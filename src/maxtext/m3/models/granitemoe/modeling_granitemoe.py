@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import dataclasses
+import math
 import json
 import os
 from typing import Any, NamedTuple
@@ -26,6 +27,8 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
+from maxtext.m3.core import kernels as m3_kernels
+from maxtext.m3.core import moe as m3_moe
 from maxtext.m3.core import rope as m3_rope
 from maxtext.m3.core import sharding as m3_sharding
 import numpy as np
@@ -100,6 +103,14 @@ class GraniteMoeConfig:
   scan_layers: bool = True
   remat_policy: str = "none"
   matmul_precision: str = "default"
+  sparse_matmul: bool = True
+  use_tokamax_gmm: bool = True
+  use_gmm_v2: bool = True
+  megablox: bool = False
+  capacity_factor: float = -1.0
+  ragged_buffer_factor: float = -1.0
+  use_ragged_sort: bool = False
+  hardware: str = "tpu"
 
   def __post_init__(self) -> None:
     if self.hidden_size <= 0 or self.hidden_size % self.num_attention_heads != 0:
@@ -124,6 +135,10 @@ class GraniteMoeConfig:
       raise ValueError(f"GraniteMoe supports hidden_act='silu', got {self.hidden_act!r}.")
     if self.remat_policy not in ("none", "full", "minimal"):
       raise ValueError(f"Unsupported remat_policy {self.remat_policy!r}; expected 'none', 'full', or 'minimal'.")
+    for bool_attr in ("sparse_matmul", "use_tokamax_gmm", "use_gmm_v2", "megablox", "use_ragged_sort"):
+      val = getattr(self, bool_attr)
+      if not isinstance(val, bool):
+        raise ValueError(f"{bool_attr} must be a bool; got {val!r}.")
 
   @property
   def head_dim(self) -> int:
@@ -133,7 +148,10 @@ class GraniteMoeConfig:
   def from_config(cls, config: Any, **overrides: Any) -> GraniteMoeConfig:
     """Builds `GraniteMoeConfig` from `GraniteMoeConfig`, M3 `BaseConfig`, `MaxTextConfig`, HF config, or dict."""
     if isinstance(config, cls):
-      return dataclasses.replace(config, **overrides) if overrides else config
+      if not overrides:
+        return config
+      rep = dict(overrides)
+      return dataclasses.replace(config, **rep)
 
     if hasattr(config, "use_m3_model") and not getattr(config, "use_m3_model"):
       raise ValueError("GraniteMoe requires use_m3_model=True.")
@@ -164,6 +182,13 @@ class GraniteMoeConfig:
 
     mp_val = _get("matmul_precision", default=_GRANITEMOE_ONLY_DEFAULTS["matmul_precision"])
     mp_str = str(getattr(mp_val, "value", mp_val)).lower()
+
+    def _raw_bool(key: str, default: bool) -> Any:
+      if isinstance(config, Mapping) and key in config:
+        return config[key]
+      if not isinstance(config, Mapping) and hasattr(config, key):
+        return getattr(config, key)
+      return default
 
     kwargs: dict[str, Any] = {
         "vocab_size": int(_get("vocab_size", default=49155)),
@@ -198,6 +223,14 @@ class GraniteMoeConfig:
         "scan_layers": bool(_get("scan_layers", default=True)),
         "remat_policy": str(remat_val),
         "matmul_precision": mp_str,
+        "sparse_matmul": _raw_bool("sparse_matmul", True),
+        "use_tokamax_gmm": _raw_bool("use_tokamax_gmm", True),
+        "use_gmm_v2": _raw_bool("use_gmm_v2", True),
+        "megablox": _raw_bool("megablox", False),
+        "capacity_factor": float(_get("capacity_factor", default=-1.0)),
+        "ragged_buffer_factor": float(_get("ragged_buffer_factor", default=-1.0)),
+        "use_ragged_sort": _raw_bool("use_ragged_sort", False),
+        "hardware": str(_get("hardware", default="tpu")),
     }
     kwargs.update(overrides)
     return cls(**kwargs)
@@ -307,10 +340,10 @@ class GraniteMoeSharding(m3_sharding.Sharding):
         return None
       case "experts", m3_sharding.TensorType.WEIGHT:
         return ("fsdp", "expert") if self.compound_ep else "expert"
-      case "embed_exp", m3_sharding.TensorType.WEIGHT:
+      case ("embed_exp" | "expert_embed"), m3_sharding.TensorType.WEIGHT:
         return None if self.compound_ep else "fsdp"
-      case ("heads" | "kv_heads" | "mlp"), _:
-        return "tensor" if self.tp_size > 1 else "tensor"
+      case ("heads" | "kv_heads" | "mlp" | "expert_mlp"), _:
+        return "tensor"
       case "vocab", _:
         return "tensor" if self.vocab_tp else None
       case ("length" | "head_dim" | "norm"), _:
@@ -599,8 +632,14 @@ def _local_ragged_swiglu(
     num_local_experts: int,
     top_k: int,
     precision: jax.lax.Precision,
+    backend: str = "ragged_dot",
+    is_tpu: bool = False,
+    capacity_factor: float = -1.0,
+    ragged_buffer_factor: float = -1.0,
+    use_ragged_sort: bool = False,
+    num_total_experts: int | None = None,
 ) -> jax.Array:
-  """Executes SwiGLU `jax.lax.ragged_dot` for experts `[expert_offset, expert_offset + num_local_experts)`."""
+  """Executes SwiGLU grouped matmul for experts `[expert_offset, expert_offset + num_local_experts)`."""
   dt = x_tokens.dtype
   num_tokens, hidden_size = x_tokens.shape
   total_slots = num_tokens * top_k
@@ -610,44 +649,73 @@ def _local_ragged_swiglu(
 
   local_idx = flat_idx - expert_offset
   is_local = (local_idx >= 0) & (local_idx < num_local_experts)
-  bucket = jnp.where(is_local, local_idx, num_local_experts)
+  safe_local_idx = jnp.where(is_local, local_idx, 0).astype(jnp.int32)
+  n_tot = num_total_experts if num_total_experts is not None else num_local_experts
+  if capacity_factor > 0.0:
+    cap = max(1, int(math.ceil((total_slots / n_tot) * capacity_factor)))
+    is_local = m3_moe.truncate_slots_by_capacity(safe_local_idx, is_local, num_experts=num_local_experts, expert_cap=cap)
+  if ragged_buffer_factor > 0.0:
+    buf_cap = max(1, int(math.ceil((total_slots * num_local_experts / n_tot) * ragged_buffer_factor)))
+    is_local = m3_moe.truncate_slots_by_buffer(safe_local_idx, is_local, num_experts=num_local_experts, buf_cap=buf_cap)
+  bucket = jnp.where(is_local, safe_local_idx, num_local_experts)
   masked_w = jnp.where(is_local, flat_w, jnp.zeros_like(flat_w))
 
   perm = jnp.argsort(bucket, stable=True)
   inv_perm = jnp.argsort(perm)
   sorted_valid = is_local[perm][:, None]
-  token_positions = perm // top_k
+  group_sizes = jnp.bincount(safe_local_idx, weights=is_local.astype(jnp.int32), length=num_local_experts).astype(
+      jnp.int32
+  )
   # Explicitly zero non-local tail rows [sum(group_sizes):total_slots] on both inputs and outputs of
   # `jax.lax.ragged_dot`: on TPU XLA, `ragged-dot` lhs VJP does not zero rows past `sum(group_sizes)`.
   zero_scalar = jnp.zeros((), dtype=dt)
-  sorted_x = jnp.where(sorted_valid, x_tokens[token_positions], zero_scalar)
-  group_sizes = jnp.bincount(bucket, length=num_local_experts + 1)[:num_local_experts]
+  if use_ragged_sort:
+    slot_rows = jnp.repeat(x_tokens, top_k, axis=0)
+    valid_count = jnp.sum(group_sizes)
+    sorted_rows = m3_moe.permute_ragged_rows(slot_rows, perm, valid_count, use_ragged_sort=True, is_tpu=is_tpu)
+    sorted_x = jnp.where(sorted_valid, sorted_rows, zero_scalar)
+  else:
+    token_positions = perm // top_k
+    sorted_x = jnp.where(sorted_valid, x_tokens[token_positions], zero_scalar)
 
   gu = gu_w.astype(dt)
-  gate = jax.lax.ragged_dot(
-      sorted_x,
-      gu[:, :, 0, :],
-      group_sizes=group_sizes,
-      preferred_element_type=dt,
-      precision=precision,
-  )
-  up = jax.lax.ragged_dot(
-      sorted_x,
-      gu[:, :, 1, :],
-      group_sizes=group_sizes,
-      preferred_element_type=dt,
-      precision=precision,
-  )
-  act = jnp.where(sorted_valid, jax.nn.silu(gate) * up, zero_scalar)
-  sorted_out = jax.lax.ragged_dot(
-      act,
-      down_w.astype(dt),
-      group_sizes=group_sizes,
-      preferred_element_type=dt,
-      precision=precision,
-  )
+  dn = down_w.astype(dt)
+  if backend in m3_moe.SHARDED_EXECUTOR_KINDS:
+    gate = m3_moe.grouped_matmul(
+        sorted_x, gu[:, :, 0, :], group_sizes, backend=backend, is_tpu=is_tpu, precision=precision
+    )
+    up = m3_moe.grouped_matmul(sorted_x, gu[:, :, 1, :], group_sizes, backend=backend, is_tpu=is_tpu, precision=precision)
+    act = jnp.where(sorted_valid, jax.nn.silu(gate) * up, zero_scalar)
+    sorted_out = m3_moe.grouped_matmul(act, dn, group_sizes, backend=backend, is_tpu=is_tpu, precision=precision)
+  else:
+    gate = jax.lax.ragged_dot(
+        sorted_x,
+        gu[:, :, 0, :],
+        group_sizes=group_sizes,
+        preferred_element_type=dt,
+        precision=precision,
+    )
+    up = jax.lax.ragged_dot(
+        sorted_x,
+        gu[:, :, 1, :],
+        group_sizes=group_sizes,
+        preferred_element_type=dt,
+        precision=precision,
+    )
+    act = jnp.where(sorted_valid, jax.nn.silu(gate) * up, zero_scalar)
+    sorted_out = jax.lax.ragged_dot(
+        act,
+        dn,
+        group_sizes=group_sizes,
+        preferred_element_type=dt,
+        precision=precision,
+    )
   sorted_out = jnp.where(sorted_valid, sorted_out, zero_scalar)
-  unsorted_out = sorted_out[inv_perm] * masked_w[:, None]
+  if use_ragged_sort:
+    unsorted_rows = m3_moe.unpermute_ragged_rows(sorted_out, inv_perm, total_slots, use_ragged_sort=True, is_tpu=is_tpu)
+  else:
+    unsorted_rows = sorted_out[inv_perm]
+  unsorted_out = unsorted_rows * masked_w[:, None]
   return jnp.sum(unsorted_out.reshape(num_tokens, top_k, hidden_size), axis=1)
 
 
@@ -709,6 +777,8 @@ class GraniteMoeExperts(nnx.Module):
     self.top_k = config.num_experts_per_tok
     self.precision = _resolve_precision(config.matmul_precision)
     self.sharding = sharding
+    self.sparse_matmul = config.sparse_matmul
+    self.executor = m3_moe.moe_from_config(config, sharding, allow_sharded_ragged_dot=True)
 
     w_dt = _resolve_jnp_dtype(config.weight_dtype)
     gu_spec = sharding("gate_up_proj", ("experts", "embed_exp", None, "mlp")) if sharding else None
@@ -737,20 +807,116 @@ class GraniteMoeExperts(nnx.Module):
     down_w = self.down_proj[...]
 
     sh = self.sharding
+    backend = self.executor.kind
     abs_mesh = jax.sharding.get_abstract_mesh()
-    use_compound_shard_map = (
-        isinstance(sh, GraniteMoeSharding)
-        and sh.compound_ep
+    inferred_mesh = None
+    if abs_mesh.empty and (backend in m3_moe.SHARDED_EXECUTOR_KINDS or backend == "dense"):
+      for arr in (x_3d, gu_w):
+        arr_shd = jax.typeof(arr).sharding
+        if isinstance(arr_shd, jax.sharding.NamedSharding) and not arr_shd.mesh.empty:
+          inferred_mesh = arr_shd.mesh
+          abs_mesh = inferred_mesh.abstract_mesh
+          break
+    if (
+        sh is None
         and not abs_mesh.empty
-        and (sh.fsdp_size * sh.ep_size > 1 or sh.tp_size > 1)
-    )
-
-    if not use_compound_shard_map:
+        and (backend in m3_moe.SHARDED_EXECUTOR_KINDS or backend == "dense")
+        and {"data", "fsdp", "tensor", "expert"}.issubset(set(abs_mesh.axis_names))
+    ):
+      sh = GraniteMoeSharding(
+          num_experts=self.num_experts,
+          dp_size=int(abs_mesh.shape["data"]),
+          fsdp_size=int(abs_mesh.shape["fsdp"]),
+          tp_size=int(abs_mesh.shape["tensor"]),
+          ep_size=int(abs_mesh.shape["expert"]),
+      )
+    is_tpu = m3_kernels.is_tpu_mesh(abs_mesh) if not abs_mesh.empty else (jax.default_backend() == "tpu")
+    if backend == "dense":
       if isinstance(sh, GraniteMoeSharding) and not sh.compound_ep and sh.ep_size > 1:
         raise NotImplementedError(
             f"Non-compound EP (num_experts={self.num_experts}, fsdp={sh.fsdp_size}, expert={sh.ep_size}) "
             "requires num_experts divisible by fsdp * expert."
         )
+      if not abs_mesh.empty:
+        if inferred_mesh is not None and jax.sharding.get_abstract_mesh().empty:
+          with jax.sharding.use_abstract_mesh(inferred_mesh.abstract_mesh):
+            return self.executor.fused(x_3d, top_k_weights_3d, top_k_indices_3d, gu_w, down_w)
+        return self.executor.fused(x_3d, top_k_weights_3d, top_k_indices_3d, gu_w, down_w)
+      return m3_moe.grouped_unsharded_fused(
+          x_3d,
+          top_k_weights_3d,
+          top_k_indices_3d,
+          gu_w,
+          down_w,
+          executor=self.executor,
+          is_tpu=is_tpu,
+      )
+    use_compound_shard_map = (
+        isinstance(sh, GraniteMoeSharding)
+        and sh.compound_ep
+        and not abs_mesh.empty
+        and (backend in m3_moe.SHARDED_EXECUTOR_KINDS or sh.fsdp_size * sh.ep_size > 1 or sh.tp_size > 1)
+    )
+
+    if not use_compound_shard_map:
+      non_compound_fsdp_only = (
+          isinstance(sh, GraniteMoeSharding) and not sh.compound_ep and sh.ep_size == 1 and sh.fsdp_size > 1
+      )
+      if backend in m3_moe.SHARDED_EXECUTOR_KINDS and not non_compound_fsdp_only:
+        exec_cfg = dataclasses.replace(self.executor, experts="expert")
+        if not abs_mesh.empty:
+          batch_ax = m3_kernels.resolve_mesh_axes(abs_mesh, exec_cfg.batch)
+          batch_shards = m3_kernels.mesh_axis_size(abs_mesh, batch_ax)
+          ep_size = m3_kernels.mesh_axis_size(abs_mesh, m3_kernels.resolve_mesh_axes(abs_mesh, exec_cfg.experts))
+          x_in, w_in, idx_in = x_3d, top_k_weights_3d, top_k_indices_3d
+          reshaped = False
+          if x_in.shape[0] % batch_shards != 0:
+            if num_tokens % batch_shards == 0:
+              x_in = x_in.reshape(num_tokens, 1, hidden_size)
+              w_in = w_in.reshape(num_tokens, 1, self.top_k)
+              idx_in = idx_in.reshape(num_tokens, 1, self.top_k)
+              reshaped = True
+            elif ep_size == 1:
+              exec_cfg = dataclasses.replace(exec_cfg, batch=None)
+            elif num_tokens % ep_size == 0:
+              x_in = x_in.reshape(num_tokens, 1, hidden_size)
+              w_in = w_in.reshape(num_tokens, 1, self.top_k)
+              idx_in = idx_in.reshape(num_tokens, 1, self.top_k)
+              reshaped = True
+              exec_cfg = dataclasses.replace(exec_cfg, batch=exec_cfg.experts)
+            else:
+              pad_tok = ep_size - (num_tokens % ep_size)
+              x_in = jnp.pad(x_in.reshape(num_tokens, 1, hidden_size), ((0, pad_tok), (0, 0), (0, 0)))
+              w_in = jnp.pad(w_in.reshape(num_tokens, 1, self.top_k), ((0, pad_tok), (0, 0), (0, 0)))
+              idx_in = jnp.pad(
+                  idx_in.reshape(num_tokens, 1, self.top_k),
+                  ((0, pad_tok), (0, 0), (0, 0)),
+                  constant_values=-1,
+              )
+              reshaped = True
+              exec_cfg = dataclasses.replace(exec_cfg, batch=exec_cfg.experts)
+          if inferred_mesh is not None:
+            with jax.sharding.use_abstract_mesh(inferred_mesh.abstract_mesh):
+              out_3d = exec_cfg.fused(x_in, w_in, idx_in, gu_w, down_w)
+          else:
+            out_3d = exec_cfg.fused(x_in, w_in, idx_in, gu_w, down_w)
+          return out_3d[:num_tokens].reshape(bsz, seq_len, hidden_size) if reshaped else out_3d
+        return m3_moe.grouped_unsharded_fused(
+            x_3d,
+            top_k_weights_3d,
+            top_k_indices_3d,
+            gu_w,
+            down_w,
+            executor=exec_cfg,
+            is_tpu=is_tpu,
+        )
+      if isinstance(sh, GraniteMoeSharding) and not sh.compound_ep and sh.ep_size > 1:
+        raise NotImplementedError(
+            f"Non-compound EP (num_experts={self.num_experts}, fsdp={sh.fsdp_size}, expert={sh.ep_size}) "
+            "requires num_experts divisible by fsdp * expert."
+        )
+      # Outside shard_map, tokamax/gmm_v2 Mosaic kernels cannot preserve GSPMD FSDP expert-weight sharding.
+      local_backend = "ragged_dot" if non_compound_fsdp_only else backend
       out_2d = _local_ragged_swiglu(
           x_3d.reshape(num_tokens, hidden_size),
           top_k_indices_3d.reshape(num_tokens, self.top_k),
@@ -761,6 +927,13 @@ class GraniteMoeExperts(nnx.Module):
           num_local_experts=self.num_experts,
           top_k=self.top_k,
           precision=self.precision,
+          backend=local_backend,
+          is_tpu=is_tpu,
+          capacity_factor=self.executor.capacity_factor,
+          ragged_buffer_factor=self.executor.ragged_buffer_factor,
+          # Keep SparseCore ragged_sort off outside shard_map (non-compound FSDP runs under GSPMD).
+          use_ragged_sort=False,
+          num_total_experts=self.num_experts,
       )
       return out_2d.reshape(bsz, seq_len, hidden_size)
 
@@ -817,6 +990,12 @@ class GraniteMoeExperts(nnx.Module):
           num_local_experts=local_experts,
           top_k=top_k,
           precision=precision,
+          backend=backend,
+          is_tpu=is_tpu,
+          capacity_factor=self.executor.capacity_factor,
+          ragged_buffer_factor=self.executor.ragged_buffer_factor,
+          use_ragged_sort=self.executor.use_ragged_sort,
+          num_total_experts=self.num_experts,
       ).reshape(b_slice, s_slice, h_dim)
 
       if tp_active:
@@ -827,12 +1006,16 @@ class GraniteMoeExperts(nnx.Module):
         return jax.lax.psum(y_partial, ("fsdp", "expert"))
       return y_partial
 
-    return jax.shard_map(
+    smap_fn = jax.shard_map(
         _ep_tp_kernel,
         in_specs=(act_spec, act_spec, act_spec, gu_spec, down_spec),
         out_specs=act_spec,
         check_vma=False,
-    )(x_3d, top_k_indices_3d, top_k_weights_3d, gu_w, down_w)
+    )
+    if inferred_mesh is not None:
+      with jax.sharding.use_abstract_mesh(inferred_mesh.abstract_mesh):
+        return smap_fn(x_3d, top_k_indices_3d, top_k_weights_3d, gu_w, down_w)
+    return smap_fn(x_3d, top_k_indices_3d, top_k_weights_3d, gu_w, down_w)
 
 
 class GraniteMoeMoE(nnx.Module):

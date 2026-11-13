@@ -54,3 +54,6 @@ load_balance_loss_weight: 0.001
 mlp_activations_limit: 10.0
 packing: false
 use_m3_model: true
+megablox: false
+use_tokamax_gmm: true
+use_gmm_v2: true

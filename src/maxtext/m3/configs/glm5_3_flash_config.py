@@ -51,7 +51,9 @@ _GLM_ONLY_FIELDS = frozenset(
         " linear_conv_kernel_dim kda_implementation"
         " dsa_attention_implementation rope_parameters index_kpool"
         " index_kpool_always_select_tail linear_lower_bound mhc_eps"
-        " enable_debug_stats router_param_dtype"
+        " enable_debug_stats router_param_dtype sparse_matmul"
+        " use_tokamax_gmm use_gmm_v2 megablox capacity_factor"
+        " ragged_buffer_factor use_ragged_sort hardware"
     ).split()
 )
 
@@ -136,6 +138,14 @@ class Glm5Config:
   remat_policy: str = "full"
   enable_debug_stats: bool = False
   num_vocab_tiling: int = 1
+  sparse_matmul: bool = True
+  use_tokamax_gmm: bool = True
+  use_gmm_v2: bool = True
+  megablox: bool = False
+  capacity_factor: float = -1.0
+  ragged_buffer_factor: float = -1.0
+  use_ragged_sort: bool = False
+  hardware: str = "tpu"
 
   def __post_init__(self) -> None:
     if isinstance(self.dtype, (np.dtype, type)):
@@ -218,6 +228,10 @@ class Glm5Config:
     kd, vd = self.linear_key_head_dim, self.linear_value_head_dim
     if kd != vd:
       raise ValueError(f"linear_key_head_dim ({kd}) must equal linear_value_head_dim ({vd}).")
+    for bool_attr in ("sparse_matmul", "use_tokamax_gmm", "use_gmm_v2", "megablox", "use_ragged_sort"):
+      val = getattr(self, bool_attr)
+      if not isinstance(val, bool):
+        raise ValueError(f"{bool_attr} must be a bool; got {val!r}.")
 
   @property
   def qk_head_dim(self) -> int:
@@ -339,7 +353,7 @@ class Glm5Sharding(m3_sharding.Sharding):
         )
     use_tp = mesh.shape["tensor"] > 1
     ep_size = int(mesh.shape["expert"])
-    return cls(use_tp=use_tp, ep_size=ep_size)
+    return cls(use_tp=use_tp, ep_in_batch=ep_size > 1, ep_size=ep_size)
 
   def map_axis(
       self,
@@ -351,13 +365,19 @@ class Glm5Sharding(m3_sharding.Sharding):
     act = tensor_type == m3_sharding.TensorType.ACTIVATION
     if axis == "batch":
       if act:
-        return (self.dp_axis, self.fsdp_axis, self.ep_axis) if self.ep_in_batch else (self.dp_axis, self.fsdp_axis)
+        if self.ep_in_batch or self.ep_size > 1:
+          return (self.dp_axis, self.fsdp_axis, self.ep_axis)
+        return (self.dp_axis, self.fsdp_axis)
       return None
-    if axis == "expert":
+    if axis in {"expert", "experts"}:
       return None if act else self.ep_axis
-    if axis in {"embed", "q_lora", "kv_lora"}:
+    if axis == "expert_embed":
       return None if act else self.fsdp_axis
-    if axis in {"vocab", "heads", "kv", "mlp"}:
+    if axis in {"embed", "q_lora", "kv_lora"}:
+      if act:
+        return None
+      return (self.fsdp_axis, self.ep_axis) if (self.ep_in_batch or self.ep_size > 1) else self.fsdp_axis
+    if axis in {"vocab", "heads", "kv", "mlp", "expert_mlp"}:
       return self.tp_axis if self.use_tp else None
     if axis == "norm" or (axis == "length" and act):
       return None

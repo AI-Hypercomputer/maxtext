@@ -82,7 +82,11 @@ MODEL_SUPPORTED_MESH_AXES: dict[str, tuple[str, ...]] = {
     "qwen3.8-flash-next-mini": ("data", "fsdp", "fsdp_transpose", "tensor", "tensor_sequence", "expert"),
 }
 MODEL_EXPLICIT_SHARDING_SUPPORT: frozenset[str] = frozenset({"qwen3-0.6b"})
-MODEL_MOE_EXECUTOR_SUPPORT: frozenset[str] = frozenset({"qwen3.8-flash-next", "qwen3.8-flash-next-mini"})
+MODEL_MOE_EXECUTOR_SUPPORT: frozenset[str] = frozenset(
+    {"glm5.3-flash", "granite-3.0-1b-a400m", "granitemoe", "qwen3.8-flash-next", "qwen3.8-flash-next-mini"}
+)
+# Models whose own shard_map kernel supports sharded ragged_dot across EP/TP/compound FSDP.
+MODEL_SHARDED_RAGGED_DOT_SUPPORT: frozenset[str] = frozenset({"granite-3.0-1b-a400m", "granitemoe"})
 
 
 def _unsupported_model_mesh_settings(config) -> dict[str, object]:
@@ -116,10 +120,12 @@ validate_moe_config = _m3_moe.validate_moe_config
 
 def validate_model_moe_config(config, *, mesh=None) -> None:
   """Validates MoE config for driver entrypoints, enforcing backend checks on `MoEExecutor` models."""
+  model_name = getattr(config, "model_name", None)
   _m3_moe.validate_moe_config(
       config,
-      check_executor_backend=getattr(config, "model_name", None) in MODEL_MOE_EXECUTOR_SUPPORT,
+      check_executor_backend=model_name in MODEL_MOE_EXECUTOR_SUPPORT,
       mesh=mesh,
+      allow_sharded_ragged_dot=model_name in MODEL_SHARDED_RAGGED_DOT_SUPPORT,
   )
 
 

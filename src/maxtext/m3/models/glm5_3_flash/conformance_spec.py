@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping
 import dataclasses
+import math
 
 from flax import nnx
 import jax
@@ -25,7 +26,7 @@ from maxtext.m3.models import glm5_3_flash
 from maxtext.m3.models.glm5_3_flash import modeling_glm5_3_flash
 from tests.unit.m3.conformance import spec
 
-_BATCH_SIZE = 2
+_BATCH_SIZE = 4
 _SEQ_LEN = 8
 _ROW1_VALID_LEN = 7
 _VOCAB_SIZE = 256
@@ -41,6 +42,9 @@ _BF16_ATOL = 5e-2
 # TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting
 # to 5e-2.
 _BF16_RTOL = 5e-2
+# Scales synthetic lecun_normal residual output projections (std ~ 0.125) down
+# to Glm5 initializer_range=0.02 scale (matching Glm5Experts/Glm5HyperConnection).
+_MINI_RESIDUAL_PROJ_SCALE = 0.16
 
 _GLM5_MINI_CFG = glm5_3_flash.Glm5Config.mini_config(
     vocab_size=_VOCAB_SIZE,
@@ -84,6 +88,20 @@ _GLM5_FULL_SCALE_CFG = glm5_3_flash.Glm5Config(
 )
 
 
+def _scale_param_preserving_sharding(param: nnx.Param, scale: float) -> None:
+  """Scales a synthetic parameter in place while preserving its NamedSharding."""
+  arr = param[...]
+  shd = jax.typeof(arr).sharding
+
+  def _mul(x: jax.Array) -> jax.Array:
+    return x * jnp.asarray(scale, dtype=x.dtype)
+
+  if isinstance(shd, jax.sharding.NamedSharding):
+    param[...] = jax.jit(_mul, out_shardings=shd)(arr)
+  else:
+    param[...] = _mul(arr)
+
+
 def _build_glm5_with_cfg(
     base_cfg: glm5_3_flash.Glm5Config,
     mesh: jax.sharding.Mesh,
@@ -115,6 +133,19 @@ def _build_glm5_with_cfg(
         sharding=None,
         place_on_devices=True,
     )
+    # Bring synthetic embed_tokens (lecun_normal std=1/sqrt(H)) to unit RMS and
+    # lecun_normal residual output projections to ~0.02 scale so 10-layer
+    # RMSNorm/KDA backward Jacobians stay well-conditioned across remat/scan.
+    _scale_param_preserving_sharding(model.embed_tokens.embedding, math.sqrt(base_cfg.hidden_size))
+    layers = [*model.prefix_layers, *model.suffix_layers]
+    if model.super_block is not None:
+      layers.extend(getattr(model.super_block, f"slot_{idx}") for idx in range(4))
+    for lyr in layers:
+      _scale_param_preserving_sharding(lyr.self_attn.o_proj.kernel, _MINI_RESIDUAL_PROJ_SCALE)
+      if hasattr(lyr.mlp, "down_proj"):
+        _scale_param_preserving_sharding(lyr.mlp.down_proj.kernel, _MINI_RESIDUAL_PROJ_SCALE)
+      else:
+        _scale_param_preserving_sharding(lyr.mlp.shared_experts.down_proj.kernel, _MINI_RESIDUAL_PROJ_SCALE)
     if remat_policy == "full":
       modeling_glm5_3_flash.apply_glm5_remat(
           model,
@@ -173,7 +204,7 @@ def _build_glm5_batch(
     key: jax.Array,
     mesh: jax.sharding.Mesh,
 ) -> Mapping[str, jax.Array]:
-  """Builds sharded `(2, 8)` tokens and segment IDs (`m3/README.md` (5)-(6))."""
+  """Builds sharded `(4, 8)` tokens and segment IDs (`m3/README.md` (5)-(6))."""
   raw_tokens = jax.random.randint(
       key,
       (_BATCH_SIZE, _SEQ_LEN),
@@ -183,7 +214,7 @@ def _build_glm5_batch(
   )
   col_idx = jnp.arange(_SEQ_LEN, dtype=jnp.int32)
   row_lengths = jnp.array(
-      [_SEQ_LEN, _ROW1_VALID_LEN],
+      [_SEQ_LEN, _ROW1_VALID_LEN] * (_BATCH_SIZE // 2),
       dtype=jnp.int32,
   )[:, None]
   segment_ids = (col_idx[None, :] < row_lengths).astype(jnp.int32)
@@ -275,12 +306,6 @@ def make_glm5_3_flash_conformance_spec() -> spec.ConformanceSpec:
               " modeling_glm5_3_flash.py:779) supports unpacked {0, 1}"
               " decoder_segment_ids only (multi-document packing with"
               " segment_ids > 1 is not yet implemented; b/585591392).",
-          ),
-          spec.CheckId.EXPERT_PARALLEL_PARITY: spec.SkipDeclaration(
-              spec.SkipStatus.NOT_APPLICABLE,
-              "Glm5Experts and Glm5MoE (modeling_glm5_3_flash.py:960-971,"
-              " 1065-1078) raise NotImplementedError when ep_size > 1 on the"
-              " 'expert' mesh axis (b/585591392).",
           ),
       },
   )
