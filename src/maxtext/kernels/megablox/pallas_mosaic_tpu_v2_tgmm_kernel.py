@@ -333,6 +333,7 @@ def tgmm_inner_kernel(
     *,
     cfgs: gmm_v2.GmmConfigs,
     num_gm: jax.Array,
+    tail_step: int | None = None,
 ):
   """Inner kernel for TGMM computation.
 
@@ -351,74 +352,94 @@ def tgmm_inner_kernel(
     metadata_ref: Contains metadata like group offsets and group IDs.
     cfgs: GmmConfigs object containing kernel configurations.
     num_gm: Total number of group-major tiles along grid axis 2.
+    tail_step: If set, a group's last visit masks and contracts only the first
+      rows of its tiles, rounded up to a multiple of tail_step (at most
+      tile_m).
   """
   # NB: grid=(num_n, num_k, num_gm)
   tiled_rhs_scale_ref = tiled_rhs_ref.scale
 
   num_lanes = pltpu.get_tpu_info().num_lanes
   tile_m = cfgs.tiles.tile_m
+  sublane = cfgs.dims.size_lhs_sublane
+  # load_lhs(rows) / load_rhs(rows): the block's first `rows` rows (tokens) as
+  # [rows, tile_k] / [rows, tile_n]; rows=None loads the whole block, of shape
+  # lhs_shape / rhs_shape.
   if cfgs.lhs_cfgs.is_3d:
-    # [tile_m // sublane, sublane, tile_d0, 128] -> [tile_m, tile_k]
+    # [tile_m // sublane, sublane, tile_d0, 128] -> [rows, tile_k]
     lhs_3d_ref = tiled_lhs_ref
     if _window(cfgs.tiles.tile_k, cfgs.dims.size_k):
       # Full-D0 slab block; relayout the K window k_id (grid axis 1) from VMEM.
-      def load_lhs():
-        return relayout.load_3d_window_as_2d(lhs_3d_ref, tile_m, cfgs.tiles.tile_k // num_lanes, step.index[1])
+      def load_lhs(rows):
+        return relayout.load_3d_window_as_2d(lhs_3d_ref, rows or tile_m, cfgs.tiles.tile_k // num_lanes, step.index[1])
 
     else:
 
-      def load_lhs():
-        return relayout.load_3d_as_2d(lhs_3d_ref, tile_m, cfgs.tiles.tile_k // num_lanes)
+      def load_lhs(rows):
+        return relayout.load_3d_as_2d(lhs_3d_ref, rows or tile_m, cfgs.tiles.tile_k // num_lanes)
 
     lhs_shape = (tile_m, cfgs.tiles.tile_k)
   else:
-    tiled_lhs_ref = tiled_lhs_ref.reshape(-1, tiled_lhs_ref.shape[-1])
+    lhs_block_ref = tiled_lhs_ref
+    lhs_2d_ref = tiled_lhs_ref.reshape(-1, tiled_lhs_ref.shape[-1])
 
-    def load_lhs():
-      return tiled_lhs_ref[...]
+    def load_lhs(rows):
+      if rows is None:
+        return lhs_2d_ref[...]
+      # Slice whole sublane rows of the block before flattening them.
+      return lhs_block_ref[pl.ds(0, rows // sublane)].reshape(rows, cfgs.tiles.tile_k)
 
-    lhs_shape = tiled_lhs_ref.shape
+    lhs_shape = lhs_2d_ref.shape
+
   if cfgs.rhs_cfgs.is_3d:
     rhs_3d_ref = tiled_rhs_ref.value
     if _window(cfgs.tiles.tile_n, cfgs.dims.size_n):
       # Full-D0 slab block; relayout the N window n_id (grid axis 0) from VMEM.
-      def load_rhs():
-        return relayout.load_3d_window_as_2d(rhs_3d_ref, tile_m, cfgs.tiles.tile_n // num_lanes, step.index[0])
+      def load_rhs(rows):
+        return relayout.load_3d_window_as_2d(rhs_3d_ref, rows or tile_m, cfgs.tiles.tile_n // num_lanes, step.index[0])
 
     else:
 
-      def load_rhs():
-        return relayout.load_3d_as_2d(rhs_3d_ref, tile_m, cfgs.tiles.tile_n // num_lanes)
+      def load_rhs(rows):
+        return relayout.load_3d_as_2d(rhs_3d_ref, rows or tile_m, cfgs.tiles.tile_n // num_lanes)
 
     rhs_shape = (tile_m, cfgs.tiles.tile_n)
   else:
-    tiled_rhs_ref = tiled_rhs_ref.value.reshape(-1, tiled_rhs_ref.value.shape[-1])
+    rhs_block_ref = tiled_rhs_ref.value
+    rhs_2d_ref = tiled_rhs_ref.value.reshape(-1, tiled_rhs_ref.value.shape[-1])
 
-    def load_rhs():
-      return tiled_rhs_ref[...]  # pyrefly: ignore[bad-index]
+    def load_rhs(rows):
+      if rows is None:
+        return rhs_2d_ref[...]  # pyrefly: ignore[bad-index]
+      return rhs_block_ref[pl.ds(0, rows // sublane)].reshape(rows, cfgs.tiles.tile_n)  # pyrefly: ignore[bad-index]
 
-    rhs_shape = tiled_rhs_ref.shape  # pyrefly: ignore[missing-attribute]
+    rhs_shape = rhs_2d_ref.shape  # pyrefly: ignore[missing-attribute]
+
   gm_id = step.index[2]
 
-  def _matmul(is_new_group: bool, is_group_changing: bool):
-
-    # Mask out invalid rows in the LHS/RHS tiles.
-    # The DMA loads tiles aligned to sublane boundaries, but the actual group
-    # data may not start/end on those boundaries.
+  def local_rows():
+    # [m_start_local, m_end_local): the visit's rows within its block. They
+    # start in the block's first sublane row; only a group's last visit can
+    # end before tile_m.
     m_start = metadata_ref.gm_id_to_m_offset[gm_id]
     m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
-    m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
-    m_start_local = m_start - m_offset
-    m_end_local = m_end - m_offset
-    lhs_iota = lax.broadcasted_iota(jnp.int32, lhs_shape, 0)
+    m_offset = m_start - m_start % sublane
+    return m_start - m_offset, m_end - m_offset
+
+  def _matmul(is_new_group: bool, is_group_changing: bool, rows: int | None = None):
+    # Mask out invalid rows in the first `rows` rows of the LHS/RHS tiles.
+    # The DMA loads tiles aligned to sublane boundaries, but the actual group
+    # data may not start/end on those boundaries.
+    m_start_local, m_end_local = local_rows()
+    lhs_iota = lax.broadcasted_iota(jnp.int32, lhs_shape if rows is None else (rows, cfgs.tiles.tile_k), 0)
     lhs_mask = jnp.logical_and(m_start_local <= lhs_iota, lhs_iota < m_end_local)
-    lhs_masked = jnp.where(lhs_mask, load_lhs(), 0)
+    lhs_masked = jnp.where(lhs_mask, load_lhs(rows), 0)
     # If there are no NaNs, masking both lhs and rhs shouldn't be necessary.
     # But without masking both, we sometimes see the result contain NaNs so we
     # decide to mask both to be safe.
-    rhs_iota = lax.broadcasted_iota(jnp.int32, rhs_shape, 0)
+    rhs_iota = lax.broadcasted_iota(jnp.int32, rhs_shape if rows is None else (rows, cfgs.tiles.tile_n), 0)
     rhs_mask = jnp.logical_and(m_start_local <= rhs_iota, rhs_iota < m_end_local)
-    rhs_masked = jnp.where(rhs_mask, load_rhs(), 0)
+    rhs_masked = jnp.where(rhs_mask, load_rhs(rows), 0)
 
     acc = jax.lax.dot_general(
         lhs_masked,
@@ -440,9 +461,21 @@ def tgmm_inner_kernel(
     else:
       acc_ref[...] = acc
 
+  def _matmul_changing(is_new_group: bool):
+    if tail_step is None:
+      _matmul(is_new_group=is_new_group, is_group_changing=True)
+      return
+    # Contract a group's last visit over its rows rounded up to a multiple of
+    # tail_step; the skipped rows would be masked zeros in both operands, so
+    # the result is the same. lax.switch clamps the index to the last branch.
+    depths = [*range(tail_step, tile_m, tail_step), None]
+    branches = [functools.partial(_matmul, is_new_group, True, d) for d in depths]
+    _, m_end_local = local_rows()
+    lax.switch((m_end_local - 1) // tail_step, branches)
+
   @jax.named_scope("matmul_new_group_and_changing")
   def matmul_new_group_and_changing():
-    _matmul(is_new_group=True, is_group_changing=True)
+    _matmul_changing(is_new_group=True)
 
   @jax.named_scope("matmul_new_group")
   def matmul_new_group():
@@ -454,7 +487,7 @@ def tgmm_inner_kernel(
 
   @jax.named_scope("matmul_group_changing")
   def matmul_group_changing():
-    _matmul(is_new_group=False, is_group_changing=True)
+    _matmul_changing(is_new_group=False)
 
   prev_gm_id = jnp.where(gm_id > 0, gm_id - 1, 0)
   is_first_gm = gm_id == 0
@@ -651,6 +684,7 @@ def tgmm_kernel_main(
     semaphore_ref: jax.Array,  # [1]
     *,
     cfgs,
+    tail_step: int | None = None,
 ):
   """Main kernel function for TGMM computation.
 
@@ -666,6 +700,7 @@ def tgmm_kernel_main(
     zero_ref: Scratch buffer for zeroing empty groups' output.
     semaphore_ref: DMA semaphore for the zeroing copies.
     cfgs: GmmConfigs object containing kernel configurations.
+    tail_step: See tgmm_inner_kernel.
   """
   num_groups_to_zero = 0
   if not cfgs.has_partial_sum:
@@ -688,7 +723,7 @@ def tgmm_kernel_main(
 
   in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
   pipeline_fn = pltpu.emit_pipeline(
-      functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm),
+      functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm, tail_step=tail_step),
       grid=(num_n, num_k, num_gm),
       in_specs=in_specs,
       out_specs=out_specs,
@@ -749,6 +784,7 @@ def validate_tgmm_inputs(
         "precision",
         "preferred_element_type",
         "acc_dtype",
+        "small_tail_contraction",
     ],
 )
 def tgmm_v2(
@@ -765,6 +801,7 @@ def tgmm_v2(
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
+    small_tail_contraction: bool = False,
 ):
   """Computes a transposed grouped matrix multiplication.
 
@@ -785,6 +822,9 @@ def tgmm_v2(
     precision: Unused. Exists for compatibility reasons.
     preferred_element_type: Optional jnp.dtype for the output matrix.
     acc_dtype: Optional jnp.dtype for the accumulator.
+    small_tail_contraction: Whether a group's last tile contracts only over
+      its first rows, rounded up to a multiple of the MXU column size, when
+      that is less than tile_m. Same result.
 
   Returns:
     The result of the transposed grouped matrix multiplication, with shape
@@ -820,6 +860,11 @@ def tgmm_v2(
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
+
+  # Tail depths step by the MXU column size, a multiple of every sublane count
+  # and relayout packing.
+  mxu = pltpu.get_tpu_info().mxu_column_size
+  tail_step = mxu if small_tail_contraction and tiles.tile_m > mxu else None
 
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = gmm_v2.align_to(dims.size_n, num_lanes)
@@ -881,7 +926,7 @@ def tgmm_v2(
     input_output_aliases = {partial_sum_idx: 0}
 
   raw_out = pl.pallas_call(
-      functools.partial(tgmm_kernel_main, cfgs=cfgs),
+      functools.partial(tgmm_kernel_main, cfgs=cfgs, tail_step=tail_step),
       out_shape=out_init,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
