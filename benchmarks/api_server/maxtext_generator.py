@@ -509,7 +509,19 @@ class MaxTextGenerator:
       prefill_length -= mm_processor.get_image_offsets(config=self.config, processor_output=processor_output)
       images = processor_output.pixel_values
 
-    tokens, true_length = self.tokenizer.encode(text, is_bos=not self.has_chat_template, prefill_lengths=[prefill_length])
+    # Prompts start with BOS, as training data does, unless the tokenizer applies the chat template itself
+    # (`use_chat_template`), has no BOS token (e.g. Qwen3), or the text already starts with it. The last case covers
+    # /v1/chat/completions, whose chat template writes BOS into the text for models such as Gemma 3, Llama 3 and
+    # DeepSeek V3; adding the BOS id as well would give two.
+    bos_token = getattr(getattr(self.tokenizer, "tokenizer", None), "bos_token", None)
+    text_starts_with_bos = isinstance(bos_token, str) and bool(bos_token) and text.startswith(bos_token)
+    is_bos = (
+        self.config.add_bos
+        and not self.config.use_chat_template
+        and getattr(self.tokenizer, "bos_id", None) is not None
+        and not text_starts_with_bos
+    )
+    tokens, true_length = self.tokenizer.encode(text, is_bos=is_bos, prefill_lengths=[prefill_length])
     if self.config.use_multimodal and image_path:
       tokens = mm_processor.prepare_text_for_image_fusion(tokens, config=self.config, processor_output=processor_output)
       true_length += mm_processor.get_image_offsets(config=self.config, processor_output=processor_output)
