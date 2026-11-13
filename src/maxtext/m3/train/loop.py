@@ -227,7 +227,9 @@ def _log_step(step: int, loss: jax.Array, last_done: float, tokens_per_step: int
 
 def train_loop(config) -> float:
   """Builds the model and optimizer, runs `config.steps` steps, and returns the last loss."""
+  m3_models.validate_model_moe_config(config)
   mesh = mesh_from_config(config)
+  m3_models.validate_model_moe_config(config, mesh=mesh)
   m3_kernels.validate_attention_config(config, mesh=mesh)
   # Lays out the input batch; `setup_model` lets the model resolve its own
   # parameter strategy from `config`.
