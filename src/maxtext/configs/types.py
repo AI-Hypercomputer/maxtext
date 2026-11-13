@@ -1926,8 +1926,9 @@ class Qwen3_8FlashNext(BaseModel):
   qsa_attention_kernel: Literal["dense", "flash"] = Field(
       "dense",
       description=(
-          "Qwen3.8 QSA attention kernel: 'dense' materializes the score matrix, 'flash' dispatches through"
-          " Tokamax Splash Attention (requires max_target_length <= index_select_budget)."
+          "Qwen3.8 QSA attention kernel: 'dense' materializes the full score matrix; 'flash' dispatches through"
+          " Tokamax Splash Attention when s <= index_select_budget and tiled block-sparse FlashAttention with a"
+          " 32-bit packed block bitmap when s > index_select_budget."
       ),
   )
   use_ple_layer: bool = Field(False, description="Whether to use Per-Layer Embedding (PLE).")
