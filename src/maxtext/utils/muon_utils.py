@@ -258,8 +258,20 @@ def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
     # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
     path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
     val_shape = getattr(variable.get_value(), "shape", None)
-    dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
-    return to_stacked_layout(dim_num, len(val_shape or ()), get_scan_axes(variable))
+    scan_axes = get_scan_axes(variable)
+    if (
+        config is not None
+        and getattr(config, "mhc_split_axis_contraction", False)
+        and _is_path_contain_any(("mhc_attention", "mhc_mlp"), path_strings)
+        and _is_path_contain_any(("pre_alpha", "post_alpha", "res_alpha"), path_strings)
+    ):
+      # The split alphas [k, d, n] contract k and d together: reduce over every feature axis but the last,
+      # and let to_stacked_layout place those axes around the layer-scan axes.
+      n_feat = len(val_shape) - len(scan_axes)
+      dim_num = mdn(tuple(range(n_feat - 1)), (-1,))
+    else:
+      dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
+    return to_stacked_layout(dim_num, len(val_shape or ()), scan_axes)
 
   # Map over whole variables so each one's scan metadata is at hand; the result is an nnx.State
   # with the same structure, holding the mdn result in place of each Param.
