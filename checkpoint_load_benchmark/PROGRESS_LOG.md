@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-13 11:36:33 UTC`
+- **Last Updated (UTC):** `2026-11-13 11:46:58 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -13,8 +13,8 @@
 
 | Platform | Region | Step 1 Done | TPU Queue Tasks Done | Active TPU JobSets | Active CPU Jobs |
 |---|---|---:|---:|---|---|
-| `v7x` | `us-central1` | **21 / 21** | **33 / 61** | `mesa-q-v7x-2x2x1-1s-w23`, `mesa-q-v7x-2x2x1-1s-w24`, `mesa-q-v7x-2x2x1-1s-w25`, `mesa-q-v7x-2x2x1-2s-w20`, `mesa-q-v7x-2x2x1-2s-w21`, `mesa-q-v7x-2x2x1-2s-w22`, `mesa-q-v7x-2x2x2-2s-w10`, `mesa-q-v7x-2x4x4-1s-w11` | _none_ |
-| `v6e` | `southamerica-west1` | **21 / 21** | **48 / 53** | `mesa-q-v6e-16x16-1s-w5`, `mesa-q-v6e-8x8-1s-w4` | _none_ |
+| `v7x` | `us-central1` | **21 / 21** | **35 / 61** | `mesa-q-v7x-2x2x1-1s-w23`, `mesa-q-v7x-2x2x1-1s-w24`, `mesa-q-v7x-2x2x1-1s-w25`, `mesa-q-v7x-2x2x1-2s-w20`, `mesa-q-v7x-2x2x1-2s-w21`, `mesa-q-v7x-2x2x1-2s-w22`, `mesa-q-v7x-2x2x2-2s-w10`, `mesa-q-v7x-2x4x4-1s-w11` | _none_ |
+| `v6e` | `southamerica-west1` | **21 / 21** | **49 / 53** | `mesa-q-v6e-16x16-1s-w6`, `mesa-q-v6e-8x8-1s-w4` | _none_ |
 | `v5e` | `europe-west4` | **12 / 12** | **22 / 22** | _none_ | _none_ |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
@@ -76,3 +76,7 @@
 - [2026-11-13 11:27:34 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 998 mirrored JSONs.
 - [2026-11-13 11:32:14 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1009 mirrored JSONs.
 - [2026-11-13 11:36:33 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1021 mirrored JSONs.
+- [2026-11-13 11:41:36 UTC] `v6e` TPU JobSet `mesa-q-v6e-16x16-1s-w5` `Completed` and cleaned up.
+- [2026-11-13 11:41:40 UTC] Launched `v6e` TPU queue worker `mesa-q-v6e-16x16-1s-w6` (`1x16x16`, min_slices=1) for 5 runnable tasks.
+- [2026-11-13 11:42:21 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1025 mirrored JSONs.
+- [2026-11-13 11:46:58 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1042 mirrored JSONs.
