@@ -697,6 +697,29 @@ class ConfigTest(absltest.TestCase):
 
     self.assertTrue(config.packing)
 
+  def test_tpu_ulysses_config_validation_accepts_full_attention(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=full",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ulysses",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.attention_type, "full")
+    self.assertTrue(config.packing)
+
   def test_context_parallel_strategy_is_normalized(self):
     argv = [
         "",
@@ -740,11 +763,10 @@ class ConfigTest(absltest.TestCase):
         (["base_num_kv_heads=1"], [], "MQA"),
         (["base_num_query_heads=18"], [], "requires num_query_heads"),
         (["base_num_kv_heads=10"], [], "requires num_kv_heads"),
-        (["attention_type=mla"], [], "global causal attention"),
-        (["attention_type=local_sliding", "sliding_window_size=128"], [], "global causal attention"),
-        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "global causal attention"),
-        (["attention_type=full"], [], "global causal attention"),
-        (["attention_type=compressed"], [], "global causal attention"),
+        (["attention_type=mla"], [], "global causal or full attention"),
+        (["attention_type=local_sliding", "sliding_window_size=128"], [], "global causal or full attention"),
+        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "global causal or full attention"),
+        (["attention_type=compressed"], [], "global causal or full attention"),
         (["use_qk_clip=True"], [], "QK-Clip"),
         (["dq_reduction_steps=2"], [], "dq_reduction_steps"),
         (["attention=dot_product"], ["attention=flash"], "attention=flash"),
