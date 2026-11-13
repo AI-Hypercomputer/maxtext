@@ -78,7 +78,14 @@ class Glm5ConfigTest(absltest.TestCase):
           [m for m in sys.modules if "tokamax" in m],
       )
     finally:
+      for k in list(sys.modules):
+        if k.startswith((cfg_mod, pkg_mod, "tokamax")) and k not in saved_modules:
+          sys.modules.pop(k, None)
       sys.modules.update(saved_modules)
+      for k, mod in saved_modules.items():
+        parent_name, _, attr_name = k.rpartition(".")
+        if parent_name in sys.modules:
+          setattr(sys.modules[parent_name], attr_name, mod)
 
   def test_matches_published_hf_text_config(self):
     # Provenance: checked-in copy of published zai-org/GLM-5.3-Flash/config.json
@@ -264,7 +271,7 @@ class Glm5ConfigTest(absltest.TestCase):
         ({"num_key_value_heads": 32}, r"num_key_value_heads.*must equal"),
         ({"linear_num_value_heads": 32}, r"linear_num_key_heads.*must equal"),
         ({"linear_value_head_dim": 64}, r"linear_key_head_dim.*must equal"),
-        ({"remat_policy": "bogus"}, "remat_policy must be 'none' or 'full'"),
+        ({"remat_policy": "bogus"}, "remat_policy must be one of"),
         (
             {"router_param_dtype": "bfloat16"},
             "router_param_dtype must be 'float32'",

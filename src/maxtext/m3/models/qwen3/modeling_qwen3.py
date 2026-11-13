@@ -34,6 +34,7 @@ Nothing here names a mesh axis.
 from typing import Any, Optional
 from flax import nnx
 import jax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
@@ -118,11 +119,11 @@ class Qwen3MLP(nnx.Module):
     """Applies gated SwiGLU feed-forward projection: wo(silu(wi_0(x)) * wi_1(x))."""
     s = self.sharding
     x = s.constrain(x, "mlp_in", ("batch", "length", "embed"))
-    gate = jax.nn.silu(s.project(self.wi_0, x, "wi_0_out", ("batch", "length", "mlp")))
-    up = s.project(self.wi_1, x, "wi_1_out", ("batch", "length", "mlp"))
-    hidden = (gate * up).astype(self.config.dtype)
+    wi_0 = checkpoint_name(s.project(self.wi_0, x, "wi_0_out", ("batch", "length", "mlp")), "mlpwi_0")
+    wi_1 = checkpoint_name(s.project(self.wi_1, x, "wi_1_out", ("batch", "length", "mlp")), "mlpwi_1")
+    hidden = (jax.nn.silu(wi_0) * wi_1).astype(self.config.dtype)
     hidden = s.constrain(hidden, "mlp_hidden", ("batch", "length", "mlp"))
-    return s.project(self.wo, hidden, "mlp_out", ("batch", "norm_length", "embed"))
+    return checkpoint_name(s.project(self.wo, hidden, "mlp_out", ("batch", "norm_length", "embed")), "mlpwo")
 
 
 class Qwen3Attention(nnx.Module):
@@ -209,9 +210,18 @@ class Qwen3Attention(nnx.Module):
     s = self.sharding
     is_default_positions = decoder_positions is None
     inputs = s.constrain(inputs, "attn_in", ("batch", "length", "embed"))
-    query = s.project(self.query, inputs, "query", ("batch", "length", "heads", "head_dim"))
-    key = s.project(self.key, inputs, "key", ("batch", "length", "kv_heads", "head_dim"))
-    value = s.project(self.value, inputs, "value", ("batch", "length", "kv_heads", "head_dim"))
+    query = checkpoint_name(
+        s.project(self.query, inputs, "query", ("batch", "length", "heads", "head_dim")),
+        "query_proj",
+    )
+    key = checkpoint_name(
+        s.project(self.key, inputs, "key", ("batch", "length", "kv_heads", "head_dim")),
+        "key_proj",
+    )
+    value = checkpoint_name(
+        s.project(self.value, inputs, "value", ("batch", "length", "kv_heads", "head_dim")),
+        "value_proj",
+    )
 
     if self.config.use_qk_norm:
       query = self.query_norm(query)
@@ -246,7 +256,10 @@ class Qwen3Attention(nnx.Module):
         "attention_out",
         ("batch", "length", "heads", "head_dim"),
     )
-    return s.project(self.out, attn_out, "attn_proj", ("batch", "norm_length", "embed"))
+    return checkpoint_name(
+        s.project(self.out, attn_out, "attn_proj", ("batch", "norm_length", "embed")),
+        "out_proj",
+    )
 
 
 class Qwen3DecoderLayer(nnx.Module):
@@ -294,7 +307,10 @@ class Qwen3DecoderLayer(nnx.Module):
       **kwargs,
   ) -> jax.Array:
     """Applies pre-norm attention and pre-norm MLP blocks with residual connections."""
-    inputs = self.sharding.constrain(inputs, "decoder_layer_input", ("batch", "norm_length", "embed"))
+    inputs = checkpoint_name(
+        self.sharding.constrain(inputs, "decoder_layer_input", ("batch", "norm_length", "embed")),
+        "decoder_layer_input",
+    )
     # Pre-attention norm & Self-attention
     normed_attn_in = self.pre_self_attention_layer_norm(inputs)
     attn_out = self.self_attention(

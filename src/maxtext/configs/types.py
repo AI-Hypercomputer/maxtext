@@ -3350,6 +3350,10 @@ class RematAndOffload(BaseModel):
           "moe_tc_ragged_weights_on_activation); 'device' saves them so the backward skips the weight gather."
       ),
   )
+  moe_routed_output: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the post-combine routed MoE output.",
+  )
   mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
@@ -7571,6 +7575,7 @@ class MaxTextConfig(
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routed_output",
           "te_moe_dispatch_remat_location",
           "mlpwi_0",
           "mlpwi_1",
@@ -9772,6 +9777,7 @@ class RLConfig(
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routed_output",
           "te_moe_dispatch_remat_location",
           "mlpwi_0",
           "mlpwi_1",

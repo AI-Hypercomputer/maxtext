@@ -523,9 +523,12 @@ def train(cfg):
         model = create_model(cfg["model"]["type"], cfg["model"], rngs=nnx.Rngs(cfg["seed"]))
         transform_cfg = cfg["transforms"]
 
-        # Infrastructure composition order: remat → quantize → Optimizer → host offload
-        maybe_apply_remat(model, transform_cfg["remat"])
+        # Infrastructure composition order:
+        # construct -> scan -> remat -> quantize -> named scopes -> optimizer -> host offload
+        model = maybe_apply_scan(model, cfg)
+        model = maybe_apply_remat(model, cfg)
         model = maybe_quantize(model, transform_cfg["quantization"], *sample_inputs)
+        model = add_named_scopes(model)
         optimizer = nnx.Optimizer(model, optax.adamw(cfg.learning_rate))
         if transform_cfg["host_offload_optimizer"]:
             optimizer.opt_state = to_host(optimizer.opt_state)
@@ -788,7 +791,7 @@ To streamline the loading and saving of checkpoints and address the complexity o
 ## Infrastructure Composition Order
 
 ```py
-construct model → maybe_apply_remat → maybe_apply_scan → maybe_quantize → split → Optimizer → host offload
+construct -> scan -> remat -> quantize -> named scopes -> optimizer -> host offload
 ```
 
 Each step is a one-liner in training setup. The model is pure architecture \+ sharding annotations at construction; everything else is layered on after using the `nnx.Optimizer` to manage state transitions.
