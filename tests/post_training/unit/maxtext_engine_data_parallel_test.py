@@ -58,9 +58,11 @@ from absl import app
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
+from flax import struct
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
+from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import maxtext_utils
 import numpy as np
@@ -902,6 +904,67 @@ class LifecycleTest(_MULTI_DEVICE_BASE):
           atol=1e-5,
           err_msg=f"eager step with mid-step compile_kernels diverged: parameter {path}",
       )
+
+  def test_fwd_only_with_zero1_and_compiled_training_lifecycle(self):
+    """`fwd_only` handles eager pre-compile and compiled Zero-1 post-update weights without breaking Zero-1."""
+
+    @struct.dataclass(frozen=True, kw_only=True)
+    class ScorePayload(abstract_engine.TrainerPayload):
+      inputs: jax.Array | np.ndarray
+      inputs_position: jax.Array | np.ndarray
+      inputs_segmentation: jax.Array | np.ndarray
+
+    cfg, mesh = _rig(shard_optimizer_over_data=True)
+    raw = _batch(cfg, 0)
+    payload = ScorePayload(
+        inputs=raw["inputs"],
+        inputs_position=raw["inputs_position"],
+        inputs_segmentation=raw["inputs_segmentation"],
+    )
+
+    def score_fn(model, p):
+      logits = model(
+          decoder_input_tokens=p.inputs,
+          decoder_positions=p.inputs_position,
+          decoder_segment_ids=p.inputs_segmentation,
+          enable_dropout=False,
+      )
+      return jnp.sum(logits.astype(jnp.float32))
+
+    with jax.set_mesh(mesh), _no_deferral():
+      engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
+      engine.with_fwd_only_fn(score_fn)
+
+      # Eager pre-compile `fwd_only` keeps optimizer moments unsharded over `data`.
+      score_before = engine.fwd_only(payload)
+      moments_eager = _moments(engine)
+      self.assertNotEmpty(moments_eager)
+      for path, leaf in moments_eager.items():
+        self.assertNotIn(_DATA, _axes(leaf.sharding.spec), f"{path} was sharded before compile()")
+
+      # Compile and run a training step under Zero-1.
+      engine.compile(raw)
+      engine.fwd_bwd(raw)
+      engine.update()
+
+      # Post-update `fwd_only` sees updated weights; re-registering forces
+      # `_compile_fwd_only_for_batch` on the compiled Zero-1 engine while preserving moments and `_params_pure`.
+      score_after = engine.fwd_only(payload)
+      engine.with_fwd_only_fn(score_fn)
+      score_recompiled = engine.fwd_only(payload)
+      moments_compiled = _moments(engine)
+      with engine._sharding_ctx():  # pylint: disable=protected-access
+        expected_after = score_fn(engine.model, payload)
+      has_params_pure = engine._params_pure is not None  # pylint: disable=protected-access
+      engine.close()
+
+    self.assertTrue(has_params_pure)
+    self.assertNotAlmostEqual(float(score_before), float(score_after), places=4)
+    np.testing.assert_allclose(np.asarray(score_after), np.asarray(expected_after), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(score_recompiled), np.asarray(expected_after), rtol=1e-4, atol=1e-4)
+    self.assertNotEmpty(moments_compiled)
+    for path, leaf in moments_compiled.items():
+      self.assertIn(_DATA, _axes(leaf.sharding.spec), f"{path} lost Zero-1 sharding after fwd_only()")
 
 
 class DeclinedGracefullyTest(_MULTI_DEVICE_BASE):

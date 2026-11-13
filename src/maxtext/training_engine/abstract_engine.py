@@ -202,10 +202,12 @@ class AbstractTrainingEngine(abc.ABC):
     """Sets the read-only callback `fwd_only` runs; the forward-only counterpart of `with_loss_fn`.
 
     Args:
-      fn: Called as `fn(model, payload)`, where `model` is a read-only
-        `eval()`-mode copy of the trainer model and `payload` is the input
-        payload with host `metadata` stripped and array leaves sharded on the
-        engine's data axis.
+      fn: Called as `fn(model, payload)` under `jax.jit`, where `model` is a
+        read-only copy of the trainer model on which `model.eval()` has been
+        called (setting `nnx.Dropout.deterministic=True` unless overridden by
+        the model's call-time flags) and `payload` is the input payload with
+        host `metadata` stripped and array leaves sharded on the engine's data
+        axis. Must return a pytree of arrays.
 
     Returns:
       self, for chaining.
@@ -220,12 +222,14 @@ class AbstractTrainingEngine(abc.ABC):
 
     The engine owns model access, JIT compilation/caching, and sharding on its
     data axis; `fn` owns the computation and must not mutate trainer state.
+    Committed `jax.Array` leaves in `payload` whose sharding differs from the
+    engine's data sharding raise `ValueError` at the `jax.jit` boundary.
 
     Args:
       payload: The input payload to prepare and shard.
 
     Returns:
-      Whatever the callback returns.
+      The pytree of arrays returned by `fn`.
 
     Raises:
       ValueError: If `with_fwd_only_fn` has not been called.

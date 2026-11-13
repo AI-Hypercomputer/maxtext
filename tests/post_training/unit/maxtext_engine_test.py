@@ -3081,6 +3081,13 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
       seen_shardings.append(result)
       return result
 
+    orig_jit = maxtext_engine.jax.jit
+    jit_kwargs_seen: list[dict[str, Any]] = []
+
+    def recording_jit(jit_fn, **jit_kwargs):
+      jit_kwargs_seen.append(jit_kwargs)
+      return orig_jit(jit_fn, **jit_kwargs)
+
     with (
         mock.patch.object(
             maxtext_engine.sharding,
@@ -3092,6 +3099,7 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
             "_fwd_only_data_shardings",
             side_effect=recording_fwd_only_shardings,
         ),
+        mock.patch.object(maxtext_engine.jax, "jit", side_effect=recording_jit),
     ):
       tokens, prompt, mask, scaled = t.fwd_only(
           ScoringPayload(
@@ -3102,27 +3110,51 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
               pad_id=3,
           )
       )
+      with mock.patch.object(t, "_batch_axis_size", return_value=2):
+        indivisible_payload = ScoringPayload(
+            token_ids=np.ones((1, 4), np.int32),
+            prompt=np.zeros((1, 0), np.int32),
+            mask=np.ones((1,), np.int32),
+            scale=jnp.float32(2.0),
+            pad_id=3,
+        )
+        with self.assertLogs(level="WARNING") as fwd_logs:
+          t.fwd_only(indivisible_payload)
+          t._fwd_only_data_shardings(indivisible_payload)  # pylint: disable=protected-access
 
-    self.assertLen(seen_shardings, 1)
-    batch_shardings = seen_shardings[0]
+    self.assertLen(seen_shardings, 3)
+    self.assertLen(jit_kwargs_seen, 2)
+    self.assertIsNone(jit_kwargs_seen[0]["in_shardings"][0])
+    jit_payload_shardings = jit_kwargs_seen[0]["in_shardings"][3]
     self.assertEqual(
-        batch_shardings.token_ids.spec,
+        jit_payload_shardings.token_ids.spec,
         jax.sharding.PartitionSpec("data", None),
     )
     # Rank-1 leaves absorb only the leading entry of `[batch, sequence]`.
     self.assertEqual(
-        batch_shardings.mask.spec,
+        jit_payload_shardings.mask.spec,
         jax.sharding.PartitionSpec("data"),
     )
     # Zero-width and rank-0 array leaves stay replicated.
     self.assertEqual(
-        batch_shardings.prompt.spec,
+        jit_payload_shardings.prompt.spec,
         jax.sharding.PartitionSpec(),
     )
     self.assertEqual(
-        batch_shardings.scale.spec,
+        jit_payload_shardings.scale.spec,
         jax.sharding.PartitionSpec(),
     )
+    # Indivisible micro-batches fall back to replicated and warn once on `_fwd_only_replicated_batch_warned`
+    # without consuming training's `_replicated_batch_warned`.
+    indivisible_shardings = jit_kwargs_seen[1]["in_shardings"][3]
+    self.assertEqual(indivisible_shardings.token_ids.spec, jax.sharding.PartitionSpec(None, None))
+    self.assertEqual(indivisible_shardings.mask.spec, jax.sharding.PartitionSpec(None))
+    fwd_warnings = [line for line in fwd_logs.output if "does not divide mesh axis" in line]
+    self.assertLen(fwd_warnings, 1)
+    self.assertIn("Forward-only input", fwd_warnings[0])
+    self.assertIn("2x the work", fwd_warnings[0])
+    self.assertTrue(t._fwd_only_replicated_batch_warned)  # pylint: disable=protected-access
+    self.assertFalse(t._replicated_batch_warned)  # pylint: disable=protected-access
     self.assertIs(seen_statics["pad_id_type"], int)
     self.assertEqual(seen_statics["pad_id"], 3)
     self.assertEqual(tokens.shape, (2, 4))
@@ -3148,7 +3180,7 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     self.assertFalse(maxtext_engine.sharding.get_logical_axis_rules())
 
   def test_fwd_only_caches_compiled_executable_and_invalidates_on_rebind(self):
-    """Caches one compiled executable with donate_argnums=() and invalidates on fn/state/checkpoint reset."""
+    """Caches one compiled executable with donate_argnums=() and invalidates on fn/static rebind."""
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
     trace_calls = 0
 
@@ -3162,9 +3194,11 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
 
     orig_jit = maxtext_engine.jax.jit
     jit_kwargs_seen: list[dict[str, Any]] = []
+    jit_fn_names: list[str] = []
 
     def recording_jit(fn, **jit_kwargs):
       jit_kwargs_seen.append(jit_kwargs)
+      jit_fn_names.append(getattr(fn, "__name__", ""))
       return orig_jit(fn, **jit_kwargs)
 
     with mock.patch.object(maxtext_engine.jax, "jit", side_effect=recording_jit):
@@ -3180,22 +3214,47 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
       self.assertEqual(trace_calls, 1)
       self.assertIsNotNone(t._compiled_fwd_only)  # pylint: disable=protected-access
       self.assertIsNotNone(t._compiled_fwd_only_signature)  # pylint: disable=protected-access
+      self.assertEqual(jit_fn_names, ["fwd_only"])
       self.assertEqual(jit_kwargs_seen[-1]["donate_argnums"], ())
       self.assertAlmostEqual(float(out1), 7.0)
       self.assertAlmostEqual(float(out2), 11.0)
 
-      # New static field values replace the cached executable and reuse it on repeat calls.
+      # New static field values trace once, and repeat calls hit JAX's cache.
       out3 = t.fwd_only(DummyPayload(temperature=2.0))
       out4 = t.fwd_only(DummyPayload(temperature=2.0))
+      out5 = t.fwd_only(DummyPayload(temperature=1.0))
       self.assertEqual(trace_calls, 2)
       self.assertAlmostEqual(float(out3), 14.0)
       self.assertAlmostEqual(float(out4), 14.0)
+      self.assertAlmostEqual(float(out5), 7.0)
 
     # Re-registering with_fwd_only_fn clears cached executable/signature and runs the new callback.
     t.with_fwd_only_fn(lambda model, payload: jnp.sum(model.weights[...]) * payload.temperature)
     self.assertIsNone(t._compiled_fwd_only)  # pylint: disable=protected-access
     self.assertIsNone(t._compiled_fwd_only_signature)  # pylint: disable=protected-access
     self.assertAlmostEqual(float(t.fwd_only(DummyPayload(temperature=1.0))), 3.0)
+
+  def test_fwd_only_retraces_on_model_rebind_with_different_graphdef(self):
+    """Rebinding `engine.model` with identical State shapes/shardings still reflects updated GraphDef."""
+
+    class StaticOffsetModel(nnx.Module):
+
+      def __init__(self, offset: float):
+        self.weights = nnx.Param(jnp.array([1.0, 2.0]))
+        self.offset = offset
+
+    mesh = jax.sharding.Mesh(
+        maxtext_utils.create_device_mesh(self.mock_config),
+        self.mock_config.mesh_axes,
+    )
+    self.mock_from_pretrained.return_value = (StaticOffsetModel(offset=10.0), mesh)
+    t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
+    t.with_fwd_only_fn(lambda model, _payload: jnp.sum(model.weights[...]) + model.offset)
+
+    self.assertAlmostEqual(float(t.fwd_only(DummyPayload())), 13.0)
+
+    t.model = StaticOffsetModel(offset=100.0)
+    self.assertAlmostEqual(float(t.fwd_only(DummyPayload())), 103.0)
 
   def test_fwd_only_skips_zero1_when_uncompiled_and_preserves_when_compiled(self):
     """`fwd_only` avoids Zero-1 sharding on eager engines and keeps it once compiled."""
@@ -3929,9 +3988,10 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
     # A training update updates live weights without invalidating cache.
     engine.fwd_bwd(payload)
     engine.update()
+    traces_before = len(seen_model_types)
     logps_after = engine.fwd_only(payload)
     self.assertIs(engine._compiled_fwd_only, compiled_before)
-    self.assertLen(seen_model_types, 2)
+    self.assertLen(seen_model_types, traces_before)
 
     with engine._sharding_ctx():
       expected_after = bound_logps_fn(engine.model, payload)
