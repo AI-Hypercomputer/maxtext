@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-13 22:37:36 UTC`
+- **Last Updated (UTC):** `2026-11-13 22:41:21 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -13,7 +13,7 @@
 
 | Platform | Region | Step 1 Done | TPU Queue Tasks Done | Active TPU JobSets | Active CPU Jobs |
 |---|---|---:|---:|---|---|
-| `v7x` | `us-central1` | **21 / 21** | **61 / 61** | `mesa-q-v7x-2x2x1-2s-w65`, `mesa-q-v7x-2x2x1-2s-w66`, `mesa-q-v7x-2x2x2-1s-w63`, `mesa-sd-v7x-397b-1x2x2x2` | _none_ |
+| `v7x` | `us-central1` | **21 / 21** | **61 / 61** | `mesa-q-v7x-2x2x1-2s-w65`, `mesa-q-v7x-2x2x1-2s-w66`, `mesa-q-v7x-2x2x2-1s-w63`, `mesa-sd-v7x-397b-1x2x2x2`, `mesa-tm2-v7x-397b-2s` | _none_ |
 | `v6e` | `southamerica-west1` | **21 / 21** | **53 / 53** | _none_ | _none_ |
 | `v5e` | `europe-west4` | **12 / 12** | **22 / 22** | `mesa-fix-v5e-30b-r12` | _none_ |
 
