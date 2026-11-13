@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794577436928,
+  "lastUpdate": 1794590429327,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -69543,6 +69543,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 338,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Nuojin Cheng",
+            "username": "NuojCheng",
+            "email": "chengnuojin@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "53aaf092bc415aeb53558f9e5ae9d1bed9629cc0",
+          "message": "PR #6291: Raise instead of assuming 1 device when config validation can't get the device count\n\nImported from GitHub PR https://github.com/AI-Hypercomputer/maxtext/pull/6291\n\n# Description\n\nWhen `jax.devices()` failed during config validation, `MaxTextConfig` logged \"JAX device system not available for config validation. Assuming 1 device.\" and carried on. Every global batch size is derived from that count, so the run continued with batch sizes for one device and failed much later in `pjit`, with an indivisibility error that names neither the batch size nor the device count (#4933). If the numbers happened to divide, it would train with the wrong batch size instead.\n\nThis change makes validation raise a `ValueError` that carries the original error. Behavior changes in two cases:\n\n- With `num_slices` set, validation used to succeed with `num_target_devices=1`. It now fails with the new message.\n- With `num_slices` unset, it already failed: `get_num_slices` calls `jax.devices()` again right after, outside any handler, so the raw `RuntimeError` escaped. It now fails with the new message instead.\n\nOn TPU, `jax.distributed.initialize()` runs before validation only for runs that save or load checkpoints (`_uses_checkpoints`), so multi-host runs with `enable_checkpointing=false` can reach this path.\n\n# Tests\n\n- The new `test_unavailable_device_count_raises` mocks `jax.devices()` to raise. It fails on main (\"ValueError not raised\") and passes with this change.\n- `tests/unit/configs_value_test.py` and `tests/unit/pyconfig_test.py` pass on CPU (134 passed).\n- `pre-commit run` (codespell, pylint, pyink) passes on the changed files.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests and provided workload links above if applicable. *(Note: New PRs get `skip-ci-tests` so only CPU/lint/docs checks run during review; a bot removes it after 2 approvals on a 1-commit PR to run TPU/GPU suites, or remove it yourself / ask a maintainer on fork PRs to run them sooner. On TPU7X, only the TPU tests that the PR adds or modifies run; add the `run-tpu7x` label to run the full TPU7X suite.)*\n- [x] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nCopybara import of the project:\n\n--\n8a9300c79476beb18664c37048fa178a6630e3e5 by NuojCheng <chengnuojin@google.com>:\n\nRaise instead of assuming 1 device when config validation can't get the device count\n\nGlobal batch sizes are derived from num_target_devices. When jax.devices()\nfailed during validation, the config assumed 1 device, so the run continued\nwith batch sizes for a single device and failed later in pjit (#4933).\n\nMerging this change closes #6291\n\nCOPYBARA_INTEGRATE_REVIEW=https://github.com/AI-Hypercomputer/maxtext/pull/6291 from AI-Hypercomputer:chengnuojin-no-silent-device-count-fallback 8a9300c79476beb18664c37048fa178a6630e3e5\nPiperOrigin-RevId: 1021091163",
+          "timestamp": "2026-11-13T17:18:52Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/53aaf092bc415aeb53558f9e5ae9d1bed9629cc0"
+        },
+        "date": 1794590428388,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 259.23299999999983,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 36,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 62.352000000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 32,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2169.75,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 134.0649999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 584.9029999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 89,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3475.353000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 346,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1637.931,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 408.51,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 80,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3519.1219999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 346,
             "unit": "count"
           }
         ]
