@@ -1937,6 +1937,12 @@ class MoEGeneral(BaseModel):
       description="Whether to pre-fuse MoE weights (w0 and w1) during initialization. "
       "This enables a single FFN1 grouped GEMM in sparse MoE paths and passes fused weights directly in vllm_rpa mode.",
   )
+  moe_unsliced_prefused_wi: bool = Field(
+      False,
+      description="When True (with prefuse_moe_weights=True and sparse_matmul=True), pass the fused wi [E, emb, 2*mlp] "
+      "across shard_map as a single operand (w1_kernel=None) instead of slicing into w0/w1 and re-concatenating "
+      "inside gmm_up. Requires the MLP dim of wi to be unsharded (tensor parallelism = 1).",
+  )
   fuse_expert_scales: bool = Field(
       False,
       description="Whether to fuse the expert scaling factors into the expert weights. "
@@ -5233,6 +5239,26 @@ def parse_a2a_quant_method(method: str) -> tuple[str, float | None, str | None]:
 # ----------------------------------------------------------------------------
 
 
+def _validate_moe_unsliced_prefused_wi(config) -> None:
+  """moe_unsliced_prefused_wi is only wired through the plain prefused sparse_matmul path; reject it elsewhere."""
+  if not config.moe_unsliced_prefused_wi:
+    return
+  unmet = [
+      requirement
+      for requirement, ok in (
+          ("prefuse_moe_weights=True", config.prefuse_moe_weights),
+          ("sparse_matmul=True", config.sparse_matmul),
+          ("num_moe_emb_chunks=0", config.num_moe_emb_chunks == 0),
+          ("moe_fsdp_use_two_stage_all_gather=False", not config.moe_fsdp_use_two_stage_all_gather),
+          ("te_moe_block=False", not config.te_moe_block),
+          ("expert_replicas_per_device=0", config.expert_replicas_per_device == 0),
+      )
+      if not ok
+  ]
+  if unmet:
+    raise ValueError(f"moe_unsliced_prefused_wi=True requires {', '.join(unmet)}.")
+
+
 class MaxTextConfig(
     # Run and Checkpointing
     RunInfo,
@@ -7432,6 +7458,7 @@ class MaxTextConfig(
       self.validate_moe_dropless_fallback()
       self.validate_moe_log_max_load_ratio()
       self.validate_moe_tc_ragged_sort()
+    _validate_moe_unsliced_prefused_wi(self)
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
     self.validate_moe_topk_before_ep_all_gather()
@@ -8657,6 +8684,7 @@ class RLConfig(
     model_name = getattr(self, "model_name", None)
     if model_name is None:
       raise ValueError("model_name is not set. Please pass model_name in your command.")
+    _validate_moe_unsliced_prefused_wi(self)
 
     # With sequence packing on, a maximal sequence (prompt cap + generation
     # cap = max_target_length) must fit in one packed row. Tunix checks this
