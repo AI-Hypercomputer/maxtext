@@ -1412,8 +1412,44 @@ def checkpoint_exception_guard(config, checkpoint_manager, handler_fn=None):
       raise
 
 
-def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None):
-  """Save checkpoint if checkpointing is enabled."""
+def colocated_save_lacks_slice_0(config, state) -> bool:
+  """Returns whether a colocated Python checkpoint save of `state` would run without Pathways slice 0.
+
+  With colocated Python checkpointing, the Pathways workers write the arrays. Orbax makes worker process 0 the one
+  that creates the shared `array_metadatas/` directory and writes each array's TensorStore metadata, and process 0
+  is a worker of Pathways slice 0. On a mesh without that slice, the other workers wait 600 s for the directory and
+  the save fails (b/579045475).
+
+  Args:
+    config: MaxText config.
+    state: The train state to save.
+  """
+  if not (
+      getattr(config, "enable_single_controller", False) and getattr(config, "colocated_python_checkpointing", False)
+  ):
+    return False
+  leaf = next((x for x in jax.tree.leaves(state) if isinstance(x, jax.Array)), None)
+  if leaf is None:
+    return False
+  slice_indices = {getattr(d, "slice_index", None) for d in leaf.sharding.device_set}
+  return None not in slice_indices and 0 not in slice_indices
+
+
+def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step=None, is_final=False):
+  """Save checkpoint if checkpointing is enabled.
+
+  Args:
+    checkpoint_manager: The checkpoint manager, or None if checkpointing is disabled.
+    state: The train state.
+    config: MaxText config.
+    data_iterator: The training data iterator.
+    step: The step that produced `state`. None saves the last completed step even off `checkpoint_period`.
+    is_final: Whether this is the checkpoint at the end of training.
+
+  Raises:
+    RuntimeError: If the final checkpoint cannot be saved because the run is without Pathways slice 0 (see
+      `colocated_save_lacks_slice_0`), or if the save fails.
+  """
   if checkpoint_manager is None:
     return
 
@@ -1442,6 +1478,19 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   # to prevent Orbax OCDBT UUID collisions during auto-resume / continuation runs for DiLoCo.
   if latest_step(checkpoint_manager) == actual_step or actual_step in all_steps(checkpoint_manager):
     max_logging.log(f"Checkpoint for step {actual_step} already exists, skipping save.")
+    return
+
+  # Snapshots continue meanwhile, so the run can still recover from a slice failure. The final checkpoint can't be
+  # skipped: fail, so that the restarted job writes it on all slices.
+  if colocated_save_lacks_slice_0(config, state):
+    message = (
+        f"Cannot save the checkpoint of step {actual_step}: this attempt runs without Pathways slice 0, and colocated"
+        " Python checkpointing needs worker process 0, which is on that slice."
+    )
+    if is_final:
+      raise RuntimeError(f"{message} Failing so that the job restarts and saves the final checkpoint on all slices.")
+    max_logging.warning(f"{message} Skipping it; checkpoints resume once slice 0 is back.")
+    _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
     return
 
   def _checkpoint_error_handler(err):
