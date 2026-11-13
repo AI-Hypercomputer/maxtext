@@ -1586,6 +1586,17 @@ class MoEGeneral(BaseModel):
       False,
       description="Keep embed_moe sharded so we can manually QAG it over FSDP.",
   )
+  moe_init_under_default_expert_sharding: bool = Field(
+      False,
+      description=(
+          "Draw the routed expert kernels (wi_0, wi_1, wo) under the default"
+          " ('exp', 'embed_moe', 'mlp_moe') sharding and then reshard them to"
+          " the configured storage axes (e.g. shard_exp_on_fsdp). With a"
+          " sharded RNG (prng_impl unsafe_rbg) the drawn values depend on the"
+          " output sharding, so this keeps initial weights identical to the"
+          " default layout. Defaults to False."
+      ),
+  )
   use_2d_fsdp_sharding: bool = Field(
       False,
       description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",

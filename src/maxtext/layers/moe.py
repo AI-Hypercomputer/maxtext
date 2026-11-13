@@ -1211,24 +1211,45 @@ class RoutedMoE(nnx.Module):
       )
     else:
 
-      def _init_expert_kernel(shape, dtype):
+      def _init_expert_kernel(shape, dtype, default_axes):
         # Always init in 3D [E, rows, cols] so the fan-in/out (and RNG draw) match the 3D layout, then view it
         # as the flat [E * rows, cols] matrix under moe_flat_fsdp_weights (see wi_kernel_axes above).
         kernel = self.kernel_init(self.rngs.params(), shape, dtype, kernel_in_axis, kernel_out_axis)
+        if self.config.moe_init_under_default_expert_sharding:
+          # Random bits from a sharded RngBitGenerator depend on its output sharding, so draw the kernel under
+          # the default expert sharding and let XLA reshard it to wi/wo_kernel_axes: initial values stay identical.
+          default_pspec = logical_to_mesh_axes(default_axes, self.mesh, rules=self.config.logical_axis_rules)
+          kernel = jax.lax.with_sharding_constraint(kernel, NamedSharding(self.mesh, default_pspec))
         if self.config.moe_flat_fsdp_weights:
           kernel = kernel.reshape(shape[0] * shape[1], shape[2])
         return kernel
 
       self.wi_0 = nnx.Param(
-          _init_expert_kernel((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype),
+          _init_expert_kernel(
+              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
+              weight_dtype,
+              ("exp", "embed_moe", "mlp_moe"),
+          ),
           out_sharding=self.wi_kernel_axes,
       )
       self.wi_1 = nnx.Param(
-          _init_expert_kernel((num_experts, self.moe_expert_input_dim, moe_intermediate_dim), weight_dtype),
+          _init_expert_kernel(
+              (num_experts, self.moe_expert_input_dim, moe_intermediate_dim),
+              weight_dtype,
+              ("exp", "embed_moe", "mlp_moe"),
+          ),
           out_sharding=self.wi_kernel_axes,
       )
       self.wo = nnx.Param(
-          _init_expert_kernel((self.num_experts, moe_intermediate_dim, self.moe_expert_input_dim), self.weight_dtype),
+          _init_expert_kernel(
+              (
+                  self.num_experts,
+                  moe_intermediate_dim,
+                  self.moe_expert_input_dim,
+              ),
+              self.weight_dtype,
+              ("exp", "mlp_moe", "embed_moe"),
+          ),
           out_sharding=self.wo_kernel_axes,
       )
 
