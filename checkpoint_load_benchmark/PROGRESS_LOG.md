@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-13 01:42:41 UTC`
+- **Last Updated (UTC):** `2026-11-13 01:46:53 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -14,7 +14,7 @@
 | Platform | Region | Step 1 Done | TPU Queue Tasks Done | Active TPU JobSets | Active CPU Jobs |
 |---|---|---:|---:|---|---|
 | `v7x` | `us-central1` | **21 / 21** | **19 / 61** | `mesa-q-v7x-2x2x1-1s-w3`, `mesa-q-v7x-2x2x1-2s-w2` | _none_ |
-| `v6e` | `southamerica-west1` | **21 / 21** | **21 / 53** | `mesa-q-v6e-2x4-2s-w2` | `mesa-copy-v6e-deepseek4-1600b-v2-cp-v6e` |
+| `v6e` | `southamerica-west1` | **21 / 21** | **21 / 53** | `mesa-q-v6e-2x4-2s-w2` | _none_ |
 | `v5e` | `europe-west4` | **12 / 12** | **21 / 22** | `mesa-q-v5e-16x16-2s-w2` | _none_ |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
@@ -62,3 +62,6 @@
 - [2026-11-13 01:42:03 UTC] Launched `v5e` TPU queue worker `mesa-q-v5e-16x16-2s-w2` (`2x16x16`, min_slices=2) for 1 runnable tasks.
 - [2026-11-13 01:42:08 UTC] Launched `v6e` BF16 copy job `mesa-copy-v6e-deepseek4-1600b-v2-cp-v6e` for `deepseek4-1600b`.
 - [2026-11-13 01:42:41 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 620 mirrored JSONs.
+- [2026-11-13 01:46:12 UTC] `v6e` CPU job `mesa-copy-v6e-deepseek4-1600b-v2-cp-v6e` Completed and cleaned up.
+- [2026-11-13 01:46:20 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 53/53 staged tasks.
+- [2026-11-13 01:46:53 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 621 mirrored JSONs.
