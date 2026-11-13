@@ -1139,6 +1139,14 @@ class SplashAttention(BaseModel):
       " Not storage-only: the attention output itself becomes the dequantized value (so forward and backward see"
       " the same tensor), i.e. `out[dh:]` reaches the next layer fp8-rounded, in training and in eval.",
   )
+  sa_context_device_fp8: bool = Field(
+      False,
+      description="Quantize the device-resident Splash `out[:dh]` (`context_device`) per 128-dim row to float8_e4m3fn"
+      " + bf16 scale, halving its HBM footprint (same scheme as `sa_context_offload_fp8`, including the fp8-rounded"
+      " attention output). With `sa_context_split_device_heads=0` there is no `out[:dh]`: if `sa_context_offload_fp8`"
+      " is off, every head is quantized and kept on device as `context_device` (the `context` remat setting is not"
+      " used); if it is on, every head is offloaded and this flag has no effect.",
+  )
   sa_diag_band_skip: bool = Field(
       False,
       description="Tokamax Splash fused backward only (maps to SplashConfig.diag_band_skip): with sa_qk_diag_skip,"
@@ -1669,7 +1677,7 @@ class MoEGeneral(BaseModel):
   moe_fused_gmm3d_wgrad_schedule_mode: int = Field(
       0,
       ge=0,
-      le=16,
+      le=17,
       description="Schedule MoE weight gradients and reduce-scatters (RS) earlier via zero-cost scalar NaN guards;"
       " only read with moe_fused_gmm3d_split_gate_bwd. 0=no guards, 1=dwo before gate_dx, 2=dwo+dwi before"
       " attention bwd, 3=also finish post-RS dwo+dwi_0 before attention bwd, 4=chained tgmm_v2 before gate_dx with"
@@ -1678,7 +1686,8 @@ class MoEGeneral(BaseModel):
       " behind gate_dx before Splash bwd, 9=mode 8 + chained tgmm_v2, 10-12=tgmm_v2 before gate_dx with 0/1/2 RSs"
       " forced before gate_dx, 13=mode 12 + dwi_1 RS finished before the layer dx via a grad_coeffs guard, 14=mode"
       " 10 + all 3 RSs finished before the layer dx via grad_coeffs guards, 15=unguarded gate_dx (attention bwd not"
-      " delayed) with dwo_raw before chained tgmm_v2, 16=mode 15 + dwo_raw guarded behind gate_dx + combine_dx).",
+      " delayed) with dwo_raw before chained tgmm_v2, 16=mode 15 + dwo_raw guarded behind gate_dx + combine_dx,"
+      " 17=mode 10 + all 3 RSs finished before attention bwd via a dx3d guard).",
   )
   moe_fused_gmm3d_inv_perm_combine: bool = Field(
       False,
@@ -1705,19 +1714,52 @@ class MoEGeneral(BaseModel):
       description="Pack (expert_id << 20) | slot_idx into a single uint32 array for bit-exact single-operand routing"
       " argsort.",
   )
-  use_qwen3_fused_qkv: bool = Field(
+  moe_tc_routing_offload_free: bool = Field(
       False,
-      description="Fuse Qwen3 QKV projection + QK RMSNorm + RoPE + Splash layout in Pallas kernel.",
+      description="Co-sort routing weights on TensorCore under `moe_packed_routing_sort` and reuse one-hot"
+      " `summed_expert_mask` for `group_size`, eliminating SparseCore gather/scatter routing offloads.",
   )
-  use_qwen3_fused_out: bool = Field(
+  moe_wi_ag_latency_ns: int = Field(
+      0,
+      description="If > 0, stamps `latency_metadata` (in nanoseconds) onto MoE `wi` (`//2` on `wo`) FSDP"
+      " all-gathers so XLA LHS starts them during `out_proj` + router `sort` instead of right before `gmm_v2`.",
+  )
+  use_fused_qkv_kernel: bool = Field(
+      False,
+      description="Fuse the QKV projection + per-head QK RMSNorm + RoPE + Splash layout in a Pallas kernel"
+      " (self-attention with QK RMSNorm and standard RoPE, e.g. Qwen3).",
+  )
+  use_fused_out_kernel: bool = Field(
       False,
       description="Use custom-VJP FSDP Attention out projection with local absmax quantization and early overlapped"
       " weight-gradient reduce-scatter.",
   )
-  qwen3_defer_norm_grad_allreduce: bool = Field(
+  fused_out_early_dw_rs: bool = Field(
+      False,
+      description="Guard `scale_dctx` on `dw_sharded_ehd` in `_fused_out_local_bwd` so the out-projection weight"
+      " gradient and its SparseCore reduce-scatter start before `splash_mha_dkv` instead of at the layer tail.",
+  )
+  defer_norm_grad_allreduce: bool = Field(
       False,
       description="Defer per-layer RMSNorm and QK-norm scale gradient all-reduces across FSDP/data axes until after"
-      " the decoder layer scan loop.",
+      " the decoder layer scan loop. Takes effect in the scanned layers of decoder blocks that support it"
+      " (currently qwen3 / qwen3_moe); elsewhere it is a no-op with a warning.",
+  )
+  moe_save_full_routing: bool = Field(
+      False,
+      description="Save the MoE top-k routing values/indices, expert density, group sizes, and sorted routing"
+      " indices/weights on HBM under the `moe_routing` checkpoint name (remat_policy='custom'), so the backward"
+      " pass does not recompute the routing sorts. Requires router_topk_matmul_vjp=True and"
+      " moe_packed_routing_sort=True; the exact-top_k combine `src_rows` are additionally saved on the fused gmm3d"
+      " exact-top_k combine path (moe_use_fused_gmm3d with moe_fused_gmm3d_gmm_combine and"
+      " moe_fused_gmm3d_exact_topk_combine, without moe_fused_gmm3d_inv_perm_combine).",
+  )
+  moe_save_gate_logits: str = Field(
+      "remat",
+      description="Remat policy for the MoE router `gate_logits`: `remat` (recompute), `device` (save on HBM), or"
+      " `offload` (save on pinned host), under the `moe_gate_logits` checkpoint name with remat_policy='custom'."
+      " Saved logits are checkpointed through an integer bitcast so that `jax.checkpoint` does not insert a"
+      " `reduce_precision` op.",
   )
   use_gather_mosaic_kernel: bool = Field(
       False,
@@ -2579,6 +2621,11 @@ class RematAndOffload(BaseModel):
   remat_policy_for_vit: str | None = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
   decoder_layer_input: RematLocation = Field(
       RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
+  )
+  decoder_layer_input_unalias: bool = Field(
+      False,
+      description="Materialize a single-layer HBM copy of `decoder_layer_input` right after checkpointing so"
+      " backward host prefetch (`dynamic-slice-start`) has no end-of-layer WAR hazard.",
   )
   indexer_cutoff_threshold: RematLocation = Field(
       RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
@@ -5314,6 +5361,51 @@ class MaxTextConfig(
     return self
 
   @model_validator(mode="after")
+  def validate_fused_attention_kernels(self) -> "MaxTextConfig":
+    """Checks the fused attention kernel flags and the deferred norm reduction against static config.
+
+    `use_fused_qkv_kernel` / `use_fused_out_kernel` fail fast on configs their `Attention` paths reject at trace
+    time. `defer_norm_grad_allreduce` is a no-op by design where the post-scan all-reduce does not run
+    (unscanned layers, FSDP prefetch, pipeline stages, explicit sharding); it then keeps the regular per-layer
+    all-reduce, so this only warns instead of leaving it silent. Sharding-dependent checks (tensor parallelism
+    on heads/embed) stay at trace time because they depend on the logical axis rules.
+    """
+    deferred_norm_blocks = (DecoderBlockType.QWEN3, DecoderBlockType.QWEN3_MOE)
+    # The fused kernels are model-agnostic: they take every model-dependent value (heads, head_dim, QK-norm eps,
+    # RoPE timescales, query_pre_attn_scalar) from the `Attention` layer, which rejects unsupported structure
+    # (non-RMSNorm QK norm, non-standard RoPE, projection bias, mRoPE / NoPE / vision, TP > 1) at trace time.
+    # Only the statically known requirements are checked here.
+    for flag in ("use_fused_qkv_kernel", "use_fused_out_kernel"):
+      if getattr(self, flag) and self.attention_type == "mla":
+        raise ValueError(f"{flag}=True does not support attention_type='mla'.")
+    if self.use_fused_qkv_kernel:
+      if not self.use_qk_norm:
+        raise ValueError("use_fused_qkv_kernel=True requires use_qk_norm=True (per-head QK RMSNorm).")
+      for name in ("fused_qkv", "share_kv_projections", "sa_qproj_bwd_bf16"):
+        if getattr(self, name):
+          raise ValueError(f"use_fused_qkv_kernel=True does not support {name}=True.")
+    if self.defer_norm_grad_allreduce:
+      unsupported = []
+      if self.decoder_block not in deferred_norm_blocks:
+        unsupported.append(f"decoder_block={self.decoder_block!r}")
+      if not self.scan_layers:
+        unsupported.append("scan_layers=False")
+      if self.prefetch_fsdp_weights:
+        unsupported.append("prefetch_fsdp_weights=True")
+      if self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1:
+        unsupported.append("pipeline parallelism")
+      if self.shard_mode != ShardMode.AUTO:
+        unsupported.append(f"shard_mode={self.shard_mode!r}")
+      if unsupported:
+        max_logging.warning(
+            "defer_norm_grad_allreduce=True has no effect with "
+            + ", ".join(unsupported)
+            + "; the norm scale gradients keep the regular per-layer all-reduce (the deferred all-reduce only runs"
+            " in the scanned layers of the supported decoder blocks: qwen3, qwen3_moe)."
+        )
+    return self
+
+  @model_validator(mode="after")
   def validate_qwix_multipass_quantization(self) -> "MaxTextConfig":
     """Validates `quantization=multipass` and its `qwix_*multipass_mode` / `qwix_multipass_tile_size` knobs."""
     modes = (self.qwix_multipass_mode, self.qwix_dlhs_multipass_mode, self.qwix_drhs_multipass_mode)
@@ -5960,16 +6052,43 @@ class MaxTextConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
-    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8:
+    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8 or self.sa_context_device_fp8:
       if self.remat_policy != "custom":
         raise ValueError(
-            "sa_context_split_device_heads and sa_context_offload_fp8 require remat_policy='custom', got"
-            f" remat_policy={self.remat_policy!r}."
+            "sa_context_split_device_heads, sa_context_offload_fp8, and sa_context_device_fp8 require"
+            f" remat_policy='custom', got remat_policy={self.remat_policy!r}."
         )
       if "context_device" not in self.tensors_on_device:
         self.tensors_on_device.append("context_device")
       if "context_offload" not in self.tensors_to_offload:
         self.tensors_to_offload.append("context_offload")
+    if self.moe_save_gate_logits not in ("remat", "device", "offload"):
+      raise ValueError(
+          f"moe_save_gate_logits must be 'remat', 'device', or 'offload', got {self.moe_save_gate_logits!r}."
+      )
+    if (self.moe_save_full_routing or self.moe_save_gate_logits != "remat") and self.remat_policy != "custom":
+      raise ValueError(
+          "moe_save_full_routing and moe_save_gate_logits other than 'remat' require remat_policy='custom', got"
+          f" remat_policy={self.remat_policy!r}."
+      )
+    if self.moe_save_full_routing:
+      # The saved top-k selection and sorted routing come from the custom VJPs that these two options enable;
+      # without them the backward pass would silently recompute the routing sorts.
+      if not (self.router_topk_matmul_vjp and self.moe_packed_routing_sort):
+        raise ValueError(
+            "moe_save_full_routing requires router_topk_matmul_vjp=True and moe_packed_routing_sort=True, got"
+            f" router_topk_matmul_vjp={self.router_topk_matmul_vjp!r} and"
+            f" moe_packed_routing_sort={self.moe_packed_routing_sort!r}."
+        )
+      # Checkpoint names below match `layers/moe.py` (`MOE_ROUTING_CHECKPOINT_NAME`, `MOE_GATE_LOGITS_CHECKPOINT_NAME`).
+      if "moe_routing" not in self.tensors_on_device:
+        self.tensors_on_device.append("moe_routing")
+    if self.moe_save_gate_logits == "device":
+      if "moe_gate_logits" not in self.tensors_on_device:
+        self.tensors_on_device.append("moe_gate_logits")
+    elif self.moe_save_gate_logits == "offload":
+      if "moe_gate_logits" not in self.tensors_to_offload:
+        self.tensors_to_offload.append("moe_gate_logits")
     if self.sa_num_stacked_q_heads < 1:
       raise ValueError(f"sa_num_stacked_q_heads must be >= 1, got {self.sa_num_stacked_q_heads}.")
     if self.sa_num_stacked_q_heads > 1 and self.num_kv_heads > 0:
@@ -6540,6 +6659,9 @@ class MaxTextConfig(
           "shard_exp_on_fsdp=False": not self.shard_exp_on_fsdp,
           "use_2d_fsdp_sharding=False": not self.use_2d_fsdp_sharding,
           "capacity_factor < 0 (dropless)": self.capacity_factor < 0,
+          "fp8_moe_fake_quant=False": not self.fp8_moe_fake_quant,
+          "use_batch_split_schedule=False": not self.use_batch_split_schedule,
+          "no weight sparsity": not (self.weight_sparsity_n and self.weight_sparsity_m),
       }
       unmet = [name for name, ok in fused_gmm3d_requirements.items() if not ok]
       if unmet:
@@ -7105,16 +7227,30 @@ class MaxTextConfig(
           "Please disable attn_logits_soft_cap when using use_qk_clip."
       )
 
-    if self.experimental_sa_quant_q_fp8 and self.attention_type != "mla":
+    # fp8 Q/K for the Tokamax Splash kernel: MLA (attention_mla.py) and the GQA 'global' path
+    # (attentions.py, train mode only; cast after qk-norm, RoPE and query_pre_attn_scalar).
+    _sa_fp8_qk_attention_types = ("mla", "global")
+    if self.experimental_sa_quant_q_fp8 and self.attention_type not in _sa_fp8_qk_attention_types:
       raise ValueError(
           "Q quantization is currently only supported with"
-          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
+          f" attention_type in {_sa_fp8_qk_attention_types}. Found attention_type='{self.attention_type}'"
       )
-    if self.experimental_sa_quant_k_fp8 and self.attention_type != "mla":
+    if self.experimental_sa_quant_k_fp8 and self.attention_type not in _sa_fp8_qk_attention_types:
       raise ValueError(
           "K quantization is currently only supported with"
-          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
+          f" attention_type in {_sa_fp8_qk_attention_types}. Found attention_type='{self.attention_type}'"
       )
+    if (self.experimental_sa_quant_q_fp8 or self.experimental_sa_quant_k_fp8) and self.attention_type == "global":
+      if not (self.use_tokamax_splash and self.attention == "flash"):
+        raise ValueError(
+            "experimental_sa_quant_q_fp8/experimental_sa_quant_k_fp8 with attention_type='global' require"
+            " use_tokamax_splash=True and attention='flash'."
+        )
+      if self.context_parallel_strategy.lower() in ("ring", "usp"):
+        raise ValueError(
+            "experimental_sa_quant_q_fp8/experimental_sa_quant_k_fp8 with attention_type='global' are not"
+            f" supported with context_parallel_strategy '{self.context_parallel_strategy}'."
+        )
     if self.sa_diag_band_skip:
       if not (self.use_tokamax_splash and self.attention == "flash" and self.sa_qk_diag_skip):
         raise ValueError(
@@ -7143,9 +7279,12 @@ class MaxTextConfig(
             "sa_q_prescaled_log2e requires experimental_sa_quant_q_fp8=True, sa_use_base2_exp=True,"
             " use_tokamax_splash=True and attention='flash'."
         )
-      # The LOG2E fold is only in the MLA query path (attention_mla.py).
-      if self.attention_type != "mla":
-        raise ValueError(f"sa_q_prescaled_log2e only supports attention_type='mla'; got '{self.attention_type}'.")
+      # The LOG2E fold lives in the MLA query path (attention_mla.py) and in the GQA 'global' path
+      # (attentions.py: folded into query_pre_attn_scalar before the single fp8 rounding).
+      if self.attention_type not in ("mla", "global"):
+        raise ValueError(
+            f"sa_q_prescaled_log2e only supports attention_type in ('mla', 'global'); got '{self.attention_type}'."
+        )
       if self.use_mla_absorbed_mqa:
         raise ValueError("sa_q_prescaled_log2e is not supported with use_mla_absorbed_mqa=True.")
       # Ring and USP context parallelism use MaxText's vendored splash kernel (natural exp, no
@@ -7900,16 +8039,43 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
-    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8:
+    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8 or self.sa_context_device_fp8:
       if self.remat_policy != "custom":
         raise ValueError(
-            "sa_context_split_device_heads and sa_context_offload_fp8 require remat_policy='custom', got"
-            f" remat_policy={self.remat_policy!r}."
+            "sa_context_split_device_heads, sa_context_offload_fp8, and sa_context_device_fp8 require"
+            f" remat_policy='custom', got remat_policy={self.remat_policy!r}."
         )
       if "context_device" not in self.tensors_on_device:
         self.tensors_on_device.append("context_device")
       if "context_offload" not in self.tensors_to_offload:
         self.tensors_to_offload.append("context_offload")
+    if self.moe_save_gate_logits not in ("remat", "device", "offload"):
+      raise ValueError(
+          f"moe_save_gate_logits must be 'remat', 'device', or 'offload', got {self.moe_save_gate_logits!r}."
+      )
+    if (self.moe_save_full_routing or self.moe_save_gate_logits != "remat") and self.remat_policy != "custom":
+      raise ValueError(
+          "moe_save_full_routing and moe_save_gate_logits other than 'remat' require remat_policy='custom', got"
+          f" remat_policy={self.remat_policy!r}."
+      )
+    if self.moe_save_full_routing:
+      # The saved top-k selection and sorted routing come from the custom VJPs that these two options enable;
+      # without them the backward pass would silently recompute the routing sorts.
+      if not (self.router_topk_matmul_vjp and self.moe_packed_routing_sort):
+        raise ValueError(
+            "moe_save_full_routing requires router_topk_matmul_vjp=True and moe_packed_routing_sort=True, got"
+            f" router_topk_matmul_vjp={self.router_topk_matmul_vjp!r} and"
+            f" moe_packed_routing_sort={self.moe_packed_routing_sort!r}."
+        )
+      # Checkpoint names below match `layers/moe.py` (`MOE_ROUTING_CHECKPOINT_NAME`, `MOE_GATE_LOGITS_CHECKPOINT_NAME`).
+      if "moe_routing" not in self.tensors_on_device:
+        self.tensors_on_device.append("moe_routing")
+    if self.moe_save_gate_logits == "device":
+      if "moe_gate_logits" not in self.tensors_on_device:
+        self.tensors_on_device.append("moe_gate_logits")
+    elif self.moe_save_gate_logits == "offload":
+      if "moe_gate_logits" not in self.tensors_to_offload:
+        self.tensors_to_offload.append("moe_gate_logits")
 
     _validate_remat_policy(
         self.remat_policy,

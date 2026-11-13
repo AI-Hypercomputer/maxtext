@@ -1792,11 +1792,11 @@ class Qwen3StackConfigValidationTest(absltest.TestCase):
     self.assertTrue(config.qwix_disable_channelwise_axes)
 
   def test_moe_fused_gmm3d_wgrad_schedule_mode_bounds(self):
-    for mode in (-1, 17):
+    for mode in (-1, 18):
       with self.subTest(mode=mode):
         with self.assertRaises(pydantic.ValidationError):
           self._initialize(f"moe_fused_gmm3d_wgrad_schedule_mode={mode}")
-    self.assertEqual(self._initialize("moe_fused_gmm3d_wgrad_schedule_mode=16").moe_fused_gmm3d_wgrad_schedule_mode, 16)
+    self.assertEqual(self._initialize("moe_fused_gmm3d_wgrad_schedule_mode=17").moe_fused_gmm3d_wgrad_schedule_mode, 17)
 
   def test_moe_use_fused_gmm3d_prerequisites(self):
     # A fully-MoE model: base_moe_mlp_dim must match base_mlp_dim (7168 in base.yml).
