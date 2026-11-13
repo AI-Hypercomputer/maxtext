@@ -30,6 +30,7 @@ from collections.abc import Callable
 from flax import nnx
 import jax
 from maxtext.m3.core import kernels as m3_kernels
+from maxtext.m3.core import moe as _m3_moe
 from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
@@ -77,8 +78,8 @@ MODEL_SUPPORTED_MESH_AXES: dict[str, tuple[str, ...]] = {
     "granitemoe": _FOUR_AXIS_MESH,
     "qwen3-0.6b": m3_sharding.DEFAULT_SHARDING_AXES,
     "qwen3-vl-2b": _FOUR_AXIS_MESH,
-    "qwen3.8-flash-next": ("data", "fsdp", "fsdp_transpose", "tensor", "expert"),
-    "qwen3.8-flash-next-mini": ("data", "fsdp", "fsdp_transpose", "tensor", "expert"),
+    "qwen3.8-flash-next": ("data", "fsdp", "fsdp_transpose", "tensor", "tensor_sequence", "expert"),
+    "qwen3.8-flash-next-mini": ("data", "fsdp", "fsdp_transpose", "tensor", "tensor_sequence", "expert"),
 }
 MODEL_EXPLICIT_SHARDING_SUPPORT: frozenset[str] = frozenset({"qwen3-0.6b"})
 
@@ -109,6 +110,7 @@ ambient_mesh_is_explicit = m3_sharding.ambient_mesh_is_explicit
 end_eager_placement = m3_sharding.end_eager_placement
 enter_mesh_scope = m3_sharding.enter_mesh_scope
 validate_attention_config = m3_kernels.validate_attention_config
+validate_moe_config = _m3_moe.validate_moe_config
 _end_eager_placement = end_eager_placement
 
 

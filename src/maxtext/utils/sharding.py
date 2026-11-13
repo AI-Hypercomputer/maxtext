@@ -449,7 +449,9 @@ def apply_m3_default_named_sharding(
   Falls back to the largest non-data/non-stage mesh axis when
   fsdp/fsdp_transpose are absent.
   """
-  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose", "context") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
+  shard_axes = tuple(
+      a for a in ("fsdp", "fsdp_transpose", "context", "expert") if a in mesh.axis_names and int(mesh.shape[a]) > 1
+  )
   if not shard_axes:
     fallback_axes = [
         (a, int(mesh.shape[a])) for a in mesh.axis_names if a not in ("data", "stage") and int(mesh.shape[a]) > 1
