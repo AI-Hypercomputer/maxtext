@@ -14,6 +14,8 @@
 
 """Unit and multi-device parity tests for `maxtext.m3.core.moe`."""
 
+import functools
+import math
 import re
 from types import SimpleNamespace
 from unittest import mock
@@ -182,6 +184,7 @@ class ValidateAndResolveMoETest(parameterized.TestCase):
         )
     )
     self.assertEqual(tok_exec.batch, ("data", "fsdp", "fsdp_transpose", "expert"))
+    self.assertEqual(tok_exec.length, "context")
     self.assertEqual(tok_exec.experts, "expert")
     self.assertEqual(tok_exec.mlp, ("tensor", "tensor_sequence"))
     self.assertEqual(tok_exec.kind, "tokamax")
@@ -189,6 +192,14 @@ class ValidateAndResolveMoETest(parameterized.TestCase):
     self.assertTrue(tok_exec.bwd_wgrad_overlap)
     self.assertEqual(tok_exec.ragged_buffer_factor, 1.5)
     self.assertIsInstance(hash(tok_exec), int)
+
+    # EP = CP: the token shards along the expert axis are slices of the sequence, not of the batch.
+    ecp_exec = m3_moe.moe_from_config(
+        SimpleNamespace(sparse_matmul=True, use_tokamax_gmm=True), DefaultSharding(expert_context_parallel=True)
+    )
+    self.assertEqual(ecp_exec.batch, ("data", "fsdp", "fsdp_transpose"))
+    self.assertEqual(ecp_exec.length, ("context", "expert"))
+    self.assertEqual(ecp_exec.experts, "expert")
 
     # Forward compatibility once legacy `megablox`/`use_tokamax_gmm` flags are removed (#6114):
     post_6114_exec = m3_moe.moe_from_config(SimpleNamespace(num_experts=4, sparse_matmul=True, ici_expert_parallelism=2))
@@ -653,6 +664,46 @@ class MultiDeviceEPAndTPTest(parameterized.TestCase):
       np.testing.assert_allclose(np.asarray(exp_out), np.asarray(ref_out), rtol=1e-4, atol=1e-4)
       for g_got, g_ref in zip(exp_grads, ref_grads):
         np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+
+
+class SequenceShardedTokensTest(parameterized.TestCase):
+  """Tokens sharded along the sequence (EP = CP) run the experts shard by shard and give the same result."""
+
+  @parameterized.named_parameters(
+      ("ragged_dot_sequence_on_expert", "ragged_dot", {"expert": 2, "tensor": 2}, None, "expert"),
+      ("tokamax_sequence_on_expert", "tokamax", {"expert": 2, "tensor": 2}, None, "expert"),
+      ("tokamax_batch_on_fsdp", "tokamax", {"fsdp": 2, "expert": 2}, "fsdp", "expert"),
+      ("tokamax_sequence_on_context", "tokamax", {"context": 2, "expert": 2}, "expert", "context"),
+      ("tokamax_sequence_on_two_axes", "tokamax", {"context": 2, "expert": 2}, None, ("context", "expert")),
+  )
+  def test_matches_dense_reference(self, kind, ici, batch_ax, length_ax):
+    if jax.device_count() < 4:
+      self.skipTest(f"Requires >= 4 devices; got {jax.device_count()}.")
+    x, weights, indices, _ = _make_routing_inputs(batch=4, length=8, embed=16, num_experts=4, top_k=2)
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=4, embed=16, mlp=12)
+    cotangent = jax.random.normal(jax.random.key(7), x.shape, dtype=x.dtype)
+
+    def step(executor, x_in, w0, w1, w_out):
+      return jnp.sum(executor(x_in, weights, indices, w0, w1, w_out) * cotangent)
+
+    ref_loss, ref_grads = jax.value_and_grad(functools.partial(step, m3_moe.MoEExecutor("dense")), argnums=(0, 1, 2, 3))(
+        x, wi_0, wi_1, wo
+    )
+    mesh = create_mesh(ici=ici, devices=jax.devices()[:4])
+    executor = m3_moe.MoEExecutor(kind, batch=batch_ax, length=length_ax, experts="expert", mlp="tensor")
+    with jax.set_mesh(mesh):
+      x_d = jax.device_put(x, NamedSharding(mesh, P(batch_ax, length_ax, None)))
+      loss, grads = jax.jit(jax.value_and_grad(functools.partial(step, executor), argnums=(0, 1, 2, 3)))(
+          x_d, wi_0, wi_1, wo
+      )
+      jaxpr = str(jax.make_jaxpr(functools.partial(step, executor))(x_d, wi_0, wi_1, wo))
+    np.testing.assert_allclose(loss, ref_loss, rtol=1e-4, atol=1e-4)
+    for got, ref in zip(grads, ref_grads):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(ref), rtol=1e-4, atol=1e-4)
+    # The shard_map keeps the sequence axis: per-shard tokens are `length / shards` long.
+    length_shards = math.prod(mesh.shape[ax] for ax in ((length_ax,) if isinstance(length_ax, str) else length_ax))
+    batch_shards = mesh.shape[batch_ax] if batch_ax else 1
+    self.assertIn(f"f32[{4 // batch_shards},{8 // length_shards},16]", jaxpr)
 
 
 class MockedTPULoweringContractTest(parameterized.TestCase):
@@ -1125,16 +1176,19 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
     _, state_specs, _ = maxtext_utils.get_abstract_state_nnx(
         cfg, mesh, lambda: init_state_fn(use_mask=False), is_training=True
     )
-    expected_default = ("fsdp", "expert") if ici["fsdp"] > 1 else "expert"
+    # Every Qwen3.8 parameter carries its own annotation, so the dense weights keep the strategy's
+    # placement rather than the shape heuristic that `get_abstract_state_nnx` applies to bare ones.
+    dense = ("fsdp", "fsdp_transpose", "expert")
+    tp = ("tensor", "tensor_sequence")
 
     gu_spec = state_specs.model.decoder.cycles.gdn_0.mlp.experts.gate_up_proj.get_value()
     dn_spec = state_specs.model.decoder.cycles.gdn_0.mlp.experts.down_proj.get_value()
     emb_spec = state_specs.model.decoder.token_embedder.embedding.get_value()
     se_spec = state_specs.model.decoder.cycles.gdn_0.mlp.shared_expert.gate_proj.kernel.get_value()
-    self.assertEqual(gu_spec, P(None, "expert", ("fsdp", "fsdp_transpose"), None, ("tensor", "tensor_sequence")))
-    self.assertEqual(dn_spec, P(None, "expert", ("tensor", "tensor_sequence"), ("fsdp", "fsdp_transpose")))
-    self.assertEqual(emb_spec, P(expected_default, None))
-    self.assertEqual(se_spec, P(None, expected_default, None))
+    self.assertEqual(gu_spec, P(None, "expert", ("fsdp", "fsdp_transpose"), None, tp))
+    self.assertEqual(dn_spec, P(None, "expert", tp, ("fsdp", "fsdp_transpose")))
+    self.assertEqual(emb_spec, P(tp, dense))
+    self.assertEqual(se_spec, P(None, dense, tp))
 
     opt_mu = state_specs.optimizer.opt_state[0].mu
     self.assertEqual(opt_mu.decoder.cycles.gdn_0.mlp.experts.gate_up_proj.get_value(), gu_spec)
@@ -1197,6 +1251,10 @@ class ValidationErrorTest(parameterized.TestCase):
           m3_moe.MoEExecutor("tokamax", batch="expert", experts="expert", mlp="tensor")(
               x, weights, indices, wi_0, wi_1, wo
           )
+        # Length 3 does not divide over 2 sequence shards (expert=2).
+        x3, w3, i3, _ = _make_routing_inputs(batch=2, length=3, embed=8, num_experts=4, top_k=2)
+        with self.assertRaisesRegex(ValueError, "Length 3 does not divide"):
+          m3_moe.MoEExecutor("tokamax", length="expert", experts="expert", mlp="tensor")(x3, w3, i3, wi_0, wi_1, wo)
         # num_experts=3 not divisible by ep_size=2.
         w0_3, w1_3, wo_3 = _make_expert_weights(num_experts=3, embed=8, mlp=8)
         x4 = jnp.zeros((4, 4, 8), dtype=jnp.float32)

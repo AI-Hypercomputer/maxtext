@@ -345,6 +345,7 @@ class MoEExecutor:
 
   kind: ExecutorKind = "dense"
   batch: MeshAxes = None
+  length: MeshAxes = None
   experts: MeshAxes = None
   mlp: MeshAxes = None
   capacity_factor: float = -1.0
@@ -493,6 +494,7 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
   return MoEExecutor(
       kind=kind,
       batch=tokens_spec[0],
+      length=tokens_spec[1],
       experts=wi_spec[0],
       mlp=wi_spec[2],
       capacity_factor=cap,
@@ -879,10 +881,12 @@ def _sharded_grouped(
   is_tpu = kernels.is_tpu_mesh(mesh)
 
   batch_ax = kernels.resolve_mesh_axes(mesh, executor.batch)
+  length_ax = kernels.resolve_mesh_axes(mesh, executor.length)
   experts_ax = kernels.resolve_mesh_axes(mesh, executor.experts)
   mlp_ax = kernels.resolve_mesh_axes(mesh, executor.mlp)
 
   batch_shards = kernels.mesh_axis_size(mesh, batch_ax)
+  length_shards = kernels.mesh_axis_size(mesh, length_ax)
   ep_size = kernels.mesh_axis_size(mesh, experts_ax)
   tp_size = kernels.mesh_axis_size(mesh, mlp_ax)
   ep_axes = kernels.mesh_axis_names(experts_ax)
@@ -892,6 +896,8 @@ def _sharded_grouped(
     raise NotImplementedError(f"Expert sharding supports at most one mesh axis; got {ep_axes}.")
   if x.shape[0] % batch_shards != 0:
     raise ValueError(f"Batch {x.shape[0]} does not divide over the {batch_shards} token shards of {batch_ax!r}.")
+  if x.shape[1] % length_shards != 0:
+    raise ValueError(f"Length {x.shape[1]} does not divide over the {length_shards} token shards of {length_ax!r}.")
   if num_experts % ep_size != 0:
     raise ValueError(
         f"num_experts ({num_experts}) must be divisible by expert parallelism size ({ep_size}) on {experts_ax!r}."
@@ -926,7 +932,9 @@ def _sharded_grouped(
   if mlp_dim % tp_size != 0:
     raise ValueError(f"Expert MLP dim ({mlp_dim}) must be divisible by tensor parallelism size ({tp_size}).")
 
-  tokens_spec = P(batch_ax, None, None)
+  # Tokens stay on the shard that holds them: a sequence axis left out here would be gathered at the boundary and
+  # every shard along it would run the experts on the whole sequence.
+  tokens_spec = P(batch_ax, length_ax, None)
   matmul_fn = functools.partial(grouped_matmul, backend=executor.kind, is_tpu=is_tpu)
   e_loc = num_experts // ep_size
   m_tp = mlp_dim // tp_size

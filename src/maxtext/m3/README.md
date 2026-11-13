@@ -122,7 +122,7 @@ path regexes or heuristics, and nothing re-shards a parameter after it is create
 | Concern | Where | Config |
 | :---- | :---- | :---- |
 | Which logical axis each tensor dimension carries | the model, as `*_metadata={"out_sharding": s(name, axes)}` on every parameter and `s.constrain(x, name, axes)` on key activations | — |
-| Which mesh axis a logical axis lands on | one strategy class per parallelism scheme: `core.sharding.DefaultSharding` (`fsdp` × `fsdp_transpose` × `expert` over `embed`; `tensor` and `tensor_sequence` over `heads`, `kv_heads`, `mlp`, `vocab`; `context` over `length`; `context` and `tensor_sequence` over `norm_length`; batch over `data` × `fsdp` × `fsdp_transpose` × `expert`) | — |
+| Which mesh axis a logical axis lands on | one strategy class per parallelism scheme: `core.sharding.DefaultSharding` (`fsdp` × `fsdp_transpose` × `expert` over `embed`, `conv_channels`, and `ngram_vocab`; `tensor` and `tensor_sequence` over `heads`, `kv_heads`, `mlp`, `vocab`; `context` over `length`; `context` and `tensor_sequence` over `norm_length`; batch over `data` × `fsdp` × `fsdp_transpose` × `expert`; with `expert_context_parallel` the `expert` axis moves from the batch to `length` and off `conv_channels`) | `expert_context_parallel` (`false` by default) |
 | Mesh shape | `core.sharding.mesh_from_config` → `create_mesh` | `ici_{data,pipeline,fsdp,fsdp_transpose,context,tensor,tensor_sequence,expert}_parallelism`, `dcn_*`, `custom_mesh` (`hybrid_ring_64x4`, `hybrid_ring_32x8`), `allow_split_physical_axes`, `optimize_mesh_for_tpu_v6e` |
 | Auto vs explicit sharding | `create_mesh(explicit=)`; `constrain` and `out_sharding` dispatch on the mesh in scope | `shard_mode` (`auto`, the default, or `explicit`) |
 | Input batch layout | the driver asks the strategy (`train/loop.py::batch_spec`) | — |
@@ -151,10 +151,19 @@ parallelism settings the mesh does not carry (`sequence`, `context_usp_ulysses`,
 `context_autoregressive`, `autoregressive`, `diloco`, `custom_mesh_and_rule*`)
 are refused with the field named rather than ignored.
 
-Today `qwen3` is fully annotated; Qwen3-VL inherits the decoder, MLP and embedding annotations but
-its hand-rolled attention and vision tower are not yet sharded; GLM-5.3-Flash and Wan carry their
-own `Sharding` subclasses and mesh construction, which should converge on `DefaultSharding` and
-`mesh_from_config`.
+Today `qwen3` and `qwen3_8_flash_next` are fully annotated; Qwen3-VL inherits the decoder, MLP and
+embedding annotations but its hand-rolled attention and vision tower are not yet sharded;
+GLM-5.3-Flash and Wan carry their own `Sharding` subclasses and mesh construction, which should
+converge on `DefaultSharding` and `mesh_from_config`.
+
+`qwen3_8_flash_next` also keeps the sequence sharded on the mesh axes the strategy gives `length`:
+`context`, and `expert` under `expert_context_parallel`. Activations are constrained on batch and
+sequence, the routed experts run per token shard (`MoEExecutor.length`), Gated DeltaNet composes its
+recurrent state across sequence shards with `kernels/attention/gdn_cp.py` when every shard holds
+whole chunks, and the QSA Splash kernel keeps queries on their shard while keys and values are
+gathered. A sequence the shards cannot divide falls back to the gathered form. The dense QSA path,
+taken beyond the index budget, is left to the partitioner. `ici_context_parallelism > 1` needs
+`context_parallel_load_balance=false`, which the config check enforces for Gated DeltaNet models.
 
 ## Invariants for the training-engine and RL path
 
