@@ -143,6 +143,15 @@ class CompressedTokenizer:
     return output_ids
 
 
+def _mulmod_u32(a: Array, b: Array, p: Array) -> Array:
+  """Computes (a * b) % p for uint32 a, b < p < 2**24 without overflowing uint32."""
+  b2, b1, b0 = b >> 16, (b >> 8) & 0xFF, b & 0xFF
+  acc = (a * b2) % p
+  acc = ((acc << 8) % p + (a * b1) % p) % p
+  acc = ((acc << 8) % p + (a * b0) % p) % p
+  return acc
+
+
 class NgramHashMapping:
   """
   Deterministically maps token indices to n-gram hash indices for embedding lookups.
@@ -194,12 +203,27 @@ class NgramHashMapping:
     # Pre-calculate odd multipliers for hashing: {layer_id: multipliers}
     # Store as numpy arrays, not JAX arrays (see `CompressedTokenizer.lookup_table`)
     self.layer_multipliers = {
-        k: np.asarray(v, dtype=np.int32) for k, v in self._calculate_multipliers_across_layers(seed).items()
+        k: np.asarray(v, dtype=np.int64) for k, v in self._calculate_multipliers_across_layers(seed).items()
     }
 
     # Pre-calculate unique prime vocab sizes for every head
     # Structure: {layer_id: [[2gram_head1, ..., 2gram_headH], ..., [Ngram_head1, ..., Ngram_headH]]}
     self.vocab_size_across_layers = self._calculate_vocab_size_across_layers()
+
+    # Pre-compute (prod_hi, prod_lo) uint32 limbs of (token_id * multiplier) and (2**32 % prime)
+    # on host as NumPy arrays so 64-bit multiplicative-XOR hashing stays exact under jax_enable_x64=False.
+    ids = np.arange(self.tokenizer_vocab_size, dtype=np.uint64)
+    self.layer_prod_hi = {}
+    self.layer_prod_lo = {}
+    self.layer_pow32_mod_p = {}
+    for layer_id in self.layer_ids:
+      products = ids[None, :] * self.layer_multipliers[layer_id].astype(np.uint64)[:, None]
+      self.layer_prod_hi[layer_id] = (products >> np.uint64(32)).astype(np.uint32)
+      self.layer_prod_lo[layer_id] = (products & np.uint64(0xFFFFFFFF)).astype(np.uint32)
+      self.layer_pow32_mod_p[layer_id] = [
+          (np.int64(2**32) % np.asarray(ngram_primes, dtype=np.int64)).astype(np.uint32)
+          for ngram_primes in self.vocab_size_across_layers[layer_id]
+      ]
 
   def _calculate_multipliers_across_layers(self, seed: int) -> dict[int, np.ndarray]:
     """
@@ -208,8 +232,8 @@ class NgramHashMapping:
     Returns:
       A dictionary mapping layer_id to a list of `max_ngram_size` multipliers.
     """
-    # Pre-calculate bounds for random generation using int32 to avoid overflow
-    max_int = np.iinfo(np.int32).max
+    # Pre-calculate bounds for random generation using int64 to match reference
+    max_int = np.iinfo(np.int64).max
     m_max = int(max_int // self.tokenizer_vocab_size)
     half_bound = max(1, m_max // 2)
     # Hard-code prime number to align with reference
@@ -221,7 +245,7 @@ class NgramHashMapping:
       layer_seed = int(seed + LAYER_PRIME_OFFSET * int(layer_id))
       np_rng = np.random.default_rng(layer_seed)
       # Generate random odd integers
-      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int32)
+      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
       multipliers = random_value * 2 + 1
       layer_multipliers[layer_id] = multipliers
     return layer_multipliers
@@ -296,31 +320,36 @@ class NgramHashMapping:
         shifted_x = jnp.concatenate([padding, x[:, :-k]], axis=1)
         shifted_inputs.append(shifted_x)
 
-    # 2. Retrieve layer-specific hash multipliers
-    multipliers = self.layer_multipliers[layer_id]
+    # 2. Retrieve layer-specific (prod_hi, prod_lo) uint32 limbs and prime moduli
+    prod_hi = jnp.asarray(self.layer_prod_hi[layer_id])
+    prod_lo = jnp.asarray(self.layer_prod_lo[layer_id])
+    vocab_sizes = self.vocab_size_across_layers[layer_id]
+    pow32_mod_p = self.layer_pow32_mod_p[layer_id]
 
-    # 3. Compute Hashes: multiplicative bitwise XOR
+    # 3. Compute Hashes: multiplicative bitwise XOR via (hi, lo) uint32 limbs
     # Implements hash: H_n = (shift_0 * m_0) ^ ... ^ (shift_k * m_k)
     # e.g., (The * m_0) ^ (PAD * m_1) ^ (PAD * m_2)
     #       (cat * m_0) ^ (The * m_1) ^ (PAD * m_2)
     #       (sat * m_0) ^ (cat * m_1) ^ (The * m_2)
     all_hashes = []
     # Initialize with unigrams, shape: [B, S]
-    ngram_hash = shifted_inputs[0] * multipliers[0]
-    # Pre-fetch vocab sizes for modulo
-    vocab_sizes = self.vocab_size_across_layers[layer_id]
+    ngram_hash_hi = prod_hi[0][shifted_inputs[0]]
+    ngram_hash_lo = prod_lo[0][shifted_inputs[0]]
 
     for n in range(2, self.max_ngram_size + 1):
       # Update hash with next history token
-      ngram_hash = jnp.bitwise_xor(ngram_hash, shifted_inputs[n - 1] * multipliers[n - 1])
+      ngram_hash_hi = jnp.bitwise_xor(ngram_hash_hi, prod_hi[n - 1][shifted_inputs[n - 1]])
+      ngram_hash_lo = jnp.bitwise_xor(ngram_hash_lo, prod_lo[n - 1][shifted_inputs[n - 1]])
 
       # Retrieve prime vocab sizes for all heads of this n-gram order
-      vocab_sizes_for_this_gram = vocab_sizes[n - 2]
-      mods = jnp.array(vocab_sizes_for_this_gram, dtype=jnp.int32)
+      mods = jnp.asarray(vocab_sizes[n - 2], dtype=jnp.uint32)
+      pow32_mods = jnp.asarray(pow32_mod_p[n - 2], dtype=jnp.uint32)
 
-      # Broadcast Modulo: Map hash to valid table indices
+      # Limb-wise Modulo: ((hi % p) * (2**32 % p) + (lo % p)) % p
       # [B, S, 1] % [H] -> [B, S, H]
-      head_hashes = ngram_hash[..., None] % mods
+      r_hi = ngram_hash_hi[..., None] % mods
+      r_lo = ngram_hash_lo[..., None] % mods
+      head_hashes = ((_mulmod_u32(r_hi, pow32_mods, mods) + r_lo) % mods).astype(jnp.int32)
       all_hashes.append(head_hashes)
 
     # Concatenate all heads: [B, S, H_total] where H_total = H * num_ngram_orders
