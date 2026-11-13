@@ -64,6 +64,7 @@ class SyntheticRoutingCfg:
   synthetic_routing_row_taus: str = ""
   synthetic_routing_row_len: int = 0
   synthetic_routing_profile: str = ""
+  synthetic_routing_overhead_control: bool = False
 
   def __post_init__(self):
     if self.synthetic_routing not in VALID_MODES:
@@ -86,7 +87,17 @@ _CFG_FIELD_TYPES: dict[str, type[Any]] = {
     "synthetic_routing_row_taus": str,
     "synthetic_routing_row_len": int,
     "synthetic_routing_profile": str,
+    "synthetic_routing_overhead_control": bool,
 }
+
+
+def _parse_bool(raw_val: str) -> bool:
+  lowered = raw_val.strip().lower()
+  if lowered in ("true", "1", "yes"):
+    return True
+  if lowered in ("false", "0", "no"):
+    return False
+  raise ValueError(f"Expected boolean for synthetic routing option, got {raw_val!r}")
 
 
 def parse_synthetic_routing_args(argv: Sequence[str]) -> tuple[SyntheticRoutingCfg, list[str]]:
@@ -113,6 +124,8 @@ def parse_synthetic_routing_args(argv: Sequence[str]) -> tuple[SyntheticRoutingC
       caster = _CFG_FIELD_TYPES[key]
       if key == "synthetic_routing" and raw_val.strip().lower() in ("none", "null", ""):
         parsed[key] = "none"
+      elif caster is bool:
+        parsed[key] = _parse_bool(raw_val)
       else:
         parsed[key] = caster(raw_val)
     else:

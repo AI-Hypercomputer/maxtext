@@ -25,8 +25,11 @@ from benchmarks.moe_synthetic_routing import synthetic_routing
 from benchmarks.moe_synthetic_routing import train as bench_train
 import jax
 import jax.numpy as jnp
+from flax import nnx
 from maxtext.common import data_loader
 from maxtext.configs import pyconfig
+from maxtext.layers import attentions
+from maxtext.layers import moe
 from maxtext.utils import maxtext_utils
 import numpy as np
 from tests.utils.test_helpers import get_test_config_path
@@ -256,10 +259,126 @@ class SyntheticRoutingWrapperTest(unittest.TestCase):
     self.assertIs(data_loader.DataLoader.load_next_batch, orig_lnb)
     self.assertNotIn("forced_routed_experts", maxtext_utils.get_shaped_batch(cfg, batch_sharding=sharding))
 
+  def test_forced_routing_reaches_routed_moe_and_changes_group_sizes(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="moe_reach_test",
+        enable_checkpointing=False,
+        per_device_batch_size=2,
+        max_target_length=32,
+        base_num_decoder_layers=1,
+        num_experts=8,
+        num_experts_per_tok=2,
+        base_emb_dim=32,
+        base_mlp_dim=64,
+        base_moe_mlp_dim=64,
+        sparse_matmul=True,
+    )
+    dev = jax.devices()[0]
+    mesh = jax.sharding.Mesh(np.array([dev]), ("data",))
+    sharding = jax.sharding.SingleDeviceSharding(dev)
+    routed_moe = moe.RoutedMoE(
+        config=cfg,
+        num_experts=8,
+        num_experts_per_tok=2,
+        mesh=mesh,
+        kernel_init=attentions.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("exp", "embed_moe", "mlp_moe"),
+        rngs=nnx.Rngs(params=0, dropout=1),
+        intermediate_dim=64,
+    )
+    bsz = cfg.global_batch_size_to_load
+    seq = 32
+    x_in = jnp.ones((bsz, seq, 32), dtype=jnp.float32)
+    # Deliberately bias router logits toward expert 0 so only forced_routed_experts can produce our target counts.
+    biased_logits = jnp.zeros((bsz, seq, 8), dtype=jnp.float32).at[:, :, 0].set(100.0)
+
+    def run_mode(syn_cfg):
+      class _DummyLoader:
+        pass
+
+      loader = _DummyLoader()
+      loader.config = cfg
+      loader.goodput_recorder = None
+      loader.data_iterator = iter([{"inputs": np.zeros((bsz, seq), np.int32), "targets": np.zeros((bsz, seq), np.int32)}])
+      loader.last_batch = None
+      loader.input_data_shardings = sharding
+      loader.update_data_iterator = lambda: None
+      loader.check_example_batch = lambda: None
+      loader.load_next_batch_pre_sharding = types.MethodType(data_loader.DataLoader.load_next_batch_pre_sharding, loader)
+      with bench_train.install_synthetic_routing(syn_cfg):
+        batch = data_loader.DataLoader.load_next_batch(loader)
+      forced_l0 = batch["forced_routed_experts"][:, :, 0, :]
+      _, _, _, group_sizes, _, _, _, _, _, _, _, _ = routed_moe.permute(
+          x_in,
+          biased_logits,
+          biased_logits,
+          use_custom_sort_vjp=False,
+          rngs=nnx.Rngs(params=0),
+          forced_routed_experts=forced_l0,
+          return_expert_counts=True,
+      )
+      return np.asarray(forced_l0), np.asarray(group_sizes)
+
+    forced_bal, gs_bal = run_mode(
+        synthetic_routing.SyntheticRoutingCfg(synthetic_routing="balanced", synthetic_routing_pool_size=1)
+    )
+    np.testing.assert_array_equal(gs_bal, np.bincount(forced_bal.ravel(), minlength=8))
+    self.assertTrue(np.all(gs_bal == (bsz * seq * 2) // 8))
+
+    forced_skew, gs_skew = run_mode(
+        synthetic_routing.SyntheticRoutingCfg(
+            synthetic_routing="lognormal",
+            synthetic_routing_sigma=2.5,
+            synthetic_routing_pool_size=1,
+            synthetic_routing_seed=0,
+        )
+    )
+    np.testing.assert_array_equal(gs_skew, np.bincount(forced_skew.ravel(), minlength=8))
+    self.assertGreaterEqual(float(gs_skew.max()) / float(gs_skew.mean()), 2.0)
+
+  def test_overhead_control_hook_zeroes_replica_routing_and_restores(self):
+    syn_cfg, rem = synthetic_routing.parse_synthetic_routing_args(
+        ["train.py", "base.yml", "--synthetic_routing_overhead_control=true"]
+    )
+    self.assertTrue(syn_cfg.synthetic_routing_overhead_control)
+    self.assertFalse(syn_cfg.enabled)
+    self.assertEqual(rem, ["train.py", "base.yml"])
+    syn_off, _ = synthetic_routing.parse_synthetic_routing_args(["train.py", "synthetic_routing_overhead_control=false"])
+    self.assertFalse(syn_off.synthetic_routing_overhead_control)
+    with self.assertRaises(ValueError):
+      synthetic_routing.parse_synthetic_routing_args(["train.py", "--synthetic_routing_overhead_control=maybe"])
+
+    fake_mrp = types.ModuleType("maxtext.layers.moe_replica_planner")
+
+    def fake_identity_route_table(num_ep, num_experts, num_replicas):
+      return ("identity", num_ep, num_experts, num_replicas)
+
+    def orig_plan_iter(counts_src, num_ep, num_replicas, *_args, **_kwargs):
+      plan = types.SimpleNamespace()
+      plan.route_table = ("replicated", num_ep, counts_src.shape[1], num_replicas)
+      plan.rep_home = "kept_rep_home"
+      return plan
+
+    fake_mrp.identity_route_table = fake_identity_route_table
+    fake_mrp.compute_plan_iter = orig_plan_iter
+    import maxtext.layers as maxtext_layers  # pylint: disable=import-outside-toplevel
+
+    with mock.patch.dict("sys.modules", {"maxtext.layers.moe_replica_planner": fake_mrp}):
+      with mock.patch.object(maxtext_layers, "moe_replica_planner", fake_mrp, create=True):
+        with bench_train.install_synthetic_routing(syn_cfg):
+          plan = fake_mrp.compute_plan_iter(np.zeros((4, 16), np.int32), 4, 2)
+          self.assertEqual(plan.route_table, ("identity", 4, 16, 2))
+          self.assertEqual(plan.rep_home, "kept_rep_home")
+        self.assertIs(fake_mrp.compute_plan_iter, orig_plan_iter)
+
   def test_main_delegates_with_stripped_argv(self):
     with mock.patch.object(bench_train.pre_train, "main") as mock_pre_train_main:
       bench_train.main(["train.py", "base.yml", "steps=2", "--synthetic_routing=balanced"])
       mock_pre_train_main.assert_called_once_with(["train.py", "base.yml", "steps=2"])
+    with mock.patch.object(bench_train.app, "run") as mock_app_run:
+      bench_train.main(["train.py", "base.yml", "--synthetic_routing=none"], use_absl_app=True)
+      mock_app_run.assert_called_once_with(bench_train.pre_train.main, argv=["train.py", "base.yml"])
 
 
 if __name__ == "__main__":
