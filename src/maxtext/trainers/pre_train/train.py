@@ -597,6 +597,30 @@ def _apply_moe_bias_updates_by_path(
       bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(update)
 
 
+def _filter_shardings_for_tree(shardings_tree, target_tree):
+  """Filters `shardings_tree` to match the keys and Variable types of `target_tree`."""
+
+  def _is_sharding_leaf(x):
+    return isinstance(x, (nnx.Variable, NamedSharding, jax.sharding.Sharding))
+
+  lookup = {
+      path: (s.get_raw_value() if isinstance(s, nnx.Variable) else s)
+      for path, s in jax.tree_util.tree_leaves_with_path(shardings_tree, is_leaf=_is_sharding_leaf)
+  }
+
+  def _match(path, leaf):
+    ns = lookup.get(path, jax.memory.Space.Device)
+    if isinstance(leaf, nnx.Variable):
+      return leaf.replace(ns)
+    return ns
+
+  return jax.tree_util.tree_map_with_path(
+      _match,
+      target_tree,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
+  )
+
+
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
   """Training step for the NNX model.
 
@@ -619,15 +643,41 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   input_state_leaves = jax.tree_util.tree_leaves(state) if config.moe_dropless_fallback == "step" else None
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
   loss_model, loss_params, loss_rng = state.model, None, None
+  if params_shardings is None and (
+      config.parameter_memory_host_offload or config.gradient_accumulation_steps > 1 or config.shard_optimizer_over_data
+  ):
+    params_shardings, _ = sharding.maybe_update_params_sharding_with_opt(config, state_mesh_shardings)
 
   # --- Gradient computation ---
   if config.gradient_accumulation_steps > 1:
+    ga_params_shardings = params_shardings
+    if config.parameter_memory_host_offload:
+      enable_lora = getattr(getattr(config, "lora", None), "enable_lora", False)
+      train_param_type = getattr(nnx, "LoRAParam", nnx.Param) if enable_lora else nnx.Param
+      nnx.pop(state.model, nnx.Intermediate)
+      _, curr_params, frozen_and_rest = nnx.split(state.model, train_param_type, ...)
+      ga_params_shardings = jax.tree_util.tree_map_with_path(
+          maxtext_utils_nnx.move_memory_to_device,
+          params_shardings,
+          is_leaf=lambda x: isinstance(x, NamedSharding),
+      )
+      curr_param_shardings = (
+          _filter_shardings_for_tree(ga_params_shardings, curr_params) if enable_lora else ga_params_shardings
+      )
+      curr_params = jax.device_put(curr_params, curr_param_shardings)
+      nnx.update(state.model, curr_params)
+      if enable_lora:
+        _, frozen_params, _ = nnx.split(frozen_and_rest, nnx.Param, ...)
+        if jax.tree.leaves(frozen_params, is_leaf=lambda x: isinstance(x, nnx.Variable)):
+          frozen_shardings = _filter_shardings_for_tree(ga_params_shardings, frozen_params)
+          nnx.update(state.model, jax.device_put(frozen_params, frozen_shardings))
+        ga_params_shardings = curr_param_shardings
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
         loss_fn,
         config,
         loss_model,
         loss_params,
-        params_shardings,
+        ga_params_shardings,
         data,
         loss_rng,
     )
@@ -651,13 +701,22 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       # operands share the same memory space (XLA on GPU requires this).
       # Using params_shardings (Param-only) avoids Shardy rank mismatches that
       # occur when applying PartitionSpec() (rank-0 in SDY) to rank-1 RNG key tensors.
+      enable_lora = getattr(getattr(config, "lora", None), "enable_lora", False)
       device_param_shardings = jax.tree_util.tree_map_with_path(
           maxtext_utils_nnx.move_memory_to_device,
           params_shardings,
           is_leaf=lambda x: isinstance(x, NamedSharding),
       )
-      curr_params = jax.device_put(curr_params, device_param_shardings)
+      curr_param_shardings = (
+          _filter_shardings_for_tree(device_param_shardings, curr_params) if enable_lora else device_param_shardings
+      )
+      curr_params = jax.device_put(curr_params, curr_param_shardings)
       nnx.update(state.model, curr_params)  # ensure state.model has device params for optimizer update
+      if enable_lora:
+        _, frozen_params, non_param_rest_init = nnx.split(rest, nnx.Param, ...)
+        if jax.tree.leaves(frozen_params, is_leaf=lambda x: isinstance(x, nnx.Variable)):
+          frozen_shardings = _filter_shardings_for_tree(device_param_shardings, frozen_params)
+          rest = nnx.State.merge(jax.device_put(frozen_params, frozen_shardings), non_param_rest_init)
     if config.shard_optimizer_over_data:
       param_sharding_lookup = {}
       for p, s in jax.tree_util.tree_leaves_with_path(
@@ -700,10 +759,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       raw_grads,
   )
   if config.parameter_memory_host_offload:
-    raw_grads = jax.device_put(
-        raw_grads,
-        max_utils.with_memory_kind(params_shardings, "device"),
-    )
+    grad_device_shardings = max_utils.with_memory_kind(params_shardings, "device")
+    if getattr(getattr(config, "lora", None), "enable_lora", False):
+      grad_device_shardings = _filter_shardings_for_tree(grad_device_shardings, raw_grads)
+    raw_grads = jax.device_put(raw_grads, grad_device_shardings)
 
   # Extract aux fields into locals
   intermediate_outputs = aux["intermediate_outputs"]
