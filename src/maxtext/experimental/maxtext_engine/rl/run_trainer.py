@@ -678,15 +678,17 @@ def main() -> int:
       # MaxText flag log_moe_drops=true.
       worker.fwd_bwd(request=req)
       times.append(time.monotonic() - tm)
-    worker.update()
+    update_result = worker.update()
     # Drain the step's device work before reading the clock, as
     # maxtext_engine/train.py does.
     throttler = getattr(trainer, "_throttler", None)
     if throttler is not None:
       throttler.wait_for_all()
-      raw_metrics = worker.get_metrics()
+    if isinstance(update_result, tuple) and len(update_result) == 2:
+      raw_metrics = update_result[1]
     else:
       raw_metrics = worker.get_metrics()
+    if throttler is None:
       jax.block_until_ready(raw_metrics)
     dt = time.monotonic() - t0
     logging.info(
