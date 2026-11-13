@@ -22,11 +22,14 @@ import typing
 
 from flax import nnx
 import jax
+from jax.ad_checkpoint import checkpoint_name
+from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.typing import DTypeLike
 from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.configs import glm5_3_flash_config as glm5_config
+from maxtext.m3.infra import remat as m3_remat
 import optax
 
 
@@ -306,9 +309,9 @@ class Glm5KdaAttention(nnx.Module):
       hidden_states = jnp.where(mask, hidden_states, 0)
 
     # Q, K, V projections followed by causal depthwise conv1d + SiLU
-    q = self.q_conv1d(self.q_proj(hidden_states))
-    k = self.k_conv1d(self.k_proj(hidden_states))
-    v = self.v_conv1d(self.v_proj(hidden_states))
+    q = self.q_conv1d(checkpoint_name(self.q_proj(hidden_states), "query_proj"))
+    k = self.k_conv1d(checkpoint_name(self.k_proj(hidden_states), "key_proj"))
+    v = self.v_conv1d(checkpoint_name(self.v_proj(hidden_states), "value_proj"))
 
     # Low-rank forget gate & beta
     f = self.f_b_proj(self.f_a_proj(hidden_states))
@@ -339,21 +342,25 @@ class Glm5KdaAttention(nnx.Module):
     # pylint: enable=g-import-not-at-top,import-outside-toplevel
 
     impl = cast(tokamax_kda.Implementation, self.kda_implementation)
+    abs_mesh = jax.sharding.get_abstract_mesh()
+    mesh_platform = getattr(getattr(abs_mesh, "abstract_device", None), "platform", "")
+    is_tpu_cross_compile = not abs_mesh.empty and mesh_platform == "tpu" and jax.default_backend() != "tpu"
 
     def _run_kda(q_arg, k_arg, v_arg, f_arg, beta_arg, a_log_arg, dt_bias_arg):
-      out, _ = tokamax_kda.kimi_delta_attention(
-          query=q_arg,
-          key=k_arg,
-          value=v_arg,
-          gate=f_arg,
-          beta=beta_arg,
-          a_log=a_log_arg,
-          delta_time_bias=dt_bias_arg,
-          use_gate_in_kernel=True,
-          lower_bound=self.config.linear_lower_bound,
-          use_qk_l2norm=False,
-          implementation=impl,
-      )
+      with m3_remat.maybe_tokamax_cross_compile(is_tpu_cross_compile):
+        out, _ = tokamax_kda.kimi_delta_attention(
+            query=q_arg,
+            key=k_arg,
+            value=v_arg,
+            gate=f_arg,
+            beta=beta_arg,
+            a_log=a_log_arg,
+            delta_time_bias=dt_bias_arg,
+            use_gate_in_kernel=True,
+            lower_bound=self.config.linear_lower_bound,
+            use_qk_l2norm=False,
+            implementation=impl,
+        )
       return out
 
     if self.sharding is not None and not jax.sharding.get_abstract_mesh().empty:
@@ -392,7 +399,7 @@ class Glm5KdaAttention(nnx.Module):
     g_low = self.g_a_proj(hidden_states)
     g = self.g_b_proj(g_low).reshape(head_shape)
     normed = self.o_norm(attn_out, g)
-    output = self.o_proj(normed.reshape(b, s, self.qkv_dim))
+    output = checkpoint_name(self.o_proj(normed.reshape(b, s, self.qkv_dim)), "out_proj")
 
     if mask is not None:
       output = jnp.where(mask, output, 0)
@@ -780,12 +787,12 @@ class Glm5DsaMlaAttention(nnx.Module):
 
     q_resid = self.q_a_layernorm(self.q_a_proj(hidden_states))
     q_heads, qk_dim = self.num_heads, self.qk_nope_head_dim
-    q = self.q_b_proj(q_resid).reshape(b, s, q_heads, qk_dim)
+    q = checkpoint_name(self.q_b_proj(q_resid), "query_proj").reshape(b, s, q_heads, qk_dim)
     q = q.transpose(0, 2, 1, 3)
 
     kv_compressed = self.kv_a_proj_with_mqa(hidden_states)
     kv_dim = qk_dim + self.v_head_dim
-    kv = self.kv_b_proj(self.kv_a_layernorm(kv_compressed))
+    kv = checkpoint_name(self.kv_b_proj(self.kv_a_layernorm(kv_compressed)), "kv_proj")
     kv = kv.reshape(b, s, q_heads, kv_dim).transpose(0, 2, 1, 3)
     k, v = jnp.split(kv, [qk_dim], axis=-1)
 
@@ -811,8 +818,8 @@ class Glm5DsaMlaAttention(nnx.Module):
           "Unsupported Glm5Config.dsa_attention_implementation:" f" {self.config.dsa_attention_implementation!r}."
       )
 
-    out = out.transpose(0, 2, 1, 3).reshape(b, s, -1)
-    out = self.o_proj(out)
+    out = checkpoint_name(out.transpose(0, 2, 1, 3).reshape(b, s, -1), "context")
+    out = checkpoint_name(self.o_proj(out), "out_proj")
     if self.sharding:
       axes = ("batch", "length", "embed")
       out = self.sharding.constrain(out, "mla_out", axes)
@@ -855,9 +862,9 @@ class Glm5MLP(nnx.Module):
     self.down_proj = _lin(inter, h, "down_proj", ("mlp", "embed"))
 
   def __call__(self, x: jax.Array) -> jax.Array:
-    gate = jnp.minimum(self.gate_proj(x), self.swiglu_limit)
-    up = jnp.clip(self.up_proj(x), -self.swiglu_limit, self.swiglu_limit)
-    return self.down_proj(jax.nn.silu(gate) * up)
+    gate = jnp.minimum(checkpoint_name(self.gate_proj(x), "mlpwi_0"), self.swiglu_limit)
+    up = jnp.clip(checkpoint_name(self.up_proj(x), "mlpwi_1"), -self.swiglu_limit, self.swiglu_limit)
+    return checkpoint_name(self.down_proj(jax.nn.silu(gate) * up), "mlpwo")
 
 
 class Glm5TopkRouter(nnx.Module):
@@ -1047,7 +1054,7 @@ class Glm5Experts(nnx.Module):
     )
     n = hidden_states.shape[0]
     weighted = (sorted_out[inv_perm].astype(jnp.float32) * flat_w).reshape(n, self.top_k, -1)
-    return jnp.sum(weighted, axis=1).astype(dt)
+    return checkpoint_name(jnp.sum(weighted, axis=1).astype(dt), "moe_routed_output")
 
 
 class Glm5MoE(nnx.Module):
@@ -1355,6 +1362,7 @@ class Glm5DecoderLayer(nnx.Module):
       jax.Array | None,
       jax.Array | None,
   ]:
+    hidden_streams = checkpoint_name(hidden_streams, "decoder_layer_input")
     p, c, col = self.attn_hc(hidden_streams)
     need_indexer = return_aux or self.config.enable_debug_stats
     if isinstance(self.self_attn, Glm5DsaMlaAttention):
@@ -1673,6 +1681,13 @@ def scan_super_blocks(
   if not leaves:
     raise ValueError("super_block has no parameters.")
   num_super_blocks = leaves[0].shape[0]
+  if remat_policy is not None and not callable(remat_policy):
+    raise ValueError(f"remat_policy must be None or callable: {remat_policy!r}.")
+  eff_remat_policy = (
+      m3_remat.scan_safe_policy(remat_policy)
+      if (scan_layers and num_super_blocks == 1 and remat_policy is not None)
+      else remat_policy
+  )
 
   def step_fn(carry_in: Any, xs_i: tuple[Any, Any]) -> tuple[Any, Any]:
     p_i, np_i = xs_i
@@ -1689,7 +1704,7 @@ def scan_super_blocks(
     ) = block(
         carry,
         decoder_segment_ids=decoder_segment_ids,
-        remat_policy=remat_policy,
+        remat_policy=eff_remat_policy,
         cur_lb=cur_lb,
         return_router_logits=return_router_logits,
         return_aux=return_aux,
@@ -1702,19 +1717,22 @@ def scan_super_blocks(
     carry_out = (carry, cur_lb)
     return carry_out, (r_out, rt_out, idx_out, rw_out, rp_out)
 
-  if remat_policy is not None and not callable(remat_policy):
-    raise ValueError(f"remat_policy must be None or callable: {remat_policy!r}.")
   step_exec = step_fn
   init_carry = (hidden_streams, cur_lb_init)
 
   if scan_layers:
+    if num_super_blocks == 1 and eff_remat_policy is not None:
+      with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+        scan_out = jax.lax.scan(step_exec, init_carry, (params, non_params))
+    else:
+      scan_out = jax.lax.scan(step_exec, init_carry, (params, non_params))
     (final_streams, final_lb), (
         scanned_r,
         scanned_rt,
         scanned_idx,
         scanned_rw,
         scanned_rp,
-    ) = jax.lax.scan(step_exec, init_carry, (params, non_params))
+    ) = scan_out
     all_router_logits = (
         [scanned_r[b, s] for b in range(num_super_blocks) for s in range(4)]
         if (return_router_logits and scanned_r is not None)
@@ -2012,6 +2030,18 @@ class Glm5Model(nnx.Module):
         rngs=rngs,
     )
     self.mtp = Glm5Mtp(cfg, sharding=sharding, rngs=rngs) if cfg.num_nextn_predict_layers > 0 else None
+
+  def set_remat(self, remat: Any) -> None:
+    """Updates the per-layer activation checkpointing policy in place."""
+    if remat is None:
+      pol = None
+    elif callable(remat):
+      pol = remat
+    else:
+      pol = getattr(remat, "policy", None)
+      if pol is None:
+        pol = jax.checkpoint_policies.nothing_saveable
+    apply_glm5_remat(self, policy=pol)
 
   def forward_with_aux(
       self,
@@ -2359,17 +2389,16 @@ def create_glm5_3_flash_model(
     raise TypeError("remat_policy must be configured via config.remat_policy, not as a" " keyword argument.")
   if not hasattr(config, "remat_policy"):
     raise AttributeError("config must define 'remat_policy'.")
-  remat_policy = config.remat_policy
+  remat_policy = "none" if config.remat_policy is None else config.remat_policy
   if not isinstance(remat_policy, str):
     raise TypeError(f"remat_policy must be a str, got {type(remat_policy).__name__}.")
-  if remat_policy == "none":
-    policy = None
-  elif remat_policy == "full":
-    policy = jax.checkpoint_policies.nothing_saveable
-  else:
+  if remat_policy.lower() not in m3_remat.REMAT_POLICIES:
     raise ValueError(
-        f"Unsupported remat_policy for GLM-5.3-Flash: {remat_policy!r}." " Supported policies: ('none', 'full')."
+        f"Unsupported remat_policy for GLM-5.3-Flash: {remat_policy!r}."
+        f" Supported policies: {m3_remat.REMAT_POLICIES}."
     )
+  resolved_remat = m3_remat.resolve_policy(config)
+  policy = None if resolved_remat is None else resolved_remat.policy
   model = Glm5Model.from_maxtext_config(config, mesh, rngs=rngs, place_on_devices=False, **kwargs)
   return apply_glm5_remat(model, policy=policy)
 

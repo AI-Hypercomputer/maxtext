@@ -24,7 +24,9 @@ from typing import Any, NamedTuple
 
 from flax import nnx
 import jax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
+from maxtext.m3.infra import remat as m3_remat
 from jax.sharding import PartitionSpec as P
 from maxtext.m3.core import rope as m3_rope
 from maxtext.m3.core import sharding as m3_sharding
@@ -507,9 +509,9 @@ class GraniteMoeAttention(nnx.Module):
       dropout_rng: jax.Array | None = None,
   ) -> tuple[jax.Array, tuple[jax.Array, jax.Array] | None]:
     bsz, q_len, _ = hidden_states.shape
-    q = self.q_proj(hidden_states).reshape(bsz, q_len, self.num_heads, self.head_dim)
-    k = self.k_proj(hidden_states).reshape(bsz, q_len, self.num_kv_heads, self.head_dim)
-    v = self.v_proj(hidden_states).reshape(bsz, q_len, self.num_kv_heads, self.head_dim)
+    q = checkpoint_name(self.q_proj(hidden_states), "query_proj").reshape(bsz, q_len, self.num_heads, self.head_dim)
+    k = checkpoint_name(self.k_proj(hidden_states), "key_proj").reshape(bsz, q_len, self.num_kv_heads, self.head_dim)
+    v = checkpoint_name(self.v_proj(hidden_states), "value_proj").reshape(bsz, q_len, self.num_kv_heads, self.head_dim)
 
     q = _constrain_activation(self.sharding, q, "attn_q", ("batch", "length", "heads", "head_dim"))
     k = _constrain_activation(self.sharding, k, "attn_k", ("batch", "length", "kv_heads", "head_dim"))
@@ -577,8 +579,11 @@ class GraniteMoeAttention(nnx.Module):
 
     attn_out = jnp.einsum("bhgsk,bhgkd->bhgsd", probs, v_grouped, precision=self.precision)
     attn_out = attn_out.transpose(0, 3, 1, 2, 4).reshape(bsz, q_len, self.num_heads * self.head_dim)
-    attn_out = _constrain_activation(self.sharding, attn_out, "attn_out", ("batch", "length", "heads"))
-    out = self.o_proj(attn_out)
+    attn_out = checkpoint_name(
+        _constrain_activation(self.sharding, attn_out, "attn_out", ("batch", "length", "heads")),
+        "context",
+    )
+    out = checkpoint_name(self.o_proj(attn_out), "out_proj")
     out = _constrain_activation(self.sharding, out, "attn_proj_out", ("batch", "length", "embed"))
     return out, updated_kv
 
@@ -864,10 +869,13 @@ class GraniteMoeMoE(nnx.Module):
     frozen_flat = frozen_topk_indices.reshape(bsz * seq_len, self.top_k) if frozen_topk_indices is not None else None
     top_k_weights, top_k_indices, router_logits = self.router(h_flat, frozen_topk_indices=frozen_flat)
 
-    out = self.experts(
-        hidden_states,
-        top_k_indices.reshape(bsz, seq_len, self.top_k),
-        top_k_weights.reshape(bsz, seq_len, self.top_k),
+    out = checkpoint_name(
+        self.experts(
+            hidden_states,
+            top_k_indices.reshape(bsz, seq_len, self.top_k),
+            top_k_weights.reshape(bsz, seq_len, self.top_k),
+        ),
+        "moe_routed_output",
     )
     out = _constrain_activation(self.sharding, out, "moe_out", ("batch", "length", "embed"))
     return (
@@ -962,6 +970,7 @@ class GraniteMoeDecoderLayer(nnx.Module):
       deterministic: bool = True,
       dropout_rng: jax.Array | None = None,
   ) -> tuple[jax.Array, jax.Array, jax.Array, tuple[jax.Array, jax.Array] | None]:
+    hidden_states = checkpoint_name(hidden_states, "decoder_layer_input")
     res_scale = jnp.asarray(
         self.residual_multiplier if residual_multiplier is None else residual_multiplier,
         dtype=hidden_states.dtype,
@@ -1046,14 +1055,30 @@ def _slice_stacked_state(state: Any, layer_idx: int) -> Any:
   return jax.tree_util.tree_map(_slice_leaf, state, is_leaf=lambda x: isinstance(x, nnx.Variable))
 
 
-def _resolve_remat_callable(fn: Callable[..., Any], remat_policy: str) -> Callable[..., Any]:
-  """Wraps `fn` with `jax.checkpoint` according to `remat_policy` without altering NNX parameter paths."""
+_REMAT_UNSET = object()
+
+
+def _resolve_remat_callable(
+    fn: Callable[..., Any],
+    remat_policy: str,
+    remat_override: Any = _REMAT_UNSET,
+    *,
+    prevent_cse: bool = True,
+) -> Callable[..., Any]:
+  """Wraps `fn` with `jax.checkpoint` according to `remat_override` or `remat_policy`."""
+  if remat_override is not _REMAT_UNSET:
+    pol = m3_remat.policy_callable(remat_override)
+    return fn if pol is None else jax.checkpoint(fn, policy=pol, prevent_cse=prevent_cse)
   if remat_policy == "none":
     return fn
   if remat_policy == "full":
-    return jax.checkpoint(fn)
+    return jax.checkpoint(fn, prevent_cse=prevent_cse)
   if remat_policy == "minimal":
-    return jax.checkpoint(fn, policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable)
+    return jax.checkpoint(
+        fn,
+        policy=jax.checkpoint_policies.dots_with_no_batch_dims_saveable,
+        prevent_cse=prevent_cse,
+    )
   raise ValueError(f"Unsupported remat_policy {remat_policy!r}.")
 
 
@@ -1071,6 +1096,7 @@ class GraniteMoeModel(nnx.Module):
     if rngs is None:
       raise ValueError("GraniteMoeModel requires a non-None nnx.Rngs instance.")
     self.config = config
+    self._m3_remat: Any = _REMAT_UNSET
     self.mesh = mesh
     if sharding is None and mesh is not None and not mesh.empty:
       sharding = GraniteMoeSharding.from_mesh(mesh, config)
@@ -1106,6 +1132,10 @@ class GraniteMoeModel(nnx.Module):
           kernel_metadata={"out_sharding": lm_spec} if lm_spec is not None else {},
           rngs=rngs,
       )
+
+  def set_remat(self, remat: Any) -> None:
+    """Sets the path-transparent `m3` rematerialization policy on this model."""
+    self._m3_remat = remat
 
   def forward_with_details(
       self,
@@ -1178,7 +1208,22 @@ class GraniteMoeModel(nnx.Module):
         return h_out, r_logits, topk_idx, kv_out[0], kv_out[1]
       return h_out, r_logits, topk_idx, None, None
 
-    layer_fn = _resolve_remat_callable(_run_one_layer, self.config.remat_policy)
+    remat_ov = (
+        m3_remat.scan_safe_policy(self._m3_remat)
+        if (
+            self._m3_remat is not _REMAT_UNSET
+            and self._m3_remat is not None
+            and self.config.scan_layers
+            and self.config.num_hidden_layers == 1
+        )
+        else self._m3_remat
+    )
+    layer_fn = _resolve_remat_callable(
+        _run_one_layer,
+        self.config.remat_policy,
+        remat_ov,
+        prevent_cse=not self.config.scan_layers,
+    )
 
     if self.config.scan_layers:
       scan_xs = (
@@ -1195,9 +1240,11 @@ class GraniteMoeModel(nnx.Module):
         h_next, r_log, tk_idx, k_next, v_next = layer_fn(p_s, np_s, carry, k_s, v_s, f_s, d_s)
         return h_next, (r_log, tk_idx, k_next, v_next)
 
-      hidden_states, (all_router_logits, all_topk_indices, new_k_all, new_v_all) = jax.lax.scan(
-          _scan_body, hidden_states, scan_xs
-      )
+      use_remat = layer_fn is not _run_one_layer
+      with m3_remat.trip_count_one_scan_barrier(self.config.num_hidden_layers == 1 and use_remat):
+        hidden_states, (all_router_logits, all_topk_indices, new_k_all, new_v_all) = jax.lax.scan(
+            _scan_body, hidden_states, scan_xs
+        )
       updated_cache = GraniteMoeKVCache(k=new_k_all, v=new_v_all) if use_cache else None
     else:
       r_logits_list: list[jax.Array] = []

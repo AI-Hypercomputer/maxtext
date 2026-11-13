@@ -19,6 +19,7 @@ from typing import Any
 
 import jax
 from maxtext.m3.core import sharding as m3_sharding
+from maxtext.m3.infra import remat as m3_remat
 import numpy as np
 
 
@@ -130,6 +131,7 @@ class Glm5Config:
   mtp_loss_scaling_factor: float = 0.1
   packing: bool = False
   scan_layers: bool = True
+  param_scan_axis: int = 0
   dtype: str = "bfloat16"
   weight_dtype: str = "float32"
   router_param_dtype: str = "float32"
@@ -147,11 +149,13 @@ class Glm5Config:
     object.__setattr__(self, "layer_types", l_types)
     object.__setattr__(self, "indexer_types", i_types)
 
-    r_pol = self.remat_policy
+    cls_name = type(self).__name__
+    r_pol = "none" if self.remat_policy is None else self.remat_policy
     if not isinstance(r_pol, str):
-      raise TypeError(f"Glm5Config.remat_policy must be a str, got {type(r_pol).__name__}.")
-    if r_pol not in ("none", "full"):
-      raise ValueError(f"Glm5Config.remat_policy must be 'none' or 'full'; got {r_pol!r}.")
+      raise TypeError(f"{cls_name}.remat_policy must be a str, got {type(r_pol).__name__}.")
+    if r_pol.lower() not in m3_remat.REMAT_POLICIES:
+      raise ValueError(f"{cls_name}.remat_policy must be one of {m3_remat.REMAT_POLICIES}; got {r_pol!r}.")
+    object.__setattr__(self, "remat_policy", r_pol)
 
     r_dt = self.router_param_dtype
     if not isinstance(r_dt, str) or r_dt != "float32":

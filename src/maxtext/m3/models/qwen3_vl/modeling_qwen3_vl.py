@@ -26,6 +26,7 @@ Self-contained NNX implementation for multimodal forward passes:
 from typing import Any, Optional, Sequence, Union
 from flax import nnx
 import jax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 import numpy as np
 from jax.sharding import Mesh
@@ -808,9 +809,9 @@ class Qwen3VLAttention(nnx.Module):
       deterministic: bool = False,
   ) -> jax.Array:
     s = inputs.shape[1]
-    query = self.query(inputs)
-    key = self.key(inputs)
-    value = self.value(inputs)
+    query = checkpoint_name(self.query(inputs), "query_proj")
+    key = checkpoint_name(self.key(inputs), "key_proj")
+    value = checkpoint_name(self.value(inputs), "value_proj")
 
     query = self.query_norm(query)
     key = self.key_norm(key)
@@ -834,8 +835,11 @@ class Qwen3VLAttention(nnx.Module):
     scores = jnp.where(causal_mask[:, None, None, :, :], scores, -1e10)
     weights = jax.nn.softmax(scores, axis=-1).astype(value.dtype)
     attn_out = jnp.einsum("bkgst,btkd->bskgd", weights, value)
-    attn_out = attn_out.reshape(inputs.shape[0], s, self.num_query_heads, self.head_dim)
-    return self.out(attn_out)
+    attn_out = checkpoint_name(
+        attn_out.reshape(inputs.shape[0], s, self.num_query_heads, self.head_dim),
+        "context",
+    )
+    return checkpoint_name(self.out(attn_out), "out_proj")
 
 
 class Qwen3VLDecoderLayer(nnx.Module):
@@ -869,6 +873,7 @@ class Qwen3VLDecoderLayer(nnx.Module):
       deterministic: bool = False,
       **kwargs,
   ) -> jax.Array:
+    inputs = checkpoint_name(inputs, "decoder_layer_input")
     normed_attn_in = self.pre_self_attention_layer_norm(inputs)
     attn_out = self.self_attention(
         normed_attn_in,

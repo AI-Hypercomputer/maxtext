@@ -80,14 +80,24 @@ def get_topology_mesh(config):
       jax.config.update("mock_num_gpu_processes", config.compile_topology_num_slices)
       topology_devices = jax.devices()
     else:
-      topology_devices = get_topology_desc(
-          platform=target_hardware.platform,
-          topology_name=target_hardware.topology_name,
-          chip_config_name=target_hardware.chip_config_name,
-          chips_per_host_bounds=target_hardware.chips_per_host_bounds,
-          num_slices=config.compile_topology_num_slices,
-          wrap=target_hardware.wrap,
-      ).devices
+      try:
+        topology_devices = get_topology_desc(
+            platform=target_hardware.platform,
+            topology_name=target_hardware.topology_name,
+            chip_config_name=target_hardware.chip_config_name,
+            chips_per_host_bounds=target_hardware.chips_per_host_bounds,
+            num_slices=config.compile_topology_num_slices,
+            wrap=target_hardware.wrap,
+        ).devices
+      except TypeError as exc:
+        if "chip_config_name" not in str(exc) and "wrap" not in str(exc):
+          raise
+        topology_devices = get_topology_desc(
+            platform=target_hardware.platform,
+            topology_name=target_hardware.topology_name,
+            chips_per_host_bounds=target_hardware.chips_per_host_bounds,
+            num_slices=config.compile_topology_num_slices,
+        ).devices
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
   jax.config.update(
       "jax_remove_size_one_mesh_axis_from_type",

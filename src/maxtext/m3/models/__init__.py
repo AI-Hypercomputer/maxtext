@@ -36,6 +36,7 @@ from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint:
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model  # pylint: disable=no-name-in-module
+from maxtext.m3.infra import remat as _m3_remat
 from maxtext.m3.models.qwen3 import qwen3_flops  # pylint: disable=no-name-in-module
 
 
@@ -111,6 +112,8 @@ end_eager_placement = m3_sharding.end_eager_placement
 enter_mesh_scope = m3_sharding.enter_mesh_scope
 validate_attention_config = m3_kernels.validate_attention_config
 validate_moe_config = _m3_moe.validate_moe_config
+maybe_apply_remat = _m3_remat.maybe_apply_remat
+check_model_tags = _m3_remat.check_model_tags
 _end_eager_placement = end_eager_placement
 
 
