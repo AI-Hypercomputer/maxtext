@@ -5978,6 +5978,196 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
       out, _, _ = block(x)
     self.assertTrue(bool(jnp.all(jnp.isfinite(out))))
 
+  @staticmethod
+  def _cpu_ragged_all_to_all(operand, output, input_offsets, send_sizes, output_offsets, recv_sizes, *, axis_name):
+    """CPU emulation of jax.lax.ragged_all_to_all via all_gather."""
+    del recv_sizes
+    me = jax.lax.axis_index(axis_name)
+    gathered_op = jax.lax.all_gather(operand, axis_name=axis_name)
+    gathered_in_off = jax.lax.all_gather(input_offsets, axis_name=axis_name)
+    gathered_send_sz = jax.lax.all_gather(send_sizes, axis_name=axis_name)
+    gathered_out_off = jax.lax.all_gather(output_offsets, axis_name=axis_name)
+    rows = jnp.arange(output.shape[0])
+    for s in range(input_offsets.shape[0]):
+      in_off = gathered_in_off[s, me]
+      sz = gathered_send_sz[s, me]
+      out_off = gathered_out_off[s, me]
+      idx = jnp.clip(rows - out_off + in_off, 0, operand.shape[0] - 1)
+      mask = ((rows >= out_off) & (rows < out_off + sz)).reshape((output.shape[0],) + (1,) * (output.ndim - 1))
+      output = jnp.where(mask, gathered_op[s, idx], output)
+    return output
+
+  def test_ra2a_sows_mesh_max_required_rbf(self):
+    if jax.device_count() < 4:
+      self.skipTest("Requires >= 4 host devices to test EP + FSDP mesh pmax.")
+    # 4 experts, top-2, EP=2 (experts {0,1} on shard 0, {2,3} on shard 1), FSDP=device_count//2.
+    # Each device has per_device_batch_size=1, seq_len=4 -> local_tokens=4, balanced_size = 4 * 2 = 8 rows/shard.
+    # On FSDP replica 0: 8 tokens * top-2 = 16 assignments; route 14 of them to shard 1 (experts 2, 3) and 2 to shard 0
+    # -> shard 1 needs 14 / 8 = 1.75 (even with ragged_buffer_factor=1.25 truncating the buffer to 10 rows).
+    # On remaining FSDP replicas, route evenly (required = 1.0). Global pmax over (fsdp, expert) must report 1.75.
+    n_fsdp = jax.device_count() // 2
+    cfg = _tiny_deepseek_config(
+        "ra2a_req_rbf",
+        use_ring_of_experts=False,
+        sparse_matmul=True,
+        megablox=True,
+        use_ragged_sort=False,
+        log_required_ragged_buffer_factor=True,
+        ragged_buffer_factor=1.25,
+        ici_expert_parallelism=2,
+        ici_fsdp_parallelism=n_fsdp,
+        per_device_batch_size=1,
+        max_target_length=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      block = moe.RoutedMoE(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.moe_mlp_dim,
+          dtype=cfg.dtype,
+          rngs=nnx.Rngs(0),
+      )
+    bsz = jax.device_count() * cfg.per_device_batch_size
+    batch_sharding = jax.sharding.NamedSharding(mesh, P(("data", "fsdp", "expert"), None, None))
+    x = jax.device_put(
+        jax.random.normal(jax.random.PRNGKey(1), (bsz, cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype),
+        batch_sharding,
+    )
+    forced_grid = np.zeros((n_fsdp, 2, cfg.max_target_length, 2), dtype=np.int32)
+    forced_grid[..., 0] = 0
+    forced_grid[..., 1] = 2
+    forced_grid[0, :, :, 0] = 2
+    forced_grid[0, :, :, 1] = 3
+    forced_grid[0, 0, 0, :] = [0, 1]
+    forced = jax.device_put(jnp.asarray(forced_grid.reshape((bsz, cfg.max_target_length, 2))), batch_sharding)
+    with (
+        jax.set_mesh(mesh),
+        nn_partitioning.axis_rules(cfg.logical_axis_rules),
+        mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=self._cpu_ragged_all_to_all),
+    ):
+      out, _, _ = block(x, forced_routed_experts=forced)
+    intermediates = nnx.pop(block, nnx.Intermediate)
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out))))
+    req = float(np.asarray(intermediates["moe_required_rbf"].get_value()[0]))
+    self.assertAlmostEqual(req, 14.0 / 8.0, places=5)
+
+  def test_ra2a_ep1_and_unsharded_batch_do_not_sow_required_rbf(self):
+    cfg = _tiny_deepseek_config(
+        "ra2a_req_rbf_ep1",
+        use_ring_of_experts=False,
+        sparse_matmul=True,
+        megablox=True,
+        log_required_ragged_buffer_factor=True,
+        ici_expert_parallelism=1,
+        ici_fsdp_parallelism=jax.device_count(),
+        per_device_batch_size=1,
+        max_target_length=4,
+        num_experts=4,
+        num_experts_per_tok=2,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      block = moe.RoutedMoE(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=cfg.moe_mlp_dim,
+          dtype=cfg.dtype,
+          rngs=nnx.Rngs(0),
+      )
+    bsz = jax.device_count() * cfg.per_device_batch_size
+    x = jax.random.normal(jax.random.PRNGKey(2), (bsz, cfg.max_target_length, cfg.base_emb_dim), dtype=cfg.dtype)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      block(x)
+    intermediates = nnx.pop(block, nnx.Intermediate)
+    self.assertNotIn("moe_required_rbf", intermediates)
+
+    if jax.device_count() >= 4:
+      # Cover num_ep > 1 with is_batch_sharded_by_expert=False (batch sharded on fsdp only, replicated across expert).
+      n_fsdp = jax.device_count() // 2
+      cfg_unsharded = _tiny_deepseek_config(
+          "ra2a_req_rbf_unsharded",
+          use_ring_of_experts=False,
+          sparse_matmul=True,
+          megablox=True,
+          log_required_ragged_buffer_factor=True,
+          ici_expert_parallelism=2,
+          ici_fsdp_parallelism=n_fsdp,
+          per_device_batch_size=1,
+          max_target_length=4,
+          num_experts=4,
+          num_experts_per_tok=2,
+      )
+      rules_no_ep_batch = [(k, "fsdp" if k == "activation_batch" else v) for k, v in cfg_unsharded.logical_axis_rules]
+      mesh2 = Mesh(maxtext_utils.create_device_mesh(cfg_unsharded), cfg_unsharded.mesh_axes)
+      with nn_partitioning.axis_rules(rules_no_ep_batch):
+        block2 = moe.RoutedMoE(
+            config=cfg_unsharded,
+            num_experts=cfg_unsharded.num_experts,
+            num_experts_per_tok=cfg_unsharded.num_experts_per_tok,
+            mesh=mesh2,
+            kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+            kernel_axes=("embed", "mlp"),
+            intermediate_dim=cfg_unsharded.moe_mlp_dim,
+            dtype=cfg_unsharded.dtype,
+            rngs=nnx.Rngs(0),
+        )
+      # Global batch_size == 1 triggers is_batch_sharded_by_ep(inputs) == False (decode replicated-batch path),
+      # where no ragged_all_to_all buffer is allocated and required_rbf stays None.
+      rep_sharding = jax.sharding.NamedSharding(mesh2, P(None, None, None))
+      x2 = jax.device_put(x[:1], rep_sharding)
+      forced2 = jax.device_put(
+          jnp.array([[[2, 3], [2, 3], [2, 3], [0, 1]]], dtype=jnp.int32),
+          rep_sharding,
+      )
+      with (
+          jax.set_mesh(mesh2),
+          nn_partitioning.axis_rules(rules_no_ep_batch),
+          mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=self._cpu_ragged_all_to_all),
+      ):
+        block2(x2, forced_routed_experts=forced2)
+      intermediates2 = nnx.pop(block2, nnx.Intermediate)
+      self.assertNotIn("moe_required_rbf", intermediates2)
+
+  def test_validator_rules_for_log_required_ragged_buffer_factor(self):
+    cfg = _tiny_deepseek_config(
+        "val_ra2a_ok",
+        use_ring_of_experts=False,
+        sparse_matmul=True,
+        use_ragged_sort=False,
+        log_required_ragged_buffer_factor=True,
+    )
+    self.assertTrue(cfg.log_required_ragged_buffer_factor)
+    with self.assertRaisesRegex(ValueError, "sparse_matmul=True"):
+      _tiny_deepseek_config(
+          "val_no_sparse",
+          use_ring_of_experts=False,
+          sparse_matmul=False,
+          log_required_ragged_buffer_factor=True,
+      )
+    with self.assertRaisesRegex(ValueError, "use_ragged_sort=True"):
+      _tiny_deepseek_config(
+          "val_roe_no_rs",
+          compile_topology="v5e-8",
+          compile_topology_num_slices=1,
+          ici_expert_parallelism=2,
+          ici_fsdp_parallelism=4,
+          use_ring_of_experts=True,
+          sparse_matmul=True,
+          use_ragged_sort=False,
+          log_required_ragged_buffer_factor=True,
+      )
+
 
 def _flat_fsdp_config(**overrides):
   """Tiny DeepSeek config on the tokamax gmm_v2 fp8 path with the explicit weight all-gather over FSDP."""

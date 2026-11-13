@@ -129,6 +129,8 @@ class RouteMetadata:
   # Shape [num_ep, num_ep]. all_gather of reshaped_group_sizes across EP shards.
   # [i, j] = number of tokens from batch shard i sent to expert shard j.
   all_shards_group_sizes: Optional[jax.Array]
+  # Optional online hot-expert replication plan produced by ra2a_and_route for _moe_body.
+  replica_plan: Optional[Any] = None
 
 
 @struct.dataclass
@@ -1016,15 +1018,21 @@ _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psu
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
 
-  def required_ragged_buffer_factor(self, group_sizes, bsz_times_seq_len, num_ep, expert_shard_id):
+  def required_ragged_buffer_factor(
+      self, group_sizes, bsz_times_seq_len, num_ep, expert_shard_id, local_num_experts=None
+  ):
     """log_required_ragged_buffer_factor probe: the smallest ragged_buffer_factor that would not have dropped tokens.
 
-    group_sizes are the global per-expert token counts of the (EP-gathered) batch, as ring_ragged_sort computes them
-    for the overflow check. The per-shard buffer is int(balanced_size * factor) rows, so a shard drops tokens iff
-    sum(local group sizes) > balanced_size * factor. The result is max over all devices of
+    group_sizes are the global per-expert token counts of the (EP-gathered) batch, as ring_ragged_sort and
+    ra2a_and_route compute them before buffer truncation. The per-shard buffer is int(balanced_size * factor) rows, so
+    a shard drops tokens iff sum(local group sizes) > balanced_size * factor. The result is max over all devices of
     sum(local group sizes) / balanced_size: one float32 scalar max all-reduce over the mesh axes (no other change).
+    On the ragged all-to-all path, only `num_ep > 1` with `is_batch_sharded_by_expert` allocates a
+    `ragged_buffer_factor`-sized receive buffer (`get_ragged_buffer_size`); when `num_ep == 1` or batch is unsharded
+    over `expert`, no buffer can truncate and `ra2a_and_route` leaves `required_rbf = None`.
     """
-    local_num_experts = self.config.num_experts // num_ep
+    if local_num_experts is None:
+      local_num_experts = self.config.num_experts // num_ep
     local_group_sizes = jax.lax.dynamic_slice_in_dim(
         group_sizes, expert_shard_id * local_num_experts, local_num_experts, axis=0
     )
@@ -1746,6 +1754,7 @@ class RoutedMoE(nnx.Module):
       precomputed_topk=None,
       precomputed_density_prob=None,
       per_expert_scale=None,
+      physical_route_fn=None,
   ):
     """Permute tokens to group by expert to fit gmm call.
 
@@ -1955,6 +1964,11 @@ class RoutedMoE(nnx.Module):
       else:
         flatten_selected_experts_safe = flatten_selected_experts
 
+      num_sort_bins = self.num_experts
+      if physical_route_fn is not None:
+        # Expert replication: sort by physical slot (home or replica) instead of logical expert.
+        flatten_selected_experts_safe, num_sort_bins = physical_route_fn(flatten_selected_experts_safe)
+
       sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if self.config.moe_use_direct_token_gather:
         sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
@@ -1969,7 +1983,7 @@ class RoutedMoE(nnx.Module):
       if not is_qarray:
         sorted_inputs = sorted_inputs.astype(self.dtype)
 
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+      group_size = jnp.bincount(flatten_selected_experts_safe, length=num_sort_bins)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -2006,7 +2020,7 @@ class RoutedMoE(nnx.Module):
       )
     else:
       local_group_size = None
-      expert_indices = jnp.arange(self.num_experts)
+      expert_indices = jnp.arange(group_size.shape[0])
       sorted_experts = jnp.repeat(
           expert_indices,
           repeats=group_size,
@@ -3274,6 +3288,41 @@ class RoutedMoE(nnx.Module):
       local_sorted_indices = None
       all_shards_group_sizes = None
       reshaped_group_sizes = None
+      required_rbf = None
+      replica_plan = None
+      local_tokens = math.prod(x.shape[:-1])
+      num_replicas = int(getattr(self.config, "expert_replicas_per_device", 0) or 0)
+      use_replication = num_replicas > 0
+      physical_route_fn = None
+      if use_replication:
+        if num_ep <= 1:
+          raise ValueError(f"expert_replicas_per_device={num_replicas} requires num_ep > 1, got num_ep={num_ep}.")
+        if not is_batch_sharded_by_expert:
+          raise ValueError(
+              f"expert_replicas_per_device={num_replicas} requires batch sharded across expert "
+              "(is_batch_sharded_by_expert=True; batch size 1 decode is unsupported)."
+          )
+        if self.config.num_experts % num_ep != 0:
+          raise ValueError(
+              f"num_experts ({self.config.num_experts}) must be divisible by num_ep ({num_ep}) for expert replication."
+          )
+        from maxtext.layers import moe_replica_planner as mrp  # pylint: disable=import-outside-toplevel
+
+        def _physical_route_fn(flat_logical):
+          nonlocal replica_plan
+          local_counts = jnp.bincount(flat_logical, length=self.config.num_experts).astype(jnp.int32)
+          counts_src = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
+          replica_plan = mrp.compute_plan_iter(
+              counts_src,
+              num_ep,
+              num_replicas,
+              int(self.config.expert_replica_max_send),
+              int(self.config.expert_replica_board_size),
+          )
+          phys = replica_plan.route_table[expert_shard_id][flat_logical]
+          return phys, num_ep * replica_plan.num_slots
+
+        physical_route_fn = _physical_route_fn
       # force_dropless (the in-layer dropless fallback) sizes the receive buffer for the worst case
       # instead of ragged_buffer_factor * balanced, so no tokens can be dropped.
       ragged_buffer_factor = -1.0 if force_dropless else self.get_ragged_buffer_factor()
@@ -3302,12 +3351,13 @@ class RoutedMoE(nnx.Module):
           compute_lb_loss=not use_megatron_seq_aux_loss,
           return_expert_counts=True,
           per_expert_scale=per_expert_scale,
+          physical_route_fn=physical_route_fn,
       )
 
       if num_ep > 1:
         batch_axis = self._expert_parallelism_name if is_batch_sharded_by_expert else "data"
         # get group sizes for all shards
-        local_expert_size = self.config.num_experts // num_ep
+        local_expert_size = self.config.num_experts // num_ep + (num_replicas if use_replication else 0)
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
         global_group_sizes = group_sizes
 
@@ -3340,6 +3390,14 @@ class RoutedMoE(nnx.Module):
               axis_name=self._expert_parallelism_name,
           )
           global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=self._expert_parallelism_name)
+          if getattr(self.config, "log_required_ragged_buffer_factor", False):
+            required_rbf = self.required_ragged_buffer_factor(
+                jnp.sum(global_group_sizes, axis=0),
+                local_tokens * num_ep,
+                num_ep,
+                expert_shard_id,
+                local_num_experts=local_expert_size,
+            )
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
               x,
               global_group_sizes,
@@ -3351,6 +3409,8 @@ class RoutedMoE(nnx.Module):
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
+          # Batch is replicated across `expert`, so no `ragged_all_to_all` receive buffer is allocated;
+          # `required_rbf` stays `None` (same as `num_ep == 1` below).
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
               x,
               global_group_sizes[None, :],
@@ -3374,12 +3434,14 @@ class RoutedMoE(nnx.Module):
               lb_loss=lb_loss,
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
+              required_rbf=required_rbf,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
               local_sorted_indices=local_sorted_indices,
               all_shards_group_sizes=all_shards_group_sizes,
               reshaped_group_sizes=reshaped_group_sizes,
+              replica_plan=replica_plan,
           ),
       )
 
@@ -3398,6 +3460,10 @@ class RoutedMoE(nnx.Module):
       expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
 
       if self.config.use_ring_of_experts:
+        if int(getattr(self.config, "expert_replicas_per_device", 0) or 0) > 0:
+          raise NotImplementedError(
+              "expert replication is only supported on the ragged all-to-all path (use_ring_of_experts=False)."
+          )
         return roe_ag_and_route(
             x,
             logits,
@@ -3816,6 +3882,8 @@ class RoutedMoE(nnx.Module):
     ):
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
+        if int(getattr(self.config, "expert_replicas_per_device", 0) or 0) > 0:
+          raise NotImplementedError("expert replication does not support num_moe_emb_chunks > 0 yet.")
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
             x,
             logits,
@@ -3856,6 +3924,19 @@ class RoutedMoE(nnx.Module):
 
         x = jax.tree.map(_cn, x)
         routing = jax.tree.map(_cn, routing)
+        if route_metadata.replica_plan is not None:
+          from maxtext.layers import moe_replica_weights as mrw  # pylint: disable=import-outside-toplevel
+
+          if w0_bias is not None or w1_bias is not None or wo_bias is not None:
+            raise NotImplementedError("expert replication does not support MoE biases yet.")
+          if return_weights:
+            raise NotImplementedError("expert replication does not support moe_accumulate_chunk_wgrad yet.")
+          plan = route_metadata.replica_plan
+          num_ep_ = self.get_expert_parallelism_size()
+          ep_name = self._expert_parallelism_name
+          w0 = mrw.extend_with_replicas(w0, plan, ep_name, num_ep_, self.dtype)
+          w1 = mrw.extend_with_replicas(w1, plan, ep_name, num_ep_, self.dtype)
+          wo = mrw.extend_with_replicas(wo, plan, ep_name, num_ep_, self.dtype)
         route_metadata = jax.tree.map(_cn, route_metadata)
         mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
 
