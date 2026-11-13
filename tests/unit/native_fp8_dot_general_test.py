@@ -793,6 +793,21 @@ class ServeFp8ActCalibrationModesTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "w1_lhs_scale"):
       moe.fused_moe_lhs_scale_kwargs(quant, self._fused_moe_without_lhs_scales)
 
+  @staticmethod
+  def _fused_moe_with_quantize_lhs(hidden_states, quantize_lhs=True):
+    """Stands in for a tpu-inference fused_moe_func with the quantize_lhs option."""
+    del quantize_lhs
+    return hidden_states
+
+  def test_w8a16_mode_keeps_bf16_expert_activations(self):
+    for calib in ("w8a16", "none", "bf16"):
+      quant = quantizations.ServeFp8WeightQuantization(act_calibration_method=calib)
+      self.assertEqual(moe.fused_moe_lhs_scale_kwargs(quant, self._fused_moe_with_quantize_lhs), {"quantize_lhs": False})
+
+  def test_w8a16_mode_with_old_tpu_inference_keeps_kernel_default(self):
+    quant = quantizations.ServeFp8WeightQuantization(act_calibration_method="w8a16")
+    self.assertEqual(moe.fused_moe_lhs_scale_kwargs(quant, self._fused_moe_without_lhs_scales), {})
+
 
 class FastNonMoeFp8DenseOptimizationsTest(unittest.TestCase):
   """Tests 3D per-channel scale detection, blockwise-to-per-channel requantization,
