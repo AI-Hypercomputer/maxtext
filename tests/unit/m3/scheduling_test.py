@@ -16,6 +16,11 @@
 
 import unittest
 
+import pytest
+
+pytest.importorskip("diffusers")  # the schedulers need diffusers (TPU pre-training requirements).
+
+# pylint: disable=wrong-import-position
 from diffusers import FlowMatchEulerDiscreteScheduler, UniPCMultistepScheduler
 import jax
 import jax.numpy as jnp
@@ -28,6 +33,7 @@ try:
   import torch
 except ImportError:
   torch = None
+# pylint: enable=wrong-import-position
 
 # Wan-AI/Wan2.1-T2V-14B-Diffusers scheduler/scheduler_config.json (also stored in converted checkpoints).
 WAN21_UNIPC_CONFIG = {
@@ -75,7 +81,7 @@ class UniPCParityTest(unittest.TestCase):
   """`FlaxUniPCMultistepScheduler` (Wan 2.1 config) vs `diffusers.UniPCMultistepScheduler`.
 
   Flow sigmas / `flow_prediction`: `set_timesteps` and a full sampling loop for solver orders 1-3. Manual run (needs
-  torch; CPU, no network): `JAX_PLATFORMS=cpu python -m pytest src/maxtext/m3/models/diffuser_schedulers/`.
+  torch; CPU, no network): `JAX_PLATFORMS=cpu python -m pytest tests/unit/m3/scheduling_test.py`.
   """
 
   def test_from_config_ignores_diffusers_keys(self):
