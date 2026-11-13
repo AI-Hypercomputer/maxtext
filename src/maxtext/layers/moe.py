@@ -130,7 +130,7 @@ class RouteMetadata:
   # [i, j] = number of tokens from batch shard i sent to expert shard j.
   all_shards_group_sizes: Optional[jax.Array]
   # Optional online hot-expert replication plan produced by ra2a_and_route for _moe_body.
-  replica_plan: Optional[Any] = struct.field(pytree_node=False, default=None)
+  replica_plan: Optional[Any] = None
 
 
 @struct.dataclass

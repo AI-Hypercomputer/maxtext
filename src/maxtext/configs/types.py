@@ -4715,6 +4715,11 @@ class MaxTextConfig(
           "expert_replicas_per_device > 0 does not support moe_dropless_fallback "
           "(the overflow check uses pre-replication logical shard counts)."
       )
+    if self.fp8_moe or self.fp8_moe_fake_quant or bool(self.quantization) or bool(self.te_gmm_quantization):
+      raise ValueError(
+          "expert_replicas_per_device > 0 does not yet support FP8 or quantized MoE GEMMs "
+          "(fp8_moe, fp8_moe_fake_quant, quantization, or te_gmm_quantization)."
+      )
     if not self.override_logical_axis_rules and not ep_enabled(self):
       raise ValueError("expert_replicas_per_device > 0 requires expert parallelism > 1.")
 

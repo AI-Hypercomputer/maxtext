@@ -167,6 +167,10 @@ class ExpertReplicationConfigTest(absltest.TestCase):
         ("ep_1", {"ici_expert_parallelism": 1, "ici_fsdp_parallelism": 8}, "expert parallelism > 1"),
         ("no_sparse_matmul", {"sparse_matmul": False}, "sparse_matmul=True"),
         ("num_experts_1", {"num_experts": 1, "num_experts_per_tok": 1}, "num_experts > 1"),
+        ("fp8_moe", {"fp8_moe": True}, "FP8 or quantized MoE"),
+        ("fp8_moe_fake_quant", {"fp8_moe_fake_quant": True}, "FP8 or quantized MoE"),
+        ("quantization", {"quantization": "int8"}, "FP8 or quantized MoE"),
+        ("te_gmm_quantization", {"te_gmm_quantization": "te_mxfp8"}, "FP8 or quantized MoE"),
     ]
     for label, overrides, expected_msg in bad_cases:
       with self.subTest(case=label):
@@ -521,6 +525,31 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
       with mock.patch.object(jax, "shard_map", side_effect=_replicated_shard_map):
         with self.assertRaisesRegex(ValueError, "is_batch_sharded_by_expert=True"):
           layer.sparse_matmul(inputs[:1], logits[:1], None, w0[:2], w1[:2], wo[:2], None, None, None)
+
+  def test_route_metadata_with_replica_plan_is_valid_pytree(self):
+    """RouteMetadata carrying a ReplicaPlan flattens as a PyTree and crosses jax.jit and jax.lax.cond."""
+    from maxtext.layers import moe_replica_planner as mrp  # pylint: disable=import-outside-toplevel
+
+    counts = jnp.asarray([[20, 2, 1, 1], [10, 1, 1, 1]], dtype=jnp.int32)
+    plan = mrp.compute_plan_iter(counts, num_ep=2, num_replicas=1, max_send=1, board_size=1)
+    rm = moe.RouteMetadata(
+        expert_shard_id=0,
+        local_sorted_indices=jnp.arange(4, dtype=jnp.int32),
+        reshaped_group_sizes=jnp.asarray([12, 12], dtype=jnp.int32),
+        all_shards_group_sizes=jnp.ones((2, 2), dtype=jnp.int32),
+        replica_plan=plan,
+    )
+    leaves, treedef = jax.tree_util.tree_flatten(rm)
+    self.assertLen(leaves, 4 + 5)
+    restored = jax.tree_util.tree_unflatten(treedef, leaves)
+    self.assertEqual(restored.replica_plan.num_slots, plan.num_slots)
+
+    @jax.jit
+    def roundtrip(flag, meta):
+      return jax.lax.cond(flag, lambda m: m, lambda m: m, meta)
+
+    out = roundtrip(jnp.asarray(True), rm)
+    np.testing.assert_array_equal(np.asarray(out.replica_plan.route_table), np.asarray(plan.route_table))
 
   def test_routed_bias_updates_match_r0(self):
     """Verifies routed_bias_update_rate > 0 emits logical expert bias updates identical to R=0."""
