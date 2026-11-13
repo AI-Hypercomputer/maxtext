@@ -35,7 +35,9 @@ from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
+from maxtext.utils import train_utils
 
 
 class GoodputTrainingHooks(TrainingHooks):
@@ -249,6 +251,30 @@ class BaseDataHooks(DataHooks):
   def __init__(self, config, mesh, goodput_recorder):
     self.config = config
     self.train_data_iterator, self.eval_data_iterator = create_data_iterator(config, mesh)
+    reorder_cp_size = max_utils.reordered_cp_size(config, mesh)
+    if reorder_cp_size > 1:
+      reorder_strategy = max_utils.resolve_reorder_strategy(config)
+      max_logging.log(
+          f"Reordering data on host for CP Size: {reorder_cp_size} using"
+          f" {reorder_strategy} strategy in {config.shard_mode} mode"
+      )
+      with jax.set_mesh(mesh):
+        reorder_fn = maxtext_utils.get_reorder_callable(
+            reorder_cp_size,
+            config.shard_mode,
+            reorder_strategy,
+            config.hardware,
+        )
+      # pylint: disable=protected-access
+      self.train_data_iterator = train_utils._reorder_data_iterator_for_loader(
+          reorder_fn,
+          self.train_data_iterator,
+      )
+      if self.eval_data_iterator is not None:
+        self.eval_data_iterator = train_utils._ReorderedDataIterator(
+            reorder_fn,
+            self.eval_data_iterator,
+        )
     self.train_data_loader = DataLoader(config, mesh, self.train_data_iterator, goodput_recorder=goodput_recorder)
     self.train_batch = None
     self.eval_batch = None
