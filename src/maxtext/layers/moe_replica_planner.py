@@ -36,7 +36,16 @@ import jax.numpy as jnp
 
 
 class ReplicaPlan:
-  """Plain container (not a pytree) for one layer's replication plan."""
+  """Plain container (not a pytree) for one layer's replication plan.
+
+  Invariants guaranteed by `compute_plan_iter` and relied on by
+  `moe_replica_weights.extend_with_replicas`:
+    1. At most one replica per `(home, receiver)` device pair.
+    2. Distinct valid home devices (`rep_home[r] >= 0`) across each receiver `r`'s `R` slots.
+    3. Valid send entries for home `h` are compacted at the front of `send_slots[h, :k]`
+       (`k = sum(send_peer_index[h] >= 0) <= max_send`), ordered by ascending receiver ID so
+       `send_peer_index[h, valid_receivers] == [0, ..., k - 1]` and `0 <= send_slots[h, :k] < L`.
+  """
 
   def __init__(self, route_table, rep_home, rep_slot, send_slots, send_peer_index, num_slots, num_replicas):
     self.route_table = route_table  # [EP, E] int32: (source shard, logical expert) -> physical slot

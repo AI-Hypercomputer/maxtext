@@ -221,6 +221,48 @@ class ReplicaPlannerTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "board_size >= 1"):
       mrp.compute_plan_iter(counts, NUM_EP, NUM_REPLICAS, MAX_SEND, 0)
 
+  def test_plan_satisfies_weight_move_invariants(self):
+    cases = [
+        (_skewed_counts(seed=0), NUM_EP, NUM_REPLICAS, MAX_SEND, BOARD_SIZE),
+        (_skewed_counts(seed=3), NUM_EP, NUM_REPLICAS, 2, BOARD_SIZE),
+        (
+            jnp.asarray([[500, 10, 10, 10], [500, 10, 10, 10], [500, 10, 10, 10], [500, 10, 10, 10]], jnp.int32),
+            4,
+            3,
+            2,
+            2,
+        ),
+    ]
+    for counts, ep, r_slots, max_send, board in cases:
+      local = counts.shape[1] // ep
+      plan = mrp.compute_plan_iter(counts, ep, r_slots, max_send, board)
+      rep_home = np.asarray(plan.rep_home)
+      rep_slot = np.asarray(plan.rep_slot)
+      send_slots = np.asarray(plan.send_slots)
+      spi = np.asarray(plan.send_peer_index)
+      pairs = set()
+      for r in range(ep):
+        valid_homes = [int(h) for h in rep_home[r] if h >= 0]
+        # Invariant 2: distinct valid home devices per receiver's R slots.
+        self.assertEqual(len(valid_homes), len(set(valid_homes)))
+        for s, h in enumerate(rep_home[r]):
+          if h >= 0:
+            # Invariant 1: at most one replica per (home, receiver) pair.
+            self.assertNotIn((int(h), r), pairs)
+            pairs.add((int(h), r))
+            idx = int(spi[int(h), r])
+            self.assertTrue(0 <= idx < max_send)
+            self.assertEqual(int(send_slots[int(h), idx]), int(rep_slot[r, s]))
+      for h in range(ep):
+        valid_rcvs = [r for r in range(ep) if spi[h, r] >= 0]
+        k = len(valid_rcvs)
+        self.assertLessEqual(k, max_send)
+        # Invariant 3: valid sends compacted at front [0..k-1] in ascending receiver order, within [0, local).
+        self.assertEqual([int(spi[h, r]) for r in valid_rcvs], list(range(k)))
+        if k > 0:
+          self.assertTrue(np.all((send_slots[h, :k] >= 0) & (send_slots[h, :k] < local)))
+        self.assertTrue(np.all(send_slots[h, k:] == 0))
+
 
 if __name__ == "__main__":
   absltest.main()
