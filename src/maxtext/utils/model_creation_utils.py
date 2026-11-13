@@ -738,6 +738,7 @@ def create_model(
     from maxtext.m3.core import kernels as m3_kernels  # pylint: disable=import-outside-toplevel
     from maxtext.m3.core import moe as m3_moe  # pylint: disable=import-outside-toplevel
     from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.infra import remat as m3_remat  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra.named_scopes import add_named_scopes  # pylint: disable=import-outside-toplevel
 
@@ -749,6 +750,9 @@ def create_model(
     ):
       model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
       model = m3_scan.maybe_apply_scan(model, config)
+      model = m3_remat.maybe_apply_remat(model, config, model_mode=model_mode)
+      if model_mode == MODEL_MODE_TRAIN:
+        m3_remat.check_model_tags(model, config, mesh=mesh)
       if getattr(config, "quantization", "") and m3_sharding._ambient_mesh_is_explicit():  # pylint: disable=protected-access
         raise ValueError(
             "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized "

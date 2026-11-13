@@ -26,10 +26,14 @@ treated as such a stack, so models should not use it for anything else.
 
 import functools
 from collections.abc import MutableMapping, Sequence
+import inspect
 from typing import Any
 
 from flax import nnx
 import jax
+from jax import ad_checkpoint
+from jax import checkpoint_policies as cp
+from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
@@ -86,6 +90,31 @@ def _strip_layer_axis(state: Any, param_scan_axis: int) -> Any:
   return jax.tree.map(strip, state, is_leaf=_is_variable)
 
 
+def _filter_layer_kwargs(layer_cls: type[Any], kwargs: dict[str, Any]) -> dict[str, Any]:
+  """Filters `kwargs` to parameters accepted by `layer_cls.__call__`, matching `nnx.Sequential`."""
+  if not kwargs:
+    return {}
+  params = list(inspect.signature(layer_cls.__call__).parameters.values())
+  if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params):
+    return kwargs
+  # `self` and `carry` consume the first 2 positional slots.
+  pos_consumed = 0
+  accepted: set[str] = set()
+  for p in params:
+    if p.kind == inspect.Parameter.POSITIONAL_ONLY:
+      pos_consumed += 1
+    elif p.kind == inspect.Parameter.POSITIONAL_OR_KEYWORD:
+      if pos_consumed < 2:
+        pos_consumed += 1
+      else:
+        accepted.add(p.name)
+    elif p.kind == inspect.Parameter.VAR_POSITIONAL:
+      pos_consumed = 2
+    elif p.kind == inspect.Parameter.KEYWORD_ONLY:
+      accepted.add(p.name)
+  return {k: v for k, v in kwargs.items() if k in accepted}
+
+
 class ScannedLayers(nnx.Module):
   """Structurally identical layers with stacked state, executed via `jax.lax.scan`.
 
@@ -95,7 +124,13 @@ class ScannedLayers(nnx.Module):
   Parameters are read-only scan inputs; other state is updated after the scan.
   """
 
-  def __init__(self, layers: Sequence[nnx.Module], *, param_scan_axis: int = 1):  # pylint: disable=super-init-not-called
+  def __init__(
+      self,
+      layers: Sequence[nnx.Module],
+      *,
+      param_scan_axis: int = 1,
+      remat: Any = None,
+  ):  # pylint: disable=super-init-not-called
     if not isinstance(param_scan_axis, int) or param_scan_axis < 0:
       raise ValueError("param_scan_axis must be a non-negative integer.")
     if not layers:
@@ -114,6 +149,7 @@ class ScannedLayers(nnx.Module):
         setattr(self, name, value)
     self._param_scan_axis = param_scan_axis
     self.num_layers = len(layers)
+    self.remat = remat
 
   def __call__(self, carry: Any, **kwargs: Any) -> Any:
     axis = self._param_scan_axis
@@ -123,15 +159,61 @@ class ScannedLayers(nnx.Module):
     stacked_rest = rest
     rest = _strip_layer_axis(rest, 0)
 
-    def body(carry, xs):
-      layer_params, layer_rest = xs
+    remat_cfg = getattr(self, "remat", None)
+    if remat_cfg is None:
+      use_remat = False
+      remat_pol = None
+    elif callable(remat_cfg):
+      use_remat = True
+      remat_pol = remat_cfg
+    else:
+      use_remat = True
+      remat_pol = getattr(remat_cfg, "policy", None)
+      if remat_pol is None:
+        remat_pol = cp.nothing_saveable
+
+    mro = type(self).__mro__
+    layer_cls = mro[mro.index(ScannedLayers) + 1]
+    filtered_kw = _filter_layer_kwargs(layer_cls, kwargs)
+    traced_kw = {k: v for k, v in filtered_kw.items() if isinstance(v, jax.Array)}
+    static_kw = {k: v for k, v in filtered_kw.items() if k not in traced_kw}
+
+    def _layer_step(carry_in, layer_params, layer_rest, dyn_kw):
       layer = nnx.merge(graphdef, layer_params, layer_rest)
       # The layer class's `__call__`: next in the MRO after this mixin.
-      carry = super(ScannedLayers, layer).__call__(carry, **kwargs)
+      carry_out = super(ScannedLayers, layer).__call__(carry_in, **dyn_kw, **static_kw)
       _, _, new_rest = nnx.split(layer, nnx.Param, ...)
-      return carry, new_rest
+      return carry_out, new_rest
 
-    carry, new_rest = jax.lax.scan(body, carry, (params, rest), length=self.num_layers)
+    if self.num_layers == 1 and use_remat and remat_pol is not None and remat_pol is not cp.nothing_saveable:
+      raw_pol = remat_pol
+
+      def _trip_one_pol(prim: Any, *args: Any, **params_kw: Any) -> Any:
+        decision = raw_pol(prim, *args, **params_kw)
+        if isinstance(decision, ad_checkpoint.Offloadable):
+          return ad_checkpoint.Saveable
+        return decision
+
+      remat_pol = _trip_one_pol
+    # Inside `jax.lax.scan`, the loop boundary prevents cross-step CSE (and the trip-count-one
+    # barrier preserves that boundary when `num_layers == 1`), matching `should_prevent_cse_in_remat`.
+    # Passing `prevent_cse=True` inside `scan` inserts optimization barriers that pin conflicting
+    # layouts on pinned-host (`S(5)`) dynamic-update-slice buffers under `minimal_offloaded`.
+    step_fn = jax.checkpoint(_layer_step, policy=remat_pol, prevent_cse=False) if use_remat else _layer_step
+
+    def body(carry_in, xs):
+      layer_params, layer_rest = xs
+      return step_fn(carry_in, layer_params, layer_rest, traced_kw)
+
+    if self.num_layers == 1:
+      # XLA's while-loop simplifier inlines trip-count-1 loops by default. Inlining drops the
+      # loop boundary, allowing the scheduler to overlap activation temporaries with adjacent
+      # layers and CSE across remat, defeating the per-layer checkpoint. Keeping the while loop
+      # preserves the scan body as a memory barrier.
+      with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+        carry, new_rest = jax.lax.scan(body, carry, (params, rest), length=self.num_layers)
+    else:
+      carry, new_rest = jax.lax.scan(body, carry, (params, rest), length=self.num_layers)
     if jax.tree.leaves(new_rest):
       # Restore the stacked metadata stripped for the body.
       new_rest = jax.tree.map(
@@ -150,11 +232,16 @@ def _scanned_class(layer_cls: type[nnx.Module]) -> type[ScannedLayers]:
   return type(f"Scanned{layer_cls.__name__}", (ScannedLayers, layer_cls), {})
 
 
-def scan_run(layers: Sequence[nnx.Module], *, param_scan_axis: int) -> ScannedLayers:
+def scan_run(
+    layers: Sequence[nnx.Module],
+    *,
+    param_scan_axis: int,
+    remat: Any = None,
+) -> ScannedLayers:
   """Stacks `layers` (all of one class) into a `Scanned<Layer>` instance."""
   if not layers:
     raise ValueError("Cannot scan an empty run of layers.")
-  return _scanned_class(type(layers[0]))(layers, param_scan_axis=param_scan_axis)
+  return _scanned_class(type(layers[0]))(layers, param_scan_axis=param_scan_axis, remat=remat)
 
 
 def _identical_runs(layers: Sequence[nnx.Module]) -> list[list[nnx.Module]]:
@@ -177,13 +264,18 @@ def scan_layers(layers: nnx.Sequential, *, param_scan_axis: int) -> nnx.Module:
   One run of identical layers becomes a single `ScannedLayers`. Several runs
   become an `nnx.Sequential` of `ScannedLayers`, one per run.
   """
-  runs = _identical_runs(list(layers))
+  prior_remat = getattr(layers, "remat", None)
+  runs = _identical_runs(list(layers.layers))
   scanned = []
   for run in runs:
     if isinstance(run[0], ScannedLayers):
+      if prior_remat is not None:
+        for item in run:
+          if getattr(item, "remat", None) is None:
+            item.remat = prior_remat
       scanned.extend(run)
       continue
-    scanned.append(scan_run(run, param_scan_axis=param_scan_axis))
+    scanned.append(scan_run(run, param_scan_axis=param_scan_axis, remat=prior_remat))
   if len(scanned) == 1:
     return scanned[0]
   return nnx.Sequential(*scanned)
@@ -216,4 +308,4 @@ def maybe_apply_scan(model: nnx.Module, config) -> nnx.Module:
   """Scans the model's layers when `config.scan_layers` is set."""
   if not config.scan_layers:
     return model
-  return apply_scan(model, param_scan_axis=config.param_scan_axis)
+  return apply_scan(model, param_scan_axis=getattr(config, "param_scan_axis", 0))

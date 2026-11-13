@@ -34,6 +34,7 @@ Nothing here names a mesh axis.
 from typing import Any, Optional
 from flax import nnx
 import jax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
@@ -117,11 +118,20 @@ class Qwen3MLP(nnx.Module):
     """Applies gated SwiGLU feed-forward projection: wo(silu(wi_0(x)) * wi_1(x))."""
     s = self.sharding
     x = s.constrain(x, "mlp_in", ("batch", "length", "embed"))
-    gate = jax.nn.silu(self.wi_0(x, out_sharding=s.out_sharding("wi_0_out", ("batch", "length", "mlp"))))
-    up = self.wi_1(x, out_sharding=s.out_sharding("wi_1_out", ("batch", "length", "mlp")))
-    hidden = (gate * up).astype(self.config.dtype)
+    wi_0 = checkpoint_name(
+        self.wi_0(x, out_sharding=s.out_sharding("wi_0_out", ("batch", "length", "mlp"))),
+        "mlpwi_0",
+    )
+    wi_1 = checkpoint_name(
+        self.wi_1(x, out_sharding=s.out_sharding("wi_1_out", ("batch", "length", "mlp"))),
+        "mlpwi_1",
+    )
+    hidden = (jax.nn.silu(wi_0) * wi_1).astype(self.config.dtype)
     hidden = s.constrain(hidden, "mlp_hidden", ("batch", "length", "mlp"))
-    out = self.wo(hidden, out_sharding=s.out_sharding("mlp_out", ("batch", "norm_length", "embed")))
+    out = checkpoint_name(
+        self.wo(hidden, out_sharding=s.out_sharding("mlp_out", ("batch", "norm_length", "embed"))),
+        "mlpwo",
+    )
     return s.constrain(out, "mlp_out", ("batch", "norm_length", "embed"))
 
 
@@ -209,20 +219,29 @@ class Qwen3Attention(nnx.Module):
     s = self.sharding
     is_default_positions = decoder_positions is None
     inputs = s.constrain(inputs, "attn_in", ("batch", "length", "embed"))
-    query = s.constrain(
-        self.query(inputs, out_sharding=s.out_sharding("query", ("batch", "length", "heads", "head_dim"))),
-        "query",
-        ("batch", "length", "heads", "head_dim"),
+    query = checkpoint_name(
+        s.constrain(
+            self.query(inputs, out_sharding=s.out_sharding("query", ("batch", "length", "heads", "head_dim"))),
+            "query",
+            ("batch", "length", "heads", "head_dim"),
+        ),
+        "query_proj",
     )
-    key = s.constrain(
-        self.key(inputs, out_sharding=s.out_sharding("key", ("batch", "length", "kv_heads", "head_dim"))),
-        "key",
-        ("batch", "length", "kv_heads", "head_dim"),
+    key = checkpoint_name(
+        s.constrain(
+            self.key(inputs, out_sharding=s.out_sharding("key", ("batch", "length", "kv_heads", "head_dim"))),
+            "key",
+            ("batch", "length", "kv_heads", "head_dim"),
+        ),
+        "key_proj",
     )
-    value = s.constrain(
-        self.value(inputs, out_sharding=s.out_sharding("value", ("batch", "length", "kv_heads", "head_dim"))),
-        "value",
-        ("batch", "length", "kv_heads", "head_dim"),
+    value = checkpoint_name(
+        s.constrain(
+            self.value(inputs, out_sharding=s.out_sharding("value", ("batch", "length", "kv_heads", "head_dim"))),
+            "value",
+            ("batch", "length", "kv_heads", "head_dim"),
+        ),
+        "value_proj",
     )
 
     if self.config.use_qk_norm:
@@ -258,7 +277,10 @@ class Qwen3Attention(nnx.Module):
         "attention_out",
         ("batch", "length", "heads", "head_dim"),
     )
-    proj = self.out(attn_out, out_sharding=s.out_sharding("attn_proj", ("batch", "norm_length", "embed")))
+    proj = checkpoint_name(
+        self.out(attn_out, out_sharding=s.out_sharding("attn_proj", ("batch", "norm_length", "embed"))),
+        "out_proj",
+    )
     return s.constrain(proj, "attn_proj", ("batch", "norm_length", "embed"))
 
 
@@ -307,7 +329,10 @@ class Qwen3DecoderLayer(nnx.Module):
       **kwargs,
   ) -> jax.Array:
     """Applies pre-norm attention and pre-norm MLP blocks with residual connections."""
-    inputs = self.sharding.constrain(inputs, "decoder_layer_input", ("batch", "norm_length", "embed"))
+    inputs = checkpoint_name(
+        self.sharding.constrain(inputs, "decoder_layer_input", ("batch", "norm_length", "embed")),
+        "decoder_layer_input",
+    )
     # Pre-attention norm & Self-attention
     normed_attn_in = self.pre_self_attention_layer_norm(inputs)
     attn_out = self.self_attention(

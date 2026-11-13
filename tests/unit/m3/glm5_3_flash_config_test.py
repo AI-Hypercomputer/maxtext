@@ -264,7 +264,7 @@ class Glm5ConfigTest(absltest.TestCase):
         ({"num_key_value_heads": 32}, r"num_key_value_heads.*must equal"),
         ({"linear_num_value_heads": 32}, r"linear_num_key_heads.*must equal"),
         ({"linear_value_head_dim": 64}, r"linear_key_head_dim.*must equal"),
-        ({"remat_policy": "bogus"}, "remat_policy must be 'none' or 'full'"),
+        ({"remat_policy": "bogus"}, "remat_policy must be one of"),
         (
             {"router_param_dtype": "bfloat16"},
             "router_param_dtype must be 'float32'",
