@@ -3,7 +3,8 @@ datasets>=5.0.1
 filelock>=4.2.1
 fsspec==2026.6.0
 gcsfs==2026.6.0
-orbax-checkpoint>=0.12.8
+orbax-checkpoint>=0.12.10
+etils[epath]>=1.15.0
 markdown>=3.10.2
 oauthlib>=4.0.1
 optax==0.2.8

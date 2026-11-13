@@ -1493,8 +1493,34 @@ def _filter_lora_trainable_state(state):
   return _filter_dict(state)
 
 
-def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False):
-  """Wrapper for saving checkpoint."""
+def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=None, force=False, backup=False):
+  """Wrapper for saving checkpoint.
+
+  Args:
+    checkpoint_manager: The checkpoint manager.
+    step: The training step.
+    state: The train state to save.
+    config: The MaxText config.
+    data_iterator: The data iterator, saved alongside the state with grain.
+    force: Save even if no checkpoint is due at this step.
+    backup: Multi-Tier Checkpointing only: ask for this step to be backed up to persistent storage, regardless
+      of the backup interval (e.g. at an epoch or phase boundary). Implies `force`. The request is attached to
+      the save that writes the step, so pass it on the first `save_checkpoint` call for that step (before any
+      periodic save of the same step); a step that is already saved cannot be backed up after the fact.
+  """
+  if backup:
+    if not isinstance(checkpoint_manager, EmergencyReplicatorCheckpointManager):
+      raise ValueError("backup=True requires Multi-Tier Checkpointing (`enable_multi_tier_checkpointing=True`).")
+    try:
+      already_saved = step in all_steps(checkpoint_manager)
+    except NotImplementedError:  # Pathways colocated mode does not track saved steps on the host.
+      already_saved = False
+    if already_saved:
+      raise ValueError(
+          f"backup=True must be passed on the save_checkpoint call that writes step {step}, but step {step} is "
+          "already saved. Call save_checkpoint(..., backup=True) before the periodic save of that step."
+      )
+    force = True
   # Allow struct.PyTreeNode so Flax dataclass states (e.g. DiLoCoTrainState) aren't cleared to empty dicts ({})
   if not isinstance(state, (dict, nnx.State, train_state.TrainState, struct.PyTreeNode)):
     if isinstance(state, train_state_nnx.TrainStateNNX):
@@ -1534,7 +1560,7 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
 
   # Emergency / replicator managers keep the v0 save path.
   if isinstance(checkpoint_manager, (EmergencyCheckpointManager, EmergencyReplicatorCheckpointManager)):
-    return emergency_checkpointing.save(checkpoint_manager, step, state, config, force)
+    return emergency_checkpointing.save(checkpoint_manager, step, state, config, force, backup=backup)
 
   # Record config properties needed to validate compatibility at load time
   # (e.g. proactive scan_layers verification, LoRA restore).

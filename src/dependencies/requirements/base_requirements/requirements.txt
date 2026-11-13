@@ -23,6 +23,9 @@ ml-goodput-measurement
 numpy
 omegaconf
 optax
+# MaxText needs orbax-checkpoint>=0.12.10, which requires etils>=1.15.0 and
+# therefore cannot be resolved against the JAX seed lock (etils==1.14.0). The
+# real floor is enforced through extra_deps/*_overrides.txt.
 orbax-checkpoint>=0.12.8
 parameterized
 pathwaysutils>=0.1.11

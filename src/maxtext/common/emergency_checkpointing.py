@@ -110,8 +110,12 @@ def create_replicator_checkpoint_manager(
   return manager
 
 
-def save(checkpoint_manager, step, state, config, force):
-  """v0 emergency save: writes the state under the ``state`` checkpointable."""
+def save(checkpoint_manager, step, state, config, force, backup=False):
+  """v0 emergency save: writes the state under the ``state`` checkpointable.
+
+  With ``backup=True`` Multi-Tier Checkpointing is asked to back up this step to persistent storage
+  regardless of its backup interval; such a step is always saved locally (``force`` is implied).
+  """
   chunk_byte_size = (
       config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
   )
@@ -121,7 +125,11 @@ def save(checkpoint_manager, step, state, config, force):
       ocdbt_target_data_file_size=chunk_byte_size,
   )
   replicator_error_handler(config)
-  return checkpoint_manager.save(step, args=ocp.args.Composite(state=checkpoint_args), force=force)
+  if not backup:
+    return checkpoint_manager.save(step, args=ocp.args.Composite(state=checkpoint_args), force=force)
+  if not isinstance(checkpoint_manager, ReplicatorCheckpointManager):
+    raise ValueError("backup=True requires Multi-Tier Checkpointing (`enable_multi_tier_checkpointing=True`).")
+  return checkpoint_manager.save(step, args=ocp.args.Composite(state=checkpoint_args), force=True, backup=True)
 
 
 def restore(checkpoint_manager, step, abstract_unboxed_pre_state):
@@ -138,7 +146,7 @@ def restore(checkpoint_manager, step, abstract_unboxed_pre_state):
 
 def replicator_error_handler(config: Any):
   """Replicator error handler to handle errors in replicator service."""
-  if config.enable_multi_tier_checkpointing:
+  if config and config.enable_multi_tier_checkpointing:
     local_dir = config.local_checkpoint_directory
     replicator_errors_file = f"{local_dir}/replicator.errors"
     replicator_failed_file = f"{local_dir}/replicator.failed"

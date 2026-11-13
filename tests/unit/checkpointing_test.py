@@ -947,6 +947,64 @@ class SaveCheckpointStepExistsTest(parameterized.TestCase):
     self.assertFalse(saved)
 
 
+class SaveCheckpointBackupTest(parameterized.TestCase):
+  """save_checkpoint(backup=True) asks Multi-Tier Checkpointing to back up the step."""
+
+  def test_backup_forwarded_to_multi_tier_checkpointing_manager(self):
+    manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
+    manager.all_steps.return_value = [0]  # step 5 not saved yet
+    manager.save.return_value = True
+
+    saved = checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
+
+    self.assertTrue(saved)
+    manager.save.assert_called_once()
+    _, kwargs = manager.save.call_args
+    self.assertTrue(kwargs["backup"])
+    self.assertTrue(kwargs["force"])  # a step to back up is always saved locally
+
+  def test_backup_rejected_for_already_saved_step(self):
+    # The request rides on the save that writes the step; a second forced save of the
+    # same step would raise StepAlreadyExistsError without requesting the backup.
+    manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
+    manager.all_steps.return_value = [0, 5]
+
+    with self.assertRaisesRegex(ValueError, "step 5 is already saved"):
+      checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
+    manager.save.assert_not_called()
+
+  def test_backup_allowed_when_saved_steps_unknown(self):
+    # Pathways colocated mode cannot list saved steps on the host; the request still goes through.
+    manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
+    manager.all_steps.side_effect = NotImplementedError("all_steps is not supported in colocated mode.")
+    manager.save.return_value = True
+
+    self.assertTrue(checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True))
+    self.assertTrue(manager.save.call_args.kwargs["backup"])
+
+  def test_no_backup_keeps_multi_tier_checkpointing_save_call_unchanged(self):
+    manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
+    manager.save.return_value = True
+
+    checkpointing.save_checkpoint(manager, 5, {"w": 1}, force=True)
+
+    _, kwargs = manager.save.call_args
+    self.assertNotIn("backup", kwargs)
+    self.assertTrue(kwargs["force"])
+
+  @parameterized.named_parameters(
+      ("standard_checkpointer", None),
+      ("single_tier_emergency_manager", checkpointing.EmergencyCheckpointManager),
+  )
+  def test_backup_rejected_without_multi_tier_checkpointing(self, manager_spec):
+    manager = mock.Mock(spec=manager_spec) if manager_spec else mock.Mock()
+    manager.use_async = False
+
+    with self.assertRaisesRegex(ValueError, "backup=True requires Multi-Tier Checkpointing"):
+      checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
+    self.assertEqual(manager.mock_calls, [])  # rejected before touching the manager
+
+
 class SaveCheckpointAsyncTest(parameterized.TestCase):
   """save_checkpoint must honor the manager's use_async flag (v0 async parity)."""
 
