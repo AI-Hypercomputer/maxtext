@@ -21,6 +21,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+from etils.epath import backend as epath_backend
 from flax import nnx
 from flax.training import train_state
 import jax
@@ -862,6 +863,31 @@ class LeadingAxisShardingTest(parameterized.TestCase):
     self.assertEqual(block_sizes_in_read, [0])
     self.assertEqual(gcsfs.GCSFileSystem.default_block_size, block_size)
     np.testing.assert_array_equal(loaded["w"], np.ones((4, 2), dtype=np.float32))
+
+  def test_gcs_path_opens_files_with_gcsfs(self):
+    # With TensorFlow installed, etils would open `gs://` files with tf.io.gfile, which reads 64 MiB per open file.
+    path = load_dynamic._GcsfsPath("gs://bucket/ckpt")  # pylint: disable=protected-access
+    self.assertIs(path._backend, epath_backend.fsspec_backend)  # pylint: disable=protected-access
+    self.assertIsInstance(path / "model.safetensors", load_dynamic._GcsfsPath)  # pylint: disable=protected-access
+
+  @parameterized.named_parameters(
+      ("gcs", "gs://bucket/ckpt", True),
+      ("local", "/tmp/ckpt", False),
+  )
+  def test_load_reads_gcs_through_gcsfs(self, path, uses_gcsfs):
+    pytest.importorskip("gcsfs")
+    with (
+        mock.patch.object(load_dynamic.ocp_v1, "Context", wraps=load_dynamic.ocp_v1.Context) as context,
+        mock.patch.object(load_dynamic.ocp_v1, "pytree_metadata", side_effect=RuntimeError("stop")),
+        self.assertRaisesRegex(RuntimeError, "stop"),
+    ):
+      load_dynamic.load_sharded_hf_state(path)
+
+    file_options = context.call_args.kwargs["file_options"]
+    if uses_gcsfs:
+      self.assertIs(file_options.path_class, load_dynamic._GcsfsPath)  # pylint: disable=protected-access
+    else:
+      self.assertIsNone(file_options)
 
 
 class CheckpointMetadataTest(parameterized.TestCase):
