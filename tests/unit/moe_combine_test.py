@@ -23,13 +23,20 @@ reshaping the [tokens * k, emb] activations to [tokens, k, emb].
 import types
 import unittest
 
+from absl.testing import absltest
+from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 import numpy as np
 
 from maxtext.common import common_types as ctypes
+from maxtext.configs import pyconfig
 from maxtext.kernels import sort_activations
 from maxtext.layers import moe
+from maxtext.layers.initializers import nd_dense_init
+from maxtext.utils import maxtext_utils
+from tests.utils.test_helpers import get_test_config_path
 
 
 def _routing(rng, num_tokens, k, num_experts):
@@ -128,5 +135,67 @@ class UnrouteReferenceTest(unittest.TestCase):
         )
 
 
+class DenseMatmulCombineDtypeTest(unittest.TestCase):
+  """RoutedMoE.dense_matmul with capacity_factor > 0 keeps self.dtype."""
+
+  def test_capacity_factor_combine_preserves_bfloat16_dtype(self):
+    def _build_layer(capacity_factor):
+      cfg = pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="dense_matmul_combine_dtype",
+          enable_checkpointing=False,
+          decoder_block="deepseek",
+          dtype="bfloat16",
+          weight_dtype="float32",
+          sparse_matmul=False,
+          megablox=False,
+          float32_gate_logits=True,
+          float32_weight_sum=True,
+          capacity_factor=capacity_factor,
+          num_experts=4,
+          num_experts_per_tok=2,
+          base_emb_dim=16,
+          base_mlp_dim=32,
+          base_moe_mlp_dim=32,
+          per_device_batch_size=1,
+          max_target_length=4,
+      )
+      devices = maxtext_utils.create_device_mesh(cfg)
+      mesh = jax.sharding.Mesh(devices, cfg.mesh_axes)
+      layer = moe.RoutedMoE(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=mesh,
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", None),
+          intermediate_dim=cfg.moe_mlp_dim,
+          dtype=cfg.dtype,
+          weight_dtype=cfg.weight_dtype,
+          rngs=nnx.Rngs(params=0),
+      )
+      return cfg, mesh, layer
+
+    def _scan_step(carry, _):
+      return layer_cap(carry)[0], None
+
+    cfg, mesh, layer_cap = _build_layer(capacity_factor=8.0)
+    _, _, layer_dropless = _build_layer(capacity_factor=-1.0)
+    shape = (jax.device_count(), 4, 16)
+    inputs = jax.random.normal(jax.random.PRNGKey(1), shape, dtype=jnp.bfloat16)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      out_cap, _, _ = layer_cap(inputs)
+      out_dropless, _, _ = layer_dropless(inputs)
+      scanned, _ = jax.lax.scan(_scan_step, inputs, None, length=2)
+    self.assertEqual(out_cap.dtype, jnp.bfloat16)
+    self.assertEqual(scanned.dtype, jnp.bfloat16)
+    np.testing.assert_allclose(
+        out_cap.astype(jnp.float32),
+        out_dropless.astype(jnp.float32),
+        rtol=2e-2,
+        atol=1e-2,
+    )
+
+
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

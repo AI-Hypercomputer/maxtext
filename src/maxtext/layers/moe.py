@@ -5089,7 +5089,7 @@ class RoutedMoE(nnx.Module):
             intermediate_layer,
             combine_mask,
             precision=matmul_precision,
-        )
+        ).astype(self.dtype)
         if output.ndim == 4:
           output = jnp.reshape(
               output,
