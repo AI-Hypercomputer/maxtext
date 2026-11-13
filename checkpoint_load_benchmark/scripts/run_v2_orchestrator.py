@@ -462,7 +462,7 @@ def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-argumen
     sh = (str(t["topology"]), int(t["slices"]))
     pending_by_shape[sh] = pending_by_shape.get(sh, 0) + 1
 
-  max_js = 7 if platform == "v7x" else 1
+  max_js = 10 if platform == "v7x" else (2 if platform == "v6e" else 1)
   for nxt in pending_ready_tasks:
     if len(active_jobsets) >= max_js:
       break
