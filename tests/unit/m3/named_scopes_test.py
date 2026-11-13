@@ -121,8 +121,8 @@ class NamedScopesTest(parameterized.TestCase):
         f"{layer}pre_self_attention_layer_norm/",
     ):
       self.assertTrue(any(prefix in n and scope in n for n in names), msg=f"no op under {prefix}...{scope}")
-    # The attention scores are inline code of the attention module; they land in its scope.
-    self.assertTrue(any(f"{layer}self_attention/" in n and "->bkgts" in n for n in names))
+    # Attention softmax ops issued inline by the attention module land in every layer's scope.
+    self.assertTrue(any(prefix in n and f"{layer}self_attention/" in n and "/exp" in n for n in names))
     self.assertTrue(any("decoder/apply_output_head/decoder_norm/" in n for n in names))
     self.assertTrue(any("decoder/token_embedder/" in n for n in names))
 
