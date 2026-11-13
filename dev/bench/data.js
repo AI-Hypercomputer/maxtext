@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794562689511,
+  "lastUpdate": 1794577436928,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -69426,6 +69426,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3170.5079999999984,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 338,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "a78b9cc0203c66865f32b5c3c179885d415392ab",
+          "message": "Relax the qwen3.8 flash next scanned vs unscanned bf16 parity check.\n\n`Qwen3_8BackboneTest.test_scanned_vs_unscanned_bfloat16_parity` started failing\ndeterministically: 20/4096 elements (0.49%) exceed `atol=rtol=0.1`, with a max\nabs diff of 0.174. No m3 model code changed. The shift comes from upstream\ncompiler numerics.\n\nThe scanned and unscanned models compile to different XLA programs, so bf16\nrounding through 4 layers of GDN + MoE + QSA diverges slightly. The fp32 parity\ntest (`test_scanned_vs_unscanned_parity_2_cycles`, atol=5e-5) still passes, so\nthe cross-path logic is correct and the bf16 gap is precision only.\n\nThis check now compares in fp32, with `atol=0.25, rtol=0.1` element-wise plus a\nmean abs error bound of 0.05 (measured: about 0.031), so it still catches gross\nbf16 regressions.\n\nPiperOrigin-RevId: 1020827363",
+          "timestamp": "2026-11-13T09:04:11Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/a78b9cc0203c66865f32b5c3c179885d415392ab"
+        },
+        "date": 1794577435796,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 258.17699999999985,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 36,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 61.23199999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 32,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2153.977,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 134.39999999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 585.261,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 89,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3102.0819999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 338,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1641.9769999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 407.05600000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 80,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3199.1169999999993,
             "unit": "sec"
           },
           {
