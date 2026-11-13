@@ -285,7 +285,7 @@ pytype>=2024.10.11
 pywin32>=310 ; sys_platform == 'win32'
 pyyaml>=6.0.3
 pyzmq>=27.3.0
-qwix>=0.1.9
+qwix>=0.1.10
 ray>=2.60.0
 referencing>=0.37.0
 regex>=2026.11.9
