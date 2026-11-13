@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-13 22:52:55 UTC`
+- **Last Updated (UTC):** `2026-11-13 23:04:25 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -15,7 +15,7 @@
 |---|---|---:|---:|---|---|
 | `v7x` | `us-central1` | **21 / 21** | **61 / 61** | `mesa-q-v7x-2x2x1-2s-w65`, `mesa-q-v7x-2x2x1-2s-w66`, `mesa-q-v7x-2x2x2-1s-w63`, `mesa-sd-v7x-397b-1x2x2x2`, `mesa-tm2-v7x-397b-2s` | _none_ |
 | `v6e` | `southamerica-west1` | **21 / 21** | **53 / 53** | _none_ | _none_ |
-| `v5e` | `europe-west4` | **12 / 12** | **22 / 22** | `mesa-fix-v5e-30b-r12` | _none_ |
+| `v5e` | `europe-west4` | **12 / 12** | **22 / 22** | `mesa-v5e-r1-s3-np0`, `mesa-v5e-r2-s12-np1` | _none_ |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
 
@@ -43,7 +43,6 @@
 
 ## 3. Chronological Event Log (Newest Last)
 
-- [2026-11-13 13:28:05 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1105 mirrored JSONs.
 - [2026-11-13 13:32:22 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1111 mirrored JSONs.
 - [2026-11-13 13:36:41 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1114 mirrored JSONs.
 - [2026-11-13 13:41:02 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1120 mirrored JSONs.
@@ -193,3 +192,4 @@
 - [2026-11-13 22:08:11 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1281 mirrored JSONs.
 - [2026-11-13 22:12:39 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1283 mirrored JSONs.
 - [2026-11-13 22:21:48 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1282 mirrored JSONs.
+- [2026-11-13 22:56:49 UTC] `v5e` TPU JobSet `mesa-fix-v5e-30b-r12` `Failed` and cleaned up.
