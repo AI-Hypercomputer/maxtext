@@ -179,6 +179,7 @@ save_quantized_params_path: ""
 # accepted values are "inference"
 model_call_mode: ""
 use_qwix_quantization: false # [DEPRECATED: AQT will be removed in a future release. It is strongly recommended to set use_qwix_quantization to true] whether to use qwix for quantization. if set to true, the model will be quantized using qwix.
+qwix_disable_channelwise_axes: false # fp8_full only: quantize GMM activations and backward cotangents with per-tensor scales (requires fixed weight calibration).
 use_manual_quantization: false # a flag if to use manual quantization for batch split. Only used if use_batch_split_schedule is true.
 # quantization calibration method used for weights and activations. supported methods can be found in https://github.com/google/qwix/blob/dc2a0770351c740e5ab3cce7c0efe9f7beacce9e/qwix/qconfig.py#l70-l80
 weight_quantization_calibration_method: "absmax"
@@ -372,6 +373,35 @@ moe_tc_ragged_3d_gmm: false # moe_tc_ragged_sort with tokamax gmm_v2: keep the s
 moe_tc_ragged_3d_dispatch: false # moe_tc_ragged_sort + moe_tc_ragged_3d_gmm: keep tokens in the (batch, seq, emb // 128, 128) layout through the EP all-gather and combine.
 moe_tc_window_routing: false # moe_tc_ragged_sort: keep only the shard's [start, start + cap) routing window, packed uint32 sorts.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
+moe_use_fused_gmm3d: false # EP=1 only: Lineage fused 3D-layout GMMv2 expert kernels (in-kernel token gather, SwiGLU + fp8 quantization,
+                           # top-k combine); the gate weight becomes one flat fused param wi [E * emb, 2 * mlp]. See configs/types.py.
+moe_fused_gmm3d_gate_tile_m: 768 # tile_m of gather_gate_gmm under moe_use_fused_gmm3d.
+moe_fused_gmm3d_gate_tile_k: 1024 # tile_k of gather_gate_gmm under moe_use_fused_gmm3d (multiple of 1024 dividing emb_dim).
+moe_fused_gmm3d_dgrad_tile_rows: 256 # tile_rows of linear_bwd_dgrad under moe_use_fused_gmm3d.
+moe_fused_gmm3d_dgrad_bucket_rows: 128 # bucket_rows of linear_bwd_dgrad under moe_use_fused_gmm3d.
+moe_fused_gmm3d_dgrad_tile_n: 512 # tile_n of linear_bwd_dgrad under moe_use_fused_gmm3d.
+moe_fused_gmm3d_dx_tile_m: 512 # tile_m of gmm_v2 gate_dx under moe_use_fused_gmm3d.
+moe_fused_gmm3d_dx_tile_k: 3072 # tile_k of gmm_v2 gate_dx under moe_use_fused_gmm3d.
+moe_fused_gmm3d_dx_tile_n: 2048 # tile_n of gmm_v2 gate_dx under moe_use_fused_gmm3d (multiple of 1024 dividing emb_dim).
+moe_fused_gmm3d_dw_tile_k: 1024 # tile_k of tgmm_v2 gate wgrad under moe_use_fused_gmm3d.
+moe_fused_gmm3d_gmm_combine: true # use linear_gmm_fp8 + ragged_gather_reduce_tc instead of linear_combine_fwd.
+moe_fused_gmm3d_split_gate_bwd: true # decouple gmm_v2 dx from tgmm_v2 dw_gate instead of gate_bwd_fused.
+moe_fused_gmm3d_split_dw_gate: true # split dw_gate into [E,D,F] halves with separate reduce-scatters for TC/SC pipelining.
+moe_fused_gmm3d_dgrad_tile_k: 1024 # tile_k of linear_bwd_dgrad under moe_use_fused_gmm3d (1024 or emb_dim).
+moe_fused_gmm3d_prequant_dy: false # pre-quantize dy [N, D] once per token to e5m2 before linear_bwd_dgrad.
+moe_fused_gmm3d_early_dwo_rs: false # run linear_bwd_wgrad + dwo reduce-scatter immediately after linear_bwd_dgrad before gate_dx.
+moe_fused_gmm3d_sc_routed_gather: false # issue 2D x_q[token_indices] gather at start of fused MoE bwd so XLA offloads asynchronously to SparseCore.
+moe_fused_gmm3d_exact_topk_combine: false # use specialized exact-top_k TensorCore gather-reduce combine kernel in fused MoE fwd and bwd.
+moe_fused_gmm3d_exact_topk_out_2d: false # flatten [block_tokens, D0, D1] -> [block_tokens, D] in VMEM inside exact_topk_gather_reduce_tc.
+moe_fused_gmm3d_wgrad_schedule_mode: 0 # schedule MoE wgrads + reduce-scatters earlier via scalar guards (0 = off, 1..16; every mode is described in configs/types.py).
+moe_fused_gmm3d_inv_perm_combine: false # use O(C) SparseCore inverse-permutation scatter instead of TC sort for exact_topk_combine src_rows.
+moe_fused_gmm3d_relayout_x_2d_to_3d: false # use Pallas VMEM strided-store relayout for x_q [N, D] -> [N, D//128, 128].
+moe_fused_gmm3d_fused_quant_relayout: false # fuse FP8 quantize + [N, D] -> [N, D//128, 128] relayout in VMEM for x2d.
+moe_fused_gmm3d_overlap_dcoeffs_scatter: false # overlap unique-index dcoeffs SparseCore scatter behind MoE wgrad + gate_dx.
+moe_packed_routing_sort: false # pack (expert_id << 20) | slot_idx into a single uint32 array for routing argsort.
+use_qwen3_fused_qkv: false # fuse Qwen3 QKV projection + QK RMSNorm + RoPE + Splash layout in Pallas kernel.
+use_qwen3_fused_out: false # use custom-VJP FSDP Attention out projection with local absmax bwd and early dw_o reduce-scatter.
+qwen3_defer_norm_grad_allreduce: false # defer per-layer RMSNorm and QK-norm scale gradient all-reduces until after the decoder scan loop.
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
@@ -1504,6 +1534,8 @@ sa_use_base2_exp: true # defaults to true in Tokamax
 sa_qk_diag_skip: false # skip strictly causal-masked sub-tiles in diagonal QK blocks
 sa_sv_diag_skip: false # skip zeroed strictly causal-masked sub-tiles in diagonal SV blocks
 sa_qk_diag_grid: 2 # sub-grid split factor for diagonal skip (power of 2 >= 2)
+sa_diag_band_skip: false # run Splash dkv causal diagonal block as sa_qk_diag_grid kv row-bands skipping strictly-above-diagonal tiles
+sa_num_stacked_q_heads: 1 # process this many query heads of the same KV group per Splash forward grid step
 # local_sa_* variants apply to local (sliding window) attention layers;
 # if None, each inherits from the corresponding global sa_* flag.
 local_sa_block_q: None  # inherits from sa_block_q if None
@@ -1531,7 +1563,15 @@ experimental_sa_quant_q_fp8: False # Experimental flag: If enabled, the Q tensor
 experimental_sa_quant_k_fp8: False # Experimental flag: If enabled, the K tensor in splash attention is quantized to jnp.float8_e4m3fn, without scaling factors.
 sa_dkv_reuse_scaled_q: False # Experimental (SplashConfig.dkv_reuse_scaled_q): fused dkv kernel reuses LOG2E-scaled q for dK (1 live q copy instead of 2). Works with bf16 or fp8 q; subsumed by sa_q_prescaled_log2e.
 sa_q_prescaled_log2e: False # Experimental (SplashConfig.q_prescaled_log2e): folds LOG2E into f32 q softmax_scale before fp8 cast (1 fp8 rounding instead of 2) and skips in-kernel q scaling. Preferred over sa_dkv_reuse_scaled_q for MLA with fp8 q.
-sa_ignore_segment_ids: False # Do not pass segment ids to splash attention, for both train and eval. Splash then runs its non-segmented kernels, which skip the per-block segment-id compare and mask (VPU work on every block, not only diagonal ones); causal masking still applies. Only valid for c4_mlperf with stream chunking, where every row is one segment.
+sa_dq_transposed: False # Experimental (SplashConfig.dq_transposed): accumulate dq^T = k^T * ds in Splash dkv when k_layout=SEQ_MINOR.
+sa_bwd_fp8_ds: False # Experimental (SplashConfig.bwd_fp8_ds): quantize ds per-tile to float8_e4m3fn with power-of-2 scale in Splash dkv.
+sa_bwd_fp8_dov: False # Experimental (SplashConfig.bwd_fp8_dov): quantize do and p to float8_e4m3fn with power-of-2 scales so dv runs on FP8 MXU in Splash dkv.
+sa_fwd_pv_fp8: False # Experimental (SplashConfig.fwd_pv_fp8): quantize s per-row and v per-tile to float8_e4m3fn with power-of-2 scales in Splash fwd.
+sa_compact_residuals: False # Experimental (SplashConfig.compact_residuals): write logsumexp directly in compact (num_q_heads, 8, q_seq_len) layout from Splash fwd and skip dead max_logits.
+sa_bwd_vmem_dkv_gqa: False # Experimental (SplashConfig.bwd_vmem_dkv_gqa): accumulate full-KV dk/dv in VMEM across q_heads_per_kv_head on dynamic grid when kv_steps <= 2.
+sa_context_split_device_heads: 0 # Experimental: split Splash forward `out` across query heads (`[:N]` + logsumexp on device HBM, `[N:]` offloaded to pinned host) under custom remat to eliminate backward Splash fwd remat within HBM and host-memory caps.
+sa_context_offload_fp8: False # Experimental: quantize offloaded Splash `out[dh:]` per 128-dim row to float8_e4m3fn + bf16 scale on device to halve host RAM and PCIe transfer. The attention output itself becomes the dequantized (fp8-rounded) value, not only the stored copy.
+sa_ignore_segment_ids: False # Do not pass segment ids to splash attention, for both train and eval. Splash then runs its non-segmented kernels, which skip the per-block segment-id compare and mask (VPU work on every block, not only diagonal ones); causal masking still applies. Only valid where every row is one segment: c4_mlperf with stream chunking, or synthetic data without packed segments (max_segments_per_seq < 2).
 use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)
 cost_estimate_flops_bwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (backward)
