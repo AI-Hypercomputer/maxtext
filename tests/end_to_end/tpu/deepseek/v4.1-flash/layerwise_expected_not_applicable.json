@@ -1,0 +1,125 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "stage": "L2",
+      "sample": "M4",
+      "layer": 2,
+      "check": "indexer_agreement",
+      "geometry": {
+        "compress_ratio": 2,
+        "index_topk": 512,
+        "max_reachable": 512,
+        "geometrically_eligible_queries": 0
+      },
+      "reason": "S=1024, ratio 2: no query reaches more than indexer_topk=512 compressed positions (deepseek4.1-flash.yml:53,58)"
+    },
+    {
+      "stage": "L2",
+      "sample": "M4",
+      "layer": 14,
+      "check": "indexer_agreement",
+      "geometry": {
+        "compress_ratio": 2,
+        "index_topk": 512,
+        "max_reachable": 512,
+        "geometrically_eligible_queries": 0
+      },
+      "reason": "S=1024, ratio 2: no query reaches more than indexer_topk=512 compressed positions (deepseek4.1-flash.yml:53,58)"
+    },
+    {
+      "stage": "L2",
+      "sample": "M4",
+      "layer": 20,
+      "check": "candidate_selection",
+      "geometry": {
+        "compress_ratio": 1,
+        "candidate_topk_blocks": 2048,
+        "candidate_block_size": 8,
+        "max_reachable": 1024,
+        "geometrically_eligible_queries": 0
+      },
+      "reason": "S=1024: every query reaches at most 1024 <= candidate_topk_blocks*candidate_block_size=16384 positions (deepseek4.1-flash.yml:59-61)"
+    },
+    {
+      "stage": "L2",
+      "sample": "S2048",
+      "layer": 20,
+      "check": "candidate_selection",
+      "geometry": {
+        "compress_ratio": 1,
+        "candidate_topk_blocks": 2048,
+        "candidate_block_size": 8,
+        "max_reachable": 2048,
+        "geometrically_eligible_queries": 0
+      },
+      "reason": "S=2048: every query reaches at most 2048 <= candidate_topk_blocks*candidate_block_size=16384 positions (deepseek4.1-flash.yml:59-61)"
+    },
+    {
+      "stage": "L2",
+      "sample": "L2x",
+      "layer": 2,
+      "check": "indexer_agreement",
+      "geometry": {
+        "compress_ratio": 2,
+        "index_topk": 512,
+        "max_reachable": 204,
+        "geometrically_eligible_queries": 0
+      },
+      "reason": "S=408, ratio 2: no query reaches more than indexer_topk=512 compressed positions (deepseek4.1-flash.yml:53,58)"
+    },
+    {
+      "stage": "L2",
+      "sample": "L2x",
+      "layer": 14,
+      "check": "indexer_agreement",
+      "geometry": {
+        "compress_ratio": 2,
+        "index_topk": 512,
+        "max_reachable": 204,
+        "geometrically_eligible_queries": 0
+      },
+      "reason": "S=408, ratio 2: no query reaches more than indexer_topk=512 compressed positions (deepseek4.1-flash.yml:53,58)"
+    },
+    {
+      "stage": "L2",
+      "sample": "L2x",
+      "layer": 20,
+      "check": "indexer_agreement",
+      "geometry": {
+        "compress_ratio": 1,
+        "index_topk": 512,
+        "max_reachable": 408,
+        "geometrically_eligible_queries": 0
+      },
+      "reason": "S=408, ratio 1: no query reaches more than indexer_topk=512 compressed positions (deepseek4.1-flash.yml:53,58)"
+    },
+    {
+      "stage": "L2",
+      "sample": "L2x",
+      "layer": 20,
+      "check": "candidate_selection",
+      "geometry": {
+        "compress_ratio": 1,
+        "candidate_topk_blocks": 2048,
+        "candidate_block_size": 8,
+        "max_reachable": 408,
+        "geometrically_eligible_queries": 0
+      },
+      "reason": "S=408: every query reaches at most 408 <= candidate_topk_blocks*candidate_block_size=16384 positions (deepseek4.1-flash.yml:59-61)"
+    },
+    {
+      "stage": "L2",
+      "sample": "L2x",
+      "layer": 24,
+      "check": "indexer_agreement",
+      "geometry": {
+        "compress_ratio": 1,
+        "index_topk": 512,
+        "max_reachable": 408,
+        "geometrically_eligible_queries": 0
+      },
+      "reason": "S=408, ratio 1: no query reaches more than indexer_topk=512 compressed positions (deepseek4.1-flash.yml:53,58)"
+    }
+  ]
+}
