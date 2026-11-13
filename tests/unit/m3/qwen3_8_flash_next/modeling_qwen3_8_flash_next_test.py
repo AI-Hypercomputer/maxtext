@@ -1790,6 +1790,7 @@ class Qwen3_8BackboneTest(absltest.TestCase):
     """Verifies the checkpointed scanned cycle (remat) matches the uncheckpointed one (loss and gradients)."""
     cfgs = [_get_mini_config(scan_layers=True, base_num_decoder_layers=8, remat_policy=p) for p in ("full", "none")]
     m_remat, m_plain = (m3_models.create_model(c, mesh=None) for c in cfgs)
+    m_remat.decoder.set_remat(jax.checkpoint_policies.nothing_saveable)
     nnx.update(m_plain, nnx.state(m_remat))
     self.assertTrue(m_remat.decoder.remat)
     self.assertFalse(m_plain.decoder.remat)

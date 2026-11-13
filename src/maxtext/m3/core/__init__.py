@@ -20,6 +20,7 @@ Modules:
   * `sharding.py` — `Sharding` ABC, `DefaultSharding` rules, mesh creation.
   * `kernels.py` — `AttentionKernel` and `SplashConfig` attention kernel dispatch.
   * `moe.py` — `MoEExecutor` routed-expert runtime and load-balance loss.
+  * `remat.py` — plain-JAX remat policy helpers and trip-count-one scan barrier.
 
 Planned modules:
   * `interfaces.py` — shared ABCs and `CausalLMOutput`.
