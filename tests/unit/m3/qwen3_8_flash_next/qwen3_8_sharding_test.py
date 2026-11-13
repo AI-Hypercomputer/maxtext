@@ -42,7 +42,7 @@ _TP = ("tensor", "tensor_sequence")
 
 def _mini_config(**overrides):
   """`qwen3.8-flash-next-mini`: one four-layer cycle (three GDN layers, one QSA layer), PLE, and an MTP block."""
-  kwargs = {"scan_layers": False, "dtype": "float32", "weight_dtype": "float32", **overrides}
+  kwargs = {"scan_layers": False, "remat_policy": "none", "dtype": "float32", "weight_dtype": "float32", **overrides}
   return pyconfig.initialize(
       [None, f"{maxtext_globals.MAXTEXT_CONFIGS_DIR}/base.yml"],
       model_name="qwen3.8-flash-next-mini",
@@ -100,7 +100,7 @@ class AnnotationTest(absltest.TestCase):
 
   def test_weights_name_the_strategy_axes(self):
     params = _params(m3_models.create_model(_mini_config(), self.mesh, rngs=nnx.Rngs(0)))
-    gdn, qsa, ple = "decoder/layers_0", "decoder/layers_3/self_attn", "decoder/layers_1/ple"
+    gdn, qsa, ple = "decoder/first_cycle/gdn_0", "decoder/first_cycle/qsa_3/self_attn", "decoder/first_cycle/gdn_1/ple"
     expected = {
         "decoder/token_embedder/embedding": P(_TP, _DENSE_FSDP),
         "lm_head/kernel": P(_DENSE_FSDP, _TP),
@@ -137,7 +137,7 @@ class AnnotationTest(absltest.TestCase):
       self.assertEqual(params[path].get_metadata()["out_sharding"], spec, path)
 
   def test_scanned_cycle_leaves_the_cycle_axis_unsharded(self):
-    config = _mini_config(scan_layers=True, base_num_decoder_layers=8)
+    config = _mini_config(scan_layers=True, base_num_decoder_layers=12)
     params = _params(m3_models.create_model(config, self.mesh, rngs=nnx.Rngs(0)))
     cycle = "decoder/cycles/gdn_0"
     kernel = params[f"{cycle}/linear_attn/in_proj_qkv/kernel"]
@@ -151,9 +151,10 @@ class AnnotationTest(absltest.TestCase):
         params[f"{cycle}/mlp/experts/down_proj"].get_metadata()["out_sharding"], P(None, "expert", _TP, _EXPERT_FSDP)
     )
     self.assertEqual(params[f"{cycle}/linear_attn/norm/scale"].get_metadata()["out_sharding"], P(None, None))
-    # The PLE layer is hoisted out of the cycle and keeps its unstacked spec.
+    # The PLE layer stays in `first_cycle` and keeps its unstacked spec.
     self.assertEqual(
-        params["decoder/ple/ple_embedding/ngram_embedding/embedding"].get_metadata()["out_sharding"], P(_DENSE_FSDP, None)
+        params["decoder/first_cycle/gdn_1/ple/ple_embedding/ngram_embedding/embedding"].get_metadata()["out_sharding"],
+        P(_DENSE_FSDP, None),
     )
 
   def test_construction_without_a_mesh_records_the_logical_spec(self):
@@ -163,7 +164,8 @@ class AnnotationTest(absltest.TestCase):
     for path, var in params.items():
       self.assertLen(var.get_metadata()["out_sharding"], var[...].ndim, path)
     self.assertEqual(
-        params["decoder/layers_0/linear_attn/in_proj_qkv/kernel"].get_metadata()["out_sharding"], P(_DENSE_FSDP, None)
+        params["decoder/first_cycle/gdn_0/linear_attn/in_proj_qkv/kernel"].get_metadata()["out_sharding"],
+        P(_DENSE_FSDP, None),
     )
 
 
@@ -189,29 +191,31 @@ class PlacementTest(absltest.TestCase):
 
   def test_tensor_parallelism_splits_heads_mlp_and_vocab(self):
     params = _params(self._model(create_mesh(ici={"fsdp": -1, "tensor": 2}, devices=self.devices)))
-    self.assertEqual(_shard_shape(params["decoder/layers_3/self_attn/q_proj/kernel"]), (128, 256))
-    self.assertEqual(_shard_shape(params["decoder/layers_3/self_attn/o_proj/kernel"]), (128, 128))
-    self.assertEqual(_shard_shape(params["decoder/layers_0/mlp/shared_expert/gate_proj/kernel"]), (128, 32))
-    self.assertEqual(_shard_shape(params["decoder/layers_0/mlp/experts/gate_up_proj"]), (8, 128, 2, 32))
-    self.assertEqual(_shard_shape(params["decoder/layers_0/mlp/experts/down_proj"]), (8, 32, 128))
+    self.assertEqual(_shard_shape(params["decoder/first_cycle/qsa_3/self_attn/q_proj/kernel"]), (128, 256))
+    self.assertEqual(_shard_shape(params["decoder/first_cycle/qsa_3/self_attn/o_proj/kernel"]), (128, 128))
+    self.assertEqual(_shard_shape(params["decoder/first_cycle/gdn_0/mlp/shared_expert/gate_proj/kernel"]), (128, 32))
+    self.assertEqual(_shard_shape(params["decoder/first_cycle/gdn_0/mlp/experts/gate_up_proj"]), (8, 128, 2, 32))
+    self.assertEqual(_shard_shape(params["decoder/first_cycle/gdn_0/mlp/experts/down_proj"]), (8, 32, 128))
     self.assertEqual(_shard_shape(params["decoder/token_embedder/embedding"]), (512, 128))
     self.assertEqual(_shard_shape(params["lm_head/kernel"]), (128, 512))
     # Gated DeltaNet has no `tensor` dimension, so it stays FSDP-only.
-    self.assertEqual(_shard_shape(params["decoder/layers_0/linear_attn/in_proj_qkv/kernel"]), (128, 512))
+    self.assertEqual(_shard_shape(params["decoder/first_cycle/gdn_0/linear_attn/in_proj_qkv/kernel"]), (128, 512))
 
   def test_expert_axis_splits_the_routed_experts(self):
     params = _params(self._model(create_mesh(ici={"fsdp": -1, "expert": 2}, devices=self.devices)))
-    self.assertEqual(_shard_shape(params["decoder/layers_0/mlp/experts/gate_up_proj"]), (4, 128, 2, 64))
-    self.assertEqual(_shard_shape(params["decoder/layers_0/mlp/experts/down_proj"]), (4, 64, 128))
+    self.assertEqual(_shard_shape(params["decoder/first_cycle/gdn_0/mlp/experts/gate_up_proj"]), (4, 128, 2, 64))
+    self.assertEqual(_shard_shape(params["decoder/first_cycle/gdn_0/mlp/experts/down_proj"]), (4, 64, 128))
     # A dense weight spends the `expert` axis on its model dimension.
-    self.assertEqual(_shard_shape(params["decoder/layers_0/linear_attn/in_proj_qkv/kernel"]), (64, 512))
+    self.assertEqual(_shard_shape(params["decoder/first_cycle/gdn_0/linear_attn/in_proj_qkv/kernel"]), (64, 512))
 
   def test_scan_keeps_the_placement(self):
     mesh = create_mesh(ici={"fsdp": -1}, devices=self.devices)
-    params = _params(self._model(mesh, scan_layers=True, base_num_decoder_layers=8))
+    params = _params(self._model(mesh, scan_layers=True, base_num_decoder_layers=12))
     kernel = params["decoder/cycles/gdn_0/linear_attn/in_proj_qkv/kernel"]
     self.assertEqual(_shard_shape(kernel), (2, 64, 512))
-    self.assertAlmostEqual(_shard_fraction(params["decoder/ple/ple_embedding/ngram_embedding/embedding"]), 1 / 4)
+    self.assertAlmostEqual(
+        _shard_fraction(params["decoder/first_cycle/gdn_1/ple/ple_embedding/ngram_embedding/embedding"]), 1 / 4
+    )
 
   def test_dimension_the_mesh_cannot_divide_stays_replicated(self):
     """Six experts do not divide over `expert=4`: that dimension is left whole instead of failing construction."""
@@ -310,13 +314,14 @@ class PlacementTest(absltest.TestCase):
     mesh = create_mesh(ici={"fsdp": -1}, devices=self.devices)
     _, abstract = model_creation_utils.create_nnx_abstract_model(_mini_config(), mesh)
     state = {"/".join(map(str, p)): v for p, v in nnx.to_flat_state(nnx.state(abstract, nnx.Param))}
-    kernel = state["decoder/layers_0/linear_attn/in_proj_qkv/kernel"]
+    kernel = state["decoder/first_cycle/gdn_0/linear_attn/in_proj_qkv/kernel"]
     self.assertEqual(kernel.get_metadata()["out_sharding"], P(_DENSE_FSDP, None))
     self.assertEqual(kernel.get_value().sharding.spec, P(_DENSE_FSDP, None))
     self.assertEqual(
-        state["decoder/layers_0/mlp/experts/gate_up_proj"].get_value().sharding.spec, P("expert", _EXPERT_FSDP, None, _TP)
+        state["decoder/first_cycle/gdn_0/mlp/experts/gate_up_proj"].get_value().sharding.spec,
+        P("expert", _EXPERT_FSDP, None, _TP),
     )
-    self.assertEqual(state["decoder/layers_0/linear_attn/norm/scale"].get_value().sharding.spec, P(None))
+    self.assertEqual(state["decoder/first_cycle/gdn_0/linear_attn/norm/scale"].get_value().sharding.spec, P(None))
 
 
 def _grads(fn, *args):
@@ -395,10 +400,8 @@ class SequenceShardingTest(absltest.TestCase):
       for got, ref in zip(grads, ref_grads):
         np.testing.assert_allclose(got, ref, atol=1e-5, rtol=1e-4, err_msg=str(ici))
 
-  def _compare_with_single_device(self, ici, tokens, *, devices=None, atol=1e-4, rtol=1e-4, **overrides):
+  def _compare_with_single_device(self, ici, tokens, *, devices=None, atol=1e-4, rtol=1e-4, plain_ref=None, **overrides):
     """Loss and gradients of a model built on `ici` against the same weights on one device."""
-    plain = m3_models.create_model(_mini_config(**overrides), mesh=None, rngs=nnx.Rngs(0))
-    plain_params = _params(plain)
     targets = jnp.roll(tokens, -1, axis=-1)
     segment_ids = jnp.ones(tokens.shape, dtype=jnp.int32).at[:, tokens.shape[1] // 2 :].set(2)
 
@@ -410,14 +413,20 @@ class SequenceShardingTest(absltest.TestCase):
 
     mesh = create_mesh(ici=ici, devices=devices or self.devices)
     sharded = m3_models.create_model(_mini_config(**overrides), mesh, rngs=nnx.Rngs(0))
-    for path, var in _params(sharded).items():
-      plain_params[path].set_value(jnp.asarray(np.asarray(var[...])))
     with jax.set_mesh(mesh):
       loss_sharded, grads_sharded = _grads(loss_fn, sharded)
-    loss_plain, grads_plain = _grads(loss_fn, plain)
+    if plain_ref is None:
+      plain = m3_models.create_model(_mini_config(**overrides), mesh=None, rngs=nnx.Rngs(0))
+      plain_params = _params(plain)
+      for path, var in _params(sharded).items():
+        plain_params[path].set_value(jnp.asarray(np.asarray(var[...])))
+      loss_plain, grads_plain = _grads(loss_fn, plain)
+    else:
+      loss_plain, grads_plain = plain_ref
     np.testing.assert_allclose(loss_sharded, loss_plain, rtol=1e-5, err_msg=str(ici))
     for name, grad in grads_sharded.items():
       np.testing.assert_allclose(grad, grads_plain[name], atol=atol, rtol=rtol, err_msg=f"{ici} {name}")
+    return loss_plain, grads_plain
 
   def test_sequence_sharded_model_matches_single_device(self):
     """Sharding the sequence, over `context` or (EP = CP) over `expert`, moves bytes, not numbers.
@@ -427,13 +436,14 @@ class SequenceShardingTest(absltest.TestCase):
     """
     tokens = jax.random.randint(jax.random.key(1), (4, 64), 4, 1024, dtype=jnp.int32)
     rule = modeling_qwen3_8_flash_next.context_parallel_chunk_gated_delta_rule
+    plain_ref = None
     for ici, overrides in (
         ({"context": -1}, {}),
         ({"expert": -1}, {"expert_context_parallel": True}),
         ({"fsdp": 2, "expert": 2}, {"expert_context_parallel": True}),
     ):
       with mock.patch.object(modeling_qwen3_8_flash_next, "context_parallel_chunk_gated_delta_rule", wraps=rule) as cp:
-        self._compare_with_single_device(ici, tokens, **overrides)
+        plain_ref = self._compare_with_single_device(ici, tokens, plain_ref=plain_ref, **overrides)
       self.assertEqual(cp.call_count, 3, f"{ici}: one call per Gated DeltaNet layer")
       length_axes = {call.kwargs["length_axes"] for call in cp.call_args_list}
       self.assertEqual(length_axes, {("context",) if "context" in ici else ("expert",)}, str(ici))
@@ -461,7 +471,7 @@ class SequenceShardingTest(absltest.TestCase):
     self.assertIn(2, [call.kwargs.get("q_seq_shards") for call in make_kernel.call_args_list])
 
   def test_moe_preserves_3d_sequence_sharding_and_logical_axis_rules(self):
-    """Qwen3_8SparseMoeBlock passes 3D (B, S, D) tokens to routed_experts_fused so executor.length stays ('context', 'expert')."""
+    """Qwen3_8SparseMoeBlock passes 3D (B, S, D) tokens to routed_experts_fused with length=('context', 'expert')."""
     cfg_default = _mini_config(expert_context_parallel=False)
     cfg_epcp = _mini_config(expert_context_parallel=True)
     rules_default = dict(cfg_default.logical_axis_rules)
@@ -539,10 +549,10 @@ class SequenceShardingTest(absltest.TestCase):
     mesh = create_mesh(ici={"fsdp": 2, "expert": 2}, devices=self.devices)
 
     untiled_cfg = _mini_config(
-        base_num_decoder_layers=1, use_ple_layer=False, expert_context_parallel=True, num_vocab_tiling=1
+        base_num_decoder_layers=4, use_ple_layer=False, expert_context_parallel=True, num_vocab_tiling=1
     )
     tiled_cfg = _mini_config(
-        base_num_decoder_layers=1, use_ple_layer=False, expert_context_parallel=True, num_vocab_tiling=2
+        base_num_decoder_layers=4, use_ple_layer=False, expert_context_parallel=True, num_vocab_tiling=2
     )
     untiled_model = m3_models.create_model(untiled_cfg, mesh, rngs=nnx.Rngs(0))
     tiled_model = m3_models.create_model(tiled_cfg, mesh, rngs=nnx.Rngs(0))
@@ -560,7 +570,7 @@ class SequenceShardingTest(absltest.TestCase):
       loss_untiled, grads_untiled = _grads(loss_fn, untiled_model)
       loss_tiled, grads_tiled = _grads(loss_fn, tiled_model)
       # Also verify the train.py sow-interception path when decoder_target_tokens is passed.
-      ret = tiled_model(tokens, decoder_target_tokens=targets)
+      ret = nnx.jit(lambda m: m(tokens, decoder_target_tokens=targets))(tiled_model)
       self.assertIsNone(ret)
       sowed = tiled_model.decoder.hidden_states.get_value()[-1]
       self.assertEqual(sowed.shape, (2, 32, tiled_cfg.emb_dim))

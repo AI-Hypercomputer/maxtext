@@ -541,6 +541,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     with jax.set_mesh(mesh), nnx.use_eager_sharding(True):
       cfg_scan = _qwen3_8_mini_config(
           scan_layers=True,
+          base_num_decoder_layers=8,
           remat_policy="custom",
           tensors_on_device=["moe_routed_output"],
       )
@@ -564,19 +565,22 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
 
       gd, st = nnx.split(m_scan.decoder)
       dec_jaxpr = jax.make_jaxpr(lambda s, t: nnx.merge(gd, s)(t)[0])(st, toks).jaxpr
-      # Top-level decoder jaxpr must NOT wrap the `scan` primitive in a coarse outer `remat2`.
+      # Top-level decoder jaxpr has 4 per-sublayer `remat2` calls for `first_cycle` (`prevent_cse=False`)
+      # and 1 `scan` call for `cycles` whose body has 4 per-sublayer `remat2` calls (`prevent_cse=True`).
       top_remat = [eqn for eqn in dec_jaxpr.eqns if eqn.primitive.name == "remat2"]
-      self.assertEqual(len(top_remat), 0, "Cycle scan must not be wrapped in a single coarse outer remat2")
+      self.assertLen(top_remat, 4)
+      for eqn in top_remat:
+        self.assertFalse(eqn.params.get("prevent_cse", True))
       scan_eqns = [eqn for eqn in dec_jaxpr.eqns if eqn.primitive.name == "scan"]
       self.assertLen(scan_eqns, 1)
       scan_body_jaxpr = scan_eqns[0].params["jaxpr"].jaxpr
       inner_remat = [eqn for eqn in scan_body_jaxpr.eqns if eqn.primitive.name == "remat2"]
-      # 4 decoder sublayers (`gdn_0`, `gdn_1`, `gdn_2`, `qsa_3`) + optional `ple` -> >= 4 per-sublayer checkpoints.
+      # 4 decoder sublayers (`gdn_0`, `gdn_1`, `gdn_2`, `qsa_3`) inside `cycles`.
       self.assertGreaterEqual(len(inner_remat), 4)
       for eqn in inner_remat:
         self.assertTrue(eqn.params.get("prevent_cse", False))
 
-      # Single-cycle (`num_cycles == 1`) compiled HLO must preserve the `while` loop barrier.
+      # Single-stacked-cycle (`num_stacked_cycles == 1`, `base_num_decoder_layers == 8`) HLO preserves `while(`.
       toks_arr = jax.device_put(jnp.ones((1, 8), dtype=jnp.int32), rep)
       hlo_1cyc = jax.jit(lambda s, t: nnx.merge(gd, s)(t)[0]).lower(st, toks_arr).compile().as_text()
       self.assertIn("while(", hlo_1cyc)
@@ -803,9 +807,10 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
           weight_dtype="bfloat16",
       )
       model = model_creation_utils.create_model(cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
-      ple_shape = model.decoder.ple.ple_embedding.ngram_embedding.embedding.shape
+      ple_shape = model.decoder.first_cycle.gdn_1.ple.ple_embedding.ngram_embedding.embedding.shape
       num_cycles = model.decoder.num_cycles
       stacked_sig = f"{num_cycles}x{ple_shape[0]}x{ple_shape[1]}"
+      stacked_rem_sig = f"{model.decoder.num_stacked_cycles}x{ple_shape[0]}x{ple_shape[1]}"
       gdef, params, rest = nnx.split(model, nnx.Param, ...)
 
       for pol_name in ("full", "minimal_with_context", "custom"):
@@ -820,6 +825,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
 
         mlir = jax.jit(jax.grad(loss_fn)).lower(params).as_text()
         self.assertNotIn(stacked_sig, mlir, f"PLE weights stacked across cycles under {pol_name}: {stacked_sig}")
+        self.assertNotIn(stacked_rem_sig, mlir, f"PLE weights stacked across cycles under {pol_name}: {stacked_rem_sig}")
 
   @parameterized.parameters(False, True)
   def test_glm5_3_set_remat_tags_eval_gate_and_grad_parity(self, scan_layers: bool):
@@ -902,7 +908,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     cfg = _qwen3_8_mini_config(scan_layers=False, remat_policy="full")
     with jax.set_mesh(mesh):
       decoder = modeling_qwen3_8_flash_next.Qwen3_8Decoder(cfg, rngs=nnx.Rngs(0))
-      layer0 = getattr(decoder, "layers_0")
+      layer0 = decoder.first_cycle.gdn_0
 
       class _CustomIntermediate(nnx.Intermediate):
         """Probe Intermediate variable."""
@@ -932,9 +938,9 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     """Verifies unscanned _run_qwen3_8_sublayer uses prevent_cse=False (scanned keeps True) and <1e-5 grad drift."""
     # pylint: disable=protected-access
     mesh = create_mesh(devices=jax.devices()[:1])
-    cfg_none = _qwen3_8_mini_config(scan_layers=False, remat_policy="none")
-    cfg_full = _qwen3_8_mini_config(scan_layers=False, remat_policy="full")
-    cfg_scan = _qwen3_8_mini_config(scan_layers=True, remat_policy="full")
+    cfg_none = _qwen3_8_mini_config(scan_layers=False, base_num_decoder_layers=8, remat_policy="none")
+    cfg_full = _qwen3_8_mini_config(scan_layers=False, base_num_decoder_layers=8, remat_policy="full")
+    cfg_scan = _qwen3_8_mini_config(scan_layers=True, base_num_decoder_layers=8, remat_policy="full")
     with jax.set_mesh(mesh):
       m_none = model_creation_utils.create_model(cfg_none, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
       m_full = model_creation_utils.create_model(cfg_full, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))

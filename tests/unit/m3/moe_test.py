@@ -884,7 +884,7 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
         model_name="qwen3.8-flash-next",
         vocab_size=128,
         emb_dim=32,
-        num_decoder_layers=4,
+        num_decoder_layers=8,
         inhomogeneous_layer_cycle_interval=4,
         hc_count=4,
         hc_lowrank=8,
@@ -1081,27 +1081,26 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
     mesh_tp = create_mesh(ici=ici_tp, devices=jax.devices()[:tp_devs])
     with jax.set_mesh(mesh_tp):
       tp_model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, mesh=mesh_tp, rngs=nnx.Rngs(params=0))
-      if scan_layers:
-        gu_var = tp_model.decoder.cycles.gdn_0.mlp.experts.gate_up_proj
-        dn_var = tp_model.decoder.cycles.gdn_0.mlp.experts.down_proj
-        self.assertEqual(
-            gu_var.get_metadata()["out_sharding"],
-            P(None, "expert", ("fsdp", "fsdp_transpose"), None, ("tensor", "tensor_sequence")),
-        )
-        self.assertEqual(
-            dn_var.get_metadata()["out_sharding"],
-            P(None, "expert", ("tensor", "tensor_sequence"), ("fsdp", "fsdp_transpose")),
-        )
-      else:
-        gu_var = tp_model.decoder.layers_0.mlp.experts.gate_up_proj
-        dn_var = tp_model.decoder.layers_0.mlp.experts.down_proj
-        self.assertEqual(
-            gu_var.get_metadata()["out_sharding"],
-            P("expert", ("fsdp", "fsdp_transpose"), None, ("tensor", "tensor_sequence")),
-        )
-        self.assertEqual(
-            dn_var.get_metadata()["out_sharding"], P("expert", ("tensor", "tensor_sequence"), ("fsdp", "fsdp_transpose"))
-        )
+      fc_gu_var = tp_model.decoder.first_cycle.gdn_0.mlp.experts.gate_up_proj
+      fc_dn_var = tp_model.decoder.first_cycle.gdn_0.mlp.experts.down_proj
+      self.assertEqual(
+          fc_gu_var.get_metadata()["out_sharding"],
+          P("expert", ("fsdp", "fsdp_transpose"), None, ("tensor", "tensor_sequence")),
+      )
+      self.assertEqual(
+          fc_dn_var.get_metadata()["out_sharding"],
+          P("expert", ("tensor", "tensor_sequence"), ("fsdp", "fsdp_transpose")),
+      )
+      cyc_gu_var = tp_model.decoder.cycles.gdn_0.mlp.experts.gate_up_proj
+      cyc_dn_var = tp_model.decoder.cycles.gdn_0.mlp.experts.down_proj
+      self.assertEqual(
+          cyc_gu_var.get_metadata()["out_sharding"],
+          P(None, "expert", ("fsdp", "fsdp_transpose"), None, ("tensor", "tensor_sequence")),
+      )
+      self.assertEqual(
+          cyc_dn_var.get_metadata()["out_sharding"],
+          P(None, "expert", ("tensor", "tensor_sequence"), ("fsdp", "fsdp_transpose")),
+      )
       tok_tp = NamedSharding(mesh_tp, P(("data", "fsdp", "expert"), None))
       tp_loss = nnx.jit(lambda m, t, y, s: modeling_qwen3_8_flash_next.compute_total_loss(m, t, y, segment_ids=s)[0])(
           tp_model, jax.device_put(tokens, tok_tp), jax.device_put(targets, tok_tp), jax.device_put(seg_ids, tok_tp)

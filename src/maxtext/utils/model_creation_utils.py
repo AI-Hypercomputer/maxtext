@@ -818,7 +818,8 @@ def create_nnx_abstract_model(
     # created (`eager_sharding`), which needs the mesh in scope, and they carry
     # no AQT variables.
     if getattr(config, "use_m3_model", False) and mesh is not None:
-      with jax.set_mesh(mesh):
+      scope = jax.set_mesh(mesh) if isinstance(mesh, Mesh) else jax.sharding.use_abstract_mesh(mesh)
+      with scope:
         abs_model = nnx.eval_shape(_create_model)
     else:
       abs_model = nnx.eval_shape(_create_model)
