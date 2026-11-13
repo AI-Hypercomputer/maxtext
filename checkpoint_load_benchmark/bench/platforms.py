@@ -106,14 +106,13 @@ PROFILES: dict[str, PlatformProfile] = {
         priority_class_name=None,
         node_selectors={
             "cloud.google.com/gke-tpu-accelerator": "tpu7x",
-            "cloud.google.com/gke-spot": "true",
-            "tpu7x.gke.io/capacity": "spot",
         },
         tolerations=[
             {"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"},
             {"key": "cloud.google.com/gke-spot", "operator": "Equal", "value": "true", "effect": "NoSchedule"},
+            {"key": "cloud.google.com/reservation-name", "operator": "Exists", "effect": "NoSchedule"},
         ],
-        required_node_affinity=[{"key": "cloud.google.com/reservation-name", "operator": "DoesNotExist"}],
+        required_node_affinity=[{"key": "cloud.google.com/gke-tpu-accelerator", "operator": "In", "values": ["tpu7x"]}],
         service_account_name=None,
         image_pull_secrets=("gitimg",),
         container_image=CONTAINER_IMAGE,
