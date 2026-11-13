@@ -221,6 +221,7 @@ class GetParallelismFlagsTest(unittest.TestCase):
     )
     flags_256 = harness._get_parallelism_flags(args_256, concurrent_gb=45)
     self.assertIn("ici_data_parallelism=4", flags_256)
+    self.assertIn("allow_split_physical_axes=True", flags_256)
     self.assertIn("ici_fsdp_parallelism=-1", flags_256)
 
     args_64 = types.SimpleNamespace(

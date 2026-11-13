@@ -1216,6 +1216,7 @@ def _get_parallelism_flags(args: argparse.Namespace, concurrent_gb: int) -> list
     eff_per_slice = devices_per_slice // max(1, ici_expert * ici_tensor)
     if eff_per_slice > 64 and eff_per_slice % 64 == 0:
       extra_ici.append(f"ici_data_parallelism={eff_per_slice // 64}")
+      extra_ici.append("allow_split_physical_axes=True")
   if num_slices > 1:
     return [
         "skip_jax_distributed_system=False",
