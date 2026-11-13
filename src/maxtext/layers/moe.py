@@ -1016,15 +1016,21 @@ _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psu
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
 
-  def required_ragged_buffer_factor(self, group_sizes, bsz_times_seq_len, num_ep, expert_shard_id):
+  def required_ragged_buffer_factor(
+      self, group_sizes, bsz_times_seq_len, num_ep, expert_shard_id, local_num_experts=None
+  ):
     """log_required_ragged_buffer_factor probe: the smallest ragged_buffer_factor that would not have dropped tokens.
 
-    group_sizes are the global per-expert token counts of the (EP-gathered) batch, as ring_ragged_sort computes them
-    for the overflow check. The per-shard buffer is int(balanced_size * factor) rows, so a shard drops tokens iff
-    sum(local group sizes) > balanced_size * factor. The result is max over all devices of
+    group_sizes are the global per-expert token counts of the (EP-gathered) batch, as ring_ragged_sort and
+    ra2a_and_route compute them before buffer truncation. The per-shard buffer is int(balanced_size * factor) rows, so
+    a shard drops tokens iff sum(local group sizes) > balanced_size * factor. The result is max over all devices of
     sum(local group sizes) / balanced_size: one float32 scalar max all-reduce over the mesh axes (no other change).
+    On the ragged all-to-all path, only `num_ep > 1` with `is_batch_sharded_by_expert` allocates a
+    `ragged_buffer_factor`-sized receive buffer (`get_ragged_buffer_size`); when `num_ep == 1` or batch is unsharded
+    over `expert`, no buffer can truncate and `ra2a_and_route` leaves `required_rbf = None`.
     """
-    local_num_experts = self.config.num_experts // num_ep
+    if local_num_experts is None:
+      local_num_experts = self.config.num_experts // num_ep
     local_group_sizes = jax.lax.dynamic_slice_in_dim(
         group_sizes, expert_shard_id * local_num_experts, local_num_experts, axis=0
     )
@@ -3274,6 +3280,8 @@ class RoutedMoE(nnx.Module):
       local_sorted_indices = None
       all_shards_group_sizes = None
       reshaped_group_sizes = None
+      required_rbf = None
+      local_tokens = math.prod(x.shape[:-1])
       # force_dropless (the in-layer dropless fallback) sizes the receive buffer for the worst case
       # instead of ragged_buffer_factor * balanced, so no tokens can be dropped.
       ragged_buffer_factor = -1.0 if force_dropless else self.get_ragged_buffer_factor()
@@ -3340,6 +3348,14 @@ class RoutedMoE(nnx.Module):
               axis_name=self._expert_parallelism_name,
           )
           global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=self._expert_parallelism_name)
+          if getattr(self.config, "log_required_ragged_buffer_factor", False):
+            required_rbf = self.required_ragged_buffer_factor(
+                jnp.sum(global_group_sizes, axis=0),
+                local_tokens * num_ep,
+                num_ep,
+                expert_shard_id,
+                local_num_experts=local_expert_size,
+            )
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
               x,
               global_group_sizes,
@@ -3351,6 +3367,8 @@ class RoutedMoE(nnx.Module):
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
+          # Batch is replicated across `expert`, so no `ragged_all_to_all` receive buffer is allocated;
+          # `required_rbf` stays `None` (same as `num_ep == 1` below).
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
               x,
               global_group_sizes[None, :],
@@ -3374,6 +3392,7 @@ class RoutedMoE(nnx.Module):
               lb_loss=lb_loss,
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
+              required_rbf=required_rbf,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,

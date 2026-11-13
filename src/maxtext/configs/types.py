@@ -4871,9 +4871,11 @@ class MaxTextConfig(
     if self.log_required_ragged_buffer_factor:
       if self.te_moe_block:
         raise ValueError("log_required_ragged_buffer_factor=True is not supported with te_moe_block=True.")
-      if not (self.use_ring_of_experts and self.use_ragged_sort):
+      if not self.sparse_matmul:
+        raise ValueError("log_required_ragged_buffer_factor=True requires sparse_matmul=True.")
+      if self.use_ring_of_experts and not self.use_ragged_sort:
         raise ValueError(
-            "log_required_ragged_buffer_factor=True requires use_ring_of_experts=True and use_ragged_sort=True."
+            "log_required_ragged_buffer_factor=True with use_ring_of_experts=True requires use_ragged_sort=True."
         )
       if self.num_moe_emb_chunks > 0:
         raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")
