@@ -1250,6 +1250,17 @@ class MoEGeneral(BaseModel):
 
   fp8_moe: bool = Field(False, description="Store MoE weights in fp8 with per-channel scale.")
   fp8_moe_fake_quant: bool = Field(False, description="Train dense MoE weights with fp8 per-channel fake quantization.")
+  fp4_moe: bool = Field(False, description="Store MoE weights in fp4 (float4_e2m1fn) with per-channel or K-block scale.")
+  fp4_moe_fake_quant: bool = Field(
+      False, description="Train dense MoE weights with fp4 (float4_e2m1fn) fake quantization."
+  )
+  moe_weight_block_size: None | PositiveInt = Field(
+      None,
+      description=(
+          "Optional K-dimension block size for MoE weight quantization (e.g. 256, 512). "
+          "When None, per-channel scaling is used for fp8_moe / fp4_moe."
+      ),
+  )
   num_experts: PositiveInt = Field(1, description="The total number of experts in each MoE layer.")
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
@@ -4051,6 +4062,7 @@ class VLLM(BaseModel):
   """vLLM-specific configuration for rollouts."""
 
   rollout_fp8_moe: bool = Field(False, description="Enable FP8 MoE for the rollout.")
+  rollout_fp4_moe: bool = Field(False, description="Enable FP4 (float4_e2m1fn) MoE for the rollout.")
   kv_cache_buffer: int = Field(256, gt=0, description="Buffer for KV cache.")
   hbm_utilization_vllm: float = Field(0.72, gt=0.0, le=1.0, description="Target HBM utilization for vLLM.")
   swap_space_vllm_gb: int = Field(2, ge=0, description="Swap space in GB for vLLM.")
@@ -6582,14 +6594,29 @@ class MaxTextConfig(
             "te_moe_block=True does not currently support norm_topk_prob=True "
             "when routed_score_func is not 'sqrtsoftplus' or 'sigmoid'."
         )
+      if self.fp8_moe and self.fp4_moe:
+        raise ValueError("Cannot enable both fp8_moe and fp4_moe simultaneously.")
+      if self.fp8_moe_fake_quant and self.fp4_moe_fake_quant:
+        raise ValueError("Cannot enable both fp8_moe_fake_quant and fp4_moe_fake_quant simultaneously.")
       if self.fp8_moe_fake_quant:
-        if self.fp8_moe or self.weight_block_size is not None:
+        if self.fp8_moe or self.fp4_moe or self.weight_block_size is not None or self.moe_weight_block_size is not None:
           raise ValueError(
               "fp8_moe_fake_quant applies rollout quantize_weight_per_channel directly in bf16 forward; "
-              "requires fp8_moe=False and weight_block_size=None."
+              "requires fp8_moe=False, fp4_moe=False, weight_block_size=None, and moe_weight_block_size=None."
           )
-      if (self.fp8_moe or self.rollout_fp8_moe) and self.weight_block_size is not None:
-        raise ValueError("fp8_moe / rollout_fp8_moe requires weight_block_size=None (per-channel scaling).")
+      if self.fp4_moe_fake_quant:
+        if self.fp8_moe or self.fp4_moe:
+          raise ValueError(
+              "fp4_moe_fake_quant applies rollout fp4 fake-quantization directly in bf16 forward; "
+              "requires fp8_moe=False and fp4_moe=False."
+          )
+      if (self.fp8_moe or self.rollout_fp8_moe) and (
+          self.weight_block_size is not None or self.moe_weight_block_size is not None
+      ):
+        raise ValueError(
+            "fp8_moe / rollout_fp8_moe requires weight_block_size=None and moe_weight_block_size=None "
+            "(per-channel scaling)."
+        )
       if self.te_moe_block and self.routed_bias_update_rate > 0.0:
         raise ValueError("te_moe_block=True does not currently support routed_bias_update_rate > 0.")
       if self.te_moe_block and self.norm_topk_prob:

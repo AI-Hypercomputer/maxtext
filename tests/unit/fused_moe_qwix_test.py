@@ -106,6 +106,38 @@ class QuantizeWeightForFusedMoeTest(unittest.TestCase):
     col_max = jnp.max(jnp.abs(ref), axis=1, keepdims=True)
     _assert_error_within(dequantized, ref, col_max / 127)
 
+  def test_fp4_and_int4_channelwise_and_blockwise(self):
+    for qtype in (jnp.float4_e2m1fn, jnp.int4):
+      for tile_size, expected_blocks in ((None, 1), (64, self.in_dim // 64)):
+        with self.subTest(qtype=qtype, tile_size=tile_size):
+          rule = qwix.QtRule(module_path=".*", weight_qtype=qtype, tile_size=tile_size, op_names=("gmm",))
+          weight, scale = quantizations.quantize_weight_for_fused_moe(self.kernel, rule)
+          self.assertEqual(weight.dtype, qtype)
+          self.assertEqual(scale.shape, (self.num_experts, expected_blocks, 1, self.out_dim))
+
+  def test_quantize_and_fake_quantize_moe_weight_fp4(self):
+    for block_size, expected_blocks in ((None, 1), (64, self.in_dim // 64)):
+      with self.subTest(block_size=block_size):
+        q_w, scale = quantizations.quantize_moe_weight_fp4(self.kernel, block_size=block_size)
+        self.assertEqual(q_w.dtype, jnp.float4_e2m1fn)
+        self.assertEqual(scale.shape, (self.num_experts, expected_blocks, self.out_dim))
+        fake_q = quantizations.fake_quantize_moe_weight_fp4(self.kernel, block_size=block_size)
+        deq = quantizations.dequantize_weight(q_w, scale, compute_dtype=self.kernel.dtype)
+        np.testing.assert_array_equal(np.asarray(fake_q), np.asarray(deq))
+        grad = jax.grad(lambda w, bs=block_size: jnp.sum(quantizations.fake_quantize_moe_weight_fp4(w, block_size=bs)))(
+            self.kernel
+        )
+        np.testing.assert_array_equal(np.asarray(grad), np.ones_like(np.asarray(self.kernel)))
+        sds_w, sds_s = quantizations.quantize_moe_weight_fp4(
+            jax.ShapeDtypeStruct(self.kernel.shape, self.kernel.dtype), block_size=block_size
+        )
+        self.assertEqual(sds_w.dtype, jnp.float4_e2m1fn)
+        self.assertEqual(sds_s.shape, (self.num_experts, expected_blocks, self.out_dim))
+    q_i4, _ = quantizations.quantize_moe_weight_fp4(self.kernel, weight_dtype=jnp.int4)
+    self.assertEqual(q_i4.dtype, jnp.int4)
+    with self.assertRaisesRegex(ValueError, "must be divisible by moe_weight_block_size"):
+      quantizations.quantize_moe_weight_fp4(self.kernel, block_size=63)
+
   def test_rejects_non_3d_weight(self):
     with self.assertRaises(ValueError):
       quantizations.quantize_weight_for_fused_moe(self.kernel[0], _fp8_rule())
