@@ -208,5 +208,31 @@ class LoadDynamicDownloadCapTest(unittest.TestCase):
     self.assertIs(fake_ld.concurrent.futures.ProcessPoolExecutor, fake_pool)
 
 
+class GetParallelismFlagsTest(unittest.TestCase):
+  """Tests `_get_parallelism_flags` mesh divisibility handling for `gpt-oss` on 256-chip slices."""
+
+  def test_caps_gpt_oss_ici_fsdp_at_64_on_256_devices(self):
+    args_256 = types.SimpleNamespace(
+        model="gpt-oss-120b",
+        num_slices=1,
+        num_hosts_per_slice=64,
+        devices_per_slice=256,
+        dcn_parallelism_axis="auto",
+    )
+    flags_256 = harness._get_parallelism_flags(args_256, concurrent_gb=45)
+    self.assertIn("ici_data_parallelism=4", flags_256)
+    self.assertIn("ici_fsdp_parallelism=-1", flags_256)
+
+    args_64 = types.SimpleNamespace(
+        model="gpt-oss-120b",
+        num_slices=1,
+        num_hosts_per_slice=16,
+        devices_per_slice=64,
+        dcn_parallelism_axis="auto",
+    )
+    flags_64 = harness._get_parallelism_flags(args_64, concurrent_gb=45)
+    self.assertFalse(any(f.startswith("ici_data_parallelism=") for f in flags_64))
+
+
 if __name__ == "__main__":
   unittest.main()

@@ -320,6 +320,83 @@ class BuildSheetV2Test(unittest.TestCase):
     self.assertTrue(any(op.get("range", "").startswith("Progress!D58:H58") for op in raw_ops))
     self.assertTrue(any("HYPERLINK" in str(op.get("data")) for op in formula_ops))
 
+  def test_v7x_step1b_copy_fallback_and_step1_oom_ram_cell(self):
+    v2_root = os.path.join(self.tmp_dir, "v2_copy_fallback")
+
+    _write_json(
+        os.path.join(v2_root, "step1", "deepseek4-284b_step1_result.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "step1_hf_to_gcs",
+            "tpu_platform": "v7x",
+            "step1_gcs_bucket_region": "us-central1",
+            "model_name": "deepseek4-284b",
+            "step1_total_seconds": 120.0,
+            "run_status": "OK",
+        },
+    )
+    _write_json(
+        os.path.join(v2_root, "step1b", "deepseek4-284b_copy_result.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "step1b_deepseek_copy_region",
+            "tpu_platform": "v7x",
+            "step1_gcs_bucket_region": "us-central1",
+            "model_name": "deepseek4-284b",
+            "step1b_deepseek_total_seconds": 45.0,
+            "run_status": "OK",
+        },
+    )
+    _write_json(
+        os.path.join(v2_root, "runs", "deepseek4-284b_sd.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "safetensors_dynamic",
+            "pipeline_name": "safetensors_dynamic",
+            "tpu_platform": "v7x",
+            "model_name": "deepseek4-284b",
+            "scan_layers_mode": "scanned",
+            "number_of_slices": 1,
+            "slice_topology": "2x2x1",
+            "repetition_index": 1,
+            "run_status": "OK",
+            "safetensors_dynamic_step1_total_seconds": 0.01,
+            "safetensors_dynamic_step2_total_seconds": 34.99,
+            "setup_total_before_load_seconds": 10.0,
+            "memory_peak_host_ram_container_gb": 60.0,
+            "memory_tpu_hbm_peak_per_device_gb": 50.0,
+        },
+    )
+    _write_json(
+        os.path.join(v2_root, "runs", "qwen3_235b_tm_s1_oom.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "to_maxtext_step1",
+            "pipeline_name": "to_maxtext",
+            "tpu_platform": "v7x",
+            "model_name": "qwen3-235b-a22b",
+            "scan_layers_mode": "scanned",
+            "number_of_slices": 1,
+            "slice_topology": "2x2x1",
+            "repetition_index": 1,
+            "run_status": "FAILED",
+            "failure_category": "OOM-HOST",
+            "error_summary": "Host RAM staging limit exceeded",
+        },
+    )
+
+    ds = build_sheet_v2.build_v2_dataset(v2_roots=[v2_root])
+    ds284 = next(
+        r for r in ds.summary_rows if r["row_id"] == "v2|v7x|deepseek4-284b|scanned|safetensors_dynamic|1x2x2x1"
+    )
+    self.assertEqual(ds284["step1b_deepseek_total_seconds"], 45.0)
+    self.assertAlmostEqual(float(ds284["total_end_to_end_seconds"]), 200.0, places=2)
+
+    q235 = next(r for r in ds.summary_rows if r["row_id"] == "v2|v7x|qwen3-235b-a22b|scanned|to_maxtext|1x2x2x1")
+    self.assertEqual(q235["run_status"], "OOM-HOST")
+    self.assertEqual(q235["memory_peak_host_ram_container_gb"], "OOM-HOST")
+    self.assertEqual(q235["memory_tpu_hbm_peak_per_device_gb"], "BLOCKED")
+
 
 if __name__ == "__main__":
   unittest.main()
