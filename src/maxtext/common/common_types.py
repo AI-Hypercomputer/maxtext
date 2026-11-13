@@ -56,7 +56,10 @@ DEFAULT_FP8_UNQUANTIZED_MODULES = (
 def is_module_unquantized(config: Config, module_name: str) -> bool:
   """Checks whether module_name matches any pattern in config.unquantized_modules."""
   unquantized = getattr(config, "unquantized_modules", None) or ()
-  if not unquantized and getattr(config, "fp8_dense_fake_quant", False):
+  if not unquantized and (
+      getattr(config, "fp8_dense_fake_quant", False)
+      or is_fp8_dtype(getattr(config, "weight_dtype", None))
+  ):
     unquantized = DEFAULT_FP8_UNQUANTIZED_MODULES
   elif isinstance(unquantized, str):
     unquantized = tuple(m.strip() for m in unquantized.split(",") if m.strip())

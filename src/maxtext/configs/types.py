@@ -1594,6 +1594,10 @@ class MoEGeneral(BaseModel):
       description="Whether to fuse the expert scaling factors into the expert weights. "
       "This can improve inference performance.",
   )
+  fp8_kv_fake_quant: bool = Field(
+      False,
+      description="Apply FP8 (float8_e4m3fn) straight-through fake quantization to attention K/V in train mode.",
+  )
   fp8_dense_fake_quant: bool = Field(
       False,
       description=(

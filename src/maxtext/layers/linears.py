@@ -693,6 +693,8 @@ def maybe_quantize_shared_fp8_activations(inputs: Any, modules: Sequence[Any]):
     rhs_axis = 0
     scheme = quantizations.resolve_fp8_scale_scheme(kernel.shape, kernel_scale.shape, rhs_axis)
     calib = m.quant.act_calibration_method
+    if quantizations.is_no_act_quantization(calib) and scheme in ("per_tensor", "per_channel"):
+      return inputs
     if quantizations.is_static_calibration(calib) or scheme in ("per_tensor", "per_channel"):
       eff_scheme = "per_channel"
       rhs_block_size = None

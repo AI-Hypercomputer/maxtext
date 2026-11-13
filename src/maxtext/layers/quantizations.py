@@ -408,6 +408,8 @@ def native_fp8_dot_general(
   rhs = qwix.QArray(qvalue=quantized_kernel, scale=kernel_scale)
   if isinstance(inputs, qwix.QArray):
     lhs = inputs
+  elif is_no_act_quantization(act_calibration_method) and scheme in ("per_tensor", "per_channel"):
+    lhs = jnp.asarray(inputs, compute_dtype)
   else:
     rhs_block_size = scale_block_size[norm_rhs_axis] if isinstance(scale_block_size, (list, tuple)) else scale_block_size
     if rhs_block_size is None and scheme == "block_wise":
@@ -465,6 +467,11 @@ class ServeFp8WeightQuantization(Quantization):
 def is_static_calibration(calibration_method: str | None) -> bool:
   """Whether `calibration_method` is a fixed-range (static scale) calibration."""
   return bool(calibration_method) and calibration_method.lower().startswith("fixed")
+
+
+def is_no_act_quantization(calibration_method: str | None) -> bool:
+  """Whether activation quantization is disabled (native W8A16 MXU dot_general)."""
+  return bool(calibration_method) and calibration_method.lower() in ("none", "w8a16", "bf16")
 
 
 def prepare_fused_gmm_scale(scale: jnp.ndarray, kernel_shape: Tuple[int, ...]) -> jnp.ndarray:

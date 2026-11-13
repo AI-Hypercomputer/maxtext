@@ -301,6 +301,17 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
     self.assertTrue(is_module_unquantized(cfg_str, "in_proj_ba"))
     self.assertFalse(is_module_unquantized(cfg_str, "in_proj"))
 
+    cfg_default = SimpleNamespace(
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+        unquantized_modules=[],
+    )
+    for mod in ("token_embedder", "logits_dense", "gate", "shared_expert_gate", "conv1d", "in_proj_ba", "A_log", "dt_bias", "norm"):
+      self.assertTrue(is_module_unquantized(cfg_default, mod), mod)
+      self.assertEqual(get_weight_dtype(cfg_default, mod), "bfloat16", mod)
+    self.assertFalse(is_module_unquantized(cfg_default, "in_proj_qkvz"))
+    self.assertEqual(get_weight_dtype(cfg_default, "in_proj_qkvz"), "float8_e4m3fn")
+
     cfg = SimpleNamespace(
         weight_dtype="float8_e4m3fn",
         dtype="bfloat16",
@@ -955,6 +966,67 @@ class FastNonMoeFp8DenseOptimizationsTest(unittest.TestCase):
     self.assertTrue(bool(jnp.all(jnp.isfinite(grad_w))))
     self.assertTrue(bool(jnp.all(jnp.isfinite(grad_x))))
     self.assertGreater(float(jnp.linalg.norm(grad_w)), 0.0)
+
+  def test_w8a16_native_fp8_dot_general_and_shared_activations_bypass(self):
+    in_dim, out_dim = 128, 64
+    rng = np.random.default_rng(31)
+    w_bf16 = jnp.asarray((rng.normal(size=(in_dim, out_dim)).astype(np.float32) * 0.05).astype(ml_dtypes.bfloat16))
+    x = jnp.asarray((rng.normal(size=(2, 4, in_dim)).astype(np.float32) * 0.05).astype(ml_dtypes.bfloat16))
+
+    fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
+    w_f32 = w_bf16.astype(jnp.float32)
+    w_amax = jnp.max(jnp.abs(w_f32), axis=0, keepdims=True)
+    w_scale = jnp.where(w_amax == 0, 1.0, w_amax / fp8_max).astype(jnp.float32)
+    q_kernel = jnp.clip(w_f32 / w_scale, -fp8_max, fp8_max).astype(jnp.float8_e4m3fn)
+
+    self.assertTrue(quantizations.is_no_act_quantization("w8a16"))
+    self.assertTrue(quantizations.is_no_act_quantization("none"))
+    self.assertFalse(quantizations.is_no_act_quantization("absmax"))
+
+    out_w8a16 = quantizations.native_fp8_dot_general(
+        x, q_kernel, w_scale, None, (2,), (0,), compute_dtype=jnp.bfloat16, act_calibration_method="w8a16"
+    )
+    expected_w8a16 = (
+        jax.lax.dot_general(x, q_kernel, (((2,), (0,)), ((), ())), preferred_element_type=jnp.float32)
+        * w_scale.reshape(1, 1, out_dim)
+    ).astype(jnp.bfloat16)
+    np.testing.assert_array_equal(np.asarray(out_w8a16), np.asarray(expected_w8a16))
+
+    jaxpr_w8a16 = str(
+        jax.make_jaxpr(
+            lambda inp: quantizations.native_fp8_dot_general(
+                inp, q_kernel, w_scale, None, (2,), (0,), compute_dtype=jnp.bfloat16, act_calibration_method="w8a16"
+            )
+        )(x)
+    )
+    self.assertEqual(jaxpr_w8a16.count("reduce_max"), 0)
+
+    quant_w8a16 = quantizations.ServeFp8WeightQuantization(act_calibration_method="w8a16")
+    proj_a = linears.DenseGeneral(
+        in_features_shape=in_dim,
+        out_features_shape=out_dim,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        kernel_axes=("embed", "mlp"),
+        quant=quant_w8a16,
+        rngs=nnx.Rngs(0),
+    )
+    proj_b = linears.DenseGeneral(
+        in_features_shape=in_dim,
+        out_features_shape=out_dim,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        kernel_axes=("embed", "mlp"),
+        quant=quant_w8a16,
+        rngs=nnx.Rngs(1),
+    )
+    proj_a.kernel[...] = q_kernel
+    proj_a.kernel_scale[...] = w_scale
+    proj_b.kernel[...] = q_kernel
+    proj_b.kernel_scale[...] = w_scale
+
+    shared_inp = linears.maybe_quantize_shared_fp8_activations(x, (proj_a, proj_b))
+    self.assertIs(shared_inp, x)
 
 
 if __name__ == "__main__":

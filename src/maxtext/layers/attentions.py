@@ -1269,6 +1269,11 @@ class Attention(nnx.Module):
       cached_values = [None, None]
       if model_mode != MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
+      elif getattr(self.config, "fp8_kv_fake_quant", False):
+        k_q = jax.lax.optimization_barrier(jnp.clip(key.astype(self.dtype), -448.0, 448.0).astype(jnp.float8_e4m3fn))
+        v_q = jax.lax.optimization_barrier(jnp.clip(value.astype(self.dtype), -448.0, 448.0).astype(jnp.float8_e4m3fn))
+        key = jax.lax.stop_gradient(k_q.astype(key.dtype)) + (key - jax.lax.stop_gradient(key))
+        value = jax.lax.stop_gradient(v_q.astype(value.dtype)) + (value - jax.lax.stop_gradient(value))
       out = self.attention_op(
           query,
           key,
