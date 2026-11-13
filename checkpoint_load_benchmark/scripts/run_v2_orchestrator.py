@@ -419,7 +419,7 @@ def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-argumen
       ]
   )
   active_jobsets: list[str] = []
-  covered_shapes: set[tuple[str, int]] = set()
+  shape_counts: dict[tuple[str, int], int] = {}
   if res.returncode == 0 and res.stdout.strip():
     try:
       items = json.loads(res.stdout).get("items", [])
@@ -445,77 +445,66 @@ def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-argumen
                 "--ignore-not-found=true",
             ]
         )
-        if shape is not None:
-          tslug = manifests_v2.dns_slug(shape[0])
-          _run_cmd(
-              [
-                  "gcloud",
-                  "storage",
-                  "rm",
-                  "-f",
-                  f"{queue_uri}/claims/*_{shape[1]}x{tslug}_*.json",
-              ],
-              timeout=60,
-          )
         reason = "Suspended/Deactivated by Kueue" if is_deactivated else term_state
         events.append(f"[{utc_now_str()}] `{platform}` TPU JobSet `{js_name}` `{reason}` and cleaned up.")
         continue
       active_jobsets.append(js_name)
+      w_suffix = js_name.rsplit("-w", 1)
+      if len(w_suffix) == 2 and w_suffix[1].isdigit():
+        worker_seq[platform] = max(worker_seq.get(platform, 1), int(w_suffix[1]))
       if shape is not None:
-        covered_shapes.add(shape)
+        shape_counts[shape] = shape_counts.get(shape, 0) + 1
         if platform == "v6e" and shape == ("2x4", 2):
-          covered_shapes.add(("2x4", 1))
+          shape_counts[("2x4", 1)] = shape_counts.get(("2x4", 1), 0) + 1
 
-  max_js = 2 if platform == "v7x" else 1
+  pending_by_shape: dict[tuple[str, int], int] = {}
+  for t in pending_ready_tasks:
+    sh = (str(t["topology"]), int(t["slices"]))
+    pending_by_shape[sh] = pending_by_shape.get(sh, 0) + 1
+
+  max_js = 7 if platform == "v7x" else 1
   for nxt in pending_ready_tasks:
     if len(active_jobsets) >= max_js:
       break
     topo = str(nxt["topology"])
     slices = int(nxt["slices"])
-    if (topo, slices) in covered_shapes:
-      continue
     min_slices = 1
     if platform == "v6e" and topo == "2x4":
       same_topo_slices = {int(t["slices"]) for t in pending_ready_tasks if str(t["topology"]) == topo}
       slices = max(same_topo_slices)
       min_slices = min(same_topo_slices)
-      covered_shapes.add((topo, 1))
-      covered_shapes.add((topo, 2))
     else:
       min_slices = slices
-      covered_shapes.add((topo, slices))
 
-    tslug = manifests_v2.dns_slug(topo)
-    _run_cmd(
-        [
-            "gcloud",
-            "storage",
-            "rm",
-            "-f",
-            f"{queue_uri}/claims/*_{slices}x{tslug}_*.json",
-        ],
-        timeout=60,
-    )
-    seq = worker_seq.get(platform, 1) + 1
-    worker_seq[platform] = seq
-    wid = f"w{seq}"
-    js = manifests_v2.build_queue_worker_jobset(
-        platform=platform,
-        topology=topo,
-        num_slices=slices,
-        queue_uri=queue_uri,
-        worker_id=wid,
-        run_id=f"v2-{platform}-{wid}",
-        results_gcs_uri=results_uri,
-        min_slices=min_slices,
-    )
-    if apply_k8s_manifests(ctx, [js]):
-      js_name = js["metadata"]["name"]
-      active_jobsets.append(js_name)
-      events.append(
-          f"[{utc_now_str()}] Launched `{platform}` TPU queue worker `{js_name}` "
-          f"(`{slices}x{topo}`, min_slices={min_slices}) for {len(pending_ready_tasks)} runnable tasks."
+    shape_key = (topo, slices)
+    max_for_shape = 1
+    if platform == "v7x" and topo == "2x2x1":
+      max_for_shape = min(3, pending_by_shape.get(shape_key, 0))
+    while shape_counts.get(shape_key, 0) < max_for_shape and len(active_jobsets) < max_js:
+      shape_counts[shape_key] = shape_counts.get(shape_key, 0) + 1
+      if platform == "v6e" and topo == "2x4":
+        shape_counts[("2x4", 1)] = shape_counts.get(("2x4", 1), 0) + 1
+        shape_counts[("2x4", 2)] = shape_counts.get(("2x4", 2), 0) + 1
+      seq = worker_seq.get(platform, 1) + 1
+      worker_seq[platform] = seq
+      wid = f"w{seq}"
+      js = manifests_v2.build_queue_worker_jobset(
+          platform=platform,
+          topology=topo,
+          num_slices=slices,
+          queue_uri=queue_uri,
+          worker_id=wid,
+          run_id=f"v2-{platform}-{wid}",
+          results_gcs_uri=results_uri,
+          min_slices=min_slices,
       )
+      if apply_k8s_manifests(ctx, [js]):
+        js_name = js["metadata"]["name"]
+        active_jobsets.append(js_name)
+        events.append(
+            f"[{utc_now_str()}] Launched `{platform}` TPU queue worker `{js_name}` "
+            f"(`{slices}x{topo}`, min_slices={min_slices}) for {len(pending_ready_tasks)} runnable tasks."
+        )
 
   return active_jobsets, len(done_task_ids), len(all_tasks)
 
