@@ -2167,7 +2167,8 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     )
     state_mesh_shardings.optimizer = optimizer_sharding
   if is_training and config.parameter_memory_host_offload:
-    assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
+    if config.scan_layers and not config.use_m3_model:
+      assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
     _, state_params, _ = nnx.split(state_mesh_shardings, nnx.Param, ...)
     state_params = jax.tree_util.tree_map_with_path(
         maxtext_utils_nnx.move_memory_to_host,

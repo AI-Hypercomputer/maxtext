@@ -21,13 +21,12 @@ Modules:
     the projection layers of the decoder stack.
   * `named_scopes.py` — `jax.named_scope` per submodule, so profiles and HLO
     dumps read `decoder/layers/3/mlp/wi_0`.
-
-Planned modules:
-  * `offload.py` — `to_host` for optimizer/parameter offloading.
+  * `offload.py` — `to_memory`, `HostOffloadedOptimizer`, and
+    `maybe_offload_parameters` for pinned-host optimizer/parameter offloading.
 
 Composition order is fixed, and `maxtext.m3.train.loop.setup_model` is the
 reference for it:
-`construct -> scan -> remat -> quantize -> named scopes -> optimizer -> host offload`.
+`construct -> scan -> remat -> quantize -> named scopes -> host offload -> optimizer`.
 
 None of these wrap the model in another module, and quantization leaves the
 variable tree untouched (asserted). Standard `nnx.Sequential` models rely only

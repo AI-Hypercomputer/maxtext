@@ -73,6 +73,9 @@ def gradient_accumulation_loss_and_grad(
 
   is_nnx = isinstance(model, nnx.Module)
 
+  if config.parameter_memory_host_offload:
+    params_shardings = max_utils.with_memory_kind(params_shardings, "device")
+
   # For ZeRO-1 + GA, read the resolved "data" axis size from the mesh rather than
   # config.ici_data_parallelism, which may be -1 (auto-fill) and resolves to 1 when
   # FSDP already consumes every device — in which case data parallelism is not active.
@@ -90,6 +93,8 @@ def gradient_accumulation_loss_and_grad(
 
   if is_nnx:
     graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+  if config.parameter_memory_host_offload:
+    params = jax.device_put(params, params_shardings)
 
   # When using Zero-1 optimizer sharding, cast params to lower precision and apply sharding constraints
   # so that all-gather is done once in the lower precision before the gradient accumulation loop
