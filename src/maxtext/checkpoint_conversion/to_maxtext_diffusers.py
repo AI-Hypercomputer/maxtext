@@ -58,7 +58,7 @@ except ImportError:
 # ==============================================================================
 
 # Diffusers sub-folders that can be stored; each becomes `<name>_state` + `<name>_config` items.
-_COMPONENT_ITEMS = ("transformer", "transformer_2", "vae", "text_encoder")
+_COMPONENT_ITEMS = ("transformer", "transformer_2", "vae", "text_encoder", "image_encoder")
 # Weight-free diffusers sub-folders stored as a `<name>_config` item only: {name: config file}.
 _CONFIG_ONLY_COMPONENTS = {"scheduler": "scheduler_config.json"}
 # Item names written by earlier versions of this converter (restore-only).
@@ -194,7 +194,7 @@ def restore_diffusers_checkpoint(checkpoint_dir: str, step: Optional[int] = None
 # ==============================================================================
 
 # Non-converted pipeline components loaded at inference time by their own libraries (transformers, ...).
-_AUXILIARY_COMPONENTS = ("tokenizer", "scheduler", "image_encoder", "image_processor")
+_AUXILIARY_COMPONENTS = ("tokenizer", "scheduler", "image_processor")
 
 
 def download_diffusers_components(
@@ -387,6 +387,8 @@ def convert_diffusers_states(config) -> dict:
   scan_layers = bool(getattr(config, "scan_layers", False))
   outputs = {}
   for component in mapping_cls.COMPONENTS:
+    if not os.path.isfile(os.path.join(repo_dir, component, "config.json")):
+      continue
     state, model_config = convert_diffusers_component(repo_dir, component, mapping_cls, scan_layers, weights_dtype)
     outputs[f"{component}_state"], outputs[f"{component}_config"] = state, model_config
   for component, config_file in _CONFIG_ONLY_COMPONENTS.items():

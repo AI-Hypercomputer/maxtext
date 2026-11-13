@@ -25,9 +25,18 @@ from maxtext.m3.configs import config as config_lib
 from maxtext.utils import gcs_utils, max_logging, max_utils
 from maxtext.m3.models.wan import utils_wan
 from maxtext.multimodal.processor_vae import export_to_video
+from diffusers.utils import load_image
 import flax
 
 jax.config.update("jax_use_shardy_partitioner", True)
+
+_IMAGE_CACHE = {}
+
+
+def _load_conditioning_image(image_url: str):
+  if image_url not in _IMAGE_CACHE:
+    _IMAGE_CACHE[image_url] = load_image(image_url)
+  return _IMAGE_CACHE[image_url]
 
 
 def _upload_video(gcs_output_path: str, video_path: str):
@@ -43,6 +52,12 @@ def _upload_video(gcs_output_path: str, video_path: str):
 def call_pipeline(config, pipeline, prompt, negative_prompt, num_inference_steps=None):
   if num_inference_steps is None:
     num_inference_steps = config.num_inference_steps
+  kwargs = {}
+  if getattr(config, "model_type", "T2V").upper() == "I2V" or getattr(config, "image_url", ""):
+    image_url = getattr(config, "image_url", "")
+    if not image_url:
+      raise ValueError("`image_url` must be set in config or CLI for I2V inference.")
+    kwargs["image"] = _load_conditioning_image(image_url)
   return pipeline(
       prompt=prompt,
       negative_prompt=negative_prompt,
@@ -57,6 +72,7 @@ def call_pipeline(config, pipeline, prompt, negative_prompt, num_inference_steps
       magcache_K=config.magcache_K,
       retention_ratio=config.retention_ratio,
       use_kv_cache=config.use_kv_cache,
+      **kwargs,
   )
 
 
