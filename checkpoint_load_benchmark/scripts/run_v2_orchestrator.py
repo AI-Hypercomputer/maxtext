@@ -479,8 +479,11 @@ def update_queue_and_tpu_workers(  # pylint: disable=too-many-positional-argumen
     shape_key = (topo, slices)
     max_for_shape = 1
     if platform == "v7x" and topo == "2x2x1":
-      cap = 6 if (slices == 1 and pending_by_shape.get(("2x2x1", 2), 0) == 0) else 3
+      other_slices = 2 if slices == 1 else 1
+      cap = 6 if pending_by_shape.get(("2x2x1", other_slices), 0) == 0 else 3
       max_for_shape = min(cap, pending_by_shape.get(shape_key, 0))
+    elif platform == "v6e" and topo == "8x8" and pending_by_shape.get(("16x16", 1), 0) == 0:
+      max_for_shape = min(2, pending_by_shape.get(shape_key, 0))
     while shape_counts.get(shape_key, 0) < max_for_shape and len(active_jobsets) < max_js:
       shape_counts[shape_key] = shape_counts.get(shape_key, 0) + 1
       if platform == "v6e" and topo == "2x4":
