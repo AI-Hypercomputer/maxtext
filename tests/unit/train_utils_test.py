@@ -432,6 +432,42 @@ class TestValidateCompletedSteps(unittest.TestCase):
     )
 
 
+class TestTrainStateDonation(unittest.TestCase):
+  """Overwritten state leaves must remain available for input/output buffer aliasing."""
+
+  def test_donates_state_leaves_whose_previous_values_are_unused(self):
+    mesh = Mesh(np.array([jax.devices()[0]]), ("data",))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    config = SimpleNamespace(enable_diloco=False, compiled_trainstep_file="")
+    state = jax.device_put({"weight": np.zeros(4, dtype=np.float32), "stats": np.zeros(8, dtype=np.float32)}, replicated)
+    state_shardings = jax.tree.map(lambda _: replicated, state)
+    batch = jax.device_put(np.arange(8, dtype=np.float32), replicated)
+
+    def train_step(model, config, state_mesh_shardings, params_shardings, state, batch):
+      del model, config, state_mesh_shardings, params_shardings
+      # Like overwrite-with-gradient FP8 statistics, the new value does not read the old one.
+      return {"weight": state["weight"] + 1, "stats": batch * 2}, {}
+
+    p_train_step = train_utils.jit_train_step(
+        config,
+        model=None,
+        state=state,
+        state_mesh_shardings=state_shardings,
+        data_sharding=replicated,
+        train_step=train_step,
+        params_shardings=state_shardings,
+    )
+    compiled = p_train_step.lower(state, batch).compile()
+    # The distinct shapes ensure each output aliases its corresponding state input.
+    expected_alias_bytes = sum(leaf.nbytes for leaf in jax.tree.leaves(state))
+    self.assertEqual(compiled.memory_analysis().alias_size_in_bytes, expected_alias_bytes)
+
+    for step_index in range(3):
+      state, _ = compiled(state, batch)
+      np.testing.assert_array_equal(state["weight"], np.full(4, step_index + 1, dtype=np.float32))
+      np.testing.assert_array_equal(state["stats"], np.arange(8, dtype=np.float32) * 2)
+
+
 class TestCompileXlaFlags(unittest.TestCase):
   """Tests that compile_xla_flags are applied to JIT and AOT-compiled train/eval steps without step-0 recompilation."""
 
