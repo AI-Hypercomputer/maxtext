@@ -301,7 +301,10 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
       )
     n_vit_h, n_vit_w = config.ds41_vision_grid
     patch_dim = config.num_channels_for_vit * (config.patch_size_for_vit**2)
-    image_shape = (batch_size, num_image_per_sequence, n_vit_h * n_vit_w, patch_dim)
+    num_images = (
+        max(1, int(config.max_num_images_per_example)) if num_image_per_sequence == 1 else int(num_image_per_sequence)
+    )
+    image_shape = (batch_size, num_images, n_vit_h * n_vit_w, patch_dim)
   return image_shape
 
 

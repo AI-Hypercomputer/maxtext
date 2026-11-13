@@ -22,6 +22,7 @@ from typing import Any, Sequence, TypedDict
 import datetime
 import functools
 import gc
+import json
 import os
 import time
 
@@ -59,7 +60,8 @@ from maxtext.utils import elastic_utils
 from maxtext.layers.multi_token_prediction import calculate_mtp_acceptance_rate, calculate_mtp_loss, mtp_acceptance, mtp_losses
 from maxtext.layers.attention_mla import indexer_losses
 from maxtext.layers import moe
-from maxtext.common import checkpointing, profiler
+from maxtext.models import deepseek41
+from maxtext.common import checkpointing, common_types, profiler
 from maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,
@@ -412,6 +414,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       load_ratios = jnp.concatenate(load_ratios)
       aux["moe_max_load_ratio"] = jnp.max(load_ratios)
       aux["moe_max_load_ratio_mean"] = jnp.mean(load_ratios)
+  if (hasattr(config, "log_required_ragged_buffer_factor") and bool(config.log_required_ragged_buffer_factor)) or (
+      "DS41_LOG_STEP0_MOE_DROPPED" in os.environ and os.environ["DS41_LOG_STEP0_MOE_DROPPED"].strip() == "1"
+  ):
+    dropped_frac_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_dropped_frac")
+    if dropped_frac_values:
+      aux["moe_dropped_frac"] = jnp.concatenate([x.astype(jnp.float32) for x in dropped_frac_values])
   return loss, aux
 
 
@@ -606,6 +614,13 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     opt_state = nnx.state(state.optimizer)
     new_opt_state = jax.device_put(opt_state, device_opt_shardings)
     nnx.update(state.optimizer, new_opt_state)
+  frozen_vit_pure = (
+      nnx.to_pure_dict(nnx.state(state.model.vision_encoder.DeepSeek41VisionEncoder_0, nnx.Param))
+      if config.use_multimodal
+      and config.freeze_vision_encoder_params
+      and config.vision_encoder_block == common_types.VisionEncoderBlockType.DEEPSEEK41
+      else None
+  )
   if config.skip_step_on_spikes:
     # The skip-step optimizer is a GradientTransformationExtraArgs that reads
     # loss/grad_norm to decide whether to zero the update on a spike. nnx
@@ -614,6 +629,10 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     state.apply_gradients(grads, loss=loss, grad_norm=grad_norm)
   else:
     state.apply_gradients(grads)
+  if frozen_vit_pure is not None:
+    vit_param_state = nnx.state(state.model.vision_encoder.DeepSeek41VisionEncoder_0, nnx.Param)
+    nnx.replace_by_pure_dict(vit_param_state, frozen_vit_pure)
+    nnx.update(state.model.vision_encoder.DeepSeek41VisionEncoder_0, vit_param_state)
   new_state = state
 
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family
@@ -735,6 +754,14 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   if getattr(config, "log_required_ragged_buffer_factor", False) and "moe_required_rbf" in aux:
     # Top-level (not "scalar"): a per-layer vector, read by training_loop_iteration for the REQUIRED_RBF line.
     metrics["moe_required_rbf"] = aux["moe_required_rbf"]
+  if "moe_dropped_frac" in aux:
+    metrics["moe_dropped_frac"] = aux["moe_dropped_frac"]
+  if (
+      bool(config.use_multimodal)
+      and config.vision_encoder_block == common_types.VisionEncoderBlockType.DEEPSEEK41
+      and bool(config.log_moe_bias_norms)
+  ):
+    metrics["ds41_mm_norms"] = _compute_ds41_mm_norms_vector(config, new_state.model)
   if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -793,6 +820,136 @@ def _maybe_log_required_rbf(config, step, metrics, program):
     return
   per_layer_str = ",".join(f"{v:.4f}" for v in per_layer)
   max_logging.log(f"REQUIRED_RBF step={step} max={per_layer.max():.4f} per_layer=[{per_layer_str}] program={program}")
+
+
+def _f32_l2_norm(node: Any) -> jax.Array:
+  """Computes exact float32 L2 norm over all array leaves in `node`."""
+  leaves = [
+      v[...] if isinstance(v, nnx.Variable) else v
+      for v in jax.tree_util.tree_leaves(node, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  ]
+  sq_sum = sum((jnp.sum(jnp.square(jnp.asarray(x, dtype=jnp.float32))) for x in leaves), jnp.float32(0.0))
+  return jnp.sqrt(sq_sum)
+
+
+def _compute_ds41_mm_norms_vector(config: Any, model: nnx.Module) -> jax.Array:
+  """Computes `[vit_norm, aligner_norm, delim_norm, *bias_vl_norms]` as a 1D float32 array inside `train_step`."""
+  model_state = nnx.state(model)
+  ve_state = model_state["vision_encoder"]
+  vit_norm = _f32_l2_norm(ve_state["DeepSeek41VisionEncoder_0"])
+  proj_state = ve_state["DeepSeek41VisionProjector_0"]
+  aligner_norm = _f32_l2_norm((proj_state["w1"], proj_state["w2"]))
+  delim_norm = _f32_l2_norm((proj_state["image_start"], proj_state["image_end"], proj_state["image_newline"]))
+  dec_state = model_state["decoder"]
+  num_layers = int(config.num_decoder_layers)
+  bias_vl_norms: list[jax.Array] = [jnp.float32(0.0)] * num_layers
+  if config.scan_layers:
+    for seg_idx, segment in enumerate(deepseek41.build_segments(config)):
+      seg_state = dec_state[f"segments_{seg_idx}"]
+      for slot_idx in range(len(segment.groups[0])):
+        stacked = seg_state[f"layers_{slot_idx}"]["mlp"]["MoeBlock_0"]["gate"]["bias_vl"][...]
+        for rep_idx, group in enumerate(segment.groups):
+          bias_vl_norms[group[slot_idx]] = _f32_l2_norm(stacked[rep_idx])
+  else:
+    for layer_idx in range(num_layers):
+      bias_vl_norms[layer_idx] = _f32_l2_norm(dec_state[f"layers_{layer_idx}"]["mlp"]["MoeBlock_0"]["gate"]["bias_vl"])
+  return jnp.stack([vit_norm, aligner_norm, delim_norm, *bias_vl_norms])
+
+
+def _query_local_device0_hbm_gib() -> tuple[float, float] | None:
+  """Queries host device 0 `(bytes_in_use_gib, peak_bytes_in_use_gib)`, or returns `None` when unsupported (CPU)."""
+  local_devs = jax.local_devices()
+  if not local_devs:
+    return None
+  dev_mem = local_devs[0].memory_stats()
+  if dev_mem is None or "peak_bytes_in_use" not in dev_mem:
+    return None
+  gib = float(1024**3)
+  in_use_bytes = int(dev_mem["bytes_in_use"]) if "bytes_in_use" in dev_mem else 0
+  peak_bytes = int(dev_mem["peak_bytes_in_use"])
+  return (in_use_bytes / gib, peak_bytes / gib)
+
+
+def _maybe_log_ds41_mm_norms(
+    config: Any,
+    step: int,
+    metrics: dict[str, Any],
+    *,
+    force_hbm_log: bool = False,
+) -> str | None:
+  """Logs per-step float32 L2 norms (when enabled) and live TPU HBM (`bytes_in_use_gib`, `peak_hbm_gb`)."""
+  has_norm_metrics = "ds41_mm_norms" in metrics and bool(config.log_moe_bias_norms)
+  env_log_norms = "DS41_LOG_MM_NORMS" in os.environ and os.environ["DS41_LOG_MM_NORMS"].strip() == "1"
+  if not has_norm_metrics and not env_log_norms:
+    return None
+
+  if has_norm_metrics:
+    host_norms = np.asarray(jax.device_get(metrics["ds41_mm_norms"]), dtype=np.float32).ravel()
+    hbm_pair = _query_local_device0_hbm_gib()
+    vit_hex = float(np.float32(host_norms[0])).hex()
+    aligner_hex = float(np.float32(host_norms[1])).hex()
+    delim_hex = float(np.float32(host_norms[2])).hex()
+    bvl_hex_str = ",".join(float(np.float32(v)).hex() for v in host_norms[3:])
+    line = (
+        f"DS41_MM_NORMS step={int(step)} vit_norm={vit_hex} "
+        f"aligner_norm={aligner_hex} delim_norm={delim_hex} bias_vl_norm=[{bvl_hex_str}]"
+    )
+    if hbm_pair is not None:
+      in_use_gib, peak_gib = hbm_pair
+      line += f" peak_hbm_gb={peak_gib:.6f} live_peak_hbm_gib={peak_gib:.6f} bytes_in_use_gib={in_use_gib:.6f}"
+    max_logging.log(line)
+    return line
+
+  log_period = int(config.log_period)
+  if not force_hbm_log and int(step) != 0 and log_period > 1 and (int(step) % log_period != 0):
+    return None
+  for metric_leaf in jax.tree_util.tree_leaves(metrics):
+    if hasattr(metric_leaf, "block_until_ready"):
+      metric_leaf.block_until_ready()
+  hbm_pair = _query_local_device0_hbm_gib()
+  if hbm_pair is None:
+    return None
+  in_use_gib, peak_gib = hbm_pair
+  payload = {
+      "bytes_in_use_gib": round(in_use_gib, 6),
+      "live_peak_hbm_gib": round(peak_gib, 6),
+      "peak_hbm_gb": round(peak_gib, 6),
+      "step": int(step),
+      "use_multimodal": bool(config.use_multimodal),
+  }
+  line = (
+      f"DS41_MM_NORMS: {json.dumps(payload, sort_keys=True)} "
+      f"step={int(step)} bytes_in_use_gib={in_use_gib:.6f} "
+      f"peak_hbm_gb={peak_gib:.6f} live_peak_hbm_gib={peak_gib:.6f}"
+  )
+  max_logging.log(line)
+  return line
+
+
+def _maybe_log_step0_moe_dropped_frac(
+    config: Any,
+    step: int,
+    start_step: int,
+    metrics: dict[str, Any],
+) -> str | None:
+  """Logs per-layer routed MoE dropped-token fraction on step 0 (`step == start_step`) only."""
+  if int(step) != int(start_step):
+    return None
+  if "moe_dropped_frac" not in metrics or metrics["moe_dropped_frac"] is None:
+    return None
+  per_layer = np.asarray(jax.device_get(metrics["moe_dropped_frac"]), dtype=np.float32).reshape(-1)
+  if per_layer.size == 0:
+    return None
+  rbf = float(config.ragged_buffer_factor)
+  mean_val = float(np.mean(per_layer))
+  max_val = float(np.max(per_layer))
+  per_layer_str = ",".join(f"{float(v):.6f}" for v in per_layer)
+  line = (
+      f"MOE_DROPPED_FRAC step={int(step)} ragged_buffer_factor={rbf} "
+      f"mean={mean_val:.6f} max={max_val:.6f} per_layer=[{per_layer_str}]"
+  )
+  max_logging.log(line)
+  return line
 
 
 def training_loop_iteration(
@@ -960,6 +1117,9 @@ def training_loop_iteration(
 
   if step == start_step:
     max_utils.print_mem_stats("After params initialized")
+
+  _maybe_log_ds41_mm_norms(config, step, metrics)
+  _maybe_log_step0_moe_dropped_frac(config, step, start_step, metrics)
 
   metric_logger_instance.buffer_and_write_metrics(metrics, step, step_time_delta)
   if not ran_eval:
@@ -1463,6 +1623,13 @@ def train_loop(config, recorder, state=None):
 
     # Unpack state for post-loop actions
     state = jax_device_state["state"]
+    if (
+        python_vars["step"] > immutable_data["start_step"]
+        and "DS41_LOG_MM_NORMS" in os.environ
+        and os.environ["DS41_LOG_MM_NORMS"].strip() == "1"
+    ):
+      jax.block_until_ready(state)
+      _maybe_log_ds41_mm_norms(config, python_vars["step"] - 1, {}, force_hbm_log=True)
 
     if immutable_data["save_checkpoint_on_completion"]:
       checkpointing.maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator)

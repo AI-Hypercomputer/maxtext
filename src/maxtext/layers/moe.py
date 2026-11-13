@@ -20,6 +20,7 @@ import enum
 import functools
 import inspect
 import math
+import os
 import random
 from typing import Any, Iterable, Optional, Tuple, Union
 
@@ -130,6 +131,7 @@ class RouteOutput:
   topk_argsort_indices: Optional[jax.Array] = None
   # moe_tc_ragged_sort: TcRouting shared by the TensorCore ragged sort and unsort of this chunk.
   tc_routing: Optional[Any] = None
+  dropped_frac: Optional[jax.Array] = None
 
 
 def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax.Array:
@@ -2715,6 +2717,13 @@ class RoutedMoE(nnx.Module):
     # Debug only: the shard_map gets a 5th (max_load_ratio) output only when requested, so the
     # default shard_map signature is unchanged. Stub configs in tests may lack the field.
     log_max_load_ratio = getattr(self.config, "moe_log_max_load_ratio", False)
+    log_dropped_frac = bool(
+        (
+            hasattr(self.config, "log_required_ragged_buffer_factor")
+            and bool(self.config.log_required_ragged_buffer_factor)
+        )
+        or ("DS41_LOG_STEP0_MOE_DROPPED" in os.environ and os.environ["DS41_LOG_STEP0_MOE_DROPPED"].strip() == "1")
+    )
 
     def finalize_bias_updates(summed_expert_counts):
       """Loss-free-balancing update from expert counts summed over all token chunks (the full batch)."""
@@ -2941,6 +2950,7 @@ class RoutedMoE(nnx.Module):
       local_sorted_indices = None
       all_shards_group_sizes = None
       reshaped_group_sizes = None
+      dropped_frac = None
       (
           x,
           sorted_selected_experts,
@@ -2983,6 +2993,16 @@ class RoutedMoE(nnx.Module):
               self.config.num_experts_per_tok,
               self.get_ragged_buffer_factor(),
           )
+          if log_dropped_frac and self.get_ragged_buffer_factor() > 0.0:
+            col_totals = jnp.sum(all_shards_group_sizes, axis=0)
+            dropped_in_slice = jnp.sum(jnp.maximum(col_totals - buffer_size, 0)).astype(jnp.float32)
+            routed_in_slice = jnp.float32(jnp.shape(x)[0] * num_ep)
+            if roe_bias_axis_names:
+              global_dropped = jax.lax.psum(dropped_in_slice, axis_name=roe_bias_axis_names)
+              global_routed = jax.lax.psum(routed_in_slice, axis_name=roe_bias_axis_names)
+            else:
+              global_dropped, global_routed = dropped_in_slice, routed_in_slice
+            dropped_frac = jnp.reshape(global_dropped / jnp.maximum(global_routed, 1.0), (1,))
           input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
               all_shards_group_sizes,
               expert_shard_id,
@@ -3037,6 +3057,7 @@ class RoutedMoE(nnx.Module):
               lb_loss=lb_loss,
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
+              dropped_frac=dropped_frac,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -3658,6 +3679,7 @@ class RoutedMoE(nnx.Module):
             routing.has_overflow,
             routing.required_rbf,
             routing.max_load_ratio,
+            routing.dropped_frac,
             (w0, w1, wo),
         )
 
@@ -3698,6 +3720,7 @@ class RoutedMoE(nnx.Module):
           routing.has_overflow,
           routing.required_rbf,
           routing.max_load_ratio,
+          routing.dropped_frac,
           (w0, w1, wo),
       )
 
@@ -3737,7 +3760,7 @@ class RoutedMoE(nnx.Module):
             P(),  # required_rbf (probe): replicated scalar max-reduced across entire mesh, or None
         )
         # max_load_ratio (moe_log_max_load_ratio only): replicated scalar, max-reduced across the mesh.
-        + ((P(),) if log_max_load_ratio else ()),
+        + ((P(),) if log_max_load_ratio else ()) + ((P(),) if log_dropped_frac else ()),
         check_vma=self.config.check_vma,
     )
     def sparse_matmul_route_and_compute(
@@ -3767,7 +3790,7 @@ class RoutedMoE(nnx.Module):
       def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
         if n_chunks <= 1 or not self.config.use_ring_of_experts:
-          out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, _ = _moe_body(
+          out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, dropped_frac, _ = _moe_body(
               x,
               logits,
               pre_bias_logits,
@@ -3784,7 +3807,7 @@ class RoutedMoE(nnx.Module):
           )
           if not defer_small_ars:
             bias_updates = finalize_bias_updates(bias_updates)
-          return out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio
+          return out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, dropped_frac
 
         # Chunked ring-of-experts pipeline: split the per-shard tokens along the
         # sequence dim into `n_chunks` data-independent chunks. Each chunk runs the
@@ -3797,7 +3820,15 @@ class RoutedMoE(nnx.Module):
         # the Switch-style loss of other routers is averaged across chunks.
         seq_len = x.shape[1]
         chunk = seq_len // n_chunks
-        outs, lb_losses, bias_updates_list, has_overflows, required_rbfs, max_load_ratios = [], [], [], [], [], []
+        outs, lb_losses, bias_updates_list, has_overflows, required_rbfs, max_load_ratios, dropped_fracs = (
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
         _prev = None
         # With moe_accumulate_chunk_wgrad, each chunk's GMMs return the (gathered, possibly quantized)
         # weights they consumed and the next chunk reuses them. The weights are then gathered and
@@ -3814,7 +3845,7 @@ class RoutedMoE(nnx.Module):
           # loss stays bit-exact.
           if barrier_enabled and _prev is not None:
             x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
-          out_c, lb_c, bu_c, ov_c, req_c, ratio_c, chunk_weights = _moe_body(
+          out_c, lb_c, bu_c, ov_c, req_c, ratio_c, drop_c, chunk_weights = _moe_body(
               x_c,
               logits[:, sl, :],
               None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
@@ -3841,6 +3872,7 @@ class RoutedMoE(nnx.Module):
           has_overflows.append(ov_c)
           required_rbfs.append(req_c)
           max_load_ratios.append(ratio_c)
+          dropped_fracs.append(drop_c)
         output = jnp.concatenate(outs, axis=1)
         lb_loss = None if lb_losses[0] is None else sum(lb_losses) / n_chunks
         if bias_updates_list[0] is None:
@@ -3854,7 +3886,8 @@ class RoutedMoE(nnx.Module):
         # Each chunk has its own buffer, so the step needs the largest per-chunk factor.
         required_rbf = None if required_rbfs[0] is None else jnp.max(jnp.stack(required_rbfs))
         max_load_ratio = None if max_load_ratios[0] is None else jnp.max(jnp.stack(max_load_ratios))
-        return output, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio
+        dropped_frac = None if not dropped_fracs or dropped_fracs[0] is None else jnp.mean(jnp.stack(dropped_fracs))
+        return output, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, dropped_frac
 
       force_dropless = getattr(self, "force_dropless", False)
 
@@ -3865,15 +3898,20 @@ class RoutedMoE(nnx.Module):
       if self.config.moe_dropless_fallback == "layer":
         fallback_chunks = self.get_dropless_fallback_num_chunks(x.shape[1], n_chunks)
       if fallback_chunks is None:
-        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _route_and_compute(force_dropless)
+        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, dropped_frac = _route_and_compute(
+            force_dropless
+        )
         has_overflow = _per_device_flag(has_overflow)
         if defer_small_ars and bias_updates is not None:
           if bias_updates.ndim == 1:  # unchunked path: one chunk
             bias_updates = bias_updates[None, :]
           bias_updates = bias_updates[None]  # (1, n_chunks, E): this shard's partial counts
+        ret = (out, lb_loss, bias_updates, has_overflow, jnp.bool_(False), required_rbf)
         if log_max_load_ratio:
-          return out, lb_loss, bias_updates, has_overflow, jnp.bool_(False), required_rbf, max_load_ratio
-        return out, lb_loss, bias_updates, has_overflow, jnp.bool_(False), required_rbf
+          ret = ret + (max_load_ratio,)
+        if log_dropped_frac:
+          ret = ret + (dropped_frac,)
+        return ret
 
       # In-layer dropless fallback: calculate the overflow, then run either the
       # normal capped path or a chunked dropless path for this layer only (no step replay).
@@ -3885,25 +3923,36 @@ class RoutedMoE(nnx.Module):
       # log_required_ragged_buffer_factor probe is off, a float32 scalar otherwise. The dropless
       # branch returns the probe value of its own (fallback_chunks) chunking.
       def _capped_branch():
-        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _route_and_compute(False)
-        return out, lb_loss, bias_updates, jnp.asarray(has_overflow, dtype=jnp.bool_), required_rbf, max_load_ratio
+        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, dropped_frac = _route_and_compute(False)
+        return (
+            out,
+            lb_loss,
+            bias_updates,
+            jnp.asarray(has_overflow, dtype=jnp.bool_),
+            required_rbf,
+            max_load_ratio,
+            dropped_frac,
+        )
 
       # Save nothing from the rare dropless branch: lax.cond gives both branches the union of
       # their residuals, so the (larger) dropless residuals would otherwise be held every step.
       @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
       def _dropless_branch():
-        out, lb_loss, bias_updates, _, required_rbf, max_load_ratio = _route_and_compute(
+        out, lb_loss, bias_updates, _, required_rbf, max_load_ratio, dropped_frac = _route_and_compute(
             True, n_chunks=fallback_chunks, barrier_enabled=True
         )
-        return out, lb_loss, bias_updates, jnp.bool_(False), required_rbf, max_load_ratio
+        return out, lb_loss, bias_updates, jnp.bool_(False), required_rbf, max_load_ratio, dropped_frac
 
-      out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = jax.lax.cond(
+      out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, dropped_frac = jax.lax.cond(
           took_fallback, _dropless_branch, _capped_branch
       )
       has_overflow = _per_device_flag(has_overflow)
+      ret = (out, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf)
       if log_max_load_ratio:
-        return out, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf, max_load_ratio
-      return out, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf
+        ret = ret + (max_load_ratio,)
+      if log_dropped_frac:
+        ret = ret + (dropped_frac,)
+      return ret
 
     # Note: SparseCore pinning (`moe_pin_sparse_core_all_gathers`) is currently not supported
     # with `moe_fsdp_use_two_stage_all_gather` (enforced via validation in types.py).
@@ -4018,7 +4067,14 @@ class RoutedMoE(nnx.Module):
         forced_routed_experts,
     )
     output, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf = route_and_compute_outputs[:6]
-    max_load_ratio = route_and_compute_outputs[6] if log_max_load_ratio else None
+    extra_idx = 6
+    max_load_ratio = None
+    if log_max_load_ratio:
+      max_load_ratio = route_and_compute_outputs[extra_idx]
+      extra_idx += 1
+    dropped_frac = None
+    if log_dropped_frac:
+      dropped_frac = route_and_compute_outputs[extra_idx]
     if use_megatron_seq_aux_loss:
       # Global (batch, sequence) arrays: one loss per full sequence (not per token chunk), averaged
       # over the global batch.
@@ -4033,6 +4089,8 @@ class RoutedMoE(nnx.Module):
       self.sow(nnx.Intermediate, "moe_required_rbf", required_rbf)
     if max_load_ratio is not None:
       self.sow(nnx.Intermediate, "moe_max_load_ratio", max_load_ratio)
+    if dropped_frac is not None:
+      self.sow(nnx.Intermediate, "moe_dropped_frac", dropped_frac)
     return output, lb_loss, bias_updates
 
   def reshape_and_update_weights(self, weights, indices, safe_updates=False):
@@ -4698,6 +4756,15 @@ class RoutedMoE(nnx.Module):
             weights,
             precision=matmul_precision,
         ).astype(self.dtype)
+      log_dropped_frac = bool(
+          (
+              hasattr(self.config, "log_required_ragged_buffer_factor")
+              and bool(self.config.log_required_ragged_buffer_factor)
+          )
+          or ("DS41_LOG_STEP0_MOE_DROPPED" in os.environ and os.environ["DS41_LOG_STEP0_MOE_DROPPED"].strip() == "1")
+      )
+      if log_dropped_frac:
+        self.sow(nnx.Intermediate, "moe_dropped_frac", jnp.zeros((1,), dtype=jnp.float32))
       return output, lb_loss, bias_updates
 
   def fused_moe_matmul(
