@@ -14,7 +14,9 @@
 
 """CPU tests for `benchmarks.moe_synthetic_routing`."""
 
+import gc
 import tempfile
+import weakref
 import types
 import unittest
 from unittest import mock
@@ -211,13 +213,17 @@ class SyntheticRoutingWrapperTest(unittest.TestCase):
         "inputs": np.zeros((cfg.global_batch_size_to_load, 16), dtype=np.int32),
         "targets": np.zeros((cfg.global_batch_size_to_load, 16), dtype=np.int32),
     }
-    loader = types.SimpleNamespace(
-        config=cfg,
-        goodput_recorder=None,
-        data_iterator=iter([dummy_raw, dummy_raw, dummy_raw]),
-        last_batch=None,
-        input_data_shardings=sharding,
-    )
+
+    class _DummyLoader:
+      pass
+
+    loader = _DummyLoader()
+    loader.config = cfg
+    loader.goodput_recorder = None
+    loader.data_iterator = iter([dummy_raw, dummy_raw, dummy_raw])
+    loader.last_batch = None
+    loader.input_data_shardings = sharding
+    loader_ref = weakref.ref(loader)
     loader.update_data_iterator = lambda: None
     loader.check_example_batch = lambda: None
     loader.load_next_batch_pre_sharding = types.MethodType(data_loader.DataLoader.load_next_batch_pre_sharding, loader)
@@ -240,6 +246,10 @@ class SyntheticRoutingWrapperTest(unittest.TestCase):
       self.assertEqual(b0["forced_routed_experts"].shape, shaped_train["forced_routed_experts"].shape)
       self.assertFalse(np.array_equal(np.asarray(b0["forced_routed_experts"]), np.asarray(b1["forced_routed_experts"])))
       np.testing.assert_array_equal(np.asarray(b0["forced_routed_experts"]), np.asarray(b2["forced_routed_experts"]))
+      # Verify WeakKeyDictionary does not retain DataLoader instances once dropped.
+      del loader
+      gc.collect()
+      self.assertIsNone(loader_ref())
 
     # Restored cleanly on exit.
     self.assertIs(maxtext_utils.get_shaped_batch, orig_gsb)

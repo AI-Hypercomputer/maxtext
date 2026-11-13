@@ -23,6 +23,7 @@ from collections.abc import Sequence
 import contextlib
 import functools
 import sys
+import weakref
 
 from absl import app
 from benchmarks.moe_synthetic_routing import synthetic_routing
@@ -55,17 +56,15 @@ def install_synthetic_routing(syn_cfg: synthetic_routing.SyntheticRoutingCfg):
       shaped_batch["forced_routed_experts"] = jax.ShapeDtypeStruct(routing_shape, jnp.int32, sharding=batch_sharding)
     return shaped_batch
 
-  pools_by_loader: dict[int, tuple[object, synthetic_routing.SyntheticRouting]] = {}
+  pools_by_loader: weakref.WeakKeyDictionary[object, synthetic_routing.SyntheticRouting] = weakref.WeakKeyDictionary()
 
   @functools.wraps(orig_load_next_batch)
   def wrapped_load_next_batch(self, *args, **kwargs):
     example_batch = orig_load_next_batch(self, *args, **kwargs)
-    entry = pools_by_loader.get(id(self))
-    if entry is None or entry[0] is not self:
+    sr = pools_by_loader.get(self)
+    if sr is None:
       sr = synthetic_routing.SyntheticRouting(self.config, self.input_data_shardings, syn_cfg=syn_cfg)
-      pools_by_loader[id(self)] = (self, sr)
-    else:
-      sr = entry[1]
+      pools_by_loader[self] = sr
     example_batch = dict(example_batch)
     example_batch["forced_routed_experts"] = sr.next()
     return example_batch
