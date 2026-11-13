@@ -36,7 +36,7 @@ over the mesh are rejected rather than emulated.
 `setup_model` is where infrastructure is composed, in the order every m3
 driver follows:
 
-    construct -> quantize -> named scopes -> optimizer
+    construct -> scan -> remat -> quantize -> named scopes -> host offload -> optimizer
 
 Each transform is a function from `maxtext.m3.infra`. Named scopes always
 apply; the others read one config field and are a no-op when that field is
@@ -68,6 +68,7 @@ Example (CPU or TPU)::
 """
 
 from collections.abc import Sequence
+from typing import Any
 import functools
 import math
 import time
@@ -93,6 +94,7 @@ from maxtext.m3.core.sharding import (
     project_spec_to_mesh,
     sharding_from_config,
 )
+from maxtext.m3.infra import offload as m3_offload
 from maxtext.m3.infra import quantization
 from maxtext.m3.infra import remat as m3_remat
 from maxtext.m3.infra import scan as m3_scan
@@ -134,7 +136,8 @@ def setup_model(config, mesh: Mesh, sharding: Sharding | None = None) -> tuple[n
     )
   model = quantization.maybe_quantize(model, config, *quantization.example_inputs(config))
   model = add_named_scopes(model)
-  optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
+  model = m3_offload.maybe_offload_parameters(model, config)
+  optimizer = m3_offload.make_optimizer(model, make_optimizer(config), config)
   return model, optimizer
 
 
@@ -221,12 +224,30 @@ def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict[str, jax
   return loss
 
 
-def _log_step(step: int, loss: jax.Array, last_done: float, tokens_per_step: int) -> tuple[float, float]:
-  """Blocks until `step` finishes, logs it, and returns its loss and completion time."""
+get_device_hbm_stats = m3_offload.get_device_hbm_stats
+
+
+def _log_step(
+    step: int,
+    loss: jax.Array,
+    last_done: float,
+    tokens_per_step: int,
+    *,
+    device: Any = None,
+) -> tuple[float, float]:
+  """Blocks until `step` finishes, logs it (with TPU HBM stats when available), and returns `(loss, done)`."""
   loss = float(loss)
   done = time.perf_counter()
   step_time = done - last_done
-  max_logging.log(f"step {step}: loss {loss:.4f}, {step_time:.3f}s, {tokens_per_step / step_time:,.0f} tokens/s")
+  hbm = get_device_hbm_stats(device)
+  hbm_suffix = (
+      f", hbm_allocated_gib={hbm['hbm_allocated_gib']:.2f}, hbm_peak_in_use_gib={hbm['hbm_peak_in_use_gib']:.2f}"
+      if hbm is not None
+      else ""
+  )
+  max_logging.log(
+      f"step {step}: loss {loss:.4f}, {step_time:.3f}s, {tokens_per_step / step_time:,.0f} tokens/s{hbm_suffix}"
+  )
   return loss, done
 
 
@@ -283,7 +304,9 @@ def train_loop(config) -> float:
         f"{params_held_per_device(model):.1%} of them per device, "
         f"batch {config.global_batch_size_to_train_on} x {config.max_target_length} tokens, "
         f"matmul_precision={matmul_precision}, "
-        f"quantization={getattr(config.quantization, 'value', config.quantization) or 'none'}"
+        f"quantization={getattr(config.quantization, 'value', config.quantization) or 'none'}, "
+        f"optimizer_offload={bool(getattr(config, 'optimizer_memory_host_offload', False))}, "
+        f"param_offload={bool(getattr(config, 'parameter_memory_host_offload', False))}"
     )
 
     prof = profiler.Profiler(config, offset_step=0)

@@ -20,13 +20,12 @@ import math
 from typing import Any
 
 import jax
-from maxtext.training_engine import maxtext_engine
 
 _GIB = 2**30
 PEAK_LABEL = "TRAIN-KERNEL DEVICE PEAK"
 _HOST_MEMORY_KINDS = frozenset({"pinned_host", "unpinned_host"})
-_MODEL_KEY = maxtext_engine._MODEL_STATE_KEY  # pylint: disable=protected-access
-_OPTIMIZER_KEY = maxtext_engine._OPTIMIZER_STATE_KEY  # pylint: disable=protected-access
+_MODEL_KEY = "model"
+_OPTIMIZER_KEY = "optimizer"
 
 # Top-level train-state subtrees that remain resident in HBM while each kernel runs without being
 # passed as arguments.
