@@ -229,6 +229,8 @@ def _pallas_grouped_matmul_bwd(
 
   if backend_kind in ("gmm_v2", "tokamax"):
     if not is_tpu:
+      lhs_safe = jnp.where(valid_rows, lhs, jnp.zeros((), dtype=lhs.dtype))
+      grad_safe = jnp.where(valid_rows, grad.astype(lhs.dtype), jnp.zeros((), dtype=lhs.dtype))
       _, vjp_fn = jax.vjp(
           lambda l, r: jax.lax.ragged_dot(
               l,
@@ -805,6 +807,8 @@ def _grouped_unsharded(
     activation: Callable[[jax.Array], jax.Array],
     swiglu_limit: float | None,
     executor: MoEExecutor,
+    backend: str = "ragged_dot",
+    is_tpu: bool = False,
 ) -> jax.Array:
   """Portable `ragged_dot` grouped execution without `shard_map`."""
   if executor.bwd_wgrad_overlap:
@@ -844,7 +848,7 @@ def _grouped_unsharded(
   sorted_x = _permute_rows(slot_rows, perm)
   sorted_x = jnp.where((jnp.arange(num_slots, dtype=jnp.int32) < valid_count)[:, None], sorted_x, 0)
 
-  matmul_fn = functools.partial(grouped_matmul, backend="ragged_dot", is_tpu=False)
+  matmul_fn = functools.partial(grouped_matmul, backend=backend, is_tpu=is_tpu)
   expert_out = _run_local_expert_mlp(
       sorted_x,
       projections,
@@ -1211,6 +1215,65 @@ def routed_experts(
     case other:
       raise ValueError(f"Unknown MoE executor kind {other!r}; expected 'dense', 'ragged_dot', 'gmm_v2', or 'tokamax'.")
   return checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+
+def grouped_unsharded_fused(
+    x: jax.Array,
+    weights: jax.Array,
+    indices: jax.Array,
+    gate_up_proj: jax.Array,
+    down_proj: jax.Array,
+    *,
+    executor: MoEExecutor = RAGGED_DOT,
+    activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
+    swiglu_limit: float | None = None,
+    is_tpu: bool = False,
+) -> jax.Array:
+  """Executes fused routed experts on a single device when no `Mesh` is in scope."""
+  if gate_up_proj.ndim not in (3, 4) or down_proj.ndim != 3:
+    raise ValueError(
+        f"Expected 3D or 4D gate_up_proj and 3D down_proj; got gate_up_proj={gate_up_proj.shape}, "
+        f"down_proj={down_proj.shape}."
+    )
+  num_experts = gate_up_proj.shape[0]
+  _validate_routed_inputs(x, weights, indices, num_experts)
+  projections = (gate_up_proj.astype(x.dtype), down_proj.astype(x.dtype))
+  backend = executor.kind if executor.kind in SHARDED_EXECUTOR_KINDS else "ragged_dot"
+  if is_tpu and backend in SHARDED_EXECUTOR_KINDS:
+    mesh_1d = jax.sharding.Mesh(jax.local_devices()[:1], ("_moe_1d",))
+    return jax.shard_map(
+        lambda x_l, w_l, idx_l, gu_l, dn_l: _grouped_unsharded(
+            x_l,
+            w_l,
+            idx_l,
+            (gu_l, dn_l),
+            fused=True,
+            num_experts=num_experts,
+            activation=activation,
+            swiglu_limit=swiglu_limit,
+            executor=executor,
+            backend=backend,
+            is_tpu=True,
+        ).astype(x_l.dtype),
+        mesh=mesh_1d,
+        in_specs=(P(), P(), P(), P(), P()),
+        out_specs=P(),
+        check_vma=False,
+    )(x, weights, indices, projections[0], projections[1])
+  out = _grouped_unsharded(
+      x,
+      weights,
+      indices,
+      projections,
+      fused=True,
+      num_experts=num_experts,
+      activation=activation,
+      swiglu_limit=swiglu_limit,
+      executor=executor,
+      backend=backend,
+      is_tpu=is_tpu,
+  )
+  return out.astype(x.dtype)
 
 
 def routed_experts_fused(

@@ -31,6 +31,7 @@ import math
 import re
 import subprocess
 import tempfile
+import types
 from typing import Any
 import unittest
 
@@ -1256,6 +1257,125 @@ class GraniteMoeGoldenParityAndPerturbTest(absltest.TestCase):
 
     # Direct tensor pass-through:
     self.assertIs(_extract_hf_router_logits(expected_logits, num_experts), expected_logits)
+
+
+class GraniteMoeTokamaxExecutionTest(absltest.TestCase):
+  """Config validation, single-device, and multi-device Tokamax tests for GraniteMoe."""
+
+  def _sync_nnx_vars(self, src_mod: Any, dst_mod: Any) -> None:
+    for (_, s_var), (_, d_var) in zip(
+        _flatten_nnx_vars(nnx.state(src_mod)),
+        _flatten_nnx_vars(nnx.state(dst_mod)),
+        strict=True,
+    ):
+      shd = getattr(d_var.get_value(), "sharding", None)
+      d_var.set_value(jax.device_put(s_var.get_value(), shd) if shd is not None else jnp.asarray(s_var.get_value()))
+
+  def test_sparse_matmul_config_validation_and_sharding_axes(self):
+    self.assertTrue(modeling_granitemoe.GraniteMoeConfig().sparse_matmul)
+    self.assertFalse(_make_mini_config(sparse_matmul=False).sparse_matmul)
+    for bad_bool in ("yes", "false", 1, 0, None):
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        _make_mini_config(sparse_matmul=bad_bool)
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        modeling_granitemoe.GraniteMoeConfig.from_maxtext_config(types.SimpleNamespace(sparse_matmul=bad_bool))
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        modeling_granitemoe.GraniteMoeConfig.from_maxtext_config(
+            modeling_granitemoe.GraniteMoeConfig(), sparse_matmul=bad_bool
+        )
+
+    ns = types.SimpleNamespace(sparse_matmul=True)
+    self.assertTrue(modeling_granitemoe.GraniteMoeConfig.from_maxtext_config(ns).sparse_matmul)
+    self.assertFalse(modeling_granitemoe.GraniteMoeConfig.from_maxtext_config(ns, sparse_matmul=False).sparse_matmul)
+
+    shd = modeling_granitemoe.GraniteMoeSharding()
+    self.assertEqual(
+        shd("input_linear", ("experts", "expert_embed", "expert_mlp")),
+        jax.sharding.PartitionSpec(("fsdp", "expert"), None, "tensor"),
+    )
+
+  def test_single_and_multidevice_tokamax_forward_vjp_parity_and_no_weight_all_gather(self):
+    cfg_ref = _make_mini_config(sparse_matmul=False)
+    cfg_tok = _make_mini_config(sparse_matmul=True)
+    exp_ref = modeling_granitemoe.GraniteMoeExperts(cfg_ref, rngs=nnx.Rngs(5))
+    exp_tok = modeling_granitemoe.GraniteMoeExperts(cfg_tok, rngs=nnx.Rngs(5))
+    self._sync_nnx_vars(exp_ref, exp_tok)
+
+    # Small token count (2 * 3 = 6 tokens * top_k=2 -> M=12 < 128) + sentinel -1 unassigned slot (F6, F8).
+    x = jax.random.normal(jax.random.PRNGKey(13), (2, 3, cfg_ref.hidden_size), dtype=jnp.float32)
+    idx = jnp.array([[[0, 1], [2, -1], [4, 5]], [[1, 3], [6, 7], [0, -1]]], dtype=jnp.int32)
+    gates = jnp.array(
+        [[[0.6, 0.4], [1.0, 0.9], [0.5, 0.5]], [[0.7, 0.3], [0.2, 0.8], [1.0, 0.5]]],
+        dtype=jnp.float32,
+    )
+    cot = jax.random.normal(jax.random.PRNGKey(17), x.shape, dtype=jnp.float32)
+
+    out_ref = exp_ref(x, idx, gates)
+    out_tok = exp_tok(x, idx, gates)
+    np.testing.assert_allclose(np.asarray(out_tok), np.asarray(out_ref), rtol=1e-5, atol=1e-5)
+
+    def _loss(mod, x_in):
+      return jnp.sum(mod(x_in, idx, gates) * cot)
+
+    _, (gmod_ref, gx_ref) = nnx.value_and_grad(_loss, argnums=(0, 1))(exp_ref, x)
+    _, (gmod_tok, gx_tok) = nnx.value_and_grad(_loss, argnums=(0, 1))(exp_tok, x)
+    np.testing.assert_allclose(np.asarray(gx_tok), np.asarray(gx_ref), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(gmod_tok.gate_up_proj.get_value()),
+        np.asarray(gmod_ref.gate_up_proj.get_value()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(gmod_tok.down_proj.get_value()),
+        np.asarray(gmod_ref.down_proj.get_value()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    # Negative control: perturbing gate_up_proj breaks output parity.
+    exp_bad = modeling_granitemoe.GraniteMoeExperts(cfg_tok, rngs=nnx.Rngs(5))
+    self._sync_nnx_vars(exp_ref, exp_bad)
+    exp_bad.gate_up_proj.set_value(exp_bad.gate_up_proj.get_value() + 2.0)
+    self.assertGreater(float(jnp.max(jnp.abs(exp_bad(x, idx, gates) - out_ref))), 1e-3)
+
+    devices = jax.devices()
+    if len(devices) >= 4:
+      moe_ref = modeling_granitemoe.GraniteMoeMoE(cfg_ref, rngs=nnx.Rngs(31))
+      x3d = jax.random.normal(jax.random.PRNGKey(37), (4, 4, cfg_ref.hidden_size), dtype=jnp.float32)
+      cot3d = jax.random.normal(jax.random.PRNGKey(41), x3d.shape, dtype=jnp.float32)
+      ref_y, _, _ = moe_ref(x3d)
+
+      def _ref_moe_loss(m, inp):
+        y, _, _ = m(inp)
+        return jnp.sum(y * cot3d)
+
+      _, ref_dx = nnx.value_and_grad(_ref_moe_loss, argnums=1)(moe_ref, x3d)
+
+      for ici in ({"data": 4}, {"fsdp": 2, "expert": 2}, {"fsdp": 2, "tensor": 2}):
+        mesh = m3_sharding.create_mesh(ici=ici, devices=devices[:4])
+        shd = modeling_granitemoe.GraniteMoeSharding.from_mesh(mesh)
+        with jax.set_mesh(mesh):
+          moe_tok = modeling_granitemoe.GraniteMoeMoE(cfg_tok, sharding=shd, rngs=nnx.Rngs(31))
+          self._sync_nnx_vars(moe_ref, moe_tok)
+          x_shd = jax.device_put(
+              x3d,
+              jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(("data", "fsdp", "expert"), None, None)),
+          )
+          cot_shd = jax.device_put(cot3d, x_shd.sharding)
+
+          @nnx.jit
+          def _step(m, inp, c):
+            def _l(mod, z):
+              y, _, _ = mod(z)
+              return jnp.sum(y * c), y
+
+            (loss_v, y_v), dx_v = nnx.value_and_grad(_l, argnums=1, has_aux=True)(m, inp)
+            return loss_v, y_v, dx_v
+
+          _, y_tok, dx_tok = _step(moe_tok, x_shd, cot_shd)
+          np.testing.assert_allclose(np.asarray(y_tok), np.asarray(ref_y), rtol=1e-4, atol=1e-4)
+          np.testing.assert_allclose(np.asarray(dx_tok), np.asarray(ref_dx), rtol=1e-4, atol=1e-4)
 
 
 # ==============================================================================

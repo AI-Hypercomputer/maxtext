@@ -352,6 +352,94 @@ class SingleDeviceParityTest(parameterized.TestCase):
       np.testing.assert_allclose(tok_rbf, ragged_rbf, rtol=1e-5, atol=1e-5)
       self.assertGreater(float(jnp.max(jnp.abs(tok_rbf - dropless))), 1e-2)
 
+  @parameterized.named_parameters(
+      ("ragged_dot", "ragged_dot"),
+      ("tokamax", "tokamax"),
+  )
+  def test_grouped_matmul_unassigned_tail_rows_zeroed_in_fwd_and_bwd(self, backend):
+    key = jax.random.key(314)
+    k1, k2, k3 = jax.random.split(key, 3)
+    m, valid_n, k, n = 16, 10, 12, 8
+    group_sizes = jnp.array([4, 0, 6, 0], dtype=jnp.int32)
+    lhs_valid = jax.random.normal(k1, (valid_n, k), dtype=jnp.float32)
+    rhs = jax.random.normal(k2, (4, k, n), dtype=jnp.float32)
+    cot_valid = jax.random.normal(k3, (valid_n, n), dtype=jnp.float32)
+
+    lhs_padded = jnp.concatenate([lhs_valid, jnp.full((m - valid_n, k), 500.0, dtype=jnp.float32)], axis=0)
+    cot_padded = jnp.concatenate([cot_valid, jnp.full((m - valid_n, n), -700.0, dtype=jnp.float32)], axis=0)
+
+    ref_out, ref_vjp = jax.vjp(
+        lambda l, r: m3_moe.grouped_matmul(l, r, group_sizes, backend="ragged_dot", is_tpu=False),
+        lhs_valid,
+        rhs,
+    )
+    ref_dlhs, ref_drhs = ref_vjp(cot_valid)
+
+    out, vjp_fn = jax.vjp(
+        lambda l, r: m3_moe.grouped_matmul(l, r, group_sizes, backend=backend, is_tpu=False),
+        lhs_padded,
+        rhs,
+    )
+    dlhs, drhs = vjp_fn(cot_padded)
+
+    np.testing.assert_allclose(out[:valid_n], ref_out, rtol=1e-5, atol=1e-5)
+    np.testing.assert_array_equal(np.asarray(out[valid_n:]), np.zeros((m - valid_n, n), dtype=np.float32))
+    np.testing.assert_allclose(dlhs[:valid_n], ref_dlhs, rtol=1e-5, atol=1e-5)
+    np.testing.assert_array_equal(np.asarray(dlhs[valid_n:]), np.zeros((m - valid_n, k), dtype=np.float32))
+    np.testing.assert_allclose(drhs, ref_drhs, rtol=1e-5, atol=1e-5)
+
+    if backend == "tokamax":
+      lhs_nan = jnp.concatenate([lhs_valid, jnp.full((m - valid_n, k), jnp.nan, dtype=jnp.float32)], axis=0)
+      cot_nan = jnp.concatenate([cot_valid, jnp.full((m - valid_n, n), jnp.nan, dtype=jnp.float32)], axis=0)
+      captured_pads = {}
+
+      def mock_gmm(*args, **kwargs):
+        lhs_arg = kwargs.get("lhs", args[0] if args else None)
+        rhs_arg = kwargs.get("rhs", args[1] if len(args) > 1 else None)
+        if "fwd_lhs_pad" not in captured_pads:
+          captured_pads["fwd_lhs_pad"] = np.asarray(lhs_arg)
+          return jnp.zeros((lhs_arg.shape[0], rhs_arg.shape[2]), dtype=lhs_arg.dtype)
+        captured_pads["bwd_grad_pad"] = np.asarray(lhs_arg)
+        return jnp.zeros((lhs_arg.shape[0], rhs_arg.shape[2]), dtype=lhs_arg.dtype)
+
+      def mock_tgmm(*args, **kwargs):
+        lhs_arg = kwargs.get("lhs", args[0] if args else None)
+        rhs_arg = kwargs.get("rhs", args[1] if len(args) > 1 else None)
+        num_groups = kwargs.get("num_actual_groups", rhs.shape[0])
+        captured_pads["bwd_lhs_pad"] = np.asarray(lhs_arg)
+        return jnp.zeros((num_groups, lhs_arg.shape[1], rhs_arg.shape[1]), dtype=rhs.dtype)
+
+      with (
+          mock.patch.object(gmm_v2, "gmm_v2", side_effect=mock_gmm),
+          mock.patch.object(tgmm_v2, "tgmm_v2", side_effect=mock_tgmm),
+      ):
+        tpu_out, tpu_vjp = jax.vjp(
+            lambda l, r: m3_moe.grouped_matmul(l, r, group_sizes, backend="gmm_v2", is_tpu=True),
+            lhs_nan,
+            rhs,
+        )
+        tpu_dlhs, tpu_drhs = tpu_vjp(cot_nan)
+
+      self.assertFalse(np.isnan(captured_pads["fwd_lhs_pad"]).any())
+      self.assertFalse(np.isnan(captured_pads["bwd_lhs_pad"]).any())
+      self.assertFalse(np.isnan(captured_pads["bwd_grad_pad"]).any())
+      self.assertFalse(np.isnan(np.asarray(tpu_out)).any())
+      self.assertFalse(np.isnan(np.asarray(tpu_dlhs)).any())
+      self.assertFalse(np.isnan(np.asarray(tpu_drhs)).any())
+
+  def test_grouped_unsharded_fused_without_active_mesh(self):
+    x, weights, indices, _ = _make_routing_inputs(batch=2, length=3, embed=16, num_experts=4, top_k=2)
+    indices = indices.at[0, 0, 1].set(-1)
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=4, embed=16, mlp=12)
+    w_gu_4d = jnp.stack([wi_0, wi_1], axis=2)
+    ref = m3_moe.grouped_unsharded_fused(
+        x, weights, indices, w_gu_4d, wo, swiglu_limit=1.2, executor=m3_moe.MoEExecutor("ragged_dot"), is_tpu=False
+    )
+    tok = m3_moe.grouped_unsharded_fused(
+        x, weights, indices, w_gu_4d, wo, swiglu_limit=1.2, executor=m3_moe.MoEExecutor("tokamax"), is_tpu=False
+    )
+    np.testing.assert_allclose(tok, ref, rtol=1e-5, atol=1e-5)
+
 
 class MultiDeviceEPAndTPTest(parameterized.TestCase):
   """Verifies multi-device `(FSDP >= 1, EP > 1, TP > 1)` parity, HLO collectives, and `ScannedLayers`."""
@@ -556,7 +644,7 @@ class MultiDeviceEPAndTPTest(parameterized.TestCase):
           ref_exec=ref_exec,
       )
 
-  def test_scanned_layers_preserve_paths_and_match_unscanned_under_ep_and_tp(self):
+  def test_scan_layers_preserve_paths_and_match_unscanned_under_ep_and_tp(self):
     ici = self._ep_tp_layouts()[0]
     mesh = create_mesh(ici=ici, devices=jax.devices()[: (ici["fsdp"] * ici["expert"] * ici["tensor"])])
     sharding = DefaultSharding()
@@ -893,7 +981,7 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       ("unscanned_tokamax", False, True),
-      ("scanned_tokamax", True, True),
+      ("scan_layers_tokamax", True, True),
   )
   def test_qwen3_8_sparse_moe_block_ep_tp_forward_and_grad_parity(self, scan_layers, use_tokamax_gmm):
     n = jax.device_count()
@@ -1002,7 +1090,7 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       ("unscanned_tokamax", False, True),
-      ("scanned_tokamax", True, True),
+      ("scan_layers_tokamax", True, True),
   )
   def test_qwen3_8_full_model_ep_forward_and_all_leaf_grad_parity(self, scan_layers, use_tokamax_gmm):
     n = jax.device_count()
