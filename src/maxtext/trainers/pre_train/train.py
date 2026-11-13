@@ -23,6 +23,7 @@ import datetime
 import functools
 import gc
 import os
+import sys
 import time
 
 from absl import app
@@ -31,12 +32,18 @@ import numpy as np
 
 import pathwaysutils  # pylint: disable=unused-import
 
-# Triton (used by te_mhc) segfaults when its native library is loaded after TensorFlow's, so load
-# it first when it is installed.
+# Triton (used by te_mhc) aborts in triton>=3.7 when libtriton.so is loaded after TensorFlow without
+# RTLD_DEEPBIND (duplicate LLVM command-line option registration). Load it early with RTLD_DEEPBIND
+# so its internal LLVM symbols stay isolated even if TensorFlow was loaded first.
+_orig_dlopen_flags = sys.getdlopenflags()
+if hasattr(os, "RTLD_DEEPBIND"):
+  sys.setdlopenflags(_orig_dlopen_flags | os.RTLD_DEEPBIND)
 try:
   import triton  # pylint: disable=unused-import
 except ImportError:
   pass
+finally:
+  sys.setdlopenflags(_orig_dlopen_flags)
 
 try:
   import tensorflow as tf
