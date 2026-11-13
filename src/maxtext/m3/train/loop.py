@@ -93,6 +93,7 @@ from maxtext.m3.core.sharding import (
     sharding_from_config,
 )
 from maxtext.m3.infra import quantization
+from maxtext.m3.infra import remat as m3_remat
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
@@ -119,6 +120,9 @@ def setup_model(config, mesh: Mesh, sharding: Sharding | None = None) -> tuple[n
   create_kw = {"sharding": sharding} if sharding is not None else {}
   model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed), **create_kw)
   model = m3_scan.maybe_apply_scan(model, config)
+  model = m3_remat.maybe_apply_remat(model, config)
+  sharding_obj = sharding or sharding_from_config(config)
+  m3_remat.check_model_tags(model, config, mesh=mesh, sharding=sharding_obj)
   if getattr(config, "quantization", "") and _ambient_mesh_is_explicit():
     raise ValueError(
         "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized matmuls. "
