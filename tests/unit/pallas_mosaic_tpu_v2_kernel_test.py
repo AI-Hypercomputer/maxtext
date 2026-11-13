@@ -15,6 +15,7 @@
 """Unit tests for Pallas Mosaic TPU v2 kernels."""
 
 import collections
+import types
 from unittest import mock
 
 import pytest
@@ -313,6 +314,111 @@ class GmmDispatchTest(parameterized.TestCase):
     expected = jax.jit(jax.value_and_grad(reference_loss, argnums=(0, 1, 2)))(lhs, rhs, partial_sum)
     chex.assert_trees_all_close(actual, expected, atol=1e-4, rtol=1e-5)
     self.assertEqual(gmm_mock.call_args.kwargs["transpose_rhs"], bool(use_dlhs_transpose_rhs))
+
+
+class TgmmV2OptionsTest(parameterized.TestCase):
+  """CPU tests of the tgmm_v2 pipeline depth option."""
+
+  @parameterized.product(has_partial_sum=(False, True), tiles=((256, 512, 256), (512, 2816, 768)))
+  def test_vmem_bytes_at_default_depth(self, has_partial_sum, tiles):
+    """At the default depth the budget is the one calculate_tgmm_tiling always used."""
+    tile_m, tile_k, tile_n = tiles
+    zero_ref_bytes = 2 * 1024 * 1024
+    out_bytes, acc_bytes, in_bytes = 2, 4, 2
+    expected = (
+        tile_k * tile_n * (acc_bytes + 2 * out_bytes)
+        + (tile_k * tile_n * 2 * out_bytes if has_partial_sum else 0)
+        + 3 * tile_m * tile_k * in_bytes
+        + 2 * tile_m * tile_n * in_bytes
+        + zero_ref_bytes
+    )
+    actual = tgmm_backend.tgmm_vmem_bytes(
+        gmm_backend.TileSizes(*tiles),
+        jnp.bfloat16,
+        jnp.bfloat16,
+        jnp.bfloat16,
+        jnp.float32,
+        zero_ref_bytes,
+        has_partial_sum,
+    )
+    self.assertEqual(actual, expected)
+    deeper = tgmm_backend.tgmm_vmem_bytes(
+        gmm_backend.TileSizes(*tiles),
+        jnp.bfloat16,
+        jnp.bfloat16,
+        jnp.bfloat16,
+        jnp.float32,
+        zero_ref_bytes,
+        has_partial_sum,
+        num_buffers=3,
+    )
+    # One more lhs, rhs and out block; the partial sum keeps two buffers.
+    self.assertEqual(deeper - actual, (tile_m * tile_k + tile_m * tile_n + tile_k * tile_n) * 2)
+
+  def _cfgs(self, is_3d=False):
+    operand = types.SimpleNamespace(is_3d=is_3d, dtype=jnp.bfloat16)
+    return types.SimpleNamespace(
+        lhs_cfgs=operand,
+        rhs_cfgs=operand,
+        tiles=gmm_backend.TileSizes(512, 2816, 768),
+        out_dtype=jnp.bfloat16,
+        acc_dtype=jnp.float32,
+        has_partial_sum=False,
+    )
+
+  @parameterized.parameters(
+      # (requested, deepest depth that fits, is_3d, expected)
+      (2, 4, False, 2),
+      (3, 4, False, 3),
+      (4, 4, False, 4),
+      (4, 3, False, 3),
+      (3, 2, False, 2),
+      (3, 4, True, 2),
+  )
+  def test_resolve_num_buffers(self, requested, deepest_fit, is_3d, expected):
+    cfgs = self._cfgs(is_3d)
+
+    def vmem_bytes(num_buffers):
+      return tgmm_backend.tgmm_vmem_bytes(
+          cfgs.tiles, jnp.bfloat16, jnp.bfloat16, jnp.bfloat16, jnp.float32, 0, False, num_buffers
+      )
+
+    self.assertEqual(tgmm_backend.resolve_num_buffers(cfgs, requested, vmem_bytes(deepest_fit), 0), expected)
+
+  def test_options_reject_shallow_pipeline(self):
+    with self.assertRaises(ValueError):
+      tgmm_backend.TgmmV2Options(num_buffers=1)
+
+  @parameterized.parameters(None, 2, 3)
+  def test_options_reach_tgmm_through_custom_vjp(self, num_buffers):
+    num_groups, batch_size, in_size, out_size = 2, 8, 16, 32
+    lhs = jnp.linspace(-1.0, 1.0, batch_size * in_size).reshape(batch_size, in_size)
+    rhs = jnp.linspace(-0.5, 0.5, num_groups * in_size * out_size).reshape(num_groups, in_size, out_size)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+
+    def mock_gmm(lhs, rhs, transpose_rhs=False, **kwargs):
+      del kwargs
+      if transpose_rhs:
+        rhs = rhs.swapaxes(1, 2)
+      return jnp.einsum("gmk,gkn->gmn", lhs.reshape(num_groups, -1, lhs.shape[-1]), rhs).reshape(batch_size, -1)
+
+    def mock_tgmm(lhs, rhs, **kwargs):
+      del kwargs
+      return jnp.einsum(
+          "gmk,gmn->gkn", lhs.reshape(num_groups, -1, lhs.shape[-1]), rhs.reshape(num_groups, -1, rhs.shape[-1])
+      )
+
+    kwargs = {} if num_buffers is None else {"tgmm_v2_options": tgmm_backend.TgmmV2Options(num_buffers=num_buffers)}
+
+    def loss(lhs, rhs):
+      out = megablox_ops.gmm(lhs, rhs, group_sizes, use_tokamax_backend=True, use_gmm_v2=True, **kwargs)
+      return jnp.sum(out**2)
+
+    with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", side_effect=mock_gmm):
+      with mock.patch.object(megablox_ops.tgmm_v2, "tgmm_v2", side_effect=mock_tgmm) as tgmm_mock:
+        jax.jit(jax.grad(loss, argnums=(0, 1)))(lhs, rhs)
+    expected = tgmm_backend.TgmmV2Options(num_buffers=num_buffers or tgmm_backend.DEFAULT_NUM_BUFFERS)
+    self.assertEqual(tgmm_mock.call_args.kwargs["options"], expected)
 
 
 class GmmTest(parameterized.TestCase):
@@ -759,6 +865,37 @@ class GmmTest(parameterized.TestCase):
     )
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     assert_arrays_all_close(actual, expected)
+
+  @parameterized.product(num_buffers=[3, 4], has_partial_sum=[False, True], empty_group=[False, True])
+  def test_tgmm_num_buffers_bit_identical(self, num_buffers, has_partial_sum, empty_group):
+    """Deeper lhs/rhs/out pipelines change only the schedule, not a single bit of the result."""
+    batch_size, in_size, out_size, num_groups = 2048, 512, 384, 8
+    key1, key2, key3 = jax.random.split(jax.random.key(0), 3)
+    lhs = jax.random.normal(key1, (batch_size, in_size), dtype=jnp.bfloat16)
+    grad = jax.random.normal(key2, (batch_size, out_size), dtype=jnp.bfloat16)
+    group_sizes = get_group_sizes(batch_size, num_groups)
+    if empty_group:
+      group_sizes = group_sizes.at[-1].add(group_sizes[2]).at[2].set(0)
+    ps = jax.random.normal(key3, (num_groups, in_size, out_size), dtype=jnp.bfloat16) if has_partial_sum else None
+    tile_info = gmm_backend.TileSizes(tile_m=256, tile_k=in_size, tile_n=out_size)
+
+    def run(options):
+      return tgmm_backend.tgmm_v2(
+          lhs,
+          grad,
+          group_sizes,
+          num_groups,
+          partial_sum=ps,
+          preferred_element_type=jnp.bfloat16,
+          tile_info=tile_info,
+          options=options,
+      )
+
+    expected = run(tgmm_backend.TgmmV2Options())
+    actual = run(tgmm_backend.TgmmV2Options(num_buffers=num_buffers))
+    self.assertTrue(bool(jnp.array_equal(actual, expected)))
+    reference = reference_tgmm(lhs.swapaxes(0, 1), grad, group_sizes, num_groups, partial_sum=ps)
+    assert_arrays_all_close(actual, reference)
 
   @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   @parameterized.product(

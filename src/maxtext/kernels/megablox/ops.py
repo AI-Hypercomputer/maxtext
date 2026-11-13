@@ -101,6 +101,7 @@ def gmm(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    tgmm_v2_options: tgmm_v2.TgmmV2Options = tgmm_v2.TgmmV2Options(),
 ):
   """Grouped matrix multiplication operation.
 
@@ -110,6 +111,9 @@ def gmm(
   consumes / produces the matching 3D cotangents without relayout copies. With
   `out_is_3d`, a forward `partial_sum` must also be 3D; with `return_lhs`, the
   cotangent of the returned (3D) lhs is accumulated into the 3D dlhs in place.
+
+  `tgmm_v2_options` tunes the tgmm_v2 DRHS kernel (use_tokamax_backend and use_gmm_v2) without
+  changing its result; other backends ignore it.
   """
   lhs_ndim = (lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs).ndim
   if (lhs_ndim == 3 or out_is_3d) and not (use_tokamax_backend and use_gmm_v2):
@@ -158,7 +162,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25, 26),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -188,6 +192,7 @@ def gmm(
       fuse_3d_dlhs_ps,
       tc_routing,
       tc_unsort_cfg,
+      tgmm_v2_options,
   )
   if return_lhs and return_rhs:
     return out, lhs_out, rhs_out
@@ -250,6 +255,7 @@ def _gmm_fwd(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    tgmm_v2_options: tgmm_v2.TgmmV2Options = tgmm_v2.TgmmV2Options(),
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
     tuple[
@@ -633,6 +639,7 @@ def _gmm_bwd(
     out_is_3d: bool,
     fuse_3d_dlhs_ps: bool,
     tc_unsort_cfg: TcUnsortCfg | None,
+    tgmm_v2_options: tgmm_v2.TgmmV2Options,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -776,6 +783,7 @@ def _gmm_bwd(
       use_gmm_v2_heuristic_tiling,
       partial_sum=drhs_partial_sum,
       flat_rhs_shard=flat_fsdp_shard is not None,
+      tgmm_v2_options=tgmm_v2_options,
   )
 
   # 5. Output Formatting
@@ -1195,6 +1203,7 @@ def _compute_drhs(
     use_gmm_v2_heuristic_tiling: bool,
     partial_sum: jnp.ndarray | None = None,
     flat_rhs_shard: bool = False,
+    tgmm_v2_options: tgmm_v2.TgmmV2Options = tgmm_v2.TgmmV2Options(),
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -1210,6 +1219,7 @@ def _compute_drhs(
         tiling,
         use_gmm_v2_heuristic_tiling,
         partial_sum=partial_sum,
+        options=tgmm_v2_options,
     )
   else:
     drhs = _drhs_run_megablox(
@@ -1296,6 +1306,7 @@ def _drhs_run_tokamax_v2(
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     partial_sum: jnp.ndarray | None = None,
+    options: tgmm_v2.TgmmV2Options = tgmm_v2.TgmmV2Options(),
 ) -> jnp.ndarray:
   """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
@@ -1321,6 +1332,7 @@ def _drhs_run_tokamax_v2(
       preferred_element_type=rhs_dtype,
       group_offset=group_offset,
       tile_info=drhs_tiling,
+      options=options,
   )
 
 
