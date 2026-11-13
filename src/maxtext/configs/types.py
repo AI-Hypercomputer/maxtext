@@ -1196,36 +1196,6 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
   )
-  expert_replicas_per_device: int = Field(
-      0,
-      description="Online hot-expert replication on the ragged all-to-all path: replica slots per EP device (0=off).",
-  )
-  expert_replica_max_send: int = Field(4, description="Max replicas a home device sends per layer.")
-  expert_replica_board_size: int = Field(8, description="EP devices per board (the planner prefers same-board sources).")
-  expert_replica_plan: Literal["online", "lagged"] = Field(
-      "online",
-      description="online: place replicas from this step's counts; lagged: from the previous step's counts.",
-  )
-  expert_replica_planner: Literal["greedy", "rounds"] = Field(
-      "rounds", description="Replica planner: rounds (vectorized rounds) | greedy (serial loop over EP*R candidates)."
-  )
-  expert_replica_impl: Literal["auto", "concat", "split"] = Field(
-      "auto",
-      description="Replica GMM implementation: concat (copy local+replica weights) | split (two GMMs) | auto"
-      " (concat when a device holds <= 32 local experts).",
-  )
-  expert_replica_move: Literal["gather", "direct"] = Field(
-      "direct",
-      description="Replica weight move (concat impl): direct (send rows straight from the weights, write replicas in"
-      " place) | gather (send buffer + concat; same math).",
-  )
-  expert_replica_identity: bool = Field(False, description="Testing: replication machinery on with the identity plan.")
-  expert_replica_overhead_control: bool = Field(
-      False, description="Control arm: move replica weights per the plan but route no tokens to replicas."
-  )
-  log_ra2a_required_rbf: bool = Field(
-      False, description="Debug: print the per-layer ragged_buffer_factor needed to avoid drops (ragged a2a path)."
-  )
   moe_dropless_fallback: Literal["step", "layer"] | None = Field(
       None,
       description=(
@@ -4690,9 +4660,11 @@ class MaxTextConfig(
     if self.log_required_ragged_buffer_factor:
       if self.te_moe_block:
         raise ValueError("log_required_ragged_buffer_factor=True is not supported with te_moe_block=True.")
-      if not (self.use_ring_of_experts and self.use_ragged_sort):
+      if not self.sparse_matmul:
+        raise ValueError("log_required_ragged_buffer_factor=True requires sparse_matmul=True.")
+      if self.use_ring_of_experts and not self.use_ragged_sort:
         raise ValueError(
-            "log_required_ragged_buffer_factor=True requires use_ring_of_experts=True and use_ragged_sort=True."
+            "log_required_ragged_buffer_factor=True with use_ring_of_experts=True requires use_ragged_sort=True."
         )
       if self.num_moe_emb_chunks > 0:
         raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")
