@@ -263,6 +263,59 @@ class ReplicaPlannerTest(parameterized.TestCase):
           self.assertTrue(np.all((send_slots[h, :k] >= 0) & (send_slots[h, :k] < local)))
         self.assertTrue(np.all(send_slots[h, k:] == 0))
 
+  def test_replica_plan_pytree_jit_and_cond(self):
+    """ReplicaPlan flattens/unflattens as a PyTree and crosses jax.jit and jax.lax.cond cleanly."""
+    counts = _skewed_counts(seed=5)
+    eager = mrp.compute_plan_iter(counts, NUM_EP, NUM_REPLICAS, MAX_SEND, BOARD_SIZE)
+    leaves, treedef = jax.tree_util.tree_flatten(eager)
+    self.assertLen(leaves, 5)
+    restored = jax.tree_util.tree_unflatten(treedef, leaves)
+    self.assertEqual(restored.num_slots, eager.num_slots)
+    self.assertEqual(restored.num_replicas, eager.num_replicas)
+    for a, b in zip(leaves, jax.tree_util.tree_leaves(restored)):
+      np.testing.assert_array_equal(np.asarray(a), np.asarray(b))
+
+    @jax.jit
+    def plan_under_cond(c, take_active):
+      return jax.lax.cond(
+          take_active,
+          lambda x: mrp.compute_plan_iter(x, NUM_EP, NUM_REPLICAS, MAX_SEND, BOARD_SIZE, enabled=True),
+          lambda x: mrp.compute_plan_iter(x, NUM_EP, NUM_REPLICAS, MAX_SEND, BOARD_SIZE, enabled=False),
+          c,
+      )
+
+    active_plan = plan_under_cond(counts, jnp.asarray(True))
+    disabled_plan = plan_under_cond(counts, jnp.asarray(False))
+    np.testing.assert_array_equal(np.asarray(active_plan.route_table), np.asarray(eager.route_table))
+    np.testing.assert_array_equal(
+        np.asarray(disabled_plan.route_table),
+        np.asarray(mrp.identity_route_table(NUM_EP, NUM_EXPERTS, NUM_REPLICAS)),
+    )
+
+  def test_unmovable_hottest_expert_does_not_starve_second_hottest(self):
+    """An unsplittable hottest expert on device 0 does not block device 0's next-hottest splittable expert."""
+    # Case 1: local expert 0 has all tokens on home shard 0 (is_home), while local expert 1 has remote shards.
+    counts_home = np.zeros((NUM_EP, NUM_EXPERTS), dtype=np.int32)
+    counts_home[0, 0] = 800
+    counts_home[1:, 1] = 85  # 7 * 85 = 595 remote tokens on expert 1 (also owned by device 0)
+    plan_home = mrp.compute_plan_iter(jnp.asarray(counts_home), NUM_EP, NUM_REPLICAS, MAX_SEND, BOARD_SIZE)
+    self.assertTrue(np.any(np.asarray(plan_home.route_table)[1:, 1] != 1))
+    loads_before = _device_loads(
+        counts_home, mrp.identity_route_table(NUM_EP, NUM_EXPERTS, NUM_REPLICAS), LOCAL + NUM_REPLICAS
+    )
+    loads_after = _device_loads(counts_home, plan_home.route_table, plan_home.num_slots)
+    self.assertEqual(loads_after.sum(), loads_before.sum())
+    self.assertLess(loads_after[0], loads_before[0] - 200.0)
+
+    # Case 2: local expert 0 has 1 giant remote shard > half the global max-to-min gap, while expert 1 is splittable.
+    counts_big = np.zeros((NUM_EP, NUM_EXPERTS), dtype=np.int32)
+    counts_big[1, 0] = 900
+    counts_big[1:, 1] = 70  # 7 * 70 = 490 -> dev 0 load = 1390, max_possible_gap = 695 < 900
+    plan_big = mrp.compute_plan_iter(jnp.asarray(counts_big), NUM_EP, NUM_REPLICAS, MAX_SEND, BOARD_SIZE)
+    self.assertTrue(np.any(np.asarray(plan_big.route_table)[1:, 1] != 1))
+    loads_big_after = _device_loads(counts_big, plan_big.route_table, plan_big.num_slots)
+    self.assertLess(loads_big_after[0], 1390.0 - 200.0)
+
 
 if __name__ == "__main__":
   absltest.main()

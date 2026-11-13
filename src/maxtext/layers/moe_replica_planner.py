@@ -27,16 +27,25 @@ hottest-to-coldest device matching:
     replica (preferring sources on the receiver's board), so tokens are never
     split inside a source shard and no extra sort is needed.
 
+Each logical expert gets at most one replica per step (`sent[h, loc]`), so a
+single expert hotter than roughly 2x a device's mean load cannot be fully
+balanced across more than two devices (home + one replica).
+
 Tokens are remapped logical expert -> physical slot before the dispatch sort.
 Every (token, k) maps to exactly one physical slot, so it is computed exactly
 once with identical weights. Replica weights are moved by `moe_replica_weights`.
 """
 
+from flax import struct
+import jax
 import jax.numpy as jnp
 
 
+@struct.dataclass
 class ReplicaPlan:
-  """Plain container (not a pytree) for one layer's replication plan.
+  """PyTree container for one layer's online hot-expert replication plan.
+
+  Array fields are traced PyTree children; `num_slots` and `num_replicas` are static Python ints.
 
   Invariants guaranteed by `compute_plan_iter` and relied on by
   `moe_replica_weights.extend_with_replicas`:
@@ -47,14 +56,13 @@ class ReplicaPlan:
        `send_peer_index[h, valid_receivers] == [0, ..., k - 1]` and `0 <= send_slots[h, :k] < L`.
   """
 
-  def __init__(self, route_table, rep_home, rep_slot, send_slots, send_peer_index, num_slots, num_replicas):
-    self.route_table = route_table  # [EP, E] int32: (source shard, logical expert) -> physical slot
-    self.rep_home = rep_home  # [EP, R] int32: home device of each replica slot, -1 if empty
-    self.rep_slot = rep_slot  # [EP, R] int32: home-local slot of each replica, 0 if empty
-    self.send_slots = send_slots  # [EP, C] int32: local slots each device sends (ordered by receiver)
-    self.send_peer_index = send_peer_index  # [EP, EP] int32: index into sender's send buffer for receiver, -1 if none
-    self.num_slots = num_slots  # L + R (python int)
-    self.num_replicas = num_replicas  # R (python int)
+  route_table: jax.Array  # [EP, E] int32: (source shard, logical expert) -> physical slot
+  rep_home: jax.Array  # [EP, R] int32: home device of each replica slot, -1 if empty
+  rep_slot: jax.Array  # [EP, R] int32: home-local slot of each replica, 0 if empty
+  send_slots: jax.Array  # [EP, C] int32: local slots each device sends (ordered by receiver)
+  send_peer_index: jax.Array  # [EP, EP] int32: index into sender's send buffer for receiver, -1 if none
+  num_slots: int = struct.field(pytree_node=False)  # L + R (static python int)
+  num_replicas: int = struct.field(pytree_node=False)  # R (static python int)
 
 
 def identity_route_table(num_ep, num_experts, num_replicas):
@@ -155,6 +163,14 @@ def compute_plan_iter(counts_src, num_ep, num_replicas, max_send, board_size, en
     rep_mask = rep_mask.at[r, slot].set(jnp.where(ok[:, None], take, rep_mask[r, slot]))
     free = free.at[r].add(-ok.astype(jnp.int32))
     send_cnt = send_cnt.at[h].add(ok.astype(jnp.int32))
+    # Conservative starvation guard (safe heuristic): if every positive non-home source shard
+    # of (h, loc) exceeds half the current global max-to-min device load gap (or (h, loc) has
+    # zero non-home tokens), no receiver can accept even a single shard in this or any later
+    # round (since max(dev_load) is non-increasing and min(dev_load) is non-decreasing across
+    # rounds). Mark such experts skipped so h can replicate cooler splittable experts, without
+    # wrongly skipping experts that only failed due to a warm partner, full receiver, or key-prefix order.
+    max_possible_gap = (jnp.max(dev_load) - jnp.min(dev_load)) / 2.0
+    unmovable = enabled & jnp.all((contrib <= 0) | is_home | (contrib > max_possible_gap), axis=1)
     pair_used = pair_used.at[h, r].set(pair_used[h, r] | ok)
-    sent = sent.at[h, loc].set(sent[h, loc] | ok)
+    sent = sent.at[h, loc].set(sent[h, loc] | ok | unmovable)
   return _finalize_plan(rep_e, rep_mask, num_ep, num_experts, r_slots, max_send)
