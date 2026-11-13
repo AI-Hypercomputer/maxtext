@@ -5971,7 +5971,7 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
     req = float(np.asarray(intermediates["moe_required_rbf"].get_value()[0]))
     self.assertAlmostEqual(req, 14.0 / 8.0, places=5)
 
-  def test_ra2a_ep1_and_unsharded_batch_required_rbf(self):
+  def test_ra2a_ep1_and_unsharded_batch_do_not_sow_required_rbf(self):
     cfg = _tiny_deepseek_config(
         "ra2a_req_rbf_ep1",
         use_ring_of_experts=False,
@@ -6003,7 +6003,7 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
       block(x)
     intermediates = nnx.pop(block, nnx.Intermediate)
-    self.assertAlmostEqual(float(np.asarray(intermediates["moe_required_rbf"].get_value()[0])), 1.0, places=5)
+    self.assertNotIn("moe_required_rbf", intermediates)
 
     if jax.device_count() >= 4:
       # Cover num_ep > 1 with is_batch_sharded_by_expert=False (batch sharded on fsdp only, replicated across expert).
@@ -6035,13 +6035,13 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
             dtype=cfg_unsharded.dtype,
             rngs=nnx.Rngs(0),
         )
-      # Each FSDP slice has (bsz // n_fsdp) = 2 batch rows * 4 tokens = 8 tokens -> balanced_size = (8 // 2) * 2 = 8.
-      # 3 of 4 tokens per row pick (2, 3) -> 12 assignments to shard 1, so required_rbf = 12 / 8 = 1.5.
-      fsdp_sharding = jax.sharding.NamedSharding(mesh2, P("fsdp", None, None))
-      x2 = jax.device_put(x, fsdp_sharding)
+      # Global batch_size == 1 triggers is_batch_sharded_by_ep(inputs) == False (decode replicated-batch path),
+      # where no ragged_all_to_all buffer is allocated and required_rbf stays None.
+      rep_sharding = jax.sharding.NamedSharding(mesh2, P(None, None, None))
+      x2 = jax.device_put(x[:1], rep_sharding)
       forced2 = jax.device_put(
-          jnp.broadcast_to(jnp.array([[[2, 3], [2, 3], [2, 3], [0, 1]]], dtype=jnp.int32), (bsz, 4, 2)),
-          fsdp_sharding,
+          jnp.array([[[2, 3], [2, 3], [2, 3], [0, 1]]], dtype=jnp.int32),
+          rep_sharding,
       )
       with (
           jax.set_mesh(mesh2),
@@ -6050,7 +6050,7 @@ class RequiredRaggedBufferFactorTest(unittest.TestCase):
       ):
         block2(x2, forced_routed_experts=forced2)
       intermediates2 = nnx.pop(block2, nnx.Intermediate)
-      self.assertAlmostEqual(float(np.asarray(intermediates2["moe_required_rbf"].get_value()[0])), 12.0 / 8.0, places=5)
+      self.assertNotIn("moe_required_rbf", intermediates2)
 
   def test_validator_rules_for_log_required_ragged_buffer_factor(self):
     cfg = _tiny_deepseek_config(

@@ -944,6 +944,9 @@ class RoutedMoE(nnx.Module):
     ra2a_and_route compute them before buffer truncation. The per-shard buffer is int(balanced_size * factor) rows, so
     a shard drops tokens iff sum(local group sizes) > balanced_size * factor. The result is max over all devices of
     sum(local group sizes) / balanced_size: one float32 scalar max all-reduce over the mesh axes (no other change).
+    On the ragged all-to-all path, only `num_ep > 1` with `is_batch_sharded_by_expert` allocates a
+    `ragged_buffer_factor`-sized receive buffer (`get_ragged_buffer_size`); when `num_ep == 1` or batch is unsharded
+    over `expert`, no buffer can truncate and `ra2a_and_route` leaves `required_rbf = None`.
     """
     if local_num_experts is None:
       local_num_experts = self.config.num_experts // num_ep
@@ -3206,14 +3209,8 @@ class RoutedMoE(nnx.Module):
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
         else:
-          if getattr(self.config, "log_required_ragged_buffer_factor", False):
-            required_rbf = self.required_ragged_buffer_factor(
-                group_sizes,
-                local_tokens,
-                num_ep,
-                expert_shard_id,
-                local_num_experts=local_expert_size,
-            )
+          # Batch is replicated across `expert`, so no `ragged_all_to_all` receive buffer is allocated;
+          # `required_rbf` stays `None` (same as `num_ep == 1` below).
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
               x,
               global_group_sizes[None, :],
@@ -3226,8 +3223,6 @@ class RoutedMoE(nnx.Module):
               ragged_buffer_factor=ragged_buffer_factor,
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
-      elif getattr(self.config, "log_required_ragged_buffer_factor", False):
-        required_rbf = self.required_ragged_buffer_factor(group_sizes, local_tokens, 1, 0)
 
       return (
           x,
