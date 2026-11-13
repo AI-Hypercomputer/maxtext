@@ -18,84 +18,78 @@ from dataclasses import dataclass, field
 import math
 from typing import Any
 
-CONTAINER_IMAGE = (
-    "gcr.io/cloud-tpu-shared-capacity/yaoyuchen-runner:ds41-2026-10-22-16-03-48"
-)
+CONTAINER_IMAGE = "gcr.io/cloud-tpu-shared-capacity/yaoyuchen-runner:ds41-2026-10-22-16-03-48"
 DEFAULT_GCS_DATA_ROOT = "gs://mesa-maxtext/mesa-bench-v2"
 DEFAULT_GCS_CODE_DIR = f"{DEFAULT_GCS_DATA_ROOT}/code"
 
 
 @dataclass(frozen=True)
 class PlatformProfile:
-    """Cluster, queue, scheduling, and TPU hardware parameters for one benchmark platform."""
+  """Cluster, queue, scheduling, and TPU hardware parameters for one benchmark platform."""
 
-    name: str
-    gke_cluster_name: str
-    gcp_project_id: str
-    gcp_region: str
-    kube_context: str
-    kueue_queue: str | None
-    kueue_topology_aware_scheduling: bool
-    priority_class_name: str | None
-    node_selectors: dict[str, str]
-    tolerations: list[dict[str, Any]]
-    required_node_affinity: list[dict[str, Any]]
-    service_account_name: str | None
-    image_pull_secrets: tuple[str, ...]
-    container_image: str
-    tpu_chips_per_host_by_topology: dict[str, int]
-    tpu_devices_per_chip: int
-    hosts_per_slice_by_topology: dict[str, int]
-    host_machine_type_by_topology: dict[str, str]
-    host_ram_gib_by_topology: dict[str, int]
-    hf_token_secret_name: str = "mesa-hf-token"
-    hf_token_secret_optional: bool = True
-    gcs_code_dir: str = DEFAULT_GCS_CODE_DIR
-    gcs_data_root: str = DEFAULT_GCS_DATA_ROOT
-    regional_gcs_data_root: str = ""
-    pod_labels: dict[str, str] = field(default_factory=lambda: {"app": "mesa-bench-v2"})
-    workload_time_limit_minutes: int | None = None
-    capacity_type: str = "spot"
-    zone_hint: str = ""
-    cpu_node_pool: str = "cpu-np"
-    cpu_machine_type: str = ""
-    step1b_cpu_node_pool: str = ""
-    step1b_cpu_machine_type: str = ""
-    step2_ram_margin_ratio: float = 0.93
-    min_avail_host_ram_gb: float = 8.5
-    sparse_min_avail_host_ram_gb: float = 24.0
-    default_phase_timeout_s: int = 14400
-    default_barrier_timeout_s: int = 1800
-    max_download_workers: int = 16
-    max_concurrent_jobsets: int = 2
+  name: str
+  gke_cluster_name: str
+  gcp_project_id: str
+  gcp_region: str
+  kube_context: str
+  kueue_queue: str | None
+  kueue_topology_aware_scheduling: bool
+  priority_class_name: str | None
+  node_selectors: dict[str, str]
+  tolerations: list[dict[str, Any]]
+  required_node_affinity: list[dict[str, Any]]
+  service_account_name: str | None
+  image_pull_secrets: tuple[str, ...]
+  container_image: str
+  tpu_chips_per_host_by_topology: dict[str, int]
+  tpu_devices_per_chip: int
+  hosts_per_slice_by_topology: dict[str, int]
+  host_machine_type_by_topology: dict[str, str]
+  host_ram_gib_by_topology: dict[str, int]
+  hf_token_secret_name: str = "mesa-hf-token"
+  hf_token_secret_optional: bool = True
+  gcs_code_dir: str = DEFAULT_GCS_CODE_DIR
+  gcs_data_root: str = DEFAULT_GCS_DATA_ROOT
+  regional_gcs_data_root: str = ""
+  pod_labels: dict[str, str] = field(default_factory=lambda: {"app": "mesa-bench-v2"})
+  workload_time_limit_minutes: int | None = None
+  capacity_type: str = "spot"
+  zone_hint: str = ""
+  cpu_node_pool: str = "cpu-np"
+  cpu_machine_type: str = ""
+  step1b_cpu_node_pool: str = ""
+  step1b_cpu_machine_type: str = ""
+  step2_ram_margin_ratio: float = 0.93
+  min_avail_host_ram_gb: float = 8.5
+  sparse_min_avail_host_ram_gb: float = 24.0
+  default_phase_timeout_s: int = 14400
+  default_barrier_timeout_s: int = 1800
+  max_download_workers: int = 16
+  max_concurrent_jobsets: int = 2
 
-    def _require_topology(self, topology: str) -> None:
-        if topology not in self.hosts_per_slice_by_topology:
-            supported = ", ".join(sorted(self.hosts_per_slice_by_topology))
-            raise ValueError(
-                f"Unknown topology {topology!r} for platform {self.name!r} (expected one of: {supported})"
-            )
+  def _require_topology(self, topology: str) -> None:
+    if topology not in self.hosts_per_slice_by_topology:
+      supported = ", ".join(sorted(self.hosts_per_slice_by_topology))
+      raise ValueError(f"Unknown topology {topology!r} for platform {self.name!r} (expected one of: {supported})")
 
-    def hosts_per_slice(self, topology: str) -> int:
-        """Returns the number of VM hosts (Indexed Job pods) in one slice of `topology`."""
-        self._require_topology(topology)
-        return self.hosts_per_slice_by_topology[topology]
+  def hosts_per_slice(self, topology: str) -> int:
+    """Returns the number of VM hosts (Indexed Job pods) in one slice of `topology`."""
+    self._require_topology(topology)
+    return self.hosts_per_slice_by_topology[topology]
 
-    def chips_per_host(self, topology: str) -> int:
-        """Returns `google.com/tpu` chips requested by each host pod in `topology`."""
-        self._require_topology(topology)
-        return self.tpu_chips_per_host_by_topology[topology]
+  def chips_per_host(self, topology: str) -> int:
+    """Returns `google.com/tpu` chips requested by each host pod in `topology`."""
+    self._require_topology(topology)
+    return self.tpu_chips_per_host_by_topology[topology]
 
-    def devices_per_slice(self, topology: str) -> int:
-        """Returns total JAX devices in one slice across all hosts of `topology`."""
-        self._require_topology(topology)
-        try:
-            chips = math.prod(int(part) for part in topology.split("x"))
-        except ValueError as ex:
-            raise ValueError(
-                f"Invalid topology shape {topology!r} for platform {self.name!r}"
-            ) from ex
-        return chips * self.tpu_devices_per_chip
+  def devices_per_slice(self, topology: str) -> int:
+    """Returns total JAX devices in one slice across all hosts of `topology`."""
+    self._require_topology(topology)
+    try:
+      chips = math.prod(int(part) for part in topology.split("x"))
+    except ValueError as ex:
+      raise ValueError(f"Invalid topology shape {topology!r} for platform {self.name!r}") from ex
+    return chips * self.tpu_devices_per_chip
 
 
 _V7X_TOPOLOGIES = ("2x2x1", "2x2x2", "2x2x4", "2x4x4")
@@ -168,9 +162,7 @@ PROFILES: dict[str, PlatformProfile] = {
         kueue_topology_aware_scheduling=False,
         priority_class_name="medium",
         node_selectors={"cloud.google.com/gke-tpu-accelerator": "tpu-v6e-slice"},
-        tolerations=[
-            {"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"}
-        ],
+        tolerations=[{"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"}],
         required_node_affinity=[],
         service_account_name=None,
         image_pull_secrets=(),
@@ -228,9 +220,7 @@ PROFILES: dict[str, PlatformProfile] = {
         kueue_topology_aware_scheduling=False,
         priority_class_name=None,
         node_selectors={"cloud.google.com/gke-tpu-accelerator": "tpu-v5-lite-podslice"},
-        tolerations=[
-            {"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"}
-        ],
+        tolerations=[{"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"}],
         required_node_affinity=[],
         service_account_name="mesa-bench",
         image_pull_secrets=(),
@@ -258,8 +248,8 @@ PROFILES: dict[str, PlatformProfile] = {
 
 
 def get_profile(name: str) -> PlatformProfile:
-    """Returns the verified PlatformProfile for `name` or raises ValueError."""
-    if name not in PROFILES:
-        supported = ", ".join(sorted(PROFILES))
-        raise ValueError(f"Unknown platform {name!r} (expected one of: {supported})")
-    return PROFILES[name]
+  """Returns the verified PlatformProfile for `name` or raises ValueError."""
+  if name not in PROFILES:
+    supported = ", ".join(sorted(PROFILES))
+    raise ValueError(f"Unknown platform {name!r} (expected one of: {supported})")
+  return PROFILES[name]
