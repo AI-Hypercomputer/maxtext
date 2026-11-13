@@ -92,6 +92,13 @@ class ConfigTest(absltest.TestCase):
     # num_devices is mocked to 8
     self.assertEqual(config.global_batch_size_to_train_on, 8 * 8 * 2)
 
+  def test_unavailable_device_count_raises(self):
+    """Config validation raises instead of assuming 1 device, which would derive the wrong global batch size."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "num_slices=1"]
+    with unittest.mock.patch("jax.devices", side_effect=RuntimeError("backend not initialized")):
+      with self.assertRaisesRegex(ValueError, "Could not determine the number of devices"):
+        pyconfig.initialize(argv)
+
   def test_validation_error(self):
     """Tests that a validation error is raised for invalid config."""
     # A negative number for steps should trigger a ValidationError in the pydantic model.
