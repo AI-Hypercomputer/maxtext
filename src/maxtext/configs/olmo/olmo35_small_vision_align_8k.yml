@@ -173,8 +173,9 @@ lr_schedule_type: "wsd"
 wsd_decay_style: "linear"
 learning_rate_schedule_steps: 3500
 steps: 3500
-warmup_steps_fraction: 0.0285714286
-wsd_decay_steps_fraction: 0.9714285714
+warmup_step_offset: 1
+warmup_steps_fraction: 0.02857142857142857
+wsd_decay_steps_fraction: 0.9714285714285714
 learning_rate_final_fraction: 0.0
 adam_b1: 0.9
 adam_b2: 0.95

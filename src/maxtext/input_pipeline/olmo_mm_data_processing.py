@@ -132,12 +132,16 @@ def install_path_remap_prefix(remap_from: str, remap_to: str) -> None:
     if cur_val.startswith(src):
       os.environ[env_key] = dst + cur_val[len(src) :]
 
-  paths_mod = sys.modules.get("olmo_core.data.multimodal.paths")
-  if paths_mod is not None:
-    for attr in dir(paths_mod):
-      val = getattr(paths_mod, attr, None)
+  for mod_name, mod in list(sys.modules.items()):
+    if mod is None or not mod_name.startswith("olmo_core.data.multimodal"):
+      continue
+    for attr in dir(mod):
+      val = getattr(mod, attr, None)
       if isinstance(val, str) and val.startswith(src):
-        setattr(paths_mod, attr, dst + val[len(src) :])
+        try:
+          setattr(mod, attr, dst + val[len(src) :])
+        except Exception:
+          pass
 
   if _PATH_REMAP_HOOKS_INSTALLED:
     return
@@ -149,6 +153,14 @@ def install_path_remap_prefix(remap_from: str, remap_to: str) -> None:
     return orig_builtins_open(_translate_remapped_path(file), *args, **kwargs)
 
   builtins.open = _wrapped_open  # type: ignore[assignment]
+
+  orig_io_open = io.open
+
+  @ft.wraps(orig_io_open)
+  def _wrapped_io_open(file, *args, **kwargs):
+    return orig_io_open(_translate_remapped_path(file), *args, **kwargs)
+
+  io.open = _wrapped_io_open  # type: ignore[assignment]
 
   for fn_name in ("exists", "isfile", "isdir", "islink", "realpath", "abspath"):
     orig_fn = getattr(os.path, fn_name)

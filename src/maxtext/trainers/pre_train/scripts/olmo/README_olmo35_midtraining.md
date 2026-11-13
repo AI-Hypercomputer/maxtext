@@ -133,7 +133,7 @@ dataset_type=olmo_mm
 olmo_mm_batches_dir=gs://<BUCKET>/olmo35/batches/joint_8k
 ```
 
-> **Note on media coverage:** The batches exported for validation cover `16` of `28` vision sources and both text sources (`dolmino`, `longermino`). The `4` `pixmo_*` sources that read `torch_datasets/pixmo_images` and the `8` `cosyn_*` sources that read `torch_datasets/cosyn_images` need those two image directories under the remapped `/weka` root before a live 28-source run. Live loading also needs `pypdfium2` and `torchvision` on the workers.
+> **Note on media coverage:** All `28` of `28` training vision sources and both text sources (`dolmino`, `longermino`) load once `torch_datasets/pixmo_images` and `torch_datasets/cosyn_images` are mounted under the remapped `/weka` root. For held-out `joint` validation, `20` of `21` splits run when those two image directories are present; the remaining `ocr_document-validation` split requires the `4` academic validation directories (`text_vqa`, `docqa`, `info_qa`, `chart_qa`). Live loading also needs `pypdfium2` and `torchvision` on the workers.
 
 ### B. 256K Text MT + Long-Context (`dataset_type=olmo_grain`)
 
@@ -261,24 +261,20 @@ Verified so far:
 | :--- | :--- | :--- |
 | Converter round trip | Tiny `step870229` (`bridge_init`), `step3500`, `step22320`; `829` tensors | `0.0` max abs diff |
 | Hero `162974` compatibility | Key and shape match on `1,113` LM keys; `bridge_init` not yet run on it | Matched |
-| Batch export | `8` `bridge_8k`, `8` `joint_8k`, `2` `mt_lc_256k` global batches | `16` of `28` vision sources; Bridge batches use synthetic images |
-| Stage 1 Bridge mechanics | Tiny, `64` TPU v5p chips, `500` steps cycling `8` batches | `0.0` change on `ViT`, `LM`, `logits_dense`, text embedding rows |
-| Stage 2 Joint mechanics | Tiny, `64` TPU v5p chips, `60` steps cycling `8` batches | `30+30` save/resume bit-exact |
-| Converted `step3500` eval | `4` `joint_8k` batches | `1.246` mean loss (no reference value to compare yet) |
+| FP32 forward & 858-leaf backward parity (`8K Joint`) | Tiny `step3500` vs `OLMo-core` PyTorch FP32 on `64` TPU v5p chips (`kda_chunked_impl=subblock`) | CE `1.57104 vs 1.57095` (`8.99e-5`), MoE aux `0.22422 vs 0.22370`, valid logits cos `0.999983`, all `858` param grads matched (`lm_head` & text rows exact `0.0`, `<im_*>` cos `0.99926`, routers min cos `0.99221`, experts min cos `0.99834`, `382` LM leaves min cos `0.99911`) |
+| FP32 forward & 858-leaf backward parity (`256K` unfrozen) | Tiny `step22320` vs `OLMo-core` PyTorch FP32 on `64` TPU v5p chips | CE `12.45748 vs 12.45744` (`3.27e-5`), MoE aux `0.29254 vs 0.29253`, valid logits cos `0.999948`, all `858` param grads matched (`lm_head` cos `1.00000`, base emb cos `0.99999`, `<im_*>` cos `0.99990`, routers min cos `0.99985`, experts min cos `0.99986`, `382` LM leaves min cos `0.99978`) |
+| Production `bfloat16` fused forward parity | Tiny `step3500` (`DP=8, EP=8`, fused KDA + MegaBlox) vs PyTorch FP32 | CE `1.56850 vs 1.57095` (`2.45e-3`), valid logits cos `0.998451`, response top-1 `98.16%` |
+| Held-out eval parity (`Bridge` step 0 & `Joint` step `3,500`) | All `12/12` Bridge splits (`bridge_init`) and `20/20` available Joint splits (`step3500`) vs GPU eval CSVs | Bridge step 0 mean `|diff|=0.0260` (independent connector init); Joint step `3,500` median `|diff|=0.00064`, mean `0.01279` |
+| Stage 1 Bridge mechanics | Tiny, `64` TPU v5p chips, `500` steps | `0.0` change on `ViT`, `LM`, `logits_dense`, text embedding rows; exact 1-based LR parity (`warmup_step_offset: 1`) |
+| Stage 2 Joint mechanics | Tiny, `64` TPU v5p chips, `60` steps | `30+30` save/resume bit-exact |
 | Hero `256K` vision step time | `512` TPU v4 chips, synthetic data, `1,024` crops/seq | Measured `14.22 s/step`, `19.03 GiB` XLA peak |
 
-The Stage 1 and Stage 2 runs cycle `8` batches, so their loss curves reflect memorization of those batches. They verify
-freeze masks, schedules, and checkpointing, not convergence.
+In progress / not yet verified:
 
-Not yet verified:
-
-1. Step-0 logit and gradient parity against `OLMo-core` on the real `step3500` and `step22320` checkpoints.
-2. Stage 3 (`256K`) training on real multimodal batches, and `olmo_grain` chunk-edge masking on hardware.
-3. Loss curves against the GPU reference runs.
-4. Live `MixtureDataLoader` mode (`olmo_mm_config_path`) on TPU hosts, including its throughput at `256K`.
-5. Resume in live mode: the loader replays every earlier batch after a restart (no loader state is saved), which is
-   slow late in a long run.
-6. The full `bridge_init` -> `Bridge` -> `Joint` -> `256K` path at Hero scale.
+1. Full Tiny real-data `8K Bridge` (`500` steps, currently past step `360/500` tracking the GPU W&B CE curve closely) -> `8K Joint` -> `256K` multi-step curve comparison against GPU reference runs.
+2. Live `MixtureDataLoader` mode (`olmo_mm_config_path`) on TPU hosts, including its throughput at `8K` and `256K`, and `olmo_grain` chunk-edge masking on hardware.
+3. Resume in live mode: the loader replays earlier batches after a restart unless loader state checkpointing is enabled/saved, which is slow late in a long run.
+4. The full `bridge_init` -> `Bridge` -> `Joint` -> `256K` path at Hero (`Small`) scale once Hero vision-alignment LRs are finalized.
 
 ---
 

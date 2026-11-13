@@ -2589,7 +2589,9 @@ def create_learning_rate_schedule(config):
 
   else:  # WSD
     decay_steps = int(config.learning_rate_schedule_steps * config.wsd_decay_steps_fraction)
-    stable_steps = config.learning_rate_schedule_steps - warmup_steps - decay_steps
+    stable_steps = config.learning_rate_schedule_steps - (warmup_steps + offset) - decay_steps
+    if decay_steps > 0:
+      decay_steps += offset
 
     if stable_steps > 0:
       stable_schedule = optax.constant_schedule(lr)

@@ -621,11 +621,38 @@ class Olmoe3UlyssesKdaAndDataTest(parameterized.TestCase):
         "olmo_vision_lr_cosine_alpha_f=-1.0",
     ])
     sched_b = maxtext_utils.create_learning_rate_schedule(cfg_bridge)
-    self.assertAlmostEqual(float(sched_b(0)), 0.0, places=9)
-    self.assertAlmostEqual(float(sched_b(100)), 2.0e-4, places=9)
+    # `olmo35_small_vision_align_8k.yml` sets `warmup_step_offset: 1` for 1-based OLMo-core parity.
+    self.assertAlmostEqual(float(sched_b(0)), 2.0e-6, places=9)
+    self.assertAlmostEqual(float(sched_b(99)), 2.0e-4, places=9)
     self.assertAlmostEqual(float(sched_b(249)), 2.0e-5, places=9)
     self.assertAlmostEqual(float(sched_b(250)), 2.0e-5, places=9)
     self.assertAlmostEqual(float(sched_b(499)), 2.0e-5, places=9)
+
+    # Also verify `warmup_step_offset=0` backwards compatibility.
+    cfg_bridge_off0 = pyconfig.initialize([
+        "",
+        _VISION_8K_YML,
+        "run_name=ut_sched_bridge_off0",
+        "base_output_directory=/tmp/ut_sched",
+        "dataset_type=synthetic",
+        "compile_topology=v4-1024",
+        "compile_topology_num_slices=1",
+        "learning_rate=2.0e-4",
+        "lr_schedule_type=cosine",
+        "learning_rate_schedule_steps=250",
+        "steps=500",
+        "warmup_steps_fraction=0.4",
+        "warmup_step_offset=0",
+        "learning_rate_final_fraction=0.1",
+        "olmo_hold_final_lr=True",
+        "olmo_vision_lr_cosine_alpha_f=-1.0",
+    ])
+    sched_b0 = maxtext_utils.create_learning_rate_schedule(cfg_bridge_off0)
+    self.assertAlmostEqual(float(sched_b0(0)), 0.0, places=9)
+    self.assertAlmostEqual(float(sched_b0(100)), 2.0e-4, places=9)
+    self.assertAlmostEqual(float(sched_b0(249)), 2.0e-5, places=9)
+    self.assertAlmostEqual(float(sched_b0(250)), 2.0e-5, places=9)
+    self.assertAlmostEqual(float(sched_b0(499)), 2.0e-5, places=9)
 
     cfg_joint = pyconfig.initialize([
         "",
@@ -638,7 +665,8 @@ class Olmoe3UlyssesKdaAndDataTest(parameterized.TestCase):
         "skip_step_on_spikes=False",
     ])
     lm_sched = maxtext_utils.create_learning_rate_schedule(cfg_joint)
-    self.assertAlmostEqual(float(lm_sched(100)), 1.0e-4, places=9)
+    self.assertAlmostEqual(float(lm_sched(0)), 1.0e-6, places=9)
+    self.assertAlmostEqual(float(lm_sched(99)), 1.0e-4, places=9)
     self.assertAlmostEqual(float(lm_sched(3499)), 0.0, places=9)
 
     tx = optimizers.get_optimizer(cfg_joint, lm_sched)
@@ -662,10 +690,14 @@ class Olmoe3UlyssesKdaAndDataTest(parameterized.TestCase):
     emb_50_joint = optimizers._make_olmo35_cosine_schedule(2e-5, 0.1, 50, 3500, 3500)(50)
     emb_50_full = optimizers._make_olmo35_cosine_schedule(2e-5, 0.1, 100, 3500, 3500)(50)
     vis_50 = optimizers._make_olmo35_cosine_schedule(2e-6, 0.1, 100, 3500, 3500)(50)
+    conn_off1 = optimizers._make_olmo35_cosine_schedule(2e-5, 0.1, 50, 3500, 3500, offset=1)
     self.assertAlmostEqual(float(conn_50), 2.0e-5, places=9)
     self.assertAlmostEqual(float(emb_50_joint), 2.0e-5, places=9)
     self.assertAlmostEqual(float(emb_50_full), 1.0e-5, places=9)
     self.assertAlmostEqual(float(vis_50), 1.0e-6, places=9)
+    self.assertAlmostEqual(float(conn_off1(0)), 2.0e-5 / 50.0, places=9)
+    self.assertAlmostEqual(float(conn_off1(49)), 2.0e-5, places=9)
+    self.assertAlmostEqual(float(conn_off1(3499)), 2.0e-6, places=9)
 
   def test_eos_ends_document_chunk_split_and_cross_segment_mask_match_olmo_core(self):
     # Matches OLMo-core segment_ids_from_eos (eos.cumsum() - eos) + 8K chunk replay split.
@@ -912,11 +944,14 @@ class Olmoe3UlyssesKdaAndDataTest(parameterized.TestCase):
     #    -> `maxtext_to_olmo_core` (0.0 round-trip diff).
     import math
     import tempfile
-    import torch
-    from olmo_core.distributed.checkpoint import save_state_dict
-    from olmo_core.nn.maxtext.checkpoint import write_json
-    from olmo_core.nn.maxtext.config import get_maxtext_config
-    from olmo_core.nn.maxtext.convert import olmo_core_shapes
+    try:
+      import torch
+      from olmo_core.distributed.checkpoint import save_state_dict
+      from olmo_core.nn.maxtext.checkpoint import write_json
+      from olmo_core.nn.maxtext.config import get_maxtext_config
+      from olmo_core.nn.maxtext.convert import olmo_core_shapes
+    except ImportError as exc:
+      self.skipTest(f"Optional dependency missing for OLMo-core converter test: {exc}")
     from maxtext.checkpoint_conversion import convert_olmo35_multimodal_checkpoint as conv
     from maxtext.common import checkpointing
 
