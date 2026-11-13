@@ -19,13 +19,12 @@ Modules:
   * `remat.py` — path-transparent remat policies, `maybe_apply_remat`, and `check_tags`.
   * `quantization.py` — `maybe_quantize`: qwix int8 / fp8 by interception, over
     the projection layers of the decoder stack.
-
-Planned modules:
-  * `offload.py` — `to_host` for optimizer/parameter offloading.
+  * `offload.py` — `to_memory`, `HostOffloadedOptimizer`, and
+    `maybe_offload_parameters` for pinned-host optimizer/parameter offloading.
 
 Composition order is fixed, and `maxtext.m3.train.loop.setup_model` is the
 reference for it:
-`construct -> scan -> remat -> quantize -> optimizer -> host offload`.
+`construct -> scan -> remat -> quantize -> host offload -> optimizer`.
 
 None of these wrap the model in another module, and quantization leaves the
 variable tree untouched (asserted). Model files contain only zero-cost
