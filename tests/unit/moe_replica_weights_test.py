@@ -185,6 +185,38 @@ class ExtendWithReplicasTest(parameterized.TestCase):
     np.testing.assert_array_equal(np.asarray(out, dtype=np.float32), np.concatenate([w_bf16, reps], axis=1))
     np.testing.assert_allclose(np.asarray(dw), g_f32[:, :LOCAL] + dw_rep, rtol=1e-2, atol=1e-2)
 
+  def test_noop_when_zero_replicas_or_single_device(self):
+    w_single = jnp.asarray(self.w[0], dtype=jnp.float32)
+    g_single = jnp.asarray(self.g[0, :LOCAL], dtype=jnp.bfloat16)
+    zero_rep_plan = types.SimpleNamespace(num_replicas=0, send_slots=jnp.zeros((NUM_EP, 2), jnp.int32))
+    with mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=AssertionError("must not call ra2a")):
+      out_r0, vjp_r0 = jax.vjp(lambda w: mrw.extend_with_replicas(w, zero_rep_plan, AXIS, NUM_EP, jnp.bfloat16), w_single)
+      (dw_r0,) = vjp_r0(g_single)
+      out_ep1, vjp_ep1 = jax.vjp(lambda w: mrw.extend_with_replicas(w, self.plan, AXIS, 1, jnp.bfloat16), w_single)
+      (dw_ep1,) = vjp_ep1(g_single)
+    self.assertEqual(out_r0.shape, w_single.shape)
+    self.assertEqual(out_r0.dtype, jnp.bfloat16)
+    self.assertEqual(dw_r0.dtype, jnp.float32)
+    np.testing.assert_array_equal(np.asarray(out_r0), np.asarray(w_single.astype(jnp.bfloat16)))
+    np.testing.assert_array_equal(np.asarray(out_ep1), np.asarray(w_single.astype(jnp.bfloat16)))
+    np.testing.assert_array_equal(np.asarray(dw_r0), np.asarray(g_single.astype(jnp.float32)))
+    np.testing.assert_array_equal(np.asarray(dw_ep1), np.asarray(g_single.astype(jnp.float32)))
+
+  def test_invalid_plan_parameters_raise_value_error(self):
+    w_single = jnp.asarray(self.w[0], dtype=jnp.float32)
+    bad_cases = [
+        types.SimpleNamespace(num_replicas=-1, send_slots=jnp.zeros((NUM_EP, 2), jnp.int32)),
+        types.SimpleNamespace(num_replicas=2, send_slots=jnp.zeros((NUM_EP,), jnp.int32)),
+        types.SimpleNamespace(num_replicas=2, send_slots=jnp.zeros((NUM_EP, 0), jnp.int32)),
+        types.SimpleNamespace(num_replicas=2, send_slots=jnp.zeros((NUM_EP, 9), jnp.int32)),
+        types.SimpleNamespace(num_replicas=2, send_slots=jnp.full((NUM_EP, 2), LOCAL, jnp.int32)),
+    ]
+    for bad_plan in bad_cases:
+      with self.assertRaises(ValueError):
+        mrw.extend_with_replicas(w_single, bad_plan, AXIS, NUM_EP, jnp.float32)
+    with self.assertRaises(ValueError):
+      mrw.extend_with_replicas(w_single, self.plan, AXIS, 0, jnp.float32)
+
 
 if __name__ == "__main__":
   absltest.main()

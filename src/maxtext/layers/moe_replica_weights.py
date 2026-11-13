@@ -15,18 +15,29 @@
 """Replica weight move for online hot-expert replication on the ragged all-to-all MoE path.
 
 Each expert-parallel (EP) device owns L = E / EP "home" experts and R extra
-replica slots. Given a `ReplicaPlan` (`rep_home`, `send_slots`,
-`send_peer_index`, `num_replicas`), `extend_with_replicas` pads the local
+replica slots. Given a `ReplicaPlan` produced by
+`moe_replica_planner.compute_plan_iter`, `extend_with_replicas` pads the local
 expert weights `[L, ...]` to `[L + R, ...]` and populates rows `[L, L + R)` in
 place via a single `ragged_all_to_all` straight from the home weight array.
 Its custom VJP returns replica gradients `[L, L + R)` back to their home
 devices and accumulates them into the home expert gradients.
+
+Plan invariants required from `moe_replica_planner` (verified in
+`moe_replica_planner_test.test_plan_satisfies_weight_move_invariants`):
+  1. At most one replica row per `(home, receiver)` device pair.
+  2. Distinct valid home devices (`rep_home[r] >= 0`) across each receiver `r`'s `R` slots.
+  3. Valid send entries for home `h` compacted at the front of `send_slots[h, :k]`
+     (`k = sum(send_peer_index[h] >= 0) <= max_send`), ordered by ascending receiver ID,
+     with `0 <= send_slots[h, :k] < L`.
 """
 
 import functools
 
 import jax
 import jax.numpy as jnp
+import numpy as np
+
+MAX_REPLICA_SEND = 8
 
 
 def _direct_move_params(plan, me, num_ep):
@@ -84,6 +95,9 @@ def _extend_direct_bwd(axis_name, r_slots, max_send, dtype, wdtype, res, g):
   back = back.astype(wdtype) * valid.reshape((max_send,) + (1,) * (len(shape) - 1))
   rows = jnp.arange(local, dtype=jnp.int32).reshape((local,) + (1,) * (len(shape) - 1))
   g_home = g[:local].astype(wdtype)
+  # Costs O(max_send) full-size [L, ...] elementwise passes, fused into one kernel by XLA
+  # (capped at MAX_REPLICA_SEND=8); dynamic `.at[send_slots].add(back)` prevents XLA fusion into
+  # `g[:local]` and materializes an extra HBM copy.
   for c in range(max_send):
     g_home = g_home + jnp.where(rows == send_slots[c], back[c][None], jnp.zeros((), wdtype))
   return g_home, tuple(None for _ in idx)
@@ -93,10 +107,28 @@ _extend_direct.defvjp(_extend_direct_fwd, _extend_direct_bwd)
 
 
 def extend_with_replicas(w_local, plan, axis_name, num_ep, dtype):
-  """Extends `w_local` `[L, ...]` to `[L + R, ...]` in `dtype`, summing replica grads back into home slots."""
+  """Extends `w_local` `[L, ...]` to `[L + R, ...]` in `dtype`, summing replica grads back into home slots.
+
+  Relies on the `moe_replica_planner.ReplicaPlan` invariants: at most one replica row per
+  `(home, receiver)` pair, distinct valid home IDs across each receiver's `R` slots, and valid
+  send entries compacted at the front of `send_slots[:, :max_send]` (`1 <= max_send <= 8`).
+  Returns `w_local.astype(dtype)` directly when `plan.num_replicas == 0` or `num_ep == 1`.
+  """
+  r_slots = int(plan.num_replicas)
+  if r_slots < 0 or num_ep < 1:
+    raise ValueError(f"Expected num_replicas >= 0 and num_ep >= 1, got num_replicas={r_slots}, num_ep={num_ep}.")
+  if r_slots == 0 or num_ep == 1:
+    return w_local.astype(dtype)
+  if plan.send_slots.ndim != 2:
+    raise ValueError(f"Expected 2D send_slots [EP, max_send], got shape {plan.send_slots.shape}.")
+  max_send = int(plan.send_slots.shape[1])
+  if max_send < 1 or max_send > MAX_REPLICA_SEND:
+    raise ValueError(f"Expected 1 <= max_send <= {MAX_REPLICA_SEND}, got max_send={max_send}.")
+  if not isinstance(plan.send_slots, jax.core.Tracer):
+    slots_np = np.asarray(plan.send_slots)
+    if np.any((slots_np < 0) | (slots_np >= w_local.shape[0])):
+      raise ValueError(f"send_slots entries must be in [0, {w_local.shape[0]}), got {slots_np}.")
   me = jax.lax.axis_index(axis_name)
-  max_send = plan.send_slots.shape[1]
-  r_slots = plan.num_replicas
   in_off, send_sz, out_off, recv_sz = _direct_move_params(plan, me, num_ep)
   bwd_in_off, bwd_out_off = _bwd_offsets(plan, me, num_ep)
   idx = (in_off, send_sz, out_off, recv_sz, plan.send_slots[me], bwd_in_off, recv_sz, bwd_out_off, send_sz)
