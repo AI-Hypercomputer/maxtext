@@ -265,7 +265,9 @@ def run_task(q: Queue, task: dict, gen: int, args) -> int:
   attempts = q.bump_attempts(task["id"]) if interrupted else 0
   if interrupted and attempts < args.max_attempts:
     q.release(task["id"], state["gen"])
-    _log(f"INTERRUPTED {task['id']} on {args.worker} (exit code {rc}, attempt {attempts}/{args.max_attempts}); released")
+    _log(
+        f"INTERRUPTED {task['id']} on {args.worker} (exit code {rc}, attempt {attempts}/{args.max_attempts}); released"
+    )
     return rc
   q.mark_done(
       task["id"],
@@ -298,10 +300,12 @@ def main() -> int:
   )
   p.add_argument("--max-tasks", type=int, default=0, help="Exit with code 2 after this many tasks (0 = no limit)")
   p.add_argument("--no-wait", action="store_true", help="Exit with code 3 instead of polling when nothing is claimable")
-  p.add_argument("--prefer-max-slices", action="store_true", help="Claim tasks needing --max-slices before smaller ones")
+  p.add_argument(
+      "--prefer-max-slices", action="store_true", help="Claim tasks needing --max-slices before smaller ones"
+  )
   p.add_argument("--poll-s", type=int, default=120)
   p.add_argument("--heartbeat-s", type=int, default=60)
-  p.add_argument("--stale-after-s", type=int, default=1200)
+  p.add_argument("--stale-after-s", type=int, default=240)
   p.add_argument("--max-attempts", type=int, default=3, help="Interrupted runs of a task before it is marked done")
   args = p.parse_args()
 
@@ -328,7 +332,7 @@ def main() -> int:
       stale_gen = None
       if lock is not None:
         age = time.time() - float(lock.get("heartbeat", 0))
-        if age < args.stale_after_s:
+        if lock.get("worker") != args.worker and age < args.stale_after_s:
           continue
         _log(f"Taking over stale lock of {task['id']} from {lock.get('worker')} (heartbeat {age:.0f}s old)")
         stale_gen = lock_gen
