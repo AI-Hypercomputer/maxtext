@@ -60,11 +60,11 @@ class ConfigTest(absltest.TestCase):
 
   def test_model_override(self):
     """Tests that model-specific configs override base.yml."""
-    argv = ["", _BASE_CONFIG_PATH, "model_name=llama2-7b", "run_name=test"]
+    argv = ["", _BASE_CONFIG_PATH, "model_name=llama3.1-8b", "run_name=test"]
     config = pyconfig.initialize(argv)
-    self.assertEqual(config.base_emb_dim, 4096)  # From llama2-7b.yml
-    self.assertEqual(config.base_num_decoder_layers, 32)  # From llama2-7b.yml
-    self.assertEqual(config.decoder_block, types.DecoderBlockType.LLAMA2)  # from llama2-7b.yml
+    self.assertEqual(config.base_emb_dim, 4096)  # From llama3.1-8b.yml
+    self.assertEqual(config.base_num_decoder_layers, 32)  # From llama3.1-8b.yml
+    self.assertEqual(config.decoder_block, types.DecoderBlockType.LLAMA2)  # from llama3.1-8b.yml
     self.assertEqual(config.steps, 150001)  # From base.yml, not overridden
 
   def test_derived_values(self):
@@ -1188,7 +1188,7 @@ class ConfigTest(absltest.TestCase):
     argv = [
         "",
         _BASE_CONFIG_PATH,
-        "model_name=llama3-8b",
+        "model_name=llama3.1-8b",
         "tokenizer_path=assets/tokenizer_llama3.tiktoken",
         "run_name=test",
     ]
@@ -1778,10 +1778,10 @@ class Qwen3StackConfigValidationTest(absltest.TestCase):
         "base_num_kv_heads": 2,
         "base_mlp_dim": 256,
         "max_prefill_predict_length": 4,
-        "model_name": "llama2-7b",
+        "model_name": "llama3.1-8b",
         "override_model_config": True,
         "weight_dtype": "bfloat16",
-        "tokenizer_path": "meta-llama/Llama-2-7b",
+        "tokenizer_path": "meta-llama/Llama-3.1-8B",
     }
 
     def rl_config(*cli_args):

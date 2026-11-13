@@ -418,7 +418,7 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
         mm_processor.reformat_prompt("Tell me a story", "<img>", "qwen3-4b", num_images=0), "Tell me a story"
     )
     self.assertEqual(
-        mm_processor.reformat_prompt("Tell me a story", "<img>", "llama2-7b", num_images=0), "Tell me a story"
+        mm_processor.reformat_prompt("Tell me a story", "<img>", "llama3.1-8b", num_images=0), "Tell me a story"
     )
 
   def test_get_vision_and_decoder_block_routing(self):
@@ -439,9 +439,9 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
     self.assertIsNone(mm_processor._get_vision_block("qwen3-4b"))
     self.assertEqual(mm_processor._get_decoder_block("qwen3-4b"), "qwen3-4b")
 
-    # Text-only Llama 2 should have empty vision block and fallback to model_name
-    self.assertIsNone(mm_processor._get_vision_block("llama2-7b"))
-    self.assertEqual(mm_processor._get_decoder_block("llama2-7b"), "llama2-7b")
+    # Text-only Llama 3.1 should have empty vision block and fallback to model_name
+    self.assertIsNone(mm_processor._get_vision_block("llama3.1-8b"))
+    self.assertEqual(mm_processor._get_decoder_block("llama3.1-8b"), "llama3.1-8b")
 
     # Ming has an audio decoder but no vision encoder.
     self.assertIsNone(mm_processor._get_vision_block("ming-3.0-audio-tiny"))
@@ -506,7 +506,7 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
 
     # Text-only models should return empty tuple ()
     self.assertEqual(mm_processor.get_dummy_image_shape_for_init("qwen3-4b"), ())
-    self.assertEqual(mm_processor.get_dummy_image_shape_for_init("llama2-7b"), ())
+    self.assertEqual(mm_processor.get_dummy_image_shape_for_init("llama3.1-8b"), ())
 
   def test_preprocess_image_for_training(self):
     dummy_image = np.zeros((224, 224, 3), dtype=np.uint8)

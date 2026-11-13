@@ -740,7 +740,7 @@ class TestScannedLayoutDimensionNumbers(parameterized.TestCase):
   """Muon reduces over the same feature axes of a real model whatever its param_scan_axis."""
 
   @parameterized.product(
-      model_name=("llama2-7b", "qwen3-30b-a3b", "qwen3-next-80b-a3b", "deepseek3-test"), sharded=(False, True)
+      model_name=("llama3.1-8b", "qwen3-30b-a3b", "qwen3-next-80b-a3b", "deepseek3-test"), sharded=(False, True)
   )
   def test_feature_axes_match_across_scan_axes(self, model_name, sharded):
     layer_major = _dimension_numbers_by_path(model_name, param_scan_axis=0, sharded=sharded)

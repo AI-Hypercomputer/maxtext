@@ -39,7 +39,7 @@ Command:
   python3 -m tests.utils.run_sharding_dump --model_name <model> --topology <topology> --num_slice <slices>
 
 Example:
-  python3 -m tests.utils.run_sharding_dump --model_name gemma-7b --topology v5p-256 --num_slice 1
+  python3 -m tests.utils.run_sharding_dump --model_name gemma3-4b --topology v5p-256 --num_slice 1
 
 """
 
@@ -84,6 +84,7 @@ def run_single_dump(model_name: str, topology: str, num_slice: str, custom_mesh_
 
 def main(argv: Sequence[str]) -> None:
   """Generate json files for every combination of model, topology, slices and rule."""
+  del argv
   if FLAGS.model_name and FLAGS.topology and FLAGS.num_slice:
     cmr = FLAGS.custom_mesh_and_rule if FLAGS.custom_mesh_and_rule is not None else ""
     # We do not natively support overrides via CLI FLAGS. To test explicit cases,
