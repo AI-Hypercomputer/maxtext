@@ -1,60 +1,186 @@
 <!DOCTYPE html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, minimum-scale=1.0, initial-scale=1, user-scalable=yes" />
+    <meta name="description" content="MaxText CI test execution duration and test count benchmarks across TPU v6e, TPU 7x, and GPU A100 suites." />
+    <title>MaxText Test Benchmarks &amp; CI Pulse</title>
     <style>
+      :root {
+        color-scheme: light;
+        --bg: #F8FAFC;
+        --surface: #FFFFFF;
+        --elevated: #F1F5F9;
+        --ink: #0F172A;
+        --ink2: #334155;
+        --muted: #64748B;
+        --grid: #E2E8F0;
+        --border: rgba(15, 23, 42, 0.11);
+        --accent: #0284C7;
+        --accent-bright: #0EA5E9;
+        --tpu: #2563EB;
+        --tpu7x: #0D9488;
+        --gpu: #EA580C;
+        --archived: #64748B;
+        --good: #16A34A;
+        --warn: #D97706;
+        --crit: #DC2626;
+        --tint-good: rgba(22, 163, 74, 0.10);
+        --tint-warn: rgba(217, 119, 6, 0.11);
+        --tint-crit: rgba(220, 38, 38, 0.10);
+        --font: system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
       html {
-        font-family: BlinkMacSystemFont,-apple-system,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,"Fira Sans","Droid Sans","Helvetica Neue",Helvetica,Arial,sans-serif;
+        font-family: var(--font);
         -webkit-font-smoothing: antialiased;
-        background-color: #fff;
+        background-color: var(--bg);
+        color: var(--ink);
         font-size: 16px;
         height: 100%;
+        scroll-behavior: smooth;
       }
+
       body {
-        color: #4a4a4a;
-        margin: 8px;
-        font-size: 1em;
-        font-weight: 400;
+        margin: 0;
+        color: var(--ink);
+        background-color: var(--bg);
+        font-size: 14px;
+        line-height: 1.5;
         min-height: 100vh;
         display: flex;
         flex-direction: column;
       }
-      header {
-        margin-bottom: 8px;
+
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+
+      /* Top Header & View Switcher */
+      header#header {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        background: rgba(255, 255, 255, 0.95);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
+        border-bottom: 1px solid var(--border);
+        padding: 8px 20px;
+      }
+
+      .header-inner {
+        max-width: 1280px;
+        margin: 0 auto;
         display: flex;
         flex-wrap: wrap;
         align-items: center;
-        gap: 12px;
+        gap: 12px 20px;
       }
-      .header-item {
-        display: flex;
+
+      .brand-title {
+        display: inline-flex;
         align-items: center;
+        gap: 8px;
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: var(--ink);
       }
+
+      .brand-dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: var(--good);
+        flex-shrink: 0;
+      }
+
+      .header-meta {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 16px;
+        font-size: 12.5px;
+        color: var(--muted);
+      }
+
+      .header-item {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+      }
+
+      .header-label {
+        font-weight: 600;
+        color: var(--ink2);
+      }
+
+      #last-update {
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+        color: var(--ink2);
+      }
+
+      #repository-link {
+        font-family: var(--mono);
+        font-size: 12px;
+        background: var(--elevated);
+        color: var(--ink2);
+        padding: 2px 8px;
+        border-radius: 5px;
+        border: 1px solid var(--border);
+        text-decoration: none;
+      }
+      #repository-link:hover {
+        color: var(--accent);
+        border-color: rgba(2, 132, 199, 0.35);
+      }
+
+      body.view-ci .brand-title,
+      body.view-ci .header-meta {
+        display: none;
+      }
+
       .view-toggle {
         margin-left: auto;
         display: inline-flex;
         align-items: center;
-        gap: 8px;
-        padding: 4px;
-        border: 1px solid #dfe3e8;
+        gap: 4px;
+        padding: 3px;
+        border: 1px solid var(--border);
         border-radius: 999px;
-        background: #f5f7fa;
+        background: var(--elevated);
       }
+
       .toggle-button {
-        color: #4a4a4a;
+        color: var(--ink2);
         background: transparent;
         border: none;
         border-radius: 999px;
-        padding: 8px 12px;
-        font-size: 0.875rem;
-        font-weight: 600;
+        padding: 6px 14px;
+        font: 600 13px/1.2 var(--font);
         cursor: pointer;
+        transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+      }
+      .toggle-button:hover {
+        color: var(--ink);
       }
       .toggle-button.active {
-        color: #fff;
-        background-color: #3298dc;
+        color: #FFFFFF;
+        background: var(--accent);
+        box-shadow: 0 1px 3px rgba(2, 132, 199, 0.28);
       }
+
+      /* Page Views */
       .page-view {
         display: none;
       }
@@ -66,11 +192,7 @@
         flex: 1 1 auto;
         min-height: 0;
       }
-      main {
-        width: 100%;
-        display: flex;
-        flex-direction: column;
-      }
+
       #ci-metrics-frame {
         width: 100%;
         /* --ci-chrome is measured from the real header at runtime; 88px is only
@@ -81,88 +203,760 @@
         background: #ffffff;
         display: block;
       }
-      a {
-        color: #3273dc;
-        cursor: pointer;
-        text-decoration: none;
+
+      /* Benchmarks Main Container */
+      #benchmarks-page {
+        flex: 1 1 auto;
       }
-      a:hover {
-        color: #000;
+
+      main#main {
+        max-width: 1280px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 20px 20px 32px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
       }
-      button {
-        color: #fff;
-        background-color: #3298dc;
-        border-color: transparent;
-        cursor: pointer;
-        text-align: center;
+
+      /* Cards */
+      .b-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 18px 20px;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
       }
-      button:hover {
-        background-color: #2793da;
-        flex: none;
+
+      /* Hero & Controls */
+      .hero-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 16px;
+        flex-wrap: wrap;
       }
-      .spacer {
-        flex: auto;
-      }
-      .small {
-        font-size: 0.75rem;
-      }
-      footer {
-        margin-top: 16px;
+
+      .hero-title-group h1 {
+        margin: 0;
+        font-size: 20px;
+        font-weight: 700;
+        letter-spacing: -0.02em;
+        color: var(--ink);
         display: flex;
         align-items: center;
+        gap: 10px;
+        flex-wrap: wrap;
       }
-      .header-label {
-        margin-right: 4px;
+
+      .hero-subtitle {
+        margin: 4px 0 0;
+        font-size: 13px;
+        color: var(--muted);
+        max-width: 820px;
       }
-      .benchmark-set {
-        margin: 8px 0;
+
+      .guide-btn {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--accent);
+        font: 600 12px/1 var(--font);
+        padding: 5px 10px;
+        border-radius: 999px;
+        cursor: pointer;
+        transition: border-color 0.15s ease, background-color 0.15s ease;
+      }
+      .guide-btn:hover {
+        border-color: var(--accent);
+        background: #F0F9FF;
+      }
+
+      .guide-box {
+        margin-top: 12px;
+        padding: 12px 14px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        font-size: 12.5px;
+        color: var(--ink2);
+        line-height: 1.55;
+      }
+      .guide-box[hidden] {
+        display: none;
+      }
+      .guide-box ul {
+        margin: 6px 0 0 18px;
+        padding: 0;
+      }
+      .guide-box li {
+        margin-bottom: 4px;
+      }
+      .guide-box code {
+        font-family: var(--mono);
+        font-size: 11.5px;
+        background: var(--surface);
+        padding: 1px 5px;
+        border-radius: 4px;
+        border: 1px solid var(--border);
+      }
+
+      /* Filter Toolbar */
+      .toolbar-row {
+        margin-top: 14px;
+        padding-top: 14px;
+        border-top: 1px solid var(--grid);
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 10px;
+      }
+
+      .seg-group {
+        display: inline-flex;
+        align-items: center;
+        background: var(--elevated);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 2px;
+        gap: 2px;
+      }
+
+      .seg-btn {
+        appearance: none;
+        border: none;
+        background: transparent;
+        color: var(--ink2);
+        font: 600 12px/1 var(--font);
+        padding: 5px 9px;
+        border-radius: 6px;
+        cursor: pointer;
+        transition: all 0.12s ease;
+      }
+      .seg-btn:hover {
+        color: var(--ink);
+      }
+      .seg-btn.active {
+        background: var(--surface);
+        color: var(--ink);
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.08);
+      }
+
+      .toolbar-divider {
+        width: 1px;
+        height: 18px;
+        background: var(--grid);
+      }
+
+      .hw-chips {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 5px;
+        align-items: center;
+      }
+
+      .fchip {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--ink2);
+        font: 600 12px/1 var(--font);
+        padding: 5px 10px;
+        border-radius: 999px;
+        cursor: pointer;
+        transition: all 0.15s ease;
+      }
+      .fchip:hover {
+        color: var(--ink);
+        border-color: rgba(2, 132, 199, 0.4);
+      }
+      .fchip.on {
+        border-color: var(--accent);
+        background: var(--accent);
+        color: #FFFFFF;
+      }
+      .fchip .count-pill {
+        font: 700 11px/1 var(--mono);
+        padding: 2px 5px;
+        border-radius: 999px;
+        background: var(--elevated);
+        color: var(--muted);
+      }
+      .fchip.on .count-pill {
+        background: rgba(255, 255, 255, 0.22);
+        color: #FFFFFF;
+      }
+
+      .hw-dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        display: inline-block;
+        flex-shrink: 0;
+      }
+
+      .search-wrap {
+        margin-left: auto;
+        position: relative;
+        min-width: 155px;
+        max-width: 205px;
+        flex: 1 1 155px;
+      }
+
+      .search-input {
         width: 100%;
+        font: 500 13px/1.2 var(--font);
+        padding: 6px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--ink);
+        outline: none;
+        transition: border-color 0.15s ease, background-color 0.15s ease;
+      }
+      .search-input:focus {
+        background: var(--surface);
+        border-color: var(--accent);
+      }
+
+      /* KPI Grid */
+      .kpi-grid {
+        display: grid;
+        grid-template-columns: repeat(4, minmax(0, 1fr));
+        gap: 12px;
+      }
+
+      @media (max-width: 980px) {
+        .kpi-grid {
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+        }
+      }
+      @media (max-width: 560px) {
+        .kpi-grid {
+          grid-template-columns: 1fr;
+        }
+        .search-wrap {
+          margin-left: 0;
+          width: 100%;
+        }
+      }
+
+      .kpi-tile {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        padding: 14px 16px;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+      }
+
+      .kpi-label {
+        font-size: 11.5px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.05em;
+        color: var(--muted);
+        margin-bottom: 6px;
+      }
+
+      .kpi-value-row {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .kpi-value {
+        font: 700 22px/1.15 var(--mono);
+        font-variant-numeric: tabular-nums;
+        color: var(--ink);
+      }
+
+      .kpi-sub {
+        margin-top: 5px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      /* Delta & Status Badges */
+      .delta-chip {
+        display: inline-flex;
+        align-items: center;
+        font: 700 11.5px/1 var(--mono);
+        font-variant-numeric: tabular-nums;
+        padding: 3px 7px;
+        border-radius: 5px;
+        white-space: nowrap;
+      }
+      .delta-good {
+        background: var(--tint-good);
+        color: var(--good);
+      }
+      .delta-warn {
+        background: var(--tint-warn);
+        color: var(--warn);
+      }
+      .delta-crit {
+        background: var(--tint-crit);
+        color: var(--crit);
+      }
+      .delta-flat {
+        background: var(--elevated);
+        color: var(--ink2);
+      }
+
+      /* Overview Table */
+      .section-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 12px;
+        margin-bottom: 10px;
+        flex-wrap: wrap;
+      }
+
+      .section-head h2 {
+        margin: 0;
+        font-size: 14px;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--ink2);
+      }
+
+      .section-note {
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .table-scroll {
+        overflow-x: auto;
+      }
+
+      table.suite-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 13px;
+      }
+
+      .suite-table th {
+        text-align: left;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+        color: var(--muted);
+        padding: 8px 8px;
+        border-bottom: 1px solid var(--grid);
+        white-space: nowrap;
+        cursor: pointer;
+        user-select: none;
+      }
+      .suite-table th:hover {
+        color: var(--ink);
+      }
+      .suite-table th.num,
+      .suite-table td.num {
+        text-align: right;
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+      }
+
+      .suite-table tbody tr {
+        border-bottom: 1px solid var(--grid);
+        cursor: pointer;
+        transition: background-color 0.12s ease;
+      }
+      .suite-table tbody tr:last-child {
+        border-bottom: none;
+      }
+      .suite-table tbody tr:hover {
+        background: var(--bg);
+      }
+
+      .suite-table td {
+        padding: 8px 8px;
+        vertical-align: middle;
+        white-space: nowrap;
+      }
+
+      .suite-name-cell {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-weight: 600;
+        color: var(--ink);
+      }
+
+      .runner-tag {
+        font: 500 11.5px/1.2 var(--mono);
+        color: var(--muted);
+        background: var(--elevated);
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+
+      .archived-pill {
+        font: 600 11px/1 var(--mono);
+        color: var(--muted);
+        background: var(--elevated);
+        border: 1px solid var(--border);
+        padding: 2px 6px;
+        border-radius: 4px;
+      }
+
+      /* Hardware Group Sections & Suite Cards */
+      .hw-section {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .hw-section-header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 4px 2px 0;
+      }
+
+      .hw-section-header h2 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        color: var(--ink);
+      }
+
+      .hw-section-meta {
+        font-size: 12.5px;
+        color: var(--muted);
+        font-family: var(--mono);
+      }
+
+      .suite-card {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 16px 18px;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
+        transition: box-shadow 0.25s ease, border-color 0.25s ease;
+      }
+
+      .suite-card.flash-target {
+        border-color: var(--accent);
+        box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.18);
+      }
+
+      .suite-card-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        gap: 12px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+      }
+
+      .suite-card-title {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex-wrap: wrap;
+      }
+
+      .suite-card-title h3 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 700;
+        letter-spacing: -0.01em;
+        color: var(--ink);
+      }
+
+      .suite-card-sub {
+        margin-top: 2px;
+        padding-left: 16px;
+        font-size: 12px;
+        color: var(--muted);
+      }
+
+      .suite-stats-row {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 8px 14px;
+        font-size: 12.5px;
+        color: var(--ink2);
+      }
+
+      .stat-kv {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .stat-kv span.k {
+        color: var(--muted);
+      }
+      .stat-kv b.v {
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+        color: var(--ink);
+      }
+
+      .suite-charts-grid {
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 14px;
+      }
+
+      @media (max-width: 920px) {
+        .suite-charts-grid {
+          grid-template-columns: 1fr;
+        }
+      }
+
+      .chart-panel {
+        border: 1px solid var(--grid);
+        border-radius: 8px;
+        padding: 10px 12px 6px;
+        background: #FCFDFE;
         display: flex;
         flex-direction: column;
       }
-      .benchmark-title {
-        font-size: 3rem;
-        font-weight: 600;
-        word-break: break-word;
-        text-align: center;
-      }
-      .benchmark-graphs {
+
+      .chart-panel-head {
         display: flex;
-        flex-direction: row;
-        justify-content: space-around;
+        justify-content: space-between;
         align-items: center;
-        flex-wrap: wrap;
-        width: 100%;
+        gap: 8px;
+        margin-bottom: 6px;
+        font-size: 12px;
       }
-      .benchmark-chart {
-        max-width: 1000px;
+
+      .chart-panel-title {
+        font-weight: 600;
+        color: var(--ink2);
+      }
+
+      .chart-panel-legend {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 11px;
+        color: var(--muted);
+        font-family: var(--mono);
+      }
+
+      .legend-line {
+        display: inline-block;
+        width: 12px;
+        height: 0;
+        border-top: 1.5px dashed var(--muted);
+        vertical-align: middle;
+        margin-right: 3px;
+      }
+      .legend-line.alert {
+        border-top-color: rgba(220, 38, 38, 0.7);
+      }
+
+      .svg-chart-wrap {
+        width: 100%;
+        position: relative;
+        user-select: none;
+      }
+
+      .svg-chart-wrap svg {
+        width: 100%;
+        height: auto;
+        display: block;
+        cursor: crosshair;
+      }
+
+      /* Collapsible Archived Section */
+      details.archived-details {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 14px 18px;
+      }
+
+      details.archived-details > summary {
+        cursor: pointer;
+        font-weight: 600;
+        font-size: 13.5px;
+        color: var(--ink2);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        list-style: none;
+      }
+      details.archived-details > summary::-webkit-details-marker {
+        display: none;
+      }
+
+      .archived-banner {
+        margin: 12px 0;
+        padding: 10px 14px;
+        border-radius: 8px;
+        background: var(--elevated);
+        border: 1px solid var(--border);
+        font-size: 12.5px;
+        color: var(--ink2);
+      }
+
+      .archived-stack {
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+        margin-top: 12px;
+      }
+
+      .empty-state {
+        text-align: center;
+        padding: 36px 20px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      /* Floating Tooltip */
+      #bench-tooltip {
+        position: fixed;
+        z-index: 120;
+        pointer-events: none;
+        display: none;
+        max-width: 360px;
+        background: rgba(15, 23, 42, 0.96);
+        color: #F8FAFC;
+        border: 1px solid rgba(148, 163, 184, 0.25);
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-size: 12px;
+        line-height: 1.45;
+        box-shadow: 0 10px 25px rgba(15, 23, 42, 0.28);
+      }
+
+      #bench-tooltip .tt-head {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 10px;
+        font-weight: 700;
+        font-size: 12.5px;
+        margin-bottom: 6px;
+        padding-bottom: 5px;
+        border-bottom: 1px solid rgba(148, 163, 184, 0.2);
+      }
+
+      #bench-tooltip .tt-row {
+        display: flex;
+        justify-content: space-between;
+        gap: 14px;
+        padding: 2px 0;
+      }
+      #bench-tooltip .tt-row .k {
+        color: #94A3B8;
+      }
+      #bench-tooltip .tt-row .v {
+        font-family: var(--mono);
+        font-variant-numeric: tabular-nums;
+        font-weight: 600;
+        color: #F8FAFC;
+      }
+      #bench-tooltip .tt-commit {
+        margin-top: 6px;
+        padding-top: 6px;
+        border-top: 1px solid rgba(148, 163, 184, 0.2);
+        color: #CBD5E1;
+        word-break: break-word;
+      }
+      #bench-tooltip .tt-hint {
+        margin-top: 4px;
+        font-size: 11px;
+        color: #38BDF8;
+      }
+
+      /* Footer */
+      footer.bench-footer {
+        max-width: 1280px;
+        width: 100%;
+        margin: 0 auto;
+        padding: 8px 20px 28px;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        color: var(--muted);
+        font-size: 12.5px;
+      }
+
+      .dl-btn {
+        appearance: none;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: var(--surface);
+        color: var(--ink2);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 7px 12px;
+        font: 600 12.5px/1.2 var(--font);
+        cursor: pointer;
+        transition: border-color 0.15s ease, color 0.15s ease, background-color 0.15s ease;
+      }
+      .dl-btn:hover {
+        color: var(--ink);
+        border-color: var(--accent);
+        background: #F0F9FF;
+      }
+
+      .spacer {
+        flex: 1 1 auto;
+      }
+
+      .small {
+        font-size: 12px;
       }
     </style>
-    <title>Benchmarks</title>
   </head>
 
   <body>
     <header id="header">
-      <div class="header-item">
-        <strong class="header-label">Last Update:</strong>
-        <span id="last-update"></span>
-      </div>
-      <div class="header-item">
-        <strong class="header-label">Repository:</strong>
-        <a id="repository-link" rel="noopener"></a>
-      </div>
-      <div class="view-toggle" aria-label="View toggle">
-        <button class="toggle-button active" data-view="benchmarks" type="button">Benchmarks</button>
-        <button class="toggle-button" data-view="ci" type="button">CI Pulse</button>
+      <div class="header-inner">
+        <div class="brand-title">
+          <span class="brand-dot" aria-hidden="true"></span>
+          <span>MaxText CI &amp; Benchmarks</span>
+        </div>
+        <div class="header-meta">
+          <div class="header-item">
+            <span class="header-label">Last Update:</span>
+            <span id="last-update"></span>
+          </div>
+          <div class="header-item">
+            <span class="header-label">Repository:</span>
+            <a id="repository-link" rel="noopener"></a>
+          </div>
+        </div>
+        <div class="view-toggle" aria-label="View toggle">
+          <button class="toggle-button active" data-view="benchmarks" type="button">Benchmarks</button>
+          <button class="toggle-button" data-view="ci" type="button">CI Pulse</button>
+        </div>
       </div>
     </header>
 
     <div id="benchmarks-page" class="page-view active">
       <main id="main"></main>
-      <footer>
-        <button id="dl-button">Download data as JSON</button>
+      <footer class="bench-footer">
+        <button id="dl-button" class="dl-btn" type="button">Download data as JSON</button>
         <div class="spacer"></div>
-        <div class="small">Powered by <a rel="noopener" href="https://github.com/marketplace/actions/continuous-benchmark">github-action-benchmark</a></div>
+        <div class="small">
+          Powered by <a rel="noopener" href="https://github.com/marketplace/actions/continuous-benchmark">github-action-benchmark</a>
+          &middot; Updated every 4 hours by scheduled <code>main</code> CI
+        </div>
       </footer>
     </div>
 
@@ -170,68 +964,1308 @@
       <iframe id="ci-metrics-frame" title="CI Metrics dashboard" data-src="ci-pulse/index.html"></iframe>
     </div>
 
-    <script src="https://cdn.jsdelivr.net/npm/chart.js@2.9.2/dist/Chart.min.js"></script>
+    <div id="bench-tooltip" role="tooltip" aria-hidden="true"></div>
+
     <script src="data.js"></script>
     <script id="main-script">
       'use strict';
-      (function() {
-        // Colors from https://github.com/github/linguist/blob/master/lib/linguist/languages.yml
-        const toolColors = {
-          cargo: '#dea584',
-          go: '#00add8',
-          benchmarkjs: '#f1e05a',
-          benchmarkluau: '#000080',
-          pytest: '#3572a5',
-          googlecpp: '#f34b7d',
-          catch2: '#f34b7d',
-          julia: '#a270ba',
-          jmh: '#b07219',
-          benchmarkdotnet: '#178600',
-          customBiggerIsBetter: '#38ff38',
-          customSmallerIsBetter: '#ff3838',
-          _: '#333333'
+      (function () {
+        // Infrastructure metadata aligned with .github/workflows/ci_pipeline.yml & run_tests_coordinator.yml
+        const SUITE_CATALOG = {
+          'TPU-UNIT': {
+            hw: 'tpu',
+            order: 10,
+            device: 'v6e-4',
+            runner: 'linux-x86-ct6e-180-4tpu',
+            stage: 'Pretrain Unit (class-split)',
+          },
+          'TPU-INTEGRATION': {
+            hw: 'tpu',
+            order: 11,
+            device: 'v6e-4',
+            runner: 'linux-x86-ct6e-180-4tpu',
+            stage: 'Pretrain Integration',
+          },
+          'TPU-POST-TRAINING-UNIT': {
+            hw: 'tpu',
+            order: 12,
+            device: 'v6e-4',
+            runner: 'linux-x86-ct6e-180-4tpu',
+            stage: 'Post-Train Unit',
+          },
+          'TPU-POST-TRAINING-INTEGRATION': {
+            hw: 'tpu',
+            order: 13,
+            device: 'v6e-4',
+            runner: 'linux-x86-ct6e-180-4tpu',
+            stage: 'Post-Train Integration',
+          },
+          'TPU7X-UNIT': {
+            hw: 'tpu7x',
+            order: 20,
+            device: 'tpu7x-8',
+            runner: 'linux-x86-tpu7x-224-4tpu',
+            stage: 'Pretrain Unit',
+          },
+          'TPU7X-INTEGRATION': {
+            hw: 'tpu7x',
+            order: 21,
+            device: 'tpu7x-8',
+            runner: 'linux-x86-tpu7x-224-4tpu',
+            stage: 'Pretrain Integration',
+          },
+          'TPU7X-POST-TRAINING-UNIT': {
+            hw: 'tpu7x',
+            order: 22,
+            device: 'tpu7x-8',
+            runner: 'linux-x86-tpu7x-224-4tpu',
+            stage: 'Post-Train Unit',
+          },
+          'TPU7X-POST-TRAINING-INTEGRATION': {
+            hw: 'tpu7x',
+            order: 23,
+            device: 'tpu7x-8',
+            runner: 'linux-x86-tpu7x-224-4tpu',
+            stage: 'Post-Train Integration',
+          },
+          'GPU-UNIT': {
+            hw: 'gpu',
+            order: 30,
+            device: 'a100-40gb-4',
+            runner: 'linux-x86-a2-48-a100-4gpu',
+            stage: 'Pretrain Unit',
+          },
+          'GPU-INTEGRATION': {
+            hw: 'gpu',
+            order: 31,
+            device: 'a100-40gb-4',
+            runner: 'linux-x86-a2-48-a100-4gpu',
+            stage: 'Pretrain Integration',
+          },
+          'CPU-UNIT': {
+            hw: 'cpu',
+            order: 80,
+            device: 'X64',
+            runner: 'CPU runner',
+            stage: 'Left out of data.js since Aug 4 (still timed in per_test_baseline.json)',
+          },
+          'CPU-POST-TRAINING-UNIT': {
+            hw: 'cpu',
+            order: 81,
+            device: 'X64',
+            runner: 'CPU runner',
+            stage: 'Left out of data.js since Aug 4 (still timed in per_test_baseline.json)',
+          },
+          'CPU-TORCH-REFERENCE': {
+            hw: 'cpu',
+            order: 82,
+            device: 'X64',
+            runner: 'CPU runner',
+            stage: 'Flavor removed Jul 30; torch is now installed in scheduled cpu-unit and cpu-integration runs',
+          },
+          'DECOUPLED': {
+            hw: 'cpu',
+            order: 83,
+            device: 'X64',
+            runner: 'CPU runner',
+            stage: 'Offline gcloud check in cpu-unit shard 1; left out of data.js since Oct 15',
+          },
         };
 
-        function init() {
-          function collectBenchesPerTestCase(entries) {
-            const map = new Map();
-            for (const entry of entries) {
-              const {commit, date, tool, benches} = entry;
-              for (const bench of benches) {
-                const result = { commit, date, tool, bench };
-                const arr = map.get(bench.name);
-                if (arr === undefined) {
-                  map.set(bench.name, [result]);
-                } else {
-                  arr.push(result);
+        const HW_GROUPS = [
+          {
+            key: 'tpu',
+            label: 'TPU v6e',
+            sectionTitle: 'TPU v6e Suites',
+            meta: 'v6e-4 · linux-x86-ct6e-180-4tpu',
+            color: '#2563EB',
+          },
+          {
+            key: 'tpu7x',
+            label: 'TPU 7x',
+            sectionTitle: 'TPU 7x Suites',
+            meta: 'tpu7x-8 · linux-x86-tpu7x-224-4tpu',
+            color: '#0D9488',
+          },
+          {
+            key: 'gpu',
+            label: 'GPU A100',
+            sectionTitle: 'GPU A100 Suites',
+            meta: 'a100-40gb-4 · linux-x86-a2-48-a100-4gpu',
+            color: '#EA580C',
+          },
+          {
+            key: 'other',
+            label: 'Other Suites',
+            sectionTitle: 'Other Benchmark Suites',
+            meta: 'Custom series',
+            color: '#0284C7',
+          },
+        ];
+
+        const ARCHIVED_STALE_MS = 14 * 24 * 3600 * 1000; // >14 days behind newest dataset entry => archived
+        const ALERT_RATIO = 1.15; // Matches alert-threshold: '115%' in track_performance.yml
+
+        const state = {
+          rangeDays: 30, // 7, 14, 30, 90, 0 (All)
+          hwFilter: 'active', // 'active', 'tpu', 'tpu7x', 'gpu', 'archived'
+          yScale: 'zero', // 'zero' | 'fit'
+          search: '',
+          sortCol: 'order',
+          sortDir: 1,
+          guideOpen: false,
+        };
+
+        function esc(str) {
+          return String(str == null ? '' : str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
+        }
+
+        function formatUtcShort(ms) {
+          if (!ms || !Number.isFinite(ms)) return '—';
+          const d = new Date(ms);
+          return d.toISOString().replace('T', ' ').slice(0, 16) + ' UTC';
+        }
+
+        function formatDateShort(ms) {
+          if (!ms || !Number.isFinite(ms)) return '—';
+          return new Date(ms).toISOString().slice(0, 10);
+        }
+
+        function formatAxisDate(ms, spanDays) {
+          const iso = new Date(ms).toISOString();
+          if (spanDays <= 10) {
+            return iso.slice(5, 10) + ' ' + iso.slice(11, 16);
+          }
+          return iso.slice(5, 10);
+        }
+
+        function formatDurationHuman(sec) {
+          if (sec == null || !Number.isFinite(sec)) return '—';
+          if (sec < 59.95) return sec.toFixed(1) + 's';
+          const totalSec = Math.round(sec);
+          const m = Math.floor(totalSec / 60);
+          const s = totalSec % 60;
+          if (m < 60) return s > 0 ? m + 'm ' + String(s).padStart(2, '0') + 's' : m + 'm';
+          const h = Math.floor(m / 60);
+          const rm = m % 60;
+          return rm > 0 ? h + 'h ' + String(rm).padStart(2, '0') + 'm' : h + 'h';
+        }
+
+        function formatSecCompact(sec) {
+          if (sec == null || !Number.isFinite(sec)) return '—';
+          return sec >= 100 ? Math.round(sec).toLocaleString('en-US') + 's' : sec.toFixed(1) + 's';
+        }
+
+        // Data counts as fresh for three times the 4-hourly schedule of the CI run that writes it.
+        const FRESH_MS = 12 * 3600 * 1000;
+
+        // How long ago the newest entry was recorded, by the clock of the reader.
+        function freshnessText(newestMs) {
+          const hours = Math.max(0, (Date.now() - newestMs) / 3600000);
+          if (hours < 1.5) return 'Updated ' + Math.round(hours * 60) + ' min ago';
+          if (hours < 48) return 'Updated ' + Math.round(hours) + ' h ago';
+          return 'No update for ' + Math.round(hours / 24) + ' days';
+        }
+
+        function median(nums) {
+          if (!nums || !nums.length) return null;
+          const sorted = nums.slice().sort((a, b) => a - b);
+          const mid = Math.floor(sorted.length / 2);
+          return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+        }
+
+        function inferSuiteMeta(suiteKey) {
+          if (SUITE_CATALOG[suiteKey]) return SUITE_CATALOG[suiteKey];
+          const upper = suiteKey.toUpperCase();
+          if (upper.startsWith('TPU7X')) {
+            return { hw: 'tpu7x', order: 29, device: 'tpu7x-8', runner: 'linux-x86-tpu7x-224-4tpu', stage: suiteKey };
+          }
+          if (upper.startsWith('TPU')) {
+            return { hw: 'tpu', order: 19, device: 'v6e-4', runner: 'linux-x86-ct6e-180-4tpu', stage: suiteKey };
+          }
+          if (upper.startsWith('GPU')) {
+            return { hw: 'gpu', order: 39, device: 'a100-40gb-4', runner: 'linux-x86-a2-48-a100-4gpu', stage: suiteKey };
+          }
+          if (upper.startsWith('CPU') || upper.includes('DECOUPLED')) {
+            return { hw: 'cpu', order: 89, device: 'X64', runner: 'CPU runner', stage: suiteKey };
+          }
+          return { hw: 'other', order: 50, device: '—', runner: '—', stage: suiteKey };
+        }
+
+        function hwColor(hw, isArchived) {
+          if (isArchived) return '#64748B';
+          if (hw === 'tpu') return '#2563EB';
+          if (hw === 'tpu7x') return '#0D9488';
+          if (hw === 'gpu') return '#EA580C';
+          return '#0284C7';
+        }
+
+        function parseDataset(rawData) {
+          const suitesMap = new Map();
+          let newestMs = 0;
+
+          const entriesObj = (rawData && rawData.entries) || {};
+          for (const setName of Object.keys(entriesObj)) {
+            const entries = entriesObj[setName] || [];
+            for (let idx = 0; idx < entries.length; idx++) {
+              const entry = entries[idx];
+              const commit = entry.commit || {};
+              const commitMs = Date.parse(commit.timestamp || '') || 0;
+              const runMs = typeof entry.date === 'number' && entry.date > 0 ? entry.date : commitMs;
+              if (runMs > newestMs) newestMs = runMs;
+
+              const perSuiteInEntry = new Map();
+              const benches = entry.benches || [];
+              for (const b of benches) {
+                const m = /^Total\s+(.+?)\s+Tests\s+(Duration|Count)$/i.exec(b.name || '');
+                if (m) {
+                  const key = m[1].toUpperCase();
+                  const kind = m[2].toLowerCase();
+                  let rec = perSuiteInEntry.get(key);
+                  if (!rec) {
+                    rec = { duration: null, count: null };
+                    perSuiteInEntry.set(key, rec);
+                  }
+                  if (kind === 'duration') rec.duration = b;
+                  else rec.count = b;
+                } else if (b && b.name) {
+                  const key = b.name;
+                  perSuiteInEntry.set(key, {
+                    duration: b.unit === 'count' ? null : b,
+                    count: b.unit === 'count' ? b : null,
+                  });
                 }
               }
+
+              for (const [suiteKey, pair] of perSuiteInEntry.entries()) {
+                let suite = suitesMap.get(suiteKey);
+                if (!suite) {
+                  const meta = inferSuiteMeta(suiteKey);
+                  suite = {
+                    key: suiteKey,
+                    hw: meta.hw,
+                    order: meta.order,
+                    device: meta.device,
+                    runner: meta.runner,
+                    stage: meta.stage,
+                    points: [],
+                  };
+                  suitesMap.set(suiteKey, suite);
+                }
+                suite.points.push({
+                  runMs,
+                  commitMs,
+                  commit,
+                  tool: entry.tool || 'customSmallerIsBetter',
+                  duration: pair.duration ? Number(pair.duration.value) : null,
+                  durationUnit: pair.duration ? pair.duration.unit || 'sec' : 'sec',
+                  durationExtra: pair.duration ? pair.duration.extra || '' : '',
+                  count: pair.count ? Number(pair.count.value) : null,
+                });
+              }
             }
-            return map;
           }
 
-          const data = window.BENCHMARK_DATA;
+          const suites = Array.from(suitesMap.values());
+          for (const s of suites) {
+            s.points.sort((a, b) => a.runMs - b.runMs);
+            const lastPt = s.points[s.points.length - 1];
+            const firstPt = s.points[0];
+            s.firstMs = firstPt ? firstPt.runMs : 0;
+            s.lastMs = lastPt ? lastPt.runMs : 0;
+            s.archived = newestMs > 0 && newestMs - s.lastMs > ARCHIVED_STALE_MS;
+            s.color = hwColor(s.hw, s.archived);
+
+            // Compute 7-day rolling baseline median anchored to suite's own latest point
+            const sevenDaysBefore = s.lastMs - 7 * 24 * 3600 * 1000;
+            const recentDurs = s.points
+              .filter(p => p.runMs >= sevenDaysBefore && p.duration != null)
+              .slice(0, -1)
+              .map(p => p.duration);
+            const fallbackDurs = s.points
+              .filter(p => p.duration != null)
+              .slice(-15, -1)
+              .map(p => p.duration);
+            s.median7d = median(recentDurs.length >= 3 ? recentDurs : fallbackDurs);
+            s.latest = lastPt || null;
+            s.latestDuration = lastPt && lastPt.duration != null ? lastPt.duration : null;
+            s.latestCount = lastPt && lastPt.count != null ? lastPt.count : null;
+            s.deltaPct =
+              s.latestDuration != null && s.median7d && s.median7d > 0
+                ? ((s.latestDuration - s.median7d) / s.median7d) * 100
+                : null;
+          }
+
+          suites.sort((a, b) => a.order - b.order || a.key.localeCompare(b.key));
+          return { suites, newestMs };
+        }
+
+        function windowPoints(suite, newestMs, rangeDays) {
+          if (!rangeDays || rangeDays <= 0) return suite.points;
+          // Archived suites keep their historical range relative to their own last run so charts are never blank
+          const anchor = suite.archived ? suite.lastMs : newestMs;
+          const cutoff = anchor - rangeDays * 24 * 3600 * 1000;
+          const pts = suite.points.filter(p => p.runMs >= cutoff);
+          return pts.length > 0 ? pts : suite.points.slice(-Math.min(30, suite.points.length));
+        }
+
+        function deltaChipHtml(pct) {
+          if (pct == null || !Number.isFinite(pct)) {
+            return '<span class="delta-chip delta-flat">—</span>';
+          }
+          const sign = pct > 0 ? '+' : '';
+          const txt = sign + pct.toFixed(1) + '%';
+          let cls = 'delta-flat';
+          if (pct >= 15) cls = 'delta-crit';
+          else if (pct >= 6) cls = 'delta-warn';
+          else if (pct <= -4) cls = 'delta-good';
+          return '<span class="delta-chip ' + cls + '">' + txt + '</span>';
+        }
+
+        // Interactive SVG Chart Renderer (zero external dependencies, crisp vector output)
+        function buildSvgChart(opts) {
+          const { points, field, color, yScaleMode, medianRef, alertRef, unit, isStep } = opts;
+          const valid = [];
+          for (let i = 0; i < points.length; i++) {
+            const val = points[i][field];
+            if (val != null && Number.isFinite(val)) {
+              valid.push({ idx: i, val, pt: points[i] });
+            }
+          }
+
+          const W = 560;
+          const H = 205;
+          const padL = 54;
+          const padR = 14;
+          const padT = 14;
+          const padB = 28;
+          const plotW = W - padL - padR;
+          const plotH = H - padT - padB;
+
+          if (!valid.length) {
+            return {
+              svgHtml:
+                '<svg viewBox="0 0 ' +
+                W +
+                ' ' +
+                H +
+                '" role="img"><text x="' +
+                W / 2 +
+                '" y="' +
+                H / 2 +
+                '" text-anchor="middle" fill="#64748B" font-size="12">No data in selected window</text></svg>',
+              valid: [],
+              geom: null,
+            };
+          }
+
+          let minV = Infinity;
+          let maxV = -Infinity;
+          for (const d of valid) {
+            if (d.val < minV) minV = d.val;
+            if (d.val > maxV) maxV = d.val;
+          }
+          if (alertRef != null && alertRef > maxV) maxV = alertRef;
+          if (medianRef != null && medianRef < minV) minV = medianRef;
+
+          let yMin = yScaleMode === 'zero' ? 0 : Math.max(0, minV - (maxV - minV || maxV * 0.1 || 1) * 0.18);
+          let yMax = maxV + (maxV - yMin || maxV * 0.1 || 1) * 0.12;
+          if (yMax <= yMin) yMax = yMin + 1;
+
+          const xAt = i => (valid.length === 1 ? padL + plotW / 2 : padL + (i / (valid.length - 1)) * plotW);
+          const yAt = v => padT + plotH - ((v - yMin) / (yMax - yMin)) * plotH;
+
+          // Y gridlines (4 ticks)
+          const yTicks = 4;
+          let gridHtml = '';
+          for (let t = 0; t <= yTicks; t++) {
+            const tv = yMin + ((yMax - yMin) * t) / yTicks;
+            const ty = yAt(tv);
+            const label =
+              unit === 'sec'
+                ? tv >= 600
+                  ? Math.round(tv / 60) + 'm'
+                  : Math.round(tv) + 's'
+                : Math.round(tv).toString();
+            gridHtml +=
+              '<line x1="' +
+              padL +
+              '" y1="' +
+              ty.toFixed(1) +
+              '" x2="' +
+              (W - padR) +
+              '" y2="' +
+              ty.toFixed(1) +
+              '" stroke="#E2E8F0" stroke-width="1" />' +
+              '<text x="' +
+              (padL - 7) +
+              '" y="' +
+              (ty + 3.5).toFixed(1) +
+              '" text-anchor="end" fill="#64748B" font-size="10.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">' +
+              esc(label) +
+              '</text>';
+          }
+
+          // X ticks (up to 6 evenly spaced)
+          const firstMs = valid[0].pt.runMs;
+          const lastMs = valid[valid.length - 1].pt.runMs;
+          const spanDays = Math.max(1, (lastMs - firstMs) / (24 * 3600 * 1000));
+          const xTickCount = Math.min(5, valid.length);
+          let xAxisHtml = '';
+          if (xTickCount === 1) {
+            const tx = xAt(0);
+            xAxisHtml +=
+              '<text x="' +
+              tx.toFixed(1) +
+              '" y="' +
+              (H - 7) +
+              '" text-anchor="middle" fill="#64748B" font-size="10.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">' +
+              esc(formatAxisDate(valid[0].pt.runMs, spanDays)) +
+              '</text>';
+          } else {
+            for (let k = 0; k < xTickCount; k++) {
+              const vi = Math.round((k * (valid.length - 1)) / (xTickCount - 1));
+              const tx = xAt(vi);
+              const anchor = k === 0 ? 'start' : k === xTickCount - 1 ? 'end' : 'middle';
+              xAxisHtml +=
+                '<text x="' +
+                tx.toFixed(1) +
+                '" y="' +
+                (H - 7) +
+                '" text-anchor="' +
+                anchor +
+                '" fill="#64748B" font-size="10.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">' +
+                esc(formatAxisDate(valid[vi].pt.runMs, spanDays)) +
+                '</text>';
+            }
+          }
+
+          // Reference lines (7d median & 115% threshold)
+          let refHtml = '';
+          if (medianRef != null && medianRef >= yMin && medianRef <= yMax) {
+            const my = yAt(medianRef).toFixed(1);
+            refHtml +=
+              '<line x1="' +
+              padL +
+              '" y1="' +
+              my +
+              '" x2="' +
+              (W - padR) +
+              '" y2="' +
+              my +
+              '" stroke="#64748B" stroke-width="1.2" stroke-dasharray="4 3" opacity="0.75" />';
+          }
+          if (alertRef != null && alertRef >= yMin && alertRef <= yMax) {
+            const ay = yAt(alertRef).toFixed(1);
+            refHtml +=
+              '<line x1="' +
+              padL +
+              '" y1="' +
+              ay +
+              '" x2="' +
+              (W - padR) +
+              '" y2="' +
+              ay +
+              '" stroke="#DC2626" stroke-width="1.1" stroke-dasharray="3 3" opacity="0.6" />';
+          }
+
+          // Path & Area
+          const coords = valid.map((d, i) => ({ x: xAt(i), y: yAt(d.val), d }));
+          let pathD = '';
+          for (let i = 0; i < coords.length; i++) {
+            const c = coords[i];
+            if (i === 0) {
+              pathD += 'M' + c.x.toFixed(1) + ',' + c.y.toFixed(1);
+            } else if (isStep) {
+              pathD += ' H' + c.x.toFixed(1) + ' V' + c.y.toFixed(1);
+            } else {
+              pathD += ' L' + c.x.toFixed(1) + ' ' + c.y.toFixed(1);
+            }
+          }
+
+          const baseY = (padT + plotH).toFixed(1);
+          const areaD =
+            coords.length > 1
+              ? pathD +
+                ' L' +
+                coords[coords.length - 1].x.toFixed(1) +
+                ',' +
+                baseY +
+                ' L' +
+                coords[0].x.toFixed(1) +
+                ',' +
+                baseY +
+                ' Z'
+              : '';
+
+          let dotsHtml = '';
+          if (coords.length <= 55) {
+            const r = coords.length <= 25 ? '2.6' : '1.8';
+            for (const c of coords) {
+              dotsHtml +=
+                '<circle cx="' +
+                c.x.toFixed(1) +
+                '" cy="' +
+                c.y.toFixed(1) +
+                '" r="' +
+                r +
+                '" fill="' +
+                color +
+                '" />';
+            }
+          } else {
+            const lastC = coords[coords.length - 1];
+            dotsHtml +=
+              '<circle cx="' +
+              lastC.x.toFixed(1) +
+              '" cy="' +
+              lastC.y.toFixed(1) +
+              '" r="2.8" fill="' +
+              color +
+              '" />';
+          }
+
+          const svgHtml =
+            '<svg class="benchmark-chart" viewBox="0 0 ' +
+            W +
+            ' ' +
+            H +
+            '" role="img" aria-label="' +
+            esc(opts.ariaLabel || field) +
+            '">' +
+            gridHtml +
+            refHtml +
+            (areaD ? '<path d="' + areaD + '" fill="' + color + '" fill-opacity="0.09" />' : '') +
+            '<path d="' +
+            pathD +
+            '" fill="none" stroke="' +
+            color +
+            '" stroke-width="1.85" stroke-linejoin="round" stroke-linecap="round" />' +
+            dotsHtml +
+            xAxisHtml +
+            '<line class="hover-line" x1="0" y1="' +
+            padT +
+            '" x2="0" y2="' +
+            (padT + plotH) +
+            '" stroke="#0F172A" stroke-width="1" stroke-dasharray="2 2" visibility="hidden" />' +
+            '<circle class="hover-dot" cx="0" cy="0" r="4.5" fill="' +
+            color +
+            '" stroke="#FFFFFF" stroke-width="2" visibility="hidden" />' +
+            '</svg>';
+
+          return {
+            svgHtml,
+            coords,
+            geom: { W, H, padL, padR, padT, padB, plotW, plotH },
+          };
+        }
+
+        // Tooltip & Synchronized Crosshair Binding
+        const tooltipEl = document.getElementById('bench-tooltip');
+
+        function positionTooltip(clientX, clientY) {
+          if (!tooltipEl) return;
+          const pad = 14;
+          const rect = tooltipEl.getBoundingClientRect();
+          let left = clientX + pad;
+          let top = clientY + pad;
+          if (left + rect.width > window.innerWidth - 12) {
+            left = Math.max(12, clientX - rect.width - pad);
+          }
+          if (top + rect.height > window.innerHeight - 12) {
+            top = Math.max(12, clientY - rect.height - pad);
+          }
+          tooltipEl.style.left = left + 'px';
+          tooltipEl.style.top = top + 'px';
+        }
+
+        function bindSyncedSuiteCharts(cardEl, suite, durChart, cntChart) {
+          const panels = [
+            { wrap: cardEl.querySelector('[data-chart="duration"]'), chart: durChart },
+            { wrap: cardEl.querySelector('[data-chart="count"]'), chart: cntChart },
+          ];
+
+          function showAtRunMs(targetRunMs, clientX, clientY, sourceChart) {
+            let chosenPt = null;
+            for (const p of panels) {
+              if (!p.wrap || !p.chart.coords || !p.chart.coords.length) continue;
+              const svg = p.wrap.querySelector('svg');
+              const hLine = svg && svg.querySelector('.hover-line');
+              const hDot = svg && svg.querySelector('.hover-dot');
+              if (!hLine || !hDot) continue;
+
+              // Nearest point by runMs
+              let best = p.chart.coords[0];
+              let bestDiff = Math.abs(best.d.pt.runMs - targetRunMs);
+              for (let i = 1; i < p.chart.coords.length; i++) {
+                const diff = Math.abs(p.chart.coords[i].d.pt.runMs - targetRunMs);
+                if (diff < bestDiff) {
+                  best = p.chart.coords[i];
+                  bestDiff = diff;
+                }
+              }
+              if (p.chart === sourceChart || !chosenPt) chosenPt = best.d.pt;
+
+              hLine.setAttribute('x1', best.x.toFixed(1));
+              hLine.setAttribute('x2', best.x.toFixed(1));
+              hLine.setAttribute('visibility', 'visible');
+              hDot.setAttribute('cx', best.x.toFixed(1));
+              hDot.setAttribute('cy', best.y.toFixed(1));
+              hDot.setAttribute('visibility', 'visible');
+            }
+
+            if (chosenPt && tooltipEl) {
+              const c = chosenPt.commit || {};
+              const sha = (c.id || '').slice(0, 7) || 'unknown';
+              const firstLine = String(c.message || '').split('\n')[0].slice(0, 90);
+              const author = (c.committer && c.committer.username) || (c.author && c.author.username) || '';
+              // The 7-day median is the one of the newest point, so only that point is compared with it.
+              const vsMed =
+                chosenPt === suite.latest && chosenPt.duration != null && suite.median7d
+                  ? (((chosenPt.duration - suite.median7d) / suite.median7d) * 100).toFixed(1) + '%'
+                  : null;
+
+              tooltipEl.innerHTML =
+                '<div class="tt-head"><span>' +
+                esc(suite.key) +
+                '</span><span style="color:#94A3B8;font-family:var(--mono);font-size:11px">' +
+                esc(formatUtcShort(chosenPt.runMs)) +
+                '</span></div>' +
+                (chosenPt.duration != null
+                  ? '<div class="tt-row"><span class="k">Duration</span><span class="v">' +
+                    esc(formatDurationHuman(chosenPt.duration)) +
+                    ' (' +
+                    esc(chosenPt.duration.toFixed(1)) +
+                    's' +
+                    (vsMed ? ', ' + ( Number(vsMed.replace('%','')) > 0 ? '+' : '') + vsMed + ' vs 7d med' : '') +
+                    ')</span></div>'
+                  : '') +
+                (chosenPt.count != null
+                  ? '<div class="tt-row"><span class="k">Tests</span><span class="v">' +
+                    esc(chosenPt.count) +
+                    ' tests</span></div>'
+                  : '') +
+                '<div class="tt-commit"><strong style="font-family:var(--mono);color:#F8FAFC">' +
+                esc(sha) +
+                '</strong>' +
+                (author ? ' by @' + esc(author) : '') +
+                '<br/>' +
+                esc(firstLine) +
+                '<div class="tt-hint">Click point to open commit on GitHub &#8599;</div></div>';
+
+              tooltipEl.style.display = 'block';
+              positionTooltip(clientX, clientY);
+            }
+          }
+
+          function hideAll() {
+            for (const p of panels) {
+              if (!p.wrap) continue;
+              const svg = p.wrap.querySelector('svg');
+              if (!svg) continue;
+              const hLine = svg.querySelector('.hover-line');
+              const hDot = svg.querySelector('.hover-dot');
+              if (hLine) hLine.setAttribute('visibility', 'hidden');
+              if (hDot) hDot.setAttribute('visibility', 'hidden');
+            }
+            if (tooltipEl) tooltipEl.style.display = 'none';
+          }
+
+          for (const p of panels) {
+            if (!p.wrap || !p.chart.coords || !p.chart.coords.length || !p.chart.geom) continue;
+            const svg = p.wrap.querySelector('svg');
+            if (!svg) continue;
+
+            // The point nearest to the mouse along x, and whether the mouse is on that point (within 12 units of it).
+            function pickNearestFromEvent(ev) {
+              const rect = svg.getBoundingClientRect();
+              if (!rect.width) return null;
+              const svgX = ((ev.clientX - rect.left) / rect.width) * p.chart.geom.W;
+              const svgY = ((ev.clientY - rect.top) / rect.height) * p.chart.geom.H;
+              let best = p.chart.coords[0];
+              let bestDist = Math.abs(best.x - svgX);
+              for (let i = 1; i < p.chart.coords.length; i++) {
+                const dist = Math.abs(p.chart.coords[i].x - svgX);
+                if (dist < bestDist) {
+                  best = p.chart.coords[i];
+                  bestDist = dist;
+                }
+              }
+              return { pt: best.d.pt, onPoint: bestDist <= 12 && Math.abs(best.y - svgY) <= 12 };
+            }
+
+            svg.addEventListener('mousemove', ev => {
+              const hit = pickNearestFromEvent(ev);
+              if (!hit) return;
+              showAtRunMs(hit.pt.runMs, ev.clientX, ev.clientY, p.chart);
+              svg.style.cursor = hit.onPoint ? 'pointer' : 'crosshair';
+            });
+
+            svg.addEventListener('mouseleave', hideAll);
+
+            // Only a click on a point opens its commit. A click anywhere else on the chart would open tabs by accident.
+            svg.addEventListener('click', ev => {
+              const hit = pickNearestFromEvent(ev);
+              if (hit && hit.onPoint && hit.pt.commit && hit.pt.commit.url) {
+                window.open(hit.pt.commit.url, '_blank', 'noopener');
+              }
+            });
+          }
+        }
+
+        function renderSuiteCardElement(suite, newestMs) {
+          const pts = windowPoints(suite, newestMs, state.rangeDays);
+          const durs = pts.filter(p => p.duration != null).map(p => p.duration);
+          const minDur = durs.length ? Math.min(...durs) : null;
+          const maxDur = durs.length ? Math.max(...durs) : null;
+
+          const durChart = buildSvgChart({
+            points: pts,
+            field: 'duration',
+            color: suite.color,
+            yScaleMode: state.yScale,
+            medianRef: suite.median7d,
+            alertRef: !suite.archived && suite.median7d ? suite.median7d * ALERT_RATIO : null,
+            unit: 'sec',
+            isStep: false,
+            ariaLabel: 'Total ' + suite.key + ' Tests Duration',
+          });
+
+          const cntChart = buildSvgChart({
+            points: pts,
+            field: 'count',
+            color: suite.archived ? '#64748B' : '#0284C7',
+            yScaleMode: state.yScale,
+            medianRef: null,
+            alertRef: null,
+            unit: 'count',
+            isStep: true,
+            ariaLabel: 'Total ' + suite.key + ' Tests Count',
+          });
+
+          const lastSha = suite.latest && suite.latest.commit && suite.latest.commit.id
+            ? suite.latest.commit.id.slice(0, 7)
+            : '';
+          const lastUrl = suite.latest && suite.latest.commit && suite.latest.commit.url
+            ? suite.latest.commit.url
+            : '';
+
+          const card = document.createElement('article');
+          card.className = 'suite-card';
+          card.id = 'suite-card-' + suite.key.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+
+          card.innerHTML =
+            '<div class="suite-card-head">' +
+              '<div>' +
+                '<div class="suite-card-title">' +
+                  '<span class="hw-dot" style="background:' + suite.color + '"></span>' +
+                  '<h3>' + esc(suite.key) + '</h3>' +
+                  '<span class="runner-tag">' + esc(suite.device) + ' &middot; ' + esc(suite.runner) + '</span>' +
+                  (suite.archived
+                    ? '<span class="archived-pill">Archived &middot; ' +
+                      esc(formatDateShort(suite.firstMs)) +
+                      ' &ndash; ' +
+                      esc(formatDateShort(suite.lastMs)) +
+                      '</span>'
+                    : deltaChipHtml(suite.deltaPct)) +
+                '</div>' +
+                '<div class="suite-card-sub">' + esc(suite.stage) + '</div>' +
+              '</div>' +
+              '<div class="suite-stats-row">' +
+                '<span class="stat-kv"><span class="k">Latest:</span><b class="v">' +
+                  esc(formatDurationHuman(suite.latestDuration)) +
+                '</b> <span class="k">(' + esc(formatSecCompact(suite.latestDuration)) + ')</span></span>' +
+                (minDur != null
+                  ? '<span class="stat-kv"><span class="k">Window:</span><b class="v">' +
+                    esc(formatDurationHuman(minDur)) +
+                    ' &ndash; ' +
+                    esc(formatDurationHuman(maxDur)) +
+                    '</b></span>'
+                  : '') +
+                '<span class="stat-kv"><span class="k">Tests:</span><b class="v">' +
+                  (suite.latestCount != null ? esc(suite.latestCount) : '—') +
+                '</b></span>' +
+                (lastSha
+                  ? '<span class="stat-kv"><span class="k">Commit:</span>' +
+                    (lastUrl
+                      ? '<a class="runner-tag" href="' + esc(lastUrl) + '" target="_blank" rel="noopener">' + esc(lastSha) + '</a>'
+                      : '<span class="runner-tag">' + esc(lastSha) + '</span>') +
+                    '</span>'
+                  : '') +
+              '</div>' +
+            '</div>' +
+            '<div class="suite-charts-grid">' +
+              '<div class="chart-panel">' +
+                '<div class="chart-panel-head">' +
+                  '<span class="chart-panel-title">Total ' + esc(suite.key) + ' Tests Duration (sec)</span>' +
+                  '<span class="chart-panel-legend">' +
+                    (suite.median7d != null
+                      ? '<span><i class="legend-line"></i>7d med ' + esc(formatDurationHuman(suite.median7d)) + '</span>'
+                      : '') +
+                    (!suite.archived && suite.median7d != null
+                      ? '<span><i class="legend-line alert"></i>115% of 7d med</span>'
+                      : '') +
+                  '</span>' +
+                '</div>' +
+                '<div class="svg-chart-wrap" data-chart="duration">' + durChart.svgHtml + '</div>' +
+              '</div>' +
+              '<div class="chart-panel">' +
+                '<div class="chart-panel-head">' +
+                  '<span class="chart-panel-title">Total ' + esc(suite.key) + ' Tests Count</span>' +
+                  '<span class="chart-panel-legend">' + esc(pts.length) + ' runs</span>' +
+                '</div>' +
+                '<div class="svg-chart-wrap" data-chart="count">' + cntChart.svgHtml + '</div>' +
+              '</div>' +
+            '</div>';
+
+          bindSyncedSuiteCharts(card, suite, durChart, cntChart);
+          return card;
+        }
+
+        function init() {
+          const data = window.BENCHMARK_DATA || { lastUpdate: 0, repoUrl: '', entries: {} };
 
           // Render header
-          document.getElementById('last-update').textContent = new Date(data.lastUpdate).toString();
-          const repoLink = document.getElementById('repository-link');
-          repoLink.href = data.repoUrl;
-          repoLink.textContent = data.repoUrl;
+          const luEl = document.getElementById('last-update');
+          if (luEl) {
+            luEl.textContent = data.lastUpdate ? formatUtcShort(data.lastUpdate) : '—';
+            if (data.lastUpdate) luEl.title = new Date(data.lastUpdate).toUTCString();
+          }
 
-          // Render footer
-          document.getElementById('dl-button').onclick = () => {
-            const dataUrl = 'data:,' + JSON.stringify(data, null, 2);
-            const a = document.createElement('a');
-            a.href = dataUrl;
-            a.download = 'benchmark_data.json';
-            a.click();
+          const repoLink = document.getElementById('repository-link');
+          if (repoLink && data.repoUrl) {
+            repoLink.href = data.repoUrl;
+            repoLink.textContent = data.repoUrl.replace(/^https?:\/\/github\.com\//, '');
+            repoLink.title = data.repoUrl;
+          }
+
+          // Render footer JSON download
+          const dlBtn = document.getElementById('dl-button');
+          if (dlBtn) {
+            dlBtn.onclick = () => {
+              const jsonText = JSON.stringify(data, null, 2);
+              if (typeof Blob === 'function' && window.URL && typeof URL.createObjectURL === 'function') {
+                const blob = new Blob([jsonText], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'benchmark_data.json';
+                a.click();
+                setTimeout(() => URL.revokeObjectURL(url), 1000);
+              } else {
+                const a = document.createElement('a');
+                a.href = 'data:,' + jsonText;
+                a.download = 'benchmark_data.json';
+                a.click();
+              }
+            };
+          }
+
+          const model = parseDataset(data);
+          const dot = document.querySelector('.brand-dot');
+          if (dot && Date.now() - model.newestMs > FRESH_MS) dot.style.background = 'var(--warn)';
+          return model;
+        }
+
+        function matchesFilters(suite) {
+          if (state.hwFilter === 'active' && suite.archived) return false;
+          if (state.hwFilter === 'archived' && !suite.archived) return false;
+          if (state.hwFilter === 'tpu' && (suite.archived || suite.hw !== 'tpu')) return false;
+          if (state.hwFilter === 'tpu7x' && (suite.archived || suite.hw !== 'tpu7x')) return false;
+          if (state.hwFilter === 'gpu' && (suite.archived || suite.hw !== 'gpu')) return false;
+
+          if (state.search) {
+            const q = state.search.toLowerCase();
+            const hay = (suite.key + ' ' + suite.device + ' ' + suite.runner + ' ' + suite.stage).toLowerCase();
+            if (!hay.includes(q)) return false;
+          }
+          return true;
+        }
+
+        function renderDashboard(model) {
+          const main = document.getElementById('main');
+          if (!main) return;
+          if (tooltipEl) tooltipEl.style.display = 'none';
+
+          const { suites, newestMs } = model;
+          const activeSuites = suites.filter(s => !s.archived);
+          const archivedSuites = suites.filter(s => s.archived);
+
+          const countsByHw = {
+            active: activeSuites.length,
+            tpu: activeSuites.filter(s => s.hw === 'tpu').length,
+            tpu7x: activeSuites.filter(s => s.hw === 'tpu7x').length,
+            gpu: activeSuites.filter(s => s.hw === 'gpu').length,
+            archived: archivedSuites.length,
           };
 
-          // Prepare data points for charts
-          return Object.keys(data.entries).map(name => ({
-            name,
-            dataSet: collectBenchesPerTestCase(data.entries[name]),
-          }));
+          const filteredSuites = suites.filter(matchesFilters);
+
+          // KPI metrics computed over active suites (or filtered active suites)
+          const kpiPool = state.hwFilter === 'archived' ? archivedSuites : activeSuites;
+          const totalLatestSec = kpiPool.reduce((acc, s) => acc + (s.latestDuration || 0), 0);
+          const totalMed7dSec = kpiPool.reduce((acc, s) => acc + (s.median7d || s.latestDuration || 0), 0);
+          const totalDeltaPct =
+            totalMed7dSec > 0 ? ((totalLatestSec - totalMed7dSec) / totalMed7dSec) * 100 : null;
+
+          const totalTests = kpiPool.reduce((acc, s) => acc + (s.latestCount || 0), 0);
+          let windowTestDelta = 0;
+          for (const s of kpiPool) {
+            const wPts = windowPoints(s, newestMs, state.rangeDays).filter(p => p.count != null);
+            if (wPts.length >= 2) {
+              windowTestDelta += wPts[wPts.length - 1].count - wPts[0].count;
+            }
+          }
+
+          const overAlert = activeSuites.filter(s => s.deltaPct != null && s.deltaPct >= 15);
+          const nearAlert = activeSuites.filter(s => s.deltaPct != null && s.deltaPct >= 8 && s.deltaPct < 15);
+
+          main.innerHTML = '';
+
+          // 1. Hero & Filter Toolbar Card
+          const heroCard = document.createElement('section');
+          heroCard.className = 'b-card benchmark-set';
+          heroCard.innerHTML =
+            '<div class="hero-top">' +
+              '<div class="hero-title-group">' +
+                '<h1>MaxText Test Execution Times ' +
+                  '<button type="button" class="guide-btn" id="guide-toggle-btn">' +
+                    (state.guideOpen ? 'Hide guide' : 'How to read') +
+                  '</button>' +
+                '</h1>' +
+                '<p class="hero-subtitle">' +
+                  'Suite-level execution durations (summed across pytest shards) and test counts (skipped and failed tests included) from 4-hourly scheduled runs on <code>main</code>.' +
+                '</p>' +
+              '</div>' +
+            '</div>' +
+            '<div class="guide-box" id="bench-guide"' + (state.guideOpen ? '' : ' hidden') + '>' +
+              '<strong>CI/CD Pipeline &amp; Benchmark Rules</strong>' +
+              '<ul>' +
+                '<li><strong>Source:</strong> Scheduled runs of <code>ci_pipeline.yml</code> (every 4 hours on <code>main</code>) execute sharded suites via <code>run_tests_coordinator.yml</code> and aggregate JUnit XML artifacts in <code>tools/dev/process_test_results.py</code>.</li>' +
+                '<li><strong>Duration &amp; Thresholds:</strong> Summed test execution seconds across all worker shards of each flavor (<code>customSmallerIsBetter</code>). CI comments on the commit when a suite takes more than <strong>115%</strong> of the previous recorded result. The red dashed line on the charts is a different reference: 115% of the 7-day median. PR runs also enforce per-test (+20% &amp; +15s/+30s) and like-for-like suite growth (&gt;1.20x &amp; +300s) checks.</li>' +
+                '<li><strong>Why CPU &amp; Decoupled are Archived:</strong> CPU runner noise caused false alerts, so <code>CPU-*</code> flavors (since Aug 4) and <code>DECOUPLED</code> (since Oct 15) are left out of <code>data.js</code>. The <code>CPU-TORCH-REFERENCE</code> flavor was removed on Jul 30. CPU flavors that still run are still timed in <code>per_test_baseline.json</code>.</li>' +
+                '<li><strong>Commit on a point:</strong> the head of <code>main</code> when the result was recorded. It can be newer than the commit that run tested.</li>' +
+              '</ul>' +
+            '</div>' +
+            '<div class="toolbar-row">' +
+              '<div class="seg-group" role="group" aria-label="Time window">' +
+                [
+                  { d: 7, label: '7d' },
+                  { d: 14, label: '14d' },
+                  { d: 30, label: '30d' },
+                  { d: 90, label: '90d' },
+                  { d: 0, label: 'All' },
+                ]
+                  .map(
+                    opt =>
+                      '<button type="button" class="seg-btn' +
+                      (state.rangeDays === opt.d ? ' active' : '') +
+                      '" data-range="' +
+                      opt.d +
+                      '">' +
+                      opt.label +
+                      '</button>'
+                  )
+                  .join('') +
+              '</div>' +
+              '<div class="seg-group" role="group" aria-label="Y-axis scale">' +
+                '<button type="button" class="seg-btn' +
+                  (state.yScale === 'zero' ? ' active' : '') +
+                  '" data-yscale="zero" title="Anchor Y-axis at 0">Y: 0-Base</button>' +
+                '<button type="button" class="seg-btn' +
+                  (state.yScale === 'fit' ? ' active' : '') +
+                  '" data-yscale="fit" title="Zoom Y-axis to data range">Y: Fit</button>' +
+              '</div>' +
+              '<span class="toolbar-divider" aria-hidden="true"></span>' +
+              '<div class="hw-chips" role="group" aria-label="Hardware filter">' +
+                '<button type="button" class="fchip' + (state.hwFilter === 'active' ? ' on' : '') + '" data-hw="active">All Active <span class="count-pill">' + countsByHw.active + '</span></button>' +
+                '<button type="button" class="fchip' + (state.hwFilter === 'tpu' ? ' on' : '') + '" data-hw="tpu"><span class="hw-dot" style="background:#2563EB"></span>TPU v6e <span class="count-pill">' + countsByHw.tpu + '</span></button>' +
+                '<button type="button" class="fchip' + (state.hwFilter === 'tpu7x' ? ' on' : '') + '" data-hw="tpu7x"><span class="hw-dot" style="background:#0D9488"></span>TPU 7x <span class="count-pill">' + countsByHw.tpu7x + '</span></button>' +
+                '<button type="button" class="fchip' + (state.hwFilter === 'gpu' ? ' on' : '') + '" data-hw="gpu"><span class="hw-dot" style="background:#EA580C"></span>GPU A100 <span class="count-pill">' + countsByHw.gpu + '</span></button>' +
+                (countsByHw.archived > 0
+                  ? '<button type="button" class="fchip' + (state.hwFilter === 'archived' ? ' on' : '') + '" data-hw="archived"><span class="hw-dot" style="background:#64748B"></span>Archived <span class="count-pill">' + countsByHw.archived + '</span></button>'
+                  : '') +
+              '</div>' +
+              '<div class="search-wrap">' +
+                '<input type="search" id="bench-search" class="search-input" placeholder="Filter suite or runner…" value="' + esc(state.search) + '" aria-label="Filter suites" />' +
+              '</div>' +
+            '</div>';
+          main.appendChild(heroCard);
+
+          // 2. KPI Summary Row
+          const kpiRow = document.createElement('section');
+          kpiRow.className = 'kpi-grid';
+          kpiRow.innerHTML =
+            '<div class="kpi-tile">' +
+              '<div class="kpi-label">Active Accelerator Suites</div>' +
+              '<div class="kpi-value-row">' +
+                '<span class="kpi-value">' + countsByHw.active + '</span>' +
+                '<span class="delta-chip ' + (Date.now() - newestMs <= FRESH_MS ? 'delta-good' : 'delta-warn') + '">' + esc(freshnessText(newestMs)) + '</span>' +
+              '</div>' +
+              '<div class="kpi-sub">' +
+                countsByHw.tpu + ' TPU v6e &middot; ' + countsByHw.tpu7x + ' TPU 7x &middot; ' + countsByHw.gpu + ' GPU A100' +
+              '</div>' +
+            '</div>' +
+            '<div class="kpi-tile">' +
+              '<div class="kpi-label">' + (state.hwFilter === 'archived' ? 'Archived Last Total Time' : 'Total Latest Test Time') + '</div>' +
+              '<div class="kpi-value-row">' +
+                '<span class="kpi-value">' + esc(formatDurationHuman(totalLatestSec)) + '</span>' +
+                deltaChipHtml(totalDeltaPct) +
+              '</div>' +
+              '<div class="kpi-sub">' + esc(formatSecCompact(totalLatestSec)) + ' summed across ' + kpiPool.length + ' suites (vs 7d med)</div>' +
+            '</div>' +
+            '<div class="kpi-tile">' +
+              '<div class="kpi-label">Tracked Tests</div>' +
+              '<div class="kpi-value-row">' +
+                '<span class="kpi-value">' + totalTests.toLocaleString('en-US') + '</span>' +
+                '<span class="delta-chip delta-flat">' +
+                  (windowTestDelta > 0 ? '+' + windowTestDelta : windowTestDelta < 0 ? String(windowTestDelta) : '0') +
+                  ' vs ' + (state.rangeDays > 0 ? state.rangeDays + 'd' : 'start') +
+                '</span>' +
+              '</div>' +
+              '<div class="kpi-sub">Across ' + kpiPool.length + ' ' + (state.hwFilter === 'archived' ? 'archived' : 'active') + ' suites</div>' +
+            '</div>' +
+            '<div class="kpi-tile">' +
+              '<div class="kpi-label">Over 115% of 7-Day Median</div>' +
+              '<div class="kpi-value-row">' +
+                '<span class="kpi-value">' +
+                  (overAlert.length === 0 ? 'None' : overAlert.length + ' Over') +
+                '</span>' +
+                '<span class="delta-chip ' +
+                  (overAlert.length > 0 ? 'delta-crit' : nearAlert.length > 0 ? 'delta-warn' : 'delta-good') +
+                '">' +
+                  (overAlert.length > 0
+                    ? overAlert[0].key
+                    : nearAlert.length > 0
+                      ? nearAlert.length + ' near (+8%)'
+                      : '0 over') +
+                '</span>' +
+              '</div>' +
+              '<div class="kpi-sub">Compared against 7-day rolling suite median</div>' +
+            '</div>';
+          main.appendChild(kpiRow);
+
+          // 3. Suite Overview Table
+          const sortedTableSuites = filteredSuites.slice().sort((a, b) => {
+            const dir = state.sortDir;
+            switch (state.sortCol) {
+              case 'suite':
+                return dir * a.key.localeCompare(b.key);
+              case 'duration':
+                return dir * ((a.latestDuration || 0) - (b.latestDuration || 0));
+              case 'delta':
+                return dir * ((a.deltaPct == null ? -999 : a.deltaPct) - (b.deltaPct == null ? -999 : b.deltaPct));
+              case 'tests':
+                return dir * ((a.latestCount || 0) - (b.latestCount || 0));
+              case 'updated':
+                return dir * (a.lastMs - b.lastMs);
+              default:
+                return dir * (a.order - b.order || a.key.localeCompare(b.key));
+            }
+          });
+
+          function sortArrow(col) {
+            if (state.sortCol !== col) return '';
+            return state.sortDir > 0 ? ' &#9652;' : ' &#9662;';
+          }
+
+          const tableCard = document.createElement('section');
+          tableCard.className = 'b-card';
+          tableCard.innerHTML =
+            '<div class="section-head">' +
+              '<h2>Suite Summary (' + sortedTableSuites.length + ')</h2>' +
+              '<span class="section-note">Click any row to jump to its charts &middot; Click column headers to sort</span>' +
+            '</div>' +
+            (sortedTableSuites.length === 0
+              ? '<div class="empty-state">No benchmark suites match your current filter.</div>'
+              : '<div class="table-scroll">' +
+                  '<table class="suite-table">' +
+                    '<thead>' +
+                      '<tr>' +
+                        '<th data-sort="suite">Suite' + sortArrow('suite') + '</th>' +
+                        '<th data-sort="order">Device &amp; Runner' + sortArrow('order') + '</th>' +
+                        '<th class="num" data-sort="duration">Latest Duration' + sortArrow('duration') + '</th>' +
+                        '<th class="num" data-sort="delta">vs. 7d Median' + sortArrow('delta') + '</th>' +
+                        '<th class="num">Window Min &ndash; Max</th>' +
+                        '<th class="num" data-sort="tests">Tests' + sortArrow('tests') + '</th>' +
+                        '<th class="num" data-sort="updated">Latest Run' + sortArrow('updated') + '</th>' +
+                      '</tr>' +
+                    '</thead>' +
+                    '<tbody>' +
+                      sortedTableSuites
+                        .map(s => {
+                          const wPts = windowPoints(s, newestMs, state.rangeDays);
+                          const durs = wPts.filter(p => p.duration != null).map(p => p.duration);
+                          const minD = durs.length ? Math.min(...durs) : null;
+                          const maxD = durs.length ? Math.max(...durs) : null;
+                          const cardId = 'suite-card-' + s.key.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+                          const sha = s.latest && s.latest.commit && s.latest.commit.id ? s.latest.commit.id.slice(0, 7) : '';
+                          const shaUrl = s.latest && s.latest.commit && s.latest.commit.url ? s.latest.commit.url : '';
+                          const shortRunner = s.runner.replace(/^linux-x86-/, '');
+                          const shortRunTime = s.lastMs ? new Date(s.lastMs).toISOString().slice(5, 16).replace('T', ' ') : '—';
+                          return (
+                            '<tr data-jump="' + esc(cardId) + '">' +
+                              '<td><div class="suite-name-cell"><span class="hw-dot" style="background:' + s.color + '"></span><span>' + esc(s.key) + '</span>' +
+                              (s.archived ? '<span class="archived-pill">Archived</span>' : '') +
+                              '</div></td>' +
+                              '<td><span class="runner-tag" title="' + esc(s.device + ' · ' + s.runner) + '">' + esc(s.device) + ' &middot; ' + esc(shortRunner) + '</span></td>' +
+                              '<td class="num"><strong>' + esc(formatDurationHuman(s.latestDuration)) + '</strong> <span style="color:var(--muted)">(' + esc(formatSecCompact(s.latestDuration)) + ')</span></td>' +
+                              '<td class="num">' + (s.archived ? '<span class="archived-pill">Stopped ' + esc(formatDateShort(s.lastMs)) + '</span>' : deltaChipHtml(s.deltaPct)) + '</td>' +
+                              '<td class="num" style="color:var(--ink2)">' + (minD != null ? esc(formatDurationHuman(minD)) + ' &ndash; ' + esc(formatDurationHuman(maxD)) : '—') + '</td>' +
+                              '<td class="num">' + (s.latestCount != null ? s.latestCount : '—') + '</td>' +
+                              '<td class="num" style="color:var(--muted)">' +
+                                esc(shortRunTime) +
+                                (sha
+                                  ? ' &middot; ' +
+                                    (shaUrl
+                                      ? '<a class="commit-inline-link" href="' + esc(shaUrl) + '" target="_blank" rel="noopener">' + esc(sha) + '</a>'
+                                      : esc(sha))
+                                  : '') +
+                              '</td>' +
+                            '</tr>'
+                          );
+                        })
+                        .join('') +
+                    '</tbody>' +
+                  '</table>' +
+                '</div>');
+          main.appendChild(tableCard);
+
+          // 4. Grouped Suite Chart Cards
+          const activeFiltered = filteredSuites.filter(s => !s.archived);
+          for (const grp of HW_GROUPS) {
+            const groupSuites = activeFiltered.filter(s => s.hw === grp.key);
+            if (!groupSuites.length) continue;
+
+            const sec = document.createElement('section');
+            sec.className = 'hw-section benchmark-graphs';
+            sec.innerHTML =
+              '<div class="hw-section-header">' +
+                '<span class="hw-dot" style="background:' + grp.color + ';width:10px;height:10px"></span>' +
+                '<h2>' + esc(grp.sectionTitle) + '</h2>' +
+                '<span class="hw-section-meta">' + esc(grp.meta) + '</span>' +
+              '</div>';
+            for (const s of groupSuites) {
+              sec.appendChild(renderSuiteCardElement(s, newestMs));
+            }
+            main.appendChild(sec);
+          }
+
+          // 5. Archived / Legacy Suites (either directly shown when filter==='archived', or collapsed at bottom of 'active' when unsearched)
+          const archivedToShow =
+            state.hwFilter === 'archived'
+              ? filteredSuites.filter(s => s.archived)
+              : state.hwFilter === 'active'
+                ? archivedSuites.filter(s =>
+                    !state.search ||
+                    (s.key + ' ' + s.device + ' ' + s.runner + ' ' + s.stage)
+                      .toLowerCase()
+                      .includes(state.search.toLowerCase())
+                  )
+                : [];
+
+          if (archivedToShow.length > 0) {
+            const details = document.createElement('details');
+            details.className = 'archived-details';
+            if (state.hwFilter === 'archived' || state.search) details.open = true;
+
+            details.innerHTML =
+              '<summary>' +
+                '<span>Archived / Legacy CPU &amp; Decoupled Series (' + archivedToShow.length + ')</span>' +
+                '<span class="archived-pill">Historical data preserved &middot; Click to expand</span>' +
+              '</summary>' +
+              '<div class="archived-banner">' +
+                'These suites were excluded from macro benchmark charts in <code>tools/dev/process_test_results.py</code> ' +
+                '(<code>CPU-*</code> after Jul 31, 2026; <code>DECOUPLED</code> after Oct 15, 2026) because of CPU runner noise; the <code>CPU-TORCH-REFERENCE</code> flavor was removed on Jul 30. ' +
+                'CPU flavors that still run are still timed in <code>per_test_baseline.json</code>. A time window (7d, 30d, ...) on these charts counts back from the last point of each series.' +
+              '</div>' +
+              '<div class="archived-stack"></div>';
+
+            const stack = details.querySelector('.archived-stack');
+            for (const s of archivedToShow) {
+              stack.appendChild(renderSuiteCardElement(s, newestMs));
+            }
+            main.appendChild(details);
+          }
+
+          // Wire interactive toolbar & table events
+          const guideBtn = document.getElementById('guide-toggle-btn');
+          if (guideBtn) {
+            guideBtn.addEventListener('click', () => {
+              state.guideOpen = !state.guideOpen;
+              const box = document.getElementById('bench-guide');
+              if (box) box.hidden = !state.guideOpen;
+              guideBtn.textContent = state.guideOpen ? 'Hide guide' : 'How to read';
+            });
+          }
+
+          main.querySelectorAll('[data-range]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              state.rangeDays = Number(btn.dataset.range);
+              renderDashboard(model);
+            });
+          });
+
+          main.querySelectorAll('[data-yscale]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              state.yScale = btn.dataset.yscale;
+              renderDashboard(model);
+            });
+          });
+
+          main.querySelectorAll('[data-hw]').forEach(btn => {
+            btn.addEventListener('click', () => {
+              state.hwFilter = btn.dataset.hw;
+              renderDashboard(model);
+            });
+          });
+
+          const searchEl = document.getElementById('bench-search');
+          if (searchEl) {
+            searchEl.addEventListener('input', () => {
+              const pos = searchEl.selectionStart;
+              state.search = searchEl.value;
+              renderDashboard(model);
+              const nextEl = document.getElementById('bench-search');
+              if (nextEl) {
+                nextEl.focus();
+                try {
+                  nextEl.setSelectionRange(pos, pos);
+                } catch (_e) {}
+              }
+            });
+          }
+
+          main.querySelectorAll('th[data-sort]').forEach(th => {
+            th.addEventListener('click', () => {
+              const col = th.dataset.sort;
+              if (state.sortCol === col) {
+                state.sortDir = -state.sortDir;
+              } else {
+                state.sortCol = col;
+                state.sortDir = col === 'duration' || col === 'delta' || col === 'tests' || col === 'updated' ? -1 : 1;
+              }
+              renderDashboard(model);
+            });
+          });
+
+          main.querySelectorAll('tr[data-jump]').forEach(row => {
+            row.addEventListener('click', ev => {
+              if (ev.target && ev.target.closest('a')) return;
+              const target = document.getElementById(row.dataset.jump);
+              if (target) {
+                const parentDetails = target.closest('details');
+                if (parentDetails) parentDetails.open = true;
+                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                target.classList.add('flash-target');
+                setTimeout(() => target.classList.remove('flash-target'), 1400);
+              }
+            });
+          });
         }
 
         // The CI Pulse pane is an iframe. A display:none iframe still downloads its
@@ -250,8 +2284,7 @@
         function measureChrome() {
           const header = document.getElementById('header');
           if (!header) return;
-          // 8px body margin above, 8px header margin below, 8px body margin under.
-          const chrome = header.getBoundingClientRect().height + 24;
+          const chrome = header.getBoundingClientRect().height + 2;
           document.documentElement.style.setProperty('--ci-chrome', chrome + 'px');
         }
 
@@ -266,6 +2299,10 @@
           buttons.forEach(button => {
             button.classList.toggle('active', button.dataset.view === viewName);
           });
+
+          // CI Pulse has a header of its own (title, repository, when its data was collected), so on that tab the
+          // outer header keeps only the tab buttons.
+          document.body.classList.toggle('view-ci', viewName === 'ci');
 
           if (viewName === 'ci') {
             measureChrome();
@@ -291,116 +2328,11 @@
         }
         measureChrome();
 
-        function renderAllChars(dataSets) {
-
-          function renderGraph(parent, name, dataset) {
-            const canvas = document.createElement('canvas');
-            canvas.className = 'benchmark-chart';
-            parent.appendChild(canvas);
-
-            const color = toolColors[dataset.length > 0 ? dataset[0].tool : '_'];
-            const data = {
-              labels: dataset.map(d => new Date(d.commit.timestamp).toISOString().slice(0, 10) + ' (' + d.commit.id.slice(0, 7) + ')'),
-              datasets: [
-                {
-                  label: name,
-                  data: dataset.map(d => d.bench.value),
-                  borderColor: color,
-                  backgroundColor: color + '60', // Add alpha for #rrggbbaa
-                }
-              ],
-            };
-            const options = {
-              scales: {
-                xAxes: [
-                  {
-                    scaleLabel: {
-                      display: true,
-                      labelString: 'date (commit)',
-                    },
-                  }
-                ],
-                yAxes: [
-                  {
-                    scaleLabel: {
-                      display: true,
-                      labelString: dataset.length > 0 ? dataset[0].bench.unit : '',
-                    },
-                    ticks: {
-                      beginAtZero: true,
-                    }
-                  }
-                ],
-              },
-              tooltips: {
-                callbacks: {
-                  afterTitle: items => {
-                    const {index} = items[0];
-                    const data = dataset[index];
-                    return '\n' + data.commit.message + '\n\n' + data.commit.timestamp + ' committed by @' + data.commit.committer.username + '\n';
-                  },
-                  label: item => {
-                    let label = item.value;
-                    const { range, unit } = dataset[item.index].bench;
-                    label += ' ' + unit;
-                    if (range) {
-                      label += ' (' + range + ')';
-                    }
-                    return label;
-                  },
-                  afterLabel: item => {
-                    const { extra } = dataset[item.index].bench;
-                    return extra ? '\n' + extra : '';
-                  }
-                }
-              },
-              onClick: (_mouseEvent, activeElems) => {
-                if (activeElems.length === 0) {
-                  return;
-                }
-                // XXX: Undocumented. How can we know the index?
-                const index = activeElems[0]._index;
-                const url = dataset[index].commit.url;
-                window.open(url, '_blank');
-              },
-            };
-
-            new Chart(canvas, {
-              type: 'line',
-              data,
-              options,
-            });
-          }
-
-          function renderBenchSet(name, benchSet, main) {
-            const setElem = document.createElement('div');
-            setElem.className = 'benchmark-set';
-            main.appendChild(setElem);
-
-            const nameElem = document.createElement('h1');
-            nameElem.className = 'benchmark-title';
-            nameElem.textContent = name;
-            setElem.appendChild(nameElem);
-
-            const graphsElem = document.createElement('div');
-            graphsElem.className = 'benchmark-graphs';
-            setElem.appendChild(graphsElem);
-
-            for (const [benchName, benches] of benchSet.entries()) {
-              renderGraph(graphsElem, benchName, benches)
-            }
-          }
-
-          const main = document.getElementById('main');
-          for (const {name, dataSet} of dataSets) {
-            renderBenchSet(name, dataSet, main);
-          }
-        }
-
         // Open on whichever tab the URL asks for, so the CI Pulse tab survives a
         // reload and can be linked to.
         setActiveView(location.hash === '#ci' ? 'ci' : 'benchmarks');
-        renderAllChars(init()); // Start
+        const model = init();
+        renderDashboard(model);
       })();
     </script>
   </body>
