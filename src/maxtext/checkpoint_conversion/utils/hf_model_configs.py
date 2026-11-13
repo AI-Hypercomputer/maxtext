@@ -16,7 +16,6 @@
 This config defines the architectural configurations of the Hugging Face version of a model.
 """
 
-
 import transformers
 
 if transformers.__version__ >= "5.0.0":  # pyrefly: ignore[missing-attribute]
@@ -1214,7 +1213,7 @@ deepseek41_flash_dict = {
 
 # The mini checkpoint written by tests/utils/deepseek_v41_reference/create_mini_checkpoint.py.
 deepseek41_flash_mini_dict = {
-    **deepseek41_flash_dict,
+    **{k: v for k, v in deepseek41_flash_dict.items() if k != "quantization_config"},
     "num_hidden_layers": 14,
     "n_routed_experts": 8,
     "compress_ratios": [0, 0, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1],
@@ -1226,17 +1225,20 @@ deepseek41_flash_mini_dict = {
     "engram_layer_ids": [1, 6],
     "engram_num_embeddings": [242682, 247712],
     "engram_vocab_size": 10000,
-    "quantization_config": None,  # the mini checkpoint is unquantized
 }
 
 
 # TODO: replace with the transformers config class once DeepSeek-V4.1 is available in transformers.
 class DeepseekV41Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
+  """Hugging Face configuration for DeepSeek-V4.1 checkpoint conversion."""
+
   model_type = "deepseek_v41_text"
 
   def __init__(self, **kwargs):
     self.max_position_embeddings = kwargs.get("max_position_embeddings", 1048576)
     super().__init__(**kwargs)
+    if hasattr(self, "quantization_config") and self.quantization_config is None:
+      del self.quantization_config
 
 
 deepseek41_flash_config = DeepseekV41Config(**deepseek41_flash_dict)
