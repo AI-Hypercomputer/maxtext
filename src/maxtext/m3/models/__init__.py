@@ -76,8 +76,8 @@ MODEL_SUPPORTED_MESH_AXES: dict[str, tuple[str, ...]] = {
     "granitemoe": _FOUR_AXIS_MESH,
     "qwen3-0.6b": modeling_qwen3.m3_sharding.DEFAULT_SHARDING_AXES,
     "qwen3-vl-2b": _FOUR_AXIS_MESH,
-    "qwen3.8-flash-next": _FOUR_AXIS_MESH,
-    "qwen3.8-flash-next-mini": _FOUR_AXIS_MESH,
+    "qwen3.8-flash-next": ("data", "fsdp", "fsdp_transpose", "tensor", "tensor_sequence", "expert"),
+    "qwen3.8-flash-next-mini": ("data", "fsdp", "fsdp_transpose", "tensor", "tensor_sequence", "expert"),
 }
 MODEL_EXPLICIT_SHARDING_SUPPORT: frozenset[str] = frozenset({"qwen3-0.6b"})
 

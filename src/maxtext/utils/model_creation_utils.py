@@ -736,11 +736,13 @@ def create_model(
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
     from maxtext.m3.core import kernels as m3_kernels  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.core import moe as m3_moe  # pylint: disable=import-outside-toplevel
     from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra.named_scopes import add_named_scopes  # pylint: disable=import-outside-toplevel
 
     m3_kernels.validate_attention_config(config, mesh=mesh)
+    m3_moe.validate_moe_config(config)
     with m3_sharding.enter_mesh_scope(
         mesh if jax.sharding.get_abstract_mesh().empty else None,
         shard_mode=getattr(config, "shard_mode", "auto"),
