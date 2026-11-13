@@ -3366,9 +3366,15 @@ class RoutedMoeTest(parameterized.TestCase):
       expected_sorted_inputs = inputs_shard
       # Indices are relative to inputs_shard, and since it's already sorted, they are just arange.
       expected_sorted_indices = jnp.arange(shard_total_tokens)
-      # Local expert IDs: repeat local expert index (0, 1, ...) by its count
+      # Local expert IDs: repeat local expert index (0, 1, ...) by its count,
+      # masking unpopulated tail slots to the sentinel experts_per_shard.
       expected_sorted_experts_ids = jnp.repeat(
           jnp.arange(experts_per_shard), expected_local_group_size, total_repeat_length=shard_total_tokens
+      )
+      expected_sorted_experts_ids = jnp.where(
+          jnp.arange(shard_total_tokens) < jnp.sum(expected_local_group_size),
+          expected_sorted_experts_ids,
+          experts_per_shard,
       )
 
       self.assertTrue(
