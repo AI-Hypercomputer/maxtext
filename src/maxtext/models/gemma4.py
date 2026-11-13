@@ -84,7 +84,7 @@ class Gemma4MoE(nnx.Module):
 
     self.pre_forward_scale_2 = nnx.Param(
         jnp.ones((self.config.emb_dim,), dtype=self.config.weight_dtype),
-        sharding=("embed",),
+        sharding=("norm",),
     )
     self.pre_feedforward_layernorm_2 = RMSNorm(
         num_features=self.config.emb_dim,
@@ -145,8 +145,8 @@ class Gemma4MoE(nnx.Module):
     root_size = self.config.emb_dim**-0.5
     router_scale = jnp.asarray(self.pre_forward_scale_2.value, gate_dtype)
     if self.config.shard_mode == ShardMode.EXPLICIT:
-      # The router scale is declared "embed" but multiplies an activation whose last axis is
-      # "activation_embed", two different mesh axes under the default rules.
+      # The router scale ("norm") and the activation's last axis ("activation_embed") can be on different
+      # mesh axes, depending on the logical axis rules.
       router_scale = align_scale_with_normalized_axis(router_scale, unscaled_norm)
     gate_inputs = unscaled_norm * root_size * router_scale
 
