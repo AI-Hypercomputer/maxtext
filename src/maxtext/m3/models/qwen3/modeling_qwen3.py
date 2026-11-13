@@ -38,6 +38,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config
+from maxtext.m3.core import kernels
 from maxtext.m3.core.rope import apply_rope
 from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.core.sharding import (
@@ -147,107 +148,54 @@ class Qwen3Attention(nnx.Module):
       rngs: NNX random number generators.
       sharding: Resolves logical axis names to the mesh; `DefaultSharding` if omitted.
     """
-    self.config = config
-    self.sharding = sharding or sharding_from_config(config)
-    s = self.sharding
+    entered_mesh = mesh is not None and jax.sharding.get_abstract_mesh().empty
+    with enter_mesh_scope(mesh):
+      self.config = config
+      self.sharding = sharding or sharding_from_config(config)
+      s = self.sharding
+      self.attention_kernel = kernels.attention_from_config(config, s, mesh=mesh)
 
-    self.num_query_heads = config.num_query_heads
-    self.num_kv_heads = config.num_kv_heads
-    self.head_dim = config.head_dim
+      self.num_query_heads = config.num_query_heads
+      self.num_kv_heads = config.num_kv_heads
+      self.head_dim = config.head_dim
 
-    kw = {
-        "bias_shape": None,
-        "dtype": config.dtype,
-        "param_dtype": config.weight_dtype,
-        "rngs": rngs,
-    }
-    # Q, K, V multi-axis projections
-    self.query = nnx.Einsum(
-        "...e,ehd->...hd",
-        (config.emb_dim, self.num_query_heads, self.head_dim),
-        kernel_metadata=param_metadata(s, "query", ("embed", "heads", "head_dim")),
-        **kw,
-    )
-    self.key = nnx.Einsum(
-        "...e,ehd->...hd",
-        (config.emb_dim, self.num_kv_heads, self.head_dim),
-        kernel_metadata=param_metadata(s, "key", ("embed", "kv_heads", "head_dim")),
-        **kw,
-    )
-    self.value = nnx.Einsum(
-        "...e,ehd->...hd",
-        (config.emb_dim, self.num_kv_heads, self.head_dim),
-        kernel_metadata=param_metadata(s, "value", ("embed", "kv_heads", "head_dim")),
-        **kw,
-    )
-    self.out = nnx.Einsum(
-        "...hd,hde->...e",
-        (self.num_query_heads, self.head_dim, config.emb_dim),
-        kernel_metadata=param_metadata(s, "out", ("heads", "head_dim", "embed")),
-        **kw,
-    )
-
-    # QK-Norm
-    self.query_norm = nnx.RMSNorm(num_features=self.head_dim, **norm_kwargs(config, s, "query_norm", rngs))
-    self.key_norm = nnx.RMSNorm(num_features=self.head_dim, **norm_kwargs(config, s, "key_norm", rngs))
-
-  def _compute_attention(
-      self,
-      query: jax.Array,
-      key: jax.Array,
-      value: jax.Array,
-      decoder_positions: Optional[jax.Array] = None,
-      decoder_segment_ids: Optional[jax.Array] = None,
-  ) -> jax.Array:
-    """Computes self-contained scaled dot-product attention with GQA and causal masking."""
-    b, t, n_q, d = query.shape
-    n_kv = key.shape[2]
-    g = n_q // n_kv
-    query_g = jnp.reshape(query, (b, t, n_kv, g, d))
-
-    def _compute_local_block(q_g, k, v, mask=None):
-      """Computes local attention output, max, and sum for scaled dot-product block."""
-      weights = jnp.einsum("btkgd,bskd->bkgts", q_g, k)
-      if mask is not None:
-        weights = jnp.where(mask, weights, -1e10)
-      if self.config.float32_logits:
-        weights = weights.astype(jnp.float32)
-      logits = jnp.reshape(weights, (b, n_q, t, -1))
-      local_max = jnp.max(logits, axis=-1, keepdims=True)
-      local_exp = jnp.exp(logits - local_max)
-      local_sum = jnp.sum(local_exp, axis=-1, keepdims=True)
-
-      local_exp = jnp.reshape(local_exp.astype(v.dtype), (b, n_kv, g, t, -1))
-      local_out = jnp.einsum("bkgts,bskd->btkgd", local_exp, v)
-      local_out = jnp.reshape(local_out, (b, t, n_q, d))
-
-      local_max = jnp.transpose(local_max, (0, 2, 1, 3))
-      local_sum = jnp.transpose(local_sum, (0, 2, 1, 3))
-      return local_out, local_max, local_sum
-
-    sharding = self.sharding
-    key = sharding.constrain(key, "attn_key", ("batch", "kv_length", "kv_heads", "head_dim"))
-    value = sharding.constrain(value, "attn_value", ("batch", "kv_length", "kv_heads", "head_dim"))
-    s = key.shape[1]
-    if decoder_positions is None:
-      q_pos = sharding.constrain(jnp.broadcast_to(jnp.arange(t, dtype=jnp.int32), (b, t)), "q_pos", ("batch", "length"))
-      k_pos = sharding.constrain(
-          jnp.broadcast_to(jnp.arange(s, dtype=jnp.int32), (b, s)), "k_pos", ("batch", "kv_length")
+      kw = {
+          "bias_shape": None,
+          "dtype": config.dtype,
+          "param_dtype": config.weight_dtype,
+          "rngs": rngs,
+      }
+      # Q, K, V multi-axis projections
+      self.query = nnx.Einsum(
+          "...e,ehd->...hd",
+          (config.emb_dim, self.num_query_heads, self.head_dim),
+          kernel_metadata=param_metadata(s, "query", ("embed", "heads", "head_dim")),
+          **kw,
       )
-    else:
-      q_pos = sharding.constrain(decoder_positions, "q_pos", ("batch", "length"))
-      k_pos = sharding.constrain(decoder_positions, "k_pos", ("batch", "kv_length"))
-    causal_mask = k_pos[..., None, :] <= q_pos[..., :, None]
-    if decoder_segment_ids is not None:
-      q_seg = sharding.constrain(decoder_segment_ids, "q_seg", ("batch", "length"))
-      k_seg = sharding.constrain(decoder_segment_ids, "k_seg", ("batch", "kv_length"))
-      seg_mask = q_seg[..., :, None] == k_seg[..., None, :]
-      mask = causal_mask & seg_mask
-    else:
-      mask = causal_mask
-    mask = mask[:, None, None, :, :]
-    out, _, lsum = _compute_local_block(query_g, key, value, mask)
-    return (out / lsum).astype(self.config.dtype)
+      self.key = nnx.Einsum(
+          "...e,ehd->...hd",
+          (config.emb_dim, self.num_kv_heads, self.head_dim),
+          kernel_metadata=param_metadata(s, "key", ("embed", "kv_heads", "head_dim")),
+          **kw,
+      )
+      self.value = nnx.Einsum(
+          "...e,ehd->...hd",
+          (config.emb_dim, self.num_kv_heads, self.head_dim),
+          kernel_metadata=param_metadata(s, "value", ("embed", "kv_heads", "head_dim")),
+          **kw,
+      )
+      self.out = nnx.Einsum(
+          "...hd,hde->...e",
+          (self.num_query_heads, self.head_dim, config.emb_dim),
+          kernel_metadata=param_metadata(s, "out", ("heads", "head_dim", "embed")),
+          **kw,
+      )
+
+      # QK-Norm
+      self.query_norm = nnx.RMSNorm(num_features=self.head_dim, **norm_kwargs(config, s, "query_norm", rngs))
+      self.key_norm = nnx.RMSNorm(num_features=self.head_dim, **norm_kwargs(config, s, "key_norm", rngs))
+    if entered_mesh:
+      end_eager_placement(self)
 
   def __call__(
       self,
@@ -257,8 +205,9 @@ class Qwen3Attention(nnx.Module):
       deterministic: bool = False,
       **kwargs,
   ) -> jax.Array:
-    """Executes Qwen3 self-attention forward pass with RoPE."""
+    """Executes Qwen3 self-attention forward pass with RoPE and configured attention kernel."""
     s = self.sharding
+    is_default_positions = decoder_positions is None
     inputs = s.constrain(inputs, "attn_in", ("batch", "length", "embed"))
     query = s.constrain(
         self.query(inputs, out_sharding=s.out_sharding("query", ("batch", "length", "heads", "head_dim"))),
@@ -276,7 +225,6 @@ class Qwen3Attention(nnx.Module):
         ("batch", "length", "kv_heads", "head_dim"),
     )
 
-    # QK-Norm before RoPE
     if self.config.use_qk_norm:
       query = self.query_norm(query)
       key = self.key_norm(key)
@@ -292,18 +240,24 @@ class Qwen3Attention(nnx.Module):
     query = apply_rope(query, decoder_positions, max_timescale=self.config.rope_max_timescale)
     key = apply_rope(key, decoder_positions, max_timescale=self.config.rope_max_timescale)
 
-    # Scale query by 1/sqrt(head_dim)
     query_pre_attn_scalar = self.head_dim**-0.5
     query = query * query_pre_attn_scalar
 
-    attn_out = self._compute_attention(
-        query=query,
-        key=key,
-        value=value,
-        decoder_positions=decoder_positions,
-        decoder_segment_ids=decoder_segment_ids,
+    # Only pass positions for attention masking when packed (`decoder_segment_ids` present) or
+    # decoding (`q_len != kv_len`), keeping unpacked training on the `is_causal=True` fast path.
+    use_mask_positions = not is_default_positions and (decoder_segment_ids is not None or query.shape[1] != key.shape[1])
+    attn_out = self.attention_kernel(
+        query,
+        key,
+        value,
+        segment_ids=decoder_segment_ids,
+        positions=decoder_positions if use_mask_positions else None,
     )
-    attn_out = s.constrain(attn_out, "attention_out", ("batch", "length", "heads", "head_dim"))
+    attn_out = s.constrain(
+        attn_out.astype(self.config.dtype),
+        "attention_out",
+        ("batch", "length", "heads", "head_dim"),
+    )
     proj = self.out(attn_out, out_sharding=s.out_sharding("attn_proj", ("batch", "norm_length", "embed")))
     return s.constrain(proj, "attn_proj", ("batch", "norm_length", "embed"))
 
@@ -338,7 +292,7 @@ class Qwen3DecoderLayer(nnx.Module):
     self.pre_self_attention_layer_norm = nnx.RMSNorm(
         num_features=config.emb_dim, **norm_kwargs(config, s, "pre_self_attention_layer_norm", rngs)
     )
-    self.self_attention = Qwen3Attention(config=config, rngs=rngs, sharding=s)
+    self.self_attention = Qwen3Attention(config=config, mesh=mesh, rngs=rngs, sharding=s)
     self.post_self_attention_layer_norm = nnx.RMSNorm(
         num_features=config.emb_dim, **norm_kwargs(config, s, "post_self_attention_layer_norm", rngs)
     )
@@ -393,14 +347,18 @@ class Qwen3Decoder(nnx.Module):
       layer_cls: Decoder layer constructor for model-family subclasses.
       sharding: Resolves logical axis names to the mesh; `DefaultSharding` if omitted.
     """
-    self.config = config
-    self.sharding = sharding or sharding_from_config(config)
-    s = self.sharding
+    entered_mesh = mesh is not None and jax.sharding.get_abstract_mesh().empty
+    with enter_mesh_scope(mesh):
+      self.config = config
+      self.sharding = sharding or sharding_from_config(config)
+      s = self.sharding
 
-    self.layers = nnx.Sequential(
-        *(layer_cls(config=config, rngs=rngs, sharding=s) for _ in range(config.num_decoder_layers))
-    )
-    self.decoder_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kwargs(config, s, "decoder_norm", rngs))
+      self.layers = nnx.Sequential(
+          *(layer_cls(config=config, mesh=mesh, rngs=rngs, sharding=s) for _ in range(config.num_decoder_layers))
+      )
+      self.decoder_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kwargs(config, s, "decoder_norm", rngs))
+    if entered_mesh:
+      end_eager_placement(self)
 
   def apply_output_head(
       self,
@@ -446,10 +404,8 @@ class Qwen3Decoder(nnx.Module):
     """Iterates through all decoder layers and projects to logits via tied embeddings."""
     s = self.sharding
     decoder_input_tokens = s.constrain(decoder_input_tokens, "decoder_input_tokens", ("batch", "length"))
-    if decoder_positions is None:
-      b, t = decoder_input_tokens.shape
-      decoder_positions = jnp.broadcast_to(jnp.arange(t, dtype=jnp.int32)[None, :], (b, t))
-    decoder_positions = s.constrain(decoder_positions, "decoder_positions", ("batch", "length"))
+    if decoder_positions is not None:
+      decoder_positions = s.constrain(decoder_positions, "decoder_positions", ("batch", "length"))
     if decoder_segment_ids is not None:
       decoder_segment_ids = s.constrain(decoder_segment_ids, "decoder_segment_ids", ("batch", "length"))
     y = shared_embedding(
@@ -519,6 +475,7 @@ class Qwen3Model(nnx.Module):
       )
       self.decoder = Qwen3Decoder(
           config=config,
+          mesh=mesh,
           rngs=rngs,
           sharding=self.sharding,
       )
