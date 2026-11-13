@@ -129,6 +129,8 @@ class RouteMetadata:
   # Shape [num_ep, num_ep]. all_gather of reshaped_group_sizes across EP shards.
   # [i, j] = number of tokens from batch shard i sent to expert shard j.
   all_shards_group_sizes: Optional[jax.Array]
+  # Optional online hot-expert replication plan produced by ra2a_and_route for _moe_body.
+  replica_plan: Optional[Any] = struct.field(pytree_node=False, default=None)
 
 
 @struct.dataclass
@@ -3113,8 +3115,6 @@ class RoutedMoE(nnx.Module):
           ),
       )
 
-    replica_plans = []
-
     def ra2a_and_route(
         x,
         logits,
@@ -3131,11 +3131,19 @@ class RoutedMoE(nnx.Module):
       all_shards_group_sizes = None
       reshaped_group_sizes = None
       required_rbf = None
+      replica_plan = None
       local_tokens = math.prod(x.shape[:-1])
       num_replicas = int(getattr(self.config, "expert_replicas_per_device", 0) or 0)
-      use_replication = num_replicas > 0 and num_ep > 1 and is_batch_sharded_by_expert
+      use_replication = num_replicas > 0
       physical_route_fn = None
       if use_replication:
+        if num_ep <= 1:
+          raise ValueError(f"expert_replicas_per_device={num_replicas} requires num_ep > 1, got num_ep={num_ep}.")
+        if not is_batch_sharded_by_expert:
+          raise ValueError(
+              f"expert_replicas_per_device={num_replicas} requires batch sharded across expert "
+              "(is_batch_sharded_by_expert=True; batch size 1 decode is unsupported)."
+          )
         if self.config.num_experts % num_ep != 0:
           raise ValueError(
               f"num_experts ({self.config.num_experts}) must be divisible by num_ep ({num_ep}) for expert replication."
@@ -3143,18 +3151,18 @@ class RoutedMoE(nnx.Module):
         from maxtext.layers import moe_replica_planner as mrp  # pylint: disable=import-outside-toplevel
 
         def _physical_route_fn(flat_logical):
+          nonlocal replica_plan
           local_counts = jnp.bincount(flat_logical, length=self.config.num_experts).astype(jnp.int32)
           counts_src = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
-          plan = mrp.compute_plan_iter(
+          replica_plan = mrp.compute_plan_iter(
               counts_src,
               num_ep,
               num_replicas,
               int(self.config.expert_replica_max_send),
               int(self.config.expert_replica_board_size),
           )
-          replica_plans.append(plan)
-          phys = plan.route_table[expert_shard_id][flat_logical]
-          return phys, num_ep * plan.num_slots
+          phys = replica_plan.route_table[expert_shard_id][flat_logical]
+          return phys, num_ep * replica_plan.num_slots
 
         physical_route_fn = _physical_route_fn
       # force_dropless (the in-layer dropless fallback) sizes the receive buffer for the worst case
@@ -3275,6 +3283,7 @@ class RoutedMoE(nnx.Module):
               local_sorted_indices=local_sorted_indices,
               all_shards_group_sizes=all_shards_group_sizes,
               reshaped_group_sizes=reshaped_group_sizes,
+              replica_plan=replica_plan,
           ),
       )
 
@@ -3757,14 +3766,14 @@ class RoutedMoE(nnx.Module):
 
         x = jax.tree.map(_cn, x)
         routing = jax.tree.map(_cn, routing)
-        if replica_plans:
+        if route_metadata.replica_plan is not None:
           from maxtext.layers import moe_replica_weights as mrw  # pylint: disable=import-outside-toplevel
 
           if w0_bias is not None or w1_bias is not None or wo_bias is not None:
             raise NotImplementedError("expert replication does not support MoE biases yet.")
           if return_weights:
             raise NotImplementedError("expert replication does not support moe_accumulate_chunk_wgrad yet.")
-          plan = replica_plans[-1]
+          plan = route_metadata.replica_plan
           num_ep_ = self.get_expert_parallelism_size()
           ep_name = self._expert_parallelism_name
           w0 = mrw.extend_with_replicas(w0, plan, ep_name, num_ep_, self.dtype)

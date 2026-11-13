@@ -317,7 +317,7 @@ moe_log_max_load_ratio: false # debug: log learning/moe_max_load_ratio{,_mean} (
 # Online hot-expert replication on the ragged all-to-all MoE path (off by default).
 expert_replicas_per_device: 0 # replica slots per expert-parallel device; 0 disables replication.
 expert_replica_max_send: 4 # max replicas a single home device sends per layer.
-expert_replica_board_size: 8 # EP devices per physical board/tray (planner prefers same-board sources).
+expert_replica_board_size: 8 # EP devices (TensorCores along expert) per physical board/tray (v6e: 4 or 8; v7x: 8; SFS 4x4x1: 8 per 4-chip board or 16 per paired board).
 ragged_buffer_factor: -1.0 # a factor to determine the size of the ragged buffer for routed MoE activations.
 # By default (-1), the routed buffer is worst case size to ensure no dropping.
 # When set to 1.0 this buffer if set to the size assuming perfectly balanced. If the routing dictates

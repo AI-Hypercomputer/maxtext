@@ -1210,7 +1210,12 @@ class MoEGeneral(BaseModel):
   expert_replica_board_size: int = Field(
       8,
       ge=1,
-      description="EP devices per physical board/tray (planner prefers same-board sources).",
+      description=(
+          "Number of JAX EP devices (TensorCores along the expert mesh axis; 2 per chip on 2-TC/chip TPUs when "
+          "ici_tensor_parallelism=1, 1 per chip on 1-TC/chip TPUs) per physical board/tray so the planner prefers "
+          "same-board sources: 4 (or 8 single-host) on TPU v6e-8, 8 on TPU v7x (4 chips x 2 TCs), and 8 (4-chip "
+          "board) or 16 (8-chip paired board) on SFS 4x4x1."
+      ),
   )
   moe_dropless_fallback: Literal["step", "layer"] | None = Field(
       None,
@@ -4685,6 +4690,34 @@ class MaxTextConfig(
       if self.num_moe_emb_chunks > 0:
         raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")
 
+  def validate_expert_replication(self):
+    """Validates prerequisites for online hot-expert replication (expert_replicas_per_device > 0)."""
+    if self.expert_replicas_per_device <= 0:
+      return
+    if self.num_experts <= 1:
+      raise ValueError("expert_replicas_per_device > 0 requires num_experts > 1.")
+    if not self.sparse_matmul:
+      raise ValueError("expert_replicas_per_device > 0 requires sparse_matmul=True.")
+    if self.te_moe_block:
+      raise ValueError("expert_replicas_per_device > 0 is not supported with te_moe_block=True.")
+    if self.use_ring_of_experts:
+      raise ValueError(
+          "expert_replicas_per_device > 0 is only supported on the ragged all-to-all path (use_ring_of_experts=False)."
+      )
+    if self.num_moe_emb_chunks > 0:
+      raise ValueError("expert_replicas_per_device > 0 does not support num_moe_emb_chunks > 0.")
+    if self.mlp_bias:
+      raise ValueError("expert_replicas_per_device > 0 does not support mlp_bias=True.")
+    if self.moe_accumulate_chunk_wgrad:
+      raise ValueError("expert_replicas_per_device > 0 does not support moe_accumulate_chunk_wgrad=True.")
+    if self.moe_dropless_fallback is not None:
+      raise ValueError(
+          "expert_replicas_per_device > 0 does not support moe_dropless_fallback "
+          "(the overflow check uses pre-replication logical shard counts)."
+      )
+    if not self.override_logical_axis_rules and not ep_enabled(self):
+      raise ValueError("expert_replicas_per_device > 0 requires expert parallelism > 1.")
+
   def validate_moe_log_max_load_ratio(self):
     """Validates that moe_log_max_load_ratio is used with the ring-of-experts ragged path."""
     if self.moe_log_max_load_ratio and not (
@@ -6316,6 +6349,7 @@ class MaxTextConfig(
     self.validate_mllog()
     self.validate_splash_diag_skip()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()
+    self.validate_expert_replication()
     if self.warmup_skip_train_dropless and not self.warmup_programs_in_init:
       raise ValueError("warmup_skip_train_dropless=True requires warmup_programs_in_init=True.")
 
