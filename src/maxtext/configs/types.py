@@ -842,6 +842,20 @@ class LogitsAndLoss(BaseModel):
           "the combined tensor and FSDP axes. Defaults to False (opt-in)."
       ),
   )
+  embedding_vocab_on_fsdp: bool = Field(
+      False,
+      description=(
+          "Shard the token embedding table on its vocab dimension over the FSDP"
+          " axes (logical axes vocab_fsdp, embed_vocab_replicated) instead of"
+          " sharding its embed dimension on FSDP. Only the parameter's storage"
+          " sharding changes: the table is still all-gathered for the lookup"
+          " and the tied logits, but its gradient reduce-scatter runs along"
+          " vocab, which stays lane-aligned when emb_dim is not a multiple of"
+          " 128 * fsdp (e.g. Gemma4-26b's 2816 over 128 devices). Requires"
+          " vocab_size divisible by the FSDP and tensor axes. Defaults to"
+          " False."
+      ),
+  )
   final_logits_soft_cap: None | NonNegativeFloat = Field(
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",

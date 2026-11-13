@@ -269,6 +269,9 @@ lm_head_weight_grad_in_kernel_order: None  # on for an untied model under shard_
 # Requires an untied head without MTP, vocab tiling, fp8 head weights, or training_objective: block_diffusion, and a
 # vocab size divisible by the combined tensor and FSDP axes. Defaults to false (opt-in).
 lm_head_fsdp_as_vocab_tp: false
+# Shard the token embedding table on vocab over the FSDP axes (embed dim replicated) instead of on embed. The table
+# is still all-gathered forward; only its storage and gradient reduce-scatter move to the (lane-aligned) vocab dim.
+embedding_vocab_on_fsdp: false
 float32_qk_product: false # in dot_product attention, whether to cast to fp32 the inputs to qk product
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the MLA Indexer (DeepSeek-V3 / DeepSeek-V3.2) across the unsharded local heads dimension natively.
