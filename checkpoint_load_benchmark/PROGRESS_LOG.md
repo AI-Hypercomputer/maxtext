@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-13 01:00:47 UTC`
+- **Last Updated (UTC):** `2026-11-13 01:09:59 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -43,28 +43,8 @@
 
 ## 3. Chronological Event Log (Newest Last)
 
-- [2026-11-12 22:24:02 UTC] Background orchestrator started on branch `docs/checkpoint-load-benchmark`.
-- [2026-11-12 22:26:23 UTC] Updated `v5e` queue `gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue/v2/tasks.json` with 21/22 staged tasks.
-- [2026-11-12 22:26:33 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 52/53 staged tasks.
-- [2026-11-12 22:26:43 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 60/61 staged tasks.
-- [2026-11-12 22:27:13 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 578 mirrored JSONs.
-- [2026-11-12 22:31:07 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 581 mirrored JSONs.
-- [2026-11-12 22:35:00 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 584 mirrored JSONs.
-- [2026-11-12 22:38:49 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 587 mirrored JSONs.
-- [2026-11-12 22:45:48 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 589 mirrored JSONs.
-- [2026-11-12 22:49:38 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 591 mirrored JSONs.
-- [2026-11-12 22:53:31 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 594 mirrored JSONs.
-- [2026-11-12 22:57:19 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 596 mirrored JSONs.
-- [2026-11-12 23:01:13 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 598 mirrored JSONs.
-- [2026-11-12 23:05:01 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 601 mirrored JSONs.
-- [2026-11-12 23:08:54 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 602 mirrored JSONs.
-- [2026-11-12 23:12:48 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 605 mirrored JSONs.
-- [2026-11-12 23:16:39 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 606 mirrored JSONs.
-- [2026-11-13 00:25:53 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 607 mirrored JSONs.
-- [2026-11-13 00:36:20 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 608 mirrored JSONs.
-- [2026-11-13 00:46:07 UTC] Launched `v5e` BF16 copy job `mesa-copy-v5e-deepseek4-1600b-v2-cp-v5e` for `deepseek4-1600b`.
-- [2026-11-13 00:46:15 UTC] Launched `v6e` BF16 copy job `mesa-copy-v6e-deepseek4-1600b-v2-cp-v6e` for `deepseek4-1600b`.
-- [2026-11-13 00:46:20 UTC] `v7x` CPU job `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` Completed and cleaned up.
-- [2026-11-13 00:46:26 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 61/61 staged tasks.
-- [2026-11-13 00:50:15 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 609 mirrored JSONs.
-- [2026-11-13 00:57:28 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 611 mirrored JSONs.
+- [2026-11-13 01:03:44 UTC] Background orchestrator started on branch `docs/checkpoint-load-benchmark`.
+- [2026-11-13 01:05:59 UTC] Updated `v5e` queue `gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue/v2/tasks.json` with 21/22 staged tasks.
+- [2026-11-13 01:06:09 UTC] Updated `v6e` queue `gs://mesa-maxtext-southamerica-west1/mesa-bench-v2/queue/v2/tasks.json` with 52/53 staged tasks.
+- [2026-11-13 01:06:18 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 61/61 staged tasks.
+- [2026-11-13 01:06:42 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 611 mirrored JSONs.
