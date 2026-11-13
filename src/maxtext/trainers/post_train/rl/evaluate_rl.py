@@ -155,13 +155,24 @@ def score_responses(tmvp_config, question, responses, answers):
     return is_correct, is_partially_correct, has_correct_format
 
   if eval_mode == "pass":
-    result = False, False, False
+    # pass@K: each criterion holds if any of the K samples meets it. The samples are not required to meet all three
+    # criteria at once (a correct answer in a malformed response still counts as correct).
+    is_correct, is_partially_correct, has_correct_format = False, False, False
     for extracted, response in zip(extracted_responses, responses):
-      result = _score_single(extracted, response, answers, tmvp_config, match_format)
+      if is_correct:
+        # Already solved (which implies partially correct): only the cheap format check is left to do.
+        has_correct_format |= match_format.search(response) is not None
+      else:
+        correct, partially_correct, correct_format = _score_single(
+            extracted, response, answers, tmvp_config, match_format
+        )
+        is_correct |= correct
+        is_partially_correct |= partially_correct
+        has_correct_format |= correct_format
       # Early exit if all criteria are met
-      if all(result):
-        return result
-    return result
+      if is_correct and is_partially_correct and has_correct_format:
+        break
+    return is_correct, is_partially_correct, has_correct_format
 
   if eval_mode == "pass_at_1":
     # Estimate pass@1: fraction of N samples that are correct per problem.

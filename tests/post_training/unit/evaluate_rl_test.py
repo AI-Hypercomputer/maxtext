@@ -149,6 +149,50 @@ class TestScoreResponses(unittest.TestCase):
     self.assertTrue(is_partially_correct)
     self.assertTrue(has_correct_format)
 
+  def test_pass_eval_mode_correct_answer_in_malformed_response_counts(self):
+    """pass@K: a correct answer in an earlier malformed response is not lost to a later well-formed wrong one."""
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question="What is 6 * 7?",
+        responses=[
+            "<answer>42</answer>",
+            "<reasoning>6 * 7 = 41</reasoning><answer>41</answer>",
+        ],
+        answers=["42"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    # The well-formed (wrong) second response still provides a correctly formatted sample.
+    self.assertTrue(has_correct_format)
+
+  def test_pass_eval_mode_correct_answer_in_last_response(self):
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question="What is 6 * 7?",
+        responses=[
+            "<reasoning>6 * 7 = 13</reasoning><answer>13</answer>",
+            "<answer>42</answer>",
+        ],
+        answers=["42"],
+    )
+    self.assertTrue(is_correct)
+    self.assertTrue(is_partially_correct)
+    self.assertTrue(has_correct_format)
+
+  def test_pass_eval_mode_all_wrong(self):
+    is_correct, is_partially_correct, has_correct_format = evaluate_rl.score_responses(
+        tmvp_config=self.config,
+        question="What is 6 * 7?",
+        responses=[
+            "<reasoning>6 * 7 = 13</reasoning><answer>13</answer>",
+            "<answer>-5</answer>",
+        ],
+        answers=["42"],
+    )
+    self.assertFalse(is_correct)
+    self.assertFalse(is_partially_correct)
+    self.assertTrue(has_correct_format)
+
   def test_pass_at_1_eval_mode(self):
     """pass@1 returns fraction of correct samples, not a boolean."""
     config = _make_config(eval_mode="pass_at_1")
