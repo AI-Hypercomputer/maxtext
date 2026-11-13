@@ -151,6 +151,7 @@ def merge_image_columns(example, image_columns, max_num_images_per_example):
       images.extend(example[col])
     else:
       images.append(example[col])
+  images = [image for image in images if image is not None]
 
   example["images"] = images[:max_num_images_per_example] if max_num_images_per_example > 0 else images
   return example
@@ -160,6 +161,8 @@ def pre_process_image_sft(example, image_column, config):
   """pre-process image for multimodal SFT"""
 
   def _process_image_fn(image):
+    if image is None:  # A row without an image.
+      image = []
     is_video = is_video_file(image) or (isinstance(image, list) and image and is_video_file(image[0]))
     if is_video:
       return mm_processor.preprocess_image_for_training(image, config)

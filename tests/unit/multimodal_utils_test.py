@@ -428,6 +428,12 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
         mm_processor.reformat_prompt("Tell me a story", "<img>", "llama2-7b", num_images=0), "Tell me a story"
     )
 
+  def test_merge_image_columns_skips_missing_images(self):
+    example = {"first": "a", "second": None, "third": ["b", None]}
+    merged = input_pipeline_utils.merge_image_columns(example, ["first", "second", "third"], 0)
+    self.assertEqual(merged["images"], ["a", "b"])
+    self.assertEqual(input_pipeline_utils.merge_image_columns({"first": None}, ["first"], 2)["images"], [])
+
   def test_get_vision_and_decoder_block_routing(self):
     # pylint: disable=protected-access
     # Multimodal Qwen3-VL
@@ -756,6 +762,22 @@ class TestGemma4NativeResolution(unittest.TestCase):
     fixed = mm_processor.preprocess_image_for_training(image, fixed_config)
     self.assertIsNone(fixed.image_position_ids)
     self.assertEqual(fixed.pixel_values.shape, (1, 1, 672, 960, 3))
+
+  def test_row_without_image_gets_only_empty_slots(self):
+    for missing in (None, []):
+      output = input_pipeline_utils.pre_process_image_sft({"images": missing}, "images", self._native_config())["images"]
+      self.assertEqual(output.pixel_values.shape, (0, 2520, 768))
+      tokens = mm_processor.prepare_text_for_image_fusion(np.array([1, 2, 3]), self._native_config(), output)
+      self.assertEqual(tokens.tolist(), [1, 2, 3])
+      padded = self._pad(output, 1024)
+      self.assertEqual(padded.pixel_values.shape, (3, 2520, 768))
+      np.testing.assert_array_equal(padded.image_position_ids, mm_utils.IMAGE_POSITION_PAD_VALUE)
+
+  def test_row_without_image_needs_native_resolution(self):
+    config = self._native_config()
+    config.use_native_resolution_for_vit = False
+    with self.assertRaisesRegex(ValueError, "use_native_resolution_for_vit"):
+      input_pipeline_utils.pre_process_image_sft({"images": None}, "images", config)
 
   def test_native_resolution_is_on_for_e2b(self):
     self.assertTrue(self._pyconfig().use_native_resolution_for_vit)

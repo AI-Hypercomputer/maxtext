@@ -66,6 +66,8 @@ def preprocess_mm_data_gemma4(images, config=None):
     images_in.append(images)
   else:
     images_in.extend(images)
+  if not images_in:
+    raise ValueError("A row without an image needs use_native_resolution_for_vit=True.")
 
   for img in images_in:
     images_out.append(_resize_and_rescale(img, GEMMA4_IMAGE_HEIGHT, GEMMA4_IMAGE_WIDTH))
