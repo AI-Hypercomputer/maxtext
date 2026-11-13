@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-13 00:46:27 UTC`
+- **Last Updated (UTC):** `2026-11-13 00:53:30 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -66,3 +66,4 @@
 - [2026-11-13 00:46:15 UTC] Launched `v6e` BF16 copy job `mesa-copy-v6e-deepseek4-1600b-v2-cp-v6e` for `deepseek4-1600b`.
 - [2026-11-13 00:46:20 UTC] `v7x` CPU job `mesa-step1b-deepseek4-1600b-v2-s1b-v7x` Completed and cleaned up.
 - [2026-11-13 00:46:26 UTC] Updated `v7x` queue `gs://mesa-maxtext-us-central1/mesa-bench-v2/queue/v2/tasks.json` with 61/61 staged tasks.
+- [2026-11-13 00:50:15 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 609 mirrored JSONs.

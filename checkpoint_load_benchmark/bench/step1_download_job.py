@@ -1059,11 +1059,19 @@ def copy_bf16_gcs_to_region(
   env_meta = metadata.collect_env_cluster_metadata()
   started_utc = _utc_now_iso()
 
-  ensure_empty_gcs_prefix(dest_gcs_dir, storage_client=client, clean_target=clean_target)
   dst_bucket_name, dst_prefix = split_gcs_uri(dest_gcs_dir)
   dst_bucket = client.bucket(dst_bucket_name)
   src_bucket_name, _ = split_gcs_uri(source_gcs_dir)
   src_bucket = client.bucket(src_bucket_name)
+
+  existing_dst_sizes: dict[str, int] = {}
+  try:
+    for b in _list_blobs_under_prefix(client, dest_gcs_dir):
+      if not b.name.endswith("/"):
+        existing_dst_sizes[b.name.rsplit("/", 1)[-1]] = int(getattr(b, "size", 0) or 0)
+  except Exception:  # pylint: disable=broad-exception-caught
+    existing_dst_sizes = {}
+  del clean_target
 
   src_blobs = [
       b
@@ -1077,17 +1085,27 @@ def copy_bf16_gcs_to_region(
 
   def _copy_one(blob: Any) -> int:
     fname = blob.name.rsplit("/", 1)[-1]
+    expected = int(getattr(blob, "size", 0) or 0)
+    if expected > 0 and existing_dst_sizes.get(fname) == expected:
+      return expected
     dst_blob_name = f"{dst_prefix}/{fname}" if dst_prefix else fname
-    dst_blob = dst_bucket.blob(dst_blob_name)
-    if hasattr(dst_blob, "rewrite"):
-      token = None
-      while True:
-        token, _, _ = dst_blob.rewrite(blob, token=token)
-        if token is None:
-          break
-    else:
-      src_bucket.copy_blob(blob, dst_bucket, dst_blob_name)
-    return int(getattr(blob, "size", 0) or 0)
+    for attempt in range(_MAX_RETRIES):
+      try:
+        dst_blob = dst_bucket.blob(dst_blob_name)
+        if hasattr(dst_blob, "rewrite"):
+          token = None
+          while True:
+            token, _, _ = dst_blob.rewrite(blob, token=token)
+            if token is None:
+              break
+        else:
+          src_bucket.copy_blob(blob, dst_bucket, dst_blob_name)
+        return expected
+      except Exception:  # pylint: disable=broad-exception-caught
+        if attempt == _MAX_RETRIES - 1:
+          raise
+        time.sleep(_retry_backoff(attempt))
+    return expected
 
   with concurrent.futures.ThreadPoolExecutor(max_workers=min(max_workers, len(src_blobs))) as pool:
     total_bytes = sum(pool.map(_copy_one, src_blobs))
