@@ -398,7 +398,7 @@ class KVCache(BaseCache):
       )
       self.cached_ar_lengths = nnx.Cache(
           jnp.zeros((self.batch,), dtype=jnp.int32),
-          out_sharding=(CACHE_BATCH,),
+          out_sharding=segment_id_axis_names[:1],
       )
       self.cached_ar_key_scale = None
       self.cached_ar_value_scale = None
@@ -458,7 +458,7 @@ class KVCache(BaseCache):
 
     self.cached_ar_lengths = nnx.Cache(
         jnp.zeros((cache_logical_shape[0],), dtype=jnp.int32),
-        out_sharding=(CACHE_BATCH,),
+        out_sharding=segment_id_axis_names[:1],
     )
 
     if self.kv_quant:
