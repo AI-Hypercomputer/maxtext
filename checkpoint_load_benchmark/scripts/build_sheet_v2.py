@@ -1728,6 +1728,21 @@ def _build_tab_merge_requests(  # pylint: disable=too-many-positional-arguments
 
   end_row = 1 + len(rows)
   for col_i, col_spec in enumerate(cols):
+    if col_spec.key == "model_test_tier":
+      reqs.append(
+          {
+              "updateDimensionProperties": {
+                  "range": {
+                      "sheetId": sheet_id,
+                      "dimension": "COLUMNS",
+                      "startIndex": col_i,
+                      "endIndex": col_i + 1,
+                  },
+                  "properties": {"hiddenByUser": True},
+                  "fields": "hiddenByUser",
+              }
+          }
+      )
     num_fmt = _FMT_TO_SHEETS_NUMBER_FORMAT.get(col_spec.fmt)
     if num_fmt is not None:
       reqs.append(
