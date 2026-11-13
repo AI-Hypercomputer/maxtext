@@ -18,10 +18,12 @@ from collections import defaultdict
 import json
 import os
 import shutil
+import sys
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from absl.testing import absltest
 import pytest
 
 pytest.importorskip("tunix")
@@ -36,7 +38,16 @@ from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.trainers.post_train.hooks import BaseDataHooks, BaseTrainingHooks, GoodputTrainingHooks
 from maxtext.common.metric_logger import MetricLogger
 from maxtext.utils import exceptions
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
+from maxtext.utils import train_utils
+
+if "maxtext" in sys.modules and not hasattr(sys.modules["maxtext"], "trainers"):
+  setattr(
+      sys.modules["maxtext"],
+      "trainers",
+      sys.modules["maxtext.src.maxtext.trainers"],
+  )
 
 
 class DummyTrainingHooks(BaseTrainingHooks):
@@ -208,6 +219,91 @@ class BaseHooksTest(unittest.TestCase):
     with self.assertRaises(RuntimeError):
       data_hooks.load_next_eval_batch(self.mock_train_ctx)
 
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_data_hooks_no_reorder_when_reordered_cp_size_is_one(
+      self,
+      mock_create_data_iterator,
+  ):
+    seq_len = 8
+    raw_batch = {
+        "inputs": np.broadcast_to(
+            np.arange(seq_len, dtype=np.int32),
+            (jax.device_count(), seq_len),
+        ),
+    }
+    train_iter = iter([raw_batch])
+    eval_iter = iter([raw_batch])
+    mock_create_data_iterator.return_value = (train_iter, eval_iter)
+
+    with patch.object(max_utils, "reordered_cp_size", return_value=1):
+      data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+
+    self.assertIs(data_hooks.train_data_iterator, train_iter)
+    self.assertIs(data_hooks.eval_data_iterator, eval_iter)
+    train_batch = data_hooks.load_next_train_batch(self.mock_train_ctx)
+    eval_batch = data_hooks.load_next_eval_batch(self.mock_train_ctx)
+    np.testing.assert_array_equal(
+        np.asarray(train_batch["inputs"]),
+        raw_batch["inputs"],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(eval_batch["inputs"]),
+        raw_batch["inputs"],
+    )
+
+  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  def test_data_hooks_reorders_batches_when_reordered_cp_size_gt_one(
+      self,
+      mock_create_data_iterator,
+  ):
+    seq_len = 8
+    sft_keys = (
+        "inputs",
+        "inputs_position",
+        "inputs_segmentation",
+        "targets",
+        "targets_position",
+        "targets_segmentation",
+        "targets_loss_mask",
+    )
+    seq = np.broadcast_to(
+        np.arange(seq_len, dtype=np.int32),
+        (jax.device_count(), seq_len),
+    )
+    raw_batch = {key: seq.copy() for key in sft_keys}
+    mock_create_data_iterator.return_value = (
+        iter([raw_batch]),
+        iter([raw_batch]),
+    )
+
+    with patch.object(max_utils, "reordered_cp_size", return_value=2):
+      data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+
+    # pylint: disable=protected-access
+    self.assertIsInstance(
+        data_hooks.train_data_iterator,
+        train_utils._ReorderedDataIterator,
+    )
+    self.assertIsInstance(
+        data_hooks.eval_data_iterator,
+        train_utils._ReorderedDataIterator,
+    )
+    train_batch = data_hooks.load_next_train_batch(self.mock_train_ctx)
+    eval_batch = data_hooks.load_next_eval_batch(self.mock_train_ctx)
+    expected_reordered = np.broadcast_to(
+        np.array([0, 1, 6, 7, 2, 3, 4, 5], dtype=np.int32),
+        (jax.device_count(), seq_len),
+    )
+    for key in sft_keys:
+      np.testing.assert_array_equal(
+          np.asarray(train_batch[key]),
+          expected_reordered,
+      )
+      np.testing.assert_array_equal(
+          np.asarray(eval_batch[key]),
+          expected_reordered,
+      )
+
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()
