@@ -51,6 +51,12 @@ def _run_deepseek4_layer_remat(
   through xs/ys and is written back. `policy` is the decoder's resolved remat
   policy (None means full remat).
   """
+  if getattr(layer, "disable_quant_stats_update", False):
+    # Qwix sets this flag for its initialization forward pass. Create statistics
+    # submodules on the original layer; nnx.update cannot attach new graph nodes.
+    y_out, _ = layer(y, **layer_kwargs)
+    return y_out
+
   params_filter = nnx.All(nnx.Param, nnx.Not(nnx.LoRAParam))
   graphdef, params, other = nnx.split(layer, params_filter, ...)
   params_xs = jax.tree.map(lambda x: x[None], params)
