@@ -125,11 +125,18 @@ class ExpertReplicationConfigTest(absltest.TestCase):
     for kw in (
         {"expert_replicas_per_device": -1},
         {"expert_replica_max_send": 0},
+        {"expert_replica_max_send": 9},
         {"expert_replica_board_size": 0},
     ):
       with self.subTest(kw=kw):
         with self.assertRaises((pydantic.ValidationError, ValueError)):
           self._init(**kw)
+
+  def test_expert_replica_max_send_capped_at_8(self):
+    cfg_ok = self._init(expert_replica_max_send=8)
+    self.assertEqual(cfg_ok.expert_replica_max_send, 8)
+    with self.assertRaises((pydantic.ValidationError, ValueError)):
+      self._init(expert_replica_max_send=9)
 
 
 class RoutedMoEReplicationWiringTest(parameterized.TestCase):

@@ -1204,7 +1204,8 @@ class MoEGeneral(BaseModel):
   expert_replica_max_send: int = Field(
       4,
       ge=1,
-      description="Max replicas a single home device sends per layer.",
+      le=8,
+      description="Max replicas a single home device sends per layer (capped at 8).",
   )
   expert_replica_board_size: int = Field(
       8,
