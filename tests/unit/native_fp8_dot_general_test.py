@@ -301,6 +301,17 @@ class NativeFp8DotGeneralPerTensorTest(unittest.TestCase):
     self.assertTrue(is_module_unquantized(cfg_str, "in_proj_ba"))
     self.assertFalse(is_module_unquantized(cfg_str, "in_proj"))
 
+    cfg_default = SimpleNamespace(
+        weight_dtype="float8_e4m3fn",
+        dtype="bfloat16",
+        unquantized_modules=[],
+    )
+    for mod in ("token_embedder", "logits_dense", "gate", "shared_expert_gate", "conv1d", "in_proj_ba", "A_log", "dt_bias", "norm"):
+      self.assertTrue(is_module_unquantized(cfg_default, mod), mod)
+      self.assertEqual(get_weight_dtype(cfg_default, mod), "bfloat16", mod)
+    self.assertFalse(is_module_unquantized(cfg_default, "in_proj_qkvz"))
+    self.assertEqual(get_weight_dtype(cfg_default, "in_proj_qkvz"), "float8_e4m3fn")
+
     cfg = SimpleNamespace(
         weight_dtype="float8_e4m3fn",
         dtype="bfloat16",
@@ -783,6 +794,256 @@ class ServeFp8ActCalibrationModesTest(unittest.TestCase):
     quant = quantizations.ServeFp8WeightQuantization(act_calibration_method="fixed,-224,224")
     with self.assertRaisesRegex(ValueError, "w1_lhs_scale"):
       moe.fused_moe_lhs_scale_kwargs(quant, self._fused_moe_without_lhs_scales)
+
+  @staticmethod
+  def _fused_moe_with_quantize_lhs(hidden_states, quantize_lhs=True):
+    """Stands in for a tpu-inference fused_moe_func with the quantize_lhs option."""
+    del quantize_lhs
+    return hidden_states
+
+  def test_w8a16_mode_keeps_bf16_expert_activations(self):
+    for calib in ("w8a16", "none", "bf16"):
+      quant = quantizations.ServeFp8WeightQuantization(act_calibration_method=calib)
+      self.assertEqual(moe.fused_moe_lhs_scale_kwargs(quant, self._fused_moe_with_quantize_lhs), {"quantize_lhs": False})
+
+  def test_w8a16_mode_with_old_tpu_inference_keeps_kernel_default(self):
+    quant = quantizations.ServeFp8WeightQuantization(act_calibration_method="w8a16")
+    self.assertEqual(moe.fused_moe_lhs_scale_kwargs(quant, self._fused_moe_without_lhs_scales), {})
+
+
+class FastNonMoeFp8DenseOptimizationsTest(unittest.TestCase):
+  """Tests 3D per-channel scale detection, blockwise-to-per-channel requantization,
+  and shared activation pre-quantization across sibling projections."""
+
+  def test_3d_rank_matched_per_channel_scale_uses_per_channel_scheme(self):
+    embed, heads, head_dim = 512, 4, 32
+    rng = np.random.default_rng(7)
+    w_float = rng.uniform(-1.0, 1.0, size=(embed, heads, head_dim)).astype(np.float32)
+    scale_3d = rng.uniform(0.01, 0.05, size=(1, heads, head_dim)).astype(np.float32)
+    w_q = np.clip(np.round(w_float / scale_3d), -448.0, 448.0).astype(ml_dtypes.float8_e4m3fn)
+
+    self.assertEqual(
+        quantizations.resolve_fp8_scale_scheme((embed, heads, head_dim), (1, heads, head_dim), 0), "per_channel"
+    )
+
+    act = jnp.asarray((rng.normal(size=(4, embed)).astype(np.float32) * 0.02).astype(ml_dtypes.bfloat16))
+    out_3d = quantizations.native_fp8_dot_general(
+        act, jnp.asarray(w_q), jnp.asarray(scale_3d), 128, (1,), (0,), compute_dtype=jnp.float32
+    )
+    out_2d = quantizations.native_fp8_dot_general(
+        act, jnp.asarray(w_q), jnp.asarray(scale_3d[0]), None, (1,), (0,), compute_dtype=jnp.float32
+    )
+    np.testing.assert_array_equal(np.asarray(out_3d), np.asarray(out_2d))
+
+  def test_requantize_blockwise_to_per_channel_2d_and_3d(self):
+    w_np, s_np = _load_real("attn_w", "attn_s")  # (512, 4096), (4, 32)
+    out_dim, in_dim = w_np.shape
+    quant = quantizations.ServeFp8WeightQuantization()
+
+    layer_2d = linears.DenseGeneral(
+        in_features_shape=in_dim,
+        out_features_shape=out_dim,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        block_size=128,
+        kernel_axes=("embed", "mlp"),
+        quant=quant,
+        rngs=nnx.Rngs(0),
+    )
+    layer_2d.kernel[...] = jnp.asarray(w_np.T)
+    layer_2d.kernel_scale[...] = jnp.asarray(s_np.T)
+
+    heads, head_dim = 4, 128
+    layer_3d = linears.DenseGeneral(
+        in_features_shape=in_dim,
+        out_features_shape=(heads, head_dim),
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        block_size=128,
+        kernel_axes=("embed_attn", "q_heads", "kv"),
+        quant=quant,
+        rngs=nnx.Rngs(1),
+    )
+    layer_3d.kernel[...] = jnp.asarray(w_np.T.reshape(in_dim, heads, head_dim))
+    layer_3d.kernel_scale[...] = jnp.asarray(s_np.T.reshape(32, heads, 1))
+
+    rng = np.random.default_rng(11)
+    x = jnp.asarray((rng.normal(size=(4, in_dim)).astype(np.float32) * 0.02).astype(ml_dtypes.bfloat16))
+    out_2d_before = np.asarray(layer_2d(x), dtype=np.float32)
+    out_3d_before = np.asarray(layer_3d(x), dtype=np.float32)
+
+    class _Container(nnx.Module):
+
+      def __init__(self, l2, l3):
+        self.l2 = l2
+        self.l3 = l3
+
+    container = _Container(layer_2d, layer_3d)
+    converted = linears.requantize_model_dense_fp8_to_per_channel(container)
+    self.assertEqual(converted, 2)
+    self.assertEqual(layer_2d.kernel_scale[...].shape, (1, out_dim))
+    self.assertEqual(layer_3d.kernel_scale[...].shape, (1, heads, head_dim))
+    self.assertIsNone(layer_2d.block_size)
+    self.assertIsNone(layer_3d.block_size)
+    # Second call is a no-op since both layers are now per-channel.
+    self.assertEqual(linears.requantize_model_dense_fp8_to_per_channel(container), 0)
+
+    out_2d_after = np.asarray(layer_2d(x), dtype=np.float32)
+    out_3d_after = np.asarray(layer_3d(x), dtype=np.float32)
+    relerr_2d = float(np.max(np.abs(out_2d_before - out_2d_after)) / (np.max(np.abs(out_2d_before)) + 1e-12))
+    relerr_3d = float(np.max(np.abs(out_3d_before - out_3d_after)) / (np.max(np.abs(out_3d_before)) + 1e-12))
+    self.assertLess(relerr_2d, 0.05)
+    self.assertLess(relerr_3d, 0.05)
+
+  def test_shared_activation_pre_quantization_reduces_reductions_and_is_bit_identical(self):
+    w_np, s_np = _load_real("attn_w", "attn_s")
+    out_dim, in_dim = w_np.shape
+    block_size = in_dim // s_np.shape[1]
+    quant = quantizations.ServeFp8WeightQuantization()
+
+    proj_a = linears.DenseGeneral(
+        in_features_shape=in_dim,
+        out_features_shape=out_dim,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        block_size=block_size,
+        kernel_axes=("embed", "mlp"),
+        quant=quant,
+        rngs=nnx.Rngs(0),
+    )
+    proj_b = linears.DenseGeneral(
+        in_features_shape=in_dim,
+        out_features_shape=out_dim,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        block_size=block_size,
+        kernel_axes=("embed", "mlp"),
+        quant=quant,
+        rngs=nnx.Rngs(1),
+    )
+    proj_a.kernel[...] = jnp.asarray(w_np.T)
+    proj_a.kernel_scale[...] = jnp.asarray(s_np.T)
+    proj_b.kernel[...] = jnp.asarray(np.roll(w_np.T, 1, axis=1))
+    proj_b.kernel_scale[...] = jnp.asarray(s_np.T)
+
+    rng = np.random.default_rng(19)
+    x = jnp.asarray((rng.normal(size=(2, 4, in_dim)).astype(np.float32) * 0.02).astype(ml_dtypes.bfloat16))
+
+    def unshared_fn(inp):
+      return proj_a(inp), proj_b(inp)
+
+    def shared_fn(inp):
+      q_inp = linears.maybe_quantize_shared_fp8_activations(inp, (proj_a, proj_b))
+      return proj_a(q_inp), proj_b(q_inp)
+
+    out_unshared_a, out_unshared_b = unshared_fn(x)
+    out_shared_a, out_shared_b = shared_fn(x)
+    np.testing.assert_array_equal(np.asarray(out_unshared_a), np.asarray(out_shared_a))
+    np.testing.assert_array_equal(np.asarray(out_unshared_b), np.asarray(out_shared_b))
+
+    jaxpr_unshared = str(jax.make_jaxpr(unshared_fn)(x))
+    jaxpr_shared = str(jax.make_jaxpr(shared_fn)(x))
+    self.assertEqual(jaxpr_unshared.count("reduce_max"), 2)
+    self.assertEqual(jaxpr_shared.count("reduce_max"), 1)
+
+  def test_fp8_dense_fake_quant_matches_native_fp8_forward_and_preserves_ste_gradients(self):
+    in_dim, out_dim = 128, 64
+    rng = np.random.default_rng(23)
+    w_bf16 = jnp.asarray((rng.normal(size=(in_dim, out_dim)).astype(np.float32) * 0.05).astype(ml_dtypes.bfloat16))
+    x = jnp.asarray((rng.normal(size=(4, in_dim)).astype(np.float32) * 0.05).astype(ml_dtypes.bfloat16))
+
+    fake_quant = quantizations.ServeFp8WeightQuantization(fake_quant=True)
+    layer_fq = linears.DenseGeneral(
+        in_features_shape=in_dim,
+        out_features_shape=out_dim,
+        weight_dtype=jnp.bfloat16,
+        dtype=jnp.bfloat16,
+        kernel_axes=("embed", "mlp"),
+        quant=fake_quant,
+        rngs=nnx.Rngs(0),
+    )
+    layer_fq.kernel.value = w_bf16
+
+    fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
+    w_f32 = w_bf16.astype(jnp.float32)
+    w_amax = jnp.max(jnp.abs(w_f32), axis=0, keepdims=True)
+    w_scale = jnp.where(w_amax == 0, 1.0, w_amax / fp8_max).astype(jnp.float32)
+    q_kernel = jnp.clip(w_f32 / w_scale, -fp8_max, fp8_max).astype(jnp.float8_e4m3fn)
+    expected_y = quantizations.native_fp8_dot_general(x, q_kernel, w_scale, None, (1,), (0,), compute_dtype=jnp.bfloat16)
+
+    out_fq = layer_fq(x)
+    np.testing.assert_array_equal(np.asarray(out_fq), np.asarray(expected_y))
+
+    def loss_fn(model, inp):
+      y = model(inp)
+      return jnp.sum(y.astype(jnp.float32) ** 2)
+
+    grad_model, grad_x = nnx.grad(loss_fn, argnums=(0, 1))(layer_fq, x)
+    grad_w = grad_model.kernel[...]
+    self.assertTrue(bool(jnp.all(jnp.isfinite(grad_w))))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(grad_x))))
+    self.assertGreater(float(jnp.linalg.norm(grad_w)), 0.0)
+
+  def test_w8a16_native_fp8_dot_general_and_shared_activations_bypass(self):
+    in_dim, out_dim = 128, 64
+    rng = np.random.default_rng(31)
+    w_bf16 = jnp.asarray((rng.normal(size=(in_dim, out_dim)).astype(np.float32) * 0.05).astype(ml_dtypes.bfloat16))
+    x = jnp.asarray((rng.normal(size=(2, 4, in_dim)).astype(np.float32) * 0.05).astype(ml_dtypes.bfloat16))
+
+    fp8_max = float(jnp.finfo(jnp.float8_e4m3fn).max)
+    w_f32 = w_bf16.astype(jnp.float32)
+    w_amax = jnp.max(jnp.abs(w_f32), axis=0, keepdims=True)
+    w_scale = jnp.where(w_amax == 0, 1.0, w_amax / fp8_max).astype(jnp.float32)
+    q_kernel = jnp.clip(w_f32 / w_scale, -fp8_max, fp8_max).astype(jnp.float8_e4m3fn)
+
+    self.assertTrue(quantizations.is_no_act_quantization("w8a16"))
+    self.assertTrue(quantizations.is_no_act_quantization("none"))
+    self.assertFalse(quantizations.is_no_act_quantization("absmax"))
+
+    out_w8a16 = quantizations.native_fp8_dot_general(
+        x, q_kernel, w_scale, None, (2,), (0,), compute_dtype=jnp.bfloat16, act_calibration_method="w8a16"
+    )
+    expected_w8a16 = (
+        jax.lax.dot_general(x, q_kernel, (((2,), (0,)), ((), ())), preferred_element_type=jnp.float32)
+        * w_scale.reshape(1, 1, out_dim)
+    ).astype(jnp.bfloat16)
+    np.testing.assert_array_equal(np.asarray(out_w8a16), np.asarray(expected_w8a16))
+
+    jaxpr_w8a16 = str(
+        jax.make_jaxpr(
+            lambda inp: quantizations.native_fp8_dot_general(
+                inp, q_kernel, w_scale, None, (2,), (0,), compute_dtype=jnp.bfloat16, act_calibration_method="w8a16"
+            )
+        )(x)
+    )
+    self.assertEqual(jaxpr_w8a16.count("reduce_max"), 0)
+
+    quant_w8a16 = quantizations.ServeFp8WeightQuantization(act_calibration_method="w8a16")
+    proj_a = linears.DenseGeneral(
+        in_features_shape=in_dim,
+        out_features_shape=out_dim,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        kernel_axes=("embed", "mlp"),
+        quant=quant_w8a16,
+        rngs=nnx.Rngs(0),
+    )
+    proj_b = linears.DenseGeneral(
+        in_features_shape=in_dim,
+        out_features_shape=out_dim,
+        weight_dtype=jnp.float8_e4m3fn,
+        dtype=jnp.bfloat16,
+        kernel_axes=("embed", "mlp"),
+        quant=quant_w8a16,
+        rngs=nnx.Rngs(1),
+    )
+    proj_a.kernel[...] = q_kernel
+    proj_a.kernel_scale[...] = w_scale
+    proj_b.kernel[...] = q_kernel
+    proj_b.kernel_scale[...] = w_scale
+
+    shared_inp = linears.maybe_quantize_shared_fp8_activations(x, (proj_a, proj_b))
+    self.assertIs(shared_inp, x)
 
 
 if __name__ == "__main__":

@@ -667,15 +667,26 @@ def _filter_axis_names(
   return filtered or None
 
 
-def fused_moe_lhs_scale_kwargs(quant, fused_moe_fn) -> dict[str, jax.Array]:
-  """Static activation-scale kwargs for tpu-inference's `fused_moe_func`.
+def fused_moe_lhs_scale_kwargs(quant, fused_moe_fn) -> dict[str, Any]:
+  """Activation-quantization kwargs for tpu-inference's `fused_moe_func`.
 
   With `serve_fp8_weight` and a fixed `act_quantization_calibration_method`, both expert
   grouped matmuls quantize their input with the same static per-tensor scale as the dense
-  layers, instead of the kernel's dynamic per-row, per-K-block scale. Returns {} (dynamic
-  scaling, the kernel default) otherwise.
+  layers, instead of the kernel's dynamic per-row, per-K-block scale. With
+  `act_quantization_calibration_method=w8a16` (no activation quantization), the expert
+  grouped matmuls keep their bf16 input too (`quantize_lhs=False`: W8A16 / W4A16 with f32
+  accumulation), matching the dense layers and a trainer that does not quantize activations.
+  Returns {} (dynamic scaling, the kernel default) otherwise.
   """
   if not isinstance(quant, quantizations.ServeFp8WeightQuantization):
+    return {}
+  if quantizations.is_no_act_quantization(quant.act_calibration_method):
+    if "quantize_lhs" in inspect.signature(fused_moe_fn).parameters:
+      return {"quantize_lhs": False}
+    max_logging.log(
+        f"act_quantization_calibration_method={quant.act_calibration_method!r}: this tpu-inference's"
+        " fused_moe_func has no quantize_lhs option, so routed experts keep dynamic FP8 activations."
+    )
     return {}
   scale = quant.static_act_scale()
   if scale is None:
@@ -1595,7 +1606,9 @@ class RoutedMoE(nnx.Module):
           # Padding must stay out of the softmax denominator or it rescales the
           # real slots. Large-negative, not -inf: a fully-padded token would be NaN.
           top_k_weights = jnp.where(valid_token_mask, top_k_weights, jnp.finfo(jnp.float32).min / 2)
-        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1).astype(self.dtype)
+        top_k_weights = jax.nn.softmax(top_k_weights.astype(jnp.float32), axis=-1)
+        if not self.config.norm_topk_prob:
+          top_k_weights = top_k_weights.astype(self.dtype)
 
       if valid_token_mask is not None:
         top_k_weights = top_k_weights * valid_token_mask
@@ -1606,7 +1619,7 @@ class RoutedMoE(nnx.Module):
         if valid_token_mask is not None:
           # A fully-padded token sums to zero; 0/0 would NaN the whole batch loss.
           weight_sum = jnp.where(weight_sum == 0, 1.0, weight_sum)
-        top_k_weights /= weight_sum
+        top_k_weights = (top_k_weights / weight_sum).astype(self.dtype)
 
       if per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
@@ -5229,7 +5242,8 @@ class RoutedMoE(nnx.Module):
       quantized_w1, w1_scale = quantizations.quantize_weight_for_fused_moe(fused_kernel, rule)
       quantized_w2, w2_scale = quantizations.quantize_weight_for_fused_moe(wo_kernel, rule)
     # serve_fp8_weight with a fixed act_quantization_calibration_method: the experts use the
-    # same static activation scale as the dense layers ({} keeps the kernel's dynamic scale).
+    # same static activation scale as the dense layers; with w8a16 they keep bf16 activations
+    # (quantize_lhs=False). {} keeps the kernel's dynamic per-row FP8 activation scale.
     lhs_scale_kwargs = fused_moe_lhs_scale_kwargs(getattr(self, "quant", None), fused_moe_func)
     fused_moe = quantizations.without_qwix_interception(fused_moe_func)
 

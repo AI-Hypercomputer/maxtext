@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Qwen3 family of model decoder layers."""
+
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -56,7 +57,7 @@ from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import PositionalEmbedding, Qwen3OmniMoeVisionPosEmbedInterpolate
 from maxtext.layers.initializers import nd_dense_init
-from maxtext.layers.linears import DenseGeneral, MlpBlock
+from maxtext.layers.linears import DenseGeneral, MlpBlock, maybe_quantize_shared_fp8_activations
 from maxtext.layers.moe import RoutedMoE
 from maxtext.layers.normalizations import Qwen3NextRMSNorm, Qwen3NextRMSNormGated, RMSNorm, l2norm
 from maxtext.layers.quantizations import AqtQuantization as Quant
@@ -235,17 +236,19 @@ def jax_chunk_gated_delta_rule(
   # =========================================================================
   initial_dtype = query.dtype
 
-  if use_qk_norm_in_gdn:
-    query = l2norm(query, dim=-1, eps=1e-6)
-    key = l2norm(key, dim=-1, eps=1e-6)
-
-  g = g.astype(jnp.float32)
-
-  # 2. Cast inputs to the requested compute_dtype (cfg.dtype) to save memory/compute
+  # Run L2 normalization, query scaling, and chunked WY recurrence in float32 to
+  # match the Hugging Face reference (`modeling_qwen3_next.py`) and Rollout's
+  # `tpu_inference` Pallas GDN kernel (`compute_precision = jnp.float32`).
+  compute_dtype = jnp.float32
   query = query.astype(compute_dtype)
   key = key.astype(compute_dtype)
   value = value.astype(compute_dtype)
   beta = beta.astype(compute_dtype)
+  g = g.astype(jnp.float32)
+
+  if use_qk_norm_in_gdn:
+    query = l2norm(query, dim=-1, eps=1e-6)
+    key = l2norm(key, dim=-1, eps=1e-6)
 
   # Scale Query (keep in compute_dtype)
   scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
@@ -766,10 +769,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     # STEP A: Input Projections
     # =========================================================================
+    gdn_inputs = maybe_quantize_shared_fp8_activations(hidden_states, (self.in_proj_qkvz, self.in_proj_ba))
     # qkvz: (B, S, 2 * K_dim + 2 * V_dim)
-    qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
+    qkvz = self.in_proj_qkvz(gdn_inputs, out_sharding=flat_sharding)
     # ba: (B, S, 2 * H_v)
-    ba = self.in_proj_ba(hidden_states, out_sharding=flat_sharding)
+    ba = self.in_proj_ba(gdn_inputs, out_sharding=flat_sharding)
 
     # =========================================================================
     # QKVZ and BA Reshaping and Splitting (shared by both paths)
@@ -1076,10 +1080,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       head_spec = jax.sharding.PartitionSpec(jax.typeof(a).sharding.spec[-1])
       A_log = jax.sharding.reshard(A_log, head_spec)
       dt_bias = jax.sharding.reshard(dt_bias, head_spec)
-    # beta shape: (B, S, H_v)
-    beta = jax.nn.sigmoid(b)
-    # g shape: (B, S, H_v)
-    g = -jnp.exp(A_log) * jax.nn.softplus(a + dt_bias)
+    # beta shape: (B, S, H_v) in float32 to match Rollout Pallas GDN kernel
+    beta = jax.nn.sigmoid(b.astype(jnp.float32))
+    # g shape: (B, S, H_v) in float32 to match Rollout Pallas GDN kernel
+    g = -jnp.exp(A_log.astype(jnp.float32)) * jax.nn.softplus(a.astype(jnp.float32) + dt_bias.astype(jnp.float32))
 
     if decoder_segment_ids is not None:
       mask = decoder_segment_ids != 0
@@ -1324,6 +1328,8 @@ class Qwen3NextFullAttention(nnx.Module):
         head_dim=cfg.head_dim,
         max_target_length=cfg.max_target_length,
         max_prefill_predict_length=cfg.max_prefill_predict_length,
+        float32_qk_product=cfg.float32_qk_product,
+        float32_logits=cfg.float32_logits,
         attention_kernel=cfg.attention,
         inputs_q_shape=dummy_inputs_shape,
         inputs_kv_shape=dummy_inputs_shape,
@@ -1415,8 +1421,8 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           activations=cfg.mlp_activations,
           intermediate_dropout_rate=cfg.dropout_rate,
           dtype=cfg.dtype,
-          weight_dtype=cfg.weight_dtype,
-          quant=self.quant,
+          weight_dtype=get_weight_dtype(cfg, "shared_expert"),
+          quant=get_quant(cfg, "shared_expert", self.quant),
           model_mode=config.model_call_mode,
           rngs=rngs,
       )
