@@ -49,7 +49,13 @@ def install_synthetic_routing(syn_cfg: synthetic_routing.SyntheticRoutingCfg):
   orig_compute_plan_iter = None
 
   if syn_cfg.synthetic_routing_overhead_control:
-    from maxtext.layers import moe_replica_planner as mrp_module  # pylint: disable=import-outside-toplevel
+    try:
+      from maxtext.layers import moe_replica_planner as mrp_module  # pylint: disable=import-outside-toplevel
+    except ImportError as exc:
+      raise ImportError(
+          "--synthetic_routing_overhead_control=true requires maxtext.layers.moe_replica_planner "
+          "(PRs #6300/#6302); on standalone main, moe_replica_planner is not present."
+      ) from exc
 
     orig_compute_plan_iter = mrp_module.compute_plan_iter
 

@@ -380,6 +380,34 @@ class SyntheticRoutingWrapperTest(unittest.TestCase):
       bench_train.main(["train.py", "base.yml", "--synthetic_routing=none"], use_absl_app=True)
       mock_app_run.assert_called_once_with(bench_train.pre_train.main, argv=["train.py", "base.yml"])
 
+  def test_overhead_control_missing_planner_raises_clear_import_error(self):
+    syn_cfg = synthetic_routing.SyntheticRoutingCfg(synthetic_routing_overhead_control=True)
+    with mock.patch.dict("sys.modules", {"maxtext.layers.moe_replica_planner": None}):
+      with self.assertRaisesRegex(ImportError, "requires maxtext.layers.moe_replica_planner"):
+        with bench_train.install_synthetic_routing(syn_cfg):
+          pass
+
+  def test_readme_defaults_match_synthetic_routing_cfg(self):
+    import dataclasses  # pylint: disable=import-outside-toplevel
+    from pathlib import Path as _Path  # pylint: disable=import-outside-toplevel
+
+    defaults = {f.name: f.default for f in dataclasses.fields(synthetic_routing.SyntheticRoutingCfg)}
+    readme = (_Path(__file__).resolve().parents[2] / "benchmarks" / "moe_synthetic_routing" / "README.md").read_text()
+    table_rows = {}
+    for line in readme.splitlines():
+      if line.startswith("| `synthetic_routing"):
+        cols = [c.strip().strip("`") for c in line.strip("|").split("|")]
+        table_rows[cols[0]] = cols[1]
+    self.assertEqual(set(table_rows.keys()), set(defaults.keys()))
+    for key, val in defaults.items():
+      if isinstance(val, bool):
+        expected = "true" if val else "false"
+      elif isinstance(val, str):
+        expected = f'"{val}"'
+      else:
+        expected = str(val)
+      self.assertEqual(table_rows[key], expected, msg=f"README default mismatch for {key}")
+
 
 if __name__ == "__main__":
   unittest.main()

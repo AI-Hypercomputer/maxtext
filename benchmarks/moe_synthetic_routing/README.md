@@ -46,7 +46,8 @@ python3 -m benchmarks.moe_synthetic_routing.train src/maxtext/configs/base.yml \
   --synthetic_routing=balanced
 ```
 
-When benchmarking hot-expert replication (`moe_replica_planner`), pass
+When benchmarking hot-expert replication (requires `#6300`/`#6302`; on standalone
+`main`, `--synthetic_routing_overhead_control=true` raises `ImportError`), pass
 `--synthetic_routing_overhead_control=true` to run the overhead-control ablation
 arm (moves planned replica weights over ICI each step while keeping token routing
 on home experts only).
@@ -55,13 +56,13 @@ on home experts only).
 
 | Option | Default | Description |
 |---|---|---|
-| `synthetic_routing` | `"none"` | `"none"`, `"lognormal"`, or `"balanced"`. |
+| `synthetic_routing` | `"none"` | `"none"`, `"off"`, `"lognormal"`, or `"balanced"`. |
 | `synthetic_routing_seed` | `0` | Base RNG seed for synthetic expert draws. |
-| `synthetic_routing_pool_size` | `8` | Number of pre-generated host routing batches to cycle through. |
-| `synthetic_routing_sigma` | `1.0` | Default log-normal expert popularity spread (`sigma`). |
+| `synthetic_routing_pool_size` | `4` | Number of pre-generated host routing batches to cycle through. |
+| `synthetic_routing_sigma` | `0.25` | Default log-normal expert popularity spread (`sigma`). |
 | `synthetic_routing_sigmas` | `""` | Comma-separated per-layer `sigma` values (overrides `sigma`). |
 | `synthetic_routing_row_tau` | `0.0` | Per-document expert affinity jitter (`0.0` disables). |
 | `synthetic_routing_row_taus` | `""` | Comma-separated per-layer `row_tau` values (overrides `row_tau`). |
 | `synthetic_routing_row_len` | `0` | Mean exponential document length in tokens (`0` = one document per sequence). |
 | `synthetic_routing_profile` | `""` | Optional `.npz` path (`local`, `gs://`, or `/cns/`) with `log_profile` `[P, E]`. |
-| `synthetic_routing_overhead_control` | `false` | Benchmark ablation control: moves planned expert replicas but routes no tokens to them. |
+| `synthetic_routing_overhead_control` | `false` | Benchmark ablation control (requires `#6300`/`#6302`; raises `ImportError` on `main`). |
