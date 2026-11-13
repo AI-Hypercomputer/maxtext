@@ -2578,6 +2578,98 @@ granite_3_0_1b_a400m_dict = {
 }
 granite_3_0_1b_a400m_config = PTConfig(**granite_3_0_1b_a400m_dict)
 
+muse_spark_816b_a42b_dict = {
+    "architectures": ["MuseSparkForConditionalGeneration"],
+    "audio_config": {
+        "conv_kernel_size": 7,
+        "depths": [2, 2, 2, 2],
+        "hidden_act": "gelu",
+        "hidden_sizes": [256, 512, 1024, 2048],
+        "initializer_range": 0.02,
+        "mlp_ratio": 4.0,
+        "model_type": "muse_spark_audio",
+        "num_hidden_layers": 4,
+        "out_hidden_size": 8192,
+        "patch_sizes": [16, 6, 5, 4],
+        "rms_norm_eps": 1e-06,
+    },
+    "audio_token_id": 200038,
+    "dtype": "bfloat16",
+    "image_token_id": 200092,
+    "model_type": "muse_spark",
+    "out_hidden_size": 6144,
+    "projector_hidden_act": "gelu",
+    "projector_hidden_size": 4096,
+    "text_config": {
+        "attention_bias": False,
+        "attention_dropout": 0.0,
+        "bos_token_id": 200000,
+        "eos_token_id": 200001,
+        "final_logit_softcapping": 20.0,
+        "head_dim": 64,
+        "hidden_act": "silu",
+        "hidden_size": 8192,
+        "initializer_range": 0.02,
+        "intermediate_size": 16384,
+        "layer_rope_theta": [0 if (62 - 1 - i) % 4 == 0 else 500000.0 for i in range(62)],
+        "layer_types": ["full_attention" if (62 - 1 - i) % 4 == 0 else "sliding_attention" for i in range(62)],
+        "max_position_embeddings": 1048576,
+        "mlp_layer_types": ["sparse"] * 62,
+        "model_type": "muse_spark_text",
+        "moe_hidden_size": 4096,
+        "moe_intermediate_size": 4096,
+        "num_attention_heads": 128,
+        "num_experts_per_tok": 8,
+        "num_hidden_layers": 62,
+        "num_key_value_heads": 16,
+        "num_local_experts": 256,
+        "num_shared_experts": 0,
+        "output_multiplier": 0.17677669529663687,
+        "pad_token_id": 200018,
+        "post_norm_eps": 1e-08,
+        "qk_scale_factor": 5.4730064863875,
+        "residual_gate_temperature": 0.3,
+        "rms_norm_eps": 1e-05,
+        "rope_parameters": {
+            "rope_theta": 500000.0,
+            "rope_type": "default",
+        },
+        "routed_scaling_factor": 1.0,
+        "sliding_window": 2048,
+        "tie_word_embeddings": False,
+        "use_cache": True,
+        "vocab_size": 202048,
+    },
+    "transformers_version": "5.18.0.dev0",
+    "video_token_id": 200091,
+    "vision_config": {
+        "hidden_act": "gelu",
+        "hidden_size": 1536,
+        "intermediate_size": 8960,
+        "layer_norm_eps": 1e-05,
+        "layer_types": (["window_attention"] * 3 + ["full_attention"]) * 12 + ["window_attention", "full_attention"],
+        "max_position_embeddings": 1024,
+        "merge_size": 2,
+        "model_type": "muse_spark_vision",
+        "num_attention_heads": 16,
+        "num_hidden_layers": 50,
+        "patch_size": 14,
+        "patch_temporal": 2,
+        "pos_emb_height": 32,
+        "pos_emb_width": 32,
+        "rope_parameters": {
+            "rope_theta": 10000,
+            "rope_type": "axial",
+        },
+    },
+}
+try:
+  muse_spark_816b_a42b_config = transformers.MuseSparkConfig(
+      **muse_spark_816b_a42b_dict
+  )  # pyrefly: ignore[missing-attribute]
+except AttributeError:
+  muse_spark_816b_a42b_config = PTConfig(**muse_spark_816b_a42b_dict)  # pytype: disable=wrong-arg-types
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
@@ -2643,4 +2735,5 @@ HF_MODEL_CONFIGS = {
     "olmo3-32b": olmo3_32b_config,
     "ming-3.0-audio-tiny": ming_3_0_audio_tiny_config,
     "granite-3.0-1b-a400m": granite_3_0_1b_a400m_config,
+    "muse-spark-816b-a42b": muse_spark_816b_a42b_config,
 }

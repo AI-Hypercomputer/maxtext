@@ -158,6 +158,7 @@ class DecoderBlockType(enum.Enum):
   WEAVER = "weaver"
   MING = "ming"
   HY4 = "hy4"
+  MUSE_SPARK = "muse_spark"
 
 
 class VisionEncoderBlockType(enum.Enum):
