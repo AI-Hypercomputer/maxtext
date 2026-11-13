@@ -1990,6 +1990,44 @@ class MoEKernels(BaseModel):
           "Tie token input cotangents to expert weight cotangents in m3 MoE backward to overlap wgrad reduce-scatter."
       ),
   )
+  moe_dropless_buffer_factor: float = Field(
+      -1.0,
+      description=(
+          "Receive-buffer sizing factor for m3 MoE EP ragged_all_to_all dispatch: -1.0 auto-selects 2.0 when "
+          "ep_size >= 8 and single-round unbounded (ep_size * num_slots) when ep_size < 8; 0.0 (or >= ep_size) "
+          "forces single-round unbounded buffer at any ep_size; any explicit 0.0 < factor < ep_size activates "
+          "capacity-bounded multi-round overflow scan with zero token drops."
+      ),
+  )
+
+  @classmethod
+  def _check_moe_dropless_buffer_factor(cls, v: Any) -> float:
+    """Rejects bool coercion, non-finite values, and negative values other than -1.0."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+      raise ValueError(f"moe_dropless_buffer_factor must be a float (-1.0, 0.0, or > 0.0); got {v!r}.")
+    val = float(v)
+    if not math.isfinite(val) or (val < 0.0 and val != -1.0):
+      raise ValueError(f"moe_dropless_buffer_factor must be -1.0 (auto), 0.0, or > 0.0; got {v!r}.")
+    return val
+
+  _validate_moe_dropless_buffer_factor = field_validator("moe_dropless_buffer_factor", mode="before")(
+      _check_moe_dropless_buffer_factor
+  )
+
+  @model_validator(mode="after")
+  def validate_moe_dropless_buffer_exclusivity(self) -> "MoEKernels":
+    """Rejects positive moe_dropless_buffer_factor combined with token-dropping buffer caps."""
+    if self.moe_dropless_buffer_factor > 0.0:
+      rbf = float(getattr(self, "ragged_buffer_factor", -1.0) or 0.0)
+      cf = float(getattr(self, "capacity_factor", -1.0) or 0.0)
+      if rbf > 0.0 or cf > 0.0:
+        raise ValueError(
+            "moe_dropless_buffer_factor > 0.0 cannot both be set with ragged_buffer_factor > 0.0 or "
+            f"capacity_factor > 0.0 (got moe_dropless_buffer_factor={self.moe_dropless_buffer_factor}, "
+            f"ragged_buffer_factor={rbf}, capacity_factor={cf})."
+        )
+    return self
+
   wi_tile_fwd_batch_seq: int = Field(
       512,
       description="forward pass tiling dimension for batch/sequence in GMM for wi.",
