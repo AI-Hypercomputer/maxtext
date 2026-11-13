@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-13 18:14:16 UTC`
+- **Last Updated (UTC):** `2026-11-13 18:22:58 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -15,7 +15,7 @@
 |---|---|---:|---:|---|---|
 | `v7x` | `us-central1` | **21 / 21** | **51 / 61** | `mesa-q-v7x-2x2x1-2s-w36`, `mesa-q-v7x-2x2x1-2s-w37`, `mesa-q-v7x-2x2x1-2s-w38`, `mesa-q-v7x-2x2x1-2s-w42`, `mesa-q-v7x-2x2x1-2s-w43`, `mesa-q-v7x-2x2x1-2s-w44`, `mesa-q-v7x-2x2x2-1s-w40`, `mesa-q-v7x-2x4x4-1s-w11` | _none_ |
 | `v6e` | `southamerica-west1` | **21 / 21** | **53 / 53** | _none_ | _none_ |
-| `v5e` | `europe-west4` | **12 / 12** | **13 / 22** | `mesa-q-v5e-16x16-1s-w2`, `mesa-q-v5e-16x16-1s-w99` | _none_ |
+| `v5e` | `europe-west4` | **12 / 12** | **14 / 22** | `mesa-q-v5e-16x16-1s-w2`, `mesa-q-v5e-16x16-1s-w99` | _none_ |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
 
@@ -140,3 +140,5 @@
 - [2026-11-13 18:04:16 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1123 mirrored JSONs.
 - [2026-11-13 18:09:30 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1132 mirrored JSONs.
 - [2026-11-13 18:14:16 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1133 mirrored JSONs.
+- [2026-11-13 18:18:37 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1134 mirrored JSONs.
+- [2026-11-13 18:22:58 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1142 mirrored JSONs.
