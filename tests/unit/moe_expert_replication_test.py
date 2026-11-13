@@ -108,40 +108,24 @@ class ExpertReplicationConfigTest(absltest.TestCase):
   def test_defaults_off(self):
     cfg = self._init()
     self.assertEqual(cfg.expert_replicas_per_device, 0)
-    self.assertEqual(cfg.expert_replica_plan, "online")
-    self.assertEqual(cfg.expert_replica_planner, "rounds")
-    self.assertEqual(cfg.expert_replica_impl, "auto")
-    self.assertEqual(cfg.expert_replica_move, "direct")
-    self.assertFalse(cfg.expert_replica_identity)
-    self.assertFalse(cfg.expert_replica_overhead_control)
-    self.assertFalse(cfg.log_ra2a_required_rbf)
+    self.assertEqual(cfg.expert_replica_max_send, 4)
+    self.assertEqual(cfg.expert_replica_board_size, 8)
 
   def test_flags_parse(self):
     cfg = self._init(
         expert_replicas_per_device=4,
         expert_replica_max_send=3,
-        expert_replica_plan="lagged",
-        expert_replica_planner="greedy",
-        expert_replica_impl="concat",
-        expert_replica_move="gather",
-        expert_replica_overhead_control=True,
-        log_ra2a_required_rbf=True,
+        expert_replica_board_size=16,
     )
     self.assertEqual(cfg.expert_replicas_per_device, 4)
     self.assertEqual(cfg.expert_replica_max_send, 3)
-    self.assertEqual(cfg.expert_replica_plan, "lagged")
-    self.assertEqual(cfg.expert_replica_planner, "greedy")
-    self.assertEqual(cfg.expert_replica_impl, "concat")
-    self.assertEqual(cfg.expert_replica_move, "gather")
-    self.assertTrue(cfg.expert_replica_overhead_control)
-    self.assertTrue(cfg.log_ra2a_required_rbf)
+    self.assertEqual(cfg.expert_replica_board_size, 16)
 
-  def test_invalid_choices_rejected(self):
+  def test_invalid_bounds_rejected(self):
     for kw in (
-        {"expert_replica_planner": "bogus"},
-        {"expert_replica_impl": "bogus"},
-        {"expert_replica_move": "bogus"},
-        {"expert_replica_plan": "bogus"},
+        {"expert_replicas_per_device": -1},
+        {"expert_replica_max_send": 0},
+        {"expert_replica_board_size": 0},
     ):
       with self.subTest(kw=kw):
         with self.assertRaises((pydantic.ValidationError, ValueError)):
@@ -180,8 +164,8 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
     kwargs.update(overrides)
     cfg = pyconfig.initialize([None, get_test_config_path()], **kwargs)
     fake_mesh = types.SimpleNamespace(
-        axis_names=("data", "fsdp", "expert", "tensor"),
-        shape={"data": 1, "fsdp": 1, "expert": num_ep, "tensor": 1},
+        axis_names=("expert",),
+        shape={"expert": num_ep},
         devices=np.array([jax.devices()[0]]),
         local_devices=[jax.devices()[0]],
         empty=False,
@@ -334,12 +318,11 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
     """Verifies permute() remaps logical experts into EP*(L+R) physical bins via physical_route_fn."""
     num_ep, local_experts, num_replicas = 2, 2, 1
     num_slots = local_experts + num_replicas
-    total_bins = num_ep * num_slots  # 6 physical bins: [0,1,2] on shard 0; [3,4,5] on shard 1.
+    total_bins = num_ep * num_slots
     layer = self._make_layer(num_ep=num_ep, num_experts=num_ep * local_experts, num_experts_per_tok=2)
 
     inputs = jnp.arange(2 * 3 * 16, dtype=jnp.float32).reshape(2, 3, 16)
     gate_logits = jax.random.normal(jax.random.PRNGKey(0), (2, 3, 4), dtype=jnp.float32)
-    # 6 tokens * top-2 = 12 selections; expert 0 is selected 6 times.
     forced = jnp.array(
         [
             [[0, 1], [0, 2], [0, 3]],
@@ -347,7 +330,6 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
         ],
         dtype=jnp.int32,
     )
-    # Map logical [0, 1, 2, 3] -> home bins [0, 1, 3, 4], rerouting the second half of expert-0 hits to replica bin 5.
     base_map = jnp.array([0, 1, 3, 4], dtype=jnp.int32)
     replica_bin = 5
 
@@ -369,86 +351,11 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
     )
     self.assertEqual(group_sizes.shape, (total_bins,))
     self.assertEqual(int(jnp.sum(group_sizes)), forced.size)
-    # Bins: [home0=3, home1=2, rep_shard0=0, home2=2, home3=2, rep_shard1=3].
     np.testing.assert_array_equal(np.asarray(group_sizes), np.array([3, 2, 0, 2, 2, 3], dtype=np.int32))
-    # Last 3 rows of sorted_inputs belong to replica_bin=5, which came from batch index 1 tokens (positions 6, 8, 10).
     np.testing.assert_allclose(np.asarray(sorted_inputs[-3:]), np.asarray(inputs[1]), atol=1e-6)
 
-  def test_lagged_plan_updates_batch_stat(self):
-    """Verifies lagged mode updates expert_replica_load BatchStat with zero gradient leakage."""
-    num_ep, num_experts = 2, 4
-    layer = self._make_layer(
-        num_ep=num_ep,
-        num_experts=num_experts,
-        num_experts_per_tok=2,
-        expert_replicas_per_device=1,
-        expert_replica_plan="lagged",
-    )
-    self.assertIsInstance(layer.expert_replica_load, nnx.BatchStat)
-    np.testing.assert_array_equal(np.asarray(layer.expert_replica_load[...]), np.zeros((num_experts,), np.float32))
-
-    rng = jax.random.PRNGKey(7)
-    k_in, k_log, k_w0, k_w1, k_wo = jax.random.split(rng, 5)
-    inputs = jax.random.normal(k_in, (4, 4, 16), jnp.float32)
-    logits = jax.random.normal(k_log, (4, 4, num_experts), jnp.float32)
-    w0 = jax.random.normal(k_w0, (num_experts, 16, 8), jnp.float32) * 0.2
-    w1 = jax.random.normal(k_w1, (num_experts, 16, 8), jnp.float32) * 0.2
-    wo = jax.random.normal(k_wo, (num_experts, 8, 16), jnp.float32) * 0.2
-    forced = jnp.array(
-        [
-            [[0, 1], [0, 1], [0, 2], [0, 1]],
-            [[0, 1], [0, 1], [0, 3], [0, 1]],
-            [[0, 1], [0, 2], [0, 1], [0, 1]],
-            [[0, 1], [0, 3], [2, 3], [0, 1]],
-        ],
-        dtype=jnp.int32,
-    )
-
-    with self._cpu_ep_runtime(layer, num_ep=num_ep):
-      # Differentiate the recorded BatchStat sum wrt inputs and gate_logits (using top-k routing) to verify
-      # jax.lax.stop_gradient prevents any gradient leakage through expert_replica_load.
-      def stat_only_loss(m, x, g):
-        _ = m.sparse_matmul(x, g, None, w0, w1, wo, None, None, None)
-        return jnp.sum(m.expert_replica_load[...])
-
-      gx, gg = nnx.grad(stat_only_loss, argnums=(1, 2))(layer, inputs, logits)
-      np.testing.assert_array_equal(np.asarray(gx), np.zeros_like(inputs))
-      np.testing.assert_array_equal(np.asarray(gg), np.zeros_like(logits))
-
-      # Reset to zero, then run step 1 with forced_routed_experts and check exact per-expert counts.
-      layer.expert_replica_load[...] = jnp.zeros((num_experts,), jnp.float32)
-      _ = layer.sparse_matmul(inputs, logits, None, w0, w1, wo, None, None, None, forced_routed_experts=forced)
-      expected_counts = np.bincount(np.asarray(forced).ravel(), minlength=num_experts).astype(np.float32)
-      np.testing.assert_array_equal(np.asarray(layer.expert_replica_load.value), expected_counts)
-
-    # Step 2 consumes the non-zero lagged_load recorded in step 1, places a replica on shard 1, and matches R=0.
-    cotangent = jax.random.normal(jax.random.PRNGKey(99), (4, 4, 16), jnp.float32)
-    captured_step2 = {}
-    with self._cpu_ep_runtime(layer, num_ep=num_ep, cotangent=cotangent, captured=captured_step2):
-      out_lagged, _, _ = layer.sparse_matmul(
-          inputs, logits, None, w0, w1, wo, None, None, None, forced_routed_experts=forced
-      )
-    self.assertGreater(int(np.asarray(captured_step2["local_group_sizes"])[1, -1]), 0)
-
-    base_layer = self._make_layer(num_ep=num_ep, num_experts=num_experts, num_experts_per_tok=2)
-    captured_base = {}
-    with self._cpu_ep_runtime(base_layer, num_ep=num_ep, cotangent=cotangent, captured=captured_base):
-      out_base, _, _ = base_layer.sparse_matmul(
-          inputs, logits, None, w0, w1, wo, None, None, None, forced_routed_experts=forced
-      )
-    np.testing.assert_allclose(np.asarray(out_lagged), np.asarray(out_base), rtol=1e-5, atol=1e-5)
-    for g_lag, g_ref in zip(captured_step2["grads"], captured_base["grads"]):
-      np.testing.assert_allclose(np.asarray(g_lag), np.asarray(g_ref), rtol=1e-5, atol=1e-5)
-
-  @parameterized.named_parameters(
-      ("concat_direct", "concat", "direct", "rounds", False, False),
-      ("concat_gather", "concat", "gather", "greedy", False, False),
-      ("split", "split", "direct", "rounds", False, False),
-      ("overhead_control", "concat", "direct", "rounds", True, False),
-      ("split_return_weights", "split", "direct", "rounds", False, True),
-  )
-  def test_end_to_end_sparse_matmul_parity_on_cpu(self, impl, move, planner, overhead_control, return_weights):
-    """Verifies forward output and (dx, dlogits, dw0, dw1, dwo) match R=0 across all replication modes."""
+  def test_end_to_end_sparse_matmul_parity_and_required_rbf(self):
+    """Verifies forward output, (dx, dlogits, dw0, dw1, dwo), and lowered required_rbf match R=0 on skewed traffic."""
     num_ep, num_experts = 2, 4
     rng = jax.random.PRNGKey(42)
     k_in, k_log, k_w0, k_w1, k_wo, k_cot = jax.random.split(rng, 6)
@@ -469,48 +376,42 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
         dtype=jnp.int32,
     )
 
-    def run_fwd_bwd(layer, force_ret_w=False):
+    def run_fwd_bwd(layer):
       captured = {}
-      with self._cpu_ep_runtime(
-          layer, num_ep=num_ep, cotangent=cotangent, force_return_weights=force_ret_w, captured=captured
-      ):
+      with self._cpu_ep_runtime(layer, num_ep=num_ep, cotangent=cotangent, captured=captured):
         out, _, _ = layer.sparse_matmul(inputs, logits, None, w0, w1, wo, None, None, None, forced_routed_experts=forced)
-      return out, captured["grads"], captured
+      req = float(np.asarray(nnx.pop(layer, nnx.Intermediate)["moe_required_rbf"].get_value()[0]))
+      return out, captured["grads"], captured, req
 
     base_layer = self._make_layer(
-        num_ep=num_ep, num_experts=num_experts, num_experts_per_tok=2, expert_replicas_per_device=0
+        num_ep=num_ep,
+        num_experts=num_experts,
+        num_experts_per_tok=2,
+        expert_replicas_per_device=0,
+        log_required_ragged_buffer_factor=True,
     )
-    out_ref, grads_ref, _ = run_fwd_bwd(base_layer)
+    out_ref, grads_ref, _, req_base = run_fwd_bwd(base_layer)
 
     rep_layer = self._make_layer(
         num_ep=num_ep,
         num_experts=num_experts,
         num_experts_per_tok=2,
         expert_replicas_per_device=1,
-        expert_replica_impl=impl,
-        expert_replica_move=move,
-        expert_replica_planner=planner,
-        expert_replica_overhead_control=overhead_control,
+        expert_replica_max_send=2,
+        expert_replica_board_size=2,
+        log_required_ragged_buffer_factor=True,
     )
-    out_rep, grads_rep, captured = run_fwd_bwd(rep_layer, force_ret_w=return_weights)
+    out_rep, grads_rep, captured, req_rep = run_fwd_bwd(rep_layer)
 
-    # Confirm the replica slot on shard 1 actually received tokens (unless overhead_control zeroes replica routing).
-    local_gs = np.asarray(captured["local_group_sizes"])  # shape: [num_ep, local_experts + num_replicas]
-    if overhead_control:
-      self.assertEqual(int(local_gs[:, -1].sum()), 0)
-    else:
-      self.assertGreater(int(local_gs[1, -1]), 0)
+    # Replica slot on shard 1 received offloaded expert-0 tokens and reduced required_rbf.
+    local_gs = np.asarray(captured["local_group_sizes"])
+    self.assertGreater(int(local_gs[1, -1]), 0)
+    self.assertLess(req_rep, req_base)
 
     np.testing.assert_allclose(np.asarray(out_rep), np.asarray(out_ref), rtol=1e-5, atol=1e-5)
     for name, g_rep, g_ref in zip(("dx", "dlogits", "dw0", "dw1", "dwo"), grads_rep, grads_ref):
       with self.subTest(grad=name):
         np.testing.assert_allclose(np.asarray(g_rep), np.asarray(g_ref), rtol=1e-5, atol=1e-5)
-
-    if return_weights:
-      ret_w0, ret_w1, ret_wo = captured["ret_weights"]
-      np.testing.assert_allclose(np.asarray(ret_w0).reshape(w0.shape), np.asarray(w0), atol=1e-6)
-      np.testing.assert_allclose(np.asarray(ret_w1).reshape(w1.shape), np.asarray(w1), atol=1e-6)
-      np.testing.assert_allclose(np.asarray(ret_wo).reshape(wo.shape), np.asarray(wo), atol=1e-6)
 
   def test_guardrails_raise_on_unsupported_configs(self):
     """Verifies unsupported MoE configurations raise explicit errors when expert replication is enabled."""
@@ -547,6 +448,12 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
       with self._cpu_ep_runtime(layer, num_ep=2):
         with self.assertRaisesRegex(NotImplementedError, "MoE biases"):
           layer.sparse_matmul(inputs, logits, None, w0, w1, wo, w0_bias, None, None)
+
+    with self.subTest("return_weights"):
+      layer = self._make_layer(expert_replicas_per_device=1)
+      with self._cpu_ep_runtime(layer, num_ep=2, force_return_weights=True):
+        with self.assertRaisesRegex(NotImplementedError, "moe_accumulate_chunk_wgrad"):
+          layer.sparse_matmul(inputs, logits, None, w0, w1, wo, None, None, None)
 
 
 if __name__ == "__main__":

@@ -1196,6 +1196,21 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
   )
+  expert_replicas_per_device: int = Field(
+      0,
+      ge=0,
+      description="Online hot-expert replication on the ragged all-to-all path: replica slots per EP device (0=off).",
+  )
+  expert_replica_max_send: int = Field(
+      4,
+      ge=1,
+      description="Max replicas a single home device sends per layer.",
+  )
+  expert_replica_board_size: int = Field(
+      8,
+      ge=1,
+      description="EP devices per physical board/tray (planner prefers same-board sources).",
+  )
   moe_dropless_fallback: Literal["step", "layer"] | None = Field(
       None,
       description=(
