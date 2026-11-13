@@ -812,5 +812,149 @@ class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
           np.testing.assert_allclose(np.asarray(g), np.asarray(d), rtol=1e-6, atol=1e-6)
 
 
+class _ToyQuantLayer(nnx.Module):
+  """Two-projection layer `(x @ w1) @ w2` with non-square weights for Qwix interception tests."""
+
+  def __init__(self, dim, hidden_dim, rngs):
+    self.w1 = nnx.Param(jax.random.normal(rngs.params(), (dim, hidden_dim)) / dim**0.5)
+    self.w2 = nnx.Param(jax.random.normal(rngs.params(), (hidden_dim, dim)) / hidden_dim**0.5)
+
+  def __call__(self, x):
+    x = ad_checkpoint.checkpoint_name(x, "decoder_layer_input")
+    h = ad_checkpoint.checkpoint_name(jnp.tanh(jnp.einsum("bd,dh->bh", x, self.w1[...])), "mlpwi")
+    return jnp.einsum("bh,hd->bd", h, self.w2[...]), None
+
+
+class _ToyQuantModel(nnx.Module):
+  """Root module wrapped by `qwix.quantize_model`, which deactivates interception when `__call__` returns."""
+
+  def __init__(self, length, dim, hidden_dim):
+    @nnx.split_rngs(splits=length)
+    @nnx.vmap(in_axes=(0,), out_axes=0)
+    def make_layers(rngs):
+      return _ToyQuantLayer(dim, hidden_dim, rngs)
+
+    self.layers = make_layers(nnx.Rngs(params=0))
+    self.length = length
+
+  def __call__(self, x, *, mesh=None, config=None, remat_policy=None, prefetch=True):
+    if not prefetch or mesh is None:
+      graphdef, params, state = nnx.split(self.layers, nnx.Param, ...)
+      for i in range(self.length):
+        layer = nnx.merge(
+            graphdef,
+            jax.tree.map(lambda v, i=i: v[i], params),
+            jax.tree.map(lambda v, i=i: v[i], state),
+        )
+        x, _ = layer(x)
+      return x
+    y, _, _ = fsdp_prefetch.apply_layers_with_fsdp_prefetch(
+        self.layers, x, length=self.length, mesh=mesh, config=config, remat_policy=remat_policy
+    )
+    return y
+
+
+class FsdpPrefetchQwixQuantizationTest(unittest.TestCase):
+  """`custom_vjp` backward pass preserves Qwix quantization traced during the root module's `__call__`."""
+
+  def test_rejects_explicit_sharding_when_qwix_lacks_explicit_sharding_support(self):
+    import qwix  # pylint: disable=import-outside-toplevel
+    from maxtext.configs import pyconfig  # pylint: disable=import-outside-toplevel
+    from maxtext.configs import types as config_types  # pylint: disable=import-outside-toplevel
+
+    mesh = _abstract_mesh((4,), ("fsdp",))
+    length, batch, dim, hidden_dim = 2, 4, 8, 16
+    base_model = _ToyQuantModel(length, dim, hidden_dim)
+    rules = [
+        qwix.QtRule(
+            module_path=".*",
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=jnp.float8_e5m2,
+        )
+    ]
+    q_model = qwix.quantize_model(base_model, qwix.QtProvider(rules), jnp.ones((batch, dim)))
+    config = types.SimpleNamespace(
+        param_scan_axis=0,
+        shard_mode=ShardMode.EXPLICIT,
+        debug_sharding=False,
+        prefetch_fsdp_defer_grad_reduce_scatter=True,
+        decoder_layer_input="device",
+    )
+    with unittest.mock.patch.object(fsdp_prefetch, "qwix_supports_explicit_sharding", return_value=False):
+      with self.assertRaisesRegex(ValueError, "google/qwix#455"):
+        q_model(jnp.ones((batch, dim)), mesh=mesh, config=config, remat_policy=None, prefetch=True)
+
+    with unittest.mock.patch.object(config_types, "_qwix_supports_explicit_sharding", return_value=False):
+      with self.assertRaisesRegex(ValueError, "google/qwix#455"):
+        pyconfig.initialize(
+            [
+                "",
+                "base_output_directory=gs://unused",
+                "run_name=test",
+                "prefetch_fsdp_weights=True",
+                "shard_mode=explicit",
+                "quantization=fp8_full",
+                "use_qwix_quantization=True",
+            ]
+        )
+
+  def test_backward_pass_preserves_qwix_fp8_quantization_and_matches_reference(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    if not fsdp_prefetch.qwix_supports_explicit_sharding():
+      self.skipTest("Requires qwix with explicit sharding support (google/qwix#455).")
+    import qwix  # pylint: disable=import-outside-toplevel
+
+    mesh = jax.make_mesh((4,), ("fsdp",), axis_types=(AxisType.Explicit,), devices=jax.devices()[:4])
+    length, batch, dim, hidden_dim = 4, 8, 16, 32
+    base_model = _ToyQuantModel(length, dim, hidden_dim)
+    rules = [
+        qwix.QtRule(
+            module_path=".*",
+            weight_qtype=jnp.float8_e4m3fn,
+            act_qtype=jnp.float8_e4m3fn,
+            bwd_qtype=jnp.float8_e5m2,
+        )
+    ]
+    q_model = qwix.quantize_model(base_model, qwix.QtProvider(rules), jnp.ones((batch, dim)))
+    graphdef, params, state = nnx.split(q_model, nnx.Param, ...)
+    x_np = np.random.default_rng(0).standard_normal((batch, dim)).astype(np.float32)
+    config = types.SimpleNamespace(
+        param_scan_axis=0,
+        shard_mode=ShardMode.EXPLICIT,
+        debug_sharding=False,
+        prefetch_fsdp_defer_grad_reduce_scatter=True,
+        decoder_layer_input="device",
+    )
+    custom_policy = jax.checkpoint_policies.save_only_these_names("mlpwi", "decoder_layer_input")
+
+    for policy in (None, custom_policy):
+      with self.subTest(remat_policy="full" if policy is None else "custom"):
+
+        def loss(p, x, policy=policy):
+          m = nnx.merge(graphdef, p, state)
+          y = m(x, mesh=mesh, config=config, remat_policy=policy, prefetch=True)
+          return (y * y).sum()
+
+        def ref_loss(p, x):
+          m = nnx.merge(graphdef, p, state)
+          y = m(x, mesh=mesh, config=config, remat_policy=None, prefetch=False)
+          return (y * y).sum()
+
+        with jax.set_mesh(mesh):
+          p_sharded = jax.tree.map(lambda v: jax.device_put(v, PartitionSpec(None, "fsdp", None)), params)
+          x = jax.device_put(x_np, PartitionSpec("fsdp", None))
+          grads = jax.jit(jax.grad(loss))(p_sharded, x)
+          ref_grads = jax.jit(jax.grad(ref_loss))(p_sharded, x)
+          grad_jaxpr = str(jax.make_jaxpr(jax.grad(loss))(p_sharded, x))
+
+        # The backward pass must use float8_e5m2 gradients (proving `_bwd` reused the forward-traced VJP layout)
+        # and match the quantized non-prefetched reference gradients.
+        self.assertIn("float8_e5m2", grad_jaxpr)
+        for got, want in zip(jax.tree.leaves(grads), jax.tree.leaves(ref_grads)):
+          np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+
+
 if __name__ == "__main__":
   unittest.main()
