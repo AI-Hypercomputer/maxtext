@@ -1761,7 +1761,17 @@ class Qwen3_8BackboneTest(absltest.TestCase):
     self.assertEqual(out_s.dtype, jnp.bfloat16)
     self.assertTrue(jnp.all(jnp.isfinite(out_u)))
     self.assertTrue(jnp.all(jnp.isfinite(out_s)))
-    np.testing.assert_allclose(out_u, out_s, atol=1e-1, rtol=1e-1)
+    # Scanned and unscanned paths compile to different XLA programs, so bf16
+    # rounding diverges across 4 layers and a handful of elements drift by up to
+    # ~0.2. Exact cross-path logic is covered by the fp32 parity test above; here
+    # bound the element-wise and mean error so gross bf16 regressions still fail
+    # without depending on exact fusion decisions.
+    # TODO(chengnuojin): Follow up with the XLA team on the bf16 drift introduced by the
+    # ReshapeMover change that keeps data-reordering rearranges before widening converts,
+    # and tighten these bounds again if it is resolved.
+    out_u32, out_s32 = np.asarray(out_u, np.float32), np.asarray(out_s, np.float32)
+    np.testing.assert_allclose(out_u32, out_s32, atol=2.5e-1, rtol=1e-1)
+    self.assertLess(float(np.mean(np.abs(out_u32 - out_s32))), 5e-2)
 
   def test_scanned_cycles_fail_fast_validation(self):
     """Verifies fail-fast validation in scanned cycle construction."""
