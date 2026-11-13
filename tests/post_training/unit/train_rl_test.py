@@ -1146,6 +1146,56 @@ class RLGoodputTest(unittest.TestCase):
     mock_recorder = self._run_rl_train_with_goodput(enable_goodput_recording=False)
     self.assertEqual(len(mock_recorder.method_calls), 0)
 
+  def test_rl_config_rejects_load_balanced_cp(self):
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      types.RLConfig(
+          model_name="gemma4-26b",
+          ici_context_parallelism=2,
+          context_parallel_load_balance=True,
+      )
+
+    cfg = types.RLConfig(
+        model_name="gemma4-26b",
+        ici_context_parallelism=2,
+        context_parallel_load_balance=False,
+    )
+    self.assertFalse(cfg.context_parallel_load_balance)
+    self.assertEqual(cfg.ici_context_parallelism, 2)
+
+  def test_rl_train_rejects_resolved_cp_mesh_when_load_balance_enabled(self):
+    trainer_config = SimpleNamespace(
+        managed_mldiagnostics=False,
+        enable_goodput_recording=False,
+        monitor_goodput=False,
+        tokenizer_path="tok",
+        hf_access_token="",
+        context_parallel_load_balance=True,
+        ici_context_parallelism=-1,
+        dcn_context_parallelism=1,
+        context_sharding="context",
+        rl=SimpleNamespace(use_agentic_rollout=False, profiler_max_num_hosts=1),
+    )
+    sampler_config = SimpleNamespace(debug=SimpleNamespace(rl=False))
+
+    with (
+        mock.patch.object(
+            train_rl.model_creation_utils,
+            "setup_configs_and_devices",
+            return_value=(trainer_config, sampler_config, [mock.MagicMock()], [mock.MagicMock()]),
+        ),
+        mock.patch.object(
+            train_rl.maxtext_utils,
+            "get_mesh_from_config",
+            return_value=SimpleNamespace(shape={"context": 2}),
+        ),
+        mock.patch.object(train_rl.AutoTokenizer, "from_pretrained") as mock_tokenizer,
+        mock.patch.object(train_rl.model_creation_utils, "create_models_and_meshes") as mock_create_models,
+    ):
+      with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+        train_rl.rl_train(["dummy"], {})
+      mock_tokenizer.assert_not_called()
+      mock_create_models.assert_not_called()
+
 
 if __name__ == "__main__":
   unittest.main()

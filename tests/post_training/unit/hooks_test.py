@@ -169,7 +169,7 @@ class BaseHooksTest(unittest.TestCase):
     hooks.on_train_end(self.mock_train_ctx)
     mock_recorder.record_step_start_time.assert_called_once_with(3)
 
-  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  @patch.object(post_train_hooks, "create_data_iterator")
   def test_load_next_train_batch_stop_iteration_returns_none(self, mock_create_data_iterator):
     mock_train_iter = MagicMock()
     mock_train_iter.__next__.side_effect = StopIteration()
@@ -180,7 +180,7 @@ class BaseHooksTest(unittest.TestCase):
     self.assertIsNone(batch)
     self.assertIsNone(data_hooks.train_batch)
 
-  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  @patch.object(post_train_hooks, "create_data_iterator")
   def test_load_next_train_batch_propagates_unexpected_exception(self, mock_create_data_iterator):
     mock_train_iter = MagicMock()
     mock_train_iter.__next__.side_effect = IndexError("list index out of range")
@@ -191,7 +191,7 @@ class BaseHooksTest(unittest.TestCase):
       data_hooks.load_next_train_batch(self.mock_train_ctx)
     self.assertIsInstance(cm.exception.__cause__, IndexError)
 
-  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  @patch.object(post_train_hooks, "create_data_iterator")
   def test_load_next_eval_batch_stop_iteration_returns_none(self, mock_create_data_iterator):
     mock_eval_iter = MagicMock()
     mock_eval_iter.__next__.side_effect = StopIteration()
@@ -202,7 +202,7 @@ class BaseHooksTest(unittest.TestCase):
     self.assertIsNone(batch)
     self.assertIsNone(data_hooks.eval_batch)
 
-  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  @patch.object(post_train_hooks, "create_data_iterator")
   def test_load_next_eval_batch_propagates_unexpected_exception(self, mock_create_data_iterator):
     mock_eval_iter = MagicMock()
     mock_eval_iter.__next__.side_effect = RuntimeError("eval data stream failed")

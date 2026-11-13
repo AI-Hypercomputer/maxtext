@@ -17,7 +17,7 @@ All the functions include MaxText modules, such as Pyconfig, should be moved to 
 """
 
 import collections
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import functools
 from functools import partial
 import os
@@ -1076,6 +1076,38 @@ def reordered_cp_size(config, mesh) -> int:
   if mesh is None or not getattr(config, "context_parallel_load_balance", False):
     return 1
   return mesh.shape.get(config.context_sharding, 1)
+
+
+def check_no_load_balanced_context_parallelism(config, entrypoint_name: str, mesh=None) -> None:
+  """Raises ValueError if load-balanced CP is active on an entrypoint whose input pipeline does not reorder batches."""
+  load_balance = getattr(config, "context_parallel_load_balance", False)
+  if not isinstance(load_balance, bool) or not load_balance:
+    return
+
+  if mesh is not None and isinstance(getattr(mesh, "shape", None), Mapping):
+    cp_size = reordered_cp_size(config, mesh)
+    if isinstance(cp_size, int) and not isinstance(cp_size, bool) and cp_size > 1:
+      raise ValueError(
+          f"{entrypoint_name} does not reorder batches for load-balanced context parallelism "
+          f"(mesh axis {getattr(config, 'context_sharding', 'context')!r} has size {cp_size} with "
+          "context_parallel_load_balance=True). Set context_parallel_load_balance=False."
+      )
+    return
+
+  ici_cp = getattr(config, "ici_context_parallelism", 1)
+  dcn_cp = getattr(config, "dcn_context_parallelism", 1)
+  if (
+      isinstance(ici_cp, int)
+      and not isinstance(ici_cp, bool)
+      and isinstance(dcn_cp, int)
+      and not isinstance(dcn_cp, bool)
+      and (ici_cp > 1 or dcn_cp > 1)
+  ):
+    raise ValueError(
+        f"{entrypoint_name} does not reorder batches for load-balanced context parallelism "
+        f"(ici_context_parallelism={ici_cp}, dcn_context_parallelism={dcn_cp} with "
+        "context_parallel_load_balance=True). Set context_parallel_load_balance=False."
+    )
 
 
 def resolve_reorder_strategy(config):

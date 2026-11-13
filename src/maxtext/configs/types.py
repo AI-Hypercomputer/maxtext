@@ -9231,6 +9231,8 @@ class RLConfig(
           f"num_vocab_tiling was configured to {self.num_vocab_tiling}, but it must be 1 when running train_rl."
       )
 
+    max_utils.check_no_load_balanced_context_parallelism(self, "train_rl")
+
     # Set checkpoint_dir based on run_name and base_output_directory, unless set explicitly.
     if self.checkpoint_dir:
       checkpoint_dir = self.checkpoint_dir
