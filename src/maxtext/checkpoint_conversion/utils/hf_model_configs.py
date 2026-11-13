@@ -1202,6 +1202,16 @@ deepseek41_flash_dict = {
     "engram_pad_token_id": 2,
     "engram_compressed_vocab_size": 99092,
     "torch_dtype": "bfloat16",
+    "vision_config": {
+        "hidden_size": 1024,
+        "intermediate_size": 2816,
+        "num_hidden_layers": 32,
+        "num_attention_heads": 16,
+        "patch_size": 14,
+        "num_channels": 3,
+        "downsample_ratio": 3,
+        "rope_theta": 10000,
+    },
     "quantization_config": {
         "quant_method": "fp8",
         "activation_scheme": "dynamic",
@@ -1236,8 +1246,11 @@ class DeepseekV41Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
 
   def __init__(self, **kwargs):
     self.max_position_embeddings = kwargs.get("max_position_embeddings", 1048576)
+    quant_cfg = kwargs.pop("quantization_config", None)
     super().__init__(**kwargs)
-    if hasattr(self, "quantization_config") and self.quantization_config is None:
+    if quant_cfg is not None:
+      self.quantization_config = quant_cfg
+    elif hasattr(self, "quantization_config") and self.quantization_config is None:
       del self.quantization_config
 
 

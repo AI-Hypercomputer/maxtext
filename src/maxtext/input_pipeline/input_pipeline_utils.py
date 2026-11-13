@@ -1035,10 +1035,11 @@ class FoldImagesIntoBatch(grain.MapTransform):
   """
 
   model_name: str | None = None
+  config: Any = None
 
   def __post_init__(self):
     """Initializes the target shape after the dataclass is created."""
-    self.target_shape = mm_processor.get_dummy_image_shape_for_init(self.model_name)
+    self.target_shape = mm_processor.get_dummy_image_shape_for_init(self.model_name, config=self.config)
 
   def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Applies the folding transformation to the 'images' field if present."""

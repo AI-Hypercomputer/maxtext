@@ -709,7 +709,7 @@ def vision_sft_preprocessing_pipeline(
     batch_size = batch_size // config.gradient_accumulation_steps
 
   dataset = dataset.batch(batch_size, drop_remainder=True)
-  dataset = dataset.map(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name))
+  dataset = dataset.map(input_pipeline_utils.FoldImagesIntoBatch(model_name=config.model_name, config=config))
   if config.use_mrope:
     dataset = dataset.map(
         input_pipeline_utils.ComputeQwen3OmniPositions(

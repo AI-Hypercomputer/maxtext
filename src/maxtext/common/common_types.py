@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Common types."""
+
 import enum
 import fnmatch
 from typing import Any, Sequence
@@ -154,6 +155,7 @@ class VisionEncoderBlockType(enum.Enum):
   GEMMA4 = "gemma4"
   QWEN3_5 = "qwen3_5"
   QWEN3_VL = "qwen3_vl"
+  DEEPSEEK41 = "deepseek41"
 
 
 class AttentionType(enum.Enum):
