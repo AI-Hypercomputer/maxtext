@@ -22,19 +22,24 @@ import typing
 
 from flax import nnx
 import jax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.typing import DTypeLike
-from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.configs import glm5_3_flash_config as glm5_config
+from maxtext.m3.core import kernels as m3_kernels
+from maxtext.m3.core import moe as m3_moe
+from maxtext.m3.core import sharding as m3_sharding
 import optax
+
+# pylint: disable=too-many-positional-arguments,abstract-method,too-many-function-args,no-name-in-module,import-outside-toplevel
 
 
 def _make_lin(dt: DTypeLike, p_dt: DTypeLike, sharding, rngs: nnx.Rngs):
   """Constructs a Linear layer factory closure with sharding metadata."""
 
   def _lin(in_f: int, out_f: int, name: str, axes: tuple[str | None, ...]):
-    km = {"sharding": sharding(name, axes)} if sharding else {}
+    km = m3_sharding.param_metadata(sharding, name, axes) if sharding else {}
     return nnx.Linear(
         in_f,
         out_f,
@@ -100,10 +105,10 @@ class Glm5RMSNormGated(nnx.Module):
     self.param_dtype = param_dtype
     self.sharding = sharding
 
-    spec = sharding("norm", ("norm",)) if sharding else None
+    meta = m3_sharding.param_metadata(sharding, "norm", ("norm",)) if sharding else {}
     self.weight = nnx.Param(
         jnp.ones((hidden_size,), dtype=param_dtype),
-        out_sharding=spec,
+        **meta,
     )
 
   def __call__(self, hidden_states: jax.Array, gate: jax.Array) -> jax.Array:
@@ -146,7 +151,7 @@ class Glm5ShortConv1d(nnx.Module):
     self.param_dtype = param_dtype
     self.sharding = sharding
 
-    spec = sharding("conv1d", ("heads", None, None)) if sharding else None
+    meta = m3_sharding.param_metadata(sharding, "conv1d", ("heads", None, None)) if sharding else {}
     bound = 1.0 / math.sqrt(kernel_size)
     w_init = jax.random.uniform(
         rngs.params(),
@@ -155,7 +160,7 @@ class Glm5ShortConv1d(nnx.Module):
         minval=-bound,
         maxval=bound,
     ).astype(param_dtype)
-    self.weight = nnx.Param(w_init, out_sharding=spec)
+    self.weight = nnx.Param(w_init, **meta)
 
   def __call__(self, x: jax.Array) -> jax.Array:
     """Forward pass for causal depthwise 1D conv + SiLU.
@@ -240,8 +245,8 @@ class Glm5KdaAttention(nnx.Module):
     self.f_a_proj = _lin(h, d, "f_a_proj", ("embed", None))
     self.f_b_proj = _lin(d, q, "f_b_proj", (None, "heads"))
 
-    s_h = sharding("A_log", ("heads",)) if sharding else None
-    s_dt = sharding("dt_bias", ("heads",)) if sharding else None
+    m_h = m3_sharding.param_metadata(sharding, "A_log", ("heads",)) if sharding else {}
+    m_dt = m3_sharding.param_metadata(sharding, "dt_bias", ("heads",)) if sharding else {}
     if config.linear_lower_bound is not None:
       a_log_init = jnp.zeros((n,), dtype=jnp.float32)
     else:
@@ -255,7 +260,7 @@ class Glm5KdaAttention(nnx.Module):
       a_log_init = jnp.log(a_init)
     self.A_log = nnx.Param(
         a_log_init,
-        out_sharding=s_h,
+        **m_h,
     )
 
     log_dt = jax.random.uniform(
@@ -267,7 +272,7 @@ class Glm5KdaAttention(nnx.Module):
     )
     dt = jnp.maximum(jnp.exp(log_dt), 1e-4)
     dt_bias_init = (dt + jnp.log(-jnp.expm1(-dt))).astype(jnp.float32)
-    self.dt_bias = nnx.Param(dt_bias_init, out_sharding=s_dt)
+    self.dt_bias = nnx.Param(dt_bias_init, **m_dt)
 
     self.b_proj = _lin(h, n, "b_proj", ("embed", "heads"))
     self.g_a_proj = _lin(h, d, "g_a_proj", ("embed", None))
@@ -421,8 +426,8 @@ class Glm5RMSNorm(nnx.Module):
       sharding: m3_sharding.Sharding | None = None,
   ):
     self.eps = eps
-    spec = sharding("norm", ("norm",)) if sharding else None
-    self.weight = nnx.Param(jnp.ones((d,), dtype=param_dtype), out_sharding=spec)
+    meta = m3_sharding.param_metadata(sharding, "norm", ("norm",)) if sharding else {}
+    self.weight = nnx.Param(jnp.ones((d,), dtype=param_dtype), **meta)
 
   def __call__(self, x: jax.Array) -> jax.Array:
     in_dt, x32 = x.dtype, x.astype(jnp.float32)
@@ -443,9 +448,10 @@ class Glm5LayerNorm(nnx.Module):
       sharding: m3_sharding.Sharding | None = None,
   ):
     self.eps = eps
-    spec = sharding("norm", ("norm",)) if sharding else None
-    self.weight = nnx.Param(jnp.ones((d,), dtype=param_dtype), out_sharding=spec)
-    self.bias = nnx.Param(jnp.zeros((d,), dtype=param_dtype), out_sharding=spec)
+    w_meta = m3_sharding.param_metadata(sharding, "norm", ("norm",)) if sharding else {}
+    b_meta = m3_sharding.param_metadata(sharding, "norm", ("norm",)) if sharding else {}
+    self.weight = nnx.Param(jnp.ones((d,), dtype=param_dtype), **w_meta)
+    self.bias = nnx.Param(jnp.zeros((d,), dtype=param_dtype), **b_meta)
 
   def __call__(self, x: jax.Array) -> jax.Array:
     in_dt, x32 = x.dtype, x.astype(jnp.float32)
@@ -490,15 +496,15 @@ class Glm5Indexer(nnx.Module):
     self.weights_proj = lin(h, n_heads, "weights_proj", ("embed", None))
 
     s_ape = (None, None)
-    ape_spec = sharding("index_kpool_compress_ape", s_ape) if sharding else None
+    ape_meta = m3_sharding.param_metadata(sharding, "index_kpool_compress_ape", s_ape) if sharding else {}
     ape_init = jnp.zeros((self.index_kpool, d), dtype=p_dt)
-    self.index_kpool_compress_ape = nnx.Param(ape_init, out_sharding=ape_spec)
+    self.index_kpool_compress_ape = nnx.Param(ape_init, **ape_meta)
 
     s_gate = (None, "embed")
     g_name = "index_kpool_compress_gate"
-    gate_spec = sharding(g_name, s_gate) if sharding else None
+    gate_meta = m3_sharding.param_metadata(sharding, g_name, s_gate) if sharding else {}
     gate_init = jnp.ones((d, h), dtype=p_dt)
-    self.index_kpool_compress_gate = nnx.Param(gate_init, out_sharding=gate_spec)
+    self.index_kpool_compress_gate = nnx.Param(gate_init, **gate_meta)
 
   def __call__(
       self,
@@ -884,13 +890,13 @@ class Glm5TopkRouter(nnx.Module):
     self.norm_topk_prob = config.norm_topk_prob
 
     r_p_dt = getattr(jnp, config.router_param_dtype)
-    w_spec = sharding("router_weight", ("embed", None)) if sharding else None
-    b_spec = sharding("router_bias", (None,)) if sharding else None
+    w_meta = m3_sharding.param_metadata(sharding, "router_weight", ("embed", None)) if sharding else {}
+    b_meta = m3_sharding.param_metadata(sharding, "router_bias", (None,)) if sharding else {}
     w_init = nnx.initializers.normal(0.02)(rngs.params(), (h, e), r_p_dt)
-    self.weight = nnx.Param(w_init, out_sharding=w_spec)
+    self.weight = nnx.Param(w_init, **w_meta)
     self.e_score_correction_bias = Glm5RouterBias(
         jnp.zeros((e,), dtype=r_p_dt),
-        sharding=b_spec,
+        **b_meta,
     )
 
   def __call__(
@@ -956,31 +962,56 @@ class Glm5Experts(nnx.Module):
     self.num_experts, self.top_k = e, config.num_experts_per_tok
     self.swiglu_limit = config.mlp_clamp_limit
     self.sharding = sharding
+    self.sparse_matmul = config.sparse_matmul
+    self.executor = m3_moe.moe_from_config(config, sharding)
     self.ep_axis = sharding.ep_axis if isinstance(sharding, glm5_config.Glm5Sharding) else "expert"
-    if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
-      raise NotImplementedError(
-          f"Glm5Experts expert parallelism ({self.ep_axis}={sharding.ep_size} >"
-          " 1) requires shard_map EP dispatch (follow-up F34)."
-      )
-    mesh = jax.sharding.get_abstract_mesh()
-    if not mesh.empty and self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
-      raise NotImplementedError(
-          "Glm5Experts expert parallelism"
-          f" ({self.ep_axis}={mesh.shape[self.ep_axis]} > 1) requires shard_map"
-          " EP dispatch (follow-up F34)."
-      )
+    if self.executor.kind not in m3_moe.SHARDED_EXECUTOR_KINDS:
+      if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
+        raise NotImplementedError(
+            f"Glm5Experts expert parallelism ({self.ep_axis}={sharding.ep_size} >"
+            " 1) requires shard_map EP dispatch (follow-up F34)."
+        )
+      mesh = jax.sharding.get_abstract_mesh()
+      if not mesh.empty and self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
+        raise NotImplementedError(
+            "Glm5Experts expert parallelism"
+            f" ({self.ep_axis}={mesh.shape[self.ep_axis]} > 1) requires shard_map"
+            " EP dispatch (follow-up F34)."
+        )
 
     p_dt = getattr(jnp, config.weight_dtype)
-    gu_axes = ("expert", "embed", None, "mlp")
-    d_axes = ("expert", "mlp", "embed")
-    gu_spec = sharding("gate_up_proj", gu_axes) if sharding else None
-    d_spec = sharding("down_proj", d_axes) if sharding else None
+    gu_axes = ("experts", "expert_embed", None, "expert_mlp")
+    d_axes = ("experts", "expert_mlp", "expert_embed")
+    gu_kw = m3_sharding.param_metadata(sharding, "gate_up_proj", gu_axes) if sharding else {}
+    d_kw = m3_sharding.param_metadata(sharding, "down_proj", d_axes) if sharding else {}
 
     gu_init = nnx.initializers.normal(0.02)(rngs.params(), (e, h, 2, inter), p_dt)
-    self.gate_up_proj = nnx.Param(gu_init, sharding=gu_spec)
+    self.gate_up_proj = nnx.Param(gu_init, **gu_kw)
 
     d_init = nnx.initializers.normal(0.02)(rngs.params(), (e, inter, h), p_dt)
-    self.down_proj = nnx.Param(d_init, out_sharding=d_spec)
+    self.down_proj = nnx.Param(d_init, **d_kw)
+
+  def _resolve_ep_size_and_mesh(
+      self,
+      hidden_states: jax.Array,
+  ) -> tuple[int, Any, jax.sharding.Mesh | jax.sharding.AbstractMesh | None]:
+    """Resolves active/inferred mesh and expert-parallelism size for `hidden_states`."""
+    shd_ep_size = self.sharding.ep_size if isinstance(self.sharding, glm5_config.Glm5Sharding) else 1
+    amb_mesh = jax.sharding.get_abstract_mesh()
+    inferred_mesh = None
+    if amb_mesh.empty:
+      for arr in (hidden_states, self.gate_up_proj[...]):
+        arr_shd = jax.typeof(arr).sharding
+        if isinstance(arr_shd, jax.sharding.NamedSharding) and not arr_shd.mesh.empty:
+          inferred_mesh = arr_shd.mesh
+          break
+    active_mesh = amb_mesh if not amb_mesh.empty else (inferred_mesh.abstract_mesh if inferred_mesh is not None else None)
+    mesh_ep_size = (
+        int(active_mesh.shape[self.ep_axis])
+        if active_mesh is not None and not active_mesh.empty and self.ep_axis in active_mesh.shape
+        else 1
+    )
+    return max(shd_ep_size, mesh_ep_size), active_mesh, inferred_mesh
 
   def __call__(
       self,
@@ -988,66 +1019,189 @@ class Glm5Experts(nnx.Module):
       topk_indices: jax.Array,
       topk_weights: jax.Array,
   ) -> jax.Array:
+    orig_shape = hidden_states.shape
+    dt = hidden_states.dtype
+    gu = self.gate_up_proj[...].astype(dt)
+    d_w = self.down_proj[...].astype(dt)
+    ep_size, active_mesh, inferred_mesh = self._resolve_ep_size_and_mesh(hidden_states)
+
+    if ep_size > 1 and self.executor.kind in m3_moe.SHARDED_EXECUTOR_KINDS:
+      if hidden_states.ndim == 2:
+        x_3d = hidden_states[:, None, :]
+        idx_3d = topk_indices[:, None, :]
+        w_3d = topk_weights[:, None, :].astype(jnp.float32)
+      elif hidden_states.ndim == 3:
+        x_3d = hidden_states
+        idx_3d = topk_indices
+        w_3d = topk_weights.astype(jnp.float32)
+      else:
+        raise ValueError(f"Expected 2D or 3D hidden_states; got {hidden_states.shape}.")
+
+      def _run_with_mesh(mesh_obj: Any) -> jax.Array:
+        exec_cfg = self.executor
+        x_in, w_in, idx_in = x_3d, w_3d, idx_3d
+        reshaped_to_tokens = False
+        batch_ax = m3_kernels.resolve_mesh_axes(mesh_obj, exec_cfg.batch)
+        batch_shards = m3_kernels.mesh_axis_size(mesh_obj, batch_ax)
+        mesh_ep = m3_kernels.mesh_axis_size(mesh_obj, m3_kernels.resolve_mesh_axes(mesh_obj, exec_cfg.experts))
+        if x_in.shape[0] % batch_shards != 0:
+          total_tokens = x_in.shape[0] * x_in.shape[1]
+          if total_tokens % batch_shards == 0:
+            x_in = x_in.reshape(total_tokens, 1, x_in.shape[2])
+            w_in = w_in.reshape(total_tokens, 1, w_in.shape[2])
+            idx_in = idx_in.reshape(total_tokens, 1, idx_in.shape[2])
+            reshaped_to_tokens = True
+          elif mesh_ep == 1:
+            exec_cfg = dataclasses.replace(exec_cfg, batch=None)
+          elif total_tokens % mesh_ep == 0:
+            x_in = x_in.reshape(total_tokens, 1, x_in.shape[2])
+            w_in = w_in.reshape(total_tokens, 1, w_in.shape[2])
+            idx_in = idx_in.reshape(total_tokens, 1, idx_in.shape[2])
+            reshaped_to_tokens = True
+            exec_cfg = dataclasses.replace(exec_cfg, batch=exec_cfg.experts)
+          else:
+            pad_tok = mesh_ep - (total_tokens % mesh_ep)
+            x_in = jnp.pad(x_in.reshape(total_tokens, 1, x_in.shape[2]), ((0, pad_tok), (0, 0), (0, 0)))
+            w_in = jnp.pad(w_in.reshape(total_tokens, 1, w_in.shape[2]), ((0, pad_tok), (0, 0), (0, 0)))
+            idx_in = jnp.pad(
+                idx_in.reshape(total_tokens, 1, idx_in.shape[2]),
+                ((0, pad_tok), (0, 0), (0, 0)),
+                constant_values=-1,
+            )
+            reshaped_to_tokens = True
+            exec_cfg = dataclasses.replace(exec_cfg, batch=exec_cfg.experts)
+        y = exec_cfg.fused(
+            x_in,
+            w_in,
+            idx_in,
+            gu,
+            d_w,
+            swiglu_limit=self.swiglu_limit,
+        )
+        if reshaped_to_tokens:
+          y = y[: x_3d.shape[0] * x_3d.shape[1]].reshape(x_3d.shape)
+        return y
+
+      if inferred_mesh is not None and jax.sharding.get_abstract_mesh().empty:
+        with jax.sharding.use_abstract_mesh(inferred_mesh.abstract_mesh):
+          out_3d = _run_with_mesh(inferred_mesh.abstract_mesh)
+      elif active_mesh is not None and not active_mesh.empty:
+        out_3d = _run_with_mesh(active_mesh)
+      else:
+        out_3d = m3_moe.grouped_unsharded_fused(
+            x_3d,
+            w_3d,
+            idx_3d,
+            gu,
+            d_w,
+            executor=self.executor,
+            swiglu_limit=self.swiglu_limit,
+            is_tpu=(jax.default_backend() == "tpu"),
+        )
+      return out_3d.reshape(orig_shape).astype(dt)
+
     if isinstance(self.sharding, glm5_config.Glm5Sharding) and self.sharding.ep_size > 1:
       raise NotImplementedError(
           f"Glm5Experts.__call__ with {self.ep_axis} > 1 requires shard_map EP"
           f" dispatch (follow-up F34); got ep_size={self.sharding.ep_size}."
       )
-    mesh = None
-    x_shd = jax.typeof(hidden_states).sharding
-    param_shd = jax.typeof(self.gate_up_proj.value).sharding
-    if isinstance(x_shd, jax.sharding.NamedSharding):
-      mesh = x_shd.mesh
-    elif isinstance(param_shd, jax.sharding.NamedSharding):
-      mesh = param_shd.mesh
-    elif not jax.sharding.get_abstract_mesh().empty:
-      mesh = jax.sharding.get_abstract_mesh()
-
-    if mesh is not None and not mesh.empty:
-      if self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
+    if active_mesh is not None and not active_mesh.empty:
+      if self.ep_axis in active_mesh.shape and active_mesh.shape[self.ep_axis] > 1:
         raise NotImplementedError(
             f"Glm5Experts.__call__ with {self.ep_axis} > 1 requires shard_map"
             " EP dispatch (follow-up F34); got mesh"
-            f" {self.ep_axis}={mesh.shape[self.ep_axis]}."
+            f" {self.ep_axis}={active_mesh.shape[self.ep_axis]}."
         )
 
-    flat_idx = topk_indices.reshape(-1)
-    flat_w = topk_weights.reshape(-1, 1).astype(jnp.float32)
-    perm = jnp.argsort(flat_idx)
-    sorted_h = hidden_states[perm // self.top_k]
-    inv_perm = jnp.argsort(perm)
-    group_sizes = jnp.bincount(flat_idx, length=self.num_experts)
+    if self.executor.kind == "dense":
+      if hidden_states.ndim == 2:
+        x_3d = hidden_states[:, None, :]
+        idx_3d = topk_indices[:, None, :]
+        w_3d = topk_weights[:, None, :].astype(jnp.float32)
+      elif hidden_states.ndim == 3:
+        x_3d = hidden_states
+        idx_3d = topk_indices
+        w_3d = topk_weights.astype(jnp.float32)
+      else:
+        raise ValueError(f"Expected 2D or 3D hidden_states; got {hidden_states.shape}.")
 
-    dt = hidden_states.dtype
-    gu = self.gate_up_proj[...].astype(dt)
+      if inferred_mesh is not None and jax.sharding.get_abstract_mesh().empty:
+        with jax.sharding.use_abstract_mesh(inferred_mesh.abstract_mesh):
+          out_3d = self.executor.fused(
+              x_3d,
+              w_3d,
+              idx_3d,
+              gu,
+              d_w,
+              swiglu_limit=self.swiglu_limit,
+          )
+      elif active_mesh is not None and not active_mesh.empty:
+        out_3d = self.executor.fused(
+            x_3d,
+            w_3d,
+            idx_3d,
+            gu,
+            d_w,
+            swiglu_limit=self.swiglu_limit,
+        )
+      else:
+        out_3d = m3_moe.grouped_unsharded_fused(
+            x_3d,
+            w_3d,
+            idx_3d,
+            gu,
+            d_w,
+            executor=self.executor,
+            swiglu_limit=self.swiglu_limit,
+        )
+      return out_3d.reshape(orig_shape).astype(dt)
+
+    h_2d = hidden_states.reshape(-1, orig_shape[-1])
+    flat_idx = topk_indices.reshape(-1).astype(jnp.int32)
+    is_valid = (flat_idx >= 0) & (flat_idx < self.num_experts)
+    bucket = jnp.where(is_valid, flat_idx, self.num_experts)
+    flat_w = jnp.where(is_valid, topk_weights.reshape(-1), 0).reshape(-1, 1).astype(jnp.float32)
+    perm = jnp.argsort(bucket, stable=True)
+    inv_perm = jnp.argsort(perm)
+    sorted_valid = is_valid[perm][:, None]
+    zero_scalar = jnp.zeros((), dtype=dt)
+    sorted_h = jnp.where(sorted_valid, h_2d[perm // self.top_k], zero_scalar)
+    group_sizes = jnp.bincount(bucket, length=self.num_experts + 1)[: self.num_experts]
+
+    is_tpu = (
+        m3_kernels.is_tpu_mesh(active_mesh)
+        if active_mesh is not None and not active_mesh.empty
+        else (jax.default_backend() == "tpu")
+    )
+    rdot_prec = jax.lax.Precision.DEFAULT if is_tpu else jax.lax.Precision.HIGHEST
     gate = jax.lax.ragged_dot(
         sorted_h,
         gu[:, :, 0, :],
         group_sizes=group_sizes,
         preferred_element_type=dt,
-        precision=jax.lax.Precision.HIGHEST,
+        precision=rdot_prec,
     )
     up = jax.lax.ragged_dot(
         sorted_h,
         gu[:, :, 1, :],
         group_sizes=group_sizes,
         preferred_element_type=dt,
-        precision=jax.lax.Precision.HIGHEST,
+        precision=rdot_prec,
     )
     gate = jnp.minimum(gate, self.swiglu_limit)
     up = jnp.clip(up, -self.swiglu_limit, self.swiglu_limit)
-    act = jax.nn.silu(gate) * up
-    d_w = self.down_proj[...].astype(dt)
+    act = jnp.where(sorted_valid, jax.nn.silu(gate) * up, zero_scalar)
     sorted_out = jax.lax.ragged_dot(
         act,
         d_w,
         group_sizes=group_sizes,
         preferred_element_type=dt,
-        precision=jax.lax.Precision.HIGHEST,
+        precision=rdot_prec,
     )
-    n = hidden_states.shape[0]
+    sorted_out = jnp.where(sorted_valid, sorted_out, zero_scalar)
+    n = h_2d.shape[0]
     weighted = (sorted_out[inv_perm].astype(jnp.float32) * flat_w).reshape(n, self.top_k, -1)
-    return jnp.sum(weighted, axis=1).astype(dt)
+    return checkpoint_name(jnp.sum(weighted, axis=1).reshape(orig_shape).astype(dt), "moe_routed_output")
 
 
 class Glm5MoE(nnx.Module):
@@ -1062,20 +1216,21 @@ class Glm5MoE(nnx.Module):
   ):
     self.config = config
     self.ep_axis = sharding.ep_axis if isinstance(sharding, glm5_config.Glm5Sharding) else "expert"
-    if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
-      raise NotImplementedError(
-          f"Glm5MoE expert parallelism ({self.ep_axis}={sharding.ep_size} > 1)"
-          " requires all-to-all dispatch (planned for G8); single-host bringup"
-          f" requires {self.ep_axis}=1."
-      )
-    mesh = jax.sharding.get_abstract_mesh()
-    if not mesh.empty and self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
-      raise NotImplementedError(
-          "Glm5MoE expert parallelism"
-          f" ({self.ep_axis}={mesh.shape[self.ep_axis]} > 1) requires"
-          " all-to-all dispatch (planned for G8); single-host bringup requires"
-          f" {self.ep_axis}=1."
-      )
+    if not config.sparse_matmul:
+      if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
+        raise NotImplementedError(
+            f"Glm5MoE expert parallelism ({self.ep_axis}={sharding.ep_size} > 1)"
+            " requires all-to-all dispatch (planned for G8); single-host bringup"
+            f" requires {self.ep_axis}=1."
+        )
+      mesh = jax.sharding.get_abstract_mesh()
+      if not mesh.empty and self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
+        raise NotImplementedError(
+            "Glm5MoE expert parallelism"
+            f" ({self.ep_axis}={mesh.shape[self.ep_axis]} > 1) requires"
+            " all-to-all dispatch (planned for G8); single-host bringup requires"
+            f" {self.ep_axis}=1."
+        )
     self.experts = Glm5Experts(config, rngs=rngs, sharding=sharding)
     self.gate = Glm5TopkRouter(config, rngs=rngs, sharding=sharding)
     self.shared_experts = Glm5MLP(
@@ -1089,12 +1244,15 @@ class Glm5MoE(nnx.Module):
     orig_shape = hidden_states.shape
     h_flat = hidden_states.reshape(-1, orig_shape[-1])
     router_logits, topk_weights, topk_indices, router_probs = self.gate(h_flat)
-    expert_out = self.experts(h_flat, topk_indices, topk_weights)
-    expert_out = expert_out.reshape(orig_shape)
-    shared_out = self.shared_experts(hidden_states)
     topk_reshaped = topk_indices.reshape(orig_shape[:-1] + (self.config.num_experts_per_tok,))
     weights_reshaped = topk_weights.reshape(orig_shape[:-1] + (self.config.num_experts_per_tok,))
     probs_reshaped = router_probs.reshape(orig_shape[:-1] + (self.config.n_routed_experts,))
+    ep_size, _, _ = self.experts._resolve_ep_size_and_mesh(hidden_states)  # pylint: disable=protected-access
+    if ep_size > 1 and self.experts.executor.kind in m3_moe.SHARDED_EXECUTOR_KINDS and len(orig_shape) == 3:
+      expert_out = self.experts(hidden_states, topk_reshaped, weights_reshaped)
+    else:
+      expert_out = self.experts(h_flat, topk_indices, topk_weights).reshape(orig_shape)
+    shared_out = self.shared_experts(hidden_states)
     return expert_out + shared_out, (
         router_logits,
         topk_reshaped,
@@ -1232,15 +1390,15 @@ class Glm5HyperConnection(nnx.Module):
     fn_init = nnx.initializers.normal(0.02)(rngs.params(), (self.hc_mult * config.hidden_size, mix), p_dt)
     self.fn = nnx.Param(
         fn_init,
-        out_sharding=sharding("mhc_fn", ("embed", None)) if sharding else None,
+        **(m3_sharding.param_metadata(sharding, "mhc_fn", ("embed", None)) if sharding else {}),
     )
     self.base = nnx.Param(
         jnp.zeros((mix,), dtype=p_dt),
-        out_sharding=sharding("mhc_base", (None,)) if sharding else None,
+        **(m3_sharding.param_metadata(sharding, "mhc_base", (None,)) if sharding else {}),
     )
     self.scale = nnx.Param(
         jnp.ones((3,), dtype=p_dt),
-        out_sharding=sharding("mhc_scale", (None,)) if sharding else None,
+        **(m3_sharding.param_metadata(sharding, "mhc_scale", (None,)) if sharding else {}),
     )
 
   def __call__(self, hidden_streams: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -1819,7 +1977,7 @@ class Glm5Mtp(nnx.Module):
 
     self.enorm = Glm5RMSNorm(h, eps=eps, param_dtype=p_dt, sharding=sharding)
     self.hnorm = Glm5RMSNorm(h, eps=eps, param_dtype=p_dt, sharding=sharding)
-    eh_meta = {"sharding": sharding("eh_proj", ("embed", None))} if sharding else {}
+    eh_meta = m3_sharding.param_metadata(sharding, "eh_proj", ("embed", None)) if sharding else {}
     self.eh_proj = nnx.Linear(
         2 * h,
         h,
@@ -1917,7 +2075,7 @@ class Glm5Embedding(nnx.Embed):
         features=config.hidden_size,
         dtype=getattr(jnp, config.dtype),
         param_dtype=getattr(jnp, config.weight_dtype),
-        embedding_metadata={"sharding": sharding("embed", ("vocab", "embed"))} if sharding else {},
+        embedding_metadata=m3_sharding.param_metadata(sharding, "embed", ("vocab", "embed")) if sharding else {},
         rngs=rngs,
     )
 
@@ -2000,7 +2158,7 @@ class Glm5Model(nnx.Module):
         param_dtype=p_dt,
         sharding=sharding,
     )
-    lm_meta = {"sharding": sharding("lm_head", ("embed", "vocab"))} if sharding else {}
+    lm_meta = m3_sharding.param_metadata(sharding, "lm_head", ("embed", "vocab")) if sharding else {}
     self.lm_head = nnx.Linear(
         cfg.hidden_size,
         cfg.vocab_size,
