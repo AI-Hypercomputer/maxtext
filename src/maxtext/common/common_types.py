@@ -139,6 +139,11 @@ DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 # softmax function assigns an extremely low probability to the masked positions.
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 
+# Checkpoint name of an attention layer's load-balance-ordered positions and segment ids
+# (Attention._to_load_balanced_order); remat_policy=custom saves it under
+# context_parallel_attention_load_balance_hoist_ids.
+ATTENTION_LB_IDS = "attention_lb_ids"
+
 
 @struct.dataclass
 class MultimodalInput:
