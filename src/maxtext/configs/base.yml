@@ -1295,7 +1295,10 @@ gradient_clipping_threshold: 1.0
 # batch by accumulating the gradient over a set of steps.
 gradient_accumulation_steps: 1
 ga_params_loop_barrier: false # stop XLA hoisting loop-invariant work on the params (all-gathers, casts) out of the GA loop
-ga_accumulate_fp32: false # reduce and accumulate the micro-batch gradients in float32 (Zero-1 + GA otherwise sums them in bf16)
+# Sum the micro-batch gradients in float32 (Zero-1 + GA otherwise sums them in bf16). A gradient the SPMD partitioner
+# reduces at its weight-gradient dot (e.g. a parameter replicated over the expert axis) is still reduced in bf16 each
+# micro-batch, then cast; on TPU, XLA moves the other data-parallel reductions after the loop, onto the float32 sum.
+ga_accumulate_fp32: false
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
 

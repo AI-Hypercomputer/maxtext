@@ -3443,8 +3443,10 @@ class Optimizer(BaseModel):
   ga_accumulate_fp32: bool = Field(
       False,
       description="Under gradient accumulation, cast each micro-batch's gradient to float32 before its sharding"
-      " constraint (the data-parallel reduction) and accumulate in float32, instead of in the parameters' compute"
-      " dtype (bf16 under Zero-1 + GA).",
+      " constraint and sum the micro-batches in float32, instead of in the parameters' compute dtype (bf16 under"
+      " Zero-1 + GA). A gradient that the SPMD partitioner reduces at its weight-gradient dot (e.g. a parameter"
+      " replicated over the expert axis) is still reduced in that dot's bf16 output dtype each micro-batch, before"
+      " the cast; on TPU, XLA moves the other data-parallel reductions out of the loop, onto the float32 sum.",
   )
   gradient_clipping_threshold: NonNegativeFloat = Field(
       1.0, description="The threshold for gradient clipping. 0 disables clipping."
