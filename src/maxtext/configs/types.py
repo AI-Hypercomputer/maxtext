@@ -2084,6 +2084,43 @@ class Qwen3Next(BaseModel):
       True,
       description="Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.",
   )
+  gdn_cp_mode: Literal["auto", "head", "seq"] = Field(
+      "auto",
+      description=(
+          "Context parallelism mode for Gated Delta Net: 'seq' shards the sequence with cross-rank state "
+          "composition, 'head' transposes via all-to-all to shard key/value head groups across context ranks, "
+          "and 'auto' selects automatically."
+      ),
+  )
+  gdn_pin_in_proj_output_layout: bool = Field(
+      True,
+      description=(
+          "Whether to pin the GatedDeltaNet in_proj_qkvz output to row-major XLA layout under paged-state serving "
+          "to avoid materializing a transposed copy of the projection kernel."
+      ),
+  )
+  gdn_in_proj_kernel_order: bool = Field(
+      False,
+      description=(
+          "Whether to permute GatedDeltaNet in_proj_qkvz columns to flat [q | k | v | z] order in training so qkv "
+          "and z share one kernel gather and skip per-head splitting."
+      ),
+  )
+  gdn_out_proj_token_minor: bool = Field(
+      False,
+      description="Whether to constrain the GatedDeltaNet out_proj input to token-minor (0, 2, 1) layout in training.",
+  )
+  gdn_gated_norm_layout: Literal["auto", "natural", "natural_fwd_bwd", "token_minor"] = Field(
+      "auto",
+      description=(
+          "Memory layout constraint around Qwen3NextRMSNormGated when gdn_out_proj_token_minor=True: "
+          "'auto', 'natural', 'natural_fwd_bwd', or 'token_minor'."
+      ),
+  )
+  gdn_fp8_projections: bool = Field(
+      False,
+      description="Whether to run GatedDeltaNet in_proj_qkvz and out_proj as dynamic-absmax FP8 matmuls in training.",
+  )
   gdn_mamba_block_size: int = Field(
       0,
       description=(
@@ -2112,9 +2149,9 @@ class Qwen3_8FlashNext(BaseModel):
   gdn_chunk_inverse: Literal["solve", "block_doubling"] = Field(
       "block_doubling",
       description=(
-          "Qwen3.8 GDN chunk-matrix inverse. 'block_doubling' (default) builds the exact inverse from MXU matmuls"
-          " via bottom-up block doubling (TPU-friendly; stable in float32 even for correlated keys with weak decay);"
-          " 'solve' uses jax.scipy.linalg.solve_triangular as the reference path."
+          "GDN chunk-matrix inverse (Qwen3-Next, Qwen3.5, Qwen3.8). 'block_doubling' (default) builds the exact"
+          " inverse from MXU matmuls via bottom-up block doubling (TPU-friendly; stable in float32 even for"
+          " correlated keys with weak decay); 'solve' uses jax.scipy.linalg.solve_triangular as the reference path."
       ),
   )
   qsa_indexer_mask: Literal["gather", "reshape"] = Field(
@@ -2329,6 +2366,41 @@ class HardwareAndMesh(BaseModel):
   )
   param_scan_axis: int = Field(1, description="Axis to scan over for parameters.")
   context_parallel_load_balance: bool = Field(True, description="Whether to use load balancing for context parallelism.")
+  context_parallel_attention_load_balance: bool = Field(
+      False,
+      description=(
+          "Load-balance causal attention under context parallelism inside each attention layer only. The layer "
+          "input, positions and segment ids are permuted into DUAL_CHUNK_SWAP order on entry and the output is "
+          "permuted back on exit, so every other layer and the input pipeline keep natural token order. Only "
+          "causal (global) attention layers are balanced. Requires context_parallel_load_balance=False and "
+          "use_multimodal=False."
+      ),
+  )
+  context_parallel_attention_load_balance_hoist_ids: bool = Field(
+      False,
+      description=(
+          "Under context_parallel_attention_load_balance, name each attention layer's DUAL_CHUNK_SWAP-ordered"
+          " positions and segment ids (Attention._to_load_balanced_order) so that remat_policy=custom saves them"
+          " (maxtext_utils.get_save_and_offload_names). They depend only on the batch, so the saved value is a loop"
+          " invariant of the layer scan, which jax.lax.scan hoists out of the loop: the forward computes it once,"
+          " and the remat replay of the attention layers reads that copy instead of reordering the positions and"
+          " segment ids again (two collective-permutes per array, then a per-rank select between the received"
+          " halves and their concatenation). The reordered values are the same, so outputs and gradients do not"
+          " change. Requires context_parallel_attention_load_balance=True with an even context parallelism of at"
+          " least 2, remat_policy='custom' and scan_layers=True."
+      ),
+  )
+  context_parallel_attention_load_balance_order: Literal["dual_chunk_swap", "dual_chunk_swap_local_self"] = Field(
+      "dual_chunk_swap",
+      description=(
+          "How context_parallel_attention_load_balance moves each attention layer's tokens between natural and"
+          " DUAL_CHUNK_SWAP order (tokamax_ring_attention.reorder_for_load_balance). 'dual_chunk_swap' (default):"
+          " two collective-permutes of half a shard per reorder, where a rank whose half stays on it is a (r, r)"
+          " pair, i.e. a local copy inside the permute. 'dual_chunk_swap_local_self': the same token order and"
+          " values, with the (r, r) pairs dropped from both permutes and the self rank's own half taken by a select."
+          " Requires context_parallel_attention_load_balance=True with an even context parallelism of at least 2."
+      ),
+  )
   context_parallel_strategy: str = Field(
       "all_gather",
       description="Strategy for context parallelism ('all_gather', 'ring', 'ulysses', or 'usp').",
@@ -2363,6 +2435,73 @@ class HardwareAndMesh(BaseModel):
       True,
       description="Whether to remove size one mesh axis from type through jax.config.",
   )
+
+  @staticmethod
+  def _reject_unless(setting: str, requirements: list[tuple[bool, str]]) -> None:
+    """Raises a ValueError naming every requirement of `setting` that is not met."""
+    unmet = [requirement for met, requirement in requirements if not met]
+    if unmet:
+      raise ValueError(f"{setting} requires: {'; '.join(unmet)}.")
+
+  @model_validator(mode="after")
+  def validate_context_parallel_attention_load_balance_hoist_ids(
+      self,
+  ) -> "HardwareAndMesh":
+    """The ids are reordered only on the attention load-balance path, and only a scanned custom remat hoists them."""
+    if self.context_parallel_attention_load_balance_hoist_ids:
+      # context_sharding, the parallelism degrees and remat_policy live in other sections; this validator runs on
+      # the combined config. The degree is the one AttentionOp.attention_load_balance_context_size balances over.
+      context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
+          self, f"dcn_{self.context_sharding}_parallelism", 1
+      )
+      HardwareAndMesh._reject_unless(
+          "context_parallel_attention_load_balance_hoist_ids=True",
+          [
+              (
+                  self.context_parallel_attention_load_balance,
+                  "context_parallel_attention_load_balance=True (the only path that reorders them)",
+              ),
+              (
+                  context_parallel_size >= 2 and context_parallel_size % 2 == 0,
+                  f"an even context parallelism of at least 2 (got {context_parallel_size}; attention keeps natural"
+                  " order otherwise)",
+              ),
+              (
+                  self.remat_policy == "custom",
+                  "remat_policy='custom' (the only policy whose save list takes the name)",
+              ),
+              (
+                  self.scan_layers,
+                  "scan_layers=True (the hoist out of the layer loop is jax.lax.scan's)",
+              ),
+          ],
+      )
+    return self
+
+  @model_validator(mode="after")
+  def validate_context_parallel_attention_load_balance_order(
+      self,
+  ) -> "HardwareAndMesh":
+    """A non-default order changes how the attention load-balance path moves tokens, so it needs that path."""
+    if self.context_parallel_attention_load_balance_order == "dual_chunk_swap":
+      return self
+    context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
+        self, f"dcn_{self.context_sharding}_parallelism", 1
+    )
+    HardwareAndMesh._reject_unless(
+        f"context_parallel_attention_load_balance_order={self.context_parallel_attention_load_balance_order!r}",
+        [
+            (
+                self.context_parallel_attention_load_balance,
+                "context_parallel_attention_load_balance=True (the only path that reorders the attention tokens)",
+            ),
+            (
+                context_parallel_size >= 2 and context_parallel_size % 2 == 0,
+                f"an even context parallelism of at least 2 (got {context_parallel_size})",
+            ),
+        ],
+    )
+    return self
 
 
 class LayoutAndSharding(BaseModel):
@@ -2672,6 +2811,18 @@ class RematAndOffload(BaseModel):
       description="Remat policy for the attention output.",
   )
   engram: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the engram output.")
+  gdn: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for Gated Delta Net inputs, intra/inter-chunk states, and core output.",
+  )
+  gdn_states: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for Gated Delta Net intra/inter-chunk states and core output.",
+  )
+  gdn_cp_state: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for Gated Delta Net sequence-CP halo and cross-rank affine state tensors.",
+  )
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
@@ -5069,6 +5220,54 @@ class MaxTextConfig(
           "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
       )
 
+  def _validate_context_parallel_attention_load_balance(self, context_parallel_size: int):
+    """Validates attention-local causal load balancing (`context_parallel_attention_load_balance`).
+
+    Unlike `context_parallel_load_balance`, this is legal with GatedDeltaNet context parallelism. The
+    DUAL_CHUNK_SWAP permutation is applied to the attention layer's input and undone on its output inside
+    `Attention.__call__`, so the GatedDeltaNet recurrence, which needs device order to equal sequence order,
+    never sees a reordered tensor.
+    """
+    if not self.context_parallel_attention_load_balance:
+      return
+    prefix = "context_parallel_attention_load_balance=True"
+    if self.context_parallel_load_balance:
+      raise ValueError(
+          f"{prefix} requires context_parallel_load_balance=False: the input pipeline would already have "
+          "reordered the batch, and the attention layer would reorder it a second time."
+      )
+    if self.context_parallel_strategy not in ("ring", "all_gather"):
+      raise ValueError(
+          f"{prefix} supports context_parallel_strategy='ring' or 'all_gather', got "
+          f"{self.context_parallel_strategy!r}."
+      )
+    if context_parallel_size <= 1 or context_parallel_size % 2 != 0:
+      raise ValueError(
+          f"{prefix} requires an even context parallelism of at least 2, got {context_parallel_size}. Set the "
+          "ici/dcn context parallelism sizes explicitly."
+      )
+    if self.max_target_length % (2 * context_parallel_size) != 0:
+      raise ValueError(
+          f"{prefix} requires max_target_length ({self.max_target_length}) to be divisible by "
+          f"2 * context_parallel_size ({2 * context_parallel_size})."
+      )
+    if self.attention_type != AttentionType.GLOBAL.value:
+      raise ValueError(f"{prefix} supports only attention_type='global', got {self.attention_type!r}.")
+    if self.use_indexer:
+      raise ValueError(f"{prefix} does not support the sparse indexer mask.")
+    # Vision encoder layers (bidirectional, rotary angles from the image grid) keep natural order, but the
+    # multimodal decoder inputs (image-token masks, 3D positions) have not been checked under the permutation.
+    if self.use_multimodal:
+      raise ValueError(f"{prefix} does not support use_multimodal=True.")
+    # Only these two kernels build their causal mask from the permutation (the TPU Splash/ring masks) or
+    # from positions (dot product). The GPU kernels would apply a plain causal mask to permuted tokens.
+    if self.attention not in ("flash", "dot_product"):
+      raise ValueError(f"{prefix} supports attention='flash' (TPU) or 'dot_product', got {self.attention!r}.")
+    if "gpu" in self.hardware:
+      raise ValueError(f"{prefix} is not supported on GPU.")
+    if self.shard_mode == ShardMode.EXPLICIT:
+      raise ValueError(f"{prefix} does not support shard_mode='explicit'.")
+
   def _validate_usp_context_parallelism(self):
     """Validates the USP (Ulysses over ring) context parallelism configuration."""
     if self.context_parallel_strategy != "usp":
@@ -5204,7 +5403,11 @@ class MaxTextConfig(
       reason = f"attention_type={self.attention_type!r} (only 'global' and 'mla' are supported)"
     elif cp_size > 1 and strategy in ("ring", "usp"):
       reason = f"context_parallel_strategy={strategy!r} (ring/USP attention does not use the flags)"
-    elif cp_size > 1 and strategy == "all_gather" and self.context_parallel_load_balance:
+    elif (
+        cp_size > 1
+        and strategy == "all_gather"
+        and (self.context_parallel_load_balance or self.context_parallel_attention_load_balance)
+    ):
       reason = "load-balanced all_gather context parallelism (it uses LoadBalancedCausalMask)"
     else:
       return
@@ -6004,7 +6207,16 @@ class MaxTextConfig(
           "qkv_proj",
           "attention_out",
           "out_proj",
+          "gdn",
+          "gdn_states",
+          "gdn_cp_state",
       ]
+      if self.gdn in ("device", "offload") and self.gdn_states in ("device", "offload") and self.gdn != self.gdn_states:
+        raise ValueError(
+            "GDN custom remat settings cannot place 'gdn' and 'gdn_states' in different storage tiers "
+            f"(got gdn={self.gdn!r}, gdn_states={self.gdn_states!r}) because both include "
+            "['gdn_core_attn_out', 'gdn_t_inv', 'gdn_chunk_states']."
+        )
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
     if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8:
@@ -6980,6 +7192,7 @@ class MaxTextConfig(
             f"({ulysses_num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
         )
     self._validate_usp_context_parallelism()
+    self._validate_context_parallel_attention_load_balance(context_parallel_size)
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
     # AUTO is resolved in training because test code paths may load the same
     # config but use a different reorder path.
@@ -7039,7 +7252,12 @@ class MaxTextConfig(
       rotary_dim = int(self.head_dim * self.partial_rotary_factor)
       if rotary_dim % 2 != 0:
         raise ValueError(f"Calculated rotary dimension ({rotary_dim}) must be a multiple of 2.")
-      gdn_context_parallel_size = self.ici_context_parallelism * self.dcn_context_parallelism
+      gdn_context_parallel_size = (
+          self.ici_context_parallelism
+          * self.dcn_context_parallelism
+          * self.ici_context_usp_ulysses_parallelism
+          * self.dcn_context_usp_ulysses_parallelism
+      )
       if gdn_context_parallel_size > 1 and self.context_parallel_load_balance:
         raise ValueError(
             "GatedDeltaNet context parallelism requires context_parallel_load_balance=False. The GatedDeltaNet "
@@ -7049,9 +7267,46 @@ class MaxTextConfig(
             "reorder because it rebuilds the causal mask from positions; a recurrence cannot. The run still trains "
             "and the loss still falls, so set this explicitly rather than relying on the failure being visible."
         )
+      if self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        if int(self.gdn_num_key_heads) % int(gdn_context_parallel_size) != 0:
+          raise ValueError(
+              f"gdn_cp_mode='head' requires gdn_num_key_heads ({self.gdn_num_key_heads}) to be divisible by "
+              f"the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
+          )
+      if self.gdn_gated_norm_layout != "auto" and not self.gdn_out_proj_token_minor:
+        raise ValueError("gdn_gated_norm_layout != 'auto' requires gdn_out_proj_token_minor=True.")
+      if (self.gdn_in_proj_kernel_order or self.gdn_fp8_projections) and self.shard_mode == ShardMode.EXPLICIT:
+        raise ValueError("gdn_in_proj_kernel_order and gdn_fp8_projections require shard_mode='auto'.")
+      if self.gdn_in_proj_kernel_order and self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True is incompatible with gdn_cp_mode='head' when context parallelism > 1."
+        )
+      if (
+          not self.packing
+          and self.dataset_type == DatasetType.GRAIN
+          and self.grain_file_type in ("mmap", "mmap_npy")
+          and self.reset_attention_mask
+      ):
+        raise ValueError(
+            f"GatedDeltaNet ({self.decoder_block.value}) with grain_file_type={self.grain_file_type!r} and "
+            "reset_attention_mask=True requires packing=True: those rows hold several documents split at EOD, "
+            "and with packing=False GatedDeltaNet ignores their segment IDs in training."
+        )
     else:
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
+      if (
+          self.gdn_in_proj_kernel_order
+          or self.gdn_out_proj_token_minor
+          or self.gdn_gated_norm_layout != "auto"
+          or self.gdn_fp8_projections
+          or not self.gdn_pin_in_proj_output_layout
+      ):
+        raise ValueError(
+            "GatedDeltaNet projection/norm layout options (gdn_in_proj_kernel_order, gdn_out_proj_token_minor, "
+            "gdn_gated_norm_layout, gdn_fp8_projections, gdn_pin_in_proj_output_layout) require a GatedDeltaNet "
+            "decoder_block ('qwen3_next' or 'qwen3_5')."
+        )
 
     tokenizer_path = getattr(self, "tokenizer_path", None)
     if (
@@ -7812,6 +8067,45 @@ class RLConfig(
           f"max_seq_token_per_tpu ({self.max_seq_token_per_tpu}) must be at least "
           f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
       )
+    if self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+      if not self.packing and self.max_seq_token_per_tpu > 0:
+        raise ValueError(
+            f"GatedDeltaNet ({self.decoder_block.value}) with max_seq_token_per_tpu > 0 requires packing=True: "
+            "packed rows hold several sequences, and with packing=False GatedDeltaNet ignores their segment IDs "
+            "in training."
+        )
+      gdn_context_parallel_size = (
+          self.ici_context_parallelism
+          * self.dcn_context_parallelism
+          * self.ici_context_usp_ulysses_parallelism
+          * self.dcn_context_usp_ulysses_parallelism
+      )
+      if self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        if int(self.gdn_num_key_heads) % int(gdn_context_parallel_size) != 0:
+          raise ValueError(
+              f"gdn_cp_mode='head' requires gdn_num_key_heads ({self.gdn_num_key_heads}) to be divisible by "
+              f"the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
+          )
+      if self.gdn_gated_norm_layout != "auto" and not self.gdn_out_proj_token_minor:
+        raise ValueError("gdn_gated_norm_layout != 'auto' requires gdn_out_proj_token_minor=True.")
+      if (self.gdn_in_proj_kernel_order or self.gdn_fp8_projections) and self.shard_mode == ShardMode.EXPLICIT:
+        raise ValueError("gdn_in_proj_kernel_order and gdn_fp8_projections require shard_mode='auto'.")
+      if self.gdn_in_proj_kernel_order and self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True is incompatible with gdn_cp_mode='head' when context parallelism > 1."
+        )
+    elif (
+        self.gdn_in_proj_kernel_order
+        or self.gdn_out_proj_token_minor
+        or self.gdn_gated_norm_layout != "auto"
+        or self.gdn_fp8_projections
+        or not self.gdn_pin_in_proj_output_layout
+    ):
+      raise ValueError(
+          "GatedDeltaNet projection/norm layout options (gdn_in_proj_kernel_order, gdn_out_proj_token_minor, "
+          "gdn_gated_norm_layout, gdn_fp8_projections, gdn_pin_in_proj_output_layout) require a GatedDeltaNet "
+          "decoder_block ('qwen3_next' or 'qwen3_5')."
+      )
 
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)
@@ -7961,7 +8255,16 @@ class RLConfig(
           "qkv_proj",
           "attention_out",
           "out_proj",
+          "gdn",
+          "gdn_states",
+          "gdn_cp_state",
       ]
+      if self.gdn in ("device", "offload") and self.gdn_states in ("device", "offload") and self.gdn != self.gdn_states:
+        raise ValueError(
+            "GDN custom remat settings cannot place 'gdn' and 'gdn_states' in different storage tiers "
+            f"(got gdn={self.gdn!r}, gdn_states={self.gdn_states!r}) because both include "
+            "['gdn_core_attn_out', 'gdn_t_inv', 'gdn_chunk_states']."
+        )
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
     if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8:

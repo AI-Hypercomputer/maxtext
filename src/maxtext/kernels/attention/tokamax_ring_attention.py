@@ -24,13 +24,16 @@ import functools
 from typing import Any
 
 import jax
+from jax import lax
 from jax.experimental import pallas as pl
+import jax.numpy as jnp
 import numpy as np
 
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.kernels.tokamax_splash_attention import ring_attention_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
+from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import sharding
 
@@ -210,8 +213,13 @@ def build_splash_config(
     kv_seq_len: int,
     context_parallel_size: int,
     attn_logits_soft_cap: float | None = None,
+    load_balanced: bool = False,
 ) -> Any:
-  """Converts MaxText Splash config fields into Tokamax `SplashConfig`."""
+  """Converts MaxText Splash config fields into Tokamax `SplashConfig`.
+
+  `load_balanced` says whether Q/K/V arrive in DUAL_CHUNK_SWAP order, i.e. whether the ring runs the
+  load-balanced causal mask.
+  """
   if context_parallel_size <= 1:
     raise ValueError("context_parallel_size must be > 1 for ring attention.")
   dq_reduction_steps = config.dq_reduction_steps
@@ -238,9 +246,9 @@ def build_splash_config(
   block_q_dkv = min(config.sa_block_q_dkv, q_seq_len_per_shard)
   block_kv_dkv = min(config.sa_block_kv_dkv, kv_seq_len_per_shard)
   block_kv_dkv_compute = min(config.sa_block_kv_dkv_compute, kv_seq_len_per_shard)
-  if config.context_parallel_load_balance and block_q_dkv % tokamax_splash_kernel.NUM_LANES != 0:
+  if load_balanced and block_q_dkv % tokamax_splash_kernel.NUM_LANES != 0:
     raise ValueError(
-        "TPU Tokamax ring attention with context_parallel_load_balance=True requires "
+        "TPU Tokamax ring attention with a load-balanced causal mask requires "
         f"sa_block_q_dkv ({block_q_dkv}) to be a multiple of {tokamax_splash_kernel.NUM_LANES} after clamping."
     )
   # Ring uses the dynamic-grid dKV path, so mirror Splash's small-kv_steps guard here.
@@ -295,6 +303,200 @@ def _make_causal_mask(shape: tuple[int, int], context_parallel_size: int, *, loa
   return mask
 
 
+def load_balance_permutations(
+    context_parallel_size: int,
+) -> tuple[tuple[tuple[int, int], ...], tuple[tuple[int, int], ...]]:
+  """Source-to-destination rank pairs that move a sequence into DUAL_CHUNK_SWAP order.
+
+  With N context ranks the sequence is 2N chunks. In natural order rank d holds chunks 2d and 2d + 1; in
+  DUAL_CHUNK_SWAP order (`max_utils.reorder_sequence`) rank r holds chunks r and 2N - 1 - r. Chunk c
+  therefore moves to rank c when c < N and to rank 2N - 1 - c otherwise.
+
+  The first tuple moves every rank's first half (chunk 2d), the second tuple every rank's second half
+  (chunk 2d + 1). Each is a permutation of the ranks, so each is one `lax.ppermute`. For N = 4 they are
+  {0->0, 1->2, 2->3, 3->1} and {0->1, 1->3, 2->2, 3->0}.
+  """
+  n = context_parallel_size
+  if n < 2 or n % 2 != 0:
+    raise ValueError(f"DUAL_CHUNK_SWAP load balancing requires an even context_parallel_size >= 2, got {n}.")
+
+  def destination(chunk: int) -> int:
+    return chunk if chunk < n else 2 * n - 1 - chunk
+
+  first_halves = tuple((rank, destination(2 * rank)) for rank in range(n))
+  second_halves = tuple((rank, destination(2 * rank + 1)) for rank in range(n))
+  return first_halves, second_halves
+
+
+# Values of `context_parallel_attention_load_balance_order` (configs/types.py), i.e. how `reorder_for_load_balance`
+# moves the tokens. Both give the same DUAL_CHUNK_SWAP token order and the same values.
+LOAD_BALANCE_ORDER_DUAL_CHUNK_SWAP = "dual_chunk_swap"
+LOAD_BALANCE_ORDER_DUAL_CHUNK_SWAP_LOCAL_SELF = "dual_chunk_swap_local_self"
+LOAD_BALANCE_ORDERS = {
+    LOAD_BALANCE_ORDER_DUAL_CHUNK_SWAP: (
+        "two collective-permutes of half a shard per reorder; a rank whose half stays on it is a (r, r) pair, i.e. a"
+        " local copy inside the permute"
+    ),
+    LOAD_BALANCE_ORDER_DUAL_CHUNK_SWAP_LOCAL_SELF: (
+        "the same two permutes without their (r, r) pairs; the self rank takes its own half with a select"
+    ),
+}
+_LOGGED_LOAD_BALANCE_ORDERS = set()
+
+
+def load_balance_self_ranks(
+    context_parallel_size: int,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+  """The ranks that send their half to themselves in each of `load_balance_permutations`' two perms.
+
+  For N = 4: rank 0 in the first-half perm and rank 2 in the second-half perm. For N = 2 both ranks of the
+  first-half perm (that perm moves nothing); for N = 8 ranks 0 and 5 of the first-half perm.
+  """
+  first_halves, second_halves = load_balance_permutations(context_parallel_size)
+  return (
+      tuple(src for src, dst in first_halves if src == dst),
+      tuple(src for src, dst in second_halves if src == dst),
+  )
+
+
+def _ppermute_local_self(x: jax.Array, axis_name: str, perm: tuple[tuple[int, int], ...]) -> jax.Array:
+  """Equals `lax.ppermute(x, axis_name, perm)` on every rank, with the (r, r) pairs kept out of the permute.
+
+  A collective-permute with a (r, r) pair copies `x` locally on rank r. Here rank r is dropped from the permute
+  (so it receives zeros) and takes its own `x` with a select; a perm made only of self pairs is no permute at all.
+  `perm` is a permutation, so no other pair sends to a self rank.
+  """
+  self_ranks = tuple(src for src, dst in perm if src == dst)
+  remote = tuple((src, dst) for src, dst in perm if src != dst)
+  if not remote:
+    return x
+  received = lax.ppermute(x, axis_name, perm=remote)
+  if not self_ranks:
+    return received
+  rank = lax.axis_index(axis_name)
+  is_self = functools.reduce(jnp.logical_or, [rank == r for r in self_ranks])
+  return jnp.where(is_self, x, received)
+
+
+def _to_load_balanced_shard(x: jax.Array, axis_name: str, context_parallel_size: int, seq_dim: int) -> jax.Array:
+  """Shard-local body of the natural -> DUAL_CHUNK_SWAP reorder (inside `shard_map`)."""
+  first_halves, second_halves = load_balance_permutations(context_parallel_size)
+  first_half, second_half = jnp.split(x, 2, axis=seq_dim)
+  from_first = lax.ppermute(first_half, axis_name, perm=first_halves)
+  from_second = lax.ppermute(second_half, axis_name, perm=second_halves)
+  # An even rank r receives chunk r (< N) from the first-half permute and chunk 2N - 1 - r from the
+  # second; an odd rank receives them the other way round.
+  is_even_rank = lax.axis_index(axis_name) % 2 == 0
+  lead = jnp.where(is_even_rank, from_first, from_second)
+  tail = jnp.where(is_even_rank, from_second, from_first)
+  return jnp.concatenate([lead, tail], axis=seq_dim)
+
+
+def _to_natural_shard(x: jax.Array, axis_name: str, context_parallel_size: int, seq_dim: int) -> jax.Array:
+  """Shard-local body of the DUAL_CHUNK_SWAP -> natural reorder: the inverse of `_to_load_balanced_shard`."""
+  first_halves, second_halves = load_balance_permutations(context_parallel_size)
+  lead, tail = jnp.split(x, 2, axis=seq_dim)
+  is_even_rank = lax.axis_index(axis_name) % 2 == 0
+  to_first = jnp.where(is_even_rank, lead, tail)
+  to_second = jnp.where(is_even_rank, tail, lead)
+  first_half = lax.ppermute(to_first, axis_name, perm=tuple((dst, src) for src, dst in first_halves))
+  second_half = lax.ppermute(to_second, axis_name, perm=tuple((dst, src) for src, dst in second_halves))
+  return jnp.concatenate([first_half, second_half], axis=seq_dim)
+
+
+def _to_load_balanced_shard_local_self(
+    x: jax.Array, axis_name: str, context_parallel_size: int, seq_dim: int
+) -> jax.Array:
+  """`_to_load_balanced_shard` with the (r, r) pairs kept out of both permutes (order dual_chunk_swap_local_self)."""
+  first_halves, second_halves = load_balance_permutations(context_parallel_size)
+  first_half, second_half = jnp.split(x, 2, axis=seq_dim)
+  from_first = _ppermute_local_self(first_half, axis_name, first_halves)
+  from_second = _ppermute_local_self(second_half, axis_name, second_halves)
+  is_even_rank = lax.axis_index(axis_name) % 2 == 0
+  lead = jnp.where(is_even_rank, from_first, from_second)
+  tail = jnp.where(is_even_rank, from_second, from_first)
+  return jnp.concatenate([lead, tail], axis=seq_dim)
+
+
+def _to_natural_shard_local_self(x: jax.Array, axis_name: str, context_parallel_size: int, seq_dim: int) -> jax.Array:
+  """`_to_natural_shard` with the (r, r) pairs kept out of both permutes (order dual_chunk_swap_local_self)."""
+  first_halves, second_halves = load_balance_permutations(context_parallel_size)
+  lead, tail = jnp.split(x, 2, axis=seq_dim)
+  is_even_rank = lax.axis_index(axis_name) % 2 == 0
+  to_first = jnp.where(is_even_rank, lead, tail)
+  to_second = jnp.where(is_even_rank, tail, lead)
+  first_half = _ppermute_local_self(to_first, axis_name, tuple((dst, src) for src, dst in first_halves))
+  second_half = _ppermute_local_self(to_second, axis_name, tuple((dst, src) for src, dst in second_halves))
+  return jnp.concatenate([first_half, second_half], axis=seq_dim)
+
+
+def log_load_balance_order_once(order: str) -> None:
+  """One `[attn-lb-order]` line per process and order, so a run's log shows which reorder it traced."""
+  if order in _LOGGED_LOAD_BALANCE_ORDERS:
+    return
+  _LOGGED_LOAD_BALANCE_ORDERS.add(order)
+  max_logging.log(f"[attn-lb-order] context_parallel_attention_load_balance_order={order}: {LOAD_BALANCE_ORDERS[order]}")
+
+
+def reorder_for_load_balance(
+    x: jax.Array | None,
+    *,
+    mesh: Any,
+    axis_name: str,
+    batch_axes: Any,
+    to_natural: bool = False,
+    seq_dim: int = 1,
+    order: str = LOAD_BALANCE_ORDER_DUAL_CHUNK_SWAP,
+) -> jax.Array | None:
+  """Moves a sequence-sharded array between natural and DUAL_CHUNK_SWAP order over one mesh axis.
+
+  The result equals `max_utils.reorder_sequence(x, cp_size, seq_dim, to_contiguous=to_natural)`, but it is
+  built as two point-to-point `lax.ppermute`s of half a shard each instead of a global reshape/split/stack
+  that the SPMD partitioner may lower to an all-gather. Its transpose is the opposite reorder.
+
+  Args:
+    x: array whose `seq_dim` is sharded over `axis_name`; dim 0 is the batch. None passes through.
+    mesh: the device mesh.
+    axis_name: the context mesh axis the sequence is sharded over.
+    batch_axes: the PartitionSpec entry for dim 0 (the batch sharding of the surrounding activations). It is
+      dropped for arrays whose batch does not divide over it, e.g. broadcast position ids.
+    to_natural: False for natural -> DUAL_CHUNK_SWAP, True for the inverse.
+    seq_dim: the sequence dimension.
+    order: a `LOAD_BALANCE_ORDERS` key (`context_parallel_attention_load_balance_order`). 'dual_chunk_swap_local_self'
+      gives the same result with the (r, r) pairs kept out of the permutes.
+  """
+  if order not in LOAD_BALANCE_ORDERS:
+    raise ValueError(f"Unknown load-balance order {order!r}; expected one of {sorted(LOAD_BALANCE_ORDERS)}.")
+  log_load_balance_order_once(order)
+  if x is None:
+    return None
+  context_parallel_size = mesh.shape[axis_name]
+  if x.shape[seq_dim] % (2 * context_parallel_size) != 0:
+    raise ValueError(
+        f"DUAL_CHUNK_SWAP load balancing needs the sequence length ({x.shape[seq_dim]}) to be divisible by "
+        f"2 * context_parallel_size ({2 * context_parallel_size})."
+    )
+  batch_shards = sharding.mesh_axes_size(mesh, sharding.mesh_axes_for_dim(batch_axes), label="load balance reorder")
+  spec = [None] * x.ndim
+  spec[0] = batch_axes if x.shape[0] % batch_shards == 0 else None
+  spec[seq_dim] = axis_name
+  if order == LOAD_BALANCE_ORDER_DUAL_CHUNK_SWAP_LOCAL_SELF:
+    shard_fn = _to_natural_shard_local_self if to_natural else _to_load_balanced_shard_local_self
+  else:
+    shard_fn = _to_natural_shard if to_natural else _to_load_balanced_shard
+  return jax.shard_map(
+      functools.partial(
+          shard_fn,
+          axis_name=axis_name,
+          context_parallel_size=context_parallel_size,
+          seq_dim=seq_dim,
+      ),
+      mesh=mesh,
+      in_specs=jax.sharding.PartitionSpec(*spec),
+      out_specs=jax.sharding.PartitionSpec(*spec),
+  )(x)
+
+
 def make_sharded_ring_attention_kernel(
     config: Any,
     *,
@@ -304,15 +506,23 @@ def make_sharded_ring_attention_kernel(
     ring_axis: str,
     attn_logits_soft_cap: float | None,
     maybe_shard_with_pspec: Any,
+    load_balanced: bool,
     mask: Any = None,
 ):
-  """Builds and shards the Tokamax ring attention kernel for MaxText."""
+  """Builds and shards the Tokamax ring attention kernel for MaxText.
+
+  `load_balanced` says whether Q/K/V arrive in DUAL_CHUNK_SWAP order: either the input pipeline reordered
+  the batch (`context_parallel_load_balance`) or the attention layer reordered its own input
+  (`context_parallel_attention_load_balance`). The caller decides; the config flag alone cannot tell the two
+  apart from a batch in natural order.
+  """
   splash_config = build_splash_config(
       config,
       q_seq_len=query.shape[2],
       kv_seq_len=key.shape[2],
       context_parallel_size=context_parallel_size,
       attn_logits_soft_cap=attn_logits_soft_cap,
+      load_balanced=load_balanced,
   )
   if config.use_max_logit_estimate > 0:
     splash_config = dataclasses.replace(splash_config, max_logit_const=config.use_max_logit_estimate)
@@ -326,7 +536,7 @@ def make_sharded_ring_attention_kernel(
       mask = _make_causal_mask(
           (query.shape[2], key.shape[2]),
           context_parallel_size,
-          load_balanced=config.context_parallel_load_balance,
+          load_balanced=load_balanced,
       )
 
   @functools.partial(jax.jit, static_argnames=["single_head_mask"])

@@ -212,6 +212,42 @@ def should_prevent_cse_in_remat(config):
   return True
 
 
+_GDN_REMAT_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "gdn": (
+        "gdn_qkv",
+        "gdn_b",
+        "gdn_a",
+        "gdn_core_attn_out",
+        "gdn_t_inv",
+        "gdn_chunk_states",
+    ),
+    "gdn_states": (
+        "gdn_core_attn_out",
+        "gdn_t_inv",
+        "gdn_chunk_states",
+    ),
+    "gdn_cp_state": (
+        "gdn_cp_conv_halo",
+        "gdn_cp_m_local",
+        "gdn_cp_s_in",
+    ),
+}
+
+
+def _expand_gdn_remat_names(names: list[str]) -> list[str]:
+  """Expands composite GatedDeltaNet custom remat keys while preserving order and deduplicating."""
+  expanded: list[str] = []
+  for name in names:
+    expanded.extend(_GDN_REMAT_EXPANSIONS.get(name, (name,)))
+  return list(dict.fromkeys(expanded))
+
+
+# Checkpoint name of an attention layer's load-balance-ordered positions and segment ids
+# (Attention._to_load_balanced_order); remat_policy=custom saves it under
+# context_parallel_attention_load_balance_hoist_ids.
+ATTENTION_LB_IDS = "attention_lb_ids"
+
+
 def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   """Returns the ``(save_names, offload_names)`` split for remat policies built via
   ``jax.checkpoint_policies.save_and_offload_only_these_names``.
@@ -225,7 +261,8 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   Returns a ``(save_names, offload_names)`` tuple:
     * ``custom``: ``(config.tensors_on_device, config.tensors_to_offload)`` -- the per-tensor
       assignments. Either list may be empty: all tensors set to ``device`` gives an empty offload
-      list, all set to ``remat`` gives ``([], [])``.
+      list, all set to ``remat`` gives ``([], [])``. With
+      ``context_parallel_attention_load_balance_hoist_ids``, ``ATTENTION_LB_IDS`` is saved too.
     * ``qkv_proj_offloaded`` / ``minimal_offloaded``: ``([], <hardcoded offload names>)`` -- presets
       that only offload and save nothing on device.
     * any other policy (``full``, ``minimal``, ``save_*``, ``none``, ...): ``([], [])`` -- these do
@@ -249,7 +286,18 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
         "mlpwo",
     ]
   if config.remat_policy == "custom":
-    return list(config.tensors_on_device or []), list(config.tensors_to_offload or [])
+    save_names = _expand_gdn_remat_names(list(config.tensors_on_device or []))
+    offload_names = _expand_gdn_remat_names(list(config.tensors_to_offload or []))
+    if getattr(config, "context_parallel_attention_load_balance_hoist_ids", False) and ATTENTION_LB_IDS not in save_names:
+      # On device: the saved value depends only on the batch, so jax.lax.scan keeps one copy, outside the layer loop.
+      save_names.append(ATTENTION_LB_IDS)
+    overlap = sorted(set(save_names) & set(offload_names))
+    if overlap:
+      raise ValueError(
+          "GDN custom remat settings place the same checkpointed tensors in both device HBM and host offload: "
+          f"{overlap}. Choose compatible locations for 'gdn' and 'gdn_states'."
+      )
+    return save_names, offload_names
   return [], []
 
 
@@ -1990,7 +2038,13 @@ def setup_initial_state(
         state_mesh_shardings=state_mesh_shardings,
         restored=restored,
     )
-  return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
+  return (
+      state,
+      state_mesh_annotations,
+      state_mesh_shardings,
+      data_iterator,
+      was_restored,
+  )
 
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
