@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Transformer model definition."""
+
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -144,44 +145,52 @@ class DeepSeekGenericLayer(nnx.Module):
       self.engram_layer_norm = None
       self.engram = None
 
+    self.is_shared_layer = False
+    self.served_group_size = 1
     # DeepSeek V4 natively overrides this block with CompressedAttention.
     if self.config.decoder_block != DecoderBlockType.DEEPSEEK4:
-      self.self_attention = attention_mla.MLA(
-          config=self.config,
-          num_query_heads=self.config.num_query_heads,
-          num_kv_heads=self.config.num_kv_heads,
-          head_dim=self.config.head_dim,
-          max_target_length=self.config.max_target_length,
-          max_prefill_predict_length=self.config.max_prefill_predict_length,
-          attention_kernel=self.config.attention,
-          attention_type=AttentionType(self.config.attention_type),
-          inputs_q_shape=self.dummy_inputs_shape,
-          inputs_kv_shape=self.dummy_inputs_shape,
-          mesh=mesh,
-          dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
-          dropout_rate=self.config.dropout_rate,
-          name="self_attention",
-          quant=quant,
-          kv_quant=quantizations.configure_kv_quant(self.config),
-          q_lora_rank=self.config.q_lora_rank,
-          kv_lora_rank=self.config.kv_lora_rank,
-          qk_nope_head_dim=self.config.qk_nope_head_dim,
-          qk_rope_head_dim=self.config.qk_rope_head_dim,
-          v_head_dim=self.config.v_head_dim,
-          max_position_embeddings=self.config.max_position_embeddings,
-          original_max_position_embeddings=self.config.original_max_position_embeddings,
-          mscale=self.config.mscale,
-          rope_factor=self.config.rope_factor,
-          model_mode=model_mode,
-          rngs=rngs,
-          attn_logits_soft_cap=self.config.attn_logits_soft_cap,
-      )
+      self._init_self_attention()
 
     self.dropout = Dropout(rate=self.config.dropout_rate, broadcast_dims=(-2,), rngs=self.rngs)
     if self.is_mhc_enabled:
       self.mhc_attention = mhc.ManifoldConstrainedHyperConnections(self.config, self.config.emb_dim, self.mesh, self.rngs)
       self.mhc_mlp = mhc.ManifoldConstrainedHyperConnections(self.config, self.config.emb_dim, self.mesh, self.rngs)
+
+  def _init_self_attention(self) -> None:
+    """Initializes the MLA self-attention submodule."""
+    self.self_attention = attention_mla.MLA(
+        config=self.config,
+        num_query_heads=self.config.num_query_heads,
+        num_kv_heads=self.config.num_kv_heads,
+        head_dim=self.config.head_dim,
+        max_target_length=self.config.max_target_length,
+        max_prefill_predict_length=self.config.max_prefill_predict_length,
+        attention_kernel=self.config.attention,
+        attention_type=AttentionType(self.config.attention_type),
+        inputs_q_shape=self.dummy_inputs_shape,
+        inputs_kv_shape=self.dummy_inputs_shape,
+        mesh=self.mesh,
+        dtype=self.config.dtype,
+        weight_dtype=self.config.weight_dtype,
+        dropout_rate=self.config.dropout_rate,
+        name="self_attention",
+        quant=self.quant,
+        kv_quant=quantizations.configure_kv_quant(self.config),
+        q_lora_rank=self.config.q_lora_rank,
+        kv_lora_rank=self.config.kv_lora_rank,
+        qk_nope_head_dim=self.config.qk_nope_head_dim,
+        qk_rope_head_dim=self.config.qk_rope_head_dim,
+        v_head_dim=self.config.v_head_dim,
+        max_position_embeddings=self.config.max_position_embeddings,
+        original_max_position_embeddings=self.config.original_max_position_embeddings,
+        mscale=self.config.mscale,
+        rope_factor=self.config.rope_factor,
+        model_mode=self.model_mode,
+        is_shared_layer=self.is_shared_layer,
+        served_group_size=self.served_group_size,
+        rngs=self.rngs,
+        attn_logits_soft_cap=self.config.attn_logits_soft_cap,
+    )
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
     """Executes the MLP operation. To be implemented by subclasses."""
@@ -219,9 +228,11 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
+      cached_indexer_state=None,
+      layer_idx=None,
   ):
     """Executes the attention layer."""
-    attention_result, _ = self.self_attention(
+    attention_result, _, new_indexer_state = self.self_attention(
         x,
         x,
         decoder_positions,
@@ -231,8 +242,11 @@ class DeepSeekGenericLayer(nnx.Module):
         out_sharding=self.out_sharding,
         previous_chunk=previous_chunk,
         slot=slot,
+        cached_indexer_state=cached_indexer_state,
+        layer_idx=layer_idx,
+        return_indexer_state=True,
     )
-    return self.with_logical_constraint(attention_result)
+    return self.with_logical_constraint(attention_result), new_indexer_state
 
   @property
   def logical_axis_names(self):
@@ -248,7 +262,19 @@ class DeepSeekGenericLayer(nnx.Module):
     axis_names = ["activation_batch", length_name, "activation_mlp"]
     return axis_names
 
-  def post_process(self, layer_output, load_balance_loss, moe_bias_updates, kv_cache=None):
+  def _format_layer_return(self, layer_output, kv_cache, cached_indexer_state=None):
+    """Formats the layer return tuple for sequential and scanned execution."""
+    del cached_indexer_state
+    return layer_output, (None if self.config.scan_layers else kv_cache)
+
+  def post_process(
+      self,
+      layer_output,
+      load_balance_loss,
+      moe_bias_updates,
+      kv_cache=None,
+      cached_indexer_state=None,
+  ):
     """postprocessing."""
 
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
@@ -276,11 +302,9 @@ class DeepSeekGenericLayer(nnx.Module):
           jnp.sum(layer_output == 0) / jnp.size(layer_output),
       )
 
-    if self.config.scan_layers:
-      return layer_output, None
-    return layer_output, kv_cache
+    return self._format_layer_return(layer_output, kv_cache, cached_indexer_state)
 
-  def self_attention_with_norm_op(
+  def _self_attention_with_norm_and_indexer_op(
       self,
       inputs,
       decoder_segment_ids,
@@ -289,9 +313,13 @@ class DeepSeekGenericLayer(nnx.Module):
       model_mode,
       previous_chunk=None,
       slot: None | int = None,
+      cached_indexer_state=None,
+      layer_idx=None,
   ):
-    """self-attention with normalization"""
+    """Self-attention with normalization and optional IndexShare state propagation."""
     if self.is_mhc_enabled:
+      if self.config.use_index_share:
+        raise ValueError("use_index_share=True is not supported with mhc_expansion_rate > 1.")
       intermediate_inputs, _ = self.mhc_attention(
           self.pre_attention_norm_op,
           self.self_attention,
@@ -305,9 +333,10 @@ class DeepSeekGenericLayer(nnx.Module):
           previous_chunk=previous_chunk,
           slot=slot,
       )
+      new_indexer_state = None
     else:
       lnx = self.pre_attention_norm_op(inputs)
-      attention_lnx = self.attention_op(
+      attention_lnx, new_indexer_state = self.attention_op(
           lnx,
           decoder_segment_ids,
           decoder_positions,
@@ -315,10 +344,34 @@ class DeepSeekGenericLayer(nnx.Module):
           model_mode,
           previous_chunk,
           slot,
+          cached_indexer_state=cached_indexer_state,
+          layer_idx=layer_idx,
       )
       intermediate_inputs = inputs + attention_lnx
     # Normalization
     hidden_states = self.post_attention_norm_op(intermediate_inputs)
+    return hidden_states, intermediate_inputs, new_indexer_state
+
+  def self_attention_with_norm_op(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      slot: None | int = None,
+  ):
+    """self-attention with normalization"""
+    hidden_states, intermediate_inputs, _ = self._self_attention_with_norm_and_indexer_op(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        previous_chunk,
+        slot,
+    )
     return hidden_states, intermediate_inputs
 
   def engram_op(self, x, decoder_input_tokens, model_mode):
@@ -386,6 +439,8 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       kv_cache=None,
       attention_metadata=None,
       decoder_input_tokens=None,
+      cached_indexer_state=None,
+      layer_idx=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -397,7 +452,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens, model_mode)
       x = x + engram_output
 
-    hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
+    hidden_states, intermediate_inputs, new_indexer_state = self._self_attention_with_norm_and_indexer_op(
         x,
         decoder_segment_ids,
         decoder_positions,
@@ -405,6 +460,8 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
         model_mode,
         previous_chunk,
         slot,
+        cached_indexer_state=cached_indexer_state,
+        layer_idx=layer_idx,
     )
 
     if self.is_mhc_enabled:
@@ -420,7 +477,7 @@ class DeepSeekDenseLayer(DeepSeekGenericLayer):
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
-    return self.post_process(layer_output, None, None, kv_cache)
+    return self.post_process(layer_output, None, None, kv_cache, new_indexer_state)
 
 
 class DeepSeekMoELayer(DeepSeekGenericLayer):
@@ -463,6 +520,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       kv_cache=None,
       attention_metadata=None,
       decoder_input_tokens=None,
+      cached_indexer_state=None,
+      layer_idx=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -514,7 +573,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
             in_specs=([activation_pspec] * self.config.batch_split_factor,),
             out_specs=activation_pspec,
         )(outputs)
-        return outputs, None
+        return self._format_layer_return(outputs, None, None)
 
       # bf16 and fp8 code path for pure-JAX batch-split.
       # fp8 code path supports both manual quantization and qwix
@@ -598,7 +657,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           out_specs=activation_pspec,
       )(outputs)
       outputs = jax.reshard(outputs, input_sharding)
-      return outputs, None
+      return self._format_layer_return(outputs, None, None)
 
     x = self.with_logical_constraint(inputs)
     x = checkpoint_name(x, "decoder_layer_input")
@@ -607,7 +666,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       engram_output = self.engram_op(x, decoder_input_tokens, model_mode)
       x = x + engram_output
 
-    hidden_states, intermediate_inputs = self.self_attention_with_norm_op(
+    hidden_states, intermediate_inputs, new_indexer_state = self._self_attention_with_norm_and_indexer_op(
         x,
         decoder_segment_ids,
         decoder_positions,
@@ -615,6 +674,8 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         model_mode,
         previous_chunk,
         slot,
+        cached_indexer_state=cached_indexer_state,
+        layer_idx=layer_idx,
     )
 
     if self.is_mhc_enabled:
@@ -636,7 +697,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
-    return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
+    return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache, new_indexer_state)
 
   def mlp_op(self, x, deterministic, *args, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(

@@ -25,6 +25,7 @@ import warnings
 import jax.numpy as jnp
 import yaml
 
+from maxtext.common.common_types import DecoderBlockType
 from maxtext.configs import pyconfig
 from maxtext.configs.pyconfig import (
     _CONFIG_FILE_MAPPING,
@@ -1173,6 +1174,237 @@ assert train._TF_AVAILABLE is False
             w for w in caught_active if issubclass(w.category, DeprecationWarning) and "qwen3-0.6b" in str(w.message)
         ]
         self.assertEqual(len(active_dep_warnings), 0)
+
+  def test_glm5_configs_and_prune_shared_indexers_resolution(self):
+    """Verifies GLM-5.1 and GLM-5.2 config loading and tri-state prune_shared_indexers resolution."""
+    base_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()]
+
+    cfg_51_scan = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.1-744b",
+        override_model_config=True,
+        scan_layers=True,
+        routed_bias_update_rate=1e-3,
+    )
+    self.assertEqual(cfg_51_scan.decoder_block, DecoderBlockType.GLM5)
+    self.assertFalse(cfg_51_scan.use_index_share)
+    self.assertFalse(cfg_51_scan.prune_shared_indexers)
+    self.assertTrue(cfg_51_scan.use_indexer)
+    self.assertTrue(cfg_51_scan.indexer_rope_interleave)
+    self.assertTrue(cfg_51_scan.float32_gate_logits)
+    self.assertTrue(cfg_51_scan.rope_direct_position_freqs)
+    self.assertEqual(cfg_51_scan.num_decoder_layers, 78)
+    self.assertEqual(cfg_51_scan.first_num_dense_layers, 3)
+
+    cfg_51_unscan = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.1-744b",
+        override_model_config=True,
+        scan_layers=False,
+    )
+    self.assertFalse(cfg_51_unscan.prune_shared_indexers)
+
+    cfg_52_scan = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.2-744b",
+        override_model_config=True,
+        scan_layers=True,
+    )
+    self.assertEqual(cfg_52_scan.decoder_block, DecoderBlockType.GLM5)
+    self.assertTrue(cfg_52_scan.use_index_share)
+    self.assertFalse(cfg_52_scan.prune_shared_indexers)
+    self.assertEqual(len(cfg_52_scan.index_share_pattern), 78)
+
+    cfg_52_unscan = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.2-744b",
+        override_model_config=True,
+        scan_layers=False,
+    )
+    self.assertTrue(cfg_52_unscan.prune_shared_indexers)
+
+    cfg_52_unscan_keep = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.2-744b",
+        override_model_config=True,
+        scan_layers=False,
+        prune_shared_indexers=False,
+    )
+    self.assertFalse(cfg_52_unscan_keep.prune_shared_indexers)
+
+  def test_glm5_index_share_fast_fail_validations(self):
+    """Verifies every fast-fail ValueError invariant for GLM-5 and IndexShare."""
+    base_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()]
+
+    def init_glm52(**overrides):
+      return pyconfig.initialize(
+          base_args,
+          skip_jax_distributed_system=True,
+          model_name="glm5.2-744b",
+          override_model_config=True,
+          **overrides,
+      )
+
+    with self.assertRaisesRegex(ValueError, "prune_shared_indexers=True` is incompatible with `scan_layers=True`"):
+      init_glm52(scan_layers=True, prune_shared_indexers=True)
+
+    stack_err_regex = (
+        r"prune_shared_indexers=True` is incompatible with `stack_prefill_result_cache=True`"
+        r".*IndexerKVCache_0.*prune_shared_indexers=False"
+    )
+    # Explicit prune_shared_indexers=True + stack_prefill_result_cache=True must fail fast.
+    with self.assertRaisesRegex(ValueError, stack_err_regex):
+      init_glm52(scan_layers=False, prune_shared_indexers=True, stack_prefill_result_cache=True)
+
+    # Default prune_shared_indexers=None resolves to True when use_index_share=True and scan_layers=False.
+    with self.assertRaisesRegex(ValueError, stack_err_regex):
+      init_glm52(scan_layers=False, stack_prefill_result_cache=True)
+
+    # Retaining Shared-layer indexers (prune_shared_indexers=False) allows stacking prefill caches cleanly.
+    cfg_unscan_stacked = init_glm52(
+        scan_layers=False,
+        prune_shared_indexers=False,
+        stack_prefill_result_cache=True,
+    )
+    self.assertTrue(cfg_unscan_stacked.use_index_share)
+    self.assertFalse(cfg_unscan_stacked.scan_layers)
+    self.assertFalse(cfg_unscan_stacked.prune_shared_indexers)
+    self.assertTrue(cfg_unscan_stacked.stack_prefill_result_cache)
+
+    # Scanned layers resolve prune_shared_indexers=False by default and also allow stack_prefill_result_cache=True.
+    cfg_scan_stacked = init_glm52(scan_layers=True, stack_prefill_result_cache=True)
+    self.assertFalse(cfg_scan_stacked.prune_shared_indexers)
+    self.assertTrue(cfg_scan_stacked.stack_prefill_result_cache)
+
+    with self.assertRaisesRegex(ValueError, "mhc_expansion_rate > 1"):
+      pyconfig.initialize(
+          base_args,
+          skip_jax_distributed_system=True,
+          model_name="glm5.1-744b",
+          override_model_config=True,
+          mhc_expansion_rate=2,
+      )
+
+    with self.assertRaisesRegex(ValueError, "mhc_expansion_rate > 1"):
+      init_glm52(mhc_expansion_rate=2)
+
+    with self.assertRaisesRegex(ValueError, "requires `use_indexer=True`"):
+      init_glm52(use_indexer=False)
+
+    with self.assertRaisesRegex(ValueError, "requires `decoder_block='glm5'`"):
+      init_glm52(decoder_block="deepseek")
+
+    with self.assertRaisesRegex(ValueError, "requires `attention_type='mla'`"):
+      init_glm52(attention_type="global")
+
+    with self.assertRaisesRegex(ValueError, "requires `indexer_topk > 0`"):
+      init_glm52(indexer_topk=0)
+
+    for bad_attn in ("vllm_rpa", "vllm_batched_rpa"):
+      with self.subTest(attention=bad_attn):
+        with self.assertRaisesRegex(ValueError, "not supported with `attention="):
+          init_glm52(attention=bad_attn)
+
+    with self.assertRaisesRegex(ValueError, "not supported with pipeline parallelism"):
+      init_glm52(ici_pipeline_parallelism=2)
+
+    with self.assertRaisesRegex(ValueError, "not supported with pipeline parallelism"):
+      init_glm52(dcn_pipeline_parallelism=2)
+
+    with self.assertRaisesRegex(ValueError, "not supported with `engram_layers`"):
+      init_glm52(engram_layers=[0])
+
+    with self.assertRaisesRegex(ValueError, "not supported with `use_batch_split_schedule=True`"):
+      init_glm52(use_batch_split_schedule=True)
+
+    with self.assertRaisesRegex(ValueError, "must evenly divide"):
+      init_glm52(index_share_pattern="FSSS")
+
+    with self.assertRaisesRegex(ValueError, "First layer \\(Layer 0\\) must always be 'F'"):
+      init_glm52(base_num_decoder_layers=4, first_num_dense_layers=1, index_share_pattern="SFFF")
+
+  def test_glm5_explicit_sharding_fast_fail(self):
+    """Verifies `shard_mode='explicit'` fails fast for GLM-5 and IndexShare across MaxTextConfig and RLConfig."""
+    base_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()]
+    rl_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_CONFIGS_DIR, "post_train/rl.yml")]
+
+    for model_name in ("glm5.1-744b", "glm5.2-744b"):
+      with self.subTest(config_class="MaxTextConfig", model_name=model_name):
+        with self.assertRaisesRegex(ValueError, "shard_mode='explicit'` is not supported"):
+          pyconfig.initialize(
+              base_args,
+              skip_jax_distributed_system=True,
+              model_name=model_name,
+              override_model_config=True,
+              shard_mode="explicit",
+          )
+
+      with self.subTest(config_class="RLConfig", model_name=model_name):
+        with self.assertRaisesRegex(ValueError, "shard_mode='explicit'` is not supported"):
+          pyconfig.initialize(
+              rl_args,
+              config_class=pyconfig.types.RLConfig,
+              skip_jax_distributed_system=True,
+              model_name=model_name,
+              override_model_config=True,
+              shard_mode="explicit",
+              tokenizer_path="tests/assets/tokenizers/tokenizer.llama2",
+          )
+
+  def test_rl_config_routed_bias_update_rate_validation(self):
+    """Verifies RLConfig allows loss-free load balancing for DeepSeek/GLM5 and rejects unsupported decoder blocks."""
+    rl_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_CONFIGS_DIR, "post_train/rl.yml")]
+    tok_path = "tests/assets/tokenizers/tokenizer.llama2"
+
+    for model_name in ("glm5.2-744b", "glm5.1-744b", "deepseek3-671b", "deepseek4-284b"):
+      with self.subTest(supported_model=model_name):
+        cfg = pyconfig.initialize_pydantic(
+            rl_args,
+            config_class=pyconfig.types.RLConfig,
+            skip_jax_distributed_system=True,
+            model_name=model_name,
+            override_model_config=True,
+            routed_bias=True,
+            routed_bias_update_rate=1e-3,
+            tokenizer_path=tok_path,
+        )
+        self.assertTrue(cfg.routed_bias)
+        self.assertEqual(cfg.routed_bias_update_rate, 1e-3)
+
+    # Static routed_bias=True with routed_bias_update_rate=0.0 remains allowed on non-DeepSeek/GLM models.
+    cfg_static = pyconfig.initialize_pydantic(
+        rl_args,
+        config_class=pyconfig.types.RLConfig,
+        skip_jax_distributed_system=True,
+        model_name="gpt-oss-20b",
+        override_model_config=True,
+        routed_bias=True,
+        routed_bias_update_rate=0.0,
+        tokenizer_path=tok_path,
+    )
+    self.assertTrue(cfg_static.routed_bias)
+    self.assertEqual(cfg_static.routed_bias_update_rate, 0.0)
+
+    for unsupported_model in ("mixtral-8x7b", "qwen3-30b-a3b"):
+      with self.subTest(unsupported_model=unsupported_model):
+        with self.assertRaisesRegex(
+            ValueError, "Loss-free load balancing is only supported for the DeepSeek/GLM decoder block."
+        ):
+          pyconfig.initialize_pydantic(
+              rl_args,
+              config_class=pyconfig.types.RLConfig,
+              skip_jax_distributed_system=True,
+              model_name=unsupported_model,
+              override_model_config=True,
+              routed_bias=True,
+              routed_bias_update_rate=1e-3,
+              tokenizer_path=tok_path,
+          )
 
 
 if __name__ == "__main__":

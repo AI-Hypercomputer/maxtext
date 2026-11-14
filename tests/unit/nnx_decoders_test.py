@@ -40,6 +40,7 @@ import numpy as np
 from flax import linen as nn
 from flax import nnx
 from flax import traverse_util
+from flax.linen import partitioning as nn_partitioning
 from jax.sharding import AbstractMesh, AxisType, Mesh, NamedSharding, PartitionSpec
 
 from maxtext.common.common_types import (
@@ -1999,6 +2000,212 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         self.assertIsNotNone(small_layer.out_sharding)
         self.assertIsNotNone(small_layer.mlp_intermediate_sharding)
         self.assertIsNotNone(small_layer.ple_sharding)
+
+  def test_deepseek_unscanned_engram_layers(self):
+    """Unscanned DeepSeek passes global layer_idx so engram_layers are enabled and match scanned output."""
+
+    class _TinyEngramTokenizer:
+      """Minimal deterministic tokenizer stub for fast Engram unit tests."""
+
+      pad_token_id = 0
+
+      def __init__(self, vocab_size: int = 128):
+        self._vocab_size = vocab_size
+
+      def __len__(self) -> int:
+        return self._vocab_size
+
+      def batch_decode(self, token_lists, skip_special_tokens: bool = False):
+        """Decodes token ID lists into deterministic distinct strings."""
+        del skip_special_tokens
+        return [f"tok_{ids[0]}" for ids in token_lists]
+
+      def convert_ids_to_tokens(self, tid: int) -> str:
+        """Maps a single token ID back to its string token."""
+        return f"tok_{tid}"
+
+    def _copy_scanned_to_unscanned(dec_scanned: NNXDecoder, dec_unscanned: NNXDecoder, cfg) -> None:
+      """Copies weights from an interleaved-Engram scanned DeepSeek decoder to an unscanned decoder."""
+      dec_unscanned.decoder_norm.scale.set_value(dec_scanned.decoder_norm.scale.get_value())
+      if hasattr(dec_scanned, "logits_dense"):
+        dec_unscanned.logits_dense.kernel.set_value(dec_scanned.logits_dense.kernel.get_value())
+
+      scan_axis = cfg.param_scan_axis
+      engram_set = set(cfg.engram_layers)
+
+      def _copy_single(src_mod: nnx.Module, dst_mod: nnx.Module) -> None:
+        """Copies all nnx.Param leaves between two unscanned layer modules."""
+        src_params = dict(nnx.to_flat_state(nnx.state(src_mod, nnx.Param)))
+        dst_params = dict(nnx.to_flat_state(nnx.state(dst_mod, nnx.Param)))
+        self.assertEqual(set(src_params.keys()), set(dst_params.keys()))
+        for path, src_var in src_params.items():
+          dst_params[path].set_value(src_var.get_value())
+
+      def _copy_slice(src_chunk: nnx.Module, local_idx: int, dst_mod: nnx.Module) -> None:
+        """Slices local_idx along param_scan_axis from a scanned chunk into dst_mod."""
+        src_params = dict(nnx.to_flat_state(nnx.state(src_chunk, nnx.Param)))
+        dst_params = dict(nnx.to_flat_state(nnx.state(dst_mod, nnx.Param)))
+        self.assertEqual(set(src_params.keys()), set(dst_params.keys()))
+        for path, src_var in src_params.items():
+          dst_params[path].set_value(jnp.take(src_var.get_value(), local_idx, axis=scan_axis))
+
+      def _sync_region(prefix: str, start_idx: int, end_idx: int, unscanned_offset: int) -> None:
+        """Syncs either dense_layers or moe_layers across Engram and non-Engram chunks."""
+        cur = start_idx
+        while cur < end_idx:
+          if cur in engram_set:
+            src_layer = getattr(dec_scanned, f"{prefix}_engram_{cur}")
+            dst_layer = getattr(dec_unscanned, f"{prefix}_{cur - unscanned_offset}")
+            _copy_single(src_layer, dst_layer)
+            cur += 1
+          else:
+            next_engrams = [idx for idx in engram_set if idx > cur]
+            next_boundary = min(end_idx, *next_engrams) if next_engrams else end_idx
+            src_chunk = getattr(dec_scanned, f"{prefix}_{cur}_{next_boundary - 1}")
+            for global_idx in range(cur, next_boundary):
+              dst_layer = getattr(dec_unscanned, f"{prefix}_{global_idx - unscanned_offset}")
+              _copy_slice(src_chunk, global_idx - cur, dst_layer)
+            cur = next_boundary
+
+      _sync_region("dense_layers", 0, cfg.first_num_dense_layers, 0)
+      _sync_region("moe_layers", cfg.first_num_dense_layers, cfg.num_decoder_layers, cfg.first_num_dense_layers)
+
+    common_overrides = {
+        "run_name": "deepseek_unscanned_engram_test",
+        "model_name": "deepseek-custom",
+        "decoder_block": "deepseek",
+        "use_indexer": False,
+        "first_num_dense_layers": 2,
+        "base_num_decoder_layers": 4,
+        "num_decoder_layers": 4,
+        "base_emb_dim": 16,
+        "base_mlp_dim": 32,
+        "base_moe_mlp_dim": 16,
+        "base_num_query_heads": 2,
+        "base_num_kv_heads": 2,
+        "head_dim": 8,
+        "q_lora_rank": 8,
+        "kv_lora_rank": 8,
+        "qk_nope_head_dim": 4,
+        "qk_rope_head_dim": 4,
+        "v_head_dim": 8,
+        "vocab_size": 128,
+        "mhc_expansion_rate": 2,
+        "attention": "dot_product",
+        "per_device_batch_size": 1.0,
+        "max_target_length": 8,
+        "max_prefill_predict_length": 4,
+        "engram_layers": [1, 2],
+        "engram_num_heads": 2,
+        "engram_head_dim": 4,
+        "engram_vocab_bases": [64, 64],
+        "engram_max_ngram_size": 3,
+        "engram_kernel_size": 2,
+        "num_experts": 4,
+        "num_experts_per_tok": 2,
+        "shared_experts": 1,
+        "sparse_matmul": False,
+        "capacity_factor": -1.0,
+        "megablox": False,
+        "dtype": "float32",
+        "weight_dtype": "float32",
+        "matmul_precision": "highest",
+        "remat_policy": "none",
+        "tokenizer_path": "dummy",
+        "hf_access_token": "dummy",
+    }
+
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=_TinyEngramTokenizer(128)):
+      cfg_unscanned = _make_config(scan_layers=False, **common_overrides)
+      cfg_scanned = _make_config(scan_layers=True, **common_overrides)
+      mesh = _make_mesh(cfg_unscanned)
+
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_unscanned.logical_axis_rules):
+        dec_unscanned = NNXDecoder(
+            config=cfg_unscanned,
+            mesh=mesh,
+            model_mode=MODEL_MODE_TRAIN,
+            rngs=nnx.Rngs(params=0, dropout=1),
+        )
+        dec_scanned = NNXDecoder(
+            config=cfg_scanned,
+            mesh=mesh,
+            model_mode=MODEL_MODE_TRAIN,
+            rngs=nnx.Rngs(params=0, dropout=1),
+        )
+        shared_embedding = Embed(
+            num_embeddings=cfg_unscanned.vocab_size,
+            num_features=cfg_unscanned.emb_dim,
+            dtype=cfg_unscanned.dtype,
+            embedding_init=nn.initializers.normal(stddev=1.0),
+            config=cfg_unscanned,
+            mesh=mesh,
+            rngs=nnx.Rngs(params=2),
+        )
+
+        # 1) Exactly layers 1 (dense) and 2 (MoE) have Engram enabled; 0 and 3 have it disabled.
+        expected_engram = {0: False, 1: True, 2: True, 3: False}
+        for global_idx in range(cfg_unscanned.num_decoder_layers):
+          if global_idx < cfg_unscanned.first_num_dense_layers:
+            layer = getattr(dec_unscanned, f"dense_layers_{global_idx}")
+          else:
+            layer = getattr(dec_unscanned, f"moe_layers_{global_idx - cfg_unscanned.first_num_dense_layers}")
+          self.assertEqual(layer.layer_idx, global_idx)
+          self.assertEqual(bool(layer.is_engram_enabled), expected_engram[global_idx])
+          if expected_engram[global_idx]:
+            self.assertIsNotNone(layer.engram)
+          else:
+            self.assertIsNone(layer.engram)
+
+        # Populate non-zero ShortConv kernels before syncing weights so temporal conv is exercised too.
+        for seed_offset, attr in ((1, "dense_layers_engram_1"), (2, "moe_layers_engram_2")):
+          conv_kernel = getattr(dec_scanned, attr).engram.short_conv.conv.kernel
+          conv_kernel.set_value(
+              jax.random.normal(jax.random.PRNGKey(100 + seed_offset), conv_kernel.get_value().shape, jnp.float32)
+          )
+        _copy_scanned_to_unscanned(dec_scanned, dec_unscanned, cfg_scanned)
+
+        ids, segment_ids, positions = self._make_token_inputs(cfg_unscanned)
+
+        def _forward(decoder_mod, token_ids, input_embeddings=None):
+          """Runs a jitted train-mode forward pass on decoder_mod."""
+          graphdef, state = nnx.split((decoder_mod, shared_embedding))
+
+          @jax.jit
+          def _run_pure(st, toks, in_emb):
+            dec, emb = nnx.merge(graphdef, st)
+            logits_out, hidden_out, _ = dec(
+                emb,
+                toks,
+                positions,
+                decoder_segment_ids=segment_ids,
+                deterministic=True,
+                model_mode=MODEL_MODE_TRAIN,
+                decoder_input_embeddings=in_emb,
+            )
+            return logits_out, hidden_out
+
+          return _run_pure(state, token_ids, input_embeddings)
+
+        # 2) Train-mode forward pass with decoder_input_tokens runs and produces finite outputs.
+        logits_unscanned, hidden_unscanned = _forward(dec_unscanned, ids)
+        batch = cfg_unscanned.global_batch_size_to_train_on
+        seq_len = cfg_unscanned.max_target_length
+        self.assertEqual(logits_unscanned.shape, (batch, seq_len, cfg_unscanned.vocab_size))
+        self.assertEqual(hidden_unscanned.shape, (batch, seq_len, cfg_unscanned.emb_dim))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(logits_unscanned))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(hidden_unscanned))))
+
+        # Confirm decoder_input_tokens reaches unscanned Engram layers when input embeddings are held fixed.
+        fixed_embeddings = shared_embedding(ids, model_mode=MODEL_MODE_TRAIN)
+        alt_ids = (ids + 7) % cfg_unscanned.vocab_size
+        logits_alt_tokens, _ = _forward(dec_unscanned, alt_ids, input_embeddings=fixed_embeddings)
+        self.assertFalse(np.allclose(np.asarray(logits_unscanned), np.asarray(logits_alt_tokens)))
+
+        # 3) Output matches the scan_layers=True model with identical weights.
+        logits_scanned, hidden_scanned = _forward(dec_scanned, ids)
+        np.testing.assert_allclose(np.asarray(logits_unscanned), np.asarray(logits_scanned), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(hidden_unscanned), np.asarray(hidden_scanned), rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.tpu_only

@@ -680,6 +680,7 @@ indexer_topk: 2048
 indexer_use_approx_top_k: false
 indexer_approx_top_k_recall: 0.95
 indexer_mask_exact_topk: true
+indexer_rope_interleave: false
 # Determines the training strategy for the indexer:
 # - false (Dense Warm-up): Computes indexer loss over all tokens. Used with `trainable_parameters_mask` to freeze other model parameters.
 # - true (Sparse Training): Computes indexer loss over top-k tokens only and detaches the indexer input for independent optimization.
@@ -687,6 +688,17 @@ indexer_mask_exact_topk: true
 indexer_sparse_training: false
 # Multiplier for the indexer KL divergence loss
 indexer_loss_scaling_factor: 0.0
+
+# GLM-5.2 Cross-Layer IndexCache / IndexShare
+# Note: With indexer_loss_scaling_factor > 0, the scanned training path carries the donor's
+# f32 [B, S, kv_len] indexer score across layers and retains it per layer for the backward pass.
+use_index_share: false
+# Tiled pattern of Full ('F') and Shared ('S') layers; its length must divide num_decoder_layers.
+# A topology with a non-repeating prefix must be written out in full, e.g. GLM-5.2's
+# 78-character 'FF' + 19x'FSSS' (or 'FFF' + 18x'SSSF' + 'SSS').
+index_share_pattern: "FSSS"
+# If null, resolves to (not scan_layers) when use_index_share=true, else false.
+prune_shared_indexers: null
 
 # MLA parameters
 q_lora_rank: 0

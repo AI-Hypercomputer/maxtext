@@ -71,6 +71,11 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 - **Variants**: K2 (1T), K2-Thinking (1T), K2.5 (text), K2.6 (text)
 - **Notes**: DeepSeek V3 architecture; MuonClip optimizer
 
+### GLM
+
+- **Variants**: GLM-5.1 (`glm5.1-744b`, 744B), GLM-5.2 (`glm5.2-744b`, 744B)
+- **Notes**: 78 layers (3 dense + 75 MoE with 256 routed + 1 shared expert, top-8 sigmoid routing with loss-free `MoEBiasVar`); Multi-Head Latent Attention (MLA) with Dynamic Sparse Attention (DSA) Lightning Indexer; Cross-Layer IndexShare (`use_index_share`, `index_share_pattern`, `prune_shared_indexers` in GLM-5.2); interleaved RoPE up to 202K (GLM-5.1) and 1M (GLM-5.2) context.
+
 ## Parallelism building blocks
 
 MaxText supports a wide range of parallelism strategies for scaling training and inference across TPUs and GPUs:
@@ -109,6 +114,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
     [Qwen3.5 & Qwen3.8 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3_5.py)
   - **GPT-OSS**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gpt_oss/run_gpt_oss.md) | [GPT-OSS Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/gpt_oss.py)
   - **Kimi**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md) | [K2 reuses DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/deepseek.py)
+  - **GLM**: [Model Card](glm5.md) | [GLM5 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/glm5.py) | [E2E Conversion Script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/glm5/glm5.2-744b/1_test_glm5.sh) | [E2E TPU Script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/glm5/glm5.2-744b/2_test_glm5.sh)
 
 - **Technical Explanations:**
 

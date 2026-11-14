@@ -36,7 +36,10 @@ from maxtext.configs import pyconfig
 from maxtext.common import checkpointing
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.common import train_state_nnx
+from maxtext.layers import moe
+from maxtext.utils import checkpoint_dtype_utils
 from maxtext.utils import gcs_utils
+from maxtext.utils import index_share_utils
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -46,6 +49,31 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import train_utils
 
 _SCAN_AXIS_NAMES = ("layers_per_stage", "layers", "circular_repeats")
+_DEEPSEEK_FAMILY_BLOCKS = (
+    DecoderBlockType.DEEPSEEK,
+    DecoderBlockType.DEEPSEEK.value,
+    DecoderBlockType.GLM5,
+    DecoderBlockType.GLM5.value,
+)
+
+
+def _is_deepseek_family(config) -> bool:
+  """Returns True when `config` configures a DeepSeek-V3/V3.2 or GLM-5 decoder block."""
+  return getattr(config, "decoder_block", None) in _DEEPSEEK_FAMILY_BLOCKS
+
+
+def _without_shared_indexer(layer_tree, delete_arrays: bool = False):
+  """Returns a copy of `layer_tree` with `self_attention.indexer` leaves removed."""
+  kept_items = []
+  for path, val in layer_tree.flat_state():
+    if len(path) >= 2 and path[0] == "self_attention" and path[1] == "indexer":
+      if delete_arrays:
+        arr = val[...] if isinstance(val, nnx.Variable) else val
+        if hasattr(arr, "delete"):
+          arr.delete()
+    else:
+      kept_items.append((path, val))
+  return nnx.State.from_flat_path(kept_items)
 
 
 def get_scan_axis(config, sharding_or_spec, x=None):
@@ -58,7 +86,14 @@ def get_scan_axis(config, sharding_or_spec, x=None):
   for name in _SCAN_AXIS_NAMES:
     if name in spec:
       return spec.index(name)
-  if x is not None and hasattr(x, "ndim") and x.ndim > config.param_scan_axis:
+  val = x[...] if isinstance(x, nnx.Variable) else x
+  if (
+      _is_deepseek_family(config)
+      and isinstance(x, moe.MoEBiasVar)
+      and not getattr(config, "use_batch_split_schedule", False)
+  ):
+    return 0 if (val is not None and hasattr(val, "ndim") and val.ndim > 0) else None
+  if val is not None and hasattr(val, "ndim") and val.ndim > config.param_scan_axis:
     return config.param_scan_axis
   return None
 
@@ -79,7 +114,9 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
   and removes the original collection. Mirrors the same operation on
   `state_mesh_shardings` so downstream sharding stays correct.
   """
-  param_only_state, other_state = nnx.split_state(state, nnx.Param, ...)
+  is_deepseek_family = _is_deepseek_family(config)
+  var_filter = (nnx.Param, moe.MoEBiasVar) if is_deepseek_family else nnx.Param
+  param_only_state, other_state = nnx.split_state(state, var_filter, ...)
   param_paths = set(param_only_state.flat_state().paths)
 
   param_only_shardings_items = [(path, val) for path, val in state_mesh_shardings.flat_state() if path in param_paths]
@@ -91,7 +128,13 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
   decoder_state = param_only_state.model.decoder
   decoder_shardings = param_only_shardings.model.decoder
 
-  def unroll_layer_group(num_layers, layer_name="layers"):
+  index_share_pattern = None
+  if getattr(config, "use_index_share", False):
+    index_share_pattern = index_share_utils.parse_index_share_pattern(
+        config.index_share_pattern, config.num_decoder_layers
+    )
+
+  def unroll_layer_group(num_layers, layer_name="layers", layer_offset=0):
     layers = decoder_state.get(layer_name, None)
     layers_shardings = decoder_shardings.get(layer_name, None)
     if layers is None or layers_shardings is None:
@@ -99,8 +142,7 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
 
     def drop_scan_axis(named_sharding, x):
       ps = named_sharding.spec
-      val = x[...] if isinstance(x, nnx.Variable) else x
-      scan_axis = get_scan_axis(config, named_sharding, val)
+      scan_axis = get_scan_axis(config, named_sharding, x)
       if scan_axis is not None:
         return jax.sharding.PartitionSpec(*(ps[0:scan_axis] + ps[scan_axis + 1 :]))
       return ps
@@ -112,6 +154,7 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
         is_leaf=lambda x: isinstance(x, (jax.sharding.NamedSharding, nnx.Variable)),
     )
     new_layer_sharding = jax.tree_util.tree_map(lambda ps: jax.sharding.NamedSharding(mesh, ps), new_layer_pspec)
+    pruned_layer_sharding = _without_shared_indexer(new_layer_sharding) if index_share_pattern is not None else None
 
     for i in range(num_layers):
 
@@ -119,7 +162,7 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
       def slice_ith(input_layers):
         def _slice_leaf(x, sharding):
           val = x[...] if isinstance(x, nnx.Variable) else x
-          scan_axis = get_scan_axis(config, sharding, val)
+          scan_axis = get_scan_axis(config, sharding, x)
           if scan_axis is not None:
             sliced_val = jnp.take(val, i, axis=scan_axis)
             if isinstance(x, nnx.Variable):
@@ -136,19 +179,26 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
 
       # pylint: disable=not-callable
       new_layer = jax.jit(slice_ith, out_shardings=new_layer_sharding)(layers)
-
-      decoder_state[f"{layer_name}_{i}"] = new_layer
-      decoder_shardings[f"{layer_name}_{i}"] = new_layer_sharding
+      if index_share_pattern is not None and index_share_utils.is_shared_layer(layer_offset + i, index_share_pattern):
+        decoder_state[f"{layer_name}_{i}"] = _without_shared_indexer(new_layer, delete_arrays=True)
+        decoder_shardings[f"{layer_name}_{i}"] = pruned_layer_sharding
+      else:
+        decoder_state[f"{layer_name}_{i}"] = new_layer
+        decoder_shardings[f"{layer_name}_{i}"] = new_layer_sharding
 
     decoder_state.pop(layer_name)
     decoder_shardings.pop(layer_name)
     jax.tree_util.tree_map(lambda x: x.delete() if hasattr(x, "delete") else None, layers)
 
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
-    unroll_layer_group(config.first_num_dense_layers, layer_name="dense_layers")
-    unroll_layer_group(config.num_decoder_layers - config.first_num_dense_layers, layer_name="moe_layers")
+  if is_deepseek_family:
+    unroll_layer_group(config.first_num_dense_layers, layer_name="dense_layers", layer_offset=0)
+    unroll_layer_group(
+        config.num_decoder_layers - config.first_num_dense_layers,
+        layer_name="moe_layers",
+        layer_offset=config.first_num_dense_layers,
+    )
   else:
-    unroll_layer_group(config.num_decoder_layers, layer_name="layers")
+    unroll_layer_group(config.num_decoder_layers, layer_name="layers", layer_offset=0)
 
   # Merge modified parameter state and other variables back in-place
   merged_state = nnx.merge_state(param_only_state, other_state)
@@ -160,11 +210,15 @@ def _possibly_unroll_params_nnx(config, state, state_mesh_shardings, mesh):
 
 def _read_train_checkpoint(config, checkpoint_manager, mesh):
   """Read training checkpoint at path defined by load_full_state_path."""
-  rng = random.PRNGKey(0)
-  rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=rng)
-  model = model_creation_utils.from_config(config, mesh=mesh, rngs=rngs)
-  _, tx = train_utils.create_training_optimizer(config, model)
-  _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  if _is_deepseek_family(config):
+    _create_model_partial, model = model_creation_utils.create_nnx_abstract_model(config, mesh)
+    _, tx = train_utils.create_training_optimizer(config, model, mesh=mesh)
+  else:
+    rng = random.PRNGKey(0)
+    rngs = maxtext_utils_nnx.create_nnx_rngs(config, rng_key=rng)
+    model = model_creation_utils.from_config(config, mesh=mesh, rngs=rngs)
+    _, tx = train_utils.create_training_optimizer(config, model)
+    _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
   def init_state_fn():
     nnx_model = _create_model_partial()
@@ -206,10 +260,22 @@ def _save_decode_checkpoint_nnx(config, state, checkpoint_manager):
   branch (see model_creation_utils._adjust_target_for_moe_fusion / "is_nnx_checkpoint").
   """
   # A decode checkpoint is params-only. state.model also holds rng state
-  # (PRNGKeyArray), which can't be cast to bf16, so keep only the nnx.Param leaves.
-  _, param_state, _ = nnx.split(state.model, nnx.Param, ...)
-  pure_model = param_state.to_pure_dict()
-  bf16_model = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pure_model)
+  # (PRNGKeyArray), which can't be cast to bf16, so keep only the weight leaves.
+  is_deepseek_family = _is_deepseek_family(config)
+  var_filter = (nnx.Param, moe.MoEBiasVar) if is_deepseek_family else nnx.Param
+  _, param_state, _ = nnx.split(state.model, var_filter, ...)
+  if is_deepseek_family:
+    cast_items = []
+    for path, var in param_state.flat_state():
+      arr = var[...] if isinstance(var, nnx.Variable) else var
+      keep_fp32 = checkpoint_dtype_utils.should_keep_full_precision_nnx(path, var)
+      target_dtype = jnp.float32 if keep_fp32 else jnp.bfloat16
+      cast_val = arr if arr.dtype == target_dtype else arr.astype(target_dtype)
+      cast_items.append((path, type(var)(cast_val) if isinstance(var, nnx.Variable) else cast_val))
+    bf16_model = nnx.State.from_flat_path(cast_items).to_pure_dict()
+  else:
+    pure_model = param_state.to_pure_dict()
+    bf16_model = jax.tree_util.tree_map(lambda x: x.astype(jnp.bfloat16), pure_model)
 
   # Wrap each leaf as {"value": <array>} to match the shape from_pretrained reads
   # back for NNX checkpoints. Same as layerwise_quantization._load_and_quantize_nnx.
@@ -284,7 +350,7 @@ def _possibly_unroll_lora_params_nnx(config, lora_state, lora_state_annotations,
     del decoder_annotations[layer_name]
     jax.tree_util.tree_map(lambda x: x.delete() if hasattr(x, "delete") else None, layers)
 
-  if config.decoder_block == DecoderBlockType.DEEPSEEK:
+  if _is_deepseek_family(config):
     unroll_layer_group(config.first_num_dense_layers, layer_name="dense_layers")
     unroll_layer_group(config.num_decoder_layers - config.first_num_dense_layers, layer_name="moe_layers")
   else:
