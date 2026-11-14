@@ -625,6 +625,31 @@ def main_kernel(
   )
 
 
+def _cap_col_chunk_size_for_input_rows(col_chunk_size: int, col_size: int, input_size: int) -> int:
+  """Shrinks ``col_chunk_size`` for large Ring-of-Experts inputs to fit SparseCore ``tile_spmem``.
+
+  Large gather row counts (e.g. ``ep_eff >= 16`` at 8k tokens/device) inflate row-partition
+  scratch alongside the column pipeline double-buffer and overflow the 512 KiB SparseCore
+  ``tile_spmem`` with 1024-wide column chunks. Picks the largest 128-aligned divisor of
+  ``col_size`` at or below the cap so ``col_size % col_chunk_size == 0`` always holds.
+  """
+  if input_size > 1310720:
+    cap = 256
+  elif input_size > 655360:
+    cap = 512
+  else:
+    return col_chunk_size
+
+  if col_chunk_size <= cap:
+    return col_chunk_size
+
+  start_col = (min(col_size, cap) // 128) * 128
+  for chunk in range(start_col, 127, -128):
+    if col_size % chunk == 0:
+      return chunk
+  return 128
+
+
 @functools.partial(
     jax.jit,
     static_argnames=(
@@ -693,6 +718,7 @@ def ragged_gather_reduce(
   aligned_hidden_size = _align_to(hidden_size, 128 * num_column_partitions)
   col_size = aligned_hidden_size // num_column_partitions
   col_chunk_size = _calculate_col_chunk_size(col_size, num_simd_lanes)
+  col_chunk_size = _cap_col_chunk_size_for_input_rows(col_chunk_size, col_size, input_size)
 
   # Step 3: Pre-process inputs (weights, padding, sort by validity).
   # The kernel gathers x through a uint32 reinterpretation; carry the weights
