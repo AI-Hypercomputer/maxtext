@@ -188,13 +188,15 @@ def _sort_activations(
     inputs: jax.Array,
     sort_indices: jax.Array,
     use_custom_vjp: bool,
+    inv_sort_indices: jax.Array | None = None,
 ) -> jax.Array:
   """Sort activations by `sort_indices`.
 
   If `use_custom_vjp=True`, then we use a custom backward pass that
   reverses the sort order. Specifically, this unsort operation is simply a sort
-  with `jnp.argsort(sort_indices)` as the sort indices. This is only needed in
-  the case where the compiler generates a less efficient backward pass op.
+  with `jnp.argsort(sort_indices)` as the sort indices (or `inv_sort_indices`
+  when precomputed). This is only needed in the case where the compiler
+  generates a less efficient backward pass op.
 
   Note that `use_custom_vjp=True` assumes that `sort_indices` is a permutation
   of `jnp.arange(inputs.shape[0])`.
@@ -203,6 +205,7 @@ def _sort_activations(
     inputs: `(tokens, ...)`-shaped array of input activations to sort.
     sort_indices: `(tokens,)`-shaped array containing the sort order.
     use_custom_vjp: Whether to use the explicit backward pass.
+    inv_sort_indices: Optional precomputed inverse permutation of `sort_indices`.
 
   Returns:
     `(tokens, ...)`-shaped array of input activations sorted by `sort_indices`.
@@ -211,7 +214,9 @@ def _sort_activations(
 
   with jax.named_scope("sort_activations"):
     if use_custom_vjp:
-      return _sort_activations_custom(inputs, sort_indices)
+      if inv_sort_indices is None:
+        return _sort_activations_custom(inputs, sort_indices)
+      return _sort_activations_custom_with_inv(inputs, sort_indices, inv_sort_indices)
     return inputs[sort_indices, ...]
 
 
@@ -243,6 +248,95 @@ def _sort_activations_custom_bwd(residuals: jax.Array, grads: jax.Array) -> tupl
 
 
 _sort_activations_custom.defvjp(_sort_activations_custom_fwd, _sort_activations_custom_bwd)
+
+
+@jax.custom_vjp
+def _sort_activations_custom_with_inv(
+    inputs: jax.Array, sort_indices: jax.Array, inv_sort_indices: jax.Array
+) -> jax.Array:
+  """Sort activations with precomputed inverse permutation for custom vjp."""
+  del inv_sort_indices
+  return inputs[sort_indices, ...]
+
+
+def _sort_activations_custom_with_inv_fwd(
+    inputs: jax.Array, sort_indices: jax.Array, inv_sort_indices: jax.Array
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+  """Forward pass saving `(sort_indices, inv_sort_indices)`."""
+  return _sort_activations_custom_with_inv(inputs, sort_indices, inv_sort_indices), (sort_indices, inv_sort_indices)
+
+
+def _sort_activations_custom_with_inv_bwd(
+    residuals: tuple[jax.Array, jax.Array], grads: jax.Array
+) -> tuple[jax.Array, None, None]:
+  """Backward pass reusing precomputed inverse permutation without argsort."""
+  sort_indices, inv_sort_indices = residuals
+  return _sort_activations_custom_with_inv(grads, inv_sort_indices, sort_indices), None, None
+
+
+_sort_activations_custom_with_inv.defvjp(_sort_activations_custom_with_inv_fwd, _sort_activations_custom_with_inv_bwd)
+
+
+def _gather_repeat_activations(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    num_experts_per_tok: int,
+    use_custom_vjp: bool,
+    inv_sort_indices: jax.Array | None = None,
+) -> jax.Array:
+  """Gathers and sorts `inputs` for `num_experts_per_tok` without `jnp.repeat`.
+
+  Equivalent to `_sort_activations(jnp.repeat(inputs, num_experts_per_tok, axis=0),
+  sort_indices, use_custom_vjp)` without materializing the `(tokens * K, ...)`
+  repeated activation tensor in HBM.
+  """
+  assert inputs.shape[0] * num_experts_per_tok == sort_indices.shape[0]
+  if num_experts_per_tok == 1:
+    return _sort_activations(inputs, sort_indices, use_custom_vjp, inv_sort_indices=inv_sort_indices)
+  with jax.named_scope("sort_activations"):
+    if use_custom_vjp:
+      return _gather_repeat_activations_custom(inputs, sort_indices, num_experts_per_tok, inv_sort_indices)
+    return inputs[sort_indices // num_experts_per_tok, ...]
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _gather_repeat_activations_custom(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    num_experts_per_tok: int,
+    inv_sort_indices: jax.Array | None,
+) -> jax.Array:
+  """Forward gather for `_gather_repeat_activations`."""
+  del inv_sort_indices
+  return inputs[sort_indices // num_experts_per_tok, ...]
+
+
+def _gather_repeat_activations_custom_fwd(
+    inputs: jax.Array,
+    sort_indices: jax.Array,
+    num_experts_per_tok: int,
+    inv_sort_indices: jax.Array | None,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array | None]]:
+  """Forward pass of custom vjp for `_gather_repeat_activations`."""
+  out = _gather_repeat_activations_custom(inputs, sort_indices, num_experts_per_tok, inv_sort_indices)
+  return out, (sort_indices, inv_sort_indices)
+
+
+def _gather_repeat_activations_custom_bwd(
+    num_experts_per_tok: int,
+    residuals: tuple[jax.Array, jax.Array | None],
+    grads: jax.Array,
+) -> tuple[jax.Array, None, None]:
+  """Backward pass: unsort grads and sum across `num_experts_per_tok`."""
+  sort_indices, inv_sort_indices = residuals
+  inv_indices = jnp.argsort(sort_indices) if inv_sort_indices is None else inv_sort_indices
+  unsorted = _sort_activations(grads, inv_indices, use_custom_vjp=True, inv_sort_indices=sort_indices)
+  num_tokens = sort_indices.shape[0] // num_experts_per_tok
+  grad_inputs = jnp.sum(unsorted.reshape(num_tokens, num_experts_per_tok, *grads.shape[1:]), axis=1)
+  return grad_inputs, None, None
+
+
+_gather_repeat_activations_custom.defvjp(_gather_repeat_activations_custom_fwd, _gather_repeat_activations_custom_bwd)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3))
@@ -625,19 +719,17 @@ def _batch_axis_names(pspec) -> tuple[str, ...] | None:
     return None
   # 'stage' shards the batch only where it acts as data parallelism (the layers outside the pipeline); inside
   # the pipeline it is the vmapped stage axis and never appears in these per-stage partition specs.
-  allowed_batch_axes = frozenset(
-      {
-          "data",
-          "stage",
-          "fsdp",
-          "fsdp_transpose",
-          "expert",
-          "context",
-          "context_usp_ulysses",
-          "context_autoregressive",
-          "tensor_sequence",
-      }
-  )
+  allowed_batch_axes = frozenset({
+      "data",
+      "stage",
+      "fsdp",
+      "fsdp_transpose",
+      "expert",
+      "context",
+      "context_usp_ulysses",
+      "context_autoregressive",
+      "tensor_sequence",
+  })
   axes = []
   for dim in pspec[:2]:
     items = (dim,) if isinstance(dim, str) else (dim or ())
@@ -1121,14 +1213,12 @@ class RoutedMoE(nnx.Module):
     )
 
     if self.config.custom_mesh_and_rule == ctypes.CustomRule.EXPERT_ON_FSDP_EP:
-      if any(
-          (
-              self.config.shard_exp_on_fsdp,
-              self.config.use_2d_fsdp_sharding,
-              self.config.use_batch_split_schedule,
-              self.config.moe_flat_fsdp_weights,
-          )
-      ):
+      if any((
+          self.config.shard_exp_on_fsdp,
+          self.config.use_2d_fsdp_sharding,
+          self.config.use_batch_split_schedule,
+          self.config.moe_flat_fsdp_weights,
+      )):
         raise ValueError(
             "expert-on-fsdp-ep requires the standard unflattened expert weight axes; "
             "disable shard_exp_on_fsdp, use_2d_fsdp_sharding, use_batch_split_schedule, and moe_flat_fsdp_weights."
@@ -1959,9 +2049,13 @@ class RoutedMoE(nnx.Module):
       if self.config.moe_use_direct_token_gather:
         sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
-        # sort inputs for number of selected experts
-        replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
-        sorted_inputs = _sort_activations(replicated_inputs_2d, sorted_selected_experts, use_custom_sort_vjp)
+        # Gather and sort inputs directly without materializing `jnp.repeat(inputs_2d, K, axis=0)`.
+        sorted_inputs = _gather_repeat_activations(
+            inputs_2d,
+            sorted_selected_experts,
+            self.num_experts_per_tok,
+            use_custom_sort_vjp,
+        )
       if has_per_token_scale:
         sorted_scale_1d = scale_1d[sorted_selected_experts // self.num_experts_per_tok]
 
@@ -2096,16 +2190,17 @@ class RoutedMoE(nnx.Module):
           topk_argsort_indices=topk_argsort_indices,
       )
     else:
-      reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok)).T
-      revert_indices = jnp.reshape(jnp.argsort(sorted_selected_experts), (-1, self.num_experts_per_tok)).T.reshape(-1)
+      reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok))
+      revert_indices = jnp.argsort(sorted_selected_experts)
       unsort_intermediate = _sort_activations(
           intermediate,
           revert_indices,
           use_custom_sort_vjp,
+          inv_sort_indices=sorted_selected_experts,
       )
       reshaped_intermediate = jnp.reshape(
           unsort_intermediate,
-          (self.num_experts_per_tok, reshaped_weights.shape[1], -1),
+          (reshaped_weights.shape[0], self.num_experts_per_tok, -1),
       )
       with jax.named_scope("weight_sum"):
         matmul_precision = jax.lax.Precision(self.config.matmul_precision)
@@ -2116,7 +2211,7 @@ class RoutedMoE(nnx.Module):
           reshaped_intermediate = reshaped_intermediate.astype(jnp.float32)
           reshaped_weights = reshaped_weights.astype(jnp.float32)
         output = jnp.einsum(
-            "KBE,KB -> BE",
+            "BKE,BK -> BE",
             reshaped_intermediate,
             reshaped_weights,
             precision=matmul_precision,
@@ -2996,13 +3091,11 @@ class RoutedMoE(nnx.Module):
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
-    output_pspec = self._logical_to_mesh_axes(
-        (
-            batch_logical_axis,
-            "activation_norm_length_routed",
-            "activation_embed_routed",
-        )
-    )
+    output_pspec = self._logical_to_mesh_axes((
+        batch_logical_axis,
+        "activation_norm_length_routed",
+        "activation_embed_routed",
+    ))
     input_partition_pspec = maybe_replicate_incompatible_batch(input_partition_pspec, inputs)
     gate_logits_pspec = maybe_replicate_incompatible_batch(gate_logits_pspec, gate_logits)
     pre_bias_logits_pspec = maybe_replicate_incompatible_batch(pre_bias_logits_pspec, pre_bias_logits)

@@ -394,42 +394,38 @@ class TokenDroppingTest(unittest.TestCase):
   def test_generate_masks(self):
     # expert_capacity = (tokens_per_batch / num_experts) * capacity_factor
     # expert_capacity_in_batch = (4 * 2 / 8) * 2 = 2
-    top_k_indices = jnp.array(
+    top_k_indices = jnp.array([
+        [[0, 5], [0, 4], [1, 0], [3, 5]],
+        [[1, 2], [4, 1], [5, 0], [7, 1]],
+        [[6, 2], [2, 3], [4, 2], [1, 2]],
+        [[4, 1], [0, 7], [5, 0], [4, 7]],
+    ])
+    softmax_probs = jnp.array([
         [
-            [[0, 5], [0, 4], [1, 0], [3, 5]],
-            [[1, 2], [4, 1], [5, 0], [7, 1]],
-            [[6, 2], [2, 3], [4, 2], [1, 2]],
-            [[4, 1], [0, 7], [5, 0], [4, 7]],
-        ]
-    )
-    softmax_probs = jnp.array(
+            [0.20, 0, 0, 0, 0, 0.80, 0, 0],
+            [0.68, 0, 0, 0, 0.32, 0, 0, 0],
+            [0.22, 0.78, 0, 0, 0, 0, 0, 0],
+            [0, 0, 0, 0.32, 0, 0.68, 0, 0],
+        ],
         [
-            [
-                [0.20, 0, 0, 0, 0, 0.80, 0, 0],
-                [0.68, 0, 0, 0, 0.32, 0, 0, 0],
-                [0.22, 0.78, 0, 0, 0, 0, 0, 0],
-                [0, 0, 0, 0.32, 0, 0.68, 0, 0],
-            ],
-            [
-                [0, 0.26, 0.74, 0, 0, 0, 0, 0],
-                [0, 0.79, 0, 0, 0.21, 0, 0, 0],
-                [0.89, 0, 0, 0, 0, 0.11, 0, 0],
-                [0, 0.11, 0, 0, 0, 0, 0, 0.89],
-            ],
-            [
-                [0, 0, 0.26, 0, 0, 0, 0.74, 0],
-                [0, 0, 0.88, 0.12, 0, 0, 0, 0],
-                [0, 0, 0.17, 0, 0.83, 0, 0, 0],
-                [0, 0.35, 0.65, 0, 0, 0, 0, 0],
-            ],
-            [
-                [0, 0.47, 0, 0, 0.53, 0, 0, 0],
-                [0.36, 0, 0, 0, 0, 0, 0, 0.64],
-                [0.15, 0, 0, 0, 0, 0.85, 0, 0],
-                [0, 0, 0, 0, 0.18, 0, 0, 0.82],
-            ],
-        ]
-    )
+            [0, 0.26, 0.74, 0, 0, 0, 0, 0],
+            [0, 0.79, 0, 0, 0.21, 0, 0, 0],
+            [0.89, 0, 0, 0, 0, 0.11, 0, 0],
+            [0, 0.11, 0, 0, 0, 0, 0, 0.89],
+        ],
+        [
+            [0, 0, 0.26, 0, 0, 0, 0.74, 0],
+            [0, 0, 0.88, 0.12, 0, 0, 0, 0],
+            [0, 0, 0.17, 0, 0.83, 0, 0, 0],
+            [0, 0.35, 0.65, 0, 0, 0, 0, 0],
+        ],
+        [
+            [0, 0.47, 0, 0, 0.53, 0, 0, 0],
+            [0.36, 0, 0, 0, 0, 0, 0, 0.64],
+            [0.15, 0, 0, 0, 0, 0.85, 0, 0],
+            [0, 0, 0, 0, 0.18, 0, 0, 0.82],
+        ],
+    ])
 
     # As expert_capacity_in_batch=2, so updated softmax_probs become (4 tokens were dropped):
     # softmax_probs = jnp.array([[[0.20, 0, 0, 0, 0, 0.80, 0, 0],
@@ -663,14 +659,10 @@ class DeepSeekRoutingTest(unittest.TestCase):
 
   def test_deepseek_routing(self):
     # shape as [batch, sequence, num_experts] = [1,2,16]
-    gate_logits = jnp.array(
-        [
-            [
-                [0.20, 0.10, 0.05, 0.10, 0.10, 0.60, 0.30, 0.10, 0.80, 0.01, 0.01, 0.01, 0.05, 0.80, 0.20, 0.10],
-                [0.68, 0.20, 0.06, 0.03, 0.32, 0.10, 0.05, 0.02, 0.65, 0.20, 0.04, 0.01, 0.32, 0.10, 0.05, 0.02],
-            ]
-        ]
-    )
+    gate_logits = jnp.array([[
+        [0.20, 0.10, 0.05, 0.10, 0.10, 0.60, 0.30, 0.10, 0.80, 0.01, 0.01, 0.01, 0.05, 0.80, 0.20, 0.10],
+        [0.68, 0.20, 0.06, 0.03, 0.32, 0.10, 0.05, 0.02, 0.65, 0.20, 0.04, 0.01, 0.32, 0.10, 0.05, 0.02],
+    ]])
     pre_bias_logits = gate_logits - 0.5
 
     # 4 groups of 1st token:
@@ -2768,9 +2760,13 @@ class RoutedMoeTest(parameterized.TestCase):
     # num_experts=8, ici_expert_parallelism=2 -> shard 0 owns experts [0, 4).
     # Route every token to experts 0 and 1: shard 0 gets everything and
     # overflows a tiny buffer; shard 1 gets nothing and never overflows.
-    cfg_dropless, variables, hidden_states, forced_routed_experts, out_dropless = (
-        self._get_cached_retry_forced_dropless_ref(mesh, use_ring_of_experts=True)
-    )
+    (
+        cfg_dropless,
+        variables,
+        hidden_states,
+        forced_routed_experts,
+        out_dropless,
+    ) = self._get_cached_retry_forced_dropless_ref(mesh, use_ring_of_experts=True)
 
     _, model_no_retry = self._build_retry_test_model(mesh, ragged_buffer_factor=0.125)
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_dropless.logical_axis_rules):
@@ -2852,9 +2848,13 @@ class RoutedMoeTest(parameterized.TestCase):
     """The predicate must fire (on every device) when only one EP shard overflows, and match dropless."""
     mesh = self._build_retry_test_mesh()
     # num_experts=8, ici_expert_parallelism=2 -> shard 0 owns experts [0, 4); route everything there.
-    cfg_dropless, variables, hidden_states, forced_routed_experts, out_dropless = (
-        self._get_cached_retry_forced_dropless_ref(mesh, use_ring_of_experts=use_ring_of_experts)
-    )
+    (
+        cfg_dropless,
+        variables,
+        hidden_states,
+        forced_routed_experts,
+        out_dropless,
+    ) = self._get_cached_retry_forced_dropless_ref(mesh, use_ring_of_experts=use_ring_of_experts)
 
     _, model_fallback = self._build_retry_test_model(
         mesh, ragged_buffer_factor=1.5, moe_dropless_fallback="layer", use_ring_of_experts=use_ring_of_experts
@@ -6376,6 +6376,52 @@ class Fp8MoeFakeQuantTest(unittest.TestCase):
       with self.subTest(flag=flag):
         with self.assertRaisesRegex(ValueError, "requires weight_block_size=None"):
           self._make_config("fp8_moe_block_scale_rejected", **{flag: True, "weight_block_size": 128})
+
+
+class GatherRepeatActivationsTest(absltest.TestCase):
+  """Tests for fused gather-repeat in MoE permute."""
+
+  def test_gather_repeat_equivalence_fwd_and_bwd(self):
+    key = jax.random.PRNGKey(42)
+    num_tokens, emb_dim = 16, 32
+
+    def _check_case(inputs, sort_indices, weights, num_experts_per_tok, use_custom_vjp, inv_sort_indices):
+      def ref_fn(x):
+        rep = jnp.repeat(x, num_experts_per_tok, axis=0)
+        sorted_x = moe._sort_activations(rep, sort_indices, use_custom_vjp=use_custom_vjp)  # pylint: disable=protected-access
+        return jnp.sum((sorted_x * weights).astype(jnp.float32))
+
+      def opt_fn(x):
+        sorted_x = moe._gather_repeat_activations(  # pylint: disable=protected-access
+            x,
+            sort_indices,
+            num_experts_per_tok,
+            use_custom_vjp=use_custom_vjp,
+            inv_sort_indices=inv_sort_indices,
+        )
+        return jnp.sum((sorted_x * weights).astype(jnp.float32))
+
+      ref_val, ref_grad = jax.jit(jax.value_and_grad(ref_fn))(inputs)
+      opt_val, opt_grad = jax.jit(jax.value_and_grad(opt_fn))(inputs)
+      np.testing.assert_allclose(np.array(opt_val), np.array(ref_val), rtol=0, atol=0)
+      rtol, atol = (1e-5, 1e-5) if dtype == jnp.float32 else (2e-2, 1e-1)
+      np.testing.assert_allclose(
+          np.array(opt_grad, dtype=np.float32),
+          np.array(ref_grad, dtype=np.float32),
+          rtol=rtol,
+          atol=atol,
+      )
+
+    for dtype in (jnp.bfloat16, jnp.float32):
+      for num_experts_per_tok in (1, 2, 8):
+        for use_custom_vjp in (True, False):
+          for use_precomputed_inv in (False, True):
+            key, k1, k2, k3 = jax.random.split(key, 4)
+            inputs = jax.random.normal(k1, (num_tokens, emb_dim), dtype=dtype)
+            sort_indices = jax.random.permutation(k2, num_tokens * num_experts_per_tok)
+            inv_sort_indices = jnp.argsort(sort_indices) if use_precomputed_inv else None
+            weights = jax.random.normal(k3, (num_tokens * num_experts_per_tok, emb_dim), dtype=dtype)
+            _check_case(inputs, sort_indices, weights, num_experts_per_tok, use_custom_vjp, inv_sort_indices)
 
 
 if __name__ == "__main__":
