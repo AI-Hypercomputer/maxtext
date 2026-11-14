@@ -566,6 +566,34 @@ class NNXScannedPipelineStage(nnx.Module):
     return final_carry
 
 
+def _wrap_deferred_norm_scales(params, defer_targets, mesh, psum_axes):
+  """Wraps the scanned norm scales named by `defer_targets` with `normalizations.post_scan_psum_grad`.
+
+  `defer_targets` holds the key paths (tuples of names) of the stacked `[layers, D]` scales whose layers return a
+  gradient summed over the local batch/seq shard only (`defer_scale_grad_allreduce`,
+  `defer_qk_norm_grad_allreduce`). The wrapper adds the single post-scan all-reduce over `psum_axes`. Raises if a
+  target is not in `params`: its gradient would otherwise stay per-shard without any error.
+  """
+  wrapped = set()
+
+  def _wrap(path, leaf):
+    if not isinstance(leaf, nnx.Variable):
+      return leaf
+    key_names = tuple(getattr(k, "key", getattr(k, "name", str(k))) for k in path)
+    if key_names in defer_targets:
+      wrapped.add(key_names)
+      return leaf.replace(normalizations.post_scan_psum_grad(leaf.get_value(), mesh, psum_axes))
+    return leaf
+
+  params = jax.tree_util.tree_map_with_path(_wrap, params, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  if missing := set(defer_targets) - wrapped:
+    raise ValueError(
+        "defer_norm_grad_allreduce: no parameter found for the deferred norm scale(s)"
+        f" {sorted(missing)}; their gradients would stay unreduced."
+    )
+  return params
+
+
 class NNXDecoder(nnx.Module):
   """A stack of decoder layers as a part of an encoder-decoder architecture, using NNX."""
 
@@ -1320,6 +1348,14 @@ class NNXDecoder(nnx.Module):
 
     use_kv = kv_caches_stacked is not None
     use_forced_routing = forced_routed_experts_scanned is not None
+    # The call-time model_mode (layer_args[3]), like Attention._try_fused_qkv_kernel, not the construction-time one.
+    call_model_mode = args[3] if len(args) > 3 else kwargs.get("model_mode", self.model_mode)
+    defer_psum_axes = (
+        normalizations.get_deferred_norm_psum_axes(self.config, self.mesh)
+        if not use_kv and not dynamic_graph_init and call_model_mode == MODEL_MODE_TRAIN
+        else ()
+    )
+    use_deferred_norm_grad = bool(defer_psum_axes)
 
     def layer_fn(carry, scanned_vars):
       # Ensure metadata rank matches the sliced values
@@ -1348,6 +1384,15 @@ class NNXDecoder(nnx.Module):
         current_params = hoist_fsdp_weight_gather(current_params, self.mesh, self.config)
 
       layer = nnx.merge(graphdef, current_params, current_state)
+      for norm_attr in ("pre_self_attention_layer_norm", "post_self_attention_layer_norm"):
+        norm_mod = getattr(layer, norm_attr, None)
+        if norm_mod is not None and hasattr(norm_mod, "defer_scale_grad_allreduce"):
+          norm_mod.defer_scale_grad_allreduce = use_deferred_norm_grad
+      self_attn = getattr(layer, "self_attention", None)
+      if self_attn is not None and hasattr(self_attn, "defer_qk_norm_grad_allreduce"):
+        self_attn.defer_qk_norm_grad_allreduce = use_deferred_norm_grad and bool(
+            getattr(self.config, "use_fused_qkv_kernel", False)
+        )
 
       # Build call kwargs, injecting per-layer kv_cache / forced routing / per-iteration kwargs when available
       call_kwargs = dict(valid_kwargs)
@@ -1421,6 +1466,16 @@ class NNXDecoder(nnx.Module):
     else:
       params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
       state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
+
+      if use_deferred_norm_grad:
+        defer_targets = {
+            ("pre_self_attention_layer_norm", "scale"),
+            ("post_self_attention_layer_norm", "scale"),
+        }
+        if getattr(self.config, "use_fused_qkv_kernel", False):
+          defer_targets.add(("self_attention", "query_norm", "scale"))
+          defer_targets.add(("self_attention", "key_norm", "scale"))
+        params = _wrap_deferred_norm_scales(params, defer_targets, self.mesh, defer_psum_axes)
 
       if use_forced_routing:
         scan_xs = (params, state, forced_routed_experts_scanned)

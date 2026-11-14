@@ -40,6 +40,7 @@ network (16-bit halves, then bytes) turns into columns ``c .. c + 3``. The
 network is its own inverse, so stores reuse it.
 """
 
+import math
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
@@ -216,3 +217,150 @@ def store_2d_into_3d(ref, x2d: jax.Array, tm: int, row_start: int) -> None:
           ),
           :,
       ] = out
+
+
+def _is_tpu_backend() -> bool:
+  if jax.default_backend() == "tpu":
+    return True
+  try:
+    pltpu.get_tpu_info()
+    return True
+  except (ValueError, RuntimeError):
+    return False
+
+
+def relayout_2d_to_3d_pallas(
+    x2d: jax.Array,
+    *,
+    block_tokens: int = 512,
+    interpret: bool = False,
+) -> jax.Array:
+  """Streams ``x2d`` ``[N, D]`` to ``[N, D // 128, 128]`` in VMEM without register spills.
+
+  Replaces XLA's slow cross-sublane HBM reshape before ``gather_gate_gmm`` for
+  8-bit and 16-bit activations while remaining bit-exact with ``x2d.reshape(N, D // 128, 128)``.
+  """
+  if x2d.ndim != 2 or x2d.shape[1] % LANES != 0:
+    raise ValueError(f"relayout_2d_to_3d_pallas expects 2D [N, D] with D % {LANES} == 0; got {x2d.shape}.")
+  num_tokens, size_d = x2d.shape
+  d0 = size_d // LANES
+  bits = jax.dtypes.itemsize_bits(x2d.dtype)
+  if bits not in (8, 16):
+    return x2d.reshape(num_tokens, d0, LANES)
+  pack = 32 // bits
+  sublane_align = 8 * pack
+  tm = math.gcd(block_tokens, num_tokens) if block_tokens > 0 and num_tokens > 0 else 0
+  on_tpu = interpret or _is_tpu_backend()
+  if not on_tpu or d0 < 8 or d0 % 8 != 0 or d0 % pack != 0 or tm < sublane_align or tm % sublane_align != 0:
+    return x2d.reshape(num_tokens, d0, LANES)
+
+  m_sub = 128 if tm >= 128 and tm % 128 == 0 else tm
+
+  def _kernel(in_ref, out_ref):
+    o2d, rows_per_tok, p = _flat_u32_view(out_ref, d0)
+    stride = p * rows_per_tok
+    for m0 in range(0, tm, m_sub):
+      for c in range(0, d0, p):
+        words = [
+            pltpu.bitcast(in_ref[m0 : m0 + m_sub, (c + q) * LANES : (c + q + 1) * LANES], jnp.uint32) for q in range(p)
+        ]
+        for r, out in enumerate(_transpose_words(words)):
+          o2d[pl.ds((m0 + r) * rows_per_tok + c // p, m_sub // p, stride=stride), :] = out
+
+  out_shape = jax.ShapeDtypeStruct(
+      (num_tokens, d0, LANES),
+      x2d.dtype,
+      manual_axis_type=getattr(jax.typeof(x2d), "manual_axis_type", None),
+  )
+  return pl.pallas_call(
+      _kernel,
+      out_shape=out_shape,
+      grid_spec=pltpu.PrefetchScalarGridSpec(
+          num_scalar_prefetch=0,
+          grid=(num_tokens // tm,),
+          in_specs=[pl.BlockSpec((tm, size_d), lambda i: (i, 0))],
+          out_specs=pl.BlockSpec((tm, d0, LANES), lambda i: (i, 0, 0)),
+      ),
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel",),
+          disable_bounds_checks=True,
+      ),
+      interpret=interpret,
+      name="relayout_2d_to_3d",
+  )(x2d)
+
+
+def quantize_relayout_2d_to_3d_pallas(
+    x2d: jax.Array,
+    qtype: jax.typing.DTypeLike,
+    scale: float,
+    *,
+    block_tokens: int = 512,
+    interpret: bool = False,
+) -> jax.Array:
+  """Fuses ``clip(x2d / scale, -fmax, fmax).astype(qtype)`` + ``[N, D // 128, 128]`` relayout in VMEM.
+
+  Eliminates both the standalone HBM quantization pass and XLA's cross-sublane /
+  SparseCore 2D->3D data-formatting pass. ``scale`` is a static Python float and the
+  kernel multiplies by its reciprocal rounded once to f32, so the result is bit-exact with
+  ``moe_fused_gmm3d.static_quantize(x2d, qtype, scale).reshape(N, D // 128, 128)`` for any scale.
+  """
+  if x2d.ndim != 2 or x2d.shape[1] % LANES != 0:
+    raise ValueError(f"quantize_relayout_2d_to_3d_pallas expects 2D [N, D] with D % {LANES} == 0; got {x2d.shape}.")
+  num_tokens, size_d = x2d.shape
+  d0 = size_d // LANES
+  out_dtype = jnp.dtype(qtype)
+  bits = jax.dtypes.itemsize_bits(out_dtype)
+  fmax = float(jnp.finfo(out_dtype).max)
+  in_bits = jax.dtypes.itemsize_bits(x2d.dtype)
+  inv_scale = jnp.asarray(1.0 / float(scale), jnp.float32)
+  if bits not in (8, 16) or in_bits not in (8, 16, 32):
+    xq = jnp.clip(x2d.astype(jnp.float32) * inv_scale, -fmax, fmax).astype(out_dtype)
+    return xq.reshape(num_tokens, d0, LANES)
+  pack = 32 // bits
+  in_sublane_align = 8 * max(1, 32 // in_bits)
+  sublane_align = max(8 * pack, in_sublane_align)
+  tm = math.gcd(block_tokens, num_tokens) if block_tokens > 0 and num_tokens > 0 else 0
+  on_tpu = interpret or _is_tpu_backend()
+  if not on_tpu or d0 < 8 or d0 % 8 != 0 or d0 % pack != 0 or tm < sublane_align or tm % sublane_align != 0:
+    xq = jnp.clip(x2d.astype(jnp.float32) * inv_scale, -fmax, fmax).astype(out_dtype)
+    return xq.reshape(num_tokens, d0, LANES)
+
+  m_sub = 128 if tm >= 128 and tm % 128 == 0 else tm
+  out_shape = jax.ShapeDtypeStruct(
+      (num_tokens, d0, LANES),
+      out_dtype,
+      manual_axis_type=getattr(jax.typeof(x2d), "manual_axis_type", None),
+  )
+
+  inv_s_float = float(1.0 / float(scale))
+
+  def _static_kernel(in_ref, out_ref):
+    o2d, rows_per_tok, p = _flat_u32_view(out_ref, d0)
+    stride = p * rows_per_tok
+    for m0 in range(0, tm, m_sub):
+      for c in range(0, d0, p):
+        words = []
+        for q in range(p):
+          col = in_ref[m0 : m0 + m_sub, (c + q) * LANES : (c + q + 1) * LANES].astype(jnp.float32)
+          col_q = jnp.clip(col * inv_s_float, -fmax, fmax).astype(out_dtype)
+          words.append(pltpu.bitcast(col_q, jnp.uint32))
+        for r, out in enumerate(_transpose_words(words)):
+          o2d[pl.ds((m0 + r) * rows_per_tok + c // p, m_sub // p, stride=stride), :] = out
+
+  return pl.pallas_call(
+      _static_kernel,
+      out_shape=out_shape,
+      grid_spec=pltpu.PrefetchScalarGridSpec(
+          num_scalar_prefetch=0,
+          grid=(num_tokens // tm,),
+          in_specs=[pl.BlockSpec((tm, size_d), lambda i: (i, 0))],
+          out_specs=pl.BlockSpec((tm, d0, LANES), lambda i: (i, 0, 0)),
+      ),
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=("parallel",),
+          disable_bounds_checks=True,
+      ),
+      interpret=interpret,
+      name="quantize_relayout_2d_to_3d",
+  )(x2d)
