@@ -461,5 +461,153 @@ class Glm5ConfigTest(absltest.TestCase):
       Glm5Config.from_maxtext_config(cfg_no_m3)
 
 
+class Glm5ExpertsRoutingVjpTest(absltest.TestCase):
+  """Pure-JAX forward/backward parity and scatter-free checks for Glm5Experts."""
+
+  def test_glm5_experts_scatter_free_vjp_parity(self):
+    from flax import nnx  # pylint: disable=import-outside-toplevel
+    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.models.glm5_3_flash import modeling_glm5_3_flash  # pylint: disable=import-outside-toplevel
+
+    def _has_float_scatter_jaxpr(closed_jaxpr) -> bool:
+      for eqn in closed_jaxpr.eqns:
+        if eqn.primitive.name == "scatter-add":
+          if jnp.issubdtype(eqn.outvars[0].aval.dtype, jnp.floating):
+            return True
+        for val in eqn.params.values():
+          if hasattr(val, "eqns") and _has_float_scatter_jaxpr(val):
+            return True
+      return False
+
+    def _check_primitives(dtype, tol):
+      n, k, d = 12, 3, 16
+      x = jax.random.normal(jax.random.PRNGKey(10), (n, d), dtype=dtype)
+      so = jax.random.normal(jax.random.PRNGKey(11), (n * k, d), dtype=dtype)
+      cot_g = jax.random.normal(jax.random.PRNGKey(12), (n * k, d), dtype=dtype)
+      cot_u = jax.random.normal(jax.random.PRNGKey(13), (n * k, d), dtype=dtype)
+      flat_idx = jax.random.randint(jax.random.PRNGKey(14), (n * k,), 0, 8, dtype=jnp.int32)
+      perm = jnp.argsort(flat_idx)
+      inv_perm = jnp.argsort(perm)
+
+      # pylint: disable=protected-access
+      yg, dx_opt = jax.jit(
+          jax.value_and_grad(
+              lambda z: jnp.sum(
+                  modeling_glm5_3_flash._gather_repeat_tokens(z, perm, inv_perm, k).astype(jnp.float32)
+                  * cot_g.astype(jnp.float32)
+              )
+          )
+      )(x)
+      yg_ref, dx_ref = jax.jit(
+          jax.value_and_grad(lambda z: jnp.sum(z.astype(jnp.float32)[perm // k] * cot_g.astype(jnp.float32)))
+      )(x)
+      yu, dso_opt = jax.jit(
+          jax.value_and_grad(
+              lambda s: jnp.sum(
+                  modeling_glm5_3_flash._unsort_tokens(s, perm, inv_perm).astype(jnp.float32) * cot_u.astype(jnp.float32)
+              )
+          )
+      )(so)
+      yu_ref, dso_ref = jax.jit(
+          jax.value_and_grad(lambda s: jnp.sum(s.astype(jnp.float32)[inv_perm] * cot_u.astype(jnp.float32)))
+      )(so)
+      # pylint: enable=protected-access
+
+      self.assertEqual(dx_opt.dtype, dtype)
+      self.assertEqual(dso_opt.dtype, dtype)
+      np.testing.assert_allclose(np.asarray(yg), np.asarray(yg_ref), rtol=tol, atol=tol)
+      np.testing.assert_allclose(np.asarray(yu), np.asarray(yu_ref), rtol=tol, atol=tol)
+      np.testing.assert_allclose(
+          np.asarray(dx_opt, np.float32), np.asarray(dx_ref.astype(dtype), np.float32), rtol=tol, atol=tol
+      )
+      np.testing.assert_allclose(
+          np.asarray(dso_opt, np.float32), np.asarray(dso_ref.astype(dtype), np.float32), rtol=tol, atol=tol
+      )
+
+    for dt, tol in ((jnp.bfloat16, 2e-2), (jnp.float16, 1e-2), (jnp.float32, 1e-5)):
+      _check_primitives(dt, tol)
+
+    def _check_experts(dtype_name, dtype, tol):
+      cfg = Glm5Config.mini_config(
+          hidden_size=32,
+          intermediate_size=64,
+          moe_intermediate_size=16,
+          n_routed_experts=8,
+          num_experts_per_tok=2,
+          dtype=dtype_name,
+          weight_dtype="float32",
+      )
+      mesh = m3_sharding.create_mesh(devices=list(jax.devices()[:1]))
+      with jax.sharding.set_mesh(mesh):
+        experts = modeling_glm5_3_flash.Glm5Experts(cfg, rngs=nnx.Rngs(0))
+      n, d, k = 12, cfg.hidden_size, cfg.num_experts_per_tok
+      x = jax.random.normal(jax.random.PRNGKey(1), (n, d), dtype=dtype)
+      topk_idx = jax.random.randint(jax.random.PRNGKey(2), (n, k), 0, cfg.n_routed_experts, dtype=jnp.int32)
+      topk_w = jax.nn.softmax(jax.random.normal(jax.random.PRNGKey(3), (n, k), dtype=jnp.float32), axis=-1).astype(dtype)
+      cot = jax.random.normal(jax.random.PRNGKey(4), (n, d), dtype=dtype)
+
+      def ref_forward(mod, h, idx, w):
+        gu = mod.gate_up_proj[...].astype(dtype)[idx]
+        dn = mod.down_proj[...].astype(dtype)[idx]
+        gate = jnp.einsum("nd,nkdi->nki", h, gu[:, :, :, 0, :], precision=jax.lax.Precision.HIGHEST)
+        up = jnp.einsum("nd,nkdi->nki", h, gu[:, :, :, 1, :], precision=jax.lax.Precision.HIGHEST)
+        gate = jnp.minimum(gate, mod.swiglu_limit)
+        up = jnp.clip(up, -mod.swiglu_limit, mod.swiglu_limit)
+        act = jax.nn.silu(gate) * up
+        eo = jnp.einsum("nki,nkid->nkd", act, dn, precision=jax.lax.Precision.HIGHEST)
+        return jnp.sum(eo.astype(jnp.float32) * w.astype(jnp.float32)[:, :, None], axis=1).astype(dtype)
+
+      def loss_actual(mod, h, w):
+        return jnp.sum(mod(h, topk_idx, w).astype(jnp.float32) * cot.astype(jnp.float32))
+
+      def loss_ref(mod, h, w):
+        return jnp.sum(ref_forward(mod, h, topk_idx, w).astype(jnp.float32) * cot.astype(jnp.float32))
+
+      vg_actual = jax.jit(nnx.value_and_grad(loss_actual, argnums=(0, 1, 2)))
+      vg_ref = jax.jit(nnx.value_and_grad(loss_ref, argnums=(0, 1, 2)))
+      with jax.sharding.set_mesh(mesh):
+        val_a, (grads_a, dx_a, dw_a) = vg_actual(experts, x, topk_w)
+        val_r, (grads_r, dx_r, dw_r) = vg_ref(experts, x, topk_w)
+        naive_jaxpr = jax.make_jaxpr(jax.grad(lambda z: jnp.sum(z[topk_idx.reshape(-1)].astype(jnp.float32))))(x)
+        self.assertTrue(_has_float_scatter_jaxpr(naive_jaxpr))
+        actual_jaxpr = jax.make_jaxpr(nnx.value_and_grad(loss_actual, argnums=(0, 1, 2)))(experts, x, topk_w)
+        self.assertFalse(_has_float_scatter_jaxpr(actual_jaxpr))
+        hlo = vg_actual.lower(experts, x, topk_w).compile().as_text()
+        # Zero-token edge case (n == 0).
+        out0, dx0 = jax.value_and_grad(
+            lambda z: jnp.sum(experts(z, jnp.zeros((0, k), dtype=jnp.int32), jnp.zeros((0, k), dtype=dtype)))
+        )(jnp.zeros((0, d), dtype=dtype))
+        self.assertEqual(dx0.shape, (0, d))
+        self.assertEqual(float(out0), 0.0)
+
+      self.assertEqual(dx_a.dtype, dtype)
+      self.assertEqual(dw_a.dtype, dtype)
+      np.testing.assert_allclose(np.asarray(val_a), np.asarray(val_r), rtol=tol, atol=tol)
+      np.testing.assert_allclose(np.asarray(dx_a, np.float32), np.asarray(dx_r, np.float32), rtol=tol, atol=tol)
+      np.testing.assert_allclose(np.asarray(dw_a, np.float32), np.asarray(dw_r, np.float32), rtol=tol, atol=tol)
+      np.testing.assert_allclose(
+          np.asarray(grads_a.gate_up_proj[...], np.float32),
+          np.asarray(grads_r.gate_up_proj[...], np.float32),
+          rtol=tol,
+          atol=tol,
+      )
+      np.testing.assert_allclose(
+          np.asarray(grads_a.down_proj[...], np.float32),
+          np.asarray(grads_r.down_proj[...], np.float32),
+          rtol=tol,
+          atol=tol,
+      )
+      for line in hlo.splitlines():
+        if " scatter(" in line:
+          rhs = line.split("=", 1)[1]
+          for prefix in ("bf16[", "f16[", "f32[", "f64["):
+            self.assertNotIn(prefix, rhs)
+
+    _check_experts("float32", jnp.float32, 1e-5)
+    # TPU7x XLA ragged-dot rejects bfloat16 operands with Precision.HIGHEST (which Glm5Experts hardcodes).
+    if jax.default_backend() == "cpu":
+      _check_experts("bfloat16", jnp.bfloat16, 2e-2)
+
+
 if __name__ == "__main__":
   absltest.main()

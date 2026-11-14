@@ -1257,6 +1257,142 @@ class GraniteMoeGoldenParityAndPerturbTest(absltest.TestCase):
     # Direct tensor pass-through:
     self.assertIs(_extract_hf_router_logits(expected_logits, num_experts), expected_logits)
 
+  def test_experts_scatter_free_routing_vjp_and_bf16_grads(self):
+    """Verifies GraniteMoeExperts scatter-free routing VJPs match gather reference and emit no float scatter."""
+
+    def _has_float_scatter_jaxpr(closed_jaxpr) -> bool:
+      for eqn in closed_jaxpr.eqns:
+        if eqn.primitive.name == "scatter-add":
+          if jnp.issubdtype(eqn.outvars[0].aval.dtype, jnp.floating):
+            return True
+        for val in eqn.params.values():
+          if hasattr(val, "eqns") and _has_float_scatter_jaxpr(val):
+            return True
+      return False
+
+    def _check_dtype(dtype_name, dtype, tol):
+      prec_name = "highest" if dtype == jnp.float32 else "default"
+      prec_enum = jax.lax.Precision.HIGHEST if dtype == jnp.float32 else jax.lax.Precision.DEFAULT
+      cfg = _make_mini_config(dtype=dtype_name, weight_dtype="float32", matmul_precision=prec_name)
+      mesh = m3_sharding.create_mesh(devices=_get_devices(1))
+      with jax.sharding.set_mesh(mesh):
+        experts = modeling_granitemoe.GraniteMoeExperts(cfg, rngs=nnx.Rngs(11))
+      b, s, h, k = 2, 6, cfg.hidden_size, cfg.num_experts_per_tok
+      x = jax.random.normal(jax.random.PRNGKey(12), (b, s, h), dtype=dtype)
+      idx = jax.random.randint(jax.random.PRNGKey(13), (b, s, k), 0, cfg.num_local_experts, dtype=jnp.int32)
+      w = jax.nn.softmax(jax.random.normal(jax.random.PRNGKey(14), (b, s, k), dtype=jnp.float32), axis=-1).astype(dtype)
+      cot = jax.random.normal(jax.random.PRNGKey(15), (b, s, h), dtype=dtype)
+
+      def ref_forward(mod, x_3d, idx_3d, w_3d):
+        x_2d = x_3d.reshape(b * s, h)
+        idx_2d = idx_3d.reshape(b * s, k)
+        w_2d = w_3d.astype(dtype).reshape(b * s, k)
+        gu = mod.gate_up_proj[...].astype(dtype)[idx_2d]
+        dn = mod.down_proj[...].astype(dtype)[idx_2d]
+        gate = jnp.einsum("nd,nkdi->nki", x_2d, gu[:, :, :, 0, :], precision=prec_enum)
+        up = jnp.einsum("nd,nkdi->nki", x_2d, gu[:, :, :, 1, :], precision=prec_enum)
+        eo = jnp.einsum("nki,nkid->nkd", jax.nn.silu(gate) * up, dn, precision=prec_enum)
+        return jnp.sum(eo * w_2d[:, :, None], axis=1).reshape(b, s, h)
+
+      def loss_actual(mod, inp, w_in):
+        return jnp.sum(mod(inp, idx, w_in).astype(jnp.float32) * cot.astype(jnp.float32))
+
+      def loss_ref(mod, inp, w_in):
+        return jnp.sum(ref_forward(mod, inp, idx, w_in).astype(jnp.float32) * cot.astype(jnp.float32))
+
+      vg_actual = jax.jit(nnx.value_and_grad(loss_actual, argnums=(0, 1, 2)))
+      vg_ref = jax.jit(nnx.value_and_grad(loss_ref, argnums=(0, 1, 2)))
+      with jax.sharding.set_mesh(mesh):
+        val_a, (grads_a, dx_a, dw_a) = vg_actual(experts, x, w)
+        val_r, (grads_r, dx_r, dw_r) = vg_ref(experts, x, w)
+        naive_jaxpr = jax.make_jaxpr(
+            jax.grad(lambda z: jnp.sum(z.reshape(b * s, h)[idx.reshape(-1)].astype(jnp.float32)))
+        )(x)
+        self.assertTrue(_has_float_scatter_jaxpr(naive_jaxpr))
+        actual_jaxpr = jax.make_jaxpr(nnx.value_and_grad(loss_actual, argnums=(0, 1, 2)))(experts, x, w)
+        self.assertFalse(_has_float_scatter_jaxpr(actual_jaxpr))
+        hlo = vg_actual.lower(experts, x, w).compile().as_text()
+
+      self.assertEqual(dx_a.dtype, dtype)
+      self.assertEqual(dw_a.dtype, dtype)
+      np.testing.assert_allclose(np.asarray(val_a), np.asarray(val_r), rtol=tol, atol=tol)
+      np.testing.assert_allclose(np.asarray(dx_a, np.float32), np.asarray(dx_r, np.float32), rtol=tol, atol=tol)
+      np.testing.assert_allclose(np.asarray(dw_a, np.float32), np.asarray(dw_r, np.float32), rtol=tol, atol=tol)
+      np.testing.assert_allclose(
+          np.asarray(grads_a.gate_up_proj[...], np.float32),
+          np.asarray(grads_r.gate_up_proj[...], np.float32),
+          rtol=tol,
+          atol=tol,
+      )
+      np.testing.assert_allclose(
+          np.asarray(grads_a.down_proj[...], np.float32),
+          np.asarray(grads_r.down_proj[...], np.float32),
+          rtol=tol,
+          atol=tol,
+      )
+      for line in hlo.splitlines():
+        if " scatter(" in line:
+          rhs = line.split("=", 1)[1]
+          for prefix in ("bf16[", "f16[", "f32[", "f64["):
+            self.assertNotIn(prefix, rhs)
+
+      # Also test partial / all-non-local expert subsets (`sorted_valid` tail masking) in _local_ragged_swiglu.
+      x_2d = x.reshape(b * s, h)
+      idx_2d = idx.reshape(b * s, k)
+      w_2d = w.reshape(b * s, k)
+      cot_2d = cot.reshape(b * s, h)
+
+      def _check_local_subset(offset, n_local):
+        gu_sub = (
+            experts.gate_up_proj[...][offset : offset + n_local]
+            if offset < cfg.num_local_experts
+            else experts.gate_up_proj[...][:n_local]
+        )
+        dn_sub = (
+            experts.down_proj[...][offset : offset + n_local]
+            if offset < cfg.num_local_experts
+            else experts.down_proj[...][:n_local]
+        )
+
+        def local_loss(x_in, w_in, gu_in, dn_in):
+          y = modeling_granitemoe._local_ragged_swiglu(  # pylint: disable=protected-access
+              x_in,
+              idx_2d,
+              w_in,
+              gu_in,
+              dn_in,
+              expert_offset=offset,
+              num_local_experts=n_local,
+              top_k=k,
+              precision=prec_enum,
+          )
+          return jnp.sum(y.astype(jnp.float32) * cot_2d.astype(jnp.float32))
+
+        def local_ref_loss(x_in, w_in, gu_in, dn_in):
+          loc_idx = idx_2d - offset
+          valid = (loc_idx >= 0) & (loc_idx < n_local)
+          safe_idx = jnp.clip(loc_idx, 0, n_local - 1)
+          gu_g = gu_in.astype(dtype)[safe_idx]
+          dn_g = dn_in.astype(dtype)[safe_idx]
+          gate = jnp.einsum("nd,nkdi->nki", x_in, gu_g[:, :, :, 0, :], precision=prec_enum)
+          up = jnp.einsum("nd,nkdi->nki", x_in, gu_g[:, :, :, 1, :], precision=prec_enum)
+          eo = jnp.einsum("nki,nkid->nkd", jax.nn.silu(gate) * up, dn_g, precision=prec_enum)
+          mw = jnp.where(valid, w_in.astype(dtype), jnp.zeros_like(w_in, dtype=dtype))
+          y = jnp.sum(eo * mw[:, :, None], axis=1)
+          return jnp.sum(y.astype(jnp.float32) * cot_2d.astype(jnp.float32))
+
+        lv_a, lgrads_a = jax.jit(jax.value_and_grad(local_loss, argnums=(0, 1, 2, 3)))(x_2d, w_2d, gu_sub, dn_sub)
+        lv_r, lgrads_r = jax.jit(jax.value_and_grad(local_ref_loss, argnums=(0, 1, 2, 3)))(x_2d, w_2d, gu_sub, dn_sub)
+        np.testing.assert_allclose(np.asarray(lv_a), np.asarray(lv_r), rtol=tol, atol=tol)
+        for ga, gr in zip(lgrads_a, lgrads_r):
+          np.testing.assert_allclose(np.asarray(ga, np.float32), np.asarray(gr, np.float32), rtol=tol, atol=tol)
+
+      for sub_offset, sub_n_local in ((2, 3), (cfg.num_local_experts, 2)):
+        _check_local_subset(sub_offset, sub_n_local)
+
+    for dt_name, dt, t in (("float32", jnp.float32, 1e-5), ("bfloat16", jnp.bfloat16, 2e-2)):
+      _check_dtype(dt_name, dt, t)
+
 
 # ==============================================================================
 # Suite 3: Live PyTorch Weight-Copy Parity & `PerturbSpec` Negative Controls

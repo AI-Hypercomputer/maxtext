@@ -16,6 +16,7 @@
 
 from collections.abc import Sequence
 import dataclasses
+import functools
 import math
 from typing import Any, Literal, cast
 import typing
@@ -930,6 +931,77 @@ class Glm5TopkRouter(nnx.Module):
     return router_logits, topk_weights, topk_indices, scores
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
+def _gather_repeat_tokens(
+    x: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+    top_k: int,
+) -> jax.Array:
+  """Gathers token rows into expert-sorted `(num_tokens * top_k, ...)` order with scatter-free VJP."""
+  del inv_perm
+  return x[perm // top_k]
+
+
+def _gather_repeat_tokens_fwd(
+    x: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+    top_k: int,
+) -> tuple[jax.Array, tuple[jax.Array, int]]:
+  """Forward rule saving `inv_perm` and `num_tokens` for scatter-free backward."""
+  return x[perm // top_k], (inv_perm, x.shape[0])
+
+
+def _gather_repeat_tokens_bwd(
+    top_k: int,
+    res: tuple[jax.Array, int],
+    g: jax.Array,
+) -> tuple[jax.Array, None, None]:
+  """Backward rule unpermuting slot cotangents via `inv_perm` and summing across `top_k`."""
+  inv_perm, num_tokens = res
+  unpermuted = g[inv_perm].reshape((num_tokens, top_k, *g.shape[1:]))
+  if jnp.issubdtype(g.dtype, jnp.floating) and jnp.finfo(g.dtype).bits < 32:
+    dx = jnp.sum(unpermuted, axis=1, dtype=jnp.float32).astype(g.dtype)
+  else:
+    dx = jnp.sum(unpermuted, axis=1)
+  return dx, None, None
+
+
+_gather_repeat_tokens.defvjp(_gather_repeat_tokens_fwd, _gather_repeat_tokens_bwd)
+
+
+@jax.custom_vjp
+def _unsort_tokens(
+    sorted_out: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+) -> jax.Array:
+  """Restores expert-sorted rows to `(token, top_k)` slot order with scatter-free VJP."""
+  del perm
+  return sorted_out[inv_perm]
+
+
+def _unsort_tokens_fwd(
+    sorted_out: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+  """Forward rule saving `perm` for scatter-free backward."""
+  return sorted_out[inv_perm], perm
+
+
+def _unsort_tokens_bwd(
+    perm: jax.Array,
+    g: jax.Array,
+) -> tuple[jax.Array, None, None]:
+  """Backward rule gathering slot cotangents back into expert-sorted order via `perm`."""
+  return g[perm], None, None
+
+
+_unsort_tokens.defvjp(_unsort_tokens_fwd, _unsort_tokens_bwd)
+
+
 class Glm5Experts(nnx.Module):
   """Collection of expert weights stored as 3D/4D tensors.
 
@@ -1014,8 +1086,8 @@ class Glm5Experts(nnx.Module):
     flat_idx = topk_indices.reshape(-1)
     flat_w = topk_weights.reshape(-1, 1).astype(jnp.float32)
     perm = jnp.argsort(flat_idx)
-    sorted_h = hidden_states[perm // self.top_k]
     inv_perm = jnp.argsort(perm)
+    sorted_h = _gather_repeat_tokens(hidden_states, perm, inv_perm, self.top_k)
     group_sizes = jnp.bincount(flat_idx, length=self.num_experts)
 
     dt = hidden_states.dtype
@@ -1046,7 +1118,8 @@ class Glm5Experts(nnx.Module):
         precision=jax.lax.Precision.HIGHEST,
     )
     n = hidden_states.shape[0]
-    weighted = (sorted_out[inv_perm].astype(jnp.float32) * flat_w).reshape(n, self.top_k, -1)
+    unsorted_out = _unsort_tokens(sorted_out, perm, inv_perm)
+    weighted = (unsorted_out.astype(jnp.float32) * flat_w).reshape(n, self.top_k, self.hidden_size)
     return jnp.sum(weighted, axis=1).astype(dt)
 
 
