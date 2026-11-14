@@ -20,6 +20,10 @@ emo_document_expert_pool_choices: [32, 64, 256]
 emo_document_expert_pool_probs: [0.125, 0.125, 0.75]
 # EMo pools per EOS-delimited document, as OLMo-core (our ablations' setting; not in the c1 benchmark).
 olmo_segment_eos_token_id: 100257
+# The trunk ran the whole-document pool through step 160,000, then continued from checkpoint 160,000 with the causal
+# pool (emo_causal_pool=true in the JobSet's extra args, MaxText 5e3b083), as did every decay branch. To reproduce the
+# run: false through step 160,000, true after it.
+emo_causal_pool: false
 # Each EOS stays in the document it ends, as OLMo-core main (#872). The 1xC sweep (image 445343f) and the tiny r1-r3
 # ablations predate this and put it in the next document.
 olmo_segment_eos_ends_document: true
