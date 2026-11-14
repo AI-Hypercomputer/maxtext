@@ -194,6 +194,51 @@ class ProfilerTest(unittest.TestCase):
     mock_start_trace.assert_called_once()
     mock_stop_trace.assert_called_once()
 
+  # The nsys tests mock libcudart and gcloud, so they run on any platform (cpu, gpu or tpu).
+  def _nsys_profiler(self, run_name):
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        enable_checkpointing=False,
+        run_name=run_name,
+        base_output_directory="/tmp",
+        profiler="nsys",
+    )
+    return profiler.Profiler(config)
+
+  @patch("maxtext.common.profiler.shutil.which", return_value="/usr/bin/gcloud")
+  @patch("maxtext.common.profiler.subprocess.Popen")
+  @patch("maxtext.common.profiler.cdll")
+  def test_nsys_deactivate_without_activate_is_noop(self, mock_cdll, mock_popen, _mock_which):
+    """deactivate() before any activate() must not stop the profiler or upload."""
+    prof = self._nsys_profiler("test_nsys_deactivate_without_activate_is_noop")
+
+    prof.deactivate()
+
+    mock_cdll.LoadLibrary.return_value.cudaProfilerStop.assert_not_called()
+    mock_popen.assert_not_called()
+
+  @patch("maxtext.common.profiler.shutil.which", return_value="/usr/bin/gcloud")
+  @patch("maxtext.common.profiler.subprocess.Popen")
+  @patch("maxtext.common.profiler.cdll")
+  def test_nsys_deactivate_is_idempotent(self, mock_cdll, mock_popen, _mock_which):
+    """Two deactivate() calls (e.g. step schedule and an overflow guard) stop and upload once."""
+    prof = self._nsys_profiler("test_nsys_deactivate_is_idempotent")
+    libcudart = mock_cdll.LoadLibrary.return_value
+
+    prof.activate()
+    prof.deactivate()
+    prof.deactivate()
+
+    libcudart.cudaProfilerStart.assert_called_once()
+    libcudart.cudaProfilerStop.assert_called_once()
+    mock_popen.assert_called_once()
+
+    # A later activate()/deactivate() cycle (periodic profiling) still works.
+    prof.activate()
+    prof.deactivate()
+    self.assertEqual(libcudart.cudaProfilerStart.call_count, 2)
+    self.assertEqual(libcudart.cudaProfilerStop.call_count, 2)
+
 
 if __name__ == "__main__":
   unittest.main()
