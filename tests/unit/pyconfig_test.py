@@ -1060,6 +1060,86 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(cfg_override.weight_dtype, jnp.float32)
     self.assertEqual(cfg_override.rollout_weight_dtype, jnp.bfloat16)
 
+  def test_goodput_disabled_by_default_in_test_runners_with_explicit_overrides(self):
+    """Verifies Goodput defaults to True in production and False inside test runners unless overridden."""
+    # 1. Production default (outside test runners): enabled by default from base.yml,
+    # even when `unittest` is transitively imported in sys.modules (e.g. via unittest.mock).
+    with mock.patch.object(pyconfig, "_is_running_in_test", return_value=False):
+      cfg_prod = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
+          skip_jax_distributed_system=True,
+      )
+      self.assertTrue(cfg_prod.enable_goodput_recording)
+      self.assertTrue(cfg_prod.monitor_goodput)
+
+    # 2. Default inside test runner: disabled even when loading base.yml directly.
+    cfg_default = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(cfg_default.enable_goodput_recording)
+    self.assertFalse(cfg_default.monitor_goodput)
+
+    # 3. Explicit kwargs override enables Goodput inside test runner.
+    cfg_kwargs = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        enable_goodput_recording=True,
+        monitor_goodput=True,
+    )
+    self.assertTrue(cfg_kwargs.enable_goodput_recording)
+    self.assertTrue(cfg_kwargs.monitor_goodput)
+
+    # 4. Explicit CLI override enables Goodput inside test runner.
+    cfg_cli = pyconfig.initialize(
+        [
+            os.path.join(MAXTEXT_PKG_DIR, "train.py"),
+            get_test_config_path(),
+            "enable_goodput_recording=True",
+            "monitor_goodput=True",
+        ],
+        skip_jax_distributed_system=True,
+    )
+    self.assertTrue(cfg_cli.enable_goodput_recording)
+    self.assertTrue(cfg_cli.monitor_goodput)
+
+    # 5. Explicit M_* environment variable override enables Goodput inside test runner.
+    orig_rec = os.environ.get("M_ENABLE_GOODPUT_RECORDING")
+    orig_mon = os.environ.get("M_MONITOR_GOODPUT")
+    try:
+      os.environ["M_ENABLE_GOODPUT_RECORDING"] = "true"
+      os.environ["M_MONITOR_GOODPUT"] = "true"
+      cfg_env = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+      )
+      self.assertTrue(cfg_env.enable_goodput_recording)
+      self.assertTrue(cfg_env.monitor_goodput)
+    finally:
+      if orig_rec is None:
+        os.environ.pop("M_ENABLE_GOODPUT_RECORDING", None)
+      else:
+        os.environ["M_ENABLE_GOODPUT_RECORDING"] = orig_rec
+      if orig_mon is None:
+        os.environ.pop("M_MONITOR_GOODPUT", None)
+      else:
+        os.environ["M_MONITOR_GOODPUT"] = orig_mon
+
+    # 6. Explicit child YAML override preserves Goodput settings inside test runner.
+    with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as tmp_yml:
+      base_yml_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+      tmp_yml.write(f"base_config: {base_yml_path}\nenable_goodput_recording: true\nmonitor_goodput: true\n")
+      tmp_yml_path = tmp_yml.name
+    try:
+      cfg_yaml = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), tmp_yml_path],
+          skip_jax_distributed_system=True,
+      )
+      self.assertTrue(cfg_yaml.enable_goodput_recording)
+      self.assertTrue(cfg_yaml.monitor_goodput)
+    finally:
+      os.remove(tmp_yml_path)
+
   def test_resolve_model_config_path_priority_and_fallback(self):
     with tempfile.TemporaryDirectory() as tmpdir:
       pkg_dir = os.path.join(tmpdir, "pkg_configs")

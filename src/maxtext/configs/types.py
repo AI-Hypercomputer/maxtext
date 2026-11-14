@@ -3794,11 +3794,11 @@ class ManagedMLDiagnostics(BaseModel):
 class Goodput(BaseModel):
   """Configuration for goodput monitoring."""
 
-  enable_goodput_recording: bool = Field(False, description="Enable goodput recording.")
+  enable_goodput_recording: bool = Field(True, description="Enable goodput recording.")
   goodput_job_name: str = Field(
       "", description="Optional job name override for goodput recording and monitoring. Defaults to run_name when empty."
   )
-  monitor_goodput: bool = Field(False, description="Monitor goodput.")
+  monitor_goodput: bool = Field(True, description="Monitor goodput.")
   goodput_upload_interval_seconds: int = Field(30, description="Interval to upload goodput metrics.")
   enable_pathways_goodput: bool = Field(False, description="Enable goodput monitoring for Pathways.")
   monitor_step_time_deviation: bool = Field(True, description="Monitor step time deviation.")

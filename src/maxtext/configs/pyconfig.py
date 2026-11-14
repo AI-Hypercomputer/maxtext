@@ -207,6 +207,34 @@ def _load_config(config_name: str) -> omegaconf.DictConfig:
   return cfg
 
 
+def _get_child_yaml_keys(config_name: str) -> set[str]:
+  """Returns keys explicitly defined in child/custom YAML files (excluding root base.yml)."""
+  if os.path.realpath(config_name) == os.path.realpath(os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")):
+    return set()
+  cfg = omegaconf.OmegaConf.load(config_name)
+  keys = set(cfg.keys()) - {_BASE_CONFIG_ATTR}
+  if _BASE_CONFIG_ATTR in cfg:
+    base_path = cfg[_BASE_CONFIG_ATTR]
+    if not os.path.isabs(base_path):
+      loaded_parent = os.path.join(os.path.dirname(config_name), base_path)
+      if not os.path.isfile(loaded_parent):
+        loaded_parent = os.path.join(MAXTEXT_CONFIGS_DIR, base_path)
+    else:
+      loaded_parent = base_path
+    keys |= _get_child_yaml_keys(loaded_parent)
+  return keys
+
+
+def _is_running_in_test() -> bool:
+  """Returns True when running inside a test runner or when MAXTEXT_TEST_DISABLE_GOODPUT=1 is set."""
+  if "pytest" in sys.modules or "unittest.__main__" in sys.modules:
+    return True
+  if os.environ.get("MAXTEXT_TEST_DISABLE_GOODPUT") == "1":
+    return True
+  main_file = getattr(sys.modules.get("__main__"), "__file__", None) or (sys.argv[0] if sys.argv else "")
+  return os.path.basename(main_file).endswith(("_test.py", "_tests.py"))
+
+
 def _tuples_to_lists(l: list | tuple | Any) -> list | Any:
   """Recursively converts nested tuples to lists for Pydantic compatibility."""
   return [_tuples_to_lists(x) for x in l] if isinstance(l, (list, tuple)) else l
@@ -619,6 +647,16 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
         raw_keys_dict[k] = parser(new_proposal)
       except (ValueError, KeyError) as e:
         raise ValueError(f"Couldn't parse value from ENV '{new_proposal}' for key '{k}'") from e
+
+  # Disable Goodput recording and monitoring by default inside test runners
+  # unless explicitly overridden via child/model YAML, CLI, kwargs, or M_* env vars.
+  if _is_running_in_test():
+    explicit_overrides = (
+        cli_keys | kwargs_keys | env_keys | _get_child_yaml_keys(config_path) | frozenset(model_cfg.keys())
+    )
+    for goodput_key in ("enable_goodput_recording", "monitor_goodput"):
+      if goodput_key not in explicit_overrides:
+        raw_keys_dict[goodput_key] = False
 
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict, config_class=config_class)
 
