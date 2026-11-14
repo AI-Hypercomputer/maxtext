@@ -273,6 +273,103 @@ def _run_end_to_end_checks(mesh, cp_axis):
   assert float(jnp.max(jnp.abs(rolled - reference_out))) > 1e-4
 
 
+def test_block_doubling_unit_lower_inverse_fwd_and_bwd():
+  """Verify block-doubling inverse + analytical VJP matches solve_triangular in fwd and bwd."""
+  # pylint: disable=import-outside-toplevel,protected-access
+  from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next
+  from maxtext.models import qwen3
+
+  for chunk_size in (1, 12, 16, 64):
+    k = jax.random.normal(jax.random.PRNGKey(0), (2, 3, 4, chunk_size, 16), dtype=jnp.float32)
+    k = k / (jnp.linalg.norm(k, axis=-1, keepdims=True) + 1e-6)
+    shared = jax.random.normal(jax.random.PRNGKey(1), (2, 3, 4, 1, 16), dtype=jnp.float32)
+    shared = shared / (jnp.linalg.norm(shared, axis=-1, keepdims=True) + 1e-6)
+    k = 0.7 * shared + 0.3 * k
+    k = k / (jnp.linalg.norm(k, axis=-1, keepdims=True) + 1e-6)
+    s_mat = jnp.tril(jnp.matmul(k * 0.5, k.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST), k=-1)
+    dout = jax.random.normal(jax.random.PRNGKey(2), s_mat.shape, dtype=jnp.float32)
+
+    def ref_fn(s, cs=chunk_size):
+      eye = jnp.eye(cs, dtype=jnp.float32)
+      return jax.scipy.linalg.solve_triangular(eye + s, jnp.broadcast_to(eye, s.shape), lower=True, unit_diagonal=True)
+
+    ref_val, ref_grad = jax.jit(jax.value_and_grad(lambda s, r=ref_fn, d=dout: jnp.sum(r(s) * d)))(s_mat)
+
+    for fn in (
+        qwen3._block_doubling_unit_lower_inverse,
+        modeling_qwen3_8_flash_next._block_doubling_unit_lower_inverse,
+    ):
+      out = jax.jit(lambda s, f=fn, cs=chunk_size: f(s, cs))(s_mat)
+      np.testing.assert_allclose(jax.device_get(out), jax.device_get(ref_fn(s_mat)), rtol=1e-5, atol=1e-5)
+      val, grad = jax.jit(jax.value_and_grad(lambda s, f=fn, cs=chunk_size, d=dout: jnp.sum(f(s, cs) * d)))(s_mat)
+      np.testing.assert_allclose(jax.device_get(val), jax.device_get(ref_val), rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(jax.device_get(grad), jax.device_get(ref_grad), rtol=1e-5, atol=1e-5)
+
+      # bfloat16 input: the cotangent must come back in the input dtype (custom_vjp contract) and the
+      # float32-internal inverse must still track the reference up to bf16 input rounding.
+      s_bf16 = s_mat.astype(jnp.bfloat16)
+      out_bf16 = jax.jit(lambda s, f=fn, cs=chunk_size: f(s, cs))(s_bf16)
+      assert out_bf16.dtype == jnp.float32, out_bf16.dtype
+      grad_bf16 = jax.jit(jax.grad(lambda s, f=fn, cs=chunk_size, d=dout: jnp.sum(f(s, cs) * d)))(s_bf16)
+      assert grad_bf16.dtype == jnp.bfloat16, grad_bf16.dtype
+      ref_grad_bf16 = jax.jit(jax.grad(lambda s, r=ref_fn, d=dout: jnp.sum(r(s.astype(jnp.float32)) * d)))(s_bf16)
+      np.testing.assert_allclose(
+          jax.device_get(grad_bf16).astype(np.float32),
+          jax.device_get(ref_grad_bf16).astype(np.float32),
+          rtol=2e-2,
+          atol=2e-2,
+      )
+
+
+def test_gdn_gqa_no_repeat_fwd_and_bwd():
+  """Verify GDN chunk rule with H_k < H_v matches explicit jnp.repeat in forward and backward."""
+  # pylint: disable=import-outside-toplevel
+  from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next
+  from maxtext.models import qwen3
+
+  b, s, h_k, h_v, d_k, d_v, chunk = 2, 32, 2, 4, 16, 16, 8
+  keys = jax.random.split(jax.random.PRNGKey(42), 6)
+  query = jax.random.normal(keys[0], (b, s, h_k, d_k), jnp.float32) * 0.1
+  key_t = jax.random.normal(keys[1], (b, s, h_k, d_k), jnp.float32) * 0.1
+  value = jax.random.normal(keys[2], (b, s, h_v, d_v), jnp.float32) * 0.1
+  g = -jax.nn.softplus(jax.random.normal(keys[3], (b, s, h_v), jnp.float32))
+  beta = jax.nn.sigmoid(jax.random.normal(keys[4], (b, s, h_v), jnp.float32))
+  dout = jax.random.normal(keys[5], (b, s, h_v, d_v), jnp.float32)
+
+  def run_qwen3(qq, kk, vv, gg, bb):
+    out, _ = qwen3.jax_chunk_gated_delta_rule(
+        qq, kk, vv, gg, bb, chunk_size=chunk, use_qk_norm_in_gdn=True, compute_dtype=jnp.float32
+    )
+    return jnp.sum(out * dout)
+
+  def run_m3(qq, kk, vv, gg, bb):
+    out, _ = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+        qq, kk, vv, gg, bb, chunk_size=chunk, use_qk_l2norm_in_kernel=True
+    )
+    return jnp.sum(out * dout)
+
+  for fn in (run_qwen3, run_m3):
+    v_rep, g_rep = jax.jit(
+        lambda qq, kk, vv, gg, bb, f=fn: jax.value_and_grad(f, argnums=(0, 1, 2, 3, 4))(
+            jnp.repeat(qq, 2, axis=2), jnp.repeat(kk, 2, axis=2), vv, gg, bb
+        )
+    )(query, key_t, value, g, beta)
+    v_norep, g_norep = jax.jit(
+        lambda qq, kk, vv, gg, bb, f=fn: jax.value_and_grad(f, argnums=(0, 1, 2, 3, 4))(qq, kk, vv, gg, bb)
+    )(query, key_t, value, g, beta)
+    np.testing.assert_allclose(jax.device_get(v_norep), jax.device_get(v_rep), rtol=1e-5, atol=1e-5)
+    # Sum repeated head gradients back to H_k for query and key
+    g_rep_k = (
+        g_rep[0].reshape(b, s, h_k, 2, d_k).sum(axis=3),
+        g_rep[1].reshape(b, s, h_k, 2, d_k).sum(axis=3),
+        g_rep[2],
+        g_rep[3],
+        g_rep[4],
+    )
+    for actual, expected in zip(g_norep, g_rep_k):
+      np.testing.assert_allclose(jax.device_get(actual), jax.device_get(expected), rtol=1e-5, atol=1e-5)
+
+
 if __name__ == "__main__":
   _devices = np.array(jax.devices())
   assert len(_devices) == 8, jax.devices()
@@ -286,4 +383,6 @@ if __name__ == "__main__":
   _run_gradient_checks(Mesh(_devices, ("context",)), "context")
   _run_gradient_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
   _run_end_to_end_checks(Mesh(_devices, ("context",)), "context")
+  test_block_doubling_unit_lower_inverse_fwd_and_bwd()
+  test_gdn_gqa_no_repeat_fwd_and_bwd()
   print("GDN_CP_CHECKS_PASSED")
