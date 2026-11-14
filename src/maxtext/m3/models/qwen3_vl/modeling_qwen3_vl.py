@@ -31,11 +31,11 @@ import numpy as np
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, MultimodalInput
-from maxtext.m3.core.sharding import DefaultSharding, Sharding, param_metadata
+from maxtext.m3.core.sharding import DefaultSharding, Sharding, check_mesh, enter_mesh_scope, param_metadata
 from maxtext.m3.models.qwen3.modeling_qwen3 import (
-    Qwen3MLP,
     Qwen3Decoder,
-    check_construction_mesh,
+    Qwen3MLP,
+    end_eager_placement,
     norm_kwargs,
 )
 
@@ -990,29 +990,37 @@ class Qwen3VLModel(nnx.Module):
     # DeepStack injects visual features between individual decoder layers.
     if config.scan_layers:
       raise ValueError("m3 Qwen3-VL does not support layer scanning. Set scan_layers=false.")
-    check_construction_mesh()
-    self.config = config
-    self.sharding = sharding or DefaultSharding()
+    entered_mesh = mesh is not None and jax.sharding.get_abstract_mesh().empty
+    with enter_mesh_scope(mesh):
+      ambient = jax.sharding.get_abstract_mesh()
+      if not ambient.empty:
+        check_mesh(ambient, ("data", "fsdp", "tensor", "expert"))
+        if any(t == jax.sharding.AxisType.Explicit for t in ambient.axis_types):
+          raise ValueError("m3 Qwen3-VL does not implement shard_mode='explicit' yet. Use shard_mode='auto'.")
+      self.config = config
+      self.sharding = sharding or DefaultSharding()
 
-    # 1. Vision Tower matching checkpoint parameter hierarchy
-    self.vision_encoder = (
-        Qwen3VLVisionTower(config=config, rngs=rngs) if getattr(config, "use_multimodal", False) else None
-    )
+      # 1. Vision Tower matching checkpoint parameter hierarchy
+      self.vision_encoder = (
+          Qwen3VLVisionTower(config=config, rngs=rngs) if getattr(config, "use_multimodal", False) else None
+      )
 
-    # 2. Text LLM Token Embedder & Decoder
-    self.token_embedder = nnx.Embed(
-        num_embeddings=config.vocab_size,
-        features=config.emb_dim,
-        dtype=config.dtype,
-        param_dtype=config.weight_dtype,
-        embedding_metadata=param_metadata(self.sharding, "token_embedder", ("vocab", "embed")),
-        rngs=rngs,
-    )
-    self.decoder = Qwen3VLDecoder(
-        config=config,
-        rngs=rngs,
-        sharding=self.sharding,
-    )
+      # 2. Text LLM Token Embedder & Decoder
+      self.token_embedder = nnx.Embed(
+          num_embeddings=config.vocab_size,
+          features=config.emb_dim,
+          dtype=config.dtype,
+          param_dtype=config.weight_dtype,
+          embedding_metadata=param_metadata(self.sharding, "token_embedder", ("vocab", "embed")),
+          rngs=rngs,
+      )
+      self.decoder = Qwen3VLDecoder(
+          config=config,
+          rngs=rngs,
+          sharding=self.sharding,
+      )
+    if entered_mesh:
+      end_eager_placement(self)
 
   def logits_from_hidden_states_for_vocab_tiling(
       self, hidden_states: jax.Array, deterministic: bool, model_mode: Optional[str] = None, **kwargs

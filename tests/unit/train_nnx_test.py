@@ -49,6 +49,7 @@ class _Cfg:
   """Subset of HyperParameters used by loss_fn / train_step / eval_step."""
 
   model_name: str = ""
+  use_m3_model: bool = False
   micro_batch_size_to_train_on: int = 2
   micro_batch_size_to_eval_on: int = 2
   vocab_size: int = 8

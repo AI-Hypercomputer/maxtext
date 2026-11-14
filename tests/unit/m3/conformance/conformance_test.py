@@ -280,7 +280,7 @@ class _ShardedToyModule(nnx.Module):
       ok_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", "tensor"))
       self.prefix_proj = nnx.Param(
           jax.device_put(p_init, ok_shd),
-          out_sharding=jax.sharding.PartitionSpec("stage", "tensor"),
+          out_sharding=jax.sharding.PartitionSpec("fake_axis", "tensor"),
           eager_sharding=False,
       )
     elif mode == "unconstrained_spec":
@@ -709,7 +709,16 @@ class ConformanceTest(parameterized.TestCase):
     self.assertEqual(driver_mesh.axis_names, m3_sharding.MESH_AXIS_NAMES)
     self.assertEqual(
         {**driver_mesh.shape},
-        {"data": 1, "fsdp": 2, "tensor": 2, "expert": 1},
+        {
+            "data": 1,
+            "stage": 1,
+            "fsdp": 2,
+            "fsdp_transpose": 1,
+            "context": 1,
+            "tensor": 2,
+            "tensor_sequence": 1,
+            "expert": 1,
+        },
     )
     with mock.patch.object(jax, "devices", return_value=jax.devices()[:2]):
       with self.assertRaisesRegex(AssertionError, "require >= 4 JAX devices"):
@@ -750,7 +759,7 @@ class ConformanceTest(parameterized.TestCase):
         ("param_wrong_mesh", r"prefix_proj sharding\.mesh is not driver_mesh"),
         (
             "bad_meta_axis",
-            r"prefix_proj\.out_sharding: non-m3 mesh axes \['stage'\]",
+            r"prefix_proj\.out_sharding: non-m3 mesh axes \['fake_axis'\]",
         ),
         (
             "unconstrained_spec",
