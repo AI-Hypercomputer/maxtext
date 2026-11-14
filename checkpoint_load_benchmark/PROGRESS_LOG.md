@@ -1,6 +1,6 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-14 00:50:39 UTC`
+- **Last Updated (UTC):** `2026-11-14 00:58:53 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
@@ -13,7 +13,7 @@
 
 | Platform | Region | Step 1 Done | TPU Queue Tasks Done | Active TPU JobSets | Active CPU Jobs |
 |---|---|---:|---:|---|---|
-| `v7x` | `us-central1` | **21 / 21** | **61 / 61** | `mesa-q-v7x-2x2x1-2s-w66`, `mesa-q-v7x-2x2x2-1s-w63`, `mesa-tm2-v7x-397b-2s` | _none_ |
+| `v7x` | `us-central1` | **21 / 21** | **61 / 61** | `mesa-q-v7x-2x2x1-2s-w66`, `mesa-tm2-v7x-397b-2s` | _none_ |
 | `v6e` | `southamerica-west1` | **21 / 21** | **53 / 53** | _none_ | _none_ |
 | `v5e` | `europe-west4` | **12 / 12** | **22 / 22** | _none_ | _none_ |
 
@@ -43,8 +43,6 @@
 
 ## 3. Chronological Event Log (Newest Last)
 
-- [2026-11-13 14:17:09 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1148 mirrored JSONs.
-- [2026-11-13 14:21:41 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1163 mirrored JSONs.
 - [2026-11-13 14:26:07 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1177 mirrored JSONs.
 - [2026-11-13 14:30:32 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1188 mirrored JSONs.
 - [2026-11-13 14:34:51 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1191 mirrored JSONs.
@@ -193,3 +191,5 @@
 - [2026-11-14 00:08:20 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1286 mirrored JSONs.
 - [2026-11-14 00:16:58 UTC] `v7x` TPU JobSet `mesa-sd-v7x-397b-1x2x2x2` `Completed` and cleaned up.
 - [2026-11-14 00:22:28 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1288 mirrored JSONs.
+- [2026-11-14 00:54:34 UTC] `v7x` TPU JobSet `mesa-q-v7x-2x2x2-1s-w63` `Completed` and cleaned up.
+- [2026-11-14 00:55:07 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1289 mirrored JSONs.
