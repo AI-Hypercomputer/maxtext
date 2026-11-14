@@ -3484,5 +3484,63 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
     self.assertEqual(fsdp_prefetch_inhomogeneous._unstack_variable(shared, 3, 0), (shared, shared, shared))
 
 
+class TestApplyLayersSequentiallyDynamicGraphInit(unittest.TestCase):
+  """Params created inside the scan body must not drag the base stack out with them."""
+
+  class _AdapterLayer(nnx.Module):
+    """A layer that materializes a new param while tracing, as Qwix LoRA does."""
+
+    def __init__(self):
+      self.p = nnx.Param(jax.numpy.zeros((2,)))
+
+    def __call__(self, x, **kwargs):
+      self.adapter = nnx.LoRAParam(jax.numpy.ones((2,)))
+      return x + self.p.value + self.adapter.value, None
+
+  class _ReplacingLayer(nnx.Module):
+    """A layer that swaps a carried-in param for a new one, as Qwix QLoRA does."""
+
+    def __init__(self):
+      self.p = nnx.Param(jax.numpy.zeros((2,)))
+      self.kept = nnx.Param(jax.numpy.zeros((2,)))
+
+    def __call__(self, x, **kwargs):
+      value = self.p.value
+      del self.p
+      self.quantized = nnx.Param(value)
+      return x + self.quantized.value + self.kept.value, None
+
+  def _run(self, param_scan_axis, layer_cls=None):
+    cfg = _make_config(param_scan_axis=param_scan_axis)
+    decoder = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0))
+    layers = nnx.vmap(layer_cls or self._AdapterLayer, in_axes=(), out_axes=param_scan_axis, axis_size=2)()
+    # Qwix sets this on every module for the duration of its init pass.
+    decoder.disable_quant_stats_update = True
+    base_before = layers.p.value
+    # pylint: disable=protected-access
+    _, out_layers, _ = decoder._apply_layers_sequentially(layers=layers, x_in=jax.numpy.zeros((2,)), length=2)
+    return base_before, out_layers
+
+  def test_created_param_escapes_the_scan(self):
+    for axis in (0, 1):
+      with self.subTest(param_scan_axis=axis):
+        _, out_layers = self._run(axis)
+        self.assertTrue(hasattr(out_layers, "adapter"))
+
+  def test_base_params_are_not_restacked(self):
+    for axis in (0, 1):
+      with self.subTest(param_scan_axis=axis):
+        base_before, out_layers = self._run(axis)
+        self.assertIs(out_layers.p.value, base_before)
+
+  def test_param_removed_in_the_body_stays_removed(self):
+    for axis in (0, 1):
+      with self.subTest(param_scan_axis=axis):
+        _, out_layers = self._run(axis, layer_cls=self._ReplacingLayer)
+        self.assertFalse(hasattr(out_layers, "p"))
+        self.assertTrue(hasattr(out_layers, "quantized"))
+        self.assertTrue(hasattr(out_layers, "kept"))
+
+
 if __name__ == "__main__":
   unittest.main()
