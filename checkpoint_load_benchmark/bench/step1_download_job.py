@@ -1064,14 +1064,17 @@ def copy_bf16_gcs_to_region(
   src_bucket_name, _ = split_gcs_uri(source_gcs_dir)
   src_bucket = client.bucket(src_bucket_name)
 
+  if clean_target:
+    ensure_empty_gcs_prefix(dest_gcs_dir, storage_client=client, clean_target=True)
+
   existing_dst_sizes: dict[str, int] = {}
-  try:
-    for b in _list_blobs_under_prefix(client, dest_gcs_dir):
-      if not b.name.endswith("/"):
-        existing_dst_sizes[b.name.rsplit("/", 1)[-1]] = int(getattr(b, "size", 0) or 0)
-  except Exception:  # pylint: disable=broad-exception-caught
-    existing_dst_sizes = {}
-  del clean_target
+  if not clean_target:
+    try:
+      for b in _list_blobs_under_prefix(client, dest_gcs_dir):
+        if not b.name.endswith("/"):
+          existing_dst_sizes[b.name.rsplit("/", 1)[-1]] = int(getattr(b, "size", 0) or 0)
+    except Exception:  # pylint: disable=broad-exception-caught
+      existing_dst_sizes = {}
 
   src_blobs = [
       b
