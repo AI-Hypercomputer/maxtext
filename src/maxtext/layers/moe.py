@@ -1013,6 +1013,31 @@ def _moe_combine_psum_scatter_bwd(
 _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psum_scatter_bwd)
 
 
+def scanned_qwag_weight_amax(routed_moe_params, dtype, granularity: str) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Per-layer (wi_0, wi_1, wo) QWAG amax of layer-stacked (scan axis 0) RoutedMoE params, e.g. [L, 1, 1, N]."""
+
+  def value(v):
+    return v.get_value() if isinstance(v, nnx.Variable) else v
+
+  def amax(*names):
+    return quantizations.qwag_weight_amax(tuple(value(routed_moe_params[n]) for n in names), dtype, granularity, 0)
+
+  wo_amax = amax("wo")[0]
+  if "wi" in routed_moe_params:  # prefuse_moe_weights: wi = [wi_0 | wi_1] along the output channel.
+    wi_amax = amax("wi")[0]
+    if granularity == "per_tensor":
+      return wi_amax, wi_amax, wo_amax
+    n = wi_amax.shape[-1] // 2
+    return wi_amax[..., :n], wi_amax[..., n:], wo_amax
+  return (*amax("wi_0", "wi_1"), wo_amax)
+
+
+def _qwag_amax_pspec(amax: jax.Array, weight_pspec: P) -> P:
+  """Partition spec of a QWAG amax: the weight's entry on each kept dim (size > 1), None on reduced dims."""
+  entries = tuple(weight_pspec) + (None,) * (amax.ndim - len(weight_pspec))
+  return P(*(entry if dim > 1 else None for entry, dim in zip(entries, amax.shape)))
+
+
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
 
@@ -2527,6 +2552,7 @@ class RoutedMoE(nnx.Module):
       wo_bias,
       input_ids=None,
       forced_routed_experts=None,
+      moe_qwag_weight_amax=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts."""
 
@@ -2672,6 +2698,7 @@ class RoutedMoE(nnx.Module):
         tc_routing=None,
         tc_unsort_cfg=None,
         bias=None,
+        rhs_amax=None,
     ):
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
@@ -2817,6 +2844,7 @@ class RoutedMoE(nnx.Module):
             return_rhs=return_rhs,
             flat_fsdp_shard=flat_fsdp_shard,
             fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
+            rhs_amax=rhs_amax,
             **({"out_is_3d": True} if out_is_3d else {}),
             **({"tc_routing": tc_routing, "tc_unsort_cfg": tc_unsort_cfg} if tc_unsort_cfg is not None else {}),
         )
@@ -2867,12 +2895,16 @@ class RoutedMoE(nnx.Module):
       return input_activation.shape[0] > 1
 
     def explicitly_weight_ag():
-      if not (self.config.shard_exp_on_fsdp or self.config.shard_embed_moe_on_fsdp):
-        return False
+      """Returns the gmm Qwix rule if the routed-expert weights take QWAG, else None."""
+      if ctypes.moe_qwag_flag(self.config) is None:
+        return None
       quantization_rule = qpl.get_current_rule("gmm")
-      if quantization_rule and quantization_rule.weight_calibration_method.startswith("fixed"):
-        return True
-      return False
+      if quantization_rule and (
+          quantizations.is_static_calibration(quantization_rule.weight_calibration_method)
+          or quantizations.is_dynamic_qwag_calibration(quantization_rule.weight_calibration_method)
+      ):
+        return quantization_rule
+      return None
 
     def maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec):
       if isinstance(w0_kernel, aqt.QTensor):
@@ -2926,8 +2958,8 @@ class RoutedMoE(nnx.Module):
       # w0, w1, wo needs to be un sharded on fsdp / fsdp_transpose axis, so use
       # mlp_no_fsdp axis
       if self.config.shard_exp_on_fsdp:
-        if explicitly_weight_ag():
-          # special sharding when using static scaling for weights in quantization with shard_exp_on_fsdp
+        if weight_gather:
+          # QWAG with shard_exp_on_fsdp: keep experts fsdp-sharded; gmm gathers dim 0.
           w0_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
           w1_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes)
           wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes)
@@ -2940,7 +2972,7 @@ class RoutedMoE(nnx.Module):
         w0_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         w1_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
         wo_pspec = self._logical_to_mesh_axes((None, "mlp_no_fsdp", None))
-      elif self.config.shard_embed_moe_on_fsdp and explicitly_weight_ag():
+      elif self.config.shard_embed_moe_on_fsdp and weight_gather:
         # Keep embed_moe sharded so we can manually QAG it over FSDP
         if self.config.moe_flat_fsdp_weights:
           # Flat [E * rows, cols] weights: keep the (expert, fsdp) row sharding; gmm QAGs dim 0 over FSDP.
@@ -2980,7 +3012,16 @@ class RoutedMoE(nnx.Module):
       )
 
     is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
-    weight_gather = explicitly_weight_ag()
+    qwag_rule = explicitly_weight_ag()
+    weight_gather = qwag_rule is not None
+    # Dynamic QWAG: whole-weight amax, precomputed for scanned DeepSeek, else computed here (outside shard_map).
+    if qwag_rule is not None and quantizations.is_dynamic_qwag_calibration(qwag_rule.weight_calibration_method):
+      if moe_qwag_weight_amax is None:
+        moe_qwag_weight_amax = quantizations.qwag_weight_amax(
+            (w0_kernel, w1_kernel, wo_kernel), self.dtype, self.config.moe_qwag_weight_scale_granularity
+        )
+    else:
+      moe_qwag_weight_amax = None
     (
         batch_logical_axis,
         input_partition_pspec,
@@ -2995,6 +3036,17 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
+    qwag_amax_pspecs = None
+    if moe_qwag_weight_amax is not None:
+      qwag_amax_pspecs = tuple(
+          _qwag_amax_pspec(amax, pspec)
+          for amax, pspec in zip(moe_qwag_weight_amax, (w0_pspec, w1_pspec, wo_pspec), strict=True)
+      )
+      if self.config.shard_mode == ShardMode.EXPLICIT:
+        moe_qwag_weight_amax = tuple(
+            self._maybe_shard_with_pspec(amax, pspec)
+            for amax, pspec in zip(moe_qwag_weight_amax, qwag_amax_pspecs, strict=True)
+        )
 
     output_pspec = self._logical_to_mesh_axes(
         (
@@ -3534,6 +3586,7 @@ class RoutedMoE(nnx.Module):
         mask=None,
         gather_weights=True,
         return_weights=False,
+        rhs_amax=None,
     ):
       """Run the two up-projections (gate + up) and apply the FFN activation."""
       wi_gather_axes, wi_tile_size = get_wi_gmm_params()
@@ -3541,7 +3594,7 @@ class RoutedMoE(nnx.Module):
         wi_gather_axes = []
       use_te_bias = self.config.use_te_grouped_gemm and self.config.mlp_bias
 
-      def _gmm_maybe_bias(x_, w_, bias_, partial_sum=None, *, return_lhs=False, return_rhs=False):
+      def _gmm_maybe_bias(x_, w_, bias_, partial_sum=None, *, return_lhs=False, return_rhs=False, rhs_amax_=None):
         # With return_lhs / return_rhs, gmm returns (out, [lhs], [rhs]); bias and mask apply to `out` only.
         te_bias = use_te_bias and bias_ is not None
         res = gmm_fn(
@@ -3553,6 +3606,7 @@ class RoutedMoE(nnx.Module):
             return_lhs=return_lhs,
             return_rhs=return_rhs,
             bias=bias_ if te_bias else None,
+            rhs_amax=rhs_amax_,
         )
         layer, extras = (res[0], tuple(res[1:])) if return_lhs or return_rhs else (res, ())
         if te_bias:
@@ -3564,13 +3618,20 @@ class RoutedMoE(nnx.Module):
             layer = jnp.where(mask[:, None], layer, 0)
         return (layer, *extras) if extras else layer
 
+      w0_amax, w1_amax = (None, None) if rhs_amax is None else rhs_amax
       if self.config.prefuse_moe_weights:
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
         w_fused = jnp.concatenate([w0, w1], axis=-1)
         fused_bias = None
         if use_te_bias and w0_bias is not None and w1_bias is not None:
           fused_bias = jnp.concatenate([w0_bias, w1_bias], axis=-1)
-        out = _gmm_maybe_bias(x, w_fused, fused_bias)
+        fused_amax = None
+        if rhs_amax is not None:  # Fused [w0 | w1]: max per tensor, else concat.
+          if self.config.moe_qwag_weight_scale_granularity == "per_tensor":
+            fused_amax = jnp.maximum(w0_amax, w1_amax)
+          else:
+            fused_amax = jnp.concatenate([w0_amax, w1_amax], axis=-1)
+        out = _gmm_maybe_bias(x, w_fused, fused_bias, rhs_amax_=fused_amax)
         n = out.shape[-1] // 2
         layer_w0, layer_w1 = out[:, :n], out[:, n:]
         if self.config.mlp_bias and not use_te_bias and w0_bias is not None and w1_bias is not None:
@@ -3587,7 +3648,9 @@ class RoutedMoE(nnx.Module):
         # backward pass the wi_1 DLHS arrives as the cotangent of the returned input and the wi_0 DLHS GMM
         # accumulates onto it in place (gmm_v2 partial_sum) instead of a separate add of the two DLHS.
         accum_wi_dlhs = self.config.moe_accumulate_wi_dlhs
-        layer_w0 = _gmm_maybe_bias(x, w0, w0_bias, partial_accum0, return_lhs=accum_wi_dlhs, return_rhs=return_weights)
+        layer_w0 = _gmm_maybe_bias(
+            x, w0, w0_bias, partial_accum0, return_lhs=accum_wi_dlhs, return_rhs=return_weights, rhs_amax_=w0_amax
+        )
         x_for_w1 = x
         if accum_wi_dlhs and return_weights:
           layer_w0, x_for_w1, w0 = layer_w0
@@ -3597,7 +3660,7 @@ class RoutedMoE(nnx.Module):
           layer_w0, w0 = layer_w0
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
 
-        layer_w1 = _gmm_maybe_bias(x_for_w1, w1, w1_bias, partial_accum1, return_rhs=return_weights)
+        layer_w1 = _gmm_maybe_bias(x_for_w1, w1, w1_bias, partial_accum1, return_rhs=return_weights, rhs_amax_=w1_amax)
         if return_weights:
           layer_w1, w1 = layer_w1
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
@@ -3828,6 +3891,7 @@ class RoutedMoE(nnx.Module):
         gather_weights=True,
         return_weights=False,
         per_expert_scale=None,
+        moe_qwag_weight_amax=None,
     ):
       batch_size, sequence_length, embed_dim = x.shape
       if self.config.num_moe_emb_chunks > 0:
@@ -3895,6 +3959,7 @@ class RoutedMoE(nnx.Module):
             mask=mask,
             gather_weights=gather_weights,
             return_weights=return_weights,
+            rhs_amax=None if moe_qwag_weight_amax is None else moe_qwag_weight_amax[:2],
         )
         if return_weights:
           output0, output1, w0, w1 = up_res  # pylint: disable=unbalanced-tuple-unpacking
@@ -3966,6 +4031,7 @@ class RoutedMoE(nnx.Module):
           weight_gather_axes=wo_gather_axes,
           bias=wo_bias if use_te_wo_bias else None,
           return_rhs=return_weights,
+          rhs_amax=None if moe_qwag_weight_amax is None else moe_qwag_weight_amax[2],
           **({"out_is_3d": True} if x_is_3d else {}),
           **tc_unsort_kwargs,
       )
@@ -4137,6 +4203,7 @@ class RoutedMoE(nnx.Module):
         for axis in mesh_axes_for_dim(dim)
     }
     overflow_mesh_axes = tuple(axis for axis in self.mesh.axis_names if axis in input_mesh_axes)
+    in_specs += (qwag_amax_pspecs,)
 
     @functools.partial(
         jax.shard_map,
@@ -4170,6 +4237,7 @@ class RoutedMoE(nnx.Module):
         rngs,
         forced_routed_experts=None,
         per_expert_scale=None,
+        moe_qwag_weight_amax=None,
     ):
       # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
       # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
@@ -4199,6 +4267,7 @@ class RoutedMoE(nnx.Module):
               forced_routed_experts,
               force_dropless=force_dropless,
               per_expert_scale=per_expert_scale,
+              moe_qwag_weight_amax=moe_qwag_weight_amax,
           )
           if not defer_small_ars:
             bias_updates = finalize_bias_updates(bias_updates)
@@ -4249,6 +4318,7 @@ class RoutedMoE(nnx.Module):
               gather_weights=not accum_chunk_wgrad or c == 0,
               return_weights=accum_chunk_wgrad and c < n_chunks - 1,
               per_expert_scale=per_expert_scale,
+              moe_qwag_weight_amax=moe_qwag_weight_amax,
           )
           if accum_chunk_wgrad:
             cur_w0, cur_w1, cur_wo = chunk_weights
@@ -4497,6 +4567,7 @@ class RoutedMoE(nnx.Module):
         self.rngs,
         forced_routed_experts,
         per_expert_scale,
+        moe_qwag_weight_amax,
     )
     output, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf = route_and_compute_outputs[:6]
     max_load_ratio = route_and_compute_outputs[6] if log_max_load_ratio else None
@@ -5503,6 +5574,7 @@ class RoutedMoE(nnx.Module):
       gate_inputs: jax.Array | None = None,
       out_sharding: NamedSharding | None = None,
       forced_routed_experts: jax.Array | None = None,
+      moe_qwag_weight_amax: tuple[jax.Array, jax.Array, jax.Array] | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes the routed MoE block.
 
@@ -5512,6 +5584,7 @@ class RoutedMoE(nnx.Module):
         in DeepSeek V4's early MoE layers. If None, routing relies purely on `gate_inputs` or `inputs`.
       gate_inputs: Optional alternate inputs to feed into the routing gate.
       out_sharding: Optional sharding specification for the output.
+      moe_qwag_weight_amax: Optional precomputed (wi_0, wi_1, wo) amax for dynamic QWAG; computed here if None.
 
     Returns:
       A tuple containing the MoE output, the load balance loss (if applicable),
@@ -5704,6 +5777,7 @@ class RoutedMoE(nnx.Module):
           wo_bias,
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
+          moe_qwag_weight_amax=moe_qwag_weight_amax,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -5815,6 +5889,7 @@ class RoutedAndSharedMoE(nnx.Module):
       out_sharding: NamedSharding | None = None,
       input_ids: jax.Array | None = None,
       forced_routed_experts: jax.Array | None = None,
+      moe_qwag_weight_amax: tuple[jax.Array, jax.Array, jax.Array] | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     """Executes both the routed experts and the shared expert block.
 
@@ -5826,6 +5901,7 @@ class RoutedAndSharedMoE(nnx.Module):
       out_sharding: Optional sharding spec for the final combined output.
       input_ids: Optional token IDs corresponding to the inputs, used strictly for Hash Routing
         in DeepSeek V4's early MoE layers.
+      moe_qwag_weight_amax: Optional routed-expert weight amax for dynamic QWAG (see RoutedMoE).
 
     Returns:
       A tuple containing the combined MoE output (routed + shared),
@@ -5837,6 +5913,7 @@ class RoutedAndSharedMoE(nnx.Module):
         out_sharding=out_sharding,
         input_ids=input_ids,
         forced_routed_experts=forced_routed_experts,
+        moe_qwag_weight_amax=moe_qwag_weight_amax,
     )
     shared_experts = self.shared_experts(
         inputs,

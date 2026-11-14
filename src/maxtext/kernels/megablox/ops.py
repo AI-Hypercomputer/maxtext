@@ -101,6 +101,7 @@ def gmm(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    rhs_amax: jnp.ndarray | None = None,
 ):
   """Grouped matrix multiplication operation.
 
@@ -110,6 +111,8 @@ def gmm(
   consumes / produces the matching 3D cotangents without relayout copies. With
   `out_is_3d`, a forward `partial_sum` must also be 3D; with `return_lhs`, the
   cotangent of the returned (3D) lhs is accumulated into the 3D dlhs in place.
+
+  `rhs_amax`: this shard's slice of the whole-weight amax for dynamic QWAG ([1, 1, 1], [1, 1, N] or [E, 1, N]).
   """
   lhs_ndim = (lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs).ndim
   if (lhs_ndim == 3 or out_is_3d) and not (use_tokamax_backend and use_gmm_v2):
@@ -188,6 +191,7 @@ def gmm(
       fuse_3d_dlhs_ps,
       tc_routing,
       tc_unsort_cfg,
+      rhs_amax,
   )
   if return_lhs and return_rhs:
     return out, lhs_out, rhs_out
@@ -250,6 +254,7 @@ def _gmm_fwd(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    rhs_amax: jnp.ndarray | None = None,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
     tuple[
@@ -279,18 +284,30 @@ def _gmm_fwd(
   # or gathered weights) to return matching cotangent containers in backward pass.
   lhs_is_qarray = isinstance(lhs, qpl.QArray)
   rhs_is_qarray = isinstance(rhs, qpl.QArray)
+  # Dynamic QWAG: every shard must be quantized with the whole-weight amax.
+  if (
+      rhs_amax is None
+      and not rhs_is_qarray
+      and weight_gather_axes
+      and use_tokamax_backend
+      and quantization_rule
+      and quantization_rule.bwd_qtype
+      and quantization_rule.weight_qtype
+      and quantizations.is_dynamic_qwag_calibration(quantization_rule.weight_calibration_method)
+  ):
+    raise ValueError("Dynamic (absmax) QWAG needs rhs_amax.")
+  qag_weight_calibration_ok = quantization_rule is not None and (
+      quantizations.is_static_calibration(quantization_rule.weight_calibration_method) or rhs_amax is not None
+  )
   if flat_fsdp_shard is not None:
     if rhs_is_qarray or rhs.ndim != 2 or not weight_gather_axes:
       raise NotImplementedError("flat_fsdp_shard needs a plain 2D rhs block and weight_gather_axes.")
     if any(axis_idx != 0 for _, axis_idx in weight_gather_axes):
       raise ValueError("flat_fsdp_shard: the flat rhs is gathered on dim 0 only.")
-    if not (
-        use_tokamax_backend
-        and quantization_rule
-        and quantization_rule.bwd_qtype
-        and quantization_rule.weight_calibration_method.startswith("fixed")
-    ):
-      raise NotImplementedError("flat_fsdp_shard requires the tokamax QAG path (fixed weight calibration, bwd_qtype).")
+    if not (use_tokamax_backend and quantization_rule and quantization_rule.bwd_qtype and qag_weight_calibration_ok):
+      raise NotImplementedError(
+          "flat_fsdp_shard requires the tokamax QAG path (fixed or dynamic absmax weight calibration, bwd_qtype)."
+      )
 
   # Quantize activation and weight
   if quantization_rule:
@@ -302,6 +319,7 @@ def _gmm_fwd(
         use_gmm_v2,
         use_manual_quantization,
         rhs_is_flat2d=flat_fsdp_shard is not None,
+        rhs_amax=rhs_amax,
     )
 
   # Quantization All-Gather (QAG) for weight: only supported for following conditions
@@ -309,7 +327,7 @@ def _gmm_fwd(
       use_tokamax_backend
       and quantization_rule
       and quantization_rule.bwd_qtype
-      and quantization_rule.weight_calibration_method.startswith("fixed")
+      and qag_weight_calibration_ok
       and isinstance(rhs, qpl.QArray)
       and weight_gather_axes
   ):
@@ -377,6 +395,7 @@ def _fwd_quantize_activation_and_weight(
     use_gmm_v2: bool,
     use_manual_quantization: bool,
     rhs_is_flat2d: bool = False,
+    rhs_amax: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
   if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2:
@@ -389,7 +408,10 @@ def _fwd_quantize_activation_and_weight(
     )
 
   if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
-    if not use_manual_quantization:
+    if rhs_amax is not None:
+      # Dynamic QWAG: same scale on every shard.
+      rhs = quantizations.quantize_with_amax(rhs, quantization_rule.weight_qtype, rhs_amax)
+    elif not use_manual_quantization:
       rhs = qpl.quantize(
           rhs,
           quantization_rule.weight_qtype,
@@ -419,19 +441,27 @@ def _fwd_gather_weight(
 ) -> qpl.QArray:
   """Applies QAG (Quantization All-Gather) to RHS weights during forward pass.
 
+  A non-per-tensor scale (and zero_point) is gathered too on each axis where it matches the local qvalue dim.
+
   With `gathered_shape` (moe_flat_fsdp_weights) the gathered 2D [G * rows, cols]
   qvalue is bitcast to (G, rows, cols) and a per-channel [1, cols] scale to [1, 1, cols].
   """
-  if gathered_shape is None:
-    for axis_name, axis_idx in weight_gather_axes:
-      rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
-      # replace the qvalue with the gathered qvalue in the QArray
-      rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
-    return rhs
 
-  qvalue = rhs.qvalue
+  def _gather_scale(s, qvalue, axis_name, axis_idx):
+    # Compare local dims: a kept scale dim sharded down to 1 (e.g. one expert per device) still needs the gather.
+    # A size-1 scale dim on a size-1 qvalue dim is then gathered too, which is redundant but correct.
+    if s is None or s.size == 1 or s.ndim != qvalue.ndim or s.shape[axis_idx] != qvalue.shape[axis_idx]:
+      return s
+    return jax.lax.all_gather(s, axis_name, axis=axis_idx, tiled=True)
+
+  qvalue, scale, zero_point = rhs.qvalue, rhs.scale, rhs.zero_point
   for axis_name, axis_idx in weight_gather_axes:
+    scale = _gather_scale(scale, qvalue, axis_name, axis_idx)
+    zero_point = _gather_scale(zero_point, qvalue, axis_name, axis_idx)
     qvalue = jax.lax.all_gather(qvalue, axis_name, axis=axis_idx, tiled=True)
+  if gathered_shape is None:
+    return dataclasses.replace(rhs, qvalue=qvalue, scale=scale, zero_point=zero_point)
+
   qvalue = qvalue.reshape(gathered_shape)
 
   def _expand(s):
@@ -439,7 +469,7 @@ def _fwd_gather_weight(
       return s
     return s.reshape((1,) * (len(gathered_shape) - s.ndim) + tuple(s.shape))
 
-  return dataclasses.replace(rhs, qvalue=qvalue, scale=_expand(rhs.scale), zero_point=_expand(rhs.zero_point))
+  return dataclasses.replace(rhs, qvalue=qvalue, scale=_expand(scale), zero_point=_expand(zero_point))
 
 
 def _fwd_run_tokamax_v1(
@@ -652,6 +682,7 @@ def _gmm_bwd(
     jnp.ndarray | None,
     jnp.ndarray | None,
     None,
+    None,
 ]:
   """Backward function for throughput GMM VJP."""
   (
@@ -804,7 +835,7 @@ def _gmm_bwd(
         qtype=residual_rhs.qtype,
     )
 
-  return dlhs, drhs, None, None, d_existing_out, dpartial_sum, None
+  return dlhs, drhs, None, None, d_existing_out, dpartial_sum, None, None
 
 
 def _check_tc_unsort_bwd_supported(

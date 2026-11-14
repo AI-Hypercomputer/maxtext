@@ -31,7 +31,7 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
+from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype, moe_qwag_flag
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -1359,7 +1359,7 @@ class MoEGeneral(BaseModel):
           " The per-device FSDP shard is then a contiguous, tile-aligned row block at every FSDP size, the fp8"
           " weight all-gather / weight-grad reduce-scatter run on the major dim, and the gathered weight is a free"
           " bitcast of the [E, rows, cols] operand the gmm kernels expect (no relayout copies, no 7/8 sublane"
-          " padding). Requires shard_embed_moe_on_fsdp with fixed weight calibration (explicit QAG) and the"
+          " padding). Requires shard_embed_moe_on_fsdp with fixed or absmax weight calibration (explicit QAG) and the"
           " tokamax gmm_v2 custom-VJP path. 3D checkpoints loaded via load_parameters_path are converted to the flat"
           " layout on load; full-state resumes must come from a flat checkpoint."
       ),
@@ -1791,11 +1791,19 @@ class MoEGeneral(BaseModel):
   shard_exp_on_fsdp: bool = Field(
       False,
       description="Shard the expert dimension of the MLP weights on the FSDP axis, "
-      "and recommended only when num_experts is a multiple of fsdp_parallelism",
+      "and recommended only when num_experts is a multiple of fsdp_parallelism. With fp8_full (Qwix) and fixed or"
+      " absmax weight calibration, all-gathers the experts in fp8 (QWAG); requires use_tokamax_gmm.",
   )
   shard_embed_moe_on_fsdp: bool = Field(
       False,
-      description="Keep embed_moe sharded so we can manually QAG it over FSDP.",
+      description="Keep embed_moe sharded so we can manually QAG it over FSDP. Requires quantization with fixed or"
+      " absmax weight calibration and use_tokamax_gmm.",
+  )
+  moe_qwag_weight_scale_granularity: Literal["per_channel", "per_tensor", "per_expert_channel"] = Field(
+      "per_channel",
+      description="absmax QWAG weight scale for an [E, K, N] weight: per_channel [1, 1, N], per_tensor [1, 1, 1],"
+      " per_expert_channel [E, 1, N] (needs use_gmm_v2; not with moe_flat_fsdp_weights or ring of experts + ragged"
+      " sort). Fixed calibration is always per-tensor.",
   )
   use_2d_fsdp_sharding: bool = Field(
       False,
@@ -5304,15 +5312,36 @@ class MaxTextConfig(
       return yaml.safe_load(f) or {}
 
   @model_validator(mode="after")
-  def validate_shard_embed_moe_on_fsdp(self) -> "MaxTextConfig":
-    """Raise ValueError if shard_embed_moe_on_fsdp is used without fixed weight quantization calibration."""
+  def validate_moe_qwag_sharding(self) -> "MaxTextConfig":
+    """Validates the QWAG flags shard_embed_moe_on_fsdp / shard_exp_on_fsdp."""
+    method = self.weight_quantization_calibration_method
     if self.shard_embed_moe_on_fsdp and (
-        self.quantization == "" or not self.weight_quantization_calibration_method.startswith("fixed")
+        not self.quantization or not (method.lower().startswith("fixed") or method.lower() == "absmax")
     ):
       raise ValueError(
           "shard_embed_moe_on_fsdp requires quantization to be specified and "
-          "weight_quantization_calibration_method to be fixed (static scaling mode)."
+          "weight_quantization_calibration_method to be fixed or absmax."
       )
+    qwag_flag = moe_qwag_flag(self, require_tokamax=False)
+    if qwag_flag and not self.use_tokamax_gmm:
+      raise ValueError(f"{qwag_flag} QWAG (fp8_full, {method!r}) requires use_tokamax_gmm=True.")
+    if qwag_flag and method.lower() == "absmax":
+      unsupported = []
+      if self.use_batch_split_schedule:
+        unsupported.append("use_batch_split_schedule")
+      if self.num_moe_emb_chunks > 0:
+        unsupported.append("num_moe_emb_chunks > 0")
+      if self.moe_qwag_weight_scale_granularity == "per_expert_channel":
+        # Flat shards split experts; the gmm v1 dlhs takes only [1, 1, N] rhs scales, and the dlhs scaling ignores
+        # the group_offset of ring of experts + ragged sort.
+        if self.moe_flat_fsdp_weights:
+          unsupported.append("per_expert_channel with moe_flat_fsdp_weights")
+        if not self.use_gmm_v2:
+          unsupported.append("per_expert_channel with use_gmm_v2=False")
+        if self.use_ring_of_experts and self.use_ragged_sort:
+          unsupported.append("per_expert_channel with use_ring_of_experts and use_ragged_sort")
+      if unsupported:
+        raise ValueError(f"{qwag_flag} with absmax weight calibration does not support {', '.join(unsupported)}.")
     return self
 
   @model_validator(mode="after")

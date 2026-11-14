@@ -463,6 +463,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
       kv_cache=None,
       attention_metadata=None,
       decoder_input_tokens=None,
+      moe_qwag_weight_amax=None,
   ):
     # Unpack inputs if it's a tuple (e.g. from a previous layer returning (hidden_states, kv_cache))
     if isinstance(inputs, tuple):
@@ -632,17 +633,19 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           hidden_states,
           deterministic,
           input_ids=decoder_input_tokens,
+          moe_qwag_weight_amax=moe_qwag_weight_amax,
       )
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
 
     return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
-  def mlp_op(self, x, deterministic, *args, **kwargs):
+  def mlp_op(self, x, deterministic, *args, moe_qwag_weight_amax=None, **kwargs):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.DeepSeekMoeBlock_0(
         x,
         intermediate_sharding=self.mlp_intermediate_sharding,
         out_sharding=self.out_sharding,
         input_ids=kwargs.get("input_ids"),
+        moe_qwag_weight_amax=moe_qwag_weight_amax,
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates

@@ -161,9 +161,9 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 **MoE FSDP Sharding Strategies** (Note: At most one of the following three flags can be enabled at a time):
 
-- `shard_exp_on_fsdp`: If enabled, shard the expert dimension of the MLP weights on the FSDP axis. Works for both unquantized and quantized. When `quantization` and `weight_quantization_calibration_method` are fixed, it performs quantized weight all gather over fsdp before gmm. This is recommended only when `num_experts` is a multiple of `fsdp_parallelism`.
+- `shard_exp_on_fsdp`: If enabled, shard the expert dimension of the MLP weights on the FSDP axis. Works for both unquantized and quantized. With `quantization=fp8_full` (Qwix), `sparse_matmul` and `weight_quantization_calibration_method` fixed or `absmax`, it performs quantized weight all gather over fsdp (on the expert dim) before gmm, which requires `use_tokamax_gmm=True`; otherwise XLA all-gathers the unquantized weights. This is recommended only when `num_experts` is a multiple of `fsdp_parallelism`.
 - `use_2d_fsdp_sharding`: If enabled, use fsdp and fsdp_transpose axes for sharding the MoE weights.
-- `shard_embed_moe_on_fsdp`: If enabled, keep embed_moe sharded so we can manually QAG (Quantize-All-Gather) it over FSDP. Requires `quantization` to be specified and `weight_quantization_calibration_method` to be fixed.
+- `shard_embed_moe_on_fsdp`: If enabled, keep embed_moe sharded so we can manually QAG (Quantize-All-Gather) it over FSDP. Requires `quantization` to be specified and `weight_quantization_calibration_method` to be fixed or `absmax`; the quantized all-gather requires `use_tokamax_gmm=True`. See [Quantization](quantization.md) (Weight QAG).
 
 ## 3. Performance Tuning
 

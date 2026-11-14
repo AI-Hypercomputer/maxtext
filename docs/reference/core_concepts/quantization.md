@@ -227,9 +227,21 @@ Weight QAG is triggered when an MoE FSDP sharding strategy is combined with quan
 
 Requirements:
 
-- Either `shard_embed_moe_on_fsdp=True` or `shard_exp_on_fsdp=True`. See [MoE Configuration](moe_configuration.md).
-- `quantization` must be specified (e.g. `fp8_full`).
-- Static weight calibration: `weight_quantization_calibration_method` starting with `fixed` (ensures uniform scale factors across shards without collective synchronization).
+- Either `shard_embed_moe_on_fsdp=True` (gathers `embed_moe`: dim 1 of `wi`, dim 2 of `wo`) or `shard_exp_on_fsdp=True` (gathers the expert dim 0). See [MoE Configuration](moe_configuration.md).
+- `quantization=fp8_full` with `use_qwix_quantization=True` and `sparse_matmul=True`.
+- `use_tokamax_gmm=True`.
+- Weight calibration that gives every shard the same scale, via `weight_quantization_calibration_method`:
+  - Static: starting with `fixed`. Always one per-tensor scale.
+
+  - Dynamic: exactly `absmax`, taken over the whole weight (before the layer scan for scanned DeepSeek layers, per layer otherwise). `moe_qwag_weight_scale_granularity` sets its shape for an `[E, K, N]` weight:
+
+    - `per_channel` (default): `[1, 1, N]` over all experts. The non-QWAG GMM also uses `[1, 1, N]`, but per expert-parallel shard.
+    - `per_tensor`: `[1, 1, 1]`.
+    - `per_expert_channel`: `[E, 1, N]`. Requires `use_gmm_v2=True`; not supported with `moe_flat_fsdp_weights` or with `use_ring_of_experts` + `use_ragged_sort`.
+
+    `use_batch_split_schedule` and `num_moe_emb_chunks > 0` are not supported. Since `absmax` is the default, `shard_exp_on_fsdp` with `fp8_full` now uses dynamic QWAG instead of the XLA all-gather unless a `fixed` calibration is set.
+
+  - Other methods (`absmax,<scale>`, `rms`, `minmax`) are not supported for Weight QAG: `shard_embed_moe_on_fsdp` rejects them, and `shard_exp_on_fsdp` falls back to an XLA all-gather of the unquantized weights.
 
 ## Token Quantized All-Gather Pipeline for MoE Ring of Experts
 

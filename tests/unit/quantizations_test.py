@@ -20,6 +20,7 @@ import sys
 from typing import Any
 import unittest
 from absl import logging as absl_logging
+from absl.testing import parameterized
 from aqt.jax.v2 import aqt_tensor
 from aqt.jax.v2.flax import aqt_flax
 from flax import nnx
@@ -28,11 +29,14 @@ import jax
 from jax import lax
 from jax import numpy as jnp
 from jax.sharding import Mesh
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec as P
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.common.common_types import DECODING_ACTIVE_SEQUENCE_INDICATOR
 from maxtext.kernels.megablox import ops
 from maxtext.kernels.megablox import gmm
+from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers, quantizations
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -40,6 +44,7 @@ from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import pytest
 import qwix
+import qwix.pallas as qpl
 
 _QUERY_REGEX = ".*/query"
 _VALUE_REGEX = ".*/value"
@@ -732,6 +737,144 @@ class LhsScaleTest(unittest.TestCase):
     )
     scale = ops._fwd_prepare_lhs_scale(rule)  # pylint: disable=protected-access
     self.assertIsNone(scale)
+
+
+_QWAG_QTYPE = jnp.float8_e4m3fn
+
+
+def _qwag_weight(seed, shape, dtype=jnp.float32, std=0.02):
+  # numpy rather than jax.random: no XLA compile per weight shape.
+  return np.asarray(np.random.default_rng(seed).standard_normal(shape, np.float32) * std).astype(dtype)
+
+
+def _qwag_as_f32(x):
+  return np.asarray(jnp.asarray(x).astype(jnp.float32))
+
+
+class QwagDynamicScaleTest(parameterized.TestCase):
+  """Tests for dynamic (absmax) weight scaling in the fp8 weight all-gather (QWAG)."""
+
+  def _mesh(self):
+    """A (2, 2) ("expert", "fsdp") mesh; skips the test on fewer than 4 devices."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices (XLA_FLAGS=--xla_force_host_platform_device_count=4).")
+    return Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("expert", "fsdp"))
+
+  @parameterized.named_parameters(
+      # shard_embed wi: the amax reduces across the gathered dim 1.
+      ("3d_wi_per_channel", (4, 64, 32), P("expert", "fsdp", None), 1, "per_channel"),
+      # shard_embed wo: the scale is gathered on dim 2.
+      ("3d_wo_per_channel", (4, 32, 64), P("expert", None, "fsdp"), 2, "per_channel"),
+      ("3d_wo_per_tensor", (4, 32, 64), P("expert", None, "fsdp"), 2, "per_tensor"),
+      # shard_exp: the [E, 1, F] scale is gathered on dim 0, also with one expert per device.
+      ("3d_exp_per_expert_channel", (4, 64, 32), P("fsdp", None, None), 0, "per_expert_channel"),
+      ("3d_exp_per_expert_channel_elocal1", (2, 64, 32), P("fsdp", None, None), 0, "per_expert_channel"),
+      # moe_flat_fsdp_weights [E * D, F]: the [1, F] scale is viewed as [1, 1, F].
+      ("flat_per_channel", (4, 64, 32), P(("expert", "fsdp"), None), 0, "per_channel"),
+  )
+  def test_ops_quantize_and_gather_weight_equals_quantize_after_gather(self, shape, spec, gather_dim, granularity):
+    """Quantizing each shard with its rhs_amax slice, then QWAG, matches qwix absmax on the whole weight."""
+    mesh = self._mesh()
+    flat = len(spec) == 2
+    channelwise_axes = {"per_tensor": (), "per_channel": (2,), "per_expert_channel": (0, 2)}[granularity]
+    num_experts = shape[0]
+    w3d = _qwag_weight(4, shape, jnp.bfloat16)
+    w = w3d.reshape(num_experts * shape[1], shape[2]) if flat else w3d
+    w = jax.device_put(w, NamedSharding(mesh, spec))
+    (amax,) = jax.jit(lambda w: quantizations.qwag_weight_amax([w], jnp.bfloat16, granularity))(w)
+    amax_spec = moe._qwag_amax_pspec(amax, spec)  # pylint: disable=protected-access
+    gathered_shape = (num_experts // mesh.shape["expert"], shape[1], shape[2]) if flat else None
+    rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=_QWAG_QTYPE,
+        act_qtype=None,
+        bwd_qtype=jnp.float8_e5m2,
+        weight_calibration_method="absmax",
+        op_names=("gmm",),
+    )
+
+    def body(shard, amax):
+      lhs = jnp.zeros((8, shard.shape[-1]), shard.dtype)  # Unused: act_qtype=None only exercises the weight path.
+      _, rhs = ops._fwd_quantize_activation_and_weight(  # pylint: disable=protected-access
+          lhs,
+          shard,
+          rule,
+          use_gmm_v2=True,
+          use_manual_quantization=False,
+          rhs_is_flat2d=flat,
+          rhs_amax=amax,
+      )
+      rhs = ops._fwd_gather_weight(  # pylint: disable=protected-access
+          rhs, [("fsdp", gather_dim)], gathered_shape=gathered_shape
+      )
+      return rhs.qvalue, rhs.scale
+
+    # Gathered qvalue is [E_local, ...] per expert shard.
+    out_spec = P(None if spec[0] == "fsdp" else "expert", None, None)
+    # all_gather's output is typed as varying over "fsdp" although every fsdp shard holds the same gathered value.
+    qvalue, scale = jax.jit(
+        jax.shard_map(body, mesh=mesh, in_specs=(spec, amax_spec), out_specs=(out_spec, P()), check_vma=False)
+    )(w, amax)
+
+    quantize_ref = functools.partial(
+        qpl.quantize, qtype=_QWAG_QTYPE, channelwise_axes=channelwise_axes, calibration_method="absmax"
+    )
+    ref = jax.jit(quantize_ref)(w3d)
+    self.assertEqual(qvalue.shape, shape)
+    self.assertEqual(qvalue.dtype, ref.qvalue.dtype)
+    self.assertEqual(scale.shape, ref.scale.shape)
+    np.testing.assert_array_equal(_qwag_as_f32(qvalue), _qwag_as_f32(ref.qvalue))
+    np.testing.assert_array_equal(_qwag_as_f32(scale), _qwag_as_f32(ref.scale))
+
+  @parameterized.named_parameters(
+      ("per_expert_channel", "per_expert_channel", False, (1,)),
+      ("prefused_per_tensor", "per_tensor", True, (0, 1, 2)),
+      ("prefused_per_channel", "per_channel", True, (0, 1)),
+  )
+  def test_scanned_amax_matches_per_layer_amax(self, granularity, prefused, reduce_axes):
+    """The layer-stacked precompute equals the per-layer amax of each weight cast to bf16."""
+    num_layers = 2
+    wo = _qwag_weight(2, (num_layers, 4, 8, 16), std=0.01)
+    if prefused:
+      wi = _qwag_weight(0, (num_layers, 4, 16, 16))
+      halves = (wi, wi) if granularity == "per_tensor" else (wi[..., :8], wi[..., 8:])
+      params, weights = {"wi": wi, "wo": wo}, (*halves, wo)
+    else:
+      w0, w1 = _qwag_weight(0, (num_layers, 4, 16, 8)), _qwag_weight(1, (num_layers, 4, 16, 8), std=0.05)
+      params, weights = {"wi_0": w0, "wi_1": w1, "wo": wo}, (w0, w1, wo)
+    amaxes = jax.jit(lambda p: moe.scanned_qwag_weight_amax(p, jnp.bfloat16, granularity))(params)
+    for amax, w in zip(amaxes, weights, strict=True):
+      w_bf16 = np.asarray(w).astype(jnp.bfloat16).astype(np.float32)
+      for layer in range(num_layers):
+        expected = np.max(np.abs(w_bf16[layer]), axis=reduce_axes, keepdims=True)
+        np.testing.assert_array_equal(_qwag_as_f32(amax[layer]), expected)
+
+  def test_gmm_requires_amax_for_dynamic_qwag(self):
+    """Dynamic QWAG never quantizes a shard with its own amax: gmm raises without rhs_amax."""
+    rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        weight_calibration_method="absmax",
+        act_calibration_method="absmax",
+        bwd_calibration_method="absmax",
+        op_names=("gmm",),
+    )
+    lhs = jnp.ones((128, 128), jnp.bfloat16)
+    rhs = jnp.ones((2, 32, 128), jnp.bfloat16)
+    group_sizes = jnp.array([64, 64], jnp.int32)
+    with self.assertRaisesRegex(ValueError, "needs rhs_amax"):
+      ops.gmm(
+          lhs,
+          rhs,
+          group_sizes,
+          use_qwix_quantization=True,
+          qwix_rule=rule,
+          use_tokamax_backend=True,
+          use_gmm_v2=True,
+          weight_gather_axes=[("fsdp", 1)],
+      )
 
 
 class QwixWeightGradTilingTest(unittest.TestCase):

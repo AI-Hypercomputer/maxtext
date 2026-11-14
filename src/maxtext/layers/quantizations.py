@@ -1761,6 +1761,53 @@ def manual_quantize(tensor: jax.Array, dtype: jax.typing.DTypeLike, calibration_
   return qpl.QArray(qvalue=q_tensor, scale=scale_tensor_qpl)
 
 
+def is_dynamic_qwag_calibration(calibration_method: str | None) -> bool:
+  """Whether `calibration_method` is dynamic (exactly absmax) QWAG weight calibration."""
+  return bool(calibration_method) and calibration_method.lower() == "absmax"
+
+
+def qwag_amax_reduce_axes(granularity: str, ndim: int) -> tuple[int, ...]:
+  """Axes of an [E, K, N] (flat: [E * K, N]) weight that the QWAG amax reduces for `granularity`."""
+  if granularity == "per_tensor":
+    return tuple(range(ndim))
+  if granularity == "per_channel":
+    return tuple(range(ndim - 1))
+  if granularity == "per_expert_channel":
+    if ndim != 3:
+      raise ValueError(f"per_expert_channel QWAG weight scales need a 3D [E, K, N] weight, got rank {ndim}.")
+    return (1,)
+  raise ValueError(f"Unknown moe_qwag_weight_scale_granularity: {granularity!r}.")
+
+
+def qwag_weight_amax(
+    weights: Sequence[jax.Array], dtype: DType, granularity: str, layer_axis: int | None = None
+) -> tuple[jax.Array, ...]:
+  """Per-`granularity` amax of each weight (keepdims, no grad); `layer_axis` is a kept scan axis.
+
+  Taken before the cast to `dtype`: same result (rounding is monotonic), no cast copy.
+  """
+  amaxes = []
+  for w in weights:
+    axes = qwag_amax_reduce_axes(granularity, w.ndim if layer_axis is None else w.ndim - 1)
+    if layer_axis is not None:
+      axes = tuple(a + (a >= layer_axis) for a in axes)
+    amaxes.append(jax.lax.stop_gradient(jnp.max(jnp.abs(w), axis=axes, keepdims=True).astype(dtype)))
+  return tuple(amaxes)
+
+
+def quantize_with_amax(tensor: jax.Array, qtype: jax.typing.DTypeLike, amax: jax.Array) -> qpl.QArray:
+  """Symmetric quantization with a given broadcastable amax, matching qwix absmax calibration.
+
+  So quantizing each shard with its slice of the whole-weight amax and gathering equals quantizing after the gather.
+  """
+  amax = jnp.asarray(amax, tensor.dtype)
+  amax = jnp.reshape(amax, (1,) * (tensor.ndim - amax.ndim) + amax.shape)
+  scale = amax / numerics.get_symmetric_bound(qtype)
+  tiny_sqrt = jnp.sqrt(jnp.finfo(scale.dtype).tiny)
+  scale = jnp.where(scale < tiny_sqrt, jnp.ones_like(scale), scale)
+  return qpl.QArray(qvalue=numerics.convert_to(tensor / scale, qtype), scale=scale)
+
+
 class TransformerEngineQuantization(Quantization):
   """Class for TransformerEngine quantization recipes."""
 
