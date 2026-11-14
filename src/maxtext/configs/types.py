@@ -3514,6 +3514,9 @@ class Rope(BaseModel):
 
   rope_type: RopeType = Field(RopeType.DEFAULT, description="The type of RoPE to use.")
   rope_use_scale: bool = Field(True, description="Apply RoPE scaling for Llama3.1 style.")
+  rope_scaling_factor: float = Field(8.0, description="Llama3.1-style RoPE scaling factor.")
+  rope_low_freq_factor: float = Field(1.0, description="Llama3.1-style RoPE scaling low frequency factor.")
+  rope_high_freq_factor: float = Field(4.0, description="Llama3.1-style RoPE scaling high frequency factor.")
   rope_min_timescale: int = Field(1, description="The minimum timescale for RoPE.")
   rope_max_timescale: int = Field(10_000, description="The maximum timescale for RoPE.")
   rope_linear_scaling_factor: float = Field(1.0, description="Linear scaling factor for 'default' RoPE implementation.")
