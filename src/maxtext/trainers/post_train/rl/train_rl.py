@@ -418,6 +418,10 @@ def build_rl_profiler_config(
       output_dir=trainer_config.tensorboard_dir,
       managed_mldiagnostics=trainer_config.managed_mldiagnostics,
       timeout_secs=timeout_secs,
+      **_kwargs_supported_by(
+          rl_cluster_lib.RLProfileConfig,
+          enable_continuous_profiling=trainer_config.enable_continuous_profiling,
+      ),
   )
 
 
