@@ -16,6 +16,7 @@
 
 import dataclasses
 import functools
+import math
 import os
 from typing import Any, Iterable, Optional, Tuple, Union, cast
 
@@ -25,6 +26,8 @@ import jax
 import jax.numpy as jnp
 
 from flax import nnx
+import qwix
+from qwix import pallas as qpl
 
 from maxtext.common.common_types import (
     DecoderBlockType,
@@ -50,7 +53,10 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     MODEL_MODE_PREFILL,
     AttentionType,
+    ShardMode,
 )
+from maxtext.kernels import fused_qkv
+from maxtext.layers import quantizations
 from maxtext.layers.attention_op import (
     AttentionOp,
     _resolve_attention_type,
@@ -68,7 +74,12 @@ from maxtext.layers.embeddings import (
 )
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, default_bias_init
 from maxtext.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
-from maxtext.layers.normalizations import RMSNorm, Qwen3NextRMSNorm, GlobalRMSNorm
+from maxtext.layers.normalizations import (
+    GlobalRMSNorm,
+    Qwen3NextRMSNorm,
+    RMSNorm,
+    get_deferred_norm_psum_axes,
+)
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
@@ -190,6 +201,7 @@ class Attention(nnx.Module):
       rope_max_timescale: float | None = None,
       partial_rotary_factor: float | None = None,
       share_kv_layer: bool = False,
+      defer_qk_norm_grad_allreduce: bool = False,
       rngs: nnx.Rngs | None = None,
   ):
     """Initializes the Attention module.
@@ -263,6 +275,7 @@ class Attention(nnx.Module):
     self.use_ragged_attention = use_ragged_attention
     self.ragged_block_size = ragged_block_size
     self.use_qk_norm = use_qk_norm
+    self.defer_qk_norm_grad_allreduce = defer_qk_norm_grad_allreduce
     self.query_pre_attn_scalar = query_pre_attn_scalar
     self.use_bias_in_projections = use_bias_in_projections
     self.share_kv_projections = share_kv_projections
@@ -717,8 +730,170 @@ class Attention(nnx.Module):
         rngs=self.rngs,
     )
 
-  def out_projection(self, out: Array, out_sharding: NamedSharding | None = None) -> Array:
+  @staticmethod
+  def _check_fused_qt_rule(rule: qwix.QtRule, feature: str) -> None:
+    """Raises for `additional_qt_config` settings that the fused QKV / out projections cannot honor.
+
+    The fused QKV / out projections bypass Qwix (`without_qwix_interception`) and quantize one cotangent for both
+    gradient arms, so a weight sparsity rule or a separate weight-gradient (drhs) cotangent calibration would be
+    dropped silently. `get_fp8_full_qwix_rule_w_sparsity` always passes the `sparsity_rule` key (None when
+    sparsity is off), so only an active rule is rejected.
+    """
+    extra = rule.additional_qt_config or {}
+    sparsity_rule = extra.get("sparsity_rule")
+    if sparsity_rule and sparsity_rule.weight_sparsity_n and sparsity_rule.weight_sparsity_m:
+      raise NotImplementedError(f"{feature} does not support weight sparsity (weight_sparsity_n / weight_sparsity_m).")
+    drhs_method = extra.get("drhs_grad_calibration_method")
+    if drhs_method and drhs_method != rule.bwd_calibration_method:
+      raise NotImplementedError(
+          f"{feature} quantizes one cotangent for both gradient arms and does not support"
+          f" drhs_grad_calibration_method={drhs_method!r} (bwd_calibration_method={rule.bwd_calibration_method!r})."
+      )
+
+  def _try_fused_out_kernel(self, out: Array, out_sharding: NamedSharding | None, model_mode: str) -> Array | None:
+    """Runs FSDP custom-VJP Attention `out` projection with local absmax bwd and early `dw_o` RS."""
+    if not getattr(self.config, "use_fused_out_kernel", False) or model_mode != MODEL_MODE_TRAIN:
+      return None
+    use_bias = False if self.is_qwen2 else self.use_bias_in_projections
+    if self.is_qwen3_hybrid or use_bias or out.ndim != 4 or self.out.kernel_scale is not None:
+      raise NotImplementedError("use_fused_out_kernel requires 4D [B, S, H, D] Attention out without bias or ServeFp8.")
+
+    def _param_val(param):
+      val = param.get_value() if hasattr(param, "get_value") else getattr(param, "value", param)
+      return val.value if hasattr(val, "value") else val
+
+    def _axes_tuple(entry) -> tuple[str, ...]:
+      if entry is None:
+        return ()
+      raw = (entry,) if isinstance(entry, str) else tuple(entry)
+      return tuple(ax for ax in raw if self.mesh.shape.get(ax, 1) > 1)
+
+    def _pad_spec(spec, rank: int) -> jax.sharding.PartitionSpec:
+      parts = tuple(spec) + (None,) * max(0, rank - len(spec))
+      return jax.sharding.PartitionSpec(*parts[:rank])
+
+    ctx_pspec = _pad_spec(self._logical_to_mesh_axes(self.out_axis_names), 4)
+    wo_pspec = _pad_spec(self._logical_to_mesh_axes(self.out.kernel_axes), 3)
+    y_pspec = (
+        _pad_spec(out_sharding.spec, 3)
+        if out_sharding is not None
+        else _pad_spec(self._logical_to_mesh_axes(self.input_axis_names), 3)
+    )
+    if (
+        ctx_pspec[2:] != (None, None)
+        or wo_pspec[:2] != (None, None)
+        or y_pspec[2] is not None
+        or y_pspec[:2] != ctx_pspec[:2]
+    ):
+      raise NotImplementedError(
+          f"use_fused_out_kernel requires TP=1 on heads/embed; got ctx={ctx_pspec}, wo={wo_pspec}, y={y_pspec}."
+      )
+
+    wo = _param_val(self.out.kernel)
+    weight_gather_axes = _axes_tuple(wo_pspec[2])
+    batch_seq_axes = tuple(dict.fromkeys(_axes_tuple(ctx_pspec[0]) + _axes_tuple(ctx_pspec[1])))
+    if not set(weight_gather_axes).issubset(set(batch_seq_axes)):
+      raise NotImplementedError(
+          f"use_fused_out_kernel requires weight shard axes {weight_gather_axes} to shard batch/seq {batch_seq_axes}."
+      )
+    gather_ways = math.prod(self.mesh.shape[ax] for ax in weight_gather_axes) if weight_gather_axes else 1
+    if wo.shape[2] % gather_ways != 0:
+      raise NotImplementedError(f"out_features={wo.shape[2]} is not divisible by FSDP gather size {gather_ways}.")
+    if self.quant is not None or (self.config.quantization and not self.config.use_qwix_quantization):
+      raise NotImplementedError("use_fused_out_kernel only supports Qwix quantized training or unquantized mode.")
+
+    rule = None
+    if self.config.quantization and self.config.use_qwix_quantization:
+      rule = qpl.get_current_rule("dot_general")
+      if rule is not None and not isinstance(rule, qwix.QtRule):
+        raise ValueError("Expect a QtRule for quantized training.")
+    if rule is not None and (rule.act_qtype is not None or rule.weight_qtype is not None):
+      if (
+          rule.act_qtype is None
+          or rule.weight_qtype is None
+          or not jnp.issubdtype(rule.act_qtype, jnp.floating)
+          or not jnp.issubdtype(rule.weight_qtype, jnp.floating)
+      ):
+        raise NotImplementedError(
+            "use_fused_out_kernel requires floating-point act/weight qtypes,"
+            f" got {rule.act_qtype} and {rule.weight_qtype}."
+        )
+      self._check_fused_qt_rule(rule, "use_fused_out_kernel")
+      for name, method in (("act", rule.act_calibration_method), ("weight", rule.weight_calibration_method)):
+        if not quantizations.is_static_calibration(method):
+          raise NotImplementedError(f"use_fused_out_kernel needs fixed {name} calibration, got {method!r}.")
+      act_qtype = rule.act_qtype
+      weight_qtype = rule.weight_qtype
+      bwd_qtype = rule.bwd_qtype
+      act_scale = float(quantizations.get_static_scale(act_qtype, rule.act_calibration_method))
+      weight_scale = float(quantizations.get_static_scale(weight_qtype, rule.weight_calibration_method))
+      if bwd_qtype is not None:
+        if not jnp.issubdtype(bwd_qtype, jnp.floating):
+          raise NotImplementedError(f"use_fused_out_kernel requires floating-point bwd_qtype, got {bwd_qtype}.")
+        if quantizations.is_static_calibration(rule.bwd_calibration_method):
+          bwd_scale: float | None = float(quantizations.get_static_scale(bwd_qtype, rule.bwd_calibration_method))
+        elif rule.bwd_calibration_method in (None, "absmax"):
+          bwd_scale = None
+        else:
+          raise NotImplementedError(f"use_fused_out_kernel unsupported bwd calibration {rule.bwd_calibration_method!r}.")
+      else:
+        bwd_scale = None
+    else:
+      act_qtype = None
+      weight_qtype = None
+      bwd_qtype = None
+      act_scale = 1.0
+      weight_scale = 1.0
+      bwd_scale = None
+
+    # `_run_out` wraps `fused_out_local` in `jax.shard_map(..., check_vma=False)`, whose transpose
+    # automatically `psum`s `wo` cotangents across unmentioned mesh axes (e.g. `data` / `context`).
+    params = fused_qkv.FusedOutTrainParams(
+        compute_dtype=jnp.dtype(self.dtype),
+        act_qtype=act_qtype,
+        weight_qtype=weight_qtype,
+        bwd_qtype=bwd_qtype,
+        act_scale=act_scale,
+        weight_scale=weight_scale,
+        bwd_scale=bwd_scale,
+        weight_gather_axes=weight_gather_axes,
+        extra_w_psum_axes=(),
+        ctx_dtype=out.dtype,
+        wo_dtype=wo.dtype,
+        early_dw_rs=bool(getattr(self.config, "fused_out_early_dw_rs", False)),
+    )
+
+    @quantizations.without_qwix_interception
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(ctx_pspec, wo_pspec),
+        out_specs=y_pspec,
+        check_vma=False,
+    )
+    def _run_out(ctx_l, wo_l):
+      return fused_qkv.fused_out_local(params, ctx_l, wo_l)
+
+    y = _run_out(out, wo)
+    if out_sharding is not None:
+      if self.config.shard_mode == ShardMode.EXPLICIT:
+        y = jax.sharding.reshard(y, out_sharding)
+      else:
+        y = jax.lax.with_sharding_constraint(y, out_sharding)
+    return y
+
+  def out_projection(
+      self,
+      out: Array,
+      out_sharding: NamedSharding | None = None,
+      *,
+      model_mode: str | None = None,
+  ) -> Array:
     """out projection"""
+    if model_mode is not None:
+      fused_out = self._try_fused_out_kernel(out, out_sharding, model_mode)
+      if fused_out is not None:
+        return fused_out
     return self.out(out, out_sharding=out_sharding)
 
   def compute_shared_kv(
@@ -1084,6 +1259,282 @@ class Attention(nnx.Module):
     )
     return output, kv_cache
 
+  def _try_fused_qkv_kernel(
+      self,
+      inputs_q: Array,
+      inputs_kv: Array,
+      inputs_positions: Array | None,
+      input_axis_names: AxisNames,
+      model_mode: str,
+      use_shared_kv: bool,
+  ) -> tuple[Array, Array, Array] | None:
+    """Runs fused FSDP QAG + Pallas QKV + QK-norm + RoPE + Splash layout when enabled."""
+    if not getattr(self.config, "use_fused_qkv_kernel", False) or model_mode != MODEL_MODE_TRAIN:
+      if self.defer_qk_norm_grad_allreduce and model_mode == MODEL_MODE_TRAIN:
+        raise ValueError(
+            "defer_qk_norm_grad_allreduce requires use_fused_qkv_kernel=True: only the fused QKV path defers the"
+            " QK-norm scale gradients; the standard path reduces them itself, so the post-scan all-reduce would"
+            " count them twice."
+        )
+      return None
+    if (
+        inputs_q is not inputs_kv
+        or use_shared_kv
+        or self.share_kv_layer
+        or self.share_kv_projections
+        or self.config.fused_qkv
+        or self.use_bias_in_projections
+        or not self.use_qk_norm
+        or self.use_v_norm
+        or self.is_qwen3_hybrid
+        or self.is_nope_layer
+        or self.is_vision
+        or self.use_mrope
+        or self.temperature_tuning
+        or self.config.decoder_block == DecoderBlockType.LLAMA4
+        or type(self.query_norm) is not RMSNorm  # pylint: disable=unidiomatic-typecheck
+        or type(self.key_norm) is not RMSNorm  # pylint: disable=unidiomatic-typecheck
+        or not self.query_norm.with_scale
+        or not self.key_norm.with_scale
+        or self.query_norm.scale_offset != 0.0
+        or self.key_norm.scale_offset != 0.0
+        or self.query_norm.epsilon != self.key_norm.epsilon
+        or type(self.rotary_embedding) is not RotaryEmbedding  # pylint: disable=unidiomatic-typecheck
+        or getattr(self.rotary_embedding, "rope_linear_scaling_factor", 1.0) != 1.0
+        or inputs_positions is None
+    ):
+      raise NotImplementedError(
+          "use_fused_qkv_kernel requires self-attention with per-head QK RMSNorm and standard RoPE."
+      )
+
+    def _param_val(param):
+      val = param.get_value() if hasattr(param, "get_value") else getattr(param, "value", param)
+      return val.value if hasattr(val, "value") else val
+
+    def _axes_tuple(entry) -> tuple[str, ...]:
+      if entry is None:
+        return ()
+      raw = (entry,) if isinstance(entry, str) else tuple(entry)
+      return tuple(ax for ax in raw if self.mesh.shape.get(ax, 1) > 1)
+
+    def _pad_spec(spec, rank: int) -> jax.sharding.PartitionSpec:
+      parts = tuple(spec) + (None,) * max(0, rank - len(spec))
+      return jax.sharding.PartitionSpec(*parts[:rank])
+
+    x_pspec = _pad_spec(self._logical_to_mesh_axes(input_axis_names), 3)
+    wq_pspec = _pad_spec(self._logical_to_mesh_axes(self.query.kernel_axes), 3)
+    wk_pspec = _pad_spec(self._logical_to_mesh_axes(self.key.kernel_axes), 3)
+    wv_pspec = _pad_spec(self._logical_to_mesh_axes(self.value.kernel_axes), 3)
+    q_norm_pspec = _pad_spec(self._logical_to_mesh_axes(self.query_norm.kernel_axes), 1)
+    k_norm_pspec = _pad_spec(self._logical_to_mesh_axes(self.key_norm.kernel_axes), 1)
+    q_pspec = _pad_spec(self._logical_to_mesh_axes(self.query_axis_names), 4)
+    k_pspec = _pad_spec(self._logical_to_mesh_axes(self.key_axis_names), 4)
+    v_pspec = _pad_spec(self._logical_to_mesh_axes(self.value_axis_names), 4)
+
+    if (
+        x_pspec[2] is not None
+        or wq_pspec[1:] != (None, None)
+        or wq_pspec != wk_pspec
+        or wq_pspec != wv_pspec
+        or q_norm_pspec[0] is not None
+        or k_norm_pspec[0] is not None
+        or q_pspec[2:] != (None, None)
+        or q_pspec[:2] != x_pspec[:2]
+        or q_pspec != k_pspec
+        or q_pspec != v_pspec
+    ):
+      raise NotImplementedError(
+          f"use_fused_qkv_kernel requires TP=1 on QKV/norm/activations; got x={x_pspec}, wq={wq_pspec}, q={q_pspec}."
+      )
+
+    wq = _param_val(self.query.kernel)
+    wk = _param_val(self.key.kernel)
+    wv = _param_val(self.value.kernel)
+    q_norm_scale = _param_val(self.query_norm.scale)
+    k_norm_scale = _param_val(self.key_norm.scale)
+    if self.query.kernel_scale is not None or self.key.kernel_scale is not None or self.value.kernel_scale is not None:
+      raise NotImplementedError("use_fused_qkv_kernel does not support pre-quantized ServeFp8 weights.")
+
+    weight_gather_axes = _axes_tuple(wq_pspec[0])
+    batch_seq_axes = tuple(dict.fromkeys(_axes_tuple(x_pspec[0]) + _axes_tuple(x_pspec[1])))
+    if not set(weight_gather_axes).issubset(set(batch_seq_axes)):
+      raise NotImplementedError(
+          f"use_fused_qkv_kernel requires weight shard axes {weight_gather_axes} to shard batch/seq {batch_seq_axes}."
+      )
+    gather_ways = math.prod(self.mesh.shape[ax] for ax in weight_gather_axes) if weight_gather_axes else 1
+    if wq.shape[0] % gather_ways != 0:
+      raise NotImplementedError(f"emb={wq.shape[0]} is not divisible by FSDP gather size {gather_ways}.")
+
+    if self.quant is not None or (self.config.quantization and not self.config.use_qwix_quantization):
+      raise NotImplementedError("use_fused_qkv_kernel only supports Qwix quantized training or unquantized mode.")
+    rule = None
+    if self.config.quantization and self.config.use_qwix_quantization:
+      if getattr(self.config, "sa_qproj_bwd_bf16", False):
+        raise NotImplementedError("use_fused_qkv_kernel does not support sa_qproj_bwd_bf16=True.")
+      rule = qpl.get_current_rule("dot_general")
+      if rule is not None and not isinstance(rule, qwix.QtRule):
+        raise ValueError("Expect a QtRule for quantized training.")
+    if rule is not None and (rule.act_qtype is not None or rule.weight_qtype is not None):
+      if (
+          rule.act_qtype is None
+          or rule.weight_qtype is None
+          or not jnp.issubdtype(rule.act_qtype, jnp.floating)
+          or not jnp.issubdtype(rule.weight_qtype, jnp.floating)
+      ):
+        raise NotImplementedError(
+            "use_fused_qkv_kernel requires floating-point act/weight qtypes,"
+            f" got {rule.act_qtype} and {rule.weight_qtype}."
+        )
+      self._check_fused_qt_rule(rule, "use_fused_qkv_kernel")
+      for name, method in (("act", rule.act_calibration_method), ("weight", rule.weight_calibration_method)):
+        if not quantizations.is_static_calibration(method):
+          raise NotImplementedError(f"use_fused_qkv_kernel needs fixed {name} calibration, got {method!r}.")
+      act_qtype = rule.act_qtype
+      weight_qtype = rule.weight_qtype
+      bwd_qtype = rule.bwd_qtype
+      act_scale = quantizations.get_static_scale(act_qtype, rule.act_calibration_method)
+      weight_scale = quantizations.get_static_scale(weight_qtype, rule.weight_calibration_method)
+      if bwd_qtype is not None:
+        if not jnp.issubdtype(bwd_qtype, jnp.floating):
+          raise NotImplementedError(f"use_fused_qkv_kernel requires floating-point bwd_qtype, got {bwd_qtype}.")
+        if quantizations.is_static_calibration(rule.bwd_calibration_method):
+          bwd_scale: float | None = quantizations.get_static_scale(bwd_qtype, rule.bwd_calibration_method)
+        elif rule.bwd_calibration_method in (None, "absmax"):
+          bwd_scale = None
+        else:
+          raise NotImplementedError(f"use_fused_qkv_kernel unsupported bwd calibration {rule.bwd_calibration_method!r}.")
+      else:
+        bwd_scale = None
+    else:
+      act_qtype = None
+      weight_qtype = None
+      bwd_qtype = None
+      act_scale = 1.0
+      weight_scale = 1.0
+      bwd_scale = None
+
+    has_q_scalar = bool(self.query_pre_attn_scalar) and self.query_pre_attn_scalar != 1.0
+    is_splash_attn = self.attention_kernel in ("flash", "autoselected")
+    quant_q_fp8 = is_splash_attn and bool(getattr(self.config, "experimental_sa_quant_q_fp8", False))
+    quant_k_fp8 = is_splash_attn and bool(getattr(self.config, "experimental_sa_quant_k_fp8", False))
+    q_scalar = float(self.query_pre_attn_scalar) if has_q_scalar else 1.0
+    if getattr(self.config, "sa_q_prescaled_log2e", False) and is_splash_attn:
+      q_scalar = q_scalar * math.log2(math.e)
+    q_out_dtype = jnp.float8_e4m3fn if quant_q_fp8 else None
+    k_out_dtype = jnp.float8_e4m3fn if quant_k_fp8 else None
+
+    q_seq_minor = str(getattr(self.config, "sa_q_layout", "")).upper() == "SEQ_MINOR"
+    k_seq_minor = str(getattr(self.config, "sa_k_layout", "")).upper() == "SEQ_MINOR"
+    seq_axes = _axes_tuple(x_pspec[1])
+    seq_ways = math.prod(self.mesh.shape[ax] for ax in seq_axes) if seq_axes else 1
+    local_seq_len = inputs_q.shape[1] // seq_ways
+    heads_per_tile = math.gcd(max(8, 2 * self.num_kv_heads), self.num_query_heads)
+    on_tpu = self.mesh.devices.flat[0].platform == "tpu"
+    shape_and_scale_supported = (
+        local_seq_len % 128 == 0
+        and self.head_dim % 128 == 0
+        and self.num_query_heads % heads_per_tile == 0
+        and self.num_query_heads % (2 * self.num_kv_heads) == 0
+        and (act_qtype is None or (math.log2(act_scale).is_integer() and math.log2(weight_scale).is_integer()))
+    )
+    if on_tpu and not shape_and_scale_supported:
+      raise NotImplementedError(
+          f"use_fused_qkv_kernel Pallas kernel requires local_seq_len ({local_seq_len}) and head_dim ({self.head_dim})"
+          f" divisible by 128, num_query_heads ({self.num_query_heads}) divisible by 2*num_kv_heads"
+          f" ({2 * self.num_kv_heads}), and power-of-two static scales ({act_scale=}, {weight_scale=})."
+      )
+    kernel_supported = on_tpu and shape_and_scale_supported
+    defer_axes = get_deferred_norm_psum_axes(self.config, self.mesh)
+    if self.defer_qk_norm_grad_allreduce and model_mode == MODEL_MODE_TRAIN:
+      if not defer_axes or set(batch_seq_axes) != set(defer_axes):
+        raise ValueError(
+            "defer_qk_norm_grad_allreduce requires active deferred norm axes matching attention batch_seq_axes;"
+            f" got {defer_axes=} vs {batch_seq_axes=}."
+        )
+      defer_norm = True
+    else:
+      defer_norm = False
+    # Only `fused_qkv_sharded` (`defer_norm=True`) places `custom_vjp` outside `shard_map` and needs
+    # explicit `extra_w_psum_axes`; when `defer_norm=False`, `jax.shard_map(..., check_vma=False)`
+    # transposes `wq`/`wk`/`wv` with an automatic `psum` over unmentioned mesh axes.
+    extra_w_psum_axes = (
+        tuple(ax for ax in batch_seq_axes if ax not in weight_gather_axes and self.mesh.shape.get(ax, 1) > 1)
+        if defer_norm
+        else ()
+    )
+    block_m_sel = (
+        max(128, math.gcd(1024, local_seq_len)) if local_seq_len % 128 == 0 else min(1024, max(128, local_seq_len))
+    )
+    quant_rows_sel = max(32, math.gcd(256, block_m_sel)) if block_m_sel % 32 == 0 else min(256, block_m_sel)
+    params = fused_qkv.FusedQkvTrainParams(
+        num_q_heads=self.num_query_heads,
+        num_kv_heads=self.num_kv_heads,
+        head_dim=self.head_dim,
+        eps=float(self.query_norm.epsilon),
+        rope_max_timescale=float(self.rotary_embedding.max_timescale),
+        rope_min_timescale=float(self.rotary_embedding.min_timescale),
+        query_pre_attn_scalar=q_scalar,
+        compute_dtype=jnp.dtype(self.dtype),
+        act_qtype=act_qtype,
+        weight_qtype=weight_qtype,
+        bwd_qtype=bwd_qtype,
+        act_scale=float(act_scale),
+        weight_scale=float(weight_scale),
+        bwd_scale=float(bwd_scale) if bwd_scale is not None else None,
+        q_seq_minor=q_seq_minor,
+        k_seq_minor=k_seq_minor,
+        q_out_dtype=q_out_dtype,
+        k_out_dtype=k_out_dtype,
+        weight_gather_axes=weight_gather_axes,
+        extra_w_psum_axes=extra_w_psum_axes,
+        defer_norm_grad_psum=defer_norm,
+        x_dtype=inputs_q.dtype,
+        block_m=block_m_sel,
+        heads_per_tile=heads_per_tile,
+        quant_rows=quant_rows_sel,
+        use_reference=not kernel_supported,
+    )
+    pos_2d = jnp.broadcast_to(inputs_positions, inputs_q.shape[:2])
+    pos_2d = self._maybe_shard_with_logical(pos_2d, input_axis_names[:2])
+    pos_pspec = jax.sharding.PartitionSpec(*x_pspec[:2])
+
+    if defer_norm:
+      sharded_cfg = fused_qkv.FusedQkvShardedConfig(
+          params=params,
+          mesh=self.mesh,
+          x_pspec=x_pspec,
+          wq_pspec=wq_pspec,
+          wk_pspec=wk_pspec,
+          wv_pspec=wv_pspec,
+          q_norm_pspec=q_norm_pspec,
+          k_norm_pspec=k_norm_pspec,
+          pos_pspec=pos_pspec,
+          q_pspec=q_pspec,
+          k_pspec=k_pspec,
+          v_pspec=v_pspec,
+      )
+      query, key, value = quantizations.without_qwix_interception(fused_qkv.fused_qkv_sharded)(
+          sharded_cfg, inputs_q, wq, wk, wv, q_norm_scale, k_norm_scale, pos_2d
+      )
+    else:
+
+      @quantizations.without_qwix_interception
+      @functools.partial(
+          jax.shard_map,
+          mesh=self.mesh,
+          in_specs=(x_pspec, wq_pspec, wk_pspec, wv_pspec, q_norm_pspec, k_norm_pspec, pos_pspec),
+          out_specs=(q_pspec, k_pspec, v_pspec),
+          check_vma=False,
+      )
+      def _run(x_bsd, wq_l, wk_l, wv_l, q_ns, k_ns, pos_bs):
+        return fused_qkv.fused_qkv_local(params, x_bsd, wq_l, wk_l, wv_l, q_ns, k_ns, pos_bs)
+
+      query, key, value = _run(inputs_q, wq, wk, wv, q_norm_scale, k_norm_scale, pos_2d)
+    query = self._maybe_shard_with_logical(query, self.query_axis_names)
+    key = self._maybe_shard_with_logical(key, self.key_axis_names)
+    value = self._maybe_shard_with_logical(value, self.value_axis_names)
+    return query, key, value
+
   def __call__(
       self,
       inputs_q: Array,
@@ -1141,8 +1592,9 @@ class Attention(nnx.Module):
     else:
       input_axis_names = self.decode_input_axis_names
 
+    is_self_attn = inputs_q is inputs_kv
     inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
-    inputs_kv = self._maybe_shard_with_logical(inputs_kv, input_axis_names)
+    inputs_kv = inputs_q if is_self_attn else self._maybe_shard_with_logical(inputs_kv, input_axis_names)
     qkv_sharding = create_sharding(self.mesh, input_axis_names)
 
     use_shared_kv = shared_key is not None and shared_value is not None
@@ -1151,78 +1603,115 @@ class Attention(nnx.Module):
     if use_shared_kv and self.config.fused_qkv:
       raise ValueError("shared_key / shared_value are incompatible with fused_qkv.")
 
-    # apply projection.
-    if self.config.fused_qkv:
-      query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
-    elif use_shared_kv:
-      # Donor layer already produced rotated, normed K/V — use them directly.
-      query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
-      key, value = shared_key, shared_value
-    else:
-      query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
-      key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
-      if self.share_kv_projections:
-        value = key
-      else:
-        value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=qkv_sharding)
-
     gate = None
-    if self.is_qwen3_hybrid:
-      # Split query into query & gate.
-      query, gate = jnp.split(query, 2, axis=-1)
-      batch_size, seq_len, _, _ = gate.shape
-      gate = gate.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
-
-    is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
-    # NOTE: llama 4 does L2 normalization after RoPE
-    # Apply Qwen3Next specific RMS Norm
-    if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_hybrid:
-      query = self.query_norm(query)
-      if not use_shared_kv:
-        key = self.key_norm(key)
-
-    if self.use_v_norm and not use_shared_kv:
-      value = self.value_norm(value)
-
-    # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
-    use_rope = not self.is_nope_layer
-    use_qk_norm = self.use_qk_norm and use_rope
-
-    if use_rope:
-      query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
-      if not use_shared_kv:
-        key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
-
-    if use_qk_norm and is_llama4_decoder_block:
-      l2_norm = L2Norm(eps=self.config.normalization_layer_epsilon)
-      query = l2_norm(query)
-      if not use_shared_kv:
-        key = l2_norm(key)
-
-    # apply query_pre_attn_scalar if it's present.
-    if self.query_pre_attn_scalar and self.query_pre_attn_scalar != 1.0:
-      query = query * self.query_pre_attn_scalar
-
-    if self.temperature_tuning and not use_rope:
-      attn_scales = (
-          jnp.log(jnp.floor((inputs_positions.astype(self.dtype) + 1.0) / self.temperature_tuning_floor_scale) + 1.0)
-          * self.temperature_tuning_scale
-          + 1.0
-      )
-      query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
-
-    if model_mode == MODEL_MODE_PREFILL:
-      query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.prefill_key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.prefill_value_axis_names)
-    elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
-      query = self._maybe_shard_with_logical(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
-      key = self._maybe_shard_with_logical(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
-      value = self._maybe_shard_with_logical(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+    fused_qkv_out = self._try_fused_qkv_kernel(
+        inputs_q, inputs_kv, inputs_positions, input_axis_names, model_mode, use_shared_kv
+    )
+    if fused_qkv_out is not None:
+      query, key, value = fused_qkv_out
     else:
-      query = self._maybe_shard_with_logical(query, self.query_axis_names)
-      key = self._maybe_shard_with_logical(key, self.key_axis_names)
-      value = self._maybe_shard_with_logical(value, self.value_axis_names)
+      # apply projection.
+      if self.config.fused_qkv:
+        query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
+      elif use_shared_kv:
+        # Donor layer already produced rotated, normed K/V — use them directly.
+        query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
+        key, value = shared_key, shared_value
+      else:
+        query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
+        key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
+        if self.share_kv_projections:
+          value = key
+        else:
+          value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=qkv_sharding)
+
+      if self.is_qwen3_hybrid:
+        # Split query into query & gate.
+        query, gate = jnp.split(query, 2, axis=-1)
+        batch_size, seq_len, _, _ = gate.shape
+        gate = gate.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
+
+      is_llama4_decoder_block = self.config.decoder_block == DecoderBlockType.LLAMA4
+      # NOTE: llama 4 does L2 normalization after RoPE
+      # Apply Qwen3Next specific RMS Norm
+      if (self.use_qk_norm and not is_llama4_decoder_block) or self.is_qwen3_hybrid:
+        query = self.query_norm(query)
+        if not use_shared_kv:
+          key = self.key_norm(key)
+
+      if self.use_v_norm and not use_shared_kv:
+        value = self.value_norm(value)
+
+      # NOTE: is_nope_layer should be used in attention mask and also used in attention tuning
+      use_rope = not self.is_nope_layer
+      use_qk_norm = self.use_qk_norm and use_rope
+
+      if use_rope:
+        query = self.apply_rotary_embedding(query, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
+        if not use_shared_kv:
+          key = self.apply_rotary_embedding(key, inputs_positions=inputs_positions, rope_kwargs=rope_kwargs)
+
+      if use_qk_norm and is_llama4_decoder_block:
+        l2_norm = L2Norm(eps=self.config.normalization_layer_epsilon)
+        query = l2_norm(query)
+        if not use_shared_kv:
+          key = l2_norm(key)
+
+      has_q_scalar = bool(self.query_pre_attn_scalar) and self.query_pre_attn_scalar != 1.0
+      # Optional fp8 (e4m3, static scale 1) Q/K for the Tokamax Splash kernel, train mode only (the
+      # KV cache and decode paths keep bf16). Mirrors the MLA path in attention_mla.py: Q is cast once
+      # after qk-norm, RoPE and the softmax scale (with LOG2E folded in f32 when sa_q_prescaled_log2e so
+      # the kernel skips its own in-kernel rescale and q is rounded to fp8 exactly once).
+      is_splash_attn = self.attention_kernel in ("flash", "autoselected")
+      quant_q_fp8 = (
+          model_mode == MODEL_MODE_TRAIN
+          and is_splash_attn
+          and bool(getattr(self.config, "experimental_sa_quant_q_fp8", False))
+      )
+      quant_k_fp8 = (
+          model_mode == MODEL_MODE_TRAIN
+          and is_splash_attn
+          and bool(getattr(self.config, "experimental_sa_quant_k_fp8", False))
+      )
+      prescale_log2e = (
+          bool(getattr(self.config, "sa_q_prescaled_log2e", False))
+          and is_splash_attn
+          and model_mode != MODEL_MODE_AUTOREGRESSIVE
+      )
+      if not quant_q_fp8 and not prescale_log2e and has_q_scalar:
+        query = query * self.query_pre_attn_scalar
+
+      if self.temperature_tuning and not use_rope:
+        attn_scales = (
+            jnp.log(jnp.floor((inputs_positions.astype(self.dtype) + 1.0) / self.temperature_tuning_floor_scale) + 1.0)
+            * self.temperature_tuning_scale
+            + 1.0
+        )
+        query = (query * attn_scales[:, :, jnp.newaxis, jnp.newaxis]).astype(self.dtype)
+
+      if quant_q_fp8:
+        q_scale = float(self.query_pre_attn_scalar) if has_q_scalar else 1.0
+        if prescale_log2e:
+          q_scale = q_scale * math.log2(math.e)
+        query = (query.astype(jnp.float32) * q_scale).astype(jnp.float8_e4m3fn)
+      elif prescale_log2e:
+        q_scale = (float(self.query_pre_attn_scalar) if has_q_scalar else 1.0) * math.log2(math.e)
+        query = (query.astype(jnp.float32) * q_scale).astype(self.dtype)
+      if quant_k_fp8:
+        key = key.astype(jnp.float8_e4m3fn)
+
+      if model_mode == MODEL_MODE_PREFILL:
+        query = self._maybe_shard_with_logical(query, self.prefill_query_axis_names)
+        key = self._maybe_shard_with_logical(key, self.prefill_key_axis_names)
+        value = self._maybe_shard_with_logical(value, self.prefill_value_axis_names)
+      elif model_mode == MODEL_MODE_AUTOREGRESSIVE:
+        query = self._maybe_shard_with_logical(query, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
+        key = self._maybe_shard_with_logical(key, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+        value = self._maybe_shard_with_logical(value, (DECODE_BATCH, DECODE_LENGTH, KV_HEAD, D_KV))
+      else:
+        query = self._maybe_shard_with_logical(query, self.query_axis_names)
+        key = self._maybe_shard_with_logical(key, self.key_axis_names)
+        value = self._maybe_shard_with_logical(value, self.value_axis_names)
 
     query = checkpoint_name(query, "query_proj")
     key = checkpoint_name(key, "key_proj")
@@ -1264,7 +1753,7 @@ class Attention(nnx.Module):
     if self.is_qwen3_hybrid:
       out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
       out = out * jax.nn.sigmoid(gate)
-    out = self.out_projection(out, out_sharding=out_sharding)
+    out = self.out_projection(out, out_sharding=out_sharding, model_mode=model_mode)
     if getattr(self.config, "distill_beta", 0.0) > 0.0:
       self.sow(nnx.Intermediate, "out_projection_activations", out)
     out = checkpoint_name(out, "out_proj")

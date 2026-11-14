@@ -1032,8 +1032,9 @@ class BlockCausalMaskTest(unittest.TestCase):
       sa_qk_diag_skip=False,
       sa_sv_diag_skip=False,
       sa_qk_diag_grid=2,
+      **config_overrides,
   ):
-    """Builds a minimal flash-attention operator for dispatch tests."""
+    """Builds a minimal flash-attention operator for dispatch tests (`config_overrides` set extra config fields)."""
     config = types.SimpleNamespace(
         causal_block_size=4,
         context_parallel_strategy="all_gather",
@@ -1073,6 +1074,8 @@ class BlockCausalMaskTest(unittest.TestCase):
         dq_reduction_steps=-1,
         local_sliding_window_size=4,
     )
+    for name, value in config_overrides.items():
+      setattr(config, name, value)
     device = types.SimpleNamespace(platform="cpu")
     mesh = types.SimpleNamespace(
         devices=np.asarray([device], dtype=object),
@@ -1362,6 +1365,40 @@ class BlockCausalMaskTest(unittest.TestCase):
         else:
           self.assertNotIn("qk_diag_skip", kw)
           self.assertNotIn("sv_diag_skip", kw)
+
+  def test_tpu_tokamax_splash_context_split_device_heads(self):
+    """`_create_sa_config` divides the query-head context split per Q-head shard and rejects invalid splits."""
+    query = jnp.zeros((2, 16, 1, 8))
+
+    def capture_splash_config(op):
+      with (
+          mock.patch.object(AttentionOp, "_logical_to_mesh_axes", side_effect=_stub_mesh_axes("context")),
+          mock.patch.object(
+              attention_op.tokamax_splash_kernel, "SplashConfig", side_effect=RuntimeError("splash config captured")
+          ) as make_splash_config,
+          self.assertRaisesRegex(RuntimeError, "splash config captured"),
+      ):
+        op.tpu_flash_attention(query, query, query, decoder_segment_ids=None)
+      return make_splash_config.call_args.kwargs
+
+    # Ulysses splits the query heads over the context axis: the device heads are divided per shard, and
+    # non-divisible or negative splits are rejected. The strategy is switched after construction because
+    # `__init__` only admits Ulysses on TPU hardware, which this stub mesh is not.
+    def ulysses_op(device_heads):
+      op = self._make_flash_op(
+          attention_type=AttentionType.GLOBAL,
+          context_parallel_size=2,
+          use_tokamax_splash=True,
+          remat_policy="custom",
+          sa_context_split_device_heads=device_heads,
+      )
+      op.config.context_parallel_strategy = "ulysses"
+      return op
+
+    self.assertEqual(capture_splash_config(ulysses_op(4))["residual_checkpoint_device_heads"], 2)
+    for bad in (3, -1):
+      with self.assertRaisesRegex(ValueError, "sa_context_split_device_heads"):
+        capture_splash_config(ulysses_op(bad))
 
   def _capture_splash_mask(self, op, query, q_axis="context"):
     """Runs `tpu_flash_attention` far enough to see which mask it built."""
