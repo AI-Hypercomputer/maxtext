@@ -402,6 +402,15 @@ moe_packed_routing_sort: false # pack (expert_id << 20) | slot_idx into a single
 use_fused_qkv_kernel: false # fuse the QKV projection + per-head QK RMSNorm + RoPE + Splash layout in a Pallas kernel (self-attention with QK RMSNorm and standard RoPE, e.g. Qwen3).
 use_fused_out_kernel: false # use custom-VJP FSDP Attention out projection with local absmax bwd and early dw_o reduce-scatter.
 defer_norm_grad_allreduce: false # defer per-layer RMSNorm and QK-norm scale gradient all-reduces until after the decoder scan loop (scanned qwen3 / qwen3_moe decoder layers; no-op with a warning elsewhere).
+# Experimental fused TensorCore Pallas kernels for MoE combine and permute on v6e (kernels/moe_combine_tc.py).
+moe_tc_combine: false # experimental; requires sparse_matmul=true, use_ring_of_experts=false, use_ragged_sort=false, and EP=1
+moe_tc_combine_block_tokens: 256 # tokens per grid step (power of two >= 128)
+moe_tc_combine_expert_chunks: 1 # expert chunks per token block (1 = single pass)
+moe_tc_combine_col_chunks: 1 # hidden-dimension column chunks (1 = single pass)
+moe_tc_permute: false # experimental; requires moe_use_direct_token_gather=true, use_ring_of_experts=false, use_ragged_sort=false, and EP=1
+moe_tc_permute_block_tokens: 512 # tokens per grid step (power of two >= 128)
+moe_tc_permute_expert_chunks: 1 # expert chunks per token block (1 = single pass)
+moe_tc_permute_col_chunks: 1 # hidden-dimension column chunks (1 = single pass)
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
