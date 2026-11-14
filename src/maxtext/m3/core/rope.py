@@ -42,6 +42,7 @@ numbers the legacy stack produces.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 
 def apply_rope(
@@ -50,6 +51,7 @@ def apply_rope(
     *,
     max_timescale: float = 10_000.0,
     min_timescale: float = 1.0,
+    use_fp64_timescale: bool = False,
 ) -> jax.Array:
   """Applies rotary positional embedding to a projected query or key tensor.
 
@@ -64,6 +66,10 @@ def apply_rope(
       10_000 is the original RoPE value; long-context models raise it (Qwen3
       uses 1_000_000).
     min_timescale: Shortest rotation period. Effectively always 1.
+    use_fp64_timescale: When True, precomputes inverse frequencies in IEEE-754
+      `float64` on host before casting once to `float32` (matching Hugging Face
+      PyTorch for high-`rope_theta` models). Defaults to `False` to preserve
+      bit-exact legacy MaxText `RotaryEmbedding` numerics.
 
   Returns:
     An array of the same shape and dtype as `x`, rotated by position.
@@ -86,14 +92,19 @@ def apply_rope(
 
   half_dim = head_dim // 2
 
-  # Geometric series of rotation periods, one per dimension pair. The integer
-  # `arange` is deliberate: it matches the legacy `RotaryEmbedding.timescale`
-  # expression, which is what keeps the two bit-exact.
-  fraction = 2 * jnp.arange(half_dim) / head_dim
-  timescale = min_timescale * (max_timescale / min_timescale) ** fraction
-
-  # (batch, length) -> (batch, length, 1, half_dim), broadcasting over heads.
-  angles = positions[:, :, jnp.newaxis, jnp.newaxis].astype(jnp.float32) / timescale
+  if use_fp64_timescale:
+    fraction_np = (2.0 * np.arange(half_dim, dtype=np.float64)) / np.float64(head_dim)
+    timescale_np = np.float64(min_timescale) * ((np.float64(max_timescale) / np.float64(min_timescale)) ** fraction_np)
+    inv_timescale = jnp.asarray(1.0 / timescale_np, dtype=jnp.float32)
+    angles = positions[:, :, jnp.newaxis, jnp.newaxis].astype(jnp.float32) * inv_timescale
+  else:
+    # Geometric series of rotation periods, one per dimension pair. The integer
+    # `arange` is deliberate: it matches the legacy `RotaryEmbedding.timescale`
+    # expression, which is what keeps the two bit-exact.
+    fraction = 2 * jnp.arange(half_dim) / head_dim
+    timescale = min_timescale * (max_timescale / min_timescale) ** fraction
+    # (batch, length) -> (batch, length, 1, half_dim), broadcasting over heads.
+    angles = positions[:, :, jnp.newaxis, jnp.newaxis].astype(jnp.float32) / timescale
   sin = jnp.sin(angles).astype(x.dtype)
   cos = jnp.cos(angles).astype(x.dtype)
 

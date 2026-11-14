@@ -44,6 +44,7 @@ from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
 from maxtext.trainers.diloco import diloco
 from maxtext.trainers.pre_train import train
+from maxtext.training_engine import memory_report
 from maxtext.utils import accelerator_to_spec_map
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
@@ -409,6 +410,11 @@ def main(argv: Sequence[str]) -> None:
   peak_bytes = getattr(memory_analysis, "peak_memory_in_bytes", None)
   if peak_bytes:
     print(f"Peak memory: {peak_bytes / 2**30:.2f} GiB")
+  if memory_analysis is not None:
+    print(
+        memory_report.format_memory_report(memory_report.memory_report({"update": compiled}, {})),
+        flush=True,
+    )
 
   # Dump HLO if requested
   if config.dump_hlo:
