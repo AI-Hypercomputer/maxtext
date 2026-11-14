@@ -115,9 +115,10 @@ jobs:
             gcloud container images add-tag "${img}:${IMAGE_TAG}" "${img}:${tag}" --quiet
           }
 
-          # Promotes a daily stable image to latest once it has also passed CI. Nightly images are
-          # built alongside stable ones but are not E2E tested, so they are promoted together with
-          # their stable counterpart.
+          # Promotes a daily stable image to latest once it has also passed CI. Nightly and
+          # dependencies-only images are built alongside stable ones (sharing identical dependency
+          # layers) and are not independently E2E tested, so they are promoted together with their
+          # stable counterpart.
           promote_to_latest() {
             if gcloud container images describe "${IMAGE}:verified-ci-${IMAGE_TAG}" >/dev/null 2>&1; then
               tag_image "${IMAGE}" "latest"
@@ -126,6 +127,16 @@ jobs:
                 tag_image "${nightly_image}" "latest"
               else
                 echo "Nightly image ${nightly_image}:${IMAGE_TAG} does not exist. Skipping nightly image tagging."
+              fi
+              if [[ "${IMAGE}" != *_dependencies ]]; then
+                local deps_image
+                for deps_image in "${IMAGE}_dependencies" "${nightly_image}_dependencies"; do
+                  if gcloud container images describe "${deps_image}:${IMAGE_TAG}" >/dev/null 2>&1; then
+                    tag_image "${deps_image}" "latest"
+                  else
+                    echo "Dependencies image ${deps_image}:${IMAGE_TAG} does not exist. Skipping latest tag."
+                  fi
+                done
               fi
             else
               echo "${IMAGE}:verified-ci-${IMAGE_TAG} does not exist. Skipping latest tag."
