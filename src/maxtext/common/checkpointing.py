@@ -1504,22 +1504,13 @@ def save_checkpoint(checkpoint_manager, step, state, config=None, data_iterator=
     data_iterator: The data iterator, saved alongside the state with grain.
     force: Save even if no checkpoint is due at this step.
     backup: Multi-Tier Checkpointing only: ask for this step to be backed up to persistent storage, regardless
-      of the backup interval (e.g. at an epoch or phase boundary). Implies `force`. The request is attached to
-      the save that writes the step, so pass it on the first `save_checkpoint` call for that step (before any
-      periodic save of the same step); a step that is already saved cannot be backed up after the fact.
+      of the backup interval (e.g. at an epoch or phase boundary). Implies `force`. `save_checkpoint` is expected
+      to be called at most once per step, and the request is attached to that save; calling it a second time for
+      an already saved step with `backup=True` is not supported (Orbax raises `StepAlreadyExistsError`).
   """
   if backup:
     if not isinstance(checkpoint_manager, EmergencyReplicatorCheckpointManager):
       raise ValueError("backup=True requires Multi-Tier Checkpointing (`enable_multi_tier_checkpointing=True`).")
-    try:
-      already_saved = step in all_steps(checkpoint_manager)
-    except NotImplementedError:  # Pathways colocated mode does not track saved steps on the host.
-      already_saved = False
-    if already_saved:
-      raise ValueError(
-          f"backup=True must be passed on the save_checkpoint call that writes step {step}, but step {step} is "
-          "already saved. Call save_checkpoint(..., backup=True) before the periodic save of that step."
-      )
     force = True
   # Allow struct.PyTreeNode so Flax dataclass states (e.g. DiLoCoTrainState) aren't cleared to empty dicts ({})
   if not isinstance(state, (dict, nnx.State, train_state.TrainState, struct.PyTreeNode)):
