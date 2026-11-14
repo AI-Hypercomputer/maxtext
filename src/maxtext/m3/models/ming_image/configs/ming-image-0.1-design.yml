@@ -1,0 +1,212 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Ming-Image-0.1-Design (inclusionAI) text-to-image configuration.
+#
+# Components (converted by checkpoint_conversion/to_maxtext_diffusers.py, `MING_IMAGE_HF_TO_MAXTEXT`):
+#   mllm/        BailingMoeV2 MoE language model (text path) -> prompt + 256 generation query tokens
+#   connector/   Qwen2 connector over the query-token hidden states          -> cap_feats   (B, 256, 2560)
+#   mlp/         query tokens, proj_in / proj_out / proj_directvlm           -> cap_feats_2 (B, Lp, 3840)
+#   transformer/ Z-Image style diffusion transformer (6B)
+#   vae/         AutoencoderKLQwenImage == Wan 2.1 VAE with 4 (RGBA) channels
+# The architecture of every component comes from the converted checkpoint's `<component>_config`.
+
+# Model Identity
+pretrained_model_name_or_path: 'inclusionAI/Ming-Image-0.1-Design'
+model_name: ming-image
+model_type: 'T2I'
+
+# Model dtypes
+weights_dtype: 'bfloat16'
+activations_dtype: 'bfloat16'
+# MLLM + connector + conditioning head. float32 at HIGHEST matmul precision: the connector's activations reach the
+# thousands and TPU DEFAULT precision (a single bf16 pass) corrupts the generation-query features (cap_feats).
+text_encoder_dtype: 'float32'
+text_encoder_precision: 'HIGHEST'
+# Static text length buckets (prompt tokens incl. chat template + 258 query/marker tokens), padded to the smallest
+# bucket that fits; prompts longer than the largest bucket are truncated.
+max_sequence_length: 2048
+text_length_buckets: [512, 1024, 2048]
+
+# VAE parameters
+vae_weights_dtype: 'float32'
+vae_dtype: 'float32'
+replicate_vae: False
+vae_decode_chunk: 1
+vae_encode_chunk: 4
+vae_spatial: -1
+# Latent normalization of the Ming VAE (vae/config.json): latents = (z - shift_factor) * scaling_factor.
+vae_scaling_factor: 8.0064
+vae_shift_factor: 0.0
+
+# Noise Scheduler parameters (FlowMatchEulerDiscreteScheduler, dynamic shifting as in the reference pipeline)
+scheduler_dtype: 'float32'
+use_experimental_scheduler: True
+flow_shift: 6.0
+prediction_type: "flow_prediction"
+guidance_scale: 1.0
+guidance_rescale: 0.0
+
+# Execution & Attention parameters
+precision: "DEFAULT"
+scan_layers: False
+scan_diffusion_loop: False
+jit_initializers: True
+from_pt: True
+split_head_dim: True
+attention: 'flash'
+use_base2_exp: True
+ulysses_shards: -1
+ulysses_attention_chunks: 1
+flash_min_seq_length: 4096
+dropout: 0.0
+mask_padding_tokens: True
+attention_sharding_uniform: True
+norm_num_groups: 32
+remat_policy: "NONE"
+names_which_can_be_saved: []
+names_which_can_be_offloaded: []
+enable_jax_named_scopes: False
+use_batched_text_encoder: False
+quantization: ''
+
+flash_block_sizes:
+  block_q: 512
+  block_kv_compute: 512
+  block_kv: 512
+  block_q_dkv: 512
+  block_kv_dkv: 512
+  block_kv_dkv_compute: 512
+  block_q_dq: 512
+  block_kv_dq: 512
+  use_fused_bwd_kernel: False
+
+# Inference & Generation parameters
+prompt_file: ""
+prompt: "A cozy wooden cabin poster titled \"FOUR SEASONS\" in bold serif letters, split into four panels showing the same cabin in spring blossoms, summer sun, autumn leaves and winter snow, clean flat illustration style, warm color palette."
+negative_prompt: ""
+do_classifier_free_guidance: False
+height: 1024
+width: 1024
+num_frames: 1
+num_inference_steps: 12
+fps: 1
+seed: 42
+
+# Device, Mesh Topology & SPMD Partitioning
+hardware: 'tpu'
+skip_jax_distributed_system: False
+jax_cache_dir: ''
+mesh_axes: ['data', 'fsdp', 'context', 'tensor']
+# Diffusion transformer (`WanSharding` rule table, same logical axes as the Wan transformer).
+logical_axis_rules: [
+  ['batch', ['data', 'fsdp']],
+  ['activation_batch', ['data', 'fsdp']],
+  ['activation_self_attn_heads', ['context', 'tensor']],
+  ['activation_self_attn_q_length', null],
+  ['activation_self_attn_kv_length', null],
+  ['activation_cross_attn_heads', null],
+  ['activation_cross_attn_q_length', ['context', 'tensor']],
+  ['activation_cross_attn_kv_length', null],
+  ['activation_length', 'context'],
+  ['activation_kv_length', null],
+  ['activation_heads', 'tensor'],
+  ['activation_kv', null],
+  ['activation_embed', null],
+  ['mlp', 'tensor'],
+  ['embed', ['context', 'fsdp']],
+  ['heads', 'tensor'],
+  ['norm', 'tensor'],
+  ['conv_batch', ['data', 'context', 'fsdp']],
+  ['out_channels', 'tensor'],
+  ['conv_out', 'context'],
+]
+# The VAE runs on its own mesh (`redundant` x `vae_spatial`, a reshape of the devices).
+vae_logical_axis_rules: [
+  ['activation_batch', 'redundant'],
+  ['activation_length', 'vae_spatial'],
+  ['activation_heads', null],
+  ['activation_kv_length', null],
+  ['embed', null],
+  ['heads', null],
+  ['norm', null],
+  ['conv_batch', 'redundant'],
+  ['out_channels', 'vae_spatial'],
+  ['conv_out', 'vae_spatial'],
+  ['conv_in', 'vae_spatial'],
+]
+# MLLM text encoder: tensor parallel (q heads / MLP / per-expert intermediate / vocab split over all mesh axes; kv heads,
+# the stacked-expert axis, embed dims and activations replicated). 16 q heads: up to 16 devices.
+text_encoder_logical_axis_rules: [
+  ['vocab', ['data', 'fsdp', 'context', 'tensor']],
+  ['heads', ['data', 'fsdp', 'context', 'tensor']],
+  ['kv_heads', null],
+  ['expert', null],
+  ['mlp', ['data', 'fsdp', 'context', 'tensor']],
+  ['activation_heads', ['data', 'fsdp', 'context', 'tensor']],
+  ['activation_mlp', ['data', 'fsdp', 'context', 'tensor']],
+  ['embed', null],
+  ['norm', null],
+  ['activation_batch', null],
+  ['activation_length', null],
+  ['activation_embed', null],
+]
+# Qwen2 connector (12 q heads, 2 kv heads: heads replicated) and conditioning head: MLP tensor parallel.
+connector_logical_axis_rules: [
+  ['vocab', null],
+  ['heads', null],
+  ['kv_heads', null],
+  ['expert', null],
+  ['mlp', ['data', 'fsdp', 'context', 'tensor']],
+  ['activation_heads', null],
+  ['activation_mlp', ['data', 'fsdp', 'context', 'tensor']],
+  ['embed', null],
+  ['norm', null],
+  ['activation_batch', null],
+  ['activation_length', null],
+  ['activation_embed', null],
+]
+
+data_sharding: [['data', 'fsdp', 'context', 'tensor']]
+dcn_data_parallelism: 1
+dcn_fsdp_parallelism: 1
+dcn_context_parallelism: -1
+dcn_tensor_parallelism: 1
+ici_data_parallelism: 1
+ici_fsdp_parallelism: 1
+ici_context_parallelism: -1
+ici_tensor_parallelism: 1
+allow_split_physical_axes: False
+compile_topology_num_slices: -1
+num_slices: 1
+quantization_local_shard_count: 1
+per_device_batch_size: 0.125
+
+# Checkpoint, Paths & Orbax
+run_name: ''
+base_output_directory: ""
+checkpoint_directory: ""
+output_dir: ""
+checkpoint_every: -1
+checkpoint_dir: ""
+save_final_checkpoint: False
+save_config_to_gcs: False
+enable_single_replica_ckpt_restoring: False
+aot_cache_dir: ""
+revision: ""
+
+# Profiling
+enable_profiler: False
+skip_first_n_steps_for_profiler: 1
+profiler_steps: 1
