@@ -50,6 +50,7 @@ from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as to
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as m3_moe
 from maxtext.m3.core.sharding import DefaultSharding, Sharding, TensorType, param_metadata, sharding_from_config
+from maxtext.m3.infra import remat as m3_remat
 
 
 # =================================================================================================
@@ -867,6 +868,7 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
           use_qk_l2norm_in_kernel=True,
           chunk_inverse=self.chunk_inverse,
       )
+    core_attn_out = checkpoint_name(core_attn_out, "context")
     core_normed = self.norm(core_attn_out, z).reshape(b, s, self.value_dim)
     out = checkpoint_name(self.out_proj(core_normed), "out_proj")
     return (out, last_state) if output_final_state else out
@@ -2109,6 +2111,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
       return_aux: bool = False,
   ) -> Any:
     """Executes single decoder layer forward pass."""
+    hidden_states = checkpoint_name(hidden_states, "hidden_states")
     if self.ple is not None and ple_input_ids is not None:
       hidden_states = hidden_states + self.ple(hidden_states, ple_input_ids, conv_mask=conv_mask)
     mixed, inject = self.attn_hyper_connection.before_block(hidden_states)
@@ -2118,6 +2121,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
       attn_out, s_idx = self.self_attn(
           mixed, position_ids=positions, attention_mask=conv_mask, segment_ids=segment_ids, return_selected_blocks=True
       )
+    attn_out = checkpoint_name(attn_out, "self_attn")
     hidden_states = shard_batch(self.attn_hyper_connection.combine(hidden_states, attn_out, inject), self.sharding)
     mixed, inject = self.mlp_hyper_connection.before_block(hidden_states)
     mlp_out, r_w, r_idx, r_probs = self.mlp(mixed, return_router_topk=True)
@@ -2220,82 +2224,20 @@ def create_scanned_cycles(
   return nnx.merge(sp[0][0], *stacked_trees)
 
 
-_QWEN3_8_PROJECTIONS = ("query_proj", "value_proj", "key_proj", "kv_proj", "qkv_proj")
-_QWEN3_8_MINIMAL = _QWEN3_8_PROJECTIONS + ("out_proj", "mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo")
-
-
 def _coerce_remat_callable(remat: Any) -> Callable[..., Any] | None:
   """Extracts a `jax.checkpoint` policy callable from `remat` (`Remat`, callable, or `None`)."""
-  if remat is None:
-    return None
-  if callable(remat):
-    return remat
+  if remat is None or isinstance(remat, m3_remat.Remat) or callable(remat):
+    return m3_remat.policy_callable(remat)
   pol = getattr(remat, "policy", None)
   return cp.nothing_saveable if pol is None else pol
 
 
 def _resolve_qwen3_8_remat_policy(config: Any) -> Callable[..., Any] | None:
-  """Resolves `config.remat_policy` locally without importing `maxtext.m3.infra`."""
+  """Resolves `config.remat_policy` into a `jax.checkpoint` policy callable via `m3.infra.remat`."""
   raw = getattr(config, "remat_policy", "none")
-  if raw is None or raw == "":
-    return None
   if callable(raw):
     return raw
-  key = str(raw).lower()
-  if key == "none":
-    return None
-  on_dev = list(getattr(config, "tensors_on_device", None) or getattr(config, "names_which_can_be_saved", None) or ())
-  to_off = list(
-      getattr(config, "tensors_to_offload", None) or getattr(config, "names_which_can_be_offloaded", None) or ()
-  )
-  match key:
-    case "full":
-      return cp.nothing_saveable
-    case "minimal" | "minimal_flash":
-      return cp.save_only_these_names(*_QWEN3_8_MINIMAL)
-    case "minimal_with_context":
-      return cp.save_only_these_names(*_QWEN3_8_MINIMAL, "context")
-    case "save_qkv_proj":
-      return cp.save_only_these_names(*_QWEN3_8_PROJECTIONS)
-    case "save_dot_except_mlp":
-      return cp.save_only_these_names(*_QWEN3_8_PROJECTIONS, "out_proj")
-    case "save_dot_except_mlpwi":
-      return cp.save_only_these_names(*_QWEN3_8_PROJECTIONS, "out_proj", "mlpwo")
-    case "save_out_proj":
-      return cp.save_only_these_names("out_proj")
-    case "qkv_proj_offloaded":
-      return cp.save_and_offload_only_these_names(
-          names_which_can_be_saved=[],
-          names_which_can_be_offloaded=list(_QWEN3_8_PROJECTIONS),
-          offload_src="device",
-          offload_dst="pinned_host",
-      )
-    case "minimal_offloaded":
-      return cp.save_and_offload_only_these_names(
-          names_which_can_be_saved=[],
-          names_which_can_be_offloaded=list(_QWEN3_8_MINIMAL),
-          offload_src="device",
-          offload_dst="pinned_host",
-      )
-    case "matmul_without_batch":
-      return cp.checkpoint_dots_with_no_batch_dims
-    case "offload_matmul_without_batch":
-      return cp.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
-    case "custom":
-      return cp.save_and_offload_only_these_names(
-          names_which_can_be_saved=on_dev,
-          names_which_can_be_offloaded=to_off,
-          offload_src="device",
-          offload_dst="pinned_host",
-      )
-    case "hidden_state_with_offload":
-      return cp.save_and_offload_only_these_names(
-          names_which_can_be_saved=[],
-          names_which_can_be_offloaded=["hidden_states", "self_attn", "cross_attn"],
-          offload_src="device",
-          offload_dst="pinned_host",
-      )
-  raise ValueError(f"Unsupported remat_policy for Qwen3.8: {raw!r}.")
+  return m3_remat.policy_callable(m3_remat.resolve_policy(config))
 
 
 def _run_qwen3_8_sublayer(
@@ -2445,10 +2387,13 @@ def apply_scanned_cycles(
         aux_out.extend(a_c)
     return (h, aux_out) if return_aux else h
 
-  if num_cycles == 1:
+  if num_cycles == 1 and not (m3_remat.is_offload_policy(remat_policy) or m3_remat.is_offload_policy(eff_policy)):
     # Retain the trip-count-1 while loop as a memory barrier (see `ScannedLayers` in
     # `maxtext.m3.infra.scan`): prevents XLA from inlining the single cycle and overlapping
-    # activation temporaries across the remat boundary.
+    # activation temporaries across the remat boundary. Skip when offloading residuals to
+    # `pinned_host` (`S(5)`), as an un-simplified length-1 scan folds its backward
+    # `dynamic_index_in_dim/squeeze` (`[1, B, S, 4*D]` -> `[B, S, 4*D]`) into a cross-memory-space
+    # `bitcast` (`S(0)` -> `S(5)`) rejected by the XLA HLO verifier.
     with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
       res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests))
   else:

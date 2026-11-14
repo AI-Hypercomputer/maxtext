@@ -30,7 +30,7 @@ import jax
 from jax import checkpoint_policies as cp
 import jax.extend as jex
 
-from maxtext.m3.infra import scan as m3_scan
+from maxtext.src.maxtext.m3.infra import scan as m3_scan
 
 _TRAIN_MODE = "train"
 
@@ -38,6 +38,14 @@ _PROJECTIONS = ("query_proj", "value_proj", "key_proj", "kv_proj", "qkv_proj")
 _MINIMAL = _PROJECTIONS + ("out_proj", "mlpwi_0", "mlpwi_1", "mlpwi", "mlpwo")
 _MINIMAL_WITH_CONTEXT = _MINIMAL + ("context",)
 _HIDDEN_OFFLOAD = ("hidden_states", "self_attn", "cross_attn")
+_OFFLOAD_POLICIES = frozenset(
+    {
+        "qkv_proj_offloaded",
+        "minimal_offloaded",
+        "offload_matmul_without_batch",
+        "hidden_state_with_offload",
+    }
+)
 
 # Supported `remat_policy` config values (case-insensitive).
 REMAT_POLICIES = (
@@ -65,6 +73,24 @@ class Remat:
 
   policy: Callable[..., Any] | None = cp.nothing_saveable
   names: tuple[str, ...] | None = None
+  offloaded: bool = False
+
+
+def is_offload_policy(remat: Remat | Callable[..., Any] | str | None) -> bool:
+  """Returns whether `remat` offloads activation residuals to `pinned_host` memory."""
+  if remat is None:
+    return False
+  if isinstance(remat, str):
+    return remat.lower() in _OFFLOAD_POLICIES
+  if isinstance(remat, Remat):
+    return bool(remat.offloaded or getattr(remat.policy, "offloaded", False))
+  return bool(getattr(remat, "offloaded", False))
+
+
+def _mark_offloaded(pol: Callable[..., Any], is_offloaded: bool) -> Callable[..., Any]:
+  if is_offloaded:
+    setattr(pol, "offloaded", True)
+  return pol
 
 
 def policy_callable(remat: Remat | Callable[..., Any] | None) -> Callable[..., Any] | None:
@@ -138,36 +164,51 @@ def remat_policy(
     case "save_out_proj":
       return cp.save_only_these_names("out_proj")
     case "qkv_proj_offloaded":
-      return cp.save_and_offload_only_these_names(
-          names_which_can_be_saved=[],
-          names_which_can_be_offloaded=list(_PROJECTIONS),
-          offload_src="device",
-          offload_dst="pinned_host",
+      return _mark_offloaded(
+          cp.save_and_offload_only_these_names(
+              names_which_can_be_saved=[],
+              names_which_can_be_offloaded=list(_PROJECTIONS),
+              offload_src="device",
+              offload_dst="pinned_host",
+          ),
+          True,
       )
     case "minimal_offloaded":
-      return cp.save_and_offload_only_these_names(
-          names_which_can_be_saved=[],
-          names_which_can_be_offloaded=list(_MINIMAL),
-          offload_src="device",
-          offload_dst="pinned_host",
+      return _mark_offloaded(
+          cp.save_and_offload_only_these_names(
+              names_which_can_be_saved=[],
+              names_which_can_be_offloaded=list(_MINIMAL),
+              offload_src="device",
+              offload_dst="pinned_host",
+          ),
+          True,
       )
     case "matmul_without_batch":
       return cp.checkpoint_dots_with_no_batch_dims
     case "offload_matmul_without_batch":
-      return cp.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host")
+      return _mark_offloaded(
+          cp.offload_dot_with_no_batch_dims(offload_src="device", offload_dst="pinned_host"),
+          True,
+      )
     case "custom":
-      return cp.save_and_offload_only_these_names(
-          names_which_can_be_saved=saved,
-          names_which_can_be_offloaded=offloaded,
-          offload_src="device",
-          offload_dst="pinned_host",
+      return _mark_offloaded(
+          cp.save_and_offload_only_these_names(
+              names_which_can_be_saved=saved,
+              names_which_can_be_offloaded=offloaded,
+              offload_src="device",
+              offload_dst="pinned_host",
+          ),
+          bool(offloaded),
       )
     case "hidden_state_with_offload":
-      return cp.save_and_offload_only_these_names(
-          names_which_can_be_saved=[],
-          names_which_can_be_offloaded=list(_HIDDEN_OFFLOAD),
-          offload_src="device",
-          offload_dst="pinned_host",
+      return _mark_offloaded(
+          cp.save_and_offload_only_these_names(
+              names_which_can_be_saved=[],
+              names_which_can_be_offloaded=list(_HIDDEN_OFFLOAD),
+              offload_src="device",
+              offload_dst="pinned_host",
+          ),
+          True,
       )
   raise ValueError(f"Unknown remat_policy {name!r}; expected one of {REMAT_POLICIES}.")
 
@@ -192,7 +233,11 @@ def resolve_policy(config: Any) -> Remat | None:
       names_which_can_be_offloaded=to_offload,
   )
   assert pol is not None
-  return Remat(policy=pol, names=_policy_names(key, on_device, to_offload))
+  return Remat(
+      policy=pol,
+      names=_policy_names(key, on_device, to_offload),
+      offloaded=is_offload_policy(pol),
+  )
 
 
 def _filter_kwargs(fn: Callable[..., Any], num_pos_args: int, kwargs: dict[str, Any]) -> dict[str, Any]:
