@@ -362,6 +362,11 @@ moe_dispatch_no_expert_sharding: false
 use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the MoE permute path; valid both with and
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
+# Ring-of-experts ragged sort routing index maps: 'sort' = two stable argsorts (default); 'count' = one packed
+# single-operand sort plus counting for the inverse (and argmax passes for unforced router top-k selection).
+# Same permutation, same values.
+# Needs sparse_matmul, use_ring_of_experts and use_ragged_sort (and te_moe_block=False).
+moe_routing_index_math: 'sort'
 moe_tc_ragged_sort: false # ring-of-experts ragged sort/unsort on TensorCore (Pallas DMA kernels) instead of the SparseCore
                           # kernels; requires use_ring_of_experts, use_ragged_sort and ragged_buffer_factor > 0.
 moe_tc_ragged_gather_block_size: 1024 # moe_tc_ragged_sort: rows per grid step of the TC ragged gather.
@@ -403,6 +408,7 @@ use_fused_qkv_kernel: false # fuse the QKV projection + per-head QK RMSNorm + Ro
 use_fused_out_kernel: false # use custom-VJP FSDP Attention out projection with local absmax bwd and early dw_o reduce-scatter.
 defer_norm_grad_allreduce: false # defer per-layer RMSNorm and QK-norm scale gradient all-reduces until after the decoder scan loop (scanned qwen3 / qwen3_moe decoder layers; no-op with a warning elsewhere).
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
+ragged_unsort_spread_masked_indices: false # bit-identical: masked slots of the count-index unsort gather read distinct entries, not entry 0
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
 ragged_gather_reduce_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
