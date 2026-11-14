@@ -15,6 +15,7 @@
 """Linear Layers."""
 
 import functools
+import math
 import operator
 from typing import Any, Callable, Iterable, Sequence
 
@@ -42,6 +43,9 @@ from maxtext.utils.sharding import maybe_shard_with_pspec
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
+from maxtext.utils.sharding import get_logical_axis_rules
+from maxtext.utils.sharding import logical_to_mesh_axes
+from maxtext.utils.sharding import mesh_axes_for_dim
 
 
 # SiTU betas used by Kimi-K3; they come from the HF config keys `activation_situ_beta`
@@ -202,6 +206,101 @@ def _align_bias_with_output(bias: Array, output: Array, shard_mode: ShardMode, d
   return maybe_shard_with_pspec(
       bias, bias_spec, out_sharding.mesh, shard_mode, debug_sharding=debug_sharding, extra_stack_level=1
   )
+
+
+# Logical axis a custom rule set maps to every mesh axis the tokens are sharded over when it keeps the dense weights
+# off some of them (cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp); see `route_dense_weight_grad`.
+DENSE_GRAD_AXIS = "embed_grad"
+_DENSE_EMBED_AXES = ("embed", "embed_attn", "q_lora", "kv_lora")
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def _reshard_cotangent(x, via, to):
+  """Identity whose cotangent is constrained to the PartitionSpec `via` and then to `to`."""
+  del via, to
+  return x
+
+
+def _reshard_cotangent_fwd(x, via, to):
+  del via, to
+  return x, None
+
+
+def _reshard_cotangent_bwd(via, to, _, cotangent):
+  # Without the barrier, XLA folds the reduce-scatter into `via` and the all-gather into `to` back into the
+  # unrouted reduction (which XLA:TPU further combines into a full-weight all-reduce across all token axes).
+  cotangent = jax.lax.optimization_barrier(jax.lax.with_sharding_constraint(cotangent, via))
+  return (jax.lax.with_sharding_constraint(cotangent, to),)
+
+
+_reshard_cotangent.defvjp(_reshard_cotangent_fwd, _reshard_cotangent_bwd)
+
+
+def _spec_divides_shape(spec: PartitionSpec | None, shape: tuple[int, ...], mesh) -> bool:
+  """True when `spec` fits `shape` and every sharded dimension is divisible by its mesh shard count."""
+  if spec is None or len(spec) > len(shape):
+    return False
+  for dim_len, entry in zip(shape, spec):
+    shards = math.prod(mesh.shape.get(ax, 1) for ax in mesh_axes_for_dim(entry))
+    if dim_len % shards != 0:
+      return False
+  return True
+
+
+def route_dense_weight_grad(kernel: Array, kernel_axes: tuple[None | str, ...]) -> Array:
+  """Reduce-scatters a dense weight's gradient over every token axis before resharding it to the weight's sharding.
+
+  A weight's gradient is a partial sum over every mesh axis the tokens are sharded on. When the weight is sharded
+  over only some of them (cp-as-ep-dense-no-cp and cp-as-ep-dense-fsdp replicate the dense weights over context),
+  GSPMD partitions the unrouted gradient as a reduction+slice over the weight's sharded axes plus an all-reduce of
+  the shard over the replicated token axes, which XLA:TPU backend passes fold into a combined full-weight all-reduce
+  across all token axes followed by a local slice. Under a rule set that maps `embed_grad` to the token axes, the
+  backward of every kernel with an `embed`, `embed_attn`, `q_lora`, or `kv_lora` dimension instead constrains the
+  gradient to the kernel's axes with that dimension on `embed_grad` (one reduce-scatter over all of the token axes'
+  devices), and then, across an optimization barrier, to the kernel's own sharding (an all-gather of that shard over
+  the axes the weight is replicated on). When no abstract mesh is active (e.g. `with mesh:` in MaxEngine or vLLM),
+  under rules that do not map `embed_grad`, or when the tensor dimension is not divisible by the `embed_grad` shard
+  count, the kernel is returned unchanged.
+
+  Args:
+    kernel: The kernel, as the dot product consumes it.
+    kernel_axes: Its logical axes.
+
+  Returns:
+    The kernel.
+  """
+  if not isinstance(kernel, jax.Array) or not jnp.issubdtype(kernel.dtype, jnp.floating):
+    return kernel
+  if len(kernel_axes) != kernel.ndim:
+    return kernel
+  rules = get_logical_axis_rules()
+  if not rules or not any(rule and rule[0] == DENSE_GRAD_AXIS for rule in rules):
+    return kernel
+  if not any(isinstance(axis, str) and axis in _DENSE_EMBED_AXES for axis in kernel_axes):
+    return kernel
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or any(t == jax.sharding.AxisType.Explicit for t in getattr(mesh, "axis_types", ())):
+    return kernel
+  str_axes = [a for a in kernel_axes if isinstance(a, str)]
+  if len(set(str_axes)) != len(str_axes):
+    return kernel
+  to = logical_to_mesh_axes(tuple(kernel_axes), mesh, rules=rules)
+  if to is None:
+    return kernel
+  routed_dims = [
+      i for i, a in enumerate(kernel_axes) if isinstance(a, str) and a in _DENSE_EMBED_AXES and mesh_axes_for_dim(to[i])
+  ]
+  if len(routed_dims) != 1:
+    return kernel
+  sharded_idx = routed_dims[0]
+  via_axes = tuple(
+      DENSE_GRAD_AXIS if i == sharded_idx else (None if not mesh_axes_for_dim(to[i]) else a)
+      for i, a in enumerate(kernel_axes)
+  )
+  via = logical_to_mesh_axes(via_axes, mesh, rules=rules)
+  if via == to or not _spec_divides_shape(via, kernel.shape, mesh) or not _spec_divides_shape(to, kernel.shape, mesh):
+    return kernel
+  return _reshard_cotangent(kernel, via, to)
 
 
 def _compute_dot_general_nnx(
@@ -594,6 +693,8 @@ class DenseGeneral(nnx.Module):
     kernel = self._maybe_two_stage_all_gather(kernel)
     if kernel_all_gather_fn is not None:
       kernel = kernel_all_gather_fn(kernel)
+    elif not _initializing and self.shard_mode != ShardMode.EXPLICIT:
+      kernel = route_dense_weight_grad(kernel, self.kernel_axes)
 
     # out_sharding should be None for auto mesh axis
     if self.shard_mode != ShardMode.EXPLICIT:

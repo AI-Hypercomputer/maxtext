@@ -1040,6 +1040,8 @@ class GateLogit(nnx.Module):
     else:
       kernel = self.kernel[...]
     kernel = jnp.asarray(kernel, self.dtype)
+    if not _initializing and self.shard_mode != ShardMode.EXPLICIT:
+      kernel = linears.route_dense_weight_grad(kernel, self.kernel_axes)
 
     contract_ind = tuple(range(0, len(norm_axis)))
     output_sharding = (
@@ -1538,7 +1540,28 @@ class RoutedMoE(nnx.Module):
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
-      self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
+      # wo is [experts, mlp, embed]. With moe_wo_fsdp_on_mlp=True under mesh rules that define
+      # `mlp_moe_out`/`embed_moe_out` (cp-as-ep, cp-as-ep-dense-*), shard its mlp dim over FSDP instead of its embed
+      # dim, so its gradient reduce-scatter scatters a middle dimension like wi's instead of transposing to
+      # [embed, experts * mlp] and scattering on its major dimension.
+      if getattr(self.config, "moe_wo_fsdp_on_mlp", False) and {"mlp_moe_out", "embed_moe_out"} <= {
+          rule[0] for rule in (getattr(self.config, "logical_axis_rules", None) or ()) if rule
+      }:
+        self.wo_kernel_axes = ("exp", "mlp_moe_out", "embed_moe_out")
+        if self.mesh is not None and not self.config.moe_flat_fsdp_weights:
+          wo_spec = logical_to_mesh_axes(self.wo_kernel_axes, self.mesh, rules=self.config.logical_axis_rules)
+          for dim_name, dim_val, spec_entry in (
+              ("moe_mlp_dim", self.intermediate_dim, wo_spec[1]),
+              ("moe_expert_input_dim", self.moe_expert_input_dim, wo_spec[2]),
+          ):
+            shards = math.prod(self.mesh.shape.get(ax, 1) for ax in mesh_axes_for_dim(spec_entry))
+            if dim_val % shards != 0:
+              raise ValueError(
+                  f"moe_wo_fsdp_on_mlp=True requires {dim_name} ({dim_val}) to be divisible by its mesh shard"
+                  f" count ({shards} on {spec_entry!r})."
+              )
+      else:
+        self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
       if self.config.moe_flat_fsdp_weights:
         # Flat layout: wi [E * embed, mlp], wo [E * mlp, embed]; dim 0 is sharded over (expert, fsdp) via the
         # compound logical axis ("exp", "embed_moe") so every FSDP shard is a contiguous tile-aligned row block
@@ -1558,8 +1581,12 @@ class RoutedMoE(nnx.Module):
       if self.mesh is not None and "dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1:
         expert_axes.append("dcp")
       self._expert_parallelism_name = tuple(expert_axes)
-    elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
-      # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
+    elif self.config.custom_mesh_and_rule in (
+        ctypes.CustomRule.CP_AS_EP,
+        ctypes.CustomRule.CP_AS_EP_DENSE_NO_CP,
+        ctypes.CustomRule.CP_AS_EP_DENSE_FSDP,
+    ):
+      # when custom mesh and rule is cp-as-ep (or a variant of it), context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
     elif self._tp_as_ep:
       # when custom mesh and rule is tp-as-ep, tensor axis is same with expert in MoE component.
@@ -3528,7 +3555,11 @@ class RoutedMoE(nnx.Module):
         else:
           w0_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
           w1_pspec = self._logical_to_mesh_axes(("exp", "embed_moe", "mlp_no_fsdp"))
-          wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
+          wo_kernel_axes = getattr(self, "wo_kernel_axes", None)
+          if wo_kernel_axes == ("exp", "mlp_moe_out", "embed_moe_out"):
+            wo_pspec = self._logical_to_mesh_axes(wo_kernel_axes)
+          else:
+            wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", "embed_moe"))
       else:
         # Tell XLA to automatically gather the D dimension (e.g. for dynamic absmax scaling)
         if self.config.moe_flat_fsdp_weights:
@@ -3538,7 +3569,11 @@ class RoutedMoE(nnx.Module):
         else:
           w0_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
           w1_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp"))
-          wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
+          wo_kernel_axes = getattr(self, "wo_kernel_axes", None)
+          if wo_kernel_axes == ("exp", "mlp_moe_out", "embed_moe_out"):
+            wo_pspec = self._logical_to_mesh_axes(wo_kernel_axes)
+          else:
+            wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None))
         # Update kernel pspec for FSDP AG: strip the FSDP axes and any axes co-sharded with them
         # (e.g. `context` under context parallelism), matching the FSDP all-gather.
         w0_pspec = remove_fsdp_from_partition_spec(w0_pspec)

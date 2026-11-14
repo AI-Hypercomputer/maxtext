@@ -503,6 +503,9 @@ shard_embed_moe_on_fsdp: false
 # QWAG weight scale, only with absmax weight calibration (fixed is per-tensor): per_channel [1,1,N], per_tensor,
 # per_expert_channel [E,1,N] (needs use_gmm_v2; not with moe_flat_fsdp_weights or use_ring_of_experts).
 moe_weight_quantization_granularity: "per_channel"
+# Shard RoutedMoE.wo ([experts, mlp, embed]) over FSDP on its intermediate mlp dim ('mlp_moe_out') instead of its
+# embed dim when logical_axis_rules define 'mlp_moe_out' and 'embed_moe_out' (e.g. cp-as-ep, cp-as-ep-dense-*).
+moe_wo_fsdp_on_mlp: false
 # use fsdp and fsdp_transpose axes for sharding the moe weights
 use_2d_fsdp_sharding: false
 
@@ -812,6 +815,12 @@ compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_s
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
 custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
+# Gradients of the dense weights a custom_mesh_and_rule replicates over context (rules that map 'embed_grad':
+# cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp): "reduce_scatter" = reduce-scatter over every token axis, then all-gather over
+# the replicated axes across an optimization barrier (linears.route_dense_weight_grad); "all_reduce" = drop 'embed_grad',
+# leaving GSPMD's unbarred reduction (sharded-axis reduce + replicated-axis all-reduce; folded by XLA:TPU into a combined
+# full-weight all-reduce across all token axes).
+dense_grad_reduce: "reduce_scatter"
 mesh_axes: ['diloco', 'data', 'stage', 'fsdp', 'fsdp_transpose', 'context', 'context_usp_ulysses', 'context_autoregressive', 'tensor', 'tensor_sequence', 'expert', 'autoregressive']
 logical_axis_rules: [
                       ['circular_repeats', []],
