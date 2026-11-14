@@ -37,7 +37,7 @@ instead, and refuses to pass unless the child reports tests actually run.
 
 import contextlib
 import dataclasses
-
+import hashlib
 import io
 import os
 import re
@@ -48,6 +48,16 @@ from typing import Any
 import unittest
 from unittest import mock
 
+_REQUIRED_DEVICES = 4
+_CHILD_ENV = "_MAXTEXT_XAOT_CHILD"
+_IN_CHILD = os.environ.get(_CHILD_ENV) == "1"
+if _IN_CHILD:
+  os.environ["XLA_FLAGS"] = (
+      f"{os.environ.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}"
+  ).strip()
+  os.environ["JAX_PLATFORMS"] = "cpu"
+
+from absl import app
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -58,6 +68,7 @@ from maxtext.configs import maxtext_engine_types
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.pre_train import train_compile as pre_train_compile
+from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import grpo_engine_compile
 from maxtext.training_engine import maxtext_engine
 from maxtext.training_engine import maxtext_engine_compile
@@ -76,9 +87,10 @@ from tunix.rl import packing
 # training_engine imports tunix, so these tests need the post-training dependency bundle.
 pytestmark = [pytest.mark.post_training]
 
-_REQUIRED_DEVICES = 4
 _SENTINEL = "MAXTEXT_ENGINE_XAOT_TESTS_PASSED"
 _RAN = re.compile(rf"{_SENTINEL} ran=(\d+)")
+_MULTI_DEVICE_BASE = parameterized.TestCase if _IN_CHILD else object
+_CHILD_TEST_BASE = absltest.TestCase if _IN_CHILD else object
 
 _MIB = 2**20
 _GIB = 2**30
@@ -89,32 +101,30 @@ _FLOAT32_BYTES = 4
 _MESH = AbstractMesh((2,), ("data",), axis_types=(AxisType.Explicit,))
 
 
-@pytest.mark.cpu_only
-def test_engine_aot_parity_on_a_four_device_cpu_mesh():
-  """Runs the multi-device classes below in a child process with four CPU devices.
+class AotParitySubprocessTest(absltest.TestCase):
+  """Launches the four-device parity suites in a fresh CPU process when needed."""
 
-  See the module docstring for why re-exec is the only option. The flag is
-  *appended* rather
-  than defaulted so it wins over whatever a sibling module set -- XLA takes the
-  last occurrence
-  of a repeated flag.
-  """
-  env = os.environ.copy()
-  env["XLA_FLAGS"] = f"{env.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}".strip()
-  env["JAX_PLATFORMS"] = "cpu"
-  # The child imports `tests.utils.test_helpers`, which pytest puts on the path for us and a
-  # bare interpreter does not.
-  repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-  env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else repo_root
+  @pytest.mark.cpu_only
+  def test_engine_aot_parity_on_a_four_device_cpu_mesh(self):
+    """Runs the multi-device classes below in a child process with four CPU devices."""
+    env = os.environ.copy()
+    env["XLA_FLAGS"] = f"{env.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_REQUIRED_DEVICES}".strip()
+    env["JAX_PLATFORMS"] = "cpu"
+    env[_CHILD_ENV] = "1"
+    # The child imports `tests.utils.test_helpers`, which pytest puts on the path for us and a
+    # bare interpreter does not.
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else repo_root
 
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
+    cmd = [sys.executable, __file__] if sys.executable else [sys.argv[0]]
+    result = subprocess.run(cmd, env=env, capture_output=True, text=True, check=False)
 
-  report = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert result.returncode == 0, report
-  ran = _RAN.search(result.stdout)
-  # An exit status of 0 is also what a run that skipped everything produces.
-  assert ran, f"the child did not report a completed run\n{report}"
-  assert int(ran.group(1)) > 0, f"every test in the child skipped\n{report}"
+    report = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+    self.assertEqual(result.returncode, 0, report)
+    ran = _RAN.search(result.stdout)
+    # An exit status of 0 is also what a run that skipped everything produces.
+    self.assertIsNotNone(ran, f"the child did not report a completed run\n{report}")
+    self.assertGreater(int(ran.group(1)), 0, f"every test in the child skipped\n{report}")
 
 
 def _tiny_overrides(data_parallelism: int = _REQUIRED_DEVICES) -> list[str]:
@@ -225,14 +235,7 @@ def _script_argv(*overrides: str) -> tuple[str, ...]:
 
 
 class _LiveKernels:
-  """Recompiles the kernels a running engine actually dispatched.
-
-  An executable keeps no handle on the arguments it was compiled from, so reading a kernel's HLO
-  means compiling it a second time -- through the engine's own jitted wrappers, from the avals of
-  the arguments it was dispatched with. Avals rather than the arrays, because `_compiled_update`
-  donates its state. That recompilation is only sound if it reproduces the original, which
-  `test_recompiling_reproduces_the_kernels_training_ran` checks and the rest of the file rests on.
-  """
+  """Records every kernel dispatch on a live engine and exposes the compiled executables that ran."""
 
   _ATTRIBUTES = {
       "fwd_bwd": "_compiled_fwd_bwd",
@@ -264,18 +267,11 @@ class _LiveKernels:
     return call
 
   def compiled(self) -> dict[str, jax.stages.Compiled]:
-    """The executable behind each kernel's first dispatch.
-
-    `jax.jit` exposes no way to compile without lowering first, so this goes through
-    `Lowered.compile()` -- the same two steps the engine's `compile_kernels` takes.
-    """
+    """Returns the compiled executable behind each kernel's dispatch."""
     missing = sorted(set(self._ATTRIBUTES) - set(self.calls))
     if missing:
       raise AssertionError(f"these kernels were never dispatched, so they have no HLO to read: {missing}")
-    # The mesh and the logical axis rules have to be live while tracing, exactly as they were at
-    # dispatch: without the rules every `maybe_shard_with_logical` is a no-op.
-    with self._engine._sharding_ctx():
-      return {name: self._engine._jitted_kernels[name].lower(*calls[0]).compile() for name, calls in self.calls.items()}
+    return {name: self._dispatched[name] for name in self.calls}
 
 
 # Optimized HLO carries a source-location index -- `<id> "<name>"` header lines, plus the
@@ -298,7 +294,7 @@ def _normalize(hlo: str) -> str:
   return "\n".join(lines)
 
 
-class EngineAotParityTest(parameterized.TestCase):
+class EngineAotParityTest(_MULTI_DEVICE_BASE):
   """A live engine and an abstract one compile to the same bytes."""
 
   __test__ = False  # collected only via the subprocess entry point at the top of this file.
@@ -372,11 +368,7 @@ class EngineAotParityTest(parameterized.TestCase):
       )
 
   def test_recompiling_reproduces_the_kernels_training_ran(self):
-    """`engine.compile_kernels()` is not a second code path -- on a live engine it re-derives its own.
-
-    This is what licenses `_LiveKernels`: without it every comparison here would be between two
-    compilations and none against training.
-    """
+    """`engine.compile_kernels()` compiles the same kernels `compile()` dispatched on a live engine."""
     cfg, mesh = _config_and_mesh()
 
     engine, kernels = self._live(cfg, mesh)
@@ -486,7 +478,7 @@ class EngineAotParityTest(parameterized.TestCase):
       self.assertEqual(module.group(1), f"jit_{name}")
 
 
-class AbstractMaxTextEngineTest(absltest.TestCase):
+class AbstractMaxTextEngineTest(_CHILD_TEST_BASE):
   """What an engine built without weights will and will not do."""
 
   __test__ = False  # collected only via the subprocess entry point at the top of this file.
@@ -1297,6 +1289,35 @@ class CompiledMemoryReportTest(absltest.TestCase):
       self.assertTrue(os.path.exists(written), f"{name} was not written to {written}")
       self.assertGreater(os.path.getsize(written), 0, written)
 
+  def test_offload_moves_optimizer_out_of_peak(self):
+    """Offload shifts the optimizer subtree from device `+state` to `host state`."""
+    off_state = self._engine.train_state_avals()
+    off = _by_kernel(memory_report.memory_report(self._compiled, off_state))
+    on_cfg = _config("optimizer_memory_host_offload=True", data_parallelism=1)
+    on_engine, on_compiled = maxtext_engine_compile.compile_engine(on_cfg, maxtext_utils.get_mesh_from_config(on_cfg))
+    on_state = on_engine.train_state_avals()
+    on = _by_kernel(memory_report.memory_report(on_compiled, on_state))
+
+    optimizer = _subtree_bytes(off_state, "optimizer")
+    self.assertGreater(optimizer, 0)
+    # All of it moves, scalars included, and nothing of it is left on the device.
+    self.assertEqual(_subtree_bytes(on_state, "optimizer", memory=1), optimizer)
+    self.assertEqual(_subtree_bytes(on_state, "optimizer"), 0)
+    for name in ("fwd_bwd", "accumulate"):
+      with self.subTest(kernel=name):
+        self.assertEqual(on[name].resident, off[name].resident, "offload changed a kernel it is not passed to")
+        # The optimizer moves from `+state` to `host state`; what else each kernel runs beside stays.
+        self.assertEqual(off[name].device_not_passed - on[name].device_not_passed, optimizer)
+        self.assertEqual((off[name].host_not_passed, on[name].host_not_passed), (0, optimizer))
+        self.assertEqual(off[name].device_total - on[name].device_total, optimizer)
+    self.assertEqual((off["update"].host_argument, off["update"].host_output), (0, 0))
+    # `update` is passed the optimizer either way, so offload can only move its bytes between the
+    # device and host columns. Which one is up to the backend: XLA:CPU has a single memory space
+    # and counts a pinned_host argument in `argument`.
+    self.assertEqual(
+        on["update"].argument + on["update"].host_argument, off["update"].argument + off["update"].host_argument
+    )
+
 
 # The Tunix adapter needs a model with a Hugging Face config. Two sequences per micro-batch and two
 # micro-batches per update, so the micro-batch is not the global batch; 8 of the 32 tokens are prompt,
@@ -1906,11 +1927,18 @@ class GrpoRouterReplayCompileTest(parameterized.TestCase):
   def test_main_compiles_packed_micro_batch_without_replay(self):
     """When the packed micro-batch has no routing, router replay leaves the program as it is, and the report says why."""
     packed = _grpo_overrides(*_QWEN35_OVERRIDES, "max_seq_token_per_tpu=64")
+    probe_cfg = _grpo_config(*_QWEN35_OVERRIDES, "router_replay=True", "max_seq_token_per_tpu=64")
+    probe_algo = _grpo_config_obj(temperature=1.0)
+    if (
+        grpo_engine_compile.get_rl_micro_batch(
+            probe_cfg, probe_algo, maxtext_utils.get_mesh_from_config(probe_cfg)
+        ).routed_experts
+        is not None
+    ):
+      self.skipTest("Tunix's packed assembler carries routed_experts; test_main_compiles_router_replay covers that.")
     _, _, _, unrouted = _run_main_and_capture(self, *packed)
-    output, _, micro_batch, compiled = _run_main_and_capture(self, *packed, "router_replay=True")
+    output, _, _, compiled = _run_main_and_capture(self, *packed, "router_replay=True")
 
-    if micro_batch.routed_experts is not None:
-      self.skipTest("Tunix's packed assembler carries routed_experts;" " test_main_compiles_router_replay covers that.")
     self.assertEqual(_fwd_bwd_memory(compiled), _fwd_bwd_memory(unrouted))
     self.assertIn(
         "router_replay is set, but Tunix's batch assembler drops"
@@ -1927,7 +1955,7 @@ class GrpoRouterReplayCompileTest(parameterized.TestCase):
       grpo_engine_compile.get_rl_micro_batch(cfg, algo_cfg, _FSDP_BY_EXPERT)
 
 
-class Zero1MemoryReportTest(absltest.TestCase):
+class Zero1MemoryReportTest(_CHILD_TEST_BASE):
   """Zero-1 shards the optimizer at compile time, so the report must read the state after it."""
 
   __test__ = False  # collected only via the subprocess entry point at the top of this file.
@@ -1953,10 +1981,188 @@ class Zero1MemoryReportTest(absltest.TestCase):
     self.assertGreater(unsharded, 3 * optimizer)
 
 
-_SUITE = (EngineAotParityTest, AbstractMaxTextEngineTest, Zero1MemoryReportTest)
+_QWEN35_PAD_ID = 3
+_QWEN35_CP_AS_EP_OVERRIDES = {
+    "custom_mesh_and_rule": "cp-as-ep",
+    "ici_fsdp_parallelism": 2,
+    "ici_expert_parallelism": 2,
+}
 
 
-if __name__ == "__main__":
+def _qwen35_config(**overrides) -> pyconfig.HyperParameters:
+  """A minimal Qwen3.5 MoE/GDN config covering both GDN and full-attention layers on 4 devices."""
+  argv = [
+      "maxtext_engine_xaot_test.py",
+      get_test_config_path("base.yml"),
+      "model_name=qwen3.5-35b-a3b",
+      "override_model_config=True",
+      "run_name=engine_compile_parity_test",
+      "enable_checkpointing=False",
+      "convert_checkpoint_if_possible=False",
+      "skip_jax_distributed_system=True",
+      "enable_tensorboard=False",
+      "log_config=False",
+      "init_weights_seed=0",
+      "dtype=float32",
+      "weight_dtype=float32",
+      "grad_dtype=float32",
+      "scan_layers=True",
+      "attention=dot_product",
+      "sparse_matmul=False",
+      "inhomogeneous_layer_cycle_interval=2",
+      "base_num_decoder_layers=2",
+      "base_emb_dim=64",
+      "base_num_query_heads=2",
+      "base_num_kv_heads=2",
+      "head_dim=64",
+      "partial_rotary_factor=1.0",
+      "base_mlp_dim=64",
+      "base_moe_mlp_dim=64",
+      "num_experts=4",
+      "num_experts_per_tok=2",
+      "gdn_key_head_dim=16",
+      "gdn_value_head_dim=16",
+      "gdn_num_key_heads=2",
+      "gdn_num_value_heads=2",
+      "gdn_chunk_size=16",
+      "vocab_size=32",
+      "max_target_length=16",
+      "per_device_batch_size=1",
+      "profiler_steps=0",
+  ]
+  argv.extend(f"{key}={value}" for key, value in overrides.items())
+  return pyconfig.initialize(argv, config_class=maxtext_engine_types.CompileConfig)
+
+
+def _tunix_loss(model, input_tokens, positions, targets, weights):
+  logits, _ = model(input_tokens, positions, None, None)
+  log_probs = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+  target_log_probs = jnp.take_along_axis(log_probs, targets[..., None], axis=-1)[..., 0]
+  weights = weights.astype(jnp.float32)
+  return abstract_engine.WeightedMetric(unreduced_sum=-(target_log_probs * weights).sum(), denominator=weights.sum())
+
+
+def _tunix_inputs(payload):
+  return {
+      "input_tokens": payload["inputs"],
+      "positions": payload["inputs_position"],
+      "targets": payload["targets"],
+      "weights": payload["targets_segmentation"],
+  }
+
+
+_LOCATION = re.compile(r"loc\([^\n]*?\)")
+
+
+def _stablehlo(lowered: jax.stages.Lowered) -> str:
+  return _LOCATION.sub("", lowered.as_text())
+
+
+def _digest(text: str) -> str:
+  return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _lower_tunix(engine: maxtext_engine.MaxTextTrainingEngine, cfg: pyconfig.HyperParameters) -> dict:
+  engine.with_loss_fn(_tunix_loss).with_gen_model_input_fn(_tunix_inputs)
+  return engine._lower_kernels(maxtext_engine_compile.get_shaped_micro_batch(cfg))
+
+
+class Qwen35CompileParityTest(_MULTI_DEVICE_BASE):
+  """Qwen3.5 behind the Tunix adapter: the abstract engine against a live, randomly initialized one."""
+
+  _default_artifacts: tuple[Any, Any, dict[str, dict[str, Any]]] | None = None
+
+  @classmethod
+  def _get_default_artifacts(cls):
+    """Returns cached `(abstract_engine, live_engine, lowered_kernels)` for the `cp-as-ep` rule set."""
+    if cls._default_artifacts is None:
+      cfg = _qwen35_config(**_QWEN35_CP_AS_EP_OVERRIDES)
+      mesh = maxtext_utils.get_mesh_from_config(cfg)
+      wrap = {"wrap_with_tunix_adapter": True, "tokenizer_pad_id": _QWEN35_PAD_ID}
+      abstract = maxtext_engine_compile.AbstractMaxTextEngine(cfg, mesh, **wrap)
+      live = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh, **wrap)
+      cls._default_artifacts = (
+          abstract,
+          live,
+          {"abstract": _lower_tunix(abstract, cfg), "live": _lower_tunix(live, cfg)},
+      )
+    return cls._default_artifacts
+
+  def _assert_io_equivalent(self, actual, expected, label: str) -> None:
+    """Asserts two lowered `args_info`/`out_info` trees match in structure, dtype, shape, and device sharding."""
+    actual_leaves, actual_treedef = jax.tree.flatten(actual)
+    expected_leaves, expected_treedef = jax.tree.flatten(expected)
+    self.assertEqual(actual_treedef, expected_treedef, label)
+    for a, e in zip(actual_leaves, expected_leaves, strict=True):
+      if hasattr(a, "shape") and hasattr(e, "shape"):
+        self.assertEqual((a.shape, a.dtype), (e.shape, e.dtype), label)
+        a_sharding = getattr(a, "sharding", None)
+        e_sharding = getattr(e, "sharding", None)
+        self.assertEqual(
+            isinstance(a_sharding, jax.sharding.Sharding),
+            isinstance(e_sharding, jax.sharding.Sharding),
+            f"{label}: sharding presence mismatch ({a_sharding} vs {e_sharding})",
+        )
+        if isinstance(a_sharding, jax.sharding.Sharding) and isinstance(e_sharding, jax.sharding.Sharding):
+          self.assertEqual(a_sharding.memory_kind, e_sharding.memory_kind, label)
+          self.assertTrue(a_sharding.is_equivalent_to(e_sharding, len(a.shape)), f"{label}: {a_sharding} != {e_sharding}")
+      else:
+        self.assertEqual(a, e, label)
+
+  def test_abstract_engine_matches_live_engine(self):
+    abstract, live, lowered = self._get_default_artifacts()
+
+    for engine, label in ((abstract, "abstract"), (live, "live")):
+      self.assertIsInstance(engine.model, TunixMaxTextAdapter, label)
+      self.assertEqual(engine.model._pad_id, _QWEN35_PAD_ID, label)
+      self.assertIsNone(engine.model.config, label)
+    self.assertEqual(abstract.model.use_no_op_mappings, live.model.use_no_op_mappings)
+
+    for name in maxtext_engine_compile.KERNEL_NAMES:
+      with self.subTest(kernel=name):
+        self.assertEqual(
+            _digest(_stablehlo(lowered["abstract"][name])),
+            _digest(_stablehlo(lowered["live"][name])),
+            f"{name}: the abstract engine lowers a different program",
+        )
+        self._assert_io_equivalent(
+            lowered["abstract"][name].args_info,
+            lowered["live"][name].args_info,
+            f"{name}: abstract vs live args_info differ",
+        )
+        self._assert_io_equivalent(
+            lowered["abstract"][name].out_info,
+            lowered["live"][name].out_info,
+            f"{name}: abstract vs live out_info differ",
+        )
+
+  def test_pad_id_changes_hlo(self):
+    cfg = _qwen35_config(**_QWEN35_CP_AS_EP_OVERRIDES)
+    mesh = maxtext_utils.get_mesh_from_config(cfg)
+    _, _, default_lowered = self._get_default_artifacts()
+
+    abstract = maxtext_engine_compile.AbstractMaxTextEngine(
+        cfg, mesh, wrap_with_tunix_adapter=True, tokenizer_pad_id=_QWEN35_PAD_ID + 4
+    )
+    lowered_abstract = _lower_tunix(abstract, cfg)
+
+    self.assertNotEqual(
+        _digest(_stablehlo(lowered_abstract["fwd_bwd"])),
+        _digest(_stablehlo(default_lowered["live"]["fwd_bwd"])),
+        "a different pad id left fwd_bwd unchanged, so the parity test cannot see the wrap",
+    )
+
+
+_SUITE = (
+    EngineAotParityTest,
+    AbstractMaxTextEngineTest,
+    Zero1MemoryReportTest,
+    Qwen35CompileParityTest,
+)
+
+
+def _main(_argv):
+  """Runs all multi-device XAOT test suites inside the child subprocess."""
   if jax.device_count() < _REQUIRED_DEVICES:
     raise SystemExit(
         f"needs {_REQUIRED_DEVICES} devices, got {jax.device_count()}; run this through pytest, which sets "
@@ -1969,3 +2175,10 @@ if __name__ == "__main__":
   if not _result.wasSuccessful():
     sys.exit(1)
   print(f"{_SENTINEL} ran={_result.testsRun - len(_result.skipped)}")
+
+
+if __name__ == "__main__":
+  if _IN_CHILD:
+    app.run(_main, argv=[sys.argv[0]])
+  else:
+    absltest.main()

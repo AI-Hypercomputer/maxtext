@@ -35,6 +35,7 @@ from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 
 
@@ -243,12 +244,53 @@ class BaseTrainingHooks(GoodputTrainingHooks, abc.ABC):
     """Calculate the number of non-padded tokens in the batch."""
 
 
-class BaseDataHooks(DataHooks):
-  """Shared data hooks for post-training."""
+class _RestartableReorderedIterator:
+  """Applies the load-balanced context parallelism reorder to each batch of the wrapped iterator.
 
-  def __init__(self, config, mesh, goodput_recorder):
+  Tunix restarts a dataset by calling `iter()` on it, at the start of training and of every evaluation round, and
+  `MultiHostDataLoadIterator` rewinds in `__iter__`. Forwarding `iter()` keeps that behavior for wrapped iterators.
+  """
+
+  def __init__(self, reorder_fn, data_iterator):
+    self.reorder_fn = reorder_fn
+    self.data_iterator = data_iterator
+
+  def __iter__(self):
+    iter(self.data_iterator)
+    return self
+
+  def __next__(self):
+    return self.reorder_fn(next(self.data_iterator))
+
+
+class BaseDataHooks(DataHooks):
+  """Shared data hooks for post-training.
+
+  With `reorder_batches`, train and eval batches get the same load-balanced context parallelism reorder that
+  `setup_train_loop` applies in pre-training, whenever `max_utils.reordered_cp_size(config, mesh) > 1`.
+  """
+
+  def __init__(self, config, mesh, goodput_recorder, *, reorder_batches: bool = False):
     self.config = config
     self.train_data_iterator, self.eval_data_iterator = create_data_iterator(config, mesh)
+    reorder_cp_size = max_utils.reordered_cp_size(config, mesh) if reorder_batches else 1
+    if reorder_cp_size > 1:
+      reorder_strategy = max_utils.resolve_reorder_strategy(config)
+      max_logging.log(
+          f"Reordering post-training batches for CP size {reorder_cp_size} "
+          f"using {reorder_strategy} strategy in {config.shard_mode} mode"
+      )
+      reorder_fn = maxtext_utils.get_reorder_callable(
+          reorder_cp_size, config.shard_mode, reorder_strategy, config.hardware
+      )
+      if isinstance(self.train_data_iterator, list):
+        self.train_data_iterator = [
+            _RestartableReorderedIterator(reorder_fn, iterator) for iterator in self.train_data_iterator
+        ]
+      else:
+        self.train_data_iterator = _RestartableReorderedIterator(reorder_fn, self.train_data_iterator)
+      if self.eval_data_iterator is not None:
+        self.eval_data_iterator = _RestartableReorderedIterator(reorder_fn, self.eval_data_iterator)
     self.train_data_loader = DataLoader(config, mesh, self.train_data_iterator, goodput_recorder=goodput_recorder)
     self.train_batch = None
     self.eval_batch = None

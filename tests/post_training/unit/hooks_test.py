@@ -19,6 +19,7 @@ import json
 import os
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -32,10 +33,13 @@ from jax.sharding import Mesh
 import numpy as np
 
 from maxtext.configs import pyconfig
+from maxtext.input_pipeline import multihost_dataloading
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.trainers.post_train import hooks as post_train_hooks
 from maxtext.trainers.post_train.hooks import BaseDataHooks, BaseTrainingHooks, GoodputTrainingHooks
 from maxtext.common.metric_logger import MetricLogger
 from maxtext.utils import exceptions
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 
 
@@ -207,6 +211,87 @@ class BaseHooksTest(unittest.TestCase):
     data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
     with self.assertRaises(RuntimeError):
       data_hooks.load_next_eval_batch(self.mock_train_ctx)
+
+  @patch.object(post_train_hooks, "create_data_iterator")
+  def test_data_hooks_does_not_reorder_by_default(self, mock_create_data_iterator):
+    seq_len = 8
+    raw_batch = {"inputs": np.broadcast_to(np.arange(seq_len, dtype=np.int32), (jax.device_count(), seq_len))}
+    train_iter = iter([raw_batch])
+    eval_iter = iter([raw_batch])
+    mock_create_data_iterator.return_value = (train_iter, eval_iter)
+
+    with patch.object(max_utils, "reordered_cp_size", return_value=2):
+      data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
+
+    self.assertIs(data_hooks.train_data_iterator, train_iter)
+    self.assertIs(data_hooks.eval_data_iterator, eval_iter)
+    np.testing.assert_array_equal(
+        np.asarray(data_hooks.load_next_train_batch(self.mock_train_ctx)["inputs"]),
+        raw_batch["inputs"],
+    )
+    np.testing.assert_array_equal(
+        np.asarray(data_hooks.load_next_eval_batch(self.mock_train_ctx)["inputs"]),
+        raw_batch["inputs"],
+    )
+
+  @patch.object(post_train_hooks, "create_data_iterator")
+  def test_data_hooks_reorder_batches_respects_reordered_cp_size(self, mock_create_data_iterator):
+    seq_len = 8
+    raw_batch = {"inputs": np.broadcast_to(np.arange(seq_len, dtype=np.int32), (jax.device_count(), seq_len))}
+    train_iter = iter([raw_batch])
+    eval_iter = iter([raw_batch])
+    mock_create_data_iterator.return_value = (train_iter, eval_iter)
+
+    with patch.object(max_utils, "reordered_cp_size", return_value=1):
+      data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None, reorder_batches=True)
+    self.assertIs(data_hooks.train_data_iterator, train_iter)
+    self.assertIs(data_hooks.eval_data_iterator, eval_iter)
+
+    train_iter2 = iter([raw_batch])
+    eval_iter2 = iter([raw_batch])
+    mock_create_data_iterator.return_value = (train_iter2, eval_iter2)
+    with patch.object(max_utils, "reordered_cp_size", return_value=2):
+      data_hooks_cp = BaseDataHooks(self.config, self.mesh, goodput_recorder=None, reorder_batches=True)
+    expected = np.broadcast_to(np.array([0, 1, 6, 7, 2, 3, 4, 5], dtype=np.int32), (jax.device_count(), seq_len))
+    np.testing.assert_array_equal(
+        np.asarray(data_hooks_cp.load_next_train_batch(self.mock_train_ctx)["inputs"]),
+        expected,
+    )
+    np.testing.assert_array_equal(
+        np.asarray(data_hooks_cp.load_next_eval_batch(self.mock_train_ctx)["inputs"]),
+        expected,
+    )
+
+  @patch.object(post_train_hooks, "create_data_iterator")
+  def test_load_next_eval_batch_resets_reordered_iterator_after_stop_iteration(self, mock_create_data_iterator):
+    seq_len = 8
+    batches = [{"inputs": np.broadcast_to(np.arange(seq_len, dtype=np.int32), (jax.device_count(), seq_len))}]
+    eval_iter = multihost_dataloading.MultiHostDataLoadIterator(batches, self.mesh)
+    mock_create_data_iterator.return_value = (iter(batches), eval_iter)
+
+    config = pyconfig.initialize(
+        ["", os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
+        per_device_batch_size=1,
+        run_name="test",
+        base_output_directory=self.test_dir,
+        tensorboard_dir=self.test_dir,
+        eval_steps=-1,
+        skip_jax_distributed_system=True,
+    )
+    with patch.object(max_utils, "reordered_cp_size", return_value=2):
+      data_hooks = BaseDataHooks(config, self.mesh, goodput_recorder=None, reorder_batches=True)
+
+    train_ctx = SimpleNamespace(training_hooks=SimpleNamespace(eval_metadata={"eval_step_count": 0}))
+    iter(data_hooks.eval_data_iterator)
+    b1 = data_hooks.load_next_eval_batch(train_ctx)
+    self.assertIsNotNone(b1)
+    self.assertIsNone(data_hooks.load_next_eval_batch(train_ctx))
+
+    # Round 2 must reset inner MultiHostDataLoadIterator and yield batch 0 again.
+    iter(data_hooks.eval_data_iterator)
+    b2 = data_hooks.load_next_eval_batch(train_ctx)
+    self.assertIsNotNone(b2)
+    np.testing.assert_array_equal(np.asarray(b1["inputs"]), np.asarray(b2["inputs"]))
 
 
 if __name__ == "__main__":

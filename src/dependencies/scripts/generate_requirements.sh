@@ -68,14 +68,39 @@ fi
 
 ARTIFACT_DIR="$OUTPUT_DIR/python${PYTHON_VERSION//./_}"
 
+SEED_LOCAL_REQUIREMENTS="$BASE_REQUIREMENTS"
+if [[ -n "$OVERRIDE_REQUIREMENTS" ]]; then
+  # Apply exact (==) pins from OVERRIDE_REQUIREMENTS ahead of seed-env so
+  # pins that conflict with the JAX seed lock resolve without promoting >= floors.
+  _exact_pins_re="$(grep -E '^[^#[:space:];]+==' "$OVERRIDE_REQUIREMENTS" | sed 's/\[.*//; s/[[:space:]]*==.*//' | paste -sd'|' - || true)"
+  if [[ -n "$_exact_pins_re" ]]; then
+    SEED_LOCAL_REQUIREMENTS="$(mktemp)"
+    mkdir -p "$ARTIFACT_DIR"
+    trap 'rm -f "$SEED_LOCAL_REQUIREMENTS" "$ARTIFACT_DIR/uv.toml"' EXIT
+    {
+      echo "override-dependencies = ["
+      grep -E '^[^#[:space:];]+==' "$OVERRIDE_REQUIREMENTS" | sed 's/.*/  "&",/'
+      echo "]"
+    } > "$ARTIFACT_DIR/uv.toml"
+    while IFS= read -r _line; do
+      [[ "$_line" =~ ^-r[[:space:]]+(.+)$ ]] && cat "$(dirname "$BASE_REQUIREMENTS")/${BASH_REMATCH[1]}" || echo "$_line"
+    done < "$BASE_REQUIREMENTS" \
+      | grep -v '^\s*#' | grep -v '^\s*$' \
+      | grep -viE "^(${_exact_pins_re})([=<>!~\\[;[:space:]]|$)" > "$SEED_LOCAL_REQUIREMENTS" || true
+    grep -E '^[^#[:space:];]+==' "$OVERRIDE_REQUIREMENTS" >> "$SEED_LOCAL_REQUIREMENTS"
+  fi
+fi
+
 echo "=== Running seed-env with $BASE_REQUIREMENTS ==="
 "$SEED_ENV" \
-  --local-requirements "$BASE_REQUIREMENTS" \
+  --local-requirements "$SEED_LOCAL_REQUIREMENTS" \
   --host-name MaxText \
   --hardware "$HARDWARE" \
   --python-version "$PYTHON_VERSION" \
   --seed-commit "$SEED_COMMIT" \
   --output-dir "$OUTPUT_DIR"
+
+rm -f "$ARTIFACT_DIR/uv.toml"
 
 # Recursively expand a requirements file into a flat list of package specs,
 # following -r <file> includes and stripping comments.

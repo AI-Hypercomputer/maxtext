@@ -24,7 +24,9 @@ Nothing is materialized: the weights, the optimizer moments and the batch are al
 `jax.ShapeDtypeStruct`s, and the device mesh is a topology description rather than hardware.
 So a v5e-256 configuration can be compiled from a workstation, and an out-of-memory one
 reports the same `RESOURCE_EXHAUSTED` it would report on the target -- before the target is
-booked.
+booked. The kernels are traced under that mesh (`jax.set_mesh`), so those with a TPU
+implementation and a fallback compile the TPU one (`pltpu.is_tpu_device`), tiled for the
+topology's chip.
 
 Example, qwen3-0.6b on four v6e chips:
 
@@ -44,10 +46,10 @@ loss against a synthetic `RLTrainerPayload` micro-batch (configurable via `grpo_
 see `maxtext_engine_types.CompileConfig`).
 
 In addition to each kernel's raw `memory_analysis()`, `main` prints a per-device memory summary
-table and the overall `TRAIN-KERNEL DEVICE PEAK`. The summary subtracts aliased (donated) buffers
-that XLA counts in both arguments and outputs, and adds state that remains resident in HBM while a
-kernel runs without being passed as an argument (e.g., optimizer state during `fwd_bwd`, and model
-and optimizer state during `accumulate`).
+table and the overall `TRAIN-KERNEL DEVICE PEAK`. The summary subtracts aliased (donated) buffers that
+XLA counts in both arguments and outputs, and adds state that remains resident in HBM while a
+kernel runs without being passed as an argument (optimizer state and the running gradient accumulator
+during `fwd_bwd`, and model and optimizer state during `accumulate`).
 """
 
 from collections.abc import Sequence
@@ -61,7 +63,6 @@ from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import maxtext_engine_types
 from maxtext.configs import pyconfig
-from maxtext.integration.tunix.tunix_adapter import TunixMaxTextAdapter
 from maxtext.trainers.pre_train import train_compile as pre_train_compile
 from maxtext.training_engine import grpo_engine_compile
 from maxtext.training_engine import maxtext_engine
@@ -171,13 +172,7 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
         rng_key=self._init_rng,
     )
     if wrap_with_tunix_adapter:
-      with self._mesh:
-        abstract_model = TunixMaxTextAdapter(
-            base_model=abstract_model,
-            use_no_op_mappings="maxtext_config" in self._config.vllm_additional_config,
-            pad_id=tokenizer_pad_id,
-        )
-        abstract_model.config = None  # pyrefly: ignore[missing-attribute]
+      abstract_model = model_creation_utils.apply_tunix_adapter(abstract_model, self._config, tokenizer_pad_id)
     return abstract_model
 
   def _build_optimizer(self, tx: Any) -> Any:
@@ -307,14 +302,21 @@ def _engine_and_micro_batch(
   return AbstractMaxTextEngine(config, topology_mesh), get_shaped_micro_batch(config)
 
 
+def compile_engine(
+    config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh
+) -> tuple[AbstractMaxTextEngine, dict[str, Any]]:
+  """Lowers and compiles every kernel the engine runs, on `topology_mesh`, and keeps the engine."""
+  engine, micro_batch = _engine_and_micro_batch(config, topology_mesh)
+  return engine, engine.compile_kernels(micro_batch)
+
+
 def compile_engine_kernels(config: pyconfig.HyperParameters, topology_mesh: jax.sharding.Mesh) -> dict[str, Any]:
   """Lowers and compiles every kernel the engine runs, on `topology_mesh`.
 
   Returns:
     `{kernel name: jax.stages.Compiled}`, keyed by `KERNEL_NAMES`.
   """
-  engine, micro_batch = _engine_and_micro_batch(config, topology_mesh)
-  return engine.compile_kernels(micro_batch)
+  return compile_engine(config, topology_mesh)[1]
 
 
 def kernel_save_path(compiled_trainstep_file: str, kernel_name: str) -> str:

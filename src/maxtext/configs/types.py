@@ -1004,6 +1004,13 @@ class CompressedAttention(BaseModel):
       False,
       description="Whether to use Pallas TPU kernel for CSA StreamIndex score computation.",
   )
+  use_csa_vmap_selection_mask: bool = Field(
+      False,
+      description=(
+          "Build the CSA top-k selection mask with a vmapped scatter of the selected block ids instead of "
+          "a [batch, seq, k, compressed_len] broadcast-compare. Slower on TPU, where XLA fuses the compare."
+      ),
+  )
 
 
 class AttentionIndexer(BaseModel):
@@ -1698,19 +1705,21 @@ class MoEGeneral(BaseModel):
       description="Pack (expert_id << 20) | slot_idx into a single uint32 array for bit-exact single-operand routing"
       " argsort.",
   )
-  use_qwen3_fused_qkv: bool = Field(
+  use_fused_qkv_kernel: bool = Field(
       False,
-      description="Fuse Qwen3 QKV projection + QK RMSNorm + RoPE + Splash layout in Pallas kernel.",
+      description="Fuse the QKV projection + per-head QK RMSNorm + RoPE + Splash layout in a Pallas kernel"
+      " (self-attention with QK RMSNorm and standard RoPE, e.g. Qwen3).",
   )
-  use_qwen3_fused_out: bool = Field(
+  use_fused_out_kernel: bool = Field(
       False,
       description="Use custom-VJP FSDP Attention out projection with local absmax quantization and early overlapped"
       " weight-gradient reduce-scatter.",
   )
-  qwen3_defer_norm_grad_allreduce: bool = Field(
+  defer_norm_grad_allreduce: bool = Field(
       False,
       description="Defer per-layer RMSNorm and QK-norm scale gradient all-reduces across FSDP/data axes until after"
-      " the decoder layer scan loop.",
+      " the decoder layer scan loop. Takes effect in the scanned layers of decoder blocks that support it"
+      " (currently qwen3 / qwen3_moe); elsewhere it is a no-op with a warning.",
   )
   moe_tc_combine: bool = Field(
       False,
@@ -5347,6 +5356,51 @@ class MaxTextConfig(
     return self
 
   @model_validator(mode="after")
+  def validate_fused_attention_kernels(self) -> "MaxTextConfig":
+    """Checks the fused attention kernel flags and the deferred norm reduction against static config.
+
+    `use_fused_qkv_kernel` / `use_fused_out_kernel` fail fast on configs their `Attention` paths reject at trace
+    time. `defer_norm_grad_allreduce` is a no-op by design where the post-scan all-reduce does not run
+    (unscanned layers, FSDP prefetch, pipeline stages, explicit sharding); it then keeps the regular per-layer
+    all-reduce, so this only warns instead of leaving it silent. Sharding-dependent checks (tensor parallelism
+    on heads/embed) stay at trace time because they depend on the logical axis rules.
+    """
+    deferred_norm_blocks = (DecoderBlockType.QWEN3, DecoderBlockType.QWEN3_MOE)
+    # The fused kernels are model-agnostic: they take every model-dependent value (heads, head_dim, QK-norm eps,
+    # RoPE timescales, query_pre_attn_scalar) from the `Attention` layer, which rejects unsupported structure
+    # (non-RMSNorm QK norm, non-standard RoPE, projection bias, mRoPE / NoPE / vision, TP > 1) at trace time.
+    # Only the statically known requirements are checked here.
+    for flag in ("use_fused_qkv_kernel", "use_fused_out_kernel"):
+      if getattr(self, flag) and self.attention_type == "mla":
+        raise ValueError(f"{flag}=True does not support attention_type='mla'.")
+    if self.use_fused_qkv_kernel:
+      if not self.use_qk_norm:
+        raise ValueError("use_fused_qkv_kernel=True requires use_qk_norm=True (per-head QK RMSNorm).")
+      for name in ("fused_qkv", "share_kv_projections", "sa_qproj_bwd_bf16"):
+        if getattr(self, name):
+          raise ValueError(f"use_fused_qkv_kernel=True does not support {name}=True.")
+    if self.defer_norm_grad_allreduce:
+      unsupported = []
+      if self.decoder_block not in deferred_norm_blocks:
+        unsupported.append(f"decoder_block={self.decoder_block!r}")
+      if not self.scan_layers:
+        unsupported.append("scan_layers=False")
+      if self.prefetch_fsdp_weights:
+        unsupported.append("prefetch_fsdp_weights=True")
+      if self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1:
+        unsupported.append("pipeline parallelism")
+      if self.shard_mode != ShardMode.AUTO:
+        unsupported.append(f"shard_mode={self.shard_mode!r}")
+      if unsupported:
+        max_logging.warning(
+            "defer_norm_grad_allreduce=True has no effect with "
+            + ", ".join(unsupported)
+            + "; the norm scale gradients keep the regular per-layer all-reduce (the deferred all-reduce only runs"
+            " in the scanned layers of the supported decoder blocks: qwen3, qwen3_moe)."
+        )
+    return self
+
+  @model_validator(mode="after")
   def validate_qwix_multipass_quantization(self) -> "MaxTextConfig":
     """Validates `quantization=multipass` and its `qwix_*multipass_mode` / `qwix_multipass_tile_size` knobs."""
     modes = (self.qwix_multipass_mode, self.qwix_dlhs_multipass_mode, self.qwix_drhs_multipass_mode)
@@ -7138,16 +7192,30 @@ class MaxTextConfig(
           "Please disable attn_logits_soft_cap when using use_qk_clip."
       )
 
-    if self.experimental_sa_quant_q_fp8 and self.attention_type != "mla":
+    # fp8 Q/K for the Tokamax Splash kernel: MLA (attention_mla.py) and the GQA 'global' path
+    # (attentions.py, train mode only; cast after qk-norm, RoPE and query_pre_attn_scalar).
+    _sa_fp8_qk_attention_types = ("mla", "global")
+    if self.experimental_sa_quant_q_fp8 and self.attention_type not in _sa_fp8_qk_attention_types:
       raise ValueError(
           "Q quantization is currently only supported with"
-          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
+          f" attention_type in {_sa_fp8_qk_attention_types}. Found attention_type='{self.attention_type}'"
       )
-    if self.experimental_sa_quant_k_fp8 and self.attention_type != "mla":
+    if self.experimental_sa_quant_k_fp8 and self.attention_type not in _sa_fp8_qk_attention_types:
       raise ValueError(
           "K quantization is currently only supported with"
-          f" attention_type='mla'. Found attention_type='{self.attention_type}'"
+          f" attention_type in {_sa_fp8_qk_attention_types}. Found attention_type='{self.attention_type}'"
       )
+    if (self.experimental_sa_quant_q_fp8 or self.experimental_sa_quant_k_fp8) and self.attention_type == "global":
+      if not (self.use_tokamax_splash and self.attention == "flash"):
+        raise ValueError(
+            "experimental_sa_quant_q_fp8/experimental_sa_quant_k_fp8 with attention_type='global' require"
+            " use_tokamax_splash=True and attention='flash'."
+        )
+      if self.context_parallel_strategy.lower() in ("ring", "usp"):
+        raise ValueError(
+            "experimental_sa_quant_q_fp8/experimental_sa_quant_k_fp8 with attention_type='global' are not"
+            f" supported with context_parallel_strategy '{self.context_parallel_strategy}'."
+        )
     if self.sa_diag_band_skip:
       if not (self.use_tokamax_splash and self.attention == "flash" and self.sa_qk_diag_skip):
         raise ValueError(
@@ -7176,9 +7244,12 @@ class MaxTextConfig(
             "sa_q_prescaled_log2e requires experimental_sa_quant_q_fp8=True, sa_use_base2_exp=True,"
             " use_tokamax_splash=True and attention='flash'."
         )
-      # The LOG2E fold is only in the MLA query path (attention_mla.py).
-      if self.attention_type != "mla":
-        raise ValueError(f"sa_q_prescaled_log2e only supports attention_type='mla'; got '{self.attention_type}'.")
+      # The LOG2E fold lives in the MLA query path (attention_mla.py) and in the GQA 'global' path
+      # (attentions.py: folded into query_pre_attn_scalar before the single fp8 rounding).
+      if self.attention_type not in ("mla", "global"):
+        raise ValueError(
+            f"sa_q_prescaled_log2e only supports attention_type in ('mla', 'global'); got '{self.attention_type}'."
+        )
       if self.use_mla_absorbed_mqa:
         raise ValueError("sa_q_prescaled_log2e is not supported with use_mla_absorbed_mqa=True.")
       # Ring and USP context parallelism use MaxText's vendored splash kernel (natural exp, no

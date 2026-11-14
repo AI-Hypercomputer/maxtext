@@ -138,8 +138,8 @@ jobs:
           # mutable. All nine jax_* tags for a given date resolve to the same digest.
           # TODO: restore ":latest" once the compiler regression is fixed upstream.
           PATHWAYS_IMAGES = {
-              "cloud-tpu-v2-images/pathways/server": "sha256:6fb1399d265fc4532805bfb04d6f44a596b3111e30c7f2e4d9fafe98adf7456b",
-              "cloud-tpu-v2-images/pathways/proxy_server": "sha256:57781f09427eb2f1863672c04b239ed5fce41e05e598da4c071880ce3eef51d5",
+              "cloud-tpu-v2-images/pathways/server": "sha256:b7a1b9566d869e6f797910c87f9bf769cfe29969a28f2f6f2468f2b15db1ae71",
+              "cloud-tpu-v2-images/pathways/proxy_server": "sha256:afda1e6f321ab31c0fd9c9f319f7cbb8a8f88d75be245a652fef34945154c87c",
           }
 
           def extract_image_layers(repo):

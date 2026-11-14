@@ -399,9 +399,9 @@ moe_fused_gmm3d_relayout_x_2d_to_3d: false # use Pallas VMEM strided-store relay
 moe_fused_gmm3d_fused_quant_relayout: false # fuse FP8 quantize + [N, D] -> [N, D//128, 128] relayout in VMEM for x2d.
 moe_fused_gmm3d_overlap_dcoeffs_scatter: false # overlap unique-index dcoeffs SparseCore scatter behind MoE wgrad + gate_dx.
 moe_packed_routing_sort: false # pack (expert_id << 20) | slot_idx into a single uint32 array for routing argsort.
-use_qwen3_fused_qkv: false # fuse Qwen3 QKV projection + QK RMSNorm + RoPE + Splash layout in Pallas kernel.
-use_qwen3_fused_out: false # use custom-VJP FSDP Attention out projection with local absmax bwd and early dw_o reduce-scatter.
-qwen3_defer_norm_grad_allreduce: false # defer per-layer RMSNorm and QK-norm scale gradient all-reduces until after the decoder scan loop.
+use_fused_qkv_kernel: false # fuse the QKV projection + per-head QK RMSNorm + RoPE + Splash layout in a Pallas kernel (self-attention with QK RMSNorm and standard RoPE, e.g. Qwen3).
+use_fused_out_kernel: false # use custom-VJP FSDP Attention out projection with local absmax bwd and early dw_o reduce-scatter.
+defer_norm_grad_allreduce: false # defer per-layer RMSNorm and QK-norm scale gradient all-reduces until after the decoder scan loop (scanned qwen3 / qwen3_moe decoder layers; no-op with a warning elsewhere).
 # Experimental fused TensorCore Pallas kernels for MoE combine and permute on v6e (kernels/moe_combine_tc.py).
 moe_tc_combine: false # experimental; requires sparse_matmul=true, use_ring_of_experts=false, use_ragged_sort=false, and EP=1
 moe_tc_combine_block_tokens: 256 # tokens per grid step (power of two >= 128)
@@ -712,6 +712,7 @@ o_groups: 0 # Output groups for Compressed Attention.
 compress_ratios: [] # Per-layer compression ratios (0, 4, 128, etc).
 compressed_rope_max_timescale: 160_000 # If positive, used for Compressed Sparse/Heavy Attention.
 use_csa_streamindex_kernel: false # Whether to use Pallas TPU kernel for CSA StreamIndex score computation.
+use_csa_vmap_selection_mask: false # Build the CSA top-k selection mask with a vmapped scatter instead of a broadcast-compare (slower on TPU, where XLA fuses the compare).
 
 # QK-Clip (Muon Clip) Configuration
 use_qk_clip: false  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)

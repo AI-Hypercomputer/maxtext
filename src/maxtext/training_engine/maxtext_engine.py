@@ -439,11 +439,15 @@ def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutpu
   )
 
 
-def _to_aval(value: Any) -> Any:
-  """Returns `value` as a `jax.ShapeDtypeStruct` on the sharding it carries, or unchanged if it has no shape."""
+def _to_aval(value: Any, target_sharding: jax.sharding.Sharding | None = None) -> Any:
+  """Returns `value` as a `jax.ShapeDtypeStruct` on `target_sharding` or its own, or unchanged if it has no shape."""
   if not hasattr(value, "shape") or not hasattr(value, "dtype"):
     return value
-  return jax.ShapeDtypeStruct(value.shape, value.dtype, sharding=getattr(value, "sharding", None))
+  return jax.ShapeDtypeStruct(
+      value.shape,
+      value.dtype,
+      sharding=target_sharding if target_sharding is not None else getattr(value, "sharding", None),
+  )
 
 
 def _row_and_mask(payload: abstract_engine.RLTrainerPayload) -> tuple[jax.Array, jax.Array]:
@@ -1737,6 +1741,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     data_spec = self._input_data_spec()
     return jax.tree.map(lambda leaf: self._leaf_data_sharding(leaf, data_spec), dynamic_batch)
 
+  def _place_batch_inputs(self, inputs: Any) -> Any:
+    """Commits a batch's array leaves to the shardings `_compile_for_batch` would use."""
+    if self._mesh is None:
+      return inputs
+    data_spec = self._input_data_spec()
+
+    def place(leaf: Any) -> Any:
+      if not isinstance(leaf, (jax.Array, np.ndarray)):
+        return leaf
+      if leaf.ndim == 0 or 0 in leaf.shape:
+        return leaf
+      if isinstance(leaf, jax.Array) and not leaf.is_fully_addressable:
+        return leaf
+      target = self._leaf_data_sharding(leaf, data_spec)
+      if target is None or getattr(leaf, "sharding", None) == target:
+        return leaf
+      return jax.device_put(leaf, target)
+
+    return jax.tree.map(place, inputs)
+
   def _fwd_only_data_shardings(self, payload: Any) -> Any:
     """Builds per-leaf input shardings for `fwd_only`, keeping rank-0 and empty arrays replicated."""
     data_spec = self._input_data_spec()
@@ -2009,9 +2033,26 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _xla_options(self, compiler_options: dict[str, Any] | None) -> dict[str, Any] | None:
     """Returns the XLA options to compile with: the caller's, or `config.compile_xla_flags`."""
-    if compiler_options is None and getattr(self._config, "compile_xla_flags", ""):
+    if compiler_options is None and self._config.compile_xla_flags:
       return max_utils.parse_libtpu_flags_to_dict(self._config.compile_xla_flags)
     return compiler_options
+
+  def _mesh_avals(self, tree: Any) -> Any:
+    """Turns array leaves into `ShapeDtypeStruct`s on their mesh shardings."""
+    if self._mesh is None:
+      return jax.tree.map(_to_aval, tree)
+    return jax.tree.map(lambda leaf: _to_aval(leaf, self._mesh_sharding(leaf)), tree)
+
+  def _batch_avals(self, dynamic_batch: Any) -> Any:
+    """Turns dynamic batch leaves into `ShapeDtypeStruct`s on the engine's input data shardings.
+
+    `jit.trace` / `jit.lower` inspects each `ShapeDtypeStruct`'s own `.sharding` during tracing
+    rather than applying `in_shardings` first, so unsharded host batches must carry their target
+    mesh shardings explicitly.
+    """
+    if self._mesh is None:
+      return jax.tree.map(_to_aval, dynamic_batch)
+    return jax.tree.map(_to_aval, dynamic_batch, self._batch_data_shardings(dynamic_batch))
 
   def _compile_eval(self, dummy_data: abstract_engine.TrainerPayload, compiler_options: dict[str, Any] | None) -> None:
     """Compiles the forward-only eval kernel, so the first `eval_step` does not stall on XLA.
@@ -2028,9 +2069,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # `_compile_eval_for_batch` leaves the jitted wrapper here; lowering it replaces it with
       # what it compiles to, which is what `eval_step` then dispatches through.
       self._compiled_eval = self._compiled_eval.lower(
-          jax.tree.map(_to_aval, params_pure),
-          jax.tree.map(_to_aval, rest_pure),
-          jax.tree.map(_to_aval, dynamic_batch),
+          self._mesh_avals(params_pure),
+          self._mesh_avals(rest_pure),
+          self._batch_avals(dynamic_batch),
       ).compile(compiler_options=self._xla_options(compiler_options))
 
   def _lower_kernels(self, dummy_data: abstract_engine.TrainerPayload) -> dict[str, jax.stages.Lowered]:
@@ -2060,20 +2101,22 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
     self._compile_for_batch(dynamic_batch, static_batch)
 
-    state_aval = jax.tree.map(_to_aval, self._read_state_pure())
+    state_aval = self._mesh_avals(self._read_state_pure())
     params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
-    params_aval = jax.tree.map(_to_aval, params_pure)
-    rest_aval = jax.tree.map(_to_aval, rest_pure)
-    batch_aval = jax.tree.map(_to_aval, dynamic_batch)
+    params_aval = self._mesh_avals(params_pure)
+    rest_aval = self._mesh_avals(rest_pure)
+    batch_aval = self._batch_avals(dynamic_batch)
     mean_loss_aval = jax.ShapeDtypeStruct((), jnp.float32) if self._config.skip_step_on_spikes else None
 
     with self._sharding_ctx():
-      fwd_bwd = self._jitted_kernels["fwd_bwd"].lower(params_aval, rest_aval, batch_aval)
+      fwd_bwd_traced = self._jitted_kernels["fwd_bwd"].trace(params_aval, rest_aval, batch_aval)
       # Off the kernel's own outputs, not predicted from the parameters: the gradients differ by
-      # `grad_dtype` and, under deferral, an `unreduced` tag.
-      _, _, _, grads_aval, denominator_aval = fwd_bwd.out_info
-      # The running sum holds every leaf in `grad_dtype`, including those `fwd_bwd`
-      # returns uncast.
+      # `grad_dtype` and, under deferral, an `unreduced` tag. Read from `Traced` before lowering,
+      # because `Lowered.out_info` exposes LoJax's device-local shape and partitions rather than
+      # the `unreduced` spec.
+      _, _, _, grads_aval, denominator_aval = fwd_bwd_traced.out_info
+      fwd_bwd = fwd_bwd_traced.lower()
+      # The running sum holds every leaf in `grad_dtype`, including those `fwd_bwd` returns uncast.
       acc_grads_aval = jax.tree.map(self._to_grad_dtype, grads_aval)
       return {
           "fwd_bwd": fwd_bwd,
@@ -2123,14 +2166,24 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       signature = _batch_signature(dynamic_batch, static_batch)
       if not self._compiled or self._needs_recompile(signature, self._compiled_signature):
         self._compile_for_batch(dynamic_batch, static_batch)
+      with self._sharding_ctx():
+        # Lazy `jax.jit` traces host NumPy batches as replicated before applying `in_shardings`,
+        # so place uncompiled batches on the target data shardings before tracing.
+        inputs = (
+            self._place_batch_inputs(dynamic_batch)
+            if self._mesh is not None and not isinstance(self._compiled_fwd_bwd, jax.stages.Compiled)
+            else dynamic_batch
+        )
       # The compiled `fwd_bwd` closes over the static half, so it is passed the traced one only.
-      fwd_bwd_kernel, accumulate_kernel, inputs = self._compiled_fwd_bwd, self._compiled_accumulate, dynamic_batch
+      fwd_bwd_kernel, accumulate_kernel = self._compiled_fwd_bwd, self._compiled_accumulate
     else:
       # Offload optimizer state to pinned host memory when enabled before eager execution; skip
       # Zero-1 sharding because eager `_update_kernel` expects un-Zero-1'd optimizer leaves.
       if self._optimizer_offload_enabled():
         self._settle_state(shard_zero1=False)
-      fwd_bwd_kernel, accumulate_kernel, inputs = self._fwd_bwd_kernel, self._accumulate_kernel, batch
+      with self._sharding_ctx():
+        inputs = self._place_batch_inputs(batch) if self._reduced_params_shardings is not None else batch
+      fwd_bwd_kernel, accumulate_kernel = self._fwd_bwd_kernel, self._accumulate_kernel
     # After any recompile, not before: reading first would hand the new kernel a pure
     # state split against the old graph.
     params, rest = self._read_model_pure(model)
@@ -2285,7 +2338,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         signature = _batch_signature(dynamic_batch, static_batch)
         if self._compiled_eval is None or self._needs_recompile(signature, self._compiled_eval_signature):
           self._compile_eval_for_batch(dynamic_batch, static_batch)
-        loss, aux = self._compiled_eval(params, rest, dynamic_batch)
+        inputs = (
+            self._place_batch_inputs(dynamic_batch)
+            if self._mesh is not None and not isinstance(self._compiled_eval, jax.stages.Compiled)
+            else dynamic_batch
+        )
+        loss, aux = self._compiled_eval(params, rest, inputs)
       else:
         loss, aux = self._eval_kernel(params, rest, batch)
 

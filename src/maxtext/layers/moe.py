@@ -2642,6 +2642,20 @@ class RoutedMoE(nnx.Module):
         return quantize_dtype, quantize_dtype
       return None, None
 
+    def localize_groups(inputs, num_local_groups, group_sizes, group_offset):
+      """Moves the rows of groups [group_offset, group_offset + num_local_groups) to the front of `inputs`.
+
+      Backends without a `group_offset` read their groups from row 0. Returns `(inputs, local_group_sizes,
+      row_start)`, where `row_start` is the shift for `jnp.roll(output, row_start, axis=0)`, or `None` when
+      `group_offset` is statically 0.
+      """
+      start = 0 if group_offset is None else group_offset
+      local_group_sizes = jax.lax.dynamic_slice_in_dim(group_sizes, start, num_local_groups)
+      if isinstance(start, int) and start == 0:
+        return inputs, local_group_sizes, None
+      row_start = jnp.sum(jnp.where(jnp.arange(group_sizes.shape[0]) < start, group_sizes, 0))
+      return jnp.roll(inputs, -row_start, axis=0), local_group_sizes, row_start
+
     def te_grouped_dense_gmm(inputs, kernel, group_sizes, group_offset, bias=None):
       """Grouped GEMM via TransformerEngine `grouped_dense` (custom VJP).
 
@@ -2657,15 +2671,7 @@ class RoutedMoE(nnx.Module):
       # pylint: disable=import-outside-toplevel
       from transformer_engine.jax.dense import grouped_dense
 
-      num_local_experts = kernel.shape[0]
-      start = 0 if group_offset is None else group_offset
-      te_group_sizes = jax.lax.dynamic_slice_in_dim(group_sizes, start, num_local_experts)
-      # With a group_offset the local groups' rows follow those of groups [0, group_offset), as in
-      # megablox. TE has no group offset and reads from row 0, so rotate those rows to the front.
-      row_start = None
-      if not (isinstance(start, int) and start == 0):
-        row_start = jnp.sum(jnp.where(jnp.arange(group_sizes.shape[0]) < start, group_sizes, 0))
-        inputs = jnp.roll(inputs, -row_start, axis=0)
+      inputs, te_group_sizes, row_start = localize_groups(inputs, kernel.shape[0], group_sizes, group_offset)
       # TE asserts lhs.dtype == rhs.dtype and reuses that dtype in its custom VJP,
       # so a wider `preferred_element_type` also fails in the backward pass. The
       # GPT-OSS GLU can hand `wo` f32 activations while the experts stay bf16;
@@ -2791,6 +2797,11 @@ class RoutedMoE(nnx.Module):
 
       if is_tokamax_v1_unquantized:
         # tokamax v1 (unquantized)
+        if not (group_offset is None or (isinstance(group_offset, int) and group_offset == 0)):
+          raise NotImplementedError(
+              "tokamax ragged_dot (use_tokamax_gmm=True, use_gmm_v2=False) does not support a non-zero "
+              "group_offset, which ring-of-experts ragged sort uses when the ragged buffer holds every routed row."
+          )
         output = tokamax.ragged_dot(
             lhs=inputs,
             rhs=kernel,
@@ -2851,15 +2862,22 @@ class RoutedMoE(nnx.Module):
             **({"tc_routing": tc_routing, "tc_unsort_cfg": tc_unsort_cfg} if tc_unsort_cfg is not None else {}),
         )
       else:
-        # jax.lax.ragged_dot
+        # jax.lax.ragged_dot takes no group_offset and expects one group per expert in `kernel`.
+        inputs, local_group_sizes, row_start = localize_groups(inputs, kernel.shape[0], group_sizes, group_offset)
+        if isinstance(kernel, aqt.QTensor) and (row_start is not None or local_group_sizes.shape != group_sizes.shape):
+          raise NotImplementedError(
+              "ragged_dot with a quantized kernel does not support a group_offset or more groups than kernel experts."
+          )
         output = jax_ragged_dot_gmm(
             inputs,
             kernel,
             tiling,
-            group_sizes,
+            local_group_sizes,
             expert_assignments,
             padding_amount,
         )
+        if row_start is not None:
+          output = jnp.roll(output, row_start, axis=0)
 
       def unpad(t):
         if padding_amount == 0:
@@ -3628,38 +3646,38 @@ class RoutedMoE(nnx.Module):
           return layer_w0, layer_w1, w0, w1
         return layer_w0, layer_w1
 
-    def valid_token_count(x, routing, route_metadata):
-      """Rows of `x` the gmm actually computes; the rest is ragged-buffer padding."""
+    def local_gmm_groups(x, routing, route_metadata):
+      """Returns the group sizes and group offset of this shard's experts in `x`."""
       num_ep = self.get_expert_parallelism_size()
       num_experts_per_shard = self.config.num_experts // num_ep
       if self.config.use_ring_of_experts and x.shape[0] < routing.sorted_selected_experts.shape[0]:
-        return jnp.sum(routing.local_group_sizes)
+        return routing.local_group_sizes, 0
       if self.config.use_ragged_sort and self.config.use_ring_of_experts:
-        experts_start = route_metadata.expert_shard_id * num_experts_per_shard
-        return jnp.sum(jax.lax.dynamic_slice_in_dim(routing.group_sizes, experts_start, num_experts_per_shard))
-      return jnp.sum(routing.group_sizes)
+        return routing.group_sizes, route_metadata.expert_shard_id * num_experts_per_shard
+      return routing.group_sizes, 0
+
+    def local_rows_mask(x, routing, route_metadata):
+      """Returns a mask for the rows of `x` that belong to this shard's experts."""
+      group_sizes, group_offset = local_gmm_groups(x, routing, route_metadata)
+      num_experts_per_shard = self.config.num_experts // self.get_expert_parallelism_size()
+      group_ends = jnp.cumulative_sum(group_sizes, include_initial=True)
+      rows = jnp.arange(x.shape[0])
+      return (rows >= group_ends[group_offset]) & (rows < group_ends[group_offset + num_experts_per_shard])
+
+    def local_expert_ids(x, routing, route_metadata):
+      """Returns per-row local expert ids for `x`. Values outside `local_rows_mask` are unused."""
+      _, group_offset = local_gmm_groups(x, routing, route_metadata)
+      num_experts_per_shard = self.config.num_experts // self.get_expert_parallelism_size()
+      return jnp.clip(routing.selected_experts - group_offset, 0, num_experts_per_shard - 1)
 
     def get_gmm_for_local_experts(x, routing, route_metadata):
       """Return a partial GMM function with preconfigured routing params."""
-      num_ep = self.get_expert_parallelism_size()
-      num_experts_per_shard = self.config.num_experts // num_ep
-      if self.config.use_ring_of_experts and x.shape[0] < routing.sorted_selected_experts.shape[0]:
-        local_group_sizes = routing.local_group_sizes
-        return functools.partial(
-            gmm,
-            group_sizes=local_group_sizes,
-            expert_assignments=routing.selected_experts,
-            group_offset=0,
-        )
-      if self.config.use_ragged_sort and self.config.use_ring_of_experts:
-        experts_start = route_metadata.expert_shard_id * num_experts_per_shard
-      else:
-        experts_start = 0
+      group_sizes, group_offset = local_gmm_groups(x, routing, route_metadata)
       return functools.partial(
           gmm,
-          group_sizes=routing.group_sizes,
+          group_sizes=group_sizes,
           expert_assignments=routing.selected_experts,
-          group_offset=experts_start,
+          group_offset=group_offset,
       )
 
     def unsort_output_and_ra2a(
@@ -3767,12 +3785,13 @@ class RoutedMoE(nnx.Module):
       )
 
       if self.config.mlp_bias:
+        bias_experts = local_expert_ids(cur_x_chunk, routing, route_metadata)
         if not self.config.use_te_grouped_gemm:
-          w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
+          w0_bias, w1_bias, wo_bias = self.transform_bias(bias_experts, w0_bias, w1_bias, wo_bias)
         elif self.get_tensor_parallelism_size() > 1:
           # TE fuses per-expert wi bias in the GEMM. wo bias is added after
           # psum_scatter, so index it per token like the non-TE path.
-          (wo_bias,) = self.transform_bias(routing.selected_experts, wo_bias)
+          (wo_bias,) = self.transform_bias(bias_experts, wo_bias)
 
       partial_sum0 = jnp.zeros((cur_x_chunk.shape[0], w0.shape[-1]), dtype=cur_x_chunk.dtype)
       partial_sum1 = jnp.zeros((cur_x_chunk.shape[0], w1.shape[-1]), dtype=cur_x_chunk.dtype)
@@ -3818,11 +3837,7 @@ class RoutedMoE(nnx.Module):
       last_w0 = jax.lax.dynamic_slice_in_dim(w0, (self.config.num_moe_emb_chunks - 1) * chunk_dim, chunk_dim, axis=1)
       last_w1 = jax.lax.dynamic_slice_in_dim(w1, (self.config.num_moe_emb_chunks - 1) * chunk_dim, chunk_dim, axis=1)
       gmm_fn = get_gmm_for_local_experts(last_x_chunk, routing, route_metadata)
-      mask = (
-          jnp.arange(last_x_chunk.shape[0]) < valid_token_count(last_x_chunk, routing, route_metadata)
-          if self.config.mlp_bias
-          else None
-      )
+      mask = local_rows_mask(last_x_chunk, routing, route_metadata) if self.config.mlp_bias else None
       output0, output1 = gmm_up(
           last_x_chunk,
           last_w0,
@@ -3898,15 +3913,16 @@ class RoutedMoE(nnx.Module):
         x = jax.tree.map(_cn, x)
         routing = jax.tree.map(_cn, routing)
         route_metadata = jax.tree.map(_cn, route_metadata)
-        mask = jnp.arange(x.shape[0]) < valid_token_count(x, routing, route_metadata)
+        mask = local_rows_mask(x, routing, route_metadata)
 
         if self.config.mlp_bias:
+          bias_experts = local_expert_ids(x, routing, route_metadata)
           if not self.config.use_te_grouped_gemm:
-            w0_bias, w1_bias, wo_bias = self.transform_bias(routing.selected_experts, w0_bias, w1_bias, wo_bias)
+            w0_bias, w1_bias, wo_bias = self.transform_bias(bias_experts, w0_bias, w1_bias, wo_bias)
           elif self.get_tensor_parallelism_size() > 1:
             # TE fuses per-expert wi bias in the GEMM. wo bias is added after
             # psum_scatter, so index it per token like the non-TE path.
-            (wo_bias,) = self.transform_bias(routing.selected_experts, wo_bias)
+            (wo_bias,) = self.transform_bias(bias_experts, wo_bias)
 
         gmm_fn = get_gmm_for_local_experts(x, routing, route_metadata)
         up_res = gmm_up(
@@ -4004,7 +4020,7 @@ class RoutedMoE(nnx.Module):
             tiled=True,
         )
       if self.config.mlp_bias:
-        mask = jnp.arange(intermediate_output.shape[0]) < valid_token_count(intermediate_output, routing, route_metadata)
+        mask = local_rows_mask(intermediate_output, routing, route_metadata)
         if not use_te_wo_bias:
           if tc_prescaled:
             # The unsort skips the routing weights, so weight the bias too: w * (h @ wo + b) = (w * h) @ wo + w * b.

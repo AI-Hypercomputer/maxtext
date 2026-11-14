@@ -3676,18 +3676,15 @@ class TeGroupedGemmTest(unittest.TestCase):
         **{"megablox": False, **overrides},
     )
 
-  def _run_te_vs_ragged_dot(self, expert_parallelism, mlp_bias=False, ref_overrides=None, **overrides):
-    """Compares forward, loss and gradients of the TE grouped GEMM path against ragged_dot on shared weights.
-
-    `ref_overrides` apply to the ragged_dot reference only, on top of `overrides`.
-    """
+  def _run_te_vs_ragged_dot(self, expert_parallelism, mlp_bias=False, **overrides):
+    """Compares forward, loss and gradients of the TE grouped GEMM path against ragged_dot on shared weights."""
     _skip_unless_te_single_local_device(self)
     if jax.device_count() < expert_parallelism:
       self.skipTest(f"EP={expert_parallelism} needs >= {expert_parallelism} devices, got {jax.device_count()}")
 
     seq_len = 16
     batch_size = max(4, jax.device_count())
-    cfg_ref = self._te_cfg(False, expert_parallelism, mlp_bias, **{**overrides, **(ref_overrides or {})})
+    cfg_ref = self._te_cfg(False, expert_parallelism, mlp_bias, **overrides)
     cfg_te = self._te_cfg(True, expert_parallelism, mlp_bias, **overrides)
     devices_array = maxtext_utils.create_device_mesh(cfg_ref)
     mesh = Mesh(devices_array, cfg_ref.mesh_axes)
@@ -3760,24 +3757,29 @@ class TeGroupedGemmTest(unittest.TestCase):
       self.skipTest(f"EP over all devices needs >= 2 devices, got {jax.device_count()}")
     self._run_te_vs_ragged_dot(jax.device_count())
 
-  def test_ragged_sort(self):
+  def _run_ragged_sort(self, mlp_bias):
     """Forward and backward match ragged_dot with the ragged-sort ring-of-experts path.
 
-    When the ragged buffer holds every routed row (EP=2 here), ring_ragged_sort keeps rows at their
-    global positions and gmm gets the global group sizes with a non-zero group_offset on every shard
-    but the first. jax_ragged_dot_gmm ignores group_offset, so the reference runs the same path on
-    megablox.
+    When the ragged buffer holds every routed row, `ring_ragged_sort` keeps rows at their global
+    positions and passes a non-zero `group_offset` on every shard after the first. TE and `ragged_dot`
+    share `localize_groups`, which `RingOfExpertsMeshTest` checks against a single-device reference.
     """
     if jax.device_count() < 2:
       self.skipTest(f"use_ragged_sort needs EP > 1, got {jax.device_count()} devices")
     self._run_te_vs_ragged_dot(
         jax.device_count(),
-        ref_overrides={"megablox": True},
+        mlp_bias=mlp_bias,
         use_ring_of_experts=True,
         use_ragged_sort=True,
         capacity_factor=3.0,
         ragged_buffer_factor=3.0,
     )
+
+  def test_ragged_sort(self):
+    self._run_ragged_sort(mlp_bias=False)
+
+  def test_ragged_sort_mlp_bias(self):
+    self._run_ragged_sort(mlp_bias=True)
 
   def test_f32_wo_activations(self):
     """wo GMM must accept f32 activations against bf16 expert weights."""
@@ -3885,6 +3887,125 @@ class TeGroupedGemmConfigTest(parameterized.TestCase):
           dtype=cfg.dtype,
           rngs=nnx.Rngs(params=0),
       )
+
+
+class RingOfExpertsMeshTest(parameterized.TestCase):
+  """Checks forward, input, and weight gradients of ring-of-experts MoE against a single-device reference.
+
+  Ring of experts all-gathers the tokens, so each expert shard's gmm input holds rows for every expert. With
+  ragged sort and a full buffer, rows stay at their global positions and `gmm` gets a non-zero `group_offset`.
+  Without ragged sort, `permute` rolls the shard's experts to the front. Tests `ragged_dot` and `megablox` in
+  interpret mode with `mlp_bias=True`, so a row that gets another expert's bias fails the test.
+  """
+
+  _EXPERT_PARALLELISM = 2
+  _SEQ_LEN = 8
+  _LAYOUTS = {
+      # The ragged buffer holds every routed row, so rows keep their global positions.
+      "ragged_sort_full": {
+          "use_ring_of_experts": True,
+          "use_ragged_sort": True,
+          "ragged_buffer_factor": _EXPERT_PARALLELISM,
+      },
+      "ring_of_experts": {"use_ring_of_experts": True},
+  }
+
+  _references = {}
+
+  def setUp(self):
+    super().setUp()
+    if jax.device_count() < self._EXPERT_PARALLELISM:
+      self.skipTest(
+          f"Needs {self._EXPERT_PARALLELISM} devices, "
+          f"e.g. XLA_FLAGS=--xla_force_host_platform_device_count={self._EXPERT_PARALLELISM}."
+      )
+
+  def _cfg(self, expert_parallelism, **overrides):
+    return pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="ring_of_experts_mesh_test",
+        enable_checkpointing=False,
+        # hardware="cpu" disables megablox, whereas hardware="gpu" runs it in interpret mode off TPU.
+        hardware="gpu",
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        sparse_matmul=True,
+        ici_expert_parallelism=expert_parallelism,
+        skip_jax_distributed_system=True,
+        # Two experts per shard give the second shard a non-zero group_offset and distinct local biases.
+        num_experts=2 * self._EXPERT_PARALLELISM,
+        num_experts_per_tok=1,
+        per_device_batch_size=1,
+        max_target_length=self._SEQ_LEN,
+        base_emb_dim=8,
+        base_mlp_dim=8,
+        base_moe_mlp_dim=8,
+        mlp_bias=True,
+        float32_gate_logits=True,
+        **{"megablox": False, **overrides},
+    )
+
+  def _run(self, cfg, variables=None):
+    """Returns the host variables, output, input gradient, and variable gradients."""
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    model = linen_wrappers.to_linen(
+        moe.RoutedMoE,
+        name="MoeBlock",
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=mesh,
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        intermediate_dim=cfg.mlp_dim,
+        dtype=cfg.dtype,
+    )
+    x = jax.random.normal(
+        jax.random.PRNGKey(42),
+        (cfg.per_device_batch_size * jax.device_count(), self._SEQ_LEN, cfg.base_emb_dim),
+        jnp.bfloat16,
+    )
+
+    def loss(x, variables):
+      out, *_ = model.apply(variables, x)
+      return jnp.sum(out.astype(jnp.float32) ** 2), out
+
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      if variables is None:
+        variables = jax.jit(model.init)({"params": jax.random.PRNGKey(0)}, x)
+        # The biases start at zero; make them differ per expert so a bias of the wrong expert shows.
+        variables = jax.tree_util.tree_map_with_path(
+            lambda path, v: (
+                v + 0.1 * jax.random.normal(jax.random.PRNGKey(1), v.shape, v.dtype)
+                if "bias" in jax.tree_util.keystr(path)
+                else v
+            ),
+            variables,
+        )
+        variables = jax.device_get(variables)
+      (_, out), (dx, dvars) = jax.jit(jax.value_and_grad(loss, argnums=(0, 1), has_aux=True))(x, variables)
+    return variables, jax.device_get(out), jax.device_get(dx), jax.device_get(dvars)
+
+  def _reference(self):
+    if "no_ep" not in self._references:
+      self._references["no_ep"] = self._run(self._cfg(1))
+    return self._references["no_ep"]
+
+  def _assert_close(self, name, actual, expected, threshold=2e-2):
+    actual, expected = np.asarray(actual, np.float32), np.asarray(expected, np.float32)
+    rel = np.linalg.norm(actual - expected) / (np.linalg.norm(expected) + 1e-6)
+    self.assertLess(rel, threshold, f"{name}: relative L2 {rel:.4g}")
+
+  @parameterized.product(layout=tuple(_LAYOUTS), megablox=(False, True))
+  def test_matches_no_expert_parallelism(self, layout, megablox):
+    variables, out_ref, dx_ref, dvars_ref = self._reference()
+    cfg = self._cfg(self._EXPERT_PARALLELISM, megablox=megablox, **self._LAYOUTS[layout])
+    _, out, dx, dvars = self._run(cfg, variables)
+    self._assert_close("forward", out, out_ref)
+    self._assert_close("dinput", dx, dx_ref)
+    expected = dict(jax.tree_util.tree_leaves_with_path(dvars_ref))
+    for path, grad in jax.tree_util.tree_leaves_with_path(dvars):
+      self._assert_close(f"d{jax.tree_util.keystr(path)}", grad, expected[path])
 
 
 class QuantizedMoeTest(parameterized.TestCase):

@@ -1496,19 +1496,24 @@ def from_pretrained(
         )
 
     if wrap_with_tunix_adapter:
-      with mesh:
-        use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
-        model = TunixMaxTextAdapter(
-            base_model=model,  # pyrefly: ignore[bad-argument-type]
-            use_no_op_mappings=use_no_op_mappings,
-            pad_id=tokenizer_pad_id,
-        )
-        model.config = None  # pyrefly: ignore[missing-attribute]
+      model = apply_tunix_adapter(model, config, tokenizer_pad_id)
 
     if original_mesh:
       return model
     else:
       return model, mesh
+
+
+def apply_tunix_adapter(model, config, pad_id):
+  """Wraps `model` in `TunixMaxTextAdapter`."""
+  use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
+  wrapped = TunixMaxTextAdapter(
+      base_model=model,  # pyrefly: ignore[bad-argument-type]
+      use_no_op_mappings=use_no_op_mappings,
+      pad_id=pad_id,
+  )
+  wrapped.config = None  # pyrefly: ignore[missing-attribute]
+  return wrapped
 
 
 def setup_decode_state_from_nnx(model, config, rng, mesh):
