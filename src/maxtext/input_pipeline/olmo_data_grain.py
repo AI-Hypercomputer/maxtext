@@ -512,16 +512,20 @@ class ShiftToInputsTargets(grain.transforms.Map):
 
   With ``segment_eos_token_id`` set, ``inputs_segmentation`` instead numbers the
   EOS-delimited documents the way OLMo-core's EMo router does
-  (``segment_ids_from_eos``: an EOS token starts the next segment; position 0
-  never does), offset by one so no real token sits in MaxText's padding segment
-  0. ``targets_segmentation`` carries the same ids, or zeros for a filtered
+  (``segment_ids_from_eos``), offset by one so no real token sits in MaxText's
+  padding segment 0. By default an EOS token starts the next segment and
+  position 0 never does (the EMo repo's convention, and OLMo-core's before
+  allenai/OLMo-core#872). With ``segment_eos_ends_document`` an EOS stays in the
+  document it ends (``eos.cumsum() - eos``, OLMo-core since #872), so an EOS at
+  position 0 closes a one-token segment. ``targets_segmentation`` carries the same ids, or zeros for a filtered
   instance. The mixers must then be told to ignore the segments
   (``olmoe3_segments_for_emo_only``), since OLMo-core's attention and KDA see
   the whole instance.
   """
 
-  def __init__(self, segment_eos_token_id: int = -1):
+  def __init__(self, segment_eos_token_id: int = -1, segment_eos_ends_document: bool = False):
     self.segment_eos_token_id = int(segment_eos_token_id)
+    self.segment_eos_ends_document = bool(segment_eos_ends_document)
 
   def map(self, element: Dict[str, Any]) -> Dict[str, Any]:
     """Convert ``tokens`` into ``inputs`` / ``targets`` / segmentation tensors."""
@@ -530,9 +534,12 @@ class ShiftToInputsTargets(grain.transforms.Map):
     instance_mask = bool(element.get("instance_mask", True))
     seg_value = np.int32(1) if instance_mask else np.int32(0)
     if self.segment_eos_token_id >= 0:
-      starts = (tokens == self.segment_eos_token_id).astype(np.int32)
-      starts[0] = 0
-      segments = 1 + np.cumsum(starts, dtype=np.int32)
+      eos = (tokens == self.segment_eos_token_id).astype(np.int32)
+      if self.segment_eos_ends_document:
+        segments = 1 + np.cumsum(eos, dtype=np.int32) - eos
+      else:
+        eos[0] = 0
+        segments = 1 + np.cumsum(eos, dtype=np.int32)
     else:
       segments = np.ones(L, dtype=np.int32)
 
@@ -573,6 +580,7 @@ def make_olmo_grain_data_loader(
     shard_count: int,
     apply_ngram_filter: bool = True,
     segment_eos_token_id: int = -1,
+    segment_eos_ends_document: bool = False,
     shift_to_inputs_targets: bool = True,
     path_remap: Optional[Dict[str, str]] = None,
     grain_worker_count: int = 0,
@@ -592,6 +600,8 @@ def make_olmo_grain_data_loader(
     apply_ngram_filter: Add :class:`NgramFilterTransform` (recommended).
     segment_eos_token_id: With >= 0, number EOS-delimited documents in ``inputs_segmentation`` (see
       :class:`ShiftToInputsTargets`); -1 keeps one segment per instance.
+    segment_eos_ends_document: Keep each EOS in the document it ends (OLMo-core since #872) rather than
+      starting the next one.
     shift_to_inputs_targets: Add :class:`ShiftToInputsTargets` so the loader
       yields the ``inputs``/``targets`` shape MaxText's trainer expects.
     path_remap: Pass-through to :class:`OlmoNpyDataSource`.
@@ -633,7 +643,7 @@ def make_olmo_grain_data_loader(
   if apply_ngram_filter:
     ops.append(NgramFilterTransform())
   if shift_to_inputs_targets:
-    ops.append(ShiftToInputsTargets(segment_eos_token_id))
+    ops.append(ShiftToInputsTargets(segment_eos_token_id, segment_eos_ends_document))
   ops.append(grain.transforms.Batch(batch_size=batch_size, drop_remainder=True))
 
   # Both samplers already shard by host (shard_index/shard_count). Handing Grain a real

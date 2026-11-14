@@ -80,6 +80,7 @@ class OlmoPplEval:
 
   def __init__(self, config):
     self.interval = int(config.olmo_ppl_eval_interval)
+    self.last_step = int(getattr(config, "steps", 0)) - 1
     self.seq_len = int(config.max_target_length)
     # The eval step scores only the first micro_batch_size_to_eval_on rows of a batch (fewer than it loads when
     # eval_per_device_batch_size < 1 or expansion_factor_real_data > 1), so documents go only in those rows; the
@@ -109,8 +110,9 @@ class OlmoPplEval:
       )
 
   def due(self, step: int) -> bool:
-    """After the step that completes a multiple of the interval (OLMo-core evaluates after step N, N % interval == 0)."""
-    return self.interval > 0 and (step + 1) % self.interval == 0
+    """After the step that completes a multiple of the interval (OLMo-core evaluates after step N, N % interval == 0),
+    and after the run's last step, so a run whose length isn't a multiple still ends with an eval."""
+    return self.interval > 0 and ((step + 1) % self.interval == 0 or step == self.last_step)
 
   def run(self, p_eval_step, state, data_sharding) -> dict[str, Any]:
     """``eval/lm/<label>/CE loss`` and ``.../PPL`` for every set."""

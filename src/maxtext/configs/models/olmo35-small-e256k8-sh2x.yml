@@ -38,7 +38,7 @@ gdn_num_value_heads: 8
 gdn_key_head_dim: 256
 gdn_value_head_dim: 512   # head_dim * kda_expand_v (2.0)
 gdn_conv_kernel_dim: 4
-gdn_chunk_size: 64
+gdn_chunk_size: 128  # every small run so far passed 128 on the command line; a model config beats a config file
 
 vocab_size: 100352
 enable_dropout: false

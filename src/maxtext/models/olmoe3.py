@@ -1470,6 +1470,8 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     [emo_min, emo_max] or, with ``emo_document_expert_pool_choices`` set,
     from that set of sizes (uniformly, or with ``emo_document_expert_pool_probs``);
     outside training it is fixed at ``emo_eval_document_expert_pool``.
+    With ``emo_causal_pool`` a token's totals cover only its document's tokens
+    so far, so the pool never depends on later tokens.
 
     MaxText packs documents contiguously, so the per-document score totals are
     cumulative-sum differences at document boundaries rather than a scatter
@@ -1492,10 +1494,15 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
 
     scores = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
     csum = jnp.cumsum(scores, axis=1)
-    csum_end = jnp.take_along_axis(csum, end[..., None], axis=1)
     before = jnp.take_along_axis(csum, jnp.maximum(start - 1, 0)[..., None], axis=1)
     csum_before = jnp.where((start == 0)[..., None], 0.0, before)
-    document_scores = csum_end - csum_before  # [b, s, E]: each token sees its document's totals
+    if cfg.emo_causal_pool:
+      # Each token's pool comes from its document's tokens up to and including itself, as at inference. The first
+      # token's pool is then its own top `pool` experts, which hold its top-k: its routing is unconstrained.
+      document_scores = csum - csum_before
+    else:
+      csum_end = jnp.take_along_axis(csum, end[..., None], axis=1)
+      document_scores = csum_end - csum_before  # [b, s, E]: each token sees its document's totals
 
     if rngs is not None and cfg.model_call_mode != "inference" and not _EMO_EVAL_POOLS.get():
       rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
@@ -1583,12 +1590,22 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     # olmoe3_router_metrics: [lb, load imbalance, global load imbalance] instead of the scalar; the decoder layer
     # splits it, so the loss term is unchanged. The vector rides the scalar's path out of the routed MoE's
     # shard_map (out_specs P(): every device computes the same values from the gathered counts). The per-sequence
-    # counts need the one-hot mask, built here only (the loss above uses bincount).
-    expert_mask = jax.nn.one_hot(jax.lax.stop_gradient(top_k_indices), num_classes=self.num_experts, dtype=jnp.float32)
-    local_imbalance, global_imbalance = self._router_load_imbalance(expert_mask)
+    # counts are built here only (the loss above uses bincount). With olmoe3_router_metrics_interval the train step
+    # sets moe.ROUTER_IMBALANCE_ON, and steps it's False for skip the imbalance (zeros; the logger drops them).
+    top_k = jax.lax.stop_gradient(top_k_indices)
+    imbalance_on = moe.ROUTER_IMBALANCE_ON.get()
+    if imbalance_on is None:
+      local_imbalance, global_imbalance = self._router_load_imbalance(top_k)
+    else:
+      local_imbalance, global_imbalance = jax.lax.cond(
+          imbalance_on,
+          self._router_load_imbalance,
+          lambda _: (jnp.zeros((), jnp.float32), jnp.zeros((), jnp.float32)),
+          top_k,
+      )
     return jnp.stack([lb, local_imbalance, global_imbalance])
 
-  def _router_load_imbalance(self, expert_mask):
+  def _router_load_imbalance(self, top_k_indices):
     """OLMo-core's per-layer "load imbalance" and "global load imbalance" (max / mean tokens per expert).
 
     OLMo-core counts each rank's routed tokens per expert over the step (all micro-batches) and reports the
@@ -1600,7 +1617,17 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     and gathered over the batch axes, so every device holds the whole batch's counts.
     """
     cfg = self.config
-    seq_counts = jax.lax.stop_gradient(expert_mask.sum(axis=(1, 2)))  # [batch, experts]
+    if getattr(cfg, "olmoe3_router_metrics_scatter_counts", False):
+      # Scatter-add each sequence's routed experts, instead of a [batch, seq, top_k, experts] one-hot mask.
+      batch = top_k_indices.shape[0]
+      seq_counts = (
+          jnp.zeros((batch, self.num_experts), jnp.float32)
+          .at[jnp.arange(batch)[:, None], top_k_indices.reshape(batch, -1)]
+          .add(1.0)
+      )
+    else:
+      expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.float32)
+      seq_counts = expert_mask.sum(axis=(1, 2))  # [batch, experts]
     if moe.LB_REDUCE_AXES.get() is not None:  # inside the sparse routed MoE's shard_map
       spec = self._logical_to_mesh_axes(("activation_batch", "activation_norm_length", None))
       batch_axes = tuple(mesh_axes_for_dim(spec[0])) if spec and spec[0] is not None else ()
