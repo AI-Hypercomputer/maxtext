@@ -82,6 +82,7 @@ import optax
 from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
+from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core.sharding import (
     Sharding,
     TensorType,
@@ -219,6 +220,7 @@ def _log_step(step: int, loss: jax.Array, last_done: float, tokens_per_step: int
 
 def train_loop(config) -> float:
   """Builds the model and optimizer, runs `config.steps` steps, and returns the last loss."""
+  m3_kernels.validate_attention_config(config)
   mesh = mesh_from_config(config)
   # The parallelism strategy. The mesh shape decides which of its axes are
   # live; the model is handed the strategy and places its parameters from it.

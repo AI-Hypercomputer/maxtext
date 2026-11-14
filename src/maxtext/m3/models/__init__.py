@@ -34,6 +34,7 @@ from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint:
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model  # pylint: disable=no-name-in-module
+from maxtext.m3.models.qwen3 import qwen3_flops  # pylint: disable=no-name-in-module
 
 
 def create_glm5_3_flash_model(config, mesh=None, *, rngs, **kwargs):
@@ -174,6 +175,8 @@ MODEL_FLOPS_REGISTRY: dict[str, Callable] = {
     "granitemoe": calculate_granitemoe_tflops_per_device,
     "qwen3.8-flash-next": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
     "qwen3.8-flash-next-mini": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
+    "qwen3-0.6b": qwen3_flops.calculate_qwen3_tflops_per_device,
+    "qwen3-vl-2b": qwen3_flops.calculate_qwen3_tflops_per_device,
 }
 
 
