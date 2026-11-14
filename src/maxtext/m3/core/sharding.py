@@ -399,9 +399,11 @@ class DefaultSharding(Sharding):
   Weights shard `embed` across `("fsdp", "fsdp_transpose", "context", "expert")`
   (`fsdp_transpose` acts as an additional FSDP factor rather than sharding MLP
   width, and `context` doubles as FSDP weight sharding so dense parameters are
-  never replicated across `fsdp_transpose`, `context`, or `expert`); `heads`,
-  `kv_heads`, `mlp`, and `vocab` shard over `("tensor", "tensor_sequence")`;
-  `norm` and `head_dim` stay replicated.
+  never replicated across `fsdp_transpose`, `context`, or `expert`);
+  routed-expert weights shard `experts` over `"expert"`, `expert_embed` over
+  `("fsdp", "fsdp_transpose", "context")`, and `expert_mlp` over
+  `("tensor", "tensor_sequence")`; `heads`, `kv_heads`, `mlp`, and `vocab` shard
+  over `("tensor", "tensor_sequence")`; `norm` and `head_dim` stay replicated.
 
   Activations shard `batch` over `("data", "fsdp", "fsdp_transpose", "expert")`,
   `length` over `context` (all-gather K/V in natural token order), and
@@ -428,7 +430,13 @@ class DefaultSharding(Sharding):
         return ("fsdp", "fsdp_transpose", "context", "expert")
       case "embed", TensorType.ACTIVATION:
         return None
-      case ("heads" | "kv_heads" | "mlp" | "vocab"), _:
+      case "experts", _:
+        return "expert"
+      case "expert_embed", TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose", "context")
+      case "expert_embed", TensorType.ACTIVATION:
+        return None
+      case ("heads" | "kv_heads" | "mlp" | "expert_mlp" | "vocab"), _:
         return ("tensor", "tensor_sequence")
       case ("length" | "norm_length" | "kv_length"), TensorType.WEIGHT:
         return None

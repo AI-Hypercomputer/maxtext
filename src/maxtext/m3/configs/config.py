@@ -249,6 +249,7 @@ class TransformerConfig(BaseModel):
   norm_num_groups: int = 32
   use_base2_exp: bool = True
   sa_gqa_head_stacking: bool = False
+  moe_bwd_wgrad_overlap: bool = False
 
 
 # ----------------------------------------------------------------------------
