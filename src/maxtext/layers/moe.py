@@ -5615,6 +5615,9 @@ class RoutedMoE(nnx.Module):
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       fused_kernel, wi_native_scale = _maybe_native_fused_weight(self.wi[...], wi_scale)
     elif cfg.prefuse_moe_weights:
+      # Split into two whole halves: `model_creation_utils._fuse_moe_weights` prefuses [gate | up] for every
+      # consumer except tpu-inference's TP fused kernel (the fused path above without expert parallelism), which
+      # gets one [gate | up] chunk per shard instead.
       wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
       wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
       n = wi.shape[-1] // 2
