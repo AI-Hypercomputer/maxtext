@@ -357,6 +357,7 @@ class GmmConfigs:
   has_glu_coeffs: bool = False
   glu_out_dtype: jnp.dtype | None = None
   has_glu_out_scale: bool = False
+  glu_only: bool = False
   # The 3D lhs rows are gathered from HBM inside the kernel (one DMA per row)
   # instead of being read from a pre-permuted lhs (see `gmm_v2`'s
   # `lhs_gather_indices`).
@@ -576,7 +577,9 @@ def generate_block_specs(
       bias=rhs_bias_block_spec,
   )
 
-  if cfgs.out_is_3d:
+  if cfgs.glu_only:
+    out_block_spec = None
+  elif cfgs.out_is_3d:
     out_block_spec = pl.BlockSpec(
         (
             bounded_slice_gm,
@@ -839,13 +842,11 @@ def inner_kernel(
     else:
       tiled_lhs = tiled_lhs_ref.get_value().reshape(-1, cfgs.tiles.tile_k)[:bucket_m]
     tiled_rhs = tiled_rhs_ref.get_weight()
-    if cfgs.transpose_rhs:
-      tiled_rhs = jnp.transpose(tiled_rhs)
 
     # This should only be taken in the case where we don't requantize
     # the scales and thus we need to dequantize inside VMEM to avoid small
     # contracting dimensions
-    rhs_tile_n = tiled_rhs.shape[1]
+    rhs_tile_n = tiled_rhs.shape[0 if cfgs.transpose_rhs else 1]
     rhs_qbs = cfgs.rhs_cfgs.quant_block_size
     if cfgs.rhs_cfgs.should_dequantize_before_matmul:
       if cfgs.transpose_rhs:
@@ -864,7 +865,8 @@ def inner_kernel(
       mask_lhs = lax.broadcasted_iota(jnp.int32, tiled_lhs.shape, 1) < valid_k
       tiled_lhs = jnp.where(mask_lhs, tiled_lhs, 0)
 
-      mask_rhs = lax.broadcasted_iota(jnp.int32, tiled_rhs.shape, 0) < valid_k
+      rhs_k_axis = 1 if cfgs.transpose_rhs else 0
+      mask_rhs = lax.broadcasted_iota(jnp.int32, tiled_rhs.shape, rhs_k_axis) < valid_k
       tiled_rhs = jnp.where(mask_rhs, tiled_rhs, 0)
 
     if cfgs.lhs_cfgs.should_use_external_scale and not cfgs.rhs_cfgs.has_scale:
@@ -873,6 +875,7 @@ def inner_kernel(
       tiled_lhs = ops.quantize_tile(tiled_lhs, inv_scale, cfgs.lhs_cfgs.quant_dtype)
 
     # Step 2: Matmul.
+    dot_dims = (((1,), (1,)), ((), ())) if cfgs.transpose_rhs else (((1,), (0,)), ((), ()))
     acc_list = []
     if not cfgs.lhs_cfgs.should_quantize or (cfgs.lhs_cfgs.should_use_external_scale and not cfgs.rhs_cfgs.has_scale):
       # Unquantized / pre-quantized / external-lhs-scale matmul path.
@@ -885,11 +888,15 @@ def inner_kernel(
           end_k = min(cfgs.tiles.tile_k, start_k + rhs_qbs)  # pyrefly: ignore[unsupported-operation]
 
           # dot_general (unlike jnp.matmul) accepts mixed operand dtypes, e.g.
-          # an e5m2 lhs with e4m3 weights.
+          # an e5m2 lhs with e4m3 weights, and contracts transposed rhs directly
+          # on MXU without VMEM relayout.
+          rhs_slice = (
+              tiled_rhs[start_n:end_n, start_k:end_k] if cfgs.transpose_rhs else tiled_rhs[start_k:end_k, start_n:end_n]
+          )
           block_acc = lax.dot_general(
               tiled_lhs[:, start_k:end_k],
-              tiled_rhs[start_k:end_k, start_n:end_n],
-              (((1,), (0,)), ((), ())),
+              rhs_slice,
+              dot_dims,
               preferred_element_type=jnp.float32,
           ).astype(acc_ref.dtype)
 
@@ -945,7 +952,9 @@ def inner_kernel(
           end_k = min(cfgs.tiles.tile_k, start_k + q_block_size)  # pyrefly: ignore[unsupported-operation]
 
           block_lhs = tiled_lhs[:, start_k:end_k]
-          block_rhs = tiled_rhs[start_k:end_k, start_n:end_n]
+          block_rhs = (
+              tiled_rhs[start_n:end_n, start_k:end_k] if cfgs.transpose_rhs else tiled_rhs[start_k:end_k, start_n:end_n]
+          )
 
           # Perform lhs quantization. Note that for every block_lhs,
           # same computation will be performed tiles_n//mxu_size times.
@@ -978,9 +987,11 @@ def inner_kernel(
           block_acc = acc_n if ext_lhs_scale_const_k else None
           for sub_k in range(0, block_len, step_k):  # pyrefly: ignore[bad-argument-type]
             sub_end_k = min(block_len, sub_k + step_k)  # pyrefly: ignore[unsupported-operation]
-            sub_acc = jnp.matmul(
+            sub_rhs = block_rhs[:, sub_k:sub_end_k] if cfgs.transpose_rhs else block_rhs[sub_k:sub_end_k, :]
+            sub_acc = lax.dot_general(
                 block_lhs_q[:, sub_k:sub_end_k],
-                block_rhs[sub_k:sub_end_k, :],
+                sub_rhs,
+                dot_dims,
                 preferred_element_type=preferred_element_type,
             ).astype(acc_ref.dtype)
 
@@ -1027,47 +1038,49 @@ def inner_kernel(
       iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0)
       mask = jnp.logical_and(m_start_local <= iota, iota < m_end_local)
       acc_masked = jnp.where(mask, acc, 0)
-
-      # Write the final output to the output ref.
-      out_val_ref = tiled_out_ref.out
-      acc_out = acc_masked.astype(out_val_ref.dtype)
-      if cfgs.out_is_3d:
-        # Block is [tile_m // sublane, sublane, tile_d0, 128]; scatter the
-        # [acc_m, tile_n] rows back into per-token [tile_d0, 128] slabs.
-        relayout.store_2d_as_3d(
-            out_val_ref,
-            acc_out,
-            acc_m,
-            cfgs.out_tile_d0,
-        )
-      else:
-        tiled_out_2d_ref = out_val_ref.reshape(-1, cfgs.tiles.tile_n)
-        tiled_out_2d_ref[:acc_m] = acc_out
-
-      # If this is the first tile for grid[n_id, :, :], we initialize the
-      # partial out to zeros. Otherwise, partial out from last tile of
-      # grid[n_id-1, :, :] can be used and cause numeric issues.
-      partial_out_zeros = jnp.zeros_like(partial_out_ref)
-
-      # Accumulate the partial output from the previous step.
-      out_val_ref[0] += jnp.where(gm_id == 0, partial_out_zeros, partial_out_ref[...])
-
-      # Consider following case where size_lhs_sublane = 4, number denotes group
-      # id and | denotes boundaries between sublanes:
-      # | 0 0 1 2 | 2 2 2 2 | 3 3 4 4 |
-      #
-      # Assuming group id of current step is 1, current step will not completely
-      # fill size_lhs_sublane rows and will be revisited at the next step. By
-      # storing the partial rows into the partial_out_ref, the next step can
-      # read them and accumulate to them.  Additionally, for group id of 2,
-      # since it completely fills the size_lhs_sublane rows, we need to zero out
-      # partial_out_ref to avoid numeric error for group 3.
+      acc_out = acc_masked.astype(cfgs.out_dtype)
       last_row = m_end_local // cfgs.dims.size_lhs_sublane
-      partial_out_ref[...] = jnp.where(
-          m_end_local % cfgs.dims.size_lhs_sublane == 0,
-          partial_out_zeros,
-          out_val_ref[last_row],
-      )
+
+      if not cfgs.glu_only:
+        # Write the final output to the output ref.
+        out_val_ref = tiled_out_ref.out
+        assert out_val_ref is not None
+        if cfgs.out_is_3d:
+          # Block is [tile_m // sublane, sublane, tile_d0, 128]; scatter the
+          # [acc_m, tile_n] rows back into per-token [tile_d0, 128] slabs.
+          relayout.store_2d_as_3d(
+              out_val_ref,
+              acc_out,
+              acc_m,
+              cfgs.out_tile_d0,
+          )
+        else:
+          tiled_out_2d_ref = out_val_ref.reshape(-1, cfgs.tiles.tile_n)
+          tiled_out_2d_ref[:acc_m] = acc_out
+
+        # If this is the first tile for grid[n_id, :, :], we initialize the
+        # partial out to zeros. Otherwise, partial out from last tile of
+        # grid[n_id-1, :, :] can be used and cause numeric issues.
+        partial_out_zeros = jnp.zeros_like(partial_out_ref)
+
+        # Accumulate the partial output from the previous step.
+        out_val_ref[0] += jnp.where(gm_id == 0, partial_out_zeros, partial_out_ref[...])
+
+        # Consider following case where size_lhs_sublane = 4, number denotes group
+        # id and | denotes boundaries between sublanes:
+        # | 0 0 1 2 | 2 2 2 2 | 3 3 4 4 |
+        #
+        # Assuming group id of current step is 1, current step will not completely
+        # fill size_lhs_sublane rows and will be revisited at the next step. By
+        # storing the partial rows into the partial_out_ref, the next step can
+        # read them and accumulate to them.  Additionally, for group id of 2,
+        # since it completely fills the size_lhs_sublane rows, we need to zero out
+        # partial_out_ref to avoid numeric error for group 3.
+        partial_out_ref[...] = jnp.where(
+            m_end_local % cfgs.dims.size_lhs_sublane == 0,
+            partial_out_zeros,
+            out_val_ref[last_row],
+        )
 
       if cfgs.has_glu_coeffs:
         assert tiled_out_ref.act is not None
@@ -1079,7 +1092,7 @@ def inner_kernel(
             tiled_lhs_ref.get_glu_coeffs().reshape(-1, 1)[:acc_m],
             0.0,
         )
-        act_tile = ops.silu_mul_tile(acc_out[:, :half_n], acc_out[:, half_n:], c_tile, out_val_ref.dtype)
+        act_tile = ops.silu_mul_tile(acc_out[:, :half_n], acc_out[:, half_n:], c_tile, cfgs.out_dtype)
         if glu_out_scale_ref is not None:
           inv_scale = 1.0 / glu_out_scale_ref[0].astype(jnp.float32)
           act_out = ops.quantize_tile(act_tile, inv_scale, act_val_ref.dtype)
@@ -1467,7 +1480,9 @@ def kernel_main(
     glu_coeffs_in = lhs_ref.glu_coeffs.reshape(-1, cfgs.dims.size_lhs_sublane, 1)
   lhs_in = LhsRef(value=lhs_value_in, scale=lhs_ref.scale, glu_coeffs=glu_coeffs_in)
   # Works for both [size_m, size_n] and the 3D [size_m, D0, 128] output.
-  out_val_in = out_ref.out.reshape(-1, cfgs.dims.size_lhs_sublane, *out_ref.out.shape[1:])
+  out_val_in = (
+      None if out_ref.out is None else out_ref.out.reshape(-1, cfgs.dims.size_lhs_sublane, *out_ref.out.shape[1:])
+  )
   act_val_in = None
   if out_ref.act is not None:
     act_val_in = out_ref.act.reshape(-1, cfgs.dims.size_lhs_sublane, out_ref.act.shape[-1])
@@ -1559,6 +1574,41 @@ def _kernel_main_gather_into_out(
   )
 
 
+def _kernel_main_gather(
+    lhs_group_sizes_ref: jax.Array,
+    group_offset_ref: jax.Array,
+    gather_start_ref: jax.Array,  # int32[1]
+    lhs_ref: LhsRef,  # value: gather source [rows * num_k, 1, tile_d0, 128]
+    rhs_ref: WeightsRef,
+    out_scale_ref: jax.Array | None,
+    glu_out_scale_ref: jax.Array | None,
+    gather_indices_ref: jax.Array,  # int32[num_indices]
+    out_ref: OutRef,
+    *scratch_refs,
+    cfgs: GmmConfigs,
+    idx_window: int,
+    max_win_start: int,
+):
+  """`kernel_main` gathering the lhs rows in-kernel without an aliased `out`."""
+  _kernel_main_gather_into_out(
+      lhs_group_sizes_ref,
+      group_offset_ref,
+      None,
+      gather_start_ref,
+      lhs_ref,
+      rhs_ref,
+      out_scale_ref,
+      glu_out_scale_ref,
+      gather_indices_ref,
+      None,
+      out_ref,
+      *scratch_refs,
+      cfgs=cfgs,
+      idx_window=idx_window,
+      max_win_start=max_win_start,
+  )
+
+
 def calculate_tiling(
     dims: Dimensions,
     lhs_cfgs: InputConfigs,
@@ -1569,6 +1619,7 @@ def calculate_tiling(
     out_is_3d: bool = False,
     flat_rhs: bool = False,
     has_glu_coeffs: bool = False,
+    glu_only: bool = False,
 ) -> TileSizes:
   """Calculate optimal tile sizes for GMM kernel."""
 
@@ -1670,7 +1721,7 @@ def calculate_tiling(
     # 4. Output tile (double-buffered)
     out_dtype_bytes = jax.dtypes.itemsize_bits(lhs_cfgs.dtype) // 8
     tn_vmem = _slab_padded(tn) if out_is_3d else tn
-    out_vmem = 2 * tm * tn_vmem * out_dtype_bytes
+    out_vmem = 0 if glu_only else 2 * tm * tn_vmem * out_dtype_bytes
     if has_glu_coeffs:
       out_vmem += 2 * tm * (tn // 2) * 2 + 2 * tm * num_lanes * 2
 
@@ -1890,7 +1941,10 @@ def get_cost_estimate(cfgs: GmmConfigs):
   if cfgs.rhs_cfgs.has_bias:
     rhs_bytes += dims.size_group * dims.size_n * fp32_bytes
 
-  out_bytes = dims.size_m * cfgs.out_size_n * cfgs.out_dtype.itemsize
+  out_bytes = 0 if cfgs.glu_only else dims.size_m * cfgs.out_size_n * cfgs.out_dtype.itemsize
+  if cfgs.has_glu_coeffs:
+    act_dtype = cfgs.glu_out_dtype or cfgs.out_dtype
+    out_bytes += dims.size_m * (dims.size_n // 2) * jnp.dtype(act_dtype).itemsize
 
   total_bytes = lhs_bytes + rhs_bytes + out_bytes
 
@@ -1909,7 +1963,7 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
       f"-n_{dims.size_n}-tm_{tiles.tile_m}-tk_{tiles.tile_k}-tn_{tiles.tile_n}"
   )
   if cfgs.has_glu_coeffs:
-    name += "-glu"
+    name += "-glu_only" if cfgs.glu_only else "-glu"
   if cfgs.lhs_gather:
     name += "-gather"
   return name
@@ -1941,6 +1995,7 @@ def make_gmm_configs(
     has_glu_coeffs: bool = False,
     glu_out_dtype: jnp.dtype | None = None,
     has_glu_out_scale: bool = False,
+    glu_only: bool = False,
 ):
   """Fills the GMM config for the GMM kernel."""
   packing_factor = get_packing_factor(rhs.dtype, rhs_quant_dtype)
@@ -2028,7 +2083,7 @@ def make_gmm_configs(
   )
 
   if out_dtype is None:
-    out_dtype = lhs.dtype
+    out_dtype = jnp.bfloat16 if (lhs.dtype.itemsize == 1 and (has_out_scale or glu_only)) else lhs.dtype
 
   if acc_dtype is None:
     if lhs_cfgs.quant_dtype is None:
@@ -2048,6 +2103,8 @@ def make_gmm_configs(
       tile_info = functools.partial(tile_info, flat_rhs=True)
     if has_glu_coeffs:
       tile_info = functools.partial(tile_info, has_glu_coeffs=True)
+    if glu_only:
+      tile_info = functools.partial(tile_info, glu_only=True)
     tiles = tile_info(dims, lhs_cfgs, rhs_cfgs, vmem_limit_bytes, fuse_act)  # pyrefly: ignore[bad-argument-type]
 
   num_lanes = pltpu.get_tpu_info().num_lanes
@@ -2103,6 +2160,8 @@ def make_gmm_configs(
           f"glu_coeffs requires tile_n ({tiles.tile_n}) == size_n"
           f" ({dims.size_n}) and size_n divisible by {2 * num_lanes}."
       )
+  if glu_only and not has_glu_coeffs:
+    raise ValueError("glu_only requires glu_coeffs.")
 
   return GmmConfigs(
       dims=dims,
@@ -2121,6 +2180,7 @@ def make_gmm_configs(
       has_glu_coeffs=has_glu_coeffs,
       glu_out_dtype=(jnp.dtype(glu_out_dtype) if glu_out_dtype is not None else None),
       has_glu_out_scale=has_glu_out_scale,
+      glu_only=glu_only,
   )
 
 
@@ -2152,6 +2212,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "out_is_3d",
         "flat_rhs",
         "glu_out_dtype",
+        "glu_only",
         "lhs_gather_size_m",
     ],
     donate_argnames=["out"],
@@ -2185,6 +2246,7 @@ def gmm_v2(
     glu_coeffs: jax.Array | None = None,  # [size_m, 1]
     glu_out_dtype: jnp.dtype | None = None,
     glu_out_scale: jax.Array | None = None,  # [1, 1]
+    glu_only: bool = False,
     lhs_gather_indices: jax.Array | None = None,  # int32[num_indices]
     lhs_gather_start: jax.Array | int = 0,  # int32 scalar
     lhs_gather_size_m: int | None = None,
@@ -2257,6 +2319,8 @@ def gmm_v2(
       (e.g. `jnp.float8_e4m3fn`). Defaults to `out`'s dtype.
     glu_out_scale: Optional `[1, 1]` f32 static quantization scale for `act`
       when `glu_out_dtype` is fp8.
+    glu_only: If True (requires `glu_coeffs` and `out is None`), omit the `out`
+      HBM buffer and return only `act`.
     lhs_gather_indices: Optional int32 `[num_indices]` row indices into `lhs`.
       When given, `lhs` is the gather source x `[x_rows, size_k // 128, 128]`
       and the kernel multiplies the gathered rows `x[lhs_gather_indices[
@@ -2264,16 +2328,16 @@ def gmm_v2(
       from HBM (one DMA per row, double-buffered per m tile) instead of reading
       a pre-gathered lhs. Only the rows of the groups are gathered, so the
       indices past `lhs_gather_start + sum(group_sizes)` are never read and need
-      not be valid. Requires `out`, an unscaled (bf16 / fp8) 3D x consumed as
-      is, tile_k dividing size_k and a single n tile (tile_n >= the output
-      width, as `glu_coeffs` requires anyway).
+      not be valid. Requires an unscaled (bf16 / fp8) 3D x consumed as is,
+      tile_k dividing size_k and a single n tile (tile_n >= the output width, as
+      `glu_coeffs` requires anyway).
     lhs_gather_start: Offset into `lhs_gather_indices` of gathered row 0.
     lhs_gather_size_m: Number of gathered rows (the logical size_m).
 
   Returns:
     Output of shape [size_m, size_n], or [size_m, size_n // 128, 128] if
     `out_is_3d`, or the updated `out` (or `(out, act)` when `glu_coeffs` is
-    provided).
+    provided, or `act` when `glu_only` is True).
   """
 
   del precision
@@ -2286,14 +2350,23 @@ def gmm_v2(
     # Zero-filling rows outside the computed range would wipe `out`.
     zero_initialize = False
 
+  if glu_only:
+    if out is not None:
+      raise ValueError("`glu_only` requires `out is None`.")
+    if disable_multi_core_mode and lhs_gather_indices is None:
+      # The single-core fallback below only knows the plain `out` layout.
+      raise ValueError("`glu_only` with disable_multi_core_mode=True requires `lhs_gather_indices`.")
+    zero_initialize = False
+
   gather_src = None
   size_m = lhs.shape[0]
   if lhs_gather_indices is not None:
-    if out is None or lhs.ndim != 3 or lhs_scale is not None:
+    if lhs.ndim != 3 or lhs_scale is not None or (out is None and (not disable_multi_core_mode or out_is_3d)):
       raise ValueError(
-          "`lhs_gather_indices` requires `out` and a 3D lhs without"
-          f" `lhs_scale`; got {lhs.shape=}, {out is None=},"
-          f" {lhs_scale is None=}."
+          "`lhs_gather_indices` requires a 3D lhs without `lhs_scale` and"
+          " either `out` or (`disable_multi_core_mode=True` and `not"
+          f" out_is_3d`); got {lhs.shape=}, {out is None=},"
+          f" {disable_multi_core_mode=}, {out_is_3d=}, {lhs_scale is None=}."
       )
     if lhs_gather_indices.ndim != 1:
       raise ValueError(f"`lhs_gather_indices` must be 1D; got {lhs_gather_indices.shape=}.")
@@ -2356,6 +2429,7 @@ def gmm_v2(
       has_glu_coeffs=glu_coeffs is not None,
       glu_out_dtype=glu_out_dtype,
       has_glu_out_scale=glu_out_scale is not None,
+      glu_only=glu_only,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
@@ -2406,7 +2480,9 @@ def gmm_v2(
   # Initialize scratch shapes.
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   acc_cols = 2 * tiles.tile_n if cfgs.fuse_act is not None else tiles.tile_n
-  if cfgs.out_is_3d:
+  if cfgs.glu_only:
+    partial_out_shape = (1, num_lanes)
+  elif cfgs.out_is_3d:
     partial_out_shape = (dims.size_lhs_sublane, cfgs.out_tile_d0, num_lanes)
   else:
     partial_out_shape = (dims.size_lhs_sublane, tiles.tile_n)
@@ -2474,10 +2550,14 @@ def gmm_v2(
   # Propagate the manual-axis type so the kernel works under
   # shard_map(check_vma=True) (the output inherits the lhs' manual axes).
   lhs_manual_axis_type = jax.typeof(lhs if gather_src is None else gather_src).manual_axis_type
-  out_init = jax.ShapeDtypeStruct(
-      out_shape,
-      cfgs.out_dtype,
-      manual_axis_type=lhs_manual_axis_type,
+  out_init = (
+      None
+      if cfgs.glu_only
+      else jax.ShapeDtypeStruct(
+          out_shape,
+          cfgs.out_dtype,
+          manual_axis_type=lhs_manual_axis_type,
+      )
   )
   act_init = None
   if cfgs.has_glu_coeffs:
@@ -2591,6 +2671,88 @@ def gmm_v2(
       return res.out, res.act[:size_m]
     return res.out
 
+  if gather_src is not None:
+    # In-kernel row gather without `out`: a single-core `pl.pallas_call` like
+    # the `out` path above, so it does not depend on the fallback block below.
+    assert lhs_gather_indices is not None
+    hbm = pl.BlockSpec(memory_space=pltpu.HBM)
+    num_k = dims.size_k // tiles.tile_k
+    idx_window = gather_idx_window(tiles.tile_m)
+    indices = lhs_gather_indices.astype(jnp.int32)
+    # Pad so every index window is in bounds and starts HBM-tile aligned.
+    num_indices = indices.shape[0]
+    indices = jnp.pad(
+        indices,
+        (0, max(-num_indices % _GATHER_IDX_ALIGN, idx_window - num_indices)),
+    )
+    scalars = (group_sizes, group_offset, jnp.asarray(lhs_gather_start, jnp.int32).reshape(1))
+    # [x_rows, D0, 128] -> [x_rows * num_k, 1, tile_d0, 128] (a bitcast; see the
+    # `out` path above). Keep it the last op on x before the kernel call.
+    x_view = gather_src.reshape(-1, 1, cfgs.lhs_tile_d0, num_lanes)
+    inputs = [dataclasses.replace(lhs_in, value=x_view), rhs_weights, out_scale, glu_out_scale, indices]
+    in_specs = [
+        LhsRef(
+            value=hbm,
+            scale=hbm if cfgs.lhs_cfgs.has_scale else None,
+            glu_coeffs=hbm if cfgs.has_glu_coeffs else None,
+        ),
+        WeightsRef(
+            weight=hbm,
+            scale=hbm if rhs_scale is not None else None,
+            bias=hbm if rhs_bias is not None else None,
+        ),
+        out_scale_spec,
+        glu_out_scale_spec,
+        hbm,
+    ]
+    gather_scratch_shapes = [
+        # buf_ref: two k-major slots of gathered rows.
+        pltpu.VMEM(
+            (2 * num_k, tiles.tile_m, cfgs.lhs_tile_d0, num_lanes),
+            gather_src.dtype,
+        ),
+        # row_sems
+        pltpu.SemaphoreType.DMA((2,)),
+        # idx_smem_ref
+        pltpu.SMEM((2 * idx_window,), jnp.int32),
+        # idx_sems
+        pltpu.SemaphoreType.DMA((2,)),
+    ]
+    res = pl.pallas_call(
+        functools.partial(
+            _kernel_main_gather,
+            cfgs=cfgs,
+            idx_window=idx_window,
+            max_win_start=indices.shape[0] - idx_window,
+        ),
+        out_shape=OutRef(out=out_init, act=act_init),
+        grid_spec=pltpu.PrefetchScalarGridSpec(
+            num_scalar_prefetch=len(scalars),
+            in_specs=in_specs,
+            out_specs=OutRef(
+                out=None if cfgs.glu_only else hbm,
+                act=hbm if cfgs.has_glu_coeffs else None,
+            ),
+            # pyrefly: ignore[bad-argument-type]
+            scratch_shapes=scratch_shapes + gather_scratch_shapes,
+        ),
+        compiler_params=pltpu.CompilerParams(
+            vmem_limit_bytes=vmem_limit_bytes,
+            disable_bounds_checks=True,
+        ),
+        name=get_scope_name(cfgs),
+        cost_estimate=get_cost_estimate(cfgs),
+        metadata=get_metadata(cfgs),  # pyrefly: ignore[bad-argument-type]
+    )(*scalars, *inputs)
+    if cfgs.glu_only:
+      assert res.act is not None
+      return res.act[:size_m]
+    assert res.out is not None
+    if cfgs.has_glu_coeffs:
+      assert res.act is not None
+      return res.out[out_slice], res.act[:size_m]
+    return res.out[out_slice]
+
   # TODO(b/549337409): Revert temporary fallback to unblock vmap on older JAX.
   # DO NOT EDIT THIS BLOCK: This path is a temporary fallback to unblock
   # until Tokamax updates its JAX version.
@@ -2675,6 +2837,10 @@ def gmm_v2(
       cost_estimate=get_cost_estimate(cfgs),
       metadata=get_metadata(cfgs),  # pyrefly: ignore[bad-argument-type]
   )(group_sizes, group_offset, lhs_in, rhs_weights, out_scale, glu_out_scale)
+  if cfgs.glu_only:
+    assert res.act is not None
+    return res.act[:size_m]
+  assert res.out is not None
   if cfgs.has_glu_coeffs:
     assert res.act is not None
     return res.out[out_slice], res.act[:size_m]

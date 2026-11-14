@@ -1790,6 +1790,53 @@ class AttentionOp(nnx.Module):
             "sv_diag_skip": self.sv_diag_skip,
             "qk_diag_grid": config.sa_qk_diag_grid,
         }
+        if getattr(config, "sa_diag_band_skip", False):
+          # Row-band skip of the dkv diagonal block (bit-exact); needs dq_reduction_steps=1.
+          diag_skip_kwargs["diag_band_skip"] = True
+      q_mesh_axes = self._logical_to_mesh_axes(self.flash_axis_names_q)
+      q_head_axes = q_mesh_axes[1] if q_mesh_axes is not None and len(q_mesh_axes) > 1 else None
+      q_head_axes = (q_head_axes,) if isinstance(q_head_axes, str) else (q_head_axes or ())
+      q_head_shards = math.prod(self.mesh.shape.get(ax, 1) for ax in q_head_axes)
+      if self.context_parallel_strategy == "ulysses":
+        q_head_shards *= self._context_parallel_size()
+      raw_dh = int(getattr(config, "sa_context_split_device_heads", 0) or 0)
+      if raw_dh < 0 or raw_dh % q_head_shards != 0:
+        raise ValueError(
+            f"sa_context_split_device_heads ({raw_dh}) must be non-negative and divisible by the Q-head shard"
+            f" count ({q_head_shards})."
+        )
+      is_custom_remat = getattr(config, "remat_policy", None) == "custom"
+      stacked_q = int(getattr(config, "sa_num_stacked_q_heads", 1) or 1)
+      extra_sa_kwargs = {
+          k: v
+          for k, v in {
+              "dq_transposed": bool(getattr(config, "sa_dq_transposed", False)),
+              "bwd_fp8_ds": bool(getattr(config, "sa_bwd_fp8_ds", False)),
+              "bwd_fp8_dov": bool(getattr(config, "sa_bwd_fp8_dov", False)),
+              "fwd_pv_fp8": bool(getattr(config, "sa_fwd_pv_fp8", False)),
+              "compact_residuals": bool(getattr(config, "sa_compact_residuals", False)),
+              "bwd_vmem_dkv_gqa": bool(getattr(config, "sa_bwd_vmem_dkv_gqa", False)),
+              "num_stacked_q_heads": stacked_q if stacked_q != 1 else 0,
+              "residual_checkpoint_device_heads": (raw_dh // q_head_shards) if is_custom_remat else 0,
+              "residual_checkpoint_offload_fp8": (
+                  bool(getattr(config, "sa_context_offload_fp8", False)) and is_custom_remat
+              ),
+              "residual_checkpoint_device_fp8": (
+                  bool(getattr(config, "sa_context_device_fp8", False)) and is_custom_remat
+              ),
+          }.items()
+          if v
+      }
+      # The optional fields are only passed when enabled, so the PyPI Tokamax used by open-source MaxText works
+      # by default; name the missing fields instead of a SplashConfig TypeError when a flag needs a newer one.
+      if dataclasses.is_dataclass(tokamax_splash_kernel.SplashConfig):
+        supported = {f.name for f in dataclasses.fields(tokamax_splash_kernel.SplashConfig)}
+        unsupported = sorted((extra_sa_kwargs.keys() | diag_skip_kwargs.keys()) - supported)
+        if unsupported:
+          raise ValueError(
+              f"The installed Tokamax SplashConfig has no field(s) {unsupported}, which the enabled sa_* config"
+              " flags need; install a newer Tokamax or disable those flags."
+          )
       return tokamax_splash_kernel.SplashConfig(
           block_q=min(blocks.block_q, q_len),
           block_kv=min(blocks.block_kv, kv_len),
@@ -1807,6 +1854,7 @@ class AttentionOp(nnx.Module):
           dkv_reuse_scaled_q=getattr(config, "sa_dkv_reuse_scaled_q", False),
           q_prescaled_log2e=getattr(config, "sa_q_prescaled_log2e", False),
           residual_checkpoint_name="context",
+          **extra_sa_kwargs,
           fwd_cost_estimate=pl.CostEstimate(
               flops=config.cost_estimate_flops_fwd,
               transcendentals=0,

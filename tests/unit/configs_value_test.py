@@ -1792,11 +1792,23 @@ class Qwen3StackConfigValidationTest(absltest.TestCase):
     self.assertTrue(config.qwix_disable_channelwise_axes)
 
   def test_moe_fused_gmm3d_wgrad_schedule_mode_bounds(self):
-    for mode in (-1, 17):
+    for mode in (-1, 18):
       with self.subTest(mode=mode):
         with self.assertRaises(pydantic.ValidationError):
           self._initialize(f"moe_fused_gmm3d_wgrad_schedule_mode={mode}")
-    self.assertEqual(self._initialize("moe_fused_gmm3d_wgrad_schedule_mode=16").moe_fused_gmm3d_wgrad_schedule_mode, 16)
+    self.assertEqual(self._initialize("moe_fused_gmm3d_wgrad_schedule_mode=17").moe_fused_gmm3d_wgrad_schedule_mode, 17)
+
+  def test_moe_tc_routing_offload_free_prerequisites(self):
+    with self.assertRaisesRegex(self._ERRORS, "requires moe_packed_routing_sort=True"):
+      self._initialize("moe_tc_routing_offload_free=true")
+    config = self._initialize("moe_packed_routing_sort=true", "moe_tc_routing_offload_free=true")
+    self.assertTrue(config.moe_tc_routing_offload_free)
+    # The ring-of-experts ragged sort needs expert parallelism > 1, so check that rule on the validator directly.
+    ring_config = unittest.mock.Mock(
+        moe_tc_routing_offload_free=True, moe_packed_routing_sort=True, use_ring_of_experts=True, use_ragged_sort=True
+    )
+    with self.assertRaisesRegex(ValueError, "does not support use_ring_of_experts=True"):
+      types.MaxTextConfig.validate_moe_tc_routing_offload_free(ring_config)
 
   def test_moe_use_fused_gmm3d_prerequisites(self):
     # A fully-MoE model: base_moe_mlp_dim must match base_mlp_dim (7168 in base.yml).

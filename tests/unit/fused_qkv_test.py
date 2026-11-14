@@ -321,6 +321,7 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
       tol_grad: float,
       fused_out_flag: bool = False,
       bwd_calib: str = "fixed,-224,224",
+      early_dw_rs: bool = False,
       data_par: int = 1,
       fsdp_par: int = 4,
   ):
@@ -359,6 +360,7 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
           "matmul_precision": "highest",
           "use_fused_qkv_kernel": fused_qkv_flag,
           "use_fused_out_kernel": (fused_qkv_flag and fused_out_flag),
+          "fused_out_early_dw_rs": (fused_qkv_flag and fused_out_flag and early_dw_rs),
           "sa_q_layout": "SEQ_MINOR",
           "sa_k_layout": "SEQ_MINOR",
       }
@@ -461,6 +463,7 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
         tol_y=1.5e-2,
         tol_grad=2.5e-2,
         fused_out_flag=True,
+        early_dw_rs=True,
         data_par=2,
         fsdp_par=2,
     )
@@ -1106,8 +1109,198 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
     self.assertRegex(hlo1, r"f32\[2,512\]\{1,0\}.*all-reduce\(")
     self.assertRegex(hlo1, r"f32\[2,128\]\{1,0\}.*all-reduce\(")
 
+  def test_fused_out_early_dw_rs_parity(self):
+    """Verifies `early_dw_rs` 3D `(emb, nq, hd)` `axis=0` AG/RS preserves bit-exact fwd+bwd parity."""
+    devices = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devices), ("fsdp",))
+    n_dev = len(devices)
+    batch, seq_len, nq, hd = n_dev, 64, 8, 128
+    emb = nq * hd
+    k0, k1, k2 = jax.random.split(jax.random.PRNGKey(1801), 3)
+    ctx = jax.random.normal(k0, (batch, seq_len, nq, hd), jnp.bfloat16)
+    wo = jax.random.normal(k1, (nq, hd, emb), jnp.float32) * 0.05
+    cot = jax.random.normal(k2, (batch, seq_len, emb), jnp.bfloat16)
+
+    def run_variant(early_dw: bool):
+      p = fused_qkv.FusedOutTrainParams(
+          compute_dtype=jnp.bfloat16,
+          act_qtype=jnp.float8_e4m3fn,
+          weight_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e5m2,
+          act_scale=0.5,
+          weight_scale=0.5,
+          bwd_scale=224.0 / 57344.0,
+          weight_gather_axes=("fsdp",),
+          ctx_dtype=jnp.bfloat16,
+          wo_dtype=jnp.float32,
+          early_dw_rs=early_dw,
+      )
+      ctx_spec = jax.sharding.PartitionSpec("fsdp", None, None, None)
+      wo_spec = jax.sharding.PartitionSpec(None, None, "fsdp")
+
+      @functools.partial(
+          jax.shard_map,
+          mesh=mesh,
+          in_specs=(ctx_spec, wo_spec, jax.sharding.PartitionSpec("fsdp", None, None)),
+          out_specs=(jax.sharding.PartitionSpec("fsdp", None, None), ctx_spec, wo_spec),
+          check_vma=False,
+      )
+      def step(c_l, w_l, cot_l):
+        y_l, vjp_fn = jax.vjp(lambda c_, w_: fused_qkv.fused_out_local(p, c_, w_), c_l, w_l)
+        dc_l, dw_l = vjp_fn(cot_l)
+        return y_l, dc_l, dw_l
+
+      jitted = jax.jit(step)
+      ctx_s = jax.device_put(ctx, jax.sharding.NamedSharding(mesh, ctx_spec))
+      wo_s = jax.device_put(wo, jax.sharding.NamedSharding(mesh, wo_spec))
+      cot_s = jax.device_put(cot, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", None, None)))
+      hlo = jitted.lower(ctx_s, wo_s, cot_s).as_text()
+      y, dc, dw = jitted(ctx_s, wo_s, cot_s)
+      return np.asarray(y, np.float32), np.asarray(dc, np.float32), np.asarray(dw, np.float32), hlo
+
+    y0, dc0, dw0, hlo0 = run_variant(False)
+    y1, dc1, dw1, hlo1 = run_variant(True)
+    np.testing.assert_array_equal(y1, y0)
+    np.testing.assert_array_equal(dc1, dc0)
+    np.testing.assert_array_equal(dw1, dw0)
+    self.assertIn("all_gather_dim = 2", hlo0)
+    self.assertIn("all_gather_dim = 0", hlo1)
+    self.assertIn("scatter_dimension = 2", hlo0)
+    self.assertIn("scatter_dimension = 0", hlo1)
+
+  @parameterized.named_parameters(("unfused_qkv", False), ("fused_qkv", True))
+  def test_nnx_decoder_defer_norm_grad_allreduce_parity(self, fused_qkv: bool):
+    """`defer_norm_grad_allreduce` on vs. off through a scanned `NNXDecoder`: same output and gradients.
+
+    Differentiates through the decoder itself, so it covers what the flag needs in order to be correct: the
+    `layer_fn` overrides that switch the layers to shard-local scale gradients, the key paths under which
+    `NNXDecoder` finds and wraps every deferred scale, and the psum axes. It also shows that the comparison notices
+    a missing wrapper, and that `NNXDecoder` refuses a deferred scale it cannot find.
+    """
+    from unittest import mock  # pylint: disable=import-outside-toplevel
+
+    from flax import linen as nn  # pylint: disable=import-outside-toplevel
+    from flax import nnx  # pylint: disable=import-outside-toplevel
+    from jax.sharding import Mesh  # pylint: disable=import-outside-toplevel
+    from maxtext.common.common_types import MODEL_MODE_TRAIN  # pylint: disable=import-outside-toplevel
+    from maxtext.configs import pyconfig  # pylint: disable=import-outside-toplevel
+    from maxtext.layers import nnx_decoders  # pylint: disable=import-outside-toplevel
+    from maxtext.layers import normalizations  # pylint: disable=import-outside-toplevel
+    from maxtext.layers.embeddings import Embed  # pylint: disable=import-outside-toplevel
+    from maxtext.utils import maxtext_utils  # pylint: disable=import-outside-toplevel
+    from tests.utils.test_helpers import get_test_config_path  # pylint: disable=import-outside-toplevel
+
+    emb, seq_len, nq, nkv, hd, vocab = 512, 128, 8, 2, 128, 128
+
+    def make_cfg(defer_flag: bool):
+      return pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name="defer_norm_decoder_test",
+          enable_checkpointing=False,
+          skip_jax_distributed_system=True,
+          hardware="cpu",
+          decoder_block="qwen3",
+          attention="dot_product",
+          scan_layers=True,
+          base_num_decoder_layers=2,
+          base_emb_dim=emb,
+          base_mlp_dim=512,
+          base_num_query_heads=nq,
+          base_num_kv_heads=nkv,
+          head_dim=hd,
+          use_qk_norm=True,
+          rope_max_timescale=1_000_000.0,
+          max_target_length=seq_len,
+          per_device_batch_size=1,
+          ici_fsdp_parallelism=4,
+          vocab_size=vocab,
+          dtype="float32",
+          weight_dtype="float32",
+          matmul_precision="highest",
+          use_fused_qkv_kernel=fused_qkv,
+          use_fused_out_kernel=fused_qkv,
+          defer_norm_grad_allreduce=defer_flag,
+      )
+
+    cfg_base, cfg_defer = make_cfg(False), make_cfg(True)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg_base), cfg_base.mesh_axes)
+    batch = int(cfg_base.per_device_batch_size) * jax.device_count()
+    k_tok, k_cot = jax.random.split(jax.random.PRNGKey(1305))
+    toks = jax.random.randint(k_tok, (batch, seq_len), 0, vocab, jnp.int32)
+    pos = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32), (batch, seq_len))
+    seg = jnp.ones((batch, seq_len), jnp.int32)
+    cot = jax.random.normal(k_cot, (batch, seq_len, vocab), jnp.float32)
+    norm_scale_paths = [
+        ("pre_self_attention_layer_norm", "scale"),
+        ("post_self_attention_layer_norm", "scale"),
+        ("self_attention", "query_norm", "scale"),
+        ("self_attention", "key_norm", "scale"),
+    ]
+
+    def eval_decoder(cfg):
+      with mesh, nn.logical_axis_rules(cfg.logical_axis_rules):
+        shared_emb = Embed(
+            num_embeddings=vocab,
+            num_features=emb,
+            dtype=cfg.dtype,
+            embedding_init=nn.initializers.normal(stddev=1.0),
+            config=cfg,
+            mesh=mesh,
+            rngs=nnx.Rngs(params=1),
+        )
+        dec = nnx_decoders.NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+        nnx.pop(dec, nnx.Intermediate)
+        graphdef, params, rest = nnx.split(dec, nnx.Param, ...)
+
+        def loss_fn(p_):
+          m = nnx.merge(graphdef, p_, rest)
+          y, _, _ = m(shared_emb, toks, pos, decoder_segment_ids=seg, deterministic=True, model_mode=MODEL_MODE_TRAIN)
+          return jnp.sum(y.astype(jnp.float32) * cot), y
+
+        (_, y), grads = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(params)
+      flat = {
+          jax.tree_util.keystr(k): np.asarray(v, np.float32) for k, v in jax.tree_util.tree_flatten_with_path(grads)[0]
+      }
+      return np.asarray(y, np.float32), flat, (dec, params)
+
+    def scale_keys(grads):
+      return [k for k in grads if any(all(name in k for name in path) for path in norm_scale_paths)]
+
+    y_base, g_base, _ = eval_decoder(cfg_base)
+    y_defer, g_defer, (dec_defer, params_defer) = eval_decoder(cfg_defer)
+
+    # The deferred mode is really on: active psum axes, and (below) shard-local scale gradients once the post-scan
+    # all-reduce is removed. The layers themselves are built with the deferral off; `_apply_layers_sequentially`
+    # turns it on per call.
+    defer_axes = normalizations.get_deferred_norm_psum_axes(cfg_defer, mesh)
+    self.assertNotEmpty(defer_axes)
+    self.assertEmpty(normalizations.get_deferred_norm_psum_axes(cfg_base, mesh))
+    self.assertFalse(dec_defer.layers.pre_self_attention_layer_norm.defer_scale_grad_allreduce)
+    self.assertFalse(dec_defer.layers.post_self_attention_layer_norm.defer_scale_grad_allreduce)
+
+    self.assertEqual(set(g_base), set(g_defer))
+    self.assertLen(scale_keys(g_base), 4)
+    self.assertLess(_errors(y_defer, y_base)[1], 1e-5)
+    for k in g_base:
+      self.assertLess(_errors(g_defer[k], g_base[k])[1], 1e-4, msg=k)
+
+    # Without the post-scan wrapper the deferred scale gradients are per-shard, and the comparison sees it. Only
+    # the scales that the layers actually defer (the QK-norm ones need the fused QKV path) are affected.
+    with mock.patch.object(normalizations, "post_scan_psum_grad", side_effect=lambda w, *_: w):
+      _, g_unwrapped, _ = eval_decoder(cfg_defer)
+    deferred = [k for k in scale_keys(g_base) if fused_qkv or "attention_layer_norm" in k]
+    self.assertLen(deferred, 4 if fused_qkv else 2)
+    for k in deferred:
+      self.assertGreater(_errors(g_unwrapped[k], g_base[k])[1], 0.1, msg=k)
+
+    # `NNXDecoder` raises instead of leaving a deferred scale unwrapped when its key path is not in the params.
+    with self.assertRaisesRegex(ValueError, "no parameter found for the deferred norm scale"):
+      nnx_decoders._wrap_deferred_norm_scales(  # pylint: disable=protected-access
+          params_defer["layers"], {("no_such_layer_norm", "scale")}, mesh, defer_axes
+      )
+
   def test_attention_fp8_qk_log2e_and_config_guards(self):
-    """Verifies `experimental_sa_quant_q/k_fp8`, `sa_q_prescaled_log2e`, and TP guard."""
+    """Verifies `experimental_sa_quant_q/k_fp8`, `sa_q_prescaled_log2e`, `sa_context_device_fp8`, and TP guard."""
     from flax import nnx  # pylint: disable=import-outside-toplevel
     from flax.linen import partitioning as nn_partitioning  # pylint: disable=import-outside-toplevel
     from jax.sharding import Mesh  # pylint: disable=import-outside-toplevel
@@ -1138,6 +1331,24 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
           dtype="bfloat16",
           weight_dtype="float32",
           **extra,
+      )
+
+    # 1. `sa_context_device_fp8` requires `remat_policy='custom'` and registers `context_device` on device.
+    cfg_sa_dev_only = init_cfg(
+        attention="flash",
+        use_tokamax_splash=True,
+        ici_fsdp_parallelism=4,
+        remat_policy="custom",
+        sa_context_device_fp8=True,
+    )
+    self.assertIn("context_device", cfg_sa_dev_only.tensors_on_device)
+    with self.assertRaisesRegex(ValueError, "require remat_policy='custom'"):
+      init_cfg(
+          attention="flash",
+          use_tokamax_splash=True,
+          ici_fsdp_parallelism=4,
+          remat_policy="full",
+          sa_context_device_fp8=True,
       )
 
     # 2. `use_fused_qkv_kernel=True` with `ici_tensor_parallelism > 1` raises `NotImplementedError`.

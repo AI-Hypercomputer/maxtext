@@ -393,14 +393,17 @@ moe_fused_gmm3d_early_dwo_rs: false # run linear_bwd_wgrad + dwo reduce-scatter 
 moe_fused_gmm3d_sc_routed_gather: false # issue 2D x_q[token_indices] gather at start of fused MoE bwd so XLA offloads asynchronously to SparseCore.
 moe_fused_gmm3d_exact_topk_combine: false # use specialized exact-top_k TensorCore gather-reduce combine kernel in fused MoE fwd and bwd.
 moe_fused_gmm3d_exact_topk_out_2d: false # flatten [block_tokens, D0, D1] -> [block_tokens, D] in VMEM inside exact_topk_gather_reduce_tc.
-moe_fused_gmm3d_wgrad_schedule_mode: 0 # schedule MoE wgrads + reduce-scatters earlier via scalar guards (0 = off, 1..16; every mode is described in configs/types.py).
+moe_fused_gmm3d_wgrad_schedule_mode: 0 # schedule MoE wgrads + reduce-scatters earlier via scalar guards (0 = off, 1..17; every mode is described in configs/types.py).
 moe_fused_gmm3d_inv_perm_combine: false # use O(C) SparseCore inverse-permutation scatter instead of TC sort for exact_topk_combine src_rows.
 moe_fused_gmm3d_relayout_x_2d_to_3d: false # use Pallas VMEM strided-store relayout for x_q [N, D] -> [N, D//128, 128].
 moe_fused_gmm3d_fused_quant_relayout: false # fuse FP8 quantize + [N, D] -> [N, D//128, 128] relayout in VMEM for x2d.
 moe_fused_gmm3d_overlap_dcoeffs_scatter: false # overlap unique-index dcoeffs SparseCore scatter behind MoE wgrad + gate_dx.
 moe_packed_routing_sort: false # pack (expert_id << 20) | slot_idx into a single uint32 array for routing argsort.
+moe_tc_routing_offload_free: false # co-sort routing weights on TensorCore under moe_packed_routing_sort and reuse one-hot expert counts.
+moe_wi_ag_latency_ns: 0 # override LHS latency_metadata (ns) on MoE wi/wo FSDP all-gathers.
 use_fused_qkv_kernel: false # fuse the QKV projection + per-head QK RMSNorm + RoPE + Splash layout in a Pallas kernel (self-attention with QK RMSNorm and standard RoPE, e.g. Qwen3).
 use_fused_out_kernel: false # use custom-VJP FSDP Attention out projection with local absmax bwd and early dw_o reduce-scatter.
+fused_out_early_dw_rs: false # start fused out-projection dw + reduce-scatter before Splash backward.
 defer_norm_grad_allreduce: false # defer per-layer RMSNorm and QK-norm scale gradient all-reduces until after the decoder scan loop (scanned qwen3 / qwen3_moe decoder layers; no-op with a warning elsewhere).
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
@@ -614,6 +617,7 @@ kv_wa_proj: 'remat'
 mla_q: 'remat'
 mla_kv: 'remat'
 attention_out: 'remat'
+decoder_layer_input_unalias: false # unalias offloaded Qwen3 decoder_layer_input at layer start to hide backward PCIe prefetch.
 engram: 'remat'
 
 optimizer_memory_host_offload: false
@@ -1572,6 +1576,7 @@ sa_compact_residuals: False # Experimental (SplashConfig.compact_residuals): wri
 sa_bwd_vmem_dkv_gqa: False # Experimental (SplashConfig.bwd_vmem_dkv_gqa): accumulate full-KV dk/dv in VMEM across q_heads_per_kv_head on dynamic grid when kv_steps <= 2.
 sa_context_split_device_heads: 0 # Experimental: split Splash forward `out` across query heads (`[:N]` + logsumexp on device HBM, `[N:]` offloaded to pinned host) under custom remat to eliminate backward Splash fwd remat within HBM and host-memory caps.
 sa_context_offload_fp8: False # Experimental: quantize offloaded Splash `out[dh:]` per 128-dim row to float8_e4m3fn + bf16 scale on device to halve host RAM and PCIe transfer. The attention output itself becomes the dequantized (fp8-rounded) value, not only the stored copy.
+sa_context_device_fp8: False # Experimental: quantize the device-resident Splash `out[:dh]` (`context_device`) per 128-dim row to float8_e4m3fn + bf16 scale to halve its HBM footprint. With sa_context_split_device_heads=0 it keeps every head on device as fp8 when sa_context_offload_fp8 is off, and has no effect when it is on.
 sa_ignore_segment_ids: False # Do not pass segment ids to splash attention, for both train and eval. Splash then runs its non-segmented kernels, which skip the per-block segment-id compare and mask (VPU work on every block, not only diagonal ones); causal masking still applies. Only valid where every row is one segment: c4_mlperf with stream chunking, or synthetic data without packed segments (max_segments_per_seq < 2).
 use_max_logit_estimate: -1 # -1 means no estimate, any > 0 value will be used as max logit estimate
 cost_estimate_flops_fwd: -1 # -1 means using splash default cost estmiation, any >= 0 value will be used as cost estmiation for splash to overlap for communication (forward)

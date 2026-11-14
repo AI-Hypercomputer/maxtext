@@ -1139,6 +1139,14 @@ class SplashAttention(BaseModel):
       " Not storage-only: the attention output itself becomes the dequantized value (so forward and backward see"
       " the same tensor), i.e. `out[dh:]` reaches the next layer fp8-rounded, in training and in eval.",
   )
+  sa_context_device_fp8: bool = Field(
+      False,
+      description="Quantize the device-resident Splash `out[:dh]` (`context_device`) per 128-dim row to float8_e4m3fn"
+      " + bf16 scale, halving its HBM footprint (same scheme as `sa_context_offload_fp8`, including the fp8-rounded"
+      " attention output). With `sa_context_split_device_heads=0` there is no `out[:dh]`: if `sa_context_offload_fp8`"
+      " is off, every head is quantized and kept on device as `context_device` (the `context` remat setting is not"
+      " used); if it is on, every head is offloaded and this flag has no effect.",
+  )
   sa_diag_band_skip: bool = Field(
       False,
       description="Tokamax Splash fused backward only (maps to SplashConfig.diag_band_skip): with sa_qk_diag_skip,"
@@ -1669,7 +1677,7 @@ class MoEGeneral(BaseModel):
   moe_fused_gmm3d_wgrad_schedule_mode: int = Field(
       0,
       ge=0,
-      le=16,
+      le=17,
       description="Schedule MoE weight gradients and reduce-scatters (RS) earlier via zero-cost scalar NaN guards;"
       " only read with moe_fused_gmm3d_split_gate_bwd. 0=no guards, 1=dwo before gate_dx, 2=dwo+dwi before"
       " attention bwd, 3=also finish post-RS dwo+dwi_0 before attention bwd, 4=chained tgmm_v2 before gate_dx with"
@@ -1678,7 +1686,8 @@ class MoEGeneral(BaseModel):
       " behind gate_dx before Splash bwd, 9=mode 8 + chained tgmm_v2, 10-12=tgmm_v2 before gate_dx with 0/1/2 RSs"
       " forced before gate_dx, 13=mode 12 + dwi_1 RS finished before the layer dx via a grad_coeffs guard, 14=mode"
       " 10 + all 3 RSs finished before the layer dx via grad_coeffs guards, 15=unguarded gate_dx (attention bwd not"
-      " delayed) with dwo_raw before chained tgmm_v2, 16=mode 15 + dwo_raw guarded behind gate_dx + combine_dx).",
+      " delayed) with dwo_raw before chained tgmm_v2, 16=mode 15 + dwo_raw guarded behind gate_dx + combine_dx,"
+      " 17=mode 10 + all 3 RSs finished before attention bwd via a dx3d guard).",
   )
   moe_fused_gmm3d_inv_perm_combine: bool = Field(
       False,
@@ -1705,6 +1714,16 @@ class MoEGeneral(BaseModel):
       description="Pack (expert_id << 20) | slot_idx into a single uint32 array for bit-exact single-operand routing"
       " argsort.",
   )
+  moe_tc_routing_offload_free: bool = Field(
+      False,
+      description="Co-sort routing weights on TensorCore under `moe_packed_routing_sort` and reuse one-hot"
+      " `summed_expert_mask` for `group_size`, eliminating SparseCore gather/scatter routing offloads.",
+  )
+  moe_wi_ag_latency_ns: int = Field(
+      0,
+      description="If > 0, stamps `latency_metadata` (in nanoseconds) onto MoE `wi` (`//2` on `wo`) FSDP"
+      " all-gathers so XLA LHS starts them during `out_proj` + router `sort` instead of right before `gmm_v2`.",
+  )
   use_fused_qkv_kernel: bool = Field(
       False,
       description="Fuse the QKV projection + per-head QK RMSNorm + RoPE + Splash layout in a Pallas kernel"
@@ -1714,6 +1733,11 @@ class MoEGeneral(BaseModel):
       False,
       description="Use custom-VJP FSDP Attention out projection with local absmax quantization and early overlapped"
       " weight-gradient reduce-scatter.",
+  )
+  fused_out_early_dw_rs: bool = Field(
+      False,
+      description="Guard `scale_dctx` on `dw_sharded_ehd` in `_fused_out_local_bwd` so the out-projection weight"
+      " gradient and its SparseCore reduce-scatter start before `splash_mha_dkv` instead of at the layer tail.",
   )
   defer_norm_grad_allreduce: bool = Field(
       False,
@@ -2581,6 +2605,11 @@ class RematAndOffload(BaseModel):
   remat_policy_for_vit: str | None = Field("minimal", description="Remat policy for multimodal model's vision encoder.")
   decoder_layer_input: RematLocation = Field(
       RematLocation.DEVICE, description="Remat policy for the decoder layer's input."
+  )
+  decoder_layer_input_unalias: bool = Field(
+      False,
+      description="Materialize a single-layer HBM copy of `decoder_layer_input` right after checkpointing so"
+      " backward host prefetch (`dynamic-slice-start`) has no end-of-layer WAR hazard.",
   )
   indexer_cutoff_threshold: RematLocation = Field(
       RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
@@ -4976,6 +5005,19 @@ class MaxTextConfig(
       if unsupported:
         raise ValueError(f"moe_tc_ragged_3d_gmm=True does not support: {', '.join(unsupported)}.")
 
+  def validate_moe_tc_routing_offload_free(self):
+    """Validates that moe_tc_routing_offload_free is used where `RoutedMoE.permute` applies it."""
+    if not self.moe_tc_routing_offload_free:
+      return
+    # The routing weights are co-sorted with the packed (expert_id << 20) | slot_idx keys; without the packed
+    # sort the TensorCore co-sort never runs and SparseCore still gathers the weights.
+    if not self.moe_packed_routing_sort:
+      raise ValueError("moe_tc_routing_offload_free=True requires moe_packed_routing_sort=True.")
+    if self.use_ring_of_experts and self.use_ragged_sort:
+      raise ValueError(
+          "moe_tc_routing_offload_free=True does not support use_ring_of_experts=True with use_ragged_sort=True."
+      )
+
   def validate_moe_topk_before_ep_all_gather(self):
     """Validates that moe_topk_before_ep_all_gather is used with ring of experts."""
     if self.moe_topk_before_ep_all_gather and not (self.sparse_matmul and self.use_ring_of_experts):
@@ -6007,11 +6049,11 @@ class MaxTextConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
-    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8:
+    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8 or self.sa_context_device_fp8:
       if self.remat_policy != "custom":
         raise ValueError(
-            "sa_context_split_device_heads and sa_context_offload_fp8 require remat_policy='custom', got"
-            f" remat_policy={self.remat_policy!r}."
+            "sa_context_split_device_heads, sa_context_offload_fp8, and sa_context_device_fp8 require"
+            f" remat_policy='custom', got remat_policy={self.remat_policy!r}."
         )
       if "context_device" not in self.tensors_on_device:
         self.tensors_on_device.append("context_device")
@@ -6587,6 +6629,9 @@ class MaxTextConfig(
           "shard_exp_on_fsdp=False": not self.shard_exp_on_fsdp,
           "use_2d_fsdp_sharding=False": not self.use_2d_fsdp_sharding,
           "capacity_factor < 0 (dropless)": self.capacity_factor < 0,
+          "fp8_moe_fake_quant=False": not self.fp8_moe_fake_quant,
+          "use_batch_split_schedule=False": not self.use_batch_split_schedule,
+          "no weight sparsity": not (self.weight_sparsity_n and self.weight_sparsity_m),
       }
       unmet = [name for name, ok in fused_gmm3d_requirements.items() if not ok]
       if unmet:
@@ -6664,6 +6709,7 @@ class MaxTextConfig(
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
     self.validate_moe_topk_before_ep_all_gather()
+    self.validate_moe_tc_routing_offload_free()
     self.validate_moe_quantize_combine_bwd_method()
     self.validate_mllog()
     self.validate_splash_diag_skip()
@@ -7964,11 +8010,11 @@ class RLConfig(
       ]
       self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
       self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
-    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8:
+    if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8 or self.sa_context_device_fp8:
       if self.remat_policy != "custom":
         raise ValueError(
-            "sa_context_split_device_heads and sa_context_offload_fp8 require remat_policy='custom', got"
-            f" remat_policy={self.remat_policy!r}."
+            "sa_context_split_device_heads, sa_context_offload_fp8, and sa_context_device_fp8 require"
+            f" remat_policy='custom', got remat_policy={self.remat_policy!r}."
         )
       if "context_device" not in self.tensors_on_device:
         self.tensors_on_device.append("context_device")
