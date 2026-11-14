@@ -29,6 +29,7 @@ from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import safetensors_reader
 import numpy as np
 from orbax.checkpoint import v1 as ocp_v1
@@ -112,14 +113,12 @@ class SafetensorsReaderTest(parameterized.TestCase):
           np.testing.assert_array_equal(np.asarray(shard.data), np.asarray(want)[shard.index])
 
   def test_matches_orbax(self):
-    """Bit for bit equal to Orbax's SafeTensors loader, with each tensor split by whole rows."""
-
-    def by_rows(shape):
-      # Split dim 0 over all 4 chips where it divides, else a full copy on every chip.
-      return P(("x", "y")) if shape and shape[0] % 4 == 0 else P()
-
+    """Bit for bit equal to Orbax's SafeTensors loader, with the shardings the streaming loader uses."""
+    devices = list(self.mesh.devices.flat)
     request = {
-        name: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=NamedSharding(self.mesh, by_rows(a.shape)))
+        name: jax.ShapeDtypeStruct(
+            a.shape, a.dtype, sharding=hf_streaming_load.choose_load_sharding(a.shape, a.dtype, devices, 0)
+        )
         for name, (a, _) in self.cases.items()
     }
     with safetensors_reader.SafetensorsReader(self.dir) as reader:
