@@ -6587,6 +6587,9 @@ class MaxTextConfig(
           "shard_exp_on_fsdp=False": not self.shard_exp_on_fsdp,
           "use_2d_fsdp_sharding=False": not self.use_2d_fsdp_sharding,
           "capacity_factor < 0 (dropless)": self.capacity_factor < 0,
+          "fp8_moe_fake_quant=False": not self.fp8_moe_fake_quant,
+          "use_batch_split_schedule=False": not self.use_batch_split_schedule,
+          "no weight sparsity": not (self.weight_sparsity_n and self.weight_sparsity_m),
       }
       unmet = [name for name, ok in fused_gmm3d_requirements.items() if not ok]
       if unmet:

@@ -2877,7 +2877,16 @@ def merge_microbatches(
 
 # --- Pallas Kernels for Ragged Gather on TensorCore ---
 
-_RAGGED_GATHER_TC_NUM_BUFFERS = 2
+_RAGGED_GATHER_TC_NUM_BUFFERS = 4
+_RAGGED_GATHER_TC_IDX_RING = 3
+_RAGGED_GATHER_TC_VMEM_BUDGET = 48 * 1024 * 1024
+
+
+def _tpu_vmem_capacity_bytes(default_bytes: int = 64 * 1024 * 1024) -> int:
+  try:
+    return pltpu.get_tpu_info().vmem_capacity_bytes
+  except ValueError:
+    return default_bytes
 
 
 @jt.jaxtyped(typechecker=typeguard.typechecked)
@@ -2890,6 +2899,7 @@ def ragged_gather_tc(
     block_size: int = 2048,
     *,
     with_absmax: bool = False,
+    interpret: bool = False,
 ) -> Any:
   """Executes a ragged gather on TensorCore using a Pallas kernel.
 
@@ -2910,9 +2920,11 @@ def ragged_gather_tc(
       does not recompile per value.
     max_out_tokens: Length of the output buffer along axis 0.
     block_size: Number of output rows gathered per grid step, i.e. the number of
-      concurrent row DMAs in flight per buffer. Clamped to `max_out_tokens`.
+      concurrent row DMAs in flight per buffer. Clamped to `max_out_tokens` and
+      to fit VMEM across all pipeline buffers.
     with_absmax: If True, also returns the `[1, 1]` f32 absmax over the first
       `num_tokens` gathered rows.
+    interpret: Whether to execute `pallas_call` in CPU interpret mode.
 
   Returns:
     Gathered array in an output buffer of shape (max_out_tokens, d0, d1), or
@@ -2932,8 +2944,21 @@ def ragged_gather_tc(
       return empty, jnp.zeros((1, 1), dtype=jnp.float32)
     return empty
 
-  block_size = min(block_size, max_out_tokens)
   num_buffers = _RAGGED_GATHER_TC_NUM_BUFFERS
+  idx_ring = _RAGGED_GATHER_TC_IDX_RING
+  itemsize = jnp.dtype(x.dtype).itemsize
+  sublanes = 8 * max(1, 4 // itemsize)
+  token_vmem_bytes = pl.cdiv(dim0, sublanes) * sublanes * pl.cdiv(dim1, 128) * 128 * itemsize
+  vmem_budget = (
+      _RAGGED_GATHER_TC_VMEM_BUDGET
+      if interpret
+      else min(_RAGGED_GATHER_TC_VMEM_BUDGET, int(0.75 * _tpu_vmem_capacity_bytes()))
+  )
+  max_vmem_block = max(1, vmem_budget // (num_buffers * max(1, token_vmem_bytes)))
+  if block_size > max_vmem_block:
+    block_size = 1 << (max_vmem_block.bit_length() - 1)
+  block_size = min(block_size, max_out_tokens)
+
   num_full_blocks = max_out_tokens // block_size
   rem = max_out_tokens % block_size
   num_blocks = num_full_blocks + (1 if rem > 0 else 0)
@@ -2941,9 +2966,8 @@ def ragged_gather_tc(
   # `indices` may exceed SMEM capacity, so each block stages only its window of
   # indices in SMEM. The window starts at an offset aligned to the HBM tile
   # (128 x i32) so the dynamic DMA slice needs no retiling, and has room for the
-  # misalignment. It is clamped to `max_win_start` to stay in bounds, which
-  # requires the (padded) indices length to be aligned and at least one window
-  # long.
+  # misalignment. Windows cycle through a 3-slot SMEM ring buffer so index DMAs
+  # are prefetched asynchronously ahead of `data_start`.
   idx_align = 128
   idx_window = pl.cdiv(block_size, idx_align) * idx_align + idx_align
   idx_pad = max((-num_indices) % idx_align, idx_window - num_indices)
@@ -2982,6 +3006,7 @@ def ragged_gather_tc(
 
     block_idx = pl.program_id(0)
     buf_idx = block_idx % num_buffers
+    num_steps = pl.num_programs(0)
     start_idx = scalars_smem_ref[0]
     num_valid = scalars_smem_ref[1]
 
@@ -2992,22 +3017,24 @@ def ragged_gather_tc(
       def _init_amax():
         amax_vmem_ref[...] = jnp.zeros_like(amax_vmem_ref)
 
+    def _win_and_off(s):
+      row0 = start_idx + s * block_size
+      win_start = jnp.clip((row0 // idx_align) * idx_align, 0, max_win_start)
+      return win_start, row0 - win_start
+
+    def _idx_copy(s):
+      r = s % idx_ring
+      win_start, _ = _win_and_off(s)
+      return pltpu.make_async_copy(
+          idx_hbm_ref.at[pl.ds(pl.multiple_of(win_start, idx_align), idx_window)],
+          idx_smem_ref.at[pl.ds(r * idx_window, idx_window)],
+          idx_sem.at[r],
+      )
+
     def _run_step(step_idx, b_idx, action: str):
       base = step_idx * block_size
-      row0 = start_idx + base
-      win_start = jnp.minimum((row0 // idx_align) * idx_align, max_win_start)
-      idx_off = row0 - win_start
-
-      def _fetch_indices():
-        # Synchronous; the row gathers read the indices as scalars when issued,
-        # so a single SMEM buffer suffices.
-        copy = pltpu.make_async_copy(
-            idx_hbm_ref.at[pl.ds(pl.multiple_of(win_start, idx_align), idx_window)],
-            idx_smem_ref,
-            idx_sem,
-        )
-        copy.start()
-        copy.wait()
+      _, idx_off = _win_and_off(step_idx)
+      smem_base = (step_idx % idx_ring) * idx_window + idx_off
 
       def _chunk(off, size: int, chunk_action: str):
         """Issues `chunk_action` for block rows [off, off + size)."""
@@ -3017,7 +3044,7 @@ def ragged_gather_tc(
           @pl.loop(0, size // step_unroll)
           def _(chunk_i):
             base_i = off + chunk_i * step_unroll
-            src_indices = [idx_smem_ref[idx_off + base_i + u] for u in range(step_unroll)]
+            src_indices = [idx_smem_ref[smem_base + base_i + u] for u in range(step_unroll)]
             for u in range(step_unroll):
               pltpu.make_async_copy(
                   x_hbm_ref.at[pl.ds(src_indices[u], 1), :, :],
@@ -3080,11 +3107,6 @@ def ragged_gather_tc(
               off = off + bit
 
         if action == "data_start":
-
-          @pl.when(step_valid > 0)
-          def _():
-            _fetch_indices()
-
           _over_valid_rows("data_start")
         elif action == "copy_out_start":
           # All recv waits must finish before any send starts, because the
@@ -3109,30 +3131,47 @@ def ragged_gather_tc(
 
     @pl.when(block_idx == 0)
     def _prologue():
+      for s in range(idx_ring):
+
+        @pl.when(s < num_steps)
+        def _start_init_idx(s=s):
+          _idx_copy(s).start()
+
+      _idx_copy(0).wait()
       _run_step(0, 0, "data_start")
 
+      @pl.when(1 < num_steps)
+      def _start_step1():
+        _idx_copy(1).wait()
+        _run_step(1, 1, "data_start")
+
+    # Free buffer `(block_idx + 2) % 4 == (block_idx - 2) % 4` and launch block
+    # `block_idx + 2` *before* waiting on `block_idx`, keeping two full gather
+    # blocks (`2 * block_size` row DMAs) continuously in flight across waits.
+    @pl.when(block_idx >= 2)
+    def _wait_prev2_out():
+      prev2 = block_idx - 2
+      _run_step(prev2, prev2 % num_buffers, "copy_out_wait")
+
+    next2 = block_idx + 2
+
+    @pl.when(next2 < num_steps)
+    def _queue_next2():
+      _idx_copy(next2).wait()
+      _run_step(next2, next2 % num_buffers, "data_start")
+
+      @pl.when(block_idx + 3 < num_steps)
+      def _prefetch_idx3():
+        _idx_copy(block_idx + 3).start()
+
     _run_step(block_idx, buf_idx, "copy_out_start")
-
-    # The grid covers only blocks overlapping `[0, num_tokens)`.
-    num_steps = pl.num_programs(0)
-    next_data_block = block_idx + 1
-
-    @pl.when(next_data_block < num_steps)
-    def _queue_next():
-      next_data_buf = next_data_block % num_buffers
-
-      @pl.when(block_idx >= 1)
-      def _wait_prev_out():
-        _run_step(block_idx - 1, next_data_buf, "copy_out_wait")
-
-      _run_step(next_data_block, next_data_buf, "data_start")
 
     @pl.when(block_idx == num_steps - 1)
     def _epilogue():
       @pl.when(block_idx >= 1)
-      def _wait_prev_out():
-        prev_block = block_idx - 1
-        _run_step(prev_block, prev_block % num_buffers, "copy_out_wait")
+      def _wait_prev1_out():
+        prev1 = block_idx - 1
+        _run_step(prev1, prev1 % num_buffers, "copy_out_wait")
 
       _run_step(block_idx, buf_idx, "copy_out_wait")
       if with_absmax:
@@ -3156,8 +3195,8 @@ def ragged_gather_tc(
   num_steps = pl.cdiv(num_tokens if isinstance(num_tokens, int) else scalars[1], block_size)
   scratch_shapes = [
       pltpu.VMEM((num_buffers, block_size, dim0, dim1), x.dtype),
-      pltpu.SMEM((idx_window,), indices.dtype),
-      pltpu.SemaphoreType.DMA(()),
+      pltpu.SMEM((idx_ring * idx_window,), indices.dtype),
+      pltpu.SemaphoreType.DMA((idx_ring,)),
       pltpu.SemaphoreType.DMA((num_buffers,)),
       pltpu.SemaphoreType.DMA((num_buffers,)),
   ]
@@ -3193,7 +3232,9 @@ def ragged_gather_tc(
       scratch_shapes=scratch_shapes,
       compiler_params=pltpu.CompilerParams(
           dimension_semantics=(pltpu.ARBITRARY,),
+          vmem_limit_bytes=(None if interpret else min(_RAGGED_GATHER_REDUCE_TC_VMEM_LIMIT, _tpu_vmem_capacity_bytes())),
       ),
+      interpret=interpret,
       name=call_name,
   )(scalars, indices, x)
 
@@ -3889,6 +3930,311 @@ def ragged_gather_reduce_tc(
       ),
       name="ragged_gather_reduce_tc",
   )(*inputs)
+
+
+def exact_topk_gather_reduce_tc_src_rows(indices: jax.Array) -> jax.Array:
+  """Returns stable argsort positions grouping consecutive `top_k` slots per token."""
+  n = indices.shape[0]
+  positions = jnp.arange(n, dtype=jnp.int32)
+  _, src_rows = jax.lax.sort((indices.astype(jnp.int32), positions), dimension=0, num_keys=2, is_stable=False)
+  return src_rows
+
+
+def _exact_topk_block_tokens(
+    num_out_tokens: int,
+    top_k: int,
+    dim0: int,
+    dim1: int,
+    dtype: Any,
+    max_block_tokens: int = 128,
+    out_2d: bool = False,
+) -> int:
+  """Selects a static power-of-2 token block size for `exact_topk_gather_reduce_tc` (0 if unsupported)."""
+  if num_out_tokens <= 0 or top_k <= 0 or dim1 % 128 != 0:
+    return 0
+  itemsize = jnp.dtype(dtype).itemsize
+  sublanes = 8 * max(1, 4 // itemsize)
+  if dim0 % sublanes != 0:
+    return 0
+  token_vmem_bytes = dim0 * dim1 * itemsize
+  num_buffers = _RAGGED_GATHER_REDUCE_TC_NUM_BUFFERS
+  # Each buffer holds `block_tokens * top_k` input rows + `block_tokens` output rows
+  # (+ `sublanes` scratch rows if out_2d).
+  scratch_bytes = (sublanes * token_vmem_bytes) if out_2d else 0
+  vmem_budget = min(_RAGGED_GATHER_REDUCE_TC_VMEM_BUDGET, int(0.875 * _tpu_vmem_capacity_bytes()))
+  max_by_vmem = (vmem_budget - scratch_bytes) // (num_buffers * (top_k + 1) * token_vmem_bytes)
+  blk = min(max_block_tokens, num_out_tokens & -num_out_tokens)
+  while blk > max_by_vmem:
+    blk //= 2
+  min_blk = sublanes if out_2d else 8
+  if blk < min_blk or (blk * top_k) % _RAGGED_GATHER_REDUCE_TC_ALIGN != 0:
+    return 0
+  return blk
+
+
+def can_use_exact_topk_gather_reduce_tc(
+    num_out_tokens: int,
+    top_k: int,
+    dim0: int,
+    dim1: int,
+    dtype: Any,
+    *,
+    out_2d: bool = False,
+) -> bool:
+  """Returns whether `exact_topk_gather_reduce_tc` supports the given dropless top-k shape."""
+  return _exact_topk_block_tokens(num_out_tokens, top_k, dim0, dim1, dtype, out_2d=out_2d) > 0
+
+
+def exact_topk_gather_reduce_tc(
+    x: jax.Array,
+    src_rows: jax.Array,
+    *,
+    num_out_tokens: int,
+    top_k: int,
+    out_2d: bool = False,
+    interpret: bool = False,
+) -> jax.Array:
+  """Bit-exact static-chunk TensorCore gather-reduce when every token owns `top_k` slots.
+
+  Eliminates `ragged_gather_reduce_tc_metadata`, dynamic SMEM-indexed VMEM writes,
+  `jnp.where(t == prev_t)` token-run checks, and `top_k - 1` redundant VMEM stores
+  and `f32 -> bf16` packs per token while preserving exact left-to-right `f32`
+  summation `((r_0 + r_1) + ... + r_{top_k - 1})`. When `out_2d=True`, flattens
+  `(sublanes, dim0, dim1) -> (sublanes, dim0 * dim1)` in VMEM inside the chunk loop
+  and DMAs `(block_tokens, dim0 * dim1)` directly to `(num_out_tokens, dim0 * dim1)`.
+  """
+  num_slots, dim0, dim1 = x.shape
+  if src_rows.shape != (num_out_tokens * top_k,) or num_slots < num_out_tokens * top_k:
+    raise ValueError(
+        f"Expected src_rows shape {(num_out_tokens * top_k,)} and x.shape[0] >= {num_out_tokens * top_k};"
+        f" got {src_rows.shape=} and {x.shape=}."
+    )
+  on_tpu = jax.default_backend() == "tpu"
+  if not on_tpu and not interpret:
+    try:
+      pltpu.get_tpu_info()
+      on_tpu = True
+    except (ValueError, RuntimeError):
+      on_tpu = False
+  if not on_tpu and not interpret:
+    gathered = x[src_rows].reshape(num_out_tokens, top_k, dim0, dim1).astype(jnp.float32)
+    acc = gathered[:, 0]
+    for k in range(1, top_k):
+      acc = acc + gathered[:, k]
+    res = acc.astype(x.dtype)
+    return res.reshape(num_out_tokens, dim0 * dim1) if out_2d else res
+
+  block_tokens = _exact_topk_block_tokens(num_out_tokens, top_k, dim0, dim1, x.dtype, out_2d=out_2d)
+  if block_tokens <= 0:
+    raise ValueError(
+        f"Unsupported shape for exact_topk_gather_reduce_tc: {num_out_tokens=}, {top_k=},"
+        f" {x.shape=}, {x.dtype=}, {out_2d=}."
+    )
+
+  itemsize = jnp.dtype(x.dtype).itemsize
+  sublanes = 8 * max(1, 4 // itemsize)
+  num_blocks = num_out_tokens // block_tokens
+  block_slots = block_tokens * top_k
+  num_buffers = _RAGGED_GATHER_REDUCE_TC_NUM_BUFFERS
+  lookahead = _RAGGED_GATHER_REDUCE_TC_LOOKAHEAD
+  ring = lookahead + 2
+  tok_unroll = min(4, block_tokens)
+  chunk_slots = tok_unroll * top_k
+  num_chunks = block_tokens // tok_unroll
+  chunks_per_group = sublanes // tok_unroll
+  num_groups = block_tokens // sublanes
+  issue_unroll = min(_RAGGED_GATHER_REDUCE_TC_ISSUE_UNROLL, block_slots)
+
+  def _exact_topk_kernel(
+      src_hbm_ref,
+      x_hbm_ref,
+      o_hbm_ref,
+      in_vmem_ref,
+      out_vmem_ref,
+      tmp_3d_vmem_ref,
+      src_smem_ref,
+      recv_sem,
+      send_sem,
+      slots_sem,
+  ):
+    def _slots_copy(blk):
+      r = blk % ring
+      off = pl.multiple_of(blk * block_slots, block_slots)
+      return pltpu.make_async_copy(
+          src_hbm_ref.at[pl.ds(off, block_slots)],
+          src_smem_ref.at[pl.ds(r * block_slots, block_slots)],
+          slots_sem.at[r],
+      )
+
+    def _in_start(blk):
+      b = blk % num_buffers
+      slot_base = (blk % ring) * block_slots
+
+      @pl.loop(0, block_slots // issue_unroll)
+      def _issue(c):
+        base_i = c * issue_unroll
+        srcs = [src_smem_ref[slot_base + base_i + u] for u in range(issue_unroll)]
+        for u in range(issue_unroll):
+          pltpu.make_async_copy(
+              x_hbm_ref.at[pl.ds(srcs[u], 1), :, :],
+              in_vmem_ref.at[b, pl.ds(base_i + u, 1), :, :],
+              recv_sem.at[b],
+          ).start()
+
+    def _in_wait(blk):
+      b = blk % num_buffers
+      rows = in_vmem_ref.at[b, pl.ds(0, block_slots), :, :]
+      pltpu.make_async_copy(rows, rows, recv_sem.at[b]).wait()
+
+    def _out_start(blk):
+      b = blk % num_buffers
+      tok_off = pl.multiple_of(blk * block_tokens, block_tokens)
+      if out_2d:
+        pltpu.make_async_copy(
+            out_vmem_ref.at[b, :, :],
+            o_hbm_ref.at[pl.ds(tok_off, block_tokens), :],
+            send_sem.at[b],
+        ).start()
+      else:
+        pltpu.make_async_copy(
+            out_vmem_ref.at[b, :, :, :],
+            o_hbm_ref.at[pl.ds(tok_off, block_tokens), :, :],
+            send_sem.at[b],
+        ).start()
+
+    def _out_wait(blk):
+      b = blk % num_buffers
+      buf = out_vmem_ref.at[b, :, :] if out_2d else out_vmem_ref.at[b, :, :, :]
+      pltpu.make_async_copy(buf, buf, send_sem.at[b]).wait()
+
+    for blk in range(min(ring, num_blocks)):
+      _slots_copy(blk).start()
+
+    for blk in range(min(lookahead, num_blocks)):
+      _slots_copy(blk).wait()
+      _in_start(blk)
+
+    def _reduce_block(b_i, b_nxt, issue_slot_base, with_issue: bool):
+      if out_2d:
+
+        def _group_body(g, _):
+          def _chunk_in_group(cg, _):
+            c = g * chunks_per_group + cg
+            base_slot = c * chunk_slots
+            srcs = [src_smem_ref[issue_slot_base + base_slot + u] for u in range(chunk_slots)] if with_issue else None
+            rows = in_vmem_ref[b_i, pl.ds(base_slot, chunk_slots), :, :].astype(jnp.float32)
+            if srcs is not None:
+              for u in range(chunk_slots):
+                pltpu.make_async_copy(
+                    x_hbm_ref.at[pl.ds(srcs[u], 1), :, :],
+                    in_vmem_ref.at[b_nxt, pl.ds(base_slot + u, 1), :, :],
+                    recv_sem.at[b_nxt],
+                ).start()
+            grp_tok = cg * tok_unroll
+            for u in range(tok_unroll):
+              acc = rows[u * top_k]
+              for k in range(1, top_k):
+                acc = acc + rows[u * top_k + k]
+              tmp_3d_vmem_ref[grp_tok + u, :, :] = acc.astype(x.dtype)
+
+          jax.lax.fori_loop(0, chunks_per_group, _chunk_in_group, None)
+          out_off = pl.multiple_of(g * sublanes, sublanes)
+          out_vmem_ref[b_i, pl.ds(out_off, sublanes), :] = jnp.reshape(tmp_3d_vmem_ref[...], (sublanes, dim0 * dim1))
+
+        jax.lax.fori_loop(0, num_groups, _group_body, None)
+      else:
+
+        def _body(c, _):
+          base_tok = c * tok_unroll
+          base_slot = c * chunk_slots
+          srcs = [src_smem_ref[issue_slot_base + base_slot + u] for u in range(chunk_slots)] if with_issue else None
+          rows = in_vmem_ref[b_i, pl.ds(base_slot, chunk_slots), :, :].astype(jnp.float32)
+          if srcs is not None:
+            for u in range(chunk_slots):
+              pltpu.make_async_copy(
+                  x_hbm_ref.at[pl.ds(srcs[u], 1), :, :],
+                  in_vmem_ref.at[b_nxt, pl.ds(base_slot + u, 1), :, :],
+                  recv_sem.at[b_nxt],
+              ).start()
+          for u in range(tok_unroll):
+            acc = rows[u * top_k]
+            for k in range(1, top_k):
+              acc = acc + rows[u * top_k + k]
+            out_vmem_ref[b_i, base_tok + u, :, :] = acc.astype(x.dtype)
+
+        jax.lax.fori_loop(0, num_chunks, _body, None)
+
+    steady_blocks = max(0, num_blocks - lookahead)
+    if steady_blocks > 0:
+
+      @pl.loop(0, steady_blocks)
+      def _steady_step(i):
+        _in_wait(i)
+
+        @pl.when(i >= num_buffers)
+        def _free_out():
+          _out_wait(i - num_buffers)
+
+        nxt = i + lookahead
+        _slots_copy(nxt).wait()
+        b_i = i % num_buffers
+        b_nxt = nxt % num_buffers
+        issue_slot_base = (nxt % ring) * block_slots
+        _reduce_block(b_i, b_nxt, issue_slot_base, with_issue=True)
+        _out_start(i)
+
+        @pl.when(i + ring < num_blocks)
+        def _load_later_slots():
+          _slots_copy(i + ring).start()
+
+    @pl.loop(steady_blocks, num_blocks)
+    def _tail_step(i):
+      _in_wait(i)
+
+      @pl.when(i >= num_buffers)
+      def _free_out():
+        _out_wait(i - num_buffers)
+
+      b_i = i % num_buffers
+      _reduce_block(b_i, 0, 0, with_issue=False)
+      _out_start(i)
+
+    for k in range(min(num_buffers, num_blocks)):
+      _out_wait(num_blocks - 1 - k)
+
+  manual_axis_type = getattr(jax.typeof(x), "manual_axis_type", None)
+  out_shape = jax.ShapeDtypeStruct(
+      (num_out_tokens, dim0 * dim1) if out_2d else (num_out_tokens, dim0, dim1),
+      x.dtype,
+      manual_axis_type=manual_axis_type,
+  )
+  hbm_spec = pl.BlockSpec(memory_space=pltpu.HBM)
+  dma_sems = pltpu.SemaphoreType.DMA((num_buffers,))
+  scratch_shapes = [
+      pltpu.VMEM((num_buffers, block_slots, dim0, dim1), x.dtype),
+      pltpu.VMEM(
+          (num_buffers, block_tokens, dim0 * dim1) if out_2d else (num_buffers, block_tokens, dim0, dim1),
+          x.dtype,
+      ),
+      pltpu.VMEM((sublanes, dim0, dim1), x.dtype) if out_2d else pltpu.VMEM((8, 128), x.dtype),
+      pltpu.SMEM((ring * block_slots,), jnp.int32),
+      dma_sems,
+      dma_sems,
+      pltpu.SemaphoreType.DMA((ring,)),
+  ]
+  return pl.pallas_call(
+      _exact_topk_kernel,
+      out_shape=out_shape,
+      in_specs=[hbm_spec, hbm_spec],
+      out_specs=hbm_spec,
+      scratch_shapes=scratch_shapes,
+      compiler_params=pltpu.CompilerParams(
+          vmem_limit_bytes=(None if interpret else min(_RAGGED_GATHER_REDUCE_TC_VMEM_LIMIT, _tpu_vmem_capacity_bytes())),
+          disable_bounds_checks=True,
+      ),
+      interpret=interpret,
+      name="exact_topk_gather_reduce_tc_2d" if out_2d else "exact_topk_gather_reduce_tc",
+  )(src_rows, x)
 
 
 # Double-buffered (1024, 56, 128) bf16 input tiles plus bf16/f32 temporaries.

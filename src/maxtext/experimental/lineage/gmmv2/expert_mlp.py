@@ -258,24 +258,32 @@ def _tgmm_dw(
 
 
 def _gate_fwd_kwargs(
-    out: jax.Array,
+    out: jax.Array | None,
     out_scale: jax.Array | None,
     glu_coeffs: jax.Array | None,
     glu_out_dtype: jnp.dtype | None,
     glu_out_scale: jax.Array | None,
+    *,
+    glu_only: bool = False,
+    preferred_element_type: jnp.dtype | None = None,
 ) -> dict[str, Any]:
   """Returns the fp8 / fused GLU `gmm_v2` arguments of the gate GMM."""
   kwargs: dict[str, Any] = {}
+  out_dtype = (preferred_element_type or (jnp.bfloat16 if out_scale is not None else None)) if out is None else out.dtype
   if out_scale is not None:
     kwargs.update(
         out_scale=out_scale,
         acc_dtype=jnp.float32,
-        preferred_element_type=out.dtype,
+        preferred_element_type=out_dtype,
     )
+  elif out_dtype is not None:
+    kwargs["preferred_element_type"] = out_dtype
   if glu_coeffs is not None:
     kwargs["glu_coeffs"] = glu_coeffs
     kwargs["glu_out_dtype"] = glu_out_dtype
     kwargs["glu_out_scale"] = glu_out_scale
+  if glu_only:
+    kwargs["glu_only"] = True
   return kwargs
 
 
@@ -335,15 +343,17 @@ def gather_gate_gmm(
     start: jax.Array | int,
     w_gate: jax.Array,  # [E, D, F_gate]
     group_sizes: jax.Array,  # int32 [E]
-    out: jax.Array,  # [R, F_gate]
-    out_offset: jax.Array | int,
+    out: jax.Array | None = None,  # [R, F_gate]
+    out_offset: jax.Array | int = 0,
     out_scale: jax.Array | None = None,  # f32 [1, 1]
     *,
     size_m: int,
     glu_coeffs: jax.Array | None = None,  # [size_m, 1]
     glu_out_dtype: jnp.dtype | None = None,
     glu_out_scale: jax.Array | None = None,  # f32 [1, 1]
-) -> Any:  # [R, F_gate] (and [size_m, F_gate // 2] when glu_coeffs is set)
+    glu_only: bool = False,
+    preferred_element_type: jnp.dtype | None = None,
+) -> Any:  # [R, F_gate] (and [size_m, F_gate // 2] when glu_coeffs is set), or `act` when `glu_only`
   """`gate_gmm` of the rows `x3d[indices[start + m]]`, m < size_m.
 
   Same result as `gate_gmm(cfg, x3d[indices[start:start + size_m]], ...)`,
@@ -359,7 +369,9 @@ def gather_gate_gmm(
     start: Index into `indices` of routed token 0.
     w_gate: Gate weights.
     group_sizes: Routed tokens per local expert, in routed token order.
-    out: Buffer to write into, e.g. the activation bank. Donated.
+    out: Optional buffer to write into, e.g. the activation bank. When `None`,
+      allocates a fresh output buffer without input-output aliasing (or omits
+      `out` completely when `glu_only=True`).
     out_offset: Row of `out` receiving routed token 0 (see `gate_gmm`).
     out_scale: For fp8 x3d and w_gate, the product of their per-tensor scales.
     size_m: Number of routed tokens (the `BT` of `gate_gmm`), static.
@@ -367,9 +379,13 @@ def gather_gate_gmm(
       `gate_gmm`).
     glu_out_dtype: Optional dtype for the fused GLU output `act`.
     glu_out_scale: Optional `[1, 1]` f32 quantization scale for `act`.
+    glu_only: When `True` (requires `out is None` and `glu_coeffs is not None`),
+      only writes and returns `act`, skipping HBM writes of `gate_out`.
+    preferred_element_type: Output/gate dtype when `out is None`.
 
   Returns:
-    The updated `out`, or `(out, act)` when `glu_coeffs` is provided.
+    The updated `out`, `(out, act)` when `glu_coeffs` is provided, or `act`
+    when `glu_only=True`.
   """
   _check_3d("x3d", x3d)
   return _gmm(
@@ -383,7 +399,15 @@ def gather_gate_gmm(
       lhs_gather_indices=indices,
       lhs_gather_start=start,
       lhs_gather_size_m=size_m,
-      **_gate_fwd_kwargs(out, out_scale, glu_coeffs, glu_out_dtype, glu_out_scale),
+      **_gate_fwd_kwargs(
+          out,
+          out_scale,
+          glu_coeffs,
+          glu_out_dtype,
+          glu_out_scale,
+          glu_only=glu_only,
+          preferred_element_type=preferred_element_type,
+      ),
   )
 
 
