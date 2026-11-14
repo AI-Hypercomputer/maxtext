@@ -46,10 +46,11 @@ loss against a synthetic `RLTrainerPayload` micro-batch (configurable via `grpo_
 see `maxtext_engine_types.CompileConfig`).
 
 In addition to each kernel's raw `memory_analysis()`, `main` prints a per-device memory summary
-table and the overall `TRAIN-KERNEL DEVICE PEAK`. The summary subtracts aliased (donated) buffers that
-XLA counts in both arguments and outputs, and adds state that remains resident in HBM while a
-kernel runs without being passed as an argument (optimizer state and the running gradient accumulator
-during `fwd_bwd`, and model and optimizer state during `accumulate`).
+table and the overall
+`TRAIN-KERNEL DEVICE PEAK`. The summary subtracts aliased (donated) buffers that XLA counts in
+both arguments and outputs, and adds state that remains resident in HBM while a kernel runs
+without being passed as an argument (optimizer state and the running gradient accumulator during
+`fwd_bwd`, and model and optimizer state during `accumulate`).
 """
 
 from collections.abc import Sequence
@@ -228,7 +229,7 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
           " compiling is what places the optimizer state on the layout it"
           " runs on."
       )
-    return jax.tree.map(maxtext_engine._to_aval, self._read_state_pure())  # pylint: disable=protected-access
+    return jax.tree.map(maxtext_engine.to_aval, self._read_state_pure())
 
   def _checkpoint_dir(self) -> str:
     """Returns no directory: Orbax creates whatever it is given, and this engine can never save."""

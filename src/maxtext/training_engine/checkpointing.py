@@ -111,6 +111,40 @@ def _verify_pathways_persistence(context: ocp.Context) -> None:
   )
 
 
+def _verify_colocated_python(context: ocp.Context) -> None:
+  """Checks that `context` resolves to an array handler backed by a colocated Python dispatcher.
+
+  With `colocated_python_checkpointing=True`, checkpoint writes and restores are dispatched to
+  colocated Python workers that have direct access to host mounts such as GCSFuse, avoiding
+  controller-side host RAM staging. Off a Pathways backend (or when colocated Python is
+  unavailable), Orbax silently falls back to a controller-side `ArrayHandler` with no dispatcher
+  (`has_dispatcher() == False`), which can exhaust controller memory for large models.
+
+  Args:
+    context: The Orbax context the checkpointer saves and restores with.
+
+  Raises:
+    PathwaysCheckpointingUnavailableError: If `context` does not resolve to an array handler with
+      an active dispatcher.
+  """
+  try:
+    handler = _resolve_array_handler(context)
+    has_dispatcher = handler.has_dispatcher()
+  except (ImportError, AttributeError, NotImplementedError, ValueError, TypeError) as e:
+    raise PathwaysCheckpointingUnavailableError(
+        "colocated_python_checkpointing=True requires a colocated Python array handler, but "
+        f"resolving it failed ({type(e).__name__}: {e})."
+    ) from e
+
+  if not has_dispatcher:
+    raise PathwaysCheckpointingUnavailableError(
+        "colocated_python_checkpointing=True requires an array handler with an active colocated "
+        f"Python dispatcher, got {type(handler).__name__} (has_dispatcher={has_dispatcher!r})."
+    )
+
+  logging.info("Using colocated Python array handler (%s).", type(handler).__name__)
+
+
 class CheckpointManager:
   """Orbax `training.Checkpointer` wrapper for MaxText training engine."""
 
@@ -126,21 +160,30 @@ class CheckpointManager:
       config: The training configuration.
 
     Raises:
-      ValueError: If ENABLE_PATHWAYS_PERSISTENCE=1 and `checkpoint_dir` is not a gs:// URI, or if
-        `checkpoint_storage_use_ocdbt` or `checkpoint_storage_use_zarr3` is enabled.
-      PathwaysCheckpointingUnavailableError: If ENABLE_PATHWAYS_PERSISTENCE=1 but no Pathways
-        persistence handler is available.
+      ValueError: If ENABLE_PATHWAYS_PERSISTENCE=1 (without `colocated_python_checkpointing`) and
+        `checkpoint_dir` is not a gs:// URI, or if `checkpoint_storage_use_ocdbt` or
+        `checkpoint_storage_use_zarr3` is enabled.
+      PathwaysCheckpointingUnavailableError: If Pathways persistence or colocated Python
+        checkpointing is requested but the corresponding handler is unavailable.
     """
     self._checkpoint_manager: ocp.training.Checkpointer | None = None
     self._use_async = bool(config.async_checkpointing)
+    self._uses_colocated_python = False
     # The step of the save most recently handed to Orbax, so a failure that surfaces later can
     # be attributed to it.
     self._in_flight_step: int | None = None
     if not checkpoint_dir:
       return
 
+    colocated_python = bool(config.colocated_python_checkpointing)
+    if colocated_python and not config.enable_single_controller:
+      raise ValueError("colocated_python_checkpointing=True requires enable_single_controller=True.")
+    self._uses_colocated_python = colocated_python
     enable_pathways_persistence = _pathways_persistence_requested()
-    if enable_pathways_persistence:
+    # Pathways persistence mode writes directly from worker pods and requires gs:// URIs without
+    # OCDBT/Zarr3; colocated Python mode dispatches through controller-colocated workers and
+    # supports GCSFuse mounts and OCDBT/Zarr3.
+    if enable_pathways_persistence and not colocated_python:
       if config.checkpoint_storage_use_ocdbt or config.checkpoint_storage_use_zarr3:
         raise ValueError(
             "ENABLE_PATHWAYS_PERSISTENCE=1 is incompatible with OCDBT and Zarr3; set "
@@ -151,18 +194,21 @@ class CheckpointManager:
       if not str(checkpoint_dir).startswith("gs://"):
         raise ValueError(
             "ENABLE_PATHWAYS_PERSISTENCE=1 dispatches persistence writes to every "
-            f"pathways-worker; checkpoint_dir must be a gs:// URI, got {checkpoint_dir!r}."
+            f"pathways-worker; checkpoint_dir must be a gs:// URI, got {checkpoint_dir!r} "
+            "(or set colocated_python_checkpointing=True for GCSFuse paths)."
         )
-    # TODO(igorts): Support config.colocated_python_checkpointing when single-controller Pathways is used.
     context = checkpoint_context.build_context(
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
         use_zarr3=config.checkpoint_storage_use_zarr3,
         checkpoint_storage_device_host_concurrent_gb=config.checkpoint_storage_device_host_concurrent_gb,
         # Deadline for the background half of a save (storage writes and finalization).
         async_checkpointing_timeout_secs=config.async_checkpointing_timeout_secs,
+        colocated_python_checkpointing=colocated_python,
         enable_pathways_persistence=enable_pathways_persistence,
     )
-    if enable_pathways_persistence:
+    if colocated_python:
+      _verify_colocated_python(context)
+    elif enable_pathways_persistence:
       _verify_pathways_persistence(context)
     policies = ocp.training.save_decision_policies
     save_policies = [
@@ -320,18 +366,17 @@ class CheckpointManager:
     abstract_checkpointables: dict[str, Any] = {"model_params": nnx.state(checkpoint_state.model)}
     if checkpoint_state.optimizer is not None:
       optimizer_state = nnx.state(checkpoint_state.optimizer, nnx.optimizer.OptState)
+      if not self._uses_colocated_python:
+        # Pathways persistence allocates restored buffers on device HBM; colocated Python restores
+        # pinned_host leaves directly to host memory.
+        def _device_restore_target(leaf: Any) -> Any:
+          sharding = getattr(leaf, "sharding", None)
+          if getattr(sharding, "memory_kind", None) == "pinned_host":
+            return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=sharding.with_memory_kind("device"))
+          return leaf
 
-      # The Pathways array handler ignores `memory_kind="pinned_host"` for physical placement
-      # (allocating restored buffers in device HBM) while keeping `pinned_host` on the returned
-      # array's sharding metadata. Request `device` placement explicitly so the restored sharding
-      # matches physical placement; the engine moves host-offloaded state back after restoring.
-      def _device_restore_target(leaf: Any) -> Any:
-        sharding = getattr(leaf, "sharding", None)
-        if getattr(sharding, "memory_kind", None) == "pinned_host":
-          return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=sharding.with_memory_kind("device"))
-        return leaf
-
-      abstract_checkpointables["optimizer_state"] = jax.tree.map(_device_restore_target, optimizer_state)
+        optimizer_state = jax.tree.map(_device_restore_target, optimizer_state)
+      abstract_checkpointables["optimizer_state"] = optimizer_state
 
     try:
       restored_items = self._checkpoint_manager.load_checkpointables(step, abstract_checkpointables)

@@ -16,6 +16,7 @@
 
 # pylint: disable=protected-access
 
+import contextlib
 import dataclasses
 import functools
 import os
@@ -566,6 +567,81 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
         ocp_pathways.CheckpointingImpl.PERSISTENCE,
     )
 
+  def _colocated_checkpoint_config(self, **overrides):
+    """Builds a real config configured for colocated Python checkpointing."""
+    fields = {
+        "async_checkpointing": False,
+        "colocated_python_checkpointing": True,
+        "enable_single_controller": True,
+        "checkpoint_storage_use_ocdbt": False,
+        "checkpoint_storage_use_zarr3": False,
+        "checkpoint_storage_device_host_concurrent_gb": 8,
+        "checkpoint_period": 1,
+        "save_checkpoint_on_start": True,
+    }
+    fields.update(overrides)
+    return self.setup_config(enable_checkpointing=True, **fields)
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  def test_colocated_python_allows_gcsfuse_and_ocdbt_even_when_persistence_env_is_set(self, mock_checkpointer):
+    """Configures COLOCATED_PYTHON with GCSFuse and OCDBT when colocated_python_checkpointing is True."""
+    cfg = self._colocated_checkpoint_config(
+        checkpoint_storage_use_ocdbt=True,
+        checkpoint_storage_use_zarr3=True,
+        checkpoint_storage_device_host_concurrent_gb=16,
+    )
+    fake_handler = type("_FakeColocatedHandler", (), {"has_dispatcher": lambda self: True})()
+    with mock.patch(_GET_ARRAY_HANDLER, return_value=fake_handler) as mock_get_array_handler:
+      manager = checkpointing.CheckpointManager("/gcs/bucket/checkpoints", cfg)
+
+    self.assertTrue(manager._uses_colocated_python)
+    mock_get_array_handler.assert_called_once()
+    mock_checkpointer.assert_called_once()
+    ctx = mock_checkpointer.call_args.kwargs["context"]
+    self.assertEqual(ctx.pathways.checkpointing_impl, ocp_pathways.CheckpointingImpl.COLOCATED_PYTHON)
+    self.assertEqual(ctx.memory.transfer_concurrent_bytes, 16 * 10**9)
+    self.assertIsNotNone(ctx.memory.serialization_status_callback)
+
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  def test_colocated_python_requires_single_controller(self, mock_checkpointer):
+    """Rejects colocated_python_checkpointing=True unless enable_single_controller=True."""
+    with self.assertRaisesRegex(ValueError, "enable_single_controller"):
+      self._colocated_checkpoint_config(enable_single_controller=False)
+
+    cfg = types.SimpleNamespace(
+        async_checkpointing=False,
+        colocated_python_checkpointing=True,
+        enable_single_controller=False,
+    )
+    with self.assertRaisesRegex(ValueError, "enable_single_controller=True"):
+      checkpointing.CheckpointManager("/gcs/bucket/checkpoints", cfg)
+    mock_checkpointer.assert_not_called()
+
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  def test_colocated_python_rejects_handler_without_dispatcher(self, mock_checkpointer):
+    """Without an active colocated Python dispatcher, construction fails fast before any save."""
+    cfg = self._colocated_checkpoint_config()
+    controller_handler = type("ArrayHandler", (), {"has_dispatcher": lambda self: False})()
+    with mock.patch(_GET_ARRAY_HANDLER, return_value=controller_handler):
+      with self.assertRaisesRegex(
+          checkpointing.PathwaysCheckpointingUnavailableError,
+          "colocated Python dispatcher",
+      ):
+        checkpointing.CheckpointManager("/gcs/bucket/checkpoints", cfg)
+    mock_checkpointer.assert_not_called()
+
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  def test_colocated_python_rejects_handler_resolution_failure(self, mock_checkpointer):
+    cfg = self._colocated_checkpoint_config()
+    with mock.patch(_GET_ARRAY_HANDLER, side_effect=ImportError("pathwaysutils missing")):
+      with self.assertRaisesRegex(
+          checkpointing.PathwaysCheckpointingUnavailableError,
+          "resolving it failed",
+      ):
+        checkpointing.CheckpointManager("/gcs/bucket/checkpoints", cfg)
+    mock_checkpointer.assert_not_called()
+
   def test_checkpoint_dir_derived_unless_set(self):
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
@@ -601,15 +677,12 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     mgr.close()
 
   def test_save_checkpoint_called_after_update(self):
-    mock_config = self.setup_config(enable_checkpointing=True)
-
-    t = maxtext_engine.MaxTextTrainingEngine(mock_config)
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
     mock_orbax_mgr = self._mock_orbax_manager(t)
 
     dummy_metadata = mock.MagicMock()
     t.save_checkpoint(metadata=dummy_metadata)
 
-    # Verify orbax save was called
     mock_orbax_mgr.save_checkpointables.assert_called_once()
     (step, checkpointables), call_kwargs = mock_orbax_mgr.save_checkpointables.call_args
     self.assertEqual(step, 0)
@@ -618,6 +691,24 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     self.assertIn("model_params", checkpointables)
     self.assertNotIn("accumulated_metrics", checkpointables)
     self.assertNotIn("accumulated_grads", checkpointables)
+
+  def test_save_checkpoint_is_annotated_in_profiles(self):
+    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    mock_orbax_mgr = self._mock_orbax_manager(t)
+    entered = []
+
+    @contextlib.contextmanager
+    def trace_annotation(name, **kwargs):
+      del kwargs
+      entered.append(name)
+      yield
+      if name == "save_checkpoint":
+        mock_orbax_mgr.save_checkpointables.assert_called_once()
+
+    with mock.patch.object(jax.profiler, "TraceAnnotation", side_effect=trace_annotation):
+      t.save_checkpoint(metadata=None)
+
+    self.assertEqual(entered, ["save_checkpoint"])
 
   def test_save_checkpoint_writes_only_the_model_and_optimizer(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
@@ -1014,9 +1105,23 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     mock_orbax_mgr.checkpointables_metadata.assert_not_called()
     mock_orbax_mgr.load_checkpointables.assert_not_called()
 
-  def test_restore_targets_device_memory_for_host_offloaded_optimizer_state(self):
-    """A `pinned_host` optimizer leaf is restored into device memory with the same sharding otherwise."""
-    t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+  @parameterized.named_parameters(
+      ("pathways_persistence", False, "device"),
+      ("colocated_python", True, "pinned_host"),
+  )
+  def test_restore_memory_kind_for_host_offloaded_optimizer_state(self, colocated_python, expected_memory_kind):
+    """Restores `pinned_host` optimizer leaves to device HBM by default or `pinned_host` under colocated Python."""
+    cfg = self.setup_config(
+        enable_checkpointing=True,
+        enable_single_controller=colocated_python,
+        colocated_python_checkpointing=colocated_python,
+    )
+    if colocated_python:
+      fake_handler = type("_FakeColocatedHandler", (), {"has_dispatcher": lambda self: True})()
+      with mock.patch(_GET_ARRAY_HANDLER, return_value=fake_handler):
+        t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    else:
+      t = maxtext_engine.MaxTextTrainingEngine(cfg)
     mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
     self._mock_saved_checkpoint(mock_orbax_mgr)
 
@@ -1047,8 +1152,9 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     self.assertNotEmpty(targets)
     for target, source in zip(targets, jax.tree.leaves(offloaded)):
       if getattr(source.sharding, "memory_kind", None) == "pinned_host":
-        self.assertIsInstance(target, jax.ShapeDtypeStruct)
-        self.assertEqual(target.sharding.memory_kind, "device")
+        if not colocated_python:
+          self.assertIsInstance(target, jax.ShapeDtypeStruct)
+        self.assertEqual(target.sharding.memory_kind, expected_memory_kind)
         self.assertEqual((target.shape, target.dtype), (source.shape, source.dtype))
 
   def test_step_boundary_checkpoint_round_trips_through_real_orbax(self):
