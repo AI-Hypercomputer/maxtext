@@ -1368,6 +1368,18 @@ class MoEGeneral(BaseModel):
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
   )
+  moe_wi_gather_transposed: bool = Field(
+      False,
+      description=(
+          "All-gather the routed wi_0/wi_1 kernels as [experts, mlp, embed]"
+          " (local shards swapped before the FSDP gather) and run the wi GMMs"
+          " on that layout: gmm_v2 forward with transpose_rhs, DLHS without a"
+          " transpose, and DRHS as tgmm_v2(dout, x) giving the [experts, mlp,"
+          " embed] gradient. Avoids a per-layer relayout copy of the gathered"
+          " weights when mlp is not lane-aligned (e.g. 704). Same dot products."
+          " Requires unquantized use_tokamax_gmm=True and use_gmm_v2=True."
+      ),
+  )
   moe_bwd_prequant_before_unsort: bool = Field(
       False,
       description=(

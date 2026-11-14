@@ -2672,6 +2672,7 @@ class RoutedMoE(nnx.Module):
         tc_routing=None,
         tc_unsort_cfg=None,
         bias=None,
+        rhs_transposed=False,
     ):
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
@@ -2817,6 +2818,7 @@ class RoutedMoE(nnx.Module):
             return_rhs=return_rhs,
             flat_fsdp_shard=flat_fsdp_shard,
             fuse_3d_dlhs_ps=self.config.moe_3d_dlhs_partial_sum,
+            rhs_transposed=rhs_transposed,
             **({"out_is_3d": True} if out_is_3d else {}),
             **({"tc_routing": tc_routing, "tc_unsort_cfg": tc_unsort_cfg} if tc_unsort_cfg is not None else {}),
         )
@@ -2995,6 +2997,23 @@ class RoutedMoE(nnx.Module):
         decoder_tokens_pspec,
     ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
+    wi_transposed = getattr(self.config, "moe_wi_gather_transposed", False)
+    if wi_transposed:
+      # wi enters the shard_map (and is all-gathered) as [E, mlp, embed]; see moe_wi_gather_transposed.
+      if not (
+          self.config.use_tokamax_gmm
+          and self.config.use_gmm_v2
+          and self.config.hardware != "cpu"
+          and not self.config.quantization
+          and not weight_gather
+          and not self.config.prefuse_moe_weights
+          and not self.config.moe_flat_fsdp_weights
+          and self.config.num_moe_emb_chunks <= 0
+          and not self.config.prefetch_fsdp_weights
+      ):
+        raise NotImplementedError("moe_wi_gather_transposed requires unquantized tokamax gmm_v2 without prefetch.")
+      w0_pspec = P(w0_pspec[0], w0_pspec[2], w0_pspec[1])
+      w1_pspec = P(w1_pspec[0], w1_pspec[2], w1_pspec[1])
 
     output_pspec = self._logical_to_mesh_axes(
         (
@@ -3553,6 +3572,7 @@ class RoutedMoE(nnx.Module):
             return_lhs=return_lhs,
             return_rhs=return_rhs,
             bias=bias_ if te_bias else None,
+            rhs_transposed=wi_transposed,
         )
         layer, extras = (res[0], tuple(res[1:])) if return_lhs or return_rhs else (res, ())
         if te_bias:
@@ -4468,6 +4488,10 @@ class RoutedMoE(nnx.Module):
       # sit between the dW all-reduce and its FSDP dynamic-slice, blocking their fusion into a reduce-scatter.
       w0_kernel, w1_kernel, wo_kernel = jax.lax.optimization_barrier((w0_kernel, w1_kernel, wo_kernel))
 
+    if wi_transposed:
+      # Swap the local shards to [E, mlp, embed] before the FSDP all-gather: the gathered weight is then embed-minor
+      # (lane-aligned 2816 for Gemma4) and feeds the gmm_v2 kernels without a per-layer relayout copy.
+      w0_kernel, w1_kernel = jnp.swapaxes(w0_kernel, 1, 2), jnp.swapaxes(w1_kernel, 1, 2)
     # Weights already all-gathered (typed `reduced`) by fsdp_prefetch skip the reshard, which would drop the type.
     w0_kernel = w0_kernel if _reduced_axes(w0_kernel) else _fsdp_all_gather(w0_kernel, w0_pspec)
     w1_kernel = w1_kernel if _reduced_axes(w1_kernel) else _fsdp_all_gather(w1_kernel, w1_pspec)
