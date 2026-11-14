@@ -1304,6 +1304,18 @@ class NNXDecoder(nnx.Module):
     if scan_axis != 0:
       params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
 
+    gathered_grad_shardings = {}
+    if (
+        self.config.gather_scanned_kernels_once
+        and kv_caches_stacked is None
+        and not self.config.parameter_memory_host_offload
+        and not self.config.prefetch_fsdp_weights
+    ):
+      params = moe.gather_scanned_kernels_once(layers, params, self.mesh)
+      gathered_grad_shardings = moe.gathered_kernel_grad_shardings(
+          layers, self.mesh, self.config.logical_axis_rules, metadata_axis_name=metadata_axis_name
+      )
+
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
@@ -1338,6 +1350,9 @@ class NNXDecoder(nnx.Module):
         kv_cache_layer = None
         forced_routed_experts_layer = None
         iteration_kwargs = None
+
+      if gathered_grad_shardings:
+        current_params = moe.reduce_scatter_gathered_grads(current_params, gathered_grad_shardings)
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(

@@ -953,6 +953,26 @@ class Attention(BaseModel):
           "Default is 0 (no chunking). Reduces memory footprint at the cost of time."
       ),
   )
+  query_proj_kernel_gather_once: bool = Field(
+      False,
+      description=(
+          "Training: gather the attention query projection kernel (including Qwen3-Next / Qwen3.5's output gate,"
+          " which shares it) once per attention layer in the backward pass instead of twice. The kernel is sharded"
+          " on its embed dimension, so the partitioner inserts one all-gather for the remat replay of"
+          " q = x @ wq and another for the input gradient dx = dq @ wq^T. With this on, the projection is a custom"
+          " VJP (layers/linears.py _dot_general_reusing_gathered_kernel) that gathers the kernel with one explicit"
+          " sharding constraint and computes the input gradient from that gathered value, which stays live from the"
+          " replay to the input gradient; the kernel gradient is the stock transpose, reduce-scattered as before."
+          " Same values in the same order, so the outputs and gradients are the same bits. Requires an unquantized"
+          " (quantization='') and unfused (fused_qkv=False) query projection of layers/attentions.py (not"
+          " attention_type mla or compressed), shard_mode='auto', a kernel sharded on its embed dimension"
+          " ('embed_attn' mapped to a mesh axis of size > 1, ici_context_autoregressive_parallelism=1) and"
+          " replicated on the others (q_heads and kv on mesh axes of size 1: no tensor parallelism), and a remat"
+          " policy that replays the projection in the backward: 'full', 'save_out_proj', or 'custom' with"
+          " query_proj='remat'. Under any other policy the projection is saved or not rematerialized, and the"
+          " backward already gathers the kernel once."
+      ),
+  )
 
 
 class MoBa(BaseModel):
@@ -1758,6 +1778,14 @@ class MoEGeneral(BaseModel):
   moe_pin_sparse_core_all_gathers: bool = Field(
       False,
       description="Pin FSDP and EP all-gathers in MoE to dedicated SparseCores using compute_on.",
+  )
+  gather_scanned_kernels_once: bool = Field(
+      False,
+      description=(
+          "Gather GateLogit router kernels, Attention.query kernels, and any other scanned kernel <= 16 MiB per layer"
+          " once before the layer scan instead of inside every scanned layer, while preserving per-layer gradient"
+          " reduce-scatter sharding via _identity_with_grad_sharding."
+      ),
   )
   moe_pin_sparse_core_ep_all_gathers: bool = Field(
       False,
@@ -5457,6 +5485,89 @@ class MaxTextConfig(
       )
     return self
 
+  @staticmethod
+  def validate_query_proj_kernel_gather_once(cfg: Any) -> None:
+    """Fails a config on which query_proj_kernel_gather_once would not remove an all-gather from the backward.
+
+    The option makes the attention query projection reuse the remat replay's gathered kernel for its input gradient.
+    That saves an all-gather only if the projection is the unquantized, unfused query DenseGeneral of
+    layers/attentions.py, its kernel is sharded on the embed dimension, and the backward replays it; the program is
+    verified to change in nothing else only with the kernel's other dimensions replicated. Shared by MaxTextConfig and
+    RLConfig (RLConfig does not inherit MaxTextConfig's validators). A parallelism left at -1 (filled in when the mesh
+    is built) counts as possibly sharded.
+    """
+    if not getattr(cfg, "query_proj_kernel_gather_once", False):
+      return
+    prefix = "query_proj_kernel_gather_once=True"
+
+    def sharded(mesh_axes):
+      return any(
+          getattr(cfg, f"{mesh}_{axis}_parallelism", 1) not in (0, 1) for axis in mesh_axes for mesh in ("ici", "dcn")
+      )
+
+    if cfg.attention_type in (
+        AttentionType.MLA.value,
+        AttentionType.COMPRESSED.value,
+    ):
+      raise ValueError(
+          f"{prefix} applies to the query projection of layers/attentions.py; attention_type={cfg.attention_type!r}"
+          " builds its own query projections, which it does not change."
+      )
+    if cfg.fused_qkv:
+      raise ValueError(f"{prefix} requires fused_qkv=False: the fused qkv projection has no separate query kernel.")
+    if cfg.use_fused_qkv_kernel:
+      raise ValueError(
+          f"{prefix} requires use_fused_qkv_kernel=False: the fused qkv kernel runs its own query projection."
+      )
+    if cfg.quantization is not None and cfg.quantization != QuantizationType.NONE:
+      raise ValueError(
+          f"{prefix} requires quantization='': a quantized projection runs its own dot_general, got"
+          f" quantization={cfg.quantization!r}."
+      )
+    if cfg.shard_mode == ShardMode.EXPLICIT:
+      raise ValueError(f"{prefix} requires shard_mode='auto'.")
+    if cfg.ici_context_autoregressive_parallelism > 1:
+      raise ValueError(
+          f"{prefix} has nothing to gather with ici_context_autoregressive_parallelism > 1: the query kernel is"
+          " replicated."
+      )
+    embed_axes = axes_for_logical(cfg.logical_axis_rules, "embed_attn")
+    if not sharded(embed_axes):
+      raise ValueError(
+          f"{prefix} has nothing to gather: the kernel's embed dimension (logical axis 'embed_attn') maps to mesh"
+          f" axes {list(embed_axes)}, none of which has a parallelism other than 1."
+      )
+    other_mesh_axes = {name: axes_for_logical(cfg.logical_axis_rules, name) for name in ("q_heads", "kv")}
+    if any(sharded(axes) for axes in other_mesh_axes.values()):
+      raise ValueError(
+          f"{prefix} requires the kernel's other dimensions to be replicated, i.e. logical axes {other_mesh_axes}"
+          " mapped to mesh axes of parallelism 1 (no tensor parallelism on the query kernel): the gathered kernel"
+          " would keep that sharding, and the partitioner may then re-plan the collectives around the projection,"
+          " which is not verified to be exact."
+      )
+    if not (
+        cfg.remat_policy in (RematPolicy.FULL.value, RematPolicy.SAVE_OUT_PROJ.value)
+        or (cfg.remat_policy == RematPolicy.CUSTOM.value and cfg.query_proj == RematLocation.REMAT.value)
+    ):
+      raise ValueError(
+          f"{prefix} requires a remat policy that replays the query projection in the backward ('full',"
+          f" 'save_out_proj', or 'custom' with query_proj='remat'), got remat_policy={cfg.remat_policy!r}"
+          f" (query_proj={cfg.query_proj!r}): when the projection is saved or not rematerialized the backward already"
+          " gathers the kernel once, and the option would only keep the gathered kernel alive longer."
+      )
+
+  @staticmethod
+  def validate_gather_scanned_kernels_once(cfg: Any) -> None:
+    """Fail fast when `gather_scanned_kernels_once=True` is combined with `shard_mode='explicit'`."""
+    if not cfg.gather_scanned_kernels_once:
+      return
+    if cfg.shard_mode == ShardMode.EXPLICIT:
+      raise ValueError(
+          "gather_scanned_kernels_once=True requires shard_mode='auto': "
+          "gather_scanned_kernels_once and _identity_with_grad_sharding use jax.lax.with_sharding_constraint, "
+          "which is incompatible with Explicit mesh axes."
+      )
+
   @model_validator(mode="after")
   def set_derived_and_validate_values(self) -> "MaxTextConfig":
     """
@@ -7565,6 +7676,8 @@ class MaxTextConfig(
       raise ValueError(
           "granite-3.0-1b-a400m requires use_m3_model=True; legacy decoder_block is not supported for GraniteMoe."
       )
+    self.validate_query_proj_kernel_gather_once(self)
+    self.validate_gather_scanned_kernels_once(self)
     return self
 
 
@@ -8009,4 +8122,6 @@ class RLConfig(
     dcn_map = get_parallelism_map("dcn")
     self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
 
+    MaxTextConfig.validate_query_proj_kernel_gather_once(self)
+    MaxTextConfig.validate_gather_scanned_kernels_once(self)
     return self
