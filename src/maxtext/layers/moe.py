@@ -855,6 +855,7 @@ class GateLogit(nnx.Module):
     else:
       kernel = self.kernel[...]
     kernel = jnp.asarray(kernel, self.dtype)
+    kernel = linears.route_dense_weight_grad(kernel, self.kernel_axes)
 
     contract_ind = tuple(range(0, len(norm_axis)))
     output_sharding = (
@@ -1148,7 +1149,16 @@ class RoutedMoE(nnx.Module):
       self.wi_kernel_axes, self.wo_kernel_axes = get_batchsplit_init_kernel_axes()
     else:
       self.wi_kernel_axes = ("exp", "embed_moe", "mlp_moe")
-      self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
+      # wo is [experts, mlp, embed]. Mesh rules that define `mlp_moe_out`/`embed_moe_out` (cp-as-ep) shard its mlp
+      # dim over FSDP instead of its embed dim, so its gradient reduce-scatter scatters a middle dimension, like wi's,
+      # instead of being transposed to [embed, experts * mlp] and scattered on its major dimension (about 3x slower
+      # on the SparseCore for the same bytes).
+      if {"mlp_moe_out", "embed_moe_out"} <= {
+          rule[0] for rule in (getattr(self.config, "logical_axis_rules", None) or ()) if rule
+      }:
+        self.wo_kernel_axes = ("exp", "mlp_moe_out", "embed_moe_out")
+      else:
+        self.wo_kernel_axes = ("exp", "mlp_moe", "embed_moe")
       if self.config.moe_flat_fsdp_weights:
         # Flat layout: wi [E * embed, mlp], wo [E * mlp, embed]; dim 0 is sharded over (expert, fsdp) via the
         # compound logical axis ("exp", "embed_moe") so every FSDP shard is a contiguous tile-aligned row block
@@ -1168,8 +1178,12 @@ class RoutedMoE(nnx.Module):
       if self.mesh is not None and "dcp" in self.mesh.shape and self.mesh.shape["dcp"] > 1:
         expert_axes.append("dcp")
       self._expert_parallelism_name = tuple(expert_axes)
-    elif self.config.custom_mesh_and_rule == ctypes.CustomRule.CP_AS_EP:
-      # when custom mesh and rule is cp-as-ep, context axis is same with expert in MoE component
+    elif self.config.custom_mesh_and_rule in (
+        ctypes.CustomRule.CP_AS_EP,
+        ctypes.CustomRule.CP_AS_EP_DENSE_NO_CP,
+        ctypes.CustomRule.CP_AS_EP_DENSE_FSDP,
+    ):
+      # when custom mesh and rule is cp-as-ep (or a variant of it), context axis is same with expert in MoE component
       self._expert_parallelism_name = ("context", "expert")
     elif self._tp_as_ep:
       # when custom mesh and rule is tp-as-ep, tensor axis is same with expert in MoE component.
