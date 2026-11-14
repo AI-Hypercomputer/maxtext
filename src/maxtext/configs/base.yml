@@ -658,6 +658,17 @@ prefetch_fsdp_weights: false
 # and run them on the SparseCore dedicated to FSDP collectives. Hides them at the cost of extra HBM. Inhomogeneous
 # blocks prefetched per sub-layer defer them to the next sub-layer's step.
 prefetch_fsdp_defer_grad_reduce_scatter: false
+# Training (scan_layers: true, shard_mode: 'auto'): hoist FSDP all-gathers of small scanned kernels (<= 16 MiB per
+# layer and <= 512 MiB per stacked tensor per device, such as MoE router GateLogit, small GQA K/V projections, and GDN
+# beta/alpha projections) out of the layer scan so each stack is gathered once over its FSDP axes (preserving tensor
+# and other non-FSDP sharding) instead of in every layer's forward and backward pass, while per-layer gradients still
+# reduce-scatter back to their FSDP sharding. Trade-off: hoisted stacks stay live across the entire training step
+# (~1.50 GiB fp32 / ~0.98 GiB with bf16 non-router weights and fp32 routers / ~0.75 GiB all-bf16 on Qwen3.5-397B;
+# ~0.18 GiB fp32 on Qwen3-235B). Larger kernels (such as Attention.query on 70B+ models) stay inside the scan; pair
+# with query_proj_kernel_gather_once: true to save the second backward Attention.query gather while keeping only one
+# layer's query kernel live at a time. Incompatible with scan_layers: false, prefetch_fsdp_weights: true,
+# parameter_memory_host_offload: true, and lora.enable_lora: true.
+gather_scanned_kernels_once: false
 
 # The attention parameter dictates the specific algorithm/methodology used to compute the attention scores
 # The attention_type parameter determines the variants of attention, e.g. global or local_sliding
@@ -740,6 +751,14 @@ qk_clip_threshold: 100.0  # Threshold for clipping (tau in the paper)
 # Combine matmuls for QKV and MLP
 fused_qkv: false
 fused_mlp: false
+# Training: gather the attention query projection kernel (with Qwen3-Next / Qwen3.5's output gate) once per attention
+# layer in the backward pass instead of twice. The kernel is sharded on its embed dimension, so the partitioner
+# all-gathers it for the remat replay of q = x @ wq and again for the input gradient dx = dq @ wq^T. With this on, the
+# replay's gathered kernel feeds the input gradient (it stays live in between); the kernel gradient is unchanged and
+# the results are the same bits. Requires an unquantized, unfused (fused_qkv: false) query projection without LoRA
+# (lora.enable_lora: false) whose kernel is sharded on its embed dimension and replicated on the others (no tensor
+# parallelism), auto shard mode, and remat_policy full, save_out_proj, or custom with query_proj: 'remat'.
+query_proj_kernel_gather_once: false
 
 record_internal_nn_metrics: 0
 

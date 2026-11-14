@@ -36,13 +36,13 @@ from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bi
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import create_sharding
 from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import maybe_shard_with_pspec
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
-
 
 # SiTU betas used by Kimi-K3; they come from the HF config keys `activation_situ_beta`
 # and `activation_situ_linear_beta` (HF `SituAndMul`) and are not configurable here.
@@ -274,6 +274,53 @@ def _compute_dot_general_nnx(
   )
 
 
+def _gathered_kernel_dot_fwd(inputs, kernel, dimension_numbers, precision, gathered_sharding):
+  """Gathers `kernel` to `gathered_sharding`, contracts it with `inputs` and keeps the gathered kernel."""
+  gathered_kernel = jax.lax.with_sharding_constraint(kernel, gathered_sharding)
+  out = lax.dot_general(inputs, gathered_kernel, dimension_numbers, precision=precision)
+  return out, (inputs, gathered_kernel)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def _dot_general_reusing_gathered_kernel(inputs, kernel, dimension_numbers, precision, gathered_sharding):
+  """`lax.dot_general(inputs, kernel)` whose input gradient reuses the forward's gathered kernel.
+
+  The forward gathers the kernel with one explicit sharding constraint and keeps the gathered value as the
+  residual; the backward computes the input gradient from that residual instead of letting the partitioner insert
+  a second all-gather of the same kernel. Under remat the residual is recomputed in the backward together with the
+  rest of the replayed forward, so the replay's gathered kernel is the one the input gradient uses: one all-gather
+  per backward instead of two. The kernel gradient is the stock dot_general transpose with no sharding constraint,
+  so it is reduce-scattered to the kernel's sharding exactly as before (transposing a sharding constraint would
+  instead constrain the kernel gradient to the gathered sharding, i.e. all-reduce it).
+
+  Args:
+    inputs: the left-hand side.
+    kernel: the right-hand side.
+    dimension_numbers: `lax.dot_general` dimension numbers without batch dimensions.
+    precision: `lax.dot_general` precision.
+    gathered_sharding: the sharding the kernel is gathered to: its own with the gathered mesh axes removed.
+
+  Returns:
+    The dot_general output.
+  """
+  return _gathered_kernel_dot_fwd(inputs, kernel, dimension_numbers, precision, gathered_sharding)[0]
+
+
+def _gathered_kernel_dot_bwd(dimension_numbers, precision, gathered_sharding, residuals, out_grad):
+  del gathered_sharding
+  inputs, gathered_kernel = residuals
+
+  def dot(lhs, rhs):
+    return lax.dot_general(lhs, rhs, dimension_numbers, precision=precision)
+
+  (inputs_grad,) = jax.linear_transpose(lambda lhs: dot(lhs, gathered_kernel), inputs)(out_grad)
+  (kernel_grad,) = jax.linear_transpose(lambda rhs: dot(inputs, rhs), gathered_kernel)(out_grad)
+  return inputs_grad, kernel_grad
+
+
+_dot_general_reusing_gathered_kernel.defvjp(_gathered_kernel_dot_fwd, _gathered_kernel_dot_bwd)
+
+
 class DenseGeneral(nnx.Module):
   """A linear transformation with flexible axes."""
 
@@ -303,6 +350,7 @@ class DenseGeneral(nnx.Module):
       weight_quant: quantizations.WeightQuantConfig | None = None,
       weight_grad_in_kernel_order: bool = False,
       *,  # Following arguments are keyword-only
+      gathered_kernel_axes: tuple[None | str, ...] | None = None,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the DenseGeneral module.
@@ -343,6 +391,13 @@ class DenseGeneral(nnx.Module):
         stored kernel, its initialization and the arithmetic are all untouched,
         so gradients are bit-identical to the default rule. Only takes effect
         under `shard_mode: explicit`; ignored when the layer is quantized.
+      gathered_kernel_axes: if set, the logical axes of the kernel as the dot reads it
+        (the kernel's axes with the gathered ones replaced by None). The kernel is
+        gathered to them by one explicit sharding constraint and the backward
+        computes the input gradient from that gathered kernel instead of gathering
+        the kernel a second time; under remat the backward's replay gathers it
+        once (see `_dot_general_reusing_gathered_kernel`). The kernel gradient is
+        unchanged. Needs `mesh`; unquantized kernels in auto shard mode only.
       rngs: RNG state for initialization in nnx.
     """
     if weight_quant is not None:
@@ -373,6 +428,7 @@ class DenseGeneral(nnx.Module):
     self.block_size = block_size
     self.weight_quant = weight_quant
     self.weight_grad_in_kernel_order = weight_grad_in_kernel_order
+    self.gathered_kernel_axes = gathered_kernel_axes
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -512,6 +568,31 @@ class DenseGeneral(nnx.Module):
     kernel = shard(kernel, stage2)
     return kernel
 
+  def _dot_general_gathering_kernel_once(self, inputs, kernel, kernel_scale, norm_axis, contract_ind, slice_bounds):
+    """The dot_general of `gathered_kernel_axes` (see `_dot_general_reusing_gathered_kernel`)."""
+    if (
+        self.quant is not None
+        or kernel_scale is not None
+        or is_fp8_dtype(getattr(kernel, "dtype", None))
+        or slice_bounds is not None
+        or self.use_two_stage_all_gather
+        or self.shard_mode == ShardMode.EXPLICIT
+        or self.mesh is None
+    ):
+      raise ValueError(
+          "gathered_kernel_axes supports only an unquantized, unsliced kernel in auto shard mode without the"
+          " two-stage all-gather, and needs the mesh."
+      )
+    gathered_sharding = create_sharding(self.mesh, self.gathered_kernel_axes)
+    dimension_numbers = ((norm_axis, contract_ind), ((), ()))
+    return _dot_general_reusing_gathered_kernel(
+        inputs,
+        kernel,
+        dimension_numbers,
+        lax.Precision(self.matmul_precision),
+        gathered_sharding,
+    )
+
   def __call__(
       self,
       inputs: Array,
@@ -519,6 +600,8 @@ class DenseGeneral(nnx.Module):
       out_sharding: NamedSharding | None = None,
       slice_bounds: tuple[int, int] | None = None,
       kernel_all_gather_fn: Callable[[Array], Array] | None = None,
+      *,
+      use_gathered_kernel: bool = True,
   ) -> Array:
     """Applies a linear transformation to the inputs along multiple dimensions.
 
@@ -532,6 +615,9 @@ class DenseGeneral(nnx.Module):
         Used by `fsdp_prefetch` (`explicit_fsdp_weight`) on `logits_dense` (which sits
         outside the scanned decoder loop) so its backward weight gradient uses an
         explicit SparseCore `reduce-scatter`.
+      use_gathered_kernel: Whether to use `gathered_kernel_axes` on this call when
+        configured. Callers pass `False` on forward-only inference/prefill calls so
+        a train-initialized module falls back to the standard projection path.
 
     Returns:
       The transformed input.
@@ -601,35 +687,40 @@ class DenseGeneral(nnx.Module):
 
     contract_ind = tuple(range(0, len(self.axis)))
     native_fp8_compute = isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
-    quant_dot_general = self.quant_dot_general if slice_bounds is None else None
-    # The auto-axes region only buys anything where XLA refuses to fold the
-    # transpose away, and it has to own the whole dot to do it -- so it is off
-    # under auto sharding and under any quantized path. `self.quant` only covers
-    # AQT; weight-only fp8 leaves it None and is identified by the scale instead.
-    weight_grad_in_kernel_order = (
-        self.weight_grad_in_kernel_order
-        and self.shard_mode == ShardMode.EXPLICIT
-        and self.quant is None
-        and quant_dot_general is None
-        and kernel_scale is None
-        and not is_fp8_dtype(getattr(kernel, "dtype", None))
-    )
-    output = _compute_dot_general_nnx(
-        inputs,
-        kernel,
-        norm_axis,
-        contract_ind,
-        self.matmul_precision,
-        quant_dot_general,
-        _initializing,
-        out_sharding,
-        kernel_scale=kernel_scale,
-        compute_dtype=self.dtype,
-        native_fp8_compute=native_fp8_compute,
-        scale_block_size=self.block_size,
-        act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
-        weight_grad_in_kernel_order=weight_grad_in_kernel_order,
-    )
+    if self.gathered_kernel_axes is not None and use_gathered_kernel:
+      output = self._dot_general_gathering_kernel_once(
+          inputs, kernel, kernel_scale, norm_axis, contract_ind, slice_bounds
+      )
+    else:
+      quant_dot_general = self.quant_dot_general if slice_bounds is None else None
+      # The auto-axes region only buys anything where XLA refuses to fold the
+      # transpose away, and it has to own the whole dot to do it -- so it is off
+      # under auto sharding and under any quantized path. `self.quant` only covers
+      # AQT; weight-only fp8 leaves it None and is identified by the scale instead.
+      weight_grad_in_kernel_order = (
+          self.weight_grad_in_kernel_order
+          and self.shard_mode == ShardMode.EXPLICIT
+          and self.quant is None
+          and quant_dot_general is None
+          and kernel_scale is None
+          and not is_fp8_dtype(getattr(kernel, "dtype", None))
+      )
+      output = _compute_dot_general_nnx(
+          inputs,
+          kernel,
+          norm_axis,
+          contract_ind,
+          self.matmul_precision,
+          quant_dot_general,
+          _initializing,
+          out_sharding,
+          kernel_scale=kernel_scale,
+          compute_dtype=self.dtype,
+          native_fp8_compute=native_fp8_compute,
+          scale_block_size=self.block_size,
+          act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
+          weight_grad_in_kernel_order=weight_grad_in_kernel_order,
+      )
 
     if self.bias is not None:
       bias = jnp.asarray(self.bias[...], self.dtype)

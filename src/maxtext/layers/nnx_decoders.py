@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Module for decoder layers"""
+
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -1430,6 +1431,30 @@ class NNXDecoder(nnx.Module):
     if scan_axis != 0:
       params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
 
+    dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
+    updated_graphdef = [graphdef]
+
+    use_kv = kv_caches_stacked is not None
+    use_forced_routing = forced_routed_experts_scanned is not None
+    # The call-time model_mode (layer_args[3]), like Attention._try_fused_qkv_kernel, not the construction-time one.
+    call_model_mode = args[3] if len(args) > 3 else kwargs.get("model_mode", self.model_mode)
+
+    gathered_grad_shardings = {}
+    if (
+        self.config.gather_scanned_kernels_once
+        and call_model_mode == MODEL_MODE_TRAIN
+        and not use_kv
+        and not dynamic_graph_init
+        and not self.config.parameter_memory_host_offload
+        and not self.config.prefetch_fsdp_weights
+    ):
+      params = moe.gather_scanned_kernels_once(
+          layers, params, self.mesh, self.config.logical_axis_rules, metadata_axis_name=metadata_axis_name
+      )
+      gathered_grad_shardings = moe.gathered_kernel_grad_shardings(
+          layers, self.mesh, self.config.logical_axis_rules, metadata_axis_name=metadata_axis_name
+      )
+
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
     valid_kwargs = {k: v for k, v in kwargs.items() if k in sig.parameters or "kwargs" in sig.parameters}
@@ -1441,13 +1466,6 @@ class NNXDecoder(nnx.Module):
         return {k: _extract_matching_state(v, full[k]) for k, v in template.items()}
       return full
 
-    dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
-    updated_graphdef = [graphdef]
-
-    use_kv = kv_caches_stacked is not None
-    use_forced_routing = forced_routed_experts_scanned is not None
-    # The call-time model_mode (layer_args[3]), like Attention._try_fused_qkv_kernel, not the construction-time one.
-    call_model_mode = args[3] if len(args) > 3 else kwargs.get("model_mode", self.model_mode)
     defer_psum_axes = (
         normalizations.get_deferred_norm_psum_axes(self.config, self.mesh)
         if not use_kv and not dynamic_graph_init and call_model_mode == MODEL_MODE_TRAIN
@@ -1479,6 +1497,9 @@ class NNXDecoder(nnx.Module):
         kv_cache_layer = None
         forced_routed_experts_layer = None
         iteration_kwargs = None
+
+      if gathered_grad_shardings:
+        current_params = moe.reduce_scatter_gathered_grads(current_params, gathered_grad_shardings)
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(

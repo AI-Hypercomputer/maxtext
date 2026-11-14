@@ -300,6 +300,7 @@ class Attention(nnx.Module):
     self.reshape_q = reshape_q
     self.is_nope_layer = is_nope_layer
     self.is_vision = is_vision
+    self.name = name
     self.model_mode = model_mode
     self.use_mrope = use_mrope
     self.mrope_section = mrope_section
@@ -572,6 +573,23 @@ class Attention(nnx.Module):
       out_features = (self.num_query_heads, self.head_dim * 2)
 
     block_size = getattr(self.config, "weight_block_size", None)
+    # query_proj_kernel_gather_once: the backward's remat replay gathers the kernel once and the input gradient reuses
+    # it (DenseGeneral gathered_kernel_axes: the embed dimension gathered, the others as they are). Scanned/remat'd
+    # decoder training only: forward-only models, mesh-less modules, and unrematerialized vision/audio encoders skip it.
+    full_attn = (AttentionType.FULL, AttentionType.FULL.value)
+    is_multimodal_encoder = (
+        self.is_vision
+        or self.name == "self_attention_audio"
+        or (self.attention_type in full_attn and self.config.attention_type not in full_attn)
+    )
+    gathered_kernel_axes = None
+    if (
+        getattr(self.config, "query_proj_kernel_gather_once", False)
+        and self.model_mode == MODEL_MODE_TRAIN
+        and self.mesh is not None
+        and not is_multimodal_encoder
+    ):
+      gathered_kernel_axes = tuple(None if axis == "embed_attn" else axis for axis in kernel_axes)
     return DenseGeneral(
         in_features_shape=in_features,
         out_features_shape=out_features,
@@ -585,14 +603,18 @@ class Attention(nnx.Module):
         use_bias=self.use_bias_in_projections,
         shard_mode=self.config.shard_mode,
         weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
+        mesh=self.mesh if gathered_kernel_axes else None,
         block_size=block_size,
+        gathered_kernel_axes=gathered_kernel_axes,
         rngs=self.rngs,
     )
 
-  def query_projection(self, inputs_q: Array, out_sharding: NamedSharding | None = None) -> Array:
+  def query_projection(
+      self, inputs_q: Array, out_sharding: NamedSharding | None = None, model_mode: str = MODEL_MODE_TRAIN
+  ) -> Array:
     """Query projection."""
 
-    return self.query(inputs_q, out_sharding=out_sharding)
+    return self.query(inputs_q, out_sharding=out_sharding, use_gathered_kernel=model_mode == MODEL_MODE_TRAIN)
 
   def init_kv_w(self, inputs_kv_shape: Tuple) -> nnx.Module:
     """Initializes the key or value projection.
@@ -1614,10 +1636,10 @@ class Attention(nnx.Module):
         query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
       elif use_shared_kv:
         # Donor layer already produced rotated, normed K/V — use them directly.
-        query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
+        query = self.query_projection(inputs_q, out_sharding=qkv_sharding, model_mode=model_mode)
         key, value = shared_key, shared_value
       else:
-        query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
+        query = self.query_projection(inputs_q, out_sharding=qkv_sharding, model_mode=model_mode)
         key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
         if self.share_kv_projections:
           value = key
