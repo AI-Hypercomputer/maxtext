@@ -1,47 +1,185 @@
-# Handoff: Checkpoint Load-Time Benchmark (`v2` Multi-Platform + `tpu7x` Archive)
+# Handoff: Checkpoint Load-Time Benchmark (`v2` Multi-Platform + `tpu7x` Legacy Archive)
 
-> **Snapshot:** 2026-11-14 · **Branch:** `docs/checkpoint-load-benchmark` (pushed to `origin/docs/checkpoint-load-benchmark`) · **Executive Summary:** [`reports/benchmark_v2_summary.md`](reports/benchmark_v2_summary.md) · **Live Progress Log:** [`PROGRESS_LOG.md`](PROGRESS_LOG.md) · **Sheet v2:** [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) (`100.0%` complete: `Summary=396` [`352` v2 + `44` non-overlapping legacy v1], `Step1=54/54` cold regional downloads, `0` `ERROR` / `0` `TIMEOUT`)
+> **Snapshot:** 2026-11-14 10:12 UTC · **Branch:** `docs/checkpoint-load-benchmark` (pushed to `origin/docs/checkpoint-load-benchmark`) · **Executive Summary:** [`reports/benchmark_v2_summary.md`](reports/benchmark_v2_summary.md) · **Live Progress Log:** [`PROGRESS_LOG.md`](PROGRESS_LOG.md) · **Design Plan:** [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) · **Live Google Sheet v2:** [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) (**`100.0%` Complete & Forensically Validated: `0 ERRORS, 0 WARNINGS`**)
 
 ---
 
-## Quick-Pickup Guide (For Team Members & Jetski)
+## 0. Benchmark `v2` TL;DR (Final Session State)
 
-1. **Live Progress & Chat Log (`PROGRESS_LOG.md`):**
-   - Read [`PROGRESS_LOG.md`](PROGRESS_LOG.md) (`/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md` on branch `docs/checkpoint-load-benchmark`) for the live cluster status table, chronological chat/event log, and background orchestrator status.
-   - Read [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) for the full v2 design and 21-model × 3-platform matrix (`352` planned v2 rows, `54` regional Step 1 downloads).
-2. **Rules on this branch (`docs/checkpoint-load-benchmark`):**
-   - **Never edit `src/maxtext/`** unless explicitly reviewed/approved; keep benchmark & harness tooling self-contained under `checkpoint_load_benchmark/`.
-   - **Pods run only committed code:** Push `docs/checkpoint-load-benchmark`, then run `build_code_tarball.py --out /tmp/code_bundle --upload gs://mesa-maxtext/mesa-bench-v2/code` (refuses dirty tracked files or unpushed commits).
-   - **Resource prefix `mesa-`:** Name all new Kubernetes JobSets/Jobs/pods/KSAs/secrets `mesa-*` with label `app: mesa-bench-v2`, and write all v2 GCS outputs under `gs://mesa-maxtext-{us-central1,southamerica-west1,europe-west4}/mesa-bench-v2/`. Leave legacy `mesakh_tpu7x_bench/` untouched.
-   - **Never stage unrelated workspace files:** `docs/plans/`, `run_e2e_matrix_xpk.{py,sh}`, `vllm_decoder_issue.md`, and root `benchmark_v2_design_plan.md`.
-   - **Teammate setup on another Cloudtop:** Ask the sheet owner (`mesakh`) for Share access to Sheet `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`, run `gcloud container clusters get-credentials` for the three clusters in `bench/platforms.py` (`bodaborg-tpu7x-nap` / `us-central1`, `bodaborg-v6e-nap` / `southamerica-west1`, `v5e-256-bodaborg-europe-west4` / `europe-west4`), and use `~/Documents/mesakh/py312/bin/python` (or a Python 3.12 env with `pytest`, `pyyaml`, `etils`, `google-api-core`).
-3. **Current status (2026-11-14 — `100.0%` Complete & Cleaned Up):**
-   - **Phases 0–4 (`T0.1–T4.4`):** Completed, unit-tested (`96 passed`), linted (`pyink` + `pylint 10.00/10`), committed & pushed on `docs/checkpoint-load-benchmark`, and uploaded to `gs://mesa-maxtext/mesa-bench-v2/code`.
-   - **Phase 5 (`T5.1–T5.3`) — All `136 / 136` TPU Queue Tasks (`352 / 352` Planned `v2` Rows) & `54 / 54` Cold Regional Step 1 Downloads Completed (`0` `ERROR`, `0` `TIMEOUT`):**
-     - **`v7x` (`bodaborg-tpu7x-nap`, `us-central1`):** `21 / 21` cold Step 1 + Step 1b done; `61 / 61` TPU tasks (`164 / 164` `Summary` rows: `142` `OK`, `22` genuine `OOM-HOST` in single-host CPU `to_maxtext` Step 2, `0` `ERROR`, `0` `TIMEOUT`, `3/3` Tier A reps).
-     - **`v6e` (`bodaborg-v6e-nap`, `southamerica-west1`):** `21 / 21` cold Step 1 + Step 1b done; `53 / 53` TPU tasks (`140 / 140` `Summary` rows: `127` `OK`, `13` genuine `OOM-HOST`, `0` `ERROR`, `0` `TIMEOUT`, `3/3` Tier A reps).
-     - **`v5e` (`v5e-256-bodaborg-europe-west4`, `europe-west4`):** `12 / 12` cold Step 1 + Step 1b done; `22 / 22` TPU tasks (`48 / 48` `Summary` rows: `22` `OK`, `24` genuine `OOM-HOST` [`18` `to_maxtext` S2 + `6` unfused Qwen3 MoE `safetensors_dynamic` on `192 GiB` hosts], `1` genuine `OOM-HBM`, `1` `SKIPPED`, `0` `ERROR`, `0` `TIMEOUT`, `3/3` Tier A reps).
-     - **Sheet v2 & Cluster Cleanup:** All 11 tabs of Google Sheet [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) validated end-to-end (`0` formula errors, `0` cell mismatches, clickable `gpaste` URLs on all executed rows, internal `Experiment Tier` column hidden on `Summary` and `Runs`), executive summary written to [`reports/benchmark_v2_summary.md`](reports/benchmark_v2_summary.md), and all `mesa-*` JobSets/Jobs/Pods/PVCs cleaned up across all 3 clusters.
-4. **Commands to inspect background orchestrator, test, upload bundle, or check cluster status:**
-   ```bash
-   cd /usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3
-   git status  # branch: docs/checkpoint-load-benchmark
+| Workstream | Final Status (2026-11-14) |
+| :--- | :--- |
+| **Phases 0–4 Code & Test Suite** (`T0.1–T4.4`) | ✅ **100% Done, Linted & Tested.** Modular `bench/` + `scripts/` suite (`pyink` 2-space clean, `pylint --rcfile=pylintrc` **`10.00/10`**, **`96 passed`** in `pytest`, `bash -n` clean). Committed tarball + `CODE_VERSION.json` uploaded to `gs://mesa-maxtext/mesa-bench-v2/code/`. `src/maxtext/` was **not** modified in this session. |
+| **Cold Regional Step 1 (`HF -> GCS`)** | ✅ **`54 / 54` (`100%`) Done & Verified Cold.** `21` models in `us-central1` (`v7x`, median `0.29 GB/s`), `21` in `southamerica-west1` (`v6e`, median `0.14 GB/s`), `12` in `europe-west4` (`v5e`, median `0.56 GB/s`). Every row verified with `step1_value_source = cold_download` and `step1_files_already_in_gcs_count = 0`. |
+| **Real-Weight DeepSeek Step 1b (`FP8/FP4 -> BF16`)** | ✅ **`12 / 12` (`100%`) Done & Verified Cold.** `284B`, `671B`, and `3.2-671B` copied into all 3 regions (`912s–3,471s`). **`deepseek4-1600b` (`DeepSeek-V4-Pro`, `3,197.7 GB` BF16 / 72 shards)** dequantized from real HF FP8+FP4 weights on CPU (`n2d-standard-64` + 5 TB PVC in `us-central1`) in **`10,675.89s`**, and copied cold (`--clean-target`) to `southamerica-west1` (**`5,803.30s`**) and `europe-west4` (**`5,300.98s`**). |
+| **TPU Benchmark Matrix (`136 / 136` Tasks = `352 / 352` `v2` Rows)** | ✅ **`100.0%` Done (`0` `ERROR`, `0` `TIMEOUT`, `0` `NOT-TPU`, `0` `PENDING`).**<br>• **`v7x` (`us-central1`):** `61/61` tasks → `164/164` rows (**`142` `OK`**, **`22` `OOM-HOST`** [all 22 in `to_maxtext` S2; `0` in `safetensors_dynamic`]).<br>• **`v6e` (`southamerica-west1`):** `53/53` tasks → `140/140` rows (**`127` `OK`**, **`13` `OOM-HOST`** [all 13 in `to_maxtext` S2; `0` in `safetensors_dynamic`]).<br>• **`v5e` (`europe-west4`):** `22/22` tasks → `48/48` rows (**`22` `OK`**, **`24` `OOM-HOST`** [`18` `to_maxtext` S2 + `6` unfused Qwen3 MoE `safetensors_dynamic` on `192 GiB` hosts], **`1` `OOM-HBM`** [`1600B` `scanned` `2×16x16`], **`1` `SKIPPED`** [`1600B` `unscanned` `2×16x16`]).<br>• **Overall `v2` Tally:** **`291` `OK`**, **`59` `OOM-HOST`**, **`1` `OOM-HBM`**, **`1` `SKIPPED`**. All Tier A `OK` rows have **3/3 repetitions** + parameter checksum parity. |
+| **Google Sheet `v2` (`11` Tabs) & Reports** | ✅ **100% Synced & Forensically Validated (`0 ERRORS, 0 WARNINGS`).** Scanned **`180,453` live cells** across all 11 tabs (`Summary=396` [`352` `v2` + `44` non-overlapping `legacy|`], `Step 1 downloads=54`, `Stages: safetensors_dynamic=205`, `Stages: to_maxtext=191`, `Runs=1,498`). Clickable `gpaste` URLs on all executed rows (`396` in `Summary`, `1,382` in `Runs`), `Experiment Tier` (`Column C`) hidden on `Summary` & `Runs`, `README!A20:B26` populated, and [`reports/benchmark_v2_summary.md`](reports/benchmark_v2_summary.md) committed. |
+| **Live Cluster & Background Daemon State** | ✅ **All Clean / Inactive.** `0` Kubernetes JobSets, Jobs, Pods, or PVCs across `v7x`, `v6e`, and `v5e`. `mesa-v2-orchestrator.service` is `inactive` (`0` background processes running). |
 
-   # Check background experiment orchestrator process & live log
-   ps -ef | grep run_v2_orchestrator.py
-   tail -f /tmp/mesa_v2_orchestrator.log
-   cat checkpoint_load_benchmark/PROGRESS_LOG.md
+---
 
-   # Run local unit tests
-   ~/Documents/mesakh/py312/bin/python -m pytest -q -p no:cacheprovider checkpoint_load_benchmark/tests/
+## 1. New Session Pickup Prompt & Branch Guardrails
 
-   # Check active K8s jobs/jobsets across all 3 clusters
-   ./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v7x --mode status
-   ./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v6e --mode status
-   ./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v5e --mode status
-   ```
-5. **Teammate Jetski pickup prompt:**
-   > Read `checkpoint_load_benchmark/PROGRESS_LOG.md`, `checkpoint_load_benchmark/handoff.md`, and `checkpoint_load_benchmark/plans/benchmark_v2_plan.md` on branch `docs/checkpoint-load-benchmark` in `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`, check `/tmp/mesa_v2_orchestrator.log`, and report current Phase 5 experiment progress across `v7x`, `v6e`, and `v5e`.
+### 1.1 Copy-Paste Prompt for Opening a New Jetski Session
+> Read `checkpoint_load_benchmark/handoff.md`, `checkpoint_load_benchmark/reports/benchmark_v2_summary.md`, and `checkpoint_load_benchmark/PROGRESS_LOG.md` on branch `docs/checkpoint-load-benchmark` in `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`. Note that all 352 Benchmark v2 rows, 54 cold regional Step 1 downloads, and 12 DeepSeek Step 1b jobs across `v7x`, `v6e`, and `v5e` are 100% completed, cleaned up, and validated (`0 ERRORS, 0 WARNINGS`) on Google Sheet `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`. Wait for my next instruction.
+
+### 1.2 Mandatory Rules & Guardrails on `docs/checkpoint-load-benchmark`
+1. **Never modify `src/maxtext/`** unless explicitly requested and approved; keep benchmark, sheet, and orchestration code inside `checkpoint_load_benchmark/`.
+2. **Never stage unrelated untracked root files** in `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`:
+   - Leave `benchmark_v2_design_plan.md`, `docs/plans/`, `run_e2e_matrix_xpk.py`, `run_e2e_matrix_xpk.sh`, and `vllm_decoder_issue.md` unstaged.
+3. **Pods run only committed, pushed code bundles:** Before launching any new cluster pod/job, commit & push `docs/checkpoint-load-benchmark`, then run `scripts/build_code_tarball.py --out /tmp/code_bundle --upload gs://mesa-maxtext/mesa-bench-v2/code` (it refuses dirty tracked trees or unpushed commits and writes `CODE_VERSION.json`).
+4. **Resource naming & bucket isolation:** All v2 K8s resources use prefix `mesa-` with label `app: mesa-bench-v2`. All v2 GCS outputs live in regional buckets `gs://mesa-maxtext-{us-central1,southamerica-west1,europe-west4}/mesa-bench-v2/`. Leave legacy `gs://mesa-maxtext/mesakh_tpu7x_bench/` and legacy Google Sheet `11S2eN8mlpuQDQyMyBoBiBsF9KCRd5ZvNHcDf2T8Bz0Y` untouched.
+5. **Formatting & lint standard:** MaxText uses **2-space indentation** and `line-length=120`. Always pass `--pyink-indentation=2 --line-length=120` to `pyink` and `--rcfile=pylintrc` to `pylint` (using `/usr/local/google/home/mesakh/Documents/mesakh/py312/bin/`).
+
+---
+
+## 2. Benchmark `v2` Architecture, Codebase & Test Suite (`96` Unit Tests)
+
+Built on top of `origin/main` (`5b6773c9b`, which includes Lance Wang's merged `safetensors_dynamic` PRs `#5706`, `#5828`, `#5705`, `#5610`, `#6113`, `#6116`) plus branch fixes (`207cabecc` single-leaf composite build U-1 & pairwise slice concat U-6; `96329637f` `MAXTEXT_ORBAX_SAVE_CONCURRENT_GB` save-buffer cap U-8):
+
+| File | Responsibility |
+| :--- | :--- |
+| [`bench/schema_v2.py`](bench/schema_v2.py) | Canonical column specs (`SUMMARY_COLUMNS` [35], `STEP1_COLUMNS` [24], `STAGES_SD_COLUMNS` [55], `STAGES_TM_COLUMNS` [70], `RUNS_COLUMNS` [92]), status/failure enums (`OK`, `OOM-HOST`, `OOM-HBM`, `SKIPPED`, `BLOCKED`, `NOT-TPU`, `TIMEOUT`, `PREEMPTED`, `ERROR`), row validators, and `load_models_v2()`. |
+| [`bench/stages.py`](bench/stages.py) | Per-host `StageRecorder` (`stage()`, `wrap()`), `jax.monitoring` listeners (`orbax` & `jaxpr` duration hooks), distributed barrier timer, background Host RAM/RSS & TPU HBM (`memory_stats()`) sampler across `v7x`/`v6e`/`v5e` metric keys, and `BENCH_STAGES_JSON` min/median/max/slowest-host aggregator across up to 128 hosts. |
+| [`bench/harness_v2.py`](bench/harness_v2.py) | v2 phase result JSON builder, pre-load `check_tpu_backend` enforcement (fails fast with `NOT-TPU` if backend != `tpu` or device counts mismatch), and Tier A parameter checksum computation & cross-pipeline parity verification. |
+| [`bench/platforms.py`](bench/platforms.py) | Verified `PlatformProfile` registry for `v7x`, `v6e`, and `v5e` (contexts, regional buckets, Kueue/TAS settings, chip/device ratios, Host RAM margins, OOM floors, Step 1 64-vCPU VM types). |
+| [`bench/manifests_v2.py`](bench/manifests_v2.py) | Profile-driven K8s Indexed `JobSet` builder (1–128 pods), Step 1/1b CPU `Job` + `PVC` builder, and deterministic `S -> A -> C -> B` queue task generator (`build_planned_queue_tasks`). |
+| [`bench/step1_download_job.py`](bench/step1_download_job.py) | Standalone CPU CLI for cold `HF -> GCS` downloads (`download`), bounded-RAM resumable DeepSeek `FP8/FP4 -> BF16` CPU dequantization (`convert-deepseek`), and resumable multi-chunk cross-region GCS copies (`copy-region`, enforcing `--clean-target`). |
+| [`bench/legacy_v1.py`](bench/legacy_v1.py) & [`bench/metadata.py`](bench/metadata.py) | Adapts `259` legacy v1 `tpu7x` JSONs (`44` non-overlapping `legacy|` rows retained in `Summary`) and collects runtime/package/`CODE_VERSION.json`/downward-API/safetensors header metadata. |
+| [`benchmark_ckpt_load_time.py`](benchmark_ckpt_load_time.py) & [`bootstrap_tpu7x.py`](bootstrap_tpu7x.py) | Unified multi-host/multi-slice TPU benchmark harness & pod bootstrap (extracts `/tmp/maxtext` from committed tarball, verifies `CODE_VERSION.json` SHA-256, no runtime string-patching of `src/`). |
+| [`scripts/build_code_tarball.py`](scripts/build_code_tarball.py) | Packages `src/`, `checkpoint_load_benchmark/`, `pyproject.toml`, `README.md` + `CODE_VERSION.json` from clean pushed `HEAD` and uploads to GCS. |
+| [`scripts/generate_v2_manifests.py`](scripts/generate_v2_manifests.py) & [`scripts/run_v2_cluster.sh`](scripts/run_v2_cluster.sh) | Multi-platform manifest generator and CLI launcher (`--platform {v7x,v6e,v5e} --mode {step1,step1b,copy-region,queue,status,cleanup}`). |
+| [`scripts/build_sheet_v2.py`](scripts/build_sheet_v2.py) | Builds all 5 data CSVs + `gsheets` write/merge/number-format/hide-column batches (`01`–`03`), uploads missing logs to `gpaste`, and updates [`configs/gpaste_log_urls.json`](configs/gpaste_log_urls.json). |
+| [`scripts/run_v2_orchestrator.py`](scripts/run_v2_orchestrator.py) | Autonomous multi-cluster daemon that scheduled Step 1 -> Step 1b -> TPU queue workers (`S -> A -> C -> B`) and synced Sheet v2 + [`PROGRESS_LOG.md`](PROGRESS_LOG.md). |
+| [`configs/models_v2.json`](configs/models_v2.json) | 21-model matrix (`0.6B` to `1600B`), HF repos, dtypes, BF16 sizes, Step 1b flags, and per-platform slice/topology lists (`352` planned Summary rows). |
+| [`tests/*_test.py`](tests/) | `10` test modules (`96` unit tests passing in ~31s via `pytest`). |
+
+---
+
+## 3. Multi-Cluster Infrastructure & Regional Storage (`bench/platforms.py`)
+
+| Platform | GKE Cluster & Kubectl Context | Region & Regional Bucket | Queue / TAS & Pod Scheduling | Hardware Specs & Topologies |
+| :--- | :--- | :--- | :--- | :--- |
+| **`v7x`** | `bodaborg-tpu7x-nap`<br>`gke_cloud-tpu-shared-capacity_us-central1_bodaborg-tpu7x-nap` | `us-central1`<br>`gs://mesa-maxtext-us-central1/mesa-bench-v2` | Kueue `default`, TAS `podset-slice-size`, Spot (`tpu7x-spot` / `tpu7x-flavor`), `reservation-name DoesNotExist`, `gitimg` pull secret, ~3h Kueue cap | `tpu7x-standard-4t`: `4` chips = `8` JAX cores/host (`95 GiB`/core HBM, `960 GiB` Host RAM). Topologies: `2x2x1` (1h), `2x2x2` (2h), `2x2x4` (4h), `2x4x4` (8h). Step 1/1b CPU: `n2d-standard-64` (`cpu-np`). |
+| **`v6e`** | `bodaborg-v6e-nap`<br>`gke_cloud-tpu-shared-capacity_southamerica-west1_bodaborg-v6e-nap` | `southamerica-west1`<br>`gs://mesa-maxtext-southamerica-west1/mesa-bench-v2` | Kueue `default`, TAS `False`, `priorityClassName: medium`, NO spot selectors, ~3h Kueue cap | `ct6e-standard-8t` (`2x4`: `8` chips/host, `1,440 GiB` RAM) & `ct6e-standard-4t` (`4` chips/host, `720 GiB` RAM), `32 GiB`/chip HBM. Topologies: `2x4`, `2x2`, `4x4` (4h), `8x8` (16h), `16x16` (64h / 256 chips). Step 1 CPU: `n4-standard-64`. |
+| **`v5e`** | `v5e-256-bodaborg-europe-west4`<br>`gke_tpu-prod-env-multipod_europe-west4_v5e-256-bodaborg-europe-west4` | `europe-west4`<br>`gs://mesa-maxtext-europe-west4/mesa-bench-v2` | **No Kueue** (omit `queue-name`, TAS `gke-v5e-tas-2` broken), `serviceAccountName: mesa-bench`, no 3h cap | `ct5lp-hightpu-4t`: `4` chips = `4` devices/host (`16 GiB`/chip HBM, `192 GiB` Host RAM). Topologies: `1×16x16` (64 hosts / 256 chips) & `2×16x16` (128 hosts / 512 chips). Step 1 CPU: `n2-standard-64`. |
+
+---
+
+## 4. Complete `v2` Execution Outcomes & Headline Findings
+
+Full tables and per-model highlights are in [`reports/benchmark_v2_summary.md`](reports/benchmark_v2_summary.md) and on live Sheet [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit):
+
+1. **Speedups Across `121` Paired `OK` Configurations (`to_maxtext ÷ safetensors_dynamic`):**
+   - **Without HF Download (`(TM S1 + S2 + S3) ÷ (SD S1 + S2)`):** Median **`4.99x`** (`0.53x – 26.76x`) faster with `safetensors_dynamic` (`v7x` median **`4.61x`**, `v6e` median **`5.53x`**, `v5e` median **`3.11x`**) by eliminating single-host CPU Orbax conversion (`Step 2`).
+   - **End-to-End (Including Cold Step 1 + Step 1b):** Median **`1.83x`** (`0.72x – 3.95x`) faster with `safetensors_dynamic`.
+   - **Warm Load Only (`TM Step 3 ÷ SD Step 2`):** Median **`0.49x`** (`0.08x – 10.42x`) — once `Step 2` is amortized, restoring pre-sharded Orbax checkpoints in `Step 3` is ~2× faster than re-reading `.safetensors` and transforming on TPU, except on smaller `unscanned` models where Orbax per-leaf metadata overhead dominates.
+2. **Large-Scale Reach (`0` `OOM-HOST` on `v7x` & `v6e` `safetensors_dynamic` vs `53` `to_maxtext` `OOM-HOST` rows):**
+   - **`deepseek4-1600b` (`3,200 GB` real BF16):** `to_maxtext` Step 2 cannot run on any single TPU host (`OOM-HOST`). `safetensors_dynamic` loads it directly from regional GCS in **`368.36s` `unscanned` / `1,137.90s` `scanned`** on `v6e` `1×16x16` (`256` chips) and **`873.83s` `unscanned` / `1,087.17s` `scanned`** on `v7x` `1×2x4x4` (`64` cores). On `v5e` `2×16x16` (`16 GiB`/chip), `1600B` hits genuine `OOM-HBM` during MoE expert stacking/resharding (`unscanned` `SKIPPED`).
+   - **`deepseek3-671b` & `deepseek3.2-671b` (`1,371 GB` real BF16):** `safetensors_dynamic` loads in **`188.70s` / `234.22s`–`239.5s` `unscanned`** on `v6e` / `v5e` `1×16x16` and **`829.57s` `scanned`** on `v7x` `1×2x2x4`.
+   - **`qwen3.5-397b-a17b` (`806.8 GB`):** `unscanned` `to_maxtext` Step 2 fits on `v7x` (`~884 GB` peak Host RAM, **`7,877.26s–7,930.76s`**) + Step 3 **`1,952.53s`** (`2×2x2x1`) / **`2,065.84s`** (`1×2x2x2`), vs `safetensors_dynamic` **`1,270.34s`** / **`1,120.93s`** (**`7.78x–8.87x`** faster without HF download).
+   - **Unfused Per-Expert Qwen3 MoE on `192 GiB` `v5e` Hosts (`6` `OOM-HOST` rows):** `qwen3-30b-a3b`, `qwen3-235b-a22b`, and `qwen3-480b-a35b` store 55k–110k unfused 2D per-expert tensors, exceeding `192 GiB` Host RAM during 64-host `v5e` shard reads (all 3 succeed cleanly on `v6e` and `v7x`), whereas fused-expert MoE models (`qwen3.5-397b-a17b`, `deepseek3-671b`, `deepseek3.2-671b`) shard along the leading `num_experts` axis and succeed cleanly on `v5e 1×16x16`.
+
+---
+
+## 5. User Decisions, Cold-Cache Guarantees & Google Sheet `v2` Design
+
+1. **Internal `Experiment Tier` (`S`, `A`, `B`, `C`) Hidden (`d524aab2b`):**
+   - `Experiment Tier` is an internal scheduling/repetition classification (`S` = smoke `0.6B`, `A` = 5 core cross-platform models with **3 repetitions + checksum verification**, `B` = 9 models `2B–47B` on `v7x`/`v6e` with 1 rep, `C` = 6 models `>200B` with 1 rep).
+   - Per user direction, `Column C` (`Experiment Tier`) is kept in schema position `C` so `Progress` tab `COUNTIFS` formulas remain intact, and **`hiddenByUser: true` is enforced on `Summary` (`sheetId=300`) and `Runs` (`sheetId=700`)** inside `03_format_batch.json` on every `build_sheet_v2.py` sync.
+2. **Strict Cold / Empty Cache Guarantees Across All Phases:**
+   - **Step 1 (`HF -> GCS`) & Step 1b (`copy-region`):** `ensure_empty_gcs_prefix` verifies/cleans target prefixes before measuring (`step1_files_already_in_gcs_count = 0`, `step1_value_source = cold_download`; `--clean-target` fixed & enforced in `copy_bf16_gcs_to_region` at `a230891c8`).
+   - **JAX XLA Compilation Cache:** Neither `JAX_COMPILATION_CACHE_DIR` nor `checkpoint_compilation_cache_dir` is set; every phase runs in a fresh subprocess with an empty compilation cache (`jax_compilation_cache_state = "empty"` across all `Runs` records).
+   - **Host `/ramdisk` Cleanup Between Queue Tasks:** `tpu7x_task_queue.py` purges `/ramdisk/bench_*`, `/ramdisk/hf_local`, and `/ramdisk/tmp` on slice 0 and all remote daemon hosts between tasks (`2884fc50c`), and every load phase streams cold from regional GCS in a fresh Python process.
+3. **11-Tab Workbook Layout, Ordering & Vertical Merges:**
+   - Tabs: `README`, `Progress`, `Summary` (`396` rows), `Step 1 downloads` (`54` rows), `Stages: safetensors_dynamic` (`205` rows), `Stages: to_maxtext` (`191` rows), `Runs` (`1,498` rows), `Models`, `Platforms`, `Legend`, `Columns`.
+   - All 5 data tabs are deterministically ordered and vertically merged by `TPU platform -> Model -> Pipeline -> Scan layers`, unmerging prior merges before writing `RAW` data so top-left group labels never blank out (`ce0c9fc84`, `c5cd5ee29`, `d4f93892e`, `873e0866a`).
+
+---
+
+## 6. Post-Completion Live Google Sheet `v2` Forensic Validation (`0 ERRORS, 0 WARNINGS`)
+
+Executed `validate_live_sheet_v2.py` + `check_all_sheet_invariants.py` against live Sheet `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`:
+- **[1/10] Metadata, Merges & Hidden Tier:** All `11` tabs present, vertical merges intact (`0` header overlaps), `Column C` hidden on `sheetIds = [300, 700]`.
+- **[2/10] Global Formula & Corrupt Token Scan:** Scanned **`180,453` live cells** across all 11 tabs → **`0`** `#REF!`, `#DIV/0!`, `#VALUE!`, `#NAME?`, `#N/A`, `NaN`, or `None` errors.
+- **[3/10] Live Sheet ↔ Local CSV Cell-by-Cell Parity:** **`0` cell mismatches** across `Summary` (`396×35`), `Step 1 downloads` (`54×24`), `Stages: safetensors_dynamic` (`205×55`), `Stages: to_maxtext` (`191×70`), and `Runs` (`1,498×92`).
+- **[4/10] Cold Step 1 & Step 1b Audit:** `54/54` cold regional downloads + `12/12` DeepSeek Step 1b rows (`912s–10,676s`, `0` `<60s` warm-skip no-ops).
+- **[5/10] Matrix Coverage, Hardware Ceilings & Repetitions:** `352/352` planned `v2` keys present, `0` legacy overlaps, `3/3` Tier A `OK` reps with `min–max` ranges, `tpu` backend verified on all `291` `OK` rows, realistic Host RAM/HBM ceilings.
+- **[6/10] Timing Equations & Speedups:** Verified `total_without_hf_download_seconds`, `total_end_to_end_seconds`, and all `121` paired speedup ratios.
+- **[7/10] `Summary` ↔ `Stages` Cross-Tab Parity:** All `291` `OK` `v2` rows match `Stages: safetensors_dynamic` and `Stages: to_maxtext`.
+- **[8/10] `Summary` ↔ `Runs` & Cold Cache Audit:** All `1,122` `v2` phase records in `Runs` match `Summary` repetition counts and `jax_compilation_cache_state = empty`.
+- **[9/10] `Progress` Tab Live Tallies:** `Progress!I10 = 0` pending, `Progress!J10 = 100.0%`, `Progress!J18 = 100.0%`.
+- **[10/10] Live `gpaste` `HYPERLINK` Formulas:** `396` clickable `gpaste` formulas in `Summary` + `1,382` in `Runs` (`0` non-`SKIPPED` rows missing logs).
+
+---
+
+## 7. Engineering Issues Discovered & Resolved During Benchmark `v2`
+
+1. **64-Host `v5e` TPU `SliceBuilder` ALTS gRPC Hang (`c64b44244`):** Fixed remote daemon environment forwarding and unbuffered log streaming so `jax.distributed.initialize` across 64–128 hosts on `v5e 16x16` completes reliably.
+2. **`gpt-oss-20b` / `gpt-oss-120b` on 256-Chip `16x16` Torus (`edad98c96`, `1973efc79`):** When `total_devices (256) > num_experts (32 or 128)`, `ici_fsdp_parallelism=256` fails expert divisibility, and reshaping `(16, 16)` into `(4, 64)` requires `allow_split_physical_axes=True`. Automated both in `benchmark_ckpt_load_time.py`.
+3. **Multi-Host Worker Teardown Race (`2884fc50c`):** Added synchronized post-result-write barrier (`worker_teardown_results_written`) so slice 0 waits for remote slice workers to flush `BENCH_STAGES_JSON` before Indexed Job completion terminates companion pods.
+4. **DeepSeek `1600B` (`3.2 TB` BF16) Bounded-RAM Resumable CPU Conversion (`3dffe1209`, `5fcf69248`, `935db475a`, `37e0d3cd6`):** Ran on `n2d-standard-64` (`180 GiB` request + 5 TB `standard-rwo` PVC on `cpu-np`, `safe-to-evict: "false"`) with a 48-thread single-process worker, `posix_fadvise(POSIX_FADV_DONTNEED)` page-cache eviction, shard-level GCS resume, and async parallel XML multipart upload (`10,675.89s`).
+5. **Step 1b `copy_bf16_gcs_to_region` `--clean-target` Bug (`a230891c8`):** Fixed `copy_bf16_gcs_to_region` ignoring `clean_target=True` (previously `del clean_target`), added unit test in `tests/step1_download_job_test.py`, and re-ran cold `1600B` regional copies on `v5e` (`5,300.98s`) and `v6e` (`5,803.30s`).
+6. **`Step 1` / `1b` `Runs` `gpaste` Column Mapping (`484aa4b5b`):** Fixed `step1_download_log_url` → `step1_log_url` and `step1b_log_url` in `build_sheet_v2.py` so all 66 cold Step 1/1b rows in `Runs` carry clickable `gpaste` links.
+7. **Spot Preemption Isolation for `397B` `2×2x2x1` `to_maxtext` & Kueue `NodeFailures` Deadlock:**
+   - Because `2x2x1` spot nodes on `bodaborg-tpu7x-nap` preempted frequently during the 2.2-hour `397B` CPU conversion, ran `--tm-convert-only` on the lower-contention `2x2x2` pool (`7,930.76s`), promoted `orbax_ckpt` + Step 1/2 JSONs to `run_v2-v7x-qwen3.5-397b-a17b-2x2x2x1-r1`, and ran standalone Step 3 (`1,952.53s`, `unset SKIP_FAILED_RESULTS`) on `2x2x1`.
+   - When a JobSet on `bodaborg-tpu7x-nap` is evicted with `NodeFailures`, Kueue can remain stuck (`Admitted: False`) on the old `check-capacity-prov-1` `ProvisioningRequest`; deleting and recreating the JobSet allocates a fresh `ProvisioningRequest` immediately.
+
+---
+
+## 8. Command Cheat Sheet (`v2` Verification, Sheet Sync & Cluster Ops)
+
+```bash
+cd /usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3
+PY=/usr/local/google/home/mesakh/Documents/mesakh/py312/bin
+
+# 1. Verify clean cluster state across all 3 GKE clusters (all should show No resources found)
+./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v7x --mode status
+./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v6e --mode status
+./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v5e --mode status
+
+# 2. Run formatting, lint (10.00/10), unit tests (96 passed), and shell checks
+$PY/pyink --pyink-indentation=2 --line-length=120 --check checkpoint_load_benchmark/bench/*.py checkpoint_load_benchmark/scripts/build_sheet_v2.py
+PYTHONPATH=checkpoint_load_benchmark $PY/pylint --rcfile=pylintrc checkpoint_load_benchmark/bench/*.py checkpoint_load_benchmark/scripts/build_sheet_v2.py
+$PY/pytest -q checkpoint_load_benchmark/tests/
+bash -n checkpoint_load_benchmark/scripts/*.sh
+
+# 3. Re-mirror GCS JSONs, re-sync Google Sheet v2, and re-run the 10-step live forensic validator
+SCRATCH=/usr/local/google/home/mesakh/.gemini/jetski/brain/f1a7974d-a23a-4dd5-b86c-79af1a906d19/scratch
+$PY/python3 -c "
+import sys; sys.path.insert(0, 'checkpoint_load_benchmark')
+from scripts import run_v2_orchestrator as o
+o.sync_gcs_to_mirror('$SCRATCH/v2_mirror')
+assert o.sync_sheet_v2('$SCRATCH/v2_mirror', '$SCRATCH/v1_mirror', '$SCRATCH/sheet_v2_sync', '1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I')
+"
+$PY/python3 $SCRATCH/generate_final_reports.py --apply-readme --git-commit "$(git rev-parse --short HEAD)"
+$PY/python3 -u $SCRATCH/validate_live_sheet_v2.py
+$PY/python3 $SCRATCH/check_all_sheet_invariants.py
+
+# 4. Build & upload a fresh committed code tarball + CODE_VERSION.json before any new cluster run
+$PY/python3 checkpoint_load_benchmark/scripts/build_code_tarball.py \
+  --out /tmp/mesa_code_bundle \
+  --upload gs://mesa-maxtext/mesa-bench-v2/code
+```
+
+---
+
+## 9. Where Everything Lives (`v2` Locations & Local Caches)
+
+| Resource | Exact Location |
+| :--- | :--- |
+| **Git Repository & Branch** | `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3` (`docs/checkpoint-load-benchmark`) |
+| **Executive Summary (`v2`)** | [`checkpoint_load_benchmark/reports/benchmark_v2_summary.md`](reports/benchmark_v2_summary.md) |
+| **Live Progress & Event Log** | [`checkpoint_load_benchmark/PROGRESS_LOG.md`](PROGRESS_LOG.md) |
+| **Design & Backlog (`T0.1–T5.3`)** | [`checkpoint_load_benchmark/plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) |
+| **Persistent `gpaste` URL Cache** | [`checkpoint_load_benchmark/configs/gpaste_log_urls.json`](configs/gpaste_log_urls.json) |
+| **Live Google Sheet `v2` (`11` Tabs)** | [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) (`gsheets` CLI: `/google/bin/releases/gemini-agents-gsheets/gsheets`) |
+| **GCS Committed Code Bundle** | `gs://mesa-maxtext/mesa-bench-v2/code/{maxtext_lance_prs.tar.gz,CODE_VERSION.json}` |
+| **GCS Regional Data & Result Buckets** | `gs://mesa-maxtext-{us-central1,southamerica-west1,europe-west4}/mesa-bench-v2/{hf_cache,bf16_cache,step1,step1b,runs,queue}/` |
+| **Local `v2` JSON Mirror (`1,291` files)** | `/usr/local/google/home/mesakh/.gemini/jetski/brain/f1a7974d-a23a-4dd5-b86c-79af1a906d19/scratch/v2_mirror` |
+| **Local `v1` JSON Mirror (`259` files)** | `/usr/local/google/home/mesakh/.gemini/jetski/brain/f1a7974d-a23a-4dd5-b86c-79af1a906d19/scratch/v1_mirror` |
+| **Local Synced Sheet CSVs & Batches** | `/usr/local/google/home/mesakh/.gemini/jetski/brain/f1a7974d-a23a-4dd5-b86c-79af1a906d19/scratch/sheet_v2_sync/{summary,step1_downloads,stages_safetensors_dynamic,stages_to_maxtext,runs}.csv` |
+| **Live Sheet Forensic Validators** | `/usr/local/google/home/mesakh/.gemini/jetski/brain/f1a7974d-a23a-4dd5-b86c-79af1a906d19/scratch/{validate_live_sheet_v2.py,check_all_sheet_invariants.py,generate_final_reports.py}` |
+| **Python 3.12 Virtualenv** | `/usr/local/google/home/mesakh/Documents/mesakh/py312/bin/python3` |
 
 ---
 
