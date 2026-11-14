@@ -677,6 +677,38 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.ici_context_parallelism, 4)
     self.assertFalse(config.context_parallel_load_balance)
 
+  def test_tpu_ulysses_config_validation_accepts_fewer_kv_heads_than_context_ranks(
+      self,
+  ):
+    """1 (MQA) or 2 KV heads at context 4 or 8 are repeated across the context ranks."""
+    for base_num_kv_heads in (1, 2):
+      for ici_context_parallelism in (4, 8):
+        with self.subTest(
+            base_num_kv_heads=base_num_kv_heads,
+            ici_context_parallelism=ici_context_parallelism,
+        ):
+          argv = [
+              "",
+              _BASE_CONFIG_PATH,
+              "run_name=test",
+              "attention=flash",
+              "use_tokamax_splash=True",
+              "use_jax_splash=False",
+              "context_parallel_strategy=ulysses",
+              "context_parallel_load_balance=False",
+              f"ici_context_parallelism={ici_context_parallelism}",
+              "base_num_query_heads=32",
+              f"base_num_kv_heads={base_num_kv_heads}",
+              "hardware=tpu",
+              "packing=True",
+              "skip_jax_distributed_system=True",
+          ]
+          mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+          with unittest.mock.patch("jax.devices", return_value=mock_devices):
+            config = pyconfig.initialize(argv)
+          self.assertEqual(config.num_kv_heads, base_num_kv_heads)
+          self.assertEqual(config.context_parallel_strategy, "ulysses")
+
   def test_tpu_ulysses_config_validation_accepts_packing(self):
     argv = [
         "",
@@ -738,9 +770,13 @@ class ConfigTest(absltest.TestCase):
     ]
     cases = [
         (["context_parallel_load_balance=True"], ["context_parallel_load_balance=False"], "load_balance"),
-        (["base_num_kv_heads=1"], [], "MQA"),
         (["base_num_query_heads=18"], [], "requires num_query_heads"),
         (["base_num_kv_heads=10"], [], "requires num_kv_heads"),
+        (
+            ["base_num_query_heads=24", "base_num_kv_heads=6"],
+            [],
+            r"requires num_kv_heads \(6\).*or to divide it",
+        ),
         (["attention_type=mla"], [], "global causal attention"),
         (["attention_type=local_sliding", "sliding_window_size=128"], [], "global causal attention"),
         (["attention_type=chunk", "chunk_attn_window_size=128"], [], "global causal attention"),
@@ -2151,6 +2187,20 @@ class Qwen3StackConfigValidationTest(absltest.TestCase):
     config = rl_config("remat_policy=custom", "sa_context_split_device_heads=2")
     self.assertIn("context_device", config.tensors_on_device)
     self.assertIn("context_offload", config.tensors_to_offload)
+
+    config_qkv_dev = rl_config("remat_policy=custom", "ulysses_qkv=device")
+    self.assertIn("ulysses_qkv", config_qkv_dev.tensors_on_device)
+    self.assertNotIn("ulysses_qkv", config_qkv_dev.tensors_to_offload)
+
+    config_qkv_off = rl_config("remat_policy=custom", "ulysses_qkv=offload")
+    self.assertNotIn("ulysses_qkv", config_qkv_off.tensors_on_device)
+    self.assertIn("ulysses_qkv", config_qkv_off.tensors_to_offload)
+
+    self.assertEqual(rl_config().ulysses_pin_row_major_layout, "auto")
+    for mode in ("auto", "always", "never"):
+      self.assertEqual(rl_config(f"ulysses_pin_row_major_layout={mode}").ulysses_pin_row_major_layout, mode)
+    with self.assertRaises(pydantic.ValidationError):
+      rl_config("ulysses_pin_row_major_layout=invalid")
 
 
 class MMapDatasetConfigTest(absltest.TestCase):

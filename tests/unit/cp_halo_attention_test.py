@@ -160,32 +160,34 @@ class CpHaloConfigAndValidationTest(parameterized.TestCase):
     self.assertEqual(config.local_context_parallel_strategy, "halo")
 
   def test_pyconfig_accepts_ulysses_global_with_halo_local_mqa(self):
-    argv = [
-        "",
-        test_helpers.get_test_config_path(),
-        "run_name=test_ulysses_halo",
-        "attention=flash",
-        "use_tokamax_splash=True",
-        "use_jax_splash=False",
-        "context_parallel_strategy=ulysses",
-        "local_context_parallel_strategy=halo",
-        "context_parallel_load_balance=False",
-        "sliding_window_size=128",
-        "base_num_query_heads=8",
-        "base_num_kv_heads=1",
-        "global_num_kv_heads=4",
-        "ici_context_parallelism=4",
-        "hardware=tpu",
-        "packing=False",
-        "dataset_type=synthetic",
-        "skip_jax_distributed_system=True",
-    ]
-    mock_devices = [mock.MagicMock(slice_index=0) for _ in range(8)]
-    with mock.patch("jax.devices", return_value=mock_devices):
-      config = pyconfig.initialize(argv)
+    for global_num_kv_heads in (1, 4):
+      with self.subTest(global_num_kv_heads=global_num_kv_heads):
+        argv = [
+            "",
+            test_helpers.get_test_config_path(),
+            "run_name=test_ulysses_halo",
+            "attention=flash",
+            "use_tokamax_splash=True",
+            "use_jax_splash=False",
+            "context_parallel_strategy=ulysses",
+            "local_context_parallel_strategy=halo",
+            "context_parallel_load_balance=False",
+            "sliding_window_size=128",
+            "base_num_query_heads=8",
+            "base_num_kv_heads=1",
+            f"global_num_kv_heads={global_num_kv_heads}",
+            "ici_context_parallelism=4",
+            "hardware=tpu",
+            "packing=False",
+            "dataset_type=synthetic",
+            "skip_jax_distributed_system=True",
+        ]
+        mock_devices = [mock.MagicMock(slice_index=0) for _ in range(8)]
+        with mock.patch("jax.devices", return_value=mock_devices):
+          config = pyconfig.initialize(argv)
 
-    self.assertEqual(config.context_parallel_strategy, "ulysses")
-    self.assertEqual(config.local_context_parallel_strategy, "halo")
+        self.assertEqual(config.context_parallel_strategy, "ulysses")
+        self.assertEqual(config.local_context_parallel_strategy, "halo")
 
   def test_pyconfig_rejects_invalid_local_context_parallel_configs(self):
     base_args = [
@@ -239,11 +241,12 @@ class CpHaloConfigAndValidationTest(parameterized.TestCase):
                 "context_parallel_strategy=ulysses",
                 "context_parallel_load_balance=False",
                 "packing=False",
+                "base_num_query_heads=24",
                 "base_num_kv_heads=1",
-                "global_num_kv_heads=1",
+                "global_num_kv_heads=6",
             ],
             ["context_parallel_strategy=ring"],
-            "MQA",
+            r"requires num_kv_heads \(6\).*or to divide it",
         ),
     ]
     mock_devices = [mock.MagicMock(slice_index=0) for _ in range(8)]
@@ -301,8 +304,8 @@ class CpHaloConfigAndValidationTest(parameterized.TestCase):
         model_mode=common_types.MODEL_MODE_PREFILL,
         rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
     )
-    local_attention.mesh = types.SimpleNamespace(shape={"context": 4})
-    global_attention.mesh = types.SimpleNamespace(shape={"context": 4})
+    local_attention.mesh = types.SimpleNamespace(shape={"context": 3})
+    global_attention.mesh = types.SimpleNamespace(shape={"context": 3})
     with mock.patch.dict(
         cfg.get_keys(),
         {
@@ -311,7 +314,7 @@ class CpHaloConfigAndValidationTest(parameterized.TestCase):
         },
     ):
       local_attention.init_kv_w(inputs_kv_shape=inputs_shape)
-      with self.assertRaisesRegex(ValueError, r"num_kv_heads \(2\).*must be divisible by 4"):
+      with self.assertRaisesRegex(ValueError, r"num_kv_heads \(2\).*must be divisible by 3"):
         global_attention.init_kv_w(inputs_kv_shape=inputs_shape)
 
   def test_tpu_halo_flash_attention_rejects_unsupported_runtime_features(self):
