@@ -1960,7 +1960,7 @@ class RoutedMoE(nnx.Module):
       group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
 
       if self.config.moe_use_direct_token_gather:
-        if self.config.moe_tc_permute:
+        if getattr(self.config, "moe_tc_permute", False):
           if is_qarray or self.get_expert_parallelism_size() != 1:
             raise ValueError(
                 "moe_tc_permute=True requires unquantized activations and expert parallelism = 1,"
@@ -2114,7 +2114,7 @@ class RoutedMoE(nnx.Module):
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
       )
-    elif self.config.moe_tc_combine:
+    elif getattr(self.config, "moe_tc_combine", False):
       if self.get_expert_parallelism_size() != 1:
         raise ValueError(
             f"moe_tc_combine=True requires expert parallelism = 1, got {self.get_expert_parallelism_size()}."

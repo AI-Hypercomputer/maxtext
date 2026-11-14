@@ -390,14 +390,11 @@ def kernel_supported(
       dtype == jnp.bfloat16
       and hidden_dim > 0
       and hidden_dim % _LANES == 0
-      and 0 < k <= _LANES
+      and 0 < k <= _LANES <= block_tokens <= num_tokens <= _MAX_TOKENS
       and align >= 8
       and (align & (align - 1)) == 0
-      and block_tokens >= _LANES
       and (block_tokens & (block_tokens - 1)) == 0
-      and num_tokens >= block_tokens
       and num_tokens % block_tokens == 0
-      and num_tokens <= _MAX_TOKENS
       and 0 < num_rows <= num_tokens * k
       and num_rows % align == 0
       and expert_chunks >= 1
@@ -515,9 +512,7 @@ def _build_dma_table(sort_idx, group_sizes, num_tokens, k, block_tokens, align=8
   aligned_win_start = jnp.bitwise_and(range_start, -align)
   aligned_win_end = jnp.bitwise_and(range_end + (align - 1), -align)
   active_win_end = jnp.where(nonempty, aligned_win_end, -1)
-  prev_covered_end = jnp.pad(
-      lax.cummax(active_win_end, axis=2)[:, :, :-1], ((0, 0), (0, 0), (1, 0)), constant_values=-1
-  )
+  prev_covered_end = jnp.pad(lax.cummax(active_win_end, axis=2)[:, :, :-1], ((0, 0), (0, 0), (1, 0)), constant_values=-1)
   dma_hbm_start = jnp.maximum(aligned_win_start, prev_covered_end)
   dma_num_rows = jnp.where(nonempty, jnp.maximum(aligned_win_end - dma_hbm_start, 0), 0)
   dma_vmem_offset = jnp.cumsum(dma_num_rows, axis=2) - dma_num_rows
@@ -800,9 +795,7 @@ def _decode_row_info(
     token = token + 65536.0 * lane(_INFO_TOKEN_HI)
   row_topk_slot = lane(_INFO_TOPK).astype(jnp.int32)
   row_token_in_block = token.astype(jnp.int32) - block_start_token
-  belongs_to_current_block = (
-      (row_token_in_block >= 0) & (row_token_in_block < block_tokens) & (buf_row_idx < packed_rows)
-  )
+  belongs_to_current_block = (row_token_in_block >= 0) & (row_token_in_block < block_tokens) & (buf_row_idx < packed_rows)
   if expert_chunk is not None:
     belongs_to_current_block &= lane(_INFO_EXPERT_CHUNK).astype(jnp.int32) == expert_chunk
   return jnp.where(belongs_to_current_block, row_token_in_block, -1), row_topk_slot
@@ -1627,7 +1620,7 @@ def _resolve_config(
     *,
     sort_idx_shape: tuple[int, ...] | None = None,
     block_tokens: int | None = None,
-    interpret: bool | pltpu.InterpretParams | None = None,
+    interpret: bool | pltpu.InterpretParams = False,
     align: int = 8,
     split_weights: bool = False,
     default_block_tokens: int = DEFAULT_COMBINE_BLOCK_TOKENS,
@@ -1717,12 +1710,7 @@ def _resolve_config(
         f" num_tokens={num_tokens}, k={k}, block_tokens={block_tokens}, expert_chunks={expert_chunks},"
         f" col_chunks={col_chunks}."
     )
-  if interpret is None:
-    abstract_mesh = jax.sharding.get_abstract_mesh()
-    mesh_platform = getattr(getattr(abstract_mesh, "abstract_device", None), "platform", None)
-    on_tpu = jax.default_backend() == "tpu" or mesh_platform == "tpu"
-    interpret = False if on_tpu else pltpu.InterpretParams()
-  elif interpret is True:  # dynamic-size DMAs require the Mosaic TPU interpreter
+  if interpret is True:  # dynamic-size DMAs require the Mosaic TPU interpreter
     interpret = pltpu.InterpretParams()
   return _Config(
       k,
@@ -1784,9 +1772,7 @@ _combine_vjp.defvjp(_combine_fwd, _combine_bwd)
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(4,))
 def _unpermute_sum_vjp(x, sort_idx, group_sizes, dma_table, cfg):
-  return _gather_call(
-      x, None, dma_table, _row_info(sort_idx, group_sizes, cfg), cfg=cfg, name="moe_unpermute_sum_fwd"
-  )
+  return _gather_call(x, None, dma_table, _row_info(sort_idx, group_sizes, cfg), cfg=cfg, name="moe_unpermute_sum_fwd")
 
 
 def _unpermute_sum_fwd(x, sort_idx, group_sizes, dma_table, cfg):
@@ -1814,7 +1800,7 @@ def combine(
     block_tokens: int | None = None,
     expert_chunks: int = 1,
     col_chunks: int = 1,
-    interpret: bool | pltpu.InterpretParams | None = None,
+    interpret: bool | pltpu.InterpretParams = False,
     align: int = 8,
     vmem_limit_bytes: int | None = None,
 ) -> jax.Array:
@@ -1833,7 +1819,7 @@ def combine(
     block_tokens: tokens per grid step (default: 256, power of two >= 128).
     expert_chunks: process the experts in this many chunks per token block (default: 1 = single pass).
     col_chunks: process the hidden dimension in this many column chunks (default: 1 = single pass).
-    interpret: run under the Mosaic TPU interpreter (default: False on TPU, `pltpu.InterpretParams()` off-TPU).
+    interpret: run under the Mosaic TPU interpreter (tests only; default: False, compiled for TPU).
     align: DMA / VMEM row alignment, a power of two >= 8.
     vmem_limit_bytes: maximum per-kernel VMEM footprint in bytes (default: 95% of the chip's VMEM, see
       `default_vmem_limit_bytes`).
@@ -1916,9 +1902,7 @@ def _permute_fwd(x, sort_idx, group_sizes, dma_table, cfg):
 def _permute_bwd(cfg, residuals, grad_out):
   """Backward pass for `_permute_vjp`, summing the `K` expert gradients per token via `_gather_call`."""
   sort_idx, group_sizes, dma_table = residuals
-  grad_x = _gather_call(
-      grad_out, None, dma_table, _row_info(sort_idx, group_sizes, cfg), cfg=cfg, name="moe_permute_bwd"
-  )
+  grad_x = _gather_call(grad_out, None, dma_table, _row_info(sort_idx, group_sizes, cfg), cfg=cfg, name="moe_permute_bwd")
   return grad_x, None, None, None
 
 
@@ -1934,7 +1918,7 @@ def permute(
     block_tokens: int | None = None,
     expert_chunks: int = 1,
     col_chunks: int = 1,
-    interpret: bool | pltpu.InterpretParams | None = None,
+    interpret: bool | pltpu.InterpretParams = False,
     align: int = 8,
     vmem_limit_bytes: int | None = None,
 ) -> jax.Array:
@@ -1953,7 +1937,7 @@ def permute(
     block_tokens: tokens per grid step (default: 512, power of two >= 128).
     expert_chunks: process the experts in this many chunks per token block (default: 1 = single pass).
     col_chunks: process the hidden dimension in this many column chunks (default: 1 = single pass).
-    interpret: run under the Mosaic TPU interpreter (default: False on TPU, `pltpu.InterpretParams()` off-TPU).
+    interpret: run under the Mosaic TPU interpreter (tests only; default: False, compiled for TPU).
     align: DMA / VMEM row alignment, a power of two >= 8.
     vmem_limit_bytes: maximum per-kernel VMEM footprint in bytes (default: 95% of the chip's VMEM, see
       `default_vmem_limit_bytes`).

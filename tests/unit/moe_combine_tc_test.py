@@ -141,9 +141,7 @@ class MoeCombineTest(parameterized.TestCase):
   )
   def test_fwd_bwd(self, seed, num_tokens, k, num_groups, hidden_dim, block_tokens, skew, align=8):
     x, sort_idx, weights, group_sizes, dy = _problem(seed, num_tokens, k, num_groups, hidden_dim, skew)
-    combine_fn = functools.partial(
-        moe_combine_tc.combine, block_tokens=block_tokens, interpret=_interpret(), align=align
-    )
+    combine_fn = functools.partial(moe_combine_tc.combine, block_tokens=block_tokens, interpret=_interpret(), align=align)
     self._check_combine(combine_fn, x, sort_idx, weights, group_sizes, dy)
 
   @parameterized.named_parameters(("pure_local", 0.0), ("mixed", 0.02))
@@ -275,9 +273,7 @@ class MoeCombineTest(parameterized.TestCase):
       ("align8_384tok_k2_g16", 384, 2, 16, 128, 128, 8),
       ("align16_512tok_k1_g180", 512, 1, 180, 128, 128, 16),
   )
-  def test_three_or_more_experts_sharing_single_granule(
-      self, num_tokens, k, num_groups, hidden_dim, block_tokens, align
-  ):
+  def test_three_or_more_experts_sharing_single_granule(self, num_tokens, k, num_groups, hidden_dim, block_tokens, align):
     """When >= 3 experts in a token block start inside one 8/16-row granule, that granule is staged at most once."""
     x, sort_idx, weights, group_sizes, dy = _problem(42, num_tokens, k, num_groups, hidden_dim, skew=0.0)
     # pylint: disable=protected-access
@@ -295,9 +291,7 @@ class MoeCombineTest(parameterized.TestCase):
     for block_idx in range(num_blocks):
       staged = [v for v in np.concatenate([head_hbm[block_idx], tail_hbm[block_idx]]) if v >= 0]
       self.assertEqual(len(staged), len(set(staged)))
-    combine_fn = functools.partial(
-        moe_combine_tc.combine, block_tokens=block_tokens, interpret=_interpret(), align=align
-    )
+    combine_fn = functools.partial(moe_combine_tc.combine, block_tokens=block_tokens, interpret=_interpret(), align=align)
     self._check_combine(combine_fn, x, sort_idx, weights, group_sizes, dy)
     permute_fn = functools.partial(
         moe_combine_tc.permute, num_experts_per_tok=k, block_tokens=block_tokens, interpret=_interpret(), align=align
@@ -569,9 +563,7 @@ class MoeCombineTest(parameterized.TestCase):
     # pylint: disable=protected-access
     table = moe_combine_tc._build_dma_table(sort_idx, group_sizes, num_tokens, k, block_tokens, expert_chunks=2)
     with mock.patch.object(moe_combine_tc, "_MAX_HISTOGRAM_ONEHOT_BYTES", 16 * 1024):
-      chunked_table = moe_combine_tc._build_dma_table(
-          sort_idx, group_sizes, num_tokens, k, block_tokens, expert_chunks=2
-      )
+      chunked_table = moe_combine_tc._build_dma_table(sort_idx, group_sizes, num_tokens, k, block_tokens, expert_chunks=2)
     # pylint: enable=protected-access
     np.testing.assert_array_equal(np.asarray(table), np.asarray(chunked_table))
 
@@ -642,9 +634,7 @@ class PrivateFunctionsTest(parameterized.TestCase):
     self.assertEqual(acc_gather - base_gather, block_tokens * hidden_dim * 4)
 
     # `_required_vmem_bytes` returns `max(fwd_bytes, bwd_bytes)` for combine or permute.
-    req_combine = moe_combine_tc._required_vmem_bytes(
-        block_tokens, 4, 16, hidden_dim, itemsize, is_combine=True
-    )
+    req_combine = moe_combine_tc._required_vmem_bytes(block_tokens, 4, 16, hidden_dim, itemsize, is_combine=True)
     bwd_combine = moe_combine_tc._combine_bwd_vmem_bytes(
         moe_combine_tc._buffer_rows(block_tokens, 4, 16), block_tokens, hidden_dim, itemsize
     )
@@ -806,9 +796,7 @@ class PrivateFunctionsTest(parameterized.TestCase):
 
     # Multiplying a binary `{0, 1}` bf16 indicator matrix by the 3 bf16 parts matches the f32 dot product.
     indicator_bf16 = jnp.asarray(rng.integers(0, 2, size=(32, 64)), dtype=jnp.bfloat16)
-    dot_from_parts = sum(
-        jnp.dot(indicator_bf16, part, preferred_element_type=jnp.float32) for part in parts_3
-    )
+    dot_from_parts = sum(jnp.dot(indicator_bf16, part, preferred_element_type=jnp.float32) for part in parts_3)
     dot_ref = jnp.dot(indicator_bf16.astype(jnp.float32), val_f32, precision=jax.lax.Precision.HIGHEST)
     np.testing.assert_allclose(np.asarray(dot_from_parts), np.asarray(dot_ref), rtol=1e-6, atol=1e-5)
 

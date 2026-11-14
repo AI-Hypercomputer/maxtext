@@ -7360,6 +7360,9 @@ class MaxTextConfig(
       if getattr(self, chunk_field) < 1:
         raise ValueError(f"`{chunk_field}` must be >= 1, got {getattr(self, chunk_field)}.")
 
+    if (self.moe_tc_combine or self.moe_tc_permute) and self.hardware != "tpu":
+      raise ValueError("`moe_tc_combine` and `moe_tc_permute` are only supported on TPU (`hardware=tpu`).")
+
     if self.moe_tc_combine:
       if not self.sparse_matmul:
         raise ValueError("`moe_tc_combine=True` requires `sparse_matmul=True`.")

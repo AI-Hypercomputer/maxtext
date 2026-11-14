@@ -85,6 +85,15 @@ class PyconfigTest(unittest.TestCase):
           moe_use_direct_token_gather=False,
       )
 
+  def test_moe_tc_kernels_require_tpu(self):
+    with self.assertRaisesRegex(ValueError, "only supported on TPU"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine=True,
+          sparse_matmul=True,
+          hardware="gpu",
+      )
+
   def test_moe_tc_block_tokens_and_chunks_validation(self):
     with self.assertRaisesRegex(ValueError, "`moe_tc_combine_block_tokens` must be a power of two >= 128"):
       pyconfig.initialize(
