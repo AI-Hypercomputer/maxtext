@@ -2586,6 +2586,14 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
   )
   context: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the attention context.")
+  ulysses_qkv: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for Q/K/V after the Ulysses all-to-all (context_parallel_strategy='ulysses'). Saving them"
+          " (device or offload) keeps the backward from replaying the all-to-all; costs the exchanged Q/K/V per"
+          " attention layer."
+      ),
+  )
   mlpwi: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the first MLP layer's intermediate output.",
@@ -5982,6 +5990,7 @@ class MaxTextConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "ulysses_qkv",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
@@ -6974,10 +6983,13 @@ class MaxTextConfig(
       )
       if ulysses_num_kv_heads == 1:
         raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
-      if ulysses_num_kv_heads % context_parallel_size != 0:
+      # Fewer KV heads than context ranks is fine when the ranks are a multiple of them: each KV head is then
+      # repeated across the ranks whose query heads use it (ulysses_attention.repeat_kv_heads_for_ulysses).
+      if ulysses_num_kv_heads % context_parallel_size != 0 and context_parallel_size % ulysses_num_kv_heads != 0:
         raise ValueError(
             "TPU Ulysses attention requires num_kv_heads "
-            f"({ulysses_num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+            f"({ulysses_num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size}) or to "
+            "divide it."
         )
     self._validate_usp_context_parallelism()
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
@@ -7940,6 +7952,7 @@ class RLConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "ulysses_qkv",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
