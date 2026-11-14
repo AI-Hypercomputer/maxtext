@@ -229,6 +229,18 @@ def reformat_prompt(
     return prompt
 
 
+def reformatted_prompt_needs_bos(model_name):
+  """Whether the BOS token id has to be prepended to the tokens of a `reformat_prompt` output.
+
+  The chat formats written by `reformat_prompt` either spell out their BOS token (Gemma 4's `<bos>`, Llama 4's
+  `<|begin_of_text|>`) or have none (Qwen3). Gemma 3's format starts with `<bos>` as well, but it is left to the token
+  ids because the Gemma 3 SentencePiece tokenizer does not parse `<bos>` written in text. Callers that skip the
+  tokenizer's own BOS (decoding with a chat-template tokenizer, multimodal SFT) must add it back: without BOS, Gemma 3
+  output is unreliable, e.g. an immediate `<end_of_turn>` (an empty answer).
+  """
+  return _get_vision_block(model_name) is not None and _get_decoder_block(model_name) == "gemma3"
+
+
 def reformat_response(response, model_name):
   """Reformat response for different models."""
   vision_block = _get_vision_block(model_name)
