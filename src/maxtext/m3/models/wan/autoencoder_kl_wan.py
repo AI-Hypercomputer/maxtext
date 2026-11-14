@@ -349,6 +349,103 @@ class ZeroPaddedConv2D(nnx.Module):
     return self.conv(x)
 
 
+def patchify(x: jax.Array, patch_size: Optional[int] = None) -> jax.Array:
+  """Rearrange spatial patches into channels for channel-last (B, F, H, W, C) video tensors."""
+  if patch_size is None or patch_size == 1:
+    return x
+  b, f, h, w, c = x.shape
+  x = x.reshape(b, f, h // patch_size, patch_size, w // patch_size, patch_size, c)
+  # Match diffusers einops: "b c f (h q) (w r) -> b (c r q) f h w" (width patch r before height patch q).
+  x = x.transpose(0, 1, 2, 4, 6, 5, 3)
+  return x.reshape(b, f, h // patch_size, w // patch_size, c * patch_size * patch_size)
+
+
+def unpatchify(x: jax.Array, patch_size: Optional[int] = None) -> jax.Array:
+  """Rearrange channels back into spatial patches for channel-last (B, F, H, W, C) video tensors."""
+  if patch_size is None or patch_size == 1:
+    return x
+  b, f, h, w, c_patched = x.shape
+  c = c_patched // (patch_size * patch_size)
+  x = x.reshape(b, f, h, w, c, patch_size, patch_size)
+  # Inverse of patchify: "b (c r q) f h w -> b c f (h q) (w r)".
+  x = x.transpose(0, 1, 2, 6, 3, 5, 4)
+  return x.reshape(b, f, h * patch_size, w * patch_size, c)
+
+
+class AvgDown3D(nnx.Module):
+  """3D average-pooling residual shortcut for Wan 2.2 encoder downblocks."""
+
+  def __init__(
+      self,
+      in_channels: int,
+      out_channels: int,
+      factor_t: int,
+      factor_s: int = 1,
+  ):
+    self.in_channels = in_channels
+    self.out_channels = out_channels
+    self.factor_t = factor_t
+    self.factor_s = factor_s
+    self.factor = self.factor_t * self.factor_s * self.factor_s
+    assert in_channels * self.factor % out_channels == 0
+    self.group_size = in_channels * self.factor // out_channels
+
+  def __call__(self, x: jax.Array) -> jax.Array:
+    pad_t = (self.factor_t - x.shape[1] % self.factor_t) % self.factor_t
+    if pad_t > 0:
+      x = jnp.pad(x, ((0, 0), (pad_t, 0), (0, 0), (0, 0), (0, 0)))
+    b, t, h, w, c = x.shape
+    x = x.reshape(
+        b,
+        t // self.factor_t,
+        self.factor_t,
+        h // self.factor_s,
+        self.factor_s,
+        w // self.factor_s,
+        self.factor_s,
+        c,
+    )
+    x = x.transpose(0, 1, 3, 5, 7, 2, 4, 6)
+    x = x.reshape(
+        b,
+        t // self.factor_t,
+        h // self.factor_s,
+        w // self.factor_s,
+        self.out_channels,
+        self.group_size,
+    )
+    return jnp.mean(x, axis=-1)
+
+
+class DupUp3D(nnx.Module):
+  """3D duplicate-upsampling residual shortcut for Wan 2.2 decoder upblocks."""
+
+  def __init__(
+      self,
+      in_channels: int,
+      out_channels: int,
+      factor_t: int,
+      factor_s: int = 1,
+  ):
+    self.in_channels = in_channels
+    self.out_channels = out_channels
+    self.factor_t = factor_t
+    self.factor_s = factor_s
+    self.factor = self.factor_t * self.factor_s * self.factor_s
+    assert out_channels * self.factor % in_channels == 0
+    self.repeats = out_channels * self.factor // in_channels
+
+  def __call__(self, x: jax.Array, first_chunk: bool = False) -> jax.Array:
+    b, t, h, w, _ = x.shape
+    x = jnp.repeat(x, self.repeats, axis=-1)
+    x = x.reshape(b, t, h, w, self.out_channels, self.factor_t, self.factor_s, self.factor_s)
+    x = x.transpose(0, 1, 5, 2, 6, 3, 7, 4)
+    x = x.reshape(b, t * self.factor_t, h * self.factor_s, w * self.factor_s, self.out_channels)
+    if first_chunk:
+      x = x[:, self.factor_t - 1 :, :, :, :]
+    return x
+
+
 class WanResample(nnx.Module):
   """Spatial/temporal up- or down-sampling layer for the VAE."""
 
@@ -357,6 +454,7 @@ class WanResample(nnx.Module):
       dim: int,
       mode: str,
       rngs: nnx.Rngs,
+      upsample_out_dim: Optional[int] = None,
       sharding: Sharding | None = None,
       dtype: jnp.dtype = jnp.float32,
       weights_dtype: jnp.dtype = jnp.float32,
@@ -366,13 +464,15 @@ class WanResample(nnx.Module):
     self.mode = mode
     self.dtype = dtype
     self.time_conv = nnx.data(None)
+    if upsample_out_dim is None:
+      upsample_out_dim = dim // 2
 
     if mode == "upsample2d":
       self.resample = nnx.Sequential(
           WanUpsample(scale_factor=(2.0, 2.0), method="nearest"),
           nnx.Conv(
               dim,
-              dim // 2,
+              upsample_out_dim,
               kernel_size=(3, 3),
               padding="SAME",
               use_bias=True,
@@ -389,7 +489,7 @@ class WanResample(nnx.Module):
           WanUpsample(scale_factor=(2.0, 2.0), method="nearest"),
           nnx.Conv(
               dim,
-              dim // 2,
+              upsample_out_dim,
               kernel_size=(3, 3),
               padding="SAME",
               use_bias=True,
@@ -803,12 +903,153 @@ class WanUpBlock(nnx.Module):
           )
       ]
 
-  def __call__(self, x: jax.Array, feat_cache=None, feat_idx=0):
+  def __call__(self, x: jax.Array, feat_cache=None, feat_idx=0, first_chunk: bool = False):
+    del first_chunk
     for resnet in self.resnets:
       x, feat_cache, feat_idx = resnet(x, feat_cache, feat_idx)
 
     if self.upsamplers is not None:
       x, feat_cache, feat_idx = self.upsamplers[0](x, feat_cache, feat_idx)
+    return x, feat_cache, feat_idx
+
+
+class WanResidualDownBlock(nnx.Module):
+  """Wan 2.2 encoder downblock with an AvgDown3D residual shortcut."""
+
+  def __init__(
+      self,
+      in_dim: int,
+      out_dim: int,
+      dropout: float,
+      num_res_blocks: int,
+      rngs: nnx.Rngs,
+      temperal_downsample: bool = False,
+      downsample: bool = False,
+      non_linearity: str = "silu",
+      sharding: Sharding | None = None,
+      dtype: jnp.dtype = jnp.float32,
+      weights_dtype: jnp.dtype = jnp.float32,
+      precision: jax.lax.Precision = None,
+  ):
+    self.avg_shortcut = AvgDown3D(
+        in_dim,
+        out_dim,
+        factor_t=2 if temperal_downsample else 1,
+        factor_s=2 if downsample else 1,
+    )
+    resnets = []
+    current_dim = in_dim
+    for _ in range(num_res_blocks):
+      resnets.append(
+          WanResidualBlock(
+              in_dim=current_dim,
+              out_dim=out_dim,
+              dropout=dropout,
+              non_linearity=non_linearity,
+              rngs=rngs,
+              sharding=sharding,
+              dtype=dtype,
+              weights_dtype=weights_dtype,
+              precision=precision,
+          )
+      )
+      current_dim = out_dim
+    self.resnets = nnx.data(resnets)
+
+    if downsample:
+      mode = "downsample3d" if temperal_downsample else "downsample2d"
+      self.downsampler = WanResample(
+          dim=out_dim,
+          mode=mode,
+          rngs=rngs,
+          sharding=sharding,
+          dtype=dtype,
+          weights_dtype=weights_dtype,
+          precision=precision,
+      )
+    else:
+      self.downsampler = nnx.data(None)
+
+  def __call__(self, x: jax.Array, feat_cache=None, feat_idx=0):
+    x_copy = x
+    for resnet in self.resnets:
+      x, feat_cache, feat_idx = resnet(x, feat_cache, feat_idx)
+    if self.downsampler is not None:
+      x, feat_cache, feat_idx = self.downsampler(x, feat_cache, feat_idx)
+    return x + self.avg_shortcut(x_copy), feat_cache, feat_idx
+
+
+class WanResidualUpBlock(nnx.Module):
+  """Wan 2.2 decoder upblock with a DupUp3D residual shortcut."""
+
+  def __init__(
+      self,
+      in_dim: int,
+      out_dim: int,
+      num_res_blocks: int,
+      rngs: nnx.Rngs,
+      dropout: float = 0.0,
+      upsample_mode: Optional[str] = None,
+      non_linearity: str = "silu",
+      sharding: Sharding | None = None,
+      dtype: jnp.dtype = jnp.float32,
+      weights_dtype: jnp.dtype = jnp.float32,
+      precision: jax.lax.Precision = None,
+  ):
+    self.in_dim = in_dim
+    self.out_dim = out_dim
+
+    if upsample_mode is not None:
+      self.avg_shortcut = DupUp3D(
+          in_dim,
+          out_dim,
+          factor_t=2 if upsample_mode == "upsample3d" else 1,
+          factor_s=2,
+      )
+    else:
+      self.avg_shortcut = nnx.data(None)
+
+    resnets = []
+    current_dim = in_dim
+    for _ in range(num_res_blocks + 1):
+      resnets.append(
+          WanResidualBlock(
+              in_dim=current_dim,
+              out_dim=out_dim,
+              dropout=dropout,
+              non_linearity=non_linearity,
+              rngs=rngs,
+              sharding=sharding,
+              dtype=dtype,
+              weights_dtype=weights_dtype,
+              precision=precision,
+          )
+      )
+      current_dim = out_dim
+    self.resnets = nnx.data(resnets)
+
+    if upsample_mode is not None:
+      self.upsampler = WanResample(
+          dim=out_dim,
+          mode=upsample_mode,
+          upsample_out_dim=out_dim,
+          rngs=rngs,
+          sharding=sharding,
+          dtype=dtype,
+          weights_dtype=weights_dtype,
+          precision=precision,
+      )
+    else:
+      self.upsampler = nnx.data(None)
+
+  def __call__(self, x: jax.Array, feat_cache=None, feat_idx=0, first_chunk: bool = False):
+    x_copy = x
+    for resnet in self.resnets:
+      x, feat_cache, feat_idx = resnet(x, feat_cache, feat_idx)
+    if self.upsampler is not None:
+      x, feat_cache, feat_idx = self.upsampler(x, feat_cache, feat_idx)
+    if self.avg_shortcut is not None:
+      x = x + self.avg_shortcut(x_copy, first_chunk=first_chunk)
     return x, feat_cache, feat_idx
 
 
@@ -818,6 +1059,7 @@ class WanEncoder3d(nnx.Module):
   def __init__(
       self,
       rngs: nnx.Rngs,
+      in_channels: int = 3,
       dim: int = 128,
       z_dim: int = 4,
       dim_mult=None,
@@ -826,6 +1068,7 @@ class WanEncoder3d(nnx.Module):
       temperal_downsample=None,
       dropout=0.0,
       non_linearity: str = "silu",
+      is_residual: bool = False,
       sharding: Sharding | None = None,
       dtype: jnp.dtype = jnp.float32,
       weights_dtype: jnp.dtype = jnp.float32,
@@ -840,6 +1083,7 @@ class WanEncoder3d(nnx.Module):
     self.num_res_blocks = num_res_blocks
     self.attn_scales = attn_scales
     self.temperal_downsample = temperal_downsample
+    self.is_residual = is_residual
     self.nonlinearity = get_activation(non_linearity)
 
     # dimensions
@@ -849,7 +1093,7 @@ class WanEncoder3d(nnx.Module):
     # init block
     self.conv_in = WanCausalConv3d(
         rngs=rngs,
-        in_channels=3,
+        in_channels=in_channels,
         out_channels=dims[0],
         kernel_size=3,
         padding=1,
@@ -862,24 +1106,31 @@ class WanEncoder3d(nnx.Module):
     # downsample blocks
     self.down_blocks = []
     for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
-      # residual (+attention) blocks
-      for _ in range(num_res_blocks):
+      if is_residual:
         self.down_blocks.append(
-            WanResidualBlock(
+            WanResidualDownBlock(
                 in_dim=in_dim,
                 out_dim=out_dim,
                 dropout=dropout,
+                num_res_blocks=num_res_blocks,
                 rngs=rngs,
+                temperal_downsample=temperal_downsample[i] if i != len(dim_mult) - 1 else False,
+                downsample=(i != len(dim_mult) - 1),
+                non_linearity=non_linearity,
                 sharding=sharding,
                 dtype=dtype,
                 weights_dtype=weights_dtype,
                 precision=precision,
             )
         )
-        if scale in attn_scales:
+      else:
+        # residual (+attention) blocks
+        for _ in range(num_res_blocks):
           self.down_blocks.append(
-              WanAttentionBlock(
-                  dim=out_dim,
+              WanResidualBlock(
+                  in_dim=in_dim,
+                  out_dim=out_dim,
+                  dropout=dropout,
                   rngs=rngs,
                   sharding=sharding,
                   dtype=dtype,
@@ -887,23 +1138,34 @@ class WanEncoder3d(nnx.Module):
                   precision=precision,
               )
           )
-        in_dim = out_dim
-
-      # downsample block
-      if i != len(dim_mult) - 1:
-        mode = "downsample3d" if temperal_downsample[i] else "downsample2d"
-        self.down_blocks.append(
-            WanResample(
-                out_dim,
-                mode=mode,
-                rngs=rngs,
-                sharding=sharding,
-                dtype=dtype,
-                weights_dtype=weights_dtype,
-                precision=precision,
+          if scale in attn_scales:
+            self.down_blocks.append(
+                WanAttentionBlock(
+                    dim=out_dim,
+                    rngs=rngs,
+                    sharding=sharding,
+                    dtype=dtype,
+                    weights_dtype=weights_dtype,
+                    precision=precision,
+                )
             )
-        )
-        scale /= 2.0
+          in_dim = out_dim
+
+        # downsample block
+        if i != len(dim_mult) - 1:
+          mode = "downsample3d" if temperal_downsample[i] else "downsample2d"
+          self.down_blocks.append(
+              WanResample(
+                  out_dim,
+                  mode=mode,
+                  rngs=rngs,
+                  sharding=sharding,
+                  dtype=dtype,
+                  weights_dtype=weights_dtype,
+                  precision=precision,
+              )
+          )
+          scale /= 2.0
     self.down_blocks = nnx.data(self.down_blocks)
 
     # `out_dim` is the last loop value; dim_mult is never empty.
@@ -1009,6 +1271,8 @@ class WanDecoder3d(nnx.Module):
       temperal_upsample: Optional[List[bool]] = None,
       dropout=0.0,
       non_linearity: str = "silu",
+      out_channels: int = 3,
+      is_residual: bool = False,
       sharding: Sharding | None = None,
       dtype: jnp.dtype = jnp.float32,
       weights_dtype: jnp.dtype = jnp.float32,
@@ -1022,6 +1286,7 @@ class WanDecoder3d(nnx.Module):
     self.num_res_blocks = num_res_blocks
     self.attn_scales = attn_scales
     self.temperal_upsample = temperal_upsample
+    self.is_residual = is_residual
 
     self.nonlinearity = get_activation(non_linearity)
 
@@ -1057,9 +1322,10 @@ class WanDecoder3d(nnx.Module):
 
     # upsample blocks
     self.up_blocks = []
+    up_block_cls = WanResidualUpBlock if is_residual else WanUpBlock
     for i, (in_dim, out_dim) in enumerate(zip(dims[:-1], dims[1:])):
       # residual (+attention) blocks
-      if i > 0:
+      if i > 0 and not is_residual:
         in_dim = in_dim // 2
 
       # Determine if we need upsampling
@@ -1067,7 +1333,7 @@ class WanDecoder3d(nnx.Module):
       if i != len(dim_mult) - 1:
         upsample_mode = "upsample3d" if temperal_upsample[i] else "upsample2d"
       # Create and add the upsampling block
-      up_block = WanUpBlock(
+      up_block = up_block_cls(
           in_dim=in_dim,
           out_dim=out_dim,
           num_res_blocks=num_res_blocks,
@@ -1101,7 +1367,7 @@ class WanDecoder3d(nnx.Module):
     self.conv_out = WanCausalConv3d(
         rngs=rngs,
         in_channels=out_dim,
-        out_channels=3,
+        out_channels=out_channels,
         kernel_size=3,
         padding=1,
         sharding=sharding,
@@ -1111,7 +1377,7 @@ class WanDecoder3d(nnx.Module):
     )
     # pylint: enable=undefined-loop-variable
 
-  def __call__(self, x: jax.Array, feat_cache=None, feat_idx=0):
+  def __call__(self, x: jax.Array, feat_cache=None, feat_idx=0, first_chunk: bool = False):
     if feat_cache is not None:
       idx = feat_idx
       cache_x = jnp.copy(x[:, -CACHE_T:, :, :, :])
@@ -1131,7 +1397,7 @@ class WanDecoder3d(nnx.Module):
     x, feat_cache, feat_idx = self.mid_block(x, feat_cache, feat_idx)
     ## upsamples
     for up_block in self.up_blocks:
-      x, feat_cache, feat_idx = up_block(x, feat_cache, feat_idx)
+      x, feat_cache, feat_idx = up_block(x, feat_cache, feat_idx, first_chunk=first_chunk)
 
     ## head
     x = self.norm_out(x)
@@ -1262,16 +1528,20 @@ class AutoencoderKLWan(nnx.Module):
     """Latent shape (B, z_dim, F, H, W) of `batch` videos of `num_frames` x `height` x `width` pixels.
 
     Same compression as `encode`: 2**sum(temperal_downsample) in time (causal: first frame kept) and
-    2**len(temperal_downsample) in space. Only `vae_config` keys are needed, no weights.
+    `scale_factor_spatial` (or 2**len(temperal_downsample) * patch_size) in space. Only `vae_config` keys are needed,
+    no weights.
     """
     downsample = vae_config.get("temperal_downsample") or [False, True, True]
-    temporal, spatial = 2 ** sum(bool(d) for d in downsample), 2 ** len(downsample)
+    temporal = vae_config.get("scale_factor_temporal") or (2 ** sum(bool(d) for d in downsample))
+    patch_size = vae_config.get("patch_size") or 1
+    spatial = vae_config.get("scale_factor_spatial") or ((2 ** len(downsample)) * patch_size)
     return (batch, vae_config.get("z_dim", 16), (num_frames - 1) // temporal + 1, height // spatial, width // spatial)
 
   def __init__(
       self,
       rngs: nnx.Rngs,
       base_dim: int = 96,
+      decoder_base_dim: Optional[int] = None,
       z_dim: int = 16,
       dim_mult: Optional[List[int]] = None,
       num_res_blocks: int = 2,
@@ -1280,6 +1550,12 @@ class AutoencoderKLWan(nnx.Module):
       dropout: float = 0.0,
       latents_mean: Optional[List[float]] = None,
       latents_std: Optional[List[float]] = None,
+      is_residual: bool = False,
+      in_channels: int = 3,
+      out_channels: int = 3,
+      patch_size: Optional[int] = None,
+      scale_factor_temporal: Optional[int] = None,
+      scale_factor_spatial: Optional[int] = None,
       sharding: Sharding | None = None,
       dtype: jnp.dtype = jnp.float32,
       weights_dtype: jnp.dtype = jnp.float32,
@@ -1292,7 +1568,13 @@ class AutoencoderKLWan(nnx.Module):
     temperal_downsample = [False, True, True] if temperal_downsample is None else temperal_downsample
     latents_mean = list(_DEFAULT_LATENTS_MEAN) if latents_mean is None else latents_mean
     latents_std = list(_DEFAULT_LATENTS_STD) if latents_std is None else latents_std
+    if decoder_base_dim is None:
+      decoder_base_dim = base_dim
     self.z_dim = z_dim
+    self.is_residual = is_residual
+    self.in_channels = in_channels
+    self.out_channels = out_channels
+    self.patch_size = patch_size
     assert vae_decode_chunk >= 1 or vae_decode_chunk == -1, f"vae_decode_chunk must be >= 1 or -1, got {vae_decode_chunk}"
     assert vae_encode_chunk >= 1 or vae_encode_chunk == -1, f"vae_encode_chunk must be >= 1 or -1, got {vae_encode_chunk}"
     self.vae_decode_chunk = vae_decode_chunk
@@ -1300,6 +1582,12 @@ class AutoencoderKLWan(nnx.Module):
     self.temperal_downsample = temperal_downsample
     self.temporal_upsample = temperal_downsample[::-1]
     self.temporal_downsample_factor = 2 ** sum(temperal_downsample)
+    self.scale_factor_temporal = (
+        scale_factor_temporal if scale_factor_temporal is not None else self.temporal_downsample_factor
+    )
+    self.scale_factor_spatial = (
+        scale_factor_spatial if scale_factor_spatial is not None else (2 ** len(temperal_downsample)) * (patch_size or 1)
+    )
 
     if self.vae_encode_chunk != -1:
       assert self.vae_encode_chunk % self.temporal_downsample_factor == 0, (
@@ -1313,6 +1601,7 @@ class AutoencoderKLWan(nnx.Module):
 
     self.encoder = WanEncoder3d(
         rngs=rngs,
+        in_channels=in_channels,
         dim=base_dim,
         z_dim=z_dim * 2,
         dim_mult=dim_mult,
@@ -1320,6 +1609,7 @@ class AutoencoderKLWan(nnx.Module):
         attn_scales=attn_scales,
         temperal_downsample=temperal_downsample,
         dropout=dropout,
+        is_residual=is_residual,
         sharding=sharding,
         dtype=dtype,
         weights_dtype=weights_dtype,
@@ -1349,13 +1639,15 @@ class AutoencoderKLWan(nnx.Module):
 
     self.decoder = WanDecoder3d(
         rngs=rngs,
-        dim=base_dim,
+        dim=decoder_base_dim,
         z_dim=z_dim,
         dim_mult=dim_mult,
         num_res_blocks=num_res_blocks,
         attn_scales=attn_scales,
         temperal_upsample=self.temporal_upsample,
         dropout=dropout,
+        out_channels=out_channels,
+        is_residual=is_residual,
         sharding=sharding,
         dtype=dtype,
         weights_dtype=weights_dtype,
@@ -1366,10 +1658,13 @@ class AutoencoderKLWan(nnx.Module):
   def _encode(self, x: jax.Array, feat_cache: AutoencoderKLWanCache):
     """Encode video chunk-by-chunk with a causal feature cache."""
     feat_cache.init_cache()
-    if x.shape[-1] != 3:
+    raw_channels = self.in_channels // (self.patch_size**2) if self.patch_size is not None else self.in_channels
+    if x.shape[-1] != raw_channels:
       # reshape channel last for JAX
       x = jnp.transpose(x, (0, 2, 3, 4, 1))
-      assert x.shape[-1] == 3, f"Expected input shape (N, D, H, W, 3), got {x.shape}"
+      assert x.shape[-1] == raw_channels, f"Expected input shape (N, D, H, W, {raw_channels}), got {x.shape}"
+    if self.patch_size is not None:
+      x = patchify(x, patch_size=self.patch_size)
     x = x.astype(self.encoder.conv_in.conv.dtype)
 
     t = x.shape[1]
@@ -1510,7 +1805,7 @@ class AutoencoderKLWan(nnx.Module):
       chunk_in_0 = x[:, 0:1, ...]
       if spatial_sharding is not None:
         chunk_in_0 = self.sharding.constrain(chunk_in_0, _SPATIAL_NAME, _SPATIAL_AXES)
-      out_0, dec_feat_map, _ = self.decoder(chunk_in_0, feat_cache=dec_feat_map, feat_idx=0)
+      out_0, dec_feat_map, _ = self.decoder(chunk_in_0, feat_cache=dec_feat_map, feat_idx=0, first_chunk=True)
       if spatial_sharding is not None:
         out_0 = self.sharding.constrain(out_0, _SPATIAL_NAME, _SPATIAL_AXES)
 
@@ -1595,6 +1890,11 @@ class AutoencoderKLWan(nnx.Module):
       out = out_0
 
     feat_cache._feat_map = dec_feat_map  # pylint: disable=protected-access
+
+    if self.patch_size is not None:
+      out = unpatchify(out, patch_size=self.patch_size)
+      if spatial_sharding is not None:
+        out = self.sharding.constrain(out, _SPATIAL_NAME, _SPATIAL_AXES)
 
     out = jnp.clip(out, min=-1.0, max=1.0)
     if not return_dict:
