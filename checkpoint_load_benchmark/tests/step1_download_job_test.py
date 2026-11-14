@@ -254,6 +254,7 @@ class Step1DownloadJobTest(unittest.TestCase):
     self.assertEqual(rec_1b["loaded_checkpoint_dtype"], "BF16")
     self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "scratch_1b", "input_fp8")))
 
+    self.gcs.bucket("mesa-maxtext-southamerica-west1").blob("ds/bf16/stale.safetensors").upload_from_string(b"old")
     rec_cp = step1_download_job.copy_bf16_gcs_to_region(
         platform="v6e",
         dest_region="southamerica-west1",
@@ -262,11 +263,13 @@ class Step1DownloadJobTest(unittest.TestCase):
         source_gcs_dir="gs://mesa-maxtext-us-central1/ds/bf16",
         dest_gcs_dir="gs://mesa-maxtext-southamerica-west1/ds/bf16",
         run_id="r-ds-copy",
+        clean_target=True,
         storage_client=self.gcs,
     )
     self.assertEqual(rec_cp["run_status"], "OK")
     self.assertEqual(rec_cp["checkpoint_number_of_files"], 1)
     self.assertIn("ds/bf16/model.safetensors", self.gcs.bucket("mesa-maxtext-southamerica-west1").objects)
+    self.assertNotIn("ds/bf16/stale.safetensors", self.gcs.bucket("mesa-maxtext-southamerica-west1").objects)
     # Silence unused import warning cleanly while cross-checking metadata helper on local path if needed.
     self.assertTrue(callable(metadata.inspect_safetensors_headers))
 
