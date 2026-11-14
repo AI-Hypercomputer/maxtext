@@ -14,6 +14,7 @@
 
 """Normalization Layers."""
 
+import functools
 from typing import Any
 
 from flax import nnx
@@ -21,11 +22,186 @@ import jax
 from jax import lax
 import jax.numpy as jnp
 from jax.sharding import NamedSharding
-from maxtext.common.common_types import Array, DType, ShardMode, is_fp8_dtype
+from maxtext.common.common_types import Array, DecoderBlockType, DType, ShardMode, is_fp8_dtype
 from maxtext.layers.initializers import Initializer
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils import sharding as maxtext_sharding
 from maxtext.utils.sharding import truncate_out_sharding
+
+
+def _flatten_active_mesh_axes(entries: tuple[Any, ...], mesh: Any) -> tuple[str, ...]:
+  out: list[str] = []
+  for entry in entries:
+    if entry is None:
+      continue
+    raw = (entry,) if isinstance(entry, str) else tuple(entry)
+    for ax in raw:
+      if ax is not None and mesh.shape.get(ax, 1) > 1 and ax not in out:
+        out.append(ax)
+  return tuple(out)
+
+
+def _deferred_norm_unavailable_reason(config: Any, mesh: Any) -> str | None:
+  """Why `defer_norm_grad_allreduce` cannot apply to `config`, or None when it can."""
+  if mesh is None:
+    return "no mesh"
+  if not getattr(config, "scan_layers", False):
+    return "scan_layers=False"
+  if getattr(config, "prefetch_fsdp_weights", False):
+    return "prefetch_fsdp_weights=True (the prefetch path has no post-scan all-reduce)"
+  if (
+      bool(getattr(config, "using_pipeline_parallelism", False))
+      or int(getattr(config, "ici_pipeline_parallelism", 1) or 1) > 1
+      or int(getattr(config, "dcn_pipeline_parallelism", 1) or 1) > 1
+  ):
+    return "pipeline parallelism"
+  if getattr(config, "decoder_block", None) not in (
+      DecoderBlockType.QWEN3,
+      DecoderBlockType.QWEN3_MOE,
+      "qwen3",
+      "qwen3_moe",
+  ):
+    return f"decoder_block={getattr(config, 'decoder_block', None)!r} (supported decoder blocks: qwen3, qwen3_moe)"
+  if getattr(config, "shard_mode", ShardMode.AUTO) != ShardMode.AUTO:
+    return "shard_mode != auto"
+  return None
+
+
+@functools.lru_cache(maxsize=None)
+def _warn_deferred_norm_unavailable(reason: str) -> None:
+  """Logs once per reason that the deferral is requested but inactive."""
+  max_logging.warning(
+      f"defer_norm_grad_allreduce=True has no effect: {reason}; the norm scale gradients use the standard"
+      " per-layer all-reduces."
+  )
+
+
+def get_deferred_norm_psum_axes(config: Any, mesh: Any) -> tuple[str, ...]:
+  """Returns batch/FSDP mesh axes for deferred post-scan RMSNorm scale all-reduces, or `()` when disabled.
+
+  When `defer_norm_grad_allreduce` is set but the deferral cannot apply, a warning is logged once per
+  reason and `()` is returned so callers fall back to the standard path.
+  """
+  if not getattr(config, "defer_norm_grad_allreduce", False):
+    return ()
+  reason = _deferred_norm_unavailable_reason(config, mesh)
+  if reason is None:
+    rules = maxtext_sharding.get_logical_axis_rules() or getattr(config, "logical_axis_rules", None)
+    norm_axes = maxtext_sharding.logical_to_mesh_axes(("norm",), mesh, rules=rules)
+    act_axes = maxtext_sharding.logical_to_mesh_axes(
+        ("activation_batch", "activation_norm_length", "activation_embed"), mesh, rules=rules
+    )
+    if (norm_axes and norm_axes[0] is not None) or (len(act_axes) >= 3 and act_axes[2] is not None):
+      reason = "the norm scale or the embedding activations are sharded"
+    else:
+      axes = _flatten_active_mesh_axes(tuple(act_axes[:2]), mesh)
+      if axes:
+        return axes
+      reason = "no batch or sequence mesh axis spans more than one device"
+  _warn_deferred_norm_unavailable(reason)
+  return ()
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def post_scan_psum_grad(w: jnp.ndarray, mesh: Any, psum_axes: tuple[str, ...]) -> jnp.ndarray:
+  """Identity in forward; sums unreduced per-shard norm scale gradients across `psum_axes` once after `lax.scan`.
+
+  Second half of the deferred norm-grad all-reduce; it must be paired with the first half. A scale that reaches
+  `_scale_mul_deferred_grad` (`RMSNorm(defer_scale_grad_allreduce=True)`) or the fused QKV path with
+  `defer_norm_grad_psum=True` (`Attention.defer_qk_norm_grad_allreduce`) gets a gradient that is summed over the
+  local batch/seq shard only, although it is typed as replicated. The caller must wrap the stacked `[layers, D]`
+  scale with this function outside the layer scan, over the same `psum_axes` (`get_deferred_norm_psum_axes`), and
+  must not reshard the scale gradient in between; otherwise the scale gradients stay per-shard and the replicas
+  diverge. `NNXDecoder._apply_layers_sequentially` is the only code that sets the two flags, and it wraps every
+  deferred scale (raising if one cannot be found).
+  """
+  return w
+
+
+def _post_scan_psum_grad_fwd(w: jnp.ndarray, mesh: Any, psum_axes: tuple[str, ...]):
+  return w, ()
+
+
+def _post_scan_psum_grad_bwd(mesh: Any, psum_axes: tuple[str, ...], _, dw: jnp.ndarray):
+  """All-reduces the accumulated scale gradient across `psum_axes` after the decoder scan."""
+  if not psum_axes:
+    return (dw,)
+  rep_spec = jax.sharding.PartitionSpec(*((None,) * dw.ndim))
+  ax = psum_axes if len(psum_axes) > 1 else psum_axes[0]
+
+  @functools.partial(jax.shard_map, mesh=mesh, in_specs=rep_spec, out_specs=rep_spec, check_vma=False)
+  def _sum_across_shards(dw_local):
+    return lax.psum(dw_local.astype(jnp.float32), ax).astype(dw_local.dtype)
+
+  return (_sum_across_shards(dw),)
+
+
+post_scan_psum_grad.defvjp(_post_scan_psum_grad_fwd, _post_scan_psum_grad_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def _scale_mul_deferred_grad(
+    y: jnp.ndarray,
+    scale: jnp.ndarray,
+    mesh: Any,
+    y_pspec: jax.sharding.PartitionSpec,
+    out_dtype: Any,
+) -> jnp.ndarray:
+  """Multiplies normalized `y` by `scale` while keeping `dscale` shard-local in backward.
+
+  The backward returns `dscale` summed over the local batch/seq shard only, through a replicated out_spec with
+  `check_vma=False`: the value is not replicated until `post_scan_psum_grad` sums it across the batch/seq mesh
+  axes, so `scale` must be wrapped with `post_scan_psum_grad` (see its docstring for the pairing invariant).
+  """
+  scale_pspec = jax.sharding.PartitionSpec(None)
+
+  @functools.partial(jax.shard_map, mesh=mesh, in_specs=(y_pspec, scale_pspec), out_specs=y_pspec, check_vma=False)
+  def _fwd_shmap(y_l, s_l):
+    return jnp.asarray(y_l * jnp.asarray(s_l, out_dtype), out_dtype)
+
+  return _fwd_shmap(y, scale)
+
+
+def _scale_mul_deferred_grad_fwd(
+    y: jnp.ndarray,
+    scale: jnp.ndarray,
+    mesh: Any,
+    y_pspec: jax.sharding.PartitionSpec,
+    out_dtype: Any,
+):
+  return _scale_mul_deferred_grad(y, scale, mesh, y_pspec, out_dtype), (y, scale)
+
+
+def _scale_mul_deferred_grad_bwd(
+    mesh: Any,
+    y_pspec: jax.sharding.PartitionSpec,
+    out_dtype: Any,
+    res,
+    dout: jnp.ndarray,
+):
+  """Computes local `(dy, dscale)` without per-layer cross-shard `psum` on `dscale`."""
+  y, scale = res
+  scale_pspec = jax.sharding.PartitionSpec(None)
+
+  @functools.partial(
+      jax.shard_map,
+      mesh=mesh,
+      in_specs=(y_pspec, scale_pspec, y_pspec),
+      # `ds_l` is per-shard, not replicated: the replicated spec with `check_vma=False` only defers its cross-shard
+      # sum to `post_scan_psum_grad`, which the caller has to apply.
+      out_specs=(y_pspec, scale_pspec),
+      check_vma=False,
+  )
+  def _bwd_shmap(y_l, s_l, dout_l):
+    dy_l = jnp.asarray(dout_l * jnp.asarray(s_l, out_dtype), y_l.dtype)
+    ds_l = jnp.sum(dout_l.astype(jnp.float32) * y_l.astype(jnp.float32), axis=(0, 1)).astype(s_l.dtype)
+    return dy_l, ds_l
+
+  return _bwd_shmap(y, scale, dout)
+
+
+_scale_mul_deferred_grad.defvjp(_scale_mul_deferred_grad_fwd, _scale_mul_deferred_grad_bwd)
 
 
 def align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp.ndarray:
@@ -58,7 +234,11 @@ def align_scale_with_normalized_axis(scale: jnp.ndarray, y: jnp.ndarray) -> jnp.
 
 
 class RMSNorm(nnx.Module):
-  """RMS normalization."""
+  """RMS normalization.
+
+  `defer_scale_grad_allreduce=True` leaves the scale gradient summed over the local batch/seq shard only (see
+  `_scale_mul_deferred_grad`); the caller must wrap the scale with `post_scan_psum_grad`.
+  """
 
   def __init__(
       self,
@@ -72,6 +252,8 @@ class RMSNorm(nnx.Module):
       parameter_memory_host_offload: bool = False,
       scale_offset: float = 0.0,
       with_scale: bool = True,
+      mesh: Any = None,
+      defer_scale_grad_allreduce: bool = False,
       *,
       rngs: nnx.Rngs,
   ):
@@ -85,6 +267,8 @@ class RMSNorm(nnx.Module):
     self.parameter_memory_host_offload = parameter_memory_host_offload
     self.scale_offset = scale_offset
     self.with_scale = with_scale
+    self.mesh = mesh
+    self.defer_scale_grad_allreduce = defer_scale_grad_allreduce
     if self.with_scale:
       self.scale = nnx.Param(
           scale_init(rngs.params(), (num_features,), self.weight_dtype),
@@ -116,6 +300,40 @@ class RMSNorm(nnx.Module):
     if self.parameter_memory_host_offload:
       max_logging.log("normalizations.py: Moving scale parameter to device")
       scale = jax.device_put(scale, max_utils.device_space())
+
+    if self.defer_scale_grad_allreduce:
+      if (
+          self.mesh is None
+          or self.shard_mode != ShardMode.AUTO
+          or x.ndim != 3
+          or self.scale_offset != 0.0
+          or out_sharding is not None
+      ):
+        raise ValueError(
+            "defer_scale_grad_allreduce requires 3D inputs, ShardMode.AUTO, scale_offset==0.0, and out_sharding is None"
+        )
+      rules = maxtext_sharding.get_logical_axis_rules()
+      norm_axes = maxtext_sharding.logical_to_mesh_axes(("norm",), self.mesh, rules=rules) if rules else ()
+      act_axes = (
+          maxtext_sharding.logical_to_mesh_axes(
+              ("activation_batch", "activation_norm_length", "activation_embed"), self.mesh, rules=rules
+          )
+          if rules
+          else ()
+      )
+      parts = tuple(act_axes) + (None,) * max(0, 3 - len(act_axes))
+      y_pspec = jax.sharding.PartitionSpec(*parts[:3])
+      if (
+          not rules
+          or (norm_axes and norm_axes[0] is not None)
+          or parts[2] is not None
+          or maxtext_sharding.adjust_pspec_for_indivisible_shapes(y_pspec, y.shape, self.mesh) != y_pspec
+      ):
+        raise ValueError(
+            "defer_scale_grad_allreduce requires active logical_axis_rules with replicated norm/embed and divisible"
+            f" batch/seq dims; got y.shape={y.shape}, y_pspec={y_pspec}."
+        )
+      return _scale_mul_deferred_grad(y, scale, self.mesh, y_pspec, self.dtype)
 
     scale_fp32 = jnp.asarray(scale, jnp.float32)
     effective_scale = scale_fp32
