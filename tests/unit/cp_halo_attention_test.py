@@ -301,8 +301,8 @@ class CpHaloConfigAndValidationTest(parameterized.TestCase):
         model_mode=common_types.MODEL_MODE_PREFILL,
         rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
     )
-    local_attention.mesh = types.SimpleNamespace(shape={"context": 4})
-    global_attention.mesh = types.SimpleNamespace(shape={"context": 4})
+    local_attention.mesh = types.SimpleNamespace(shape={"context": 3})
+    global_attention.mesh = types.SimpleNamespace(shape={"context": 3})
     with mock.patch.dict(
         cfg.get_keys(),
         {
@@ -311,7 +311,7 @@ class CpHaloConfigAndValidationTest(parameterized.TestCase):
         },
     ):
       local_attention.init_kv_w(inputs_kv_shape=inputs_shape)
-      with self.assertRaisesRegex(ValueError, r"num_kv_heads \(2\).*must be divisible by 4"):
+      with self.assertRaisesRegex(ValueError, r"num_kv_heads \(2\).*must be divisible by 3"):
         global_attention.init_kv_w(inputs_kv_shape=inputs_shape)
 
   def test_tpu_halo_flash_attention_rejects_unsupported_runtime_features(self):

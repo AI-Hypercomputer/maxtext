@@ -21,6 +21,7 @@ import os
 from typing import Any, Iterable, Optional, Tuple, Union, cast
 
 from jax.ad_checkpoint import checkpoint_name
+from jax.experimental.layout import Layout, with_layout_constraint
 from jax.sharding import Mesh, NamedSharding
 import jax
 import jax.numpy as jnp
@@ -87,6 +88,36 @@ from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding, lo
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
+
+
+def _row_major(x):
+  if not isinstance(x, jax.core.Tracer):
+    return x
+  return with_layout_constraint(x, Layout(major_to_minor=tuple(range(x.ndim))))
+
+
+@jax.custom_vjp
+def _pin_row_major_with_cotangent(x):
+  """Identity that constrains `x` and its cotangent to the default (row-major) XLA layout.
+
+  Under Ulysses the attention backward wants the hidden-state gradient tokens-minor, for the
+  [B, S, H, D] -> [B, H, S, D] transpose ahead of the inverse all-to-all. Without a pin XLA carries that
+  layout out through the residual add into the neighbouring MoE layers, where it transposes the
+  expert-parallel-gathered token buffer (8x the local tokens) in front of the token reduce-scatter. Pinning
+  the attention block's input and output keeps the relayout on the attention-local tensors.
+  """
+  return _row_major(x)
+
+
+def _pin_row_major_fwd(x):
+  return _row_major(x), None
+
+
+def _pin_row_major_bwd(_, g):
+  return (_row_major(g),)
+
+
+_pin_row_major_with_cotangent.defvjp(_pin_row_major_fwd, _pin_row_major_bwd)
 
 
 @dataclasses.dataclass(repr=False)
@@ -475,10 +506,14 @@ class Attention(nnx.Module):
 
     Ulysses context parallelism shards the KV heads a second time, over the
     context axis, using a runtime all-to-all rather than the weight's logical
-    axes, so that axis is folded in explicitly.  `types.py` separately requires
-    `num_kv_heads` to be divisible by the context-parallel size on its own;
-    checking the product here is what catches a head count that clears each
-    factor individually but not both together.
+    axes, so that axis is folded in explicitly.  `types.py` separately checks
+    `num_kv_heads` against the context-parallel size on its own; checking the
+    product here is what catches a head count that clears each factor
+    individually but not both together.  The one exception is a context axis
+    that is a multiple of the KV heads left on each device by the other axes:
+    Ulysses then repeats each KV head across the context ranks whose query heads
+    use it (`ulysses_attention.repeat_kv_heads_for_ulysses`) instead of splitting
+    the KV heads, so the context axis places no constraint on them.
 
     Without this check an over-sharded mesh fails much later, either with an
     opaque XLA divisibility error or by silently leaving the projection
@@ -506,17 +541,22 @@ class Attention(nnx.Module):
       kv_head_axes = (kv_head_axes,)
     kv_head_axes = list(kv_head_axes)
 
+    def shards(axes):
+      return math.prod(self.mesh.shape.get(axis, 1) for axis in axes)
+
     # Ulysses exchanges sequence ownership for head ownership through an
     # all-to-all, so the context axis shards KV heads too even though no
-    # logical rule says so.
+    # logical rule says so -- unless it is a multiple of the KV heads left per
+    # device, in which case those heads are repeated rather than split.
     if resolve_context_parallel_strategy(self.config, self.attention_type) == "ulysses":
       ulysses_axis = self.config.context_sharding
       if ulysses_axis not in kv_head_axes:
-        kv_head_axes.append(ulysses_axis)
+        local_kv_heads, remainder = divmod(self.num_kv_heads, shards(kv_head_axes))
+        replicated = remainder == 0 and self.mesh.shape.get(ulysses_axis, 1) % local_kv_heads == 0
+        if not replicated:
+          kv_head_axes.append(ulysses_axis)
 
-    kv_parallelism = 1
-    for axis in kv_head_axes:
-      kv_parallelism *= self.mesh.shape.get(axis, 1)
+    kv_parallelism = shards(kv_head_axes)
 
     if self.num_kv_heads % kv_parallelism != 0:
       raise ValueError(
@@ -1591,16 +1631,25 @@ class Attention(nnx.Module):
     else:
       input_axis_names = self.decode_input_axis_names
 
-    is_self_attn = inputs_q is inputs_kv
-    inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
-    inputs_kv = inputs_q if is_self_attn else self._maybe_shard_with_logical(inputs_kv, input_axis_names)
-    qkv_sharding = create_sharding(self.mesh, input_axis_names)
-
     use_shared_kv = shared_key is not None and shared_value is not None
     if self.share_kv_layer and not use_shared_kv:
       raise ValueError("share_kv_layer=True requires both shared_key and shared_value to be provided.")
     if use_shared_kv and self.config.fused_qkv:
       raise ValueError("shared_key / shared_value are incompatible with fused_qkv.")
+
+    pin_layout = (
+        model_mode == MODEL_MODE_TRAIN
+        and resolve_context_parallel_strategy(self.config, self.attention_type) == "ulysses"
+        and not use_shared_kv
+    )
+    if pin_layout:
+      same_kv = inputs_kv is inputs_q
+      inputs_q = _pin_row_major_with_cotangent(inputs_q)
+      inputs_kv = inputs_q if same_kv else _pin_row_major_with_cotangent(inputs_kv)
+    is_self_attn = inputs_q is inputs_kv
+    inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
+    inputs_kv = inputs_q if is_self_attn else self._maybe_shard_with_logical(inputs_kv, input_axis_names)
+    qkv_sharding = create_sharding(self.mesh, input_axis_names)
 
     gate = None
     fused_qkv_out = self._try_fused_qkv_kernel(
@@ -1755,5 +1804,7 @@ class Attention(nnx.Module):
     out = self.out_projection(out, out_sharding=out_sharding, model_mode=model_mode)
     if getattr(self.config, "distill_beta", 0.0) > 0.0:
       self.sow(nnx.Intermediate, "out_projection_activations", out)
+    if pin_layout:
+      out = _pin_row_major_with_cotangent(out)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
