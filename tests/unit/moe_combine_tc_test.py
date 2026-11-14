@@ -23,6 +23,7 @@ import jax
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from maxtext.kernels import moe_combine_tc
 
@@ -593,6 +594,14 @@ class MoeCombineTest(parameterized.TestCase):
         col_chunks=col_chunks,
     )
     self.assertEqual((cfg.block_tokens, cfg.expert_chunks, cfg.col_chunks), (block_tokens, expert_chunks, col_chunks))
+
+  @pytest.mark.tpu_only
+  def test_compiled_gemma4_26b_shape(self):
+    """Compiled kernels (no interpreter) at the Gemma-4 26B shape with the default block sizes."""
+    num_tokens, k, num_groups, hidden_dim = 1024, 8, 128, 2816
+    x, sort_idx, weights, group_sizes, dy = _problem(11, num_tokens, k, num_groups, hidden_dim)
+    self._check_combine(moe_combine_tc.combine, x, sort_idx, weights, group_sizes, dy)
+    self._check_permute(functools.partial(moe_combine_tc.permute, num_experts_per_tok=k), dy, sort_idx, group_sizes, x, k)
 
 
 class PrivateFunctionsTest(parameterized.TestCase):
