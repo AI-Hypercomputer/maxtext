@@ -148,7 +148,7 @@ _VLLM_REPEAT_AXES = frozenset({"kv_heads"})
 # Logical axis names whose padding semantics are "append zeros at the end"
 # (e.g. MoE MLP-dim padding to satisfy the GMM_v2 kernel's per-shard size
 # constraint, set in src/maxtext/integration/vllm/maxtext_vllm_adapter/adapter.py).
-_VLLM_ZERO_PAD_AXES = frozenset({"mlp_moe", "activation_mlp"})
+_VLLM_ZERO_PAD_AXES = frozenset({"mlp_moe", "mlp_moe_out", "activation_mlp"})
 
 
 def _normalize_logical_axes(axes):
