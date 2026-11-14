@@ -1440,7 +1440,9 @@ def populate_gpaste_urls(
   for row in dataset.runs_rows:
     phase = str(row.get("phase_name") or "")
     if phase == "step1_hf_to_gcs":
-      url_col = "step1_download_log_url"
+      url_col = "step1_log_url"
+    elif phase.startswith("step1b_"):
+      url_col = "step1b_log_url"
     elif phase == "to_maxtext_step1":
       url_col = "pipeline_step1_log_url"
     elif phase == "to_maxtext_step2":
@@ -1449,6 +1451,9 @@ def populate_gpaste_urls(
       url_col = "step3_or_load_log_url"
     existing_url = str(row.get(url_col) or "")
     local_files = [p for p in row.get("_local_log_files", []) if p and os.path.exists(p)]
+    local_json = str(row.get("_local_json_path") or "")
+    if not local_files and phase.startswith("step1") and local_json and os.path.exists(local_json):
+      local_files = [local_json]
     sig = _files_cache_sig(local_files)
     if existing_url.startswith("https://paste.googleplex.com/") and not sig:
       continue
