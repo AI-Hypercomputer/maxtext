@@ -2672,7 +2672,9 @@ class RoutedMoE(nnx.Module):
         tc_routing=None,
         tc_unsort_cfg=None,
         bias=None,
+        kernel1=None,
     ):
+      # With kernel1 (moe_wi_dlhs_merged_k), returns (inputs @ kernel, inputs @ kernel1) with one merged DLHS GMM.
       def extract_vma(tensor):
         # Extract underlying array from QArray to inspect sharding annotation string.
         if isinstance(tensor, qpl.QArray):
@@ -2731,6 +2733,19 @@ class RoutedMoE(nnx.Module):
         inputs = inputs.astype(self.dtype)
       if not is_native_kernel:
         kernel = kernel.astype(self.dtype)
+      if kernel1 is not None:
+        outputs = mblx.gmm_pair_merged_dlhs(
+            inputs,
+            kernel,
+            kernel1.astype(self.dtype),
+            group_sizes,
+            self.dtype,
+            tiling,
+            group_offset,
+            use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
+            use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+        )
+        return tuple(o[: orig_inputs_shape[0]] for o in outputs) if padding_amount else outputs
       lhs_quantize_dtype, rhs_quantize_dtype = get_quantization_dtypes()
 
       # Interpret the megablox Pallas kernel only when the TARGET is NOT TPU (CPU or GPU,
@@ -3579,6 +3594,21 @@ class RoutedMoE(nnx.Module):
           if mask is not None:
             layer_w0 = jnp.where(mask[:, None], layer_w0, 0)
             layer_w1 = jnp.where(mask[:, None], layer_w1, 0)
+        layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
+        layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
+        return layer_w0, layer_w1
+      elif (
+          self.config.moe_wi_dlhs_merged_k
+          and self.config.hardware != "cpu"
+          and partial_accum0 is None
+          and partial_accum1 is None
+          and not return_weights
+          and not self.config.mlp_bias
+          and not isinstance(x, qpl.QArray)
+          and x.ndim == 2
+      ):
+        # The backward runs one gmm_v2 DLHS over concat([dout0, dout1]) x concat([w0, w1]) instead of two plus an add.
+        layer_w0, layer_w1 = gmm_fn(x, w0, tiling=wi_tile_size, weight_gather_axes=wi_gather_axes, kernel1=w1)
         layer_w0 = adc.checkpoint_name(adc.checkpoint_name(layer_w0, "mlpwi_0"), "moe_mlpwi_0")
         layer_w1 = adc.checkpoint_name(layer_w1, "moe_mlpwi_1")
         return layer_w0, layer_w1
