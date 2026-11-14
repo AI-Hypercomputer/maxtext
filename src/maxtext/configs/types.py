@@ -1543,6 +1543,28 @@ class MoEGeneral(BaseModel):
           " before the wo matmul instead of into the (buffer, emb) expert output before the unsort."
       ),
   )
+  moe_sc_gather_reduce: bool = Field(
+      False,
+      description=(
+          "Non-ring sparse_matmul (any top-k): gather token rows"
+          " straight into expert order (no top-k repeat) and run the top-k sums"
+          " (dispatch backward, and the combine under"
+          " moe_weights_on_activation) on the SparseCore gather-reduce kernel"
+          " instead of on the TensorCore. Shapes the kernel cannot take (top-k not"
+          " dividing the SparseCore lane count, rows not dividing over its subcores)"
+          " and chips without SparseCore fall back to an f32 TensorCore sum."
+      ),
+  )
+  moe_weights_on_activation: bool = Field(
+      False,
+      description=(
+          "Without ring of experts (sparse_matmul, expert parallelism 1, no"
+          " mlp_bias): multiply the routing weights into the sorted (rows, mlp)"
+          " expert activation before the wo matmul, and combine the top-k"
+          " expert outputs in unpermute by a plain sum instead of the (rows,"
+          " emb) weighted einsum."
+      ),
+  )
   moe_tc_ragged_flatten_block_size: int = Field(
       0,
       description=(
@@ -7343,6 +7365,14 @@ class MaxTextConfig(
       raise ValueError(
           "moe_bwd_prequant_before_unsort=True requires moe_tc_ragged_3d_dispatch=True and"
           " moe_tc_ragged_weights_on_activation=True."
+      )
+    if self.moe_sc_gather_reduce and not self.sparse_matmul:
+      raise ValueError("moe_sc_gather_reduce=True requires sparse_matmul=True.")
+    if self.moe_weights_on_activation and (
+        not self.sparse_matmul or self.mlp_bias or self.decoder_block == DecoderBlockType.LLAMA4
+    ):
+      raise ValueError(
+          "moe_weights_on_activation=True requires sparse_matmul=True, mlp_bias=False and a non-Llama4 model."
       )
     if self.moe_combine_bwd_direct_qarray and not self.moe_bwd_prequant_before_unsort:
       raise ValueError("moe_combine_bwd_direct_qarray=True requires moe_bwd_prequant_before_unsort=True.")
