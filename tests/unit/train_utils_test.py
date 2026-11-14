@@ -379,19 +379,29 @@ class TestCreateCheckpointManager(unittest.TestCase):
     mesh = object()
     checkpoint_manager = object()
     checkpointing_impl = object()
+    calls = []
+
+    def fake_create_manager(*args, **kwargs):
+      del args, kwargs
+      calls.append("create_manager")
+      return checkpoint_manager
 
     with (
         mock.patch.object(
             train_utils.emergency_checkpointing,
             "create_replicator_checkpoint_manager",
-            return_value=checkpoint_manager,
+            side_effect=fake_create_manager,
         ) as create_manager,
         mock.patch.object(
             train_utils.ocp_pathways.CheckpointingImpl,
             "from_options",
             return_value=checkpointing_impl,
         ) as from_options,
-        mock.patch.object(train_utils.ocp_pathways, "register_type_handlers") as register_type_handlers,
+        mock.patch.object(
+            train_utils.ocp_pathways,
+            "register_type_handlers",
+            side_effect=lambda **kwargs: calls.append("register_type_handlers"),
+        ) as register_type_handlers,
     ):
       result = train_utils.create_checkpoint_manager(config, mesh, init_state_fn=object())
 
@@ -403,10 +413,14 @@ class TestCreateCheckpointManager(unittest.TestCase):
         config.colocated_python_checkpointing,
     )
     from_options.assert_called_once_with(use_colocated_python=True)
-    register_type_handlers.assert_called_once_with(
-        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
-        checkpointing_impl=checkpointing_impl,
-    )
+    self.assertEqual(register_type_handlers.call_count, 1)
+    _, kwargs = register_type_handlers.call_args
+    self.assertEqual(kwargs["use_single_replica_array_handler"], config.enable_single_replica_ckpt_restoring)
+    self.assertIs(kwargs["checkpointing_impl"], checkpointing_impl)
+    self.assertIsNone(kwargs["primary_host"])
+    self.assertIsNone(kwargs["array_metadata_store"])
+    # Handlers must be registered before the manager, which reads the array metadata store at init.
+    self.assertEqual(calls, ["register_type_handlers", "create_manager"])
 
 
 class TestValidateCompletedSteps(unittest.TestCase):

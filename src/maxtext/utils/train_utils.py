@@ -166,6 +166,21 @@ def create_training_optimizer(config, model, mesh=None):
 
 def create_checkpoint_manager(config, mesh, init_state_fn):
   """Creates the init_rng, optimizer, learning rate schedule, and checkpoint manager."""
+  # Use Colocated Python checkpointing dispatchers (Single Controller only). Register before any
+  # CheckpointManager is created, since v0 handlers read the array metadata store at init. With
+  # array_metadata_store=None, workers don't wait on process 0 to create array_metadatas/ during elastic resizes.
+  if config.enable_single_controller and config.colocated_python_checkpointing:
+    max_logging.log("Registering colocated python array handler")
+    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+    )
+    ocp_pathways.register_type_handlers(
+        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
+        checkpointing_impl=checkpointing_impl,
+        primary_host=None,
+        array_metadata_store=None,
+    )
+
   # pass in model for muon
   # Orbax checkpoint Cloud Logger (None unless `enable_checkpoint_cloud_logger`),
   # used by ML Goodput to measure checkpoint save/restore badput.
@@ -216,17 +231,6 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
         config.checkpoint_storage_target_data_file_size_bytes,
         colocated_python_checkpointing=config.enable_single_controller and config.colocated_python_checkpointing,
         async_checkpointing_timeout_secs=config.async_checkpointing_timeout_secs,
-    )
-
-  # Use Colocated Python checkpointing dispatchers optimization (Single Controller only).
-  if checkpoint_manager is not None and config.enable_single_controller and config.colocated_python_checkpointing:
-    max_logging.log("Registering colocated python array handler")
-    checkpointing_impl = ocp_pathways.CheckpointingImpl.from_options(
-        use_colocated_python=True,
-    )
-    ocp_pathways.register_type_handlers(
-        use_single_replica_array_handler=config.enable_single_replica_ckpt_restoring,
-        checkpointing_impl=checkpointing_impl,
     )
 
   return checkpoint_manager
