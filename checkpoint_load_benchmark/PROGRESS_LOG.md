@@ -1,28 +1,29 @@
 # Checkpoint-Load Benchmark v2 — Live Progress & Team Handoff Log
 
-- **Last Updated (UTC):** `2026-11-14 04:46:36 UTC`
+- **Last Updated (UTC):** `2026-11-14 07:24:45 UTC`
 - **Git Branch:** `docs/checkpoint-load-benchmark`
 - **Repository Path on Cloudtop:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3`
 - **This Progress File:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/PROGRESS_LOG.md`
 - **Handoff Runbook:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/handoff.md`
+- **Executive Summary Report:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/reports/benchmark_v2_summary.md`
 - **Design & Task Plan:** `/usr/local/google/home/mesakh/Documents/mesakh/maxtext-project/maxtext-3/checkpoint_load_benchmark/plans/benchmark_v2_plan.md`
-- **Live Google Sheet v2:** https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit
-- **Background Orchestrator Script:** `checkpoint_load_benchmark/scripts/run_v2_orchestrator.py`
+- **Live Google Sheet v2:** https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit (`100.0%` complete & validated)
+- **Background Orchestrator Script:** `checkpoint_load_benchmark/scripts/run_v2_orchestrator.py` (stopped cleanly after `100.0%` completion)
 
 ## 1. Live Cluster & Experiment Progress Summary
 
 | Platform | Region | Step 1 Done | TPU Queue Tasks Done | Active TPU JobSets | Active CPU Jobs |
 |---|---|---:|---:|---|---|
-| `v7x` | `us-central1` | **21 / 21** | **60 / 61** | `mesa-q-v7x-2x2x1-2s-w67` | _none_ |
+| `v7x` | `us-central1` | **21 / 21** | **61 / 61** | _none_ | _none_ |
 | `v6e` | `southamerica-west1` | **21 / 21** | **53 / 53** | _none_ | _none_ |
 | `v5e` | `europe-west4` | **12 / 12** | **22 / 22** | _none_ | _none_ |
 
 ## 2. Chat Session Summary & Handoff Guide for Other Engineers
 
-1. **Summary of What Has Been Completed in This Session:**
-   - **Code & Tests (`docs/checkpoint-load-benchmark`):** Completed all Phase 0 through Phase 4 deliverables (`bench/schema_v2.py`, `bench/harness_v2.py`, `bench/platforms.py`, `bench/stages.py`, `bench/manifests_v2.py`, `scripts/generate_v2_manifests.py`, `scripts/run_v2_cluster.sh`, `scripts/build_sheet_v2.py`, `scripts/run_v2_orchestrator.py`). Fixed 64-host stage timing aggregation on `v5e` and TPU HBM metric keys on `v5e`/`v6e`/`v7x`. All 94 unit tests pass (`pytest`) and all modular files score `10.00/10` on `pylint`.
-   - **Cross-Platform Validation (`T3.5`) & Sheet Sync (`T4.1-T4.3`):** Verified end-to-end on `v5e` (`16x16` = 64 hosts / 256 chips in `europe-west4`), `v6e` (`2x4` and `4x4` in `southamerica-west1`), and `v7x` (`2x2x1` in `us-central1`). Populated Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with all 555 Summary rows (352 planned v2 rows + 203 legacy v1 rows).
-   - **Background Execution (`Phase 5`):** To avoid blocking the interactive Jetski chat session while multi-hour HuggingFace downloads and TPU benchmarks run, `scripts/run_v2_orchestrator.py` runs in the background (`nohup` daemon logging to `/tmp/mesa_v2_orchestrator.log`). Every 60 seconds it polls all 3 GKE clusters and regional GCS buckets, cleans up finished K8s Jobs/JobSets, launches the next Step 1 / Step 1b / TPU Queue Worker waves in `S -> A -> C -> B` tier order, syncs Google Sheet v2, and updates this Markdown file.
+1. **Summary of What Has Been Completed (`100.0%` Done, Validated & Cleaned Up):**
+   - **Code & Tests (`docs/checkpoint-load-benchmark`):** Completed all Phase 0 through Phase 5 deliverables (`bench/schema_v2.py`, `bench/harness_v2.py`, `bench/platforms.py`, `bench/stages.py`, `bench/manifests_v2.py`, `bench/step1_download_job.py`, `scripts/generate_v2_manifests.py`, `scripts/run_v2_cluster.sh`, `scripts/build_sheet_v2.py`, `scripts/run_v2_orchestrator.py`). All 96 unit tests pass (`pytest`) and all modular files score `10.00/10` on `pylint`.
+   - **Full Multi-Platform Matrix (`352 / 352` Planned `v2` Rows, `0` `ERROR`, `0` `TIMEOUT`):** Completed `54 / 54` cold regional Step 1 downloads + `12 / 12` DeepSeek Step 1b BF16 conversions/regional transfers, and `136 / 136` TPU queue tasks (`352` planned `v2` `Summary` rows: `291` `OK`, `59` genuine `OOM-HOST`, `1` genuine `OOM-HBM`, `1` `SKIPPED`, `3/3` Tier A repetitions).
+   - **Live Google Sheet v2 & Executive Summary (`0 ERRORS, 0 WARNINGS`):** Synced and forensically validated all 11 tabs (`180,453` live cells) of Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`: `396` `Summary` rows = `352` `v2` + `44` non-overlapping `legacy|`, `54` `Step 1 downloads` rows, `205` `Stages: safetensors_dynamic` rows, `191` `Stages: to_maxtext` rows, `1,498` `Runs` phase records, clickable `gpaste` URLs on every executed row, internal `Experiment Tier` column hidden on `Summary` & `Runs`, `README!A20:B26` findings & limits populated), wrote `checkpoint_load_benchmark/reports/benchmark_v2_summary.md`, and cleaned up all K8s resources across `v7x`, `v6e`, and `v5e`.
 2. **How Another Engineer Can Inspect or Take Over on Cloudtop:**
    ```bash
    # 1. Go to the repo and verify branch is docs/checkpoint-load-benchmark
@@ -193,3 +194,8 @@
 - [2026-11-14 04:23:12 UTC] Launched `v7x` TPU queue worker `mesa-q-v7x-2x2x1-2s-w67` (`2x2x2x1`, min_slices=2) for 1 runnable tasks.
 - [2026-11-14 04:23:42 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1288 mirrored JSONs.
 - [2026-11-14 04:27:57 UTC] Synced Google Sheet v2 (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`) with 1289 mirrored JSONs.
+- [2026-11-14 05:31:14 UTC] `v7x` TPU JobSet `mesa-s3b-v7x-397b-2s` (`qwen3.5-397b-a17b` `2x2x2x1` `unscanned` `to_maxtext` Step 3 = `1952.53s` `OK`) completed (`61/61` on `v7x`, `136/136` overall) and cleaned up; `mesa-v2-orchestrator.service` stopped cleanly.
+- [2026-11-14 07:05:18 UTC] `v5e` CPU Job `mesa-copy-v5e-deepseek4-1600b-v2-cp-v5e-cold` (`5300.98s` cold BF16 regional copy) completed and cleaned up.
+- [2026-11-14 07:14:52 UTC] `v6e` CPU Job `mesa-copy-v6e-deepseek4-1600b-v2-cp-v6e-cold` (`5803.30s` cold BF16 regional copy) completed and cleaned up (`0` active resources across `v7x`, `v6e`, `v5e`).
+- [2026-11-14 07:20:53 UTC] Final GCS mirror (`1291` JSONs), Google Sheet v2 sync (`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`), `README!A20:B26` summary update, and `reports/benchmark_v2_summary.md` completed.
+- [2026-11-14 07:23:13 UTC] Completed 10-step live Google Sheet & CSV forensic validation across `180,453` live cells (`FINAL RESULT: 0 ERRORS, 0 WARNINGS`).

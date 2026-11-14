@@ -1,6 +1,6 @@
 # MaxText Checkpoint Load-Time Benchmark Suite (`to_maxtext` vs. `safetensors_dynamic`)
 
-> **Benchmark v2 (Active):** Multi-platform expansion across **TPU v5e**, **TPU v6e**, and **TPU v7x** is tracked in [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) and [`handoff.md`](handoff.md) (live Sheet v2: [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit)). Smoke tests (`S3`/`S4`, `qwen3-0.6b` on TPU across `v7x 2x2x1`, `v6e 2x4`, and `v5e 16x16`) passed and are logged in Sheet v2; next steps are `T0.3–T0.6` prerequisites and Phases `1–5` (schema, stage instrumentation, regional Step 1 jobs, full 352-row matrix). Pods execute a single committed tarball built from `HEAD` via `scripts/build_code_tarball.py`.
+> **Benchmark v2 (`100%` Completed Across TPU v5e, v6e & v7x):** All **352 planned `v2` configurations** (`136 / 136` TPU queue tasks, `0` `ERROR`, `0` `TIMEOUT`) plus **54 / 54 cold regional Step 1 downloads** across **21 HuggingFace models (`0.6B` to `1600B`)** are complete and validated in Google Sheet v2 [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) and summarized in [`reports/benchmark_v2_summary.md`](reports/benchmark_v2_summary.md) (design & runbook: [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md), [`handoff.md`](handoff.md), [`PROGRESS_LOG.md`](PROGRESS_LOG.md)). Every pod runs a single committed tarball built from `HEAD` via [`scripts/build_code_tarball.py`](scripts/build_code_tarball.py) with `CODE_VERSION.json` provenance.
 
 A self-contained, reproducible benchmark suite for comparing end-to-end and warm checkpoint load times, sub-phase breakdowns, and peak Host RAM / TPU HBM utilization between MaxText's offline Orbax conversion pipeline (**`to_maxtext`**) and on-the-fly distributed SafeTensors loading (**`safetensors_dynamic`**) across:
 - **Scan Modes**: `scanned` (`scan_layers=True`) and `unscanned` (`scan_layers=False`)
@@ -26,17 +26,30 @@ checkpoint_load_benchmark/
 ├── plans/
 │   └── benchmark_v2_plan.md                         # v2 design & Phases 0–5 task backlog across v5e, v6e, and v7x
 ├── bench/
-│   └── platforms.py                                 # Verified PlatformProfile definitions for v7x, v6e, and v5e
+│   ├── schema_v2.py                                 # Canonical v2 column specs, status enums & row validators
+│   ├── stages.py                                    # Per-host stage recorder, barrier timer & RAM/HBM sampler
+│   ├── harness_v2.py                                # v2 result JSON builder, TPU verification & checksum helpers
+│   ├── platforms.py                                 # Verified PlatformProfile definitions for v7x, v6e, and v5e
+│   ├── manifests_v2.py                              # Profile-driven K8s JobSet, Step 1/1b CPU Job & queue builders
+│   ├── step1_download_job.py                        # Cold HF->GCS downloader, DeepSeek FP8/FP4->BF16 & copy-region CLI
+│   ├── legacy_v1.py                                 # Legacy v1 tpu7x JSON -> v2 schema adapter
+│   └── metadata.py                                  # Package/env/downward-API/CODE_VERSION & safetensors header inspector
 ├── benchmark_ckpt_load_time.py                      # Unified benchmark harness, TPU check, multi-slice coordinator & daemon
 ├── bootstrap_tpu7x.py                               # Pod bootstrap: extracts committed code tarball to /tmp/maxtext & verifies CODE_VERSION.json
-├── generate_tpu7x_manifests.py                      # Legacy manifest generator for bodaborg-tpu7x-nap (to be replaced when v2 adds full matrix)
+├── generate_tpu7x_manifests.py                      # Legacy manifest generator for bodaborg-tpu7x-nap
 ├── configs/
+│   ├── models_v2.json                               # 21-model v2 matrix, dtypes, sizes & platform topologies (352 rows)
+│   ├── gpaste_log_urls.json                         # Persistent gpaste URL cache for Summary and Runs log links
 │   ├── model_tiers.env                              # Model tier definitions (v5p Tiers 0-3 + tpu7x Priority 1 & Priority 2) & cluster defaults
-│   └── p1_completion_tasks.json                     # Legacy Priority 1 completion queue tasks (still references old pod trees; replaced in v2)
+│   └── p1_completion_tasks.json                     # Legacy Priority 1 completion queue tasks
 ├── patches/
 │   └── hbmfix/                                      # Archived patch snapshot from earlier P1 debugging (no longer staged by pods)
 ├── scripts/
 │   ├── build_code_tarball.py                        # Builds & uploads maxtext_lance_prs.tar.gz + CODE_VERSION.json from a pushed git commit
+│   ├── generate_v2_manifests.py                     # Generates v2 Step 1/1b CPU Jobs, TPU JobSets & regional queue tasks
+│   ├── run_v2_cluster.sh                            # Multi-platform v2 launcher (--platform {v7x,v6e,v5e} --mode {step1,queue,status,cleanup})
+│   ├── run_v2_orchestrator.py                       # Autonomous multi-cluster v2 orchestrator & continuous Google Sheet sync
+│   ├── build_sheet_v2.py                            # Builds v2 CSVs + gsheets batches/formatting & uploads gpaste log links
 │   ├── make_smoke_jobset.py                         # Generates v2 smoke Indexed JobSets (mesa-smoke-*) from bench/platforms.py
 │   ├── run_smoke.sh                                 # Dry-run or --apply v2 smoke tests on v7x, v6e, or v5e
 │   ├── common.sh                                    # Shared environment setup, PYTHONPATH, HF token & Python interpreter resolution
@@ -53,6 +66,7 @@ checkpoint_load_benchmark/
 ├── k8s/
 │   └── multislice_benchmark_job.yaml.tmpl           # Kubernetes Service + 2-Node Coordinator/Worker Job template for GKE TPU v5p-8
 └── reports/
+    ├── benchmark_v2_summary.md                      # [v2: v7x, v6e, v5e] Executive 352-row summary across 21 models & 3 TPU generations
     ├── team_sync_and_200b_experiment_plan.md        # Team sync, Lance Wang's 3 PRs (#5706, #5828, #5705) & >200B cluster capacity guide
     ├── benchmark_ckpt_load_time_summary.md          # [v5p] Executive 48-config summary (two-row side-by-side comparison table)
     ├── benchmark_ckpt_load_time_report.md           # [v5p] Detailed 48-config engineering report with phase breakdowns
@@ -144,7 +158,24 @@ The earlier Priority 1 comparison described below used a multi-tree layout (`/tm
 
 ## 5. Quick Start & Reproduction Commands
 
-### 5.1 Run Priority 1 (`>200B`) & Priority 2 (`16 Models`) on `bodaborg-tpu7x-nap` (`tpu7x`)
+### 5.0 Run Multi-Platform Benchmark v2 (`v7x`, `v6e`, `v5e`)
+Use [`scripts/run_v2_cluster.sh`](scripts/run_v2_cluster.sh) and [`scripts/build_sheet_v2.py`](scripts/build_sheet_v2.py) to run cold regional Step 1/1b CPU jobs, TPU queue workers, status checks, cleanups, and Google Sheet v2 updates:
+
+```bash
+# Check live K8s JobSets/Jobs/Pods across v7x (us-central1), v6e (southamerica-west1), and v5e (europe-west4):
+./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v7x --mode status
+./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v6e --mode status
+./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v5e --mode status
+
+# Deploy cold Step 1 HF->GCS downloads or TPU queue workers for a platform/tier:
+./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v7x --mode step1 --tier S
+./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v7x --mode queue --topology 2x2x1 --slices 1 --workers 2
+
+# Clean up completed mesa-* K8s JobSets/Jobs/Pods/PVCs:
+./checkpoint_load_benchmark/scripts/run_v2_cluster.sh --platform v7x --mode cleanup
+```
+
+### 5.1 Run Legacy Priority 1 (`>200B`) & Priority 2 (`16 Models`) on `bodaborg-tpu7x-nap` (`tpu7x`)
 Use [`scripts/run_tpu7x_cluster.sh`](scripts/run_tpu7x_cluster.sh) to build and upload the committed code tarball via [`scripts/build_code_tarball.py`](scripts/build_code_tarball.py) (`--upload "${GCS_CODE_DIR}"`), generate Kubernetes manifests via [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py), and deploy pods:
 
 > **Note:** The legacy queue task files ([`configs/p1_completion_tasks.json`](configs/p1_completion_tasks.json), [`configs/p3_tasks.json`](configs/p3_tasks.json)) and [`generate_tpu7x_manifests.py`](generate_tpu7x_manifests.py) still reference the old multi-tree pod paths and will be replaced when v2 adds platform profiles.
@@ -338,6 +369,10 @@ python3 checkpoint_load_benchmark/benchmark_ckpt_load_time.py \
 ---
 
 ## 7. Benchmark Reports & Results (`reports/`)
+
+### 7.0 Multi-Platform Benchmark v2 (`v7x`, `v6e`, `v5e` — `352` Rows, `21` Models `0.6B–1600B`)
+- **[Multi-Platform Benchmark v2 Executive Summary (`v7x`, `v6e`, `v5e`)](reports/benchmark_v2_summary.md)**
+- **[Live Google Sheet v2 (`11` Tabs: `Summary`, `Step 1 downloads`, `Stages`, `Runs`)](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit)**
 
 ### 7.1 TPU v7 (`bodaborg-tpu7x-nap`, `tpu7x-standard-4t`) Reports
 - **[Priority 1 (`>200B`) Progress: Every Test and Its Status](reports/tpu7x_priority1_progress.md)** *(live tracker, updated with the completion queue)*

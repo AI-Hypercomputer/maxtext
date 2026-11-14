@@ -20,24 +20,26 @@
 
 ---
 
-## 2. Current Live Status (as of 2026-11-12)
+## 2. Final Execution Status (Completed 2026-11-14)
 
-### Completed (Committed & Pushed)
-- **Phase 0 (T1–T5)**:
-  - Fixed sheet markdown table separator and stale `README.md` / `handoff.md` docs.
-  - Persisted `worker_upload_max_s`, made `sitecustomize` once-per-process, removed broken legacy shims, fixed `global_devices` docs.
-  - Added `scripts/build_code_tarball.py` (`CODE_VERSION.json`, dirty/unpushed guard, `code_version` written into every phase JSON).
-  - Updated `bootstrap_tpu7x.py`, `scripts/tpu7x_task_queue.py`, `scripts/run_tpu7x_cluster.sh` so pods extract only `/tmp/maxtext` from the pushed tarball and keep the 16-worker download cap without editing `src/`.
-- **Smoke Tests & TPU Verification (S0–S4)**:
-  - **S0 Preflight**: Verified Kueue, quotas, image pulls (`yaoyuchen-runner:ds41-2026-10-22-16-03-48`), HF reachability, and GCS access across all 3 clusters; created v5e KSA `mesa-bench` with `roles/storage.objectAdmin` + `roles/storage.legacyBucketReader` on `gs://mesa-maxtext`.
-  - **S1 Bundle Upload**: Initial bundle pushed at `82cc1c701`, then rebuilt/uploaded from `c64b44244` (with multi-host gRPC fix) and `site_packages_overlay.tar.gz` to `gs://mesa-maxtext/mesa-bench-v2/code/`.
-  - **S2 Code**: Added `bench/platforms.py` (`v7x`, `v6e`, `v5e`), `scripts/make_smoke_jobset.py`, `scripts/run_smoke.sh`, and mandatory TPU backend/device-count verification (`check_tpu_backend`) in `benchmark_ckpt_load_time.py`.
-  - **Multi-host `v5e` `SliceBuilder` gRPC fix (`c64b44244`)**: First `v5e` `16x16` smoke timed out in 64-host `SliceBuilder` ALTS gRPC handshake between GKE Workload Identity pods. Added `_ensure_tpu_insecure_grpc_init_args` in `init_worker_runtime` (appends `--slicebuilder_use_insecure_grpc=true` when `total_procs > 1` and `--megascale_use_insecure_grpc=true` when `num_slices > 1` if supported by `libtpu.so`; disable via `KEEP_ALTS_GRPC=1`), unbuffered worker streaming (`PYTHONUNBUFFERED=1`), and remote-abort error attribution (`62` unit tests pass).
-  - **S3/S4 Smoke Results (`qwen3-0.6b`, `scanned` & `unscanned`, both pipelines, 0 failures, all JobSets deleted)**:
-    - **v7x** (`2x2x1`, `1` host, `8` `TPU7x` devices @ `82cc1c701`, `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v7x/`): cold Step 1 `17.64s` (`local 15.65s`); `scanned` Step 2 `17.16s`, Step 3 `2.53s`, `safetensors_dynamic` `15.34s` (Columns e2e `52.99s` vs `32.99s`, `1.61x`; CSV `37.34s` vs `32.99s`); `unscanned` Step 2 `63.06s`, Step 3 `3.14s`, `safetensors_dynamic` `7.04s` (Columns e2e `99.49s` vs `24.68s`, `4.03x`; CSV `83.84s` vs `24.68s`).
-    - **v6e** (`2x4`, `1` host, `8` `TPU v6 lite` devices @ `82cc1c701`, `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v6e/`): cold Step 1 `102.24s` (`local 83.06s`); `scanned` Step 2 `79.13s`, Step 3 `23.66s`, `safetensors_dynamic` `30.00s` (Columns e2e `288.09s` vs `132.24s`, `2.18x`; CSV `205.03s` vs `132.24s`); `unscanned` Step 2 `237.41s`, Step 3 `33.49s`, `safetensors_dynamic` `23.19s` (Columns e2e `456.20s` vs `125.43s`, `3.64x`; CSV `373.13s` vs `125.43s`).
-    - **v5e** (`16x16`, `64` hosts, `256` `TPU v5 lite` devices @ `c64b44244`, `gs://mesa-maxtext/mesa-bench-v2/smoke/run_smoke-v5e-r2/`): cold Step 1 `81.96s` (`local 67.32s`); `scanned` Step 2 `64.82s`, Step 3 `23.64s`, `safetensors_dynamic` `54.78s` (Columns e2e `237.74s` vs `136.74s`, `1.74x`; CSV `170.42s` vs `136.74s`); `unscanned` Step 2 `161.60s`, Step 3 `21.53s`, `safetensors_dynamic` `45.23s` (Columns e2e `332.40s` vs `127.18s`, `2.61x`; CSV `265.09s` vs `127.18s`). *(Note: remote host 1 raised `-6` during coordinator teardown after writing valid JSONs on `safetensors_dynamic`.)*
-- **Google Sheet v2**: Created `1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I` (`11` tabs), marked `S3` & `S4` `Done`, and populated `Summary` with the `12` Tier S rows (`12/20` Tier S = `60.0%`; `12/352` overall = `3.4%`).
+### All Phases `0–5` (`T0.1–T5.3`) Completed & Validated (`100.0%`)
+- **Phase 0 (`T0.1–T0.8`)**:
+  - Added [`scripts/build_code_tarball.py`](../scripts/build_code_tarball.py) (`CODE_VERSION.json`, dirty/unpushed guard, `code_version` recorded in every phase JSON).
+  - Updated [`bootstrap_tpu7x.py`](../bootstrap_tpu7x.py) and [`scripts/tpu7x_task_queue.py`](../scripts/tpu7x_task_queue.py) so pods extract only `/tmp/maxtext` from the pushed tarball with clean `/ramdisk` teardown between tasks.
+  - Verified regional buckets `gs://mesa-maxtext-{us-central1,southamerica-west1,europe-west4}/mesa-bench-v2/`, `mesa-hf-token` secrets, Kueue queues, and KSA `mesa-bench`.
+- **Phase 1 (`T1.1–T1.6`)**:
+  - Implemented and unit-tested [`bench/schema_v2.py`](../bench/schema_v2.py), [`bench/stages.py`](../bench/stages.py), [`bench/legacy_v1.py`](../bench/legacy_v1.py), [`bench/metadata.py`](../bench/metadata.py), [`configs/models_v2.json`](../configs/models_v2.json), and [`bench/step1_download_job.py`](../bench/step1_download_job.py) (`96` unit tests passing, `pylint 10.00/10`).
+- **Phase 2 (`T2.1–T2.10`)**:
+  - Instrumented per-stage timings (`setup_*`, `safetensors_dynamic_step{1,2}_*`, `to_maxtext_step{1,2,3}_*`), per-host RAM/RSS & TPU HBM milestones, `check_tpu_backend` enforcement, synchronized multi-host teardown (`worker_teardown_results_written`), Tier A parameter checksum verification, and cold JAX compilation cache isolation (`jax_compilation_cache_state = empty`).
+- **Phase 3 (`T3.1–T3.5`)**:
+  - Completed [`bench/platforms.py`](../bench/platforms.py), [`bench/manifests_v2.py`](../bench/manifests_v2.py), [`scripts/generate_v2_manifests.py`](../scripts/generate_v2_manifests.py), [`scripts/run_v2_cluster.sh`](../scripts/run_v2_cluster.sh), and [`scripts/run_v2_orchestrator.py`](../scripts/run_v2_orchestrator.py) across `v7x` (`2x2x1`..`2x4x4`), `v6e` (`2x4`..`16x16`), and `v5e` (`16x16`, 64 hosts).
+- **Phase 4 & Phase 5 (`T4.1–T5.3`) — Full 352-Row Matrix Executed & Validated**:
+  - **Cold Step 1 (`HF -> GCS`) & DeepSeek Step 1b (`FP8/FP4 -> BF16`):** **`54 / 54` (`100%`)** completed cold across `us-central1` (`21`), `southamerica-west1` (`21`), and `europe-west4` (`12`), plus all 12 regional DeepSeek Step 1b BF16 conversions/transfers.
+  - **TPU Benchmark Matrix (`136 / 136` queue tasks = `352 / 352` planned `v2` `Summary` rows, `0` `ERROR`, `0` `TIMEOUT`):**
+    - **`v7x` (`us-central1`):** `61 / 61` tasks (`164 / 164` rows: `142` `OK`, `22` genuine `OOM-HOST` in single-host CPU `to_maxtext` Step 2, `0` `ERROR`, `0` `TIMEOUT`, `3/3` Tier A repetitions).
+    - **`v6e` (`southamerica-west1`):** `53 / 53` tasks (`140 / 140` rows: `127` `OK`, `13` genuine `OOM-HOST`, `0` `ERROR`, `0` `TIMEOUT`, `3/3` Tier A repetitions).
+    - **`v5e` (`europe-west4`):** `22 / 22` tasks (`48 / 48` rows: `22` `OK`, `24` genuine `OOM-HOST` [`18` `to_maxtext` S2 + `6` unfused Qwen3 MoE `safetensors_dynamic` on `192 GiB` hosts], `1` genuine `OOM-HBM` on `deepseek4-1600b` `2x16x16`, `1` `SKIPPED`, `0` `ERROR`, `0` `TIMEOUT`, `3/3` Tier A repetitions).
+  - **Google Sheet v2 & Summary Report:** Synced all 11 tabs of [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) via [`scripts/build_sheet_v2.py`](../scripts/build_sheet_v2.py) with clickable `gpaste` logs on every executed row, hidden internal `Experiment Tier` column on `Summary`/`Runs`, `README` findings & limits block, and executive summary in [`reports/benchmark_v2_summary.md`](../reports/benchmark_v2_summary.md).
 
 ### Verified Cluster Facts (`bench/platforms.py`)
 
@@ -60,13 +62,10 @@ Execution tier order per platform: **S** (smoke) -> **A** (core) -> **C** (>200B
 
 ---
 
-## 4. Remaining Tasks (Backlog to Pick Up)
+## 4. Completed Deliverables (`T0.3–T5.3`)
 
-### Immediate Next (Start Here)
-- **T0.3–T0.6 Cluster & Storage Prereqs**:
-  - **T0.3**: Create regional buckets `gs://mesa-maxtext-southamerica-west1` and `gs://mesa-maxtext-europe-west4` with Workload Identity permissions so v6e and v5e loads do not read across continents from the US multi-region bucket.
-  - **T0.4**: Create `mesa-hf-token` secret on v7x/v6e/v5e for gated HuggingFace repos (`meta-llama/*`, `google/*`).
-  - **T0.5 / T0.6**: Confirm budget/TPU chip-hours & check v6e `8x8`/`16x16` + v5e 2x`16x16` capacity constraints.
+### Cluster & Storage Prerequisites (`Done`)
+- **T0.3–T0.6**: Regional buckets `gs://mesa-maxtext-{us-central1,southamerica-west1,europe-west4}/mesa-bench-v2/`, `mesa-hf-token` secrets across all 3 clusters, KSA `mesa-bench` on `v5e`, and topology capacity (`v6e` up to `16x16`, `v5e` up to `2×16x16`, `v7x` up to `1×2x4x4` / `2×2x2x2`) verified and cleaned up after completion.
 
 ### Phase 1: Schema, Stage Recorder, Metadata & Step 1 Download Job (Pure Python, Test-First)
 - **T1.1 `bench/schema_v2.py`**: Canonical v2 column definitions (`step1_*`, `step1b_deepseek_*`, `setup_*`, `safetensors_dynamic_*`, `to_maxtext_*`, `memory_*`, `speedup_*`), record validation, status/failure enums (`OK`, `FAILED`, `NOT RUN`, `BLOCKED`, `SKIPPED`, `NOT-TPU`, `OOM-HBM`, `OOM-HOST`, `TIMEOUT`, `PREEMPTED`, `ERROR`).
