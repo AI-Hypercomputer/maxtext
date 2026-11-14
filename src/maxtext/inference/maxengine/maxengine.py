@@ -261,6 +261,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       slot=None,
       encoder_images=None,
       encoder_image_masks=None,
+      encoder_image_position_ids=None,
       encoder_videos=None,
       encoder_video_masks=None,
       encoder_video_grid_thw=None,
@@ -284,6 +285,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         decoder_segment_ids=decoder_segment_ids,
         encoder_images=encoder_images,
         encoder_image_masks=encoder_image_masks,
+        encoder_image_position_ids=encoder_image_position_ids,
         encoder_videos=encoder_videos,
         encoder_video_masks=encoder_video_masks,
         encoder_video_grid_thw=encoder_video_grid_thw,
@@ -638,6 +640,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       mrope_deltas: jax.Array | None = None,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
+      image_position_ids: jax.Array | None = None,
       videos: jax.Array | None = None,
       video_masks: jax.Array | None = None,
       video_grid_thw: tuple[int, int, int] | None = None,
@@ -668,6 +671,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       padded_tokens: The input token sequence, padded to a fixed length.
       images: Optional input images for multimodal models.
       image_masks: Optional image masks for multimodal models with tiled images.
+      image_position_ids: Optional per-patch (x, y) positions [N, L, 2] for images given as patches [N, L, F].
       audio_values: Optional input audio for multimodal models.
       audio_masks: Optional audio masks for multimodal models (currently unused).
       true_length: The actual length of `padded_tokens` before padding.
@@ -713,7 +717,11 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       positions = jnp.expand_dims(jnp.arange(start_position, start_position + input_tokens.shape[1]), 0)
 
     if self.config.use_multimodal and images is not None:
-      if images.ndim == 3:
+      if image_position_ids is not None:
+        # [N, L, F] patches with [N, L, 2] positions: add the batch dimension.
+        images = images[jnp.newaxis, ...]
+        image_position_ids = image_position_ids[jnp.newaxis, ...]
+      elif images.ndim == 3:
         # For Gemma3 single image, add batch and image count dimensions
         images = images[jnp.newaxis, jnp.newaxis, ...]
         image_masks = image_masks[jnp.newaxis, jnp.newaxis, ...] if image_masks is not None else None
@@ -742,6 +750,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           decoder_segment_ids=sequence_indicator,
           encoder_images=images,
           encoder_image_masks=image_masks,
+          encoder_image_position_ids=image_position_ids,
           encoder_videos=videos,
           encoder_video_masks=video_masks,
           encoder_video_grid_thw=video_grid_thw,
@@ -825,6 +834,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       mrope_deltas: jax.Array | None = None,
       images: jax.Array | None = None,
       image_masks: jax.Array | None = None,
+      image_position_ids: jax.Array | None = None,
       videos: jax.Array | None = None,
       video_masks: jax.Array | None = None,
       video_grid_thw: jax.Array | None = None,
@@ -865,6 +875,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         mrope_deltas=mrope_deltas,
         images=images,
         image_masks=image_masks,
+        image_position_ids=image_position_ids,
         videos=videos,
         video_masks=video_masks,
         video_grid_thw=video_grid_thw,

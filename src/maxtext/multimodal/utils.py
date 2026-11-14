@@ -30,6 +30,8 @@ except ImportError:
   librosa = None
 
 NUM_IMAGE_CHANNELS = 3  # RGB
+# Position of a padded patch in `PreprocessorOutput.image_position_ids`.
+IMAGE_POSITION_PAD_VALUE = -1
 
 
 @dataclass
@@ -48,6 +50,8 @@ class PreprocessorOutput:
                    This is particularly relevant for models like Llama4 that handle
                    images by tiling.
     num_images: Number of images in the output.
+    image_position_ids: Optional per-patch (x, y) positions [N, L, 2] for images given as patches
+                        [N, L, F]; padded patches hold IMAGE_POSITION_PAD_VALUE.
     audio_values: An optional array containing processed audio features.
     audio_mask: An optional array indicating valid audio segments.
   """
@@ -56,9 +60,19 @@ class PreprocessorOutput:
   pixel_mask: None | np.ndarray = None
   aspect_ratios: None | np.ndarray = None
   num_images: int = 0
+  image_position_ids: None | np.ndarray = None
   # Audio attributes.
   audio_values: None | np.ndarray = None
   audio_mask: None | np.ndarray = None
+
+
+def get_max_num_images(max_length: int, image_offset: int, max_num_images_per_example: int) -> int:
+  """Image slots per example when each image adds `image_offset` tokens."""
+  # Reserve space for at least one text token.
+  max_num_images = (max_length - 1) // image_offset
+  if max_num_images_per_example > 0:
+    max_num_images = min(max_num_images_per_example, max_num_images)
+  return max_num_images
 
 
 def convert_to_RGB(image):

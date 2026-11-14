@@ -105,7 +105,7 @@ def preprocess_mm_data(config):
     from maxtext.multimodal.processor_gemma4 import preprocess_mm_data_gemma4  # pylint: disable=import-outside-toplevel
 
     images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",")]
-    processor_outputs = preprocess_mm_data_gemma4(images)
+    processor_outputs = preprocess_mm_data_gemma4(images, config)
   elif vision_block in ["llama4"]:
     from maxtext.multimodal.processor_llama4 import preprocess_mm_data_llama4  # pylint: disable=import-outside-toplevel
 
@@ -137,7 +137,7 @@ def preprocess_image_for_training(image, config):
   elif vision_block in ["gemma4"]:
     from maxtext.multimodal.processor_gemma4 import preprocess_mm_data_gemma4  # pylint: disable=import-outside-toplevel
 
-    return preprocess_mm_data_gemma4(image)
+    return preprocess_mm_data_gemma4(image, config)
   elif vision_block in ["llama4"]:
     from maxtext.multimodal.processor_llama4 import preprocess_mm_data_llama4  # pylint: disable=import-outside-toplevel
 
@@ -166,7 +166,7 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
   elif vision_block in ["gemma4"]:
     from maxtext.multimodal.processor_gemma4 import get_image_offsets_gemma4  # pylint: disable=import-outside-toplevel
 
-    return get_image_offsets_gemma4(processor_output)
+    return get_image_offsets_gemma4(processor_output, config)
   elif vision_block in ["llama4"]:
     from maxtext.multimodal.processor_llama4 import get_image_offsets_llama4  # pylint: disable=import-outside-toplevel
 
@@ -276,7 +276,9 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_gemma4 import add_extra_tokens_for_images_gemma4  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_images_gemma4(
-        tokens, max_num_images=processor_output.num_images  # pyrefly: ignore[missing-attribute]
+        tokens,
+        max_num_images=processor_output.num_images,  # pyrefly: ignore[missing-attribute]
+        num_soft_tokens_per_image=getattr(processor_output, "num_soft_tokens_per_image", None),
     )  # pyrefly: ignore[missing-attribute]
   elif vision_block in ["llama4"]:
     from maxtext.multimodal.processor_llama4 import add_extra_tokens_for_images_llama4  # pylint: disable=import-outside-toplevel
@@ -315,6 +317,15 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
   return image_shape
+
+
+def get_dummy_patch_shape_for_init(config, batch_size=1):
+  """Shape [B, N, L, F] of images given as patches with per-patch positions; None for models that take whole images."""
+  if _get_vision_block(config) in ["gemma4"]:
+    from maxtext.multimodal.processor_gemma4 import get_dummy_patch_shape_for_init_gemma4  # pylint: disable=import-outside-toplevel
+
+    return get_dummy_patch_shape_for_init_gemma4(config, batch_size)
+  return None
 
 
 def get_dummy_audio_shape_for_init(config):

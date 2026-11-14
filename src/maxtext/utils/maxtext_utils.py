@@ -177,6 +177,11 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
       shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
       shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
       shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
+    elif (patch_shape := mm_processor.get_dummy_patch_shape_for_init(config, batch_size)) is not None:
+      # Images given as patches, with an (x, y) position per patch.
+      shaped_batch["images"] = jax.ShapeDtypeStruct(patch_shape, jnp.float32, sharding=batch_sharding)
+      positions_shape = patch_shape[:-1] + (2,)
+      shaped_batch["image_position_ids"] = jax.ShapeDtypeStruct(positions_shape, jnp.int32, sharding=batch_sharding)
     else:
       image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size)
       shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)

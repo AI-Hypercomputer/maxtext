@@ -60,9 +60,9 @@ from typing import Any, Callable, List, Sequence
 import absl
 import ml_dtypes
 from flax import nnx
-from flax.nnx import variablelib
 from huggingface_hub import hf_hub_download, list_repo_files
 import jax
+from maxtext.common.common_types import variable_collection_name
 from maxtext.configs import pyconfig
 from maxtext.configs.types import DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
@@ -419,7 +419,7 @@ def get_maxtext_model_info(config):
   for path, variable in nnx.to_flat_state(nnx.state(abstract_model)):
     if isinstance(variable, nnx.RngState):
       continue
-    node = abstract_params_tree.setdefault(variablelib.variable_name_from_type(type(variable), allow_register=True), {})
+    node = abstract_params_tree.setdefault(variable_collection_name(type(variable)), {})
     *parents, name = param_key_parts_from_path(path)
     for part in parents:
       node = node.setdefault(part, {})
