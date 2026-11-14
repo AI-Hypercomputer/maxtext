@@ -33,6 +33,7 @@ Sections (in dependency order):
 
 from collections.abc import Callable
 from collections.abc import Sequence
+import functools
 import math
 from typing import Any
 
@@ -245,7 +246,7 @@ def _init_state(shape: tuple[int, ...], state: jax.Array | None) -> jax.Array:
   return jnp.zeros(shape, jnp.float32) if state is None else state.astype(jnp.float32)
 
 
-def _block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax.Array:
+def _block_doubling_unit_lower_inverse_impl(s_mat: jax.Array, chunk_size: int) -> jax.Array:
   """Computes the exact inverse of (I + s_mat) for strictly lower-triangular s_mat with MXU-friendly matmuls.
 
   Bottom-up block doubling: starting from 1x1 blocks (inverse = I), each level merges adjacent b x b diagonal
@@ -269,6 +270,41 @@ def _block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax
   return inv
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _block_doubling_unit_lower_inverse_f32(s_mat: jax.Array, chunk_size: int) -> jax.Array:
+  """float32-only core of the block-doubling inverse with an analytical 2-matmul VJP."""
+  return _block_doubling_unit_lower_inverse_impl(s_mat, chunk_size)
+
+
+def _block_doubling_unit_lower_inverse_fwd(s_mat: jax.Array, chunk_size: int) -> tuple[jax.Array, jax.Array]:
+  inv = _block_doubling_unit_lower_inverse_impl(s_mat, chunk_size)
+  return inv, inv
+
+
+def _block_doubling_unit_lower_inverse_bwd(chunk_size: int, inv: jax.Array, d_inv: jax.Array) -> tuple[jax.Array]:
+  prec = jax.lax.Precision.HIGHEST
+  inv_t = jnp.swapaxes(inv, -1, -2)
+  d_s = -jnp.matmul(jnp.matmul(inv_t, d_inv, precision=prec), inv_t, precision=prec)
+  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
+  return (jnp.where(mask, d_s, 0.0),)
+
+
+_block_doubling_unit_lower_inverse_f32.defvjp(
+    _block_doubling_unit_lower_inverse_fwd,
+    _block_doubling_unit_lower_inverse_bwd,
+)
+
+
+def _block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax.Array:
+  """Computes (I + s_mat)^-1 with an analytical 2-matmul VJP instead of differentiating through log2(C) stages.
+
+  The inverse is always computed in float32. Casting here (outside the custom_vjp) lets JAX's own
+  convert_element_type VJP return the cotangent in the caller's dtype, so bfloat16 inputs differentiate
+  correctly without threading a dtype residual through the custom rule.
+  """
+  return _block_doubling_unit_lower_inverse_f32(s_mat.astype(jnp.float32), chunk_size)
+
+
 def jax_chunk_gated_delta_rule(
     query: jax.Array,
     key: jax.Array,
@@ -289,7 +325,11 @@ def jax_chunk_gated_delta_rule(
     query, key = l2norm(query, dim=-1, eps=1e-6), l2norm(key, dim=-1, eps=1e-6)
 
   query, key, value, beta, g = (jnp.swapaxes(x.astype(jnp.float32), 1, 2) for x in (query, key, value, beta, g))
-  b, h, s, d_k = key.shape
+  b, h_k, s, d_k = key.shape
+  h = value.shape[1]
+  if h % h_k != 0:
+    raise ValueError(f"Expected value heads ({h}) divisible by key heads ({h_k}).")
+  rep = h // h_k
   d_v = value.shape[-1]
   pad_size = (chunk_size - s % chunk_size) % chunk_size
   if pad_size > 0:
@@ -299,15 +339,24 @@ def jax_chunk_gated_delta_rule(
   total_s = s + pad_size
   num_chunks = total_s // chunk_size
   beta_c = jnp.expand_dims(beta.reshape(b, h, num_chunks, chunk_size), -1)
-  query = (query * (1.0 / jnp.sqrt(d_k))).reshape(b, h, num_chunks, chunk_size, d_k)
-  key = key.reshape(b, h, num_chunks, chunk_size, d_k)
-  k_beta, v_beta = key * beta_c, value.reshape(b, h, num_chunks, chunk_size, d_v) * beta_c
+  query = (query * (1.0 / jnp.sqrt(d_k))).reshape(b, h_k, num_chunks, chunk_size, d_k)
+  key = key.reshape(b, h_k, num_chunks, chunk_size, d_k)
+  v_beta = value.reshape(b, h, num_chunks, chunk_size, d_v) * beta_c
   g = g.reshape(b, h, num_chunks, chunk_size)
 
   prec = jax.lax.Precision.HIGHEST
   g_cumsum = jnp.cumsum(g, axis=-1)
   decay_mask = jnp.tril(jnp.exp(jnp.tril(jnp.expand_dims(g_cumsum, -1) - jnp.expand_dims(g_cumsum, -2))))
-  s_mat = (jnp.matmul(k_beta, jnp.swapaxes(key, -1, -2), precision=prec)) * jnp.tril(decay_mask, k=-1)
+  if rep == 1:
+    k_beta = key * beta_c
+    s_mat = (jnp.matmul(k_beta, jnp.swapaxes(key, -1, -2), precision=prec)) * jnp.tril(decay_mask, k=-1)
+  else:
+    key_grp = key[:, :, None, :, :, :]
+    k_beta_grp = key_grp * beta_c.reshape(b, h_k, rep, num_chunks, chunk_size, 1)
+    s_mat = jnp.matmul(k_beta_grp, jnp.swapaxes(key_grp, -1, -2), precision=prec).reshape(
+        b, h, num_chunks, chunk_size, chunk_size
+    ) * jnp.tril(decay_mask, k=-1)
+    k_beta = k_beta_grp.reshape(b, h, num_chunks, chunk_size, d_k)
   rhs = jnp.concatenate([v_beta, k_beta * jnp.expand_dims(jnp.exp(g_cumsum), -1)], axis=-1)
   if chunk_inverse == "block_doubling":
     solved = jnp.matmul(_block_doubling_unit_lower_inverse(s_mat, chunk_size), rhs, precision=prec)
@@ -319,12 +368,19 @@ def jax_chunk_gated_delta_rule(
   init_state = _init_state((b, h, d_k, d_v), initial_state)
 
   def _chunk_step(carry, xs):
-    q_i, k_i, v_i, k_cd_i, dm_i, g_i = xs
+    q_in, k_in, v_i, k_cd_i, dm_i, g_i = xs
+    qk = jnp.matmul(q_in, jnp.swapaxes(k_in, -1, -2), precision=prec)
+    if rep > 1:
+      qk = jnp.broadcast_to(qk[:, :, None, :, :], (b, h_k, rep, chunk_size, chunk_size)).reshape(
+          b, h, chunk_size, chunk_size
+      )
+      q_i = jnp.broadcast_to(q_in[:, :, None, :, :], (b, h_k, rep, chunk_size, d_k)).reshape(b, h, chunk_size, d_k)
+      k_i = jnp.broadcast_to(k_in[:, :, None, :, :], (b, h_k, rep, chunk_size, d_k)).reshape(b, h, chunk_size, d_k)
+    else:
+      q_i, k_i = q_in, k_in
     v_new = v_i - jnp.matmul(k_cd_i, carry, precision=prec)
     attn_inter = jnp.matmul(q_i * jnp.expand_dims(jnp.exp(g_i), -1), carry, precision=prec)
-    core_out = attn_inter + jnp.matmul(
-        (jnp.matmul(q_i, jnp.swapaxes(k_i, -1, -2), precision=prec)) * dm_i, v_new, precision=prec
-    )
+    core_out = attn_inter + jnp.matmul(qk * dm_i, v_new, precision=prec)
     decay_last = jnp.expand_dims(jnp.exp(g_i[..., -1:]), -1)
     k_decay = k_i * jnp.expand_dims(jnp.exp(g_i[..., -1:] - g_i), -1)
     return carry * decay_last + jnp.matmul(jnp.swapaxes(k_decay, -1, -2), v_new, precision=prec), core_out
@@ -470,11 +526,10 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
       value = jnp.where(mask[:, :, None, None], value, 0.0)
       g = jnp.where(mask[:, :, None], g, 0.0)
 
-    if self.num_v_heads // self.num_k_heads > 1:
-      rep = self.num_v_heads // self.num_k_heads
-      query, key = jnp.repeat(query, rep, axis=2), jnp.repeat(key, rep, axis=2)
-
     if s == 1 and initial_state is not None:
+      if self.num_v_heads // self.num_k_heads > 1:
+        rep = self.num_v_heads // self.num_k_heads
+        query, key = jnp.repeat(query, rep, axis=2), jnp.repeat(key, rep, axis=2)
       core_attn_out, last_state = jax_recurrent_gated_delta_rule(
           query,
           key,
