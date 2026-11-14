@@ -275,6 +275,7 @@ ModelName = Literal[
     "kimi-k2-1t",
     "gemma-7b",
     "gemma-2b",
+    "pi05-base",
     "gemma2-2b",
     "gemma2-9b",
     "gemma2-27b",
@@ -2057,6 +2058,21 @@ class Ming(BaseModel):
   ming_norm_audio_embeds: bool = Field(
       True, description="L2-normalize the projected audio embeddings (norm_query_embeds)."
   )
+
+
+class Pi05ActionExpert(BaseModel):
+  """pi0.5 vision-language-action model: Gemma-300M flow-matching action expert next to the Gemma-2B VLM."""
+
+  action_expert: str = Field("none", description="Action expert riding on the decoder block: 'none' or 'pi05'.")
+  action_dim: int = Field(32, description="(Padded) action / state dimension of the action expert.")
+  action_horizon: int = Field(50, description="Number of action tokens (chunk length) predicted per call.")
+  action_hidden_size: int = Field(1024, description="Width of the action-expert stream (Gemma-300M).")
+  action_mlp_dim: int = Field(4096, description="Intermediate size of the action-expert GeGLU MLP.")
+  action_num_cameras: int = Field(3, description="Number of camera slots in the pi0.5 prefix.")
+  flow_num_inference_steps: int = Field(10, description="Euler steps for flow-matching action sampling.")
+  flow_min_period: float = Field(0.004, description="Min period of the sinusoidal flow-time embedding.")
+  flow_max_period: float = Field(4.0, description="Max period of the sinusoidal flow-time embedding.")
+  pi05_max_token_len: int = Field(200, description="Padded length of the pi0.5 language prompt.")
 
 
 class Qwen3Next(BaseModel):
@@ -4760,6 +4776,7 @@ class MaxTextConfig(
     Qwen3Next,
     Qwen3_8FlashNext,
     Ming,
+    Pi05ActionExpert,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -6643,6 +6660,7 @@ class MaxTextConfig(
       if self.model_name in ("gemma4-e2b", "gemma4-e4b"):
         raise ValueError(f"Multimodal is not yet supported for {self.model_name}; only text inputs are supported.")
       valid_mm_models = (
+          "pi05-base",
           "gemma3-4b",
           "gemma3-12b",
           "gemma3-27b",

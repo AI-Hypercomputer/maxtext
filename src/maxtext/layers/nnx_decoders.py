@@ -1515,6 +1515,16 @@ class NNXDecoder(nnx.Module):
     if cfg.decoder_block not in layer_map:
       raise ValueError(f"Incorrect decoder_block name {cfg.decoder_block.value=}")
 
+    # pi0.5: the Gemma-300M action expert rides on the Gemma decoder layers (unscanned only).
+    if getattr(cfg, "action_expert", "none") == "pi05":
+      if cfg.decoder_block != DecoderBlockType.GEMMA:
+        raise ValueError("action_expert='pi05' requires decoder_block='gemma'")
+      if cfg.scan_layers:
+        raise NotImplementedError("action_expert='pi05' is only implemented for scan_layers=False")
+      from maxtext.models import pi05  # pylint: disable=import-outside-toplevel
+
+      return [pi05.Pi05DecoderLayer]
+
     return layer_map[cfg.decoder_block]
 
   def minimal_policy(self, with_context=False, with_quantization=False):

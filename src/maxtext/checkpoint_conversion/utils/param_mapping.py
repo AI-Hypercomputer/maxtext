@@ -5434,7 +5434,181 @@ def HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
   return hooks
 
 
+def PI05_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """pi0.5 (lerobot/pi05_base, openpi layout): PaliGemma (SigLIP + Gemma-2B) + Gemma-300M action expert.
+
+  Layer counts are taken from the MaxText config so that truncated (mini) checkpoints convert as well.
+  Only unscanned layers are supported.
+  """
+  if scan_layers:
+    raise NotImplementedError("pi05 conversion supports scan_layers=False only")
+  del config
+  nlayers = maxtext_config.num_decoder_layers
+  nvis = maxtext_config.num_hidden_layers_for_vit
+  p = "paligemma_with_expert."
+  lm = p + "paligemma.model.language_model."
+  ex = p + "gemma_expert.model."
+  vt = p + "paligemma.model.vision_tower.vision_model."
+  vis = "params-vision_encoder-Gemma3VisionEncoderLayer_0-"
+  mapping = {
+      "params-token_embedder-embedding": p + "paligemma.lm_head.weight",
+      "params-decoder-decoder_norm-scale": lm + "norm.weight",
+      # Action head
+      "params-action_head-action_in_proj-kernel": "action_in_proj.weight",
+      "params-action_head-action_in_proj-bias": "action_in_proj.bias",
+      "params-action_head-action_out_proj-kernel": "action_out_proj.weight",
+      "params-action_head-action_out_proj-bias": "action_out_proj.bias",
+      "params-action_head-time_mlp_in-kernel": "time_mlp_in.weight",
+      "params-action_head-time_mlp_in-bias": "time_mlp_in.bias",
+      "params-action_head-time_mlp_out-kernel": "time_mlp_out.weight",
+      "params-action_head-time_mlp_out-bias": "time_mlp_out.bias",
+      "params-action_head-norm_action-dense-kernel": ex + "norm.dense.weight",
+      "params-action_head-norm_action-dense-bias": ex + "norm.dense.bias",
+      # SigLIP + projector
+      vis + "embedding-kernel": vt + "embeddings.patch_embedding.weight",
+      vis + "embedding-bias": vt + "embeddings.patch_embedding.bias",
+      vis + "pos_embedding": vt + "embeddings.position_embedding.weight",
+      vis + "Transformer-encoder_norm-scale": vt + "post_layernorm.weight",
+      vis + "Transformer-encoder_norm-bias": vt + "post_layernorm.bias",
+      "params-vision_encoder-VisionEmbedder_0-custom_linear_0-kernel": p
+      + "paligemma.model.multi_modal_projector.linear.weight",
+      "params-vision_encoder-VisionEmbedder_0-custom_linear_0-bias": p
+      + "paligemma.model.multi_modal_projector.linear.bias",
+  }
+  vision_params = [
+      ("LayerNorm_0-scale", "layer_norm1.weight"),
+      ("LayerNorm_0-bias", "layer_norm1.bias"),
+      ("LayerNorm_1-scale", "layer_norm2.weight"),
+      ("LayerNorm_1-bias", "layer_norm2.bias"),
+      ("MultiHeadDotProductAttention_0-query-kernel", "self_attn.q_proj.weight"),
+      ("MultiHeadDotProductAttention_0-query-bias", "self_attn.q_proj.bias"),
+      ("MultiHeadDotProductAttention_0-key-kernel", "self_attn.k_proj.weight"),
+      ("MultiHeadDotProductAttention_0-key-bias", "self_attn.k_proj.bias"),
+      ("MultiHeadDotProductAttention_0-value-kernel", "self_attn.v_proj.weight"),
+      ("MultiHeadDotProductAttention_0-value-bias", "self_attn.v_proj.bias"),
+      ("MultiHeadDotProductAttention_0-out-kernel", "self_attn.out_proj.weight"),
+      ("MultiHeadDotProductAttention_0-out-bias", "self_attn.out_proj.bias"),
+      ("MlpBlockViT_0-Dense_0-kernel", "mlp.fc1.weight"),
+      ("MlpBlockViT_0-Dense_0-bias", "mlp.fc1.bias"),
+      ("MlpBlockViT_0-Dense_1-kernel", "mlp.fc2.weight"),
+      ("MlpBlockViT_0-Dense_1-bias", "mlp.fc2.bias"),
+  ]
+  for i in range(nvis):
+    for mx, hf in vision_params:
+      mapping[f"{vis}Transformer-encoderblock_{i}-{mx}"] = f"{vt}encoder.layers.{i}.{hf}"
+
+  layer_params = [
+      # VLM (Gemma-2B) stream
+      ("pre_self_attention_norm-scale", lm, "input_layernorm.weight"),
+      ("pre_ffw_norm-scale", lm, "post_attention_layernorm.weight"),
+      ("self_attention-query-kernel", lm, "self_attn.q_proj.weight"),
+      ("self_attention-key-kernel", lm, "self_attn.k_proj.weight"),
+      ("self_attention-value-kernel", lm, "self_attn.v_proj.weight"),
+      ("self_attention-out-kernel", lm, "self_attn.o_proj.weight"),
+      ("mlp-wi_0-kernel", lm, "mlp.gate_proj.weight"),
+      ("mlp-wi_1-kernel", lm, "mlp.up_proj.weight"),
+      ("mlp-wo-kernel", lm, "mlp.down_proj.weight"),
+      # Action-expert (Gemma-300M) stream
+      ("pre_self_attention_norm_action-dense-kernel", ex, "input_layernorm.dense.weight"),
+      ("pre_self_attention_norm_action-dense-bias", ex, "input_layernorm.dense.bias"),
+      ("pre_ffw_norm_action-dense-kernel", ex, "post_attention_layernorm.dense.weight"),
+      ("pre_ffw_norm_action-dense-bias", ex, "post_attention_layernorm.dense.bias"),
+      ("self_attention_action-query-kernel", ex, "self_attn.q_proj.weight"),
+      ("self_attention_action-key-kernel", ex, "self_attn.k_proj.weight"),
+      ("self_attention_action-value-kernel", ex, "self_attn.v_proj.weight"),
+      ("self_attention_action-out-kernel", ex, "self_attn.o_proj.weight"),
+      ("mlp_action-wi_0-kernel", ex, "mlp.gate_proj.weight"),
+      ("mlp_action-wi_1-kernel", ex, "mlp.up_proj.weight"),
+      ("mlp_action-wo-kernel", ex, "mlp.down_proj.weight"),
+  ]
+  for i in range(nlayers):
+    for mx, prefix, hf in layer_params:
+      mapping[f"params-decoder-layers_{i}-{mx}"] = f"{prefix}layers.{i}.{hf}"
+  return mapping
+
+
+def PI05_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Hooks for pi0.5: transposes, Gemma RMSNorm +1, folded 1/sqrt(head_dim) query scale, scaled embedding."""
+  del config, scan_layers
+  nlayers = maxtext_config.num_decoder_layers
+  nvis = maxtext_config.num_hidden_layers_for_vit
+  head_dim = maxtext_config.head_dim
+  emb_dim = maxtext_config.emb_dim
+
+  def reshape_kernel(x, target_shape):
+    if saving_to_hf:
+      return x.reshape(np.flip(np.array(target_shape))).T
+    return x.T.reshape(target_shape)
+
+  def scale_query(x, target_shape):
+    s = np.dtype("float32").type(np.sqrt(head_dim) if saving_to_hf else 1.0 / np.sqrt(head_dim))
+    return (x * s).astype(x.dtype)
+
+  def scale_rmsnorm(x, target_shape):
+    if saving_to_hf:
+      return (x - 1.0).reshape(target_shape)
+    return (x + 1.0).reshape(target_shape)
+
+  def scale_embedding(x, target_shape):
+    normalizer = np.dtype("float32").type(emb_dim**0.5)
+    if saving_to_hf:
+      return (x[: target_shape[0], : target_shape[1]] / normalizer).astype(x.dtype)
+    out = np.zeros(target_shape, dtype=x.dtype)
+    out[: x.shape[0], : x.shape[1]] = x
+    return (out * normalizer).astype(x.dtype)
+
+  def as_is(x, target_shape):
+    return x.reshape(target_shape)
+
+  def vision_patch(x, target_shape):
+    return x.transpose(3, 2, 0, 1) if saving_to_hf else x.transpose(2, 3, 1, 0)
+
+  def pos_embed(x, target_shape):
+    return x.squeeze(0) if saving_to_hf else x[None, :, :]
+
+  def vis_bias(x, target_shape):
+    return x.flatten() if saving_to_hf else x.reshape(target_shape)
+
+  vis = "params-vision_encoder-Gemma3VisionEncoderLayer_0-"
+  hooks = {
+      "params-token_embedder-embedding": scale_embedding,
+      "params-decoder-decoder_norm-scale": scale_rmsnorm,
+      "params-action_head-action_in_proj-kernel": reshape_kernel,
+      "params-action_head-action_out_proj-kernel": reshape_kernel,
+      "params-action_head-time_mlp_in-kernel": reshape_kernel,
+      "params-action_head-time_mlp_out-kernel": reshape_kernel,
+      "params-action_head-norm_action-dense-kernel": reshape_kernel,
+      vis + "embedding-kernel": vision_patch,
+      vis + "pos_embedding": pos_embed,
+      "params-vision_encoder-VisionEmbedder_0-custom_linear_0-kernel": reshape_kernel,
+  }
+  for i in range(nvis):
+    base = f"{vis}Transformer-encoderblock_{i}-"
+    for qkv in ["query", "key", "value", "out"]:
+      hooks[base + f"MultiHeadDotProductAttention_0-{qkv}-kernel"] = reshape_kernel
+      hooks[base + f"MultiHeadDotProductAttention_0-{qkv}-bias"] = vis_bias
+    hooks[base + "MlpBlockViT_0-Dense_0-kernel"] = reshape_kernel
+    hooks[base + "MlpBlockViT_0-Dense_1-kernel"] = reshape_kernel
+  for i in range(nlayers):
+    pref = f"params-decoder-layers_{i}-"
+    for nm in ["pre_self_attention_norm-scale", "pre_ffw_norm-scale"]:
+      hooks[pref + nm] = scale_rmsnorm
+    for stream in ["self_attention", "self_attention_action"]:
+      hooks[pref + f"{stream}-query-kernel"] = [reshape_kernel, scale_query]
+      hooks[pref + f"{stream}-key-kernel"] = reshape_kernel
+      hooks[pref + f"{stream}-value-kernel"] = reshape_kernel
+      hooks[pref + f"{stream}-out-kernel"] = reshape_kernel
+    for mlp in ["mlp", "mlp_action"]:
+      for w in ["wi_0", "wi_1", "wo"]:
+        hooks[pref + f"{mlp}-{w}-kernel"] = reshape_kernel
+    for nm in ["pre_self_attention_norm_action", "pre_ffw_norm_action"]:
+      hooks[pref + f"{nm}-dense-kernel"] = reshape_kernel
+      hooks[pref + f"{nm}-dense-bias"] = as_is
+  return hooks
+
+
 PARAM_MAPPING = {
+    "pi05-base": PI05_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -5502,6 +5676,7 @@ PARAM_MAPPING = {
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "pi05-base": PI05_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,

@@ -149,6 +149,14 @@ class Transformer(nnx.Module):
     self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_audio", False) else None
     self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
 
+    # pi0.5 action head (action in/out projections, flow-time MLP, expert final adaptive norm).
+    if getattr(cfg, "action_expert", "none") == "pi05":
+      from maxtext.models import pi05  # pylint: disable=import-outside-toplevel
+
+      self.action_head = pi05.Pi05ActionHead(cfg, rngs=rngs)
+    else:
+      self.action_head = None
+
     # If MTP is enabled via config, set up the MTP block.
     if getattr(self.config, "mtp_num_layers", 0) > 0:
       # Get the list of layer blueprints for the current model.

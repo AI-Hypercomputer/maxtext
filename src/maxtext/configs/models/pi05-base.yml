@@ -1,0 +1,55 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# model config for pi0.5 base (lerobot/pi05_base): PaliGemma (SigLIP So400m/14 @ 224 + Gemma-2B)
+# + Gemma-300M flow-matching action expert. Requires use_multimodal=true and scan_layers=false.
+
+# Gemma-2B VLM stream
+base_emb_dim: 2048
+base_num_query_heads: 8
+base_num_kv_heads: 1
+base_mlp_dim: 16384
+base_num_decoder_layers: 18
+head_dim: 256
+mlp_activations: ["gelu","linear"]
+vocab_size: 257152
+decoder_block: "gemma"
+normalization_layer_epsilon: 1.e-06
+logits_via_embedding: true
+
+# SigLIP So400m/14 at 224 px (256 patches, no pooling) + PaliGemma linear projector (with bias)
+vision_encoder_block: "gemma3"
+image_size_for_vit: 224
+num_channels_for_vit: 3
+patch_size_for_vit: 14
+conv_stride_for_vit: 14
+hidden_size_for_vit: 1152
+intermediate_size_for_vit: 4304
+num_hidden_layers_for_vit: 27
+num_attention_heads_for_vit: 16
+vision_projector_type: "customized_vision_projector"
+vision_connector_num_layers: 1
+vision_connector_use_bias: true
+
+# Gemma-300M action expert (same heads / head_dim as the VLM, joint attention)
+action_expert: "pi05"
+action_dim: 32
+action_horizon: 50
+action_hidden_size: 1024
+action_mlp_dim: 4096
+action_num_cameras: 3
+flow_num_inference_steps: 10
+flow_min_period: 0.004
+flow_max_period: 4.0
+pi05_max_token_len: 200

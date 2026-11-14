@@ -1703,6 +1703,18 @@ use_qk_norm_in_gdn: true
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
 
+# pi0.5 VLA (Gemma-300M flow-matching action expert next to the Gemma-2B VLM).
+action_expert: "none" # "none" | "pi05"
+action_dim: 32
+action_horizon: 50
+action_hidden_size: 1024
+action_mlp_dim: 4096
+action_num_cameras: 3
+flow_num_inference_steps: 10
+flow_min_period: 0.004
+flow_max_period: 4.0
+pi05_max_token_len: 200
+
 use_tokamax_splash: false
 # Setting this flag will use a non-pallas implementation.
 use_jax_splash: false

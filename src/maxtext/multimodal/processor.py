@@ -18,6 +18,8 @@ from maxtext.multimodal import utils as mm_utils
 
 # model_name -> (vision_encoder_block, decoder_block) mapping
 _MODEL_TO_BLOCKS = {
+    # pi0.5 (PaliGemma SigLIP + Gemma-2B + action expert)
+    "pi05-base": ("gemma3", "gemma"),
     # Gemma 3
     "gemma3-4b": ("gemma3", "gemma3"),
     "gemma3-12b": ("gemma3", "gemma3"),

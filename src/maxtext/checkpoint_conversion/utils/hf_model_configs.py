@@ -2579,7 +2579,20 @@ granite_3_0_1b_a400m_dict = {
 granite_3_0_1b_a400m_config = PTConfig(**granite_3_0_1b_a400m_dict)
 
 # {maxtext model name: hf model config}
+# pi0.5 base (lerobot/pi05_base) has no transformers config class; the mapping reads layer counts from the
+# MaxText config, so only descriptive fields are kept here.
+pi05_base_config = transformers.PretrainedConfig(
+    model_type="pi05",
+    paligemma_variant="gemma_2b",
+    action_expert_variant="gemma_300m",
+    num_hidden_layers=18,
+    vocab_size=257152,
+    hidden_size=2048,
+    head_dim=256,
+)
+
 HF_MODEL_CONFIGS = {
+    "pi05-base": pi05_base_config,
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
     "gemma2-27b": gemma2_27b_config,
