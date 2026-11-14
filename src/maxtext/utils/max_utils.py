@@ -1015,6 +1015,7 @@ def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu
       "targets_position",
       "inputs_segmentation",
       "targets_segmentation",
+      "completion_mask",
       "corruption_mask",
       "targets_loss_mask",
   }

@@ -27,10 +27,13 @@ import numpy as np
 import os
 import shutil
 import tempfile
+from types import SimpleNamespace
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.trainers.post_train import hooks as post_train_hooks
 from maxtext.trainers.post_train.dpo import hooks as dpo_hooks
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 
 
@@ -65,6 +68,33 @@ class DPOHooksTest(unittest.TestCase):
 
     self.assertIsNotNone(data_hooks.train_batch)
     self.assertEqual(data_hooks.train_batch["inputs"].shape, expected_batch["inputs"].shape)
+
+  @patch.object(post_train_hooks, "create_data_iterator")
+  def test_dpo_data_hooks_does_not_reorder_batches_under_cp(self, mock_create_data_iterator):
+    seq_len = 8
+    raw_batch = {
+        "prompt_ids": np.broadcast_to(np.arange(seq_len, dtype=np.int32), (jax.device_count(), seq_len)),
+        "chosen_ids": np.broadcast_to(np.arange(seq_len, dtype=np.int32), (jax.device_count(), seq_len)),
+        "rejected_ids": np.broadcast_to(np.arange(seq_len, dtype=np.int32), (jax.device_count(), seq_len)),
+        "prompt_mask": np.ones((jax.device_count(), seq_len), dtype=np.int32),
+        "chosen_mask": np.ones((jax.device_count(), seq_len), dtype=np.int32),
+        "rejected_mask": np.ones((jax.device_count(), seq_len), dtype=np.int32),
+    }
+    train_iter = iter([raw_batch])
+    eval_iter = iter([raw_batch])
+    mock_create_data_iterator.return_value = (train_iter, eval_iter)
+
+    with patch.object(max_utils, "reordered_cp_size", return_value=2):
+      data_hooks = dpo_hooks.DPODataHooks(self.config, self.mesh, goodput_recorder=None)
+
+    self.assertIs(data_hooks.train_data_iterator, train_iter)
+    self.assertIs(data_hooks.eval_data_iterator, eval_iter)
+    train_batch = data_hooks.load_next_train_batch(train_ctx=None)
+    train_ctx = SimpleNamespace(training_hooks=SimpleNamespace(eval_metadata={"eval_step_count": 0}))
+    eval_batch = data_hooks.load_next_eval_batch(train_ctx=train_ctx)
+    for key, expected in raw_batch.items():
+      np.testing.assert_array_equal(np.asarray(train_batch[key]), expected)
+      np.testing.assert_array_equal(np.asarray(eval_batch[key]), expected)
 
   def test_dpo_training_hooks_get_total_weights(self):
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)

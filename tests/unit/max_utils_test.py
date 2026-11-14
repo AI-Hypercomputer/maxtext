@@ -831,10 +831,12 @@ class TestReorderSequence(unittest.TestCase):
     self.assertTrue(jnp.allclose(x, restored, rtol=1e-5, atol=1e-6))
 
   def test_block_diffusion_masks_are_reordered_with_tokens(self):
+    completion_mask = jnp.arange(16, dtype=jnp.int32).reshape(1, 16) + 50
     corruption_mask = jnp.arange(16, dtype=jnp.int32).reshape(1, 16)
     targets_loss_mask = corruption_mask + 100
     batch = {
         "inputs": corruption_mask + 200,
+        "completion_mask": completion_mask,
         "corruption_mask": corruption_mask,
         "targets_loss_mask": targets_loss_mask,
     }
@@ -846,6 +848,7 @@ class TestReorderSequence(unittest.TestCase):
         hardware="cpu",
     )
 
+    np.testing.assert_array_equal(reordered["completion_mask"], max_utils.reorder_sequence(completion_mask, 2))
     np.testing.assert_array_equal(reordered["corruption_mask"], max_utils.reorder_sequence(corruption_mask, 2))
     np.testing.assert_array_equal(
         reordered["targets_loss_mask"],

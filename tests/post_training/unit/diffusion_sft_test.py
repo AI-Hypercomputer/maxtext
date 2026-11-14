@@ -21,8 +21,10 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maxtext.common.common_types import ReorderStrategy
 from maxtext.diffusion.block_diffusion import target_alignment
 from maxtext.integration.tunix import diffusion_sft
+from maxtext.utils import max_utils
 
 
 pytestmark = [pytest.mark.post_training]
@@ -178,3 +180,26 @@ def test_logits_adapter_uses_target_alignment():
   np.testing.assert_array_equal(actual, expected)
   assert calls[0]["enable_dropout"] is False
   np.testing.assert_array_equal(calls[0]["decoder_input_tokens"], _raw_batch()["inputs"])
+
+
+def test_batch_adapter_preserves_completion_only_alignment_after_cp_reorder():
+  adapter = diffusion_sft.create_batch_adapter(_config(alignment="shifted", completion_only=True))
+  contiguous_raw = _raw_batch(jnp)
+  contiguous_adapted = adapter(contiguous_raw)
+  reordered_raw = max_utils.reorder_causal_load_balanced(
+      contiguous_raw,
+      cp_size=2,
+      reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP,
+      hardware="cpu",
+  )
+
+  reordered_adapted = adapter(reordered_raw)
+
+  np.testing.assert_array_equal(
+      reordered_adapted.target_ids,
+      max_utils.reorder_sequence(contiguous_adapted.target_ids, cp_size=2),
+  )
+  np.testing.assert_array_equal(
+      reordered_adapted.loss_weights,
+      max_utils.reorder_sequence(contiguous_adapted.loss_weights, cp_size=2),
+  )

@@ -14,6 +14,7 @@
 
 """Tests for training and data loading hooks for SFT"""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 import unittest
 from unittest.mock import MagicMock, patch
@@ -32,7 +33,9 @@ import tempfile
 
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.trainers.post_train import hooks as post_train_hooks
 from maxtext.trainers.post_train.sft import hooks as sft_hooks
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 
 
@@ -67,6 +70,58 @@ class SFTHooksTest(unittest.TestCase):
 
     self.assertIsNotNone(data_hooks.train_batch)
     self.assertEqual(data_hooks.train_batch["inputs"].shape, expected_batch["inputs"].shape)
+
+  @patch.object(post_train_hooks, "create_data_iterator")
+  def test_sft_data_hooks_reorders_all_sft_and_diffusion_keys(self, mock_create_data_iterator):
+    seq_len = 8
+    if jax.device_count() >= 4:
+      config = pyconfig.initialize(
+          ["", os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
+          per_device_batch_size=1,
+          ici_fsdp_parallelism=2,
+          ici_context_parallelism=2,
+          run_name="test",
+          base_output_directory=self.test_dir,
+          tensorboard_dir=self.test_dir,
+          skip_jax_distributed_system=True,
+      )
+      mesh = Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "context"))
+      batch_size = 4
+      cp_ctx = nullcontext()
+    else:
+      config = self.config
+      mesh = self.mesh
+      batch_size = jax.device_count()
+      cp_ctx = patch.object(max_utils, "reordered_cp_size", return_value=2)
+
+    sft_keys = (
+        "inputs",
+        "inputs_position",
+        "inputs_segmentation",
+        "targets",
+        "targets_position",
+        "targets_segmentation",
+        "completion_mask",
+        "corruption_mask",
+        "targets_loss_mask",
+    )
+    seq = np.broadcast_to(np.arange(seq_len, dtype=np.int32), (batch_size, seq_len))
+    raw_batch = {key: seq.copy() for key in sft_keys}
+    mock_create_data_iterator.return_value = (iter([raw_batch]), iter([raw_batch]))
+
+    with cp_ctx:
+      data_hooks = sft_hooks.SFTDataHooks(config, mesh, goodput_recorder=None)
+
+    train_batch = data_hooks.load_next_train_batch(train_ctx=None)
+    train_ctx = SimpleNamespace(training_hooks=SimpleNamespace(eval_metadata={"eval_step_count": 0}))
+    eval_batch = data_hooks.load_next_eval_batch(train_ctx=train_ctx)
+    expected_reordered = np.broadcast_to(
+        np.array([0, 1, 6, 7, 2, 3, 4, 5], dtype=np.int32),
+        (batch_size, seq_len),
+    )
+    for key in sft_keys:
+      np.testing.assert_array_equal(np.asarray(train_batch[key]), expected_reordered)
+      np.testing.assert_array_equal(np.asarray(eval_batch[key]), expected_reordered)
 
   def test_sft_training_hooks_get_total_weights(self):
     learning_rate_schedule = maxtext_utils.create_learning_rate_schedule(self.config)
