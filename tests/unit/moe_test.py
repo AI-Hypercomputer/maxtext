@@ -1183,6 +1183,51 @@ class RoutedMoeTest(parameterized.TestCase):
         else:
           np.testing.assert_array_equal(actual_value, expected_value)
 
+  def test_fold_expert_scale_into_wo_matches_topk_scale(self):
+    """moe_fold_expert_scale_into_wo scales wo by per_expert_scale; the routed output matches the top-k gather path."""
+
+    def run(fold):
+      cfg = pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=f"fold_expert_scale_{fold}",
+          enable_checkpointing=False,
+          dtype="float32",
+          weight_dtype="float32",
+          matmul_precision="highest",
+          max_target_length=4,
+          max_prefill_predict_length=1,
+          per_device_batch_size=1,
+          decoder_block="gemma4",
+          num_experts=4,
+          num_experts_per_tok=2,
+          base_emb_dim=128,
+          base_mlp_dim=256,
+          base_moe_mlp_dim=256,
+          sparse_matmul=True,
+          megablox=False,
+          capacity_factor=-1,
+          moe_fold_expert_scale_into_wo=fold,
+      )
+      model = moe.RoutedMoE(
+          config=cfg,
+          num_experts=cfg.num_experts,
+          num_experts_per_tok=cfg.num_experts_per_tok,
+          mesh=Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes),
+          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          dtype=cfg.dtype,
+          rngs=nnx.Rngs(params=0),
+      )
+      self.assertIsNotNone(model.per_expert_scale)
+      self.assertEqual(model._fold_expert_scale_into_wo(), fold)  # pylint: disable=protected-access
+      model.per_expert_scale.value = jnp.array([0.5, 1.5, 2.0, 0.25], jnp.float32)
+      inputs = jax.random.normal(
+          jax.random.PRNGKey(1), (int(cfg.per_device_batch_size) * jax.device_count(), 4, cfg.emb_dim), jnp.float32
+      )
+      return model(inputs)[0]
+
+    np.testing.assert_allclose(run(True), run(False), rtol=1e-5, atol=1e-5)
+
   def get_expected_output(self, rng, hidden_states, cfg, mesh):
     """Retrieve expected output from Routed Mixture of Experts."""
     model = get_moe_loop(

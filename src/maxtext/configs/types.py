@@ -1543,6 +1543,16 @@ class MoEGeneral(BaseModel):
           " before the wo matmul instead of into the (buffer, emb) expert output before the unsort."
       ),
   )
+  moe_fold_expert_scale_into_wo: bool = Field(
+      False,
+      description=(
+          "Models with a per-expert router scale (Gemma 4), sparse_matmul training:"
+          " multiply per_expert_scale into the (still FSDP-sharded) wo weight"
+          " instead of gathering it per token into the top-k routing weights."
+          " The routed output is linear in the scale, so only the rounding order"
+          " changes."
+      ),
+  )
   moe_tc_ragged_flatten_block_size: int = Field(
       0,
       description=(
@@ -7344,6 +7354,8 @@ class MaxTextConfig(
           "moe_bwd_prequant_before_unsort=True requires moe_tc_ragged_3d_dispatch=True and"
           " moe_tc_ragged_weights_on_activation=True."
       )
+    if self.moe_fold_expert_scale_into_wo and not self.sparse_matmul:
+      raise ValueError("moe_fold_expert_scale_into_wo=True requires sparse_matmul=True.")
     if self.moe_combine_bwd_direct_qarray and not self.moe_bwd_prequant_before_unsort:
       raise ValueError("moe_combine_bwd_direct_qarray=True requires moe_bwd_prequant_before_unsort=True.")
     if self.moe_bwd_prequant_before_unsort and self.quantization:
