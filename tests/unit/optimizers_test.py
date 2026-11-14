@@ -23,6 +23,7 @@ from absl.testing import absltest, parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.common.common_types import UntrainableParam
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
 from maxtext.optimizers.muon import ShardedMuonDimensionNumbers as smdn
@@ -897,6 +898,88 @@ class TrainableParametersMaskTest(parameterized.TestCase):
       opt_all_frozen.init(params)
       mock_warning.assert_called_once()
       self.assertIn("froze EVERY parameter", mock_warning.call_args[0][0])
+
+
+class _WeightDecayModel(nnx.Module):
+  """Names follow the Muon rules: `kernel` is a matrix, `scale` is excluded from Muon."""
+
+  def __init__(self):
+    layer = nnx.Dict(kernel=nnx.Param(jnp.ones((2, 2))), frozen_kernel=UntrainableParam(jnp.ones((2, 2))))
+    self.decoder = nnx.Dict(layer=layer)
+    self.bound_scale = UntrainableParam(jnp.asarray(3.0, jnp.float32))
+
+
+class UntrainableParamWeightDecayTest(parameterized.TestCase):
+  """Zero gradients leave weight decay as the only force on a weight, so only a real freeze holds it in place."""
+
+  def _config(self, *extra):
+    argv = ["", get_test_config_path(), "run_name=test_untrainable_decay", "adam_weight_decay=0.5", *extra]
+    return pyconfig.initialize(argv)
+
+  def _apply_zero_grads(self, model, tx):
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+    optimizer.update(model, jax.tree_util.tree_map(jnp.zeros_like, nnx.state(model, nnx.Param)))
+    return optimizer
+
+  def _assert_untrainable_unchanged(self, model, optimizer, kernel_moved=True):
+    self.assertEqual(kernel_moved, not jnp.array_equal(model.decoder.layer.kernel[...], jnp.ones((2, 2))))
+    self.assertTrue(jnp.array_equal(model.decoder.layer.frozen_kernel[...], jnp.ones((2, 2))))
+    self.assertEqual(float(model.bound_scale[...]), 3.0)
+    slots = [jax.tree_util.keystr(path) for path, _ in jax.tree_util.tree_leaves_with_path(nnx.state(optimizer))]
+    self.assertEqual(kernel_moved, bool([s for s in slots if "'kernel'" in s]), slots)
+    self.assertFalse([s for s in slots if "frozen_kernel" in s or "bound_scale" in s], slots)
+
+  @parameterized.named_parameters(
+      ("adamw", "opt_type=adamw"),
+      ("adam_pax", "opt_type=adam_pax"),
+  )
+  def test_adam_weight_decay_skips_untrainable(self, opt_type):
+    model = _WeightDecayModel()
+    tx = optimizers.get_optimizer(self._config(opt_type), lambda step: 1.0, model)
+    self._assert_untrainable_unchanged(model, self._apply_zero_grads(model, tx))
+
+  def test_muon_weight_decay_skips_untrainable(self):
+    model = _WeightDecayModel()
+    config = self._config("opt_type=muon", "muon_type=maxtext_muon", "muon_weight_decay=0.5")
+    tx = optimizers.get_optimizer(config, lambda step: 1.0, model)
+    self._assert_untrainable_unchanged(model, self._apply_zero_grads(model, tx))
+
+  @parameterized.named_parameters(
+      ("whitelist_names_untrainable", "trainable_parameters_mask=['kernel','bound_scale']", True),
+      ("whitelist_excludes_everything_else", "trainable_parameters_mask=['bound_scale']", False),
+  )
+  def test_trainable_parameters_mask_cannot_unfreeze(self, mask, kernel_moved):
+    model = _WeightDecayModel()
+    tx = optimizers.get_optimizer(self._config("opt_type=adamw", mask), lambda step: 1.0, model)
+    self._assert_untrainable_unchanged(model, self._apply_zero_grads(model, tx), kernel_moved)
+
+  def test_frozen_paths_survive_inject_hyperparams(self):
+    model = _WeightDecayModel()
+    config = self._config("opt_type=adamw")
+    frozen_paths = optimizers.untrainable_paths(model)
+
+    def factory(learning_rate):
+      return optimizers.get_optimizer(config, learning_rate, frozen_paths=frozen_paths)
+
+    tx = optax.inject_hyperparams(factory)(learning_rate=1.0)
+    self._assert_untrainable_unchanged(model, self._apply_zero_grads(model, tx))
+
+  def test_no_untrainable_params_leaves_optimizer_state_unchanged(self):
+    params = {"kernel": jnp.ones((2, 2))}
+    config = self._config("opt_type=adamw")
+    wrapped = optimizers.get_optimizer(config, lambda step: 1.0, nnx.Dict(kernel=nnx.Param(jnp.ones((2, 2)))))
+    plain = optimizers.get_optimizer(config, lambda step: 1.0)
+    self.assertEqual(jax.tree_util.tree_structure(wrapped.init(params)), jax.tree_util.tree_structure(plain.init(params)))
+
+  def test_untrainable_param_without_freeze_raises_at_init(self):
+    model = _WeightDecayModel()
+    tx = optimizers.get_optimizer(self._config("opt_type=adamw"), lambda step: 1.0)
+    with self.assertRaisesRegex(ValueError, "UntrainableParam weights would be trained"):
+      nnx.Optimizer(model, tx, wrt=nnx.Param)
+
+  def test_untrainable_paths_is_empty_for_none_and_models_without_them(self):
+    self.assertEqual(optimizers.untrainable_paths(None), frozenset())
+    self.assertEqual(optimizers.untrainable_paths(nnx.Dict(kernel=nnx.Param(jnp.ones(1)))), frozenset())
 
 
 class SkipStepOnSpikesTest(parameterized.TestCase):
