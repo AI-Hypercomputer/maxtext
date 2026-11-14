@@ -599,6 +599,19 @@ def sync_lora_metadata(config: pyconfig.HyperParameters) -> None:
     )
 
 
+def _to_replicated_on_mesh(arr: jax.Array, replicated_sharding: jax.sharding.NamedSharding) -> jax.Array:
+  """Reshards a LoRA parameter array onto `replicated_sharding`."""
+  if isinstance(arr, jax.Array) and getattr(arr.sharding, "device_set", None) == replicated_sharding.device_set:
+    return jax.device_put(arr, replicated_sharding)
+  if not isinstance(arr, jax.Array) or arr.is_fully_addressable:
+    arr_jnp = jnp.asarray(arr)
+    return jax.make_array_from_callback(arr.shape, replicated_sharding, lambda idx, v=arr_jnp: v[idx])
+  raise ValueError(
+      "Cannot reshard non-fully-addressable array across different device sets: "
+      f"{arr.sharding} vs {replicated_sharding}."
+  )
+
+
 def apply_lora_to_model(
     model: nnx.Module,
     mesh: Optional[jax.sharding.Mesh],
@@ -641,9 +654,7 @@ def apply_lora_to_model(
       if replicated_sharding is not None:
         arr = val.get_value()
         if isinstance(arr, jax.Array) and arr.sharding != replicated_sharding:
-          arr_jnp = jnp.asarray(arr)
-          resharded_arr = jax.make_array_from_callback(arr.shape, replicated_sharding, lambda idx, v=arr_jnp: v[idx])
-          val.set_value(resharded_arr)
+          val.set_value(_to_replicated_on_mesh(arr, replicated_sharding))
 
   _verify_lora_parameters(lora_model, mt_config, matched_modules)
   return lora_model  # pyrefly: ignore[bad-return]
