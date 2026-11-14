@@ -549,6 +549,7 @@ def validate_and_assign_remat_tensors(keys):
       "moe_mlpwi_0",
       "moe_mlpwi_1",
       "moe_mlpwo",
+      "moe_routed_output",
       "te_moe_dispatch_remat_location",
       "query_proj",
       "key_proj",
@@ -567,8 +568,10 @@ def validate_and_assign_remat_tensors(keys):
       tensors_to_offload.append(t)
     elif keys[t] != "remat":
       raise ValueError(f"Invalid value chosen for tensor {t}")
-  keys["tensors_on_device"] = tensors_on_device
-  keys["tensors_to_offload"] = tensors_to_offload
+  if keys.get("tensors_on_device") is None:
+    keys["tensors_on_device"] = tensors_on_device
+  if keys.get("tensors_to_offload") is None:
+    keys["tensors_to_offload"] = tensors_to_offload
   return keys
 
 

@@ -176,7 +176,12 @@ class Glm5TrainTest(absltest.TestCase):
     with self.assertRaises(TypeError):
       modeling_glm5_3_flash.create_glm5_3_flash_model(bad_type_cfg, rngs=nnx.Rngs(0))
 
-    for bad_policy in ("", "minimal", "save_dot_except_mlp", "bogus_policy"):
+    for valid_policy in ("minimal", "save_dot_except_mlp"):
+      named_cfg = _make_train_cfg(num_hidden_layers=5, scan_layers=False, remat_policy=valid_policy)
+      m_named = modeling_glm5_3_flash.create_glm5_3_flash_model(named_cfg, rngs=nnx.Rngs(0))
+      self.assertTrue(callable(m_named.remat_policy))
+
+    for bad_policy in ("", "bogus_policy"):
       bad_cfg = _make_train_cfg(num_hidden_layers=5, scan_layers=False, remat_policy="none")
       object.__setattr__(bad_cfg, "remat_policy", bad_policy)
       with self.assertRaises(ValueError):

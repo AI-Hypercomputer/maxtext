@@ -2421,6 +2421,10 @@ class RematAndOffload(BaseModel):
           "moe_tc_ragged_weights_on_activation); 'device' saves them so the backward skips the weight gather."
       ),
   )
+  moe_routed_output: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the post-combine routed MoE output.",
+  )
   mlpwo: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the second MLP layer's output.",
@@ -5679,6 +5683,7 @@ class MaxTextConfig(
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routed_output",
           "te_moe_dispatch_remat_location",
           "mlpwi_0",
           "mlpwi_1",
@@ -5695,8 +5700,10 @@ class MaxTextConfig(
           "attention_out",
           "out_proj",
       ]
-      self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
-      self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+      if getattr(self, "tensors_on_device", None) is None:
+        self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
+      if getattr(self, "tensors_to_offload", None) is None:
+        self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
     if self.pipeline_parallel_layers == -1:
       if self.decoder_block == DecoderBlockType.DEEPSEEK:
@@ -7539,6 +7546,7 @@ class RLConfig(
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
+          "moe_routed_output",
           "te_moe_dispatch_remat_location",
           "mlpwi_0",
           "mlpwi_1",
@@ -7554,8 +7562,10 @@ class RLConfig(
           "attention_out",
           "out_proj",
       ]
-      self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
-      self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+      if getattr(self, "tensors_on_device", None) is None:
+        self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
+      if getattr(self, "tensors_to_offload", None) is None:
+        self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
 
     _validate_remat_policy(
         self.remat_policy,

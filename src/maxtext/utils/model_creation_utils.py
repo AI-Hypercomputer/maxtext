@@ -738,6 +738,7 @@ def create_model(
     from maxtext.m3.core import kernels as m3_kernels  # pylint: disable=import-outside-toplevel
     from maxtext.m3.core import moe as m3_moe  # pylint: disable=import-outside-toplevel
     from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.infra import remat as m3_remat  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
 
     m3_kernels.validate_attention_config(config)
@@ -745,6 +746,9 @@ def create_model(
     with m3_sharding.enter_mesh_scope(mesh if jax.sharding.get_abstract_mesh().empty else None):
       model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
       model = m3_scan.maybe_apply_scan(model, config)
+      model = m3_remat.maybe_apply_remat(model, config, model_mode=model_mode)
+      if model_mode == MODEL_MODE_TRAIN:
+        m3_remat.check_model_tags(model, config, mesh=mesh)
       model = quantizations.maybe_quantize_model(model, config)
     return model
 
