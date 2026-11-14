@@ -25,10 +25,12 @@ import logging
 import os
 import queue
 import random
+import shlex
 import string
 import subprocess
 import threading
 import time
+from typing import Any
 
 import omegaconf
 
@@ -137,6 +139,10 @@ class WorkloadConfig:
   xpk_storage: None | list[str] = None
   hlo_dump: None | bool = None
   skip_validation: bool = False
+  # MaxText `key=value` overrides applied on top of model.tuning_params and
+  # pathways_tuning_params. A value of None removes the key so the base.yml
+  # default applies (e.g. {"profiler": None} turns off a model's "xplane").
+  extra_tuning_params: dict[str, Any] | None = None
 
   def __post_init__(self):
     """Initializes num_devices_per_slice, topology, and compute_type from device_type."""
@@ -278,18 +284,52 @@ def wait_for_workloads_completion_async(
 wait_for_xpk_workloads_completion_async = wait_for_workloads_completion_async
 
 
-def _get_config_tuning_params(wl_config: WorkloadConfig):
-  """Get config tuning parameters for the workload.
+# MaxText keys that build_user_command always writes *after* the tuning params. MaxText keeps the last value of a
+# repeated command-line key, so an extra_tuning_params entry for one of these would be silently ignored.
+RUNNER_ALWAYS_SET_KEYS = frozenset({"steps", "model_name", "base_output_directory", "run_name"})
+# Written after the tuning params only for McJAX workloads (see `vertex_tensorboard` in build_user_command).
+_MCJAX_ONLY_RUNNER_SET_KEYS = frozenset(
+    {"use_vertex_tensorboard", "vertex_tensorboard_project", "vertex_tensorboard_region"}
+)
+# Written after the tuning params only when metrics are uploaded to BigQuery.
+_BIGQUERY_ONLY_RUNNER_SET_KEYS = frozenset({"gcs_metrics"})
+
+
+def _runner_set_keys(wl_config: WorkloadConfig) -> frozenset[str]:
+  """Returns the MaxText keys build_user_command writes after the tuning params for this workload."""
+  keys = set(RUNNER_ALWAYS_SET_KEYS)
+  if wl_config.pathways_config is None:
+    keys |= _MCJAX_ONLY_RUNNER_SET_KEYS
+  if wl_config.generate_metrics_and_upload_to_big_query:
+    keys |= _BIGQUERY_ONLY_RUNNER_SET_KEYS
+  return frozenset(keys)
+
+
+def _resolve_tuning_params(wl_config: WorkloadConfig) -> dict[str, Any]:
+  """Resolves the effective MaxText tuning params for the workload.
+
+  Precedence (lowest to highest): model.tuning_params, pathways_tuning_params,
+  extra_tuning_params. An extra_tuning_params value of None removes the key so
+  the base.yml default applies.
 
   Args:
     wl_config: Workload configuration.
 
   Returns:
-    A string of config tuning parameters.
+    A dict of resolved tuning parameters.
+
+  Raises:
+    ValueError: If extra_tuning_params sets a key that build_user_command writes itself, which would be ignored.
   """
+  shadowed = sorted(set(wl_config.extra_tuning_params or {}) & _runner_set_keys(wl_config))
+  if shadowed:
+    raise ValueError(
+        f"extra_tuning_params cannot set {shadowed}: the runner writes these keys itself after the tuning params,"
+        " so the override would be ignored. Set them through the corresponding WorkloadConfig fields instead."
+    )
+
   is_pw_enabled = wl_config.pathways_config is not None
 
-  config_tuning_params = ""
   unified_tuning_params = wl_config.model.tuning_params.copy()  # Create a copy
 
   # Overwrite the tuning params with pathways specific tuning params if present.
@@ -310,12 +350,11 @@ def _get_config_tuning_params(wl_config: WorkloadConfig):
     for key, value in model_configs.BASE_PATHWAYS_TUNING_PARAMS.items():
       if key not in wl_config.model.pathways_tuning_params:
         wl_config.model.pathways_tuning_params[key] = value
-
-      print(
-          f"WARNING: {key} is not present in pathways tuning"
-          f" params for model: {wl_config.model.model_name}, Adding the"
-          f" param {key}={value} to support pathways."
-      )
+        print(
+            f"WARNING: {key} is not present in pathways tuning"
+            f" params for model: {wl_config.model.model_name}, Adding the"
+            f" param {key}={value} to support pathways."
+        )
 
     print(
         f"Pathways tuning params for model: {wl_config.model.model_name} are:"
@@ -324,15 +363,55 @@ def _get_config_tuning_params(wl_config: WorkloadConfig):
     for key, value in wl_config.model.pathways_tuning_params.items():
       unified_tuning_params[key] = value
 
-  print(f"Unified tuning params for model are:" f" {unified_tuning_params}")
+  # Apply caller-provided overrides last; None means "drop the key".
+  for key, value in (wl_config.extra_tuning_params or {}).items():
+    if value is None:
+      unified_tuning_params.pop(key, None)
+    else:
+      unified_tuning_params[key] = value
 
-  for key, value in unified_tuning_params.items():
+  print(f"Unified tuning params for model are:" f" {unified_tuning_params}")
+  return unified_tuning_params
+
+
+# Characters that would break out of the `--command="..."` wrapper built in
+# generate_workload_cmd (`$` is already escaped there).
+_UNSAFE_OVERRIDE_CHARS = ('"', "'", "`", "\\")
+
+
+def _quote_override_value(key: str, value: Any) -> str:
+  """Renders an override value so the in-container shell passes it to MaxText as-is."""
+  text = str(value)  # bool -> "True"/"False", int -> "10"
+  bad = [c for c in _UNSAFE_OVERRIDE_CHARS if c in text]
+  if bad:
+    raise ValueError(f"Override {key}={text!r} contains unsupported characters {bad}.")
+  return shlex.quote(text)  # no-op for plain values; single-quotes globs/spaces
+
+
+def _get_config_tuning_params(wl_config: WorkloadConfig, tuning_params: dict[str, Any] | None = None):
+  """Get config tuning parameters for the workload.
+
+  Args:
+    wl_config: Workload configuration.
+    tuning_params: Already-resolved params from _resolve_tuning_params; resolved here when None.
+
+  Returns:
+    A string of config tuning parameters.
+  """
+  overrides = wl_config.extra_tuning_params or {}
+  config_tuning_params = ""
+  if tuning_params is None:
+    tuning_params = _resolve_tuning_params(wl_config)
+
+  for key, value in tuning_params.items():
+    if key in overrides:
+      value = _quote_override_value(key, value)
     config_tuning_params += f"{key}={value} "
 
   return config_tuning_params
 
 
-def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
+def _build_args_from_config(wl_config: WorkloadConfig, tuning_params: dict[str, Any] | None = None) -> dict:
   """Builds a dictionary of arguments for metrics upload from the workload config.
 
   This function extracts various configuration details and formats them into a
@@ -341,54 +420,56 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
 
   Args:
     wl_config: The WorkloadConfig object containing all run details.
+    tuning_params: Already-resolved params from _resolve_tuning_params; resolved here when None.
 
   Returns:
     A dictionary of arguments for the metrics upload script.
   """
   base_config = omegaconf.OmegaConf.load(wl_config.base_config)
+  params = tuning_params if tuning_params is not None else _resolve_tuning_params(wl_config)
 
   # Extract per_device_batch_size arg
-  if "per_device_batch_size" not in wl_config.model.tuning_params:
+  if "per_device_batch_size" not in params:
     per_device_batch_size = base_config.per_device_batch_size
   else:
-    per_device_batch_size = wl_config.model.tuning_params["per_device_batch_size"]
+    per_device_batch_size = params["per_device_batch_size"]
 
   # Extract precision arg
-  if "matmul_precision" not in wl_config.model.tuning_params:
+  if "matmul_precision" not in params:
     precision = base_config.matmul_precision
   else:
-    precision = wl_config.model.tuning_params["matmul_precision"]
+    precision = params["matmul_precision"]
 
   # Extract optimizer arg
-  if "opt_type" not in wl_config.model.tuning_params:
+  if "opt_type" not in params:
     optimizer = base_config.opt_type
   else:
-    optimizer = wl_config.model.tuning_params["opt_type"]
+    optimizer = params["opt_type"]
 
   # Extract sequence_length arg
-  if "max_target_length" not in wl_config.model.tuning_params:
+  if "max_target_length" not in params:
     sequence_length = base_config.max_target_length
   else:
-    sequence_length = wl_config.model.tuning_params["max_target_length"]
+    sequence_length = params["max_target_length"]
 
   # Extract dataset arg
-  if "dataset_type" not in wl_config.model.tuning_params:
+  if "dataset_type" not in params:
     dataset = base_config.dataset_type
   else:
-    dataset = wl_config.model.tuning_params["dataset_type"]
+    dataset = params["dataset_type"]
 
   # Extract xla_flags arg
   xla_flags_str = wl_config.model.xla_flags.strip().replace(" ", ",")
 
   # Extract tuning_params arg
-  tuning_params_str = json.dumps(wl_config.model.tuning_params)
+  tuning_params_str = json.dumps(params)  # resolved params actually used by the run
 
   num_steps = wl_config.num_steps  # default case
 
   if (
-      "steps" in wl_config.model.tuning_params and wl_config.num_steps == -1
+      "steps" in params and wl_config.num_steps == -1
   ):  # replace num_step for not provided num_steps and configuration exist in tuning_params.
-    num_steps = wl_config.model.tuning_params["steps"]
+    num_steps = params["steps"]
     log.info("using steps=(%d) in model convergence test setup", num_steps)
 
   container_image_name = (
@@ -424,19 +505,21 @@ def _build_args_from_config(wl_config: WorkloadConfig) -> dict:
 def build_user_command(
     name: str,
     wl_config: WorkloadConfig,
+    tuning_params: dict[str, Any] | None = None,
 ):
   """Builds the user command string to be executed within the workload.
 
   Args:
     name: The name of the workload.
     wl_config: The WorkloadConfig object containing configuration details.
+    tuning_params: Already-resolved params from _resolve_tuning_params; resolved here when None.
 
   Returns:
     A string representing the full command to run MaxText.
   """
   is_pw_enabled = wl_config.pathways_config is not None
 
-  config_tuning_params = _get_config_tuning_params(wl_config)
+  config_tuning_params = _get_config_tuning_params(wl_config, tuning_params)
 
   install_libtpu_cmd = ""
   jax_platforms = None
@@ -656,6 +739,11 @@ def generate_workload_cmd(
   user = user or os.environ.get("USER", "user")
   is_pathways_enabled = wl_config.pathways_config is not None
   is_pathways_headless_enabled = wl_config.pathways_config and wl_config.pathways_config.headless
+  if is_pathways_headless_enabled and wl_config.extra_tuning_params:
+    raise ValueError(
+        "Pathways headless mode starts only the Pathways components and runs no MaxText training command, so"
+        f" MaxText overrides {sorted(wl_config.extra_tuning_params)} would have no effect. Remove them."
+    )
 
   time.localtime()
   length_of_random_str = 3
@@ -685,8 +773,11 @@ def generate_workload_cmd(
   wl_config.metrics_gcs_file = os.path.join(wl_config.base_output_directory, wl_config.run_name, "metrics")
 
   user_command = ""
+  tuning_params = None
   if not is_pathways_headless_enabled:
-    user_command = build_user_command(name=name, wl_config=wl_config)
+    # Resolve once and reuse for the BigQuery upload args below, so the warnings print once per workload.
+    tuning_params = _resolve_tuning_params(wl_config)
+    user_command = build_user_command(name=name, wl_config=wl_config, tuning_params=tuning_params)
 
   additional_flags = ""
   if not is_pathways_enabled and wl_config.libtpu_type == LibTpuType.CUSTOM:
@@ -733,7 +824,7 @@ def generate_workload_cmd(
   upload_metrics_to_bq_cmd = ""
   if wl_config.generate_metrics_and_upload_to_big_query and not is_pathways_headless_enabled:
     # TODO (optionally) make it so that this upload step is done on local device instead of within the workload.
-    args = _build_args_from_config(wl_config)
+    args = _build_args_from_config(wl_config, tuning_params)
     args_str = ""
     for k, v in args.items():
       args_str += f"--{k}={v} "
