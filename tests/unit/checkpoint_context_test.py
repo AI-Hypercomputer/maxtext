@@ -148,6 +148,16 @@ class TestBuildContext(unittest.TestCase):
     ctx = checkpoint_context.build_context(colocated_python_checkpointing=True, enable_pathways_persistence=True)
     self.assertEqual(ctx.pathways.checkpointing_impl, ocp_pathways.CheckpointingImpl.COLOCATED_PYTHON)
 
+  def test_colocated_python_skips_array_metadata(self):
+    ctx = checkpoint_context.build_context(colocated_python_checkpointing=True)
+    self.assertIsNone(ctx.array.saving.array_metadata_store)
+
+  def test_array_metadata_kept_without_colocated_python(self):
+    for kwargs in ({}, {"enable_pathways_persistence": True}):
+      with self.subTest(**kwargs):
+        ctx = checkpoint_context.build_context(**kwargs)
+        self.assertIsNotNone(ctx.array.saving.array_metadata_store)
+
   def test_device_host_concurrent_gb_to_transfer_bytes(self):
     ctx = checkpoint_context.build_context(checkpoint_storage_device_host_concurrent_gb=16)
     self.assertEqual(ctx.memory.transfer_concurrent_bytes, 16 * _GB)
