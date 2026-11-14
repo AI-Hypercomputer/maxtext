@@ -25,8 +25,8 @@ export RUN_NAME="${RUN_NAME:-rl-$(date +%Y%m%d-%H%M)}"
 # Pathways component images, pinned to specific versions (mirrors the reference config).
 # Note: PATHWAYS_SERVER_IMAGE is used for BOTH the Pathways resource-manager server and the
 # workers; in the reference config the worker and pathwaysServer images are identical.
-export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server@sha256:d03068b39a8a2fab0621086ccb7c9445ce17ad34f1520159ca4ecd395346a162}"
-export PATHWAYS_PROXY_SERVER_IMAGE="${PATHWAYS_PROXY_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server@sha256:6342a3cae2818d2f887d396e9ae4156b3316f79fef186d71ff16d535b44e1724}"
+export PATHWAYS_SERVER_IMAGE="${PATHWAYS_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server@sha256:8dfe0e851b92aada15afbb413c2ed45e49e71d555400c2df57fe462dac48c04e}"
+export PATHWAYS_PROXY_SERVER_IMAGE="${PATHWAYS_PROXY_SERVER_IMAGE:-us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server@sha256:4bd7d3c00fc5a8a27841f242bfaf626fe7e2f33d3d88139d51ab135811e5c1d0}"
 
 # --- Variable Validation ---
 if [ -z "$PROJECT_ID" ]; then
