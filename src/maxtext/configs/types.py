@@ -1511,6 +1511,21 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use ragged kernel for sorting, improve performance when EP is enabled.",
   )
+  moe_routing_index_math: Literal["sort", "count"] = Field(
+      "sort",
+      description=(
+          "How the ring-of-experts ragged sort computes its routing index maps. 'sort' (default): the expert"
+          " permutation and its inverse by two stable argsorts. 'count': the permutation by one single-operand"
+          " packed uint32 sort (XLA lowers the stable argsort with an extra, duplicated iota operand); the sorted"
+          " token indices by division instead of a gather; the inverse permutation by counting, on this shard's"
+          " slots only, instead of a second argsort; the router-weight gradient back to slot order by a gather"
+          " instead of a scatter; the gather-reduce validity sort packed into one uint32 operand; and, for unforced"
+          " router top-k selection, the router's top-k indices by k argmax passes instead of a sort. Exact: the same"
+          " permutation, so the same outputs and gradients, dropped tokens included. With moe_tc_ragged_sort, which"
+          " replaces the ragged sort of the dropping program, it applies to the dropless program's ragged sort only."
+          " Requires sparse_matmul=True, te_moe_block=False, use_ring_of_experts=True and use_ragged_sort=True."
+      ),
+  )
   moe_quantize_combine_bwd_method: str | None = Field(
       "",
       description=(
@@ -1522,6 +1537,14 @@ class MoEGeneral(BaseModel):
   ragged_sort_use_single_sparsecore: bool = Field(
       False,
       description="Whether to run ragged sort kernels on 1 SparseCore instead of all SparseCores.",
+  )
+  ragged_unsort_spread_masked_indices: bool = Field(
+      False,
+      description=(
+          "Ring-of-experts unsort backward with moe_routing_index_math='count' and a packed buffer: the slot-order"
+          " gather of the routing-weight gradient gives masked slots distinct in-bounds indices instead of 0."
+          " Bit-identical (masked lanes are discarded); avoids sending 7 of 8 SparseCore gather lookups to one address."
+      ),
   )
   moe_tc_ragged_sort: bool = Field(
       False,
@@ -1867,6 +1890,37 @@ class MoEGeneral(BaseModel):
       raise ValueError(
           "Only one of shard_exp_on_fsdp, use_2d_fsdp_sharding, or "
           "shard_embed_moe_on_fsdp can be True at the same time."
+      )
+    return self
+
+  # The validators of the MoE performance keys below share one form: each lists (met, requirement) pairs and
+  # _reject_unless raises naming every unmet one. They read the fields of the other config mixins (sparse_matmul,
+  # mlp_bias, remat_policy, the parallelism degrees, ...) directly: they run on the combined configs (MaxTextConfig
+  # and RLConfig), which have all of them, so a renamed field fails loudly instead of passing the check.
+
+  @staticmethod
+  def _reject_unless(setting: str, requirements: list[tuple[bool, str]]) -> None:
+    """Raises a ValueError naming every requirement of `setting` that is not met."""
+    unmet = [requirement for met, requirement in requirements if not met]
+    if unmet:
+      raise ValueError(f"{setting} requires: {'; '.join(unmet)}.")
+
+  def _ring_of_experts_ragged_sort_requirements(self) -> list[tuple[bool, str]]:
+    """What the MoE layer needs to run the ring-of-experts ragged sort."""
+    return [
+        (self.sparse_matmul, "sparse_matmul=True"),
+        (not self.te_moe_block, "te_moe_block=False"),
+        (self.use_ring_of_experts, "use_ring_of_experts=True"),
+        (self.use_ragged_sort, "use_ragged_sort=True"),
+    ]
+
+  @model_validator(mode="after")
+  def validate_moe_routing_index_math(self) -> "MoEGeneral":
+    """moe_routing_index_math='count' needs the ring-of-experts ragged sort, the only user of these index maps."""
+    if self.moe_routing_index_math != "sort":
+      MoEGeneral._reject_unless(
+          f"moe_routing_index_math={self.moe_routing_index_math!r}",
+          self._ring_of_experts_ragged_sort_requirements(),
       )
     return self
 

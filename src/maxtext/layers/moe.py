@@ -158,7 +158,7 @@ class RouteOutput:
   # moe_log_max_load_ratio=True on the ring-of-experts ragged path.
   max_load_ratio: Optional[jax.Array] = None
   # Inverse of sorted_selected_experts on the ring-of-experts ragged path, so the unsort backward does not re-sort to
-  # get it. Only set when moe_routing_maps is not "remat".
+  # get it. Set when moe_routing_maps is not "remat", and always with moe_routing_index_math="count".
   topk_argsort_indices: Optional[jax.Array] = None
   # moe_tc_ragged_sort: TcRouting shared by the TensorCore ragged sort and unsort of this chunk.
   tc_routing: Optional[Any] = None
@@ -450,6 +450,25 @@ def _top_2_in_group_sum(scores_grouped: jax.Array) -> jax.Array:
 
   # 3. Cast both values to float32 before summation.
   return max_1.astype(jnp.float32) + max_2.astype(jnp.float32)
+
+
+def topk_indices_by_argmax(scores: jax.Array, k: int) -> jax.Array:
+  """`jax.lax.top_k(scores, k)[1]` without a sort (moe_routing_index_math="count").
+
+  k passes of argmax over the last axis, each masking its winner to -inf. argmax returns the first maximal index,
+  so ties go to the lower index, in the order top_k returns them. With k small against the expert count (10 of 512
+  for Qwen3.5-397B) the k reductions are expected to cost less than the sort top_k lowers to; this was timed only as
+  part of moe_routing_index_math="count", not on its own. Needs at least k entries above -inf per row, true of the
+  router probabilities it is used on.
+  """
+  lane = jax.lax.broadcasted_iota(jnp.int32, scores.shape, scores.ndim - 1)
+  masked = scores
+  picks = []
+  for _ in range(k):
+    pick = jnp.argmax(masked, axis=-1).astype(jnp.int32)
+    picks.append(pick)
+    masked = jnp.where(lane == pick[..., None], jnp.array(-jnp.inf, scores.dtype), masked)
+  return jnp.stack(picks, axis=-1)
 
 
 def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None, return_counts=False):
@@ -1575,8 +1594,14 @@ class RoutedMoE(nnx.Module):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-        _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
+        if getattr(self.config, "moe_routing_index_math", "sort") == "count":
+          top_k_indices = topk_indices_by_argmax(gate_logits, self.num_experts_per_tok)
+        else:
+          _, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
         top_k_weights = jnp.take_along_axis(router_probs, top_k_indices, axis=-1).astype(self.dtype)
+      elif getattr(self.config, "moe_routing_index_math", "sort") == "count":
+        top_k_indices = topk_indices_by_argmax(gate_logits, self.num_experts_per_tok)
+        top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
       else:
         top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
@@ -1915,6 +1940,7 @@ class RoutedMoE(nnx.Module):
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           tag_routing_fn=tag_routing_fn,
+          index_math=self.config.moe_routing_index_math,
       )
       if has_per_token_scale:
         cap = sorted_inputs.shape[0]
@@ -1933,8 +1959,10 @@ class RoutedMoE(nnx.Module):
           sorted_scale_1d = _window_token_scale(
               scale_1d, token_ids_sorted, jnp.minimum(end - start, cap), cap, start=start
           )
-      if tag_routing_fn is None:
+      if tag_routing_fn is None and self.config.moe_routing_index_math == "sort":
         # moe_routing_maps=remat: unpermute re-derives the permutation in its backward (existing behavior).
+        # moe_routing_index_math="count" always passes it: its inverse covers only this shard's slots, so it
+        # cannot be argsorted back, and under remat the replay recomputes it anyway (no memory is saved).
         topk_argsort_indices = None
     else:
       flatten_selected_experts = jnp.ravel(selected_experts)
@@ -2094,6 +2122,8 @@ class RoutedMoE(nnx.Module):
           gather_reduce_bytes_accessed_override=self.config.ragged_gather_reduce_cost_estimate_bytes_accessed,
           use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           topk_argsort_indices=topk_argsort_indices,
+          index_math=self.config.moe_routing_index_math,
+          spread_masked_indices=self.config.ragged_unsort_spread_masked_indices,
       )
     else:
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok)).T
