@@ -17,6 +17,7 @@
 from collections.abc import Callable, Mapping
 import dataclasses
 import enum
+import math
 import re
 
 from flax import nnx
@@ -26,10 +27,22 @@ _SCAN_MODES = ((False, "none"), (False, "full"), (True, "none"), (True, "full"))
 # TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting
 # to 256.
 _DEFAULT_MIN_SHARDED_PARAM_ELEMENTS = 256
+# TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting
+# to 5e-2.
+_DEFAULT_BF16_ATOL = 5e-2
+# TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting
+# to 5e-2.
+_DEFAULT_BF16_RTOL = 5e-2
+_DEFAULT_FULL_SCALE_TOPOLOGIES: tuple[tuple[str, Mapping[str, int]], ...] = (
+    ("v5p-128", {"data": 1, "fsdp": 64, "tensor": 1, "expert": 1}),
+    ("tpu7x-64", {"data": 1, "fsdp": 32, "tensor": 2, "expert": 1}),
+    ("tpu7x-128", {"data": 1, "fsdp": 64, "tensor": 2, "expert": 1}),
+    ("tpu7x-256", {"data": 1, "fsdp": 64, "tensor": 4, "expert": 1}),
+)
 
 
 class CheckId(enum.Enum):
-  """Identifiers for the 8 mandatory m3 conformance checks."""
+  """Identifiers for the mandatory m3 conformance checks."""
 
   SCAN_REMAT_EQUIVALENCE = "check_1_scan_remat_equivalence"
   PARAM_AND_GRAD_HEALTH = "check_2_param_and_grad_health"
@@ -39,6 +52,12 @@ class CheckId(enum.Enum):
   NO_POST_INIT_PARAM_CONSTRAINTS = "check_6_no_post_init_param_constraints"
   WEIGHT_SHARDING_COVERAGE = "check_7_weight_sharding_coverage"
   NO_EXPERT_WEIGHT_ALL_GATHER = "check_8_no_expert_weight_all_gather"
+  BF16_FORWARD_PARITY = "check_9a_bf16_forward_parity"
+  PACKING_AND_PADDING_ISOLATION = "check_9b_packing_and_padding_isolation"
+  EXPERT_PARALLEL_PARITY = "check_9c_expert_parallel_parity"
+  OPTIMIZER_STEP_AND_FROZEN_WEIGHT_DECAY = "check_10_optimizer_step_and_frozen_weight_decay"
+  SHARDED_CHECKPOINT_SLICE_LOAD = "check_11_sharded_checkpoint_slice_load"
+  FULL_SCALE_TOPOLOGY_AOT_AND_REMAT_HBM = "check_12_full_scale_topology_aot_and_remat_hbm"
 
 
 class OutputKind(enum.Enum):
@@ -100,6 +119,13 @@ class ConformanceSpec:
   num_scanned_blocks: int = 1
   min_sharded_param_elements: int = _DEFAULT_MIN_SHARDED_PARAM_ELEMENTS
   expert_weight_param_patterns: tuple[str, ...] = ()
+  build_bf16_model: Callable[[jax.sharding.Mesh, nnx.Rngs, bool, str], nnx.Module] | None = None
+  bf16_atol: float = _DEFAULT_BF16_ATOL
+  bf16_rtol: float = _DEFAULT_BF16_RTOL
+  build_full_scale_abstract_model: (
+      Callable[[jax.sharding.Mesh | jax.sharding.AbstractMesh, bool, str], nnx.Module] | None
+  ) = None
+  full_scale_topologies: tuple[tuple[str, Mapping[str, int]], ...] = _DEFAULT_FULL_SCALE_TOPOLOGIES
   skips: Mapping[CheckId, SkipDeclaration] = dataclasses.field(
       default_factory=dict,
   )
@@ -140,6 +166,38 @@ class ConformanceSpec:
     ):
       if isinstance(int_val, bool) or not isinstance(int_val, int) or int_val < 1:
         raise ValueError(f"{self.model_name}: {int_field} must be int >= 1, got {int_val!r}.")
+    for float_field, float_val in (
+        ("bf16_atol", self.bf16_atol),
+        ("bf16_rtol", self.bf16_rtol),
+    ):
+      if (
+          isinstance(float_val, bool)
+          or not isinstance(float_val, (int, float))
+          or not math.isfinite(float(float_val))
+          or float(float_val) <= 0.0
+      ):
+        raise ValueError(f"{self.model_name}: {float_field} must be finite > 0, got" f" {float_val!r}.")
+    for fn_field, fn_val in (
+        ("build_bf16_model", self.build_bf16_model),
+        (
+            "build_full_scale_abstract_model",
+            self.build_full_scale_abstract_model,
+        ),
+    ):
+      if fn_val is not None and not callable(fn_val):
+        raise ValueError(f"{self.model_name}: {fn_field} must be callable or None, got" f" {fn_val!r}.")
+    topos = self.full_scale_topologies
+    if not isinstance(topos, tuple) or not topos:
+      raise ValueError(f"{self.model_name}: full_scale_topologies must be non-empty tuple," f" got {topos!r}.")
+    for entry in topos:
+      if not isinstance(entry, tuple) or len(entry) != 2:
+        raise ValueError(f"{self.model_name}: invalid full_scale_topologies entry {entry!r}.")
+      topo_name, axis_map = entry
+      if not isinstance(topo_name, str) or not topo_name.strip() or not isinstance(axis_map, Mapping) or not axis_map:
+        raise ValueError(f"{self.model_name}: invalid full_scale_topologies entry {entry!r}.")
+      for ax_k, ax_v in axis_map.items():
+        if not isinstance(ax_k, str) or isinstance(ax_v, bool) or not isinstance(ax_v, int) or ax_v < 1:
+          raise ValueError(f"{self.model_name}: invalid full_scale_topologies axis" f" {ax_k!r}={ax_v!r}.")
 
 
 _REGISTERED_SPECS: list[ConformanceSpec | Callable[[], ConformanceSpec]] = []
