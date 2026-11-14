@@ -45,16 +45,12 @@ except ImportError:
     raise
   HAS_TORCH = False
 
-pytestmark = [
-    pytest.mark.scheduled_only,
-    pytest.mark.skipif(not HAS_TORCH, reason="Torch or transformers not available"),
-]
-
 
 def _to_np(x):
   return x.detach().cpu().numpy()
 
 
+@pytest.mark.scheduled_only
 @unittest.skipUnless(HAS_TORCH, "Torch or transformers not available")
 class Glm5MoeTest(absltest.TestCase):
   """Numerical parity and invariant tests for Clamped-SwiGLU MLP and MoE."""
@@ -386,24 +382,24 @@ class Glm5MoeTest(absltest.TestCase):
     self._assert_allclose(out_exp, ref_out, atol=1e-5)
 
   def test_ep_sharding_guard(self):
-    """Verifies ep>1 construction-time and runtime guards on a real 4-device mesh."""
+    """Verifies ep>1 construction-time and runtime guards when sparse_matmul=False."""
     if len(jax.devices()) < 4:
       if "TEST_SRCDIR" in os.environ:
         self.fail("Expected >= 4 JAX devices under Blaze XLA_FLAGS, got" f" {len(jax.devices())}")
       self.skipTest(f"Requires >= 4 JAX devices, got {len(jax.devices())}")
-    cfg = self._mini_cfg()
+    cfg = dataclasses.replace(self._mini_cfg(), sparse_matmul=False)
     mesh_ep4 = m3_sharding.create_mesh(ici={"expert": 4}, devices=jax.devices()[:4])
     shd_ep4 = glm5_config.Glm5Sharding.from_mesh(mesh_ep4)
 
-    # 1. Verify Glm5MoE constructor raises NotImplementedError
+    # 1. Verify Glm5MoE constructor raises NotImplementedError when sparse_matmul=False
     with self.assertRaisesRegex(NotImplementedError, "expert parallelism"):
       modeling_glm5_3_flash.Glm5MoE(cfg, sharding=shd_ep4, rngs=nnx.Rngs(0))
 
-    # 2. Verify Glm5Experts constructor raises NotImplementedError
+    # 2. Verify Glm5Experts constructor raises NotImplementedError when sparse_matmul=False
     with self.assertRaisesRegex(NotImplementedError, "expert parallelism"):
       modeling_glm5_3_flash.Glm5Experts(cfg, sharding=shd_ep4, rngs=nnx.Rngs(0))
 
-    # 3. Construct Glm5Experts without sharding and place x on mesh_ep4
+    # 3. Construct Glm5Experts without sharding (sparse_matmul=False) and place x on mesh_ep4
     exp_guard = modeling_glm5_3_flash.Glm5Experts(cfg, rngs=nnx.Rngs(0))
     x_test = jax.random.normal(jax.random.PRNGKey(0), (4, cfg.hidden_size), dtype=jnp.float32)
     topk_idx = jnp.array([[0, 2], [1, 3], [2, 0], [3, 1]], dtype=jnp.int32)
@@ -596,6 +592,137 @@ class Glm5MoeTest(absltest.TestCase):
     self.assertEqual(moe.shared_experts.gate_proj.kernel[...].dtype, jnp.bfloat16)
     self.assertEqual(moe.shared_experts.up_proj.kernel[...].dtype, jnp.bfloat16)
     self.assertEqual(moe.shared_experts.down_proj.kernel[...].dtype, jnp.bfloat16)
+
+
+class Glm5MoeTokamaxExecutionTest(absltest.TestCase):
+  """Torch-free single-device and multi-device TP/EP parity tests for Glm5Experts on MoEExecutor."""
+
+  def setUp(self):
+    super().setUp()
+    self.enter_context(nnx.use_eager_sharding(True))
+
+  def _sync_nnx_vars(self, src_mod: Any, dst_mod: Any) -> None:
+    src_leaves = jax.tree.leaves(nnx.state(src_mod), is_leaf=lambda x: isinstance(x, nnx.Variable))
+    dst_leaves = jax.tree.leaves(nnx.state(dst_mod), is_leaf=lambda x: isinstance(x, nnx.Variable))
+    for s_var, d_var in zip(src_leaves, dst_leaves, strict=True):
+      shd = getattr(d_var.get_value(), "sharding", None)
+      d_var.set_value(jax.device_put(s_var.get_value(), shd) if shd is not None else jnp.asarray(s_var.get_value()))
+
+  def test_single_device_and_small_token_tokamax_forward_and_vjp_parity(self):
+    cfg_ref = glm5_config.Glm5Config.mini_config(
+        hidden_size=64,
+        intermediate_size=128,
+        moe_intermediate_size=32,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        dtype="float32",
+        weight_dtype="float32",
+        sparse_matmul=False,
+    )
+    cfg_tok = dataclasses.replace(cfg_ref, sparse_matmul=True)
+    exp_ref = modeling_glm5_3_flash.Glm5Experts(cfg_ref, rngs=nnx.Rngs(7))
+    with m3_sharding.allow_unsharded_construction():
+      exp_tok = modeling_glm5_3_flash.Glm5Experts(cfg_tok, rngs=nnx.Rngs(7), sharding=glm5_config.Glm5Sharding(ep_size=2))
+    self._sync_nnx_vars(exp_ref, exp_tok)
+
+    # Small token count (6 tokens * top_k=2 -> M=12 < 128) + sentinel -1 unassigned slot (F6, F8).
+    x = jax.random.normal(jax.random.PRNGKey(11), (6, 64), dtype=jnp.float32)
+    idx = jnp.array([[0, 1], [2, -1], [4, 5], [1, 3], [6, 7], [0, -1]], dtype=jnp.int32)
+    w = jnp.array(
+        [[0.6, 0.4], [1.0, 0.9], [0.5, 0.5], [0.7, 0.3], [0.2, 0.8], [1.0, 0.5]],
+        dtype=jnp.float32,
+    )
+    cot = jax.random.normal(jax.random.PRNGKey(12), x.shape, dtype=jnp.float32)
+
+    out_ref = exp_ref(x, idx, w)
+    out_tok = exp_tok(x, idx, w)
+    np.testing.assert_allclose(np.asarray(out_tok), np.asarray(out_ref), rtol=1e-5, atol=1e-5)
+
+    def _loss(mod, x_in):
+      return jnp.sum(mod(x_in, idx, w) * cot)
+
+    _, (gmod_ref, gx_ref) = nnx.value_and_grad(_loss, argnums=(0, 1))(exp_ref, x)
+    _, (gmod_tok, gx_tok) = nnx.value_and_grad(_loss, argnums=(0, 1))(exp_tok, x)
+    np.testing.assert_allclose(np.asarray(gx_tok), np.asarray(gx_ref), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(gmod_tok.gate_up_proj.get_value()),
+        np.asarray(gmod_ref.gate_up_proj.get_value()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(gmod_tok.down_proj.get_value()),
+        np.asarray(gmod_ref.down_proj.get_value()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    # Negative control: perturbing gate_up_proj must break output parity.
+    with m3_sharding.allow_unsharded_construction():
+      exp_bad = modeling_glm5_3_flash.Glm5Experts(cfg_tok, rngs=nnx.Rngs(7), sharding=glm5_config.Glm5Sharding(ep_size=2))
+    self._sync_nnx_vars(exp_ref, exp_bad)
+    exp_bad.gate_up_proj.set_value(exp_bad.gate_up_proj.get_value() + 2.0)
+    self.assertGreater(float(jnp.max(jnp.abs(exp_bad(x, idx, w) - out_ref))), 1e-3)
+
+  def test_multidevice_tp_and_ep_tokamax_execution_and_no_weight_all_gather(self):
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest(f"Requires >= 4 devices; got {len(devices)}")
+
+    cfg_ref = glm5_config.Glm5Config.mini_config(
+        hidden_size=64,
+        intermediate_size=128,
+        moe_intermediate_size=32,
+        n_routed_experts=8,
+        num_experts_per_tok=2,
+        dtype="float32",
+        weight_dtype="float32",
+        sparse_matmul=False,
+    )
+    cfg_tok = dataclasses.replace(cfg_ref, sparse_matmul=True)
+    moe_ref = modeling_glm5_3_flash.Glm5MoE(cfg_ref, rngs=nnx.Rngs(19))
+
+    x = jax.random.normal(jax.random.PRNGKey(23), (4, 4, 64), dtype=jnp.float32)
+    cot = jax.random.normal(jax.random.PRNGKey(29), x.shape, dtype=jnp.float32)
+    out_ref, _ = moe_ref(x)
+
+    def _ref_loss(m, inp):
+      y, _ = m(inp)
+      return jnp.sum(y * cot)
+
+    _, ref_dx = nnx.value_and_grad(_ref_loss, argnums=1)(moe_ref, x)
+
+    # Verify ep_size > 1 still raises NotImplementedError when sparse_matmul=False.
+    mesh_ep = m3_sharding.create_mesh(ici={"expert": 4}, devices=devices[:4])
+    shd_ep = glm5_config.Glm5Sharding.from_mesh(mesh_ep)
+    with self.assertRaisesRegex(NotImplementedError, "expert=1"):
+      with jax.sharding.set_mesh(mesh_ep):
+        modeling_glm5_3_flash.Glm5MoE(cfg_ref, rngs=nnx.Rngs(19), sharding=shd_ep)
+
+    for ici in ({"fsdp": 2, "tensor": 2}, {"expert": 4}, {"expert": 2, "tensor": 2}):
+      mesh = m3_sharding.create_mesh(ici=ici, devices=devices[:4])
+      shd = glm5_config.Glm5Sharding.from_mesh(mesh)
+      with jax.sharding.set_mesh(mesh):
+        moe_tok = modeling_glm5_3_flash.Glm5MoE(cfg_tok, rngs=nnx.Rngs(19), sharding=shd)
+        self._sync_nnx_vars(moe_ref, moe_tok)
+        x_shd = jax.device_put(
+            x,
+            jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(("data", "fsdp", "expert"), None, None)),
+        )
+        cot_shd = jax.device_put(cot, x_shd.sharding)
+
+        @nnx.jit
+        def _step(m, inp, c):
+          def _l(mod, z):
+            y, _ = mod(z)
+            return jnp.sum(y * c), y
+
+          (loss_v, y_v), dx_v = nnx.value_and_grad(_l, argnums=1, has_aux=True)(m, inp)
+          return loss_v, y_v, dx_v
+
+        _, out_tok, dx_tok = _step(moe_tok, x_shd, cot_shd)
+        np.testing.assert_allclose(np.asarray(out_tok), np.asarray(out_ref), rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(dx_tok), np.asarray(ref_dx), rtol=1e-4, atol=1e-4)
 
 
 if __name__ == "__main__":

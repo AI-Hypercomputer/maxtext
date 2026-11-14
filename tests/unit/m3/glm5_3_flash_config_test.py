@@ -372,6 +372,18 @@ class Glm5ConfigTest(absltest.TestCase):
     }
     s_ctx_1 = Glm5Sharding.from_mesh(mesh_ctx_1)
     self.assertEqual(s_ctx_1.ep_size, 1)
+    self.assertFalse(s_ctx_1.ep_in_batch)
+
+    mesh_ep4 = mock.create_autospec(jax.sharding.Mesh, instance=True)
+    mesh_ep4.axis_names = ("data", "fsdp", "tensor", "expert")
+    mesh_ep4.shape = {"data": 1, "fsdp": 2, "tensor": 1, "expert": 4}
+    s_ep4 = Glm5Sharding.from_mesh(mesh_ep4)
+    self.assertEqual(s_ep4.ep_size, 4)
+    self.assertTrue(s_ep4.ep_in_batch)
+    self.assertEqual(
+        s_ep4("kda_head_act", ("heads", "batch", None, None), m3_sharding.TensorType.ACTIVATION),
+        P(None, ("data", "fsdp", "expert"), None, None),
+    )
 
     mesh_ctx_2 = mock.create_autospec(jax.sharding.Mesh, instance=True)
     mesh_ctx_2.axis_names = ("data", "fsdp", "tensor", "expert", "context")
@@ -459,6 +471,29 @@ class Glm5ConfigTest(absltest.TestCase):
     cfg_no_m3 = mock.MagicMock(use_m3_model=False)
     with self.assertRaisesRegex(ValueError, "requires use_m3_model=True"):
       Glm5Config.from_maxtext_config(cfg_no_m3)
+
+  def test_sparse_matmul_validation_and_sharding_axes(self):
+    self.assertTrue(Glm5Config().sparse_matmul)
+    self.assertFalse(Glm5Config(sparse_matmul=False).sparse_matmul)
+    base_cfg = pyconfig.initialize(["", "src/maxtext/configs/base.yml", "model_name=glm5.3-flash"])
+    self.assertTrue(Glm5Config.from_maxtext_config(base_cfg).sparse_matmul)
+    self.assertFalse(Glm5Config.from_maxtext_config(base_cfg, sparse_matmul=False).sparse_matmul)
+    self.assertFalse(Glm5Config.from_maxtext_config(Glm5Config(sparse_matmul=True), sparse_matmul=False).sparse_matmul)
+
+    for bad_bool in ("false", "true", 1, 0, None):
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        Glm5Config(sparse_matmul=cast(Any, bad_bool))
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        Glm5Config.from_maxtext_config(base_cfg, sparse_matmul=bad_bool)
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        Glm5Config.from_maxtext_config(Glm5Config(), sparse_matmul=bad_bool)
+
+    shd = Glm5Sharding(use_tp=True)
+    self.assertEqual(shd("gate_up_proj", ("experts", "expert_embed", "expert_mlp")), P("expert", None, "tensor"))
+    self.assertEqual(
+        shd("moe_tokens", ("batch", "length", "embed"), m3_sharding.TensorType.ACTIVATION),
+        P(("data", "fsdp", "expert"), None, None),
+    )
 
 
 if __name__ == "__main__":

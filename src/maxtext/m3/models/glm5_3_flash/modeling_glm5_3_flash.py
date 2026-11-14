@@ -22,12 +22,17 @@ import typing
 
 from flax import nnx
 import jax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.typing import DTypeLike
-from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.configs import glm5_3_flash_config as glm5_config
+from maxtext.m3.core import kernels as m3_kernels
+from maxtext.m3.core import moe as m3_moe
+from maxtext.m3.core import sharding as m3_sharding
 import optax
+
+# pylint: disable=too-many-positional-arguments,abstract-method,too-many-function-args,no-name-in-module,import-outside-toplevel
 
 
 def _make_lin(dt: DTypeLike, p_dt: DTypeLike, sharding, rngs: nnx.Rngs):
@@ -956,31 +961,56 @@ class Glm5Experts(nnx.Module):
     self.num_experts, self.top_k = e, config.num_experts_per_tok
     self.swiglu_limit = config.mlp_clamp_limit
     self.sharding = sharding
+    self.sparse_matmul = config.sparse_matmul
+    self.executor = m3_moe.moe_from_config(config, sharding)
     self.ep_axis = sharding.ep_axis if isinstance(sharding, glm5_config.Glm5Sharding) else "expert"
-    if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
-      raise NotImplementedError(
-          f"Glm5Experts expert parallelism ({self.ep_axis}={sharding.ep_size} >"
-          " 1) requires shard_map EP dispatch (follow-up F34)."
-      )
-    mesh = jax.sharding.get_abstract_mesh()
-    if not mesh.empty and self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
-      raise NotImplementedError(
-          "Glm5Experts expert parallelism"
-          f" ({self.ep_axis}={mesh.shape[self.ep_axis]} > 1) requires shard_map"
-          " EP dispatch (follow-up F34)."
-      )
+    if self.executor.kind not in m3_moe.SHARDED_EXECUTOR_KINDS:
+      if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
+        raise NotImplementedError(
+            f"Glm5Experts expert parallelism ({self.ep_axis}={sharding.ep_size} >"
+            " 1) requires shard_map EP dispatch (follow-up F34)."
+        )
+      mesh = jax.sharding.get_abstract_mesh()
+      if not mesh.empty and self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
+        raise NotImplementedError(
+            "Glm5Experts expert parallelism"
+            f" ({self.ep_axis}={mesh.shape[self.ep_axis]} > 1) requires shard_map"
+            " EP dispatch (follow-up F34)."
+        )
 
     p_dt = getattr(jnp, config.weight_dtype)
     gu_axes = ("expert", "embed", None, "mlp")
     d_axes = ("expert", "mlp", "embed")
-    gu_spec = sharding("gate_up_proj", gu_axes) if sharding else None
-    d_spec = sharding("down_proj", d_axes) if sharding else None
+    gu_kw = m3_sharding.param_metadata(sharding, "gate_up_proj", gu_axes) if sharding else {}
+    d_kw = m3_sharding.param_metadata(sharding, "down_proj", d_axes) if sharding else {}
 
     gu_init = nnx.initializers.normal(0.02)(rngs.params(), (e, h, 2, inter), p_dt)
-    self.gate_up_proj = nnx.Param(gu_init, sharding=gu_spec)
+    self.gate_up_proj = nnx.Param(gu_init, **gu_kw)
 
     d_init = nnx.initializers.normal(0.02)(rngs.params(), (e, inter, h), p_dt)
-    self.down_proj = nnx.Param(d_init, out_sharding=d_spec)
+    self.down_proj = nnx.Param(d_init, **d_kw)
+
+  def _resolve_ep_size_and_mesh(
+      self,
+      hidden_states: jax.Array,
+  ) -> tuple[int, Any, jax.sharding.Mesh | None]:
+    """Resolves active/inferred mesh and expert-parallelism size for `hidden_states`."""
+    shd_ep_size = self.sharding.ep_size if isinstance(self.sharding, glm5_config.Glm5Sharding) else 1
+    amb_mesh = jax.sharding.get_abstract_mesh()
+    inferred_mesh = None
+    if amb_mesh.empty:
+      for arr in (hidden_states, self.gate_up_proj[...]):
+        arr_shd = jax.typeof(arr).sharding
+        if isinstance(arr_shd, jax.sharding.NamedSharding) and not arr_shd.mesh.empty:
+          inferred_mesh = arr_shd.mesh
+          break
+    active_mesh = amb_mesh if not amb_mesh.empty else (inferred_mesh.abstract_mesh if inferred_mesh is not None else None)
+    mesh_ep_size = (
+        int(active_mesh.shape[self.ep_axis])
+        if active_mesh is not None and not active_mesh.empty and self.ep_axis in active_mesh.shape
+        else 1
+    )
+    return max(shd_ep_size, mesh_ep_size), active_mesh, inferred_mesh
 
   def __call__(
       self,
@@ -988,66 +1018,135 @@ class Glm5Experts(nnx.Module):
       topk_indices: jax.Array,
       topk_weights: jax.Array,
   ) -> jax.Array:
+    orig_shape = hidden_states.shape
+    dt = hidden_states.dtype
+    gu = self.gate_up_proj[...].astype(dt)
+    d_w = self.down_proj[...].astype(dt)
+    ep_size, active_mesh, inferred_mesh = self._resolve_ep_size_and_mesh(hidden_states)
+
+    if ep_size > 1 and self.executor.kind in m3_moe.SHARDED_EXECUTOR_KINDS:
+      if hidden_states.ndim == 2:
+        x_3d = hidden_states[:, None, :]
+        idx_3d = topk_indices[:, None, :]
+        w_3d = topk_weights[:, None, :].astype(jnp.float32)
+      elif hidden_states.ndim == 3:
+        x_3d = hidden_states
+        idx_3d = topk_indices
+        w_3d = topk_weights.astype(jnp.float32)
+      else:
+        raise ValueError(f"Expected 2D or 3D hidden_states; got {hidden_states.shape}.")
+
+      def _run_with_mesh(mesh_obj: Any) -> jax.Array:
+        exec_cfg = self.executor
+        x_in, w_in, idx_in = x_3d, w_3d, idx_3d
+        reshaped_to_tokens = False
+        batch_ax = m3_kernels.resolve_mesh_axes(mesh_obj, exec_cfg.batch)
+        batch_shards = m3_kernels.mesh_axis_size(mesh_obj, batch_ax)
+        mesh_ep = m3_kernels.mesh_axis_size(mesh_obj, m3_kernels.resolve_mesh_axes(mesh_obj, exec_cfg.experts))
+        if x_in.shape[0] % batch_shards != 0:
+          total_tokens = x_in.shape[0] * x_in.shape[1]
+          if total_tokens % batch_shards == 0:
+            x_in = x_in.reshape(total_tokens, 1, x_in.shape[2])
+            w_in = w_in.reshape(total_tokens, 1, w_in.shape[2])
+            idx_in = idx_in.reshape(total_tokens, 1, idx_in.shape[2])
+            reshaped_to_tokens = True
+          elif mesh_ep == 1:
+            exec_cfg = dataclasses.replace(exec_cfg, batch=None)
+          elif total_tokens % mesh_ep == 0:
+            x_in = x_in.reshape(total_tokens, 1, x_in.shape[2])
+            w_in = w_in.reshape(total_tokens, 1, w_in.shape[2])
+            idx_in = idx_in.reshape(total_tokens, 1, idx_in.shape[2])
+            reshaped_to_tokens = True
+            exec_cfg = dataclasses.replace(exec_cfg, batch=exec_cfg.experts)
+        y = exec_cfg.fused(
+            x_in,
+            w_in,
+            idx_in,
+            gu,
+            d_w,
+            swiglu_limit=self.swiglu_limit,
+        )
+        if reshaped_to_tokens:
+          y = y.reshape(x_3d.shape)
+        return y
+
+      if inferred_mesh is not None and jax.sharding.get_abstract_mesh().empty:
+        with jax.sharding.use_abstract_mesh(inferred_mesh.abstract_mesh):
+          out_3d = _run_with_mesh(inferred_mesh.abstract_mesh)
+      elif active_mesh is not None and not active_mesh.empty:
+        out_3d = _run_with_mesh(active_mesh)
+      else:
+        out_3d = m3_moe.grouped_unsharded_fused(
+            x_3d,
+            w_3d,
+            idx_3d,
+            gu,
+            d_w,
+            executor=self.executor,
+            swiglu_limit=self.swiglu_limit,
+            is_tpu=(jax.default_backend() == "tpu"),
+        )
+      return out_3d.reshape(orig_shape).astype(dt)
+
     if isinstance(self.sharding, glm5_config.Glm5Sharding) and self.sharding.ep_size > 1:
       raise NotImplementedError(
           f"Glm5Experts.__call__ with {self.ep_axis} > 1 requires shard_map EP"
           f" dispatch (follow-up F34); got ep_size={self.sharding.ep_size}."
       )
-    mesh = None
-    x_shd = jax.typeof(hidden_states).sharding
-    param_shd = jax.typeof(self.gate_up_proj.value).sharding
-    if isinstance(x_shd, jax.sharding.NamedSharding):
-      mesh = x_shd.mesh
-    elif isinstance(param_shd, jax.sharding.NamedSharding):
-      mesh = param_shd.mesh
-    elif not jax.sharding.get_abstract_mesh().empty:
-      mesh = jax.sharding.get_abstract_mesh()
-
-    if mesh is not None and not mesh.empty:
-      if self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
+    if active_mesh is not None and not active_mesh.empty:
+      if self.ep_axis in active_mesh.shape and active_mesh.shape[self.ep_axis] > 1:
         raise NotImplementedError(
             f"Glm5Experts.__call__ with {self.ep_axis} > 1 requires shard_map"
             " EP dispatch (follow-up F34); got mesh"
-            f" {self.ep_axis}={mesh.shape[self.ep_axis]}."
+            f" {self.ep_axis}={active_mesh.shape[self.ep_axis]}."
         )
 
-    flat_idx = topk_indices.reshape(-1)
-    flat_w = topk_weights.reshape(-1, 1).astype(jnp.float32)
-    perm = jnp.argsort(flat_idx)
-    sorted_h = hidden_states[perm // self.top_k]
+    h_2d = hidden_states.reshape(-1, orig_shape[-1])
+    flat_idx = topk_indices.reshape(-1).astype(jnp.int32)
+    is_valid = (flat_idx >= 0) & (flat_idx < self.num_experts)
+    bucket = jnp.where(is_valid, flat_idx, self.num_experts)
+    flat_w = jnp.where(is_valid, topk_weights.reshape(-1), 0).reshape(-1, 1).astype(jnp.float32)
+    perm = jnp.argsort(bucket, stable=True)
     inv_perm = jnp.argsort(perm)
-    group_sizes = jnp.bincount(flat_idx, length=self.num_experts)
+    sorted_valid = is_valid[perm][:, None]
+    zero_scalar = jnp.zeros((), dtype=dt)
+    sorted_h = jnp.where(sorted_valid, h_2d[perm // self.top_k], zero_scalar)
+    group_sizes = jnp.bincount(bucket, length=self.num_experts + 1)[: self.num_experts]
 
-    dt = hidden_states.dtype
-    gu = self.gate_up_proj[...].astype(dt)
+    is_tpu = (
+        m3_kernels.is_tpu_mesh(active_mesh)
+        if active_mesh is not None and not active_mesh.empty
+        else (jax.default_backend() == "tpu")
+    )
+    rdot_prec = jax.lax.Precision.DEFAULT if is_tpu else jax.lax.Precision.HIGHEST
     gate = jax.lax.ragged_dot(
         sorted_h,
         gu[:, :, 0, :],
         group_sizes=group_sizes,
         preferred_element_type=dt,
-        precision=jax.lax.Precision.HIGHEST,
+        precision=rdot_prec,
     )
     up = jax.lax.ragged_dot(
         sorted_h,
         gu[:, :, 1, :],
         group_sizes=group_sizes,
         preferred_element_type=dt,
-        precision=jax.lax.Precision.HIGHEST,
+        precision=rdot_prec,
     )
     gate = jnp.minimum(gate, self.swiglu_limit)
     up = jnp.clip(up, -self.swiglu_limit, self.swiglu_limit)
-    act = jax.nn.silu(gate) * up
-    d_w = self.down_proj[...].astype(dt)
+    act = jnp.where(sorted_valid, jax.nn.silu(gate) * up, zero_scalar)
     sorted_out = jax.lax.ragged_dot(
         act,
         d_w,
         group_sizes=group_sizes,
         preferred_element_type=dt,
-        precision=jax.lax.Precision.HIGHEST,
+        precision=rdot_prec,
     )
-    n = hidden_states.shape[0]
+    sorted_out = jnp.where(sorted_valid, sorted_out, zero_scalar)
+    n = h_2d.shape[0]
     weighted = (sorted_out[inv_perm].astype(jnp.float32) * flat_w).reshape(n, self.top_k, -1)
-    return jnp.sum(weighted, axis=1).astype(dt)
+    return checkpoint_name(jnp.sum(weighted, axis=1).reshape(orig_shape).astype(dt), "moe_routed_output")
 
 
 class Glm5MoE(nnx.Module):
@@ -1062,20 +1161,21 @@ class Glm5MoE(nnx.Module):
   ):
     self.config = config
     self.ep_axis = sharding.ep_axis if isinstance(sharding, glm5_config.Glm5Sharding) else "expert"
-    if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
-      raise NotImplementedError(
-          f"Glm5MoE expert parallelism ({self.ep_axis}={sharding.ep_size} > 1)"
-          " requires all-to-all dispatch (planned for G8); single-host bringup"
-          f" requires {self.ep_axis}=1."
-      )
-    mesh = jax.sharding.get_abstract_mesh()
-    if not mesh.empty and self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
-      raise NotImplementedError(
-          "Glm5MoE expert parallelism"
-          f" ({self.ep_axis}={mesh.shape[self.ep_axis]} > 1) requires"
-          " all-to-all dispatch (planned for G8); single-host bringup requires"
-          f" {self.ep_axis}=1."
-      )
+    if not config.sparse_matmul:
+      if isinstance(sharding, glm5_config.Glm5Sharding) and sharding.ep_size > 1:
+        raise NotImplementedError(
+            f"Glm5MoE expert parallelism ({self.ep_axis}={sharding.ep_size} > 1)"
+            " requires all-to-all dispatch (planned for G8); single-host bringup"
+            f" requires {self.ep_axis}=1."
+        )
+      mesh = jax.sharding.get_abstract_mesh()
+      if not mesh.empty and self.ep_axis in mesh.shape and mesh.shape[self.ep_axis] > 1:
+        raise NotImplementedError(
+            "Glm5MoE expert parallelism"
+            f" ({self.ep_axis}={mesh.shape[self.ep_axis]} > 1) requires"
+            " all-to-all dispatch (planned for G8); single-host bringup requires"
+            f" {self.ep_axis}=1."
+        )
     self.experts = Glm5Experts(config, rngs=rngs, sharding=sharding)
     self.gate = Glm5TopkRouter(config, rngs=rngs, sharding=sharding)
     self.shared_experts = Glm5MLP(
@@ -1089,12 +1189,15 @@ class Glm5MoE(nnx.Module):
     orig_shape = hidden_states.shape
     h_flat = hidden_states.reshape(-1, orig_shape[-1])
     router_logits, topk_weights, topk_indices, router_probs = self.gate(h_flat)
-    expert_out = self.experts(h_flat, topk_indices, topk_weights)
-    expert_out = expert_out.reshape(orig_shape)
-    shared_out = self.shared_experts(hidden_states)
     topk_reshaped = topk_indices.reshape(orig_shape[:-1] + (self.config.num_experts_per_tok,))
     weights_reshaped = topk_weights.reshape(orig_shape[:-1] + (self.config.num_experts_per_tok,))
     probs_reshaped = router_probs.reshape(orig_shape[:-1] + (self.config.n_routed_experts,))
+    ep_size, _, _ = self.experts._resolve_ep_size_and_mesh(hidden_states)  # pylint: disable=protected-access
+    if ep_size > 1 and self.experts.executor.kind in m3_moe.SHARDED_EXECUTOR_KINDS and len(orig_shape) == 3:
+      expert_out = self.experts(hidden_states, topk_reshaped, weights_reshaped)
+    else:
+      expert_out = self.experts(h_flat, topk_indices, topk_weights).reshape(orig_shape)
+    shared_out = self.shared_experts(hidden_states)
     return expert_out + shared_out, (
         router_logits,
         topk_reshaped,
