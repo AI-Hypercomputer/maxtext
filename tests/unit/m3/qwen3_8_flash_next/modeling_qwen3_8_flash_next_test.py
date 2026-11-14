@@ -1558,12 +1558,11 @@ def _copy_hf_weights_to_jax(hf_model, jax_model):
     for k in keys:
       getattr(getattr(dst, k), attr)[...] = to_j(getattr(src, k).weight, tr)
 
-  d.token_embedder.embedding[...] = to_j(pm.embed_tokens.weight)
-  jax_model.lm_head.kernel[...] = to_j(hf_model.lm_head.weight, True)
-  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "input_mix_weight_down", "input_mix_weight_up")
-  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "hc_norm", tr=False, attr="scale")
-  for i in range(d.num_layers):
-    jl, pl = getattr(d, f"layers_{i}"), pm.layers[i]
+  def cp_stacked(dst, srcs, *keys, tr=True, attr="kernel"):
+    for k in keys:
+      getattr(getattr(dst, k), attr)[...] = jnp.stack([to_j(getattr(s, k).weight, tr) for s in srcs], axis=0)
+
+  def copy_layer(jl, pl):
     for jh, ph in (
         (jl.attn_hyper_connection, pl.attn_hyper_connection),
         (jl.mlp_hyper_connection, pl.mlp_hyper_connection),
@@ -1595,6 +1594,55 @@ def _copy_hf_weights_to_jax(hf_model, jax_model):
         jl.mlp.experts.gate_up_proj.shape
     )
     cp(jl.mlp.shared_expert, pl.mlp.shared_expert, "gate_proj", "up_proj", "down_proj")
+
+  def copy_stacked_slot(jl, pls):
+    for jh_name in ("attn_hyper_connection", "mlp_hyper_connection"):
+      jh = getattr(jl, jh_name)
+      phs = [getattr(pl, jh_name) for pl in pls]
+      cp_stacked(jh, phs, "input_mix_weight_down", "input_mix_weight_up", "block_inject_weight")
+      cp_stacked(jh, phs, "hc_norm", tr=False, attr="scale")
+    if jl.layer_type == "linear_attention":
+      pls_la = [pl.linear_attn for pl in pls]
+      cp_stacked(jl.linear_attn, pls_la, "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj")
+      jl.linear_attn.A_log[...] = jnp.stack([to_j(p.A_log) for p in pls_la], axis=0)
+      jl.linear_attn.dt_bias[...] = jnp.stack([to_j(p.dt_bias) for p in pls_la], axis=0)
+      cp_stacked(jl.linear_attn, pls_la, "norm", tr=False, attr="scale")
+      jl.linear_attn.conv1d.kernel[...] = jnp.stack(
+          [jnp.array(p.conv1d.weight.detach().cpu().permute(2, 1, 0).numpy()) for p in pls_la], axis=0
+      )
+    else:
+      pls_sa = [pl.self_attn for pl in pls]
+      cp_stacked(jl.self_attn, pls_sa, "q_proj", "k_proj", "v_proj", "o_proj")
+      cp_stacked(jl.self_attn, pls_sa, "q_norm", "k_norm", tr=False, attr="scale")
+      pls_idx = [p.indexer for p in pls_sa]
+      cp_stacked(jl.self_attn.indexer, pls_idx, "q_layernorm", "k_layernorm", tr=False, attr="scale")
+      cp_stacked(jl.self_attn.indexer, pls_idx, "index_qk_proj")
+    jl.mlp.gate.linear.kernel[...] = jnp.stack([to_j(pl.mlp.gate.weight, True) for pl in pls], axis=0)
+    jl.mlp.shared_expert_gate.kernel[...] = jnp.stack(
+        [to_j(pl.mlp.shared_expert_gate.weight, True) for pl in pls], axis=0
+    )
+    jl.mlp.experts.down_proj[...] = jnp.stack(
+        [jnp.swapaxes(to_j(pl.mlp.experts.down_proj), -1, -2) for pl in pls], axis=0
+    )
+    jl.mlp.experts.gate_up_proj[...] = jnp.stack(
+        [
+            jnp.swapaxes(to_j(pl.mlp.experts.gate_up_proj), -1, -2).reshape(jl.mlp.experts.gate_up_proj.shape[1:])
+            for pl in pls
+        ],
+        axis=0,
+    )
+    cp_stacked(jl.mlp.shared_expert, [pl.mlp.shared_expert for pl in pls], "gate_proj", "up_proj", "down_proj")
+
+  d.token_embedder.embedding[...] = to_j(pm.embed_tokens.weight)
+  jax_model.lm_head.kernel[...] = to_j(hf_model.lm_head.weight, True)
+  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "input_mix_weight_down", "input_mix_weight_up")
+  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "hc_norm", tr=False, attr="scale")
+  slot_names = ("gdn_0", "gdn_1", "gdn_2", "qsa_3")
+  for k, name in enumerate(slot_names):
+    copy_layer(getattr(d.first_cycle, name), pm.layers[k])
+  if d.cycles is not None:
+    for k, name in enumerate(slot_names):
+      copy_stacked_slot(getattr(d.cycles, name), [pm.layers[4 * c + k] for c in range(1, d.num_cycles)])
 
 
 def _make_matching_hf_config(c) -> Any:
@@ -1726,7 +1774,7 @@ class Qwen3_8BackboneTest(absltest.TestCase):
     ms = m3_models.create_model(_get_mini_config(scan_layers=True, base_num_decoder_layers=4), mesh=None)
     for cu in (
         _get_mini_config(scan_layers=False, base_num_decoder_layers=8),
-        _get_mini_config(scan_layers=False, base_num_decoder_layers=4, ple_layer_id=2),
+        _get_mini_config(scan_layers=False, base_num_decoder_layers=4, use_ple_layer=False),
     ):
       with self.assertRaises(ValueError):
         modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(m3_models.create_model(cu, mesh=None), ms)
@@ -2219,8 +2267,8 @@ class Qwen3_8MTPLossTest(absltest.TestCase):
     self.assertTrue({"total_loss", "primary_loss", "router_loss", "mtp_loss"}.issubset(metrics))
     self.assertGreater(jnp.sum(jnp.abs(grads.lm_head.kernel[...])), 0.0)
     self.assertGreater(jnp.sum(jnp.abs(grads.mtp.fc_embedding.kernel[...])), 0.0)
-    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.layers_0.mlp.experts.gate_up_proj[...])), 0.0)
-    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.layers_0.mlp.gate.linear.kernel[...])), 0.0)
+    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.first_cycle.gdn_0.mlp.experts.gate_up_proj[...])), 0.0)
+    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.first_cycle.gdn_0.mlp.gate.linear.kernel[...])), 0.0)
     self.assertGreater(jnp.sum(jnp.abs(grads.mtp.layers_0.mlp.gate.linear.kernel[...])), 0.0)
 
   def test_compute_total_loss_single_token(self):

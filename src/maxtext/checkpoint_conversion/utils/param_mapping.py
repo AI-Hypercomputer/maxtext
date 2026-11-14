@@ -5036,24 +5036,23 @@ def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_
       ),
   }
 
-  if not scan_layers:
-    for i in range(n_layers):
-      is_qsa = (i % cycle_interval) == (cycle_interval - 1)
-      prefix = f"params-decoder-layers_{i}"
-      for mt_sub, hf_sub, _ in _qwen3_8_flash_next_layer_sub_specs(is_qsa):
-        mapping[f"{prefix}-{mt_sub}"] = f"{text_base}.layers.{i}.{hf_sub}"
-  else:
-    num_cycles = n_layers // cycle_interval
-    for p in range(cycle_interval):
-      is_qsa = p == (cycle_interval - 1)
-      blk = f"qsa_{p}" if is_qsa else f"gdn_{p}"
+  del scan_layers
+  num_cycles = n_layers // cycle_interval
+  for p in range(cycle_interval):
+    is_qsa = p == (cycle_interval - 1)
+    blk = f"qsa_{p}" if is_qsa else f"gdn_{p}"
+    first_prefix = f"params-decoder-first_cycle-{blk}"
+    for mt_sub, hf_sub, _ in _qwen3_8_flash_next_layer_sub_specs(is_qsa):
+      mapping[f"{first_prefix}-{mt_sub}"] = f"{text_base}.layers.{p}.{hf_sub}"
+    if num_cycles > 1:
       prefix = f"params-decoder-cycles-{blk}"
-      layer_indices = [c * cycle_interval + p for c in range(num_cycles)]
+      layer_indices = [c * cycle_interval + p for c in range(1, num_cycles)]
       for mt_sub, hf_sub, _ in _qwen3_8_flash_next_layer_sub_specs(is_qsa):
         mapping[f"{prefix}-{mt_sub}"] = [f"{text_base}.layers.{idx}.{hf_sub}" for idx in layer_indices]
 
   if use_ple_layer:
-    ple_prefix = "params-decoder-ple" if scan_layers else f"params-decoder-layers_{pid}-ple"
+    ple_slot = f"qsa_{pid}" if pid == (cycle_interval - 1) else f"gdn_{pid}"
+    ple_prefix = f"params-decoder-first_cycle-{ple_slot}-ple"
     hf_ple_prefix = f"{text_base}.layers.{pid}.ple"
     mapping[f"{ple_prefix}-conv1d-kernel"] = f"{hf_ple_prefix}.conv1d.weight"
     mapping[f"{ple_prefix}-key_proj-kernel"] = f"{hf_ple_prefix}.key_proj.weight"
@@ -5178,18 +5177,18 @@ def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_
       if kind in kind_to_hook:
         hooks[f"{prefix}-{mt_sub}"] = kind_to_hook[kind]
 
-  if not scan_layers:
-    for i in range(n_layers):
-      is_qsa = (i % cycle_interval) == (cycle_interval - 1)
-      _attach_layer_hooks(f"params-decoder-layers_{i}", is_qsa)
-  else:
-    for p in range(cycle_interval):
-      is_qsa = p == (cycle_interval - 1)
-      blk = f"qsa_{p}" if is_qsa else f"gdn_{p}"
+  del scan_layers
+  num_cycles = n_layers // cycle_interval
+  for p in range(cycle_interval):
+    is_qsa = p == (cycle_interval - 1)
+    blk = f"qsa_{p}" if is_qsa else f"gdn_{p}"
+    _attach_layer_hooks(f"params-decoder-first_cycle-{blk}", is_qsa)
+    if num_cycles > 1:
       _attach_layer_hooks(f"params-decoder-cycles-{blk}", is_qsa)
 
   if use_ple_layer:
-    ple_prefix = "params-decoder-ple" if scan_layers else f"params-decoder-layers_{pid}-ple"
+    ple_slot = f"qsa_{pid}" if pid == (cycle_interval - 1) else f"gdn_{pid}"
+    ple_prefix = f"params-decoder-first_cycle-{ple_slot}-ple"
     hooks[f"{ple_prefix}-conv1d-kernel"] = reshape_conv1d
     hooks[f"{ple_prefix}-key_proj-kernel"] = reshape_kernel
     hooks[f"{ple_prefix}-value_proj-kernel"] = reshape_kernel

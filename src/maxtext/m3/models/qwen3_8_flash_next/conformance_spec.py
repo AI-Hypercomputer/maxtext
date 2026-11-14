@@ -25,11 +25,11 @@ from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next as 
 from tests.unit.m3.conformance import spec
 
 _BATCH_SIZE = 2
-_SEQ_LEN = 16
-_ROW1_VALID_LEN = 12
+_SEQ_LEN = 8
+_ROW1_VALID_LEN = 7
 _VOCAB_SIZE = 256
 _NUM_EXPERTS = 4
-_NUM_CYCLES = 2
+_NUM_CYCLES = 3
 _PLE_LAYER_ID = 1
 # Covers every 2D+ weight of the mini model down to the `(64, 1)` shared-expert gate.
 _MIN_SHARDED_PARAM_ELEMENTS = 64
@@ -43,14 +43,14 @@ _QWEN3_8_MINI_CFG = {
     "normalization_layer_epsilon": 1e-6,
     "dtype": "float32",
     "weight_dtype": "float32",
-    "hc_count": 4,
+    "hc_count": 2,
     "hc_lowrank": 16,
     "gdn_num_key_heads": 2,
     "gdn_num_value_heads": 4,
     "gdn_key_head_dim": 16,
     "gdn_value_head_dim": 16,
     "gdn_conv_kernel_dim": 4,
-    "gdn_chunk_size": 8,
+    "gdn_chunk_size": 16,
     "gdn_output_gate_activation": "sigmoid",
     "gdn_chunk_inverse": "block_doubling",
     "num_query_heads": 4,
@@ -94,10 +94,9 @@ _QWEN3_8_MINI_CFG = {
 }
 
 
-def _randomize_ple_conv_kernel(model: qwen3_8.Qwen3_8FlashNextModel, scan_layers: bool) -> None:
+def _randomize_ple_conv_kernel(model: qwen3_8.Qwen3_8FlashNextModel) -> None:
   """Replaces the zero-initialized PLE conv kernel so `norm_conv`, which only feeds it, receives gradient."""
-  decoder = model.decoder
-  ple = decoder.ple if scan_layers else getattr(decoder, f"layers_{_PLE_LAYER_ID}").ple
+  ple = getattr(model.decoder.first_cycle, f"gdn_{_PLE_LAYER_ID}").ple
   kernel = ple.conv1d.kernel
   value = kernel.get_value()
   noise = 0.02 * jax.random.normal(jax.random.key(0), value.shape, value.dtype)
@@ -110,7 +109,7 @@ def _build_qwen3_8_model(
     scan_layers: bool,
     remat_policy: str,
 ) -> nnx.Module:
-  """Builds a 2-cycle mini `Qwen3_8FlashNextModel` on `mesh` (`m3/README.md` Invariants (1)-(7))."""
+  """Builds a 3-cycle (`first_cycle` + 2 stacked `cycles`) mini `Qwen3_8FlashNextModel` on `mesh`."""
   if rngs is None:
     raise ValueError("rngs must be provided as a non-None nnx.Rngs instance.")
   if not isinstance(scan_layers, bool):
@@ -120,7 +119,7 @@ def _build_qwen3_8_model(
   cfg = types.SimpleNamespace(**_QWEN3_8_MINI_CFG, scan_layers=scan_layers, remat_policy=remat_policy)
   with jax.sharding.set_mesh(mesh):
     model = qwen3_8.Qwen3_8FlashNextModel(cfg, mesh, rngs=rngs)
-    _randomize_ple_conv_kernel(model, scan_layers)
+    _randomize_ple_conv_kernel(model)
     return model
 
 
@@ -182,12 +181,14 @@ def make_qwen3_8_flash_next_conformance_spec() -> spec.ConformanceSpec:
       build_batch=_build_qwen3_8_batch,
       forward_fn=_forward_qwen3_8,
       loss_fn=_loss_qwen3_8,
-      # Check 1 needs every variant to share state paths with the unscanned reference. Scanned storage
-      # (`decoder.cycles`, `decoder.ple`) and unscanned storage (`decoder.layers_i`) are different parameter trees,
-      # bridged by `copy_unscanned_to_scanned`, so only unscanned variants qualify. The unscanned forward does not
-      # apply remat, so today this pins only that the two builds agree; `test_scan_remat_matches_no_remat` covers
-      # scanned remat parity.
-      scan_remat_variants=((False, "none"), (False, "full")),
+      # Both `scan_layers=False` and `scan_layers=True` share the always-stacked (`first_cycle` + `cycles`)
+      # parameter tree (`m3/README.md` Invariant (3)), so all 4 `(scan_layers, remat_policy)` variants are checked.
+      scan_remat_variants=(
+          (False, "none"),
+          (True, "none"),
+          (False, "full"),
+          (True, "full"),
+      ),
       # The indexer picks blocks through a non-differentiable top-k and has no training loss of its own.
       frozen_param_patterns=(r"\.self_attn\.indexer\.",),
       aux_losses={
@@ -195,7 +196,7 @@ def make_qwen3_8_flash_next_conformance_spec() -> spec.ConformanceSpec:
           "mtp_loss": (r"^mtp\.(?!.*\.indexer\.)",),
       },
       stacked_param_path_patterns=(r"^decoder\.cycles\.",),
-      num_scanned_blocks=_NUM_CYCLES,
+      num_scanned_blocks=_NUM_CYCLES - 1,
       min_sharded_param_elements=_MIN_SHARDED_PARAM_ELEMENTS,
       expert_weight_param_patterns=(r"\.mlp\.experts\.(gate_up_proj|down_proj)$",),
       skips={},
