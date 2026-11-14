@@ -250,6 +250,7 @@ class TransformerConfig(BaseModel):
   use_base2_exp: bool = True
   sa_gqa_head_stacking: bool = False
   moe_bwd_wgrad_overlap: bool = False
+  moe_dropless_buffer_factor: float = -1.0
 
 
 # ----------------------------------------------------------------------------

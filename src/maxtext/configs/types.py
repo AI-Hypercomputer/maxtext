@@ -1067,6 +1067,15 @@ class SplashAttention(BaseModel):
           "Tie token input cotangents to expert weight cotangents in m3 MoE backward to overlap wgrad reduce-scatter."
       ),
   )
+  moe_dropless_buffer_factor: float = Field(
+      -1.0,
+      description=(
+          "Receive-buffer sizing factor for m3 MoE EP ragged_all_to_all dispatch: -1.0 auto-selects 2.0 when "
+          "ep_size >= 8 and single-round unbounded (ep_size * num_slots) when ep_size < 8; 0.0 (or >= ep_size) "
+          "forces single-round unbounded buffer at any ep_size; any explicit 0.0 < factor < ep_size activates "
+          "capacity-bounded multi-round overflow scan with zero token drops."
+      ),
+  )
   sa_q_layout: str = Field("HEAD_DIM_MINOR", description="Layout for Q in splash attention.")
   sa_k_layout: str = Field("HEAD_DIM_MINOR", description="Layout for K in splash attention.")
   sa_v_layout: str = Field("HEAD_DIM_MINOR", description="Layout for V in splash attention.")
