@@ -2421,9 +2421,36 @@ class RoutedMoE(nnx.Module):
 
     return input_offsets, send_sizes, output_offsets, recv_sizes
 
+  @quantizations.without_qwix_interception
   def transform_bias(self, experts_index, *biases):
-    """Selects bias values for a variable number of bias tensors based on chosen experts."""
-    return tuple(bias[experts_index] for bias in biases)
+    """Selects bias values for a variable number of bias tensors based on chosen experts.
+
+    Assumes `experts_index` holds valid local expert indices in `[0, bias.shape[0])` (with finite
+    `bias` entries). Expresses the per-token expert bias lookup as an unquantized one-hot matmul on
+    the MXU rather than `bias[experts_index]`, avoiding materializing `[num_routed_tokens, dim]`
+    gather buffers in HBM in forward/remat and high-collision `scatter-add` in backward.
+    """
+    one_hot_cache = {}
+
+    def _project(bias):
+      if bias is None:
+        return None
+      num_experts = bias.shape[0]
+      key = (num_experts, bias.dtype)
+      one_hot = one_hot_cache.get(key)
+      if one_hot is None:
+        one_hot = jax.nn.one_hot(experts_index, num_experts, dtype=bias.dtype)
+        one_hot_cache[key] = one_hot
+      precision = jax.lax.Precision.DEFAULT if bias.dtype == jnp.bfloat16 else jax.lax.Precision.HIGHEST
+      return jax.lax.dot_general(
+          one_hot,
+          bias,
+          (((one_hot.ndim - 1,), (0,)), ((), ())),
+          precision=precision,
+          preferred_element_type=bias.dtype,
+      )
+
+    return tuple(_project(bias) for bias in biases)
 
   def get_ragged_buffer_factor(self):
     """Reads ragged_buffer_factor for this module.
