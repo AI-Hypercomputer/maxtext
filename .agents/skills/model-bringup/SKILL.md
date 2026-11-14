@@ -65,7 +65,7 @@ Update this document at each phase of the bring-up:
 - **Logits Verification**: Run `forward_pass_logit_checker.py` using the mini-subset Orbax checkpoint against golden HF `.jsonl` logits (KL Divergence $\\le 10^{-3}$).
 - **Autoregressive Decode Verification**: Run full autoregressive decode to generate ~16 tokens on both HF PyTorch and MaxText using real weights from the mini subset.
   - **Success Criteria**: Because weights are from a truncated model subset, output text will be gibberish, but **MaxText and HF must generate the exact same token IDs and gibberish text**.
-- **Deep Profiling via Activations Mapping**: If outputs diverge, run HF and MaxText step-by-step with `layers=1` and compare intermediate layer activations.
+- **Deep Profiling via Activations Mapping**: If outputs diverge, run HF and MaxText step-by-step with `layers=1` and compare intermediate layer activations (or use [maxtext-logit-bisect](../maxtext-logit-bisect/SKILL.md) for automated 1:1 config auditing and layerwise activation bisection).
 - **Full Model Run**: Once mini subset passes, run full checkpoint conversion and full logits verification.
 - **Wrap Up Handover**: Finalize `{model_name}_handover.md` with all pitfalls found and full reproduction commands.
 - For details, see [logits_checker.md](references/logits_checker.md).
