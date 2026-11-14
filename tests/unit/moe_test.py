@@ -1183,6 +1183,41 @@ class RoutedMoeTest(parameterized.TestCase):
         else:
           np.testing.assert_array_equal(actual_value, expected_value)
 
+  @parameterized.parameters(True, False)
+  def test_routed_output_carries_remat_tag(self, sparse_matmul):
+    """Every routed path tags its combined output `moe_routed_output`, so a custom remat policy can save it."""
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="routed_output_tag_test",
+        enable_checkpointing=False,
+        dtype="float32",
+        max_target_length=4,
+        max_prefill_predict_length=1,
+        per_device_batch_size=1,
+        num_experts=4,
+        num_experts_per_tok=2,
+        base_emb_dim=128,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
+        sparse_matmul=sparse_matmul,
+        megablox=False,
+        capacity_factor=-1,
+    )
+    model = moe.RoutedMoE(
+        config=cfg,
+        num_experts=cfg.num_experts,
+        num_experts_per_tok=cfg.num_experts_per_tok,
+        mesh=Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes),
+        kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+        kernel_axes=("embed", "mlp"),
+        dtype=cfg.dtype,
+        rngs=nnx.Rngs(params=0),
+    )
+    inputs = jnp.ones((int(cfg.per_device_batch_size) * jax.device_count(), 4, cfg.emb_dim), jnp.float32)
+    graphdef, state = nnx.split(model)
+    jaxpr = str(jax.make_jaxpr(lambda st, x: nnx.merge(graphdef, st)(x)[0])(state, inputs))
+    self.assertIn("moe_routed_output", jaxpr)
+
   def get_expected_output(self, rng, hidden_states, cfg, mesh):
     """Retrieve expected output from Routed Mixture of Experts."""
     model = get_moe_loop(

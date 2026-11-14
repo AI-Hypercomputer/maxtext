@@ -2607,6 +2607,14 @@ class RematAndOffload(BaseModel):
           "from the saved tensor. Default 'remat' recomputes (existing behavior)."
       ),
   )
+  moe_routed_output: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the routed MoE output after unpermute and the top-k combine (any MoE model, every"
+          " routed path). 'device' saves it so the backward does not replay the wo matmul, unpermute and"
+          " combine. Default 'remat' recomputes (existing behavior)."
+      ),
+  )
   moe_routing_maps: RematLocation = Field(
       RematLocation.REMAT,
       description=(
@@ -5985,6 +5993,7 @@ class MaxTextConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routed_output",
           "moe_routing_maps",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
@@ -7943,6 +7952,7 @@ class RLConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routed_output",
           "moe_routing_maps",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
