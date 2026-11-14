@@ -645,6 +645,27 @@ class Gemma3And4CheckpointConversionTest(unittest.TestCase):
     self.assertEqual(kv, 2 * 512)
     self.assertEqual(norm, 512)
 
+  def test_gemma3_hf_configs_global_and_local_rope_theta(self):
+    # pylint: disable=import-outside-toplevel
+    import os
+    from maxtext.checkpoint_conversion.utils import hf_model_configs
+    from maxtext.configs import pyconfig
+    from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+
+    base_yml = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+    for model_key in ("gemma3-4b", "gemma3-12b", "gemma3-27b"):
+      max_cfg = pyconfig.initialize(
+          ["", base_yml, f"model_name={model_key}", "run_name=test", "enable_checkpointing=false"]
+      )
+      hf_text_cfg = hf_model_configs.HF_MODEL_CONFIGS[model_key].text_config
+      full_attn = hf_text_cfg.rope_parameters["full_attention"]
+      sliding_attn = hf_text_cfg.rope_parameters["sliding_attention"]
+      self.assertEqual(full_attn["rope_theta"], float(max_cfg.rope_max_timescale))
+      self.assertEqual(full_attn["rope_theta"], 1_000_000.0)
+      self.assertEqual(full_attn["factor"], float(max_cfg.rope_linear_scaling_factor))
+      self.assertEqual(sliding_attn["rope_theta"], float(max_cfg.local_rope_max_timescale))
+      self.assertEqual(sliding_attn["rope_theta"], 10_000.0)
+
 
 if __name__ == "__main__":
   unittest.main()
