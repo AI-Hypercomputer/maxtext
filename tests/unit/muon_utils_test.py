@@ -284,6 +284,49 @@ class TestTransformLogic(unittest.TestCase):
         mdn((0,), (-1,)),
     )
 
+  def test_self_attention_mla_output_gate(self):
+    # Head-expanded MLA g_proj (Kimi-K3): [emb, heads, v_head_dim] (unscanned) / [emb, layers, heads, v_head_dim]
+    # (scanned) orthogonalizes [emb, heads * v_head_dim] like wq_b / wkv_b.
+    for shape in ((256, 4, 32), (256, 2, 4, 32)):
+      self.assertEqual(
+          muon_utils.transform_logic(("decoder", "layers_3", "self_attention", "g_proj", "kernel"), shape=shape),
+          mdn((0,), (-2, -1)),
+      )
+    # Flat 2D g_proj (e.g. KDA) keeps the standard mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "layers_0", "self_attention", "g_proj", "kernel"), shape=(256, 128)),
+        mdn((0,), (-1,)),
+    )
+    # A flat g_proj under a scanned stack is 3D [emb, layers, out]: the layer axis stays a batch axis.
+    for path in (
+        ("decoder", "scanned_blocks", "layers_0", "self_attention", "g_proj", "kernel"),  # Kimi-K3 scanned KDA
+        ("decoder", "layers", "self_attention", "g_proj", "kernel"),  # e.g. Ming scanned KDA / MLA
+    ):
+      self.assertEqual(muon_utils.transform_logic(path, shape=(256, 22, 128)), mdn((0,), (-1,)))
+    # The scanned head-expanded MLA gate is 4D and keeps the head-aware mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(
+            ("decoder", "scanned_blocks", "layers_3", "self_attention", "g_proj", "kernel"), shape=(256, 22, 4, 32)
+        ),
+        mdn((0,), (-2, -1)),
+    )
+
+  def test_kimi_k3_scanned_kda_out_is_standard(self):
+    # Kimi-K3 scanned KDA `out` is a flat [in, layers, out] projection, not a head-expanded [heads, head_dim, out].
+    self.assertEqual(
+        muon_utils.transform_logic(
+            ("decoder", "scanned_blocks", "layers_0", "self_attention", "out", "kernel"), shape=(384, 22, 256)
+        ),
+        mdn((0,), (-1,)),
+    )
+    # Scanned MLA `out` is 4D [heads, layers, head_dim, out] and keeps the head-aware mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(
+            ("decoder", "scanned_blocks", "layers_3", "self_attention", "out", "kernel"), shape=(4, 22, 32, 256)
+        ),
+        mdn((0, -2), (-1,)),
+    )
+
   # --- 3. Standard ---
   def test_standard_weight(self):
     self.assertEqual(
