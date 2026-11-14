@@ -30,20 +30,20 @@ from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 import numpy as np
 
-from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
-from maxtext.configs import pyconfig
-from maxtext.m3 import models as m3_models
-from maxtext.m3.configs import glm5_3_flash_config as glm5_config
-from maxtext.m3.core import moe as m3_moe
-from maxtext.m3.core.sharding import DefaultSharding, create_mesh
-from maxtext.m3.infra import remat as m3_remat
-from maxtext.m3.infra import scan as m3_scan
-from maxtext.m3.models.glm5_3_flash import modeling_glm5_3_flash
-from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next
-from maxtext.utils import globals as maxtext_globals  # pylint: disable=no-name-in-module
-from maxtext.utils import model_creation_utils
-from tests.utils import glm5_test_utils
-from tests.utils.test_helpers import get_test_config_path
+from maxtext.src.maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
+from maxtext.src.maxtext.configs import pyconfig
+from maxtext.src.maxtext.m3 import models as m3_models
+from maxtext.src.maxtext.m3.configs import glm5_3_flash_config as glm5_config
+from maxtext.src.maxtext.m3.core import moe as m3_moe
+from maxtext.src.maxtext.m3.core.sharding import DefaultSharding, create_mesh
+from maxtext.src.maxtext.m3.infra import remat as m3_remat
+from maxtext.src.maxtext.m3.infra import scan as m3_scan
+from maxtext.src.maxtext.m3.models.glm5_3_flash import modeling_glm5_3_flash
+from maxtext.src.maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next
+from maxtext.src.maxtext.utils import globals as maxtext_globals  # pylint: disable=no-name-in-module
+from maxtext.src.maxtext.utils import model_creation_utils
+from maxtext.tests.utils import glm5_test_utils
+from maxtext.tests.utils.test_helpers import get_test_config_path
 
 
 @dataclasses.dataclass
@@ -290,6 +290,34 @@ class RematPolicyAndContainerTest(parameterized.TestCase):
     assert remat_min.names is not None and remat_ctx.names is not None
     self.assertNotIn("context", remat_min.names)
     self.assertIn("context", remat_ctx.names)
+    self.assertFalse(m3_remat.is_offload_policy(remat_min))
+    self.assertFalse(m3_remat.is_offload_policy(remat_min.policy))
+    self.assertFalse(m3_remat.is_offload_policy("minimal"))
+    self.assertTrue(m3_remat.is_offload_policy("hidden_state_with_offload"))
+
+    remat_off = m3_remat.resolve_policy(_PolicyStub(remat_policy="hidden_state_with_offload"))
+    assert remat_off is not None
+    self.assertTrue(m3_remat.is_offload_policy(remat_off))
+    self.assertTrue(m3_remat.is_offload_policy(remat_off.policy))
+
+    # Verify 1-layer `ScannedLayers` sets `skip-simplify-while-loops_trip-count-one` only when not offloading.
+    scan_1_min = m3_remat.apply_remat(
+        m3_scan.apply_scan(nnx.Sequential(_ToyLayerA(8, rngs=nnx.Rngs(0))), param_scan_axis=0),
+        remat_min,
+    )
+    scan_1_off = m3_remat.apply_remat(
+        m3_scan.apply_scan(nnx.Sequential(_ToyLayerA(8, rngs=nnx.Rngs(0))), param_scan_axis=0),
+        remat_off,
+    )
+    x_toy = jnp.ones((2, 8), dtype=jnp.float32)
+    self.assertIn(
+        "skip-simplify-while-loops_trip-count-one",
+        nnx.jit(lambda m, x: m(x)).lower(scan_1_min, x_toy).as_text(),
+    )
+    self.assertNotIn(
+        "skip-simplify-while-loops_trip-count-one",
+        nnx.jit(lambda m, x: m(x)).lower(scan_1_off, x_toy).as_text(),
+    )
 
     remat_custom = m3_remat.resolve_policy(
         _PolicyStub(
@@ -300,6 +328,12 @@ class RematPolicyAndContainerTest(parameterized.TestCase):
     )
     assert remat_custom is not None
     self.assertEqual(remat_custom.names, ("moe_routed_output", "context"))
+    self.assertTrue(m3_remat.is_offload_policy(remat_custom))
+    self.assertFalse(
+        m3_remat.is_offload_policy(
+            m3_remat.resolve_policy(_PolicyStub(remat_policy="custom", tensors_on_device=("moe_routed_output",)))
+        )
+    )
 
     # Verify native `m3` `TrainerConfig` field names (`names_which_can_be_saved` / `names_which_can_be_offloaded`).
     trainer_stub = dataclasses.make_dataclass(
@@ -468,7 +502,7 @@ class CheckTagsModeGateAndLoopSetupTest(parameterized.TestCase):
 
   @parameterized.parameters("auto", "explicit")
   def test_loop_setup_model_wires_remat_and_check_tags_under_auto_and_explicit_meshes(self, shard_mode: str):
-    from maxtext.m3.train import loop  # pylint: disable=import-outside-toplevel
+    from maxtext.src.maxtext.m3.train import loop  # pylint: disable=import-outside-toplevel
 
     cfg = _qwen3_mini_config(
         self.output_dir,
@@ -547,21 +581,40 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
       )
       m_scan = model_creation_utils.create_model(cfg_scan, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
       found_tags = m3_remat.check_tags(m_scan, cfg_scan, toks)
-      self.assertTrue(
-          {
-              "moe_routed_output",
-              "qkv_proj",
-              "query_proj",
-              "key_proj",
-              "value_proj",
-              "context",
-              "out_proj",
-              "mlpwi_0",
-              "mlpwi_1",
-              "mlpwo",
-          }.issubset(found_tags),
-          f"Missing Qwen3.8 savepoint tags: {found_tags}",
+      self.assertEqual(
+          found_tags,
+          frozenset(
+              {
+                  "hidden_states",
+                  "self_attn",
+                  "moe_routed_output",
+                  "qkv_proj",
+                  "query_proj",
+                  "key_proj",
+                  "value_proj",
+                  "context",
+                  "out_proj",
+                  "mlpwi_0",
+                  "mlpwi_1",
+                  "mlpwo",
+              }
+          ),
+          f"Unexpected Qwen3.8 savepoint tags: {found_tags}",
       )
+      gdn_tags = m3_remat.checkpoint_names(
+          m_scan.decoder.first_cycle.gdn_0.linear_attn,
+          jnp.ones((1, 8, cfg_scan.emb_dim), dtype=jnp.float32),
+      )
+      self.assertEqual(gdn_tags, frozenset({"qkv_proj", "context", "out_proj"}))
+      for pol_name in m3_remat.REMAT_POLICIES:
+        stub = _PolicyStub(
+            remat_policy=pol_name,
+            tensors_on_device=("qkv_proj",) if pol_name == "custom" else (),
+            tensors_to_offload=("hidden_states",) if pol_name == "custom" else (),
+        )
+        resolved = m3_remat.resolve_policy(stub)
+        if resolved is not None and resolved.names is not None:
+          self.assertTrue(found_tags & set(resolved.names), f"No matching tags for {pol_name}: {resolved.names}")
 
       gd, st = nnx.split(m_scan.decoder)
       dec_jaxpr = jax.make_jaxpr(lambda s, t: nnx.merge(gd, s)(t)[0])(st, toks).jaxpr
@@ -580,10 +633,15 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
       for eqn in inner_remat:
         self.assertTrue(eqn.params.get("prevent_cse", False))
 
-      # Single-stacked-cycle (`num_stacked_cycles == 1`, `base_num_decoder_layers == 8`) HLO preserves `while(`.
+      # Single-stacked-cycle (`num_stacked_cycles == 1`, `base_num_decoder_layers == 8`) sets
+      # `skip-simplify-while-loops_trip-count-one` for on-device remat, and omits it when offloading to `pinned_host`.
       toks_arr = jax.device_put(jnp.ones((1, 8), dtype=jnp.int32), rep)
-      hlo_1cyc = jax.jit(lambda s, t: nnx.merge(gd, s)(t)[0]).lower(st, toks_arr).compile().as_text()
-      self.assertIn("while(", hlo_1cyc)
+      mlir_on_dev = jax.jit(lambda s, t: nnx.merge(gd, s)(t)[0]).lower(st, toks_arr).as_text()
+      self.assertIn("skip-simplify-while-loops_trip-count-one", mlir_on_dev)
+      m_scan.decoder.set_remat(m3_remat.resolve_policy(_PolicyStub(remat_policy="hidden_state_with_offload")))
+      gd_off, st_off = nnx.split(m_scan.decoder)
+      mlir_off = jax.jit(lambda s, t: nnx.merge(gd_off, s)(t)[0]).lower(st_off, toks_arr).as_text()
+      self.assertNotIn("skip-simplify-while-loops_trip-count-one", mlir_off)
 
       # Unscanned Qwen3.8 must also wrap each sublayer in `remat2`.
       cfg_unscan = _qwen3_8_mini_config(scan_layers=False, remat_policy="full")
@@ -774,7 +832,12 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
       ref_state = nnx.state(m_none)
       ref_loss, ref_grads = loss_and_grad(m_none, toks, targets, seg)
 
-      for pol, saved in (("full", []), ("minimal_with_context", []), ("custom", ["moe_routed_output"])):
+      for pol, saved in (
+          ("full", []),
+          ("save_qkv_proj", []),
+          ("minimal_with_context", []),
+          ("custom", ["hidden_states", "self_attn", "moe_routed_output"]),
+      ):
         cfg_p = _qwen3_8_mini_config(scan_layers=scan_layers, remat_policy=pol, tensors_on_device=saved)
         m_p = model_creation_utils.create_model(cfg_p, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(1))
         nnx.update(m_p, ref_state)
@@ -968,6 +1031,8 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     for scan in (True, False):
       cfg = _qwen3_8_mini_config(
           scan_layers=scan,
+          use_ple_layer=False,
+          mtp_num_layers=0,
           remat_policy="full",
           quantization="int8",
           use_qwix_quantization="true",

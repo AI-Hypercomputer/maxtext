@@ -190,11 +190,14 @@ class ScannedLayers(nnx.Module):
       layer_params, layer_rest = xs
       return step_fn(carry_in, layer_params, layer_rest, traced_kw)
 
-    if self.num_layers == 1:
+    has_offload = bool(getattr(remat_cfg, "offloaded", False) or getattr(remat_pol, "offloaded", False))
+    if self.num_layers == 1 and not has_offload:
       # XLA's while-loop simplifier inlines trip-count-1 loops by default. Inlining drops the
       # loop boundary, allowing the scheduler to overlap activation temporaries with adjacent
       # layers and CSE across remat, defeating the per-layer checkpoint. Keeping the while loop
-      # preserves the scan body as a memory barrier.
+      # preserves the scan body as a memory barrier. Skip when offloading residuals to
+      # `pinned_host` (`S(5)`): an un-simplified length-1 scan folds its backward `[1, ...]` ->
+      # `[...]` squeeze into a cross-memory-space `bitcast` (`S(0)` -> `S(5)`) rejected by XLA.
       with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
         carry, new_rest = jax.lax.scan(body, carry, (params, rest), length=self.num_layers)
     else:
