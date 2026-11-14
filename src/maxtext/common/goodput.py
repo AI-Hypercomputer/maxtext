@@ -21,11 +21,14 @@ to various logging platforms, including cloud logging and TensorBoard.
 
 import contextlib
 from enum import Enum
+import threading
 import jax
 from maxtext.common.gcloud_stub import goodput_modules
 from maxtext.utils import max_logging
 
 goodput, monitoring, _GOODPUT_STUB = goodput_modules()
+
+_GOODPUT_FLUSH_TIMEOUT_SECONDS = 30
 
 
 def get_goodput_job_name(config) -> str:
@@ -167,12 +170,39 @@ def maybe_record_goodput(recorder, event_name, *args):
       record_goodput(recorder, f"record_{event_name.value}_end_time", *args)
 
 
+def _flush_goodput_recorder(recorder, timeout_seconds: float = _GOODPUT_FLUSH_TIMEOUT_SECONDS) -> None:
+  """Flushes pending goodput log entries in a daemon thread with a timeout."""
+  try:
+    flush_func = getattr(recorder, "flush", None)
+    if not callable(flush_func):
+      return
+
+    def _safe_flush():
+      try:
+        flush_func()
+      except Exception as e:  # pylint: disable=broad-exception-caught
+        max_logging.log(f"Goodput: failed to flush recorder on job end: {e}")
+
+    thread = threading.Thread(target=_safe_flush, daemon=True)
+    thread.start()
+    thread.join(timeout=timeout_seconds)
+    if thread.is_alive():
+      max_logging.log(
+          f"Goodput: recorder.flush() did not complete within {timeout_seconds}s and will be "
+          "abandoned to avoid blocking workload shutdown."
+      )
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.log(f"Goodput: unexpected error while flushing recorder on job end: {e}")
+
+
 def record_goodput(recorder, event_name, *args):
   """Record goodput to cloud logging."""
   if recorder:
     record_func = getattr(recorder, event_name, None)
     if record_func:
       record_func(*args)
+      if event_name == RECORD_JOB_END_TIME:
+        _flush_goodput_recorder(recorder)
 
 
 def create_goodput_recorder(config):

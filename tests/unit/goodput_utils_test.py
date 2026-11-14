@@ -17,6 +17,7 @@
 import os
 import shutil
 import tempfile
+import threading
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -41,6 +42,7 @@ from maxtext.common.goodput import (
     RECORD_JOB_END_TIME,
     RECORD_JOB_START_TIME,
     _construct_goodput_monitor,
+    _flush_goodput_recorder,
     create_goodput_recorder,
     get_goodput_job_name,
     maybe_monitor_goodput,
@@ -81,27 +83,30 @@ class GoodputUtilsTest(unittest.TestCase):
         monitor_step_time_deviation=True,
     )
 
+  @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.flush")
   @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_end_time")
   @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_start_time")
   @mock.patch("google.cloud.logging.Client")
-  def test_record_goodput(self, mock_cloud_logger, mock_record_job_start_time, mock_record_job_end_time):
+  def test_record_goodput(self, mock_cloud_logger, mock_record_job_start_time, mock_record_job_end_time, mock_flush):
     mock_cloud_logger.return_value = mock.MagicMock()
     mock_record_job_start_time.return_value = mock.MagicMock()
     mock_record_job_end_time.return_value = mock.MagicMock()
 
     recorder = create_goodput_recorder(self.config)
     with maybe_record_goodput(recorder, GoodputEvent.JOB):
-      pass
+      mock_flush.assert_not_called()
 
     mock_cloud_logger.return_value.logger.assert_called()
     mock_record_job_start_time.assert_called()
     mock_record_job_end_time.assert_called()
+    mock_flush.assert_called_once()
 
     class TestException(BaseException):
       pass
 
     mock_record_job_start_time.reset_mock()
     mock_record_job_end_time.reset_mock()
+    mock_flush.reset_mock()
     with self.assertRaises(TestException):
       with maybe_record_goodput(recorder, GoodputEvent.JOB):
         mock_record_job_start_time.assert_called_once()
@@ -109,6 +114,7 @@ class GoodputUtilsTest(unittest.TestCase):
 
     mock_record_job_start_time.assert_called_once()
     mock_record_job_end_time.assert_not_called()
+    mock_flush.assert_not_called()
 
   @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_rolling_window_goodput_uploader")
   @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_rolling_window_goodput_uploader")
@@ -373,17 +379,19 @@ class GoodputUtilsTest(unittest.TestCase):
 
     self.assertIsInstance(recorder, goodput.GoodputRecorder)
 
+  @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.flush")
   @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_end_time")
   @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_start_time")
   @mock.patch("google.cloud.logging.Client")
   def test_explicit_job_recording_graceful_completion(
-      self, mock_cloud_logger, mock_record_job_start_time, mock_record_job_end_time
+      self, mock_cloud_logger, mock_record_job_start_time, mock_record_job_end_time, mock_flush
   ):
-    """Both start and end are recorded when the job completes gracefully."""
+    """Both start and end are recorded and flushed when the job completes gracefully."""
     mock_cloud_logger.return_value = mock.MagicMock()
     recorder = create_goodput_recorder(self.config)
 
     record_goodput(recorder, RECORD_JOB_START_TIME)
+    mock_flush.assert_not_called()
     _job_completed_gracefully = False
     try:
       _job_completed_gracefully = True
@@ -393,12 +401,14 @@ class GoodputUtilsTest(unittest.TestCase):
 
     mock_record_job_start_time.assert_called_once()
     mock_record_job_end_time.assert_called_once()
+    mock_flush.assert_called_once()
 
+  @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.flush")
   @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_end_time")
   @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_start_time")
   @mock.patch("google.cloud.logging.Client")
   def test_explicit_job_recording_elastic_restart(
-      self, mock_cloud_logger, mock_record_job_start_time, mock_record_job_end_time
+      self, mock_cloud_logger, mock_record_job_start_time, mock_record_job_end_time, mock_flush
   ):
     """Only start is recorded when the elastic manager handles the error internally.
 
@@ -420,6 +430,41 @@ class GoodputUtilsTest(unittest.TestCase):
 
     mock_record_job_start_time.assert_called_once()
     mock_record_job_end_time.assert_not_called()
+    mock_flush.assert_not_called()
+
+  @mock.patch("maxtext.utils.max_logging.log")
+  def test_flush_goodput_recorder_timeout_abandons_without_raising(self, mock_log):
+    """A hung recorder.flush() is bounded by timeout_seconds and abandoned with a warning."""
+    unblock_event = threading.Event()
+    self.addCleanup(unblock_event.set)
+    recorder = SimpleNamespace(flush=lambda: unblock_event.wait(timeout=5.0))
+
+    _flush_goodput_recorder(recorder, timeout_seconds=0.05)
+
+    self.assertTrue(
+        any("did not complete within 0.05s" in str(call.args[0]) for call in mock_log.call_args_list),
+        f"Expected timeout warning in logs, got {mock_log.call_args_list}",
+    )
+
+  @mock.patch("maxtext.utils.max_logging.log")
+  @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.flush", side_effect=RuntimeError("flush boom"))
+  @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_end_time")
+  @mock.patch("google.cloud.logging.Client")
+  def test_flush_goodput_recorder_exception_degrades_gracefully(
+      self, mock_cloud_logger, mock_record_job_end_time, mock_flush, mock_log
+  ):
+    """An exception inside recorder.flush() is logged and swallowed so a finished job never fails."""
+    mock_cloud_logger.return_value = mock.MagicMock()
+    recorder = create_goodput_recorder(self.config)
+
+    record_goodput(recorder, RECORD_JOB_END_TIME)  # Must not raise.
+
+    mock_record_job_end_time.assert_called_once()
+    mock_flush.assert_called_once()
+    self.assertTrue(
+        any("failed to flush recorder on job end: flush boom" in str(call.args[0]) for call in mock_log.call_args_list),
+        f"Expected flush error warning in logs, got {mock_log.call_args_list}",
+    )
 
   @mock.patch("google.cloud.logging.Client")
   def test_goodput_job_name_override(self, mock_cloud_logger):
