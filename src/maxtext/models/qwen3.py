@@ -217,6 +217,57 @@ def naive_jax_chunk_gated_delta_rule(
   return core_attn_out, final_state if output_final_state else None
 
 
+def _block_doubling_unit_lower_inverse_impl(s_mat: Array, chunk_size: int) -> Array:
+  """Computes (I + s_mat)^-1 for strictly lower-triangular s_mat via bottom-up block doubling."""
+  prec = jax.lax.Precision.HIGHEST
+  ar = jnp.arange(chunk_size)
+  inv = jnp.broadcast_to(jnp.eye(chunk_size, dtype=jnp.float32), s_mat.shape)
+  b = 1
+  while b < chunk_size:
+    # Lower-left b x b sub-block of each 2b x 2b diagonal block: the only part of s_mat not yet folded into inv.
+    cross = ((ar[:, None] // (2 * b)) == (ar[None, :] // (2 * b))) & ((ar[:, None] // b) == (ar[None, :] // b) + 1)
+    off = jnp.matmul(jnp.matmul(inv, jnp.where(cross, s_mat, 0.0), precision=prec), inv, precision=prec)
+    inv = inv - jnp.where(cross, off, 0.0)
+    b *= 2
+  return inv
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _block_doubling_unit_lower_inverse_f32(s_mat: Array, chunk_size: int) -> Array:
+  """float32-only core of the block-doubling inverse with an analytical 2-matmul VJP."""
+  return _block_doubling_unit_lower_inverse_impl(s_mat, chunk_size)
+
+
+def _block_doubling_unit_lower_inverse_fwd(s_mat: Array, chunk_size: int) -> tuple[Array, Array]:
+  inv = _block_doubling_unit_lower_inverse_impl(s_mat, chunk_size)
+  return inv, inv
+
+
+def _block_doubling_unit_lower_inverse_bwd(chunk_size: int, inv: Array, d_inv: Array) -> tuple[Array]:
+  # d(L^-1) = -L^-1 dL L^-1 => dL = -(L^-T d_inv L^-T), masked to the strictly lower triangle.
+  prec = jax.lax.Precision.HIGHEST
+  inv_t = inv.swapaxes(-1, -2)
+  d_s = -jnp.matmul(jnp.matmul(inv_t, d_inv, precision=prec), inv_t, precision=prec)
+  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
+  return (jnp.where(mask, d_s, 0.0),)
+
+
+_block_doubling_unit_lower_inverse_f32.defvjp(
+    _block_doubling_unit_lower_inverse_fwd,
+    _block_doubling_unit_lower_inverse_bwd,
+)
+
+
+def _block_doubling_unit_lower_inverse(s_mat: Array, chunk_size: int) -> Array:
+  """Computes (I + s_mat)^-1 for strictly lower-triangular s_mat with an analytical 2-matmul VJP.
+
+  The inverse is always computed in float32. Casting here (outside the custom_vjp) lets JAX's own
+  convert_element_type VJP return the cotangent in the caller's dtype, so bfloat16 inputs differentiate
+  correctly without threading a dtype residual through the custom rule.
+  """
+  return _block_doubling_unit_lower_inverse_f32(s_mat.astype(jnp.float32), chunk_size)
+
+
 def jax_chunk_gated_delta_rule(
     query: Array,
     key: Array,
@@ -251,7 +302,11 @@ def jax_chunk_gated_delta_rule(
   scale = jax.lax.rsqrt(jnp.array(query.shape[-1], dtype=jnp.float32)).astype(compute_dtype)
   query = query * scale
 
-  B, seq_len, H, K_dim = key.shape
+  B, seq_len, H_k, K_dim = key.shape
+  H = value.shape[2]
+  if H % H_k != 0:
+    raise ValueError(f"Expected value heads ({H}) divisible by key heads ({H_k}).")
+  rep = H // H_k
   V_dim = value.shape[-1]
 
   pad_len = (chunk_size - (seq_len % chunk_size)) % chunk_size
@@ -268,17 +323,17 @@ def jax_chunk_gated_delta_rule(
 
   num_chunks = query.shape[1] // chunk_size
 
-  # Helper: (B, S, H, D) -> (B, N, H, C, D)
-  def to_chunk(x):
-    return x.reshape(B, num_chunks, chunk_size, H, -1).transpose(0, 1, 3, 2, 4)
+  # Helper: (B, S, H_x, D) -> (B, N, H_x, C, D)
+  def to_chunk(x, heads):
+    return x.reshape(B, num_chunks, chunk_size, heads, -1).transpose(0, 1, 3, 2, 4)
 
   # Helper for scalars: (B, S, H) -> (B, N, H, C)
   def to_chunk_scalar(x):
     return x.reshape(B, num_chunks, chunk_size, H).transpose(0, 1, 3, 2)
 
-  q_c = to_chunk(query)
-  k_c = to_chunk(key)
-  v_c = to_chunk(value)
+  q_c = to_chunk(query, H_k)
+  k_c = to_chunk(key, H_k)
+  v_c = to_chunk(value, H)
   g_c = to_chunk_scalar(g)
   beta_c = to_chunk_scalar(beta)
 
@@ -288,10 +343,15 @@ def jax_chunk_gated_delta_rule(
 
   # Cumulative decay (Must be float32)
   g_cumsum = jnp.cumsum(g_c, axis=-1)
-  k_beta = k_c * beta_c[..., None]
-
-  # S Matrix Calculation
-  S = jnp.matmul(k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
+  if rep == 1:
+    k_beta = k_c * beta_c[..., None]
+    S = jnp.matmul(k_beta, k_c.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
+  else:
+    k_c_grp = k_c[:, :, :, None, :, :]
+    k_beta_grp = k_c_grp * beta_c.reshape(B, num_chunks, H_k, rep, chunk_size)[..., None]
+    S = jnp.matmul(k_beta_grp, k_c_grp.swapaxes(-1, -2), precision=jax.lax.Precision.HIGHEST)
+    S = S.reshape(B, num_chunks, H, chunk_size, chunk_size)
+    k_beta = k_beta_grp.reshape(B, num_chunks, H, chunk_size, K_dim)
   S = S.astype(jnp.float32)
 
   # Apply mask BEFORE exp to prevent 'inf' gradients
@@ -302,11 +362,8 @@ def jax_chunk_gated_delta_rule(
   S = S * jnp.exp(g_diff)
   S = jnp.where(mask, S, 0.0)
 
-  # Inversion (A) - Strictly float32
-  identity = jnp.eye(chunk_size, dtype=jnp.float32)
-  identity_broadcasted = jnp.broadcast_to(identity, S.shape)
-
-  A = jax.scipy.linalg.solve_triangular(identity + S, identity_broadcasted, lower=True, unit_diagonal=True)
+  # Inversion (A) - Strictly float32, MXU block doubling + 2-matmul analytical VJP
+  A = _block_doubling_unit_lower_inverse(S, chunk_size)
 
   # 5. WY Factors
   v_beta = v_c * beta_c[..., None]
@@ -337,8 +394,19 @@ def jax_chunk_gated_delta_rule(
   xs = (w_scan, u_scan, q_scan, k_scan, g_scan)
 
   def scan_body(h, args):
-    w, u, q, k, g = args
+    w, u, q_in, k_in, g = args
     prec = jax.lax.Precision.HIGHEST
+
+    # 3. Intra-chunk: q(dtype) @ k(dtype) -> f32 (on H_k unique heads when rep > 1)
+    attn = jnp.matmul(q_in, k_in.swapaxes(-1, -2), precision=prec).astype(jnp.float32)
+    if rep > 1:
+      attn = jnp.broadcast_to(attn[:, :, None, :, :], (B, H_k, rep, chunk_size, chunk_size)).reshape(
+          B, H, chunk_size, chunk_size
+      )
+      q = jnp.broadcast_to(q_in[:, :, None, :, :], (B, H_k, rep, chunk_size, K_dim)).reshape(B, H, chunk_size, K_dim)
+      k = jnp.broadcast_to(k_in[:, :, None, :, :], (B, H_k, rep, chunk_size, K_dim)).reshape(B, H, chunk_size, K_dim)
+    else:
+      q, k = q_in, k_in
 
     # --- Output Computation ---
     # 1. Inter-chunk: q(dtype) * exp(g)(f32) -> f32
@@ -349,10 +417,6 @@ def jax_chunk_gated_delta_rule(
     # w serves as k_cumdecay, u serves as value_intra
     v_prime = jnp.matmul(w.astype(jnp.float32), h, precision=prec)
     v_new = u.astype(jnp.float32) - v_prime
-
-    # 3. Intra-chunk: q(dtype) @ k(dtype) -> f32
-    attn = jnp.matmul(q, k.swapaxes(-1, -2), precision=prec)
-    attn = attn.astype(jnp.float32)
 
     # Mask before exp
     g_diff = g[..., :, None] - g[..., None, :]
@@ -388,7 +452,8 @@ def jax_chunk_gated_delta_rule(
     # Sequence is sharded over cp_axis, so a sequential scan over chunks is not
     # available. Fold the local chunks into one affine map, exchange those, then
     # replay locally from the correct incoming state. See kernels/attention/gdn_cp.py.
-    A_loc, B_loc = gdn_cp.compose_local(w_scan, u_scan, k_scan, g_scan)
+    k_scan_cp = jnp.repeat(k_scan, rep, axis=2) if rep > 1 else k_scan
+    A_loc, B_loc = gdn_cp.compose_local(w_scan, u_scan, k_scan_cp, g_scan)
     h_in, final_h = gdn_cp.incoming_state(A_loc, B_loc, h_init, cp_axis)
     _, o_chunks = lax.scan(scan_body, h_in, xs)
 
@@ -1088,14 +1153,11 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       value = jnp.where(mask[..., None, None], value, 0.0)
       g = jnp.where(mask[..., None], g, 0.0)
 
-    if self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
-      repeats = self.num_v_heads // self.num_k_heads
-      # query shape after repeat: (B, S, H_v, D_k)
-      query = jnp.repeat(query, repeats, axis=2, out_sharding=head_sharding)
-      # key shape after repeat: (B, S, H_v, D_k)
-      key = jnp.repeat(key, repeats, axis=2, out_sharding=head_sharding)
-
     if seq_len == 1 and model_mode == MODEL_MODE_AUTOREGRESSIVE:
+      if self.num_v_heads > self.num_k_heads and self.num_v_heads % self.num_k_heads == 0:
+        repeats = self.num_v_heads // self.num_k_heads
+        query = jnp.repeat(query, repeats, axis=2, out_sharding=head_sharding)
+        key = jnp.repeat(key, repeats, axis=2, out_sharding=head_sharding)
       core_attn_out, next_recurrent_state = jax_ar_gated_delta_rule(
           query,
           key,
