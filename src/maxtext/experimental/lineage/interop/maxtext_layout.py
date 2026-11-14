@@ -661,4 +661,4 @@ def convert_maxtext_params(
       out_sharding=out_shardings,
   )
   with jax.set_mesh(mesh):
-    return jax.jit(convert)(jax.tree.map(_unbox, tree))
+    return jax.jit(convert, donate_argnums=(0,))(jax.tree.map(_unbox, tree))

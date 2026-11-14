@@ -177,6 +177,9 @@ def dsv3_mtp_block(
     expert_permutations: Sequence[jax.Array | None] | None = None,
     main_token_embeddings: jt.Num[jax.Array, "B T D"] | None = None,
     token_zero_embedding: jt.Num[jax.Array, "D"] | None = None,
+    loss_chunk_tokens: int = 0,
+    remat_layer: bool = False,
+    chunked_loss_fn: Callable[[jax.Array, jax.Array, jax.Array], tuple[jax.Array, jax.Array]] | None = None,
 ) -> DSv3MTPBlockOutputs:
   """Runs the MTP depths, as MaxText's `MultiTokenPredictionBlock.__call__`.
 
@@ -265,7 +268,8 @@ def dsv3_mtp_block(
       target_token_embedding = target_token_embedding.astype(dtype)
 
       w = depth_weights[k - 1]
-      mtp_hidden_state, aux = layer_fn(
+      call_layer = jax.checkpoint(layer_fn) if remat_layer else layer_fn
+      mtp_hidden_state, aux = call_layer(
           mtp_hidden_state,
           target_token_embedding,
           w.layer,
@@ -275,17 +279,32 @@ def dsv3_mtp_block(
 
       assert w.final_norm_scale is not None
       normed = dsv3_embed.final_norm(mtp_hidden_state, w.final_norm_scale, epsilon=norm_epsilon)
-      mtp_logits = head_fn(normed)
-      mtp_xent = dsv3_loss.cross_entropy_with_integer_labels(mtp_logits, rolled_target_ids)
-      mtp_xent_masked = mtp_xent * rolled_target_mask
+      if loss_chunk_tokens > 0 and eval_target_module != k:
+        if compute_losses:
+          if chunked_loss_fn is not None:
+            loss_k, weight_k = chunked_loss_fn(normed, rolled_target_ids, rolled_target_mask)
+          else:
+            loss_k, weight_k = dsv3_loss.chunked_integer_token_loss(
+                normed,
+                rolled_target_ids,
+                rolled_target_mask,
+                head_fn=head_fn,
+                loss_chunk_tokens=loss_chunk_tokens,
+            )
+          losses.append(loss_k)
+          weights.append(weight_k)
+      else:
+        mtp_logits = head_fn(normed)
+        mtp_xent = dsv3_loss.cross_entropy_with_integer_labels(mtp_logits, rolled_target_ids)
+        mtp_xent_masked = mtp_xent * rolled_target_mask
 
-      if compute_losses:
-        losses.append(jnp.sum(mtp_xent_masked))
-        weights.append(jnp.sum(rolled_target_mask).astype(jnp.float32))
-      if eval_target_module == k:
-        # fp32 to avoid gradient errors; cast back to int32 for the rate.
-        preds.append(jnp.argmax(mtp_logits, axis=-1).astype(jnp.float32))
-        masks.append(rolled_target_mask)
+        if compute_losses:
+          losses.append(jnp.sum(mtp_xent_masked))
+          weights.append(jnp.sum(rolled_target_mask).astype(jnp.float32))
+        if eval_target_module == k:
+          # fp32 to avoid gradient errors; cast back to int32 for the rate.
+          preds.append(jnp.argmax(mtp_logits, axis=-1).astype(jnp.float32))
+          masks.append(rolled_target_mask)
 
   return DSv3MTPBlockOutputs(
       losses=jnp.stack(losses) if losses else None,

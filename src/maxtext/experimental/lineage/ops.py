@@ -989,7 +989,7 @@ def _fwd_step_xs(w: Any, w_aux: Any, layers: slice | int, shifted: bool) -> tupl
 
 @functools.partial(
     jax.custom_vjp,
-    nondiff_argnums=(0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16),
+    nondiff_argnums=(0, 1, 2, 5, 6, 7, 8, 9, 10, 11, 12, 13, 15, 16, 17),
 )
 def w_collect_pipelined_scan_prologue_epilogue(
     prologue_fn: PipelinedScanLayer,
@@ -1009,6 +1009,7 @@ def w_collect_pipelined_scan_prologue_epilogue(
     w_aux: Any = None,
     collect_fn_pre: Callable[..., AnyJaxArrayOrPyTree] | None = None,
     reduce_fn_pre: Callable[..., AnyJaxArrayOrPyTree] | None = None,
+    offload_w_grad: bool = False,
 ) -> tuple[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree]:
   """Pipelines weight collection for scanning with prologue and epilogue.
 
@@ -1097,7 +1098,7 @@ def w_collect_pipelined_scan_prologue_epilogue(
     all scan iterations.
   """
   del offload_fn, load_fn, collect_fn_ici_bwd, reduce_fn_dcn
-  del reduce_fn_ici_first, reduce_fn_ici_second, reduce_fn_pre
+  del reduce_fn_ici_first, reduce_fn_ici_second, reduce_fn_pre, offload_w_grad
   num_layers = jax.tree.leaves(w)[0].shape[0]
   assert num_layers >= 3, (
       "there must be at least three layers to perform a pipelined scan with a" " peeled prologue and epilogue"
@@ -1107,6 +1108,11 @@ def w_collect_pipelined_scan_prologue_epilogue(
   shifted = collect_fn_pre is not None
   fns = _layer_collect(collect_fn_dcn, collect_fn_ici_fwd, collect_fn_pre, w, w_aux)
   step_xs = functools.partial(_fwd_step_xs, w, w_aux, shifted=shifted)
+
+  def _fwd_xs_dyn(layer_idx: jax.Array):
+    if shifted:
+      return None, None, jnp.minimum(layer_idx + 1, num_layers - 1)
+    return _layer_at(w, layer_idx), _layer_at(w_aux, layer_idx), None
 
   w_aux_0 = _layer_slice(w_aux, 0)
   w_first = fns.collect(_layer_slice(w, 0), w_aux_0)
@@ -1129,22 +1135,19 @@ def w_collect_pipelined_scan_prologue_epilogue(
     activations, aux_step = scan_body_fn.fwd(activations, w_curr, w_next, **_w_aux_kwargs(w_aux_curr))[0]
     return (activations, w_next, w_aux_n, pre_carry), aux_step
 
-  def body(carry_tuple, xs_pair):
-    xs_0, xs_1 = xs_pair
-    carry_tuple, aux_0 = _scan_step(carry_tuple, xs_0)
-    (carry_tuple, aux_0), xs_1 = jax.lax.optimization_barrier(((carry_tuple, aux_0), xs_1))
-    carry_tuple, aux_1 = _scan_step(carry_tuple, xs_1)
+  def body(carry_tuple, pair_idx):
+    carry_tuple, aux_0 = _scan_step(carry_tuple, _fwd_xs_dyn(2 + 2 * pair_idx))
+    (carry_tuple, aux_0), pair_idx = jax.lax.optimization_barrier(((carry_tuple, aux_0), pair_idx))
+    carry_tuple, aux_1 = _scan_step(carry_tuple, _fwd_xs_dyn(3 + 2 * pair_idx))
     return carry_tuple, (aux_0, aux_1)
 
   num_scanned = num_layers - 3
   num_pairs = num_scanned // 2
-  even = slice(2, 2 + 2 * num_pairs, 2)
-  odd = slice(3, 2 + 2 * num_pairs, 2)
 
   (carry, w_curr, w_aux_curr, pre_carry), (aux_0, aux_1) = jax.lax.scan(
       body,
       (carry, w_second, w_aux_1, pre_carry),
-      (step_xs(even), step_xs(odd)),
+      jnp.arange(num_pairs, dtype=jnp.int32),
   )
   aux_parts = [jax.tree.map(lambda x: x[jnp.newaxis], aux_first)]
   if num_pairs > 0:
@@ -1173,8 +1176,16 @@ def w_collect_pipelined_scan_prologue_epilogue(
 
 
 def _is_pinned_host(x: Any) -> bool:
-  sharding = getattr(jax.typeof(x), "sharding", None)
-  return getattr(sharding, "memory_kind", None) == "pinned_host"
+  if x is None:
+    return False
+  aval = jax.typeof(x)
+  if getattr(aval, "memory_space", None) == jax.memory.Space.Host:
+    return True
+  for obj in (aval, x):
+    sharding = getattr(obj, "sharding", None)
+    if getattr(sharding, "memory_kind", None) == "pinned_host":
+      return True
+  return False
 
 
 @jt.jaxtyped(typechecker=typeguard.typechecked)
@@ -1196,22 +1207,33 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
     w_aux: Any = None,
     collect_fn_pre: Callable[..., AnyJaxArrayOrPyTree] | None = None,
     reduce_fn_pre: Callable[..., AnyJaxArrayOrPyTree] | None = None,
+    offload_w_grad: bool = False,
 ) -> tuple[tuple[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree], Any]:
   """Forward pass of w_collect_pipelined_scan_prologue_epilogue."""
   del load_fn, collect_fn_ici_bwd, reduce_fn_dcn
-  del reduce_fn_ici_first, reduce_fn_ici_second
+  del reduce_fn_ici_first, reduce_fn_ici_second, offload_w_grad
   num_layers = jax.tree.leaves(w)[0].shape[0]
   assert num_layers >= 3, (
       "there must be at least three layers to perform a pipelined scan and its"
       " transpose, which peel a scan body step at each end of the scan"
   )
   assert (collect_fn_pre is None) == (reduce_fn_pre is None), "collect_fn_pre and reduce_fn_pre must be given together"
+  w_primal_dtypes = jax.tree.map(
+      lambda a: None if a is None else jnp.empty((0,), dtype=a.dtype),
+      w,
+      is_leaf=lambda a: a is None,
+  )
   # Only the quantized weights are collected, here and in the backward pass.
   if quantize_fn is not None:
     w = quantize_fn(w)
   shifted = collect_fn_pre is not None
   fns = _layer_collect(collect_fn_dcn, collect_fn_ici_fwd, collect_fn_pre, w, w_aux)
   step_xs = functools.partial(_fwd_step_xs, w, w_aux, shifted=shifted)
+
+  def _fwd_xs_dyn(layer_idx: jax.Array):
+    if shifted:
+      return None, None, jnp.minimum(layer_idx + 1, num_layers - 1)
+    return _layer_at(w, layer_idx), _layer_at(w_aux, layer_idx), None
 
   w_aux_0 = _layer_slice(w_aux, 0)
   with jax.named_scope("prologue_fwd"):
@@ -1269,14 +1291,13 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
     )
 
   @jax.named_call
-  def body_fwd(carry_tuple, xs_pair):
-    xs_0, xs_1 = xs_pair
+  def body_fwd(carry_tuple, pair_idx):
     carry_tuple, (res_prev_0_host, res_curr_0_device, aux_0) = jax.named_call(_scan_step_fwd, name="unrolled_0")(
-        carry_tuple, xs_0
+        carry_tuple, _fwd_xs_dyn(2 + 2 * pair_idx)
     )
-    (carry_tuple, aux_0), xs_1 = jax.lax.optimization_barrier(((carry_tuple, aux_0), xs_1))
+    (carry_tuple, aux_0), pair_idx = jax.lax.optimization_barrier(((carry_tuple, aux_0), pair_idx))
     carry_tuple, (res_prev_1_host, res_curr_1_device, aux_1) = jax.named_call(_scan_step_fwd, name="unrolled_1")(
-        carry_tuple, xs_1
+        carry_tuple, _fwd_xs_dyn(3 + 2 * pair_idx)
     )
     return carry_tuple, (
         (res_prev_0_host, res_prev_1_host),
@@ -1286,8 +1307,6 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
 
   num_scanned = num_layers - 3
   num_pairs = num_scanned // 2
-  even = slice(2, 2 + 2 * num_pairs, 2)
-  odd = slice(3, 2 + 2 * num_pairs, 2)
 
   (carry, w_curr, w_aux_curr, pre_carry, res_curr_sb_offload), (
       (res_prev_0_scanned_host, res_prev_1_scanned_host),
@@ -1296,7 +1315,7 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
   ) = jax.lax.scan(
       body_fwd,
       (carry, w_second, w_aux_1, pre_carry, res_sb_0_offload),
-      (step_xs(even), step_xs(odd)),
+      jnp.arange(num_pairs, dtype=jnp.int32),
   )
 
   aux_parts = [jax.tree.map(lambda x: x[jnp.newaxis], aux_first)]
@@ -1356,6 +1375,7 @@ def w_collect_pipelined_scan_prologue_epilogue_fwd(
       res_epilogue_host,
       w,
       w_aux,
+      w_primal_dtypes,
   )
   return (out, aux), res
 
@@ -1376,6 +1396,7 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
     load_fn: Callable[[Any], Any],
     collect_fn_pre: Callable[..., AnyJaxArrayOrPyTree] | None,
     reduce_fn_pre: Callable[..., AnyJaxArrayOrPyTree] | None,
+    offload_w_grad: bool,
     res: Any,
     grad_outputs: tuple[AnyJaxArrayOrPyTree, Any],
 ) -> tuple[AnyJaxArrayOrPyTree, AnyJaxArrayOrPyTree, None]:
@@ -1401,6 +1422,7 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
       res_epilogue_host,
       w,
       w_aux,
+      w_primal_dtypes,
   ) = res
   num_layers = jax.tree.leaves(w)[0].shape[0]
   shifted = collect_fn_pre is not None
@@ -1579,30 +1601,6 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
         None,
     )
 
-  @jax.named_call
-  def body_bwd(carry, xs_pair):
-    xs_0, xs_1 = xs_pair
-    carry_in = carry
-    carry, w_1_reduced = jax.named_call(_scan_step_bwd, name="unrolled_1")(carry, xs_1)
-    carry_for_barrier = jax.tree.map(
-        lambda x_in, x_out: None if x_out is x_in else x_out,
-        carry_in,
-        carry,
-    )
-    res_curr_0_device, *xs_0_rest = xs_0
-    (carry_for_barrier, w_1_reduced), xs_0_rest = jax.lax.optimization_barrier(
-        ((carry_for_barrier, w_1_reduced), xs_0_rest)
-    )
-    xs_0 = (res_curr_0_device, *xs_0_rest)
-    carry = jax.tree.map(
-        lambda x_in, x_bar: x_in if x_bar is None else x_bar,
-        carry_in,
-        carry_for_barrier,
-        is_leaf=lambda x: x is None,
-    )
-    carry, w_0_reduced = jax.named_call(_scan_step_bwd, name="unrolled_0")(carry, xs_0)
-    return carry, (w_0_reduced, w_1_reduced)
-
   num_scanned = num_layers - 3
   num_pairs = num_scanned // 2
 
@@ -1643,28 +1641,184 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
     )
     carry_bwd, w_rem_reduced = _scan_step_bwd(carry_bwd, xs_rem)
 
-  w_grads_reduced = None
+  def _leaf_aval(leaf: Any) -> Any:
+    return jax.typeof(leaf) if isinstance(leaf, jax.Array) else leaf
+
+  def _is_host_grad_leaf(leaf: Any) -> bool:
+    # Only offload >=2D per-layer leaves (which stack to >=3D `[num_pairs, ...]`,
+    # keeping axis 0 untiled outside TPU `T(8, 128)` sublanes); 1D norm/bias
+    # leaves (<100 KiB total) stay in HBM to avoid pinned-host sublane
+    # dynamic-update-slice errors.
+    return leaf is not None and _leaf_aval(leaf).ndim >= 2
+
+  def _alloc_grad_stack(leaf: Any) -> Any:
+    if leaf is None:
+      return None
+    aval = _leaf_aval(leaf)
+    sh = getattr(aval, "sharding", None)
+    out_sh = None
+    if isinstance(sh, jax.sharding.NamedSharding):
+      out_sh = jax.sharding.NamedSharding(sh.mesh, jax.sharding.PartitionSpec(None, *sh.spec))
+    return jnp.zeros((num_layers,) + aval.shape, dtype=aval.dtype, out_sharding=out_sh)
+
+  def _alloc_dev_grad_stack(leaf: Any) -> Any:
+    if leaf is None or _is_host_grad_leaf(leaf):
+      return None
+    return _alloc_grad_stack(leaf)
+
+  def _set_grad_layer(buf: Any, val: Any, idx: int | jax.Array) -> Any:
+    if buf is None or val is None:
+      return buf
+    return jax.lax.dynamic_update_index_in_dim(buf, val, idx, axis=0)
+
+  def _set_grad_tree(buf_tree: Any, val_tree: Any, idx: int | jax.Array) -> Any:
+    return jax.tree.map(
+        lambda b, v: _set_grad_layer(b, v, idx),
+        buf_tree,
+        val_tree,
+        is_leaf=lambda x: x is None,
+    )
+
+  def _bwd_xs_dyn(res_curr_device, res_prev_host, layer_idx: jax.Array, aux_step_grad):
+    if shifted:
+      return (res_curr_device, res_prev_host, None, None, aux_step_grad, jnp.maximum(layer_idx - 1, 0))
+    return (
+        res_curr_device,
+        res_prev_host,
+        _layer_at(w, layer_idx),
+        _layer_at(w_aux, layer_idx),
+        aux_step_grad,
+        None,
+    )
+
+  def _grad_to_host(tree: Any) -> Any:
+    return jax.tree.map(
+        lambda a: jax.device_put(a, jax.memory.Space.Host) if _is_host_grad_leaf(a) else None,
+        tree,
+        is_leaf=lambda a: a is None,
+    )
+
+  def _grad_to_device(tree: Any) -> Any:
+    return jax.tree.map(
+        lambda a: None if a is None else jax.device_put(a, jax.memory.Space.Device),
+        tree,
+        is_leaf=lambda a: a is None,
+    )
+
+  w_rem_host = None
+  w_0_scanned_host = None
+  w_1_scanned_host = None
+  w_third_host = None
+  w_second_host = None
+  w_grad_dev = None
+  use_host_w_grad = bool(offload_w_grad and num_pairs > 0)
+
   if num_pairs > 0:
-    even = slice(0, 2 * num_pairs, 2)
-    odd = slice(1, 1 + 2 * num_pairs, 2)
     aux_even_grad = jax.tree.map(lambda g: g[0 : 2 * num_pairs : 2], aux_scanned_grad)
-    aux_odd_grad = jax.tree.map(lambda g: g[1 : 2 * num_pairs : 2], aux_scanned_grad)
+    aux_odd_grad = jax.tree.map(lambda g: g[1 : 1 + 2 * num_pairs : 2], aux_scanned_grad)
+    xs_0_res = (res_curr_0_scanned_device, res_prev_0_scanned_host, aux_even_grad)
+    xs_1_res = (res_curr_1_scanned_device, res_prev_1_scanned_host, aux_odd_grad)
+    pair_indices = jnp.arange(num_pairs, dtype=jnp.int32)
+    if w_rem_reduced is not None:
+      w_grad_template = w_rem_reduced
+    else:
+      xs_1_last_res = jax.tree.map(lambda a: None if a is None else a[-1], xs_1_res, is_leaf=lambda x: x is None)
+      w_grad_template = jax.eval_shape(
+          lambda c, x_r: _scan_step_bwd(
+              c, _bwd_xs_dyn(x_r[0], x_r[1], jnp.asarray(1 + 2 * (num_pairs - 1), jnp.int32), x_r[2])
+          )[1],
+          carry_bwd,
+          xs_1_last_res,
+      )
 
-    xs_0 = _step_xs(res_curr_0_scanned_device, res_prev_0_scanned_host, even, aux_even_grad)
-    xs_1 = _step_xs(res_curr_1_scanned_device, res_prev_1_scanned_host, odd, aux_odd_grad)
+    if use_host_w_grad:
+      w_grad_dev = jax.tree.map(_alloc_dev_grad_stack, w_grad_template, is_leaf=lambda x: x is None)
+      if w_rem_reduced is not None:
+        w_rem_host = _grad_to_host(w_rem_reduced)
+        w_grad_dev = _set_grad_tree(w_grad_dev, w_rem_reduced, num_layers - 1)
+        w_rem_reduced = None
 
-    carry_bwd, (w_0_reduced_scanned, w_1_reduced_scanned) = jax.lax.scan(
-        body_bwd,
-        carry_bwd,
-        (xs_0, xs_1),
-        reverse=True,
-    )
+      @jax.named_call
+      def body_bwd_host(carry_and_dev, idx_and_xs):
+        carry, w_dev_acc = carry_and_dev
+        pair_idx, step_0_res, step_1_res = idx_and_xs
+        carry_in = carry
+        res_c1, res_p1, aux_g1 = step_1_res
+        step_xs_1 = _bwd_xs_dyn(res_c1, res_p1, 1 + 2 * pair_idx, aux_g1)
+        carry, w_1_reduced = jax.named_call(_scan_step_bwd, name="unrolled_1")(carry, step_xs_1)
+        w_1_host = _grad_to_host(w_1_reduced)
+        w_dev_acc = _set_grad_tree(w_dev_acc, w_1_reduced, 4 + 2 * pair_idx)
+        carry_for_barrier = jax.tree.map(
+            lambda x_in, x_out: None if x_out is x_in else x_out,
+            carry_in,
+            carry,
+        )
+        res_c0, res_p0, aux_g0 = step_0_res
+        (carry_for_barrier, w_dev_acc), (pair_idx, res_p0, aux_g0) = jax.lax.optimization_barrier(
+            ((carry_for_barrier, w_dev_acc), (pair_idx, res_p0, aux_g0))
+        )
+        step_xs_0 = _bwd_xs_dyn(res_c0, res_p0, 2 * pair_idx, aux_g0)
+        carry = jax.tree.map(
+            lambda x_in, x_bar: x_in if x_bar is None else x_bar,
+            carry_in,
+            carry_for_barrier,
+            is_leaf=lambda x: x is None,
+        )
+        carry, w_0_reduced = jax.named_call(_scan_step_bwd, name="unrolled_0")(carry, step_xs_0)
+        w_0_host = _grad_to_host(w_0_reduced)
+        w_dev_acc = _set_grad_tree(w_dev_acc, w_0_reduced, 3 + 2 * pair_idx)
+        return (carry, w_dev_acc), (w_0_host, w_1_host)
 
-    w_grads_reduced = jax.tree.map(
-        _interleave_arrays,
-        w_0_reduced_scanned,
-        w_1_reduced_scanned,
-    )
+      (carry_bwd, w_grad_dev), (w_0_scanned_host, w_1_scanned_host) = jax.lax.scan(
+          body_bwd_host,
+          (carry_bwd, w_grad_dev),
+          (pair_indices, xs_0_res, xs_1_res),
+          reverse=True,
+      )
+      w_grad = None
+    else:
+      w_grad = jax.tree.map(_alloc_grad_stack, w_grad_template, is_leaf=lambda x: x is None)
+      if w_rem_reduced is not None:
+        w_grad = _set_grad_tree(w_grad, w_rem_reduced, num_layers - 1)
+        w_rem_reduced = None
+
+      @jax.named_call
+      def body_bwd_inplace(carry_and_grad, idx_and_xs):
+        carry, w_grad_acc = carry_and_grad
+        pair_idx, step_0_res, step_1_res = idx_and_xs
+        carry_in = carry
+        res_c1, res_p1, aux_g1 = step_1_res
+        step_xs_1 = _bwd_xs_dyn(res_c1, res_p1, 1 + 2 * pair_idx, aux_g1)
+        carry, w_1_reduced = jax.named_call(_scan_step_bwd, name="unrolled_1")(carry, step_xs_1)
+        w_grad_acc = _set_grad_tree(w_grad_acc, w_1_reduced, 4 + 2 * pair_idx)
+        carry_for_barrier = jax.tree.map(
+            lambda x_in, x_out: None if x_out is x_in else x_out,
+            carry_in,
+            carry,
+        )
+        res_c0, res_p0, aux_g0 = step_0_res
+        (carry_for_barrier, w_grad_acc), (pair_idx, res_p0, aux_g0) = jax.lax.optimization_barrier(
+            ((carry_for_barrier, w_grad_acc), (pair_idx, res_p0, aux_g0))
+        )
+        step_xs_0 = _bwd_xs_dyn(res_c0, res_p0, 2 * pair_idx, aux_g0)
+        carry = jax.tree.map(
+            lambda x_in, x_bar: x_in if x_bar is None else x_bar,
+            carry_in,
+            carry_for_barrier,
+            is_leaf=lambda x: x is None,
+        )
+        carry, w_0_reduced = jax.named_call(_scan_step_bwd, name="unrolled_0")(carry, step_xs_0)
+        w_grad_acc = _set_grad_tree(w_grad_acc, w_0_reduced, 3 + 2 * pair_idx)
+        return (carry, w_grad_acc), None
+
+      (carry_bwd, w_grad), _ = jax.lax.scan(
+          body_bwd_inplace,
+          (carry_bwd, w_grad),
+          (pair_indices, xs_0_res, xs_1_res),
+          reverse=True,
+      )
+  else:
+    w_grad = None
 
   (
       carry_grad,
@@ -1704,12 +1858,26 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
         **_w_aux_kwargs(w_aux_0),
     )
     w_third_grad_reduced = _reduce_dcn(w_third_grad_ici)
+    if use_host_w_grad:
+      w_third_host = _grad_to_host(w_third_grad_reduced)
+      w_grad_dev = _set_grad_tree(w_grad_dev, w_third_grad_reduced, 2)
+      w_third_grad_reduced = None
+    elif w_grad is not None:
+      w_grad = _set_grad_tree(w_grad, w_third_grad_reduced, 2)
+      w_third_grad_reduced = None
 
   # 4. Prologue backward: the second layer's reduction overlaps the prologue
   # compute, which leaves only the first layer's reduction to drain the
   # pipeline.
   with jax.named_scope("prologue_bwd"):
     w_second_grad_reduced = _reduce_dcn(_reduce_ici_second(_reduce_pre(w_second_grad_partial, w_aux_1), w_aux_1))
+    if use_host_w_grad:
+      w_second_host = _grad_to_host(w_second_grad_reduced)
+      w_grad_dev = _set_grad_tree(w_grad_dev, w_second_grad_reduced, 1)
+      w_second_grad_reduced = None
+    elif w_grad is not None:
+      w_grad = _set_grad_tree(w_grad, w_second_grad_reduced, 1)
+      w_second_grad_reduced = None
 
     x_grad, w_0_mla_grad_unreduced = prologue_fn.bwd(res_prologue_device, carry_grad, w_0, **_w_aux_kwargs(w_aux_0))
 
@@ -1720,20 +1888,54 @@ def w_collect_pipelined_scan_prologue_epilogue_bwd(
             w_aux_0,
         )
     )
-
-  w_grad_parts = [
-      jax.tree.map(lambda x: x[jnp.newaxis], g)
-      for g in (
+    if use_host_w_grad:
+      w_grad = jax.tree.map(
+          lambda dev_b, first_v: dev_b if dev_b is not None else _alloc_grad_stack(first_v),
+          w_grad_dev,
           w_first_grad_reduced,
-          w_second_grad_reduced,
-          w_third_grad_reduced,
+          is_leaf=lambda x: x is None,
       )
-  ]
-  if w_grads_reduced is not None:
-    w_grad_parts.append(w_grads_reduced)
-  if w_rem_reduced is not None:
-    w_grad_parts.append(jax.tree.map(lambda x: x[jnp.newaxis], w_rem_reduced))
-  w_grad = jax.tree.map(lambda *parts: jnp.concatenate(parts, axis=0), *w_grad_parts)
+      w_grad_dev = None
+      w_grad = _set_grad_tree(w_grad, w_first_grad_reduced, 0)
+      w_grad = _set_grad_tree(w_grad, _grad_to_device(w_second_host), 1)
+      w_grad = _set_grad_tree(w_grad, _grad_to_device(w_third_host), 2)
+      if w_rem_host is not None:
+        w_grad = _set_grad_tree(w_grad, _grad_to_device(w_rem_host), num_layers - 1)
+
+      def _reload_grad_pair(buf, idx_and_pair):
+        p_idx, w0_h, w1_h = idx_and_pair
+        buf = _set_grad_tree(buf, _grad_to_device(w0_h), 3 + 2 * p_idx)
+        buf = _set_grad_tree(buf, _grad_to_device(w1_h), 4 + 2 * p_idx)
+        return buf, None
+
+      w_grad, _ = jax.lax.scan(
+          _reload_grad_pair,
+          w_grad,
+          (jnp.arange(num_pairs, dtype=jnp.int32), w_0_scanned_host, w_1_scanned_host),
+      )
+      w_first_grad_reduced = None
+    elif w_grad is not None:
+      w_grad = _set_grad_tree(w_grad, w_first_grad_reduced, 0)
+      w_first_grad_reduced = None
+
+  if w_grad is None:
+    w_grad_parts = [
+        jax.tree.map(lambda x: x[jnp.newaxis], g)
+        for g in (
+            w_first_grad_reduced,
+            w_second_grad_reduced,
+            w_third_grad_reduced,
+        )
+    ]
+    if w_rem_reduced is not None:
+      w_grad_parts.append(jax.tree.map(lambda x: x[jnp.newaxis], w_rem_reduced))
+    w_grad = jax.tree.map(lambda *parts: jnp.concatenate(parts, axis=0), *w_grad_parts)
+  w_grad = jax.tree.map(
+      lambda g, dt: (g.astype(dt.dtype) if (g is not None and dt is not None and g.dtype != dt.dtype) else g),
+      w_grad,
+      w_primal_dtypes,
+      is_leaf=lambda a: a is None,
+  )
   return x_grad, w_grad, None
 
 

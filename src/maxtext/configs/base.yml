@@ -498,10 +498,28 @@ topk_routing_group: -1 # number of top groups to route inputs. For EP,
 use_batch_split_schedule: false # a flag if splitting batch into micro-batches to hide communications that yields performance benefits.
 batch_split_factor: 1 # the factor by which to split the batch. Only used if use_batch_split_schedule is true.
 use_lineage: false # a flag to use Lineage DeepSeek-V3 execution.
-lineage_quantization: "none" # "none", "fp8_full", "fp8_full_splash_qk" or "fp8_full_splash_qk_e3": quantization of the Lineage routed experts and MLA. Only used if use_lineage is true.
+lineage_quantization: "none" # Lineage quantization preset ("none", "fp8_full", "fp8_full_splash_qk", "fp8_full_splash_qk_e3", "fp8_full_combine", "fp8_full_combine_per_hop", "fp8_full_splash_qk_e3_combine_per_hop", or "fp8_full_all_splash_qk_e3_combine_per_hop"). Only used if use_lineage is true.
 lineage_expert_permutation: None # per-layer expert permutation for Lineage sparse/MTP layers: None (no shuffling) or "lpt" (on-device LPT load balancing from the previous step's expert counts).
 lineage_diag_band_skip: true # enable row-band diagonal skip in Lineage Splash attention. Only used if use_lineage is true.
-lineage_dq_reduction_steps: 1 # Lineage dkv dq reduction steps: 1 for VMEM reduction, 0 for None. Only used if use_lineage is true.
+lineage_dq_reduction_steps: 1 # Lineage dkv dq reduction steps: 1 for VMEM reduction, 3 for 3-step reduction, 0 for None. Only used if use_lineage is true.
+lineage_qk_diag_grid: 8 # Diagonal grid count for QK causal diagonal skip in Lineage Splash attention. Only used if use_lineage is true.
+lineage_layout_4x4x4: "default" # 4x4x4 sharding topology variant ("default" or "ep8_fsdp64") for Lineage DeepSeek-V3. Only used if use_lineage is true.
+lineage_router_metadata_sc0: false # Pin MoE routing metadata collectives to SparseCore 0 in Lineage training. Only used if use_lineage is true.
+lineage_out_proj_2d: false # Use local 2D shard_map FP8 dots for MLA out projection. Only used if use_lineage is true.
+lineage_bwd_fp8_combine: false # Quantize backward MoE token-gradient combine reduce-scatter to per-hop FP8 e4m3fn. Only used if use_lineage is true.
+lineage_norm_reduce_tc: false # Reduce 1D RMSNorm scale gradients on TensorCore instead of SparseCore. Only used if use_lineage is true.
+lineage_fp8_splash_out: false # Save MLA splash_out residual in static-scaled FP8 shared with out_projection. Only used if use_lineage is true.
+lineage_cp_expert_axes: false # move non-attention expert axes from batch to sequence/head sharding in Lineage training. Only used if use_lineage is true.
+lineage_offload_mla_fields: "" # comma-separated DSv3MLAResiduals fields to offload to pinned_host across sparse layers. Only used if use_lineage is true.
+lineage_offload_moe_fields: "" # comma-separated DSv3MoEResiduals fields to offload to pinned_host across sparse layers. Only used if use_lineage is true.
+lineage_offload_bank: false # offload the cross-layer ragged MoE activation bank to pinned_host across sparse layers. Only used if use_lineage is true.
+lineage_offload_w_grad: false # stage per-layer reduced sparse weight gradients in host memory during backward scan. Only used if use_lineage is true.
+lineage_loss_chunk_tokens: 0 # max local tokens per chunked LM head + cross-entropy scan chunk in Lineage training (0 disables). Only used if use_lineage is true.
+lineage_remat_dense_layers: false # wrap initial dense layers in jax.checkpoint in Lineage training. Only used if use_lineage is true.
+lineage_stream_param_cast: false # cast and quantize Lineage decoder weights per layer inside DCN collect instead of upfront. Only used if use_lineage is true.
+lineage_remat_mtp: false # wrap each MTP depth layer in jax.checkpoint in Lineage training. Only used if use_lineage is true.
+lineage_max_async_overlap: true # register Lineage max_async_overlap XLA transform. Only used if use_lineage is true.
+lineage_max_async_overlap_entry: true # include entry computation in Lineage max_async_overlap_transform. Only used if use_lineage is true.
 
 # For complex architectures like llama4 there are repeated sets of
 # inhomogeneous layers. E.g. maverick uses [dense+rope, moe+rope, dense+rope, moe+nope]

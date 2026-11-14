@@ -23,6 +23,7 @@ import typeguard
 
 from maxtext.experimental.lineage import dsv3_dense_layers
 from maxtext.experimental.lineage import dsv3_expert_shuffle
+from maxtext.experimental.lineage import dsv3_router
 from maxtext.experimental.lineage import dsv3_sparse_layers
 from maxtext.experimental.lineage import dsv3_types
 from maxtext.experimental.lineage import quantization
@@ -66,6 +67,17 @@ def dsv3(
     ragged_buffer_factor: float,
     quant: quantization.QuantConfig | None = None,
     expert_permutations: jt.Int[jax.Array, "L E"] | None = None,
+    mla_offload_fields: tuple[str, ...] = (),
+    moe_offload_fields: tuple[str, ...] = (),
+    offload_bank: bool = False,
+    offload_w_grad: bool = False,
+    max_async_overlap_entry: bool = True,
+    remat_dense_layers: bool = False,
+    stream_param_cast: bool = False,
+    compute_dtype: jax.typing.DTypeLike | None = None,
+    router_metadata_sc0: bool = False,
+    bwd_fp8_combine: bool = False,
+    norm_reduce_tc: bool = False,
 ) -> tuple[
     jt.Num[jax.Array, "B T D"],
     dsv3_types.DSv3RouterAux[jax.Array],
@@ -126,7 +138,9 @@ def dsv3(
     been reduced across devices to global stats.
   """
   if max_async_overlap_transform:
-    max_async_overlap_transform_module.register_transform()
+    max_async_overlap_transform_module.register_transform(include_entry=max_async_overlap_entry)
+  else:
+    max_async_overlap_transform_module.unregister_transform()
 
   if expert_permutations is not None:
     num_sparse_layers = jax.tree.leaves(w.sparse)[0].shape[0]
@@ -156,7 +170,12 @@ def dsv3(
       axis_mapping=axis_mapping,
       segment_ids=segment_ids,
       quant=quant,
+      remat_layers=remat_dense_layers,
+      compute_dtype=compute_dtype if stream_param_cast else None,
   )
+  dsv3_router.set_router_metadata_sc0(router_metadata_sc0)
+  dsv3_router.set_bwd_fp8_combine(bwd_fp8_combine)
+  dsv3_sparse_layers.dsv3_sparse_layer.set_norm_reduce_tc(norm_reduce_tc)
   x, aux = dsv3_sparse_layers.dsv3_sparse_layers(
       x,
       w.sparse,
@@ -188,5 +207,11 @@ def dsv3(
       ragged_buffer_factor=ragged_buffer_factor,
       quant=quant,
       expert_permutations=expert_permutations,
+      mla_offload_fields=mla_offload_fields,
+      moe_offload_fields=moe_offload_fields,
+      offload_bank=offload_bank,
+      offload_w_grad=offload_w_grad,
+      stream_param_cast=stream_param_cast,
+      compute_dtype=compute_dtype,
   )
   return x, aux

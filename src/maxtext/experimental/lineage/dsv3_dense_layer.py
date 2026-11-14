@@ -57,19 +57,15 @@ class RopeFn(Protocol):
 def dsv3_mlp(
     x: jt.Num[jax.Array, "*BT D"],
     w: dsv3_types.DSv3MLPWeightsPytree,
+    *,
+    quant_rule: quantization.GmmQuantRule | None = None,
 ) -> jt.Num[jax.Array, "*BT D"]:
-  """Performs computation for an MLP.
-
-  Args:
-    x: Input tokens with any number of leading dimensions.
-    w: MLP weights.
-
-  Returns:
-    Output tokens with the same shape as the input.
-  """
+  """Performs computation for an MLP (in fp8 when `quant_rule` is set)."""
   assert w.gate_0 is not None
   assert w.gate_1 is not None
   assert w.linear is not None
+  if quant_rule is not None:
+    return dsv3_mla.fp8_swiglu(x, w.gate_0, w.gate_1, w.linear, quant_rule)
   dot = functools.partial(jnp.tensordot, axes=1)
   with jax.named_scope("gate_0"):
     g0 = dot(x, w.gate_0)
@@ -159,7 +155,7 @@ def dsv3_dense_layer(
   attn_out = x + orig_x
   with jax.named_scope("post_attn_norm"):
     x = norm_fn(attn_out, w.post_attn_norm_scale)
-  mlp_out = dsv3_mlp(x, w.mlp)
+  mlp_out = dsv3_mlp(x, w.mlp, quant_rule=quant.shared_mlp if quant else None)
   return attn_out + mlp_out
 
 
