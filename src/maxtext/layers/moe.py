@@ -29,6 +29,7 @@ from flax import struct
 import jax
 from jax import ad_checkpoint as adc
 from jax.experimental.compute_on import compute_on
+from jax.experimental.layout import Layout, with_layout_constraint
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding
@@ -53,6 +54,7 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import (
     CompoundLogicalAxis,
     create_sharding,
+    fsdp_axes_for_dim,
     get_logical_axis_rules,
     logical_to_mesh_axes,
     maybe_shard_with_logical,
@@ -94,6 +96,61 @@ def _reduced_axes(w) -> frozenset:
     return frozenset()
   spec = getattr(getattr(jax.typeof(w), "sharding", None), "spec", None)
   return frozenset(spec.reduced) if spec is not None else frozenset()
+
+
+@jax.custom_vjp
+def _fwd_only_optimization_barrier(x):
+  """Applies `jax.lax.optimization_barrier` in forward only so backward dW reductions can fuse."""
+  return jax.lax.optimization_barrier(x)
+
+
+def _fwd_only_optimization_barrier_fwd(x):
+  """Forward pass for `_fwd_only_optimization_barrier`."""
+  return jax.lax.optimization_barrier(x), None
+
+
+def _fwd_only_optimization_barrier_bwd(_, g):
+  """Backward pass for `_fwd_only_optimization_barrier` (identity without a barrier)."""
+  return (g,)
+
+
+_fwd_only_optimization_barrier.defvjp(_fwd_only_optimization_barrier_fwd, _fwd_only_optimization_barrier_bwd)
+
+
+def _fsdp_all_gather_to_reduced_kw(w: jax.Array, fsdp_axes: str | tuple[str, ...]) -> dict[str, str]:
+  """Returns `{'to': 'reduced'}` when `w` carries `fsdp_axes` in its `check_vma` varying set."""
+  axes = (fsdp_axes,) if isinstance(fsdp_axes, str) else tuple(fsdp_axes)
+  mat = getattr(jax.typeof(w), "manual_axis_type", None)
+  varying = getattr(mat, "varying", frozenset()) if mat is not None else frozenset()
+  return {"to": "reduced"} if axes and set(axes).issubset(varying) else {}
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def _fsdp_all_gather_major_rs(w: jax.Array, fsdp_axes: str | tuple[str, ...], dim: int) -> jax.Array:
+  """All-gathers `w` on `dim` over `fsdp_axes` and pins `dim` major-most before backward `psum_scatter`.
+
+  When `w_gathered.shape[dim] // gather_size` does not divide the TPU sublane/lane tile along `dim`
+  (e.g. GPT-OSS 2880 / 8 = 360), XLA's `AllReduceFolder` cannot fold a `shard_map`-boundary `all-reduce` +
+  `dynamic-slice` into a `reduce-scatter`, and SparseCore offloading rewrites a minor/sublane-dimension
+  `reduce-scatter` back into `all-reduce` + `dynamic-slice`. Laying out the cotangent with `dim` major-most
+  makes each FSDP shard a contiguous untiled slice so XLA emits a direct `reduce-scatter`.
+  """
+  return jax.lax.all_gather(w, fsdp_axes, axis=dim, tiled=True, **_fsdp_all_gather_to_reduced_kw(w, fsdp_axes))
+
+
+def _fsdp_all_gather_major_rs_fwd(w: jax.Array, fsdp_axes: str | tuple[str, ...], dim: int):
+  """Forward pass for `_fsdp_all_gather_major_rs`."""
+  return jax.lax.all_gather(w, fsdp_axes, axis=dim, tiled=True, **_fsdp_all_gather_to_reduced_kw(w, fsdp_axes)), None
+
+
+def _fsdp_all_gather_major_rs_bwd(fsdp_axes: str | tuple[str, ...], dim: int, _, g: jax.Array):
+  """Backward pass for `_fsdp_all_gather_major_rs`: major-most layout constraint + `psum_scatter`."""
+  dim = dim % g.ndim
+  g = with_layout_constraint(g, Layout((dim,) + tuple(i for i in range(g.ndim) if i != dim)))
+  return (jax.lax.psum_scatter(g, fsdp_axes, scatter_dimension=dim, tiled=True),)
+
+
+_fsdp_all_gather_major_rs.defvjp(_fsdp_all_gather_major_rs_fwd, _fsdp_all_gather_major_rs_bwd)
 
 
 def _get_te_moe_checkpoint_kwargs(moe_fn) -> dict[str, str]:
@@ -4336,13 +4393,97 @@ class RoutedMoE(nnx.Module):
         return pspec
       return P(*pspec, unreduced=pspec.unreduced, reduced=reduced, unreduced_kind=pspec.unreduced_kind)
 
+    same_weight_and_compute_dtype_scan = (
+        jnp.dtype(self.weight_dtype) == jnp.dtype(self.dtype)
+        and self.config.scan_layers
+        and not getattr(self.config, "prefetch_fsdp_weights", False)
+    )
+    can_in_shard_map_fsdp_ag = (
+        not self.config.shard_exp_on_fsdp
+        and not self.config.use_2d_fsdp_sharding
+        and not self.config.moe_flat_fsdp_weights
+        and not weight_gather
+        and not self.config.moe_fsdp_use_two_stage_all_gather
+        and not self.config.moe_pin_sparse_core_all_gathers
+        and not getattr(self.config, "moe_pin_sparse_core_fsdp_all_gathers", False)
+        and not (self.config.check_vma and (self.config.megablox or self.config.use_tokamax_gmm))
+    )
+    init_wi_pspec = self._logical_to_mesh_axes(self.wi_kernel_axes) if can_in_shard_map_fsdp_ag else None
+    init_wo_pspec = self._logical_to_mesh_axes(self.wo_kernel_axes) if can_in_shard_map_fsdp_ag else None
+    raw_wi_pspec = self._logical_to_mesh_axes(("exp", None, "mlp_no_fsdp")) if can_in_shard_map_fsdp_ag else None
+    raw_wo_pspec = self._logical_to_mesh_axes(("exp", "mlp_no_fsdp", None)) if can_in_shard_map_fsdp_ag else None
+
+    def _active_mesh_axes(entry):
+      return tuple(a for a in mesh_axes_for_dim(entry) if self.mesh.shape.get(a, 1) > 1)
+
+    def _maybe_in_shard_map_fsdp_spec(w, pspec, init_pspec, raw_pspec, fsdp_dim):
+      if (
+          not can_in_shard_map_fsdp_ag
+          or not isinstance(w, jax.Array)
+          or w.ndim != 3
+          or _reduced_axes(w)
+          or not isinstance(pspec, P)
+      ):
+        return pspec, None
+      padded_pspec = tuple(pspec) + (None,) * (3 - len(pspec))
+      padded_raw = tuple(raw_pspec) + (None,) * (3 - len(raw_pspec))
+      padded_init = tuple(init_pspec) + (None,) * (3 - len(init_pspec))
+      if _active_mesh_axes(padded_pspec[fsdp_dim]):
+        return pspec, None
+      init_dim_axes = _active_mesh_axes(padded_init[fsdp_dim])
+      gather_axes = fsdp_axes_for_dim(init_dim_axes)
+      if not gather_axes or gather_axes != init_dim_axes:
+        return pspec, None
+      gather_axes_set = set(gather_axes)
+      if any(
+          gather_axes_set.intersection(_active_mesh_axes(padded_raw[d]))
+          or gather_axes_set.intersection(_active_mesh_axes(padded_pspec[d]))
+          for d in range(3)
+          if d != fsdp_dim
+      ):
+        return pspec, None
+      if self.config.shard_mode == ShardMode.EXPLICIT:
+        w_type_spec = getattr(getattr(jax.typeof(w), "sharding", None), "spec", None)
+        if w_type_spec is None:
+          return pspec, None
+        padded_type = tuple(w_type_spec) + (None,) * (3 - len(w_type_spec))
+        if _active_mesh_axes(padded_type[fsdp_dim]) != gather_axes:
+          return pspec, None
+      gather_size = math.prod(self.mesh.shape[a] for a in gather_axes)
+      if w.shape[fsdp_dim] % gather_size != 0:
+        return pspec, None
+      # `Layout((fsdp_dim, 0, 3 - fsdp_dim))` places dim 0 in the 8-sublane slot and `3 - fsdp_dim` in the 128-lane
+      # slot; smaller local dimensions cannot form a full (8, 128) TPU tile and XLA rewrites the reduce-scatter back
+      # into an all-reduce + slice.
+      sublane_shards = math.prod(self.mesh.shape[a] for a in _active_mesh_axes(padded_pspec[0]))
+      minor_dim = 3 - fsdp_dim
+      minor_shards = math.prod(self.mesh.shape[a] for a in _active_mesh_axes(padded_pspec[minor_dim]))
+      if w.shape[0] // sublane_shards < 8 or w.shape[minor_dim] // minor_shards < 128:
+        return pspec, None
+      # In `{2, 1, 0:T(8, 128)(2, 1)}` layout, dim 1 (`wi_0`/`wi_1`) is sublane-tiled (16-element alignment) and dim 2
+      # (`wo`) is minor lane-tiled (128-element alignment). When the per-shard slice already divides that tile, XLA's
+      # `AllReduceFolder` folds the boundary `all-reduce` + `dynamic-slice` natively without a major-most relayout.
+      tile_align = 128 if fsdp_dim == 2 else 16
+      if (w.shape[fsdp_dim] // gather_size) % tile_align == 0:
+        return pspec, None
+      gather_entry = gather_axes[0] if len(gather_axes) == 1 else gather_axes
+      sharded_parts = tuple(
+          gather_entry if d == fsdp_dim else (None if not _active_mesh_axes(padded_pspec[d]) else padded_pspec[d])
+          for d in range(3)
+      )
+      return P(*sharded_parts), (gather_entry, fsdp_dim)
+
+    w0_in_pspec, w0_fsdp_ag = _maybe_in_shard_map_fsdp_spec(w0_kernel, w0_pspec, init_wi_pspec, raw_wi_pspec, 1)
+    w1_in_pspec, w1_fsdp_ag = _maybe_in_shard_map_fsdp_spec(w1_kernel, w1_pspec, init_wi_pspec, raw_wi_pspec, 1)
+    wo_in_pspec, wo_fsdp_ag = _maybe_in_shard_map_fsdp_spec(wo_kernel, wo_pspec, init_wo_pspec, raw_wo_pspec, 2)
+
     in_specs = (
         input_partition_pspec,
         gate_logits_pspec,
         pre_bias_logits_pspec,
-        keep_reduced(w0_pspec, w0_kernel),
-        keep_reduced(w1_pspec, w1_kernel),
-        keep_reduced(wo_pspec, wo_kernel),
+        keep_reduced(w0_in_pspec, w0_kernel),
+        keep_reduced(w1_in_pspec, w1_kernel),
+        keep_reduced(wo_in_pspec, wo_kernel),
         w0_bias_pspec,
         w1_bias_pspec,
         wo_bias_pspec,
@@ -4399,9 +4540,15 @@ class RoutedMoE(nnx.Module):
         per_expert_scale=None,
     ):
       # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
-      # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
-      # drops fsdp -> GSPMD inserts the boundary all-gather) and reused across all
-      # chunks of the token-chunk pipeline below.
+      # shard_map entry (either via the explicit `_fsdp_all_gather_major_rs` below
+      # when needed for backward reduce-scatter, or implicitly via the boundary
+      # pspec) and reused across all chunks of the token-chunk pipeline below.
+      if w0_fsdp_ag is not None:
+        w0 = _fsdp_all_gather_major_rs(w0, *w0_fsdp_ag)
+      if w1_fsdp_ag is not None:
+        w1 = _fsdp_all_gather_major_rs(w1, *w1_fsdp_ag)
+      if wo_fsdp_ag is not None:
+        wo = _fsdp_all_gather_major_rs(wo, *wo_fsdp_ag)
       override_chunks = getattr(self, "num_moe_token_chunks", None)
       n_chunks = override_chunks if override_chunks is not None else self.config.num_moe_token_chunks
       if x.shape[1] == 1:
@@ -4693,21 +4840,17 @@ class RoutedMoE(nnx.Module):
           return w
         return self._maybe_shard_with_pspec(w, pspec)
 
-    if (
-        jnp.dtype(self.weight_dtype) == jnp.dtype(self.dtype)
-        and self.config.scan_layers
-        and not getattr(self.config, "prefetch_fsdp_weights", False)
-    ):
+    if same_weight_and_compute_dtype_scan:
       # Without this, XLA rewrites all_gather(dynamic_slice(w)) into dynamic_slice(all_gather(w)) and hoists the
       # gather out of the scanned decoder, keeping every layer's experts live; the dtype cast normally blocks that.
-      # Skipped with prefetch_fsdp_weights: the weights arrive already gathered, and the barrier's transpose would
-      # sit between the dW all-reduce and its FSDP dynamic-slice, blocking their fusion into a reduce-scatter.
-      w0_kernel, w1_kernel, wo_kernel = jax.lax.optimization_barrier((w0_kernel, w1_kernel, wo_kernel))
+      # Forward-only barrier: a plain `jax.lax.optimization_barrier` has itself as its transpose, sitting between
+      # the dW reduction and its FSDP dynamic-slice in backward and blocking their fusion into a reduce-scatter.
+      w0_kernel, w1_kernel, wo_kernel = _fwd_only_optimization_barrier((w0_kernel, w1_kernel, wo_kernel))
 
     # Weights already all-gathered (typed `reduced`) by fsdp_prefetch skip the reshard, which would drop the type.
-    w0_kernel = w0_kernel if _reduced_axes(w0_kernel) else _fsdp_all_gather(w0_kernel, w0_pspec)
-    w1_kernel = w1_kernel if _reduced_axes(w1_kernel) else _fsdp_all_gather(w1_kernel, w1_pspec)
-    wo_kernel = wo_kernel if _reduced_axes(wo_kernel) else _fsdp_all_gather(wo_kernel, wo_pspec)
+    w0_kernel = w0_kernel if _reduced_axes(w0_kernel) else _fsdp_all_gather(w0_kernel, w0_in_pspec)
+    w1_kernel = w1_kernel if _reduced_axes(w1_kernel) else _fsdp_all_gather(w1_kernel, w1_in_pspec)
+    wo_kernel = wo_kernel if _reduced_axes(wo_kernel) else _fsdp_all_gather(wo_kernel, wo_in_pspec)
     if w0_bias is not None:
       w0_bias = _fsdp_all_gather(w0_bias, w0_bias_pspec)
     if w1_bias is not None:

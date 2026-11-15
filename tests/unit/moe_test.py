@@ -6384,5 +6384,530 @@ class Fp8MoeFakeQuantTest(unittest.TestCase):
           self._make_config("fp8_moe_block_scale_rejected", **{flag: True, "weight_block_size": 128})
 
 
+class MoeFsdpBackwardReduceScatterTest(unittest.TestCase):
+  """Tests forward-only scan barrier and in-shard_map FSDP backward reduce-scatter."""
+
+  @staticmethod
+  def _has_prim_jaxpr(jaxpr_or_closed, prim_name: str) -> bool:
+    jaxpr = jaxpr_or_closed.jaxpr if isinstance(jaxpr_or_closed, ClosedJaxpr) else jaxpr_or_closed
+    for eqn in jaxpr.eqns:
+      if eqn.primitive.name == prim_name:
+        return True
+      for sub in jax.tree_util.tree_leaves(eqn.params, is_leaf=lambda p: isinstance(p, (Jaxpr, ClosedJaxpr))):
+        if isinstance(sub, (Jaxpr, ClosedJaxpr)) and MoeFsdpBackwardReduceScatterTest._has_prim_jaxpr(sub, prim_name):
+          return True
+    return False
+
+  @staticmethod
+  def _pad_spec(spec: P, ndim: int) -> tuple[tuple[str, ...], ...]:
+    parts = tuple(spec.partitions if isinstance(spec, P) else spec)
+    return tuple(sharding.mesh_axes_for_dim(d) for d in parts) + ((),) * (ndim - len(parts))
+
+  def test_fwd_only_optimization_barrier_strips_backward_barrier(self):
+    """Verifies `_fwd_only_optimization_barrier` emits `optimization_barrier` in forward only."""
+    x = jnp.arange(12, dtype=jnp.float32).reshape(3, 4)
+    y = jnp.ones((3, 4), dtype=jnp.float32) * 2.0
+
+    def fwd_fn(a, b):
+      a2, b2 = jax.lax.cond(
+          jnp.sum(a) >= 0,
+          lambda u, v: moe._fwd_only_optimization_barrier((u, v)),  # pylint: disable=protected-access
+          lambda u, v: (u, v),
+          a,
+          b,
+      )
+      return a2 * 3.0 + b2
+
+    out, vjp_fn = jax.vjp(fwd_fn, x, y)
+    dx, dy = vjp_fn(jnp.ones_like(out))
+    np.testing.assert_allclose(np.asarray(out), np.asarray(x * 3.0 + y))
+    np.testing.assert_allclose(np.asarray(dx), np.full_like(x, 3.0))
+    np.testing.assert_allclose(np.asarray(dy), np.ones_like(y))
+
+    fwd_jaxpr = jax.make_jaxpr(fwd_fn)(x, y)
+    bwd_jaxpr = jax.make_jaxpr(vjp_fn)(jnp.ones_like(out))
+    self.assertTrue(self._has_prim_jaxpr(fwd_jaxpr, "optimization_barrier"))
+    self.assertFalse(self._has_prim_jaxpr(bwd_jaxpr, "optimization_barrier"))
+
+  def test_fsdp_all_gather_major_rs_check_vma_and_no_all_reduce(self):
+    """Verifies `_fsdp_all_gather_major_rs` supports `check_vma=True`, co-axes, and negative `dim`."""
+    n_dev = len(jax.devices())
+    if n_dev < 2:
+      self.skipTest("Requires at least 2 devices.")
+    if n_dev >= 4:
+      mesh = Mesh(np.array(jax.devices()[:n_dev]).reshape(n_dev // 2, 2), ("fsdp", "context"))
+      gather_axes = ("fsdp", "context")
+    else:
+      mesh = Mesh(np.array(jax.devices()[:n_dev]), ("fsdp",))
+      gather_axes = "fsdp"
+    # Choose a per-shard slice size not divisible by 16 (e.g. 36 * n_dev -> 36 % 16 == 4) and >= (8, 128) minor tiles.
+    d_non16 = 36 * n_dev
+    m_dim = 128
+    num_e = 8
+    key = jax.random.PRNGKey(0)
+    x_full = jax.random.normal(key, (n_dev * 16, d_non16), dtype=jnp.bfloat16) * 0.2
+    w_wi_full = (jax.random.normal(jax.random.PRNGKey(1), (num_e, d_non16, m_dim), dtype=jnp.float32) * 0.05).astype(
+        jnp.bfloat16
+    )
+    w_wo_full = (jax.random.normal(jax.random.PRNGKey(2), (num_e, m_dim, d_non16), dtype=jnp.float32) * 0.05).astype(
+        jnp.bfloat16
+    )
+    cot_full = jax.random.normal(jax.random.PRNGKey(3), (n_dev * 16, d_non16), dtype=jnp.bfloat16)
+
+    x_shd = jax.device_put(x_full, jax.sharding.NamedSharding(mesh, P(gather_axes, None)))
+    wi_shd = jax.device_put(w_wi_full, jax.sharding.NamedSharding(mesh, P(None, gather_axes, None)))
+    wo_shd = jax.device_put(w_wo_full, jax.sharding.NamedSharding(mesh, P(None, None, gather_axes)))
+    cot_shd = jax.device_put(cot_full, jax.sharding.NamedSharding(mesh, P(gather_axes, None)))
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(P(gather_axes, None), P(None, gather_axes, None), P(None, None, gather_axes)),
+        out_specs=P(gather_axes, None),
+        check_vma=True,
+    )
+    def sharded_fn(x_loc, wi_loc, wo_loc):
+      wi = moe._fsdp_all_gather_major_rs(wi_loc, gather_axes, 1)  # pylint: disable=protected-access
+      wo = moe._fsdp_all_gather_major_rs(wo_loc, gather_axes, -1)  # pylint: disable=protected-access
+      gs = jnp.full((num_e,), x_loc.shape[0] // num_e, dtype=jnp.int32)
+      h = jax.lax.ragged_dot(x_loc, wi, gs, preferred_element_type=jnp.bfloat16)
+      return jax.lax.ragged_dot(jax.nn.silu(h), wo, gs, preferred_element_type=jnp.bfloat16)
+
+    def loss_sharded(x_in, wi_in, wo_in):
+      return jnp.mean(sharded_fn(x_in, wi_in, wo_in).astype(jnp.float32) * cot_shd.astype(jnp.float32))
+
+    def loss_ref(x_in, wi_in, wo_in):
+      chunks = []
+      rows_per_shard = x_in.shape[0] // n_dev
+      gs = jnp.full((num_e,), rows_per_shard // num_e, dtype=jnp.int32)
+      for idx in range(n_dev):
+        sl = slice(idx * rows_per_shard, (idx + 1) * rows_per_shard)
+        h = jax.lax.ragged_dot(x_in[sl], wi_in, gs, preferred_element_type=jnp.bfloat16)
+        chunks.append(jax.lax.ragged_dot(jax.nn.silu(h), wo_in, gs, preferred_element_type=jnp.bfloat16))
+      out = jnp.concatenate(chunks, axis=0)
+      return jnp.mean(out.astype(jnp.float32) * cot_full.astype(jnp.float32))
+
+    vg_shd = jax.jit(jax.value_and_grad(loss_sharded, argnums=(0, 1, 2)))
+    vg_ref = jax.jit(jax.value_and_grad(loss_ref, argnums=(0, 1, 2)))
+    val_s, (dx_s, dwi_s, dwo_s) = vg_shd(x_shd, wi_shd, wo_shd)
+    val_r, (dx_r, dwi_r, dwo_r) = vg_ref(x_full, w_wi_full, w_wo_full)
+
+    tol = 3e-2
+    np.testing.assert_allclose(np.asarray(val_s), np.asarray(val_r), rtol=tol, atol=tol)
+    np.testing.assert_allclose(np.asarray(dx_s, np.float32), np.asarray(dx_r, np.float32), rtol=tol, atol=tol)
+    np.testing.assert_allclose(np.asarray(dwi_s, np.float32), np.asarray(dwi_r, np.float32), rtol=tol, atol=tol)
+    np.testing.assert_allclose(np.asarray(dwo_s, np.float32), np.asarray(dwo_r, np.float32), rtol=tol, atol=tol)
+    self.assertEqual(self._pad_spec(dwi_s.sharding.spec, 3), self._pad_spec(P(None, gather_axes, None), 3))
+    self.assertEqual(self._pad_spec(dwo_s.sharding.spec, 3), self._pad_spec(P(None, None, gather_axes), 3))
+
+    hlo = vg_shd.lower(x_shd, wi_shd, wo_shd).compile().as_text()
+    self.assertIn("reduce-scatter", hlo)
+    expert_3d_shapes = (f"[{num_e},{d_non16},{m_dim}]", f"[{num_e},{m_dim},{d_non16}]")
+    for line in hlo.splitlines():
+      if "all-reduce" in line and any(s in line for s in expert_3d_shapes):
+        self.fail(f"Unexpected expert-weight all-reduce in HLO: {line}")
+
+  def test_routed_moe_non16_fsdp_parity_and_no_all_reduce(self):
+    """Verifies `RoutedMoE` parity, gradient sharding, and backward `reduce-scatter` across meshes and GMM backends."""
+    n_dev = len(jax.devices())
+    if n_dev < 2:
+      self.skipTest("Requires at least 2 devices.")
+
+    def _run_case(sub_name, emb_dim, weight_dtype, shard_mode, extra_cfg):
+      common_kwargs = {
+          "per_device_batch_size": 1,
+          "max_target_length": 32,
+          "base_emb_dim": emb_dim,
+          "base_mlp_dim": 128,
+          "base_moe_mlp_dim": 128,
+          "num_experts": 8,
+          "num_experts_per_tok": 2,
+          "megablox": False,
+          "use_tokamax_gmm": False,
+          "sparse_matmul": True,
+          "dtype": "bfloat16",
+          "weight_dtype": weight_dtype,
+          "scan_layers": False,
+          "shard_mode": shard_mode,
+          "log_config": False,
+      }
+      cfg_overrides = {
+          **common_kwargs,
+          "ici_fsdp_parallelism": n_dev,
+          "ici_data_parallelism": 1,
+          **extra_cfg,
+      }
+      cfg = pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=f"moe_fsdp_rs_{sub_name}",
+          **cfg_overrides,
+      )
+      ref_overrides = {
+          **common_kwargs,
+          **{k: v for k, v in extra_cfg.items() if not k.startswith("ici_") and k != "use_ring_of_experts"},
+          "shard_mode": "auto",
+          "ici_fsdp_parallelism": 1,
+          "ici_data_parallelism": n_dev,
+      }
+      ref_cfg = pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=f"moe_fsdp_rs_ref_{sub_name}",
+          **ref_overrides,
+      )
+      mesh = maxtext_utils.get_mesh_from_config(cfg)
+      ref_mesh = maxtext_utils.get_mesh_from_config(ref_cfg)
+      x_raw = jax.random.normal(
+          jax.random.PRNGKey(10),
+          (n_dev, cfg.max_target_length, emb_dim),
+          dtype=jnp.bfloat16,
+      )
+      act_pspec = sharding.logical_to_mesh_axes(
+          ("activation_batch", "activation_norm_length", "activation_embed"),
+          mesh,
+          rules=cfg.logical_axis_rules,
+      )
+      ref_act_pspec = sharding.logical_to_mesh_axes(
+          ("activation_batch", "activation_norm_length", "activation_embed"),
+          ref_mesh,
+          rules=ref_cfg.logical_axis_rules,
+      )
+      x_shd = jax.device_put(x_raw, jax.sharding.NamedSharding(mesh, act_pspec))
+      x_ref = jax.device_put(x_raw, jax.sharding.NamedSharding(ref_mesh, ref_act_pspec))
+
+      with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        model = moe.RoutedMoE(
+            config=cfg,
+            num_experts=cfg.num_experts,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            mesh=mesh,
+            kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+            kernel_axes=("embed", "mlp"),
+            intermediate_dim=cfg.moe_mlp_dim,
+            dtype=cfg.dtype,
+            weight_dtype=cfg.weight_dtype,
+            rngs=nnx.Rngs(11),
+        )
+        graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+        param_shardings = sharding.nnx_construct_named_sharding(params, mesh)
+        params_shd = jax.tree.map(jax.device_put, params, param_shardings)
+
+        def loss_opt(p, inp):
+          out, _, _ = nnx.merge(graphdef, p, rest)(inp)
+          return jnp.mean(out.astype(jnp.float32) ** 2)
+
+        with jax.set_mesh(mesh):
+          vg_opt = jax.jit(
+              jax.value_and_grad(loss_opt, argnums=(0, 1)),
+              out_shardings=(
+                  jax.sharding.NamedSharding(mesh, P()),
+                  (param_shardings, jax.sharding.NamedSharding(mesh, act_pspec)),
+              ),
+          )
+          loss_o, (grads_o, dx_o) = vg_opt(params_shd, x_shd)
+          hlo = vg_opt.lower(params_shd, x_shd).compile().as_text()
+
+      with nn_partitioning.axis_rules(ref_cfg.logical_axis_rules):
+        ref_model = moe.RoutedMoE(
+            config=ref_cfg,
+            num_experts=ref_cfg.num_experts,
+            num_experts_per_tok=ref_cfg.num_experts_per_tok,
+            mesh=ref_mesh,
+            kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+            kernel_axes=("embed", "mlp"),
+            intermediate_dim=ref_cfg.moe_mlp_dim,
+            dtype=ref_cfg.dtype,
+            weight_dtype=ref_cfg.weight_dtype,
+            rngs=nnx.Rngs(11),
+        )
+        ref_graphdef, ref_params, ref_rest = nnx.split(ref_model, nnx.Param, ...)
+        ref_shardings = sharding.nnx_construct_named_sharding(ref_params, ref_mesh)
+        ref_params_shd = jax.tree.map(jax.device_put, ref_params, ref_shardings)
+
+        def loss_ref(p, inp):
+          out, _, _ = nnx.merge(ref_graphdef, p, ref_rest)(inp)
+          return jnp.mean(out.astype(jnp.float32) ** 2)
+
+        with jax.set_mesh(ref_mesh):
+          vg_ref = jax.jit(jax.value_and_grad(loss_ref, argnums=(0, 1)))
+          loss_r, (grads_r, dx_r) = vg_ref(ref_params_shd, x_ref)
+          ref_hlo = vg_ref.lower(ref_params_shd, x_ref).compile().as_text()
+
+      tol = 3e-2
+      grads_o_dict = nnx.to_pure_dict(grads_o)
+      grads_r_dict = nnx.to_pure_dict(grads_r)
+      shd_dict = nnx.to_pure_dict(param_shardings)
+      np.testing.assert_allclose(np.asarray(loss_o), np.asarray(loss_r), rtol=tol, atol=tol)
+      np.testing.assert_allclose(np.asarray(dx_o, np.float32), np.asarray(dx_r, np.float32), rtol=tol, atol=tol)
+      for w_name, fsdp_dim in (("wi_0", 1), ("wi_1", 1), ("wo", 2)):
+        np.testing.assert_allclose(
+            np.asarray(grads_o_dict[w_name], np.float32),
+            np.asarray(grads_r_dict[w_name], np.float32),
+            rtol=tol,
+            atol=tol,
+        )
+        grad_padded = self._pad_spec(grads_o_dict[w_name].sharding.spec, 3)
+        self.assertEqual(grad_padded, self._pad_spec(shd_dict[w_name].spec, 3))
+        self.assertTrue(bool(sharding.fsdp_axes_for_dim(grad_padded[fsdp_dim])))
+
+      ep_size = max(1, extra_cfg.get("ici_expert_parallelism", 1))
+      local_e = cfg.num_experts // ep_size
+      local_expert_3d_shapes = (
+          f"[{local_e},{emb_dim},{cfg.moe_mlp_dim}]",
+          f"[{local_e},{cfg.moe_mlp_dim},{emb_dim}]",
+      )
+      ref_expert_3d_shapes = (
+          f"[{cfg.num_experts},{emb_dim},{cfg.moe_mlp_dim}]",
+          f"[{cfg.num_experts},{cfg.moe_mlp_dim},{emb_dim}]",
+      )
+      # Positive control: replicated data-parallel reference emits 3D expert-weight all-reduces; FSDP RS path does not.
+      self.assertTrue(
+          any("all-reduce" in line and any(s in line for s in ref_expert_3d_shapes) for line in ref_hlo.splitlines())
+      )
+      self.assertIn("reduce-scatter", hlo)
+      for line in hlo.splitlines():
+        if "all-reduce" in line and any(s in line for s in local_expert_3d_shapes):
+          self.fail(f"Unexpected expert-weight all-reduce in {sub_name}: {line}")
+
+    cases = [
+        ("non16_f32_auto", 36 * n_dev, "float32", "auto", {}),
+        ("non16_f32_explicit", 36 * n_dev, "float32", "explicit", {}),
+    ]
+    if n_dev >= 4:
+      cases.append((
+          "non16_cp2_fsdp",
+          36 * n_dev,
+          "float32",
+          "auto",
+          {"ici_context_parallelism": 2, "ici_fsdp_parallelism": n_dev // 2},
+      ))
+      if jax.default_backend() == "cpu":
+        cases.append((
+            "non16_ep2_fsdp_roe",
+            36 * (n_dev // 2),
+            "float32",
+            "auto",
+            {
+                "ici_expert_parallelism": 2,
+                "ici_fsdp_parallelism": n_dev // 2,
+                "num_experts": 16,
+                "use_ring_of_experts": True,
+            },
+        ))
+    if jax.default_backend() == "tpu":
+      cases.extend([
+          ("non16_tokamax_tpu", 36 * n_dev, "float32", "auto", {"use_tokamax_gmm": True, "max_target_length": 128}),
+          ("lane_unaligned_64_tpu", 64 * n_dev, "float32", "auto", {"use_tokamax_gmm": True, "max_target_length": 128}),
+      ])
+      if n_dev >= 4:
+        cases.append((
+            "non16_ep2_fsdp_ra2a_tpu",
+            36 * (n_dev // 2),
+            "float32",
+            "auto",
+            {
+                "ici_expert_parallelism": 2,
+                "ici_fsdp_parallelism": n_dev // 2,
+                "num_experts": 16,
+                "use_tokamax_gmm": True,
+                "max_target_length": 128,
+            },
+        ))
+    for sub_name, emb_dim, weight_dtype, shard_mode, extra_cfg in cases:
+      with self.subTest(case=sub_name):
+        _run_case(sub_name, emb_dim, weight_dtype, shard_mode, extra_cfg)
+
+  def test_scanned_checkpointed_bf16_routed_moe_no_bwd_barrier(self):
+    """Verifies a 2-layer `lax.scan(jax.checkpoint(...))` `bfloat16` `RoutedMoE` loop has no backward barrier or AR."""
+    n_dev = len(jax.devices())
+    if n_dev < 2:
+      self.skipTest("Requires at least 2 devices.")
+
+    def _run_scan_case(sub_name, emb_dim):
+      common_kwargs = {
+          "per_device_batch_size": 1,
+          "max_target_length": 32,
+          "base_emb_dim": emb_dim,
+          "base_mlp_dim": 128,
+          "base_moe_mlp_dim": 128,
+          "num_experts": 8,
+          "num_experts_per_tok": 2,
+          "megablox": False,
+          "use_tokamax_gmm": False,
+          "sparse_matmul": True,
+          "dtype": "bfloat16",
+          "weight_dtype": "bfloat16",
+          "scan_layers": True,
+          "shard_mode": "auto",
+          "log_config": False,
+      }
+      cfg = pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=f"moe_scan_rs_{sub_name}",
+          ici_fsdp_parallelism=n_dev,
+          ici_data_parallelism=1,
+          **common_kwargs,
+      )
+      ref_cfg = pyconfig.initialize(
+          [None, get_test_config_path()],
+          run_name=f"moe_scan_rs_ref_{sub_name}",
+          ici_fsdp_parallelism=1,
+          ici_data_parallelism=n_dev,
+          **common_kwargs,
+      )
+      mesh = maxtext_utils.get_mesh_from_config(cfg)
+      ref_mesh = maxtext_utils.get_mesh_from_config(ref_cfg)
+      x_raw = jax.random.normal(
+          jax.random.PRNGKey(20),
+          (n_dev, cfg.max_target_length, emb_dim),
+          dtype=jnp.bfloat16,
+      )
+      x_shd = jax.device_put(x_raw, jax.sharding.NamedSharding(mesh, P("fsdp", None, None)))
+      x_ref = jax.device_put(x_raw, jax.sharding.NamedSharding(ref_mesh, P("data", None, None)))
+
+      with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        m0 = moe.RoutedMoE(
+            config=cfg,
+            num_experts=cfg.num_experts,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            mesh=mesh,
+            kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+            kernel_axes=("embed", "mlp"),
+            intermediate_dim=cfg.moe_mlp_dim,
+            dtype=cfg.dtype,
+            weight_dtype=cfg.weight_dtype,
+            rngs=nnx.Rngs(21),
+        )
+        m1 = moe.RoutedMoE(
+            config=cfg,
+            num_experts=cfg.num_experts,
+            num_experts_per_tok=cfg.num_experts_per_tok,
+            mesh=mesh,
+            kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+            kernel_axes=("embed", "mlp"),
+            intermediate_dim=cfg.moe_mlp_dim,
+            dtype=cfg.dtype,
+            weight_dtype=cfg.weight_dtype,
+            rngs=nnx.Rngs(22),
+        )
+        graphdef, p0, rest = nnx.split(m0, nnx.Param, ...)
+        _, p1, _ = nnx.split(m1, nnx.Param, ...)
+        param_shardings = sharding.nnx_construct_named_sharding(p0, mesh)
+        p0_leaves, treedef = jax.tree_util.tree_flatten(p0)
+        p1_leaves = jax.tree_util.tree_leaves(p1)
+        shd_leaves = jax.tree_util.tree_leaves(param_shardings)
+        stacked_shd = [jax.sharding.NamedSharding(mesh, P(None, *s.spec)) for s in shd_leaves]
+        stacked_opt = [
+            jax.device_put(jnp.stack([a, b], axis=0), ss) for a, b, ss in zip(p0_leaves, p1_leaves, stacked_shd)
+        ]
+
+        def scan_body(carry, layer_leaves):
+          constrained = [jax.lax.with_sharding_constraint(l, s) for l, s in zip(layer_leaves, shd_leaves)]
+          p_layer = jax.tree_util.tree_unflatten(treedef, constrained)
+          out, _, _ = nnx.merge(graphdef, p_layer, rest)(carry)
+          return carry + out, None
+
+        def scan_fwd_nocheckpoint(stacked_leaves, inp):
+          y, _ = jax.lax.scan(scan_body, inp, stacked_leaves)
+          return y
+
+        def scan_fwd_opt(stacked_leaves, inp):
+          y, _ = jax.lax.scan(jax.checkpoint(scan_body), inp, stacked_leaves)
+          return y
+
+        def loss_opt(stacked_leaves, inp):
+          return jnp.mean(scan_fwd_opt(stacked_leaves, inp).astype(jnp.float32) ** 2)
+
+        with jax.set_mesh(mesh):
+          # Without remat, `vjp_fn` runs pure backward transpose (0 `optimization_barrier`s).
+          fwd_jaxpr = jax.make_jaxpr(scan_fwd_nocheckpoint)(stacked_opt, x_shd)
+          out_vjp, vjp_fn = jax.vjp(scan_fwd_nocheckpoint, stacked_opt, x_shd)
+          bwd_jaxpr = jax.make_jaxpr(vjp_fn)(jnp.ones_like(out_vjp))
+          self.assertTrue(self._has_prim_jaxpr(fwd_jaxpr, "optimization_barrier"))
+          self.assertFalse(self._has_prim_jaxpr(bwd_jaxpr, "optimization_barrier"))
+
+          vg_opt = jax.jit(jax.value_and_grad(loss_opt, argnums=(0, 1)))
+          loss_o, (grads_o_leaves, dx_o) = vg_opt(stacked_opt, x_shd)
+          hlo = vg_opt.lower(stacked_opt, x_shd).compile().as_text()
+
+      with nn_partitioning.axis_rules(ref_cfg.logical_axis_rules):
+        rm0 = moe.RoutedMoE(
+            config=ref_cfg,
+            num_experts=ref_cfg.num_experts,
+            num_experts_per_tok=ref_cfg.num_experts_per_tok,
+            mesh=ref_mesh,
+            kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+            kernel_axes=("embed", "mlp"),
+            intermediate_dim=ref_cfg.moe_mlp_dim,
+            dtype=ref_cfg.dtype,
+            weight_dtype=ref_cfg.weight_dtype,
+            rngs=nnx.Rngs(21),
+        )
+        rm1 = moe.RoutedMoE(
+            config=ref_cfg,
+            num_experts=ref_cfg.num_experts,
+            num_experts_per_tok=ref_cfg.num_experts_per_tok,
+            mesh=ref_mesh,
+            kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+            kernel_axes=("embed", "mlp"),
+            intermediate_dim=ref_cfg.moe_mlp_dim,
+            dtype=ref_cfg.dtype,
+            weight_dtype=ref_cfg.weight_dtype,
+            rngs=nnx.Rngs(22),
+        )
+        ref_graphdef, rp0, ref_rest = nnx.split(rm0, nnx.Param, ...)
+        _, rp1, _ = nnx.split(rm1, nnx.Param, ...)
+        ref_shardings = sharding.nnx_construct_named_sharding(rp0, ref_mesh)
+        rp0_leaves, ref_treedef = jax.tree_util.tree_flatten(rp0)
+        rp1_leaves = jax.tree_util.tree_leaves(rp1)
+        ref_shd_leaves = jax.tree_util.tree_leaves(ref_shardings)
+        ref_stacked_shd = [jax.sharding.NamedSharding(ref_mesh, P(None, *s.spec)) for s in ref_shd_leaves]
+        stacked_ref = [
+            jax.device_put(jnp.stack([a, b], axis=0), ss) for a, b, ss in zip(rp0_leaves, rp1_leaves, ref_stacked_shd)
+        ]
+
+        def loss_ref(stacked_leaves, inp):
+          def body_fn(carry, layer_leaves):
+            p_layer = jax.tree_util.tree_unflatten(ref_treedef, layer_leaves)
+            out, _, _ = nnx.merge(ref_graphdef, p_layer, ref_rest)(carry)
+            return carry + out, None
+
+          y, _ = jax.lax.scan(jax.checkpoint(body_fn), inp, stacked_leaves)
+          return jnp.mean(y.astype(jnp.float32) ** 2)
+
+        with jax.set_mesh(ref_mesh):
+          vg_ref = jax.jit(jax.value_and_grad(loss_ref, argnums=(0, 1)))
+          loss_r, (grads_r_leaves, dx_r) = vg_ref(stacked_ref, x_ref)
+
+      tol = 3e-2
+      np.testing.assert_allclose(np.asarray(loss_o), np.asarray(loss_r), rtol=tol, atol=tol)
+      np.testing.assert_allclose(np.asarray(dx_o, np.float32), np.asarray(dx_r, np.float32), rtol=tol, atol=tol)
+      grads_o_dict = nnx.to_pure_dict(jax.tree_util.tree_unflatten(treedef, grads_o_leaves))
+      grads_r_dict = nnx.to_pure_dict(jax.tree_util.tree_unflatten(ref_treedef, grads_r_leaves))
+      for w_name, fsdp_dim in (("wi_0", 2), ("wi_1", 2), ("wo", 3)):
+        np.testing.assert_allclose(
+            np.asarray(grads_o_dict[w_name], np.float32),
+            np.asarray(grads_r_dict[w_name], np.float32),
+            rtol=tol,
+            atol=tol,
+        )
+        self.assertEqual(self._pad_spec(grads_o_dict[w_name].sharding.spec, 4)[fsdp_dim], ("fsdp",))
+
+      expert_3d_shapes = (
+          f"[{cfg.num_experts},{emb_dim},{cfg.moe_mlp_dim}]",
+          f"[{cfg.num_experts},{cfg.moe_mlp_dim},{emb_dim}]",
+      )
+      self.assertIn("reduce-scatter", hlo)
+      for line in hlo.splitlines():
+        if "all-reduce" in line and any(s in line for s in expert_3d_shapes):
+          self.fail(f"Unexpected expert-weight all-reduce in {sub_name}: {line}")
+
+    scan_cases = [("non16_bf16_scan", 36 * n_dev)]
+    if jax.default_backend() == "tpu":
+      scan_cases.append(("aligned128_bf16_scan_tpu", 128 * n_dev))
+    for sub_name, emb_dim in scan_cases:
+      with self.subTest(case=sub_name):
+        _run_scan_case(sub_name, emb_dim)
+
+
 if __name__ == "__main__":
   absltest.main()
