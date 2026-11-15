@@ -2113,6 +2113,15 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
+  moe_tgmm_v2_k_minor_out: bool = Field(
+      False,
+      description=(
+          "Have the tgmm_v2 kernel (MoE drhs) write its output k-minor and return it via swapaxes when n is a single, "
+          "non-lane-aligned tile (e.g. the wi gradient) and the expert weight gradients are not reduced across devices "
+          "(no FSDP gather of the experts, no data parallelism), so no relayout copy follows the kernel. Same result; "
+          "requires use_gmm_v2=true."
+      ),
+  )
 
 
 class DeepSeekMoE(BaseModel):

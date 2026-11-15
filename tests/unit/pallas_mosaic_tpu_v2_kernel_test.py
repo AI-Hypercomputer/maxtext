@@ -315,6 +315,105 @@ class GmmDispatchTest(parameterized.TestCase):
     self.assertEqual(gmm_mock.call_args.kwargs["transpose_rhs"], bool(use_dlhs_transpose_rhs))
 
 
+class _FakeTpuInfo:
+  """The TPU facts tgmm's config and eligibility code reads (v7x values)."""
+
+  num_lanes = 128
+
+  @staticmethod
+  def get_sublane_tiling(dtype):
+    return 32 // jnp.dtype(dtype).itemsize
+
+
+class TgmmKMinorOutEligibilityTest(parameterized.TestCase):
+  """CPU-compatible checks of when tgmm_v2(k_minor_out=True) changes layout."""
+
+  @parameterized.named_parameters(
+      # gemma4-26b wi drhs (n = 704) at 16384, 4096 and 512 tokens/device.
+      {"testcase_name": "wi_16k", "m": 131072, "k": 2816, "n": 704, "tiles": (512, 2816, 768), "expected": True},
+      {"testcase_name": "wi_4k", "m": 32768, "k": 2816, "n": 704, "tiles": (256, 2816, 704), "expected": True},
+      {"testcase_name": "wi_512", "m": 4096, "k": 2816, "n": 704, "tiles": (512, 2816, 768), "expected": True},
+      # Lane-aligned n (gemma4-26b wo drhs) needs no relayout.
+      {"testcase_name": "lane_aligned_n", "m": 131072, "k": 704, "n": 2816, "tiles": (512, 768, 2816), "expected": False},
+      # K padded to a tile_k multiple would need a slice before the swapaxes.
+      {"testcase_name": "padded_k", "m": 131072, "k": 2816, "n": 704, "tiles": (512, 1024, 768), "expected": False},
+      {"testcase_name": "two_n_tiles", "m": 131072, "k": 2816, "n": 704, "tiles": (512, 2816, 384), "expected": False},
+      {
+          "testcase_name": "n_not_sublane_multiple",
+          "m": 131072,
+          "k": 2816,
+          "n": 700,
+          "tiles": (512, 2816, 768),
+          "expected": False,
+      },
+      {
+          "testcase_name": "partial_sum",
+          "m": 131072,
+          "k": 2816,
+          "n": 704,
+          "tiles": (512, 2816, 768),
+          "expected": False,
+          "has_ps": True,
+      },
+  )
+  def test_k_minor_out_applies(self, m, k, n, tiles, expected, has_ps=False):
+    num_groups = 128
+    bf16 = jnp.bfloat16
+    with mock.patch.object(tgmm_backend.pltpu, "get_tpu_info", return_value=_FakeTpuInfo()):
+      cfgs = tgmm_backend.make_tgmm_configs(
+          jax.ShapeDtypeStruct((m, k), bf16),
+          jax.ShapeDtypeStruct((m, n), bf16),
+          None,
+          jax.ShapeDtypeStruct((num_groups, k, n), bf16) if has_ps else None,
+          jax.ShapeDtypeStruct((num_groups,), jnp.int32),
+          num_groups,
+          tile_info=gmm_backend.TileSizes(*tiles),
+          vmem_limit_bytes=None,
+          out_dtype=bf16,
+          acc_dtype=None,
+          target_zero_ref_bytes=2 * 1024 * 1024,
+      )
+      self.assertEqual(tgmm_backend.k_minor_out_applies(cfgs), expected)
+
+  @parameterized.parameters(False, True)
+  def test_k_minor_out_passed_to_tgmm(self, flag):
+    """gmm(tgmm_v2_k_minor_out=...) reaches the drhs tgmm_v2 call through the custom VJP."""
+    num_groups, batch_size, in_size, out_size = 2, 8, 16, 32
+    lhs = jnp.linspace(-1.0, 1.0, batch_size * in_size).reshape(batch_size, in_size)
+    rhs = jnp.linspace(-0.5, 0.5, num_groups * in_size * out_size).reshape(num_groups, in_size, out_size)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+
+    def mock_gmm(lhs, rhs, transpose_rhs=False, **kwargs):
+      del kwargs
+      if transpose_rhs:
+        rhs = rhs.swapaxes(1, 2)
+      return jnp.einsum("gmk,gkn->gmn", lhs.reshape(num_groups, -1, lhs.shape[-1]), rhs).reshape(batch_size, -1)
+
+    def mock_tgmm(lhs, rhs, **kwargs):
+      del kwargs
+      return jnp.einsum(
+          "gmk,gmn->gkn",
+          lhs.reshape(num_groups, -1, lhs.shape[-1]),
+          rhs.reshape(num_groups, -1, rhs.shape[-1]),
+      )
+
+    def loss(lhs, rhs):
+      out = megablox_ops.gmm(
+          lhs,
+          rhs,
+          group_sizes,
+          use_tokamax_backend=True,
+          use_gmm_v2=True,
+          tgmm_v2_k_minor_out=flag,
+      )
+      return jnp.sum(out**2)
+
+    with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", side_effect=mock_gmm):
+      with mock.patch.object(megablox_ops.tgmm_v2, "tgmm_v2", side_effect=mock_tgmm) as tgmm_mock:
+        jax.jit(jax.grad(loss, argnums=(0, 1)))(lhs, rhs)
+    self.assertEqual(tgmm_mock.call_args.kwargs["k_minor_out"], flag)
+
+
 class GmmTest(parameterized.TestCase):
 
   def setUp(self):
@@ -725,6 +824,75 @@ class GmmTest(parameterized.TestCase):
     )
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     assert_arrays_all_close(actual, expected)
+
+  @parameterized.named_parameters(
+      # 4 groups of 256 rows, n = 192 (not lane-aligned): the k-minor path.
+      {"testcase_name": "k_minor", "m": 1024, "k": 256, "n": 192, "expect_k_minor": True},
+      {"testcase_name": "k_minor_empty_first", "m": 1024, "k": 256, "n": 192, "expect_k_minor": True, "empty_group": 0},
+      {"testcase_name": "k_minor_empty_last", "m": 1024, "k": 256, "n": 192, "expect_k_minor": True, "empty_group": 3},
+      {"testcase_name": "k_minor_group_offset", "m": 1024, "k": 256, "n": 192, "expect_k_minor": True, "group_offset": 1},
+      {"testcase_name": "k_minor_two_k_tiles", "m": 1024, "k": 512, "n": 192, "expect_k_minor": True, "tile_k": 256},
+      # 64 rows per group: short groups, one grid step each.
+      {"testcase_name": "k_minor_short_rows", "m": 256, "k": 256, "n": 192, "expect_k_minor": True},
+      # gemma4-26b's wi drhs n (704 = 5.5 x 128 lanes).
+      {"testcase_name": "k_minor_n704", "m": 2048, "k": 512, "n": 704, "expect_k_minor": True},
+      # Fallbacks to the n-minor output.
+      {"testcase_name": "lane_aligned_n", "m": 1024, "k": 256, "n": 256, "expect_k_minor": False},
+      {"testcase_name": "padded_k", "m": 1024, "k": 384, "n": 192, "expect_k_minor": False, "tile_k": 256},
+      {"testcase_name": "partial_sum", "m": 1024, "k": 256, "n": 192, "expect_k_minor": False, "has_ps": True},
+  )
+  def test_tgmm_k_minor_out_bit_exact(
+      self, m, k, n, expect_k_minor, empty_group=None, group_offset=0, tile_k=None, has_ps=False
+  ):
+    """k_minor_out=True returns the same bits as the n-minor output."""
+    num_local_groups = 4
+    num_groups = num_local_groups + group_offset
+    key1, key2, key3 = jax.random.split(jax.random.key(0), 3)
+    lhs = jax.random.normal(key1, (m, k), dtype=jnp.bfloat16)
+    grad = jax.random.normal(key2, (m, n), dtype=jnp.bfloat16)
+    group_sizes = jnp.array([m // num_groups] * num_groups, dtype=jnp.int32)
+    group_sizes = group_sizes.at[-1].add(m - jnp.sum(group_sizes))
+    if empty_group is not None:
+      group_sizes = group_sizes.at[-1].add(group_sizes[empty_group]).at[empty_group].set(0)
+    group_offset = jnp.array(group_offset, dtype=jnp.int32)
+    ps = jax.random.normal(key3, (num_local_groups, k, n), dtype=jnp.bfloat16) if has_ps else None
+    tile_info = gmm_backend.TileSizes(tile_m=256, tile_k=tile_k or k, tile_n=gmm_backend.align_to(n, 128))
+
+    cfgs = tgmm_backend.make_tgmm_configs(
+        lhs,
+        grad,
+        None,
+        ps,
+        group_sizes,
+        num_local_groups,
+        tile_info=tile_info,
+        vmem_limit_bytes=None,
+        out_dtype=jnp.bfloat16,
+        acc_dtype=None,
+        target_zero_ref_bytes=2 * 1024 * 1024,
+    )
+    self.assertEqual(tgmm_backend.k_minor_out_applies(cfgs), expect_k_minor)
+
+    def run(k_minor_out):
+      return tgmm_backend.tgmm_v2(
+          lhs,
+          grad,
+          group_sizes,
+          num_local_groups,
+          partial_sum=ps,
+          group_offset=group_offset,
+          preferred_element_type=jnp.bfloat16,
+          tile_info=tile_info,
+          k_minor_out=k_minor_out,
+      )
+
+    n_minor, k_minor = run(False), run(True)
+    self.assertEqual(k_minor.shape, (num_local_groups, k, n))
+    self.assertTrue(bool(jnp.array_equal(k_minor, n_minor)))
+    expected = reference_tgmm(
+        lhs.swapaxes(0, 1), grad, group_sizes, num_local_groups, group_offset=group_offset, partial_sum=ps
+    )
+    assert_arrays_all_close(k_minor, expected)
 
   @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   def test_tgmm_explicitly_exercises_all_branches(self):
