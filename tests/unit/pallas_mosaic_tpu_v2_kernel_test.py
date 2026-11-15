@@ -314,6 +314,77 @@ class GmmDispatchTest(parameterized.TestCase):
     chex.assert_trees_all_close(actual, expected, atol=1e-4, rtol=1e-5)
     self.assertEqual(gmm_mock.call_args.kwargs["transpose_rhs"], bool(use_dlhs_transpose_rhs))
 
+  @parameterized.product(use_gmm_v2_paired_tiles=(None, False, True))
+  def test_paired_tiles_flag_through_custom_vjp(self, use_gmm_v2_paired_tiles):
+    """use_gmm_v2_paired_tiles defaults off and reaches both gmm_v2 calls (forward and DLHS)."""
+    num_groups, batch_size, in_size, out_size = 2, 8, 16, 32
+    lhs = jnp.linspace(-1.0, 1.0, batch_size * in_size).reshape(batch_size, in_size)
+    rhs = jnp.linspace(-0.5, 0.5, num_groups * in_size * out_size).reshape(num_groups, in_size, out_size)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+
+    def mock_gmm(lhs, rhs, transpose_rhs=False, **kwargs):
+      del kwargs
+      if transpose_rhs:
+        rhs = rhs.swapaxes(1, 2)
+      out = jnp.einsum("gmk,gkn->gmn", lhs.reshape(num_groups, -1, lhs.shape[-1]), rhs)
+      return out.reshape(batch_size, -1)
+
+    def mock_tgmm(lhs, rhs, **kwargs):
+      del kwargs
+      return jnp.einsum(
+          "gmk,gmn->gkn",
+          lhs.reshape(num_groups, -1, lhs.shape[-1]),
+          rhs.reshape(num_groups, -1, rhs.shape[-1]),
+      )
+
+    def loss(lhs, rhs):
+      # None exercises the public default.
+      kwargs = {} if use_gmm_v2_paired_tiles is None else {"use_gmm_v2_paired_tiles": use_gmm_v2_paired_tiles}
+      out = megablox_ops.gmm(lhs, rhs, group_sizes, use_tokamax_backend=True, use_gmm_v2=True, **kwargs)
+      return jnp.sum(out**2)
+
+    with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", side_effect=mock_gmm) as gmm_mock:
+      with mock.patch.object(megablox_ops.tgmm_v2, "tgmm_v2", side_effect=mock_tgmm):
+        jax.jit(jax.value_and_grad(loss, argnums=(0, 1)))(lhs, rhs)
+    # One forward and one DLHS gmm_v2 call, both carrying the flag.
+    self.assertEqual(gmm_mock.call_count, 2)
+    for call in gmm_mock.call_args_list:
+      self.assertEqual(call.kwargs["paired_tiles"], bool(use_gmm_v2_paired_tiles))
+
+  @parameterized.product(size_n=(704, 768), transpose_rhs=(False, True), paired_tiles=(None, False, True))
+  def test_make_gmm_configs_paired_tiles_opt_in(self, size_n, transpose_rhs, paired_tiles):
+    """make_gmm_configs only selects the paired path when paired_tiles=True (Gemma 4 26B shape)."""
+    size_m, size_k, num_groups, tile_m = 131072, 2816, 128, 1024
+    lhs = jax.ShapeDtypeStruct((size_m, size_k), jnp.bfloat16)
+    rhs_shape = (num_groups, size_n, size_k) if transpose_rhs else (num_groups, size_k, size_n)
+    rhs = jax.ShapeDtypeStruct(rhs_shape, jnp.bfloat16)
+    kwargs = {} if paired_tiles is None else {"paired_tiles": paired_tiles}
+    # Target TPU7x so pltpu.get_tpu_info() works on CPU.
+    tpu_mesh = jax.sharding.AbstractMesh(
+        (1,), ("x",), abstract_device=jax.sharding.AbstractDevice(device_kind="TPU7x", num_cores=2, platform="tpu")
+    )
+    with jax.sharding.use_abstract_mesh(tpu_mesh):
+      cfgs = gmm_backend.make_gmm_configs(
+          lhs,
+          rhs,
+          None,
+          None,
+          None,
+          jax.ShapeDtypeStruct((num_groups,), jnp.int32),
+          jax.ShapeDtypeStruct((1,), jnp.int32),
+          tile_info=gmm_backend.TileSizes(tile_m=tile_m, tile_k=size_k, tile_n=size_n),
+          vmem_limit_bytes=int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9),
+          out_dtype=None,
+          acc_dtype=None,
+          maybe_quantize_lhs=False,
+          zero_initialize=True,
+          transpose_rhs=transpose_rhs,
+          **kwargs,
+      )
+    self.assertEqual(cfgs.paired_tiles, bool(paired_tiles))
+    if not paired_tiles:
+      self.assertFalse(cfgs.paired_members)
+
 
 class GmmTest(parameterized.TestCase):
 

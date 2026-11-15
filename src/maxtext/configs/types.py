@@ -1398,6 +1398,10 @@ class MoEGeneral(BaseModel):
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
   )
+  moe_gmm_v2_paired_tiles: bool = Field(
+      False,
+      description="Let GMM v2 forward and DLHS cover two group members per grid step (bit-exact small tail dots).",
+  )
   moe_bwd_prequant_before_unsort: bool = Field(
       False,
       description=(
