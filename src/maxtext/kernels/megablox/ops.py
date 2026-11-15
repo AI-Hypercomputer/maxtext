@@ -101,6 +101,7 @@ def gmm(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    use_tgmm_v2_multi_window_steps: bool = False,
 ):
   """Grouped matrix multiplication operation.
 
@@ -110,6 +111,11 @@ def gmm(
   consumes / produces the matching 3D cotangents without relayout copies. With
   `out_is_3d`, a forward `partial_sum` must also be 3D; with `return_lhs`, the
   cotangent of the returned (3D) lhs is accumulated into the 3D dlhs in place.
+
+  `use_tgmm_v2_multi_window_steps` lets the tgmm_v2 backward DRHS kernel cover
+  several tile_m-row sub-windows per grid step with deeper buffering, when VMEM
+  fits. It does not change the result and only applies with `use_gmm_v2` on the
+  tokamax backend.
   """
   lhs_ndim = (lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs).ndim
   if (lhs_ndim == 3 or out_is_3d) and not (use_tokamax_backend and use_gmm_v2):
@@ -158,7 +164,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25, 26),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -188,6 +194,7 @@ def gmm(
       fuse_3d_dlhs_ps,
       tc_routing,
       tc_unsort_cfg,
+      use_tgmm_v2_multi_window_steps,
   )
   if return_lhs and return_rhs:
     return out, lhs_out, rhs_out
@@ -250,6 +257,7 @@ def _gmm_fwd(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    use_tgmm_v2_multi_window_steps: bool = False,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
     tuple[
@@ -274,6 +282,7 @@ def _gmm_fwd(
   """
 
   del use_dlhs_transpose_rhs  # Only affects the custom backward pass.
+  del use_tgmm_v2_multi_window_steps  # Only affects the custom backward pass.
 
   # Track whether operands arrived as QArray (e.g. from token all-gather quantization
   # or gathered weights) to return matching cotangent containers in backward pass.
@@ -633,6 +642,7 @@ def _gmm_bwd(
     out_is_3d: bool,
     fuse_3d_dlhs_ps: bool,
     tc_unsort_cfg: TcUnsortCfg | None,
+    use_tgmm_v2_multi_window_steps: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -776,6 +786,7 @@ def _gmm_bwd(
       use_gmm_v2_heuristic_tiling,
       partial_sum=drhs_partial_sum,
       flat_rhs_shard=flat_fsdp_shard is not None,
+      multi_window_steps=use_tgmm_v2_multi_window_steps,
   )
 
   # 5. Output Formatting
@@ -1195,6 +1206,7 @@ def _compute_drhs(
     use_gmm_v2_heuristic_tiling: bool,
     partial_sum: jnp.ndarray | None = None,
     flat_rhs_shard: bool = False,
+    multi_window_steps: bool = False,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -1210,6 +1222,7 @@ def _compute_drhs(
         tiling,
         use_gmm_v2_heuristic_tiling,
         partial_sum=partial_sum,
+        multi_window_steps=multi_window_steps,
     )
   else:
     drhs = _drhs_run_megablox(
@@ -1296,6 +1309,7 @@ def _drhs_run_tokamax_v2(
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     partial_sum: jnp.ndarray | None = None,
+    multi_window_steps: bool = False,
 ) -> jnp.ndarray:
   """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
@@ -1321,6 +1335,7 @@ def _drhs_run_tokamax_v2(
       preferred_element_type=rhs_dtype,
       group_offset=group_offset,
       tile_info=drhs_tiling,
+      multi_window_steps=multi_window_steps,
   )
 
 

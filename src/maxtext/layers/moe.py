@@ -3162,6 +3162,7 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2=self.config.use_gmm_v2,
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
+            use_tgmm_v2_multi_window_steps=self.config.moe_tgmm_v2_multi_window_steps,
             partial_sum=partial_sum,
             interpret=megablox_interpret,
             return_lhs=return_lhs,

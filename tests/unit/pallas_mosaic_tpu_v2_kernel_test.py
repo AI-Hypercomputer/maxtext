@@ -15,6 +15,7 @@
 """Unit tests for Pallas Mosaic TPU v2 kernels."""
 
 import collections
+import inspect
 from unittest import mock
 
 import pytest
@@ -313,6 +314,189 @@ class GmmDispatchTest(parameterized.TestCase):
     expected = jax.jit(jax.value_and_grad(reference_loss, argnums=(0, 1, 2)))(lhs, rhs, partial_sum)
     chex.assert_trees_all_close(actual, expected, atol=1e-4, rtol=1e-5)
     self.assertEqual(gmm_mock.call_args.kwargs["transpose_rhs"], bool(use_dlhs_transpose_rhs))
+
+  def test_tgmm_multi_window_steps_defaults_off(self):
+    """Every hop of the multi-window flag defaults to the HEAD behavior."""
+    flag_by_fn = {
+        megablox_ops.gmm: "use_tgmm_v2_multi_window_steps",
+        megablox_ops._gmm_fwd: "use_tgmm_v2_multi_window_steps",  # pylint: disable=protected-access
+        megablox_ops._compute_drhs: "multi_window_steps",  # pylint: disable=protected-access
+        megablox_ops._drhs_run_tokamax_v2: "multi_window_steps",  # pylint: disable=protected-access
+        tgmm_backend.tgmm_v2: "multi_window_steps",
+    }
+    for fn, name in flag_by_fn.items():
+      self.assertIs(inspect.signature(fn).parameters[name].default, False, msg=fn.__name__)
+
+  @parameterized.product(
+      use_tgmm_v2_multi_window_steps=(None, False, True),
+      use_gmm_v2_heuristic_tiling=(False, True),
+  )
+  def test_tgmm_multi_window_steps_through_custom_vjp(self, use_tgmm_v2_multi_window_steps, use_gmm_v2_heuristic_tiling):
+    """The flag reaches tgmm_v2 in the backward pass and is off unless set."""
+    num_groups, batch_size, in_size, out_size = 2, 8, 16, 32
+    lhs = jnp.linspace(-1.0, 1.0, batch_size * in_size).reshape(batch_size, in_size)
+    rhs = jnp.linspace(-0.5, 0.5, num_groups * in_size * out_size).reshape(num_groups, in_size, out_size)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+
+    def mock_gmm(lhs, rhs, transpose_rhs=False, partial_sum=None, **kwargs):
+      del kwargs, partial_sum
+      if transpose_rhs:
+        rhs = rhs.swapaxes(1, 2)
+      out = jnp.einsum("gmk,gkn->gmn", lhs.reshape(num_groups, -1, lhs.shape[-1]), rhs)
+      return out.reshape(batch_size, -1)
+
+    def mock_tgmm(lhs, rhs, **kwargs):
+      del kwargs
+      return jnp.einsum(
+          "gmk,gmn->gkn",
+          lhs.reshape(num_groups, -1, lhs.shape[-1]),
+          rhs.reshape(num_groups, -1, rhs.shape[-1]),
+      )
+
+    def loss(lhs, rhs):
+      kwargs = {}
+      if use_tgmm_v2_multi_window_steps is not None:
+        kwargs["use_tgmm_v2_multi_window_steps"] = use_tgmm_v2_multi_window_steps
+      out = megablox_ops.gmm(
+          lhs,
+          rhs,
+          group_sizes,
+          use_tokamax_backend=True,
+          use_gmm_v2=True,
+          use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
+          **kwargs,
+      )
+      return jnp.sum(out**2)
+
+    with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", side_effect=mock_gmm):
+      with mock.patch.object(megablox_ops.tgmm_v2, "tgmm_v2", side_effect=mock_tgmm) as tgmm_mock:
+        jax.jit(jax.grad(loss, argnums=(0, 1)))(lhs, rhs)
+
+    self.assertEqual(tgmm_mock.call_count, 1)
+    self.assertIs(
+        tgmm_mock.call_args.kwargs["multi_window_steps"],
+        bool(use_tgmm_v2_multi_window_steps),
+    )
+
+
+def _tgmm_configs(size_m, size_k, size_n, *, tile_m=512, lhs_is_3d=False, rhs_is_3d=False):
+  """Builds the GmmConfigs of a bf16 2D tgmm with full-size k/n tiles (no TPU needed)."""
+  num_lanes = 128
+  tiles = gmm_backend.TileSizes(
+      tile_m=tile_m,
+      tile_k=gmm_backend.align_to(size_k, num_lanes),
+      tile_n=gmm_backend.align_to(size_n, num_lanes),
+  )
+  dims = gmm_backend.Dimensions(
+      size_m=size_m,
+      size_k=size_k,
+      size_n=size_n,
+      size_group=128,
+      size_lhs_group=128,
+      size_lhs_sublane=16,
+  )
+  return gmm_backend.GmmConfigs(
+      tiles=tiles,
+      dims=dims,
+      lhs_cfgs=gmm_backend.InputConfigs(
+          quant_dtype=None,
+          quant_block_size=-1,
+          dtype=jnp.bfloat16,
+          is_3d=lhs_is_3d,
+      ),
+      rhs_cfgs=gmm_backend.InputConfigs(
+          quant_dtype=None,
+          quant_block_size=size_m,
+          dtype=jnp.bfloat16,
+          is_3d=rhs_is_3d,
+      ),
+      out_dtype=jnp.dtype(jnp.bfloat16),
+      acc_dtype=jnp.dtype(jnp.float32),
+      has_partial_sum=False,
+      zero_init=False,
+      fuse_act=None,
+      transpose_rhs=False,
+  )
+
+
+class TgmmStepConfigTest(parameterized.TestCase):
+  """CPU-compatible tests of the multi-window step choice; no TPU kernel runs."""
+
+  _MIB = 1024 * 1024
+  _ZERO_REF_BYTES = 2 * _MIB
+
+  @parameterized.parameters((2816, 704), (704, 2816))
+  def test_gemma_drhs_shape_picks_widest_config_on_v7x_vmem(self, size_k, size_n):
+    cfgs = _tgmm_configs(131072, size_k, size_n)
+    vmem_limit_bytes = int(64 * self._MIB * 0.9)
+    self.assertEqual(
+        tgmm_backend._tgmm_step_config(cfgs, vmem_limit_bytes, self._ZERO_REF_BYTES),  # pylint: disable=protected-access
+        (3, 3),
+    )
+
+  @parameterized.parameters(
+      (50, (2, 3)),
+      (40, (2, 2)),
+      (36, (2, 2)),
+      (35, (1, 2)),
+      (1, (1, 2)),
+  )
+  def test_falls_back_as_vmem_shrinks(self, vmem_limit_mib, expected):
+    # k=2816, n=704: the candidates need 56.9, 46.4, 42.3, 35.3 and 35.9 MiB.
+    cfgs = _tgmm_configs(131072, 2816, 704)
+    actual = tgmm_backend._tgmm_step_config(cfgs, int(vmem_limit_mib * self._MIB), self._ZERO_REF_BYTES)  # pylint: disable=protected-access
+    self.assertEqual(actual, expected)
+
+  @parameterized.parameters((512, (1, 3)), (1000, (2, 3)), (1025, (3, 3)))
+  def test_sub_windows_need_more_rows_than_the_window(self, size_m, expected):
+    cfgs = _tgmm_configs(size_m, 2816, 704)
+    actual = tgmm_backend._tgmm_step_config(cfgs, 1024 * self._MIB, self._ZERO_REF_BYTES)  # pylint: disable=protected-access
+    self.assertEqual(actual, expected)
+
+  @parameterized.parameters((True, False), (False, True))
+  def test_3d_operands_keep_single_window_double_buffering(self, lhs_is_3d, rhs_is_3d):
+    cfgs = _tgmm_configs(131072, 2816, 768, lhs_is_3d=lhs_is_3d, rhs_is_3d=rhs_is_3d)
+    actual = tgmm_backend._tgmm_step_config(cfgs, 1024 * self._MIB, self._ZERO_REF_BYTES)  # pylint: disable=protected-access
+    self.assertEqual(actual, (1, 2))
+
+  @parameterized.parameters(None, False, True)
+  def test_tgmm_v2_picks_step_config_only_when_flag_is_on(self, multi_window_steps):
+    size_m, size_k, size_n, num_groups = 2048, 256, 256, 2
+    lhs = jnp.zeros((size_m, size_k), jnp.bfloat16)
+    rhs = jnp.zeros((size_m, size_n), jnp.bfloat16)
+    group_sizes = jnp.array([size_m // num_groups] * num_groups, dtype=jnp.int32)
+    kwargs = {} if multi_window_steps is None else {"multi_window_steps": multi_window_steps}
+    # The host has no TPU: stand in for the v7x info and the pallas_call (the
+    # kernel never runs).
+    tpu_info = mock.Mock(
+        num_lanes=128,
+        mxu_column_size=256,
+        vmem_capacity_bytes=64 * self._MIB,
+        smem_capacity_bytes=self._MIB,
+    )
+    tpu_info.get_sublane_tiling.return_value = 16
+    with mock.patch.object(pltpu, "get_tpu_info", return_value=tpu_info):
+      with mock.patch.object(tgmm_backend, "_tgmm_step_config", return_value=(2, 3)) as step_config_mock:
+        with mock.patch.object(tgmm_backend.pl, "pallas_call") as pallas_call_mock:
+          pallas_call_mock.return_value = lambda *args: jnp.zeros((num_groups, size_k, size_n), jnp.bfloat16)
+          # __wrapped__ skips the jit, so the mocks always see a fresh trace.
+          tgmm_backend.tgmm_v2.__wrapped__(
+              lhs,
+              rhs,
+              group_sizes,
+              num_groups,
+              tile_info=gmm_backend.TileSizes(tile_m=512, tile_k=size_k, tile_n=size_n),
+              preferred_element_type=jnp.bfloat16,
+              vmem_limit_bytes=64 * self._MIB,
+              **kwargs,
+          )
+    kernel_kwargs = pallas_call_mock.call_args.args[0].keywords
+    if multi_window_steps:
+      step_config_mock.assert_called_once()
+      self.assertEqual((kernel_kwargs["num_sub"], kernel_kwargs["num_buffers"]), (2, 3))
+    else:
+      step_config_mock.assert_not_called()
+      self.assertEqual((kernel_kwargs["num_sub"], kernel_kwargs["num_buffers"]), (1, 2))
 
 
 class GmmTest(parameterized.TestCase):

@@ -1398,6 +1398,16 @@ class MoEGeneral(BaseModel):
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
   )
+  moe_tgmm_v2_multi_window_steps: bool = Field(
+      False,
+      description=(
+          "Let the tgmm_v2 backward DRHS kernel cover several tile_m-row"
+          " sub-windows per grid step and buffer its lhs, rhs and out blocks"
+          " deeper than double buffering, when VMEM fits. The result is"
+          " unchanged; False keeps one window per grid step at double"
+          " buffering."
+      ),
+  )
   moe_bwd_prequant_before_unsort: bool = Field(
       False,
       description=(
