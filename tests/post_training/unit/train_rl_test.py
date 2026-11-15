@@ -81,6 +81,22 @@ class TrainRLTest(unittest.TestCase):
     self.assertEqual(config.max_seq_token_per_tpu, 12288)
     self.assertEqual(config.vllm_block_size, 128)
 
+  def test_rl_config_num_slices_colocated_multislice_and_disaggregated(self):
+    """Colocated RL auto-detects multi-slice topology; disaggregated preserves explicit num_slices."""
+    mock_2slice_devices = _get_mock_devices(devices_per_slice=8, num_slices=2)
+    with mock.patch.object(jax, "devices", return_value=mock_2slice_devices):
+      coloc_auto = types.RLConfig(model_name="gemma4-26b")
+      self.assertEqual(coloc_auto.num_slices, 2)
+
+      coloc_explicit = types.RLConfig(model_name="gemma4-26b", num_slices=4)
+      self.assertEqual(coloc_explicit.num_slices, 4)
+
+      disagg_parent = types.RLConfig(model_name="gemma4-26b", num_trainer_slices=1, num_samplers_slices=1)
+      self.assertEqual(disagg_parent.num_slices, -1)
+
+      disagg_sub = types.RLConfig(model_name="gemma4-26b", num_trainer_slices=2, num_samplers_slices=2, num_slices=2)
+      self.assertEqual(disagg_sub.num_slices, 2)
+
   def test_rl_config_tunix_knob_defaults(self):
     """The forwarded tunix knobs default to tunix's own defaults."""
     config = types.RLConfig(model_name="gemma4-26b")

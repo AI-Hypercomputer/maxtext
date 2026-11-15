@@ -629,7 +629,11 @@ def setup_configs_and_devices(
   config = pyconfig.initialize_pydantic(argv, config_class=config_class, **combined_kwargs)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
-    max_logging.log("Running on a single slice")
+    num_slices = getattr(config, "num_slices", 1)
+    if num_slices > 1:
+      max_logging.log(f"Running colocated across {num_slices} slices")
+    else:
+      max_logging.log("Running on a single slice")
     num_vms = len(devices) // config.chips_per_vm
     trainer_devices = devices
     sampler_devices = devices

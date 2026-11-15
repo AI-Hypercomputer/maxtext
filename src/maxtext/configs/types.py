@@ -7572,7 +7572,18 @@ class RLConfig(
         or (self.cluster.num_trainer_slices > 0 and self.cluster.num_samplers_slices > 0)
     ):
       raise ValueError("`num_trainer_slices` and `num_samplers_slices` must be both -1 or both positive.")
-    self.num_slices = 1 if self.cluster.num_trainer_slices == -1 else -1
+    if self.cluster.num_trainer_slices == -1:
+      # Auto-detect (or preserve explicit) num_slices for colocated single- and multi-slice RL.
+      raw_keys_for_num_slices = {
+          "num_slices": self.num_slices,
+          "hardware": self.hardware,
+          "compile_topology_num_slices": self.compile_topology_num_slices,
+      }
+      self.num_slices = max_utils.get_num_slices(raw_keys_for_num_slices)
+    elif self.num_slices == -1:
+      # Top-level disaggregated config before setup_configs_and_devices splits
+      # slices into trainer/sampler sub-configs that pass explicit num_slices > 0.
+      self.num_slices = -1
 
     # Set train_steps based on the number of batches, iterations, train fraction, and epochs.
     object.__setattr__(
