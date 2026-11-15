@@ -85,6 +85,135 @@ def _patch_tunix_moe_weight_keys() -> None:
 _patch_tunix_moe_weight_keys()
 
 
+# Maps id(rollout_array) -> id(source_array) from the most recent direct sync so
+# `_delete_target_buffers` can skip deleting rollout arrays that may still alias
+# an unchanged source buffer on Pathways (where `unsafe_buffer_pointer()` is
+# unavailable and `sidechannel_reshard` can return a new `jax.Array` wrapper
+# backed by the same IFRT buffer when source/target shardings match).
+_SYNCED_TGT_TO_SRC_ID: dict[int, int] = {}
+
+
+def _leaf_array_ids(tree: Any) -> tuple[int, ...]:
+  """Returns ordered Python ids of array-like leaves in a PyTree / NNX state."""
+  ids = []
+  for leaf in jax.tree_util.tree_leaves(tree):
+    arr = leaf.value if hasattr(leaf, "value") else leaf
+    if hasattr(arr, "shape"):
+      ids.append(id(arr))
+  return tuple(ids)
+
+
+def _patch_tunix_delete_target_buffers() -> None:
+  """Protects source-aliased rollout buffers when unsafe_buffer_pointer is unavailable (Pathways).
+
+  Tunix's `tunix.generate.utils._delete_target_buffers` skips alias detection
+  whenever `_collect_src_buffer_ids` returns `None` (Pathways does not expose
+  PjRt `unsafe_buffer_pointer()`). On colocated Pathways runs where initial
+  `load_checkpoint` zero-copy aliases same-sharding leaves from `actor_model`
+  into vLLM state (potentially wrapped in a new `jax.Array` handle by
+  `sidechannel_reshard`), a subsequent `update_params` before those actor
+  buffers are replaced (e.g., Pre-RL evaluation when `num_test_batches > 0`,
+  or frozen base weights) deletes live `actor_model` buffers and aborts
+  `pathways-proxy` with `Check failed: !args[i]->IsDeleted()`.
+  """
+  orig_fn = getattr(tunix_utils, "_delete_target_buffers", None)  # pylint: disable=protected-access
+  if orig_fn is None or getattr(orig_fn, "_maxtext_alias_safe_patched", False):
+    return
+
+  def _alias_safe_delete_target_buffers(spec_flat, src_flat):
+    src_obj_ids = {id(val.value if hasattr(val, "value") else val) for val in src_flat.values()}
+    safe_spec_flat = {}
+    skipped = 0
+    for key, tgt_val in spec_flat.items():
+      tgt_arr = tgt_val.value if hasattr(tgt_val, "value") else tgt_val
+      tgt_id = id(tgt_arr)
+      origin_src_id = _SYNCED_TGT_TO_SRC_ID.get(tgt_id)
+      if tgt_id in src_obj_ids or (origin_src_id is not None and origin_src_id in src_obj_ids):
+        skipped += 1
+        continue
+      safe_spec_flat[key] = tgt_val
+    if skipped:
+      logging.debug(
+          "MaxTextVllmRollout: preserved %d source-aliased rollout buffers during weight sync.",
+          skipped,
+      )
+    return orig_fn(safe_spec_flat, src_flat)
+
+  _alias_safe_delete_target_buffers._maxtext_alias_safe_patched = True  # pylint: disable=protected-access
+  tunix_utils._delete_target_buffers = _alias_safe_delete_target_buffers  # pylint: disable=protected-access
+  logging.info("Patched tunix _delete_target_buffers with origin-tracked alias protection for Pathways.")
+
+
+def _patch_tpu_inference_sampling_transforms(sampling_module: Any = None) -> bool:
+  """Skips binary-search top-k/top-p masks in tpu_inference when disabled for the batch.
+
+  Upstream `tpu_inference.layers.jax.sample.sampling._apply_sampling_transforms`
+  executes both 32-step `topk_mask` and 33-step `topp_mask` full-vocabulary
+  binary searches unconditionally and discards disabled branches via `jnp.where`.
+  Guarding each mask with `jax.lax.cond` preserves bitwise-identical logits for
+  every `(temperature, top_k, top_p)` combination while avoiding 65 full-vocab
+  reductions per decode token during pure-temperature RL sampling
+  (`top_k <= 0`, `top_p >= 1.0`).
+  """
+  if sampling_module is None:
+    try:
+      from tpu_inference.layers.jax.sample import sampling as sampling_module  # pylint: disable=import-outside-toplevel
+    except ImportError:
+      return False
+
+  orig_fn = getattr(sampling_module, "_apply_sampling_transforms", None)
+  topk_mask_fn = getattr(sampling_module, "topk_mask", None)
+  topp_mask_fn = getattr(sampling_module, "topp_mask", None)
+  if orig_fn is None or topk_mask_fn is None or topp_mask_fn is None:
+    return False
+  if getattr(orig_fn, "_maxtext_cond_patched", False):
+    return False
+
+  def _cond_apply_sampling_transforms(logits: jax.Array, tpu_sampling_metadata: Any) -> jax.Array:
+    if not tpu_sampling_metadata.do_sampling:
+      return logits
+
+    temperatures = tpu_sampling_metadata.temperature.astype(logits.dtype)
+    temperatures = jnp.expand_dims(temperatures, axis=-1)
+    logits = logits / temperatures
+
+    top_k = tpu_sampling_metadata.top_k
+    logits = jax.lax.cond(
+        jnp.any(top_k > 0),
+        lambda op: jnp.where(
+            jnp.expand_dims(op[1] > 0, axis=-1),
+            topk_mask_fn(op[0], op[1], replace_val=-1e12),
+            op[0],
+        ),
+        lambda op: op[0],
+        (logits, top_k),
+    )
+
+    top_p = tpu_sampling_metadata.top_p
+    logits = jax.lax.cond(
+        jnp.any(top_p < 1.0),
+        lambda op: jnp.where(
+            jnp.expand_dims(op[1] < 1.0, axis=-1),
+            topp_mask_fn(op[0], op[1], replace_val=-1e12),
+            op[0],
+        ),
+        lambda op: op[0],
+        (logits, top_p),
+    )
+    return logits
+
+  _cond_apply_sampling_transforms._maxtext_cond_patched = True  # pylint: disable=protected-access
+  sampling_module._apply_sampling_transforms = _cond_apply_sampling_transforms  # pylint: disable=protected-access
+  logging.info(
+      "Patched tpu_inference _apply_sampling_transforms to short-circuit disabled top-k/top-p masks via jax.lax.cond."
+  )
+  return True
+
+
+_patch_tunix_delete_target_buffers()
+_patch_tpu_inference_sampling_transforms()
+
+
 def _rule_table_for(model_name: str):
   """Maps a MaxText model name to its torchax rule table.
 
@@ -209,7 +338,7 @@ def prepare_direct_sync_additional_config(
   Tunix's direct-sync MoE fusion builds the required per-shard layout once at
   weight-load time when the target exposes a prefused ``wi`` parameter.
   """
-  if not direct_maxtext_sync or num_experts <= 1 or tensor_parallel_size <= 1:
+  if not direct_maxtext_sync or num_experts <= 1:
     return additional_config
 
   prepared = copy.deepcopy(additional_config) if additional_config is not None else {}
@@ -217,12 +346,19 @@ def prepare_direct_sync_additional_config(
   if not isinstance(maxtext_overrides, dict):
     raise ValueError("vLLM additional_config.maxtext_config must be a dictionary for direct MaxText sync.")
 
-  if not maxtext_overrides.get("prefuse_moe_weights", False):
+  if tensor_parallel_size > 1:
+    if not maxtext_overrides.get("prefuse_moe_weights", False):
+      logging.info(
+          "MaxTextVllmRollout: enabling prefuse_moe_weights for correct MoE gate/up layout with TP=%d.",
+          tensor_parallel_size,
+      )
+    maxtext_overrides["prefuse_moe_weights"] = True
+  elif "prefuse_moe_weights" not in maxtext_overrides:
     logging.info(
-        "MaxTextVllmRollout: enabling prefuse_moe_weights for correct MoE gate/up layout with TP=%d.",
-        tensor_parallel_size,
+        "MaxTextVllmRollout: enabling prefuse_moe_weights by default for MoE rollout (TP=1) to avoid "
+        "per-step wi_0/wi_1 concatenation."
     )
-  maxtext_overrides["prefuse_moe_weights"] = True
+    maxtext_overrides["prefuse_moe_weights"] = True
   return prepared
 
 
@@ -518,6 +654,44 @@ class MaxTextVllmSampler(VllmSampler):
     engine_kwargs = getattr(config, "engine_kwargs", {}) or {}
     self._model_name = model_name or getattr(config, "model", "") or engine_kwargs.get("model", "") or ""
     self._is_gemma = "gemma" in str(self._model_name).lower()
+    self._last_synced_src_ids: Optional[tuple[int, ...]] = None
+    self._last_synced_tgt_ids: Optional[tuple[int, ...]] = None
+    self._tracked_tgt_ids: list[int] = []
+
+  def _record_synced_origins(self, src_weights: Any) -> None:
+    """Records direct-sync (tgt_id -> src_id) origin pairs for Pathways alias protection."""
+    for old_id in self._tracked_tgt_ids:
+      _SYNCED_TGT_TO_SRC_ID.pop(old_id, None)
+    self._tracked_tgt_ids = []
+
+    def _to_pure(tree: Any) -> Any:
+      if hasattr(tree, "to_pure_dict"):
+        return tree.to_pure_dict()
+      if hasattr(tree, "to_dict"):
+        return tree.to_dict()
+      return tree
+
+    src_pure = _to_pure(src_weights)
+    while isinstance(src_pure, dict) and "base" in src_pure:
+      src_pure = src_pure["base"]
+    tgt_pure = _to_pure(self.transformer_state)
+    while isinstance(tgt_pure, dict) and "model" in tgt_pure:
+      tgt_pure = tgt_pure["model"]
+    if not isinstance(src_pure, dict) or not isinstance(tgt_pure, dict):
+      return
+
+    src_flat = flatten_dict(src_pure)
+    tgt_flat = flatten_dict(tgt_pure)
+    for key, tgt_val in tgt_flat.items():
+      src_val = src_flat.get(key)
+      if src_val is None:
+        continue
+      src_arr = src_val.value if hasattr(src_val, "value") else src_val
+      tgt_arr = tgt_val.value if hasattr(tgt_val, "value") else tgt_val
+      if hasattr(src_arr, "shape") and hasattr(tgt_arr, "shape"):
+        tgt_id = id(tgt_arr)
+        _SYNCED_TGT_TO_SRC_ID[tgt_id] = id(src_arr)
+        self._tracked_tgt_ids.append(tgt_id)
 
   def update_params(
       self,
@@ -527,8 +701,24 @@ class MaxTextVllmSampler(VllmSampler):
     """Update the vLLM runner weights from a MaxText state tree."""
     if self._direct_maxtext_sync and self._is_gemma:
       updated_weights = unroll_gemma_scanned_weights(updated_weights)
+
+    if self._direct_maxtext_sync:
+      src_ids = _leaf_array_ids(updated_weights)
+      tgt_ids = _leaf_array_ids(self.transformer_state)
+      if (
+          src_ids
+          and self._last_synced_src_ids == src_ids
+          and self._last_synced_tgt_ids == tgt_ids
+      ):
+        logging.info(
+            "MaxTextVllmSampler.update_params: all %d source weight buffers are unchanged since last sync; "
+            "skipping redundant reshard.",
+            len(src_ids),
+        )
+        return None
+
     try:
-      return super().update_params(updated_weights, filter_types)
+      result = super().update_params(updated_weights, filter_types)
     except BaseException:
       # A device-addressability failure here takes the whole Pathways JobSet
       # down, and the teardown races the normal exception propagation -- the
@@ -536,6 +726,12 @@ class MaxTextVllmSampler(VllmSampler):
       # logs. Force it out before re-raising.
       _log_and_flush_traceback("MaxTextVllmSampler.update_params failed")
       raise
+
+    if self._direct_maxtext_sync:
+      self._last_synced_src_ids = _leaf_array_ids(updated_weights)
+      self._last_synced_tgt_ids = _leaf_array_ids(self.transformer_state)
+      self._record_synced_origins(updated_weights)
+    return result
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
