@@ -1161,6 +1161,66 @@ class RLGoodputTest(unittest.TestCase):
     mock_recorder = self._run_rl_train_with_goodput(enable_goodput_recording=False)
     self.assertEqual(len(mock_recorder.method_calls), 0)
 
+  @pytest.mark.cpu_only
+  def test_olmo35_rl_hf_stub_configs_valid(self):
+    """Verify checked-in OLMo 3.5 vLLM HF stub configs match expected geometries."""
+    import json
+    from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+
+    base_dir = os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "olmo35_rl")
+    expected = {
+        "hf_config_tiny_e256": (1024, 16, 2048, 256, 8),
+        "hf_config_tiny_e512": (1024, 16, 1024, 512, 16),
+        "hf_config_small_16l": (1536, 16, 3072, 256, 8),
+        "hf_config_small_40l": (1536, 40, 3072, 256, 8),
+    }
+    for subdir, (hidden, layers, moe_ff, n_exp, k_exp) in expected.items():
+      cfg_path = os.path.join(base_dir, subdir, "config.json")
+      with open(cfg_path, encoding="utf-8") as f:
+        cfg = json.load(f)
+      self.assertEqual(cfg["architectures"], ["MaxTextForCausalLM"])
+      self.assertEqual(cfg["hidden_size"], hidden)
+      self.assertEqual(cfg["num_hidden_layers"], layers)
+      self.assertEqual(cfg["moe_intermediate_size"], moe_ff)
+      self.assertEqual(cfg["num_experts"], n_exp)
+      self.assertEqual(cfg["num_experts_per_tok"], k_exp)
+      self.assertEqual(cfg["vocab_size"], 100352)
+
+  @pytest.mark.cpu_only
+  def test_olmo35_base_gsm8k_processor_formats_two_shot_prompt(self):
+    """Verify base-checkpoint 2-shot GSM8K processor and template format prompts cleanly."""
+    import importlib.util
+    import json
+    from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+
+    base_dir = os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "olmo35_rl")
+    proc_path = os.path.join(base_dir, "olmo35_base_gsm8k_processor.py")
+    tmpl_path = os.path.join(base_dir, "olmo35_gsm8k_2shot.json")
+
+    spec = importlib.util.spec_from_file_location("olmo35_base_gsm8k_processor", proc_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    with open(tmpl_path, encoding="utf-8") as f:
+      tmpl = json.load(f)
+
+    tmvp_cfg = SimpleNamespace(
+        reasoning_start_token="<reasoning>",
+        reasoning_end_token="</reasoning>",
+        solution_start_token="<answer>",
+        solution_end_token="</answer>",
+    )
+    out = mod.process_data(
+        "openai/gsm8k",
+        None,
+        tmpl,
+        tmvp_cfg,
+        {"question": "What is 6 * 7?", "answer": "Six times seven is 42.\n#### 42"},
+    )
+    self.assertIn("Problem: What is 6 * 7?\nSolution:\n", out["prompts"])
+    self.assertIn("<reasoning>", out["prompts"])
+    self.assertIn("<answer>72</answer>", out["prompts"])
+    self.assertEqual(json.loads(out["answer"]), "42")
+
 
 if __name__ == "__main__":
   unittest.main()
