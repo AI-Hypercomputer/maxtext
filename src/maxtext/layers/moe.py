@@ -75,6 +75,8 @@ import tokamax
 # load_balance_loss reads it to reduce over the token-sharding axes only (shard_map rejects axes an enclosing vmap
 # mapped away, such as "stage" or "diloco"); None outside the shard_map.
 LB_REDUCE_AXES: contextvars.ContextVar = contextvars.ContextVar("moe_lb_reduce_axes", default=None)
+# log_moe_dropped_tokens: mesh axes that partition the routed MoE's input tokens, set around its shard_map.
+PROBE_TOKEN_AXES: contextvars.ContextVar = contextvars.ContextVar("moe_probe_token_axes", default=None)
 
 # A traced boolean, set around a train step's forward pass when the router load-imbalance metrics are computed on some
 # steps only (olmoe3_router_metrics_interval): a model computes them under lax.cond on it. None computes them always.
@@ -817,6 +819,17 @@ def megatron_aux_loss_inputs(scores, num_experts_per_tok):
   return aux_probs, aux_top_k_indices
 
 
+def _combine_required_rbf(values):
+  """Combines the log_required_ragged_buffer_factor probe over token chunks: the largest factor, and with
+  log_moe_dropped_tokens ([factor, dropped, routed]) the summed row counts. None when the probe is off."""
+  if not values or values[0] is None:
+    return None
+  stacked = jnp.stack(values)
+  if stacked.ndim == 1:
+    return jnp.max(stacked)
+  return jnp.concatenate([jnp.max(stacked[:, :1], axis=0), jnp.sum(stacked[:, 1:], axis=0)])
+
+
 def _log_a2a_drops(global_group_sizes, buffer_size, expert_axis, mesh):
   """moe_log_a2a_drops probe: rows the expert-major all-to-all drops for want of receive buffer.
 
@@ -1238,6 +1251,42 @@ class RoutedMoE(nnx.Module):
     if self.mesh is not None and self.mesh.axis_names:
       required = jax.lax.pmax(required, tuple(self.mesh.axis_names))
     return required
+
+  def _a2a_drop_probe(self, all_shards_group_sizes, num_ep, expert_shard_id, local_rows, buffer_size):
+    """log_required_ragged_buffer_factor on the all-to-all path (the ring path uses required_ragged_buffer_factor).
+
+    A receiving shard drops rows iff the rows every shard of its EP group sends it exceed its receive buffer, which
+    is int(local rows * factor) rows, local rows being its own (tokens x top_k) count. The factor is
+    max over the mesh of received / local rows. With log_moe_dropped_tokens the probe is the vector
+    [factor, dropped rows, routed rows]: each shard's own receive overflow and receive count, summed over the mesh
+    axes that partition the tokens (each such device is one distinct receiver), then made replicated by a max.
+    Without expert parallelism over a batch-sharded input nothing is exchanged and nothing drops.
+    """
+    log_drops = getattr(self.config, "log_moe_dropped_tokens", False)
+    if all_shards_group_sizes is None:
+      factor = jnp.float32(1.0)
+      return jnp.stack([factor, jnp.float32(0.0), jnp.float32(0.0)]) if log_drops else factor
+    per_dest = all_shards_group_sizes
+    if per_dest.shape[1] != num_ep:  # expert-major: [source shard, expert] -> [source shard, destination shard]
+      per_dest = jnp.sum(per_dest.reshape(per_dest.shape[0], num_ep, -1), axis=2)
+    received = jnp.sum(per_dest, axis=0)[expert_shard_id]
+    factor = received.astype(jnp.float32) / jnp.float32(local_rows)
+    mesh_axes = tuple(self.mesh.axis_names) if self.mesh is not None and self.mesh.axis_names else ()
+    shard_map_axes = LB_REDUCE_AXES.get()
+    if shard_map_axes:  # an enclosing vmap may have mapped some mesh axes away
+      mesh_axes = tuple(a for a in mesh_axes if a in shard_map_axes)
+    if mesh_axes:
+      factor = jax.lax.pmax(factor, mesh_axes)
+    if not log_drops:
+      return factor
+    dropped = jnp.float32(0.0) if buffer_size is None else jnp.maximum(received - buffer_size, 0).astype(jnp.float32)
+    counts = jnp.stack([dropped, received.astype(jnp.float32)])
+    token_axes = tuple(a for a in mesh_axes if a in (PROBE_TOKEN_AXES.get() or ()))
+    if token_axes:
+      counts = jax.lax.psum(counts, token_axes)
+    if mesh_axes:
+      counts = jax.lax.pmax(counts, mesh_axes)
+    return jnp.concatenate([factor[None], counts])
 
   def __init__(
       self,
@@ -3373,6 +3422,9 @@ class RoutedMoE(nnx.Module):
       required_rbf = None
       if getattr(self.config, "log_required_ragged_buffer_factor", False):
         required_rbf = self.required_ragged_buffer_factor(group_sizes, local_tokens * num_ep, num_ep, expert_shard_id)
+        if getattr(self.config, "log_moe_dropped_tokens", False):
+          # Same [factor, dropped, routed] layout as the all-to-all path; the ring path does not count rows (-1).
+          required_rbf = jnp.stack([required_rbf, jnp.float32(-1.0), jnp.float32(-1.0)])
       return (
           x,
           RouteOutput(
@@ -3573,6 +3625,14 @@ class RoutedMoE(nnx.Module):
               use_single_sparsecore=self.config.ragged_sort_use_single_sparsecore,
           )
 
+      required_rbf = None
+      if getattr(self.config, "log_required_ragged_buffer_factor", False):
+        if num_ep > 1 and is_batch_sharded_by_expert:
+          required_rbf = self._a2a_drop_probe(
+              all_shards_group_sizes, num_ep, expert_shard_id, sorted_selected_experts.shape[0], buffer_size
+          )
+        else:
+          required_rbf = self._a2a_drop_probe(None, num_ep, expert_shard_id, sorted_selected_experts.shape[0], None)
       return (
           x,
           RouteOutput(
@@ -3584,6 +3644,7 @@ class RoutedMoE(nnx.Module):
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
               pad_rows=pad_rows,
+              required_rbf=required_rbf,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -4624,7 +4685,7 @@ class RoutedMoE(nnx.Module):
           bias_updates = jnp.stack(bias_updates_list)
         else:
           bias_updates = finalize_bias_updates(sum(bias_updates_list))
-        required_rbf = None if required_rbfs[0] is None else jnp.max(jnp.stack(required_rbfs))
+        required_rbf = _combine_required_rbf(required_rbfs)
         return (
             jnp.concatenate(outs, axis=1),
             lb_loss,
@@ -4726,7 +4787,7 @@ class RoutedMoE(nnx.Module):
           bias_updates = finalize_bias_updates(sum(bias_updates_list))
         has_overflow = jnp.any(jnp.stack(has_overflows))
         # Each chunk has its own buffer, so the step needs the largest per-chunk factor.
-        required_rbf = None if required_rbfs[0] is None else jnp.max(jnp.stack(required_rbfs))
+        required_rbf = _combine_required_rbf(required_rbfs)
         max_load_ratio = None if max_load_ratios[0] is None else jnp.max(jnp.stack(max_load_ratios))
         return output, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio
 
@@ -4887,6 +4948,7 @@ class RoutedMoE(nnx.Module):
       per_expert_scale = self._maybe_shard_with_pspec(per_expert_scale, P())
 
     lb_axes_token = LB_REDUCE_AXES.set(overflow_mesh_axes)
+    probe_axes_token = PROBE_TOKEN_AXES.set(tuple(bias_update_axis_names or ()))
     try:
       route_and_compute_outputs = sparse_matmul_route_and_compute(
           inputs,
@@ -4905,6 +4967,7 @@ class RoutedMoE(nnx.Module):
       )
     finally:
       LB_REDUCE_AXES.reset(lb_axes_token)
+      PROBE_TOKEN_AXES.reset(probe_axes_token)
     output, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf = route_and_compute_outputs[:6]
     max_load_ratio = route_and_compute_outputs[6] if log_max_load_ratio else None
     if use_megatron_seq_aux_loss:

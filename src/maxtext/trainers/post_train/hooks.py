@@ -252,11 +252,29 @@ class BaseDataHooks(DataHooks):
     self.train_data_loader = DataLoader(config, mesh, self.train_data_iterator, goodput_recorder=goodput_recorder)
     self.train_batch = None
     self.eval_batch = None
+    self._resume_skip_done = False
+
+  def _skip_trained_batches(self, train_ctx: peft_trainer.PeftTrainer):
+    """On resume, discards the batches the restored checkpoint already trained on.
+
+    Tunix skips them itself only when no data hooks are set, and the streaming iterators are not checkpointed, so
+    without this a resumed run replays the data from the start.
+    """
+    self._resume_skip_done = True
+    n = train_ctx._iter_steps  # pylint: disable=protected-access
+    if n <= 0:
+      return
+    start = time.perf_counter()
+    for _ in range(n):
+      self.train_data_loader.load_next_batch_pre_sharding()
+    max_logging.log(f"Resume: skipped {n} already-trained batches in {time.perf_counter() - start:.1f}s")
 
   @override
-  def load_next_train_batch(self, train_ctx: peft_trainer.PeftTrainer):  # pylint: disable=unused-argument
+  def load_next_train_batch(self, train_ctx: peft_trainer.PeftTrainer):
     """Loads the next batch of data for training."""
     try:
+      if not self._resume_skip_done:
+        self._skip_trained_batches(train_ctx)
       self.train_batch = self.train_data_loader.load_next_batch()
     except exceptions.StopTraining as e:
       if isinstance(e.__cause__ or e.__context__, StopIteration):

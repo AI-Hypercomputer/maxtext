@@ -40,7 +40,9 @@ from typing import Any, Sequence
 from absl import app
 import os
 import jax
+import numpy as np
 import jax.numpy as jnp
+from jax.sharding import NamedSharding, PartitionSpec
 import optax
 import pathwaysutils
 
@@ -51,12 +53,13 @@ from flax.core.spmd import logical_axis_rules
 from orbax import checkpoint as ocp
 
 from tunix.sft import diffusion as tunix_diffusion_sft
+from tunix.sft import checkpoint_manager as checkpoint_manager_lib
 from tunix.sft import metrics_logger, peft_trainer, profiler
 
 from maxtext.optimizers import optimizers
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix import diffusion_sft as maxtext_diffusion_sft
-from maxtext.trainers.pre_train.train import loss_fn
+from maxtext.trainers.pre_train.train import loss_fn, required_rbf_log_lines
 from maxtext.common.goodput import (
     GoodputEvent,
     RECORD_JOB_END_TIME,
@@ -75,6 +78,46 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 
 
+def _host_scalar(x):
+  """A replicated scalar (jax.Array or Python number) as a float, read from this host's first shard."""
+  return float(x.addressable_data(0)) if isinstance(x, jax.Array) else float(x)
+
+
+def _log_hbm(where):
+  """Logging only: HBM in use, peak and limit on this host's first device (nothing on backends without stats)."""
+  stats = jax.local_devices()[0].memory_stats()
+  if not stats:
+    return
+  gib = lambda k: stats.get(k, 0) / 2**30
+  max_logging.log(
+      f"HBM {where}: in_use={gib('bytes_in_use'):.2f} GiB peak={gib('peak_bytes_in_use'):.2f} GiB "
+      f"limit={gib('bytes_limit'):.2f} GiB host={jax.process_index()}"
+  )
+
+
+def _restore_targets_from_live_shardings(state):
+  """Restore targets for the optimizer state, taken from the live arrays' own shardings.
+
+  Tunix's checkpoint_manager._fix_sharding rebuilds them from nnx partition specs, where a logical axis name with no
+  rule (e.g. "mlp_moe") passes through unchanged; it then sees an axis the mesh lacks and replicates the whole leaf, so
+  every expert tensor's Adam moments are restored as a full copy on each chip and the restore runs out of HBM. The live
+  arrays already carry the sharding training uses, so restoring into it changes nothing but the load. Scalars with a
+  single-device sharding (e.g. the step count) are replicated, as Tunix intends.
+  """
+  mesh = next(
+      (x.sharding.mesh for x in jax.tree_util.tree_leaves(state) if isinstance(getattr(x, "sharding", None), NamedSharding)),
+      None,
+  )
+  if mesh is None:
+    return state
+
+  def target(x):
+    sharding = x.sharding if isinstance(getattr(x, "sharding", None), NamedSharding) else NamedSharding(mesh, PartitionSpec())
+    return jax.ShapeDtypeStruct(jnp.shape(x), jnp.result_type(x), sharding=sharding)
+
+  return jax.tree_util.tree_map(target, state)
+
+
 class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
   """MaxText-specific PeftTrainer that avoids nested NNX transformations.
 
@@ -88,6 +131,43 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
   with an explicit split/merge pattern (matching MaxText's pre-training NNX
   train_step), which avoids the nested NNX transformation issue entirely.
   """
+
+  # The MaxText config; set by _create_trainer. self.config is Tunix's TrainingConfig, which has none of the MaxText
+  # flags (reading log_moe_dropped_tokens from it is why the 51f8cc4b drop-count image never printed MOE-DROPPED).
+  mt_config = None
+
+  def _post_process_train_step(self, aux):
+    """Logs the loss's parts (LOSS-PARTS), the MoE buffer probe (REQUIRED_RBF, MOE-DROPPED) and HBM, on host 0.
+
+    Tunix calls this once per micro-batch, after buffering the step's metrics; the step number is the update step.
+    """
+    if not aux or jax.process_index() != 0:
+      return
+    step = self._train_steps + 1
+    # The scalars are replicated, so this host's copy is the global value.
+    xent_sum, weights, z, lb = (
+        _host_scalar(aux.get(k, 0.0)) for k in ("xent_sum", "total_weights", "z_loss", "moe_lb_loss")
+    )
+    ce = xent_sum / (weights + 1e-8) - z  # xent_sum includes the z-loss term
+    max_logging.log(f"LOSS-PARTS step={step} ce={ce:.6f} moe_lb={lb:.6f} z={z:.6f} tokens={weights:.0f}")
+    if "doc_xent_sum" in aux:
+      # MAXTEXT_LOG_DOC_CE: CE split into document-role segments (e.g. long-context replay) and chat segments.
+      dsum, dw, csum_all = (_host_scalar(aux[k]) for k in ("doc_xent_sum", "doc_weights", "ce_only_sum"))
+      cw = weights - dw
+      max_logging.log(
+          f"DOC-CE step={step} doc_ce={dsum / max(dw, 1e-8):.6f} doc_tokens={dw:.0f} "
+          f"chat_ce={(csum_all - dsum) / max(cw, 1e-8):.6f} chat_tokens={cw:.0f} doc_share={dw / max(weights, 1e-8):.4f}"
+      )
+    if "moe_required_rbf" in aux and aux["moe_required_rbf"] is not None:
+      # log_required_ragged_buffer_factor: per MoE layer, the smallest ragged_buffer_factor that would not have
+      # dropped a token this step; at or below the run's factor, the step dropped nothing. With
+      # log_moe_dropped_tokens, also the dropped and routed (token, expert) rows.
+      rbf = aux["moe_required_rbf"]
+      rbf = rbf.addressable_data(0) if isinstance(rbf, jax.Array) else rbf
+      for line in required_rbf_log_lines(self.mt_config, step, rbf):
+        max_logging.log(line)
+    if self._train_steps < 20 or step % 500 == 0:
+      _log_hbm(f"step {step}")
 
   def create_train_step_fn(self):
     """Creates a train step using jax.value_and_grad with explicit NNX split/merge."""
@@ -209,6 +289,7 @@ def get_tunix_config(mt_config):
   checkpointing_options = ocp.CheckpointManagerOptions(
       save_interval_steps=mt_config.checkpoint_period,
       enable_async_checkpointing=mt_config.async_checkpointing,
+      max_to_keep=mt_config.max_num_checkpoints_to_keep,
   )
 
   # Metrics configurations
@@ -313,7 +394,9 @@ def _create_trainer(model, optimizer, tunix_config, mt_config):
   """
   if getattr(mt_config, "training_objective", "causal_lm") == "block_diffusion":
     return peft_trainer.PeftTrainer(model, optimizer, tunix_config)
-  return MaxTextPeftTrainer(model, optimizer, tunix_config)
+  trainer = MaxTextPeftTrainer(model, optimizer, tunix_config)
+  trainer.mt_config = mt_config
+  return trainer
 
 
 def validate_config(config):
@@ -372,7 +455,10 @@ def setup_trainer_state(mt_config, goodput_recorder=None):
       nnx.pop(model, nnx.Intermediate)
       if mt_config.lora.lora_restore_path:
         lora_utils.restore_lora_from_path(model, mt_config)
+      # Restore the optimizer state into the live arrays' shardings (see _restore_targets_from_live_shardings).
+      checkpoint_manager_lib._fix_sharding = _restore_targets_from_live_shardings  # pylint: disable=protected-access
       trainer = _create_trainer(model, optimizer, tunix_config, mt_config)
+      _log_hbm("after trainer init (restore included)")
       trainer.with_training_hooks(training_hooks)
       trainer.with_data_hooks(data_hooks)
       trainer = configure_training_objective(trainer, mt_config)

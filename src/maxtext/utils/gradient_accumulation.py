@@ -314,7 +314,15 @@ def gradient_accumulation_loss_and_grad(
     aux["te_moe_recv_capacity_per_rank"] = jnp.min(scanned_aux["te_moe_recv_capacity_per_rank"], axis=0)
   if "moe_required_rbf" in scanned_aux:
     # log_required_ragged_buffer_factor probe: the step needs the largest factor over microbatches.
-    aux["moe_required_rbf"] = jnp.max(scanned_aux["moe_required_rbf"], axis=0)
+    rbf = scanned_aux["moe_required_rbf"]
+    if getattr(config, "log_moe_dropped_tokens", False):
+      # [factor, dropped, routed] per layer: the largest factor and the summed row counts over microbatches.
+      rbf = rbf.reshape(rbf.shape[0], -1, 3)
+      aux["moe_required_rbf"] = jnp.concatenate(
+          [jnp.max(rbf[..., :1], axis=0), jnp.sum(rbf[..., 1:], axis=0)], axis=-1
+      ).reshape(-1)
+    else:
+      aux["moe_required_rbf"] = jnp.max(rbf, axis=0)
   if "moe_max_load_ratio" in scanned_aux:
     aux["moe_max_load_ratio"] = jnp.max(scanned_aux["moe_max_load_ratio"], axis=0)
     aux["moe_max_load_ratio_mean"] = jnp.mean(scanned_aux["moe_max_load_ratio_mean"], axis=0)

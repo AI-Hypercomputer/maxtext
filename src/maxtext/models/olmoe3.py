@@ -244,6 +244,18 @@ def _dense(config, in_features, out_features, kernel_axes, quant, rngs, use_bias
   )
 
 
+def _mask_padding_gates(segment_ids, log_decay, beta):
+  """Padding (segment id 0) takes no part in the KDA recurrence: no decay and no state update.
+
+  Its gates are arbitrary, and a chunk made only of padding can push the unfused chunk's decay exponents past the
+  float range; the inf * 0 = NaN that follows reaches real tokens through the loss's 0-weighted terms and the dense
+  MoE dispatch. Padding outputs are never trained and padding only follows real tokens, so real tokens are unchanged.
+  `log_decay` is `[B, T, H, dk]`, `beta` `[B, T, H]`.
+  """
+  is_pad = (segment_ids == 0)[:, :, None]
+  return jnp.where(is_pad[..., None], 0.0, log_decay), jnp.where(is_pad, 0.0, beta)
+
+
 def causal_depthwise_conv(x: jnp.ndarray, weight: jnp.ndarray, segment_ids: None | jnp.ndarray) -> jnp.ndarray:
   """Short causal depthwise convolution over time, followed by SiLU.
 
@@ -469,41 +481,48 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
       else:
         prev_ids = jnp.pad(decoder_segment_ids, ((0, 0), (1, 0)), constant_values=-1)[:, :seq_len]
         resets = decoder_segment_ids != prev_ids
+        log_decay, beta = _mask_padding_gates(decoder_segment_ids, log_decay, beta)
 
       chunk = self.config.gdn_chunk_size
-      if chunk > 0 and seq_len % chunk == 0:
-        if self.config.kda_chunked_impl == "subblock" and self.config.kda_pallas_fused:
-          # The whole chunk pipeline in one Pallas kernel per direction (kernels/kda).
-          out = self._chunk_kda(q, k, v, log_decay, beta, resets, out_dtype=x.dtype)
-        elif self.config.kda_chunked_impl == "subblock":
-          # v goes in as is: the sub-block path casts to the compute dtype itself (bf16 -> f32 is exact).
-          out = _delta_rule_chunked_subblock(
-              q,
-              k,
-              v,
-              log_decay,
-              beta,
-              resets,
-              chunk,
-              self.config.gdn_state_dtype,
-              sub_block=self.config.kda_sub_block,
-              state_scan=self._pallas_state_scan if self.config.kda_pallas_scan else None,
-              intra_vjp=self.config.kda_intra_custom_vjp,
-              intra_fn=self._pallas_intra if self.config.kda_pallas_intra else None,
-              chunk_kernel=self._pallas_chunk if self.config.kda_pallas_chunk else None,
-              inverse_precision=getattr(jax.lax.Precision, self.config.kda_inverse_precision.upper()),
-          )
-        else:
-          out = _delta_rule_chunked(
-              q, k, v.astype(jnp.float32), log_decay, beta, resets, chunk, self.config.gdn_state_dtype
-          )
-      else:
-        out = _delta_rule_scan(q, k, v.astype(jnp.float32), jnp.exp(log_decay), beta, resets)
+      with jax.default_matmul_precision(self.config.kda_matmul_precision):
+        out = self._unfused_core(q, k, v, log_decay, beta, resets, chunk, seq_len, x.dtype)
 
     gate = jax.nn.sigmoid(self.g_proj_2(g_in).reshape(batch, seq_len, heads, dv))
     out = self.o_norm(out.astype(x.dtype)) * gate
     out = self.w_out(out.reshape(batch, seq_len, heads * dv))
     out = checkpoint_name(out, "out_proj")
+    return out
+
+  def _unfused_core(self, q, k, v, log_decay, beta, resets, chunk, seq_len, out_dtype):
+    """The non-tokamax KDA recurrence on `[B, T, H, d]` inputs (fused Pallas, sub-block, pairwise or scan)."""
+    if chunk > 0 and seq_len % chunk == 0:
+      if self.config.kda_chunked_impl == "subblock" and self.config.kda_pallas_fused:
+        # The whole chunk pipeline in one Pallas kernel per direction (kernels/kda).
+        out = self._chunk_kda(q, k, v, log_decay, beta, resets, out_dtype=out_dtype)
+      elif self.config.kda_chunked_impl == "subblock":
+        # v goes in as is: the sub-block path casts to the compute dtype itself (bf16 -> f32 is exact).
+        out = _delta_rule_chunked_subblock(
+            q,
+            k,
+            v,
+            log_decay,
+            beta,
+            resets,
+            chunk,
+            self.config.gdn_state_dtype,
+            sub_block=self.config.kda_sub_block,
+            state_scan=self._pallas_state_scan if self.config.kda_pallas_scan else None,
+            intra_vjp=self.config.kda_intra_custom_vjp,
+            intra_fn=self._pallas_intra if self.config.kda_pallas_intra else None,
+            chunk_kernel=self._pallas_chunk if self.config.kda_pallas_chunk else None,
+            inverse_precision=getattr(jax.lax.Precision, self.config.kda_inverse_precision.upper()),
+        )
+      else:
+        out = _delta_rule_chunked(
+            q, k, v.astype(jnp.float32), log_decay, beta, resets, chunk, self.config.gdn_state_dtype
+        )
+    else:
+      out = _delta_rule_scan(q, k, v.astype(jnp.float32), jnp.exp(log_decay), beta, resets)
     return out
 
   def _cp_forward(
@@ -661,10 +680,18 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
       )
       if seg_full is None:
         resets = jnp.zeros((b_loc, t_full), dtype=bool)
+        beta_f = beta_full
       else:
         prev_ids = jnp.pad(seg_full, ((0, 0), (1, 0)), constant_values=-1)[:, :t_full]
         resets = seg_full != prev_ids
+        log_decay, beta_f = _mask_padding_gates(seg_full, log_decay, beta_full)
+      with jax.default_matmul_precision(cfg.kda_matmul_precision):
+        out_full = _cp_core(q, k, v, log_decay, beta_f, resets)
+      out_loc = jax.lax.all_to_all(out_full.astype(x.dtype), axis_name=cp_axis, split_axis=1, concat_axis=2, tiled=True)
+      return out_loc.reshape(b_loc, t_loc, heads, dv) if v_splits > 1 else out_loc
 
+    def _cp_core(q, k, v, log_decay, beta_full, resets):
+      t_full = q.shape[1]
       if chunk > 0 and t_full % chunk == 0:
         if use_pallas_fused:
           out_full = kda.chunk_kda(
@@ -703,9 +730,7 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
           )
       else:
         out_full = _delta_rule_scan(q, k, v.astype(jnp.float32), jnp.exp(log_decay), beta_full, resets)
-
-      out_loc = jax.lax.all_to_all(out_full.astype(x.dtype), axis_name=cp_axis, split_axis=1, concat_axis=2, tiled=True)
-      return out_loc.reshape(b_loc, t_loc, heads, dv) if v_splits > 1 else out_loc
+      return out_full
 
     call_args = [packed_in, beta_cp, q_conv_h, k_conv_h, v_conv_h, a_log_h, dt_bias_h]
     if has_segments:
@@ -762,6 +787,10 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     log_decay = neg_a * jax.nn.softplus(raw_g.astype(f32) + self.dt_bias[...].astype(f32))
 
     resets = kda.segment_resets(decoder_segment_ids, batch, seq_len)
+    if decoder_segment_ids is not None:
+      is_pad = decoder_segment_ids == 0
+      log_decay = jnp.where(is_pad[..., None], 0.0, log_decay)  # [B, T, H * dk]
+      beta = jnp.where(is_pad[..., None], 0.0, beta)  # [B, T, H]
 
     c = cfg.gdn_chunk_size
     n = seq_len // c

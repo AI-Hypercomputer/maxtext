@@ -921,6 +921,59 @@ def reorder_sequence(tensor, cp_size: int, seq_dim: int = 1, to_contiguous: bool
   return reordered.reshape(ori_tensor_shape)
 
 
+def _load_balanced_chunk_owner(chunk: int, cp_size: int) -> int:
+  """Rank that holds sequence chunk `chunk` (of 2 * cp_size) in DUAL_CHUNK_SWAP order."""
+  return chunk if chunk < cp_size else 2 * cp_size - 1 - chunk
+
+
+def reorder_sequence_shard(tensor, axis_name, cp_size: int, seq_dim: int, to_contiguous: bool = False):
+  """`reorder_sequence` for a tensor sharded `cp_size` ways on `seq_dim`, called inside a shard_map.
+
+  `tensor` is this rank's local shard. With `to_contiguous=False` the global sequence goes from
+  contiguous order (rank r holds chunks 2r, 2r+1 of 2 * cp_size) to DUAL_CHUNK_SWAP order (rank r
+  holds chunks r and 2 * cp_size - 1 - r), i.e. the same global permutation as `reorder_sequence`;
+  `to_contiguous=True` is the inverse.
+
+  Chunks r and 2 * cp_size - 1 - r have opposite parity, so every rank exchanges exactly one even and
+  one odd chunk: the permutation is two `ppermute`s of half a shard each. The transpose of a
+  `ppermute` is the inverse `ppermute`, so autodiff gives the inverse reorder in the backward.
+
+  Args:
+    tensor: local shard; `tensor.shape[seq_dim]` is the global length / cp_size.
+    axis_name: mesh axis name (or tuple of names) the sequence is sharded over; its size is cp_size.
+    cp_size: number of sequence shards (must be even).
+    seq_dim: sequence dimension.
+    to_contiguous: invert the reorder.
+  """
+  if tensor is None:
+    return tensor
+  if cp_size % 2 != 0:
+    raise ValueError(f"{cp_size=} must be a multiple of 2.")
+  seq_dim = seq_dim % tensor.ndim
+  local_len = tensor.shape[seq_dim]
+  if local_len % 2 != 0:
+    raise ValueError(f"Local sequence shard length {local_len} must be even.")
+  half = local_len // 2
+  first = jax.lax.slice_in_dim(tensor, 0, half, axis=seq_dim)
+  second = jax.lax.slice_in_dim(tensor, half, local_len, axis=seq_dim)
+  # Contiguous rank r holds chunk 2r (even) and 2r+1 (odd).
+  even_perm = [(r, _load_balanced_chunk_owner(2 * r, cp_size)) for r in range(cp_size)]
+  odd_perm = [(r, _load_balanced_chunk_owner(2 * r + 1, cp_size)) for r in range(cp_size)]
+  # In load-balanced order rank r holds chunk r in the first half; that chunk is even iff r is even.
+  rank_is_even = jax.lax.axis_index(axis_name) % 2 == 0
+  if not to_contiguous:
+    recv_even = jax.lax.ppermute(first, axis_name, even_perm)
+    recv_odd = jax.lax.ppermute(second, axis_name, odd_perm)
+    new_first = jnp.where(rank_is_even, recv_even, recv_odd)
+    new_second = jnp.where(rank_is_even, recv_odd, recv_even)
+  else:
+    send_even = jnp.where(rank_is_even, first, second)
+    send_odd = jnp.where(rank_is_even, second, first)
+    new_first = jax.lax.ppermute(send_even, axis_name, [(d, s) for s, d in even_perm])
+    new_second = jax.lax.ppermute(send_odd, axis_name, [(d, s) for s, d in odd_perm])
+  return jnp.concatenate([new_first, new_second], axis=seq_dim)
+
+
 @partial(jax.jit, static_argnums=(1, 2, 3))
 def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu"):
   """Reorders the example batch sequences using a hardware-appropriate backend.

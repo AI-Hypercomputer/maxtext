@@ -183,6 +183,19 @@ def olmo_core_loss_denominator(targets_segmentation, total_weights):
   return total_weights + masked_instances * (seq_len - 1)
 
 
+
+_LOG_DOC_CE = os.environ.get("MAXTEXT_LOG_DOC_CE", "") == "1"
+
+
+def _document_segment_mask(inputs_segmentation, targets_segmentation, max_segments=4096):
+  """[B, S] bool: tokens of segments with at most one untrained token (document-role rows train every token; chat rows
+  mask their prompt). A chat row whose first message is the assistant's would also count; that is rare in SFT data."""
+  seg = jnp.clip(inputs_segmentation.astype(jnp.int32), 0, max_segments - 1)
+  untrained = ((targets_segmentation == 0) & (inputs_segmentation > 0)).astype(jnp.int32)
+  per_seg = jax.vmap(lambda u, g: jax.ops.segment_sum(u, g, num_segments=max_segments))(untrained, seg)
+  untrained_in_seg = jnp.take_along_axis(per_seg, seg, axis=1)
+  return (inputs_segmentation > 0) & (untrained_in_seg <= 1)
+
 def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_train=True):
   """loss_fn for both train and eval.
 
@@ -318,6 +331,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     seq_w = jnp.where(has_vision, scale_vis, scale_txt)[:, None]
     data = dict(data, loss_weights=active_lw * seq_w)
 
+  doc_ce_aux = None
   is_dense_warmup = config.use_indexer and config.indexer_loss_scaling_factor > 0.0 and not config.indexer_sparse_training
   if is_dense_warmup and is_train:
     # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
@@ -330,6 +344,21 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     hidden_state_key = ("decoder", "hidden_states")
     hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
     xent_sum, total_z_loss = fused_lm_head_ce_nnx_loss(model, hidden_states, data, config, is_train)
+    if is_train and _LOG_DOC_CE:
+      # Logging only (MAXTEXT_LOG_DOC_CE=1): CE of document-role segments (pretraining-style rows such as long-context
+      # replay, every token trained) separately from chat segments, to compare per-source CE with GPU runs whose
+      # batches mix sources differently. A second forward-only pass of the fused head over the document tokens; the
+      # result goes to aux only, so gradients are unchanged.
+      doc_mask = _document_segment_mask(data["inputs_segmentation"], data["targets_segmentation"])
+      doc_data = dict(data, targets_segmentation=data["targets_segmentation"] * doc_mask.astype(data["targets_segmentation"].dtype))
+      doc_xent_sum, doc_z_sum = fused_lm_head_ce_nnx_loss(
+          model, jax.lax.stop_gradient(hidden_states), doc_data, config, is_train
+      )
+      doc_ce_aux = {
+          "doc_xent_sum": jax.lax.stop_gradient(doc_xent_sum - doc_z_sum),
+          "doc_weights": jnp.sum((doc_data["targets_segmentation"] != 0).astype(jnp.float32)),
+          "ce_only_sum": jax.lax.stop_gradient(xent_sum - total_z_loss),
+      }
   elif config.num_vocab_tiling > 1:
     hidden_state_key = ("decoder", "hidden_states")
     hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
@@ -512,6 +541,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "mtp_loss": mtp_loss,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
+  if doc_ce_aux is not None:
+    aux.update(doc_ce_aux)
   te_moe_block = getattr(config, "te_moe_block", False)
   if te_moe_block:
     overflow_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_capacity_overflow")
@@ -1078,11 +1109,33 @@ def _maybe_log_required_rbf(config, step, metrics, program):
   """log_required_ragged_buffer_factor probe: one REQUIRED_RBF line per train program run (fetches the vector)."""
   if not getattr(config, "log_required_ragged_buffer_factor", False) or "moe_required_rbf" not in metrics:
     return
-  per_layer = np.asarray(jax.device_get(metrics["moe_required_rbf"]), dtype=np.float32).ravel()
-  if per_layer.size == 0:
-    return
-  per_layer_str = ",".join(f"{v:.4f}" for v in per_layer)
-  max_logging.log(f"REQUIRED_RBF step={step} max={per_layer.max():.4f} per_layer=[{per_layer_str}] program={program}")
+  for line in required_rbf_log_lines(config, step, jax.device_get(metrics["moe_required_rbf"]), f" program={program}"):
+    max_logging.log(line)
+
+
+def required_rbf_log_lines(config, step, probe, suffix=""):
+  """REQUIRED_RBF (and with log_moe_dropped_tokens, MOE-DROPPED) lines for one step's moe_required_rbf vector.
+
+  The vector holds one factor per MoE layer, or with log_moe_dropped_tokens one [factor, dropped rows, routed rows]
+  triple per layer (layer-major). Counts of -1 mean the path does not count rows (ring of experts).
+  """
+  probe = np.asarray(probe, dtype=np.float32).ravel()
+  if probe.size == 0:
+    return []
+  if getattr(config, "log_moe_dropped_tokens", False):
+    triples = probe.reshape(-1, 3)
+    factors, dropped, routed = triples[:, 0], triples[:, 1], triples[:, 2]
+  else:
+    factors, dropped, routed = probe, None, None
+  lines = [
+      f"REQUIRED_RBF step={step} max={factors.max():.4f} per_layer=[{','.join(f'{v:.4f}' for v in factors)}]{suffix}"
+  ]
+  if dropped is not None:
+    lines.append(
+        f"MOE-DROPPED step={step} dropped={dropped.sum():.0f} routed={routed.sum():.0f} "
+        f"frac={dropped.sum() / max(routed.sum(), 1.0):.3e} per_layer=[{','.join(f'{v:.0f}' for v in dropped)}]{suffix}"
+    )
+  return lines
 
 
 def training_loop_iteration(

@@ -297,6 +297,7 @@ moe_dropless_fallback: None
 retry_dropless_first_steps: 0 # with moe_dropless_fallback=step, run steps with step - start_step < N directly with the dropless program (no normal attempt). 0 = off.
 first_phase_ragged_buffer_factor: 0.0 # with moe_dropless_fallback=step and retry_dropless_first_steps=N, the first N steps use this ragged buffer factor (drops replay dropless). 0 = off.
 log_required_ragged_buffer_factor: false # probe: log per step and MoE layer the min ragged_buffer_factor avoiding drops (REQUIRED_RBF).
+log_moe_dropped_tokens: false # with the probe above on the all-to-all path: also count dropped/routed rows (MOE-DROPPED).
 warmup_programs_in_init: false # before init_stop/run_start, run each precompiled train/eval program once on a synthetic batch (state unchanged), then a cross-host barrier.
 warmup_skip_train_dropless: false # requires warmup_programs_in_init=true; do not warm the train_dropless program (its warmup holds a second copy of the train state in HBM and can OOM). Use only when that warmup OOMs; the first dropless replay then pays the program's first load.
 log_step_diagnostics: false # append grad/param norms, max |grad|, routed-bias checksum, nonzero bias updates and the overflow flag to every training step log line
@@ -1613,6 +1614,13 @@ dq_reduction_steps: 0 #the number of reduction steps. For now, only 3 or all the
 context_parallel_load_balance: true
 context_parallel_strategy: "all_gather" # "all_gather", "ring", "ulysses", or "usp"
 context_parallel_reorder_strategy: "auto" # "auto", "dual_chunk_swap", or "striped"
+# all_gather strategy only: pass K/V (and KV segment ids) into the flash shard_map sharded on the context axis and
+# all-gather them inside it, so the backward reduces the K/V cotangent with a reduce-scatter instead of an all-reduce.
+cp_all_gather_in_shard_map: false
+# all_gather strategy with context_parallel_load_balance: false only: inside flash attention, permute Q into the
+# load-balanced order (two collective-permutes per tensor), run the load-balanced causal kernel, and permute the output
+# back, so causal attention work is balanced across context ranks while other layers keep contiguous order.
+attention_local_load_balance: false
 
 
 # Chunked Prefill Parameters
@@ -1761,6 +1769,8 @@ kda_intra_custom_vjp: false
 kda_pallas_intra: false
 kda_pallas_intra_bwd: false
 # Sub-block KDA: precision of the triangular inverse (highest = 6-pass f32, high = 3-pass).
+# jax.default_matmul_precision around the pure-JAX chunked KDA (Pallas kernels ignore it).
+kda_matmul_precision: "default"
 kda_inverse_precision: "highest"
 # Sub-block KDA: one Pallas kernel for the WY products, the recurrence and the readout (bf16 state).
 kda_pallas_chunk: false

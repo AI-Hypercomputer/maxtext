@@ -22,6 +22,7 @@ from functools import partial
 from typing import Union, Sequence
 from collections.abc import Iterator, Iterable
 import gc
+import hashlib
 import time
 import json
 import weakref
@@ -223,6 +224,22 @@ def _form_global_array(path, array: np.ndarray, global_mesh: Mesh) -> jax.Array:
   return jax.make_array_from_single_device_arrays(global_shape, sharding, local_device_buffers)
 
 
+_LOG_BATCH_HASH = os.environ.get("MAXTEXT_LOG_BATCH_HASH", "") == "1"
+
+
+def _log_batch_hash(iterator, local_data):
+  """Logging only: one line per local batch this host pulls (resume skips included), with the sha256 of every array in
+  it, keys sorted, so a resumed run's batches can be compared with an uninterrupted run's or a CPU rebuild's."""
+  n = getattr(iterator, "_batch_hash_n", 0) + 1
+  iterator._batch_hash_n = n  # pylint: disable=protected-access
+  h = hashlib.sha256()
+  for key in sorted(local_data):
+    a = np.ascontiguousarray(np.asarray(local_data[key]))
+    h.update(f"{key}:{a.dtype.str}:{a.shape}".encode())
+    h.update(a.tobytes())
+  max_logging.log(f"BATCH-HASH n={n} host={jax.process_index()} sha256={h.hexdigest()}")
+
+
 class MultiHostDataLoadIterator:
   """fold get_next_batch_sharded into a iterator class.
   expansion_factor_for_grain is only used for grain pipeline when having a subset of hosts loading real data.
@@ -327,6 +344,8 @@ class MultiHostDataLoadIterator:
         raise TimeoutError(f"Failed to load data after {MAX_DATA_LOAD_ATTEMPTS} retry attempts.")
 
       self.last_local_data = local_data
+    if _LOG_BATCH_HASH:
+      _log_batch_hash(self, local_data)
     if jax.process_count() == 1:
       sharding = NamedSharding(self.global_mesh, PartitionSpec(self.global_mesh.axis_names))
       input_gdas = jax.device_put(local_data, sharding)

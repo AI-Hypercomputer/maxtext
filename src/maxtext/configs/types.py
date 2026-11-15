@@ -1239,6 +1239,14 @@ class MoEGeneral(BaseModel):
           "max all-reduce per MoE layer and token chunk, and a device-to-host fetch per step."
       ),
   )
+  log_moe_dropped_tokens: bool = Field(
+      False,
+      description=(
+          "With log_required_ragged_buffer_factor on the all-to-all MoE path: also count, per MoE layer and step, the"
+          " (token, expert) rows the capped receive buffers dropped and the rows routed, and log them as MOE-DROPPED"
+          " (SFT trainer). The per-layer probe becomes [required factor, dropped rows, routed rows]."
+      ),
+  )
   warmup_programs_in_init: bool = Field(
       False,
       description=(
@@ -2061,6 +2069,14 @@ class Qwen3Next(BaseModel):
       " u = X vb, w = X kb, the chunk-state recurrence and the readout, fwd and bwd (bf16 state only);"
       " supersedes kda_pallas_scan.",
   )
+  kda_matmul_precision: Literal["default", "high", "highest"] = Field(
+      "default",
+      description=(
+          "jax.default_matmul_precision around the pure-JAX chunked KDA (pairwise and subblock, with or without"
+          " context parallelism): einsums there that pass no explicit precision run at this one. Pallas kernels"
+          " (kda_pallas_fused, kda_pallas_*) ignore it; kda_inverse_precision still sets the inverse."
+      ),
+  )
   kda_inverse_precision: Literal["highest", "high"] = Field(
       "highest",
       description="Sub-block KDA: matmul precision of the triangular inverse (I + M)^-1 and its VJP. 'high'"
@@ -2444,6 +2460,23 @@ class HardwareAndMesh(BaseModel):
   context_parallel_reorder_strategy: ReorderStrategy = Field(
       ReorderStrategy.AUTO,
       description="Reorder strategy for load-balanced context parallelism.",
+  )
+  cp_all_gather_in_shard_map: bool = Field(
+      False,
+      description=(
+          "For context_parallel_strategy='all_gather' TPU flash attention: pass K/V and the KV segment ids into the "
+          "attention shard_map sharded on the context axis and all-gather them inside it (instead of letting XLA "
+          "all-gather them outside). The backward then reduces dK/dV with a reduce-scatter instead of a full all-reduce."
+      ),
+  )
+  attention_local_load_balance: bool = Field(
+      False,
+      description=(
+          "For context_parallel_strategy='all_gather' TPU flash attention with context_parallel_load_balance=False: "
+          "inside the attention op only, permute the query shards into the load-balanced (DUAL_CHUNK_SWAP) order, run "
+          "the load-balanced causal Splash path, and permute the output back, so the causal work is balanced across "
+          "context-parallel ranks while the rest of the model keeps contiguous sequence order."
+      ),
   )
   custom_mesh: str = Field("", description="Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']")
   custom_mesh_and_rule: CustomRule = Field(
@@ -5110,12 +5143,15 @@ class MaxTextConfig(
         )
       if self.te_moe_block:
         raise ValueError("first_phase_ragged_buffer_factor > 0 is not supported with te_moe_block=True.")
+    if self.log_moe_dropped_tokens and not self.log_required_ragged_buffer_factor:
+      raise ValueError("log_moe_dropped_tokens=True needs log_required_ragged_buffer_factor=True.")
     if self.log_required_ragged_buffer_factor:
       if self.te_moe_block:
         raise ValueError("log_required_ragged_buffer_factor=True is not supported with te_moe_block=True.")
-      if not (self.use_ring_of_experts and self.use_ragged_sort):
+      # The all-to-all path computes the probe from the all-gathered per-shard group sizes (RoutedMoE.ra2a_and_route).
+      if self.use_ring_of_experts and not self.use_ragged_sort:
         raise ValueError(
-            "log_required_ragged_buffer_factor=True requires use_ring_of_experts=True and use_ragged_sort=True."
+            "log_required_ragged_buffer_factor=True with use_ring_of_experts=True requires use_ragged_sort=True."
         )
       if self.num_moe_emb_chunks > 0:
         raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")

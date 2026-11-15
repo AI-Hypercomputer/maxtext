@@ -1351,10 +1351,55 @@ def load_params_from_path(
   # offered? Compare against what is ON DISK; comparing against the restored tree can never
   # differ, because the restore only ever returns what was requested.
   _log_unconsumed_checkpoint_weights(want, audit_stored)
+  restored_weights = _maybe_seed_embedding_rows(restored_weights)
   if is_nnx:
     nnx.replace_by_pure_dict(abstract_unboxed_params, restored_weights)
     return abstract_unboxed_params
   return restored_weights
+
+
+def _maybe_seed_embedding_rows(weights):
+  """Seed promoted-token rows as the fp32 mean of their piece rows (OLMo SFT `--reserved_slot_tokens`).
+
+  Driven by the env var MAXTEXT_SEED_ROWS, e.g. "100256:14023,771,29;100266:524,27963,29": each new row of the
+  input embedding (`token_embedder/embedding`, [V, D]) and of the untied output head (`logits_dense/kernel`, [D, V])
+  is set to the mean of the listed rows, computed in fp32 from the loaded weights (open-instruct
+  `model_utils.seed_embedding_rows`). Unset: no change.
+  """
+  spec_str = os.environ.get("MAXTEXT_SEED_ROWS", "").strip()
+  if not spec_str:
+    return weights
+  spec = []
+  for item in spec_str.split(";"):
+    new, src = item.split(":")
+    spec.append((int(new), [int(x) for x in src.split(",")]))
+
+  def seed(arr, axis):
+    a = arr.astype(jnp.float32)
+    for new, src in spec:
+      m = jnp.take(a, jnp.asarray(src), axis=axis).mean(axis=axis)
+      a = a.at[new].set(m) if axis == 0 else a.at[:, new].set(m)
+    return a.astype(arr.dtype)
+
+  hits = []
+
+  def walk(node, path):
+    if isinstance(node, dict):
+      return {k: walk(v, path + (str(k),)) for k, v in node.items()}
+    tail = path[-2:]
+    axis = 0 if tail == ("token_embedder", "embedding") else (1 if tail == ("logits_dense", "kernel") else None)
+    if axis is None or not hasattr(node, "shape"):
+      return node
+    sharding = getattr(node, "sharding", None)
+    out = jax.jit(seed, static_argnums=1, out_shardings=sharding)(node, axis)
+    hits.append(("/".join(path), tuple(node.shape), axis))
+    return out
+
+  weights = walk(weights, ())
+  max_logging.log(f"MAXTEXT_SEED_ROWS {spec_str}: seeded {len(hits)} matrices {hits}")
+  if len(hits) != 2:
+    raise ValueError(f"MAXTEXT_SEED_ROWS expected 2 matrices (embedding + untied head), seeded {hits}")
+  return weights
 
 
 def save_params_to_path(checkpoint_dir, params, use_ocdbt=True, use_zarr3=True):

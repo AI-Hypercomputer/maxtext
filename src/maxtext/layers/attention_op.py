@@ -72,6 +72,7 @@ from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
+from maxtext.utils import sharding as sharding_utils
 from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, logical_to_spec, maybe_shard_with_pspec, with_logical_constraint
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
@@ -2036,6 +2037,81 @@ class AttentionOp(nnx.Module):
           sequence_dim=2,
       )
 
+    # All-gather CP with K/V gathered inside the shard_map: K/V and the KV segment ids enter
+    # sharded over the same mesh axes as the query sequence and are all-gathered (tiled) back to
+    # the full sequence before the kernel, so the kernel sees exactly the same operands as when
+    # XLA gathers them outside. The transpose of all_gather is psum_scatter, so the backward
+    # reduces dK/dV with a reduce-scatter rather than a full-sequence all-reduce.
+    use_cp_all_gather_in_shard_map = (
+        getattr(self.config, "cp_all_gather_in_shard_map", False)
+        and cp_size > 1
+        and not (use_tokamax_ring or use_ulysses or use_usp)
+    )
+    cp_gather_axes = None
+    if use_cp_all_gather_in_shard_map:
+      q_seq_entry = axis_names_q[2]
+      cp_gather_axes = sharding_utils.mesh_axes_for_dim(q_seq_entry)
+      if key.shape[2] % cp_size != 0:
+        raise ValueError(
+            f"cp_all_gather_in_shard_map requires the KV length ({key.shape[2]}) to be divisible by the "
+            f"context parallel size ({cp_size})."
+        )
+      for names, seq_dim, label in ((axis_names_kv, 2, "K/V"), (segment_axis_names_kv, 1, "KV segment ids")):
+        if names is None:
+          continue
+        for dim, entry in enumerate(names):
+          dim_axes = sharding_utils.mesh_axes_for_dim(entry)
+          if dim == seq_dim and dim_axes:
+            raise ValueError(
+                f"cp_all_gather_in_shard_map expects the {label} sequence dimension to be unsharded, got {dim_axes}."
+            )
+          if dim != seq_dim and set(dim_axes) & set(cp_gather_axes):
+            raise ValueError(
+                f"cp_all_gather_in_shard_map requires the context axes {cp_gather_axes} to appear only on the "
+                f"{label} sequence dimension; got {dim_axes} on dim {dim}."
+            )
+      axis_names_kv = sharding_utils.with_axis_on_dim(axis_names_kv, q_seq_entry, 2)
+      segment_axis_names_kv = sharding_utils.with_axis_on_dim(segment_axis_names_kv, q_seq_entry, 1)
+
+    # Attention-local load balancing: the batch is in contiguous order (context_parallel_load_balance
+    # is off), so with a causal mask rank i of cp_size does ~(2i+1) units of work. Inside the shard_map,
+    # permute the local query (and its segment ids) into the DUAL_CHUNK_SWAP order, run the existing
+    # load-balanced kernel path (LoadBalanced* mask; K/V stay contiguous, so they are not reordered),
+    # and permute the output back. Only Q and O move; each reorder is two half-shard collective-permutes,
+    # and autodiff transposes them into the inverse permutes for dO and dQ.
+    use_attention_local_lb = (
+        getattr(self.config, "attention_local_load_balance", False)
+        and cp_size > 1
+        and not load_balanced_context_parallel
+        and not (use_tokamax_ring or use_ulysses or use_usp)
+    )
+    lb_q_axes = None
+    if use_attention_local_lb:
+      lb_q_axes = sharding_utils.mesh_axes_for_dim(axis_names_q[2])
+      lb_axes_size = math.prod(self.mesh.shape[a] for a in lb_q_axes)
+      if lb_axes_size != cp_size:
+        raise ValueError(
+            f"attention_local_load_balance: query sequence mesh axes {lb_q_axes} have size {lb_axes_size}, "
+            f"expected cp_size={cp_size}."
+        )
+      if cp_size % 2 != 0 or query.shape[2] % (2 * cp_size) != 0:
+        raise ValueError(
+            f"attention_local_load_balance requires an even cp_size ({cp_size}) and a query length "
+            f"({query.shape[2]}) divisible by 2 * cp_size."
+        )
+      if query.shape[2] != key.shape[2]:
+        raise ValueError("attention_local_load_balance requires equal query and KV lengths (self-attention).")
+      if indexer_mask is not None:
+        raise ValueError("attention_local_load_balance does not support an indexer mask.")
+      if self.attention_type == AttentionType.COMPRESSED:
+        raise ValueError("attention_local_load_balance does not support AttentionType.COMPRESSED.")
+      if segment_axis_names_q is not None and tuple(
+          sharding_utils.mesh_axes_for_dim(segment_axis_names_q[1])
+      ) != tuple(lb_q_axes):
+        raise ValueError(
+            "attention_local_load_balance requires the query segment ids to be sharded like the query sequence."
+        )
+
     devices_in_data_fsdp = self.mesh.shape.get("data", 1) * self.mesh.shape.get("fsdp", 1)
     assert (query.shape[0] / devices_in_data_fsdp).is_integer(), (
         "Batch dimension should be shardable among the devices in data and fsdp"
@@ -2051,7 +2127,7 @@ class AttentionOp(nnx.Module):
         use_diag_skip = (
             self.attention_type in (AttentionType.GLOBAL, AttentionType.MLA)
             and query.shape[2] == key.shape[2]
-            and not (cp_size > 1 and load_balanced_context_parallel)
+            and not (cp_size > 1 and (load_balanced_context_parallel or use_attention_local_lb))
         )
         diag_skip_kwargs = {}
         if use_diag_skip and (self.qk_diag_skip or self.sv_diag_skip):
@@ -2167,7 +2243,7 @@ class AttentionOp(nnx.Module):
       splash_q_seq_shards = cp_size
 
       mask_module = tokamax_splash_mask if self.config.use_tokamax_splash else splash_attention_mask
-      use_load_balanced_cp = cp_size > 1 and load_balanced_context_parallel
+      use_load_balanced_cp = cp_size > 1 and (load_balanced_context_parallel or use_attention_local_lb)
       if self.attention_type == AttentionType.FULL:
         mask = mask_module.FullMask(mask_shape)
       elif self.attention_type == AttentionType.COMPRESSED:
@@ -2364,7 +2440,19 @@ class AttentionOp(nnx.Module):
         out_specs=out_specs,
         check_vma=False,
     )
-    def wrap_flash_attention(
+    def wrap_flash_attention(query, key, value, decoder_segment_ids_q, *args):
+      if not use_attention_local_lb:
+        return flash_attention_body(query, key, value, decoder_segment_ids_q, *args)
+      query = max_utils.reorder_sequence_shard(query, lb_q_axes, cp_size, seq_dim=2)
+      decoder_segment_ids_q = max_utils.reorder_sequence_shard(decoder_segment_ids_q, lb_q_axes, cp_size, seq_dim=1)
+      attention_output, max_logits = flash_attention_body(query, key, value, decoder_segment_ids_q, *args)
+      attention_output = max_utils.reorder_sequence_shard(
+          attention_output, lb_q_axes, cp_size, seq_dim=2, to_contiguous=True
+      )
+      # max_logits (batch, heads, q) stays in load-balanced order: callers only reduce it over q.
+      return attention_output, max_logits
+
+    def flash_attention_body(
         query,
         key,
         value,
@@ -2425,6 +2513,14 @@ class AttentionOp(nnx.Module):
             ulysses_axis,
         )
         return attention_output, None
+
+      if use_cp_all_gather_in_shard_map:
+        # K/V and KV segment ids arrive as sequence shards (in the same, possibly
+        # load-balanced, order as the global array); gather the full sequence here.
+        key = jax.lax.all_gather(key, cp_gather_axes, axis=2, tiled=True)
+        value = jax.lax.all_gather(value, cp_gather_axes, axis=2, tiled=True)
+        if decoder_segment_ids_kv is not None:
+          decoder_segment_ids_kv = jax.lax.all_gather(decoder_segment_ids_kv, cp_gather_axes, axis=1, tiled=True)
 
       # The load-balanced all-gather path restores K/V to contiguous order
       # before calling Splash attention.

@@ -15,6 +15,8 @@
 """Operations used by Grain"""
 
 import dataclasses
+import os
+import re
 import warnings
 from threading import current_thread
 from typing import Any, Iterable, TYPE_CHECKING
@@ -34,6 +36,7 @@ from maxtext.multimodal import processor as mm_processor
 from maxtext.multimodal import utils as mm_utils
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
+from transformers.utils import chat_template_utils
 
 Features = dict[str, Any]
 INPUT_TOKENS_KEY = "input_ids"
@@ -251,51 +254,182 @@ def extract_token_ids(tokens):
     raise ValueError(f"Can't extract token_ids from type {type(tokens)}")
 
 
-def _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs):
-  """Splits a conversational round (system + user + assistant) into prompt and completion formatted strings.
+def _assistant_span_is_clean(messages, message_idx, rendered, span_text):
+  """Whether a derived assistant span lines up with its message: it covers the content, starts at it
+  (not inside the assistant header) and does not run into later messages. Turns whose content the
+  template rewrites are not checked. Mirrors open-instruct's _verify_assistant_spans_cover_content."""
+  content = messages[message_idx].get("content")
+  if not content or content not in rendered:
+    return True
+  if content not in span_text or not span_text.lstrip().startswith(content):
+    return False
+  tail = span_text[span_text.index(content) + len(content) :]
+  return not any(m.get("content") and m["content"] in tail for m in messages[message_idx + 1 :])
 
-  Uses the longest-common-prefix between the full conversation tokens and the
-  generation-prompt tokens to locate where the prompt ends and completion begins.
+
+def _segments_from_spans(full_tokens, spans):
+  """(token ids, is_prompt) runs covering `full_tokens`, with the token ranges in `spans` trained."""
+  segments = []
+  pos = 0
+  for start, end in spans:
+    start = max(start, pos)
+    if start > pos:
+      segments.append((list(full_tokens[pos:start]), True))
+    if end > start:
+      segments.append((list(full_tokens[start:end]), False))
+    pos = max(pos, end)
+  if pos < len(full_tokens):
+    segments.append((list(full_tokens[pos:]), True))
+  return segments
+
+
+_GENERATION_BLOCK = re.compile(r"\{%[-+]?\s*generation\s*[-+]?%\}")
+
+
+def _generation_block_segments(tokenizer_model, conversation, template):
+  """Segments for templates that mark assistant output with `{% generation %}` blocks, as open-instruct labels
+  them: render once with the generation character ranges, tokenize the rendering with offsets, and train every
+  token that overlaps a range (boundary merges included, zero-width offsets never). A conversation whose
+  end-of-turn or end-of-sequence token sits just outside its block is not trained (open-instruct drops it)."""
+  rendered_chats, generation_indices = chat_template_utils.render_jinja_template(
+      conversations=[conversation],
+      chat_template=template,
+      return_assistant_tokens_mask=True,
+      add_generation_prompt=False,
+      **tokenizer_model.special_tokens_map,
+  )
+  rendered, ranges = rendered_chats[0], [tuple(r) for r in generation_indices[0]]
+  enc = tokenizer_model(rendered, add_special_tokens=False, return_offsets_mapping=True)
+  full_tokens, offsets = enc["input_ids"], np.asarray(enc["offset_mapping"]).reshape(-1, 2)
+  if not any(start < end for start, end in ranges):
+    return [(list(full_tokens), True)] if any(m["role"] == "assistant" for m in conversation) else []
+  terminators = {t for t in (tokenizer_model.eos_token, "<|im_end|>") if t}
+  for start, end in ranges:
+    if start == end:
+      continue
+    t0 = end
+    while t0 < len(rendered) and rendered[t0].isspace():
+      t0 += 1
+    for terminator in terminators:
+      if rendered.startswith(terminator, t0):
+        covered = t0
+        for b0, b1 in sorted(ranges):
+          if b0 <= covered < b1:
+            covered = b1
+        if covered < t0 + len(terminator):
+          max_logging.log(f"Not training on a conversation whose {terminator!r} sits outside its generation block.")
+          return [(list(full_tokens), True)]
+  trained = np.zeros(len(full_tokens), dtype=bool)
+  for start, end in ranges:
+    if start < end:
+      trained |= (offsets[:, 1] > start) & (offsets[:, 0] < end)
+  trained &= offsets[:, 0] < offsets[:, 1]
+  spans, i = [], 0
+  while i < len(trained):
+    if trained[i]:
+      j = i
+      while j < len(trained) and trained[j]:
+        j += 1
+      spans.append((i, j))
+      i = j
+    else:
+      i += 1
+  return _segments_from_spans(full_tokens, spans)
+
+
+def _split_conversation_into_segments(tokenizer_model, conversation):
+  """Splits a conversation into formatted (text, is_prompt) segments covering its whole rendering.
+
+  The conversation is templated once, as a whole, and every segment is cut from that rendering, so
+  turns appear exactly as the chat template renders the full conversation (one system prompt, no
+  extra end-of-sequence tokens between turns). Assistant turn i is trained from the token count of
+  the conversation before it rendered with the generation prompt, to the token count of the
+  conversation through it. When every such prefix renders as a literal prefix of the whole, a token
+  straddling the end of the generation prompt is trained too (open-instruct's char-offset spans);
+  otherwise, e.g. a template closing the last message with end-of-sequence instead of end-of-turn,
+  spans come from token counts alone and each is checked against its message. Messages after the
+  last assistant turn stay as untrained context.
+
+  If a checked span does not line up with its message's content (it would put header or later-message
+  tokens in the loss), no token of the conversation is trained. open-instruct drops such conversations.
 
   Args:
     tokenizer_model: The tokenizer instance.
-    round_msgs: Messages for the current conversational turn including the assistant response.
+    conversation: The messages of one conversation.
 
   Returns:
-    A tuple of (prompt_str, completion_str).
+    A list of (token ids, is_prompt) pairs. Token ids, not text: re-tokenizing a decoded slice need not give the
+    same tokens back.
   """
-  full_tokens = extract_token_ids(
-      tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True)
-  )
-  prompt_tokens = extract_token_ids(
-      tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
-  )
 
-  # Find the longest common prefix where prompt ends and completion begins
-  common_len = 0
-  for full_id, prompt_id in zip(full_tokens, prompt_tokens):
-    if full_id == prompt_id:
-      common_len += 1
-    else:
-      break
+  # A conversation of one `document` message is pretraining-style text (e.g. long-context replay): it is tokenized
+  # without the chat template, ends with one end-of-sequence token, and every token is trained. (The old line's
+  # docrole image layer, dra35420de; production SFT data carries such rows.)
+  if len(conversation) == 1 and conversation[0]["role"] == "document":
+    ids = extract_token_ids(tokenizer_model(conversation[0]["content"], add_special_tokens=False))
+    return [(list(ids) + [tokenizer_model.eos_token_id], False)]
 
-  if common_len == 0:
-    raise ValueError(
-        "Chat template generation prompt mismatch: no common prefix tokens found.\n"
-        f"Full conversation tokens: {full_tokens} ('{tokenizer_model.decode(full_tokens)}')\n"
-        f"Generation prompt tokens: {prompt_tokens} ('{tokenizer_model.decode(prompt_tokens)}')\n"
-        "Cannot determine completion boundary."
+  # Which labelling rule to follow is the recipe's, not the template's: open-instruct main labels
+  # `{% generation %}` blocks (allenai/open-instruct#1879), while older branches (e.g. the Olmo 3.5 hero SFT
+  # runs) derive spans from rendered prefixes even when the template has blocks. They differ on templates whose
+  # generation prompt ends inside the block, e.g. Olmo 3.5's trailing <think>.
+  template = tokenizer_model.get_chat_template()
+  use_blocks = os.environ.get("MAXTEXT_SFT_LABELS", "generation_blocks") == "generation_blocks"
+  if use_blocks and isinstance(template, str) and _GENERATION_BLOCK.search(template):
+    return _generation_block_segments(tokenizer_model, conversation, template)
+
+  def n_tokens(messages, add_generation_prompt):
+    return len(
+        extract_token_ids(
+            tokenizer_model.apply_chat_template(messages, add_generation_prompt=add_generation_prompt, tokenize=True)
+        )
     )
 
-  prompt_str = tokenizer_model.decode(full_tokens[:common_len], skip_special_tokens=False)
-  completion_str = tokenizer_model.decode(full_tokens[common_len:], skip_special_tokens=False)
-  return prompt_str, completion_str
-
-
-def _get_completion_in_chat_template(tokenizer_model, round_msgs):
-  """Calculates the completion part of a conversation turn formatted with a chat template."""
-  _, completion_str = _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs)
-  return completion_str
+  full_tokens = extract_token_ids(
+      tokenizer_model.apply_chat_template(conversation, add_generation_prompt=False, tokenize=True)
+  )
+  rendered = tokenizer_model.apply_chat_template(conversation, add_generation_prompt=False, tokenize=False)
+  decode = lambda tokens: tokenizer_model.decode(tokens, skip_special_tokens=False)
+  assistant_indices = [idx for idx, message in enumerate(conversation) if message["role"] == "assistant"]
+  # Conversations whose prefixes render as literal prefixes of the whole need no check; the rest (e.g. a
+  # template closing the last message with end-of-sequence) are checked turn by turn, as in open-instruct.
+  prefix_stable = all(
+      rendered.startswith(
+          tokenizer_model.apply_chat_template(conversation[: idx + 1], add_generation_prompt=False, tokenize=False)
+      )
+      and (
+          idx == 0
+          or rendered.startswith(
+              tokenizer_model.apply_chat_template(conversation[:idx], add_generation_prompt=True, tokenize=False)
+          )
+      )
+      for idx in assistant_indices
+  )
+  spans = []
+  for idx in assistant_indices:
+    if idx == 0:
+      start = 0
+    elif prefix_stable:
+      # A token straddling the end of the generation prompt is trained, as open-instruct's char-offset
+      # spans do: the span starts where the tokens of the full rendering first differ from the prompt's.
+      prompt_tokens = extract_token_ids(
+          tokenizer_model.apply_chat_template(conversation[:idx], add_generation_prompt=True, tokenize=True)
+      )
+      start = next((i for i, (x, y) in enumerate(zip(full_tokens, prompt_tokens)) if x != y), len(prompt_tokens))
+    else:
+      start = n_tokens(conversation[:idx], True)
+    end = min(n_tokens(conversation[: idx + 1], False), len(full_tokens))
+    if (
+        not prefix_stable
+        and start < end
+        and not _assistant_span_is_clean(conversation, idx, rendered, decode(full_tokens[start:end]))
+    ):
+      max_logging.log(f"Not training on a conversation whose assistant span {idx} does not match its content.")
+      return [(list(full_tokens), True)]
+    spans.append((start, end))
+  if not spans:
+    return []
+  return _segments_from_spans(full_tokens, spans)
 
 
 def apply_chat_template(example, tokenizer_model, data_column_name):
@@ -319,29 +453,17 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
         prompt (if applicable). `False` indicates the expected LLM
         completion, excluding the assistant's start tokens.
   """
-  messages = []
-  is_prompt = []
-  round_msgs = []
+  conversation = list(example[data_column_name])
   try:
-    for idx, message in enumerate(example[data_column_name]):
-      if message["role"] == "system":
-        if idx != 0:
-          raise ValueError(f"System message found at index {idx}. System messages must be at index 0.")
-        round_msgs.append(message)
-      elif message["role"] == "user":
-        round_msgs.append(message)
-      elif message["role"] == "assistant":
-        round_msgs.append(message)
-        prompt_str, completion_str = _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs)
-        messages.extend([prompt_str, completion_str])
-        is_prompt.extend([True, False])
-        # Round ended, clearing the buffer.
-        round_msgs.clear()
+    for idx, message in enumerate(conversation):
+      if message["role"] == "system" and idx != 0:
+        raise ValueError(f"System message found at index {idx}. System messages must be at index 0.")
+    segments = _split_conversation_into_segments(tokenizer_model, conversation)
   except ValueError as e:
     max_logging.log(f"Unable to apply chat template: {e}")
     raise e
-  example["is_prompt"] = is_prompt
-  example[data_column_name] = messages
+  example["is_prompt"] = [is_prompt for _, is_prompt in segments]
+  example[data_column_name] = [text for text, _ in segments]
   return example
 
 
@@ -350,7 +472,8 @@ def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
   for column_name in column_names:
     if isinstance(example[column_name], list):
       example[column_name] = [
-          hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
+          x if not isinstance(x, str) else hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"]
+          for x in example[column_name]
       ]
     elif isinstance(example[column_name], str):
       example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
@@ -791,6 +914,27 @@ class ReformatPacking(grain.MapTransform):
       ret[f"{col}_segmentation"] = element[1][col]
       ret[f"{col}_position"] = element[2][col]
     return ret
+
+
+@dataclasses.dataclass
+class ExpandToLoadedRows(grain.MapTransform):
+  """Place a batch of the trained rows at their positions in the loaded batch; the other rows are zeros.
+
+  Zero rows have zero segmentation, so they carry no loss weight; the loss slices them off anyway.
+  """
+
+  def __init__(self, keep):
+    self.keep = np.asarray(keep, dtype=bool)
+
+  def map(self, element):
+    out = {}
+    for k, v in element.items():
+      v = np.asarray(v)
+      assert v.shape[0] == self.keep.sum(), (k, v.shape, int(self.keep.sum()))
+      full = np.zeros((len(self.keep),) + v.shape[1:], dtype=v.dtype)
+      full[self.keep] = v
+      out[k] = full
+    return out
 
 
 @dataclasses.dataclass

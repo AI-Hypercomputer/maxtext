@@ -1164,6 +1164,9 @@ def from_pretrained(
           if col != "params":
             checkpoint = checkpointing._deep_merge_dicts(checkpoint, col_tree)  # pylint: disable=protected-access
 
+      # Promoted-token row seeding (MAXTEXT_SEED_ROWS); the SFT/NNX path restores here, not via load_params_from_path.
+      checkpoint = checkpointing._maybe_seed_embedding_rows(checkpoint)  # pylint: disable=protected-access
+
       if checkpoint:
         # Same QTensor caveat as `_build_value_target` / `_free_device_memory`:
         # `v[...]` fails on Variables wrapping QTensors. Use `get_value()` to

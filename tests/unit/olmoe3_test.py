@@ -263,7 +263,10 @@ class OLMoE3PackingTest(unittest.TestCase):
 
     tokens = jnp.arange(1, seq_len + 1, dtype=jnp.int32)[None, :]
     packed_positions = jnp.concatenate([jnp.arange(doc_len), jnp.arange(doc_len)])[None, :].astype(jnp.int32)
-    packed_segments = jnp.concatenate([jnp.zeros((1, doc_len), jnp.int32), jnp.ones((1, doc_len), jnp.int32)], axis=1)
+    # Segment ids start at 1: 0 marks padding, which the KDA recurrence skips (as the solo case below relies on).
+    packed_segments = jnp.concatenate(
+        [jnp.ones((1, doc_len), jnp.int32), 2 * jnp.ones((1, doc_len), jnp.int32)], axis=1
+    )
 
     with mesh:
       params = model.init({"params": jax.random.PRNGKey(0)}, tokens, packed_positions, packed_segments)
