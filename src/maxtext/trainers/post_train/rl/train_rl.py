@@ -95,7 +95,11 @@ from maxtext.utils import max_logging, max_utils, model_creation_utils
 from maxtext.utils.model_creation_utils import get_rollout_kwargs_for_parallelism
 
 
-_RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset((DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5))
+_RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset((
+    DecoderBlockType.QWEN3_NEXT,
+    DecoderBlockType.QWEN3_5,
+    DecoderBlockType.OLMOE3,
+))
 
 
 def rollout_prefix_caching_enabled(trainer_config: Any) -> bool:

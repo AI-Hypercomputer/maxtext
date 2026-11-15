@@ -542,7 +542,7 @@ def patch_kv_cache_manager():
     elif hasattr(decoder_block, "value"):
       decoder_block_str = decoder_block.value
 
-    if decoder_block_str in ("qwen3_next", "qwen3_5"):
+    if decoder_block_str in ("qwen3_next", "qwen3_5", "olmoe3"):
       mamba_cache_mode = getattr(self.runner.cache_config, "mamba_cache_mode", "none")
       interval = cfg.inhomogeneous_layer_cycle_interval
 
@@ -625,7 +625,7 @@ def patch_kv_cache_manager():
 
     kv_cache_spec = original_get_kv_cache_spec(self)
 
-    if decoder_block_str in ("qwen3_next", "qwen3_5"):
+    if decoder_block_str in ("qwen3_next", "qwen3_5", "olmoe3"):
       for i in range(cfg.base_num_decoder_layers):
         layer_name = f"layer.{i}"
         if (i + 1) % interval != 0:

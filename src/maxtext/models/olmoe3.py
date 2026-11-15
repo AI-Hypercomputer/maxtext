@@ -432,14 +432,32 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     # Quantized kernels go through DenseGeneral's own dot_general, so they stay separate.
     self.fused_input_proj = bool(cfg.kda_fused_input_proj) and quant is None
 
-  def __call__(self, x: jnp.ndarray, decoder_segment_ids: None | jnp.ndarray = None) -> jnp.ndarray:
+  def __call__(
+      self,
+      x: jnp.ndarray,
+      decoder_segment_ids: None | jnp.ndarray = None,
+      kv_cache: Any = None,
+      attention_metadata: Any = None,
+  ) -> jnp.ndarray | tuple[jnp.ndarray, Any]:
     batch, seq_len, _ = x.shape
     heads, dk, dv = self.num_heads, self.head_k_dim, self.head_v_dim
+
+    mamba_block_size = getattr(self.config, "gdn_mamba_block_size", 0)
+    use_paged_state = (
+        kv_cache is not None
+        and isinstance(kv_cache, tuple)
+        and len(kv_cache) == 2
+        and attention_metadata is not None
+        and (
+            getattr(attention_metadata, "mamba_state_indices", None) is not None
+            or (mamba_block_size and getattr(attention_metadata, "block_tables", None) is not None)
+        )
+    )
 
     # An fp32 conv weight otherwise promotes q/k/v (and their kernel residuals) to fp32.
     cast = self.config.kda_conv_in_compute_dtype
     q_conv, k_conv, v_conv = (w[...].astype(x.dtype) if cast else w[...] for w in (self.q_conv, self.k_conv, self.v_conv))
-    if self.fused_input_proj:
+    if self.fused_input_proj and not use_paged_state:
       q_in, k_in, v_in, f_in, g_in, b_in = self._fused_input_proj(x)
     else:
       q_in, k_in, v_in = self.w_q(x), self.w_k(x), self.w_v(x)
@@ -449,6 +467,12 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
       q_in, k_in, v_in = (
           checkpoint_name(t, n) for t, n in ((q_in, "query_proj"), (k_in, "key_proj"), (v_in, "value_proj"))
       )
+
+    if use_paged_state:
+      return self._paged_kda_forward(
+          x, q_in, k_in, v_in, f_in, g_in, b_in, q_conv, k_conv, v_conv, kv_cache, attention_metadata
+      )
+
     cp_axis = getattr(self.config, "context_sharding", "context")
     cp_size = self.mesh.shape.get(cp_axis, 1) if self.mesh is not None else 1
     if cp_size > 1:
@@ -492,6 +516,382 @@ class OLMoE3KimiDeltaAttention(nnx.Module):
     out = self.w_out(out.reshape(batch, seq_len, heads * dv))
     out = checkpoint_name(out, "out_proj")
     return out
+
+  @staticmethod
+  def _mamba_block_table_slots(
+      attention_metadata,
+      seq_lens,
+      query_start_loc,
+      mamba_block_size: int,
+      padded_num_reqs_per_dp: int,
+      dp_size: int,
+      local_rows: int,
+      truncate_fn,
+  ):
+    """Derives write/read mamba state slot ids from block_tables when mamba_state_indices is absent."""
+    block_tables = attention_metadata.block_tables
+    max_reqs_per_dp = attention_metadata.seq_lens.shape[0] // dp_size
+    num_blocks_per_req = block_tables.shape[0] // (max_reqs_per_dp * dp_size)
+    block_tables_2d = jnp.reshape(block_tables, (max_reqs_per_dp * dp_size, num_blocks_per_req))
+    block_tables_sliced = truncate_fn(block_tables_2d, padded_num_reqs_per_dp, dp_size)
+
+    query_start_loc_reshaped = jnp.reshape(query_start_loc, (dp_size, padded_num_reqs_per_dp + 1))
+    query_lens = jnp.reshape(query_start_loc_reshaped[:, 1:] - query_start_loc_reshaped[:, :-1], (-1,))
+    num_computed = seq_lens - query_lens
+
+    read_col = jnp.maximum(num_computed - 1, 0) // mamba_block_size
+    write_col = jnp.maximum(seq_lens - 1, 0) // mamba_block_size
+    batch_idx = jnp.arange(seq_lens.shape[0])
+
+    write_state_indices = jnp.clip(block_tables_sliced[batch_idx, write_col], 0, local_rows - 1)
+    read_state_indices = jnp.clip(block_tables_sliced[batch_idx, read_col], 0, local_rows - 1)
+    return write_state_indices.astype(jnp.int32), read_state_indices.astype(jnp.int32)
+
+  def _paged_kda_forward(
+      self,
+      x: jnp.ndarray,
+      q_in: jnp.ndarray,
+      k_in: jnp.ndarray,
+      v_in: jnp.ndarray,
+      f_in: jnp.ndarray,
+      g_in: jnp.ndarray,
+      b_in: jnp.ndarray,
+      q_conv: jnp.ndarray,
+      k_conv: jnp.ndarray,
+      v_conv: jnp.ndarray,
+      kv_cache: tuple[jnp.ndarray, jnp.ndarray],
+      attention_metadata: Any,
+  ) -> tuple[jnp.ndarray, tuple[jnp.ndarray, jnp.ndarray]]:
+    """vLLM paged-state KDA forward (vectorized decode + chunked WY prefill/mixed)."""
+    cfg = self.config
+    batch, seq_len, _ = x.shape
+    num_tokens = batch * seq_len
+    heads, dk, dv = self.num_heads, self.head_k_dim, self.head_v_dim
+    key_dim = heads * dk
+    val_dim = heads * dv
+    conv_k = cfg.gdn_conv_kernel_dim
+
+    raw_g = self.f_proj_2(f_in)
+    beta_scale = 2.0 if cfg.kda_allow_neg_eigval else 1.0
+    beta = beta_scale * jax.nn.sigmoid(b_in.astype(jnp.float32))
+
+    q_flat = q_in.reshape(num_tokens, key_dim)
+    k_flat = k_in.reshape(num_tokens, key_dim)
+    v_flat = v_in.reshape(num_tokens, val_dim)
+    raw_g_flat = raw_g.reshape(num_tokens, key_dim)
+    beta_flat = beta.reshape(num_tokens, heads)
+
+    conv_state_paged, recurrent_state_paged = kv_cache
+
+    # Resolve vLLM mesh axes (ATTN_DATA / ATTN_HEAD) when running under tpu_inference;
+    # fall back cleanly for local unit-test meshes without tpu_inference installed.
+    attn_data = None
+    attn_head = None
+    dp_size = 1
+    tp_size = 1
+
+    def _simple_truncate(tensor, per_dp_len, dp_sz):
+      if dp_sz == 1:
+        return tensor[:per_dp_len]
+      reshaped = tensor.reshape((dp_sz, tensor.shape[0] // dp_sz, *tensor.shape[1:]))
+      return reshaped[:, :per_dp_len].reshape((dp_sz * per_dp_len, *tensor.shape[1:]))
+
+    truncate_fn = _simple_truncate
+    if self.mesh is not None and "attn_dp" in self.mesh.axis_names:
+      try:
+        from tpu_inference.layers.common.sharding import ShardingAxisName  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from tpu_inference.layers.common.utils import truncate_sharded_tensor  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+        from tpu_inference.utils import get_mesh_shape_product  # pylint: disable=import-outside-toplevel # pytype: disable=import-error
+
+        attn_data = ShardingAxisName.ATTN_DATA
+        attn_head = ShardingAxisName.ATTN_HEAD
+        dp_size = int(get_mesh_shape_product(self.mesh, attn_data))
+        tp_size = int(get_mesh_shape_product(self.mesh, attn_head))
+        truncate_fn = truncate_sharded_tensor
+      except ImportError:
+        pass
+
+    padded_num_reqs = getattr(attention_metadata, "padded_num_reqs", -1)
+    if padded_num_reqs is None or padded_num_reqs <= 0:
+      padded_num_reqs = attention_metadata.seq_lens.shape[0]
+    padded_num_reqs_per_dp = padded_num_reqs // dp_size
+
+    query_start_loc = truncate_fn(attention_metadata.query_start_loc, padded_num_reqs_per_dp + 1, dp_size)
+    seq_lens = truncate_fn(attention_metadata.seq_lens, padded_num_reqs_per_dp, dp_size)
+    if getattr(attention_metadata, "mamba_state_indices", None) is not None:
+      state_indices = truncate_fn(attention_metadata.mamba_state_indices.astype(jnp.int32), padded_num_reqs_per_dp, dp_size)
+      read_state_indices = state_indices
+    else:
+      state_indices, read_state_indices = self._mamba_block_table_slots(
+          attention_metadata,
+          seq_lens,
+          query_start_loc,
+          cfg.gdn_mamba_block_size,
+          padded_num_reqs_per_dp,
+          dp_size,
+          local_rows=max(conv_state_paged.shape[0] // dp_size, 1),
+          truncate_fn=truncate_fn,
+      )
+
+    h_loc = heads // tp_size
+    prefill_chunk = 64
+    prefill_sub_block = 16
+    prefill_compute_dtype = jnp.bfloat16 if cfg.gdn_state_dtype == "bfloat16" else jnp.float32
+    inv_prec = getattr(jax.lax.Precision, cfg.kda_inverse_precision.upper())
+    matmul_prec = cfg.kda_matmul_precision
+
+    def _paged_kda_local(
+        q_loc,
+        k_loc,
+        v_loc,
+        rg_loc,
+        beta_loc,
+        c_state_all,
+        r_state_all,
+        qc_loc,
+        kc_loc,
+        vc_loc,
+        alog_loc,
+        dtb_loc,
+        q_start_loc,
+        s_idx,
+        rs_idx,
+        dist,
+        s_lens,
+    ):
+      qkv = jnp.concatenate([q_loc, k_loc, v_loc], axis=-1)
+      conv_w = jnp.concatenate([qc_loc, kc_loc, vc_loc], axis=0)
+      conv_dtype = c_state_all.dtype
+      state_dtype = r_state_all.dtype
+      out_dtype = qkv.dtype
+      num_blocks = c_state_all.shape[0]
+      n_tok = qkv.shape[0]
+      max_reqs = s_idx.shape[0]
+      k_dim_loc = h_loc * dk
+      v_dim_loc = h_loc * dv
+      dim_loc = qkv.shape[-1]
+
+      neg_exp_a = -jnp.exp(alog_loc.astype(jnp.float32)).reshape(h_loc, 1)
+      dt_b = dtb_loc.astype(jnp.float32).reshape(h_loc, dk)
+      out = jnp.zeros((n_tok, v_dim_loc), dtype=out_dtype)
+
+      decode_end = dist[0]
+      total_reqs = dist[2]
+
+      # Fast path 1: vectorized 1-token decode across requests [0, decode_end).
+      def _run_decode(carry):
+        cs, rs, out_buf = carry
+        req_ids = jnp.arange(max_reqs, dtype=jnp.int32)
+        is_dec = req_ids < decode_end
+        tok_idx = jnp.clip(q_start_loc[:-1], 0, n_tok - 1)
+        r_idx = jnp.clip(rs_idx, 0, num_blocks - 1)
+        has_init = s_lens > 1
+
+        x_dec = qkv[tok_idx]  # [R, dim_loc]
+        c_prev = jnp.where(has_init[:, None, None], cs[r_idx], jnp.zeros((1, conv_k - 1, dim_loc), conv_dtype))
+        full_win = jnp.concatenate([c_prev.astype(qkv.dtype), x_dec[:, None, :]], axis=1)  # [R, K, dim_loc]
+        conv_acc = jnp.sum(full_win * conv_w.T[None, :, :], axis=1)
+        qkv_conv = jax.nn.silu(conv_acc)
+        c_next = full_win[:, 1:, :].astype(conv_dtype)
+
+        q_d = _l2_normalize(qkv_conv[:, :k_dim_loc].reshape(max_reqs, h_loc, dk).astype(jnp.float32)) * (dk**-0.5)
+        k_d = _l2_normalize(qkv_conv[:, k_dim_loc : 2 * k_dim_loc].reshape(max_reqs, h_loc, dk).astype(jnp.float32))
+        v_d = qkv_conv[:, 2 * k_dim_loc :].reshape(max_reqs, h_loc, dv).astype(jnp.float32)
+
+        rg_d = rg_loc[tok_idx].reshape(max_reqs, h_loc, dk).astype(jnp.float32)
+        beta_d = beta_loc[tok_idx].astype(jnp.float32)  # [R, H]
+        decay_d = jnp.exp(neg_exp_a[None, :, :] * jax.nn.softplus(rg_d + dt_b[None, :, :]))
+
+        r_prev = jnp.where(has_init[:, None, None, None], rs[r_idx].astype(jnp.float32), 0.0)
+        # VPU-fused exact fp32 delta-rule step: decay -> predict -> rank-1 update -> readout.
+        r_dec = r_prev * decay_d[..., None]
+        pred = jnp.sum(r_dec * k_d[..., None], axis=-2)
+        delta = (v_d - pred) * beta_d[..., None]
+        r_next = r_dec + k_d[..., None] * delta[..., None, :]
+        y_d = jnp.sum(r_next * q_d[..., None], axis=-2).reshape(max_reqs, v_dim_loc).astype(out_dtype)
+
+        w_slot = jnp.where(is_dec, s_idx, num_blocks)
+        w_tok = jnp.where(is_dec, tok_idx, n_tok)
+        cs = cs.at[w_slot].set(c_next, mode="drop")
+        rs = rs.at[w_slot].set(r_next.astype(state_dtype), mode="drop")
+        out_buf = out_buf.at[w_tok].set(y_d, mode="drop")
+        return cs, rs, out_buf
+
+      c_state_all, r_state_all, out = jax.lax.cond(
+          decode_end > 0, _run_decode, lambda s: s, (c_state_all, r_state_all, out)
+      )
+
+      # Fast path 2: chunked WY prefill & mixed requests [decode_end, total_reqs).
+      def _run_prefill(carry):
+        cs, rs, out_buf = carry
+        c = prefill_chunk
+        qkv_pad = jnp.pad(qkv, ((0, c), (0, 0)))
+        rg_pad = jnp.pad(rg_loc, ((0, c), (0, 0)))
+        beta_pad = jnp.pad(beta_loc, ((0, c), (0, 0)))
+        c_idx = jnp.arange(c, dtype=jnp.int32)
+        causal_c = jnp.tril(jnp.ones((c, c), dtype=bool))
+        strict_c = jnp.tril(jnp.ones((c, c), dtype=bool), k=-1)
+        tri_ones_c = jnp.tril(jnp.ones((c, c), dtype=jnp.float32))
+
+        def _req_body(req_carry):
+          r, cs_cur, rs_cur, out_cur = req_carry
+          q_start = q_start_loc[r]
+          q_end = q_start_loc[r + 1]
+          q_len = q_end - q_start
+          has_init = s_lens[r] > q_len
+          r_slot = jnp.clip(rs_idx[r], 0, num_blocks - 1)
+          w_slot = jnp.clip(s_idx[r], 0, num_blocks - 1)
+
+          c_init = jnp.where(has_init, cs_cur[r_slot], jnp.zeros((conv_k - 1, dim_loc), conv_dtype))
+          r_init = jnp.where(has_init, rs_cur[r_slot].astype(jnp.float32), jnp.zeros((h_loc, dk, dv), jnp.float32))
+
+          def _chunk_body(ch_carry):
+            offset, c_st, r_st, o_buf = ch_carry
+            valid_len = jnp.minimum(c, q_len - offset)
+            valid = c_idx < valid_len
+
+            x_c = jax.lax.dynamic_slice(qkv_pad, (q_start + offset, 0), (c, dim_loc))
+            rg_c = jax.lax.dynamic_slice(rg_pad, (q_start + offset, 0), (c, k_dim_loc))
+            b_c = jax.lax.dynamic_slice(beta_pad, (q_start + offset, 0), (c, h_loc))
+
+            buf = jnp.concatenate([c_st.astype(qkv.dtype), x_c], axis=0)  # [K - 1 + C, dim_loc]
+            acc = jnp.zeros_like(x_c)
+            for tap in range(conv_k):
+              acc = acc + buf[tap : tap + c] * conv_w[:, tap]
+            qkv_c = jax.nn.silu(acc)
+            c_st_next = jax.lax.dynamic_slice(buf, (valid_len, 0), (conv_k - 1, dim_loc)).astype(conv_dtype)
+
+            q_ch = qkv_c[:, :k_dim_loc].reshape(c, h_loc, dk).transpose(1, 0, 2)
+            k_ch = qkv_c[:, k_dim_loc : 2 * k_dim_loc].reshape(c, h_loc, dk).transpose(1, 0, 2)
+            v_ch = qkv_c[:, 2 * k_dim_loc :].reshape(c, h_loc, dv).transpose(1, 0, 2).astype(jnp.float32)
+
+            q_ch = _l2_normalize(q_ch.astype(jnp.float32)) * (dk**-0.5)
+            k_ch = _l2_normalize(k_ch.astype(jnp.float32))
+            rg_ch = rg_c.reshape(c, h_loc, dk).transpose(1, 0, 2).astype(jnp.float32)
+            ld_ch = neg_exp_a[:, None, :] * jax.nn.softplus(rg_ch + dt_b[:, None, :])
+            beta_ch = b_c.transpose(1, 0).astype(jnp.float32)
+
+            # Mask padded tail so state is untouched past valid_len.
+            ld_ch = jnp.where(valid[None, :, None], ld_ch, 0.0)
+            beta_ch = jnp.where(valid[None, :], beta_ch, 0.0)
+
+            with jax.default_matmul_precision(matmul_prec):
+              g = jnp.einsum("ij,hjd->hid", tri_ones_c, ld_ch, precision=jax.lax.Precision.HIGHEST)
+              scores, kk = _kda_intra_chunk(q_ch, k_ch, g, sub_block=prefill_sub_block, compute_dtype=prefill_compute_dtype)
+              scores = jnp.where(causal_c, scores, 0.0)
+              m = jnp.where(strict_c, kk, 0.0) * beta_ch[..., None]
+              x_inv = _invert_unit_lower(m, inv_prec)
+
+              eg = jnp.exp(g)
+              cd = prefill_compute_dtype
+              vb = (v_ch * beta_ch[..., None]).astype(cd)
+              kb = (k_ch * eg * beta_ch[..., None]).astype(cd)
+              x_inv_c = x_inv.astype(cd)
+              u = jnp.einsum("hij,hjd->hid", x_inv_c, vb, preferred_element_type=jnp.float32)
+              w = jnp.einsum("hij,hjd->hid", x_inv_c, kb, preferred_element_type=jnp.float32)
+              r_st_c = r_st.astype(cd)
+              delta = u - jnp.einsum("hcd,hdv->hcv", w.astype(cd), r_st_c, preferred_element_type=jnp.float32)
+              delta_c = delta.astype(cd)
+
+              qg = (q_ch * eg).astype(cd)
+              y_ch = jnp.einsum("hcd,hdv->hcv", qg, r_st_c, preferred_element_type=jnp.float32) + jnp.einsum(
+                  "hij,hjv->hiv", scores.astype(cd), delta_c, preferred_element_type=jnp.float32
+              )
+
+              g_last = g[:, -1:, :]
+              k_carry = (k_ch * jnp.exp(g_last - g)).astype(cd)
+              decay_last = jnp.exp(g_last[:, 0, :])
+              r_st_next = r_st * decay_last[..., None] + jnp.einsum(
+                  "hcd,hcv->hdv", k_carry, delta_c, preferred_element_type=jnp.float32
+              )
+
+            y_flat = y_ch.transpose(1, 0, 2).reshape(c, v_dim_loc).astype(out_dtype)
+            w_tok = jnp.where(valid, q_start + offset + c_idx, n_tok)
+            o_buf = o_buf.at[w_tok].set(y_flat, mode="drop")
+            return offset + c, c_st_next, r_st_next, o_buf
+
+          _, c_final, r_final, out_cur = jax.lax.while_loop(
+              lambda ch: ch[0] < q_len, _chunk_body, (jnp.int32(0), c_init, r_init, out_cur)
+          )
+          cs_cur = jax.lax.cond(q_len > 0, lambda arr: arr.at[w_slot].set(c_final), lambda arr: arr, cs_cur)
+          rs_cur = jax.lax.cond(
+              q_len > 0, lambda arr: arr.at[w_slot].set(r_final.astype(state_dtype)), lambda arr: arr, rs_cur
+          )
+          return r + 1, cs_cur, rs_cur, out_cur
+
+        _, cs, rs, out_buf = jax.lax.while_loop(
+            lambda rc: rc[0] < total_reqs, _req_body, (decode_end, cs, rs, out_buf)
+        )
+        return cs, rs, out_buf
+
+      c_state_all, r_state_all, out = jax.lax.cond(
+          decode_end < total_reqs, _run_prefill, lambda s: s, (c_state_all, r_state_all, out)
+      )
+      return (c_state_all, r_state_all), out
+
+    args = (
+        q_flat,
+        k_flat,
+        v_flat,
+        raw_g_flat,
+        beta_flat,
+        conv_state_paged,
+        recurrent_state_paged,
+        q_conv,
+        k_conv,
+        v_conv,
+        self.A_log[...],
+        self.dt_bias[...],
+        query_start_loc,
+        state_indices,
+        read_state_indices,
+        attention_metadata.request_distribution,
+        seq_lens,
+    )
+
+    if self.mesh is not None and (dp_size > 1 or tp_size > 1):
+      in_specs = (
+          PartitionSpec(attn_data, attn_head),  # q_flat
+          PartitionSpec(attn_data, attn_head),  # k_flat
+          PartitionSpec(attn_data, attn_head),  # v_flat
+          PartitionSpec(attn_data, attn_head),  # raw_g_flat
+          PartitionSpec(attn_data, attn_head),  # beta_flat
+          PartitionSpec(attn_data, None, attn_head),  # conv_state_paged
+          PartitionSpec(attn_data, attn_head, None, None),  # recurrent_state_paged
+          PartitionSpec(attn_head, None),  # q_conv
+          PartitionSpec(attn_head, None),  # k_conv
+          PartitionSpec(attn_head, None),  # v_conv
+          PartitionSpec(attn_head),  # A_log
+          PartitionSpec(attn_head),  # dt_bias
+          PartitionSpec(attn_data),  # query_start_loc
+          PartitionSpec(attn_data),  # state_indices
+          PartitionSpec(attn_data),  # read_state_indices
+          PartitionSpec(attn_data),  # distribution
+          PartitionSpec(attn_data),  # seq_lens
+      )
+      out_specs = (
+          (
+              PartitionSpec(attn_data, None, attn_head),
+              PartitionSpec(attn_data, attn_head, None, None),
+          ),
+          PartitionSpec(attn_data, attn_head),
+      )
+      (new_conv_state, new_recurrent_state), out_flat = jax.shard_map(
+          _paged_kda_local,
+          mesh=self.mesh,
+          in_specs=in_specs,
+          out_specs=out_specs,
+          check_vma=False,
+      )(*args)
+    else:
+      (new_conv_state, new_recurrent_state), out_flat = _paged_kda_local(*args)
+
+    out = out_flat.reshape(batch, seq_len, heads, dv)
+    gate = jax.nn.sigmoid(self.g_proj_2(g_in).reshape(batch, seq_len, heads, dv))
+    out = self.o_norm(out.astype(x.dtype)) * gate
+    out = self.w_out(out.reshape(batch, seq_len, heads * dv))
+    out = checkpoint_name(out, "out_proj")
+    return out, (new_conv_state, new_recurrent_state)
 
   def _unfused_core(self, q, k, v, log_decay, beta, resets, chunk, seq_len, out_dtype):
     """The non-tokamax KDA recurrence on `[B, T, H, d]` inputs (fused Pallas, sub-block, pairwise or scan)."""
@@ -1695,8 +2095,15 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     """
     # Forced experts arrive already routed (moe_a2a_token_chunks reuses the full-sequence EMo routing per
     # chunk). They lie inside their pools, so masking again changes nothing but would rebuild the pools from a
-    # partial sequence.
-    if self.config.emo_enabled and forced_routed_experts is None:
+    # partial sequence. At inference with eval pool >= num_experts, every expert is kept so masking is a no-op.
+    if (
+        self.config.emo_enabled
+        and forced_routed_experts is None
+        and not (
+            self.config.model_call_mode == "inference"
+            and self.config.emo_eval_document_expert_pool >= self.num_experts
+        )
+    ):
       gate_logits = self._emo_mask_logits(gate_logits, input_ids, rngs)
     top_k_weights, top_k_indices = super().get_topk(
         gate_logits,
@@ -1707,6 +2114,22 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
         per_expert_scale=per_expert_scale,
     )
     return top_k_weights * self.num_experts_per_tok, top_k_indices
+
+  def fused_moe_matmul(self, *args, **kwargs):
+    """Applies OLMoE3's ``restore_weight_scale`` (``* num_experts_per_tok``) on the fused vLLM MoE path.
+
+    ``RoutedMoE.fused_moe_matmul`` delegates routing directly to ``tpu_inference``'s
+    ``fused_moe_func(renormalize=True)`` and bypasses ``get_topk``, leaving top-k
+    weights normalized to sum to 1 instead of ``num_experts_per_tok``. Because expert
+    combination is linear in the routing weights, scaling the fused output is exact.
+    """
+    if self.config.emo_enabled and self.config.emo_eval_document_expert_pool < self.num_experts:
+      raise NotImplementedError(
+          "OLMoE3 fused_moe_matmul does not support emo_eval_document_expert_pool < num_experts."
+      )
+    output, lb_loss, bias_updates = super().fused_moe_matmul(*args, **kwargs)
+    scaled = (output.astype(jnp.float32) * float(self.num_experts_per_tok)).astype(output.dtype)
+    return scaled, lb_loss, bias_updates
 
   def _emo_mask_logits(self, gate_logits, segment_ids, rngs):
     """Masks router logits to each document's expert pool (the EMo router).
@@ -2101,7 +2524,15 @@ class OLMoE3DecoderLayer(nnx.Module):
           attention_metadata=attention_metadata,
       )
     else:
-      mixer_out = self.mixer(normed, mixer_segment_ids)
+      if kv_cache is not None and attention_metadata is not None:
+        mixer_out, kv_cache = self.mixer(
+            normed,
+            mixer_segment_ids,
+            kv_cache=kv_cache,
+            attention_metadata=attention_metadata,
+        )
+      else:
+        mixer_out = self.mixer(normed, mixer_segment_ids)
 
     attn_branch = self.attn_out_norm(mixer_out)
     hidden = inputs + (attn_branch if self.residual_multiplier == 1.0 else self.residual_multiplier * attn_branch)
@@ -2129,7 +2560,11 @@ class OLMoE3DecoderLayer(nnx.Module):
           input_ids=decoder_segment_ids,
           precomputed_gate_logits=precomputed_gate,
       )
-      has_lb = self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None
+      has_lb = (
+          self.config.load_balance_loss_weight > 0.0
+          and load_balance_loss is not None
+          and self.config.model_call_mode != "inference"
+      )
       if has_lb or (self.config.use_multimodal and self.config.model_call_mode != "inference"):
         # Reference auxiliary loss adds a router z-loss: 1e-5 * mean(logsumexp(router logits)^2),
         # which stays active in OLMo-core multimodal stages (e.g. 8K Bridge) even when lb_loss_weight == 0.0.

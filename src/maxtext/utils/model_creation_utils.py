@@ -794,6 +794,33 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
     max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
     with reference_mesh:
       actor_base_model = nnx.clone(reference_model.base)
+      # nnx.clone duplicates the Python graph but aliases the underlying jax.Array
+      # buffers with reference_model. Under colocated Pathways RL, Tunix's weight
+      # sync deletes old rollout buffers without pointer-level alias checks, so
+      # any replicated tensor passed through a no-op reshard on sync 0 would delete
+      # reference_model's weights on sync 1. Copy arrays on-device preserving exact
+      # shardings so actor and reference own disjoint buffers.
+      actor_state = nnx.state(actor_base_model)
+      out_shardings = jax.tree_util.tree_map(
+          lambda x: x.sharding if isinstance(x, jax.Array) else None,
+          actor_state,
+      )
+
+      def _copy_leaf(x):
+        if not isinstance(x, jax.Array):
+          return x
+        if jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key):
+          return jax.random.wrap_key_data(
+              jnp.array(jax.random.key_data(x), copy=True),
+              impl=jax.random.key_impl(x),
+          )
+        return jnp.array(x, copy=True)
+
+      copy_state_fn = jax.jit(
+          lambda s: jax.tree_util.tree_map(_copy_leaf, s),
+          out_shardings=out_shardings,
+      )
+      nnx.update(actor_base_model, copy_state_fn(actor_state))
       use_no_op_mappings = "maxtext_config" in trainer_config.vllm_additional_config
       # TunixMaxTextAdapter wraps MaxText models to be compatible with Tunix's default APIs
       # The weight mappings for vllm (which is interfaced to from MaxText via Tunix) are model specific.

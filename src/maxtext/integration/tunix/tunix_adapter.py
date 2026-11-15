@@ -109,12 +109,16 @@ class TunixMaxTextAdapter(nnx.Module):
   ):
     super().__init__()
     self.base = base_model
-    self._vllm_weight_mapping = VllmWeightMapping(
-        self.base.config.model_name,
-        HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
-        use_standalone_mappings,
-    )
     self.use_no_op_mappings = use_no_op_mappings
+    self._vllm_weight_mapping = (
+        None
+        if use_no_op_mappings
+        else VllmWeightMapping(
+            self.base.config.model_name,
+            HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
+            use_standalone_mappings,
+        )
+    )
     # Lowest-priority source of segment ids, used only when Tunix supplies
     # neither `segment_ids` nor an `attention_mask` (`__call__` has the order).
     # Synthesizes them per token -- 1 for non-pad, 0 for pad -- so MaxText's

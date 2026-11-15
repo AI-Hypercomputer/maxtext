@@ -4974,16 +4974,17 @@ class RoutedMoE(nnx.Module):
       # Global (batch, sequence) arrays: one loss per full sequence (not per token chunk), averaged
       # over the global batch.
       lb_loss = self.megatron_seq_aux_loss(pre_bias_logits if pre_bias_logits is not None else gate_logits)
-    if getattr(self, "force_dropless", False):
-      self.sow(nnx.Intermediate, "moe_has_overflow", jnp.zeros((), jnp.bool_))
-    else:
-      self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
-    if self.config.moe_dropless_fallback == "layer":
-      self.sow(nnx.Intermediate, "moe_dropless_fallback", took_fallback)
-    if required_rbf is not None:
-      self.sow(nnx.Intermediate, "moe_required_rbf", required_rbf)
-    if max_load_ratio is not None:
-      self.sow(nnx.Intermediate, "moe_max_load_ratio", max_load_ratio)
+    if self.config.model_call_mode != "inference":
+      if getattr(self, "force_dropless", False):
+        self.sow(nnx.Intermediate, "moe_has_overflow", jnp.zeros((), jnp.bool_))
+      else:
+        self.sow(nnx.Intermediate, "moe_has_overflow", has_overflow)
+      if self.config.moe_dropless_fallback == "layer":
+        self.sow(nnx.Intermediate, "moe_dropless_fallback", took_fallback)
+      if required_rbf is not None:
+        self.sow(nnx.Intermediate, "moe_required_rbf", required_rbf)
+      if max_load_ratio is not None:
+        self.sow(nnx.Intermediate, "moe_max_load_ratio", max_load_ratio)
     return output, lb_loss, bias_updates
 
   def reshape_and_update_weights(self, weights, indices, safe_updates=False):
