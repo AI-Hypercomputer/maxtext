@@ -254,6 +254,14 @@ class GmmConfigs:
   # Output is stored as [size_m, out_size_n // 128, 128] (one contiguous slab
   # per row); tiles are relayouted from [tile_m, tile_n] inside VMEM.
   out_is_3d: bool = False
+  # 2D unquantized single-K configs only (see make_gmm_configs): a tile whose
+  # rows all lie in its first small_tail_m positions (a group's short tail) runs
+  # a [small_tail_m, tile_k] matmul instead of [tile_m, tile_k] (inner_kernel).
+  small_tail_dot: bool = False
+
+  @property
+  def small_tail_m(self) -> int:
+    return 256 if self.transpose_rhs else 128
 
   @property
   def lhs_is_3d(self) -> bool:
@@ -430,9 +438,12 @@ def generate_block_specs(
         _ordered(index_map.lhs_index_map),
     )
   else:
+    # small_tail_dot: triple-buffer the 2D lhs and out blocks too, so the short
+    # tail steps' DMAs overlap the full tiles' matmuls.
     lhs_value_spec = pl.BlockSpec(
         (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_k),
         _ordered(index_map.lhs_index_map),
+        pipeline_mode=pl.Buffered(3) if cfgs.small_tail_dot else None,
     )
   lhs_scale_spec = None
   if cfgs.lhs_cfgs.has_scale:
@@ -495,6 +506,7 @@ def generate_block_specs(
     out_block_spec = pl.BlockSpec(
         (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
         _ordered(index_map.out_index_map),
+        pipeline_mode=pl.Buffered(3) if cfgs.small_tail_dot else None,
     )
 
   return (lhs_block_spec, rhs_block_spec, ps_block_spec), out_block_spec
@@ -546,8 +558,10 @@ def inner_kernel(
     num_k: Total number of K tiles along grid axis 2.
   """
 
-  def _matmul(is_first_k_step: bool, is_last_k_step: bool):
+  def _matmul(is_first_k_step: bool, is_last_k_step: bool, rows: int | None = None):
+    # rows: compute only the tile's first rows (small_tail_dot); None: all tile_m.
     tpu_info = pltpu.get_tpu_info()
+    acc_rows = cfgs.tiles.tile_m if rows is None else rows
     mxu_size = tpu_info.mxu_column_size
 
     # Step 1: Input pre-processing.
@@ -567,6 +581,8 @@ def inner_kernel(
       # Block is [tile_m // sublane, sublane, tile_d0, 128]; relayout into
       # [tile_m, tile_k] with tokens on sublanes.
       tiled_lhs = relayout.load_3d_as_2d(tiled_lhs_ref.value, cfgs.tiles.tile_m, cfgs.lhs_tile_d0)
+    elif rows is not None:
+      tiled_lhs = tiled_lhs_ref.value[pl.ds(0, rows // cfgs.dims.size_lhs_sublane)].reshape(rows, cfgs.tiles.tile_k)
     else:
       tiled_lhs = tiled_lhs_ref.get_value().reshape(-1, cfgs.tiles.tile_k)[...]
     tiled_rhs = tiled_rhs_ref.get_weight(transpose_rhs=cfgs.transpose_rhs)
@@ -649,7 +665,7 @@ def inner_kernel(
         end_n = min(rhs_tile_n, start_n + mxu_size)
         col_size = end_n - start_n
 
-        acc_n = jnp.zeros((cfgs.tiles.tile_m, col_size), dtype=acc_ref.dtype)
+        acc_n = jnp.zeros((acc_rows, col_size), dtype=acc_ref.dtype)
         for b_id in range(pl.cdiv(tile_k_end, rhs_qbs)):  # pyrefly: ignore[no-matching-overload]
           start_k = b_id * rhs_qbs  # pyrefly: ignore[unsupported-operation]
           end_k = start_k + rhs_qbs  # pyrefly: ignore[unsupported-operation]
@@ -827,6 +843,9 @@ def inner_kernel(
         relayout.store_2d_as_3d(
             tiled_out_ref, acc_masked.astype(tiled_out_ref.dtype), acc_masked.shape[0], cfgs.out_tile_d0
         )
+      elif rows is not None:
+        sub = cfgs.dims.size_lhs_sublane
+        tiled_out_ref[pl.ds(0, rows // sub)] = acc_masked.reshape(rows // sub, sub, -1).astype(tiled_out_ref.dtype)
       else:
         tiled_out_ref[...] = acc_masked.reshape(tiled_out_ref.shape).astype(tiled_out_ref.dtype)
 
@@ -873,6 +892,24 @@ def inner_kernel(
   @jax.named_scope("matmul_last")
   def matmul_last():
     _matmul(is_first_k_step=False, is_last_k_step=True)
+
+  if cfgs.small_tail_dot:
+    # Single K step. A tile whose rows all lie in its first small_tail_m
+    # positions computes only those rows; the rest of its out block is not
+    # written back (the block is bounded to the tile's rows). Bit-identical:
+    # each dot sits in its own lax.cond region, and Mosaic (v7x) rounds a
+    # small_tail_m-row dot's rows as the tile_m dot rounds its first rows.
+    gm_id = step.index[cfgs.gm_axis]
+    m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+    fits_small = m_end - (m_start - m_start % cfgs.dims.size_lhs_sublane) <= cfgs.small_tail_m
+
+    @jax.named_scope("matmul_small_tail")
+    def matmul_small_tail():
+      _matmul(is_first_k_step=True, is_last_k_step=True, rows=cfgs.small_tail_m)
+
+    lax.cond(fits_small, matmul_small_tail, matmul_first_last)
+    return
 
   # Select and execute matmul function based on the current step.
   k_id = step.index[2]
@@ -1432,6 +1469,19 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
   return scope_name
 
 
+def _small_tail_dot_vmem_bytes(cfgs: GmmConfigs) -> int:
+  """VMEM of the small_tail_dot pipeline: triple-buffered lhs, rhs and out, f32 acc, zero-init buffer."""
+  tm, tk, tn = cfgs.tiles.tile_m, cfgs.tiles.tile_k, cfgs.tiles.tile_n
+  lhs_bytes = jnp.dtype(cfgs.lhs_cfgs.dtype).itemsize
+  rhs_bytes = jnp.dtype(cfgs.rhs_cfgs.dtype).itemsize
+  out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
+  return (
+      3 * (tm * tk * lhs_bytes + tk * tn * rhs_bytes + tm * tn * out_bytes)
+      + tm * tn * jnp.dtype(cfgs.acc_dtype).itemsize
+      + (2 * 1024 * 1024 if cfgs.zero_init else 0)
+  )
+
+
 def make_gmm_configs(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -1451,6 +1501,7 @@ def make_gmm_configs(
     lhs_scale: jax.Array | None = None,
     transpose_rhs: bool = False,
     out_is_3d: bool = False,
+    small_tail_dot: bool = False,
 ):
   """Fills the GMM config for the GMM kernel."""
 
@@ -1578,7 +1629,7 @@ def make_gmm_configs(
   elif partial_sum is not None and partial_sum.ndim == 3:
     raise ValueError("A 3D partial_sum requires out_is_3d=True.")
 
-  return GmmConfigs(
+  cfgs = GmmConfigs(
       dims=dims,
       tiles=tiles,
       lhs_cfgs=lhs_cfgs,
@@ -1591,6 +1642,16 @@ def make_gmm_configs(
       transpose_rhs=transpose_rhs,
       out_is_3d=out_is_3d,
   )
+  if (
+      small_tail_dot
+      and not (lhs_cfgs.is_3d or out_is_3d or lhs_cfgs.quant_dtype is not None or has_lhs_scale)
+      and not (rhs_cfgs.has_scale or partial_sum is not None or fuse_act is not None)
+      and pl.cdiv(dims.size_k, tiles.tile_k) == 1
+      and tiles.tile_m >= 4 * cfgs.small_tail_m
+      and _small_tail_dot_vmem_bytes(cfgs) <= (vmem_limit_bytes or 0)
+  ):
+    cfgs = dataclasses.replace(cfgs, small_tail_dot=True)
+  return cfgs
 
 
 def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
@@ -1616,6 +1677,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "fuse_act",
         "transpose_rhs",
         "out_is_3d",
+        "small_tail_dot",
     ]
 )
 def gmm_v2(
@@ -1638,6 +1700,7 @@ def gmm_v2(
     fuse_act: str | None = None,
     transpose_rhs: bool = False,
     out_is_3d: bool = False,
+    small_tail_dot: bool = False,
 ) -> jax.Array:
   """GMM kernel implemented with emit_pipeline.
 
@@ -1647,8 +1710,8 @@ def gmm_v2(
 
   Args:
     lhs: lhs with shape [size_m, size_k].
-    rhs: rhs with shape [size_group, size_k, size_n], or
-      [size_group, size_n, size_k] when transpose_rhs=True.
+    rhs: rhs with shape [size_group, size_k, size_n], or [size_group, size_n,
+      size_k] when transpose_rhs=True.
     group_sizes: The group sizes of lhs rows of shape [size_lhs_group,].
     rhs_scale: The rhs scale of shape [size_group, num_blocks, 1, out_size].
     rhs_bias: The rhs bias of shape [size_group, 1, out_size].
@@ -1670,12 +1733,15 @@ def gmm_v2(
     fuse_act: Activation function to fuse with GMM, None if no fusion.
     transpose_rhs: Interpret rhs as [size_group, size_n, size_k] and contract
       its last dimension without materializing a full rhs transpose.
-    out_is_3d: If True, the output is written directly in the 3D layout
-      [size_m, out_size_n // 128, 128], relayouted from [tile_m, tile_n] inside
-      VMEM. A 3D lhs ([size_m, size_k // 128, 128]) is detected from lhs.ndim.
-      Both require tile_k / tile_n to be a multiple of 128 that divides the
-      dim. Tiles whose D0 (tile // 128) is not a multiple of 8 use full-D0
-      blocks and relayout the tile window in VMEM.
+    out_is_3d: If True, the output is written directly in the 3D layout [size_m,
+      out_size_n // 128, 128], relayouted from [tile_m, tile_n] inside VMEM. A
+      3D lhs ([size_m, size_k // 128, 128]) is detected from lhs.ndim. Both
+      require tile_k / tile_n to be a multiple of 128 that divides the dim.
+      Tiles whose D0 (tile // 128) is not a multiple of 8 use full-D0 blocks and
+      relayout the tile window in VMEM.
+    small_tail_dot: Whether a 2D unquantized single-K config computes a tile
+      whose rows fit its first 256 (transposed rhs) or 128 positions with a
+      matmul of that many rows instead of tile_m. Same result.
 
   Returns:
     Output of shape [size_m, size_n] (or [size_m, size_n // 128, 128]).
@@ -1710,6 +1776,7 @@ def gmm_v2(
       lhs_scale=lhs_scale,
       transpose_rhs=transpose_rhs,
       out_is_3d=out_is_3d,
+      small_tail_dot=small_tail_dot,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
