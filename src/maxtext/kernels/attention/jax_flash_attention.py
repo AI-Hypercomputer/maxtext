@@ -1533,6 +1533,131 @@ def flash_attention_bwd(
   return dq, dk, dv
 
 
+@functools.partial(
+    jax.custom_vjp,
+    nondiff_argnames=("block_q", "block_kv", "mask_value", "cap"),
+)
+def flash_attention_block_masked_custom_vjp(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    segment_ids: SegmentIds | None,
+    mask: jax.Array,
+    block_q: int,
+    block_kv: int,
+    mask_value: float,
+    cap: Optional[float] = None,
+) -> Tuple[jax.Array, Dict[str, jax.Array]]:
+  """Block-masked flash attention with a memory-efficient backward pass.
+
+  Differentiating `flash_attention_block_masked` directly makes JAX save the
+  intermediates of every block-loop iteration, which is O(q_seq_len *
+  kv_seq_len) memory. This wrapper saves only the inputs, the output and the
+  logsumexp, and recomputes the attention tiles in `flash_attention_bwd`.
+
+  Args:
+    q: Query tensor with shape (batch_size, num_q_heads, q_seq_len, head_dim).
+    k: Key tensor with shape (batch_size, num_kv_heads, kv_seq_len, head_dim).
+    v: Value tensor with shape (batch_size, num_kv_heads, kv_seq_len,
+      v_head_dim).
+    segment_ids: Optional segment ids with shapes (batch_size, q_seq_len) and
+      (batch_size, kv_seq_len).
+    mask: Boolean runtime mask, either shared with shape (q_seq_len,
+      kv_seq_len) or per batch item with shape (batch_size, q_seq_len,
+      kv_seq_len).
+    block_q: Block size for the query sequence dimension.
+    block_kv: Block size for the key/value sequence dimension.
+    mask_value: The value to use for masked-out attention scores.
+    cap: Optional cap for attention logits.
+
+  Returns:
+    The attention output and a dict of non-differentiable (logsumexp,
+    max_logits) statistics.
+  """
+  out_and_stats, _ = _flash_attention_block_masked_custom_vjp_fwd(
+      q, k, v, segment_ids, mask, block_q, block_kv, mask_value, cap
+  )
+  return out_and_stats
+
+
+def _flash_attention_block_masked_custom_vjp_fwd(
+    q: jax.Array,
+    k: jax.Array,
+    v: jax.Array,
+    segment_ids: SegmentIds | None,
+    mask: jax.Array,
+    block_q: int,
+    block_kv: int,
+    mask_value: float,
+    cap: Optional[float],
+) -> Tuple[Tuple[jax.Array, Dict[str, jax.Array]], Tuple[Any, ...]]:
+  """Custom VJP forward rule for flash_attention_block_masked_custom_vjp."""
+  out, stats = flash_attention_block_masked(
+      q,
+      k,
+      v,
+      segment_ids,
+      block_kv=block_kv,
+      block_q=block_q,
+      mask=mask,
+      mask_value=mask_value,
+      cap=cap,
+      save_residuals=True,
+      logits_dtype=q.dtype,
+      # A fully unrolled loop is prohibitive for long runtime-masked
+      # sequences, and the must-fuse wrapper is not needed without autodiff.
+      loop_unroll=False,
+      fuse_logits=False,
+  )
+  assert isinstance(stats, dict)
+  return (out, stats), (q, k, v, segment_ids, mask, out, stats["logsumexp"])
+
+
+def _flash_attention_block_masked_custom_vjp_bwd(
+    block_q: int,
+    block_kv: int,
+    mask_value: float,
+    cap: Optional[float],
+    res: Tuple[Any, ...],
+    g: Tuple[jax.Array, Dict[str, jax.Array]],
+) -> Tuple[jax.Array, jax.Array, jax.Array, None, None]:
+  """Custom VJP backward rule for flash_attention_block_masked_custom_vjp."""
+  q, k, v, segment_ids, mask, out, logsumexp = res
+  do, _ = g  # The statistics are not differentiable.
+
+  def bwd_one_example(q, k, v, segment_ids, mask, out, do, logsumexp):
+    return flash_attention_bwd(
+        q=q,
+        k=k,
+        v=v,
+        o=out,
+        do=do,
+        logsumexp=logsumexp,
+        mask=mask,
+        segment_ids=segment_ids,
+        mask_value=mask_value,
+        cap=cap,
+        block_q=block_q,
+        block_kv=block_kv,
+        dtype=jnp.float32,
+        di=jnp.sum(out.astype(jnp.float32) * do.astype(jnp.float32), axis=-1),
+    )
+
+  # Map over the batch so that every example sees a rank-2 mask, which the
+  # backward kernels support for both MHA and GQA.
+  mask_axis = 0 if mask.ndim == 3 else None
+  dq, dk, dv = jax.vmap(bwd_one_example, in_axes=(0, 0, 0, 0, mask_axis, 0, 0, 0))(
+      q, k, v, segment_ids, mask, out, do, logsumexp
+  )
+  return dq, dk, dv, None, None
+
+
+flash_attention_block_masked_custom_vjp.defvjp(
+    _flash_attention_block_masked_custom_vjp_fwd,
+    _flash_attention_block_masked_custom_vjp_bwd,
+)
+
+
 splash_attention_mha_bwd_jax = flash_attention_mha_bwd_jax
 splash_attention_gqa_bwd_jax = flash_attention_gqa_bwd_jax
 flash_attention_block_masked_bwd = flash_attention_bwd
