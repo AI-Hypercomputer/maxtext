@@ -307,6 +307,18 @@ class TransformsTest(unittest.TestCase):
     np.testing.assert_array_equal(out["inputs_segmentation"], expected_seg)
     np.testing.assert_array_equal(out["targets_segmentation"], expected_tgt_seg)
 
+  def test_shift_to_inputs_targets_eos_ends_document(self):
+    # OLMo-core's eos.cumsum() - eos: each EOS closes its own document, so the EOS at position 0 is a
+    # one-token segment and the EOS at 3 and 5 stay with the tokens before them.
+    arr = np.array([99, 10, 11, 99, 12, 99, 13, 14], dtype=np.uint32)
+    out = ShiftToInputsTargets(segment_eos_token_id=99, segment_eos_ends_document=True).map(
+        {"tokens": arr, "instance_id": 0, "file_id": 0, "instance_mask": True}
+    )
+    eos = (arr == 99).astype(np.int32)
+    np.testing.assert_array_equal(out["inputs_segmentation"], 1 + np.cumsum(eos) - eos)
+    np.testing.assert_array_equal(out["inputs_segmentation"], np.array([1, 2, 2, 2, 3, 3, 4, 4], dtype=np.int32))
+    np.testing.assert_array_equal(out["targets_segmentation"], np.array([1, 2, 2, 2, 3, 3, 4, 0], dtype=np.int32))
+
 
 class OlmoCoreOrderSamplerTest(unittest.TestCase):
 

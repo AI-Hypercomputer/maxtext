@@ -172,6 +172,53 @@ class OLMoE3GlobalLoadBalancingTest(unittest.TestCase):
     np.testing.assert_allclose(global_, expected_global, rtol=1e-6)
     self.assertGreater(local, global_)  # fewer tokens per group: a rank is less balanced than the batch
 
+  def _metrics_router(self, scatter_counts=False):
+    router = _router(self.mesh, True)
+    router.config.olmoe3_router_metrics = True
+    router.config.router_metrics_group_seqs = 2
+    router.config.olmoe3_router_metrics_scatter_counts = scatter_counts
+    router._logical_to_mesh_axes = lambda names: P(("data", "expert"), None, None)  # pylint: disable=protected-access
+    router._router_load_imbalance = functools.partial(  # pylint: disable=protected-access
+        olmoe3.OLMoE3LatentRoutedMoE._router_load_imbalance, router  # pylint: disable=protected-access
+    )
+    return router
+
+  def _sharded_metrics(self, router):
+    return _with_token_axes(
+        jax.shard_map(
+            lambda x: _lb(router, x),
+            mesh=self.mesh,
+            in_specs=P(("data", "expert")),
+            out_specs=P(),
+            check_vma=False,
+        )
+    )
+
+  def test_router_metrics_scatter_counts_match_one_hot(self):
+    """``olmoe3_router_metrics_scatter_counts`` gives the one-hot mask's values, inside the sharded MoE too."""
+    one_hot = jax.jit(self._sharded_metrics(self._metrics_router()))(self.logits)
+    scatter = jax.jit(self._sharded_metrics(self._metrics_router(scatter_counts=True)))(self.logits)
+    np.testing.assert_allclose(np.asarray(scatter), np.asarray(one_hot), rtol=1e-6)
+
+  def test_router_imbalance_gate(self):
+    """``moe.ROUTER_IMBALANCE_ON`` (a traced bool, as the train step sets it under olmoe3_router_metrics_interval):
+    True gives the ungated values, False zeros for both imbalances; the loss entry is the same either way."""
+    sharded = self._sharded_metrics(self._metrics_router())
+    ungated = np.asarray(jax.jit(sharded)(self.logits))
+
+    def gated(logits, on):
+      token = moe.ROUTER_IMBALANCE_ON.set(on)
+      try:
+        return sharded(logits)
+      finally:
+        moe.ROUTER_IMBALANCE_ON.reset(token)
+
+    gated = jax.jit(gated)
+    np.testing.assert_allclose(np.asarray(gated(self.logits, jnp.array(True))), ungated, rtol=1e-6)
+    off = np.asarray(gated(self.logits, jnp.array(False)))
+    np.testing.assert_allclose(off[0], ungated[0], rtol=1e-6)
+    np.testing.assert_array_equal(off[1:], [0.0, 0.0])
+
 
 if __name__ == "__main__":
   unittest.main()

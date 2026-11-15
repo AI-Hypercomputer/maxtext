@@ -1395,6 +1395,15 @@ def _uses_local_checkpoint_period(config):
   return config.enable_emergency_checkpoint or config.enable_multi_tier_checkpointing
 
 
+def _wsds_fork_save_steps(config):
+  """wsds_save_forks: the labels before each WSDS stage's first decay step, where its decay branch resumes."""
+  schedule_type = getattr(config, "lr_schedule_type", None)
+  if not getattr(config, "wsds_save_forks", False) or getattr(schedule_type, "value", schedule_type) != "wsds":
+    return frozenset()
+  from maxtext.utils import maxtext_utils  # pylint: disable=import-outside-toplevel  # maxtext_utils imports this module
+  return frozenset(fork - 1 for fork, end in maxtext_utils.wsds_decay_windows(config) if fork < end)
+
+
 def _should_save_checkpoint_at_step(checkpoint_manager, step, config, force):
   """Returns whether MaxText should build and dispatch checkpoint args."""
   if force:
@@ -1471,8 +1480,11 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
   # AND the 'actual_step' is a valid step,
   # AND it's not a step that would normally trigger a checkpoint save.
   force_ckpt_save = step is None and actual_step != -1 and (actual_step % config.checkpoint_period != 0)
+  # A WSDS fork (wsds_save_forks) is saved off the period: forced past the save-decision policy, but not waited on
+  # like a final save.
+  fork_save = step is not None and actual_step in _wsds_fork_save_steps(config)
 
-  if not _should_save_checkpoint_at_step(checkpoint_manager, actual_step, config, force_ckpt_save):
+  if not _should_save_checkpoint_at_step(checkpoint_manager, actual_step, config, force_ckpt_save or fork_save):
     _handle_post_checkpoint_preemption(checkpoint_manager, actual_step, force_ckpt_save)
     return
 
@@ -1493,7 +1505,7 @@ def maybe_save_checkpoint(checkpoint_manager, state, config, data_iterator, step
         state,
         config,
         data_iterator,
-        force_ckpt_save,
+        force_ckpt_save or fork_save,
     )
   if checkpoint_saved:
     print_save_message(actual_step, config.async_checkpointing)
