@@ -432,18 +432,30 @@ function inspectPR(pr){
   const ci=COMMITS.findIndex(c=>c.hash===String(pr));
   if(ci===-1){window.open('https://github.com/'+REPO+'/pull/'+pr,'_blank','noopener');return}
   const wcsAll=COMMITS.map(c=>wallClock(c,'all'));
-  const src=getWindows().current;const pool=(src.length?src:COMMITS).map(c=>wallClock(c,'all').total).sort((a,b)=>a-b);
-  const median=pool[Math.floor(pool.length/2)];
-  openModal(COMMITS[ci],ci,wcsAll,median);
+  openModal(COMMITS[ci],ci,wcsAll,rangeMedian(wcsAll));
 }
 function goToCommit(hash){
   const ci=COMMITS.findIndex(c=>c.hash===hash);
   if(ci===-1)return;
   const wcsAll=COMMITS.map(c=>wallClock(c,'all'));
-  // Same baseline as the timeline: the median of the runs in the selected range (all stored runs if empty)
-  const src=getWindows().current;const pool=(src.length?src:COMMITS).map(c=>wallClock(c,'all').total).sort((a,b)=>a-b);
-  const median=pool[Math.floor(pool.length/2)];
-  openModal(COMMITS[ci],ci,wcsAll,median);
+  openModal(COMMITS[ci],ci,wcsAll,rangeMedian(wcsAll));
+}
+// A run that ran nothing - GitHub listed no job for it, or (with one device picked) none of that device's
+// jobs ran tests - has no wall clock to compare. Counting its zero would drag every median, baseline and
+// "slower than usual" flag down, so each of them is taken over the runs that ran something.
+function ranSomething(w,hw){return (hw||'all')==='all'?w.total>0:!w.noTests}
+// The page's median (the upper of the two middle values) of those runs' wall clocks; null when none ran.
+function runMedian(ws,hw){
+  const t=ws.filter(w=>ranSomething(w,hw)).map(w=>w.total).sort((a,b)=>a-b);
+  return t.length?t[Math.floor(t.length/2)]:null;
+}
+// The modal's baseline: the median of the runs in the selected range, or of every stored run when none in
+// the range ran anything. wcsAll holds wallClock(c,'all') for every commit, in COMMITS order.
+function rangeMedian(wcsAll){
+  const r=getRange();
+  const inRange=wcsAll.filter((w,i)=>r.has(commitDate(COMMITS[i])));
+  const med=runMedian(inRange,'all');
+  return med!==null?med:runMedian(wcsAll,'all');
 }
 // Clickable commit link HTML
 // X-axis label for one merged pull request: the hash is a link to the pull request on GitHub
@@ -521,12 +533,21 @@ function jtSort(id,key){
   if(!window.__CI_PULSE_MOCK__&&String(id).startsWith('jt-jobs-'))loadPrDetailIntoModal(String(id).slice(8));
 }
 
+// A real run (commit.exact: built from the views) lists every job it had, so a job missing from it did not
+// run: it counts as zero minutes with status 'skip', never as that job's usual (median) minutes. Only the
+// sample data built into this file stores just the jobs that differ from usual, so only it is filled in.
+// held: the job got a runner. A job cancelled while it still waited for one has no queue, setup or run time
+// at all (h:false), so its zero must not count as a wait. label: the machine this run's job asked for.
 function jd(commit,jobId){
   const j=JOBS.find(x=>x.id===jobId);
-  const ov=commit.o[jobId]||{};
-  return{id:jobId,name:j.name,cat:j.cat,lane:j.lane,q:ov.q??j.b.q,s:ov.s??j.b.s,r:ov.r??j.b.r,status:ov.st||'pass',total:function(){return this.q+this.s+this.r}};
+  const ov=commit.o[jobId];
+  if(commit.exact&&!ov)return{id:jobId,name:j.name,cat:j.cat,lane:j.lane,q:0,s:0,r:0,status:'skip',ran:false,held:false,label:'',total:function(){return 0}};
+  const o=ov||{};
+  return{id:jobId,name:j.name,cat:j.cat,lane:j.lane,q:o.q??j.b.q,s:o.s??j.b.s,r:o.r??j.b.r,status:o.st||'pass',ran:true,
+    held:o.h!==false,label:o.lb||RUNNER_LABELS[jobId]||'',total:function(){return this.q+this.s+this.r}};
 }
-function allJobs(c){return JOBS.map(j=>jd(c,j.id))}
+// The jobs a run really had (for the sample data: every catalogue job).
+function allJobs(c){return JOBS.filter(j=>!c.exact||c.o[j.id]).map(j=>jd(c,j.id))}
 
 // The runs-on label each job asks for, and the runner pools that answer it. Measured from
 // runs 33468578834, 33465601432 and 33462758754 on 2026-09-01. The label is fixed per job;
@@ -542,16 +563,29 @@ let RUNNER_LABELS={
   'cpu-pre-u':'linux-x86-n2-32','cpu-pre-i':'linux-x86-n2-32',
   'cpu-post-u':'linux-x86-n2-32','cpu-post-i':'linux-x86-n2-32'};
 // One machine type per device, read off that device's jobs rather than hard-coded, so a
-// mock change cannot silently make this lie.
+// mock change cannot silently make this lie. The views give each device the label most of
+// its jobs asked for in the newest run (CAT_LABELS): labels change (CPU moved from
+// linux-x86-n2-32 to linux-x86-n4-32 on Oct 22), and the first job in the catalogue may
+// not have run for months. The sample data has one label per device.
+let CAT_LABELS=dict();
 function machineOfCat(cat){
+  if(CAT_LABELS[cat])return CAT_LABELS[cat];
   const j=JOBS.find(x=>x.cat===cat);
   return j?(RUNNER_LABELS[j.id]||''):'';
+}
+// The machine one run's jobs on a device asked for (the label most of them carry); empty when the run had none.
+function machineOfRun(c,cat){
+  const n=new Map();
+  allJobs(c).forEach(j=>{if(j.cat===cat&&j.ran!==false&&j.label)n.set(j.label,(n.get(j.label)||0)+1)});
+  let best='',most=0;
+  n.forEach((k,lb)=>{if(k>most){best=lb;most=k}});
+  return best;
 }
 function wallClock(c,hwFilter){
   const hw=hwFilter||'all';
   const jobs=allJobs(c);
   const buildJobs=jobs.filter(j=>j.cat==='infra'||j.cat==='build');
-  const buildTime=Math.max(...buildJobs.map(j=>j.total()));
+  const buildTime=buildJobs.length?Math.max(...buildJobs.map(j=>j.total())):0;
   const catMax={},catQueue={},catSetup={},catRun={},catLead={};
   ['tpu','gpu','cpu'].forEach(cat=>{
     const cj=jobs.filter(j=>j.cat===cat);
@@ -571,7 +605,8 @@ function wallClock(c,hwFilter){
     const testTime=Math.max(catMax.tpu,catMax.gpu,catMax.cpu);
     const testJobs=jobs.filter(j=>['tpu','gpu','cpu'].includes(j.cat));
     const maxQ=testJobs.length?Math.max(...testJobs.map(j=>j.q)):0;
-    let bottleneck='tpu';
+    // No bottleneck to name when no TPU, GPU or CPU job took any time (or the run had none).
+    let bottleneck=testTime>0?'tpu':'';
     if(catMax.gpu>catMax.tpu&&catMax.gpu>catMax.cpu)bottleneck='gpu';
     if(catMax.cpu>catMax.tpu&&catMax.cpu>catMax.gpu)bottleneck='cpu';
     return{build:buildTime,queue:maxQ,tests:testTime-maxQ,total:buildTime+testTime,bottleneck,catMax,catQueue,catSetup,catRun,catLead};
@@ -656,12 +691,14 @@ function renderTimeline(){
   const win=getWindows(),LIST=win.current;
   if(TL_ZOOM&&(TL_ZOOM.b>LIST.length-1||TL_ZOOM.a>=TL_ZOOM.b))TL_ZOOM=null;
   if(!LIST.length){host.innerHTML=`<div style="font-size:13px;color:var(--ink2);padding:8px 0">No merged pull requests fall inside this date range.</div>`;const zb0=$('#tl-zoombar');if(zb0)zb0.innerHTML='';return}
-  const wcs=LIST.map(c=>wallClock(c,HW));
-  const wcsAll=LIST.map(c=>wallClock(c,'all'));
+  // Every wall clock once, for the whole store: the bars, the median line and the flags all read these.
+  const pos=new Map(COMMITS.map((c,i)=>[c,i]));
+  const allW=COMMITS.map(c=>wallClock(c,HW));
+  const wcs=LIST.map(c=>allW[pos.get(c)]);
+  const wcsAll=HW==='all'?wcs:LIST.map(c=>wallClock(c,'all'));
   const totals=wcs.map(w=>w.total);
   // Regression flags compare each run with the runs merged BEFORE it in the FULL stored history, so
   // narrowing the range never changes a flag. COMMITS is newest-first: older runs sit after the index.
-  const allTotals=COMMITS.map(c=>wallClock(c,HW).total);
   // Zoom window: render only the selected slice of LIST
   const off=TL_ZOOM?TL_ZOOM.a:0;
   const VIEW=TL_ZOOM?LIST.slice(TL_ZOOM.a,TL_ZOOM.b+1):LIST;
@@ -675,8 +712,9 @@ function renderTimeline(){
   svg.style.minWidth=W+'px';
   const py=v=>TP+(1-v/ymax)*(H-B-TP);
 
-  const sorted=[...totals].sort((a,b)=>a-b);
-  const median=sorted[Math.floor(sorted.length/2)];
+  // The median of the runs in range that ran something (a run with no job is left out, see ranSomething)
+  const median=runMedian(wcs,HW);
+  const medRuns=wcs.filter(w=>ranSomething(w,HW)).length;
 
   // Filter label
   if(HW!=='all'){
@@ -690,10 +728,10 @@ function renderTimeline(){
     if(v%20===0){el('text',{x:LP-6,y:py(v)+4,'text-anchor':'end','font-size':'11',fill:'var(--muted)','font-family':'var(--mono)'}).textContent=fmtTick(v);yTicks.push({y:py(v),label:fmtTick(v)})}
   }
   // Median (drawn only when it fits the zoomed scale)
-  if(median<=ymax&&totals.length>=5){  // a median of fewer than 5 runs says little
+  if(median!==null&&median<=ymax&&medRuns>=5){  // a median of fewer than 5 runs says little
     // Neutral ink on purpose: cyan is the link colour on this chart (the hash under every bar).
     el('line',{x1:LP,y1:py(median),x2:W-RP,y2:py(median),'stroke-width':1,'stroke-dasharray':'6,4',opacity:0.7}).style.stroke='var(--ink2)';
-    el('text',{x:W-RP-2,y:py(median)-5,'text-anchor':'end','font-size':'12'}).textContent='median '+Math.round(median)+'m · '+totals.length+' runs';
+    el('text',{x:W-RP-2,y:py(median)-5,'text-anchor':'end','font-size':'12'}).textContent='median '+Math.round(median)+'m · '+medRuns+' runs';
   }
 
   // The image / environment split only exists while a step template does.
@@ -708,10 +746,10 @@ function renderTimeline(){
     const ci=off+vi;
     const wc=wcs[ci];
     const x=slotX(vi);
-    // Trailing median: the runs merged BEFORE this one in the full store (not including self).
-    const priorTotals=allTotals.slice(COMMITS.indexOf(c)+1);
-    const trailingMed=priorTotals.length>=3?[...priorTotals].sort((a,b)=>a-b)[Math.floor(priorTotals.length/2)]:null;
-    const isReg=trailingMed!==null&&wc.total>trailingMed*1.15&&(wc.total-trailingMed)>3;
+    // Trailing median: the runs merged BEFORE this one in the full store (not including self) that ran something.
+    const prior=allW.slice(pos.get(c)+1);
+    const trailingMed=prior.filter(w=>ranSomething(w,HW)).length>=3?runMedian(prior,HW):null;
+    const isReg=ranSomething(wc,HW)&&trailingMed!==null&&wc.total>trailingMed*1.15&&(wc.total-trailingMed)>3;
     const isFail=c.status==='fail';
     const isFlaky=c.status==='flaky';
     const isEmpty=false;  // the bar always draws; a device with no tests still shows build and wait
@@ -777,7 +815,13 @@ function renderTimeline(){
       const flakyJobs=allJobs(c).filter(j=>j.status==='flaky');
       if(isFail){
         const deaths=failedJobs.filter(j=>j.r===0).length;
-        flags.push({main:'FAILED',sub:deaths>0&&deaths===failedJobs.length?deaths+' jobs never got a runner':failedJobs.length+' jobs failed',col:'#EF4444',bg:'#FFFFFF'});
+        const nJ=n=>n+(n===1?' job':' jobs');
+        // A run can fail with no listed job failed: before any job ran (GitHub lists none for it), with only
+        // GitHub-hosted checks (the views list the TPU, GPU, CPU and build jobs), or in one of those checks.
+        const sub=failedJobs.length?(deaths===failedJobs.length?nJ(deaths)+' never got a runner':nJ(failedJobs.length)+' failed')
+          :allJobs(c).length?'failed outside the listed jobs'
+          :c.counted===0?'failed before any job ran':'no TPU, GPU, CPU or build job ran';
+        flags.push({main:'FAILED',sub,col:'#EF4444',bg:'#FFFFFF'});
       }else if(isReg){
         flags.push({main:'+'+Math.round(wc.total-trailingMed)+'m slower',sub:Math.round(wc.total)+'m — usually '+Math.round(trailingMed)+'m',col:'#F59E0B',bg:'#FFFFFF'});
       }
@@ -937,19 +981,26 @@ function pinYAxis(scroller,LP,H,ticks){
 const tip=$('#tip');
 function showTip(c,ci,wcs,med,e){
   const wc=wcs[ci];
-  const delta=Math.round(wc.total-med);
+  // No comparison for a run that ran nothing, or when no run in the range did (med is null then).
+  const delta=med==null||!(wc.total>0)?null:Math.round(wc.total-med);
   const dColor=delta>5?'var(--crit)':delta>0?'var(--warn)':'var(--good)';
   const stChip=c.status==='fail'?'<span class="chip fail">FAILED</span>':c.status==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
   const jobs=allJobs(c);
   const tpuJobs=jobs.filter(j=>j.cat==='tpu'),gpuJobs=jobs.filter(j=>j.cat==='gpu'),cpuJobs=jobs.filter(j=>j.cat==='cpu');
-  const tpuOk=tpuJobs.every(j=>j.status==='pass'),gpuOk=gpuJobs.every(j=>j.status==='pass'),cpuOk=cpuJobs.every(j=>j.status==='pass');
+  // A device with no job in this run did not run: it gets a dash, not a pass mark ([].every() is true).
+  const laneMark=(label,list)=>{
+    if(!list.length)return`<span style="font-size:13px;display:flex;align-items:center;gap:4px;color:var(--muted)" title="No ${label} job ran"><span class="sdot" style="background:var(--muted)"></span>${label} —</span>`;
+    const good=list.every(j=>j.status==='pass');
+    return`<span style="font-size:13px;display:flex;align-items:center;gap:4px"><span class="sdot" style="background:${good?'var(--good)':'var(--crit)'}"></span>${label} ${good?'✓':'✕'}</span>`;
+  };
 
   // Compute percentages for mini bar
-  const bP=Math.round(wc.build/wc.total*100);
-  const qP=Math.round(wc.queue/wc.total*100);
-  const tpuP=Math.round(wc.catMax.tpu/wc.total*100);
-  const gpuP=Math.round(wc.catMax.gpu/wc.total*100);
-  const cpuP=Math.round(wc.catMax.cpu/wc.total*100);
+  const wT=wc.total||1;
+  const bP=Math.round(wc.build/wT*100);
+  const qP=Math.round(wc.queue/wT*100);
+  const tpuP=Math.round(wc.catMax.tpu/wT*100);
+  const gpuP=Math.round(wc.catMax.gpu/wT*100);
+  const cpuP=Math.round(wc.catMax.cpu/wT*100);
   // Jobs per category
   const tpuCount=tpuJobs.length,gpuCount=gpuJobs.length,cpuCount=cpuJobs.length;
 
@@ -962,27 +1013,27 @@ function showTip(c,ci,wcs,med,e){
 <div style="display:flex;height:10px;border-radius:5px;overflow:hidden;margin-bottom:10px;background:var(--elevated)">
 <div style="width:${bP}%;background:var(--bld)"></div>
 <div style="width:${qP}%;background:var(--q)"></div>
-<div style="width:${Math.round(wc.tests/wc.total*100)}%;background:${CAT_COLORS[wc.bottleneck]}"></div>
+<div style="width:${Math.round(wc.tests/wT*100)}%;background:${CAT_COLORS[wc.bottleneck]||'var(--muted)'}"></div>
 </div>
 <div class="trow"><span style="color:var(--bld)">■ Build & infra</span><span class="tv">${Math.round(wc.build)}m</span></div>
 <div class="trow"><span style="color:var(--q)">■ Queue wait</span><span class="tv">${wc.queue}m</span></div>
 <div style="border-top:1px solid var(--grid);margin:4px 0;padding-top:4px"></div>
 <div style="font-size:12px;color:var(--muted);margin-bottom:4px;text-transform:uppercase;letter-spacing:.05em">Test execution (parallel)</div>
-<div class="trow"><span style="color:var(--tpu)">■ TPU <span style="color:var(--muted)">(${tpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${esc(machineOfCat('tpu'))}</span></span><span class="tv">${Math.round(wc.catMax.tpu)}m</span></div>
-<div class="trow"><span style="color:var(--gpu)">■ GPU <span style="color:var(--muted)">(${gpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${esc(machineOfCat('gpu'))}</span></span><span class="tv">${Math.round(wc.catMax.gpu)}m</span></div>
-<div class="trow"><span style="color:var(--cpu)">■ CPU <span style="color:var(--muted)">(${cpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${esc(machineOfCat('cpu'))}</span></span><span class="tv">${Math.round(wc.catMax.cpu)}m</span></div>
-<div style="font-size:12px;color:var(--muted);margin-top:4px">Bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span> — sets the run time</div>
+<div class="trow"><span style="color:var(--tpu)">■ TPU <span style="color:var(--muted)">(${tpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${esc(machineOfRun(c,'tpu'))}</span></span><span class="tv">${Math.round(wc.catMax.tpu)}m</span></div>
+<div class="trow"><span style="color:var(--gpu)">■ GPU <span style="color:var(--muted)">(${gpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${esc(machineOfRun(c,'gpu'))}</span></span><span class="tv">${Math.round(wc.catMax.gpu)}m</span></div>
+<div class="trow"><span style="color:var(--cpu)">■ CPU <span style="color:var(--muted)">(${cpuCount} jobs)</span><span style="display:block;font-size:12px;color:var(--muted)" class="mono">${esc(machineOfRun(c,'cpu'))}</span></span><span class="tv">${Math.round(wc.catMax.cpu)}m</span></div>
+${wc.bottleneck?`<div style="font-size:12px;color:var(--muted);margin-top:4px">Bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span> — sets the run time</div>`:'<div style="font-size:12px;color:var(--muted);margin-top:4px">No TPU, GPU or CPU test ran in this run</div>'}
 <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;padding-top:8px;border-top:1px solid var(--grid)">
 <div style="display:flex;gap:8px">
-<span style="font-size:13px;display:flex;align-items:center;gap:4px"><span class="sdot" style="background:${tpuOk?'var(--good)':'var(--crit)'}"></span>TPU ${tpuOk?'✓':'✕'}</span>
-<span style="font-size:13px;display:flex;align-items:center;gap:4px"><span class="sdot" style="background:${gpuOk?'var(--good)':'var(--crit)'}"></span>GPU ${gpuOk?'✓':'✕'}</span>
-<span style="font-size:13px;display:flex;align-items:center;gap:4px"><span class="sdot" style="background:${cpuOk?'var(--good)':'var(--crit)'}"></span>CPU ${cpuOk?'✓':'✕'}</span>
+${laneMark('TPU',tpuJobs)}
+${laneMark('GPU',gpuJobs)}
+${laneMark('CPU',cpuJobs)}
 </div>
 <div style="font-size:12px;color:var(--muted);margin-top:2px">${(()=>{let t=0;jobs.filter(j=>['tpu','gpu','cpu'].includes(j.cat)).forEach(j=>{const tc=TEST_COUNTS[j.id];if(tc)t+=tc.total});return t>0?t+' tests across all jobs':'';})()}</div>
 ${stChip}
 </div>
-<div style="font-size:13px;font-weight:600;color:${dColor};text-align:right;margin-top:4px">${delta>0?'+':''}${delta}m vs median</div>
-<div style="font-size:12px;color:var(--muted);text-align:center;margin-top:6px;padding-top:6px;border-top:1px solid var(--grid)">click the bar to see all ${jobs.length} jobs →</div>`;
+${delta===null?'':`<div style="font-size:13px;font-weight:600;color:${dColor};text-align:right;margin-top:4px">${delta>0?'+':''}${delta}m vs median</div>`}
+<div style="font-size:12px;color:var(--muted);text-align:center;margin-top:6px;padding-top:6px;border-top:1px solid var(--grid)">${jobs.length?`click the bar to see all ${jobs.length} jobs →`:'no TPU, GPU, CPU or build job is listed for this run · click the bar for its details →'}</div>`;
   tip.style.display='block';moveTip(e);
 }
 function moveTip(e){const x=e.clientX+16,y=e.clientY-20,r=tip.getBoundingClientRect();tip.style.left=(x+(r.width||350)>window.innerWidth?e.clientX-(r.width||350)-16:x)+'px';tip.style.top=Math.max(8,Math.min(y,window.innerHeight-(r.height||300)-8))+'px'}
@@ -992,9 +1043,10 @@ function openModal(c,ci,wcs,med){
   tip.style.display='none';
   const wc=wcs[ci];
   const jobs=allJobs(c);
-  const delta=Math.round(wc.total-med);
+  // As in the tooltip: no "vs median" for a run that ran nothing, or when no run had a wall clock.
+  const delta=med==null||!(wc.total>0)?null:Math.round(wc.total-med);
   const stChip=c.status==='fail'?'<span class="chip fail">FAILED</span>':c.status==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
-  const maxJobT=Math.max(...jobs.map(j=>j.total()));
+  const maxJobT=jobs.length?Math.max(...jobs.map(j=>j.total())):0;
   const runId=RUN_IDS[c.hash]||0;
   const runUrl=`https://github.com/${REPO}/actions/runs/${runId}`;
   const prUrl=`https://github.com/${REPO}/pull/${c.pr.replace('#','')}`;
@@ -1112,7 +1164,7 @@ function openModal(c,ci,wcs,med){
       const jobHtml=`<tr style="opacity:${dim?0.25:1};cursor:pointer" onclick="const x=document.getElementById(${jsArg(String(rid))});x.style.display=x.style.display==='none'?'block':'none';this.querySelector('.xarr').textContent=x.style.display==='none'?'▸':'▾'">
 <td style="font-size:13px;max-width:300px;min-width:220px;white-space:normal;line-height:1.25;padding-right:6px" title="${esc(j.name)}"><span class="xarr" style="color:var(--muted);margin-right:4px">▸</span><strong>${esc(j.name)}</strong></td>
 <td><span style="color:${lc};font-weight:600;font-size:13px">${esc(j.lane)}</span></td>
-<td class="mono" style="font-size:12px;color:var(--ink2);white-space:nowrap">${esc(RUNNER_LABELS[j.id])||'&mdash;'}</td>
+<td class="mono" style="font-size:12px;color:var(--ink2);white-space:nowrap">${esc(j.label)||'&mdash;'}</td>
 <td class="mono" style="font-size:13px">${j.q}m</td>
 ${split?`<td class="mono" style="font-size:13px">${sImg}m</td><td class="mono" style="font-size:13px">${sEnv}m</td>`:`<td class="mono" style="font-size:13px">${j.s}m</td>`}
 <td class="mono" style="font-size:13px">${j.r}m</td>
@@ -1135,7 +1187,7 @@ ${split?`<td class="mono" style="font-size:13px">${sImg}m</td><td class="mono" s
   $('#modal').innerHTML=`<div class="modal-head"><div>
 <h2>${esc(c.pr)} ${esc(c.title)}</h2>
 <div class="sub">
-${stChip} · <span class="mono">${Math.round(wc.total)}m total</span> · ${delta>0?'+':''}${delta}m vs median · ${esc(c.concurrent)} pipeline runs overlapped it · bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span>
+${stChip} · <span class="mono">${Math.round(wc.total)}m total</span> · ${delta===null?'':`${delta>0?'+':''}${delta}m vs median · `}${esc(c.concurrent)} pipeline runs overlapped it · ${wc.bottleneck?`bottleneck: <span style="color:${CAT_COLORS[wc.bottleneck]};font-weight:700">${wc.bottleneck.toUpperCase()}</span>`:'no TPU, GPU or CPU test ran'}
 <br><span style="color:var(--muted)">${trigger==='pull_request'?'Run of a merged pull request':'Scheduled run'} · ${time} (${ago}) · run #${esc(runId)}</span>
 </div>
 <div style="display:flex;gap:8px;margin-top:6px">
@@ -1279,17 +1331,20 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
     const rows=DEVS.map(d=>{
       const s=series[d.key],a=anomInfo[d.key];
       let worst=null;
-      s.forEach((p,i)=>{if(a[i].med===null||p.failedOut)return;const dlt=p.v-a[i].med;if(!worst||dlt>worst.dlt)worst={i,dlt,med:a[i].med,v:p.v,flag:a[i].flag}});
+      // A run with no job on this device has no level of its own: it is neither a rise nor the latest level.
+      s.forEach((p,i)=>{if(a[i].med===null||p.failedOut||!p.parts.length)return;const dlt=p.v-a[i].med;if(!worst||dlt>worst.dlt)worst={i,dlt,med:a[i].med,v:p.v,flag:a[i].flag}});
       const fo=s.map((p,i)=>p.failedOut?i:-1).filter(i=>i>=0);
-      const latest=s[0],lm=a[0].med;
+      const li=s.findIndex(p=>p.parts.length>0);   // the newest run that had a job on this device
+      const latest=li>=0?s[li]:null,lm=li>=0?a[li].med:null;
       const score=(fo.length?1000:0)+(worst?(worst.flag?100:0)+Math.max(0,worst.dlt):0);
       const tone=fo.length?'crit':worst&&worst.flag?'warn':'none';
       const bits=[];
       if(fo.length)bits.push(`<span style="color:var(--crit)">${fo.map(i=>'#'+esc(wCommits[i].hash)).join(', ')}: no tests ran &mdash; every ${d.label} test job failed before its tests started</span>`);
       if(worst&&worst.dlt>0)bits.push(`${worst.flag?'<span style="color:var(--warn);font-weight:600">flagged:</span> ':''}biggest rise +${fmt(worst.dlt)}m at #${esc(wCommits[worst.i].hash)} (${m(worst.v)} against a usual ${m(worst.med)})${worst.flag?'':', inside the usual range'}`);
-      else if(!fo.length)bits.push('no run rose above its usual level');
-      if(!latest.failedOut)bits.push(`latest run ${m(latest.v)}`+(worst&&worst.flag?(lm!==null&&latest.v>lm*1.15&&latest.v-lm>2?', still above usual':', back to usual'):''));
-      const target=fo.length?wCommits[fo[0]].hash:worst&&worst.dlt>0?wCommits[worst.i].hash:wCommits[0].hash;
+      else if(!fo.length)bits.push(li<0?`no run in this range had a ${d.label} job`:'no run rose above its usual level');
+      if(li>0)bits.push(`the latest run had no ${d.label} jobs`);
+      if(latest&&!latest.failedOut)bits.push(`${li>0?'the latest run with them (#'+esc(wCommits[li].hash)+')':'latest run'} ${m(latest.v)}`+(worst&&worst.flag?(lm!==null&&latest.v>lm*1.15&&latest.v-lm>2?', still above usual':', back to usual'):''));
+      const target=fo.length?wCommits[fo[0]].hash:worst&&worst.dlt>0?wCommits[worst.i].hash:wCommits[Math.max(li,0)].hash;
       return{d,score,tone,txt:bits.join(' &middot; '),target};
     }).sort((x,y)=>y.score-x.score||x.d.label.localeCompare(y.d.label));
     sumHost.innerHTML=sumBlock({key:'dev',guide:'dev-sum',guideKind:'table',title:'Largest changes by device',
@@ -1366,11 +1421,12 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
 
   });
 
-  // Endpoint labels, nudged apart when they overlap
-  const eps=DEVS.map(d=>{const p=series[d.key][off];const dimmed=HW!=='all'&&HW!==d.key;return{label:d.label,color:d.color,v:p.v,y:py(p.v),op:dimmed?0.15:1}}).sort((a,b)=>a.y-b.y);
+  // Endpoint labels, nudged apart when they overlap. A device with no job in the newest run shown gets a
+  // dash rather than reading "0m".
+  const eps=DEVS.map(d=>{const p=series[d.key][off];const dimmed=HW!=='all'&&HW!==d.key;return{label:d.label,color:d.color,v:p.v,none:!p.parts.length,y:py(p.v),op:dimmed?0.15:1}}).sort((a,b)=>a.y-b.y);
   for(let i=1;i<eps.length;i++)if(eps[i].y<eps[i-1].y+13)eps[i].y=eps[i-1].y+13;
   const lastX=xOf(0);
-  eps.forEach(p=>{el('text',{x:lastX+8,y:p.y+3,'font-size':'12','font-weight':'700',fill:p.color,'font-family':'var(--mono)',opacity:p.op}).textContent=p.label+' '+fmt(p.v)+'m'});
+  eps.forEach(p=>{el('text',{x:lastX+8,y:p.y+3,'font-size':'12','font-weight':'700',fill:p.color,'font-family':'var(--mono)',opacity:p.op}).textContent=p.label+' '+(p.none?'—':fmt(p.v)+'m')});
 
   // X labels — every merged pull request: linked hash, merge date and time (same helper as the bar charts)
   VIEW.forEach((c,vi)=>{prAxisLabelAuto(svg,ns,xOf(vi),H-B,c.hash,sp)});
@@ -1398,7 +1454,7 @@ ${wCommits.length?`<div><span class="mono">${rangeCovers(w,wCommits)}</span></di
 ${rows.map((r,ri)=>{
   const expand=HW==='all'||HW===r.key;
   return `<div style="display:flex;justify-content:space-between;gap:14px;padding:3px 0;border-top:1px solid var(--grid)">
-<span style="font-size:13px"><span style="color:${r.color};font-weight:700">${r.label}</span> <span style="font-size:12px;color:var(--muted)" class="mono">${esc(machineOfCat(r.key))}</span> <span style="font-size:11px;color:var(--muted)">${r.parts.length} jobs</span>${ri===0&&r.v>0?' <span style="font-size:11px;color:var(--warn)">sets the pace</span>':''}${r.failedOut?' <span style="font-size:11px;color:var(--crit)">no tests ran</span>':''}${r.anom?' <span style="font-size:11px;color:var(--warn)">above recent level</span>':''}</span>
+<span style="font-size:13px"><span style="color:${r.color};font-weight:700">${r.label}</span> <span style="font-size:12px;color:var(--muted)" class="mono">${esc(machineOfRun(c,r.key))}</span> <span style="font-size:11px;color:var(--muted)">${r.parts.length} jobs</span>${ri===0&&r.v>0?' <span style="font-size:11px;color:var(--warn)">sets the pace</span>':''}${r.failedOut?' <span style="font-size:11px;color:var(--crit)">no tests ran</span>':''}${r.anom?' <span style="font-size:11px;color:var(--warn)">above recent level</span>':''}</span>
 <span class="mono" style="font-weight:700;font-size:14px;color:${r.failedOut?'var(--crit)':'var(--ink)'}">${fmt(r.v)}m</span></div>`
     +(expand?r.parts.map(p=>`<div style="display:flex;justify-content:space-between;gap:14px;padding:1px 0 1px 12px">
 <span style="font-size:12px;color:${p.status==='fail'?'var(--crit)':'var(--muted)'}">${esc(p.name)}${p.status==='fail'?' — failed':''}</span>
@@ -1776,26 +1832,30 @@ function wkEntities(){
   });
   return ents;
 }
-// Per-worker rows of one suite on one commit (synthetic splits sum to the job's own test time)
+// Per-worker rows of one suite on one commit (synthetic splits sum to the job's own test time). A real run
+// lists only the workers it had: a catalogue worker the run did not have is left out, not drawn as a zero,
+// so a suite none of whose workers ran has no rows (wkEntStatus calls it 'skip').
 function wkWorkers(c,ent){
   if(ent.split){
     const d=jd(c,ent.jobs[0]);
-    return ent.split.map((f,i)=>({name:'Execute Tests ('+(i+1)+')',q:d.q,s:d.s,r:+(d.r*f).toFixed(1),status:d.status}));
+    if(d.ran===false)return [];
+    return ent.split.map((f,i)=>({name:'Execute Tests ('+(i+1)+')',id:ent.jobs[0],q:d.q,s:d.s,r:+(d.r*f).toFixed(1),status:d.status}));
   }
-  return ent.jobs.map((id,i)=>{const d=jd(c,id);return{name:'Execute Tests ('+(i+1)+')',q:d.q,s:d.s,r:d.r,status:d.status}});
+  return ent.jobs.map((id,i)=>({i,id,d:jd(c,id)})).filter(x=>x.d.ran!==false)
+    .map(({i,id,d})=>({name:'Execute Tests ('+(i+1)+')',id,q:d.q,s:d.s,r:d.r,status:d.status}));
 }
 function wkEntTime(c,ent){return ent.jobs.reduce((a,id)=>{const d=jd(c,id);return a+d.q+d.s+d.r},0)}
-function wkEntStatus(c,ent){const ss=ent.jobs.map(id=>jd(c,id).status);return ss.includes('fail')?'fail':ss.includes('flaky')?'flaky':'pass'}
-// Per-worker phase rows of one suite on one commit (shared by the chart and the popup)
+function wkEntStatus(c,ent){const ss=ent.jobs.map(id=>jd(c,id).status);return ss.includes('fail')?'fail':ss.includes('flaky')?'flaky':ss.length&&ss.every(s=>s==='skip')?'skip':'pass'}
+// Per-worker phase rows of one suite on one commit (shared by the chart and the popup). The machine is the
+// label this run's job asked for.
 function wkWorkerRows(c,ent){
   const ws=wkWorkers(c,ent);
   const n=ws.length;
-  return ws.map((wk,k)=>{
-    const q=ent.split?+(jd(c,ent.jobs[0]).q/n).toFixed(2):jd(c,ent.jobs[k]).q;
-    const s=ent.split?+(jd(c,ent.jobs[0]).s/n).toFixed(2):jd(c,ent.jobs[k]).s;
-    const jid=ent.split?ent.jobs[0]:ent.jobs[k];
-    return{name:wk.name,q,s,r:wk.r,status:wk.status,tot:+(q+s+wk.r).toFixed(2),
-      machine:RUNNER_LABELS[jid]||''};
+  return ws.map(wk=>{
+    const d=jd(c,wk.id);
+    const q=ent.split?+(d.q/n).toFixed(2):d.q;
+    const s=ent.split?+(d.s/n).toFixed(2):d.s;
+    return{name:wk.name,q,s,r:wk.r,status:wk.status,tot:+(q+s+wk.r).toFixed(2),machine:d.label};
   });
 }
 // Path with rounded top corners only (columns get a soft cap, joints stay square)
@@ -1827,13 +1887,14 @@ function openWkPop(hash){
   $('#tip').style.display='none';
   const ents=wkEntities();
   const colorOf=wkColors(ents);
-  const rows=ents.map(e=>{
+  // Only the suites this run had: a suite none of whose workers ran would be a 0.0m row.
+  const rows=ents.filter(e=>wkEntStatus(c,e)!=='skip').map(e=>{
     const ws=wkWorkers(c,e);
-    const q=ws[0].q,s=ws[0].s;
+    const q=ws.length?ws[0].q:0,s=ws.length?ws[0].s:0;
     const r=+(ws.reduce((a,x)=>a+x.r,0)).toFixed(1);
     return{...e,q,s,r,v:wkEntTime(c,e),status:wkEntStatus(c,e),workers:ws};
   }).sort((a,b)=>b.v-a.v);
-  const tot=rows.reduce((a,r)=>a+r.v,0)||1;
+  const sum=rows.reduce((a,r)=>a+r.v,0),tot=sum||1;
   const mx=Math.max(...rows.map(r=>r.v),1);
   const stChip=c.status==='fail'?'<span class="chip fail">FAILED</span>':c.status==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
   $('#wkpop-body').innerHTML=`
@@ -1841,7 +1902,8 @@ function openWkPop(hash){
 <div style="font-weight:700;font-size:15px">#${esc(c.hash)} ${esc(c.title)}</div>${stChip}
 <button onclick="closeWkPop()" style="margin-left:auto;font:600 15px var(--font);background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
 </div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">Every worker suite in this run, longest first. The time is the suite's machine minutes: runner wait, plus setup, plus test run, added up over all of its workers. That is the whole run whatever the chart's two switches are set to, so it can be larger than the bar you clicked. A suite with several parallel workers lists each worker's test minutes. Total: <span class="mono" style="font-weight:700;color:var(--ink)">${Math.round(tot)}m</span>.</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">Every worker suite in this run, longest first. The time is the suite's machine minutes: runner wait, plus setup, plus test run, added up over all of its workers. That is the whole run whatever the chart's two switches are set to, so it can be larger than the bar you clicked. A suite with several parallel workers lists each worker's test minutes. Total: <span class="mono" style="font-weight:700;color:var(--ink)">${Math.round(sum)}m</span>.</div>
+${rows.length?'':'<div style="font-size:13px;color:var(--muted);padding:4px 0">No worker suite ran in this run.</div>'}
 ${rows.map(r=>{
   const dim=HW!=='all'&&r.lane.toLowerCase()!==HW;
   const share=(r.v/tot*100).toFixed(1);
@@ -1873,13 +1935,13 @@ function openWkSuitePop(hash,gid){
   const mx=Math.max(...rows.map(r=>r.tot),0.1);
   const suiteWall=Math.max(...rows.map(r=>r.tot),0);  // the workers run at the same time
   const st=wkEntStatus(c,ent);
-  const stChip=st==='fail'?'<span class="chip fail">FAILED</span>':st==='flaky'?'<span class="chip flaky">FLAKY</span>':'<span class="chip pass">PASS</span>';
+  const stChip=st==='fail'?'<span class="chip fail">FAILED</span>':st==='flaky'?'<span class="chip flaky">FLAKY</span>':st==='skip'?'<span class="chip skip">DID NOT RUN</span>':'<span class="chip pass">PASS</span>';
   $('#wkpop-body').innerHTML=`
 <div style="display:flex;align-items:center;gap:10px;margin-bottom:2px">
 <div style="font-weight:700;font-size:15px">#${esc(c.hash)} ${esc(c.title)}</div>${stChip}
 <button onclick="closeWkPop()" style="margin-left:auto;font:600 15px var(--font);background:none;border:none;color:var(--muted);cursor:pointer">✕</button>
 </div>
-<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">${esc(ent.name)} on this run — one row per worker, with its runner wait, setup, and test minutes.${ent.split?' The worker split is estimated from the suite total.':''} Together the ${n>1?n+' workers':'worker'} used <span class="mono" style="font-weight:700;color:var(--ink)">${suiteTot.toFixed(1)}m</span> of machine time${n>1?`, and because they run at the same time the suite added <span class="mono" style="font-weight:700;color:var(--ink)">${suiteWall.toFixed(1)}m</span> to the run`:''}.</div>
+<div style="font-size:13px;color:var(--ink2);margin-bottom:10px">${esc(ent.name)} on this run — ${n?`one row per worker, with its runner wait, setup, and test minutes.${ent.split?' The worker split is estimated from the suite total.':''} Together the ${n>1?n+' workers':'worker'} used <span class="mono" style="font-weight:700;color:var(--ink)">${suiteTot.toFixed(1)}m</span> of machine time${n>1?`, and because they run at the same time the suite added <span class="mono" style="font-weight:700;color:var(--ink)">${suiteWall.toFixed(1)}m</span> to the run`:''}.`:'none of its workers ran on this run.'}</div>
 ${rows.map((r,k)=>`<div style="display:grid;grid-template-columns:16px 1fr 190px 56px;gap:10px;align-items:center;padding:5px 0;border-bottom:1px solid var(--grid)">
 <span style="width:12px;height:12px;border-radius:3px;background:${wkShade(col,k,n)};display:inline-block"></span>
 <span style="font-size:14px;${r.status==='fail'?'color:var(--crit)':''}">${r.name}${r.status==='fail'?' — failed':r.status==='flaky'?' — passed on retry':''}<br><span style="font-size:12px;color:var(--muted)">${r.q.toFixed(1)}m wait · ${r.s.toFixed(1)}m setup · ${r.r.toFixed(1)}m tests</span></span>
@@ -1931,14 +1993,16 @@ const WK_LANES=[{key:'tpu',label:'TPU'},{key:'gpu',label:'GPU'},{key:'cpu',label
 function wkLanePart(c,key){
   const ids=JOBS.filter(j=>j.cat===key).map(j=>j.id);
   if(!ids.length)return null;
+  const ran=ids.filter(id=>jd(c,id).ran!==false);  // jobs this run really had
   if(WK_MEASURE==='machine'){
-    let q=0,s=0,r=0;ids.forEach(id=>{const p=wkPhases(c,id);q+=p.q;s+=p.s;r+=p.r});
-    return{key,q,s,r,tot:+(q+s+r).toFixed(2),n:ids.length,lead:''};
+    let q=0,s=0,r=0;ran.forEach(id=>{const p=wkPhases(c,id);q+=p.q;s+=p.s;r+=p.r});
+    return{key,q,s,r,tot:+(q+s+r).toFixed(2),n:ran.length,lead:'',lb:''};
   }
+  // lb: the machine the lead job asked for in this run
   let best=null;
-  ids.forEach(id=>{const p=wkPhases(c,id);const t=p.q+p.s+p.r;
-    if(!best||t>best.tot)best={key,q:p.q,s:p.s,r:p.r,tot:+t.toFixed(2),n:ids.length,lead:id}});
-  return best;
+  ran.forEach(id=>{const p=wkPhases(c,id);const t=p.q+p.s+p.r;
+    if(!best||t>best.tot)best={key,q:p.q,s:p.s,r:p.r,tot:+t.toFixed(2),n:ran.length,lead:id,lb:jd(c,id).label}});
+  return best||{key,q:0,s:0,r:0,tot:0,n:0,lead:'',lb:''};
 }
 // Per-worker rows with the phase switch applied. The popups keep the unfiltered rows, because
 // a drill-down that hid the runner wait would be hiding the thing you opened it to find.
@@ -1957,9 +2021,12 @@ function renderWorker(){
   if(chips){
     const catLabel={tpu:'TPU',gpu:'GPU',cpu:'CPU',build:'Build',infra:'Checks'};
     const byCat={};ents.forEach(e=>{(byCat[e.cat]=byCat[e.cat]||[]).push(e)});
+    // The most workers a suite had on one run in the range, not every worker the stored months have seen.
+    const nWk=e=>{if(e.split)return e.split.length;let k=0;LIST.forEach(c=>{k=Math.max(k,e.jobs.filter(id=>!c.exact||c.o[id]).length)});return k};
+    const wkNote=e=>{if(!(e.jobs.length>1||e.split))return'';const k=nWk(e);return' — '+(k?k+(k===1?' worker':' workers'):'did not run in this range')};
     const sel=`<select onchange="setWKSel(this.value)" style="font:600 13px var(--font);background:var(--elevated);color:var(--ink);border:1px solid var(--border);padding:5px 8px;border-radius:6px;max-width:300px;cursor:pointer">
 <option value="all" ${WK_SEL==='all'?'selected':''}>All worker suites</option>
-${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]}">${(byCat[cat]||[]).map(e=>`<option value="${esc(e.gid)}" ${WK_SEL===e.gid?'selected':''}>${esc(e.name)}${e.jobs.length>1||e.split?' — '+(e.split?e.split.length:e.jobs.length)+' workers':''}</option>`).join('')}</optgroup>`).join('')}
+${['tpu','gpu','cpu','build','infra'].map(cat=>`<optgroup label="${catLabel[cat]}">${(byCat[cat]||[]).map(e=>`<option value="${esc(e.gid)}" ${WK_SEL===e.gid?'selected':''}>${esc(e.name)}${wkNote(e)}</option>`).join('')}</optgroup>`).join('')}
 </select>`;
     const row=(label,items,cur,fn)=>`<span style="font-size:13px;color:var(--muted)">${label}</span>`
       +items.map(i=>`<button class="fchip ${i.key===cur?'on':''}" style="border-radius:8px" title="${i.note}" onclick="${fn}('${i.key}')">${i.chip}</button>`).join('');
@@ -2046,7 +2113,7 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
         });
       });
       prAxisLabelAuto(svg,ns,x0+slotW/2,H-B,c.hash,slotW+gap);
-      el('text',{x:x0+slotW/2,y:py(dpt.v)-5,'text-anchor':'middle','font-size':'11',fill:'#94A3B8','font-family':'var(--mono)'}).textContent=dpt.v.toFixed(1)+'m';
+      el('text',{x:x0+slotW/2,y:py(dpt.v)-5,'text-anchor':'middle','font-size':'11',fill:'#94A3B8','font-family':'var(--mono)'}).textContent=n?dpt.v.toFixed(1)+'m':'—';  // — : no worker of the suite ran
       if(dpt.status==='fail')el('text',{x:x0+slotW/2,y:py(dpt.v)-16,'text-anchor':'middle','font-size':'12','font-weight':'700',fill:'#EF4444','font-family':'var(--font)'}).textContent='✕';
     });
     host.appendChild(svg);
@@ -2105,7 +2172,7 @@ ${wk.status==='fail'?'<div style="font-size:12px;color:var(--crit);margin-top:4p
           svg.querySelectorAll('[data-gid]').forEach(nd=>nd.setAttribute('opacity',nd.getAttribute('data-gid')===L.key?nd.getAttribute('data-op'):'0.22'));
           tEl.innerHTML=`<div style="font-weight:700;font-size:14px;margin-bottom:2px">${L.label} lane</div>
 <div style="font-size:13px;color:var(--ink2)">#${esc(c.hash)} · ${p.n} job${p.n===1?'':'s'} · ${WK_MEASURE==='wall'?'the slowest one is drawn':'all of them added up'}</div>
-${WK_MEASURE==='wall'&&p.lead?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${esc((JOBS.find(j=>j.id===p.lead)||{}).name||p.lead)}${RUNNER_LABELS[p.lead]?' · '+esc(RUNNER_LABELS[p.lead]):''}</div>`:'<div style="margin-bottom:6px"></div>'}
+${WK_MEASURE==='wall'&&p.lead?`<div class="mono" style="font-size:12px;color:var(--muted);margin-bottom:6px">${esc((JOBS.find(j=>j.id===p.lead)||{}).name||p.lead)}${p.lb?' · '+esc(p.lb):''}</div>`:'<div style="margin-bottom:6px"></div>'}
 ${breakdown(p,sl.label)}
 <div style="display:flex;justify-content:space-between;gap:14px;font-size:14px;font-weight:700;border-top:1px solid var(--grid);margin-top:4px;padding-top:4px"><span>This lane</span><span class="mono">${p.tot.toFixed(1)}m</span></div>
 <div style="display:flex;justify-content:space-between;gap:14px;font-size:13px;color:var(--ink2)"><span>${WK_MEASURE==='wall'?'Slowest lane in this run':'Every lane added up'}</span><span class="mono">${groupVal[i].toFixed(1)}m</span></div>
@@ -2739,6 +2806,10 @@ function computeInsights(){
     let maxQ=0,maxPr=null;
     const waits=[];
     cur.forEach(c=>{
+      // A run with no job on this device neither waited for one nor used one: leave it out instead of
+      // counting a zero wait (or, for the sample data, a filled-in usual wait). The same goes for a run
+      // whose jobs on the device were all cancelled before they got a runner: no wait was recorded.
+      if(!allJobs(c).some(j=>j.cat===cat&&j.ran!==false&&j.held!==false))return;
       const wc=wallClock(c,'all');
       const q=(wc.catQueue&&wc.catQueue[cat])||0;
       waits.push(q);
@@ -2889,6 +2960,9 @@ async function loadPrDetailIntoModal(hash,runUrl){
     }
     const prView=PR_VIEW_CACHE[hash];
     if(!prView||!prView.tables)return;
+    // The file describes one run. If it is not the run this page drew for the pull request (a file left
+    // from another month's choice), its steps, errors and tests belong to another run: show none of them.
+    if(RUN_IDS[hash]!=null&&Number(prView.run_id)!==Number(RUN_IDS[hash]))return;
     const bannerEl=document.getElementById('modal-pr-banner-'+hash);
     if(!bannerEl)return;
 
@@ -3073,17 +3147,40 @@ function adaptViews(v){
 
   // ---- the job catalogue, discovered from the data rather than hard-coded ----
   const seen=new Map();
+  const runAt=new Map(runs.map(x=>[x.run_id,String(x.created_at||x.merged_at||'')]));
   jobRows.forEach(r=>{
     const lane=resolveLane(r);
     const id=jobSlug(r);
     if(!seen.has(id))seen.set(id,{id,name:jobTitle(r),cat:LANE_CAT[lane]||'infra',
-                                  lane:lane||'Hosted',label:r.runner_label||'',q:[],s:[],r:[]});
+                                  lane:lane||'Hosted',label:'',labelAt:'',q:[],s:[],r:[]});
     const j=seen.get(id);
+    // The newest run's label wins: runner labels change (CPU jobs moved from linux-x86-n2-32 to
+    // linux-x86-n4-32 on Oct 22), and the first row read is not the newest.
+    const at=runAt.get(r.run_id)||'';
+    if(r.runner_label&&at>=j.labelAt){j.label=r.runner_label;j.labelAt=at}
+    // A job cancelled before it got a runner has no times at all: its zeros are not its usual minutes.
+    if(r.queued_seconds==null)return;
     j.q.push(mins(r.queued_seconds));j.s.push(mins(r.setup_seconds));j.r.push(mins(r.run_seconds));
   });
   const jobs=[...seen.values()].map(j=>({id:j.id,name:j.name,cat:j.cat,lane:j.lane,
     b:{q:median(j.q),s:median(j.s),r:median(j.r)}}));
   const labels=dict();seen.forEach((j,id)=>{if(j.label)labels[id]=j.label});
+  // One label per device for the range-wide rows (machineOfCat): the label most of that device's jobs
+  // asked for in the newest run that had any. Ties go to the alphabetically first label.
+  const catLabels=dict();
+  {
+    const newest=dict();
+    jobRows.forEach(r=>{
+      if(!r.runner_label)return;
+      const cat=LANE_CAT[resolveLane(r)]||'infra',at=runAt.get(r.run_id)||'';
+      const cur=newest[cat];
+      if(!cur||at>cur.at)newest[cat]={at,n:new Map([[r.runner_label,1]])};
+      else if(at===cur.at)cur.n.set(r.runner_label,(cur.n.get(r.runner_label)||0)+1);
+    });
+    Object.keys(newest).forEach(cat=>{
+      catLabels[cat]=[...newest[cat].n.entries()].sort((a,b)=>b[1]-a[1]||(a[0]<b[0]?-1:1))[0][0];
+    });
+  }
 
   // ---- one entry per merged pull request, oldest first ----
   const byRun=new Map();
@@ -3118,13 +3215,16 @@ function adaptViews(v){
     const hash=String(run.pr);
     const o=dict();
     (byRun.get(run.run_id)||[]).forEach(r=>{
+      // h: the job held a runner (a job cancelled while it waited has no queued_seconds); lb: its label.
       o[jobSlug(r)]={q:mins(r.queued_seconds),s:mins(r.setup_seconds),r:mins(r.run_seconds),
-                     st:r.conclusion==='success'?'pass':'fail'};
+                     st:r.conclusion==='success'?'pass':'fail',h:r.queued_seconds!=null,lb:r.runner_label||''};
     });
     const rescued=rescues.some(x=>x.run_id===run.run_id&&x.rescued);
+    // counted: every job GitHub listed for the run, the GitHub-hosted checks included (o holds only the
+    // TPU, GPU, CPU and build jobs).
     commits.push({hash,pr:'#'+run.pr,title:run.title||'',
       status:run.conclusion==='success'?(rescued?'flaky':'pass'):'fail',
-      attempts:run.attempts||1,concurrent:run.overlapping_runs||0,o});
+      attempts:run.attempts||1,concurrent:run.overlapping_runs||0,o,exact:true,counted:run.jobs_counted??null});
     const when=run.created_at||run.merged_at;
     times[hash]=stamp(when);timeIso[hash]=when;
     runIds[hash]=run.run_id;triggers[hash]=run.event||'';
@@ -3159,6 +3259,8 @@ function adaptViews(v){
   });
 
   // ---- worker groups: any flavor that ran on more than one worker ----
+  // The name carries no worker count: the catalogue holds every worker the stored months have seen, more
+  // than many runs had. The worker views count the workers each run (or the range) really had.
   const perFlavor=dict();
   jobs.forEach(j=>{
     const flavor=j.id.split('#')[0];
@@ -3167,13 +3269,13 @@ function adaptViews(v){
   const wkGroups=dict();
   Object.entries(perFlavor).forEach(([flavor,list])=>{
     if(list.length<2)return;
-    wkGroups[flavor]={name:`${list[0].name.replace(/ \(worker \d+\)$/,'')} (${list.length} workers)`,
+    wkGroups[flavor]={name:list[0].name.replace(/ \(worker \d+\)$/,''),
       cat:list[0].cat,lane:list[0].lane,jobs:list.map(j=>j.id)};
   });
   // Group Jupyter Notebook test jobs into one suite
   const nbJobs=jobs.filter(j=>/^Jupyter Notebook Tests/i.test(j.name));
   if(nbJobs.length>1){
-    wkGroups['jupyter-nb']={name:`Jupyter Notebook Tests (${nbJobs.length} notebooks)`,
+    wkGroups['jupyter-nb']={name:'Jupyter Notebook Tests',
       cat:nbJobs[0].cat,lane:nbJobs[0].lane,jobs:nbJobs.map(j=>j.id)};
   }
 
@@ -3296,7 +3398,7 @@ function adaptViews(v){
     .map(r=>({runId:r.run_id,jobName:r.job_name||'',lane:resolveLane(r),rescued:!!r.rescued,
       iso:r.created_at,day:String(r.created_at||'').slice(0,10),date:stamp(r.created_at),url:r.html_url||null}));
 
-  return{jobs,labels,commits,times,timeIso,runIds,triggers,probeQ,counts,
+  return{jobs,labels,catLabels,commits,times,timeIso,runIds,triggers,probeQ,counts,
     wkGroups,thCategories,thCommits,
     rescues:Object.values(rescueByJob),flaky:Object.values(flakyByTest),
     schedCommits,schedRescues:Object.values(schedRescueByJob),schedFlakyTests:Object.values(schedFlakyByTest),
@@ -3305,7 +3407,7 @@ function adaptViews(v){
 
 // Assigning the model is the only place the globals are written.
 function applyModel(m,generatedAt){
-  JOBS=m.jobs;RUNNER_LABELS=m.labels;
+  JOBS=m.jobs;RUNNER_LABELS=m.labels;CAT_LABELS=m.catLabels||dict();
   COMMITS=m.commits;TIMES=m.times;TIME_ISO=m.timeIso;
   RUN_IDS=m.runIds;TRIGGERS=m.triggers;PROBE_Q=m.probeQ;
   TEST_COUNTS=m.counts;WK_GROUPS=m.wkGroups;
