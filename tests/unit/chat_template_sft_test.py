@@ -124,7 +124,7 @@ class ChatTemplateGemma4ThinkingTest(parameterized.TestCase):
     self.assertNotIn("thought", completion_seg)
 
   def test_multi_turn_with_thinking(self):
-    """Verifies multi-turn conversation with independent turn formatting."""
+    """Verifies whole-conversation multi-turn formatting matches Gemma 4's template without duplicate <bos>."""
     turn1 = [
         {"role": "system", "content": "You are a coding assistant."},
         {"role": "user", "content": "Step 1: Write a function."},
@@ -136,6 +136,8 @@ class ChatTemplateGemma4ThinkingTest(parameterized.TestCase):
     ]
     sample = {"messages": turn1 + turn2}
 
+    true_full_str = self.tokenizer.apply_chat_template(sample["messages"], add_generation_prompt=False, tokenize=False)
+
     processed = input_pipeline_utils.apply_chat_template(
         example={"messages": list(sample["messages"])},
         tokenizer_model=self.tokenizer,
@@ -144,16 +146,49 @@ class ChatTemplateGemma4ThinkingTest(parameterized.TestCase):
 
     self.assertEqual(len(processed["messages"]), 4)
     self.assertEqual(processed["is_prompt"], [True, False, True, False])
+    self.assertEqual("".join(processed["messages"]), true_full_str)
 
-    # Turn 1
-    self.assertTrue(processed["messages"][0].endswith("<|turn>model\n<|channel>thought\n"))
-    self.assertTrue(processed["messages"][1].startswith("Thinking step 1..."))
-    self.assertIn("<channel|>def step1(): pass<turn|>\n", processed["messages"][1])
+    # Turn 1: Gemma 4's template omits prior-turn thought traces in multi-turn history.
+    self.assertTrue(processed["messages"][0].startswith("<bos><|turn>system\n"))
+    self.assertTrue(processed["messages"][0].endswith("<|turn>model\n"))
+    self.assertEqual(processed["messages"][1], "def step1(): pass<turn|>\n")
 
-    # Turn 2
+    # Turn 2: no duplicate <bos>; final assistant turn preserves thought channel.
+    self.assertFalse(processed["messages"][2].startswith("<bos>"))
     self.assertTrue(processed["messages"][2].endswith("<|turn>model\n<|channel>thought\n"))
     self.assertTrue(processed["messages"][3].startswith("Thinking step 2..."))
     self.assertIn("<channel|>def step2(): print('done')<turn|>\n", processed["messages"][3])
+
+  def test_multi_turn_with_tool_and_trailing_user(self):
+    """Verifies Gemma 4 tool_calls/tool responses and trailing user turns are preserved and masked."""
+    sample = {
+        "messages": [
+            {"role": "user", "content": "Check weather in NYC."},
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {"id": "c1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "NYC"}}}
+                ],
+                "content": "",
+            },
+            {"role": "tool", "tool_call_id": "c1", "content": "72F sunny"},
+            {"role": "assistant", "content": "It is 72F and sunny."},
+            {"role": "user", "content": "Thanks!"},
+        ]
+    }
+    true_full_str = self.tokenizer.apply_chat_template(sample["messages"], add_generation_prompt=False, tokenize=False)
+    processed = input_pipeline_utils.apply_chat_template(
+        example={"messages": list(sample["messages"])},
+        tokenizer_model=self.tokenizer,
+        data_column_name="messages",
+    )
+    self.assertEqual("".join(processed["messages"]), true_full_str)
+    self.assertEqual(processed["is_prompt"], [True, False, True, False, True])
+    self.assertIn("call:get_weather", processed["messages"][1])
+    self.assertIn("72F sunny", processed["messages"][2])
+    self.assertEqual(processed["messages"][3], "It is 72F and sunny.<turn|>\n")
+    self.assertIn("Thanks!", processed["messages"][4])
+    self.assertEqual("".join(processed["messages"]).count("<bos>"), 1)
 
   def test_no_system_message(self):
     """Verifies handling when no system message is provided."""
@@ -354,6 +389,228 @@ class SFTPromptMaskingEdgeCasesTest(parameterized.TestCase):
     self.assertNotIn("<|channel>", trained_text)
     self.assertNotIn("<channel|>", trained_text)
     self.assertNotIn("thought", trained_text)
+
+
+class _SyntheticWholeConversationTokenizer:
+  """Minimal offline tokenizer for whole-conversation chat template regression tests.
+
+  Models templates that inject a default system prompt once at turn 0 and emit an
+  EOS token only after the final message (e.g., OLMo-3 Instruct).
+  """
+
+  def __init__(self, *, support_generation_blocks: bool = False):
+    self._support_generation_blocks = support_generation_blocks
+    self.bos_token = "<|endoftext|>"
+    self.eos_token = "<|endoftext|>"
+    self.pad_token = "<|pad|>"
+    self.eos_token_id = 1
+    self.bos_token_id = 1
+    self.pad_token_id = 0
+    self.unk_token_id = 0
+    self.special_tokens_map = {
+        "bos_token": self.bos_token,
+        "eos_token": self.eos_token,
+        "pad_token": self.pad_token,
+    }
+    self.chat_template = (
+        "{% if not messages or messages[0]['role'] != 'system' %}"
+        "<|im_start|>system\nDefault system.<|im_end|>\n"
+        "{% endif %}"
+        "{% for message in messages %}"
+        "<|im_start|>{{ message['role'] }}\n"
+        "{% if message['role'] == 'assistant' %}"
+        "{% generation %}{{ message['content'] }}"
+        "{% if loop.last and not add_generation_prompt %}<|im_end|>{{ eos_token }}{% else %}<|im_end|>\n{% endif %}"
+        "{% endgeneration %}"
+        "{% else %}"
+        "{{ message['content'] }}<|im_end|>\n"
+        "{% endif %}"
+        "{% endfor %}"
+        "{% if add_generation_prompt %}<|im_start|>assistant\n{% endif %}"
+        if support_generation_blocks
+        else None
+    )
+    self._special = ["<|endoftext|>", "<|im_start|>", "<|im_end|>", "<|pad|>"]
+    self._vocab = {
+        "<|pad|>": 0,
+        "<|endoftext|>": 1,
+        "<|im_start|>": 2,
+        "<|im_end|>": 3,
+    }
+    self._inv = {v: k for k, v in self._vocab.items()}
+
+  def get_chat_template(self):
+    return self.chat_template
+
+  def _tokenize_with_offsets(self, text: str):
+    ids = []
+    offsets = []
+    i = 0
+    n = len(text)
+    while i < n:
+      matched = None
+      for sp in self._special:
+        if text.startswith(sp, i):
+          matched = sp
+          break
+      if matched is not None:
+        tok = matched
+        end = i + len(matched)
+      else:
+        tok = text[i]
+        end = i + 1
+      if tok not in self._vocab:
+        idx = len(self._vocab)
+        self._vocab[tok] = idx
+        self._inv[idx] = tok
+      ids.append(self._vocab[tok])
+      offsets.append((i, end))
+      i = end
+    return ids, offsets
+
+  def __call__(self, text, add_special_tokens=False, return_offsets_mapping=False, **_kwargs):
+    if isinstance(text, list):
+      all_ids = [self._tokenize_with_offsets(t)[0] for t in text]
+      return {"input_ids": all_ids}
+    ids, offsets = self._tokenize_with_offsets(text)
+    out = {"input_ids": ids}
+    if return_offsets_mapping:
+      out["offset_mapping"] = offsets
+    return out
+
+  def decode(self, ids, skip_special_tokens=False):
+    if skip_special_tokens:
+      return "".join(self._inv[i] for i in ids if self._inv[i] not in self._special)
+    return "".join(self._inv[i] for i in ids)
+
+  def apply_chat_template(
+      self,
+      messages,
+      add_generation_prompt=False,
+      tokenize=False,
+      return_dict=False,
+      return_assistant_tokens_mask=False,
+  ):
+    pieces = []
+    mask_spans = []
+    pos = 0
+    has_sys = bool(messages and messages[0]["role"] == "system")
+    if not has_sys:
+      default_sys = "<|im_start|>system\nDefault system.<|im_end|>\n"
+      pieces.append(default_sys)
+      pos += len(default_sys)
+    for idx, msg in enumerate(messages):
+      header = f"<|im_start|>{msg['role']}\n"
+      pieces.append(header)
+      pos += len(header)
+      body_start = pos
+      body = msg.get("content", "")
+      if msg["role"] == "assistant" and idx == len(messages) - 1 and not add_generation_prompt:
+        closer = "<|im_end|><|endoftext|>"
+      else:
+        closer = "<|im_end|>\n"
+      chunk = body + closer
+      pieces.append(chunk)
+      pos += len(chunk)
+      if msg["role"] == "assistant":
+        mask_spans.append((body_start, pos))
+    if add_generation_prompt:
+      gen = "<|im_start|>assistant\n"
+      pieces.append(gen)
+      pos += len(gen)
+    rendered = "".join(pieces)
+    if not tokenize:
+      return rendered
+    ids, offsets = self._tokenize_with_offsets(rendered)
+    if return_dict:
+      out = {"input_ids": ids}
+      if return_assistant_tokens_mask and self._support_generation_blocks:
+        mask = [
+            1 if any(s <= start and end <= e for s, e in mask_spans) else 0
+            for start, end in offsets
+        ]
+        out["assistant_tokens_mask"] = mask
+      return out
+    return ids
+
+
+class ChatTemplateWholeConversationTest(parameterized.TestCase):
+  """Offline regression tests for whole-conversation chat template splitting."""
+
+  def test_multi_turn_default_system_and_end_only_eos(self):
+    """Default system prompt and final EOS must each appear once in multi-turn conversations."""
+    tok = _SyntheticWholeConversationTokenizer()
+    messages = [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "Q2"},
+        {"role": "assistant", "content": "A2"},
+    ]
+    expected_full = tok.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
+    processed = input_pipeline_utils.apply_chat_template({"messages": list(messages)}, tok, "messages")
+
+    self.assertEqual(processed["is_prompt"], [True, False, True, False])
+    self.assertEqual("".join(processed["messages"]), expected_full)
+    self.assertEqual("".join(processed["messages"]).count("Default system."), 1)
+    self.assertEqual("".join(processed["messages"]).count("<|endoftext|>"), 1)
+    self.assertEqual(processed["messages"][1], "A1<|im_end|>\n")
+    self.assertEqual(processed["messages"][3], "A2<|im_end|><|endoftext|>")
+
+  def test_tool_and_trailing_user_messages_are_preserved_and_masked(self):
+    """Non-user/non-assistant roles (e.g. tool) and trailing user turns stay intact and masked."""
+    tok = _SyntheticWholeConversationTokenizer()
+    messages = [
+        {"role": "user", "content": "Run calc"},
+        {"role": "assistant", "content": "calc(1+1)"},
+        {"role": "tool", "content": "2"},
+        {"role": "assistant", "content": "The answer is 2."},
+        {"role": "user", "content": "Bye"},
+    ]
+    expected_full = tok.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
+    processed = input_pipeline_utils.apply_chat_template({"messages": list(messages)}, tok, "messages")
+
+    self.assertEqual(processed["is_prompt"], [True, False, True, False, True])
+    self.assertEqual("".join(processed["messages"]), expected_full)
+    self.assertEqual(processed["messages"][1], "calc(1+1)<|im_end|>\n")
+    self.assertIn("<|im_start|>tool\n2<|im_end|>\n", processed["messages"][2])
+    self.assertEqual(processed["messages"][3], "The answer is 2.<|im_end|>\n")
+    self.assertIn("<|im_start|>user\nBye<|im_end|>", processed["messages"][4])
+
+  def test_generation_blocks_mask_is_used_when_supported(self):
+    """Templates with {% generation %} blocks use assistant_tokens_mask directly."""
+    tok = _SyntheticWholeConversationTokenizer(support_generation_blocks=True)
+    messages = [
+        {"role": "user", "content": "Hi"},
+        {"role": "assistant", "content": "Hello!"},
+        {"role": "user", "content": "More"},
+        {"role": "assistant", "content": "Sure."},
+    ]
+    expected_full = tok.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
+    processed = input_pipeline_utils.apply_chat_template({"messages": list(messages)}, tok, "messages")
+
+    self.assertEqual(processed["is_prompt"], [True, False, True, False])
+    self.assertEqual("".join(processed["messages"]), expected_full)
+    self.assertEqual(processed["messages"][1], "Hello!<|im_end|>\n")
+    self.assertEqual(processed["messages"][3], "Sure.<|im_end|><|endoftext|>")
+
+  def test_document_role_passthrough_trains_full_text_plus_eos(self):
+    """Single-message role='document' bypasses chat template and trains on raw text + EOS."""
+    tok = _SyntheticWholeConversationTokenizer()
+    processed = input_pipeline_utils.apply_chat_template(
+        {"messages": [{"role": "document", "content": "Raw text."}]}, tok, "messages"
+    )
+    self.assertEqual(processed["is_prompt"], [False])
+    expected_ids = tok("Raw text.", add_special_tokens=False)["input_ids"] + [tok.eos_token_id]
+    self.assertEqual(processed["messages"], [expected_ids])
+    # Also verify batched tokenization passes pre-tokenized document IDs through unchanged.
+    batched = input_pipeline_utils.tokenization(
+        {"messages": [processed["messages"]]},
+        hf_tokenizer=tok,
+        truncation=False,
+        max_length=64,
+        column_names=["messages"],
+    )
+    self.assertEqual(batched["messages"], [processed["messages"]])
 
 
 if __name__ == "__main__":
