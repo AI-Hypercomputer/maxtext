@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU tests for `moe_replica_weights.extend_with_replicas`."""
+"""CPU and TPU unit tests for `moe_replica_weights.extend_with_replicas`."""
 
+import functools
 import types
 from unittest import mock
 
@@ -21,36 +22,19 @@ from absl.testing import absltest
 from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 import numpy as np
+import pytest
 
 from maxtext.layers import moe_replica_weights as mrw
+from tests.utils import moe_replica_test_utils
 
 AXIS = "ep"
 NUM_EP = 4
 LOCAL = 3
 NUM_REPLICAS = 2
 DIM = 5
-
-
-def _emulated_ragged_all_to_all(operand, output, input_offsets, send_sizes, output_offsets, recv_sizes, *, axis_name):
-  """Emulates `jax.lax.ragged_all_to_all` across a vmapped `axis_name` on CPU."""
-  del recv_sizes
-  ep = input_offsets.shape[0]
-  me = jax.lax.axis_index(axis_name)
-  all_op = jax.lax.all_gather(operand, axis_name=axis_name)
-  all_in = jax.lax.all_gather(input_offsets, axis_name=axis_name)
-  all_sz = jax.lax.all_gather(send_sizes, axis_name=axis_name)
-  all_out = jax.lax.all_gather(output_offsets, axis_name=axis_name)
-  rows = jnp.arange(output.shape[0])
-  buf = output
-  for src in range(ep):
-    off_in = all_in[src, me]
-    sz = all_sz[src, me]
-    off_out = all_out[src, me]
-    idx = jnp.clip(rows - off_out + off_in, 0, operand.shape[0] - 1)
-    mask = ((rows >= off_out) & (rows < off_out + sz)).reshape((output.shape[0],) + (1,) * (output.ndim - 1))
-    buf = jnp.where(mask, all_op[src, idx], buf)
-  return buf
 
 
 def _hand_plan():
@@ -73,20 +57,33 @@ def _hand_plan():
   )
 
 
-def _reference(w, g_rep, plan):
-  """NumPy reference for replica rows `[EP, R, ...]` and home-grad contributions `[EP, L, ...]`."""
-  rep_home = np.asarray(plan.rep_home)
-  rep_slot = np.asarray(plan.rep_slot)
-  reps = np.zeros((NUM_EP, NUM_REPLICAS) + w.shape[2:], dtype=w.dtype)
-  dw_rep = np.zeros_like(w)
-  for r in range(NUM_EP):
-    for s in range(NUM_REPLICAS):
-      h = int(rep_home[r, s])
-      if h >= 0:
-        loc = int(rep_slot[r, s])
-        reps[r, s] = w[h, loc]
-        dw_rep[h, loc] += g_rep[r, s]
-  return reps, dw_rep
+def _plan_from_transfers(num_ep, local, num_replicas, max_send, transfers):
+  """Builds a deterministic plan from `(home, local_slot, receiver)` triples satisfying all plan invariants."""
+  rep_home = np.full((num_ep, num_replicas), -1, dtype=np.int32)
+  rep_slot = np.zeros((num_ep, num_replicas), dtype=np.int32)
+  send_slots = np.zeros((num_ep, max_send), dtype=np.int32)
+  send_peer_index = np.full((num_ep, num_ep), -1, dtype=np.int32)
+  recv_fill = np.zeros((num_ep,), dtype=np.int32)
+  send_fill = np.zeros((num_ep,), dtype=np.int32)
+  for h, loc, r in sorted(transfers, key=lambda t: (t[0], t[2])):
+    assert 0 <= h < num_ep and 0 <= r < num_ep and h != r and 0 <= loc < local
+    assert send_peer_index[h, r] == -1 and recv_fill[r] < num_replicas and send_fill[h] < max_send
+    s = recv_fill[r]
+    recv_fill[r] += 1
+    rep_home[r, s] = h
+    rep_slot[r, s] = loc
+    k = send_fill[h]
+    send_fill[h] += 1
+    send_slots[h, k] = loc
+    send_peer_index[h, r] = k
+  return types.SimpleNamespace(
+      rep_home=jnp.asarray(rep_home),
+      rep_slot=jnp.asarray(rep_slot),
+      send_slots=jnp.asarray(send_slots),
+      send_peer_index=jnp.asarray(send_peer_index),
+      num_slots=local + num_replicas,
+      num_replicas=num_replicas,
+  )
 
 
 class MoveParamsTest(absltest.TestCase):
@@ -112,7 +109,7 @@ class ExtendWithReplicasTest(parameterized.TestCase):
     self.plan = _hand_plan()
     self.w = rng.standard_normal((NUM_EP, LOCAL, DIM, 4)).astype(np.float32)
     self.g = rng.standard_normal((NUM_EP, LOCAL + NUM_REPLICAS, DIM, 4)).astype(np.float32)
-    patcher = mock.patch.object(jax.lax, "ragged_all_to_all", _emulated_ragged_all_to_all)
+    patcher = mock.patch.object(jax.lax, "ragged_all_to_all", moe_replica_test_utils.emulated_ragged_all_to_all)
     patcher.start()
     self.addCleanup(patcher.stop)
 
@@ -129,9 +126,27 @@ class ExtendWithReplicasTest(parameterized.TestCase):
         self.w,
         self.g,
     )
-    reps, dw_rep = _reference(self.w, self.g[:, LOCAL:], self.plan)
+    reps, dw_rep = moe_replica_test_utils.replica_reference(self.w, self.g[:, LOCAL:], self.plan)
     np.testing.assert_array_equal(np.asarray(out), np.concatenate([self.w, reps], axis=1))
     np.testing.assert_allclose(np.asarray(dw), self.g[:, :LOCAL] + dw_rep, rtol=1e-6, atol=1e-6)
+
+  def test_corrupted_bwd_recv_size_raises(self):
+    """Verifies the CPU emulator rejects a mismatched backward `recv_sizes` argument."""
+    orig_extend_direct = mrw._extend_direct  # pylint: disable=protected-access
+
+    def corrupt_bwd_recv(*args):
+      idx = args[6]
+      corrupted_idx = (*idx[:8], jnp.zeros_like(idx[8]))
+      return orig_extend_direct(*args[:6], corrupted_idx)
+
+    with mock.patch.object(mrw, "_extend_direct", side_effect=corrupt_bwd_recv):
+      with self.assertRaisesRegex((ValueError, jax.errors.JaxRuntimeError), "recv_sizes"):
+        out, dw = self._vjp(
+            lambda w: mrw.extend_with_replicas(w, self.plan, AXIS, NUM_EP, jnp.float32),
+            self.w,
+            self.g,
+        )
+        jax.block_until_ready((out, dw))
 
   def test_slot0_with_unused_send_slots_padded_to_zero(self):
     """Regression test: home 0 sends local slot 0 while max_send=4 pads unused send_slots with 0s."""
@@ -148,7 +163,7 @@ class ExtendWithReplicasTest(parameterized.TestCase):
         self.w,
         self.g,
     )
-    reps, dw_rep = _reference(self.w, self.g[:, LOCAL:], plan)
+    reps, dw_rep = moe_replica_test_utils.replica_reference(self.w, self.g[:, LOCAL:], plan)
     np.testing.assert_array_equal(np.asarray(out), np.concatenate([self.w, reps], axis=1))
     np.testing.assert_allclose(np.asarray(dw), self.g[:, :LOCAL] + dw_rep, rtol=1e-6, atol=1e-6)
 
@@ -181,7 +196,7 @@ class ExtendWithReplicasTest(parameterized.TestCase):
     self.assertEqual(dw.dtype, jnp.float32)
     w_bf16 = np.asarray(jnp.asarray(self.w, dtype=jnp.bfloat16), dtype=np.float32)
     g_f32 = np.asarray(g_bf16, dtype=np.float32)
-    reps, dw_rep = _reference(w_bf16, g_f32[:, LOCAL:], self.plan)
+    reps, dw_rep = moe_replica_test_utils.replica_reference(w_bf16, g_f32[:, LOCAL:], self.plan)
     np.testing.assert_array_equal(np.asarray(out, dtype=np.float32), np.concatenate([w_bf16, reps], axis=1))
     np.testing.assert_allclose(np.asarray(dw), g_f32[:, :LOCAL] + dw_rep, rtol=1e-2, atol=1e-2)
 
@@ -216,6 +231,76 @@ class ExtendWithReplicasTest(parameterized.TestCase):
         mrw.extend_with_replicas(w_single, bad_plan, AXIS, NUM_EP, jnp.float32)
     with self.assertRaises(ValueError):
       mrw.extend_with_replicas(w_single, self.plan, AXIS, 0, jnp.float32)
+
+
+@pytest.mark.tpu_only
+class ExtendWithReplicasTpuTest(parameterized.TestCase):
+  """Runs `extend_with_replicas` under `jax.shard_map` with the real TPU `ragged_all_to_all` collective."""
+
+  def _run_shard_map_vjp(self, devs, plan, w_np, g_np, *, compute_dtype):
+    """Executes forward and backward `extend_with_replicas` inside `jax.shard_map`."""
+    self.assertIsNot(jax.lax.ragged_all_to_all, moe_replica_test_utils.emulated_ragged_all_to_all)
+    num_ep = len(devs)
+    mesh = Mesh(np.asarray(devs), (AXIS,))
+    w_sharded = jax.device_put(jnp.asarray(w_np), jax.sharding.NamedSharding(mesh, P(AXIS)))
+    g_sharded = jax.device_put(jnp.asarray(g_np, dtype=compute_dtype), jax.sharding.NamedSharding(mesh, P(AXIS)))
+
+    @jax.jit
+    @functools.partial(jax.shard_map, mesh=mesh, in_specs=(P(AXIS), P(AXIS)), out_specs=(P(AXIS), P(AXIS)))
+    def step(w_shard, g_shard):
+      w_local = w_shard[0]
+      g_local = g_shard[0]
+      out_local, vjp_fn = jax.vjp(lambda w: mrw.extend_with_replicas(w, plan, AXIS, num_ep, compute_dtype), w_local)
+      (dw_local,) = vjp_fn(g_local)
+      return out_local[None], dw_local[None]
+
+    return step(w_sharded, g_sharded)
+
+  @parameterized.named_parameters(
+      ("hand_plan_f32", "hand", 2, 2, jnp.float32),
+      ("hand_plan_bf16", "hand", 2, 2, jnp.bfloat16),
+      ("r1_maxsend1_f32", "r1_ms1", 1, 1, jnp.float32),
+      ("r2_maxsend3_fanout_f32", "r2_ms3", 2, 3, jnp.float32),
+      ("r3_maxsend2_multi_home_bf16", "r3_ms2", 3, 2, jnp.bfloat16),
+  )
+  def test_real_ragged_all_to_all_forward_and_backward_match_reference(self, kind, num_replicas, max_send, compute_dtype):
+    """Checks forward replica rows and home-summed backward grads on real TPU `ragged_all_to_all`."""
+    devs = jax.devices()
+    if kind == "hand":
+      # _hand_plan() has fixed EP=4; slice an exact 4-device mesh (skipping if fewer than 4 TPU devices exist).
+      if len(devs) < 4:
+        self.skipTest(f"_hand_plan requires 4 TPU devices, got {len(devs)}.")
+      devs = devs[:4]
+      plan = _hand_plan()
+    else:
+      # Hand-built transfer fixtures below address device indices up to 3 (EP >= 4).
+      if len(devs) < 4:
+        self.skipTest(f"Transfer fixture {kind} requires >= 4 TPU devices, got {len(devs)}.")
+      num_ep = len(devs)
+      if kind == "r1_ms1":
+        transfers = [(h, h % LOCAL, (h + 1) % num_ep) for h in range(0, num_ep, 2)]
+      elif kind == "r2_ms3":
+        transfers = [(0, 2, 1), (0, 2, 2), (0, 1, 3), (2, 0, 1)]
+      else:
+        transfers = [(0, 1, 2), (0, 1, 3), (1, 2, 2), (2, 0, 3), (3, 0, 2)]
+      plan = _plan_from_transfers(num_ep, LOCAL, num_replicas, max_send, transfers)
+
+    num_ep = len(devs)
+    rng = np.random.default_rng(42 + num_replicas * 10 + max_send)
+    # Test weight tensor shape [EP, L, 16, 128].
+    w_np = rng.standard_normal((num_ep, LOCAL, 16, 128)).astype(np.float32)
+    g_np = rng.standard_normal((num_ep, LOCAL + num_replicas, 16, 128)).astype(np.float32)
+
+    out, dw = self._run_shard_map_vjp(devs, plan, w_np, g_np, compute_dtype=compute_dtype)
+    self.assertEqual(out.dtype, compute_dtype)
+    self.assertEqual(dw.dtype, jnp.float32)
+
+    w_ref = np.asarray(jnp.asarray(w_np, dtype=compute_dtype), dtype=np.float32)
+    g_ref = np.asarray(jnp.asarray(g_np, dtype=compute_dtype), dtype=np.float32)
+    reps, dw_rep = moe_replica_test_utils.replica_reference(w_ref, g_ref[:, LOCAL:], plan)
+    np.testing.assert_array_equal(np.asarray(out, dtype=np.float32), np.concatenate([w_ref, reps], axis=1))
+    tol = 1e-2 if compute_dtype == jnp.bfloat16 else 1e-5
+    np.testing.assert_allclose(np.asarray(dw), g_ref[:, :LOCAL] + dw_rep, rtol=tol, atol=tol)
 
 
 if __name__ == "__main__":
