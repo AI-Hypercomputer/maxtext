@@ -187,8 +187,9 @@ class BaseHooksTest(unittest.TestCase):
     mock_create_data_iterator.return_value = (mock_train_iter, None)
 
     data_hooks = BaseDataHooks(self.config, self.mesh, goodput_recorder=None)
-    with self.assertRaises(exceptions.StopTraining) as cm:
+    with self.assertRaises(RuntimeError) as cm:
       data_hooks.load_next_train_batch(self.mock_train_ctx)
+    self.assertNotIsInstance(cm.exception, exceptions.StopTraining)
     self.assertIsInstance(cm.exception.__cause__, IndexError)
 
   @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
