@@ -291,7 +291,9 @@ def _ste_quantize_tokens_bwd(
 ) -> Tuple[jax.Array]:
   """Backward pass of _ste_quantize_tokens; unscales incoming qvalue cotangent in float32."""
   del qtype, channelwise_axes, calibration_method
-  g_x = (g_qa.qvalue.astype(jnp.float32) / scale.astype(jnp.float32)).astype(scale.dtype)
+  scale_f32 = scale.astype(jnp.float32)
+  safe_scale = jnp.where(scale_f32 != 0.0, scale_f32, 1.0)
+  g_x = jnp.where(scale_f32 != 0.0, g_qa.qvalue.astype(jnp.float32) / safe_scale, 0.0).astype(scale.dtype)
   return (g_x,)
 
 
@@ -1980,7 +1982,7 @@ class RoutedMoE(nnx.Module):
         if cap >= total_slots:
           iota = jnp.arange(cap, dtype=jnp.int32)
           valid = (iota >= start) & (iota < end)
-          sorted_scale_1d = jnp.where(valid, scale_1d[token_ids_sorted], jnp.zeros((), scale_1d.dtype))
+          sorted_scale_1d = jnp.where(valid, scale_1d[token_ids_sorted], jnp.ones((), scale_1d.dtype))
         else:
           sorted_scale_1d = _window_token_scale(
               scale_1d, token_ids_sorted, jnp.minimum(end - start, cap), cap, start=start

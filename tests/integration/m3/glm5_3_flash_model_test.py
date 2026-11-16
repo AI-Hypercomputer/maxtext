@@ -1031,87 +1031,88 @@ class Glm5ModelPureJaxTest(parameterized.TestCase):
           is_leaf=lambda x: isinstance(x, nnx.Variable),
       )
 
-    for scan_layers in (True, False):
-      cfg = _make_cfg(num_hidden_layers=11, scan_layers=scan_layers)[0]
-      m = modeling_glm5_3_flash.Glm5Model(cfg, rngs=nnx.Rngs(123), place_on_devices=False)
-      out, aux = m(tokens, return_aux=True)
+    with _fp64_mode():
+      for scan_layers in (True, False):
+        cfg = _make_cfg(num_hidden_layers=11, scan_layers=scan_layers)[0]
+        m = modeling_glm5_3_flash.Glm5Model(cfg, rngs=nnx.Rngs(123), place_on_devices=False)
+        out, aux = m(tokens, return_aux=True)
 
-      hidden = jnp.broadcast_to(
-          m.embed_tokens(tokens.astype(jnp.int32))[:, :, None, :],
-          (
-              tokens.shape[0],
-              tokens.shape[1],
-              cfg.mhc_expansion_rate,
-              cfg.hidden_size,
-          ),
-      )
-      ref_layer_aux: list[dict[str, Any]] = []
+        hidden = jnp.broadcast_to(
+            m.embed_tokens(tokens.astype(jnp.int32))[:, :, None, :],
+            (
+                tokens.shape[0],
+                tokens.shape[1],
+                cfg.mhc_expansion_rate,
+                cfg.hidden_size,
+            ),
+        )
+        ref_layer_aux: list[dict[str, Any]] = []
 
-      for lyr_idx, lyr in enumerate(m.prefix_layers):
-        hidden, _, r_idx, idx_topk, r_w, r_p = lyr(hidden, return_aux=True)
-        layer_dict: dict[str, Any] = {}
-        if lyr_idx >= cfg.first_k_dense_replace:
-          layer_dict["router_indices"] = r_idx
-          layer_dict["routing_weights"] = r_w
-          layer_dict["router_probs"] = r_p
-        if cfg.layer_types[lyr_idx] == "full_attention":
-          layer_dict["selected_block_indices"] = idx_topk
-        ref_layer_aux.append(layer_dict)
+        for lyr_idx, lyr in enumerate(m.prefix_layers):
+          hidden, _, r_idx, idx_topk, r_w, r_p = lyr(hidden, return_aux=True)
+          layer_dict: dict[str, Any] = {}
+          if lyr_idx >= cfg.first_k_dense_replace:
+            layer_dict["router_indices"] = r_idx
+            layer_dict["routing_weights"] = r_w
+            layer_dict["router_probs"] = r_p
+          if cfg.layer_types[lyr_idx] == "full_attention":
+            layer_dict["selected_block_indices"] = idx_topk
+          ref_layer_aux.append(layer_dict)
 
-      for b in range(2):
-        sb_b = modeling_glm5_3_flash.Glm5SuperBlock(cfg, rngs=nnx.Rngs(999))
-        nnx.update(sb_b, _slice_block(b, nnx.state(m.super_block)))
-        for s in range(4):
-          slot = getattr(sb_b, f"slot_{s}")
-          hidden, _, r_idx, idx_topk, r_w, r_p = slot(hidden, return_aux=True)
-          slot_dict: dict[str, Any] = {
-              "router_indices": r_idx,
-              "routing_weights": r_w,
-              "router_probs": r_p,
-          }
-          if slot.layer_type == "full_attention":
-            slot_dict["selected_block_indices"] = idx_topk
-          ref_layer_aux.append(slot_dict)
+        for b in range(2):
+          sb_b = modeling_glm5_3_flash.Glm5SuperBlock(cfg, rngs=nnx.Rngs(999))
+          nnx.update(sb_b, _slice_block(b, nnx.state(m.super_block)))
+          for s in range(4):
+            slot = getattr(sb_b, f"slot_{s}")
+            hidden, _, r_idx, idx_topk, r_w, r_p = slot(hidden, return_aux=True)
+            slot_dict: dict[str, Any] = {
+                "router_indices": r_idx,
+                "routing_weights": r_w,
+                "router_probs": r_p,
+            }
+            if slot.layer_type == "full_attention":
+              slot_dict["selected_block_indices"] = idx_topk
+            ref_layer_aux.append(slot_dict)
 
-      ref_logits = m.lm_head(
-          m.norm(jnp.mean(hidden.astype(jnp.float32), axis=2).astype(m.norm.weight.value.dtype))
-      ).astype(jnp.float32)
+        ref_logits = m.lm_head(
+            m.norm(jnp.mean(hidden.astype(jnp.float32), axis=2).astype(m.norm.weight.value.dtype))
+        ).astype(jnp.float32)
 
-      np.testing.assert_allclose(np.array(out), np.array(ref_logits), atol=1e-5, rtol=1e-5)
-      self.assertEqual(len(aux["layer_aux"]), 11)
-      self.assertEqual(len(ref_layer_aux), 11)
+        np.testing.assert_allclose(np.array(out), np.array(ref_logits), atol=1e-5, rtol=1e-5)
+        self.assertEqual(len(aux["layer_aux"]), 11)
+        self.assertEqual(len(ref_layer_aux), 11)
 
-      for i in range(11):
-        self.assertEqual(set(aux["layer_aux"][i].keys()), set(ref_layer_aux[i].keys()))
-        if "selected_block_indices" in ref_layer_aux[i]:
-          np.testing.assert_array_equal(
-              np.array(aux["layer_aux"][i]["selected_block_indices"]),
-              np.array(ref_layer_aux[i]["selected_block_indices"]),
-          )
-        if "router_indices" in ref_layer_aux[i]:
-          np.testing.assert_array_equal(
-              np.array(aux["layer_aux"][i]["router_indices"]),
-              np.array(ref_layer_aux[i]["router_indices"]),
-          )
-          np.testing.assert_allclose(
-              np.array(aux["layer_aux"][i]["routing_weights"]),
-              np.array(ref_layer_aux[i]["routing_weights"]),
-              atol=1e-5,
-              rtol=1e-5,
-          )
-          np.testing.assert_allclose(
-              np.array(aux["layer_aux"][i]["router_probs"]),
-              np.array(ref_layer_aux[i]["router_probs"]),
-              atol=1e-5,
-              rtol=1e-5,
-          )
+        for i in range(11):
+          self.assertEqual(set(aux["layer_aux"][i].keys()), set(ref_layer_aux[i].keys()))
+          if "selected_block_indices" in ref_layer_aux[i]:
+            np.testing.assert_array_equal(
+                np.array(aux["layer_aux"][i]["selected_block_indices"]),
+                np.array(ref_layer_aux[i]["selected_block_indices"]),
+            )
+          if "router_indices" in ref_layer_aux[i]:
+            np.testing.assert_array_equal(
+                np.array(aux["layer_aux"][i]["router_indices"]),
+                np.array(ref_layer_aux[i]["router_indices"]),
+            )
+            np.testing.assert_allclose(
+                np.array(aux["layer_aux"][i]["routing_weights"]),
+                np.array(ref_layer_aux[i]["routing_weights"]),
+                atol=1e-5,
+                rtol=1e-5,
+            )
+            np.testing.assert_allclose(
+                np.array(aux["layer_aux"][i]["router_probs"]),
+                np.array(ref_layer_aux[i]["router_probs"]),
+                atol=1e-5,
+                rtol=1e-5,
+            )
 
-      self.assertFalse(
-          np.array_equal(
-              np.array(aux["layer_aux"][3]["selected_block_indices"]),
-              np.array(aux["layer_aux"][7]["selected_block_indices"]),
-          )
-      )
+        self.assertFalse(
+            np.array_equal(
+                np.array(aux["layer_aux"][3]["selected_block_indices"]),
+                np.array(aux["layer_aux"][7]["selected_block_indices"]),
+            )
+        )
 
   def test_return_aux_use_indexer_false_and_forced_none_guard(self):
     for num_layers, scan_layers in ((5, False), (11, False), (11, True)):

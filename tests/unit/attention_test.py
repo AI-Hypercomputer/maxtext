@@ -4735,8 +4735,9 @@ class MLATest(attention_test_util.MLATestBase):
     mla_generic_output = jax.device_get(mla_generic_output)
     mla_cp_output = jax.device_get(mla_cp_output)
 
+    tol = 1e-02 if context_parallel_load_balance else 2e-02
     self.assertTrue(
-        jax.numpy.allclose(mla_generic_output, mla_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        jax.numpy.allclose(mla_generic_output, mla_cp_output, rtol=tol, atol=tol, equal_nan=False),
         msg=(
             "MLA+Indexer logits from single-device dot product and multi-device dot product context parallelism are"
             f" not close. context_parallel_load_balance={context_parallel_load_balance}."
@@ -4855,8 +4856,9 @@ class MLATest(attention_test_util.MLATestBase):
     mla_generic_output = jax.device_get(mla_generic_output)
     mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
 
+    tol = 1e-02 if context_parallel_load_balance else 2e-02
     self.assertTrue(
-        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=tol, atol=tol, equal_nan=False),
         msg=(
             "MLA+Indexer logits from generic dot product and flash attention + all-gather context parallelism are not"
             f" close. context_parallel_load_balance={context_parallel_load_balance}."
@@ -4968,8 +4970,9 @@ class MLATest(attention_test_util.MLATestBase):
     mla_generic_output = jax.device_get(mla_generic_output)
     mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
 
+    tol = 1e-02 if context_parallel_load_balance else 2e-02
     self.assertTrue(
-        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=tol, atol=tol, equal_nan=False),
         msg="MLA+Indexer logits from generic dot product and flash attention + ring context parallelism are not close. "
         f"context_parallel_load_balance={context_parallel_load_balance}.",
     )

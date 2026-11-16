@@ -129,6 +129,10 @@ def ring_ragged_sort(
           bytes_accessed_override=gather_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
       )
+      valid_mask = (jnp.arange(local_buffer_size) >= shard_output_start) & (
+          jnp.arange(local_buffer_size) < shard_output_end
+      )
+      x = jnp.where(valid_mask[:, None], x, jnp.zeros((), x.dtype))
     else:
       local_buffer_size = buffer_size
       # We only gather up to the available buffer size or the actual number of
@@ -153,6 +157,8 @@ def ring_ragged_sort(
           bytes_accessed_override=gather_bytes_accessed_override,
           use_single_sparsecore=use_single_sparsecore,
       )
+      valid_mask = jnp.arange(local_buffer_size) < gather_end
+      x = jnp.where(valid_mask[:, None], x, jnp.zeros((), x.dtype))
 
     res = (
         topk_argsort_revert_indices,
