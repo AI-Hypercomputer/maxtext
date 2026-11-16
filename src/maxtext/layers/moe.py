@@ -38,6 +38,7 @@ from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
 from maxtext.configs.types import A2A_QUANT_FORMATS, A2A_QUANT_SUPPORTED, parse_a2a_quant_method
 from maxtext.kernels import megablox as mblx
+from maxtext.kernels import moe_combine_tc
 from maxtext.kernels import sort_activations
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_unsort
@@ -146,6 +147,24 @@ def _split_gate_up_bwd(_residuals: None, grads: tuple[jax.Array, jax.Array]) -> 
 
 
 _split_gate_up.defvjp(_split_gate_up_fwd, _split_gate_up_bwd)
+
+
+def _use_moe_tc_kernel(layer, flag: str, is_qarray: bool = False) -> bool:
+  """Whether the `flag` (`moe_tc_permute` / `moe_tc_combine`) TensorCore kernel replaces the default op in this call.
+
+  The kernels are for training shapes: with model_call_mode=inference (decode / rollout, a few tokens per shard)
+  the default op is kept. Their custom VJPs are per shard, so they need expert parallelism = 1 and tensor
+  parallelism = 1 (which would shard the activations over columns), and unquantized activations.
+  """
+  if not getattr(layer.config, flag, False) or layer.config.model_call_mode == "inference":
+    return False
+  num_ep, num_tp = layer.get_expert_parallelism_size(), layer.get_tensor_parallelism_size()
+  if is_qarray or num_ep != 1 or num_tp != 1:
+    raise ValueError(
+        f"{flag}=True requires unquantized activations, expert parallelism = 1 and tensor parallelism = 1,"
+        f" got is_qarray={is_qarray}, expert_parallelism={num_ep}, tensor_parallelism={num_tp}."
+    )
+  return True
 
 
 @struct.dataclass
@@ -2903,11 +2922,32 @@ class RoutedMoE(nnx.Module):
         if _save_packed_routing_maps(self.config):
           # Forced routing, or more than 2**20 route slots / 2**11 sort bins for the packed key.
           sorted_selected_experts = adc.checkpoint_name(sorted_selected_experts, MOE_PACKED_ROUTING_MAPS)
+
+      if tc_offload_free and summed_expert_mask is not None:
+        group_size = jnp.sum(summed_expert_mask, axis=tuple(range(summed_expert_mask.ndim - 1)), dtype=jnp.int32)
+      else:
+        group_size = jnp.bincount(flatten_selected_experts_safe, length=num_sort_bins)
+      if _save_packed_routing_maps(self.config):
+        group_size = adc.checkpoint_name(group_size, MOE_PACKED_ROUTING_MAPS)
+
       if skip_token_gather:
         # moe_use_fused_gmm3d: the fused expert kernels DMA the routed rows straight from the token buffer.
         sorted_inputs = None
       elif self.config.moe_use_direct_token_gather:
-        sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
+        if _use_moe_tc_kernel(self, "moe_tc_permute", is_qarray):
+          # Gather tokens into expert-sorted order on the TensorCore (kernels/moe_combine_tc.py).
+          with jax.named_scope("moe_permute"):
+            sorted_inputs = moe_combine_tc.permute(
+                inputs_2d.astype(self.dtype),
+                sorted_selected_experts,
+                group_size,
+                self.num_experts_per_tok,
+                block_tokens=self.config.moe_tc_permute_block_tokens,
+                expert_chunks=self.config.moe_tc_permute_expert_chunks,
+                col_chunks=self.config.moe_tc_permute_col_chunks,
+            )
+        else:
+          sorted_inputs = _route_activations(inputs_2d, flatten_selected_experts_safe)
       else:
         # sort inputs for number of selected experts
         replicated_inputs_2d = jnp.repeat(inputs_2d, self.num_experts_per_tok, axis=0)
@@ -2918,13 +2958,6 @@ class RoutedMoE(nnx.Module):
       # Preserve integer/FP8 payload when inputs are QArray; avoid premature cast to self.dtype.
       if not is_qarray and sorted_inputs is not None:
         sorted_inputs = sorted_inputs.astype(self.dtype)
-
-      if tc_offload_free and summed_expert_mask is not None:
-        group_size = jnp.sum(summed_expert_mask, axis=tuple(range(summed_expert_mask.ndim - 1)), dtype=jnp.int32)
-      else:
-        group_size = jnp.bincount(flatten_selected_experts_safe, length=num_sort_bins)
-      if _save_packed_routing_maps(self.config):
-        group_size = adc.checkpoint_name(group_size, MOE_PACKED_ROUTING_MAPS)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -3053,6 +3086,24 @@ class RoutedMoE(nnx.Module):
           index_math=self.config.moe_routing_index_math,
           spread_masked_indices=self.config.ragged_unsort_spread_masked_indices,
       )
+    elif _use_moe_tc_kernel(self, "moe_tc_combine"):
+      # Fused TensorCore unpermute + top-k weighted sum (f32 accumulation; kernels/moe_combine_tc.py).
+      combine_weights = (
+          None
+          if self.config.decoder_block == ctypes.DecoderBlockType.LLAMA4
+          else jnp.reshape(weights, (-1, self.num_experts_per_tok))
+      )
+      with jax.named_scope("moe_combine"):
+        output = moe_combine_tc.combine(
+            intermediate,
+            sorted_selected_experts,
+            combine_weights,
+            group_sizes,
+            num_experts_per_tok=self.num_experts_per_tok,
+            block_tokens=self.config.moe_tc_combine_block_tokens,
+            expert_chunks=self.config.moe_tc_combine_expert_chunks,
+            col_chunks=self.config.moe_tc_combine_col_chunks,
+        )
     else:
       reshaped_weights = jnp.reshape(weights, (-1, self.num_experts_per_tok)).T
       revert_indices = jnp.reshape(jnp.argsort(sorted_selected_experts), (-1, self.num_experts_per_tok)).T.reshape(-1)
