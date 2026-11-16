@@ -16,7 +16,7 @@
 
 import functools
 import math
-from typing import Callable, Literal, NamedTuple, Sequence
+from typing import Any, Callable, Literal, NamedTuple, Sequence
 
 import jax
 import jax.numpy as jnp
@@ -52,31 +52,25 @@ def _get_xxt_out_sharding(
   return jax.sharding.NamedSharding(flat_sharding.mesh, out_spec)
 
 
-def _get_preferred_element_type(dtype: jnp.dtype) -> jnp.dtype:
-  if jnp.issubdtype(dtype, jnp.complexfloating):
-    return jnp.promote_types(dtype, jnp.complex64)
-  return jnp.promote_types(dtype, jnp.float32)
-
-
 def xxt(
     x: jax.Array,
     flat_sharding: jax.sharding.NamedSharding | None = None,
 ) -> jax.Array:
-  """Computes X @ X.T.conj() while preserving sharding along the last axis."""
+  """Computes X @ X.T while preserving sharding along the last axis."""
   out_sharding = _get_xxt_out_sharding(flat_sharding)
-  pref_type = _get_preferred_element_type(x.dtype)
+  pref_type = jnp.promote_types(x.dtype, jnp.float32)
   if reshape_utils.is_explicit_axes(flat_sharding):
     return jnp.einsum(
         "...mk,...nk->...mn",
         x,
-        x.conj(),
+        x,
         out_sharding=out_sharding,
         preferred_element_type=pref_type,
     ).astype(x.dtype)
   res = jnp.einsum(
       "...mk,...nk->...mn",
       x,
-      x.conj(),
+      x,
       preferred_element_type=pref_type,
   ).astype(x.dtype)
   if out_sharding is not None:
@@ -90,7 +84,7 @@ def b_times_x(
     flat_sharding: jax.sharding.NamedSharding | None = None,
 ) -> jax.Array:
   """Computes b @ x while outputting to flat_sharding."""
-  pref_type = _get_preferred_element_type(x.dtype)
+  pref_type = jnp.promote_types(x.dtype, jnp.float32)
   if reshape_utils.is_explicit_axes(flat_sharding):
     return jnp.einsum(
         "...mk,...kn->...mn",
@@ -280,7 +274,14 @@ def get_precond_fn(
 ) -> Callable[[jax.Array], jax.Array]:
   """Returns a preconditioning function."""
   if preconditioning == "frobenius":
-    return lambda x: x / (jnp.linalg.norm(x, axis=(-2, -1), keepdims=True) + eps)
+    # Multiply by rsqrt(sum(x^2) + eps^2) in float32+ so XLA fuses the rsqrt
+    # instead of materializing a full-tensor divide and eps^2 cannot underflow.
+    def _precond_frobenius(x: jax.Array) -> jax.Array:
+      acc_dtype = jnp.promote_types(x.dtype, jnp.float32)
+      sq_sum = jnp.sum(jnp.square(x), axis=(-2, -1), keepdims=True, dtype=acc_dtype)
+      return (x.astype(acc_dtype) * jax.lax.rsqrt(sq_sum + jnp.asarray(eps**2, dtype=acc_dtype))).astype(x.dtype)
+
+    return _precond_frobenius
   elif preconditioning == "spectral":
     return lambda x: x / (jnp.linalg.norm(x, ord=2, axis=(-2, -1), keepdims=True) + eps)
   else:
@@ -342,25 +343,6 @@ def scale_by_muon(
     else:
       mu_hat = optax.tree.bias_correction(mu, beta, count_inc)
 
-    def orthogonalize_leaf(
-        leaf: jax.Array | optax.MaskedNode,
-        dim_nums: ShardedMuonDimensionNumbers | optax.MaskedNode | None,
-    ) -> jax.Array | optax.MaskedNode:
-      """Orthogonalize a single leaf tensor."""
-      if isinstance(leaf, optax.MaskedNode) or isinstance(dim_nums, optax.MaskedNode):
-        return optax.MaskedNode()
-      if dim_nums is None:
-        dim_nums = ShardedMuonDimensionNumbers()
-      return orthogonalize(
-          x=leaf,
-          ns_coeffs=state.ns_coeffs,
-          ns_steps=ns_steps,
-          precond_fn=precond_fn,
-          ns_step_fn=ns_step_fn,
-          dim_nums=dim_nums,
-          use_all_to_all=use_all_to_all,
-      )
-
     if callable(weight_dimension_numbers):
       resolved_dim_nums = weight_dimension_numbers(updates)
     elif weight_dimension_numbers is None:
@@ -368,21 +350,26 @@ def scale_by_muon(
     else:
       resolved_dim_nums = weight_dimension_numbers
 
-    def is_leaf(x):
-      return x is None or isinstance(x, (ShardedMuonDimensionNumbers, optax.MaskedNode))
-
-    updates = jax.tree.map(
-        orthogonalize_leaf,
-        mu_hat,
-        resolved_dim_nums,
-        is_leaf=is_leaf,
-    )
+    packed_items, unpack_fn = _pack_leaves(mu_hat, resolved_dim_nums, use_all_to_all=use_all_to_all)
+    orthogonalized = [
+        orthogonalize(
+            x=x,
+            ns_coeffs=state.ns_coeffs,
+            ns_steps=ns_steps,
+            precond_fn=precond_fn,
+            ns_step_fn=ns_step_fn,
+            dim_nums=dim_nums,
+            use_all_to_all=use_all_to_all,
+        )
+        for x, dim_nums in packed_items
+    ]
+    updates = unpack_fn(orthogonalized)
 
     if adaptive:
       # Scale the orthogonalized updates by the dual norm of the original
       # updates. See https://arxiv.org/abs/2409.20325 for the derivation.
       def scale_by_dual_norm(x: jax.Array, y: jax.Array) -> jax.Array:
-        return jnp.sum(x.conj() * y) * y
+        return jnp.sum(x * y) * y
 
       updates = jax.tree.map(scale_by_dual_norm, mu_hat, updates)
 
@@ -395,6 +382,54 @@ def scale_by_muon(
     )
 
   return optax.GradientTransformation(init_fn, update_fn)
+
+
+def _pack_leaves(
+    tree: optax.Updates,
+    resolved_dim_nums: Any,
+    use_all_to_all: bool = True,
+) -> tuple[
+    list[tuple[jax.Array, ShardedMuonDimensionNumbers]],
+    Callable[[Sequence[jax.Array]], optax.Updates],
+]:
+  """Flattens `tree` and delegates padded-leaf packing to `reshape_utils`."""
+
+  def is_leaf(x):
+    return x is None or isinstance(x, (ShardedMuonDimensionNumbers, optax.MaskedNode))
+
+  leaves, treedef = jax.tree.flatten(tree, is_leaf=is_leaf)
+  dim_nums_list = treedef.flatten_up_to(resolved_dim_nums)
+
+  out_template: list[jax.Array | optax.MaskedNode | None] = [None] * len(leaves)
+  active_indices: list[int] = []
+  active_items: list[tuple[jax.Array, ShardedMuonDimensionNumbers]] = []
+  for idx, (leaf, dim_nums) in enumerate(zip(leaves, dim_nums_list)):
+    if isinstance(leaf, optax.MaskedNode) or isinstance(dim_nums, optax.MaskedNode):
+      out_template[idx] = optax.MaskedNode()
+      continue
+    if dim_nums is None:
+      dim_nums = ShardedMuonDimensionNumbers()
+    active_indices.append(idx)
+    active_items.append((leaf, dim_nums))
+
+  if use_all_to_all:
+    raw_items = [(leaf, *_normalize_axes(leaf, dim_nums), dim_nums.sharding) for leaf, dim_nums in active_items]
+    packed_raw, unpack_tensors = reshape_utils.pack_compatible_tensors(raw_items)
+    packed_items = [
+        (x, ShardedMuonDimensionNumbers(reduction_axis=red_ax, output_axis=out_ax, sharding=sharding))
+        for x, red_ax, out_ax, sharding in packed_raw
+    ]
+  else:
+    packed_items = active_items
+    unpack_tensors = list
+
+  def unpack_fn(orthogonalized: Sequence[jax.Array]) -> optax.Updates:
+    out_leaves = list(out_template)
+    for idx, leaf_out in zip(active_indices, unpack_tensors(orthogonalized)):
+      out_leaves[idx] = leaf_out
+    return jax.tree.unflatten(treedef, out_leaves)
+
+  return packed_items, unpack_fn
 
 
 def get_reshape_fns(
@@ -439,6 +474,8 @@ def orthogonalize(
     y = precond_fn(y)
     if flat_sharding is not None:
       y = reshape_utils.reshard_or_constrain(y, flat_sharding)
+    # Unroll the fixed NS step count (typically 5) so XLA eliminates while-loop
+    # carry copies and fuses across iterations.
     if ns_coeffs_.ndim == 1:
 
       def ns_iterator(i, z):
@@ -452,7 +489,7 @@ def orthogonalize(
           upper=ns_steps,
           body_fun=ns_iterator,
           init_val=y,
-          unroll=False,
+          unroll=not isinstance(ns_steps, jax.core.Tracer),
       )
     else:
 
@@ -464,7 +501,7 @@ def orthogonalize(
         return (i + 1, z_new), None
 
       init_carry = (jnp.asarray(0, dtype=jnp.int32), y)
-      (_, y), _ = jax.lax.scan(_scan_body, init_carry, ns_coeffs_)
+      (_, y), _ = jax.lax.scan(_scan_body, init_carry, ns_coeffs_, unroll=True)
     return y
 
   x_flat = reshape_fn(x)

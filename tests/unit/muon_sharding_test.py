@@ -26,6 +26,7 @@ import jax.numpy as jnp
 from maxtext.optimizers import muon as _muon
 from maxtext.optimizers import reshape_utils
 import numpy as np
+import optax
 from optax.contrib import _muon as optax_muon
 import pytest
 
@@ -107,7 +108,7 @@ class MuonShardingTest(parameterized.TestCase):
 
   @parameterized.parameters(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Auto)
   def test_sharded_2d_tensor_reduction_and_output_axes(self, axis_type):
-    """Tests that scale_by_muon handles 2D tensors with sharded reduction and output axes without all-to-all."""
+    """Tests that scale_by_muon handles 2D tensors with sharded matrix axes."""
     devices = jax.devices("cpu")
     mesh = jax.sharding.Mesh(
         np.array(devices).reshape(2, 4),
@@ -127,11 +128,15 @@ class MuonShardingTest(parameterized.TestCase):
     local_transform = _muon.scale_by_muon(
         weight_dimension_numbers={"w": _muon.ShardedMuonDimensionNumbers(sharding=sharding)},
     )
-    local_state = local_transform.init(params)
-    local_updates, _ = local_transform.update(grads, local_state, params)
+    optax_transform = optax_muon.scale_by_muon(
+        weight_dimension_numbers={"w": optax_muon.MuonDimensionNumbers()},
+    )
+    local_updates, _ = local_transform.update(grads, local_transform.init(params), params)
+    unsharded_params = jax.device_get(params)
+    unsharded_grads = jax.device_get(grads)
+    optax_updates, _ = optax_transform.update(unsharded_grads, optax_transform.init(unsharded_params), unsharded_params)
 
-    self.assertEqual(local_updates["w"].shape, (8, 16))
-    self.assertFalse(jnp.isnan(local_updates["w"]).any())
+    chex.assert_trees_all_close(local_updates, optax_updates, rtol=1e-5, atol=1e-5)
     if axis_type == jax.sharding.AxisType.Explicit:
       self.assertEqual(local_updates["w"].sharding, sharding)
 
@@ -359,201 +364,74 @@ class MuonShardingTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "Mixed mesh axis types"):
       transform.update(params, state, params)
 
-  def test_2d_tensor_reshape_and_xxt_sharding(self):
-    """Tests 2D tensor reshape, xxt, and b_times_x without all-to-all."""
+  @parameterized.named_parameters(
+      (
+          "2d_unshards_matrix",
+          (8, 16),
+          jax.sharding.PartitionSpec("x", "y"),
+          True,
+          jax.sharding.PartitionSpec(None, None, None),
+      ),
+      (
+          "3d_local_batch_1_replicates_matrix",
+          (2, 8, 16),
+          jax.sharding.PartitionSpec("x", "y", None),
+          True,
+          jax.sharding.PartitionSpec(("x",), None, None),
+      ),
+      (
+          "3d_unsharded_batch_all_to_all",
+          (8, 8, 16),
+          jax.sharding.PartitionSpec(None, "x", "y"),
+          True,
+          jax.sharding.PartitionSpec(("x", "y"), None, None),
+      ),
+      (
+          "3d_sharded_batch_padded_all_to_all",
+          (6, 8, 16),
+          jax.sharding.PartitionSpec("x", "y", None),
+          True,
+          jax.sharding.PartitionSpec(("x", "y"), None, None),
+      ),
+      (
+          "3d_disabled_all_to_all_transposed",
+          (4, 16, 8),
+          jax.sharding.PartitionSpec("x", "y", None),
+          False,
+          jax.sharding.PartitionSpec("x", None, "y"),
+      ),
+      (
+          "3d_short_spec_canonical",
+          (4, 8, 16),
+          jax.sharding.PartitionSpec("x", "y"),
+          True,
+          jax.sharding.PartitionSpec(("x", "y"), None, None),
+      ),
+  )
+  def test_get_reshape_fns_flat_sharding(self, shape, spec, use_all_to_all, expected_flat_spec):
+    """Tests flat_sharding.spec and round-trip reconstruction across sharding modes."""
     devices = jax.devices("cpu")
     mesh = jax.sharding.Mesh(
         np.array(devices).reshape(2, 4),
         axis_names=("x", "y"),
-        axis_types=(
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-        ),
+        axis_types=(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Explicit),
     )
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", "y"))
-    w = jax.device_put(jax.random.normal(jax.random.key(0), (8, 16)), sharding)
-
-    reshape_fn, unreshape_fn, flat_sharding = reshape_utils.get_reshape_fns(
-        w,
-        reduction_axes=(0,),
-        output_axes=(1,),
-        sharding=sharding,
-    )
-    w_flat = reshape_fn(w)
-    self.assertEqual(w_flat.shape, (1, 1, 8, 16))
-    self.assertEqual(
-        w_flat.sharding.spec,
-        jax.sharding.PartitionSpec(None, None, "x", "y"),
-    )
-    w_xxt = _muon.xxt(w_flat, flat_sharding=flat_sharding)
-    self.assertEqual(w_xxt.shape, (1, 1, 8, 8))
-    self.assertEqual(
-        w_xxt.sharding.spec,
-        jax.sharding.PartitionSpec(None, None, None, "x"),
-    )
-    w_restored = unreshape_fn(w_flat)
-    self.assertEqual(w_restored.shape, (8, 16))
-    self.assertEqual(w_restored.sharding, sharding)
-    chex.assert_trees_all_close(w_restored, w)
-
-  def test_3d_tensor_reshape_and_xxt_sharding_all_to_all(self):
-    """Tests 3D tensor with unsharded batch dimension triggering all-to-all with padding."""
-    devices = jax.devices("cpu")
-    mesh = jax.sharding.Mesh(
-        np.array(devices).reshape((2, 2, 2)),
-        axis_names=("a", "b", "c"),
-        axis_types=(
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-        ),
-    )
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "b", "c"))
-    x = jax.device_put(jax.random.normal(jax.random.key(0), (4, 8, 16)), sharding)
+    sharding = jax.sharding.NamedSharding(mesh, spec)
+    x = jax.device_put(jax.random.normal(jax.random.key(0), shape), sharding)
 
     reshape_fn, unreshape_fn, flat_sharding = reshape_utils.get_reshape_fns(
         x,
-        reduction_axes=(1,),
-        output_axes=(2,),
+        reduction_axes=(-2,),
+        output_axes=(-1,),
         sharding=sharding,
+        use_all_to_all=use_all_to_all,
     )
     x_flat = reshape_fn(x)
-    # Batch size 4 padded to total matrix shards = 2*2 = 4.
-    self.assertEqual(x_flat.shape, (1, 4, 8, 16))
-    self.assertEqual(
-        x_flat.sharding.spec,
-        jax.sharding.PartitionSpec(None, ("b", "c"), None, None),
-    )
-
-    xxt = _muon.xxt(x_flat, flat_sharding=flat_sharding)
-    self.assertEqual(xxt.shape, (1, 4, 8, 8))
-    self.assertEqual(
-        xxt.sharding.spec,
-        jax.sharding.PartitionSpec(None, ("b", "c"), None, None),
-    )
-
+    self.assertEqual(flat_sharding.spec, expected_flat_spec)
+    self.assertEqual(x_flat.sharding.spec, expected_flat_spec)
     x_restored = unreshape_fn(x_flat)
-    self.assertEqual(x_restored.shape, (4, 8, 16))
-    self.assertEqual(x_restored.sharding, sharding)
+    self.assertTrue(x_restored.sharding.is_equivalent_to(sharding, ndim=len(shape)))
     chex.assert_trees_all_close(x_restored, x)
-
-  def test_3d_tensor_reshape_and_xxt_sharding_without_all_to_all(self):
-    """Tests 3D tensor with unsharded batch dimension and use_all_to_all=False."""
-    devices = jax.devices("cpu")
-    mesh = jax.sharding.Mesh(
-        np.array(devices).reshape((2, 2, 2)),
-        axis_names=("a", "b", "c"),
-        axis_types=(
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-        ),
-    )
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "b", "c"))
-    x = jax.device_put(jax.random.normal(jax.random.key(0), (4, 8, 16)), sharding)
-
-    reshape_fn, unreshape_fn, flat_sharding = reshape_utils.get_reshape_fns(
-        x,
-        reduction_axes=(1,),
-        output_axes=(2,),
-        sharding=sharding,
-        use_all_to_all=False,
-    )
-    x_flat = reshape_fn(x)
-    self.assertEqual(x_flat.shape, (1, 4, 8, 16))
-    self.assertEqual(
-        x_flat.sharding.spec,
-        jax.sharding.PartitionSpec(None, None, "b", "c"),
-    )
-
-    xxt = _muon.xxt(x_flat, flat_sharding=flat_sharding)
-    self.assertEqual(xxt.shape, (1, 4, 8, 8))
-    self.assertEqual(
-        xxt.sharding.spec,
-        jax.sharding.PartitionSpec(None, None, None, "b"),
-    )
-
-    x_restored = unreshape_fn(x_flat)
-    self.assertEqual(x_restored.shape, (4, 8, 16))
-    self.assertEqual(x_restored.sharding, sharding)
-    chex.assert_trees_all_close(x_restored, x)
-
-  def test_transposed_matrix_axes(self):
-    """Tests tensor with m > n where rows and columns are swapped during reshape."""
-    devices = jax.devices("cpu")
-    mesh = jax.sharding.Mesh(
-        np.array(devices).reshape((2, 2, 2)),
-        axis_names=("a", "b", "c"),
-        axis_types=(
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-        ),
-    )
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("a", "b", "c"))
-    # m = 16 (reduction), n = 8 (output) -> m > n, so reshape transposes.
-    x = jax.device_put(jax.random.normal(jax.random.key(0), (4, 16, 8)), sharding)
-
-    reshape_fn, unreshape_fn, flat_sharding = reshape_utils.get_reshape_fns(
-        x,
-        reduction_axes=(1,),
-        output_axes=(2,),
-        sharding=sharding,
-    )
-    x_flat = reshape_fn(x)
-    self.assertEqual(x_flat.shape, (4, 1, 8, 16))
-    # Row axis is output_axis (c), col axis is reduction_axis (b)
-    self.assertEqual(x_flat.sharding.spec, jax.sharding.PartitionSpec("a", None, "c", "b"))
-
-    xxt = _muon.xxt(x_flat, flat_sharding=flat_sharding)
-    self.assertEqual(xxt.shape, (4, 1, 8, 8))
-    self.assertEqual(xxt.sharding.spec, jax.sharding.PartitionSpec("a", None, None, "c"))
-
-    x_restored = unreshape_fn(x_flat)
-    self.assertEqual(x_restored.shape, (4, 16, 8))
-    self.assertEqual(x_restored.sharding, sharding)
-    chex.assert_trees_all_close(x_restored, x)
-
-  def test_get_dim_mesh_axes(self):
-    """Tests get_dim_mesh_axes extraction across different dimension configurations."""
-    devices = jax.devices("cpu")
-    mesh = jax.sharding.Mesh(
-        np.array(devices).reshape((2, 2, 2)),
-        axis_names=("a", "b", "c"),
-        axis_types=(
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-        ),
-    )
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "a", ("b", "c")))
-
-    self.assertEqual(reshape_utils.get_dim_mesh_axes(None, 0), ())
-    self.assertEqual(reshape_utils.get_dim_mesh_axes(sharding, -1), ())
-    self.assertEqual(reshape_utils.get_dim_mesh_axes(sharding, 0), ())
-    self.assertEqual(reshape_utils.get_dim_mesh_axes(sharding, 1), ("a",))
-    self.assertEqual(reshape_utils.get_dim_mesh_axes(sharding, 2), ("b", "c"))
-    self.assertEqual(reshape_utils.get_dim_mesh_axes(sharding, 3), ())
-
-  def test_get_flat_mesh_axes(self):
-    """Tests get_flat_mesh_axes concatenation across specified dimensions."""
-    devices = jax.devices("cpu")
-    mesh = jax.sharding.Mesh(
-        np.array(devices).reshape((2, 2, 2)),
-        axis_names=("a", "b", "c"),
-        axis_types=(
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-            jax.sharding.AxisType.Explicit,
-        ),
-    )
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("a", None, ("b", "c")))
-
-    self.assertEqual(reshape_utils.get_flat_mesh_axes(None, (0, 1)), ())
-    self.assertEqual(reshape_utils.get_flat_mesh_axes(sharding, ()), ())
-    self.assertEqual(reshape_utils.get_flat_mesh_axes(sharding, (0, 1)), ("a",))
-    self.assertEqual(reshape_utils.get_flat_mesh_axes(sharding, (0, 2)), ("a", "b", "c"))
-    self.assertEqual(reshape_utils.get_flat_mesh_axes(sharding, (1, 2)), ("b", "c"))
 
   def test_is_explicit_axes(self):
     """Tests is_explicit_axes validation and classification."""
@@ -592,33 +470,155 @@ class MuonShardingTest(parameterized.TestCase):
       reshape_utils.is_explicit_axes(sharding_mixed)
 
   @parameterized.parameters(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Auto)
-  def test_sharded_all_to_all_with_non_zero_padding_jitted(self, axis_type):
-    """Tests 3D tensor with unsharded batch size 3 padded to 8 shards compiled under @jax.jit."""
+  def test_sharded_batch_and_matrix_axes_with_padding_matches_optax_contrib(self, axis_type):
+    """Tests sharded batch with local padding matches optax.contrib."""
     devices = jax.devices("cpu")
     mesh = jax.sharding.Mesh(
         np.array(devices).reshape(2, 4),
         axis_names=("x", "y"),
         axis_types=(axis_type, axis_type),
     )
-    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "x", "y"))
-    # Batch size 3 on 2*4=8 shards -> padding = 5 -> padded batch = 8
-    key = jax.random.key(42)
-    w = jax.device_put(jax.random.normal(key, (3, 8, 16)), sharding)
-    grads = {"w": w}
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", "y", None))
+    w = jax.device_put(jax.random.normal(jax.random.key(11), (6, 8, 16)), sharding)
     params = {"w": w}
+    local_opt = _muon.scale_by_muon(
+        weight_dimension_numbers={"w": _muon.ShardedMuonDimensionNumbers(1, 2, sharding=sharding)}
+    )
+    optax_opt = optax_muon.scale_by_muon(weight_dimension_numbers={"w": optax_muon.MuonDimensionNumbers(1, 2)})
+    local_updates, _ = jax.jit(local_opt.update)(params, local_opt.init(params), params)
+    unsharded_params = jax.device_get(params)
+    optax_updates, _ = optax_opt.update(unsharded_params, optax_opt.init(unsharded_params), unsharded_params)
+    chex.assert_trees_all_close(local_updates, optax_updates, rtol=1e-5, atol=1e-5)
+    if axis_type == jax.sharding.AxisType.Explicit:
+      self.assertEqual(local_updates["w"].sharding, sharding)
 
-    dim_nums = {"w": _muon.ShardedMuonDimensionNumbers(reduction_axis=-2, output_axis=-1, sharding=sharding)}
-    opt = _muon.muon(learning_rate=1e-3, muon_weight_dimension_numbers=dim_nums)
-    state = opt.init(params)
+  @parameterized.parameters(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Auto)
+  def test_pack_compatible_tensors(self, axis_type):
+    """Tests reshape_utils.pack_compatible_tensors grouping, filtering, and round-trips."""
+    devices = jax.devices("cpu")
+    mesh = jax.sharding.Mesh(
+        np.array(devices).reshape(4, 2),
+        axis_names=("x", "y"),
+        axis_types=(axis_type, axis_type),
+    )
+    sharding_2d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", "y"))
+    sharding_2d_t = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("y", "x"))
+    sharding_3d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "x", "y"))
+    sharding_4d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", None, "y", None))
+    sharding_short = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", "y"))
+    sharding_batch_only = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", None, None))
+    keys = jax.random.split(jax.random.key(23), 11)
 
-    @jax.jit
-    def step(p, s, g):
-      return opt.update(g, s, p)
+    items = [
+        # Unsharded-batch padded group -> combined into (7, 8, 16)
+        (jax.device_put(jax.random.normal(keys[0], (8, 16)), sharding_2d), (0,), (1,), sharding_2d),
+        (jax.device_put(jax.random.normal(keys[1], (16, 8)), sharding_2d_t), (0,), (1,), sharding_2d_t),
+        (jax.device_put(jax.random.normal(keys[2], (5, 8, 16)), sharding_3d), (1,), (2,), sharding_3d),
+        # Sharded-batch padded group -> combined into (32, 8, 16)
+        (jax.device_put(jax.random.normal(keys[3], (4, 3, 8, 16)), sharding_4d), (2,), (3,), sharding_4d),
+        (jax.device_put(jax.random.normal(keys[4], (4, 5, 8, 16)), sharding_4d), (2,), (3,), sharding_4d),
+        # Short PartitionSpec sharded-batch group (P("x", "y") on 3D) -> combined into (32, 8, 16)
+        (jax.device_put(jax.random.normal(keys[5], (12, 8, 16)), sharding_short), (1,), (2,), sharding_short),
+        (jax.device_put(jax.random.normal(keys[6], (20, 8, 16)), sharding_short), (1,), (2,), sharding_short),
+        # Skipped: divisible local batch, batch-only sharded, unsharded, singleton different dtype
+        (jax.device_put(jax.random.normal(keys[7], (4, 2, 8, 16)), sharding_4d), (2,), (3,), sharding_4d),
+        (jax.device_put(jax.random.normal(keys[8], (4, 8, 16)), sharding_batch_only), (1,), (2,), sharding_batch_only),
+        (jax.random.normal(keys[9], (8, 16)), (0,), (1,), None),
+        (
+            jax.device_put(jax.random.normal(keys[10], (8, 16), dtype=jnp.bfloat16), sharding_2d),
+            (0,),
+            (1,),
+            sharding_2d,
+        ),
+    ]
 
-    updates, _ = step(params, state, grads)
-    self.assertEqual(updates["w"].shape, (3, 8, 16))
-    self.assertEqual(updates["w"].sharding, sharding)
-    self.assertFalse(jnp.isnan(updates["w"]).any())
+    packed, unpack_fn = reshape_utils.pack_compatible_tensors(items)
+    # 3 skipped + 1 singleton bf16 + 2 packed groups = 6 items; the 4D and short-spec 3D
+    # sharded-batch leaves share normalized sharding_3d P("x", "y", None) -> (64, 8, 16).
+    self.assertEqual(
+        sorted(x.shape for x, _, _, _ in packed),
+        [(4, 2, 8, 16), (4, 8, 16), (7, 8, 16), (8, 16), (8, 16), (64, 8, 16)],
+    )
+    unpacked = unpack_fn([x for x, _, _, _ in packed])
+    for actual, (expected, _, _, sharding) in zip(unpacked, items):
+      self.assertEqual(actual.dtype, expected.dtype)
+      chex.assert_trees_all_close(actual, expected)
+      if axis_type == jax.sharding.AxisType.Explicit and sharding is not None:
+        self.assertTrue(actual.sharding.is_equivalent_to(sharding, ndim=expected.ndim))
+
+    with self.assertRaisesRegex(ValueError, "Expected"):
+      unpack_fn([])
+
+    empty_packed, empty_unpack = reshape_utils.pack_compatible_tensors([])
+    self.assertEqual(empty_packed, [])
+    self.assertEqual(empty_unpack([]), [])
+
+  @parameterized.parameters(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Auto)
+  def test_sharded_multi_leaf_grouping_matches_optax_contrib(self, axis_type):
+    """Tests post-3D grouping (heterogeneous batch, transposed, square, singleton, sharded batch)."""
+    devices = jax.devices("cpu")
+    mesh = jax.sharding.Mesh(
+        np.array(devices).reshape(4, 2),
+        axis_names=("x", "y"),
+        axis_types=(axis_type, axis_type),
+    )
+    sharding_2d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", "y"))
+    sharding_2d_t = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("y", "x"))
+    sharding_3d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, "x", "y"))
+    sharding_4d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("x", None, "y", None))
+    keys = jax.random.split(jax.random.key(21), 9)
+    params = {
+        "w_2d": jax.device_put(jax.random.normal(keys[0], (8, 16)), sharding_2d),
+        "w_2d_t": jax.device_put(jax.random.normal(keys[1], (16, 8)), sharding_2d_t),
+        "w_3d": jax.device_put(jax.random.normal(keys[2], (5, 8, 16)), sharding_3d),
+        "sq_2d": jax.device_put(jax.random.normal(keys[3], (8, 8)), sharding_2d),
+        "sq_3d": jax.device_put(jax.random.normal(keys[4], (3, 8, 8)), sharding_3d),
+        "b0": jax.device_put(jax.random.normal(keys[5], (4, 3, 8, 16)), sharding_4d),
+        "b1": jax.device_put(jax.random.normal(keys[6], (4, 5, 8, 16)), sharding_4d),
+        "div": jax.device_put(jax.random.normal(keys[7], (4, 2, 8, 16)), sharding_4d),
+        "singleton": jax.device_put(jax.random.normal(keys[8], (8, 32)), sharding_2d),
+    }
+    local_dim_nums = {
+        "w_2d": _muon.ShardedMuonDimensionNumbers(0, 1, sharding=sharding_2d),
+        "w_2d_t": _muon.ShardedMuonDimensionNumbers(0, 1, sharding=sharding_2d_t),
+        "w_3d": _muon.ShardedMuonDimensionNumbers(1, 2, sharding=sharding_3d),
+        "sq_2d": _muon.ShardedMuonDimensionNumbers(0, 1, sharding=sharding_2d),
+        "sq_3d": _muon.ShardedMuonDimensionNumbers(1, 2, sharding=sharding_3d),
+        "b0": _muon.ShardedMuonDimensionNumbers(2, 3, sharding=sharding_4d),
+        "b1": _muon.ShardedMuonDimensionNumbers(2, 3, sharding=sharding_4d),
+        "div": _muon.ShardedMuonDimensionNumbers(2, 3, sharding=sharding_4d),
+        "singleton": _muon.ShardedMuonDimensionNumbers(0, 1, sharding=sharding_2d),
+    }
+    optax_dim_nums = {
+        "w_2d": optax_muon.MuonDimensionNumbers(0, 1),
+        "w_2d_t": optax_muon.MuonDimensionNumbers(0, 1),
+        "w_3d": optax_muon.MuonDimensionNumbers(1, 2),
+        "sq_2d": optax_muon.MuonDimensionNumbers(0, 1),
+        "sq_3d": optax_muon.MuonDimensionNumbers(1, 2),
+        "b0": optax_muon.MuonDimensionNumbers(2, 3),
+        "b1": optax_muon.MuonDimensionNumbers(2, 3),
+        "div": optax_muon.MuonDimensionNumbers(2, 3),
+        "singleton": optax_muon.MuonDimensionNumbers(0, 1),
+    }
+    local_opt = _muon.scale_by_muon(weight_dimension_numbers=local_dim_nums)
+    optax_opt = optax_muon.scale_by_muon(weight_dimension_numbers=optax_dim_nums)
+    local_updates, _ = jax.jit(local_opt.update)(params, local_opt.init(params), params)
+    unsharded_params = jax.device_get(params)
+    optax_updates, _ = optax_opt.update(unsharded_params, optax_opt.init(unsharded_params), unsharded_params)
+    chex.assert_trees_all_close(local_updates, optax_updates, rtol=1e-5, atol=1e-5)
+    if axis_type == jax.sharding.AxisType.Explicit:
+      for name, param in params.items():
+        self.assertEqual(local_updates[name].sharding, param.sharding)
+
+    # Also verify MaskedNode preservation (both with and without all-to-all) through scale_by_muon.
+    masked_params = {**params, "masked": optax.MaskedNode()}
+    masked_dim_nums = {**local_dim_nums, "masked": optax.MaskedNode()}
+    for use_all_to_all in (True, False):
+      masked_opt = _muon.scale_by_muon(weight_dimension_numbers=masked_dim_nums, use_all_to_all=use_all_to_all)
+      masked_updates, _ = jax.jit(masked_opt.update)(masked_params, masked_opt.init(masked_params), masked_params)
+      self.assertIsInstance(masked_updates["masked"], optax.MaskedNode)
+      for name in params:
+        chex.assert_trees_all_close(masked_updates[name], optax_updates[name], rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":
