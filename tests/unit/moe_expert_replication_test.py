@@ -12,9 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""CPU tests for RoutedMoE online hot-expert replication wiring."""
+"""CPU and TPU tests for RoutedMoE online hot-expert replication wiring."""
 
 import contextlib
+import functools
 import types
 from unittest import mock
 
@@ -23,34 +24,18 @@ from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 import numpy as np
+import pytest
 
 from maxtext.configs import pyconfig
 from maxtext.layers import initializers
 from maxtext.layers import moe
 from maxtext.layers import moe_replica_planner as mrp
 from maxtext.layers import moe_replica_weights as mrw
+from tests.utils import moe_replica_test_utils
 from tests.utils.test_helpers import get_test_config_path
-
-
-def _emulated_ragged_all_to_all(
-    operand, output, input_offsets, send_sizes, output_offsets, recv_sizes, *, axis_name
-):  # pylint: disable=too-many-positional-arguments
-  """CPU-compatible ragged_all_to_all emulation via all_gather under jax.vmap."""
-  del recv_sizes
-  me = jax.lax.axis_index(axis_name)
-  ops = jax.lax.all_gather(operand, axis_name)
-  in_off = jax.lax.all_gather(input_offsets, axis_name)[:, me]
-  size = jax.lax.all_gather(send_sizes, axis_name)[:, me]
-  out_off = jax.lax.all_gather(output_offsets, axis_name)[:, me]
-  rows = jnp.arange(output.shape[0])
-  out = output
-  for i in range(ops.shape[0]):
-    hit = (rows >= out_off[i]) & (rows < out_off[i] + size[i])
-    src = jnp.clip(in_off[i] + rows - out_off[i], 0, operand.shape[0] - 1)
-    out = jnp.where(hit.reshape((-1,) + (1,) * (out.ndim - 1)), ops[i][src], out)
-  return out
 
 
 def _pure_jax_gmm(lhs, rhs, group_sizes, preferred_element_type=jnp.float32, existing_out=None, **_unused_kwargs):
@@ -215,7 +200,7 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
       object.__setattr__(layer.config, "hardware", "tpu")
       with (
           mock.patch.object(jax, "shard_map", side_effect=fake_shard_map),
-          mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=_emulated_ragged_all_to_all),
+          mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=moe_replica_test_utils.emulated_ragged_all_to_all),
           mock.patch.object(moe.mblx, "gmm", side_effect=tracked_gmm),
       ):
         yield
@@ -443,6 +428,70 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
     np.testing.assert_allclose(np.asarray(out_rep), np.asarray(out_ref), rtol=1e-5, atol=1e-5)
     for g_rep, g_ref in zip(grads_rep, grads_ref):
       np.testing.assert_allclose(np.asarray(g_rep), np.asarray(g_ref), rtol=1e-5, atol=1e-5)
+
+
+@pytest.mark.tpu_only
+class PlannerDrivenReplicaWeightsTpuTest(parameterized.TestCase):
+  """Runs `compute_plan_iter` + `extend_with_replicas` under `jax.shard_map` with real TPU `ragged_all_to_all`."""
+
+  @parameterized.named_parameters(
+      ("r1_maxsend1_f32", 1, 1, jnp.float32),
+      ("r2_maxsend2_f32", 2, 2, jnp.float32),
+      ("r3_maxsend4_f32", 3, 4, jnp.float32),
+      ("r2_maxsend3_bf16", 2, 3, jnp.bfloat16),
+  )
+  def test_compute_plan_iter_and_real_ragged_all_to_all_match_reference(self, num_replicas, max_send, compute_dtype):
+    """Checks forward and backward parity of planner-generated plans on real TPU `ragged_all_to_all`."""
+    devs = jax.devices()
+    if len(devs) < 2:
+      self.skipTest(f"compute_plan_iter requires >= 2 TPU devices, got {len(devs)}.")
+    self.assertIsNot(jax.lax.ragged_all_to_all, moe_replica_test_utils.emulated_ragged_all_to_all)
+    num_ep = len(devs)
+    local = 4
+    num_experts = num_ep * local
+    rng = np.random.default_rng(100 + num_replicas * 10 + max_send)
+    counts = rng.integers(1, 5, size=(num_ep, num_experts), dtype=np.int32)
+    counts[:, :local] += 80
+    if num_ep >= 4:
+      counts[:, local : 2 * local] += 50
+
+    plan = mrp.compute_plan_iter(jnp.asarray(counts), num_ep, num_replicas, max_send)
+    self.assertGreater(int((np.asarray(plan.rep_home) >= 0).sum()), 0)
+
+    w_np = rng.standard_normal((num_ep, local, 16, 128)).astype(np.float32)
+    g_np = rng.standard_normal((num_ep, local + num_replicas, 16, 128)).astype(np.float32)
+    mesh = Mesh(np.asarray(devs), ("expert",))
+    w_sharded = jax.device_put(jnp.asarray(w_np), jax.sharding.NamedSharding(mesh, P("expert")))
+    g_sharded = jax.device_put(jnp.asarray(g_np, dtype=compute_dtype), jax.sharding.NamedSharding(mesh, P("expert")))
+
+    @jax.jit
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(P("expert"), P("expert")),
+        out_specs=(P("expert"), P("expert"), P("expert")),
+    )
+    def step(w_shard, g_shard):
+      # Recompute the deterministic plan inside shard_map from the same replicated counts as the host reference.
+      in_shard_plan = mrp.compute_plan_iter(jnp.asarray(counts), num_ep, num_replicas, max_send)
+      out_local, vjp_fn = jax.vjp(
+          lambda w: mrw.extend_with_replicas(w, in_shard_plan, "expert", num_ep, compute_dtype),
+          w_shard[0],
+      )
+      (dw_local,) = vjp_fn(g_shard[0])
+      return out_local[None], dw_local[None], in_shard_plan.route_table[None]
+
+    out, dw, shard_routes = step(w_sharded, g_sharded)
+    np.testing.assert_array_equal(np.asarray(shard_routes[0]), np.asarray(plan.route_table))
+    self.assertEqual(out.dtype, compute_dtype)
+    self.assertEqual(dw.dtype, jnp.float32)
+
+    w_ref = np.asarray(jnp.asarray(w_np, dtype=compute_dtype), dtype=np.float32)
+    g_ref = np.asarray(jnp.asarray(g_np, dtype=compute_dtype), dtype=np.float32)
+    reps_ref, dw_rep_ref = moe_replica_test_utils.replica_reference(w_ref, g_ref[:, local:], plan)
+    np.testing.assert_array_equal(np.asarray(out, dtype=np.float32), np.concatenate([w_ref, reps_ref], axis=1))
+    tol = 1e-2 if compute_dtype == jnp.bfloat16 else 1e-5
+    np.testing.assert_allclose(np.asarray(dw), g_ref[:, :local] + dw_rep_ref, rtol=tol, atol=tol)
 
 
 if __name__ == "__main__":
