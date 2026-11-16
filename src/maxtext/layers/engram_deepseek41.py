@@ -100,6 +100,17 @@ def engram_primes(layer_ids: Sequence[int], max_ngram_size: int, n_heads: int, v
   return primes
 
 
+def engram_num_embeddings(config: Config) -> list[int]:
+  """Unpadded table rows (the sum of the hash bucket sizes) of each layer in `config.ds41_engram_layers`."""
+  primes = engram_primes(
+      config.ds41_engram_layers,
+      config.ds41_engram_max_ngram_size,
+      config.ds41_engram_n_heads,
+      config.ds41_engram_vocab_size,
+  )
+  return [int(sum(sum(per_ngram) for per_ngram in layer)) for layer in primes]
+
+
 def compute_hash_multipliers(layer_ids: Sequence[int], max_ngram_size: int, compressed_vocab_size: int) -> np.ndarray:
   """One odd multiplier per (layer, lookback), bounded so `token_id * multiplier` fits in int64. [L, N] int64."""
   max_long = np.iinfo(np.int64).max
@@ -259,7 +270,18 @@ def load_tokenizer_token_map(config: Config) -> tuple[np.ndarray, int]:
   expected = config.ds41_engram_compressed_vocab_size
   if expected and vocab_size != expected:
     raise ValueError(f"compressed tokenizer vocab size {vocab_size} != ds41_engram_compressed_vocab_size {expected}")
-  return token_map, vocab_size
+  return pad_token_map(token_map, config.vocab_size, config.ds41_engram_pad_id), vocab_size
+
+
+def pad_token_map(token_map: np.ndarray, vocab_size: int, pad_id: int) -> np.ndarray:
+  """Extends the token map to the model's (possibly padded) embedding vocab.
+
+  Ids past the tokenizer (embedding rows it never emits) hash like the pad token, instead of being clamped by the
+  gather onto the last tokenizer id.
+  """
+  if len(token_map) >= vocab_size:
+    return token_map
+  return np.concatenate([token_map, np.full(vocab_size - len(token_map), token_map[pad_id], dtype=token_map.dtype)])
 
 
 def make_hasher(config: Config, layer_id: int, token_map: np.ndarray, compressed_vocab_size: int) -> Any:

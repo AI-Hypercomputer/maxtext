@@ -46,14 +46,14 @@ o_lora_rank: 1024
 sliding_window_size: 128
 # 0 = sliding window only; r = KV compressed r-to-1.
 compress_ratios: [0, 0, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1]
-kv_source_layers: [2, 4, 6, 8]
-index_source_layers: [2, 4, 6, 8, 10, 12]
+ds41_kv_source_layers: [2, 4, 6, 8]
+ds41_index_source_layers: [2, 4, 6, 8, 10, 12]
 indexer_n_heads: 32
 indexer_head_dim: 128
 indexer_topk: 4
-candidate_source_layer: 8
-candidate_topk_blocks: 8
-candidate_block_size: 8
+ds41_candidate_source_layer: 8
+ds41_candidate_topk_blocks: 8
+ds41_candidate_block_size: 8
 
 # --- Engram ---
 ds41_engram_layers: [1, 6]

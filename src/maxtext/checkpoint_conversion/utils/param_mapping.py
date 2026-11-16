@@ -4735,15 +4735,18 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
 _FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
 
 
+def _unpack_to_bf16(xp, weight):
+  """FP8 E4M3 weight, or int8 holding two FP4 E2M1 codes per byte (low nibble first) -> bf16 (`xp`: np / jnp)."""
+  if weight.dtype != np.int8:
+    return weight.astype(jnp.bfloat16)
+  packed = jax.lax.bitcast_convert_type(weight, jnp.uint8) if xp is jnp else weight.view(np.uint8)
+  codes = xp.stack([packed & 0xF, packed >> 4], axis=-1).reshape(weight.shape[0], -1)
+  return xp.take(xp.asarray(_FP4_E2M1_VALUES, dtype=jnp.bfloat16), codes.astype(xp.int32))
+
+
 def _dequantize_block_scaled(xp, weight, scale, broadcast_scales=True):
   """See `dequantize_block_scaled`; `xp` is `np` or `jnp`."""
-  if weight.dtype == np.int8:
-    packed = jax.lax.bitcast_convert_type(weight, jnp.uint8) if xp is jnp else weight.view(np.uint8)
-    table = xp.asarray(_FP4_E2M1_VALUES, dtype=jnp.bfloat16)
-    codes = xp.stack([packed & 0xF, packed >> 4], axis=-1).reshape(weight.shape[0], -1)
-    w = xp.take(table, codes.astype(xp.int32))
-  else:
-    w = weight.astype(jnp.bfloat16)
+  w = _unpack_to_bf16(xp, weight)
   s = scale.astype(jnp.float32).astype(jnp.bfloat16)
   rows, cols = w.shape
   block_rows, block_cols = -(-rows // s.shape[0]), -(-cols // s.shape[1])
@@ -4770,12 +4773,7 @@ def _local_dequantize(weight, scale, rows, row_offset, local_scale):
   scale tensor, and each local row picks its block's row. This must come from the global shapes: comparing the
   local row count with the scale's would misread e.g. 32x32 blocks split over 32 chips (rows / 32 of each).
   """
-  if weight.dtype == np.int8:
-    packed = jax.lax.bitcast_convert_type(weight, jnp.uint8)
-    codes = jnp.stack([packed & 0xF, packed >> 4], axis=-1).reshape(weight.shape[0], -1)
-    w = jnp.take(jnp.asarray(_FP4_E2M1_VALUES, dtype=jnp.bfloat16), codes.astype(jnp.int32))
-  else:
-    w = weight.astype(jnp.bfloat16)
+  w = _unpack_to_bf16(jnp, weight)
   s = scale.astype(jnp.float32).astype(jnp.bfloat16)
   local_rows, cols = w.shape
   if not local_scale:  # Full scale tensor: pick each local row's block.
@@ -4792,7 +4790,7 @@ def _row_axis(sharding):
   return spec[0] if len(spec) and spec[0] is not None else None
 
 
-@functools.lru_cache(maxsize=None)
+@functools.lru_cache(maxsize=64)
 def _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, rows, scale_rows):
   """A jitted per-shard dequantization for one layout (weight / scale specs and global row counts)."""
   row_axis = weight_spec[0] if len(weight_spec) else None
@@ -4815,6 +4813,9 @@ def _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, rows, scale_rows):
 def _dequantize_on_device(weight, scale):
   """Dequantizes a row-split (or replicated) weight in place, each chip on its own rows; keeps its sharding."""
   mesh = weight.sharding.mesh
+  if any(axis is not None for axis in tuple(weight.sharding.spec)[1:]):
+    # The per-shard function only splits dim 0: any other split would be all-gathered into a full copy per chip.
+    raise ValueError(f"Per-shard dequantization expects a weight split along dim 0 only, got {weight.sharding.spec}.")
   weight_spec = jax.sharding.PartitionSpec(_row_axis(weight.sharding))
   scale_spec = jax.sharding.PartitionSpec()
   if (
@@ -4830,7 +4831,8 @@ def _dequantize_on_device(weight, scale):
   elif scale.sharding != jax.sharding.NamedSharding(mesh, scale_spec):
     if not scale.is_fully_replicated:
       raise ValueError(f"Scales with sharding {scale.sharding} cannot be dequantized per shard of {weight.sharding}.")
-    # A full copy on every chip already: rebuild it on the weight's mesh from the local copies (no communication).
+    # A full copy on every chip already: rebuild it on the weight's mesh from the local copies (no collective;
+    # at most a device-to-device copy for chips whose copy lives on another device object).
     scale = jax.make_array_from_single_device_arrays(
         scale.shape,
         jax.sharding.NamedSharding(mesh, scale_spec),
@@ -4844,6 +4846,11 @@ def pad_rows_to_target(x, target_shape):
   """Pads dim 0 with zeros up to `target_shape[0]` (e.g. the row-padded DeepSeek-V4.1 engram tables)."""
   if target_shape is None or x.shape[0] == target_shape[0]:
     return x
+  if x.shape[0] > target_shape[0]:
+    raise ValueError(
+        f"The checkpoint tensor has {x.shape[0]} rows, more than the {target_shape[0]} (padded) rows of its MaxText"
+        " target: the checkpoint does not match the model config."
+    )
   xp = _array_module(x)
   return xp.pad(x, ((0, target_shape[0] - x.shape[0]),) + ((0, 0),) * (x.ndim - 1))
 
@@ -4851,6 +4858,36 @@ def pad_rows_to_target(x, target_shape):
 # The streaming loader may then read the HF tensor(s) already zero-padded to the target's rows (see
 # `hf_streaming_load._load_request`), which this and the dequantize hook pass through unchanged.
 pad_rows_to_target.pads_rows_to_target = True
+
+
+def truncate_rows_to_target(x, target_shape):
+  """Drops trailing (padding) rows beyond `target_shape[0]`: the inverse of `pad_rows_to_target`, for saving."""
+  return x if target_shape is None else x[: target_shape[0]]
+
+
+def _check_engram_rows(maxtext_config, layer_id, hook):
+  """Wraps an engram-table loading hook to check the checkpoint's row count against the table the model hashes into.
+
+  The streaming loader may read the table already zero-padded to the target rows (then only an oversized table can
+  be detected here); every other path hands over the stored rows, which must match the hash bucket total exactly.
+  """
+  from maxtext.layers import engram_deepseek41  # pylint: disable=import-outside-toplevel
+
+  expected = engram_deepseek41.engram_num_embeddings(maxtext_config)[
+      list(maxtext_config.ds41_engram_layers).index(layer_id)
+  ]
+
+  def checked(x, target_shape):
+    rows = (x[0] if isinstance(x, tuple) else x).shape[0]
+    if rows not in (expected, None if target_shape is None else target_shape[0]):
+      raise ValueError(
+          f"The layer {layer_id} engram table in the checkpoint has {rows} rows, but the model config hashes into"
+          f" {expected} (the engram_* settings do not match the checkpoint)."
+      )
+    return hook(x, target_shape)
+
+  checked.pads_rows_to_target = getattr(hook, "pads_rows_to_target", False)
+  return checked
 
 
 def dequantize_block_scaled(pair, target_shape=None):
@@ -4876,7 +4913,9 @@ def dequantize_block_scaled(pair, target_shape=None):
   return _dequantize_block_scaled(np, weight, scale)
 
 
-# DeepSeek-V4.1 tensors stored block-quantized (with a sibling `.scale`) in the released checkpoint.
+# DeepSeek-V4.1 tensors stored block-quantized (with a sibling `.scale`) in the released checkpoint. Matched as
+# suffixes of the full `layers.{i}.` key, so each entry must include enough of the module path to be unambiguous
+# (e.g. `attn.wkv.weight` must not match `attn.compressor.wkv.weight`).
 _DEEPSEEK_V41_QUANTIZED = (
     "attn.wq_a.weight",
     "attn.wq_b.weight",
@@ -5006,6 +5045,11 @@ def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers
   kernel [groups, d, o_lora_rank]; the hyper-connection projections [mix, hc * dim] become [hc * dim, mix].
   """
   quantized = _deepseek41_is_quantized(config)
+  if quantized and saving_to_hf:
+    raise ValueError(
+        "Saving DeepSeek-V4.1 to the quantized (FP8 / FP4) checkpoint format is not supported: save a bf16 checkpoint"
+        " (an HF config without `quantization_config`)."
+    )
 
   def to_mt_kernel(x, target_shape):
     """torch [out, in] -> MaxText [in, *out]; saving: MaxText [in, *out] -> torch [out, in] (target_shape)."""
@@ -5062,7 +5106,11 @@ def DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers
       mapping[key] = to_mt_kernel
     mapping[f"{attn}-o_a_proj-kernel"] = o_a_proj
     if spec.has_engram:
-      mapping[f"{prefix}-engram-embed"] = pad_rows_to_target
+      mapping[f"{prefix}-engram-embed"] = (
+          truncate_rows_to_target
+          if saving_to_hf
+          else _check_engram_rows(maxtext_config, spec.layer_id, pad_rows_to_target)
+      )
 
   if quantized and not saving_to_hf:
     # Dequantize first; the sources of these weights are (weight, scale) pairs (see the param mapping).

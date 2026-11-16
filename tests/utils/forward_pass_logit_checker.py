@@ -287,7 +287,10 @@ def _local_checkpoint_dir(path):
 
   local = tempfile.mkdtemp(prefix="hf_reference_")
   atexit.register(shutil.rmtree, local, ignore_errors=True)
-  max_logging.log(f"Copying {path} to {local} for the reference model.")
+  max_logging.warning(
+      f"Copying the whole checkpoint {path} to {local} for the reference model: make sure the local disk can hold it"
+      " (hundreds of GB for a full-size model), or pass a local --hf_model_path."
+  )
   subprocess.run(["gcloud", "storage", "cp", "-r", path.rstrip("/") + "/*", local], check=True)
   return local
 
@@ -328,6 +331,10 @@ def _load_reference_model(reference_model, hf_model_path, torch_dtype, config, t
 
   if reference_model not in _REFERENCE_MODELS:
     raise ValueError(f"Unknown reference model {reference_model}; choose from {sorted(_REFERENCE_MODELS)}")
+  # The reference modules are imported as `tests.utils...`: make that work from any working directory.
+  repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+  if repo_root not in sys.path:
+    sys.path.insert(0, repo_root)
   runner = importlib.import_module(_REFERENCE_MODELS[reference_model])
   dtype = "fp32" if torch_dtype == torch.float32 else "bf16"
   max_logging.log(f"Loading the {reference_model} reference model ({dtype}) from {hf_model_path}")

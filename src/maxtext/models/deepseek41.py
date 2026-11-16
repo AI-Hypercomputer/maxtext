@@ -86,10 +86,10 @@ def build_layer_specs(config: Config) -> list[LayerSpec]:
         LayerSpec(
             layer_id=i,
             compress_ratio=ratio,
-            is_kv_source=ratio > 0 and i in config.kv_source_layers,
-            is_index_source=ratio > 0 and i in config.index_source_layers,
-            is_candidate_source=ratio > 0 and i == config.candidate_source_layer,
-            uses_candidates=0 <= config.candidate_source_layer < i,
+            is_kv_source=ratio > 0 and i in config.ds41_kv_source_layers,
+            is_index_source=ratio > 0 and i in config.ds41_index_source_layers,
+            is_candidate_source=ratio > 0 and i == config.ds41_candidate_source_layer,
+            uses_candidates=0 <= config.ds41_candidate_source_layer < i,
             has_engram=i in config.ds41_engram_layers,
         )
     )

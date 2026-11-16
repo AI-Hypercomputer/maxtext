@@ -18,12 +18,12 @@ Every DeepSeek-V4.1 layer attends over a sliding window of its own (uncompressed
 `compress_ratio > 0` additionally attend over `index_topk` positions of a *compressed* KV sequence, in the same
 softmax (with a learned per-head attention sink):
 
-  * Compressed KV is only produced by the `kv_source_layers` (one latent per `compress_ratio` tokens: a softmax
+  * Compressed KV is only produced by the `ds41_kv_source_layers` (one latent per `compress_ratio` tokens: a softmax
     pooled projection for ratio > 1, a plain projection for ratio 1). Every later layer with the same ratio reuses
     the most recent source's compressed KV and its index keys.
-  * Top-k positions are only chosen by the `index_source_layers`; the layers in between reuse the source's choice.
-  * The `candidate_source_layer` additionally keeps its `candidate_topk_blocks` best blocks of
-    `candidate_block_size` positions; every later index source only picks its top-k inside those blocks.
+  * Top-k positions are only chosen by the `ds41_index_source_layers`; the layers in between reuse the source's choice.
+  * The `ds41_candidate_source_layer` additionally keeps its `ds41_candidate_topk_blocks` best blocks of
+    `ds41_candidate_block_size` positions; every later index source only picks its top-k inside those blocks.
 
 What a layer shares with later layers is threaded through a small dict (`shared`):
   `compress_kv` [B, C, D] (RoPE'd), `index_k` [B, C, Di], `topk_mask` [B, S, C] (bool), `candidates` [B, S, C].
@@ -31,8 +31,7 @@ What a layer shares with later layers is threaded through a small dict (`shared`
 Reference: https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/inference/model.py
 """
 
-import math
-from typing import Any, Optional
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -44,55 +43,6 @@ from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral, DeepSeekV4GroupedLinear
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
-
-
-class DeepSeek41RotaryEmbedding(DeepSeekV4RotaryEmbedding):
-  """DeepSeek-V4 interleaved partial RoPE with optional YaRN frequency interpolation.
-
-  With `original_seq_len > 0`, dimensions whose wavelength already fits in the training context keep their
-  frequency, those far beyond it are divided by `rope_factor`, and the `beta_fast`..`beta_slow` band in between is
-  blended with a linear ramp (reference `precompute_freqs_cis`). No attention-temperature (mscale) is applied.
-  """
-
-  def __init__(
-      self,
-      head_dim: int,
-      partial_rotary_factor: float,
-      rope_theta: float,
-      fprop_dtype: Any = jnp.float32,
-      original_seq_len: int = 0,
-      rope_factor: float = 1.0,
-      beta_fast: int = 32,
-      beta_slow: int = 1,
-      **kwargs,
-  ):
-    super().__init__(
-        head_dim=head_dim,
-        partial_rotary_factor=partial_rotary_factor,
-        rope_theta=rope_theta,
-        fprop_dtype=fprop_dtype,
-        **kwargs,
-    )
-    self.original_seq_len = original_seq_len
-    self.rope_factor = rope_factor
-    self.beta_fast = beta_fast
-    self.beta_slow = beta_slow
-
-  @property
-  def inv_freq(self):
-    dim, base = self.dim, self.rope_theta
-    freqs = 1.0 / (base ** (jnp.arange(0, dim, 2, dtype=jnp.float32) / dim))
-    if self.original_seq_len > 0:
-
-      def corrected_dim(rotations):
-        return dim * math.log(self.original_seq_len / (rotations * 2 * math.pi)) / (2 * math.log(base))
-
-      low = max(math.floor(corrected_dim(self.beta_fast)), 0)
-      high = min(math.ceil(corrected_dim(self.beta_slow)), dim - 1)
-      ramp = jnp.clip((jnp.arange(dim // 2, dtype=jnp.float32) - low) / max(high - low, 1e-3), 0, 1)
-      smooth = 1 - ramp
-      freqs = freqs / self.rope_factor * (1 - smooth) + freqs * smooth
-    return freqs
 
 
 def compressed_visible_len(positions: Array, ratio: int) -> Array:
@@ -200,7 +150,7 @@ class DeepSeek41Indexer(nnx.Module):
   """Scores compressed positions per query and keeps the `index_topk` best (DeepSeek-V4.1 indexer).
 
   Index keys are derived from the KV source's compressed latent (`wk` + `k_norm`, RoPE on the trailing
-  `rope_head_dim`), so only an indexer in a `kv_source_layers` layer owns those weights; every other indexer reads
+  `rope_head_dim`), so only an indexer in a `ds41_kv_source_layers` layer owns those weights; every other indexer reads
   the keys its source published. Scores are `sum_h relu(q_h . k) * w_h` with `w = weights_proj(x)` scaled by
   `index_head_dim**-0.5 * index_n_heads**-0.5`.
   """
@@ -212,7 +162,7 @@ class DeepSeek41Indexer(nnx.Module):
       owns_k: bool,
       is_candidate_source: bool,
       uses_candidates: bool,
-      rotary_embedding: DeepSeek41RotaryEmbedding,
+      rotary_embedding: DeepSeekV4RotaryEmbedding,
       kernel_init: NdInitializer,
       quant: Optional[Quant] = None,
       *,
@@ -294,7 +244,7 @@ class DeepSeek41Indexer(nnx.Module):
 
     if self.is_candidate_source:
       updates["candidates"] = select_candidate_blocks(
-          scores, compress_lens, self.config.candidate_topk_blocks, self.config.candidate_block_size
+          scores, compress_lens, self.config.ds41_candidate_topk_blocks, self.config.ds41_candidate_block_size
       )
     elif self.uses_candidates:
       scores = jnp.where(shared["candidates"], scores, -jnp.inf)
@@ -397,12 +347,13 @@ class DeepSeek41Attention(nnx.Module):
     )
     self.sinks = nnx.Param(jnp.zeros((self.num_heads,), dtype=jnp.float32), out_sharding=(None,))
 
-    # Compressed layers rotate at `compressed_rope_max_timescale` with YaRN; sliding-window-only layers use the
-    # base theta without YaRN.
+    # Compressed layers rotate at `compressed_rope_max_timescale` with YaRN (no attention-temperature / mscale, as
+    # the reference `precompute_freqs_cis`); sliding-window-only layers use the base theta without YaRN.
     if compress_ratio > 0:
       rope_kwargs = {
           "rope_theta": config.compressed_rope_max_timescale,
-          "original_seq_len": config.original_max_position_embeddings if config.ds41_compressed_rope_yarn else 0,
+          "rope_type": "yarn" if config.ds41_compressed_rope_yarn else "default",
+          "original_max_position_embeddings": config.original_max_position_embeddings,
           "rope_factor": config.rope_factor,
           "beta_fast": config.beta_fast,
           "beta_slow": config.beta_slow,
@@ -411,7 +362,7 @@ class DeepSeek41Attention(nnx.Module):
       rope_kwargs = {
           "rope_theta": config.rope_max_timescale,
       }
-    self.rotary_embedding = DeepSeek41RotaryEmbedding(
+    self.rotary_embedding = DeepSeekV4RotaryEmbedding(
         head_dim=self.head_dim,
         partial_rotary_factor=config.qk_rope_head_dim / self.head_dim,
         fprop_dtype=config.dtype,

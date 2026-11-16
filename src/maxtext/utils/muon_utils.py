@@ -63,8 +63,11 @@ EXCLUDED_SUBSTRINGS = (
 
 EXCLUDED_EXACT_SEGMENTS = {
     "bias",
-    "embed",  # DeepSeek-V4.1 engram lookup tables
 }
+
+# Exact-segment pairs whose joint presence excludes a parameter (e.g. the DeepSeek-V4.1 engram lookup tables
+# `.../engram/embed`), without excluding unrelated parameters that merely share one of the names.
+EXCLUDED_EXACT_SEGMENT_PAIRS = (("engram", "embed"),)
 
 # Attention module identifiers and tensor projection names that require
 # head-aware (3D/4D) dimension specifications.
@@ -152,7 +155,7 @@ def transform_logic(
       or (segment.endswith("bias") and segment != "position_bias")
       or any(x in segment for x in EXCLUDED_SUBSTRINGS)
       for segment in path
-  ):
+  ) or any(a in path and b in path for a, b in EXCLUDED_EXACT_SEGMENT_PAIRS):
     return None
 
   # MoE routed expert weights: [num_experts, (num_layers), in_features, out_features]

@@ -36,6 +36,7 @@ from flax import nnx
 
 from maxtext.configs import pyconfig
 from maxtext.layers import attention_deepseek41
+from maxtext.layers import embeddings
 from maxtext.layers import engram_deepseek41
 from maxtext.models import deepseek41
 
@@ -162,14 +163,14 @@ def _maxtext_config(**overrides):
       "sliding_window_size": REF_ARGS["window_size"],
       "base_num_decoder_layers": len(COMPRESS_RATIOS),
       "compress_ratios": COMPRESS_RATIOS,
-      "kv_source_layers": KV_SOURCES,
-      "index_source_layers": INDEX_SOURCES,
+      "ds41_kv_source_layers": KV_SOURCES,
+      "ds41_index_source_layers": INDEX_SOURCES,
       "indexer_n_heads": REF_ARGS["index_n_heads"],
       "indexer_head_dim": REF_ARGS["index_head_dim"],
       "indexer_topk": REF_ARGS["index_topk"],
-      "candidate_source_layer": CANDIDATE_SOURCE,
-      "candidate_topk_blocks": REF_ARGS["candidate_topk_blocks"],
-      "candidate_block_size": REF_ARGS["candidate_block_size"],
+      "ds41_candidate_source_layer": CANDIDATE_SOURCE,
+      "ds41_candidate_topk_blocks": REF_ARGS["candidate_topk_blocks"],
+      "ds41_candidate_block_size": REF_ARGS["candidate_block_size"],
       "ds41_engram_layers": ENGRAM_LAYERS,
       "ds41_engram_vocab_size": REF_ARGS["engram_vocab_size"],
       "ds41_engram_max_ngram_size": REF_ARGS["engram_max_ngram_size"],
@@ -289,11 +290,12 @@ class DeepSeek41RotaryTest(unittest.TestCase):
     x = torch.randn(2, seq, 3, head_dim)
     ref = x.clone()
     ref_model.apply_rotary_emb(ref[..., -rd:], freqs_cis)
-    rope = attention_deepseek41.DeepSeek41RotaryEmbedding(
+    rope = embeddings.DeepSeekV4RotaryEmbedding(
         head_dim=head_dim,
         partial_rotary_factor=rd / head_dim,
         rope_theta=theta,
-        original_seq_len=original_seq_len,
+        rope_type="yarn" if original_seq_len > 0 else "default",
+        original_max_position_embeddings=original_seq_len,
         rope_factor=16,
         beta_fast=32,
         beta_slow=1,
@@ -493,9 +495,9 @@ class DeepSeek41CheckpointTest(unittest.TestCase):
     config = _maxtext_config(
         base_num_decoder_layers=MINI_LAYOUT["n_layers"],
         compress_ratios=MINI_COMPRESS_RATIOS,
-        kv_source_layers=list(MINI_LAYOUT["kv_source_layers"]),
-        index_source_layers=list(MINI_LAYOUT["index_source_layers"]),
-        candidate_source_layer=MINI_LAYOUT["candidate_source_layer"],
+        ds41_kv_source_layers=list(MINI_LAYOUT["kv_source_layers"]),
+        ds41_index_source_layers=list(MINI_LAYOUT["index_source_layers"]),
+        ds41_candidate_source_layer=MINI_LAYOUT["candidate_source_layer"],
         ds41_engram_layers=list(MINI_LAYOUT["engram_layer_ids"]),
         scan_layers=scan_layers,
         load_parameters_path=self.ckpt_dir,

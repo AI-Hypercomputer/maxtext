@@ -171,6 +171,113 @@ class LayerStructureTest(parameterized.TestCase):
     self.assertEqual(layout, [(0, 0, 1), (1, 1, 1), (2, 7, 2), (14, 19, 1), (20, 23, 1), (24, 27, 4)])
     self.assertEqual([i for seg in segments for group in seg.groups for i in group], list(range(40)))
 
+  def test_segment_carry_plans(self):
+    segments = deepseek41.build_segments(self.config)
+    plans = deepseek41.build_segment_carry_plans(self.config, segments)
+    # Segment [20-23] (KV / index / candidate source 20) feeds every later ratio-1 segment.
+    self.assertEqual(
+        [(p.add_before, p.keep_after) for p in plans],
+        [
+            ((), ()),
+            ((), ()),
+            ((), ()),
+            ((), ()),
+            (("compress_kv", "index_k", "candidates"), ("compress_kv", "index_k", "candidates")),
+            ((), ()),
+        ],
+    )
+    self.assertEqual([p.compress_ratio for p in plans], [0, 0, 2, 2, 1, 1])
+
+
+def _flash_config(model_name="deepseek4.1-flash", **overrides):
+  return pyconfig.initialize(
+      [sys.argv[0], "src/maxtext/configs/base.yml"],
+      run_name="deepseek41_config_test",
+      enable_checkpointing=False,
+      skip_jax_distributed_system=True,
+      model_name=model_name,
+      **overrides,
+  )
+
+
+class ConfigValidationTest(parameterized.TestCase):
+  """`validate_deepseek41` rejects layouts the shared attention state cannot express."""
+
+  @parameterized.named_parameters(
+      ("wrong_length", {"compress_ratios": [0, 0, 2]}, "entries for 40 decoder layers"),
+      # Layer 20 switches to ratio 1 but is no longer a KV source: nothing produces ratio-1 compressed KV.
+      ("ratio_change_without_kv_source", {"ds41_kv_source_layers": [2, 8, 14]}, "reuses compressed KV"),
+      ("candidates_smaller_than_topk", {"ds41_candidate_topk_blocks": 4, "indexer_topk": 64}, "must be >= indexer_topk"),
+      ("candidate_source_not_index_source", {"ds41_candidate_source_layer": 21}, "must be one of"),
+      ("sliding_window_kv_source", {"ds41_kv_source_layers": [0, 2, 8, 14, 20]}, "compress_ratio > 0"),
+  )
+  def test_rejects(self, overrides, message):
+    with self.assertRaisesRegex(ValueError, message):
+      _flash_config(override_model_config=True, **overrides)
+
+  def test_rejects_packed_data(self):
+    with self.assertRaisesRegex(ValueError, "packed sequences"):
+      _flash_config(dataset_type="hf", hf_path="dummy", packing=True)
+
+
+class CheckpointHookTest(parameterized.TestCase):
+  """Engram-table row handling and quantized-save rejection in the DeepSeek-V4.1 hooks."""
+
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls.config = _flash_config("deepseek4.1-flash-mini")  # ~250k-row engram tables
+    cls.rows = engram_deepseek41.engram_num_embeddings(cls.config)
+    cls.key = "params-decoder-layers_1-engram-embed"
+
+  def _hook(self, saving_to_hf, quantized=False):
+    hf_config = {"quantization_config": {"quant_method": "fp8"}} if quantized else {}
+    hooks = param_mapping.DEEPSEEK_V41_MAXTEXT_TO_HF_PARAM_HOOK_FN(hf_config, self.config, saving_to_hf=saving_to_hf)
+    return hooks[self.key]
+
+  def test_engram_rows_round_trip(self):
+    padded = engram_deepseek41.padded_engram_rows(self.rows[0])
+    hf_table = np.ones((self.rows[0], 2), np.float32)
+    loaded = self._hook(saving_to_hf=False)(hf_table, (padded, 2))
+    self.assertEqual(loaded.shape, (padded, 2))
+    np.testing.assert_array_equal(loaded[self.rows[0] :], 0)
+    saved = self._hook(saving_to_hf=True)(loaded, (self.rows[0], 2))
+    np.testing.assert_array_equal(saved, hf_table)
+
+  def test_engram_rows_mismatch(self):
+    padded = engram_deepseek41.padded_engram_rows(self.rows[0])
+    with self.assertRaisesRegex(ValueError, "engram table in the checkpoint has"):
+      self._hook(saving_to_hf=False)(np.ones((self.rows[0] - 1, 2), np.float32), (padded, 2))
+    with self.assertRaisesRegex(ValueError, "engram table in the checkpoint has"):
+      self._hook(saving_to_hf=False)(np.ones((padded + 1, 2), np.float32), (padded, 2))
+
+  def test_quantized_save_rejected(self):
+    with self.assertRaisesRegex(ValueError, "quantized"):
+      self._hook(saving_to_hf=True, quantized=True)
+
+  def test_quantized_load_dequantizes_then_pads(self):
+    hooks = self._hook(saving_to_hf=False, quantized=True)
+    self.assertIs(hooks[0], param_mapping.dequantize_block_scaled)
+    self.assertTrue(getattr(hooks[1], "pads_rows_to_target", False))
+
+
+class TokenMapTest(unittest.TestCase):
+
+  def test_pads_to_vocab_with_pad_token(self):
+    token_map = np.array([5, 3, 7, 1], np.int32)
+    padded = engram_deepseek41.pad_token_map(token_map, 7, pad_id=2)
+    np.testing.assert_array_equal(padded, [5, 3, 7, 1, 7, 7, 7])
+    self.assertIs(engram_deepseek41.pad_token_map(token_map, 4, pad_id=2), token_map)
+
+
+class MuonExclusionTest(unittest.TestCase):
+
+  def test_engram_table_excluded_only_under_engram(self):
+    from maxtext.utils import muon_utils  # pylint: disable=import-outside-toplevel
+
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "layers_1", "engram", "embed"), (1024, 256)))
+    self.assertIsNotNone(muon_utils.transform_logic(("decoder", "layers_1", "mlp", "embed"), (1024, 256)))
+
 
 if __name__ == "__main__":
   unittest.main()
