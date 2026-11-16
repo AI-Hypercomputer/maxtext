@@ -66,6 +66,9 @@ class GatherChangesTest(unittest.TestCase):
         "Fix pylint warnings in types.py",
         "Fix typos in docs",
         'Revert "Add foo"',
+        "Prepare for v0.2.6 release",
+        "Bump version to v0.2.7",
+        "Populate pre-built MaxText Docker tags dynamically from RTD version.",
     ]
     kept = [
         "Fix lint errors and add support for X",
@@ -76,6 +79,19 @@ class GatherChangesTest(unittest.TestCase):
       self.assertTrue(self.gc.is_followup_or_cleanup_subject(subject), subject)
     for subject in kept:
       self.assertFalse(self.gc.is_followup_or_cleanup_subject(subject), subject)
+
+  def test_extract_rtd_links_excludes_development_docs(self):
+    with mock.patch("os.path.exists", return_value=True):
+      links = self.gc.extract_rtd_links(
+          [
+              "docs/development/update_dependencies.md",
+              "docs/guides/optimization/fsdp_prefetch.md",
+          ]
+      )
+    self.assertEqual(
+        links,
+        "[fsdp prefetch](https://maxtext.readthedocs.io/en/latest/guides/optimization/fsdp_prefetch.html)",
+    )
 
   def test_revert_marker_regex(self):
     for message, expected in [

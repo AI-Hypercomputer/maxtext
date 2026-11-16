@@ -22,8 +22,8 @@ python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode collect
 
 The script automatically:
 - Walks `--first-parent` on `main` and resolves GitHub Merge PR numbers (`#XXXX`) to their initial feature/fix commit on the PR branch (ignoring follow-up review feedback or comment cleanup commits).
-- Excludes any changes in `tests/`, `.github/`, `.gemini/`, `src/maxtext/training_engine/`, `src/maxtext/experimental/` (`experimental/`), `src/dependencies/dockerfiles/`, `src/dependencies/scripts/`, `tools/`, `pytest.ini`, `README.md`, `*Dockerfile`, and `docs/release_notes.md`. Keep this list in sync with `EXCLUDED_PATH_PREFIXES` / `EXCLUDED_FILES` in the script.
-- Excludes container/Docker image vulnerability fixes, Docker registry migrations (e.g., Artifact Registry), Gemini/agent skill updates, `pytest-split` / test runner splitting, `Latest News` announcements, `"No public description"` commits, broken link / `toctree` / Sphinx doc-build fixes, pre-commit/lint-only fixes, and test-only fixes.
+- Excludes any changes in `tests/`, `.github/`, `.gemini/`, `src/maxtext/training_engine/`, `src/maxtext/experimental/` (`experimental/`), `src/dependencies/dockerfiles/`, `src/dependencies/scripts/`, `tools/`, `pytest.ini`, `README.md`, `docs/conf.py`, `src/maxtext/version.py`, `*Dockerfile`, and `docs/release_notes.md`. Keep this list in sync with `EXCLUDED_PATH_PREFIXES` / `EXCLUDED_FILES` in the script.
+- Excludes container/Docker image vulnerability fixes, Docker registry migrations (e.g., Artifact Registry), Gemini/agent skill updates, `pytest-split` / test runner splitting, `Latest News` announcements, `"No public description"` commits, release preparation / version bumps (`Prepare for vX.Y.Z release`), broken link / `toctree` / Sphinx / ReadTheDocs doc-build or dynamic version-tag plumbing fixes, pre-commit/lint-only fixes, and test-only fixes.
 - Drops a commit together with the revert that undoes it (`Reverts <hash>` / `This reverts commit <hash>` in the subject or body) when both land in the window, and prefixes reverts of older commits with `Revert of: `.
 - Strips Copybara/Piper internal metadata (`PiperOrigin-RevId`).
 - Reads `**Last Updated**: <commit_hash>` from `docs/release_notes.md` (if present) so subsequent runs automatically inspect only commits in `<last_commit>..HEAD`.
@@ -51,7 +51,7 @@ Read `raw_commits.txt` and categorize + rewrite the entries into a polished, syn
 
 1. **`#### Changes`**:
    - **Group related PRs**: If multiple commits contribute to a single feature (e.g., FP8 Orbax restoration and scale tensor ingestion), combine them into a single cohesive bullet and merge their `[ref:...]` tags.
-   - **Links**: Do **not** append GitHub PR links (`[PR #XXXX](...)`) to bullets. Only include documentation links from ReadTheDocs (`https://maxtext.readthedocs.io/en/latest/...`) when relevant documentation, guides, or tutorials exist for the change.
+   - **Links**: Do **not** append GitHub PR links (`[PR #XXXX](...)`) or internal developer/contributor maintenance doc links under `docs/development/` (e.g., `update_dependencies.html`) to bullets. Only include user-facing documentation links from ReadTheDocs (`https://maxtext.readthedocs.io/en/latest/...`) when relevant user documentation, guides, or tutorials exist for the change.
    - **Use MaxText Category Headings**:
      - **Models** (new model integrations, decoders, layers, MoE routing, Flax NNX migration)
      - **Multimodal** (vision/audio/speech encoders, multimodal processors, CLIP, SigLIP, VL models)

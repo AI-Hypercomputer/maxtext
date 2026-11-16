@@ -25,8 +25,8 @@ from typing import Any, Dict, List, Optional
 
 
 RTD_BASE_URL = "https://maxtext.readthedocs.io/en/latest"
-# `docs/` paths that Sphinx never renders as standalone pages.
-NON_PAGE_DOC_PREFIXES = ("docs/_",)
+# `docs/` paths that Sphinx never renders as standalone pages or that are internal developer maintenance guides.
+NON_PAGE_DOC_PREFIXES = ("docs/_", "docs/development/")
 # Keep bullets readable: a doc-heavy commit can otherwise touch a dozen pages.
 MAX_DOC_LINKS = 3
 
@@ -45,7 +45,9 @@ EXCLUDED_PATH_PREFIXES = (
 EXCLUDED_FILES = (
     "pytest.ini",
     "README.md",
+    "docs/conf.py",
     "docs/release_notes.md",
+    "src/maxtext/version.py",
     "*Dockerfile",
 )
 
@@ -173,7 +175,8 @@ def is_followup_or_cleanup_subject(subject: str) -> bool:
       r"(?!.*\band\s+(?:add|enable|fix|implement|improve|remove|support|update)\w*\b)",
       r"^(?:update\s+(?:src|tests|docs)/|update$|merge\s+(?:branch|remote-tracking\s+branch)\b|reverts?\b)",
       r"^(?:no\s+public\s+description|suppress\s+new\s+pyrefly|add\s+auto_gha\s+prefix)\b",
-      r"\b(?:broken\s+(?:[a-z]+\s+)?links?|dead\s+links?|toctree|sphinx|myst)\b",
+      r"^(?:prepare\s+for\s+|bump\s+(?:package\s+)?version\b|release\s+v?\d+\.\d+)",
+      r"\b(?:broken\s+(?:[a-z]+\s+)?links?|dead\s+links?|toctree|sphinx|myst|rtd\s+version|readthedocs)\b",
   ]
   return any(re.search(pat, desc) for pat in cleanup_patterns)
 
@@ -201,9 +204,7 @@ def is_excluded_commit(subject: str, body: str = "") -> bool:
   if not s or is_followup_or_cleanup_subject(s):
     return True
   if re.match(r"^(?:style|chore|test|ci|build)(?:\([^)]+\))?!?:", s):
-    return not any(
-        kw in f"{s} {body.lower()}" for kw in ("support", "upgrade", "enable", "migration", "release", "tutorial")
-    )
+    return not any(kw in f"{s} {body.lower()}" for kw in ("support", "upgrade", "enable", "migration", "tutorial"))
   return False
 
 
