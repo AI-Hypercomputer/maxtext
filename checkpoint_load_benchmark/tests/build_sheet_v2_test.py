@@ -300,11 +300,21 @@ class BuildSheetV2Test(unittest.TestCase):
     self.assertAlmostEqual(
         sd_row["speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2"], round(12.0 / 20.0, 4)
     )
+    # Plain-English verdicts must appear on BOTH rows of the pair with >=1.0x multipliers and seconds.
+    expected_from_hf = "safetensors_dynamic 5.74x faster (20.4s vs 117.0s incl. Orbax convert)"
+    expected_orbax = "to_maxtext (Orbax S3) 1.67x faster (12.0s vs 20.0s)"
+    self.assertEqual(tm_row["faster_from_hf_verdict"], expected_from_hf)
+    self.assertEqual(sd_row["faster_from_hf_verdict"], expected_from_hf)
+    self.assertEqual(tm_row["faster_already_orbax_verdict"], expected_orbax)
+    self.assertEqual(sd_row["faster_already_orbax_verdict"], expected_orbax)
 
     ds_fail = by_id["v2|v7x|deepseek4-284b|scanned|to_maxtext|1x2x2x1"]
     self.assertEqual(ds_fail["run_status"], "OOM-HOST")
     self.assertEqual(ds_fail["load_into_tpu_hbm_total_seconds"], "BLOCKED")
     self.assertIn("storage.cloud.google.com", ds_fail["log_url"])
+    # DeepSeek 284B sd is still PENDING here, so verdicts stay PENDING until sd runs.
+    self.assertEqual(ds_fail["faster_from_hf_verdict"], "PENDING")
+    self.assertEqual(ds_fail["faster_already_orbax_verdict"], "PENDING")
 
     step1_run = next(
         r for r in ds.runs_rows if r["phase_name"] == "step1_hf_to_gcs" and r["model_name"] == "llama3.1-8b"
@@ -396,6 +406,143 @@ class BuildSheetV2Test(unittest.TestCase):
     self.assertEqual(q235["run_status"], "OOM-HOST")
     self.assertEqual(q235["memory_peak_host_ram_container_gb"], "OOM-HOST")
     self.assertEqual(q235["memory_tpu_hbm_peak_per_device_gb"], "BLOCKED")
+
+  def test_verdicts_for_oom_synthetic_sparse_and_preserved_external_rows(self):
+    v2_root = os.path.join(self.tmp_dir, "v2_verdicts")
+    # 1) Real-weight safetensors_dynamic OK + to_maxtext OOM-HOST (qwen3-235b-a22b on v7x).
+    _write_json(
+        os.path.join(v2_root, "q235_tm.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "to_maxtext_step2",
+            "pipeline_name": "to_maxtext",
+            "tpu_platform": "v7x",
+            "model_name": "qwen3-235b-a22b",
+            "scan_layers_mode": "scanned",
+            "number_of_slices": 1,
+            "slice_topology": "2x2x1",
+            "repetition_index": 1,
+            "run_status": "FAILED",
+            "failure_category": "OOM-HOST",
+        },
+    )
+    _write_json(
+        os.path.join(v2_root, "q235_sd.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "safetensors_dynamic",
+            "pipeline_name": "safetensors_dynamic",
+            "tpu_platform": "v7x",
+            "model_name": "qwen3-235b-a22b",
+            "scan_layers_mode": "scanned",
+            "number_of_slices": 1,
+            "slice_topology": "2x2x1",
+            "repetition_index": 1,
+            "run_status": "OK",
+            "checkpoint_weights_kind": "real",
+            "safetensors_dynamic_step1_total_seconds": 0.2,
+            "safetensors_dynamic_step2_total_seconds": 419.8,
+        },
+    )
+    # 2) DeepSeek synthetic_sparse safetensors_dynamic OK + to_maxtext OOM-HOST.
+    _write_json(
+        os.path.join(v2_root, "ds_tm.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "to_maxtext_step2",
+            "pipeline_name": "to_maxtext",
+            "tpu_platform": "v7x",
+            "model_name": "deepseek4-284b",
+            "scan_layers_mode": "scanned",
+            "number_of_slices": 1,
+            "slice_topology": "2x2x1",
+            "repetition_index": 1,
+            "run_status": "FAILED",
+            "failure_category": "OOM-HOST",
+        },
+    )
+    _write_json(
+        os.path.join(v2_root, "ds_sd.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "safetensors_dynamic",
+            "pipeline_name": "safetensors_dynamic",
+            "tpu_platform": "v7x",
+            "model_name": "deepseek4-284b",
+            "scan_layers_mode": "scanned",
+            "number_of_slices": 1,
+            "slice_topology": "2x2x1",
+            "repetition_index": 1,
+            "run_status": "OK",
+            "checkpoint_weights_kind": "synthetic_sparse",
+            "safetensors_dynamic_step1_total_seconds": 0.01,
+            "safetensors_dynamic_step2_total_seconds": 173.49,
+        },
+    )
+
+    ds = build_sheet_v2.build_v2_dataset(v2_roots=[v2_root])
+    ext_row = {c.key: "" for c in schema_v2.SUMMARY_COLUMNS}
+    ext_row.update(
+        {
+            "tpu_platform": "v6e",
+            "model_name": "gpt-oss-120b",
+            "model_test_tier": "A",
+            "pipeline_name": "safetensors_dynamic",
+            "scan_layers_mode": "scanned",
+            "number_of_slices": 1,
+            "slice_topology": "4x4",
+            "hosts_per_slice": 4,
+            "tpu_devices_per_slice": 16,
+            "total_tpu_devices": 16,
+            "run_status": "OK",
+            "checkpoint_weights_kind": "real",
+            "checkpoint_size_gb": 233.7,
+            "load_into_tpu_hbm_total_seconds": 232.4869,
+            "total_without_hf_download_seconds": 232.4874,
+            "total_end_to_end_seconds": 1278.2513,
+            "speedup_end_to_end_to_maxtext_vs_safetensors_dynamic": 1.6347,
+            "speedup_without_hf_download_to_maxtext_vs_safetensors_dynamic": 4.4897,
+            "speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2": 1.9304,
+            "faster_from_hf_verdict": "—",
+            "faster_already_orbax_verdict": "—",
+            "repetitions_count": 3,
+            "log_url": "https://storage.cloud.google.com/mesa-maxtext-southamerica-west1/wl-bench-v2/test.log",
+            "note": "Independent cross-check",
+            "row_id": "wl|v6e|gpt-oss-120b|scanned|safetensors_dynamic|1x4x4",
+            "_preserve_log_url": True,
+            "_v2_run_status": "EXTERNAL",
+        }
+    )
+    merged = build_sheet_v2.merge_external_summary_rows(ds.summary_rows, [ext_row])
+    ds.summary_rows = merged
+    self.assertEqual(len(ds.summary_rows), 353)
+    self.assertEqual(ds.validate(), [])
+
+    by_id = {r["row_id"]: r for r in ds.summary_rows}
+    q_tm = by_id["v2|v7x|qwen3-235b-a22b|scanned|to_maxtext|1x2x2x1"]
+    q_sd = by_id["v2|v7x|qwen3-235b-a22b|scanned|safetensors_dynamic|1x2x2x1"]
+    self.assertEqual(q_tm["faster_from_hf_verdict"], "Only safetensors_dynamic fits (420.0s; to_maxtext OOM-HOST)")
+    self.assertEqual(q_sd["faster_from_hf_verdict"], "Only safetensors_dynamic fits (420.0s; to_maxtext OOM-HOST)")
+    self.assertEqual(q_sd["faster_already_orbax_verdict"], "No Orbax ckpt (to_maxtext OOM-HOST)")
+
+    ds_sd = by_id["v2|v7x|deepseek4-284b|scanned|safetensors_dynamic|1x2x2x1"]
+    self.assertEqual(ds_sd["checkpoint_weights_kind"], "synthetic_sparse")
+    self.assertIn("synthetic_sparse", ds_sd["faster_from_hf_verdict"])
+    self.assertEqual(ds_sd["faster_already_orbax_verdict"], "No Orbax ckpt (to_maxtext OOM-HOST)")
+
+    # External wl| row must not be overwritten by populate_gpaste_urls or pair speedups, and Progress must ignore it.
+    build_sheet_v2.populate_gpaste_urls(ds, cache_path="", upload_missing=False)
+    wl_row = by_id["wl|v6e|gpt-oss-120b|scanned|safetensors_dynamic|1x4x4"]
+    self.assertEqual(
+        wl_row["log_url"], "https://storage.cloud.google.com/mesa-maxtext-southamerica-west1/wl-bench-v2/test.log"
+    )
+    self.assertAlmostEqual(wl_row["speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2"], 1.9304)
+    raw_ops, formula_ops = build_sheet_v2.build_gsheets_batches(ds)
+    self.assertTrue(
+        any("wl-bench-v2/test.log" in str(op.get("data")) and '"log"' in str(op.get("data")) for op in formula_ops)
+    )
+    v6e_prog = next(op for op in raw_ops if op.get("range") == "Progress!F8:I8")
+    self.assertEqual(sum(v6e_prog["data"][0]), 140)
 
 
 if __name__ == "__main__":

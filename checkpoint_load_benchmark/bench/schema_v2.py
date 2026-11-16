@@ -182,6 +182,28 @@ SUMMARY_COLUMNS: tuple[ColumnSpec, ...] = (
         "Derived",
     ),
     _c(
+        "Faster starting from HF weights (no Orbax yet)",
+        "faster_from_hf_verdict",
+        "t",
+        "totals",
+        (
+            "Plain-English winner starting from HF safetensors in GCS (no Orbax checkpoint yet): compares Total"
+            " without the HF download."
+        ),
+        "Derived",
+    ),
+    _c(
+        "Faster if checkpoint is already Orbax (load only)",
+        "faster_already_orbax_verdict",
+        "t",
+        "totals",
+        (
+            "Plain-English winner when an Orbax checkpoint already exists in GCS (load only): compares to_maxtext Step"
+            " 3 vs safetensors_dynamic Step 2."
+        ),
+        "Derived",
+    ),
+    _c(
         "Peak host RAM, max over hosts (GB)",
         "memory_peak_host_ram_container_gb",
         "gb",
