@@ -3134,6 +3134,18 @@ class Optimizer(BaseModel):
   gradient_accumulation_steps: PositiveInt = Field(
       1, description="Number of steps to accumulate gradients before updating."
   )
+  gradient_accumulation_schedule: Literal["serial", "dual_pipe"] = Field(
+      "serial",
+      description="Gradient accumulation schedule; dual_pipe enables experimental fused Llama/DeepSeek layer scans.",
+  )
+  dual_pipe_double_buffer_layer_loops: bool = Field(
+      True,
+      description=(
+          "With the dual_pipe schedule on GPU, mark the per-layer scans for XLA's while-loop double buffering "
+          "(as the serial path does) so the next layer's weight all-gather is prefetched across iterations. "
+          "Costs extra device memory; set false if the step runs out of memory."
+      ),
+  )
   use_tunix_gradient_accumulation: bool = Field(
       False,
       description="Whether to use the Tunix implementation for gradient accumulation.",
