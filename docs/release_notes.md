@@ -22,9 +22,52 @@ MaxText is [available in PyPI](https://pypi.org/project/maxtext/) and can be ins
 
 ## Unreleased
 
-**Last Updated**: fb39de80e
+**Last Updated**: 538dcdd3e
 
 <!-- Add new unreleased changes below this line -->
+
+#### Changes
+
+##### Pre-Training
+
+- **Vocabulary Tiling Loss Optimization**: Merged forward and backward scans in NNX vocabulary tiling loss to reduce scan overhead and optimize memory bandwidth during tiled cross-entropy computation.
+- **Compressed Self-Attention Mask Construction**: Added `use_csa_vmap_selection_mask` to support constructing the Compressed Self-Attention (CSA) top-k selection mask via a vmapped scatter of selected block IDs as an alternative to broadcast-compare operations.
+- **JAX Pre-Training Upgrade**: Upgraded JAX to 0.12.0.1 for pre-training environments ([update dependencies](https://maxtext.readthedocs.io/en/latest/development/update_dependencies.html)).
+
+##### Post-Training
+
+- **SFT Context Parallelism Load Balancing**: Added batch reordering hooks to `SFTDataHooks` when `context_parallel_load_balance=True`, permuting train and evaluation batches to align token order with load-balanced causal attention masks, and reordered completion masks for block-diffusion SFT.
+- **Tunix RL Integration & Diagnostics**: Updated the `google-tunix` dependency pin to support the callback-based `with_fwd_only_fn` trainer API, aligned GRPO engine compilation and loss tests, and labeled MaxText RL Managed ML Diagnostics runs with `rl_orchestrator=tunix`.
+
+##### Performance
+
+- **Qwen3 TPU7x FP8 Kernel Optimizations**: Added fused FP8 QKV and output projection kernels with integrated QK-RMSNorm and RoPE for Qwen3 attention, fused the Qwen3 MoE expert execution path into Lineage GMMv2 kernels with in-kernel gather and TensorCore combine, wired deferred norm-gradient reductions into Qwen3 and `NNXDecoder`, and introduced configuration knobs and FP8 helper utilities for the Qwen3-235B v7x training stack.
+- **Dynamic MoE Token Quantization**: Added per-token (channelwise) dynamic absmax calibration to `moe_quantize_token_all_gather` under ring-of-experts, enabling token all-gather quantization to be used with full FP8 absmax recipes ([moe configuration](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/moe_configuration.html), [quantization](https://maxtext.readthedocs.io/en/latest/reference/core_concepts/quantization.html)).
+- **FSDP Prefetch Overlap & Qwix Quantization**: Added a dedicated post-scheduler overlap transform for FSDP prefetch (`fsdp_prefetch_overlap_transform.py`) ([fsdp prefetch](https://maxtext.readthedocs.io/en/latest/guides/optimization/fsdp_prefetch.html)), preserved Qwix quantization state across `custom_vjp` FSDP prefetch backward passes by caching forward residual layouts, and upgraded `qwix` to 0.1.9 and 0.1.10.
+
+##### Checkpointing / Goodput
+
+- **In-Memory Snapshotting GKE Runbook**: Added a comprehensive GKE runbook and operational guide for MaxText in-memory snapshotting with Pathways across Grain ArrayRecord workloads, covering Cluster Toolkit and JobSet configurations, pause/resume, and replica resizes ([run maxtext](https://maxtext.readthedocs.io/en/latest/run_maxtext.html), [run maxtext elastic training](https://maxtext.readthedocs.io/en/latest/run_maxtext/run_maxtext_elastic_training.html), [run maxtext snapshotting](https://maxtext.readthedocs.io/en/latest/run_maxtext/run_maxtext_snapshotting.html)).
+- **Multi-Tier Checkpointing Targeted Backups**: Added `backup=True` support to `save_checkpoint`, enabling training loops to trigger persistent backups on specific epoch or phase boundaries independently of periodic backup intervals ([multi tier checkpointing](https://maxtext.readthedocs.io/en/latest/guides/checkpointing_solutions/multi_tier_checkpointing.html)).
+- **High-Performance Sharded Safetensors Reader**: Implemented `SafetensorsReader` to stream HuggingFace checkpoint tensors directly into sharded `jax.Array`s via parallel ranged reads and immediate host-to-device transfers.
+
+##### Usability
+
+- **Dynamic Docker Image Tags**: Populated pre-built MaxText Docker container image tags dynamically from the ReadTheDocs documentation version ([build maxtext](https://maxtext.readthedocs.io/en/latest/tutorials/build_maxtext.html)).
+- **Release v0.2.6 Preparation**: Bumped package version to v0.2.6 and organized release notes for the v0.2.6 release.
+
+#### Bug Fixes
+
+- Fixed `group_offset` handling in ring-of-experts MoE when routing expert tokens across device mesh ranks.
+- Cast `RoutedMoE` combine einsum output back to the module dtype when `capacity_factor > 0` and float32 gate logits are used, preventing scanned decoder layer carry dtype check failures under bfloat16.
+- Raised an explicit `ValueError` when JAX device discovery fails during configuration validation instead of silently falling back to a single device and causing downstream indivisibility errors during `pjit` execution.
+- Fixed NNX checkpoint restoration in `generate_param_only_checkpoint` and `standalone_checkpointer` by setting the PRNG implementation to `unsafe_rbg` to align key shapes with training checkpoints.
+- Fixed multi-host HuggingFace checkpoint conversion in Qwen3.5 parameter hooks by operating on `jax.numpy` arrays when sharded inputs are present instead of falling back to host NumPy.
+- Added validation for ramp-up batch size settings in the Pydantic configuration schema to reject non-positive increments and invalid step ranges early.
+
+#### Deprecations
+
+- Migrated all uses of `pltpu.emit_pipeline*` to explicit indices in Pallas Mosaic TPU kernels ahead of deprecating implicit program grid indexing.
 
 ## Releases
 
