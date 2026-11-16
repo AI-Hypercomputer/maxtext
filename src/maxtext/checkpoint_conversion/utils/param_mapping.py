@@ -4763,10 +4763,12 @@ def _dequantize_block_scaled(xp, weight, scale, broadcast_scales=True):
 # format times a power of two is exact in bf16, so the result is bit-identical to the numpy path.
 
 
-def _local_dequantize(weight, scale, rows, row_offset):
+def _local_dequantize(weight, scale, rows, row_offset, local_scale):
   """Dequantizes local rows [row_offset, row_offset + weight.shape[0]) of a weight with `rows` rows in total.
 
-  `scale` is the full (replicated) scale tensor, or exactly these rows' scales when it has one row per weight row.
+  `local_scale`: `scale` holds exactly these rows' scales (one scale row per weight row). Otherwise it is the full
+  scale tensor, and each local row picks its block's row. This must come from the global shapes: comparing the
+  local row count with the scale's would misread e.g. 32x32 blocks split over 32 chips (rows / 32 of each).
   """
   if weight.dtype == np.int8:
     packed = jax.lax.bitcast_convert_type(weight, jnp.uint8)
@@ -4776,7 +4778,7 @@ def _local_dequantize(weight, scale, rows, row_offset):
     w = weight.astype(jnp.bfloat16)
   s = scale.astype(jnp.float32).astype(jnp.bfloat16)
   local_rows, cols = w.shape
-  if s.shape[0] != local_rows:  # Full scale tensor: pick each local row's block.
+  if not local_scale:  # Full scale tensor: pick each local row's block.
     block_rows = -(-rows // s.shape[0])
     s = jnp.take(s, (row_offset + jnp.arange(local_rows)) // block_rows, axis=0)
   block_cols = -(-cols // s.shape[1])
@@ -4792,15 +4794,18 @@ def _row_axis(sharding):
 
 @functools.lru_cache(maxsize=None)
 def _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, rows, scale_rows):
+  """A jitted per-shard dequantization for one layout (weight / scale specs and global row counts)."""
   row_axis = weight_spec[0] if len(weight_spec) else None
   scale_split = len(scale_spec) > 0 and scale_spec[0] is not None
 
+  one_scale_per_row = scale_rows == rows
+
   def local(weight, scale):
     offset = jax.lax.axis_index(row_axis) * weight.shape[0] if row_axis is not None else 0
-    if not scale_split and scale_rows == rows:
+    if one_scale_per_row and not scale_split:
       # One scale row per weight row, held in full: slice out this shard's rows.
       scale = jax.lax.dynamic_slice_in_dim(scale, offset, weight.shape[0], axis=0)
-    return _local_dequantize(weight, scale, rows, offset)
+    return _local_dequantize(weight, scale, rows, offset, local_scale=one_scale_per_row)
 
   return jax.jit(
       jax.shard_map(local, mesh=mesh, in_specs=(weight_spec, scale_spec), out_specs=weight_spec, check_vma=False)
@@ -4808,6 +4813,7 @@ def _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, rows, scale_rows):
 
 
 def _dequantize_on_device(weight, scale):
+  """Dequantizes a row-split (or replicated) weight in place, each chip on its own rows; keeps its sharding."""
   mesh = weight.sharding.mesh
   weight_spec = jax.sharding.PartitionSpec(_row_axis(weight.sharding))
   scale_spec = jax.sharding.PartitionSpec()

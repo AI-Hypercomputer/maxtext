@@ -78,6 +78,7 @@ class LayerSpec:
 
 
 def build_layer_specs(config: Config) -> list[LayerSpec]:
+  """The static role of every layer (compression, KV / index / candidate sources, engram) from the config."""
   specs = []
   for i in range(config.num_decoder_layers):
     ratio = config.compress_ratios[i]
@@ -181,13 +182,13 @@ class DeepSeek41DecoderLayer(nnx.Module):
     self.hc_mult = config.mhc_expansion_rate
     self.norm_eps = config.normalization_layer_epsilon
     kernel_init = initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal")
-    norm_kwargs = dict(
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        epsilon=config.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-        rngs=rngs,
-    )
+    norm_kwargs = {
+        "dtype": config.dtype,
+        "weight_dtype": config.weight_dtype,
+        "epsilon": config.normalization_layer_epsilon,
+        "kernel_axes": ("norm",),
+        "rngs": rngs,
+    }
     self.pre_self_attention_layer_norm = RMSNorm(num_features=config.emb_dim, **norm_kwargs)
     self.post_self_attention_layer_norm = RMSNorm(num_features=config.emb_dim, **norm_kwargs)
     self.self_attention = attention_deepseek41.DeepSeek41Attention(
@@ -234,7 +235,8 @@ class DeepSeek41DecoderLayer(nnx.Module):
     fn, scale, base = (getattr(self, f"{prefix}_{n}")[...] for n in ("fn", "scale", "base"))
     x = h.reshape(h.shape[:2] + (-1,)).astype(jnp.float32)
     rsqrt = jax.lax.rsqrt(jnp.mean(x**2, axis=-1, keepdims=True) + self.norm_eps)
-    mixes = jnp.einsum("bsk,km->bsm", x, fn, precision=jax.lax.Precision(self.config.matmul_precision)) * rsqrt
+    # float32 contraction (as upstream): HIGHEST so TPU does not round the operands to bf16 under the default precision.
+    mixes = jnp.einsum("bsk,km->bsm", x, fn, precision=jax.lax.Precision.HIGHEST) * rsqrt
     eps = self.config.ds41_hc_eps
     pre = jax.nn.sigmoid(mixes[..., :hc] * scale[0] + base[:hc]) + eps
     post = 2 * jax.nn.sigmoid(mixes[..., hc : 2 * hc] * scale[1] + base[hc : 2 * hc])
@@ -250,7 +252,7 @@ class DeepSeek41DecoderLayer(nnx.Module):
   @staticmethod
   def hc_post(x: jax.Array, residual: jax.Array, post: jax.Array, comb: jax.Array) -> jax.Array:
     """Expands a sub-block output back to hc copies, mixing the residual in through `comb`."""
-    mixed = jnp.einsum("bsjk,bsjd->bskd", comb, residual.astype(jnp.float32))
+    mixed = jnp.einsum("bsjk,bsjd->bskd", comb, residual.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
     return (post[..., None] * x.astype(jnp.float32)[:, :, None, :] + mixed).astype(x.dtype)
 
   def __call__(self, carry: dict, decoder_positions: jax.Array, decoder_input_tokens: jax.Array) -> dict:
@@ -352,6 +354,7 @@ class SegmentCarryPlan:
 
 
 def build_segment_carry_plans(config: Config, segments: list[Segment]) -> list[SegmentCarryPlan]:
+  """How each scanned segment threads the shared state (see `SegmentCarryPlan`)."""
   specs = build_layer_specs(config)
   rw = [_group_reads_and_writes(specs, seg.groups[0]) for seg in segments]
   add_before = [set() for _ in segments]

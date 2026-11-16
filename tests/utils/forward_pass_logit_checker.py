@@ -268,33 +268,41 @@ def check_kl_divergence(model_logits, golden_logits, atol=0.02, clip_logits_epsi
 # Reference implementations for models without a transformers implementation: model type -> loader module.
 _REFERENCE_MODELS = {
     "deepseek_v41": "tests.utils.deepseek_v41_reference.runner",
+    # The text-only config (`text_config` of the released checkpoint, and the MaxText HF model configs).
+    "deepseek_v41_text": "tests.utils.deepseek_v41_reference.runner",
 }
 
 
 def _local_checkpoint_dir(path):
-  """Returns a local directory with the checkpoint at `path`, copying a gs:// checkpoint to a temp dir first."""
+  """Returns a local directory with the checkpoint at `path`, copying a gs:// checkpoint to a temp dir first.
+
+  The copy (it can hold a whole checkpoint) is deleted when the process exits.
+  """
   if not path.startswith("gs://"):
     return path
+  import atexit  # pylint: disable=import-outside-toplevel
+  import shutil  # pylint: disable=import-outside-toplevel
   import subprocess  # pylint: disable=import-outside-toplevel
   import tempfile  # pylint: disable=import-outside-toplevel
 
   local = tempfile.mkdtemp(prefix="hf_reference_")
+  atexit.register(shutil.rmtree, local, ignore_errors=True)
   max_logging.log(f"Copying {path} to {local} for the reference model.")
   subprocess.run(["gcloud", "storage", "cp", "-r", path.rstrip("/") + "/*", local], check=True)
   return local
 
 
 def _detect_reference_model(hf_model_path):
-  """Picks a reference implementation from the checkpoint's config.json `model_type`, if it needs one."""
-  if not hf_model_path or hf_model_path.startswith("gs://"):
-    return ""
-  config_path = os.path.join(hf_model_path, "config.json")
-  if not os.path.exists(config_path):
+  """Picks a reference implementation from the checkpoint's config.json `model_type` (local or gs://), if it needs one."""
+  if not hf_model_path:
     return ""
   import json  # pylint: disable=import-outside-toplevel
+  from etils import epath  # pylint: disable=import-outside-toplevel
 
-  with open(config_path, encoding="utf-8") as f:
-    model_type = json.load(f).get("model_type", "")
+  config_path = epath.Path(hf_model_path) / "config.json"
+  if not config_path.exists():
+    return ""
+  model_type = json.loads(config_path.read_text()).get("model_type", "")
   return model_type if model_type in _REFERENCE_MODELS else ""
 
 
@@ -315,6 +323,7 @@ class _ReferenceModel:
 
 
 def _load_reference_model(reference_model, hf_model_path, torch_dtype, config, tokenizer):
+  """Loads a plain-PyTorch reference (see `_REFERENCE_MODELS`) wrapped to look like a transformers model."""
   import importlib  # pylint: disable=import-outside-toplevel
 
   if reference_model not in _REFERENCE_MODELS:

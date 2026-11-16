@@ -157,19 +157,19 @@ class DeepSeek41Compressor(nnx.Module):
     self.head_dim = config.head_dim
     # The pooling runs in float32 (the reference promotes these weights to float32).
     proj_dtype = jnp.float32 if compress_ratio > 1 else config.dtype
-    dense_kwargs = dict(
-        in_features_shape=config.emb_dim,
-        out_features_shape=self.head_dim,
-        axis=-1,
-        kernel_init=kernel_init,
-        kernel_axes=("embed_attn", "kv_head_dim"),
-        dtype=proj_dtype,
-        weight_dtype=config.weight_dtype,
-        quant=quant,
-        matmul_precision=config.matmul_precision,
-        shard_mode=config.shard_mode,
-        rngs=rngs,
-    )
+    dense_kwargs = {
+        "in_features_shape": config.emb_dim,
+        "out_features_shape": self.head_dim,
+        "axis": -1,
+        "kernel_init": kernel_init,
+        "kernel_axes": ("embed_attn", "kv_head_dim"),
+        "dtype": proj_dtype,
+        "weight_dtype": config.weight_dtype,
+        "quant": quant,
+        "matmul_precision": config.matmul_precision,
+        "shard_mode": config.shard_mode,
+        "rngs": rngs,
+    }
     self.wkv = DenseGeneral(**dense_kwargs)
     if compress_ratio > 1:
       self.wgate = DenseGeneral(**dense_kwargs)
@@ -227,15 +227,15 @@ class DeepSeek41Indexer(nnx.Module):
     self.head_dim = config.indexer_head_dim
     self.index_topk = config.indexer_topk
     self.rotary_emb = rotary_embedding
-    common = dict(
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        quant=quant,
-        matmul_precision=config.matmul_precision,
-        shard_mode=config.shard_mode,
-        kernel_init=kernel_init,
-        rngs=rngs,
-    )
+    common = {
+        "dtype": config.dtype,
+        "weight_dtype": config.weight_dtype,
+        "quant": quant,
+        "matmul_precision": config.matmul_precision,
+        "shard_mode": config.shard_mode,
+        "kernel_init": kernel_init,
+        "rngs": rngs,
+    }
     self.wq_b = DenseGeneral(
         in_features_shape=config.q_lora_rank,
         out_features_shape=(self.n_heads, self.head_dim),
@@ -284,7 +284,7 @@ class DeepSeek41Indexer(nnx.Module):
         "bshd,btd->bsht",
         q.astype(jnp.float32),
         index_k.astype(jnp.float32),
-        precision=jax.lax.Precision(self.config.matmul_precision),
+        precision=jax.lax.Precision.HIGHEST,  # float32 index scores, as upstream
     )
     scores = jnp.sum(jax.nn.relu(scores) * weights[..., None], axis=2)  # [B, S, C]
 
@@ -337,22 +337,22 @@ class DeepSeek41Attention(nnx.Module):
     self.softmax_scale = self.head_dim**-0.5
     self.o_groups = config.o_groups
     self.o_lora_rank = config.o_lora_rank
-    common = dict(
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        quant=quant,
-        matmul_precision=config.matmul_precision,
-        shard_mode=config.shard_mode,
-        kernel_init=kernel_init,
-        rngs=rngs,
-    )
-    norm_kwargs = dict(
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
-        epsilon=config.normalization_layer_epsilon,
-        kernel_axes=("norm",),
-        rngs=rngs,
-    )
+    common = {
+        "dtype": config.dtype,
+        "weight_dtype": config.weight_dtype,
+        "quant": quant,
+        "matmul_precision": config.matmul_precision,
+        "shard_mode": config.shard_mode,
+        "kernel_init": kernel_init,
+        "rngs": rngs,
+    }
+    norm_kwargs = {
+        "dtype": config.dtype,
+        "weight_dtype": config.weight_dtype,
+        "epsilon": config.normalization_layer_epsilon,
+        "kernel_axes": ("norm",),
+        "rngs": rngs,
+    }
 
     self.wq_a = DenseGeneral(
         in_features_shape=config.emb_dim,
@@ -400,15 +400,17 @@ class DeepSeek41Attention(nnx.Module):
     # Compressed layers rotate at `compressed_rope_max_timescale` with YaRN; sliding-window-only layers use the
     # base theta without YaRN.
     if compress_ratio > 0:
-      rope_kwargs = dict(
-          rope_theta=config.compressed_rope_max_timescale,
-          original_seq_len=config.original_max_position_embeddings if config.ds41_compressed_rope_yarn else 0,
-          rope_factor=config.rope_factor,
-          beta_fast=config.beta_fast,
-          beta_slow=config.beta_slow,
-      )
+      rope_kwargs = {
+          "rope_theta": config.compressed_rope_max_timescale,
+          "original_seq_len": config.original_max_position_embeddings if config.ds41_compressed_rope_yarn else 0,
+          "rope_factor": config.rope_factor,
+          "beta_fast": config.beta_fast,
+          "beta_slow": config.beta_slow,
+      }
     else:
-      rope_kwargs = dict(rope_theta=config.rope_max_timescale)
+      rope_kwargs = {
+          "rope_theta": config.rope_max_timescale,
+      }
     self.rotary_embedding = DeepSeek41RotaryEmbedding(
         head_dim=self.head_dim,
         partial_rotary_factor=config.qk_rope_head_dim / self.head_dim,

@@ -1590,8 +1590,12 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
       elif (
           self.config.decoder_block
-          in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4, ctypes.DecoderBlockType.DEEPSEEK41,
-              ctypes.DecoderBlockType.HY4)
+          in (
+              ctypes.DecoderBlockType.DEEPSEEK,
+              ctypes.DecoderBlockType.DEEPSEEK4,
+              ctypes.DecoderBlockType.DEEPSEEK41,
+              ctypes.DecoderBlockType.HY4,
+          )
           and self.config.mlp_activations_limit > 0.0
       ):
         # DeepSeek V4 uses bounds to clip the SwiGLU activations

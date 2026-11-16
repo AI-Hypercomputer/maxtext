@@ -77,6 +77,12 @@ routed_bias_update_rate: 0.001
 load_balance_loss_weight: 0.0001
 log_moe_bias_norms: false
 routed_scaling_factor: 1.5
+# The trained routing biases are large and close together (e.g. 57.17..57.65 in one layer): keep them, and the gate,
+# in float32 (as upstream), or bf16 collapses them to a few distinct values and changes the selected experts.
+float32_gate_logits: true
+# Dense (non-megablox) MoE with no token dropping, as used for the logit parity checks.
+sparse_matmul: false
+capacity_factor: -1
 
 # --- RoPE ---
 rope_type: "default"

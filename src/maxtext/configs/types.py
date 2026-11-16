@@ -7406,6 +7406,15 @@ class RLConfig(
           Please pass tokenizer_path in your command."
         )
 
+    # Same checks as MaxTextConfig.set_derived_values_and_validate (this class does not inherit it).
+    deepseek_routing_blocks = (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4, DecoderBlockType.DEEPSEEK41)
+    if self.routed_bias and self.routed_bias_update_rate > 0.0 and self.decoder_block not in deepseek_routing_blocks:
+      raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
+    for val in self.compress_ratios:
+      # DeepSeek-V4.1 compresses 2-to-1 and 1-to-1 (a per-token projection selected by its indexer).
+      if self.decoder_block != DecoderBlockType.DEEPSEEK41 and val != 0 and val < 4:
+        raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
+
     if self.optimizer_memory_host_offload:
       raise ValueError(
           "optimizer_memory_host_offload=True is not supported on the post-training "

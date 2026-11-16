@@ -51,6 +51,8 @@ EXCLUDED_SUBSTRINGS = (
     "pre_beta",
     "res_beta",
     "hc_base",
+    "hc_attn_base",  # DeepSeek-V4.1 hyper-connection biases (2D when scanned)
+    "hc_ffn_base",
     "sinks",
     "tid2eid",
     "A_log",
@@ -61,6 +63,7 @@ EXCLUDED_SUBSTRINGS = (
 
 EXCLUDED_EXACT_SEGMENTS = {
     "bias",
+    "embed",  # DeepSeek-V4.1 engram lookup tables
 }
 
 # Attention module identifiers and tensor projection names that require

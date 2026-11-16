@@ -801,6 +801,7 @@ class NNXDecoder(nnx.Module):
     else:
       policy = self.get_remat_policy()
     return policy, maxtext_utils.should_prevent_cse_in_remat(self.config)
+
   def _init_deepseek41_layers(self, rngs):
     """DeepSeek-V4.1: `layers_{i}` when unscanned; otherwise one stack `segments_{k}` per segment of structurally
     identical layer groups (see `deepseek41.build_segments`), each scan step being one group."""

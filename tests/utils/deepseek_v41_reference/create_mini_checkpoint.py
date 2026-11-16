@@ -46,7 +46,6 @@ import subprocess
 
 import torch
 
-from . import model as ref_model
 from . import runner
 from .engram import EngramLayout
 
@@ -209,6 +208,7 @@ def _layer_sort_key(name: str):
 
 
 def write_checkpoint(specs, output_dir: str, seed: int):
+  """Writes randomly initialised tensors for `specs` as sharded safetensors plus an index into `output_dir`."""
   from safetensors.torch import save_file  # pylint: disable=import-outside-toplevel
 
   specs = sorted(specs, key=lambda s: _layer_sort_key(s[0]))

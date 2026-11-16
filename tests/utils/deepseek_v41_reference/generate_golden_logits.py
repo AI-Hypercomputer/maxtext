@@ -95,6 +95,7 @@ def main():
 
 
 def run_prompts(model, tokenizer, output):
+  """Runs the reference on each prompt and pickles prompt, tokens and full logits to `output`."""
   out = []
   for prompt in PROMPTS:
     ids = tokenizer(prompt, return_tensors="pt")["input_ids"]
