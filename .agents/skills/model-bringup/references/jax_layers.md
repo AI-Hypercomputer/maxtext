@@ -33,12 +33,12 @@ If the model is multimodal (e.g., VLM or ALM) and requires specific preprocessin
     -   `get_bidirectional_mask_audio` (if audio is supported)
 
 ## 2. Write Layer-Wise Unit Tests
-Write layer-wise tests in a new file under `tests/unit/{model_name}_layers_test.py`.
+Write layer-wise tests in a new file under `tests/unit/{model_name}_vs_reference_test.py`.
 For each class of layers, define a test that compares the JAX output directly to PyTorch.
 
 > [!TIP]
 > **Testing Reference**:
-> Refer to existing layer tests such as `tests/unit/gemma3_layers_test.py` or `tests/unit/gemma4_layers_test.py` as codebase references. They provide excellent best-practice examples on comparing JAX layers against reference PyTorch equivalents.
+> Refer to existing reference-parity tests such as `tests/unit/qwen3_next_vs_reference_test.py` or `tests/unit/hy4_vs_reference_test.py` as codebase references, and see [mini_verification.md](mini_verification.md) for broader mini-model-verification checks.
 
 ### Unit Test Best Practices:
 

@@ -15,52 +15,76 @@ Follow this execution order when onboarding a new model:
 | **3** | Add Model Config | `src/maxtext/configs/models/{model_name}.yml` | Config load check | Log model dimensions in handover doc |
 | **4** | Register Model ID | `src/maxtext/utils/globals.py` & `src/maxtext/checkpoint_conversion/utils/hf_model_configs.py` | Import resolution | Update status to `IN PROGRESS` |
 | **5** | Code JAX Layers | `src/maxtext/layers/decoders.py` (or new custom layer files) | Python syntax, shapes, and autoregressive decode support | Document custom layer design & bugs found |
-| **6** | Write Layer Tests | `tests/unit/{model_name}_layers_test.py` | CPU verification (`assert_allclose`) against PyTorch reference | Record test results & numerical tolerance |
+| **6** | Write Layer Tests | `tests/unit/{model_name}_vs_reference_test.py` | CPU verification (`assert_allclose`) against PyTorch reference | Record test results & numerical tolerance |
 | **7** | Define Param Mapping | `src/maxtext/checkpoint_conversion/utils/param_mapping.py` | Unit tests for transposition and reshape hooks | Record mapping logic & hook details |
 | **8** | Convert Mini Checkpoint | Run `to_maxtext` on TPU VM using mini safetensors subset | Valid Orbax checkpoint output in `/dev/shm/$USER/checkpoints/{model_name}_mini_orbax` | Record exact conversion CLI command |
-| **9** | Mini E2E Logits & Decode Check | Run `forward_pass_logit_checker` and 16-token autoregressive decode | Logits KL Div $\\le 10^{-3}$ and exact token-for-token matching gibberish output | Record verification metrics and decode outputs |
-| **10** | Full Checkpoint & Verification | Run full `to_maxtext`, full logits check, and full decode | Full model logits match & meaningful decode | Record full run commands & output samples |
-| **11** | Handover Wrap-up | `{model_name}_handover.md` in MaxText repository root | Complete summary of pitfalls, gotchas, and full CLI commands | Mark all phases `DONE` |
+| **9** | Mini-Model-Verification | Run [mini-model-verification](mini_verification.md) on trimmed/mini checkpoints | Trimmed/mini model parity against PyTorch reference | Record mini-model-verification metrics |
+| **10** | Full Checkpoint & Verification | Convert full `scanned` & `unscanned` checkpoints; run multi-token masked prefill ([logits_checker.md](logits_checker.md)) & training/SFT checks | `scanned` & `unscanned` masked prefill parity and training stability | Record full run commands & metrics |
+| **11** | FLOPs, Benchmark & Roofline | `src/maxtext/utils/maxtext_utils.py` & [performance_and_roofline.md](performance_and_roofline.md) | Unit-tested TFLOPs, TPU training benchmark (XPlane + HLO HBM), and analytical vs measured roofline report | Record benchmark & roofline summary |
+| **12** | Handover Wrap-up | `{model_name}_handover.md` in MaxText repository root | Complete summary of pitfalls, gotchas, and full CLI commands | Mark all phases `DONE` |
 
 ---
 
 ## 2. Handover Document Template (`{model_name}_handover.md`)
 
-Maintain `{model_name}_handover.md` under the MaxText repository root throughout bring-up.
+Maintain `{model_name}_handover.md` under the MaxText repository root so architectural findings, quantitative verification results, exact reproduction commands, and log/artifact paths are auditable in one place:
 
-### Required Structure:
 ```markdown
 # {Model Name} Bring-up Handover Document
 
-## 1. HF Model Architectural Findings
-- **HuggingFace Model ID**: e.g., `THUDM/glm-4-9b-chat`
-- **Decoder Pattern**: (e.g., Homogeneous repeated / Dense first 3 layers + MoE / Local-Global Attention cycle)
-- **Minimal Subset Layer Count ($N$)**: e.g., 1 layer, 4 layers
-- **Key Parameters**: `vocab_size`, `hidden_size`, `num_attention_heads`, `num_key_value_heads`, `head_dim`, `intermediate_size`, `rms_norm_eps`, `rope_theta`, etc.
+## 1. HF Model Architectural Findings & Configs
+- **Sources**: HF model card (`{hf_model_id}`), PyTorch reference (`modeling_{model_name}.py`), MaxText branch/commit.
+- **Architecture Highlights**: Total/active params, layer types & `scan_layers=true` structure, attention (Q/KV heads, QK-norm, gating, sliding window, RoPE/NoPE), MLP/MoE (router, bottleneck, experts/top-k, shared experts), norms, residual gates, and embedding/head/soft-cap.
 
-## 2. Phase-by-Phase Status
-- [x] Phase 1: HF Discovery & Mini Safetensors Creation (DONE)
-- [x] Phase 2: JAX Layer Implementation & Layer Tests (DONE)
-- [x] Phase 3: Checkpoint Mapping & Mini-Checkpoint Conversion (DONE)
-- [x] Phase 4: E2E Logits & 16-Token Autoregressive Decode Verification (DONE)
+| Parameter | Value |
+| :--- | :--- |
+| Total / Active Parameters | ... |
+| Vocab / Hidden / Layers (`vocab_size` / `base_emb_dim` / `base_num_decoder_layers`) | ... |
+| Layer Pattern & Scanned Layout | ... |
+| Attention Specs (Q/KV heads, `head_dim`, window, RoPE) | ... |
+| MLP / MoE Specs (`num_experts`, `num_experts_per_tok`, dims, router) | ... |
+| Norms / Residual / Head Specs | ... |
 
-## 3. Bugs Encountered & Solutions
-- **Phase 2 (JAX Layers)**: [Description of bug, root cause, and how it was fixed]
-- **Phase 3 (Checkpoint Conversion)**: [Transposition mismatch, key naming issue, etc.]
-- **Phase 4 (Logits & Decode)**: [RoPE frequency mismatch, KV cache indexing, etc.]
+## 2. Verification & Evidence Summary
+| Task | Status | Log / Artifact | Key Result Notes |
+| :--- | :--- | :--- | :--- |
+| 1. Model, Config & Unit Tests | DONE / IN PROGRESS | Branch / test log | e.g., N/N CPU unit tests pass |
+| 2. Checkpoint Conversion (`scanned` & `unscanned`) | ... | Conversion logs & ckpt paths | `scan_layers=true` & `false` Orbax ckpts |
+| 3. Multi-Token Masked Prefill (`scanned` & `unscanned`) | ... | JSON reports & console log | Cosine sim, max abs, KL, ΔCE |
+| 4. Mini-Model-Verification vs PyTorch | ... | Tier reports & log | X/Y checks pass across tiers |
+| 5. Training & SFT Correctness | ... | `scanned` / `unscanned` logs | Pretrain & SFT loss ranges, HBM |
+| 6. Pre-Training Benchmark & Roofline | ... | Bench log, HLO memory, XPlane, Roofline doc | Step time, TFLOP/s (MFU), HBM vs roofline |
 
-## 4. Pitfalls & Model-Specific Gotchas (Session Wrap-up)
-- Summary of unexpected model behaviors, unusual head projections, bias handling, tied embeddings, etc.
+## 3. Working Log & Verification Evidence
 
-## 5. Full Executable Reproduction Commands
-- **Mini Safetensors Slicing**:
-  `python3 slice_hf_model.py ...`
-- **Mini Checkpoint Conversion**:
-  `python3 -m maxtext.checkpoint_conversion.to_maxtext ...`
-- **Forward Pass Logits Check**:
-  `python3 -m tests.utils.forward_pass_logit_checker ...`
-- **Autoregressive Decode Check**:
-  `python3 -m maxtext.inference.decode ...`
+### 3.1 Code Changes & Unit Tests
+- **Result**: Unit tests passed (`N/N`).
+- **Command**: `python3 -m pytest ...`
+- **Logs / Branch**: ...
+
+### 3.2 Checkpoint Conversion (`scanned` & `unscanned`)
+- **Commands**: Exact `to_maxtext` CLI commands for `scan_layers=true` and `scan_layers=false`.
+- **Checkpoint, Golden & Log Paths**: Source HF path, `scanned`/`unscanned` (and resharded) Orbax paths, reference golden `.npz`/`.jsonl` paths, and conversion logs.
+
+### 3.3 Multi-Token Masked Prefill (`scanned` & `unscanned`)
+- **Results Table**: `Checkpoint | Mode (Router Replay / Unforced) | Reference | Mean/Min Cosine Sim | Mean/Max Abs Err | Mean KL | ΔCE | Verdict`
+- **Commands**: Exact `zero_gen_logits_checker` / `forward_pass_logit_checker` commands.
+- **Evidence Logs**: JSON report paths and console logs.
+
+### 3.4 Mini-Model-Verification vs PyTorch
+- **Setup & Tier Results**: Trimmed/sliced tiers tested and pass counts per tier + coverage summary.
+- **Command & Logs**: Exact test runner command and report/log links.
+
+### 3.5 Training & SFT Correctness (`scanned` & `unscanned`)
+- **Results Table**: `Mode | Pretrain loss (step 0 -> K) | SFT loss (step 0 -> K) | Step time | Compiled HBM`
+- **Commands & Logs**: Exact `pre_train.train` and `train_sft_native` commands and console logs.
+
+### 3.6 Pre-Training Benchmark & Roofline Analysis
+- **Results Table**: Topology, precision, seq len, batch tokens, `(FSDP, TP, EP)`, step TFLOPs, steady-state `s/step`, `TFLOP/s/device` (MFU %), `Tokens/s/device`, compiled HBM vs roofline lower bound.
+- **Command & Artifacts**: Benchmark command (including `LIBTPU_INIT_ARGS`), console log, HLO memory report, XPlane profile paths, and roofline report link.
+
+## 4. Bugs & Model-Specific Pitfalls
+- Concise list of bugs encountered, root causes, fixes, and architectural gotchas.
 ```
 
 ---

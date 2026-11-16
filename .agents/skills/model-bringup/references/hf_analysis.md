@@ -55,7 +55,7 @@ To drastically speed up iteration, save memory, and eliminate large checkpoint d
      - Final normalization (`norm.weight` / `model.norm.weight`)
      - Output language model head (`lm_head.weight` if untied)
 3. Use real pretrained weights for this mini subset.
-4. This mini HF model will be used in Phase 3 for fast `to_maxtext` conversion and in Phase 4 for both `forward_pass_logit_checker` and 16-token autoregressive decoding comparison.
+4. This mini HF model will be used in Phase 3 for fast `to_maxtext` conversion and in Phase 4 for [mini-model-verification](mini_verification.md) and multi-token masked prefill.
 
 ```python
 # Quick snippet to slice HF model to mini safetensors subset
