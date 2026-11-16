@@ -465,6 +465,14 @@ def apply_m3_default_named_sharding(
   spec_axis = shard_axes[0] if len(shard_axes) == 1 else shard_axes
 
   def _shard_leaf(path, a_var, s_var):
+    # A rank-1 leaf whose model resolved its own `out_sharding` (an m3 norm scale's `P(None)`)
+    # is replicated on purpose; leave it. Larger leaves with an all-`None` spec still get the
+    # fallback: `Glm5Sharding` with tensor parallelism off resolves some of its kernels to
+    # all-`None` and relies on it for FSDP. Sharded specs are kept by `is_unsharded` below.
+    metadata = a_var.get_metadata() if hasattr(a_var, "get_metadata") else {}
+    rank = len(getattr(a_var.get_value() if hasattr(a_var, "get_value") else a_var, "shape", ()))
+    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec) and rank == 1:
+      return s_var
     cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
     is_unsharded = (
         not hasattr(cur_sharding, "spec")

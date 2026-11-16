@@ -780,6 +780,10 @@ def create_nnx_abstract_model(
   """
 
   with logical_axis_rules(config.logical_axis_rules):
+    # m3 models do not store `self.mesh`, so resolve `mesh` up front when none
+    # was passed rather than reading `abs_model.mesh` below.
+    if getattr(config, "use_m3_model", False) and mesh is None:
+      mesh = maxtext_utils.get_mesh_from_config(config, devices)
     _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
     # Use nnx.eval_shape + our scan-axis-aware sharding helper instead of
     # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
@@ -787,8 +791,10 @@ def create_nnx_abstract_model(
     # causing the stacked layers axis to be missing from the PartitionSpec.
     # Wrapping in `jax.set_mesh(mesh)` trips Flax 0.12.6's `_to_variable` for
     # serve-mode AQT variables (NamedSharding with `spec=None` rejected under
-    # AbstractMesh). Sharding is resolved afterwards via the helper, so the
-    # wrap is unnecessary here.
+    # AbstractMesh), and wrapping in `use_abstract_mesh` runs post-construction
+    # Qwix forward-pass tracing under `AbstractMesh`'s default `Explicit` axes.
+    # `m3_models.create_model` enters `mesh.abstract_mesh` for construction
+    # alone, and sharding is resolved afterwards via the helper below.
     abs_model = nnx.eval_shape(_create_model)
     if mesh is None:
       mesh = abs_model.mesh
