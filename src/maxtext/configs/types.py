@@ -2996,6 +2996,14 @@ class FineTuning(BaseModel):
   sft_train_on_completion_only: bool = Field(
       False, description="If True, trains only on the completion part of the text."
   )
+  sft_label_mode: Literal["generation_blocks", "prefix"] = Field(
+      "generation_blocks",
+      description=(
+          "Strategy for computing SFT completion loss spans: 'generation_blocks' uses chat template "
+          "{% generation %} blocks when available; 'prefix' derives spans from prefix comparisons and "
+          "boundary probes."
+      ),
+  )
   formatting_func_path: str = Field(
       "",
       description="Path to the custom data formatting function for SFT.",

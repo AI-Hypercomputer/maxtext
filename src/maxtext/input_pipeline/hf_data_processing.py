@@ -30,6 +30,7 @@ from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.utils import elastic_utils
+from maxtext.utils import max_logging
 
 
 def _get_pad_id(tokenizer):
@@ -51,6 +52,7 @@ def _get_training_objective_transform(
     packing: bool,
     pad_id: int,
     bos_token_id: int | None,
+    eos_token_id: int | None = None,
 ) -> input_pipeline_utils.ShiftData | input_pipeline_utils.BlockDiffusionCorruption | None:
   """Selects target preparation for causal or block-diffusion training.
 
@@ -62,6 +64,7 @@ def _get_training_objective_transform(
     packing: Whether multiple examples are packed into each sequence.
     pad_id: Token ID used to pad causal language-model examples.
     bos_token_id: Beginning-of-sequence token ID, or None when unavailable.
+    eos_token_id: End-of-sequence token ID, used to avoid ignoring EOS when BOS == EOS.
 
   Returns:
     The objective-specific Grain transform, or None when target shifting is disabled.
@@ -89,7 +92,11 @@ def _get_training_objective_transform(
   if objective != "causal_lm":
     raise ValueError(f"Unsupported training objective: {objective}")
   if shift and not use_dpo:
-    return input_pipeline_utils.ShiftData(ignored_ids=[pad_id, bos_token_id], axis=1)
+    # A BOS target only marks the next packed document, so it carries no loss. When BOS == EOS
+    # (e.g. OLMo-2/3), ignoring BOS would also drop every EOS target, so the model never learns to stop.
+    effective_bos_id = None if bos_token_id is None or bos_token_id == eos_token_id else bos_token_id
+    ignored = [pad_id] if effective_bos_id is None else [pad_id, effective_bos_id]
+    return input_pipeline_utils.ShiftData(ignored_ids=ignored, axis=1)
   return None
 
 
@@ -403,10 +410,18 @@ def preprocessing_pipeline(
             "tokenizer_model": tokenizer,
             "data_column_name": data_column_names[0],
             "model_name": getattr(config, "model_name", None),
+            "label_mode": getattr(config, "sft_label_mode", "generation_blocks"),
         },
     )
 
   pad_id = _get_pad_id(tokenizer)
+  eos_id = getattr(tokenizer, "eos_token_id", None)
+  if use_sft and pad_id is not None and pad_id == eos_id:
+    max_logging.warning(
+        f"SFT pad_id ({pad_id}) equals eos_token_id; prompt masking and ShiftData will drop completion EOS "
+        "targets from loss (for example GPT-2 style tokenizers without a distinct pad token). "
+        "Configure a distinct pad_token if available."
+    )
 
   if tokenize:
     dataset = dataset.map(
@@ -475,6 +490,7 @@ def preprocessing_pipeline(
       packing=packing,
       pad_id=pad_id,
       bos_token_id=tokenizer.bos_token_id,
+      eos_token_id=getattr(tokenizer, "eos_token_id", None),
   )
   if target_transform is not None:
     operations.append(target_transform)

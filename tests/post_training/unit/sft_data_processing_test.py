@@ -208,27 +208,23 @@ QWEN_DATA = {
         "truncated_exp1_inputs": (
             "<|im_start|>system\nthe system prompt<|im_end|>\n"
             "<|im_start|>user\nexample one question one<|im_end|>\n"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            "<|im_start|>assistant\nexample one answer one<|im_end|>\n"
             "<|im_start|>user\nexample one question two<|im_end|>\n"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two"
+            "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|im_end|>\n!!"
         ),
         "truncated_exp1_targets": (
-            "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            + "<|endoftext|>" * 3
-            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
-            + "<|endoftext|>" * 9
-            + "<|endoftext|>" * 3
-            + "<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
+            "<|endoftext|>" * 19
+            + "example one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 12
+            + "<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
+            + "!!<|endoftext|>"
         ),
         "truncated_exp1_targets_predictable": (
-            "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
-            "<|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|><|endoftext|>"
+            "<|endoftext|>" * 19
+            + "example one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 12
+            + "<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
             + "<|endoftext|>" * 3
-            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
-            + "<|endoftext|>" * 9
-            + "<|endoftext|>" * 3
-            + "<think>\n\n</think>\n\nexample one answer two<|endoftext|>"
         ),
         "packed_exp2_inputs": (
             "<|im_start|>user\nquestion two<|im_end|>\n"
@@ -259,28 +255,27 @@ QWEN_DATA = {
     "prompt_completion": {
         "truncated_exp1_inputs": (
             "<|im_start|>user\nexample one question one<|im_end|>\n"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
+            "<|im_start|>assistant\nexample one answer one<|im_end|>\n"
             "<|im_start|>user\nexample one question two<|im_end|>\n"
-            "<|im_start|>assistant\n<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
-            "<|im_start|>user\nexample one question"
+            "<|im_start|>assistant\nexample one answer two<|im_end|>\n"
+            "<|im_start|>user\nexample one question three<|im_end|>\n"
+            "<|im_start|>assistant\n<think>\n\n"
         ),
         "truncated_exp1_targets": (
-            "<|endoftext|>" * 8
-            + "<|endoftext|>" * 3
-            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
-            + "<|endoftext|>" * 9
-            + "<|endoftext|>" * 3
-            + "<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
-            + "<|endoftext|>" * 7
+            "<|endoftext|>" * 11
+            + "example one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 12
+            + "example one answer two<|im_end|>\n"
+            + "<|endoftext|>" * 12
+            + "<think>\n\n<|endoftext|>"
         ),
         "truncated_exp1_targets_predictable": (
-            "<|endoftext|>" * 8
-            + "<|endoftext|>" * 3
-            + "<think>\n\n</think>\n\nexample one answer one<|im_end|>\n"
-            + "<|endoftext|>" * 9
-            + "<|endoftext|>" * 3
-            + "<think>\n\n</think>\n\nexample one answer two<|im_end|>\n"
-            + "<|endoftext|>" * 7
+            "<|endoftext|>" * 11
+            + "example one answer one<|im_end|>\n"
+            + "<|endoftext|>" * 12
+            + "example one answer two<|im_end|>\n"
+            + "<|endoftext|>" * 12
+            + "<think>\n\n<|endoftext|>"
         ),
         "packed_exp2_inputs": (
             "<|im_start|>user\nquestion two<|im_end|>\n"
@@ -408,7 +403,7 @@ class SFTDataProcessingTest(unittest.TestCase):
         self.tokenizer.decode(
             np.where(batch["targets_segmentation"][0] > 0, batch["targets"][0], _get_pad_id(self.tokenizer))
         ),
-        expected["truncated_exp1_targets"],
+        expected["truncated_exp1_targets_predictable"],
     )
 
     # Check Packing
@@ -493,46 +488,81 @@ class SFTChatTemplateLogicTest(unittest.TestCase):
     self.llama2_tokenizer = transformers.AutoTokenizer.from_pretrained(LLAMA2_TOKENIZER_PATH)
     self.gemma4_tokenizer = transformers.AutoTokenizer.from_pretrained(GEMMA4_TOKENIZER_PATH)
 
-  def _apply_chat_template(self, tokenizer):
-    """Helper function to apply the chat template to a sample input and return the result for testing."""
+  def test_apply_chat_template_with_qwen3_tokenizer(self):
+    """Verifies that apply_chat_template matches Qwen3's whole-conversation chat template."""
     messages = [
         {"role": "user", "content": "Q1"},
         {"role": "assistant", "content": "A1"},
         {"role": "user", "content": "Q2"},
         {"role": "assistant", "content": "A2"},
     ]
-    example = {"messages": messages}
-    return apply_chat_template(example, tokenizer, "messages")
-
-  def test_apply_chat_template_with_qwen3_tokenizer(self):
-    """Verifies that apply_chat_template correctly applies Qwen3's chat template."""
-    result = self._apply_chat_template(self.qwen3_tokenizer)
+    expected_full = self.qwen3_tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
+    result = apply_chat_template({"messages": list(messages)}, self.qwen3_tokenizer, "messages")
     self.assertEqual(result["is_prompt"], [True, False, True, False])
     self.assertEqual(len(result["messages"]), 4)
-    self.assertIn("<|im_start|>user\nQ1<|im_end|>\n<|im_start|>assistant\n", result["messages"][0])
-    self.assertIn("<think>\n\n</think>\n\nA1<|im_end|>\n", result["messages"][1])
-    self.assertIn("<|im_start|>user\nQ2<|im_end|>\n<|im_start|>assistant\n", result["messages"][2])
-    self.assertIn("<think>\n\n</think>\n\nA2<|im_end|>\n", result["messages"][3])
+    self.assertEqual("".join(result["messages"]), expected_full)
+    self.assertEqual(result["messages"][0], "<|im_start|>user\nQ1<|im_end|>\n<|im_start|>assistant\n")
+    self.assertEqual(result["messages"][1], "A1<|im_end|>\n")
+    self.assertEqual(result["messages"][2], "<|im_start|>user\nQ2<|im_end|>\n<|im_start|>assistant\n")
+    self.assertEqual(result["messages"][3], "<think>\n\n</think>\n\nA2<|im_end|>\n")
 
   def test_apply_chat_template_with_llama2_tokenizer(self):
-    """Verifies that apply_chat_template correctly applies Llama2's chat template."""
-    result = self._apply_chat_template(self.llama2_tokenizer)
+    """Verifies that apply_chat_template matches Llama2's whole-conversation chat template."""
+    messages = [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "Q2"},
+        {"role": "assistant", "content": "A2"},
+    ]
+    expected_full_ids = self.llama2_tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=True)
+    if hasattr(expected_full_ids, "input_ids"):
+      expected_full_ids = expected_full_ids["input_ids"]
+    result = apply_chat_template({"messages": list(messages)}, self.llama2_tokenizer, "messages")
     self.assertEqual(result["is_prompt"], [True, False, True, False])
     self.assertEqual(len(result["messages"]), 4)
+    re_tok_ids = sum(
+        [self.llama2_tokenizer(seg, add_special_tokens=False)["input_ids"] for seg in result["messages"]], []
+    )
+    self.assertEqual(re_tok_ids, list(expected_full_ids))
     self.assertIn("<s>[INST] Q1 [/INST]", result["messages"][0])
     self.assertIn("A1 </s>", result["messages"][1])
     self.assertIn("<s>[INST] Q2 [/INST]", result["messages"][2])
     self.assertIn("A2 </s>", result["messages"][3])
 
   def test_apply_chat_template_with_gemma4_tokenizer(self):
-    """Verifies that apply_chat_template correctly applies Gemma4's chat template."""
-    result = self._apply_chat_template(self.gemma4_tokenizer)
+    """Verifies that apply_chat_template matches Gemma4's whole-conversation template without duplicate <bos>."""
+    messages = [
+        {"role": "user", "content": "Q1"},
+        {"role": "assistant", "content": "A1"},
+        {"role": "user", "content": "Q2"},
+        {"role": "assistant", "content": "A2"},
+    ]
+    expected_full = self.gemma4_tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
+    result = apply_chat_template({"messages": list(messages)}, self.gemma4_tokenizer, "messages")
     self.assertEqual(result["is_prompt"], [True, False, True, False])
     self.assertEqual(len(result["messages"]), 4)
+    self.assertEqual("".join(result["messages"]), expected_full)
+    self.assertEqual("".join(result["messages"]).count("<bos>"), 1)
     self.assertIn("<|turn>user\nQ1<turn|>\n<|turn>model\n", result["messages"][0])
-    self.assertIn("A1<turn|>\n", result["messages"][1])
-    self.assertIn("<|turn>user\nQ2<turn|>\n<|turn>model\n", result["messages"][2])
-    self.assertIn("A2<turn|>\n", result["messages"][3])
+    self.assertEqual(result["messages"][1], "A1<turn|>\n")
+    self.assertEqual(result["messages"][2], "<|turn>user\nQ2<turn|>\n<|turn>model\n")
+    self.assertEqual(result["messages"][3], "A2<turn|>\n")
+
+  def test_apply_chat_template_with_qwen3_tool_and_trailing_user(self):
+    """Verifies Qwen3 multi-turn tool responses and trailing user turns are preserved and masked."""
+    messages = [
+        {"role": "user", "content": "Search docs"},
+        {"role": "assistant", "content": "Calling search"},
+        {"role": "tool", "content": "Result 42"},
+        {"role": "assistant", "content": "Found 42"},
+        {"role": "user", "content": "Great"},
+    ]
+    expected_full = self.qwen3_tokenizer.apply_chat_template(messages, add_generation_prompt=False, tokenize=False)
+    result = apply_chat_template({"messages": list(messages)}, self.qwen3_tokenizer, "messages")
+    self.assertEqual("".join(result["messages"]), expected_full)
+    self.assertEqual(result["is_prompt"], [True, False, True, False, True])
+    self.assertIn("Result 42", result["messages"][2])
+    self.assertIn("Great", result["messages"][4])
 
   def test_apply_chat_template_with_gemma4_reasoning(self):
     """Verifies that apply_chat_template correctly handles Gemma4 with thinking/reasoning."""
