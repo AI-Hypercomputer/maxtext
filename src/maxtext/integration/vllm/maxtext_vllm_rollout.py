@@ -32,6 +32,7 @@ import re
 import time
 import traceback
 from typing import Any, NamedTuple, Optional, Tuple
+import weakref
 
 from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
@@ -195,36 +196,97 @@ def requires_maxtext_scanned_weight_unroll(config: Any) -> bool:
   return bool(getattr(config, "scan_layers", False) and uses_maxtext_vllm_adapter(config))
 
 
+def _leaf_jax_array_refs(
+    tree: Any,
+) -> tuple[weakref.ReferenceType[Any], ...]:
+  """Returns weakrefs to concrete, live, immutable jax.Array leaves in a PyTree.
+
+  Returns an empty tuple if any array-like leaf is an abstract tracer (e.g.,
+  under `jax.eval_shape` or `jax.jit`), deleted, mutable (not a `jax.Array`,
+  such as `np.ndarray`), or non-weakrefable, so callers never call
+  `is_deleted()` on tracers or skip a weight sync when values could change.
+
+  Args:
+    tree: PyTree containing model parameter leaves.
+  """
+  refs: list[weakref.ReferenceType[Any]] = []
+  for leaf in jax.tree_util.tree_leaves(tree):
+    arr = leaf.value if hasattr(leaf, "value") else leaf
+    if not hasattr(arr, "shape"):
+      continue
+    if isinstance(arr, jax.core.Tracer) or not isinstance(arr, jax.Array) or arr.is_deleted():
+      return ()
+    try:
+      refs.append(weakref.ref(arr))
+    except TypeError:
+      return ()
+  return tuple(refs)
+
+
+def _same_live_array_refs(
+    prev_refs: Optional[tuple[weakref.ReferenceType[Any], ...]],
+    cur_refs: tuple[weakref.ReferenceType[Any], ...],
+) -> bool:
+  """Returns True iff every prev_ref is still live and identical to cur_ref."""
+  if not prev_refs or len(prev_refs) != len(cur_refs):
+    return False
+  for prev_ref, cur_ref in zip(prev_refs, cur_refs, strict=True):
+    prev_obj = prev_ref()
+    cur_obj = cur_ref()
+    if prev_obj is None or cur_obj is None or prev_obj is not cur_obj:
+      return False
+  return True
+
+
 def prepare_direct_sync_additional_config(
     additional_config: Optional[dict[str, Any]],
     *,
     direct_maxtext_sync: bool,
     num_experts: int,
     tensor_parallel_size: int,
+    has_custom_mappings: bool = False,
 ) -> Optional[dict[str, Any]]:
-  """Makes the direct MaxText MoE target use TPU-safe prefused weights.
+  """Configures prefused MoE weights for direct MaxText-to-vLLM sync.
 
-  TPU inference shards the fused gate/up dimension across tensor-parallel
-  devices. Each shard must therefore contain its local gate chunk followed by
-  its local up chunk. The unfused MaxText inference path concatenates the two
-  complete tensors globally, which gives incorrect local shards when TP > 1.
-  Tunix's direct-sync MoE fusion builds the required per-shard layout once at
-  weight-load time when the target exposes a prefused ``wi`` parameter.
+  When TP > 1, TPU inference shards the fused gate/up dimension across
+  tensor-parallel devices, so each shard must contain its local gate chunk
+  followed by its local up chunk. The unfused MaxText inference path
+  concatenates the two complete tensors globally, which yields incorrect local
+  shards, so prefused weights are required for correctness. When TP == 1 and
+  neither custom weight mappings nor a rollout-side checkpoint restore path
+  (``load_parameters_path``) is configured, prefused weights are enabled by
+  default to avoid per-step gate/up concatenation overhead while honoring an
+  explicit False override.
+
+  Returns:
+    Updated additional_config dict (or the original value when unchanged).
   """
-  if not direct_maxtext_sync or num_experts <= 1 or tensor_parallel_size <= 1:
+  if not direct_maxtext_sync or num_experts <= 1:
     return additional_config
 
   prepared = copy.deepcopy(additional_config) if additional_config is not None else {}
   maxtext_overrides = prepared.setdefault("maxtext_config", {})
   if not isinstance(maxtext_overrides, dict):
-    raise ValueError("vLLM additional_config.maxtext_config must be a dictionary for direct MaxText sync.")
+    raise ValueError("vLLM additional_config.maxtext_config must be a dictionary for " "direct MaxText sync.")
 
-  if not maxtext_overrides.get("prefuse_moe_weights", False):
+  if tensor_parallel_size > 1:
+    if not maxtext_overrides.get("prefuse_moe_weights", False):
+      logging.info(
+          "MaxTextVllmRollout: enabling prefuse_moe_weights for correct MoE " "gate/up layout with TP=%d.",
+          tensor_parallel_size,
+      )
+    maxtext_overrides["prefuse_moe_weights"] = True
+  elif (
+      "prefuse_moe_weights" not in maxtext_overrides
+      and not has_custom_mappings
+      and not maxtext_overrides.get("load_parameters_path")
+  ):
     logging.info(
-        "MaxTextVllmRollout: enabling prefuse_moe_weights for correct MoE gate/up layout with TP=%d.",
-        tensor_parallel_size,
+        "MaxTextVllmRollout: enabling prefuse_moe_weights by default for MoE "
+        "rollout (TP=1) to avoid per-step wi_0/wi_1 concatenation "
+        "(set maxtext_config.prefuse_moe_weights=False to opt out)."
     )
-  maxtext_overrides["prefuse_moe_weights"] = True
+    maxtext_overrides["prefuse_moe_weights"] = True
   return prepared
 
 
@@ -583,6 +645,10 @@ class MaxTextVllmSampler(VllmSampler):
   applies scanned-weight pre-unrolls for the legacy / direct-sync paths.
   """
 
+  _last_synced_src_refs: Optional[tuple[weakref.ReferenceType[Any], ...]] = None
+  _last_synced_tgt_refs: Optional[tuple[weakref.ReferenceType[Any], ...]] = None
+  last_update_skipped: bool = False
+
   def __init__(
       self,
       tokenizer: Any,
@@ -596,6 +662,9 @@ class MaxTextVllmSampler(VllmSampler):
     self._model_name = model_name or getattr(config, "model", "") or engine_kwargs.get("model", "") or ""
     self._is_gemma = "gemma" in str(self._model_name).lower()
     self._is_qwen = "qwen" in str(self._model_name).lower()
+    self._last_synced_src_refs = None
+    self._last_synced_tgt_refs = None
+    self.last_update_skipped = False
 
   def _vllm_config(self, config: VllmConfig):
     """Builds vLLM engine arguments while preserving user-specified sharding_strategy."""
@@ -616,6 +685,23 @@ class MaxTextVllmSampler(VllmSampler):
       filter_types: Optional[Tuple[Any, ...]] = None,
   ):
     """Update the vLLM runner weights from a MaxText state tree."""
+    self.last_update_skipped = False
+    raw_src_refs: Optional[tuple[weakref.ReferenceType[Any], ...]] = None
+    if self._direct_maxtext_sync:
+      raw_src_refs = _leaf_jax_array_refs(updated_weights)
+      tgt_refs = _leaf_jax_array_refs(self.transformer_state)
+      if (
+          not getattr(self, "_kv_cache_deleted", False)
+          and _same_live_array_refs(self._last_synced_src_refs, raw_src_refs)
+          and _same_live_array_refs(self._last_synced_tgt_refs, tgt_refs)
+      ):
+        self.last_update_skipped = True
+        logging.info(
+            "MaxTextVllmSampler.update_params: all %d source weight buffers "
+            "are unchanged since last sync; skipping redundant reshard.",
+            len(raw_src_refs),
+        )
+        return None
     converter = getattr(self, "converter", getattr(self, "_converter", None))
     if self._direct_maxtext_sync:
       if converter is not None:
@@ -628,7 +714,7 @@ class MaxTextVllmSampler(VllmSampler):
         updated_weights = unroll_qwen_scanned_weights(updated_weights)
       validate_direct_sync_layer_coverage(updated_weights, self.transformer_state)
     try:
-      return super().update_params(updated_weights, filter_types)
+      result = super().update_params(updated_weights, filter_types)
     except BaseException:
       # A device-addressability failure here takes the whole Pathways JobSet
       # down, and the teardown races the normal exception propagation -- the
@@ -636,6 +722,10 @@ class MaxTextVllmSampler(VllmSampler):
       # logs. Force it out before re-raising.
       _log_and_flush_traceback("MaxTextVllmSampler.update_params failed")
       raise
+    if self._direct_maxtext_sync:
+      self._last_synced_src_refs = raw_src_refs or None
+      self._last_synced_tgt_refs = _leaf_jax_array_refs(self.transformer_state) or None
+    return result
 
 
 class MaxTextVllmRollout(vllm_rollout.VllmRollout):
@@ -722,6 +812,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
         direct_maxtext_sync=direct_maxtext_sync,
         num_experts=getattr(maxtext_config, "num_experts", 1),
         tensor_parallel_size=rollout_config.tensor_parallel_size,
+        has_custom_mappings=bool(getattr(mapping_config, "to_hf_mappings", None)),
     )
     self._maxtext_config = maxtext_config
 
@@ -835,14 +926,29 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
     production run.
     """
     index = self._weight_sync_count
-    self._weight_sync_count += 1
+    sampler = getattr(self, "_sampler", None)
+    # Guard with isinstance(..., bool) rather than plain truthiness so
+    # MagicMock test doubles do not appear skipped.
+    if isinstance(getattr(sampler, "last_update_skipped", None), bool):
+      sampler.last_update_skipped = False
     if not getattr(self._maxtext_config, "log_weight_sync_time", False):
       yield
+      skipped = getattr(sampler, "last_update_skipped", False)
+      if not (isinstance(skipped, bool) and skipped):
+        self._weight_sync_count += 1
       return
 
     start = time.perf_counter()
     try:
       yield
+      skipped = getattr(sampler, "last_update_skipped", False)
+      if isinstance(skipped, bool) and skipped:
+        logging.info(
+            "weight_sync_time: sync %d (%s) SKIPPED (buffers unchanged)",
+            index,
+            label,
+        )
+        return
       self._block_on_rollout_state(index)
     except BaseException:
       # Reporting a duration for a sync that raised would print a
@@ -855,6 +961,7 @@ class MaxTextVllmRollout(vllm_rollout.VllmRollout):
           time.perf_counter() - start,
       )
       raise
+    self._weight_sync_count += 1
     logging.info(
         "weight_sync_time: sync %d (%s) via %s: %.4f s",
         index,
