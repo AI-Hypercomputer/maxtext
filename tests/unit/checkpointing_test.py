@@ -620,16 +620,14 @@ class LoadDynamicTest(parameterized.TestCase):
 
   @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
   @mock.patch.object(load_dynamic.storage, "Client")
-  @mock.patch.object(load_dynamic, "load_sharded_hf_state")
-  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state")
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming")
   @mock.patch("jax.process_index", return_value=0)
   @mock.patch("jax.experimental.multihost_utils.sync_global_devices")
   def test_load_safetensors_dynamic_from_hf_hub(
       self,
       mock_sync,
       mock_process_index,
-      mock_transform,
-      mock_load_sharded,
+      mock_load_streaming,
       mock_storage_client,
       mock_hf_fs,
   ):
@@ -641,8 +639,7 @@ class LoadDynamicTest(parameterized.TestCase):
     mock_blob.name = "hf_cache/repo_meta-llama/model.safetensors"
     mock_client_instance.list_blobs.return_value = [mock_blob]
 
-    mock_load_sharded.return_value = {}
-    mock_transform.return_value = {"params": {}}
+    mock_load_streaming.return_value = {"params": {}}
 
     class MockConfig:
 
@@ -662,14 +659,15 @@ class LoadDynamicTest(parameterized.TestCase):
     self.assertEqual(loaded_vars, {"params": {}})
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
+    # The weights are streamed from the GCS cache, not from the Hub.
+    self.assertEqual(mock_load_streaming.call_args.args[0], "gs://dummy-bucket/hf_cache/repo_meta-llama")
 
   @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
-  @mock.patch.object(load_dynamic, "load_sharded_hf_state", return_value={})
-  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state", return_value={"params": {}})
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming", return_value={"params": {}})
   @mock.patch("jax.process_index", return_value=1)
   @mock.patch("jax.experimental.multihost_utils.sync_global_devices")
   def test_load_from_hf_hub_on_other_hosts_skips_hf_api(
-      self, mock_sync, mock_process_index, mock_transform, mock_load_sharded, mock_hf_fs
+      self, mock_sync, mock_process_index, mock_load_streaming, mock_hf_fs
   ):
     # Only host 0 lists and downloads the repo; the other hosts wait for it and read the GCS cache.
     config = mock.Mock(model_name="llama3.1-8b", hf_access_token=None, base_output_directory="gs://dummy-bucket")
@@ -678,7 +676,7 @@ class LoadDynamicTest(parameterized.TestCase):
 
     mock_hf_fs.assert_not_called()
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
-    mock_load_sharded.assert_called_once_with("gs://dummy-bucket/hf_cache/repo_meta-llama")
+    self.assertEqual(mock_load_streaming.call_args.args[0], "gs://dummy-bucket/hf_cache/repo_meta-llama")
 
   @parameterized.named_parameters(
       ("base", "llama3.1-8b"),
