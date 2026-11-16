@@ -66,14 +66,23 @@ class ServeModeRoundTripTest(unittest.TestCase):
 
   def _init_cfg(self, ckpt_path, *, checkpoint_is_quantized):
     """Build a pyconfig for save or reload."""
-    # Use base.yml + gpt3-52k. The decoupled test config strips
+    # Use base.yml + qwen3-0.6b with small dimensions. The decoupled test config strips
     # logical_axis_rules (e.g. "norm"), which the AQT serve-mode model
     # construction needs.
     base_yml = os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml")
     args = [
         sys.argv[0],
         base_yml,
-        "model_name=gpt3-52k",
+        "model_name=qwen3-0.6b",
+        "override_model_config=true",
+        "base_emb_dim=16",
+        "base_num_query_heads=2",
+        "base_num_kv_heads=2",
+        "base_mlp_dim=64",
+        "base_num_decoder_layers=1",
+        "head_dim=8",
+        "vocab_size=1024",
+        "attention=dot_product",
         "max_target_length=64",
         "max_prefill_predict_length=16",
         "per_device_batch_size=1",

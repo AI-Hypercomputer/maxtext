@@ -26,15 +26,14 @@ import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
 from maxtext.optimizers.muon import ShardedMuonDimensionNumbers as smdn
-from maxtext.utils import maxtext_utils, muon_utils
+from maxtext.utils import maxtext_utils, model_creation_utils, muon_utils
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 import pytest
 
-# deepseek2, specific: q_lora_rank=0
-# applicable: deepseek2-16, but not deepseek2-236b (q_lora_rank=1536)
+# MLA without Q-LoRA (q_lora_rank=0, e.g. deepseek3-test with q_lora_rank=0 override)
 _DEEPSEEK2_ATTENTION = {
     "self_attention": {
         "kv_norm": {"scale": None},
@@ -589,13 +588,11 @@ class MuonDimensionTest(parameterized.TestCase):
   """
 
   @parameterized.named_parameters(
-      ("deepseek2-16b", "deepseek2-16b", DEEPSEEK2_DIMENSION_NUMBER),
+      ("deepseek3-test", "deepseek3-test", DEEPSEEK3_DIMENSION_NUMBER),
       ("deepseek3-671b", "deepseek3-671b", DEEPSEEK3_DIMENSION_NUMBER),
       ("deepseek4-284b", "deepseek4-284b", DEEPSEEK4_DIMENSION_NUMBER),
       ("deepseek4-1600b", "deepseek4-1600b", DEEPSEEK4_1600B_DIMENSION_NUMBER),
       ("kimi-k2-1t", "kimi-k2-1t", DEEPSEEK3_DIMENSION_NUMBER),
-      ("llama2-7b", "llama2-7b", LLAMA2_DIMENSION_NUMBER),
-      ("llama3-8b", "llama3-8b", LLAMA2_DIMENSION_NUMBER),
       ("llama3.1-8b", "llama3.1-8b", LLAMA2_DIMENSION_NUMBER),
       ("llama3.3-70b", "llama3.3-70b", LLAMA2_DIMENSION_NUMBER),
       ("gemma3-4b", "gemma3-4b", GEMMA3_DIMENSION_NUMBER),
@@ -613,6 +610,27 @@ class MuonDimensionTest(parameterized.TestCase):
     """
     actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, param_scan_axis=1)
     self.assertEqual(actual_output, expected_output)
+
+  def test_deepseek_no_q_lora_mdn(self):
+    """Verifies Muon dimension numbers on the MLA q_lora_rank=0 (direct query projection) path."""
+    cfg = pyconfig.initialize(
+        [
+            None,
+            get_test_config_path(),
+            "model_name=deepseek3-test",
+            "override_model_config=True",
+            "q_lora_rank=0",
+            "scan_layers=True",
+            "param_scan_axis=1",
+            "attention=dot_product",
+            "skip_jax_distributed_system=True",
+        ]
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = jax.sharding.Mesh(devices_array, cfg.mesh_axes)
+    _, model = model_creation_utils.create_nnx_abstract_model(cfg, mesh)
+    mdn_tree = muon_utils.get_muon_weight_dimension_numbers(model, cfg)
+    self.assertEqual({"params": nnx.to_pure_dict(mdn_tree)}, DEEPSEEK2_DIMENSION_NUMBER)
 
 
 class AdamWMaskTest(parameterized.TestCase):
@@ -1172,7 +1190,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=maxtext_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
         "muon_use_all_to_all=False",
     ]
     config_no_a2a = pyconfig.initialize(argv_no_a2a)
@@ -1197,7 +1215,7 @@ class TestMuonLogic(unittest.TestCase):
         get_test_config_path(),
         "run_name=test",
         "opt_type=muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config_default = pyconfig.initialize(argv_default)
 
@@ -1222,7 +1240,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=optax_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config_optax = pyconfig.initialize(argv_optax)
 
@@ -1247,7 +1265,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=optax_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
         "muon_use_all_to_all=True",
     ]
     config_optax_a2a = pyconfig.initialize(argv_optax_a2a)
@@ -1261,7 +1279,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=invalid_type",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config_invalid = pyconfig.initialize(argv_invalid)
     with self.assertRaises(ValueError):
@@ -1290,7 +1308,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=maxtext_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config = pyconfig.initialize(argv)
 
