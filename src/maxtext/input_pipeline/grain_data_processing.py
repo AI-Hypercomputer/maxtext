@@ -543,7 +543,9 @@ def _format_chat_template_grain(element, data_columns, tokenizer_model):
 def _tokenize_sft_chunks(element, text_column_name, tokenizer_model):
   """Tokenize each chunk individually without truncating."""
   text_chunks = element[text_column_name]
-  element[text_column_name] = [tokenizer_model.encode(chunk) for chunk in text_chunks]
+  element[text_column_name] = [
+      chunk if not isinstance(chunk, str) else tokenizer_model.encode(chunk) for chunk in text_chunks
+  ]
   return element
 
 

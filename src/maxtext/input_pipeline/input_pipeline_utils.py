@@ -254,17 +254,164 @@ def extract_token_ids(tokens):
     raise ValueError(f"Can't extract token_ids from type {type(tokens)}")
 
 
+_EMPTY_THINK_PREFIX = re.compile(r"^(?:<think>\s*</think>|<\|channel>thought\s*<channel\|>)\s*$")
+
+
+def _lcp_len(a, b):
+  """Length of the longest common prefix of two sequences."""
+  n = 0
+  for x, y in zip(a, b):
+    if x == y:
+      n += 1
+    else:
+      break
+  return n
+
+
 def _assistant_span_is_clean(messages, message_idx, rendered, span_text):
-  """Whether a derived assistant span lines up with its message: it covers the content, starts at it
-  (not inside the assistant header) and does not run into later messages. Turns whose content the
-  template rewrites are not checked. Mirrors open-instruct's _verify_assistant_spans_cover_content."""
-  content = messages[message_idx].get("content")
-  if not content or content not in rendered:
+  """Whether a derived assistant span lines up with its message: it covers the content, does not
+  include the assistant role header or earlier messages, and does not run into later messages.
+  Reasoning traces (e.g. Gemma 4 `reasoning`, Qwen 3 `reasoning_content`, or empty `<think>` tags)
+  preceding `content` are allowed. Turns whose content the template rewrites are not checked.
+  Mirrors open-instruct's _verify_assistant_spans_cover_content."""
+  msg = messages[message_idx]
+  content = msg.get("content")
+  if not isinstance(content, str) or not content or content not in rendered:
     return True
-  if content not in span_text or not span_text.lstrip().startswith(content):
+  if content not in span_text:
     return False
-  tail = span_text[span_text.index(content) + len(content) :]
-  return not any(m.get("content") and m["content"] in tail for m in messages[message_idx + 1 :])
+  content_pos = span_text.rindex(content)
+  lead = span_text[:content_pos].lstrip()
+  if lead:
+    reasoning = msg.get("reasoning") or msg.get("reasoning_content")
+    if isinstance(reasoning, str) and reasoning and reasoning in lead:
+      if not (lead.startswith(reasoning) or lead.startswith("<think>")):
+        return False
+    elif not _EMPTY_THINK_PREFIX.match(lead):
+      return False
+  tail = span_text[content_pos + len(content) :]
+  return not any(
+      isinstance(m.get("content"), str) and m["content"].strip() and m["content"] in tail
+      for m in messages[message_idx + 1 :]
+  )
+
+
+def _char_offset_to_token_end(tokenizer_model, rendered, full_tokens, char_pos):
+  """Maps a character end-offset in `rendered` to the corresponding token end-index in `full_tokens`."""
+  if char_pos <= 0:
+    return 0
+  if char_pos >= len(rendered):
+    return len(full_tokens)
+  try:
+    enc = tokenizer_model(rendered, add_special_tokens=False, return_offsets_mapping=True)
+    if enc["input_ids"] == full_tokens:
+      end_idx = 0
+      for i, (tok_start, tok_end) in enumerate(enc["offset_mapping"]):
+        if tok_end <= char_pos:
+          end_idx = i + 1
+        elif tok_start < char_pos:
+          if rendered[tok_start:char_pos].strip():
+            end_idx = i + 1
+          break
+        else:
+          break
+      return end_idx
+  except (TypeError, NotImplementedError, ValueError):
+    pass
+  prefix_tokens = extract_token_ids(tokenizer_model(rendered[:char_pos], add_special_tokens=False))
+  return _lcp_len(full_tokens, prefix_tokens)
+
+
+def _find_turn_end_char(tokenizer_model, conversation, idx, rendered):
+  """Finds the character end-offset of assistant message `idx` inside `rendered`."""
+  if idx == len(conversation) - 1:
+    return len(rendered)
+
+  def render(msgs):
+    return tokenizer_model.apply_chat_template(msgs, add_generation_prompt=False, tokenize=False)
+
+  r_thru = render(conversation[: idx + 1])
+  if rendered.startswith(r_thru):
+    return len(r_thru)
+
+  asst_content = conversation[idx].get("content")
+  next_content = conversation[idx + 1].get("content")
+  if (asst_content is not None and not isinstance(asst_content, str)) or (
+      next_content is not None and not isinstance(next_content, str)
+  ):
+    lcp_thru = _lcp_len(rendered, r_thru)
+    return lcp_thru if lcp_thru > 0 else len(r_thru)
+
+  marker = " __MAXTEXT_SPAN_PROBE_9f3a__ "
+  while marker in rendered:
+    marker += "x"
+
+  asst_probed = {**conversation[idx], "content": (asst_content or "") + marker}
+  c_asst = list(conversation)
+  c_asst[idx] = asst_probed
+  after_asst = _lcp_len(rendered, render(c_asst))
+
+  c_next = list(conversation)
+  c_next[idx + 1] = {**conversation[idx + 1], "content": marker + (next_content or "")}
+  before_next = _lcp_len(rendered, render(c_next))
+
+  if before_next < after_asst:
+    return after_asst
+  gap = rendered[after_asst:before_next]
+  if not gap:
+    return after_asst
+
+  # Candidate 1: turn closer from conversation[:idx + 1] (handles Qwen 3, Gemma 4, Llama 2, tool_calls).
+  c_short = list(conversation[:idx]) + [asst_probed]
+  short_closer = r_thru[_lcp_len(r_thru, render(c_short)) :]
+  if short_closer and gap.startswith(short_closer):
+    return after_asst + len(short_closer)
+
+  # Candidate 2: non-last closer from message idx - 1 (handles templates like OLMo-3 whose last message
+  # closes with `<|endoftext|>` instead of `<|im_end|>\n`).
+  if idx > 0:
+    prev_content = conversation[idx - 1].get("content")
+    if prev_content is None or isinstance(prev_content, str):
+      r_prev = render(conversation[:idx])
+      prev_end = _lcp_len(rendered, r_prev)
+      c_prev = list(conversation)
+      c_prev[idx - 1] = {**conversation[idx - 1], "content": (prev_content or "") + marker}
+      after_prev = _lcp_len(rendered, render(c_prev))
+      non_last_closer = rendered[after_prev:prev_end]
+      if non_last_closer and gap.startswith(non_last_closer):
+        return after_asst + len(non_last_closer)
+
+  lcp_thru = _lcp_len(rendered, r_thru)
+  if after_asst <= lcp_thru <= before_next:
+    return lcp_thru
+  return after_asst
+
+
+def _find_turn_start_char(tokenizer_model, conversation, idx, rendered):
+  """Fallback character start-offset of assistant message `idx` when an earlier turn diverged."""
+  asst_content = conversation[idx].get("content")
+  if asst_content is not None and not isinstance(asst_content, str):
+    return None
+  marker = " __MAXTEXT_SPAN_PROBE_9f3a__ "
+  while marker in rendered:
+    marker += "x"
+  candidates = []
+  c_content = list(conversation)
+  c_content[idx] = {**conversation[idx], "content": marker + (asst_content or "")}
+  candidates.append(
+      _lcp_len(rendered, tokenizer_model.apply_chat_template(c_content, add_generation_prompt=False, tokenize=False))
+  )
+  for key in ("reasoning", "reasoning_content"):
+    val = conversation[idx].get(key)
+    if isinstance(val, str) and val:
+      c_reason = list(conversation)
+      c_reason[idx] = {**conversation[idx], key: marker + val}
+      pos = _lcp_len(
+          rendered, tokenizer_model.apply_chat_template(c_reason, add_generation_prompt=False, tokenize=False)
+      )
+      if pos < len(rendered):
+        candidates.append(pos)
+  return min(candidates) if candidates else None
 
 
 def _segments_from_spans(full_tokens, spans):
@@ -373,17 +520,14 @@ def _split_conversation_into_segments(tokenizer_model, conversation):
   # `{% generation %}` blocks (allenai/open-instruct#1879), while older branches (e.g. the Olmo 3.5 hero SFT
   # runs) derive spans from rendered prefixes even when the template has blocks. They differ on templates whose
   # generation prompt ends inside the block, e.g. Olmo 3.5's trailing <think>.
-  template = tokenizer_model.get_chat_template()
+  template = (
+      tokenizer_model.get_chat_template()
+      if hasattr(tokenizer_model, "get_chat_template")
+      else getattr(tokenizer_model, "chat_template", None)
+  )
   use_blocks = os.environ.get("MAXTEXT_SFT_LABELS", "generation_blocks") == "generation_blocks"
   if use_blocks and isinstance(template, str) and _GENERATION_BLOCK.search(template):
     return _generation_block_segments(tokenizer_model, conversation, template)
-
-  def n_tokens(messages, add_generation_prompt):
-    return len(
-        extract_token_ids(
-            tokenizer_model.apply_chat_template(messages, add_generation_prompt=add_generation_prompt, tokenize=True)
-        )
-    )
 
   full_tokens = extract_token_ids(
       tokenizer_model.apply_chat_template(conversation, add_generation_prompt=False, tokenize=True)
@@ -391,8 +535,12 @@ def _split_conversation_into_segments(tokenizer_model, conversation):
   rendered = tokenizer_model.apply_chat_template(conversation, add_generation_prompt=False, tokenize=False)
   decode = lambda tokens: tokenizer_model.decode(tokens, skip_special_tokens=False)
   assistant_indices = [idx for idx, message in enumerate(conversation) if message["role"] == "assistant"]
+  if not assistant_indices:
+    return []
   # Conversations whose prefixes render as literal prefixes of the whole need no check; the rest (e.g. a
-  # template closing the last message with end-of-sequence) are checked turn by turn, as in open-instruct.
+  # template closing the last message with end-of-sequence, stripping historical reasoning, or adding
+  # empty thinking channel tags to the generation prompt) are resolved via prefix LCP / marker probing
+  # and checked turn by turn, as in open-instruct.
   prefix_stable = all(
       rendered.startswith(
           tokenizer_model.apply_chat_template(conversation[: idx + 1], add_generation_prompt=False, tokenize=False)
@@ -406,19 +554,32 @@ def _split_conversation_into_segments(tokenizer_model, conversation):
       for idx in assistant_indices
   )
   spans = []
+  prev_end = 0
   for idx in assistant_indices:
     if idx == 0:
       start = 0
-    elif prefix_stable:
-      # A token straddling the end of the generation prompt is trained, as open-instruct's char-offset
-      # spans do: the span starts where the tokens of the full rendering first differ from the prompt's.
+    else:
+      # Longest common prefix handles both boundary-straddling tokens (open-instruct char-offset
+      # semantics) and templates whose generation prompt appends tags not present in the actual
+      # turn (e.g. Gemma 4's `<|channel>thought\n<channel|>` on non-thinking or thinking turns).
       prompt_tokens = extract_token_ids(
           tokenizer_model.apply_chat_template(conversation[:idx], add_generation_prompt=True, tokenize=True)
       )
-      start = next((i for i, (x, y) in enumerate(zip(full_tokens, prompt_tokens)) if x != y), len(prompt_tokens))
+      start = _lcp_len(full_tokens, prompt_tokens)
+      if start < prev_end:
+        start_char = _find_turn_start_char(tokenizer_model, conversation, idx, rendered)
+        if start_char is not None:
+          start = max(prev_end, _char_offset_to_token_end(tokenizer_model, rendered, full_tokens, start_char))
+    if idx == len(conversation) - 1:
+      end = len(full_tokens)
+    elif prefix_stable:
+      end_tokens = extract_token_ids(
+          tokenizer_model.apply_chat_template(conversation[: idx + 1], add_generation_prompt=False, tokenize=True)
+      )
+      end = min(len(end_tokens), len(full_tokens))
     else:
-      start = n_tokens(conversation[:idx], True)
-    end = min(n_tokens(conversation[: idx + 1], False), len(full_tokens))
+      end_char = _find_turn_end_char(tokenizer_model, conversation, idx, rendered)
+      end = _char_offset_to_token_end(tokenizer_model, rendered, full_tokens, end_char)
     if (
         not prefix_stable
         and start < end
@@ -427,8 +588,7 @@ def _split_conversation_into_segments(tokenizer_model, conversation):
       max_logging.log(f"Not training on a conversation whose assistant span {idx} does not match its content.")
       return [(list(full_tokens), True)]
     spans.append((start, end))
-  if not spans:
-    return []
+    prev_end = max(prev_end, end)
   return _segments_from_spans(full_tokens, spans)
 
 
@@ -447,7 +607,10 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
   Returns:
     The modified `example` dictionary.
       - The `data_column_name` column will be updated to a list of
-        messages, each formatted according to the tokenizer's chat template.
+        messages, each formatted according to the tokenizer's chat template
+        (as strings whenever re-tokenizing preserves exact token boundaries,
+        or as pre-tokenized integer ID lists for `document` rows and
+        boundary-merged segments).
       - A new column "is_prompt" is added, where `True` indicates the
         tokens contain the system message, user message, and generation
         prompt (if applicable). `False` indicates the expected LLM
@@ -463,20 +626,41 @@ def apply_chat_template(example, tokenizer_model, data_column_name):
     max_logging.log(f"Unable to apply chat template: {e}")
     raise e
   example["is_prompt"] = [is_prompt for _, is_prompt in segments]
-  example[data_column_name] = [text for text, _ in segments]
+  is_document = len(conversation) == 1 and conversation[0]["role"] == "document"
+  if not is_document and segments:
+    decoded = [tokenizer_model.decode(ids, skip_special_tokens=False) for ids, _ in segments]
+    try:
+      roundtrip_ok = all(
+          extract_token_ids(tokenizer_model(text, add_special_tokens=False)) == ids
+          for text, (ids, _) in zip(decoded, segments)
+      )
+    except (TypeError, ValueError):
+      roundtrip_ok = False
+    example[data_column_name] = decoded if roundtrip_ok else [ids for ids, _ in segments]
+  else:
+    example[data_column_name] = [ids for ids, _ in segments]
   return example
+
+
+def _tokenize_entry(entry, hf_tokenizer, truncation, max_length):
+  """Tokenizes a string or (possibly nested) list of strings, passing pre-tokenized ID lists through."""
+  if isinstance(entry, str):
+    return hf_tokenizer(entry, truncation=truncation, max_length=max_length)["input_ids"]
+  if isinstance(entry, list):
+    if not entry:
+      return entry
+    if all(isinstance(x, str) for x in entry):
+      return hf_tokenizer(entry, truncation=truncation, max_length=max_length)["input_ids"]
+    if all(isinstance(x, int) for x in entry):
+      return entry
+    return [_tokenize_entry(sub, hf_tokenizer, truncation, max_length) for sub in entry]
+  return entry
 
 
 def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
   """Tokenize a HuggingFace dataset"""
   for column_name in column_names:
-    if isinstance(example[column_name], list):
-      example[column_name] = [
-          x if not isinstance(x, str) else hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"]
-          for x in example[column_name]
-      ]
-    elif isinstance(example[column_name], str):
-      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
+    example[column_name] = _tokenize_entry(example[column_name], hf_tokenizer, truncation, max_length)
   return example
 
 

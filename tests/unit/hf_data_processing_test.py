@@ -220,6 +220,61 @@ class TrainingObjectiveTransformTest(unittest.TestCase):
     self.assertIsInstance(transform, input_pipeline_utils.ShiftData)
     self.assertEqual(transform.ignored_ids, [0, 1])
 
+  def test_shift_data_omits_none_bos_token_id(self):
+    transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
+        SimpleNamespace(),
+        shift=True,
+        use_dpo=False,
+        use_sft=True,
+        packing=True,
+        pad_id=0,
+        bos_token_id=None,
+    )
+
+    self.assertIsInstance(transform, input_pipeline_utils.ShiftData)
+    self.assertEqual(transform.ignored_ids, [0])
+
+  def test_bos_equals_eos_does_not_mask_eos_target(self):
+    dataset = mock.MagicMock()
+    dataset.select_columns.return_value = dataset
+    tokenizer = SimpleNamespace(pad_token_id=0, unk_token_id=0, bos_token_id=100257, eos_token_id=100257)
+    mesh = SimpleNamespace(size=1)
+
+    with (
+        mock.patch.object(hf_data_processing.transformers.AutoTokenizer, "from_pretrained", return_value=tokenizer),
+        mock.patch.object(hf_data_processing.input_pipeline_utils, "HFDataSource", return_value=[object()]),
+        mock.patch.object(hf_data_processing.grain, "DataLoader", return_value=object()) as data_loader,
+        mock.patch.object(
+            hf_data_processing.multihost_dataloading,
+            "MultiHostDataLoadIterator",
+            return_value=object(),
+        ),
+    ):
+      hf_data_processing.preprocessing_pipeline(
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          global_mesh=mesh,
+          dataset=dataset,
+          config=SimpleNamespace(elastic_enabled=False, training_objective="causal_lm"),
+          data_column_names=("text",),
+          tokenize=False,
+          tokenizer_path="unused",
+          hf_access_token=None,
+          global_batch_size=1,
+          max_target_length=8,
+          shuffle=False,
+          data_shuffle_seed=0,
+          packing=False,
+          shift=True,
+          use_dpo=False,
+          use_sft=False,
+      )
+
+    operations = data_loader.call_args.kwargs["operations"]
+    shift_op = next(op for op in operations if isinstance(op, input_pipeline_utils.ShiftData))
+    self.assertEqual(shift_op.ignored_ids, [0])
+    self.assertNotIn(100257, shift_op.ignored_ids)
+
   def test_causal_objective_without_shift_has_no_transform(self):
     transform = hf_data_processing._get_training_objective_transform(  # pylint: disable=protected-access
         SimpleNamespace(training_objective="causal_lm"),
