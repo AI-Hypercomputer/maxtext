@@ -1219,7 +1219,8 @@ class RLGoodputTest(unittest.TestCase):
     self.assertIn("Problem: What is 6 * 7?\nSolution:\n", out["prompts"])
     self.assertIn("<reasoning>", out["prompts"])
     self.assertIn("<answer>72</answer>", out["prompts"])
-    self.assertEqual(json.loads(out["answer"]), "42")
+    # utils_rl.process_answer returns [answer, answer] for non-MCQ questions.
+    self.assertEqual(json.loads(out["answer"]), ["42", "42"])
 
 
 if __name__ == "__main__":
