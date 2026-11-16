@@ -28,11 +28,11 @@ Exactly one workflow builds images: `.github/workflows/build_and_push_docker_ima
 It is a reusable workflow (`workflow_call`), so it never starts on its own. Three
 workflows call it, and these are the only events that build an image:
 
-| Caller                                                        | Trigger                                              | Images                                                                                                       |
-| ------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| TPU Docker Images Pipeline (`tpu_docker_images_pipeline.yml`) | Daily at 19:00 Pacific, or manual **Run workflow**   | `maxtext_jax_stable`, `maxtext_jax_nightly`, `maxtext_post_training_stable`, `maxtext_post_training_nightly` |
-| GPU Docker Images Pipeline (`gpu_docker_images_pipeline.yml`) | Nightly at 00:00 UTC, or manual **Run workflow**     | `maxtext_gpu_jax_stable`, `maxtext_gpu_jax_nightly`                                                          |
-| Release Pipeline (`release_pipeline.yml`)                     | GitHub release published, or manual **Run workflow** | Release images. Always a full build.                                                                         |
+| Caller                                                        | Trigger                                                       | Images                                                                                                                                 |
+| ------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| TPU Docker Images Pipeline (`tpu_docker_images_pipeline.yml`) | Daily at 19:00 Pacific, or manual **Run workflow**            | `maxtext_jax_stable`, `maxtext_jax_nightly`, `maxtext_post_training_stable`, `maxtext_post_training_nightly`                           |
+| GPU Docker Images Pipeline (`gpu_docker_images_pipeline.yml`) | Nightly at 00:00 UTC, or manual **Run workflow**              | `maxtext_gpu_jax_stable`, `maxtext_gpu_jax_nightly`                                                                                    |
+| Release Candidate Pipeline (`rc_release.yml`)                 | Weekly on Sunday at 19:00 Pacific, or manual **Run workflow** | `tpu_pre_training`, `tpu_post_training`. Always a full build (`release_pipeline.yml` verifies and promotes these certified RC images). |
 
 Nothing else builds an image:
 
@@ -233,5 +233,5 @@ than the source image.
   image. The nightly `build-all` runs reset this.
 - The fast overlay never deletes files. The guard therefore switches to the clean
   overlay when a code file was removed or renamed, which is slow but exact.
-- Fast-rebuild is manual by design. Nightly and release builds always use
+- Fast-rebuild is manual by design. Nightly and release candidate builds always use
   `build-all`.
