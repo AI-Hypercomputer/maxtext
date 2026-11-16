@@ -274,6 +274,7 @@ class WeightConverter:
       debug: bool = False,
       prefuse_moe_weights: Optional[bool] = None,
       target_dtype: Optional[Any] = None,
+      dp: Optional[int] = None,
   ):
     config = trainer_config if config is None else config
     if rules is not None and not rules:
@@ -290,7 +291,31 @@ class WeightConverter:
     self.rollout_backend = rollout_backend
 
     self._direct: Optional["MaxTextToMaxTextConverter"] = None
-    if rollout_backend == "maxtext" and rules is None:
+    self._vllm_torch: Optional[Any] = None
+    if rollout_backend == "vllm_torch":
+      if config is None:
+        raise ValueError(
+            "WeightConverter(rollout_backend='vllm_torch') requires `config` to "
+            "derive Qwen3.5 layer dimensions and scan settings."
+        )
+      from maxtext.integration.vllm.vllm_torch_converter import VllmTorchWeightConverter  # pylint: disable=import-outside-toplevel
+
+      self.tp = resolve_rollout_tp(config, tp)
+      self.kv_tp_size = kv_tp_size if kv_tp_size is not None else (config.kv_tp_size or 1)
+      self.moe_mlp_tp_size = moe_mlp_tp_size if moe_mlp_tp_size is not None else (config.moe_mlp_tp_size or 1)
+      self.fp8_moe = fp8_moe if fp8_moe is not None else bool(config.fp8_moe or config.rollout_fp8_moe)
+      self._vllm_torch = VllmTorchWeightConverter(
+          config=config,
+          tp=self.tp,
+          dp=dp,
+          kv_tp_size=self.kv_tp_size,
+          moe_mlp_tp_size=self.moe_mlp_tp_size,
+          fp8_moe=self.fp8_moe,
+          target_dtype=target_dtype,
+          debug=debug,
+      )
+      logging.info("WeightConverter: vllm_torch mode (tp=%d, debug=%s).", self.tp, debug)
+    elif rollout_backend == "maxtext" and rules is None:
       if config is None:
         raise ValueError(
             "WeightConverter(rules=None) needs `config` to derive the "
@@ -344,8 +369,19 @@ class WeightConverter:
           len(self.rules) if self.rules else 0,
       )
 
-  def convert(self, src_pytree: Any, target_state: Any = None) -> Any:
+  def convert(
+      self,
+      src_pytree: Any,
+      target_state: Any = None,
+      *,
+      target_layout: Optional[Mapping[str, Any]] = None,
+  ) -> Any:
     """Converts source weights pytree into target format using rules or direct converter."""
+    if self.rollout_backend == "vllm_torch":
+      effective_layout = (
+          target_layout if target_layout is not None else (target_state if isinstance(target_state, Mapping) else None)
+      )
+      return self._vllm_torch.convert(src_pytree, target_layout=effective_layout)
     if self.rollout_backend == "maxtext" and self.rules is None:
       return self._direct.convert(src_pytree, target_state=target_state)
 
