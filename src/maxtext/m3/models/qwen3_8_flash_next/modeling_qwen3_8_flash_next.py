@@ -45,8 +45,6 @@ from jax.ad_checkpoint import checkpoint_name
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
 import numpy as np
-from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as m3_moe
 from maxtext.m3.core.sharding import (
@@ -58,6 +56,8 @@ from maxtext.m3.core.sharding import (
     sharding_from_config,
 )
 from maxtext.m3.infra import remat as m3_remat
+
+tokamax_splash_kernel, tokamax_splash_mask = m3_kernels.splash_modules()
 
 
 # =================================================================================================
@@ -721,11 +721,15 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
       *,
       output_gate_activation: str,
       chunk_inverse: str = "block_doubling",
+      kernel_backend: str = "auto",
       rngs: nnx.Rngs,
   ):
     if chunk_inverse not in ("solve", "block_doubling"):
       raise ValueError(f"Expected chunk_inverse in ('solve', 'block_doubling'), got {chunk_inverse!r}.")
+    if kernel_backend not in ("auto", "tokamax", "jax"):
+      raise ValueError(f"Expected kernel_backend in ('auto', 'tokamax', 'jax'), got {kernel_backend!r}.")
     self.emb_dim, self.chunk_size, self.chunk_inverse = emb_dim, chunk_size, chunk_inverse
+    self.kernel_backend = kernel_backend
     self.num_k_heads, self.num_v_heads = num_k_heads, num_v_heads
     if num_v_heads % num_k_heads != 0:
       raise ValueError(f"num_v_heads ({num_v_heads}) must be divisible by num_k_heads ({num_k_heads}).")
@@ -833,12 +837,36 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
       key = jnp.where(mask[:, :, None, None], key, 0.0)
       value = jnp.where(mask[:, :, None, None], value, 0.0)
       g = jnp.where(mask[:, :, None], g, 0.0)
+      beta = jnp.where(mask[:, :, None], beta, 0.0)
 
     if self.num_v_heads // self.num_k_heads > 1:
       rep = self.num_v_heads // self.num_k_heads
       query, key = jnp.repeat(query, rep, axis=2), jnp.repeat(key, rep, axis=2)
 
-    if s == 1 and initial_state is not None:
+    tokamax_out: jax.Array | None = None
+    if initial_state is None and not output_final_state and s > 1 and self.kernel_backend != "jax":
+      gdn_batch_axes = batch_axes
+      if not gdn_batch_axes and self.sharding is not None:
+        cand_batch = get_batch_mesh_axes(self.sharding)
+        mesh = jax.sharding.get_abstract_mesh()
+        if cand_batch and not mesh.empty and b % math.prod(mesh.shape[ax] for ax in cand_batch) == 0:
+          gdn_batch_axes = cand_batch
+      tokamax_out = m3_kernels.gated_delta_net(
+          query,
+          key,
+          value,
+          g,
+          beta,
+          chunk_size=self.chunk_size,
+          use_qk_l2norm=True,
+          batch_axes=gdn_batch_axes,
+          length_axes=length_axes,
+          backend=self.kernel_backend,
+      )
+
+    if tokamax_out is not None:
+      core_attn_out, last_state = tokamax_out, None
+    elif s == 1 and initial_state is not None:
       core_attn_out, last_state = jax_recurrent_gated_delta_rule(
           query,
           key,
@@ -1181,6 +1209,8 @@ class Qwen3_8SparseAttention(nnx.Module):
       *,
       indexer_mask_mode: str = "gather",
       attention_kernel: str = "dense",
+      sa_block_q: int = 512,
+      sa_block_kv: int = 512,
       rngs: nnx.Rngs,
   ):
     self.sharding = sharding or DefaultSharding()
@@ -1190,6 +1220,8 @@ class Qwen3_8SparseAttention(nnx.Module):
       raise ValueError(f"Expected attention_kernel in ('dense', 'flash'), got {attention_kernel!r}.")
     self.head_dim, self.num_query_heads, self.num_kv_heads = head_dim, num_query_heads, num_kv_heads
     self.attention_kernel = attention_kernel
+    self.sa_block_q = int(sa_block_q)
+    self.sa_block_kv = int(sa_block_kv)
 
     # Projection features are head-major (`q_proj` packs each head's query and gate together), so a contiguous split
     # of the flattened feature dimension is a split over heads.
@@ -1253,20 +1285,6 @@ class Qwen3_8SparseAttention(nnx.Module):
         seg_q = jnp.pad(seg_q, ((0, 0), (0, pad_len)), constant_values=-2)
         seg_kv = jnp.pad(seg_kv, ((0, 0), (0, pad_len)), constant_values=-1)
 
-    sa_config = tokamax_splash_kernel.SplashConfig(
-        block_q=block_size,
-        block_kv=block_size,
-        block_kv_compute=block_size,
-        block_q_dkv=block_size,
-        block_kv_dkv=block_size,
-        block_kv_dkv_compute=block_size,
-        block_q_dq=block_size,
-        block_kv_dq=block_size,
-        fuse_reciprocal=True,
-        use_base2_exp=True,
-        residual_checkpoint_name="context",
-        interpret=(jax.default_backend() != "tpu"),
-    )
     mesh = jax.sharding.get_abstract_mesh()
     # Queries stay on the sequence shard that holds them; keys and values are gathered along the sequence, which a
     # causal query needs anyway. The kernel's block tables are split the same way as the queries.
@@ -1274,6 +1292,32 @@ class Qwen3_8SparseAttention(nnx.Module):
     q_shards = math.prod(mesh.shape[ax] for ax in length_axes) if length_axes else 1
     if padded_s % (q_shards * block_size) != 0 or padded_s % (q_shards * q_shards) != 0:
       length_axes, q_shards = (), 1
+    sa_block_q = m3_kernels.largest_splash_block(padded_s // q_shards, self.sa_block_q)
+    sa_block_kv = m3_kernels.largest_splash_block(padded_s, self.sa_block_kv)
+    sa_kwargs: dict[str, Any] = {
+        "block_q": sa_block_q,
+        "block_kv": sa_block_kv,
+        "block_kv_compute": sa_block_kv,
+        "block_q_dkv": sa_block_q,
+        "block_kv_dkv": sa_block_kv,
+        "block_kv_dkv_compute": sa_block_kv,
+        "block_q_dq": sa_block_q,
+        "block_kv_dq": sa_block_kv,
+        "use_fused_bwd_kernel": True,
+        "fuse_reciprocal": True,
+        "use_base2_exp": True,
+        "residual_checkpoint_name": "context",
+        "interpret": not m3_kernels.is_tpu_mesh(mesh),
+    }
+    if dataclasses.is_dataclass(tokamax_splash_kernel.SplashConfig):
+      supported = {f.name for f in dataclasses.fields(tokamax_splash_kernel.SplashConfig)}
+      sa_kwargs = {k: v for k, v in sa_kwargs.items() if k in supported}
+    sa_config = tokamax_splash_kernel.SplashConfig(**sa_kwargs)
+    m3_kernels.log_kernel_dispatch(
+        f"qsa_splash_q{sa_block_q}_kv{sa_block_kv}_shards{q_shards}",
+        f"QSA Splash Attention(upstream={m3_kernels.splash_is_upstream()}, "
+        f"block_q={sa_block_q}, block_kv={sa_block_kv}, q_shards={q_shards}, padded_s={padded_s})",
+    )
     causal_mask = tokamax_splash_mask.CausalMask(shape=(padded_s, padded_s), shard_count=q_shards)
 
     def _run_batch(
@@ -2704,6 +2748,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
           conv_kernel_size=int(c.gdn_conv_kernel_dim),
           output_gate_activation=str(c.gdn_output_gate_activation),
           chunk_inverse=str(c.gdn_chunk_inverse),
+          kernel_backend=str(getattr(c, "gdn_kernel_backend", "auto")),
       )
     else:
       self.self_attn = Qwen3_8SparseAttention(
@@ -2722,6 +2767,8 @@ class Qwen3_8DecoderLayer(nnx.Module):
           compress_ratio=int(c.index_select_block_size),
           indexer_mask_mode=str(c.qsa_indexer_mask),
           attention_kernel=str(c.qsa_attention_kernel),
+          sa_block_q=int(getattr(c, "sa_block_q", 512) or 512),
+          sa_block_kv=int(getattr(c, "sa_block_kv", 512) or 512),
       )
     self.mlp_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
     moe_executor = m3_moe.moe_from_config(c, sharding_obj)
@@ -3331,13 +3378,16 @@ def compute_total_loss(
   run_mtp, need_aux = use_mtp and (model.mtp is not None), router_aux_coeff > 0.0
   num_vocab_tiling = int(getattr(model.config, "num_vocab_tiling", 1))
   use_tiled_ce = num_vocab_tiling > 1
+  use_fused_ce = (not use_tiled_ce) and m3_kernels.model_supports_tokamax_linear_ce(
+      model, model.config, mesh=getattr(model, "mesh", None)
+  )
   out = model(
       input_tokens,
       positions,
       segment_ids,
       return_aux=need_aux,
       return_mtp=run_mtp,
-      compute_logits=not use_tiled_ce,
+      compute_logits=not (use_tiled_ce or use_fused_ce),
       **kwargs,
   )
   primary_out = out[0] if (run_mtp or need_aux) else out
@@ -3351,6 +3401,16 @@ def compute_total_loss(
   if use_tiled_ce:
     primary_loss = _compute_tiled_cross_entropy(
         model, primary_out, target_tokens, mask=eff_target_mask, num_vocab_tiling=num_vocab_tiling
+    )
+  elif use_fused_ce:
+    primary_loss = m3_kernels.linear_cross_entropy(
+        primary_out,
+        target_tokens,
+        model.lm_head.kernel[...],
+        mask=eff_target_mask,
+        sharding=getattr(model, "sharding", None),
+        mesh=getattr(model, "mesh", None),
+        reduction="mean",
     )
   else:
     primary_loss = cross_entropy_loss(primary_out, target_tokens, mask=eff_target_mask)
@@ -3374,6 +3434,17 @@ def compute_total_loss(
         mtp_targets = jnp.pad(target_tokens[:, 1:], ((0, 0), (0, 1)))
         mtp_loss = _compute_tiled_cross_entropy(
             model, mtp_out, mtp_targets, mask=mtp_aux_mask, num_vocab_tiling=num_vocab_tiling
+        )
+      elif use_fused_ce:
+        mtp_targets = jnp.pad(target_tokens[:, 1:], ((0, 0), (0, 1)))
+        mtp_loss = m3_kernels.linear_cross_entropy(
+            mtp_out,
+            mtp_targets,
+            model.lm_head.kernel[...],
+            mask=mtp_aux_mask,
+            sharding=getattr(model, "sharding", None),
+            mesh=getattr(model, "mesh", None),
+            reduction="mean",
         )
       else:
         mtp_loss = cross_entropy_loss(mtp_out[:, :-1, :], target_tokens[:, 1:], mask=m)
@@ -3540,6 +3611,8 @@ class Qwen3_8Decoder(nnx.Module):
 class Qwen3_8FlashNextModel(nnx.Module):
   """Top-level Qwen3.8-Flash-Next model with decoder and lm_head."""
 
+  SUPPORTS_DEFER_LM_HEAD_TO_LOSS: bool = True
+
   def __init__(
       self,
       config: Any,
@@ -3599,6 +3672,7 @@ class Qwen3_8FlashNextModel(nnx.Module):
       return_mtp: bool = False,
       next_tokens: jax.Array | None = None,
       compute_logits: bool = True,
+      defer_lm_head_to_loss: bool = False,
       **kwargs: Any,
   ) -> Any:
     """Forward pass computing language model logits and optional aux outputs."""
@@ -3649,8 +3723,7 @@ class Qwen3_8FlashNextModel(nnx.Module):
         return_pre_mixer=return_hidden_states,
     )
     if (
-        int(getattr(self.config, "num_vocab_tiling", 1)) > 1
-        and has_target_tokens
+        ((int(getattr(self.config, "num_vocab_tiling", 1)) > 1 and has_target_tokens) or defer_lm_head_to_loss)
         and compute_logits
         and not return_hidden_states
         and not return_aux

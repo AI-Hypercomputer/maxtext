@@ -39,6 +39,7 @@ import dataclasses
 import enum
 import functools
 import importlib
+import logging
 import math
 import sys
 from typing import Any, Literal
@@ -88,11 +89,48 @@ def _cfg_attr(source: Any, name: str, default: Any = None) -> Any:
   return default if val is None else val
 
 
-@functools.lru_cache(maxsize=1)
-def _import_splash() -> tuple[Any, Any, type[Any]]:
-  """Lazily imports Tokamax Pallas Splash attention modules and builds `_StackedGQAMask`."""
-  mtk_splash = importlib.import_module("maxtext.kernels.tokamax_splash_attention.splash_attention_kernel")
-  mtk_mask = importlib.import_module("maxtext.kernels.tokamax_splash_attention.splash_attention_mask")
+_logger = logging.getLogger(__name__)
+_LOGGED_KERNEL_DISPATCHES: set[str] = set()
+
+_UPSTREAM_SPLASH_KERNEL_MOD = "tokamax._src.ops.splash_attention.splash_attention_kernel"
+_UPSTREAM_SPLASH_MASK_MOD = "tokamax._src.ops.splash_attention.splash_attention_mask"
+_VENDORED_SPLASH_KERNEL_MOD = "maxtext.kernels.tokamax_splash_attention.splash_attention_kernel"
+_VENDORED_SPLASH_MASK_MOD = "maxtext.kernels.tokamax_splash_attention.splash_attention_mask"
+
+_UPSTREAM_SPLASH_GUARD_MODS = (
+    "tokamax",
+    "tokamax._src.ops.splash_attention",
+    _UPSTREAM_SPLASH_KERNEL_MOD,
+    _UPSTREAM_SPLASH_MASK_MOD,
+)
+_VENDORED_SPLASH_GUARD_MODS = (
+    "maxtext.kernels.tokamax_splash_attention",
+    "maxtext.kernels.tokamax_splash_attention.splash_attention_kernel",
+    "maxtext.kernels.tokamax_splash_attention.splash_attention_mask",
+    "maxtext.kernels.tokamax_splash_attention",
+    _VENDORED_SPLASH_KERNEL_MOD,
+    _VENDORED_SPLASH_MASK_MOD,
+)
+
+
+def log_kernel_dispatch(key: str, message: str) -> None:
+  """Logs a resolved kernel backend once per process at trace time."""
+  if key not in _LOGGED_KERNEL_DISPATCHES:
+    _LOGGED_KERNEL_DISPATCHES.add(key)
+    _logger.info("[m3.kernels] %s", message)
+
+
+_log_kernel_dispatch = log_kernel_dispatch
+
+
+def _any_module_disabled(mod_names: tuple[str, ...]) -> bool:
+  """Returns True if any module name in `mod_names` is explicitly disabled via `sys.modules[name] = None`."""
+  return any(name in sys.modules and sys.modules[name] is None for name in mod_names)
+
+
+@functools.lru_cache(maxsize=4)
+def _build_stacked_gqa_mask_cls(mtk_mask: Any) -> type[Any]:
+  """Constructs and caches `_StackedGQAMask` bound to a specific Splash mask module."""
 
   class _StackedGQAMask(mtk_mask._ComputableMask):  # pylint: disable=protected-access
     """Computable mask for 2x query-head sequence folding (`q_idx // group_size` token mapping)."""
@@ -151,7 +189,57 @@ def _import_splash() -> tuple[Any, Any, type[Any]]:
           )
       )
 
-  return mtk_splash, mtk_mask, _StackedGQAMask
+  return _StackedGQAMask
+
+
+def _import_splash_pair() -> tuple[Any, Any, bool]:
+  """Imports Splash `(kernel_mod, mask_mod, is_upstream)`, preferring upstream Tokamax."""
+  if not _any_module_disabled(_UPSTREAM_SPLASH_GUARD_MODS):
+    try:
+      mtk_splash = importlib.import_module(_UPSTREAM_SPLASH_KERNEL_MOD)
+      mtk_mask = importlib.import_module(_UPSTREAM_SPLASH_MASK_MOD)
+      _log_kernel_dispatch("splash_upstream", f"Splash Attention resolved to upstream {_UPSTREAM_SPLASH_KERNEL_MOD}")
+      return mtk_splash, mtk_mask, True
+    except ImportError:
+      pass
+  if _any_module_disabled(_VENDORED_SPLASH_GUARD_MODS):
+    raise ImportError("Tokamax Splash attention modules are disabled in sys.modules.")
+  mtk_splash = importlib.import_module(_VENDORED_SPLASH_KERNEL_MOD)
+  mtk_mask = importlib.import_module(_VENDORED_SPLASH_MASK_MOD)
+  _log_kernel_dispatch("splash_vendored", f"Splash Attention fell back to vendored {_VENDORED_SPLASH_KERNEL_MOD}")
+  return mtk_splash, mtk_mask, False
+
+
+def _import_splash() -> tuple[Any, Any, type[Any]]:
+  """Lazily imports Tokamax Pallas Splash attention modules and builds `_StackedGQAMask`."""
+  mtk_splash, mtk_mask, _ = _import_splash_pair()
+  return mtk_splash, mtk_mask, _build_stacked_gqa_mask_cls(mtk_mask)
+
+
+def splash_modules() -> tuple[Any, Any]:
+  """Returns the active `(splash_attention_kernel, splash_attention_mask)` modules, preferring upstream Tokamax."""
+  mtk_splash, mtk_mask, _ = _import_splash_pair()
+  return mtk_splash, mtk_mask
+
+
+def splash_is_upstream() -> bool:
+  """Returns True when `splash_modules()` resolves to upstream `tokamax._src.ops.splash_attention`."""
+  try:
+    _, _, is_upstream = _import_splash_pair()
+    return is_upstream
+  except ImportError:
+    return False
+
+
+def largest_splash_block(seq_len: int, max_block: int = 512) -> int:
+  """Returns the largest 128-aligned block size <= `max_block` that evenly divides `seq_len`."""
+  if seq_len < _SPLASH_TILE_ALIGNMENT or seq_len % _SPLASH_TILE_ALIGNMENT != 0:
+    raise ValueError(f"Splash sequence length must be a positive multiple of {_SPLASH_TILE_ALIGNMENT}; got {seq_len}.")
+  cap = min(int(max_block), int(seq_len))
+  for candidate in range((cap // _SPLASH_TILE_ALIGNMENT) * _SPLASH_TILE_ALIGNMENT, 0, -_SPLASH_TILE_ALIGNMENT):
+    if seq_len % candidate == 0:
+      return candidate
+  return _SPLASH_TILE_ALIGNMENT
 
 
 def _import_tokamax(*, required: bool = False) -> Any | None:
@@ -169,16 +257,9 @@ def _import_tokamax(*, required: bool = False) -> Any | None:
 
 
 def splash_available() -> bool:
-  """Returns True when the Tokamax Splash attention package can be imported."""
-  for mod_name in (
-      "maxtext.kernels.tokamax_splash_attention",
-      "maxtext.kernels.tokamax_splash_attention.splash_attention_kernel",
-      "maxtext.kernels.tokamax_splash_attention.splash_attention_mask",
-  ):
-    if mod_name in sys.modules and sys.modules[mod_name] is None:
-      return False
+  """Returns True when either upstream or vendored Tokamax Splash attention can be imported."""
   try:
-    _import_splash()
+    _import_splash_pair()
     return True
   except ImportError:
     return False
@@ -187,6 +268,60 @@ def splash_available() -> bool:
 def tokamax_available() -> bool:
   """Returns True when the `tokamax` package can be imported."""
   return _import_tokamax(required=False) is not None
+
+
+def _tokamax_cross_compile_enabled() -> bool:
+  """Returns True when Tokamax cross-compilation is explicitly enabled for AOT lowering on non-TPU hosts."""
+  if not tokamax_available():
+    return False
+  try:
+    cfg = importlib.import_module("tokamax._src.config")
+    return bool(cfg.cross_compile.value)
+  except Exception:  # pylint: disable=broad-exception-caught
+    return False
+
+
+def _tokamax_tpu_op_supported(mesh: Any = None) -> bool:
+  """Returns True when Tokamax Op TPU lowering can run (TPU mesh with live TPU backend or cross_compile)."""
+  if not is_tpu_mesh(mesh):
+    return False
+  return jax.default_backend() == "tpu" or _tokamax_cross_compile_enabled()
+
+
+def tokamax_gdn_available() -> bool:
+  """Returns True when upstream `tokamax.ops.kimi_delta_attention` is importable."""
+  if _any_module_disabled(("tokamax", "tokamax.ops", "tokamax._src.ops.kda", "tokamax._src.ops.kda.api")):
+    return False
+  tk = _import_tokamax(required=False)
+  return tk is not None and hasattr(tk, "ops") and hasattr(tk.ops, "kimi_delta_attention")
+
+
+def tokamax_gmm_v2_available() -> bool:
+  """Returns True when upstream `tokamax.ragged_dot` exposes `mosaic_tpu_v2`."""
+  if _any_module_disabled(("tokamax", "tokamax._src.ops.ragged_dot", "tokamax._src.ops.ragged_dot.api")):
+    return False
+  tk = _import_tokamax(required=False)
+  if tk is None or not hasattr(tk, "ragged_dot") or not hasattr(tk, "RaggedDotGroupSizes"):
+    return False
+  try:
+    rd_api = importlib.import_module("tokamax._src.ops.ragged_dot.api")
+    return "mosaic_tpu_v2" in getattr(rd_api, "IMPLEMENTATIONS", {})
+  except ImportError:
+    return False
+
+
+def tokamax_linear_ce_available() -> bool:
+  """Returns True when upstream `tokamax.linear_softmax_cross_entropy_loss` is importable."""
+  if _any_module_disabled(
+      (
+          "tokamax",
+          "tokamax._src.ops.linear_softmax_cross_entropy_loss",
+          "tokamax._src.ops.linear_softmax_cross_entropy_loss.api",
+      )
+  ):
+    return False
+  tk = _import_tokamax(required=False)
+  return tk is not None and hasattr(tk, "linear_softmax_cross_entropy_loss")
 
 
 def parse_kernel_backend(
@@ -654,26 +789,34 @@ class SplashConfig:
     block_kv_dkv_compute = _clamp_splash_block(
         min(self.block_kv_dkv_compute, block_kv_dkv), kv_length, "block_kv_dkv_compute"
     )
-    return mtk_splash.SplashConfig(
-        block_q=block_q,
-        block_kv=block_kv,
-        block_kv_compute=block_kv_compute,
-        block_q_dkv=block_q_dkv,
-        block_kv_dkv=block_kv_dkv,
-        block_kv_dkv_compute=block_kv_dkv_compute,
-        use_fused_bwd_kernel=True,
-        q_layout=_parse_qkv_layout(self.q_layout, "q_layout"),
-        k_layout=_parse_qkv_layout(self.k_layout, "k_layout"),
-        v_layout=_parse_qkv_layout(self.v_layout, "v_layout"),
-        residual_checkpoint_name=self.residual_checkpoint_name,
-        attn_logits_soft_cap=attn_logits_soft_cap,
-        fuse_reciprocal=self.fuse_reciprocal,
-        use_base2_exp=self.use_base2_exp,
-        max_logit_const=self.max_logit_const,
-        interpret=interpret,
-        use_experimental_scheduler=self.use_experimental_scheduler,
-        bwd_dkv_megacore=self.bwd_dkv_megacore,
-    )
+    kwargs: dict[str, Any] = {
+        "block_q": block_q,
+        "block_kv": block_kv,
+        "block_kv_compute": block_kv_compute,
+        "block_q_dkv": block_q_dkv,
+        "block_kv_dkv": block_kv_dkv,
+        "block_kv_dkv_compute": block_kv_dkv_compute,
+        "use_fused_bwd_kernel": True,
+        "q_layout": _parse_qkv_layout(self.q_layout, "q_layout"),
+        "k_layout": _parse_qkv_layout(self.k_layout, "k_layout"),
+        "v_layout": _parse_qkv_layout(self.v_layout, "v_layout"),
+        "residual_checkpoint_name": self.residual_checkpoint_name,
+        "attn_logits_soft_cap": attn_logits_soft_cap,
+        "fuse_reciprocal": self.fuse_reciprocal,
+        "use_base2_exp": self.use_base2_exp,
+        "max_logit_const": self.max_logit_const,
+        "interpret": interpret,
+        "use_experimental_scheduler": self.use_experimental_scheduler,
+        "bwd_dkv_megacore": self.bwd_dkv_megacore,
+    }
+    supported_fields = {f.name for f in dataclasses.fields(mtk_splash.SplashConfig)}
+    if self.bwd_dkv_megacore and "bwd_dkv_megacore" not in supported_fields:
+      raise ValueError(
+          "SplashConfig.bwd_dkv_megacore=True is not supported by the active Tokamax SplashConfig "
+          f"({mtk_splash.__name__})."
+      )
+    filtered_kwargs = {k: v for k, v in kwargs.items() if k in supported_fields}
+    return mtk_splash.SplashConfig(**filtered_kwargs)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1977,3 +2120,906 @@ def dot_product_attention(
         max_logit_value=max_logit_value,
     )
   raise ValueError(f"Unsupported attention backend: {resolved_backend!r}.")
+
+
+# ==============================================================================
+# Unified Tokamax MoE Grouped MatMul (GMM v2 / TGMM v2)
+# ==============================================================================
+
+_TOKAMAX_GMM_M_ALIGN = 256
+_TOKAMAX_GMM_KN_ALIGN = 128
+
+
+def _align_up(value: int, multiple: int) -> int:
+  """Rounds `value` up to a positive multiple of `multiple`."""
+  return max(multiple, ((int(value) + multiple - 1) // multiple) * multiple)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4))
+def _vendored_pallas_grouped_matmul(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    group_sizes: jax.Array,
+    backend_kind: str,
+    is_tpu: bool,
+) -> jax.Array:
+  """Fallback vendored MegaBlox GMM v2 (used for AOT CPU compilation or older OSS Tokamax)."""
+  group_sizes_i32 = group_sizes.astype(jnp.int32)
+  valid_count = jnp.sum(group_sizes_i32)
+  valid_rows = (jnp.arange(lhs.shape[0], dtype=jnp.int32) < valid_count)[:, None]
+  lhs_safe = jnp.where(valid_rows, lhs, jnp.zeros((), dtype=lhs.dtype))
+
+  if backend_kind in ("gmm_v2", "tokamax"):
+    if not is_tpu:
+      out = jax.lax.ragged_dot(
+          lhs_safe,
+          rhs,
+          group_sizes_i32,
+          preferred_element_type=jnp.float32,
+      ).astype(lhs.dtype)
+      return jnp.where(valid_rows, out, jnp.zeros((), dtype=lhs.dtype))
+
+    from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2  # pylint: disable=import-outside-toplevel
+
+    m, k = lhs.shape
+    _, _, n = rhs.shape
+    m_pad = _align_up(m, _TOKAMAX_GMM_M_ALIGN)
+    k_pad = _align_up(k, _TOKAMAX_GMM_KN_ALIGN)
+    n_pad = _align_up(n, _TOKAMAX_GMM_KN_ALIGN)
+    lhs_pad = jnp.pad(lhs_safe, ((0, m_pad - m), (0, k_pad - k)))
+    rhs_pad = jnp.pad(rhs, ((0, 0), (0, k_pad - k), (0, n_pad - n)))
+    out_pad = gmm_v2.gmm_v2(
+        lhs=lhs_pad,
+        rhs=rhs_pad,
+        group_sizes=group_sizes_i32,
+        rhs_scale=None,
+        tile_info=gmm_v2.calculate_tiling,
+        preferred_element_type=lhs_pad.dtype,
+        maybe_quantize_lhs=False,
+    )
+    out = out_pad[:m, :n].astype(lhs.dtype)
+    return jnp.where(valid_rows, out, jnp.zeros((), dtype=lhs.dtype))
+
+  raise ValueError(f"Unsupported Pallas grouped matmul backend {backend_kind!r}.")
+
+
+def _vendored_pallas_grouped_matmul_fwd(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    group_sizes: jax.Array,
+    backend_kind: str,
+    is_tpu: bool,
+) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
+  out = _vendored_pallas_grouped_matmul(lhs, rhs, group_sizes, backend_kind, is_tpu)
+  return out, (lhs, rhs, group_sizes.astype(jnp.int32))
+
+
+def _vendored_pallas_grouped_matmul_bwd(
+    backend_kind: str,
+    is_tpu: bool,
+    residuals: tuple[jax.Array, jax.Array, jax.Array],
+    grad: jax.Array,
+) -> tuple[jax.Array, jax.Array, None]:
+  """Backward pass for the vendored MegaBlox `gmm_v2` / `tgmm_v2` fallback."""
+  lhs, rhs, group_sizes = residuals
+  m, k = lhs.shape
+  num_groups, _, n = rhs.shape
+  valid_count = jnp.sum(group_sizes)
+  valid_rows = (jnp.arange(m, dtype=jnp.int32) < valid_count)[:, None]
+  lhs_safe = jnp.where(valid_rows, lhs, jnp.zeros((), dtype=lhs.dtype))
+
+  if backend_kind in ("gmm_v2", "tokamax"):
+    if not is_tpu:
+      _, vjp_fn = jax.vjp(
+          lambda l, r: jax.lax.ragged_dot(
+              l,
+              r,
+              group_sizes,
+              preferred_element_type=jnp.float32,
+          ).astype(lhs.dtype),
+          lhs_safe,
+          rhs,
+      )
+      grad_safe = jnp.where(valid_rows, grad.astype(lhs.dtype), jnp.zeros((), dtype=lhs.dtype))
+      dlhs, drhs = vjp_fn(grad_safe)
+      dlhs = jnp.where(valid_rows, dlhs, jnp.zeros((), dtype=lhs.dtype))
+      return dlhs, drhs, None
+
+    from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2  # pylint: disable=import-outside-toplevel
+    from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2  # pylint: disable=import-outside-toplevel
+
+    m_pad = _align_up(m, _TOKAMAX_GMM_M_ALIGN)
+    k_pad = _align_up(k, _TOKAMAX_GMM_KN_ALIGN)
+    n_pad = _align_up(n, _TOKAMAX_GMM_KN_ALIGN)
+    lhs_pad = jnp.pad(lhs_safe, ((0, m_pad - m), (0, k_pad - k)))
+    rhs_pad = jnp.pad(rhs, ((0, 0), (0, k_pad - k), (0, n_pad - n)))
+    grad_safe = jnp.where(valid_rows, grad.astype(lhs.dtype), jnp.zeros((), dtype=lhs.dtype))
+    grad_pad = jnp.pad(grad_safe, ((0, m_pad - m), (0, n_pad - n)))
+    kernel_transpose_rhs = jax.dtypes.itemsize_bits(rhs_pad.dtype) >= 8
+    dlhs_rhs = rhs_pad if kernel_transpose_rhs else rhs_pad.swapaxes(1, 2)
+    dlhs_pad = gmm_v2.gmm_v2(
+        lhs=grad_pad,
+        rhs=dlhs_rhs,
+        group_sizes=group_sizes,
+        rhs_scale=None,
+        tile_info=gmm_v2.calculate_tiling,
+        preferred_element_type=lhs_pad.dtype,
+        maybe_quantize_lhs=False,
+        transpose_rhs=kernel_transpose_rhs,
+    )
+    drhs_pad = tgmm_v2.tgmm_v2(
+        lhs=lhs_pad,
+        rhs=grad_pad,
+        group_sizes=group_sizes,
+        num_actual_groups=num_groups,
+        rhs_scale=None,
+        precision=jax.lax.Precision.DEFAULT,
+        preferred_element_type=rhs_pad.dtype,
+        tile_info=tgmm_v2.calculate_tgmm_tiling,
+    )
+    dlhs = jnp.where(valid_rows, dlhs_pad[:m, :k].astype(lhs.dtype), jnp.zeros((), dtype=lhs.dtype))
+    return dlhs, drhs_pad[:, :k, :n].astype(rhs.dtype), None
+
+  raise ValueError(f"Unsupported Pallas grouped matmul backend {backend_kind!r}.")
+
+
+_vendored_pallas_grouped_matmul.defvjp(_vendored_pallas_grouped_matmul_fwd, _vendored_pallas_grouped_matmul_bwd)
+
+
+def grouped_matmul(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    group_sizes: jax.Array,
+    *,
+    backend: str = "ragged_dot",
+    is_tpu: bool = False,
+) -> jax.Array:
+  """Unified grouped matmul dispatcher routing TPU MoE through public Tokamax `mosaic_tpu_v2`."""
+  if backend not in ("ragged_dot", "gmm_v2", "tokamax"):
+    raise ValueError(f"Unknown grouped matmul backend {backend!r}; expected 'ragged_dot', 'gmm_v2', or 'tokamax'.")
+
+  group_sizes_i32 = group_sizes.astype(jnp.int32)
+  valid_rows = (jnp.arange(lhs.shape[0], dtype=jnp.int32) < jnp.sum(group_sizes_i32))[:, None]
+  lhs_safe = jnp.where(valid_rows, lhs, jnp.zeros((), dtype=lhs.dtype))
+
+  if backend == "ragged_dot":
+    out = jax.lax.ragged_dot(
+        lhs_safe,
+        rhs,
+        group_sizes_i32,
+        preferred_element_type=jnp.float32,
+    ).astype(lhs.dtype)
+    return jnp.where(valid_rows, out, jnp.zeros((), dtype=lhs.dtype))
+
+  if is_tpu and (jax.default_backend() == "tpu" or _tokamax_cross_compile_enabled()) and tokamax_gmm_v2_available():
+    tk = _import_tokamax(required=True)
+    assert tk is not None
+    _log_kernel_dispatch(
+        f"gmm_tokamax_v2_{backend}",
+        f"MoE grouped_matmul(backend={backend!r}) resolved to public tokamax.ragged_dot(implementation='mosaic_tpu_v2')",
+    )
+    m, k = lhs.shape
+    _, _, n = rhs.shape
+    m_pad = _align_up(m, _TOKAMAX_GMM_M_ALIGN)
+    k_pad = _align_up(k, _TOKAMAX_GMM_KN_ALIGN)
+    n_pad = _align_up(n, _TOKAMAX_GMM_KN_ALIGN)
+    lhs_pad = jnp.pad(lhs_safe, ((0, m_pad - m), (0, k_pad - k)))
+    rhs_pad = jnp.pad(rhs, ((0, 0), (0, k_pad - k), (0, n_pad - n)))
+    out_pad = tk.ragged_dot(
+        lhs=lhs_pad,
+        rhs=rhs_pad,
+        group_sizes=tk.RaggedDotGroupSizes(group_sizes_i32, m_pad),
+        preferred_element_type=lhs.dtype,
+        precision=jax.lax.Precision.DEFAULT if lhs.dtype == jnp.bfloat16 else jax.lax.Precision.HIGHEST,
+        implementation="mosaic_tpu_v2",
+    )
+    out = out_pad[:m, :n].astype(lhs.dtype)
+    return jnp.where(valid_rows, out, jnp.zeros((), dtype=lhs.dtype))
+
+  if is_tpu:
+    _log_kernel_dispatch(
+        f"gmm_vendored_{backend}",
+        f"MoE grouped_matmul(backend={backend!r}) fell back to vendored megablox GMM v2 (AOT or no mosaic_tpu_v2)",
+    )
+  return _vendored_pallas_grouped_matmul(lhs, rhs, group_sizes_i32, backend, is_tpu)
+
+
+# ==============================================================================
+# Unified Tokamax Gated DeltaNet (GDN via kimi_delta_attention scalar-gate mode)
+# ==============================================================================
+
+_TOKAMAX_GDN_VALID_CHUNK_SIZES = frozenset({16, 32, 64, 128, 256, 512})
+
+
+def _tpu_gdn_supported(mesh: Any = None) -> bool:
+  """Returns True when Tokamax Mosaic TPU KDA/GDN can execute (TPU gen >= 6 with live TPU or cross_compile)."""
+  if not _tokamax_tpu_op_supported(mesh):
+    return False
+  if jax.default_backend() == "tpu":
+    try:
+      from jax.experimental.pallas import tpu as pltpu  # pylint: disable=import-outside-toplevel
+
+      return int(pltpu.get_tpu_info().generation) >= 6
+    except Exception:  # pylint: disable=broad-exception-caught
+      return False
+  return True
+
+
+@functools.lru_cache(maxsize=1)
+def _tokamax_gdn_cp_adapter_available() -> bool:
+  """Returns whether the upstream Tokamax KDA private CP/scalar-gate primitives exist."""
+  try:
+    kda_cp = importlib.import_module("tokamax._src.ops.kda.cp_utils")
+    kda_fwd = importlib.import_module("tokamax._src.ops.kda.pallas_mosaic_tpu_fwd_kernel")
+    kda_bwd = importlib.import_module("tokamax._src.ops.kda.pallas_mosaic_tpu_bwd_kernel")
+    kda_utils = importlib.import_module("tokamax._src.ops.kda.utils")
+  except Exception:  # pylint: disable=broad-exception-caught
+    return False
+  required = (
+      (kda_cp, ("ContextParallelMetadata", "all_gather_into_tensor", "_merge_dht")),
+      (kda_fwd, ("pallas_kda_fwd_intra_fused", "_prepare_cp_initial_state", "chunk_kda_fwd_h_o_varlen")),
+      (
+          kda_bwd,
+          (
+              "chunk_kda_bwd_dAv_kernel",
+              "_recompute_w_u_fwd",
+              "chunk_gated_delta_rule_bwd_dhu_pre_process",
+              "_fused_dhu_wy_intra_cumsum_pallas_jit",
+          ),
+      ),
+      (kda_utils, ("RCP_LN2", "l2norm_fwd", "prepare_chunk_indices")),
+  )
+  return all(hasattr(mod, attr) for mod, attrs in required for attr in attrs)
+
+
+def _tokamax_gdn_cp_scalar_gate(
+    q_in: jax.Array,
+    k_in: jax.Array,
+    v_in: jax.Array,
+    g_in: jax.Array,
+    beta_in: jax.Array,
+    *,
+    chunk_size: int,
+    use_qk_l2norm: bool,
+    active_mesh: Any,
+    cp_axis_name: str,
+    cp_size: int,
+) -> jax.Array:
+  """Runs Tokamax Mosaic TPU GDN under Context Parallelism using the true scalar-gate kernels.
+
+  TODO: Remove this temporary adapter and route CP directly through public
+  `tokamax.ops.kimi_delta_attention(..., per_channel_gate=False, context_parallel_metadata=...)`
+  once upstream Tokamax broadcasts `g_cumsum` (`GW=1 -> K`) at
+  `pallas_mosaic_tpu_fwd_kernel.py:2028` (`_prepare_cp_initial_state`) and
+  `pallas_mosaic_tpu_bwd_kernel.py:2705` (`chunk_gated_delta_rule_bwd_dhu_pre_process`).
+
+  Upstream `tokamax.ops.kimi_delta_attention` currently passes un-broadcast `g_cumsum` (`GW=1`) into
+  `_prepare_cp_initial_state` and `chunk_gated_delta_rule_bwd_dhu_pre_process` (both typed for `K`
+  gate channels). Broadcasting `g` to `K` and setting `per_channel_gate=True` is numerically unsound
+  for Qwen3.8 because `per_channel_gate=True`'s `BC=16` sub-block factorization computes
+  `exp2(g[0] - g[8])` (fwd) and `exp2(g_max - g_b)` (bwd), which overflow float32 whenever
+  `g < -5.87` (Qwen3.8 initializes `g` down to `~ -21.0`).
+
+  This adapter invokes the exact same upstream Tokamax Mosaic TPU Pallas primitives in true
+  `per_channel_gate=False` (scalar-gate) mode — where every intra-chunk `exp2` exponent is `<= 0`
+  and never overflows — while broadcasting `g_cumsum` (`GW=1 -> K`) *only* at the two CP boundary
+  pre-process calls (`_prepare_cp_initial_state` and `chunk_gated_delta_rule_bwd_dhu_pre_process`),
+  which themselves only evaluate `exp2(maximum(gk_last, -126.0))`.
+  """
+  kda_cp = importlib.import_module("tokamax._src.ops.kda.cp_utils")
+  kda_fwd = importlib.import_module("tokamax._src.ops.kda.pallas_mosaic_tpu_fwd_kernel")
+  kda_bwd = importlib.import_module("tokamax._src.ops.kda.pallas_mosaic_tpu_bwd_kernel")
+  kda_utils = importlib.import_module("tokamax._src.ops.kda.utils")
+
+  hb, _, s_l, k_d = q_in.shape
+  v_d = v_in.shape[-1]
+  scale = 1.0 / math.sqrt(k_d)
+
+  @jax.custom_vjp
+  def _cp_scalar_gdn(q_a, k_a, v_a, g_a, beta_a):
+    out, _ = _cp_scalar_gdn_fwd(q_a, k_a, v_a, g_a, beta_a)
+    return out
+
+  def _cp_scalar_gdn_fwd(q_a, k_a, v_a, g_a, beta_a):
+    if use_qk_l2norm:
+      q_prep, q_rstd = kda_utils.l2norm_fwd(q_a)
+      k_prep, k_rstd = kda_utils.l2norm_fwd(k_a)
+    else:
+      q_prep, k_prep = q_a, k_a
+      q_rstd = k_rstd = None
+
+    cu_seqlens = jnp.asarray([[0, s_l]], dtype=jnp.int32)
+    chunk_indices = kda_utils.prepare_chunk_indices(cu_seqlens, chunk_size, max_T=s_l)
+    w, u, kg, aqk, akk, g_cumsum, *_ = kda_fwd.pallas_kda_fwd_intra_fused(
+        q=q_prep,
+        k=k_prep,
+        v=v_a,
+        g=g_a,
+        beta=beta_a,
+        scale=scale,
+        chunk_size=chunk_size,
+        safe_gate=True,
+        per_channel_gate=False,
+        disable_recompute=True,
+        cumsum_scale=kda_utils.RCP_LN2,
+        use_gate_in_kernel=False,
+    )
+    rank = jax.lax.axis_index(cp_axis_name)
+    cp_meta = kda_cp.ContextParallelMetadata(
+        mesh=active_mesh,
+        axis_name=cp_axis_name,
+        is_first_rank=(rank == 0),
+        is_last_rank=(rank == cp_size - 1),
+        pre_num_ranks=rank,
+        post_num_ranks=(cp_size - 1) - rank,
+    )
+    g_wide = jnp.broadcast_to(g_cumsum, (hb, 1, s_l, k_d))
+    initial_state = kda_fwd._prepare_cp_initial_state(  # pylint: disable=protected-access
+        kg=kg,
+        w=w,
+        u=u,
+        gk=g_wide,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        context_parallel_metadata=cp_meta,
+        chunk_size=chunk_size,
+    )
+    out, _, h, v_new = kda_fwd.chunk_kda_fwd_h_o_varlen(
+        w=w,
+        u=u,
+        kg=kg,
+        gk=g_cumsum,
+        q=q_prep,
+        A=aqk,
+        cu_seqlens=cu_seqlens,
+        chunk_indices=chunk_indices,
+        initial_state=initial_state,
+        output_final_state=False,
+        scale=scale,
+        chunk_size=chunk_size,
+        store_h=True,
+        store_v_new=True,
+    )
+    residuals = (q_prep, k_prep, v_a, beta_a, g_cumsum, aqk, akk, h, v_new, q_rstd, k_rstd)
+    return out.astype(q_a.dtype), residuals
+
+  def _cp_scalar_gdn_bwd(residuals, do):
+    q_prep, k_prep, v_a, beta_a, g_cumsum, aqk, akk, h, v_new, q_rstd, k_rstd = residuals
+    do_cast = do.astype(q_prep.dtype)
+    d_aqk, dv0 = kda_bwd.chunk_kda_bwd_dAv_kernel(
+        q=q_prep,
+        k=k_prep,
+        v=v_new,
+        do=do_cast,
+        A=aqk,
+        scale=scale,
+        chunk_size=chunk_size,
+    )
+    g_wide = jnp.broadcast_to(g_cumsum, (hb, 1, s_l, k_d))
+    w, _, qg, kg = kda_bwd._recompute_w_u_fwd(  # pylint: disable=protected-access
+        k=k_prep,
+        v=v_a,
+        beta=beta_a,
+        A=akk,
+        q=q_prep,
+        gk=g_wide,
+        chunk_size=chunk_size,
+    )
+    seg_1 = jnp.ones((1, s_l), dtype=jnp.int32)
+    ds_ext, dm = kda_bwd.chunk_gated_delta_rule_bwd_dhu_pre_process(
+        q=qg,
+        k=kg,
+        w=w,
+        do=do_cast,
+        dv=dv0,
+        gk=g_wide,
+        scale=scale,
+        segment_ids=seg_1,
+        chunk_size=chunk_size,
+        use_exp2=True,
+    )
+    packed = jnp.concatenate([ds_ext, dm], axis=-1)
+    packed_all, _ = kda_cp.all_gather_into_tensor(packed, cp_axis_name)
+    ds_ext_all = packed_all[..., :v_d]
+    dm_all = packed_all[..., v_d : v_d + k_d]
+    rank = jax.lax.axis_index(cp_axis_name)
+    ds_in = kda_cp._merge_dht(  # pylint: disable=protected-access
+        ds_ext_all,
+        dm_all,
+        rank=rank,
+        post_num_ranks=(cp_size - 1) - rank,
+        is_last_rank=(rank == cp_size - 1),
+    )
+    dht = ds_in[:, None, :, :, :]
+    dq, dk, dv, db, dg, _ = kda_bwd._fused_dhu_wy_intra_cumsum_pallas_jit(  # pylint: disable=protected-access
+        per_channel_gate=False,
+        q=q_prep,
+        k=k_prep,
+        v=v_a,
+        v_new=v_new,
+        qg=qg,
+        kg=kg,
+        w=w,
+        g=g_cumsum,
+        beta=beta_a,
+        A=akk,
+        h=h,
+        do=do_cast,
+        dv0=dv0,
+        dAqk=d_aqk,
+        dht=dht,
+        scale=scale,
+        segment_ids=seg_1,
+        chunk_size=chunk_size,
+        use_exp2=True,
+        return_dh0=False,
+        max_num_segments=1,
+        rstd_q=q_rstd,
+        rstd_k=k_rstd,
+    )
+    return (
+        dq.astype(q_in.dtype),
+        dk.astype(k_in.dtype),
+        dv.astype(v_in.dtype),
+        dg.astype(g_in.dtype),
+        db.astype(beta_in.dtype),
+    )
+
+  _cp_scalar_gdn.defvjp(_cp_scalar_gdn_fwd, _cp_scalar_gdn_bwd)
+  return _cp_scalar_gdn(q_in, k_in, v_in, g_in, beta_in)
+
+
+def gated_delta_net(
+    query: jax.Array,
+    key: jax.Array,
+    value: jax.Array,
+    g: jax.Array,
+    beta: jax.Array,
+    *,
+    chunk_size: int = 64,
+    use_qk_l2norm: bool = True,
+    batch_axes: tuple[str, ...] = (),
+    length_axes: tuple[str, ...] = (),
+    backend: str = "auto",
+    mesh: Any = None,
+    _implementation: str = "mosaic",
+) -> jax.Array | None:
+  """Executes Gated DeltaNet via upstream `tokamax.ops.kimi_delta_attention` (scalar-gate GDN mode).
+
+  Args:
+    query: `(B, S, H, K)` query tensor (already GVA-expanded to `H == num_v_heads`).
+    key: `(B, S, H, K)` key tensor.
+    value: `(B, S, H, V)` value tensor.
+    g: `(B, S, H)` natural-log decay (`<= 0`).
+    beta: `(B, S, H)` sigmoid learning rate in `[0, 1]`.
+    chunk_size: Recurrence chunk size (`16, 32, 64, 128, 256, or 512`).
+    use_qk_l2norm: Whether to apply L2 normalization to `query` and `key` inside the kernel.
+    batch_axes: Mesh axis names sharding the batch dimension (`B`).
+    length_axes: Mesh axis names sharding the sequence dimension (`S`, context parallel).
+    backend: `'auto'` (returns `None` if ineligible so caller falls back to pure-JAX),
+      `'tokamax'` (fails closed with an exception if ineligible), or `'jax'` (always returns `None`).
+    mesh: Optional JAX mesh; defaults to the active mesh in scope.
+
+  Returns:
+    `(B, S, H, V)` attention output cast to `value.dtype`, or `None` when pure-JAX fallback should be used.
+  """
+  if backend not in ("auto", "tokamax", "jax"):
+    raise ValueError(f"Unknown GDN kernel backend {backend!r}; expected 'auto', 'tokamax', or 'jax'.")
+  if backend == "jax":
+    return None
+
+  fail_closed = backend == "tokamax"
+
+  def _reject(msg: str, exc_cls: type[Exception] = ValueError) -> None:
+    if fail_closed:
+      raise exc_cls(msg)
+
+  active_mesh = _active_mesh_or_none(mesh)
+  if _implementation == "mosaic" and not _tpu_gdn_supported(active_mesh):
+    return _reject(
+        "GDN backend 'tokamax' requires a TPU gen >= 6 mesh with live TPU backend or tokamax_cross_compile.",
+        ValueError,
+    )
+  if not tokamax_gdn_available():
+    return _reject("GDN backend 'tokamax' requested, but tokamax.ops.kimi_delta_attention is unavailable.", ImportError)
+
+  b, s, _, head_k_dim = query.shape
+  head_v_dim = value.shape[-1]
+  if head_k_dim > 256:
+    return _reject(f"Tokamax GDN requires head_k_dim <= 256; got {head_k_dim}.")
+  if chunk_size not in _TOKAMAX_GDN_VALID_CHUNK_SIZES:
+    return _reject(f"Tokamax GDN requires chunk_size in {sorted(_TOKAMAX_GDN_VALID_CHUNK_SIZES)}; got {chunk_size}.")
+  if query.dtype not in (jnp.bfloat16, jnp.float32):
+    return _reject(f"Tokamax GDN requires bfloat16 or float32 inputs; got {query.dtype}.")
+
+  eff_batch_axes = tuple(ax for ax in batch_axes if active_mesh is not None and ax in active_mesh.axis_names)
+  eff_length_axes = tuple(ax for ax in length_axes if active_mesh is not None and ax in active_mesh.axis_names)
+  if eff_batch_axes and b % math.prod(int(active_mesh.shape[ax]) for ax in eff_batch_axes) != 0:
+    eff_batch_axes = ()
+
+  cp_size = math.prod(int(active_mesh.shape[ax]) for ax in eff_length_axes) if (active_mesh and eff_length_axes) else 1
+  if cp_size > 1:
+    if len(eff_length_axes) != 1:
+      return _reject(f"Tokamax GDN context parallelism requires a single length mesh axis; got {eff_length_axes}.")
+    if chunk_size != 64:
+      return _reject(f"Tokamax GDN context parallelism requires chunk_size == 64; got {chunk_size}.")
+    if _implementation == "mosaic" and not _tokamax_gdn_cp_adapter_available():
+      return _reject(
+          "Tokamax GDN Mosaic TPU context parallelism primitives are unavailable in this Tokamax build.",
+          ImportError,
+      )
+    if head_k_dim % 128 != 0 or head_v_dim % 128 != 0:
+      return _reject(
+          f"Tokamax GDN context parallelism requires K, V divisible by 128; got K={head_k_dim}, V={head_v_dim}."
+      )
+    if s % (cp_size * chunk_size) != 0:
+      return _reject(f"Sequence length {s} must be divisible by cp_size * chunk_size ({cp_size * chunk_size}).")
+  elif s % chunk_size != 0:
+    return _reject(f"Sequence length {s} must be divisible by chunk_size ({chunk_size}).")
+
+  tk = _import_tokamax(required=True)
+  assert tk is not None
+
+  _log_kernel_dispatch(
+      f"gdn_tokamax_cp{cp_size}_{_implementation}",
+      f"GDN resolved to tokamax KDA scalar-gate(implementation={_implementation!r}, "
+      f"per_channel_gate=False, use_gate_in_kernel=False, cp_size={cp_size}, chunk_size={chunk_size})",
+  )
+
+  out_dtype = value.dtype
+  cp_axis_name = eff_length_axes[0] if cp_size > 1 else None
+
+  def _run_local(
+      q_l: jax.Array,
+      k_l: jax.Array,
+      v_l: jax.Array,
+      g_l: jax.Array,
+      beta_l: jax.Array,
+  ) -> jax.Array:
+    b_l, s_l, h_l, k_d = q_l.shape
+    v_d = v_l.shape[-1]
+    q_h = jnp.transpose(q_l, (2, 0, 1, 3))
+    k_h = jnp.transpose(k_l, (2, 0, 1, 3))
+    v_h = jnp.transpose(v_l, (2, 0, 1, 3))
+    g_h = jnp.transpose(g_l.astype(jnp.float32), (2, 0, 1))[..., None]
+    beta_h = jnp.transpose(beta_l.astype(jnp.float32), (2, 0, 1))
+
+    if cp_axis_name is not None:
+      # Fold (H, B_l) -> (H * B_l, 1) so KDA CP's B == 1 contract runs in a single kernel launch.
+      hb = h_l * b_l
+      q_in = q_h.reshape(hb, 1, s_l, k_d)
+      k_in = k_h.reshape(hb, 1, s_l, k_d)
+      v_in = v_h.reshape(hb, 1, s_l, v_d)
+      g_in = g_h.reshape(hb, 1, s_l, 1)
+      beta_in = beta_h.reshape(hb, 1, s_l)
+      if _implementation == "mosaic":
+        out_folded = _tokamax_gdn_cp_scalar_gate(
+            q_in,
+            k_in,
+            v_in,
+            g_in,
+            beta_in,
+            chunk_size=chunk_size,
+            use_qk_l2norm=use_qk_l2norm,
+            active_mesh=active_mesh,
+            cp_axis_name=cp_axis_name,
+            cp_size=cp_size,
+        )
+      else:
+        kda_base = importlib.import_module("tokamax._src.ops.kda.base")
+        seg_1 = jnp.ones((1, s_l), dtype=jnp.int32)
+        cp_meta = kda_base.ContextParallelMetadata(mesh=active_mesh, axis_name=cp_axis_name)
+        out_folded, _ = tk.ops.kimi_delta_attention(
+            q_in,
+            k_in,
+            v_in,
+            g_in,
+            beta_in,
+            use_qk_l2norm=use_qk_l2norm,
+            use_gate_in_kernel=False,
+            per_channel_gate=False,
+            chunk_size=chunk_size,
+            segment_ids=seg_1,
+            max_num_segments=1,
+            context_parallel_metadata=cp_meta,
+            implementation=_implementation,
+        )
+      out_h = out_folded.reshape(h_l, b_l, s_l, v_d)
+    else:
+      out_h, _ = tk.ops.kimi_delta_attention(
+          q_h,
+          k_h,
+          v_h,
+          g_h,
+          beta_h,
+          use_qk_l2norm=use_qk_l2norm,
+          use_gate_in_kernel=False,
+          per_channel_gate=False,
+          chunk_size=chunk_size,
+          implementation=_implementation,
+      )
+    return jnp.transpose(out_h, (1, 2, 0, 3)).astype(out_dtype)
+
+  if active_mesh is None or (not eff_batch_axes and not eff_length_axes):
+    return _run_local(query, key, value, g, beta)
+
+  b_entry: MeshAxes = eff_batch_axes[0] if len(eff_batch_axes) == 1 else (eff_batch_axes or None)
+  l_entry: MeshAxes = eff_length_axes[0] if len(eff_length_axes) == 1 else (eff_length_axes or None)
+  spec4 = P(b_entry, l_entry, None, None)
+  spec3 = P(b_entry, l_entry, None)
+
+  q_in = ensure_explicit_spec(query, spec4, active_mesh)
+  k_in = ensure_explicit_spec(key, spec4, active_mesh)
+  v_in = ensure_explicit_spec(value, spec4, active_mesh)
+  g_in = ensure_explicit_spec(g, spec3, active_mesh)
+  beta_in = ensure_explicit_spec(beta, spec3, active_mesh)
+
+  return jax.shard_map(
+      _run_local,
+      mesh=active_mesh,
+      in_specs=(spec4, spec4, spec4, spec3, spec3),
+      out_specs=spec4,
+      check_vma=False,
+  )(q_in, k_in, v_in, g_in, beta_in)
+
+
+# ==============================================================================
+# Unified Tokamax Fused Linear Softmax Cross-Entropy
+# ==============================================================================
+
+
+def _resolve_linear_ce_param_axes(
+    sharding: Sharding | None,
+    lm_head_kernel_shape: tuple[int, int],
+    mesh: Any,
+) -> tuple[MeshAxes, MeshAxes]:
+  """Resolves `(embed_entry, vocab_entry)` for `lm_head.kernel` `(H, V)` using M3 param divisibility rules."""
+  if sharding is None or mesh is None:
+    return None, None
+  raw_spec = sharding("lm_head", ("embed", "vocab"), TensorType.WEIGHT)
+  embed_ax = resolve_mesh_axes(mesh, raw_spec[0])
+  vocab_ax = resolve_mesh_axes(mesh, raw_spec[1])
+  h_dim, v_dim = int(lm_head_kernel_shape[0]), int(lm_head_kernel_shape[1])
+  if embed_ax is not None and h_dim % mesh_axis_size(mesh, embed_ax) != 0:
+    embed_ax = None
+  if vocab_ax is not None and v_dim % mesh_axis_size(mesh, vocab_ax) != 0:
+    vocab_ax = None
+  return embed_ax, vocab_ax
+
+
+def can_use_tokamax_linear_ce(
+    lm_head_kernel_shape: tuple[int, int],
+    *,
+    dtype: Any,
+    weight_dtype: Any,
+    sharding: Sharding | None = None,
+    mesh: Any = None,
+    z_loss_multiplier: float = 0.0,
+    enabled: bool = True,
+) -> bool:
+  """Returns True when Tokamax Pallas fused linear cross-entropy can safely run on the active mesh."""
+  if not enabled or float(z_loss_multiplier) != 0.0:
+    return False
+  active_mesh = _active_mesh_or_none(mesh)
+  if not _tokamax_tpu_op_supported(active_mesh):
+    return False
+  if not tokamax_linear_ce_available():
+    return False
+  if jnp.dtype(dtype) not in (jnp.bfloat16, jnp.float32):
+    return False
+  if jnp.dtype(weight_dtype) not in (jnp.bfloat16, jnp.float32):
+    return False
+  h_dim, v_dim = int(lm_head_kernel_shape[0]), int(lm_head_kernel_shape[1])
+  if h_dim % 128 != 0 or v_dim % 128 != 0:
+    return False
+  _, vocab_ax = _resolve_linear_ce_param_axes(sharding, (h_dim, v_dim), active_mesh)
+  if active_mesh is not None and vocab_ax is not None and mesh_axis_size(active_mesh, vocab_ax) > 1:
+    return False
+  return True
+
+
+def model_supports_tokamax_linear_ce(
+    model: Any,
+    config: Any,
+    *,
+    require_defer_lm_head: bool = False,
+    mesh: Any = None,
+) -> bool:
+  """Checks whether `model` and `config` support Tokamax fused linear cross-entropy on TPU."""
+  if not bool(getattr(config, "use_tokamax_linear_ce", True)):
+    return False
+  if int(getattr(config, "num_vocab_tiling", 1)) > 1:
+    return False
+  if float(getattr(config, "z_loss_multiplier", 0.0) or 0.0) != 0.0:
+    return False
+  if float(getattr(config, "final_logits_soft_cap", None) or 0.0) != 0.0:
+    return False
+  if bool(getattr(config, "parameter_memory_host_offload", False)):
+    return False
+  if require_defer_lm_head and not bool(getattr(model, "SUPPORTS_DEFER_LM_HEAD_TO_LOSS", False)):
+    return False
+  lm_head = getattr(model, "lm_head", None)
+  if lm_head is None or not hasattr(lm_head, "kernel") or getattr(lm_head, "bias", None) is not None:
+    return False
+  kernel_param = lm_head.kernel
+  kernel_val = kernel_param[...] if hasattr(kernel_param, "__getitem__") else kernel_param
+  kernel_shape = tuple(int(d) for d in kernel_val.shape)
+  if len(kernel_shape) != 2:
+    return False
+  dtype = getattr(config, "dtype", kernel_val.dtype)
+  weight_dtype = getattr(config, "weight_dtype", kernel_val.dtype)
+  return can_use_tokamax_linear_ce(
+      kernel_shape,
+      dtype=dtype,
+      weight_dtype=weight_dtype,
+      sharding=getattr(model, "sharding", None),
+      mesh=mesh or getattr(model, "mesh", None),
+      z_loss_multiplier=float(getattr(config, "z_loss_multiplier", 0.0) or 0.0),
+      enabled=True,
+  )
+
+
+def linear_cross_entropy(
+    hidden_states: jax.Array,
+    targets: jax.Array,
+    lm_head_kernel: jax.Array,
+    *,
+    mask: jax.Array | None = None,
+    sharding: Sharding | None = None,
+    mesh: Any = None,
+    reduction: Literal["mean", "sum"] = "mean",
+    backend: Literal["auto", "tokamax", "jax"] = "auto",
+    _implementation: str | tuple[str, ...] | None = None,
+) -> jax.Array:
+  """Computes linear projection + softmax cross-entropy, using Tokamax fused Pallas kernel on TPU.
+
+  When `lm_head_kernel` `(H, V)` is sharded along `H` (e.g. FSDP/expert parameter sharding), keeps
+  `lm_head_kernel` sharded in `shard_map` `in_specs` and runs `jax.lax.all_gather` inside the body so
+  autodiff transposes the weight gradient into `psum_scatter` instead of a full replicated all-reduce.
+  """
+  if reduction not in ("mean", "sum"):
+    raise ValueError(f"Expected reduction in ('mean', 'sum'); got {reduction!r}.")
+  if backend not in ("auto", "tokamax", "jax"):
+    raise ValueError(f"Expected backend in ('auto', 'tokamax', 'jax'); got {backend!r}.")
+
+  active_mesh = _active_mesh_or_none(mesh)
+  use_tokamax = False
+  if backend == "tokamax":
+    if not tokamax_linear_ce_available():
+      raise ImportError("backend='tokamax' requested, but tokamax.linear_softmax_cross_entropy_loss is unavailable.")
+    if _implementation is None and not can_use_tokamax_linear_ce(
+        (lm_head_kernel.shape[0], lm_head_kernel.shape[1]),
+        dtype=hidden_states.dtype,
+        weight_dtype=lm_head_kernel.dtype,
+        sharding=sharding,
+        mesh=active_mesh,
+        z_loss_multiplier=0.0,
+        enabled=True,
+    ):
+      raise ValueError(
+          "backend='tokamax' requested for linear_cross_entropy, but mesh/shapes/sharding are ineligible "
+          f"(hidden_states={hidden_states.shape}, lm_head_kernel={lm_head_kernel.shape})."
+      )
+    use_tokamax = True
+  elif backend == "auto":
+    use_tokamax = can_use_tokamax_linear_ce(
+        (lm_head_kernel.shape[0], lm_head_kernel.shape[1]),
+        dtype=hidden_states.dtype,
+        weight_dtype=lm_head_kernel.dtype,
+        sharding=sharding,
+        mesh=active_mesh,
+        z_loss_multiplier=0.0,
+        enabled=True,
+    )
+
+  if not use_tokamax:
+    logits = jnp.matmul(
+        hidden_states,
+        lm_head_kernel.astype(hidden_states.dtype),
+        preferred_element_type=jnp.float32,
+    ).astype(jnp.float32)
+    log_probs = jax.nn.log_softmax(logits, axis=-1)
+    t_i32 = targets.astype(jnp.int32)
+    if mask is not None:
+      valid = mask != 0
+      t_safe = jnp.where(valid, t_i32, 0)
+      per_tok = -jnp.take_along_axis(log_probs, t_safe[..., None], axis=-1).squeeze(-1)
+      m_f32 = mask.astype(jnp.float32)
+      loss_sum = jnp.sum(per_tok * m_f32)
+      if reduction == "sum":
+        return loss_sum.astype(jnp.float32)
+      return (loss_sum / jnp.maximum(jnp.sum(m_f32), 1.0)).astype(jnp.float32)
+    per_tok = -jnp.take_along_axis(log_probs, t_i32[..., None], axis=-1).squeeze(-1)
+    loss_sum = jnp.sum(per_tok)
+    if reduction == "sum":
+      return loss_sum.astype(jnp.float32)
+    return (loss_sum / jnp.array(float(targets.size), dtype=jnp.float32)).astype(jnp.float32)
+
+  tk = _import_tokamax(required=True)
+  assert tk is not None
+  b, s, h_dim = hidden_states.shape
+  v_dim = lm_head_kernel.shape[1]
+
+  batch_entry: MeshAxes = None
+  length_entry: MeshAxes = None
+  embed_entry: MeshAxes = None
+  if active_mesh is not None and sharding is not None:
+    act_spec = sharding("linear_ce_hidden", ("batch", "norm_length", "embed"), TensorType.ACTIVATION)
+    cand_b = resolve_mesh_axes(active_mesh, act_spec[0])
+    cand_l = resolve_mesh_axes(active_mesh, act_spec[1])
+    if cand_l is None:
+      alt_spec = sharding("linear_ce_hidden", ("batch", "length", "embed"), TensorType.ACTIVATION)
+      cand_l = resolve_mesh_axes(active_mesh, alt_spec[1])
+    if cand_b is not None and b % mesh_axis_size(active_mesh, cand_b) == 0:
+      batch_entry = cand_b
+    if cand_l is not None and s % mesh_axis_size(active_mesh, cand_l) == 0:
+      length_entry = cand_l
+    embed_entry, vocab_entry = _resolve_linear_ce_param_axes(sharding, (h_dim, v_dim), active_mesh)
+    if vocab_entry is not None and mesh_axis_size(active_mesh, vocab_entry) > 1:
+      raise ValueError(f"Tokamax linear_cross_entropy requires unsharded vocab; got vocab_axes={vocab_entry!r}.")
+
+  def _per_shard(
+      h_l: jax.Array,
+      t_l: jax.Array,
+      m_l: jax.Array | None,
+      w_l: jax.Array,
+  ) -> jax.Array:
+    b_l, s_l, _ = h_l.shape
+    w_cast = w_l.astype(h_l.dtype) if w_l.dtype != h_l.dtype else w_l
+    w_full = jax.lax.all_gather(w_cast, embed_entry, axis=0, tiled=True) if embed_entry is not None else w_cast
+    x_flat = h_l.reshape(b_l * s_l, h_dim)
+    t_flat = t_l.reshape(b_l * s_l).astype(jnp.int32)
+    if m_l is not None:
+      t_safe = jnp.where(m_l.reshape(b_l * s_l) != 0, t_flat, 0)
+    else:
+      t_safe = t_flat
+    if _implementation is not None:
+      impl: Any = _implementation
+    elif (b_l * s_l) >= 1024 and (b_l * s_l) % 128 == 0:
+      impl = "mosaic_tpu"
+    else:
+      impl = ("mosaic_tpu", "chunked_xla")
+    _log_kernel_dispatch(
+        f"linear_ce_tokamax_{impl}_{embed_entry}",
+        f"Linear CE resolved to tokamax.linear_softmax_cross_entropy_loss(implementation={impl!r}, "
+        f"local_tokens={b_l * s_l}, H={h_dim}, V={v_dim}, w_embed_axes={embed_entry!r})",
+    )
+    per_tok = tk.linear_softmax_cross_entropy_loss(
+        x_flat,
+        t_safe,
+        w_full,
+        reduction="none",
+        implementation=impl,
+    )
+    return per_tok.reshape(b_l, s_l).astype(jnp.float32)
+
+  if active_mesh is None or (batch_entry is None and length_entry is None and embed_entry is None):
+    per_tok = _per_shard(hidden_states, targets, mask, lm_head_kernel)
+  else:
+    h_spec = P(batch_entry, length_entry, None)
+    t_spec = P(batch_entry, length_entry)
+    m_spec = t_spec if mask is not None else None
+    w_spec = P(embed_entry, None)
+    h_in = ensure_explicit_spec(hidden_states, h_spec, active_mesh)
+    t_in = ensure_explicit_spec(targets, t_spec, active_mesh)
+    m_in = ensure_explicit_spec(mask, m_spec, active_mesh)
+    w_in = ensure_explicit_spec(lm_head_kernel, w_spec, active_mesh)
+    per_tok = jax.shard_map(
+        _per_shard,
+        mesh=active_mesh,
+        in_specs=(h_spec, t_spec, m_spec, w_spec),
+        out_specs=t_spec,
+        check_vma=False,
+    )(h_in, t_in, m_in, w_in)
+
+  if mask is not None:
+    m_f32 = mask.astype(jnp.float32)
+    loss_sum = jnp.sum(per_tok * m_f32)
+    if reduction == "sum":
+      return loss_sum.astype(jnp.float32)
+    return (loss_sum / jnp.maximum(jnp.sum(m_f32), 1.0)).astype(jnp.float32)
+
+  loss_sum = jnp.sum(per_tok)
+  if reduction == "sum":
+    return loss_sum.astype(jnp.float32)
+  return (loss_sum / jnp.array(float(targets.size), dtype=jnp.float32)).astype(jnp.float32)

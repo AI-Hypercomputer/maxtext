@@ -37,6 +37,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig  # pylint: disable=no-name-in-module
 from maxtext.m3 import models as m3_models  # pylint: disable=no-name-in-module
+from maxtext.m3.core import kernels as m3_kernels  # pylint: disable=no-name-in-module
 from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next  # pylint: disable=no-name-in-module
 from maxtext.utils import globals as maxtext_globals  # pylint: disable=no-name-in-module
@@ -328,7 +329,9 @@ class Qwen3_8GDNTest(_SingleDeviceMeshTestCase):
       np.testing.assert_allclose(np.array(chunk_out), np.array(rec_out), rtol=1e-5, atol=1e-5)
       np.testing.assert_allclose(np.array(chunk_state), np.array(rec_state), rtol=1e-5, atol=1e-5)
 
-  def _make_gdn_layer(self, conv_kernel_size: int) -> modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet:
+  def _make_gdn_layer(
+      self, conv_kernel_size: int = 4, kernel_backend: str = "auto"
+  ) -> modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet:
     return modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(
         emb_dim=64,
         num_k_heads=2,
@@ -338,6 +341,7 @@ class Qwen3_8GDNTest(_SingleDeviceMeshTestCase):
         conv_kernel_size=conv_kernel_size,
         chunk_size=64,
         output_gate_activation="sigmoid",
+        kernel_backend=kernel_backend,
         dtype=jnp.float32,
         weight_dtype=jnp.float32,
         rngs=nnx.Rngs(0),
@@ -373,6 +377,62 @@ class Qwen3_8GDNTest(_SingleDeviceMeshTestCase):
     self.assertIsNotNone(full_state)
     np.testing.assert_allclose(np.array(decode_out), np.array(full_out[:, s : s + 1, :]), rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(np.array(decode_state), np.array(full_state), rtol=1e-5, atol=1e-5)
+
+  def test_gdn_tokamax_backend_selection_and_xla_parity(self):
+    """Verifies GDN kernel_backend routing and Tokamax KDA (xla) fwd+bwd parity with masked tokens."""
+    b, s, emb_dim = 2, 128, 64
+    rng = np.random.default_rng(77)
+    x = jnp.array(rng.standard_normal((b, s, emb_dim), dtype=np.float32))
+    mask = jnp.ones((b, s), dtype=jnp.int32).at[0, 96:].set(0).at[1, 112:].set(0)
+
+    mod_jax = self._make_gdn_layer(kernel_backend="jax")
+    mod_auto = self._make_gdn_layer(kernel_backend="auto")
+    mod_tk = self._make_gdn_layer(kernel_backend="tokamax")
+    nnx.update(mod_auto, nnx.state(mod_jax))
+    nnx.update(mod_tk, nnx.state(mod_jax))
+
+    out_jax = mod_jax(x, attention_mask=mask)
+    out_auto = mod_auto(x, attention_mask=mask)
+    assert isinstance(out_jax, jax.Array) and isinstance(out_auto, jax.Array)
+    np.testing.assert_allclose(np.array(out_auto), np.array(out_jax), rtol=1e-6, atol=1e-6)
+
+    with self.assertRaises(ValueError):
+      mod_tk(x, attention_mask=mask)
+
+    if not m3_kernels.tokamax_gdn_available():
+      self.skipTest("tokamax.ops.kimi_delta_attention is not available in this Tokamax build.")
+
+    # Verify Tokamax scalar-gate KDA forward + backward parity (including zero-masked rows) via XLA reference impl.
+    h, d = 4, 32
+    q = jnp.array(rng.standard_normal((b, s, h, d), dtype=np.float32))
+    k = jnp.array(rng.standard_normal((b, s, h, d), dtype=np.float32))
+    v = jnp.array(rng.standard_normal((b, s, h, d), dtype=np.float32) * 0.2)
+    g = jnp.array(-rng.uniform(0.02, 0.3, size=(b, s, h)).astype(np.float32))
+    beta = jnp.array(rng.uniform(0.1, 0.8, size=(b, s, h)).astype(np.float32))
+    m_bool = mask != 0
+    v_m = jnp.where(m_bool[:, :, None, None], v, 0.0)
+    g_m = jnp.where(m_bool[:, :, None], g, 0.0)
+    beta_m = jnp.where(m_bool[:, :, None], beta, 0.0)
+
+    def _ref_loss(q_i, k_i, v_i, g_i, b_i):
+      out, _ = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+          q_i, k_i, v_i, g_i, b_i, chunk_size=64, use_qk_l2norm_in_kernel=True
+      )
+      return jnp.sum(jnp.where(m_bool[:, :, None, None], out, 0.0))
+
+    def _tk_loss(q_i, k_i, v_i, g_i, b_i):
+      out = m3_kernels.gated_delta_net(
+          q_i, k_i, v_i, g_i, b_i, chunk_size=64, use_qk_l2norm=True, backend="tokamax", _implementation="xla"
+      )
+      assert out is not None
+      return jnp.sum(jnp.where(m_bool[:, :, None, None], out, 0.0))
+
+    ref_val, ref_grads = jax.value_and_grad(_ref_loss, argnums=(0, 1, 2, 3, 4))(q, k, v_m, g_m, beta_m)
+    tk_val, tk_grads = jax.value_and_grad(_tk_loss, argnums=(0, 1, 2, 3, 4))(q, k, v_m, g_m, beta_m)
+    np.testing.assert_allclose(np.array(tk_val), np.array(ref_val), rtol=1e-4, atol=1e-4)
+    for g_tk, g_ref in zip(tk_grads, ref_grads):
+      self.assertTrue(np.all(np.isfinite(np.array(g_tk))))
+      _assert_allclose_to_scale(g_tk, g_ref, rtol=1e-3, atol_scale=1e-4)
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
   def test_chunk_gated_delta_rule_pytorch_parity(self):
@@ -2929,6 +2989,28 @@ class Qwen3_8MTPLossTest(_SingleDeviceMeshTestCase):
     model_no_mtp = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg_no_mtp, rngs=nnx.Rngs(params=0))
     with self.assertRaises(ValueError):
       modeling_qwen3_8_flash_next.compute_total_loss(model_no_mtp, toks, toks, router_aux_coeff=0.001)
+
+  def test_defer_lm_head_to_loss_opt_in_and_distillation_safety(self):
+    """Default __call__ always returns logits (safe for distillation); defer_lm_head_to_loss=True sows hidden_states."""
+    cfg = _create_mini_config()
+    model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+    self.assertTrue(getattr(model, "SUPPORTS_DEFER_LM_HEAD_TO_LOSS", False))
+    toks = jax.random.randint(jax.random.PRNGKey(9), (2, 8), 0, cfg.vocab_size)
+    pos = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (2, 8))
+
+    # Even when decoder_target_tokens is passed, default call must still return logits.
+    logits = model(toks, pos, decoder_target_tokens=toks)
+    self.assertIsInstance(logits, jax.Array)
+    self.assertEqual(logits.shape, (2, 8, cfg.vocab_size))
+
+    # Explicit opt-in returns None and sows ("decoder", "hidden_states") matching lm_head projection.
+    deferred = model(toks, pos, decoder_target_tokens=toks, defer_lm_head_to_loss=True)
+    self.assertIsNone(deferred)
+    intermediates = nnx.pop(model, nnx.Intermediate)
+    sown_hidden = intermediates["decoder"]["hidden_states"][0]
+    self.assertEqual(sown_hidden.shape, (2, 8, cfg.emb_dim))
+    reprojected = model.lm_head(sown_hidden)
+    np.testing.assert_allclose(np.array(reprojected), np.array(logits), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":
