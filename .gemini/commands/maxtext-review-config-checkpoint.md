@@ -44,7 +44,13 @@ concrete config, override, or checkpoint that breaks or changes behavior.
     saved before the change fail to restore, or restore silently wrong. Check
     whether the change needs a conversion or migration step, and whether
     checkpoint-conversion code (`checkpoint_conversion/`, HF import/export)
-    was updated to match.
+    was updated to match. Conversion and migration must handle both
+    `scan_layers` settings: stacked checkpoints put the layer axis at
+    `param_scan_axis`, so migrating a stacked parameter with a plain reshape
+    (e.g., `(k*d, L, n)` to `(k, L, d, n)`) silently interleaves layers, and a
+    "pure reshape" claim holds only per layer. A flag that changes parameter
+    shapes must say in its `base.yml` comment and `types.py` description that
+    it changes the checkpoint layout.
 6.  **Checkpointing behavior.** Changes to `common/checkpointing.py`,
     `common/emergency_checkpointing.py`, or standalone checkpointers that could
     lose data or corrupt state: saving non-atomically, multiple hosts writing

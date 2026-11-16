@@ -1,4 +1,4 @@
-# MaxText Review Focus Area: TPU and GPU Performance
+# MaxText Review Focus Area: TPU and GPU Performance and Sharding
 
 <!--
 Shared focus area for MaxText code review. Used by the GitHub PR review
@@ -9,13 +9,15 @@ skill. Keep it platform-neutral.
 **Applies when the change touches:** `src/maxtext/layers/`,
 `src/maxtext/models/`, `src/maxtext/m3/`, `src/maxtext/trainers/`,
 `src/maxtext/training_engine/`, `src/maxtext/optimizers/`,
-`src/maxtext/inference/`, or `src/maxtext/multimodal/`.
+`src/maxtext/inference/`, `src/maxtext/multimodal/`,
+`src/maxtext/utils/sharding.py`, `src/maxtext/utils/maxtext_utils.py`, or
+`src/maxtext/utils/max_utils.py`.
 
 MaxText training and inference steps compile with `jax.jit` to run
 asynchronously across sharded TPU and GPU meshes. Keep a finding only if you can
 name the function, tensor shape or dtype, and execution path (training step,
-prefill, or decode) that triggers the bottleneck, and provide a concrete fix. Do
-not flag CPU usage or unrolled loops in offline scripts
+prefill, or decode) that triggers the bottleneck or failure, and provide a
+concrete fix. Do not flag CPU usage or unrolled loops in offline scripts
 (`src/maxtext/checkpoint_conversion/`, `tools/`, `benchmarks/`) or unit tests.
 
 ## What to check
@@ -87,3 +89,56 @@ not flag CPU usage or unrolled loops in offline scripts
     (`query_proj`, `key_proj`, `value_proj`, `qkv_proj`, `kv_proj`, `out_proj`,
     `context`, `decoder_layer_input`, `mlpwi_0`, `mlpwi_1`, `mlpwi`, `mlpwo`,
     `moe_mlpwi_0`, `moe_mlpwi_1`, `moe_mlpwo`).
+7.  **Sharding changes that miss a path or a rule.** When a change replicates
+    or re-shards a tensor's logical axis (e.g., keeping a single MQA K/V head
+    replicated instead of splitting it over `tensor`), check every place that
+    tensor and its cache are constrained, not only the training path: weight
+    `kernel_axes`, activation constraints in training, prefill, and
+    autoregressive modes, `shard_map` `in_specs` in attention kernels (flash
+    attention builds its K/V specs from `flash_axis_names_kv`, which uses the
+    query `HEAD` axis), dot-product attention's prefill/decode constraints, and
+    the KV-cache logical axes (MLA keeps its single cache head unsharded with
+    `CACHE_HEADS_NONE`). A dimension smaller than, or not divisible by, the
+    product of its mesh axes fails at construction or trace time
+    (`IndivisibleError`, or a `shard_map` divisibility `ValueError`). When a
+    change adds a mesh axis or logical-axis rule, check every weight and
+    activation rule that should include it, for every model family that uses
+    those rules: a missing entry silently replicates the tensor over that axis
+    instead of failing.
+8.  **Unverified collective or memory claims.** When the description claims a
+    change removes a collective (e.g., an all-gather of a TP-sharded
+    activation) or saves memory, check what the claim depends on: the backward
+    pass (a layout that avoids a forward all-gather can reintroduce it in the
+    gradient), sibling modules that still flatten or reshape the sharded axis
+    (the claim then holds only partially), and whether the default and
+    model-specific `logical_axis_rules` shard that axis at all. Recommend a test
+    that compiles a small sharded case (CPU CI provides 4 devices) and asserts
+    on the collectives in the compiled HLO.
+9.  **Rematerialization that does nothing.** `jax.checkpoint` (or `nnx.remat`)
+    with `prevent_cse=False` is meant for use inside `jax.lax.scan`; elsewhere
+    under `jit`, XLA can merge the recomputation with the forward pass and keep
+    the activations, so the remat policy silently has no effect (e.g., on the
+    `scan_layers=False` path). Derive the flag from
+    `maxtext_utils.should_prevent_cse_in_remat(config)` instead of hardcoding
+    it. Offloading policies cannot carry offloaded residuals across a
+    trip-count-one loop; follow `_get_scan_safe_remat_policy` in
+    `layers/nnx_decoders.py`, which keeps them on device there.
+10. **Device-mesh construction.** Changes to `create_device_mesh`
+    (`utils/maxtext_utils.py`) or the mesh helpers in `utils/max_utils.py`
+    must handle chips that expose several devices (TPU7x and v2/v3 devices on
+    one chip share `coords` and differ in `core_on_chip`; JAX's `mesh_utils`
+    adds a core dimension for them), multi-slice and `use_lineage` meshes, and
+    the other mesh options (`custom_mesh`, `allow_split_physical_axes`,
+    `optimize_mesh_for_tpu_v6e`), which should be rejected or warned about
+    rather than silently ignored. A layout that helps one mesh axis (e.g.,
+    closing a ring on a slice dimension without wraparound links) changes the
+    locality of the other axes, and wraparound differs by topology (see the
+    wrap flags in `utils/accelerator_to_spec_map.py`): such an option can be
+    strictly worse on a full torus, so its documentation must state its scope.
+11. **Hand-built collectives under `shard_map`.** For
+    `jax.lax.ragged_all_to_all`, `output_offsets` index into each *receiver's*
+    output, and sender `i`'s `send_sizes[j]` must equal receiver `j`'s
+    `recv_sizes[i]`; a custom VJP that returns gradients through the same
+    collective must swap the send and receive sizes. Check that the offsets are
+    built from the receiver's view and that both directions are derived from
+    one consistent plan.
