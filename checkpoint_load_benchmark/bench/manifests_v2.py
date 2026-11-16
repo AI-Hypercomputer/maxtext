@@ -574,9 +574,16 @@ def build_planned_queue_tasks(
     tiers: Sequence[str] = ("S", "A", "C", "B"),
     tree: str = "/tmp/maxtext",
     verify_checksums_tiers: Sequence[str] = ("A",),
-    clean_sparse_env: bool = True,
+    clean_sparse_env: bool = False,
+    models: Sequence[str] | None = None,
+    skip_to_maxtext: bool = False,
 ) -> list[dict[str, Any]]:
-  """Generates ordered GCS task-queue items for `platform` from `models_v2.json`."""
+  """Generates ordered GCS task-queue items for `platform` from `models_v2.json`.
+
+  Step 1b (DeepSeek) models load the real BF16 checkpoint from the regional `hf_cache_bf16`; `clean_sparse_env`
+  opts back into synthetic sparse files staged on each host. `models` keeps only those models, and
+  `skip_to_maxtext` runs `safetensors_dynamic` only.
+  """
   profile = platforms.get_profile(platform)
   cfg = schema_v2.load_models_v2()
   reps_by_tier: Mapping[str, int] = cfg["repetitions_by_tier"]
@@ -584,7 +591,8 @@ def build_planned_queue_tasks(
   want_cs_tiers = set(verify_checksums_tiers)
   root = (profile.regional_gcs_data_root or profile.gcs_data_root).rstrip("/")
 
-  models = [m for m in cfg["models"] if m["tier"] in want_tiers]
+  want_models: set[str] = set(models or ())
+  models = [m for m in cfg["models"] if m["tier"] in want_tiers and (not want_models or m["model_name"] in want_models)]
   models.sort(key=lambda m: (_TIER_ORDER.get(m["tier"], 99), float(m.get("loaded_bf16_gb") or 0.0)))
 
   tasks: list[dict[str, Any]] = []
@@ -636,6 +644,8 @@ def build_planned_queue_tasks(
         ]
         if tier in want_cs_tiers:
           args.append("--verify-checksums")
+        if skip_to_maxtext:
+          args.append("--skip-to-maxtext")
         env: dict[str, str] = {
             "BENCH_PLATFORM": platform,
             "BENCH_SLICE_TOPOLOGY": topology,

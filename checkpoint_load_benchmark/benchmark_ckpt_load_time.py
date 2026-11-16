@@ -411,6 +411,9 @@ def _stage_sparse_bf16_safetensors(model_name: str, target_dir: str) -> tuple[in
 
 
 def _should_stage_sparse_bf16(model_name: str) -> bool:
+  # A real checkpoint staged in GCS always wins over synthetic sparse files.
+  if os.environ.get("BENCH_SAFETENSORS_GCS_DIR", "").strip():
+    return False
   if os.environ.get("STAGE_SPARSE_ALL_LARGE") == "1" and model_name in (
       "qwen3-235b-a22b",
       "qwen3.5-397b-a17b",
@@ -428,6 +431,14 @@ def _should_stage_sparse_bf16(model_name: str) -> bool:
       "deepseek4-284b",
       "deepseek4-1600b",
   )
+
+
+def _checkpoint_source_fields(model_name: str, load_uri: str) -> dict[str, str]:
+  """Returns the result-record fields saying which weights a phase loaded and from where."""
+  return {
+      "checkpoint_weights_kind": "synthetic_sparse" if _should_stage_sparse_bf16(model_name) else "real",
+      "checkpoint_load_source_uri": load_uri,
+  }
 
 
 def _list_hf_repo_files(repo_id: str, token: str | None) -> list[str]:
@@ -1118,6 +1129,7 @@ def run_worker_to_maxtext_step2_convert(args: argparse.Namespace) -> dict[str, A
       "pipeline_config": {
           "to_maxtext_orbax_save_dtype": "bfloat16",
           "checkpoint_storage_concurrent_gb": get_concurrent_gb(args.model, args.scan_mode, 1),
+          **_checkpoint_source_fields(args.model, args.local_hf_dir),
       },
       **sub_timings,
   }
@@ -1484,6 +1496,7 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
       else getattr(config, "dcn_data_parallelism", 1),
       "checkpoint_storage_concurrent_gb": concurrent_gb,
       "maxtext_load_weight_dtype": str(getattr(config, "weight_dtype", "")),
+      **_checkpoint_source_fields(args.model, orbax_items_path),
       "harness_environment_flags": ",".join(
           f"{k}={os.environ[k]}"
           for k in sorted(os.environ)
@@ -2178,6 +2191,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
       else getattr(config, "dcn_data_parallelism", 1),
       "checkpoint_storage_concurrent_gb": concurrent_gb,
       "safetensors_read_concurrent_bytes": int(os.environ.get("SAFETENSORS_READ_CONCURRENT_BYTES", "0") or 0) or "",
+      **_checkpoint_source_fields(args.model, load_params_uri),
       "maxtext_load_weight_dtype": str(getattr(config, "weight_dtype", "")),
       "harness_environment_flags": ",".join(
           f"{k}={os.environ[k]}"
