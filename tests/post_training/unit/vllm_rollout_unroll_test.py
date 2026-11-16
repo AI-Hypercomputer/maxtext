@@ -28,8 +28,9 @@ from maxtext.integration.vllm.maxtext_vllm_rollout import (
     MaxTextVllmSampler,
     prepare_direct_sync_additional_config,
     requires_maxtext_scanned_weight_unroll,
-    unroll_gemma_scanned_weights,
-    unroll_qwen_scanned_weights,
+    unroll_layers_n_blocks,
+    unroll_nested_block_scan,
+    unroll_scanned_block_weights,
     uses_maxtext_vllm_adapter,
     validate_direct_sync_layer_coverage,
 )
@@ -52,12 +53,12 @@ class MockWeights:
 
 
 class GemmaScannedWeightsUnrollTest(unittest.TestCase):
-  """Verify the correctness of the unroll_gemma_scanned_weights utility."""
+  """Verify the correctness of the unroll_layers_n_blocks utility."""
 
   def test_bypasses_non_pytree_weights(self):
     """If the weights object doesn't have `to_pure_dict`, it should be returned unchanged."""
     raw_weights = {"dummy": np.ones(5)}
-    result = unroll_gemma_scanned_weights(raw_weights)
+    result = unroll_layers_n_blocks(raw_weights)
     self.assertIs(result, raw_weights)
 
   def test_bypasses_non_scanned_checkpoints(self):
@@ -71,7 +72,7 @@ class GemmaScannedWeightsUnrollTest(unittest.TestCase):
         }
     }
     weights = MockWeights(pure_dict)
-    result = unroll_gemma_scanned_weights(weights)
+    result = unroll_layers_n_blocks(weights)
     self.assertIs(result, weights)
 
   def test_correctly_unrolls_gemma_scanned_weights(self):
@@ -116,7 +117,7 @@ class GemmaScannedWeightsUnrollTest(unittest.TestCase):
         }
     }
     weights = MockWeights(pure_dict)
-    unrolled = unroll_gemma_scanned_weights(weights)
+    unrolled = unroll_layers_n_blocks(weights)
 
     # Check unrolled structure
     decoder_dict = unrolled["decoder"]
@@ -178,7 +179,7 @@ class GemmaScannedWeightsUnrollTest(unittest.TestCase):
         }
     }
     weights = MockWeights(pure_dict)
-    unrolled = unroll_gemma_scanned_weights(weights)
+    unrolled = unroll_layers_n_blocks(weights)
 
     decoder_dict = unrolled["decoder"]
     self.assertIn("layers_0", decoder_dict)
@@ -213,7 +214,7 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
         }
     )
 
-    unrolled = unroll_qwen_scanned_weights(weights)
+    unrolled = unroll_nested_block_scan(weights)
 
     decoder = unrolled["base"]["decoder"]
     for layer_idx in range(4):
@@ -257,7 +258,7 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
         }
     )
 
-    unrolled = unroll_qwen_scanned_weights(weights)
+    unrolled = unroll_nested_block_scan(weights)
 
     decoder = unrolled["base"]["decoder"]
     for layer_idx in range(num_blocks * cycle):
@@ -292,12 +293,12 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
         }
     )
 
-    unrolled = unroll_qwen_scanned_weights(weights, pattern_length=num_local + 1)
+    unrolled = unroll_nested_block_scan(weights, pattern_length=num_local + 1)
     for block in range(num_blocks):
       np.testing.assert_array_equal(unrolled["decoder"][f"layers_{block * 4 + 3}"]["probe"], np.ones((2, 1)))
 
     with self.assertRaisesRegex(ValueError, "hold 3 cycle slots, but pattern_length 5"):
-      unroll_qwen_scanned_weights(weights, pattern_length=num_local + 2)
+      unroll_nested_block_scan(weights, pattern_length=num_local + 2)
 
   @pytest.mark.cpu_only
   def test_rejects_the_nested_block_scan_remainder(self):
@@ -315,7 +316,7 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     )
 
     with self.assertRaisesRegex(ValueError, "layers_remainder"):
-      unroll_qwen_scanned_weights(weights)
+      unroll_nested_block_scan(weights)
 
   @pytest.mark.cpu_only
   def test_rejects_nested_local_layers_without_a_cycle_slot_axis(self):
@@ -323,7 +324,7 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     weights = MockWeights({"decoder": {"layers": {"local_layers": {"probe": np.ones((2, 2))}}}})
 
     with self.assertRaisesRegex(ValueError, "has no scan axis"):
-      unroll_qwen_scanned_weights(weights)
+      unroll_nested_block_scan(weights)
 
   @pytest.mark.cpu_only
   def test_correctly_unrolls_homogeneous_scanned_weights(self):
@@ -346,7 +347,7 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
         }
     )
 
-    unrolled = unroll_qwen_scanned_weights(weights)
+    unrolled = unroll_nested_block_scan(weights)
 
     decoder = unrolled["base"]["decoder"]
     for layer_idx in range(4):
@@ -380,14 +381,14 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     )
 
     with self.assertRaisesRegex(ValueError, "disagree on scan length"):
-      unroll_qwen_scanned_weights(weights)
+      unroll_nested_block_scan(weights)
 
   @pytest.mark.cpu_only
   def test_invalid_scan_axis_formats_non_string_parameter_path(self):
     weights = MockWeights({"decoder": {"layers": {"layer_0": {0: np.ones((2, 1))}}}})
 
     with self.assertRaisesRegex(ValueError, r"decoder\.layers\.layer_0\.0"):
-      unroll_qwen_scanned_weights(weights, scan_axis=2, pattern_length=1)
+      unroll_nested_block_scan(weights, scan_axis=2, pattern_length=1)
 
   @pytest.mark.cpu_only
   def test_supports_nondefault_axis_and_sparse_slots(self):
@@ -397,7 +398,7 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     )
     weights = MockWeights({"decoder": {"layers": {"layer_1": {"probe": slot_1}}}})
 
-    unrolled = unroll_qwen_scanned_weights(weights, scan_axis=0, pattern_length=2)
+    unrolled = unroll_nested_block_scan(weights, scan_axis=0, pattern_length=2)
 
     self.assertNotIn("layers_0", unrolled["decoder"])
     np.testing.assert_array_equal(unrolled["decoder"]["layers_1"]["probe"], np.full((2, 1), 1))
@@ -447,12 +448,75 @@ class QwenScannedWeightsUnrollTest(unittest.TestCase):
     self.assertEqual(validate_direct_sync_layer_coverage(source, target), 1)
 
 
+class ScannedBlockUnrollDispatchTest(unittest.TestCase):
+  """Verify `unroll_scanned_block_weights` picks the unroll from the tree structure, not the model name."""
+
+  @pytest.mark.cpu_only
+  def test_unrolls_moe_blocks_without_an_mlp_wi_0(self):
+    """b/584148200: GPT-OSS and Llama 4 blocks have no `mlp.wi_0`, which the scan length was read from."""
+    num_blocks, block_length = 3, 2
+    # `wo[j][:, i, :]` is layer `j` of block `i`, i.e. physical layer `i * block_length + j`.
+    wo = [
+        np.stack([np.full((4, 2), i * block_length + j) for i in range(num_blocks)], axis=1) for j in range(block_length)
+    ]
+    weights = {"decoder": {"layers": {f"layers_{j}": {"GptOssMlp": {"wo": wo[j]}} for j in range(block_length)}}}
+
+    decoder = unroll_scanned_block_weights(weights)["decoder"]
+
+    self.assertCountEqual(decoder, [f"layers_{n}" for n in range(num_blocks * block_length)])
+    for n in range(num_blocks * block_length):
+      np.testing.assert_array_equal(decoder[f"layers_{n}"]["GptOssMlp"]["wo"], np.full((4, 2), n))
+
+  @pytest.mark.cpu_only
+  def test_unrolls_the_nested_block_scan_under_scanned_blocks(self):
+    """b/584148367: Gemma 4 nests Qwen 3.5's `local_layers`/`global_layer` scan under `scanned_blocks`."""
+    num_blocks, num_local = 2, 2
+    cycle = num_local + 1
+    local_probe = np.zeros((2, num_blocks, num_local, 1), dtype=np.float32)
+    global_probe = np.zeros((2, num_blocks, 1), dtype=np.float32)
+    for block in range(num_blocks):
+      for slot in range(num_local):
+        local_probe[:, block, slot, :] = block * cycle + slot
+      global_probe[:, block, :] = block * cycle + num_local
+    weights = {
+        "decoder": {
+            "scanned_blocks": {
+                "local_layers": {"probe": local_probe},
+                "global_layer": {"probe": global_probe},
+            }
+        }
+    }
+
+    decoder = unroll_scanned_block_weights(weights)["decoder"]
+
+    self.assertCountEqual(decoder, [f"layers_{n}" for n in range(num_blocks * cycle)])
+    for n in range(num_blocks * cycle):
+      np.testing.assert_array_equal(decoder[f"layers_{n}"]["probe"], np.full((2, 1), n, dtype=np.float32))
+
+  @pytest.mark.cpu_only
+  def test_leaves_a_homogeneous_stack_for_tunix(self):
+    weights = {"decoder": {"layers": {"mlp": {"wo": np.zeros((4, 3, 2))}}}}
+    self.assertIs(unroll_scanned_block_weights(weights), weights)
+
+  @pytest.mark.cpu_only
+  def test_rejects_scanned_blocks_after_unscanned_layers(self):
+    """Ming and HY4 keep unscanned layers before their scanned blocks, which must not overwrite them."""
+    weights = {
+        "decoder": {
+            "layers_0": {"mlp": {"wo": np.zeros((4, 2))}},
+            "scanned_blocks": {"layers_0": {"mlp": {"wo": np.ones((4, 3, 2))}}},
+        }
+    }
+    with self.assertRaisesRegex(ValueError, "would overwrite unscanned layers"):
+      unroll_scanned_block_weights(weights)
+
+
 class ScannedSourceLayerCoverageTest(unittest.TestCase):
   """Verify the coverage check accepts scanned sources that Tunix unrolls itself.
 
-  Only Gemma and Qwen are unrolled by MaxText before the direct sync; other
-  scanned models (e.g. Llama) keep `decoder.layers.*` stacked on the scan axis
-  and Tunix's `transfer_state_directly` slices layer N out for `layers_N`.
+  MaxText unrolls scanned blocks before the direct sync; a homogeneous scan
+  (e.g. Llama) keeps `decoder.layers.*` stacked on the scan axis and Tunix's
+  `transfer_state_directly` slices layer N out for `layers_N`.
   """
 
   _PER_LAYER_PARAMS = (
@@ -509,7 +573,6 @@ class ScannedSourceLayerCoverageTest(unittest.TestCase):
     """Regression: llama3.1-70b direct sync failed with `matched 0/720 target layer parameters`."""
     sampler = object.__new__(MaxTextVllmSampler)
     sampler._direct_maxtext_sync = True  # pylint: disable=protected-access
-    sampler._is_gemma = False  # pylint: disable=protected-access
     sampler._is_qwen = False  # pylint: disable=protected-access
     source, target = self._scanned_llama_trees(num_layers=2)
 
