@@ -305,5 +305,54 @@ class RLDerivedStepsConfigTest(absltest.TestCase):
     self.assertEqual(types.RLConfig(**dumped).train_steps, 50)
 
 
+class RLSliceConfigTest(absltest.TestCase):
+  """Tests colocated multi-slice and disaggregated `num_slices` resolution."""
+
+  def test_num_slices_colocated_multislice_and_disaggregated(self):
+    mock_2slice_devices = []
+    for slice_idx in range(2):
+      for _ in range(8):
+        dev = mock.MagicMock()
+        dev.id = len(mock_2slice_devices)
+        dev.slice_index = slice_idx
+        mock_2slice_devices.append(dev)
+
+    with mock.patch.object(types.jax, "devices", return_value=mock_2slice_devices):
+      coloc_auto = _rl_config(run_name="rl_slice_auto")
+      self.assertEqual(coloc_auto.num_slices, 2)
+
+      coloc_explicit = _rl_config(run_name="rl_slice_explicit", num_slices=4)
+      self.assertEqual(coloc_explicit.num_slices, 4)
+
+      disagg_parent = _rl_config(
+          run_name="rl_slice_disagg_parent",
+          num_trainer_slices=1,
+          num_samplers_slices=1,
+      )
+      self.assertEqual(disagg_parent.num_slices, -1)
+
+      disagg_sub_1x1 = _rl_config(
+          run_name="rl_slice_disagg_sub_1x1",
+          num_trainer_slices=1,
+          num_samplers_slices=1,
+          num_slices=1,
+      )
+      self.assertEqual(disagg_sub_1x1.num_slices, 1)
+
+      disagg_sub = _rl_config(
+          run_name="rl_slice_disagg_sub",
+          num_trainer_slices=2,
+          num_samplers_slices=2,
+          num_slices=2,
+      )
+      self.assertEqual(disagg_sub.num_slices, 2)
+
+      # Multi-host GPU colocated RL resolves slice_index just like MaxTextConfig unless overridden.
+      gpu_auto = _rl_config(run_name="rl_slice_gpu_auto", hardware="gpu_multiprocess")
+      self.assertEqual(gpu_auto.num_slices, 2)
+      gpu_explicit = _rl_config(run_name="rl_slice_gpu_explicit", hardware="gpu_multiprocess", num_slices=1)
+      self.assertEqual(gpu_explicit.num_slices, 1)
+
+
 if __name__ == "__main__":
   absltest.main()
