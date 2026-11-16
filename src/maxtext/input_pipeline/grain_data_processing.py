@@ -33,7 +33,7 @@ import jax
 import numpy as np
 
 import grain.python as grain
-from grain.experimental import ElasticIterator
+from grain.experimental import ElasticIterator, ThreadPrefetchIterDataset
 
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils
@@ -259,6 +259,66 @@ def _apply_mapdataset_transforms(
   return dataset
 
 
+def _mix_iter_datasets(
+    dataset_list,
+    weights,
+    names,
+    shuffle,
+    shuffle_seed,
+    num_epoch,
+    dataloading_host_index,
+    dataloading_host_count,
+    grain_num_threads,
+    grain_prefetch_buffer_size,
+):
+  """Transforms and mixes component MapDatasets with ``IterDataset.mix`` using budgeted ReadOptions.
+
+  ``grain_num_threads`` and ``grain_prefetch_buffer_size`` are partitioned across mixture components by normalized
+  weight so multi-source mixtures do not multiply reader thread pools and prefetch buffers by the number of sources.
+  Components whose proportional share rounds down to zero use ``ReadOptions(num_threads=0, prefetch_buffer_size=0)``
+  (allocating no per-component thread pool or buffer while keeping per-component checkpoint state), and any remaining
+  prefetch buffer budget is applied once after mixing via ``ThreadPrefetchIterDataset`` (which transparently delegates
+  ``get_state`` / ``set_state`` to the underlying ``_MixedDatasetIterator``).
+  """
+  total_weight = sum(weights)
+  normalized_weights = [weight / total_weight for weight in weights]
+
+  allocated_buffer = 0
+  transformed = []
+  for ds, w in zip(dataset_list, normalized_weights):
+    comp_threads = int(grain_num_threads * w) if grain_num_threads > 0 else 0
+    comp_buffer = int(grain_prefetch_buffer_size * w) if grain_prefetch_buffer_size > 0 else 0
+    if comp_threads == 0 or comp_buffer == 0:
+      comp_threads, comp_buffer = 0, 0
+    allocated_buffer += comp_buffer
+    transformed.append(
+        _apply_mapdataset_transforms(
+            ds,
+            shuffle,
+            shuffle_seed,
+            num_epoch,
+            dataloading_host_index,
+            dataloading_host_count,
+            comp_threads,
+            comp_buffer,
+        )
+    )
+
+  if names is not None:
+    datasets_dict = dict(zip(names, transformed))
+    weights_dict = dict(zip(names, normalized_weights))
+    dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
+  else:
+    # Use IterDataset.mix instead of MapDataset.mix in order to have per-mixture component checkpoints
+    # for supporting changing the mixture after checkpointing.
+    dataset = grain.IterDataset.mix(transformed, normalized_weights)
+
+  remaining_buffer = max(0, grain_prefetch_buffer_size - allocated_buffer) if grain_num_threads > 0 else 0
+  if remaining_buffer > 0 and isinstance(dataset, grain.IterDataset):
+    dataset = ThreadPrefetchIterDataset(dataset, prefetch_buffer_size=remaining_buffer)
+  return dataset
+
+
 def _build_dataset_config(config, num_samples=None, seed=1234, split_ratio=None, split_index=0, batch_size=None):
   """Build the configuration used by the Megatron-compatible data sources.
 
@@ -328,57 +388,26 @@ def get_datasets(
       return grain.MapDataset.source(source)
 
     names, patterns, weights = _parse_arrayrecord_patterns(data_file_pattern, mixture_config_path)
-    # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
-    if names is not None and weights is not None:
+    # Handle weighted mixtures (named via mixture_config_path or unnamed ';'-separated patterns)
+    if weights is not None:
+      # Parallelize file finding (globbing), data source creation, and dataset wrapping.
+      # File finding and source creation are I/O-bound operations that release the GIL.
       executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
       dataset_list = list(executor.map(create_dataset_from_pattern, patterns))
       executor.shutdown(wait=True)
 
-      datasets_dict = dict(zip(names, dataset_list))
-
-      for name, ds in datasets_dict.items():
-        datasets_dict[name] = _apply_mapdataset_transforms(
-            ds,
-            shuffle,
-            shuffle_seed,
-            num_epoch,
-            dataloading_host_index,
-            dataloading_host_count,
-            grain_num_threads,
-            grain_prefetch_buffer_size,
-        )
-
-      # Normalize weights
-      total_weight = sum(weights)
-      weights_dict = {name: weight / total_weight for name, weight in zip(names, weights)}
-
-      dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
-      return dataset
-    elif weights is not None:
-      weights = [round(weight / sum(weights), 4) for weight in weights]
-
-      # Parallelize file finding (globbing), data source creation, and dataset wrapping
-      # File finding and source creation are I/O-bound operations that release the GIL
-      executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
-      dataset_list = list(executor.map(create_dataset_from_pattern, patterns))
-      executor.shutdown(wait=True)
-
-      # Apply shuffle, repeat, sharding, and conversion to IterDataset to each dataset before mixing
-      for d, _ in enumerate(dataset_list):
-        dataset_list[d] = _apply_mapdataset_transforms(
-            dataset_list[d],
-            shuffle,
-            shuffle_seed,
-            num_epoch,
-            dataloading_host_index,
-            dataloading_host_count,
-            grain_num_threads,
-            grain_prefetch_buffer_size,
-        )
-      # Use IterDataset.mix instead of MapDataset.mix in order to have per-mixture component checkpoints
-      # for supporting changing the mixture after checkpointing
-      dataset = grain.IterDataset.mix(dataset_list, weights)
-      return dataset
+      return _mix_iter_datasets(
+          dataset_list,
+          weights,
+          names,
+          shuffle,
+          shuffle_seed,
+          num_epoch,
+          dataloading_host_index,
+          dataloading_host_count,
+          grain_num_threads,
+          grain_prefetch_buffer_size,
+      )
     else:
       # Single pattern case - no need for parallelization
       dataset = create_dataset_from_pattern(patterns[0] if patterns else data_file_pattern)
