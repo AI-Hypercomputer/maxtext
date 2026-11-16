@@ -545,11 +545,107 @@ def _build_stage_row_from_rep(
   return row
 
 
+def _winner_verdict_text(
+    tm_val: Any,
+    sd_val: Any,
+    *,
+    tm_label: str,
+    sd_label: str,
+    tm_suffix: str = "",
+) -> str:
+  """Formats a plain-English winner string with >=1.0x multiplier and both durations in seconds."""
+  if not (_is_number(tm_val) and _is_number(sd_val) and float(tm_val) > 0 and float(sd_val) > 0):
+    return "—"
+  tm_s = float(tm_val)
+  sd_s = float(sd_val)
+  ratio = max(tm_s, sd_s) / min(tm_s, sd_s)
+  if ratio < 1.05:
+    return f"Tie (~1.0x: {sd_label} {sd_s:,.1f}s vs {tm_label} {tm_s:,.1f}s{tm_suffix})"
+  if sd_s <= tm_s:
+    return f"{sd_label} {tm_s / sd_s:.2f}x faster ({sd_s:,.1f}s vs {tm_label} {tm_s:,.1f}s{tm_suffix})".replace(
+        f"vs {tm_label} ", "vs " if tm_label == "to_maxtext" else f"vs {tm_label} "
+    )
+  return f"{tm_label} {sd_s / tm_s:.2f}x faster ({tm_s:,.1f}s{tm_suffix} vs {sd_s:,.1f}s)"
+
+
+def _format_pair_verdicts(tm: Mapping[str, Any], sd: Mapping[str, Any]) -> tuple[str, str]:
+  """Returns `(faster_from_hf_verdict, faster_already_orbax_verdict)` for a paired configuration."""
+  tm_status = str(tm.get("run_status") or "")
+  sd_status = str(sd.get("run_status") or "")
+  tm_weights = str(tm.get("checkpoint_weights_kind") or "real")
+  sd_weights = str(sd.get("checkpoint_weights_kind") or "real")
+  is_synthetic = sd_weights in ("synthetic", "synthetic_sparse") or tm_weights in ("synthetic", "synthetic_sparse")
+
+  if tm_status in ("", "PENDING") or sd_status in ("", "PENDING"):
+    return "PENDING", "PENDING"
+  if tm_status == "NOT RUN" or sd_status == "NOT RUN":
+    return "—", "—"
+  if is_synthetic:
+    if tm_status != "OK" and sd_status == "OK":
+      return (
+          f"to_maxtext {tm_status}; real-GCS safetensors_dynamic re-run in progress (v2 row used {sd_weights})",
+          f"No Orbax ckpt (to_maxtext {tm_status})",
+      )
+    if tm_status != "OK" and sd_status != "OK":
+      return (
+          f"Neither succeeded (to_maxtext {tm_status}; safetensors_dynamic {sd_status})",
+          f"No Orbax ckpt (to_maxtext {tm_status})",
+      )
+    return "—", "—"
+
+  if tm_status == "OK" and sd_status == "OK":
+    from_hf = _winner_verdict_text(
+        tm.get("total_without_hf_download_seconds"),
+        sd.get("total_without_hf_download_seconds"),
+        tm_label="to_maxtext",
+        sd_label="safetensors_dynamic",
+        tm_suffix=" incl. Orbax convert",
+    )
+    already_orbax = _winner_verdict_text(
+        tm.get("load_into_tpu_hbm_total_seconds"),
+        sd.get("load_into_tpu_hbm_total_seconds"),
+        tm_label="to_maxtext (Orbax S3)",
+        sd_label="safetensors_dynamic",
+    )
+    return from_hf, already_orbax
+
+  if sd_status == "OK" and tm_status != "OK":
+    sd_nohf = sd.get("total_without_hf_download_seconds")
+    sd_txt = f"{float(sd_nohf):,.1f}s; " if _is_number(sd_nohf) else ""
+    return (
+        f"Only safetensors_dynamic fits ({sd_txt}to_maxtext {tm_status})",
+        f"No Orbax ckpt (to_maxtext {tm_status})",
+    )
+
+  if tm_status == "OK" and sd_status != "OK":
+    tm_nohf = tm.get("total_without_hf_download_seconds")
+    tm_load = tm.get("load_into_tpu_hbm_total_seconds")
+    nohf_txt = f"{float(tm_nohf):,.1f}s incl. Orbax convert; " if _is_number(tm_nohf) else ""
+    load_txt = f"{float(tm_load):,.1f}s; " if _is_number(tm_load) else ""
+    return (
+        f"Only to_maxtext fits ({nohf_txt}safetensors_dynamic {sd_status})",
+        f"Only to_maxtext (Orbax S3) succeeded ({load_txt}safetensors_dynamic {sd_status})",
+    )
+
+  return (
+      f"Neither succeeded (to_maxtext {tm_status}; safetensors_dynamic {sd_status})",
+      f"No Orbax ckpt (to_maxtext {tm_status})",
+  )
+
+
 def _attach_v2_pair_speedups(summary_rows: Sequence[dict[str, Any]]) -> None:
-  """Computes `to_maxtext / safetensors_dynamic` speedup ratios onto paired `safetensors_dynamic` rows."""
-  by_pair: dict[tuple[str, str, str, int, str], dict[str, dict[str, Any]]] = {}
+  """Computes `to_maxtext / safetensors_dynamic` speedup ratios and plain-English verdicts per pair."""
+  by_pair: dict[tuple[str, str, str, str, int, str], dict[str, dict[str, Any]]] = {}
   for row in summary_rows:
+    if not row.get("faster_from_hf_verdict"):
+      row["faster_from_hf_verdict"] = "—"
+    if not row.get("faster_already_orbax_verdict"):
+      row["faster_already_orbax_verdict"] = "—"
+    prefix = str(row.get("row_id") or "").split("|", 1)[0]
+    if row.get("_v2_run_status") == "EXTERNAL":
+      continue
     key = (
+        prefix,
         str(row["tpu_platform"]),
         str(row["model_name"]),
         str(row["scan_layers_mode"]),
@@ -563,7 +659,19 @@ def _attach_v2_pair_speedups(summary_rows: Sequence[dict[str, Any]]) -> None:
     sd = pair.get("safetensors_dynamic")
     if not (tm and sd):
       continue
-    if tm.get("run_status") != "OK" or sd.get("run_status") != "OK":
+    from_hf, already_orbax = _format_pair_verdicts(tm, sd)
+    tm["faster_from_hf_verdict"] = from_hf
+    sd["faster_from_hf_verdict"] = from_hf
+    tm["faster_already_orbax_verdict"] = already_orbax
+    sd["faster_already_orbax_verdict"] = already_orbax
+
+    is_synthetic = str(sd.get("checkpoint_weights_kind") or "real") in ("synthetic", "synthetic_sparse") or str(
+        tm.get("checkpoint_weights_kind") or "real"
+    ) in ("synthetic", "synthetic_sparse")
+    if tm.get("run_status") != "OK" or sd.get("run_status") != "OK" or is_synthetic:
+      sd["speedup_end_to_end_to_maxtext_vs_safetensors_dynamic"] = "—"
+      sd["speedup_without_hf_download_to_maxtext_vs_safetensors_dynamic"] = "—"
+      sd["speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2"] = "—"
       continue
     tm_nohf = tm.get("total_without_hf_download_seconds")
     sd_nohf = sd.get("total_without_hf_download_seconds")
@@ -679,6 +787,8 @@ def _build_v2_matrix_rows(
             "speedup_end_to_end_to_maxtext_vs_safetensors_dynamic": "—",
             "speedup_without_hf_download_to_maxtext_vs_safetensors_dynamic": "—",
             "speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2": "—",
+            "faster_from_hf_verdict": "—",
+            "faster_already_orbax_verdict": "—",
             "row_id": row_id,
         }
     )
@@ -819,6 +929,7 @@ def _build_v2_matrix_rows(
       sum_row["maxtext_load_weight_dtype"] = (
           dec_rec.get("maxtext_load_weight_dtype") or sum_row["maxtext_load_weight_dtype"]
       )
+      sum_row["checkpoint_weights_kind"] = dec_rec.get("checkpoint_weights_kind") or sum_row["checkpoint_weights_kind"]
       if _is_number(dec_rec.get("checkpoint_size_gb")):
         sum_row["checkpoint_size_gb"] = _round_num(float(dec_rec["checkpoint_size_gb"]), 4)
 
@@ -877,6 +988,9 @@ def _build_v2_matrix_rows(
         stages_tm_rows.append(agg_stage)
     else:
       sum_row["run_status"] = latest_status
+      sum_row["checkpoint_weights_kind"] = (
+          latest_deciding_rec.get("checkpoint_weights_kind") or sum_row["checkpoint_weights_kind"]
+      )
       sum_row["repetitions_count"] = len(reps_map)
       sum_row["total_without_hf_download_seconds"] = "—"
       sum_row["total_end_to_end_seconds"] = "—"
@@ -1181,26 +1295,67 @@ def _merge_v2_and_legacy_summary_rows(
   _attach_v2_pair_speedups(merged)
 
   def _summary_sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
-    m_name = str(row.get("model_name") or "")
-    plat = str(row.get("tpu_platform") or "")
-    pipe = str(row.get("pipeline_name") or "")
-    scan = str(row.get("scan_layers_mode") or "")
-    slices = int(row.get("number_of_slices") or 0) if _is_number(row.get("number_of_slices")) else 0
-    topo = str(row.get("slice_topology") or "")
-    model_order_idx = models_by_name.get(m_name, {}).get("_idx", 999)
-    return (
-        _PLAT_SORT_ORDER.get(plat, 99),
-        model_order_idx,
-        m_name if model_order_idx == 999 else "",
-        _PIPE_SORT_ORDER.get(pipe, 99),
-        0 if scan == "scanned" else 1,
-        slices,
-        topo,
-        str(row.get("row_id") or ""),
-    )
+    return _make_summary_sort_key(row, models_by_name)
 
   merged.sort(key=_summary_sort_key)
   return merged
+
+
+def _make_summary_sort_key(
+    row: Mapping[str, Any],
+    models_by_name: Mapping[str, Mapping[str, Any]],
+) -> tuple[Any, ...]:
+  """Builds the canonical Summary row sort key (`Platform -> Model -> Pipeline -> Scan -> Slices -> Topo -> Row ID`)."""
+  m_name = str(row.get("model_name") or "")
+  plat = str(row.get("tpu_platform") or "")
+  pipe = str(row.get("pipeline_name") or "")
+  scan = str(row.get("scan_layers_mode") or "")
+  slices = int(row.get("number_of_slices") or 0) if _is_number(row.get("number_of_slices")) else 0
+  topo = str(row.get("slice_topology") or "")
+  model_order_idx = models_by_name.get(m_name, {}).get("_idx", 999)
+  return (
+      _PLAT_SORT_ORDER.get(plat, 99),
+      model_order_idx,
+      m_name if model_order_idx == 999 else "",
+      _PIPE_SORT_ORDER.get(pipe, 99),
+      0 if scan == "scanned" else 1,
+      slices,
+      topo,
+      str(row.get("row_id") or ""),
+  )
+
+
+def merge_external_summary_rows(
+    summary_rows: Sequence[Mapping[str, Any]],
+    external_rows: Sequence[Mapping[str, Any]],
+    *,
+    models_by_name: Mapping[str, Mapping[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+  """Merges external cross-check rows (e.g. `wl|`, `wl-fix|`, `wl-dp4|`) without altering their cell values."""
+  if models_by_name is None:
+    models_cfg = schema_v2.load_models_v2()
+    models_by_name = {m["model_name"]: {**m, "_idx": idx} for idx, m in enumerate(models_cfg["models"])}
+
+  out = [dict(r) for r in summary_rows]
+  seen_ids = {str(r.get("row_id") or "") for r in out}
+  for ext in external_rows:
+    rid = str(ext.get("row_id") or "")
+    if not rid or rid in seen_ids:
+      continue
+    seen_ids.add(rid)
+    row = _empty_row(schema_v2.SUMMARY_COLUMNS)
+    row.update(ext)
+    if not row.get("faster_from_hf_verdict"):
+      row["faster_from_hf_verdict"] = "—"
+    if not row.get("faster_already_orbax_verdict"):
+      row["faster_already_orbax_verdict"] = "—"
+    row.setdefault("_preserve_log_url", True)
+    row.setdefault("_v2_run_status", "EXTERNAL")
+    out.append(row)
+
+  _attach_v2_pair_speedups(out)
+  out.sort(key=lambda r: _make_summary_sort_key(r, models_by_name))
+  return out
 
 
 def build_v2_dataset(
@@ -1418,6 +1573,8 @@ def populate_gpaste_urls(
   # 1. Inspect executed Summary rows (both OK and failed/skipped).
   summary_keys: list[tuple[dict[str, Any], str]] = []
   for row in dataset.summary_rows:
+    if row.get("_preserve_log_url"):
+      continue
     status = str(row.get("run_status") or "")
     if status in ("", "PENDING"):
       continue
@@ -1615,7 +1772,10 @@ def build_gsheets_batches(
     raw_ops.append({"op": "write", "range": f"Progress!D{r_idx}", "data": [[s1_cnt]]})
 
   planned_v2_rows = [
-      r for r in dataset.summary_rows if str(r.get("_v2_run_status") or r.get("run_status")) != "LEGACY_ONLY"
+      r
+      for r in dataset.summary_rows
+      if str(r.get("row_id") or "").startswith("v2|")
+      and str(r.get("_v2_run_status") or r.get("run_status")) not in ("LEGACY_ONLY", "EXTERNAL")
   ]
   for r_idx, plat in ((7, "v7x"), (8, "v6e"), (9, "v5e")):
     p_rows = [r for r in planned_v2_rows if r.get("tpu_platform") == plat]

@@ -34,6 +34,15 @@ class SchemaV2Test(unittest.TestCase):
       self.assertEqual(len(keys), len(set(keys)), f"Duplicate keys in {tab_name}")
       self.assertGreater(len(keys), 20, tab_name)
 
+  def test_summary_columns_include_plain_english_verdicts_after_speedups(self):
+    keys = [c.key for c in schema_v2.SUMMARY_COLUMNS]
+    self.assertEqual(len(keys), 37)
+    load_speedup_idx = keys.index("speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2")
+    self.assertEqual(keys[load_speedup_idx + 1], "faster_from_hf_verdict")
+    self.assertEqual(keys[load_speedup_idx + 2], "faster_already_orbax_verdict")
+    self.assertEqual(schema_v2.SUMMARY_COLUMNS[load_speedup_idx + 1].fmt, "t")
+    self.assertEqual(schema_v2.SUMMARY_COLUMNS[load_speedup_idx + 2].fmt, "t")
+
   def test_make_row_id_and_status_normalization(self):
     self.assertEqual(
         schema_v2.make_row_id("v2", "v7x", "qwen3-0.6b", "scanned", "to_maxtext", 2, "2x2x1"),
