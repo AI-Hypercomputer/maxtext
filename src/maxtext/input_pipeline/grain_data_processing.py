@@ -381,9 +381,12 @@ def get_datasets(
           if file_instructions is not None
           else find_data_files(pattern, hf_access_token=hf_access_token)
       )
-      reader_options = (
-          {"index_storage_option": grain_index_storage_option} if grain_index_storage_option is not None else None
-      )
+      if grain_index_storage_option == "offloaded":
+        reader_options = {"index_storage_option": "offloaded", "footer_prefetch_bytes": "0"}
+      elif grain_index_storage_option is not None:
+        reader_options = {"index_storage_option": grain_index_storage_option}
+      else:
+        reader_options = None
       source = grain.ArrayRecordDataSource(files, reader_options=reader_options)
       return grain.MapDataset.source(source)
 

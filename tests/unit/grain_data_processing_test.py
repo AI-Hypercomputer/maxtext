@@ -390,7 +390,7 @@ class TestGrainArrayRecordDataSource:
       [
           (None, None),
           ("in_memory", {"index_storage_option": "in_memory"}),
-          ("offloaded", {"index_storage_option": "offloaded"}),
+          ("offloaded", {"index_storage_option": "offloaded", "footer_prefetch_bytes": "0"}),
       ],
   )
   def test_index_storage_option_passed_to_arrayrecord_reader(self, grain_index_storage_option, expected_reader_options):
@@ -418,6 +418,32 @@ class TestGrainArrayRecordDataSource:
       )
 
     data_source.assert_called_once_with(["data.arrayrecord"], reader_options=expected_reader_options)
+
+  def test_offloaded_index_storage_reads_records(self, tmp_path):
+    from array_record.python import array_record_module  # pylint: disable=import-outside-toplevel
+
+    shard_path = str(tmp_path / "shard.array_record")
+    writer = array_record_module.ArrayRecordWriter(shard_path, "group_size:1")
+    writer.write(b"record_0")
+    writer.write(b"record_1")
+    writer.close()
+
+    ds = grain_data_processing.get_datasets(
+        shard_path,
+        "arrayrecord",
+        shuffle=False,
+        shuffle_seed=0,
+        shuffle_buffer_size=1,
+        num_epoch=1,
+        dataloading_host_index=0,
+        dataloading_host_count=1,
+        grain_worker_count=0,
+        grain_num_threads=1,
+        grain_prefetch_buffer_size=1,
+        grain_data_source_max_workers=1,
+        grain_index_storage_option="offloaded",
+    )
+    assert list(ds) == [b"record_0", b"record_1"]
 
 
 def _extract_file_instructions(**kwargs):
