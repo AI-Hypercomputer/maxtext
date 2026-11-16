@@ -82,16 +82,31 @@ from maxtext.utils.sharding import (
 )
 import numpy as np
 from tokamax._src.ops.attention import base as tokamax_attention_base
-from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask
+
+# tokamax 0.0.18.dev20261102 moved splash attention out of `experimental/tpu/` and removed the old
+# path. The TPU post-training environment (pinned by tpu-inference) uses the new layout, while the
+# pre-training, GPU and decoupled environments still use releases with the old one, so accept both.
+try:
+  from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+  from tokamax._src.ops.splash_attention import splash_attention_mask as tokamax_splash_mask
+except ImportError:
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_kernel as tokamax_splash_kernel
+  from tokamax._src.ops.experimental.tpu.splash_attention import splash_attention_mask as tokamax_splash_mask
 
 
 def _tokamax_gpu_flash_attention():
   """Returns tokamax's Triton GPU flash attention op.
 
   Imported lazily: its module imports `jax_triton` at import time, which is not installed on TPU.
+  tokamax 0.0.17 added `attention.triton.TritonFlashAttention`; older releases only have
+  `attention.pallas_triton.PallasTritonFlashAttention`.
   """
-  from tokamax._src.ops.attention.triton import TritonFlashAttention  # pylint: disable=import-outside-toplevel
+  # pylint: disable=import-outside-toplevel
+  try:
+    from tokamax._src.ops.attention.triton import TritonFlashAttention
+  except ImportError:
+    from tokamax._src.ops.attention.pallas_triton import PallasTritonFlashAttention as TritonFlashAttention
+  # pylint: enable=import-outside-toplevel
 
   return TritonFlashAttention()
 
