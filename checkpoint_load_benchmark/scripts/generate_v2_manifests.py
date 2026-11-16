@@ -105,6 +105,8 @@ def main(argv: Sequence[str] | None = None) -> int:
   qt.add_argument("--experiment-name", default="mesa-bench-v2")
   qt.add_argument("--run-prefix", required=True)
   qt.add_argument("--tiers", nargs="+", default=["S", "A", "C", "B"])
+  qt.add_argument("--models", nargs="+", default=None, help="Optional subset of model names")
+  qt.add_argument("--skip-to-maxtext", action="store_true", help="Run safetensors_dynamic only")
   qt.add_argument("--out", default=None)
   qt.add_argument("--upload", default="", help="Optional gs://.../tasks.json URI to write directly")
 
@@ -162,6 +164,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         experiment_name=args.experiment_name,
         run_prefix=args.run_prefix,
         tiers=args.tiers,
+        models=args.models,
+        skip_to_maxtext=args.skip_to_maxtext,
     )
     _write_json_doc({"platform": args.platform, "tasks": tasks}, args.out, upload_gcs=args.upload)
   return 0

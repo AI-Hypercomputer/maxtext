@@ -235,5 +235,59 @@ class GetParallelismFlagsTest(unittest.TestCase):
     self.assertFalse(any(f.startswith("ici_data_parallelism=") for f in flags_64))
 
 
+class ShouldStageSparseBf16Test(unittest.TestCase):
+  """Synthetic sparse DeepSeek files must never replace a real checkpoint staged in GCS."""
+
+  def setUp(self):
+    super().setUp()
+    keys = ("STAGE_SPARSE_DEEPSEEK_OOM", "STAGE_SPARSE_ALL_LARGE", "BENCH_SAFETENSORS_GCS_DIR")
+    saved = {k: os.environ.get(k) for k in keys}
+
+    def _restore():
+      for k, v in saved.items():
+        if v is None:
+          os.environ.pop(k, None)
+        else:
+          os.environ[k] = v
+
+    self.addCleanup(_restore)
+    for k in keys:
+      os.environ.pop(k, None)
+
+  def test_stages_sparse_files_when_no_gcs_checkpoint_is_set(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    self.assertTrue(harness._should_stage_sparse_bf16("deepseek3-671b"))
+
+  def test_loads_the_real_gcs_checkpoint_even_with_the_sparse_flag(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    os.environ["BENCH_SAFETENSORS_GCS_DIR"] = "gs://bucket/mesa-bench-v2/hf_cache_bf16/deepseek3-671b"
+    self.assertFalse(harness._should_stage_sparse_bf16("deepseek3-671b"))
+
+  def test_loads_the_real_gcs_checkpoint_even_with_the_all_large_flag(self):
+    os.environ["STAGE_SPARSE_ALL_LARGE"] = "1"
+    os.environ["BENCH_SAFETENSORS_GCS_DIR"] = "gs://bucket/mesa-bench-v2/hf_cache/qwen3-480b-a35b"
+    self.assertFalse(harness._should_stage_sparse_bf16("qwen3-480b-a35b"))
+
+  def test_ignores_a_blank_gcs_checkpoint_dir(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    os.environ["BENCH_SAFETENSORS_GCS_DIR"] = "  "
+    self.assertTrue(harness._should_stage_sparse_bf16("deepseek4-1600b"))
+
+  def test_source_fields_label_sparse_staging_as_synthetic(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    self.assertEqual(
+        harness._checkpoint_source_fields("deepseek4-284b", "/tmp/hf_local_deepseek4-284b"),
+        {"checkpoint_weights_kind": "synthetic_sparse", "checkpoint_load_source_uri": "/tmp/hf_local_deepseek4-284b"},
+    )
+
+  def test_source_fields_label_a_gcs_checkpoint_as_real(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    os.environ["BENCH_SAFETENSORS_GCS_DIR"] = "gs://b/hf_cache_bf16/deepseek4-284b"
+    self.assertEqual(
+        harness._checkpoint_source_fields("deepseek4-284b", "gs://b/hf_cache_bf16/deepseek4-284b"),
+        {"checkpoint_weights_kind": "real", "checkpoint_load_source_uri": "gs://b/hf_cache_bf16/deepseek4-284b"},
+    )
+
+
 if __name__ == "__main__":
   unittest.main()

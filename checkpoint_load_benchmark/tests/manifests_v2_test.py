@@ -111,8 +111,18 @@ class ManifestsV2Test(unittest.TestCase):
     self.assertTrue(all("--verify-checksums" in t["args"] for t in tier_a_tasks))
     self.assertTrue(
         all(
-            "STAGE_SPARSE_DEEPSEEK_OOM" in t["env"]
+            "STAGE_SPARSE_DEEPSEEK_OOM" not in t["env"]
             for t in tasks_v6e
+            if t["model"].startswith("deepseek3") or t["model"].startswith("deepseek4")
+        )
+    )
+    sparse_v6e = manifests_v2.build_planned_queue_tasks(
+        platform="v6e", experiment_name="exp2", run_prefix="v2", clean_sparse_env=True
+    )
+    self.assertTrue(
+        all(
+            "STAGE_SPARSE_DEEPSEEK_OOM" in t["env"]
+            for t in sparse_v6e
             if t["model"].startswith("deepseek3") or t["model"].startswith("deepseek4")
         )
     )
@@ -151,6 +161,40 @@ class ManifestsV2Test(unittest.TestCase):
     with open(cp_yaml, "r", encoding="utf-8") as f:
       docs = list(yaml.safe_load_all(f))
     self.assertEqual(docs[0]["kind"], "Job")
+
+  DEEPSEEK_BIG = ["deepseek4-284b", "deepseek3-671b", "deepseek3.2-671b", "deepseek4-1600b"]
+
+  def test_real_weight_deepseek_queue_reads_the_regional_bf16_checkpoint(self):
+    expected_counts = {"v7x": 7, "v6e": 4, "v5e": 4}
+    for platform, count in expected_counts.items():
+      tasks = manifests_v2.build_planned_queue_tasks(
+          platform=platform,
+          experiment_name="exp-real",
+          run_prefix="v2real",
+          tiers=("C",),
+          models=self.DEEPSEEK_BIG,
+          skip_to_maxtext=True,
+      )
+      self.assertEqual(len(tasks), count, platform)
+      for t in tasks:
+        self.assertIn(t["model"], self.DEEPSEEK_BIG)
+        self.assertIn("--skip-to-maxtext", t["args"])
+        self.assertNotIn("STAGE_SPARSE_DEEPSEEK_OOM", t["env"])
+        self.assertTrue(t["env"]["BENCH_SAFETENSORS_GCS_DIR"].endswith(f"/hf_cache_bf16/{t['model']}"))
+        self.assertTrue(t["env"]["BENCH_RUN_ID"].startswith(f"v2real-{platform}-"))
+
+  def test_queue_tasks_cli_filters_models_and_skips_to_maxtext(self):
+    tmp_dir = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, tmp_dir)
+    q_json = os.path.join(tmp_dir, "tasks.json")
+    argv = ["queue-tasks", "--platform", "v6e", "--run-prefix", "v2real", "--tiers", "C", "--skip-to-maxtext"]
+    argv += ["--models", *self.DEEPSEEK_BIG, "--out", q_json]
+    self.assertEqual(generate_v2_manifests.main(argv), 0)
+    with open(q_json, "r", encoding="utf-8") as f:
+      loaded = json.load(f)
+    self.assertEqual(sorted({t["model"] for t in loaded["tasks"]}), sorted(self.DEEPSEEK_BIG))
+    self.assertEqual(len(loaded["tasks"]), 4)
+    self.assertTrue(all("--skip-to-maxtext" in t["args"] for t in loaded["tasks"]))
 
 
 if __name__ == "__main__":

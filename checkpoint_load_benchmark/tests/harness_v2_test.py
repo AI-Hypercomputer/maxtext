@@ -217,6 +217,41 @@ class HarnessV2Test(unittest.TestCase):
     self.assertAlmostEqual(v2_rec["safetensors_dynamic_step2_read_from_gcs_to_host_ram_gb"], 0.75)
     self.assertAlmostEqual(v2_rec["safetensors_dynamic_step2_bytes_read_divided_by_bytes_needed_ratio"], 1.0)
 
+  def _minimal_record(self, pipeline_config=None):
+    return harness_v2.build_v2_phase_record(
+        phase="safetensors_dynamic",
+        model_name="deepseek3-671b",
+        scan_mode="scanned",
+        platform_name="v6e",
+        num_slices=1,
+        num_hosts_per_slice=64,
+        topology="16x16",
+        raw_worker_data={},
+        merged_stages={},
+        env_meta={"run_id": "v2real-test"},
+        code_ver={},
+        hw_info={},
+        pkg_versions={},
+        started_at_utc="2026-11-16T00:00:00Z",
+        finished_at_utc="2026-11-16T00:01:00Z",
+        wall_clock_s=60.0,
+        run_status="FAILED",
+        cache_state="empty",
+        pipeline_config=pipeline_config,
+    )
+
+  def test_record_reports_synthetic_sparse_weights_and_the_load_source(self):
+    rec = self._minimal_record(
+        {"checkpoint_weights_kind": "synthetic_sparse", "checkpoint_load_source_uri": "/tmp/hf_local_deepseek3-671b"}
+    )
+    self.assertEqual(rec["checkpoint_weights_kind"], "synthetic_sparse")
+    self.assertEqual(rec["checkpoint_load_source_uri"], "/tmp/hf_local_deepseek3-671b")
+
+  def test_record_reports_real_weights_when_the_pipeline_does_not_say_otherwise(self):
+    rec = self._minimal_record()
+    self.assertEqual(rec["checkpoint_weights_kind"], "real")
+    self.assertEqual(rec["checkpoint_load_source_uri"], "")
+
   def test_worker_subprocess_emits_stages_with_low_unattributed_time(self):
     harness = _load_harness_module()
     tmp_dir = tempfile.mkdtemp()
