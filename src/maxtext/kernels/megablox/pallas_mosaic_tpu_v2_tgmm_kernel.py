@@ -667,6 +667,13 @@ def tgmm_kernel_main(
     semaphore_ref: DMA semaphore for the zeroing copies.
     cfgs: GmmConfigs object containing kernel configurations.
   """
+  if partial_sum_ref is not None:
+    partial_sum_ref = gmm_v2.pad_lanes(partial_sum_ref)
+  out_ref = gmm_v2.pad_lanes(out_ref)
+  if rhs_ref.scale is not None:
+    padded_scale = gmm_v2.pad_lanes(rhs_ref.scale)
+    rhs_ref = dataclasses.replace(rhs_ref, scale=padded_scale)
+
   num_groups_to_zero = 0
   if not cfgs.has_partial_sum:
     num_groups_to_zero = zero_out_start(
@@ -823,11 +830,14 @@ def tgmm_v2(
 
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = gmm_v2.align_to(dims.size_n, num_lanes)
+  use_unpadded_out = partial_sum is not None and gmm_v2.HAS_PAD_REF
+  out_n = dims.size_n if use_unpadded_out else aligned_n
   # Pad K up to a tile_k multiple so (a) every k-tile written by the matmul
   # stays in-bounds, and (b) the zero-init path can slice in sublane-aligned
   # chunks. tile_k is num_lanes-aligned, which is also sublane-tile-aligned.
   aligned_k = gmm_v2.align_to(dims.size_k, tiles.tile_k)
-  out_init = jax.ShapeDtypeStruct((num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype)
+  out_shape = (num_actual_groups, aligned_k, out_n)
+  out_init = jax.ShapeDtypeStruct(out_shape, cfgs.out_dtype)
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
       # acc_ref
@@ -853,7 +863,7 @@ def tgmm_v2(
 
   if rhs_scale is not None:
     rhs_scale = rhs_scale.astype(jnp.float32)
-    pad_n = aligned_n - dims.size_n
+    pad_n = 0 if gmm_v2.HAS_PAD_REF else aligned_n - dims.size_n
     if pad_n > 0:
       rhs_scale = jnp.pad(rhs_scale, ((0, 0), (0, 0), (0, pad_n)))
   rhs = OperandRef(value=rhs, scale=rhs_scale)  # pyrefly: ignore[bad-assignment]
@@ -861,7 +871,7 @@ def tgmm_v2(
   partial_sum_spec = None
   if partial_sum is not None:
     pad_k = aligned_k - dims.size_k
-    pad_n = aligned_n - dims.size_n
+    pad_n = out_n - dims.size_n
     if pad_k > 0 or pad_n > 0:
       partial_sum = jnp.pad(partial_sum, ((0, 0), (0, pad_k), (0, pad_n)))
     partial_sum_spec = hbm_spec

@@ -1300,6 +1300,71 @@ class GmmTest(parameterized.TestCase):
 
     chex.assert_trees_all_close(actual, expected, atol=atol, rtol=rtol)
 
+  def test_gmm_partial_sum_unaligned_n(self):
+    """Unaligned N gmm_v2 partial_sum aliases in-place without HLO pad."""
+    m, k, out_n, g = 128, 256, 576, 4
+    k0, k1, k2 = jax.random.split(jax.random.key(0), 3)
+    lhs = jax.random.normal(k0, (m, k), jnp.bfloat16)
+    rhs = jax.random.normal(k1, (g, out_n, k), jnp.bfloat16) * jnp.bfloat16(0.1)
+    ps = jax.random.normal(k2, (m, out_n), jnp.bfloat16)
+    gs = get_group_sizes(m, g)
+    tiles = gmm_backend.TileSizes(64, 256, 256)
+
+    fn = jax.jit(
+        lambda l, r, gsz, p: gmm_backend.gmm_v2(
+            l,
+            r,
+            gsz,
+            partial_sum=p,
+            tile_info=tiles,
+            preferred_element_type=jnp.bfloat16,
+            transpose_rhs=True,
+        ),
+        donate_argnums=(3,),
+    )
+    compiled = fn.lower(lhs, rhs, gs, ps).compile()
+    if gmm_backend.HAS_PAD_REF:
+      hlo_text = compiled.as_text() or ""
+      self.assertIn("output_to_operand_aliasing", hlo_text)
+      self.assertNotIn("pad(", hlo_text)
+    expected = reference_gmm(lhs, rhs.swapaxes(1, 2), gs, partial_sum=ps)
+    assert_arrays_all_close(compiled(lhs, rhs, gs, ps), expected)
+
+  def test_tgmm_partial_sum_unaligned_n(self):
+    """Unaligned N tgmm_v2 partial_sum aliases in-place without HLO pad."""
+    m, k, out_n, g = 128, 256, 500, 4
+    k0, k1, k2, k3 = jax.random.split(jax.random.key(1), 4)
+    lhs = jax.random.normal(k0, (m, k), jnp.bfloat16)
+    grad = jax.random.normal(k1, (m, out_n), jnp.bfloat16) * jnp.bfloat16(0.1)
+    ps = jax.random.normal(k2, (g, k, out_n), jnp.float32)
+    rhs_scale = jnp.abs(jax.random.normal(k3, (1, 1, out_n), jnp.float32)) * 0.5
+    gs = get_group_sizes(m, g)
+    tiles = gmm_backend.TileSizes(64, 256, 256)
+
+    fn = jax.jit(
+        lambda l, gr, gsz, p, sc: tgmm_backend.tgmm_v2(
+            l,
+            gr,
+            gsz,
+            g,
+            rhs_scale=sc,
+            partial_sum=p,
+            tile_info=tiles,
+            preferred_element_type=jnp.float32,
+        ),
+        donate_argnums=(3,),
+    )
+    compiled = fn.lower(lhs, grad, gs, ps, rhs_scale).compile()
+    if gmm_backend.HAS_PAD_REF:
+      hlo_text = compiled.as_text() or ""
+      self.assertIn("output_to_operand_aliasing", hlo_text)
+      self.assertNotIn("pad(", hlo_text)
+    grad_scaled = grad.astype(jnp.float32) * rhs_scale.reshape(1, out_n)
+    lhs_t = lhs.swapaxes(0, 1).astype(jnp.float32)
+    expected = reference_tgmm(lhs_t, grad_scaled, gs, g, partial_sum=ps)
+    actual = compiled(lhs, grad, gs, ps, rhs_scale)
+    chex.assert_trees_all_close(actual, expected, atol=1e-2, rtol=1e-2)
+
 
 if __name__ == "__main__":
   absltest.main()

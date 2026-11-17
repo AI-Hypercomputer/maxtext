@@ -29,6 +29,8 @@ import jax.numpy as jnp
 
 from maxtext.kernels.megablox import relayout
 
+HAS_PAD_REF: bool = hasattr(pl, "pad_ref")
+
 # Util.
 
 
@@ -77,6 +79,14 @@ def apply_act_fn(acc: jax.Array, fuse_act: str | None):
 
 def align_to(x, a):
   return pl.cdiv(x, a) * a
+
+
+def pad_lanes(ref: Any) -> Any:
+  """Pads the trailing lane dimension of `ref` to a multiple of `num_lanes`."""
+  aligned_n = align_to(ref.shape[-1], pltpu.get_tpu_info().num_lanes)
+  if ref.shape[-1] == aligned_n:
+    return ref
+  return pl.pad_ref(ref, (*ref.shape[:-1], aligned_n))
 
 
 # Define data classes.
@@ -1121,6 +1131,9 @@ def kernel_main(
 
   num_k = pl.cdiv(cfgs.dims.size_k, cfgs.tiles.tile_k)
   num_n = pl.cdiv(cfgs.out_size_n, cfgs.tiles.tile_n)
+  if partial_sum_ref is not None:
+    partial_sum_ref = pad_lanes(partial_sum_ref)
+  out_ref = pad_lanes(out_ref)
 
   # Pack along K (2nd minor dim) so that pltpu.bitcast can unpack inside the
   # kernel.
@@ -1792,14 +1805,21 @@ def gmm_v2(
     scratch_shapes += [None, None]
 
   aligned_n = align_to(cfgs.out_size_n, num_lanes)
+  use_unpadded_out = partial_sum is not None and HAS_PAD_REF
+  out_n = cfgs.out_size_n if use_unpadded_out else aligned_n
   if cfgs.out_is_3d:
     out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n // num_lanes, num_lanes), cfgs.out_dtype)
   else:
-    out_init = jax.ShapeDtypeStruct((dims.size_m, aligned_n), cfgs.out_dtype)
+    out_init = jax.ShapeDtypeStruct((dims.size_m, out_n), cfgs.out_dtype)
   lhs_in = LhsRef(value=lhs, scale=lhs_scale)
   rhs_weights = WeightsRef(weight=rhs, scale=rhs_scale, bias=rhs_bias)
   partial_sum_spec = None
   if partial_sum is not None:
+    if not cfgs.out_is_3d:
+      pad_m = dims.size_m - partial_sum.shape[0]
+      pad_n = out_n - partial_sum.shape[1]
+      if pad_m > 0 or pad_n > 0:
+        partial_sum = jnp.pad(partial_sum, ((0, pad_m), (0, pad_n)))
     partial_sum_spec = pl.BlockSpec(memory_space=pltpu.HBM)
 
   input_output_aliases = {}
