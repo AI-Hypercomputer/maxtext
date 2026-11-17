@@ -2205,6 +2205,10 @@ class CompressedAttention(Attention):
     # L1 normalize aggregated target distribution across compressed blocks
     target_probs = jnp.where(valid_tokens_mask[:, :, None], target_probs, 0.0)
     target_probs = target_probs / (jnp.sum(target_probs, axis=-1, keepdims=True) + EPS)
+    # The teacher is stop-gradient, so saving this (B, T, W) fp32 tensor lets the backward pass skip
+    # rematerializing the dense Q.K_comp teacher and its (B, H, T, W) fp32 softmax. Controlled by the
+    # `indexer_teacher` remat location (default 'remat': recompute, the previous behavior).
+    target_probs = checkpoint_name(target_probs, "indexer_teacher")
 
     # KL Divergence: KL(attention || indexer)
     log_target_probs = jnp.log(target_probs + EPS)
