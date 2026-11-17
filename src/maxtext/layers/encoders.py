@@ -85,6 +85,13 @@ class VisionEncoder(nnx.Module):
           self, encoder_name, qwen3_vl_vision.Qwen3VLVisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
       )
       setattr(self, projector_name, qwen3_vl_vision.Qwen3VLVisionProjector(config=self.config, rngs=self.rngs))
+    elif self.vision_encoder_block == VisionEncoderBlockType.DEEPSEEK41:
+      from maxtext.models import deepseek41_vision  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "DeepSeek41VisionEncoder_0"
+      projector_name = "DeepSeek41VisionProjector_0"
+      setattr(self, encoder_name, deepseek41_vision.DeepSeek41VisionEncoder(config=self.config, rngs=self.rngs))
+      setattr(self, projector_name, deepseek41_vision.DeepSeek41VisionProjector(config=self.config, rngs=self.rngs))
     else:
       supported_blocks = [block.value for block in VisionEncoderBlockType if block != VisionEncoderBlockType.NONE]
       raise ValueError(

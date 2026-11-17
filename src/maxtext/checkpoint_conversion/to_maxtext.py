@@ -95,7 +95,7 @@ def resolve_scale_key(key: str, container) -> str:
   return key
 
 
-def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray:
+def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16", is_ds41: bool = False) -> np.ndarray:
   """Converts a PyTorch tensor or NumPy array to the target NumPy format.
 
   Args:
@@ -139,6 +139,13 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
 
     return tensor.numpy()
 
+  if is_ds41:
+    arr = np.asarray(tensor)
+    if save_dtype in ("float32", DType.FLOAT32) and arr.dtype != np.float32:
+      return arr.astype(np.float32)
+    if save_dtype in ("bfloat16", DType.BFLOAT16) and arr.dtype != ml_dtypes.bfloat16:
+      return arr.astype(ml_dtypes.bfloat16)
+    return arr
   if isinstance(tensor, np.ndarray):
     if save_dtype in ("float32", DType.FLOAT32) and tensor.dtype != np.float32:
       return tensor.astype(np.float32)
@@ -152,6 +159,10 @@ _FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
 _FULL_PRECISION_SUBSTRINGS = (
     "-attn_hc-",
     "-ffn_hc-",
+    "-hc_attn_",
+    "-hc_ffn_",
+    "-hc_attn-",
+    "-hc_ffn-",
     "-hc_head-",
     "-self_attention-sinks",
     "-self_attention-indexer-k_norm-",
@@ -190,11 +201,12 @@ class LazyHFLoader:
   can still occur in parallel.
   """
 
-  def __init__(self, model_id, token, revision=None, save_dtype: str = "bfloat16"):
+  def __init__(self, model_id, token, revision=None, save_dtype: str = "bfloat16", is_ds41: bool = False):
     self.model_id = model_id
     self.token = token
     self.revision = revision
     self.save_dtype = save_dtype
+    self.is_ds41 = is_ds41
     # Whether loads from local directory
     self.is_local = os.path.isdir(self.model_id)
     self.shard_map = {}
@@ -293,7 +305,7 @@ class LazyHFLoader:
       framework = "pt" if torch is not None else "np"
       with safe_open(local_path, framework=framework, device="cpu") as f:
         t = f.get_tensor(resolved_key)
-        return _convert_tensor_to_numpy(t, dtype or self.save_dtype)
+        return _convert_tensor_to_numpy(t, dtype or self.save_dtype, is_ds41=self.is_ds41)
 
 
 class LazyTensor:
@@ -1047,10 +1059,12 @@ def main(
     hf_state_dict_numpy = None
     hf_loader = None
 
+    is_ds41 = config.model_name.startswith("deepseek4.1")
+
     # Define the appropriate tensor getter based on mode
     if lazy_load_tensors:
       max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
-      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision, save_dtype=save_dtype)
+      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision, save_dtype=save_dtype, is_ds41=is_ds41)
 
       print_ram_usage("After LazyLoader init")
       tensor_getter = hf_loader.get_tensor
@@ -1083,10 +1097,13 @@ def main(
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/config.json#L54
         hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, revision=revision, dtype="auto")
       elif eager_load_method == "safetensors":
-        max_logging.log("Eager load with Safetensors backend, safe_open with pt framework")
+        st_framework = "flax" if (is_ds41 and torch is None) else "pt"
+        max_logging.log(f"Eager load with Safetensors backend, safe_open with {st_framework} framework")
         # For safe_open, loaded dtype is the same as original safetensor
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/model.safetensors.index.json
-        hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, token=hf_token, revision=revision, framework="pt")
+        hf_state_dict_numpy = load_hf_dict_from_safetensors(
+            model_id, token=hf_token, revision=revision, framework=st_framework
+        )
       else:
         raise NotImplementedError
 
@@ -1117,7 +1134,7 @@ def main(
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
 
         v = hf_state_dict_numpy[resolved_key]
-        return _convert_tensor_to_numpy(v, dtype or save_dtype)
+        return _convert_tensor_to_numpy(v, dtype or save_dtype, is_ds41=is_ds41)
 
       tensor_getter = _eager_getter
 
@@ -1129,6 +1146,17 @@ def main(
     # load config
     hf_config_obj = HF_MODEL_CONFIGS[model_key]
     hf_config_dict = hf_config_obj.to_dict()
+    if is_ds41:
+      ckpt_config_path = os.path.join(model_id, "config.json") if model_id else ""
+      if ckpt_config_path and os.path.isfile(ckpt_config_path):
+        with open(ckpt_config_path, encoding="utf-8") as f:
+          ckpt_cfg = json.load(f)
+        if "quantization_config" in ckpt_cfg:
+          hf_config_dict["quantization_config"] = ckpt_cfg["quantization_config"]
+        elif isinstance(ckpt_cfg.get("text_config"), dict) and "quantization_config" in ckpt_cfg["text_config"]:
+          hf_config_dict["quantization_config"] = ckpt_cfg["text_config"]["quantization_config"]
+        else:
+          hf_config_dict.pop("quantization_config", None)
     # example of param mapping (gemma2, maxtext:huggingface):
     # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
     #   f"model.layers.{global_layer_idx}.input_layernorm.weight",
