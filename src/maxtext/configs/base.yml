@@ -354,13 +354,14 @@ moe_quantize_token_all_gather: false
 # Quantization method for output gradients before the All-Gather across EP shards in Ring-of-Experts backward pass (Token Combine)
 # Value: "" = unquantized BF16; "rowwise" = dynamic token-wise FP8 E5M2; "fixed,<bound>" = static per-tensor FP8 E5M2
 # With use_ring_of_experts=false it quantizes the Token Combine backward EP ragged all-to-all (leg 3) instead:
-# "", "rowwise" (= "rowwise@e5m2"), "rowwise@e4m3" or "rowwise@e5m2".
+# "", "rowwise" or "fixed,<bound>", with an optional "@e4m3" / "@e5m2" suffix (default e5m2).
 moe_quantize_combine_bwd_method: ""
-# FP8 quantization of the other EP ragged all-to-all legs (use_ring_of_experts=false): "" = unquantized;
-# "rowwise[@e4m3|@e5m2]" = FP8 values + one f32 absmax scale per token, dequantized after the collective.
-moe_quantize_dispatch_fwd_method: "" # Token Dispatch forward (leg 1); "rowwise" = "rowwise@e4m3"
-moe_quantize_combine_fwd_method: "" # Token Combine forward (leg 2); "rowwise" = "rowwise@e4m3"
-moe_quantize_dispatch_bwd_method: "" # Token Dispatch backward (leg 4); "rowwise" = "rowwise@e5m2"
+# FP8 quantization of the other EP ragged all-to-all legs (use_ring_of_experts=false), dequantized after the
+# collective: "" = unquantized; "<scaling>[@e4m3|@e5m2]" with scaling "rowwise" (one f32 absmax scale per token)
+# or "fixed,<bound>" (static scale bound / qmax; values beyond +-bound saturate).
+moe_quantize_dispatch_fwd_method: "" # Token Dispatch forward (leg 1); default format e4m3
+moe_quantize_combine_fwd_method: "" # Token Combine forward (leg 2); default format e4m3
+moe_quantize_dispatch_bwd_method: "" # Token Dispatch backward (leg 4); default format e5m2
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
 # If true, peel the 'expert' mesh axis off the MoE dispatch/MLP batch dim so the expert GEMM
 # stays expert-parallel (AllToAll); false keeps 'expert' on the batch dim (activation_batch_moe).
