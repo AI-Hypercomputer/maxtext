@@ -659,6 +659,10 @@ prefetch_fsdp_weights: false
 # and run them on the SparseCore dedicated to FSDP collectives. Hides them at the cost of extra HBM. Inhomogeneous
 # blocks prefetched per sub-layer defer them to the next sub-layer's step.
 prefetch_fsdp_defer_grad_reduce_scatter: false
+# With prefetch_fsdp_defer_grad_reduce_scatter=true on a multi-slice mesh with batch axes over DCN, pipeline
+# each weight gradient's DCN all-reduce one backward step behind its intra-slice FSDP reduce-scatter (set false
+# to fall back to single-stage reduction).
+prefetch_fsdp_two_stage_dcn: true
 # Training (scan_layers: true, shard_mode: 'auto'): hoist FSDP all-gathers of small scanned kernels (<= 16 MiB per
 # layer and <= 512 MiB per stacked tensor per device, such as MoE router GateLogit, small GQA K/V projections, and GDN
 # beta/alpha projections) out of the layer scan so each stack is gathered once over its FSDP axes (preserving tensor
