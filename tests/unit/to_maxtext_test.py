@@ -14,9 +14,12 @@
 
 """Tests for to_maxtext.py"""
 
+import types
 import unittest
+import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
+import orbax.checkpoint as ocp
 import pytest
 
 try:
@@ -32,6 +35,8 @@ from maxtext.checkpoint_conversion.to_maxtext import (
     _param_save_dtype,
     resolve_scale_key,
 )
+from maxtext.checkpoint_conversion.utils.utils import load_orbax_checkpoint, process_maxtext_param
+from maxtext.configs.types import DType
 
 
 class ResolveScaleKeyTest(unittest.TestCase):
@@ -93,6 +98,77 @@ class ParamSaveDtypeTest(unittest.TestCase):
   def test_other_params_keep_save_dtype(self):
     self.assertEqual(_param_save_dtype("params-decoder-layers_3-mlp-MoeBlock_0-gate-kernel", "bfloat16"), "bfloat16")
     self.assertEqual(_param_save_dtype(("params-a", "params-b"), "bfloat16"), "bfloat16")
+
+  def test_model_specific_float32_params(self):
+    muse_fp32_keys = (
+        "params-decoder-scanned_blocks-layers_0-moe_block-gate-kernel",
+        "params-decoder-scanned_blocks-layers_0-moe_block-gate-bias",
+        "params-decoder-scanned_blocks-layers_0-post_attention_residual_gate-gate",
+        "params-decoder-layers_0-post_feedforward_residual_gate-gate",
+    )
+    for key in muse_fp32_keys:
+      self.assertEqual(_param_save_dtype(key, "bfloat16", "muse-spark-816b-a42b"), "float32")
+      self.assertEqual(_param_save_dtype(key, DType.BFLOAT16, "muse-spark-816b-a42b"), "float32")
+      self.assertEqual(_param_save_dtype(key, jnp.bfloat16, "muse-spark-816b-a42b"), "float32")
+      self.assertEqual(_param_save_dtype(key, "bfloat16", "qwen3-30b-a3b"), "bfloat16")
+      self.assertEqual(_param_save_dtype(key, "bfloat16"), "bfloat16")
+
+  def test_process_maxtext_param_preserves_full_precision_keys(self):
+    arr = np.array([1.1234567, -0.9876543], dtype=np.float32)
+    gate_key = "params-decoder-layers_0-post_attention_residual_gate-gate"
+    proj_key = "params-decoder-layers_0-self_attention-query-kernel"
+    param_map = {gate_key: "hf.gate", proj_key: "hf.proj"}
+    hf_shape_map = {"hf.gate": [2], "hf.proj": [2]}
+    cfg = types.SimpleNamespace(weight_dtype=DType.BFLOAT16, model_name="muse-spark-816b-a42b")
+    gate_outputs = process_maxtext_param(gate_key, arr, param_map, {}, hf_shape_map, cfg)
+    proj_outputs = process_maxtext_param(proj_key, arr, param_map, {}, hf_shape_map, cfg)
+    self.assertEqual(len(gate_outputs), 1)
+    self.assertEqual(len(proj_outputs), 1)
+    gate_out, proj_out = gate_outputs[0][1], proj_outputs[0][1]
+    self.assertEqual(gate_out.dtype, np.float32)
+    np.testing.assert_array_equal(gate_out, arr)
+    self.assertEqual(proj_out.dtype, ml_dtypes.bfloat16)
+
+  def test_load_orbax_checkpoint_preserves_full_precision_keys(self):
+    import tempfile  # pylint: disable=import-outside-toplevel
+
+    fp32_vals = np.array([47.3456789, -16.061234], dtype=np.float32)
+    ckpt_tree = {
+        "params": {
+            "params": {
+                "decoder": {
+                    "layers_0": {
+                        "post_attention_residual_gate": {"gate": fp32_vals},
+                        "moe_block": {"gate": {"kernel": fp32_vals}},
+                        "self_attention": {"query": {"kernel": fp32_vals}},
+                    }
+                }
+            },
+            "MoEBiasVar": {"decoder": {"layers_0": {"moe_block": {"gate": {"bias": fp32_vals}}}}},
+        }
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+      ckpt_dir = f"{tmpdir}/ckpt"
+      ckptr = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
+      ckptr.save(ckpt_dir, args=ocp.args.PyTreeSave(ckpt_tree))
+      cfg = types.SimpleNamespace(
+          load_parameters_path=ckpt_dir,
+          lora=types.SimpleNamespace(lora_restore_path=""),
+          checkpoint_storage_concurrent_gb=1,
+          checkpoint_storage_use_ocdbt=True,
+          checkpoint_storage_use_zarr3=False,
+          weight_dtype=jnp.bfloat16,
+          model_name="muse-spark-816b-a42b",
+      )
+      restored = load_orbax_checkpoint(cfg)
+    layers_0 = restored["params"]["params"]["decoder"]["layers_0"]
+    bias = restored["params"]["MoEBiasVar"]["decoder"]["layers_0"]["moe_block"]["gate"]["bias"]
+    self.assertEqual(layers_0["post_attention_residual_gate"]["gate"].dtype, jnp.float32)
+    np.testing.assert_array_equal(np.asarray(layers_0["post_attention_residual_gate"]["gate"]), fp32_vals)
+    self.assertEqual(layers_0["moe_block"]["gate"]["kernel"].dtype, jnp.float32)
+    self.assertEqual(bias.dtype, jnp.float32)
+    np.testing.assert_array_equal(np.asarray(bias), fp32_vals)
+    self.assertEqual(layers_0["self_attention"]["query"]["kernel"].dtype, jnp.bfloat16)
 
   def test_non_bf16_save_dtype_unchanged(self):
     self.assertEqual(_param_save_dtype("MoEBiasVar-x", "float8_e4m3fn"), "float8_e4m3fn")
