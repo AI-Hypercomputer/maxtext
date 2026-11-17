@@ -101,6 +101,9 @@ enable_orbax_v1: false
 checkpoint_conversion_fn: none
 # optional checkpoint context to use for loading. options: "orbax", "safetensors"
 source_checkpoint_layout: "orbax"
+# Experimental, only with source_checkpoint_layout="safetensors_dynamic": stream the HF checkpoint
+# a few decoder layers at a time (hf_streaming_load) instead of reading all of it into HBM first.
+safetensors_dynamic_streaming: false
 
 # Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing
 colocated_python_checkpointing: false
