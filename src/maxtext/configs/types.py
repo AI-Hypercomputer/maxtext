@@ -353,6 +353,7 @@ ModelName = Literal[
     "granite-3.0-1b-a400m",
     "ming-3.0-audio-tiny",
     "hy4-preview",
+    "muse-spark-816b-a42b",
 ]
 
 
@@ -2169,6 +2170,27 @@ class Ming(BaseModel):
   )
 
 
+class MuseSpark(BaseModel):
+  """Configuration specific to Meta Muse-Spark models."""
+
+  muse_spark_post_norm_eps: float = Field(
+      1.0e-8,
+      description="Epsilon for Muse-Spark post-attention, post-expert, and post-feedforward RMSNorm layers.",
+  )
+  muse_spark_qk_scale_factor: float = Field(
+      5.4730064863875,
+      description="Multiplicative scale factor applied to query after scaleless QK RMSNorm.",
+  )
+  muse_spark_output_multiplier: float = Field(
+      0.17677669529663687,
+      description="Multiplicative scale factor applied to MoE router logits and final output head logits.",
+  )
+  muse_spark_residual_gate_temperature: float = Field(
+      0.3,
+      description="Temperature scaling factor for learnable Muse-Spark residual gates.",
+  )
+
+
 class Qwen3Next(BaseModel):
   """Configuration specific to Qwen3-Next models with Gated Delta Net."""
 
@@ -2851,6 +2873,13 @@ class RematAndOffload(BaseModel):
           "and group sizes)."
       ),
   )
+  moe_combined: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the combined MoE output before post_expert_proj. 'device' saves the [B, S, D] tensor so the"
+          " backward pass does not recompute the expert combine."
+      ),
+  )
   # TODO: Update to moe_tc_routing_weights.
   moe_tc_routing_checkpoint: RematLocation = Field(
       RematLocation.REMAT,
@@ -2907,6 +2936,10 @@ class RematAndOffload(BaseModel):
   attention_out: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the attention output.",
+  )
+  pre_expert_norm: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the input of the pre-expert norm (the pre_expert_proj output).",
   )
   engram: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the engram output.")
   gdn: RematLocation = Field(
@@ -4866,6 +4899,7 @@ FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS = (
     DecoderBlockType.QWEN3_5,
     DecoderBlockType.MIXTRAL,
     DecoderBlockType.GEMMA4,
+    DecoderBlockType.MUSE_SPARK,
 )
 
 
@@ -5150,6 +5184,7 @@ class MaxTextConfig(
     Qwen3_8FlashNext,
     Ming,
     KimiK3,
+    MuseSpark,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -6485,6 +6520,7 @@ class MaxTextConfig(
           "moe_mlpwi_0",
           "moe_x_sorted",
           "moe_routing_maps",
+          "moe_combined",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
@@ -6506,6 +6542,7 @@ class MaxTextConfig(
           "gdn",
           "gdn_states",
           "gdn_cp_state",
+          "pre_expert_norm",
       ]
       if self.gdn in ("device", "offload") and self.gdn_states in ("device", "offload") and self.gdn != self.gdn_states:
         raise ValueError(
@@ -8253,6 +8290,7 @@ class RLConfig(
     Qwen3Next,
     Qwen3_8FlashNext,
     Ming,
+    MuseSpark,
     MultimodalGeneral,
     Muon,
     FineTuning,
@@ -8642,6 +8680,7 @@ class RLConfig(
           "moe_mlpwi_0",
           "moe_x_sorted",
           "moe_routing_maps",
+          "moe_combined",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
@@ -8662,6 +8701,7 @@ class RLConfig(
           "gdn",
           "gdn_states",
           "gdn_cp_state",
+          "pre_expert_norm",
       ]
       if self.gdn in ("device", "offload") and self.gdn_states in ("device", "offload") and self.gdn != self.gdn_states:
         raise ValueError(
