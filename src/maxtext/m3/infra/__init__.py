@@ -17,6 +17,7 @@
 Modules:
   * `scan.py` — layer stacking via `jax.lax.scan` + `maybe_apply_scan`.
   * `remat.py` — path-transparent remat policies, `maybe_apply_remat`, and `check_tags`.
+  * `fsdp_prefetch.py` — double-buffered FSDP weight prefetch & deferred reduce-scatter for `ScannedLayers`.
   * `quantization.py` — `maybe_quantize`: qwix int8 / fp8 by interception, over
     the projection layers of the decoder stack.
   * `named_scopes.py` — `jax.named_scope` per submodule, so profiles and HLO
@@ -27,7 +28,7 @@ Planned modules:
 
 Composition order is fixed, and `maxtext.m3.train.loop.setup_model` is the
 reference for it:
-`construct -> scan -> remat -> quantize -> named scopes -> optimizer -> host offload`.
+`construct -> scan -> remat -> fsdp_prefetch -> quantize -> named scopes -> optimizer -> host offload`.
 
 None of these wrap the model in another module, and quantization leaves the
 variable tree untouched (asserted). Standard `nnx.Sequential` models rely only

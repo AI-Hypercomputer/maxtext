@@ -93,6 +93,7 @@ from maxtext.m3.core.sharding import (
     project_spec_to_mesh,
     sharding_from_config,
 )
+from maxtext.m3.infra import fsdp_prefetch as m3_fsdp_prefetch
 from maxtext.m3.infra import quantization
 from maxtext.m3.infra import remat as m3_remat
 from maxtext.m3.infra import scan as m3_scan
@@ -127,6 +128,7 @@ def setup_model(config, mesh: Mesh, sharding: Sharding | None = None) -> tuple[n
   model = m3_remat.maybe_apply_remat(model, config)
   sharding_obj = sharding or sharding_from_config(config)
   m3_remat.check_model_tags(model, config, mesh=mesh, sharding=sharding_obj)
+  model = m3_fsdp_prefetch.maybe_apply_fsdp_prefetch(model, config, mesh=mesh)
   if getattr(config, "quantization", "") and ambient_mesh_is_explicit():
     raise ValueError(
         "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized matmuls. "
