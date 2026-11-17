@@ -586,6 +586,14 @@ class StreamingLoadTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "no HF tensor for params-decoder-decoder_norm-scale"):
       self._load("llama", scan_layers=True, edit_maps=no_hf_norm)
 
+  def test_tuple_hf_key_without_hook_raises(self):
+    def tuple_without_hook(param_map, hook_map):
+      param_map["params-decoder-logits_dense-kernel"] = ("model.embed_tokens.weight", "lm_head.weight")
+      hook_map.pop("params-decoder-logits_dense-kernel", None)
+
+    with self.assertRaisesRegex(ValueError, "tuple of HF tensors for params-decoder-logits_dense-kernel"):
+      self._load("llama", scan_layers=True, edit_maps=tuple_without_hook)
+
 
 class Float8SourceTest(parameterized.TestCase):
   """An FP8 HF tensor must not be cast into a wider MaxText weight without its scales."""
@@ -683,15 +691,19 @@ class DeepSeekV4LayoutTest(parameterized.TestCase):
     restored = hf_streaming_load.load_hf_params_streaming(
         ckpt_dir, target_tree, param_map, hook_map, _config(scan_layers=True), min_bytes_to_split=0
     )
-    self.assertEqual(set(restored), {"params", "MoEBiasVar"})
-    np.testing.assert_array_equal(
-        np.asarray(restored["MoEBiasVar"]["decoder"]["layers"]["MoeBlock_0"]["gate"]["bias"]),
-        np.stack([hf[f"layers.{i}.ffn.gate.bias"] for i in range(_LAYERS)]),
+    transformed = load_dynamic.transform_hf_state_to_mt_state(
+        dict(hf), target_tree, param_map, hook_map, _config(scan_layers=True)
     )
-    np.testing.assert_array_equal(
-        np.asarray(restored["params"]["decoder"]["layers_0"]["MoeBlock_0"]["wi_0"]),
-        np.stack([hf[f"layers.0.ffn.experts.{e}.w1.weight"].T for e in range(_EXPERTS)]),
-    )
+    for got in (restored, transformed):
+      self.assertEqual(set(got), {"params", "MoEBiasVar"})
+      np.testing.assert_array_equal(
+          np.asarray(got["MoEBiasVar"]["decoder"]["layers"]["MoeBlock_0"]["gate"]["bias"]),
+          np.stack([hf[f"layers.{i}.ffn.gate.bias"] for i in range(_LAYERS)]),
+      )
+      np.testing.assert_array_equal(
+          np.asarray(got["params"]["decoder"]["layers_0"]["MoeBlock_0"]["wi_0"]),
+          np.stack([hf[f"layers.0.ffn.experts.{e}.w1.weight"].T for e in range(_EXPERTS)]),
+      )
 
 
 if __name__ == "__main__":

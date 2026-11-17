@@ -46,6 +46,7 @@ from typing import Any, Callable, Iterator
 import flax.traverse_util
 import jax
 import jax.numpy as jnp
+from maxtext.checkpoint_conversion.utils import dequantize
 from maxtext.checkpoint_conversion.utils import safetensors_reader
 from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.utils import max_logging
@@ -167,6 +168,7 @@ class _Write:
   targets: tuple[_Target, ...]
   index: tuple[int, ...]
   hf_source: str | tuple[str, ...]  # One HF key, or a tuple the hook fuses into one tensor.
+  scale_keys: dict[str, str] = dataclasses.field(default_factory=dict, compare=False, hash=False)
 
   @property
   def target(self) -> _Target:
@@ -294,11 +296,17 @@ def _group_bytes_per_host(group: list[_Write], hf_metadata: dict, min_bytes_to_s
   A tensor split into `factor` pieces is read in `min(factor, process_count)` parts, one per
   host at most: a tensor that isn't split is read in full on every host.
   """
+  seen_scales = set()
   total = 0
   for key, write in {key: write for write in group for key in write.hf_keys}.items():
     meta = hf_metadata[key]
     factor = load_split_factor(meta.shape, meta.dtype, len(_devices_of(write.target.sharding)), min_bytes_to_split)
     total += _nbytes(meta) // min(factor, jax.process_count())
+  for write in group:
+    for s_key in write.scale_keys.values():
+      if s_key not in seen_scales:
+        seen_scales.add(s_key)
+        total += _nbytes(hf_metadata[s_key])
   return total
 
 
@@ -389,8 +397,11 @@ def build_plan(param_map: dict, hook_map: dict, target_tree: Any, config) -> Loa
         raise ValueError(f"Param mapping gives no HF tensor for {mt_key}, so it needs exactly one weight and a hook.")
       generated.append(parts[0])
       continue
+    entries = list(_enumerate_sources(hf_source, parts[0]))
+    if parts[0].hooks is None and any(isinstance(source, tuple) for _, source in entries):
+      raise ValueError(f"Param mapping gives a tuple of HF tensors for {mt_key}, so it needs a hook.")
     targets.extend(parts)
-    writes.extend(_Write(tuple(parts), index, source) for index, source in _enumerate_sources(hf_source, parts[0]))
+    writes.extend(_Write(tuple(parts), index, source) for index, source in entries)
 
   groups = collections.defaultdict(list)
   for write in writes:
@@ -427,50 +438,49 @@ def _write_fn(dtype, sharding, axes, ndim):
   return jax.jit(write, donate_argnums=0, out_shardings=sharding)
 
 
-def _check_sources(plan: LoadPlan, hf_metadata: dict):
-  """Raises if a mapped HF tensor is missing from the checkpoint; logs HF tensors nothing reads."""
+def _with_scale_keys(plan: LoadPlan, hf_metadata: dict) -> LoadPlan:
+  """Attaches companion block-scale keys to each quantized `_Write` and checks for unscaled FP8 casts."""
+  mapped_hf_keys = {key for group in plan.groups for write in group for key in write.hf_keys}
+  groups = []
+  for group in plan.groups:
+    new_group = []
+    for write in group:
+      target_dtypes = [t.dtype for t in write.targets]
+      w_scales = dequantize.resolve_source_scales(
+          write.hf_source, target_dtypes, hf_metadata, mapped_hf_keys, write.target.mt_key
+      )
+      new_group.append(dataclasses.replace(write, scale_keys=w_scales) if w_scales else write)
+    groups.append(new_group)
+  return dataclasses.replace(plan, groups=groups)
+
+
+def _check_missing_sources(plan: LoadPlan, hf_keys: dict):
+  """Raises if a mapped HF tensor is missing from the checkpoint."""
   needed = {}
   for group in plan.groups:
     for write in group:
       for key in write.hf_keys:
         needed.setdefault(key, write.target.mt_key)
-  missing = [key for key in needed if key not in hf_metadata]
+  missing = [key for key in needed if key not in hf_keys]
   if missing:
     examples = ", ".join(f"{key} (for {needed[key]})" for key in missing[:10])
     raise ValueError(f"{len(missing)} HF tensors in the param mapping are not in the checkpoint, e.g. {examples}.")
-  unused = sorted(set(hf_metadata) - set(needed))
+
+
+def _log_source_summary(plan: LoadPlan, hf_metadata: dict):
+  """Logs on-the-fly dequantization count, unused checkpoint tensors, and unmatched param-mapping keys."""
+  dequant_weights = {key for group in plan.groups for write in group for key in write.scale_keys}
+  scale_tensors = {s_key for group in plan.groups for write in group for s_key in write.scale_keys.values()}
+  if dequant_weights:
+    max_logging.log(f"On-the-fly dequantizing {len(dequant_weights)} quantized HF weights to bfloat16.")
+  used = {key for group in plan.groups for write in group for key in write.hf_keys} | scale_tensors
+  unused = sorted(set(hf_metadata) - used)
   if unused:
     max_logging.log(f"Not loading {len(unused)} HF tensors that no mapped MaxText weight uses, e.g. {unused[:5]}.")
   if plan.unmatched_mt_keys:
     max_logging.log(
         f"Skipping {len(plan.unmatched_mt_keys)} param-mapping entries with no weight in the target tree,"
         f" e.g. {plan.unmatched_mt_keys[:5]}."
-    )
-
-
-def _is_float8(dtype) -> bool:
-  return np.dtype(dtype).name.startswith("float8")
-
-
-def _check_float8_sources(plan: LoadPlan, hf_metadata: dict):
-  """Raises if an FP8 HF tensor would be cast into a wider MaxText weight without its scales.
-
-  A hook that gets the tensor together with its scales (a tuple HF source) can dequantize it. A lone
-  FP8 tensor would only be cast, leaving every block off by its scale with nothing to flag it (e.g. an
-  FP8 DeepSeek-V4 export with the bf16-only mapping).
-  """
-  bad = [
-      f"{write.hf_source} -> {write.target.name} ({write.target.dtype})"
-      for group in plan.groups
-      for write in group
-      if isinstance(write.hf_source, str)
-      and _is_float8(hf_metadata[write.hf_source].dtype)
-      and not _is_float8(write.target.dtype)
-  ]
-  if bad:
-    raise ValueError(
-        f"{len(bad)} FP8 HF tensors would be cast into wider MaxText weights without their scales, e.g."
-        f" {bad[:3]}. This param mapping reads no scales for them: load a bf16 export of the checkpoint."
     )
 
 
@@ -489,6 +499,13 @@ def _load_request(call: list[_Write], hf_metadata: dict, min_bytes_to_split: int
         # Request the file's own dtype: the reader never casts.
         sharding = choose_load_sharding(meta.shape, meta.dtype, devices, min_bytes_to_split, mesh_factor)
         request[key] = jax.ShapeDtypeStruct(meta.shape, meta.dtype, sharding=sharding)
+      if key in write.scale_keys and write.scale_keys[key] not in request:
+        s_key = write.scale_keys[key]
+        s_meta = hf_metadata[s_key]
+        # Replicate the tiny block-scale grid on the weight's load mesh so each TPU chip
+        # dequantizes its own row slice locally with no cross-host communication.
+        s_sharding = jax.sharding.NamedSharding(request[key].sharding.mesh, jax.sharding.PartitionSpec())
+        request[s_key] = jax.ShapeDtypeStruct(s_meta.shape, s_meta.dtype, sharding=s_sharding)
   return request
 
 
@@ -504,13 +521,25 @@ def _entry_sharding(target: _Target) -> jax.sharding.Sharding:
   return jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*entry_spec))
 
 
-def _apply_write(write: _Write, hf_arrays: dict, results: dict):
-  """Hooks one HF source, then casts and writes it into its MaxText weight(s)."""
+def _apply_write(
+    write: _Write,
+    hf_arrays: dict,
+    results: dict,
+    block_size: tuple[int, int] = (dequantize.DEFAULT_FP8_BLOCK_SIZE, dequantize.DEFAULT_FP8_BLOCK_SIZE),
+):
+  """Dequantizes (if quantized) and hooks one HF source, then casts and writes it into its MaxText weight(s)."""
   first = write.target
+
+  def get_array(key: str):
+    array = hf_arrays[key]
+    if key in write.scale_keys:
+      return dequantize.dequantize_weight(array, hf_arrays[write.scale_keys[key]], block_size=block_size)
+    return array
+
   if isinstance(write.hf_source, tuple):
-    raw = tuple(hf_arrays[key] for key in write.hf_source)
+    raw = tuple(get_array(key) for key in write.hf_source)
   else:
-    raw = hf_arrays[write.hf_source]
+    raw = get_array(write.hf_source)
   num = len(write.targets)
   # A tuple MaxText key: the hooks get one shape per weight, as in `to_maxtext`, and return the
   # weights stacked along a new last axis.
@@ -595,7 +624,7 @@ def load_hf_params_streaming(
       the target shardings. Linen's `params` collection or an NNX pure dict both work.
     param_map: MaxText key -> HF key(s), from `param_mapping.PARAM_MAPPING[model]`.
     hook_map: MaxText key -> hook function(s), from `param_mapping.HOOK_FNS[model]`.
-    config: The MaxText config (`scan_layers` and `param_scan_axis` are read).
+    config: The MaxText config (`scan_layers`, `param_scan_axis`, and `weight_block_size` are read).
     min_bytes_to_split: HF tensors smaller than this are loaded as a full copy on every TPU chip.
     read_bytes_per_host: About how many bytes of HF tensors each host reads per read call.
       Whole decoder layers are packed up to this; None reads the whole checkpoint in one call.
@@ -616,6 +645,7 @@ def load_hf_params_streaming(
     weight-mismatch check reports them.
   """
   t_start = time.time()
+  fp8_block_size = dequantize.resolve_fp8_block_size(config)
   plan = build_plan(param_map, hook_map, target_tree, config)
   with (
       safetensors_reader.SafetensorsReader(
@@ -626,10 +656,11 @@ def load_hf_params_streaming(
     stored = {key: key for key in reader.metadata}
     if rename_hf_keys is not None:
       stored = rename_hf_keys(stored)
-    _check_sources(plan, stored)
+    _check_missing_sources(plan, stored)
     plan = _with_stored_names(plan, stored)
     hf_metadata = reader.metadata
-    _check_float8_sources(plan, hf_metadata)
+    plan = _with_scale_keys(plan, hf_metadata)
+    _log_source_summary(plan, hf_metadata)
     sizes = [_group_bytes_per_host(group, hf_metadata, min_bytes_to_split) for group in plan.groups]
     spans = pack_groups(sizes, read_bytes_per_host)
     calls = [[write for i in span for write in plan.groups[i]] for span in spans]
@@ -659,7 +690,7 @@ def load_hf_params_streaming(
         hf_arrays = reader.unpack(fetched)
         del fetched
         for write in call:
-          _apply_write(write, hf_arrays, results)
+          _apply_write(write, hf_arrays, results, block_size=fp8_block_size)
         # Finish this call's writes before dropping its HF tensors, so at most one
         # call (two with prefetch) of HF tensors is held in HBM.
         jax.block_until_ready([results[t.name] for write in call for t in write.targets])

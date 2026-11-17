@@ -67,16 +67,18 @@ Note:
   - Weights from the Hugging Face Hub are cached under `<base_output_directory>/hf_cache/`, so
     `base_output_directory` must start with "gs://".
   - `hf_access_token` is required if downloading gated models.
-  - Loaded weights use `weight_dtype`, regardless of the checkpoint dtype.
-  - Only the training restore (`load_state_if_possible`) supports this layout; `from_pretrained` does
-    not.
+  - Loaded weights use `weight_dtype`, regardless of the checkpoint dtype. Block-scaled `FP8`
+    (`*_scale_inv` / `*.scale`) and packed `MXFP4` (`*.scale`) weights (e.g., official DeepSeek-V3 /
+    V3.2 / V4 Hugging Face checkpoints) are dequantized to `bfloat16` on the fly before casting to
+    `weight_dtype`.
+  - Supported by both training restore (`load_state_if_possible`) and `from_pretrained`.
   - The Pathways backend is not supported.
 """
 
 import collections
 import concurrent.futures
-import contextlib
 import functools
+import math
 import multiprocessing
 import os
 import random
@@ -87,9 +89,11 @@ import flax.traverse_util
 import huggingface_hub
 import jax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
+from maxtext.checkpoint_conversion.utils import dequantize
 from maxtext.checkpoint_conversion.utils import hf_model_configs
 from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import param_mapping
+from maxtext.checkpoint_conversion.utils import safetensors_reader
 from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.common.gcloud_stub import gcs_storage
 from maxtext.utils import gcs_utils
@@ -205,46 +209,103 @@ def _leading_axis_shardings(abstract_state, devices, num_groups=None):
   num_processes, num_local = mesh.devices.shape
 
   def leading_axis_sharding(sds):
-    rows = sds.shape[0] if sds.shape else 1
+    if not sds.shape:
+      return NamedSharding(mesh, PartitionSpec())
+    rows = sds.shape[0]
     if rows % (num_processes * num_local) == 0:
       return NamedSharding(mesh, PartitionSpec(("process", "local")))
-    if rows % num_processes == 0:
+    if num_processes > 1 and rows % num_processes == 0:
       return NamedSharding(mesh, PartitionSpec("process"))
     return NamedSharding(mesh, PartitionSpec())
 
+  if isinstance(abstract_state, dict):
+    return {
+        key: (
+            NamedSharding(mesh, PartitionSpec())
+            if dequantize.is_companion_scale_key(key, abstract_state)
+            else jax.tree.map(leading_axis_sharding, value)
+        )
+        for key, value in abstract_state.items()
+    }
   return jax.tree.map(leading_axis_sharding, abstract_state)
 
 
-@contextlib.contextmanager
-def _no_gcs_read_ahead():
-  """Makes gcsfs read only the requested bytes of a `gs://` file within this context.
+_FALLBACK_MAX_BYTES_PER_HOST = 4 << 30
 
-  Orbax reads each byte range through `epath`, whose `gs://` backend (gcsfs) also reads `default_block_size`
-  (5 MiB) ahead. Each host reads one range per tensor, so a host of DeepSeek-V3 on 128 hosts needed about
-  230 KB per tensor but downloaded 5.3 MB. The class attribute is set because gcsfs instances are cached per
-  thread and Orbax opens files from worker threads. Writes still use blocks of at least 256 KiB.
-  """
-  try:
-    import gcsfs  # pylint: disable=import-outside-toplevel
-  except ImportError:
-    yield
-    return
-  block_size = gcsfs.GCSFileSystem.default_block_size
-  gcsfs.GCSFileSystem.default_block_size = 0
-  try:
-    yield
-  finally:
-    gcsfs.GCSFileSystem.default_block_size = block_size
+
+def _load_sharded_via_safetensors_reader(path, devices, num_groups=None, max_bytes_per_host=_FALLBACK_MAX_BYTES_PER_HOST):
+  """Loads a SafeTensors checkpoint via `SafetensorsReader` when Orbax rejects header dtypes (e.g. `F8_E8M0`)."""
+  multi_process = num_groups is not None or jax.process_count() > 1
+  num_hosts = num_groups if num_groups is not None else max(jax.process_count(), 1)
+  with safetensors_reader.SafetensorsReader(path) as reader:
+    abstract_state = dict(reader.metadata)
+    shardings = (
+        _leading_axis_shardings(abstract_state, devices, num_groups)
+        if multi_process
+        else _single_process_shardings(abstract_state, devices)
+    )
+    request = {
+        key: jax.ShapeDtypeStruct(shape=sds.shape, dtype=sds.dtype, sharding=shardings[key])
+        for key, sds in abstract_state.items()
+    }
+    if not request or max_bytes_per_host is None:
+      return reader.read(request)
+
+    def _host_bytes(key: str) -> int:
+      sds = abstract_state[key]
+      nbytes = math.prod(sds.shape) * np.dtype(sds.dtype).itemsize
+      spec = shardings[key].spec if isinstance(shardings[key], NamedSharding) else ()
+      return nbytes // num_hosts if (multi_process and spec and spec[0] is not None) else nbytes
+
+    # Read in bounded deterministic batches so every host calls `reader.read` (`fetch` + `unpack`)
+    # in lockstep without allocating host/HBM buffers for all checkpoint shards at once.
+    hf_state = {}
+    batch_keys, batch_bytes = [], 0
+    for key in request:
+      size = _host_bytes(key)
+      if batch_keys and batch_bytes + size > max_bytes_per_host:
+        hf_state.update(reader.read({k: request[k] for k in batch_keys}))
+        batch_keys, batch_bytes = [], 0
+      batch_keys.append(key)
+      batch_bytes += size
+    if batch_keys:
+      hf_state.update(reader.read({k: request[k] for k in batch_keys}))
+    return hf_state
+
+
+def _single_process_shardings(abstract_state, devices):
+  """Constructs single-process shardings while keeping quantized weights axis-0 sharded and scales replicated."""
+  if not isinstance(abstract_state, dict):
+    return sharding_utils.construct_maximal_shardings(abstract_state, devices=devices)
+  quant_or_scale_keys = {
+      key
+      for key, sds in abstract_state.items()
+      if dequantize.is_companion_scale_key(key, abstract_state)
+      or (
+          dequantize.is_quantized_weight_dtype(getattr(sds, "dtype", None))
+          and dequantize.find_scale_key(key, abstract_state) is not None
+      )
+  }
+  if not quant_or_scale_keys:
+    return sharding_utils.construct_maximal_shardings(abstract_state, devices=devices)
+  leading = _leading_axis_shardings({k: abstract_state[k] for k in quant_or_scale_keys}, devices)
+  other_state = {k: v for k, v in abstract_state.items() if k not in quant_or_scale_keys}
+  other = sharding_utils.construct_maximal_shardings(other_state, devices=devices) if other_state else {}
+  return {k: leading[k] if k in leading else other[k] for k in abstract_state}
 
 
 def load_sharded_hf_state(path, num_groups=None):
   """Loads HF state sharded across the TPU mesh to avoid host OOM.
 
-  On one process, each tensor is sharded as much as possible. On several processes, each tensor is
-  sharded along its leading axis only; see `_leading_axis_shardings`.
+  On one process, each tensor is sharded as much as possible (except block-quantized weights and
+  their companion scales, which stay leading-axis sharded and replicated so per-shard dequantization
+  never splits inner dimensions). On several processes, each tensor is sharded along its leading
+  axis only; see `_leading_axis_shardings`.
 
   This holds the whole HF checkpoint in HBM at once. With `safetensors_dynamic_streaming=True`,
   `load_safetensors_dynamic_state` streams it with `hf_streaming_load` instead.
+  Note: When Orbax's SafeTensors reader rejects headers with unsupported dtypes such as `F8_E8M0`
+  (e.g. DeepSeek-V4 block scales), this function falls back to `SafetensorsReader`.
 
   Args:
     path: A directory path (either local or GCS starting with gs://) containing
@@ -261,23 +322,31 @@ def load_sharded_hf_state(path, num_groups=None):
   """
   t0 = time.time()
   multi_process = num_groups is not None or jax.process_count() > 1
+  current_global_devices = jax.devices()
   # Leading-axis shards are contiguous, so never read whole spans: with more than 1024 tensors in a file
   # (fine-grained MoE), Orbax's automatic choice would otherwise read whole spans again.
   safetensors_options = ocp_v1.options.SafetensorsOptions(max_over_read_ratio=1.0) if multi_process else None
   context = ocp_v1.Context(
       checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS, safetensors_options=safetensors_options
   )
-  with context:
-    metadata = ocp_v1.pytree_metadata(path)
+  with context, safetensors_reader.no_gcs_read_ahead():
+    try:
+      metadata = ocp_v1.pytree_metadata(path)
+    except ValueError as e:
+      if "Unsupported dtype in SafeTensors header" not in str(e):
+        raise
+      max_logging.log(f"Orbax SafeTensors metadata rejected header ({e}); reading with SafetensorsReader...")
+      hf_state = _load_sharded_via_safetensors_reader(path, current_global_devices, num_groups)
+      max_logging.log(f"load_sharded_hf_state (SafetensorsReader fallback) took {time.time() - t0:.2f}s")
+      return hf_state
     simple_abstract_state = metadata.metadata
 
     # Distributed Sharded Download: Tell JAX to shard the HF Safetensors download
     # across the entire TPU mesh to avoid Host OOM.
-    current_global_devices = jax.devices()
     if multi_process:
       shardings = _leading_axis_shardings(simple_abstract_state, current_global_devices, num_groups)
     else:
-      shardings = sharding_utils.construct_maximal_shardings(simple_abstract_state, devices=current_global_devices)
+      shardings = _single_process_shardings(simple_abstract_state, current_global_devices)
 
     def combine_sharding(sds, single_sharding):
       return jax.ShapeDtypeStruct(shape=sds.shape, dtype=sds.dtype, sharding=single_sharding)
@@ -285,8 +354,7 @@ def load_sharded_hf_state(path, num_groups=None):
     sharded_abstract_state = jax.tree.map(combine_sharding, simple_abstract_state, shardings)
 
     max_logging.log("Reading raw Safetensors into memory (Distributed Sharded GCS Download)...")
-    with _no_gcs_read_ahead():
-      hf_state = ocp_v1.load_pytree(path, sharded_abstract_state)
+    hf_state = ocp_v1.load_pytree(path, sharded_abstract_state)
     max_logging.log(f"load_sharded_hf_state took {time.time() - t0:.2f}s")
     return hf_state
 
@@ -306,22 +374,45 @@ def _hf_keys_in(hf_source):
   if isinstance(hf_source, (list, tuple)):
     for item in hf_source:
       yield from _hf_keys_in(item)
-  else:
+  elif hf_source is not None:
+    yield hf_source
+
+
+def _atomic_hf_sources(hf_source):
+  """Yields every atomic `str` or `tuple` HF source inside a (possibly nested) list."""
+  if isinstance(hf_source, list):
+    for item in hf_source:
+      yield from _atomic_hf_sources(item)
+  elif hf_source is not None:
     yield hf_source
 
 
 def rename_legacy_hf_keys(hf_state, param_map_mt_to_hf):
   """Renames HF tensors stored under a legacy prefix to the names the mapping uses.
 
-  A tensor is renamed only if the mapping does not use its stored name but uses the renamed one, so
+  A tensor is renamed only if the mapping does not use its stored name but uses the renamed one
+  (or if it is a companion `*_scale_inv` / `*.scale` tensor of a mapped quantized weight), so
   checkpoints already in the mapping's layout are unchanged.
   """
   mapped = set(_hf_keys_in(list(param_map_mt_to_hf.values())))
+
+  def should_rename(old_key: str, new_key: str) -> bool:
+    if new_key in mapped:
+      return True
+    new_weight = dequantize.companion_weight_key(new_key)
+    old_weight = dequantize.companion_weight_key(old_key)
+    if new_weight is None or new_weight not in mapped:
+      return False
+    w_val = hf_state.get(new_weight, hf_state.get(old_weight))
+    return dequantize.is_quantized_weight_dtype(getattr(w_val, "dtype", None))
+
   for key in [k for k in hf_state if k not in mapped]:
     for old, new in _LEGACY_HF_PREFIXES:
-      if key.startswith(old) and new + key[len(old) :] in mapped:
-        hf_state[new + key[len(old) :]] = hf_state.pop(key)
-        break
+      if key.startswith(old):
+        candidate = new + key[len(old) :]
+        if should_rename(key, candidate):
+          hf_state[candidate] = hf_state.pop(key)
+          break
   return hf_state
 
 
@@ -333,13 +424,7 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
   t0 = time.time()
 
   # An HF tensor may feed several MaxText leaves (gemma4 maps `experts.gate_up_proj` to both `wi_0`
-  # and `wi_1`), so each tensor is dropped only after its last use.
-  remaining_uses = collections.Counter(_hf_keys_in(list(param_map_mt_to_hf.values())))
-
-  def tensor_getter(key):
-    remaining_uses[key] -= 1
-    return hf_state.pop(key) if remaining_uses[key] <= 0 else hf_state[key]
-
+  # and `wi_1`), so each tensor is dropped only after its last active use.
   flat_target = flax.traverse_util.flatten_dict(target_tree, sep=".")
   flat_restored = flat_target.copy()
 
@@ -364,6 +449,7 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
       if not isinstance(k, tuple) and tensor_handling.is_variable_collection_key(k)
   }
 
+  active_entries = []
   for mt_key, hf_source in param_map_mt_to_hf.items():
     # A tuple of MaxText keys is a composite key: one HF source split into several leaves.
     mt_keys = mt_key if isinstance(mt_key, tuple) else (mt_key,)
@@ -376,11 +462,41 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
         and not tensor_handling.is_variable_collection_key(mt_key)
         and check_names[0] in collection_targets
     ):
-      for key in _hf_keys_in([hf_source]):
-        if key is not None:
-          tensor_getter(key)
       continue
+    active_entries.append((mt_key, mt_keys, check_names, hf_source))
 
+  remaining_uses = collections.Counter(key for *_, hf_source in active_entries for key in _hf_keys_in([hf_source]))
+
+  def tensor_getter(key):
+    remaining_uses[key] -= 1
+    return hf_state.pop(key) if remaining_uses[key] <= 0 else hf_state[key]
+
+  fp8_block_size = dequantize.resolve_fp8_block_size(maxtext_config)
+
+  mapped_hf_keys = {key for *_, hf_source in active_entries for key in _hf_keys_in([hf_source])}
+  scale_for = {}
+  scale_uses = collections.Counter()
+  for mt_key, _, check_names, hf_source in active_entries:
+    target_dtypes = [
+        flat_target[name].dtype if hasattr(flat_target[name], "dtype") else np.float32 for name in check_names
+    ]
+    for source in _atomic_hf_sources(hf_source):
+      for key, scale_key in dequantize.resolve_source_scales(
+          source, target_dtypes, hf_state, mapped_hf_keys, mt_key
+      ).items():
+        scale_for[key] = scale_key
+        scale_uses[scale_key] += 1
+
+  def dequantizing_getter(key):
+    weight = tensor_getter(key)
+    if key in scale_for:
+      scale_key = scale_for[key]
+      scale_uses[scale_key] -= 1
+      scale = hf_state.pop(scale_key) if scale_uses[scale_key] <= 0 else hf_state[scale_key]
+      return dequantize.dequantize_weight(weight, scale, block_size=fp8_block_size)
+    return weight
+
+  for mt_key, mt_keys, check_names, hf_source in active_entries:
     leaves = [flat_target[name] for name in check_names]
     hook_fn = hook_fn_map_mt.get(mt_key)
     if isinstance(mt_key, tuple):
@@ -391,7 +507,7 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
 
     load_fn = get_hf_loading_function(
         hf_source,
-        tensor_getter,
+        dequantizing_getter,
         hook_fn,
         target_leaf,
         maxtext_config,
@@ -416,22 +532,22 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
     max_logging.log(f"Sample flat_target keys: {list(flat_target.keys())[:5]}")
 
   max_logging.log(f"Successfully mapped {mapped_count} parameters.")
-  restored_params = flax.traverse_util.unflatten_dict(flat_restored, sep=".")
-
-  if "params" in restored_params:
-    restored_params = restored_params["params"]
+  restored = flax.traverse_util.unflatten_dict(flat_restored, sep=".")
 
   max_logging.log(f"transform_hf_state_to_mt_state took {time.time() - t0:.2f}s")
 
-  return {"params": restored_params}
+  # A Linen tree carries the `params` collection, and maybe others beside it (e.g. `MoEBiasVar`
+  # and `Tid2EidVar`): return it as is. An NNX pure dict has bare weights: wrap them once.
+  return restored if "params" in restored else {"params": restored}
 
 
 def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
   """Loads HF safetensors and converts them into MaxText weights on device.
 
-  By default, reads every tensor sharded across `jax.devices()`, then maps, transforms and stacks the
-  tensors into the target layout. With `maxtext_config.safetensors_dynamic_streaming`, streams the
-  checkpoint a few decoder layers at a time instead (see `hf_streaming_load`).
+  By default, reads every tensor sharded across `jax.devices()`, then maps, dequantizes (when stored
+  as block-scaled `FP8` or packed `MXFP4`), transforms, and stacks the tensors into the target
+  layout. With `maxtext_config.safetensors_dynamic_streaming`, streams the checkpoint a few decoder
+  layers at a time instead (see `hf_streaming_load`).
 
   Args:
     path: The safetensors source: a `gs://` or local directory, or an HF repo ID with or without the
@@ -539,7 +655,7 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
 
   t_total = time.time()
   param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config)
-  streaming = maxtext_config.safetensors_dynamic_streaming
+  streaming = getattr(maxtext_config, "safetensors_dynamic_streaming", False) is True
   num_steps = 2 if streaming else 3
   max_logging.log(f"[1/{num_steps}] Mappings derived in {time.time() - t_total:.2f}s")
 
