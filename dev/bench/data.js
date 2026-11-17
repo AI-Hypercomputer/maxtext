@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1794919117428,
+  "lastUpdate": 1794938888610,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -72176,6 +72176,108 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 2903.6109999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 358,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Snehal Verma",
+            "username": "snehalv2002",
+            "email": "snehalv@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "8098393052cedebc2477f9a1bacdf5bc2cb85e63",
+          "message": "Give the sparse-indexer context-parallel attention path a memory-efficient backward pass\n\n# What went wrong\n\nSince mid-September 2026, DeepSeek-V3.2 671B training at 128K context on a\n256-chip Ironwood slice does not compile. It runs out of HBM: it needs\n163.88G per core, but each core has only 94.74G.\n\nThe cause is PR #5038. That change moved the sparse indexer + all-gather\ncontext-parallel path off Tokamax Splash and onto\n`flash_attention_block_masked`, because the dynamic Splash grid gave wrong\nresults for sharded masks. `flash_attention_block_masked` has no custom\nbackward pass, so autodiff saves the intermediates of every block-loop step.\nThat is O(q_len * kv_len) memory per layer.\n\n# How this change fixes it\n\n- Add `flash_attention_block_masked_custom_vjp`. The custom VJP saves only the\n  inputs, the output and the logsumexp. The backward pass recomputes each\n  attention tile with the existing `flash_attention_bwd`, in the same way as\n  ring attention. It maps over the batch, so each example sees a rank-2 mask,\n  which the backward kernels support for MHA and GQA. Only the indexer +\n  context-parallel call site uses it.\n- The backward pass returns dq, dk and dv in the dtype of q, k and v.\n- `flash_attention_block_masked` now keeps the softmax statistics `l` and `m`\n  in float32 in both the short- and long-sequence kernels, and the\n  long-sequence P @ V row sum accumulates in float32. The output stays in the\n  input dtype. The custom VJP forward uses float32 logits, and the kernel casts\n  p to the value dtype before P @ V, so that matmul stays in bfloat16. Without\n  these changes, the backward pass recomputes p = exp(s - logsumexp) from a\n  bfloat16 logsumexp of bfloat16 logits, the recomputed probabilities do not\n  sum to 1, and the gradients have about twice the error of plain autodiff.\n\n# Results\n\n- AOT compile of the DeepSeek-V3.2 671B 128K recipe for tpu7x-512 (4x8x8):\n  before, CompileTimeHbmOom (163.88G of temporaries); after, it compiles with\n  83.52 GiB of temporaries and an 88.28 GiB peak.\n- Relative gradient error against a float32 dense reference (GQA, bfloat16\n  inputs):\n\n  | Case                | Plain autodiff (dq / dk / dv) | This change (dq / dk / dv) |\n  | ------------------- | ----------------------------- | -------------------------- |\n  | q=256, short kernel | 2.3% / 2.3% / 1.1%            | 0.95% / 0.91% / 0.23%      |\n  | q=4224, long kernel | 2.1% / 2.2% / 1.3%            | 0.54% / 0.52% / 0.23%      |\n\n  The float32 path does not change. Other callers with bfloat16 inputs get a\n  slightly more accurate forward pass, and their `max_logits` is now float32.\n\n# Tests\n\n- New `tests/unit/jax_flash_attention_test.py`: the forward output and\n  dq/dk/dv match a dense reference for MHA, MQA, GQA with a 2D mask,\n  batch == heads, soft cap, and bfloat16 on both kernels (1% bound), plus a\n  check that the cotangents keep the input dtype.\n- New TPU test `test_tpu_flash_attention_context_parallel_grad_with_indexer`:\n  input gradients of all-gather CP + indexer flash attention match\n  dot_product attention. Before, this path had only a forward test.\n- On TPU v4-8, the new gradient test, the all-gather CP forward tests\n  `no_lb_cp2` and `no_lb_cp2_seq384`, and the ring CP gradient tests pass.\n  `test_tpu_flash_attention_context_parallel_with_indexer_lb_cp4_smallk`\n  fails on v4, but it fails in the same way on main without this change.\n\n# Notes\n\n- The boolean mask is the largest residual (about 128 MiB per layer for a 1K\n  query shard of a 128K sequence). The 128K recipe fits with about 6 GiB of\n  headroom.\n- The backward pass recomputes every tile, so expect a slower step than with\n  saved intermediates.\n- The statistics output (logsumexp, max_logits) has no gradient.\n  `record_max_logits` still reads `max_logits` from it.\n\n# Checklist\n\n- [x] I have performed a self-review of my code.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests and provided workload links above if applicable.\n- [x] I have made or will make corresponding changes to the doc if needed (no doc change needed).\n\nPiperOrigin-RevId: 1023754556",
+          "timestamp": "2026-11-17T16:17:32Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/8098393052cedebc2477f9a1bacdf5bc2cb85e63"
+        },
+        "date": 1794938887748,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 217.71599999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 36,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 53.68599999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 33,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1977.739,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 178.6099999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 588.74,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 89,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1539.487,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 105,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 411.684,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 80,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 2897.485,
             "unit": "sec"
           },
           {
