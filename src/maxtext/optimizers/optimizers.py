@@ -185,6 +185,19 @@ def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
   return mean, std
 
 
+def _set_schedule_counts(inner_state, count):
+  """inner_state with every learning-rate schedule counter (optax.scale_by_schedule / scale_by_learning_rate and
+  inject_hyperparams states) set to `count`; Adam's and every other state are unchanged."""
+  schedule_states = (optax.ScaleByScheduleState, optax.InjectHyperparamsState)
+
+  def set_count(x):
+    if isinstance(x, schedule_states):
+      return x._replace(count=jnp.asarray(count, dtype=x.count.dtype))
+    return x
+
+  return jax.tree_util.tree_map(set_count, inner_state, is_leaf=lambda x: isinstance(x, schedule_states))
+
+
 def skip_step_on_spikes(
     inner_opt: optax.GradientTransformation, interval: int, scaling_factor: float
 ) -> optax.GradientTransformationExtraArgs:
@@ -195,6 +208,12 @@ def skip_step_on_spikes(
   and the gradient norm. If the current step's loss or gradient norm
   exceeds `mean + scaling_factor * std`, the update is zeroed and the
   optimizer state is not advanced, effectively skipping the step.
+
+  The learning-rate schedule still follows the training step, as in OLMo-core (whose scheduler sets the lr from the
+  trainer's global step, while Adam's own step count advances only on applied steps): every schedule counter in the
+  inner state is set to this wrapper's step count, which advances on every step. Without this a skipped step left the
+  schedule one step behind for the rest of the run (435 steps by the small hero's step 159,000), so a WSD decay never
+  reached its final lr. A checkpoint whose schedule counters already lag is re-synced on its first step.
 
   Reference implementation:
   https://github.com/allenai/OLMo-core/blob/c757b7c3c15197154c753d883330afbfa4869dcc/src/olmo_core/optim/skip_step_optimizer.py#L12
@@ -238,6 +257,8 @@ def skip_step_on_spikes(
     count = state["count"]
     losses = state["losses"]
     grad_norms = state["grad_norms"]
+    # The schedule reads the training step, skipped or not (see the docstring).
+    inner_state = _set_schedule_counts(state["inner_state"], count)
 
     # Compute rolling stats
     loss_mean, loss_std = _compute_rolling_stats(losses, count, interval)
@@ -267,19 +288,21 @@ def skip_step_on_spikes(
 
     # Conditionally execute the inner optimizer to prevent momentum poisoning
     def do_update():
-      return inner_opt.update(updates, state["inner_state"], params, **extra_args)
+      return inner_opt.update(updates, inner_state, params, **extra_args)
 
-    out_updates_struct = jax.eval_shape(do_update)[0]
+    # The inner optimizer's updates can differ in dtype from the gradients (e.g. float32 updates from bf16 gradients
+    # under Zero-1 + gradient accumulation), and lax.cond needs both branches to match, so the skip branch's zeros
+    # take the shapes and dtypes the update branch produces.
+    update_avals = jax.eval_shape(do_update)[0]
 
     def skip_update():
       # b/500923599: Investigate logging compatible with jax.jit, jax.lax.cond, and Pathway
-      # Match `do_update`'s exact leaf dtypes (e.g. float32 master updates when incoming grads are bfloat16).
-      inner_updates = jax.tree_util.tree_map(
-          lambda u, s: jnp.zeros_like(u, dtype=s.dtype), updates, out_updates_struct
-      )
-      return inner_updates, state["inner_state"]
+      inner_updates = jax.tree_util.tree_map(lambda a: jnp.zeros(a.shape, a.dtype), update_avals)
+      return inner_updates, inner_state
 
     inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
+    new_count = jnp.where(is_finite, count + 1, count)
+    new_inner_state = _set_schedule_counts(new_inner_state, new_count)
 
     # Update rolling buffers only on finite steps (append finite spikes so regime shifts can adapt,
     # while leaving rolling history and valid sample count untouched when `inf`/`nan` occurs).
@@ -296,7 +319,7 @@ def skip_step_on_spikes(
         "inner_state": new_inner_state,
         "losses": new_losses,
         "grad_norms": new_grad_norms,
-        "count": jnp.where(is_finite, count + 1, count),
+        "count": new_count,
         "is_skipped": jnp.logical_not(is_ok),
     }
     return inner_updates, new_state
