@@ -137,7 +137,13 @@ def setup_model(config, mesh: Mesh, sharding: Sharding | None = None) -> tuple[n
   model = quantization.maybe_quantize(model, config, *quantization.example_inputs(config))
   model = add_named_scopes(model)
   model = m3_offload.maybe_offload_parameters(model, config)
-  optimizer = m3_offload.make_optimizer(model, make_optimizer(config), config)
+  if m3_offload.is_selective_host_offload_enabled(config):
+    # Global-norm clipping must span device and row-sparse host gradients together.
+    tx = optimizers.get_optimizer(config, config.learning_rate)
+    clip_thresh = float(getattr(config, "gradient_clipping_threshold", 0.0) or 0.0)  # jmp-waiver: SILENT_CONFIG_FALLBACK
+    optimizer = m3_offload.make_optimizer(model, tx, config, clip_max_norm=clip_thresh)
+  else:
+    optimizer = m3_offload.make_optimizer(model, make_optimizer(config), config)
   return model, optimizer
 
 
@@ -218,7 +224,10 @@ def loss_fn(model: nnx.Module, batch: dict[str, jax.Array]) -> jax.Array:
 @nnx.jit(donate_argnums=(0, 1))
 def train_step(model: nnx.Module, optimizer: nnx.Optimizer, batch: dict[str, jax.Array]) -> jax.Array:
   """One forward/backward/update. Mutates `model` and `optimizer` in place."""
-  loss, grads = nnx.value_and_grad(loss_fn)(model, batch)
+  if m3_offload.has_selective_host_offload(model):
+    loss, grads = m3_offload.value_and_grad(loss_fn, model, batch)
+  else:
+    loss, grads = nnx.value_and_grad(loss_fn)(model, batch)
   with jax.named_scope("optimizer"):
     optimizer.update(model, grads)
   return loss

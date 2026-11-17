@@ -63,6 +63,7 @@ from maxtext.common import common_types
 from maxtext.common import train_state_nnx
 from maxtext.configs import maxtext_engine_types
 from maxtext.configs import pyconfig
+from maxtext.m3.infra import offload as m3_offload
 from maxtext.trainers.pre_train import train_compile as pre_train_compile
 from maxtext.training_engine import grpo_engine_compile
 from maxtext.training_engine import maxtext_engine
@@ -111,8 +112,15 @@ def _rehome_aval(aval: Any, mesh: jax.sharding.Mesh) -> Any:
   """
   if not hasattr(aval, "shape") or not hasattr(aval, "dtype"):
     return aval
-  spec = getattr(getattr(aval, "sharding", None), "spec", None)
-  target = jax.sharding.NamedSharding(mesh, spec) if spec is not None else None
+  sharding = getattr(aval, "sharding", None)
+  spec = getattr(sharding, "spec", None)
+  if spec is not None:
+    target = jax.sharding.NamedSharding(mesh, spec)
+    memory_kind = getattr(sharding, "memory_kind", None)
+    if memory_kind is not None and target.memory_kind != memory_kind:
+      target = target.with_memory_kind(memory_kind)
+  else:
+    target = None
   return jax.ShapeDtypeStruct(aval.shape, aval.dtype, sharding=target)
 
 
@@ -201,10 +209,14 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
 
     def build(model_state):
       model = nnx.merge(model_graphdef, model_state)
-      return train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param))
+      if m3_offload.is_selective_host_offload_enabled(self._config):
+        opt = m3_offload.make_optimizer(model, tx, self._config, wrt=nnx.Param, dense_host_grads=True)
+      else:
+        opt = nnx.Optimizer(model, tx, wrt=nnx.Param)
+      return train_state_nnx.TrainStateNNX(model, opt)
 
     propagation_mesh = _propagation_mesh(self._mesh)
-    state_graphdef, _ = nnx.split(nnx.eval_shape(build, model_pure))
+    state_graphdef, abs_state_pure = nnx.split(nnx.eval_shape(build, model_pure))
     with self._sharding_ctx():
       # Displaces the real mesh for this trace only: the graph trace above needs none, and a
       # stand-in set around it collides with the config's own AbstractMesh under `shard_mode=auto`.
@@ -213,7 +225,10 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
             lambda model_state: nnx.split(build(model_state))[1],
             jax.tree.map(lambda aval: _rehome_aval(aval, propagation_mesh), model_pure),
         )
-    return nnx.merge(state_graphdef, jax.tree.map(lambda aval: _rehome_aval(aval, self._mesh), state_pure))
+    rehomed = jax.tree.map(lambda aval: _rehome_aval(aval, self._mesh), state_pure)
+    if m3_offload.is_selective_host_offload_enabled(self._config):
+      rehomed = m3_offload.apply_selective_memory_kind_to_shardings(abs_state_pure, rehomed)
+    return nnx.merge(state_graphdef, rehomed)
 
   def train_state_avals(self) -> Any:
     """Returns a copy of the pure train state as avals on their compiled shardings.

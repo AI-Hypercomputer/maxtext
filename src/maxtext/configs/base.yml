@@ -668,6 +668,13 @@ gdn_cp_state: 'remat'
 
 optimizer_memory_host_offload: false
 parameter_memory_host_offload: false
+# Selective host offload saves HBM for regex-matched embedding tables + AdamW state at the cost of
+# synchronous host-CPU optimizer scan time (~1.5-1.9 s/step on v5p-8 at 2.5M x 160 rows/chip under
+# default 'host_compute'; 'streamed_chunks' is ~150x slower; 'lazy_sparse' skips untouched-row decay).
+selective_host_offload: false
+host_offload_param_patterns: []
+selective_host_offload_optimizer_mode: host_compute
+selective_host_offload_num_chunks: 16
 # Whether to use jax.lax.scan over layers (stacked/unstacked checkpoint). We recommend setting this to false when using pipeline parallelism, instead scanning the PP iterations. When resuming from a checkpoint, this flag is auto-determined from metadata.
 scan_layers: true
 param_scan_axis: 1
