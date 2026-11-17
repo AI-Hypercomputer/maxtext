@@ -43,6 +43,7 @@ class ManifestsV2Test(unittest.TestCase):
     for plat, region, sa, pull_sec in (
         ("v7x", "us-central1", None, True),
         ("v6e", "southamerica-west1", None, False),
+        ("v5p", "europe-west4", None, False),
         ("v5e", "europe-west4", "mesa-bench", False),
     ):
       job = manifests_v2.build_step1_cpu_job(platform=plat, model_name="llama3.1-8b", run_id="r1")
@@ -63,13 +64,34 @@ class ManifestsV2Test(unittest.TestCase):
       self.assertIn(f"gs://mesa-maxtext-{region}/mesa-bench-v2/hf_cache/llama3.1-8b", script)
       self.assertIn("step1_download_job.py download", script)
 
+    custom_job = manifests_v2.build_step1_cpu_job(
+        platform="v5p",
+        model_name="gemma2-2b",
+        run_id="r2",
+        code_dir="gs://mesa-maxtext/mesa-bench-v2/code-v5p",
+    )
+    c_spec = custom_job["spec"]["template"]["spec"]
+    c_env = self._env_map(c_spec)
+    self.assertEqual(custom_job["metadata"]["labels"].get("kueue.x-k8s.io/queue-name"), "default")
+    self.assertEqual(c_env["BENCH_CODE_DIR"]["value"], "gs://mesa-maxtext/mesa-bench-v2/code-v5p")
+    self.assertIn(
+        "gs://mesa-maxtext/mesa-bench-v2/code-v5p/bootstrap_tpu7x.py",
+        c_spec["containers"][0]["command"][2],
+    )
+
   def test_deepseek_step1b_pvc_and_job_manager_tolerations(self):
     pvc, job = manifests_v2.build_deepseek_step1b_manifests(model_name="deepseek4-1600b", run_id="ds1b")
     self.assertEqual(pvc["kind"], "PersistentVolumeClaim")
-    self.assertGreaterEqual(int(pvc["spec"]["resources"]["requests"]["storage"].removesuffix("Gi")), 5000)
+    self.assertGreaterEqual(
+        int(pvc["spec"]["resources"]["requests"]["storage"].removesuffix("Gi")),
+        5000,
+    )
 
     pod_spec = job["spec"]["template"]["spec"]
-    self.assertEqual(pod_spec["nodeSelector"], {"cloud.google.com/gke-nodepool": "job-manager-np"})
+    self.assertEqual(
+        pod_spec["nodeSelector"],
+        {"cloud.google.com/gke-nodepool": "job-manager-np"},
+    )
     tol_keys = {(t["key"], t.get("value")) for t in pod_spec["tolerations"]}
     self.assertIn(("dedicated", "job-manager"), tol_keys)
     script = self._env_map(pod_spec)["RUNNER_SCRIPT"]["value"]
@@ -117,7 +139,10 @@ class ManifestsV2Test(unittest.TestCase):
         )
     )
     sparse_v6e = manifests_v2.build_planned_queue_tasks(
-        platform="v6e", experiment_name="exp2", run_prefix="v2", clean_sparse_env=True
+        platform="v6e",
+        experiment_name="exp2",
+        run_prefix="v2",
+        clean_sparse_env=True,
     )
     self.assertTrue(
         all(
@@ -132,7 +157,17 @@ class ManifestsV2Test(unittest.TestCase):
     q_json = os.path.join(tmp_dir, "tasks.json")
     cp_yaml = os.path.join(tmp_dir, "copy.yaml")
     self.assertEqual(
-        generate_v2_manifests.main(["queue-tasks", "--platform", "v5e", "--run-prefix", "v2", "--out", q_json]),
+        generate_v2_manifests.main(
+            [
+                "queue-tasks",
+                "--platform",
+                "v5e",
+                "--run-prefix",
+                "v2",
+                "--out",
+                q_json,
+            ]
+        ),
         0,
     )
     with open(q_json, "r", encoding="utf-8") as f:
@@ -162,10 +197,15 @@ class ManifestsV2Test(unittest.TestCase):
       docs = list(yaml.safe_load_all(f))
     self.assertEqual(docs[0]["kind"], "Job")
 
-  DEEPSEEK_BIG = ["deepseek4-284b", "deepseek3-671b", "deepseek3.2-671b", "deepseek4-1600b"]
+  DEEPSEEK_BIG = [
+      "deepseek4-284b",
+      "deepseek3-671b",
+      "deepseek3.2-671b",
+      "deepseek4-1600b",
+  ]
 
   def test_real_weight_deepseek_queue_reads_the_regional_bf16_checkpoint(self):
-    expected_counts = {"v7x": 7, "v6e": 4, "v5e": 4}
+    expected_counts = {"v7x": 7, "v6e": 4, "v5p": 7, "v5e": 4}
     for platform, count in expected_counts.items():
       tasks = manifests_v2.build_planned_queue_tasks(
           platform=platform,
@@ -183,11 +223,44 @@ class ManifestsV2Test(unittest.TestCase):
         self.assertTrue(t["env"]["BENCH_SAFETENSORS_GCS_DIR"].endswith(f"/hf_cache_bf16/{t['model']}"))
         self.assertTrue(t["env"]["BENCH_RUN_ID"].startswith(f"v2real-{platform}-"))
 
+    v5p_worker = manifests_v2.build_queue_worker_jobset(
+        platform="v5p",
+        topology="2x2x4",
+        num_slices=1,
+        queue_uri="gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue/v5p",
+        worker_id="w1",
+        run_id="v5p-q1",
+        results_gcs_uri="gs://mesa-maxtext-europe-west4/mesa-bench-v2/queue_results",
+        code_dir="gs://mesa-maxtext/mesa-bench-v2/code-v5p",
+    )
+    s0_pod = v5p_worker["spec"]["replicatedJobs"][0]["template"]["spec"]["template"]["spec"]
+    self.assertEqual(
+        s0_pod["nodeSelector"],
+        {
+            "cloud.google.com/gke-tpu-accelerator": "tpu-v5p-slice",
+            "cloud.google.com/reservation-name": "cloudtpu-20260902214500-1810493672",
+            "cloud.google.com/gke-tpu-topology": "2x2x4",
+        },
+    )
+    self.assertEqual(
+        self._env_map(s0_pod)["BENCH_CODE_DIR"]["value"],
+        "gs://mesa-maxtext/mesa-bench-v2/code-v5p",
+    )
+
   def test_queue_tasks_cli_filters_models_and_skips_to_maxtext(self):
     tmp_dir = tempfile.mkdtemp()
     self.addCleanup(shutil.rmtree, tmp_dir)
     q_json = os.path.join(tmp_dir, "tasks.json")
-    argv = ["queue-tasks", "--platform", "v6e", "--run-prefix", "v2real", "--tiers", "C", "--skip-to-maxtext"]
+    argv = [
+        "queue-tasks",
+        "--platform",
+        "v6e",
+        "--run-prefix",
+        "v2real",
+        "--tiers",
+        "C",
+        "--skip-to-maxtext",
+    ]
     argv += ["--models", *self.DEEPSEEK_BIG, "--out", q_json]
     self.assertEqual(generate_v2_manifests.main(argv), 0)
     with open(q_json, "r", encoding="utf-8") as f:

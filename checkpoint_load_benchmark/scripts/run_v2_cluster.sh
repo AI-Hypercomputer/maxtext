@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Unified multi-platform v2 launcher across v7x, v6e, and v5e clusters.
+# Unified multi-platform v2 launcher across v7x, v6e, v5p, and v5e clusters.
 
 set -euo pipefail
 
@@ -70,7 +70,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "${PLATFORM}" ]]; then
-  echo "Error: --platform <v7x|v6e|v5e> is required." >&2
+  echo "Error: --platform <v7x|v6e|v5p|v5e> is required." >&2
   exit 1
 fi
 

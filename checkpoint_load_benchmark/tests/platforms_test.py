@@ -34,17 +34,29 @@ class PlatformProfilesTest(unittest.TestCase):
     self.assertEqual(platforms.get_profile("v7x").devices_per_slice("2x2x4"), 32)
     self.assertEqual(platforms.get_profile("v6e").devices_per_slice("2x4"), 8)
     self.assertEqual(platforms.get_profile("v6e").devices_per_slice("4x4"), 16)
+    self.assertEqual(platforms.get_profile("v5p").devices_per_slice("2x2x1"), 4)
+    self.assertEqual(platforms.get_profile("v5p").devices_per_slice("2x2x2"), 8)
+    self.assertEqual(platforms.get_profile("v5p").devices_per_slice("2x2x4"), 16)
+    self.assertEqual(platforms.get_profile("v5p").devices_per_slice("2x4x4"), 32)
+    self.assertEqual(platforms.get_profile("v5p").devices_per_slice("4x4x4"), 64)
     self.assertEqual(platforms.get_profile("v5e").devices_per_slice("16x16"), 256)
 
   def test_hosts_per_slice_and_chips_per_host(self):
     self.assertEqual(platforms.get_profile("v7x").hosts_per_slice("2x2x1"), 1)
     self.assertEqual(platforms.get_profile("v6e").hosts_per_slice("2x4"), 1)
+    self.assertEqual(platforms.get_profile("v5p").hosts_per_slice("2x2x1"), 1)
+    self.assertEqual(platforms.get_profile("v5p").hosts_per_slice("2x2x2"), 2)
+    self.assertEqual(platforms.get_profile("v5p").hosts_per_slice("2x2x4"), 4)
+    self.assertEqual(platforms.get_profile("v5p").hosts_per_slice("2x4x4"), 8)
+    self.assertEqual(platforms.get_profile("v5p").hosts_per_slice("4x4x4"), 16)
     self.assertEqual(platforms.get_profile("v5e").hosts_per_slice("16x16"), 64)
 
     self.assertEqual(platforms.get_profile("v7x").chips_per_host("2x2x1"), 4)
     self.assertEqual(platforms.get_profile("v6e").chips_per_host("2x4"), 8)
     self.assertEqual(platforms.get_profile("v6e").chips_per_host("2x2"), 4)
     self.assertEqual(platforms.get_profile("v6e").chips_per_host("4x4"), 4)
+    self.assertEqual(platforms.get_profile("v5p").chips_per_host("2x2x1"), 4)
+    self.assertEqual(platforms.get_profile("v5p").chips_per_host("4x4x4"), 4)
     self.assertEqual(platforms.get_profile("v5e").chips_per_host("16x16"), 4)
 
   def test_unknown_platform_or_topology_raises_value_error(self):
@@ -53,12 +65,14 @@ class PlatformProfilesTest(unittest.TestCase):
     with self.assertRaises(ValueError):
       platforms.get_profile("v6e").devices_per_slice("2x2x1")
     with self.assertRaises(ValueError):
+      platforms.get_profile("v5p").devices_per_slice("16x16")
+    with self.assertRaises(ValueError):
       platforms.get_profile("v5e").hosts_per_slice("2x2")
     with self.assertRaises(ValueError):
       platforms.get_profile("v7x").chips_per_host("16x16")
 
   def test_mesa_naming_and_cluster_constraints(self):
-    for name in ("v7x", "v6e", "v5e"):
+    for name in ("v7x", "v6e", "v5p", "v5e"):
       profile = platforms.get_profile(name)
       self.assertEqual(profile.pod_labels.get("app"), "mesa-bench-v2")
       self.assertTrue(profile.hf_token_secret_name.startswith("mesa-"))
@@ -77,6 +91,26 @@ class PlatformProfilesTest(unittest.TestCase):
     self.assertEqual(v6e.priority_class_name, "medium")
     self.assertEqual(v6e.image_pull_secrets, ())
 
+    v5p = platforms.get_profile("v5p")
+    self.assertEqual(v5p.gke_cluster_name, "bodaborg-v5p-nap")
+    self.assertEqual(v5p.gcp_project_id, "cloud-tpu-shared-capacity")
+    self.assertEqual(v5p.gcp_region, "europe-west4")
+    self.assertEqual(v5p.kueue_queue, "default")
+    self.assertFalse(v5p.kueue_topology_aware_scheduling)
+    self.assertEqual(v5p.priority_class_name, "medium")
+    self.assertEqual(v5p.image_pull_secrets, ())
+    self.assertIsNone(v5p.service_account_name)
+    self.assertEqual(v5p.capacity_type, "reserved")
+    self.assertEqual(v5p.workload_time_limit_minutes, 180)
+    self.assertEqual(
+        v5p.node_selectors.get("cloud.google.com/gke-tpu-accelerator"),
+        "tpu-v5p-slice",
+    )
+    self.assertEqual(
+        v5p.node_selectors.get("cloud.google.com/reservation-name"),
+        "cloudtpu-20260902214500-1810493672",
+    )
+
     v5e = platforms.get_profile("v5e")
     self.assertIsNone(v5e.kueue_queue)
     self.assertFalse(v5e.kueue_topology_aware_scheduling)
@@ -87,6 +121,7 @@ class PlatformProfilesTest(unittest.TestCase):
     expected_buckets = {
         "v7x": "gs://mesa-maxtext-us-central1/mesa-bench-v2",
         "v6e": "gs://mesa-maxtext-southamerica-west1/mesa-bench-v2",
+        "v5p": "gs://mesa-maxtext-europe-west4/mesa-bench-v2",
         "v5e": "gs://mesa-maxtext-europe-west4/mesa-bench-v2",
     }
     for name, bucket_root in expected_buckets.items():

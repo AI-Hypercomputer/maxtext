@@ -85,21 +85,44 @@ def _hf_token_env(profile: platforms.PlatformProfile, *, required: bool = False)
 def _downward_api_envs() -> list[dict[str, Any]]:
   return [
       {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
-      {"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}},
-      {"name": "NODE_NAME", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}},
+      {
+          "name": "POD_NAMESPACE",
+          "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}},
+      },
+      {
+          "name": "NODE_NAME",
+          "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}},
+      },
   ]
 
 
 def _step1_cpu_tolerations(node_pool: str) -> list[dict[str, Any]]:
   """Returns tolerations compatible with GKE `cpu-np` / `job-manager-np` taints."""
   tols: list[dict[str, Any]] = [
-      {"key": "cloud.google.com/gke-spot", "operator": "Equal", "value": "true", "effect": "NoSchedule"},
+      {
+          "key": "cloud.google.com/gke-spot",
+          "operator": "Equal",
+          "value": "true",
+          "effect": "NoSchedule",
+      },
   ]
   if node_pool == "job-manager-np":
-    tols.append({"key": "dedicated", "operator": "Equal", "value": "job-manager", "effect": "NoSchedule"})
+    tols.append(
+        {
+            "key": "dedicated",
+            "operator": "Equal",
+            "value": "job-manager",
+            "effect": "NoSchedule",
+        }
+    )
   elif node_pool:
     tols.append(
-        {"key": "cloud.google.com/gke-nodepool", "operator": "Equal", "value": node_pool, "effect": "NoSchedule"}
+        {
+            "key": "cloud.google.com/gke-nodepool",
+            "operator": "Equal",
+            "value": node_pool,
+            "effect": "NoSchedule",
+        }
     )
   return tols
 
@@ -117,21 +140,30 @@ def _build_cpu_job(
     extra_mounts: Sequence[dict[str, Any]] = (),
     extra_env: Sequence[dict[str, Any]] = (),
     require_hf_token: bool = False,
+    code_dir: str | None = None,
 ) -> dict[str, Any]:
   """Constructs a `batch/v1` CPU Kubernetes Job manifest honoring `profile` cluster constraints."""
+  effective_code_dir = code_dir or profile.gcs_code_dir
   pod_spec: dict[str, Any] = {
       "restartPolicy": "Never",
       "nodeSelector": {"cloud.google.com/gke-nodepool": node_pool},
       "tolerations": _step1_cpu_tolerations(node_pool),
-      "volumes": [{"name": "ramdisk", "emptyDir": {"medium": "Memory"}}, *extra_volumes],
+      "volumes": [
+          {"name": "ramdisk", "emptyDir": {"medium": "Memory"}},
+          *extra_volumes,
+      ],
       "containers": [
           {
               "name": "worker",
               "image": profile.container_image,
               "imagePullPolicy": "IfNotPresent",
-              "command": ["bash", "-c", _bootstrap_shell_cmd(profile.gcs_code_dir, tpu_jobset=False)],
+              "command": [
+                  "bash",
+                  "-c",
+                  _bootstrap_shell_cmd(effective_code_dir, tpu_jobset=False),
+              ],
               "env": [
-                  {"name": "BENCH_CODE_DIR", "value": profile.gcs_code_dir},
+                  {"name": "BENCH_CODE_DIR", "value": effective_code_dir},
                   {"name": "BENCH_PLATFORM", "value": profile.name},
                   {"name": "BENCH_CLUSTER", "value": profile.gke_cluster_name},
                   {"name": "BENCH_PROJECT", "value": profile.gcp_project_id},
@@ -143,7 +175,10 @@ def _build_cpu_job(
                   *extra_env,
                   {"name": "RUNNER_SCRIPT", "value": runner_script},
               ],
-              "volumeMounts": [{"name": "ramdisk", "mountPath": "/ramdisk"}, *extra_mounts],
+              "volumeMounts": [
+                  {"name": "ramdisk", "mountPath": "/ramdisk"},
+                  *extra_mounts,
+              ],
               "resources": {
                   "requests": {"cpu": cpu_request, "memory": memory_request},
                   "limits": {"memory": memory_request},
@@ -156,15 +191,22 @@ def _build_cpu_job(
   if profile.image_pull_secrets:
     pod_spec["imagePullSecrets"] = [{"name": s} for s in profile.image_pull_secrets]
 
+  job_labels = dict(labels)
+  pod_labels = dict(labels)
+  if profile.cpu_kueue_queue:
+    job_labels["kueue.x-k8s.io/queue-name"] = profile.cpu_kueue_queue
+  if profile.workload_time_limit_minutes is not None:
+    pod_labels.setdefault("declared-duration-minutes", "60")
+
   return {
       "apiVersion": "batch/v1",
       "kind": "Job",
-      "metadata": {"name": name, "namespace": "default", "labels": dict(labels)},
+      "metadata": {"name": name, "namespace": "default", "labels": job_labels},
       "spec": {
           "backoffLimit": 1,
           "template": {
               "metadata": {
-                  "labels": dict(labels),
+                  "labels": pod_labels,
                   "annotations": {"cluster-autoscaler.kubernetes.io/safe-to-evict": "false"},
               },
               "spec": pod_spec,
@@ -187,6 +229,7 @@ def build_step1_cpu_job(
     run_id: str,
     clean_target: bool = False,
     workers: int | None = None,
+    code_dir: str | None = None,
 ) -> dict[str, Any]:
   """Builds a regional CPU Kubernetes Job for cold Step 1 (`HF -> GCS`) download."""
   profile = platforms.get_profile(platform)
@@ -214,7 +257,11 @@ def build_step1_cpu_job(
       f"  --result-gcs-uri {shlex.quote(result_gcs_uri)}\n"
   )
   name = k8s_name(["mesa", "step1", platform, model_name, run_id])
-  labels = {**profile.pod_labels, "mesa-run-id": _label_value(run_id), "mesa-step": "step1"}
+  labels = {
+      **profile.pod_labels,
+      "mesa-run-id": _label_value(run_id),
+      "mesa-step": "step1",
+  }
   return _build_cpu_job(
       name=name,
       profile=profile,
@@ -228,6 +275,7 @@ def build_step1_cpu_job(
           {"name": "BENCH_RUN_ID", "value": run_id},
       ],
       require_hf_token=True,
+      code_dir=code_dir,
   )
 
 
@@ -260,7 +308,11 @@ def build_deepseek_step1b_manifests(
   size_gib = pvc_size_gib or recommended_step1b_pvc_gib(model_info)
   pvc_name = k8s_name(["mesa", "step1b", model_name, "pvc"])
   job_name = k8s_name(["mesa", "step1b", model_name, run_id])
-  labels = {**profile.pod_labels, "mesa-run-id": _label_value(run_id), "mesa-step": "step1b"}
+  labels = {
+      **profile.pod_labels,
+      "mesa-run-id": _label_value(run_id),
+      "mesa-step": "step1b",
+  }
 
   pvc = {
       "apiVersion": "v1",
@@ -327,6 +379,7 @@ def build_copy_region_cpu_job(
     run_id: str,
     clean_target: bool = False,
     bf16_source: str = "converted_by_this_benchmark",
+    code_dir: str | None = None,
 ) -> dict[str, Any]:
   """Builds a destination-region CPU Job copying converted BF16 weights into the regional bucket."""
   profile = platforms.get_profile(dest_platform)
@@ -355,7 +408,11 @@ def build_copy_region_cpu_job(
       f"  --result-gcs-uri {shlex.quote(result_gcs_uri)}\n"
   )
   name = k8s_name(["mesa", "copy", dest_platform, model_name, run_id])
-  labels = {**profile.pod_labels, "mesa-run-id": _label_value(run_id), "mesa-step": "copy-region"}
+  labels = {
+      **profile.pod_labels,
+      "mesa-run-id": _label_value(run_id),
+      "mesa-step": "copy-region",
+  }
   return _build_cpu_job(
       name=name,
       profile=profile,
@@ -368,6 +425,7 @@ def build_copy_region_cpu_job(
           {"name": "BENCH_HOST_MACHINE_TYPE", "value": profile.cpu_machine_type},
           {"name": "BENCH_RUN_ID", "value": run_id},
       ],
+      code_dir=code_dir,
   )
 
 
@@ -383,11 +441,13 @@ def build_tpu_jobset(
     repetition_index: int = 1,
     max_restarts: int = 3,
     workload_duration_minutes: int | None = None,
+    code_dir: str | None = None,
 ) -> dict[str, Any]:
   """Builds a multi-slice / multi-host TPU `JobSet` manifest strictly from `PlatformProfile`."""
   if not name.startswith("mesa-") or len(name) > _MAX_JOBSET_NAME_LEN:
     raise ValueError(f"JobSet name {name!r} must start with 'mesa-' and be <= {_MAX_JOBSET_NAME_LEN} chars")
   profile = platforms.get_profile(platform)
+  effective_code_dir = code_dir or profile.gcs_code_dir
   hosts = profile.hosts_per_slice(topology)
   chips_per_host = profile.chips_per_host(topology)
   run_label = _label_value(run_id)
@@ -427,7 +487,7 @@ def build_tpu_jobset(
     env_list: list[dict[str, Any]] = [
         {"name": "SLICE_INDEX", "value": str(s)},
         {"name": "DAEMON_PORT", "value": "55555"},
-        {"name": "BENCH_CODE_DIR", "value": profile.gcs_code_dir},
+        {"name": "BENCH_CODE_DIR", "value": effective_code_dir},
         {"name": "BENCH_PLATFORM", "value": profile.name},
         {"name": "BENCH_CLUSTER", "value": profile.gke_cluster_name},
         {"name": "BENCH_PROJECT", "value": profile.gcp_project_id},
@@ -435,7 +495,10 @@ def build_tpu_jobset(
         {"name": "BENCH_ZONE", "value": profile.zone_hint},
         {"name": "BENCH_CAPACITY_TYPE", "value": profile.capacity_type},
         {"name": "BENCH_KUEUE_QUEUE", "value": profile.kueue_queue or ""},
-        {"name": "BENCH_HOST_MACHINE_TYPE", "value": profile.host_machine_type_by_topology[topology]},
+        {
+            "name": "BENCH_HOST_MACHINE_TYPE",
+            "value": profile.host_machine_type_by_topology[topology],
+        },
         {
             "name": "BENCH_TPU_ACCELERATOR",
             "value": profile.node_selectors.get("cloud.google.com/gke-tpu-accelerator", ""),
@@ -448,12 +511,21 @@ def build_tpu_jobset(
         {"name": "TORCH_DEVICE_BACKEND_AUTOLOAD", "value": "0"},
         *_downward_api_envs(),
         _hf_token_env(profile, required=False),
-        {"name": "WAIT_FOR_DAEMON_HOST", "value": wait_hosts if is_runner_slice else ""},
-        {"name": "RUNNER_SCRIPT", "value": runner_script if is_runner_slice else ""},
+        {
+            "name": "WAIT_FOR_DAEMON_HOST",
+            "value": wait_hosts if is_runner_slice else "",
+        },
+        {
+            "name": "RUNNER_SCRIPT",
+            "value": runner_script if is_runner_slice else "",
+        },
     ]
     pod_spec: dict[str, Any] = {
         "restartPolicy": "Never",
-        "nodeSelector": {**profile.node_selectors, "cloud.google.com/gke-tpu-topology": topology},
+        "nodeSelector": {
+            **profile.node_selectors,
+            "cloud.google.com/gke-tpu-topology": topology,
+        },
         "tolerations": copy.deepcopy(profile.tolerations),
         "volumes": [{"name": "ramdisk", "emptyDir": {"medium": "Memory"}}],
         "containers": [
@@ -461,7 +533,11 @@ def build_tpu_jobset(
                 "name": "worker",
                 "image": profile.container_image,
                 "imagePullPolicy": "IfNotPresent",
-                "command": ["bash", "-c", _bootstrap_shell_cmd(profile.gcs_code_dir, tpu_jobset=True)],
+                "command": [
+                    "bash",
+                    "-c",
+                    _bootstrap_shell_cmd(effective_code_dir, tpu_jobset=True),
+                ],
                 "env": env_list,
                 "volumeMounts": [{"name": "ramdisk", "mountPath": "/ramdisk"}],
                 "resources": {
@@ -505,7 +581,10 @@ def build_tpu_jobset(
                     "completionMode": "Indexed",
                     "backoffLimit": 0,
                     "template": {
-                        "metadata": {"labels": dict(pod_labels), "annotations": pod_annotations},
+                        "metadata": {
+                            "labels": dict(pod_labels),
+                            "annotations": pod_annotations,
+                        },
                         "spec": pod_spec,
                     },
                 },
@@ -536,11 +615,15 @@ def build_queue_worker_jobset(
     results_gcs_uri: str,
     experiment_name: str = "mesa-bench-v2",
     min_slices: int = 1,
+    code_dir: str | None = None,
 ) -> dict[str, Any]:
   """Builds a queue-draining TPU JobSet supporting multi-host (`hosts_per_slice`) and multi-slice tasks."""
   profile = platforms.get_profile(platform)
   hosts = profile.hosts_per_slice(topology)
-  name = k8s_name(["mesa", "q", platform, topology, f"{num_slices}s", worker_id], max_len=_MAX_JOBSET_NAME_LEN)
+  name = k8s_name(
+      ["mesa", "q", platform, topology, f"{num_slices}s", worker_id],
+      max_len=_MAX_JOBSET_NAME_LEN,
+  )
   script = (
       "set -euo pipefail\n"
       "export TORCH_DEVICE_BACKEND_AUTOLOAD=0 KEEP_HF_CACHE=1 HF_HOME=/ramdisk/hf_cache TMPDIR=/ramdisk/tmp\n"
@@ -563,6 +646,7 @@ def build_queue_worker_jobset(
       runner_script=script,
       run_id=run_id,
       experiment_name=experiment_name,
+      code_dir=code_dir,
   )
 
 
@@ -593,7 +677,12 @@ def build_planned_queue_tasks(
 
   want_models: set[str] = set(models or ())
   models = [m for m in cfg["models"] if m["tier"] in want_tiers and (not want_models or m["model_name"] in want_models)]
-  models.sort(key=lambda m: (_TIER_ORDER.get(m["tier"], 99), float(m.get("loaded_bf16_gb") or 0.0)))
+  models.sort(
+      key=lambda m: (
+          _TIER_ORDER.get(m["tier"], 99),
+          float(m.get("loaded_bf16_gb") or 0.0),
+      )
+  )
 
   tasks: list[dict[str, Any]] = []
   for model in models:

@@ -6,8 +6,14 @@
     "B": 1,
     "C": 1
   },
-  "scan_modes": ["scanned", "unscanned"],
-  "pipelines": ["to_maxtext", "safetensors_dynamic"],
+  "scan_modes": [
+    "scanned",
+    "unscanned"
+  ],
+  "pipelines": [
+    "to_maxtext",
+    "safetensors_dynamic"
+  ],
   "deepseek_bf16_team_buckets": {
     "deepseek4-284b": "gs://maxtext-deepseek/deepseek4/hf-bf16/",
     "deepseek3-671b": "gs://maxtext-deepseek/deepseek3-671b/hf/",
@@ -30,6 +36,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -48,7 +55,8 @@
       "needs_step1b": false,
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
-        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}]
       }
     },
     {
@@ -66,7 +74,8 @@
       "needs_step1b": false,
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
-        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}]
       }
     },
     {
@@ -84,7 +93,8 @@
       "needs_step1b": false,
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
-        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}]
       }
     },
     {
@@ -103,6 +113,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -121,7 +132,8 @@
       "needs_step1b": false,
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
-        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}]
       }
     },
     {
@@ -139,7 +151,8 @@
       "needs_step1b": false,
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
-        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}]
       }
     },
     {
@@ -157,7 +170,8 @@
       "needs_step1b": false,
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
-        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}]
       }
     },
     {
@@ -175,7 +189,8 @@
       "needs_step1b": false,
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
-        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}]
       }
     },
     {
@@ -193,7 +208,8 @@
       "needs_step1b": false,
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
-        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}]
       }
     },
     {
@@ -212,6 +228,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -230,7 +247,8 @@
       "needs_step1b": false,
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
-        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}]
+        "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}]
       }
     },
     {
@@ -249,6 +267,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v6e": [{"slices": 1, "topology": "2x4"}, {"slices": 2, "topology": "2x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -268,6 +287,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v6e": [{"slices": 2, "topology": "2x4"}, {"slices": 1, "topology": "4x4"}],
+        "v5p": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -287,6 +307,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v6e": [{"slices": 1, "topology": "8x8"}],
+        "v5p": [{"slices": 1, "topology": "2x2x2"}, {"slices": 2, "topology": "2x2x1"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -306,6 +327,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x1"}, {"slices": 2, "topology": "2x2x1"}],
         "v6e": [{"slices": 1, "topology": "8x8"}],
+        "v5p": [{"slices": 1, "topology": "2x2x4"}, {"slices": 2, "topology": "2x2x2"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -325,6 +347,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 2, "topology": "2x2x1"}, {"slices": 1, "topology": "2x2x2"}],
         "v6e": [{"slices": 1, "topology": "8x8"}],
+        "v5p": [{"slices": 1, "topology": "2x2x4"}, {"slices": 1, "topology": "2x4x4"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -344,6 +367,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 2, "topology": "2x2x1"}, {"slices": 1, "topology": "2x2x2"}],
         "v6e": [{"slices": 1, "topology": "8x8"}],
+        "v5p": [{"slices": 1, "topology": "2x2x4"}, {"slices": 1, "topology": "2x4x4"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -363,6 +387,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x4"}, {"slices": 2, "topology": "2x2x2"}],
         "v6e": [{"slices": 1, "topology": "16x16"}],
+        "v5p": [{"slices": 1, "topology": "2x4x4"}, {"slices": 2, "topology": "2x2x4"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -382,6 +407,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x2x4"}, {"slices": 2, "topology": "2x2x2"}],
         "v6e": [{"slices": 1, "topology": "16x16"}],
+        "v5p": [{"slices": 1, "topology": "2x4x4"}, {"slices": 2, "topology": "2x2x4"}],
         "v5e": [{"slices": 1, "topology": "16x16"}]
       }
     },
@@ -401,6 +427,7 @@
       "topologies_by_platform": {
         "v7x": [{"slices": 1, "topology": "2x4x4"}],
         "v6e": [{"slices": 1, "topology": "16x16"}],
+        "v5p": [{"slices": 1, "topology": "4x4x4"}],
         "v5e": [{"slices": 2, "topology": "16x16"}]
       }
     }

@@ -57,7 +57,7 @@ _PHASE_PIPELINE_MAP = {
     "to_maxtext_step3": "to_maxtext",
 }
 _TIER_SORT_ORDER = {"S": 0, "A": 1, "C": 2, "B": 3}
-_PLAT_SORT_ORDER = {"v7x": 0, "v6e": 1, "v5e": 2}
+_PLAT_SORT_ORDER = {"v7x": 0, "v6e": 1, "v5p": 2, "v5e": 3}
 _PIPE_SORT_ORDER = {"to_maxtext": 0, "safetensors_dynamic": 1}
 _PROGRESS_IMPL_ROWS: dict[str, int] = {
     "T1": 22,
@@ -241,6 +241,18 @@ def _effective_record_slices(rec: Mapping[str, Any], phase: str, run_id: str) ->
   return slices
 
 
+def _record_region(rec: Mapping[str, Any], platform: str) -> str:
+  return str(
+      rec.get("step1_gcs_bucket_region")
+      or (platforms.get_profile(platform).gcp_region if platform in platforms.PROFILES else "")
+  )
+
+
+def _index_by_key(store: dict[Any, dict[str, Any]], key: Any, rec: dict[str, Any]) -> None:
+  if key not in store or _record_priority(rec) > _record_priority(store[key]):
+    store[key] = rec
+
+
 def scan_v2_roots(
     roots: Sequence[str],
     *,
@@ -249,8 +261,10 @@ def scan_v2_roots(
 ) -> dict[str, Any]:
   """Walks local mirrored GCS v2 trees and indexes Step 1, Step 1b, and phase records."""
   step1_by_pm: dict[tuple[str, str], dict[str, Any]] = {}
+  step1_by_rm: dict[tuple[str, str], dict[str, Any]] = {}
   step1b_convert_by_model: dict[str, dict[str, Any]] = {}
   step1b_copy_by_pm: dict[tuple[str, str], dict[str, Any]] = {}
+  step1b_copy_by_rm: dict[tuple[str, str], dict[str, Any]] = {}
   # (platform, model, scan, slices, topo, pipeline) -> rep_idx -> phase_name -> rec
   phases_by_cfg: dict[tuple[str, str, str, int, str, str], dict[int, dict[str, dict[str, Any]]]] = {}
   runs_map: dict[tuple[Any, ...], dict[str, Any]] = {}
@@ -289,20 +303,19 @@ def scan_v2_roots(
             rec["step3_or_load_log_url"] = rec["gcs_main_log_uri"]
 
         if phase == "step1_hf_to_gcs" and platform and model:
-          pm = (platform, model)
-          if pm not in step1_by_pm or _record_priority(rec) > _record_priority(step1_by_pm[pm]):
-            step1_by_pm[pm] = rec
+          _index_by_key(step1_by_pm, (platform, model), rec)
+          reg = _record_region(rec, platform)
+          if reg:
+            _index_by_key(step1_by_rm, (reg, model), rec)
           runs_map[(phase, platform, model, "", 0, "", run_id, 1)] = rec
         elif phase == "step1b_deepseek_dequantize" and model:
-          if model not in step1b_convert_by_model or _record_priority(rec) > _record_priority(
-              step1b_convert_by_model[model]
-          ):
-            step1b_convert_by_model[model] = rec
+          _index_by_key(step1b_convert_by_model, model, rec)
           runs_map[(phase, platform, model, "", 0, "", run_id, 1)] = rec
         elif phase == "step1b_deepseek_copy_region" and platform and model:
-          pm = (platform, model)
-          if pm not in step1b_copy_by_pm or _record_priority(rec) > _record_priority(step1b_copy_by_pm[pm]):
-            step1b_copy_by_pm[pm] = rec
+          _index_by_key(step1b_copy_by_pm, (platform, model), rec)
+          reg = _record_region(rec, platform)
+          if reg:
+            _index_by_key(step1b_copy_by_rm, (reg, model), rec)
           runs_map[(phase, platform, model, "", 0, "", run_id, 1)] = rec
         elif phase in _PHASE_PIPELINE_MAP and platform and model:
           pipeline = str(rec.get("pipeline_name") or _PHASE_PIPELINE_MAP[phase])
@@ -330,8 +343,10 @@ def scan_v2_roots(
 
   return {
       "step1_by_pm": step1_by_pm,
+      "step1_by_rm": step1_by_rm,
       "step1b_convert_by_model": step1b_convert_by_model,
       "step1b_copy_by_pm": step1b_copy_by_pm,
+      "step1b_copy_by_rm": step1b_copy_by_rm,
       "phases_by_cfg": phases_by_cfg,
       "runs_records": list(runs_map.values()),
   }
@@ -457,7 +472,10 @@ def _effective_step1b_seconds(
         (platform, model_info["model_name"])
     )
   else:
-    rec = v2_data["step1b_copy_by_pm"].get((platform, model_info["model_name"]))
+    reg = platforms.get_profile(platform).gcp_region if platform in platforms.PROFILES else ""
+    rec = v2_data["step1b_copy_by_pm"].get((platform, model_info["model_name"])) or v2_data.get(
+        "step1b_copy_by_rm", {}
+    ).get((reg, model_info["model_name"]))
   if not rec:
     return "PENDING"
   if rec.get("run_status") == "OK" and _is_number(rec.get("step1b_deepseek_total_seconds")):
@@ -574,7 +592,10 @@ def _format_pair_verdicts(tm: Mapping[str, Any], sd: Mapping[str, Any]) -> tuple
   sd_status = str(sd.get("run_status") or "")
   tm_weights = str(tm.get("checkpoint_weights_kind") or "real")
   sd_weights = str(sd.get("checkpoint_weights_kind") or "real")
-  is_synthetic = sd_weights in ("synthetic", "synthetic_sparse") or tm_weights in ("synthetic", "synthetic_sparse")
+  is_synthetic = sd_weights in ("synthetic", "synthetic_sparse") or tm_weights in (
+      "synthetic",
+      "synthetic_sparse",
+  )
 
   if tm_status in ("", "PENDING") or sd_status in ("", "PENDING"):
     return "PENDING", "PENDING"
@@ -665,9 +686,13 @@ def _attach_v2_pair_speedups(summary_rows: Sequence[dict[str, Any]]) -> None:
     tm["faster_already_orbax_verdict"] = already_orbax
     sd["faster_already_orbax_verdict"] = already_orbax
 
-    is_synthetic = str(sd.get("checkpoint_weights_kind") or "real") in ("synthetic", "synthetic_sparse") or str(
-        tm.get("checkpoint_weights_kind") or "real"
-    ) in ("synthetic", "synthetic_sparse")
+    is_synthetic = str(sd.get("checkpoint_weights_kind") or "real") in (
+        "synthetic",
+        "synthetic_sparse",
+    ) or str(tm.get("checkpoint_weights_kind") or "real") in (
+        "synthetic",
+        "synthetic_sparse",
+    )
     if tm.get("run_status") != "OK" or sd.get("run_status") != "OK" or is_synthetic:
       sd["speedup_end_to_end_to_maxtext_vs_safetensors_dynamic"] = "—"
       sd["speedup_without_hf_download_to_maxtext_vs_safetensors_dynamic"] = "—"
@@ -793,7 +818,9 @@ def _build_v2_matrix_rows(
         }
     )
 
-    step1_rec = v2_data["step1_by_pm"].get((plat, m_name))
+    step1_rec = v2_data["step1_by_pm"].get((plat, m_name)) or v2_data.get("step1_by_rm", {}).get(
+        (profile.gcp_region, m_name)
+    )
     step1_s = _effective_step1_seconds(step1_rec, None)
     step1b_s = _effective_step1b_seconds(model_info, plat, v2_data)
     sum_row["step1_total_seconds"] = _round_num(step1_s, 4) if _is_number(step1_s) else step1_s

@@ -55,7 +55,10 @@ def _write_json_doc(doc: dict, out_path: str | None, upload_gcs: str = "") -> No
     from etils import epath  # pylint: disable=import-outside-toplevel
 
     epath.Path(upload_gcs).write_text(encoded)
-    print(f"Uploaded tasks.json ({len(doc.get('tasks', []))} tasks) -> {upload_gcs}", file=sys.stderr)
+    print(
+        f"Uploaded tasks.json ({len(doc.get('tasks', []))} tasks) -> {upload_gcs}",
+        file=sys.stderr,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -69,6 +72,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   s1.add_argument("--run-id", required=True)
   s1.add_argument("--clean-target", action="store_true")
   s1.add_argument("--workers", type=int, default=None)
+  s1.add_argument("--code-dir", default=None)
   s1.add_argument("--out", default=None)
 
   s1b = sub.add_parser("step1b-cpu", help="Generate DeepSeek Step 1b PVC + CPU Job YAML")
@@ -85,7 +89,12 @@ def main(argv: Sequence[str] | None = None) -> int:
   cp.add_argument("--source-gcs-dir", required=True)
   cp.add_argument("--run-id", required=True)
   cp.add_argument("--clean-target", action="store_true")
-  cp.add_argument("--bf16-source", default="converted_by_this_benchmark", choices=schema_v2.DEEPSEEK_BF16_SOURCES)
+  cp.add_argument(
+      "--bf16-source",
+      default="converted_by_this_benchmark",
+      choices=schema_v2.DEEPSEEK_BF16_SOURCES,
+  )
+  cp.add_argument("--code-dir", default=None)
   cp.add_argument("--out", default=None)
 
   qw = sub.add_parser("queue-worker", help="Generate TPU queue-worker JobSet YAML")
@@ -98,9 +107,13 @@ def main(argv: Sequence[str] | None = None) -> int:
   qw.add_argument("--run-id", required=True)
   qw.add_argument("--results", default="")
   qw.add_argument("--experiment-name", default="mesa-bench-v2")
+  qw.add_argument("--code-dir", default=None)
   qw.add_argument("--out", default=None)
 
-  qt = sub.add_parser("queue-tasks", help="Generate tasks.json for a platform and optionally upload to GCS")
+  qt = sub.add_parser(
+      "queue-tasks",
+      help="Generate tasks.json for a platform and optionally upload to GCS",
+  )
   qt.add_argument("--platform", required=True, choices=schema_v2.PLATFORMS)
   qt.add_argument("--experiment-name", default="mesa-bench-v2")
   qt.add_argument("--run-prefix", required=True)
@@ -108,7 +121,11 @@ def main(argv: Sequence[str] | None = None) -> int:
   qt.add_argument("--models", nargs="+", default=None, help="Optional subset of model names")
   qt.add_argument("--skip-to-maxtext", action="store_true", help="Run safetensors_dynamic only")
   qt.add_argument("--out", default=None)
-  qt.add_argument("--upload", default="", help="Optional gs://.../tasks.json URI to write directly")
+  qt.add_argument(
+      "--upload",
+      default="",
+      help="Optional gs://.../tasks.json URI to write directly",
+  )
 
   args = parser.parse_args(argv)
   if args.command == "step1-cpu":
@@ -119,6 +136,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             run_id=args.run_id,
             clean_target=args.clean_target,
             workers=args.workers,
+            code_dir=args.code_dir,
         )
         for m in args.models
     ]
@@ -140,6 +158,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_id=args.run_id,
         clean_target=args.clean_target,
         bf16_source=args.bf16_source,
+        code_dir=args.code_dir,
     )
     _write_yaml_docs([doc], args.out)
   elif args.command == "queue-worker":
@@ -156,6 +175,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         results_gcs_uri=results_uri,
         experiment_name=args.experiment_name,
         min_slices=args.min_slices,
+        code_dir=args.code_dir,
     )
     _write_yaml_docs([doc], args.out)
   else:
@@ -167,7 +187,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         models=args.models,
         skip_to_maxtext=args.skip_to_maxtext,
     )
-    _write_json_doc({"platform": args.platform, "tasks": tasks}, args.out, upload_gcs=args.upload)
+    _write_json_doc(
+        {"platform": args.platform, "tasks": tasks},
+        args.out,
+        upload_gcs=args.upload,
+    )
   return 0
 
 

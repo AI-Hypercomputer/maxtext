@@ -100,19 +100,20 @@ class SchemaV2Test(unittest.TestCase):
     self.assertEqual(schema_v2.validate_v2_phase_record(rec), [])
 
   def test_models_v2_planned_matrix_counts(self):
+    self.assertEqual(schema_v2.PLATFORMS, ("v7x", "v6e", "v5p", "v5e"))
     cfg = schema_v2.load_models_v2()
     self.assertEqual(len(cfg["models"]), 21)
     planned = list(schema_v2.iter_planned_matrix(cfg))
-    self.assertEqual(len(planned), 352)
+    self.assertEqual(len(planned), 516)
     by_platform = {}
     models_per_platform = {}
     for item in planned:
       by_platform[item["platform"]] = by_platform.get(item["platform"], 0) + 1
       models_per_platform.setdefault(item["platform"], set()).add(item["model_name"])
-    self.assertEqual(by_platform, {"v7x": 164, "v6e": 140, "v5e": 48})
+    self.assertEqual(by_platform, {"v7x": 164, "v6e": 140, "v5p": 164, "v5e": 48})
     self.assertEqual(
         {k: len(v) for k, v in models_per_platform.items()},
-        {"v7x": 21, "v6e": 21, "v5e": 12},
+        {"v7x": 21, "v6e": 21, "v5p": 21, "v5e": 12},
     )
 
 

@@ -81,7 +81,10 @@ class BuildSheetV2Test(unittest.TestCase):
                 "git_working_tree_clean": True,
                 "code_tarball_sha256": "abcd1234",
             },
-            "package_versions": {"python_version": "3.12.7", "jax_version": "0.11.1"},
+            "package_versions": {
+                "python_version": "3.12.7",
+                "jax_version": "0.11.1",
+            },
         },
     )
     _write_json(
@@ -123,7 +126,11 @@ class BuildSheetV2Test(unittest.TestCase):
     )
 
     # 2. Three repetitions for llama3.1-8b scanned 1x2x2x1 on v7x for both pipelines -> median + min-max range.
-    for rep, tm_load, sd_load in ((1, 12.0, 20.0), (2, 10.0, 18.0), (3, 14.0, 24.0)):
+    for rep, tm_load, sd_load in (
+        (1, 12.0, 20.0),
+        (2, 10.0, 18.0),
+        (3, 14.0, 24.0),
+    ):
       base_dir = os.path.join(v2_root, "runs", "A", f"rep{rep}", "llama3.1-8b", "scanned")
       _write_json(
           os.path.join(base_dir, "to_maxtext_step1_result.json"),
@@ -218,7 +225,15 @@ class BuildSheetV2Test(unittest.TestCase):
 
     # 3. Failed to_maxtext Step 2 (OOM-HOST) for deepseek4-284b must mark Step 3 BLOCKED.
     _write_json(
-        os.path.join(v2_root, "runs", "C", "ds284", "deepseek4-284b", "scanned", "to_maxtext_step2_result.json"),
+        os.path.join(
+            v2_root,
+            "runs",
+            "C",
+            "ds284",
+            "deepseek4-284b",
+            "scanned",
+            "to_maxtext_step2_result.json",
+        ),
         {
             "schema_version": schema_v2.SCHEMA_VERSION,
             "phase_name": "to_maxtext_step2",
@@ -241,20 +256,30 @@ class BuildSheetV2Test(unittest.TestCase):
 
     impl_json = os.path.join(self.tmp_dir, "impl.json")
     with open(impl_json, "w", encoding="utf-8") as f:
-      json.dump([{"task": "T4.1", "status": "Done", "commit": "abc1234", "notes": "tested"}], f)
+      json.dump(
+          [
+              {
+                  "task": "T4.1",
+                  "status": "Done",
+                  "commit": "abc1234",
+                  "notes": "tested",
+              }
+          ],
+          f,
+      )
 
     rc = build_sheet_v2.main(["--v2-root", v2_root, "--impl-json", impl_json, "--out-dir", out_dir])
     self.assertEqual(rc, 0)
 
     ds = build_sheet_v2.build_v2_dataset(v2_roots=[v2_root])
     self.assertEqual(ds.validate(), [])
-    # Full planned v2 matrix must stay exact at 352 rows and group by Platform -> Model -> Pipeline -> Scan layers -> Slices.
-    self.assertEqual(len(ds.summary_rows), 352)
+    # Full planned v2 matrix must stay exact at 516 rows and group by Platform -> Model -> Pipeline -> Scan layers -> Slices.
+    self.assertEqual(len(ds.summary_rows), 516)
     plat_blocks = []
     for r in ds.summary_rows:
       if not plat_blocks or plat_blocks[-1] != r["tpu_platform"]:
         plat_blocks.append(r["tpu_platform"])
-    self.assertEqual(plat_blocks, ["v7x", "v6e", "v5e"])
+    self.assertEqual(plat_blocks, ["v7x", "v6e", "v5p", "v5e"])
     qwen06_v7x_groups = [
         (r["pipeline_name"], r["scan_layers_mode"], r["number_of_slices"])
         for r in ds.summary_rows
@@ -294,11 +319,16 @@ class BuildSheetV2Test(unittest.TestCase):
     self.assertAlmostEqual(sd_row["total_without_hf_download_seconds"], 20.4)
     self.assertAlmostEqual(sd_row["total_end_to_end_seconds"], 60.8)
     self.assertAlmostEqual(
-        sd_row["speedup_without_hf_download_to_maxtext_vs_safetensors_dynamic"], round(117.0 / 20.4, 4)
+        sd_row["speedup_without_hf_download_to_maxtext_vs_safetensors_dynamic"],
+        round(117.0 / 20.4, 4),
     )
-    self.assertAlmostEqual(sd_row["speedup_end_to_end_to_maxtext_vs_safetensors_dynamic"], round(157.4 / 60.8, 4))
     self.assertAlmostEqual(
-        sd_row["speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2"], round(12.0 / 20.0, 4)
+        sd_row["speedup_end_to_end_to_maxtext_vs_safetensors_dynamic"],
+        round(157.4 / 60.8, 4),
+    )
+    self.assertAlmostEqual(
+        sd_row["speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2"],
+        round(12.0 / 20.0, 4),
     )
     # Plain-English verdicts must appear on BOTH rows of the pair with >=1.0x multipliers and seconds.
     expected_from_hf = "safetensors_dynamic 5.74x faster (20.4s vs 117.0s incl. Orbax convert)"
@@ -332,6 +362,54 @@ class BuildSheetV2Test(unittest.TestCase):
 
   def test_v7x_step1b_copy_fallback_and_step1_oom_ram_cell(self):
     v2_root = os.path.join(self.tmp_dir, "v2_copy_fallback")
+
+    _write_json(
+        os.path.join(v2_root, "step1_ew4", "deepseek4-284b_step1_result.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "step1_hf_to_gcs",
+            "tpu_platform": "v5e",
+            "step1_gcs_bucket_region": "europe-west4",
+            "model_name": "deepseek4-284b",
+            "step1_total_seconds": 135.0,
+            "run_status": "OK",
+        },
+    )
+    _write_json(
+        os.path.join(v2_root, "step1b_ew4", "deepseek4-284b_copy_result.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "step1b_deepseek_copy_region",
+            "tpu_platform": "v5e",
+            "step1_gcs_bucket_region": "europe-west4",
+            "model_name": "deepseek4-284b",
+            "step1b_deepseek_total_seconds": 52.0,
+            "run_status": "OK",
+        },
+    )
+    _write_json(
+        os.path.join(v2_root, "runs_v5p", "deepseek4-284b_sd.json"),
+        {
+            "schema_version": schema_v2.SCHEMA_VERSION,
+            "phase_name": "safetensors_dynamic",
+            "pipeline_name": "safetensors_dynamic",
+            "tpu_platform": "v5p",
+            "model_name": "deepseek4-284b",
+            "scan_layers_mode": "scanned",
+            "number_of_slices": 1,
+            "slice_topology": "2x2x4",
+            "repetition_index": 1,
+            "run_status": "OK",
+            "jax_backend_platform": "tpu",
+            "tpu_device_kind": "TPU v5",
+            "total_tpu_devices_measured": 16,
+            "safetensors_dynamic_step1_total_seconds": 0.02,
+            "safetensors_dynamic_step2_total_seconds": 44.98,
+            "setup_total_before_load_seconds": 11.0,
+            "memory_peak_host_ram_container_gb": 70.0,
+            "memory_tpu_hbm_peak_per_device_gb": 55.0,
+        },
+    )
 
     _write_json(
         os.path.join(v2_root, "step1", "deepseek4-284b_step1_result.json"),
@@ -401,6 +479,14 @@ class BuildSheetV2Test(unittest.TestCase):
     )
     self.assertEqual(ds284["step1b_deepseek_total_seconds"], 45.0)
     self.assertAlmostEqual(float(ds284["total_end_to_end_seconds"]), 200.0, places=2)
+
+    ds284_v5p = next(
+        r for r in ds.summary_rows if r["row_id"] == "v2|v5p|deepseek4-284b|scanned|safetensors_dynamic|1x2x2x4"
+    )
+    self.assertEqual(ds284_v5p["step1_total_seconds"], 135.0)
+    self.assertEqual(ds284_v5p["step1b_deepseek_total_seconds"], 52.0)
+    self.assertAlmostEqual(float(ds284_v5p["total_without_hf_download_seconds"]), 45.0, places=2)
+    self.assertAlmostEqual(float(ds284_v5p["total_end_to_end_seconds"]), 232.0, places=2)
 
     q235 = next(r for r in ds.summary_rows if r["row_id"] == "v2|v7x|qwen3-235b-a22b|scanned|to_maxtext|1x2x2x1")
     self.assertEqual(q235["run_status"], "OOM-HOST")
@@ -515,14 +601,20 @@ class BuildSheetV2Test(unittest.TestCase):
     )
     merged = build_sheet_v2.merge_external_summary_rows(ds.summary_rows, [ext_row])
     ds.summary_rows = merged
-    self.assertEqual(len(ds.summary_rows), 353)
+    self.assertEqual(len(ds.summary_rows), 517)
     self.assertEqual(ds.validate(), [])
 
     by_id = {r["row_id"]: r for r in ds.summary_rows}
     q_tm = by_id["v2|v7x|qwen3-235b-a22b|scanned|to_maxtext|1x2x2x1"]
     q_sd = by_id["v2|v7x|qwen3-235b-a22b|scanned|safetensors_dynamic|1x2x2x1"]
-    self.assertEqual(q_tm["faster_from_hf_verdict"], "Only safetensors_dynamic fits (420.0s; to_maxtext OOM-HOST)")
-    self.assertEqual(q_sd["faster_from_hf_verdict"], "Only safetensors_dynamic fits (420.0s; to_maxtext OOM-HOST)")
+    self.assertEqual(
+        q_tm["faster_from_hf_verdict"],
+        "Only safetensors_dynamic fits (420.0s; to_maxtext OOM-HOST)",
+    )
+    self.assertEqual(
+        q_sd["faster_from_hf_verdict"],
+        "Only safetensors_dynamic fits (420.0s; to_maxtext OOM-HOST)",
+    )
     self.assertEqual(q_sd["faster_already_orbax_verdict"], "No Orbax ckpt (to_maxtext OOM-HOST)")
 
     ds_sd = by_id["v2|v7x|deepseek4-284b|scanned|safetensors_dynamic|1x2x2x1"]
@@ -534,9 +626,13 @@ class BuildSheetV2Test(unittest.TestCase):
     build_sheet_v2.populate_gpaste_urls(ds, cache_path="", upload_missing=False)
     wl_row = by_id["wl|v6e|gpt-oss-120b|scanned|safetensors_dynamic|1x4x4"]
     self.assertEqual(
-        wl_row["log_url"], "https://storage.cloud.google.com/mesa-maxtext-southamerica-west1/wl-bench-v2/test.log"
+        wl_row["log_url"],
+        "https://storage.cloud.google.com/mesa-maxtext-southamerica-west1/wl-bench-v2/test.log",
     )
-    self.assertAlmostEqual(wl_row["speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2"], 1.9304)
+    self.assertAlmostEqual(
+        wl_row["speedup_load_only_to_maxtext_step3_vs_safetensors_dynamic_step2"],
+        1.9304,
+    )
     raw_ops, formula_ops = build_sheet_v2.build_gsheets_batches(ds)
     self.assertTrue(
         any("wl-bench-v2/test.log" in str(op.get("data")) and '"log"' in str(op.get("data")) for op in formula_ops)

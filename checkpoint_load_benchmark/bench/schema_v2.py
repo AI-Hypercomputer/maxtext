@@ -31,7 +31,7 @@ DEEPSEEK_BF16_SOURCES = ("converted_by_this_benchmark", "copied_from_maxtext_tea
 CACHE_STATE_CODES = ("empty", "warm")
 PIPELINES = ("to_maxtext", "safetensors_dynamic")
 SCAN_MODES = ("scanned", "unscanned")
-PLATFORMS = ("v7x", "v6e", "v5e")
+PLATFORMS = ("v7x", "v6e", "v5p", "v5e")
 
 NON_NUMERIC_CODES = frozenset(
     {
