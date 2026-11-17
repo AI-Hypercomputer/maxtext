@@ -212,6 +212,36 @@ def should_prevent_cse_in_remat(config):
   return True
 
 
+_GDN_REMAT_EXPANSIONS: dict[str, tuple[str, ...]] = {
+    "gdn": (
+        "gdn_qkv",
+        "gdn_b",
+        "gdn_a",
+        "gdn_core_attn_out",
+        "gdn_t_inv",
+        "gdn_chunk_states",
+    ),
+    "gdn_states": (
+        "gdn_core_attn_out",
+        "gdn_t_inv",
+        "gdn_chunk_states",
+    ),
+    "gdn_cp_state": (
+        "gdn_cp_conv_halo",
+        "gdn_cp_m_local",
+        "gdn_cp_s_in",
+    ),
+}
+
+
+def _expand_gdn_remat_names(names: list[str]) -> list[str]:
+  """Expands composite GatedDeltaNet custom remat keys while preserving order and deduplicating."""
+  expanded: list[str] = []
+  for name in names:
+    expanded.extend(_GDN_REMAT_EXPANSIONS.get(name, (name,)))
+  return list(dict.fromkeys(expanded))
+
+
 def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   """Returns the ``(save_names, offload_names)`` split for remat policies built via
   ``jax.checkpoint_policies.save_and_offload_only_these_names``.
@@ -249,7 +279,15 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
         "mlpwo",
     ]
   if config.remat_policy == "custom":
-    return list(config.tensors_on_device or []), list(config.tensors_to_offload or [])
+    save_names = _expand_gdn_remat_names(list(config.tensors_on_device or []))
+    offload_names = _expand_gdn_remat_names(list(config.tensors_to_offload or []))
+    overlap = sorted(set(save_names) & set(offload_names))
+    if overlap:
+      raise ValueError(
+          "GDN custom remat settings place the same checkpointed tensors in both device HBM and host offload: "
+          f"{overlap}. Choose compatible locations for 'gdn' and 'gdn_states'."
+      )
+    return save_names, offload_names
   return [], []
 
 
