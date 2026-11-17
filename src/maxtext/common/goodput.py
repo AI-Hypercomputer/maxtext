@@ -75,7 +75,9 @@ def maybe_monitor_goodput(config):
   """Monitor cumulative goodput if enabled on the lead host.
 
   When the goodput module is stubbed or monitoring is disabled, this
-  becomes a lightweight no-op context manager.
+  becomes a lightweight no-op context manager. If the monitor cannot be
+  created or started, a single warning is logged and the wrapped block
+  runs with Goodput monitoring off.
   """
   if _GOODPUT_STUB:
     if config.monitor_goodput and jax.process_index() == 0:
@@ -87,12 +89,13 @@ def maybe_monitor_goodput(config):
     return
   goodput_monitor = None
   try:
-    if config.report_performance_metric_for_gcp_monitoring:
-      config.enable_gcp_step_deviation_metrics = False
-
+    # MaxText's workload monitor and Goodput's step deviation uploader both publish to the workload/performance
+    # GCM metric; when report_performance_metric_for_gcp_monitoring is on, skip Goodput's.
     gcp_options = monitoring.GCPOptions(
         enable_gcp_goodput_metrics=config.enable_gcp_goodput_metrics,
-        enable_gcp_step_deviation_metrics=config.enable_gcp_step_deviation_metrics,
+        enable_gcp_step_deviation_metrics=(
+            config.enable_gcp_step_deviation_metrics and not config.report_performance_metric_for_gcp_monitoring
+        ),
     )
 
     job_name = get_goodput_job_name(config)
@@ -110,9 +113,16 @@ def maybe_monitor_goodput(config):
         "gcp_options": gcp_options,
     }
 
-    goodput_monitor = _construct_goodput_monitor(config, common_kwargs)
-    goodput_monitor.start_goodput_uploader()
-    max_logging.log("Started Cumulative Goodput upload to Tensorboard & GCM in the background!")
+    try:
+      goodput_monitor = _construct_goodput_monitor(config, common_kwargs)
+      goodput_monitor.start_goodput_uploader()
+      max_logging.log("Started Cumulative Goodput upload to Tensorboard & GCM in the background!")
+    except Exception as e:  # pylint: disable=broad-exception-caught
+      goodput_monitor = None
+      max_logging.warning(
+          "Goodput: could not start goodput monitoring, continuing with Goodput monitoring off"
+          f" (set monitor_goodput=false to silence this warning): {type(e).__name__}: {e}"
+      )
     with maybe_monitor_rolling_window_goodput(goodput_monitor, config):
       yield
   finally:
@@ -206,7 +216,11 @@ def record_goodput(recorder, event_name, *args):
 
 
 def create_goodput_recorder(config):
-  """Create goodput recorder if `enable_goodput_recording=True`."""
+  """Create goodput recorder if `enable_goodput_recording=True`.
+
+  Returns None (Goodput recording off) after logging a single warning if the
+  recorder cannot be created.
+  """
   if _GOODPUT_STUB:
     if config.enable_goodput_recording and jax.process_index() == 0:
       max_logging.log("[GOODPUT NO-OP] recorder skipped (decoupled stub).")
@@ -233,6 +247,13 @@ def create_goodput_recorder(config):
     except Exception as e:  # pylint: disable=broad-exception-caught
       max_logging.log(f"Goodput: could not create elastic goodput recorder, falling back to base recorder: {e}")
 
-  recorder = goodput.GoodputRecorder(job_name, logger_name, jax.process_index() == 0)
+  try:
+    recorder = goodput.GoodputRecorder(job_name, logger_name, jax.process_index() == 0)
+  except Exception as e:  # pylint: disable=broad-exception-caught
+    max_logging.warning(
+        "Goodput: could not create goodput recorder, continuing with Goodput recording off"
+        f" (set enable_goodput_recording=false to silence this warning): {type(e).__name__}: {e}"
+    )
+    return None
   max_logging.log(f"Goodput: created base GoodputRecorder for job: {job_name}")
   return recorder
