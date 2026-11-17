@@ -43,9 +43,22 @@ class MakeSmokeJobsetTest(unittest.TestCase):
     cases = [
         ("v7x", "2x2x1", 1, "4", 8, "default", True, "60", None, None),
         ("v6e", "2x4", 1, "8", 8, "default", False, "60", "medium", None),
+        ("v5p", "2x2x1", 1, "4", 4, "default", False, "60", "medium", None),
+        ("v5p", "2x2x4", 4, "4", 16, "default", False, "60", "medium", None),
         ("v5e", "16x16", 64, "4", 256, None, False, None, None, "mesa-bench"),
     ]
-    for platform, topo, hosts, tpu_req, devices, queue, tas, duration, prio, sa in cases:
+    for (
+        platform,
+        topo,
+        hosts,
+        tpu_req,
+        devices,
+        queue,
+        tas,
+        duration,
+        prio,
+        sa,
+    ) in cases:
       with self.subTest(platform=platform, topology=topo):
         doc = gen.build_smoke_jobset(
             platform=platform,
@@ -67,7 +80,10 @@ class MakeSmokeJobsetTest(unittest.TestCase):
           self.assertEqual(meta_labels.get("kueue.x-k8s.io/queue-name"), queue)
 
         self.assertEqual(doc["spec"]["failurePolicy"], {"maxRestarts": 0})
-        self.assertEqual(doc["spec"]["network"], {"enableDNSHostnames": True, "publishNotReadyAddresses": True})
+        self.assertEqual(
+            doc["spec"]["network"],
+            {"enableDNSHostnames": True, "publishNotReadyAddresses": True},
+        )
 
         rjob = doc["spec"]["replicatedJobs"][0]
         job_tmpl = rjob["template"]
@@ -88,9 +104,15 @@ class MakeSmokeJobsetTest(unittest.TestCase):
 
         pod_ann = pod_meta.get("annotations", {})
         if tas:
-          self.assertEqual(pod_ann.get("kueue.x-k8s.io/podset-slice-required-topology"), "cloud.google.com/gke-nodepool")
+          self.assertEqual(
+              pod_ann.get("kueue.x-k8s.io/podset-slice-required-topology"),
+              "cloud.google.com/gke-nodepool",
+          )
           self.assertEqual(pod_ann.get("kueue.x-k8s.io/podset-slice-size"), str(hosts))
-          self.assertEqual(pod_ann.get("kueue.x-k8s.io/podset-unconstrained-topology"), "true")
+          self.assertEqual(
+              pod_ann.get("kueue.x-k8s.io/podset-unconstrained-topology"),
+              "true",
+          )
         else:
           self.assertEqual(pod_ann, {})
 
@@ -110,7 +132,10 @@ class MakeSmokeJobsetTest(unittest.TestCase):
         self.assertEqual(res["limits"]["google.com/tpu"], tpu_req)
 
         env = self._env_map(doc)
-        self.assertEqual(env["BENCH_CODE_DIR"]["value"], "gs://mesa-maxtext/mesa-bench-v2/code")
+        self.assertEqual(
+            env["BENCH_CODE_DIR"]["value"],
+            "gs://mesa-maxtext/mesa-bench-v2/code",
+        )
         hf_ref = env["HF_TOKEN"]["valueFrom"]["secretKeyRef"]
         self.assertEqual(hf_ref["name"], "mesa-hf-token")
         self.assertTrue(hf_ref["optional"])
@@ -143,13 +168,57 @@ class MakeSmokeJobsetTest(unittest.TestCase):
     self.addCleanup(shutil.rmtree, tmp_dir)
     out_file = os.path.join(tmp_dir, "smoke.yaml")
     rc = gen.main(
-        ["--platform", "v5e", "--topology", "16x16", "--model", "qwen3-0.6b", "--run-id", "s1", "--out", out_file]
+        [
+            "--platform",
+            "v5e",
+            "--topology",
+            "16x16",
+            "--model",
+            "qwen3-0.6b",
+            "--run-id",
+            "s1",
+            "--out",
+            out_file,
+        ]
     )
     self.assertEqual(rc, 0)
     with open(out_file, "r", encoding="utf-8") as f:
       loaded = yaml.safe_load(f)
     self.assertEqual(loaded["kind"], "JobSet")
     self.assertEqual(loaded["spec"]["replicatedJobs"][0]["template"]["spec"]["parallelism"], 64)
+
+    v5p_out = os.path.join(tmp_dir, "smoke_v5p.yaml")
+    self.assertEqual(
+        gen.main(
+            [
+                "--platform",
+                "v5p",
+                "--topology",
+                "2x2x1",
+                "--model",
+                "qwen3-0.6b",
+                "--run-id",
+                "s2",
+                "--code-dir",
+                "gs://mesa-maxtext/mesa-bench-v2/code-v5p",
+                "--regional",
+                "--out",
+                v5p_out,
+            ]
+        ),
+        0,
+    )
+    with open(v5p_out, "r", encoding="utf-8") as f:
+      v5p_doc = yaml.safe_load(f)
+    v5p_env = self._env_map(v5p_doc)
+    self.assertEqual(
+        v5p_env["BENCH_CODE_DIR"]["value"],
+        "gs://mesa-maxtext/mesa-bench-v2/code-v5p",
+    )
+    self.assertIn(
+        "gs://mesa-maxtext-europe-west4/mesa-bench-v2/smoke",
+        v5p_env["RUNNER_SCRIPT"]["value"],
+    )
 
 
 if __name__ == "__main__":

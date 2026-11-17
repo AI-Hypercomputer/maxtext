@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-# Generate (and optionally apply with --apply) a smoke-test JobSet manifest for v7x, v6e, or v5e.
+# Generate (and optionally apply with --apply) a smoke-test JobSet manifest for v7x, v6e, v5p, or v5e.
 
 set -euo pipefail
 
@@ -56,7 +56,7 @@ while [[ $# -gt 0 ]]; do
       ;;
     *)
       echo "Unknown option: $1" >&2
-      echo "Usage: $0 --platform <v7x|v6e|v5e> --topology <topo> --run-id <id> [--model qwen3-0.6b] [--scan-modes scanned unscanned] [--pipelines both|to_maxtext|safetensors_dynamic] [--out <file>] [--apply]" >&2
+      echo "Usage: $0 --platform <v7x|v6e|v5p|v5e> --topology <topo> --run-id <id> [--model qwen3-0.6b] [--scan-modes scanned unscanned] [--pipelines both|to_maxtext|safetensors_dynamic] [--out <file>] [--apply]" >&2
       exit 1
       ;;
   esac

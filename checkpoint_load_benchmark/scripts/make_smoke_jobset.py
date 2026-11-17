@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Generates a single-slice JobSet YAML manifest for a v7x, v6e, or v5e smoke test run."""
+"""Generates a single-slice JobSet YAML manifest for a v7x, v6e, v5p, or v5e smoke test run."""
 
 import argparse
 import copy
@@ -127,7 +127,7 @@ echo "=== [{name}] SMOKE TEST COMPLETE ==="
 """
 
 
-def build_smoke_jobset(
+def build_smoke_jobset(  # pylint: disable=too-many-positional-arguments
     platform: str,
     topology: str,
     model: str,
@@ -135,9 +135,11 @@ def build_smoke_jobset(
     scan_modes: list[str] | None = None,
     pipelines: str = "both",
     regional: bool = False,
+    code_dir: str | None = None,
 ) -> dict[str, Any]:
   """Builds the Kubernetes JobSet manifest dict for one smoke test run."""
   profile = platforms.get_profile(platform)
+  effective_code_dir = code_dir or profile.gcs_code_dir
   hosts = profile.hosts_per_slice(topology)
   chips_per_host = profile.chips_per_host(topology)
   modes = list(scan_modes or ["scanned", "unscanned"])
@@ -179,15 +181,21 @@ def build_smoke_jobset(
   env_list: list[dict[str, Any]] = [
       {"name": "SLICE_INDEX", "value": "0"},
       {"name": "DAEMON_PORT", "value": "55555"},
-      {"name": "BENCH_CODE_DIR", "value": profile.gcs_code_dir},
+      {"name": "BENCH_CODE_DIR", "value": effective_code_dir},
       {"name": "BENCH_PLATFORM", "value": profile.name},
       {"name": "BENCH_CLUSTER", "value": profile.gke_cluster_name},
       {"name": "BENCH_TOPOLOGY", "value": topology},
       {"name": "BENCH_RUN_ID", "value": run_id},
       {"name": "TORCH_DEVICE_BACKEND_AUTOLOAD", "value": "0"},
       {"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
-      {"name": "POD_NAMESPACE", "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}}},
-      {"name": "NODE_NAME", "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}}},
+      {
+          "name": "POD_NAMESPACE",
+          "valueFrom": {"fieldRef": {"fieldPath": "metadata.namespace"}},
+      },
+      {
+          "name": "NODE_NAME",
+          "valueFrom": {"fieldRef": {"fieldPath": "spec.nodeName"}},
+      },
       {
           "name": "HF_TOKEN",
           "valueFrom": {
@@ -204,7 +212,10 @@ def build_smoke_jobset(
 
   pod_spec: dict[str, Any] = {
       "restartPolicy": "Never",
-      "nodeSelector": {**profile.node_selectors, "cloud.google.com/gke-tpu-topology": topology},
+      "nodeSelector": {
+          **profile.node_selectors,
+          "cloud.google.com/gke-tpu-topology": topology,
+      },
       "tolerations": copy.deepcopy(profile.tolerations),
       "volumes": [{"name": "ramdisk", "emptyDir": {"medium": "Memory"}}],
       "containers": [
@@ -212,7 +223,7 @@ def build_smoke_jobset(
               "name": "worker",
               "image": profile.container_image,
               "imagePullPolicy": "IfNotPresent",
-              "command": ["bash", "-c", _bootstrap_command(profile.gcs_code_dir)],
+              "command": ["bash", "-c", _bootstrap_command(effective_code_dir)],
               "env": env_list,
               "volumeMounts": [{"name": "ramdisk", "mountPath": "/ramdisk"}],
               "resources": {
@@ -265,7 +276,10 @@ def build_smoke_jobset(
                           "completionMode": "Indexed",
                           "backoffLimit": 0,
                           "template": {
-                              "metadata": {"labels": pod_labels, "annotations": pod_annotations},
+                              "metadata": {
+                                  "labels": pod_labels,
+                                  "annotations": pod_annotations,
+                              },
                               "spec": pod_spec,
                           },
                       },
@@ -278,13 +292,27 @@ def build_smoke_jobset(
 
 def main(argv: list[str] | None = None) -> int:
   p = argparse.ArgumentParser(description=__doc__)
-  p.add_argument("--platform", required=True, choices=["v7x", "v6e", "v5e"])
+  p.add_argument("--platform", required=True, choices=["v7x", "v6e", "v5p", "v5e"])
   p.add_argument("--topology", required=True)
   p.add_argument("--model", default="qwen3-0.6b")
   p.add_argument("--run-id", required=True)
-  p.add_argument("--scan-modes", nargs="+", default=["scanned", "unscanned"], choices=["scanned", "unscanned"])
-  p.add_argument("--pipelines", default="both", choices=["both", "to_maxtext", "safetensors_dynamic"])
-  p.add_argument("--regional", action="store_true", help="Write smoke outputs into regional_gcs_data_root")
+  p.add_argument(
+      "--scan-modes",
+      nargs="+",
+      default=["scanned", "unscanned"],
+      choices=["scanned", "unscanned"],
+  )
+  p.add_argument(
+      "--pipelines",
+      default="both",
+      choices=["both", "to_maxtext", "safetensors_dynamic"],
+  )
+  p.add_argument(
+      "--regional",
+      action="store_true",
+      help="Write smoke outputs into regional_gcs_data_root",
+  )
+  p.add_argument("--code-dir", default=None, help="Optional override for BENCH_CODE_DIR")
   p.add_argument("--out", default=None, help="Output YAML path (prints to stdout if omitted)")
   args = p.parse_args(argv)
 
@@ -296,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
       scan_modes=args.scan_modes,
       pipelines=args.pipelines,
       regional=args.regional,
+      code_dir=args.code_dir,
   )
   rendered = yaml.safe_dump(doc, sort_keys=False)
   if args.out:

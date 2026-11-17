@@ -4132,8 +4132,8 @@ def main() -> None:
   parser.add_argument(
       "--platform",
       default=os.environ.get("BENCH_PLATFORM", "v7x"),
-      choices=["v5e", "v6e", "v7x"],
-      help="Target TPU platform profile (v5e, v6e, or v7x).",
+      choices=["v5e", "v5p", "v6e", "v7x"],
+      help="Target TPU platform profile (v5e, v5p, v6e, or v7x).",
   )
   parser.add_argument(
       "--slice-topology",

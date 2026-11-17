@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Verified GKE TPU platform profiles for v7x, v6e, and v5e benchmark runs."""
+"""Verified GKE TPU platform profiles for v7x, v6e, v5p, and v5e benchmark runs."""
 
 from dataclasses import dataclass, field
 import math
@@ -57,6 +57,7 @@ class PlatformProfile:
   zone_hint: str = ""
   cpu_node_pool: str = "cpu-np"
   cpu_machine_type: str = ""
+  cpu_kueue_queue: str | None = None
   step1b_cpu_node_pool: str = ""
   step1b_cpu_machine_type: str = ""
   step2_ram_margin_ratio: float = 0.93
@@ -93,6 +94,8 @@ class PlatformProfile:
 
 
 _V7X_TOPOLOGIES = ("2x2x1", "2x2x2", "2x2x4", "2x4x4")
+_V5P_TOPOLOGIES = ("2x2x1", "2x2x2", "2x2x4", "2x4x4", "4x4x4")
+_V5P_RESERVATION = "cloudtpu-20260902214500-1810493672"
 
 PROFILES: dict[str, PlatformProfile] = {
     "v7x": PlatformProfile(
@@ -209,6 +212,58 @@ PROFILES: dict[str, PlatformProfile] = {
         default_barrier_timeout_s=1800,
         max_download_workers=16,
         max_concurrent_jobsets=2,
+    ),
+    "v5p": PlatformProfile(
+        name="v5p",
+        gke_cluster_name="bodaborg-v5p-nap",
+        gcp_project_id="cloud-tpu-shared-capacity",
+        gcp_region="europe-west4",
+        kube_context="gke_cloud-tpu-shared-capacity_europe-west4_bodaborg-v5p-nap",
+        kueue_queue="default",
+        kueue_topology_aware_scheduling=False,
+        priority_class_name="medium",
+        node_selectors={
+            "cloud.google.com/gke-tpu-accelerator": "tpu-v5p-slice",
+            "cloud.google.com/reservation-name": _V5P_RESERVATION,
+        },
+        tolerations=[
+            {"key": "google.com/tpu", "operator": "Exists", "effect": "NoSchedule"},
+            {
+                "key": "cloud.google.com/reservation-name",
+                "operator": "Equal",
+                "value": _V5P_RESERVATION,
+                "effect": "NoSchedule",
+            },
+        ],
+        required_node_affinity=[],
+        service_account_name=None,
+        image_pull_secrets=(),
+        container_image=CONTAINER_IMAGE,
+        tpu_chips_per_host_by_topology={t: 4 for t in _V5P_TOPOLOGIES},
+        tpu_devices_per_chip=1,
+        hosts_per_slice_by_topology={
+            "2x2x1": 1,
+            "2x2x2": 2,
+            "2x2x4": 4,
+            "2x4x4": 8,
+            "4x4x4": 16,
+        },
+        host_machine_type_by_topology={t: "ct5p-hightpu-4t" for t in _V5P_TOPOLOGIES},
+        host_ram_gib_by_topology={t: 448 for t in _V5P_TOPOLOGIES},
+        regional_gcs_data_root="gs://mesa-maxtext-europe-west4/mesa-bench-v2",
+        workload_time_limit_minutes=180,
+        capacity_type="reserved",
+        zone_hint="europe-west4-b",
+        cpu_node_pool="cpu-np",
+        cpu_machine_type="n2d-standard-64",
+        cpu_kueue_queue="default",
+        step2_ram_margin_ratio=0.92,
+        min_avail_host_ram_gb=8.5,
+        sparse_min_avail_host_ram_gb=24.0,
+        default_phase_timeout_s=10500,
+        default_barrier_timeout_s=1800,
+        max_download_workers=16,
+        max_concurrent_jobsets=4,
     ),
     "v5e": PlatformProfile(
         name="v5e",
