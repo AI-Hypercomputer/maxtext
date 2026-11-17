@@ -1516,8 +1516,9 @@ class MoEGeneral(BaseModel):
           "Quantization method for the Token Combine backward collective (leg 3). With use_ring_of_experts=True"
           " (EP all-gather): '' = unquantized BF16; 'rowwise' = dynamic token-wise FP8 E5M2;"
           " 'fixed,<bound>' = static per-tensor FP8 E5M2 (e.g. 'fixed,1.0', 'fixed,57344')."
-          " With use_ring_of_experts=False (EP ragged all-to-all): '', 'rowwise' or 'fixed,<bound>' (static scale"
-          " bound/qmax, values beyond +-bound saturate), with an optional '@e4m3' / '@e5m2' suffix (default E5M2)."
+          " With use_ring_of_experts=False (EP ragged all-to-all): '', 'rowwise', 'block512' or 'fixed,<bound>'"
+          " (static scale bound/qmax, values beyond +-bound saturate), each with an optional '@e4m3' / '@e5m2' suffix"
+          " (default E5M2)."
       ),
   )
   moe_quantize_dispatch_fwd_method: str = Field(
@@ -1525,8 +1526,9 @@ class MoEGeneral(BaseModel):
       description=(
           "Quantization of the Token Dispatch forward EP ragged all-to-all (leg 1, use_ring_of_experts=False),"
           " dequantized after the collective: '' = unquantized; '<scaling>[@e4m3|@e5m2]' (default E4M3) = FP8 values"
-          " with scaling 'rowwise' (dynamic f32 absmax scale per token) or 'fixed,<bound>' (static scale bound/qmax,"
-          " values clipped to +-bound, no scale collective). With 'rowwise', when the wi gmms are"
+          " with scaling 'rowwise' (dynamic f32 absmax scale per token), 'block512' (dynamic f32 absmax scale per"
+          " token and run of 512 features; needs the feature dim divisible by 512) or 'fixed,<bound>' (static scale"
+          " bound/qmax, values clipped to +-bound, no scale collective). With 'rowwise', when the wi gmms are"
           " qwix-quantized tokamax gmm_v2 calls with that act qtype and per-token absmax act calibration (scale factor"
           " >= 1), the FP8 tokens instead pass straight into gmm_v2 (one scale per token in the activation dtype, no"
           " second quantization). 'fixed,<bound>' passes straight into gmm_v2 too, with any act calibration, when the"
@@ -1551,8 +1553,8 @@ class MoEGeneral(BaseModel):
       "",
       description=(
           "Quantization of the Token Dispatch backward EP ragged all-to-all (leg 4, use_ring_of_experts=False):"
-          " '', 'rowwise' or 'fixed,<bound>' (static scale bound/qmax, values beyond +-bound saturate), with an"
-          " optional '@e4m3' / '@e5m2' suffix (default E5M2)."
+          " '', 'rowwise', 'block512' or 'fixed,<bound>' (static scale bound/qmax, values beyond +-bound saturate),"
+          " each with an optional '@e4m3' / '@e5m2' suffix (default E5M2)."
       ),
   )
   ragged_sort_use_single_sparsecore: bool = Field(
@@ -5330,15 +5332,15 @@ class MaxTextConfig(
         )
 
   @staticmethod
-  def _validate_a2a_quant_method(knob: str, method: str):
-    """Validates one EP ragged all-to-all quantization method `<scaling>[@e4m3|@e5m2]`, on any leg.
+  def _validate_a2a_quant_method(knob: str, method: str) -> str:
+    """Validates one EP ragged all-to-all quantization method `<scaling>[@e4m3|@e5m2]`; returns the scaling.
 
-    Mirrors moe._parse_a2a_quant_method: scaling is 'rowwise' or 'fixed,<bound>' with bound > 0.
+    Mirrors moe._parse_a2a_quant_method: on any leg, scaling is 'rowwise', 'block512' or 'fixed,<bound>' with bound > 0.
     """
     name, sep, fmt = method.partition("@")
     scaling, _, bound = name.partition(",")
-    supported = "'', 'rowwise', 'fixed,<bound>', each with an optional '@e4m3' / '@e5m2' suffix"
-    if scaling == "tensor" or scaling.startswith("block"):
+    supported = "'', 'rowwise', 'block512', 'fixed,<bound>', each with an optional '@e4m3' / '@e5m2' suffix"
+    if scaling == "tensor" or (scaling.startswith("block") and scaling != "block512"):
       raise ValueError(f"{knob}={method!r} is not implemented on the EP ragged all-to-all. Supported: {supported}.")
     valid_fixed = False
     if scaling == "fixed":
@@ -5346,8 +5348,9 @@ class MaxTextConfig(
         valid_fixed = 0 < float(bound) < float("inf")
       except ValueError:
         pass
-    if not (name == "rowwise" or valid_fixed) or (sep and fmt not in ("e4m3", "e5m2")):
+    if not (name in ("rowwise", "block512") or valid_fixed) or (sep and fmt not in ("e4m3", "e5m2")):
       raise ValueError(f"Unsupported {knob}={method!r} on the EP ragged all-to-all. Supported: {supported}.")
+    return scaling
 
   def validate_moe_quantize_a2a_methods(self):
     """Validates the per-leg FP8 quantization knobs of the EP ragged all-to-all (use_ring_of_experts=False)."""
@@ -5370,8 +5373,21 @@ class MaxTextConfig(
       a2a_knobs["moe_quantize_combine_bwd_method"] = self.moe_quantize_combine_bwd_method
     if not a2a_knobs:
       return
+    # Feature dim of each wire: dispatch sends full expert-input rows, combine sends the tensor-parallel shard of them.
+    expert_input_dim = self.moe_expert_input_dim if self.moe_expert_input_dim > 0 else self.emb_dim
+    tp = (
+        1
+        if self.custom_mesh_and_rule is CustomRule.TP_AS_EP
+        else self.ici_tensor_parallelism * self.dcn_tensor_parallelism
+    )
     for knob, method in a2a_knobs.items():
-      self._validate_a2a_quant_method(knob, method)
+      scaling = self._validate_a2a_quant_method(knob, method)
+      features = expert_input_dim if "dispatch" in knob else expert_input_dim // tp
+      if scaling == "block512" and (features is None or features % 512):
+        raise ValueError(
+            f"{knob}={method!r} needs the ragged all-to-all feature dim divisible by 512, got {features}"
+            f" (expert input dim {expert_input_dim}{'' if 'dispatch' in knob else f' / tensor parallelism {tp}'})."
+        )
     # The wire is dequantized right after the collective, so any gmm backend consumes it; te_moe_block has its own EP
     # path that never reaches these collectives.
     requirements = {

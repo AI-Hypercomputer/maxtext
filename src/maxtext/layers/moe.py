@@ -1041,14 +1041,31 @@ _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psu
 
 
 _A2A_QUANT_FORMATS = {"e4m3": jnp.float8_e4m3fn, "e5m2": jnp.float8_e5m2}
-_A2A_QUANT_METHODS_HELP = "'', 'rowwise[@e4m3|@e5m2]', 'fixed,<bound>[@e4m3|@e5m2]'"
+# 'block512' scales each run of 512 contiguous features of a row: the blocks tokamax gmm_v2 quantizes its lhs with
+# in-kernel (`quant_block_size`).
+_A2A_QUANT_BLOCK_SIZE = 512
+_A2A_QUANT_METHODS_HELP = "'', 'rowwise[@e4m3|@e5m2]', 'block512[@e4m3|@e5m2]', 'fixed,<bound>[@e4m3|@e5m2]'"
+# Scalings whose scales ride in the value rows (see `_ra2a_maybe_quantized`) instead of a second ragged all-to-all.
+# XLA:TPU pads every ragged all-to-all row to a multiple of 512 bytes. Compiled-HLO results and bytes per row on v7x
+# (EP=4, 64 rows; nb = H / 512 scales per row):
+#   layout                                  H = 2048                             H = 7168
+#   bf16                                    bf16[64,2,1024]               4096   bf16[64,2,3584]               14336
+#   rowwise: f8 + separate f32 [rows]       f8[64,4,512] + f32[64,1,128]  2560   f8[64,4,1792] + f32[64,1,128]  7680
+#   block512: f8 + separate f32 [rows, nb]  f8[64,4,512] + f32[64,1,128]  2560   f8[64,4,1792] + f32[64,1,128]  7680
+#   rowwise / block512 packed: u8           u8[64,4,640]                  2560   u8[64,4,1920]                  7680
+#   fixed: f8 only                          f8[64,4,512]                  2048   f8[64,4,1792]                  7168
+# A flattened [rows * nb] f32 scale would cost 512 B per scalar. Packing adds one 512 B granule (H + 4 * nb <= H + 512),
+# i.e. the same bytes as a separate scale, in one collective instead of two. 'rowwise' keeps the separate scale
+# collective: packing it saves no bytes, and the leg-1 passthrough reuses its wire.
+_A2A_PACKED_SCALINGS = frozenset({"block512"})
 
 
 class A2aQuantSpec(NamedTuple):
   """A parsed EP ragged all-to-all quantization method `<scaling>[@<format>]`.
 
   Attributes:
-    scaling: 'rowwise' (dynamic absmax scale per row) or 'fixed' (static per-tensor scale `bound / qmax`).
+    scaling: 'rowwise' (dynamic absmax scale per row), 'block512' (dynamic absmax scale per row and run of
+      `_A2A_QUANT_BLOCK_SIZE` features) or 'fixed' (static per-tensor scale `bound / qmax`).
     qtype: FP8 wire dtype of the values.
     bound: 'fixed' only: values are clipped to [-bound, bound].
   """
@@ -1062,8 +1079,8 @@ def _parse_a2a_quant_method(method: str, default_qtype: jnp.dtype) -> A2aQuantSp
   """Parses a ragged all-to-all quantization method; returns None for '' (unquantized).
 
   Args:
-    method: '' or `<scaling>[@<format>]`, with scaling 'rowwise' or 'fixed,<bound>' (bound > 0) and format 'e4m3'
-      or 'e5m2'.
+    method: '' or `<scaling>[@<format>]`, with scaling 'rowwise', 'block512' or 'fixed,<bound>' (bound > 0) and
+      format 'e4m3' or 'e5m2'.
     default_qtype: Wire dtype when the '@<format>' suffix is omitted.
 
   Returns:
@@ -1080,7 +1097,7 @@ def _parse_a2a_quant_method(method: str, default_qtype: jnp.dtype) -> A2aQuantSp
         f"Unsupported ragged all-to-all quantization method: {method!r}. Supported: {_A2A_QUANT_METHODS_HELP}."
     )
   qtype = _A2A_QUANT_FORMATS[fmt] if fmt else default_qtype
-  if name == "rowwise":
+  if name in ("rowwise", f"block{_A2A_QUANT_BLOCK_SIZE}"):
     return A2aQuantSpec(name, qtype)
   scaling, _, bound = name.partition(",")
   if scaling == "fixed":
@@ -1099,22 +1116,50 @@ def _a2a_quantize_rows(x: jax.Array, spec: A2aQuantSpec) -> tuple[jax.Array, jax
   """Quantizes [rows, features] `x` in f32 math.
 
   Returns:
-    (qvalue, scale): `spec.qtype` values of `x`'s shape and the f32 scale: [rows, 1] ('rowwise') or the static
-    [1, 1] scale ('fixed').
+    (qvalue, scale): `spec.qtype` values of `x`'s shape and the f32 scale: [rows, 1] ('rowwise'),
+    [rows, features / 512] ('block512') or the static [1, 1] scale ('fixed').
   """
   x_f32 = x.astype(jnp.float32)
   if spec.scaling == "fixed":
     # Same quantizer as the 'fixed' branch of `_all_gather_quantized_payload`: values beyond the bound saturate.
     x_q = qpl.quantize(x_f32, qtype=spec.qtype, channelwise_axes=(), calibration_method=f"fixed,{spec.bound}")
     return x_q.qvalue, x_q.scale
-  # All-zero rows get scale 1 (qwix guards tiny scales), so they stay 0 and never produce NaN.
-  x_q = qpl.quantize(x_f32, qtype=spec.qtype, channelwise_axes=(0,), calibration_method="absmax")
-  return x_q.qvalue, x_q.scale
+  rows, features = x.shape
+  block = features if spec.scaling == "rowwise" else _A2A_QUANT_BLOCK_SIZE
+  if features % block:
+    raise ValueError(f"{spec.scaling!r} ragged all-to-all quantization needs features ({features}) divisible by {block}.")
+  # All-zero rows / blocks get scale 1 (qwix guards tiny scales), so they stay 0 and never produce NaN.
+  x_q = qpl.quantize(
+      x_f32.reshape(rows, features // block, block),
+      qtype=spec.qtype,
+      channelwise_axes=(0, 1),
+      calibration_method="absmax",
+  )
+  return x_q.qvalue.reshape(rows, features), x_q.scale.reshape(rows, features // block)
 
 
 def _a2a_dequantize_rows(qvalue: jax.Array, scale: jax.Array, dtype: jnp.dtype) -> jax.Array:
   """Inverse of `_a2a_quantize_rows`: [rows, features] values times their f32 scale, cast to `dtype`."""
-  return (qvalue.astype(jnp.float32) * scale).astype(dtype)
+  rows, features = qvalue.shape
+  num_blocks = scale.shape[-1]
+  values = qvalue.astype(jnp.float32).reshape(rows, num_blocks, features // num_blocks)
+  return (values * scale[..., None]).reshape(rows, features).astype(dtype)
+
+
+def _a2a_pack_rows(qvalue: jax.Array, scale: jax.Array) -> jax.Array:
+  """Packs FP8 values [rows, H] and f32 scales [rows, nb] into one uint8 [rows, H + 4 * nb] wire row (bit exact)."""
+  rows = qvalue.shape[0]
+  value_bytes = jax.lax.bitcast_convert_type(qvalue, jnp.uint8)
+  scale_bytes = jax.lax.bitcast_convert_type(scale.astype(jnp.float32), jnp.uint8).reshape(rows, -1)
+  return jnp.concatenate([value_bytes, scale_bytes], axis=1)
+
+
+def _a2a_unpack_rows(packed: jax.Array, features: int, qtype: jnp.dtype) -> tuple[jax.Array, jax.Array]:
+  """Inverse of `_a2a_pack_rows`; returns (values [rows, features] in `qtype`, f32 scales [rows, nb])."""
+  rows = packed.shape[0]
+  qvalue = jax.lax.bitcast_convert_type(packed[:, :features], qtype)
+  scale = jax.lax.bitcast_convert_type(packed[:, features:].reshape(rows, -1, 4), jnp.float32)
+  return qvalue, scale
 
 
 def _ra2a_maybe_quantized(
@@ -1126,18 +1171,22 @@ def _ra2a_maybe_quantized(
     recv_sizes: jax.Array,
     axis_name: str,
     spec: A2aQuantSpec | None,
+    pack_scales: bool | None = None,
 ) -> jax.Array:
   """One ragged all-to-all wire of [rows, features] `x`: plain if `spec` is None, else FP8 values and f32 scales.
 
   The quantized wire sends `x` as `spec.qtype` values and dequantizes them to `x.dtype` on the receiver:
     'fixed': one ragged all-to-all of the values; the static scale is known on both sides.
-    'rowwise': a second ragged all-to-all of the f32 scales on the same offsets.
+    'rowwise' / 'block512', `pack_scales` False: a second ragged all-to-all of the f32 scales on the same offsets.
+    'rowwise' / 'block512', `pack_scales` True: the scale bytes are appended to each row's value bytes, and one
+      uint8 ragged all-to-all moves both.
   Receive buffers are zero-initialized, so rows that receive nothing dequantize to 0 (like a zero `output`); `output`
   must therefore be all zeros, or fully overwritten, on the quantized wire.
 
   Args:
     x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name: As in `jax.lax.ragged_all_to_all`.
     spec: The parsed quantization method, or None.
+    pack_scales: Whether to pack the scales into the value rows; None means `spec.scaling in _A2A_PACKED_SCALINGS`.
   """
   ra2a = functools.partial(
       jax.lax.ragged_all_to_all,
@@ -1151,16 +1200,28 @@ def _ra2a_maybe_quantized(
     return ra2a(x, output)
   if x.ndim != 2:
     raise ValueError(f"Quantized ragged all-to-all expects [rows, features] operands, got {x.shape}.")
-  out_rows = output.shape[0]
+  out_rows, features = output.shape
   qvalue, scale = _a2a_quantize_rows(x, spec)
   # zeros_like keeps the varying manual axes (VMA) of `output` under shard_map(check_vma=True).
   if spec.scaling == "fixed":
     return _a2a_dequantize_rows(ra2a(qvalue, jnp.zeros_like(output, dtype=spec.qtype)), scale, x.dtype)
+  if pack_scales is None:
+    pack_scales = spec.scaling in _A2A_PACKED_SCALINGS
+  if pack_scales:
+    packed = _a2a_pack_rows(qvalue, scale)
+    received = ra2a(packed, jnp.zeros_like(output, dtype=jnp.uint8, shape=(out_rows, packed.shape[1])))
+    recv_qvalue, recv_scale = _a2a_unpack_rows(received, features, spec.qtype)
+    return _a2a_dequantize_rows(recv_qvalue, recv_scale, x.dtype)
   recv_qvalue = ra2a(qvalue, jnp.zeros_like(output, dtype=spec.qtype))
-  # One f32 scale per row, sent as [rows]. XLA:TPU still moves each row as one (1, 128) f32 tile, i.e. 512 B/row
-  # (about 7% of the FP8 payload at 7168 features).
-  recv_scale = ra2a(scale.reshape(-1), jnp.zeros_like(output, dtype=jnp.float32, shape=(out_rows,)))
-  return _a2a_dequantize_rows(recv_qvalue, recv_scale[:, None], x.dtype)
+  num_blocks = scale.shape[1]
+  # One f32 scale per row is sent as [rows], 'block512' scales (unpacked) as [rows, features / 512]. XLA:TPU moves
+  # either as one (1, 128) f32 tile per row, i.e. 512 B/row (about 7% of the FP8 payload at 7168 features).
+  scale_shape = (out_rows,) if num_blocks == 1 else (out_rows, num_blocks)
+  recv_scale = ra2a(
+      scale.reshape((scale.shape[0], *scale_shape[1:])),
+      jnp.zeros_like(output, dtype=jnp.float32, shape=scale_shape),
+  )
+  return _a2a_dequantize_rows(recv_qvalue, recv_scale.reshape(out_rows, num_blocks), x.dtype)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9))
@@ -1296,7 +1357,7 @@ def _ragged_all_to_all_qarray(
     output_rows: Rows of the receive buffer.
     input_offsets, send_sizes, output_offsets, recv_sizes, axis_name: As in `jax.lax.ragged_all_to_all`.
     bwd_method: Quantization of the backward wire: '' or `<scaling>[@e4m3|@e5m2]` (default E5M2) with scaling
-      'rowwise' or 'fixed,<bound>'; see `_parse_a2a_quant_method`.
+      'rowwise', 'block512' or 'fixed,<bound>'; see `_parse_a2a_quant_method`.
 
   Returns:
     [output_rows, features] QArray with the dtype of `x_q.qvalue` and a [output_rows, 1] scale.
@@ -1354,7 +1415,8 @@ class RoutedMoE(nnx.Module):
         whatever it is, and its backward scales the cotangents by that scale; the rule's act calibration is only read
         when gmm_v2 quantizes the lhs itself (`ops._fwd_prepare_lhs_scale`), and for a per-tensor lhs scale
         (`ops._lhs_rhs_share_fixed_scale`), whereas the receiver holds the static scale per row.
-    Otherwise leg 1 is dequantized after the collective and the gmm quantizes its input again.
+    Otherwise ('block512', or the requirements are not met) leg 1 is dequantized after the collective and the gmm
+    quantizes its input again.
     """
     spec = _parse_a2a_quant_method(self.config.moe_quantize_dispatch_fwd_method, jnp.float8_e4m3fn)
     if spec is None:

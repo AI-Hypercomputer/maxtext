@@ -354,11 +354,12 @@ moe_quantize_token_all_gather: false
 # Quantization method for output gradients before the All-Gather across EP shards in Ring-of-Experts backward pass (Token Combine)
 # Value: "" = unquantized BF16; "rowwise" = dynamic token-wise FP8 E5M2; "fixed,<bound>" = static per-tensor FP8 E5M2
 # With use_ring_of_experts=false it quantizes the Token Combine backward EP ragged all-to-all (leg 3) instead:
-# "", "rowwise" or "fixed,<bound>", with an optional "@e4m3" / "@e5m2" suffix (default e5m2).
+# "", "rowwise", "block512" or "fixed,<bound>", each with an optional "@e4m3" / "@e5m2" suffix (default e5m2).
 moe_quantize_combine_bwd_method: ""
 # FP8 quantization of the other EP ragged all-to-all legs (use_ring_of_experts=false), dequantized after the
-# collective: "" = unquantized; "<scaling>[@e4m3|@e5m2]" with scaling "rowwise" (one f32 absmax scale per token)
-# or "fixed,<bound>" (static scale bound / qmax; values beyond +-bound saturate).
+# collective: "" = unquantized; "<scaling>[@e4m3|@e5m2]" with scaling "rowwise" (one f32 absmax scale per token),
+# "block512" (one f32 absmax scale per token and 512 features) or "fixed,<bound>" (static scale bound / qmax; values
+# beyond +-bound saturate).
 # Leg 1 "rowwise" skips the dequantize and feeds the FP8 tokens (one activation-dtype scale per token) straight into
 # gmm_v2 when the wi gmms are qwix-quantized tokamax gmm_v2 calls with that act qtype and per-token absmax act
 # calibration (factor >= 1). Leg 1 "fixed,<bound>" does the same (the static f32 scale on every token) with any act

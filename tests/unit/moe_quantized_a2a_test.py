@@ -136,6 +136,11 @@ class QuantizedA2aConfigTest(parameterized.TestCase):
     cfg = _config(f"qa2a_cbwd_ok_{method}", moe_quantize_combine_bwd_method=method)
     self.assertEqual(cfg.moe_quantize_combine_bwd_method, method)
 
+  @parameterized.product(knob=_FWD_KNOBS + _BWD_KNOBS, method=("block512", "block512@e4m3", "block512@e5m2"))
+  def test_block512_accepted(self, knob, method):
+    cfg = _config(f"qa2a_blk_{knob}", base_emb_dim=512, **{knob: method})
+    self.assertEqual(getattr(cfg, knob), method)
+
   @parameterized.product(knob=_FWD_KNOBS, method=("fixed,1.0", "fixed,448@e4m3", "fixed,2.5e-3@e5m2"))
   def test_fixed_accepted_on_forward_legs(self, knob, method):
     cfg = _config(f"qa2a_fixed_{knob}", **{knob: method})
@@ -146,9 +151,7 @@ class QuantizedA2aConfigTest(parameterized.TestCase):
     cfg = _config(f"qa2a_fixed_bwd_{knob}", **{knob: method})
     self.assertEqual(getattr(cfg, knob), method)
 
-  @parameterized.product(
-      knob=_FWD_KNOBS + _BWD_KNOBS, method=("tensor", "tensor@e4m3", "block512", "block512@e5m2", "block1024")
-  )
+  @parameterized.product(knob=_FWD_KNOBS + _BWD_KNOBS, method=("tensor", "tensor@e4m3", "block256", "block1024@e5m2"))
   def test_unimplemented_methods_rejected(self, knob, method):
     with self.assertRaisesRegex(ValueError, re.escape(f"{knob}={method!r} is not implemented on the EP ragged")):
       _config(f"qa2a_unimpl_{knob}", base_emb_dim=1024, **{knob: method})
@@ -161,6 +164,8 @@ class QuantizedA2aConfigTest(parameterized.TestCase):
           "rowwise@e3m4",
           "rowwise@",
           "rowwise,1.0",
+          "block512@",
+          "block512,1.0",
           "fixed",
           "fixed,",
           "fixed,0",
@@ -174,6 +179,22 @@ class QuantizedA2aConfigTest(parameterized.TestCase):
   def test_junk_methods_rejected(self, knob, method):
     with self.assertRaisesRegex(ValueError, re.escape(f"Unsupported {knob}={method!r} on the EP ragged all-to-all")):
       _config(f"qa2a_junk_{knob}", base_emb_dim=512, **{knob: method})
+
+  @parameterized.parameters(*(_FWD_KNOBS + _BWD_KNOBS))
+  def test_block512_needs_divisible_feature_dim(self, knob):
+    """deepseek3-tiny's emb_dim is 64."""
+    with self.assertRaisesRegex(
+        ValueError, re.escape("needs the ragged all-to-all feature dim divisible by 512, got 64")
+    ):
+      _config(f"qa2a_blk_dim_{knob}", **{knob: "block512"})
+
+  def test_block512_combine_needs_divisible_tensor_parallel_shard(self):
+    """Combine sends the tensor-parallel shard of each row, dispatch the whole row."""
+    common = {"base_emb_dim": 512, "ici_tensor_parallelism": 2}
+    cfg = _config("qa2a_blk_tp_dispatch", moe_quantize_dispatch_fwd_method="block512", **common)
+    self.assertEqual(cfg.moe_quantize_dispatch_fwd_method, "block512")
+    with self.assertRaisesRegex(ValueError, re.escape("got 256 (expert input dim 512 / tensor parallelism 2)")):
+      _config("qa2a_blk_tp_combine", moe_quantize_combine_fwd_method="block512", **common)
 
   @parameterized.parameters(*_A2A_KNOBS)
   def test_new_knob_rejected_with_ring_of_experts(self, knob):
@@ -209,6 +230,15 @@ def _bits(q):
   return np.asarray(jax.lax.bitcast_convert_type(q, jnp.uint8))
 
 
+def _gmm_v2_lhs_quantize(x, qtype, block=512):
+  """tokamax gmm_v2's in-kernel lhs quantization (gmm_v2.py quantized matmul path), in `x.dtype` arithmetic."""
+  rows, features = x.shape
+  blocks = x.reshape(rows, features // block, block)
+  scale = jnp.max(jnp.abs(blocks), axis=-1, keepdims=True) / float(jnp.finfo(qtype).max)
+  scale_inv = jnp.where(scale == 0, 0, 1 / scale)
+  return (blocks * scale_inv).astype(qtype).reshape(rows, features)
+
+
 def _ragged_all_to_all_dtypes(jaxpr):
   """Sorted result dtype names of every ragged_all_to_all in a jaxpr (recursing into sub-jaxprs)."""
   out = []
@@ -224,7 +254,7 @@ def _ragged_all_to_all_dtypes(jaxpr):
 
 
 class QuantizedA2aWireTest(parameterized.TestCase):
-  """Parsing and quantization of the ragged all-to-all wire (no collective; runs on any backend)."""
+  """Parsing, quantization and scale packing of the ragged all-to-all wire (no collective; runs on any backend)."""
 
   def test_parse_a2a_quant_method(self):
     parse = moe._parse_a2a_quant_method  # pylint: disable=protected-access
@@ -233,11 +263,13 @@ class QuantizedA2aWireTest(parameterized.TestCase):
     self.assertEqual(parse("rowwise", _E4M3), spec("rowwise", _E4M3))
     self.assertEqual(parse("rowwise", _E5M2), spec("rowwise", _E5M2))
     self.assertEqual(parse("rowwise@e5m2", _E4M3), spec("rowwise", _E5M2))
+    self.assertEqual(parse("block512", _E5M2), spec("block512", _E5M2))
+    self.assertEqual(parse("block512@e4m3", _E5M2), spec("block512", _E4M3))
     self.assertEqual(parse("fixed,448", _E4M3), spec("fixed", _E4M3, 448.0))
     self.assertEqual(parse("fixed,2.5e-3@e5m2", _E4M3), spec("fixed", _E5M2, 2.5e-3))
 
   @parameterized.parameters(
-      "foo", "rowwise@", "rowwise@e3m4", "block512", "block256", "tensor", "fixed", "fixed,0", "fixed,-2", "fixed,x"
+      "foo", "rowwise@", "rowwise@e3m4", "block256", "block512,1", "tensor", "fixed", "fixed,0", "fixed,-2", "fixed,x"
   )
   def test_parse_rejects(self, method):
     with self.assertRaisesRegex(ValueError, "Unsupported ragged all-to-all quantization method"):
@@ -268,6 +300,48 @@ class QuantizedA2aWireTest(parameterized.TestCase):
           bwd_method,
       )
 
+  @parameterized.product(dtype=(jnp.bfloat16, jnp.float32), qtype=(_E4M3, _E5M2))
+  def test_block512_requant_lossless(self, dtype, qtype):
+    """block512 wire -> dequantize -> gmm_v2's in-kernel requantize gives back exactly the wire's FP8 values."""
+    x = _spread_rows(jax.random.PRNGKey(0), (64, 2048), dtype)
+    x = x.at[0, :512].set(0).at[1].set(0)  # An all-zero block and an all-zero row.
+    spec = moe.A2aQuantSpec("block512", qtype)
+    qvalue, scale = moe._a2a_quantize_rows(x, spec)  # pylint: disable=protected-access
+    self.assertEqual(scale.shape, (64, 4))
+    dequantized = moe._a2a_dequantize_rows(qvalue, scale, dtype)  # pylint: disable=protected-access
+    requantized = _gmm_v2_lhs_quantize(dequantized, qtype)
+    np.testing.assert_array_equal(_bits(requantized), _bits(qvalue))
+    # For reference: the kernel's own quantization of x rounds a few values differently (bf16 reciprocal multiply vs
+    # the wire's f32 divide), so the forward with leg-1 block512 is close to, not bitwise equal to, knobs off.
+    same = float(np.mean(_bits(_gmm_v2_lhs_quantize(x, qtype)) == _bits(qvalue)))
+    print(f"[{jnp.dtype(dtype).name}/{jnp.dtype(qtype).name}] kernel(x) == wire values: {same:.4%}", flush=True)
+
+  @parameterized.product(dtype=(jnp.bfloat16, jnp.float32), qtype=(_E4M3, _E5M2))
+  def test_block512_dequantize_error_bound(self, dtype, qtype):
+    """Every value comes back within half an FP8 ulp of its own block's scale; blocks differ 4x in magnitude."""
+    x = _spread_rows(jax.random.PRNGKey(5), (16, 2048), jnp.float32)
+    x = (x * jnp.repeat(4.0 ** jnp.arange(4), 512)).astype(dtype)
+    qvalue, scale = moe._a2a_quantize_rows(x, moe.A2aQuantSpec("block512", qtype))  # pylint: disable=protected-access
+    got = np.asarray(moe._a2a_dequantize_rows(qvalue, scale, dtype), np.float32)  # pylint: disable=protected-access
+    want = np.asarray(x, np.float32)
+    block_scale = np.repeat(np.asarray(scale), 512, axis=1)
+    out_rounding = 2.0**-8 if dtype == jnp.bfloat16 else 0.0
+    tol = (2.0 ** -(_mantissa_bits(qtype) + 1) + out_rounding) * np.abs(want) + 0.5 * float(
+        jnp.finfo(qtype).smallest_subnormal
+    ) * block_scale
+    self.assertTrue(np.all(np.abs(got - want) <= tol * 1.001), f"max excess {np.max(np.abs(got - want) - tol)}")
+
+  @parameterized.parameters("rowwise", "block512")
+  def test_pack_roundtrip_bit_exact(self, scaling):
+    x = _spread_rows(jax.random.PRNGKey(1), (32, 1024), jnp.bfloat16)
+    qvalue, scale = moe._a2a_quantize_rows(x, moe.A2aQuantSpec(scaling, _E4M3))  # pylint: disable=protected-access
+    packed = moe._a2a_pack_rows(qvalue, scale)  # pylint: disable=protected-access
+    self.assertEqual(packed.dtype, jnp.uint8)
+    self.assertEqual(packed.shape, (32, 1024 + 4 * scale.shape[1]))
+    got_qvalue, got_scale = moe._a2a_unpack_rows(packed, 1024, _E4M3)  # pylint: disable=protected-access
+    np.testing.assert_array_equal(_bits(got_qvalue), _bits(qvalue))
+    np.testing.assert_array_equal(np.asarray(got_scale), np.asarray(scale))
+
   @parameterized.product(qtype=(_E4M3, _E5M2), bound=(8.0, 0.00125))
   def test_fixed_scale_and_saturation(self, qtype, bound):
     x = _spread_rows(jax.random.PRNGKey(2), (32, 512), jnp.float32)
@@ -282,6 +356,12 @@ class QuantizedA2aWireTest(parameterized.TestCase):
     )
     self.assertTrue(np.all(np.abs(got - want) <= tol * 1.001 + 1e-7 * bound))
     self.assertLessEqual(float(np.max(np.abs(got))), bound * (1 + 1e-6))
+
+  def test_quantize_rejects_indivisible_features(self):
+    with self.assertRaisesRegex(ValueError, "needs features \\(768\\) divisible by 512"):
+      moe._a2a_quantize_rows(  # pylint: disable=protected-access
+          jnp.ones((4, 768), jnp.float32), moe.A2aQuantSpec("block512", _E4M3)
+      )
 
 
 class LocalPermuteQArrayTest(parameterized.TestCase):
@@ -426,6 +506,18 @@ def _ra2a_fwd_and_grad(mesh, impl, fwd_method, bwd_method, check_vma=False, rema
   return fn
 
 
+def _ra2a_wire_forward(mesh, spec, pack_scales):
+  """jit(x, *routing) -> y: forward of one `_ra2a_maybe_quantized` wire over the `expert` axis of `mesh`."""
+
+  def per_shard(x, input_offsets, send_sizes, output_offsets, recv_sizes):
+    routing = (input_offsets[0], send_sizes[0], output_offsets[0], recv_sizes[0])
+    return moe._ra2a_maybe_quantized(  # pylint: disable=protected-access
+        x, jnp.zeros(x.shape, x.dtype), *routing, "expert", spec, pack_scales
+    )
+
+  return jax.jit(jax.shard_map(per_shard, mesh=mesh, in_specs=(P("expert"),) * 5, out_specs=P("expert"), check_vma=False))
+
+
 def _ragged_all_to_all_results(hlo):
   """Sorted (dtype, dims) of the result of every ragged all-to-all in a compiled HLO module.
 
@@ -444,7 +536,7 @@ class QuantizedA2aTpuTest(parameterized.TestCase):
   """`_quantized_ragged_all_to_all` and `_ragged_all_to_all_qarray` on 4 TPU chips (XLA:CPU has no ragged-all-to-all)."""
 
   ROWS = 64
-  # A multiple of 512 features: XLA:TPU tiles an f8 row in (4, 128) blocks.
+  # Two 512-feature blocks per row. A multiple of 512 features: XLA:TPU tiles an f8 row in (4, 128) blocks.
   DIM = 1024
 
   def setUp(self):
@@ -470,22 +562,23 @@ class QuantizedA2aTpuTest(parameterized.TestCase):
     for s in range(_NUM_SHARDS):
       np.testing.assert_array_equal(got[s, valid_rows[s] :], 0.0, err_msg=f"{what}: shard {s} tail rows")
 
-  def _assert_close(self, got, want, valid_rows, rel_bound, what, lossy=True):
-    """|got - want| <= rel_bound * the absmax of each row on valid rows; tail rows exactly 0."""
+  def _assert_close(self, got, want, valid_rows, rel_bound, what, block=None, lossy=True):
+    """|got - want| <= rel_bound * the absmax of each row (or `block` features) on valid rows; tail rows exactly 0."""
     self._assert_tail_zero(got, valid_rows, what)
-    got, want = got.reshape(_NUM_SHARDS, self.ROWS, -1), want.reshape(_NUM_SHARDS, self.ROWS, -1)
+    got = got.reshape(_NUM_SHARDS, self.ROWS, -1, block or self.DIM)
+    want = want.reshape(_NUM_SHARDS, self.ROWS, -1, block or self.DIM)
     for s in range(_NUM_SHARDS):
       n = valid_rows[s]
       err = np.max(np.abs(got[s, :n] - want[s, :n]), axis=-1)
       bad = np.argwhere(err > rel_bound * np.max(np.abs(want[s, :n]), axis=-1) * 1.001)
-      self.assertEmpty(bad, f"{what}: shard {s} rows {bad[:8].tolist()}")
+      self.assertEmpty(bad, f"{what}: shard {s} (row, block) {bad[:8].tolist()}")
       if lossy and n:  # A quantized wire must not be a silent passthrough of the BF16/F32 payload.
         self.assertGreater(float(np.max(err)), 0.0, f"{what}: shard {s} is not quantized")
 
   def _assert_quantized_close(self, got, want, valid_rows, method, forward, dtype, what):
-    """Within half an FP8 ulp of the absmax of each row."""
+    """Within half an FP8 ulp of the absmax of each row ('rowwise') or 512-feature block ('block512')."""
     bound = 2.0 ** -(_mantissa_bits(_qtype(method, forward)) + 1) + (2.0**-8 if dtype == jnp.bfloat16 else 0.0)
-    self._assert_close(got, want, valid_rows, bound, what)
+    self._assert_close(got, want, valid_rows, bound, what, block=512 if method.startswith("block512") else None)
 
   def _assert_fixed_close(self, got, want, valid_rows, method, what):
     """Values clipped to +-bound, then within half an FP8 ulp (or half the smallest subnormal step)."""
@@ -519,9 +612,11 @@ class QuantizedA2aTpuTest(parameterized.TestCase):
       np.testing.assert_array_equal(dx, dx_ref, err_msg=f"{impl} backward")
     self.assertGreater(float(np.max(np.abs(dx_ref))), 0.0)
 
-  @parameterized.product(method=("rowwise@e4m3", "rowwise@e5m2"), full=(False, True))
+  @parameterized.product(
+      method=("rowwise@e4m3", "rowwise@e5m2", "block512", "block512@e4m3", "block512@e5m2"), full=(False, True)
+  )
   def test_forward_quantized(self, method, full):
-    """Forward wire quantized: FP8 error bound per row, zero tail rows, exact (unquantized) backward."""
+    """Forward wire quantized: FP8 error bound per row / block, zero tail rows, exact (unquantized) backward."""
     sizes, routing, x, ct = self._inputs(jnp.float32, full)
     y_ref, dx_ref = self._run("jax", "", "", x, ct, routing)
     y, dx = self._run("wrapper", method, "", x, ct, routing)
@@ -537,7 +632,9 @@ class QuantizedA2aTpuTest(parameterized.TestCase):
     self._assert_fixed_close(y, y_ref, sizes.sum(axis=0), method, "forward")
     np.testing.assert_array_equal(dx, dx_ref, err_msg="unquantized backward")
 
-  @parameterized.product(method=("rowwise@e4m3", "rowwise@e5m2"), full=(False, True))
+  @parameterized.product(
+      method=("rowwise@e4m3", "rowwise@e5m2", "block512", "block512@e4m3", "block512@e5m2"), full=(False, True)
+  )
   def test_backward_quantized(self, method, full):
     """Backward wire quantized: exact forward, FP8 error bound on dx, zero dx on rows never sent."""
     sizes, routing, x, ct = self._inputs(jnp.float32, full)
@@ -573,7 +670,7 @@ class QuantizedA2aTpuTest(parameterized.TestCase):
     self.assertLessEqual(float(np.max(np.abs(dx))), bound * (1 + 1e-6))
     self.assertGreater(float(np.max(np.abs(dx - np.clip(dx_ref, -bound, bound)))), 0.0, "backward is not quantized")
 
-  @parameterized.parameters(("rowwise",))
+  @parameterized.parameters("rowwise", "block512")
   def test_bf16_both_quantized(self, method):
     sizes, routing, x, ct = self._inputs(jnp.bfloat16, False)
     y_ref, dx_ref = self._run("jax", "", "", x, ct, routing)
@@ -587,7 +684,8 @@ class QuantizedA2aTpuTest(parameterized.TestCase):
       ("", "rowwise"),
       ("rowwise@e5m2", "rowwise@e4m3"),
       ("rowwise", "rowwise"),
-      ("fixed,4", "rowwise"),
+      ("block512", "block512"),
+      ("fixed,4", "block512@e4m3"),
       ("fixed,4@e5m2", ""),
       ("rowwise", "fixed,1"),
   )
@@ -599,6 +697,17 @@ class QuantizedA2aTpuTest(parameterized.TestCase):
     np.testing.assert_array_equal(y, y_ref)
     np.testing.assert_array_equal(dx, dx_ref)
 
+  @parameterized.product(scaling=("rowwise", "block512"), full=(False, True))
+  def test_packed_scales_match_separate_scales_bitwise(self, scaling, full):
+    """Packing the scale bytes into the value rows changes only the wire layout, not a single received bit."""
+    sizes, routing, x, _ = self._inputs(jnp.bfloat16, full)
+    spec = moe.A2aQuantSpec(scaling, _E4M3)
+    packed = np.asarray(_ra2a_wire_forward(self.mesh, spec, True)(x, *routing).astype(jnp.float32))
+    separate = np.asarray(_ra2a_wire_forward(self.mesh, spec, False)(x, *routing).astype(jnp.float32))
+    np.testing.assert_array_equal(packed, separate)
+    self._assert_tail_zero(packed, sizes.sum(axis=0), "packed")
+    self.assertGreater(float(np.max(np.abs(packed))), 0.0)
+
   def _ragged_all_to_all_payloads(self, fwd_method, bwd_method, remat=False):
     """Sorted (dtype, rows, element count) of every ragged all-to-all result in the compiled bf16 fwd + bwd."""
     _, routing, x, ct = self._inputs(jnp.bfloat16, False)
@@ -607,11 +716,18 @@ class QuantizedA2aTpuTest(parameterized.TestCase):
     return sorted((dt, dims[0], int(np.prod(dims))) for dt, dims in results)
 
   def test_hlo_wire_dtypes(self):
-    """Knobs on: FP8 payloads and f32 scales (none for 'fixed'), no BF16; knobs off: BF16 only."""
+    """Knobs on: FP8 (or packed uint8) payloads, f32 scales only where unpacked, no BF16; knobs off: BF16 only."""
     rows, n = self.ROWS, self.ROWS * self.DIM
     got = {
         methods: self._ragged_all_to_all_payloads(*methods)
-        for methods in (("", ""), ("rowwise", "rowwise"), ("", "rowwise@e4m3"), ("fixed,8", ""), ("", "fixed,8"))
+        for methods in (
+            ("", ""),
+            ("rowwise", "rowwise"),
+            ("", "rowwise@e4m3"),
+            ("fixed,8", ""),
+            ("block512", "block512"),
+            ("", "fixed,8"),
+        )
     }
     # XLA:TPU moves each f32 scale as a (1, 128) tile.
     scale = ("f32", rows, rows * 128)
@@ -621,10 +737,14 @@ class QuantizedA2aTpuTest(parameterized.TestCase):
     # 'fixed': the FP8 values only; the static scale never crosses the wire.
     self.assertEqual(got[("fixed,8", "")], sorted([("bf16", rows, n), ("f8e4m3fn", rows, n)]))
     self.assertEqual(got[("", "fixed,8")], sorted([("bf16", rows, n), ("f8e5m2", rows, n)]))
+    # 'block512': one uint8 ragged all-to-all per leg, the 2 f32 scales per row packed after the values.
+    self.assertEqual([(dt, r) for dt, r, _ in got[("block512", "block512")]], [("u8", rows)] * 2)
+    for _, _, numel in got[("block512", "block512")]:
+      self.assertGreaterEqual(numel, rows * (self.DIM + 8))
 
   def test_remat_adds_no_ragged_all_to_all(self):
     """The backward needs only the integer routing, so jax.checkpoint recomputes no ragged all-to-all."""
-    for methods in (("", ""), ("rowwise", "rowwise"), ("fixed,8", "rowwise"), ("rowwise", "fixed,8")):
+    for methods in (("", ""), ("rowwise", "rowwise"), ("fixed,8", "block512"), ("rowwise", "fixed,8")):
       self.assertEqual(
           self._ragged_all_to_all_payloads(*methods, remat=True),
           self._ragged_all_to_all_payloads(*methods),
@@ -833,7 +953,7 @@ def _f8_dequant_converts(jaxpr):
   return count
 
 
-def _case(name, knobs, gmm_v2=False, ragged_sort=True, dequant=False, **overrides):
+def _case(name, knobs, gmm_v2=False, ragged_sort=True, dequant=False, worse=None, **overrides):
   """A RoutedMoE test case; `use_ragged_sort=True` (the production path) is primary, the XLA sort secondary."""
   return {
       "testcase_name": f"{'gmm_v2_' if gmm_v2 else ''}{name}_{'ragged' if ragged_sort else 'xla'}_sort",
@@ -841,12 +961,15 @@ def _case(name, knobs, gmm_v2=False, ragged_sort=True, dequant=False, **override
       "gmm_v2": gmm_v2,
       "overrides": {"use_ragged_sort": ragged_sort, **overrides},
       "dequant": dequant,
+      "worse": worse,
   }
 
 
 _ROWWISE_ALL = dict.fromkeys(_FWD_KNOBS + _BWD_KNOBS, "rowwise")
+_BLOCK512_ALL = dict.fromkeys(_FWD_KNOBS + _BWD_KNOBS, "block512")
 _FIXED_FWD = {_LEG1: "fixed,64", "moe_quantize_combine_fwd_method": "fixed,64@e5m2"}
 _ROWWISE_BWD = dict.fromkeys(_BWD_KNOBS, "rowwise")
+_BLOCK512_BWD = {"moe_quantize_combine_bwd_method": "block512", "moe_quantize_dispatch_bwd_method": "block512@e4m3"}
 _DROPLESS = {"ragged_buffer_factor": 1.0, "moe_dropless_fallback": "layer"}
 _LEG4_ROWWISE = {"moe_quantize_dispatch_bwd_method": "rowwise"}
 _MOE_CASES = (
@@ -863,6 +986,15 @@ _MOE_CASES = (
     _case("fixed_leg2", {"moe_quantize_combine_fwd_method": "fixed,64@e5m2"}),
     _case("fixed_fwd_rowwise_bwd_dropless_fallback_layer", {**_FIXED_FWD, **_ROWWISE_BWD}, **_DROPLESS),
     _case("fixed_fwd_rowwise_bwd_check_vma", {**_FIXED_FWD, **_ROWWISE_BWD}, ragged_sort=False, check_vma=True),
+    _case("block512_leg1", {_LEG1: "block512"}),
+    _case("block512_leg2", {"moe_quantize_combine_fwd_method": "block512@e5m2"}),
+    _case("block512_leg3", {"moe_quantize_combine_bwd_method": "block512"}),
+    _case("block512_leg4", {"moe_quantize_dispatch_bwd_method": "block512@e4m3"}),
+    _case("block512_all_rbf_2p5", _BLOCK512_ALL, ragged_buffer_factor=2.5),
+    _case("block512_all_dropless_fallback_layer", _BLOCK512_ALL, **_DROPLESS),
+    # block512 needs the feature dim divisible by 512; deepseek3-tiny's is 64 (the ragged sort makes it 1024).
+    _case("block512_all_check_vma", _BLOCK512_ALL, ragged_sort=False, check_vma=True, base_emb_dim=512),
+    _case("fixed_fwd_block512_bwd", {**_FIXED_FWD, **_BLOCK512_BWD}),
     # qwix fp8_full tokamax gmm_v2 (Mixtral, bf16): leg 1 'rowwise' / 'fixed' passes the FP8 rows into gmm_v2.
     *(_case("rowwise_leg1", {_LEG1: "rowwise"}, True, sort, dequant=True) for sort in (True, False)),
     _case("rowwise_leg1_rbf_2p5", {_LEG1: "rowwise"}, True, ragged_buffer_factor=2.5),
@@ -874,6 +1006,13 @@ _MOE_CASES = (
     # 'fixed' passthrough does not depend on the act calibration: here the gmms quantize their inputs statically.
     _case("fixed_leg1_static_act", {_LEG1: "fixed,64"}, True, act_quantization_calibration_method="fixed,64"),
     _case("fixed_leg1_leg4", {_LEG1: "fixed,64", **_LEG4_ROWWISE}, True),
+    # gmm_v2 re-quantizes the dequantized block512 rows to exactly the wire's FP8 values (test_block512_requant_lossless),
+    # so leg-1 block512 is closer to knobs off than leg-1 rowwise, whose one scale per token replaces the kernel's
+    # per-(token, 512) scales. At 512 features the two are the same quantizer.
+    *(
+        _case("block512_leg1", {_LEG1: "block512"}, True, sort, worse={_LEG1: "rowwise"}, base_emb_dim=2048)
+        for sort in (True, False)
+    ),
 )
 
 
@@ -888,11 +1027,12 @@ class QuantizedA2aRoutedMoETpuTest(parameterized.TestCase):
       self.skipTest(f"Needs a multiple of {_NUM_SHARDS} devices for expert parallelism {_NUM_SHARDS}.")
 
   @parameterized.named_parameters(*_MOE_CASES)
-  def test_close_to_unquantized(self, knobs, gmm_v2, overrides, dequant):
+  def test_close_to_unquantized(self, knobs, gmm_v2, overrides, dequant, worse):
     """Finite and close to knobs off, on shared parameters and inputs, with NaN-filled jax.lax.empty.
 
     dequant: also leg 1 without the passthrough, by moe_quantize_dispatch_fwd_passthrough=False and by a mock; both
       give the same bits, further from knobs off than the passthrough (two FP8 roundings instead of one).
+    worse: knobs whose output is further from knobs off.
     """
     name = self._testMethodName
     overrides = {"ici_expert_parallelism": _NUM_SHARDS, **overrides}
@@ -906,6 +1046,7 @@ class QuantizedA2aRoutedMoETpuTest(parameterized.TestCase):
         ("on", knobs, ()),
         *((("knob_off", {**knobs, "moe_quantize_dispatch_fwd_passthrough": False}, ()),) if dequant else ()),
         *((("mock_off", knobs, (_force_dequant(),)),) if dequant else ()),
+        *((("worse", worse, ()),) if worse else ()),
     ):
       cfg = _config(f"{name}_{label}", gmm_v2, **overrides, **knobs_)
       runs[label] = _MoeRun(cfg, off.variables, sigma).run(*patches)
@@ -935,6 +1076,8 @@ class QuantizedA2aRoutedMoETpuTest(parameterized.TestCase):
         jax.tree_util.tree_map(np.testing.assert_array_equal, got, want)
       self.assertLess(errs["on"], errs["knob_off"])
       self.assertBetween(_rel_err(runs["on"][1], runs["knob_off"][1]), 1e-30, 0.08)
+    if worse:
+      self.assertLess(errs["on"], errs["worse"])
 
   @parameterized.named_parameters(
       ("rowwise_ragged_sort", "rowwise", True),
