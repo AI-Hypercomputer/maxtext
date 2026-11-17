@@ -104,31 +104,32 @@ class ResolveAxisSizesTest(parameterized.TestCase):
   """
 
   @parameterized.named_parameters(
-      ("all_explicit", (1, 4, 2, 1), 8, (1, 4, 2, 1)),
-      ("auto_fsdp", (1, -1, 1, 1), 8, (1, 8, 1, 1)),
-      ("auto_fsdp_with_tp", (1, -1, 2, 1), 8, (1, 4, 2, 1)),
-      ("auto_data", (-1, 2, 2, 1), 8, (2, 2, 2, 1)),
-      ("auto_expert", (1, 2, 1, -1), 8, (1, 2, 1, 4)),
-      ("single_device", (1, -1, 1, 1), 1, (1, 1, 1, 1)),
+      ("all_explicit", (1, 1, 4, 2, 1), 8, (1, 1, 4, 2, 1)),
+      ("auto_fsdp", (1, 1, -1, 1, 1), 8, (1, 1, 8, 1, 1)),
+      ("auto_fsdp_with_tp", (1, 1, -1, 2, 1), 8, (1, 1, 4, 2, 1)),
+      ("auto_fsdp_with_stages", (1, 2, -1, 1, 1), 8, (1, 2, 4, 1, 1)),
+      ("auto_data", (-1, 1, 2, 2, 1), 8, (2, 1, 2, 2, 1)),
+      ("auto_expert", (1, 1, 2, 1, -1), 8, (1, 1, 2, 1, 4)),
+      ("single_device", (1, 1, -1, 1, 1), 1, (1, 1, 1, 1, 1)),
   )
   def test_resolves(self, sizes, target, expected):
     self.assertEqual(_resolve_axis_sizes(sizes, target, "ICI", "per-slice device count"), expected)
 
   @parameterized.named_parameters(
-      ("auto_data_over_slices", (-1, 1, 1, 1), 4, (4, 1, 1, 1)),
-      ("explicit_split", (2, 2, 1, 1), 4, (2, 2, 1, 1)),
-      ("one_slice", (-1, 1, 1, 1), 1, (1, 1, 1, 1)),
+      ("auto_data_over_slices", (-1, 1, 1, 1, 1), 4, (4, 1, 1, 1, 1)),
+      ("explicit_split", (2, 1, 2, 1, 1), 4, (2, 1, 2, 1, 1)),
+      ("one_slice", (-1, 1, 1, 1, 1), 1, (1, 1, 1, 1, 1)),
   )
   def test_resolves_dcn_against_slice_count(self, sizes, num_slices, expected):
     self.assertEqual(_resolve_axis_sizes(sizes, num_slices, "DCN", "slice count"), expected)
 
   def test_rejects_multiple_auto_axes(self):
     with self.assertRaisesRegex(ValueError, "At most one ICI mesh axis may be -1"):
-      _resolve_axis_sizes((-1, -1, 1, 1), 8, "ICI", "per-slice device count")
+      _resolve_axis_sizes((-1, 1, -1, 1, 1), 8, "ICI", "per-slice device count")
 
   @parameterized.named_parameters(
-      ("zero", (0, 1, 1, 1)),
-      ("negative", (1, -2, 1, 1)),
+      ("zero", (0, 1, 1, 1, 1)),
+      ("negative", (1, 1, -2, 1, 1)),
   )
   def test_rejects_invalid_sizes(self, sizes):
     with self.assertRaisesRegex(ValueError, "must be >= 1"):
@@ -137,11 +138,11 @@ class ResolveAxisSizesTest(parameterized.TestCase):
   def test_rejects_indivisible_auto_axis(self):
     """8 devices cannot be split with tensor=3."""
     with self.assertRaisesRegex(ValueError, "not divisible"):
-      _resolve_axis_sizes((1, -1, 3, 1), 8, "ICI", "per-slice device count")
+      _resolve_axis_sizes((1, 1, -1, 3, 1), 8, "ICI", "per-slice device count")
 
   @parameterized.named_parameters(
-      ("too_few", (1, 2, 1, 1), 8),
-      ("too_many", (2, 8, 1, 1), 8),
+      ("too_few", (1, 1, 2, 1, 1), 8),
+      ("too_many", (2, 1, 8, 1, 1), 8),
   )
   def test_rejects_product_mismatch(self, sizes, target):
     with self.assertRaisesRegex(ValueError, "does not match"):
@@ -155,9 +156,9 @@ class ResolveAxisSizesTest(parameterized.TestCase):
     magnitude.
     """
     with self.assertRaisesRegex(ValueError, r"ICI mesh axes .* per-slice device count \(8\)"):
-      _resolve_axis_sizes((1, 2, 1, 1), 8, "ICI", "per-slice device count")
+      _resolve_axis_sizes((1, 1, 2, 1, 1), 8, "ICI", "per-slice device count")
     with self.assertRaisesRegex(ValueError, r"DCN mesh axes .* slice count \(2\)"):
-      _resolve_axis_sizes((1, 1, 1, 1), 2, "DCN", "slice count")
+      _resolve_axis_sizes((1, 1, 1, 1, 1), 2, "DCN", "slice count")
 
 
 class CountSlicesTest(parameterized.TestCase):
@@ -397,7 +398,9 @@ class ShardModeTest(parameterized.TestCase):
     mixed = jax.sharding.Mesh(
         base.devices,
         MESH_AXIS_NAMES,
-        axis_types=(jax.sharding.AxisType.Explicit, jax.sharding.AxisType.Auto) * 2,
+        axis_types=tuple(
+            jax.sharding.AxisType.Explicit if i % 2 else jax.sharding.AxisType.Auto for i in range(len(MESH_AXIS_NAMES))
+        ),
     )
     with jax.sharding.set_mesh(mixed):
       with self.assertRaisesRegex(ValueError, "mixes explicit and non-explicit"):
@@ -623,7 +626,7 @@ class CreateMeshTest(parameterized.TestCase):
 
   def test_axis_names_are_stable(self):
     """Model rules reference these by name; reordering silently rewires sharding."""
-    self.assertEqual(MESH_AXIS_NAMES, ("data", "fsdp", "tensor", "expert"))
+    self.assertEqual(MESH_AXIS_NAMES, ("data", "stage", "fsdp", "tensor", "expert"))
 
   def test_single_device_mesh_is_trivial(self):
     """Defaults must work on one device so there is no special-case code path."""

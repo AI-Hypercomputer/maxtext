@@ -34,7 +34,7 @@ For the motivation, design rationale, and alternatives considered, see the
 ```text
 m3/
   core/      # RoPE, sharding, interfaces, checkpoint, data — only what NNX lacks
-  infra/     # remat, scan, quantization, offload — applied after construction
+  infra/     # remat, pipeline, scan, quantization, offload — applied after construction
   configs/   # slim Pydantic config types, model configs (e.g. glm5_3_flash_config) + base.yml
   models/    # one directory per model family + create_model dispatch
   train/     # m3's own training loop (one of two supported drivers)
@@ -123,7 +123,8 @@ path regexes or heuristics, and nothing re-shards a parameter after it is create
 | :---- | :---- | :---- |
 | Which logical axis each tensor dimension carries | the model, as `*_metadata={"out_sharding": s(name, axes)}` on every parameter and `s.constrain(x, name, axes)` on key activations | — |
 | Which mesh axis a logical axis lands on | one strategy class per parallelism scheme: `core.sharding.DefaultSharding` (FSDP over `embed`; tensor over `heads`, `kv_heads`, `mlp`, `vocab`; batch over `data` × `fsdp` × `expert`) | — |
-| Mesh shape | `core.sharding.mesh_from_config` → `create_mesh` | `ici_{data,fsdp,tensor,expert}_parallelism`, `dcn_*`; legacy's names and defaults |
+| Mesh shape | `core.sharding.mesh_from_config` → `create_mesh` | `ici_{data,fsdp,tensor,expert}_parallelism`, `ici_pipeline_parallelism` (the `stage` axis), `dcn_*`; legacy's names and defaults |
+| Pipeline parallelism over `stage` | `infra.pipeline.maybe_apply_pipeline`, a post-construction transform (below) | `num_pipeline_microbatches`, `num_pipeline_repeats`, `num_layers_per_pipeline_stage`, `pipeline_fsdp_ag_once`, ... |
 | Auto vs explicit sharding | `create_mesh(explicit=)`; `constrain` dispatches on the mesh in scope | `shard_mode`: `auto` (`explicit` is refused for now, below) |
 | Input batch layout | the driver asks the strategy (`train/loop.py::batch_spec`) | — |
 
@@ -150,11 +151,40 @@ A model with a novel axis subclasses `DefaultSharding` and delegates the rest; a
 another scheme for a model built on `DefaultSharding` (`qwen3`, Qwen3-VL) passes `sharding=` to
 `create_model`. m3 does not read `logical_axis_rules`: the strategy class is the rule table, typed
 and conflict-checked. Legacy parallelism axes the mesh does not carry (`sequence`, `context*`,
-`pipeline`, `autoregressive`, `fsdp_transpose`, `tensor_sequence`, `diloco`) and custom mesh layouts
+`autoregressive`, `fsdp_transpose`, `tensor_sequence`, `diloco`) and custom mesh layouts
 (`custom_mesh`, `custom_mesh_and_rule`, `allow_split_physical_axes`, `optimize_mesh_for_tpu_v6e`) are
 refused with the field named rather than ignored. `mesh_from_config` refuses the fields; a mesh some
 other driver builds is checked when the model meets it (`core.sharding.check_mesh`): it must carry
-`data`, `fsdp`, `tensor` and `expert`, and split no other axis.
+`data`, `stage`, `fsdp`, `tensor` and `expert`, and split no other axis.
+
+### Pipeline parallelism
+
+A layer-stacking concern, so a transform rather than a rule (design doc: "the model defines layers;
+the training infrastructure decides whether to stack them sequentially, scan them, or pipeline
+them"). `mesh_from_config` sizes the `stage` axis from `ici_pipeline_parallelism` ×
+`dcn_pipeline_parallelism`, and when it is larger than one `infra.pipeline.maybe_apply_pipeline`
+replaces the model's `nnx.Sequential` of decoder layers with `PipelinedLayers`: the layers grouped
+into stage bodies (scanned per stage under `scan_layers`), stacked on a leading `[stages]` axis
+(`[repeats, stages]` for a circular pipeline) sharded over `stage`, and run with the GPipe
+(`num_pipeline_repeats=1`) or circular schedule ported from legacy `layers/pipeline.py`: microbatches
+flow through the stages one iteration at a time, each iteration a `jax.vmap` over the stages, with
+`ppermute` shifting activations between them and per-stage buffers (`state_io`, `shift`,
+`circ_storage`) carrying the microbatches. Each stage runs the model's own layer class unchanged,
+and the layer's `batch` constraints apply inside the stage, so `DefaultSharding` names `stage` in no
+rule. Parameter paths keep one stage body's layout under the leading axes, as legacy pipelined
+checkpoints have them.
+
+The schedule reads legacy's fields (`num_pipeline_microbatches`, `num_pipeline_repeats`,
+`num_layers_per_pipeline_stage`, `pipeline_delay_activation_forwarding`, `scan_pipeline_iterations`,
+`set_remat_policy_on_pipeline_iterations`) with legacy's defaults. `pipeline_fsdp_ag_once` all-gathers
+the stage weights over `fsdp` once before the iteration loop instead of inside every iteration. Not
+yet: the per-repeat weight prefetch of legacy's `NNXCircularPipeline` (`pipeline_fsdp_ag_per_repeat`
+and its `pipeline_bsw_*` options) and pipelining only a prefix of the stack
+(`pipeline_parallel_layers`), both refused with the field named; stage bodies with non-parameter
+state (RNG streams), refused; and `shard_mode=explicit`, which `mesh_from_config` refuses anyway.
+Outside the pipelined stack -- embedding, final norm, logits -- the batch follows the `batch` rule,
+which does not name `stage`, so those run replicated across the stages; giving them `stage` as data
+parallelism without clashing with the per-stage `vmap` is future work.
 
 Today `qwen3` is fully annotated; Qwen3-VL inherits the decoder, MLP and embedding annotations but
 its hand-rolled attention and vision tower are not yet sharded; GLM-5.3-Flash and Wan carry their

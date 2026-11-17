@@ -280,7 +280,7 @@ class _ShardedToyModule(nnx.Module):
       ok_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", "tensor"))
       self.prefix_proj = nnx.Param(
           jax.device_put(p_init, ok_shd),
-          out_sharding=jax.sharding.PartitionSpec("stage", "tensor"),
+          out_sharding=jax.sharding.PartitionSpec("context", "tensor"),
           eager_sharding=False,
       )
     elif mode == "unconstrained_spec":
@@ -750,7 +750,7 @@ class ConformanceTest(parameterized.TestCase):
         ("param_wrong_mesh", r"prefix_proj sharding\.mesh is not driver_mesh"),
         (
             "bad_meta_axis",
-            r"prefix_proj\.out_sharding: non-m3 mesh axes \['stage'\]",
+            r"prefix_proj\.out_sharding: non-m3 mesh axes \['context'\]",
         ),
         (
             "unconstrained_spec",

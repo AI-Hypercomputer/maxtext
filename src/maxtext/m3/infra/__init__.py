@@ -15,6 +15,9 @@
 """Post-construction transforms applied from training setup, never from models.
 
 Modules:
+  * `pipeline.py` — pipeline parallelism over the `stage` mesh axis (GPipe and
+    circular schedules, ported from legacy `layers/pipeline.py`) +
+    `maybe_apply_pipeline`.
   * `scan.py` — layer stacking via `jax.lax.scan` + `maybe_apply_scan`.
   * `quantization.py` — `maybe_quantize`: qwix int8 / fp8 by interception, over
     the projection layers of the decoder stack.
@@ -27,7 +30,7 @@ Planned modules:
 
 Composition order is fixed, and `maxtext.m3.train.loop.setup_model` is the
 reference for it:
-`construct -> remat -> scan -> quantize -> named scopes -> optimizer -> host offload`.
+`construct -> remat -> pipeline -> scan -> quantize -> named scopes -> optimizer -> host offload`.
 
 None of these wrap the model in another module, and quantization leaves the
 variable tree untouched (asserted). Model files contain only zero-cost
