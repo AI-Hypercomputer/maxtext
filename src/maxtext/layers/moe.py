@@ -2643,8 +2643,10 @@ class RoutedMoE(nnx.Module):
             preferred_element_type=self.dtype,
         )
       if isinstance(kernel, aqt.QTensor):
-        # Multiply outputs by the kernely scale
-        scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
+        # Multiply outputs by the kernely scale. Padding rows carry the out-of-range expert id
+        # local_expert_size (see local_permute); clip it so they read a finite scale instead of
+        # jnp.take's default NaN fill (their ragged_dot output is 0, and 0 * NaN = NaN).
+        scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0, mode="clip")
         if padding_amount > 0:
           scales = jax.lax.pad(
               scales,
@@ -3426,8 +3428,11 @@ class RoutedMoE(nnx.Module):
               buffer_size=buffer_size,
           )
 
-          buffer_init = jnp.zeros if ragged_buffer_factor > 0.0 else jax.lax.empty
-          output_shape = buffer_init((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
+          # Zero-initialize for every ragged_buffer_factor: besides a capped buffer, the worst-case buffer
+          # of rbf <= 0 / force_dropless is also under-full, and its tail rows reach the gmm. Uninitialized
+          # (possibly NaN / Inf) tail rows poison reductions over all rows, e.g. the fp8 absmax scale of the
+          # drhs lhs in the quantized gmm backward.
+          output_shape = jnp.zeros((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
 
           x = jax.lax.ragged_all_to_all(
               x,
