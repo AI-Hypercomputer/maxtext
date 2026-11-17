@@ -333,7 +333,8 @@ class Llama4DecoderLayer(nnx.Module):
       self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
       self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-    self.mlp_activation_axis_names = self.activation_axis_names[:-1] + ("activation_mlp",)
+    mlp_length_name = "prefill_activation_length" if model_mode == MODEL_MODE_PREFILL else "activation_length"
+    self.mlp_activation_axis_names = ("activation_batch", mlp_length_name, "activation_mlp")
 
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
     # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.

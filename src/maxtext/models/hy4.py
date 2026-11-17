@@ -570,8 +570,9 @@ class Hy4DecoderLayer(nnx.Module):
     self.activation_axis_names = ("activation_batch", length_name, "activation_embed")
     self.stream_axis_names = ("activation_batch", length_name, None, "activation_embed")
     self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+    mlp_length_name = "prefill_activation_length" if model_mode == MODEL_MODE_PREFILL else "activation_length"
     self.mlp_intermediate_sharding = create_sharding(
-        mesh, ("activation_batch", length_name, "activation_mlp"), rules=get_logical_axis_rules()
+        mesh, ("activation_batch", mlp_length_name, "activation_mlp"), rules=get_logical_axis_rules()
     )
 
     norm = functools.partial(

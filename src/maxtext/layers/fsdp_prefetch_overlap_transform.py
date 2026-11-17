@@ -472,6 +472,16 @@ def async_queue(opcode: str, instruction_text: str) -> str | None:
   return f"{thread.group(1)}:{core_ids}"
 
 
+def issues_queued_async_work(opcode: str, instruction_text: str) -> bool:
+  """Returns True if an instruction starts async work on a hardware FIFO queue the transform reorders.
+
+  Only nested loops that issue such work (for example SparseCore collectives in an inner scan) fence
+  the schedule of the loop around them. Loops that only issue TensorCore collectives, such as the
+  collective-permutes of ring attention under context parallelism, do not.
+  """
+  return async_queue(opcode, instruction_text) is not None
+
+
 def _build_graph(
     sequence: Sequence["_hlo.HloInstruction"],
     computations_by_name: Mapping[str, "_hlo.HloComputation"],
@@ -524,7 +534,7 @@ def _build_graph(
 
 
 def _while_and_async_body_names(module: "_hlo.HloModule") -> tuple[set[str], set[str]]:
-  """Returns (all while-body names, while-body names that issue async collectives)."""
+  """Returns (all while-body names, while-body names that issue queued async work)."""
   issues_directly: dict[str, bool] = {}
   nested_bodies: dict[str, list[str]] = {}
   for computation in module.make_nonfusion_computations():
@@ -533,7 +543,7 @@ def _while_and_async_body_names(module: "_hlo.HloModule") -> tuple[set[str], set
     for inst in computation.instructions():
       opcode = inst.opcode.name
       text = inst.to_string()
-      if opcode in _ASYNC_START_OPCODES and not _is_non_collective_async(opcode, text):
+      if opcode in _ASYNC_START_OPCODES and issues_queued_async_work(opcode, text):
         issues_directly[computation.name] = True
       elif opcode == "kWhile":
         match = _BODY_RE.search(text)
