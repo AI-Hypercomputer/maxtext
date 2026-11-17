@@ -22,7 +22,7 @@ from typing import Any, Optional, Sequence, Union
 import jax
 import jax.numpy as jnp
 from maxtext.utils import max_logging
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
 
@@ -184,6 +184,34 @@ class TrainerConfig(BaseModel):
   remat_policy: str = "NONE"
   names_which_can_be_saved: list[str] = Field(default_factory=list)
   names_which_can_be_offloaded: list[str] = Field(default_factory=list)
+  prefetch_fsdp_weights: bool = Field(
+      default=False,
+      description=(
+          "Overlap next scanned layer's FSDP weight all-gather with current layer compute (requires"
+          " scan_layers=True and non-'none' remat_policy). Known limitation: remat_policy='minimal_offloaded'"
+          " compiles and matches numerics, but synchronous host-stack DMA stalls PCIe on TPU7x; pair with"
+          " remat_policy='full' or device-resident savepoints for peak throughput."
+      ),
+  )
+  prefetch_fsdp_defer_grad_reduce_scatter: bool = Field(
+      default=False,
+      description=(
+          "With prefetch_fsdp_weights and shard_mode='explicit', defer each layer's weight-gradient"
+          " reduce-scatter to the next layer's backward step (extra HBM for one layer of unreduced grads)."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def _validate_prefetch_remat(self) -> "TrainerConfig":
+    """Rejects prefetch_fsdp_weights=True when remat_policy is disabled."""
+    pol = "NONE" if self.remat_policy is None else str(self.remat_policy).strip().upper()
+    if self.prefetch_fsdp_weights and pol in ("", "NONE"):
+      raise ValueError(
+          "remat_policy='none' is not supported with prefetch_fsdp_weights=True; the FSDP weight-prefetch "
+          "custom_vjp pipeline requires per-layer gradient checkpointing."
+      )
+    return self
+
   enable_tile_search: bool = False
   tile_search_mode: str = "smart"
   tile_search_iters: int = 10
