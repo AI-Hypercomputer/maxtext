@@ -87,6 +87,33 @@ class NgramHashMappingTest(parameterized.TestCase):
     for layer_id in LAYER_IDS:
       np.testing.assert_array_equal(actual[layer_id], expected[layer_id])
 
+  def test_int64_reference_parity_and_int32_negative_control(self):
+    """uint32-limb hashing under jax_enable_x64=False matches np.int64 reference bit-for-bit; int32 truncation fails."""
+    self.assertFalse(jax.config.jax_enable_x64)
+    actual = self.hash_mapping(self.input_ids)
+    compressed = self.hash_mapping.compressed_tokenizer.lookup_table_np[self.input_ids]
+    _, s = compressed.shape
+    shifts = [
+        compressed if k == 0 else np.pad(compressed, ((0, 0), (k, 0)), constant_values=self.hash_mapping.pad_id)[:, :s]
+        for k in range(self.hash_mapping.max_ngram_size)
+    ]
+    for layer_id in LAYER_IDS:
+      mult_i64 = self.hash_mapping.layer_multipliers[layer_id]
+      mult_i32 = jnp.asarray(mult_i64.astype(np.int32), dtype=jnp.int32)
+      ref_mix = shifts[0] * mult_i64[0]
+      naive_mix = jnp.asarray(shifts[0], dtype=jnp.int32) * mult_i32[0]
+      ref_heads, naive_heads = [], []
+      for n in range(2, self.hash_mapping.max_ngram_size + 1):
+        ref_mix = np.bitwise_xor(ref_mix, shifts[n - 1] * mult_i64[n - 1])
+        naive_mix = jnp.bitwise_xor(naive_mix, jnp.asarray(shifts[n - 1], dtype=jnp.int32) * mult_i32[n - 1])
+        mods = np.asarray(self.hash_mapping.vocab_size_across_layers[layer_id][n - 2], dtype=np.int64)
+        ref_heads.append((ref_mix[..., None] % mods).astype(np.int32))
+        naive_heads.append(np.asarray(naive_mix[..., None] % jnp.asarray(mods, dtype=jnp.int32)))
+      ref_out = np.concatenate(ref_heads, axis=2)
+      naive_out = np.concatenate(naive_heads, axis=2)
+      np.testing.assert_array_equal(actual[layer_id], ref_out)
+      self.assertGreater(float(np.mean(naive_out != ref_out)), 0.99)
+
 
 class ShortConvTest(parameterized.TestCase):
 
