@@ -71,6 +71,22 @@ def create_emergency_checkpoint_manager(
   if isinstance(abstract_state, nnx.State):
     abstract_state = train_state_nnx.to_checkpoint_dict(abstract_state)
 
+  # Orbax counts replicas along `replica_axis_index` (default 0) and, if there is only one, writes no local
+  # checkpoints. MaxText's mesh puts `diloco` (size 1 unless DiLoCo is enabled) before `data`, so use `data`.
+  axis_names = global_mesh.axis_names
+  replica_axis = axis_names.index("data") if "data" in axis_names else 0
+  replica_count = global_mesh.devices.shape[replica_axis]
+  max_logging.log(
+      f"Emergency checkpointing replica axis: '{axis_names[replica_axis]}' "
+      f"(index {replica_axis}, {replica_count} replica(s))"
+  )
+  if replica_count < 2:
+    max_logging.warning(
+        "Emergency checkpointing needs at least 2 data-parallel replicas; Orbax will only write "
+        f"persistent checkpoints to {persistent_checkpoint_dir} and no local checkpoints to "
+        f"{local_checkpoint_dir}."
+    )
+
   manager = CheckpointManager(
       local_checkpoint_dir,
       persistent_p,
@@ -79,6 +95,7 @@ def create_emergency_checkpoint_manager(
       options=emergency_checkpoint_manager.CheckpointManagerOptions(
           local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
           persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
+          replica_axis_index=replica_axis,
       ),
       logger=orbax_logger,
   )
