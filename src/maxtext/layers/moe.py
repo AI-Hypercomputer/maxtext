@@ -1213,8 +1213,106 @@ def _quantized_ragged_all_to_all(
   )
 
 
+def _ragged_all_to_all_qarray(
+    x_q: qpl.QArray,
+    output_rows: int,
+    input_offsets: jax.Array,
+    send_sizes: jax.Array,
+    output_offsets: jax.Array,
+    recv_sizes: jax.Array,
+    *,
+    axis_name: str,
+    bwd_method: str = "",
+) -> qpl.QArray:
+  """Ragged all-to-all of per-row quantized tokens that keeps them quantized (leg-1 passthrough into gmm_v2).
+
+  The FP8 values and their per-row scale travel on the same routes in two ragged all-to-alls, so the receiver gets a
+  QArray that gmm_v2 consumes as its lhs without quantizing again (it applies the per-row scale to its output). Both
+  receive buffers are zero-initialized: rows that receive nothing have value 0 and scale 0, so their gmm rows are 0.
+
+  Backward: the cotangent of the received values (gmm_v2's full-precision dlhs times the row scale) goes back along the
+  reversed routes, quantized with `bwd_method`; the scale gets no cotangent, as in the ring's quantized token
+  all-gather. The sender's `_ste_quantize_tokens` then divides by its own copy of the scale, which gives the
+  straight-through gradient.
+
+  Args:
+    x_q: [rows, features] QArray with a [rows, 1] scale, e.g. from `_ste_quantize_tokens` with per-row channelwise
+      axes.
+    output_rows: Rows of the receive buffer.
+    input_offsets, send_sizes, output_offsets, recv_sizes, axis_name: As in `jax.lax.ragged_all_to_all`.
+    bwd_method: Quantization of the backward wire: '' or 'rowwise[@e4m3|@e5m2]'; 'rowwise' means E5M2.
+
+  Returns:
+    [output_rows, features] QArray with the dtype of `x_q.qvalue` and a [output_rows, 1] scale.
+  """
+  _parse_a2a_quant_method(bwd_method, jnp.float8_e5m2)  # Validate at trace time, before the backward is traced.
+  qvalue = x_q.qvalue
+  # One scale per row, sent as [rows] to avoid padding [rows, 1] to 128 lanes.
+  scale = jnp.reshape(x_q.scale, qvalue.shape[:-1])
+  # custom_vjp with an unquantized forward wire: the backward sends the (full-precision) cotangent as a fresh ragged
+  # all-to-all instead of transposing the FP8 one, which would mix a full-precision cotangent with an FP8 buffer.
+  qvalue = _quantized_ragged_all_to_all_vjp(
+      qvalue,
+      jnp.zeros_like(qvalue, shape=(output_rows, *qvalue.shape[1:])),
+      input_offsets,
+      send_sizes,
+      output_offsets,
+      recv_sizes,
+      axis_name,
+      "",
+      bwd_method,
+      qvalue.shape[0],
+  )
+  scale = jax.lax.ragged_all_to_all(
+      jax.lax.stop_gradient(scale),
+      jnp.zeros_like(scale, shape=(output_rows,)),
+      input_offsets,
+      send_sizes,
+      output_offsets,
+      recv_sizes,
+      axis_name=axis_name,
+  )
+  return dataclasses.replace(x_q, qvalue=qvalue, scale=scale[:, None])
+
+
 class RoutedMoE(nnx.Module):
   """Implements a routed MoE block."""
+
+  def _dispatch_fwd_passthrough_quantizer(self):
+    """(qtype, calibration_method) if leg 1 (dispatch forward) can pass its FP8 wire straight into gmm_v2, else None.
+
+    Passthrough applies to moe_quantize_dispatch_fwd_method='rowwise[@fmt]' when moe_quantize_dispatch_fwd_passthrough
+    is True (the default; False is the A/B and rollback switch) and the wi gmms are qwix-quantized tokamax gmm_v2 calls
+    whose act qtype is the wire format and whose act calibration is per-token absmax with a scale factor >= 1 (the
+    straight-through backward of `_ste_quantize_tokens` is exact only without clipping); the wire then is the gmm's own
+    activation quantization. Otherwise leg 1 is dequantized after the collective and the gmm quantizes its input again.
+    """
+    qtype = _parse_a2a_quant_method(self.config.moe_quantize_dispatch_fwd_method, jnp.float8_e4m3fn)
+    if qtype is None:
+      return None
+    rule = qpl.get_current_rule("gmm") if self.config.quantization and self.config.use_qwix_quantization else None
+    cal_method = (rule.act_calibration_method or "") if rule is not None else ""
+    cal_name, *cal_args = cal_method.lower().split(",")
+    requirements = {
+        "moe_quantize_dispatch_fwd_passthrough=True": self.config.moe_quantize_dispatch_fwd_passthrough,
+        "a qwix gmm quantization rule": rule is not None,
+        f"act_qtype {jnp.dtype(qtype).name}": rule is not None
+        and rule.act_qtype is not None
+        and jnp.dtype(rule.act_qtype) == jnp.dtype(qtype),
+        "per-token absmax act calibration with a scale factor >= 1": cal_name == "absmax"
+        and not (cal_args and float(cal_args[0]) < 1.0)
+        and not getattr(rule, "disable_channelwise_axes", False),
+        "use_tokamax_gmm=True, use_gmm_v2=True": self.config.use_tokamax_gmm and self.config.use_gmm_v2,
+        "a TPU gmm (hardware != 'cpu', use_te_grouped_gemm=False)": self.config.hardware != "cpu"
+        and not self.config.use_te_grouped_gemm,
+    }
+    if missing := [req for req, ok in requirements.items() if not ok]:
+      max_logging.log(
+          f"moe_quantize_dispatch_fwd_method={self.config.moe_quantize_dispatch_fwd_method!r}: leg 1 is dequantized"
+          f" after the ragged all-to-all and re-quantized by the gmm; passthrough needs {', '.join(missing)}."
+      )
+      return None
+    return qtype, cal_method
 
   def required_ragged_buffer_factor(self, group_sizes, bsz_times_seq_len, num_ep, expert_shard_id):
     """log_required_ragged_buffer_factor probe: the smallest ragged_buffer_factor that would not have dropped tokens.
@@ -2432,6 +2530,9 @@ class RoutedMoE(nnx.Module):
         ragged buffer can be much larger than the actually-routed token count,
         so this avoids touching the padded tail in both forward and backward.
 
+    `inputs` may be a QArray with a per-row scale (leg-1 passthrough of the quantized ragged all-to-all): its
+    values are permuted as above and its scale rows follow them.
+
     Returns:
       A tuple containing:
         sorted_inputs: Input data permuted local expert ID.
@@ -2441,6 +2542,9 @@ class RoutedMoE(nnx.Module):
         sorted_experts_ids: expert ID corresponding to each token of the permuted
         inputs.
     """
+    qarray_inputs = inputs if isinstance(inputs, qpl.QArray) else None
+    if qarray_inputs is not None:
+      inputs = qarray_inputs.qvalue
 
     # Slice the count of local expert IDs in each batch shard.
     # all_shard_local_sizes.shape: [expert_shard, local_expert_size]
@@ -2492,15 +2596,31 @@ class RoutedMoE(nnx.Module):
       # the worst-case ragged buffer. Restricting the gather to that prefix
       # makes both forward and backward proportional to the routed token count.
       valid_end = jnp.sum(local_group_size).astype(jnp.int32)
+      # ragged_gather moves rows as uint32 words, so the row count must be a multiple of the rows packed per word
+      # (4 for an FP8 passthrough buffer). Pad with zero rows that sort to themselves; they are past valid_end.
+      num_rows = inputs.shape[0]
+      pad = -num_rows % max(1, 4 // jnp.dtype(inputs.dtype).itemsize)
       sorted_inputs = a2a_ragged_sort(
-          inputs,
-          sorted_indices,
+          jnp.pad(inputs, [(0, pad)] + [(0, 0)] * (inputs.ndim - 1)) if pad else inputs,
+          jnp.concatenate([sorted_indices, jnp.arange(num_rows, num_rows + pad, dtype=sorted_indices.dtype)])
+          if pad
+          else sorted_indices,
           valid_end,
           use_single_sparsecore=use_single_sparsecore,
-      )
+      )[:num_rows]
     else:
       sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
     sorted_experts_ids = expert_indices[sorted_indices]
+    if qarray_inputs is not None:
+      # The routed rows come first after the sort; the rest are tail rows of an under-full buffer (zero values, or
+      # zeroed by the ragged sort). Give those scale 0 too, as `_window_token_scale` does, so their gmm rows are 0.
+      num_rows = inputs.shape[0]
+      scale_1d = jnp.reshape(qarray_inputs.scale, (num_rows,))
+      valid = jnp.arange(num_rows) < jnp.sum(local_group_size)
+      sorted_scale = jnp.where(valid, scale_1d[sorted_indices], jnp.zeros((), scale_1d.dtype))
+      sorted_inputs = dataclasses.replace(
+          qarray_inputs, qvalue=sorted_inputs, scale=jax.lax.stop_gradient(sorted_scale[:, None])
+      )
     return (
         sorted_inputs,
         sorted_indices,
@@ -3608,17 +3728,34 @@ class RoutedMoE(nnx.Module):
           output_shape = jnp.zeros((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
 
           # Token Dispatch: leg 1 (forward) and leg 4 (backward) of the EP ragged all-to-all.
-          x = _quantized_ragged_all_to_all(
-              x,
-              output_shape,
-              input_offsets,
-              send_sizes,
-              output_offsets,
-              recv_sizes,
-              axis_name=self._expert_parallelism_name,
-              fwd_method=self.config.moe_quantize_dispatch_fwd_method,
-              bwd_method=self.config.moe_quantize_dispatch_bwd_method,
-          )
+          passthrough = self._dispatch_fwd_passthrough_quantizer()
+          if passthrough is not None:
+            # Leg-1 passthrough: quantize each token row with a per-token absmax over the full hidden dim (gmm_v2's
+            # in-kernel quantization is per k-block, finer) in the rule's act qtype, and keep it quantized through the
+            # collective and local_permute; gmm_v2 consumes the QArray.
+            qtype, cal_method = passthrough
+            x = _ragged_all_to_all_qarray(
+                _ste_quantize_tokens(x.astype(self.dtype), qtype, tuple(range(x.ndim - 1)), cal_method),
+                buffer_size,
+                input_offsets,
+                send_sizes,
+                output_offsets,
+                recv_sizes,
+                axis_name=self._expert_parallelism_name,
+                bwd_method=self.config.moe_quantize_dispatch_bwd_method,
+            )
+          else:
+            x = _quantized_ragged_all_to_all(
+                x,
+                output_shape,
+                input_offsets,
+                send_sizes,
+                output_offsets,
+                recv_sizes,
+                axis_name=self._expert_parallelism_name,
+                fwd_method=self.config.moe_quantize_dispatch_fwd_method,
+                bwd_method=self.config.moe_quantize_dispatch_bwd_method,
+            )
           global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=self._expert_parallelism_name)
           x, local_sorted_indices, group_sizes, selected_experts = RoutedMoE.local_permute(
               x,

@@ -358,7 +358,11 @@ moe_quantize_token_all_gather: false
 moe_quantize_combine_bwd_method: ""
 # FP8 quantization of the other EP ragged all-to-all legs (use_ring_of_experts=false): "" = unquantized;
 # "rowwise[@e4m3|@e5m2]" = FP8 values + one f32 absmax scale per token, dequantized after the collective.
+# Leg 1 skips the dequantize and feeds the FP8 tokens (one activation-dtype scale per token) straight into gmm_v2 when
+# the wi gmms are qwix-quantized tokamax gmm_v2 calls with that act qtype and per-token absmax act calibration (factor
+# >= 1).
 moe_quantize_dispatch_fwd_method: "" # Token Dispatch forward (leg 1); "rowwise" = "rowwise@e4m3"
+moe_quantize_dispatch_fwd_passthrough: true # false: leg 1 always dequantizes after the collective (A/B, rollback)
 moe_quantize_combine_fwd_method: "" # Token Combine forward (leg 2); "rowwise" = "rowwise@e4m3"
 moe_quantize_dispatch_bwd_method: "" # Token Dispatch backward (leg 4); "rowwise" = "rowwise@e5m2"
 num_moe_emb_chunks: 0 # number of chunks for overlapping token all-gather and GMM computation along embedding dimension
