@@ -23,6 +23,7 @@ import types
 import unittest
 from unittest import mock
 
+from absl.testing import absltest
 import jax
 from jax import ad_checkpoint
 import jax.numpy as jnp
@@ -189,6 +190,42 @@ class FsdpPrefetchSparseCoreTest(unittest.TestCase):
     self.assertRegex(rs_pinned, r"core_ids.{0,8}\[1\]")
     self.assertIn("dimension = 0", rs_pinned)
 
+  def test_pinned_3d_non_major_reduce_scatter_moves_scatter_dim_to_axis0(self):
+    mesh = _abstract_mesh((4, 2), ("fsdp", "expert"))
+    # MLA `self_attention.out.kernel` shape [heads, v_head_dim, emb] sharded on dim=2 over ('fsdp', 'expert').
+    g_dim2 = jax.ShapeDtypeStruct(
+        (8, 128, 512),
+        jnp.float32,
+        sharding=NamedSharding(mesh, PartitionSpec(None, None, None, unreduced=frozenset({"fsdp", "expert"}))),
+    )
+    # 3D routed expert weight shape [experts, emb, mlp] sharded on dim=1 over 'fsdp'.
+    g_dim1 = jax.ShapeDtypeStruct(
+        (8, 256, 256),
+        jnp.float32,
+        sharding=NamedSharding(mesh, PartitionSpec("expert", None, None, unreduced=frozenset({"fsdp"}))),
+    )
+
+    def scatter_dim2(x):
+      return fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+          x, mesh, PartitionSpec(None, None, ("fsdp", "expert")), PartitionSpec(None, None, None), sparse_core_id=1
+      )
+
+    def scatter_dim1(x):
+      return fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+          x, mesh, PartitionSpec("expert", "fsdp", None), PartitionSpec("expert", None, None), sparse_core_id=1
+      )
+
+    with jax.sharding.use_abstract_mesh(mesh):
+      hlo_dim2 = jax.jit(scatter_dim2).trace(g_dim2).lower(lowering_platforms=("tpu",)).as_text()
+      hlo_dim1 = jax.jit(scatter_dim1).trace(g_dim1).lower(lowering_platforms=("tpu",)).as_text()
+
+    for hlo in (hlo_dim2, hlo_dim1):
+      self.assertIn('_xla_compute_type = "sparseoffload"', hlo)
+      self.assertRegex(hlo, r"core_ids.{0,8}\[1\]")
+      self.assertIn("dimension = 0", hlo)
+      self.assertNotIn("dimension = 1", hlo)
+      self.assertNotIn("dimension = 2", hlo)
+
   def test_overlap_transform_registered_on_tpu_mesh_only(self):
     def fake_mesh(platform):
       dev = types.SimpleNamespace(platform=platform, device_kind="TPU7x" if platform == "tpu" else "cpu")
@@ -317,6 +354,253 @@ class FsdpPrefetchSparseCoreTest(unittest.TestCase):
     done_of = {"rs1_start": "rs1_done", "ag1_start": "ag1_done", "rs2_start": "rs2_done", "ag2_start": "ag2_done"}
     sc_dones = [done_of[s] for s in sc_starts]
     self.assertEqual(sc_dones, sorted(sc_dones, key=pos.__getitem__))
+
+  def test_async_queue_separates_sc0_and_sc1_with_nested_consumer_core_ids(self):
+    sc0_text = (
+        "%call-start.10 = ((bf16[4,2048]{1,0}), bf16[32,2048]{1,0}) call-start(%slice.1), "
+        'async_execution_thread="sparsecore", '
+        'backend_config={"operation_queue_id":"0",'
+        '"sparse_core_config":{"consumers":[{"core_ids":[]}],"producers":[{"core_ids":[]}],"core_ids":["0"]}}'
+    )
+    sc1_text = (
+        "%call-start.11 = ((bf16[32,2048]{1,0}), bf16[512,2048]{1,0}) call-start(%slice.2), "
+        'async_execution_thread="sparsecore", '
+        'backend_config={"operation_queue_id":"0",'
+        '"sparse_core_config":{"consumers":[{"core_ids":[]}],"core_ids":["1"]}}'
+    )
+    # Also verify stringified `backend_config="{...}"` emitted by XLA HLO printers.
+    sc0_stringified = (
+        "%call-start.12 = ((bf16[4,2048]{1,0}), bf16[32,2048]{1,0}) call-start(%slice.1), "
+        'async_execution_thread="sparsecore", '
+        r'backend_config="{\"operation_queue_id\":\"0\",'
+        r'\"sparse_core_config\":{\"consumers\":[{\"core_ids\":[]}],\"core_ids\":[\"0\"]}}"'
+    )
+    sc1_stringified = (
+        "%call-start.13 = ((bf16[32,2048]{1,0}), bf16[512,2048]{1,0}) call-start(%slice.2), "
+        'async_execution_thread="sparsecore", '
+        r'backend_config="{\"operation_queue_id\":\"0\",'
+        r'\"sparse_core_config\":{\"consumers\":[{\"core_ids\":[]}],\"core_ids\":[\"1\"]}}"'
+    )
+    q_sc0 = fsdp_prefetch_overlap_transform.async_queue("kAsyncStart", sc0_text)
+    q_sc1 = fsdp_prefetch_overlap_transform.async_queue("kAsyncStart", sc1_text)
+    self.assertEqual(q_sc0, "sparsecore:0")
+    self.assertEqual(q_sc1, "sparsecore:1")
+    self.assertEqual(fsdp_prefetch_overlap_transform.async_queue("kAsyncStart", sc0_stringified), "sparsecore:0")
+    self.assertEqual(fsdp_prefetch_overlap_transform.async_queue("kAsyncStart", sc1_stringified), "sparsecore:1")
+
+    # Edge cases: non-SparseCore `backend_config`, malformed `backend_config`, regex fallback, and host/non-async ops.
+    self.assertIsNone(
+        fsdp_prefetch_overlap_transform.async_queue(
+            "kAsyncStart", '%ag = call-start(%p), async_execution_thread="sparsecore", backend_config={"other":1}'
+        )
+    )
+    self.assertIsNone(
+        fsdp_prefetch_overlap_transform.async_queue(
+            "kAsyncStart", '%ag = call-start(%p), async_execution_thread="sparsecore", backend_config="{not_json"'
+        )
+    )
+    self.assertEqual(
+        fsdp_prefetch_overlap_transform.async_queue(
+            "kAsyncStart", '%ag = call-start(%p), async_execution_thread="sparsecore", attrs={"core_ids": [1]}'
+        ),
+        "sparsecore:1",
+    )
+    self.assertIsNone(
+        fsdp_prefetch_overlap_transform.async_queue(
+            "kAsyncStart", '%ag = call-start(%p), async_execution_thread="sparsecore"'
+        )
+    )
+    self.assertIsNone(fsdp_prefetch_overlap_transform.async_queue("kDot", sc1_text))
+    self.assertIsNone(
+        fsdp_prefetch_overlap_transform.async_queue(
+            "kAsyncStart", '%h = call-start(%p), async_execution_thread="host", attrs={"core_ids": [0]}'
+        )
+    )
+
+    # An SC1 FSDP prefetch issued before an SC0 MoE EP collective must not have its done capped before
+    # the SC0 done (since SC0 and SC1 have independent hardware FIFO queues).
+    order = ("param", "sc1_ag_start", "sc1_ag_done", "sc0_ep_start", "sc0_ep_done", "moe_dot", "next_dot", "root")
+    opcodes = {
+        "param": "kParameter",
+        "sc1_ag_start": "kAsyncStart",
+        "sc1_ag_done": "kAsyncDone",
+        "sc0_ep_start": "kAsyncStart",
+        "sc0_ep_done": "kAsyncDone",
+        "moe_dot": "kDot",
+        "next_dot": "kDot",
+        "root": "kTuple",
+    }
+    operands = {
+        "param": (),
+        "sc1_ag_start": ("param",),
+        "sc1_ag_done": ("sc1_ag_start",),
+        "sc0_ep_start": ("param",),
+        "sc0_ep_done": ("sc0_ep_start",),
+        "moe_dot": ("sc0_ep_done",),
+        "next_dot": ("moe_dot", "sc1_ag_done"),
+        "root": ("next_dot",),
+    }
+    graph = fsdp_prefetch_overlap_transform.make_schedule_graph(
+        order=order,
+        opcodes=opcodes,
+        operands=operands,
+        queues={"sc1_ag_start": q_sc1, "sc0_ep_start": q_sc0},
+    )
+    rescheduled = fsdp_prefetch_overlap_transform.reschedule(graph)
+    fsdp_prefetch_overlap_transform.validate_order(graph, rescheduled)
+    pos = {name: i for i, name in enumerate(rescheduled)}
+    self.assertGreater(pos["sc1_ag_done"], pos["moe_dot"])
+    self.assertLess(pos["sc1_ag_done"], pos["next_dot"])
+
+  def test_ignores_pipelined_vmem_dma_async_ops_and_loop_fences(self):
+    def fake_inst(name, opcode_name, operand_list, text):
+      return types.SimpleNamespace(
+          name=name,
+          opcode=types.SimpleNamespace(name=opcode_name),
+          operands=lambda operand_list=operand_list: operand_list,
+          to_string=lambda text=text: text,
+      )
+
+    # Inner recurrence loop body containing only intra-core VMEM DMAs (`dma_priority` / `dynamic-slice-start`),
+    # where XLA's loop pipeliner consumes a previous-iteration DMA from a loop parameter tuple (`kGetTupleElement`).
+    b_param = fake_inst("b_param", "kParameter", [], "%b_param = (bf16[8,128]{1,0}) parameter(0)")
+    b_gte = fake_inst(
+        "b_gte", "kGetTupleElement", [b_param], "%b_gte = bf16[8,128]{1,0} get-tuple-element(%b_param), index=0"
+    )
+    b_dma_done = fake_inst(
+        "dynamic-slice-done.3",
+        "kAsyncDone",
+        [b_gte],
+        '%dynamic-slice-done.3 = bf16[8,128S(1)]{1,0} dynamic-slice-done(%b_gte), backend_config={"dma_priority":0}',
+    )
+    b_dma_start = fake_inst(
+        "dynamic-slice-start.4",
+        "kAsyncStart",
+        [b_dma_done],
+        "%dynamic-slice-start.4 = ((bf16[8,128]{1,0}), bf16[8,128S(1)]{1,0}) dynamic-slice-start(%dynamic-slice-done.3), "
+        'backend_config={"dma_priority":0}',
+    )
+    b_root = fake_inst("b_root", "kTuple", [b_dma_start], "%b_root = tuple(%dynamic-slice-start.4)")
+    pipelined_body = types.SimpleNamespace(
+        name="gdn_chunk_post_fusion_pipelined_body",
+        instructions=lambda: [b_param, b_gte, b_dma_done, b_dma_start, b_root],
+    )
+
+    # Outer layer computation: issues an SC1 FSDP weight prefetch before the inner VMEM-DMA loop, and
+    # drains the pipelined VMEM DMA after the inner loop (`dynamic-slice-done.12` whose operand 0 is `gte`,
+    # even without `backend_config` on the done).
+    param = fake_inst("param", "kParameter", [], "%param = bf16[32,2048]{1,0} parameter(0)")
+    ag_start = fake_inst(
+        "ag_start",
+        "kAsyncStart",
+        [param],
+        "%ag_start = ((bf16[32,2048]{1,0}), bf16[256,2048]{1,0}) call-start(%param), "
+        'async_execution_thread="sparsecore", backend_config={"sparse_core_config":{"core_ids":["1"]}}',
+    )
+    ag_done = fake_inst(
+        "ag_done",
+        "kAsyncDone",
+        [ag_start],
+        '%ag_done = bf16[256,2048]{1,0} call-done(%ag_start), async_execution_thread="sparsecore"',
+    )
+    vmem_prologue = fake_inst(
+        "dynamic-slice-start.1",
+        "kAsyncStart",
+        [param],
+        "%dynamic-slice-start.1 = ((bf16[32,2048]{1,0}), bf16[8,128S(1)]{1,0}) dynamic-slice-start(%param), "
+        r'backend_config="{\"dma_priority\":0}"',
+    )
+    host_start = fake_inst(
+        "host_offload_start",
+        "kAsyncStart",
+        [param],
+        "%host_offload_start = ((bf16[32,2048]{1,0}), bf16[32,2048]{1,0:S(5)}) call-start(%param)",
+    )
+    host_done = fake_inst(
+        "host_offload_done",
+        "kAsyncDone",
+        [host_start],
+        "%host_offload_done = bf16[32,2048]{1,0} call-done(%host_offload_start)",
+    )
+    chunk_while = fake_inst(
+        "chunk_while",
+        "kWhile",
+        [vmem_prologue],
+        "%chunk_while = ((bf16[8,128]{1,0})) while(%dynamic-slice-start.1), "
+        "condition=%chunk_cond, body=%gdn_chunk_post_fusion_pipelined_body",
+    )
+    while_gte = fake_inst(
+        "while_gte", "kGetTupleElement", [chunk_while], "%while_gte = get-tuple-element(%chunk_while), index=0"
+    )
+    vmem_epilogue = fake_inst(
+        "dynamic-slice-done.12",
+        "kAsyncDone",
+        [while_gte],
+        "%dynamic-slice-done.12 = bf16[8,128S(1)]{1,0} dynamic-slice-done(%while_gte)",
+    )
+    next_dot = fake_inst(
+        "next_dot",
+        "kDot",
+        [vmem_epilogue, ag_done, host_done],
+        "%next_dot = dot(%dynamic-slice-done.12, %ag_done, %host_offload_done)",
+    )
+    root = fake_inst("root", "kTuple", [next_dot], "%root = tuple(%next_dot)")
+    outer_seq = [
+        param,
+        ag_start,
+        ag_done,
+        host_start,
+        host_done,
+        vmem_prologue,
+        chunk_while,
+        while_gte,
+        vmem_epilogue,
+        next_dot,
+        root,
+    ]
+    outer_comp = types.SimpleNamespace(name="sublayer_body", instructions=lambda: outer_seq)
+    entry_while = fake_inst(
+        "outer_while",
+        "kWhile",
+        [param],
+        "%outer_while = tuple() while(%param), condition=%outer_cond, body=%sublayer_body",
+    )
+    entry_seq = [param, entry_while, root]
+    entry_comp = types.SimpleNamespace(name="main", instructions=lambda: entry_seq)
+
+    sequences = {
+        "gdn_chunk_post_fusion_pipelined_body": [b_param, b_gte, b_dma_done, b_dma_start, b_root],
+        "sublayer_body": outer_seq,
+        "main": entry_seq,
+    }
+    updated_sequences = {}
+    fake_schedule = types.SimpleNamespace(
+        sequence=lambda comp: sequences[comp.name],
+        set_sequence=lambda comp, seq: updated_sequences.__setitem__(comp.name, [i.name for i in seq]),
+        verify=lambda: None,
+    )
+    fake_module = types.SimpleNamespace(
+        name="test_module",
+        schedule=lambda: fake_schedule,
+        set_schedule=lambda _: None,
+        to_string=lambda *_: "HloModule test_module\nENTRY %main () -> () {\n}\n",
+        computations=lambda: [pipelined_body, outer_comp, entry_comp],
+        make_nonfusion_computations=lambda: [pipelined_body, outer_comp, entry_comp],
+    )
+    all_bodies, async_bodies = fsdp_prefetch_overlap_transform._while_and_async_body_names(fake_module)  # pylint: disable=protected-access
+    self.assertIn("gdn_chunk_post_fusion_pipelined_body", all_bodies)
+    # VMEM-DMA-only loop must not be classified as a collective-issuing async body / fence.
+    self.assertNotIn("gdn_chunk_post_fusion_pipelined_body", async_bodies)
+    self.assertIn("sublayer_body", async_bodies)
+
+    rewritten = fsdp_prefetch_overlap_transform.transform_module(fake_module)
+    self.assertEqual(set(rewritten), {"sublayer_body", "main"})
+    self.assertNotIn("gdn_chunk_post_fusion_pipelined_body", updated_sequences)
+    pos = {name: i for i, name in enumerate(updated_sequences["sublayer_body"])}
+    # `ag_done` overlaps the entire `chunk_while` loop instead of being fenced before `chunk_while`.
+    self.assertLess(pos["ag_start"], pos["chunk_while"])
+    self.assertGreater(pos["ag_done"], pos["chunk_while"])
+    self.assertLess(pos["ag_done"], pos["next_dot"])
 
 
 class FsdpPrefetchAllGatherTest(unittest.TestCase):
@@ -535,6 +819,48 @@ class FsdpPrefetchReducedGradTest(unittest.TestCase):
     # One tagged reduce-scatter per weight and no all-reduce: the gradient is reduced exactly once.
     self.assertEqual(hlo.count("stablehlo.reduce_scatter"), 2)
     self.assertNotIn("stablehlo.all_reduce", hlo)
+
+  def test_3d_non_major_sparse_core_reduce_scatter_matches_reference(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs at least 4 devices.")
+    mesh = jax.make_mesh(
+        (2, 2), ("fsdp", "expert"), axis_types=(AxisType.Explicit, AxisType.Explicit), devices=jax.devices()[:4]
+    )
+    rng = np.random.default_rng(7)
+    x_np = rng.standard_normal((4, 4, 128)).astype(np.float32)
+    w_out_np = (rng.standard_normal((4, 128, 256)) / 128**0.5).astype(np.float32)
+    src_spec = PartitionSpec(None, None, ("fsdp", "expert"))
+    gathered_spec = PartitionSpec(None, None, None)
+
+    def loss_fn(x, w):
+      return jnp.sin(
+          jnp.einsum(
+              "bhd,hde->be",
+              x,
+              w,
+              precision=jax.lax.Precision.HIGHEST,
+              out_sharding=PartitionSpec(("fsdp", "expert"), None),
+          )
+      ).sum()
+
+    def prefetch_grad(x, w):
+      wg = fsdp_prefetch._apply_sharding_hint(w, mesh, ShardMode.EXPLICIT, sparse_core_id=1)  # pylint: disable=protected-access
+      _, vjp_fn = jax.vjp(lambda w_: loss_fn(x, w_), wg)
+      (dw,) = vjp_fn(jnp.ones((), jnp.float32))
+      return fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+          dw, mesh, src_spec, gathered_spec, sparse_core_id=1
+      )
+
+    with jax.set_mesh(mesh):
+      x_dev = jax.device_put(x_np, PartitionSpec(("fsdp", "expert"), None, None))
+      w_dev = jax.device_put(w_out_np, src_spec)
+      got = jax.jit(prefetch_grad)(x_dev, w_dev)
+
+    want = jax.grad(lambda w: jnp.sin(jnp.einsum("bhd,hde->be", x_np, w, precision=jax.lax.Precision.HIGHEST)).sum())(
+        w_out_np
+    )
+    np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+    self.assertEqual(tuple(got.sharding.spec.partitions), (None, None, ("fsdp", "expert")))
 
   def test_explicit_fsdp_weight_and_embed_lookup_gradients_match_reference(self):
     if jax.device_count() < 4:
@@ -957,4 +1283,4 @@ class FsdpPrefetchQwixQuantizationTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

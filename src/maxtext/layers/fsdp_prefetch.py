@@ -291,14 +291,14 @@ def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, pad_minor=Fa
       pad_width[minor_dim] = (0, padded_minor - orig_minor)
       x = _pad_unreduced(x, pad_width, tuple(ax) + tuple(extra))
       x = _pin_scatter_dim_major(x, dim)
-    if dim != 0 and x.ndim == 2 and sparse_core_id is not None and sparse_core_id >= 0:
+    if dim != 0 and sparse_core_id is not None and sparse_core_id >= 0:
       # `compute_on` outlines its body into an HLO `call` whose boundary defaults to row-major
-      # `{1, 0}` layout, ignoring `_pin_scatter_dim_major` outside the call and turning a dim-1
-      # scatter into a minor-dimension SparseCore reduce-scatter (which XLA rewrites into an
-      # all-reduce + dynamic-slice when dim 0's 128-tile count is not divisible by 3, e.g.
-      # `bf16[2048, 7168]`). Moving `dim` to axis 0 across the `compute_on` boundary makes the call
-      # parameter row-major `{1, 0}` with the scatter dimension major-most, which lowers to a
-      # zero-copy bitcast around a direct SparseCore reduce-scatter.
+      # `{N-1, ..., 0}` layout, ignoring `_pin_scatter_dim_major` outside the call and turning any
+      # `dim != 0` scatter into a non-major SparseCore reduce-scatter (which XLA rewrites into an
+      # all-reduce + dynamic-slice on 2D weights like `bf16[2048, 7168]`, or miscompiles on 3D+
+      # weights like `bf16[128, 128, 7168]` sharded on `dim=2`). Moving `dim` to axis 0 across the
+      # `compute_on` boundary makes the call parameter row-major with the scatter dimension
+      # major-most, lowering to zero-copy bitcasts around a `scatter_dimension=0` reduce-scatter.
       x = jnp.moveaxis(x, dim, 0)
       x = _on_sparse_core(
           functools.partial(
