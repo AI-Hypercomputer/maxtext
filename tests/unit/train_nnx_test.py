@@ -72,6 +72,8 @@ class _Cfg:
   shard_optimizer_over_data: bool = False
   optimizer_memory_host_offload: bool = False
   parameter_memory_host_offload: bool = False
+  selective_host_offload: bool = False
+  host_offload_param_patterns: tuple[str, ...] = ()
   gradient_clipping_threshold: float = 0.0
   grad_dtype: jnp.dtype = jnp.float32
   record_internal_nn_metrics: bool = False

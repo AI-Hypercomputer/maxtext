@@ -27,10 +27,11 @@ from flax import nnx
 import jax
 from jax.experimental.topologies import get_topology_desc
 import jax.numpy as jnp
-from jax.sharding import Mesh, NamedSharding, SingleDeviceSharding
+from jax.sharding import AxisType, Mesh, NamedSharding, SingleDeviceSharding
 from jax.sharding import PartitionSpec as P
 import numpy as np
 
+from maxtext.common import train_state_nnx
 from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.m3.core.sharding import TensorType, mesh_from_config, sharding_from_config
@@ -1120,6 +1121,1891 @@ class RuntimeHbmTelemetryTest(parameterized.TestCase):
     self.assertLen(opt_vars, 1)
     self.assertFalse(bool(opt_vars[0].eager_sharding))
     self.assertNotIn("_offload_saved_eager", opt_vars[0].get_metadata())
+
+
+def _qwen38_mini_config(output_dir: str, **overrides):
+  """Creates a compact `qwen3.8-flash-next-mini` M3 configuration for selective offload tests."""
+  args = {
+      "model_name": "qwen3.8-flash-next-mini",
+      "override_model_config": "true",
+      "use_m3_model": "true",
+      "per_device_batch_size": "1",
+      "max_target_length": "16",
+      "steps": "4",
+      "learning_rate": "1e-3",
+      "gradient_clipping_threshold": "1.0",
+      "adam_weight_decay": "0.1",
+      "dtype": "float32",
+      "weight_dtype": "float32",
+      "matmul_precision": "highest",
+      "enable_checkpointing": "false",
+      "base_output_directory": output_dir,
+      "run_name": "m3_selective_offload_test",
+  }
+  num_devices = len(jax.devices())
+  if num_devices >= 4:
+    args["ici_fsdp_parallelism"] = "2"
+    args["ici_expert_parallelism"] = str(num_devices // 2)
+  else:
+    args["ici_fsdp_parallelism"] = str(num_devices)
+  args.update({k: str(v) for k, v in overrides.items()})
+  return pyconfig.initialize(["", get_test_config_path()] + [f"{k}={v}" for k, v in args.items()])
+
+
+_HLO_DEBUG_SECTIONS = frozenset({"FileNames", "FunctionNames", "FileLocations", "StackFrames"})
+_HLO_COMP_DEF_RE = re.compile(r"^(ENTRY\s+)?(%[\w.\-]+)\s*\((.*)\)\s*->\s*(.*\{\s*)$")
+_HLO_PARAM_DECL_RE = re.compile(r"(?:^|(?<=,\s)|(?<=\*/))([A-Za-z_][\w.\-]*)(\s*:)")
+_HLO_STR_OR_IDENT_RE = re.compile(r'"[^"]*"|%([A-Za-z_][\w.\-]*)')
+
+
+def _hlo_comp_stem(name: str) -> str:
+  stem = re.sub(r"\.\d+(?=\.|_spmd\b|$)", "", name)
+  return re.sub(r"\bregion_\d+", "region", stem)
+
+
+def _hlo_ssa_stem(name: str) -> str:
+  return re.sub(r"\.\d+(?=\.|$)", "", name)
+
+
+def _normalize_hlo(hlo_text: str) -> str:
+  """Canonicalizes XLA debug tables and monotonic SSA/subcomputation counters while preserving graph wiring."""
+  lines = hlo_text.splitlines()
+  comp_map: dict[str, str] = {}
+  comp_counts: dict[str, int] = {}
+  for line in lines:
+    m = _HLO_COMP_DEF_RE.match(line.strip())
+    if m:
+      raw_comp = m.group(2)[1:]
+      if raw_comp not in comp_map:
+        stem = _hlo_comp_stem(raw_comp)
+        idx = comp_counts.get(stem, 0)
+        comp_counts[stem] = idx + 1
+        comp_map[raw_comp] = f"{stem}#{idx}"
+
+  out_lines: list[str] = []
+  in_debug_section = False
+  in_comp = False
+  local_map: dict[str, str] = {}
+  local_counts: dict[str, int] = {}
+
+  def _map_local(raw_name: str) -> str:
+    if raw_name in comp_map:
+      return comp_map[raw_name]
+    if raw_name not in local_map:
+      stem = _hlo_ssa_stem(raw_name)
+      idx = local_counts.get(stem, 0)
+      local_counts[stem] = idx + 1
+      local_map[raw_name] = f"{stem}#{idx}"
+    return local_map[raw_name]
+
+  def _replace_param(pm: re.Match[str]) -> str:
+    return f"{_map_local(pm.group(1))}{pm.group(2)}"
+
+  def _replace_ident(im: re.Match[str]) -> str:
+    return f"%{_map_local(im.group(1))}" if im.group(1) is not None else im.group(0)
+
+  for line in lines:
+    stripped = line.strip()
+    if not in_comp:
+      if stripped in _HLO_DEBUG_SECTIONS:
+        in_debug_section = True
+        continue
+      if in_debug_section:
+        if not stripped or re.match(r"^\d+\s+", stripped):
+          continue
+        in_debug_section = False
+      if stripped.startswith("HloModule "):
+        line = re.sub(r"^(\s*HloModule\s+)\S+?,", r"\1<module>,", line, count=1)
+        out_lines.append(line)
+        continue
+
+    m = _HLO_COMP_DEF_RE.match(stripped)
+    if m:
+      in_comp = True
+      local_map.clear()
+      local_counts.clear()
+      entry_prefix = m.group(1) or ""
+      comp_canon = comp_map[m.group(2)[1:]]
+      params_str = _HLO_PARAM_DECL_RE.sub(_replace_param, m.group(3))
+      out_lines.append(f"{entry_prefix}%{comp_canon} ({params_str}) -> {m.group(4).rstrip()}")
+      continue
+
+    if in_comp and (stripped == "}" or stripped.startswith("},")):
+      in_comp = False
+      out_lines.append(line)
+      continue
+
+    if in_comp:
+      line = re.sub(r"\s*\bstack_frame_id=\d+", "", line)
+      line = re.sub(r",?\s*metadata=\{[^}]*\}", "", line)
+      line = _HLO_STR_OR_IDENT_RE.sub(_replace_ident, line)
+    if stripped or (out_lines and out_lines[-1] != ""):
+      out_lines.append(line)
+
+  return "\n".join(out_lines)
+
+
+class SelectiveHostOffloadTest(parameterized.TestCase):
+  """Tests pattern-selected pinned-host offload for large embedding tables (e.g. Qwen3.8 PLE)."""
+
+  _tpu7x_ple_unsharded_off_cache: dict[str, tuple[int, int, int]] = {}
+  _tpu7x_engine_ple_off_cache: dict[str, tuple[int, int]] = {}
+  _mtp_ref_cache: dict[int, tuple] = {}
+
+  def setUp(self):
+    super().setUp()
+    self.enterContext(nnx.use_eager_sharding(True))
+
+  def test_device_host_compute_compat_across_jax_versions(self):
+    """Verifies `_device_host_compute` handles `compute_on`, `compute_on2` (`jax 0.11.0`), and context fallback."""
+    # pylint: disable=protected-access
+    import types  # pylint: disable=import-outside-toplevel
+
+    @contextlib.contextmanager
+    def _legacy_cm(compute_type: str):  # pylint: disable=unused-argument
+      yield
+
+    real_dec = m3_offload._COMPUTE_ON_DECORATOR
+    self.assertIsNotNone(real_dec)
+    mod_0110 = types.SimpleNamespace(compute_on=_legacy_cm, compute_on2=real_dec)
+    self.assertIs(m3_offload._resolve_compute_on_decorator(mod_0110), real_dec)
+    mod_legacy = types.SimpleNamespace(compute_on=_legacy_cm)
+    self.assertIsNone(m3_offload._resolve_compute_on_decorator(mod_legacy))
+
+    @m3_offload._device_host_compute(
+        out_memory_spaces=(jax.memory.Space.Device, jax.memory.Space.Host),
+        compute_on_mod=mod_0110,
+    )
+    def _pair_0110(x_h: jax.Array):
+      doubled = x_h * 2.0
+      return doubled, doubled + 1.0
+
+    @m3_offload._device_host_compute(
+        out_memory_spaces=(jax.memory.Space.Device, jax.memory.Space.Host),
+        compute_on_mod=mod_legacy,
+    )
+    def _pair_legacy(x_d: jax.Array):
+      doubled = x_d * 2.0
+      return doubled, doubled + 1.0
+
+    dev0 = jax.local_devices()[0]
+    x_host = jax.device_put(
+        jnp.array([1.0, 3.0], dtype=jnp.float32),
+        SingleDeviceSharding(dev0, memory_kind="pinned_host"),
+    )
+    y_dev_0110, y_host_0110 = jax.jit(_pair_0110)(x_host)
+    self.assertEqual(y_dev_0110.sharding.memory_kind, "device")
+    self.assertEqual(y_host_0110.sharding.memory_kind, "pinned_host")
+    np.testing.assert_allclose(np.asarray(y_dev_0110), np.array([2.0, 6.0], dtype=np.float32))
+    np.testing.assert_allclose(np.asarray(y_host_0110), np.array([3.0, 7.0], dtype=np.float32))
+
+    x_dev = jax.device_put(jnp.array([1.0, 3.0], dtype=jnp.float32), SingleDeviceSharding(dev0))
+    y_dev_leg, y_host_leg = jax.jit(_pair_legacy)(x_dev)
+    self.assertEqual(y_dev_leg.sharding.memory_kind, "device")
+    self.assertEqual(y_host_leg.sharding.memory_kind, "pinned_host")
+    np.testing.assert_allclose(np.asarray(y_dev_leg), np.array([2.0, 6.0], dtype=np.float32))
+    np.testing.assert_allclose(np.asarray(y_host_leg), np.array([3.0, 7.0], dtype=np.float32))
+
+  def test_validation_fails_closed(self):
+    out_dir = self.create_tempdir().full_path
+    with self.assertRaisesRegex(ValueError, "host_offload_param_patterns"):
+      _qwen38_mini_config(out_dir, selective_host_offload="true", host_offload_param_patterns="[]")
+
+    with self.assertRaisesRegex(ValueError, "parameter_memory_host_offload"):
+      _qwen38_mini_config(
+          out_dir,
+          selective_host_offload="true",
+          parameter_memory_host_offload="true",
+      )
+
+    cfg_unmatched = _qwen38_mini_config(
+        out_dir,
+        selective_host_offload="true",
+        host_offload_param_patterns='["nonexistent_param_path_xyz$"]',
+    )
+    mesh = mesh_from_config(cfg_unmatched)
+    with jax.set_mesh(mesh):
+      with self.assertRaisesRegex(ValueError, "matched 0 parameters"):
+        loop.setup_model(cfg_unmatched, mesh)
+
+    with self.assertRaises(ValueError):
+      _qwen38_mini_config(
+          out_dir,
+          selective_host_offload="true",
+          selective_host_offload_optimizer_mode="unknown_mode",
+      )
+
+  def test_selective_offload_fails_closed_instead_of_silent_fallback(self):
+    """Verifies missing tokens, pre-gather shape mismatch, and dense lazy_sparse raise ValueError."""
+    import importlib.util  # pylint: disable=import-outside-toplevel
+
+    out_dir = self.create_tempdir().full_path
+    cfg = _qwen38_mini_config(out_dir, scan_layers="true", selective_host_offload="true")
+    mesh = mesh_from_config(cfg)
+    sharding = sharding_from_config(cfg)
+
+    with jax.set_mesh(mesh):
+      model, _ = loop.setup_model(cfg, mesh, sharding)
+      bad_batch = {"targets": jnp.zeros((4, 16), dtype=jnp.int32)}
+
+      # 1. value_and_grad / pure_value_and_grad / engine_value_and_grad refuse dense fallback when tokens=None.
+      with self.assertRaisesRegex(ValueError, "requires token IDs"):
+        m3_offload.value_and_grad(loop.loss_fn, model, bad_batch)
+
+      graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+      with self.assertRaisesRegex(ValueError, "requires token IDs"):
+        m3_offload.pure_value_and_grad(
+            lambda p, cp, r, c, d: (jnp.array(0.0), None),
+            graphdef,
+            params,
+            custom_params=nnx.State({}),
+            rest=rest,
+            config=cfg,
+            data=bad_batch,
+        )
+
+      with self.assertRaisesRegex(ValueError, "requires token IDs"):
+        m3_offload.engine_value_and_grad(
+            lambda p, r, b: (jnp.array(0.0), (None, r)),
+            graphdef,
+            params,
+            rest,
+            bad_batch,
+        )
+
+      # 2. HostOffloadedEmbed refuses pre-gather shape mismatch instead of bypassing pre_gathered.
+      ple_embeds = m3_offload._collect_host_embeds(model)  # pylint: disable=protected-access
+      self.assertEqual(len(ple_embeds), 1)
+      ple_path, ple_embed, _ = ple_embeds[0]
+      dummy_pre_ids = jnp.zeros((2, 4), dtype=jnp.int32)
+      dummy_pre_vals = jnp.zeros((2, 4, ple_embed.features), dtype=jnp.float32)
+      with m3_offload._pregathered_context({ple_path: (dummy_pre_ids, dummy_pre_vals)}):  # pylint: disable=protected-access
+        with self.assertRaisesRegex(ValueError, "pre-gather shape mismatch"):
+          ple_embed(jnp.zeros((2, 5), dtype=jnp.int32))
+
+      # 3. lazy_sparse rejects dense host gradients both at config/make_optimizer time and in update().
+      cfg_ls = _qwen38_mini_config(
+          out_dir,
+          scan_layers="true",
+          selective_host_offload="true",
+          selective_host_offload_optimizer_mode="lazy_sparse",
+      )
+      with self.assertRaisesRegex(ValueError, "incompatible with dense pinned_host gradients"):
+        m3_offload.make_optimizer(model, optax.adamw(1e-3), cfg_ls, dense_host_grads=True)
+
+      opt_ls = m3_offload.make_optimizer(model, optax.adamw(1e-3), cfg_ls)
+      dense_grads = jax.tree.map(
+          lambda v: (
+              v.replace(
+                  m3_offload.to_memory(jnp.zeros_like(v.get_raw_value()), "pinned_host")
+                  if m3_offload._is_host_leaf(v)  # pylint: disable=protected-access
+                  else jnp.zeros_like(v.get_raw_value())
+              )
+              if isinstance(v, nnx.Variable)
+              else jnp.zeros_like(v)
+          ),
+          nnx.state(model, nnx.Param),
+          is_leaf=lambda x: isinstance(x, nnx.Variable),
+      )
+      with self.assertRaisesRegex(ValueError, "requires SparseHostGrad"):
+        opt_ls.update(model, dense_grads)
+
+    # 4. AbstractMaxTextEngine fails closed at construction time for lazy_sparse (when tunix is installed).
+    if importlib.util.find_spec("tunix") is not None:
+      from maxtext.training_engine import maxtext_engine_compile  # pylint: disable=import-outside-toplevel
+
+      cfg_eng_ls = _qwen38_mini_config(
+          out_dir,
+          compile_topology="tpu7x-8",
+          compile_topology_num_slices="1",
+          ici_fsdp_parallelism="4",
+          ici_expert_parallelism="2",
+          scan_layers="true",
+          selective_host_offload="true",
+          selective_host_offload_optimizer_mode="lazy_sparse",
+      )
+      tpu_mesh = train_compile.get_topology_mesh(cfg_eng_ls)
+      with self.assertRaisesRegex(ValueError, "incompatible with dense pinned_host gradients"):
+        maxtext_engine_compile.AbstractMaxTextEngine(cfg_eng_ls, tpu_mesh)
+
+  def test_sharded_2d_embed_gather_sqnorm_clip_and_optimizer_modes(self):
+    """Tests 2-axis row-sharded P(('fsdp', 'ep'), None) table with non-divisible n_local and duplicate IDs."""
+    devices = np.array(jax.devices())
+    if len(devices) >= 4:
+      mesh = Mesh(devices[:4].reshape(2, 2), ("fsdp", "ep"))
+      row_spec = ("fsdp", "ep")
+      n_local = 37  # Odd & non-divisible by num_chunks=5 (mirrors 320,001,920 / 128 = 2,500,015).
+      vocab_size = n_local * 4
+    else:
+      mesh = Mesh(devices.reshape(-1, 1), ("fsdp", "ep"))
+      row_spec = ("fsdp",)
+      n_local = 37
+      vocab_size = n_local * len(devices)
+    width = 16
+
+    class _ToyEmbedModel(nnx.Module):
+      """Minimal embedding + linear test module."""
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.ple_embedding = nnx.Embed(
+            num_embeddings=vocab_size,
+            features=width,
+            dtype=jnp.float32,
+            param_dtype=jnp.float32,
+            embedding_init=nnx.initializers.normal(0.1),
+            rngs=rngs,
+        )
+        self.proj = nnx.Linear(width, width, use_bias=False, dtype=jnp.float32, param_dtype=jnp.float32, rngs=rngs)
+
+      def __call__(self, inputs: jax.Array) -> jax.Array:
+        return self.proj(self.ple_embedding(inputs))
+
+    class _ToyCfg:
+      parameter_memory_host_offload = False
+      optimizer_memory_host_offload = False
+      selective_host_offload = True
+      host_offload_param_patterns = ("(?:^|/)ple_embedding/embedding$",)
+      selective_host_offload_optimizer_mode = "host_compute"
+      selective_host_offload_num_chunks = 5
+
+    def _build(selective: bool, opt_mode: str = "host_compute"):
+      model = _ToyEmbedModel(nnx.Rngs(0))
+      sh_tbl = NamedSharding(mesh, P(row_spec, None))
+      model.ple_embedding.embedding.set_metadata("out_sharding", P(row_spec, None))
+      model.ple_embedding.embedding.set_raw_value(jax.device_put(model.ple_embedding.embedding.get_raw_value(), sh_tbl))
+      model.proj.kernel.set_raw_value(
+          jax.device_put(model.proj.kernel.get_raw_value(), NamedSharding(mesh, P(None, None)))
+      )
+
+      base_tx = optax.adamw(learning_rate=1e-2, weight_decay=0.1)
+      if not selective:
+        tx = optax.chain(optax.clip_by_global_norm(0.5), base_tx)
+        return model, nnx.Optimizer(model, tx, wrt=nnx.Param)
+      cfg = _ToyCfg()
+      cfg.selective_host_offload_optimizer_mode = opt_mode
+      model = m3_offload.maybe_offload_parameters(model, cfg)
+      opt = m3_offload.make_optimizer(model, base_tx, cfg, clip_max_norm=0.5)
+      return model, opt
+
+    def _loss(m, batch):
+      return jnp.mean(m(batch["inputs"]) ** 2)
+
+    @nnx.jit(donate_argnums=(0, 1))
+    def _step(m, opt, batch):
+      if m3_offload.has_selective_host_offload(m):
+        loss, grads = m3_offload.value_and_grad(_loss, m, batch)
+      else:
+        loss, grads = nnx.value_and_grad(_loss)(m, batch)
+      opt.update(m, grads)
+      return loss
+
+    with jax.set_mesh(mesh):
+      m_ref, opt_ref = _build(False)
+      m_hc, opt_hc = _build(True, "host_compute")
+      m_sc, opt_sc = _build(True, "streamed_chunks")
+      m_ls, opt_ls = _build(True, "lazy_sparse")
+
+      # Construct batches with explicit duplicate row IDs across shards and untouched rows.
+      batches = []
+      for s in range(3):
+        raw_ids = jax.random.randint(jax.random.key(50 + s), (4, 8), 0, vocab_size, dtype=jnp.int32)
+        # Force duplicate hits on row 3 and row n_local + 2 across shards.
+        raw_ids = raw_ids.at[:, :2].set(jnp.array([3, min(n_local + 2, vocab_size - 1)], dtype=jnp.int32))
+        batches.append({"inputs": jax.device_put(raw_ids, NamedSharding(mesh, P(None, None)))})
+
+      # Step-0 exact gradient and global-norm parity (including duplicate-ID accumulation).
+      l_ref0, g_ref0 = nnx.value_and_grad(_loss)(m_ref, batches[0])
+      l_hc0, g_hc0 = m3_offload.value_and_grad(_loss, m_hc, batches[0])
+      np.testing.assert_allclose(float(l_hc0), float(l_ref0), rtol=1e-6, atol=1e-6)
+      norm_ref = float(m3_offload.l2norm_pytree(g_ref0))
+      norm_hc = float(m3_offload.l2norm_pytree(g_hc0))
+      np.testing.assert_allclose(norm_hc, norm_ref, rtol=1e-5, atol=1e-6)
+
+      # Run 3 optimizer steps across all modes.
+      losses_ref, losses_hc, losses_sc, losses_ls = [], [], [], []
+      for b in batches:
+        losses_ref.append(float(_step(m_ref, opt_ref, b)))
+        losses_hc.append(float(_step(m_hc, opt_hc, b)))
+        losses_sc.append(float(_step(m_sc, opt_sc, b)))
+        losses_ls.append(float(_step(m_ls, opt_ls, b)))
+
+      np.testing.assert_allclose(losses_hc, losses_ref, rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(losses_sc, losses_ref, rtol=1e-5, atol=1e-5)
+      p_ref = _param_numpy_map(m_ref)
+      p_hc = _param_numpy_map(m_hc)
+      p_sc = _param_numpy_map(m_sc)
+      p_ls = _param_numpy_map(m_ls)
+      for path in p_ref:
+        np.testing.assert_allclose(p_hc[path], p_ref[path], rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(p_sc[path], p_ref[path], rtol=1e-5, atol=1e-5)
+
+      # Verify opt-in lazy_sparse intentionally skips weight decay on untouched rows (documenting deviation).
+      emb_path = ("ple_embedding", "embedding")
+      touched = set(int(x) for b in batches for x in np.asarray(b["inputs"]).reshape(-1))
+      untouched = [i for i in range(vocab_size) if i not in touched]
+      self.assertNotEmpty(untouched)
+      # Dense AdamW decayed untouched rows; lazy_sparse left them untouched, so they must diverge.
+      untouched_diff = float(np.max(np.abs(p_ls[emb_path][untouched] - p_ref[emb_path][untouched])))
+      self.assertGreater(untouched_diff, 1e-4)
+
+      # Negative controls executing real m3_offload: bypassing step-1 AdamW bias correction (pre-advancing
+      # ScaleByAdamState count so 1 - beta^t ~ 1) or perturbing SparseHostGrad.d_gathered before opt.update
+      # breaks step-1 parity against the dense reference far above tolerance.
+      m_ref1, opt_ref1 = _build(False)
+      _step(m_ref1, opt_ref1, batches[0])
+      p_ref1 = _param_numpy_map(m_ref1)
+
+      m_nobc, opt_nobc = _build(True, "host_compute")
+      found_count = False
+      for leaf in jax.tree.leaves(opt_nobc.opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)):
+        if isinstance(leaf, nnx.Variable):
+          val = leaf.get_raw_value()
+          if jnp.issubdtype(val.dtype, jnp.integer) and val.ndim == 0:
+            leaf.set_raw_value(jax.device_put(jnp.asarray(100_000, dtype=val.dtype), val.sharding))
+            found_count = True
+      self.assertTrue(found_count)
+      _step(m_nobc, opt_nobc, batches[0])
+      self.assertFalse(np.allclose(_param_numpy_map(m_nobc)[emb_path], p_ref1[emb_path], rtol=1e-5, atol=1e-5))
+
+      m_pert, opt_pert = _build(True, "host_compute")
+      _, g_pert = m3_offload.value_and_grad(_loss, m_pert, batches[0])
+      sparse_hits = 0
+
+      def _perturb_sparse(x):
+        nonlocal sparse_hits
+        if isinstance(x, m3_offload.SparseHostGrad):
+          sparse_hits += 1
+          return x.with_d_gathered(x.d_gathered + jnp.asarray(0.1, dtype=x.d_gathered.dtype))
+        return x
+
+      g_pert = jax.tree.map(_perturb_sparse, g_pert, is_leaf=lambda x: isinstance(x, m3_offload.SparseHostGrad))
+      self.assertGreater(sparse_hits, 0)
+      opt_pert.update(m_pert, g_pert)
+      self.assertFalse(np.allclose(_param_numpy_map(m_pert)[emb_path], p_ref1[emb_path], rtol=1e-5, atol=1e-5))
+
+    # Verify row-sharded `streamed_chunks` also isolates inside `jax.shard_map` when called OUTSIDE
+    # `with jax.set_mesh(mesh):` (emitting 0 MegaScale collectives and matching captured param sqnorm).
+    if len(devices) >= 2:
+      with jax.set_mesh(mesh):
+        m_ref_no_ctx, opt_ref_no_ctx = _build(False)
+        m_sc_no_ctx, opt_sc_no_ctx = _build(True, "streamed_chunks")
+
+      @nnx.jit(donate_argnums=(0, 1))
+      def _step_capture(m, opt, batch):
+        if m3_offload.has_selective_host_offload(m):
+          loss, grads = m3_offload.value_and_grad(_loss, m, batch)
+          with m3_offload.capture_host_param_sqnorms() as sq_map:
+            opt.update(m, grads)
+          pnorm = m3_offload.l2norm_pytree_with_overrides(nnx.state(m, nnx.Param), sq_map)
+        else:
+          loss, grads = nnx.value_and_grad(_loss)(m, batch)
+          opt.update(m, grads)
+          pnorm = m3_offload.l2norm_pytree(nnx.state(m, nnx.Param))
+        return loss, pnorm
+
+      self.assertTrue(jax.sharding.get_abstract_mesh().empty)
+      compiled_no_ctx = _step_capture.lower(m_sc_no_ctx, opt_sc_no_ctx, batches[0]).compile()
+      self.assertNotIn("MegaScaleCollective", compiled_no_ctx.as_text())
+      for b in batches:
+        l_r, pn_r = _step_capture(m_ref_no_ctx, opt_ref_no_ctx, b)
+        l_s, pn_s = _step_capture(m_sc_no_ctx, opt_sc_no_ctx, b)
+        np.testing.assert_allclose(float(l_s), float(l_r), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(float(pn_s), float(pn_r), rtol=1e-5, atol=1e-5)
+      p_r_map = _param_numpy_map(m_ref_no_ctx)
+      p_s_map = _param_numpy_map(m_sc_no_ctx)
+      for path in p_r_map:
+        np.testing.assert_allclose(p_s_map[path], p_r_map[path], rtol=1e-5, atol=1e-5)
+
+  @parameterized.named_parameters(
+      ("scanned", True),
+      ("unscanned", False),
+  )
+  def test_qwen38_mini_eval_shape_and_step0_grad_parity(self, scan_layers: bool):
+    """Verifies `eval_shape` `pinned_host` placement and step-0 loss/gradient parity."""
+    out_dir = self.create_tempdir().full_path
+    cfg_off = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        scan_layers=str(scan_layers).lower(),
+        selective_host_offload="false",
+    )
+    cfg_on = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        scan_layers=str(scan_layers).lower(),
+        selective_host_offload="true",
+    )
+    mesh = mesh_from_config(cfg_off)
+    sharding = sharding_from_config(cfg_off)
+
+    with jax.set_mesh(mesh):
+      abs_model, abs_opt = nnx.eval_shape(lambda: loop.setup_model(cfg_on, mesh, sharding))
+      abs_ple_paths = m3_offload.selected_host_param_paths(abs_model)
+      self.assertEqual(len(abs_ple_paths), 1)
+      for path, var in nnx.to_flat_state(nnx.state(abs_model, nnx.Param)):
+        mk = var.get_raw_value().sharding.memory_kind
+        if tuple(path) in abs_ple_paths:
+          self.assertEqual(mk, "pinned_host")
+        else:
+          self.assertIn(mk, (None, "device"))
+      abs_host_opt = 0
+      abs_dev_opt = 0
+      for path, leaf in jax.tree_util.tree_leaves_with_path(
+          abs_opt.opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
+      ):
+        raw = leaf.get_raw_value()
+        if not hasattr(raw, "ndim") or raw.ndim == 0:
+          continue
+        key_t = tuple(m3_offload._key_value(k) for k in path)  # pylint: disable=protected-access
+        is_sel = m3_offload._is_matching_opt_leaf(key_t, abs_ple_paths) is not None  # pylint: disable=protected-access
+        if is_sel:
+          self.assertEqual(raw.sharding.memory_kind, "pinned_host")
+        else:
+          self.assertIn(raw.sharding.memory_kind, (None, "device"))
+        abs_host_opt += int(is_sel)
+        abs_dev_opt += int(not is_sel)
+      self.assertEqual(abs_host_opt, 2)
+      self.assertGreater(abs_dev_opt, 10)
+
+      m_off, _ = loop.setup_model(cfg_off, mesh, sharding)
+      m_on, _ = loop.setup_model(cfg_on, mesh, sharding)
+      self.assertEqual(_param_paths(m_on), _param_paths(m_off))
+
+      batch0 = loop.make_synthetic_batch(cfg_off, mesh, sharding, jax.random.key(0))
+      l0_off, g0_off = nnx.jit(nnx.value_and_grad(loop.loss_fn))(m_off, batch0)
+      l0_on, g0_on = nnx.jit(lambda m, b: m3_offload.value_and_grad(loop.loss_fn, m, b))(m_on, batch0)
+      np.testing.assert_allclose(float(l0_on), float(l0_off), rtol=1e-6, atol=1e-6)
+      g_off_map = {tuple(p): v.get_raw_value() for p, v in nnx.to_flat_state(g0_off)}
+      g_on_map = {
+          tuple(p): (v.get_raw_value() if isinstance(v, nnx.Variable) else v) for p, v in nnx.to_flat_state(g0_on)
+      }
+      for path, go in g_off_map.items():
+        gn = g_on_map[path]
+        if isinstance(gn, m3_offload.SparseHostGrad):
+          gn = m3_offload.materialize_sparse_grad(gn)
+        np.testing.assert_allclose(np.asarray(gn), np.asarray(go), rtol=1e-5, atol=1e-5)
+
+  @parameterized.named_parameters(
+      ("scanned", True),
+      ("unscanned", False),
+  )
+  def test_qwen38_mini_loop_parity_and_memory_kind(self, scan_layers: bool):
+    """Verifies 3-step `loop.train_step` trajectory parity, post-step `pinned_host` invariants, and PLE perturbation."""
+    out_dir = self.create_tempdir().full_path
+    cfg_off = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        scan_layers=str(scan_layers).lower(),
+        selective_host_offload="false",
+    )
+    cfg_on = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        scan_layers=str(scan_layers).lower(),
+        selective_host_offload="true",
+    )
+    mesh = mesh_from_config(cfg_off)
+    sharding = sharding_from_config(cfg_off)
+
+    with jax.set_mesh(mesh):
+      m_off, opt_off = loop.setup_model(cfg_off, mesh, sharding)
+      m_on, opt_on = loop.setup_model(cfg_on, mesh, sharding)
+      self.assertEqual(_param_paths(m_on), _param_paths(m_off))
+      batch0 = loop.make_synthetic_batch(cfg_off, mesh, sharding, jax.random.key(0))
+
+      # 3-step exact AdamW trajectory parity (step-0 elementwise <= 1e-6; 3-step Frobenius <= 1e-5).
+      losses_off, losses_on = [], []
+      for step in range(3):
+        batch = loop.make_synthetic_batch(cfg_off, mesh, sharding, jax.random.key(10 + step))
+        losses_off.append(float(loop.train_step(m_off, opt_off, batch)))
+        losses_on.append(float(loop.train_step(m_on, opt_on, batch)))
+        if step == 0:
+          p_off0 = _param_numpy_map(m_off)
+          p_on0 = _param_numpy_map(m_on)
+          for path in p_off0:
+            np.testing.assert_allclose(p_on0[path], p_off0[path], rtol=1e-6, atol=1e-6)
+      np.testing.assert_allclose(losses_on, losses_off, rtol=1e-5, atol=1e-5)
+      p_off = _param_numpy_map(m_off)
+      p_on = _param_numpy_map(m_on)
+      for path in p_off:
+        # Damp denominator at 1.0 for zero-centered `1+scale` norms (`||scale||_2 ~ 0.01`, max_d < 1e-6).
+        rel_frob = float(np.linalg.norm(p_on[path] - p_off[path]) / max(float(np.linalg.norm(p_off[path])), 1.0))
+        self.assertLess(rel_frob, 1e-5, f"Frobenius drift too large on {path}: {rel_frob:.2e}")
+        np.testing.assert_allclose(p_on[path], p_off[path], rtol=1e-4, atol=1e-4)
+
+      # Post-step memory_kind invariants: ONLY PLE weight + its mu/nu remain in pinned_host.
+      ple_paths = m3_offload.selected_host_param_paths(m_on)
+      for path, var in nnx.to_flat_state(nnx.state(m_on, nnx.Param)):
+        mk = var.get_raw_value().sharding.memory_kind
+        if tuple(path) in ple_paths:
+          self.assertEqual(mk, "pinned_host")
+        else:
+          self.assertIn(mk, (None, "device"))
+      post_host_opt = 0
+      for path, leaf in jax.tree_util.tree_leaves_with_path(
+          opt_on.opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
+      ):
+        raw = leaf.get_raw_value()
+        if not hasattr(raw, "ndim") or raw.ndim == 0:
+          continue
+        key_t = tuple(m3_offload._key_value(k) for k in path)  # pylint: disable=protected-access
+        is_sel = m3_offload._is_matching_opt_leaf(key_t, ple_paths) is not None  # pylint: disable=protected-access
+        if is_sel:
+          self.assertEqual(raw.sharding.memory_kind, "pinned_host")
+          post_host_opt += 1
+        else:
+          self.assertIn(raw.sharding.memory_kind, (None, "device"))
+      self.assertEqual(post_host_opt, 2)
+
+      # Negative control: perturbing the offloaded PLE table must break loss parity.
+      ple_path = next(iter(ple_paths))
+      ple_var = dict(nnx.to_flat_state(nnx.state(m_on, nnx.Param)))[ple_path]
+      ple_var.set_raw_value(m3_offload.to_memory(ple_var.get_raw_value() + 1.0, "pinned_host"))
+      jit_loss = nnx.jit(loop.loss_fn)
+      perturbed_loss = float(jit_loss(m_on, batch0))
+      ref_loss = float(jit_loss(m_off, batch0))
+      self.assertGreater(abs(perturbed_loss - ref_loss), 1e-3)
+
+  def test_default_off_hlo_byte_identical(self):
+    """Verifies Qwen3.8 default-off (`selective_host_offload=False`) emits byte-identical HLO."""
+    out_dir = self.create_tempdir().full_path
+    cfg_default = _qwen38_mini_config(out_dir, max_target_length="8", scan_layers="true", selective_host_offload="false")
+    cfg_empty_pat = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        scan_layers="true",
+        selective_host_offload="false",
+        host_offload_param_patterns="[]",
+    )
+    self.assertNotEmpty(cfg_default.host_offload_param_patterns)
+    mesh = mesh_from_config(cfg_default)
+    sharding = sharding_from_config(cfg_default)
+
+    cfg_selective_on = _qwen38_mini_config(
+        out_dir, max_target_length="8", scan_layers="true", selective_host_offload="true"
+    )
+
+    def _compile_hlo(cfg):
+      with jax.set_mesh(mesh):
+        m, opt = loop.setup_model(cfg, mesh, sharding)
+        batch = loop.make_synthetic_batch(cfg, mesh, sharding, jax.random.key(0))
+        return _normalize_hlo(loop.train_step.lower(m, opt, batch).compile().as_text())
+
+    hlo_default = _compile_hlo(cfg_default)
+    self.assertEqual(hlo_default, _compile_hlo(cfg_empty_pat))
+    self.assertNotEqual(hlo_default, _compile_hlo(cfg_selective_on))
+
+  def test_dual_drivers_and_transform_composition(self):
+    """Verifies selective offload loss, grad-norm, param-norm, and memory kinds in `train.py`."""
+    out_dir = self.create_tempdir().full_path
+
+    def _run_legacy(selective: bool):
+      cfg = _qwen38_mini_config(
+          out_dir,
+          max_target_length="8",
+          mtp_num_layers="0",
+          scan_layers="true",
+          dataset_type="synthetic",
+          selective_host_offload=str(selective).lower(),
+      )
+      mesh = mesh_from_config(cfg)
+      with jax.set_mesh(mesh):
+        (
+            _,
+            _,
+            state_mesh_shardings,
+            _,
+            mesh,
+            _,
+            data_iter,
+            _,
+            _,
+            _,
+            train_state,
+        ) = train_utils.setup_train_loop(cfg, None, mesh=mesh)
+        jit_model, state = nnx.split(train_state)
+        p_step, _ = train_utils.jit_train_and_eval_step(
+            cfg, jit_model, mesh, state, state_mesh_shardings, legacy_train.train_step
+        )
+        losses, gnorms, pnorms = [], [], []
+        for _ in range(2):
+          batch = next(data_iter)
+          state, metrics = p_step(state, batch)
+          losses.append(float(metrics["scalar"]["learning/loss"]))
+          gnorms.append(float(metrics["scalar"]["learning/grad_norm"]))
+          pnorms.append(float(metrics["scalar"]["learning/param_norm"]))
+      return state, losses, gnorms, pnorms
+
+    _, l_off, gn_off, pn_off = _run_legacy(False)
+    st_on, l_on, gn_on, pn_on = _run_legacy(True)
+    np.testing.assert_allclose(l_on, l_off, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(gn_on, gn_off, rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(pn_on, pn_off, rtol=1e-4, atol=1e-4)
+    host_m = [
+        x for x in jax.tree.leaves(st_on.model) if hasattr(x, "sharding") and x.sharding.memory_kind == "pinned_host"
+    ]
+    dev_m = [x for x in jax.tree.leaves(st_on.model) if hasattr(x, "sharding") and x.sharding.memory_kind == "device"]
+    host_o = [
+        x
+        for x in jax.tree.leaves(st_on.optimizer)
+        if hasattr(x, "sharding") and getattr(x, "ndim", 0) > 0 and x.sharding.memory_kind == "pinned_host"
+    ]
+    dev_o = [
+        x
+        for x in jax.tree.leaves(st_on.optimizer)
+        if hasattr(x, "sharding") and getattr(x, "ndim", 0) > 0 and x.sharding.memory_kind == "device"
+    ]
+    self.assertLen(host_m, 1)
+    self.assertGreater(len(dev_m), 10)
+    self.assertLen(host_o, 2)
+    self.assertGreater(len(dev_o), 10)
+
+  def test_transform_composition_scan_remat_qwix_and_selective_offload(self):
+    """Verifies `scan` + `remat=full` + Qwix `int8` quantization + selective host offload path equality."""
+    out_dir = self.create_tempdir().full_path
+    cfg_comp = _qwen38_mini_config(
+        out_dir,
+        scan_layers="true",
+        remat_policy="full",
+        quantization="int8",
+        use_qwix_quantization="true",
+        selective_host_offload="true",
+    )
+    cfg_comp_off = _qwen38_mini_config(
+        out_dir,
+        scan_layers="true",
+        remat_policy="full",
+        quantization="int8",
+        use_qwix_quantization="true",
+        selective_host_offload="false",
+    )
+    mesh = mesh_from_config(cfg_comp)
+    with jax.set_mesh(mesh):
+      m_comp_off = model_creation_utils.create_model(cfg_comp_off, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+      m_comp_on = model_creation_utils.create_model(cfg_comp, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+      self.assertEqual(_param_paths(m_comp_on), _param_paths(m_comp_off))
+      ple_paths = m3_offload.selected_host_param_paths(m_comp_on)
+      self.assertLen(ple_paths, 1)
+      toks = jnp.ones((cfg_comp.global_batch_size_to_train_on, 16), dtype=jnp.int32)
+      pos = jnp.broadcast_to(jnp.arange(16, dtype=jnp.int32), toks.shape)
+      self.assertGreater(m3_quant.quantized_matmuls(m_comp_on, jnp.int8, toks, pos), 0)
+
+  def test_dual_drivers_maxtext_training_engine_parity(self):
+    """Verifies selective offload 2-step loss parity in `MaxTextTrainingEngine`."""
+    import importlib.util  # pylint: disable=import-outside-toplevel
+
+    if importlib.util.find_spec("tunix") is None:
+      self.skipTest("tunix not installed in this environment")
+    from maxtext.training_engine import maxtext_engine  # pylint: disable=import-outside-toplevel
+
+    out_dir = self.create_tempdir().full_path
+    mesh = mesh_from_config(_qwen38_mini_config(out_dir, max_target_length="8", mtp_num_layers="0", scan_layers="true"))
+
+    def _run_engine(selective: bool):
+      cfg_e = _qwen38_mini_config(
+          out_dir,
+          max_target_length="8",
+          mtp_num_layers="0",
+          scan_layers="true",
+          selective_host_offload=str(selective).lower(),
+      )
+      eng = maxtext_engine.MaxTextTrainingEngine(cfg_e, mesh=mesh)
+      bs = cfg_e.global_batch_size_to_train_on
+      seq = cfg_e.max_target_length
+      losses = []
+      for step in range(2):
+        toks = jax.random.randint(jax.random.key(200 + step), (bs, seq), 0, cfg_e.vocab_size, dtype=jnp.int32)
+        pos = jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32), (bs, seq))
+        seg = jnp.ones((bs, seq), dtype=jnp.int32)
+        batch = {
+            "inputs": toks,
+            "targets": jnp.roll(toks, -1, axis=-1),
+            "inputs_position": pos,
+            "targets_position": pos,
+            "inputs_segmentation": seg,
+            "targets_segmentation": seg,
+        }
+        if step == 0:
+          eng.compile(batch)
+        eng.fwd_bwd(batch)
+        eng.update()
+        m = eng.get_metrics()
+        lk = next(iter(m.weighted_metrics))
+        losses.append(float(jnp.sum(m.weighted_metrics[lk].unreduced_sum) / jnp.sum(m.weighted_metrics[lk].denominator)))
+      jax.block_until_ready(eng._read_state_pure())  # pylint: disable=protected-access
+      return losses
+
+    np.testing.assert_allclose(_run_engine(True), _run_engine(False), rtol=1e-5, atol=1e-5)
+
+  def _compile_tpu7x_selective_ple(
+      self, out_dir: str, topo, *, selective: bool, opt_mode: str = "host_compute", row_shard_ple: bool = False
+  ):
+    """Compiles Qwen3.8 mini with a 100K PLE table on virtual `tpu7x-8` and returns memory analysis and HLO."""
+    cfg = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        mtp_num_layers="0",
+        compile_topology="tpu7x-8",
+        ici_fsdp_parallelism="4",
+        ici_expert_parallelism="2",
+        scan_layers="true",
+        remat_policy="full",
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        ngram_vocab_size_base="100000",
+        selective_host_offload=str(selective).lower(),
+        selective_host_offload_optimizer_mode=opt_mode,
+        selective_host_offload_num_chunks="8",
+    )
+    tpu_mesh = mesh_from_config(cfg, devices=topo.devices)
+    sharding = sharding_from_config(cfg)
+    with jax.set_mesh(tpu_mesh):
+      data_spec = sharding("tokens", ("batch", "length"), TensorType.ACTIVATION)
+      data_sharding = NamedSharding(tpu_mesh, data_spec)
+      batch_shape = (int(cfg.per_device_batch_size) * len(topo.devices), int(cfg.max_target_length))
+      batch = {
+          "inputs": jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=data_sharding),
+          "targets": jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=data_sharding),
+          "positions": jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=data_sharding),
+      }
+      abs_model, abs_opt = nnx.eval_shape(lambda: loop.setup_model(cfg, tpu_mesh))
+      if row_shard_ple:
+        ple_paths = m3_offload._match_param_paths(  # pylint: disable=protected-access
+            nnx.state(abs_model, nnx.Param), cfg.host_offload_param_patterns
+        )
+        self.assertLen(ple_paths, 1)
+        emb_var = dict(nnx.to_flat_state(nnx.state(abs_model, nnx.Param)))[next(iter(ple_paths))]
+        emb_sds = emb_var.get_raw_value()
+        emb_kind = emb_sds.sharding.memory_kind
+        emb_var.set_metadata("out_sharding", P("fsdp", None))
+        emb_var.set_raw_value(
+            jax.ShapeDtypeStruct(
+                emb_sds.shape,
+                emb_sds.dtype,
+                sharding=NamedSharding(tpu_mesh, P("fsdp", None), memory_kind=emb_kind),
+            )
+        )
+        for leaf in jax.tree.leaves(abs_opt.opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)):
+          if isinstance(leaf, nnx.Variable):
+            raw = leaf.get_raw_value()
+            if hasattr(raw, "shape") and raw.shape == emb_sds.shape:
+              leaf.set_raw_value(
+                  jax.ShapeDtypeStruct(
+                      raw.shape,
+                      raw.dtype,
+                      sharding=NamedSharding(tpu_mesh, P("fsdp", None), memory_kind=raw.sharding.memory_kind),
+                  )
+              )
+      compiled = loop.train_step.lower(abs_model, abs_opt, batch).compile()
+    rows = memory_report.memory_report({"update": compiled}, {})
+    return compiled.memory_analysis(), rows[0], compiled.as_text() or ""
+
+  @parameterized.named_parameters(
+      ("host_compute", "host_compute"),
+      ("streamed_chunks", "streamed_chunks"),
+  )
+  def test_tpu7x_aot_selective_ple_offload_reduces_hbm_without_dense_grad(self, opt_mode: str):
+    """Compiles unsharded Qwen3.8 mini PLE offload on virtual `tpu7x-8` and checks HBM drop."""
+    os.environ.setdefault("ALLOW_MULTIPLE_LIBTPU_LOAD", "1")
+    out_dir = self.create_tempdir().full_path
+    topo = _get_tpu7x8_topology()
+
+    cache = type(self)._tpu7x_ple_unsharded_off_cache  # pylint: disable=protected-access
+    if "off" not in cache:
+      mem_off, row_off, _ = self._compile_tpu7x_selective_ple(out_dir, topo, selective=False)
+      cache["off"] = (int(mem_off.host_argument_size_in_bytes), int(row_off.argument), int(row_off.device_total))
+    off_host_arg_bytes, off_arg, off_dev_total = cache["off"]
+
+    _, row_sel, hlo_sel = self._compile_tpu7x_selective_ple(
+        out_dir, topo, selective=True, opt_mode=opt_mode, row_shard_ple=False
+    )
+    self.assertEqual(off_host_arg_bytes, 0)
+    self.assertNotIn("MegaScaleCollective", hlo_sel)
+    arg_drop = off_arg - row_sel.argument
+    self.assertGreater(arg_drop, 140 * 1024 * 1024)
+    self.assertEqual(row_sel.host_argument, arg_drop)
+    self.assertEqual(row_sel.host_alias, row_sel.host_argument)
+    self.assertLess(row_sel.device_total, off_dev_total - 100 * 1024 * 1024)
+    if opt_mode == "host_compute":
+      self.assertLessEqual(row_sel.host_temp, row_sel.host_argument)
+    else:
+      jax_ver = tuple(int(part) for part in jax.__version__.split(".")[:2] if part.isdigit())
+      if jax_ver >= (0, 12):
+        self.assertEqual(row_sel.host_temp, 0)
+      else:
+        self.assertLessEqual(row_sel.host_temp, 2 * row_sel.host_argument + 1024 * 1024)
+
+  def test_tpu7x_aot_row_sharded_selective_ple_streamed_chunks(self):
+    """Verifies row-sharded (`P('fsdp', None)`) `streamed_chunks` emits 0 MegaScale ops and cuts HBM."""
+    os.environ.setdefault("ALLOW_MULTIPLE_LIBTPU_LOAD", "1")
+    out_dir = self.create_tempdir().full_path
+    topo = _get_tpu7x8_topology()
+
+    _, row_off_sharded, _ = self._compile_tpu7x_selective_ple(out_dir, topo, selective=False, row_shard_ple=True)
+    _, row_sc_sharded, hlo_sc_sharded = self._compile_tpu7x_selective_ple(
+        out_dir, topo, selective=True, opt_mode="streamed_chunks", row_shard_ple=True
+    )
+
+    self.assertNotIn("MegaScaleCollective", hlo_sc_sharded)
+    sharded_arg_drop = row_off_sharded.argument - row_sc_sharded.argument
+    self.assertGreater(sharded_arg_drop, 35 * 1024 * 1024)
+    self.assertEqual(row_sc_sharded.host_argument, sharded_arg_drop)
+    self.assertEqual(row_sc_sharded.host_alias, row_sc_sharded.host_argument)
+    self.assertLess(row_sc_sharded.device_total, row_off_sharded.device_total)
+    jax_ver = tuple(int(part) for part in jax.__version__.split(".")[:2] if part.isdigit())
+    if jax_ver >= (0, 12):
+      self.assertEqual(row_sc_sharded.host_temp, 0)
+      self.assertLess(row_sc_sharded.device_total, row_off_sharded.device_total - 80 * 1024 * 1024)
+    else:
+      self.assertLessEqual(row_sc_sharded.host_temp, 2 * row_sc_sharded.host_argument + 1024 * 1024)
+      self.assertLess(row_sc_sharded.host_temp, 90 * 1024 * 1024)
+
+  @parameterized.named_parameters(
+      ("host_compute", "host_compute"),
+      ("streamed_chunks", "streamed_chunks"),
+  )
+  def test_tpu7x_aot_engine_selective_ple_offload_reduces_hbm_zero_megascale(self, opt_mode: str):
+    """Verifies `AbstractMaxTextEngine` AOT PLE offload emits 0 MegaScale collectives and cuts device peak."""
+    import importlib.util  # pylint: disable=import-outside-toplevel
+
+    if importlib.util.find_spec("tunix") is None:
+      self.skipTest("tunix not installed in this environment")
+    from maxtext.training_engine import maxtext_engine_compile  # pylint: disable=import-outside-toplevel
+
+    os.environ.setdefault("ALLOW_MULTIPLE_LIBTPU_LOAD", "1")
+    out_dir = self.create_tempdir().full_path
+
+    def _compile_engine(selective: bool, mode: str = "host_compute"):
+      cfg = _qwen38_mini_config(
+          out_dir,
+          max_target_length="8",
+          mtp_num_layers="0",
+          compile_topology="tpu7x-8",
+          compile_topology_num_slices="1",
+          ici_fsdp_parallelism="4",
+          ici_expert_parallelism="2",
+          scan_layers="true",
+          remat_policy="full",
+          dtype="bfloat16",
+          weight_dtype="bfloat16",
+          ngram_vocab_size_base="100000",
+          selective_host_offload=str(selective).lower(),
+          selective_host_offload_optimizer_mode=mode,
+          selective_host_offload_num_chunks="8",
+      )
+      tpu_mesh = train_compile.get_topology_mesh(cfg)
+      eng = maxtext_engine_compile.AbstractMaxTextEngine(cfg, tpu_mesh)
+      compiled = eng.compile_kernels(maxtext_engine_compile.get_shaped_micro_batch(cfg))
+      rows = memory_report.memory_report(compiled, eng.train_state_avals())
+      peak = memory_report.device_peak(rows)
+      ms_count = sum((c.as_text() or "").count("MegaScaleCollective") for c in compiled.values())
+      return peak, ms_count
+
+    cache = type(self)._tpu7x_engine_ple_off_cache  # pylint: disable=protected-access
+    if "off" not in cache:
+      peak_off, ms_off = _compile_engine(False)
+      cache["off"] = (int(peak_off.device_total), int(ms_off))
+    off_dev_total, ms_off = cache["off"]
+
+    peak_sel, ms_sel = _compile_engine(True, opt_mode)
+    self.assertEqual(ms_off, 0)
+    self.assertEqual(ms_sel, 0)
+    self.assertLess(peak_sel.device_total, off_dev_total - 100 * 1024 * 1024)
+
+  def test_explicit_sharding_and_engine_zero1(self):
+    """Verifies tied `qwen3-0.6b` under `shard_mode='explicit'` in `loop.py` and fail-closed `lazy_sparse`."""
+    out_dir = self.create_tempdir().full_path
+    dp = str(len(jax.devices()))
+
+    cfg_tied_ref = _tiny_m3_config(
+        out_dir,
+        per_device_batch_size="1",
+        max_target_length="8",
+        shard_mode="explicit",
+        ici_data_parallelism=dp,
+        ici_fsdp_parallelism="1",
+        ici_tensor_parallelism="1",
+        selective_host_offload="false",
+    )
+    mesh = mesh_from_config(cfg_tied_ref)
+    sharding = sharding_from_config(cfg_tied_ref)
+    with jax.set_mesh(mesh):
+      m_ref, opt_ref = loop.setup_model(cfg_tied_ref, mesh, sharding)
+      batch_tied = loop.make_synthetic_batch(cfg_tied_ref, mesh, sharding, jax.random.key(0))
+      loss_tied_ref = float(loop.train_step(m_ref, opt_ref, batch_tied))
+
+    for mode in ("host_compute", "streamed_chunks"):
+      cfg_tied = _tiny_m3_config(
+          out_dir,
+          per_device_batch_size="1",
+          max_target_length="8",
+          shard_mode="explicit",
+          ici_data_parallelism=dp,
+          ici_fsdp_parallelism="1",
+          ici_tensor_parallelism="1",
+          selective_host_offload="true",
+          host_offload_param_patterns="['^token_embedder/embedding$']",
+          selective_host_offload_optimizer_mode=mode,
+      )
+      with jax.set_mesh(mesh):
+        m_t, opt_t = loop.setup_model(cfg_tied, mesh, sharding)
+        loss_t = float(loop.train_step(m_t, opt_t, batch_tied))
+      np.testing.assert_allclose(loss_t, loss_tied_ref, rtol=1e-5, atol=1e-5, err_msg=f"tied explicit {mode}")
+
+    cfg_tied_ls = _tiny_m3_config(
+        out_dir,
+        per_device_batch_size="1",
+        max_target_length="8",
+        shard_mode="explicit",
+        ici_data_parallelism=dp,
+        ici_fsdp_parallelism="1",
+        ici_tensor_parallelism="1",
+        selective_host_offload="true",
+        host_offload_param_patterns="['^token_embedder/embedding$']",
+        selective_host_offload_optimizer_mode="lazy_sparse",
+    )
+    with self.assertRaisesRegex(ValueError, "SparseHostGrad"):
+      with jax.set_mesh(mesh):
+        m_ls, opt_ls = loop.setup_model(cfg_tied_ls, mesh, sharding)
+        loop.train_step(m_ls, opt_ls, batch_tied)
+
+  def test_explicit_sharding_untied_size1_axes_all_modes_parity(self):
+    """Verifies untied `HostOffloadedEmbed` on a size-1-axis `AxisType.Explicit` mesh across all 3 modes."""
+    devs = np.array(jax.devices())
+    exp_mesh = Mesh(
+        devs.reshape((len(devs), 1, 1)),
+        ("data", "fsdp", "tensor"),
+        axis_types=(jax.sharding.AxisType.Explicit,) * 3,
+    )
+
+    class _UntiedExpModel(nnx.Module):
+      """Minimal untied embedding + linear head with explicit size-1 axis metadata."""
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.emb = nnx.Embed(
+            num_embeddings=64,
+            features=16,
+            dtype=jnp.float32,
+            param_dtype=jnp.float32,
+            embedding_metadata={"out_sharding": P("tensor", "fsdp")},
+            rngs=rngs,
+        )
+        self.w = nnx.Param(
+            jax.random.normal(rngs.params(), (16, 32), dtype=jnp.float32),
+            out_sharding=P("fsdp", "tensor"),
+        )
+
+      def __call__(self, toks: jax.Array) -> jax.Array:
+        if isinstance(self.emb, m3_offload.HostOffloadedEmbed):
+          x = self.emb(toks)
+        else:
+          x = self.emb.embedding[...].at[toks].get(out_sharding=P("data", None, "fsdp"))
+        return jnp.einsum("bsd,do->bso", x, self.w[...], out_sharding=P("data", None, "tensor"))
+
+    class _UntiedCfg:
+      """Minimal selective offload config for `_UntiedExpModel`."""
+
+      parameter_memory_host_offload = False
+      optimizer_memory_host_offload = False
+      selective_host_offload = True
+      host_offload_param_patterns = ("^emb/embedding$",)
+      selective_host_offload_optimizer_mode = "host_compute"
+      selective_host_offload_num_chunks = 4
+
+    def _u_loss(mod, b):
+      return jnp.mean(mod(b["inputs"]) ** 2)
+
+    with jax.set_mesh(exp_mesh):
+      b_exp = {
+          "inputs": jax.device_put(
+              jax.random.randint(jax.random.key(5), (len(devs), 8), 0, 64, dtype=jnp.int32),
+              NamedSharding(exp_mesh, P("data", None)),
+          )
+      }
+      m_uref = _UntiedExpModel(nnx.Rngs(0))
+      opt_uref = nnx.Optimizer(m_uref, optax.chain(optax.clip_by_global_norm(1.0), optax.adamw(1e-2)), wrt=nnx.Param)
+
+      @nnx.jit
+      def _u_ref_step(mod, opt_inst, batch_in):
+        loss_val, grads_val = nnx.value_and_grad(_u_loss)(mod, batch_in)
+        opt_inst.update(mod, grads_val)
+        return loss_val
+
+      loss_uref0 = float(_u_ref_step(m_uref, opt_uref, b_exp))
+      loss_uref1 = float(_u_ref_step(m_uref, opt_uref, b_exp))
+
+      for mode in ("host_compute", "streamed_chunks", "lazy_sparse"):
+        ucfg = _UntiedCfg()
+        ucfg.selective_host_offload_optimizer_mode = mode
+        m_u = m3_offload.maybe_offload_parameters(_UntiedExpModel(nnx.Rngs(0)), ucfg)
+        opt_u = m3_offload.make_optimizer(m_u, optax.adamw(1e-2), ucfg, clip_max_norm=1.0)
+
+        @nnx.jit
+        def _u_step(mod, opt_inst, batch_in):
+          loss_val, grads_val = m3_offload.value_and_grad(_u_loss, mod, batch_in)
+          opt_inst.update(mod, grads_val)
+          return loss_val
+
+        loss_u0 = float(_u_step(m_u, opt_u, b_exp))
+        loss_u1 = float(_u_step(m_u, opt_u, b_exp))
+        np.testing.assert_allclose(loss_u0, loss_uref0, rtol=1e-5, atol=1e-5, err_msg=f"untied explicit s0 {mode}")
+        if mode != "lazy_sparse":
+          np.testing.assert_allclose(loss_u1, loss_uref1, rtol=1e-5, atol=1e-5, err_msg=f"untied explicit s1 {mode}")
+
+  @parameterized.named_parameters(("no_skip_nan", False), ("skip_nan", True))
+  def test_engine_explicit_sharding_zero1_selective_offload(self, skip_nan: bool):
+    """Verifies `MaxTextTrainingEngine` `shard_mode='explicit'` + ZeRO-1 loss parity under selective offload."""
+    import importlib.util  # pylint: disable=import-outside-toplevel
+
+    if importlib.util.find_spec("tunix") is None:
+      self.skipTest("tunix not installed in this environment")
+    from maxtext.training_engine import maxtext_engine  # pylint: disable=import-outside-toplevel
+
+    out_dir = self.create_tempdir().full_path
+    dp = str(len(jax.devices()))
+    cfg_base = _tiny_m3_config(
+        out_dir,
+        per_device_batch_size="1",
+        max_target_length="8",
+        shard_mode="explicit",
+        ici_data_parallelism=dp,
+        ici_fsdp_parallelism="1",
+        ici_tensor_parallelism="1",
+        selective_host_offload="false",
+    )
+    mesh = mesh_from_config(cfg_base)
+
+    def _run_zero1_engine(selective: bool):
+      cfg_e = _tiny_m3_config(
+          out_dir,
+          per_device_batch_size="1",
+          max_target_length="8",
+          shard_mode="explicit",
+          ici_data_parallelism=dp,
+          ici_fsdp_parallelism="1",
+          ici_tensor_parallelism="1",
+          shard_optimizer_over_data="true",
+          skip_step_on_nan=str(skip_nan).lower(),
+          selective_host_offload=str(selective).lower(),
+          host_offload_param_patterns="['^token_embedder/embedding$']" if selective else "[]",
+      )
+      eng = maxtext_engine.MaxTextTrainingEngine(cfg_e, mesh=mesh)
+      bs = cfg_e.global_batch_size_to_train_on
+      seq = cfg_e.max_target_length
+      data_sh = NamedSharding(mesh, P("data", None))
+      losses = []
+      for step in range(2):
+        toks = jax.device_put(
+            jax.random.randint(jax.random.key(10 + step), (bs, seq), 0, cfg_e.vocab_size, dtype=jnp.int32),
+            data_sh,
+        )
+        pos = jax.device_put(jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32), (bs, seq)), data_sh)
+        seg = jax.device_put(jnp.ones((bs, seq), dtype=jnp.int32), data_sh)
+        batch = {
+            "inputs": toks,
+            "targets": jnp.roll(toks, -1, axis=-1),
+            "inputs_position": pos,
+            "targets_position": pos,
+            "inputs_segmentation": seg,
+            "targets_segmentation": seg,
+        }
+        if step == 0:
+          eng.compile(batch)
+        eng.fwd_bwd(batch)
+        eng.update()
+        m_out = eng.get_metrics()
+        lk = next(iter(m_out.weighted_metrics))
+        losses.append(
+            float(jnp.sum(m_out.weighted_metrics[lk].unreduced_sum) / jnp.sum(m_out.weighted_metrics[lk].denominator))
+        )
+      return losses
+
+    np.testing.assert_allclose(_run_zero1_engine(True), _run_zero1_engine(False), rtol=1e-5, atol=1e-5)
+
+  def test_engine_eager_uncompiled_selective_offload_skips_device_staging(self):
+    """Verifies eager (uncompiled) `MaxTextTrainingEngine.update()` never stages selective host optimizer state."""
+    import importlib.util  # pylint: disable=import-outside-toplevel
+
+    if importlib.util.find_spec("tunix") is None:
+      self.skipTest("tunix not installed in this environment")
+    from maxtext.training_engine import maxtext_engine  # pylint: disable=import-outside-toplevel
+
+    out_dir = self.create_tempdir().full_path
+    cfg_eager = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        mtp_num_layers="0",
+        scan_layers="true",
+        selective_host_offload="true",
+        optimizer_memory_host_offload="true",
+    )
+    mesh_eager = mesh_from_config(cfg_eager)
+    eng_eager = maxtext_engine.MaxTextTrainingEngine(cfg_eager, mesh=mesh_eager)
+    bs_e = cfg_eager.global_batch_size_to_train_on
+    toks_e = jax.random.randint(jax.random.key(42), (bs_e, 8), 0, cfg_eager.vocab_size, dtype=jnp.int32)
+    pos_e = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (bs_e, 8))
+    seg_e = jnp.ones((bs_e, 8), dtype=jnp.int32)
+    batch_e = {
+        "inputs": toks_e,
+        "targets": jnp.roll(toks_e, -1, axis=-1),
+        "inputs_position": pos_e,
+        "targets_position": pos_e,
+        "inputs_segmentation": seg_e,
+        "targets_segmentation": seg_e,
+    }
+    with mock.patch.object(
+        eng_eager,
+        "_with_optimizer_on_device",
+        wraps=eng_eager._with_optimizer_on_device,  # pylint: disable=protected-access
+    ) as spy_on_dev:
+      eng_eager.fwd_bwd(batch_e)
+      eng_eager.update()
+      spy_on_dev.assert_not_called()
+
+  def test_tpu7x_engine_zero1_selective_offload_emits_zero_megascale_collectives(self):
+    """Verifies TrainerConfig/RLConfig validation and AbstractMaxTextEngine ZeRO-1 + selective_host_offload on tpu7x-8."""
+    import importlib.util  # pylint: disable=import-outside-toplevel
+    from maxtext.configs import types as cfg_types  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.configs.config import TrainerConfig  # pylint: disable=import-outside-toplevel
+
+    # Verify m3 TrainerConfig and RLConfig enforce selective_host_offload invariants before tunix skip check.
+    with self.assertRaisesRegex(ValueError, "cannot be combined with parameter_memory_host_offload"):
+      TrainerConfig(
+          selective_host_offload=True,
+          parameter_memory_host_offload=True,
+          host_offload_param_patterns=["(?:^|/)ple_embedding/ngram_embedding/embedding$"],
+      )
+    with self.assertRaisesRegex(ValueError, "requires non-empty host_offload_param_patterns"):
+      TrainerConfig(selective_host_offload=True)
+    with self.assertRaisesRegex(ValueError, "requires non-empty host_offload_param_patterns"):
+      pyconfig.initialize_pydantic(
+          [
+              "",
+              get_test_config_path("post_train/rl.yml"),
+              "selective_host_offload=true",
+              "host_offload_param_patterns=[]",
+          ],
+          config_class=cfg_types.RLConfig,
+          enable_checkpointing=False,
+          run_name="rl_selective_offload_test",
+      )
+
+    if importlib.util.find_spec("tunix") is None:
+      self.skipTest("tunix not installed in this environment")
+    from maxtext.training_engine import maxtext_engine_compile  # pylint: disable=import-outside-toplevel
+
+    os.environ.setdefault("ALLOW_MULTIPLE_LIBTPU_LOAD", "1")
+    out_dir = self.create_tempdir().full_path
+    cfg = _tiny_m3_config(
+        out_dir,
+        model_name="qwen3-0.6b",
+        compile_topology="tpu7x-8",
+        compile_topology_num_slices="1",
+        shard_mode="explicit",
+        ici_data_parallelism="4",
+        ici_fsdp_parallelism="1",
+        ici_tensor_parallelism="2",
+        shard_optimizer_over_data="true",
+        selective_host_offload="true",
+        host_offload_param_patterns="['^token_embedder/embedding$']",
+        per_device_batch_size="1",
+        max_target_length="32",
+    )
+    tpu_mesh = train_compile.get_topology_mesh(cfg)
+    eng = maxtext_engine_compile.AbstractMaxTextEngine(cfg, tpu_mesh)
+    compiled = eng.compile_kernels(maxtext_engine_compile.get_shaped_micro_batch(cfg))
+    self.assertNotEmpty(compiled)
+    for step_name, comp in compiled.items():
+      self.assertEqual((comp.as_text() or "").count("MegaScaleCollective"), 0, f"MegaScaleCollective in {step_name}")
+
+    def _uses_data(spec: P) -> bool:
+      return any(ax == "data" or (isinstance(ax, tuple) and "data" in ax) for ax in spec)
+
+    opt_avals = [
+        a for a in jax.tree.leaves(eng.train_state_avals()["optimizer"]) if getattr(a, "sharding", None) is not None
+    ]
+    self.assertTrue(
+        any(getattr(a.sharding, "memory_kind", None) != "pinned_host" and _uses_data(a.sharding.spec) for a in opt_avals)
+    )
+    self.assertTrue(
+        any(
+            getattr(a.sharding, "memory_kind", None) == "pinned_host" and not _uses_data(a.sharding.spec)
+            for a in opt_avals
+        )
+    )
+
+  def test_skip_step_on_spikes_and_non2d_fail_closed(self):
+    """Verifies non-2D fail-closed validation, forced NaN spike skipping, and duplicate-ID `step_diagnostics`."""
+    from maxtext.optimizers import optimizers as mt_optimizers  # pylint: disable=import-outside-toplevel
+
+    out_dir = self.create_tempdir().full_path
+    cfg_1d = _tiny_m3_config(
+        out_dir,
+        selective_host_offload="true",
+        host_offload_param_patterns="['.*norm/scale$']",
+    )
+    mesh_1d = mesh_from_config(cfg_1d)
+    with jax.set_mesh(mesh_1d):
+      with self.assertRaisesRegex(ValueError, "2D"):
+        model_creation_utils.create_model(cfg_1d, mesh_1d, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+
+    cfg_sp = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        mtp_num_layers="0",
+        scan_layers="true",
+        selective_host_offload="true",
+        selective_host_offload_optimizer_mode="host_compute",
+    )
+    mesh_sp = mesh_from_config(cfg_sp)
+    sh_sp = sharding_from_config(cfg_sp)
+    with jax.set_mesh(mesh_sp):
+      m_sp, _ = loop.setup_model(cfg_sp, mesh_sp, sh_sp)
+      opt_sp = m3_offload.make_optimizer(
+          m_sp,
+          mt_optimizers.skip_step_on_spikes(optax.adamw(1e-2), interval=4, scaling_factor=1.0),
+          cfg_sp,
+      )
+      b_sp = loop.make_synthetic_batch(cfg_sp, mesh_sp, sh_sp, jax.random.key(99))
+      _, grads_sp = nnx.jit(lambda m, b: m3_offload.value_and_grad(loop.loss_fn, m, b))(m_sp, b_sp)
+      ple_var = [
+          v for p, v in nnx.to_flat_state(nnx.state(m_sp, nnx.Param)) if p[-2:] == ("ngram_embedding", "embedding")
+      ][0]
+      p_before = np.asarray(ple_var[...]).copy()
+      opt_sp.update(m_sp, grads_sp, loss=jnp.float32(jnp.nan), grad_norm=jnp.float32(1.0))
+      self.assertTrue(bool(opt_sp.opt_state["is_skipped"][...]))
+      np.testing.assert_array_equal(np.asarray(ple_var[...]), p_before)
+
+    ids = jnp.array([[2, 2, 2, 5]], dtype=jnp.int32)
+    dg = jnp.ones((1, 4, 8), dtype=jnp.float32) * 1.5
+    sparse = m3_offload.SparseHostGrad(ids, dg, table_shape=(16, 8), table_dtype=jnp.float32)
+    diag = legacy_train.step_diagnostics({"emb": sparse}, None, [], [])
+    np.testing.assert_allclose(float(diag["diag/max_abs_grad"]), 4.5, rtol=1e-6, atol=1e-6)
+
+  @parameterized.named_parameters(
+      ("host_compute", "host_compute"),
+      ("streamed_chunks", "streamed_chunks"),
+      ("lazy_sparse", "lazy_sparse"),
+  )
+  def test_skip_step_on_spikes_legacy_train_modes(self, mode: str):
+    """Verifies `skip_step_on_spikes=True` in `train.py` under selective host offload."""
+    out_dir = self.create_tempdir().full_path
+    cfg_tr = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        mtp_num_layers="0",
+        scan_layers="true",
+        dataset_type="synthetic",
+        skip_step_on_spikes="true",
+        selective_host_offload="true",
+        selective_host_offload_optimizer_mode=mode,
+    )
+    mesh_tr = mesh_from_config(cfg_tr)
+    with jax.set_mesh(mesh_tr):
+      _, _, state_mesh_shardings, _, mesh_tr, _, data_iter, _, _, _, train_state = train_utils.setup_train_loop(
+          cfg_tr, None, mesh=mesh_tr
+      )
+      jit_model, state = nnx.split(train_state)
+      p_step, _ = train_utils.jit_train_and_eval_step(
+          cfg_tr, jit_model, mesh_tr, state, state_mesh_shardings, legacy_train.train_step
+      )
+      for _ in range(2):
+        state, metrics = p_step(state, next(data_iter))
+        self.assertTrue(np.isfinite(float(metrics["scalar"]["learning/loss"])))
+
+  def test_skip_step_on_spikes_maxtext_training_engine(self):
+    """Verifies `skip_step_on_spikes=True` in `MaxTextTrainingEngine` under selective host offload."""
+    import importlib.util  # pylint: disable=import-outside-toplevel
+
+    if importlib.util.find_spec("tunix") is None:
+      self.skipTest("tunix not installed in this environment")
+    from maxtext.training_engine import maxtext_engine  # pylint: disable=import-outside-toplevel
+
+    out_dir = self.create_tempdir().full_path
+    cfg_eng = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        mtp_num_layers="0",
+        scan_layers="true",
+        skip_step_on_spikes="true",
+        selective_host_offload="true",
+    )
+    eng = maxtext_engine.MaxTextTrainingEngine(cfg_eng, mesh=mesh_from_config(cfg_eng))
+    bs = cfg_eng.global_batch_size_to_train_on
+    for step in range(2):
+      toks = jax.random.randint(jax.random.key(30 + step), (bs, 8), 0, cfg_eng.vocab_size, dtype=jnp.int32)
+      pos = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (bs, 8))
+      seg = jnp.ones((bs, 8), dtype=jnp.int32)
+      batch = {
+          "inputs": toks,
+          "targets": jnp.roll(toks, -1, axis=-1),
+          "inputs_position": pos,
+          "targets_position": pos,
+          "inputs_segmentation": seg,
+          "targets_segmentation": seg,
+      }
+      if step == 0:
+        eng.compile(batch)
+      eng.fwd_bwd(batch)
+      eng.update()
+      m_out = eng.get_metrics()
+      lk = next(iter(m_out.weighted_metrics))
+      self.assertTrue(
+          np.isfinite(
+              float(jnp.sum(m_out.weighted_metrics[lk].unreduced_sum) / jnp.sum(m_out.weighted_metrics[lk].denominator))
+          )
+      )
+
+  @parameterized.named_parameters(
+      ("host_compute", "host_compute"),
+      ("streamed_chunks", "streamed_chunks"),
+      ("lazy_sparse", "lazy_sparse"),
+  )
+  def test_repeated_host_offloaded_embed_mtp_and_input_tokens_key(self, mode: str):
+    """Verifies repeated `HostOffloadedEmbed` MTP calls and `'input_tokens'` extraction."""
+    out_dir = self.create_tempdir().full_path
+
+    def _mtp_loss(model: nnx.Module, batch: dict) -> jax.Array:
+      toks = batch.get("inputs", batch.get("input_tokens"))
+      seg = batch.get("inputs_segmentation", batch.get("segment_ids"))
+      logits, mtp_logits = model(
+          toks,
+          decoder_positions=batch["inputs_position"],
+          decoder_segment_ids=seg,
+          return_mtp=True,
+      )
+      l_main = jnp.mean(jax.nn.log_softmax(logits, axis=-1)[..., 0])
+      l_mtp = jnp.mean(jax.nn.log_softmax(mtp_logits, axis=-1)[..., 1])
+      return -(l_main + 0.5 * l_mtp)
+
+    cfg_on = _qwen38_mini_config(
+        out_dir,
+        max_target_length="8",
+        scan_layers="true",
+        mtp_num_layers="1",
+        selective_host_offload="true",
+        host_offload_param_patterns="['^decoder/token_embedder/embedding$']",
+        selective_host_offload_optimizer_mode=mode,
+    )
+    mesh = mesh_from_config(cfg_on)
+    sharding = sharding_from_config(cfg_on)
+    num_devs = len(jax.devices())
+    bs = int(cfg_on.per_device_batch_size) * num_devs
+    ref_cache = type(self)._mtp_ref_cache  # pylint: disable=protected-access
+
+    with jax.set_mesh(mesh):
+      toks = jax.random.randint(jax.random.key(77), (bs, 8), 1, cfg_on.vocab_size, dtype=jnp.int32)
+      pos = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (bs, 8))
+      seg = jnp.ones((bs, 8), dtype=jnp.int32)
+      batch = {"inputs": toks, "inputs_position": pos, "inputs_segmentation": seg}
+
+      if num_devs not in ref_cache:
+        cfg_ref = _qwen38_mini_config(
+            out_dir,
+            max_target_length="8",
+            scan_layers="true",
+            mtp_num_layers="1",
+            selective_host_offload="false",
+        )
+        m_ref, opt_ref = loop.setup_model(cfg_ref, mesh, sharding)
+        toks_const = jnp.ones_like(toks) * 3
+        jit_mtp_loss = nnx.jit(_mtp_loss)
+        l_const = float(jit_mtp_loss(m_ref, {"inputs": toks_const, "inputs_position": pos, "inputs_segmentation": seg}))
+        l_ref_arr, g_ref = nnx.jit(nnx.value_and_grad(_mtp_loss))(m_ref, batch)
+        l_ref = float(l_ref_arr)
+        g_ref_map = {tuple(p): np.asarray(v.get_raw_value()) for p, v in nnx.to_flat_state(g_ref)}
+        nnx.jit(lambda m, o, g: o.update(m, g))(m_ref, opt_ref, g_ref)
+        p_ref_after = {tuple(p): np.asarray(v[...]) for p, v in nnx.to_flat_state(nnx.state(m_ref, nnx.Param))}
+        ref_cache[num_devs] = (l_const, l_ref, g_ref_map, p_ref_after)
+      l_const, l_ref, g_ref_map, p_ref_after = ref_cache[num_devs]
+      self.assertGreater(abs(l_ref - l_const), 1e-3)
+
+      next_tok = np.pad(np.asarray(toks)[:, 1:], ((0, 0), (0, 1)))
+      touched_rows = sorted(set(np.asarray(toks).reshape(-1).tolist()) | set(next_tok.reshape(-1).tolist()))
+      emb_path = ("decoder", "token_embedder", "embedding")
+
+      m_on, opt_on = loop.setup_model(cfg_on, mesh, sharding)
+      call_batch = {"input_tokens": toks, "inputs_position": pos, "segment_ids": seg} if mode == "host_compute" else batch
+      l_on, g_on = nnx.jit(lambda m, b: m3_offload.value_and_grad(_mtp_loss, m, b))(m_on, call_batch)
+      np.testing.assert_allclose(float(l_on), l_ref, rtol=1e-6, atol=1e-6, err_msg=f"MTP loss {mode}")
+      g_on_map = {tuple(p): (v.get_raw_value() if isinstance(v, nnx.Variable) else v) for p, v in nnx.to_flat_state(g_on)}
+      for path, go in g_ref_map.items():
+        gn = g_on_map[path]
+        if isinstance(gn, m3_offload.SparseHostGrad):
+          gn = m3_offload.materialize_sparse_grad(gn)
+        np.testing.assert_allclose(np.asarray(gn), go, rtol=1e-5, atol=1e-5, err_msg=f"MTP grad {path} ({mode})")
+      nnx.jit(lambda m, o, g: o.update(m, g))(m_on, opt_on, g_on)
+      p_on_after = {tuple(p): np.asarray(v[...]) for p, v in nnx.to_flat_state(nnx.state(m_on, nnx.Param))}
+      if mode == "lazy_sparse":
+        np.testing.assert_allclose(
+            p_on_after[emb_path][touched_rows],
+            p_ref_after[emb_path][touched_rows],
+            rtol=1e-5,
+            atol=1e-5,
+        )
+      else:
+        np.testing.assert_allclose(p_on_after[emb_path], p_ref_after[emb_path], rtol=1e-5, atol=1e-5)
+
+  @parameterized.named_parameters(("qwen38_auto", True), ("tiny_explicit", False))
+  def test_checkpoint_dict_and_optimizer_init_never_stage_host_tables_to_device(self, use_qwen38_auto: bool):
+    """Verifies `loop.setup_model` and checkpoint save/restore keep host tables and moments off HBM."""
+    out_dir = self.create_tempdir().full_path
+    orig_h2d = m3_offload._host_to_device_weight  # pylint: disable=protected-access
+    orig_zeros_like = jnp.zeros_like
+    eager_host_zeros: list[tuple[int, ...]] = []
+
+    def _checked_zeros_like(arr, *args, **kwargs):
+      if not isinstance(arr, jax.core.Tracer) and isinstance(arr, jax.Array):
+        if getattr(getattr(arr, "sharding", None), "memory_kind", None) == "pinned_host":
+          eager_host_zeros.append(tuple(arr.shape))
+      return orig_zeros_like(arr, *args, **kwargs)
+
+    if use_qwen38_auto:
+      cfg = _qwen38_mini_config(
+          out_dir,
+          shard_mode="auto",
+          scan_layers="true",
+          dtype="bfloat16",
+          weight_dtype="float32",
+          selective_host_offload="true",
+      )
+      leaf_sub = "ngram_embedding"
+    else:
+      cfg = _tiny_m3_config(
+          out_dir,
+          shard_mode="explicit",
+          scan_layers="true",
+          dtype="bfloat16",
+          weight_dtype="float32",
+          selective_host_offload="true",
+          host_offload_param_patterns="['.*embed.*']",
+      )
+      leaf_sub = "token_embedder"
+
+    mesh = mesh_from_config(cfg)
+    sharding = sharding_from_config(cfg)
+    with warnings.catch_warnings(record=True) as caught_warns:
+      warnings.simplefilter("always")
+      with (
+          jax.set_mesh(mesh),
+          nnx.use_eager_sharding(True),
+          mock.patch.object(m3_offload, "_host_to_device_weight", wraps=orig_h2d) as spy_init,
+          mock.patch.object(jnp, "zeros_like", side_effect=_checked_zeros_like),
+      ):
+        model, opt = loop.setup_model(cfg, mesh, sharding)
+        self.assertEqual(spy_init.call_count, 0)
+        self.assertEmpty(eager_host_zeros)
+
+        hook_warns = [str(w.message) for w in caught_warns if "Variable hooks are deprecated" in str(w.message)]
+        self.assertEmpty(hook_warns)
+        for _, var in nnx.to_flat_state(nnx.state(model, nnx.Param)):
+          self.assertIsNone(var.get_metadata("on_get_value", default=None))
+        for leaf in jax.tree.leaves(opt.opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)):
+          if isinstance(leaf, nnx.Variable):
+            self.assertIsNone(leaf.get_metadata("on_get_value", default=None))
+
+        ts = train_state_nnx.TrainStateNNX(model, opt)
+        with mock.patch.object(m3_offload, "_host_to_device_weight", wraps=orig_h2d) as spy_ckpt:
+          ckpt_dict = train_state_nnx.to_checkpoint_dict(nnx.state(ts))
+          self.assertEqual(spy_ckpt.call_count, 0)
+
+        ple_leaves = [
+            val
+            for key_path, val in jax.tree_util.tree_leaves_with_path(ckpt_dict)
+            if leaf_sub in "/".join(str(m3_offload._key_value(k)) for k in key_path)  # pylint: disable=protected-access
+        ]
+        self.assertLen(ple_leaves, 3)
+        for lf in ple_leaves:
+          self.assertEqual(lf.sharding.memory_kind, "pinned_host")
+
+        for as_numpy in (False, True):
+          linen_state, _, _ = train_state_nnx.split_for_checkpoint(nnx.state(ts))
+          src_dict = {k: v for k, v in ckpt_dict.items() if k != "nnx_aux"}
+          if as_numpy:
+            src_dict = jax.tree.map(lambda x: np.asarray(x) if isinstance(x, jax.Array) else x, src_dict)
+          restored_nested = train_state_nnx.from_linen_checkpoint_dict(src_dict)
+          with mock.patch.object(m3_offload, "_host_to_device_weight", wraps=orig_h2d) as spy_restore:
+            nnx.replace_by_pure_dict(linen_state, restored_nested)
+            self.assertEqual(spy_restore.call_count, 0)
+          nnx.update(ts, linen_state)
+          for path, var in nnx.to_flat_state(nnx.state(ts.model, nnx.Param)):
+            if leaf_sub in "/".join(str(x) for x in path):
+              self.assertEqual(var.get_raw_value().sharding.memory_kind, "pinned_host")
+              self.assertEqual(var.get_value().sharding.memory_kind, "pinned_host")
+          for path, leaf in jax.tree_util.tree_leaves_with_path(
+              ts.optimizer.opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
+          ):
+            key_s = "/".join(str(m3_offload._key_value(k)) for k in path)  # pylint: disable=protected-access
+            if leaf_sub in key_s and getattr(leaf.get_raw_value(), "ndim", 0) == 2:
+              self.assertEqual(leaf.get_raw_value().sharding.memory_kind, "pinned_host")
+
+  def test_pretrain_and_engine_init_never_stage_host_tables_to_device(self):
+    """Verifies `train.py` `setup_train_loop` and `MaxTextTrainingEngine.__init__` never stage host tables."""
+    out_dir = self.create_tempdir().full_path
+    orig_h2d = m3_offload._host_to_device_weight  # pylint: disable=protected-access
+    orig_zeros_like = jnp.zeros_like
+    eager_host_zeros: list[tuple[int, ...]] = []
+
+    def _checked_zeros_like(arr, *args, **kwargs):
+      if not isinstance(arr, jax.core.Tracer) and isinstance(arr, jax.Array):
+        if getattr(getattr(arr, "sharding", None), "memory_kind", None) == "pinned_host":
+          eager_host_zeros.append(tuple(arr.shape))
+      return orig_zeros_like(arr, *args, **kwargs)
+
+    cfg_tr = _qwen38_mini_config(
+        out_dir,
+        scan_layers="true",
+        dtype="bfloat16",
+        weight_dtype="float32",
+        selective_host_offload="true",
+    )
+    with (
+        nnx.use_eager_sharding(True),
+        mock.patch.object(m3_offload, "_host_to_device_weight", wraps=orig_h2d) as spy_tr,
+        mock.patch.object(jnp, "zeros_like", side_effect=_checked_zeros_like),
+    ):
+      *_, tr_state = train_utils.setup_train_loop(cfg_tr, None)
+      self.assertEqual(spy_tr.call_count, 0)
+      self.assertEmpty(eager_host_zeros)
+      ckpt_tr = train_state_nnx.to_checkpoint_dict(tr_state)
+      self.assertEqual(spy_tr.call_count, 0)
+      ple_tr = [
+          val
+          for key_path, val in jax.tree_util.tree_leaves_with_path(ckpt_tr)
+          if "ngram_embedding"
+          in "/".join(str(m3_offload._key_value(k)) for k in key_path)  # pylint: disable=protected-access
+      ]
+      self.assertLen(ple_tr, 3)
+      for lf in ple_tr:
+        self.assertEqual(lf.sharding.memory_kind, "pinned_host")
+
+      import importlib.util  # pylint: disable=import-outside-toplevel
+
+      if importlib.util.find_spec("tunix") is not None:
+        from maxtext.training_engine import maxtext_engine  # pylint: disable=import-outside-toplevel
+
+        eng_mesh = mesh_from_config(cfg_tr)
+        with jax.set_mesh(eng_mesh):
+          eng = maxtext_engine.MaxTextTrainingEngine(cfg_tr, mesh=eng_mesh)
+          self.assertEqual(spy_tr.call_count, 0)
+          self.assertEmpty(eager_host_zeros)
+          del eng
+
+  def test_tied_explicit_sharding_forward_vocab_tiling_and_attend_parity(self):
+    """Verifies tied Qwen3 explicit forward (`__call__`, `logits_from_hidden_states_for_vocab_tiling`, `attend`)."""
+    out_dir = self.create_tempdir().full_path
+    cfg_tied_off = _tiny_m3_config(out_dir, shard_mode="explicit", scan_layers="true", selective_host_offload="false")
+    cfg_tied_on = _tiny_m3_config(
+        out_dir,
+        shard_mode="explicit",
+        scan_layers="true",
+        selective_host_offload="true",
+        host_offload_param_patterns="['.*embed.*']",
+    )
+    t_mesh = mesh_from_config(cfg_tied_off)
+    t_sharding = sharding_from_config(cfg_tied_off)
+    with jax.set_mesh(t_mesh), nnx.use_eager_sharding(True), jax.default_matmul_precision("highest"):
+      m_off, _ = loop.setup_model(cfg_tied_off, t_mesh, t_sharding)
+      m_on, _ = loop.setup_model(cfg_tied_on, t_mesh, t_sharding)
+      self.assertNotIsInstance(m_on, m3_offload.HostOffloadedParameters)
+      self.assertIsInstance(m_on.token_embedder, m3_offload.HostOffloadedEmbed)
+      self.assertIsInstance(m_on.token_embedder.embedding, m3_offload.HostOffloadedParam)
+      self.assertEqual(m_on.token_embedder.embedding.get_value().sharding.memory_kind, "pinned_host")
+      self.assertEqual(m_on.token_embedder.embedding[...].sharding.memory_kind, "device")
+      batch = loop.make_synthetic_batch(cfg_tied_off, t_mesh, t_sharding, jax.random.key(9))
+      np.testing.assert_allclose(
+          np.asarray(m_on(batch["inputs"], batch["positions"])),
+          np.asarray(m_off(batch["inputs"], batch["positions"])),
+          rtol=1e-5,
+          atol=1e-5,
+      )
+      hidden = jnp.ones((batch["inputs"].shape[0], 4, int(cfg_tied_off.base_emb_dim)), dtype=jnp.float32)
+      hidden = jax.device_put(
+          hidden,
+          NamedSharding(t_mesh, t_sharding("embedded_inputs", ("batch", "norm_length", "embed"), TensorType.ACTIVATION)),
+      )
+      np.testing.assert_allclose(
+          np.asarray(m_on.logits_from_hidden_states_for_vocab_tiling(hidden, deterministic=True)),
+          np.asarray(m_off.logits_from_hidden_states_for_vocab_tiling(hidden, deterministic=True)),
+          rtol=1e-5,
+          atol=1e-5,
+      )
+      np.testing.assert_allclose(
+          np.asarray(m_on.token_embedder.attend(hidden)),
+          np.asarray(m_off.token_embedder.attend(hidden)),
+          rtol=1e-5,
+          atol=1e-5,
+      )
+
+  def test_tpu7x_aot_explicit_sharding_loop_eval_shape_preserves_pinned_host(self):
+    """Verifies `nnx.eval_shape(loop.setup_model)` under `shard_mode=explicit` keeps `pinned_host` and compiles."""
+    self.enterContext(mock.patch.dict(os.environ, {"ALLOW_MULTIPLE_LIBTPU_LOAD": "1"}))
+    out_dir = self.create_tempdir().full_path
+    topo = _get_tpu7x8_topology()
+
+    def _compile_explicit(selective: bool, opt_mode: str = "host_compute"):
+      cfg = _tiny_m3_config(
+          out_dir,
+          compile_topology="tpu7x-8",
+          shard_mode="explicit",
+          ici_fsdp_parallelism="4",
+          ici_tensor_parallelism="2",
+          base_emb_dim="128",
+          base_mlp_dim="256",
+          head_dim="32",
+          vocab_size="4096",
+          scan_layers="true",
+          dtype="bfloat16",
+          weight_dtype="bfloat16",
+          selective_host_offload=str(selective).lower(),
+          host_offload_param_patterns="['.*embed.*']" if selective else "[]",
+          selective_host_offload_optimizer_mode=opt_mode,
+          selective_host_offload_num_chunks="2",
+      )
+      tpu_mesh = mesh_from_config(cfg, devices=topo.devices)
+      self.assertTrue(all(ax_t == AxisType.Explicit for ax_t in tpu_mesh.axis_types))
+      sharding = sharding_from_config(cfg)
+      with jax.set_mesh(tpu_mesh), nnx.use_eager_sharding(True):
+        abs_model, abs_opt = nnx.eval_shape(lambda: loop.setup_model(cfg, tpu_mesh, sharding))
+        if selective:
+          emb_sds = abs_model.token_embedder.embedding.get_raw_value()
+          self.assertEqual(emb_sds.sharding.memory_kind, "pinned_host")
+          sel_paths = m3_offload.selected_host_param_paths(abs_model)
+          host_opt_count = 0
+          for path, leaf in jax.tree_util.tree_leaves_with_path(
+              abs_opt.opt_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
+          ):
+            raw = leaf.get_raw_value()
+            if getattr(raw, "ndim", 0) == 0:
+              continue
+            key_t = tuple(m3_offload._key_value(k) for k in path)  # pylint: disable=protected-access
+            if m3_offload._is_matching_opt_leaf(key_t, sel_paths) is not None:  # pylint: disable=protected-access
+              self.assertEqual(raw.sharding.memory_kind, "pinned_host")
+              host_opt_count += 1
+          self.assertEqual(host_opt_count, 2)
+        data_spec = sharding("tokens", ("batch", "length"), TensorType.ACTIVATION)
+        data_sharding = NamedSharding(tpu_mesh, data_spec)
+        batch_shape = (int(cfg.per_device_batch_size) * len(topo.devices), int(cfg.max_target_length))
+        batch = {
+            "inputs": jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=data_sharding),
+            "targets": jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=data_sharding),
+            "positions": jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=data_sharding),
+        }
+        compiled = loop.train_step.lower(abs_model, abs_opt, batch).compile()
+        self.assertNotIn("MegaScaleCollective", compiled.as_text())
+        return compiled.memory_analysis()
+
+    mem_off = _compile_explicit(False)
+    for mode in ("host_compute", "streamed_chunks"):
+      mem_on = _compile_explicit(True, mode)
+      self.assertLess(mem_on.argument_size_in_bytes, mem_off.argument_size_in_bytes)
+
+  def test_pretrain_zero1_excludes_selectively_offloaded_leaves_and_anchors_suffix_matching(self):
+    """Verifies `get_abstract_state_nnx` ZeRO-1 skips `pinned_host` leaves and `_is_matching_opt_leaf` anchors paths."""
+    # 1. Path-boundary check: nested `("token_embedder", "embedding")` must NOT match top-level `("embedding",)`.
+    self.assertIsNone(
+        m3_offload._is_matching_opt_leaf(  # pylint: disable=protected-access
+            (0, "mu", "token_embedder", "embedding"),
+            frozenset({("embedding",)}),
+        )
+    )
+    self.assertEqual(
+        m3_offload._is_matching_opt_leaf(  # pylint: disable=protected-access
+            (0, "mu", "embedding"),
+            frozenset({("embedding",)}),
+        ),
+        ("embedding",),
+    )
+
+    class _NestedSuffixModel(nnx.Module):
+      """Model with both top-level `embedding` (selected) and nested `token_embedder.embedding` (unselected)."""
+
+      def __init__(self):
+        base_emb = m3_offload.to_memory(nnx.Param(jnp.ones((4, 4), dtype=jnp.float32)), "pinned_host")
+        self.embedding = m3_offload._to_host_offloaded_param(base_emb)  # pylint: disable=protected-access
+        self.token_embedder = nnx.Embed(num_embeddings=4, features=4, rngs=nnx.Rngs(0))
+
+      def __call__(self, ids: jax.Array) -> jax.Array:
+        w = m3_offload._host_to_device_weight(self.embedding.get_raw_value())  # pylint: disable=protected-access
+        return w[ids] + self.token_embedder(ids)
+
+    suffix_model = _NestedSuffixModel()
+    suffix_opt = m3_offload.HostOffloadedOptimizer(
+        suffix_model,
+        optax.adamw(1e-2),
+        wrt=nnx.Param,
+        offload_opt_state=False,
+        selected_param_paths=frozenset({("embedding",)}),
+    )
+    ids = jnp.array([[0, 1]], dtype=jnp.int32)
+    grads = nnx.grad(lambda m: jnp.sum(m(ids)))(suffix_model)
+    suffix_opt.update(suffix_model, grads)
+
+  def test_pretrain_zero1_excludes_selectively_offloaded_leaves(self):
+    """Verifies `get_abstract_state_nnx` ZeRO-1 skips `pinned_host` leaves under `selective_host_offload=True`."""
+    if len(jax.devices()) < 4:
+      self.skipTest("Requires >= 4 host devices")
+    out_dir = self.create_tempdir().full_path
+    cfg = _qwen38_mini_config(
+        out_dir,
+        ici_data_parallelism="4",
+        ici_fsdp_parallelism="1",
+        ici_expert_parallelism="1",
+        shard_optimizer_over_data="true",
+        selective_host_offload="true",
+        dataset_type="synthetic",
+    )
+    mesh = mesh_from_config(cfg)
+    with jax.set_mesh(mesh):
+      (
+          _,
+          _,
+          state_mesh_shardings,
+          _,
+          mesh,
+          _,
+          data_iter,
+          _,
+          _,
+          _,
+          train_state,
+      ) = train_utils.setup_train_loop(cfg, None, mesh=mesh)
+      params_shardings, state_mesh_shardings = sharding_utils.maybe_update_params_sharding_with_opt(
+          cfg, state_mesh_shardings
+      )
+      raw_param_shardings = [
+          s.get_raw_value() if isinstance(s, nnx.Variable) else s
+          for s in jax.tree_util.tree_leaves(
+              params_shardings, is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding))
+          )
+      ]
+      host_param_specs = [
+          s.spec for s in raw_param_shardings if isinstance(s, NamedSharding) and s.memory_kind == "pinned_host"
+      ]
+      self.assertNotEmpty(host_param_specs)
+      for spec in host_param_specs:
+        self.assertNotIn("data", spec)
+
+      raw_opt_shardings = [
+          s.get_raw_value() if isinstance(s, nnx.Variable) else s
+          for s in jax.tree_util.tree_leaves(
+              state_mesh_shardings.optimizer, is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding))
+          )
+      ]
+      host_opt_specs = [
+          s.spec for s in raw_opt_shardings if isinstance(s, NamedSharding) and s.memory_kind == "pinned_host"
+      ]
+      self.assertNotEmpty(host_opt_specs)
+      for spec in host_opt_specs:
+        self.assertNotIn("data", spec)
+
+      jit_model, state = nnx.split(train_state)
+      p_step, _ = train_utils.jit_train_and_eval_step(
+          cfg, jit_model, mesh, state, state_mesh_shardings, legacy_train.train_step, params_shardings=params_shardings
+      )
+      state = sharding_utils.reshard_train_state(state, state_mesh_shardings, cfg.enable_single_controller)
+      _, metrics = p_step(state, next(data_iter))
+      self.assertTrue(np.isfinite(float(metrics["scalar"]["learning/loss"])))
 
 
 if __name__ == "__main__":

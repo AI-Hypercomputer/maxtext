@@ -821,6 +821,10 @@ def create_nnx_abstract_model(
     named_sharding_state = sharding.nnx_construct_named_sharding(abs_var_state, mesh)
     if getattr(config, "use_m3_model", False) and mesh is not None and getattr(mesh, "size", 1) > 1:
       named_sharding_state = _apply_m3_default_named_sharding(abs_var_state, named_sharding_state, mesh)
+    if bool(getattr(config, "selective_host_offload", False)):
+      from maxtext.m3.infra import offload as m3_offload  # pylint: disable=import-outside-toplevel
+
+      named_sharding_state = m3_offload.apply_selective_memory_kind_to_shardings(abs_var_state, named_sharding_state)
     abstract_state = jax.tree.map(
         lambda a, s: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=s),
         abs_var_state,
