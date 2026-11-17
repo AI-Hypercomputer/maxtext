@@ -1526,7 +1526,18 @@ class MoEGeneral(BaseModel):
           "Quantization of the Token Dispatch forward EP ragged all-to-all (leg 1, use_ring_of_experts=False),"
           " dequantized after the collective: '' = unquantized; '<scaling>[@e4m3|@e5m2]' (default E4M3) = FP8 values"
           " with scaling 'rowwise' (dynamic f32 absmax scale per token) or 'fixed,<bound>' (static scale bound/qmax,"
-          " values clipped to +-bound, no scale collective)."
+          " values clipped to +-bound, no scale collective). With 'rowwise', when the wi gmms are"
+          " qwix-quantized tokamax gmm_v2 calls with that act qtype and per-token absmax act calibration (scale factor"
+          " >= 1), the FP8 tokens instead pass straight into gmm_v2 (one scale per token in the activation dtype, no"
+          " second quantization). 'fixed,<bound>' passes straight into gmm_v2 too, with any act calibration, when the"
+          " wi gmms are qwix-quantized tokamax gmm_v2 calls with that act qtype (the static f32 scale on every token)."
+      ),
+  )
+  moe_quantize_dispatch_fwd_passthrough: bool = Field(
+      True,
+      description=(
+          "Whether a quantized Token Dispatch forward (moe_quantize_dispatch_fwd_method) may pass its FP8 tokens straight"
+          " into gmm_v2 when eligible. False always dequantizes after the collective (A/B and rollback switch)."
       ),
   )
   moe_quantize_combine_fwd_method: str = Field(
