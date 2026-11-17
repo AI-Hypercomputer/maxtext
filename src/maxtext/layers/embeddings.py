@@ -14,8 +14,10 @@
 
 """Embedding Layers."""
 
+import array
 import dataclasses
 import math
+import struct
 from typing import Any
 
 import jax
@@ -32,6 +34,11 @@ from maxtext.utils import max_utils
 from maxtext.utils.sharding import logical_to_mesh_axes, create_sharding, truncate_out_sharding
 
 _MAX_WAVELENGTH = 10_000
+
+
+def _round_f32(x: float) -> float:
+  """Rounds a Python float64 to the nearest IEEE-754 binary32 value."""
+  return struct.unpack("<f", struct.pack("<f", x))[0]
 
 
 def _cis(theta: Array) -> Array:
@@ -1792,24 +1799,38 @@ class DeepSeekV4RotaryEmbedding(RotaryEmbedding):
   @property
   def inv_freq(self):
     """Computes inverse frequencies with optional YaRN scaling."""
-    # Compute base inverse frequencies for half of self.dim
+    # Compute on the host rather than inside JAX so TPU XLA does not lower
+    # `rope_theta ** fraction` through its approximate `power` op (~16 ULP
+    # drift) and CPU JIT does not rewrite `1 / pow` or `/ (high - low)`.
+    # Exponentiate in float64 then round to binary32, matching the PyTorch
+    # float32 reference operation order bit-exactly without adding a NumPy dep.
     half_dim = self.dim // 2
-    fraction = 2 * jnp.arange(0, half_dim, dtype=jnp.float32) / self.dim
-    freqs = 1.0 / (self.rope_theta**fraction)
-    if self.rope_type != "yarn":
-      return freqs
-
-    # pylint: disable=protected-access
-    low, high = YarnRotaryEmbedding._find_correction_range(
-        self.beta_fast,
-        self.beta_slow,
-        self.dim,
-        self.rope_theta,
-        self.original_max_position_embeddings,
-        self.truncate,
-    )
-    smooth = 1 - YarnRotaryEmbedding._linear_ramp_factor(low, high, half_dim)
-    return freqs / self.rope_factor * (1 - smooth) + freqs * smooth
+    base = float(self.rope_theta)
+    freqs = [_round_f32(1.0 / _round_f32(base ** _round_f32(2.0 * i / self.dim))) for i in range(half_dim)]
+    if self.rope_type == "yarn":
+      # pylint: disable=protected-access
+      low, high = YarnRotaryEmbedding._find_correction_range(
+          self.beta_fast,
+          self.beta_slow,
+          self.dim,
+          self.rope_theta,
+          self.original_max_position_embeddings,
+          self.truncate,
+      )
+      if low == high:
+        high += 0.001
+      low_f32 = _round_f32(float(low))
+      span_f32 = _round_f32(float(high - low))
+      factor_f32 = _round_f32(float(self.rope_factor))
+      scaled = []
+      for i, freq in enumerate(freqs):
+        ramp = min(max(_round_f32(_round_f32(_round_f32(float(i)) - low_f32) / span_f32), 0.0), 1.0)
+        smooth = _round_f32(1.0 - ramp)
+        scaled.append(
+            _round_f32(_round_f32(_round_f32(freq / factor_f32) * _round_f32(1.0 - smooth)) + _round_f32(freq * smooth))
+        )
+      freqs = scaled
+    return jnp.asarray(array.array("f", freqs), dtype=jnp.float32)
 
   def get_freqs(self, position_ids: jnp.ndarray) -> tuple[jnp.ndarray, jnp.ndarray]:
     # position_ids: [B, S]
