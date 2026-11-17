@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.infra import scan
 from maxtext.m3.infra.named_scopes import add_named_scopes, scope_of
 from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3MLP, create_qwen3_model
@@ -96,6 +97,15 @@ def instructions_modulo_names(hlo_text):
 
 
 class NamedScopesTest(parameterized.TestCase):
+
+  def setUp(self):
+    super().setUp()
+    # Other tests on the same xdist worker enable JAX's persistent compilation cache, whose
+    # default key strips MLIR debuginfo (`op_name`) and would return an unscoped executable.
+    prev_include_meta = jax.config.jax_compilation_cache_include_metadata_in_key
+    jax.config.update("jax_compilation_cache_include_metadata_in_key", True)
+    self.addCleanup(jax.config.update, "jax_compilation_cache_include_metadata_in_key", prev_include_meta)
+    self.enter_context(jax.set_mesh(create_mesh(devices=jax.devices()[:1])))
 
   @parameterized.named_parameters(("unrolled", False), ("scanned", True))
   def test_scopes_name_modules_by_attribute_path(self, scan_layers):

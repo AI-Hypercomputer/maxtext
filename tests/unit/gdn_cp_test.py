@@ -515,7 +515,8 @@ def test_gdn_cp_config_and_custom_remat_validation():
   assert {"gdn_core_attn_out", "gdn_t_inv", "gdn_chunk_states"}.issubset(set(offload_names))
   assert "gdn_qkv" not in save_names and "gdn_qkv" not in offload_names
 
-  policy = NNXDecoder.get_remat_policy(SimpleNamespace(config=cfg_disjoint))
+  stub_decoder = SimpleNamespace(config=cfg_disjoint, _effective_remat_policy=lambda: cfg_disjoint.remat_policy)
+  policy = NNXDecoder.get_remat_policy(stub_decoder)
   assert callable(policy)
 
 
