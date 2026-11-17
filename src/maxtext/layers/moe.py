@@ -4401,16 +4401,22 @@ class RoutedMoE(nnx.Module):
       # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
       # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
       # drops fsdp -> GSPMD inserts the boundary all-gather) and reused across all
-      # chunks of the ring-of-experts pipeline below.
+      # chunks of the token-chunk pipeline below.
       override_chunks = getattr(self, "num_moe_token_chunks", None)
       n_chunks = override_chunks if override_chunks is not None else self.config.num_moe_token_chunks
+      if x.shape[1] == 1:
+        n_chunks = 1
+      elif n_chunks > 1 and x.shape[1] % n_chunks != 0:
+        raise ValueError(
+            f"Per-shard sequence length ({x.shape[1]}) must be divisible by num_moe_token_chunks ({n_chunks})."
+        )
       barrier_enabled = getattr(self, "moe_chunk_barrier", None)
       if barrier_enabled is None:
         barrier_enabled = self.config.moe_chunk_barrier
 
       def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
-        if n_chunks <= 1 or not self.config.use_ring_of_experts:
+        if n_chunks <= 1:
           out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, _ = _moe_body(
               x,
               logits,
@@ -4431,15 +4437,18 @@ class RoutedMoE(nnx.Module):
             bias_updates = finalize_bias_updates(bias_updates)
           return out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio
 
-        # Chunked ring-of-experts pipeline: split the per-shard tokens along the
-        # sequence dim into `n_chunks` data-independent chunks. Each chunk runs the
-        # full route -> GMM -> combine path; with no barrier between them XLA is
-        # free to overlap chunk (c+1)'s EP all-gather and chunk (c-1)'s
-        # reduce-scatter with chunk c's GMM compute. Token routing is per-token, so
-        # the main (lm) output is identical to n_chunks=1. The bias update (one sign
-        # of the expert counts summed over chunks) and the sigmoid-router aux loss
-        # (computed on full sequences after the shard_map) do not depend on n_chunks;
-        # the Switch-style loss of other routers is averaged across chunks.
+        # Chunked MoE pipeline: split the per-shard tokens along the sequence dim
+        # into `n_chunks` data-independent chunks. Each chunk runs the full
+        # route -> GMM -> combine path; with no barrier between them XLA is free to
+        # overlap one chunk's EP communication with another chunk's GMM compute
+        # (ring of experts: the token all-gather and output reduce-scatter; ragged
+        # all-to-all path: the dispatch and combine ragged all-to-alls, whose
+        # buffers are sized from each chunk's own token count). Token routing is
+        # per-token, so the main (lm) output is identical to n_chunks=1. The bias
+        # update (one sign of the expert counts summed over chunks) and the
+        # sigmoid-router aux loss (computed on full sequences after the shard_map)
+        # do not depend on n_chunks; the Switch-style loss of other routers is
+        # averaged across chunks.
         seq_len = x.shape[1]
         chunk = seq_len // n_chunks
         outs, lb_losses, bias_updates_list, has_overflows, required_rbfs, max_load_ratios = [], [], [], [], [], []
@@ -4541,8 +4550,8 @@ class RoutedMoE(nnx.Module):
         get_dropless_fallback_num_chunks keeps no larger than the capped path's buffer. The scan body
         is checkpointed, so the backward recomputes one chunk at a time and accumulates the expert
         weight gradients in the scan carry instead of materializing one per chunk. Unlike the
-        unrolled chunk loop in _route_and_compute (which exists to overlap ring-of-experts
-        communication with compute), chunks run strictly one after another.
+        unrolled chunk loop in _route_and_compute (which exists to overlap EP communication with
+        compute), chunks run strictly one after another.
         """
         batch, seq_len = x.shape[0], x.shape[1]
         chunk = seq_len // n_chunks

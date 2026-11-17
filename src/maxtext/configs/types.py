@@ -1325,11 +1325,11 @@ class MoEGeneral(BaseModel):
   num_moe_token_chunks: PositiveInt = Field(
       1,
       description=(
-          "Number of token chunks for the ring-of-experts MoE pipeline. 1"
+          "Number of token chunks for the sparse_matmul MoE pipeline. 1"
           " disables chunking (identical to baseline). >1 splits the per-shard"
-          " tokens along the sequence dimension so each chunk's EP all-gather /"
-          " reduce-scatter overlaps the previous chunk's GMM compute. Requires"
-          " use_ring_of_experts=True."
+          " tokens along the sequence dimension so each chunk's EP communication"
+          " (ring of experts: all-gather / reduce-scatter; use_ring_of_experts=False:"
+          " ragged all-to-all) can overlap another chunk's GMM compute."
       ),
   )
   moe_accumulate_chunk_wgrad: bool = Field(
@@ -1397,13 +1397,12 @@ class MoEGeneral(BaseModel):
       False,
       description=(
           "Diagnostic (profiling, not production). When True, chain the chunked"
-          " ring-of-experts MoE loop so each chunk's input is fenced with"
+          " MoE loop so each chunk's input is fenced with"
           " jax.lax.optimization_barrier on the previous chunk's output,"
           " forcing XLA to run the chunks sequentially (no interleave/fusion)."
           " Math is unchanged (barrier is identity), so loss stays bit-exact."
-          " Used to test whether the token-AG/RS chunks overlap at all today."
-          " Requires num_moe_token_chunks>1 and use_ring_of_experts=True to have any"
-          " effect."
+          " Used to test whether the chunks' EP communication overlaps at all today."
+          " Requires num_moe_token_chunks>1 to have any effect."
       ),
   )
   moe_log_max_load_ratio: bool = Field(
@@ -1845,12 +1844,6 @@ class MoEGeneral(BaseModel):
       description="Whether to fuse the expert scaling factors into the expert weights. "
       "This can improve inference performance.",
   )
-
-  @model_validator(mode="after")
-  def validate_moe_chunks(self) -> "MoEGeneral":
-    if self.num_moe_token_chunks > 1 and not self.use_ring_of_experts:
-      raise ValueError("num_moe_token_chunks > 1 requires use_ring_of_experts=True.")
-    return self
 
   @model_validator(mode="after")
   def validate_moe_sharding_strategy(self) -> "MoEGeneral":
@@ -7479,6 +7472,17 @@ class MaxTextConfig(
             f"fsdp/fsdp_transpose mesh axes have a combined size of {fsdp_size}. Set "
             "`ici_fsdp_parallelism` and `ici_fsdp_transpose_parallelism` (and their `dcn_` "
             "counterparts) to 1, or turn off `shard_optimizer_over_data`."
+        )
+
+    if self.num_moe_token_chunks > 1:
+      routed_seq_axes = axes_for_logical(self.logical_axis_rules, "activation_norm_length_routed")
+      routed_seq_shards = _resolved_axis_product(
+          self.mesh_axes, self.ici_parallelism, self.num_target_devices // max(self.num_slices, 1), routed_seq_axes
+      ) * _resolved_axis_product(self.mesh_axes, self.dcn_parallelism, self.num_slices, routed_seq_axes)
+      if self.max_target_length % (routed_seq_shards * self.num_moe_token_chunks) != 0:
+        raise ValueError(
+            f"num_moe_token_chunks={self.num_moe_token_chunks} must evenly divide the per-shard sequence length "
+            f"(max_target_length={self.max_target_length}, activation_norm_length_routed sharding={routed_seq_shards})."
         )
 
     if self.quantization in JAX_MX_QUANTIZATIONS:
