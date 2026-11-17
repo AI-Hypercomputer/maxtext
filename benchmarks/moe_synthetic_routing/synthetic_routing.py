@@ -364,12 +364,19 @@ def _row_taus(opts):
 class SyntheticRouting:
   """Host-generated pool of forced routing batches, placed on device once."""
 
-  def __init__(self, config, sharding, syn_cfg: SyntheticRoutingCfg | None = None):
+  def __init__(
+      self,
+      config,
+      sharding,
+      syn_cfg: SyntheticRoutingCfg | None = None,
+      *,
+      batch_size: int | None = None,
+  ):
     import jax  # pylint: disable=import-outside-toplevel
 
     opts = syn_cfg if syn_cfg is not None else config
     self.mode = opts.synthetic_routing
-    batch = int(config.global_batch_size_to_load)
+    batch = int(batch_size if batch_size is not None else config.global_batch_size_to_load)
     seq = int(config.max_target_length)
     num_layers = int(config.num_decoder_layers)
     num_experts = int(config.num_experts)
@@ -383,11 +390,11 @@ class SyntheticRouting:
       if "://" in prof_path or prof_path.startswith("/cns/"):
         from etils import epath  # pylint: disable=import-outside-toplevel
 
-        with epath.Path(prof_path).open("rb") as f:
-          profile = np.load(f)["log_profile"]
+        with epath.Path(prof_path).open("rb") as f, np.load(f) as data:
+          profile = data["log_profile"]
       else:
-        with open(prof_path, "rb") as f:
-          profile = np.load(f)["log_profile"]
+        with open(prof_path, "rb") as f, np.load(f) as data:
+          profile = data["log_profile"]
     w = None
     if self.mode == "lognormal":
       w = layer_log_popularity(num_layers, num_experts, seed, _layer_sigmas(opts, num_layers), profile)

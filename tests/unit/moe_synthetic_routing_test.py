@@ -16,10 +16,11 @@
 
 import gc
 import tempfile
-import weakref
 import types
 import unittest
 from unittest import mock
+import warnings
+import weakref
 
 from benchmarks.moe_synthetic_routing import synthetic_routing
 from benchmarks.moe_synthetic_routing import train as bench_train
@@ -306,6 +307,67 @@ class SyntheticRoutingWrapperTest(unittest.TestCase):
         "forced_routed_experts",
         maxtext_utils.get_shaped_batch(cfg, batch_sharding=sharding),
     )
+
+  def test_non_train_batch_size_and_closed_npz_profile(self):
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="batch_size_and_npz_test",
+        enable_checkpointing=False,
+        per_device_batch_size=1,
+        eval_per_device_batch_size=3,
+        max_target_length=16,
+        base_num_decoder_layers=2,
+        num_experts=8,
+        num_experts_per_tok=2,
+        base_mlp_dim=64,
+        base_moe_mlp_dim=64,
+    )
+    sharding = jax.sharding.SingleDeviceSharding(jax.devices()[0])
+    train_bsz = int(cfg.global_batch_size_to_load)
+    alt_bsz = train_bsz * 3
+    self.assertNotEqual(alt_bsz, train_bsz)
+
+    with tempfile.NamedTemporaryFile(suffix=".npz") as tmp:
+      np.savez(tmp.name, log_profile=np.linspace(-1.0, 1.0, 16, dtype=np.float64).reshape(2, 8))
+      syn_cfg = synthetic_routing.SyntheticRoutingCfg(
+          synthetic_routing="lognormal",
+          synthetic_routing_pool_size=2,
+          synthetic_routing_profile=tmp.name,
+      )
+
+      class _DummyLoader:
+
+        def __init__(self, **kw):
+          self.__dict__.update(kw)
+
+      loader = _DummyLoader(
+          config=cfg,
+          goodput_recorder=None,
+          data_iterator=iter(
+              [
+                  {"inputs": np.zeros((train_bsz, 16), np.int32), "targets": np.zeros((train_bsz, 16), np.int32)},
+                  {"inputs": np.zeros((alt_bsz, 16), np.int32), "targets": np.zeros((alt_bsz, 16), np.int32)},
+              ]
+          ),
+          last_batch=None,
+          input_data_shardings=sharding,
+          update_data_iterator=lambda: None,
+          check_example_batch=lambda: None,
+      )
+      setattr(
+          loader,
+          "load_next_batch_pre_sharding",
+          types.MethodType(data_loader.DataLoader.load_next_batch_pre_sharding, loader),
+      )
+
+      with warnings.catch_warnings():
+        warnings.simplefilter("error", ResourceWarning)
+        with bench_train.install_synthetic_routing(syn_cfg):
+          b_train = data_loader.DataLoader.load_next_batch(loader)
+          b_alt = data_loader.DataLoader.load_next_batch(loader)
+          gc.collect()
+      self.assertEqual(b_train["forced_routed_experts"].shape, (train_bsz, 16, cfg.num_decoder_layers, 2))
+      self.assertEqual(b_alt["forced_routed_experts"].shape, (alt_bsz, 16, cfg.num_decoder_layers, 2))
 
   def test_forced_routing_reaches_routed_moe_and_changes_group_sizes(self):
     cfg = pyconfig.initialize(

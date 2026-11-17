@@ -86,15 +86,24 @@ def install_synthetic_routing(syn_cfg: synthetic_routing.SyntheticRoutingCfg):
           shaped_batch["forced_routed_experts"] = jax.ShapeDtypeStruct(routing_shape, jnp.int32, sharding=batch_sharding)
         return shaped_batch
 
-      pools_by_loader: weakref.WeakKeyDictionary[object, synthetic_routing.SyntheticRouting] = weakref.WeakKeyDictionary()
+      pools_by_loader: weakref.WeakKeyDictionary[object, dict[int, synthetic_routing.SyntheticRouting]] = (
+          weakref.WeakKeyDictionary()
+      )
 
       @functools.wraps(orig_load_next_batch)
       def wrapped_load_next_batch(self, *args, **kwargs):
         example_batch = orig_load_next_batch(self, *args, **kwargs)
-        sr = pools_by_loader.get(self)
+        batch_size = int(example_batch["inputs"].shape[0])
+        by_bsz = pools_by_loader.setdefault(self, {})
+        sr = by_bsz.get(batch_size)
         if sr is None:
-          sr = synthetic_routing.SyntheticRouting(self.config, self.input_data_shardings, syn_cfg=syn_cfg)
-          pools_by_loader[self] = sr
+          sr = synthetic_routing.SyntheticRouting(
+              self.config,
+              self.input_data_shardings,
+              syn_cfg=syn_cfg,
+              batch_size=batch_size,
+          )
+          by_bsz[batch_size] = sr
         example_batch = dict(example_batch)
         example_batch["forced_routed_experts"] = sr.next()
         return example_batch
