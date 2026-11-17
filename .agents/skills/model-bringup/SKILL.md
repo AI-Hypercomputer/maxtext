@@ -1,12 +1,12 @@
 ---
 name: model-bringup
 description: >-
-  Performs new LLM/VLM model bring-up in MaxText on TPU VMs. Use when onboarding a new HuggingFace model (e.g., Qwen, Llama, Gemma variants) to MaxText. This includes analyzing the HuggingFace source code, implementing decoder layers in JAX/Flax, writing layer-wise unit tests with weight-copy/allclose checks, writing checkpoint conversion utilities for safetensors-to-orbax, and running the end-to-end forward pass logits checker. Don't use for general MaxText training execution, standard inference, or debugging unrelated TPU compilation issues.
+  Performs new LLM/VLM model bring-up in MaxText on TPU VMs. Use when onboarding a new HuggingFace model (e.g., Qwen, Llama, Gemma variants) to MaxText. This includes analyzing the HuggingFace source code, implementing decoder layers in JAX/Flax, writing layer-wise unit tests with weight-copy/allclose checks, running mini-model-verification, writing checkpoint conversion utilities for safetensors-to-orbax, and running multi-token masked prefill verification. Don't use for general MaxText training execution, standard inference, or debugging unrelated TPU compilation issues.
 ---
 
 # MaxText New Model Bring-up Workflow
 
-New model bring-up in MaxText is a structured 4-phase workflow designed to systematically port a PyTorch/HuggingFace model, implement it in JAX, and mathematically verify correctness using exact weight copies, logits validation, and autoregressive decoding.
+New model bring-up in MaxText is a structured 4-phase workflow designed to systematically port a PyTorch/HuggingFace model, implement it in JAX, and mathematically verify correctness using exact weight copies, mini-model-verification, and multi-token masked prefill.
 
 Before beginning, review [docs/guides/model_bringup.md](../../../docs/guides/model_bringup.md) for the project's standard bring-up guide and [docs/reference/models/supported_models_and_architectures.md](../../../docs/reference/models/supported_models_and_architectures.md) to inspect existing supported architectures.
 
@@ -16,14 +16,11 @@ For a step-by-step checklist of the bring-up process and a registry explaining t
 
 ## Handover Document (`{model_name}_handover.md`)
 
-To track progress and enable seamless collaboration across debugging sessions, maintain a live handover document in the MaxText root directory (`{model_name}_handover.md`).
-
-Update this document at each phase of the bring-up:
-1. **Original HF Model Learnings**: Key architectural findings (norm type/eps, RoPE theta, head dims, decoder patterns).
-2. **Phase Status Tracking**: Mark each phase as `NOT STARTED`, `IN PROGRESS`, `BLOCKED`, or `DONE`.
-3. **Bugs & Resolutions**: Log all bugs encountered during each phase and the exact fixes applied.
-4. **Session Wrap-up & Pitfalls**: Summarize all model-specific pitfalls, gotchas, and caveats upon completion.
-5. **Full Reproduction Commands**: Document exact CLI commands for mini safetensors slicing, checkpoint conversion, decode, and forward pass logits checking.
+Maintain `{model_name}_handover.md` in the MaxText root directory as a single auditable record so reviewers can immediately verify all evidence is present (see template in [roadmap.md](references/roadmap.md)):
+1. **HF Model Architectural Findings & Config Table**: Key specs (layer types/scanned structure, attention/RoPE/sliding window, MLP/MoE, norms, head/soft-cap) and reference links.
+2. **Verification & Evidence Summary Table**: Status, key metrics, and log/report links for every task at a glance.
+3. **Per-Stage Results, Commands & Logs**: For each stage (unit tests, `scanned`/`unscanned` conversion, `mini-model-verification`, multi-token masked prefill, training/SFT checks, and benchmark/roofline), record the result metrics table, exact CLI reproduction command, and log/checkpoint/golden paths together.
+4. **Bugs & Pitfalls**: Key issues resolved and model-specific gotchas.
 
 ---
 
@@ -44,8 +41,8 @@ Update this document at each phase of the bring-up:
 - **Maximize Reuse**: Check what layers already exist in MaxText that can be configured/reused (e.g., in `src/maxtext/layers/attentions.py`).
 - Implement new layers in JAX under `src/maxtext/layers/`.
 - **Autoregressive Generation Support**: Ensure custom decoder layers properly support autoregressive decode (KV caching, causal mask updates during decode steps).
-- Write layer-wise correctness unit tests under `tests/unit/{model_name}_layers_test.py` using **mini-layer sizes** (e.g. batch=2, seq=4, hidden=128) and assert output matches PyTorch via `assert_allclose`.
-- **Reference**: Refer to existing layer tests such as `tests/unit/gemma3_layers_test.py` or `tests/unit/gemma4_layers_test.py` as implementation references.
+- Write layer-wise correctness unit tests under `tests/unit/{model_name}_vs_reference_test.py` using **mini-layer sizes** (e.g. batch=2, seq=4, hidden=128) and assert output matches PyTorch via `assert_allclose`.
+- **Reference**: Refer to existing reference-parity tests such as `tests/unit/qwen3_next_vs_reference_test.py` or `tests/unit/hy4_vs_reference_test.py` as implementation references.
 - **Multimodal Preprocessing**: If multimodal (VLM/ALM), implement preprocessing in `src/maxtext/multimodal/processor_{model_name}.py` and test against HF processors.
 - Add model config `src/maxtext/configs/models/{model_name}.yml`. Run a quick check via `maxtext.inference.decode` with random weights and `base_num_decoder_layers=1` to verify shapes.
 - Update `{model_name}_handover.md` with Phase 2 status and any bugs/fixes.
@@ -60,15 +57,22 @@ Update this document at each phase of the bring-up:
 - Update `{model_name}_handover.md` with Phase 3 status and full conversion commands.
 - For details, see [checkpoint_conversion.md](references/checkpoint_conversion.md).
 
-### [Phase 4: E2E Logits Validation & Autoregressive Decode Check](references/logits_checker.md)
+### [Phase 4: Mini-Model-Verification & Multi-Token Masked Prefill](references/logits_checker.md)
 
-- **Logits Verification**: Run `forward_pass_logit_checker.py` using the mini-subset Orbax checkpoint against golden HF `.jsonl` logits (KL Divergence $\\le 10^{-3}$).
-- **Autoregressive Decode Verification**: Run full autoregressive decode to generate ~16 tokens on both HF PyTorch and MaxText using real weights from the mini subset.
-  - **Success Criteria**: Because weights are from a truncated model subset, output text will be gibberish, but **MaxText and HF must generate the exact same token IDs and gibberish text**.
+- **Mini-Model-Verification**: Validate a representative trimmed version of the target model against PyTorch (see [mini_verification.md](references/mini_verification.md)).
+- **Multi-Token Masked Prefill**: Convert full `scanned` (`scan_layers=true`) and `unscanned` (`scan_layers=false`) checkpoints and verify multi-token masked prefill parity via `zero_gen_logits_checker.py` / `forward_pass_logit_checker.py` (using router replay and unforced checks for MoE).
+- **Training & SFT Check** *(if applicable)*: Run short pre-training and SFT smoke checks on both `scanned` and `unscanned` checkpoints.
 - **Deep Profiling via Activations Mapping**: If outputs diverge, run HF and MaxText step-by-step with `layers=1` and compare intermediate layer activations.
-- **Full Model Run**: Once mini subset passes, run full checkpoint conversion and full logits verification.
 - **Wrap Up Handover**: Finalize `{model_name}_handover.md` with all pitfalls found and full reproduction commands.
-- For details, see [logits_checker.md](references/logits_checker.md).
+- For details, see [logits_checker.md](references/logits_checker.md) and [mini_verification.md](references/mini_verification.md).
+
+---
+
+## [FLOP Calculation, Training Benchmarking & Roofline Analysis](references/performance_and_roofline.md)
+
+- **FLOP Calculation**: Update `calculate_tflops_training_per_device` in `src/maxtext/utils/maxtext_utils.py` (with unit tests) for custom attention, latent/routed MoE, or head projections.
+- **Training Benchmarking**: Run a steady-state synthetic pre-training benchmark on TPU (`profiler=xplane`) and record step time, `TFLOP/s/device` (MFU), `Tokens/s/device`, compile-time HBM estimates, and HLO memory reports.
+- **Roofline Analysis**: Generate an analytical roofline report (`roofline_cli.py`, `jasmine` backend) and compare aggregate/per-block bounds and HBM budgets against measured MaxText performance. See [performance_and_roofline.md](references/performance_and_roofline.md).
 
 ---
 
