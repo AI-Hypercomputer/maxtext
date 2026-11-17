@@ -76,6 +76,12 @@ Maintain `{model_name}_handover.md` in the MaxText root directory as a single au
 
 ---
 
+## [Bring-up Troubleshooting Wiki](references/wiki/index.md)
+
+When verification or conversion hits resource bottlenecks (such as TPU HBM OOM on single TPU VMs or multi-host TPU clusters), consult [references/wiki/index.md](references/wiki/index.md) (e.g., [hbm_verification.md](references/wiki/hbm_verification.md)) and merge newly discovered reusable workarounds back into the wiki.
+
+---
+
 ## Critical Gotchas & Gotcha Resolution
 
 > [!IMPORTANT]
