@@ -52,7 +52,11 @@ olmo_trainable_embedding_row_range: [100278, 100284]
 static_loss_cotangent: true
 z_loss_multiplier: 1.0e-5
 olmoe3_segments_for_emo_only: false
-emo_enabled: false
+emo_enabled: true
+emo_causal_pool: true
+emo_threshold_by_bisection: true
+emo_document_expert_pool_choices: [32, 64, 256]
+emo_document_expert_pool_probs: [0.125, 0.125, 0.75]
 load_balance_loss_weight: 0.01
 moe_aux_loss_reduction: "sum"
 moe_global_load_balancing: true

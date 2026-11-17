@@ -32,6 +32,7 @@ All fixes below are integrated directly into this branch:
 3. **Loss, Router & Per-Component Optimizer Parity (`src/maxtext/trainers/pre_train/train.py`, `src/maxtext/optimizers/optimizers.py`)**:
    * Normalizes token CE + `z_loss_multiplier=1e-5` by the global `loss_weights` sum (`olmo_loss_denominator_counts_masked_instances=true`, `static_loss_cotangent=true`) and scales MoE auxiliary load-balance loss (`0.01`) by valid non-padding `router_token_mask` tokens.
    * Supports `8K Joint` domain loss-group normalization (`olmo_text_loss_group_weight=0.35`, `olmo_vision_loss_group_weight=0.65`).
+   * Enables causal EMo document-pool routing (`emo_enabled=true`, `emo_causal_pool=true`, r3 pool choices `[32, 64, 256]`) with exact cross-context-parallel (`CP > 1`) boundary propagation across both `ra2a_and_route` / `_route_once_dispatch_in_chunks` and `cp-as-ep` `roe_ag_and_route`.
    * Implements per-component learning rate scales and schedules (`olmo_vision_lr_scale`, `olmo_connector_lr_scale`, `olmo_embedding_lr_scale`, `olmo_connector_warmup_steps`, `olmo_vision_lr_cosine_alpha_f`, `olmo_hold_final_lr`), per-component global gradient norm clipping (`olmo_per_component_grad_clip=true`), embedding row-range gradient masking (`olmo_trainable_embedding_row_range=[100278, 100284]`), and `load_balance_loss_weight=0.0` during Stage 1 Bridge, returning to the pretraining value `0.01` in Stage 2 Joint (`OLMo-core`'s `restore_pretraining_router_lb=True` restores the load-balance loss coefficients; the router has no separate bias state).
 4. **Multimodal & 256K Chunked Text Data Pipelines (`src/maxtext/input_pipeline/olmo_mm_data_processing.py`, `tools/data_generation/export_olmo_mm_batches.py`, `src/maxtext/input_pipeline/olmo_data_grain.py`)**:
    * `dataset_type=olmo_mm` supports both pre-exported `.npz` global batches (`olmo_mm_batches_dir`, for validation and short runs on TPU pods without local media mounts) and live `OLMo-core` `MixtureDataLoader` configs (`olmo_mm_config_path`, including a built-in `merged_mt_lc` composable text-replay shim and `/weka` path remapping).
@@ -285,6 +286,8 @@ Run the OLMo 3.5 mid-training unit and parity test suites from the repository ro
 ```bash
 pytest -v \
   tests/unit/olmoe3_midtraining_test.py \
+  tests/unit/olmoe3_emo_cp_test.py \
+  tests/unit/olmoe3_emo_causal_pool_test.py \
   tests/unit/input_pipeline/olmo_data_grain_test.py \
   tests/unit/olmoe3_router_metrics_test.py
 ```

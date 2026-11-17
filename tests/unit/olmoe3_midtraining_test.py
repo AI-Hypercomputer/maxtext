@@ -580,6 +580,41 @@ class Olmoe3UlyssesKdaAndDataTest(parameterized.TestCase):
     self.assertAlmostEqual(cfg_vis_8k.olmo_embedding_lr_scale, 0.2, places=10)
     self.assertAlmostEqual(cfg_vis_8k.olmo_vision_lr_cosine_alpha_f, 0.1, places=10)
     self.assertEqual(cfg_vis_8k.olmo_connector_warmup_steps, 50)
+    for cfg in (cfg_256k_3k, cfg_vis_8k):
+      self.assertTrue(cfg.emo_enabled)
+      self.assertTrue(cfg.emo_causal_pool)
+      self.assertTrue(cfg.emo_threshold_by_bisection)
+      self.assertEqual(list(cfg.emo_document_expert_pool_choices), [32, 64, 256])
+      self.assertEqual(list(cfg.emo_document_expert_pool_probs), [0.125, 0.125, 0.75])
+
+    # Every setting written in the midtraining YAMLs must survive resolution (no silent model-config shadowing).
+    import yaml  # pylint: disable=import-outside-toplevel
+
+    def _norm(value):
+      value = getattr(value, "value", value)
+      if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+      if isinstance(value, (list, tuple)):
+        return [_norm(v) for v in value]
+      return value
+
+    for yml_path, topo in ((_MIDTRAIN_256K_YML, "v4-6144"), (_VISION_8K_YML, "v4-1024")):
+      with open(yml_path, encoding="utf-8") as f:
+        want = yaml.safe_load(f)
+      resolved = pyconfig.initialize([
+          "",
+          yml_path,
+          "run_name=ut_no_shadow",
+          "base_output_directory=/tmp/ut_yml",
+          f"compile_topology={topo}",
+          "compile_topology_num_slices=1",
+      ])
+      shadowed = {
+          k: (v, getattr(resolved, k))
+          for k, v in want.items()
+          if k != "base_config" and _norm(getattr(resolved, k)) != _norm(v)
+      }
+      self.assertEqual(shadowed, {}, f"{os.path.basename(yml_path)} had keys shadowed at resolution: {shadowed}")
 
   def test_chunk_boundary_only_target_mask_preserves_intra_chunk_eos(self):
     eos = 100257

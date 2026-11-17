@@ -41,6 +41,7 @@ with the canonical pools min=top_k, max=eval=num_experts).
 import contextlib
 import contextvars
 import functools
+import math
 import os
 from typing import Any
 
@@ -1695,9 +1696,64 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     MaxText packs documents contiguously, so the per-document score totals are
     cumulative-sum differences at document boundaries rather than a scatter
     over a static document count — this also makes the masking independent of
-    the segment-id numbering (only boundaries matter). The auxiliary losses
-    intentionally see the unmasked logits, as in the reference.
+    the segment-id numbering (only boundaries matter). Under context parallelism
+    (``CP > 1``), boundary summaries (and document pool draws) are propagated
+    across sequence-sharded mesh axes so documents spanning CP shards produce
+    the same pools as ``CP = 1``. The auxiliary losses intentionally see the
+    unmasked logits, as in the reference.
     """
+    seq_axes = moe.SEQ_SHARD_AXES.get()
+    ep_axes = moe.EP_GATHERED_AXES.get()
+    if seq_axes and ep_axes:
+      gathered_seq_axes = tuple(ax for ax in seq_axes if ax in ep_axes)
+      if gathered_seq_axes:
+        # roe_ag_and_route already all-gathered `ep_axes` (including `gathered_seq_axes`, e.g.
+        # `("context", "expert")` under cp-as-ep) onto axis 0. Unfold the gathered sequence axes
+        # back onto axis 1 so EMo sees contiguous sequences without any extra collectives.
+        mesh_shape = self.mesh.shape
+        ep_sizes = tuple(mesh_shape[ax] for ax in ep_axes)
+        ep_prod = math.prod(ep_sizes)
+        batch, seq_len, num_experts = gate_logits.shape
+        local_batch = batch // ep_prod
+        non_seq_idx = [i for i, ax in enumerate(ep_axes) if ax not in gathered_seq_axes]
+        seq_idx = [ep_axes.index(ax) for ax in gathered_seq_axes]
+        b_idx = len(ep_axes)
+        s_idx = b_idx + 1
+        e_idx = b_idx + 2
+        perm_logits = (*non_seq_idx, b_idx, *seq_idx, s_idx, e_idx)
+        inv_perm_logits = [0] * len(perm_logits)
+        for dst, src in enumerate(perm_logits):
+          inv_perm_logits[src] = dst
+        gathered_cp = math.prod(mesh_shape[ax] for ax in gathered_seq_axes)
+        new_batch = (ep_prod // gathered_cp) * local_batch
+        new_seq = gathered_cp * seq_len
+        unfolded_logits = jnp.transpose(
+            gate_logits.reshape(*ep_sizes, local_batch, seq_len, num_experts), perm_logits
+        ).reshape(new_batch, new_seq, num_experts)
+        if segment_ids is not None:
+          perm_seg = (*non_seq_idx, b_idx, *seq_idx, s_idx)
+          unfolded_segs = jnp.transpose(
+              segment_ids.reshape(*ep_sizes, local_batch, seq_len), perm_seg
+          ).reshape(new_batch, new_seq)
+        else:
+          unfolded_segs = None
+        remaining_seq_axes = tuple(ax for ax in seq_axes if ax not in gathered_seq_axes)
+        masked = OLMoE3LatentRoutedMoE._emo_mask_logits_impl(
+            self, unfolded_logits, unfolded_segs, rngs, remaining_seq_axes
+        )
+        transposed_shape = (
+            *(ep_sizes[i] for i in non_seq_idx),
+            local_batch,
+            *(ep_sizes[i] for i in seq_idx),
+            seq_len,
+            num_experts,
+        )
+        return jnp.transpose(masked.reshape(transposed_shape), tuple(inv_perm_logits)).reshape(
+            batch, seq_len, num_experts
+        )
+    return OLMoE3LatentRoutedMoE._emo_mask_logits_impl(self, gate_logits, segment_ids, rngs, seq_axes)
+
+  def _emo_mask_logits_impl(self, gate_logits, segment_ids, rngs, seq_axes=()):
     cfg = self.config
     batch, seq_len, _ = gate_logits.shape
     if segment_ids is None:
@@ -1711,11 +1767,14 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     start = jax.lax.cummax(jnp.where(is_first, positions, 0), axis=1)
     end = jnp.flip(jax.lax.cummin(jnp.flip(jnp.where(is_last, positions, seq_len), axis=1), axis=1), axis=1)
 
-    scores = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
+    # Pools only produce a discrete boolean keep mask; stop_gradient avoids saving softmax/cumsum
+    # intermediates or emitting backward collectives for cross-CP boundary gathers.
+    scores = jax.lax.stop_gradient(jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1))
     csum = jnp.cumsum(scores, axis=1)
     before = jnp.take_along_axis(csum, jnp.maximum(start - 1, 0)[..., None], axis=1)
     csum_before = jnp.where((start == 0)[..., None], 0.0, before)
-    if cfg.emo_causal_pool:
+    causal_pool = getattr(cfg, "emo_causal_pool", False)
+    if causal_pool:
       # Each token's pool comes from its document's tokens up to and including itself, as at inference. The first
       # token's pool is then its own top `pool` experts, which hold its top-k: its routing is unconstrained.
       document_scores = csum - csum_before
@@ -1723,8 +1782,14 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
       csum_end = jnp.take_along_axis(csum, end[..., None], axis=1)
       document_scores = csum_end - csum_before  # [b, s, E]: each token sees its document's totals
 
-    if rngs is not None and cfg.model_call_mode != "inference" and not _EMO_EVAL_POOLS.get():
+    cp_size = math.prod(self.mesh.shape[ax] for ax in seq_axes) if seq_axes else 1
+    cp_idx = jax.lax.axis_index(seq_axes) if cp_size > 1 else None
+
+    sample_pools = rngs is not None and cfg.model_call_mode != "inference" and not _EMO_EVAL_POOLS.get()
+    if sample_pools:
       rng = rngs.params() if hasattr(rngs, "params") and callable(getattr(rngs, "params")) else rngs
+      if cp_size > 1:
+        rng = jax.random.fold_in(rng, cp_idx)
       if cfg.emo_document_expert_pool_choices:
         choices = jnp.asarray(cfg.emo_document_expert_pool_choices, dtype=jnp.int32)
         if cfg.emo_document_expert_pool_probs:
@@ -1741,9 +1806,56 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     else:
       pool = jnp.full((batch, seq_len), cfg.emo_eval_document_expert_pool, dtype=jnp.int32)
 
+    if cp_size > 1:
+      # Propagate document score totals and sampled pool sizes across sequence-sharded (CP) boundaries.
+      # Only O(CP * batch * num_experts) boundary summaries are gathered (~32 KB at CP=32, E=256).
+      first_seg = segment_ids[:, 0]  # [B]
+      last_seg = segment_ids[:, -1]  # [B]
+      single_doc = start[:, -1] == 0  # [B]: True iff the entire local shard belongs to one document
+      trailing_sum = csum[:, -1, :] - csum_before[:, -1, :]  # [B, E]: sum of the doc ending this shard
+
+      all_first_seg = jax.lax.all_gather(first_seg, seq_axes, axis=0)  # [CP, B]
+      all_last_seg = jax.lax.all_gather(last_seg, seq_axes, axis=0)  # [CP, B]
+      all_single_doc = jax.lax.all_gather(single_doc, seq_axes, axis=0)  # [CP, B]
+      all_trailing_sum = jax.lax.all_gather(trailing_sum, seq_axes, axis=0)  # [CP, B, E]
+
+      shard_ids = jnp.arange(cp_size)[:, None]  # [CP, 1]
+      is_before = shard_ids < cp_idx
+      matches_last = all_last_seg == first_seg[None, :]
+      pass_left = jnp.where(is_before, matches_last & all_single_doc, True)
+      rev_all = jnp.flip(
+          jnp.cumprod(jnp.flip(pass_left.astype(jnp.int32), axis=0), axis=0), axis=0
+      ).astype(jnp.bool_)
+      pass_between_l = jnp.concatenate([rev_all[1:], jnp.ones((1, batch), dtype=jnp.bool_)], axis=0)
+      in_prefix = is_before & matches_last & pass_between_l  # [CP, B]
+
+      prefix_carry = jnp.sum(jnp.where(in_prefix[..., None], all_trailing_sum, 0.0), axis=0)  # [B, E]
+      document_scores = document_scores + jnp.where((start == 0)[..., None], prefix_carry[:, None, :], 0.0)
+
+      if sample_pools:
+        all_trailing_pool = jax.lax.all_gather(pool[:, -1], seq_axes, axis=0)  # [CP, B]
+        has_prefix = jnp.any(in_prefix, axis=0)  # [B]
+        q_start = jnp.argmax(in_prefix.astype(jnp.int32), axis=0)  # [B]: earliest shard of this doc
+        inherited_pool = jnp.take_along_axis(all_trailing_pool, q_start[None, :], axis=0)[0]  # [B]
+        pool = jnp.where((start == 0) & has_prefix[:, None], inherited_pool[:, None], pool)
+
+      if not causal_pool:
+        leading_sum = jnp.take_along_axis(csum, end[:, :1, None], axis=1)[:, 0, :]  # [B, E]
+        all_leading_sum = jax.lax.all_gather(leading_sum, seq_axes, axis=0)  # [CP, B, E]
+        is_after = shard_ids > cp_idx
+        matches_first = all_first_seg == last_seg[None, :]
+        pass_right = jnp.where(is_after, matches_first & all_single_doc, True)
+        fwd_all = jnp.cumprod(pass_right.astype(jnp.int32), axis=0).astype(jnp.bool_)
+        pass_between_r = jnp.concatenate([jnp.ones((1, batch), dtype=jnp.bool_), fwd_all[:-1]], axis=0)
+        in_suffix = is_after & matches_first & pass_between_r  # [CP, B]
+        suffix_carry = jnp.sum(jnp.where(in_suffix[..., None], all_leading_sum, 0.0), axis=0)  # [B, E]
+        document_scores = document_scores + jnp.where(
+            (end == seq_len - 1)[..., None], suffix_carry[:, None, :], 0.0
+        )
+
     if cfg.moe_lean_routing:
-      keep = self._emo_keep_by_threshold(
-          jax.lax.stop_gradient(document_scores), pool, bisect=cfg.emo_threshold_by_bisection
+      keep = OLMoE3LatentRoutedMoE._emo_keep_by_threshold(
+          document_scores, pool, bisect=getattr(cfg, "emo_threshold_by_bisection", False)
       )
       keep = checkpoint_name(keep, "moe_routing")
     else:
@@ -1771,7 +1883,7 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     slots = pool[..., None] - jnp.sum(above, axis=-1, keepdims=True)
     return above | (at & (jnp.cumsum(at, axis=-1) <= slots))
 
-  def load_balance_loss(self, top_k_indices, logits) -> jax.Array:  # pylint: disable=arguments-differ
+  def load_balance_loss(self, top_k_indices, logits, density_prob=None) -> jax.Array:  # pylint: disable=arguments-differ
     """OLMo-core's batch-level load-balancing loss.
 
     ``lb = (E / K) * sum_e mean_{b,s}(probs_e) * counts_e / (B * S)``, scaled by
@@ -1799,7 +1911,11 @@ class OLMoE3LatentRoutedMoE(moe.RoutedMoE):
     if reduce_axes:
       counts = jax.lax.pmean(jax.lax.stop_gradient(counts), reduce_axes)
     tokens = top_k_indices.shape[0] * top_k_indices.shape[1]
-    mean_probs = logits.astype(jnp.float32).mean(axis=(0, 1))
+    mean_probs = (
+        density_prob.astype(jnp.float32).mean(axis=0)
+        if density_prob is not None
+        else logits.astype(jnp.float32).mean(axis=(0, 1))
+    )
     lb = (mean_probs * counts).sum() * self.num_experts / (self.num_experts_per_tok * tokens)
     if reduce_axes:
       lb = jax.lax.pmean(lb, reduce_axes)

@@ -76,6 +76,14 @@ import tokamax
 # mapped away, such as "stage" or "diloco"); None outside the shard_map.
 LB_REDUCE_AXES: contextvars.ContextVar = contextvars.ContextVar("moe_lb_reduce_axes", default=None)
 
+# Mesh axes that shard the sequence dimension (axis 1) of gate_logits inside the sparse routed MoE's shard_map,
+# set around that call; () outside the shard_map or when sequence is unsharded.
+SEQ_SHARD_AXES: contextvars.ContextVar = contextvars.ContextVar("moe_seq_shard_axes", default=())
+
+# Mesh axes all-gathered onto axis 0 of gate_logits inside roe_ag_and_route before permute() (e.g. ("context",
+# "expert") under cp-as-ep); () when gate_logits still has its shard_map layout.
+EP_GATHERED_AXES: contextvars.ContextVar = contextvars.ContextVar("moe_ep_gathered_axes", default=())
+
 # A traced boolean, set around a train step's forward pass when the router load-imbalance metrics are computed on some
 # steps only (olmoe3_router_metrics_interval): a model computes them under lax.cond on it. None computes them always.
 ROUTER_IMBALANCE_ON: contextvars.ContextVar = contextvars.ContextVar("moe_router_imbalance_on", default=None)
@@ -183,7 +191,13 @@ def keep_top_by_bisection(scores: jax.Array, k) -> jax.Array:
     cand = thr | (jnp.uint32(1) << (31 - i).astype(jnp.uint32))
     return jnp.where(jnp.sum(key >= cand, axis=-1, keepdims=True) >= want, cand, thr)
 
-  thr = jax.lax.fori_loop(0, 32, step, jnp.zeros(want.shape, jnp.uint32))
+  init_thr = jnp.zeros(want.shape, jnp.uint32)
+  key_vma = getattr(getattr(jax.typeof(key), "manual_axis_type", None), "varying", ())
+  want_vma = getattr(getattr(jax.typeof(want), "manual_axis_type", None), "varying", ())
+  vma = tuple(dict.fromkeys((*key_vma, *want_vma)))
+  if vma:
+    init_thr = jax.lax.pcast(init_thr, vma, to="varying")
+  thr = jax.lax.fori_loop(0, 32, step, init_thr)
   above = key > thr
   at = key == thr
   slots = want - jnp.sum(above, axis=-1, keepdims=True)
@@ -3339,37 +3353,47 @@ class RoutedMoE(nnx.Module):
 
       # "Route" tokens within each shard.
       num_experts_per_shard = self.config.num_experts // num_ep
-      (
-          x,
-          sorted_selected_experts,
-          weights,
-          group_sizes,
-          selected_experts,
-          lb_loss,
-          bias_updates,
-          local_group_sizes,
-          has_overflow,
-          max_load_ratio,
-          topk_argsort_indices,
-          tc_routing,
-      ) = self.permute(
-          x,
-          logits,
-          pre_bias_logits,
-          self.config.use_custom_sort_vjp,
-          roll_to_expert_id=num_experts_per_shard * expert_shard_id,
-          rngs=rngs,
-          input_ids=input_ids,
-          forced_routed_experts=forced_routed_experts,
-          force_dropless=force_dropless,
-          mesh_axis_names=roe_bias_axis_names,
-          compute_lb_loss=not use_megatron_seq_aux_loss,
-          return_expert_counts=True,
-          defer_reductions=defer_small_ars,
-          precomputed_topk=precomputed_topk,
-          precomputed_density_prob=precomputed_density_prob,
-          per_expert_scale=per_expert_scale,
+      ep_gathered = (
+          (self._expert_parallelism_name,)
+          if isinstance(self._expert_parallelism_name, str)
+          else tuple(self._expert_parallelism_name)
       )
+      ep_gathered_token = EP_GATHERED_AXES.set(ep_gathered) if not topk_before_all_gather and num_ep > 1 else None
+      try:
+        (
+            x,
+            sorted_selected_experts,
+            weights,
+            group_sizes,
+            selected_experts,
+            lb_loss,
+            bias_updates,
+            local_group_sizes,
+            has_overflow,
+            max_load_ratio,
+            topk_argsort_indices,
+            tc_routing,
+        ) = self.permute(
+            x,
+            logits,
+            pre_bias_logits,
+            self.config.use_custom_sort_vjp,
+            roll_to_expert_id=num_experts_per_shard * expert_shard_id,
+            rngs=rngs,
+            input_ids=input_ids,
+            forced_routed_experts=forced_routed_experts,
+            force_dropless=force_dropless,
+            mesh_axis_names=roe_bias_axis_names,
+            compute_lb_loss=not use_megatron_seq_aux_loss,
+            return_expert_counts=True,
+            defer_reductions=defer_small_ars,
+            precomputed_topk=precomputed_topk,
+            precomputed_density_prob=precomputed_density_prob,
+            per_expert_scale=per_expert_scale,
+        )
+      finally:
+        if ep_gathered_token is not None:
+          EP_GATHERED_AXES.reset(ep_gathered_token)
       required_rbf = None
       if getattr(self.config, "log_required_ragged_buffer_factor", False):
         required_rbf = self.required_ragged_buffer_factor(group_sizes, local_tokens * num_ep, num_ep, expert_shard_id)
@@ -4886,7 +4910,14 @@ class RoutedMoE(nnx.Module):
       # `in_specs`, and the scale is declared "exp" -> the expert axis.
       per_expert_scale = self._maybe_shard_with_pspec(per_expert_scale, P())
 
+    raw_seq_axes = (
+        tuple(mesh_axes_for_dim(gate_logits_pspec[1]))
+        if gate_logits_pspec is not None and len(gate_logits_pspec) > 1 and gate_logits_pspec[1] is not None
+        else ()
+    )
+    seq_shard_axes = tuple(ax for ax in raw_seq_axes if self.mesh.shape[ax] > 1)
     lb_axes_token = LB_REDUCE_AXES.set(overflow_mesh_axes)
+    seq_axes_token = SEQ_SHARD_AXES.set(seq_shard_axes)
     try:
       route_and_compute_outputs = sparse_matmul_route_and_compute(
           inputs,
@@ -4904,6 +4935,7 @@ class RoutedMoE(nnx.Module):
           per_expert_scale,
       )
     finally:
+      SEQ_SHARD_AXES.reset(seq_axes_token)
       LB_REDUCE_AXES.reset(lb_axes_token)
     output, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf = route_and_compute_outputs[:6]
     max_load_ratio = route_and_compute_outputs[6] if log_max_load_ratio else None
