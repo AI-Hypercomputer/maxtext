@@ -29,6 +29,7 @@ import numpy as np
 from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.configs import pyconfig
+from maxtext.layers import attention_deepseek41
 from maxtext.layers import engram_deepseek41
 from maxtext.models import deepseek41
 
@@ -215,9 +216,12 @@ class ConfigValidationTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, message):
       _flash_config(override_model_config=True, **overrides)
 
-  def test_rejects_packed_data(self):
-    with self.assertRaisesRegex(ValueError, "packed sequences"):
-      _flash_config(packing=True, override_model_config=True)  # also on (default) synthetic data
+  def test_supports_packed_data(self):
+    cfg = _flash_config(dataset_type="hf", hf_path="dummy", packing=True, override_model_config=True)
+    self.assertTrue(cfg.packing)
+    self.assertEqual(cfg.dataset_type, "hf")
+    cfg_syn = _flash_config(packing=True, override_model_config=True)
+    self.assertTrue(cfg_syn.packing)
 
   def test_rejects_engram_without_ngrams(self):
     with self.assertRaisesRegex(ValueError, "ds41_engram_max_ngram_size must be >= 2"):
@@ -314,8 +318,6 @@ class MuonTest(unittest.TestCase):
 class RotaryTest(unittest.TestCase):
 
   def test_inv_freq_computed_on_host_in_float64(self):
-    from maxtext.layers import attention_deepseek41  # pylint: disable=import-outside-toplevel
-
     rope = attention_deepseek41.DeepSeek41RotaryEmbedding(
         head_dim=512,
         partial_rotary_factor=64 / 512,
@@ -334,6 +336,39 @@ class RotaryTest(unittest.TestCase):
     want = (freqs / 16 * (1 - smooth) + freqs * smooth).astype(np.float32)
     np.testing.assert_array_equal(np.asarray(rope.inv_freq), want)
     np.testing.assert_array_equal(np.asarray(jax.jit(lambda: rope.inv_freq)()), want)
+
+
+class RotaryAndCandidateBlockTest(unittest.TestCase):
+  """Torch-free unit tests for DeepSeek-V4.1 rotary invertibility and candidate selection."""
+
+  def test_rotary_invertibility_and_candidate_blocks(self):
+    rng = np.random.default_rng(0)
+    x = jnp.asarray(rng.standard_normal((2, 32, 3, 32), dtype=np.float32))
+    positions = jnp.broadcast_to(jnp.arange(32, dtype=jnp.int32), (2, 32))
+    for orig_len, theta in ((65536, 160000.0), (0, 10000.0)):
+      rope = attention_deepseek41.DeepSeek41RotaryEmbedding(
+          head_dim=32,
+          partial_rotary_factor=8 / 32,
+          rope_theta=theta,
+          rope_type="yarn" if orig_len > 0 else "default",
+          original_max_position_embeddings=orig_len if orig_len > 0 else 65536,
+          rope_factor=16,
+          beta_fast=32,
+          beta_slow=1,
+      )
+      rotated = rope(x, positions, unsqueeze_dim=-2)
+      np.testing.assert_array_equal(np.asarray(rotated[..., :-8]), np.asarray(x[..., :-8]))
+      recovered = rope(rotated, positions, unsqueeze_dim=-2, reverse=True)
+      np.testing.assert_allclose(np.asarray(recovered), np.asarray(x), rtol=1e-5, atol=1e-5)
+
+    raw_logits = rng.standard_normal((2, 16, 16), dtype=np.float32)
+    lens_np = np.broadcast_to(np.arange(1, 17, dtype=np.int32)[:, None], (2, 16, 1))
+    masked_logits = jnp.asarray(np.where(np.arange(16)[None, None, :] >= lens_np, -np.inf, raw_logits))
+    lens = jnp.broadcast_to(jnp.arange(1, 17, dtype=jnp.int32), (2, 16))
+    selected = attention_deepseek41.select_candidate_blocks(masked_logits, lens, topk_blocks=2, block_size=4)
+    self.assertEqual(selected.shape, (2, 16, 16))
+    self.assertEqual(selected.dtype, jnp.bool_)
+    np.testing.assert_array_equal(np.asarray(selected[:, -1]).sum(axis=-1), np.array([8, 8]))
 
 
 if __name__ == "__main__":

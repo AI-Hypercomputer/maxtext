@@ -1012,6 +1012,11 @@ class DeepSeek41(BaseModel):
   )
   ds41_hc_sinkhorn_iters: PositiveInt = Field(20, description="Sinkhorn iterations of the hyper-connection mixes.")
   ds41_hc_eps: float = Field(1e-6, description="Epsilon of the hyper-connection mixes.")
+  ds41_activation_quant: bool = Field(
+      False,
+      description="Reproduce the reference's activation FP8 / FP4 quantize-dequantize round trips (straight-through"
+      " gradients); only the non-dropping dense MoE path implements them.",
+  )
   ds41_engram_layers: list[int] = Field(default_factory=list, description="Layers with an engram n-gram lookup.")
   ds41_engram_vocab_size: NonNegativeInt = Field(0, description="Base bucket size for the engram hash primes.")
   ds41_engram_max_ngram_size: PositiveInt = Field(1, description="Largest n-gram hashed by the engram.")
@@ -4363,9 +4368,6 @@ def validate_deepseek41(cfg) -> None:
     raise ValueError(f"deepseek41: compress_ratios must be >= 0, got {ratios}.")
   if cfg.mhc_expansion_rate < 2:
     raise ValueError("deepseek41 requires hyper-connections (mhc_expansion_rate >= 2).")
-  if getattr(cfg, "packing", False):
-    # The attention masks, compressed KV and engram n-grams assume one sequence per row with positions from 0.
-    raise ValueError("deepseek41 does not support packed sequences yet: set packing=False.")
   if cfg.ds41_engram_layers and cfg.ds41_engram_max_ngram_size < 2:
     raise ValueError("deepseek41: ds41_engram_max_ngram_size must be >= 2 when ds41_engram_layers is set.")
 
@@ -6988,6 +6990,11 @@ class MaxTextConfig(
 
     validate_compress_ratios(self)
     validate_deepseek41(self)
+    if self.ds41_activation_quant and (self.sparse_matmul or self.capacity_factor > 0):
+      raise ValueError(
+          "ds41_activation_quant is only implemented in the dense, non-dropping MoE path: set sparse_matmul=false and"
+          " capacity_factor=-1 (or ds41_activation_quant=false)."
+      )
 
     if self.num_kv_shared_layers > 0:
       if self.fused_qkv:
