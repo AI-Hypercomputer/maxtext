@@ -217,7 +217,14 @@ class ConfigValidationTest(parameterized.TestCase):
 
   def test_rejects_packed_data(self):
     with self.assertRaisesRegex(ValueError, "packed sequences"):
-      _flash_config(dataset_type="hf", hf_path="dummy", packing=True)
+      _flash_config(packing=True, override_model_config=True)  # also on (default) synthetic data
+
+  def test_rejects_engram_without_ngrams(self):
+    with self.assertRaisesRegex(ValueError, "ds41_engram_max_ngram_size must be >= 2"):
+      _flash_config(ds41_engram_max_ngram_size=1, override_model_config=True)
+
+  def test_muon_allowed(self):
+    self.assertEqual(_flash_config(opt_type="muon").opt_type, "muon")
 
 
 class CheckpointHookTest(parameterized.TestCase):
@@ -270,13 +277,63 @@ class TokenMapTest(unittest.TestCase):
     self.assertIs(engram_deepseek41.pad_token_map(token_map, 4, pad_id=2), token_map)
 
 
-class MuonExclusionTest(unittest.TestCase):
+class MuonTest(unittest.TestCase):
+  """Muon dimension numbers of the DeepSeek-V4.1 parameters."""
 
-  def test_engram_table_excluded_only_under_engram(self):
+  def test_engram_tables_and_scales_excluded_only_under_engram(self):
     from maxtext.utils import muon_utils  # pylint: disable=import-outside-toplevel
 
-    self.assertIsNone(muon_utils.transform_logic(("decoder", "layers_1", "engram", "embed"), (1024, 256)))
+    for name in ("embed", "q_weight", "k_weight"):
+      self.assertIsNone(muon_utils.transform_logic(("decoder", "layers_1", "engram", name), (1024, 256)))
     self.assertIsNotNone(muon_utils.transform_logic(("decoder", "layers_1", "mlp", "embed"), (1024, 256)))
+
+  def test_scanned_single_head_wkv_keeps_layer_axis_out(self):
+    from maxtext.utils import muon_utils  # pylint: disable=import-outside-toplevel
+
+    for path in (
+        ("decoder", "segments_2", "layers_0", "self_attention", "wkv", "kernel"),
+        ("decoder", "segments_2", "layers_0", "self_attention", "compressor", "wkv", "kernel"),
+    ):
+      dims = muon_utils.transform_logic(path, (5120, 2, 512), scan_layers=True)
+      self.assertEqual((dims.reduction_axis, dims.output_axis), ((0,), (-1,)))
+      dims = muon_utils.transform_logic(path[:1] + ("layers_2",) + path[3:], (5120, 512), scan_layers=False)
+      self.assertEqual((dims.reduction_axis, dims.output_axis), ((0,), (-1,)))
+    # Head-expanded projections keep their head axis in the output, scanned or not.
+    q = ("decoder", "segments_2", "layers_0", "self_attention", "wq_b", "kernel")
+    dims = muon_utils.transform_logic(q, (1280, 2, 64, 512), scan_layers=True)
+    self.assertEqual((dims.reduction_axis, dims.output_axis), ((0,), (-2, -1)))
+
+  def test_layers_all_stacked(self):
+    from maxtext.utils import muon_utils  # pylint: disable=import-outside-toplevel
+
+    self.assertTrue(muon_utils.layers_all_stacked(_flash_config(scan_layers=True)))
+    self.assertFalse(muon_utils.layers_all_stacked(_flash_config(scan_layers=False)))
+    self.assertIsNone(muon_utils.layers_all_stacked(None))
+
+
+class RotaryTest(unittest.TestCase):
+
+  def test_inv_freq_computed_on_host_in_float64(self):
+    from maxtext.layers import attention_deepseek41  # pylint: disable=import-outside-toplevel
+
+    rope = attention_deepseek41.DeepSeek41RotaryEmbedding(
+        head_dim=512,
+        partial_rotary_factor=64 / 512,
+        rope_theta=160000.0,
+        rope_type="yarn",
+        original_max_position_embeddings=65536,
+        rope_factor=16,
+        beta_fast=32,
+        beta_slow=1,
+    )
+    dim = 64
+    freqs = 1.0 / (160000.0 ** (np.arange(0, dim, 2, dtype=np.float64) / dim))
+    low = max(int(np.floor(dim * np.log(65536 / (32 * 2 * np.pi)) / (2 * np.log(160000.0)))), 0)
+    high = min(int(np.ceil(dim * np.log(65536 / (1 * 2 * np.pi)) / (2 * np.log(160000.0)))), dim - 1)
+    smooth = 1 - np.clip((np.arange(dim // 2) - low) / max(high - low, 1e-3), 0, 1)
+    want = (freqs / 16 * (1 - smooth) + freqs * smooth).astype(np.float32)
+    np.testing.assert_array_equal(np.asarray(rope.inv_freq), want)
+    np.testing.assert_array_equal(np.asarray(jax.jit(lambda: rope.inv_freq)()), want)
 
 
 if __name__ == "__main__":

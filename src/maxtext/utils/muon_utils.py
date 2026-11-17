@@ -31,6 +31,7 @@ from typing import Optional, Tuple
 
 from flax import nnx
 import jax
+from maxtext.common.common_types import DecoderBlockType
 from maxtext.configs import pyconfig
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
 from maxtext.utils import maxtext_utils, model_creation_utils
@@ -67,7 +68,8 @@ EXCLUDED_EXACT_SEGMENTS = {
 
 # Exact-segment pairs whose joint presence excludes a parameter (e.g. the DeepSeek-V4.1 engram lookup tables
 # `.../engram/embed`), without excluding unrelated parameters that merely share one of the names.
-EXCLUDED_EXACT_SEGMENT_PAIRS = (("engram", "embed"),)
+# The engram `q_weight` / `k_weight` are elementwise gating scales ([hc, dim]), not projections.
+EXCLUDED_EXACT_SEGMENT_PAIRS = (("engram", "embed"), ("engram", "q_weight"), ("engram", "k_weight"))
 
 # Attention module identifiers and tensor projection names that require
 # head-aware (3D/4D) dimension specifications.
@@ -101,10 +103,23 @@ MOE_BLOCK_NAMES = (
 )
 
 
+def layers_all_stacked(config) -> Optional[bool]:
+  """Whether every attention parameter of `config`'s model carries a layer axis (True), none does (False), or
+  unknown (None: `transform_logic` then guesses from the shape alone).
+
+  Only reported where it is certain: DeepSeek-V4.1 stacks every decoder layer under `scan_layers` (single-layer
+  segments too) and has no unscanned extras such as MTP layers.
+  """
+  if config is None or getattr(config, "decoder_block", None) != DecoderBlockType.DEEPSEEK41:
+    return None
+  return bool(config.scan_layers)
+
+
 def transform_logic(
     path: Tuple[str, ...],
     shape: Optional[Tuple[int, ...]] = None,
     include_routers: bool = True,
+    scan_layers: Optional[bool] = None,
 ) -> Optional[mdn]:
   """Determines Muon dimension numbers based on parameter path and shape.
 
@@ -171,8 +186,11 @@ def transform_logic(
   if "o_a_proj" in path:
     return mdn((-2,), (-1,))
 
-  # Head-expanded attention projections (3D unscanned or 4D scanned)
-  if _is_path_contain_any(ATTENTION_BLOCK_NAMES, path) and (shape is None or len(shape) > 2):
+  # Head-expanded attention projections (3D unscanned or 4D scanned). With `scan_layers` known (see
+  # `layers_all_stacked`), the layer axis is not counted, so a single-head projection (e.g. DeepSeek-V4.1 `wkv`,
+  # [in, (num_layers), out]) stays a 2D matrix instead of folding the layer axis into its output.
+  per_layer_ndim = None if shape is None else len(shape) - (1 if scan_layers else 0)
+  if _is_path_contain_any(ATTENTION_BLOCK_NAMES, path) and (per_layer_ndim is None or per_layer_ndim > 2):
     if _is_path_contain_any(ATTENTION_QKV_NAMES, path):
       # [in_features, (num_layers), num_heads, head_dim] -> reduce (0,), output (-2, -1)
       return mdn((0,), (-2, -1))
@@ -201,6 +219,7 @@ def get_transform_tree(tree, path=(), include_routers: bool = True):
 def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
   """Extracts a matching pytree of `MuonDimensionNumbers` from a model."""
   include_routers = getattr(config, "muon_include_routers", True) if config is not None else True
+  scan_layers = layers_all_stacked(config)
   _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
 
   def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], leaf):
@@ -208,7 +227,7 @@ def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
     path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
     val = leaf.get_value() if hasattr(leaf, "get_value") else leaf
     val_shape = getattr(val, "shape", None)
-    return transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
+    return transform_logic(path_strings, shape=val_shape, include_routers=include_routers, scan_layers=scan_layers)
 
   # tree_map_with_path handles NNX's PyTree structure; result is an nnx.State with the
   # same structure, where each Param's value holds the mdn result.

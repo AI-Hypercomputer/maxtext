@@ -36,7 +36,6 @@ from flax import nnx
 
 from maxtext.configs import pyconfig
 from maxtext.layers import attention_deepseek41
-from maxtext.layers import embeddings
 from maxtext.layers import engram_deepseek41
 from maxtext.models import deepseek41
 
@@ -290,7 +289,7 @@ class DeepSeek41RotaryTest(unittest.TestCase):
     x = torch.randn(2, seq, 3, head_dim)
     ref = x.clone()
     ref_model.apply_rotary_emb(ref[..., -rd:], freqs_cis)
-    rope = embeddings.DeepSeekV4RotaryEmbedding(
+    rope = attention_deepseek41.DeepSeek41RotaryEmbedding(
         head_dim=head_dim,
         partial_rotary_factor=rd / head_dim,
         rope_theta=theta,

@@ -1346,7 +1346,8 @@ deepseek41_flash_dict = {
 
 # The mini checkpoint written by tests/utils/deepseek_v41_reference/create_mini_checkpoint.py.
 deepseek41_flash_mini_dict = {
-    **deepseek41_flash_dict,
+    # The mini checkpoint is unquantized: leave `quantization_config` out (a None value breaks `to_dict()`).
+    **{k: v for k, v in deepseek41_flash_dict.items() if k != "quantization_config"},
     "num_hidden_layers": 14,
     "n_routed_experts": 8,
     "compress_ratios": [0, 0, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1],
@@ -1358,7 +1359,6 @@ deepseek41_flash_mini_dict = {
     "engram_layer_ids": [1, 6],
     "engram_num_embeddings": [242682, 247712],
     "engram_vocab_size": 10000,
-    "quantization_config": None,  # the mini checkpoint is unquantized
 }
 
 

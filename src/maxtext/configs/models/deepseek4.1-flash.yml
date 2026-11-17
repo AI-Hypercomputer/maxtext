@@ -30,6 +30,8 @@ logits_via_embedding: false
 normalization_layer_epsilon: 1.0e-20
 
 decoder_block: "deepseek41"
+# One sequence per row: the attention masks, compressed KV and engram n-grams do not handle packed segments yet.
+packing: false
 
 # --- Hyper-connections ---
 mhc_expansion_rate: 4
@@ -77,9 +79,8 @@ routed_scaling_factor: 1.5
 # The trained routing biases are large and close together (e.g. 57.17..57.65 in one layer): keep them, and the gate,
 # in float32 (as upstream), or bf16 collapses them to a few distinct values and changes the selected experts.
 float32_gate_logits: true
-# Dense (non-megablox) MoE with no token dropping, as used for the logit parity checks.
-sparse_matmul: false
-capacity_factor: -1
+# For the logit parity checks, run with dense (non-megablox), dropless MoE:
+#   sparse_matmul=false capacity_factor=-1 override_model_config=true
 
 # --- RoPE ---
 rope_type: "default"

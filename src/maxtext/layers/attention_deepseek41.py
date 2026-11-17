@@ -35,14 +35,37 @@ from typing import Optional
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 from flax import nnx
 
 from maxtext.common.common_types import Array, Config
-from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding
+from maxtext.layers.embeddings import DeepSeekV4RotaryEmbedding, YarnRotaryEmbedding
 from maxtext.layers.initializers import nd_dense_init, NdInitializer
 from maxtext.layers.linears import DenseGeneral, DeepSeekV4GroupedLinear
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
+
+
+class DeepSeek41RotaryEmbedding(DeepSeekV4RotaryEmbedding):
+  """`DeepSeekV4RotaryEmbedding` with its inverse frequencies (and YaRN blend) computed on the host in float64.
+
+  The base class evaluates `rope_theta ** fraction` in float32 on device, which inside `jit` on TPU drifts by up to
+  8 ULPs over most frequencies (|d cos| ~1.6e-3 at position 65535). Computing them on the host in float64 and
+  casting once to float32 matches the reference `precompute_freqs_cis` (YaRN without attention-temperature).
+  """
+
+  @property
+  def inv_freq(self):
+    dim, base = self.dim, float(self.rope_theta)
+    freqs = 1.0 / (base ** (np.arange(0, dim, 2, dtype=np.float64) / dim))
+    if self.rope_type == "yarn":
+      # pylint: disable=protected-access
+      low, high = YarnRotaryEmbedding._find_correction_range(
+          self.beta_fast, self.beta_slow, dim, base, self.original_max_position_embeddings, self.truncate
+      )
+      smooth = 1 - np.clip((np.arange(dim // 2, dtype=np.float64) - low) / max(high - low, 1e-3), 0, 1)
+      freqs = freqs / self.rope_factor * (1 - smooth) + freqs * smooth
+    return jnp.asarray(freqs.astype(np.float32))
 
 
 def compressed_visible_len(positions: Array, ratio: int) -> Array:
@@ -105,8 +128,10 @@ class DeepSeek41Compressor(nnx.Module):
     self.config = config
     self.compress_ratio = compress_ratio
     self.head_dim = config.head_dim
-    # The pooling runs in float32 (the reference promotes these weights to float32).
+    # The pooling runs in float32 (the reference promotes these weights to float32), at HIGHEST precision so TPU does
+    # not round the float32 operands to bf16 under the default `matmul_precision`.
     proj_dtype = jnp.float32 if compress_ratio > 1 else config.dtype
+    proj_precision = "highest" if compress_ratio > 1 else config.matmul_precision
     dense_kwargs = {
         "in_features_shape": config.emb_dim,
         "out_features_shape": self.head_dim,
@@ -116,7 +141,7 @@ class DeepSeek41Compressor(nnx.Module):
         "dtype": proj_dtype,
         "weight_dtype": config.weight_dtype,
         "quant": quant,
-        "matmul_precision": config.matmul_precision,
+        "matmul_precision": proj_precision,
         "shard_mode": config.shard_mode,
         "rngs": rngs,
     }
@@ -162,7 +187,7 @@ class DeepSeek41Indexer(nnx.Module):
       owns_k: bool,
       is_candidate_source: bool,
       uses_candidates: bool,
-      rotary_embedding: DeepSeekV4RotaryEmbedding,
+      rotary_embedding: DeepSeek41RotaryEmbedding,
       kernel_init: NdInitializer,
       quant: Optional[Quant] = None,
       *,
@@ -362,7 +387,7 @@ class DeepSeek41Attention(nnx.Module):
       rope_kwargs = {
           "rope_theta": config.rope_max_timescale,
       }
-    self.rotary_embedding = DeepSeekV4RotaryEmbedding(
+    self.rotary_embedding = DeepSeek41RotaryEmbedding(
         head_dim=self.head_dim,
         partial_rotary_factor=config.qk_rope_head_dim / self.head_dim,
         fprop_dtype=config.dtype,

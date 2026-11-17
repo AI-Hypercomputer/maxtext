@@ -4363,9 +4363,11 @@ def validate_deepseek41(cfg) -> None:
     raise ValueError(f"deepseek41: compress_ratios must be >= 0, got {ratios}.")
   if cfg.mhc_expansion_rate < 2:
     raise ValueError("deepseek41 requires hyper-connections (mhc_expansion_rate >= 2).")
-  if getattr(cfg, "packing", False) and getattr(cfg, "dataset_type", DatasetType.SYNTHETIC) != DatasetType.SYNTHETIC:
+  if getattr(cfg, "packing", False):
     # The attention masks, compressed KV and engram n-grams assume one sequence per row with positions from 0.
     raise ValueError("deepseek41 does not support packed sequences yet: set packing=False.")
+  if cfg.ds41_engram_layers and cfg.ds41_engram_max_ngram_size < 2:
+    raise ValueError("deepseek41: ds41_engram_max_ngram_size must be >= 2 when ds41_engram_layers is set.")
 
   kv_sources, index_sources = set(cfg.ds41_kv_source_layers), set(cfg.ds41_index_source_layers)
   for name, layers in (
@@ -6837,6 +6839,7 @@ class MaxTextConfig(
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.DEEPSEEK41,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.QWEN3_CUSTOM_MOE,
@@ -7492,6 +7495,7 @@ class RLConfig(
     # Shared with MaxTextConfig.set_derived_values_and_validate (this class does not inherit it).
     validate_loss_free_load_balancing(self)
     validate_compress_ratios(self)
+    validate_deepseek41(self)
 
     if self.optimizer_memory_host_offload:
       raise ValueError(
