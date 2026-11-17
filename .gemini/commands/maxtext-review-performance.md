@@ -30,10 +30,17 @@ concrete fix. Do not flag CPU usage or unrolled loops in offline scripts
     `jax.experimental.io_callback`, `jax.debug.callback`) in hot paths, or
     per-step token routing, sorting, mask construction, or metric aggregation
     performed on CPU every step when it can be expressed in JIT-compiled
-    `jnp`/`jax.lax` on device. Recommend keeping per-step metrics as on-device
-    `jax.Array`s and buffering them across steps so step `t` is materialized on
-    the host only after step `t + 1` is dispatched (e.g.,
-    `MetricLogger.buffer_and_write_metrics` in
+    `jnp`/`jax.lax` on device. Also flag NumPy tensor ops (`np.array`,
+    `np.concatenate`, `np.where`, etc.) on activations, logits, masks, or other
+    per-step device arrays in the forward, backward, or decode path; recommend
+    the `jnp`/`jax.lax` equivalent so XLA keeps them on device and fuses them.
+    Flag Python `if`/`while`/`for` conditions or `range()` bounds that depend
+    on the runtime value of a `jax.Array` (they fail under `jax.jit` or force a
+    host sync outside it); recommend `jnp.where`, `jax.lax.select`,
+    `jax.lax.cond`, `jax.lax.while_loop`, or `jax.lax.fori_loop`. Recommend
+    keeping per-step metrics as on-device `jax.Array`s and buffering them across
+    steps so step `t` is materialized on the host only after step `t + 1` is
+    dispatched (e.g., `MetricLogger.buffer_and_write_metrics` in
     `src/maxtext/common/metric_logger.py`, `MetricsRecorder` in
     `src/maxtext/training_engine/metrics.py`, or N-step windowed
     `jax.device_get`). Do not flag `np.*` on static shapes or config constants
@@ -48,8 +55,10 @@ concrete fix. Do not flag CPU usage or unrolled loops in offline scripts
     context parallelism); dense 2D/4D boolean or float causal/sliding masks
     (`jnp.tril`, `jnp.ones`) instead of procedural
     `splash_attention_mask._ComputableMask` subclasses (such as
-    `ChunkedCausalMask`) or segment IDs; or bespoke decoder attention that
-    bypasses `Attention`/`AttentionOp` (`src/maxtext/layers/attentions.py` and
+    `ChunkedCausalMask`) or segment IDs; dense `[H, S, S]` or `[B, H, S, S]`
+    relative-position or ALiBi-style bias tensors added to the logits; or
+    bespoke decoder attention that bypasses `Attention`/`AttentionOp`
+    (`src/maxtext/layers/attentions.py` and
     `src/maxtext/layers/attention_op.py`). When dot-product attention is
     legitimately used (e.g., fallback paths), flag additive masking
     (`logits + mask`) and recommend `apply_mask_to_logits` (`jnp.where`). Do not
