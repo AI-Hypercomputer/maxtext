@@ -1513,9 +1513,33 @@ class MoEGeneral(BaseModel):
   moe_quantize_combine_bwd_method: str | None = Field(
       "",
       description=(
-          "Quantization method for Token Combine backward All-Gather. "
-          "'' = unquantized BF16; 'rowwise' = dynamic token-wise FP8 E5M2; "
-          "'fixed,<bound>' = static per-tensor FP8 E5M2 (e.g. 'fixed,1.0', 'fixed,57344')."
+          "Quantization method for the Token Combine backward collective (leg 3). With use_ring_of_experts=True"
+          " (EP all-gather): '' = unquantized BF16; 'rowwise' = dynamic token-wise FP8 E5M2;"
+          " 'fixed,<bound>' = static per-tensor FP8 E5M2 (e.g. 'fixed,1.0', 'fixed,57344')."
+          " With use_ring_of_experts=False (EP ragged all-to-all): '', 'rowwise' (= 'rowwise@e5m2'), 'rowwise@e4m3'"
+          " or 'rowwise@e5m2'."
+      ),
+  )
+  moe_quantize_dispatch_fwd_method: str = Field(
+      "",
+      description=(
+          "Quantization of the Token Dispatch forward EP ragged all-to-all (leg 1, use_ring_of_experts=False):"
+          " '' = unquantized; 'rowwise' (= 'rowwise@e4m3'), 'rowwise@e4m3' or 'rowwise@e5m2' = FP8 values with a"
+          " dynamic f32 absmax scale per token, dequantized after the collective."
+      ),
+  )
+  moe_quantize_combine_fwd_method: str = Field(
+      "",
+      description=(
+          "Quantization of the Token Combine forward EP ragged all-to-all (leg 2, use_ring_of_experts=False):"
+          " '', 'rowwise' (= 'rowwise@e4m3'), 'rowwise@e4m3' or 'rowwise@e5m2'."
+      ),
+  )
+  moe_quantize_dispatch_bwd_method: str = Field(
+      "",
+      description=(
+          "Quantization of the Token Dispatch backward EP ragged all-to-all (leg 4, use_ring_of_experts=False):"
+          " '', 'rowwise' (= 'rowwise@e5m2'), 'rowwise@e4m3' or 'rowwise@e5m2'."
       ),
   )
   ragged_sort_use_single_sparsecore: bool = Field(
@@ -5279,18 +5303,75 @@ class MaxTextConfig(
         )
 
   def validate_moe_quantize_combine_bwd_method(self):
-    """Validates that moe_quantize_combine_bwd_method is only used with ring of experts."""
-    if self.moe_quantize_combine_bwd_method:
-      if not self.use_ring_of_experts:
-        raise ValueError(
-            f"moe_quantize_combine_bwd_method='{self.moe_quantize_combine_bwd_method}' requires use_ring_of_experts=True."
-        )
+    """Validates moe_quantize_combine_bwd_method on the ring of experts EP all-gather.
+
+    Without ring of experts the knob quantizes the EP ragged all-to-all and is validated by
+    validate_moe_quantize_a2a_methods.
+    """
+    if self.moe_quantize_combine_bwd_method and self.use_ring_of_experts:
       method = self.moe_quantize_combine_bwd_method
       if not (method == "rowwise" or method.startswith("fixed")):
         raise ValueError(
-            f"Unsupported moe_quantize_combine_bwd_method: '{method}'. "
+            f"Unsupported moe_quantize_combine_bwd_method: '{method}' with use_ring_of_experts=True. "
             "Supported options: '', 'rowwise', 'fixed,<bound>'."
         )
+
+  @staticmethod
+  def _validate_a2a_quant_method(knob: str, method: str):
+    """Validates one EP ragged all-to-all quantization method: 'rowwise', 'rowwise@e4m3' or 'rowwise@e5m2'."""
+    name, sep, fmt = method.partition("@")
+    base = name.split(",")[0]
+    if base.startswith("block") or base in ("tensor", "fixed"):
+      raise ValueError(
+          f"{knob}={method!r} is not implemented (Phase 3) on the EP ragged all-to-all."
+          " Supported: 'rowwise', 'rowwise@e4m3', 'rowwise@e5m2'."
+      )
+    if name != "rowwise" or (sep and fmt not in ("e4m3", "e5m2")):
+      raise ValueError(
+          f"Unsupported {knob}={method!r} on the EP ragged all-to-all."
+          " Supported: '', 'rowwise', 'rowwise@e4m3', 'rowwise@e5m2'."
+      )
+
+  def validate_moe_quantize_a2a_methods(self):
+    """Validates the per-leg FP8 quantization knobs of the EP ragged all-to-all (use_ring_of_experts=False)."""
+    a2a_knobs = {
+        name: getattr(self, name)
+        for name in (
+            "moe_quantize_dispatch_fwd_method",
+            "moe_quantize_combine_fwd_method",
+            "moe_quantize_dispatch_bwd_method",
+        )
+        if getattr(self, name)
+    }
+    if a2a_knobs and self.use_ring_of_experts:
+      raise ValueError(
+          f"{', '.join(f'{k}={v!r}' for k, v in a2a_knobs.items())} quantizes the EP ragged all-to-all and requires"
+          " use_ring_of_experts=False. With ring of experts use moe_quantize_token_all_gather and"
+          " moe_quantize_combine_bwd_method."
+      )
+    if not self.use_ring_of_experts and self.moe_quantize_combine_bwd_method:
+      a2a_knobs["moe_quantize_combine_bwd_method"] = self.moe_quantize_combine_bwd_method
+    if not a2a_knobs:
+      return
+    for knob, method in a2a_knobs.items():
+      self._validate_a2a_quant_method(knob, method)
+    # The wire is dequantized right after the collective, so any gmm backend consumes it; te_moe_block has its own EP
+    # path that never reaches these collectives.
+    requirements = {
+        "sparse_matmul=True": self.sparse_matmul,
+        "te_moe_block=False": not self.te_moe_block,
+    }
+    if missing := [req for req, ok in requirements.items() if not ok]:
+      raise ValueError(f"{', '.join(f'{k}={v!r}' for k, v in a2a_knobs.items())} requires {', '.join(missing)}.")
+    if not self.quantization:
+      max_logging.log(
+          f"WARNING: {', '.join(a2a_knobs)} quantizes the EP ragged all-to-all payloads to FP8 while"
+          " quantization='' (BF16 expert matmuls)."
+      )
+    if self.ici_expert_parallelism * self.dcn_expert_parallelism == 1:
+      max_logging.log(
+          f"WARNING: {', '.join(a2a_knobs)} has no effect with expert parallelism 1 (no EP ragged all-to-all)."
+      )
 
   @staticmethod
   def _load_mesh_config_from_yaml(rule_value: str) -> dict:
@@ -6690,6 +6771,7 @@ class MaxTextConfig(
     self.validate_moe_quantize_token_all_gather()
     self.validate_moe_topk_before_ep_all_gather()
     self.validate_moe_quantize_combine_bwd_method()
+    self.validate_moe_quantize_a2a_methods()
     self.validate_mllog()
     self.validate_splash_diag_skip()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()
