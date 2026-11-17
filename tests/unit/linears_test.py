@@ -898,6 +898,66 @@ class MlpBlockTest(unittest.TestCase):
     self.assertEqual(outputs.shape, (batch_size, seq_len, in_features))
     self.assertEqual(layer.wi.kernel[...].shape, (in_features, 1, intermediate_dim))
 
+  def test_fuse_wi_weights_bf16_and_fp8_parity(self):
+    batch_size = 2
+    seq_len = 3
+    in_features = 16
+    intermediate_dim = 32
+    inputs = jax.random.normal(jax.random.PRNGKey(42), (batch_size, seq_len, in_features), dtype=jnp.bfloat16)
+
+    # 1. BF16 gated MLP (wi_0, wi_1 -> wi)
+    layer_bf16 = linears.MlpBlock(
+        config=self.cfg,
+        mesh=self.mesh,
+        in_features=in_features,
+        intermediate_dim=intermediate_dim,
+        activations=("silu", "linear"),
+        dtype=jnp.bfloat16,
+        weight_dtype=jnp.bfloat16,
+        rngs=nnx.Rngs(params=0, dropout=1),
+    )
+    out_before = layer_bf16(inputs, deterministic=True)
+    self.assertTrue(hasattr(layer_bf16, "wi_0"))
+    self.assertTrue(hasattr(layer_bf16, "wi_1"))
+
+    self.assertEqual(linears.fuse_model_mlp_wi(layer_bf16), 1)
+    self.assertFalse(hasattr(layer_bf16, "wi_0"))
+    self.assertFalse(hasattr(layer_bf16, "wi_1"))
+    self.assertEqual(layer_bf16.wi.kernel[...].shape, (in_features, 2, intermediate_dim))
+    self.assertEqual(linears.fuse_model_mlp_wi(layer_bf16), 0)
+
+    out_after = layer_bf16(inputs, deterministic=True)
+    np.testing.assert_allclose(
+        np.asarray(out_before, dtype=np.float32),
+        np.asarray(out_after, dtype=np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+
+    # 2. Native FP8 gated MLP (wi_0, wi_1 + kernel_scale -> wi + kernel_scale)
+    layer_fp8 = linears.MlpBlock(
+        config=self.cfg,
+        mesh=self.mesh,
+        in_features=in_features,
+        intermediate_dim=intermediate_dim,
+        activations=("silu", "linear"),
+        dtype=jnp.bfloat16,
+        weight_dtype=jnp.float8_e4m3fn,
+        quant=quantizations.ServeFp8WeightQuantization(),
+        rngs=nnx.Rngs(params=2, dropout=3),
+    )
+    out_fp8_before = layer_fp8(inputs, deterministic=True)
+    self.assertTrue(layer_fp8.fuse_wi_weights())
+    self.assertEqual(layer_fp8.wi.kernel[...].shape, (in_features, 2, intermediate_dim))
+    self.assertEqual(layer_fp8.wi.kernel_scale[...].shape, (1, 2, 1))
+    out_fp8_after = layer_fp8(inputs, deterministic=True)
+    np.testing.assert_allclose(
+        np.asarray(out_fp8_before, dtype=np.float32),
+        np.asarray(out_fp8_after, dtype=np.float32),
+        rtol=1e-2,
+        atol=1e-2,
+    )
+
   @pytest.mark.tpu_only
   def test_dense_fsdp_two_stage_all_gather_tpu_only(self):
     """`dense_fsdp_use_two_stage_all_gather` is a pure resharding and must not change MLP numerics.

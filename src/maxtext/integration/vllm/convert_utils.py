@@ -616,6 +616,19 @@ def _fuse_and_unstack_moe(
   )
 
 
+@functools.partial(jax.jit, static_argnames=("scan_axis", "stack_axis"))
+def _fuse_and_unstack_mlp(
+    wi_0: jax.Array | np.ndarray,
+    wi_1: jax.Array | np.ndarray,
+    scan_axis: int,
+    stack_axis: int = -2,
+) -> Tuple[jax.Array | np.ndarray, ...]:
+  """Unstacks scanned `MlpBlock` `wi_0` and `wi_1` leaves and stacks them along `stack_axis`."""
+  unstacked_0 = jnp.unstack(wi_0, axis=scan_axis)
+  unstacked_1 = jnp.unstack(wi_1, axis=scan_axis)
+  return tuple(jnp.stack([w0, w1], axis=stack_axis) for w0, w1 in zip(unstacked_0, unstacked_1))
+
+
 def _align_to_model_shape(
     src_val: jax.Array | np.ndarray | jax.ShapeDtypeStruct,
     tgt_val: jax.Array | np.ndarray | jax.ShapeDtypeStruct,

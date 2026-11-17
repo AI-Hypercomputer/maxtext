@@ -38,6 +38,7 @@ from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
+from maxtext.layers import linears
 from tpu_inference.models.jax.utils.multi_modal_utils import merge_multimodal_embeddings
 from .multimodal import get_multimodal_handler
 
@@ -482,6 +483,14 @@ class MaxTextForCausalLM(nnx.Module):
       model = model_creation_utils.from_pretrained(
           self.maxtext_config, mesh=self.mesh, model_mode=self.model_mode, rng_key=rng_key
       )
+      if (
+          getattr(self.maxtext_config, "prefuse_moe_weights", False)
+          or getattr(self.maxtext_config, "fused_mlp", False)
+          or os.environ.get("FUSE_SHARED_EXPERT_WI", "0") == "1"
+      ):
+        num_fused = linears.fuse_model_mlp_wi(model)
+        if num_fused > 0:
+          max_logging.log(f"Fused {num_fused} MlpBlock wi_0/wi_1 projections into 3D wi.")
       if self.maxtext_config.lora.enable_lora:
         model = lora_utils.apply_lora_to_model(model, self.mesh, self.maxtext_config)
         if self.maxtext_config.lora.lora_restore_path:
