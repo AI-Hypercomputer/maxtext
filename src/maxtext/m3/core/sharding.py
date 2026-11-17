@@ -424,7 +424,13 @@ class DefaultSharding(Sharding):
   routed-expert weights shard `experts` over `"expert"`, `expert_embed` over
   `("fsdp", "fsdp_transpose", "context")`, and `expert_mlp` over
   `("tensor", "tensor_sequence")`; `heads`, `kv_heads`, `mlp`, and `vocab` shard
-  over `("tensor", "tensor_sequence")`; `norm` and `head_dim` stay replicated.
+  over `("tensor", "tensor_sequence")`; `stage`/`layers` shard over `stage`;
+  `norm` and `head_dim` stay replicated. Two axes cover dense weights that have
+  no `embed` dimension to carry FSDP: `ngram_vocab` (the row dimension of a
+  hashed n-gram embedding table, which can be the largest single weight of a
+  model) shards over `("fsdp", "fsdp_transpose", "context", "expert")` too, and
+  `conv_channels` (the channel dimension of a depthwise convolution kernel)
+  shards over `("fsdp", "fsdp_transpose", "expert")` (staying off `context`).
 
   Activations shard `batch` over `("data", "fsdp", "fsdp_transpose", "expert")`,
   `length` over `context` (all-gather K/V in natural token order), and
@@ -441,15 +447,44 @@ class DefaultSharding(Sharding):
   and the norm scale over `tensor`, whereas this leaves both replicated over
   `tensor` (use `tensor_sequence` instead of `tensor` to shard residual/norm
   activations along sequence).
+
+  When `expert_context_parallel=True` (EP = CP), the `expert` mesh axis carries the
+  sequence instead of the batch: `batch` shards over `("data", "fsdp", "fsdp_transpose")`,
+  `length` over `("context", "expert")`, and `norm_length` over
+  `("context", "tensor_sequence", "expert")`. Each expert shard then holds a slice of
+  every sequence, so the global batch only has to divide the data and FSDP shards,
+  which is what long sequences with few examples need. Weight rules are unchanged
+  except `conv_channels`, which leaves the `expert` axis: a convolution runs along
+  the sequence, so its kernel stays off the axes that carry it.
   """
+
+  expert_context_parallel: bool = False
 
   def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
     match axis, tensor_type:
       case "batch", TensorType.ACTIVATION:
+        if self.expert_context_parallel:
+          return ("data", "fsdp", "fsdp_transpose")
         return ("data", "fsdp", "fsdp_transpose", "expert")
       case "embed", TensorType.WEIGHT:
         return ("fsdp", "fsdp_transpose", "context", "expert")
       case "embed", TensorType.ACTIVATION:
+        return None
+      case "conv_channels", TensorType.WEIGHT:
+        # A convolution runs along the sequence. With its kernel on a mesh axis that carries the sequence, the
+        # partitioner gathers the sequence instead of exchanging the few tokens at the shard boundaries.
+        if self.expert_context_parallel:
+          return ("fsdp", "fsdp_transpose")
+        return ("fsdp", "fsdp_transpose", "expert")
+      case "ngram_vocab", TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose", "context", "expert")
+      case ("conv_channels" | "ngram_vocab"), TensorType.ACTIVATION:
+        return None
+      case ("stage" | "layers"), TensorType.WEIGHT:
+        return "stage"
+      case "stage", TensorType.ACTIVATION:
+        return "stage"
+      case "layers", TensorType.ACTIVATION:
         return None
       case "experts", _:
         return "expert"
@@ -462,8 +497,10 @@ class DefaultSharding(Sharding):
       case ("length" | "norm_length" | "kv_length"), TensorType.WEIGHT:
         return None
       case "length", TensorType.ACTIVATION:
-        return "context"
+        return ("context", "expert") if self.expert_context_parallel else "context"
       case "norm_length", TensorType.ACTIVATION:
+        if self.expert_context_parallel:
+          return ("context", "tensor_sequence", "expert")
         return ("context", "tensor_sequence")
       case "kv_length", TensorType.ACTIVATION:
         return None
@@ -474,9 +511,10 @@ class DefaultSharding(Sharding):
 
 
 def sharding_from_config(config: Any) -> DefaultSharding:
-  """Builds `DefaultSharding` from `config`."""
-  del config
-  return DefaultSharding()
+  """Builds `DefaultSharding` from `config` (`expert_context_parallel=False` by default)."""
+  return DefaultSharding(
+      expert_context_parallel=bool(getattr(config, "expert_context_parallel", False)),
+  )
 
 
 def _resolve_axis_sizes(
