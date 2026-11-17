@@ -678,6 +678,40 @@ class GCSTFRecordIterDataset(TFRecordIterDataset):
     return _GCSTFRecordDatasetIterator(self._path)
 
 
+def format_sharegpt(example):
+  """Convert a ShareGPT conversation into query and response fields."""
+  query = ""
+  response = ""
+  conversations = example.get("conversations", [])
+  if not isinstance(conversations, list):
+    raise TypeError(f"Expected 'conversations' to be a list, got {type(conversations).__name__}.")
+  for turn in conversations:
+    if not isinstance(turn, dict):
+      continue
+    if turn.get("from") == "human":
+      query = turn.get("value", "")
+    elif turn.get("from") == "gpt":
+      response = turn.get("value", "")
+      break
+  example["query"] = query
+  example["response"] = [response]
+  return example
+
+
+def maybe_format_sharegpt(element, text_columns):
+  """Element-wise ShareGPT conversion used by `dataset_type=hf` vision SFT when the query column is absent."""
+  if "conversations" in element and text_columns[0] not in element:
+    return format_sharegpt(element)
+  return element
+
+
+def add_default_prompt_to_element(element, prompt_column, default_prompt):
+  """Element-wise default prompt injection (e.g. COCO captioning datasets without a prompt column)."""
+  if prompt_column not in element:
+    element[prompt_column] = default_prompt
+  return element
+
+
 def make_tfrecord_iter_dataset(path: str):
   """Returns the appropriate TFRecordIterDataset for local or GCS paths."""
   if path.startswith("gs://"):
@@ -692,6 +726,84 @@ def make_parquet_iter_dataset(path: str, hf_access_token: str | None = None):
 
     return grain.experimental.ParquetIterDataset(path, filesystem=HfFileSystem(token=hf_access_token))
   return grain.experimental.ParquetIterDataset(path)
+
+
+if hasattr(grain.experimental, "HFIterDataset"):
+
+  class ShardOnceHFIterDataset(grain.experimental.HFIterDataset):
+    """`HFIterDataset` that is sharded across Grain workers exactly once.
+
+    In grain 0.2.19, `mp_prefetch` shards each worker's copy via `set_slice`, and the iterator then
+    shards it again by its multiprocessing context. With 2 workers each worker reads 1/4 of the data
+    (half is silently dropped); with more workers than half the shards it fails. Marking the
+    iterator as already sharded after `set_slice` keeps only the first sharding.
+    """
+
+    _sliced = False
+
+    def set_slice(self, sl: slice, sequential_slice: bool = False) -> None:
+      super().set_slice(sl, sequential_slice)
+      self._sliced = True
+
+    def __iter__(self):
+      iterator = super().__iter__()
+      if self._sliced:
+        iterator._sharded = True  # pylint: disable=protected-access
+      return iterator
+
+
+def make_hf_streaming_iter_dataset(
+    path: str,
+    *,
+    name: str | None = None,
+    data_dir: str | None = None,
+    data_files: str | list[str] | None = None,
+    split: str = "train",
+    hf_access_token: str | None = None,
+    dataloading_host_index: int = 0,
+    dataloading_host_count: int = 1,
+    grain_worker_count: int = 0,
+    num_epoch: int = 1,
+):
+  """Returns a Grain `IterDataset` streaming a Hugging Face dataset via `datasets.load_dataset`.
+
+  Accepts the same inputs as `dataset_type=hf`: a Hub repo id or a builder name (`json`, `csv`,
+  `text`, `parquet`, `arrow`, ...) with `data_files` pointing at local, `gs://` or `hf://` paths.
+  The dataset is split across data-loading hosts with `split_dataset_by_node` (by file when the
+  shard count is divisible by the host count, by example otherwise) and wrapped in
+  `grain.experimental.HFIterDataset`, which shards it further across Grain worker processes and
+  checkpoints the stream position.
+  """
+  import datasets  # pylint: disable=import-outside-toplevel
+  from datasets.distributed import split_dataset_by_node  # pylint: disable=import-outside-toplevel
+
+  if not hasattr(grain.experimental, "HFIterDataset"):
+    raise ImportError("grain_file_type=hf requires grain>=0.2.19 (grain.experimental.HFIterDataset).")
+
+  ds = datasets.load_dataset(
+      path,
+      name=name or None,
+      data_dir=data_dir or None,
+      data_files=data_files or None,
+      split=split,
+      streaming=True,
+      token=hf_access_token or None,
+  )
+  if dataloading_host_count > 1:
+    if ds.num_shards < dataloading_host_count:
+      max_logging.warning(
+          f"Hugging Face dataset {path} has {ds.num_shards} shards < {dataloading_host_count} data-loading hosts. "
+          "Every host reads every shard and keeps 1/host_count of the examples, which is slow."
+      )
+    ds = split_dataset_by_node(ds, rank=dataloading_host_index, world_size=dataloading_host_count)
+  if grain_worker_count > 1 and ds.num_shards < grain_worker_count:
+    raise ValueError(
+        f"grain_worker_count ({grain_worker_count}) exceeds the number of Hugging Face dataset shards per host "
+        f"({ds.num_shards}). Lower grain_worker_count to at most {ds.num_shards}."
+    )
+  if num_epoch > 1:
+    ds = ds.repeat(num_epoch)
+  return ShardOnceHFIterDataset(ds)  # pylint: disable=used-before-assignment  # Defined when grain>=0.2.19.
 
 
 def compute_file_sharding(file_count, host_index, host_count):

@@ -42,55 +42,8 @@ def _get_pad_id(tokenizer):
   return pad_id
 
 
-def _get_training_objective_transform(
-    config: ml_collections.ConfigDict,
-    *,
-    shift: bool,
-    use_dpo: bool,
-    use_sft: bool,
-    packing: bool,
-    pad_id: int,
-    bos_token_id: int | None,
-) -> input_pipeline_utils.ShiftData | input_pipeline_utils.BlockDiffusionCorruption | None:
-  """Selects target preparation for causal or block-diffusion training.
-
-  Args:
-    config: Training configuration containing the objective-specific settings.
-    shift: Whether causal language-model targets should be shifted by one token.
-    use_dpo: Whether the pipeline is preparing direct-preference data.
-    use_sft: Whether the pipeline is preparing supervised fine-tuning data.
-    packing: Whether multiple examples are packed into each sequence.
-    pad_id: Token ID used to pad causal language-model examples.
-    bos_token_id: Beginning-of-sequence token ID, or None when unavailable.
-
-  Returns:
-    The objective-specific Grain transform, or None when target shifting is disabled.
-
-  Raises:
-    ValueError: If the objective is unsupported or block diffusion is combined with
-      DPO or packing.
-  """
-  objective = getattr(config, "training_objective", "causal_lm")
-  if objective == "block_diffusion":
-    completion_only = bool(use_sft and getattr(config, "sft_train_on_completion_only", False))
-    if use_dpo:
-      raise ValueError("Block-diffusion training is not compatible with DPO.")
-    if packing:
-      raise ValueError("Block-diffusion training requires packing=False.")
-    return input_pipeline_utils.BlockDiffusionCorruption(
-        block_size=config.causal_block_size,
-        mask_id=config.block_diffusion_mask_id,
-        min_noise=config.block_diffusion_min_noise,
-        logit_alignment=config.block_diffusion_logit_alignment,
-        canvas_policy=config.block_diffusion_canvas_policy,
-        axis=1,
-        completion_only=completion_only,
-    )
-  if objective != "causal_lm":
-    raise ValueError(f"Unsupported training objective: {objective}")
-  if shift and not use_dpo:
-    return input_pipeline_utils.ShiftData(ignored_ids=[pad_id, bos_token_id], axis=1)
-  return None
+# Kept as an alias for existing callers; shared with the Grain pipeline.
+_get_training_objective_transform = data_processing_utils.get_training_objective_transform
 
 
 def add_default_prompt_if_missing(dataset, text_columns, config):
@@ -104,24 +57,7 @@ def add_default_prompt_if_missing(dataset, text_columns, config):
   return dataset
 
 
-def format_sharegpt(example):
-  """Convert a ShareGPT conversation into query and response fields."""
-  query = ""
-  response = ""
-  conversations = example.get("conversations", [])
-  if not isinstance(conversations, list):
-    raise TypeError(f"Expected 'conversations' to be a list, got {type(conversations).__name__}.")
-  for turn in conversations:
-    if not isinstance(turn, dict):
-      continue
-    if turn.get("from") == "human":
-      query = turn.get("value", "")
-    elif turn.get("from") == "gpt":
-      response = turn.get("value", "")
-      break
-  example["query"] = query
-  example["response"] = [response]
-  return example
+format_sharegpt = input_pipeline_utils.format_sharegpt
 
 
 def vision_sft_preprocessing_pipeline(
