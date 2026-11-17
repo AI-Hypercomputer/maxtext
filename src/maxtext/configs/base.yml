@@ -1860,3 +1860,6 @@ elastic_max_per_device_batch_size: -1
 # elastic_max_per_device_batch_size set to the nominal per-device batch (only gradient_accumulation_steps grows).
 # 0 disables the check. A no-op with "constant_grad_accum", whose per-device batch never grows.
 elastic_hbm_budget_fraction: 0.9
+
+##### Muse Spark
+muse_spark_moe_num_token_chunks: 1 # with expert parallelism, split each device's tokens into N sequential chunks
