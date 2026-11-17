@@ -1404,15 +1404,7 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
       flush=True,
   )
 
-  try:
-    from orbax.checkpoint.experimental.v1._src.synchronization import multihost as _ocp_mh
-
-    _ocp_mh._DEFAULT_BARRIER_TIMEOUT = max(
-        getattr(_ocp_mh, "_DEFAULT_BARRIER_TIMEOUT", 300),
-        int(os.environ.get("ORBAX_BARRIER_TIMEOUT_S", "1800")),
-    )
-  except ImportError:
-    pass
+  _configure_orbax_barrier_timeout()
   if jax.process_count() > 1:
     from jax.experimental import multihost_utils
 
@@ -1520,6 +1512,28 @@ def run_worker_to_maxtext_step3_load_orbax(args: argparse.Namespace) -> dict[str
       "parameter_checksums": checksums,
       **tpu_info,
   }
+
+
+def _configure_orbax_barrier_timeout(multihost_mod: Any | None = None) -> None:
+  """Raises Orbax v1's 300s default barrier timeout for multi-host GCS reads (`ORBAX_BARRIER_TIMEOUT_S`)."""
+  try:
+    if multihost_mod is None:
+      from orbax.checkpoint.experimental.v1._src.synchronization import multihost as multihost_mod  # pylint: disable=import-outside-toplevel
+
+    multihost_mod._DEFAULT_BARRIER_TIMEOUT = max(  # pylint: disable=protected-access
+        getattr(multihost_mod, "_DEFAULT_BARRIER_TIMEOUT", 300),
+        int(os.environ.get("ORBAX_BARRIER_TIMEOUT_S", "1800")),
+    )
+  except ImportError:
+    pass
+
+
+def _is_completed_result_to_skip(data: dict[str, Any], *, skip_failed: bool) -> bool:
+  """Returns True when an existing phase JSON represents an executed or dependency-skipped result."""
+  status = str(data.get("run_status") or data.get("status") or "")
+  if status == "SKIPPED" and str(data.get("error_summary") or "").strip().startswith("--"):
+    return False
+  return (data.get("status") != "FAILED" and status != "FAILED") or skip_failed
 
 
 _HF_DOWNLOAD_MAX_WORKERS = 16
@@ -1710,6 +1724,7 @@ def run_worker_safetensors_dynamic(args: argparse.Namespace) -> dict[str, Any]:
 
   header_info: dict[str, Any] = {}
 
+  _configure_orbax_barrier_timeout()
   if jax.process_count() > 1:
     from jax.experimental import multihost_utils
 
@@ -3219,6 +3234,18 @@ def _write_skipped_v2_result(
       worker_cached_times=[],
       skip_reason=skip_reason,
   )
+  if gcs_run_dir.startswith("gs://") and skip_reason.startswith("--"):
+    try:
+      from etils import epath  # pylint: disable=import-outside-toplevel
+
+      gcs_res = epath.Path(f"{gcs_run_dir.rstrip('/')}/logs/{model}/{scan_dir_name}/{phase}_result.json")
+      if gcs_res.exists():
+        existing_rec = json.loads(gcs_res.read_text(encoding="utf-8"))
+        if _is_completed_result_to_skip(existing_rec, skip_failed=True):
+          _write_result_json(result_json, existing_rec)
+          return existing_rec
+    except Exception:  # pylint: disable=broad-exception-caught
+      pass
   _write_result_json(result_json, v2_rec)
   if gcs_run_dir.startswith("gs://"):
     try:
@@ -3339,7 +3366,7 @@ def invoke_worker_subprocess(
   if skip_completed and os.path.exists(result_json):
     with open(result_json, "r", encoding="utf-8") as rf:
       data = json.load(rf)
-    if data.get("status") != "FAILED" or os.environ.get("SKIP_FAILED_RESULTS") == "1":
+    if _is_completed_result_to_skip(data, skip_failed=os.environ.get("SKIP_FAILED_RESULTS") == "1"):
       print(
           f"[SKIP COMPLETED]: {phase} | Model: {model} | Scan Mode: {scan_mode} "
           f"| Slices: {num_slices} -> {result_json}",
@@ -3365,7 +3392,7 @@ def invoke_worker_subprocess(
     if os.path.exists(scanned_json):
       with open(scanned_json, "r", encoding="utf-8") as rf:
         data = json.load(rf)
-      if data.get("status") != "FAILED":
+      if _is_completed_result_to_skip(data, skip_failed=False):
         shutil.copyfile(scanned_json, result_json)
         if os.path.exists(scanned_log):
           shutil.copyfile(scanned_log, log_file)

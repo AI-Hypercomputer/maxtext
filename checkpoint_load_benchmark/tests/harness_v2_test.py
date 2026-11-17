@@ -150,7 +150,9 @@ class HarnessV2Test(unittest.TestCase):
     self.assertTrue(harness_v2.compare_parameter_checksums(cs_a, cs_bad))
 
   def test_compute_local_shard_gb_and_build_v2_phase_record_validates(self):
-    fake_arr = types.SimpleNamespace(addressable_shards=[types.SimpleNamespace(data=np.zeros(2_000_000, dtype=np.uint8))])
+    fake_arr = types.SimpleNamespace(
+        addressable_shards=[types.SimpleNamespace(data=np.zeros(2_000_000, dtype=np.uint8))]
+    )
     self.assertAlmostEqual(harness_v2.compute_local_shard_gb({"a": fake_arr}), 0.002)
 
     rec_line = stages.StageRecorder()
@@ -527,6 +529,37 @@ mod.main()
       persisted = json.load(f)
       self.assertEqual(persisted["checksum_verification"], "MISMATCH")
       self.assertTrue(persisted["checksum_mismatches"])
+
+  def test_configure_orbax_barrier_timeout_applies_to_multihost_module(self):
+    harness = _load_harness_module()
+    fake_mh = types.SimpleNamespace(_DEFAULT_BARRIER_TIMEOUT=300)
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("ORBAX_BARRIER_TIMEOUT_S", None)
+      harness._configure_orbax_barrier_timeout(fake_mh)  # pylint: disable=protected-access
+      self.assertEqual(fake_mh._DEFAULT_BARRIER_TIMEOUT, 1800)  # pylint: disable=protected-access
+    with mock.patch.dict(os.environ, {"ORBAX_BARRIER_TIMEOUT_S": "3600"}):
+      harness._configure_orbax_barrier_timeout(fake_mh)  # pylint: disable=protected-access
+      self.assertEqual(fake_mh._DEFAULT_BARRIER_TIMEOUT, 3600)  # pylint: disable=protected-access
+
+  def test_is_completed_result_to_skip_reruns_cli_skipped_placeholder(self):
+    harness = _load_harness_module()
+    cli_skipped = {
+        "status": "SKIPPED",
+        "run_status": "SKIPPED",
+        "error_summary": "--skip-to-maxtext",
+    }
+    dep_skipped = {
+        "status": "SKIPPED",
+        "run_status": "SKIPPED",
+        "error_summary": "SKIPPED_DUE_TO_STEP2_FAILURE",
+    }
+    ok_res = {"status": "OK", "run_status": "OK"}
+    failed_res = {"status": "FAILED", "run_status": "FAILED"}
+    self.assertFalse(harness._is_completed_result_to_skip(cli_skipped, skip_failed=True))  # pylint: disable=protected-access
+    self.assertTrue(harness._is_completed_result_to_skip(dep_skipped, skip_failed=True))  # pylint: disable=protected-access
+    self.assertTrue(harness._is_completed_result_to_skip(ok_res, skip_failed=False))  # pylint: disable=protected-access
+    self.assertFalse(harness._is_completed_result_to_skip(failed_res, skip_failed=False))  # pylint: disable=protected-access
+    self.assertTrue(harness._is_completed_result_to_skip(failed_res, skip_failed=True))  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":
