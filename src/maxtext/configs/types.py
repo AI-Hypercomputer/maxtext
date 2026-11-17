@@ -1516,19 +1516,21 @@ class MoEGeneral(BaseModel):
           "Quantization method for the Token Combine backward collective (leg 3). With use_ring_of_experts=True"
           " (EP all-gather): '' = unquantized BF16; 'rowwise' = dynamic token-wise FP8 E5M2;"
           " 'fixed,<bound>' = static per-tensor FP8 E5M2 (e.g. 'fixed,1.0', 'fixed,57344')."
-          " With use_ring_of_experts=False (EP ragged all-to-all): '', 'rowwise' (= 'rowwise@e5m2'), 'rowwise@e4m3'"
-          " or 'rowwise@e5m2'."
+          " With use_ring_of_experts=False (EP ragged all-to-all): '', 'rowwise' or 'fixed,<bound>' (static scale"
+          " bound/qmax, values beyond +-bound saturate), with an optional '@e4m3' / '@e5m2' suffix (default E5M2)."
       ),
   )
   moe_quantize_dispatch_fwd_method: str = Field(
       "",
       description=(
-          "Quantization of the Token Dispatch forward EP ragged all-to-all (leg 1, use_ring_of_experts=False):"
-          " '' = unquantized; 'rowwise' (= 'rowwise@e4m3'), 'rowwise@e4m3' or 'rowwise@e5m2' = FP8 values with a"
-          " dynamic f32 absmax scale per token, dequantized after the collective. When the wi gmms are qwix-quantized"
-          " tokamax gmm_v2 calls with that act qtype and per-token absmax act calibration (scale factor >= 1), the"
-          " FP8 tokens instead pass straight into gmm_v2 (one scale per token in the activation dtype, no second"
-          " quantization)."
+          "Quantization of the Token Dispatch forward EP ragged all-to-all (leg 1, use_ring_of_experts=False),"
+          " dequantized after the collective: '' = unquantized; '<scaling>[@e4m3|@e5m2]' (default E4M3) = FP8 values"
+          " with scaling 'rowwise' (dynamic f32 absmax scale per token) or 'fixed,<bound>' (static scale bound/qmax,"
+          " values clipped to +-bound, no scale collective). With 'rowwise', when the wi gmms are"
+          " qwix-quantized tokamax gmm_v2 calls with that act qtype and per-token absmax act calibration (scale factor"
+          " >= 1), the FP8 tokens instead pass straight into gmm_v2 (one scale per token in the activation dtype, no"
+          " second quantization). 'fixed,<bound>' passes straight into gmm_v2 too, with any act calibration, when the"
+          " wi gmms are qwix-quantized tokamax gmm_v2 calls with that act qtype (the static f32 scale on every token)."
       ),
   )
   moe_quantize_dispatch_fwd_passthrough: bool = Field(
@@ -1542,14 +1544,15 @@ class MoEGeneral(BaseModel):
       "",
       description=(
           "Quantization of the Token Combine forward EP ragged all-to-all (leg 2, use_ring_of_experts=False):"
-          " '', 'rowwise' (= 'rowwise@e4m3'), 'rowwise@e4m3' or 'rowwise@e5m2'."
+          " same values as moe_quantize_dispatch_fwd_method."
       ),
   )
   moe_quantize_dispatch_bwd_method: str = Field(
       "",
       description=(
           "Quantization of the Token Dispatch backward EP ragged all-to-all (leg 4, use_ring_of_experts=False):"
-          " '', 'rowwise' (= 'rowwise@e5m2'), 'rowwise@e4m3' or 'rowwise@e5m2'."
+          " '', 'rowwise' or 'fixed,<bound>' (static scale bound/qmax, values beyond +-bound saturate), with an"
+          " optional '@e4m3' / '@e5m2' suffix (default E5M2)."
       ),
   )
   ragged_sort_use_single_sparsecore: bool = Field(
@@ -5328,19 +5331,23 @@ class MaxTextConfig(
 
   @staticmethod
   def _validate_a2a_quant_method(knob: str, method: str):
-    """Validates one EP ragged all-to-all quantization method: 'rowwise', 'rowwise@e4m3' or 'rowwise@e5m2'."""
+    """Validates one EP ragged all-to-all quantization method `<scaling>[@e4m3|@e5m2]`, on any leg.
+
+    Mirrors moe._parse_a2a_quant_method: scaling is 'rowwise' or 'fixed,<bound>' with bound > 0.
+    """
     name, sep, fmt = method.partition("@")
-    base = name.split(",")[0]
-    if base.startswith("block") or base in ("tensor", "fixed"):
-      raise ValueError(
-          f"{knob}={method!r} is not implemented (Phase 3) on the EP ragged all-to-all."
-          " Supported: 'rowwise', 'rowwise@e4m3', 'rowwise@e5m2'."
-      )
-    if name != "rowwise" or (sep and fmt not in ("e4m3", "e5m2")):
-      raise ValueError(
-          f"Unsupported {knob}={method!r} on the EP ragged all-to-all."
-          " Supported: '', 'rowwise', 'rowwise@e4m3', 'rowwise@e5m2'."
-      )
+    scaling, _, bound = name.partition(",")
+    supported = "'', 'rowwise', 'fixed,<bound>', each with an optional '@e4m3' / '@e5m2' suffix"
+    if scaling == "tensor" or scaling.startswith("block"):
+      raise ValueError(f"{knob}={method!r} is not implemented on the EP ragged all-to-all. Supported: {supported}.")
+    valid_fixed = False
+    if scaling == "fixed":
+      try:
+        valid_fixed = 0 < float(bound) < float("inf")
+      except ValueError:
+        pass
+    if not (name == "rowwise" or valid_fixed) or (sep and fmt not in ("e4m3", "e5m2")):
+      raise ValueError(f"Unsupported {knob}={method!r} on the EP ragged all-to-all. Supported: {supported}.")
 
   def validate_moe_quantize_a2a_methods(self):
     """Validates the per-leg FP8 quantization knobs of the EP ragged all-to-all (use_ring_of_experts=False)."""
