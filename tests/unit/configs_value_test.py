@@ -1878,5 +1878,29 @@ class MMapDatasetConfigTest(absltest.TestCase):
     self.assertEqual(config.packing_max_segments_per_sample, 0)
 
 
+class GrainReadOptionsConfigTest(absltest.TestCase):
+  """Tests pyconfig validation for Grain ReadOptions."""
+
+  def _initialize(self, *overrides):
+    return pyconfig.initialize(
+        ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false", "dataset_type=grain", *overrides]
+    )
+
+  def test_read_options_bounds(self):
+    cfg = self._initialize(
+        "grain_train_files=/tmp/train*",
+        "grain_num_threads=0",
+        "grain_prefetch_buffer_size=0",
+        "grain_num_threads_eval=0",
+        "grain_prefetch_buffer_size_eval=0",
+    )
+    self.assertEqual((cfg.grain_num_threads, cfg.grain_prefetch_buffer_size), (0, 0))
+    with self.assertRaises(pydantic.ValidationError):
+      self._initialize("grain_train_files=/tmp/train*", "grain_num_threads=-1")
+    for file_type in ("parquet", "tfrecord"):
+      with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "grain_num_threads.*must be > 0"):
+        self._initialize(f"grain_file_type={file_type}", "grain_train_files=/tmp/train*", "grain_num_threads=0")
+
+
 if __name__ == "__main__":
   absltest.main()
