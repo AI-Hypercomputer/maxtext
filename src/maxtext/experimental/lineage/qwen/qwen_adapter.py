@@ -443,13 +443,45 @@ def loss_and_aux(
       total_weights = local_weights
     return mean_loss, total_weights
 
-  mean_loss, total_weights = jax.shard_map(
-      _local_loss_and_weights,
-      mesh=model.mesh,
-      in_specs=(param_pspecs, data_pspec, data_pspec, data_pspec, data_pspec, data_pspec),
-      out_specs=(P(), P()),
-      check_vma=False,
-  )(
+  # Run `value_and_grad` *inside* `shard_map` via `custom_vjp` so the Lineage
+  # pipelined-scan custom_vjp sees shard-local tracers directly (matching
+  # `model.make_value_and_grad_fn`) rather than differentiating through `shard_map`.
+  @jax.custom_vjp
+  def _sharded_loss_and_weights(params_tree, toks, tgts, pos, seg, tmask):
+    return jax.shard_map(
+        _local_loss_and_weights,
+        mesh=model.mesh,
+        in_specs=(param_pspecs, data_pspec, data_pspec, data_pspec, data_pspec, data_pspec),
+        out_specs=(P(), P()),
+        check_vma=False,
+    )(params_tree, toks, tgts, pos, seg, tmask)
+
+  def _sharded_loss_fwd(params_tree, toks, tgts, pos, seg, tmask):
+    def _local_vag(p, tk, tg, ps, sg, tm):
+      def _loss_only(p_in):
+        return _local_loss_and_weights(p_in, tk, tg, ps, sg, tm)
+
+      (m_loss, t_weights), grads = jax.value_and_grad(_loss_only, has_aux=True)(p)
+      return m_loss, t_weights, grads
+
+    m_loss, t_weights, grads = jax.shard_map(
+        _local_vag,
+        mesh=model.mesh,
+        in_specs=(param_pspecs, data_pspec, data_pspec, data_pspec, data_pspec, data_pspec),
+        out_specs=(P(), P(), param_pspecs),
+        check_vma=False,
+    )(params_tree, toks, tgts, pos, seg, tmask)
+    return (m_loss, t_weights), (grads,)
+
+  def _sharded_loss_bwd(res, g_out):
+    (grads,) = res
+    g_loss, _ = g_out
+    scaled_grads = jax.tree.map(lambda g: g * g_loss.astype(g.dtype), grads)
+    return (scaled_grads, None, None, None, None, None)
+
+  _sharded_loss_and_weights.defvjp(_sharded_loss_fwd, _sharded_loss_bwd)
+
+  mean_loss, total_weights = _sharded_loss_and_weights(
       model.lineage_params(),
       inputs,
       targets,
