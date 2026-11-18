@@ -1347,6 +1347,32 @@ def from_pretrained(
           return full_dict
         return {k: _subset_dict(full_dict[k], target_keys_dict[k]) for k in target_keys_dict if k in full_dict}
 
+      def _tree_paths(tree, prefix=()):
+        """Yields the key path of every leaf in a nested dict (non-dict values are leaves)."""
+        if hasattr(tree, "items") and tree:
+          for k, v in tree.items():
+            yield from _tree_paths(v, prefix + (k,))
+        else:
+          yield prefix
+
+      def _only_rng_state_extra(target, meta_tree):
+        """Whether the checkpoint holds every target leaf and its only extra entries are NNX RNG state.
+
+        Checkpoints written from the full `nnx.state(model)` (e.g. Tunix's SFT checkpoint manager) also
+        persist `rngs` subtrees (RngKey/RngCount per stream). The restore target leaves `nnx.RngState`
+        out on purpose, and a strict (`partial_restore=False`) Orbax restore rejects those extra
+        on-disk entries. Restoring partially is safe only when nothing else differs: `partial_restore`
+        does not raise for target leaves missing on disk, so this check keeps that guarantee.
+        """
+        target_paths = set(_tree_paths(target))
+        meta_paths = set(_tree_paths(meta_tree))
+        # A target leaf may be a composite pytree (e.g. an AQT QTensor) stored as several on-disk leaves,
+        # so compare by prefix: a target leaf is on disk if it prefixes an on-disk leaf, and vice versa.
+        meta_prefixes = {m[:i] for m in meta_paths for i in range(1, len(m) + 1)}
+        missing = [t for t in target_paths if t not in meta_prefixes]
+        extra = [m for m in meta_paths if not any(m[:i] in target_paths for i in range(1, len(m) + 1))]
+        return not missing and bool(extra) and all("rngs" in m for m in extra)
+
       def _restore_and_update(target_subset, is_partial=True):
         if is_nnx_checkpoint:
           item = {"base": target_subset} if has_base_key else target_subset
@@ -1430,7 +1456,10 @@ def from_pretrained(
               f"({chunk_layer_keys[0]} to {chunk_layer_keys[-1]})."
           )
       else:
-        _restore_and_update(target_for_restore, is_partial=False)
+        _restore_and_update(
+            target_for_restore,
+            is_partial=is_nnx_checkpoint and _only_rng_state_extra(target_for_restore, meta_tree_for_params),
+        )
 
     if wrap_with_tunix_adapter:
       with mesh:
