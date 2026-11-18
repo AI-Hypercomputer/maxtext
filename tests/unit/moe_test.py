@@ -6384,5 +6384,144 @@ class Fp8MoeFakeQuantTest(unittest.TestCase):
           self._make_config("fp8_moe_block_scale_rejected", **{flag: True, "weight_block_size": 128})
 
 
+class MoeTransformBiasTest(parameterized.TestCase):
+  """Tests for RoutedMoE.transform_bias one-hot MXU projection."""
+
+  @parameterized.product(
+      dtype=[jnp.bfloat16, jnp.float16, jnp.float32],
+      num_experts=[8, 32],
+      idx_shape=[(128,), (16, 8)],
+  )
+  def test_transform_bias_fwd_and_bwd_parity(self, dtype, num_experts, idx_shape):
+    key = jax.random.PRNGKey(0)
+    k_idx, k_b0, k_b1, k_c0, k_c1 = jax.random.split(key, 5)
+    experts_idx = jax.random.randint(k_idx, idx_shape, 0, num_experts, dtype=jnp.int32)
+    b0 = jax.random.normal(k_b0, (num_experts, 64), dtype=dtype)
+    b1 = jax.random.normal(k_b1, (num_experts, 48), dtype=dtype)
+    cot0 = jax.random.normal(k_c0, (*idx_shape, 64), dtype=dtype)
+    cot1 = jax.random.normal(k_c1, (*idx_shape, 48), dtype=dtype)
+
+    out0, out_none, out1 = moe.RoutedMoE.transform_bias(None, experts_idx, b0, None, b1)
+    self.assertIsNone(out_none)
+    np.testing.assert_array_equal(np.asarray(out0), np.asarray(b0[experts_idx]))
+    np.testing.assert_array_equal(np.asarray(out1), np.asarray(b1[experts_idx]))
+
+    def loss_opt(b0_, b1_):
+      t0, _, t1 = moe.RoutedMoE.transform_bias(None, experts_idx, b0_, None, b1_)
+      return jnp.sum(t0 * cot0, dtype=jnp.float32) + jnp.sum(t1 * cot1, dtype=jnp.float32)
+
+    def loss_ref(b0_f32, b1_f32):
+      return jnp.sum(b0_f32[experts_idx] * cot0.astype(jnp.float32)) + jnp.sum(
+          b1_f32[experts_idx] * cot1.astype(jnp.float32)
+      )
+
+    db0_opt, db1_opt = jax.jit(jax.grad(loss_opt, argnums=(0, 1)))(b0, b1)
+    db0_ref, db1_ref = jax.jit(jax.grad(loss_ref, argnums=(0, 1)))(b0.astype(jnp.float32), b1.astype(jnp.float32))
+    self.assertEqual(db0_opt.dtype, dtype)
+    self.assertEqual(db1_opt.dtype, dtype)
+    tol = 1e-2 if dtype in (jnp.bfloat16, jnp.float16) else 1e-5
+    np.testing.assert_allclose(
+        np.asarray(db0_opt, np.float32), np.asarray(db0_ref.astype(dtype), np.float32), rtol=tol, atol=tol
+    )
+    np.testing.assert_allclose(
+        np.asarray(db1_opt, np.float32), np.asarray(db1_ref.astype(dtype), np.float32), rtol=tol, atol=tol
+    )
+
+  def test_transform_bias_shard_map_check_vma(self):
+    devices = np.array(jax.devices())
+    n_dev = devices.size
+    if n_dev >= 2 and n_dev % 2 == 0:
+      mesh = Mesh(devices.reshape(2, n_dev // 2), ("fsdp", "tensor"))
+      fsdp_size = 2
+    else:
+      mesh = Mesh(devices.reshape(n_dev, 1), ("fsdp", "tensor"))
+      fsdp_size = n_dev
+    experts_idx = jax.device_put(
+        jax.random.randint(jax.random.PRNGKey(1), (fsdp_size * 16,), 0, 8, dtype=jnp.int32),
+        jax.sharding.NamedSharding(mesh, P("fsdp")),
+    )
+    bias = jax.device_put(
+        jax.random.normal(jax.random.PRNGKey(2), (8, 64), dtype=jnp.bfloat16),
+        jax.sharding.NamedSharding(mesh, P(None, "tensor")),
+    )
+    cot = jax.device_put(
+        jax.random.normal(jax.random.PRNGKey(3), (fsdp_size * 16, 64), dtype=jnp.bfloat16),
+        jax.sharding.NamedSharding(mesh, P("fsdp", "tensor")),
+    )
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(P("fsdp"), P(None, "tensor")),
+        out_specs=P("fsdp", "tensor"),
+        check_vma=True,
+    )
+    def run_opt(idx, b):
+      (out,) = moe.RoutedMoE.transform_bias(None, idx, b)
+      return out
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=mesh,
+        in_specs=(P("fsdp"), P(None, "tensor")),
+        out_specs=P("fsdp", "tensor"),
+        check_vma=True,
+    )
+    def run_ref(idx, b):
+      return b[idx]
+
+    y_opt, vjp_opt = jax.vjp(run_opt, experts_idx, bias)
+    y_ref, vjp_ref = jax.vjp(run_ref, experts_idx, bias)
+    np.testing.assert_array_equal(np.asarray(y_opt), np.asarray(y_ref))
+    _, db_opt = vjp_opt(cot)
+    _, db_ref = vjp_ref(cot)
+    np.testing.assert_allclose(np.asarray(db_opt, np.float32), np.asarray(db_ref, np.float32), rtol=1e-2, atol=1e-2)
+
+  def test_transform_bias_bypasses_qwix_interception(self):
+    class _DummyBiasModule(nn.Module):
+      """Minimal module holding a bias parameter to test Qwix dot_general interception."""
+
+      @nn.compact
+      def __call__(self, experts_idx):  # pylint: disable=arguments-differ
+        bias = self.param(
+            "wi_0_bias",
+            lambda rng, shape: jnp.linspace(0.1234567, 1.9876543, int(np.prod(shape)), dtype=jnp.float32).reshape(shape),
+            (8, 16),
+        )
+
+        @jax.checkpoint
+        def _rematted(idx, b):
+          (out,) = moe.RoutedMoE.transform_bias(None, idx, b)
+          return out
+
+        return _rematted(experts_idx, bias)
+
+    experts_idx = jnp.array([0, 3, 7, 2, 5, 3], dtype=jnp.int32)
+    cot = jnp.linspace(-0.7654321, 1.3456789, 6 * 16, dtype=jnp.float32).reshape(6, 16)
+    ref_mod = _DummyBiasModule()
+    params = ref_mod.init(jax.random.PRNGKey(0), experts_idx)
+
+    rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        op_names=("dot_general",),
+    )
+    q_mod = qwix.quantize_model(ref_mod, qwix.QtProvider([rule]))
+    q_params = q_mod.init(jax.random.PRNGKey(0), experts_idx)
+
+    def loss_and_out(mod, p):
+      out = mod.apply(p, experts_idx)
+      return jnp.sum(out * cot), out
+
+    (_, ref_out), ref_grads = jax.jit(jax.value_and_grad(functools.partial(loss_and_out, ref_mod), has_aux=True))(params)
+    (_, q_out), q_grads = jax.jit(jax.value_and_grad(functools.partial(loss_and_out, q_mod), has_aux=True))(q_params)
+    np.testing.assert_array_equal(np.asarray(q_out), np.asarray(ref_out))
+    np.testing.assert_array_equal(
+        np.asarray(q_grads["params"]["wi_0_bias"]), np.asarray(ref_grads["params"]["wi_0_bias"])
+    )
+
+
 if __name__ == "__main__":
   absltest.main()
