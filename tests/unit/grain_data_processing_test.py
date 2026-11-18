@@ -1389,6 +1389,7 @@ class GrainMixtureReadOptionsBudgetTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       ("ceil_budget", "a,0.05;b,0.25;c,0.70", 16, 500, [(1, 25), (4, 125), (12, 350)]),
+      ("avoids_float_overshoot", "a,0.07;b,0.93", 16, 100, [(2, 7), (15, 93)]),
       ("caps_threads_at_buffer", "a,0.25;b,0.75", 16, 4, [(1, 1), (3, 3)]),
       ("zero_disables_prefetch", "a,3;b,7", 0, 0, [(0, 0), (0, 0)]),
   )

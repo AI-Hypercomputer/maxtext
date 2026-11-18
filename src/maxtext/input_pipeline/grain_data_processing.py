@@ -288,8 +288,8 @@ def _mix_iter_datasets(
 
   transformed = []
   for ds, w in zip(dataset_list, normalized_weights):
-    comp_buffer = math.ceil(grain_prefetch_buffer_size * w)
-    comp_threads = min(math.ceil(grain_num_threads * w), comp_buffer)
+    comp_buffer = math.ceil(round(grain_prefetch_buffer_size * w, 9))
+    comp_threads = min(math.ceil(round(grain_num_threads * w, 9)), comp_buffer)
     transformed.append(
         _apply_mapdataset_transforms(
             ds,
