@@ -1,0 +1,80 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Model config for Qwen 3.5 (397B-A17B) using Lineage batch-split schedule on TPU7x.
+
+decoder_block: "qwen3_5"
+
+# Core architecture (60L = 15 superblocks of [3 GDN + 1 FullAttn])
+base_emb_dim: 4096
+base_num_decoder_layers: 60
+base_num_query_heads: 32
+base_num_kv_heads: 2
+head_dim: 256
+vocab_size: 248320
+normalization_layer_epsilon: 1.0e-6
+
+# MoE (512 routed top-10 + 1 gated shared expert)
+base_mlp_dim: 1024
+base_moe_mlp_dim: 1024
+num_experts: 512
+shared_experts: 1
+num_experts_per_tok: 10
+norm_topk_prob: true
+float32_gate_logits: true
+
+# Gated DeltaNet
+inhomogeneous_layer_cycle_interval: 4
+gdn_conv_kernel_dim: 4
+gdn_key_head_dim: 128
+gdn_value_head_dim: 128
+gdn_num_key_heads: 16
+gdn_num_value_heads: 64
+gdn_chunk_size: 64
+
+# RoPE
+rope_max_timescale: 10000000
+partial_rotary_factor: 0.25
+
+enable_dropout: false
+use_lineage: true
+lineage_quantization: "fp8_full"
+ragged_buffer_factor: 1.05
+num_vocab_tiling: 2
+
+# SplashAttention block sizes
+sa_block_q: 1024
+sa_block_kv: 1024
+sa_block_kv_compute: 1024
+sa_block_q_dkv: 1024
+sa_block_kv_dkv: 1024
+sa_block_kv_dkv_compute: 1024
+
+# Core-minor TPU7x mesh: ('fsdp', 'expert', 'ep_d2d') for 256c (512 TCs) default.
+# Override ici_parallelism for 64c ([16, 4, 2]), 128c ([16, 8, 2]), or 512c ([64, 8, 2]).
+mesh_axes: ['fsdp', 'expert', 'ep_d2d']
+ici_fsdp_parallelism: 32
+ici_expert_parallelism: 8
+ici_parallelism: [32, 8, 2]
+dcn_parallelism: [1, 1, 1]
+data_sharding: [['fsdp', 'expert', 'ep_d2d']]
+override_logical_axis_rules: true
+logical_axis_rules: [
+  ['activation_batch', ['fsdp', 'expert', 'ep_d2d']],
+  ['activation_embed_and_logits_batch', ['fsdp', 'expert', 'ep_d2d']],
+  ['activation_embed_and_logits_batch_sequence', ['fsdp', 'expert', 'ep_d2d']],
+  ['activation_kv_batch', ['fsdp', 'expert', 'ep_d2d']],
+]
+
+compile_xla_flags: "--xla_tpu_use_tc_device_shape_on_sc=true --xla_sc_disable_megacore_partitioning=true --xla_tpu_offload_gather_to_sparsecore=false --xla_tpu_num_sparse_cores_for_gather_offloading=1 --xla_tpu_enable_offloading_scatter_to_sparsecore=false --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_reduce_scatter=true --xla_tpu_enable_sparse_core_collective_offload_nd_reduce_scatter=true --xla_tpu_enable_sparse_core_collective_offload_all_reduce=true --xla_tpu_enable_sparse_core_collective_offload_ragged_all_to_all=false --xla_tpu_enable_async_ragged_all_to_all=false --xla_tpu_sparse_core_all_gather_offload_min_size_in_bytes=250000 --xla_tpu_sparse_core_reduce_scatter_offload_min_size_in_bytes=250000 --xla_tpu_sparse_core_all_reduce_offload_min_size_in_bytes=2000000 --xla_tpu_enable_sparse_core_reduce_scatter_v2=true --xla_tpu_enable_all_experimental_scheduler_features=true --xla_tpu_nd_short_transfer_max_chunks=2048 --xla_tpu_use_single_sparse_core_for_all_gather_offload=false --xla_tpu_use_single_sparse_core_for_reduce_scatter_offload=false --xla_tpu_use_single_sparse_core_for_all_reduce_offload=false --xla_tpu_enable_concurrent_sparse_core_offloading=true --xla_tpu_aggressive_opt_barrier_removal=false --xla_tpu_scoped_vmem_limit_kib=65472 --xla_tpu_enable_sublane_major_scaling_bitcast_fusion=false --xla_tpu_dvfs_p_state=7 --xla_tpu_enable_offloading_copy_to_sparsecore=false --xla_tpu_disable_sparse_core_collective_offload_remover=true --xla_tpu_sparse_core_reduce_scatter_latency_multiplier=6 --xla_tpu_pcie_bandwidth_multiplier=0.05 --xla_tpu_enable_sparse_core_hierarchical_reduce_scatter=true --xla_tpu_enable_sparse_core_hierarchical_all_reduce=true --xla_tpu_enable_reduce_scatter_span_buffer_utilization_optimization=true --xla_tpu_enable_sparse_core_reduce_scatter_padding=true --xla_sc_tile_tasks_prefetch_ahead=4 --xla_tpu_scheduler_percent_shared_memory_limit=112 --xla_jf_rematerialization_percent_shared_memory_limit=86 --xla_tpu_autofdo=false"
