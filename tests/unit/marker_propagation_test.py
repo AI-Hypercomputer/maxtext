@@ -21,6 +21,7 @@ from unittest import mock
 from absl.testing import parameterized
 import jax
 
+from tests.conftest import _restore_jax_prng_and_libtpu_env
 from tests.conftest import pytest_collection_modifyitems
 
 
@@ -110,6 +111,16 @@ class MarkerPropagationTest(parameterized.TestCase):
     self.assertNotIn("cpu_only", get_added_names(item_tpu))
     self.assertNotIn("cpu_only", get_added_names(item_gpu))
     self.assertNotIn("cpu_only", get_added_names(item_cpu))
+
+  def test_restore_jax_use_shardy_partitioner(self):
+    """Verifies _restore_jax_prng_and_libtpu_env restores jax_use_shardy_partitioner."""
+    prev_shardy = getattr(jax.config, "jax_use_shardy_partitioner", True)
+    self.addCleanup(jax.config.update, "jax_use_shardy_partitioner", prev_shardy)
+    jax.config.update("jax_use_shardy_partitioner", True)
+    with _restore_jax_prng_and_libtpu_env():
+      jax.config.update("jax_use_shardy_partitioner", False)
+      self.assertFalse(jax.config.jax_use_shardy_partitioner)
+    self.assertTrue(jax.config.jax_use_shardy_partitioner)
 
 
 if __name__ == "__main__":

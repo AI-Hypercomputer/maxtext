@@ -30,6 +30,8 @@ import pytest
 from tempfile import gettempdir, NamedTemporaryFile
 
 
+from maxtext.configs import pyconfig
+from maxtext.trainers.pre_train.train_compile import get_topology_mesh
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path
@@ -1819,3 +1821,20 @@ class TrainCompile(parameterized.TestCase):
             "override_model_config=True",
         )
     )
+
+  def test_get_topology_mesh_updates_shardy_partitioner(self):
+    """Verifies get_topology_mesh updates jax_use_shardy_partitioner from config.shardy."""
+    prev_shardy = getattr(jax.config, "jax_use_shardy_partitioner", True)
+    self.addCleanup(jax.config.update, "jax_use_shardy_partitioner", prev_shardy)
+    jax.config.update("jax_use_shardy_partitioner", False)
+    config = pyconfig.initialize(
+        (
+            "",
+            get_test_config_path(),
+            "compile_topology=v6e-4",
+            "compile_topology_num_slices=1",
+            "shardy=True",
+        )
+    )
+    get_topology_mesh(config)
+    self.assertTrue(jax.config.jax_use_shardy_partitioner)
