@@ -16,19 +16,22 @@
 # AOT memory check of the e2e trainer program (Tunix GRPO loss, packed micro-batch with router replay,
 # fwd_bwd / accumulate / update) with maxtext.training_engine.maxtext_engine_compile.
 #
-#   LAUNCH_RENDER=<file> [IMAGE=<image>] [TRAINER_SLICE=4x8x8] [COMPILE_TOPOLOGY=tpu7x-512]
-#   [EXTRA_MAXTEXT_FLAGS=... REPLACE_MAXTEXT_FLAGS=... LIBTPU_EXTRA=... LIBTPU_DROP=... COMPUTE_LOGPS_CHUNK_SIZE=...]
-#   [LOG=<file>] bash run_trainer_compile.sh [extra MaxText key=value ...]
+#   LAUNCH_RENDER=<file> [TUNIX_ROOT=<tunix checkout>] [IMAGE=<image>] [TRAINER_SLICE=4x8x8]
+#   [COMPILE_TOPOLOGY=tpu7x-512] [EXTRA_MAXTEXT_FLAGS=... REPLACE_MAXTEXT_FLAGS=... LIBTPU_EXTRA=... LIBTPU_DROP=...
+#   COMPUTE_LOGPS_CHUNK_SIZE=...] [LOG=<file>] bash run_trainer_compile.sh [extra MaxText key=value ...]
+#
+# LAUNCH_RENDER is the `--dry-run` output of a Tunix dist_rl launch; TUNIX_ROOT (default: the installed tunix
+# package's checkout) holds its relative override_config_file= paths.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../../.." && pwd)"
-: "${LAUNCH_RENDER:?set LAUNCH_RENDER to the DRY_RUN output of your e2e launch}"
+: "${LAUNCH_RENDER:?set LAUNCH_RENDER to the --dry-run output of your e2e launch}"
 _aot_env=$("${PYTHON:-python3}" "$SCRIPT_DIR/render_trainer_jobset.py" --print-aot-env --launch-render "$LAUNCH_RENDER" \
   --extra-maxtext-flags "${EXTRA_MAXTEXT_FLAGS:-}" --replace-maxtext-flags "${REPLACE_MAXTEXT_FLAGS:-}" \
   --libtpu-extra="${LIBTPU_EXTRA:-}" --libtpu-drop="${LIBTPU_DROP:-}" --trainer-slice "${TRAINER_SLICE:-}" \
-  --compute-logps-chunk-size "${COMPUTE_LOGPS_CHUNK_SIZE:-}")
+  --compute-logps-chunk-size "${COMPUTE_LOGPS_CHUNK_SIZE:-}" ${TUNIX_ROOT:+--tunix-root "$TUNIX_ROOT"})
 eval "$_aot_env"
 
 _run_name="$(date -u +%Y%m%dT%H%M%SZ)"

@@ -16,15 +16,17 @@
 
 Runs as the Pathways client in the trainer pod without an orchestrator or
 rollout engines, driving the same Tunix + MaxText trainer objects and training
-loop as the end-to-end distributed RL pipeline:
-  * trainer: `run_trainer_node._parse_args`, `_create_maxtext_trainer_factory`,
-    and `TrainerWorker` (the MaxText training engine wrapped in the Tunix
-    adapter), built from the e2e trainer's `TRAINER_ARGV` and
-    `MAXTEXT_EXTRA_FLAGS`;
-  * algorithm and inputs: `run_deepswe_dist._parse_args` and `_build_algo`
-    (`GRPOConfig`) from the e2e orchestrator's `ORCH_ARGV`, the program's
-    `BatchConfig` and `create_batch_assembler` as `StandardRLProgram` builds
-    them, and `build_warmup_payload`, which runs synthetic trajectories through
+loop as the end-to-end distributed RL pipeline. Every e2e process gets the same
+config arguments (`override_config_file=...` and `section.key=value`, resolved
+by `tunix.dist_rl.launch.common.resolve_config.initialize`); the driver takes
+them from `CONFIG_ARGV`:
+  * trainer: `tunix.dist_rl.launch.nodes.trainer`'s
+    `_create_maxtext_trainer_factory` and `TrainerWorker` (the MaxText training
+    engine wrapped in the Tunix adapter), as `trainer.main` builds them;
+  * algorithm and inputs: `tunix.dist_rl.launch.nodes.orchestrator`'s
+    `build_grpo_config` (`GRPOConfig`) and `build_batch_config`, with
+    `create_batch_assembler` as `StandardRLProgram` builds them, and
+    `build_warmup_payload`, which runs synthetic trajectories through
     `payload_builder.create_trainer_payloads` and the batch assembler;
   * configure_worker: `DistributedRLEngine.configure_worker` for the `ACTOR`
     role (`loss_fn` with `has_aux=True`, `gen_model_input_fn` with the
@@ -46,42 +48,35 @@ and `UNSET` routed experts, producing a degenerate MoE load).
 
 Numerics knobs (`moe_exclude_padding_from_routing` on/off A/B):
 `ADVANTAGES=random` assigns each segment a seeded `N(0, 1)` advantage while
-keeping token IDs and routing identical; `LOGP_GATES=off` strips the
-orchestrator's `--seq_logprob_error_threshold` and
-`--truncated_importance_sampling_*`
-flags so synthetic rollout log-probs (`-0.7`) are not masked out against a
-randomly initialized model. After each step, the driver logs `STEP_LOSS`
-and `STEP_METRICS` lines with pooled and per-micro-batch metrics.
+keeping token IDs and routing identical; `LOGP_GATES=off` sets the
+`agentic_grpo_config` rejection gates (`seq_logprob_error_threshold` and
+`sampler_rs*`) to null so synthetic rollout log-probs (`-0.7`) are not masked
+out against a randomly initialized model. After each step, the driver logs
+`STEP_LOSS` and `STEP_METRICS` lines with pooled and per-micro-batch metrics.
 
-The only intended difference from e2e is random weight initialization (no
-checkpoint loaded), preserving identical shapes, shardings, and XLA programs.
+The only intended difference from e2e is random weight initialization (the
+driver clears `actor_model_config.model_path` after resolving the config, so no
+checkpoint is loaded), preserving identical shapes, shardings, and XLA programs.
 """
 
 # pylint: disable=broad-exception-caught,g-import-not-at-top,import-outside-toplevel,no-name-in-module,protected-access
 
+from collections.abc import MutableMapping
 import dataclasses
 import logging
 import os
 import shlex
 import sys
 import time
-import types
 from typing import Any
 
 import jax
 import numpy as np
-from transformers import AutoTokenizer
 from tunix.dist_rl.common import datatypes
-from tunix.dist_rl.examples.common import run_trainer_node
-
-try:
-  from tunix.dist_rl.examples.deepswe_dist import run_deepswe_dist
-except ModuleNotFoundError:
-  sys.modules.setdefault(
-      "tunix.dist_rl.examples.deepswe_dist.deepswe",
-      types.SimpleNamespace(DEFAULT_DATASET_NAME="R2E-Gym/R2E-Gym-Subset"),
-  )
-  from tunix.dist_rl.examples.deepswe_dist import run_deepswe_dist
+from tunix.dist_rl.launch.common import resolve_config
+from tunix.dist_rl.launch.nodes import node_utils
+from tunix.dist_rl.launch.nodes import orchestrator
+from tunix.dist_rl.launch.nodes import trainer as trainer_node
 from tunix.dist_rl.orchestrator import batch_assembly
 from tunix.dist_rl.orchestrator import payload_builder
 from tunix.dist_rl.worker import trainer_worker
@@ -97,14 +92,15 @@ logging.basicConfig(
 
 UNSET_ROUTED_EXPERT = -1  # tunix.dist_rl.common.datatypes.UNSET_ROUTED_EXPERT
 
-# Orchestrator flags of the sampler-vs-trainer log-prob gates (GRPO loss:
-# `sequence_loss_mask` and `truncated_importance_weights`). LOGP_GATES=off
-# strips them, so they take their argparse default None (gate off).
-LOGP_GATE_FLAGS = (
-    "--seq_logprob_error_threshold",
-    "--truncated_importance_sampling_type",
-    "--truncated_importance_sampling_ratio_min",
-    "--truncated_importance_sampling_ratio",
+# Config keys of the sampler-vs-trainer log-prob gates that drop sequences or
+# tokens from the GRPO loss (`seq_logprob_error_threshold`, and `sampler_rs`
+# with its keep-band). LOGP_GATES=off sets them to null (gate off);
+# `sampler_is` only truncates the importance ratio and is kept.
+LOGP_GATE_KEYS = (
+    "agentic_grpo_config.seq_logprob_error_threshold",
+    "agentic_grpo_config.sampler_rs",
+    "agentic_grpo_config.sampler_rs_min",
+    "agentic_grpo_config.sampler_rs_max",
 )
 
 # Default routing calibration. Per-layer max expert-shard load ratio (EP=8) of
@@ -371,19 +367,9 @@ def payload_shard_load_ratio(payload, *, num_experts, ep=8, ep_rows=2, context=4
   return best, pad
 
 
-def strip_logp_gates(argv):
-  """Removes sampler-vs-trainer log-prob gate flags from `argv`."""
-  out, skip = [], False
-  for t in argv:
-    if skip:
-      skip = False
-      continue
-    name = t.split("=", 1)[0]
-    if name in LOGP_GATE_FLAGS:
-      skip = "=" not in t
-      continue
-    out.append(t)
-  return out
+def disable_logp_gates(config_argv: list[str]) -> list[str]:
+  """Appends overrides that turn the `LOGP_GATE_KEYS` gates off (last wins)."""
+  return [*config_argv, *(f"{key}=null" for key in LOGP_GATE_KEYS)]
 
 
 def summarize_metrics(buf):
@@ -488,16 +474,20 @@ def build_warmup_payload(
 
 def main() -> int:
   """Initializes the trainer worker, compiles kernels, and runs timed steps."""
-  trainer_argv = shlex.split(os.environ["TRAINER_ARGV"])
-  orch_argv = shlex.split(os.environ["ORCH_ARGV"])
+  if "MAXTEXT_EXTRA_FLAGS" in os.environ:
+    raise ValueError(
+        "MAXTEXT_EXTRA_FLAGS is not read; set the MaxText keys as"
+        " dist_training_config.maxtext_extra_config.<key>=<value> in CONFIG_ARGV."
+    )
+  config_argv = shlex.split(os.environ["CONFIG_ARGV"])
   # LOGP_GATES=off (numerics A/B): the payload's rollout log-probs are
   # synthetic (-0.7 per completion token), so against a random-init trainer
-  # the seq_logprob_error_threshold and seq-mask-tis gates drop every sequence,
-  # the loss mask is empty and the gradient is exactly 0. Stripping the gate
-  # flags keeps every sequence in the loss.
+  # the seq_logprob_error_threshold and sampler_rs gates drop every sequence,
+  # the loss mask is empty and the gradient is exactly 0. Turning the gates
+  # off keeps every sequence in the loss.
   logp_gates = os.environ.get("LOGP_GATES", "on")
   if logp_gates == "off":
-    orch_argv = strip_logp_gates(orch_argv)
+    config_argv = disable_logp_gates(config_argv)
   elif logp_gates != "on":
     raise ValueError(f"LOGP_GATES must be on or off, got {logp_gates!r}")
   steps = int(os.environ.get("STEPS", "3"))
@@ -508,20 +498,33 @@ def main() -> int:
 
     pathwaysutils.initialize()
 
-  t_args = run_trainer_node._parse_args(trainer_argv)
-  o_args = run_deepswe_dist._parse_args(orch_argv)
-  if o_args.mini_batch_size is None:
-    o_args.mini_batch_size = o_args.batch_size
-  logging.info("Trainer args: %s", t_args)
-  logging.info("Orchestrator args: %s", o_args)
+  hp = resolve_config.initialize(config_argv)
+  actor_config = hp.config["actor_model_config"]
+  if not isinstance(actor_config, MutableMapping):
+    raise TypeError(f"actor_model_config must be a mutable mapping, got {type(actor_config).__name__}.")
+  if actor_config["model_source"] != "maxtext":
+    raise ValueError(
+        "run_trainer benchmarks the MaxText trainer; set model_config.model_source=maxtext,"
+        f" got actor_model_config.model_source={actor_config['model_source']!r}."
+    )
+  # Random init, the one intended difference from e2e: the resolver requires a
+  # MaxText checkpoint path, so it is cleared after resolution.
+  actor_config["model_path"] = ""
+  node_utils.apply_library_env(hp, "trainer")
+  node_utils.log_resolved_config(hp, "trainer")
+  rl_train = hp.config_mapping("rl_training_config")
+  rollout_config = hp.config_mapping("rollout_config")
+  max_prompt_length = int(rollout_config["max_prompt_length"])
+  max_response_length = int(rollout_config["total_generation_steps"])
 
-  # Trainer worker, as run_trainer_node.main builds it.
-  trainer_factory, mesh = run_trainer_node._create_maxtext_trainer_factory(t_args)
+  # Trainer worker, mirroring tunix.dist_rl.launch.nodes.trainer.main.
+  worker_id = node_utils.worker_id(hp, "trainer", trainer_node.LOCAL_WORKER_ID)
+  trainer_factory, mesh = trainer_node._create_maxtext_trainer_factory(hp, worker_id)  # pylint: disable=protected-access
   worker = trainer_worker.TrainerWorker(
       trainer_factory=trainer_factory,
-      worker_id=t_args.worker_id,
-      logps_chunk_size=t_args.compute_logps_chunk_size,
-      logps_micro_batch_size=t_args.compute_logps_micro_batch_size,
+      worker_id=worker_id,
+      logps_chunk_size=int(rl_train["compute_logps_chunk_size"]),
+      logps_micro_batch_size=int(rl_train["compute_logps_micro_batch_size"]),
       execution_context=mesh,
   )
   t0 = time.monotonic()
@@ -532,38 +535,23 @@ def main() -> int:
       jax.device_count(),
   )
 
-  # Tokenizer ids, as run_deepswe_dist.main derives them.
-  tokenizer_path = o_args.tokenizer_path or os.getenv("MODEL_DIR") or o_args.model_id
-  tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
-  if tokenizer.pad_token_id is None and tokenizer.eos_token is not None:
-    tokenizer.pad_token = tokenizer.eos_token
-  pad_id = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
-  eos_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else pad_id
+  # Tokenizer ids, as tunix.dist_rl.launch.nodes.orchestrator.main derives them.
+  tokenizer = node_utils.load_hf_tokenizer(hp)
+  pad_id, eos_id = node_utils.pad_and_eos_ids(tokenizer)
 
-  # Algorithm, BatchConfig and assembler, as run_deepswe_dist.main /
-  # StandardRLProgram build them.
-  algo_config = run_deepswe_dist._build_algo(o_args)
-  algo_config.temperature = o_args.temperature
+  # Algorithm, BatchConfig and assembler, as the orchestrator node /
+  # StandardRLProgram build them (the program sets the algorithm's temperature
+  # from the generation args).
+  algo_config = orchestrator.build_grpo_config(hp)
+  algo_config.temperature = orchestrator.build_generation_args(hp).temperature
   trainer: Any = worker._trainer
   cfg = trainer._config
   if cfg.num_experts > 1 and algo_config.routed_experts_num_experts is None:
     algo_config.routed_experts_num_experts = int(cfg.num_experts)
 
-  num_data_shards = o_args.num_data_shards or (t_args.mesh_fsdp * t_args.mesh_expert)
-  batch_config = batch_assembly.BatchConfig(
-      pad_id=pad_id,
-      eos_id=eos_id,
-      mini_batch_size=o_args.mini_batch_size,
-      train_micro_batch_size=o_args.train_micro_batch_size,
-      max_prompt_length=o_args.max_prompt_length,
-      max_response_length=o_args.max_response_length,
-      max_seq_token_per_tpu=o_args.max_seq_token_per_tpu,
-      max_segments_per_packed_row=o_args.max_segments_per_packed_row,
-      segment_alignment_boundary=o_args.segment_alignment_boundary,
-      num_data_shards=num_data_shards,
-  )
+  batch_config = orchestrator.build_batch_config(hp, pad_id=pad_id, eos_id=eos_id)
   assembler = batch_assembly.create_batch_assembler(
-      num_generations=o_args.num_generations,
+      num_generations=algo_config.num_generations,
       batch_config=batch_config,
   )
 
@@ -591,8 +579,8 @@ def main() -> int:
   payload = build_warmup_payload(
       algo_config=algo_config,
       assembler=assembler,
-      max_prompt_length=o_args.max_prompt_length,
-      max_response_length=o_args.max_response_length,
+      max_prompt_length=max_prompt_length,
+      max_response_length=max_response_length,
       pad_id=a_pad,
       routed_experts_shape=routed_shape,
   )
@@ -607,7 +595,7 @@ def main() -> int:
   if mode == "realistic":
     knobs = {
         "num_experts": int(cfg.num_experts),
-        "ep": int(os.environ.get("EP_SIZE", getattr(t_args, "mesh_expert", 8))),
+        "ep": int(os.environ.get("EP_SIZE", hp.mesh_axes("actor_model_config")["expert"])),
         "routing": os.environ.get("ROUTING", "probe"),
         "scale": float(os.environ.get("ROUTING_SCALE", "1.0")),
         "pad_id": a_pad,

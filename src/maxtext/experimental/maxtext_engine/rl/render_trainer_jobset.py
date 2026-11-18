@@ -12,61 +12,74 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Renders the RL trainer benchmark JobSet from a DRY_RUN render of a Tunix GRPO e2e run.
+"""Renders the RL trainer benchmark JobSet from a dry-run render of a Tunix dist_rl e2e run.
 
-The trainer JobSet is kept as is (Pathways resource manager, proxy and worker
-containers and their args, env, images, node selectors, tolerations,
-reservations, Kueue labels and annotations) except:
+Every process of a Tunix dist_rl run (`tunix/dist_rl/launch/common/launch.sh`)
+gets the same config arguments (`override_config_file=...` and
+`section.key=value`). The trainer JobSet is kept as is (Pathways resource
+manager, proxy and worker containers and their args, env, images, node
+selectors, tolerations, reservations, Kueue labels and annotations) except:
 
   * names: JobSet name, namespace, gang-id label; failurePolicy.maxRestarts=0
     (a failed bench should not rerun the compile);
-  * the client command: the same inline env prefix (MAXTEXT_EXTRA_FLAGS,
-    LIBTPU_INIT_ARGS, ...) in front of run_trainer.py instead of the
-    Tunix runtime main, with the e2e trainer's flags (TRAINER_ARGV) and the e2e
-    orchestrator's flags (ORCH_ARGV); the Tunix fail-fast wrapper and the gRPC
-    port are dropped;
-  * trainer flags: --maxtext_ckpt_path is cleared (random init, the one
-    intended difference), --maxtext_output_directory points at
-    `--output-prefix/<name>` and --worker_id is the bench name;
+  * the client command: the same inline env prefix (LIBTPU_INIT_ARGS and the
+    other `cluster_config.role_env.trainer` variables, ...) in front of
+    run_trainer.py instead of the Tunix runtime main, with the e2e config
+    arguments in CONFIG_ARGV; the Tunix fail-fast wrapper and the gRPC port
+    are dropped;
+  * config: `cluster_config.k8s.trainer_id` (the MaxText run name) is the bench
+    name and `actor_model_config.kwargs.maxtext_output_dir` points at
+    `--output-prefix/<name>`. run_trainer.py clears the checkpoint path itself
+    (random init, the one intended difference);
   * optional knobs for A/B variants: --libtpu-extra / --libtpu-drop (written to
     every place the e2e render carries libtpu flags: the client's
     LIBTPU_INIT_ARGS, the pathways-proxy --xla_* args and the pw-node workers'
-    LIBTPU_INIT_ARGS), --extra-maxtext-flags (appended to MAXTEXT_EXTRA_FLAGS),
-    --replace-maxtext-flags (replace an existing MAXTEXT_EXTRA_FLAGS key in
-    place), --set-trainer-flags / --set-orch-flags (replace an existing trainer
-    or orchestrator flag in place), --compute-logps-chunk-size,
+    LIBTPU_INIT_ARGS), --extra-maxtext-flags (set
+    `dist_training_config.maxtext_extra_config` keys), --replace-maxtext-flags
+    (replace a key the resolved `maxtext_extra_config` already has),
+    --set-config (set any config key), --compute-logps-chunk-size,
     --profiler-skip / --profiler-steps;
   * optional --trainer-slice (e.g. 4x8x8): the trainer slice and the FSDP size
-    that fills it, with expert, context and tp kept. It changes the Pathways
-    resource manager's --instance_type, the pw-node completions/parallelism
-    (hosts = chips / chips per host), the pw-node gke-tpu-slice-topology
-    annotation, the trainer's --mesh_fsdp and the orchestrator's
-    --trainer_fsdp (which sets the assembler's pack size, fsdp x expert rows).
+    that fills it, with expert, context, dp and tp kept. It changes the
+    Pathways resource manager's --instance_type, the pw-node
+    completions/parallelism (hosts = chips / chips per host), the pw-node
+    gke-tpu-slice-topology annotation, and `actor_model_config.mesh` (the
+    assembler's pack size, fsdp x dp x expert rows, follows from it).
+
+The final config arguments are resolved with Tunix's
+`resolve_config.initialize`, so a bad override fails here rather than in the
+pod; relative `override_config_file=` paths are read from --tunix-root.
 
 Writes a file and nothing else; it never talks to a cluster. With
 --print-aot-env it prints shell exports of the trainer's MaxText and XLA flags
 and mesh for run_trainer_compile.sh instead of rendering.
 """
 
+# pylint: disable=protected-access
+
 from __future__ import annotations
 
 import argparse
 import copy
+import math
 import os
 import re
 import shlex
 import sys
 from typing import Any
 
+from tunix.dist_rl.launch.common import resolve_config
+from tunix.dist_rl.launch.nodes import trainer as trainer_node
 import yaml
 
 RUNTIME_MAIN = "python -m tunix.dist_rl.distributed.runtime.main"
-TRAINER_MAIN = "tunix.dist_rl.examples.common.run_trainer_node.main"
-ORCH_MAIN = "tunix.dist_rl.examples.deepswe_dist.run_deepswe_dist.main"
+TRAINER_MAIN = "tunix.dist_rl.launch.nodes.trainer.main"
 # pod hostnames <name>-pw-node-0-<idx>-<5 chars> must stay <= 63 chars.
 MAX_NAME_LEN = 30
 TOPOLOGY_ANNOTATION = "cloud.google.com/gke-tpu-slice-topology"
 NODE_SELECTOR_TOPOLOGY = "cloud.google.com/gke-tpu-topology"
+MAXTEXT_EXTRA_CONFIG_KEY = "dist_training_config.maxtext_extra_config"
+TRAINER_LIBTPU_KEY = "cluster_config.role_env.trainer.LIBTPU_INIT_ARGS"
 
 
 class _LiteralDumper(yaml.SafeDumper):
@@ -110,7 +123,7 @@ def _proc_main(js):
 
 
 def load_documents(path: str) -> list[dict[str, Any]]:
-  """Loads YAML JobSet documents from a `DRY_RUN` output file."""
+  """Loads YAML JobSet documents from a launcher dry-run output file."""
   docs = []
   with open(path, encoding="utf-8") as f:
     text = f.read()
@@ -143,21 +156,14 @@ def _main_aliases(name: str) -> set[str]:
   }
 
 
-def select_jobsets(
-    docs: list[dict[str, Any]],
-    trainer_main: str = TRAINER_MAIN,
-    orch_main: str = ORCH_MAIN,
-):
-  """Selects the unique `(trainer, orchestrator)` JobSet pair from `docs`."""
-  out = []
-  for want in (trainer_main, orch_main):
-    aliases = _main_aliases(want)
-    hits = [d for d in docs if process_main_of(d) in aliases]
-    if len(hits) != 1:
-      names = [d.get("metadata", {}).get("name") for d in hits]
-      raise ValueError(f"expected one JobSet with --process_main={want}, found" f" {len(hits)}: {names}")
-    out.append(hits[0])
-  return out[0], out[1]
+def select_jobset(docs: list[dict[str, Any]], trainer_main: str = TRAINER_MAIN) -> dict[str, Any]:
+  """Selects the unique trainer JobSet (`--process_main=trainer_main`) from `docs`."""
+  aliases = _main_aliases(trainer_main)
+  hits = [d for d in docs if process_main_of(d) in aliases]
+  if len(hits) != 1:
+    names = [d["metadata"]["name"] for d in hits]
+    raise ValueError(f"expected one JobSet with --process_main={trainer_main}, found {len(hits)}: {names}")
+  return hits[0]
 
 
 def split_command(cmd: str) -> tuple[str, list[str]]:
@@ -173,40 +179,61 @@ def split_command(cmd: str) -> tuple[str, list[str]]:
   raise ValueError("no --process_main in command")
 
 
-def set_flag(tokens: list[str], name: str, value: str) -> list[str]:
-  """Removes every `--name=` entry from `tokens` and appends `--name=value`."""
-  out = [t for t in tokens if not t.startswith(f"--{name}=")]
-  return out + [f"--{name}={value}"]
+def format_config_arg(key: str, value: str | int) -> str:
+  """Returns the `key=value` override that sets `key` to `value`.
+
+  The resolver parses each value as YAML, so a string is written as a one-line
+  double-quoted YAML scalar and reads back unchanged (`""`, `"0"` or `"true"`
+  stay strings instead of becoming None, 0 or True), as
+  `tunix.cli.config.format_cli_arg` writes them.
+
+  Args:
+    key: Dotted config path.
+    value: The value to set.
+  """
+  if isinstance(value, str):
+    # `width=math.inf` keeps long strings on one line.
+    quoted = yaml.safe_dump(value, default_style='"', width=math.inf)
+    return f"{key}={quoted.rstrip()}"
+  return f"{key}={value}"
 
 
-def set_in_place(tokens: list[str], kvs: list[str], what: str = "trainer") -> list[str]:
-  """Replaces existing `--k=` flags in place while preserving argv order."""
-  tokens = list(tokens)
+def set_config(args: list[str], key: str, value: str | int) -> list[str]:
+  """Removes every `key=` override from `args` and appends one setting `key` to `value`."""
+  return [t for t in args if not t.startswith(f"{key}=")] + [format_config_arg(key, value)]
+
+
+def set_raw_configs(args: list[str], kvs: list[str]) -> list[str]:
+  """Replaces or appends each raw `key=value` override of `kvs`, its value read as YAML."""
   for kv in kvs:
-    k, _, v = kv.partition("=")
-    hits = [i for i, t in enumerate(tokens) if t.startswith(f"--{k}=")]
-    if len(hits) != 1:
-      raise ValueError(f"--set-{what}-flags {kv!r}: --{k}= found {len(hits)} times in the" f" {what} argv")
-    tokens[hits[0]] = f"--{k}={v}"
-  return tokens
+    key, sep, _ = kv.partition("=")
+    if not key or not sep:
+      raise ValueError(f"expected key=value, got {kv!r}")
+    args = [t for t in args if not t.startswith(f"{key}=")] + [kv]
+  return args
 
 
-def upsert_flag(tokens: list[str], name: str, value: str) -> list[str]:
-  """Replaces `--name=` in place if present once, or appends it if absent."""
-  hits = [i for i, t in enumerate(tokens) if t.startswith(f"--{name}=")]
-  if len(hits) > 1:
-    raise ValueError(f"--{name}= found {len(hits)} times")
-  if not hits:
-    return list(tokens) + [f"--{name}={value}"]
-  return set_in_place(tokens, [f"{name}={value}"])
+def resolve(config_args: list[str], tunix_root: str) -> resolve_config.DistHyperParameters:
+  """Resolves `config_args`, reading relative `override_config_file=` paths from `tunix_root`.
 
+  The k8s launcher passes override files relative to the repo root, the
+  container's working directory.
 
-def maxtext_extra_flags(prefix: str) -> str:
-  """Extracts the `MAXTEXT_EXTRA_FLAGS` string from an inline env prefix."""
-  m = re.findall(r'MAXTEXT_EXTRA_FLAGS="([^"]*)"', prefix)
-  if len(m) > 1:
-    raise ValueError("expected at most one MAXTEXT_EXTRA_FLAGS in env prefix, found" f" {len(m)}")
-  return m[0] if m else ""
+  Args:
+    config_args: The run's config arguments.
+    tunix_root: Root of the Tunix checkout that holds the override files.
+
+  Returns:
+    The validated configuration.
+  """
+  args = []
+  for t in config_args:
+    if t.startswith("override_config_file="):
+      path = t.split("=", 1)[1]
+      if not os.path.isabs(path):
+        t = f"override_config_file={os.path.join(tunix_root, path)}"
+    args.append(t)
+  return resolve_config.initialize(args)
 
 
 def libtpu_init_args(prefix: str) -> str:
@@ -217,13 +244,8 @@ def libtpu_init_args(prefix: str) -> str:
   return m[0] if m else ""
 
 
-def rewrite_env_prefix(
-    prefix: str,
-    libtpu: list[str],
-    extra_maxtext: str,
-    replace_maxtext: str = "",
-) -> str:
-  """Rewrites `LIBTPU_INIT_ARGS` and `MAXTEXT_EXTRA_FLAGS` in `prefix`."""
+def rewrite_env_prefix(prefix: str, libtpu: list[str]) -> str:
+  """Rewrites `LIBTPU_INIT_ARGS` in `prefix`."""
   # LIBTPU_INIT_ARGS='...' (single-quoted in the e2e render).
   prefix, n = re.subn(
       r"LIBTPU_INIT_ARGS='[^']*'",
@@ -234,42 +256,12 @@ def rewrite_env_prefix(
     prefix = prefix.rstrip() + " LIBTPU_INIT_ARGS=" + shlex.quote(" ".join(libtpu)) + " "
   elif n > 1:
     raise ValueError(f"expected at most one LIBTPU_INIT_ARGS in the env prefix, found {n}")
-  for kv in replace_maxtext.split():
-    # Replaces an existing key=value of MAXTEXT_EXTRA_FLAGS in place,
-    # so the rendered flag set carries one value per key.
-    # Fails if the key is not there exactly once.
-    key = kv.split("=", 1)[0]
-    m = re.search(r'MAXTEXT_EXTRA_FLAGS="([^"]*)"', prefix)
-    if m is None:
-      raise ValueError("no MAXTEXT_EXTRA_FLAGS in the env prefix")
-    toks = m.group(1).split(" ")
-    hits = [i for i, t in enumerate(toks) if t.split("=", 1)[0] == key]
-    if len(hits) != 1:
-      raise ValueError(f"--replace-maxtext-flags {kv!r}: key found {len(hits)} times in" " MAXTEXT_EXTRA_FLAGS")
-    toks[hits[0]] = kv
-    prefix = prefix[: m.start(1)] + " ".join(toks) + prefix[m.end(1) :]
-  if extra_maxtext:
-    prefix, n = re.subn(
-        r'MAXTEXT_EXTRA_FLAGS="([^"]*)"',
-        lambda m: f'MAXTEXT_EXTRA_FLAGS="{m.group(1)} {extra_maxtext}"',
-        prefix,
-    )
-    if n == 0:
-      prefix = f'{prefix.rstrip()} MAXTEXT_EXTRA_FLAGS="{extra_maxtext}" '
-    elif n > 1:
-      raise ValueError("expected at most one MAXTEXT_EXTRA_FLAGS in the env prefix," f" found {n}")
   return prefix
 
 
-def _flag_value(tokens: list[str], *names: str, default: str | None = None) -> str:
-  """Returns the value of a unique `--name=value` flag in `tokens`."""
-  prefixes = tuple(f"--{n}=" for n in names)
-  vals = list(dict.fromkeys(t.split("=", 1)[1] for t in tokens if t.startswith(prefixes)))
-  if not vals and default is not None:
-    return default
-  if len(vals) != 1:
-    raise ValueError(f"expected one --{names[0]}= flag, found {vals}")
-  return vals[0]
+def _mesh_context(hp: resolve_config.DistHyperParameters) -> int:
+  """Returns the trainer's MaxText context-parallel size, as the trainer reads it."""
+  return trainer_node._kwarg(hp.config_mapping("actor_model_config")["kwargs"], "mesh_context", 1)
 
 
 def current_slice(js: dict[str, Any]) -> tuple[str, str]:
@@ -307,12 +299,12 @@ def compile_topology(accel: str, topo: str) -> str:
 
 def apply_trainer_slice(
     js: dict[str, Any],
-    trainer_flags: list[str],
-    orch_flags: list[str],
+    hp: resolve_config.DistHyperParameters,
+    config_args: list[str],
     topo: str,
     devices_per_chip: int = 0,
-):
-  """Re-targets the trainer JobSet and FSDP flags to a `topo` slice."""
+) -> tuple[list[str], str]:
+  """Re-targets the trainer JobSet and `actor_model_config.mesh` to a `topo` slice."""
   accel, ref_topo = current_slice(js)
   if devices_per_chip <= 0:
     devices_per_chip = 2 if accel == "tpu7x" else 1
@@ -327,17 +319,17 @@ def apply_trainer_slice(
     raise ValueError(f"{chips} chips not divisible by {chips_per_host} chips per host")
   hosts = chips // chips_per_host
   devices = chips * devices_per_chip
-  tp = int(_flag_value(trainer_flags, "mesh_tp"))
-  ep = int(_flag_value(trainer_flags, "mesh_expert"))
-  cp = int(_flag_value(trainer_flags, "mesh_context", "maxtext_mesh_context", default="1"))
-  if devices % (tp * ep * cp):
-    raise ValueError(f"{devices} devices not divisible by tp*expert*context={tp * ep * cp}")
-  fsdp = devices // (tp * ep * cp)
-  if any(t.startswith("--trainer_expert=") for t in orch_flags):
-    if _flag_value(orch_flags, "trainer_expert") != str(ep):
-      raise ValueError("orchestrator --trainer_expert differs from the trainer's" " --mesh_expert")
+  axes = hp.mesh_axes("actor_model_config")
+  tp, ep, dp, cp = axes["tp"], axes["expert"], axes["dp"], _mesh_context(hp)
+  others = tp * ep * dp * cp
+  if devices % others:
+    raise ValueError(f"{devices} devices not divisible by tp*expert*dp*context={others}")
+  fsdp = devices // others
   if pw["completions"] != pw["parallelism"]:
     raise ValueError("unexpected pw-node completions/parallelism:" f" {pw['completions']}/{pw['parallelism']}")
+  shape, names = hp.parse_mesh_config("actor_model_config")
+  if "fsdp" not in names:
+    raise ValueError(f"actor_model_config.mesh.axis_names {names} has no fsdp axis to fill the slice with")
 
   proc, _ = _proc_main(js)
   rm = find(proc["initContainers"], "pathways-rm")
@@ -350,35 +342,32 @@ def apply_trainer_slice(
   if NODE_SELECTOR_TOPOLOGY in ns:
     ns[NODE_SELECTOR_TOPOLOGY] = topo
   pw["completions"] = pw["parallelism"] = hosts
-  trainer_flags = set_flag(trainer_flags, "mesh_fsdp", str(fsdp))
-  if any(t.startswith("--num_data_shards=") for t in orch_flags):
-    orch_flags = set_flag(orch_flags, "num_data_shards", str(fsdp * ep))
-  else:
-    orch_flags = set_flag(orch_flags, "trainer_fsdp", str(fsdp))
+  # `mesh.shape` and `mesh.axis_names` are inherited as a pair, so both are set.
+  new_shape = [fsdp if name == "fsdp" else size for size, name in zip(shape, names)]
+  config_args = set_config(config_args, "actor_model_config.mesh.shape", f"({','.join(map(str, new_shape))})")
+  config_args = set_config(
+      config_args, "actor_model_config.mesh.axis_names", "(" + ",".join(f"'{name}'" for name in names) + ")"
+  )
+  config_args = set_config(config_args, "cluster_config.k8s.trainer.tpu_slice", f"{accel}:{topo}")
   summary = (
       f"trainer slice {accel}:{ref_topo} -> {accel}:{topo}: {chips} chips,"
       f" {hosts} hosts, {devices} devices; mesh fsdp={fsdp} tp={tp}"
-      f" expert={ep} context={cp}; pack size {fsdp * ep} rows per micro-batch"
+      f" expert={ep} dp={dp} context={cp}; pack size {fsdp * dp * ep} rows per micro-batch"
   )
-  return trainer_flags, orch_flags, summary
+  return config_args, summary
 
 
 def client_script(
     env_prefix: str,
     driver_src: str,
-    trainer_argv: list[str],
-    orch_argv: list[str],
+    config_args: list[str],
     *,
     steps: int,
     micro_steps: int,
     driver_env: str = "",
 ) -> str:
   """Builds the client container's bash script that embeds and runs the driver."""
-  bench_env = (
-      f"TRAINER_ARGV={shlex.quote(shlex.join(trainer_argv))} "
-      f"ORCH_ARGV={shlex.quote(shlex.join(orch_argv))} STEPS={steps}"
-      f" MICRO_STEPS={micro_steps}"
-  )
+  bench_env = f"CONFIG_ARGV={shlex.quote(shlex.join(config_args))} STEPS={steps} MICRO_STEPS={micro_steps}"
   for kv in shlex.split(driver_env):
     k, _, v = kv.partition("=")
     if not re.fullmatch(r"[A-Z_][A-Z0-9_]*", k):
@@ -406,8 +395,8 @@ exit $EXIT_CODE
 """
 
 
-def _is_moe_model(model_name: str, trainer_flags: list[str], orch_flags: list[str]) -> bool:
-  """Returns whether `model_name` or the launch flags configure an MoE model."""
+def _is_moe_model(model_name: str, hp: resolve_config.DistHyperParameters) -> bool:
+  """Returns whether `model_name` or the resolved config configures an MoE model."""
   models_dir = os.path.join(
       os.path.dirname(os.path.abspath(__file__)),
       "..",
@@ -421,61 +410,38 @@ def _is_moe_model(model_name: str, trainer_flags: list[str], orch_flags: list[st
     with open(yml, encoding="utf-8") as f:
       data = yaml.safe_load(f) or {}
     return int(data.get("num_experts") or 1) > 1
-  ep = int(_flag_value(trainer_flags, "mesh_expert", default="1"))
-  return ep > 1 or "--return_routed_experts" in orch_flags
+  return hp.mesh_axes("actor_model_config")["expert"] > 1 or bool(
+      hp.config_mapping("vllm_config")["return_routed_experts"]
+  )
 
 
 def aot_env(
-    env_prefix: str,
     libtpu: list[str],
-    trainer_flags: list[str],
-    orch_flags: tuple[str, ...] | list[str] = (),
+    hp: resolve_config.DistHyperParameters,
     js: dict[str, Any] | None = None,
 ) -> str:
   """Formats shell exports of MaxText, XLA, and mesh flags for AOT compile."""
-  model_name = _flag_value(trainer_flags, "maxtext_model_name")
-  prompt_len = int(_flag_value(trainer_flags, "max_prompt_length", default="8192"))
-  resp_len = int(_flag_value(trainer_flags, "max_response_length", default="57344"))
-  seq_tpu = int(
-      _flag_value(
-          list(trainer_flags) + list(orch_flags),
-          "max_seq_token_per_tpu",
-          default="0",
-      )
-  )
+  model_name = str(hp.config_mapping("actor_model_config")["kwargs"]["maxtext_model_name"])
+  rollout = hp.config_mapping("rollout_config")
+  rl_train = hp.config_mapping("rl_training_config")
+  prompt_len = int(rollout["max_prompt_length"])
+  resp_len = int(rollout["total_generation_steps"])
+  budget = rl_train["max_seq_tokens_per_device"]
+  seq_tpu = int(budget) if budget else 0
   target_len = max(prompt_len + resp_len, seq_tpu)
   seq_token_per_tpu = seq_tpu if seq_tpu > 0 else target_len
-  max_segments = _flag_value(
-      list(orch_flags) + list(trainer_flags),
-      "max_segments_per_packed_row",
-      default="16",
-  )
-  mini_batch = int(
-      _flag_value(
-          list(orch_flags) + list(trainer_flags),
-          "mini_batch_size",
-          "batch_size",
-          default="64",
-      )
-  )
-  num_gen = int(
-      _flag_value(
-          list(orch_flags) + list(trainer_flags),
-          "num_generations",
-          default="16",
-      )
-  )
-  micro_batch = int(
-      _flag_value(
-          list(orch_flags) + list(trainer_flags),
-          "train_micro_batch_size",
-          default="64",
-      )
-  )
+  segments = rl_train["max_segments_per_packed_row"]
+  # 16: the AOT check's segment cap when the config sets none, as before.
+  max_segments = 16 if segments is None else int(segments)
+  mini_batch = int(rl_train["mini_batch_size"])
+  num_gen = int(hp.config_mapping("agentic_grpo_config")["num_generations"])
+  micro_batch = int(rl_train["train_micro_batch_size"])
   global_batch = max(mini_batch * num_gen, micro_batch)
-  router_replay = "true" if _is_moe_model(model_name, trainer_flags, list(orch_flags)) else "false"
+  router_replay = "true" if _is_moe_model(model_name, hp) else "false"
+  # The MaxText arguments the trainer appends for `maxtext_extra_config`.
+  maxtext_extra = " ".join(trainer_node._maxtext_extra_flags(hp))
   lines = [
-      ("export" f" MAXTEXT_EXTRA_FLAGS={shlex.quote(maxtext_extra_flags(env_prefix))}"),
+      f"export MAXTEXT_EXTRA_FLAGS={shlex.quote(maxtext_extra)}",
       ("export" f" LIBTPU_INIT_ARGS={shlex.quote(' '.join(f for f in libtpu if f.startswith('--xla_')))}"),
       f"export MODEL_NAME=${{MODEL_NAME:-{shlex.quote(model_name)}}}",
       f"export MAX_PREFILL_PREDICT_LENGTH=${{MAX_PREFILL_PREDICT_LENGTH:-{prompt_len}}}",
@@ -489,15 +455,14 @@ def aot_env(
   if js is not None:
     topo = shlex.quote(compile_topology(*current_slice(js)))
     lines.append(f"export COMPILE_TOPOLOGY=${{COMPILE_TOPOLOGY:-{topo}}}")
-  for k in ("fsdp", "tp", "expert", "context"):
-    names = ("mesh_context", "maxtext_mesh_context") if k == "context" else (f"mesh_{k}",)
-    default = "1" if k == "context" else None
+  axes = hp.mesh_axes("actor_model_config")
+  mesh = {"fsdp": axes["fsdp"], "tp": axes["tp"], "expert": axes["expert"], "context": _mesh_context(hp)}
+  for k, val in mesh.items():
     var = f"MESH_{k.upper()}"
-    val = _flag_value(trainer_flags, *names, default=default)
     lines.append(f"export {var}=${{{var}:-{val}}}")
-  chunk = [t.split("=", 1)[1] for t in trainer_flags if t.startswith("--compute_logps_chunk_size=")]
-  if len(chunk) == 1:
-    lines.append(f"export LOGPS_CHUNK_SIZE=${{LOGPS_CHUNK_SIZE:-{chunk[0]}}}")
+  chunk = int(rl_train["compute_logps_chunk_size"])
+  if chunk > 0:
+    lines.append(f"export LOGPS_CHUNK_SIZE=${{LOGPS_CHUNK_SIZE:-{chunk}}}")
   return "\n".join(lines)
 
 
@@ -507,7 +472,7 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument(
       "--launch-render",
       default="",
-      help="DRY_RUN output of the e2e launcher (multi-document YAML)",
+      help="dry-run output of the e2e launcher (multi-document YAML)",
   )
   p.add_argument(
       "--train-yaml",
@@ -515,19 +480,14 @@ def build_parser() -> argparse.ArgumentParser:
       help="the e2e trainer JobSet alone (instead of --launch-render)",
   )
   p.add_argument(
-      "--orch-yaml",
-      default="",
-      help="the e2e orchestrator JobSet alone (instead of --launch-render)",
-  )
-  p.add_argument(
       "--trainer-main",
       default=TRAINER_MAIN,
       help="--process_main of the trainer JobSet",
   )
   p.add_argument(
-      "--orch-main",
-      default=ORCH_MAIN,
-      help="--process_main of the orchestrator JobSet",
+      "--tunix-root",
+      default=str(resolve_config.REPO_ROOT),
+      help="Tunix checkout that relative override_config_file= paths are read from",
   )
   p.add_argument(
       "--driver",
@@ -545,21 +505,20 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument("--micro-steps", type=int, default=4)
   p.add_argument("--libtpu-drop", default="")
   p.add_argument("--libtpu-extra", default="")
-  p.add_argument("--extra-maxtext-flags", default="")
+  p.add_argument(
+      "--extra-maxtext-flags",
+      default="",
+      help='"k=v ...": set dist_training_config.maxtext_extra_config keys',
+  )
   p.add_argument(
       "--replace-maxtext-flags",
       default="",
-      help='"k=v ...": replace existing keys in place',
+      help='"k=v ...": replace keys the resolved maxtext_extra_config already has',
   )
   p.add_argument(
-      "--set-trainer-flags",
+      "--set-config",
       default="",
-      help='"k=v ...": replace existing trainer flags in place',
-  )
-  p.add_argument(
-      "--set-orch-flags",
-      default="",
-      help='"k=v ...": replace existing orchestrator flags in place',
+      help='"section.key=value ...": set config keys',
   )
   p.add_argument(
       "--image",
@@ -582,17 +541,17 @@ def build_parser() -> argparse.ArgumentParser:
   p.add_argument(
       "--compute-logps-chunk-size",
       default="",
-      help="trainer --compute_logps_chunk_size; empty keeps",
+      help="rl_training_config.compute_logps_chunk_size; empty keeps",
   )
   p.add_argument(
       "--profiler-skip",
       default="",
-      help="trainer --skip_first_n_profiler_steps (counts fwd_bwd calls)",
+      help="rl_training_config.profiler_options.skip_first_n_steps (counts fwd_bwd calls)",
   )
   p.add_argument(
       "--profiler-steps",
       default="",
-      help="trainer --profiler_steps (fwd_bwd calls in the window)",
+      help="rl_training_config.profiler_options.profiler_steps (fwd_bwd calls in the window)",
   )
   p.add_argument(
       "--print-aot-env",
@@ -606,16 +565,14 @@ def main(argv=None):
   """CLI entrypoint that renders the benchmark JobSet or prints AOT exports."""
   a = build_parser().parse_args(argv)
   if a.launch_render:
-    if a.train_yaml or a.orch_yaml:
-      sys.exit("pass either --launch-render or --train-yaml/--orch-yaml")
-    train, orch = select_jobsets(load_documents(a.launch_render), a.trainer_main, a.orch_main)
-  elif a.train_yaml and a.orch_yaml:
+    if a.train_yaml:
+      sys.exit("pass either --launch-render or --train-yaml")
+    train = select_jobset(load_documents(a.launch_render), a.trainer_main)
+  elif a.train_yaml:
     with open(a.train_yaml, encoding="utf-8") as f:
       train = yaml.safe_load(f)
-    with open(a.orch_yaml, encoding="utf-8") as f:
-      orch = yaml.safe_load(f)
   else:
-    sys.exit("pass --launch-render, or both --train-yaml and --orch-yaml")
+    sys.exit("pass --launch-render or --train-yaml")
   if not a.print_aot_env:
     missing = [k for k in ("name", "namespace", "output_prefix") if not getattr(a, k)]
     if missing:
@@ -626,38 +583,39 @@ def main(argv=None):
       a.out = f"rendered/{a.name}.yaml"
 
   js = copy.deepcopy(train)
-  _, orch_main = _proc_main(orch)
-  _, orch_flags = split_command(orch_main["command"][-1])
-
   proc, main_c = _proc_main(js)
-  env_prefix, trainer_flags = split_command(main_c["command"][-1])
+  env_prefix, config_args = split_command(main_c["command"][-1])
   base_libtpu = libtpu_init_args(env_prefix)
   libtpu = compose_libtpu(base_libtpu, a.libtpu_drop, a.libtpu_extra)
-  env_prefix = rewrite_env_prefix(env_prefix, libtpu, a.extra_maxtext_flags, a.replace_maxtext_flags)
+  env_prefix = rewrite_env_prefix(env_prefix, libtpu)
+  if a.libtpu_drop or a.libtpu_extra:
+    config_args = set_config(config_args, TRAINER_LIBTPU_KEY, " ".join(libtpu))
 
-  trainer_flags = set_flag(trainer_flags, "maxtext_ckpt_path", "")
-  trainer_flags = set_flag(trainer_flags, "maxtext_output_directory", f"{a.output_prefix}/{a.name}")
-  trainer_flags = set_flag(trainer_flags, "worker_id", a.name)
+  if not a.print_aot_env:
+    config_args = set_config(config_args, "cluster_config.k8s.trainer_id", a.name)
+    config_args = set_config(config_args, "actor_model_config.kwargs.maxtext_output_dir", f"{a.output_prefix}/{a.name}")
   if a.compute_logps_chunk_size:
-    trainer_flags = set_in_place(
-        trainer_flags,
-        [f"compute_logps_chunk_size={int(a.compute_logps_chunk_size)}"],
-    )
-  trainer_flags = [t for t in trainer_flags if not t.startswith(("--discovery_addrs=", "--port="))]
+    config_args = set_config(config_args, "rl_training_config.compute_logps_chunk_size", int(a.compute_logps_chunk_size))
+  config_args = set_raw_configs(config_args, [f"{MAXTEXT_EXTRA_CONFIG_KEY}.{kv}" for kv in a.extra_maxtext_flags.split()])
+  hp = resolve(config_args, a.tunix_root)
+  extra = hp.config_mapping("dist_training_config")["maxtext_extra_config"]
+  for kv in a.replace_maxtext_flags.split():
+    if kv.split("=", 1)[0] not in extra:
+      raise ValueError(f"--replace-maxtext-flags {kv!r}: key not in the resolved {MAXTEXT_EXTRA_CONFIG_KEY}")
+    config_args = set_raw_configs(config_args, [f"{MAXTEXT_EXTRA_CONFIG_KEY}.{kv}"])
   if a.trainer_slice and a.trainer_slice != current_slice(js)[1]:
-    trainer_flags, orch_flags, summary = apply_trainer_slice(
-        js, trainer_flags, orch_flags, a.trainer_slice, a.devices_per_chip
-    )
+    config_args, summary = apply_trainer_slice(js, hp, config_args, a.trainer_slice, a.devices_per_chip)
     print(summary, file=sys.stderr)
-  trainer_flags = set_in_place(trainer_flags, a.set_trainer_flags.split(), "trainer")
-  orch_flags = set_in_place(orch_flags, a.set_orch_flags.split(), "orch")
+  config_args = set_raw_configs(config_args, shlex.split(a.set_config))
   if a.profiler_steps:
-    trainer_flags = upsert_flag(trainer_flags, "profiler_steps", str(int(a.profiler_steps)))
+    config_args = set_config(config_args, "rl_training_config.profiler_options.profiler_steps", int(a.profiler_steps))
   if a.profiler_skip:
-    trainer_flags = upsert_flag(trainer_flags, "skip_first_n_profiler_steps", str(int(a.profiler_skip)))
+    config_args = set_config(config_args, "rl_training_config.profiler_options.skip_first_n_steps", int(a.profiler_skip))
+  # Validates the final arguments here rather than in the pod.
+  hp = resolve(config_args, a.tunix_root)
 
   if a.print_aot_env:
-    print(aot_env(env_prefix, libtpu, trainer_flags, orch_flags, js))
+    print(aot_env(libtpu, hp, js))
     return 0
 
   md = js["metadata"]
@@ -673,8 +631,7 @@ def main(argv=None):
       client_script(
           env_prefix,
           driver_src,
-          trainer_flags,
-          orch_flags,
+          config_args,
           steps=a.steps,
           micro_steps=a.micro_steps,
           driver_env=a.driver_env,

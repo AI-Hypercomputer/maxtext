@@ -32,20 +32,28 @@ or an orchestrator:
 
 ## End-to-End Workflow
 
-### Step 1: Export a `DRY_RUN=true` manifest from Tunix
+### Step 1: Export a `--dry-run` manifest from Tunix
 
 From a checkout of the [`google/tunix`](https://github.com/google/tunix)
-repository, run the distributed RL recipe launcher with `DRY_RUN=true` so it
-prints the rendered Kubernetes `JobSet` manifests without submitting them to the cluster:
+repository, run a distributed RL recipe on the shared launcher
+(`tunix/dist_rl/launch/common/launch.sh`, `cluster_config.target=k8s`) with
+`--dry-run` so it prints the rendered Kubernetes `JobSet` manifests without
+submitting them to the cluster. For example, with the MLPerf Qwen3.5-35B-A3B
+recipe:
 
 ```bash
-DRY_RUN=true \
-  TRAINER_BACKEND=maxtext \
-  TRAINER_JOBSET_YAML=jobset.pathways.yaml \
-  TUNIX_IMAGE=<tunix-docker-image> \
-  MAXTEXT_CKPT=gs://<bucket>/ckpt/0/items \
-  bash tunix/dist_rl/examples/deepswe_dist/k8s_launcher.sh --command start > launch-dryrun.yaml
+bash tunix/experimental/examples/recipes/mlperf_35b_128_v5p.sh start --dry-run \
+  cluster_config.k8s.tunix_image=<tunix-docker-image> \
+  model_config.model_path=gs://<bucket>/ckpt/0/items \
+  <other per-run section.key=value overrides> > launch-dryrun.yaml
 ```
+
+Every process of the run gets the same config arguments
+(`override_config_file=...` and `section.key=value`); the benchmark tools read
+them from the trainer `JobSet` and resolve them with Tunix's `resolve_config`,
+so run them where `tunix` is importable. Relative `override_config_file=` paths
+are read from the Tunix checkout of the installed `tunix` package, or from
+`--tunix-root` (`TUNIX_ROOT` for `run_trainer_compile.sh`).
 
 ### Step 2: Check compilation and HBM peak on CPU
 
@@ -57,9 +65,9 @@ LAUNCH_RENDER=launch-dryrun.yaml \
   bash src/maxtext/experimental/maxtext_engine/rl/run_trainer_compile.sh
 ```
 
-`run_trainer_compile.sh` extracts `MAXTEXT_EXTRA_FLAGS`, `LIBTPU_INIT_ARGS`,
-the model and sequence parameters, and the mesh/topology from
-`launch-dryrun.yaml` (via `render_trainer_jobset.py --print-aot-env`) and runs
+`run_trainer_compile.sh` extracts the MaxText extra flags
+(`dist_training_config.maxtext_extra_config`), `LIBTPU_INIT_ARGS`, the model and
+sequence parameters, and the mesh/topology from `launch-dryrun.yaml` (via `render_trainer_jobset.py --print-aot-env`) and runs
 `maxtext.training_engine.maxtext_engine_compile`, printing the per-kernel memory
 breakdown and `TRAIN-KERNEL DEVICE PEAK`. You can pass variant overrides via
 `TRAINER_SLICE`, `EXTRA_MAXTEXT_FLAGS`, `REPLACE_MAXTEXT_FLAGS`,
@@ -72,12 +80,12 @@ Once the configuration passes the AOT check, there are two ways to run RL traine
 #### Scenario A: Run on GKE via `JobSet`
 
 1. **Render the standalone trainer `JobSet` YAML**:
-   Run `render_trainer_jobset.py` on your workstation. It extracts
-   `TRAINER_ARGV`, `ORCH_ARGV`, `MAXTEXT_EXTRA_FLAGS`, and `LIBTPU_INIT_ARGS`
-   from `launch-dryrun.yaml`, embeds `run_trainer.py` into the `proc`
-   container's entrypoint (with `--maxtext_ckpt_path=""` for random
-   initialization), and writes `rendered/<job-name>.yaml` (or a custom path if
-   `--out` is passed):
+   Run `render_trainer_jobset.py` on your workstation. It extracts the
+   trainer's config arguments (`CONFIG_ARGV`) and `LIBTPU_INIT_ARGS` from
+   `launch-dryrun.yaml`, embeds `run_trainer.py` into the `proc` container's
+   entrypoint (`run_trainer.py` clears `actor_model_config.model_path` for
+   random initialization), and writes `rendered/<job-name>.yaml` (or a custom
+   path if `--out` is passed):
 
    ```bash
    python3 src/maxtext/experimental/maxtext_engine/rl/render_trainer_jobset.py \
@@ -98,17 +106,17 @@ Once the configuration passes the AOT check, there are two ways to run RL traine
    kubectl --context <context> -n <namespace> delete jobset <job-name>
    ```
 
-   > **Note:** Run `python3 src/maxtext/experimental/maxtext_engine/rl/render_trainer_jobset.py --help` to see optional override, slice, and profiler flags (such as `--steps`, `--micro-steps`, `--trainer-slice`, `--profiler-steps`, and `--extra-maxtext-flags`).
+   > **Note:** Run `python3 src/maxtext/experimental/maxtext_engine/rl/render_trainer_jobset.py --help` to see optional override, slice, and profiler flags (such as `--steps`, `--micro-steps`, `--trainer-slice`, `--profiler-steps`, `--set-config`, and `--extra-maxtext-flags`).
 
 #### Scenario B: Interactive TPU / Pathways session
 
 If you already have an active TPU or Pathways session, you can skip
-`render_trainer_jobset.py` and run `run_trainer.py` directly by passing
-`TRAINER_ARGV` and `ORCH_ARGV` in the environment:
+`render_trainer_jobset.py` and run `run_trainer.py` directly by passing the
+run's config arguments in `CONFIG_ARGV`:
 
 ```bash
 STEPS=3 MICRO_STEPS=4 PAYLOAD=realistic \
-  TRAINER_ARGV="--worker_id=trainer-bench --trainer_backend=maxtext ..." \
-  ORCH_ARGV="--model_id=Qwen/Qwen3.5-397B-A17B ..." \
+  CONFIG_ARGV="override_config_file=<tunix>/tunix/experimental/examples/recipes/mlperf_35b_128_v5p.yaml \
+    model_config.model_path=gs://<bucket>/ckpt/0/items ..." \
   python3 -m maxtext.experimental.maxtext_engine.rl.run_trainer
 ```
