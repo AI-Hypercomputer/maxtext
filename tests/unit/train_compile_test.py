@@ -404,6 +404,29 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
+  def test_moe_dropping_int8(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_int8.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-128",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=False",
+            "capacity_factor=1",
+            "per_device_batch_size=4",
+            "max_target_length=128",
+            "attention=flash",
+            "dtype=bfloat16",
+            "quantization=int8",
+        )
+    )
+
   # TODO(b/388572320): Add int8 quantization test once this bug is fixed.
   def test_moe_megablox_bf16(self):
     temp_dir = gettempdir()
@@ -560,6 +583,53 @@ class TrainCompile(parameterized.TestCase):
             "max_target_length=1024",
             "attention=flash",
             "dtype=bfloat16",
+        )
+    )
+
+  @pytest.mark.skip(reason="b/400476456 Tests are currently flaking / failing due to JAX 0.5.1 upgrade")
+  def test_moe_dense_int8(self):
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_int8.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-128",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=1",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=False",
+            "capacity_factor=-1",
+            "per_device_batch_size=4",
+            "max_target_length=128",
+            "attention=flash",
+            "dtype=bfloat16",
+            "quantization=int8",
+        )
+    )
+
+  def test_moe_pp_bf16(self):
+    pytest.skip("Pipeline parallelism is not supported for the NNX decoder.")
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_pp_bf16.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-64",
+            "use_iota_embed=true",
+            "compile_topology_num_slices=2",
+            "model_name=mixtral-8x7b",
+            "sparse_matmul=False",
+            "capacity_factor=1",
+            "per_device_batch_size=4",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "dcn_pipeline_parallelism=2",
+            "num_layers_per_pipeline_stage=1",
         )
     )
 
@@ -721,6 +791,49 @@ class TrainCompile(parameterized.TestCase):
             "weight_dtype=bfloat16",
             "n_routing_groups=8",
             "topk_routing_group=4",
+        )
+    )
+
+  def test_moe_deepseek_pipeline_subset(self):
+    pytest.skip("Pipeline parallelism is not supported for the NNX decoder.")
+    compiled_trainstep_file = "/tmp/test_moe_deepseek_pipeline_subset.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-64",
+            "compile_topology_num_slices=8",
+            "use_iota_embed=true",
+            "model_name=deepseek3-test",
+            "megablox=True",
+            "sparse_matmul=False",
+            "capacity_factor=1",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "pipeline_parallel_layers=56",
+            "ici_expert_parallelism=16",
+            "dcn_pipeline_parallelism=8",
+        )
+    )
+
+  def test_pipeline_subset(self):
+    pytest.skip("Not supported for the NNX decoder.")
+    compiled_trainstep_file = "/tmp/test_pipeline_subset.pickle"
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-128",
+            "compile_topology_num_slices=8",
+            "use_iota_embed=true",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "pipeline_parallel_layers=56",
+            "base_num_decoder_layers=61",  # Remainder of 5 will fail when sharded incorrectly.
+            "ici_expert_parallelism=16",
+            "dcn_pipeline_parallelism=8",
         )
     )
 
@@ -1062,6 +1175,32 @@ class TrainCompile(parameterized.TestCase):
             "override_model_config=True",
             "base_num_decoder_layers=3",
             "engram_layers=[1]",
+        )
+    )
+
+  def test_circular_pipeline_ag_per_repeat_ep_ds(self):
+    pytest.skip("Pipeline parallelism is not supported for the NNX decoder.")
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_circular_pipeline_ag_per_repeat_ep_ds.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "compile_topology_num_slices=1",
+            "per_device_batch_size=2",
+            "ici_pipeline_parallelism=2",
+            "ici_expert_parallelism=2",
+            "pipeline_parallel_layers=4",
+            "num_pipeline_microbatches=4",
+            "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=7",
+            "use_ring_of_experts=true",
+            "use_random_routing=true",
+            "max_target_length=128",
+            "pipeline_fsdp_ag_per_repeat=true",
         )
     )
 
