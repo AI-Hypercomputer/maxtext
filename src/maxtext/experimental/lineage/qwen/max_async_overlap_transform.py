@@ -1268,7 +1268,10 @@ def restamp_send_recv_aggregation(
   try:
     from tensorflow.compiler.xla.service import hlo_pb2  # pylint: disable=g-import-not-at-top,g-direct-tensorflow-import
   except ImportError:
-    from google3.third_party.tensorflow.compiler.xla.service import hlo_pb2  # pylint: disable=g-import-not-at-top,g-direct-tensorflow-import
+    try:
+      from google3.third_party.tensorflow.compiler.xla.service import hlo_pb2  # pylint: disable=g-import-not-at-top,g-direct-tensorflow-import
+    except ImportError:
+      return serialized_hlo
 
   proto = hlo_pb2.HloModuleProto.FromString(serialized_hlo)
   for computation in proto.computations:
@@ -1345,11 +1348,15 @@ def restamp_send_recv_aggregation(
   return proto.SerializeToString()
 
 
-def max_async_overlap_transform(serialized_hlo: bytes) -> bytes:
+def max_async_overlap_transform(serialized_hlo: bytes) -> bytes | None:
   """XLA `POST_SCHEDULER` plugin hook rescheduling async HLO operations."""
+  if len(serialized_hlo) < 50_000:
+    return None
   from_proto = getattr(_hlo.HloModule, "from_serialized_hlo_module_proto")
   module: _hlo.HloModule = from_proto(serialized_hlo)
   results = transform_module(module, config=_ACTIVE_CONFIG)
+  if not results:
+    return None
   _LAST_TRANSFORM_STATS["modules_transformed"] = (
       int(_LAST_TRANSFORM_STATS.get("modules_transformed", 0)) + 1
   )

@@ -24,6 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 import functools
+import os
 from typing import Any, TYPE_CHECKING
 
 from flax import nnx
@@ -180,7 +181,7 @@ def qwen_config_from_maxtext(
       shared_mlp_dim=int(cfg.mlp_dim),
       norm_topk_prob=bool(cfg.norm_topk_prob),
       float32_gate_logits=bool(cfg.float32_gate_logits),
-      routing_mode="router",
+      routing_mode=os.environ.get("MAXTEXT_QWEN_LINEAGE_ROUTING_MODE", "router"),
       ragged_buffer_factor=ragged_bf,
       per_device_batch_size=max(1, int(cfg.per_device_batch_size)),
       seq_len=int(cfg.max_target_length),
@@ -399,6 +400,10 @@ def loss_and_aux(
   from maxtext.experimental.lineage.qwen import params as qwen_params  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   cfg = model.lineage_config()
+  if cfg.use_max_async_overlap_transform:
+    from maxtext.experimental.lineage.qwen import max_async_overlap_transform  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    max_async_overlap_transform.register_max_async_overlap_transform(cfg)
   param_pspecs = qwen_params.get_param_pspecs(cfg)
   data_pspec = P(cfg.all_sharded_axes, None)
 
