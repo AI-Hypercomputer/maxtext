@@ -1348,21 +1348,34 @@ def from_pretrained(
         return {k: _subset_dict(full_dict[k], target_keys_dict[k]) for k in target_keys_dict if k in full_dict}
 
       def _tree_paths(tree, prefix=()):
-        """Yields the key path of every leaf in a nested dict (non-dict values are leaves)."""
+        """Yields the key path of every leaf in a nested dict; list/tuple entries get their index as key."""
         if hasattr(tree, "items") and tree:
           for k, v in tree.items():
             yield from _tree_paths(v, prefix + (k,))
+        elif isinstance(tree, (list, tuple)) and tree:
+          for i, v in enumerate(tree):
+            yield from _tree_paths(v, prefix + (i,))
         else:
           yield prefix
 
-      def _only_rng_state_extra(target, meta_tree):
-        """Whether the checkpoint holds every target leaf and its only extra entries are NNX RNG state.
+      def _is_runtime_state_path(path):
+        """Whether an on-disk leaf is NNX runtime state that the restore target leaves out on purpose.
 
-        Checkpoints written from the full `nnx.state(model)` (e.g. Tunix's SFT checkpoint manager) also
-        persist `rngs` subtrees (RngKey/RngCount per stream). The restore target leaves `nnx.RngState`
-        out on purpose, and a strict (`partial_restore=False`) Orbax restore rejects those extra
-        on-disk entries. Restoring partially is safe only when nothing else differs: `partial_restore`
-        does not raise for target leaves missing on disk, so this check keeps that guarantee.
+        `rngs` subtrees hold nnx.RngState (RngKey/RngCount per stream). Values written with `sow()`
+        (nnx.Intermediate, e.g. MoE `moe_has_overflow`) are tuples, so their leaves sit at
+        `<name>.value.<index>`, while persisted weights are single arrays at `<name>.value`.
+        """
+        return "rngs" in path or (len(path) >= 2 and isinstance(path[-1], int) and path[-2] == "value")
+
+      def _only_runtime_state_extra(target, meta_tree):
+        """Whether the checkpoint holds every target leaf and its only extra entries are NNX runtime state.
+
+        Checkpoints written from the full `nnx.state(model)` (e.g. Tunix's SFT checkpoint manager or the
+        training engine) also persist RNG state and sown intermediates. The restore target leaves
+        `nnx.RngState` and `nnx.Intermediate` out on purpose, and a strict (`partial_restore=False`)
+        Orbax restore rejects those extra on-disk entries. Restoring partially is safe only when nothing
+        else differs: `partial_restore` does not raise for target leaves missing on disk, so this check
+        keeps that guarantee.
         """
         target_paths = set(_tree_paths(target))
         meta_paths = set(_tree_paths(meta_tree))
@@ -1371,7 +1384,7 @@ def from_pretrained(
         meta_prefixes = {m[:i] for m in meta_paths for i in range(1, len(m) + 1)}
         missing = [t for t in target_paths if t not in meta_prefixes]
         extra = [m for m in meta_paths if not any(m[:i] in target_paths for i in range(1, len(m) + 1))]
-        return not missing and bool(extra) and all("rngs" in m for m in extra)
+        return not missing and bool(extra) and all(_is_runtime_state_path(m) for m in extra)
 
       def _restore_and_update(target_subset, is_partial=True):
         if is_nnx_checkpoint:
@@ -1458,7 +1471,7 @@ def from_pretrained(
       else:
         _restore_and_update(
             target_for_restore,
-            is_partial=is_nnx_checkpoint and _only_rng_state_extra(target_for_restore, meta_tree_for_params),
+            is_partial=is_nnx_checkpoint and _only_runtime_state_extra(target_for_restore, meta_tree_for_params),
         )
 
     if wrap_with_tunix_adapter:
