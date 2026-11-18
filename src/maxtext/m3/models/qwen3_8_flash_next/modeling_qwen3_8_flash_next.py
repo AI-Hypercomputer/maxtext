@@ -46,7 +46,6 @@ from jax.experimental import xla_metadata
 import jax.numpy as jnp
 import numpy as np
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
-from maxtext.m3.infra import remat as m3_remat
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as m3_moe
@@ -58,6 +57,7 @@ from maxtext.m3.core.sharding import (
     param_metadata,
     sharding_from_config,
 )
+from maxtext.m3.infra import remat as m3_remat
 
 
 # =================================================================================================
@@ -580,6 +580,7 @@ def context_parallel_chunk_gated_delta_rule(
         return jnp.where(i < shard_id, nxt, state), None
 
       state_in, _ = jax.lax.scan(_fold, jnp.zeros(state_shape, jnp.float32), (a_all, b_all, jnp.arange(num_shards)))
+    state_in = checkpoint_name(state_in, "context")
     _, core_out = _gdn_chunk_scan(xs, state_in)
     return jnp.swapaxes(core_out, 1, 2).astype(init_dtype)
 
@@ -633,7 +634,7 @@ def _context_parallel_causal_conv1d(
         all_tails = jax.lax.all_gather(tail, length_axes, axis=0, tiled=False)
         shard_id = jax.lax.axis_index(length_axes)
         recv_halo = all_tails[jnp.maximum(shard_id - 1, 0)]
-      left_halo = jnp.where(shard_id == 0, jnp.zeros_like(recv_halo), recv_halo)
+      left_halo = checkpoint_name(jnp.where(shard_id == 0, jnp.zeros_like(recv_halo), recv_halo), "context")
       x_padded = jnp.concatenate([left_halo, x_l], axis=1)
     else:
       x_padded = x_l
@@ -813,11 +814,13 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
     else:
       conv_out = self.conv1d(qkv)
     mixed_qkv = jax.nn.silu(conv_out)
-    z = self.in_proj_z(hidden_states).reshape(b, s, self.num_v_heads, self.head_v_dim)
+    z = checkpoint_name(self.in_proj_z(hidden_states), "qkv_proj").reshape(b, s, self.num_v_heads, self.head_v_dim)
 
-    beta = jax.nn.sigmoid(self.in_proj_b(hidden_states))
+    b_proj = checkpoint_name(self.in_proj_b(hidden_states), "qkv_proj")
+    a_proj = checkpoint_name(self.in_proj_a(hidden_states), "qkv_proj")
+    beta = jax.nn.sigmoid(b_proj)
     g = -jnp.exp(self.A_log[...].astype(jnp.float32)) * jax.nn.softplus(
-        self.in_proj_a(hidden_states).astype(jnp.float32) + self.dt_bias[...].astype(jnp.float32)
+        a_proj.astype(jnp.float32) + self.dt_bias[...].astype(jnp.float32)
     )
 
     kd = self.key_dim
@@ -875,6 +878,7 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
           use_qk_l2norm_in_kernel=True,
           chunk_inverse=self.chunk_inverse,
       )
+    core_attn_out = checkpoint_name(core_attn_out, "context")
     core_normed = self.norm(core_attn_out, z).reshape(b, s, self.value_dim)
     out = checkpoint_name(self.out_proj(core_normed), "out_proj")
     return (out, last_state) if output_final_state else out
@@ -1260,6 +1264,7 @@ class Qwen3_8SparseAttention(nnx.Module):
         block_kv_dq=block_size,
         fuse_reciprocal=True,
         use_base2_exp=True,
+        residual_checkpoint_name="context",
         interpret=(jax.default_backend() != "tpu"),
     )
     mesh = jax.sharding.get_abstract_mesh()
@@ -2199,7 +2204,11 @@ class Qwen3_8TopKRouter(nnx.Module):
     router_top_value, router_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
     if self.norm_topk_prob:
       router_top_value = router_top_value / jnp.sum(router_top_value, axis=-1, keepdims=True)
-    routing_weights = (router_top_value * self.routed_scaling_factor).astype(router_logits.dtype)
+    routing_weights = checkpoint_name(
+        (router_top_value * self.routed_scaling_factor).astype(router_logits.dtype),
+        "moe_routing",
+    )
+    router_indices = checkpoint_name(router_indices, "moe_routing")
     return routing_weights, router_indices, router_probs
 
 
@@ -2744,7 +2753,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
       return_aux: bool = False,
   ) -> Any:
     """Executes single decoder layer forward pass."""
-    hidden_states = checkpoint_name(hidden_states, "decoder_layer_input")
+    hidden_states = checkpoint_name(checkpoint_name(hidden_states, "decoder_layer_input"), "hidden_states")
     if self.ple is not None and (ple_embeds is not None or ple_input_ids is not None):
       hidden_states = hidden_states + self.ple(
           hidden_states, ple_input_ids, conv_mask=conv_mask, precomputed_embeds=ple_embeds
@@ -2756,6 +2765,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
       attn_out, s_idx = self.self_attn(
           mixed, position_ids=positions, attention_mask=conv_mask, segment_ids=segment_ids, return_selected_blocks=True
       )
+    attn_out = checkpoint_name(attn_out, "self_attn")
     hidden_states = shard_batch(self.attn_hyper_connection.combine(hidden_states, attn_out, inject), self.sharding)
     mixed, inject = self.mlp_hyper_connection.before_block(hidden_states)
     mlp_out, r_w, r_idx, r_probs = self.mlp(mixed, return_router_topk=True)
@@ -3031,7 +3041,8 @@ def apply_scanned_cycles(
   if num_cycles == 1:
     # Retain the trip-count-1 while loop as a memory barrier (see `ScannedLayers` in
     # `maxtext.m3.infra.scan`): prevents XLA from inlining the single cycle and overlapping
-    # activation temporaries across the remat boundary.
+    # activation temporaries across the remat boundary (`scan_safe_policy` above keeps
+    # offloaded residuals on device across this trip-count-1 barrier).
     with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
       res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests))
   else:

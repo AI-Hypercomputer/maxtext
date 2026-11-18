@@ -138,17 +138,33 @@ backward_wgrad_tie.defvjp(_backward_wgrad_tie_fwd, _backward_wgrad_tie_bwd)
 
 
 @jax.custom_vjp
-def _permute_rows(inputs: jax.Array, perm: jax.Array) -> jax.Array:
+def _permute_rows(
+    inputs: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array | None = None,
+) -> jax.Array:
   """Permutes axis 0 by bijection `perm` with gather-only inverse VJP."""
+  del inv_perm
   return inputs[perm]
 
 
-def _permute_rows_fwd(inputs: jax.Array, perm: jax.Array) -> tuple[jax.Array, jax.Array]:
-  return inputs[perm], perm
+def _permute_rows_fwd(
+    inputs: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array | None = None,
+) -> tuple[jax.Array, tuple[jax.Array | None, jax.Array | None]]:
+  if inv_perm is not None:
+    return inputs[perm], (None, inv_perm)
+  return inputs[perm], (perm, None)
 
 
-def _permute_rows_bwd(perm: jax.Array, grad: jax.Array) -> tuple[jax.Array, None]:
-  return grad[jnp.argsort(perm)], None
+def _permute_rows_bwd(
+    res: tuple[jax.Array | None, jax.Array | None],
+    grad: jax.Array,
+) -> tuple[jax.Array, None, None]:
+  perm, inv_perm = res
+  inv = inv_perm if inv_perm is not None else jnp.argsort(perm)
+  return grad[inv], None, None
 
 
 _permute_rows.defvjp(_permute_rows_fwd, _permute_rows_bwd)
@@ -739,13 +755,14 @@ def _dense_separate(
   if capacity_factor > 0.0:
     cap = max(1, int(math.ceil((num_tokens * top_k / num_experts) * capacity_factor)))
     slot_valid = _truncate_slots_by_capacity(safe_idx, slot_valid, num_experts=num_experts, expert_cap=cap)
+    slot_valid = checkpoint_name(slot_valid.astype(jnp.int32), "moe_routing") != 0
   eff_indices = jnp.reshape(jnp.where(slot_valid, safe_idx, -1), indices.shape)
   eff_weights = jnp.reshape(jnp.where(slot_valid, jnp.reshape(weights, (-1,)), 0), weights.shape)
-  table = combine_weights(eff_weights, eff_indices, num_experts)
-  gate = jnp.einsum("bse,neh->bsnh", x, wi_0)
-  up = jnp.einsum("bse,neh->bsnh", x, wi_1)
+  table = checkpoint_name(combine_weights(eff_weights, eff_indices, num_experts), "moe_routing")
+  gate = checkpoint_name(jnp.einsum("bse,neh->bsnh", x, wi_0), "moe_gate_up")
+  up = checkpoint_name(jnp.einsum("bse,neh->bsnh", x, wi_1), "moe_gate_up")
   hidden = _apply_gated_activation(gate, up, activation=activation, swiglu_limit=swiglu_limit, out_dtype=x.dtype)
-  per_expert = jnp.einsum("bsnh,nhe->bsne", hidden, wo)
+  per_expert = checkpoint_name(jnp.einsum("bsnh,nhe->bsne", hidden, wo), "moe_routed_output")
   return jnp.einsum("bsne,bsn->bse", per_expert.astype(_COMBINE_DTYPE), table.astype(_COMBINE_DTYPE))
 
 
@@ -794,7 +811,7 @@ def _run_local_expert_mlp(
   """Runs gate/up + activation + down grouped matmuls on sorted rows."""
   if fused:
     w_gu, w_dn = projections
-    gate_up = matmul_fn(sorted_x, w_gu, group_sizes)
+    gate_up = checkpoint_name(matmul_fn(sorted_x, w_gu, group_sizes), "moe_gate_up")
     gate, up = jnp.split(gate_up, 2, axis=-1)
     hidden = _apply_gated_activation(
         gate,
@@ -806,8 +823,8 @@ def _run_local_expert_mlp(
     return matmul_fn(hidden, w_dn, group_sizes)
 
   wi_0, wi_1, wo = projections
-  gate = matmul_fn(sorted_x, wi_0, group_sizes)
-  up = matmul_fn(sorted_x, wi_1, group_sizes)
+  gate = checkpoint_name(matmul_fn(sorted_x, wi_0, group_sizes), "moe_gate_up")
+  up = checkpoint_name(matmul_fn(sorted_x, wi_1, group_sizes), "moe_gate_up")
   hidden = _apply_gated_activation(
       gate,
       up,
@@ -856,17 +873,23 @@ def _grouped_unsharded(
   if executor.ragged_buffer_factor > 0.0:
     buf_cap = max(1, int(math.ceil(num_slots * executor.ragged_buffer_factor)))
     slot_valid = _truncate_slots_by_buffer(safe_idx, slot_valid, num_experts=num_experts, buf_cap=buf_cap)
+  if executor.capacity_factor > 0.0 or executor.ragged_buffer_factor > 0.0:
+    slot_valid = checkpoint_name(slot_valid.astype(jnp.int32), "moe_routing") != 0
 
   sort_key = jnp.where(slot_valid, safe_idx, num_experts)
-  perm = jnp.argsort(sort_key, stable=True)
-  inv_perm = jnp.argsort(perm)
-  group_sizes = jnp.bincount(safe_idx, weights=slot_valid.astype(jnp.int32), length=num_experts).astype(jnp.int32)
+  perm = checkpoint_name(jnp.argsort(sort_key, stable=True), "moe_routing")
+  inv_perm = checkpoint_name(jnp.argsort(perm), "moe_routing")
+  group_sizes = checkpoint_name(
+      jnp.bincount(safe_idx, weights=slot_valid.astype(jnp.int32), length=num_experts).astype(jnp.int32),
+      "moe_routing",
+  )
   valid_count = jnp.sum(group_sizes)
 
   slot_token_ids = jnp.repeat(jnp.arange(num_tokens, dtype=jnp.int32), top_k)
   slot_rows = jnp.reshape(x, (num_tokens, embed))[slot_token_ids]
-  sorted_x = _permute_rows(slot_rows, perm)
+  sorted_x = _permute_rows(slot_rows, perm, inv_perm)
   sorted_x = jnp.where((jnp.arange(num_slots, dtype=jnp.int32) < valid_count)[:, None], sorted_x, 0)
+  sorted_x = checkpoint_name(sorted_x, "moe_disp_ep")
 
   matmul_fn = functools.partial(grouped_matmul, backend="ragged_dot", is_tpu=False)
   expert_out = _run_local_expert_mlp(
@@ -878,7 +901,7 @@ def _grouped_unsharded(
       activation=activation,
       swiglu_limit=swiglu_limit,
   )
-  unsorted_out = _permute_rows(expert_out, inv_perm)
+  unsorted_out = checkpoint_name(_permute_rows(expert_out, inv_perm, perm), "moe_routed_output")
   eff_w = jnp.where(slot_valid, flat_w, 0).astype(_COMBINE_DTYPE)
   safe_out = jnp.where(slot_valid[:, None], unsorted_out.astype(_COMBINE_DTYPE), 0.0)
   weighted = safe_out * eff_w[:, None]
@@ -1011,11 +1034,16 @@ def _sharded_grouped(
       if executor.ragged_buffer_factor > 0.0:
         buf_cap = max(1, int(math.ceil(num_slots * executor.ragged_buffer_factor)))
         slot_valid = _truncate_slots_by_buffer(safe_idx, slot_valid, num_experts=num_experts, buf_cap=buf_cap)
+      if executor.capacity_factor > 0.0 or executor.ragged_buffer_factor > 0.0:
+        slot_valid = checkpoint_name(slot_valid.astype(jnp.int32), "moe_routing") != 0
 
       sort_key = jnp.where(slot_valid, safe_idx, num_experts)
-      perm = jnp.argsort(sort_key, stable=True)
-      inv_perm = jnp.argsort(perm)
-      group_sizes = jnp.bincount(safe_idx, weights=slot_valid.astype(jnp.int32), length=num_experts).astype(jnp.int32)
+      perm = checkpoint_name(jnp.argsort(sort_key, stable=True), "moe_routing")
+      inv_perm = checkpoint_name(jnp.argsort(perm), "moe_routing")
+      group_sizes = checkpoint_name(
+          jnp.bincount(safe_idx, weights=slot_valid.astype(jnp.int32), length=num_experts).astype(jnp.int32),
+          "moe_routing",
+      )
       valid_count = jnp.sum(group_sizes)
 
       if executor.use_ragged_sort and is_tpu:
@@ -1023,8 +1051,9 @@ def _sharded_grouped(
 
         sorted_x = ragged_sort.a2a_ragged_sort(slot_rows, perm, valid_count)
       else:
-        sorted_x = _permute_rows(slot_rows, perm)
+        sorted_x = _permute_rows(slot_rows, perm, inv_perm)
         sorted_x = jnp.where((jnp.arange(num_slots, dtype=jnp.int32) < valid_count)[:, None], sorted_x, 0)
+      sorted_x = checkpoint_name(sorted_x, "moe_disp_ep")
 
       expert_out = _run_local_expert_mlp(
           sorted_x,
@@ -1041,7 +1070,8 @@ def _sharded_grouped(
 
         unsorted_out = ragged_sort.a2a_ragged_unsort(expert_out, inv_perm, num_slots)
       else:
-        unsorted_out = _permute_rows(expert_out, inv_perm)
+        unsorted_out = _permute_rows(expert_out, inv_perm, perm)
+      unsorted_out = checkpoint_name(unsorted_out, "moe_routed_output")
 
       eff_w = jnp.where(slot_valid, flat_w, 0).astype(_COMBINE_DTYPE)
       safe_out = jnp.where(slot_valid[:, None], unsorted_out.astype(_COMBINE_DTYPE), 0.0)
@@ -1084,34 +1114,40 @@ def _sharded_grouped(
       pre_rank = jnp.arange(num_slots, dtype=jnp.int32) - pre_starts[pre_exp]
       keep_pre = slot_valid[pre_order] & (pre_rank < allowed_local[pre_exp])
       slot_valid = keep_pre[jnp.argsort(pre_order)]
+    if executor.capacity_factor > 0.0 or recv_buf_len < ep_size * num_slots:
+      slot_valid = checkpoint_name(slot_valid.astype(jnp.int32), "moe_routing") != 0
 
     send_key = jnp.where(slot_valid, safe_idx, num_experts)
-    send_perm = jnp.argsort(send_key, stable=True)
-    inv_send_perm = jnp.argsort(send_perm)
-    send_x = _permute_rows(slot_rows, send_perm)
+    send_perm = checkpoint_name(jnp.argsort(send_key, stable=True), "moe_routing")
+    inv_send_perm = checkpoint_name(jnp.argsort(send_perm), "moe_routing")
+    send_x = _permute_rows(slot_rows, send_perm, inv_send_perm)
 
-    counts_matrix = jnp.sum(jnp.reshape(all_exp_counts, (ep_size, ep_size, e_loc)), axis=2)
+    counts_matrix = checkpoint_name(
+        jnp.sum(jnp.reshape(all_exp_counts, (ep_size, ep_size, e_loc)), axis=2),
+        "moe_routing",
+    )
     recv_x = _ep_ragged_exchange(send_x, recv_buf_len, counts_matrix, ep_id, ep_axis, is_tpu=is_tpu)
 
     recv_exp_by_src = jax.lax.dynamic_slice_in_dim(all_exp_counts, ep_id * e_loc, e_loc, axis=1)
-    local_group_sizes = jnp.sum(recv_exp_by_src, axis=0)
+    local_group_sizes = checkpoint_name(jnp.sum(recv_exp_by_src, axis=0), "moe_routing")
+    recv_valid_end = jnp.sum(local_group_sizes)
     chunk_sizes = jnp.reshape(recv_exp_by_src, (ep_size * e_loc,))
     chunk_ends = jnp.cumsum(chunk_sizes)
-    recv_valid_end = chunk_ends[-1]
     row_idx = jnp.arange(recv_buf_len, dtype=jnp.int32)
     chunk_idx = jnp.searchsorted(chunk_ends, row_idx, side="right")
     recv_local_exp = jnp.where(row_idx < recv_valid_end, chunk_idx % e_loc, e_loc)
 
-    local_perm = jnp.argsort(recv_local_exp, stable=True)
-    inv_local_perm = jnp.argsort(local_perm)
+    local_perm = checkpoint_name(jnp.argsort(recv_local_exp, stable=True), "moe_routing")
+    inv_local_perm = checkpoint_name(jnp.argsort(local_perm), "moe_routing")
 
     if executor.use_ragged_sort and is_tpu:
       from maxtext.kernels.ragged import ragged_sort  # pylint: disable=import-outside-toplevel
 
       sorted_recv_x = ragged_sort.a2a_ragged_sort(recv_x, local_perm, recv_valid_end)
     else:
-      sorted_recv_x = _permute_rows(recv_x, local_perm)
+      sorted_recv_x = _permute_rows(recv_x, local_perm, inv_local_perm)
       sorted_recv_x = jnp.where((row_idx < recv_valid_end)[:, None], sorted_recv_x, 0)
+    sorted_recv_x = checkpoint_name(sorted_recv_x, "moe_disp_ep")
 
     expert_out = _run_local_expert_mlp(
         sorted_recv_x,
@@ -1128,11 +1164,11 @@ def _sharded_grouped(
 
       recv_unsorted = ragged_sort.a2a_ragged_unsort(expert_out, inv_local_perm, recv_valid_end)
     else:
-      recv_unsorted = _permute_rows(expert_out, inv_local_perm)
+      recv_unsorted = _permute_rows(expert_out, inv_local_perm, local_perm)
       recv_unsorted = jnp.where((row_idx < recv_valid_end)[:, None], recv_unsorted, 0)
 
     returned_sorted_slots = _ep_ragged_exchange(recv_unsorted, num_slots, counts_matrix.T, ep_id, ep_axis, is_tpu=is_tpu)
-    unsorted_slots = _permute_rows(returned_sorted_slots, inv_send_perm)
+    unsorted_slots = checkpoint_name(_permute_rows(returned_sorted_slots, inv_send_perm, send_perm), "moe_routed_output")
 
     eff_w = jnp.where(slot_valid, flat_w, 0).astype(_COMBINE_DTYPE)
     safe_slots = jnp.where(slot_valid[:, None], unsorted_slots.astype(_COMBINE_DTYPE), 0.0)
