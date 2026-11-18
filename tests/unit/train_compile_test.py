@@ -1239,14 +1239,8 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.scheduled_only
   def test_qwen3_next_explicit_sharding_zero1(self):
-    """AOT test for qwen3-next under explicit sharding with ZeRO-1 and gradient accumulation.
-
-    Scheduled only: test_qwen3_next_explicit_sharding compiles the explicit qwen3_next block on
-    PRs, and tests/integration/train_tests.py::test_tpu_qwen3_hybrid_zero1_gradient_accumulation
-    (also scheduled) trains ZeRO-1 + GA on qwen3_next and compares losses.
-    """
+    """AOT test for qwen3-next under explicit sharding with ZeRO-1 and gradient accumulation."""
     compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_next_explicit_sharding_zero1.pickle")
     train_compile_main(
         (
@@ -1307,13 +1301,8 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.scheduled_only
   def test_qwen3_5_explicit_sharding_zero1(self):
     """AOT test for qwen3-5 under explicit sharding with ZeRO-1 and gradient accumulation.
-
-    Scheduled only: test_qwen3_5_explicit_sharding compiles the explicit qwen3_5 block on
-    PRs, and tests/integration/train_tests.py::test_tpu_qwen3_hybrid_zero1_gradient_accumulation
-    (also scheduled) trains ZeRO-1 + GA on qwen3_5 and compares losses.
 
     ZeRO-1 shards the optimizer moments over "data", so the parameters are
     all-gathered
@@ -1568,17 +1557,12 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
-  @pytest.mark.scheduled_only
   def test_llama4_explicit_sharding_zero1(self):
     """AOT test for Llama4 under explicit sharding with ZeRO-1 and gradient accumulation.
 
     Explicit sharding type-checks every operation's layout rather than letting GSPMD infer
     one, so a missing `out_sharding` in the Llama4 decoder fails the trace here rather than
     silently costing a collective at a scale we cannot reach in a test.
-
-    Scheduled only: test_llama4_17b_128e_explicit_sharding compiles the same explicit Llama4
-    block on PRs, and tests/integration/train_tests.py::test_tpu_llama4_zero1_gradient_accumulation
-    (also scheduled) trains ZeRO-1 + GA on Llama4 and compares losses.
     """
     compiled_trainstep_file = os.path.join(gettempdir(), "test_llama4_explicit_sharding_zero1.pickle")
     train_compile_main(

@@ -120,8 +120,8 @@ class Train(parameterized.TestCase):
     train_main(args)
 
   @parameterized.named_parameters(
-      # quantization=fp8 only quantizes dot_general (not gmm), so its tokamax gmm path is the bf16 case.
       {"testcase_name": "bf16", "quantization": ""},
+      {"testcase_name": "fp8", "quantization": "fp8"},  # not quantize gmm
       {"testcase_name": "fp8_full", "quantization": "fp8_full"},  # quantize gmm
   )
   @pytest.mark.tpu_only

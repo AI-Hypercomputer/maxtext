@@ -72,6 +72,34 @@ _HALO_CP_TEST_CASES = (
     },
 )
 
+# The other half of the cp degree x load_balance x packing grid (three-way combinations); scheduled CI only.
+_HALO_CP_SCHEDULED_TEST_CASES = (
+    {
+        "testcase_name": "cp2_load_balance",
+        "ici_context_parallelism": 2,
+        "context_parallel_load_balance": True,
+        "packing": False,
+    },
+    {
+        "testcase_name": "cp2_packed",
+        "ici_context_parallelism": 2,
+        "context_parallel_load_balance": False,
+        "packing": True,
+    },
+    {
+        "testcase_name": "cp4_no_load_balance",
+        "ici_context_parallelism": 4,
+        "context_parallel_load_balance": False,
+        "packing": False,
+    },
+    {
+        "testcase_name": "cp4_packed_load_balance",
+        "ici_context_parallelism": 4,
+        "context_parallel_load_balance": True,
+        "packing": True,
+    },
+)
+
 
 def _count_primitives(jaxpr: Any, primitive_name: str, name_param: str | None = None) -> int:
   """Counts primitive occurrences in a jaxpr, recursing into sub-jaxprs."""
@@ -519,12 +547,22 @@ class CpHaloAttentionTest(parameterized.TestCase):
   @parameterized.named_parameters(*_HALO_CP_TEST_CASES)
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_halo_context_parallel(
-      self,
-      ici_context_parallelism,
-      context_parallel_load_balance,
-      packing,
+      self, ici_context_parallelism, context_parallel_load_balance, packing
   ):
     """Tests forward parity between dot_product and flash attention + halo CP."""
+    self._check_halo_context_parallel(ici_context_parallelism, context_parallel_load_balance, packing)
+
+  @parameterized.named_parameters(*_HALO_CP_SCHEDULED_TEST_CASES)
+  @pytest.mark.tpu_only
+  @pytest.mark.scheduled_only
+  def test_tpu_flash_attention_halo_context_parallel_scheduled(
+      self, ici_context_parallelism, context_parallel_load_balance, packing
+  ):
+    """Same check on the other half of the grid; the pairwise half above runs on PRs."""
+    self._check_halo_context_parallel(ici_context_parallelism, context_parallel_load_balance, packing)
+
+  def _check_halo_context_parallel(self, ici_context_parallelism, context_parallel_load_balance, packing):
+    """Checks forward parity between dot_product and flash attention + halo CP."""
     cfg_cp = self._halo_test_config(
         ici_context_parallelism,
         context_parallel_load_balance=context_parallel_load_balance,
@@ -577,12 +615,22 @@ class CpHaloAttentionTest(parameterized.TestCase):
   @parameterized.named_parameters(*_HALO_CP_TEST_CASES)
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_halo_context_parallel_grad(
-      self,
-      ici_context_parallelism,
-      context_parallel_load_balance,
-      packing,
+      self, ici_context_parallelism, context_parallel_load_balance, packing
   ):
     """Tests input-gradient parity between dot_product and flash halo CP."""
+    self._check_halo_context_parallel_grad(ici_context_parallelism, context_parallel_load_balance, packing)
+
+  @parameterized.named_parameters(*_HALO_CP_SCHEDULED_TEST_CASES)
+  @pytest.mark.tpu_only
+  @pytest.mark.scheduled_only
+  def test_tpu_flash_attention_halo_context_parallel_grad_scheduled(
+      self, ici_context_parallelism, context_parallel_load_balance, packing
+  ):
+    """Same check on the other half of the grid; the pairwise half above runs on PRs."""
+    self._check_halo_context_parallel_grad(ici_context_parallelism, context_parallel_load_balance, packing)
+
+  def _check_halo_context_parallel_grad(self, ici_context_parallelism, context_parallel_load_balance, packing):
+    """Checks input-gradient parity between dot_product and flash halo CP."""
     cfg_cp = self._halo_test_config(
         ici_context_parallelism,
         context_parallel_load_balance=context_parallel_load_balance,
