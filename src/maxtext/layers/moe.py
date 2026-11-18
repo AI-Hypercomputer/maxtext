@@ -46,6 +46,8 @@ from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
 from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
 from maxtext.layers import moe_fused_gmm3d
+from maxtext.layers import moe_replica_planner
+from maxtext.layers import moe_replica_weights
 from maxtext.layers.initializers import NdInitializer, default_bias_init, nd_dense_init
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -130,6 +132,8 @@ class RouteMetadata:
   # Shape [num_ep, num_ep]. all_gather of reshaped_group_sizes across EP shards.
   # [i, j] = number of tokens from batch shard i sent to expert shard j.
   all_shards_group_sizes: Optional[jax.Array]
+  # Optional online hot-expert replication plan produced by ra2a_and_route for _moe_body.
+  replica_plan: Optional[Any] = None
 
 
 @struct.dataclass
@@ -1803,6 +1807,7 @@ class RoutedMoE(nnx.Module):
       precomputed_density_prob=None,
       per_expert_scale=None,
       skip_token_gather=False,
+      physical_route_fn=None,
   ):
     """Permute tokens to group by expert to fit gmm call.
 
@@ -2015,11 +2020,16 @@ class RoutedMoE(nnx.Module):
       else:
         flatten_selected_experts_safe = flatten_selected_experts
 
+      num_sort_bins = self.num_experts
+      if physical_route_fn is not None:
+        # Expert replication: sort by physical slot (home or replica) instead of logical expert.
+        flatten_selected_experts_safe, num_sort_bins = physical_route_fn(flatten_selected_experts_safe)
+
       if (
           getattr(self.config, "moe_packed_routing_sort", False)
           and forced_routed_experts is None
           and flatten_selected_experts_safe.shape[0] <= (1 << 20)
-          and self.num_experts <= (1 << 11)
+          and num_sort_bins <= (1 << 11)
       ):
         num_route_slots = flatten_selected_experts_safe.shape[0]
         iota_vma = (flatten_selected_experts_safe.astype(jnp.int32) * jnp.int32(0)).astype(jnp.uint32) + jnp.arange(
@@ -2045,7 +2055,7 @@ class RoutedMoE(nnx.Module):
       if not is_qarray and sorted_inputs is not None:
         sorted_inputs = sorted_inputs.astype(self.dtype)
 
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=self.num_experts)
+      group_size = jnp.bincount(flatten_selected_experts_safe, length=num_sort_bins)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -2082,7 +2092,7 @@ class RoutedMoE(nnx.Module):
       )
     else:
       local_group_size = None
-      expert_indices = jnp.arange(self.num_experts)
+      expert_indices = jnp.arange(group_size.shape[0])
       sorted_experts = jnp.repeat(
           expert_indices,
           repeats=group_size,
@@ -3376,7 +3386,40 @@ class RoutedMoE(nnx.Module):
       all_shards_group_sizes = None
       reshaped_group_sizes = None
       required_rbf = None
+      replica_plan = None
       local_tokens = math.prod(x.shape[:-1])
+      num_replicas = self.config.expert_replicas_per_device
+      use_replication = num_replicas > 0
+      physical_route_fn = None
+      if use_replication:
+        if num_ep <= 1:
+          raise ValueError(f"expert_replicas_per_device={num_replicas} requires num_ep > 1, got num_ep={num_ep}.")
+        if not is_batch_sharded_by_expert:
+          raise ValueError(
+              f"expert_replicas_per_device={num_replicas} requires batch sharded across expert "
+              "(is_batch_sharded_by_expert=True; batch size 1 decode is unsupported)."
+          )
+        if self.config.num_experts % num_ep != 0:
+          raise ValueError(
+              f"num_experts ({self.config.num_experts}) must be divisible by num_ep ({num_ep}) for expert replication."
+          )
+
+        def _physical_route_fn(flat_logical):
+          # Build the replica plan inside permute() once flattened top-k expert IDs are available,
+          # and capture it in ra2a_and_route's scope so RouteMetadata can thread it to _moe_body.
+          nonlocal replica_plan
+          local_counts = jnp.bincount(flat_logical, length=self.config.num_experts).astype(jnp.int32)
+          counts_src = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
+          replica_plan = moe_replica_planner.compute_plan_iter(
+              counts_src,
+              num_ep,
+              num_replicas,
+              self.config.expert_replica_max_send,
+          )
+          phys = replica_plan.route_table[expert_shard_id][flat_logical]
+          return phys, num_ep * replica_plan.num_slots
+
+        physical_route_fn = _physical_route_fn
       # force_dropless (the in-layer dropless fallback) sizes the receive buffer for the worst case
       # instead of ragged_buffer_factor * balanced, so no tokens can be dropped.
       ragged_buffer_factor = -1.0 if force_dropless else self.get_ragged_buffer_factor()
@@ -3406,6 +3449,7 @@ class RoutedMoE(nnx.Module):
           return_expert_counts=True,
           per_expert_scale=per_expert_scale,
           skip_token_gather=skip_token_gather,
+          physical_route_fn=physical_route_fn,
       )
 
       if num_ep > 1:
@@ -3413,7 +3457,7 @@ class RoutedMoE(nnx.Module):
           raise NotImplementedError("moe_use_fused_gmm3d requires expert parallelism 1 (no ragged all-to-all).")
         batch_axis = self._expert_parallelism_name if is_batch_sharded_by_expert else "data"
         # get group sizes for all shards
-        local_expert_size = self.config.num_experts // num_ep
+        local_expert_size = self.config.num_experts // num_ep + (num_replicas if use_replication else 0)
         reshaped_group_sizes = jnp.sum(group_sizes.reshape(-1, local_expert_size), axis=1)
         global_group_sizes = group_sizes
 
@@ -3498,6 +3542,7 @@ class RoutedMoE(nnx.Module):
               local_sorted_indices=local_sorted_indices,
               all_shards_group_sizes=all_shards_group_sizes,
               reshaped_group_sizes=reshaped_group_sizes,
+              replica_plan=replica_plan,
           ),
       )
 
@@ -3517,6 +3562,10 @@ class RoutedMoE(nnx.Module):
       expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
 
       if self.config.use_ring_of_experts:
+        if self.config.expert_replicas_per_device > 0:
+          raise NotImplementedError(
+              "expert replication is only supported on the ragged all-to-all path (use_ring_of_experts=False)."
+          )
         if skip_token_gather:
           raise NotImplementedError("moe_use_fused_gmm3d does not support use_ring_of_experts.")
         return roe_ag_and_route(
@@ -4061,6 +4110,8 @@ class RoutedMoE(nnx.Module):
             "moe_use_fused_gmm3d does not support forced routing, the dropless fallback or chunk weight accumulation."
         )
       if self.config.num_moe_emb_chunks > 0:
+        if self.config.expert_replicas_per_device > 0:
+          raise NotImplementedError("expert replication does not support num_moe_emb_chunks > 0 yet.")
         output0, output1, gmm_fn, routing, route_metadata, wo_bias = moe_emb_chunking(
             x,
             logits,
@@ -4104,6 +4155,24 @@ class RoutedMoE(nnx.Module):
         x = jax.tree.map(_cn, x)
         routing = jax.tree.map(_cn, routing)
         route_metadata = jax.tree.map(_cn, route_metadata)
+        if route_metadata.replica_plan is not None:
+          if w0_bias is not None or w1_bias is not None or wo_bias is not None:
+            raise NotImplementedError("expert replication does not support MoE biases yet.")
+          if return_weights:
+            raise NotImplementedError("expert replication does not support moe_accumulate_chunk_wgrad yet.")
+          plan = route_metadata.replica_plan
+          ep_size = self.get_expert_parallelism_size()
+          expected_local = self.config.num_experts // ep_size
+          for w_name, w_arr in (("w0", w0), ("w1", w1), ("wo", wo)):
+            if w_arr.ndim != 3 or w_arr.shape[0] != expected_local:
+              raise ValueError(
+                  f"expert replication expects 3D local {w_name} weights with leading dim {expected_local} "
+                  f"(num_experts={self.config.num_experts} // num_ep={ep_size}), got shape {w_arr.shape}."
+              )
+          ep_name = self._expert_parallelism_name
+          w0 = moe_replica_weights.extend_with_replicas(w0, plan, ep_name, ep_size, self.dtype)
+          w1 = moe_replica_weights.extend_with_replicas(w1, plan, ep_name, ep_size, self.dtype)
+          wo = moe_replica_weights.extend_with_replicas(wo, plan, ep_name, ep_size, self.dtype)
 
         if use_fused_gmm3d:
           # The fused kernels gather the tokens in-kernel (route() returned x=None): the whole expert MLP and
