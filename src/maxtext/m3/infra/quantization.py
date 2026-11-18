@@ -49,8 +49,8 @@ from maxtext.m3.infra import scan as m3_scan
 
 # NNX layers that do exactly one weight matmul.
 _PROJECTIONS = (nnx.Linear, nnx.LinearGeneral, nnx.Einsum)
-# The decoder stack (`layers/<i>`, `layers_<i>`, or `layers` when scanned) and everything under it.
-_LAYER_STACK = re.compile(r"decoder/layers(_\d+)?(/|$)")
+# The decoder stack (`layers/<i>`, `layers_<i>`, `layers` when scanned, or `first_cycle` / `cycles`) and everything under it.
+_LAYER_STACK = re.compile(r"decoder/(layers(_\d+)?|first_cycle|cycles)(/|$)")
 # MoE router attribute names (HF and legacy both use `gate`).
 _ROUTERS = frozenset({"gate"})
 # `jax.lax.ragged_dot` binds `ragged_dot_general`.
@@ -148,7 +148,15 @@ def plan(model: nnx.Module, quantize_routers: bool = True) -> Plan:
       continue  # A router, or a layer inside one (e.g. `gate/linear`).
     if isinstance(module, _PROJECTIONS):
       quantized.append(name)
-    elif _owns_weights(module, layer_axes=int(isinstance(module, m3_scan.ScannedLayers) or name.startswith(scanned))):
+    elif _owns_weights(
+        module,
+        layer_axes=int(
+            isinstance(module, m3_scan.ScannedLayers)
+            or name.startswith(scanned)
+            or name == "decoder/cycles"
+            or name.startswith("decoder/cycles/")
+        ),
+    ):
       uncovered.append(name)
   return Plan(tuple(quantized), tuple(routers), tuple(uncovered))
 

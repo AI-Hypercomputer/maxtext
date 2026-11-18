@@ -1374,10 +1374,10 @@ class MultipassQtProvider(qwix.QtProvider):
 
 
 # Matches decoder layer stacks: legacy (`decoder/.*layers.*`), m3 unscanned
-# (`decoder/layers_<i>/...` or `decoder/layers/<i>/...`), and m3 cycle-scanned decoders
-# (`decoder/cycles/.*` plus top-level `decoder/ple/.*`). `MultipassQtProvider` skips
+# (`decoder/layers_<i>/...` or `decoder/layers/<i>/...`), and m3 cycle-stacked decoders
+# (`decoder/first_cycle/.*` and `decoder/cycles/.*`). `MultipassQtProvider` skips
 # activation-only `dot_general` calls inside matched modules. `model.mtp` is not matched.
-_DECODER_LAYER_MODULE_PATH = r"decoder/(.*layers.*|cycles/.*|ple/.*)"
+_DECODER_LAYER_MODULE_PATH = r"decoder/(.*layers.*|first_cycle/.*|cycles/.*)"
 
 
 def _get_router_proj_unquantized_rule() -> qwix.QtRule:
