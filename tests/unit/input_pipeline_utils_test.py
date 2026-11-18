@@ -552,6 +552,53 @@ class PadOrTrimToMaxLengthMultimodalTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "must have pixel_values"):
       unreg_transform._pad_image_and_mask(mm_utils.PreprocessorOutput(pixel_values=None))  # pylint: disable=protected-access
 
+  def test_patches_with_positions_are_padded_per_slot(self):
+    patches = np.ones((2, 6, 4), dtype=np.float32)
+    positions = np.arange(24, dtype=np.int32).reshape(2, 6, 2)
+    output = mm_utils.PreprocessorOutput(pixel_values=patches, image_position_ids=positions, num_images=2)
+    config = SimpleNamespace(vision_encoder_block="gemma4", use_multimodal=True)
+    transform = PadOrTrimToMaxLength(max_length=45, pad_id=0, config=config)
+    with mock.patch.object(input_pipeline_utils.mm_processor, "get_image_offsets", return_value=11) as offsets:
+      out = transform._pad_image_and_mask(output)  # pylint: disable=protected-access
+    # Slots are costed at the largest image (no sample passed), so every sample gets the same count.
+    offsets.assert_called_once_with(config, None)
+    self.assertEqual(out.pixel_values.shape, (4, 6, 4))  # (45 - 1) // 11
+    np.testing.assert_array_equal(out.pixel_values[:2], patches)
+    np.testing.assert_array_equal(out.pixel_values[2:], 0)
+    self.assertEqual(out.image_position_ids.shape, (4, 6, 2))
+    np.testing.assert_array_equal(out.image_position_ids[:2], positions)
+    np.testing.assert_array_equal(out.image_position_ids[2:], mm_utils.IMAGE_POSITION_PAD_VALUE)
+
+  def test_patches_respect_max_num_images_per_example(self):
+    output = mm_utils.PreprocessorOutput(
+        pixel_values=np.ones((1, 6, 4)), image_position_ids=np.zeros((1, 6, 2), dtype=np.int32), num_images=1
+    )
+    transform = PadOrTrimToMaxLength(
+        max_length=45,
+        pad_id=0,
+        config=SimpleNamespace(vision_encoder_block="gemma4", use_multimodal=True),
+        max_num_images_per_example=2,
+    )
+    with mock.patch.object(input_pipeline_utils.mm_processor, "get_image_offsets", return_value=11):
+      out = transform._pad_image_and_mask(output)  # pylint: disable=protected-access
+    self.assertEqual(out.pixel_values.shape[0], 2)
+    self.assertEqual(out.image_position_ids.shape[0], 2)
+
+
+class ExtractImagesAndMasksTest(unittest.TestCase):
+  """ExtractImagesAndMasks passes per-patch positions on to the model."""
+
+  def test_emits_image_position_ids(self):
+    positions = np.zeros((1, 6, 2), dtype=np.int32)
+    output = mm_utils.PreprocessorOutput(pixel_values=np.ones((1, 6, 4)), image_position_ids=positions)
+    element = input_pipeline_utils.ExtractImagesAndMasks().map({"images": output})
+    self.assertIs(element["image_position_ids"], positions)
+
+  def test_no_positions_no_key(self):
+    output = mm_utils.PreprocessorOutput(pixel_values=np.ones((1, 4, 4, 3)))
+    element = input_pipeline_utils.ExtractImagesAndMasks().map({"images": output})
+    self.assertNotIn("image_position_ids", element)
+
 
 class FixPadTokenIfNeededTest(unittest.TestCase):
   """Tests for fix_pad_token_if_needed and SFT completion EOS loss masking."""

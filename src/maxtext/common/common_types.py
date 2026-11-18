@@ -19,8 +19,11 @@ from typing import Any, Sequence
 
 import numpy as np
 
+import jax
 import jax.numpy as jnp
+from flax import nnx
 from flax import struct
+from flax.nnx import variablelib
 
 Config = Any
 
@@ -28,6 +31,21 @@ Array = jnp.ndarray
 PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
+
+
+class UntrainableParam(nnx.Param):  # pylint: disable=abstract-method
+  """A model weight saved and loaded like `nnx.Param`, with no gradient, optimizer update or weight decay."""
+
+  def get_value(self, **kwargs):
+    value = super().get_value(**kwargs)
+    return jax.lax.stop_gradient(value) if isinstance(value, jax.Array) else value
+
+
+def variable_collection_name(variable_type: type[nnx.Variable]) -> str:
+  """Returns the checkpoint collection of a Variable type; UntrainableParam is stored with the regular params."""
+  if issubclass(variable_type, UntrainableParam):
+    return "params"
+  return variablelib.variable_name_from_type(variable_type, allow_register=True)
 
 
 def is_fp8_dtype(dtype: Any) -> bool:

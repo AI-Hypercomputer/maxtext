@@ -101,6 +101,7 @@ class EncoderKwargs(TypedDict, total=False):
 
   encoder_images: Any
   encoder_image_masks: Any
+  encoder_image_position_ids: Any
   encoder_videos: Any
   encoder_video_masks: Any
   encoder_video_grid_thw: Any
@@ -194,6 +195,12 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   # parameters in the model and checkpoints. Only pass image inputs when present.
   encoder_images = data.get("images") if config.use_multimodal else None
   encoder_image_masks = data.get("image_masks") if config.use_multimodal else None
+  # Gemma-4 padded-patch (Option-S) contract: when the data pipeline produces per-patch image position ids
+  # (native-resolution / pan-and-scan processors), thread them to the vision encoder so pad patches are
+  # masked and pooled by real coordinates. The stock fixed-grid Gemma-4 processor produces all-valid patches
+  # and does NOT emit this key, so the legacy all-valid path is used (correct for its contract). See
+  # gemma4_vision.Gemma4VisionEncoderLayer for the fail-closed guard.
+  encoder_image_position_ids = data.get("image_position_ids") if config.use_multimodal else None
   is_video = "video_grid_thw" in data
   encoder_kwargs: EncoderKwargs
   if is_video:
@@ -206,6 +213,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     encoder_kwargs = {
         "encoder_images": encoder_images,
         "encoder_image_masks": encoder_image_masks,
+        "encoder_image_position_ids": encoder_image_position_ids,
     }
   # Flax NNX model: forward pass, then pop Intermediates sown during it.
   logits = model(

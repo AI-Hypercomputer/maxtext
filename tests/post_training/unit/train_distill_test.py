@@ -35,6 +35,7 @@ import orbax.checkpoint as ocp
 from absl.testing import absltest
 
 # Import the module under test
+from maxtext.common.common_types import UntrainableParam
 from maxtext.trainers.post_train.distillation import train_distill
 from maxtext.trainers.post_train.distillation import distillation_utils
 from maxtext.configs import pyconfig
@@ -430,6 +431,28 @@ class TrainDistillTest(unittest.TestCase):
     )
     with self.assertRaisesRegex(ValueError, "Muon optimizer is not currently supported"):
       train_distill.get_distillation_optimizer(muon_config, max_train_steps=100)
+
+  def test_optimizer_weight_decay_skips_untrainable_params(self):
+    """Zero gradients leave weight decay as the only force, which must not reach an UntrainableParam."""
+    config = pyconfig.initialize(
+        ["", get_test_config_path()],
+        base_output_directory=self.test_dir,
+        run_name="optimizer_untrainable_test",
+        learning_rate=1.0,
+        opt_type="adamw",
+        adam_weight_decay=0.5,
+        gradient_clipping_threshold=0.0,
+        warmup_steps_fraction=0.0,
+        learning_rate_final_fraction=0.1,
+    )
+    model = nnx.Dict(kernel=nnx.Param(jnp.ones(3)), bound=UntrainableParam(jnp.ones(3)))
+    tx = train_distill.get_distillation_optimizer(config, max_train_steps=100, model=model)
+    optimizer = nnx.Optimizer(model, tx, wrt=nnx.Param)
+
+    optimizer.update(model, jax.tree_util.tree_map(jnp.zeros_like, nnx.state(model, nnx.Param)))
+
+    self.assertFalse(jnp.array_equal(model.kernel[...], jnp.ones(3)))
+    self.assertTrue(jnp.array_equal(model.bound[...], jnp.ones(3)))
 
   def test_monitored_strategy(self):
     self._test_monitored_strategy(sft_mode=False, feature_loss_type="cosine")

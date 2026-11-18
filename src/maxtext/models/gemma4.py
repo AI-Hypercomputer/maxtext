@@ -25,7 +25,7 @@ import jax.numpy as jnp
 from flax import nnx
 from typing import Optional, Any
 
-from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL, ShardMode
+from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL, ShardMode, UntrainableParam
 from maxtext.layers import initializers
 from maxtext.layers import moe
 from maxtext.layers import nnx_scan
@@ -344,7 +344,7 @@ class Gemma4DecoderLayer(nnx.Module):
     else:
       self.post_ffw_norm = None
 
-    self.layer_scalar = nnx.Param(jnp.ones((1,), dtype=config.weight_dtype), sharding=(None,))
+    self.layer_scalar = UntrainableParam(jnp.ones((1,), dtype=config.weight_dtype), sharding=(None,))
 
   def __call__(
       self,

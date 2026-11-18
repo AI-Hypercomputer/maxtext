@@ -23,7 +23,7 @@ import jax.numpy as jnp
 
 from flax import nnx
 
-from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL, ShardMode
+from maxtext.common.common_types import Config, AttentionType, MODEL_MODE_PREFILL, ShardMode, UntrainableParam
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import DenseGeneral, MlpBlock
@@ -427,7 +427,7 @@ class Gemma4SmallDecoderLayer(nnx.Module):
       self.per_layer_projection = None
       self.post_per_layer_input_norm = None
 
-    self.layer_scalar = nnx.Param(jnp.ones((1,), dtype=config.weight_dtype), sharding=(None,))
+    self.layer_scalar = UntrainableParam(jnp.ones((1,), dtype=config.weight_dtype), sharding=(None,))
 
   def compute_shared_kv(self, inputs: jax.Array, decoder_positions: jax.Array) -> tuple[jax.Array, jax.Array]:
     """Returns the rotated, normed K / V for this (non-shared) layer.

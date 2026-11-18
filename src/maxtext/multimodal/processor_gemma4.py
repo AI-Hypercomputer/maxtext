@@ -16,6 +16,7 @@
 """Gemma4-specific utilities for multimodal features."""
 
 from dataclasses import dataclass
+import math
 
 import numpy as np
 from PIL import Image
@@ -45,27 +46,31 @@ class Gemma4PreprocessorOutput(mm_utils.PreprocessorOutput):
   num_images: int = 0
   pixel_values: None | np.ndarray = None
   pixel_mask: None | np.ndarray = None
-  positions_xy: None | np.ndarray = None
+  num_soft_tokens_per_image: None | np.ndarray = None
 
 
-def preprocess_mm_data_gemma4(images):
-  """Preprocesses multimodal data for Gemma4 models."""
+def _resize_and_rescale(img: np.ndarray, height: int, width: int) -> np.ndarray:
+  """Bicubic resize to (height, width), scaled to the [0, 1] range Gemma 4 expects."""
   # PIL resize expects (width, height)
-  target_size = (GEMMA4_IMAGE_WIDTH, GEMMA4_IMAGE_HEIGHT)
+  resized_pil_img = Image.fromarray(img).resize((width, height), resample=Image.Resampling.BICUBIC)
+  return np.asarray(resized_pil_img, dtype=np.float32) / 255.0
+
+
+def preprocess_mm_data_gemma4(images, config=None):
+  """Preprocesses multimodal data for Gemma4 models."""
+  if config is not None and config.use_native_resolution_for_vit:
+    return preprocess_mm_data_gemma4_native(images, max_soft_tokens=config.vision_output_length)
 
   images_in, images_out = [], []
   if isinstance(images, np.ndarray):
     images_in.append(images)
   else:
     images_in.extend(images)
+  if not images_in:
+    raise ValueError("A row without an image needs use_native_resolution_for_vit=True.")
 
   for img in images_in:
-    pil_img = Image.fromarray(img)
-    resized_pil_img = pil_img.resize(target_size, resample=Image.Resampling.BICUBIC)
-
-    # Gemma 4 expects inputs strictly in the [0, 1] range.
-    img = np.asarray(resized_pil_img, dtype=np.float32) / 255.0
-    images_out.append(img)
+    images_out.append(_resize_and_rescale(img, GEMMA4_IMAGE_HEIGHT, GEMMA4_IMAGE_WIDTH))
 
   stacked_images = np.stack(images_out, axis=0).astype(np.float32)
 
@@ -75,8 +80,73 @@ def preprocess_mm_data_gemma4(images):
   )
 
 
-def get_image_offsets_gemma4(processor_output: mm_utils.PreprocessorOutput | None):
+def get_aspect_ratio_preserving_size_gemma4(height: int, width: int, max_soft_tokens: int) -> tuple[int, int]:
+  """Port of HF `get_aspect_ratio_preserving_size` with the Gemma-4 patch and pooling sizes; returns (height, width)."""
+  max_patches = max_soft_tokens * GEMMA4_POOLING_KERNEL**2
+  side_mult = GEMMA4_PATCH_SIZE * GEMMA4_POOLING_KERNEL
+  factor = math.sqrt(max_patches * GEMMA4_PATCH_SIZE**2 / (height * width))
+  target_height = int(math.floor(factor * height / side_mult)) * side_mult
+  target_width = int(math.floor(factor * width / side_mult)) * side_mult
+
+  if target_height == 0 and target_width == 0:
+    raise ValueError(f"Cannot resize a {height}x{width} image to a non-empty Gemma-4 patch grid.")
+  # An extreme aspect ratio can round one side down to zero: keep one row or column of pooled tokens.
+  max_side_length = max_soft_tokens * side_mult
+  if target_height == 0:
+    target_height = side_mult
+    target_width = min(int(math.floor(width / height)) * side_mult, max_side_length)
+  elif target_width == 0:
+    target_width = side_mult
+    target_height = min(int(math.floor(height / width)) * side_mult, max_side_length)
+  return target_height, target_width
+
+
+def preprocess_mm_data_gemma4_native(images, max_soft_tokens: int):
+  """Preprocesses images like the HF Gemma-4 processor: aspect ratio kept, patches padded to the token budget.
+
+  Returns:
+    A Gemma4PreprocessorOutput with pixel_values [N, L, P*P*C], image_position_ids [N, L, 2] holding (x, y), and
+    num_soft_tokens_per_image [N], where L = max_soft_tokens * GEMMA4_POOLING_KERNEL**2.
+  """
+  images_in = [images] if isinstance(images, np.ndarray) else list(images)
+  num_images = len(images_in)
+  patch = GEMMA4_PATCH_SIZE
+  max_patches = max_soft_tokens * GEMMA4_POOLING_KERNEL**2
+
+  pixel_values = np.zeros((num_images, max_patches, patch * patch * mm_utils.NUM_IMAGE_CHANNELS), dtype=np.float32)
+  image_position_ids = np.full((num_images, max_patches, 2), mm_utils.IMAGE_POSITION_PAD_VALUE, dtype=np.int32)
+  num_soft_tokens_per_image = np.zeros(num_images, dtype=np.int32)
+
+  for i, img in enumerate(images_in):
+    height, width = get_aspect_ratio_preserving_size_gemma4(img.shape[0], img.shape[1], max_soft_tokens)
+    pixels = _resize_and_rescale(img, height, width)
+
+    grid_h, grid_w = height // patch, width // patch
+    num_patches = grid_h * grid_w
+    pixel_values[i, :num_patches] = (
+        pixels.reshape(grid_h, patch, grid_w, patch, -1).transpose(0, 2, 1, 3, 4).reshape(num_patches, -1)
+    )
+    xs, ys = np.meshgrid(np.arange(grid_w), np.arange(grid_h))
+    image_position_ids[i, :num_patches] = np.stack([xs, ys], axis=-1).reshape(num_patches, 2)
+    num_soft_tokens_per_image[i] = num_patches // GEMMA4_POOLING_KERNEL**2
+
+  return Gemma4PreprocessorOutput(
+      num_images=num_images,
+      pixel_values=pixel_values,
+      image_position_ids=image_position_ids,
+      num_soft_tokens_per_image=num_soft_tokens_per_image,
+  )
+
+
+def get_image_offsets_gemma4(processor_output: mm_utils.PreprocessorOutput | None, config=None):
   """Gets the increase in total token count after inserting image token placeholders."""
+  num_soft_tokens_per_image = getattr(processor_output, "num_soft_tokens_per_image", None)
+  if num_soft_tokens_per_image is not None:
+    return int(np.sum(np.asarray(num_soft_tokens_per_image) + GEMMA4_NUM_EXTRA_TOKENS_PER_MEDIA - 1))
+  if processor_output is None and config is not None and config.use_native_resolution_for_vit:
+    # One image at the full token budget.
+    return config.vision_output_length + GEMMA4_NUM_EXTRA_TOKENS_PER_MEDIA - 1
+
   has_images = processor_output is not None and processor_output.pixel_values is not None
   num_images = processor_output.pixel_values.shape[0] if has_images else 1  # pyrefly: ignore[missing-attribute]
 
@@ -154,12 +224,33 @@ def insert_sequence(
   return new_tokens
 
 
+def _expand_image_tokens_native(tokens: np.ndarray, num_soft_tokens_per_image: np.ndarray) -> np.ndarray:
+  """Replaces each placeholder in a 1D token array with its image's own soft token run."""
+  if tokens.ndim != 1:
+    raise ValueError(f"Native-resolution token expansion expects 1D tokens, got shape {tokens.shape}.")
+  starts = np.flatnonzero(tokens == GEMMA4_TOKEN_PLACEHOLDER)
+  if starts.size != len(num_soft_tokens_per_image):
+    raise ValueError(
+        f"Found {starts.size} image placeholder(s) in the prompt for {len(num_soft_tokens_per_image)} image(s)."
+    )
+  pieces = np.split(tokens, starts)
+  out = [pieces[0]]
+  for piece, num_soft_tokens in zip(pieces[1:], num_soft_tokens_per_image):
+    image_tokens = [GEMMA4_BEGIN_IMAGE_TOKEN, *[GEMMA4_TOKEN_PLACEHOLDER] * int(num_soft_tokens), GEMMA4_END_IMAGE_TOKEN]
+    out += [image_tokens, piece[1:]]
+  return np.concatenate(out).astype(tokens.dtype)
+
+
 def add_extra_tokens_for_images_gemma4(
     tokens: np.ndarray | list,
     *,
     max_num_images: int = 1,
+    num_soft_tokens_per_image: np.ndarray | None = None,
 ):
   """Replaces image placeholder tokens with the full sequence of Gemma 4 image tokens."""
+  if num_soft_tokens_per_image is not None:
+    return _expand_image_tokens_native(np.asarray(tokens), num_soft_tokens_per_image)
+
   # New tokens which will be inserted for each image (accounting for pooling)
   num_patches = (GEMMA4_IMAGE_HEIGHT // GEMMA4_PATCH_SIZE) * (GEMMA4_IMAGE_WIDTH // GEMMA4_PATCH_SIZE)
   num_soft_tokens = num_patches // (GEMMA4_POOLING_KERNEL**2)
@@ -189,3 +280,13 @@ def get_dummy_image_shape_for_init_gemma4(batch_size=1, num_image_per_sequence=1
       mm_utils.NUM_IMAGE_CHANNELS,
   )
   return image_shape
+
+
+def get_dummy_patch_shape_for_init_gemma4(config, batch_size=1):
+  """Shape [B, N, L, P*P*C] of native-resolution images, as the input pipeline pads them; None when off."""
+  if not config.use_native_resolution_for_vit:
+    return None
+  image_offset = get_image_offsets_gemma4(None, config)
+  num_images = mm_utils.get_max_num_images(config.max_target_length, image_offset, config.max_num_images_per_example)
+  max_patches = config.vision_output_length * GEMMA4_POOLING_KERNEL**2
+  return (batch_size, num_images, max_patches, GEMMA4_PATCH_SIZE**2 * mm_utils.NUM_IMAGE_CHANNELS)

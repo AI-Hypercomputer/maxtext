@@ -281,12 +281,15 @@ def get_data(golden_data_point, config):
 
   if config.use_multimodal and audio_values is None:
     assert "pixel_values" in golden_data_point, "no image found in golden data while use_multimodal=True"
+  image_position_ids = None
   if config.use_multimodal and "pixel_values" in golden_data_point:
     pixel_values = np.asarray(golden_data_point["pixel_values"], dtype=np.float32)
     max_logging.log(f"pixel_values.shape = {pixel_values.shape}")
-    # Gemma3 and Gemma4 models expect (num_images, height, width, channels)
+    # Gemma3 and Gemma4 models expect (num_images, height, width, channels), or Gemma4 [L, F] patches with positions
     if model_prefix in ["gemma3", "gemma4"]:
-      if pixel_values.ndim == 2:
+      if config.use_native_resolution_for_vit:
+        image_position_ids = np.asarray(golden_data_point["image_position_ids"], dtype=np.int32)
+      elif pixel_values.ndim == 2:
         h, w = config.image_size_for_vit
         p = config.patch_size_for_vit
         c = pixel_values.shape[-1] // (p * p)
@@ -308,6 +311,8 @@ def get_data(golden_data_point, config):
       c = config.num_channels_for_vit
       pixel_values = np.reshape(pixel_values, (c, int(grid_t * tps), int(grid_h * p), int(grid_w * p)))
     pixel_values = np.stack([pixel_values for _ in range(config.global_batch_size_to_train_on)])
+    if image_position_ids is not None:
+      image_position_ids = np.stack([image_position_ids for _ in range(config.global_batch_size_to_train_on)])
   else:
     pixel_values = None
 
@@ -359,7 +364,7 @@ def get_data(golden_data_point, config):
     decoder_positions = np.stack(
         [np.arange(config.max_target_length, dtype=np.int32) for _ in range(config.global_batch_size_to_train_on)]
     )
-  return ids, decoder_segment_ids, decoder_positions, logits, seq_len, pixel_values, audio_values
+  return ids, decoder_segment_ids, decoder_positions, logits, seq_len, pixel_values, audio_values, image_position_ids
 
 
 def main(config, test_args):  # pylint: disable=W0621
@@ -412,7 +417,9 @@ def main(config, test_args):  # pylint: disable=W0621
   nnx_graphdef, nnx_state = nnx.split(model)
 
   @jax.jit
-  def eval_step_nnx(step_state, ids, decoder_positions, decoder_segment_ids, images=None, audios=None):
+  def eval_step_nnx(
+      step_state, ids, decoder_positions, decoder_segment_ids, images=None, audios=None, image_position_ids=None
+  ):
     """Fused NNX forward pass.
 
     Without jit the decoder runs op-by-op and every layer's intermediates stay
@@ -428,6 +435,7 @@ def main(config, test_args):  # pylint: disable=W0621
           decoder_segment_ids=decoder_segment_ids,
           encoder_images=images,
           encoder_audios=audios,
+          encoder_image_position_ids=image_position_ids,
           enable_dropout=False,
       )
 
@@ -465,11 +473,13 @@ def main(config, test_args):  # pylint: disable=W0621
     all_data_to_save = []
     for golden_data_index, golden_data_point in enumerate(golden_data):
       max_logging.log(f"\n--- Comparing forward pass for golden data index: {golden_data_index} ---")
-      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images, audios = get_data(
+      ids, decoder_segment_ids, decoder_positions, golden_logits, seq_len, images, audios, image_position_ids = get_data(
           golden_data_point, config
       )
       max_logging.log("maxtext forward pass")
-      full_train_logits = eval_step_nnx(nnx_state, ids, decoder_positions, decoder_segment_ids, images, audios)
+      full_train_logits = eval_step_nnx(
+          nnx_state, ids, decoder_positions, decoder_segment_ids, images, audios, image_position_ids
+      )
 
       # Only batch element 0 is compared; slice before the allgather so the
       # full [batch, seq, vocab] logits are never materialized per host.

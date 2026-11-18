@@ -35,6 +35,8 @@ import jax
 from jax import tree_util as jtu
 import qwix
 
+from maxtext.common.common_types import variable_collection_name
+
 M = tp.TypeVar("M", bound=Module)
 
 
@@ -624,7 +626,7 @@ class ToLinen(linen.Module):
     # group state by collection
     for path, leaf in nnx.to_flat_state(state):
       type_ = leaf.type if isinstance(leaf, nnx.Variable) else type(leaf)
-      collection = variablelib.variable_name_from_type(type_, allow_register=True)
+      collection = variable_collection_name(type_)
       if collection not in collection_flat_state:
         collection_flat_state[collection] = []
       collection_flat_state[collection].append((path, leaf))

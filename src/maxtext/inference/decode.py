@@ -192,6 +192,7 @@ def main(argv: Sequence[str]) -> None:
           image_masks=processor_outputs.pixel_mask  # pyrefly: ignore[bad-argument-type]
           if config.use_multimodal and "llama4" in config.model_name
           else None,  # pyrefly: ignore[bad-argument-type]
+          image_position_ids=processor_outputs.image_position_ids,
           videos=getattr(processor_outputs, "video_values", None) if config.use_multimodal else None,
           video_masks=getattr(processor_outputs, "video_mask", None) if config.use_multimodal else None,
           video_grid_thw=getattr(processor_outputs, "video_grid_thw", None) if config.use_multimodal else None,
