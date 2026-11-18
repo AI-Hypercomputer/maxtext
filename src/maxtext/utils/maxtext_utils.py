@@ -2262,6 +2262,7 @@ def create_device_mesh(config, devices=None):
         devices,
         dcn_parallelism=dcn_parallelism,
         allow_split_physical_axes=allow_split_physical_axes,
+        config=config,
     )
   elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()

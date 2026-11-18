@@ -722,7 +722,7 @@ def from_config(
 def get_transformer_model(config, mesh, quant, model_mode: str = MODEL_MODE_TRAIN, rngs: nnx.Rngs | None = None):
   """Returns the transformer model based on the configuration."""
   if rngs is not None and lineage_adapter.is_native(config):
-    return lineage_adapter.LineageTransformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
+    return lineage_adapter.create_transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   if rngs is not None:
     return models.Transformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
   else:

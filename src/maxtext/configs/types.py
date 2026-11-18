@@ -321,7 +321,9 @@ ModelName = Literal[
     "qwen3.5-35b-fp8",
     "qwen3.5-397b-a17b",
     "qwen3.5-397b-a17b-fp8",
+    "qwen3.5-397b-a17b-lineage",
     "qwen3.8-2.4t-a95b",
+    "qwen3.8-2.4t-a95b-lineage",
     "gpt3-175b",
     "gpt3-22b",
     "gpt3-6b",
@@ -7445,14 +7447,23 @@ class MaxTextConfig(
     if self.use_lineage:
       if not self.scan_layers:
         raise ValueError("use_lineage=True requires scan_layers=True.")
-      if self.decoder_block != DecoderBlockType.DEEPSEEK:
-        raise ValueError(f"use_lineage=True requires decoder_block='deepseek', got decoder_block={self.decoder_block!r}.")
-      if self.attention_type != "mla":
-        raise ValueError(f"use_lineage=True requires attention_type='mla', got attention_type={self.attention_type!r}.")
-      if self.rope_type != RopeType.YARN:
-        raise ValueError(f"use_lineage=True requires rope_type='yarn', got rope_type={self.rope_type!r}.")
-      if self.capacity_factor <= 0:
-        raise ValueError(f"use_lineage=True requires capacity_factor > 0, got capacity_factor={self.capacity_factor}.")
+      if self.decoder_block == DecoderBlockType.DEEPSEEK:
+        if self.attention_type != "mla":
+          raise ValueError(f"use_lineage=True requires attention_type='mla', got attention_type={self.attention_type!r}.")
+        if self.rope_type != RopeType.YARN:
+          raise ValueError(f"use_lineage=True requires rope_type='yarn', got rope_type={self.rope_type!r}.")
+        if self.capacity_factor <= 0:
+          raise ValueError(f"use_lineage=True requires capacity_factor > 0, got capacity_factor={self.capacity_factor}.")
+      elif self.decoder_block == DecoderBlockType.QWEN3_5:
+        if self.num_decoder_layers % 4 != 0:
+          raise ValueError(
+              f"use_lineage=True with decoder_block='qwen3_5' requires num_decoder_layers % 4 == 0, got {self.num_decoder_layers}."
+          )
+      else:
+        raise ValueError(
+            "use_lineage=True requires decoder_block in ('deepseek', 'qwen3_5'), "
+            f"got decoder_block={self.decoder_block!r}."
+        )
 
     # The freqs_cis table lookup clamps positions >= max_position_embeddings to the last row, while
     # rope_direct_position_freqs uses the true angle; keep positions in range so both settings agree.

@@ -59,8 +59,17 @@ GA_STATS_KEY = "lineage_ga_stats"
 
 
 def is_native(cfg: Any) -> bool:
-  """Whether `cfg` runs the Lineage-native DeepSeek-V3 model (`use_lineage`)."""
+  """Whether `cfg` runs a Lineage-native model (`use_lineage`)."""
   return bool(getattr(cfg, "use_lineage", False))
+
+
+def _is_qwen(cfg: Any) -> bool:
+  """Whether `cfg` selects the Qwen 3.5 / Qwen MAX Lineage path."""
+  if not is_native(cfg):
+    return False
+  decoder_block = getattr(cfg, "decoder_block", "")
+  block_val = getattr(decoder_block, "value", str(decoder_block)).lower()
+  return block_val == "qwen3_5"
 
 
 class LineageRouterBiasVar(nnx.Variable):
@@ -98,8 +107,14 @@ def create_device_mesh(
     devices: Sequence[Any],
     dcn_parallelism: Sequence[int] | None = None,
     allow_split_physical_axes: bool | None = None,
+    config: Any = None,
 ) -> np.ndarray:
   """Maps logical mesh axis i one-to-one onto physical axis i, with mesh_utils fallback."""
+  if config is not None and _is_qwen(config):
+    from maxtext.experimental.lineage.qwen import qwen_adapter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    return qwen_adapter.create_device_mesh(ici_parallelism, devices, config=config)
+
   from maxtext.experimental.lineage import dsv3_sharding  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   return dsv3_sharding.create_device_mesh(
@@ -599,8 +614,24 @@ def _ga_stats(aux: dsv3_model.DSv3LossAux, cfg: dsv3_config.DSv3Config) -> dict[
   return stats
 
 
+def create_transformer(
+    config: Any,
+    mesh: jax.sharding.Mesh,
+    quant: Any = None,
+    *,
+    rngs: nnx.Rngs,
+    model_mode: str = "train",
+) -> nnx.Module:
+  """Instantiates the Lineage NNX model for `config` (DeepSeek-V3 or Qwen)."""
+  if _is_qwen(config):
+    from maxtext.experimental.lineage.qwen import qwen_adapter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    return qwen_adapter.QwenLineageTransformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
+  return LineageTransformer(config, mesh, quant=quant, rngs=rngs, model_mode=model_mode)
+
+
 def loss_and_aux(
-    model: LineageTransformer,
+    model: Any,
     config: Any,
     data: Mapping[str, jax.Array],
     *,
@@ -633,6 +664,11 @@ def loss_and_aux(
     `diag_bias_updates` for `log_step_diagnostics` and (under GA)
     `lineage_ga_stats` for `finalize_accumulated_step`.
   """
+  if _is_qwen(config):
+    from maxtext.experimental.lineage.qwen import qwen_adapter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    return qwen_adapter.loss_and_aux(model, config, data, is_train=is_train)
+
   from maxtext.experimental.lineage import dsv3_loss  # pylint: disable=g-import-not-at-top,import-outside-toplevel
   from maxtext.experimental.lineage import dsv3_model  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
@@ -699,8 +735,13 @@ def loss_and_aux(
   }
 
 
-def finalize_accumulated_step(model: LineageTransformer, aux: dict[str, Any]) -> dict[str, Any]:
+def finalize_accumulated_step(model: Any, aux: dict[str, Any]) -> dict[str, Any]:
   """Applies one full-batch router-bias / expert-permutation update after the GA scan."""
+  if _is_qwen(model.config):
+    from maxtext.experimental.lineage.qwen import qwen_adapter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    return qwen_adapter.finalize_accumulated_step(model, aux)
+
   from maxtext.experimental.lineage import dsv3_loss  # pylint: disable=g-import-not-at-top,import-outside-toplevel
   from maxtext.experimental.lineage import dsv3_model  # pylint: disable=g-import-not-at-top,import-outside-toplevel
   from maxtext.experimental.lineage import dsv3_types  # pylint: disable=g-import-not-at-top,import-outside-toplevel
@@ -780,6 +821,10 @@ def maxtext_restore_target(config: Any, mesh: jax.sharding.Mesh) -> dict[str, An
   Returns:
     The restore target: `{"params": ..., "MoEBiasVar": ...}`.
   """
+  if _is_qwen(config):
+    from maxtext.experimental.lineage.qwen import qwen_adapter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    return qwen_adapter.maxtext_restore_target(config, mesh)
   tree = maxtext_abstract_param_tree(config, mesh)
   flat = traverse_util.flatten_dict(tree)
   params_flat = {}
@@ -853,6 +898,11 @@ def restore_params(
     config: MaxText config.
     mesh: The device mesh.
   """
+  if _is_qwen(config):
+    from maxtext.experimental.lineage.qwen import qwen_adapter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    qwen_adapter.restore_params(model_state, maxtext_params, config, mesh)
+    return
   from maxtext.experimental.lineage.interop import maxtext_layout  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   cfg = dsv3_config_from_maxtext(config, mesh)
