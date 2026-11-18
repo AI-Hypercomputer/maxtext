@@ -27,9 +27,9 @@ from jax.experimental.layout import with_layout_constraint  # pylint: disable=g-
 import jax.numpy as jnp
 
 from maxtext.experimental.lineage.qwen.config import QwenConfig
-from maxtext.experimental.lineage.qwen.ext_kernels.gdn.gdn_bwd_pallas import GdnPrecomputedMeta
-from maxtext.experimental.lineage.qwen.ext_kernels.gdn.gdn_bwd_pallas import gdn_decoupled_conv1d
-from maxtext.experimental.lineage.qwen.ext_kernels.gdn.gdn_bwd_pallas import precompute_gdn_meta
+from maxtext.kernels.gdn.gdn_bwd_pallas import GdnPrecomputedMeta
+from maxtext.kernels.gdn.gdn_bwd_pallas import gdn_decoupled_conv1d
+from maxtext.kernels.gdn.gdn_bwd_pallas import precompute_gdn_meta
 
 # Zero-host-offload HBM residual checkpoint names (`S(0)` HBM only;
 # NEVER `S(5)` `pinned_host` offload).

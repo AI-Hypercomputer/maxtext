@@ -26,9 +26,9 @@ import jax.numpy as jnp
 from maxtext.experimental.lineage.qwen import moe_kernels
 from maxtext.experimental.lineage.qwen import ops
 from maxtext.experimental.lineage.qwen.config import QwenConfig
-from maxtext.experimental.lineage.qwen.ext_kernels.ragged import ragged_gather_tc as tc
-from maxtext.experimental.lineage.qwen.ext_kernels.ragged import ragged_sort
-from maxtext.experimental.lineage.qwen.ext_kernels.ragged import ragged_sort_tc
+from maxtext.kernels.ragged import ragged_gather_tc as tc
+from maxtext.kernels.ragged import ragged_sort
+from maxtext.kernels.ragged import ragged_sort_tc
 
 Fp8SteWeight = moe_kernels.Fp8SteWeight
 gather_routed_weight_sc1 = moe_kernels.gather_routed_weight_sc1

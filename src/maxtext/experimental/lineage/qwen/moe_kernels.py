@@ -45,7 +45,7 @@ from maxtext.experimental.lineage.qwen import ragged_ops
 from maxtext.experimental.lineage.qwen.config import QwenConfig
 from maxtext.experimental.lineage.qwen.ext_kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.experimental.lineage.qwen.ext_kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
-from maxtext.experimental.lineage.qwen.ext_kernels.ragged import ragged_gather_tc as tc
+from maxtext.kernels.ragged import ragged_gather_tc as tc
 from maxtext.experimental.lineage.qwen.gmmv2 import gate_bwd_fused
 from maxtext.experimental.lineage.qwen.gmmv2 import gmmv2_kernel
 from maxtext.experimental.lineage.qwen.gmmv2 import linear_bwd_split

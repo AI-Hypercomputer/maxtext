@@ -23,12 +23,12 @@ import dataclasses
 import functools
 import logging
 import math
+from typing import Any
 
 import jax
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
-
 
 # --- Pallas Kernels for Ragged Gather on TensorCore ---
 
@@ -70,7 +70,9 @@ def ragged_gather_tc(
   if max_out_tokens <= 0:
     raise ValueError(f"max_out_tokens must be positive, got {max_out_tokens}.")
   if isinstance(num_tokens, int) and not 0 <= num_tokens <= max_out_tokens:
-    raise ValueError(f"num_tokens must be in [0, {max_out_tokens}], got {num_tokens}.")
+    raise ValueError(
+        f"num_tokens must be in [0, {max_out_tokens}], got {num_tokens}."
+    )
   if block_size <= 0:
     raise ValueError(f"block_size must be positive, got {block_size}.")
   num_indices = indices.shape[0]
@@ -123,7 +125,9 @@ def ragged_gather_tc(
         # Synchronous; the row gathers read the indices as scalars when issued,
         # so a single SMEM buffer suffices.
         copy = pltpu.make_async_copy(
-            idx_hbm_ref.at[pl.ds(pl.multiple_of(win_start, idx_align), idx_window)],
+            idx_hbm_ref.at[
+                pl.ds(pl.multiple_of(win_start, idx_align), idx_window)
+            ],
             idx_smem_ref,
             idx_sem,
         )
@@ -138,7 +142,9 @@ def ragged_gather_tc(
           @pl.loop(0, size // step_unroll)
           def _(chunk_i):
             base_i = off + chunk_i * step_unroll
-            src_indices = [idx_smem_ref[idx_off + base_i + u] for u in range(step_unroll)]
+            src_indices = [
+                idx_smem_ref[idx_off + base_i + u] for u in range(step_unroll)
+            ]
             for u in range(step_unroll):
               pltpu.make_async_copy(
                   x_hbm_ref.at[pl.ds(src_indices[u], 1), :, :],
@@ -251,15 +257,15 @@ def ragged_gather_tc(
       x.dtype,
       manual_axis_type=manual_axis_type,
   )
-  scalars = jnp.stack(
-      [
-          jnp.asarray(start, dtype=jnp.int32),
-          jnp.asarray(num_tokens, dtype=jnp.int32),
-      ]
-  )
+  scalars = jnp.stack([
+      jnp.asarray(start, dtype=jnp.int32),
+      jnp.asarray(num_tokens, dtype=jnp.int32),
+  ])
   # Only launch grid steps for blocks overlapping `[0, num_tokens)`. When
   # `num_tokens` is traced, this is a dynamic grid size.
-  num_steps = pl.cdiv(num_tokens if isinstance(num_tokens, int) else scalars[1], block_size)
+  num_steps = pl.cdiv(
+      num_tokens if isinstance(num_tokens, int) else scalars[1], block_size
+  )
 
   return pl.pallas_call(
       _ragged_gather_kernel,
@@ -302,8 +308,8 @@ _RAGGED_GATHER_REDUCE_TC_SEARCH_CHUNK = 64
 # Block table entries per block: first slot, slot count, first token, token
 # count.
 _RAGGED_GATHER_REDUCE_TC_BLOCK_FIELDS = 4
-# VMEM of the block buffers, under the kernel's VMEM limit.
-_RAGGED_GATHER_REDUCE_TC_VMEM_LIMIT = 64 * 1024 * 1024
+# VMEM of the block buffers, within Ghostfish's max valid 65,472 KiB limit.
+_RAGGED_GATHER_REDUCE_TC_VMEM_LIMIT = 65472 * 1024
 _RAGGED_GATHER_REDUCE_TC_VMEM_BUDGET = 56 * 1024 * 1024
 
 
@@ -370,16 +376,19 @@ def _check_ragged_gather_reduce_tc_args(top_k: int, block_size: int):
     raise ValueError(f"top_k must be positive, got {top_k}.")
   if block_size <= top_k:
     raise ValueError(
-        f"block_size must exceed top_k ({top_k}) so that a block fits a token" f" and its rows, got {block_size}."
+        f"block_size must exceed top_k ({top_k}) so that a block fits a token"
+        f" and its rows, got {block_size}."
     )
 
 
 @functools.cache
-def _warn_packed_sort_fallback(n: int, max_key: int, pos_bits: int, key_bits: int) -> None:
+def _warn_packed_sort_fallback(
+    n: int, max_key: int, pos_bits: int, key_bits: int
+) -> None:
   """Logs, once per shape at trace time, that packed_stable_sort took the slower tuple sort."""
   logging.warning(
-      "packed_stable_sort: %d position bits (n=%d) + %d key bits (max_key=%d) > 32; "
-      "falling back to the (key, position) tuple sort.",
+      "packed_stable_sort: %d position bits (n=%d) + %d key bits (max_key=%d) >"
+      " 32; falling back to the (key, position) tuple sort.",
       pos_bits,
       n,
       key_bits,
@@ -387,26 +396,701 @@ def _warn_packed_sort_fallback(n: int, max_key: int, pos_bits: int, key_bits: in
   )
 
 
-def packed_stable_sort(key: jax.Array, max_key: int) -> tuple[jax.Array, jax.Array]:
-  """Stable sort of `arange(len(key))` by non-negative int `key` <= max_key; returns (sorted_key, positions).
+def packed_stable_sort(
+    key: jax.Array, max_key: int
+) -> tuple[jax.Array, jax.Array]:
+  """Stable sort of `arange(len(key))` by non-negative int `key` <= `max_key`.
 
-  Sorts the single uint32 array `key << pos_bits | position` when it fits in 32 bits (else the (key, position)
-  tuple sort). The positions are distinct, so every packed value is unique and the unstable single-array sort
-  gives the stable order.
+  Sorts the single uint32 array `key << pos_bits | position` when it fits in 32
+  bits, or `key * n + position` when `(max_key + 1) * n <= 2**32` (e.g. EP=16
+  `max_key=65536, n=43008`), else falls back to the `(key, position)` tuple
+  sort. The positions are distinct, so every packed value is unique and the
+  unstable single-array sort gives the stable order.
+
+  Args:
+    key: 1-D non-negative integer array of sort keys.
+    max_key: Upper bound on values in `key`.
+
+  Returns:
+    Tuple of `(sorted_key, sorted_positions)` sorted stably by `key`.
   """
   n = key.shape[0]
   positions = jnp.arange(n, dtype=jnp.int32)
   pos_bits = max(1, (n - 1).bit_length())
   key_bits = max(1, int(max_key).bit_length())
-  if pos_bits + key_bits > 32:
-    _warn_packed_sort_fallback(n, int(max_key), pos_bits, key_bits)
-    sorted_key, sorted_positions = jax.lax.sort((key.astype(jnp.int32), positions), num_keys=1, is_stable=True)
-    return sorted_key, sorted_positions
-  shift = jnp.uint32(pos_bits)
-  packed_key = (key.astype(jnp.uint32) << shift) | positions.astype(jnp.uint32)
-  sorted_packed = jax.lax.sort(packed_key, is_stable=False)
-  sorted_positions = (sorted_packed & jnp.uint32((1 << pos_bits) - 1)).astype(jnp.int32)
-  return (sorted_packed >> shift).astype(jnp.int32), sorted_positions
+  if pos_bits + key_bits <= 32:
+    shift = jnp.uint32(pos_bits)
+    packed_key = (key.astype(jnp.uint32) << shift) | positions.astype(
+        jnp.uint32
+    )
+    sorted_packed = jax.lax.sort(packed_key, is_stable=False)
+    sorted_positions = (sorted_packed & jnp.uint32((1 << pos_bits) - 1)).astype(
+        jnp.int32
+    )
+    return (sorted_packed >> shift).astype(jnp.int32), sorted_positions
+  if n > 0 and (int(max_key) + 1) * n <= (1 << 32):
+    radix = jnp.uint32(n)
+    packed_key = key.astype(jnp.uint32) * radix + positions.astype(jnp.uint32)
+    sorted_packed = jax.lax.sort(packed_key, is_stable=False)
+    sorted_key_u32 = sorted_packed // radix
+    sorted_positions = (sorted_packed - sorted_key_u32 * radix).astype(
+        jnp.int32
+    )
+    return sorted_key_u32.astype(jnp.int32), sorted_positions
+  _warn_packed_sort_fallback(n, int(max_key), pos_bits, key_bits)
+  sorted_key, sorted_positions = jax.lax.sort(
+      (key.astype(jnp.int32), positions), num_keys=1, is_stable=True
+  )
+  return sorted_key, sorted_positions
+
+
+def _packed_stable_sort_with_weights_impl(
+    key: jax.Array, max_key: int, weights_flat: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Sorts `weights_flat` as a payload alongside `packed_stable_sort(key, max_key)`."""
+  n = key.shape[0]
+  positions = jnp.arange(n, dtype=jnp.int32)
+  if n == 0:
+    return key.astype(jnp.int32), positions, weights_flat
+  pos_bits = max(1, (n - 1).bit_length())
+  key_bits = max(1, int(max_key).bit_length())
+  if pos_bits + key_bits <= 32:
+    shift = jnp.uint32(pos_bits)
+    packed_key = (key.astype(jnp.uint32) << shift) | positions.astype(
+        jnp.uint32
+    )
+    sorted_packed, sorted_weights = jax.lax.sort(
+        (packed_key, weights_flat), dimension=0, is_stable=False, num_keys=1
+    )
+    sorted_positions = (sorted_packed & jnp.uint32((1 << pos_bits) - 1)).astype(
+        jnp.int32
+    )
+    return (
+        (sorted_packed >> shift).astype(jnp.int32),
+        sorted_positions,
+        sorted_weights,
+    )
+  if (int(max_key) + 1) * n <= (1 << 32):
+    radix = jnp.uint32(n)
+    packed_key = key.astype(jnp.uint32) * radix + positions.astype(jnp.uint32)
+    sorted_packed, sorted_weights = jax.lax.sort(
+        (packed_key, weights_flat), dimension=0, is_stable=False, num_keys=1
+    )
+    sorted_key_u32 = sorted_packed // radix
+    sorted_positions = (sorted_packed - sorted_key_u32 * radix).astype(
+        jnp.int32
+    )
+    return sorted_key_u32.astype(jnp.int32), sorted_positions, sorted_weights
+  _warn_packed_sort_fallback(n, int(max_key), pos_bits, key_bits)
+  sorted_key, sorted_positions, sorted_weights = jax.lax.sort(
+      (key.astype(jnp.int32), positions, weights_flat),
+      dimension=0,
+      num_keys=1,
+      is_stable=True,
+  )
+  return sorted_key, sorted_positions, sorted_weights
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def packed_stable_sort_with_weights(
+    key: jax.Array, max_key: int, weights_flat: jax.Array
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Stable sort of `(arange(n), weights_flat)` by non-negative int `key`.
+
+  Avoids both the forward `gather_fusion` (`w_flat[slot_order]`) and the
+  backward `scatter` by carrying `weights_flat` directly as a sort payload in
+  forward and unsorting its cotangent via inverse sort on the bijection
+  `sorted_positions` in backward.
+
+  Args:
+    key: Non-negative integer keys `[N]` with values `<= max_key`.
+    max_key: Static upper bound on values in `key`.
+    weights_flat: Differentiable 1D routing weights `[N]` (`bf16` or `f32`).
+
+  Returns:
+    Tuple `(sorted_key, sorted_positions, sorted_weights)`.
+  """
+  return _packed_stable_sort_with_weights_impl(key, max_key, weights_flat)
+
+
+def _packed_stable_sort_with_weights_fwd(
+    key: jax.Array, max_key: int, weights_flat: jax.Array
+):
+  sorted_key, sorted_positions, sorted_weights = (
+      _packed_stable_sort_with_weights_impl(key, max_key, weights_flat)
+  )
+  return (sorted_key, sorted_positions, sorted_weights), (sorted_positions,)
+
+
+def _packed_stable_sort_with_weights_bwd(
+    max_key: int, res: tuple[jax.Array], g_out
+):
+  del max_key
+  (sorted_positions,) = res
+  _, _, g_sorted_weights = g_out
+  if g_sorted_weights.shape[0] == 0:
+    return (None, g_sorted_weights)
+  # `sorted_positions` is a bijection on `{0, ..., N - 1}`, so sorting
+  # `(sorted_positions, g_sorted_weights)` by `sorted_positions` places every
+  # cotangent back at its exact source slot with zero scatter and zero gather.
+  _, g_weights = jax.lax.sort(
+      (sorted_positions.astype(jnp.uint32), g_sorted_weights),
+      dimension=0,
+      is_stable=False,
+      num_keys=1,
+  )
+  return (None, g_weights)
+
+
+packed_stable_sort_with_weights.defvjp(
+    _packed_stable_sort_with_weights_fwd,
+    _packed_stable_sort_with_weights_bwd,
+)
+
+
+# --- TC-only 1D Unique Gather / Scatter for MoE Routing Weights ---
+
+_TC_1D_TILE_SUBLANES = 8
+_TC_1D_TILE_LANES = 128
+_TC_1D_CHUNK_SIZE = _TC_1D_TILE_SUBLANES * _TC_1D_TILE_LANES  # 1024
+_TC_1D_BWD_CHUNK_SUBLANES = 256
+_TC_1D_BWD_CHUNK_LANES = 256
+_TC_1D_BWD_LANE_SHIFT = 8  # log2(256)
+_TC_1D_BWD_CHUNK_SHIFT = 16  # log2(256 * 256)
+_TC_1D_BWD_CHUNK_SIZE = (
+    _TC_1D_BWD_CHUNK_SUBLANES * _TC_1D_BWD_CHUNK_LANES
+)  # 65536 = 1 << 16
+_TC_1D_BWD_K_STEP = 256
+_TC_1D_BWD_M_CHUNK_ELEMS = _TC_1D_TILE_SUBLANES * _TC_1D_BWD_K_STEP  # 2048
+_TC_1D_FWD_MAX_VMEM_BYTES = 32 * 1024 * 1024
+
+
+def _tc_gather_1d_sorted_pallas(
+    w_flat_f32: jax.Array,
+    s_sorted: jax.Array,
+    n_orig: int,
+    *,
+    interpret: bool = False,
+) -> jax.Array:
+  """Gathers `w_flat_f32[s_sorted]` on TC via VMEM `take_along_axis` (0 scatter/gather HLO)."""
+  n = w_flat_f32.shape[0]
+  m = s_sorted.shape[0]
+  chunk_sz = _TC_1D_CHUNK_SIZE
+  num_w_chunks = pl.cdiv(n, chunk_sz)
+  n_pad = num_w_chunks * chunk_sz
+  num_m_chunks = pl.cdiv(m, chunk_sz)
+  m_pad = num_m_chunks * chunk_sz
+
+  w_bytes = n_pad * 4
+  if w_bytes > _TC_1D_FWD_MAX_VMEM_BYTES:
+    raise ValueError(
+        f"tc_gather_1d_unique: padded w_flat ({w_bytes} B) exceeds VMEM"
+        f" budget ({_TC_1D_FWD_MAX_VMEM_BYTES} B)."
+    )
+
+  w_3d = jnp.pad(w_flat_f32, (0, n_pad - n)).reshape(
+      num_w_chunks, _TC_1D_TILE_SUBLANES, _TC_1D_TILE_LANES
+  )
+  s_3d = jnp.pad(
+      s_sorted, (0, m_pad - m), constant_values=jnp.int32(n_pad)
+  ).reshape(num_m_chunks, _TC_1D_TILE_SUBLANES, _TC_1D_TILE_LANES)
+
+  s_first = s_3d[:, 0, 0]
+  has_valid = s_first < n_orig
+  s_valid_max = jnp.max(
+      jnp.where(s_3d < n_orig, s_3d, jnp.int32(0)), axis=(1, 2)
+  )
+  c_starts = jnp.where(
+      has_valid, s_first >> 10, jnp.int32(num_w_chunks)
+  ).astype(jnp.int32)
+  c_ends = jnp.where(has_valid, (s_valid_max >> 10) + 1, c_starts).astype(
+      jnp.int32
+  )
+
+  def _gather_kernel(w_vmem, s_vmem, c_starts_smem, c_ends_smem, out_vmem):
+    t = pl.program_id(0)
+    c_start = c_starts_smem[t]
+    c_end = c_ends_smem[t]
+    s_tile = s_vmem[0, :, :]
+    row_tile = s_tile >> 7
+    lane_tile = s_tile & 127
+
+    def _chunk_body(c, acc):
+      w_chunk = w_vmem[c, :, :]
+      base_row = c * _TC_1D_TILE_SUBLANES
+      for r in range(_TC_1D_TILE_SUBLANES):
+        r_idx = jnp.full(
+            (_TC_1D_TILE_SUBLANES, _TC_1D_TILE_LANES), r, dtype=jnp.int32
+        )
+        row_bcast = jnp.take_along_axis(
+            w_chunk,
+            r_idx,
+            axis=-2,
+            mode="promise_in_bounds",
+            wrap_negative_indices=False,
+        )
+        gathered = jnp.take_along_axis(
+            row_bcast,
+            lane_tile,
+            axis=-1,
+            mode="promise_in_bounds",
+            wrap_negative_indices=False,
+        )
+        acc = jnp.where(row_tile == (base_row + r), gathered, acc)
+      return acc
+
+    acc = jax.lax.fori_loop(
+        c_start,
+        c_end,
+        _chunk_body,
+        jnp.zeros(
+            (_TC_1D_TILE_SUBLANES, _TC_1D_TILE_LANES), dtype=jnp.float32
+        ),
+    )
+    out_vmem[0, :, :] = acc
+
+  manual_axis_type = getattr(jax.typeof(w_flat_f32), "manual_axis_type", None)
+  out_shape = jax.ShapeDtypeStruct(
+      (num_m_chunks, _TC_1D_TILE_SUBLANES, _TC_1D_TILE_LANES),
+      jnp.float32,
+      manual_axis_type=manual_axis_type,
+  )
+  out_3d = pl.pallas_call(
+      _gather_kernel,
+      out_shape=out_shape,
+      grid=(num_m_chunks,),
+      in_specs=[
+          pl.BlockSpec(
+              (num_w_chunks, _TC_1D_TILE_SUBLANES, _TC_1D_TILE_LANES),
+              lambda t: (0, 0, 0),
+          ),
+          pl.BlockSpec(
+              (1, _TC_1D_TILE_SUBLANES, _TC_1D_TILE_LANES),
+              lambda t: (t, 0, 0),
+          ),
+          pl.BlockSpec(memory_space=pltpu.SMEM),
+          pl.BlockSpec(memory_space=pltpu.SMEM),
+      ],
+      out_specs=pl.BlockSpec(
+          (1, _TC_1D_TILE_SUBLANES, _TC_1D_TILE_LANES),
+          lambda t: (t, 0, 0),
+      ),
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=(pltpu.ARBITRARY,),
+      ),
+      interpret=interpret,
+      name="tc_gather_1d_unique",
+  )(w_3d, s_3d, c_starts, c_ends)
+  return out_3d.reshape(m_pad)[:m]
+
+
+def _tc_scatter_1d_sorted_pallas(
+    s_sorted: jax.Array,
+    gw_sorted_f32: jax.Array,
+    num_out: int,
+    *,
+    out_dtype: jax.typing.DTypeLike = jnp.bfloat16,
+    interpret: bool = False,
+) -> jax.Array:
+  """Scatters sorted unique `(s_sorted, gw_sorted_f32)` into `zeros(num_out)` on TC.
+
+  Keeps `(s_sorted, gw_sorted_f32)` in VMEM (`~336 KiB` at `M=43,008`) as
+  `(num_m_chunks, 8, 256)` (`2,048` elems/chunk) and scatters each `65,536`-elem
+  output chunk `(256, 256)` via MXU one-hot outer-product accumulation:
+  `acc[r, c] += sum_k (sub[k]==r ? gw[k] : 0) * (lane[k]==c)`. Mosaic fuses the
+  one-hot predicate directly into MXU push (`vmatpush1.bf16.xpose.msra`),
+  eliminating serial XLU binary search (`16.7 us` on TPU7x). `bf16` output runs
+  in 1 pass; `f32` (or other) output uses a 3-pass `bf16` mantissa split
+  (`hi + mid + lo`) for 0-ULP bit-exact `f32` accumulation.
+  """
+  out_dt = jnp.dtype(out_dtype)
+  m = s_sorted.shape[0]
+  chunk_sublanes = _TC_1D_BWD_CHUNK_SUBLANES
+  chunk_lanes = _TC_1D_BWD_CHUNK_LANES
+  chunk_sz = _TC_1D_BWD_CHUNK_SIZE
+  k_step = _TC_1D_BWD_K_STEP
+  m_tile_elems = _TC_1D_BWD_M_CHUNK_ELEMS
+
+  num_w_chunks = pl.cdiv(num_out, chunk_sz)
+  n_pad = num_w_chunks * chunk_sz
+  num_m_chunks = pl.cdiv(max(m, 1), m_tile_elems)
+  m_pad = num_m_chunks * m_tile_elems
+
+  vmem_bytes = 2 * m_pad * 4
+  if vmem_bytes > _TC_1D_FWD_MAX_VMEM_BYTES:
+    raise ValueError(
+        f"tc_scatter_1d_unique: padded (s_sorted, gw_sorted) ({vmem_bytes} B)"
+        f" exceeds VMEM budget ({_TC_1D_FWD_MAX_VMEM_BYTES} B)."
+    )
+
+  s_3d = jnp.pad(
+      s_sorted, (0, m_pad - m), constant_values=jnp.int32(n_pad)
+  ).reshape(num_m_chunks, _TC_1D_TILE_SUBLANES, k_step)
+  gw_3d = jnp.pad(
+      gw_sorted_f32, (0, m_pad - m), constant_values=jnp.float32(0.0)
+  ).reshape(num_m_chunks, _TC_1D_TILE_SUBLANES, k_step)
+
+  s_mc = s_3d.reshape(num_m_chunks, m_tile_elems)
+  mc_first = s_mc[:, 0]
+  mc_valid_max = jnp.max(
+      jnp.where(s_mc < n_pad, s_mc, jnp.int32(-1)), axis=1
+  )
+  mc_has_valid = mc_valid_max >= 0
+  mc_first_chunk = jnp.where(
+      mc_has_valid,
+      mc_first >> _TC_1D_BWD_CHUNK_SHIFT,
+      jnp.int32(num_w_chunks),
+  )
+  mc_last_chunk = jnp.where(
+      mc_has_valid,
+      mc_valid_max >> _TC_1D_BWD_CHUNK_SHIFT,
+      jnp.int32(num_w_chunks),
+  )
+  c_ids = jnp.arange(num_w_chunks, dtype=jnp.int32)
+  mc_starts = jnp.sum(
+      (mc_last_chunk[None, :] < c_ids[:, None]).astype(jnp.int32), axis=1
+  )
+  mc_ends = jnp.sum(
+      (mc_first_chunk[None, :] <= c_ids[:, None]).astype(jnp.int32), axis=1
+  )
+
+  r_rep = chunk_sublanes // _TC_1D_TILE_SUBLANES
+  c_rep = chunk_lanes // _TC_1D_TILE_SUBLANES
+  is_bf16_out = out_dt == jnp.dtype(jnp.bfloat16)
+
+  def _scatter_kernel(
+      s_vmem, gw_vmem, mc_starts_smem, mc_ends_smem, out_vmem
+  ):
+    c = pl.program_id(0)
+    mc_start = mc_starts_smem[c]
+    mc_end = mc_ends_smem[c]
+    base = c * chunk_sz
+    row_ids = jnp.broadcast_to(
+        jnp.arange(chunk_sublanes, dtype=jnp.int32)[:, None],
+        (chunk_sublanes, k_step),
+    )
+    col_ids = jnp.broadcast_to(
+        jnp.arange(chunk_lanes, dtype=jnp.int32)[:, None],
+        (chunk_lanes, k_step),
+    )
+
+    def _mc_body(mc, acc):
+      s_tile = s_vmem[mc, :, :]
+      gw_tile = gw_vmem[mc, :, :]
+      local_s = s_tile - base
+      in_chunk = (local_s >= 0) & (local_s < chunk_sz)
+      sub_tile = jnp.where(
+          in_chunk, local_s >> _TC_1D_BWD_LANE_SHIFT, jnp.int32(-1)
+      )
+      lane_tile = local_s & (chunk_lanes - 1)
+      gw_tile_clean = jnp.where(in_chunk, gw_tile, jnp.float32(0.0))
+
+      for u in range(_TC_1D_TILE_SUBLANES):
+        u_idx = jnp.full((_TC_1D_TILE_SUBLANES, k_step), u, dtype=jnp.int32)
+        sub_8 = jnp.take_along_axis(
+            sub_tile,
+            u_idx,
+            axis=-2,
+            mode="promise_in_bounds",
+            wrap_negative_indices=False,
+        )
+        lane_8 = jnp.take_along_axis(
+            lane_tile,
+            u_idx,
+            axis=-2,
+            mode="promise_in_bounds",
+            wrap_negative_indices=False,
+        )
+        gw_8 = jnp.take_along_axis(
+            gw_tile_clean,
+            u_idx,
+            axis=-2,
+            mode="promise_in_bounds",
+            wrap_negative_indices=False,
+        )
+        sub_mask = jnp.tile(sub_8, (r_rep, 1)) == row_ids
+        b_t = (jnp.tile(lane_8, (c_rep, 1)) == col_ids).astype(jnp.bfloat16)
+        if is_bf16_out:
+          a_mat = jnp.where(
+              sub_mask,
+              jnp.tile(gw_8.astype(jnp.bfloat16), (r_rep, 1)),
+              jnp.bfloat16(0.0),
+          )
+          acc = acc + jax.lax.dot_general(
+              a_mat,
+              b_t,
+              (((1,), (1,)), ((), ())),
+              preferred_element_type=jnp.float32,
+          )
+        else:
+          hi_8 = gw_8.astype(jnp.bfloat16)
+          rem1_8 = gw_8 - hi_8.astype(jnp.float32)
+          mid_8 = rem1_8.astype(jnp.bfloat16)
+          lo_8 = (rem1_8 - mid_8.astype(jnp.float32)).astype(jnp.bfloat16)
+          for part_8 in (hi_8, mid_8, lo_8):
+            a_mat = jnp.where(
+                sub_mask, jnp.tile(part_8, (r_rep, 1)), jnp.bfloat16(0.0)
+            )
+            acc = acc + jax.lax.dot_general(
+                a_mat,
+                b_t,
+                (((1,), (1,)), ((), ())),
+                preferred_element_type=jnp.float32,
+            )
+      return acc
+
+    acc = jax.lax.fori_loop(
+        mc_start,
+        mc_end,
+        _mc_body,
+        jnp.zeros((chunk_sublanes, chunk_lanes), dtype=jnp.float32),
+    )
+    out_vmem[0, :, :] = acc.astype(out_dt)
+
+  manual_axis_type = getattr(
+      jax.typeof(gw_sorted_f32), "manual_axis_type", None
+  )
+  out_shape = jax.ShapeDtypeStruct(
+      (num_w_chunks, chunk_sublanes, chunk_lanes),
+      out_dt,
+      manual_axis_type=manual_axis_type,
+  )
+  out_3d = pl.pallas_call(
+      _scatter_kernel,
+      out_shape=out_shape,
+      grid=(num_w_chunks,),
+      in_specs=[
+          pl.BlockSpec(
+              (num_m_chunks, _TC_1D_TILE_SUBLANES, k_step),
+              lambda c: (0, 0, 0),
+          ),
+          pl.BlockSpec(
+              (num_m_chunks, _TC_1D_TILE_SUBLANES, k_step),
+              lambda c: (0, 0, 0),
+          ),
+          pl.BlockSpec(memory_space=pltpu.SMEM),
+          pl.BlockSpec(memory_space=pltpu.SMEM),
+      ],
+      out_specs=pl.BlockSpec(
+          (1, chunk_sublanes, chunk_lanes),
+          lambda c: (c, 0, 0),
+      ),
+      compiler_params=pltpu.CompilerParams(
+          dimension_semantics=(pltpu.PARALLEL,),
+      ),
+      interpret=interpret,
+      name="tc_scatter_1d_unique",
+  )(s_3d, gw_3d, mc_starts, mc_ends)
+  return out_3d.reshape(n_pad)[:num_out]
+
+
+def tc_scatter_1d_unique(
+    g_w_rows: jax.Array,
+    slot_order: jax.Array,
+    count: jax.Array | int,
+    *,
+    num_out: int,
+    out_dtype: jax.typing.DTypeLike = jnp.bfloat16,
+    use_pallas: bool = True,
+    interpret: bool = False,
+) -> jax.Array:
+  """Zero-scatter TC transpose of `tc_gather_1d_unique` for unique `slot_order[:count]`.
+
+  Args:
+    g_w_rows: 1D gradient weights of shape `[M]`.
+    slot_order: 1D int32 destination indices of shape `[M]`, unique on
+      `[:count]` in `[0, num_out)`.
+    count: Scalar number of valid entries in `slot_order`.
+    num_out: Static output length `N`.
+    out_dtype: Output dtype (defaults to `bfloat16`; `float32` uses 0-ULP
+      3-pass mantissa split).
+    use_pallas: Use Pallas TC MXU kernel (`False` for CPU fallback).
+    interpret: Run Pallas kernel in CPU interpret mode (for unit tests).
+
+  Returns:
+    Scattered 1D array of shape `[num_out]` and dtype `out_dtype`.
+  """
+  m = slot_order.shape[0]
+  if num_out == 0 or m == 0:
+    return jnp.zeros((num_out,), dtype=out_dtype)
+  valid = jnp.arange(m, dtype=jnp.int32) < jnp.asarray(count, dtype=jnp.int32)
+  if not use_pallas:
+    safe_idx = jnp.where(valid, slot_order, jnp.int32(0))
+    vals = jnp.where(valid, g_w_rows.astype(jnp.float32), jnp.float32(0.0))
+    return (
+        jnp.zeros((num_out,), dtype=jnp.float32)
+        .at[safe_idx]
+        .add(vals)
+        .astype(out_dtype)
+    )
+  n_pad = pl.cdiv(num_out, _TC_1D_BWD_CHUNK_SIZE) * _TC_1D_BWD_CHUNK_SIZE
+  s_masked = jnp.where(
+      valid, slot_order.astype(jnp.int32), jnp.int32(n_pad)
+  )
+  gw_masked = jnp.where(
+      valid, g_w_rows.astype(jnp.float32), jnp.float32(0.0)
+  )
+  s_sorted, gw_sorted = jax.lax.sort(
+      (s_masked, gw_masked), dimension=0, is_stable=False, num_keys=1
+  )
+  return _tc_scatter_1d_sorted_pallas(
+      s_sorted, gw_sorted, num_out, out_dtype=out_dtype, interpret=interpret
+  )
+
+
+def _tc_gather_1d_unique_impl(
+    w_flat: jax.Array,
+    slot_order: jax.Array,
+    count: jax.Array,
+    out_dtype: Any,
+    use_pallas: bool,
+    interpret: bool,
+) -> jax.Array:
+  """Forward body of `tc_gather_1d_unique`."""
+  n = w_flat.shape[0]
+  m = slot_order.shape[0]
+  if n == 0 or m == 0:
+    return jnp.zeros((m,), dtype=out_dtype)
+  valid = jnp.arange(m, dtype=jnp.int32) < count.astype(jnp.int32)
+  if not use_pallas:
+    safe_idx = jnp.where(valid, slot_order, jnp.int32(0))
+    return jnp.where(
+        valid,
+        w_flat[safe_idx].astype(out_dtype),
+        jnp.asarray(0, dtype=out_dtype),
+    )
+  n_pad = pl.cdiv(n, _TC_1D_CHUNK_SIZE) * _TC_1D_CHUNK_SIZE
+  s_masked = jnp.where(
+      valid, slot_order.astype(jnp.int32), jnp.int32(n_pad)
+  )
+  pos = jnp.arange(m, dtype=jnp.int32)
+  s_sorted, pos_sorted = jax.lax.sort(
+      (s_masked, pos), dimension=0, is_stable=False, num_keys=1
+  )
+  w_sorted_f32 = _tc_gather_1d_sorted_pallas(
+      w_flat.astype(jnp.float32), s_sorted, n, interpret=interpret
+  )
+  if w_flat.dtype == jnp.bfloat16 and m <= (1 << 16):
+    # Pack `(pos_sorted << 16) | bf16_bits` for a 1-array u32 inverse sort.
+    w_u16 = jax.lax.bitcast_convert_type(
+        w_sorted_f32.astype(jnp.bfloat16), jnp.uint16
+    )
+    packed = (pos_sorted.astype(jnp.uint32) << jnp.uint32(16)) | w_u16.astype(
+        jnp.uint32
+    )
+    unsorted = jax.lax.sort(packed, dimension=0, is_stable=False)
+    w_rows_bf16 = jax.lax.bitcast_convert_type(
+        (unsorted & jnp.uint32(0xFFFF)).astype(jnp.uint16), jnp.bfloat16
+    )
+    return w_rows_bf16.astype(out_dtype)
+  _, w_rows_f32 = jax.lax.sort(
+      (pos_sorted.astype(jnp.uint32), w_sorted_f32),
+      dimension=0,
+      is_stable=False,
+      num_keys=1,
+  )
+  return w_rows_f32.astype(out_dtype)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6, 7))
+def _tc_gather_1d_unique_core(
+    w_flat: jax.Array,
+    slot_order: jax.Array,
+    count: jax.Array,
+    num_out: int,
+    in_dtype: Any,
+    out_dtype: Any,
+    use_pallas: bool,
+    interpret: bool,
+) -> jax.Array:
+  del num_out, in_dtype
+  return _tc_gather_1d_unique_impl(
+      w_flat, slot_order, count, out_dtype, use_pallas, interpret
+  )
+
+
+def _tc_gather_1d_unique_fwd(
+    w_flat: jax.Array,
+    slot_order: jax.Array,
+    count: jax.Array,
+    num_out: int,
+    in_dtype: Any,
+    out_dtype: Any,
+    use_pallas: bool,
+    interpret: bool,
+):
+  del num_out, in_dtype
+  w_rows = _tc_gather_1d_unique_impl(
+      w_flat, slot_order, count, out_dtype, use_pallas, interpret
+  )
+  return w_rows, (slot_order, count)
+
+
+def _tc_gather_1d_unique_bwd(
+    num_out: int,
+    in_dtype: Any,
+    out_dtype: Any,
+    use_pallas: bool,
+    interpret: bool,
+    res: tuple[jax.Array, jax.Array],
+    g_w_rows: jax.Array,
+):
+  del out_dtype
+  slot_order, count = res
+  g_w_flat = tc_scatter_1d_unique(
+      g_w_rows,
+      slot_order,
+      count,
+      num_out=num_out,
+      out_dtype=in_dtype,
+      use_pallas=use_pallas,
+      interpret=interpret,
+  )
+  return (g_w_flat, None, None)
+
+
+_tc_gather_1d_unique_core.defvjp(
+    _tc_gather_1d_unique_fwd, _tc_gather_1d_unique_bwd
+)
+
+
+def tc_gather_1d_unique(
+    w_flat: jax.Array,
+    slot_order: jax.Array,
+    count: jax.Array | int,
+    *,
+    out_dtype: jax.typing.DTypeLike = jnp.float32,
+    use_pallas: bool = True,
+    interpret: bool = False,
+) -> jax.Array:
+  """Zero-gather, zero-scatter TC 1D weight gather/scatter for unique `slot_order[:count]`.
+
+  Computes `out[i] = w_flat[slot_order[i]]` for `i < count` and `0` otherwise,
+  where `slot_order[:count]` contains strictly unique indices in `[0, len(w_flat))`.
+  Avoids carrying `w_flat` through the full `N`-element expert sort while
+  emitting zero HLO `gather` and zero HLO `scatter` ops on TPU.
+
+  Args:
+    w_flat: 1D routing weights of shape `[N]`.
+    slot_order: 1D int32 indices of shape `[M]`, unique on `[:count]`.
+    count: Scalar number of valid entries in `slot_order`.
+    out_dtype: Output dtype (defaults to `float32`).
+    use_pallas: Use Pallas TC kernels (`False` for CPU fallback).
+    interpret: Run Pallas kernels in CPU interpret mode (for unit tests).
+
+  Returns:
+    Gathered weights of shape `[M]` and dtype `out_dtype`.
+  """
+  return _tc_gather_1d_unique_core(
+      w_flat,
+      slot_order,
+      jnp.asarray(count, dtype=jnp.int32),
+      w_flat.shape[0],
+      w_flat.dtype,
+      jnp.dtype(out_dtype),
+      use_pallas,
+      interpret,
+  )
 
 
 def ragged_gather_reduce_tc_metadata(
@@ -460,14 +1144,24 @@ def ragged_gather_reduce_tc_metadata(
   num_indices = indices.shape[0]
   if num_out_tokens is None:
     if num_indices % top_k:
-      raise ValueError(f"indices length ({num_indices}) must be divisible by top_k ({top_k}).")
+      raise ValueError(
+          f"indices length ({num_indices}) must be divisible by top_k"
+          f" ({top_k})."
+      )
     num_out_tokens = num_indices // top_k
   if isinstance(num_tokens, int) and num_tokens < 0:
     raise ValueError(f"num_tokens must be non-negative, got {num_tokens}.")
   if isinstance(start, int) and start < 0:
     raise ValueError(f"start must be non-negative, got {start}.")
-  if isinstance(start, int) and isinstance(num_tokens, int) and start + num_tokens > num_indices:
-    raise ValueError(f"start + num_tokens ({start + num_tokens}) must not exceed indices" f" length ({num_indices}).")
+  if (
+      isinstance(start, int)
+      and isinstance(num_tokens, int)
+      and start + num_tokens > num_indices
+  ):
+    raise ValueError(
+        f"start + num_tokens ({start + num_tokens}) must not exceed indices"
+        f" length ({num_indices})."
+    )
   max_blocks, _, slots_len = _ragged_gather_reduce_tc_layout(
       num_indices, top_k, block_size, num_out_tokens=num_out_tokens
   )
@@ -491,7 +1185,9 @@ def ragged_gather_reduce_tc_metadata(
   if packed_sort:
     sorted_key, sorted_positions = packed_stable_sort(key, num_out_tokens)
   else:
-    sorted_key, sorted_positions = jax.lax.sort((key, positions), num_keys=1, is_stable=True)
+    sorted_key, sorted_positions = jax.lax.sort(
+        (key, positions), num_keys=1, is_stable=True
+    )
   pad = slots_len - num_indices
   src_rows = jnp.pad(sorted_positions - start, (0, pad))
   tokens = jnp.pad(sorted_key, (0, pad))
@@ -499,10 +1195,14 @@ def ragged_gather_reduce_tc_metadata(
   # A token costs its valid rows plus its output row, so the tokens before
   # slot i's token cost run_start[i] + sorted_key[i], where run_start[i] is
   # the first slot of that token. This cost increases over the valid slots.
-  is_run_start = jnp.concatenate([jnp.ones((1,), bool), sorted_key[1:] != sorted_key[:-1]])
+  is_run_start = jnp.concatenate(
+      [jnp.ones((1,), bool), sorted_key[1:] != sorted_key[:-1]]
+  )
   run_start = jax.lax.cummax(jnp.where(is_run_start, positions, 0))
   int_max = jnp.iinfo(jnp.int32).max
-  slot_cost = jnp.where(sorted_key < num_out_tokens, run_start + sorted_key, int_max)
+  slot_cost = jnp.where(
+      sorted_key < num_out_tokens, run_start + sorted_key, int_max
+  )
   # Block b starts at the first token whose tokens before it cost at least
   # threshold[b]. The slots of the tokens before it, slot_start[b], are the
   # slots with a smaller cost. Searches over all slots are slow on TPU, so
@@ -510,18 +1210,24 @@ def ragged_gather_reduce_tc_metadata(
   # straddles the threshold.
   chunk = _RAGGED_GATHER_REDUCE_TC_SEARCH_CHUNK
   num_chunks = pl.cdiv(num_indices, chunk)
-  cost_chunks = jnp.pad(slot_cost, (0, num_chunks * chunk - num_indices), constant_values=int_max).reshape(
-      num_chunks, chunk
-  )
+  cost_chunks = jnp.pad(
+      slot_cost, (0, num_chunks * chunk - num_indices), constant_values=int_max
+  ).reshape(num_chunks, chunk)
   threshold = jnp.arange(max_blocks + 1, dtype=jnp.int32) * (block_size - top_k)
-  full_chunks = jnp.sum(cost_chunks[:, -1] < threshold[:, None], axis=1, dtype=jnp.int32)
+  full_chunks = jnp.sum(
+      cost_chunks[:, -1] < threshold[:, None], axis=1, dtype=jnp.int32
+  )
   row = jnp.minimum(full_chunks, num_chunks - 1)
-  in_chunk = jnp.sum(cost_chunks[row] < threshold[:, None], axis=1, dtype=jnp.int32)
+  in_chunk = jnp.sum(
+      cost_chunks[row] < threshold[:, None], axis=1, dtype=jnp.int32
+  )
   slot_start = row * chunk + in_chunk
   # The tokens between slot_start - 1's token and slot_start's token have no
   # valid slots and cost 1 each, so block b starts at the first of them whose
   # tokens before it reach the threshold, or else at slot_start's token.
-  prev_key = jnp.where(slot_start > 0, sorted_key[jnp.maximum(slot_start - 1, 0)], -1)
+  prev_key = jnp.where(
+      slot_start > 0, sorted_key[jnp.maximum(slot_start - 1, 0)], -1
+  )
   next_key = jnp.where(
       slot_start < num_indices,
       sorted_key[jnp.minimum(slot_start, num_indices - 1)],
@@ -587,7 +1293,9 @@ def ragged_gather_reduce_tc(
   block_size = metadata.block_size
   _check_ragged_gather_reduce_tc_args(top_k, block_size)
   if num_out_tokens < 0:
-    raise ValueError(f"num_out_tokens must be non-negative, got {num_out_tokens}.")
+    raise ValueError(
+        f"num_out_tokens must be non-negative, got {num_out_tokens}."
+    )
   num_buffers = _RAGGED_GATHER_REDUCE_TC_NUM_BUFFERS
   align = _RAGGED_GATHER_REDUCE_TC_ALIGN
   fields = _RAGGED_GATHER_REDUCE_TC_BLOCK_FIELDS
@@ -609,7 +1317,9 @@ def ragged_gather_reduce_tc(
   # A (d0, d1) token is padded to whole (sublanes, 128) tiles in VMEM.
   itemsize = jnp.dtype(x.dtype).itemsize
   sublanes = 8 * max(1, 4 // itemsize)
-  token_vmem_bytes = pl.cdiv(dim0, sublanes) * sublanes * pl.cdiv(dim1, 128) * 128 * itemsize
+  token_vmem_bytes = (
+      pl.cdiv(dim0, sublanes) * sublanes * pl.cdiv(dim1, 128) * 128 * itemsize
+  )
   vmem_budget = _RAGGED_GATHER_REDUCE_TC_VMEM_BUDGET
   if num_buffers * block_size * token_vmem_bytes > vmem_budget:
     raise ValueError(
@@ -850,7 +1560,9 @@ def ragged_gather_reduce_tc(
         _out_wait(num_blocks - 1 - k)
 
   manual_axis_type = getattr(jax.typeof(x), "manual_axis_type", None)
-  out_shape = jax.ShapeDtypeStruct((num_out_tokens, dim0, dim1), x.dtype, manual_axis_type=manual_axis_type)
+  out_shape = jax.ShapeDtypeStruct(
+      (num_out_tokens, dim0, dim1), x.dtype, manual_axis_type=manual_axis_type
+  )
   hbm_spec = pl.BlockSpec(memory_space=pltpu.HBM)
   dma_sems = pltpu.SemaphoreType.DMA((num_buffers,))
   return pl.pallas_call(

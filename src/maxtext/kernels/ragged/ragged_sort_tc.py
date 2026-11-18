@@ -14,7 +14,8 @@
 
 """Ring-of-experts ragged sort / unsort on TensorCore.
 
-Drop-in alternative to `ring_ragged_sort` / `ring_ragged_unsort` (truncated-buffer
+Drop-in alternative to `ring_ragged_sort` / `ring_ragged_unsort`
+(truncated-buffer
 case) that replaces the SparseCore ragged_gather / ragged_gather_reduce kernels
 with the TensorCore DMA kernels in `ragged_gather_tc.py`.
 
@@ -24,18 +25,29 @@ so each token is one contiguous row DMA.
 Routing (shared by sort and unsort of one MoE chunk):
   token_ids_sorted[j]: source token of the j-th slot in global expert order.
   slot_order[j]:       flat (token * topk + k) slot of the j-th sorted slot.
-  start, count:        this shard's window [start, start + count) of sorted slots,
+  start, count:        this shard's window [start, start + count) of sorted
+  slots,
                        count clamped to the buffer size.
   reduce_meta:         routing of the TC gather-reduce, derived once.
 
 Forward sort:    buf[i] = x[token_ids_sorted[start + i]], i < count (else 0).
-Forward unsort:  y[t] = sum_{i < count, token_ids_sorted[start+i] == t} w_i * buf[i].
+Forward unsort:  y[t] = sum_{i < count, token_ids_sorted[start+i] == t} w_i *
+buf[i].
 Each op's transpose is the other op, implemented with the other TC kernel.
 
-keep_3d (moe_tc_ragged_3d_gmm): the sorted buffer stays in the kernels' 3D layout
+keep_3d (moe_tc_ragged_3d_gmm): the sorted buffer stays in the kernels' 3D
+layout
 (cap, D // 128, 128) on both sides (sort output / unsort input and their
+
+Performance Invariant (do not reintroduce — regressed +80-100 ms in v17 & v19a):
+  - Do NOT gather per-slot routing weights via `.at[rows].get()` / dynamic
+    gather or emit a padded `ragged_gather_reduce_tc` in the backward pass
+    (e.g. via 1-op packed sort without weight payload or compact-routing
+    replay). That triggers a +77 ms `jvp()` fusion regression and doubles
+    `transpose(jvp(ragged_gather_reduce_tc))` backward calls (+25 ms).
 cotangents), for GMM kernels that consume / produce that layout directly. As in
-the 2D path, mask_padding zeros the buffer rows past `count` (the sort output and
+the 2D path, mask_padding zeros the buffer rows past `count` (the sort output
+and
 the unsort-input cotangent). Without it they are left uninitialized: the 3D
 gmm_v2 / tgmm_v2 consumers only use rows < sum(group_sizes) == count, but
 whole-tensor statistics (e.g. absmax quantization of the gmm lhs or of the
@@ -62,7 +74,8 @@ class TcRouting:
   count: jax.Array
   reduce_meta: tc.RaggedGatherReduceMetadata
   num_out_tokens: int = jax.tree.static()
-  # slot_order / token_ids_sorted hold only this shard's [cap] window (start == 0), see `window_routing`.
+  # slot_order / token_ids_sorted hold only this shard's [cap] window
+  # (start == 0), see `window_routing`.
   windowed: bool = jax.tree.static()
 
 
@@ -77,7 +90,7 @@ def _to2d(x):
   return x.reshape(x.shape[0], x.shape[1] * x.shape[2])
 
 
-# --- Pallas relayout (N, D) <-> (N, D // 128, 128), after lineage ragged_flatten ---
+# --- Pallas relayout (N, D) <-> (N, D // 128, 128), after ragged_flatten ---
 #
 # XLA lowers these reshapes to full-size layout copies. The kernels reshape in
 # VMEM and only visit blocks overlapping the first `num_rows` rows; rows past
@@ -123,7 +136,11 @@ def _tc_flatten(x, num_rows, block, zero_fill=False):
     grid = (pl.cdiv(rows, block),)
 
     def in_map(i, n_ref):
-      return (jnp.minimum(i, jnp.maximum(pl.cdiv(n_ref[0], block) - 1, 0)), 0, 0)
+      return (
+          jnp.minimum(i, jnp.maximum(pl.cdiv(n_ref[0], block) - 1, 0)),
+          0,
+          0,
+      )
 
   else:
     grid = (pl.cdiv(n[0], block),)
@@ -134,7 +151,9 @@ def _tc_flatten(x, num_rows, block, zero_fill=False):
 
   return pl.pallas_call(
       functools.partial(_flatten_kernel, block=block, zero_fill=zero_fill),
-      out_shape=jax.ShapeDtypeStruct((rows, d), x.dtype, manual_axis_type=_manual_axis_type(x)),
+      out_shape=jax.ShapeDtypeStruct(
+          (rows, d), x.dtype, manual_axis_type=_manual_axis_type(x)
+      ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=1,
           grid=grid,
@@ -160,7 +179,9 @@ def _tc_unflatten(x, num_rows, block):
   n = jnp.reshape(jnp.asarray(num_rows, jnp.int32), (1,))
   return pl.pallas_call(
       _unflatten_kernel,
-      out_shape=jax.ShapeDtypeStruct((rows, d0, d1), x.dtype, manual_axis_type=_manual_axis_type(x)),
+      out_shape=jax.ShapeDtypeStruct(
+          (rows, d0, d1), x.dtype, manual_axis_type=_manual_axis_type(x)
+      ),
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=1,
           grid=(pl.cdiv(n[0], block),),
@@ -233,6 +254,7 @@ def _gather_reduce(buf2d, routing, num_out_tokens, topk, blocks):
   return _to2d(out)
 
 
+# pylint: disable=unused-argument
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5))
 def tc_sort_gather(x2d, routing, cap, topk, blocks, mask_padding):
   """buf[i] = x[token_ids_sorted[start + i]] for i < count, zero-padded to cap."""
@@ -240,7 +262,10 @@ def tc_sort_gather(x2d, routing, cap, topk, blocks, mask_padding):
 
 
 def _tc_sort_gather_fwd(x2d, routing, cap, topk, blocks, mask_padding):
-  return _gather(x2d, routing, cap, blocks, mask_padding), (routing, x2d.shape[0])
+  return _gather(x2d, routing, cap, blocks, mask_padding), (
+      routing,
+      x2d.shape[0],
+  )
 
 
 def _tc_sort_gather_bwd(cap, topk, blocks, mask_padding, res, g):
@@ -253,13 +278,23 @@ tc_sort_gather.defvjp(_tc_sort_gather_fwd, _tc_sort_gather_bwd)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4, 5))
-def tc_unsort_reduce(buf2d, routing, num_out_tokens, topk, blocks, mask_padding):
+def tc_unsort_reduce(
+    buf2d, routing, num_out_tokens, topk, blocks, mask_padding
+):
   """y[t] = sum of valid buffer rows whose source token is t."""
   return _gather_reduce(buf2d, routing, num_out_tokens, topk, blocks)
 
 
-def _tc_unsort_reduce_fwd(buf2d, routing, num_out_tokens, topk, blocks, mask_padding):
-  return _gather_reduce(buf2d, routing, num_out_tokens, topk, blocks), (routing, buf2d.shape[0])
+def _tc_unsort_reduce_fwd(
+    buf2d, routing, num_out_tokens, topk, blocks, mask_padding
+):
+  return _gather_reduce(buf2d, routing, num_out_tokens, topk, blocks), (
+      routing,
+      buf2d.shape[0],
+  )
+
+
+# pylint: enable=unused-argument
 
 
 def _tc_unsort_reduce_bwd(num_out_tokens, topk, blocks, mask_padding, res, g):
@@ -289,14 +324,32 @@ def ring_ragged_sort_tc(
 ):
   """TC version of `ring_ragged_sort` for the truncated-buffer case.
 
-  `tag_routing_fn` (as in `ring_ragged_sort`, e.g. a checkpoint_name tagger for moe_routing_maps) is applied to
-  each integer routing array (the TcRouting leaves, group sizes and the inverse permutation), so they can be
-  saved across the remat boundary instead of recomputed in the backward pass.
+  `tag_routing_fn` (as in `ring_ragged_sort`, e.g. a checkpoint_name tagger for
+  moe_routing_maps) is applied to each integer routing array (the TcRouting
+  leaves, group sizes and the inverse permutation), so they can be saved across
+  the remat boundary instead of recomputed in the backward pass.
 
-  With `window_routing` (moe_tc_window_routing), the expert sort is a packed uint32 sort, the routing keeps only
-  this shard's [start, start + cap) window of the sorted slots (so the reduce metadata sorts cap instead of
-  N * topk slots), and the inverse permutation is not computed: the third output is then the forward
-  permutation, which TC callers only use for its shape.
+  With `window_routing` (moe_tc_window_routing), the expert sort is a packed
+  uint32 sort, the routing keeps only this shard's [start, start + cap) window
+  of the sorted slots (so the reduce metadata sorts cap instead of N * topk
+  slots), and the inverse permutation is not computed: the third output is then
+  the forward permutation, which TC callers only use for its shape.
+
+  Args:
+    hidden_states_local: Local activations ``[N, D]`` or ``[N, D // 128, 128]``.
+    topk_indices_local: Selected expert indices ``[N, topk]``.
+    num_experts: Total global expert count.
+    topk: Number of active experts per token.
+    ep_name: Expert-parallel mesh axis name(s).
+    ep_size: Total EP shard count.
+    buffer_size: Truncated capacity buffer rows per EP shard.
+    gather_block_size: SparseCore gather block size.
+    reduce_block_size: SparseCore reduce block size.
+    mask_padding: Whether to mask out-of-range padding slots in gather.
+    flatten_block_size: Optional flatten block size (``0`` disables).
+    tag_routing_fn: Optional checkpoint-tagging transform on routing tensors.
+    keep_3d: Whether to return sorted tokens in ``[cap, D // 128, 128]`` layout.
+    window_routing: Whether to slice each shard's routing window locally.
 
   Returns:
     (sorted buffer [buffer_size, hidden], group_sizes [num_experts],
@@ -306,10 +359,16 @@ def ring_ragged_sort_tc(
   topk_indices_flat = topk_indices_local.flatten().astype(jnp.int32)
   n = topk_indices_flat.shape[0]
   if window_routing:
-    _, topk_argsort_indices = tc.packed_stable_sort(topk_indices_flat, num_experts - 1)
+    _, topk_argsort_indices = tc.packed_stable_sort(
+        topk_indices_flat, num_experts - 1
+    )
   else:
-    topk_argsort_indices = jnp.argsort(topk_indices_flat, stable=True).astype(jnp.int32)
-  group_sizes_local = jax.nn.one_hot(topk_indices_flat, num_experts, dtype=jnp.int32).sum(axis=0)
+    topk_argsort_indices = jnp.argsort(topk_indices_flat, stable=True).astype(
+        jnp.int32
+    )
+  group_sizes_local = jax.nn.one_hot(
+      topk_indices_flat, num_experts, dtype=jnp.int32
+  ).sum(axis=0)
 
   shard_idx = jax.lax.axis_index(ep_name) if ep_size > 1 else 0
   local_num_experts = num_experts // ep_size
@@ -321,7 +380,9 @@ def ring_ragged_sort_tc(
 
   if window_routing:
     topk_argsort_revert_indices = topk_argsort_indices
-    slot_order = jax.lax.dynamic_slice_in_dim(jnp.pad(topk_argsort_indices, (0, cap)), start, cap, axis=0)
+    slot_order = jax.lax.dynamic_slice_in_dim(
+        jnp.pad(topk_argsort_indices, (0, cap)), start, cap, axis=0
+    )
     token_ids_sorted = jax.lax.stop_gradient(slot_order // topk)
     reduce_meta = tc.ragged_gather_reduce_tc_metadata(
         token_ids_sorted,
@@ -334,7 +395,9 @@ def ring_ragged_sort_tc(
     )
     start = jnp.int32(0)
   else:
-    topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices).astype(jnp.int32)
+    topk_argsort_revert_indices = jnp.argsort(topk_argsort_indices).astype(
+        jnp.int32
+    )
     slot_order = topk_argsort_indices
     token_ids_sorted = jax.lax.stop_gradient(topk_argsort_indices // topk)
     reduce_meta = tc.ragged_gather_reduce_tc_metadata(
@@ -353,8 +416,8 @@ def ring_ragged_sort_tc(
     routing = jax.tree.map(tag_routing_fn, routing)
     group_sizes_local = tag_routing_fn(group_sizes_local)
     topk_argsort_revert_indices = tag_routing_fn(topk_argsort_revert_indices)
-  # A 3D (N, D // 128, 128) input (moe_tc_ragged_3d_dispatch) is gathered without a relayout, and its
-  # cotangent is produced in the same layout.
+  # A 3D (N, D // 128, 128) input (moe_tc_ragged_3d_dispatch) is gathered
+  # without a relayout, and its cotangent is produced in the same layout.
   tokens_3d = hidden_states_local.ndim == 3
   x = tc_sort_gather(
       hidden_states_local,
@@ -367,28 +430,135 @@ def ring_ragged_sort_tc(
   return x, group_sizes_local, topk_argsort_revert_indices, routing
 
 
-def tc_buffer_row_weights(routing, topk_weights, cap):
-  """Routing weight of each buffer row: w[slot_order[start + i]] for i < count, else 0.
-
-  Args:
-    routing: TcRouting from `ring_ragged_sort_tc`.
-    topk_weights: flat [N * topk] routing weights (differentiated).
-    cap: buffer rows.
-
-  Returns:
-    [cap] float32 weights.
-  """
+def _tc_buffer_row_weights_impl(
+    slot_order: jax.Array,
+    start: jax.Array,
+    count: jax.Array,
+    windowed: bool,
+    topk_weights: jax.Array,
+    cap: int,
+) -> jax.Array:
   w_flat = topk_weights.astype(jnp.float32)
   iota = jnp.arange(cap, dtype=jnp.int32)
-  valid = iota < routing.count
-  if routing.windowed:
-    # Valid rows are distinct slots and padding rows get distinct out-of-range indices (filled with 0), so the
-    # gather is unique_indices and its transpose needs no scatter-sort.
-    rows = jnp.where(valid, routing.slot_order, w_flat.shape[0] + iota)
+  valid = iota < count
+  if windowed:
+    # Valid rows are distinct slots and padding rows get distinct out-of-range
+    # indices (filled with 0), so gather is unique_indices (no scatter-sort).
+    rows = jnp.where(valid, slot_order, w_flat.shape[0] + iota)
     return w_flat.at[rows].get(mode="fill", fill_value=0.0, unique_indices=True)
-  padded_order = jnp.pad(routing.slot_order, (0, cap))
-  rows = jax.lax.dynamic_slice_in_dim(padded_order, routing.start, cap, axis=0)
-  return jnp.where(valid, jnp.take(w_flat, jnp.where(valid, rows, 0), axis=0), 0.0)
+  padded_order = jnp.pad(slot_order, (0, cap))
+  rows = jax.lax.dynamic_slice_in_dim(padded_order, start, cap, axis=0)
+  return jnp.where(
+      valid, jnp.take(w_flat, jnp.where(valid, rows, 0), axis=0), 0.0
+  )
+
+
+def _tc_buffer_row_weights_no_scatter(
+    slot_order: jax.Array,
+    start: jax.Array,
+    count: jax.Array,
+    reduce_meta,
+    num_out_tokens: int,
+    windowed: bool,
+    topk_weights: jax.Array,
+    cap: int,
+) -> jax.Array:
+  return _tc_buffer_row_weights_impl(
+      slot_order, start, count, windowed, topk_weights, cap
+  )
+
+
+_tc_buffer_row_weights_no_scatter = jax.custom_vjp(
+    _tc_buffer_row_weights_no_scatter, nondiff_argnums=(4, 5, 7)
+)
+
+
+def _tc_buffer_row_weights_fwd(
+    slot_order: jax.Array,
+    start: jax.Array,
+    count: jax.Array,
+    reduce_meta,
+    num_out_tokens: int,
+    windowed: bool,
+    topk_weights: jax.Array,
+    cap: int,
+):
+  out = _tc_buffer_row_weights_impl(
+      slot_order, start, count, windowed, topk_weights, cap
+  )
+  w_dummy = jax.lax.broadcast(
+      jnp.zeros((), dtype=topk_weights.dtype), (topk_weights.shape[0],)
+  )
+  return out, (slot_order, start, count, reduce_meta, w_dummy)
+
+
+def _tc_buffer_row_weights_bwd(
+    num_out_tokens: int,
+    windowed: bool,
+    cap: int,
+    res,
+    g_out: jax.Array,
+):
+  slot_order, start, count, reduce_meta, w_dummy = res
+  n_w = w_dummy.shape[0]
+  w_dtype = w_dummy.dtype
+  iota = jnp.arange(cap, dtype=jnp.int32)
+  valid = iota < count
+  if windowed:
+    rows = slot_order
+  else:
+    padded_order = jnp.pad(slot_order, (0, cap))
+    rows = jax.lax.dynamic_slice_in_dim(padded_order, start, cap, axis=0)
+  top_k = max(1, n_w // max(1, num_out_tokens))
+  k_idx = jnp.where(valid, rows % top_k, 0)
+  oh = jax.nn.one_hot(k_idx, 128, dtype=jnp.float32)
+  dw_3d = (jnp.where(valid, g_out, 0.0)[:, None] * oh)[:, None, :]
+  d_w_tok = tc.ragged_gather_reduce_tc(
+      dw_3d, reduce_meta, num_out_tokens=num_out_tokens, top_k=top_k
+  )
+  g_w = d_w_tok[:, 0, :top_k].reshape(-1).astype(w_dtype)
+  return (None, None, None, None, g_w)
+
+
+_tc_buffer_row_weights_no_scatter.defvjp(
+    _tc_buffer_row_weights_fwd, _tc_buffer_row_weights_bwd
+)
+
+
+def tc_unsort_row_weights(
+    g_w_rows: jax.Array,
+    slot_order: jax.Array,
+    count: jax.Array,
+    reduce_meta,
+    *,
+    num_out_tokens: int,
+    top_k: int,
+    out_dtype,
+) -> jax.Array:
+  """Maps `[buf_size]` buffer-row weight gradients to `[num_out_tokens, top_k]`."""
+  n_slots = num_out_tokens * top_k
+  return tc.tc_scatter_1d_unique(
+      g_w_rows,
+      slot_order,
+      count,
+      num_out=n_slots,
+      out_dtype=out_dtype,
+      use_pallas=(reduce_meta is not None),
+  ).reshape(num_out_tokens, top_k)
+
+
+def tc_buffer_row_weights(routing, topk_weights, cap):
+  """Routing weight of each buffer row: w[slot_order[start + i]] for i < count, else 0."""
+  return _tc_buffer_row_weights_no_scatter(
+      routing.slot_order,
+      jnp.asarray(routing.start, dtype=jnp.int32),
+      jnp.asarray(routing.count, dtype=jnp.int32),
+      routing.reduce_meta,
+      int(routing.num_out_tokens),
+      bool(routing.windowed),
+      topk_weights,
+      int(cap),
+  )
 
 
 def ring_ragged_unsort_tc(
@@ -405,18 +575,25 @@ def ring_ragged_unsort_tc(
   """TC version of `ring_ragged_unsort`: weighted top-k combine of this shard's slots.
 
   Args:
-    sorted_tokens_local: [buffer_size, hidden] expert outputs, or [buffer_size, hidden // 128, 128]
-      (moe_tc_ragged_3d_gmm), which is fed to the TC gather-reduce without a relayout.
+    sorted_tokens_local: [buffer_size, hidden] expert outputs, or [buffer_size,
+      hidden // 128, 128] (moe_tc_ragged_3d_gmm), which is fed to the TC
+      gather-reduce without a relayout.
     routing: TcRouting from `ring_ragged_sort_tc`.
     topk: routing top-k.
-    topk_weights: flat [N * topk] routing weights (differentiated). Unused if prescaled.
-    prescaled: rows are already multiplied by their routing weight (e.g. on the expert
-      activation, see `tc_buffer_row_weights`), so only the unweighted combine is done.
-    out_3d: return the combine in the TC kernels' (N, hidden // 128, 128) layout (no relayout);
-      the cotangent is then expected in that layout too.
+    topk_weights: flat [N * topk] routing weights (differentiated). Unused if
+      prescaled.
+    gather_block_size: SparseCore gather block size (unused in TC combine).
+    mask_padding: Whether to mask out-of-range slots (unused in TC combine).
+    flatten_block_size: Optional flatten block size (``0`` disables).
+    prescaled: rows are already multiplied by their routing weight (e.g. on the
+      expert activation, see `tc_buffer_row_weights`), so only the unweighted
+      combine is done.
+    out_3d: return the combine in the TC kernels' (N, hidden // 128, 128) layout
+      (no relayout); the cotangent is then expected in that layout too.
 
   Returns:
-    [N, hidden] (or [N, hidden // 128, 128] if out_3d) partial combine for this shard's experts.
+    [N, hidden] (or [N, hidden // 128, 128] if out_3d) partial combine for this
+    shard's experts.
   """
   cap = sorted_tokens_local.shape[0]
   num_out_tokens = routing.num_out_tokens
@@ -425,7 +602,9 @@ def ring_ragged_unsort_tc(
   else:
     w_rows = tc_buffer_row_weights(routing, topk_weights, cap)
     w_rows = w_rows.reshape(-1, *([1] * (sorted_tokens_local.ndim - 1)))
-    scaled = (sorted_tokens_local.astype(jnp.float32) * w_rows).astype(sorted_tokens_local.dtype)
+    scaled = (sorted_tokens_local.astype(jnp.float32) * w_rows).astype(
+        sorted_tokens_local.dtype
+    )
   keep_3d = sorted_tokens_local.ndim == 3
   return tc_unsort_reduce(
       scaled,
