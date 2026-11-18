@@ -98,7 +98,7 @@ mv generated_artifacts/python3_12/tpu-requirements.txt \
 
 ### TPU Post-Training
 
-> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt` in the repository was generated using JAX build commit hash: [52d5cb3893727451d0f695bfa6f8206cdd9492c7](https://github.com/jax-ml/jax/commit/52d5cb3893727451d0f695bfa6f8206cdd9492c7). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
+> **Note:** The current `src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt` in the repository was generated using JAX build commit hash: [4f1e40d3ab063353167468c8a809c89c94a1b6a4](https://github.com/jax-ml/jax/commit/4f1e40d3ab063353167468c8a809c89c94a1b6a4). When regenerating the requirements, either use the same commit hash or update this hash if you use a different one.
 
 If you have made changes to the post-training dependencies in `src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt`, you need to regenerate the pinned post-training requirements in `generated_requirements/` directory. Run the following command, replacing `<jax-build-commit-hash>` with the hash you copied in the previous step:
 
@@ -108,7 +108,7 @@ bash src/dependencies/scripts/generate_requirements.sh \
 --base-requirements src/dependencies/requirements/base_requirements/tpu-post-train-requirements.txt \
 --generated-requirements tpu-post-train-requirements.txt \
 --override-requirements src/dependencies/extra_deps/tpu_post_train_overrides.txt \
---seed-commit 52d5cb3893727451d0f695bfa6f8206cdd9492c7
+--seed-commit 4f1e40d3ab063353167468c8a809c89c94a1b6a4
 
 # Copy generated requirements to src/dependencies/requirements/generated_requirements
 mv generated_artifacts/python3_12/tpu-post-train-requirements.txt \
