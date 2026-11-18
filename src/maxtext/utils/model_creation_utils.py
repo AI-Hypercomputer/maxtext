@@ -1367,16 +1367,19 @@ def from_pretrained(
         """
         return "rngs" in path or (len(path) >= 2 and isinstance(path[-1], int) and path[-2] == "value")
 
-      def _only_runtime_state_extra(target, meta_tree):
-        """Whether the checkpoint holds every target leaf and its only extra entries are NNX runtime state.
+      def _only_runtime_state_extra(target, meta_tree, with_base_key):
+        """Whether the checkpoint holds every target leaf and its only extra entries are not model weights.
 
         Checkpoints written from the full `nnx.state(model)` (e.g. Tunix's SFT checkpoint manager or the
-        training engine) also persist RNG state and sown intermediates. The restore target leaves
-        `nnx.RngState` and `nnx.Intermediate` out on purpose, and a strict (`partial_restore=False`)
-        Orbax restore rejects those extra on-disk entries. Restoring partially is safe only when nothing
-        else differs: `partial_restore` does not raise for target leaves missing on disk, so this check
-        keeps that guarantee.
+        training engine) also persist RNG state and sown intermediates, and training-engine checkpoints
+        keep the trainer state (`opt_state`, `step`) next to the model under `base`. The restore target
+        leaves `nnx.RngState`, `nnx.Intermediate` and the trainer state out on purpose, and a strict
+        (`partial_restore=False`) Orbax restore rejects those extra on-disk entries. Restoring partially
+        is safe only when nothing else differs: `partial_restore` does not raise for target leaves
+        missing on disk, so this check keeps that guarantee.
         """
+        if with_base_key:
+          target = {"base": target}
         target_paths = set(_tree_paths(target))
         meta_paths = set(_tree_paths(meta_tree))
         # A target leaf may be a composite pytree (e.g. an AQT QTensor) stored as several on-disk leaves,
@@ -1384,7 +1387,9 @@ def from_pretrained(
         meta_prefixes = {m[:i] for m in meta_paths for i in range(1, len(m) + 1)}
         missing = [t for t in target_paths if t not in meta_prefixes]
         extra = [m for m in meta_paths if not any(m[:i] in target_paths for i in range(1, len(m) + 1))]
-        return not missing and bool(extra) and all(_is_runtime_state_path(m) for m in extra)
+        # With a `base` key, everything outside it is trainer state, not model weights.
+        allowed = [m for m in extra if _is_runtime_state_path(m) or (with_base_key and m[0] != "base")]
+        return not missing and bool(extra) and len(allowed) == len(extra)
 
       def _restore_and_update(target_subset, is_partial=True):
         if is_nnx_checkpoint:
@@ -1471,7 +1476,8 @@ def from_pretrained(
       else:
         _restore_and_update(
             target_for_restore,
-            is_partial=is_nnx_checkpoint and _only_runtime_state_extra(target_for_restore, meta_tree_for_params),
+            is_partial=is_nnx_checkpoint
+            and _only_runtime_state_extra(target_for_restore, metadata.item_metadata.tree, has_base_key),
         )
 
     if wrap_with_tunix_adapter:
