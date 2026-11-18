@@ -216,6 +216,22 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         "encoder_images": encoder_images,
         "encoder_image_masks": encoder_image_masks,
     }
+  is_dense_warmup = config.use_indexer and config.indexer_loss_scaling_factor > 0.0 and not config.indexer_sparse_training
+  m3_kernels_mod = None
+  use_m3_tokamax_ce = False
+  if (
+      bool(getattr(config, "use_m3_model", False))
+      and not is_block_diffusion
+      and not (is_dense_warmup and is_train)
+      and not (not is_train and config.mtp_eval_target_module > 0)
+      and config.num_vocab_tiling <= 1
+  ):
+    from maxtext.m3.core import kernels as m3_kernels_mod  # pylint: disable=import-outside-toplevel
+
+    use_m3_tokamax_ce = m3_kernels_mod.model_supports_tokamax_linear_ce(
+        model, config, require_defer_lm_head=True, mesh=getattr(model, "mesh", None)
+    )
+  defer_lm_head_kwargs = {"defer_lm_head_to_loss": True} if use_m3_tokamax_ce else {}
   # Flax NNX model: forward pass, then pop Intermediates sown during it.
   logits = model(
       decoder_input_tokens=data["inputs"],
@@ -226,6 +242,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       decoder_target_tokens=data["targets"],
       decoder_target_mask=data["targets_segmentation"],
       **forced_routing_kwargs,
+      **defer_lm_head_kwargs,
   )
   # mtp_losses and mtp_acceptance subclass nnx.Intermediate, and nnx type filters match
   # subclasses. Pop them before the generic Intermediate pop below, which would otherwise
@@ -255,7 +272,6 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if indexer_losses_state is not None:
     intermediate_outputs["indexer_losses"] = indexer_losses_state.to_pure_dict()
 
-  is_dense_warmup = config.use_indexer and config.indexer_loss_scaling_factor > 0.0 and not config.indexer_sparse_training
   if is_dense_warmup and is_train:
     # In Dense Warm-up stage, we skip main model loss calculation for efficiency.
     # The main model parameters are frozen and only the indexer is trained via KL divergence.
@@ -267,6 +283,19 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     hidden_state_key = ("decoder", "hidden_states")
     hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
     xent_sum, total_z_loss = vocab_tiling_nnx_loss(model, hidden_states, data, config, is_train)
+  elif use_m3_tokamax_ce and logits is None and m3_kernels_mod is not None:
+    hidden_state_key = ("decoder", "hidden_states")
+    hidden_states = maxtext_utils.get_nested_value(intermediate_outputs, hidden_state_key)[0]
+    xent_sum = m3_kernels_mod.linear_cross_entropy(
+        hidden_states,
+        data["targets"],
+        model.lm_head.kernel[...],
+        mask=(data["targets_segmentation"] != 0),
+        sharding=getattr(model, "sharding", None),
+        mesh=getattr(model, "mesh", None),
+        reduction="sum",
+    )
+    total_z_loss = jnp.array(0.0, dtype=jnp.float32)
   else:
     if is_block_diffusion:
       logits = block_diffusion_target_alignment.align_logits_to_targets(

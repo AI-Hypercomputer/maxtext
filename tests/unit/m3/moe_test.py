@@ -862,6 +862,45 @@ class MockedTPULoweringContractTest(parameterized.TestCase):
     self.assertGreaterEqual(calls["unsort"], 2)
     self.assertGreaterEqual(calls["ra2a"], 4)
 
+  @parameterized.parameters("tokamax", "gmm_v2")
+  def test_tpu_public_tokamax_mosaic_v2_dispatch_contract(self, kind: str):
+    """On live TPU (or tokamax_cross_compile), both 'tokamax' and 'gmm_v2' call public `tokamax.ragged_dot` v2."""
+    import tokamax  # pylint: disable=import-outside-toplevel
+
+    lhs = jax.random.normal(jax.random.key(61), (16, 32), dtype=jnp.bfloat16)
+    rhs = jax.random.normal(jax.random.key(62), (4, 32, 24), dtype=jnp.bfloat16)
+    group_sizes = jnp.array([4, 3, 5, 4], dtype=jnp.int32)
+    ref_out, (ref_dlhs, ref_drhs) = jax.value_and_grad(
+        lambda l, r: jnp.sum(m3_moe.grouped_matmul(l, r, group_sizes, backend="ragged_dot", is_tpu=False)),
+        argnums=(0, 1),
+    )(lhs, rhs)
+
+    seen_impls: list[str] = []
+
+    def fake_ragged_dot(*, lhs, rhs, group_sizes, preferred_element_type, precision, implementation):
+      del precision
+      seen_impls.append(implementation)
+      self.assertEqual(lhs.shape[0] % 256, 0)
+      self.assertEqual(lhs.shape[1] % 128, 0)
+      self.assertEqual(rhs.shape[2] % 128, 0)
+      gs = jnp.asarray(group_sizes, dtype=jnp.int32)
+      return jax.lax.ragged_dot(lhs, rhs, gs, preferred_element_type=jnp.float32).astype(preferred_element_type)
+
+    with (
+        mock.patch.object(m3_kernels, "_tokamax_cross_compile_enabled", return_value=True),
+        mock.patch.object(m3_kernels, "tokamax_gmm_v2_available", return_value=True),
+        mock.patch.object(tokamax, "ragged_dot", side_effect=fake_ragged_dot),
+    ):
+      got_out, (got_dlhs, got_drhs) = jax.value_and_grad(
+          lambda l, r: jnp.sum(m3_moe.grouped_matmul(l, r, group_sizes, backend=kind, is_tpu=True)),
+          argnums=(0, 1),
+      )(lhs, rhs)
+
+    self.assertEqual(seen_impls, ["mosaic_tpu_v2"])
+    np.testing.assert_allclose(np.asarray(got_out), np.asarray(ref_out), rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(np.asarray(got_dlhs), np.asarray(ref_dlhs), rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(np.asarray(got_drhs), np.asarray(ref_drhs), rtol=1e-2, atol=1e-2)
+
 
 class LoadBalanceLossMaskingTest(parameterized.TestCase):
   """Verifies padding masking (`!= 0`) and packed `segment_ids` binarization with negative controls."""
