@@ -25,6 +25,11 @@ import jax.numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.experimental.pallas import tpu_sc as plsc
+from packaging import version
+
+# JAX 0.11.1 (libtpu 0.0.46) can't run the SparseCore layout passes on this
+# kernel, so enable them only from JAX 0.11.2 (libtpu 0.0.48) onward.
+_NEEDS_LAYOUT_PASSES = version.Version(jax.__version__) >= version.Version("0.11.2")
 
 
 # pylint: disable=missing-class-docstring
@@ -777,7 +782,7 @@ def ragged_gather_reduce(
       compiler_params=pltpu.CompilerParams(
           use_tc_tiling_on_sc=True,
           disable_bounds_checks=True,
-          needs_layout_passes=False,
+          needs_layout_passes=_NEEDS_LAYOUT_PASSES,
       ),
       cost_estimate=get_cost_estimate(
           padded_input_size=padded_input_size,
