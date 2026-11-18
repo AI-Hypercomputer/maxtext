@@ -49,7 +49,9 @@ def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq
     return jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
   max_segs = min(max_segments_per_seq, seq_len)
-  key = jax.random.PRNGKey(42)
+  # Pin threefry2x32: base.yml defaults prng_impl="unsafe_rbg", whose HLO rng-bit-generator
+  # partitions per shard on Pathways TPU and diverges between shard_mode="auto" and "explicit".
+  key = jax.random.key(42, impl="threefry2x32")
   k1, k2 = jax.random.split(key, 2)
 
   # Sample random number of segments per row in [2, max_segs].
@@ -74,25 +76,50 @@ def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq
 class SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
 
-  data_generator: Callable[[pyconfig.HyperParameters, tuple[Any, ...]], dict]
+  data_generator: Callable[..., dict[str, Any]]
+  batch: dict[str, Any]
 
   def __init__(self, config, mesh, is_training: bool = True):
     self.mesh = mesh
     self.config = config
-    batch_size = config.global_batch_size_to_load if is_training else config.global_batch_size_to_load_eval
+    self.is_training = is_training
     rules = None if is_training else config.logical_axis_rules_for_eval
     data_pspec_shardings = sharding.get_input_data_sharding(config, mesh, rules=rules)
-    self.data_generator = jax.jit(
-        SyntheticDataIterator.raw_generate_synthetic_data, out_shardings=data_pspec_shardings, static_argnums=0
-    )
+    # Generate the (static) synthetic batch once, directly in its sharded layout. Building it unsharded on
+    # local_devices()[0] each step cost 1.5-12 GiB of HBM on that device and stalled step 0 on 512+ chips.
+    mesh_ctx = jax.set_mesh(self.mesh) if isinstance(self.mesh, jax.sharding.Mesh) else self.mesh
+    with mesh_ctx:
+      self.data_generator = jax.jit(
+          SyntheticDataIterator.raw_generate_synthetic_data,
+          in_shardings=(),
+          out_shardings=data_pspec_shardings,
+          static_argnums=(0, 1),
+      )
+      self.batch = self.data_generator(self.config, is_training)  # pylint: disable=not-callable
+      jax.block_until_ready(self.batch)
 
+  def reset(self):
+    pass  # Synthetic data is stateless; nothing to reset.
+
+  def __iter__(self):
+    return self
+
+  def __next__(self):
+    return self.batch
+
+  @staticmethod
+  def raw_generate_synthetic_data(config: pyconfig.HyperParameters, is_training: bool = True):
+    """Generates a single batch of synthetic data"""
+    batch_size = config.global_batch_size_to_load if is_training else config.global_batch_size_to_load_eval
     # When several data replicas share this process (threaded DiLoCo), `global_batch_size_to_load` is one replica's
     # batch. Build the batch of all replicas and keep this replica's rows, so replica i gets the same rows as replica i
     # of SPMD DiLoCo, which splits one global batch along its first axis. With one replica this is the full batch.
     replica_index, num_replicas = input_pipeline_utils.get_data_replica(config)
     all_replicas_batch_size = batch_size * num_replicas
+    # Pin threefry2x32: base.yml defaults prng_impl="unsafe_rbg", whose HLO rng-bit-generator
+    # partitions per shard on Pathways TPU and diverges between shard_mode="auto" and "explicit".
     tokens = jax.random.randint(
-        jax.random.PRNGKey(0),
+        jax.random.key(0, impl="threefry2x32"),
         (all_replicas_batch_size, config.max_target_length + 1),
         0,
         config.vocab_size,
@@ -114,29 +141,13 @@ class SyntheticDataIterator:
     if is_training and config.logical_global_batch_size_to_load is not None:
       # With `elastic_global_batch_size_mode='constant_padded'`, mask out rows beyond the logical global batch.
       segmentation = segmentation.at[config.logical_global_batch_size_to_load :].set(0)
-    self.data = (tokens, batch_positions, segmentation)
-
-  def reset(self):
-    pass  # Synthetic data is stateless; nothing to reset.
-
-  def __iter__(self):
-    return self
-
-  def __next__(self):
-    with self.mesh:
-      return self.data_generator(self.config, self.data)  # pylint: disable=not-callable
-
-  @staticmethod
-  def raw_generate_synthetic_data(config: pyconfig.HyperParameters, data):
-    """Generates a single batch of synthetic data"""
-    tokens, positions, segmentation = data
 
     output = {}
     output["inputs"] = tokens[:, :-1]
-    output["inputs_position"] = positions[:, :-1]
+    output["inputs_position"] = batch_positions[:, :-1]
     output["inputs_segmentation"] = segmentation
     output["targets"] = tokens[:, 1:]
-    output["targets_position"] = positions[:, 1:]
+    output["targets_position"] = batch_positions[:, 1:]
     output["targets_segmentation"] = segmentation
     if config.enable_diloco:
       output = reshape_first_axis_with_diloco(config.num_diloco_replicas, output)
