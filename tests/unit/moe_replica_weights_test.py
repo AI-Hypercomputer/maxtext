@@ -327,11 +327,12 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
   """CPU tests for `extend_quantized_with_replicas` (dynamic & static FP8, channelwise & per-tensor, STE grads)."""
 
   def setUp(self):
+    """Initializes deterministic 4-shard weights/grads and patches `ragged_all_to_all` on CPU."""
     super().setUp()
     rng = np.random.default_rng(1)
     self.plan = _hand_plan()
     # Home 0 (the sender) holds 8x larger weights than its receivers 1 and 3.
-    mag = np.array([8.0, 1.0, 1.0, 1.0], np.float32).reshape(NUM_EP, 1, 1, 1)
+    mag = np.array([8.0, 1.0, 1.0, 1.0], np.float32).reshape((NUM_EP, 1, 1, 1))
     self.w = (rng.standard_normal((NUM_EP, LOCAL, DIM, 4)) * mag).astype(np.float32)
     self.g = rng.standard_normal((NUM_EP, LOCAL + NUM_REPLICAS, DIM, 4)).astype(np.float32)
     patcher = mock.patch.object(jax.lax, "ragged_all_to_all", moe_replica_test_utils.emulated_ragged_all_to_all)
@@ -418,9 +419,9 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
         jax.vmap(lambda w: mrw.extend_with_replicas(w, self.plan, AXIS, NUM_EP, jnp.float32), axis_name=AXIS)
     )(jnp.asarray(self.w))
     naive = qpl.quantize(dense[1], jnp.float8_e4m3fn, channelwise_axes=[2], calibration_method="absmax")
-    home = jax.jit(
-        lambda w: qpl.quantize(w, jnp.float8_e4m3fn, channelwise_axes=[2], calibration_method="absmax")
-    )(jnp.asarray(self.w[1]))
+    home = jax.jit(lambda w: qpl.quantize(w, jnp.float8_e4m3fn, channelwise_axes=[2], calibration_method="absmax"))(
+        jnp.asarray(self.w[1])
+    )
     self.assertGreater(float(np.min(np.asarray(naive.scale) / np.asarray(home.scale))), 2.0)
     np.testing.assert_array_equal(
         np.asarray(self._extend("absmax").scale[1, :LOCAL]), np.broadcast_to(home.scale, (LOCAL, 1, 4))
@@ -460,9 +461,7 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
     g_single = jnp.asarray(self.g[0, :LOCAL], dtype=jnp.bfloat16)
     zero_rep_plan = types.SimpleNamespace(num_replicas=0, send_slots=jnp.zeros((NUM_EP, 2), jnp.int32))
     with mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=AssertionError("must not call ra2a")):
-      out_r0 = mrw.extend_quantized_with_replicas(
-          w_single, zero_rep_plan, AXIS, NUM_EP, jnp.bfloat16, jnp.float8_e4m3fn
-      )
+      out_r0 = mrw.extend_quantized_with_replicas(w_single, zero_rep_plan, AXIS, NUM_EP, jnp.bfloat16, jnp.float8_e4m3fn)
       dw_r0 = jax.grad(
           lambda w: _ste_consume(
               mrw.extend_quantized_with_replicas(w, zero_rep_plan, AXIS, NUM_EP, jnp.bfloat16, jnp.float8_e4m3fn),
@@ -521,7 +520,7 @@ class ExtendQuantizedWithReplicasTpuTest(parameterized.TestCase):
     devs = devs[:4]
     plan = _hand_plan()
     rng = np.random.default_rng(77)
-    mag = np.array([8.0, 1.0, 1.0, 1.0], np.float32).reshape(NUM_EP, 1, 1, 1)
+    mag = np.array([8.0, 1.0, 1.0, 1.0], np.float32).reshape((NUM_EP, 1, 1, 1))
     w_np = (rng.standard_normal((NUM_EP, LOCAL, 16, 128)) * mag).astype(np.float32)
     g_np = rng.standard_normal((NUM_EP, LOCAL + NUM_REPLICAS, 16, 128)).astype(np.float32)
     mesh = Mesh(np.asarray(devs), (AXIS,))
