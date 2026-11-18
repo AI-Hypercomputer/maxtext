@@ -24,12 +24,12 @@ trainer's scanned tree must be unscanned into that same per-layer shape
 before binding, or names/shapes never line up.
 
 This differs from ``maxtext.integration.vllm.maxtext_vllm_rollout``'s
-``unroll_gemma_scanned_weights``: that function targets Gemma 3/4's
+``unroll_layers_n_blocks``: that function targets block scans such as Gemma 3's
 attention-pattern-interleaved scan (an explicit ``layers.layers_N`` pytree
 level per attention-pattern block, requiring a scan-length/pattern-length
 computation). Qwen3 (and MaxText's default non-interleaved scan) has no such
 sub-block nesting -- the layer axis is embedded directly in each param array
-at axis 1, with a single flat ``layers`` container. Reusing the Gemma
+at axis 1, with a single flat ``layers`` container. Reusing that
 function's pattern-block matching would silently no-op on Qwen3 trees (its
 ``_find_scanned_layer_idx`` requires a ``layers_<N>`` key immediately under
 ``layers``, which never appears here), so this module implements the
