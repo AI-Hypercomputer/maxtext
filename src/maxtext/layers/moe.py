@@ -2327,6 +2327,11 @@ class RoutedMoE(nnx.Module):
       )
     else:
       sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
+      if not is_offset:
+        # Rows from valid_count on are the uninitialized tail of the receive buffer, sorted to the end. Zero them,
+        # as a2a_ragged_sort does, so they cannot poison reductions over all rows of the gmm (e.g. the fp8 absmax
+        # of the drhs cotangent, where 0 * NaN = NaN).
+        sorted_inputs = jnp.where((jnp.arange(inputs.shape[0]) < valid_count)[:, None], sorted_inputs, 0)
     sorted_experts_ids = expert_indices[sorted_indices]
     return (
         sorted_inputs,
@@ -3428,11 +3433,10 @@ class RoutedMoE(nnx.Module):
               buffer_size=buffer_size,
           )
 
-          # Zero-initialize for every ragged_buffer_factor: besides a capped buffer, the worst-case buffer
-          # of rbf <= 0 / force_dropless is also under-full, and its tail rows reach the gmm. Uninitialized
-          # (possibly NaN / Inf) tail rows poison reductions over all rows, e.g. the fp8 absmax scale of the
-          # drhs lhs in the quantized gmm backward.
-          output_shape = jnp.zeros((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
+          # No memset for any ragged_buffer_factor: the rows past the routed count stay uninitialized, and
+          # local_permute keeps them out of the gmm input (the ragged sort gathers only the valid prefix; the
+          # XLA sort zeroes the tail).
+          output_shape = jax.lax.empty((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
 
           x = jax.lax.ragged_all_to_all(
               x,

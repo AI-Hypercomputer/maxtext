@@ -11,11 +11,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Tests for the worst-case ragged_all_to_all receive buffer in RoutedMoE (ring of experts off).
+"""Tests the uninitialized tail of the ragged_all_to_all receive buffer in RoutedMoE (ring of experts off).
 
-With ragged_buffer_factor <= 0 or force_dropless, the dispatch receive buffer of `ra2a_and_route` is sized for
-the worst case and holds fewer than `buffer_size` rows. Its tail rows reach the gmm, so they must be zero rather
-than uninitialized memory.
+The dispatch receive buffer of `ra2a_and_route` (`jax.lax.empty`) holds fewer than `buffer_size` rows, for every
+ragged_buffer_factor. Its tail rows stay uninitialized; `local_permute` must zero them in the gmm input, with
+either sort, so they cannot poison reductions over all rows (e.g. the fp8 absmax of the quantized gmm backward).
 """
 
 from unittest import mock
@@ -44,36 +44,57 @@ def _nan_empty(shape, dtype, **kwargs):
 
 
 class Ra2aBufferInitTest(parameterized.TestCase):
-  """With `jax.lax.empty` returning NaN, the fp8 RoutedMoE forward and backward stay finite on worst-case buffers."""
+  """With `jax.lax.empty` returning NaN, the fp8 RoutedMoE forward and backward stay finite."""
 
-  def _build(self, ragged_buffer_factor, force_dropless):
-    """Builds an fp8_full (Qwix) RoutedMoE with EP=4, ring of experts off and the given buffer settings."""
+  def _build(self, ragged_buffer_factor, force_dropless, gmm_v2, ragged_sort):
+    """Builds an fp8_full (Qwix, absmax) RoutedMoE with EP=4, ring of experts off and the given buffer settings."""
+    if gmm_v2:
+      # tokamax gmm_v2 (in-kernel lhs quantization), as in moe_quantized_a2a_test.
+      gmm = {
+          "base_mlp_dim": 512,
+          "base_moe_mlp_dim": 512,
+          "weight_dtype": "float32",
+          "per_device_batch_size": 1,
+          "megablox": False,
+          "use_tokamax_gmm": True,
+          "use_gmm_v2": True,
+          "check_vma": False,
+          **{f"{w}_tile_{p}_batch_seq": 128 for w in ("wi", "wo") for p in ("fwd", "dlhs", "drhs")},
+          **dict.fromkeys(("wi_tile_dlhs_embed_dim", "wo_tile_fwd_embed_dim", "wo_tile_dlhs_mlp_dim"), 256),
+      }
+    else:
+      gmm = {
+          "base_mlp_dim": 256,
+          "base_moe_mlp_dim": 256,
+          "per_device_batch_size": 2,
+          "megablox": True,
+          # gmm tiles must not exceed the small mlp dim / per-shard buffer.
+          **{f"{w}_tile_{p}_mlp_dim": 256 for w in ("wi", "wo") for p in ("fwd", "dlhs", "drhs")},
+          **{f"{w}_tile_{p}_batch_seq": 128 for w in ("wi", "wo") for p in ("fwd", "dlhs", "drhs")},
+      }
     cfg = pyconfig.initialize(
         [None, get_test_config_path()],
-        run_name=f"moe_ra2a_buffer_init_{ragged_buffer_factor}_{force_dropless}",
+        run_name=f"moe_ra2a_buffer_init_{ragged_buffer_factor}_{force_dropless}_{gmm_v2}_{ragged_sort}",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
         override_model_config=True,
         # emb dim >= 2048 (multiple of 1024) for the SparseCore ragged sort kernels.
         base_emb_dim=2048,
-        base_mlp_dim=256,
-        base_moe_mlp_dim=256,
         dtype="bfloat16",
-        megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=2,
         max_target_length=64,
         float32_gate_logits=True,
         ici_expert_parallelism=4,
         use_ring_of_experts=False,
-        use_ragged_sort=False,
+        use_ragged_sort=ragged_sort,
         ragged_buffer_factor=ragged_buffer_factor,
         quantization="fp8_full",
         use_qwix_quantization=True,
         quantize_router_proj=False,
-        # gmm tiles must not exceed the small mlp dim / per-shard buffer.
-        **{f"{w}_tile_{p}_mlp_dim": 256 for w in ("wi", "wo") for p in ("fwd", "dlhs", "drhs")},
-        **{f"{w}_tile_{p}_batch_seq": 128 for w in ("wi", "wo") for p in ("fwd", "dlhs", "drhs")},
+        weight_quantization_calibration_method="absmax",
+        act_quantization_calibration_method="absmax",
+        bwd_quantization_calibration_method="absmax",
+        **gmm,
     )
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     model = nnx_wrappers.to_linen(
@@ -87,8 +108,9 @@ class Ra2aBufferInitTest(parameterized.TestCase):
         mesh=mesh,
         kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
         kernel_axes=("embed", "mlp"),
-        intermediate_dim=cfg.mlp_dim,
+        intermediate_dim=cfg.moe_mlp_dim,
         dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
         force_dropless=force_dropless,
     )
     rule = qwix.QtRule(
@@ -106,15 +128,20 @@ class Ra2aBufferInitTest(parameterized.TestCase):
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(
-      # Worst-case (EP x balanced) buffer of the default dropless path.
-      ("dropless_rbf_neg1", -1.0, False),
+      # megablox, XLA sort. Worst-case (EP x balanced) buffer of the default dropless path.
+      ("dropless_rbf_neg1", -1.0, False, False, False),
       # force_dropless overrides a tiny capped buffer with the worst-case buffer and routes with rbf=-1.
-      ("force_dropless", 0.125, True),
+      ("force_dropless", 0.125, True, False, False),
+      # A capped buffer is under-full too unless the routing overflows it.
+      ("capped_rbf_2", 2.0, False, False, False),
+      # tokamax gmm_v2: XLA sort, then the SparseCore ragged sort (which only gathers the valid prefix).
+      ("gmm_v2_rbf_neg1", -1.0, False, True, False),
+      ("gmm_v2_ragged_sort_rbf_neg1", -1.0, False, True, True),
   )
-  def test_nan_empty_fp8_finite(self, ragged_buffer_factor, force_dropless):
+  def test_nan_empty_fp8_finite(self, ragged_buffer_factor, force_dropless, gmm_v2, ragged_sort):
     if jax.default_backend() != "tpu":
-      self.skipTest("Requires TPU (megablox fp8 gmm and ragged_all_to_all).")
-    cfg, mesh, model = self._build(ragged_buffer_factor, force_dropless)
+      self.skipTest("Requires TPU (fp8 gmm and ragged_all_to_all).")
+    cfg, mesh, model = self._build(ragged_buffer_factor, force_dropless, gmm_v2, ragged_sort)
     rng_model, rng_x = jax.random.split(jax.random.PRNGKey(2345))
     x = jax.random.uniform(
         rng_x,
@@ -122,7 +149,7 @@ class Ra2aBufferInitTest(parameterized.TestCase):
         dtype=cfg.dtype,
     )
 
-    # Records (sorted rows, routed row count) of every local_permute call that reads a received buffer.
+    # Records (received rows, sorted rows, routed row count) of every local_permute call on a received buffer.
     captured = []
     orig_local_permute = moe.RoutedMoE.local_permute
 
@@ -131,7 +158,8 @@ class Ra2aBufferInitTest(parameterized.TestCase):
       if not kwargs.get("is_offset", False):
         sorted_inputs, _, local_group_size, _ = res
         jax.debug.callback(
-            lambda s, n: captured.append((np.asarray(s, np.float32), int(np.sum(n)))),
+            lambda r, s, n: captured.append((np.asarray(r, np.float32), np.asarray(s, np.float32), int(np.sum(n)))),
+            args[0],
             sorted_inputs,
             local_group_size,
         )
@@ -169,10 +197,12 @@ class Ra2aBufferInitTest(parameterized.TestCase):
       self.assertGreater(g_max, 0.0, f"{name} grad is all zero.")
 
     # The test only means something if some shard's receive buffer was under-full.
-    underfull = [(s, n) for s, n in captured if n < s.shape[0]]
+    underfull = [(r, s, n) for r, s, n in captured if n < s.shape[0]]
     self.assertNotEmpty(underfull, "No under-full receive buffer; the test does not exercise the tail rows.")
-    for s, n in underfull:
-      np.testing.assert_array_equal(s[n:], 0.0, err_msg="Tail rows of the received buffer are not zero.")
+    for r, s, n in underfull:
+      # No memset: the receive buffer tail is still `jax.lax.empty` (NaN here); local_permute zeroes it.
+      self.assertTrue(np.all(np.isnan(r[n:])), "Tail rows of the received buffer were initialized.")
+      np.testing.assert_array_equal(s[n:], 0.0, err_msg="Tail rows of the gmm input are not zero.")
 
 
 if __name__ == "__main__":
