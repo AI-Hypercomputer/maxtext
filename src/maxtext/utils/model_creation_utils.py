@@ -1347,6 +1347,50 @@ def from_pretrained(
           return full_dict
         return {k: _subset_dict(full_dict[k], target_keys_dict[k]) for k in target_keys_dict if k in full_dict}
 
+      def _tree_paths(tree, prefix=()):
+        """Yields the key path of every leaf in a nested dict; list/tuple entries get their index as key."""
+        if hasattr(tree, "items") and tree:
+          for k, v in tree.items():
+            yield from _tree_paths(v, prefix + (k,))
+        elif isinstance(tree, (list, tuple)) and tree:
+          for i, v in enumerate(tree):
+            yield from _tree_paths(v, prefix + (i,))
+        else:
+          yield prefix
+
+      def _is_runtime_state_path(path):
+        """Whether an on-disk leaf is NNX runtime state that the restore target leaves out on purpose.
+
+        `rngs` subtrees hold nnx.RngState (RngKey/RngCount per stream). Values written with `sow()`
+        (nnx.Intermediate, e.g. MoE `moe_has_overflow`) are tuples, so their leaves sit at
+        `<name>.value.<index>`, while persisted weights are single arrays at `<name>.value`.
+        """
+        return "rngs" in path or (len(path) >= 2 and isinstance(path[-1], int) and path[-2] == "value")
+
+      def _only_runtime_state_extra(target, meta_tree, model_prefix):
+        """Whether the checkpoint holds every target leaf and its only extra entries are not model weights.
+
+        `model_prefix` is where the model weights sit in the checkpoint: `()` for NNX, `("base",)` for
+        NNX-RL and `("params", "params")` for Linen. Checkpoints written from a full training state
+        also persist entries the restore target leaves out on purpose: NNX RNG state and sown
+        intermediates inside the model, and trainer state such as `opt_state` and `step` next to it.
+        A strict (`partial_restore=False`) Orbax restore rejects those extra on-disk entries.
+        Restoring partially is safe only when nothing else differs: `partial_restore` does not raise
+        for target leaves missing on disk, so this check keeps that guarantee.
+        """
+        for key in reversed(model_prefix):
+          target = {key: target}
+        target_paths = set(_tree_paths(target))
+        meta_paths = set(_tree_paths(meta_tree))
+        # A target leaf may be a composite pytree (e.g. an AQT QTensor) stored as several on-disk leaves,
+        # so compare by prefix: a target leaf is on disk if it prefixes an on-disk leaf, and vice versa.
+        meta_prefixes = {m[:i] for m in meta_paths for i in range(1, len(m) + 1)}
+        missing = [t for t in target_paths if t not in meta_prefixes]
+        extra = [m for m in meta_paths if not any(m[:i] in target_paths for i in range(1, len(m) + 1))]
+        n = len(model_prefix)
+        allowed = [m for m in extra if m[:n] != model_prefix or _is_runtime_state_path(m[n:])]
+        return not missing and bool(extra) and len(allowed) == len(extra)
+
       def _restore_and_update(target_subset, is_partial=True):
         if is_nnx_checkpoint:
           item = {"base": target_subset} if has_base_key else target_subset
@@ -1430,7 +1474,14 @@ def from_pretrained(
               f"({chunk_layer_keys[0]} to {chunk_layer_keys[-1]})."
           )
       else:
-        _restore_and_update(target_for_restore, is_partial=False)
+        _restore_and_update(
+            target_for_restore,
+            is_partial=_only_runtime_state_extra(
+                target_for_restore,
+                metadata.item_metadata.tree,
+                (("base",) if has_base_key else ()) if is_nnx_checkpoint else ("params", "params"),
+            ),
+        )
 
     if wrap_with_tunix_adapter:
       with mesh:
