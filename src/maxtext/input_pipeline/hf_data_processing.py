@@ -29,6 +29,7 @@ from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import elastic_utils
 
 
@@ -225,6 +226,12 @@ def vision_sft_preprocessing_pipeline(
           "column_names": text_columns,
       },
   )
+  # Formats that leave BOS to the token ids (Gemma 3) need it added back to the prompt.
+  if mm_processor.reformatted_prompt_needs_bos(config.model_name):
+    dataset = dataset.map(
+        input_pipeline_utils.prepend_bos,
+        fn_kwargs={"column_name": text_columns[0], "bos_id": tokenizer.bos_token_id},
+    )
   dataset = dataset.map(
       input_pipeline_utils.prepare_text_for_image_fusion,
       fn_kwargs={"column_name": text_columns[0], "config": config},

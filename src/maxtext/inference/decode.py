@@ -137,6 +137,10 @@ def main(argv: Sequence[str]) -> None:
   except AttributeError as _:
     has_chat_template = False
   is_bos = config.add_bos and not has_chat_template
+  if config.use_multimodal and mm_processor.reformatted_prompt_needs_bos(config.model_name):
+    # `text` comes from `reformat_prompt`, not from the tokenizer's chat template (only applied with
+    # `use_chat_template`), so having a chat template doesn't mean BOS is already there.
+    is_bos = config.add_bos
   tokens, true_length = tokenizer_model.encode(text, is_bos=is_bos, prefill_lengths=[prefill_length])
 
   position_ids = None

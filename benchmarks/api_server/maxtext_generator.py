@@ -509,7 +509,12 @@ class MaxTextGenerator:
       prefill_length -= mm_processor.get_image_offsets(config=self.config, processor_output=processor_output)
       images = processor_output.pixel_values
 
-    tokens, true_length = self.tokenizer.encode(text, is_bos=not self.has_chat_template, prefill_lengths=[prefill_length])
+    is_bos = not self.has_chat_template
+    if self.config.use_multimodal and image_path and mm_processor.reformatted_prompt_needs_bos(self.config.model_name):
+      # Same as decode.py: `text` comes from `reformat_prompt`, which leaves Gemma 3's BOS to the token ids, so having a
+      # chat template doesn't mean BOS is already there.
+      is_bos = self.config.add_bos
+    tokens, true_length = self.tokenizer.encode(text, is_bos=is_bos, prefill_lengths=[prefill_length])
     if self.config.use_multimodal and image_path:
       tokens = mm_processor.prepare_text_for_image_fusion(tokens, config=self.config, processor_output=processor_output)
       true_length += mm_processor.get_image_offsets(config=self.config, processor_output=processor_output)
