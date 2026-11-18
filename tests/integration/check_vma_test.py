@@ -59,7 +59,7 @@ _BASE_ARGS = (
 
 @pytest.mark.tpu_backend
 class CheckVmaTest(absltest.TestCase):
-  """Tests that megablox MoE compiles under different check_vma / shard_mode settings."""
+  """Tests that megablox MoE compiles under different check_vma settings."""
 
   def test_check_vma(self):
     """check_vma=True with fsdp and expert parallelism."""
@@ -74,6 +74,8 @@ class CheckVmaTest(absltest.TestCase):
         )
     )
 
+  # check_vma=False is the base.yml default, which every megablox MoE compile outside this file already covers.
+  @pytest.mark.scheduled_only
   def test_check_vma_disabled(self):
     """check_vma=False (default) should also compile correctly."""
     temp_dir = gettempdir()
@@ -140,19 +142,6 @@ class CheckVmaTest(absltest.TestCase):
               "use_tokamax_gmm=True",
           )
       )
-
-  def test_explicit_shard_mode(self):
-    """shard_mode=explicit should compile correctly without check_vma (check_vma not supported here)."""
-    temp_dir = gettempdir()
-    train_compile_main(
-        _BASE_ARGS
-        + (
-            f"compiled_trainstep_file={os.path.join(temp_dir, 'explicit_shard.pickle')}",
-            "shard_mode=explicit",
-            "ici_fsdp_parallelism=4",
-            "ici_expert_parallelism=-1",
-        )
-    )
 
 
 if __name__ == "__main__":

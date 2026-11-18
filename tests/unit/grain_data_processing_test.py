@@ -989,11 +989,12 @@ class _GrainParquetSetup:
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
 
 
-class GrainParquetProcessingTest(_GrainParquetSetup, GrainDeterminismMixin, GrainBaseProcessingTest, unittest.TestCase):
+class GrainParquetProcessingTest(_GrainParquetSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with Parquet format.
 
   In decoupled mode, reads directly from GCS. Otherwise, reads from GCSFUSE mounted path.
-  Inherits test_train_ds, test_batch_determinism, and test_for_loop_repeatable.
+  Inherits test_train_ds only: parquet and tfrecord share the same file-sharding/interleave/shuffle branch in
+  get_datasets, so determinism is covered by GrainTFRecordProcessingTest (which mixes in GrainDeterminismMixin).
   Variant subclasses should inherit _GrainParquetSetup + GrainBaseProcessingTest
   directly to get only test_train_ds.
   """

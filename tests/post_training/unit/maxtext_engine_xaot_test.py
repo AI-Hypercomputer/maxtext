@@ -1616,20 +1616,19 @@ class GrpoCompileTest(parameterized.TestCase):
 
   def test_main_compiles_maxtext_loss_by_default(self):
     """`maxtext`, the default, compiles MaxText's own loss on a pre-training batch, with no Tunix adapter."""
+    # The default is `maxtext`, so passing `loss=maxtext` explicitly would compile the identical program.
     self.assertEqual(_config(data_parallelism=1).loss, "maxtext")
-    for extra in ((), ("loss=maxtext",)):
-      with self.subTest(extra=extra):
-        output, engine, micro_batch, compiled = _run_main_and_capture(self, *extra)
+    output, engine, micro_batch, compiled = _run_main_and_capture(self)
 
-        self.assertNotIsInstance(engine.model, TunixMaxTextAdapter)
-        self.assertIsNone(engine._loss_fn)
-        self.assertIsNone(engine._gen_model_input_fn)
-        self.assertEqual(
-            micro_batch,
-            maxtext_engine_compile.get_shaped_micro_batch(engine._config),
-        )
-        self.assertIn("xent_sum", compiled["fwd_bwd"].out_info[1])
-        self.assertNotIn("GRPO", output)
+    self.assertNotIsInstance(engine.model, TunixMaxTextAdapter)
+    self.assertIsNone(engine._loss_fn)
+    self.assertIsNone(engine._gen_model_input_fn)
+    self.assertEqual(
+        micro_batch,
+        maxtext_engine_compile.get_shaped_micro_batch(engine._config),
+    )
+    self.assertIn("xent_sum", compiled["fwd_bwd"].out_info[1])
+    self.assertNotIn("GRPO", output)
 
   def test_rejects_unknown_loss(self):
     with self.assertRaisesRegex(ValueError, r"loss\s+Input should be 'maxtext' or 'grpo'"):

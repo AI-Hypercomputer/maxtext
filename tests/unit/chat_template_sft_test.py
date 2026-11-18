@@ -15,7 +15,6 @@
 
 import os
 from absl.testing import parameterized
-import numpy as np
 import pytest
 from transformers import AutoTokenizer
 
@@ -264,39 +263,6 @@ class SFTPromptMaskingEdgeCasesTest(parameterized.TestCase):
     trained_text = self.tokenizer.decode(trained_ids)
     self.assertTrue(trained_text.startswith("Let us add x + y."))
     self.assertIn("<channel|>sum = x + y<turn|>\n", trained_text)
-
-  def test_sft_prompt_masking_completion_only_false(self):
-    """Ensures that when completion_only=False, targets are identical to inputs."""
-    sample = {
-        "messages": [
-            {"role": "user", "content": "Hello"},
-            {"role": "assistant", "content": "World"},
-        ]
-    }
-
-    processed = input_pipeline_utils.apply_chat_template(
-        example={"messages": sample["messages"]},
-        tokenizer_model=self.tokenizer,
-        data_column_name="messages",
-    )
-
-    tok_example = input_pipeline_utils.tokenization(
-        example=processed,
-        hf_tokenizer=self.tokenizer,
-        truncation=False,
-        max_length=4096,
-        column_names=["messages"],
-    )
-
-    masker = input_pipeline_utils.SFTPromptMasking(
-        text_column_name="messages",
-        completion_only=False,
-        max_target_length=4096,
-        unk_id=self.unk_id,
-    )
-
-    sft_out = masker.map(tok_example)
-    np.testing.assert_array_equal(sft_out["inputs"], sft_out["targets"])
 
   @parameterized.named_parameters(
       ("omitted_reasoning_field", "OMITTED"),

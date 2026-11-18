@@ -183,7 +183,9 @@ class TestMHC(parameterized.TestCase):
 
   # Skip GPU due to NotImplementedError: dynamic grid bounds not supported in the Triton backend
   @pytest.mark.tpu_only
-  @parameterized.named_parameters(("Rate3", 3), ("Rate4", 4))
+  # Shapes do not branch on the rate, so each layer type runs one rate; rate 3 is kept here (TPU) and in the
+  # dense test (CPU), rate 4 in the attention test.
+  @parameterized.named_parameters(("Rate3", 3))
   def test_moe_layer_output_shape(self, rate):
     self._setup_mhc(rate)
 
@@ -213,7 +215,8 @@ class TestMHC(parameterized.TestCase):
         self.assertIsNotNone(value, f"Key '{key}' has a value of None")
       self.assertEqual(output.shape, (b, s, k, d))
 
-  @parameterized.named_parameters(("Rate3", 3), ("Rate4", 4))
+  # One rate per layer type (see test_moe_layer_output_shape).
+  @parameterized.named_parameters(("Rate3", 3))
   def test_dense_layer_output_shape(self, rate):
     self._setup_mhc(rate)
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
@@ -236,7 +239,8 @@ class TestMHC(parameterized.TestCase):
       self.assertDictEqual(metadata, {})
       self.assertEqual(output.shape, (b, s, k, d))
 
-  @parameterized.named_parameters(("Rate3", 3), ("Rate4", 4))
+  # One rate per layer type (see test_moe_layer_output_shape).
+  @parameterized.named_parameters(("Rate4", 4))
   def test_attention_layer_output_shape(self, rate):
     self._setup_mhc(rate)
     inputs_shape = (

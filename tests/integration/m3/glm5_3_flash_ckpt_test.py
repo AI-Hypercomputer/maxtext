@@ -779,11 +779,16 @@ class Glm5CkptTest(parameterized.TestCase):
     tokens = jnp.array(ids.numpy())
 
     hf_logits = _hf_forward(hf_m, hf_head, ids)
-    (hf_logits * cot).sum().backward()
 
     out_aux = jax_m.forward_with_aux(tokens)
     self._assert_e3(out_aux.logits, hf_logits.detach().cpu().numpy(), "forward_logits")
 
+    if scan_layers:
+      # 13-layer scanned HF backward / all-param gradient parity through load_hf_state_into_model is covered by
+      # glm5_3_flash_ckpt_parity_test.py::test_golden_batch_ce_loss_and_all_param_gradient_parity.
+      return
+
+    (hf_logits * cot).sum().backward()
     cot_jax = jnp.array(cot.detach().cpu().numpy())
     _, grads = nnx.value_and_grad(lambda m: jnp.sum(m(tokens) * cot_jax))(jax_m)
 

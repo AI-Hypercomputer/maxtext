@@ -15,10 +15,11 @@
 """Unit tests for self-contained m3 Qwen3-VL multimodal model family.
 
 Verifies:
-  1. Factory routing through model_creation_utils with use_m3_model=True.
-  2. 100% parameter path and shape parity against the reference model.
-  3. Qwen3VLModel forward pass execution with multimodal visual embeddings and
+  1. 100% parameter path and shape parity against the reference model.
+  2. Qwen3VLModel forward pass execution with multimodal visual embeddings and
      3D MRoPE.
+
+Factory routing through model_creation_utils is covered by tests/unit/m3/m3_smoke_test.py.
 """
 
 import os
@@ -30,10 +31,7 @@ from jax.sharding import Mesh
 from maxtext.configs import pyconfig
 from maxtext.m3.core import checkpoint as m3_checkpoint
 from maxtext.m3.core.sharding import create_mesh
-from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import (
-    Qwen3VLModel,
-    create_qwen3_vl_model,
-)
+from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 import numpy as np
@@ -79,13 +77,6 @@ class Qwen3VLComparisonTest(absltest.TestCase):
     # m3 parameters carry sharding over the m3 mesh axes, so m3 models are built on that mesh.
     self.mesh = create_mesh(devices=devices)
     self.legacy_mesh = Mesh(np.array(devices), ("data",))
-
-  def test_model_creation_utils_routing(self):
-    """Verifies that model_creation_utils routes to Qwen3VLModel when use_m3_model=True."""
-    cfg = pyconfig.initialize(_get_qwen3_vl_config_args(use_m3=True, reduced=True))
-    with jax.set_mesh(self.mesh):
-      model = model_creation_utils.create_model(cfg, self.mesh)
-      self.assertIsInstance(model, Qwen3VLModel)
 
   def test_parameter_shapes_and_paths_match(self):
     """Verifies that all parameter paths and shapes match 100% between legacy and m3 Qwen3-VL."""

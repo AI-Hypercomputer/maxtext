@@ -43,6 +43,8 @@ from tests.utils import attention_test_util
 from tests.utils import hlo_test_utils
 from tests.utils import test_helpers
 
+# Pairwise (not full product) coverage of cp degree x load_balance x packing: every pair of values
+# for any two of the three factors appears in at least one case.
 _HALO_CP_TEST_CASES = (
     {
         "testcase_name": "cp2_no_load_balance",
@@ -51,28 +53,10 @@ _HALO_CP_TEST_CASES = (
         "packing": False,
     },
     {
-        "testcase_name": "cp2_load_balance",
-        "ici_context_parallelism": 2,
-        "context_parallel_load_balance": True,
-        "packing": False,
-    },
-    {
-        "testcase_name": "cp2_packed",
-        "ici_context_parallelism": 2,
-        "context_parallel_load_balance": False,
-        "packing": True,
-    },
-    {
         "testcase_name": "cp2_packed_load_balance",
         "ici_context_parallelism": 2,
         "context_parallel_load_balance": True,
         "packing": True,
-    },
-    {
-        "testcase_name": "cp4_no_load_balance",
-        "ici_context_parallelism": 4,
-        "context_parallel_load_balance": False,
-        "packing": False,
     },
     {
         "testcase_name": "cp4_load_balance",
@@ -84,12 +68,6 @@ _HALO_CP_TEST_CASES = (
         "testcase_name": "cp4_packed",
         "ici_context_parallelism": 4,
         "context_parallel_load_balance": False,
-        "packing": True,
-    },
-    {
-        "testcase_name": "cp4_packed_load_balance",
-        "ici_context_parallelism": 4,
-        "context_parallel_load_balance": True,
         "packing": True,
     },
 )

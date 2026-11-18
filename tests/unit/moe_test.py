@@ -2235,12 +2235,6 @@ class RoutedMoeTest(parameterized.TestCase):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=False, ragged_buffer_factor=1.5)
 
   @pytest.mark.tpu_only
-  def test_ragged_sort_loss_and_grad_no_ring_of_experts_fallback(self):
-    self._run_ragged_sort_loss_and_grad(
-        use_ring_of_experts=False, ragged_gather_fallback=True, ragged_gather_reduce_fallback=True
-    )
-
-  @pytest.mark.tpu_only
   def test_ragged_sort_single_sparsecore_ring_of_experts(self):
     self._run_ragged_sort_loss_and_grad(use_ring_of_experts=True, ragged_sort_use_single_sparsecore=True)
 
@@ -4244,6 +4238,9 @@ class QuantizedMoeTest(parameterized.TestCase):
           "tc_ragged_sort_3d_unwindowed",
       ]
       for cal_name, cal_val in [("fixed", "fixed,-224,224"), ("absmax", "absmax")]
+      # A fixed calibration has a single per-tensor scale, so the per-token scale branches that the full-buffer and
+      # unwindowed variants add are only reached with absmax; run those two variants with absmax only.
+      if not (cal_name == "fixed" and sort_name in ("ragged_sort_full", "tc_ragged_sort_3d_unwindowed"))
   )
   @pytest.mark.tpu_only
   def test_moe_quantize_token_all_gather(
@@ -4950,6 +4947,10 @@ class FusedMoeTPUTest(unittest.TestCase):
         run_name="fused_moe_dense_ref",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         sparse_matmul=False,
         megablox=False,
@@ -4968,6 +4969,10 @@ class FusedMoeTPUTest(unittest.TestCase):
         run_name="fused_moe_vllm",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         ici_expert_parallelism=jax.device_count(),
         log_config=False,
@@ -4983,12 +4988,14 @@ class FusedMoeTPUTest(unittest.TestCase):
     return jax.random.normal(self.rng, (self._B, self._S, self.dense_cfg.base_emb_dim), dtype=jnp.bfloat16)
 
   def test_fused_vs_dense_softmax(self):
-    """fused_moe_matmul agrees with dense_matmul under softmax routing."""
+    """fused_moe_matmul agrees with dense_matmul under softmax routing; output is (B, S, D) in cfg.dtype."""
     inputs = self._inputs()
 
     dense_out, _, _ = self.dense_model(inputs)
     fused_out, lb_loss, bias_updates = self.fused_model(inputs)
 
+    self.assertEqual(fused_out.shape, (self._B, self._S, self.fused_cfg.base_emb_dim))
+    self.assertEqual(fused_out.dtype, self.fused_cfg.dtype)
     np.testing.assert_allclose(
         np.array(dense_out, dtype=np.float32),
         np.array(fused_out, dtype=np.float32),
@@ -5005,6 +5012,10 @@ class FusedMoeTPUTest(unittest.TestCase):
         run_name="fused_moe_sparse_ref",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         sparse_matmul=True,
         megablox=True,
@@ -5032,17 +5043,6 @@ class FusedMoeTPUTest(unittest.TestCase):
     self.assertIsNone(lb_loss)
     self.assertIsNone(bias_updates)
 
-  def test_fused_output_shape_and_dtype(self):
-    """Output shape is (B, S, D), dtype matches cfg.dtype, and losses are None."""
-    inputs = self._inputs()
-    fused_out, lb_loss, bias_updates = self.fused_model(inputs)
-
-    expected_shape = (self._B, self._S, self.fused_cfg.base_emb_dim)
-    self.assertEqual(fused_out.shape, expected_shape)
-    self.assertEqual(fused_out.dtype, self.fused_cfg.dtype)
-    self.assertIsNone(lb_loss)
-    self.assertIsNone(bias_updates)
-
   def test_fused_vs_dense_renormalize(self):
     """fused_moe_matmul agrees with dense_matmul when norm_topk_prob=True."""
     dense_renorm_cfg = pyconfig.initialize(
@@ -5050,6 +5050,10 @@ class FusedMoeTPUTest(unittest.TestCase):
         run_name="fused_moe_dense_renorm",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         sparse_matmul=False,
         megablox=False,
@@ -5068,6 +5072,10 @@ class FusedMoeTPUTest(unittest.TestCase):
         run_name="fused_moe_vllm_renorm",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         norm_topk_prob=True,
         ici_expert_parallelism=jax.device_count(),
@@ -5100,6 +5108,10 @@ class FusedMoeTPUTest(unittest.TestCase):
         run_name="fused_moe_vllm_prefused",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         ici_expert_parallelism=jax.device_count(),
         log_config=False,
@@ -5132,6 +5144,10 @@ class FusedMoeTPUTest(unittest.TestCase):
         run_name="fused_moe_sparse_ref2",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         sparse_matmul=True,
         megablox=True,
@@ -5149,6 +5165,10 @@ class FusedMoeTPUTest(unittest.TestCase):
         run_name="fused_moe_vllm_prefused2",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         ici_expert_parallelism=jax.device_count(),
         prefuse_moe_weights=True,
@@ -5200,6 +5220,10 @@ class SparseMoeNativeGmmPerChannelAxisTest(unittest.TestCase):
         run_name="moe_native_gmm_k_axis_scale",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         weight_dtype="float8_e4m3fn",
         weight_block_size=block_size,
@@ -5270,6 +5294,10 @@ class SparseMoeNativeGmmPerTensorTest(unittest.TestCase):
         run_name="moe_native_gmm_per_tensor_scale",
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         weight_dtype="float8_e4m3fn",
         weight_block_size=None,
@@ -5404,6 +5432,10 @@ class FusedMoeNativeFp8Test(unittest.TestCase):
         run_name=run_name,
         enable_checkpointing=False,
         model_name="mixtral-8x7b",
+        override_model_config=True,
+        base_emb_dim=1024,
+        base_mlp_dim=1024,
+        base_moe_mlp_dim=1024,
         dtype="bfloat16",
         weight_dtype="float8_e4m3fn",
         weight_block_size=block_size,

@@ -193,7 +193,10 @@ class Glm5TrainTest(absltest.TestCase):
         target_tokens = jnp.array([[4, 6, 8, 10, 12, 14, 16, 18]])
         target_mask = jnp.ones((1, seq_len), dtype=jnp.int32)
 
-        for scan_layers in (False, True):
+        # A 5-layer model has no super_block (3 dense prefix + 2 suffix layers), so scan_layers does not change the
+        # computation; one setting suffices. Scanned super-block remat equivalence is covered by the m3 conformance
+        # check_scan_remat_equivalence, and remat_policy mapping by test_f23_remat_policy_mapping.
+        for scan_layers in (True,):
           with self.subTest(scan_layers=scan_layers):
             cfg_none = _make_train_cfg(
                 num_hidden_layers=5,

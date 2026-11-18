@@ -727,33 +727,22 @@ class LoraUtilsTest(unittest.TestCase):
     _, state = nnx.split(lora_model)
     return {"/".join(str(p) for p in path) for path, value in state.flat_state() if isinstance(value, nnx.LoRAParam)}
 
-  def test_apply_lora_to_deepseek4_tiny_unscanned_no_compression(self):
-    """Unscanned layers with no compression: only 8 base projections per layer."""
-    compress_ratios = [0, 0, 0, 0, 0]  # No compression
-    self.assertEqual(
-        self._deepseek4_tiny_lora_paths(scan_layers=False, compress_ratios=compress_ratios),
-        _ds4_expected_lora_paths("decoder/layers_{i}", range(_DS4_TINY_NUM_LAYERS), compress_ratios),
-    )
-
   def test_apply_lora_to_deepseek4_tiny_unscanned_with_compression(self):
-    """Unscanned layers with selective compression: base + compressor modules."""
+    """Unscanned layers with selective compression: base + compressor modules.
+
+    Layers 0-1 (ratio 0) also cover the uncompressed case (8 base projections only).
+    """
     compress_ratios = [0, 0, 4, 128, 4]  # Layers 2,4: CSA; Layer 3: HCA
     self.assertEqual(
         self._deepseek4_tiny_lora_paths(scan_layers=False, compress_ratios=compress_ratios),
         _ds4_expected_lora_paths("decoder/layers_{i}", range(_DS4_TINY_NUM_LAYERS), compress_ratios),
     )
 
-  def test_apply_lora_to_deepseek4_tiny_scanned_no_compression(self):
-    """Scanned: uncompressed prefix layers; the scanned block is always HCA + CSA."""
-    compress_ratios = [0, 0, 0, 0, 0]  # No compression
-    self.assertEqual(
-        self._deepseek4_tiny_lora_paths(scan_layers=True, compress_ratios=compress_ratios),
-        _ds4_expected_lora_paths("decoder/layers_{i}", range(_DS4_TINY_PREFIX_LAYERS), compress_ratios)
-        | _ds4_expected_lora_paths("decoder/scanned_blocks/layers_{i}", range(2), _DS4_SCANNED_BLOCK_COMPRESS_RATIOS),
-    )
-
   def test_apply_lora_to_deepseek4_tiny_scanned_with_compression(self):
-    """Scanned layers with compression: 3 prefix + 2 in block, selective compressors."""
+    """Scanned layers with compression: 3 prefix + 2 in block, selective compressors.
+
+    Prefix layers 0-1 (ratio 0) also cover uncompressed prefix layers; the scanned block is always HCA + CSA.
+    """
     compress_ratios = [0, 0, 4, 128, 4]  # Layers 2,4: CSA; Layer 3: HCA
     self.assertEqual(
         self._deepseek4_tiny_lora_paths(scan_layers=True, compress_ratios=compress_ratios),

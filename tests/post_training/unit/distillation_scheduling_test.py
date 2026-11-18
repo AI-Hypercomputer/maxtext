@@ -21,7 +21,7 @@ from unittest import mock
 import pytest
 
 pytest.importorskip("tunix")
-pytestmark = [pytest.mark.tpu_only, pytest.mark.post_training]
+pytestmark = [pytest.mark.cpu_only, pytest.mark.post_training]
 
 import jax
 import jax.numpy as jnp

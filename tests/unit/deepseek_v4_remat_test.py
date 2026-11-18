@@ -111,18 +111,31 @@ class DeepSeekV4RematTest(unittest.TestCase):
     _train_step.cache_clear()
     super().tearDownClass()
 
-  def test_remat_preserves_loss_aux_and_grads(self):
-    """remat_policy=full and none give the same loss, sown aux losses and gradients."""
-    loss_full, inter_full, grads_full, _, _ = _train_step("full")
-    loss_none, inter_none, grads_none, _, _ = _train_step("none")
-    np.testing.assert_allclose(loss_full, loss_none, rtol=1e-6)
-    self.assertGreater(len(inter_none), 0)
-    self.assertEqual(len(inter_full), len(inter_none))
-    for a, b in zip(inter_full, inter_none):
-      np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-7)
-    self.assertEqual(len(grads_full), len(grads_none))
-    for g_full, g_none in zip(grads_full, grads_none):
-      np.testing.assert_allclose(g_full, g_none, rtol=1e-5, atol=1e-6)
+  # The no-dropout checks share one test body so the full/none/minimal compiles happen once per
+  # process: pytest-xdist would otherwise spread them over workers and defeat the lru_cache.
+  def test_remat_numerics_and_recompute(self):
+    """full vs none: same loss, sown aux losses and grads; full adds one forward recompute; policies are honored."""
+    loss_full, inter_full, grads_full, flops_full, _ = _train_step("full")
+    loss_none, inter_none, grads_none, flops_none, _ = _train_step("none")
+
+    with self.subTest("remat_preserves_loss_aux_and_grads"):
+      np.testing.assert_allclose(loss_full, loss_none, rtol=1e-6)
+      self.assertGreater(len(inter_none), 0)
+      self.assertEqual(len(inter_full), len(inter_none))
+      for a, b in zip(inter_full, inter_none):
+        np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-7)
+      self.assertEqual(len(grads_full), len(grads_none))
+      for g_full, g_none in zip(grads_full, grads_none):
+        np.testing.assert_allclose(g_full, g_none, rtol=1e-5, atol=1e-6)
+
+    with self.subTest("full_remat_recomputes_the_forward_once"):
+      # Forward ~ 1/3 of a train step, so one recompute adds at most ~1/3 and two add ~2/3.
+      self.assertGreater(flops_full, 1.05 * flops_none)
+      self.assertLess(flops_full, 1.45 * flops_none)
+
+    with self.subTest("remat_policy_is_honored"):
+      # A policy that saves named dots recomputes less than full remat.
+      self.assertLess(_train_step("minimal")[3], flops_full)
 
   def test_remat_advances_dropout_rngs(self):
     """With dropout on, remat matches no remat in loss, gradients and the RNG counters it writes back."""
@@ -136,18 +149,6 @@ class DeepSeekV4RematTest(unittest.TestCase):
     self.assertEqual(len(rngs_full), len(rngs_none))
     for c_full, c_none in zip(rngs_full, rngs_none):
       np.testing.assert_array_equal(c_full, c_none)
-
-  def test_full_remat_recomputes_the_forward_once(self):
-    """Full remat adds one forward recompute: more FLOPs than no remat, fewer than two recomputes."""
-    flops_none = _train_step("none")[3]
-    flops_full = _train_step("full")[3]
-    # Forward ~ 1/3 of a train step, so one recompute adds at most ~1/3 and two add ~2/3.
-    self.assertGreater(flops_full, 1.05 * flops_none)
-    self.assertLess(flops_full, 1.45 * flops_none)
-
-  def test_remat_policy_is_honored(self):
-    """A policy that saves named dots recomputes less than full remat."""
-    self.assertLess(_train_step("minimal")[3], _train_step("full")[3])
 
 
 if __name__ == "__main__":

@@ -284,12 +284,17 @@ class StreamingLoadTest(parameterized.TestCase):
     )
     return restored, target_tree, hf_tensors, param_map, hook_map, config
 
-  @parameterized.product(
-      model=("llama", "mixtral"),
-      scan_layers=(True, False),
-      dtype=(jnp.float32, jnp.bfloat16),
-      read_bytes_per_host=(0, None),  # One read call per layer, or one call for everything.
-      prefetch=(True, False),
+  # Pairwise (2-way) covering array over the five binary factors: 8 rows instead of the full 32-case product.
+  # read_bytes_per_host=0 means one read call per layer; None means one call for everything.
+  @parameterized.parameters(
+      {"model": "llama", "scan_layers": True, "dtype": jnp.float32, "read_bytes_per_host": 0, "prefetch": True},
+      {"model": "llama", "scan_layers": True, "dtype": jnp.bfloat16, "read_bytes_per_host": 0, "prefetch": False},
+      {"model": "llama", "scan_layers": False, "dtype": jnp.float32, "read_bytes_per_host": None, "prefetch": True},
+      {"model": "llama", "scan_layers": False, "dtype": jnp.bfloat16, "read_bytes_per_host": None, "prefetch": False},
+      {"model": "mixtral", "scan_layers": True, "dtype": jnp.float32, "read_bytes_per_host": None, "prefetch": False},
+      {"model": "mixtral", "scan_layers": True, "dtype": jnp.bfloat16, "read_bytes_per_host": None, "prefetch": True},
+      {"model": "mixtral", "scan_layers": False, "dtype": jnp.float32, "read_bytes_per_host": 0, "prefetch": False},
+      {"model": "mixtral", "scan_layers": False, "dtype": jnp.bfloat16, "read_bytes_per_host": 0, "prefetch": True},
   )
   def test_matches_in_memory_transform(self, model, scan_layers, dtype, read_bytes_per_host, prefetch):
     got, target_tree, hf_tensors, param_map, hook_map, config = self._load(

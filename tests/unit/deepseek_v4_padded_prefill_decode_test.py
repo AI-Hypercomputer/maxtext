@@ -66,7 +66,6 @@ if "_jetstream_stubs" in getattr(maxengine.engine_api.ResultTokens, "__qualname_
     pass
 
 PROMPT = [3, 17, 42, 5, 9]
-STEPS = 24
 REL_TOL = 1e-3
 
 _V4_SMALL = {
@@ -109,15 +108,13 @@ class DeepseekV4PaddedPrefillDecodeTest(unittest.TestCase):
     cls._rels_cache.clear()
     super().tearDownClass()
 
-  def test_decode_logits_match_forward_after_padded_prefill(self):
-    self._check_decode_matches_forward(_V4_SMALL, STEPS)
-
   def test_decode_logits_match_forward_past_sliding_window(self):
     # AR cache (64 - 16 = 48 slots) longer than the window, and decode runs past
     # prompt + window, so both cache parts need true-position windowing.
     self._check_decode_matches_forward({**_V4_SMALL, "sliding_window_size": 8, "max_target_length": 64}, 30)
 
   def test_decode_logits_match_forward_when_compressor_cache_fills(self):
+    # Also covers the basic padded-prefill case: every step from the first decoded token is checked.
     # The HCA (ratio 8) emits decode blocks at positions 7, 15, 23 and 31; decode
     # continues to position 34, so the AR region must hold all of them.
     self._check_decode_matches_forward(_V4_SMALL, 30)
@@ -185,8 +182,7 @@ class DeepseekV4PaddedPrefillDecodeTest(unittest.TestCase):
 
   def _check_decode_matches_forward(self, overrides, steps):
     """Greedy-decodes `steps` tokens after a padded prefill and compares each step with the forward pass."""
-    max_steps = max(steps, 30) if overrides == _V4_SMALL else steps
-    rels = self._compute_decode_rels(overrides, max_steps)[: steps + 1]
+    rels = self._compute_decode_rels(overrides, steps)[: steps + 1]
     worst = int(np.argmax(rels))
     self.assertLessEqual(
         rels[worst],

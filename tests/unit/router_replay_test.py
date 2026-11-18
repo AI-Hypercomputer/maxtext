@@ -575,33 +575,6 @@ class TrainerRouterReplayTest(unittest.TestCase):
         msg=f"[{label}] replay matched the unforced loss",
     )
 
-  def test_loss_fn_with_forced_routed_experts(self):
-    seq_len, batch_size, top_k, num_experts = 16, 2, 2, 4
-    cfg = _init_test_cfg(
-        extra_args=["attention=flash"],
-        **_tiny_qwen35_kwargs(
-            seq_len,
-            batch_size,
-            num_experts,
-            top_k,
-            run_name="test_trainer_router_replay",
-            base_num_decoder_layers=1,
-            num_decoder_layers=1,
-            scan_layers=False,
-        ),
-    )
-
-    # Synthetic forced routed experts: [batch, seq_len, top_k]
-    forced_experts = jnp.zeros((_batch_rows(cfg), seq_len, top_k), dtype=jnp.int32)
-    forced_experts = forced_experts.at[:, :, 0].set(1)
-    forced_experts = forced_experts.at[:, :, 1].set(3)
-    # Mark the last two tokens of every sequence as padding (-1) in every
-    # expert slot, exercising the padding-mask/scatter-safety/NaN-guard code
-    # paths end-to-end, not just in isolated unit tests.
-    forced_experts = forced_experts.at[:, -2:, :].set(-1)
-
-    self._assert_forced_routing_loss_finite(cfg, seq_len, forced_experts, "qwen3.5")
-
   def _qwen35_cfg(self, seq_len, batch_size, num_experts, top_k, run_name, **overrides):
     return _init_test_cfg(
         extra_args=["attention=dot_product"],
@@ -632,6 +605,11 @@ class TrainerRouterReplayTest(unittest.TestCase):
     batch_rows = _batch_rows(cfg)
     a = jnp.tile(jnp.array([0, 1], jnp.int32), (batch_rows, seq_len, 1))
     b = jnp.tile(jnp.array([2, 3], jnp.int32), (batch_rows, seq_len, 1))
+    # Mark the last two tokens as padding (-1) in every expert slot of both
+    # replays, so the padding-mask/scatter-safety/NaN-guard paths run end-to-end
+    # under an assertion that fails if the replay is dropped.
+    a = a.at[:, -2:, :].set(-1)
+    b = b.at[:, -2:, :].set(-1)
     self._assert_routing_is_load_bearing(cfg, seq_len, a, b, "qwen3.5 unscanned")
 
   def test_per_layer_routing_is_not_broadcast_unscanned(self):
@@ -670,10 +648,11 @@ class TrainerRouterReplayTest(unittest.TestCase):
   def test_per_layer_routing_is_not_broadcast_scanned(self):
     """Same, through jax.lax.scan's xs -- the path that reshapes to
 
-    [scan_length, layers_per_cycle, ...].
+    [scan_length, layers_per_cycle, ...]. A cycle of 3 gives each scanned block
+    two local layers, and 7 layers leave a one-layer remainder block.
     """
     seq_len, batch_size, top_k, num_experts = 8, 1, 2, 4
-    cycle_interval, layers = 2, 4
+    cycle_interval, layers = 3, 7
     cfg = self._qwen35_cfg(
         seq_len,
         batch_size,
@@ -686,6 +665,8 @@ class TrainerRouterReplayTest(unittest.TestCase):
     )
     layer_ids = jnp.arange(layers, dtype=jnp.int32) % num_experts
     per_layer = jnp.broadcast_to(layer_ids[None, None, :, None], (_batch_rows(cfg), seq_len, layers, top_k))
+    # Pad the last two tokens (-1) in every layer, so padding also goes through the scan's xs.
+    per_layer = per_layer.at[:, -2:, :, :].set(-1)
     self._assert_routing_is_load_bearing(
         cfg,
         seq_len,
@@ -713,6 +694,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     b = shared.at[:, :, -1, :].set(3)
     self._assert_routing_is_load_bearing(cfg, seq_len, a, b, "qwen3.5 scan remainder")
 
+  @pytest.mark.scheduled_only
   def test_scanned_routing_matches_unscanned_with_several_local_layers_and_a_remainder(self):
     """Each sub-layer of a scanned block must replay its own layer's routing.
 
@@ -795,43 +777,6 @@ class TrainerRouterReplayTest(unittest.TestCase):
     forced_experts = forced_experts.at[:, -2:, :].set(-1)
 
     self._assert_forced_routing_loss_finite(cfg, seq_len, forced_experts, "gemma4")
-
-  def test_loss_fn_with_forced_routed_experts_scanned_qwen3_5(self):
-    """Qwen3.5 supports forced routing together with `scan_layers=True` (see
-
-    `check_forced_routing_support` in configs/types.py for the full list of
-    supported decoder_blocks). This exercises that scanned path end-to-end:
-    forced_routed_experts is threaded through jax.lax.scan's xs (one slice
-    per layer) instead of being broadcast.
-    """
-    seq_len, batch_size, top_k, num_experts = 16, 2, 2, 4
-    cycle_interval = 4
-    num_layers = 2 * cycle_interval  # 2 scan iterations of one cycle each.
-
-    cfg = _init_test_cfg(
-        extra_args=["attention=dot_product"],
-        **_tiny_qwen35_kwargs(
-            seq_len,
-            batch_size,
-            num_experts,
-            top_k,
-            run_name="test_trainer_router_replay_scanned_qwen3_5",
-            base_num_decoder_layers=num_layers,
-            num_decoder_layers=num_layers,
-            inhomogeneous_layer_cycle_interval=cycle_interval,
-        ),
-    )
-
-    # Synthetic forced routed experts, one distinct value per layer:
-    # [batch, seq_len, num_layers, top_k].
-    layer_ids = jnp.arange(num_layers, dtype=jnp.int32)
-    forced_experts = jnp.broadcast_to(
-        layer_ids[None, None, :, None] % num_experts,
-        (_batch_rows(cfg), seq_len, num_layers, top_k),
-    )
-    forced_experts = forced_experts.at[:, -2:, :, :].set(-1)
-
-    self._assert_forced_routing_loss_finite(cfg, seq_len, forced_experts, "scanned qwen3.5")
 
   def test_loss_fn_with_forced_routed_experts_scanned_mixtral(self):
     """Mixtral has no ScannableBlock wrapper: every scan iteration is exactly

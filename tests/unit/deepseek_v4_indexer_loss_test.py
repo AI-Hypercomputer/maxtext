@@ -279,52 +279,8 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
     np.testing.assert_array_equal(np.array(topk_chunked), np.array(topk_native))
     np.testing.assert_allclose(np.array(scores_chunked), np.array(scores_native), rtol=1e-5, atol=1e-5)
 
-  def test_csa_indexer_chunked_gradients_flow(self):
-    """Test that gradients flow through indexer under head chunking with jax.checkpoint rematerialization."""
-    config = self._get_config(indexer_loss_scaling_factor=1.0, indexer_sparse_training=False, csa_qk_head_chunk_size=2)
-    attn = self._init_csa_attention(config)
-
-    inputs_q = jax.random.normal(jax.random.PRNGKey(1), (self.batch_size, self.seq_len, config.emb_dim))
-    inputs_kv = jax.random.normal(jax.random.PRNGKey(2), (self.batch_size, self.seq_len, config.emb_dim))
-    positions = jnp.broadcast_to(jnp.arange(self.seq_len)[None, :], (self.batch_size, self.seq_len))
-    segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
-
-    def loss_fn(attn_model, q, kv, seg=segment_ids, pos=positions):
-      attn_model(
-          inputs_q=q,
-          inputs_kv=kv,
-          decoder_segment_ids=seg,
-          inputs_positions=pos,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return attn_model.indexer_loss.get_value()
-
-    grad_model_fn = nnx.grad(loss_fn, argnums=0)
-    grads = grad_model_fn(attn, inputs_q, inputs_kv)
-
-    self.assertIsNotNone(grads.csa_compressor.indexer.q_proj.kernel)
-    self.assertIsNotNone(grads.csa_compressor.indexer.kv_proj.kernel)
-    self.assertIsNotNone(grads.csa_compressor.indexer.gate_proj.kernel)
-    self.assertIsNotNone(grads.csa_compressor.indexer.weights_proj.kernel)
-
-    q_grad_norm = jnp.linalg.norm(grads.csa_compressor.indexer.q_proj.kernel.get_value())
-    self.assertGreater(float(q_grad_norm), 0.0)
-    self.assertGreater(float(jnp.linalg.norm(grads.csa_compressor.indexer.weights_proj.kernel.get_value())), 0.0)
-
-    # Gradients must not leak into main model projections
-    self.assertAlmostEqual(float(jnp.linalg.norm(grads.wq_a.kernel.get_value())), 0.0)
-    self.assertAlmostEqual(float(jnp.linalg.norm(grads.wq_b.kernel.get_value())), 0.0)
-    self.assertAlmostEqual(float(jnp.linalg.norm(grads.wkv.kernel.get_value())), 0.0)
-
-    # Gradients with respect to inputs must be zero
-    grad_inputs_fn = nnx.grad(loss_fn, argnums=(1, 2))
-    grad_q, grad_kv = grad_inputs_fn(attn, inputs_q, inputs_kv)
-    self.assertAlmostEqual(float(jnp.linalg.norm(grad_q)), 0.0)
-    self.assertAlmostEqual(float(jnp.linalg.norm(grad_kv)), 0.0)
-
   def test_csa_indexer_gradients_chunking_parity(self):
-    """Test that indexer parameter gradients under head chunking match native einsum."""
+    """Test that all param/input gradients under head chunking (jax.checkpoint remat) match native einsum."""
     config_chunked = self._get_config(
         indexer_loss_scaling_factor=1.0, indexer_sparse_training=False, csa_qk_head_chunk_size=2
     )
@@ -340,10 +296,10 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
     positions = jnp.broadcast_to(jnp.arange(self.seq_len)[None, :], (self.batch_size, self.seq_len))
     segment_ids = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
 
-    def loss_fn(attn_model):
+    def loss_fn(attn_model, q, kv):
       attn_model(
-          inputs_q=inputs_q,
-          inputs_kv=inputs_kv,
+          inputs_q=q,
+          inputs_kv=kv,
           decoder_segment_ids=segment_ids,
           inputs_positions=positions,
           deterministic=True,
@@ -351,19 +307,34 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
       )
       return attn_model.indexer_loss.get_value()
 
-    grads_chunked = nnx.grad(loss_fn)(attn_chunked)
-    grads_native = nnx.grad(loss_fn)(attn_native)
+    grad_fn = nnx.grad(loss_fn, argnums=(0, 1, 2))
+    grads_chunked, grad_q_chunked, grad_kv_chunked = grad_fn(attn_chunked, inputs_q, inputs_kv)
+    grads_native, grad_q_native, grad_kv_native = grad_fn(attn_native, inputs_q, inputs_kv)
 
-    for proj_name in ("q_proj", "kv_proj", "gate_proj", "weights_proj"):
-      kernel_chunked = getattr(grads_chunked.csa_compressor.indexer, proj_name).kernel.get_value()
-      kernel_native = getattr(grads_native.csa_compressor.indexer, proj_name).kernel.get_value()
+    # Every parameter gradient must match native einsum.
+    chunked_leaves = jax.tree_util.tree_leaves_with_path(grads_chunked)
+    native_leaves = jax.tree_util.tree_leaves_with_path(grads_native)
+    self.assertEqual([path for path, _ in chunked_leaves], [path for path, _ in native_leaves])
+    self.assertTrue(chunked_leaves)
+    for (path, g_chunked), (_, g_native) in zip(chunked_leaves, native_leaves):
       np.testing.assert_allclose(
-          np.array(kernel_chunked),
-          np.array(kernel_native),
+          np.array(g_chunked),
+          np.array(g_native),
           rtol=1e-3,
           atol=2e-4,
-          err_msg=f"Gradient parity mismatch in indexer.{proj_name}.kernel",
+          err_msg=f"Gradient parity mismatch in {jax.tree_util.keystr(path)}",
       )
+
+    # Under chunking (jax.checkpoint remat), gradients still flow to the indexer...
+    indexer_grads = grads_chunked.csa_compressor.indexer
+    self.assertGreater(float(jnp.linalg.norm(indexer_grads.q_proj.kernel.get_value())), 0.0)
+    self.assertGreater(float(jnp.linalg.norm(indexer_grads.weights_proj.kernel.get_value())), 0.0)
+    # ...but must not leak into main model projections or the (detached) inputs.
+    self.assertAlmostEqual(float(jnp.linalg.norm(grads_chunked.wq_a.kernel.get_value())), 0.0)
+    self.assertAlmostEqual(float(jnp.linalg.norm(grads_chunked.wq_b.kernel.get_value())), 0.0)
+    self.assertAlmostEqual(float(jnp.linalg.norm(grads_chunked.wkv.kernel.get_value())), 0.0)
+    for grad_input in (grad_q_chunked, grad_kv_chunked, grad_q_native, grad_kv_native):
+      self.assertAlmostEqual(float(jnp.linalg.norm(grad_input)), 0.0)
 
   def test_csa_indexer_gradients_flow(self):
     """Test that gradients flow to indexer parameters and do not leak into main projections or inputs."""

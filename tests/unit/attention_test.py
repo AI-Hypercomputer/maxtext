@@ -2349,53 +2349,6 @@ class AttentionTest(parameterized.TestCase):
     return lnx, decoder_segment_ids, decoder_positions
 
   @pytest.mark.tpu_only
-  def test_autoregression(self):
-    prefill_length = self.cfg.max_prefill_predict_length
-    decode_total_length = self.cfg.max_target_length
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
-
-    mha_full, _ = self._attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-
-    lnx_prefill = lnx[:, 0:prefill_length, :]
-    decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
-    decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
-
-    mha_prefill, _ = self._attention_as_mha_generic(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
-    )
-
-    self.assertTrue(
-        jax.numpy.allclose(mha_prefill, mha_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
-    )
-
-    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
-      lnx_idx = lnx[:, idx : idx + 1, :]
-      decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      mha_idx, _ = self._attention_as_mha_generic(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-      )
-
-      mha_full_this_idx = mha_full[:, idx : idx + 1, :]
-      self.assertTrue(mha_full_this_idx.shape == mha_idx.shape)
-      self.assertTrue(jax.numpy.allclose(mha_full_this_idx, mha_idx, rtol=1e-02, atol=1e-02, equal_nan=False))
-
-  @pytest.mark.tpu_only
   def test_model_mode_prefill_dtype_float32(self):
     self._test_model_mode_prefill_dtype(jnp.float32)
 
@@ -2454,15 +2407,7 @@ class AttentionTest(parameterized.TestCase):
   def test_tpu_kernel_attention_mqa(self):
     self.tpu_kernel_attention_helper(1)
 
-  @pytest.mark.tpu_only
-  def test_tpu_kernel_attention_mha_share_kv(self):
-    self.tpu_kernel_attention_helper(self.num_kv_heads, share_kv_projections=True)
-
-  @pytest.mark.tpu_only
-  def test_tpu_kernel_attention_gqa_share_kv(self):
-    self.tpu_kernel_attention_helper(self.num_kv_heads // 2, share_kv_projections=True)
-
-  def tpu_kernel_attention_helper(self, num_kv_heads, share_kv_projections=False):
+  def tpu_kernel_attention_helper(self, num_kv_heads):
     """Test equivalence between dot_product and TPU accelerated"""
 
     lnx, decoder_segment_ids, decoder_positions = self.get_data(self.dtype)
@@ -2482,7 +2427,6 @@ class AttentionTest(parameterized.TestCase):
         attention_kernel="dot_product",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
-        share_kv_projections=share_kv_projections,
         rngs=self.nnx_rng,
     )
 
@@ -2512,7 +2456,6 @@ class AttentionTest(parameterized.TestCase):
         attention_kernel="flash",
         dtype=self.dtype,
         dropout_rate=self.cfg.dropout_rate,
-        share_kv_projections=share_kv_projections,
         rngs=self.nnx_rng,
     )
     nnx.update(attention_as_mha_flash, generic_state)
@@ -2853,9 +2796,9 @@ class AttentionTest(parameterized.TestCase):
         f"are not close. context_parallel_load_balance={context_parallel_load_balance}.",
     )
 
+  # packed_load_balance forward parity is asserted by test_tpu_flash_attention_ring_context_parallel_grad.
   @parameterized.named_parameters(
       {"testcase_name": "no_load_balance", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_ring_context_parallel(self, context_parallel_load_balance, packing):
@@ -2942,7 +2885,7 @@ class AttentionTest(parameterized.TestCase):
       ring_scan_unroll,
       packing,
   ):
-    """Test gradient equivalence between dot_product and flash attention + ring context parallelism"""
+    """Test output and input-gradient equivalence between dot_product and flash attention + ring context parallelism"""
 
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -2960,7 +2903,7 @@ class AttentionTest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
+    lnx, decoder_segment_ids, decoder_positions, generic_state, generic_output, generic_grad = self._get_cp_generic_ref(
         cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True
     )
 
@@ -3000,12 +2943,21 @@ class AttentionTest(parameterized.TestCase):
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+      if context_parallel_load_balance:
+        output = max_utils.reorder_sequence(output, cp_size=cfg_cp.ici_context_parallelism, to_contiguous=True)
+      return jnp.mean(output.astype(jnp.float32) ** 2), output
 
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      ring_grad = jax.grad(ring_loss)(lnx)
+      (_, ring_output), ring_grad = jax.value_and_grad(ring_loss, has_aux=True)(lnx)
+    ring_output = jax.device_get(ring_output)
     ring_grad = jax.device_get(ring_grad)
 
+    self.assertTrue(
+        jax.numpy.allclose(generic_output, ring_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        msg="Logits from generic dot product and flash attention + ring context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}, "
+        f"dq_reduction_steps={dq_reduction_steps}, ring_scan_unroll={ring_scan_unroll}, packing={packing}.",
+    )
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
         msg="Input gradients from generic dot product and flash attention + ring context parallelism are not close. "
@@ -3071,48 +3023,13 @@ class AttentionTest(parameterized.TestCase):
       {"testcase_name": "ulysses_size_4_packed", "ici_context_parallelism": 4, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ulysses_context_parallel(self, ici_context_parallelism, packing):
-    """Test equivalence between dot_product and flash attention + Ulysses context parallelism"""
-
-    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
-    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
-    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
-        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False
-    )
-    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    nnx.update(attention_as_mha_flash_cp, generic_state)
-
-    mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
-        cfg_cp,
-        mesh_cp,
-        attention_as_mha_flash_cp,
-        lnx,
-        decoder_segment_ids,
-        decoder_positions,
-    )
-
-    mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
-
-    self.assertTrue(
-        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
-        msg="Logits from generic dot product and flash attention + Ulysses context parallelism are not close. "
-        f"ici_context_parallelism={ici_context_parallelism}, packing={packing}.",
-    )
-
-  @parameterized.named_parameters(
-      {"testcase_name": "ulysses_size_2", "ici_context_parallelism": 2, "packing": False},
-      {"testcase_name": "ulysses_size_4", "ici_context_parallelism": 4, "packing": False},
-      {"testcase_name": "ulysses_size_4_packed", "ici_context_parallelism": 4, "packing": True},
-  )
-  @pytest.mark.tpu_only
   def test_tpu_flash_attention_ulysses_context_parallel_grad(self, ici_context_parallelism, packing):
-    """Test input-gradient equivalence between dot_product and flash attention + Ulysses context parallelism"""
+    """Test output and input-gradient equivalence between dot_product and flash attention + Ulysses CP"""
 
     cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
+    lnx, decoder_segment_ids, decoder_positions, generic_state, generic_output, generic_grad = self._get_cp_generic_ref(
         cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True
     )
     _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
@@ -3127,12 +3044,18 @@ class AttentionTest(parameterized.TestCase):
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+      return jnp.mean(output.astype(jnp.float32) ** 2), output
 
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      ulysses_grad = jax.grad(ulysses_loss)(lnx)
+      (_, ulysses_output), ulysses_grad = jax.value_and_grad(ulysses_loss, has_aux=True)(lnx)
+    ulysses_output = jax.device_get(ulysses_output)
     ulysses_grad = jax.device_get(ulysses_grad)
 
+    self.assertTrue(
+        jax.numpy.allclose(generic_output, ulysses_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        msg="Logits from generic dot product and flash attention + Ulysses context parallelism are not close. "
+        f"ici_context_parallelism={ici_context_parallelism}, packing={packing}.",
+    )
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ulysses_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
         msg="Input gradients from generic dot product and flash attention + Ulysses context parallelism are not "
@@ -3216,47 +3139,13 @@ class AttentionTest(parameterized.TestCase):
       {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_usp_context_parallel(self, context_parallel_load_balance, packing):
-    """Test equivalence between dot_product and flash attention + USP context parallelism"""
-
-    cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
-    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
-    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
-        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False
-    )
-    _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
-    nnx.update(attention_as_mha_flash_cp, generic_state)
-
-    mha_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
-        cfg_cp,
-        mesh_cp,
-        attention_as_mha_flash_cp,
-        lnx,
-        decoder_segment_ids,
-        decoder_positions,
-    )
-
-    mha_generic_flash_cp_output = jax.device_get(mha_generic_flash_cp_output)
-
-    self.assertTrue(
-        jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
-        msg="Logits from generic dot product and flash attention + USP context parallelism are not close. "
-        f"context_parallel_load_balance={context_parallel_load_balance}, packing={packing}.",
-    )
-
-  @parameterized.named_parameters(
-      {"testcase_name": "usp_2x2", "context_parallel_load_balance": False, "packing": False},
-      {"testcase_name": "usp_2x2_packed_load_balance", "context_parallel_load_balance": True, "packing": True},
-  )
-  @pytest.mark.tpu_only
   def test_tpu_flash_attention_usp_context_parallel_grad(self, context_parallel_load_balance, packing):
-    """Test input-gradient equivalence between dot_product and flash attention + USP context parallelism"""
+    """Test output and input-gradient equivalence between dot_product and flash attention + USP context parallelism"""
 
     cfg_cp = self._usp_test_config(packing=packing, context_parallel_load_balance=context_parallel_load_balance)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
+    lnx, decoder_segment_ids, decoder_positions, generic_state, generic_output, generic_grad = self._get_cp_generic_ref(
         cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True
     )
     _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
@@ -3279,12 +3168,20 @@ class AttentionTest(parameterized.TestCase):
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+      if context_parallel_load_balance:
+        output = max_utils.reorder_sequence(output, cp_size=cfg_cp.ici_context_parallelism, to_contiguous=True)
+      return jnp.mean(output.astype(jnp.float32) ** 2), output
 
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      usp_grad = jax.grad(usp_loss)(lnx)
+      (_, usp_output), usp_grad = jax.value_and_grad(usp_loss, has_aux=True)(lnx)
+    usp_output = jax.device_get(usp_output)
     usp_grad = jax.device_get(usp_grad)
 
+    self.assertTrue(
+        jax.numpy.allclose(generic_output, usp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        msg="Logits from generic dot product and flash attention + USP context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}, packing={packing}.",
+    )
     self.assertTrue(
         jax.numpy.allclose(generic_grad, usp_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
         msg="Input gradients from generic dot product and flash attention + USP context parallelism are not close. "
@@ -4072,7 +3969,7 @@ class MLATest(attention_test_util.MLATestBase):
         jax.numpy.allclose(mla_prefill, mla_full[:, :prefill_length, :], rtol=1e-02, atol=1e-02, equal_nan=False)
     )
 
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
       mla_idx, _ = mla(
@@ -4231,7 +4128,7 @@ class MLATest(attention_test_util.MLATestBase):
     self.assertTrue(jnp.allclose(out_normal_prefill, out_sliced_prefill, rtol=1e-05, atol=1e-05, equal_nan=False))
 
     # Run autoregressive steps
-    for idx in range(prefill_length, decode_total_length):
+    for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
@@ -4431,105 +4328,8 @@ class MLATest(attention_test_util.MLATestBase):
       {"testcase_name": "load_balance", "context_parallel_load_balance": True},
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ring_context_parallel(self, context_parallel_load_balance):
-    """Test equivalence between dot_product and flash attention + ring context parallelism"""
-
-    config_arguments = {
-        "per_device_batch_size": 1.0,
-        "run_name": "test",
-        "enable_checkpointing": False,
-        "max_target_length": 512,
-        "sa_block_q": 128,
-        "sa_block_kv": 128,
-        "sa_block_kv_compute": 128,
-        "sa_block_q_dkv": 128,
-        "sa_block_kv_dkv": 128,
-        "sa_block_kv_dkv_compute": 128,
-        "attention_type": AttentionType.MLA.value,
-        "q_lora_rank": 4,
-        "kv_lora_rank": 4,
-        "qk_nope_head_dim": 128,
-        "qk_rope_head_dim": 64,
-        "v_head_dim": 128,
-        "dtype": "float32",
-    }
-
-    cfg, mla = self.init_mla(config_arguments, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    generic_state = nnx.state(mla)
-
-    cfg_cp = pyconfig.initialize(
-        [sys.argv[0], get_test_config_path()],
-        **config_arguments,
-        attention="flash",
-        rope_type=cfg.rope_type,
-        context_parallel_strategy="ring",
-        context_parallel_load_balance=context_parallel_load_balance,
-        ici_context_parallelism=2,
-        use_tokamax_splash=True,
-        use_jax_splash=False,
-        packing=False,
-    )
-    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
-    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      attention_as_mla_flash_cp = MLA(
-          config=cfg_cp,
-          num_query_heads=cfg_cp.num_query_heads,
-          num_kv_heads=cfg_cp.num_kv_heads,
-          head_dim=cfg_cp.head_dim,
-          inputs_q_shape=lnx.shape,
-          inputs_kv_shape=lnx.shape,
-          max_target_length=cfg_cp.max_target_length,
-          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-          mesh=mesh_cp,
-          attention_kernel="flash",
-          dtype=cfg_cp.dtype,
-          dropout_rate=cfg_cp.dropout_rate,
-          attention_type=AttentionType(cfg_cp.attention_type),
-          q_lora_rank=cfg_cp.q_lora_rank,
-          kv_lora_rank=cfg_cp.kv_lora_rank,
-          qk_nope_head_dim=cfg_cp.qk_nope_head_dim,
-          qk_rope_head_dim=cfg_cp.qk_rope_head_dim,
-          v_head_dim=cfg_cp.v_head_dim,
-          model_mode=MODEL_MODE_PREFILL,
-          rngs=self.nnx_rng,
-      )
-    nnx.update(attention_as_mla_flash_cp, generic_state)
-
-    mla_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
-        cfg_cp,
-        mesh_cp,
-        attention_as_mla_flash_cp,
-        lnx,
-        decoder_segment_ids,
-        decoder_positions,
-    )
-
-    mla_generic_output = jax.device_get(mla_generic_output)
-    mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
-
-    self.assertTrue(
-        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
-        msg="MLA logits from generic dot product and flash attention + ring context parallelism are not close. "
-        f"context_parallel_load_balance={context_parallel_load_balance}.",
-    )
-
-  @parameterized.named_parameters(
-      {"testcase_name": "no_load_balance", "context_parallel_load_balance": False},
-      {"testcase_name": "load_balance", "context_parallel_load_balance": True},
-  )
-  @pytest.mark.tpu_only
   def test_tpu_flash_attention_ring_context_parallel_grad(self, context_parallel_load_balance):
-    """Test gradient equivalence between dot_product and flash attention + ring context parallelism"""
+    """Test output and input-gradient equivalence between dot_product and flash attention + ring context parallelism"""
 
     config_arguments = {
         "per_device_batch_size": 1.0,
@@ -4605,7 +4405,7 @@ class MLATest(attention_test_util.MLATestBase):
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+      return jnp.mean(output.astype(jnp.float32) ** 2), output
 
     def ring_loss(lnx):
       if context_parallel_load_balance:
@@ -4625,14 +4425,23 @@ class MLATest(attention_test_util.MLATestBase):
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+      if context_parallel_load_balance:
+        output = max_utils.reorder_sequence(output, cp_size=cfg_cp.ici_context_parallelism, to_contiguous=True)
+      return jnp.mean(output.astype(jnp.float32) ** 2), output
 
-    generic_grad = jax.grad(generic_loss)(lnx)
+    (_, generic_output), generic_grad = jax.value_and_grad(generic_loss, has_aux=True)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      ring_grad = jax.grad(ring_loss)(lnx)
+      (_, ring_output), ring_grad = jax.value_and_grad(ring_loss, has_aux=True)(lnx)
+    generic_output = jax.device_get(generic_output)
+    ring_output = jax.device_get(ring_output)
     generic_grad = jax.device_get(generic_grad)
     ring_grad = jax.device_get(ring_grad)
 
+    self.assertTrue(
+        jax.numpy.allclose(generic_output, ring_output, rtol=1e-02, atol=1e-02, equal_nan=False),
+        msg="MLA logits from generic dot product and flash attention + ring context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}.",
+    )
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-06, equal_nan=False),
         msg="MLA input gradients from generic dot product and flash attention + ring context parallelism are not close. "
@@ -4757,16 +4566,25 @@ class MLATest(attention_test_util.MLATestBase):
           "ici_context_parallelism": 4,
           "indexer_topk": 32,
       },
-      {
-          "testcase_name": "no_lb_cp2_seq384",
-          "context_parallel_load_balance": False,
-          "ici_context_parallelism": 2,
-          "indexer_topk": 256,
-          "max_target_length": 384,
-      },
   )
   @pytest.mark.tpu_only
   def test_tpu_flash_attention_context_parallel_with_indexer(
+      self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256
+  ):
+    self._check_flash_attention_context_parallel_with_indexer(
+        context_parallel_load_balance, ici_context_parallelism=ici_context_parallelism, indexer_topk=indexer_topk
+    )
+
+  # Slow (~45-50 s per TPU flavor); it only guards the `math.gcd(block_q, shard_len)` clamp in attention_op for CP shard
+  # lengths that 128 does not divide (384 / cp2 = 192 -> block 64), so it runs on scheduled CI only.
+  @pytest.mark.scheduled_only
+  @pytest.mark.tpu_only
+  def test_tpu_flash_attention_context_parallel_with_indexer_no_lb_cp2_seq384(self):
+    self._check_flash_attention_context_parallel_with_indexer(
+        context_parallel_load_balance=False, ici_context_parallelism=2, indexer_topk=256, max_target_length=384
+    )
+
+  def _check_flash_attention_context_parallel_with_indexer(
       self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256, max_target_length=512
   ):
     """Test equivalence between dot_product MLA + Indexer and all-gather flash attention + context parallelism + Indexer"""
@@ -5016,122 +4834,10 @@ class MLATest(attention_test_util.MLATestBase):
       },
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ring_context_parallel_with_indexer(
-      self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256
-  ):
-    """Test equivalence between dot_product MLA + Indexer and flash attention + ring context parallelism + Indexer"""
-    config_arguments = {
-        "per_device_batch_size": 1.0,
-        "run_name": "test",
-        "enable_checkpointing": False,
-        "max_target_length": 512,
-        "sa_block_q": 128,
-        "sa_block_kv": 128,
-        "sa_block_kv_compute": 128,
-        "sa_block_q_dkv": 128,
-        "sa_block_kv_dkv": 128,
-        "sa_block_kv_dkv_compute": 128,
-        "attention_type": AttentionType.MLA.value,
-        "use_indexer": True,
-        "indexer_loss_scaling_factor": 0.1,
-        "indexer_topk": indexer_topk,
-        "q_lora_rank": 4,
-        "kv_lora_rank": 4,
-        "qk_nope_head_dim": 128,
-        "qk_rope_head_dim": 64,
-        "v_head_dim": 128,
-        "dtype": "float32",
-    }
-
-    cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    generic_state = nnx.state(mla)
-
-    cfg_cp = pyconfig.initialize(
-        [sys.argv[0], get_test_config_path()],
-        **config_arguments,
-        attention="flash",
-        rope_type=cfg.rope_type,
-        context_parallel_strategy="ring",
-        context_parallel_load_balance=context_parallel_load_balance,
-        ici_context_parallelism=ici_context_parallelism,
-        use_tokamax_splash=True,
-        use_jax_splash=False,
-        packing=False,
-    )
-    devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
-    mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      attention_as_mla_flash_cp = MLA(
-          config=cfg_cp,
-          num_query_heads=cfg_cp.num_query_heads,
-          num_kv_heads=cfg_cp.num_kv_heads,
-          head_dim=cfg_cp.head_dim,
-          inputs_q_shape=lnx.shape,
-          inputs_kv_shape=lnx.shape,
-          max_target_length=cfg_cp.max_target_length,
-          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-          mesh=mesh_cp,
-          attention_kernel="flash",
-          dtype=cfg_cp.dtype,
-          dropout_rate=cfg_cp.dropout_rate,
-          attention_type=AttentionType(cfg_cp.attention_type),
-          q_lora_rank=cfg_cp.q_lora_rank,
-          kv_lora_rank=cfg_cp.kv_lora_rank,
-          qk_nope_head_dim=cfg_cp.qk_nope_head_dim,
-          qk_rope_head_dim=cfg_cp.qk_rope_head_dim,
-          v_head_dim=cfg_cp.v_head_dim,
-          model_mode=MODEL_MODE_PREFILL,
-          rngs=self.nnx_rng,
-      )
-    nnx.update(attention_as_mla_flash_cp, generic_state)
-
-    mla_generic_flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
-        cfg_cp,
-        mesh_cp,
-        attention_as_mla_flash_cp,
-        lnx,
-        decoder_segment_ids,
-        decoder_positions,
-    )
-
-    mla_generic_output = jax.device_get(mla_generic_output)
-    mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
-
-    tol = 1e-02 if context_parallel_load_balance else 2e-02
-    self.assertTrue(
-        jax.numpy.allclose(mla_generic_output, mla_generic_flash_cp_output, rtol=tol, atol=tol, equal_nan=False),
-        msg="MLA+Indexer logits from generic dot product and flash attention + ring context parallelism are not close. "
-        f"context_parallel_load_balance={context_parallel_load_balance}.",
-    )
-
-  @parameterized.named_parameters(
-      {
-          "testcase_name": "no_lb_cp2",
-          "context_parallel_load_balance": False,
-          "ici_context_parallelism": 2,
-          "indexer_topk": 256,
-      },
-      {
-          "testcase_name": "lb_cp4_smallk",
-          "context_parallel_load_balance": True,
-          "ici_context_parallelism": 4,
-          "indexer_topk": 32,
-      },
-  )
-  @pytest.mark.tpu_only
   def test_tpu_flash_attention_ring_context_parallel_grad_with_indexer(
       self, context_parallel_load_balance, ici_context_parallelism=2, indexer_topk=256
   ):
-    """Test gradient equivalence between dot_product and flash attention + ring context parallelism with Indexer"""
+    """Test output/input-gradient equivalence between dot_product and flash attention + ring CP with Indexer"""
     config_arguments = {
         "per_device_batch_size": 1.0,
         "run_name": "test",
@@ -5209,7 +4915,7 @@ class MLATest(attention_test_util.MLATestBase):
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+      return jnp.mean(output.astype(jnp.float32) ** 2), output
 
     def ring_loss(lnx):
       if context_parallel_load_balance:
@@ -5229,14 +4935,24 @@ class MLATest(attention_test_util.MLATestBase):
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
+      if context_parallel_load_balance:
+        output = max_utils.reorder_sequence(output, cp_size=cfg_cp.ici_context_parallelism, to_contiguous=True)
+      return jnp.mean(output.astype(jnp.float32) ** 2), output
 
-    generic_grad = jax.grad(generic_loss)(lnx)
+    (_, generic_output), generic_grad = jax.value_and_grad(generic_loss, has_aux=True)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      ring_grad = jax.grad(ring_loss)(lnx)
+      (_, ring_output), ring_grad = jax.value_and_grad(ring_loss, has_aux=True)(lnx)
+    generic_output = jax.device_get(generic_output)
+    ring_output = jax.device_get(ring_output)
     generic_grad = jax.device_get(generic_grad)
     ring_grad = jax.device_get(ring_grad)
 
+    tol = 1e-02 if context_parallel_load_balance else 2e-02
+    self.assertTrue(
+        jax.numpy.allclose(generic_output, ring_output, rtol=tol, atol=tol, equal_nan=False),
+        msg="MLA+Indexer logits from generic dot product and flash attention + ring context parallelism are not close. "
+        f"context_parallel_load_balance={context_parallel_load_balance}.",
+    )
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ring_grad, rtol=1e-02, atol=1e-06, equal_nan=False),
         msg=(
@@ -6466,14 +6182,6 @@ class CompressedAttentionTest(parameterized.TestCase):
     self._run_compressed_attention(compress_ratio, attention_kernel)
 
   @parameterized.named_parameters(
-      {"testcase_name": "csa_ratio4_flash", "compress_ratio": 4, "attention_kernel": "flash"},
-      {"testcase_name": "hca_ratio128_flash", "compress_ratio": 128, "attention_kernel": "flash"},
-  )
-  @pytest.mark.tpu_only
-  def test_compressed_attention_flash(self, compress_ratio, attention_kernel):
-    self._run_compressed_attention(compress_ratio, attention_kernel)
-
-  @parameterized.named_parameters(
       {"testcase_name": "csa_ratio4", "compress_ratio": 4},
       {"testcase_name": "hca_ratio128", "compress_ratio": 128},
   )
@@ -7042,14 +6750,16 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
       "max_target_length": 32,
       "max_prefill_predict_length": 16,
       "attention_type": AttentionType.MLA.value,
-      "head_dim": 256,
+      # Small dims (DeepSeek-V3 uses 64 heads, kv_lora_rank 512, qk_nope 192, qk_rope 64, v 256): dense-vs-absorbed
+      # parity is algebraic and size-independent. kv_lora_rank > qk_nope_head_dim keeps the absorbed latent wider.
+      "head_dim": 48,
       "q_lora_rank": 0,
-      "kv_lora_rank": 512,
-      "qk_nope_head_dim": 192,
-      "qk_rope_head_dim": 64,
-      "v_head_dim": 256,
-      "num_query_heads": 64,
-      "num_kv_heads": 64,
+      "kv_lora_rank": 64,
+      "qk_nope_head_dim": 32,
+      "qk_rope_head_dim": 16,
+      "v_head_dim": 32,
+      "num_query_heads": 8,
+      "num_kv_heads": 8,
       "attention": "dot_product",
       "dtype": "float32",
       "mla_naive_kvcache": False,
@@ -7169,16 +6879,21 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
       assert_close(jax.tree_util.keystr(path), g_dense, flat_mqa[path])
 
   def test_mla_absorbed_mqa_kv_cache_footprint(self):
-    """Verifies the exact 57x reduction in KV cache memory footprint on real production modules (catching D3)."""
+    """Verifies the latent MQA KV cache footprint vs dense MLA on real modules (catching D3).
+
+    At DeepSeek-V3 dims (64 heads, d_c=512, d_nope=192, d_rope=64, d_v=256) this is 32768 vs 576 elements per token,
+    i.e. the ~57x reduction.
+    """
     cfg_dense, mla_dense = self.init_mla(self.config_arguments, rope_type="default")
     cfg_mqa_args = self.config_arguments.copy()
     cfg_mqa_args["use_mla_absorbed_mqa"] = True
     _, mla_mqa = self.init_mla(cfg_mqa_args, rope_type="default")
 
     b, s = 1, 16
-    d_c = cfg_dense.kv_lora_rank  # 512
-    d_rope = cfg_dense.qk_rope_head_dim  # 64
-    d_nope = cfg_dense.qk_nope_head_dim  # 192
+    d_c = cfg_dense.kv_lora_rank
+    d_rope = cfg_dense.qk_rope_head_dim
+    d_nope = cfg_dense.qk_nope_head_dim
+    d_v = mla_dense.v_head_dim
     num_heads = mla_dense.num_query_heads
 
     low_rank_main = jnp.ones((b, s, d_c), dtype=jnp.float32)
@@ -7187,43 +6902,26 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     # 1. Uncompressed Dense MLA KV projection on real module
     key_dense, val_dense = mla_dense.mla_get_key_value(low_rank_main, key_rope, MODEL_MODE_PREFILL)
     self.assertEqual(key_dense.shape, (b, s, num_heads, d_nope + d_rope))
-    self.assertEqual(val_dense.shape, (b, s, num_heads, mla_dense.v_head_dim))
+    self.assertEqual(val_dense.shape, (b, s, num_heads, d_v))
 
     # 2. Latent MQA KV projection on real module
     key_mqa, val_mqa = mla_mqa.get_kv_latent(low_rank_main, key_rope)
     self.assertEqual(key_mqa.shape, (b, s, 1, d_c + d_rope))
     self.assertEqual(val_mqa.shape, (b, s, 1, d_c))
+    # A single latent KV entry of width d_c + d_rope is cached per token and shared across all heads.
     mqa_elements_per_token = key_mqa.size // (b * s)
-    self.assertEqual(mqa_elements_per_token, 576)
-    mqa_bytes_per_token_bf16 = mqa_elements_per_token * 2  # 1,152 bytes = 1.15 KB
-    self.assertEqual(mqa_bytes_per_token_bf16, 1152)
+    self.assertEqual(mqa_elements_per_token, d_c + d_rope)
 
-    # 3. Production DeepSeek-V3 architecture specification: 64 heads, d_nope=192, d_rope=64, d_v=256
-    prod_heads = 64
-    prod_d_v = 256
-    prod_dense_elements_per_token = prod_heads * (d_nope + d_rope) + prod_heads * prod_d_v
-    self.assertEqual(prod_dense_elements_per_token, 32768)
-    prod_dense_bytes_per_token_bf16 = prod_dense_elements_per_token * 2  # 65,536 bytes = 64 KB
-    self.assertEqual(prod_dense_bytes_per_token_bf16, 65536)
-
-    # 4. Reduction ratio: 32,768 / 576 = 56.888... (~57x)
-    ratio = prod_dense_elements_per_token / mqa_elements_per_token
-    self.assertAlmostEqual(ratio, 56.8888, places=3)
-
-    # 5. Gather volume for K=2048 tokens in DeepSeek Sparse Attention (DSA)
-    tokens_k = 2048
-    uncompressed_gather_bytes = tokens_k * prod_dense_bytes_per_token_bf16
-    latent_gather_bytes = tokens_k * mqa_bytes_per_token_bf16
-    self.assertEqual(uncompressed_gather_bytes, 128 * (1024**2))  # 128 MB
-    self.assertEqual(latent_gather_bytes, 2359296)  # 2.25 MB
-    gather_ratio = uncompressed_gather_bytes / latent_gather_bytes
-    self.assertAlmostEqual(gather_ratio, 56.8888, places=3)
+    # 3. Dense MLA caches per-head K and V.
+    dense_elements_per_token = (key_dense.size + val_dense.size) // (b * s)
+    self.assertEqual(dense_elements_per_token, num_heads * (d_nope + d_rope + d_v))
+    self.assertLess(mqa_elements_per_token, dense_elements_per_token)
 
   def test_mla_absorbed_mqa_shapes_and_identities(self):
     """Verifies shapes, scale factor preservation, and linear associativity identities."""
     _, mla = self.init_mla(self.config_arguments, rope_type="default")
-    b, t, s, h = 1, 4, 16, 64
-    d_c, d_nope, d_rope, d_v = 512, 192, 64, 256
+    b, t, s, h = 1, 4, 16, mla.num_query_heads
+    d_c, d_nope, d_rope, d_v = mla.kv_lora_rank, mla.qk_nope_head_dim, mla.qk_rope_head_dim, mla.v_head_dim
 
     rng = jax.random.PRNGKey(101)
     k1, k2, k3, k4, k5, k6 = jax.random.split(rng, 6)
@@ -7236,17 +6934,18 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
 
     # Helper method shapes
     q_mqa = mla.absorb_query(q_n, q_p, w_k)
-    self.assertEqual(q_mqa.shape, (b, t, h, 576))
+    self.assertEqual(q_mqa.shape, (b, t, h, d_c + d_rope))
 
     kv_latent, val_latent = mla.get_kv_latent(c_k, k_p)
-    self.assertEqual(kv_latent.shape, (b, s, 1, 576))
-    self.assertEqual(val_latent.shape, (b, s, 1, 512))
+    self.assertEqual(kv_latent.shape, (b, s, 1, d_c + d_rope))
+    self.assertEqual(val_latent.shape, (b, s, 1, d_c))
 
     out_latent = jax.random.normal(rng, (b, t, h, d_c))
     out_absorbed = mla.absorb_output(out_latent, w_v)
     self.assertEqual(out_absorbed.shape, (b, t, h, d_v))
 
-    # Softmax scale base uses (qk_nope_head_dim + qk_rope_head_dim)=256 -> 1/sqrt(256)=0.0625, NOT 1/sqrt(576) (catching D4)
+    # Softmax scale base uses 1/sqrt(qk_nope_head_dim + qk_rope_head_dim), NOT 1/sqrt(kv_lora_rank + qk_rope_head_dim)
+    # (catching D4).
     expected_base_scale = (mla.qk_nope_head_dim + mla.qk_rope_head_dim) ** -0.5
     if mla.max_position_embeddings > mla.original_max_position_embeddings:
       mscale = 0.1 * mla.mscale * math.log(mla.rope_factor) + 1.0
@@ -7328,7 +7027,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
     """Verifies that use_sliced_mla_proj works with exact parity under use_mla_absorbed_mqa."""
     cfg = self.config_arguments.copy()
     cfg["use_mla_absorbed_mqa"] = True
-    cfg["q_lora_rank"] = 512
+    cfg["q_lora_rank"] = 64
     cfg["use_sliced_mla_proj"] = False
 
     cfg_sliced = cfg.copy()

@@ -116,6 +116,18 @@ def _make_mesh(config):
   return Mesh(devices_array, config.mesh_axes)
 
 
+# Shrinks the qwen3-vl-2b vision tower (24 layers, hidden 1024) for tests that only need its structure:
+# two blocks, one deepstack merger, and an output width matching the test emb_dim.
+_SMALL_QWEN3_VL_VIT = {
+    "num_hidden_layers_for_vit": 2,
+    "hidden_size_for_vit": 32,
+    "intermediate_size_for_vit": 64,
+    "num_attention_heads_for_vit": 2,
+    "deepstack_visual_indexes_for_vit": [0],
+    "out_hidden_size_for_vit": 32,
+}
+
+
 @pytest.mark.tpu_only
 class FixRestoreArgsRankGuardTest(unittest.TestCase):
   """_fix_restore_args_for_shape_mismatch must dispatch correctly on rank/divisibility.
@@ -962,6 +974,7 @@ class TestCreateNnxModel(unittest.TestCase):
         "vision_connector_num_layers": 2,
         "vision_connector_activation": "gelu",
         "vision_connector_use_bias": True,
+        **_SMALL_QWEN3_VL_VIT,
     }
     model = model_creation_utils.from_pretrained(_make_config(**projector), self.mesh)
 
@@ -1292,6 +1305,7 @@ class TestCreateNnxModel(unittest.TestCase):
         vision_connector_num_layers=2,
         vision_connector_activation="gelu",
         vision_connector_use_bias=True,
+        **_SMALL_QWEN3_VL_VIT,
     )
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)

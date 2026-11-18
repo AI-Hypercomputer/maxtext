@@ -626,49 +626,6 @@ class PackedVersusUnpackedGradientsTest(unittest.TestCase):
     self.assertEqual(packed_denom, unpacked_denom)
     self.assertEqual(packed_denom, float(_NUM_SEQ))
 
-  def test_packed_accumulation_over_uneven_micro_batches(self):
-    """Two packed micro-batches with different active-segment counts.
-
-    Micro-batch A carries three live segments and B carries two plus a padding
-    bucket, so the correct total weights A's contribution 3/5 and B's 2/5, while
-    a mean of per-micro-batch means would weight them 1/2 each. Measured on this
-    split, that is a 10% error in the resulting gradient tree -- with no NaN, no
-    warning and a perfectly plausible loss. Packing is the regime where it
-    actually bites: an FFD packer deliberately emits unequally filled rows, so
-    unequal denominators are the norm rather than an edge case.
-
-    Two assertions doing two jobs. The denominators pin the *policy*: 5, not 4
-    (which is what counting `num_segments` buckets rather than active segments
-    gives) and not 2.5. The gradient comparison pins packed/unpacked
-    *equivalence* across an accumulation window -- and it is not vacuous, since
-    the two micro-batches' normalized gradients differ by 96% in relative L2, so
-    how they are weighted genuinely changes the answer.
-    """
-    tokens, advantages = _sequences()
-
-    unpacked_engine = self._fresh_engine()
-    unpacked_engine.fwd_bwd(_unpacked_example(tokens, advantages, n=_NUM_SEQ))
-    unpacked = _grads_after(unpacked_engine, _unpacked_example(tokens, advantages, n=2))
-
-    packed_engine = self._fresh_engine()
-    packed_engine.fwd_bwd(_packed_example(tokens, advantages, n=_NUM_SEQ))
-    packed = _grads_after(packed_engine, _packed_example(tokens, advantages, n=2))
-
-    # 3 live segments then 2, summed -- not averaged to 2.5, and not 4 (which is
-    # what counting `num_segments` buckets instead of active ones would give).
-    self.assertEqual(
-        float(np.asarray(packed_engine._accumulated_denominator)),  # pylint: disable=protected-access
-        float(_NUM_SEQ + 2),
-    )
-    self.assertEqual(
-        float(np.asarray(unpacked_engine._accumulated_denominator)),  # pylint: disable=protected-access
-        float(_NUM_SEQ + 2),
-    )
-
-    for i, (p, u) in enumerate(zip(packed, unpacked)):
-      np.testing.assert_allclose(p, u, atol=2e-4, rtol=2e-4, err_msg=f"accumulated gradient leaf {i} differs")
-    self.assertLess(_rel_l2(packed, unpacked), 1e-3)
-
 
 class PackedBatchStaticsTest(unittest.TestCase):
   """`num_segments` must cross the jit boundary as a static value.
@@ -718,10 +675,14 @@ class PackedDenominatorPartitionsTest(unittest.TestCase):
   """`Σ grad(sum_i)` over *any* partition into packed micro-batches, and `Σ denom_i`.
 
   Ported from `tunix/tests/sft/peft_trainer_test.py:1487`, which parameterizes
-  the same identity over four partitions of 8-32 examples. T6 above is only the
-  two-micro-batch case; the degenerate shapes are what tunix's docstring says the
-  parameterization exists for -- "to catch regressions where the divisor drifts
-  off-by-one" -- and an off-by-one is invisible at K=2 in a way it is not at K=8.
+  the same identity over four partitions of 8-32 examples. The degenerate shapes are
+  what tunix's docstring says the parameterization exists for -- "to catch
+  regressions where the divisor drifts off-by-one" -- and an off-by-one is invisible
+  at K=2 in a way it is not at K=8. The first two partitions are also uneven (rows of
+  `max(sizes)` slots, unequally filled), so they subsume the two-micro-batch
+  uneven-accumulation case: the summed denominator counts *active* segments (not
+  `num_segments` buckets, not a mean of per-micro-batch means), and the packed
+  accumulated gradients match the matched-partition unpacked run.
 
   The engine version runs one layer further out than tunix's. Tunix drives
   `GradientAccumulator.add(g, denom=...)` with a hand-supplied denom, so its test

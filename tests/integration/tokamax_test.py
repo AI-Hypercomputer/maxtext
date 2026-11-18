@@ -120,8 +120,8 @@ class Train(parameterized.TestCase):
     train_main(args)
 
   @parameterized.named_parameters(
+      # quantization=fp8 only quantizes dot_general (not gmm), so its tokamax gmm path is the bf16 case.
       {"testcase_name": "bf16", "quantization": ""},
-      {"testcase_name": "fp8", "quantization": "fp8"},  # not quantize gmm
       {"testcase_name": "fp8_full", "quantization": "fp8_full"},  # quantize gmm
   )
   @pytest.mark.tpu_only
@@ -140,16 +140,7 @@ class Train(parameterized.TestCase):
           "ici_expert_parallelism": 1,
           "use_gmm_v2_heuristic_tiling": True,
       },
-      {
-          "testcase_name": "fp8_full_ep1",
-          "quantization": "fp8_full",
-          "ici_expert_parallelism": 1,
-      },
-      {
-          "testcase_name": "bf16_ep2",
-          "quantization": "",
-          "ici_expert_parallelism": 2,
-      },
+      # fp8_full_ep2 covers both the fp8_full gmm and the EP axis (fp8_full_ep1 / bf16_ep2 would be redundant).
       {
           "testcase_name": "fp8_full_ep2",
           "quantization": "fp8_full",
