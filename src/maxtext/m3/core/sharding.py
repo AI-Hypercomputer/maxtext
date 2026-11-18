@@ -48,23 +48,40 @@ from jax.experimental import mesh_utils
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 
-# Data, fully-sharded data, tensor and expert parallelism, in mesh order.
+# Data, pipeline-stage, fully-sharded data, tensor and expert parallelism, in
+# mesh order.
 #
 # Order is not cosmetic: it is the order handed to `mesh_utils`, which places
 # axes against the physical topology. Inserting an axis in the middle changes
-# the placement of everything after it.
+# the placement of everything after it (an axis of size 1 changes nothing,
+# which is why `stage` could take legacy's slot behind `data` without moving
+# existing meshes).
 #
 # The names are legacy's rather than abbreviations because the mesh is shared
 # with `maxtext.training_engine.maxtext_engine` (see `m3/README.md`), which
 # reads the data axis by name: on a mesh with no axis called `"data"` it
 # declines Zero-1 (one warning) and deferred gradient all-reduce (silently).
 #
+# `stage` is named by no `Sharding` rule: it is the axis `infra.pipeline` lays
+# the pipeline stages over, and sits before `fsdp` as in legacy so that
+# `dcn_pipeline_parallelism` can put the stages on the slow network.
+#
 # TODO: This is a basic starting point, this list will be expanded soon.
 # Legacy carries twelve axes, but that list is a union -- its seven strategy
 # configs under `configs/custom_mesh_and_rule/` use between one and six. The
-# ones m3 is likely to need next are `stage` (pipeline), `context` and
-# `context_usp_ulysses` (context parallelism), and `tensor_sequence`.
-MESH_AXIS_NAMES = ("data", "fsdp", "tensor", "expert")
+# ones m3 is likely to need next are `context` and `context_usp_ulysses`
+# (context parallelism), and `tensor_sequence`.
+MESH_AXIS_NAMES = ("data", "stage", "fsdp", "tensor", "expert")
+
+# Mesh axes whose legacy config fields are not named after them:
+# `ici_pipeline_parallelism` sizes `stage`.
+_CONFIG_AXIS_NAMES = {"stage": "pipeline"}
+
+
+def parallelism_field(network: str, axis: str) -> str:
+  """The legacy config field that sizes mesh axis `axis` on `network` (`"ici"` or `"dcn"`)."""
+  return f"{network}_{_CONFIG_AXIS_NAMES.get(axis, axis)}_parallelism"
+
 
 # A logical axis maps to one mesh axis, several (their product shards the
 # dimension), or None to leave the dimension replicated.
@@ -300,6 +317,13 @@ class DefaultSharding(Sharding):
   model, and the conflict check in `Sharding.__call__` is what will flag the
   tensors whose `embed` must then give `expert` up.
 
+  `stage` appears in no rule. The pipeline (`infra.pipeline`) lays the stacked
+  stage weights and the per-stage activations over it itself, and runs each
+  stage's layers under a `vmap` over that axis, which is where their `batch`
+  constraints would clash with a rule that named it. Outside the pipelined
+  stack (embedding, final norm, logits) the batch is therefore replicated
+  over `stage`.
+
   Two places this follows the design doc rather than legacy's
   `logical_axis_rules`: legacy shards the residual-stream activation and the
   norm scale over `tensor`, where this leaves both replicated.
@@ -520,7 +544,6 @@ _UNSUPPORTED_PARALLELISM_AXES = (
     "context_usp_ulysses",
     "context_autoregressive",
     "tensor_sequence",
-    "pipeline",
     "autoregressive",
 )
 # Legacy mesh-layout knobs `create_mesh` does not implement, with the value
@@ -555,10 +578,12 @@ def mesh_from_config(config, devices: Sequence[jax.Device] | None = None) -> Mes
 
   Reads legacy's field names so the knobs users already know keep working:
   `ici_<axis>_parallelism` / `dcn_<axis>_parallelism` for `data`, `fsdp`,
-  `tensor` and `expert`. Legacy's defaults (`ici_fsdp_parallelism=-1`,
-  `dcn_data_parallelism=-1`) are `create_mesh`'s, so a slim config without the
-  fields gets the same mesh. Any other parallelism axis set to something other
-  than 1, or a custom mesh layout, is refused with the field named.
+  `tensor` and `expert`, and `ici_pipeline_parallelism` /
+  `dcn_pipeline_parallelism` for `stage` (`parallelism_field`). Legacy's
+  defaults (`ici_fsdp_parallelism=-1`, `dcn_data_parallelism=-1`) are
+  `create_mesh`'s, so a slim config without the fields gets the same mesh. Any
+  other parallelism axis set to something other than 1, or a custom mesh
+  layout, is refused with the field named.
 
   `shard_mode=explicit` is refused too: parameters place under an explicit
   mesh, but the m3 forward pass does not run under one yet (see m3/README.md),
@@ -576,6 +601,6 @@ def mesh_from_config(config, devices: Sequence[jax.Device] | None = None) -> Mes
         f"m3 builds an auto-sharded mesh over {MESH_AXIS_NAMES} with the default device layout; "
         f"it does not implement {unsupported} (see m3/README.md)."
     )
-  ici = {axis: getattr(config, f"ici_{axis}_parallelism", -1 if axis == "fsdp" else 1) for axis in MESH_AXIS_NAMES}
-  dcn = {axis: getattr(config, f"dcn_{axis}_parallelism", -1 if axis == "data" else 1) for axis in MESH_AXIS_NAMES}
+  ici = {axis: getattr(config, parallelism_field("ici", axis), -1 if axis == "fsdp" else 1) for axis in MESH_AXIS_NAMES}
+  dcn = {axis: getattr(config, parallelism_field("dcn", axis), -1 if axis == "data" else 1) for axis in MESH_AXIS_NAMES}
   return create_mesh(ici=ici, dcn=dcn, devices=devices)

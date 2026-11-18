@@ -190,7 +190,15 @@ class MeshFromConfigTest(parameterized.TestCase):
   def test_real_config_fields_are_read(self):
     config = m3_test_utils.tiny_config("qwen3-0.6b")
     mesh = mesh_from_config(config, devices=jax.devices()[:1])
-    self.assertEqual(dict(mesh.shape), {"data": 1, "fsdp": 1, "tensor": 1, "expert": 1})
+    self.assertEqual(dict(mesh.shape), {"data": 1, "stage": 1, "fsdp": 1, "tensor": 1, "expert": 1})
+
+  def test_pipeline_parallelism_sizes_the_stage_axis(self):
+    """Legacy's `ici_pipeline_parallelism` is the knob; `stage` is the axis it sizes."""
+    devices = _devices_or_skip(self)
+    config = m3_test_utils.tiny_config("qwen3-0.6b", ici_pipeline_parallelism=2)
+    mesh = mesh_from_config(config, devices=devices)
+    self.assertEqual(mesh.shape["stage"], 2)
+    self.assertEqual(mesh.shape["fsdp"], len(devices) // 2)
 
   def test_shard_mode_explicit_is_refused(self):
     """The forward pass does not run under an explicit mesh yet, so the loop must not start on one."""
@@ -205,14 +213,14 @@ class MeshFromConfigTest(parameterized.TestCase):
     fields = [f"{net}_{axis}_parallelism" for net in ("ici", "dcn") for axis in m3_sharding._UNSUPPORTED_PARALLELISM_AXES]
     fields += list(m3_sharding._UNSUPPORTED_MESH_FIELDS)
     # pylint: enable=protected-access
-    fields += [f"{net}_{axis}_parallelism" for net in ("ici", "dcn") for axis in m3_sharding.MESH_AXIS_NAMES]
+    fields += [m3_sharding.parallelism_field(net, axis) for net in ("ici", "dcn") for axis in m3_sharding.MESH_AXIS_NAMES]
     fields += ["shard_mode"]
     missing = [field for field in fields if not hasattr(config, field)]
     self.assertEqual(missing, [])
 
   @parameterized.parameters(
       ("ici_context_parallelism", 2),
-      ("dcn_pipeline_parallelism", 2),
+      ("ici_autoregressive_parallelism", 2),
       ("ici_fsdp_transpose_parallelism", 4),
       ("ici_sequence_parallelism", 2),
       ("custom_mesh", "hybrid_ring_64x4"),
@@ -255,7 +263,7 @@ class CheckMeshTest(parameterized.TestCase):
     m3_sharding.check_mesh(SimpleNamespace(axis_names=tuple(shape), shape=shape))
 
   def test_a_missing_axis_is_refused(self):
-    with self.assertRaisesRegex(ValueError, r"lacks mesh axes \['data', 'tensor', 'expert'\]"):
+    with self.assertRaisesRegex(ValueError, r"lacks mesh axes \['data', 'stage', 'tensor', 'expert'\]"):
       m3_sharding.check_mesh(SimpleNamespace(axis_names=("fsdp",), shape={"fsdp": 8}))
 
   def test_a_split_unused_axis_is_refused(self):
@@ -446,6 +454,18 @@ class ShardedLoopTest(parameterized.TestCase):
       ("fsdp", {}),
       ("fsdp_and_tensor", {"ici_tensor_parallelism": 2}),
       ("scanned_fsdp", {"scan_layers": "true"}),
+      # Each microbatch still has to split over the batch axes (`fsdp`, here 2 wide): 2 rows per device.
+      ("pipeline_and_fsdp", {"ici_pipeline_parallelism": 2, "num_pipeline_microbatches": 4, "per_device_batch_size": 2}),
+      (
+          "circular_pipeline_scanned",
+          {
+              "ici_pipeline_parallelism": 2,
+              "base_num_decoder_layers": 4,
+              "num_pipeline_microbatches": 4,
+              "per_device_batch_size": 2,
+              "scan_layers": "true",
+          },
+      ),
   )
   def test_train_loop_runs(self, overrides):
     self.assertTrue(np.isfinite(loop.train_loop(self._config(**overrides))))

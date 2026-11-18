@@ -26,7 +26,10 @@ fields consumed by `maxtext.optimizers.optimizers.get_optimizer`,
 `gradient_clipping_threshold`, `init_weights_seed`, the precision fields
 `matmul_precision` and `quantization`, the mesh fields consumed by
 `maxtext.m3.core.sharding.mesh_from_config` (`ici_*_parallelism`,
-`dcn_*_parallelism`, `shard_mode`), and the profiler fields consumed by
+`dcn_*_parallelism`, `shard_mode`), the pipeline fields consumed by
+`maxtext.m3.infra.pipeline.schedule_from_config` when the mesh has more than
+one `stage` (`num_pipeline_microbatches`, `num_pipeline_repeats`, ...), and
+the profiler fields consumed by
 `maxtext.common.profiler.Profiler` (`profiler`,
 `skip_first_n_steps_for_profiler`, `profiler_steps`, ...). The trace is
 written under `config.tensorboard_dir`. `gradient_accumulation_steps > 1`,
@@ -36,11 +39,11 @@ mesh are rejected rather than emulated.
 `setup_model` is where infrastructure is composed, in the order every m3
 driver follows:
 
-    construct -> quantize -> named scopes -> optimizer
+    construct -> pipeline -> scan -> quantize -> named scopes -> optimizer
 
 Each transform is a function from `maxtext.m3.infra`. Named scopes always
-apply; the others read one config field and are a no-op when that field is
-off. Models never see any of it.
+apply; the others read one config field (the mesh's `stage` axis, for the
+pipeline) and are a no-op when that field is off. Models never see any of it.
 
 Precision follows legacy MaxText: `weight_dtype` (float32 master weights)
 and `dtype` (bfloat16 compute) are applied by the model at construction;
@@ -82,6 +85,7 @@ from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
 from maxtext.m3.core.sharding import DefaultSharding, Sharding, TensorType, mesh_from_config
+from maxtext.m3.infra import pipeline as m3_pipeline
 from maxtext.m3.infra import quantization
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.m3.infra.named_scopes import add_named_scopes
@@ -105,13 +109,16 @@ def setup_model(config, mesh: Mesh) -> tuple[nnx.Module, nnx.Optimizer]:
   Must run inside `jax.set_mesh(mesh)`. The model places its parameters from
   its own `Sharding` strategy as it is constructed; constructors do not share
   one signature for it (GLM brings its own and rejects unknown keywords), so
-  none is passed. Scan comes before quantization, which records module paths
-  and so must see the final structure; quantization traces one forward pass of
-  the training shape. Named scopes come after both: they only label ops, and
-  scan needs identical layer classes. The optimizer comes last, as it must see
-  the final model.
+  none is passed. The pipeline comes first: it groups the layers into stages,
+  scanning each stage's layers itself when `scan_layers` is set, so scan has
+  nothing left to do after it. Scan comes before quantization, which records
+  module paths and so must see the final structure; quantization traces one
+  forward pass of the training shape. Named scopes come after all of them:
+  they only label ops, and pipeline and scan need identical layer classes. The
+  optimizer comes last, as it must see the final model.
   """
   model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
+  model = m3_pipeline.maybe_apply_pipeline(model, config, mesh)
   model = m3_scan.maybe_apply_scan(model, config)
   model = quantization.maybe_quantize(model, config, *quantization.example_inputs(config))
   model = add_named_scopes(model)
