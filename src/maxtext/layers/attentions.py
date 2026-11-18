@@ -55,6 +55,9 @@ from maxtext.common.common_types import (
     MODEL_MODE_PREFILL,
     AttentionType,
     ShardMode,
+    get_quant,
+    get_weight_dtype,
+    is_module_unquantized,
 )
 from maxtext.kernels import fused_qkv
 from maxtext.layers import quantizations
@@ -74,7 +77,12 @@ from maxtext.layers.embeddings import (
     Gemma4PartialRotaryEmbedding,
 )
 from maxtext.layers.initializers import nd_dense_init, NdInitializer, default_bias_init
-from maxtext.layers.linears import DenseGeneral, canonicalize_tuple, normalize_axes
+from maxtext.layers.linears import (
+    DenseGeneral,
+    canonicalize_tuple,
+    maybe_quantize_shared_fp8_activations,
+    normalize_axes,
+)
 from maxtext.layers.normalizations import (
     GlobalRMSNorm,
     Qwen3NextRMSNorm,
@@ -258,6 +266,10 @@ class Attention(nnx.Module):
           skipped. The caller must pass `shared_key` / `shared_value` to `__call__`.
       rngs: RNG state for initialization, passed by the nnx.to_linen wrapper.
     """
+
+    if is_module_unquantized(config, "self_attention"):
+      weight_dtype = get_weight_dtype(config, "self_attention")
+      quant = get_quant(config, "self_attention", quant)
 
     self.config = config
     self.num_query_heads = num_query_heads
@@ -1692,12 +1704,24 @@ class Attention(nnx.Module):
         query = self.query_projection(inputs_q, out_sharding=qkv_sharding, model_mode=model_mode)
         key, value = shared_key, shared_value
       else:
-        query = self.query_projection(inputs_q, out_sharding=qkv_sharding, model_mode=model_mode)
-        key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
+        # For self-attention, quantize the shared input to FP8 once and reuse it for Q/K/V
+        # (no-op unless the projections are native FP8 DenseGeneral layers).
+        if is_self_attn:
+          kv_modules = (self.key,) if self.share_kv_projections else (self.key, self.value)
+          q_inputs = kv_inputs = maybe_quantize_shared_fp8_activations(inputs_q, (self.query, *kv_modules))
+        else:
+          q_inputs = inputs_q
+          kv_inputs = (
+              inputs_kv
+              if self.share_kv_projections
+              else maybe_quantize_shared_fp8_activations(inputs_kv, (self.key, self.value))
+          )
+        query = self.query_projection(q_inputs, out_sharding=qkv_sharding, model_mode=model_mode)
+        key = self.kv_projection(kv_inputs, proj_name="key", out_sharding=qkv_sharding)
         if self.share_kv_projections:
           value = key
         else:
-          value = self.kv_projection(inputs_kv, proj_name="value", out_sharding=qkv_sharding)
+          value = self.kv_projection(kv_inputs, proj_name="value", out_sharding=qkv_sharding)
 
       if self.is_qwen3_hybrid:
         # Split query into query & gate.
@@ -1809,6 +1833,11 @@ class Attention(nnx.Module):
       cached_values = [None, None]
       if model_mode != MODEL_MODE_TRAIN:
         cached_values = self.update_kv_caches(key, value, decoder_segment_ids, model_mode, previous_chunk)
+      elif getattr(self.config, "fp8_kv_fake_quant", False):
+        k_q = jax.lax.optimization_barrier(jnp.clip(key.astype(self.dtype), -448.0, 448.0).astype(jnp.float8_e4m3fn))
+        v_q = jax.lax.optimization_barrier(jnp.clip(value.astype(self.dtype), -448.0, 448.0).astype(jnp.float8_e4m3fn))
+        key = jax.lax.stop_gradient(k_q.astype(key.dtype)) + (key - jax.lax.stop_gradient(key))
+        value = jax.lax.stop_gradient(v_q.astype(value.dtype)) + (value - jax.lax.stop_gradient(value))
       out = self.attention_op(
           query,
           key,
