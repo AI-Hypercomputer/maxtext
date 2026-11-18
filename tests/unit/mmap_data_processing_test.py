@@ -938,6 +938,46 @@ class TestMMapGrainPipeline:
         break
     assert len(items) > 0
 
+  def test_get_datasets_mmap_mixture_budgets_read_options(self, tmp_dir):
+    """Budgets num_threads and prefetch_buffer_size across mmap mixture components."""
+    from maxtext.input_pipeline._mmap_datasource import get_mmap_dataset  # pylint: disable=import-outside-toplevel
+
+    p1 = create_mmap_test_data(os.path.join(tmp_dir, "b1"), [np.array([1, 2], dtype=np.int32)])
+    p2 = create_mmap_test_data(os.path.join(tmp_dir, "b2"), [np.array([3, 4], dtype=np.int32)])
+    p3 = create_mmap_test_data(os.path.join(tmp_dir, "b3"), [np.array([5, 6], dtype=np.int32)])
+
+    def run_and_capture(pattern, num_threads, prefetch_buffer_size):
+      recorded = []
+
+      def capture_transforms(ds, _shuf, _seed, num_epoch, host_idx, host_cnt, comp_threads, comp_buffer):
+        recorded.append((comp_threads, comp_buffer))
+        return ds.repeat(num_epoch)[host_idx::host_cnt].to_iter_dataset(
+            read_options=grain.ReadOptions(num_threads=comp_threads, prefetch_buffer_size=comp_buffer)
+        )
+
+      ds = get_mmap_dataset(
+          data_file_pattern=pattern,
+          split_sentences=False,
+          seq_length=0,
+          eod_id=0,
+          shuffle=False,
+          shuffle_seed=0,
+          num_epoch=1,
+          host_index=0,
+          host_count=1,
+          num_threads=num_threads,
+          prefetch_buffer_size=prefetch_buffer_size,
+          apply_transforms=capture_transforms,
+      )
+      assert next(iter(ds)) is not None
+      return recorded
+
+    assert run_and_capture(f"{p1},0.05;{p2},0.25;{p3},0.70", 16, 500) == [(1, 25), (4, 125), (12, 350)]
+    # Threads are capped at each component's prefetch_buffer_size to avoid Grain ReadOptions warnings.
+    assert run_and_capture(f"{p1},0.25;{p2},0.75", 16, 4) == [(1, 1), (3, 3)]
+    # Zero disables prefetching cleanly.
+    assert run_and_capture(f"{p1},0.3;{p2},0.7", 0, 0) == [(0, 0), (0, 0)]
+
   def test_shuffle_determinism(self, tmp_dir):
     """Same seed produces same order."""
     from maxtext.input_pipeline.grain_data_processing import get_datasets  # pylint: disable=import-outside-toplevel

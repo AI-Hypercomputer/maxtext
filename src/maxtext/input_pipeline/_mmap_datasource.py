@@ -22,6 +22,7 @@ import bisect
 import dataclasses
 import glob as _glob
 import logging
+import math
 import os
 import struct
 
@@ -1043,19 +1044,22 @@ def get_mmap_dataset(
   if ";" in data_file_pattern:
     prefixes, weights = _parse_weighted_mixture(data_file_pattern, "mmap")
     datasets = [create_mmap_source(prefix, split_sentences, seq_length, eod_id) for prefix in prefixes]
-    iter_datasets = [
-        apply_transforms(
-            dataset,
-            shuffle,
-            shuffle_seed,
-            num_epoch,
-            host_index,
-            host_count,
-            num_threads,
-            prefetch_buffer_size,
-        )
-        for dataset in datasets
-    ]
+    iter_datasets = []
+    for dataset, w in zip(datasets, weights):
+      comp_buffer = math.ceil(prefetch_buffer_size * w)
+      comp_threads = min(math.ceil(num_threads * w), comp_buffer)
+      iter_datasets.append(
+          apply_transforms(
+              dataset,
+              shuffle,
+              shuffle_seed,
+              num_epoch,
+              host_index,
+              host_count,
+              comp_threads,
+              comp_buffer,
+          )
+      )
     return grain.IterDataset.mix(iter_datasets, weights)
 
   dataset = create_mmap_source(data_file_pattern, split_sentences, seq_length, eod_id)
