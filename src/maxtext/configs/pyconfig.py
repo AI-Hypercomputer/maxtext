@@ -35,6 +35,7 @@ from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, HF_I
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.configs import types
 from maxtext.inference.inference_utils import str2bool
+from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_utils
 from maxtext.utils import max_logging
 
@@ -48,7 +49,7 @@ _MAX_PREFIX = "M_"
 _yaml_types_to_parser = {str: str, int: int, float: float, bool: str2bool}
 
 # Don't log the following keys.
-KEYS_NO_LOGGING = ("hf_access_token",)
+KEYS_NO_LOGGING = maxtext_globals.KEYS_NO_LOGGING
 
 # Module paths to their default config file (relative to MAXTEXT_CONFIGS_DIR).
 _CONFIG_FILE_MAPPING: dict[str, str] = {

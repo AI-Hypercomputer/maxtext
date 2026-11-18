@@ -2212,6 +2212,8 @@ def add_config_to_summary_writer(config, summary_writer):
     else:
       config_dict = dict(config)
     for key, value in config_dict.items():
+      if key in pyconfig.KEYS_NO_LOGGING:
+        continue
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
 
 

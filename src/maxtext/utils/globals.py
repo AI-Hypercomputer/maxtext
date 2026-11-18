@@ -114,13 +114,17 @@ HF_IDS = {
     "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
 }
 
+# Config keys holding secrets; excluded from logs, TensorBoard, and config.yml.
+KEYS_NO_LOGGING = ("hf_access_token",)
+
 __all__ = [
     "DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE",
     "EPS",
+    "HF_IDS",
+    "KEYS_NO_LOGGING",
     "MAXTEXT_ASSETS_ROOT",
     "MAXTEXT_CONFIGS_DIR",
     "MAXTEXT_PKG_DIR",
     "MAXTEXT_REPO_ROOT",
     "MAXTEXT_TEST_ASSETS_ROOT",
-    "HF_IDS",
 ]

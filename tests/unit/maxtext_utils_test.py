@@ -1513,6 +1513,52 @@ class TestAddConfigToSummaryWriter(unittest.TestCase):
       if jax.process_index() == 0:
         self.assertEqual(mock_add.call_count, 2)
 
+  def test_skips_secret_keys_for_hyperparameters(self):
+    secret = "hf_test_secret_token_123"
+    cfg = pyconfig.initialize(
+        ["", get_test_config_path()],
+        run_name="redaction_test",
+        base_output_directory="/tmp/maxtext_redaction_test",
+        enable_checkpointing=False,
+        skip_jax_distributed_system=True,
+        log_config=False,
+        hf_access_token=secret,
+    )
+    self.assertEqual(cfg.hf_access_token, secret)
+
+    mock_writer = MagicMock()
+    with patch("jax.process_index", return_value=0):
+      maxtext_utils.add_config_to_summary_writer(cfg, mock_writer)
+
+    entries = {call.args[0]: call.args[1] for call in mock_writer.add_text.call_args_list}
+    self.assertEqual(entries.get("run_name"), "redaction_test")
+    self.assertNotIn("hf_access_token", entries)
+    for value in entries.values():
+      self.assertNotIn(secret, value)
+
+  def test_skips_secret_keys_for_pydantic_and_dict(self):
+    secret = "hf_pydantic_secret_789"
+    pydantic_cfg = pyconfig.initialize_pydantic(
+        ["", get_test_config_path()],
+        run_name="pydantic_redaction_test",
+        base_output_directory="/tmp/maxtext_redaction_test",
+        enable_checkpointing=False,
+        skip_jax_distributed_system=True,
+        log_config=False,
+        hf_access_token=secret,
+    )
+
+    for cfg in (pydantic_cfg, {"steps": 42, "hf_access_token": secret}):
+      mock_writer = MagicMock()
+      with patch("jax.process_index", return_value=0):
+        maxtext_utils.add_config_to_summary_writer(cfg, mock_writer)
+
+      entries = {call.args[0]: call.args[1] for call in mock_writer.add_text.call_args_list}
+      self.assertTrue(entries)
+      self.assertNotIn("hf_access_token", entries)
+      for value in entries.values():
+        self.assertNotIn(secret, value)
+
 
 class TestMaybeDumpJaxpr(unittest.TestCase):
   """Tests for maybe_dump_jaxpr."""
