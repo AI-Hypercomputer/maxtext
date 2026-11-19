@@ -31,7 +31,17 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
+from maxtext.common.common_types import (
+    AttentionType,
+    CustomRule,
+    DecoderBlockType,
+    FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION,
+    ReorderStrategy,
+    ShardMode,
+    VisionEncoderBlockType,
+    is_fp8_dtype,
+    is_module_unquantized,
+)
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -237,6 +247,7 @@ class ElasticGlobalBatchSizeMode(str, Enum):
 
   SCALED = "scaled"
   CONSTANT_PADDED = "constant_padded"
+  CONSTANT_GRAD_ACCUM = "constant_grad_accum"
 
 
 # ----------------------------------------------------------------------------
@@ -273,6 +284,7 @@ ModelName = Literal[
     "deepseek4-1600b",
     "deepseek-custom",
     "kimi-k2-1t",
+    "kimi-k3",
     "gemma-7b",
     "gemma-2b",
     "gemma2-2b",
@@ -460,6 +472,13 @@ class Checkpointing(BaseModel):
   checkpoint_conversion_fn: None | str = Field(None, description="Function for processing loaded checkpoint dict.")
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
+  )
+  safetensors_dynamic_streaming: bool = Field(
+      False,
+      description=(
+          "Experimental. With source_checkpoint_layout='safetensors_dynamic', stream the HF checkpoint a few"
+          " decoder layers at a time instead of reading all of it into HBM before converting."
+      ),
   )
   save_checkpoint_on_start: bool = Field(True, description="If True, saves an initial checkpoint upon training start.")
   save_checkpoint_on_completion: bool = Field(
@@ -1431,6 +1450,14 @@ class MoEGeneral(BaseModel):
       -1,
       description="Dimension of tokens entering the MoE layer. If < 0, defaults to emb_dim.",
   )
+  moe_router_input_dim: int = Field(
+      -1,
+      description=(
+          "Dimension of the router (gate) input when it differs from the expert input, e.g. a latent MoE that"
+          " routes on the full hidden state but runs experts on a down-projected latent (pass the router input"
+          " as `gate_inputs`). If < 0, defaults to the expert input dim."
+      ),
+  )
   base_moe_mlp_dim: int = Field(-1, description="Intermediate dimension at MoE layer.")
   padded_base_moe_mlp_dim: Optional[int] = Field(
       None,
@@ -2096,6 +2123,35 @@ class Qwen3Next(BaseModel):
           "and 'auto' selects automatically."
       ),
   )
+  gdn_pin_in_proj_output_layout: bool = Field(
+      True,
+      description=(
+          "Whether to pin the GatedDeltaNet in_proj_qkvz output to row-major XLA layout under paged-state serving "
+          "to avoid materializing a transposed copy of the projection kernel."
+      ),
+  )
+  gdn_in_proj_kernel_order: bool = Field(
+      False,
+      description=(
+          "Whether to permute GatedDeltaNet in_proj_qkvz columns to flat [q | k | v | z] order in training so qkv "
+          "and z share one kernel gather and skip per-head splitting."
+      ),
+  )
+  gdn_out_proj_token_minor: bool = Field(
+      False,
+      description="Whether to constrain the GatedDeltaNet out_proj input to token-minor (0, 2, 1) layout in training.",
+  )
+  gdn_gated_norm_layout: Literal["auto", "natural", "natural_fwd_bwd", "token_minor"] = Field(
+      "auto",
+      description=(
+          "Memory layout constraint around Qwen3NextRMSNormGated when gdn_out_proj_token_minor=True: "
+          "'auto', 'natural', 'natural_fwd_bwd', or 'token_minor'."
+      ),
+  )
+  gdn_fp8_projections: bool = Field(
+      False,
+      description="Whether to run GatedDeltaNet in_proj_qkvz and out_proj as dynamic-absmax FP8 matmuls in training.",
+  )
   gdn_mamba_block_size: int = Field(
       0,
       description=(
@@ -2160,6 +2216,105 @@ class Qwen3_8FlashNext(BaseModel):
   split_ngram_parts: int = Field(128, description="Number of embedding shards for PLE.")
   ple_seed: int = Field(1234, description="Hash seed for PLE n-gram hashing.")
   ple_eos_token_id: int = Field(248044, description="EOS token ID used for PLE n-gram boundary resets (HF eos_token_id).")
+
+
+class KimiK3(BaseModel):
+  """Configuration specific to Kimi-K3 models.
+
+  `moe_intermediate_size` / `num_shared_experts` mirror the HF names the Kimi-K3 layers read;
+  the generic MoE code reads `base_moe_mlp_dim` / `shared_experts`. When set (not None), each
+  must equal its generic twin, so overriding only one of a pair fails loudly instead of
+  leaving the other stale. Unset is `None` (so an explicit 0 is still validated), and
+  `shared_intermediate_size`, when set, must equal `moe_intermediate_size * num_shared_experts`.
+  """
+
+  attn_res_block_size: PositiveInt = Field(12, description="Attention residual block interval.")
+  full_attn_layers: list[NonNegativeInt] = Field(
+      default_factory=list,
+      description="0-indexed decoder layers that use full (MLA) attention; all others use KDA linear attention.",
+  )
+  routed_expert_hidden_size: NonNegativeInt = Field(0, description="Routed expert projection size for latent MoE.")
+  shared_intermediate_size: NonNegativeInt | None = Field(
+      None,
+      description="Shared expert intermediate size for latent MoE; must equal moe_intermediate_size * num_shared_experts.",
+  )
+  moe_intermediate_size: NonNegativeInt | None = Field(
+      None, description="Routed expert intermediate size read by the Kimi-K3 layers; must equal base_moe_mlp_dim if set."
+  )
+  num_shared_experts: NonNegativeInt | None = Field(
+      None, description="Shared expert count read by the Kimi-K3 layers; must equal shared_experts if set."
+  )
+  short_conv_kernel_size: PositiveInt = Field(4, description="Kernel size for the KDA short convolution.")
+  kda_gate_lower_bound: Optional[float] = Field(
+      -5.0,
+      lt=0.0,
+      description=(
+          "KDA decay-gate lower bound (must be negative). When set, the gate is the bounded sigmoid "
+          "`lb * sigmoid(exp(A_log) * (g + dt_bias))` (as in fla); None selects the softplus gate."
+      ),
+  )
+  kda_chunk_size: int = Field(64, gt=0, description="Chunk size of the KDA chunked (WY) prefill/train core.")
+  kda_compute_dtype: Literal["float32", "bfloat16"] = Field(
+      "float32",
+      description=(
+          "Precision of the KDA q/k/v inputs to the core (and of the q/k L2-norm). The decay gate, its "
+          "cumsum, the chunked WY solve and the recurrent state are always float32, as in fla. The output "
+          "is cast back to `dtype`."
+      ),
+  )
+  kda_kernel: Literal["jax", "tokamax"] = Field(
+      "jax",
+      description=(
+          "KDA chunked core for train/prefill. 'jax' is the in-tree chunked WY scan; 'tokamax' calls "
+          "`tokamax.ops.kimi_delta_attention` (fused gate + q/k L2-norm, custom VJP, varlen segments)."
+      ),
+  )
+  kda_tokamax_implementation: Literal["auto", "mosaic", "xla_chunked", "xla"] = Field(
+      "auto",
+      description=(
+          "tokamax KDA backend when kda_kernel='tokamax'. 'auto' tries the Pallas Mosaic kernel (TPU v6+) "
+          "and falls back to the pure-JAX chunked kernel ('xla_chunked'); 'xla' is the recurrent reference."
+      ),
+  )
+  kda_tokamax_remat_safe: bool = Field(
+      True,
+      description=(
+          "With kda_kernel='tokamax', disable the kernel's debug-only `checkify` input check (process-wide). "
+          "The check is an effect, and JAX never rematerializes effectful ops, so with it every KDA layer "
+          "saves its f32 kernel residuals/output regardless of remat_policy (and lax.scan stacks them)."
+      ),
+  )
+  kda_max_num_segments: int = Field(
+      0,
+      description=(
+          "With kda_kernel='tokamax' in training, a positive value passes `decoder_segment_ids` to the "
+          "kernel so the recurrent state resets at packed-document boundaries; it is the static upper "
+          "bound on documents per sequence (each costs up to chunk_size-1 padded tokens). 0 ignores "
+          "segment ids (state carries across packed documents, like kda_kernel='jax')."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_kimi_k3_alias_pairs(self):
+    """Rejects a Kimi-K3 HF-named field that disagrees with its generic MaxText twin."""
+    for kimi_name, generic_name in (
+        ("moe_intermediate_size", "base_moe_mlp_dim"),
+        ("num_shared_experts", "shared_experts"),
+    ):
+      kimi_value = getattr(self, kimi_name)
+      generic_value = getattr(self, generic_name, None)
+      if kimi_value is not None and generic_value is not None and kimi_value != generic_value:
+        raise ValueError(f"{kimi_name}={kimi_value} must equal {generic_name}={generic_value}; override both together.")
+    if self.shared_intermediate_size is not None:
+      if self.moe_intermediate_size is None or self.num_shared_experts is None:
+        raise ValueError("shared_intermediate_size requires moe_intermediate_size and num_shared_experts to be set.")
+      expected = self.moe_intermediate_size * self.num_shared_experts
+      if self.shared_intermediate_size != expected:
+        raise ValueError(
+            f"shared_intermediate_size={self.shared_intermediate_size} must equal moe_intermediate_size * "
+            f"num_shared_experts = {self.moe_intermediate_size} * {self.num_shared_experts} = {expected}."
+        )
+    return self
 
 
 # ----------------------------------------------------------------------------
@@ -2710,6 +2865,14 @@ class Tokenizer(BaseModel):
       description="Path to the tokenizer model file.",
   )
   tokenizer_type: TokenizerType = Field(TokenizerType.SENTENCEPIECE, description="The type of tokenizer.")
+  tokenizer_trust_remote_code: bool = Field(
+      False,
+      description=(
+          "Passes `trust_remote_code=True` to `transformers.AutoTokenizer` (tokenizer_type 'huggingface' and the "
+          "hf pipeline). Needed for tokenizers that ship their own Python code (e.g. Kimi-K3). This runs code "
+          "from `tokenizer_path`, so only enable it for a trusted tokenizer."
+      ),
+  )
   use_chat_template: bool = Field(False, description="Whether to use the chat template for tokenization.")
   chat_template_path: str = Field("", description="Path to chat template json file.")
   chat_template: str = Field(
@@ -3879,11 +4042,64 @@ class ElasticTraining(BaseModel):
       ElasticGlobalBatchSizeMode.SCALED,
       description=(
           "How the global batch size behaves when some slices of the job are down. 'scaled' keeps"
-          " `per_device_batch_size` fixed so the global batch scales with the live slice count. 'constant_padded' keeps"
-          " the global batch size of all slices of the job by rounding up `per_device_batch_size` and padding the extra"
-          " rows with zero segmentation, which the loss masks out."
+          " `per_device_batch_size` fixed so the global batch scales with the live slice count. 'constant_grad_accum'"
+          " keeps the global batch size of all slices of the job and the per-device batch: only"
+          " `gradient_accumulation_steps` grows, to `ceil(global_batch / (live_devices * per_device_batch_size))`, so"
+          " the activation memory and the compiled microbatch shapes never change on a resize (recommended)."
+          " 'constant_padded' also keeps the global batch size of all slices but, by default, rounds"
+          " `per_device_batch_size` up instead; `elastic_max_per_device_batch_size` lets it search the per-device"
+          " batches up to a bound for the factoring with the least padding (advanced). Both constant modes pad the"
+          " extra rows with zero segmentation, which the loss masks out."
       ),
   )
+  elastic_max_per_device_batch_size: int = Field(
+      -1,
+      description=(
+          "With `elastic_global_batch_size_mode='constant_padded'`, how the constant global batch is covered on fewer"
+          " slices. -1 keeps `gradient_accumulation_steps` and rounds `per_device_batch_size` up, growing activation"
+          " memory by the same factor. A value >= `per_device_batch_size` bounds the per-device batch instead and"
+          " grows `gradient_accumulation_steps` to cover the rest, choosing the factoring with the least padding among"
+          " the per-device batches in `[per_device_batch_size, bound]` (ties go to the smaller per-device batch); the"
+          " per-device batch is never lowered below `per_device_batch_size`, so a resize never adds scan iterations"
+          " beyond those needed to cover the logical batch. With `elastic_global_batch_size_mode='constant_grad_accum'`"
+          " the bound is implied to be `per_device_batch_size` and this must stay -1."
+      ),
+  )
+  elastic_hbm_budget_fraction: float = Field(
+      0.9,
+      ge=0.0,
+      le=1.0,
+      description=(
+          "With `elastic_global_batch_size_mode='constant_padded'`, the fraction of device HBM the compiled train step"
+          " may use when a resize raised `per_device_batch_size` above its nominal value. If the compiled step needs"
+          " more, the attempt is restarted with `elastic_max_per_device_batch_size` set to the nominal per-device batch,"
+          " so only the gradient accumulation steps grow. 0 disables the check. A no-op with"
+          " `elastic_global_batch_size_mode='constant_grad_accum'`, whose per-device batch never grows."
+      ),
+  )
+  elastic_simulate_job_devices: int = Field(
+      0,
+      description=(
+          "Testing only. With a constant-global-batch `elastic_global_batch_size_mode` (`constant_padded`,"
+          " `constant_grad_accum`), pretend the job has this many devices while running on the devices actually"
+          " present, without Pathways or `elastic_enabled`. The logical global batch is sized for the pretended devices"
+          " and the physical batch is planned and padded for the present ones, exactly as after a replica resize."
+          " 0 disables the simulation. Not in base.yml; pass it on the command line (tests only)."
+      ),
+  )
+
+  @property
+  def constant_global_batch_active(self) -> bool:
+    """Whether a constant-global-batch elastic mode is in effect, i.e. the logical global batch covers all job devices.
+
+    True for `elastic_global_batch_size_mode` in (`constant_padded`, `constant_grad_accum`) when elastic training is
+    enabled or a larger job is simulated (`elastic_simulate_job_devices`); the two modes differ only in how the planner
+    factors the constant batch over the live devices.
+    """
+    return (self.elastic_enabled or self.elastic_simulate_job_devices > 0) and self.elastic_global_batch_size_mode in (
+        ElasticGlobalBatchSizeMode.CONSTANT_PADDED,
+        ElasticGlobalBatchSizeMode.CONSTANT_GRAD_ACCUM,
+    )
 
 
 class GcpMonitoring(BaseModel):
@@ -4485,6 +4701,13 @@ class DerivedValues(BaseModel):
       None,
       description="Unpadded global dataloader batch size across all job devices in `constant_padded` elastic mode.",
   )
+  elastic_nominal_per_device_batch_size: int | None = Field(
+      None,
+      description=(
+          "In `constant_padded` elastic mode, the configured `per_device_batch_size` when a resize raised it above that"
+          " value; None when it is unchanged. The HBM budget check falls back to this value."
+      ),
+  )
   global_batch_size_to_load_eval: None | int = Field(
       None,
       description="The global batch size for the evaluation dataloader, potentially scaled by `expansion_factor_real_data`.",
@@ -4758,6 +4981,67 @@ def _validate_remat_policy(
     )
 
 
+def plan_constant_global_batch(
+    per_device_batch_size: int,
+    gradient_accumulation_steps: int,
+    job_devices: int,
+    live_devices: int,
+    alignment: int,
+    max_per_device_batch_size: int,
+) -> tuple[int, int]:
+  """Factors the logical global batch of all job devices into a per-device batch and accumulation steps on live devices.
+
+  The logical global batch size is `per_device_batch_size * job_devices * gradient_accumulation_steps`. On fewer live
+  devices it is covered by a physical batch `B' * live_devices * K'`, whose excess rows are padded with zero
+  segmentation (see `elastic_global_batch_size_mode`). Two ways of factoring exist:
+
+  *   `max_per_device_batch_size == -1`: keep `gradient_accumulation_steps` and round the per-device batch up to
+      `ceil(per_device_batch_size * job_devices / live_devices)`. Activations grow by the same factor, and with
+      several accumulation steps every microbatch is padded (`constant_padded` without a bound).
+  *   `max_per_device_batch_size >= per_device_batch_size`: search every aligned per-device batch `B'` in
+      `[per_device_batch_size, max_per_device_batch_size]` with `K' = ceil(logical / (B' * live_devices))` and
+      return the pair with the least padding; ties go to the smaller `B'` (less HBM). With the bound equal to
+      `per_device_batch_size` (`constant_grad_accum`) the per-device batch, and hence the activation memory and the
+      per-microbatch program shapes, never change: only the accumulation steps grow, and fewer than
+      `B' * live_devices` rows are padded (less than one microbatch; the microbatch reshape spreads them over the
+      microbatches).
+
+  Args:
+    per_device_batch_size: Per-device batch size of the full job (an integer >= 1).
+    gradient_accumulation_steps: Accumulation steps of the full job.
+    job_devices: Number of devices in the whole job.
+    live_devices: Number of live devices, fewer than `job_devices`.
+    alignment: `B'` must be a multiple of this (vocab tiling and pipeline microbatch divisibility).
+    max_per_device_batch_size: Upper bound on `B'`, or -1 to keep the accumulation steps instead.
+
+  Returns:
+    The per-device batch size `B'` and the gradient accumulation steps `K'` for the live devices.
+  """
+
+  def _align_up(value: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
+
+  logical_batch = per_device_batch_size * job_devices * gradient_accumulation_steps
+  if max_per_device_batch_size == -1:
+    return _align_up(math.ceil(per_device_batch_size * job_devices / live_devices)), gradient_accumulation_steps
+
+  def _padding_and_steps(candidate: int) -> tuple[int, int]:
+    micro_batch = candidate * live_devices
+    steps = math.ceil(logical_batch / micro_batch)
+    return steps * micro_batch - logical_batch, steps
+
+  # The alignment may force B' above the bound; the first aligned value is always a candidate.
+  best_batch = _align_up(per_device_batch_size)
+  best_padding, best_steps = _padding_and_steps(best_batch)
+  upper = max(max_per_device_batch_size, best_batch)
+  for candidate in range(best_batch + alignment, upper + 1, alignment):
+    padding, steps = _padding_and_steps(candidate)
+    # Strictly less padding only: ties keep the smaller per-device batch.
+    if padding < best_padding:
+      best_batch, best_padding, best_steps = candidate, padding, steps
+  return best_batch, best_steps
+
+
 # ----------------------------------------------------------------------------
 # Main Config Class
 # ----------------------------------------------------------------------------
@@ -4793,6 +5077,7 @@ class MaxTextConfig(
     Qwen3Next,
     Qwen3_8FlashNext,
     Ming,
+    KimiK3,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -5144,6 +5429,21 @@ class MaxTextConfig(
     if not self.quantization.startswith("te_"):
       raise ValueError(
           "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
+      )
+
+  @staticmethod
+  def _validate_gdn_projection_quantization(cfg: Any) -> None:
+    """Rejects gdn_in_proj_kernel_order=True without gdn_fp8_projections=True when in_proj_qkvz is quantized."""
+    if (
+        cfg.gdn_in_proj_kernel_order
+        and not cfg.gdn_fp8_projections
+        and bool(cfg.quantization)
+        and (cfg.use_qwix_quantization or not is_module_unquantized(cfg, "in_proj_qkvz"))
+    ):
+      raise ValueError(
+          "gdn_in_proj_kernel_order=True with gdn_fp8_projections=False is incompatible with quantized "
+          "in_proj_qkvz; enable gdn_fp8_projections=True, set quantization='', or exclude 'in_proj_qkvz' "
+          "via unquantized_modules with use_qwix_quantization=False."
       )
 
   def _validate_usp_context_parallelism(self):
@@ -5893,13 +6193,15 @@ class MaxTextConfig(
       global_batch_to_train = int(micro_batch_to_train * grad_accum_steps)
       return global_batch_to_load, global_batch_to_train, micro_batch_to_train
 
-    # With `elastic_global_batch_size_mode='constant_padded'`, keep the logical global batch sized for all job devices
-    # and round `per_device_batch_size` up across live devices (preserving vocab-tiling and pipeline divisibility).
+    # With a constant-global-batch `elastic_global_batch_size_mode` (`constant_padded`, `constant_grad_accum`), keep the
+    # logical global batch sized for all job devices and factor it over the live devices (preserving vocab-tiling and
+    # pipeline divisibility).
     # pylint: disable=access-member-before-definition
     eval_tracks_train_batch = self.eval_per_device_batch_size == self.per_device_batch_size
+    mode_label = f"`elastic_global_batch_size_mode='{self.elastic_global_batch_size_mode.value}'`"
+    grad_accum_mode = self.elastic_global_batch_size_mode == ElasticGlobalBatchSizeMode.CONSTANT_GRAD_ACCUM
     if (
-        self.elastic_enabled
-        and self.elastic_global_batch_size_mode == ElasticGlobalBatchSizeMode.CONSTANT_PADDED
+        self.constant_global_batch_active
         and self.per_device_batch_size >= 1.0
         and float(self.per_device_batch_size).is_integer()
     ):
@@ -5911,7 +6213,11 @@ class MaxTextConfig(
         except (RuntimeError, IndexError):
           return self.num_target_devices, max(self.num_slices, 1)
 
-      if self.internal_compile or self.compile_topology or self.subslice_shape:
+      if self.elastic_simulate_job_devices > 0:
+        # Testing without Pathways: the present devices stand in for the live ones of a larger job.
+        job_devices, job_slices = self.elastic_simulate_job_devices, max(self.num_slices, 1)
+        live_slices = job_slices
+      elif self.internal_compile or self.compile_topology or self.subslice_shape:
         job_devices, job_slices = self.num_target_devices, max(self.num_slices, 1)
         live_slices = job_slices
       else:
@@ -5919,6 +6225,27 @@ class MaxTextConfig(
         _, live_slices = _devices_and_slices(lambda: elastic_utils.live_devices(config=self))
       if (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0:
         raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
+      if grad_accum_mode:
+        # The per-device batch never changes: the planner bound is the configured per-device batch.
+        if self.elastic_max_per_device_batch_size != -1:
+          raise ValueError(
+              f"{mode_label} keeps `per_device_batch_size` fixed and only grows `gradient_accumulation_steps` on a"
+              " resize, so `elastic_max_per_device_batch_size` is implied and must stay -1 (got"
+              f" {self.elastic_max_per_device_batch_size}); use `elastic_global_batch_size_mode='constant_padded'` to"
+              " bound the per-device batch explicitly."
+          )
+        max_per_device_batch_size = int(self.per_device_batch_size)
+      else:
+        if (
+            self.elastic_max_per_device_batch_size != -1
+            and self.elastic_max_per_device_batch_size < self.per_device_batch_size
+        ):
+          raise ValueError(
+              f"{mode_label} requires `elastic_max_per_device_batch_size` to be -1"
+              f" or >= `per_device_batch_size` ({int(self.per_device_batch_size)}), got"
+              f" {self.elastic_max_per_device_batch_size}."
+          )
+        max_per_device_batch_size = self.elastic_max_per_device_batch_size
       pipeline_microbatches, live_non_batch_devices = 0, 1
       if self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1:
         num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
@@ -5978,9 +6305,32 @@ class MaxTextConfig(
             if pipeline_microbatches > 0
             else 1
         )
-        step = math.lcm(vocab_step, pipeline_step)
-        scaled = math.ceil(self.per_device_batch_size * job_devices / self.num_target_devices)
-        self.per_device_batch_size = float(((scaled + step - 1) // step) * step)
+        planned_batch, planned_steps = plan_constant_global_batch(
+            per_device_batch_size=int(self.per_device_batch_size),
+            gradient_accumulation_steps=self.gradient_accumulation_steps,
+            job_devices=job_devices,
+            live_devices=self.num_target_devices,
+            alignment=math.lcm(vocab_step, pipeline_step),
+            max_per_device_batch_size=max_per_device_batch_size,
+        )
+        logger.info(
+            "%s: %d of %d devices live; per_device_batch_size %s -> %d, gradient_accumulation_steps"
+            " %d -> %d, physical batch %d for logical batch %d (%d padded rows).",
+            self.elastic_global_batch_size_mode.value,
+            self.num_target_devices,
+            job_devices,
+            self.per_device_batch_size,
+            planned_batch,
+            self.gradient_accumulation_steps,
+            planned_steps,
+            planned_batch * self.num_target_devices * planned_steps,
+            self.logical_global_batch_size_to_train_on,
+            planned_batch * self.num_target_devices * planned_steps - self.logical_global_batch_size_to_train_on,
+        )
+        if planned_batch > int(self.per_device_batch_size):
+          self.elastic_nominal_per_device_batch_size = int(self.per_device_batch_size)
+        self.per_device_batch_size = float(planned_batch)
+        self.gradient_accumulation_steps = planned_steps
         if pipeline_microbatches > 0 and eval_tracks_train_batch:
           self.eval_per_device_batch_size = self.per_device_batch_size
     # pylint: enable=access-member-before-definition
@@ -6302,8 +6652,18 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
-    if self.elastic_enabled and self.elastic_global_batch_size_mode == ElasticGlobalBatchSizeMode.CONSTANT_PADDED:
+    if self.elastic_simulate_job_devices < 0:
+      raise ValueError(f"`elastic_simulate_job_devices` must be >= 0, got {self.elastic_simulate_job_devices}.")
+    if 0 < self.elastic_simulate_job_devices < self.num_target_devices:
+      raise ValueError(
+          f"`elastic_simulate_job_devices` ({self.elastic_simulate_job_devices}) must be >= the number of present"
+          f" devices ({self.num_target_devices}); it simulates a larger job."
+      )
+    if self.constant_global_batch_active:
       uses_elastic_iterator = self.dataset_type == DatasetType.GRAIN and self.grain_use_elastic_iterator
+      # `constant_grad_accum`, and `constant_padded` with a per-device bound, may grow the accumulation steps on a
+      # resize; the legacy `constant_padded` default keeps them.
+      steps_may_change = grad_accum_mode or self.elastic_max_per_device_batch_size != -1
       for invalid, reason in (
           (
               self.per_device_batch_size < 1.0 or not float(self.per_device_batch_size).is_integer(),
@@ -6326,16 +6686,42 @@ class MaxTextConfig(
           (self.enable_rampup_batch_size, "is not supported with `enable_rampup_batch_size=True`"),
           (self.enable_diloco, "is not supported with DiLoCo (`enable_diloco=True`)"),
           (self.use_dpo, "is not supported with DPO (`use_dpo=True`)"),
-          (self.num_experts > 1, "is not supported with MoE (`num_experts > 1`)"),
+          # MoE: RoutedMoE keeps the padded rows out of routing, expert capacity, the load-balance loss and the
+          # routed-bias update through its `token_mask` (see `moe.routing_token_mask`). The MoE implementations
+          # below bypass RoutedMoE's routing and take no mask, so the padded rows would be routed and counted.
+          (
+              self.num_experts > 1 and self.te_moe_block,
+              "is not supported with MoE and `te_moe_block=True` (TransformerEngine routes the padded rows)",
+          ),
+          (
+              self.num_experts > 1 and self.use_batch_split_schedule,
+              "is not supported with MoE and `use_batch_split_schedule=True`",
+          ),
+          (self.num_experts > 1 and self.use_lineage, "is not supported with MoE and `use_lineage=True`"),
+          (self.num_experts > 1 and self.use_m3_model, "is not supported with MoE and `use_m3_model=True`"),
+          (
+              self.num_experts > 1 and self.decoder_block == DecoderBlockType.KIMI_LINEAR,
+              "is not supported with MoE and `decoder_block=kimi_linear` (its latent MoE block takes no `token_mask`)",
+          ),
           (self.indexer_loss_scaling_factor > 0.0, "is not supported with `indexer_loss_scaling_factor > 0`"),
           (self.use_qk_clip, "is not supported with QK-Clip (`use_qk_clip=True`)"),
           (
               self.use_tunix_gradient_accumulation and self.gradient_accumulation_steps > 1,
               "is not supported with `use_tunix_gradient_accumulation=True` when `gradient_accumulation_steps > 1`",
           ),
+          (
+              steps_may_change and self.use_tunix_gradient_accumulation,
+              "may change `gradient_accumulation_steps` on a resize (`constant_grad_accum`, or"
+              " `elastic_max_per_device_batch_size` set), which `use_tunix_gradient_accumulation=True` does not support",
+          ),
+          (
+              steps_may_change and self.quantization in FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION,
+              "may change `gradient_accumulation_steps` on a resize (`constant_grad_accum`, or"
+              " `elastic_max_per_device_batch_size` set), which FP8 quantization does not support",
+          ),
       ):
         if invalid:
-          raise ValueError(f"`elastic_global_batch_size_mode='constant_padded'` {reason}.")
+          raise ValueError(f"{mode_label} {reason}.")
     if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
       raise ValueError(
           "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."
@@ -6371,6 +6757,35 @@ class MaxTextConfig(
       raise ValueError("`grain_use_elastic_iterator=True` requires `packing=False`.")
     if self.use_dpo and self.packing:
       raise ValueError("DPO does not support packing. Set `packing=False`.")
+    if (
+        self.decoder_block == DecoderBlockType.KIMI_LINEAR
+        and self.packing
+        and not (self.kda_kernel == "tokamax" and self.kda_max_num_segments > 0)
+    ):
+      # The JAX KDA core ignores `decoder_segment_ids`, so packed documents would leak recurrent
+      # state into each other in 69 of the 93 layers. The tokamax kernel resets state per segment.
+      raise ValueError(
+          "decoder_block=kimi_linear (Kimi-K3) packs sequences only with the tokamax KDA kernel: set "
+          "`packing=False`, or `kda_kernel=tokamax` with `kda_max_num_segments > 0`."
+      )
+    elif self.decoder_block == DecoderBlockType.KIMI_LINEAR and self.packing:
+      # Segments past `kda_max_num_segments` are silently zeroed by `_segment_ids_to_cu_seqlens`, so
+      # the input packer must bound segments per sequence to `<= kda_max_num_segments`. TFDS / C4MLPERF
+      # `pack_dataset` has no segment cap.
+      if self.dataset_type in (DatasetType.TFDS, DatasetType.C4MLPERF):
+        dataset_type_str = getattr(self.dataset_type, "value", self.dataset_type)
+        raise ValueError(
+            "decoder_block=kimi_linear (Kimi-K3) with packing=True and kda_kernel=tokamax does not support "
+            f"dataset_type={dataset_type_str!r} because TFDS packing does not bound segments per sequence "
+            f"(`kda_max_num_segments={self.kda_max_num_segments}`). Use dataset_type='grain' or 'hf' with "
+            "`0 < max_segments_per_seq <= kda_max_num_segments`, or set `packing=False`."
+        )
+      if self.max_segments_per_seq is None or not 0 < self.max_segments_per_seq <= self.kda_max_num_segments:
+        raise ValueError(
+            "decoder_block=kimi_linear (Kimi-K3) with packing=True and kda_kernel=tokamax requires "
+            "`0 < max_segments_per_seq <= kda_max_num_segments` (got "
+            f"max_segments_per_seq={self.max_segments_per_seq}, kda_max_num_segments={self.kda_max_num_segments})."
+        )
     if self.grain_use_elastic_iterator and not self.use_truncation:
       raise ValueError(
           "`grain_use_elastic_iterator=True` requires `use_truncation=True`. "
@@ -6639,10 +7054,7 @@ class MaxTextConfig(
           " add, score function, gemma4 router norm) are second-order next to the quantization error."
           " Set `quantize_router_proj=False` to keep the projection in fp32."
       )
-    if (
-        self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
-        and self.gradient_accumulation_steps > 1
-    ):
+    if self.quantization in FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION and self.gradient_accumulation_steps > 1:
       raise ValueError("FP8 quantization is not compatible with gradient accumulation.")
     if self.engram_layers:
       if not self.hf_access_token or not self.tokenizer_path:
@@ -6899,6 +7311,23 @@ class MaxTextConfig(
     context_parallel_size = getattr(self, f"ici_{self.context_sharding}_parallelism", 1) * getattr(
         self, f"dcn_{self.context_sharding}_parallelism", 1
     )
+    if self.decoder_block == DecoderBlockType.KIMI_LINEAR and any(
+        deg > 1
+        for deg in (
+            context_parallel_size,
+            self.ici_context_parallelism,
+            self.dcn_context_parallelism,
+            self.ici_context_usp_ulysses_parallelism,
+            self.dcn_context_usp_ulysses_parallelism,
+            self.ici_context_autoregressive_parallelism,
+            self.dcn_context_autoregressive_parallelism,
+        )
+    ):
+      raise ValueError(
+          "decoder_block=kimi_linear (Kimi-K3) does not support context parallelism yet: "
+          "KDA layers do not propagate recurrent/conv state across sequence shards or unpermute "
+          "load-balanced (DUAL_CHUNK_SWAP) batches."
+      )
     if self.attention_type == AttentionType.COMPRESSED.value:
       # `compress_ratios` is per-layer and a ratio of 0 downgrades that layer to local sliding
       # attention (see CompressedAttention.__init__), so context parallelism stays legal when no
@@ -7150,6 +7579,15 @@ class MaxTextConfig(
               f"gdn_cp_mode='head' requires gdn_num_key_heads ({self.gdn_num_key_heads}) to be divisible by "
               f"the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
           )
+      if self.gdn_gated_norm_layout != "auto" and not self.gdn_out_proj_token_minor:
+        raise ValueError("gdn_gated_norm_layout != 'auto' requires gdn_out_proj_token_minor=True.")
+      if (self.gdn_in_proj_kernel_order or self.gdn_fp8_projections) and self.shard_mode == ShardMode.EXPLICIT:
+        raise ValueError("gdn_in_proj_kernel_order and gdn_fp8_projections require shard_mode='auto'.")
+      if self.gdn_in_proj_kernel_order and self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True is incompatible with gdn_cp_mode='head' when context parallelism > 1."
+        )
+      self._validate_gdn_projection_quantization(self)
       if (
           not self.packing
           and self.dataset_type == DatasetType.GRAIN
@@ -7164,6 +7602,18 @@ class MaxTextConfig(
     else:
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
+      if (
+          self.gdn_in_proj_kernel_order
+          or self.gdn_out_proj_token_minor
+          or self.gdn_gated_norm_layout != "auto"
+          or self.gdn_fp8_projections
+          or not self.gdn_pin_in_proj_output_layout
+      ):
+        raise ValueError(
+            "GatedDeltaNet projection/norm layout options (gdn_in_proj_kernel_order, gdn_out_proj_token_minor, "
+            "gdn_gated_norm_layout, gdn_fp8_projections, gdn_pin_in_proj_output_layout) require a GatedDeltaNet "
+            "decoder_block ('qwen3_next' or 'qwen3_5')."
+        )
 
     tokenizer_path = getattr(self, "tokenizer_path", None)
     if (
@@ -7954,6 +8404,27 @@ class RLConfig(
               f"gdn_cp_mode='head' requires gdn_num_key_heads ({self.gdn_num_key_heads}) to be divisible by "
               f"the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
           )
+      if self.gdn_gated_norm_layout != "auto" and not self.gdn_out_proj_token_minor:
+        raise ValueError("gdn_gated_norm_layout != 'auto' requires gdn_out_proj_token_minor=True.")
+      if (self.gdn_in_proj_kernel_order or self.gdn_fp8_projections) and self.shard_mode == ShardMode.EXPLICIT:
+        raise ValueError("gdn_in_proj_kernel_order and gdn_fp8_projections require shard_mode='auto'.")
+      if self.gdn_in_proj_kernel_order and self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True is incompatible with gdn_cp_mode='head' when context parallelism > 1."
+        )
+      MaxTextConfig._validate_gdn_projection_quantization(self)  # pylint: disable=protected-access
+    elif (
+        self.gdn_in_proj_kernel_order
+        or self.gdn_out_proj_token_minor
+        or self.gdn_gated_norm_layout != "auto"
+        or self.gdn_fp8_projections
+        or not self.gdn_pin_in_proj_output_layout
+    ):
+      raise ValueError(
+          "GatedDeltaNet projection/norm layout options (gdn_in_proj_kernel_order, gdn_out_proj_token_minor, "
+          "gdn_gated_norm_layout, gdn_fp8_projections, gdn_pin_in_proj_output_layout) require a GatedDeltaNet "
+          "decoder_block ('qwen3_next' or 'qwen3_5')."
+      )
 
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)

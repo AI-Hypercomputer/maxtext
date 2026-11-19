@@ -64,7 +64,7 @@ def _call_moe_body_return_weights(fn, s_args):
   use_ring_of_experts=True (which fails earlier in route()), so closure lookup reaches it directly.
   """
   moe_body = dict(zip(fn.__code__.co_freevars, (c.cell_contents for c in fn.__closure__)))["_moe_body"]
-  return moe_body(*s_args[:12], return_weights=True, per_expert_scale=s_args[12])[:6]
+  return moe_body(*s_args[:12], return_weights=True, per_expert_scale=s_args[12], token_mask=s_args[13])[:6]
 
 
 class RoutedMoEReplicationWiringTest(parameterized.TestCase):
@@ -248,7 +248,10 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
         rngs=jax.random.PRNGKey(1),
         forced_routed_experts=forced,
         compute_lb_loss=False,
-        physical_route_fn=lambda flat: (jnp.where((flat == 0) & (jnp.arange(flat.shape[0]) >= 6), 5, base_map[flat]), 6),
+        physical_route_fn=lambda flat, _mask=None: (
+            jnp.where((flat == 0) & (jnp.arange(flat.shape[0]) >= 6), 5, base_map[flat]),
+            6,
+        ),
     )
     self.assertEqual(group_sizes.shape, (6,))
     self.assertEqual(int(jnp.sum(group_sizes)), forced.size)
@@ -264,7 +267,7 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
     inputs = jnp.arange(2 * 2 * 16, dtype=jnp.float32).reshape(2, 2, 16)
     logits = jnp.zeros((2, 2, 4), dtype=jnp.float32).at[:, :, 0].set(10.0).at[:, :, 1].set(5.0)
 
-    def route_fn(flat):
+    def route_fn(flat, _mask=None):
       return jnp.where(flat == 0, target_bin, flat), total_bins
 
     layer_ref = self._make_layer(moe_packed_routing_sort=False)
@@ -423,8 +426,8 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
       def ckpt_shard(x_, g_, w0_, w1_, wo_, forced_main):
         return jax.lax.cond(
             jnp.bool_(True),
-            lambda _: fn(x_, g_, s_args[2], w0_, w1_, wo_, *s_args[6:11], forced_main, s_args[12]),
-            lambda _: fn(x_, g_, s_args[2], w0_, w1_, wo_, *s_args[6:11], alt_forced, s_args[12]),
+            lambda _: fn(x_, g_, s_args[2], w0_, w1_, wo_, *s_args[6:11], forced_main, *s_args[12:]),
+            lambda _: fn(x_, g_, s_args[2], w0_, w1_, wo_, *s_args[6:11], alt_forced, *s_args[12:]),
             operand=None,
         )
 
@@ -444,6 +447,108 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
     np.testing.assert_allclose(np.asarray(out_rep), np.asarray(out_ref), rtol=1e-5, atol=1e-5)
     for g_rep, g_ref in zip(grads_rep, grads_ref):
       np.testing.assert_allclose(np.asarray(g_rep), np.asarray(g_ref), rtol=1e-5, atol=1e-5)
+
+  def test_token_mask_padded_rows_excluded_from_planner_and_replica_slots(self):
+    """Verifies token_mask padded tokens add 0 to planner counts, avoid replica slots, and match R=0."""
+    inputs, base_logits, w0, w1, wo, cotangent = self._sample_tensors(seed=101)
+    # Shard 0 (rows 0..1) has 2 valid tokens routing to (2, 0) plus 6 padded tokens whose round-robin
+    # dummy_indices include hot expert 2; shard 1 (rows 2..3) has 7 valid tokens routing to (2, 3) + 1 pad.
+    token_mask_mixed = jnp.array(
+        [
+            [True, True, False, False],
+            [False, False, False, False],
+            [True, True, True, True],
+            [True, True, True, False],
+        ],
+        dtype=jnp.bool_,
+    )
+    logits_mixed = (
+        base_logits.at[:2, :, 2]
+        .set(12.0)
+        .at[:2, :, 0]
+        .set(9.0)
+        .at[:2, :, 1]
+        .set(-8.0)
+        .at[:2, :, 3]
+        .set(-8.0)
+        .at[2:, :, 2]
+        .set(12.0)
+        .at[2:, :, 3]
+        .set(9.0)
+        .at[2:, :, 0]
+        .set(-8.0)
+        .at[2:, :, 1]
+        .set(-8.0)
+    )
+    # Also test a tail-padded batch where shard 1 holds 0 valid tokens while shard 0 routes to shard 1's (2, 3).
+    token_mask_tail = jnp.array(
+        [[True, True, True, True], [True, True, True, True], [False, False, False, False], [False, False, False, False]],
+        dtype=jnp.bool_,
+    )
+    logits_tail = base_logits.at[:2, :, 2].set(12.0).at[:2, :, 3].set(9.0).at[:2, :, :2].set(-8.0)
+
+    orig_compute_plan = mrp.compute_plan_iter
+
+    def check_case(logits, token_mask, expected_counts, expected_rep_gs):
+      # Poison padded inputs with large non-zero values to verify they never leak into outputs or grads.
+      padded_inputs = jnp.where(token_mask[..., None], inputs, jnp.float32(500.0))
+      seen_counts = []
+
+      def spy_plan(counts_src, num_ep, num_replicas, max_send):
+        jax.debug.callback(lambda c: seen_counts.append(np.asarray(c)), counts_src)
+        return orig_compute_plan(counts_src, num_ep, num_replicas, max_send)
+
+      def run_arm(replicas):
+        layer = self._make_layer(
+            decoder_block="deepseek",
+            expert_replicas_per_device=replicas,
+            expert_replica_max_send=2,
+            load_balance_loss_weight=0.01,
+            routed_bias=True,
+            routed_bias_update_rate=1e-3,
+        )
+        cap = {}
+        ctx = (
+            mock.patch.object(mrp, "compute_plan_iter", side_effect=spy_plan)
+            if replicas > 0
+            else contextlib.nullcontext()
+        )
+        with ctx, self._cpu_ep_runtime(layer, cotangent=cotangent, captured=cap):
+          out, lb_loss, bias = layer.sparse_matmul(
+              padded_inputs, logits, None, w0, w1, wo, None, None, None, token_mask=token_mask
+          )
+        return out, lb_loss, bias, cap
+
+      out_ref, lb_ref, bias_ref, cap_ref = run_arm(0)
+      out_rep, lb_rep, bias_rep, cap_rep = run_arm(1)
+
+      # 1. Planner [EP, E] counts exclude all token_mask=False padded tokens (exact 0s on tail-padded shard).
+      self.assertNotEmpty(seen_counts)
+      for shard_counts in seen_counts:
+        np.testing.assert_array_equal(shard_counts, np.array(expected_counts, dtype=np.int32))
+
+      # 2. Replica slots [L, L+R) hold ONLY the planned valid tokens (zero dummy padded tokens).
+      local_gs = np.asarray(cap_rep["local_group_sizes"])
+      np.testing.assert_array_equal(local_gs[:, 2], np.array(expected_rep_gs, dtype=np.int32))
+
+      # 3. Forward output, masked aux loss, routed-bias update, and all 5 gradients match R=0; padded positions are 0.
+      pad_mask_np = ~np.asarray(token_mask)
+      np.testing.assert_array_equal(np.asarray(out_rep)[pad_mask_np], 0.0)
+      np.testing.assert_allclose(np.asarray(out_rep), np.asarray(out_ref), rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(np.asarray(lb_rep), np.asarray(lb_ref), rtol=1e-6, atol=1e-6)
+      np.testing.assert_allclose(np.asarray(bias_rep), np.asarray(bias_ref), rtol=1e-6, atol=1e-6)
+      dx_rep, dlogits_rep = np.asarray(cap_rep["grads"][0]), np.asarray(cap_rep["grads"][1])
+      np.testing.assert_array_equal(dx_rep[pad_mask_np], 0.0)
+      np.testing.assert_array_equal(dlogits_rep[pad_mask_np], 0.0)
+      for name, g_rep, g_ref in zip(("dx", "dlogits", "dw0", "dw1", "dwo"), cap_rep["grads"], cap_ref["grads"]):
+        np.testing.assert_allclose(np.asarray(g_rep), np.asarray(g_ref), rtol=1e-5, atol=1e-5, err_msg=name)
+
+    for case_name, logits_c, mask_c, exp_counts, exp_rep_gs in (
+        ("mixed_pad_with_dummy_hitting_hot_expert", logits_mixed, token_mask_mixed, [[2, 0, 2, 0], [0, 0, 7, 7]], [2, 0]),
+        ("tail_shard_all_padded", logits_tail, token_mask_tail, [[0, 0, 8, 8], [0, 0, 0, 0]], [8, 0]),
+    ):
+      with self.subTest(case=case_name):
+        check_case(logits_c, mask_c, exp_counts, exp_rep_gs)
 
 
 @pytest.mark.tpu_only

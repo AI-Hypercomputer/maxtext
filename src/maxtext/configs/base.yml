@@ -101,6 +101,9 @@ enable_orbax_v1: false
 checkpoint_conversion_fn: none
 # optional checkpoint context to use for loading. options: "orbax", "safetensors"
 source_checkpoint_layout: "orbax"
+# Experimental, only with source_checkpoint_layout="safetensors_dynamic": stream the HF checkpoint
+# a few decoder layers at a time (hf_streaming_load) instead of reading all of it into HBM first.
+safetensors_dynamic_streaming: false
 
 # Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing
 colocated_python_checkpointing: false
@@ -336,6 +339,7 @@ warmup_programs_in_init: false # before init_stop/run_start, run each precompile
 warmup_skip_train_dropless: false # requires warmup_programs_in_init=true; do not warm the train_dropless program (its warmup holds a second copy of the train state in HBM and can OOM). Use only when that warmup OOMs; the first dropless replay then pays the program's first load.
 log_step_diagnostics: false # append grad/param norms, max |grad|, routed-bias checksum, nonzero bias updates and the overflow flag to every training step log line
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
+moe_router_input_dim: -1 # feature dimension of the router (gate) input, passed as `gate_inputs`; defaults to the expert input dim.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
 moe_use_megatron_seq_aux_loss: false # when true, sigmoid and sqrtsoftplus routers use Megatron-LM's sequence-wise aux loss summed over MoE layers; false (default) uses the Switch-style loss averaged over MoE layers.
@@ -1018,6 +1022,9 @@ tokenizer_path: ""
 # grain and tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
 tokenizer_type: "sentencepiece" # Currently supporting: "tiktoken", "sentencepiece", "huggingface"
+# Pass trust_remote_code=True to AutoTokenizer (huggingface type / hf pipeline). This runs code from
+# tokenizer_path; only enable it for a trusted tokenizer (e.g. Kimi-K3's tiktoken-based HF tokenizer).
+tokenizer_trust_remote_code: false
 use_chat_template: false
 chat_template_path: "" # path to chat template json file
 chat_template: "" # Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template.
@@ -1826,6 +1833,23 @@ elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
 # How the global batch size behaves when training on fewer than all slices of the job: "scaled" keeps
-# per_device_batch_size fixed so the global batch scales with the live slice count; "constant_padded" keeps the global
-# batch size of all slices by rounding up per_device_batch_size and padding the extra rows with zero segmentation.
+# per_device_batch_size fixed so the global batch scales with the live slice count; "constant_grad_accum" keeps the
+# global batch size of all slices and per_device_batch_size, growing only gradient_accumulation_steps to
+# ceil(global_batch / (live_devices * per_device_batch_size)), so activation memory and the compiled microbatch shapes
+# never change on a resize (recommended, in particular for recipes that fill HBM at the nominal batch);
+# "constant_padded" keeps the global batch size of all slices by rounding up per_device_batch_size (or, with
+# elastic_max_per_device_batch_size, by searching the per-device batches up to a bound for the least padding; advanced).
+# Both constant modes pad the extra rows with zero segmentation, which the loss masks out.
 elastic_global_batch_size_mode: "scaled"
+# With "constant_padded", how the constant global batch is covered on fewer slices. -1 keeps gradient_accumulation_steps
+# and rounds per_device_batch_size up (activation memory grows by the same factor). A value >= per_device_batch_size
+# bounds the per-device batch and grows gradient_accumulation_steps instead, picking the factoring with the least
+# padding among the per-device batches in [per_device_batch_size, bound] (ties go to the smaller per-device batch, and
+# it is never lowered below per_device_batch_size). With "constant_grad_accum" the bound is implied to be
+# per_device_batch_size and this must stay -1.
+elastic_max_per_device_batch_size: -1
+# With "constant_padded", the fraction of device HBM the compiled train step may use when a resize raised
+# per_device_batch_size above its nominal value. If it needs more, the attempt restarts with
+# elastic_max_per_device_batch_size set to the nominal per-device batch (only gradient_accumulation_steps grows).
+# 0 disables the check. A no-op with "constant_grad_accum", whose per-device batch never grows.
+elastic_hbm_budget_fraction: 0.9

@@ -29,6 +29,10 @@ PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
 
+# `quantization` modes that do not support gradient accumulation (`gradient_accumulation_steps > 1`). Shared by the
+# config validation and the elastic HBM fallback, which must agree on when the accumulation steps may not change.
+FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION = ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
+
 
 def is_fp8_dtype(dtype: Any) -> bool:
   """Checks whether a dtype is FP8."""
@@ -158,6 +162,7 @@ class DecoderBlockType(enum.Enum):
   WEAVER = "weaver"
   MING = "ming"
   HY4 = "hy4"
+  KIMI_LINEAR = "kimi_linear"
 
 
 class VisionEncoderBlockType(enum.Enum):

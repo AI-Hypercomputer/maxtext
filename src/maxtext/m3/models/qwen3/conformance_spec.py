@@ -27,6 +27,12 @@ from tests.unit.m3.conformance import spec
 _BATCH_SIZE = 2
 _SEQ_LEN = 8
 _VOCAB_SIZE = 256
+# TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting
+# to 5e-2.
+_BF16_ATOL = 5e-2
+# TODO(yaoyuchen): Make threshold configurable via flag/user input defaulting
+# to 5e-2.
+_BF16_RTOL = 5e-2
 
 
 @dataclasses.dataclass(frozen=True, kw_only=True)
@@ -72,6 +78,28 @@ _QWEN3_MINI_CFG = _Qwen3MiniConfig(
     weight_dtype=jnp.float32,
 )
 
+_QWEN3_MINI_BF16_CFG = dataclasses.replace(
+    _QWEN3_MINI_CFG,
+    dtype=jnp.bfloat16,
+)
+
+
+def _build_qwen3_with_cfg(
+    cfg: _Qwen3MiniConfig,
+    mesh: jax.sharding.Mesh,
+    rngs: nnx.Rngs,
+    scan_layers: bool,
+    remat_policy: str,
+) -> nnx.Module:
+  """Builds a mini `Qwen3Model` with `cfg` on `mesh` (`m3/README.md` (1), (2), (7))."""
+  del scan_layers
+  if rngs is None:
+    raise ValueError("rngs must be provided as a non-None nnx.Rngs instance.")
+  if remat_policy not in ("none", "full"):
+    raise ValueError(f"remat_policy must be 'none' or 'full', got {remat_policy!r}.")
+  with jax.sharding.set_mesh(mesh):
+    return modeling_qwen3.Qwen3Model(cfg, mesh, rngs=rngs)
+
 
 def _build_qwen3_model(
     mesh: jax.sharding.Mesh,
@@ -79,12 +107,18 @@ def _build_qwen3_model(
     scan_layers: bool,
     remat_policy: str,
 ) -> nnx.Module:
-  """Builds a mini `Qwen3Model` on `mesh` (`m3/README.md` (1), (2), (7))."""
-  del scan_layers, remat_policy
-  if rngs is None:
-    raise ValueError("rngs must be provided as a non-None nnx.Rngs instance.")
-  with jax.sharding.set_mesh(mesh):
-    return modeling_qwen3.Qwen3Model(_QWEN3_MINI_CFG, mesh, rngs=rngs)
+  """Builds a mini `fp32` `Qwen3Model` on `mesh` (`m3/README.md` (1), (2), (7))."""
+  return _build_qwen3_with_cfg(_QWEN3_MINI_CFG, mesh, rngs, scan_layers, remat_policy)
+
+
+def _build_qwen3_bf16_model(
+    mesh: jax.sharding.Mesh,
+    rngs: nnx.Rngs,
+    scan_layers: bool,
+    remat_policy: str,
+) -> nnx.Module:
+  """Builds a mini `bfloat16` `Qwen3Model` on `mesh` for Check 9a."""
+  return _build_qwen3_with_cfg(_QWEN3_MINI_BF16_CFG, mesh, rngs, scan_layers, remat_policy)
 
 
 def _build_qwen3_batch(
@@ -96,7 +130,7 @@ def _build_qwen3_batch(
   input_ids = jax.random.randint(
       key,
       (_BATCH_SIZE, _SEQ_LEN),
-      0,
+      1,
       _VOCAB_SIZE,
       dtype=jnp.int32,
   )
@@ -132,16 +166,17 @@ def _loss_qwen3(
     batch: Mapping[str, jax.Array],
     aux_weights: Mapping[str, float],
 ) -> jax.Array:
-  """Computes fp32 cross-entropy loss (`m3/README.md` Invariant (4))."""
+  """Computes masked fp32 cross-entropy loss (`m3/README.md` Invariant (4))."""
   del aux_weights
   targets = jnp.roll(batch["input_ids"], shift=-1, axis=-1)
+  valid_mask = (batch["segment_ids"] != 0).astype(jnp.float32)
   log_probs = jax.nn.log_softmax(out.primary.astype(jnp.float32), axis=-1)
   token_nll = -jnp.take_along_axis(
       log_probs,
       targets[..., None],
       axis=-1,
   ).squeeze(-1)
-  return jnp.mean(token_nll)
+  return jnp.sum(token_nll * valid_mask) / jnp.maximum(jnp.sum(valid_mask), 1.0)
 
 
 def make_qwen3_conformance_spec() -> spec.ConformanceSpec:
@@ -153,6 +188,9 @@ def make_qwen3_conformance_spec() -> spec.ConformanceSpec:
       build_batch=_build_qwen3_batch,
       forward_fn=_forward_qwen3,
       loss_fn=_loss_qwen3,
+      build_bf16_model=_build_qwen3_bf16_model,
+      bf16_atol=_BF16_ATOL,
+      bf16_rtol=_BF16_RTOL,
       skips={
           spec.CheckId.SCAN_REMAT_EQUIVALENCE: spec.SkipDeclaration(
               spec.SkipStatus.NOT_APPLICABLE,
@@ -179,6 +217,27 @@ def make_qwen3_conformance_spec() -> spec.ConformanceSpec:
               spec.SkipStatus.NOT_APPLICABLE,
               "Qwen3DecoderLayer (modeling_qwen3.py:244-289) uses dense"
               " Qwen3MLP (modeling_qwen3.py:37-88) with no MoE expert weights.",
+          ),
+          spec.CheckId.PACKING_AND_PADDING_ISOLATION: spec.SkipDeclaration(
+              spec.SkipStatus.NOT_APPLICABLE,
+              "Qwen3Attention._compute_attention (modeling_qwen3.py:199-206)"
+              " masks via segment_ids[:, :, None] == segment_ids[:, None, :]"
+              " without excluding 0-padding (0 == 0 pad-to-pad attention) and"
+              " Qwen3Model (modeling_qwen3.py:458-478) does not mask padding"
+              " output logits (b/585591291).",
+          ),
+          spec.CheckId.EXPERT_PARALLEL_PARITY: spec.SkipDeclaration(
+              spec.SkipStatus.NOT_APPLICABLE,
+              "Qwen3Model (modeling_qwen3.py:37-88) is a dense transformer" " without MoE expert parallelism.",
+          ),
+          spec.CheckId.SHARDED_CHECKPOINT_SLICE_LOAD: spec.SkipDeclaration(
+              spec.SkipStatus.NOT_APPLICABLE,
+              "Qwen3Model (modeling_qwen3.py:418-446) does not attach" " NamedSharding metadata to parameters yet.",
+          ),
+          spec.CheckId.FULL_SCALE_TOPOLOGY_AOT_AND_REMAT_HBM: spec.SkipDeclaration(
+              spec.SkipStatus.NOT_APPLICABLE,
+              "Qwen3Model (modeling_qwen3.py:339-345, 436-446) omits"
+              " parameter PartitionSpecs and remat_policy support.",
           ),
       },
   )
