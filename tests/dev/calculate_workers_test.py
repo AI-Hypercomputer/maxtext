@@ -30,7 +30,7 @@ from tools.dev.calculate_workers import get_max_workers_for_flavor
 
 def test_constants():
   """Tests that module constants have expected defaults."""
-  assert MAX_CPU_WORKERS == 4
+  assert MAX_CPU_WORKERS == 5
   assert MAX_TPU_WORKERS == 3
   assert MAX_GPU_WORKERS == 3
   assert DEFAULT_WORKERS == 1
@@ -41,9 +41,9 @@ def test_constants():
 
 def test_get_max_workers_for_flavor():
   """Tests device-specific maximum worker safety caps."""
-  assert get_max_workers_for_flavor("cpu-unit") == 4
-  assert get_max_workers_for_flavor("cpu-integration") == 4
-  assert get_max_workers_for_flavor("cpu-post-training-unit") == 4
+  assert get_max_workers_for_flavor("cpu-unit") == 5
+  assert get_max_workers_for_flavor("cpu-integration") == 5
+  assert get_max_workers_for_flavor("cpu-post-training-unit") == 5
   assert get_max_workers_for_flavor("tpu-unit") == 3
   assert get_max_workers_for_flavor("tpu-integration") == 3
   assert get_max_workers_for_flavor("tpu7x-unit") == 3
@@ -55,8 +55,8 @@ def test_get_max_workers_for_flavor():
 def test_calculate_workers_no_baseline():
   """Tests fallback behavior when baseline data is not provided."""
   workers, groups = calculate_workers("cpu-unit", None)
-  assert workers == 4
-  assert groups == [1, 2, 3, 4]
+  assert workers == 5
+  assert groups == [1, 2, 3, 4, 5]
 
   workers, groups = calculate_workers("tpu-unit", None)
   assert workers == 3
@@ -81,8 +81,8 @@ def test_calculate_workers_heavy_suite():
   """Tests worker allocation for heavy suites (>= 16 effective mins)."""
   baseline = {f"cpu-unit::test_{i}": 600.0 for i in range(30)}  # 300 CPU-mins -> 37.5 eff mins
   workers, groups = calculate_workers("cpu-unit", baseline)
-  assert workers == 4
-  assert groups == [1, 2, 3, 4]
+  assert workers == 5
+  assert groups == [1, 2, 3, 4, 5]
 
   baseline_tpu = {f"tpu-unit::test_{i}": 60.0 for i in range(20)}  # 20 mins total
   workers, groups = calculate_workers("tpu-unit", baseline_tpu)
@@ -111,7 +111,7 @@ def test_calculate_workers_lightweight_suite():
 
 def test_calculate_workers_fewer_tests_than_max_workers():
   """Tests that worker count never exceeds the number of tests."""
-  # 2 tests taking 1000s each = 16.67m max single test -> max_workers is 4, but only 2 tests!
+  # 2 tests taking 1000s each = 16.67m max single test -> max_workers is 5, but only 2 tests!
   baseline = {
       "cpu-unit::test_heavy_1": 1000.0,
       "cpu-unit::test_heavy_2": 1000.0,
