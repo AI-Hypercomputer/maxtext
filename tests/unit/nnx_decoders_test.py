@@ -490,6 +490,73 @@ class TestNNXDecoderRematPolicy(unittest.TestCase):
     decoder = NNXDecoder(config=cfg, mesh=mesh, rngs=nnx.Rngs(params=0, dropout=1))
     self.assertIsNotNone(decoder.get_remat_policy())
 
+  def test_combine_per_chunk_saves_moe_combine_order_across_all_remat_policies(self):
+    """`combine_per_chunk` saves `'moe_combine_order'` across all presets without mutating `cfg.tensors_on_device`."""
+    presets = (
+        "full",
+        "minimal",
+        "minimal_with_context",
+        "save_qkv_proj",
+        "save_out_proj",
+        "qkv_proj_offloaded",
+        "minimal_offloaded",
+        "custom",
+    )
+    x = jnp.ones((4,), dtype=jnp.float32)
+
+    def _exp_count_under_policy(policy):
+      def ckpt_body(val):
+        expensive = jax.lax.stop_gradient(jnp.exp(val))
+        saved = jax.ad_checkpoint.checkpoint_name(expensive, "moe_combine_order")
+        return jnp.sum((val + saved) * val)
+
+      ckpt_fn = jax.checkpoint(ckpt_body, policy=policy)
+      jaxpr = jax.make_jaxpr(jax.grad(ckpt_fn))(x).jaxpr
+
+      def _count_exp(jpr):
+        total = 0
+        for eqn in jpr.eqns:
+          if eqn.primitive.name == "exp":
+            total += 1
+          for param in eqn.params.values():
+            if hasattr(param, "eqns"):
+              total += _count_exp(param)
+            elif hasattr(param, "jaxpr") and hasattr(param.jaxpr, "eqns"):
+              total += _count_exp(param.jaxpr)
+        return total
+
+      return _count_exp(jaxpr)
+
+    # Sanity control: when unsaved, `exp` runs twice (forward + remat replay).
+    self.assertEqual(_exp_count_under_policy(jax.checkpoint_policies.nothing_saveable), 2)
+
+    for preset in presets:
+      with self.subTest(remat_policy=preset):
+        cfg = _make_config(
+            remat_policy=preset,
+            override_logical_axis_rules=True,
+            use_ring_of_experts=True,
+            num_moe_token_chunks=2,
+            moe_ring_pipeline_mode="combine_per_chunk",
+            num_experts=4,
+            num_experts_per_tok=2,
+            base_moe_mlp_dim=512,
+            sparse_matmul=True,
+            megablox=False,
+        )
+        self.assertNotIn("moe_combine_order", cfg.tensors_on_device or [])
+        if preset in ("qkv_proj_offloaded", "minimal_offloaded", "custom"):
+          save_names, _ = maxtext_utils.get_save_and_offload_names(cfg)
+          self.assertIn("moe_combine_order", save_names)
+
+        decoder = NNXDecoder(config=cfg, mesh=_make_mesh(cfg), rngs=nnx.Rngs(params=0, dropout=1))
+        policy = decoder.get_remat_policy()
+        scan_safe_policy = decoder._get_scan_safe_remat_policy()  # pylint: disable=protected-access
+        self.assertIsNotNone(policy)
+        self.assertIsNotNone(scan_safe_policy)
+        self.assertEqual(_exp_count_under_policy(policy), 1)
+        self.assertEqual(_exp_count_under_policy(scan_safe_policy), 1)
+
   # --- minimal_policy -------------------------------------------------------
 
   def test_minimal_policy_no_flags(self):
@@ -1283,6 +1350,7 @@ class TestGemma4ScannableBlock(unittest.TestCase):
         dtype=jnp.float32,
         param_scan_axis=1,
         remat_policy="none",
+        moe_ring_pipeline_mode="none",
         scan_layers=True,
         shard_mode=ShardMode.AUTO,
         debug_sharding=False,
@@ -2386,6 +2454,7 @@ class Qwen3_5ScannableBlockKVCacheTest(unittest.TestCase):
         inhomogeneous_layer_cycle_interval=self.CYCLE,
         param_scan_axis=1,
         remat_policy="none",
+        moe_ring_pipeline_mode="none",
         scan_layers=True,
         shard_mode=ShardMode.AUTO,
     )

@@ -1784,11 +1784,12 @@ class TestGetSaveAndOffloadNames(unittest.TestCase):
   """Tests for maxtext_utils.get_save_and_offload_names (pure config logic, no device needed)."""
 
   @staticmethod
-  def _cfg(remat_policy, tensors_on_device=None, tensors_to_offload=None):
+  def _cfg(remat_policy, tensors_on_device=None, tensors_to_offload=None, moe_ring_pipeline_mode="none"):
     return SimpleNamespace(
         remat_policy=remat_policy,
         tensors_on_device=tensors_on_device,
         tensors_to_offload=tensors_to_offload,
+        moe_ring_pipeline_mode=moe_ring_pipeline_mode,
     )
 
   def test_named_preset_matches_equivalent_custom(self):
@@ -1828,6 +1829,45 @@ class TestGetSaveAndOffloadNames(unittest.TestCase):
     """Policies that don't use the save/offload split contribute no names to it."""
     for policy in ("full", "minimal", "save_out_proj", "save_qkv_proj", "none"):
       self.assertEqual(maxtext_utils.get_save_and_offload_names(self._cfg(policy)), ([], []))
+
+  def test_combine_per_chunk_adds_moe_combine_order_without_mutating_config(self):
+    """moe_ring_pipeline_mode='combine_per_chunk' injects 'moe_combine_order' via get_save_and_offload_names only."""
+    for preset in ("qkv_proj_offloaded", "minimal_offloaded"):
+      save, offload = maxtext_utils.get_save_and_offload_names(
+          self._cfg(preset, moe_ring_pipeline_mode="combine_per_chunk")
+      )
+      self.assertEqual(save, ["moe_combine_order"])
+      self.assertTrue(offload)
+
+    on_device = ["context"]
+    save_custom, offload_custom = maxtext_utils.get_save_and_offload_names(
+        self._cfg(
+            "custom",
+            tensors_on_device=on_device,
+            tensors_to_offload=["out_proj"],
+            moe_ring_pipeline_mode="combine_per_chunk",
+        )
+    )
+    self.assertEqual(save_custom, ["context", "moe_combine_order"])
+    self.assertEqual(offload_custom, ["out_proj"])
+    self.assertEqual(on_device, ["context"])
+
+    save_explicit_offload, offload_explicit = maxtext_utils.get_save_and_offload_names(
+        self._cfg(
+            "custom",
+            tensors_on_device=["context"],
+            tensors_to_offload=["moe_combine_order"],
+            moe_ring_pipeline_mode="combine_per_chunk",
+        )
+    )
+    self.assertEqual(save_explicit_offload, ["context"])
+    self.assertEqual(offload_explicit, ["moe_combine_order"])
+
+    for policy in ("full", "minimal", "save_out_proj", "save_qkv_proj", "none"):
+      self.assertEqual(
+          maxtext_utils.get_save_and_offload_names(self._cfg(policy, moe_ring_pipeline_mode="combine_per_chunk")),
+          ([], []),
+      )
 
 
 if __name__ == "__main__":

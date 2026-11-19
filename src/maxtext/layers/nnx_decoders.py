@@ -114,6 +114,12 @@ def save_gathered_fsdp_weights_policy(policy):
   return keep if policy is None else jax.checkpoint_policies.save_from_both_policies(policy, keep)
 
 
+def _save_moe_combine_order_policy(policy):
+  """Extends boolean/full remat `policy` so `moe_combine_order` is saved on device."""
+  keep = jax.checkpoint_policies.save_only_these_names("moe_combine_order")
+  return keep if policy is None else jax.checkpoint_policies.save_from_both_policies(policy, keep)
+
+
 def hoist_fsdp_weight_gather(params, mesh, config):
   """Gather each FSDP-sharded layer kernel once, in compute dtype, at the top of a scan body.
 
@@ -1769,16 +1775,15 @@ class NNXDecoder(nnx.Module):
   def _get_scan_safe_remat_policy(self):
     """Returns a remat policy keeping offloaded residuals on device across trip-count-one scans."""
     remat_policy = self._effective_remat_policy()
-    if not remat_policy or remat_policy in ("none", "full"):
+    if not remat_policy or remat_policy == "none":
       return None
     # Offloaded residuals cannot cross the trip-count-one boundary, so keep them on device.
     policy_cfg = types.SimpleNamespace(
+        moe_ring_pipeline_mode=self.config.moe_ring_pipeline_mode,
         remat_policy=remat_policy,
         tensors_on_device=self.config.tensors_on_device,
         tensors_to_offload=self.config.tensors_to_offload,
-        context_parallel_attention_load_balance_hoist_ids=getattr(
-            self.config, "context_parallel_attention_load_balance_hoist_ids", False
-        ),
+        context_parallel_attention_load_balance_hoist_ids=self.config.context_parallel_attention_load_balance_hoist_ids,
     )
     save_names, offload_names = maxtext_utils.get_save_and_offload_names(policy_cfg)
     if save_names or offload_names:
@@ -1863,37 +1868,7 @@ class NNXDecoder(nnx.Module):
             "kv_proj",
             "qkv_proj",
         )
-      elif remat_policy == "qkv_proj_offloaded":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=[
-                "query_proj",
-                "value_proj",
-                "key_proj",
-                "kv_proj",
-            ],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif remat_policy == "minimal_offloaded":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=[
-                "query_proj",
-                "value_proj",
-                "key_proj",
-                "kv_proj",
-                "qkv_proj",
-                "out_proj",
-                "mlpwi_0",
-                "mlpwi_1",
-                "mlpwi",
-                "mlpwo",
-            ],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif remat_policy == "custom":
+      elif remat_policy in {"qkv_proj_offloaded", "minimal_offloaded", "custom"}:
         save_names, offload_names = maxtext_utils.get_save_and_offload_names(cfg)
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=save_names,
@@ -1906,6 +1881,12 @@ class NNXDecoder(nnx.Module):
       else:
         assert remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
+      if cfg.moe_ring_pipeline_mode == "combine_per_chunk" and remat_policy not in {
+          "qkv_proj_offloaded",
+          "minimal_offloaded",
+          "custom",
+      }:
+        policy = _save_moe_combine_order_policy(policy)
     return policy
 
   def get_norm_layer(self, num_features: int, rngs: nnx.Rngs):
