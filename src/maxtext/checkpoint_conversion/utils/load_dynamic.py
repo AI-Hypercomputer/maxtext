@@ -15,18 +15,22 @@
 """Dynamic loading of HuggingFace checkpoints during training/eval workloads directly in the target format.
 
 This module allows loading HuggingFace checkpoints (in Safetensors format)
-directly during MaxText training or evaluation runs. The checkpoint is streamed
-a few decoder layers at a time (see `hf_streaming_load`): each read call's
-tensors are read straight into HBM, converted on the TPU chips, and written into
-the sharded MaxText weights. This avoids offline pre-conversion steps and holds
-at most two read calls of HF tensors (about 4 GiB per host each: the one being
-converted and the next one being read) in host RAM and HBM at a time, on top of
-the final weights.
+directly during MaxText training or evaluation runs, performing on-the-fly sharded
+restore and CPU/TPU transformations. This avoids offline pre-conversion steps
+and prevents host OOM.
+
+By default the whole checkpoint is read (`load_sharded_hf_state`) and then converted
+(`transform_hf_state_to_mt_state`), so HBM holds the HF checkpoint and the MaxText weights at
+once. With `safetensors_dynamic_streaming=True` (experimental) the checkpoint is instead streamed
+a few decoder layers at a time (see `hf_streaming_load`): each read call's tensors (about 4 GiB
+per host) are read straight into HBM, converted on the TPU chips, and written into the sharded
+MaxText weights.
 
 Usage:
   To load Hugging Face checkpoints directly, configure the following flags:
   1. `source_checkpoint_layout`: Set to `"safetensors_dynamic"`.
   2. `load_parameters_path`: Set to the source path of the Hugging Face checkpoint.
+  3. Optional: `safetensors_dynamic_streaming=True` to stream the checkpoint layer by layer.
 
 Examples:
   A. Load from a Google Cloud Storage (GCS) directory containing `.safetensors`:
@@ -239,7 +243,7 @@ def load_sharded_hf_state(path, num_groups=None):
   On one process, each tensor is sharded as much as possible. On several processes, each tensor is
   sharded along its leading axis only; see `_leading_axis_shardings`.
 
-  Reference implementation: it holds the whole HF checkpoint in HBM at once.
+  This holds the whole HF checkpoint in HBM at once. With `safetensors_dynamic_streaming=True`,
   `load_safetensors_dynamic_state` streams it with `hf_streaming_load` instead.
 
   Args:
@@ -324,7 +328,7 @@ def rename_legacy_hf_keys(hf_state, param_map_mt_to_hf):
 def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config):
   """Transforms HF state into MaxText state by applying param mappings and mathematical hooks.
 
-  Reference implementation for `hf_streaming_load`, which must produce the same weights.
+  `hf_streaming_load` (used with `safetensors_dynamic_streaming=True`) must produce the same weights.
   """
   t0 = time.time()
 
@@ -425,8 +429,9 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
 def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
   """Loads HF safetensors and converts them into MaxText weights on device.
 
-  Streams the checkpoint a few decoder layers at a time (see `hf_streaming_load`): each read call's
-  tensors are read straight into HBM, converted on the TPU chips, and written into the weights.
+  By default, reads every tensor sharded across `jax.devices()`, then maps, transforms and stacks the
+  tensors into the target layout. With `maxtext_config.safetensors_dynamic_streaming`, streams the
+  checkpoint a few decoder layers at a time instead (see `hf_streaming_load`).
 
   Args:
     path: The safetensors source: a `gs://` or local directory, or an HF repo ID with or without the
@@ -534,23 +539,38 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
 
   t_total = time.time()
   param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config)
-  max_logging.log(f"[1/2] Mappings derived in {time.time() - t_total:.2f}s")
+  streaming = maxtext_config.safetensors_dynamic_streaming
+  num_steps = 2 if streaming else 3
+  max_logging.log(f"[1/{num_steps}] Mappings derived in {time.time() - t_total:.2f}s")
 
   target_tree = abstract_params.to_pure_dict() if isinstance(abstract_params, nnx.State) else abstract_params
 
-  t1 = time.time()
-  # Read, convert, and place the weights a few decoder layers at a time. The next
-  # read call is fetched while the current one is converted, so at most two calls
-  # of HF tensors (about 4 GiB per host each) are in host RAM / HBM at once.
-  restored_params = hf_streaming_load.load_hf_params_streaming(
-      path,
-      target_tree,
-      param_map_mt_to_hf,
-      hook_fn_map_mt,
-      maxtext_config,
-      rename_hf_keys=functools.partial(rename_legacy_hf_keys, param_map_mt_to_hf=param_map_mt_to_hf),
-  )
-  max_logging.log(f"[2/2] Streamed and converted HF weights in {time.time() - t1:.2f}s")
+  if streaming:
+    t1 = time.time()
+    # Read, convert, and place the weights a few decoder layers at a time. The next
+    # read call is fetched while the current one is converted, so at most two calls
+    # of HF tensors (about 4 GiB per host each) are in host RAM / HBM at once.
+    restored_params = hf_streaming_load.load_hf_params_streaming(
+        path,
+        target_tree,
+        param_map_mt_to_hf,
+        hook_fn_map_mt,
+        maxtext_config,
+        rename_hf_keys=functools.partial(rename_legacy_hf_keys, param_map_mt_to_hf=param_map_mt_to_hf),
+    )
+    max_logging.log(f"[2/2] Streamed and converted HF weights in {time.time() - t1:.2f}s")
+  else:
+    t1 = time.time()
+    hf_state = rename_legacy_hf_keys(load_sharded_hf_state(path), param_map_mt_to_hf)
+    max_logging.log(f"[2/3] Distributed Sharded GCS load completed in {time.time() - t1:.2f}s")
+
+    t2 = time.time()
+    # Transform Hugging Face weight tensors on-the-fly into MaxText format
+    # in-memory. This is done in-memory on each host, sharded across the mesh.
+    restored_params = transform_hf_state_to_mt_state(
+        hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config
+    )
+    max_logging.log(f"[3/3] CPU Transformations completed in {time.time() - t2:.2f}s")
   max_logging.log(f"Total safetensors_dynamic duration: {time.time() - t_total:.2f}s")
 
   return None, restored_params

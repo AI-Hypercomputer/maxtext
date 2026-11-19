@@ -462,6 +462,13 @@ class Checkpointing(BaseModel):
   source_checkpoint_layout: Literal["orbax", "safetensors", "safetensors_dynamic"] = Field(
       "orbax", description="The layout of the source checkpoint to load."
   )
+  safetensors_dynamic_streaming: bool = Field(
+      False,
+      description=(
+          "Experimental. With source_checkpoint_layout='safetensors_dynamic', stream the HF checkpoint a few"
+          " decoder layers at a time instead of reading all of it into HBM before converting."
+      ),
+  )
   save_checkpoint_on_start: bool = Field(True, description="If True, saves an initial checkpoint upon training start.")
   save_checkpoint_on_completion: bool = Field(
       True, description="If True, saves a final checkpoint upon training completion."
