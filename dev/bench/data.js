@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795037041004,
+  "lastUpdate": 1795055168035,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -73047,6 +73047,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 365,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Yuchen Yao",
+            "username": "AusarYao28",
+            "email": "yaoyuchen@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "1ff9d167d6af54c70dbf4b109850d09d7287d436",
+          "message": "Expand MaxText m3 conformance suite with Checks 9a–9c and 10–12\n\n# Description\n\nExpand the MaxText `m3` conformance suite (`tests/unit/m3/conformance/`) with Checks 9a–9c and 10–12 (`CheckId`), wire `qwen3-0.6b` and `glm5.3-flash` conformance specs (`SkipDeclaration` `NOT_APPLICABLE` where model or `m3/infra` support has not yet landed on `main`), and add fault-injection negative controls in `conformance_test.py`:\n\n- Check 9a (`BF16_FORWARD_PARITY`): Evaluates `bfloat16` default-precision forward parity against `float32` highest-precision reference at normal weight initialization scale (runs on `qwen3-0.6b`; declared `NOT_APPLICABLE` on `glm5.3-flash` due to unscaled `lecun_normal` linear/embedding init and `bfloat16` KDA recurrence / `Glm5RMSNormGated` drift).\n- Check 9b (`PACKING_AND_PADDING_ISOLATION`): Verifies multi-document packed `segment_ids` (`{1, 1, 0, 2, 2, 2, 0, 0}`) forward isolation and input/embedding backward gradient isolation across documents and unique non-zero probe token IDs at `segment_ids == 0` padding positions (declared `NOT_APPLICABLE` on `qwen3-0.6b` due to `0 == 0` padding attention in `Qwen3Attention._compute_attention` and on `glm5.3-flash` which supports unpacked `{0, 1}` segment IDs only).\n- Check 9c (`EXPERT_PARALLEL_PARITY`): Verifies MoE `expert_weight_param_patterns` shard across the `'expert'` axis on `(data=1, fsdp=2, tensor=1, expert=2)` (4 devices) or `(data=1, fsdp=2, tensor=2, expert=2)` (>= 8 devices) and match `driver_mesh` forward outputs and losses (declared `NOT_APPLICABLE` on dense `qwen3-0.6b` and on `glm5.3-flash` where `Glm5Experts` / `Glm5MoE` raise `NotImplementedError` for `ep_size > 1`).\n- Check 10 (`OPTIMIZER_STEP_AND_FROZEN_WEIGHT_DECAY`): Runs two `optax.adamw` update steps with `weight_decay=0.1` wired through `configure_engine` and `frozen_param_patterns`, verifying frozen parameters remain bitwise identical while trainable parameters update with finite values and invariant state structure (runs on both `qwen3-0.6b` and `glm5.3-flash`; Check 2 also verifies frozen parameters are consumed in the forward `jaxpr`).\n- Check 11 (`SHARDED_CHECKPOINT_SLICE_LOAD`): Serializes parameters and reloads per-shard slices via `jax.make_array_from_callback` onto the sharded mesh, asserting `shard_elements < global_elements` for all eligible 2-D+ weights and bit-exact forward outputs (runs on `glm5.3-flash`; declared `NOT_APPLICABLE` on `qwen3-0.6b` consistent with Checks 5 and 7).\n- Check 12 (`FULL_SCALE_TOPOLOGY_AOT_AND_REMAT_HBM`): Evaluates `jax.eval_shape` physical sharding divisibility of full-scale abstract models across 64/128/256-device virtual meshes (`v5p-128`, `tpu7x-64`, `tpu7x-128`, `tpu7x-256`) and verifies `remat='full'` reduces saved backward VJP residuals compared to `remat='none'` (runs on `glm5.3-flash`; declared `NOT_APPLICABLE` on `qwen3-0.6b` consistent with Checks 1, 5, and 7).\n\n# Tests\n\n- `pytest -q tests/unit/m3/conformance/conformance_test.py` (4-device and 8-device CPU meshes): all conformance checks and fault-injection negative controls pass.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [x] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [x] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [x] I have run end-to-end tests and provided workload links above if applicable.\n- [x] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1025085152",
+          "timestamp": "2026-11-19T00:40:03Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/1ff9d167d6af54c70dbf4b109850d09d7287d436"
+        },
+        "date": 1795055167490,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 217.75499999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 53.031,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2004.5780000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 120,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 175.05499999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 589.451,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 89,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 2883.3920000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 380,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1561.3339999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 120,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 412.46299999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 80,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 2925.684,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 380,
             "unit": "count"
           }
         ]
