@@ -237,6 +237,10 @@ class InputConfigs:
     return self.has_scale and not self.should_dequantize_before_matmul
 
 
+# Pipeline depth of each rhs ref on the paired-tiles path: as fast as triple buffering with less VMEM.
+_PAIRED_RHS_BUFFERS = 2
+
+
 @dataclasses.dataclass(frozen=True)
 class GmmConfigs:
   """Full configuration details for GMM execution."""
@@ -254,6 +258,12 @@ class GmmConfigs:
   # Output is stored as [size_m, out_size_n // 128, 128] (one contiguous slab
   # per row); tiles are relayouted from [tile_m, tile_n] inside VMEM.
   out_is_3d: bool = False
+  # gmm_v2 only (see supports_paired_tiles): tiles of up to tile_m rows start at any offset and each grid step
+  # covers two of them, each matmul'd against its group's rhs as on the unpaired path (bit-identical output).
+  paired_tiles: bool = False
+  # Paired-tiles path only: each metadata entry is a tile plus, when it fits paired_small_m positions, its group's
+  # tail (see fill_metadata), so the tail reuses the tile's rhs block.
+  paired_members: bool = False
 
   @property
   def lhs_is_3d(self) -> bool:
@@ -311,6 +321,63 @@ class GmmConfigs:
     if d0 <= 16 or d0 % 8:
       return None
     return 8
+
+  @property
+  def supports_paired_tiles(self) -> bool:
+    """Whether gmm_v2 can run this config on the paired-tiles path."""
+    return (
+        not self.lhs_is_3d
+        and not self.out_is_3d
+        and self.lhs_cfgs.quant_dtype is None
+        and not self.lhs_cfgs.has_scale
+        and not self.rhs_cfgs.has_scale
+        and not self.rhs_cfgs.has_bias
+        and not self.rhs_cfgs.should_bitcast
+        and not self.has_partial_sum
+        and self.fuse_act is None
+        and pl.cdiv(self.dims.size_k, self.tiles.tile_k) == 1
+        and self.tiles.tile_m % self.dims.size_lhs_sublane == 0
+        and self.dims.size_m >= 2 * self.tiles.tile_m + 2 * self.dims.size_lhs_sublane
+    )
+
+  @property
+  def paired_small_m(self) -> int:
+    """Rows of the small product of a short tile (see paired_inner_kernel)."""
+    return 256 if self.transpose_rhs else 128
+
+  @property
+  def paired_use_small(self) -> bool:
+    return self.tiles.tile_m >= 4 * self.paired_small_m
+
+  @property
+  def supports_paired_members(self) -> bool:
+    return (
+        self.supports_paired_tiles
+        and self.paired_use_small
+        and self.dims.size_m >= 2 * (self.tiles.tile_m + self.paired_small_m) + 2 * self.dims.size_lhs_sublane
+    )
+
+  @property
+  def paired_block_rows(self) -> int:
+    """Sublane rows of the paired path's lhs/out block (its BoundedSlice)."""
+    sub = self.dims.size_lhs_sublane
+    member_m = self.tiles.tile_m
+    if self.paired_members:
+      member_m += self.paired_small_m
+    # Each member may spill into one more sublane row (see store_full_tile).
+    return 2 * member_m // sub + 2
+
+  def paired_tiles_vmem_bytes(self) -> int:
+    """VMEM estimate of the paired-tiles path: two rhs refs, lhs/out blocks, f32 results, zero-init buffer."""
+    tm, tk, tn = self.tiles.tile_m, self.tiles.tile_k, self.tiles.tile_n
+    block_m = self.paired_block_rows * self.dims.size_lhs_sublane
+    mxu_size = pltpu.get_tpu_info().mxu_column_size
+    rhs_vmem = 2 * _PAIRED_RHS_BUFFERS * tk * tn * jnp.dtype(self.rhs_cfgs.dtype).itemsize
+    lhs_vmem = 2 * block_m * tk * jnp.dtype(self.lhs_cfgs.dtype).itemsize
+    out_vmem = 2 * block_m * tn * jnp.dtype(self.out_dtype).itemsize
+    acc_vmem = 2 * tm * min(tn, mxu_size) * 4
+    zero_vmem = 2 * 1024 * 1024 if self.zero_init else 0
+    return rhs_vmem + lhs_vmem + out_vmem + acc_vmem + zero_vmem
 
   @property
   def num_quant_blocks_per_tile_k(self) -> int:
@@ -405,6 +472,31 @@ class IndexMaps:
     if self.cfgs.out_is_3d:
       return (pl.ds(row_start, row_size), 0, 0 if self.cfgs.out_window else n_id, 0)
     return (pl.ds(row_start, row_size), 0, n_id)
+
+  # Paired-tiles path: grid step pair_id covers metadata entries 2 * pair_id and 2 * pair_id + 1.
+
+  def lhs_pair_index_map(self, _: jax.Array, pair_id: jax.Array, k_id: jax.Array):
+    m_start = self.metadata_ref.gm_id_to_m_offset[2 * pair_id]
+    m_end = self.metadata_ref.gm_id_to_m_offset[2 * pair_id + 2]
+    row_start = m_start // self.cfgs.dims.size_lhs_sublane
+    row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
+    return (pl.ds(row_start, row_end - row_start), 0, k_id)
+
+  def rhs_pair_index_map(self, n_id: jax.Array, pair_id: jax.Array, k_id: jax.Array, *, member: int):
+    group_id = self.metadata_ref.gm_id_to_group_id[2 * pair_id + member]
+    if self.cfgs.transpose_rhs:
+      return (group_id, n_id, k_id)
+    return (group_id, k_id, n_id)
+
+  def out_pair_index_map(self, n_id: jax.Array, pair_id: jax.Array, _: jax.Array):
+    is_last = pair_id == (pl.cdiv(self.num_gm, 2) - 1)
+    m_start = self.metadata_ref.gm_id_to_m_offset[2 * pair_id]
+    m_end = self.metadata_ref.gm_id_to_m_offset[2 * pair_id + 2]
+    row_start = m_start // self.cfgs.dims.size_lhs_sublane
+    capped_row_end = m_end // self.cfgs.dims.size_lhs_sublane
+    last_row_end = pl.cdiv(m_end, self.cfgs.dims.size_lhs_sublane)
+    row_end = jnp.where(is_last, last_row_end, capped_row_end)
+    return (pl.ds(row_start, row_end - row_start), 0, n_id)
 
 
 def generate_block_specs(
@@ -895,6 +987,171 @@ def inner_kernel(
   )
 
 
+def _unquantized_single_k_matmul(lhs: jax.Array, rhs: jax.Array, cfgs: GmmConfigs) -> list[tuple[int, int, jax.Array]]:
+  """[rows, tile_k] x rhs tile of the only K step, as inner_kernel's unquantized path computes it.
+
+  Without an rhs scale the quant block is size_k, so inner_kernel's quant-block loop runs one block; this is that
+  block. Returns (start_n, end_n, acc) per mxu column block.
+  """
+  mxu_size = pltpu.get_tpu_info().mxu_column_size
+  valid_k = cfgs.dims.size_k % cfgs.tiles.tile_k
+  if valid_k != 0:
+    k_axis = 1 if cfgs.transpose_rhs else 0
+    rhs = jnp.where(lax.broadcasted_iota(jnp.int32, rhs.shape, k_axis) < valid_k, rhs, 0)
+    lhs = jnp.where(lax.broadcasted_iota(jnp.int32, lhs.shape, 1) < valid_k, lhs, 0)
+  tile_k_end = valid_k if valid_k != 0 else cfgs.tiles.tile_k
+  rhs_tile_n = rhs.shape[0 if cfgs.transpose_rhs else 1]
+  block_lhs = lhs[:, :tile_k_end]
+
+  acc_blocks = []
+  for start_n in range(0, rhs_tile_n, mxu_size):
+    end_n = min(rhs_tile_n, start_n + mxu_size)
+    if cfgs.transpose_rhs:
+      block_acc = lax.dot_general(
+          block_lhs,
+          rhs[start_n:end_n, :tile_k_end],
+          (((1,), (1,)), ((), ())),
+          preferred_element_type=jnp.float32,
+      )
+    else:
+      block_acc = jnp.matmul(
+          block_lhs,
+          rhs[:tile_k_end, start_n:end_n],
+          preferred_element_type=jnp.float32,
+      )
+    acc_n = jnp.zeros((lhs.shape[0], end_n - start_n), dtype=cfgs.acc_dtype)
+    acc_n += block_acc.astype(cfgs.acc_dtype)
+    acc_blocks.append((start_n, end_n, acc_n))
+  return acc_blocks
+
+
+def paired_inner_kernel(
+    step: pltpu.PipelineStep,
+    tiled_lhs_ref: jax.Array,  # [2 * tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
+    rhs_a_ref: jax.Array,  # rhs tile of gm tile 2p's group
+    rhs_b_ref: jax.Array,  # rhs tile of gm tile 2p + 1's group
+    tiled_out_ref: jax.Array,  # [2 * tile_m // size_lhs_sublane, size_lhs_sublane, tile_n]
+    partial_out_ref: jax.Array,  # [size_lhs_sublane, tile_n]
+    metadata_ref: MetadataRef,
+    *,
+    cfgs: GmmConfigs,
+):
+  """emit_pipeline body of the paired-tiles path (see GmmConfigs.paired_tiles).
+
+  Tile A (rows [a_start, a_end)) and tile B (rows [a_end, b_end)) are each one static [tile_m, tile_k] product,
+  masked to the tile's rows; the sublane row they may share is summed. Each matmul sits in its own lax.cond region,
+  as inner_kernel's does: two matmuls in one region are scheduled together and Mosaic then reduces K in a different
+  order. The cond also skips an empty tile (the padding tile of an odd count). With cfgs.paired_members, each
+  entry's tail runs after its tile in its own cond region, as a small product against the same rhs ref.
+  """
+  sub = cfgs.dims.size_lhs_sublane
+  tile_m = cfgs.tiles.tile_m
+  tile_rows = tile_m // sub
+  tile_k = cfgs.tiles.tile_k
+
+  pair_id = step.index[1]
+  m_offset = metadata_ref.gm_id_to_m_offset
+  a_start = m_offset[2 * pair_id]
+  a_end = m_offset[2 * pair_id + 1]
+  b_end = m_offset[2 * pair_id + 2]
+  base = a_start - a_start % sub
+  a_lo = a_start - base
+  a_hi = a_end - base
+  b_hi = b_end - base
+  b_row = a_hi // sub
+  b_off = b_row * sub
+  zeros = jnp.zeros_like(partial_out_ref)
+  # A tile whose rows fit its first small_m positions runs a [small_m, tile_k] product instead. Mosaic (v7x) rounds
+  # its rows as the tile_m dot rounds its first rows for M = 256 with a transposed rhs and M <= 128 without (not for
+  # M = 128 transposed; for other M >= 256 only rows [0, M // 2)), so the output is unchanged.
+  small_m = cfgs.paired_small_m
+  use_small = cfgs.paired_use_small
+
+  def store_small_tile(row, row_off, lo, hi, rhs_ref):
+    lhs = tiled_lhs_ref[pl.ds(row, small_m // sub)].reshape(small_m, tile_k)
+    for start_n, end_n, acc in _unquantized_single_k_matmul(lhs, rhs_ref[...], cfgs):
+      iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0) + row_off
+      out = jnp.where(jnp.logical_and(lo <= iota, iota < hi), acc, 0)
+      tiled_out_ref[pl.ds(row, small_m // sub), :, start_n:end_n] = out.reshape(
+          small_m // sub, sub, end_n - start_n
+      ).astype(tiled_out_ref.dtype)
+
+  def store_tile(row, row_off, lo, hi, rhs_ref):
+    if use_small:
+      lax.cond(
+          hi - row_off <= small_m,
+          lambda: store_small_tile(row, row_off, lo, hi, rhs_ref),
+          lambda: store_full_tile(row, row_off, lo, hi, rhs_ref),
+      )
+    else:
+      store_full_tile(row, row_off, lo, hi, rhs_ref)
+
+  def store_full_tile(row, row_off, lo, hi, rhs_ref):
+    # A tile starting off the sublane grid can spill rows [row_off + tile_m, hi) into sublane row row + tile_rows.
+    # They are copied into the unused head positions [0, spill) of the tile's first lhs sublane row and their
+    # results stored to the spill row. Without a spill this writes zeros to a row that is overwritten, not written
+    # back, or carries zero.
+    spill = hi - row_off - tile_m
+    head = tiled_lhs_ref[row]
+    pos = lax.broadcasted_iota(jnp.int32, head.shape, 0)
+    tiled_lhs_ref[row] = jnp.where(pos < spill, tiled_lhs_ref[row + tile_rows], head)
+    lhs = tiled_lhs_ref[pl.ds(row, tile_rows)].reshape(tile_m, tile_k)
+    for start_n, end_n, acc in _unquantized_single_k_matmul(lhs, rhs_ref[...], cfgs):
+      iota = lax.broadcasted_iota(jnp.int32, acc.shape, 0) + row_off
+      out = jnp.where(jnp.logical_and(lo <= iota, iota < hi), acc, 0)
+      tiled_out_ref[pl.ds(row, tile_rows), :, start_n:end_n] = out.reshape(tile_rows, sub, end_n - start_n).astype(
+          tiled_out_ref.dtype
+      )
+      spill_out = acc[:sub]
+      spill_pos = lax.broadcasted_iota(jnp.int32, spill_out.shape, 0)
+      tiled_out_ref[row + tile_rows, :, start_n:end_n] = jnp.where(spill_pos < spill, spill_out, 0).astype(
+          tiled_out_ref.dtype
+      )
+
+  def tile_a():
+    store_tile(0, 0, a_lo, a_hi, rhs_a_ref)
+
+  def tile_b():
+    # A's rows in B's first sublane row (none when a_end is sublane aligned or A is empty).
+    a_tail = tiled_out_ref[b_row]
+    a_tail = jnp.where(jnp.logical_or(a_hi % sub == 0, a_hi == a_lo), zeros, a_tail)
+    store_tile(b_row, b_off, a_hi, b_hi, rhs_b_ref)
+    tiled_out_ref[b_row] += a_tail
+
+  def store_after(lo, prev_empty, store):
+    # Keep the previous tile's rows in this tile's first sublane row and sum them back after the store.
+    row = lo // sub
+    prev = tiled_out_ref[row]
+    prev = jnp.where(jnp.logical_or(lo % sub == 0, prev_empty), zeros, prev)
+    store(row, row * sub)
+    tiled_out_ref[row] += prev
+
+  if cfgs.paired_members:
+    # An entry's first tile_m rows are its tile, the rest (if any) its group's tail.
+    a_mid = jnp.minimum(a_lo + tile_m, a_hi)
+    b_mid = jnp.minimum(a_hi + tile_m, b_hi)
+
+    def tail(lo, hi, rhs_ref):
+      store_after(lo, False, lambda row, row_off: store_small_tile(row, row_off, lo, hi, rhs_ref))
+
+    lax.cond(a_mid > a_lo, lambda: store_tile(0, 0, a_lo, a_mid, rhs_a_ref), lambda: None)
+    lax.cond(a_hi > a_mid, lambda: tail(a_mid, a_hi, rhs_a_ref), lambda: None)
+    lax.cond(
+        b_mid > a_hi,
+        lambda: store_after(a_hi, a_hi == a_lo, lambda row, row_off: store_tile(row, row_off, a_hi, b_mid, rhs_b_ref)),
+        lambda: None,
+    )
+    lax.cond(b_hi > b_mid, lambda: tail(b_mid, b_hi, rhs_b_ref), lambda: None)
+  else:
+    lax.cond(a_hi > a_lo, tile_a, lambda: None)
+    lax.cond(b_hi > a_hi, tile_b, lambda: None)
+
+  # Cross-step carry of the shared sublane row, as in inner_kernel.
+  tiled_out_ref[0] += jnp.where(pair_id == 0, zeros, partial_out_ref[...])
+  last_row = b_hi // sub
+  partial_out_ref[...] = jnp.where(b_hi % sub == 0, zeros, tiled_out_ref[last_row])
+
+
 def fill_metadata(
     lhs_group_sizes_ref: jax.Array,  # int32[size_lhs_group]
     group_offset_ref: jax.Array,  # int32[1]
@@ -924,10 +1181,17 @@ def fill_metadata(
   max_num_group = group_offset + cfgs.dims.size_group
   metadata_ref.gm_id_to_m_offset[0] = 0
 
+  # Paired-tiles path: a tile holds up to tile_m rows from any offset (see paired_inner_kernel).
+  rows_from_offset = cfgs.paired_tiles
+  # With paired_members, a group's tail joins the tile before it when it fits paired_small_m positions.
+  join_tails = cfgs.paired_members
+
   @jax.named_scope("inner_tm_loop")
-  def inner_tm_loop(tm_id, curr_m_offset, *, end_m_offset, group_id):
-    local_offset = curr_m_offset % cfgs.dims.size_lhs_sublane
+  def inner_tm_loop(tm_id, curr_m_offset, *, end_m_offset, group_id, last_tm_id):
+    local_offset = 0 if rows_from_offset else curr_m_offset % cfgs.dims.size_lhs_sublane
     tm_size = jnp.minimum(cfgs.tiles.tile_m - local_offset, end_m_offset - curr_m_offset)
+    if join_tails:
+      tm_size = jnp.where(tm_id == last_tm_id, end_m_offset - curr_m_offset, tm_size)
 
     metadata_ref.gm_id_to_group_id[tm_id] = group_id
 
@@ -959,9 +1223,15 @@ def fill_metadata(
     # In this example, we see that we require processing 2 m tiles.
     # But, performing a naive cdiv(group_size, tile_m) will return 1.
     # Instead, adding local_offset will give us the correct value.
-    local_offset = start_m_offset % cfgs.dims.size_lhs_sublane
+    local_offset = 0 if rows_from_offset else start_m_offset % cfgs.dims.size_lhs_sublane
     aligned_group_size = group_size + local_offset
     curr_num_gm = pl.cdiv(aligned_group_size, cfgs.tiles.tile_m)
+    if join_tails:
+      sub = cfgs.dims.size_lhs_sublane
+      tail_start = start_m_offset + (curr_num_gm - 1) * cfgs.tiles.tile_m
+      tail_positions = end_m_offset - tail_start + tail_start % sub
+      joins = jnp.logical_and(curr_num_gm >= 2, tail_positions <= cfgs.paired_small_m)
+      curr_num_gm = curr_num_gm - joins.astype(curr_num_gm.dtype)
 
     # We need to handle cases where we should not process the group.
     # 1. Even if group_size is 0, if local_offset is not 0, cdiv will return 1.
@@ -974,6 +1244,7 @@ def fill_metadata(
         inner_tm_loop,
         end_m_offset=end_m_offset,
         group_id=group_id,
+        last_tm_id=next_num_gm - 1,
     )
     lax.fori_loop(num_gm, next_num_gm, tm_loop_fn, start_m_offset)
 
@@ -1071,6 +1342,53 @@ def zero_out_end(
       dst_ref=out_dma.at[pl.ds(0, zero_size)],
       sem=semaphore_ref.at[0],
   ).wait()
+
+
+def _run_paired_pipeline(
+    lhs_ref: LhsRef,
+    rhs_ref: WeightsRef,
+    out_ref: jax.Array,
+    partial_out_ref: jax.Array,
+    metadata_ref: MetadataRef,
+    num_gm: jax.Array,
+    *,
+    cfgs: GmmConfigs,
+):
+  """Runs the paired-tiles grid: (num_n, cdiv(num_gm, 2), 1)."""
+  sub = cfgs.dims.size_lhs_sublane
+  # An odd last gm tile pairs with an empty one (its group, no rows).
+  last_gm = jnp.maximum(num_gm - 1, 0)
+  metadata_ref.gm_id_to_group_id[num_gm] = metadata_ref.gm_id_to_group_id[last_gm]
+  metadata_ref.gm_id_to_m_offset[num_gm + 1] = metadata_ref.gm_id_to_m_offset[num_gm]
+
+  index_map = IndexMaps(metadata_ref, cfgs, num_gm)
+  bounded_slice = pl.BoundedSlice(cfgs.paired_block_rows)
+  lhs_spec = pl.BlockSpec((bounded_slice, sub, cfgs.tiles.tile_k), index_map.lhs_pair_index_map)
+  if cfgs.transpose_rhs:
+    rhs_tile_shape = (None, cfgs.tiles.tile_n, cfgs.tiles.tile_k)
+  else:
+    rhs_tile_shape = (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n)
+  rhs_a_spec, rhs_b_spec = (
+      pl.BlockSpec(
+          rhs_tile_shape,
+          functools.partial(index_map.rhs_pair_index_map, member=member),
+          pipeline_mode=pl.Buffered(buffer_count=_PAIRED_RHS_BUFFERS),
+      )
+      for member in (0, 1)
+  )
+  out_spec = pl.BlockSpec((bounded_slice, sub, cfgs.tiles.tile_n), index_map.out_pair_index_map)
+
+  num_n = pl.cdiv(cfgs.out_size_n, cfgs.tiles.tile_n)
+  pipeline_fn = pltpu.emit_pipeline(
+      functools.partial(paired_inner_kernel, cfgs=cfgs),
+      grid=(num_n, pl.cdiv(num_gm, 2), 1),
+      in_specs=(lhs_spec, rhs_a_spec, rhs_b_spec),
+      out_specs=out_spec,
+      _explicit_indices=True,
+  )
+  lhs_in = lhs_ref.value.reshape(-1, sub, lhs_ref.value.shape[-1])
+  out_in = out_ref.reshape(-1, sub, out_ref.shape[-1])
+  pipeline_fn(lhs_in, rhs_ref.weight, rhs_ref.weight, out_in, scratches=[partial_out_ref, metadata_ref])
 
 
 def kernel_main(
@@ -1189,7 +1507,10 @@ def kernel_main(
   # Works for both [size_m, size_n] and the 3D [size_m, D0, 128] output.
   out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, *out_ref.shape[1:])
   scratches = [partial_out_ref, acc_ref, metadata_ref]
-  pipeline_fn(lhs_in, rhs_ref, ps_in, out_in, scratches=scratches)
+  if cfgs.paired_tiles:
+    _run_paired_pipeline(lhs_ref, rhs_ref, out_ref, partial_out_ref, metadata_ref, num_gm, cfgs=cfgs)
+  else:
+    pipeline_fn(lhs_in, rhs_ref, ps_in, out_in, scratches=scratches)
 
   if cfgs.zero_init:
     zero_out_end(out_ref, semaphore_ref, zero_size, dims=cfgs.dims)  # pyrefly: ignore[bad-argument-type, unbound-name]
@@ -1451,6 +1772,7 @@ def make_gmm_configs(
     lhs_scale: jax.Array | None = None,
     transpose_rhs: bool = False,
     out_is_3d: bool = False,
+    paired_tiles: bool = False,
 ):
   """Fills the GMM config for the GMM kernel."""
 
@@ -1578,7 +1900,7 @@ def make_gmm_configs(
   elif partial_sum is not None and partial_sum.ndim == 3:
     raise ValueError("A 3D partial_sum requires out_is_3d=True.")
 
-  return GmmConfigs(
+  cfgs = GmmConfigs(
       dims=dims,
       tiles=tiles,
       lhs_cfgs=lhs_cfgs,
@@ -1591,6 +1913,14 @@ def make_gmm_configs(
       transpose_rhs=transpose_rhs,
       out_is_3d=out_is_3d,
   )
+  # The paired path pays off only where a short tile can run the small matmul (tile_m >= 4 * paired_small_m).
+  if paired_tiles and cfgs.supports_paired_tiles and cfgs.paired_use_small and vmem_limit_bytes is not None:
+    paired = dataclasses.replace(cfgs, paired_tiles=True)
+    members = dataclasses.replace(paired, paired_members=True)
+    for candidate, supported in ((members, cfgs.supports_paired_members), (paired, True)):
+      if supported and candidate.paired_tiles_vmem_bytes() <= vmem_limit_bytes:
+        return candidate
+  return cfgs
 
 
 def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
@@ -1616,6 +1946,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "fuse_act",
         "transpose_rhs",
         "out_is_3d",
+        "paired_tiles",
     ]
 )
 def gmm_v2(
@@ -1638,6 +1969,7 @@ def gmm_v2(
     fuse_act: str | None = None,
     transpose_rhs: bool = False,
     out_is_3d: bool = False,
+    paired_tiles: bool = False,
 ) -> jax.Array:
   """GMM kernel implemented with emit_pipeline.
 
@@ -1676,6 +2008,8 @@ def gmm_v2(
       Both require tile_k / tile_n to be a multiple of 128 that divides the
       dim. Tiles whose D0 (tile // 128) is not a multiple of 8 use full-D0
       blocks and relayout the tile window in VMEM.
+    paired_tiles: If True, a 2D unquantized single-K call that fits vmem_limit_bytes covers two group members per
+      grid step (see GmmConfigs.paired_tiles).
 
   Returns:
     Output of shape [size_m, size_n] (or [size_m, size_n // 128, 128]).
@@ -1710,6 +2044,7 @@ def gmm_v2(
       lhs_scale=lhs_scale,
       transpose_rhs=transpose_rhs,
       out_is_3d=out_is_3d,
+      paired_tiles=paired_tiles,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
@@ -1734,6 +2069,11 @@ def gmm_v2(
   # Initialize scratch shapes.
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   acc_cols = 2 * tiles.tile_n if cfgs.fuse_act is not None else tiles.tile_n
+  acc_shape = (tiles.tile_m, acc_cols)
+  if cfgs.paired_tiles:
+    # One padding gm tile for an odd count; acc_ref is unused (single K step).
+    max_num_gm += 1
+    acc_shape = (dims.size_lhs_sublane, pltpu.get_tpu_info().num_lanes)
   num_lanes = pltpu.get_tpu_info().num_lanes
   if cfgs.out_window:
     partial_out_shape = (pl.cdiv(cfgs.out_size_n, tiles.tile_n), dims.size_lhs_sublane, tiles.tile_n)
@@ -1745,7 +2085,7 @@ def gmm_v2(
       # partial_out_ref
       pltpu.VMEM(partial_out_shape, cfgs.out_dtype),
       # acc_ref
-      pltpu.VMEM((tiles.tile_m, acc_cols), cfgs.acc_dtype),
+      pltpu.VMEM(acc_shape, cfgs.acc_dtype),
       # metadata_ref
       MetadataRef(
           gm_id_to_group_id=pltpu.SMEM((max_num_gm,), jnp.int32),
