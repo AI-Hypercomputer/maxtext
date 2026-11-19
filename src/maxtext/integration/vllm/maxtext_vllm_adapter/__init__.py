@@ -45,8 +45,9 @@ def register(config=None):
 
   # Dynamically apply runtime compatibility patches when registering the adapter
   # pylint: disable=import-outside-toplevel
-  from .adapter import patch_kv_cache_manager, patch_pallas_tpu_reciprocal
+  from .adapter import patch_kv_cache_manager, patch_pallas_tpu_reciprocal, patch_vllm_hybrid_model_config
 
+  patch_vllm_hybrid_model_config()
   patch_kv_cache_manager()
   patch_pallas_tpu_reciprocal()
 

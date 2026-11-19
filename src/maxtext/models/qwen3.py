@@ -643,6 +643,25 @@ def jax_ar_gated_delta_rule(
   return core_attn_out, new_state
 
 
+def resolve_mamba_state_indices(attention_metadata: Any) -> jax.Array | None:
+  """Returns vLLM's per-request recurrent-state slot ids, or None.
+
+  tpu-inference has exposed these as `attention_metadata.mamba_state_indices`
+  and, in newer revisions, as `attention_metadata.mamba.state_indices`
+  (`MambaMetadata`). Both are None under mamba prefix caching
+  (`mamba_cache_mode="align"`), where the slot is looked up in the block table
+  instead. Not specific to GDN: any recurrent layer served by vLLM can use it.
+  """
+  if attention_metadata is None:
+    return None
+  state_indices = getattr(attention_metadata, "mamba_state_indices", None)
+  if state_indices is None:
+    mamba_metadata = getattr(attention_metadata, "mamba", None)
+    if mamba_metadata is not None:
+      state_indices = getattr(mamba_metadata, "state_indices", None)
+  return state_indices
+
+
 class Qwen3NextGatedDeltaNet(nnx.Module):
   """
   This module implements the full end-to-end logic of a Gated Delta Network layer.
@@ -925,18 +944,19 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # When kv_cache is a 2-tuple of paged mamba state arrays from vLLM, use
     # run_jax_gdn_attention from tpu_inference for correct sequential token processing.
     # vLLM addresses the recurrent state one of two ways, and only one of them
-    # is present at a time: a resident per-request slot in
-    # `mamba_state_indices`, or -- under mamba prefix caching, where
-    # `mamba_state_indices` is None -- a block id looked up in the mamba block
+    # is present at a time: a resident per-request slot in the mamba state
+    # indices (see `resolve_mamba_state_indices`), or -- under mamba prefix
+    # caching, where those are None -- a block id looked up in the mamba block
     # table, which needs `gdn_mamba_block_size`.
     mamba_block_size = cfg.gdn_mamba_block_size
+    mamba_state_indices = resolve_mamba_state_indices(attention_metadata)
     use_paged_state = (
         kv_cache is not None
         and isinstance(kv_cache, tuple)
         and len(kv_cache) == 2
         and attention_metadata is not None
         and (
-            getattr(attention_metadata, "mamba_state_indices", None) is not None
+            mamba_state_indices is not None
             or (mamba_block_size and getattr(attention_metadata, "block_tables", None) is not None)
         )
         and self.mesh is not None
@@ -1104,10 +1124,10 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           dp_size,
       )
 
-      if getattr(attention_metadata, "mamba_state_indices", None) is not None:
+      if mamba_state_indices is not None:
         # Resident per-request slot: the same slot is read and written.
         state_indices = truncate_sharded_tensor(
-            attention_metadata.mamba_state_indices.astype(jnp.int32),  # pyrefly: ignore[missing-attribute]
+            mamba_state_indices.astype(jnp.int32),
             padded_num_reqs_per_dp,
             dp_size,
         )
