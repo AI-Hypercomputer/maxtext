@@ -237,6 +237,7 @@ class ElasticGlobalBatchSizeMode(str, Enum):
 
   SCALED = "scaled"
   CONSTANT_PADDED = "constant_padded"
+  CONSTANT_GRAD_ACCUM = "constant_grad_accum"
 
 
 # ----------------------------------------------------------------------------
@@ -4002,11 +4003,41 @@ class ElasticTraining(BaseModel):
       ElasticGlobalBatchSizeMode.SCALED,
       description=(
           "How the global batch size behaves when some slices of the job are down. 'scaled' keeps"
-          " `per_device_batch_size` fixed so the global batch scales with the live slice count. 'constant_padded' keeps"
-          " the global batch size of all slices of the job by rounding up `per_device_batch_size` and padding the extra"
-          " rows with zero segmentation, which the loss masks out."
+          " `per_device_batch_size` fixed so the global batch scales with the live slice count. 'constant_grad_accum'"
+          " keeps the global batch size of all slices of the job and the per-device batch: only"
+          " `gradient_accumulation_steps` grows, to `ceil(global_batch / (live_devices * per_device_batch_size))`, so"
+          " the activation memory and the compiled microbatch shapes never change on a resize (recommended)."
+          " 'constant_padded' also keeps the global batch size of all slices but, by default, rounds"
+          " `per_device_batch_size` up instead; `elastic_max_per_device_batch_size` lets it search the per-device"
+          " batches up to a bound for the factoring with the least padding (advanced). Both constant modes pad the"
+          " extra rows with zero segmentation, which the loss masks out."
       ),
   )
+  elastic_max_per_device_batch_size: int = Field(
+      -1,
+      description=(
+          "With `elastic_global_batch_size_mode='constant_padded'`, how the constant global batch is covered on fewer"
+          " slices. -1 keeps `gradient_accumulation_steps` and rounds `per_device_batch_size` up, growing activation"
+          " memory by the same factor. A value >= `per_device_batch_size` bounds the per-device batch instead and"
+          " grows `gradient_accumulation_steps` to cover the rest, choosing the factoring with the least padding among"
+          " the per-device batches in `[per_device_batch_size, bound]` (ties go to the smaller per-device batch); the"
+          " per-device batch is never lowered below `per_device_batch_size`, so a resize never adds scan iterations"
+          " beyond those needed to cover the logical batch. With `elastic_global_batch_size_mode='constant_grad_accum'`"
+          " the bound is implied to be `per_device_batch_size` and this must stay -1."
+      ),
+  )
+
+  @property
+  def constant_global_batch_active(self) -> bool:
+    """Whether elastic training keeps the global batch of the full job constant when slices are down.
+
+    True for `elastic_global_batch_size_mode` in (`constant_padded`, `constant_grad_accum`) with `elastic_enabled`; the
+    two modes differ only in how the planner factors the constant batch over the live devices.
+    """
+    return self.elastic_enabled and self.elastic_global_batch_size_mode in (
+        ElasticGlobalBatchSizeMode.CONSTANT_PADDED,
+        ElasticGlobalBatchSizeMode.CONSTANT_GRAD_ACCUM,
+    )
 
 
 class GcpMonitoring(BaseModel):
@@ -4879,6 +4910,67 @@ def _validate_remat_policy(
         "remat_policy='none' is not supported with pipeline parallelism"
         " (ici_pipeline_parallelism > 1 or dcn_pipeline_parallelism > 1)."
     )
+
+
+def plan_constant_global_batch(
+    per_device_batch_size: int,
+    gradient_accumulation_steps: int,
+    job_devices: int,
+    live_devices: int,
+    alignment: int,
+    max_per_device_batch_size: int,
+) -> tuple[int, int]:
+  """Factors the logical global batch of all job devices into a per-device batch and accumulation steps on live devices.
+
+  The logical global batch size is `per_device_batch_size * job_devices * gradient_accumulation_steps`. On fewer live
+  devices it is covered by a physical batch `B' * live_devices * K'`, whose excess rows are padded with zero
+  segmentation (see `elastic_global_batch_size_mode`). Two ways of factoring exist:
+
+  *   `max_per_device_batch_size == -1`: keep `gradient_accumulation_steps` and round the per-device batch up to
+      `ceil(per_device_batch_size * job_devices / live_devices)`. Activations grow by the same factor, and with
+      several accumulation steps every microbatch is padded (`constant_padded` without a bound).
+  *   `max_per_device_batch_size >= per_device_batch_size`: search every aligned per-device batch `B'` in
+      `[per_device_batch_size, max_per_device_batch_size]` with `K' = ceil(logical / (B' * live_devices))` and
+      return the pair with the least padding; ties go to the smaller `B'` (less HBM). With the bound equal to
+      `per_device_batch_size` (`constant_grad_accum`) the per-device batch, and hence the activation memory and the
+      per-microbatch program shapes, never change: only the accumulation steps grow, and fewer than
+      `B' * live_devices` rows are padded (less than one microbatch; the microbatch reshape spreads them over the
+      microbatches).
+
+  Args:
+    per_device_batch_size: Per-device batch size of the full job (an integer >= 1).
+    gradient_accumulation_steps: Accumulation steps of the full job.
+    job_devices: Number of devices in the whole job.
+    live_devices: Number of live devices, fewer than `job_devices`.
+    alignment: `B'` must be a multiple of this (vocab tiling and pipeline microbatch divisibility).
+    max_per_device_batch_size: Upper bound on `B'`, or -1 to keep the accumulation steps instead.
+
+  Returns:
+    The per-device batch size `B'` and the gradient accumulation steps `K'` for the live devices.
+  """
+
+  def _align_up(value: int) -> int:
+    return ((value + alignment - 1) // alignment) * alignment
+
+  logical_batch = per_device_batch_size * job_devices * gradient_accumulation_steps
+  if max_per_device_batch_size == -1:
+    return _align_up(math.ceil(per_device_batch_size * job_devices / live_devices)), gradient_accumulation_steps
+
+  def _padding_and_steps(candidate: int) -> tuple[int, int]:
+    micro_batch = candidate * live_devices
+    steps = math.ceil(logical_batch / micro_batch)
+    return steps * micro_batch - logical_batch, steps
+
+  # The alignment may force B' above the bound; the first aligned value is always a candidate.
+  best_batch = _align_up(per_device_batch_size)
+  best_padding, best_steps = _padding_and_steps(best_batch)
+  upper = max(max_per_device_batch_size, best_batch)
+  for candidate in range(best_batch + alignment, upper + 1, alignment):
+    padding, steps = _padding_and_steps(candidate)
+    # Strictly less padding only: ties keep the smaller per-device batch.
+    if padding < best_padding:
+      best_batch, best_padding, best_steps = candidate, padding, steps
+  return best_batch, best_steps
 
 
 # ----------------------------------------------------------------------------
@@ -6017,13 +6109,15 @@ class MaxTextConfig(
       global_batch_to_train = int(micro_batch_to_train * grad_accum_steps)
       return global_batch_to_load, global_batch_to_train, micro_batch_to_train
 
-    # With `elastic_global_batch_size_mode='constant_padded'`, keep the logical global batch sized for all job devices
-    # and round `per_device_batch_size` up across live devices (preserving vocab-tiling and pipeline divisibility).
+    # With a constant-global-batch `elastic_global_batch_size_mode` (`constant_padded`, `constant_grad_accum`), keep the
+    # logical global batch sized for all job devices and factor it over the live devices (preserving vocab-tiling and
+    # pipeline divisibility).
     # pylint: disable=access-member-before-definition
     eval_tracks_train_batch = self.eval_per_device_batch_size == self.per_device_batch_size
+    mode_label = f"`elastic_global_batch_size_mode='{self.elastic_global_batch_size_mode.value}'`"
+    grad_accum_mode = self.elastic_global_batch_size_mode == ElasticGlobalBatchSizeMode.CONSTANT_GRAD_ACCUM
     if (
-        self.elastic_enabled
-        and self.elastic_global_batch_size_mode == ElasticGlobalBatchSizeMode.CONSTANT_PADDED
+        self.constant_global_batch_active
         and self.per_device_batch_size >= 1.0
         and float(self.per_device_batch_size).is_integer()
     ):
@@ -6043,6 +6137,27 @@ class MaxTextConfig(
         _, live_slices = _devices_and_slices(lambda: elastic_utils.live_devices(config=self))
       if (self.per_device_batch_size * self.max_target_length) % self.num_vocab_tiling != 0:
         raise ValueError("Per device batch size times sequence length should be divisible by the number of vocab tiles.")
+      if grad_accum_mode:
+        # The per-device batch never changes: the planner bound is the configured per-device batch.
+        if self.elastic_max_per_device_batch_size != -1:
+          raise ValueError(
+              f"{mode_label} keeps `per_device_batch_size` fixed and only grows `gradient_accumulation_steps` on a"
+              " resize, so `elastic_max_per_device_batch_size` is implied and must stay -1 (got"
+              f" {self.elastic_max_per_device_batch_size}); use `elastic_global_batch_size_mode='constant_padded'` to"
+              " bound the per-device batch explicitly."
+          )
+        max_per_device_batch_size = int(self.per_device_batch_size)
+      else:
+        if (
+            self.elastic_max_per_device_batch_size != -1
+            and self.elastic_max_per_device_batch_size < self.per_device_batch_size
+        ):
+          raise ValueError(
+              f"{mode_label} requires `elastic_max_per_device_batch_size` to be -1"
+              f" or >= `per_device_batch_size` ({int(self.per_device_batch_size)}), got"
+              f" {self.elastic_max_per_device_batch_size}."
+          )
+        max_per_device_batch_size = self.elastic_max_per_device_batch_size
       pipeline_microbatches, live_non_batch_devices = 0, 1
       if self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1:
         num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
@@ -6102,9 +6217,30 @@ class MaxTextConfig(
             if pipeline_microbatches > 0
             else 1
         )
-        step = math.lcm(vocab_step, pipeline_step)
-        scaled = math.ceil(self.per_device_batch_size * job_devices / self.num_target_devices)
-        self.per_device_batch_size = float(((scaled + step - 1) // step) * step)
+        planned_batch, planned_steps = plan_constant_global_batch(
+            per_device_batch_size=int(self.per_device_batch_size),
+            gradient_accumulation_steps=self.gradient_accumulation_steps,
+            job_devices=job_devices,
+            live_devices=self.num_target_devices,
+            alignment=math.lcm(vocab_step, pipeline_step),
+            max_per_device_batch_size=max_per_device_batch_size,
+        )
+        logger.info(
+            "%s: %d of %d devices live; per_device_batch_size %s -> %d, gradient_accumulation_steps"
+            " %d -> %d, physical batch %d for logical batch %d (%d padded rows).",
+            self.elastic_global_batch_size_mode.value,
+            self.num_target_devices,
+            job_devices,
+            self.per_device_batch_size,
+            planned_batch,
+            self.gradient_accumulation_steps,
+            planned_steps,
+            planned_batch * self.num_target_devices * planned_steps,
+            self.logical_global_batch_size_to_train_on,
+            planned_batch * self.num_target_devices * planned_steps - self.logical_global_batch_size_to_train_on,
+        )
+        self.per_device_batch_size = float(planned_batch)
+        self.gradient_accumulation_steps = planned_steps
         if pipeline_microbatches > 0 and eval_tracks_train_batch:
           self.eval_per_device_batch_size = self.per_device_batch_size
     # pylint: enable=access-member-before-definition
@@ -6426,8 +6562,11 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
-    if self.elastic_enabled and self.elastic_global_batch_size_mode == ElasticGlobalBatchSizeMode.CONSTANT_PADDED:
+    if self.constant_global_batch_active:
       uses_elastic_iterator = self.dataset_type == DatasetType.GRAIN and self.grain_use_elastic_iterator
+      # `constant_grad_accum`, and `constant_padded` with a per-device bound, may grow the accumulation steps on a
+      # resize; the legacy `constant_padded` default keeps them.
+      steps_may_change = grad_accum_mode or self.elastic_max_per_device_batch_size != -1
       for invalid, reason in (
           (
               self.per_device_batch_size < 1.0 or not float(self.per_device_batch_size).is_integer(),
@@ -6457,9 +6596,19 @@ class MaxTextConfig(
               self.use_tunix_gradient_accumulation and self.gradient_accumulation_steps > 1,
               "is not supported with `use_tunix_gradient_accumulation=True` when `gradient_accumulation_steps > 1`",
           ),
+          (
+              steps_may_change and self.use_tunix_gradient_accumulation,
+              "may change `gradient_accumulation_steps` on a resize (`constant_grad_accum`, or"
+              " `elastic_max_per_device_batch_size` set), which `use_tunix_gradient_accumulation=True` does not support",
+          ),
+          (
+              steps_may_change and self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling"),
+              "may change `gradient_accumulation_steps` on a resize (`constant_grad_accum`, or"
+              " `elastic_max_per_device_batch_size` set), which FP8 quantization does not support",
+          ),
       ):
         if invalid:
-          raise ValueError(f"`elastic_global_batch_size_mode='constant_padded'` {reason}.")
+          raise ValueError(f"{mode_label} {reason}.")
     if self.elastic_backup_kind not in ("snapshot", "checkpoint"):
       raise ValueError(
           "elastic_backup_kind must be one of 'snapshot' or 'checkpoint', got" f" '{self.elastic_backup_kind}'."

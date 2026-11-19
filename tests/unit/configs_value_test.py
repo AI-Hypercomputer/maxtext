@@ -14,6 +14,7 @@
 
 """Tests for the new pydantic-based configuration system."""
 
+import math
 import os
 import sys
 import unittest.mock
@@ -1746,6 +1747,191 @@ class ConfigTest(absltest.TestCase):
                 remat_policy=remat_val,
                 **bad_kwargs,
             )
+
+  def test_plan_constant_global_batch(self):
+    """`plan_constant_global_batch` picks the least-padded (B', K') within the per-device bound, else rounds B up."""
+    # (per_device_batch_size, gradient_accumulation_steps, job_devices, live_devices, alignment, max) -> (B', K').
+    for args, expected in (
+        # Legacy (-1): keep K, round B up to cover the logical batch. 4 -> 3 slices of 32 chips.
+        ((1, 16, 128, 96, 1, -1), (2, 16)),
+        ((8, 1, 128, 96, 1, -1), (11, 1)),
+        # Bound == B: keep B, grow K; padding is less than one microbatch.
+        ((1, 16, 128, 96, 1, 1), (1, 22)),  # 2048 logical -> 2112 physical (3%), not 3072 (33%).
+        ((8, 1, 128, 96, 1, 8), (8, 2)),  # 1024 -> 1536: with K=1 nominal the padding equals the legacy B'=11 case.
+        ((1, 8, 256, 224, 1, 1), (1, 10)),  # 8 -> 7 slices: 2048 -> 2240.
+        ((1, 8, 256, 160, 1, 1), (1, 13)),  # 8 -> 5 slices: 2048 -> 2080.
+        # Bound > B: the search may raise B when that pads less (1024 on 96 devices: B'=11, K'=1 pads 32 rows).
+        ((8, 1, 128, 96, 1, 16), (11, 1)),
+        # Alignment: B' must be a multiple of 2, even when the bound equals B (96 < 100 rows, so K' = 2).
+        ((5, 1, 20, 16, 2, 5), (6, 2)),
+        ((4, 1, 20, 16, 2, 4), (4, 2)),
+        # Zero padding whenever the logical batch divides by the live microbatch.
+        ((1, 16, 20, 16, 1, 1), (1, 20)),
+        # The search never lowers B' below B: with B=8, K=2 on 128 -> 96 devices (logical 2048) the bound keeps B'=8,
+        # K'=3 (2304 rows) rather than B'=2, K'=11 (2112 rows) so the microbatch shapes and scan count stay fixed.
+        ((8, 2, 128, 96, 1, 8), (8, 3)),
+    ):
+      with self.subTest(args=args):
+        self.assertEqual(types.plan_constant_global_batch(*args), expected)
+    # Padding ties (B'=1, K'=22 and B'=2, K'=11 both pad 64 rows) go to the smaller B' (less activation memory).
+    self.assertEqual(types.plan_constant_global_batch(1, 16, 128, 96, 1, 4), (1, 22))
+    # With the bound equal to B (`constant_grad_accum`), B' = B and K' = ceil(logical / (live * B)) exactly.
+    for b, k, job, live in ((1, 16, 128, 96), (8, 1, 128, 96), (3, 4, 256, 224), (5, 1, 20, 16)):
+      with self.subTest(b=b, k=k, job=job, live=live):
+        self.assertEqual(
+            types.plan_constant_global_batch(b, k, job, live, 1, b), (b, math.ceil(b * k * job / (live * b)))
+        )
+
+  def test_elastic_constant_padded_mode_bounded_per_device_batch(self):
+    """With `elastic_max_per_device_batch_size`, the per-device batch stays bounded and accumulation steps grow."""
+    keep = ("elastic_global_batch_size_mode=constant_padded",)
+    # 20 job devices, 16 live: logical 5 * 20 = 100 is covered by B'=5 on 16 devices with K'=2 (160 physical rows).
+    cfg = self._elastic_config(*keep, "per_device_batch_size=5", "elastic_max_per_device_batch_size=5")
+    self.assertEqual(
+        (
+            cfg.per_device_batch_size,
+            cfg.gradient_accumulation_steps,
+            cfg.logical_global_batch_size_to_train_on,
+            cfg.global_batch_size_to_train_on,
+            cfg.micro_batch_size_to_train_on,
+            cfg.global_batch_size_to_load,
+        ),
+        (5.0, 2, 100, 160, 80, 160),
+    )
+    # Nominal K=16 with B=1: logical 320 = 16 live devices * 20 steps, zero padding.
+    cfg = self._elastic_config(
+        *keep, "per_device_batch_size=1", "gradient_accumulation_steps=16", "elastic_max_per_device_batch_size=1"
+    )
+    self.assertEqual(
+        (cfg.per_device_batch_size, cfg.gradient_accumulation_steps, cfg.global_batch_size_to_train_on), (1.0, 20, 320)
+    )
+    # A looser bound lets the planner raise B when that pads less: logical 80 = 5 * 16 exactly.
+    cfg = self._elastic_config(*keep, "per_device_batch_size=4", "elastic_max_per_device_batch_size=8")
+    self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (5.0, 1))
+    # Pipeline alignment (step 2 on 16 live devices) is honoured without changing B=4; K grows instead.
+    cfg = self._elastic_config(
+        *keep,
+        "per_device_batch_size=4",
+        "elastic_max_per_device_batch_size=4",
+        "ici_pipeline_parallelism=4",
+        "pipeline_delay_activation_forwarding=true",
+        "base_num_decoder_layers=8",
+        "eval_interval=5",
+    )
+    self.assertEqual(
+        (cfg.per_device_batch_size, cfg.eval_per_device_batch_size, cfg.gradient_accumulation_steps), (4.0, 4.0, 2)
+    )
+    # With every slice live (or none yet), the bound changes nothing.
+    for live in (20, 0):
+      cfg = self._elastic_config(
+          *keep, "per_device_batch_size=5", "elastic_max_per_device_batch_size=5", num_live_devices=live
+      )
+      self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (5.0, 1))
+    # The legacy default is unchanged.
+    cfg = self._elastic_config(*keep, "per_device_batch_size=5")
+    self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (7.0, 1))
+    # logical 320 on 16 devices: B'=1 K'=20 and B'=2 K'=10 both pad nothing; the tie goes to the smaller B'.
+    cfg = self._elastic_config(
+        *keep, "per_device_batch_size=1", "gradient_accumulation_steps=16", "elastic_max_per_device_batch_size=2"
+    )
+    self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (1.0, 20))
+
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError),
+        "requires `elastic_max_per_device_batch_size` to be -1 or >= `per_device_batch_size`",
+    ):
+      self._elastic_config(*keep, "per_device_batch_size=5", "elastic_max_per_device_batch_size=3")
+    # Rejected even when no resize is pending (all 20 devices live), since a later resize could change K.
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "may change `gradient_accumulation_steps`"):
+      self._elastic_config(
+          *keep,
+          "per_device_batch_size=5",
+          "elastic_max_per_device_batch_size=5",
+          "use_tunix_gradient_accumulation=true",
+          num_live_devices=20,
+      )
+    # FP8 quantization asserts `gradient_accumulation_steps == 1` at train time, so a bound that may grow the steps on
+    # a later resize is rejected up front, even with every device live.
+    for quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling"):
+      with self.subTest(quantization=quantization):
+        with self.assertRaisesRegex(
+            (ValueError, pydantic.ValidationError), "may change `gradient_accumulation_steps`.*FP8 quantization"
+        ):
+          self._elastic_config(
+              *keep,
+              "per_device_batch_size=5",
+              "elastic_max_per_device_batch_size=5",
+              f"quantization={quantization}",
+              num_live_devices=20,
+          )
+
+  def test_elastic_constant_grad_accum_mode(self):
+    """`constant_grad_accum` keeps B and grows K to `ceil(GBS / (live * B))`; the per-device bound is implied."""
+    keep = ("elastic_global_batch_size_mode=constant_grad_accum",)
+    # 20 job devices, 16 live. (B, K) -> (B, ceil(B * 20 * K / (16 * B))) with the physical batch B * 16 * K'.
+    for b, k, expected_steps in ((5, 1, 2), (1, 16, 20), (4, 1, 2), (3, 2, 3)):
+      with self.subTest(b=b, k=k):
+        cfg = self._elastic_config(*keep, f"per_device_batch_size={b}", f"gradient_accumulation_steps={k}")
+        self.assertEqual(expected_steps, math.ceil(b * 20 * k / (16 * b)))
+        self.assertEqual(
+            (
+                cfg.per_device_batch_size,
+                cfg.gradient_accumulation_steps,
+                cfg.logical_global_batch_size_to_train_on,
+                cfg.global_batch_size_to_train_on,
+                cfg.micro_batch_size_to_train_on,
+            ),
+            (float(b), expected_steps, b * 20 * k, b * 16 * expected_steps, b * 16),
+        )
+    # Same plan as `constant_padded` with the bound set to B by hand.
+    padded = self._elastic_config(
+        "elastic_global_batch_size_mode=constant_padded", "per_device_batch_size=5", "elastic_max_per_device_batch_size=5"
+    )
+    grad_accum = self._elastic_config(*keep, "per_device_batch_size=5")
+    self.assertEqual(
+        (padded.per_device_batch_size, padded.gradient_accumulation_steps, padded.global_batch_size_to_load),
+        (grad_accum.per_device_batch_size, grad_accum.gradient_accumulation_steps, grad_accum.global_batch_size_to_load),
+    )
+    # Pipeline alignment (step 2 on 16 live devices) never changes B; K grows instead.
+    cfg = self._elastic_config(
+        *keep,
+        "per_device_batch_size=4",
+        "ici_pipeline_parallelism=4",
+        "pipeline_delay_activation_forwarding=true",
+        "base_num_decoder_layers=8",
+        "eval_interval=5",
+    )
+    self.assertEqual(
+        (cfg.per_device_batch_size, cfg.eval_per_device_batch_size, cfg.gradient_accumulation_steps), (4.0, 4.0, 2)
+    )
+    # With every slice live (or none yet) nothing changes.
+    for live in (20, 0):
+      cfg = self._elastic_config(*keep, "per_device_batch_size=5", num_live_devices=live)
+      self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (5.0, 1))
+    # An explicit bound is rejected: it is implied by the mode.
+    for bound in (5, 8):
+      with self.subTest(bound=bound):
+        with self.assertRaisesRegex(
+            (ValueError, pydantic.ValidationError),
+            "`elastic_global_batch_size_mode='constant_grad_accum'`.*`elastic_max_per_device_batch_size` is implied"
+            " and must stay -1",
+        ):
+          self._elastic_config(*keep, "per_device_batch_size=5", f"elastic_max_per_device_batch_size={bound}")
+    # The steps may change on a resize, so Tunix gradient accumulation and FP8 are rejected even with every device live.
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError), "constant_grad_accum.*may change `gradient_accumulation_steps`"
+    ):
+      self._elastic_config(*keep, "per_device_batch_size=5", "use_tunix_gradient_accumulation=true", num_live_devices=20)
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError), "may change `gradient_accumulation_steps`.*FP8 quantization"
+    ):
+      self._elastic_config(*keep, "per_device_batch_size=5", "quantization=fp8", num_live_devices=20)
+    # The shared constant-mode restrictions apply with the mode's own name in the message.
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError),
+        "`elastic_global_batch_size_mode='constant_grad_accum'` requires an integer `per_device_batch_size >= 1`",
+    ):
+      self._elastic_config(*keep, "per_device_batch_size=0.5")
 
 
 class Qwen3StackConfigValidationTest(absltest.TestCase):

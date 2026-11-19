@@ -1833,6 +1833,18 @@ elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
 # How the global batch size behaves when training on fewer than all slices of the job: "scaled" keeps
-# per_device_batch_size fixed so the global batch scales with the live slice count; "constant_padded" keeps the global
-# batch size of all slices by rounding up per_device_batch_size and padding the extra rows with zero segmentation.
+# per_device_batch_size fixed so the global batch scales with the live slice count; "constant_grad_accum" keeps the
+# global batch size of all slices and per_device_batch_size, growing only gradient_accumulation_steps to
+# ceil(global_batch / (live_devices * per_device_batch_size)), so activation memory and the compiled microbatch shapes
+# never change on a resize (recommended, in particular for recipes that fill HBM at the nominal batch);
+# "constant_padded" keeps the global batch size of all slices by rounding up per_device_batch_size (or, with
+# elastic_max_per_device_batch_size, by searching the per-device batches up to a bound for the least padding; advanced).
+# Both constant modes pad the extra rows with zero segmentation, which the loss masks out.
 elastic_global_batch_size_mode: "scaled"
+# With "constant_padded", how the constant global batch is covered on fewer slices. -1 keeps gradient_accumulation_steps
+# and rounds per_device_batch_size up (activation memory grows by the same factor). A value >= per_device_batch_size
+# bounds the per-device batch and grows gradient_accumulation_steps instead, picking the factoring with the least
+# padding among the per-device batches in [per_device_batch_size, bound] (ties go to the smaller per-device batch, and
+# it is never lowered below per_device_batch_size). With "constant_grad_accum" the bound is implied to be
+# per_device_batch_size and this must stay -1.
+elastic_max_per_device_batch_size: -1
