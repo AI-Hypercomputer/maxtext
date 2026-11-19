@@ -81,8 +81,9 @@ class TrainSFTIntegrationTest(unittest.TestCase):
     mock_train_iter.__next__.side_effect = IndexError("list index out of range")
     mock_create_data_iterator.return_value = (mock_train_iter, None)
 
-    with self.assertRaises(exceptions.StopTraining) as cm:
+    with self.assertRaises(RuntimeError) as cm:
       train_sft.train(self.config, goodput_recorder=None)
+    self.assertNotIsInstance(cm.exception, exceptions.StopTraining)
     self.assertIsInstance(cm.exception.__cause__, IndexError)
 
 

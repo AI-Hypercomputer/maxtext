@@ -33,8 +33,12 @@ from maxtext.utils.sharding import get_input_data_sharding
 def loader_exception_guard(config):
   """Context manager that wraps data loading Exception handling.
 
-  On block failure: bubbles up JAX/ScaleUp errors if elastic training is active;
-  otherwise raises a StopTraining exception.
+  On block failure:
+  - Elastic events (see `elastic_utils.maybe_bubble_elastic_exception`) are re-raised if elastic training is active.
+  - `StopTraining` is re-raised: something asked to end training gracefully.
+  - `StopIteration` raises `StopTraining`: the run is out of training data, which ends training gracefully.
+  - Any other error raises `RuntimeError`, so that the job fails (exits non-zero) and can be restarted instead of
+    being reported as completed.
 
   Args:
     config: maxtext configuration object.
@@ -43,14 +47,13 @@ def loader_exception_guard(config):
     yield
   except Exception as e:  # pylint: disable=broad-except
     elastic_utils.maybe_bubble_elastic_exception(config, e)
+    if isinstance(e, exceptions.StopTraining):
+      raise
     if isinstance(e, StopIteration):
       raise exceptions.StopTraining(
           f"You may have run out of training data. Received {type(e)}" f" exception: ({e})"
       ) from e
-    else:
-      raise exceptions.StopTraining(
-          f"`next(self.data_iterator)` failed with {type(e)} exception: ({e}).",
-      ) from e
+    raise RuntimeError(f"`next(self.data_iterator)` failed with {type(e)} exception: ({e}).") from e
 
 
 class DataLoader:

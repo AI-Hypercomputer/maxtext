@@ -125,14 +125,30 @@ def elastic_snapshot(config) -> bool:
   return elastic_enabled(config) and config.elastic_backup_kind == "snapshot"
 
 
+def _is_or_has_slice_down_cause(e: BaseException) -> bool:
+  """Returns whether `e`, or an error in its chain of causes, was raised because a slice went down."""
+  if isinstance(e, jax.errors.JaxRuntimeError) and elastic.is_error_due_to_slice_down(e):
+    return True
+  return _slice_down_cause(e) is not None
+
+
 def maybe_bubble_elastic_exception(config, e: Exception) -> None:
-  """Checks JAX/ScaleUp elastic errors and re-raises them if elasticity is enabled.
+  """Re-raises `e` if elastic training is enabled and `e` is an elastic event.
+
+  An elastic event is either a `ScaleUpSignalError` or an error raised because a slice went down, i.e. a
+  `JaxRuntimeError` that pathwaysutils attributes to a slice-down, raised directly or found in the chain of causes of
+  `e`. These are the errors that `elastic_retry` retries.
+
+  Any other error, e.g. a `JaxRuntimeError` with `PERMISSION_DENIED` from a checkpoint save, is not an elastic event:
+  it is left to the caller, which reports it as a failure.
 
   Args:
     config: Maxtext configuration object.
     e: The exception currently being evaluated.
   """
-  if elastic_enabled(config) and isinstance(e, (jax.errors.JaxRuntimeError, manager.ScaleUpSignalError)):
+  if not elastic_enabled(config):
+    return
+  if isinstance(e, manager.ScaleUpSignalError) or _is_or_has_slice_down_cause(e):
     raise e
 
 
@@ -406,7 +422,8 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
   arrays any more; nothing is deleted explicitly.
 
   An error that a library raised because a slice went down is retried even if the library re-raised it as another
-  exception type, as long as the original `JaxRuntimeError` is in its chain of causes.
+  exception type, or as a `JaxRuntimeError` that isn't a slice-down error itself, as long as the original
+  `JaxRuntimeError` is in its chain of causes.
 
   Args:
     config: Config object.
@@ -509,10 +526,14 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
         # pathwaysutils runs the elastic event callback next; let it know this was a scale-up.
         outcome.scale_up = True
         raise
-      except jax.errors.JaxRuntimeError:
-        # pathwaysutils decides whether a slice went down.
-        raise
       except Exception as e:
+        if isinstance(e, jax.errors.JaxRuntimeError) and elastic.is_error_due_to_slice_down(e):
+          # A slice-down error itself, which pathwaysutils retries as is.
+          raise
+        # pathwaysutils only checks the error it receives. If a slice-down error is in the chain of causes of `e` (`e`
+        # can itself be a `JaxRuntimeError`, e.g. `INVALID_ARGUMENT` raised while handling a `DATA_LOSS`), it is
+        # raised in place of `e`. Otherwise `e` is re-raised as is, and pathwaysutils decides whether it is a
+        # slice-down error itself.
         cause = _slice_down_cause(e)
         if cause is None:
           raise

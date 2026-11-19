@@ -19,7 +19,9 @@ import unittest
 from unittest.mock import Mock, call, create_autospec
 from absl.testing import parameterized
 from maxtext.common import checkpointing
+from maxtext.common import data_loader
 from maxtext.utils import elastic_utils
+from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 import pathwaysutils
 from pathwaysutils.elastic.manager import ScaleUpSignalError
@@ -31,6 +33,15 @@ class MockJaxRuntimeError(Exception):
 
 class WrappedLoadError(Exception):
   """Stands in for a library exception that wraps the original error, e.g. Orbax's `NoEntryError`."""
+
+
+def _chained(error, cause, explicit=True):
+  """Returns `error` chained to `cause`: explicitly (`raise error from cause`) or implicitly (raised while handling it)."""
+  if explicit:
+    error.__cause__ = cause  # Also sets `__suppress_context__`, like `raise ... from`.
+  else:
+    error.__context__ = cause
+  return error
 
 
 class FakeDevice:
@@ -502,7 +513,12 @@ class ElasticUtilsTest(parameterized.TestCase):
         def run_with_one_retry():
           try:
             return func()
-          except (ScaleUpSignalError, MockJaxRuntimeError):
+          except ScaleUpSignalError:
+            on_elastic_event_callback()
+          except MockJaxRuntimeError as e:
+            # Like pathwaysutils, only retry an error that is due to a slice going down.
+            if not self.fake_elastic.is_error_due_to_slice_down(e):
+              raise
             on_elastic_event_callback()
           return func()
 
@@ -660,6 +676,60 @@ class ElasticUtilsTest(parameterized.TestCase):
       self.assertIsInstance(raised.exception.__cause__, WrappedLoadError)
     else:
       self.assertIs(raised.exception.__cause__, cause)
+
+  def test_elastic_retry_unwraps_slice_down_error_from_other_jax_error(self):
+    """A JaxRuntimeError raised while handling a slice-down error reaches pathwaysutils as the slice-down error."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.elastic_retry.side_effect = lambda **kwargs: lambda func: func
+    self.fake_elastic.is_error_due_to_slice_down.side_effect = lambda e: str(e).startswith("DATA_LOSS")
+    cause = MockJaxRuntimeError("DATA_LOSS: Full data loss while copying to devices")
+    error = _chained(MockJaxRuntimeError("INVALID_ARGUMENT: Buffer has been deleted or donated"), cause)
+
+    def train():
+      raise error
+
+    with self.assertRaises(MockJaxRuntimeError) as raised:
+      elastic_utils.elastic_retry(config)(train)()
+
+    self.assertEqual(str(raised.exception), str(cause))
+    self.assertIs(raised.exception.__cause__, error)
+
+  @parameterized.named_parameters(
+      ("slice_down_jax_error", "DATA_LOSS: slice 1 is down"),
+      ("other_jax_error", "PERMISSION_DENIED: While opening TensorStore"),
+  )
+  def test_elastic_retry_passes_jax_errors_without_slice_down_cause_through(self, message):
+    """A JaxRuntimeError without a slice-down error in its chain of causes reaches pathwaysutils as is."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.elastic_retry.side_effect = lambda **kwargs: lambda func: func
+    self.fake_elastic.is_error_due_to_slice_down.side_effect = lambda e: str(e).startswith("DATA_LOSS")
+    error = MockJaxRuntimeError(message)
+
+    def train():
+      raise error
+
+    with self.assertRaises(MockJaxRuntimeError) as raised:
+      elastic_utils.elastic_retry(config)(train)()
+
+    self.assertIs(raised.exception, error)
+
+  def test_elastic_retry_raises_slice_down_error_as_is(self):
+    """A slice-down JaxRuntimeError reaches pathwaysutils as is, even if its chain of causes holds another one."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.elastic_retry.side_effect = lambda **kwargs: lambda func: func
+    self.fake_elastic.is_error_due_to_slice_down.side_effect = lambda e: str(e).startswith("DATA_LOSS")
+    error = _chained(MockJaxRuntimeError("DATA_LOSS: slice 1 is down"), MockJaxRuntimeError("DATA_LOSS: slice 0 is down"))
+
+    def train():
+      raise error
+
+    with self.assertRaises(MockJaxRuntimeError) as raised:
+      elastic_utils.elastic_retry(config)(train)()
+
+    self.assertIs(raised.exception, error)
 
   def test_elastic_retry_retries_wrapped_slice_down_error(self):
     """The attempt after a wrapped slice-down error runs, and the event is reported as a slice-down."""
@@ -947,31 +1017,124 @@ class ElasticUtilsTest(parameterized.TestCase):
     self.fake_manager.available_inactive_slices = available_inactive_slices
     self.assertEqual(elastic_utils.is_scale_up_event(config), expected)
 
-  def test_maybe_bubble_elastic_exception_bubbles_on_elastic_errors(self):
-    """Tests that elastic exceptions are bubbled up, while other exceptions are returned normally."""
+  @parameterized.named_parameters(
+      ("slice_down_jax_error", lambda: MockJaxRuntimeError("DATA_LOSS: slice 1 is down"), True, True),
+      ("other_jax_error", lambda: MockJaxRuntimeError("PERMISSION_DENIED: While opening TensorStore"), False, False),
+      ("scale_up_signal", ScaleUpSignalError, False, True),
+      ("non_jax_error", lambda: ValueError("Disk full"), True, False),
+      (
+          "raised_from_slice_down_jax_error",
+          lambda: _chained(WrappedLoadError("Failed to save"), MockJaxRuntimeError("DATA_LOSS")),
+          True,
+          True,
+      ),
+      (
+          "raised_while_handling_slice_down_jax_error",
+          lambda: _chained(WrappedLoadError("Failed to save"), MockJaxRuntimeError("DATA_LOSS"), explicit=False),
+          True,
+          True,
+      ),
+      (
+          "raised_from_slice_down_jax_error_two_levels_deep",
+          lambda: _chained(
+              RuntimeError("Checkpointing failed"),
+              _chained(WrappedLoadError("Failed to save"), MockJaxRuntimeError("DATA_LOSS")),
+          ),
+          True,
+          True,
+      ),
+      (
+          "raised_from_other_jax_error",
+          lambda: _chained(WrappedLoadError("Failed to save"), MockJaxRuntimeError("PERMISSION_DENIED")),
+          False,
+          False,
+      ),
+      ("raised_from_non_jax_error", lambda: _chained(WrappedLoadError("Failed to save"), KeyError("x")), True, False),
+  )
+  def test_maybe_bubble_elastic_exception(self, make_error, slice_down, expect_bubble):
+    """Only scale-up signals and errors raised because a slice went down are bubbled up as elastic events."""
     config = FakeConfig()
-    config.elastic_enabled = True
-    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    self.fake_elastic.is_error_due_to_slice_down.return_value = slice_down
+    error = make_error()
 
-    # Scenario 1: Elastic JAX error propagates
-    with self.assertRaises(MockJaxRuntimeError):
-      elastic_utils.maybe_bubble_elastic_exception(config, MockJaxRuntimeError("TPU offline"))
+    if expect_bubble:
+      with self.assertRaises(type(error)) as raised:
+        elastic_utils.maybe_bubble_elastic_exception(config, error)
+      # The error itself is re-raised, with its traceback and chain of causes.
+      self.assertIs(raised.exception, error)
+    else:
+      # Returns normally, so that the caller handles the error.
+      elastic_utils.maybe_bubble_elastic_exception(config, error)
 
-    # Scenario 2: ScaleUpSignalError propagates
-    with self.assertRaises(ScaleUpSignalError):
-      elastic_utils.maybe_bubble_elastic_exception(config, ScaleUpSignalError())
+  def test_maybe_bubble_elastic_exception_other_jax_error_raised_from_slice_down_jax_error(self):
+    """A JaxRuntimeError that isn't a slice-down itself, but was raised from one, is an elastic event."""
+    self.fake_elastic.is_error_due_to_slice_down.side_effect = lambda e: str(e).startswith("DATA_LOSS")
+    error = _chained(MockJaxRuntimeError("INVALID_ARGUMENT: Buffer was deleted"), MockJaxRuntimeError("DATA_LOSS"))
 
-    # Scenario 3: Non-elastic error is returned/ignored
-    elastic_utils.maybe_bubble_elastic_exception(config, ValueError("Disk full"))
+    with self.assertRaises(MockJaxRuntimeError) as raised:
+      elastic_utils.maybe_bubble_elastic_exception(FakeConfig(), error)
 
-  def test_maybe_bubble_elastic_exception_disabled_does_not_bubble(self):
-    """If elasticity is disabled, JaxRuntimeError should not bubble."""
+    self.assertIs(raised.exception, error)
+
+  def test_maybe_bubble_elastic_exception_slice_down_cause_hidden_with_from_none(self):
+    """`raise ... from None` hides the slice-down error from tracebacks, but the error is still an elastic event."""
+    self.fake_elastic.is_error_due_to_slice_down.return_value = True
+
+    def save():
+      try:
+        raise MockJaxRuntimeError("DATA_LOSS")
+      except MockJaxRuntimeError:
+        raise WrappedLoadError("Failed to save") from None
+
+    with self.assertRaises(WrappedLoadError) as saved:
+      save()
+    error = saved.exception
+    self.assertIsInstance(error.__context__, MockJaxRuntimeError)
+    self.assertIsNone(error.__cause__)
+    self.assertTrue(error.__suppress_context__)
+
+    with self.assertRaises(WrappedLoadError):
+      elastic_utils.maybe_bubble_elastic_exception(FakeConfig(), error)
+
+  def test_maybe_bubble_elastic_exception_terminates_on_cyclic_cause_chain(self):
+    """A chain of causes that loops back on itself is searched once, without hanging."""
+    self.fake_elastic.is_error_due_to_slice_down.return_value = False
+    outer = WrappedLoadError("Failed to save")
+    inner = MockJaxRuntimeError("PERMISSION_DENIED")
+    outer.__cause__ = inner
+    inner.__cause__ = outer
+
+    elastic_utils.maybe_bubble_elastic_exception(FakeConfig(), outer)
+
+    self.fake_elastic.is_error_due_to_slice_down.assert_called_once_with(inner)
+
+  def test_maybe_bubble_elastic_exception_does_not_unwrap_scale_up_signal(self):
+    """Only a `ScaleUpSignalError` raised as is signals a scale-up, as in `elastic_retry`; a wrapped one doesn't."""
+    self.fake_elastic.is_error_due_to_slice_down.return_value = False
+    error = _chained(WrappedLoadError("Failed to save"), ScaleUpSignalError())
+
+    elastic_utils.maybe_bubble_elastic_exception(FakeConfig(), error)
+
+  @parameterized.named_parameters(
+      ("elastic_disabled", False, True),
+      ("backend_without_elastic_support", True, False),
+  )
+  def test_maybe_bubble_elastic_exception_without_elastic_does_not_bubble(self, elastic_enabled, pathways_backend):
+    """Without elastic training, nothing is an elastic event, not even a slice-down error or a scale-up signal."""
     config = FakeConfig()
-    config.elastic_enabled = False  # Disabled
-    self.fake_pathwaysutils.is_pathways_backend_used.return_value = True
+    config.elastic_enabled = elastic_enabled
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = pathways_backend
+    self.fake_elastic.is_error_due_to_slice_down.return_value = True
 
-    # Executes normally (no exception raised)
-    elastic_utils.maybe_bubble_elastic_exception(config, MockJaxRuntimeError("JAX error but elasticity disabled"))
+    for error in (
+        MockJaxRuntimeError("DATA_LOSS: slice 1 is down"),
+        ScaleUpSignalError(),
+        _chained(WrappedLoadError("Failed to save"), MockJaxRuntimeError("DATA_LOSS")),
+    ):
+      with self.subTest(error=repr(error)):
+        elastic_utils.maybe_bubble_elastic_exception(config, error)
+
+    self.fake_elastic.is_error_due_to_slice_down.assert_not_called()
 
   def test_checkpoint_exception_guard_checks_scale_up_on_success(self):
     """Signals ScaleUpSignalError if scale-up is active when save completes."""
@@ -1020,6 +1183,271 @@ class ElasticUtilsTest(parameterized.TestCase):
       raise ValueError("Save failed")
 
     self.assertTrue(handler_called)
+
+  def test_checkpoint_exception_guard_hands_non_elastic_jax_error_to_handler(self):
+    """A JaxRuntimeError that isn't a slice-down, e.g. PERMISSION_DENIED, is handled as a checkpoint failure."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.available_inactive_slices = {1}
+    self.fake_elastic.is_error_due_to_slice_down.return_value = False
+    mock_checkpoint_manager = Mock(spec=checkpointing.ocp.training.Checkpointer)
+    error = MockJaxRuntimeError("PERMISSION_DENIED: While opening TensorStore")
+    handled = []
+
+    def handler(err):
+      handled.append(err)
+      raise RuntimeError(f"Checkpointing failed. {err}") from err
+
+    with self.assertRaises(RuntimeError) as raised:
+      with checkpointing.checkpoint_exception_guard(config, mock_checkpoint_manager, handler):
+        raise error
+
+    self.assertEqual(handled, [error])
+    self.assertIs(raised.exception.__cause__, error)
+    self.assertEqual(str(raised.exception), "Checkpointing failed. PERMISSION_DENIED: While opening TensorStore")
+    # A failed save doesn't check for a scale-up.
+    mock_checkpoint_manager.wait.assert_not_called()
+
+  @parameterized.named_parameters(
+      ("slice_down_jax_error", lambda: MockJaxRuntimeError("DATA_LOSS: slice 1 is down"), True),
+      ("scale_up_signal", ScaleUpSignalError, False),
+  )
+  def test_checkpoint_exception_guard_bubbles_elastic_events(self, make_error, slice_down):
+    """Elastic events bypass the handler, so that `elastic_retry` can retry the attempt."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_elastic.is_error_due_to_slice_down.return_value = slice_down
+    handler = Mock()
+    error = make_error()
+
+    with self.assertRaises(type(error)) as raised:
+      with checkpointing.checkpoint_exception_guard(config, self.fake_manager, handler):
+        raise error
+
+    self.assertIs(raised.exception, error)
+    handler.assert_not_called()
+
+  def test_checkpoint_exception_guard_without_handler_reraises_non_elastic_error(self):
+    """Without a handler, an error that isn't an elastic event is re-raised as is."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_elastic.is_error_due_to_slice_down.return_value = False
+    error = MockJaxRuntimeError("PERMISSION_DENIED: While opening TensorStore")
+
+    with self.assertRaises(MockJaxRuntimeError) as raised:
+      with checkpointing.checkpoint_exception_guard(config, self.fake_manager):
+        raise error
+
+    self.assertIs(raised.exception, error)
+
+  def test_checkpoint_exception_guard_elastic_disabled_hands_jax_error_to_handler(self):
+    """Without elastic training, even a slice-down error is handled as a checkpoint failure."""
+    config = FakeConfig()
+    config.elastic_enabled = False
+    self.fake_elastic.is_error_due_to_slice_down.return_value = True
+    handler = Mock(side_effect=RuntimeError("Checkpointing failed."))
+    error = MockJaxRuntimeError("DATA_LOSS: slice 1 is down")
+
+    with self.assertRaisesRegex(RuntimeError, "Checkpointing failed."):
+      with checkpointing.checkpoint_exception_guard(config, checkpoint_manager=None, handler_fn=handler):
+        raise error
+
+    handler.assert_called_once_with(error)
+
+  def test_loader_exception_guard_passes_through_on_success(self):
+    """A data loading block that doesn't raise is left alone."""
+    with data_loader.loader_exception_guard(FakeConfig()):
+      batch = {"inputs": [1, 2, 3]}
+
+    self.assertEqual(batch, {"inputs": [1, 2, 3]})
+
+  @parameterized.named_parameters(
+      ("elastic_enabled", True),
+      ("elastic_disabled", False),
+  )
+  def test_loader_exception_guard_out_of_data_stops_training(self, elastic_enabled):
+    """Running out of training data ends training gracefully."""
+    config = FakeConfig()
+    config.elastic_enabled = elastic_enabled
+    error = StopIteration("generator raised StopIteration")
+
+    with self.assertRaises(exceptions.StopTraining) as raised:
+      with data_loader.loader_exception_guard(config):
+        raise error
+
+    self.assertIs(raised.exception.__cause__, error)
+    self.assertIn("You may have run out of training data", str(raised.exception))
+
+  @parameterized.named_parameters(
+      (
+          "permission_denied",
+          lambda: MockJaxRuntimeError("PERMISSION_DENIED: While opening TensorStore"),
+          RuntimeError,
+          1,
+          False,
+      ),
+      ("slice_down", lambda: MockJaxRuntimeError("DATA_LOSS: slice 1 is down"), None, 2, True),
+      (
+          "other_jax_error_raised_from_slice_down",
+          lambda: _chained(MockJaxRuntimeError("INVALID_ARGUMENT: Buffer was deleted"), MockJaxRuntimeError("DATA_LOSS")),
+          None,
+          2,
+          True,
+      ),
+  )
+  def test_elastic_retry_with_checkpoint_errors(self, make_error, expected_error, expected_attempts, expect_event):
+    """End to end: only a slice-down during a checkpoint save is retried; other errors fail the run via the handler."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_elastic.is_error_due_to_slice_down.side_effect = lambda e: str(e).startswith("DATA_LOSS")
+    self._fake_pathways_retry_with_one_retry()
+    callback_fn = Mock()
+    handled = []
+    attempts = []
+
+    def handler(err):
+      handled.append(err)
+      raise RuntimeError(f"Checkpointing failed. {err}") from err
+
+    def train():
+      attempts.append(len(attempts))
+      if len(attempts) == 1:
+        with checkpointing.checkpoint_exception_guard(config, None, handler):
+          raise make_error()
+
+    retried_train = elastic_utils.elastic_retry(config, callback_fn=callback_fn)(train)
+    if expected_error is None:
+      retried_train()
+    else:
+      with self.assertRaisesRegex(expected_error, "Checkpointing failed. PERMISSION_DENIED"):
+        retried_train()
+
+    self.assertLen(attempts, expected_attempts)
+    # The checkpoint error handler only sees errors that aren't elastic events.
+    self.assertLen(handled, 0 if expect_event else 1)
+    self.assertEqual(callback_fn.called, expect_event)
+
+  @parameterized.named_parameters(
+      ("os_error", True, lambda: OSError("503 Service Unavailable"), False),
+      ("value_error", True, lambda: ValueError("Bad record"), False),
+      ("other_jax_error", True, lambda: MockJaxRuntimeError("PERMISSION_DENIED: GCS read"), False),
+      (
+          "raised_from_other_jax_error",
+          True,
+          lambda: _chained(OSError("Read failed"), MockJaxRuntimeError("UNAUTHENTICATED")),
+          False,
+      ),
+      ("os_error_elastic_disabled", False, lambda: OSError("503 Service Unavailable"), False),
+      ("slice_down_jax_error_elastic_disabled", False, lambda: MockJaxRuntimeError("DATA_LOSS: slice 1 is down"), True),
+  )
+  def test_loader_exception_guard_fails_job_on_unexpected_error(self, elastic_enabled, make_error, slice_down):
+    """Unexpected data loading errors fail the job (exit non-zero) instead of ending training gracefully (exit 0)."""
+    config = FakeConfig()
+    config.elastic_enabled = elastic_enabled
+    self.fake_elastic.is_error_due_to_slice_down.return_value = slice_down
+    error = make_error()
+
+    with self.assertRaises(RuntimeError) as raised:
+      with data_loader.loader_exception_guard(config):
+        raise error
+
+    self.assertIs(type(raised.exception), RuntimeError)
+    self.assertNotIsInstance(raised.exception, exceptions.StopTraining)
+    self.assertIs(raised.exception.__cause__, error)
+    self.assertIn(f"failed with {type(error)} exception: ({error})", str(raised.exception))
+
+  @parameterized.named_parameters(
+      ("slice_down_jax_error", lambda: MockJaxRuntimeError("DATA_LOSS: slice 1 is down"), True),
+      (
+          "raised_from_slice_down_jax_error",
+          lambda: _chained(OSError("Read failed"), MockJaxRuntimeError("DATA_LOSS")),
+          True,
+      ),
+      ("scale_up_signal", ScaleUpSignalError, False),
+  )
+  def test_loader_exception_guard_bubbles_elastic_events(self, make_error, slice_down):
+    """With elastic training, elastic events are re-raised as is, so that `elastic_retry` can retry the attempt."""
+    config = FakeConfig()
+    self.fake_elastic.is_error_due_to_slice_down.return_value = slice_down
+    error = make_error()
+
+    with self.assertRaises(type(error)) as raised:
+      with data_loader.loader_exception_guard(config):
+        raise error
+
+    self.assertIs(raised.exception, error)
+
+  def test_loader_exception_guard_reraises_stop_training(self):
+    """A request to end training gracefully is kept as is, not turned into a failure."""
+    error = exceptions.StopTraining("Target loss is achieved.")
+
+    with self.assertRaises(exceptions.StopTraining) as raised:
+      with data_loader.loader_exception_guard(FakeConfig()):
+        raise error
+
+    self.assertIs(raised.exception, error)
+
+  def test_loader_exception_guard_slice_down_wins_over_out_of_data(self):
+    """With elastic training, a `StopIteration` raised because a slice went down is retried, not a graceful end."""
+    self.fake_elastic.is_error_due_to_slice_down.return_value = True
+    error = _chained(StopIteration(), MockJaxRuntimeError("DATA_LOSS: slice 1 is down"))
+
+    with self.assertRaises(StopIteration) as raised:
+      with data_loader.loader_exception_guard(FakeConfig()):
+        raise error
+
+    self.assertIs(raised.exception, error)
+
+  @parameterized.named_parameters(
+      ("keyboard_interrupt", KeyboardInterrupt),
+      ("system_exit", lambda: SystemExit(3)),
+  )
+  def test_loader_exception_guard_leaves_base_exceptions_alone(self, make_error):
+    """Exceptions that aren't errors, e.g. an interrupt or an exit, propagate unchanged."""
+    error = make_error()
+
+    with self.assertRaises(type(error)) as raised:
+      with data_loader.loader_exception_guard(FakeConfig()):
+        raise error
+
+    self.assertIs(raised.exception, error)
+    self.fake_elastic.is_error_due_to_slice_down.assert_not_called()
+
+  def test_loader_exception_guard_empty_error_message(self):
+    """An error without a message still fails the job with its type in the message."""
+    with self.assertRaisesRegex(RuntimeError, r"failed with <class 'OSError'> exception: \(\)\."):
+      with data_loader.loader_exception_guard(FakeConfig()):
+        raise OSError()
+
+  @parameterized.named_parameters(
+      ("os_error", lambda: OSError("503 Service Unavailable"), RuntimeError, 1, False),
+      ("out_of_data", StopIteration, exceptions.StopTraining, 1, False),
+      ("slice_down", lambda: MockJaxRuntimeError("DATA_LOSS: slice 1 is down"), None, 2, True),
+  )
+  def test_elastic_retry_with_data_loading_errors(self, make_error, expected_error, expected_attempts, expect_event):
+    """End to end: only a slice-down while loading data is retried; other errors end the run on the first attempt."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_elastic.is_error_due_to_slice_down.side_effect = lambda e: str(e).startswith("DATA_LOSS")
+    self._fake_pathways_retry_with_one_retry()
+    callback_fn = Mock()
+    attempts = []
+
+    def train():
+      attempts.append(len(attempts))
+      if len(attempts) == 1:
+        with data_loader.loader_exception_guard(config):
+          raise make_error()
+
+    retried_train = elastic_utils.elastic_retry(config, callback_fn=callback_fn)(train)
+    if expected_error is None:
+      retried_train()
+    else:
+      with self.assertRaises(expected_error):
+        retried_train()
+
+    self.assertLen(attempts, expected_attempts)
+    self.assertEqual(callback_fn.called, expect_event)
 
 
 if __name__ == "__main__":

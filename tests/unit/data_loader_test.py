@@ -130,6 +130,18 @@ class DataLoaderTest(unittest.TestCase):
       _ = data_loader.load_next_batch()
     self.assertTrue(str(e.exception).startswith("You may have run out of training data."))
 
+  def test_load_next_batch_fails_on_unexpected_exception(self):
+    """An unexpected data loading error fails the job instead of ending training gracefully."""
+    error = OSError("Transient GCS read error")
+    self.mock_data_iterator.__next__.side_effect = error
+
+    data_loader = DataLoader(self.config, self.mesh, self.mock_data_iterator, None)
+    with self.assertRaises(RuntimeError) as e:
+      _ = data_loader.load_next_batch()
+    self.assertNotIsInstance(e.exception, exceptions.StopTraining)
+    self.assertIs(e.exception.__cause__, error)
+    self.assertIn("Transient GCS read error", str(e.exception))
+
   @pytest.mark.external_serving
   def test_rampup_data_loader(self):
     """Tests that RampUpLoader correctly slices and increment."""
