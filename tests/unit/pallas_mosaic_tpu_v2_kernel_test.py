@@ -726,6 +726,38 @@ class GmmTest(parameterized.TestCase):
     self.assertEqual(actual.shape, (num_local_groups, in_size, out_size))
     assert_arrays_all_close(actual, expected)
 
+  @parameterized.product(tile_m=[256, 512, 1024], lhs_3d=[False, True], has_partial_sum=[False, True])
+  def test_tgmm_small_tail_contraction_is_exact(self, tile_m, lhs_3d, has_partial_sum):
+    """Contracting group tails over fewer rows gives the same bits as the full tile."""
+    m, k, n = 4096, 1024, 512
+    # Empty, short, unaligned and multi-tile groups; rows past their sum are NaN
+    # padding, which both paths must mask.
+    group_sizes = jnp.array([0, 1, 7, 255, 257, 300, 511, 513, 700, 1000], dtype=jnp.int32)
+    num_groups = group_sizes.shape[0]
+    used = int(group_sizes.sum())
+    key1, key2, key3 = jax.random.split(jax.random.key(0), 3)
+    lhs = jax.random.normal(key1, (m, k), dtype=jnp.bfloat16).at[used:].set(jnp.nan)
+    grad = jax.random.normal(key2, (m, n), dtype=jnp.bfloat16).at[used:].set(jnp.nan)
+    if lhs_3d:
+      lhs = lhs.reshape(m, k // 128, 128)
+    ps = jax.random.normal(key3, (num_groups, k, n), dtype=jnp.float32) if has_partial_sum else None
+
+    def run(small_tail_contraction):
+      return tgmm_backend.tgmm_v2(
+          lhs,
+          grad,
+          group_sizes,
+          num_groups,
+          partial_sum=ps,
+          preferred_element_type=jnp.float32,
+          tile_info=gmm_backend.TileSizes(tile_m=tile_m, tile_k=k, tile_n=n),
+          small_tail_contraction=small_tail_contraction,
+      )
+
+    want, got = run(False), run(True)
+    self.assertFalse(jnp.isnan(want).any())
+    chex.assert_trees_all_equal(got, want)
+
   @pytest.mark.skip(reason="Test takes too long, can run locally to verify changes b/528087469")
   def test_tgmm_explicitly_exercises_all_branches(self):
     # Group 0 (size 4*tile_m, 4 gm tiles): matmul_new_group, matmul, matmul,
