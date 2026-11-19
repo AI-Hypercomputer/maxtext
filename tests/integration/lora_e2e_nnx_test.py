@@ -167,9 +167,8 @@ class LoraE2ENnxIntegrationTest(unittest.TestCase):
     self._run_e2e_flow("gemma4-26b", use_sft=True)
 
   # --- QLoRA NF4 Tests (Gemma4, Qwen3, GPT-OSS) ---
-  def test_qlora_e2e_gemma4_pretrain_nf4(self):
-    self._run_e2e_flow("gemma4-26b", use_sft=False, lora_weight_qtype="nf4")
-
+  # gemma4 x pretrain x nf4 is not run on its own: each of its pairs is covered by another case
+  # (gemma4 x pretrain, gemma4 x nf4, pretrain x nf4).
   def test_qlora_e2e_gemma4_sft_native_nf4(self):
     self._run_e2e_flow("gemma4-26b", use_sft=True, lora_weight_qtype="nf4")
 

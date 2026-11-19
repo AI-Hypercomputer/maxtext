@@ -200,7 +200,11 @@ def _copy_hf_to_jax(hf_m, hf_head, jax_m, cfg):
 
 @unittest.skipUnless(HAS_TORCH, "Torch or transformers not available")
 class Glm5ModelTest(parameterized.TestCase):
-  """Parity, scan/remat equivalence, and registry dispatch tests for Glm5Model."""
+  """HF parity, padding, and MoE load-balancing loss tests for Glm5Model.
+
+  Full-model scan/remat equivalence (logits, moe_lb_loss, all-param grads) is covered by the m3 conformance
+  check_scan_remat_equivalence (tests/unit/m3/conformance) via src/maxtext/m3/models/glm5_3_flash/conformance_spec.py.
+  """
 
   def setUp(self):
     super().setUp()
@@ -360,13 +364,13 @@ class Glm5ModelTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("layers5_fp64", 5, True),
       ("layers5_fp32", 5, False),
-      ("layers7_fp64", 7, True),
-      ("layers7_fp32", 7, False),
-      ("layers13_fp64", 13, True),
-      ("layers13_fp32", 13, False),
   )
   def test_hf_parity_and_backward(self, num_layers, is_fp64):
-    """Verifies forward and backward parity between HF and JAX Glm5Model."""
+    """Verifies forward and backward parity between HF and JAX Glm5Model.
+
+    Scanned super-block (13-layer) HF forward + all-param backward parity under fp32 and fp64 is covered by
+    glm5_3_flash_ckpt_parity_test.py::test_golden_batch_ce_loss_and_all_param_gradient_parity.
+    """
     cfg_f32, hf_c = _make_cfg(
         num_hidden_layers=num_layers,
         scan_layers=True,
@@ -399,7 +403,7 @@ class Glm5ModelTest(parameterized.TestCase):
             p.normal_(0.0, 0.02)
       hf_head_f32.weight.normal_(0.0, 0.02)
 
-    seq_len = 32 if num_layers == 5 else 20
+    seq_len = 32
     ids = torch.randint(1, 200, (1, seq_len), dtype=torch.long)
     cot_f32 = torch.randn(1, seq_len, hf_c.vocab_size, dtype=torch.float32)
 
@@ -425,71 +429,17 @@ class Glm5ModelTest(parameterized.TestCase):
         num_layers, cfg_f32, hf_m_f32, hf_head_f32, ids, cot_f32, is_fp64=False
     )
     self._assert_e3(aux_logits, np_hf, "forward_aux_logits")
-    if num_layers == 5:
-      self._assert_e3(
-          np.asarray(jax_m(tokens), dtype=np.float32),
-          np_hf,
-          "forward_call_logits",
-      )
+    self._assert_e3(
+        np.asarray(jax_m(tokens), dtype=np.float32),
+        np_hf,
+        "forward_call_logits",
+    )
     for path_str, val_jax, val_hf in leaf_data:
       self._assert_e3(val_jax, val_hf, path_str)
     bias_leaves = jax.tree.leaves(nnx.state(grads, modeling_glm5_3_flash.Glm5RouterBias))
     self.assertNotEmpty(bias_leaves)
     for b_grad in bias_leaves:
       np.testing.assert_allclose(np.array(b_grad), 0.0, atol=0.0, rtol=0.0)
-
-  @parameterized.named_parameters(
-      ("unscanned", "unscanned"),
-      ("remat", "remat"),
-  )
-  def test_scanned_unscanned_and_remat_parity(self, variant):
-    """Verifies bit-level forward and per-param gradient parity on 13-layer model."""
-    cfg_s, _ = _make_cfg(num_hidden_layers=13, scan_layers=True)
-    m_scan = modeling_glm5_3_flash.Glm5Model(cfg_s, rngs=nnx.Rngs(42), place_on_devices=False)
-    target_rngs = nnx.Rngs(42)
-    if variant == "unscanned":
-      cfg_u, _ = _make_cfg(num_hidden_layers=13, scan_layers=False)
-      m_target = modeling_glm5_3_flash.Glm5Model(cfg_u, rngs=target_rngs, place_on_devices=False)
-    elif variant == "remat":
-      pol = jax.checkpoint_policies.nothing_saveable
-      m_target = modeling_glm5_3_flash.apply_glm5_remat(
-          modeling_glm5_3_flash.Glm5Model(cfg_s, rngs=target_rngs, place_on_devices=False),
-          policy=pol,
-      )
-    else:
-      raise ValueError(f"Unknown variant: {variant!r}")
-
-    for lyr in (
-        [getattr(m_scan.super_block, f"slot_{s}") for s in range(4)]
-        + list(m_scan.prefix_layers)
-        + list(m_scan.suffix_layers)
-    ):
-      if lyr and lyr.is_moe:
-        b = lyr.mlp.gate.e_score_correction_bias
-        b.value = jnp.array(np.random.randn(*b.value.shape).astype(np.float32))
-
-    nnx.update(m_target, nnx.state(m_scan))
-
-    ids = torch.randint(1, 200, (1, 20), dtype=torch.long)
-    tokens = jnp.array(ids.numpy())
-
-    def loss_fn(m):
-      o = m.forward_with_aux(tokens)
-      return o.logits.mean() + o.aux["moe_lb_loss"], (
-          o.logits,
-          o.aux["moe_lb_loss"],
-      )
-
-    (_, (logits_s, lb_loss_s)), grads_s = nnx.value_and_grad(loss_fn, has_aux=True)(m_scan)
-    leaves_s = jax.tree.leaves(nnx.state(grads_s, nnx.Param))
-
-    (_, (logits_m, lb_loss_m)), grads_m = nnx.value_and_grad(loss_fn, has_aux=True)(m_target)
-    self._assert_allclose(logits_s, logits_m, atol=1e-5, rtol=1e-5)
-    self._assert_allclose(lb_loss_s, lb_loss_m, atol=1e-5, rtol=1e-5)
-    self.assertGreater(float(lb_loss_s), 0.0)
-    leaves_m = jax.tree.leaves(nnx.state(grads_m, nnx.Param))
-    for ps, pm in zip(leaves_s, leaves_m, strict=True):
-      self._assert_allclose(ps, pm, atol=1e-5, rtol=1e-5)
 
   def test_right_padded_parity(self):
     """Verifies parity on right-padded sequences using decoder_segment_ids."""
@@ -741,9 +691,9 @@ class Glm5ModelPureJaxTest(parameterized.TestCase):
       modeling_glm5_3_flash.create_glm5_3_flash_model(cfg, rngs=nnx.Rngs(0), place_on_devices=False)
 
   def test_bfloat16_precision(self):
-    """Verifies model execution with dtype=bfloat16 and weight_dtype=float32 on 13-layer model."""
+    """Verifies model execution with dtype=bfloat16 and weight_dtype=float32 on 7-layer model (1 super_block)."""
     cfg, _ = _make_cfg(
-        num_hidden_layers=13,
+        num_hidden_layers=7,
         scan_layers=True,
         dtype="bfloat16",
         weight_dtype="float32",

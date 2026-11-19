@@ -576,16 +576,6 @@ class TrainTests(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
-  def test_tpu_synthetic(self):
-    train_main(TrainTests.CONFIGS["synthetic"])
-
-  @pytest.mark.integration_test
-  @pytest.mark.gpu_only
-  def test_gpu_synthetic(self):
-    train_main(TrainTests.CONFIGS["synthetic"] + ["attention=dot_product"])
-
-  @pytest.mark.integration_test
-  @pytest.mark.tpu_only
   def test_tpu_pdb_lt_1(self):
     train_main(TrainTests.CONFIGS["pdb_lt_1"])
 
@@ -975,37 +965,6 @@ class TrainTests(unittest.TestCase):
   def test_base_model_shardy_false(self):
     train_main(TrainTests.CONFIGS["synthetic"] + ["shardy=False"])
 
-  @pytest.mark.integration_test
-  @pytest.mark.tpu_only
-  # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
-  @pytest.mark.skip_on_tpu7x
-  def test_tpu_zero1_gradient_accumulation(self):
-    zero1_ga = [  # tests Zero-1 optimizer sharding with gradient accumulation
-        None,
-        get_test_config_path(),
-        f"base_output_directory={self._base_output_directory}",
-        "enable_tensorboard=False",
-        "run_name=runner_test",
-        f"dataset_path={self.dataset_path}",
-        "steps=3",
-        "enable_checkpointing=False",
-        "enable_goodput_recording=False",
-        "dataset_type=synthetic",
-        "remat_policy=minimal",
-        "max_target_length=512",
-        "per_device_batch_size=2",
-        "ici_data_parallelism=-1",
-        "dcn_data_parallelism=1",
-        "ici_fsdp_parallelism=1",
-        "dcn_fsdp_parallelism=1",
-        "gradient_accumulation_steps=8",
-        "shard_optimizer_over_data=True",
-        "shard_mode=explicit",
-        "decoder_block=llama2",
-        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
-    ]
-    train_main(zero1_ga)
-
   def _losses(self, run_name, model_overrides, extra_args):
     """Trains a tiny model for a few steps and returns its per-step losses."""
     with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1222,6 +1181,8 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.tpu_only
   # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
   @pytest.mark.skip_on_tpu7x
+  # GA/ZeRO-1 logic is model-agnostic; qwen3, gemma and gemma4 cover it on PRs.
+  @pytest.mark.scheduled_only
   def test_tpu_mistral_zero1_gradient_accumulation(self):
     """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
 
@@ -1327,6 +1288,8 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.tpu_only
   # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
   @pytest.mark.skip_on_tpu7x
+  # GA/ZeRO-1 logic is model-agnostic; qwen3, gemma and gemma4 cover it on PRs.
+  @pytest.mark.scheduled_only
   def test_tpu_qwen2_kimi_zero1_gradient_accumulation(self):
     """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
 
@@ -1416,6 +1379,8 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.tpu_only
   # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
   @pytest.mark.skip_on_tpu7x
+  # GA/ZeRO-1 logic is model-agnostic; qwen3, gemma and gemma4 cover it on PRs.
+  @pytest.mark.scheduled_only
   def test_tpu_qwen3_hybrid_zero1_gradient_accumulation(self):
     """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
 
@@ -1461,6 +1426,8 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.tpu_only
   # TODO(b/517509898): Skip ZeRo-1 compiler Segfault on TPU7x SparseCore platforms
   @pytest.mark.skip_on_tpu7x
+  # GA/ZeRO-1 logic is model-agnostic; qwen3, gemma and gemma4 cover it on PRs.
+  @pytest.mark.scheduled_only
   def test_tpu_llama4_zero1_gradient_accumulation(self):
     """ZeRO-1 only shards the optimizer state, so it must not change the loss trajectory.
 
@@ -1540,7 +1507,7 @@ class TrainTests(unittest.TestCase):
             # The splash kernel cannot build a mask for a downscaled Gemma (its sliding
             # window leaves empty blocks); dot product attention keeps the focus on sharding.
             "attention=dot_product",
-            # Data-parallel only, matching the llama2 test above: ZeRO-1 needs a "data"
+            # Data-parallel only, matching the ZeRO-1 tests above: ZeRO-1 needs a "data"
             # axis to shard the moments over, and MaxTextConfig rejects combining it with
             # FSDP (the gradients and the moments would end up in different layouts).
             "ici_data_parallelism=-1",

@@ -1389,17 +1389,21 @@ _QWEN3_NEXT_CONFIG = {
 }
 
 
-class TestQwen3NextScannableBlock(unittest.TestCase):
-  """Tests Qwen3-Next's nested local(scan)/global(length-1 scan) decoder block."""
+class _Qwen3HybridScannableBlockHelpers(unittest.TestCase):
+  """Builds a Qwen3 hybrid scannable block once per class; holds no tests itself.
 
-  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
-  BLOCK_CLS = qwen3.Qwen3NextScannableBlock
+  Qwen3_5ScannableBlock only overrides `_make_decoder_layer`, so the block-mechanics tests live in
+  TestQwen3NextScannableBlock alone and TestQwen3_5ScannableBlock keeps only its Qwen3.5-specific checks.
+  """
+
+  MODEL_CONFIG = None
+  BLOCK_CLS = None
 
   @classmethod
   def _build(cls, layer_idx_offset=0, **overrides):
     """Builds one scannable block; overrides go to the config."""
     cfg = _make_config(**{**cls.MODEL_CONFIG, **overrides})
-    block = cls.BLOCK_CLS(
+    block = cls.BLOCK_CLS(  # pylint: disable=not-callable
         config=cfg,
         mesh=_make_mesh(cfg),
         model_mode=MODEL_MODE_TRAIN,
@@ -1424,6 +1428,13 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     positions = jnp.arange(cfg.max_target_length)[None, :]
     segment_ids = jnp.ones((1, cfg.max_target_length), dtype=jnp.int32)
     return inputs, segment_ids, positions
+
+
+class TestQwen3NextScannableBlock(_Qwen3HybridScannableBlockHelpers):
+  """Tests Qwen3-Next's nested local(scan)/global(length-1 scan) decoder block."""
+
+  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
+  BLOCK_CLS = qwen3.Qwen3NextScannableBlock
 
   def test_block_splits_cycle_into_local_stack_plus_one_global(self):
     """A block covers one attention period: cycle-1 stacked linear layers and one full-attention layer."""
@@ -1512,10 +1523,14 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
       )
 
 
-class TestNNXDecoderQwen3Next(unittest.TestCase):
-  """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
+class _Qwen3HybridDecoderHelpers(unittest.TestCase):
+  """Builds and runs a scanned Qwen3 hybrid NNXDecoder; holds no tests itself.
 
-  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
+  Qwen3-Next and Qwen3.5 share `_apply_qwen3_hybrid_scanned_blocks`, so the wiring tests live in
+  TestNNXDecoderQwen3Next alone and TestNNXDecoderQwen3_5 keeps only its Qwen3.5-specific checks.
+  """
+
+  MODEL_CONFIG = None
 
   def _build(self, num_decoder_layers, **overrides):
     """Builds a scanned Qwen3-Next decoder and its shared embedding."""
@@ -1552,6 +1567,12 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
         attention_metadata=attention_metadata,
     )
     return logits
+
+
+class TestNNXDecoderQwen3Next(_Qwen3HybridDecoderHelpers):
+  """Tests the NNXDecoder-level wiring of the Qwen3-Next scanned blocks."""
+
+  MODEL_CONFIG = _QWEN3_NEXT_CONFIG
 
   def test_decoder_regroups_flat_kv_caches_per_block(self):
     """A flat per-layer kv cache list must be regrouped per block and written back in order.
@@ -1659,8 +1680,8 @@ _QWEN3_5_CONFIG = {
 }
 
 
-class TestQwen3_5ScannableBlock(TestQwen3NextScannableBlock):
-  """Runs the Qwen3-Next scannable-block tests against Qwen3.5's block."""
+class TestQwen3_5ScannableBlock(_Qwen3HybridScannableBlockHelpers):
+  """Qwen3.5-specific checks of its scannable block; the shared block mechanics are in TestQwen3NextScannableBlock."""
 
   MODEL_CONFIG = _QWEN3_5_CONFIG
   BLOCK_CLS = qwen3_5.Qwen3_5ScannableBlock
@@ -1670,8 +1691,8 @@ class TestQwen3_5ScannableBlock(TestQwen3NextScannableBlock):
     self.assertIsInstance(self.block.global_layer, qwen3_5.Qwen3_5DecoderLayer)
 
 
-class TestNNXDecoderQwen3_5(TestNNXDecoderQwen3Next):
-  """Runs the NNXDecoder wiring tests against Qwen3.5."""
+class TestNNXDecoderQwen3_5(_Qwen3HybridDecoderHelpers):
+  """Qwen3.5-specific NNXDecoder checks; the shared wiring tests are in TestNNXDecoderQwen3Next."""
 
   MODEL_CONFIG = _QWEN3_5_CONFIG
 
@@ -3052,17 +3073,14 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
     self._assert_parity(num_layers=2)
 
   def test_grad_parity_four_layers(self):
+    # A single-trip unroll=2 loop over layers 1 .. 2 (unordered); five layers takes the same branches in
+    # fsdp_prefetch (the odd remainder step is covered by test_grad_parity_remat_save_dot_except_mlp).
     self._assert_parity(num_layers=4)
-
-  def test_grad_parity_five_layers(self):
-    self._assert_parity(num_layers=5)
 
   def test_grad_parity_seven_layers(self):
     # Two or more layer pairs per loop in both passes, so the loops order their second prefetch.
+    # Eight layers takes the same branches in fsdp_prefetch.
     self._assert_parity(num_layers=7)
-
-  def test_grad_parity_eight_layers(self):
-    self._assert_parity(num_layers=8)
 
   def test_grad_parity_param_scan_axis_zero(self):
     self._assert_parity(num_layers=4, param_scan_axis=0)
@@ -3227,8 +3245,7 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
   def test_qwen3_5_one_block(self):
     self._assert_qwen3_5_parity(num_blocks=1)
 
-  def test_qwen3_5_two_blocks(self):
-    self._assert_qwen3_5_parity(num_blocks=2)
+  # Two blocks with the default cycle are covered by test_qwen3_5_same_group_scans_unroll_by_two.
 
   def test_qwen3_5_three_blocks(self):
     self._assert_qwen3_5_parity(num_blocks=3)

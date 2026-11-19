@@ -222,6 +222,8 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  # Scheduled only: same save_only_these_names remat construct as test_remat_save_qkv_proj (PR-run), plus out_proj/mlpwo.
+  @pytest.mark.scheduled_only
   def test_remat_save_dot_except_mlpwi(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlpwi.pickle")
@@ -244,6 +246,8 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  # Scheduled only: same save_only_these_names remat construct as test_remat_save_qkv_proj (PR-run), plus out_proj.
+  @pytest.mark.scheduled_only
   def test_remat_save_dot_except_mlp(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_remat_save_dot_except_mlp.pickle")
@@ -378,6 +382,9 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  # Scheduled only: moe_test.py::TokenDroppingTest covers the capacity_factor mask generation, and
+  # test_custom_32x8_mesh still compiles mixtral with sparse_matmul=False + capacity_factor=1 on PRs.
+  @pytest.mark.scheduled_only
   def test_moe_dropping_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dropping_bf16.pickle")
@@ -533,6 +540,9 @@ class TrainCompile(parameterized.TestCase):
           )
       )
 
+  # Scheduled only: moe_test.py::RoutedMoeTest::test_ragged_dot checks ragged_dot numerics on TPU, and
+  # test_moe_deepseek_scanned_bf16 still compiles the sparse_matmul + megablox=False path on PRs.
+  @pytest.mark.scheduled_only
   def test_moe_ragged_dot_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_ragged_dot_bf16.pickle")
@@ -554,6 +564,9 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  # Scheduled only: moe_test.py::RoutedMoeTest::test_dense checks dense_matmul numerics on TPU, and
+  # test_moe_gpt_oss_20b_dense_matmul still compiles a dropless dense_matmul MoE on PRs.
+  @pytest.mark.scheduled_only
   def test_moe_dense_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_dense_bf16.pickle")
@@ -1096,7 +1109,11 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_indexer_sparse_training(self):
-    # test deepseek3.2 with sparse attention
+    """AOT test for deepseek3.2 sparse attention (indexer sparse training).
+
+    deepseek-custom also sets mhc_expansion_rate=4, so this doubles as the AOT test for the
+    Manifold-constrained Hyper Connection (mHC) implementation.
+    """
     compiled_trainstep_file = "/tmp/test_indexer_sparse_training.pickle"
     train_compile_main(
         (
@@ -1135,30 +1152,6 @@ class TrainCompile(parameterized.TestCase):
             "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
-        )
-    )
-
-  def test_mhc_integration(self):
-    """AOT test for Manifold-constrained Hyper Connection implementation"""
-    compiled_trainstep_file = "/tmp/test_mhc_integration"
-    train_compile_main(
-        (
-            "",
-            get_test_config_path(),
-            f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-8",
-            "compile_topology_num_slices=1",
-            "model_name=deepseek-custom",
-            "per_device_batch_size=1",
-            "scan_layers=True",
-            "attention=flash",
-            "use_tokamax_splash=True",
-            "max_target_length=1024",
-            # override
-            "override_model_config=True",
-            "base_num_decoder_layers=2",
-            "mhc_expansion_rate=4",
-            "engram_layers=[]",
         )
     )
 
@@ -1286,7 +1279,7 @@ class TrainCompile(parameterized.TestCase):
     )
 
   def test_vocab_tiling_bf16(self):
-    """test vocab_tiling when weight_dtype=bfloat16"""
+    """AOT compile vocab tiling with weight_dtype=bfloat16 on the NNX path (vocab_tiling_nnx_loss + custom_vjp)."""
     compiled_trainstep_file = "/tmp/test_vocab_tiling_bf16.pickle"
     train_compile_main(
         (
@@ -1327,10 +1320,12 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @pytest.mark.scheduled_only
   def test_qwen3_8(self):
     """AOT test for qwen3-8 at full width, truncated to two 4-layer [GDN x3, full-attention] cycles.
 
     Needs expert parallelism: under pure FSDP, gathering one layer's 512 routed experts in fp32 exceeds v5p HBM.
+    Scheduled only: test_qwen3_5 compiles the same qwen3_5 decoder block on the same v5p-512 topology on PRs.
     """
     compiled_trainstep_file = os.path.join(gettempdir(), "test_qwen3_8.pickle")
     train_compile_main(
@@ -1773,26 +1768,6 @@ class TrainCompile(parameterized.TestCase):
             # The Llama4 configs default to a HuggingFace tokenizer that is not vendored.
             "tokenizer_type=tiktoken",
             f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
-        )
-    )
-
-  def test_vocab_tiling_bf16_nnx(self):
-    """AOT compile vocab tiling on the NNX path (vocab_tiling_nnx_loss + custom_vjp)."""
-    compiled_trainstep_file = "/tmp/test_vocab_tiling_bf16_nnx.pickle"
-    train_compile_main(
-        (
-            "",
-            get_test_config_path(),
-            f"compiled_trainstep_file={compiled_trainstep_file}",
-            "compile_topology=v5p-8",
-            "compile_topology_num_slices=1",
-            "base_emb_dim=256",
-            "base_mlp_dim=256",
-            "base_num_decoder_layers=2",
-            "per_device_batch_size=2",
-            "max_target_length=1024",
-            "num_vocab_tiling=4",
-            "weight_dtype=bfloat16",
         )
     )
 

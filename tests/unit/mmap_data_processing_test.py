@@ -3226,103 +3226,14 @@ class TestMegatronNpyFixedLengthOutput:
           f"{key}: expected shape ({batch_size}, {seq_length}), " f"got {batch[key].shape}"
       )
 
-  def test_pretrain_pipeline_with_mp_prefetch(self):
-    """End-to-end pipeline with grain_worker_count=2 (mp_prefetch enabled).
-
-    Verifies that the mmap_npy path — which places mp_prefetch BEFORE batch
-    — produces correct output shapes when multiprocessing is active.
-    """
-    from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
-        get_datasets,
-        pretrain_preprocessing_pipeline,
-    )
-
-    with tempfile.TemporaryDirectory() as tmp_dir:
-      bin_dir = os.path.join(tmp_dir, "bin_dir")
-      npy_dir = os.path.join(tmp_dir, "npy_dir")
-      os.makedirs(bin_dir)
-      os.makedirs(npy_dir)
-
-      # Create enough data for mp_prefetch to be meaningful:
-      # 10 documents, ~15 tokens each, 3 epochs -> many samples
-      seqs = [np.arange(i * 20 + 1, i * 20 + 16, dtype=np.int32) for i in range(10)]
-      prefix = create_mmap_test_data(
-          os.path.join(bin_dir, "test_data"),
-          seqs,
-          doc_boundaries=list(range(len(seqs) + 1)),
-      )
-      seq_length = 8
-      convert([prefix], npy_dir, seq_length=seq_length, num_epochs=3, seed=42)
-
-      pattern = f"{npy_dir}|{prefix}"
-      ds = get_datasets(
-          data_file_pattern=pattern,
-          data_file_type="mmap_npy",
-          shuffle=False,
-          shuffle_seed=0,
-          shuffle_buffer_size=0,
-          num_epoch=1,
-          dataloading_host_index=0,
-          dataloading_host_count=1,
-          grain_worker_count=0,
-          grain_num_threads=1,
-          grain_prefetch_buffer_size=1,
-          grain_data_source_max_workers=1,
-          dataset_config=MMapDatasetConfig(max_target_length=seq_length, eod_id=0, mmap_split_sentences=False),
-      )
-      cfg = SimpleNamespace(
-          grain_file_type="mmap_npy",
-          mmap_eod_id=0,
-          tokenizer_path="",
-          tokenizer_type="sentencepiece",
-          add_bos=False,
-          add_eos=False,
-          hf_access_token="",
-          dataset_type="grain",
-          max_target_length=seq_length,
-          use_truncation=False,
-          global_batch_size_to_load=4,
-          expansion_factor_real_data=1,
-          elastic_enabled=False,
-          packing=False,
-          grain_packing_type="concat_then_split",
-          max_segments_per_seq=None,
-          reset_attention_mask=False,
-          grain_ram_budget_mb=256,
-          eod_mask_loss=False,
-      )
-      pipe = pretrain_preprocessing_pipeline(
-          ds,
-          cfg,
-          data_columns=["text"],
-          tokenize=False,
-          grain_worker_count=2,
-          grain_per_worker_buffer_size=2,
-      )
-      batch = next(iter(pipe))
-
-      expected_keys = {
-          "inputs",
-          "targets",
-          "inputs_segmentation",
-          "targets_segmentation",
-          "inputs_position",
-          "targets_position",
-      }
-      assert set(batch.keys()) == expected_keys
-      batch_size = 4
-      for key in expected_keys:
-        assert batch[key].shape == (
-            batch_size,
-            seq_length,
-        ), f"{key}: expected shape ({batch_size}, {seq_length}), got {batch[key].shape}"
-
   def test_mp_prefetch_preserves_sample_ordering(self):
     """grain_worker_count=2 produces identical token content as grain_worker_count=0.
 
     Guards against Grain library changes that might alter mp_prefetch
     ordering semantics.  Collects all batches from both configurations
-    and compares inputs/targets element-by-element.
+    and compares inputs/targets element-by-element.  Also verifies that the
+    mmap_npy path — which places mp_prefetch BEFORE batch — produces the
+    expected keys and shapes when multiprocessing is active.
     """
     from maxtext.input_pipeline.grain_data_processing import (  # pylint: disable=import-outside-toplevel
         get_datasets,
@@ -3399,6 +3310,23 @@ class TestMegatronNpyFixedLengthOutput:
 
       batches_w0 = _collect_all_batches(worker_count=0, buffer_size=1)
       batches_w2 = _collect_all_batches(worker_count=2, buffer_size=2)
+
+      expected_keys = {
+          "inputs",
+          "targets",
+          "inputs_segmentation",
+          "targets_segmentation",
+          "inputs_position",
+          "targets_position",
+      }
+      batch_size = 4
+      assert batches_w2, "worker_count=2 produced no batches"
+      assert set(batches_w2[0].keys()) == expected_keys
+      for key in expected_keys:
+        assert batches_w2[0][key].shape == (
+            batch_size,
+            seq_length,
+        ), f"{key}: expected shape ({batch_size}, {seq_length}), got {batches_w2[0][key].shape}"
 
       assert len(batches_w0) == len(
           batches_w2

@@ -298,6 +298,9 @@ class DecoderLayerShardModeTest(parameterized.TestCase):
         [sys.argv[0], get_test_config_path()],
         **(_COMMON | extra_config | {"shard_mode": shard_mode}),
     )
+    # The config must keep the requested mode: every onboarded decoder has to be on the
+    # explicit-sharding allowlist in configs/types.py.
+    self.assertEqual(cfg.shard_mode, ShardMode(shard_mode))
     # Not _mesh(): explicit sharding needs the mesh axes typed Explicit rather than Auto,
     # which only the config-driven constructor does.
     mesh = maxtext_utils.get_mesh_from_config(cfg)
@@ -346,16 +349,6 @@ class DecoderLayerShardModeTest(parameterized.TestCase):
         atol=1e-5,
         err_msg="explicit shard mode changed the layer output; an out_sharding is wrong, not just missing",
     )
-
-  @parameterized.named_parameters(*_SHARD_MODE_LAYERS)
-  def test_explicit_shard_mode_is_accepted_by_config(self, layer_cls, extra_config, ctor_kwargs):
-    """Every onboarded decoder must be on the explicit-sharding allowlist in configs/types.py."""
-    del layer_cls, ctor_kwargs
-    cfg = pyconfig.initialize(
-        [sys.argv[0], get_test_config_path()],
-        **(_COMMON | extra_config | {"shard_mode": "explicit"}),
-    )
-    self.assertEqual(cfg.shard_mode, ShardMode.EXPLICIT)
 
 
 class DecoderLayerScannedKvCacheTest(parameterized.TestCase):

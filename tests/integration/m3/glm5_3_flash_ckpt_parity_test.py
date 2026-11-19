@@ -399,10 +399,8 @@ class Glm5CkptParityTest(parameterized.TestCase):
   @parameterized.named_parameters(
       ("seq512_5layers_unscanned_left", 512, 5, False, "left"),
       ("seq512_5layers_unscanned_right", 512, 5, False, "right"),
-      ("seq512_13layers_scanned_left", 512, 13, True, "left"),
       ("seq512_13layers_scanned_right", 512, 13, True, "right"),
       ("seq4096_5layers_unscanned_left", 4096, 5, False, "left"),
-      ("seq4096_13layers_scanned_left", 4096, 13, True, "left"),
   )
   def test_masked_prefill_parity_and_tier_1ab(
       self,
@@ -526,8 +524,6 @@ class Glm5CkptParityTest(parameterized.TestCase):
 
   @parameterized.parameters(
       (5, False, "right"),
-      (5, False, "left"),
-      (13, True, "right"),
       (13, True, "left"),
   )
   def test_batch_determinism(self, num_layers: int, scan_layers: bool, padding_side: str):

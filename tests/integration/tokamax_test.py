@@ -140,16 +140,7 @@ class Train(parameterized.TestCase):
           "ici_expert_parallelism": 1,
           "use_gmm_v2_heuristic_tiling": True,
       },
-      {
-          "testcase_name": "fp8_full_ep1",
-          "quantization": "fp8_full",
-          "ici_expert_parallelism": 1,
-      },
-      {
-          "testcase_name": "bf16_ep2",
-          "quantization": "",
-          "ici_expert_parallelism": 2,
-      },
+      # fp8_full_ep2 covers both the fp8_full gmm and the EP axis (fp8_full_ep1 / bf16_ep2 would be redundant).
       {
           "testcase_name": "fp8_full_ep2",
           "quantization": "fp8_full",

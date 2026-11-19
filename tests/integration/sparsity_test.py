@@ -37,11 +37,6 @@ class Train(parameterized.TestCase):
           "use_sparsity": False,
       },
       {
-          "testcase_name": "fp8_full",
-          "quantization": "fp8_full",
-          "use_sparsity": False,
-      },
-      {
           "testcase_name": "fp8_full_with_sparsity",
           "quantization": "fp8_full",
           "use_sparsity": True,

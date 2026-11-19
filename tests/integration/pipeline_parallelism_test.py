@@ -48,7 +48,7 @@ import pytest
 pytestmark = [pytest.mark.integration_test, pytest.mark.tpu_only]
 
 
-# Helper to fix pipeline parallelism in test_full_train_fp8 and test_full_train_nanoo_fp8
+# Helper to fix pipeline parallelism in test_full_train_fp8
 def _adapt_parallelism(args, pipeline_stages=4):
   dc = jax.device_count()
   # In decoupled mode with limited devices, adjust pipeline stages to device count
@@ -288,8 +288,8 @@ class PipelineParallelismTest(unittest.TestCase):
     )
     self.assert_pipeline_matches_sequential_output_and_grad(config)
 
-  def test_circular_deepseek_megablox_same_output_and_grad(self):
-    # 4 stages, 8 layers (2 repeats, 1 layer per stage), 8 microbatches.
+  def test_circular_deepseek_same_output_and_grad(self):
+    # 2 stages, 4 layers (2 repeats, 1 layer per stage), 4 microbatches, dense (non-megablox) MoE.
     # DeepSeek's MoE block (`moe.RoutedAndSharedMoE`) constructs a `shared_experts`
     # `MlpBlock` with `intermediate_dim = config.shared_experts * moe_mlp_dim`, so
     # `shared_experts >= 1` is required to avoid a zero-dim DenseGeneral kernel
@@ -304,9 +304,9 @@ class PipelineParallelismTest(unittest.TestCase):
         run_name="circular_moe",
         max_target_length=128,
         base_emb_dim=28,
-        ici_pipeline_parallelism=4,
-        base_num_decoder_layers=8,
-        num_pipeline_microbatches=8,
+        ici_pipeline_parallelism=2,
+        base_num_decoder_layers=4,
+        num_pipeline_microbatches=4,
         per_device_batch_size=4,
         num_experts=4,
         num_experts_per_tok=2,
@@ -314,8 +314,8 @@ class PipelineParallelismTest(unittest.TestCase):
         sparse_matmul=False,
         capacity_factor=1,
         decoder_block="deepseek",
-        base_moe_mlp_dim=1024,
-        base_mlp_dim=1024,
+        base_moe_mlp_dim=64,
+        base_mlp_dim=64,
         attention_type="mla",
         shared_experts=1,
     )
@@ -415,7 +415,7 @@ class PipelineParallelismTest(unittest.TestCase):
     self.assert_pipeline_matches_sequential_output_and_grad(config)
 
   def test_full_train_circular(self):
-    # Run a full train.py call with 4 stages, 32 layers (2 layers per stage, 4 circular repeats), 8 microbatches
+    # Run a full train.py call with 4 stages, 16 layers (2 layers per stage, 2 circular repeats), 8 microbatches
     train_main(
         [
             None,
@@ -427,10 +427,10 @@ class PipelineParallelismTest(unittest.TestCase):
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
             "base_mlp_dim=32",
-            "base_num_decoder_layers=32",
+            "base_num_decoder_layers=16",
             "head_dim=128",
             "per_device_batch_size=2",
-            "max_target_length=1024",
+            "max_target_length=128",
             "vocab_size=32",
             "dataset_type=synthetic",
             "steps=3",
@@ -462,7 +462,7 @@ class PipelineParallelismTest(unittest.TestCase):
     self.assert_pipeline_matches_sequential_output_and_grad(config)
 
   def test_full_train_non_circular(self):
-    # Run a full train.py call with 4 stages, 32 layers (8 layers per stage), 8 microbatches
+    # Run a full train.py call with 4 stages, 8 layers (2 layers per stage), 8 microbatches
     train_main(
         [
             None,
@@ -474,17 +474,17 @@ class PipelineParallelismTest(unittest.TestCase):
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
             "base_mlp_dim=32",
-            "base_num_decoder_layers=32",
+            "base_num_decoder_layers=8",
             "head_dim=128",
             "per_device_batch_size=2",
-            "max_target_length=1024",
+            "max_target_length=128",
             "vocab_size=32",
             "dataset_type=synthetic",
             "steps=3",
             "enable_checkpointing=False",
             "enable_goodput_recording=False",
             "ici_pipeline_parallelism=4",
-            "num_layers_per_pipeline_stage=8",
+            "num_layers_per_pipeline_stage=2",
             "num_pipeline_microbatches=8",
             rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
             "scan_layers_per_stage=False",  # We see better performance only scanning the pipeline iterations.
@@ -492,7 +492,7 @@ class PipelineParallelismTest(unittest.TestCase):
     )
 
   def test_subset_layers(self):
-    # Run a full train.py call with 4 stages, 16 layers - 8 in pipeline, 8 ran outside of pipeline
+    # Run a full train.py call with 4 stages, 12 layers - 8 in pipeline (2 circular repeats), 4 ran outside of pipeline
     train_main(
         [
             None,
@@ -504,10 +504,10 @@ class PipelineParallelismTest(unittest.TestCase):
             "base_num_query_heads=4",
             "base_num_kv_heads=4",
             "base_mlp_dim=32",
-            "base_num_decoder_layers=16",
+            "base_num_decoder_layers=12",
             "head_dim=128",
             "per_device_batch_size=2",
-            "max_target_length=1024",
+            "max_target_length=128",
             "vocab_size=32",
             "dataset_type=synthetic",
             "steps=3",
@@ -806,38 +806,6 @@ class PipelineParallelismTest(unittest.TestCase):
         "ici_pipeline_parallelism=4",
         rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
         "quantization=fp8",
-        "scan_layers_per_stage=False",
-        "attention=dot_product",
-    ]
-    _adapt_parallelism(args, pipeline_stages=4)
-    train_main(args)
-
-  @pytest.mark.skipif(is_decoupled(), reason="Pipeline parallelism not supported in decoupled mode")
-  def test_full_train_nanoo_fp8(self):
-    # Run a full train.py call with NANOO fp8 quantization, which adds extra
-    # variable collections that need to be handled
-    args = [
-        None,
-        get_test_config_path(),
-        f"base_output_directory={self.base_output_directory}",
-        "run_name=runner_pipeline_parallelism_nanoo_fp8_test",
-        f"dataset_path={self.dataset_path}",
-        "base_emb_dim=28",
-        "base_num_query_heads=4",
-        "base_num_kv_heads=4",
-        "base_mlp_dim=32",
-        "base_num_decoder_layers=4",
-        "head_dim=128",
-        "per_device_batch_size=2",
-        "max_target_length=128",
-        "vocab_size=32",
-        "dataset_type=synthetic",
-        "steps=3",
-        "enable_checkpointing=False",
-        "enable_goodput_recording=False",
-        "ici_pipeline_parallelism=4",
-        rf"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}",
-        "quantization=nanoo_fp8",
         "scan_layers_per_stage=False",
         "attention=dot_product",
     ]

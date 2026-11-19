@@ -305,15 +305,12 @@ class RoutedMoeLossTest(unittest.TestCase):
     np.testing.assert_allclose(lb_dense, lb_sparse, rtol=1e-6)
 
   def test_softmax_router_keeps_switch_loss(self):
-    """Non-sigmoid routers are unchanged: the Switch-style loss of the dispatch top-k."""
-    cfg = _tiny_deepseek_config("loss_softmax", routed_score_func="softmax")
-    (_, lb_loss, _, _), _, params, inputs = _run_routed_moe(cfg)
-    self.assertFalse(moe.uses_megatron_seq_aux_loss(cfg))
-    self.assertFalse(np.allclose(lb_loss, _reference_loss(cfg, params, inputs), rtol=1e-3))
+    """Non-sigmoid routers are unchanged: the Switch-style loss of the dispatch top-k.
 
-  def test_sigmoid_router_can_disable_megatron_seq_aux_loss(self):
-    """Setting moe_use_megatron_seq_aux_loss=False falls back to the Switch-style loss."""
-    cfg = _tiny_deepseek_config("loss_sigmoid_switch", moe_use_megatron_seq_aux_loss=False)
+    The loss branch depends only on uses_megatron_seq_aux_loss, so this also covers a sigmoid router with
+    moe_use_megatron_seq_aux_loss=False (that predicate case is checked in MegatronSeqAuxLossTest).
+    """
+    cfg = _tiny_deepseek_config("loss_softmax", routed_score_func="softmax")
     (_, lb_loss, _, _), _, params, inputs = _run_routed_moe(cfg)
     self.assertFalse(moe.uses_megatron_seq_aux_loss(cfg))
     self.assertFalse(np.allclose(lb_loss, _reference_loss(cfg, params, inputs), rtol=1e-3))
@@ -389,17 +386,34 @@ class RingOfExpertsIntegrationTest(unittest.TestCase):
     )
     return cfg, _run_routed_moe(cfg, params)
 
-  def test_loss_and_bias_update_are_chunk_invariant(self):
-    cfg, ((out1, lb1, bias1, _), grads1, params, inputs) = self._run(num_moe_token_chunks=1)
-    _, ((out2, lb2, bias2, _), grads2, _, _) = self._run(params, num_moe_token_chunks=2)
-    np.testing.assert_allclose(out2, out1, rtol=1e-5, atol=1e-6)
+  def _check_loss_and_bias_update_are_chunk_invariant(self, out_tol=(1e-5, 1e-6), grad_tol=(1e-4, 1e-6), **overrides):
+    """Runs the layer with 1 and 2 token chunks and checks outputs, loss, grads and bias update agree."""
+    cfg, ((out1, lb1, bias1, _), grads1, params, inputs) = self._run(num_moe_token_chunks=1, **overrides)
+    _, ((out2, lb2, bias2, _), grads2, _, _) = self._run(params, num_moe_token_chunks=2, **overrides)
+    np.testing.assert_allclose(out2, out1, rtol=out_tol[0], atol=out_tol[1])
     np.testing.assert_allclose(lb2, lb1, rtol=1e-6)
     np.testing.assert_allclose(lb1, _reference_loss(cfg, params, inputs), rtol=1e-5)
     np.testing.assert_array_equal(bias2, bias1)
     for g2, g1 in zip(jax.tree_util.tree_leaves(grads2), jax.tree_util.tree_leaves(grads1)):
-      np.testing.assert_allclose(g2, g1, rtol=1e-4, atol=1e-6)
+      np.testing.assert_allclose(g2, g1, rtol=grad_tol[0], atol=grad_tol[1])
     # Full-batch update: every entry is exactly -rate, 0 or +rate.
     np.testing.assert_array_equal(jnp.isin(jnp.abs(bias2), jnp.array([0.0, 1e-3], jnp.float32)), True)
+
+  def test_loss_and_bias_update_are_chunk_invariant(self):
+    """Chunking the MoE tokens must not change the output, loss, gradients or bias update."""
+    self._check_loss_and_bias_update_are_chunk_invariant()
+
+  def test_loss_and_bias_update_are_chunk_invariant_ragged_sort(self):
+    """Same as above on the ring-of-experts ragged-sort path (ring_ragged_sort / ring_ragged_unsort)."""
+    # The chunked ragged-sort output is bf16-rounded (~1e-3 relative) even in this float32 config, so outputs and
+    # grads use bf16-level tolerances; the loss and bias update must still match exactly.
+    self._check_loss_and_bias_update_are_chunk_invariant(
+        out_tol=(1e-2, 1e-4),
+        grad_tol=(1e-2, 1e-4),
+        use_ragged_sort=True,
+        ragged_gather_fallback=True,
+        ragged_gather_reduce_fallback=True,
+    )
 
   def test_gradient_accumulation_matches_single_step(self):
     """GA=2 matches GA=1 for total loss, logged moe_lb_loss, full-batch bias updates, and router gradients."""

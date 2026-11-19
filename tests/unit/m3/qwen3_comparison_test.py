@@ -15,11 +15,11 @@
 """Comparison, unit, and parity tests for M3 Qwen3 implementation.
 
 Covers:
-(1) Model routing and construction via model_creation_utils
-(2) Forward pass execution under different batch sizes, sequence lengths, and modes
-(3) Parameter tree, paths, shapes, and dtypes parity against Flax Linen
-(4) Numerical parity of forward pass logits
-(5) Numerical parity of cross-entropy loss and backward gradients
+(1) Parameter tree, paths, shapes, and dtypes parity against Flax Linen
+(2) Numerical parity of forward pass logits
+(3) Numerical parity of cross-entropy loss and backward gradients
+
+Model routing and the shape-only forward pass are covered by tests/unit/m3/m3_smoke_test.py.
 """
 
 import unittest
@@ -36,7 +36,6 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs import pyconfig
 from maxtext.m3.core import checkpoint as m3_checkpoint
-from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3Model, create_qwen3_model
 from maxtext.utils import max_utils, model_creation_utils
 
 
@@ -96,38 +95,6 @@ class Qwen3ComparisonTest(unittest.TestCase):
     mesh_shape[tp_axis_idx] = tp
     mesh_array = np.array(self.devices[:tp]).reshape(mesh_shape)
     return Mesh(mesh_array, cfg.mesh_axes)
-
-  def test_model_creation_utils_routing(self):
-    """Verifies that model_creation_utils.create_model routes to Qwen3Model when use_m3_model=true."""
-    cfg = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
-    with jax.set_mesh(mesh):
-      model = model_creation_utils.create_model(cfg, mesh)
-      self.assertIsInstance(model, Qwen3Model)
-
-  def test_qwen3_forward_pass_train(self):
-    """Verifies train forward pass executes and produces correct logits shape."""
-    cfg = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
-    with jax.set_mesh(mesh):
-      model = create_qwen3_model(cfg, mesh, model_mode=MODEL_MODE_TRAIN)
-      batch_size, seq_len = 2, 8
-      tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-      positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
-      logits = model(tokens, positions, model_mode=MODEL_MODE_TRAIN)
-      self.assertEqual(logits.shape, (batch_size, seq_len, cfg.vocab_size))
-
-  def test_qwen3_forward_pass_variable_length(self):
-    """Verifies forward pass executes on different sequence lengths and batch sizes."""
-    cfg = pyconfig.initialize_pydantic(_get_base_config_args(use_m3=True, reduced=True))
-    mesh = self._make_mesh(tp=1)
-    with jax.set_mesh(mesh):
-      model = create_qwen3_model(cfg, mesh)
-      batch_size, seq_len = 1, 4
-      tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
-      positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
-      logits = model(tokens, positions)
-      self.assertEqual(logits.shape, (batch_size, seq_len, cfg.vocab_size))
 
   def test_parameter_shapes_and_paths_match(self):
     """Verifies that all parameter paths, shapes, and dtypes match 100% with Flax Linen."""

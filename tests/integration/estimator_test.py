@@ -16,7 +16,7 @@
 E2E integration tests for the MaxText estimator.
 
 These tests exercise the estimator against a real (small) model compilation
-to verify the search_policy_only and is_oom functions work end-to-end.
+to verify the search_policy_only function (and the is_oom checks it makes) works end-to-end.
 The tests use a small default model (global_parameter_scale=1) to stay fast.
 """
 
@@ -26,9 +26,7 @@ import jax
 
 from tests.utils.test_helpers import get_test_config_path
 from maxtext.utils.estimator import (
-    Action,
     RematPolicy,
-    is_oom,
     search_policy_only,
 )
 
@@ -80,30 +78,6 @@ class EstimatorE2ETest(unittest.TestCase):
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
-  def test_is_oom_returns_bool(self):
-    """Verify is_oom returns a boolean for a small model with full remat."""
-    base_argv = self._make_base_argv()
-    tensor_names = [
-        "context",
-        "query_proj",
-        "key_proj",
-        "value_proj",
-        "kv_proj",
-        "mlpwi_0",
-        "mlpwi_1",
-        "mlpwo",
-        "out_proj",
-    ]
-    policy = RematPolicy(tensor_names=tensor_names, initial_level=Action.REMAT)
-
-    result = is_oom(base_argv, policy, pdb=2.0)
-
-    self.assertIsInstance(result, bool)
-    # A small model with full remat and small batch should NOT OOM
-    self.assertFalse(result, "Small model with full remat and pdb=2 should not OOM")
-
-  @pytest.mark.integration_test
-  @pytest.mark.tpu_only
   def test_search_policy_only_small_model(self):
     """E2E: search_policy_only returns a valid policy for a small model."""
     base_argv = self._make_base_argv()
@@ -119,7 +93,11 @@ class EstimatorE2ETest(unittest.TestCase):
         "out_proj",
     ]
 
-    result = search_policy_only(tensor_names, base_argv, pdb=2.0)
+    # search_policy_only first calls is_oom with a full-remat policy at this pdb and raises ValueError if it OOMs.
+    try:
+      result = search_policy_only(tensor_names, base_argv, pdb=2.0)
+    except ValueError as e:
+      self.fail(f"Small model with full remat and pdb=2 should not OOM: {e}")
 
     # Should return a RematPolicy
     self.assertIsInstance(result, RematPolicy)
