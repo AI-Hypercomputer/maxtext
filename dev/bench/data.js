@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795091985375,
+  "lastUpdate": 1795106499761,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -73495,6 +73495,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 380,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "df5308789775429b3edf0312df48e11e2ebf961e",
+          "message": "[MaxText] Keep `constant_padded` padding rows out of MoE routing, capacity, the aux loss and the routed-bias update.\n\n`elastic_global_batch_size_mode=\"constant_padded\"` pads the physical batch with all-zero rows (`segmentation == 0`). The CE loss masks them, but `RoutedMoE` received no segment ids, so padded tokens were routed, took expert capacity, entered the load-balance loss (which then scaled by logical/physical rows) and the loss-free-balancing expert counts. The config validator therefore rejected `num_experts > 1`. This change makes the MoE block padding-aware and lifts that rejection.\n\n*   `RoutedMoE.__call__` / `RoutedAndSharedMoE.__call__` take an optional `token_mask` (batch, sequence) bool, threaded next to `forced_routed_experts` through `dense_matmul`, `sparse_matmul` (shard_map in_specs, EP all-gather, token chunks, the dropless fallback scan and `_check_ragged_overflow`) down to `get_topk`. After the router has run, so every router type's real-token weights are untouched, a padded token gets expert id `-1` and weight `0`; the existing unused-slot handling of forced routing (`valid_expert_mask`, `safe_updates`, round-robin dummy ids / virtual expert in the ragged sort) now keys on `has_invalid_slots = forced_routed_experts is not None or token_mask is not None`. Padded tokens therefore take no capacity in `generate_masks`, are not counted by `calculate_expert_counts` (one_hot of -1 is zero) and produce a zero output.\n*   `load_balance_loss` / `megatron_seq_aux_loss` (and the `topk_before_ep_all_gather` `precomputed_density_prob`) take the mask: per-sequence densities and probabilities are means over the valid tokens (`masked_sequence_mean`, bit-identical to `jnp.mean` for an all-True mask), sequences without valid tokens contribute 0 and the batch mean divides by the number of sequences with valid tokens.\n*   Every decoder layer with an MoE block passes `token_mask=moe.routing_token_mask(config, decoder_segment_ids, model_mode)`, which is `decoder_segment_ids != 0` only in training under `constant_padded` and None otherwise (ordinary batches, prefill/decode and the fused inference kernel keep their numerics): deepseek, deepseek4 (incl. the mHC branch kwargs), envy, gemma4, gpt_oss, hy4, llama4, ming, mixtral, qwen3 (Next and MoE layers, qwen3_5 override), qwen3_custom.\n*   Validator: the blanket MoE rejection is replaced by rejections of the MoE implementations that bypass `RoutedMoE`'s routing and take no mask: `te_moe_block`, `use_batch_split_schedule`, `use_lineage`, `use_m3_model`. `RoutedMoE` raises on `te_moe_block` / `fused_moe_matmul` with a mask.\n*   Docs: `docs/run_maxtext/run_maxtext_elastic_training.md` describes the MoE behaviour and the two caveats: with a capped ragged buffer (`ragged_buffer_factor > 0`) on the non-ragged-sort sparse path the zero-weight padded rows still count toward the buffer (sized by the physical batch, so never fuller than unpadded, but the dropped set can differ), and the rejected implementations above.\n\nTests:\n\n*   `tests/unit/moe_padding_test.py` (CPU and TPU): a tiny Mixtral-style `RoutedMoE` (dense, dense with `capacity_factor`, dropless sparse with and without `moe_use_direct_token_gather`) and a tiny DeepSeek-V3 one (sparse with the Megatron seq aux loss, dense with the Switch loss, routed bias on) given a batch padded with zero rows must return, for the real rows, the same routing (expert ids and weights, exactly), outputs and gradients (to float32 rounding: the padded run is a different XLA program, so a few elements differ by one ulp), the same load-balance loss (rtol 1e-6, batch reduction order) and identical routed-bias updates; padded rows get expert id -1, weight 0 and zero output. Plus pure-function checks of `masked_sequence_mean`, `load_balance_loss`, `megatron_seq_aux_loss` (padding rows and partial-sequence masks, including gradients) and `routing_token_mask`.\n*   `tests/integration/elastic_constant_padded_test.py`: the four factorings (three `constant_padded` ones and `constant_grad_accum`) also run a 4-expert Mixtral block (dense, dense with `capacity_factor=1.25`, sparse megablox) and must agree on `learning/total_weights`, loss, grad norm and `learning/moe_lb_loss`.\n*   `tests/unit/configs_value_test.py`: the new rejections and accepted MoE configs.\n\nNote: on the sparse path the Switch-style loss is formed inside the shard_map, per batch shard. With a `token_mask` the masked loss now `psum`s its numerator (sum of the per-sequence losses) and denominator (number of sequences with a valid token) over the batch mesh axes (`reduce_axis_names`: the axes the routed-bias counts are already reduced over, i.e. without the EP axis on the all-gathered ring-of-experts path), so the loss and its gradient are a true global mean even when the padding sits at the tail of the batch and whole shards hold no real row (`_PaddedElasticIterator` and the synthetic pipeline pad that way). The unmasked path (ordinary batches) is untouched and keeps returning the pre-existing per-shard statistic (shard_map `out_specs=P()` without a reduction); hoisting that loss out of the shard_map, like the Megatron seq aux loss, would change numerics for every sparse MoE user and is left as a follow-up for the MoE owners. `moe_padding_test.py` covers both placements: per device block (every shard keeps some real rows) and, on several devices (TPU, or 4 forced CPU devices in a subprocess), tail padding, asserting the forward loss and the gradients of the unpadded run.\n\n`routing_token_mask` keys on `logical_global_batch_size_to_train_on` (set by `constant_padded`; the same signal `synthetic_data_processing.py` and `gradient_accumulation.py` use) rather than on the mode string, so a future constant-GBS mode that pads the same way enables the mask automatically.\n\nPiperOrigin-RevId: 1025559940",
+          "timestamp": "2026-11-19T15:04:26Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/df5308789775429b3edf0312df48e11e2ebf961e"
+        },
+        "date": 1795106498844,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 224.4389999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 54.13,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2140.755,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 122,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 181.21899999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 612.613,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 91,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 2982.564999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 392,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1643.1750000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 122,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 472.5879999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3057.7029999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 392,
             "unit": "count"
           }
         ]
