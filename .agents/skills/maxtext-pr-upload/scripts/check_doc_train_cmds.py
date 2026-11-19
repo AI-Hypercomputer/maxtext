@@ -15,6 +15,7 @@
 """Extracts documented MaxText train commands from a Markdown section and validates them via pyconfig."""
 
 import argparse
+import os
 import re
 import shlex
 import sys
@@ -64,7 +65,7 @@ def build_pyconfig_argv(block: str, subs: dict[str, str], module_name: str = "ma
 
   full_argv = shlex.split(cmd_line)
   if module_name not in full_argv:
-    raise ValueError(f"Module '{module_name}' not found as a token in parsed command: {full_argv}")
+    raise ValueError(f"Module '{module_name}' not found as a token in parsed command:" f" {full_argv}")
   mod_idx = full_argv.index(module_name)
   return ["train.py", *full_argv[mod_idx + 1 :]], comment_after_backslash
 
@@ -75,19 +76,34 @@ def main() -> int:
   parser.add_argument("--start", required=True, help="Start substring marker")
   parser.add_argument("--end", required=True, help="End substring marker")
   parser.add_argument("--module", default="maxtext.train", help="Python module token to locate")
-  parser.add_argument("--subst", action="append", default=[], help="VAR=VAL shell variable substitution")
-  parser.add_argument("--keys", default="model_name,override_model_config", help="Comma-separated config keys to print")
+  parser.add_argument(
+      "--subst",
+      action="append",
+      default=[],
+      help="VAR=VAL shell variable substitution",
+  )
+  parser.add_argument(
+      "--keys",
+      default="model_name,override_model_config",
+      help="Comma-separated config keys to print",
+  )
   args = parser.parse_args()
 
   with open(args.doc, "r", encoding="utf-8") as f:
     doc = f.read()
 
   if args.start not in doc:
-    print(f"Error: --start marker '{args.start}' not found in {args.doc}.", file=sys.stderr)
+    print(
+        f"Error: --start marker '{args.start}' not found in {args.doc}.",
+        file=sys.stderr,
+    )
     return 2
   start_idx = doc.index(args.start)
   if args.end not in doc[start_idx:]:
-    print(f"Error: --end marker '{args.end}' not found after --start in {args.doc}.", file=sys.stderr)
+    print(
+        f"Error: --end marker '{args.end}' not found after --start in" f" {args.doc}.",
+        file=sys.stderr,
+    )
     return 2
   end_idx = doc.index(args.end, start_idx)
   section = doc[start_idx:end_idx]
@@ -100,9 +116,13 @@ def main() -> int:
 
   blocks = extract_train_blocks(section, args.module)
   if not blocks:
-    print(f"No '{args.module}' blocks found between '{args.start}' and '{args.end}'.", file=sys.stderr)
+    print(
+        f"No '{args.module}' blocks found between '{args.start}' and" f" '{args.end}'.",
+        file=sys.stderr,
+    )
     return 1
 
+  os.environ.setdefault("JAX_PLATFORMS", "cpu")
   from maxtext.configs import pyconfig  # pylint: disable=import-outside-toplevel
 
   keys = [k.strip() for k in args.keys.split(",") if k.strip()]
@@ -110,9 +130,12 @@ def main() -> int:
   for i, block in enumerate(blocks, 1):
     argv, truncated = build_pyconfig_argv(block, subs, args.module)
     if truncated:
-      print(f"[Block {i}] FAIL: '#' comment inside '\\' continuation truncates subsequent arguments.")
+      print(f"[Block {i}] FAIL: '#' comment inside '\\' continuation truncates" " subsequent arguments.")
       rc = 1
-    cfg = pyconfig.initialize(argv)
+    init_argv = list(argv)
+    if not any(tok.startswith("skip_jax_distributed_system=") for tok in init_argv):
+      init_argv.append("skip_jax_distributed_system=True")
+    cfg = pyconfig.initialize(init_argv)
     kv_str = ", ".join(f"{k}={getattr(cfg, k, '<unset>')!r}" for k in keys)
     print(f"[Block {i}] ({len(argv) - 1} args) -> {kv_str}")
   return rc
