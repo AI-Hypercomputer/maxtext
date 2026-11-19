@@ -24,6 +24,7 @@ The following models are supported:
 | **DeepSeek3**           | 671B                   |           √           |            √            |           √           |            √            |
 | **DeepSeek3.2**         | 671B                   |           √           |            √            |           -           |            -            |
 | **Qwen3 Next**          | 80B                    |           √           |            √            |           √           |            √            |
+| **OLMo3**               | 7B, 32B                |           √           |            √            |           √           |            √            |
 
 > **Note:** *Gemma4 Small* (E2B / E4B) uses the `gemma4_small` decoder block, which has per-layer KV sharing and is incompatible with `nn.scan`. Only unscanned (`scan_layers=False`) conversion is supported for these variants.
 
