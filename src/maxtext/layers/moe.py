@@ -665,20 +665,15 @@ def uses_megatron_seq_aux_loss(config) -> bool:
 
 
 def routing_token_mask(config: Any, decoder_segment_ids: jax.Array | None, model_mode: str) -> jax.Array | None:
-  """The `token_mask` a decoder layer hands its MoE block when the batch is padded to a constant global batch size.
+  """The `token_mask` a decoder layer hands its MoE block when padding tokens are excluded from routing.
 
-  Constant-global-batch-size elastic modes (`elastic_global_batch_size_mode` `constant_padded`,
-  `constant_grad_accum`) set `logical_global_batch_size_to_train_on`, the same signal `synthetic_data_processing.py`
-  and `gradient_accumulation.py` key on, so any future mode that pads the same way enables the mask automatically. The
-  rows such a mode pads have `decoder_segment_ids == 0` everywhere (the CE loss masks them the same way), so the
-  mask is `decoder_segment_ids != 0`.
+  Active in training (`MODEL_MODE_TRAIN`) when `decoder_segment_ids` is present and either:
+  1. `logical_global_batch_size_to_train_on` is set (constant-global-batch-size elastic modes such as
+     `constant_padded` and `constant_grad_accum`), or
+  2. `moe_exclude_padding_from_routing=True` (packed or padded training batches).
 
-  The mask is token-level, not row-level: once a logical batch size is set (including at 100% live slices, before
-  any resize) it also drops every `segment_id == 0` token of a real row, e.g. the trailing pad tokens of
-  unpacked (`packing=False`) or partially filled packed sequences of a real dataset. Those tokens then take no part
-  in routing, expert capacity, the aux loss or the routed-bias update. This is consistent across resizes within a
-  `constant_padded` / `constant_grad_accum` run, but differs from `proportional` and non-elastic runs, where this
-  returns None and such pad tokens keep being routed as before.
+  Tokens with `decoder_segment_ids == 0` take no part in routing, expert capacity, the aux loss or the
+  routed-bias update.
 
   Edge case of the sequence-chunked Switch loss: with `num_moe_token_chunks > 1` (the ring-of-experts chunk loop
   averages the per-chunk losses as `sum(lb_losses) / n_chunks`) or `moe_dropless_fallback='layer'` (the dropless
@@ -687,21 +682,86 @@ def routing_token_mask(config: Any, decoder_segment_ids: jax.Array | None, model
   as one of the chunks in the average. The Megatron seq aux loss is computed on whole sequences and is unaffected.
 
   Args:
-    config: The model config; only `logical_global_batch_size_to_train_on` is read (missing counts as None).
+    config: The model config; reads `logical_global_batch_size_to_train_on` and `moe_exclude_padding_from_routing`.
     decoder_segment_ids: (batch, sequence) segment ids of the decoder inputs, 0 for padding tokens, or None.
     model_mode: One of the `common_types.MODEL_MODE_*` values.
 
   Returns:
-    A (batch, sequence) bool array, True for real tokens. None (routing unchanged) when any of these holds:
-    `decoder_segment_ids` is None; `model_mode` is not `MODEL_MODE_TRAIN` (prefill/decode keep their numerics, and
-    the fused inference MoE kernel takes no mask); or `logical_global_batch_size_to_train_on` is unset (sequence
-    padding tokens of ordinary batches keep taking part in routing, capacity and the aux loss as before).
+    A (batch, sequence) bool array, True for real tokens, or None when inactive.
   """
   if decoder_segment_ids is None or model_mode != ctypes.MODEL_MODE_TRAIN:
     return None
-  if getattr(config, "logical_global_batch_size_to_train_on", None) is None:
+  if config.logical_global_batch_size_to_train_on is None and not config.moe_exclude_padding_from_routing:
     return None
   return decoder_segment_ids != 0
+
+
+def _top_k_ids(scores: jax.Array, k: int) -> jax.Array:
+  """Returns `jax.lax.top_k(scores, k)[1]` for `fallback_topk_indices_compacted`."""
+  return jax.lax.top_k(scores, k)[1]
+
+
+def fallback_topk_indices_compacted(scores: jax.Array, uses: jax.Array, k: int, capacity: int, topk_fn) -> jax.Array:
+  """Computes the router's own top-k expert ids only on compacted fallback rows (`moe_fallback_topk_capacity > 0`).
+
+  Under router replay (`forced_routed_experts`), only tokens without valid distinct forced ids (and not masked out
+  as padding) read the router's own top-k selection. When at most `capacity` tokens have `uses=True`, those rows
+  are gathered in token order via TensorCore compare-select-sum, top-k'd, and mapped back to token order; when
+  more than `capacity` tokens have `uses=True`, `jax.lax.cond` evaluates `topk_fn` on every row instead.
+
+  Args:
+    scores: `[..., num_experts]` router scores.
+    uses: `[...]` bool mask, True where the token's router ids are consumed by `get_topk`.
+    k: Number of experts per token.
+    capacity: Maximum rows evaluated on the compacted branch (`> 0`).
+    topk_fn: Callable mapping `[rows, num_experts]` scores to `[rows, k]` integer expert ids.
+
+  Returns:
+    `[..., k]` int32 expert ids matching `topk_fn(scores)` wherever `uses` is True (0 elsewhere on the compacted
+    branch, and `topk_fn(scores)` everywhere on the overflow branch).
+  """
+  lead = scores.shape[:-1]
+  num_tokens = math.prod(lead)
+  if num_tokens == 0:
+    return jnp.zeros(lead + (k,), dtype=jnp.int32)
+  cap = min(int(capacity), num_tokens)
+  flat_scores = scores.reshape(num_tokens, scores.shape[-1])
+  if cap >= num_tokens:
+    return topk_fn(flat_scores).astype(jnp.int32).reshape(lead + (k,))
+  flat_uses = uses.reshape(num_tokens).astype(jnp.bool_)
+  rank = jnp.cumsum(flat_uses.astype(jnp.int32)) - 1
+  slot = jnp.where(flat_uses, rank, -1)
+  num_using = jnp.sum(flat_uses, dtype=jnp.int32)
+
+  def compacted(operands):
+    flat_scores, flat_uses, slot = operands
+    row_iota = jax.lax.broadcasted_iota(jnp.int32, (cap, num_tokens), 0)
+    token_iota = jax.lax.broadcasted_iota(jnp.int32, (cap, num_tokens), 1)
+    token_of_row = jnp.sum(jnp.where(slot[None, :] == row_iota, token_iota, 0), axis=1)
+    row_ids = topk_fn(jnp.take(flat_scores, token_of_row, axis=0)).astype(jnp.int32)
+    return jnp.where(flat_uses[:, None], jnp.take(row_ids, jnp.maximum(slot, 0), axis=0), jnp.zeros((), jnp.int32))
+
+  def every_row(operands):
+    flat_scores, _, _ = operands
+    return topk_fn(flat_scores).astype(jnp.int32)
+
+  ids = jax.lax.cond(num_using <= cap, compacted, every_row, (flat_scores, flat_uses, slot))
+  return ids.reshape(lead + (k,))
+
+
+def pack_routing_for_all_gather(weights: jax.Array, ids: jax.Array) -> jax.Array:
+  """Packs `[..., k]` routing weights and expert ids into one `float32 [..., 2 * k]` array.
+
+  Exact for all expert ids in `[-1, num_experts)` (float32 represents integers up to `2**24` exactly) and for
+  both `float32` and `bfloat16` routing weights. Inverted by `unpack_routing`.
+  """
+  return jnp.concatenate([weights.astype(jnp.float32), ids.astype(jnp.float32)], axis=-1)
+
+
+def unpack_routing(packed: jax.Array, weights_dtype, ids_dtype) -> tuple[jax.Array, jax.Array]:
+  """Unpacks routing weights and expert ids produced by `pack_routing_for_all_gather` into their original dtypes."""
+  k = packed.shape[-1] // 2
+  return packed[..., :k].astype(weights_dtype), packed[..., k:].astype(ids_dtype)
 
 
 def masked_sequence_mean(values: jax.Array, token_mask: jax.Array | None = None) -> jax.Array:
@@ -2267,17 +2327,69 @@ class RoutedMoE(nnx.Module):
     # (batch, sequence, num_experts_per_tok).
     valid_token_mask = None
     if forced_routed_experts is not None:
-      top_k_indices = forced_routed_experts
-      # Any id outside [0, num_experts) is an unused slot, same as the -1 sentinel.
-      valid_token_mask = valid_expert_mask(top_k_indices, self.num_experts)
+      fallback_capacity = self.config.moe_fallback_topk_capacity
+      is_deepseek_v3_routing = self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
+      if fallback_capacity > 0:
+        slot_valid = valid_expert_mask(forced_routed_experts, self.num_experts)
+        sorted_experts = jnp.sort(forced_routed_experts, axis=-1)
+        has_duplicate = jnp.any(sorted_experts[..., 1:] == sorted_experts[..., :-1], axis=-1, keepdims=True)
+        token_is_forced = jnp.logical_and(jnp.all(slot_valid, axis=-1, keepdims=True), jnp.logical_not(has_duplicate))
+        uses_router_ids = jnp.logical_not(token_is_forced[..., 0])
+        if token_mask is not None:
+          uses_router_ids = jnp.logical_and(uses_router_ids, token_mask.astype(jnp.bool_))
+        if self.is_hash_routing:
+          if input_ids is None:
+            raise ValueError("input_ids cannot be None when is_hash_routing is True")
+          tid2eid_int = self.tid2eid[...].astype(jnp.int32)
+          auto_indices = tid2eid_int[input_ids.astype(jnp.int32)]
+        else:
+          base_topk_ids_fn = (
+              functools.partial(topk_indices_by_argmax, k=self.num_experts_per_tok)
+              if self.config.moe_routing_index_math == "count"
+              else functools.partial(_top_k_ids, k=self.num_experts_per_tok)
+          )
+          if is_deepseek_v3_routing and self.config.n_routing_groups != -1:
+
+            def topk_ids_fn(row_scores):
+              group_mask = self.expert_group_mask(row_scores)
+              return base_topk_ids_fn(jnp.where(group_mask > 0, row_scores, -jnp.inf))
+
+          else:
+            topk_ids_fn = base_topk_ids_fn
+          auto_indices = fallback_topk_indices_compacted(
+              gate_logits,
+              uses_router_ids,
+              self.num_experts_per_tok,
+              fallback_capacity,
+              topk_ids_fn,
+          )
+        top_k_indices = jnp.where(token_is_forced, forced_routed_experts, auto_indices)
+        valid_token_mask = jnp.ones_like(slot_valid, dtype=jnp.bool_)
+        if token_mask is not None:
+          valid_token_mask = jnp.where(token_mask.astype(jnp.bool_)[..., None], valid_token_mask, False)
+      else:
+        top_k_indices = forced_routed_experts
+        # Any id outside [0, num_experts) is an unused slot, same as the -1 sentinel.
+        valid_token_mask = valid_expert_mask(top_k_indices, self.num_experts)
       # Gather at 0, not -1: take_along_axis would wrap -1 onto the last expert and
       # that value reaches the softmax denominator before the mask zeroes it.
       gather_indices = jnp.where(valid_token_mask, top_k_indices, 0)
+      use_dense_vjp = self.config.router_topk_matmul_vjp and fallback_capacity > 0
+
+      def _gather_weights(scores):
+        if use_dense_vjp:
+          return take_along_last_axis_dense_vjp(scores, gather_indices, scores.shape[-1])
+        return jnp.take_along_axis(scores, gather_indices, axis=-1)
+
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
-        top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
+        top_k_weights = _gather_weights(router_probs).astype(self.dtype)
+      elif fallback_capacity > 0 and pre_bias_logits is not None and (self.is_hash_routing or is_deepseek_v3_routing):
+        forced_weights = _gather_weights(gate_logits)
+        fallback_weights = _gather_weights(pre_bias_logits)
+        top_k_weights = jnp.where(token_is_forced, forced_weights, fallback_weights)
       else:
-        top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
+        top_k_weights = _gather_weights(gate_logits)
     else:
       # TE randomizes logits before scoring; retain normal top-k selection here.
       # Native JAX retains its existing random expert-ID selection.
@@ -2503,6 +2615,7 @@ class RoutedMoE(nnx.Module):
       skip_token_gather=False,
       token_mask=None,
       physical_route_fn=None,
+      has_invalid_slots=False,
       _return_sorted_weights=False,
   ):
     """Permute tokens to group by expert to fit gmm call.
@@ -2528,6 +2641,8 @@ class RoutedMoE(nnx.Module):
       physical_route_fn: Optional `(flat_logical, valid_mask) -> (physical_bins, num_sort_bins)`
         callback used by online hot-expert replication to remap logical experts into physical
         home/replica slots after `-1` padding slots have been replaced with safe indices.
+      has_invalid_slots: True when `precomputed_topk` may contain unused (-1) expert slots even if
+        `forced_routed_experts` / `token_mask` were already consumed before the EP all-gather.
     """
     is_qarray = isinstance(inputs, qpl.QArray)
     has_per_token_scale = is_qarray and inputs.scale.size > 1
@@ -2539,7 +2654,7 @@ class RoutedMoE(nnx.Module):
     # moe_tc_ragged_3d_dispatch: inputs arrive as (batch, seq, emb // 128, 128) and stay 3D for the TC sort.
     inputs_2d = jnp.reshape(raw_inputs, (bsz_times_seq_len, *inputs_shape[2:]))
     # Forced routing and token_mask both leave unused (expert id -1) slots in selected_experts.
-    has_invalid_slots = forced_routed_experts is not None or token_mask is not None
+    has_invalid_slots = has_invalid_slots or forced_routed_experts is not None or token_mask is not None
     if precomputed_topk is not None:
       weights, selected_experts = precomputed_topk
     else:
@@ -3924,7 +4039,7 @@ class RoutedMoE(nnx.Module):
     token_mask_pspec = None
     if token_mask is not None:
       token_mask_pspec = maybe_replicate_incompatible_batch(
-          self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length")), token_mask
+          self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed")), token_mask
       )
     bias_update_axis_names = _batch_axis_names(gate_logits_pspec)
     # In RoE, logits are already all-gathered across self._expert_parallelism_name before
@@ -4054,6 +4169,62 @@ class RoutedMoE(nnx.Module):
         x_gathered_scale = jax.lax.stop_gradient(jnp.reshape(scale_2d, scale_shape))
       return dataclasses.replace(x_input, qvalue=x_gathered_qval, scale=x_gathered_scale)
 
+    if self.config.moe_pin_sparse_core_all_gathers or self.config.moe_pin_sparse_core_ep_all_gathers:
+
+      @functools.partial(
+          compute_on,
+          compute_type="tpu_sparsecore",
+          out_memory_spaces=jax.memory.Space.Device,
+          compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
+      )
+      def _ep_all_gather(z):
+        return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+
+    else:
+
+      def _ep_all_gather(z):
+        return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
+
+    def maybe_pack_and_all_gather_routing(
+        logits,
+        pre_bias_logits,
+        rngs,
+        input_ids=None,
+        forced_routed_experts=None,
+        per_expert_scale=None,
+        token_mask=None,
+    ):
+      """Routes all local tokens once and all-gathers (weights, ids) as one packed f32 array when enabled."""
+      if not (
+          self.config.moe_roe_packed_routing_gather
+          and self.config.use_ring_of_experts
+          and self.config.moe_topk_before_ep_all_gather
+          and not self.is_hash_routing
+          and not self.config.use_random_routing
+      ):
+        return None
+      local_weights, local_ids = self.get_topk(
+          logits,
+          pre_bias_logits,
+          rngs,
+          input_ids,
+          forced_routed_experts,
+          per_expert_scale=per_expert_scale,
+          token_mask=token_mask,
+      )
+      packed = _ep_all_gather(pack_routing_for_all_gather(local_weights, local_ids))
+      tag_fn = routing_tag_fn(self.config)
+      if tag_fn is not None:
+        packed = tag_fn(packed)
+      gathered_weights, gathered_ids = unpack_routing(packed, local_weights.dtype, local_ids.dtype)
+      need_gathered_mask = (
+          token_mask is not None and self.config.load_balance_loss_weight > 0.0 and not use_megatron_seq_aux_loss
+      )
+      gathered_token_mask = _ep_all_gather(token_mask) if need_gathered_mask else None
+      if gathered_token_mask is not None and tag_fn is not None:
+        gathered_token_mask = tag_fn(gathered_token_mask)
+      return gathered_weights, gathered_ids, gathered_token_mask
+
     def roe_ag_and_route(
         x,
         logits,
@@ -4066,23 +4237,8 @@ class RoutedMoE(nnx.Module):
         force_dropless=False,
         per_expert_scale=None,
         token_mask=None,
+        gathered_topk=None,
     ):
-      if self.config.moe_pin_sparse_core_all_gathers or getattr(self.config, "moe_pin_sparse_core_ep_all_gathers", False):
-
-        @functools.partial(
-            compute_on,
-            compute_type="tpu_sparsecore",
-            out_memory_spaces=jax.memory.Space.Device,
-            compiler_options={"sparse_core_config": {"core_ids": [self.config.moe_ep_all_gather_sparse_core_id]}},
-        )
-        def _ep_all_gather(z):
-          return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
-
-      else:
-
-        def _ep_all_gather(z):
-          return jax.lax.all_gather(z, axis_name=self._expert_parallelism_name, tiled=True)
-
       if use_tc_3d_dispatch():
         # moe_tc_ragged_3d_dispatch: all-gather the tokens in the TC kernels' (emb // 128, 128) layout; the
         # reshape is on the local tokens, so the gathered tensor needs no relayout before the TC sort.
@@ -4109,36 +4265,56 @@ class RoutedMoE(nnx.Module):
       local_tokens = logits.shape[0] * logits.shape[1]
       precomputed_topk = None
       precomputed_density_prob = None
+      has_invalid_slots_override = False
       topk_before_all_gather = (
-          self.config.moe_topk_before_ep_all_gather
-          and forced_routed_experts is None
-          and not self.is_hash_routing
-          and not self.config.use_random_routing
+          self.config.moe_topk_before_ep_all_gather and not self.is_hash_routing and not self.config.use_random_routing
       )
-      if topk_before_all_gather:
+      if gathered_topk is not None:
+        gathered_weights, gathered_ids, gathered_token_mask = gathered_topk
+        precomputed_topk = (gathered_weights, gathered_ids)
+        has_invalid_slots_override = forced_routed_experts is not None or token_mask is not None
+        if self.config.load_balance_loss_weight > 0.0 and not use_megatron_seq_aux_loss:
+          probs_logits = pre_bias_logits if pre_bias_logits is not None else logits
+          softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+          precomputed_density_prob = _ep_all_gather(masked_sequence_mean(softmax_probs, token_mask))
+        logits, pre_bias_logits, forced_routed_experts = None, None, None
+        token_mask = gathered_token_mask
+      elif topk_before_all_gather:
         # Top-k is per token, so run it on the local tokens and all-gather only the (batch, seq, k)
         # weights and expert ids instead of the (batch, seq, num_experts) logits: every shard
         # otherwise redoes top-k on the full gathered batch, and the logit gather (and its
         # reduce-scatter in the backward) moves num_experts / k times more bytes. Only the index map
         # is computed here; permute() below still sorts the gathered tokens.
         weights, selected_experts = self.get_topk(
-            logits, pre_bias_logits, rngs, input_ids, per_expert_scale=per_expert_scale, token_mask=token_mask
+            logits,
+            pre_bias_logits,
+            rngs,
+            input_ids,
+            forced_routed_experts,
+            per_expert_scale=per_expert_scale,
+            token_mask=token_mask,
         )
         precomputed_topk = (_ep_all_gather(weights), _ep_all_gather(selected_experts))
+        has_invalid_slots_override = forced_routed_experts is not None or token_mask is not None
         if self.config.load_balance_loss_weight > 0.0 and not use_megatron_seq_aux_loss:
           # Per-sequence statistic, so gathering it over EP gives the same loss as the full batch.
           probs_logits = pre_bias_logits if pre_bias_logits is not None else logits
           softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
           precomputed_density_prob = _ep_all_gather(masked_sequence_mean(softmax_probs, token_mask))
-        logits, pre_bias_logits = None, None
+          if token_mask is not None:
+            token_mask = _ep_all_gather(token_mask)
+        else:
+          token_mask = None
+        logits, pre_bias_logits, forced_routed_experts = None, None, None
       else:
-        logits, pre_bias_logits, forced_routed_experts = tuple(
-            _ep_all_gather(z) if z is not None else None for z in (logits, pre_bias_logits, forced_routed_experts)
+        logits, pre_bias_logits, forced_routed_experts, input_ids = tuple(
+            _ep_all_gather(z) if z is not None else None
+            for z in (logits, pre_bias_logits, forced_routed_experts, input_ids)
         )
-      # permute() needs the gathered mask whichever branch ran: the loss divides by the valid tokens per sequence
-      # and the invalid-slot handling of the sort keys on it.
-      if token_mask is not None:
-        token_mask = _ep_all_gather(token_mask)
+        # permute() needs the gathered mask whichever branch ran: the loss divides by the valid tokens per sequence
+        # and the invalid-slot handling of the sort keys on it.
+        if token_mask is not None:
+          token_mask = _ep_all_gather(token_mask)
 
       # "Route" tokens within each shard.
       num_experts_per_shard = self.config.num_experts // num_ep
@@ -4173,6 +4349,7 @@ class RoutedMoE(nnx.Module):
           precomputed_density_prob=precomputed_density_prob,
           per_expert_scale=per_expert_scale,
           token_mask=token_mask,
+          has_invalid_slots=has_invalid_slots_override,
       )
       required_rbf = None
       if getattr(self.config, "log_required_ragged_buffer_factor", False):
@@ -4411,6 +4588,7 @@ class RoutedMoE(nnx.Module):
         per_expert_scale=None,
         skip_token_gather=False,
         token_mask=None,
+        gathered_topk=None,
     ):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
@@ -4435,6 +4613,7 @@ class RoutedMoE(nnx.Module):
             force_dropless=force_dropless,
             per_expert_scale=per_expert_scale,
             token_mask=token_mask,
+            gathered_topk=gathered_topk,
         )
       else:
         return ra2a_and_route(
@@ -4985,6 +5164,7 @@ class RoutedMoE(nnx.Module):
         per_expert_scale=None,
         token_mask=None,
         moe_qwag_weight_amax=None,
+        gathered_topk=None,
     ):
       batch_size, sequence_length, embed_dim = x.shape
       use_fused_gmm3d = getattr(self.config, "moe_use_fused_gmm3d", False)
@@ -5024,6 +5204,7 @@ class RoutedMoE(nnx.Module):
             per_expert_scale=per_expert_scale,
             skip_token_gather=use_fused_gmm3d,
             token_mask=token_mask,
+            gathered_topk=gathered_topk,
         )
 
         # moe_x_sorted: tag the routed (expert-sorted) MoE input and its small routing/metadata
@@ -5395,6 +5576,15 @@ class RoutedMoE(nnx.Module):
 
       def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
+        packed_topk = maybe_pack_and_all_gather_routing(
+            logits,
+            pre_bias_logits,
+            rngs,
+            input_ids=sharded_input_ids,
+            forced_routed_experts=forced_routed_experts,
+            per_expert_scale=per_expert_scale,
+            token_mask=token_mask,
+        )
         if n_chunks <= 1:
           out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, _ = _moe_body(
               x,
@@ -5413,6 +5603,7 @@ class RoutedMoE(nnx.Module):
               per_expert_scale=per_expert_scale,
               token_mask=token_mask,
               moe_qwag_weight_amax=moe_qwag_weight_amax,
+              gathered_topk=packed_topk,
           )
           if not defer_small_ars:
             bias_updates = finalize_bias_updates(bias_updates)
@@ -5449,6 +5640,15 @@ class RoutedMoE(nnx.Module):
           # loss stays bit-exact.
           if barrier_enabled and _prev is not None:
             x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
+          chunk_gathered_topk = (
+              None
+              if packed_topk is None
+              else (
+                  packed_topk[0][:, sl, :],
+                  packed_topk[1][:, sl, :],
+                  None if packed_topk[2] is None else packed_topk[2][:, sl],
+              )
+          )
           out_c, lb_c, bu_c, ov_c, req_c, ratio_c, chunk_weights = _moe_body(
               x_c,
               logits[:, sl, :],
@@ -5468,6 +5668,7 @@ class RoutedMoE(nnx.Module):
               per_expert_scale=per_expert_scale,
               token_mask=None if token_mask is None else token_mask[:, sl],
               moe_qwag_weight_amax=moe_qwag_weight_amax,
+              gathered_topk=chunk_gathered_topk,
           )
           if accum_chunk_wgrad:
             cur_w0, cur_w1, cur_wo = chunk_weights
@@ -5643,7 +5844,7 @@ class RoutedMoE(nnx.Module):
       )
     if token_mask is not None:
       token_mask = self._maybe_shard_with_pspec(
-          token_mask, token_mask_pspec, logical_axes=(batch_logical_axis, "activation_norm_length")
+          token_mask, token_mask_pspec, logical_axes=(batch_logical_axis, "activation_norm_length_routed")
       )
 
     if self.config.moe_pin_sparse_core_all_gathers or getattr(self.config, "moe_pin_sparse_core_fsdp_all_gathers", False):

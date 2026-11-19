@@ -153,6 +153,9 @@ class DummyConfig:
     self.n_routing_groups = -1
     self.topk_routing_group = 1
     self.float32_weight_sum = True
+    self.moe_fallback_topk_capacity = 0
+    self.moe_routing_index_math = "sort"
+    self.router_topk_matmul_vjp = False
 
 
 class DummyRoutedMoE:

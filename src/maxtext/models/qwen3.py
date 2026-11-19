@@ -2120,6 +2120,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         training.
     """
     # 1. Apply the routed experts block.
+    exclude_padding = token_mask is not None and self.config.moe_exclude_padding_from_routing
     routed_output, load_balance_loss, _ = self.routed_experts(
         hidden_states,
         out_sharding=out_sharding,
@@ -2151,14 +2152,20 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
     gate_inputs = hidden_states.astype(jnp.float32) if self.config.float32_gate_logits else hidden_states
     shared_gate_output = self.shared_expert_gate(gate_inputs, out_sharding=gate_sharding)
 
-    # 4. Combine the outputs.
+    # 4. Combine the outputs. Zeroing the [batch, seq, 1] gate under moe_exclude_padding_from_routing avoids
+    # materializing a full [batch, seq, embed] jnp.where buffer while ensuring padded tokens get zero MoE output.
     if self.config.float32_gate_logits and self.config.float32_weight_sum:
-      final_output = (
-          routed_output.astype(jnp.float32)
-          + jax.nn.sigmoid(shared_gate_output) * shared_expert_output.astype(jnp.float32)
-      ).astype(self.config.dtype)
+      shared_gate = jax.nn.sigmoid(shared_gate_output)
+      if exclude_padding:
+        shared_gate = shared_gate * token_mask.astype(shared_gate.dtype)[..., None]
+      final_output = (routed_output.astype(jnp.float32) + shared_gate * shared_expert_output.astype(jnp.float32)).astype(
+          self.config.dtype
+      )
     else:
-      final_output = routed_output + jax.nn.sigmoid(shared_gate_output).astype(routed_output.dtype) * shared_expert_output
+      shared_gate = jax.nn.sigmoid(shared_gate_output).astype(routed_output.dtype)
+      if exclude_padding:
+        shared_gate = shared_gate * token_mask.astype(shared_gate.dtype)[..., None]
+      final_output = routed_output + shared_gate * shared_expert_output
 
     return final_output, load_balance_loss
 
