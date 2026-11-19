@@ -1283,5 +1283,141 @@ class GrainElasticDataReplicaTest(unittest.TestCase):
       self.assertEqual(sorted(rows), list(range(step * 8, (step + 1) * 8)))
 
 
+def _write_arrayrecord(path: str, prefix: str, count: int = 50) -> None:
+  """Writes a temporary ArrayRecord shard with sequential UTF-8 records."""
+  from array_record.python import array_record_module  # pylint: disable=import-outside-toplevel
+
+  writer = array_record_module.ArrayRecordWriter(path, "group_size:1")
+  for i in range(count):
+    writer.write(f"{prefix}_{i}".encode("utf-8"))
+  writer.close()
+
+
+class GrainMixtureCheckpointUpdateTest(unittest.TestCase):
+  """Tests mid-training mixture weight and component updates when restoring from a checkpoint."""
+
+  def test_checkpoint_restore_with_updated_mixture_config(self):
+    """Restoring a mixture checkpoint preserves existing component offsets and starts new components at 0."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      ds1_path = os.path.join(tmpdir, "ds1.array_record")
+      ds2_path = os.path.join(tmpdir, "ds2.array_record")
+      ds3_path = os.path.join(tmpdir, "ds3.array_record")
+      _write_arrayrecord(ds1_path, "ds1")
+      _write_arrayrecord(ds2_path, "ds2")
+      _write_arrayrecord(ds3_path, "ds3")
+
+      mix_v1_path = os.path.join(tmpdir, "mixture_v1.json")
+      with open(mix_v1_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "ds1": {"path": ds1_path, "weight": 0.4},
+                "ds2": {"path": ds2_path, "weight": 0.6},
+            },
+            f,
+        )
+
+      ds_v1 = grain_data_processing.get_datasets(
+          "",
+          "arrayrecord",
+          shuffle=False,
+          shuffle_seed=0,
+          shuffle_buffer_size=1,
+          num_epoch=1,
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          grain_worker_count=0,
+          grain_num_threads=4,
+          grain_prefetch_buffer_size=16,
+          grain_data_source_max_workers=2,
+          mixture_config_path=mix_v1_path,
+      )
+      it_v1 = iter(ds_v1)
+      before_ckpt = [next(it_v1).decode("utf-8") for _ in range(10)]
+      ds2_seen_before = [x for x in before_ckpt if x.startswith("ds2_")]
+      self.assertTrue(ds2_seen_before)
+      self.assertEqual(ds2_seen_before, [f"ds2_{i}" for i in range(len(ds2_seen_before))])
+      ckpt_state = it_v1.get_state()
+      if hasattr(it_v1, "close"):
+        it_v1.close()
+
+      # Update mixture mid-training: drop ds1, change ds2 weight, and add new ds3.
+      mix_v2_path = os.path.join(tmpdir, "mixture_v2.json")
+      with open(mix_v2_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "ds2": {"path": ds2_path, "weight": 0.5},
+                "ds3": {"path": ds3_path, "weight": 0.5},
+            },
+            f,
+        )
+
+      ds_v2 = grain_data_processing.get_datasets(
+          "",
+          "arrayrecord",
+          shuffle=False,
+          shuffle_seed=0,
+          shuffle_buffer_size=1,
+          num_epoch=1,
+          dataloading_host_index=0,
+          dataloading_host_count=1,
+          grain_worker_count=0,
+          grain_num_threads=4,
+          grain_prefetch_buffer_size=16,
+          grain_data_source_max_workers=2,
+          mixture_config_path=mix_v2_path,
+      )
+      it_v2 = iter(ds_v2)
+      it_v2.set_state(ckpt_state)
+      after_ckpt = [next(it_v2).decode("utf-8") for _ in range(10)]
+      if hasattr(it_v2, "close"):
+        it_v2.close()
+
+      self.assertFalse(any(x.startswith("ds1_") for x in after_ckpt))
+      ds2_seen_after = [x for x in after_ckpt if x.startswith("ds2_")]
+      ds3_seen_after = [x for x in after_ckpt if x.startswith("ds3_")]
+      self.assertTrue(ds2_seen_after)
+      self.assertTrue(ds3_seen_after)
+      # Existing ds2 resumes from its exact next index without repeating or skipping records.
+      start_idx = len(ds2_seen_before)
+      self.assertEqual(ds2_seen_after, [f"ds2_{start_idx + i}" for i in range(len(ds2_seen_after))])
+      # Newly added ds3 starts cleanly from index 0.
+      self.assertEqual(ds3_seen_after, [f"ds3_{i}" for i in range(len(ds3_seen_after))])
+
+
+class GrainMixtureReadOptionsBudgetTest(parameterized.TestCase):
+  """Tests per-component ReadOptions budgeting and weight validation for ArrayRecord mixtures."""
+
+  @parameterized.named_parameters(
+      ("ceil_budget", "a,0.05;b,0.25;c,0.70", 16, 500, [(1, 25), (4, 125), (12, 350)]),
+      ("caps_threads_at_buffer", "a,0.25;b,0.75", 16, 4, [(1, 1), (3, 3)]),
+      ("zero_disables_prefetch", "a,3;b,7", 0, 0, [(0, 0), (0, 0)]),
+  )
+  def test_mixture_budgets_read_options(self, pattern, num_threads, buffer_size, expected):
+    recorded = []
+
+    def make_mock_ds(_source):
+      ds = mock.MagicMock()
+      ds.repeat.return_value = ds
+      ds.__getitem__.return_value = ds
+      ds.to_iter_dataset.side_effect = (
+          lambda read_options: recorded.append((read_options.num_threads, read_options.prefetch_buffer_size)) or ds
+      )
+      return ds
+
+    with (
+        mock.patch.object(grain_data_processing, "find_data_files", side_effect=lambda p, **_: [f"{p}_0"]),
+        mock.patch.object(grain_data_processing.grain, "ArrayRecordDataSource"),
+        mock.patch.object(grain_data_processing.grain.MapDataset, "source", side_effect=make_mock_ds),
+        mock.patch.object(grain_data_processing.grain.IterDataset, "mix", return_value=mock.MagicMock()),
+    ):
+      grain_data_processing.get_datasets(pattern, "arrayrecord", False, 0, 1, 1, 0, 1, 0, num_threads, buffer_size, 3)
+    self.assertEqual(recorded, expected)
+
+  def test_rejects_non_positive_mixture_weights(self):
+    for bad in ("a,0;b,1", "a,-0.1;b,1.1"):
+      with self.assertRaisesRegex(ValueError, "must be > 0"):
+        grain_data_processing._parse_arrayrecord_patterns(bad)  # pylint: disable=protected-access
+
+
 if __name__ == "__main__":
   absltest.main()

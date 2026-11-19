@@ -3069,11 +3069,13 @@ class GrainDataset(BaseModel):
   grain_worker_count_eval: int = Field(1, description="Number of workers for Grain eval data loading.")
   grain_per_worker_buffer_size_eval: int = Field(1, description="Per-worker buffer size for Grain eval data loading.")
   grain_ram_budget_mb: int = Field(1024, description="RAM budget (MB) for auto-tuning worker count.")
-  grain_num_threads: int = Field(16, description="Number of threads for Grain ReadOptions during training.")
-  grain_prefetch_buffer_size: int = Field(500, description="Prefetch buffer size for Grain ReadOptions during training.")
-  grain_num_threads_eval: int = Field(16, description="Number of threads for Grain ReadOptions during evaluation.")
+  grain_num_threads: int = Field(16, ge=0, description="Number of threads for Grain ReadOptions during training.")
+  grain_prefetch_buffer_size: int = Field(
+      500, ge=0, description="Prefetch buffer size for Grain ReadOptions during training."
+  )
+  grain_num_threads_eval: int = Field(16, ge=0, description="Number of threads for Grain ReadOptions during evaluation.")
   grain_prefetch_buffer_size_eval: int = Field(
-      500, description="Prefetch buffer size for Grain ReadOptions during evaluation."
+      500, ge=0, description="Prefetch buffer size for Grain ReadOptions during evaluation."
   )
   grain_data_source_max_workers: int = Field(
       16,
@@ -6793,12 +6795,14 @@ class MaxTextConfig(
           "IterDataset transform that `ElasticIterator` forbids."
       )
     if self.grain_use_elastic_iterator and (
-        self.grain_train_mixture_config_path or ";" in (self.grain_train_files or "")
+        self.grain_train_mixture_config_path
+        or ";" in (self.grain_train_files or "")
+        or (self.eval_interval > 0 and ";" in (self.grain_eval_files or ""))
     ):
       raise ValueError(
           "`grain_use_elastic_iterator=True` does not support dataset mixtures. "
-          "Set `grain_train_mixture_config_path` to empty and use a single "
-          "`grain_train_files` pattern (no ';' separator)."
+          "Set `grain_train_mixture_config_path` to empty and use single "
+          "`grain_train_files` / `grain_eval_files` patterns (no ';' separator)."
       )
     # Only a full-state resume needs the CheckpointManager, which `enable_checkpointing`
     # gates. `load_parameters_path` is a warm start: it restores through its own
@@ -7658,6 +7662,17 @@ class MaxTextConfig(
             "Please specify grain_eval_files, use hf_path with grain_file_type=parquet, or use dataset_path, "
             "eval_dataset_name, and eval_split with grain_file_type=tfrecord; otherwise set eval_interval to <=0."
         )
+      if self.grain_file_type in ("parquet", "tfrecord"):
+        if self.grain_num_threads < 1:
+          raise ValueError(
+              f"`grain_num_threads` must be > 0 when `grain_file_type={self.grain_file_type!r}`, "
+              f"got {self.grain_num_threads}."
+          )
+        if self.eval_interval > 0 and self.grain_num_threads_eval < 1:
+          raise ValueError(
+              f"`grain_num_threads_eval` must be > 0 when `grain_file_type={self.grain_file_type!r}` "
+              f"and `eval_interval > 0`, got {self.grain_num_threads_eval}."
+          )
     elif self.dataset_type == DatasetType.TFDS:
       logger.warning(
           "tfds pipeline is deprecated. Use dataset_type=grain and grain_file_type=tfrecord. You can keep the same "
