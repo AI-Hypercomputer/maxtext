@@ -1960,6 +1960,8 @@ class Qwen3_8SparseAttention(nnx.Module):
       attention_mask: jax.Array | None = None,
       segment_ids: jax.Array | None = None,
       return_selected_blocks: bool = False,
+      *,
+      position_embeddings: tuple[jax.Array, jax.Array] | None = None,
   ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Forward pass computing sparse attention with document boundary support.
 
@@ -1970,15 +1972,22 @@ class Qwen3_8SparseAttention(nnx.Module):
       segment_ids: Optional (B, S) 1-indexed document IDs (0 = padding); when both are given, padding from
         attention_mask is folded into segment_ids.
       return_selected_blocks: Whether to return selected block indices.
+      position_embeddings: Optional precomputed `(cos, sin)` tables hoisted outside decoder scan.
 
     Returns:
       Attention output tensor, or tuple of (output, selected_block_indices) if return_selected_blocks is True.
     """
     b, s, _ = hidden_states.shape
-    if position_ids is None:
-      position_ids = jnp.broadcast_to(jnp.arange(s)[None, :], (b, s))
-
-    cos, sin = self.rotary_emb(hidden_states, position_ids)
+    if position_embeddings is not None:
+      cos, sin = position_embeddings
+      if cos.dtype != hidden_states.dtype:
+        cos = cos.astype(hidden_states.dtype)
+      if sin.dtype != hidden_states.dtype:
+        sin = sin.astype(hidden_states.dtype)
+    else:
+      if position_ids is None:
+        position_ids = jnp.broadcast_to(jnp.arange(s)[None, :], (b, s))
+      cos, sin = self.rotary_emb(hidden_states, position_ids)
     selected_token_mask, selected_block_indices = self.indexer(
         hidden_states,
         (cos, sin),
@@ -2215,6 +2224,76 @@ class Qwen3_8Experts(nnx.Module):
     return out
 
 
+def _top_k_dense_vjp(probs: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
+  """`jax.lax.top_k(probs, k)` with a dense compare-select-accumulate VJP avoiding TPU scatter-add.
+
+  Checkpoints `(vals_sg, topk_ids)` under `"moe_routing"` and accumulates gradients across `k`
+  without materializing a `[..., k, num_experts]` intermediate tensor.
+  """
+  if k <= 0:
+    raise ValueError(f"Expected k > 0 for top-k routing, got {k}.")
+  num_experts = probs.shape[-1]
+  probs_dtype = probs.dtype
+  raw_vals, raw_ids = jax.lax.top_k(jax.lax.stop_gradient(probs), k)
+  vals_sg = checkpoint_name(raw_vals, "moe_routing")
+  topk_ids = checkpoint_name(raw_ids.astype(jnp.int32), "moe_routing")
+
+  @jax.custom_vjp
+  def _attach_grad(p: jax.Array, v_sg: jax.Array, ids: jax.Array) -> jax.Array:
+    del p, ids
+    return v_sg
+
+  def _attach_grad_fwd(p: jax.Array, v_sg: jax.Array, ids: jax.Array) -> tuple[jax.Array, jax.Array]:
+    del p
+    return v_sg, ids
+
+  def _attach_grad_bwd(ids: jax.Array, g_w: jax.Array) -> tuple[jax.Array, None, None]:
+    g_w = g_w.astype(probs_dtype)
+    iota_e = jax.lax.broadcasted_iota(ids.dtype, (1,) * (ids.ndim - 1) + (num_experts,), ids.ndim - 1)
+    zero = jnp.zeros((), dtype=probs_dtype)
+    # Initialize from slot 0 so `acc` inherits `ids`/`g_w`'s exact sharding under `ShardMode.EXPLICIT`.
+    acc = jnp.where(iota_e == ids[..., 0:1], g_w[..., 0:1], zero)
+    for j in range(1, k):
+      acc = acc + jnp.where(iota_e == ids[..., j : j + 1], g_w[..., j : j + 1], zero)
+    return acc, None, None
+
+  _attach_grad.defvjp(_attach_grad_fwd, _attach_grad_bwd)
+  return _attach_grad(probs, vals_sg, topk_ids), topk_ids
+
+
+def _compute_compact_router_aux_stats(
+    router_probs: jax.Array,
+    router_indices: jax.Array,
+    mask: jax.Array | None = None,
+) -> dict[str, jax.Array]:
+  """Reduces per-layer router tensors into `[E]` load-balancing sums without 4D `one_hot`."""
+  probs = router_probs.astype(jnp.float32)
+  ids_sg = jax.lax.stop_gradient(router_indices)
+  num_experts = probs.shape[-1]
+  top_k = ids_sg.shape[-1]
+  reduce_axes = tuple(range(probs.ndim - 1))
+  iota_e = jax.lax.broadcasted_iota(ids_sg.dtype, (1,) * (ids_sg.ndim - 1) + (num_experts,), ids_sg.ndim - 1)
+  if mask is not None:
+    m = jax.lax.stop_gradient((mask != 0).astype(jnp.float32))
+    m_exp = jnp.expand_dims(m, -1)
+    prob_sum = jnp.sum(probs * m_exp, axis=reduce_axes)
+    total_rows = jnp.sum(m).astype(jnp.float32)
+    weight = m_exp
+  else:
+    prob_sum = jnp.sum(probs, axis=reduce_axes)
+    total_rows = jnp.array(float(probs.size // num_experts), dtype=jnp.float32)
+    weight = jnp.ones((), dtype=jnp.float32)
+  zero = jnp.zeros((), dtype=jnp.float32)
+  counts = jnp.sum(jnp.where(ids_sg[..., 0:1] == iota_e, weight, zero), axis=reduce_axes)
+  for j in range(1, top_k):
+    counts = counts + jnp.sum(jnp.where(ids_sg[..., j : j + 1] == iota_e, weight, zero), axis=reduce_axes)
+  return {
+      "tokens_per_expert_sum": jax.lax.stop_gradient(counts),
+      "router_prob_sum": prob_sum,
+      "total_rows": jax.lax.stop_gradient(total_rows),
+  }
+
+
 class Qwen3_8TopKRouter(nnx.Module):
   """Top-k router computing routing weights, expert indices, and full probabilities."""
 
@@ -2245,14 +2324,13 @@ class Qwen3_8TopKRouter(nnx.Module):
     """Computes routing weights, selected experts, and full float32 router probabilities."""
     router_logits = self.linear(hidden_states)
     router_probs = jax.nn.softmax(router_logits.astype(jnp.float32), axis=-1)
-    router_top_value, router_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
+    router_top_value, router_indices = _top_k_dense_vjp(router_probs, self.num_experts_per_tok)
     if self.norm_topk_prob:
       router_top_value = router_top_value / jnp.sum(router_top_value, axis=-1, keepdims=True)
     routing_weights = checkpoint_name(
         (router_top_value * self.routed_scaling_factor).astype(router_logits.dtype),
         "moe_routing",
     )
-    router_indices = checkpoint_name(router_indices, "moe_routing")
     return routing_weights, router_indices, router_probs
 
 
@@ -2793,11 +2871,14 @@ class Qwen3_8DecoderLayer(nnx.Module):
       hidden_states: jax.Array,
       *,
       positions: jax.Array | None = None,
+      position_embeddings: tuple[jax.Array, jax.Array] | None = None,
       conv_mask: jax.Array | None = None,
       ple_input_ids: jax.Array | None = None,
       ple_embeds: jax.Array | None = None,
       segment_ids: jax.Array | None = None,
       return_aux: bool = False,
+      compact_router_aux: bool = False,
+      router_aux_mask: jax.Array | None = None,
   ) -> Any:
     """Executes single decoder layer forward pass."""
     hidden_states = checkpoint_name(checkpoint_name(hidden_states, "decoder_layer_input"), "hidden_states")
@@ -2809,21 +2890,36 @@ class Qwen3_8DecoderLayer(nnx.Module):
     if self.layer_type == "linear_attention":
       attn_out, s_idx = self.linear_attn(mixed, attention_mask=conv_mask), None
     else:
-      attn_out, s_idx = self.self_attn(
-          mixed, position_ids=positions, attention_mask=conv_mask, segment_ids=segment_ids, return_selected_blocks=True
+      need_selected_blocks = return_aux and not compact_router_aux
+      qsa_out = self.self_attn(
+          mixed,
+          position_ids=positions,
+          attention_mask=conv_mask,
+          segment_ids=segment_ids,
+          return_selected_blocks=need_selected_blocks,
+          position_embeddings=position_embeddings,
       )
+      attn_out, s_idx = qsa_out if need_selected_blocks else (qsa_out, None)
     attn_out = checkpoint_name(attn_out, "self_attn")
     hidden_states = shard_batch(self.attn_hyper_connection.combine(hidden_states, attn_out, inject), self.sharding)
     mixed, inject = self.mlp_hyper_connection.before_block(hidden_states)
     mlp_out, r_w, r_idx, r_probs = self.mlp(mixed, return_router_topk=True)
     hidden_states = shard_batch(self.mlp_hyper_connection.combine(hidden_states, mlp_out, inject), self.sharding)
-    aux = {
-        "router_indices": r_idx,
-        "routing_weights": r_w,
-        "router_probs": r_probs,
-        **({"selected_block_indices": s_idx} if s_idx is not None else {}),
-    }
-    return (hidden_states, aux) if return_aux else hidden_states
+    if not return_aux:
+      return hidden_states
+    if compact_router_aux:
+      eff_mask = (
+          router_aux_mask if router_aux_mask is not None else ((segment_ids != 0) if segment_ids is not None else None)
+      )
+      aux = _compute_compact_router_aux_stats(r_probs, r_idx, mask=eff_mask)
+    else:
+      aux = {
+          "router_indices": r_idx,
+          "routing_weights": r_w,
+          "router_probs": r_probs,
+          **({"selected_block_indices": s_idx} if s_idx is not None else {}),
+      }
+    return hidden_states, aux
 
 
 class Qwen3_8CycleBlock(nnx.Module):
@@ -2931,10 +3027,13 @@ def _run_qwen3_8_sublayer(
     *,
     eff_policy: Callable[..., Any] | None,
     return_aux: bool,
+    compact_router_aux: bool = False,
     positions: jax.Array | None = None,
+    position_embeddings: tuple[jax.Array, jax.Array] | None = None,
     conv_mask: jax.Array | None = None,
     ple_input_ids: jax.Array | None = None,
     segment_ids: jax.Array | None = None,
+    router_aux_mask: jax.Array | None = None,
 ) -> Any:
   """Executes one unscanned `Qwen3_8DecoderLayer`, wrapping in `jax.checkpoint(..., prevent_cse=True)` if active."""
   # Hoist the single-layer PLE n-gram table lookup outside `jax.checkpoint(..., prevent_cse=True)`:
@@ -2951,20 +3050,22 @@ def _run_qwen3_8_sublayer(
       k: v
       for k, v in (
           ("positions", positions),
+          ("position_embeddings", position_embeddings),
           ("conv_mask", conv_mask),
           ("ple_input_ids", None if ple_embeds is not None else ple_input_ids),
           ("ple_embeds", ple_embeds),
           ("segment_ids", segment_ids),
+          ("router_aux_mask", router_aux_mask),
       )
       if v is not None
   }
   if eff_policy is None:
-    return layer(hidden_states, return_aux=return_aux, **dyn_kw)
+    return layer(hidden_states, return_aux=return_aux, compact_router_aux=compact_router_aux, **dyn_kw)
   gd, lp, lr = nnx.split(layer, nnx.Param, ...)
 
   def _eval_layer(h_in, p_in, r_in, kw_in):
     mod = nnx.merge(gd, p_in, r_in)
-    out = mod(h_in, return_aux=return_aux, **kw_in)
+    out = mod(h_in, return_aux=return_aux, compact_router_aux=compact_router_aux, **kw_in)
     _, _, updated_r = nnx.split(mod, nnx.Param, ...)
     return out, updated_r
 
@@ -2980,10 +3081,13 @@ def run_single_cycle(
     *,
     eff_policy: Callable[..., Any] | None = None,
     return_aux: bool = False,
+    compact_router_aux: bool = False,
     positions: jax.Array | None = None,
+    position_embeddings: tuple[jax.Array, jax.Array] | None = None,
     conv_mask: jax.Array | None = None,
     ple_input_ids: jax.Array | None = None,
     segment_ids: jax.Array | None = None,
+    router_aux_mask: jax.Array | None = None,
     sharding: Sharding | None = None,
 ) -> Any:
   """Executes one unstacked 4-layer `Qwen3_8CycleBlock` (`first_cycle`)."""
@@ -2995,10 +3099,13 @@ def run_single_cycle(
         h,
         eff_policy=eff_policy,
         return_aux=return_aux,
+        compact_router_aux=compact_router_aux,
         positions=positions,
+        position_embeddings=position_embeddings,
         conv_mask=conv_mask,
         ple_input_ids=ple_input_ids,
         segment_ids=segment_ids,
+        router_aux_mask=router_aux_mask,
     )
     if return_aux:
       h, a = out
@@ -3016,9 +3123,12 @@ def apply_scanned_cycles(
     num_cycles: int,
     scan_layers: bool = True,
     positions: jax.Array | None = None,
+    position_embeddings: tuple[jax.Array, jax.Array] | None = None,
     conv_mask: jax.Array | None = None,
     segment_ids: jax.Array | None = None,
+    router_aux_mask: jax.Array | None = None,
     return_aux: bool = False,
+    compact_router_aux: bool = False,
     remat: bool = False,
     remat_policy: Any = None,
     sharding: Sharding | None = None,
@@ -3042,7 +3152,15 @@ def apply_scanned_cycles(
     sub_rests[name] = lr
 
   dyn_kw = {
-      k: v for k, v in (("positions", positions), ("conv_mask", conv_mask), ("segment_ids", segment_ids)) if v is not None
+      k: v
+      for k, v in (
+          ("positions", positions),
+          ("position_embeddings", position_embeddings),
+          ("conv_mask", conv_mask),
+          ("segment_ids", segment_ids),
+          ("router_aux_mask", router_aux_mask),
+      )
+      if v is not None
   }
 
   def _run_slot(name: str, h_in: jax.Array, p_slice: Any, r_slice: Any) -> Any:
@@ -3052,7 +3170,7 @@ def apply_scanned_cycles(
 
     def _eval_slot(x_in, p_in, r_in, kw_in):
       lyr = nnx.merge(gd, p_in, r_in)
-      return lyr(x_in, return_aux=return_aux, **kw_in)
+      return lyr(x_in, return_aux=return_aux, compact_router_aux=compact_router_aux, **kw_in)
 
     args = (h_in, lp, lr, dyn_kw)
     if use_remat:
@@ -3159,9 +3277,12 @@ class Qwen3_8MTPBlock(nnx.Module):
       next_token_embeds: jax.Array,
       *,
       positions: jax.Array | None = None,
+      position_embeddings: tuple[jax.Array, jax.Array] | None = None,
       conv_mask: jax.Array | None = None,
       segment_ids: jax.Array | None = None,
       return_aux: bool = False,
+      compact_router_aux: bool = False,
+      router_aux_mask: jax.Array | None = None,
   ) -> jax.Array | tuple[jax.Array, dict[str, Any]]:
     """Forward pass fusing next-token embeddings with HC hidden states."""
     expected_dim = self.hc_count * self.emb_dim
@@ -3188,9 +3309,12 @@ class Qwen3_8MTPBlock(nnx.Module):
         h_mtp_in,
         eff_policy=eff_policy,
         return_aux=return_aux,
+        compact_router_aux=compact_router_aux,
         positions=positions,
+        position_embeddings=position_embeddings,
         conv_mask=conv_mask,
         segment_ids=segment_ids,
+        router_aux_mask=router_aux_mask,
     )
     h_layer, aux = out if return_aux else (out, None)
     h_out = self.hyper_connection_mixer.mix_input(h_layer)
@@ -3326,28 +3450,33 @@ def router_load_balancing_loss(
   if not layer_items:
     raise ValueError("aux_list contains no layers.")
   for i, (layer_aux, _) in enumerate(layer_items):
-    if not isinstance(layer_aux, dict) or "router_probs" not in layer_aux or "router_indices" not in layer_aux:
-      raise ValueError(f"Layer {i} aux must be a dict with 'router_probs' and 'router_indices'.")
+    is_compact = (
+        isinstance(layer_aux, dict)
+        and "tokens_per_expert_sum" in layer_aux
+        and "router_prob_sum" in layer_aux
+        and "total_rows" in layer_aux
+    )
+    is_legacy = isinstance(layer_aux, dict) and "router_probs" in layer_aux and "router_indices" in layer_aux
+    if not (is_compact or is_legacy):
+      raise ValueError(
+          f"Layer {i} aux must be a dict with either ('router_probs', 'router_indices') or "
+          "('tokens_per_expert_sum', 'router_prob_sum', 'total_rows')."
+      )
 
   tokens_per_expert_sum = jnp.zeros(num_experts, dtype=jnp.float32)
   router_prob_sum = jnp.zeros(num_experts, dtype=jnp.float32)
   total_rows = jnp.array(0.0, dtype=jnp.float32)
 
   for layer_aux, layer_mask in layer_items:
-    r_probs = layer_aux["router_probs"].astype(jnp.float32)
-    r_idx = layer_aux["router_indices"]
-    oh = jax.nn.one_hot(r_idx, num_experts, dtype=jnp.float32)
-    oh_reduce_axes = tuple(range(oh.ndim - 1))
-    prob_reduce_axes = tuple(range(r_probs.ndim - 1))
-    if layer_mask is not None:
-      m = (layer_mask != 0).astype(jnp.float32)
-      tokens_per_expert_sum = tokens_per_expert_sum + jnp.sum(oh * jnp.expand_dims(m, (-1, -2)), axis=oh_reduce_axes)
-      router_prob_sum = router_prob_sum + jnp.sum(r_probs * jnp.expand_dims(m, -1), axis=prob_reduce_axes)
-      total_rows = total_rows + jnp.sum(m)
+    if "tokens_per_expert_sum" in layer_aux:
+      tokens_per_expert_sum = tokens_per_expert_sum + layer_aux["tokens_per_expert_sum"].astype(jnp.float32)
+      router_prob_sum = router_prob_sum + layer_aux["router_prob_sum"].astype(jnp.float32)
+      total_rows = total_rows + layer_aux["total_rows"].astype(jnp.float32)
     else:
-      tokens_per_expert_sum = tokens_per_expert_sum + jnp.sum(oh, axis=oh_reduce_axes)
-      router_prob_sum = router_prob_sum + jnp.sum(r_probs, axis=prob_reduce_axes)
-      total_rows = total_rows + float(r_probs.size // num_experts)
+      stats = _compute_compact_router_aux_stats(layer_aux["router_probs"], layer_aux["router_indices"], mask=layer_mask)
+      tokens_per_expert_sum = tokens_per_expert_sum + stats["tokens_per_expert_sum"]
+      router_prob_sum = router_prob_sum + stats["router_prob_sum"]
+      total_rows = total_rows + stats["total_rows"]
 
   denom = jnp.maximum(total_rows, 1.0)
   tokens_per_expert = tokens_per_expert_sum / denom
@@ -3381,6 +3510,35 @@ def compute_total_loss(
   use_fused_ce = (not use_tiled_ce) and m3_kernels.model_supports_tokamax_linear_ce(
       model, model.config, mesh=getattr(model, "mesh", None)
   )
+
+  eff_target_mask = target_mask
+  if segment_ids is not None:
+    seg_valid = (segment_ids != 0).astype(jnp.float32)
+    eff_target_mask = seg_valid if eff_target_mask is None else (eff_target_mask.astype(jnp.float32) * seg_valid)
+
+  mtp_m: jax.Array | None = None
+  mtp_aux_mask: jax.Array | None = None
+  if run_mtp:
+    if target_tokens.shape[1] <= 1:
+      mtp_aux_mask = jnp.zeros_like(target_tokens, dtype=jnp.float32)
+    else:
+      mtp_m = (
+          target_mask[:, 1:].astype(jnp.float32)
+          if target_mask is not None
+          else jnp.ones_like(target_tokens[:, 1:], dtype=jnp.float32)
+      )
+      if segment_ids is not None:
+        mtp_m = mtp_m * ((segment_ids[:, :-1] == segment_ids[:, 1:]) & (segment_ids[:, :-1] != 0)).astype(jnp.float32)
+      mtp_aux_mask = jnp.pad(mtp_m, ((0, 0), (0, 1)))
+
+  compact_kw: dict[str, Any] = {}
+  if need_aux and isinstance(model, Qwen3_8FlashNextModel):
+    compact_kw = {
+        "compact_router_aux": True,
+        "router_aux_mask": eff_target_mask,
+        "mtp_router_aux_mask": mtp_aux_mask,
+    }
+  call_kwargs = {**compact_kw, **kwargs}
   out = model(
       input_tokens,
       positions,
@@ -3388,16 +3546,12 @@ def compute_total_loss(
       return_aux=need_aux,
       return_mtp=run_mtp,
       compute_logits=not (use_tiled_ce or use_fused_ce),
-      **kwargs,
+      **call_kwargs,
   )
   primary_out = out[0] if (run_mtp or need_aux) else out
   aux = out[1] if (run_mtp or need_aux) else None
   mtp_out = aux["mtp_logits"] if (run_mtp and need_aux) else (out[1] if run_mtp else None)
 
-  eff_target_mask = target_mask
-  if segment_ids is not None:
-    seg_valid = (segment_ids != 0).astype(jnp.float32)
-    eff_target_mask = seg_valid if eff_target_mask is None else (eff_target_mask.astype(jnp.float32) * seg_valid)
   if use_tiled_ce:
     primary_loss = _compute_tiled_cross_entropy(
         model, primary_out, target_tokens, mask=eff_target_mask, num_vocab_tiling=num_vocab_tiling
@@ -3415,21 +3569,13 @@ def compute_total_loss(
   else:
     primary_loss = cross_entropy_loss(primary_out, target_tokens, mask=eff_target_mask)
 
-  mtp_aux_mask = None
   mtp_loss = None
   if run_mtp and mtp_out is not None:
     if mtp_out.shape[1] <= 1:
       mtp_loss = jnp.array(0.0, dtype=jnp.float32)
       mtp_aux_mask = jnp.zeros_like(target_tokens, dtype=jnp.float32)
     else:
-      m = (
-          target_mask[:, 1:].astype(jnp.float32)
-          if target_mask is not None
-          else jnp.ones_like(target_tokens[:, 1:], dtype=jnp.float32)
-      )
-      if segment_ids is not None:
-        m = m * ((segment_ids[:, :-1] == segment_ids[:, 1:]) & (segment_ids[:, :-1] != 0)).astype(jnp.float32)
-      mtp_aux_mask = jnp.pad(m, ((0, 0), (0, 1)))
+      assert mtp_m is not None and mtp_aux_mask is not None
       if use_tiled_ce:
         mtp_targets = jnp.pad(target_tokens[:, 1:], ((0, 0), (0, 1)))
         mtp_loss = _compute_tiled_cross_entropy(
@@ -3447,7 +3593,7 @@ def compute_total_loss(
             reduction="mean",
         )
       else:
-        mtp_loss = cross_entropy_loss(mtp_out[:, :-1, :], target_tokens[:, 1:], mask=m)
+        mtp_loss = cross_entropy_loss(mtp_out[:, :-1, :], target_tokens[:, 1:], mask=mtp_m)
 
   router_loss = (
       router_load_balancing_loss(
@@ -3553,6 +3699,9 @@ class Qwen3_8Decoder(nnx.Module):
       *,
       return_aux: bool = False,
       return_pre_mixer: bool = False,
+      compact_router_aux: bool = False,
+      router_aux_mask: jax.Array | None = None,
+      position_embeddings: tuple[jax.Array, jax.Array] | None = None,
   ) -> Any:
     """Forward pass computing full decoder representations."""
     tok = decoder_input_tokens
@@ -3563,6 +3712,12 @@ class Qwen3_8Decoder(nnx.Module):
         init_hyper_connection_streams(tok_emb, hc_count=self.hc_count, sharding=self.sharding),
         [],
     )
+    pos_emb = position_embeddings
+    if pos_emb is None:
+      qsa_layer = getattr(self.first_cycle, "qsa_3", None)
+      qsa_attn = getattr(qsa_layer, "self_attn", None)
+      if qsa_attn is not None and hasattr(qsa_attn, "rotary_emb"):
+        pos_emb = qsa_attn.rotary_emb(h, pos)
     eff_policy = self.remat_policy if self.remat else None
     if self.remat and eff_policy is None:
       eff_policy = cp.nothing_saveable
@@ -3571,10 +3726,13 @@ class Qwen3_8Decoder(nnx.Module):
         h,
         eff_policy=eff_policy,
         return_aux=return_aux,
+        compact_router_aux=compact_router_aux,
         positions=pos,
+        position_embeddings=pos_emb,
         conv_mask=cmask,
         ple_input_ids=pids,
         segment_ids=decoder_segment_ids,
+        router_aux_mask=router_aux_mask,
         sharding=self.sharding,
     )
     h, aux_list = first_out if return_aux else (first_out, [])
@@ -3585,9 +3743,12 @@ class Qwen3_8Decoder(nnx.Module):
           num_cycles=self.num_stacked_cycles,
           scan_layers=self.scan_layers,
           positions=pos,
+          position_embeddings=pos_emb,
           conv_mask=cmask,
           segment_ids=decoder_segment_ids,
+          router_aux_mask=router_aux_mask,
           return_aux=return_aux,
+          compact_router_aux=compact_router_aux,
           remat=self.remat,
           remat_policy=eff_policy,
           sharding=self.sharding,
@@ -3673,6 +3834,9 @@ class Qwen3_8FlashNextModel(nnx.Module):
       next_tokens: jax.Array | None = None,
       compute_logits: bool = True,
       defer_lm_head_to_loss: bool = False,
+      compact_router_aux: bool = False,
+      router_aux_mask: jax.Array | None = None,
+      mtp_router_aux_mask: jax.Array | None = None,
       **kwargs: Any,
   ) -> Any:
     """Forward pass computing language model logits and optional aux outputs."""
@@ -3684,8 +3848,21 @@ class Qwen3_8FlashNextModel(nnx.Module):
     if return_mtp:
       if self.mtp is None:
         raise ValueError("MTP module not initialized.")
+      pos, cmask = _positions_and_conv_mask(decoder_input_tokens, decoder_positions, decoder_segment_ids)
+      pos_emb: tuple[jax.Array, jax.Array] | None = None
+      qsa_layer = getattr(self.decoder.first_cycle, "qsa_3", None)
+      qsa_attn = getattr(qsa_layer, "self_attn", None)
+      if qsa_attn is not None and hasattr(qsa_attn, "rotary_emb"):
+        pos_emb = qsa_attn.rotary_emb(jnp.zeros((), dtype=self.decoder.dtype), pos)
       dec_out = self.decoder(
-          decoder_input_tokens, decoder_positions, decoder_segment_ids, return_aux=return_aux, return_pre_mixer=True
+          decoder_input_tokens,
+          decoder_positions,
+          decoder_segment_ids,
+          return_aux=return_aux,
+          return_pre_mixer=True,
+          compact_router_aux=compact_router_aux,
+          router_aux_mask=router_aux_mask,
+          position_embeddings=pos_emb,
       )
       h_mixed, h_4stream = dec_out[0], dec_out[1]
       aux_list = dec_out[2] if return_aux else []
@@ -3698,14 +3875,16 @@ class Qwen3_8FlashNextModel(nnx.Module):
               decoder_segment_ids == jnp.pad(decoder_segment_ids[:, 1:], ((0, 0), (0, 1)))
           )
           next_tok = jnp.where(same_seg, next_tok, 0)
-      pos, cmask = _positions_and_conv_mask(decoder_input_tokens, decoder_positions, decoder_segment_ids)
       mtp_out = self.mtp(
           h_4stream,
           shard_batch(self.decoder.token_embedder(next_tok), self.sharding, "next_token_embeds"),
           positions=pos,
+          position_embeddings=pos_emb,
           conv_mask=cmask,
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
+          compact_router_aux=compact_router_aux,
+          router_aux_mask=mtp_router_aux_mask if mtp_router_aux_mask is not None else router_aux_mask,
       )
       mtp_h, mtp_aux = mtp_out if return_aux else (mtp_out, None)
       mtp_logits = shard_batch(self.lm_head(mtp_h), self.sharding, "mtp_logits") if compute_logits else mtp_h
@@ -3721,6 +3900,8 @@ class Qwen3_8FlashNextModel(nnx.Module):
         decoder_segment_ids,
         return_aux=return_aux,
         return_pre_mixer=return_hidden_states,
+        compact_router_aux=compact_router_aux,
+        router_aux_mask=router_aux_mask,
     )
     if (
         ((int(getattr(self.config, "num_vocab_tiling", 1)) > 1 and has_target_tokens) or defer_lm_head_to_loss)

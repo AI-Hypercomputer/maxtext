@@ -3012,6 +3012,113 @@ class Qwen3_8MTPLossTest(_SingleDeviceMeshTestCase):
     reprojected = model.lm_head(sown_hidden)
     np.testing.assert_allclose(np.array(reprojected), np.array(logits), rtol=1e-5, atol=1e-5)
 
+  def test_top_k_dense_vjp_matches_lax_top_k(self):
+    logits = jax.random.normal(jax.random.PRNGKey(17), (2, 8, 16), dtype=jnp.float32)
+    probs = jax.nn.softmax(logits, axis=-1)
+    cotangent = jax.random.normal(jax.random.PRNGKey(18), (2, 8, 4), dtype=jnp.float32)
+
+    def _ref(p):
+      vals, _ = jax.lax.top_k(p, 4)
+      return jnp.sum(vals * cotangent)
+
+    def _dense(p):
+      vals, _ = modeling_qwen3_8_flash_next._top_k_dense_vjp(p, 4)  # pylint: disable=protected-access
+      return jnp.sum(vals * cotangent)
+
+    ref_vals, ref_ids = jax.lax.top_k(probs, 4)
+    dense_vals, dense_ids = modeling_qwen3_8_flash_next._top_k_dense_vjp(probs, 4)  # pylint: disable=protected-access
+    np.testing.assert_array_equal(np.asarray(dense_ids), np.asarray(ref_ids))
+    np.testing.assert_allclose(np.asarray(dense_vals), np.asarray(ref_vals), rtol=0.0, atol=0.0)
+
+    grad_ref = jax.grad(_ref)(probs)
+    grad_dense = jax.grad(_dense)(probs)
+    np.testing.assert_allclose(np.asarray(grad_dense), np.asarray(grad_ref), rtol=1e-6, atol=1e-6)
+
+  def test_compact_router_aux_matches_legacy_loss_and_grads(self):
+    def _check_variant(scan_layers: bool, use_mtp: bool) -> None:
+      cfg = _create_mini_config(num_layers=8, scan_layers=scan_layers, dtype="float32", weight_dtype="float32")
+      model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+      inp = jax.random.randint(jax.random.PRNGKey(21), (2, 8), 1, 128, dtype=jnp.int32)
+      tgt = jax.random.randint(jax.random.PRNGKey(22), (2, 8), 1, 128, dtype=jnp.int32)
+      seg_ids = jnp.array([[1, 1, 1, 2, 2, 2, 2, 0], [1, 1, 1, 1, 1, 0, 0, 0]], dtype=jnp.int32)
+      tgt_mask = jnp.array([[1, 1, 0, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 1, 0, 0]], dtype=jnp.float32)
+
+      # Verify compact mode emits only `[E]` summary stats without `[B, S, E]` router_probs.
+      eff_mask = tgt_mask * (seg_ids != 0).astype(jnp.float32)
+      mtp_m = tgt_mask[:, 1:] * ((seg_ids[:, :-1] == seg_ids[:, 1:]) & (seg_ids[:, :-1] != 0)).astype(jnp.float32)
+      mtp_aux_mask = jnp.pad(mtp_m, ((0, 0), (0, 1)))
+      _, compact_aux = model(
+          inp,
+          None,
+          seg_ids,
+          return_aux=True,
+          return_mtp=use_mtp,
+          compact_router_aux=True,
+          router_aux_mask=eff_mask,
+          mtp_router_aux_mask=mtp_aux_mask if use_mtp else None,
+      )
+      compact_layers = compact_aux["layer_aux"] if use_mtp else compact_aux
+      self.assertLen(compact_layers, 8)
+      for layer_stat in compact_layers:
+        self.assertIn("tokens_per_expert_sum", layer_stat)
+        self.assertIn("router_prob_sum", layer_stat)
+        self.assertIn("total_rows", layer_stat)
+        self.assertNotIn("router_probs", layer_stat)
+        self.assertNotIn("router_indices", layer_stat)
+        self.assertEqual(layer_stat["router_prob_sum"].shape, (cfg.num_experts,))
+
+      def _legacy_loss(m):
+        out = m(inp, None, seg_ids, return_aux=True, return_mtp=use_mtp, compact_router_aux=False)
+        logits, aux = out[0], out[1]
+        p_loss = modeling_qwen3_8_flash_next.cross_entropy_loss(logits, tgt, mask=eff_mask)
+        r_loss = modeling_qwen3_8_flash_next.router_load_balancing_loss(
+            aux, cfg.num_experts, mask=tgt_mask, mtp_mask=mtp_aux_mask if use_mtp else None, segment_ids=seg_ids
+        )
+        tot = p_loss + 0.01 * r_loss
+        if use_mtp:
+          tot = tot + 0.1 * modeling_qwen3_8_flash_next.cross_entropy_loss(
+              aux["mtp_logits"][:, :-1, :], tgt[:, 1:], mask=mtp_m
+          )
+        return tot, r_loss
+
+      def _compact_loss(m):
+        return modeling_qwen3_8_flash_next.compute_total_loss(
+            m, inp, tgt, target_mask=tgt_mask, segment_ids=seg_ids, router_aux_coeff=0.01, use_mtp=use_mtp
+        )
+
+      (compact_tot, compact_mets), compact_grads = nnx.value_and_grad(_compact_loss, has_aux=True)(model)
+      (legacy_tot, legacy_rloss), legacy_grads = nnx.value_and_grad(_legacy_loss, has_aux=True)(model)
+
+      np.testing.assert_allclose(float(compact_mets["router_loss"]), float(legacy_rloss), rtol=1e-6, atol=1e-6)
+      np.testing.assert_allclose(float(compact_tot), float(legacy_tot), rtol=1e-6, atol=1e-6)
+      for (path, g_c), (path_l, g_l) in zip(
+          jax.tree_util.tree_leaves_with_path(compact_grads),
+          jax.tree_util.tree_leaves_with_path(legacy_grads),
+          strict=True,
+      ):
+        self.assertEqual(path, path_l)
+        np.testing.assert_allclose(
+            np.asarray(g_c), np.asarray(g_l), rtol=1e-5, atol=1e-5, err_msg=f"Grad mismatch at {path}"
+        )
+
+    for scan_layers in (False, True):
+      for use_mtp in (False, True):
+        _check_variant(scan_layers, use_mtp)
+
+  def test_hoisted_rope_matches_per_layer_rope(self):
+    cfg = _create_mini_config(num_layers=8, scan_layers=True, dtype="float32", weight_dtype="float32")
+    model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+    qsa = model.decoder.first_cycle.qsa_3.self_attn
+    x = jax.random.normal(jax.random.PRNGKey(31), (2, 8, cfg.emb_dim), dtype=jnp.float32)
+    for pos in (
+        jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32)[None, :], (2, 8)),
+        jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32)[None, None, :], (3, 2, 8)),
+    ):
+      cos_sin = qsa.rotary_emb(x, pos)
+      out_inline = qsa(x, position_ids=pos)
+      out_hoisted = qsa(x, position_ids=pos, position_embeddings=cos_sin)
+      np.testing.assert_allclose(np.asarray(out_hoisted), np.asarray(out_inline), rtol=0.0, atol=0.0)
+
 
 if __name__ == "__main__":
   absltest.main()
