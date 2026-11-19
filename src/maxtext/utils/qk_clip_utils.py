@@ -150,9 +150,6 @@ def apply_qk_clip_nnx(state, intermediate_outputs, config):
   _check_attention_type(config)
   tau = float(config.qk_clip_threshold)
 
-  _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
-  params_dict = params_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
-
   def clip_mla_weights(path, param):
     if len(path) < 2:
       return param
@@ -175,6 +172,11 @@ def apply_qk_clip_nnx(state, intermediate_outputs, config):
     scale = _scale_from_max_logits(max_logits_batch, tau)
     return _clip_mla_weight(layer_name, param, scale, config.qk_nope_head_dim)
 
+  if hasattr(getattr(state, "optimizer", None), "apply_master_param_transform"):
+    state.optimizer.apply_master_param_transform(state.model, clip_mla_weights)
+    return state
+  _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
+  params_dict = params_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
   new_params_dict = jax.tree_util.tree_map_with_path(clip_mla_weights, params_dict)
   nnx.replace_by_pure_dict(params_state, new_params_dict)
   nnx.update(state.model, params_state)

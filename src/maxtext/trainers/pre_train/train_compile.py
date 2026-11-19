@@ -141,8 +141,7 @@ def get_shaped_inputs(topology_mesh, config):
         if getattr(getattr(config, "lora", None), "enable_lora", False)
         else nnx.Param
     )
-    optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
-    return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
+    return train_state_nnx.create_train_state(nnx_model, tx, config, wrt=wrt)
 
   init_state_fn = create_train_state_fn
 

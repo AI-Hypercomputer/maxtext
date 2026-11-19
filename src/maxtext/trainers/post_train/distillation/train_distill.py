@@ -245,6 +245,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
     super().__init__(model=model, optimizer=dummy_optimizer, training_config=training_config, **kwargs)
 
     self.strategy = strategy
+    _validate_distill_master_storage(student_config, teacher_config)
     self.checkpoint_manager: distillation_utils.MaxTextCheckpointManager = None  # pyrefly: ignore[bad-assignment]
 
     # Per-step per-device TFLOPs (constants for the run): student fwd+bwd + teacher fwd-only.
@@ -694,6 +695,21 @@ def build_training_components(
   return strategy, optimizer, train_config
 
 
+def _validate_distill_master_storage(
+    student_config: Any,
+    teacher_config: Any = None,
+) -> None:
+  """Rejects unsupported fp32_master_storage settings on distillation configs."""
+  for role_name, role_cfg in (("student_config", student_config), ("teacher_config", teacher_config)):
+    if role_cfg is None:
+      continue
+    if role_cfg.fp32_master_storage != "f32":
+      raise ValueError(
+          f"Distillation ({role_name}) does not support fp32_master_storage={role_cfg.fp32_master_storage!r}; "
+          "set fp32_master_storage='f32'."
+      )
+
+
 def train_distill(
     student_config: pyconfig.HyperParameters,
     teacher_config: pyconfig.HyperParameters,
@@ -715,6 +731,7 @@ def train_distill(
         f"Vocab size mismatch! Student: {student_config.vocab_size}, Teacher: {teacher_config.vocab_size}. "
         "Distillation requires matching vocabularies."
     )
+  _validate_distill_master_storage(student_config, teacher_config)
 
   goodput_recorder = create_goodput_recorder(student_config)
   record_goodput(goodput_recorder, RECORD_JOB_START_TIME)

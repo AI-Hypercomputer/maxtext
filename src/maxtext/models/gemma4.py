@@ -82,9 +82,11 @@ class Gemma4MoE(nnx.Module):
         rngs=self.rngs,
     )
 
+    scale_val = jnp.ones((self.config.emb_dim,), dtype=self.config.weight_dtype)
     self.pre_forward_scale_2 = nnx.Param(
-        jnp.ones((self.config.emb_dim,), dtype=self.config.weight_dtype),
+        scale_val,
         sharding=("norm",),
+        keep_fp32_master=bool(self.config.float32_gate_logits and scale_val.dtype == jnp.float32),
     )
     self.pre_feedforward_layernorm_2 = RMSNorm(
         num_features=self.config.emb_dim,

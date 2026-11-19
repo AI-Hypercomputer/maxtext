@@ -765,6 +765,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           f"{training_config.custom_mesh_and_rule_for_eval.value!r}). Leave custom_mesh_and_rule_for_eval unset, "
           "or set it to the same value as custom_mesh_and_rule."
       )
+    if training_config.fp32_master_storage != "f32":
+      raise NotImplementedError(
+          "MaxTextTrainingEngine does not support fp32_master_storage="
+          f"{training_config.fp32_master_storage!r}; set fp32_master_storage='f32'."
+      )
     self._config = training_config
     self._mesh = mesh
     self._init_rng = jax.random.PRNGKey(training_config.init_weights_seed)

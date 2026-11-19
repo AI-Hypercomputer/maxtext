@@ -153,7 +153,11 @@ def gradient_accumulation_loss_and_grad(
     acc_grad_and_loss["moe_lb_loss"] += aux["moe_lb_loss"]
     acc_grad_and_loss["indexer_loss"] += aux["indexer_loss"]
     acc_grad_and_loss["mtp_loss"] += aux["mtp_loss"]
-    acc_grad_and_loss["grad"] = jax.tree_util.tree_map(lambda x, y: x + y, cur_batch_gradient, acc_grad_and_loss["grad"])
+    acc_grad_and_loss["grad"] = jax.tree_util.tree_map(
+        lambda x, y: (x.astype(y.dtype) if x.dtype != y.dtype else x) + y,
+        cur_batch_gradient,
+        acc_grad_and_loss["grad"],
+    )
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
     return acc_grad_and_loss, aux
 
@@ -165,7 +169,13 @@ def gradient_accumulation_loss_and_grad(
     return jnp.swapaxes(reshaped_batch_arr, 0, 1)
 
   data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
-  init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
+  if config.fp32_master_storage == "residual16" and config.grad_dtype == jnp.float32:
+    init_grad = jax.tree_util.tree_map(
+        lambda x: jnp.zeros_like(x, dtype=jnp.float32) if x.dtype == jnp.bfloat16 else jnp.zeros_like(x),
+        ga_params,
+    )
+  else:
+    init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
   init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, grad_shardings)
   init_grad_and_loss = {
       "loss": 0.0,  # accumulates xent_sum across microbatches
