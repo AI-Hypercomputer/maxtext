@@ -1,0 +1,21 @@
+{
+  "reference": {
+    "description": "<pinned upstream reference: repository, revision, package versions>",
+    "pinned_modules": {"<module name>": "<sha256>"},
+    "pinned_oracle_files": {"<path relative to the provenance test>": "<sha256>"},
+    "deviations": ["<each CPU replacement or numerics-changing override, and how it was checked>"]
+  },
+  "mini_twin": {
+    "manifest": "<path of mini_manifest.json written by slice_hf_mini.py>",
+    "command": "<exact slice_hf_mini.py command>"
+  },
+  "goldens": [
+    {
+      "local_path": "<path relative to the provenance test>",
+      "sha256": "<sha256 from capture_golden.py>",
+      "storage_uri": "<golden storage root>/<model>/<file>",
+      "command": "<exact capture_golden.py command>",
+      "seed": 0
+    }
+  ]
+}

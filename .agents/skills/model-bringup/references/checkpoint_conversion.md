@@ -70,8 +70,33 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface   src/maxtext/configs/ba
 
 ---
 
-## 4. Handover Document Update
+## 4. Automated Checkpoint Round-Trip, Completeness & Expert-Slice Verification
+
+Verify every converted checkpoint before running downstream prefill or training jobs:
+
+1. **Bidirectional Mini-Checkpoint Round-Trip (`scripts/ckpt_roundtrip_check.py`)**:
+   - Use `check_hf_roundtrip(..., tol=RoundTripTol.exact())` and `negative_roundtrip_status(...)` across both `scan_layers=False` and `scan_layers=True` mini-checkpoints to verify 100% key bijectivity, shapes, preserved `float32`/`int32` dtypes, numerical values, and single-leaf perturbation detection (`status == "FIRED"`).
+2. **OCDbt Manifest, Storage Size & Layer Coverage (`scripts/verify_checkpoint.py`)**:
+   ```bash
+   python3 .agents/skills/model-bringup/scripts/verify_checkpoint.py \
+     --checkpoint-path /dev/shm/$USER/checkpoints/{model_name}_orbax/0/items \
+     --model-params-b {params_in_billions} \
+     --expected-layers {num_layers}
+   ```
+3. **Per-Layer / Per-Expert Numerical Slice Audit (`scripts/audit_ckpt_vs_hf.py`)**:
+   - For MoE models, audit `[0:256, 0:256]` slices of every expert across unscanned or scanned OCDbt checkpoints directly against HuggingFace safetensors shards:
+   ```bash
+   python3 .agents/skills/model-bringup/scripts/audit_ckpt_vs_hf.py \
+     --ckpt-uri file:///dev/shm/$USER/checkpoints/{model_name}_orbax/0/items \
+     --hf-dir /dev/shm/hf_cache/{model_name} \
+     --kind scanned \
+     --scan-group-size 1
+   ```
+
+---
+
+## 5. Handover Document Update
 Update `{model_name}_handover.md` in the MaxText root directory:
-- Record the exact conversion CLI commands (mini and full).
+- Record the exact conversion CLI commands (mini and full) plus `ckpt_roundtrip_check.py` / `verify_checkpoint.py` / `audit_ckpt_vs_hf.py` verdicts.
 - Document any weight transposition, tensor reshaping, or key mapping bugs discovered.
 - Set Phase 3 status to `DONE` and Phase 4 to `IN PROGRESS`.
