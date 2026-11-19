@@ -5570,13 +5570,9 @@ class RoutedMoE(nnx.Module):
           "Please upgrade to the latest version of TransformerEngine."
       ) from exc
 
-    if self.quant is not None and hasattr(self.quant, "get_moe_block_quantizer_sets"):
-      get_moe_block_quantizer_sets = self.quant.get_moe_block_quantizer_sets
-    elif self.config.te_gmm_quantization:
-      # No TE `quantization` (e.g. dense layers stay on XLA): the TE MoE block only needs te_gmm_quantization.
-      get_moe_block_quantizer_sets = quantizations.TransformerEngineQuantization.get_moe_block_quantizer_sets
-    else:
+    if not self.config.te_gmm_quantization:
       raise ValueError("te_moe_block=True requires te_gmm_quantization (te_no_quant or te_mxfp8).")
+    get_moe_block_quantizer_sets = quantizations.TransformerEngineQuantization.get_moe_block_quantizer_sets
     if self.is_hash_routing and (routing_indices is None or routing_weights is None):
       raise ValueError("TE MoE hash routing requires precomputed routing indices and weights.")
 
