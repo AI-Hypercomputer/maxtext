@@ -18,6 +18,7 @@ from __future__ import annotations
 import functools
 import jax
 from jax import lax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from maxtext.common.common_types import Array, DType, KV_BATCH, KV_HEAD, LENGTH, ShardMode
@@ -29,7 +30,7 @@ from maxtext.utils.sharding import (
 import numpy as np
 
 
-def block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax.Array:
+def _block_doubling_unit_lower_inverse_impl(s_mat: jax.Array, chunk_size: int) -> jax.Array:
   """Computes the exact inverse of (I + s_mat) for strictly lower-triangular s_mat with MXU-friendly matmuls.
 
   Bottom-up block doubling: starting from 1x1 blocks (inverse = I), each level merges adjacent b x b diagonal
@@ -55,6 +56,42 @@ def block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax.
     inv = inv - jnp.where(cross, off, 0.0)
     b *= 2
   return inv
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _block_doubling_unit_lower_inverse_f32(s_mat: jax.Array, chunk_size: int) -> jax.Array:
+  """float32-only core of the block-doubling inverse with an analytical 2-matmul VJP."""
+  return _block_doubling_unit_lower_inverse_impl(s_mat, chunk_size)
+
+
+def _block_doubling_unit_lower_inverse_fwd(s_mat: jax.Array, chunk_size: int) -> tuple[jax.Array, jax.Array]:
+  inv = checkpoint_name(_block_doubling_unit_lower_inverse_impl(s_mat, chunk_size), "gdn_t_inv")
+  return inv, inv
+
+
+def _block_doubling_unit_lower_inverse_bwd(chunk_size: int, inv: jax.Array, d_inv: jax.Array) -> tuple[jax.Array]:
+  # d(L^-1) = -L^-1 dL L^-1 => dL = -(L^-T d_inv L^-T), masked to the strictly lower triangle.
+  prec = jax.lax.Precision.HIGHEST
+  inv_t = jnp.swapaxes(inv, -1, -2)
+  d_s = -jnp.matmul(jnp.matmul(inv_t, d_inv, precision=prec), inv_t, precision=prec)
+  mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=bool), k=-1)
+  return (jnp.where(mask, d_s, 0.0),)
+
+
+_block_doubling_unit_lower_inverse_f32.defvjp(
+    _block_doubling_unit_lower_inverse_fwd,
+    _block_doubling_unit_lower_inverse_bwd,
+)
+
+
+def block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax.Array:
+  """Computes (I + s_mat)^-1 for strictly lower-triangular s_mat with an analytical 2-matmul VJP.
+
+  The inverse is always computed in float32. Casting here (outside the custom_vjp) lets JAX's own
+  convert_element_type VJP return the cotangent in the caller's dtype, so bfloat16 inputs differentiate
+  correctly without threading a dtype residual through the custom rule.
+  """
+  return _block_doubling_unit_lower_inverse_f32(s_mat.astype(jnp.float32), chunk_size)
 
 
 def encode_segment_ids(
