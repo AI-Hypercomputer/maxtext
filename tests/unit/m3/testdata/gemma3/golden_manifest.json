@@ -1,0 +1,4296 @@
+{
+  "cases": {
+    "mini1b": {
+      "config": {
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "attn_logit_softcapping": null,
+        "final_logit_softcapping": null,
+        "head_dim": 8,
+        "hidden_activation": "gelu_pytorch_tanh",
+        "hidden_size": 32,
+        "intermediate_size": 96,
+        "max_position_embeddings": 512,
+        "num_attention_heads": 4,
+        "num_hidden_layers": 14,
+        "num_key_value_heads": 1,
+        "pad_token_id": 0,
+        "query_pre_attn_scalar": 8,
+        "rms_norm_eps": 1e-06,
+        "rope_local_base_freq": 10000.0,
+        "rope_scaling": null,
+        "rope_theta": 1000000.0,
+        "sliding_window": 4,
+        "sliding_window_pattern": 6,
+        "tie_word_embeddings": true,
+        "vocab_size": 64
+      },
+      "description": "14-layer (2x6 cycles + 2 remainder) MQA Gemma 3 1B mini-twin with sliding_window=4, non-zero RMSNorm weights, tied embeddings, and right-padding + SWA locality probes.",
+      "seed": 111901
+    },
+    "minigqa": {
+      "config": {
+        "attention_bias": false,
+        "attention_dropout": 0.0,
+        "attn_logit_softcapping": null,
+        "final_logit_softcapping": 30.0,
+        "head_dim": 8,
+        "hidden_activation": "gelu_pytorch_tanh",
+        "hidden_size": 32,
+        "intermediate_size": 80,
+        "max_position_embeddings": 512,
+        "num_attention_heads": 4,
+        "num_hidden_layers": 8,
+        "num_key_value_heads": 2,
+        "pad_token_id": 0,
+        "query_pre_attn_scalar": 12,
+        "rms_norm_eps": 1e-06,
+        "rope_local_base_freq": 10000.0,
+        "rope_scaling": {
+          "factor": 8.0,
+          "rope_type": "linear"
+        },
+        "rope_theta": 1000000.0,
+        "sliding_window": 4,
+        "sliding_window_pattern": 6,
+        "tie_word_embeddings": false,
+        "vocab_size": 64
+      },
+      "description": "8-layer (1x6 cycle + 2 remainder) GQA Gemma 3 4B/12B/27B mini-twin with linear RoPE scaling (factor=8.0), query_pre_attn_scalar=12 != head_dim=8, final logit softcapping, and untied lm_head.",
+      "seed": 111902
+    }
+  },
+  "command": "python generate_gemma3_goldens.py --out-dir tests/unit/m3/testdata/gemma3",
+  "golden_archive": {
+    "command": "python generate_gemma3_goldens.py --out-dir tests/unit/m3/testdata/gemma3",
+    "filename": "gemma3_hf_golden.npz",
+    "num_arrays": 633,
+    "sha256": "25982e5d3416736f6e6ba51c656a6fbb73c4fe35495ee035c40b1a11bd04cda7",
+    "size_bytes": 2422710
+  },
+  "goldens": [
+    {
+      "command": "python generate_gemma3_goldens.py --out-dir tests/unit/m3/testdata/gemma3",
+      "local_path": "testdata/gemma3/gemma3_hf_golden.npz",
+      "seed": 111901,
+      "sha256": "25982e5d3416736f6e6ba51c656a6fbb73c4fe35495ee035c40b1a11bd04cda7"
+    }
+  ],
+  "model_family": "gemma3",
+  "reference": {
+    "attn_implementation": "eager",
+    "configuration_gemma3_sha256": "0e4da9c802622202a8aaa63fc4909c192a2bdde0078f4250ffd53b4a779219d9",
+    "description": "Unmodified Hugging Face transformers==4.57.3 (torch==2.14.0+cpu) transformers.models.gemma3 Gemma3TextConfig + Gemma3ForCausalLM in eager float32.",
+    "deviations": [],
+    "modeling_gemma3_sha256": "4daae3bdf1a6b345df76014a78ce1ca5e66d8e3db00abf565e1bde4198b43855",
+    "package": "transformers.models.gemma3",
+    "pinned_modules": {
+      "transformers.models.gemma3.configuration_gemma3": "0e4da9c802622202a8aaa63fc4909c192a2bdde0078f4250ffd53b4a779219d9",
+      "transformers.models.gemma3.modeling_gemma3": "4daae3bdf1a6b345df76014a78ce1ca5e66d8e3db00abf565e1bde4198b43855"
+    },
+    "pinned_oracle_files": {},
+    "precision": "float32",
+    "torch_version": "2.14.0+cpu",
+    "transformers_version": "4.57.3"
+  },
+  "schema_version": 1,
+  "tensors": {
+    "mini1b__act__embed_tokens": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__final_norm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer0_input_layernorm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer0_k_norm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        1,
+        12,
+        8
+      ]
+    },
+    "mini1b__act__layer0_mlp": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer0_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer0_post_attention_layernorm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer0_post_feedforward_layernorm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer0_pre_feedforward_layernorm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer0_q_norm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        4,
+        12,
+        8
+      ]
+    },
+    "mini1b__act__layer0_self_attn": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer13_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer5_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__act__layer5_self_attn": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__grad__model.embed_tokens.weight": {
+      "dtype": "float32",
+      "shape": [
+        64,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.0.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.0.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.0.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.0.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.1.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.1.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.1.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.1.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.10.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.10.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.10.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.10.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.11.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.11.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.11.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.11.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.12.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.12.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.12.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.12.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.13.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.13.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.13.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.13.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.2.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.2.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.2.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.2.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.3.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.3.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.3.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.3.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.4.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.4.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.4.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.4.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.5.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.5.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.5.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.5.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.6.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.6.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.6.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.6.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.7.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.7.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.7.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.7.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.8.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.8.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.8.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.8.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__grad__model.layers.9.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.9.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__grad__model.layers.9.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__grad__model.layers.9.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__grad__model.norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__input_ids": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "mini1b__logits": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        64
+      ]
+    },
+    "mini1b__loss": {
+      "dtype": "float32",
+      "shape": []
+    },
+    "mini1b__pad_attention_mask": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "mini1b__pad_input_ids": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "mini1b__pad_logits": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        64
+      ]
+    },
+    "mini1b__param__lm_head.weight": {
+      "dtype": "float32",
+      "shape": [
+        64,
+        32
+      ]
+    },
+    "mini1b__param__model.embed_tokens.weight": {
+      "dtype": "float32",
+      "shape": [
+        64,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.0.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.0.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.0.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.0.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.1.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.1.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.1.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.1.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.10.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.10.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.10.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.10.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.11.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.11.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.11.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.11.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.12.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.12.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.12.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.12.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.13.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.13.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.13.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.13.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.2.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.2.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.2.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.2.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.3.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.3.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.3.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.3.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.4.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.4.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.4.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.4.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.5.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.5.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.5.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.5.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.6.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.6.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.6.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.6.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.7.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.7.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.7.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.7.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.8.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.8.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.8.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.8.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        96
+      ]
+    },
+    "mini1b__param__model.layers.9.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        96,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.9.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "mini1b__param__model.layers.9.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "mini1b__param__model.layers.9.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        8,
+        32
+      ]
+    },
+    "mini1b__param__model.norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "mini1b__pert_tok0_input_ids": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "mini1b__pert_tok0_layer0_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__pert_tok0_layer5_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "mini1b__position_ids": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "mini1b__targets": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "minigqa__act__embed_tokens": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__final_norm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer0_input_layernorm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer0_k_norm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        2,
+        12,
+        8
+      ]
+    },
+    "minigqa__act__layer0_mlp": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer0_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer0_post_attention_layernorm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer0_post_feedforward_layernorm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer0_pre_feedforward_layernorm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer0_q_norm": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        4,
+        12,
+        8
+      ]
+    },
+    "minigqa__act__layer0_self_attn": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer5_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer5_self_attn": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__act__layer7_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__grad__lm_head.weight": {
+      "dtype": "float32",
+      "shape": [
+        64,
+        32
+      ]
+    },
+    "minigqa__grad__model.embed_tokens.weight": {
+      "dtype": "float32",
+      "shape": [
+        64,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__grad__model.layers.0.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.0.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.0.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.0.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__grad__model.layers.1.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.1.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.1.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.1.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__grad__model.layers.2.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.2.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.2.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.2.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__grad__model.layers.3.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.3.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.3.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.3.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__grad__model.layers.4.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.4.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.4.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.4.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__grad__model.layers.5.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.5.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.5.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.5.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__grad__model.layers.6.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.6.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.6.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.6.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__grad__model.layers.7.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.7.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__grad__model.layers.7.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__grad__model.layers.7.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__grad__model.norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__input_ids": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "minigqa__logits": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        64
+      ]
+    },
+    "minigqa__loss": {
+      "dtype": "float32",
+      "shape": []
+    },
+    "minigqa__pad_attention_mask": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "minigqa__pad_input_ids": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "minigqa__pad_logits": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        64
+      ]
+    },
+    "minigqa__param__lm_head.weight": {
+      "dtype": "float32",
+      "shape": [
+        64,
+        32
+      ]
+    },
+    "minigqa__param__model.embed_tokens.weight": {
+      "dtype": "float32",
+      "shape": [
+        64,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__param__model.layers.0.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.0.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.0.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.0.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__param__model.layers.1.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.1.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.1.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.1.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__param__model.layers.2.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.2.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.2.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.2.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__param__model.layers.3.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.3.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.3.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.3.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__param__model.layers.4.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.4.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.4.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.4.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__param__model.layers.5.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.5.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.5.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.5.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__param__model.layers.6.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.6.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.6.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.6.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.input_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.mlp.down_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        80
+      ]
+    },
+    "minigqa__param__model.layers.7.mlp.gate_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.mlp.up_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        80,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.post_attention_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.post_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.pre_feedforward_layernorm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.self_attn.k_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.7.self_attn.k_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.self_attn.o_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.self_attn.q_norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        8
+      ]
+    },
+    "minigqa__param__model.layers.7.self_attn.q_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        32,
+        32
+      ]
+    },
+    "minigqa__param__model.layers.7.self_attn.v_proj.weight": {
+      "dtype": "float32",
+      "shape": [
+        16,
+        32
+      ]
+    },
+    "minigqa__param__model.norm.weight": {
+      "dtype": "float32",
+      "shape": [
+        32
+      ]
+    },
+    "minigqa__pert_tok0_input_ids": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "minigqa__pert_tok0_layer0_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__pert_tok0_layer5_out": {
+      "dtype": "float32",
+      "shape": [
+        2,
+        12,
+        32
+      ]
+    },
+    "minigqa__position_ids": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    },
+    "minigqa__targets": {
+      "dtype": "int32",
+      "shape": [
+        2,
+        12
+      ]
+    }
+  }
+}
