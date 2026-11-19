@@ -274,7 +274,14 @@ def get_precond_fn(
 ) -> Callable[[jax.Array], jax.Array]:
   """Returns a preconditioning function."""
   if preconditioning == "frobenius":
-    return lambda x: x / (jnp.linalg.norm(x, axis=(-2, -1), keepdims=True) + eps)
+    # Multiply by rsqrt(sum(x^2) + eps^2) in float32+ so XLA fuses the rsqrt
+    # instead of materializing a full-tensor divide and eps^2 cannot underflow.
+    def _precond_frobenius(x: jax.Array) -> jax.Array:
+      acc_dtype = jnp.promote_types(x.dtype, jnp.float32)
+      sq_sum = jnp.sum(jnp.square(x), axis=(-2, -1), keepdims=True, dtype=acc_dtype)
+      return (x.astype(acc_dtype) * jax.lax.rsqrt(sq_sum + jnp.asarray(eps**2, dtype=acc_dtype))).astype(x.dtype)
+
+    return _precond_frobenius
   elif preconditioning == "spectral":
     return lambda x: x / (jnp.linalg.norm(x, ord=2, axis=(-2, -1), keepdims=True) + eps)
   else:
@@ -433,6 +440,8 @@ def orthogonalize(
     y = precond_fn(y)
     if flat_sharding is not None:
       y = reshape_utils.reshard_or_constrain(y, flat_sharding)
+    # Unroll the fixed NS step count (typically 5) so XLA eliminates while-loop
+    # carry copies and fuses across iterations.
     if ns_coeffs_.ndim == 1:
 
       def ns_iterator(i, z):
@@ -446,7 +455,7 @@ def orthogonalize(
           upper=ns_steps,
           body_fun=ns_iterator,
           init_val=y,
-          unroll=False,
+          unroll=not isinstance(ns_steps, jax.core.Tracer),
       )
     else:
 
@@ -458,7 +467,7 @@ def orthogonalize(
         return (i + 1, z_new), None
 
       init_carry = (jnp.asarray(0, dtype=jnp.int32), y)
-      (_, y), _ = jax.lax.scan(_scan_body, init_carry, ns_coeffs_)
+      (_, y), _ = jax.lax.scan(_scan_body, init_carry, ns_coeffs_, unroll=True)
     return y
 
   x_flat = reshape_fn(x)
