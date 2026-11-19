@@ -2068,6 +2068,30 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
+  moe_gmm_v2_small_tail_dot: bool = Field(
+      False,
+      description=(
+          "Run a short gmm_v2 tile (MoE forward and dlhs) whose rows fit its"
+          " first 128/256 positions as a smaller matmul. Same result; requires"
+          " use_gmm_v2=true."
+      ),
+  )
+  moe_tgmm_v2_deep_buffering: bool = Field(
+      False,
+      description=(
+          "Triple-buffer the lhs, rhs and out blocks of the tgmm_v2 kernel (MoE"
+          " drhs) when VMEM allows. Same result; requires use_gmm_v2=true."
+      ),
+  )
+  moe_tgmm_v2_multi_window: bool = Field(
+      False,
+      description=(
+          "Let a tgmm_v2 grid step (MoE drhs) cover up to three tile_m "
+          "windows of one long group when the deeper blocks fit VMEM, so long "
+          "groups take fewer grid steps. Same result; requires "
+          "moe_tgmm_v2_deep_buffering=true."
+      ),
+  )
 
 
 class DeepSeekMoE(BaseModel):
