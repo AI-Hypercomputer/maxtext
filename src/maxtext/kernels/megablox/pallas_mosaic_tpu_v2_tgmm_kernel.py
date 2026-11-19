@@ -532,8 +532,34 @@ class TgmmIndexMaps:
     return (group_id, k_id, n_id)
 
 
+# Pipeline depth of the 2D lhs, rhs and out blocks when it fits VMEM.
+TGMM_DEEP_BUFFER_COUNT = 3
+
+
+def deep_buffering_fits(cfgs: gmm_v2.GmmConfigs, vmem_limit_bytes: int, target_zero_ref_bytes: int) -> bool:
+  """Whether 2D tgmm tiles fit VMEM with lhs, rhs and out deep-buffered.
+
+  Mirrors calculate_tgmm_tiling's budget (lhs keeps its extra transpose-cache
+  buffer) at TGMM_DEEP_BUFFER_COUNT buffers instead of 2.
+  """
+  if cfgs.lhs_cfgs.is_3d or cfgs.rhs_cfgs.is_3d:
+    return False
+  tiles = cfgs.tiles
+  n = TGMM_DEEP_BUFFER_COUNT
+  out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
+  ps_bytes = tiles.tile_k * tiles.tile_n * 2 * out_bytes if cfgs.has_partial_sum else 0
+  budget = (
+      tiles.tile_k * tiles.tile_n * (jnp.dtype(cfgs.acc_dtype).itemsize + n * out_bytes)
+      + ps_bytes
+      + (n + 1) * tiles.tile_m * tiles.tile_k * jnp.dtype(cfgs.lhs_cfgs.dtype).itemsize
+      + n * tiles.tile_m * tiles.tile_n * jnp.dtype(cfgs.rhs_cfgs.dtype).itemsize
+      + target_zero_ref_bytes
+  )
+  return budget <= vmem_limit_bytes
+
+
 def generate_tgmm_block_specs(
-    metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs
+    metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs, deep_buffering: bool = False
 ) -> Tuple[Tuple[pl.BlockSpec, OperandRef, pl.BlockSpec | None], pl.BlockSpec]:
   """Generates block specs for the given lhs, rhs, and out refs."""
   index_map = TgmmIndexMaps(metadata_ref, cfgs)
@@ -544,18 +570,24 @@ def generate_tgmm_block_specs(
   bounded_slice_gm = pl.BoundedSlice(cfgs.tiles.tile_m // cfgs.dims.size_lhs_sublane)
   num_lanes = pltpu.get_tpu_info().num_lanes
   sublane = cfgs.dims.size_lhs_sublane
+  # deep_buffering (2D lhs/rhs only): triple-buffer lhs, rhs and out so inputs
+  # are fetched two grid steps ahead and a finished group's writeback is
+  # awaited two steps later; the DMA burst at a group change (next group's
+  # inputs plus the [tile_k, tile_n] writeback) then overlaps the following
+  # visits instead of stalling the MXU. Otherwise the default 2 buffers.
+  pipeline_mode = pl.Buffered(TGMM_DEEP_BUFFER_COUNT) if deep_buffering else None
   if cfgs.lhs_cfgs.is_3d:
     lhs_tile = cfgs.dims.size_k if _window(cfgs.tiles.tile_k, cfgs.dims.size_k) else cfgs.tiles.tile_k
     lhs_block_shape = (bounded_slice_gm, sublane, lhs_tile // num_lanes, num_lanes)
   else:
     lhs_block_shape = (bounded_slice_gm, sublane, cfgs.tiles.tile_k)
-  lhs_block_spec = pl.BlockSpec(lhs_block_shape, index_map.lhs_index_map)
+  lhs_block_spec = pl.BlockSpec(lhs_block_shape, index_map.lhs_index_map, pipeline_mode=pipeline_mode)
   if cfgs.rhs_cfgs.is_3d:
     rhs_tile = cfgs.dims.size_n if _window(cfgs.tiles.tile_n, cfgs.dims.size_n) else cfgs.tiles.tile_n
     rhs_block_shape = (bounded_slice_gm, sublane, rhs_tile // num_lanes, num_lanes)
   else:
     rhs_block_shape = (bounded_slice_gm, sublane, cfgs.tiles.tile_n)
-  rhs_block_spec = pl.BlockSpec(rhs_block_shape, index_map.rhs_index_map)
+  rhs_block_spec = pl.BlockSpec(rhs_block_shape, index_map.rhs_index_map, pipeline_mode=pipeline_mode)
   rhs_scale_block_spec = None
   if cfgs.rhs_cfgs.has_scale:
     rhs_scale_block_spec = pl.BlockSpec(
@@ -566,6 +598,7 @@ def generate_tgmm_block_specs(
   out_block_spec = pl.BlockSpec(
       (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
       index_map.out_index_map,
+      pipeline_mode=pipeline_mode,
   )
   ps_block_spec = None
   if cfgs.has_partial_sum:
@@ -651,6 +684,7 @@ def tgmm_kernel_main(
     semaphore_ref: jax.Array,  # [1]
     *,
     cfgs,
+    deep_buffering: bool = False,
 ):
   """Main kernel function for TGMM computation.
 
@@ -686,7 +720,7 @@ def tgmm_kernel_main(
       cfgs=cfgs,
   )
 
-  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
+  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs, deep_buffering)
   pipeline_fn = pltpu.emit_pipeline(
       functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm),
       grid=(num_n, num_k, num_gm),
@@ -749,6 +783,7 @@ def validate_tgmm_inputs(
         "precision",
         "preferred_element_type",
         "acc_dtype",
+        "deep_buffering",
     ],
 )
 def tgmm_v2(
@@ -765,6 +800,7 @@ def tgmm_v2(
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
+    deep_buffering: bool = False,
 ):
   """Computes a transposed grouped matrix multiplication.
 
@@ -785,6 +821,9 @@ def tgmm_v2(
     precision: Unused. Exists for compatibility reasons.
     preferred_element_type: Optional jnp.dtype for the output matrix.
     acc_dtype: Optional jnp.dtype for the accumulator.
+    deep_buffering: Whether to triple-buffer the lhs, rhs and out blocks of a
+      2D lhs/rhs when that fits vmem_limit_bytes (see deep_buffering_fits).
+      Same result.
 
   Returns:
     The result of the transposed grouped matrix multiplication, with shape
@@ -881,7 +920,11 @@ def tgmm_v2(
     input_output_aliases = {partial_sum_idx: 0}
 
   raw_out = pl.pallas_call(
-      functools.partial(tgmm_kernel_main, cfgs=cfgs),
+      functools.partial(
+          tgmm_kernel_main,
+          cfgs=cfgs,
+          deep_buffering=deep_buffering and deep_buffering_fits(cfgs, vmem_limit_bytes, target_zero_ref_bytes),
+      ),
       out_shape=out_init,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
