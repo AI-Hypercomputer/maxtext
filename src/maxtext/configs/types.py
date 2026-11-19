@@ -1998,6 +1998,14 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
+  moe_tgmm_v2_num_buffers: int = Field(
+      2,
+      ge=2,
+      description=(
+          "Pipeline depth of the lhs, rhs and out blocks of the tgmm_v2 kernel (MoE drhs), when use_gmm_v2=true. "
+          "Values above 2 apply to 2D operands that fit VMEM at that depth; the result does not change."
+      ),
+  )
 
 
 class DeepSeekMoE(BaseModel):

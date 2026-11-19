@@ -467,6 +467,9 @@ use_gmm_v2: false
 # Whether to use the heuristic tiling function from Tokamax GMM v2, when use_gmm_v2=true.
 # When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
 use_gmm_v2_heuristic_tiling: false
+# Pipeline depth of the tgmm_v2 (MoE drhs) lhs, rhs and out blocks, when use_gmm_v2=true. Same result.
+# 3 hides the DMA burst at each expert change when experts get few tile_m windows of rows.
+moe_tgmm_v2_num_buffers: 2
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 

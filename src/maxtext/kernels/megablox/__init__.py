@@ -14,3 +14,4 @@
 """Megablox kernel"""
 
 from maxtext.kernels.megablox.ops import TcUnsortCfg, gmm
+from maxtext.kernels.megablox.pallas_mosaic_tpu_v2_tgmm_kernel import TgmmV2Options
