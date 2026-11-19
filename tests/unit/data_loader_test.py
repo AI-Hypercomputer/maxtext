@@ -21,10 +21,13 @@ import pytest
 
 import jax
 
+from types import SimpleNamespace
+from unittest import mock
 from unittest.mock import MagicMock
 from jax.sharding import Mesh
 
 from maxtext.configs import pyconfig
+from maxtext.common import data_loader as data_loader_lib
 from maxtext.common.data_loader import DataLoader, RampUpDataLoader
 from maxtext.utils import exceptions
 from maxtext.utils.maxtext_utils import create_device_mesh
@@ -129,6 +132,24 @@ class DataLoaderTest(unittest.TestCase):
     with self.assertRaises(exceptions.StopTraining) as e:
       _ = data_loader.load_next_batch()
     self.assertTrue(str(e.exception).startswith("You may have run out of training data."))
+
+  def test_loader_error_in_elastic_run_is_not_a_graceful_stop(self):
+    """A broken data pipeline must fail an elastic run instead of ending it with exit code 0."""
+    config = SimpleNamespace(elastic_enabled=True)
+    with mock.patch.object(data_loader_lib.elastic_utils, "_backend_supports_elastic", return_value=True):
+      with self.assertRaisesRegex(RuntimeError, "Worker process was terminated"):
+        with data_loader_lib.loader_exception_guard(config):
+          raise RuntimeError("Worker process was terminated unexpectedly with exit code -7.")
+      # Running out of data still ends the run gracefully.
+      with self.assertRaises(exceptions.StopTraining):
+        with data_loader_lib.loader_exception_guard(config):
+          raise StopIteration()
+
+  def test_loader_error_without_elastic_still_stops_training(self):
+    config = SimpleNamespace(elastic_enabled=False)
+    with self.assertRaises(exceptions.StopTraining):
+      with data_loader_lib.loader_exception_guard(config):
+        raise RuntimeError("Worker process was terminated unexpectedly with exit code -7.")
 
   @pytest.mark.external_serving
   def test_rampup_data_loader(self):
