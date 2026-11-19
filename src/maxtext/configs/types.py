@@ -1656,12 +1656,32 @@ class MoEGeneral(BaseModel):
           " that jnp.take_along_axis transposes to. Forward and gradient values are unchanged."
       ),
   )
+  moe_fallback_topk_capacity: int = Field(
+      0,
+      description=(
+          "Router replay (forced_routed_experts): 0 (default) keeps standard slot-level forced routing where ids"
+          " outside [0, num_experts) are unused slots. With a value > 0, tokens whose forced slots are not all valid"
+          " and distinct (excluding tokens masked out by token_mask) fall back to the router's own top-k selection,"
+          " computed on at most this many compacted rows via fallback_topk_indices_compacted (or on all rows via"
+          " jax.lax.cond when more tokens need fallback)."
+      ),
+  )
+  moe_roe_packed_routing_gather: bool = Field(
+      False,
+      description=(
+          "Ring of experts with moe_topk_before_ep_all_gather=True: route all local tokens of the layer once and"
+          " all-gather the top-k routing weights and expert ids over the expert-parallel axis as a single float32"
+          " [batch, seq, 2 * top_k] array (tagged moe_routing_maps when moe_routing_maps != 'remat') instead of two"
+          " all-gathers per token chunk. Requires sparse_matmul=True, te_moe_block=False, use_ring_of_experts=True,"
+          " moe_topk_before_ep_all_gather=True, use_random_routing=False and num_moe_emb_chunks <= 0."
+      ),
+  )
   moe_topk_before_ep_all_gather: bool = Field(
       False,
       description=(
           "Ring of experts: run top-k on the local tokens and all-gather the top-k weights and expert ids"
           " instead of the full router logits. The token sort still runs after the all-gather."
-          " Ignored with forced, hash or random routing."
+          " Ignored with hash or random routing."
       ),
   )
   use_ring_of_experts: bool = Field(
@@ -2199,6 +2219,21 @@ class MoEGeneral(BaseModel):
       description="Whether to fuse the expert scaling factors into the expert weights. "
       "This can improve inference performance.",
   )
+
+  @model_validator(mode="after")
+  def validate_moe_fallback_topk_capacity(self) -> "MoEGeneral":
+    """moe_fallback_topk_capacity is a row count: 0 (off) or positive."""
+    if self.moe_fallback_topk_capacity < 0:
+      raise ValueError(f"moe_fallback_topk_capacity must be >= 0, got {self.moe_fallback_topk_capacity}.")
+    if self.moe_fallback_topk_capacity > 0:
+      MoEGeneral._reject_unless(
+          f"moe_fallback_topk_capacity={self.moe_fallback_topk_capacity}",
+          [
+              (not self.te_moe_block, "te_moe_block=False"),
+              (not self.use_random_routing, "use_random_routing=False"),
+          ],
+      )
+    return self
 
   @model_validator(mode="after")
   def validate_moe_sharding_strategy(self) -> "MoEGeneral":
@@ -6625,7 +6660,7 @@ class MaxTextConfig(
     if not a2a_knobs:
       return
     for knob, method in a2a_knobs.items():
-      self._validate_a2a_quant_method(knob, method)
+      MaxTextConfig._validate_a2a_quant_method(knob, method)
     # The wire is dequantized right after the collective, so any gmm backend consumes it; te_moe_block has its own EP
     # path that never reaches these collectives.
     requirements = {
@@ -6650,6 +6685,21 @@ class MaxTextConfig(
             if k in ("moe_quantize_combine_bwd_method", "moe_quantize_dispatch_bwd_method")
         }
     )
+
+  def validate_moe_roe_packed_routing_gather(self: "MaxTextConfig | RLConfig"):
+    """Packed routing gather replaces the per-chunk local-routing all-gathers in Ring of Experts."""
+    if self.moe_roe_packed_routing_gather:
+      MoEGeneral._reject_unless(  # pylint: disable=protected-access
+          "moe_roe_packed_routing_gather=True",
+          [
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (not self.te_moe_block, "te_moe_block=False"),
+              (self.use_ring_of_experts, "use_ring_of_experts=True"),
+              (self.moe_topk_before_ep_all_gather, "moe_topk_before_ep_all_gather=True"),
+              (not self.use_random_routing, "use_random_routing=False"),
+              (self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks <= 0"),
+          ],
+      )
 
   @staticmethod
   def _apply_dense_grad_reduce(cfg: Any, *, require_rule: bool) -> None:
@@ -6753,6 +6803,12 @@ class MaxTextConfig(
     # Explicitly setting encoding removes the need for the pylint disable comment
     with open(custom_mesh_path, "r", encoding="utf-8") as f:
       return yaml.safe_load(f) or {}
+
+  @model_validator(mode="after")
+  def validate_moe_tier2_routing_options(self) -> "MaxTextConfig":
+    """Validates cross-mixin requirements for moe_roe_packed_routing_gather."""
+    self.validate_moe_roe_packed_routing_gather()
+    return self
 
   @model_validator(mode="after")
   def validate_moe_qwag_sharding(self) -> "MaxTextConfig":
@@ -9624,6 +9680,7 @@ class RLConfig(
       raise ValueError("model_name is not set. Please pass model_name in your command.")
     _validate_moe_unsliced_prefused_wi(self)
     _validate_moe_tc_kernels(self)
+    MaxTextConfig.validate_moe_roe_packed_routing_gather(self)
 
     # With sequence packing on, a maximal sequence (prompt cap + generation
     # cap = max_target_length) must fit in one packed row. Tunix checks this
@@ -9868,6 +9925,8 @@ class RLConfig(
         using_pipeline_parallelism=self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1,
     )
     MaxTextConfig._validate_context_parallel_attention_load_balance(self)  # pylint: disable=protected-access
+    MaxTextConfig.validate_moe_quantize_combine_bwd_method(self)
+    MaxTextConfig.validate_moe_quantize_a2a_methods(self)
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:
       return {
