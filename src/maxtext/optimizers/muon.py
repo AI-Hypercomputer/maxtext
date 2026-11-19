@@ -52,31 +52,25 @@ def _get_xxt_out_sharding(
   return jax.sharding.NamedSharding(flat_sharding.mesh, out_spec)
 
 
-def _get_preferred_element_type(dtype: jnp.dtype) -> jnp.dtype:
-  if jnp.issubdtype(dtype, jnp.complexfloating):
-    return jnp.promote_types(dtype, jnp.complex64)
-  return jnp.promote_types(dtype, jnp.float32)
-
-
 def xxt(
     x: jax.Array,
     flat_sharding: jax.sharding.NamedSharding | None = None,
 ) -> jax.Array:
-  """Computes X @ X.T.conj() while preserving sharding along the last axis."""
+  """Computes X @ X.T while preserving sharding along the last axis."""
   out_sharding = _get_xxt_out_sharding(flat_sharding)
-  pref_type = _get_preferred_element_type(x.dtype)
+  pref_type = jnp.promote_types(x.dtype, jnp.float32)
   if reshape_utils.is_explicit_axes(flat_sharding):
     return jnp.einsum(
         "...mk,...nk->...mn",
         x,
-        x.conj(),
+        x,
         out_sharding=out_sharding,
         preferred_element_type=pref_type,
     ).astype(x.dtype)
   res = jnp.einsum(
       "...mk,...nk->...mn",
       x,
-      x.conj(),
+      x,
       preferred_element_type=pref_type,
   ).astype(x.dtype)
   if out_sharding is not None:
@@ -90,7 +84,7 @@ def b_times_x(
     flat_sharding: jax.sharding.NamedSharding | None = None,
 ) -> jax.Array:
   """Computes b @ x while outputting to flat_sharding."""
-  pref_type = _get_preferred_element_type(x.dtype)
+  pref_type = jnp.promote_types(x.dtype, jnp.float32)
   if reshape_utils.is_explicit_axes(flat_sharding):
     return jnp.einsum(
         "...mk,...kn->...mn",
@@ -382,7 +376,7 @@ def scale_by_muon(
       # Scale the orthogonalized updates by the dual norm of the original
       # updates. See https://arxiv.org/abs/2409.20325 for the derivation.
       def scale_by_dual_norm(x: jax.Array, y: jax.Array) -> jax.Array:
-        return jnp.sum(x.conj() * y) * y
+        return jnp.sum(x * y) * y
 
       updates = jax.tree.map(scale_by_dual_norm, mu_hat, updates)
 
