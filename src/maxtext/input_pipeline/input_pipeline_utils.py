@@ -202,6 +202,36 @@ def prepare_text_for_image_fusion(example, column_name, config):
   return example
 
 
+# ---- Audio SFT (audio + text -> text) example-level maps. Media travels under the "audios" key. ----
+
+
+def reformat_prompt_audio(example, column, model_name, audio_placeholder):
+  """Wraps the user prompt in the model's chat template with one audio block (placeholder or prepended)."""
+  example[column] = mm_processor.reformat_prompt(
+      prompt=example[column],
+      image_placeholder="",
+      model_name=model_name,
+      num_images=0,
+      audio_placeholder=audio_placeholder,
+      num_audios=1,
+  )
+  return example
+
+
+def pre_process_audio_sft(example, audio_column, config):
+  """Decodes + featurizes the audio into a static-shape `PreprocessorOutput` stored under "audios"."""
+  example["audios"] = mm_processor.preprocess_audio_for_training(example.pop(audio_column), config)
+  return example
+
+
+def prepare_text_for_audio_fusion(example, column_name, config):
+  """Expands the audio placeholder token into `audio_lengths` copies (same routing as image fusion)."""
+  example[column_name] = mm_processor.prepare_text_for_image_fusion(
+      tokens=example[column_name], config=config, processor_output=example["audios"]
+  )
+  return example
+
+
 def combine_columns(example, columns, data_column):
   """Combine columns such as 'prompt' and 'completion' for sft training"""
   assert len(columns) > 1
@@ -556,13 +586,14 @@ class SFTPromptMasking(grain.MapTransform):
 
 @dataclasses.dataclass
 class SFTPromptMaskingVision(grain.MapTransform):
-  """SFT prompt masking for multimodal"""
+  """SFT prompt masking for multimodal. `media_column` ("images" or "audios") is passed through."""
 
-  def __init__(self, query_column, response_column, max_target_length, pad_id):
+  def __init__(self, query_column, response_column, max_target_length, pad_id, media_column="images"):
     self.query_column = query_column
     self.response_column = response_column
     self.max_target_length = max_target_length
     self.pad_id = pad_id
+    self.media_column = media_column
 
   def map(self, element):
     inputs = np.concatenate((element[self.query_column], element[self.response_column]))
@@ -575,7 +606,7 @@ class SFTPromptMaskingVision(grain.MapTransform):
     return {
         "inputs": np.asarray(inputs[: self.max_target_length], dtype=np.int32),
         "targets": np.asarray(targets[: self.max_target_length], dtype=np.int32),
-        "images": element["images"],
+        self.media_column: element[self.media_column],
     }
 
 
@@ -1079,7 +1110,7 @@ class PadOrTrimToMaxLength(grain.MapTransform):
         self.config is not None and getattr(self.config, "training_objective", "causal_lm") == "block_diffusion"
     )
     for data_column in data_columns:
-      if data_column not in ("images", "completion_mask"):
+      if data_column not in ("images", "audios", "completion_mask"):
         if isinstance(element[data_column], mm_utils.PreprocessorOutput):
           raise TypeError("Only 'images' column can be of type PreprocessorOutput.")
 
@@ -1114,6 +1145,8 @@ class PadOrTrimToMaxLength(grain.MapTransform):
 
         element["images"] = self._pad_image_and_mask(element["images"])  # pyrefly: ignore[bad-argument-type]
 
+      elif key == "audios":
+        pass  # already a static-shape PreprocessorOutput (see `ExtractAudios`)
       elif key == "completion_mask" or (preserve_pad_valued_tokens and key.endswith(("_segmentation", "_position"))):
         element[key] = self._pad_text(element[key], self.max_length, 0)  # pyrefly: ignore[bad-argument-type]
       elif "true_length" not in key:
@@ -1162,6 +1195,27 @@ class ExtractImagesAndMasks(grain.MapTransform):
     if pixel_grid_thw is not None:
       output["image_grid_thw"] = pixel_grid_thw
 
+    return output
+
+
+@dataclasses.dataclass
+class ExtractAudios(grain.MapTransform):
+  """Replaces the "audios" `PreprocessorOutput` with its static-shape features `[T_mel, n_mels]`.
+
+  Batched by `grain.Batch` into `[B, T_mel, n_mels]`, consumed by the model as `encoder_audios`.
+  Per-audio lengths are already folded into the number of placeholder tokens in `inputs`, so they
+  are dropped here; a future ragged/packed pipeline can keep `audio_lengths` as an extra feature.
+  """
+
+  def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    audios = element.get("audios")
+    if audios is None:
+      return element
+    if not isinstance(audios, mm_utils.PreprocessorOutput):
+      raise TypeError(f"'audios' must be of type PreprocessorOutput, but got {type(audios)}")
+    output = element.copy()
+    # [num_audios=1, T_mel, n_mels] -> [T_mel, n_mels]; one audio per example in this version.
+    output["audios"] = np.asarray(audios.audio_values[0], dtype=np.float32)
     return output
 
 

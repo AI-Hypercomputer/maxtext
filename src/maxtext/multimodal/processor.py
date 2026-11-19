@@ -151,6 +151,22 @@ def preprocess_image_for_training(image, config):
     raise ValueError(f"Model {config.model_name} (vision block {vision_block}) not supported for image preprocessing.")
 
 
+def preprocess_audio_for_training(audio, config):
+  """Preprocesses a single dataset audio value (HF `Audio` dict, bytes or path) for SFT.
+
+  Returns a `PreprocessorOutput` with static-shape `audio_values` and per-audio `audio_lengths`
+  (number of audio placeholder tokens to insert into the prompt).
+  """
+  decoder_block = _get_decoder_block(config)
+  if decoder_block in ["ming"]:
+    from maxtext.multimodal.processor_ming import preprocess_audio_for_training_ming  # pylint: disable=import-outside-toplevel
+
+    return preprocess_audio_for_training_ming(audio, config)
+  raise ValueError(
+      f"Model {config.model_name} (decoder block {decoder_block}) not supported for audio SFT preprocessing."
+  )
+
+
 def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | None):
   """Get the increase in total token count after inserting image token placeholders"""
   vision_block = _get_vision_block(config)

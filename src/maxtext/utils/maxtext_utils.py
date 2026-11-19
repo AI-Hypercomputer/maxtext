@@ -180,7 +180,9 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
       shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
     else:
       image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size)
-      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
+      # Audio-only multimodal models (e.g. Ming) have no vision tower and no "images" feature.
+      if image_shape:
+        shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
       # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
       # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
       if "llama4" in config.model_name:
