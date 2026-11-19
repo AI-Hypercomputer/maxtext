@@ -1696,6 +1696,43 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use Ring of Experts for sparse matmul expert parallelism.",
   )
+  moe_ring_pipeline_mode: Literal["none", "combine_per_chunk", "software_pipeline"] = Field(
+      "none",
+      description=(
+          "Chunked Ring-of-Experts execution schedule. 'none' runs the plain chunk loop."
+          " 'combine_per_chunk' orders chunk c's unpermute after chunk c-1's combine reduce-scatter"
+          " via a forward-only data dependency on the routing weights (saved under remat name"
+          " 'moe_combine_order' so backward recomputation does not replay the reduce-scatter)."
+          " 'software_pipeline' orders chunk c+1's token all-gather after chunk c's routed tokens,"
+          " chunk c's combine after chunk c+1's routed tokens, chunk c+1's combine after chunk c's"
+          " reduce-scatter, and chunk c's reduce-scatter after chunk c+1's first expert GEMM via"
+          " forward-only optimization barriers (skipped with a warning when"
+          " --xla_tpu_aggressive_opt_barrier_removal=true or ENABLED applies)."
+          " Requires sparse_matmul=True, te_moe_block=False, use_ring_of_experts=True, and"
+          " num_moe_token_chunks > 1 ('software_pipeline' also requires num_moe_emb_chunks <= 0)."
+      ),
+  )
+
+  @classmethod
+  def _moe_ring_pipeline_mode_none(cls, v: Any) -> Any:
+    """pyconfig converts the string 'none' to None; map it back."""
+    if v is None or (isinstance(v, str) and v.lower() == "none"):
+      return "none"
+    return v
+
+  _validate_moe_ring_pipeline_mode = field_validator("moe_ring_pipeline_mode", mode="before")(
+      _moe_ring_pipeline_mode_none
+  )
+  ring_of_experts_row_major_reduce_scatter: bool = Field(
+      False,
+      description=(
+          "Ring of Experts only. Constrain the input of the expert-parallel combine reduce-scatter"
+          " to row-major layout in the forward pass so XLA does not copy the combine output into"
+          " a sequence-minor layout and copy the reduce-scatter result back. Forward-only layout"
+          " constraint; backward cotangent layout is left unconstrained. Requires sparse_matmul=True,"
+          " te_moe_block=False, and use_ring_of_experts=True."
+      ),
+  )
   te_moe_block: bool = Field(
       False,
       description="Whether to use TransformerEngine's fused EP MoEBlock for routing, dispatch, grouped GEMM, and combine.",
@@ -6709,6 +6746,34 @@ class MaxTextConfig(
           ],
       )
 
+  def validate_moe_ring_pipeline_and_row_major_rs(self: "MaxTextConfig | RLConfig"):
+    """Validates Ring-of-Experts chunk pipeline mode and row-major combine reduce-scatter options."""
+    if self.ring_of_experts_row_major_reduce_scatter:
+      MoEGeneral._reject_unless(  # pylint: disable=protected-access
+          "ring_of_experts_row_major_reduce_scatter=True",
+          [
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (not self.te_moe_block, "te_moe_block=False"),
+              (self.use_ring_of_experts, "use_ring_of_experts=True"),
+              (not self.moe_combine_bwd_direct_qarray, "moe_combine_bwd_direct_qarray=False"),
+          ],
+      )
+    if self.moe_ring_pipeline_mode != "none":
+      reqs = [
+          (self.sparse_matmul, "sparse_matmul=True"),
+          (not self.te_moe_block, "te_moe_block=False"),
+          (self.use_ring_of_experts, "use_ring_of_experts=True"),
+          (self.num_moe_token_chunks > 1, "num_moe_token_chunks > 1"),
+          (not self.moe_chunk_barrier, "moe_chunk_barrier=False"),
+          (not self.moe_tc_ragged_weights_on_activation, "moe_tc_ragged_weights_on_activation=False"),
+          (not self.moe_bwd_prequant_before_unsort, "moe_bwd_prequant_before_unsort=False"),
+      ]
+      if self.moe_ring_pipeline_mode == "software_pipeline":
+        reqs.append((self.num_moe_emb_chunks <= 0, "num_moe_emb_chunks <= 0"))
+      MoEGeneral._reject_unless(  # pylint: disable=protected-access
+          f"moe_ring_pipeline_mode={self.moe_ring_pipeline_mode!r}", reqs
+      )
+
   @staticmethod
   def _apply_dense_grad_reduce(cfg: Any, *, require_rule: bool) -> None:
     """When dense_grad_reduce='all_reduce', drops the 'embed_grad' rule from logical_axis_rules (and _for_eval).
@@ -6814,8 +6879,9 @@ class MaxTextConfig(
 
   @model_validator(mode="after")
   def validate_moe_tier2_routing_options(self) -> "MaxTextConfig":
-    """Validates cross-mixin requirements for moe_roe_packed_routing_gather."""
+    """Validates cross-mixin requirements for Ring-of-Experts and Tier-2 MoE routing options."""
     self.validate_moe_roe_packed_routing_gather()
+    self.validate_moe_ring_pipeline_and_row_major_rs()
     return self
 
   @model_validator(mode="after")
@@ -9689,6 +9755,7 @@ class RLConfig(
     _validate_moe_unsliced_prefused_wi(self)
     _validate_moe_tc_kernels(self)
     MaxTextConfig.validate_moe_roe_packed_routing_gather(self)
+    MaxTextConfig.validate_moe_ring_pipeline_and_row_major_rs(self)
 
     # With sequence packing on, a maximal sequence (prompt cap + generation
     # cap = max_target_length) must fit in one packed row. Tunix checks this

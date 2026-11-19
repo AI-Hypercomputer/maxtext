@@ -66,7 +66,6 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import (
-    apply_layout_constraint,
     create_sharding,
     get_logical_axis_rules,
     logical_to_mesh_axes,
@@ -155,28 +154,6 @@ _GDN_GATED_NORM_LAYOUT_LOGGED: set[str] = set()
 _GDN_IN_PROJ_KERNEL_ORDER_LOGGED: set[str] = set()
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
-def _forward_layout_constraint(x: Array, major_to_minor: tuple[int, ...]) -> Array:
-  """Constrains `x` to `major_to_minor` in the forward pass only, leaving its backward cotangent unconstrained."""
-  return apply_layout_constraint(x, major_to_minor)
-
-
-def _forward_layout_constraint_fwd(x: Array, major_to_minor: tuple[int, ...]):
-  return apply_layout_constraint(x, major_to_minor), None
-
-
-def _forward_layout_constraint_bwd(_major_to_minor, _res, cotangent):
-  return (cotangent,)
-
-
-_forward_layout_constraint.defvjp(_forward_layout_constraint_fwd, _forward_layout_constraint_bwd)
-
-
-def _forward_row_major(x: Array) -> Array:
-  """Constrains `x` to row-major layout in the forward pass only."""
-  return _forward_layout_constraint(x, tuple(range(x.ndim)))
-
-
 def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
   """Applies `gdn_gated_norm_layout` around `Qwen3NextRMSNormGated` in training (`x` has shape `(B, S, H_v, D_v)`)."""
   if mode not in _GDN_GATED_NORM_LAYOUT_LOGGED:
@@ -188,9 +165,9 @@ def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
       msg = f"GDN gated-norm output pinned row-major {where}"
     max_logging.log(f"[gdn_gated_norm_layout] mode={mode}: {msg}")
   if mode == "token_minor":
-    return _forward_layout_constraint(x, (0, 2, 3, 1))
+    return max_utils.forward_layout_constraint(x, (0, 2, 3, 1))
   if mode == "natural":
-    return _forward_row_major(x)
+    return max_utils.forward_row_major(x)
   if mode == "natural_fwd_bwd":
     return pin_row_major_with_cotangent(x)
   raise ValueError(f"gdn_gated_norm_layout must be 'auto', 'natural', 'natural_fwd_bwd' or 'token_minor', got {mode!r}.")
@@ -1892,7 +1869,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
     gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
     if out_proj_token_minor:
-      gated_output = _forward_layout_constraint(gated_output, (0, 2, 1))
+      gated_output = max_utils.forward_layout_constraint(gated_output, (0, 2, 1))
 
     # Final output shape: (B, S, E)
     if use_fp8_projections:
