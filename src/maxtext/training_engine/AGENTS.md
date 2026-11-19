@@ -7,6 +7,7 @@ Here are the refactoring rules:
 
 ## APIs and code structure
 * We want to preserve the `AbstractTrainer` APIs. The MLPerf branch added several new APIs. Any API change must be clearly justified in PR descriptions.
+* `MaxTextTrainingEngine` targets upstream Tunix's `tunix.dist_rl.train.AbstractTrainer` contract, and only that one. The MLPerf branch's Tunix carries a second, parallel contract in `tunix.experimental.train` whose trainer methods (`model_scope`, `prepare_fwd_bwd_input` / `wait_for_device`, `GCSWeightSync` in `prepare_weight_sync`) exist nowhere upstream. Do not port them: upstream has no caller, so they would be dead API. `maxtext_engine_test.py`'s `test_conforms_to_tunix_abstract_trainer` iterates `AbstractTrainer.__abstractmethods__`, so it reports upstream contract drift as a failing test; follow that, not the MLPerf branch's method list.
 
 ## Configs
 The execution scripts for this code currently live in the Tunix `atwigg/mlperf` branch under the `experimental` directory. Check if the features that we are porting were actually used in the final MLPerf submission.
