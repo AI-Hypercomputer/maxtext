@@ -1,0 +1,337 @@
+# Copyright 2023–2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Non-blocking post-submit audit for commits merged to `main`.
+# Runs fast deterministic and cross-model checks followed by a read-only Gemini
+# post-submit audit, and comments on the merged pull request ONLY when blocking
+# (deterministic failure or P0/P1) findings are detected.
+
+name: 'Post-Submit Review'
+
+on:
+  push:
+    branches:
+      - 'main'
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        type: 'string'
+        required: false
+        description: 'Commit SHA on main to audit (defaults to github.sha)'
+      dry_run:
+        type: 'boolean'
+        required: false
+        default: true
+        description: 'Run full audit without posting comments to merged PRs'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'postsubmit-review-${{ inputs.commit_sha || github.sha }}'
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  postsubmit_review:
+    name: 'Post-Submit Review'
+    if: |-
+      ${{ github.event_name == 'workflow_dispatch' || !github.event.repository.fork }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 45
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      issues: 'write'
+      pull-requests: 'write'
+    steps:
+      - name: 'Checkout repository'
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: 'Set up Python 3.12 and uv'
+        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
+        with:
+          python-version: '3.12'
+          enable-cache: false
+
+      - name: 'Prepare target commit and pre-pass environment'
+        id: 'prepare'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+          INPUT_COMMIT_SHA: '${{ inputs.commit_sha }}'
+          DEFAULT_SHA: '${{ github.sha }}'
+          HAS_GCP_WIF: '${{ vars.GCP_WIF_PROVIDER != '''' }}'
+          HAS_GEMINI_API_KEY: '${{ secrets.GEMINI_API_KEY != '''' }}'
+          HAS_GOOGLE_API_KEY: '${{ secrets.GOOGLE_API_KEY != '''' }}'
+          TOOLS_STAGE_DIR: '${{ runner.temp }}/postsubmit_tools'
+          PREPASS_VENV: '${{ runner.temp }}/postsubmit_venv'
+          UV_LINK_MODE: 'copy'
+        run: |-
+          set -euo pipefail
+
+          RAW_SHA="${INPUT_COMMIT_SHA:-${DEFAULT_SHA}}"
+          if [[ ! "${RAW_SHA}" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+            echo "::error::Invalid commit_sha '${RAW_SHA}'. Expected a 7-40 hex character SHA."
+            exit 1
+          fi
+
+          HAS_GEMINI_AUTH="false"
+          if [[ "${HAS_GCP_WIF}" == "true" || "${HAS_GEMINI_API_KEY}" == "true" || "${HAS_GOOGLE_API_KEY}" == "true" ]]; then
+            HAS_GEMINI_AUTH="true"
+          fi
+
+          mkdir -p "${TOOLS_STAGE_DIR}/commands" "${TOOLS_STAGE_DIR}/scripts"
+          cp .github/scripts/postsubmit_review_helper.py "${TOOLS_STAGE_DIR}/postsubmit_review_helper.py"
+          cp -R .gemini/commands/. "${TOOLS_STAGE_DIR}/commands/"
+          if [[ -d ".agents/skills/maxtext-pr-upload/scripts" ]]; then
+            cp -R .agents/skills/maxtext-pr-upload/scripts/. "${TOOLS_STAGE_DIR}/scripts/"
+          fi
+
+          EMPTY_TREE_SHA="4b825dc642cb6eb9a060e54bf8d69288fbee4904"
+          FULL_SHA="${RAW_SHA}"
+          if ! git rev-parse --verify "${FULL_SHA}^{commit}" >/dev/null 2>&1; then
+            if [[ "${#FULL_SHA}" -lt 40 ]]; then
+              API_SHA="$(gh api "repos/${REPOSITORY}/commits/${RAW_SHA}" --jq '.sha' 2>/dev/null || true)"
+              if [[ "${API_SHA}" =~ ^[0-9a-fA-F]{40}$ ]]; then
+                FULL_SHA="${API_SHA}"
+              elif [[ "$(git rev-parse --is-shallow-repository)" == "true" ]]; then
+                git fetch --no-tags --filter=blob:none --unshallow origin main
+              else
+                git fetch --no-tags --filter=blob:none origin main
+              fi
+            fi
+            if ! git rev-parse --verify "${FULL_SHA}^{commit}" >/dev/null 2>&1; then
+              git fetch --no-tags --depth=2 origin "${FULL_SHA}"
+            fi
+          fi
+
+          RESOLVED_TARGET="$(git rev-parse --verify "${FULL_SHA}^{commit}")"
+          FIRST_PARENT="$(git cat-file -p "${RESOLVED_TARGET}" | awk '!done && /^$/ { done = 1 } !done && /^parent / { print $2; done = 1 }')"
+          if [[ -z "${FIRST_PARENT}" ]]; then
+            RESOLVED_BASE="${EMPTY_TREE_SHA}"
+          else
+            if ! git cat-file -e "${FIRST_PARENT}^{commit}" 2>/dev/null; then
+              git fetch --no-tags --depth=2 origin "${RESOLVED_TARGET}"
+            fi
+            RESOLVED_BASE="$(git rev-parse --verify "${FIRST_PARENT}^{commit}")"
+          fi
+
+          CURRENT_HEAD="$(git rev-parse HEAD)"
+          if [[ "${RESOLVED_TARGET}" != "${CURRENT_HEAD}" ]]; then
+            git checkout --detach "${RESOLVED_TARGET}"
+          fi
+
+          uv venv --python 3.12 "${PREPASS_VENV}"
+          REQS_FILE="src/dependencies/requirements/generated_requirements/tpu-requirements.txt"
+          EXTRA_REQS_FILE="src/dependencies/extra_deps/pre_train_github_deps.txt"
+          CHANGED_LIST="$(git diff --name-only "${RESOLVED_BASE}" "${RESOLVED_TARGET}")"
+          if grep -Eq '^src/maxtext/.*\.(py|ya?ml)$' <<< "${CHANGED_LIST}"; then
+            if [[ -f "${REQS_FILE}" ]]; then
+              uv pip install --python "${PREPASS_VENV}/bin/python" --resolution=lowest -r "${REQS_FILE}" || \
+                echo "::warning::Optional MaxText dependency install failed; continuing with stdlib AST checks."
+            fi
+            if [[ -f "${EXTRA_REQS_FILE}" ]]; then
+              uv pip install --python "${PREPASS_VENV}/bin/python" --no-deps -r "${EXTRA_REQS_FILE}" || \
+                echo "::warning::Optional extra_deps install failed; continuing."
+            fi
+          elif grep -Eq '^(\.agents/skills/|\.github/scripts/)' <<< "${CHANGED_LIST}"; then
+            uv pip install --python "${PREPASS_VENV}/bin/python" pytest==8.4.2 || \
+              echo "::warning::Optional pytest install failed; falling back to unittest."
+          fi
+
+          {
+            echo "target_sha=${RESOLVED_TARGET}"
+            echo "base_sha=${RESOLVED_BASE}"
+            echo "has_gemini_auth=${HAS_GEMINI_AUTH}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: 'Run deterministic and cross-model pre-pass'
+        id: 'prepass'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+          IS_FORK: '${{ github.event.repository.fork }}'
+          TARGET_SHA: '${{ steps.prepare.outputs.target_sha }}'
+          BASE_SHA: '${{ steps.prepare.outputs.base_sha }}'
+          TOOLS_STAGE_DIR: '${{ runner.temp }}/postsubmit_tools'
+          PREPASS_PYTHON: '${{ runner.temp }}/postsubmit_venv/bin/python'
+        run: |-
+          set -euo pipefail
+          "${PREPASS_PYTHON}" "${TOOLS_STAGE_DIR}/postsubmit_review_helper.py" prepass \
+            --repo-root "." \
+            --repository "${REPOSITORY}" \
+            --is-fork "${IS_FORK}" \
+            --target-sha "${TARGET_SHA}" \
+            --base-sha "${BASE_SHA}" \
+            --fallback-scripts-dir "${TOOLS_STAGE_DIR}/scripts" \
+            --prepass-out ".gemini/postsubmit_prepass.json" \
+            --authoritative-prepass-out "${TOOLS_STAGE_DIR}/postsubmit_prepass.json" \
+            --context-out ".gemini/context.json" \
+            --github-output "${GITHUB_OUTPUT}"
+
+          mkdir -p .gemini/commands
+          for cmd_file in "${TOOLS_STAGE_DIR}/commands/"*; do
+            base_name="$(basename "${cmd_file}")"
+            if [[ ! -f ".gemini/commands/${base_name}" ]]; then
+              cp "${cmd_file}" ".gemini/commands/${base_name}"
+            fi
+          done
+
+      - name: 'Run Gemini post-submit review'
+        id: 'gemini_postsubmit_review'
+        if: |-
+          ${{ steps.prepare.outputs.has_gemini_auth == 'true' }}
+        continue-on-error: true
+        uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
+        env:
+          GEMINI_CLI_TRUST_WORKSPACE: 'true'
+          GITHUB_TOKEN: '${{ github.token }}'
+          PULL_REQUEST_NUMBER: '${{ steps.prepass.outputs.pr_number }}'
+          REPOSITORY: '${{ github.repository }}'
+          TARGET_SHA: '${{ steps.prepare.outputs.target_sha }}'
+          BASE_SHA: '${{ steps.prepare.outputs.base_sha }}'
+        with:
+          gcp_location: '${{ vars.GOOGLE_CLOUD_LOCATION }}'
+          gcp_project_id: '${{ vars.GOOGLE_CLOUD_PROJECT }}'
+          gcp_service_account: '${{ vars.SERVICE_ACCOUNT_EMAIL }}'
+          gcp_workload_identity_provider: '${{ vars.GCP_WIF_PROVIDER }}'
+          gemini_api_key: '${{ secrets.GEMINI_API_KEY }}'
+          gemini_cli_version: '${{ vars.GEMINI_CLI_VERSION || ''0.34.0'' }}'
+          gemini_debug: '${{ fromJSON(vars.DEBUG || vars.ACTIONS_STEP_DEBUG || false) }}'
+          gemini_model: '${{ vars.GEMINI_MODEL }}'
+          google_api_key: '${{ secrets.GOOGLE_API_KEY }}'
+          use_gemini_code_assist: '${{ vars.GOOGLE_GENAI_USE_GCA }}'
+          use_vertex_ai: '${{ vars.GOOGLE_GENAI_USE_VERTEXAI }}'
+          workflow_name: 'postsubmit-review'
+          settings: |-
+            {
+              "model": {
+                "maxSessionTurns": 80
+              },
+              "telemetry": {
+                "enabled": false,
+                "target": "gcp"
+              },
+              "mcpServers": {
+                "github": {
+                  "command": "docker",
+                  "args": [
+                    "run",
+                    "-i",
+                    "--rm",
+                    "-e",
+                    "GITHUB_PERSONAL_ACCESS_TOKEN",
+                    "ghcr.io/github/github-mcp-server:v0.27.0"
+                  ],
+                  "includeTools": [
+                    "get_commit",
+                    "get_file_contents",
+                    "issue_read",
+                    "pull_request_read",
+                    "search_code"
+                  ],
+                  "env": {
+                    "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_TOKEN}"
+                  }
+                }
+              },
+              "tools": {
+                "shell": {
+                  "allowEnv": [
+                    "PULL_REQUEST_NUMBER",
+                    "REPOSITORY",
+                    "TARGET_SHA",
+                    "BASE_SHA"
+                  ],
+                  "allowCommands": ["cat", "echo", "grep", "head", "tail"]
+                }
+              }
+            }
+          prompt: '/maxtext-postsubmit-review'
+
+      - name: 'Check whether PR comment token is needed'
+        id: 'check_comment_needed'
+        if: |-
+          ${{ !cancelled() }}
+        env:
+          REPOSITORY: '${{ github.repository }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          INPUT_DRY_RUN: '${{ inputs.dry_run }}'
+          IS_FORK: '${{ github.event.repository.fork }}'
+          GEMINI_OUTCOME: '${{ steps.gemini_postsubmit_review.outcome }}'
+          GEMINI_SUMMARY: '${{ steps.gemini_postsubmit_review.outputs.summary }}'
+          TOOLS_STAGE_DIR: '${{ runner.temp }}/postsubmit_tools'
+        run: |-
+          set -euo pipefail
+          python3 "${TOOLS_STAGE_DIR}/postsubmit_review_helper.py" maybe-comment \
+            --check-only \
+            --prepass-json "${TOOLS_STAGE_DIR}/postsubmit_prepass.json" \
+            --gemini-findings-json ".gemini/postsubmit_gemini_findings.json" \
+            --repository "${REPOSITORY}" \
+            --event-name "${EVENT_NAME}" \
+            --dry-run-input "${INPUT_DRY_RUN}" \
+            --is-fork "${IS_FORK}" \
+            --gemini-outcome "${GEMINI_OUTCOME}" \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: 'Mint identity token'
+        id: 'mint_identity_token'
+        if: |-
+          ${{
+            !cancelled() &&
+            steps.check_comment_needed.outputs.needs_post == 'true' &&
+            vars.APP_ID != '' &&
+            !github.event.repository.fork &&
+            !(github.event_name == 'workflow_dispatch' && inputs.dry_run)
+          }}
+        continue-on-error: true
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: '${{ vars.APP_ID }}'
+          private-key: '${{ secrets.APP_PRIVATE_KEY }}'
+          permission-contents: 'read'
+          permission-issues: 'write'
+          permission-pull-requests: 'write'
+
+      - name: 'Evaluate severity gate and conditionally comment on merged PR'
+        if: |-
+          ${{ !cancelled() }}
+        env:
+          GH_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+          EVENT_NAME: '${{ github.event_name }}'
+          INPUT_DRY_RUN: '${{ inputs.dry_run }}'
+          IS_FORK: '${{ github.event.repository.fork }}'
+          GEMINI_OUTCOME: '${{ steps.gemini_postsubmit_review.outcome }}'
+          GEMINI_SUMMARY: '${{ steps.gemini_postsubmit_review.outputs.summary }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          TOOLS_STAGE_DIR: '${{ runner.temp }}/postsubmit_tools'
+        run: |-
+          set -euo pipefail
+          python3 "${TOOLS_STAGE_DIR}/postsubmit_review_helper.py" maybe-comment \
+            --prepass-json "${TOOLS_STAGE_DIR}/postsubmit_prepass.json" \
+            --gemini-findings-json ".gemini/postsubmit_gemini_findings.json" \
+            --repository "${REPOSITORY}" \
+            --event-name "${EVENT_NAME}" \
+            --dry-run-input "${INPUT_DRY_RUN}" \
+            --is-fork "${IS_FORK}" \
+            --gemini-outcome "${GEMINI_OUTCOME}" \
+            --run-url "${RUN_URL}"
