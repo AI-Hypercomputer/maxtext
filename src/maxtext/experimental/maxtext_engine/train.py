@@ -127,7 +127,10 @@ def log_peak_memory() -> None:
   On TPU this counter excludes XLA program temporaries, so it is not the HBM peak.
   """
   device = jax.local_devices()[0]
-  peak = (device.memory_stats() or {}).get("peak_bytes_in_use")
+  try:
+    peak = (device.memory_stats() or {}).get("peak_bytes_in_use")
+  except RuntimeError:  # Pathways devices are not addressable and raise instead of returning None.
+    return
   if peak is None:
     return
   max_logging.log(
