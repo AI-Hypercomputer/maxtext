@@ -1998,6 +1998,15 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
+  moe_gmm_v2_paired_tiles: bool = Field(
+      False,
+      description=(
+          "Run the unquantized single-K gmm_v2 kernel (MoE forward and dlhs) on"
+          " its paired-tiles path: two tiles per grid step, each group's short"
+          " tail on its full tile's rhs block. Same result; requires"
+          " use_gmm_v2=true."
+      ),
+  )
 
 
 class DeepSeekMoE(BaseModel):
