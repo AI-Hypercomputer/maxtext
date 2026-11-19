@@ -47,6 +47,7 @@ import jax.numpy as jnp
 import numpy as np
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as m3_moe
+from maxtext.m3.core import sharded_embedding as m3_sharded_embedding
 from maxtext.m3.core.sharding import (
     DefaultSharding,
     Sharding,
@@ -2515,6 +2516,28 @@ def _mul_u64_bytes(tokens: jax.Array, mult_bytes: jax.Array) -> jax.Array:
   return jnp.stack(out, axis=-1)
 
 
+def _is_plain_embed(module: Any) -> bool:
+  """Returns True for a plain `nnx.Embed` (including `add_named_scopes` wrappers), excluding custom subclasses."""
+  cls = type(module)
+  while "_m3_named_scope" in vars(cls):
+    cls = cls.__bases__[0]
+  return cls is nnx.Embed
+
+
+def _is_host_resident_array(value: jax.Array, param: nnx.Variable | None = None) -> bool:
+  """Returns True when `value` (or its `nnx.Variable` metadata) resides in host memory."""
+  if isinstance(value, jax.core.Tracer):
+    space = getattr(getattr(value, "aval", None), "memory_space", None)
+    if space is not None:
+      return space == jax.memory.Space.Host
+  kind = getattr(getattr(value, "sharding", None), "memory_kind", None)
+  if kind in ("pinned_host", "unpinned_host"):
+    return True
+  if param is not None:
+    return param.get_metadata("memory_kind", default=None) in ("pinned_host", "unpinned_host")
+  return False
+
+
 class Qwen3_8NGramEmbedding(nnx.Module):
   """Hashed n-gram embedding table with SplitMix64 multipliers."""
 
@@ -2532,6 +2555,8 @@ class Qwen3_8NGramEmbedding(nnx.Module):
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
       *,
+      use_index_routed_lookup: bool = True,
+      index_routed_buffer_factor: float = 2.0,
       sharding: Sharding | None = None,
       rngs: nnx.Rngs,
   ):
@@ -2542,6 +2567,8 @@ class Qwen3_8NGramEmbedding(nnx.Module):
     self.heads_per_ngram = heads_per_ngram
     self.ngram_heads = (ngram_size - 1) * heads_per_ngram
     self.eos_token_id = eos_token_id
+    self.use_index_routed_lookup = bool(use_index_routed_lookup)
+    self.index_routed_buffer_factor = float(index_routed_buffer_factor)
 
     if ple_embed_dim % self.ngram_heads != 0:
       raise ValueError(f"ple_embed_dim ({ple_embed_dim}) not divisible by ngram_heads ({self.ngram_heads}).")
@@ -2602,14 +2629,13 @@ class Qwen3_8NGramEmbedding(nnx.Module):
     """Returns SplitMix64 multiplier bytes as a uint32 JAX array."""
     return jnp.array(self._mult_bytes_tuple, dtype=jnp.uint32)
 
-  def compute_ngram_ids(self, input_ids: jax.Array) -> jax.Array:
-    """Computes exact 64-bit n-gram hash IDs for each token position."""
+  def compute_ngram_ids_with_context(self, input_ids: jax.Array, left_context: jax.Array) -> jax.Array:
+    """Computes exact 64-bit n-gram hash IDs given `left_context` of shape `(B, ngram_size - 1)`."""
     b = input_ids.shape[0]
     mult_bytes = self.mult_bytes
     head_vocab_sizes_arr = self.head_vocab_sizes_arr
     head_offsets_arr = self.head_offsets_arr
-    context = jnp.full((b, self.ngram_size - 1), self.eos_token_id, dtype=input_ids.dtype)
-    history = jnp.concatenate([context, input_ids], axis=-1)
+    history = jnp.concatenate([left_context, input_ids], axis=-1)
     shifted_tokens = [_shift_right_ignore_eos(history, sh, self.eos_token_id) for sh in range(self.ngram_size)]
     shifted_bytes = [_mul_u64_bytes(shifted_tokens[p], mult_bytes[p]) for p in range(self.ngram_size)]
 
@@ -2631,12 +2657,113 @@ class Qwen3_8NGramEmbedding(nnx.Module):
 
     return jnp.concatenate(blocks, axis=-1)[:, self.ngram_size - 1 :, :]
 
+  def compute_ngram_ids(self, input_ids: jax.Array) -> jax.Array:
+    """Computes exact 64-bit n-gram hash IDs for each token position."""
+    context = jnp.full((input_ids.shape[0], self.ngram_size - 1), self.eos_token_id, dtype=input_ids.dtype)
+    return self.compute_ngram_ids_with_context(input_ids, context)
+
+  def _resolve_index_routed_axes(
+      self,
+      input_ids: jax.Array,
+      mesh: Any,
+      table: jax.Array,
+  ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]] | None:
+    """Returns `(table_axes, batch_axes, length_axes)` when index-routed lookup is safe, else `None`."""
+    if not self.use_index_routed_lookup or mesh.empty or mesh.size <= 1 or input_ids.ndim != 2:
+      return None
+    if not _is_plain_embed(self.ngram_embedding):
+      return None
+    if _is_host_resident_array(table, self.ngram_embedding.embedding):
+      return None
+    spec = self.sharding("ngram_embedding", ("ngram_vocab", None), TensorType.WEIGHT)
+    table_axes = tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
+    if not table_axes:
+      return None
+    meta_spec = self.ngram_embedding.embedding.get_metadata("out_sharding", default=None)
+    if isinstance(meta_spec, jax.sharding.PartitionSpec) and meta_spec:
+      meta_axes = set(_mesh_axis_names(meta_spec[0]))
+      if not set(table_axes).issubset(meta_axes):
+        return None
+    table_shards = math.prod(int(mesh.shape[ax]) for ax in table_axes)
+    if table_shards <= 1 or table.shape[0] % table_shards != 0:
+      return None
+
+    b, s = input_ids.shape
+    batch_axes = get_batch_mesh_axes(self.sharding)
+    if batch_axes and b % math.prod(int(mesh.shape[ax]) for ax in batch_axes) != 0:
+      batch_axes = ()
+
+    halo = self.ngram_size - 1
+    length_axes = get_norm_length_mesh_axes(self.sharding)
+    if length_axes:
+      norm_shards = math.prod(int(mesh.shape[ax]) for ax in length_axes)
+      if s % norm_shards != 0 or (norm_shards > 1 and s // norm_shards < halo):
+        length_axes = get_length_mesh_axes(self.sharding)
+        if length_axes:
+          len_shards = math.prod(int(mesh.shape[ax]) for ax in length_axes)
+          if s % len_shards != 0 or (len_shards > 1 and s // len_shards < halo):
+            length_axes = ()
+
+    if set(batch_axes) & set(length_axes):
+      return None
+    if not set(table_axes).issubset(set(batch_axes) | set(length_axes)):
+      return None
+    return table_axes, batch_axes, length_axes
+
   def __call__(self, input_ids: jax.Array) -> jax.Array:
-    ngram_ids = self.compute_ngram_ids(input_ids)
     mesh = jax.sharding.get_abstract_mesh()
+    if _is_plain_embed(self.ngram_embedding):
+      table = self.ngram_embedding.embedding[...]
+      routed = self._resolve_index_routed_axes(input_ids, mesh, table)
+      if routed is not None:
+        table_axes, batch_axes, length_axes = routed
+        m3_kernels.log_kernel_dispatch(
+            "qwen3_8_ple_lookup",
+            f"Qwen3_8NGramEmbedding: using index_routed_ngram_embedding "
+            f"(table_axes={table_axes}, batch_axes={batch_axes}, length_axes={length_axes}, "
+            f"table_shape={tuple(table.shape)}, input_shape={tuple(input_ids.shape)}).",
+        )
+        out_dtype = self.ngram_embedding.dtype if self.ngram_embedding.dtype is not None else table.dtype
+        embeds = m3_sharded_embedding.index_routed_ngram_embedding(
+            table,
+            input_ids,
+            self.compute_ngram_ids_with_context,
+            eos_token_id=self.eos_token_id,
+            ngram_size=self.ngram_size,
+            ple_embed_dim=self.ple_embed_dim,
+            table_axes=table_axes,
+            batch_axes=batch_axes,
+            length_axes=length_axes,
+            out_dtype=out_dtype,
+            buffer_factor=self.index_routed_buffer_factor,
+            mesh=mesh,
+        )
+        return shard_batch(embeds, self.sharding, "ngram_embeds")
+
+    if self.use_index_routed_lookup and not mesh.empty and mesh.size > 1:
+      m3_kernels.log_kernel_dispatch(
+          "qwen3_8_ple_lookup_fallback",
+          f"Qwen3_8NGramEmbedding: falling back to replicated lookup "
+          f"(embed_type={type(self.ngram_embedding).__name__}, plain={_is_plain_embed(self.ngram_embedding)}, "
+          f"input_shape={tuple(input_ids.shape)}).",
+      )
+
+    fallback_ids = (
+        self.sharding.constrain(input_ids, "ngram_input_ids", (None,) * input_ids.ndim)
+        if not mesh.empty and mesh.size > 1
+        else input_ids
+    )
+    ngram_ids = self.compute_ngram_ids(fallback_ids)
     if not mesh.empty and mesh.size > 1:
       ngram_ids = self.sharding.constrain(ngram_ids, "ngram_ids", (None,) * ngram_ids.ndim)
-    embeds = shard_batch(self.ngram_embedding(ngram_ids), self.sharding, "ngram_embeds")
+    out_shd = self.sharding.out_sharding("ngram_embeds", (None,) * (ngram_ids.ndim + 1))
+    if out_shd is not None and _is_plain_embed(self.ngram_embedding):
+      table = self.ngram_embedding.embedding[...]
+      out_dtype = self.ngram_embedding.dtype if self.ngram_embedding.dtype is not None else table.dtype
+      raw_embeds = table.at[ngram_ids].get(out_sharding=out_shd).astype(out_dtype)
+    else:
+      raw_embeds = self.ngram_embedding(ngram_ids)
+    embeds = shard_batch(raw_embeds, self.sharding, "ngram_embeds")
     return embeds.reshape(input_ids.shape[0], -1, self.ple_embed_dim)
 
 
