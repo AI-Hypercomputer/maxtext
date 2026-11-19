@@ -103,6 +103,7 @@ def _config():
       checkpoint_storage_target_data_file_size_bytes=checkpointing.DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE,
       elastic_enabled=False,
       logical_axis_rules=[],
+      fp32_master_storage="f32",
       load_parameters_path="",
       load_full_state_path="",
       checkpoint_storage_concurrent_gb=8,

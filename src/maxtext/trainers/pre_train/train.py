@@ -640,10 +640,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       (loss, (aux, non_param_rest)), (raw_grads, custom_grads) = grad_func(curr_params, custom_params, rest, config, data)
     nnx.update(state.model, nnx.State.merge(custom_grads, non_param_rest))
 
-  raw_grads = jax.tree_util.tree_map(
-      lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
-      raw_grads,
-  )
+  if config.fp32_master_storage == "residual16" and config.grad_dtype == jnp.float32:
+    raw_grads = jax.tree_util.tree_map(
+        lambda x: x.astype(jnp.float32) if x.dtype == jnp.bfloat16 else x,
+        raw_grads,
+    )
+  else:
+    raw_grads = jax.tree_util.tree_map(
+        lambda x: x.astype(config.grad_dtype) if x.dtype == jnp.float32 else x,
+        raw_grads,
+    )
   if config.parameter_memory_host_offload:
     raw_grads = jax.device_put(
         raw_grads,

@@ -424,8 +424,7 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None, m
           if getattr(getattr(config, "lora", None), "enable_lora", False)
           else nnx.Param
       )
-      optimizer = nnx.Optimizer(model, tx, wrt=wrt)
-      return train_state_nnx.TrainStateNNX(model, optimizer)
+      return train_state_nnx.create_train_state(model, tx, config, wrt=wrt)
 
     init_state_fn = create_train_state_fn
     checkpoint_manager = create_checkpoint_manager(config, mesh, init_state_fn)

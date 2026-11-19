@@ -63,6 +63,7 @@ class _Cfg:
   moe_dropless_fallback: str | None = None
   routed_bias: bool = False
   routed_bias_update_rate: float = 0.0
+  float32_gate_logits: bool = False
   mtp_num_layers: int = 0
   mtp_eval_target_module: int = 0
   use_qk_clip: bool = False
@@ -79,6 +80,8 @@ class _Cfg:
   debug_sharding: bool = False
   weight_sparsity_n: int = 0
   weight_sparsity_m: int = 0
+  fp32_master_storage: str = "f32"
+  weight_dtype: jnp.dtype = jnp.float32
 
 
 class _TinyDecoder(nnx.Module):
@@ -126,7 +129,7 @@ class GateLogit(nnx.Module):
   """Router gate stub holding bias parameter."""
 
   def __init__(self, bias_shape):
-    self.bias = nnx.Param(jnp.zeros(bias_shape))
+    self.bias = nnx.Param(jnp.zeros(bias_shape, dtype=jnp.float32), keep_fp32_master=True)
 
 
 class _MoEBiasStub(nnx.Module):
@@ -1309,6 +1312,276 @@ class TestStepDiagnosticsNNX(unittest.TestCase):
     with mock.patch.object(metric_logger.max_logging, "log") as log:
       logger.log_metrics({"scalar": scalars}, step=3, metric_type="train")
     self.assertNotIn("diag:", log.call_args[0][0])
+
+
+class TestResidual16TrainStep(unittest.TestCase):
+  """Tests pre_train.train_step reconstructed master-weight parity and negative controls for residual16."""
+
+  @staticmethod
+  def _align_params_to_bf16(model: nnx.Module, offset: float = 0.5) -> None:
+    """Rounds float32 parameters to exact bf16-representable values so f32 and residual16 share step-0 weights."""
+    _, params_state, _ = nnx.split(model, nnx.Param, ...)
+    aligned = jax.tree.map(
+        lambda v: v.replace(value=(v.get_value() + offset).astype(jnp.bfloat16).astype(jnp.float32)),
+        params_state,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    nnx.update(model, aligned)
+
+  @staticmethod
+  def _make_bf16_compute_decoder(vocab_size: int, hidden: int, seed: int, with_moe_bias: bool = False):
+    """Builds a `_TinyDecoder` variant running forward compute in `bfloat16` with `bf16`-aligned `float32` init."""
+    if with_moe_bias:
+      m = _TinyDecoderMoEBias(vocab_size, hidden=hidden, rngs=nnx.Rngs(seed))
+    else:
+      m = _TinyDecoder(vocab_size, hidden=hidden, rngs=nnx.Rngs(seed))
+    m.embed = nnx.Embed(vocab_size, hidden, dtype=jnp.bfloat16, param_dtype=jnp.float32, rngs=nnx.Rngs(seed))
+    m.proj = nnx.Linear(
+        hidden, vocab_size, use_bias=True, dtype=jnp.bfloat16, param_dtype=jnp.float32, rngs=nnx.Rngs(seed + 1)
+    )
+    n_dev = min(len(jax.devices()), 4)
+    m.mesh = jax.make_mesh((n_dev, 1, 1, 1), ("data", "fsdp", "expert", "context"))
+    TestResidual16TrainStep._align_params_to_bf16(m, offset=0.5)
+    if with_moe_bias:
+      m.decoder.gate.bias.set_value(jnp.zeros_like(m.decoder.gate.bias.get_value(), dtype=jnp.float32))
+    return m
+
+  @staticmethod
+  def _assert_reconstructed_master_parity(s_r16, s_f32, keys, *, rtol: float = 1e-5, atol: float = 1e-5) -> None:
+    rec_params = train_state_nnx.to_checkpoint_dict(s_r16)["params"]["params"]
+    ref_params = s_f32.to_pure_dict()["model"]
+    for mod_key, leaf_key in keys:
+      np.testing.assert_allclose(
+          np.asarray(rec_params[mod_key][leaf_key], dtype=np.float32),
+          np.asarray(ref_params[mod_key][leaf_key], dtype=np.float32),
+          rtol=rtol,
+          atol=atol,
+          err_msg=f"Master weight mismatch at {mod_key}.{leaf_key}",
+      )
+
+  def test_residual16_train_step_matches_f32_and_preserves_routed_bias_and_spike_skip(self):
+    tx_base = optax.adamw(learning_rate=2e-3, weight_decay=0.01)
+    tx_spike = optimizers.skip_step_on_spikes(tx_base, interval=4, scaling_factor=2.0)
+
+    cfg_f32 = _Cfg(
+        fp32_master_storage="f32",
+        routed_bias=True,
+        routed_bias_update_rate=1e-3,
+        skip_step_on_spikes=True,
+        grad_dtype=jnp.float32,
+    )
+    cfg_r16 = _Cfg(
+        fp32_master_storage="residual16",
+        routed_bias=True,
+        routed_bias_update_rate=1e-3,
+        skip_step_on_spikes=True,
+        grad_dtype=jnp.float32,
+    )
+
+    m_f32 = self._make_bf16_compute_decoder(cfg_f32.vocab_size, hidden=8, seed=42, with_moe_bias=True)
+    m_r16 = self._make_bf16_compute_decoder(cfg_r16.vocab_size, hidden=8, seed=42, with_moe_bias=True)
+    init_embed = np.array(m_f32.embed.embedding.get_value(), dtype=np.float32)
+
+    ts_f32 = train_state_nnx.create_train_state(m_f32, tx_spike, cfg_f32)
+    ts_r16 = train_state_nnx.create_train_state(m_r16, tx_spike, cfg_r16)
+
+    # Working weights are bf16 while routed gate.bias stays float32.
+    self.assertEqual(ts_r16.model.embed.embedding.get_value().dtype, jnp.bfloat16)
+    self.assertEqual(ts_r16.model.decoder.gate.bias.get_value().dtype, jnp.float32)
+
+    g_f32, s_f32 = nnx.split(ts_f32)
+    g_r16, s_r16 = nnx.split(ts_r16)
+
+    for step_idx in range(5):
+      data = _make_data(batch=cfg_f32.micro_batch_size_to_train_on, vocab=cfg_f32.vocab_size)
+      data["inputs"] = jax.random.randint(
+          jax.random.PRNGKey(10 + step_idx), (cfg_f32.micro_batch_size_to_train_on, 4), 0, cfg_f32.vocab_size
+      )
+      data["targets"] = jax.random.randint(
+          jax.random.PRNGKey(50 + step_idx), (cfg_f32.micro_batch_size_to_train_on, 4), 0, cfg_f32.vocab_size
+      )
+      with jax.set_mesh(m_f32.mesh):
+        s_f32, met_f32 = pre_train.train_step(g_f32, cfg_f32, None, None, s_f32, data)
+      with jax.set_mesh(m_r16.mesh):
+        s_r16, met_r16 = pre_train.train_step(g_r16, cfg_r16, None, None, s_r16, data)
+      self.assertIn("optim/step_skipped", met_r16["scalar"])
+      if step_idx == 0:
+        np.testing.assert_allclose(
+            float(met_r16["scalar"]["learning/loss"]),
+            float(met_f32["scalar"]["learning/loss"]),
+            rtol=0,
+            atol=0,
+        )
+      else:
+        np.testing.assert_allclose(
+            float(met_r16["scalar"]["learning/loss"]),
+            float(met_f32["scalar"]["learning/loss"]),
+            rtol=1e-4,
+            atol=1e-4,
+        )
+
+    pure_r16 = s_r16.to_pure_dict()
+    pure_f32 = s_f32.to_pure_dict()
+    max_delta = float(np.max(np.abs(np.asarray(pure_f32["model"]["embed"]["embedding"]) - init_embed)))
+    self.assertGreater(max_delta, 5e-3)
+    self._assert_reconstructed_master_parity(
+        s_r16,
+        s_f32,
+        (("embed", "embedding"), ("proj", "kernel"), ("proj", "bias")),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    # Residual16Optimizer keeps top-level opt_state identical to nnx.Optimizer (no 'inner' wrapper)
+    # and stores master_residuals as a sibling under state['optimizer'].
+    self.assertIn("master_residuals", pure_r16["optimizer"])
+    self.assertIn("is_skipped", pure_r16["optimizer"]["opt_state"])
+    self.assertNotIn("inner", pure_r16["optimizer"]["opt_state"])
+    np.testing.assert_allclose(
+        pure_r16["model"]["decoder"]["gate"]["bias"],
+        pure_f32["model"]["decoder"]["gate"]["bias"],
+        rtol=0,
+        atol=0,
+    )
+
+  def _run_multi_step_pair(self, *, ga_steps: int, offload: bool, num_steps: int = 5, lr: float = 2e-3):
+    """Runs `num_steps` compiled `train_step` iterations for paired `residual16` and `f32` models."""
+    cfg_r16 = _Cfg(
+        fp32_master_storage="residual16",
+        gradient_accumulation_steps=ga_steps,
+        grad_dtype=jnp.float32,
+        optimizer_memory_host_offload=offload,
+    )
+    cfg_f32 = _Cfg(
+        fp32_master_storage="f32",
+        gradient_accumulation_steps=ga_steps,
+        grad_dtype=jnp.float32,
+        optimizer_memory_host_offload=offload,
+    )
+    for cfg in (cfg_r16, cfg_f32):
+      cfg.global_batch_size_to_train_on = cfg.micro_batch_size_to_train_on * ga_steps
+      cfg.max_target_length = 4
+
+    m_r16 = self._make_bf16_compute_decoder(cfg_r16.vocab_size, hidden=16, seed=7)
+    m_f32 = self._make_bf16_compute_decoder(cfg_f32.vocab_size, hidden=16, seed=7)
+    init_proj = np.array(m_f32.proj.kernel.get_value(), dtype=np.float32)
+
+    repl_dev = jax.sharding.NamedSharding(m_r16.mesh, jax.sharding.PartitionSpec(), memory_kind="device")
+    repl_host = jax.sharding.NamedSharding(m_r16.mesh, jax.sharding.PartitionSpec(), memory_kind="pinned_host")
+
+    tx = optax.adamw(learning_rate=lr, weight_decay=0.01)
+    ts_r16 = train_state_nnx.create_train_state(m_r16, tx, cfg_r16)
+    ts_f32 = train_state_nnx.create_train_state(m_f32, tx, cfg_f32)
+    g_r16, s_r16 = nnx.split(ts_r16)
+    g_f32, s_f32 = nnx.split(ts_f32)
+
+    def _build_shardings(state):
+      shardings = jax.tree.map(lambda _: repl_dev, state)
+      if offload:
+        shardings.optimizer = jax.tree.map(lambda _: repl_host, state.optimizer)
+      _, params_shardings, _ = nnx.split(shardings.model, nnx.Param, ...)
+      return shardings, params_shardings
+
+    shardings_r16, params_shardings_r16 = _build_shardings(s_r16)
+    shardings_f32, params_shardings_f32 = _build_shardings(s_f32)
+    s_r16 = jax.device_put(s_r16, shardings_r16)
+    s_f32 = jax.device_put(s_f32, shardings_f32)
+
+    step_r16 = jax.jit(
+        functools.partial(pre_train.train_step, g_r16, cfg_r16, shardings_r16, params_shardings_r16),
+        in_shardings=(shardings_r16, None),
+        out_shardings=(shardings_r16, None),
+    )
+    step_f32 = jax.jit(
+        functools.partial(pre_train.train_step, g_f32, cfg_f32, shardings_f32, params_shardings_f32),
+        in_shardings=(shardings_f32, None),
+        out_shardings=(shardings_f32, None),
+    )
+
+    batch = cfg_r16.micro_batch_size_to_train_on * ga_steps
+    step0_losses = None
+    for step_idx in range(num_steps):
+      data = _make_data(batch=batch, vocab=cfg_r16.vocab_size)
+      data["inputs"] = jax.random.randint(jax.random.PRNGKey(100 + step_idx), (batch, 4), 0, cfg_r16.vocab_size)
+      data["targets"] = jax.random.randint(jax.random.PRNGKey(200 + step_idx), (batch, 4), 0, cfg_r16.vocab_size)
+      with jax.set_mesh(m_r16.mesh):
+        s_r16, met_r16 = step_r16(s_r16, data)
+      with jax.set_mesh(m_f32.mesh):
+        s_f32, met_f32 = step_f32(s_f32, data)
+      if step_idx == 0:
+        step0_losses = (float(met_r16["scalar"]["learning/loss"]), float(met_f32["scalar"]["learning/loss"]))
+
+    return s_r16, s_f32, init_proj, step0_losses
+
+  def test_residual16_gradient_accumulation_host_offload_and_negative_controls(self):
+    keys = (("embed", "embedding"), ("proj", "kernel"), ("proj", "bias"))
+    for ga_steps, offload in ((1, False), (2, False), (2, True)):
+      with self.subTest(ga_steps=ga_steps, offload=offload):
+        s_r16, s_f32, init_proj, step0_losses = self._run_multi_step_pair(
+            ga_steps=ga_steps, offload=offload, num_steps=5, lr=2e-3
+        )
+        np.testing.assert_allclose(step0_losses[0], step0_losses[1], rtol=0, atol=0)
+        self.assertEqual(int(s_r16["optimizer"]["step"].get_value()), 5)
+        self.assertIn("master_residuals", s_r16["optimizer"])
+        if offload:
+          self.assertEqual(
+              s_r16["optimizer"]["master_residuals"]["proj"]["kernel"].get_value().sharding.memory_kind,
+              "pinned_host",
+          )
+          self.assertEqual(s_r16["model"]["proj"]["kernel"].get_value().sharding.memory_kind, "device")
+        max_delta = float(np.max(np.abs(np.asarray(s_f32.to_pure_dict()["model"]["proj"]["kernel"]) - init_proj)))
+        self.assertGreater(max_delta, 5e-3)
+        self._assert_reconstructed_master_parity(s_r16, s_f32, keys, rtol=1e-5, atol=1e-5)
+
+    # Negative control 1: a no-op Residual16Optimizer.update (only incrementing `step`) MUST fail parity.
+    def _noop_update(opt_self, model, grads, /, **kwargs):
+      del model, grads, kwargs
+      opt_self.step[...] += 1
+
+    # Negative control 2: updating bf16 working weights while leaving `master_residuals` stale MUST fail parity.
+    def _stale_residuals_update(opt_self, model, grads, /, **kwargs):
+      param_arrays = nnx.as_pure(nnx.state(model, opt_self.wrt, graph=opt_self.graph))
+      grad_arrays = nnx.as_pure(nnx.state(grads, opt_self.wrt, graph=opt_self.graph))
+      opt_state_arrays = nnx.as_pure(opt_self.opt_state)
+      residuals_pure = nnx.as_pure(opt_self.master_residuals)
+      flat_residuals = train_state_nnx._flatten_leaves_by_key_tuple(residuals_pure)  # pylint: disable=protected-access
+      f32_params = jax.tree_util.tree_map_with_path(
+          lambda p, w: (
+              train_state_nnx.reconstruct_f32_from_bf16_residual16(
+                  w,
+                  flat_residuals[train_state_nnx._key_tuple(p)],  # pylint: disable=protected-access
+              )
+              if train_state_nnx._key_tuple(p) in flat_residuals  # pylint: disable=protected-access
+              else w
+          ),
+          param_arrays,
+      )
+      updates, new_opt_state = opt_self.tx.update(grad_arrays, opt_state_arrays, f32_params, **nnx.as_pure(kwargs))
+      new_f32 = jax.tree.map(lambda p, u: jnp.asarray(p + u, dtype=p.dtype), f32_params, updates)
+      new_bf16 = jax.tree_util.tree_map_with_path(
+          lambda p, p_new: (
+              train_state_nnx.split_f32_to_bf16_residual16(p_new)[0]
+              if train_state_nnx._key_tuple(p) in flat_residuals  # pylint: disable=protected-access
+              else p_new
+          ),
+          new_f32,
+      )
+      nnx.update(model, new_bf16)
+      nnx.update(opt_self.opt_state, nnx.state(new_opt_state, graph=opt_self.graph))
+      # Intentionally leave `opt_self.master_residuals` stale!
+      opt_self.step[...] += 1
+
+    for ga_steps in (1, 2):
+      with mock.patch.object(train_state_nnx.Residual16Optimizer, "update", _noop_update):
+        bad_noop_r16, ref_f32, _, _ = self._run_multi_step_pair(ga_steps=ga_steps, offload=False, num_steps=5, lr=2e-3)
+      with self.assertRaises(AssertionError, msg=f"No-op update must fail master-weight parity for GA={ga_steps}"):
+        self._assert_reconstructed_master_parity(bad_noop_r16, ref_f32, keys, rtol=1e-5, atol=1e-5)
+
+      with mock.patch.object(train_state_nnx.Residual16Optimizer, "update", _stale_residuals_update):
+        bad_stale_r16, ref_f32, _, _ = self._run_multi_step_pair(ga_steps=ga_steps, offload=False, num_steps=5, lr=2e-3)
+      with self.assertRaises(
+          AssertionError, msg=f"Stale master_residuals update must fail master-weight parity for GA={ga_steps}"
+      ):
+        self._assert_reconstructed_master_parity(bad_stale_r16, ref_f32, keys, rtol=1e-5, atol=1e-5)
 
 
 class TestNNXNamedScopeContext(unittest.TestCase):

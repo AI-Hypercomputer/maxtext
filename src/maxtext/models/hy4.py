@@ -136,14 +136,17 @@ class Hy4HyperConnection(nnx.Module):
             out_axis=1,
         ),
         out_sharding=("activation_embed", None),
+        keep_fp32_master=True,
     )
     self.base = nnx.Param(
         default_bias_init(rngs.params(), (2 * self.k,), jnp.float32),
         out_sharding=(None,),
+        keep_fp32_master=True,
     )
     self.scale = nnx.Param(
         default_scalar_init(rngs.params(), (2,), jnp.float32),
         out_sharding=(None,),
+        keep_fp32_master=True,
     )
 
   def compute_pre_post(self, hidden_streams: Array) -> tuple[Array, Array]:
@@ -208,14 +211,17 @@ class Hy4HyperHead(nnx.Module):
             out_axis=1,
         ),
         out_sharding=("activation_embed", None),
+        keep_fp32_master=True,
     )
     self.hc_base = nnx.Param(
         default_bias_init(rngs.params(), (self.mhc_expansion_rate,), jnp.float32),
         out_sharding=(None,),
+        keep_fp32_master=True,
     )
     self.hc_scale = nnx.Param(
         default_scalar_init(rngs.params(), (1,), jnp.float32),
         out_sharding=(None,),
+        keep_fp32_master=True,
     )
 
   def __call__(self, x: Array) -> Array:
@@ -265,6 +271,8 @@ class Hy4Indexer(attention_mla.Indexer):
         param_dtype=jnp.float32,
         rngs=self.rngs,
     )
+    self.k_norm.scale.set_metadata(keep_fp32_master=True)
+    self.k_norm.bias.set_metadata(keep_fp32_master=True)
     self.weights_proj = DenseGeneral(
         in_features_shape=self.config.emb_dim,
         out_features_shape=self.n_heads,
@@ -276,6 +284,7 @@ class Hy4Indexer(attention_mla.Indexer):
         shard_mode=self.config.shard_mode,
         rngs=self.rngs,
     )
+    self.weights_proj.kernel.set_metadata(keep_fp32_master=True)
 
   def apply_partial_rope(
       self,
@@ -421,6 +430,7 @@ class Hy4Attention(attention_mla.MLA):
     self.sinks = nnx.Param(
         default_bias_init(self.rngs.params(), (self.num_query_heads,), jnp.float32),
         out_sharding=(None,),
+        keep_fp32_master=True,
     )
 
     # Replace base Indexer with Hy4Indexer on "full" indexer layers; "shared" layers have no indexer.

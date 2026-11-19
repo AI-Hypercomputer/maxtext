@@ -217,6 +217,11 @@ def setup_initial_lora_state(data_iterator, tx, config, mesh, checkpoint_manager
     from maxtext.common import train_state_nnx
     from maxtext.utils import model_creation_utils
 
+    if config.fp32_master_storage != "f32":
+      raise ValueError(
+          f"LoRA does not support fp32_master_storage={config.fp32_master_storage!r}; set fp32_master_storage='f32'."
+      )
+
     _create_model_partial, _ = model_creation_utils.create_nnx_abstract_model(config, mesh)
 
     def create_train_state_fn():
