@@ -32,6 +32,7 @@ from typing import Any, Literal, NewType, Optional
 
 import jax
 from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
+from maxtext.common.common_types import FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -4026,6 +4027,18 @@ class ElasticTraining(BaseModel):
           " the bound is implied to be `per_device_batch_size` and this must stay -1."
       ),
   )
+  elastic_hbm_budget_fraction: float = Field(
+      0.9,
+      ge=0.0,
+      le=1.0,
+      description=(
+          "With `elastic_global_batch_size_mode='constant_padded'`, the fraction of device HBM the compiled train step"
+          " may use when a resize raised `per_device_batch_size` above its nominal value. If the compiled step needs"
+          " more, the attempt is restarted with `elastic_max_per_device_batch_size` set to the nominal per-device batch,"
+          " so only the gradient accumulation steps grow. 0 disables the check. A no-op with"
+          " `elastic_global_batch_size_mode='constant_grad_accum'`, whose per-device batch never grows."
+      ),
+  )
 
   @property
   def constant_global_batch_active(self) -> bool:
@@ -4638,6 +4651,13 @@ class DerivedValues(BaseModel):
   logical_global_batch_size_to_load: None | int = Field(
       None,
       description="Unpadded global dataloader batch size across all job devices in `constant_padded` elastic mode.",
+  )
+  elastic_nominal_per_device_batch_size: int | None = Field(
+      None,
+      description=(
+          "In `constant_padded` elastic mode, the configured `per_device_batch_size` when a resize raised it above that"
+          " value; None when it is unchanged. The HBM budget check falls back to this value."
+      ),
   )
   global_batch_size_to_load_eval: None | int = Field(
       None,
@@ -6239,6 +6259,8 @@ class MaxTextConfig(
             self.logical_global_batch_size_to_train_on,
             planned_batch * self.num_target_devices * planned_steps - self.logical_global_batch_size_to_train_on,
         )
+        if planned_batch > int(self.per_device_batch_size):
+          self.elastic_nominal_per_device_batch_size = int(self.per_device_batch_size)
         self.per_device_batch_size = float(planned_batch)
         self.gradient_accumulation_steps = planned_steps
         if pipeline_microbatches > 0 and eval_tracks_train_batch:
@@ -6602,7 +6624,7 @@ class MaxTextConfig(
               " `elastic_max_per_device_batch_size` set), which `use_tunix_gradient_accumulation=True` does not support",
           ),
           (
-              steps_may_change and self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling"),
+              steps_may_change and self.quantization in FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION,
               "may change `gradient_accumulation_steps` on a resize (`constant_grad_accum`, or"
               " `elastic_max_per_device_batch_size` set), which FP8 quantization does not support",
           ),
@@ -6941,10 +6963,7 @@ class MaxTextConfig(
           " add, score function, gemma4 router norm) are second-order next to the quantization error."
           " Set `quantize_router_proj=False` to keep the projection in fp32."
       )
-    if (
-        self.quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
-        and self.gradient_accumulation_steps > 1
-    ):
+    if self.quantization in FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION and self.gradient_accumulation_steps > 1:
       raise ValueError("FP8 quantization is not compatible with gradient accumulation.")
     if self.engram_layers:
       if not self.hf_access_token or not self.tokenizer_path:

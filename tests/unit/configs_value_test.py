@@ -1827,9 +1827,15 @@ class ConfigTest(absltest.TestCase):
           *keep, "per_device_batch_size=5", "elastic_max_per_device_batch_size=5", num_live_devices=live
       )
       self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (5.0, 1))
-    # The legacy default is unchanged.
+    # The legacy default is unchanged, and records the nominal per-device batch for the HBM budget check.
     cfg = self._elastic_config(*keep, "per_device_batch_size=5")
-    self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (7.0, 1))
+    self.assertEqual(
+        (cfg.per_device_batch_size, cfg.gradient_accumulation_steps, cfg.elastic_nominal_per_device_batch_size),
+        (7.0, 1, 5),
+    )
+    # When the per-device batch is unchanged there is nothing to fall back to.
+    cfg = self._elastic_config(*keep, "per_device_batch_size=5", "elastic_max_per_device_batch_size=5")
+    self.assertIsNone(cfg.elastic_nominal_per_device_batch_size)
     # logical 320 on 16 devices: B'=1 K'=20 and B'=2 K'=10 both pad nothing; the tie goes to the smaller B'.
     cfg = self._elastic_config(
         *keep, "per_device_batch_size=1", "gradient_accumulation_steps=16", "elastic_max_per_device_batch_size=2"

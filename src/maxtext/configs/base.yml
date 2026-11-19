@@ -1848,3 +1848,8 @@ elastic_global_batch_size_mode: "scaled"
 # it is never lowered below per_device_batch_size). With "constant_grad_accum" the bound is implied to be
 # per_device_batch_size and this must stay -1.
 elastic_max_per_device_batch_size: -1
+# With "constant_padded", the fraction of device HBM the compiled train step may use when a resize raised
+# per_device_batch_size above its nominal value. If it needs more, the attempt restarts with
+# elastic_max_per_device_batch_size set to the nominal per-device batch (only gradient_accumulation_steps grows).
+# 0 disables the check. A no-op with "constant_grad_accum", whose per-device batch never grows.
+elastic_hbm_budget_fraction: 0.9

@@ -1377,13 +1377,32 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       # compile would only add a third full compilation on top of the profiling
       # compile and the FDO recompile; skip it and its memory stats.
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
-      aot_compile_step(p_train_step, lower_args, compiler_options, prefix="train")
+      # A `constant_padded` resize that raised the per-device batch must fit in HBM; otherwise the attempt is
+      # restarted with the per-device batch bounded (see `get_train_func`). XLA may already run out of HBM inside
+      # the compile, so the compile itself is part of the check. The dropless and first-phase programs run with the
+      # same raised per-device batch (and the dropless one has larger MoE buffers), so they are checked too.
+      elastic_utils.compile_and_check_hbm_budget(
+          config, lambda: aot_compile_step(p_train_step, lower_args, compiler_options, prefix="train")
+      )
       precompiled_train = True
       if p_train_step_dropless is not None:
         # Precompile the dropless retry program here so no compile happens inside the timed loop.
-        aot_compile_step(p_train_step_dropless, lower_args, compiler_options, prefix="train_dropless")
+        elastic_utils.compile_and_check_hbm_budget(
+            config,
+            lambda: aot_compile_step(p_train_step_dropless, lower_args, compiler_options, prefix="train_dropless"),
+        )
       if p_train_step_first_phase is not None:
-        aot_compile_step(p_train_step_first_phase, lower_args, compiler_options, prefix="train_first_phase")
+        elastic_utils.compile_and_check_hbm_budget(
+            config,
+            lambda: aot_compile_step(p_train_step_first_phase, lower_args, compiler_options, prefix="train_first_phase"),
+        )
+    elif jax.config.jax_enable_pgle and elastic_utils.hbm_preflight_nominal_batch(config) is not None:
+      max_logging.log(
+          "Elastic utils: skipping the HBM pre-flight check of the raised per_device_batch_size"
+          f" {config.per_device_batch_size} (nominal {config.elastic_nominal_per_device_batch_size}) because AutoPGLE"
+          " skips the ahead-of-time compile; an out-of-memory step will fail at the first train step. Set"
+          " elastic_max_per_device_batch_size to a per-device batch known to fit in HBM to avoid this."
+      )
 
   if p_eval_step is not None:
     # Also used by warm_eval_input_reshard_before_run_start, which applies with a pre-compiled train step too.
@@ -1682,16 +1701,30 @@ def get_train_func(config, recorder, argv):
 
     def elastic_train_wrapper(argv: Sequence[str]) -> None:
       """Wrapper for elastic training initializes variables and runs the train loop."""
-      # Reuse the config and goodput recorder from the previous attempt if it ran on the same slices. After a
-      # replica resize `initialize` runs again so the config picks up the new slice count.
-      elastic_config, elastic_recorder = elastic_utils.get_or_build(
-          elastic_retry_cache, "initialize", functools.partial(initialize, argv)
-      )
-      run(
-          elastic_config,
-          elastic_recorder,
-          elastic_retry_cache=elastic_retry_cache,
-      )
+      while True:
+        # Reuse the config and goodput recorder from the previous attempt if it ran on the same slices. After a
+        # replica resize `initialize` runs again so the config picks up the new slice count, plus any overrides
+        # recorded by earlier attempts (e.g. the per-device batch bound below).
+        attempt_argv = [*argv, *elastic_retry_cache.config_overrides]
+        elastic_config, elastic_recorder = elastic_utils.get_or_build(
+            elastic_retry_cache, "initialize", functools.partial(initialize, attempt_argv)
+        )
+        try:
+          run(
+              elastic_config,
+              elastic_recorder,
+              elastic_retry_cache=elastic_retry_cache,
+          )
+          return
+        except elastic_utils.HbmBudgetExceededError as e:
+          # The resize raised the per-device batch beyond what fits in HBM. Rebuild the attempt on the same slices
+          # with the per-device batch bounded to its nominal value, so only the accumulation steps grow. This is not
+          # an elastic event: no retry is consumed and the slices don't change.
+          override = elastic_utils.hbm_budget_override(e.nominal_per_device_batch_size)
+          if not elastic_retry_cache.add_config_override(override):
+            raise
+          max_logging.log(f"Elastic utils: {e}")
+          elastic_utils.cleanup_iterators()
 
     # Every attempt goes through `elastic_train_wrapper`; the cache decides how much of it is skipped.
     train_func = elastic_utils.elastic_retry(
