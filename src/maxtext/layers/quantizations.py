@@ -1766,27 +1766,36 @@ def is_dynamic_qwag_calibration(calibration_method: str | None) -> bool:
   return bool(calibration_method) and calibration_method.lower() == "absmax"
 
 
-def qwag_amax_reduce_axes(granularity: str, ndim: int) -> tuple[int, ...]:
-  """Axes of an [E, K, N] (flat: [E * K, N]) weight that the QWAG amax reduces for `granularity`."""
+def qwag_amax_reduce_axes(granularity: str, ndim: int, *, rhs_transpose: bool = False) -> tuple[int, ...]:
+  """Axes of an [E, K, N] (or [E, N, K] when rhs_transpose; flat: [E * K, N]) weight that QWAG amax reduces."""
+  if rhs_transpose and ndim != 3:
+    raise ValueError(f"rhs_transpose=True QWAG weight scales need a 3D [E, N, K] weight, got rank {ndim}.")
   if granularity == "per_tensor":
     return tuple(range(ndim))
   if granularity == "per_channel":
+    if rhs_transpose:
+      return (0, 2)
     return tuple(range(ndim - 1))
   if granularity == "per_expert_channel":
     if ndim != 3:
       raise ValueError(f"per_expert_channel QWAG weight scales need a 3D [E, K, N] weight, got rank {ndim}.")
-    return (1,)
+    return (2,) if rhs_transpose else (1,)
   raise ValueError(f"Unknown moe_weight_quantization_granularity: {granularity!r}.")
 
 
-def qwag_amax_kept_axes(granularity: str, ndim: int) -> tuple[int, ...]:
-  """Axes of an [E, K, N] (flat: [E*K, N]) weight that the QWAG amax keeps for `granularity`."""
-  reduced = qwag_amax_reduce_axes(granularity, ndim)
+def qwag_amax_kept_axes(granularity: str, ndim: int, *, rhs_transpose: bool = False) -> tuple[int, ...]:
+  """Axes of an [E, K, N] (or [E, N, K] when rhs_transpose; flat: [E*K, N]) weight that QWAG amax keeps."""
+  reduced = qwag_amax_reduce_axes(granularity, ndim, rhs_transpose=rhs_transpose)
   return tuple(a for a in range(ndim) if a not in reduced)
 
 
 def qwag_weight_amax(
-    weights: Sequence[jax.Array], dtype: DType, granularity: str, layer_axis: int | None = None
+    weights: Sequence[jax.Array],
+    dtype: DType,
+    granularity: str,
+    layer_axis: int | None = None,
+    *,
+    rhs_transpose: bool = False,
 ) -> tuple[jax.Array, ...]:
   """Per-`granularity` amax of each weight (keepdims, no grad); `layer_axis` is a kept scan axis.
 
@@ -1794,7 +1803,11 @@ def qwag_weight_amax(
   """
   amaxes = []
   for w in weights:
-    axes = qwag_amax_reduce_axes(granularity, w.ndim if layer_axis is None else w.ndim - 1)
+    axes = qwag_amax_reduce_axes(
+        granularity,
+        w.ndim if layer_axis is None else w.ndim - 1,
+        rhs_transpose=rhs_transpose,
+    )
     if layer_axis is not None:
       axes = tuple(a + (a >= layer_axis) for a in axes)
     amaxes.append(jax.lax.stop_gradient(jnp.max(jnp.abs(w), axis=axes, keepdims=True).astype(dtype)))
