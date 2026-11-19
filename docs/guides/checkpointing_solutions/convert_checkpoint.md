@@ -39,7 +39,7 @@ The following models are supported:
 
 Use the `to_maxtext.py` script to convert a Hugging Face model checkpoint into a MaxText checkpoint. The script will automatically download the specified model from the Hugging Face Hub, perform conversion, and save converted checkpoints to the given output directory.
 
-> **Note:** For more information, checkout [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/4b/test_qwen3_to_mt.sh) and [gemma3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma3/4b/test_gemma3_to_mt.sh).
+> **Note:** For more information, checkout [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/cpu/qwen3/4b/test_qwen3_to_mt.sh) and [gemma3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/cpu/gemma3/4b/test_gemma3_to_mt.sh).
 
 > **Note (Multimodal Models / Gemma 3):** When converting [multimodal models](../../tutorials/posttraining/multimodal.md) to maxtext, you must set `use_multimodal=true` and disable lazy loading with `--lazy_load_tensors=False` (lazy loading of HF tensors is not supported for multimodal models yet).
 >
@@ -104,7 +104,7 @@ You can find your converted checkpoint files under `${BASE_OUTPUT_DIRECTORY}/0/i
 
 Use the `to_huggingface.py` script to convert a MaxText checkpoint into the Hugging Face format. This is useful for sharing your models or integrating them with the Hugging Face ecosystem.
 
-> **Note:** For more information, checkout [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/qwen3/4b/test_qwen3_to_hf.sh).
+> **Note:** For more information, checkout [qwen3-4b example script](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/cpu/qwen3/4b/test_qwen3_to_hf.sh).
 
 > **Note (Gemma 4 E2B / E4B):** The `gemma4-e2b` and `gemma4-e4b` variants use the `gemma4_small` decoder block and must be converted with `scan_layers=False`. If your MaxText checkpoint was fine-tuned from the base model, also pass `--hf_model_path=google/gemma-4-E4B` (or `google/gemma-4-E2B`) so the exported checkpoint bundles the base tokenizer — otherwise `to_huggingface` sources the tokenizer from `HF_IDS[gemma4-e4b]` = `google/gemma-4-E4B-it`.
 

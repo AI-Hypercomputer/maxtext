@@ -10,7 +10,7 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_gpt_oss_to_mt.sh $RUN_ID
+# bash tests/end_to_end/cpu/gpt_oss/20b/test_gpt_oss_to_mt.sh $RUN_ID
 # bash test_gpt_oss_rl.sh $RUN_ID
 
 set -ex

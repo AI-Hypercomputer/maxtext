@@ -23,7 +23,9 @@ MODEL_NAME='gpt-oss-20b'
 HF_GOLDEN_MODEL='unsloth/gpt-oss-20b-BF16'
 
 # Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you want to store scanned and unscanned checkpoints
-BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/${MODEL_NAME}}"
+# BASE_OUTPUT_PATH is also honored: callers of the former tests/end_to_end/tpu/gpt_oss/20b scripts set it.
+BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-${BASE_OUTPUT_PATH:-gs://runner-maxtext-logs/${MODEL_NAME}}}"
+BASE_OUTPUT_DIRECTORY=${BASE_OUTPUT_DIRECTORY%/}
 
 # Step 1: Install torch if not already installed
 if ! python3 -c "import torch" &>/dev/null; then

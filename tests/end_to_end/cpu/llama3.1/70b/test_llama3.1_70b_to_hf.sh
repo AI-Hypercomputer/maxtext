@@ -4,7 +4,7 @@
 
 # Usage:
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash tests/end_to_end/cpu/llama3.1/70b/test_llama3.1_70b_to_hf.sh $RUN_ID $CHECKPOINT_PATH $SCAN_LAYERS
+# bash tests/end_to_end/cpu/llama3.1/70b/test_llama3.1_70b_to_hf.sh $RUN_ID $CHECKPOINT_PATH $USE_MULTIMODAL $SCAN_LAYERS
 
 set -ex
 
@@ -13,7 +13,8 @@ unset M_RUN_NAME
 
 run_id=${1:?"Error: run_id (argument 1) is required"}
 CKPT_PATH=${2:?"Error: CKPT_PATH (argument 2) is required"}
-SCAN_LAYERS=${3:-false}
+USE_MULTIMODAL=${3:-false}
+SCAN_LAYERS=${4:-false}
 
 MODEL_NAME='llama3.1-70b'
 BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/${MODEL_NAME}}"
@@ -29,6 +30,7 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
     tokenizer_type="huggingface" \
     load_parameters_path=${CKPT_PATH} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
+    use_multimodal=${USE_MULTIMODAL} \
     scan_layers=$SCAN_LAYERS \
     weight_dtype=bfloat16 \
     checkpoint_storage_use_zarr3=False \

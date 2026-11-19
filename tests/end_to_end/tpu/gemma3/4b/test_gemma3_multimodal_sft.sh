@@ -10,7 +10,7 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_gemma3_to_mt.sh $RUN_ID true
+# bash tests/end_to_end/cpu/gemma3/4b/test_gemma3_to_mt.sh $RUN_ID true
 # bash test_gemma3_multimodal_sft.sh $RUN_ID
 
 # Note: You can stop at any step if you just want to run part of the flow.

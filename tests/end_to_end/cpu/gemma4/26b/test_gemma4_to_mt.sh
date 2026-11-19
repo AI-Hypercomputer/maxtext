@@ -21,9 +21,10 @@ unset M_RUN_NAME
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='gemma4-26b'
-# Pretrained checkpoint: the GPU script trains on raw text and decodes a raw prompt, and on raw text the
-# instruction-tuned google/gemma-4-26b-a4b-it is at chance level (also in Hugging Face itself).
-HF_GOLDEN_MODEL='google/gemma-4-26b-a4b'
+# Pretrained checkpoint by default: the pre-training scripts train on raw text and decode a raw prompt, and on raw text
+# the instruction-tuned google/gemma-4-26b-a4b-it is at chance level (also in Hugging Face itself).
+# Set HF_GOLDEN_MODEL=google/gemma-4-26b-a4b-it to convert the instruction-tuned checkpoint instead.
+HF_GOLDEN_MODEL="${HF_GOLDEN_MODEL:-google/gemma-4-26b-a4b}"
 
 # To convert the multimodal model, make sure use_multimodal is set to true
 USE_MULTIMODAL=${2:-false}

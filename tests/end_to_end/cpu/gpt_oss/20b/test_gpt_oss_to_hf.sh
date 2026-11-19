@@ -16,7 +16,9 @@ CKPT_PATH=${2:?"Error: CKPT_PATH (argument 2) is required"}
 SCAN_LAYERS=${3:-false}
 
 MODEL_NAME='gpt-oss-20b'
-BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/${MODEL_NAME}}"
+# BASE_OUTPUT_PATH is also honored: callers of the former tests/end_to_end/tpu/gpt_oss/20b scripts set it.
+BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-${BASE_OUTPUT_PATH:-gs://runner-maxtext-logs/${MODEL_NAME}}}"
+BASE_OUTPUT_DIRECTORY=${BASE_OUTPUT_DIRECTORY%/}
 
 if [ "${SCAN_LAYERS,,}" = "true" ]; then
     scan_status="scanned"
