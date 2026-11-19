@@ -53,7 +53,7 @@ python3 -m tests.utils.zero_gen_logits_checker \
 
 ## 4. Training & SFT Correctness Smoke Check (If Applicable)
 
-Verify multi-step training stability (`remat_policy=full`) on both `scanned` and `unscanned` full checkpoints:
+Verify multi-step training stability (`remat_policy=full`) on both `scanned` and `unscanned` full checkpoints (if TPU HBM is insufficient on your TPU VM or cluster, apply the HBM-saving ladder in [wiki/hbm_verification.md](wiki/hbm_verification.md)):
 1. **Pre-training**: Run 5–10 steps of `maxtext.trainers.pre_train.train` on C4 (from converted checkpoint and/or random init) and confirm finite, matching `scanned` / `unscanned` loss trajectories.
 2. **SFT**: Run 5–10 steps of `maxtext.trainers.post_train.sft.train_sft_native` with assistant-only completion masking (and optional `--mode=holdout_ce` check).
 
