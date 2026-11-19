@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AI-Hypercomputer/maxtext/.agents/skills/maxtext-pr-upload/resources/learned_lessons_schema.json",
+  "title": "MaxText Review Knowledge Base Lesson",
+  "description": "Schema for JSONL entries consumed by build_local_review_prompt.py.",
+  "type": "object",
+  "required": [
+    "repo",
+    "kind",
+    "category",
+    "rule"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "repo": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Target repository slug (e.g. 'maxtext', 'general', 'global', or 'all')."
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "must_catch",
+        "do_not_flag"
+      ],
+      "description": "Whether reviewers must flag violations ('must_catch') or avoid false alarms ('do_not_flag')."
+    },
+    "category": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Subsystem category used by build_local_review_prompt.py for path-aware filtering."
+    },
+    "rule": {
+      "type": "string",
+      "minLength": 10,
+      "description": "Self-contained, verifiable MaxText code or CI review invariant."
+    },
+    "source": {
+      "type": "string",
+      "description": "Provenance label (e.g. 'maxtext-ci-invariant', 'maxtext-review-criteria')."
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "archived"
+      ],
+      "default": "active",
+      "description": "Lifecycle state; 'archived' entries are skipped during prompt generation."
+    },
+    "fingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{16}$",
+      "description": "16-char lowercase hex SHA-256 prefix over '<repo>|<kind>|<normalized_rule>'."
+    },
+    "timestamp": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}Z$",
+      "description": "UTC ISO-8601 creation or update timestamp used for deterministic tie-breaking."
+    }
+  }
+}
