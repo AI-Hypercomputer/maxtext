@@ -1259,6 +1259,73 @@ class TestGetShapedBatch(unittest.TestCase):
     self.assertIn("inputs", shaped_batch)
     self.assertEqual(shaped_batch["inputs"].sharding, sharding_spec)
 
+  def test_get_shaped_batch_simplenamespace_mock_without_vision_encoder_block(self):
+    """B4: Verify SimpleNamespace mocks without vision_encoder_block do not raise AttributeError."""
+    cfg = SimpleNamespace(
+        enable_diloco=False,
+        global_batch_size_to_load=4,
+        max_target_length=16,
+        use_multimodal=True,
+        micro_batch_size_to_train_on=4,
+        model_name="gemma3-4b",
+        use_audio=False,
+        use_mrope=False,
+    )
+    batch = maxtext_utils.get_shaped_batch(cfg)
+    self.assertIn("images", batch)
+    self.assertEqual(batch["images"].dtype, jnp.int32)
+
+  def test_get_shaped_batch_deepseek41_diloco_5d_shape(self):
+    """B4: Verify DeepSeek-V4.1 with DiLoCo produces 5D images shape matching runtime iterator."""
+    cfg = SimpleNamespace(
+        enable_diloco=True,
+        num_diloco_replicas=2,
+        global_batch_size_to_load=4,
+        max_target_length=16,
+        use_multimodal=True,
+        micro_batch_size_to_train_on=2,
+        model_name="deepseek4.1-flash",
+        vision_encoder_block="deepseek41",
+        dataset_type="synthetic",
+        ds41_vision_grid=[39, 39],
+        max_num_images_per_example=1,
+        num_channels_for_vit=3,
+        patch_size_for_vit=16,
+        use_audio=False,
+        use_mrope=False,
+    )
+    batch = maxtext_utils.get_shaped_batch(cfg)
+    self.assertIn("images", batch)
+    self.assertEqual(batch["images"].ndim, 5)
+    self.assertEqual(batch["images"].shape[0], 2)
+    self.assertEqual(batch["images"].shape[1], 2)
+    self.assertEqual(batch["images"].dtype, jnp.float32)
+
+  def test_get_shaped_batch_deepseek41_leading_batch_sharding(self):
+    """B4: Verify 2D batch_sharding applies only to batch axis of 4D images without sharding num_images."""
+    cfg = SimpleNamespace(
+        enable_diloco=False,
+        global_batch_size_to_load=4,
+        max_target_length=16,
+        use_multimodal=True,
+        micro_batch_size_to_train_on=4,
+        model_name="deepseek4.1-flash",
+        vision_encoder_block="deepseek41",
+        dataset_type="synthetic",
+        ds41_vision_grid=[39, 39],
+        max_num_images_per_example=2,
+        num_channels_for_vit=3,
+        patch_size_for_vit=16,
+        use_audio=False,
+        use_mrope=False,
+    )
+    devices = np.array(jax.local_devices()[:1]).reshape(1, 1)
+    mesh = Mesh(devices, ("data", "fsdp"))
+    batch_shd = NamedSharding(mesh, PartitionSpec("data", "fsdp"))
+    batch = maxtext_utils.get_shaped_batch(cfg, batch_sharding=batch_shd)
+    self.assertIn("images", batch)
+    self.assertEqual(batch["images"].sharding.spec, PartitionSpec("data", None, None, None))
+
 
 class TestShouldPreventCseInRemat(unittest.TestCase):
   """Tests for should_prevent_cse_in_remat."""

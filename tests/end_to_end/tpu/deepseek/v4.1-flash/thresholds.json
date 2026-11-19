@@ -1,0 +1,177 @@
+{
+  "model_name": "deepseek4.1-flash",
+  "TT1": {
+    "description": "R1/R2 short text prompts ('I love to', 'Today is a', 'What is the'; seq_len <= 16)",
+    "max_kl": 2e-07,
+    "last_token_top10_matches": 10
+  },
+  "TT2": {
+    "description": "R1/R2 462-token text prompt (seq_len > 16, Option (a): max KL <= 0.0212, mean KL <= 1e-4, last-token top-10 10/10)",
+    "max_kl": 0.0212,
+    "mean_kl": 0.0001,
+    "last_token_top10_matches": 10
+  },
+  "TT3a": {
+    "description": "R1/R2 multimodal forward L1-L3 (<= 512 tokens, no indexer truncation): gated on both text_positions (token_types == -1) and all_positions",
+    "max_kl": 0.025,
+    "mean_kl": 0.0002,
+    "top1_agreement": 0.99,
+    "last_token_top10_matches": 10
+  },
+  "TT3b": {
+    "description": "R1/R2 multimodal forward L4 (~900 tokens, 4 images, truncation on ratio-1 layers): gated on both text_positions and all_positions",
+    "max_kl": 0.05,
+    "mean_kl": 0.0005,
+    "top1_agreement": 0.985,
+    "last_token_top10_matches": 10
+  },
+  "forward_logit_checker": {
+    "short_text_max_seq_len": 16,
+    "short_text_prompts": {
+      "max_kl": 2e-07,
+      "last_token_top10_matches": 10
+    },
+    "long_text_prompts": {
+      "max_kl": 0.0212,
+      "mean_kl": 0.0001,
+      "last_token_top10_matches": 10
+    },
+    "multimodal_cases": {
+      "L1": {
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "top1_agreement": 0.99,
+        "last_token_top10_matches": 10
+      },
+      "L2": {
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "top1_agreement": 0.99,
+        "last_token_top10_matches": 10
+      },
+      "L3": {
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "top1_agreement": 0.99,
+        "last_token_top10_matches": 10
+      },
+      "L4": {
+        "max_kl": 0.05,
+        "mean_kl": 0.0005,
+        "top1_agreement": 0.985,
+        "last_token_top10_matches": 10
+      },
+      "TT3a": {
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "top1_agreement": 0.99,
+        "last_token_top10_matches": 10
+      },
+      "TT3b": {
+        "max_kl": 0.05,
+        "mean_kl": 0.0005,
+        "top1_agreement": 0.985,
+        "last_token_top10_matches": 10
+      }
+    }
+  },
+  "TT4": {
+    "description": "R3 masked-prefill checker (thresholds_masked_prefill.md; 40 text + M1..M8 multimodal; cos_sim_diagnostic_only=false for all M1..M8)",
+    "p95_kl": 0.005,
+    "p99_kl": 0.002,
+    "mean_cos_sim": 0.999,
+    "rerun_bitwise_identical": true,
+    "rerun_argmax_identical": true,
+    "mean_batch_diff": 0.0001,
+    "diagnostic_only_fields": [
+      "intra_shard_max_diff",
+      "intra_shard_mean_diff",
+      "cross_shard_max_diff",
+      "cross_shard_mean_diff",
+      "max_batch_diff"
+    ],
+    "cross_shard_rel_warn": 0.0005,
+    "cos_sim_diagnostic_only": false,
+    "length_buckets": {
+      "<= 512": {
+        "max_seq_len": 512,
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "p99_kl": 0.002,
+        "top1_agreement": 0.99
+      },
+      "513 - 1024": {
+        "max_seq_len": 1024,
+        "max_kl": 0.05,
+        "mean_kl": 0.0005,
+        "p99_kl": 0.002,
+        "top1_agreement": 0.985
+      },
+      "1025 - 2048": {
+        "max_seq_len": 2048,
+        "max_kl": 0.08,
+        "mean_kl": 0.001,
+        "p99_kl": 0.002,
+        "top1_agreement": 0.98
+      },
+      "2049 - 4096": {
+        "max_seq_len": 4096,
+        "max_kl": 0.08,
+        "mean_kl": 0.001,
+        "p99_kl": 0.005,
+        "top1_agreement": 0.98
+      }
+    }
+  },
+  "TT5a": {
+    "description": "R4 20-step pretrain, image+text, ViT frozen (u6_verification_plan.md R7.2)",
+    "loss_0_min": 10.0,
+    "loss_0_max": 15.0,
+    "loss_4_max_delta_from_0": -1.0,
+    "loss_19_max_delta_from_0": -1.5,
+    "require_loss_19_lt_loss_4": true,
+    "step_to_step_max_increase": 0.05,
+    "moe_lb_loss_min": 5e-05,
+    "moe_lb_loss_max": 0.001,
+    "raw_grad_norm_max_ratio_to_step0": 10.0,
+    "vit_norm_bit_identical": true,
+    "bias_vl_norm_bit_identical": true,
+    "aligner_norm_must_change": true,
+    "delim_norm_must_change": true
+  },
+  "TT5b": {
+    "description": "5-step SFT + EOS probe, DS4.1 encoder (u6_verification_plan.md R7.2)",
+    "eos_probe_pass": true,
+    "loss_min": 0.5,
+    "loss_max": 3.0,
+    "loss_range_max": 0.5,
+    "raw_grad_norm_max_ratio_to_step0": 10.0,
+    "moe_lb_loss_min": 5e-05,
+    "moe_lb_loss_max": 0.001,
+    "bias_vl_norm_bit_identical": true,
+    "peak_hbm_max_aot_ratio": 1.1
+  },
+  "TT6": {
+    "description": "R4 static bias_vl norm bit-identical at every step and peak HBM budget (tolerance_table.md L93)",
+    "bias_vl_norm_bit_identical": true,
+    "peak_hbm_gb_lt": 94.7,
+    "peak_hbm_max_aot_ratio": 1.1
+  },
+  "aot_hbm_ceilings_gib": {
+    "A1": 85.0,
+    "A2": 85.0,
+    "A3": 85.0,
+    "A4": 85.0,
+    "A5": 85.0,
+    "A5t": 85.0,
+    "A6": 85.0,
+    "A7": 85.0,
+    "A7b": 85.0,
+    "A8": 92.0,
+    "A8t": 92.0,
+    "A8b": 92.0,
+    "A9": 92.0,
+    "A9t": 92.0,
+    "A9b": 92.0
+  }
+}

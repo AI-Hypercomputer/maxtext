@@ -1,0 +1,147 @@
+{
+  "base_commit": "5be418a17940ea93fed93b1772890addf5692a99",
+  "base_commit_subject": "Stream multi-shard DeepSeek-V4.1 weight audit and add stage resume",
+  "branch": "yaoyuchen/ds41-mm-integ",
+  "cherry_picks": [
+    {
+      "conflict_resolutions": [],
+      "integ_commit_sha": "14f674c9a28d5163e9d23294fafea68773fd2386",
+      "order": 1,
+      "pr_number": 5853,
+      "title": "Fix DeepSeek SFT pad_token == eos_token loss masking",
+      "upstream_merge_or_head_sha": "4d6911e173d61d4fd80a0a81772700b3bec5a6ab",
+      "upstream_source_commit_sha": "68d8070363758eb358a48858062611dbebd89c9d"
+    },
+    {
+      "conflict_resolutions": [],
+      "integ_commit_sha": "4b724556420e4638349a8dc9cb455eda08984b5d",
+      "order": 2,
+      "pr_number": 5883,
+      "title": "Add DeepSeek-V4 chat encoding to SFT preprocessing",
+      "upstream_merge_or_head_sha": "98fc5821773379683031dc89dd1765ec6d645923",
+      "upstream_source_commit_sha": "982ec5b822bf69925eed665a88d65ade99a99776"
+    },
+    {
+      "conflict_resolutions": [
+        {
+          "file": "tests/end_to_end/tpu/deepseek/sft_eos_probe.py",
+          "rationale": "Preserved PR #5884 EOS target loss-masking probe verbatim for Item 5 SFT verification.",
+          "resolution": "took_theirs_verbatim"
+        },
+        {
+          "file": "src/maxtext/configs/models/Run_DeepSeek.md",
+          "rationale": "V4-1600B documentation hunks depend on PR 714a20371 outside our DeepSeek-V4.1-Flash branch ancestry.",
+          "resolution": "kept_ours"
+        },
+        {
+          "file": "tests/end_to_end/tpu/deepseek/v4-1600b/2_test_deepseek.sh",
+          "rationale": "V4-1600B script depends on v4-1600b/1_test_deepseek.sh from PR 714a20371 not present on this branch.",
+          "resolution": "omitted_unmerged_v4_1600b_file"
+        },
+        {
+          "file": "tests/unit/deepseek_v4_e2e_script_test.py",
+          "rationale": "Tests v4-1600b/1_test_deepseek.sh which is absent on this branch; omitted to keep unit suite consistent.",
+          "resolution": "omitted_unmerged_v4_1600b_file"
+        }
+      ],
+      "integ_commit_sha": "c67a8eb4b56134d0e11f81f6ef336a9c62e2894b",
+      "order": 3,
+      "pr_number": 5884,
+      "title": "Add SFT stage to DeepSeek-V4-Pro (deepseek4-1600b) E2E test script",
+      "upstream_merge_or_head_sha": "14b9bcefab9525c7d73c5fcf614dda71dd468232",
+      "upstream_source_commit_sha": "b6574cedac543c68a5b6efd536af3afdd1680f21"
+    },
+    {
+      "conflict_resolutions": [
+        {
+          "file": "src/maxtext/configs/models/deepseek4.1-flash.yml",
+          "rationale": "Merged PR #5812 o_lora_up_proj logical_axis_rules while preserving U3..U6c vision tower config block.",
+          "resolution": "merged_both"
+        },
+        {
+          "file": "src/maxtext/configs/types.py",
+          "rationale": "Added PR #5812 ds41_per_layer_remat, ds41_attention_chunk, ds41_engram_lookup, and ds41_engram_a2a_capacity_factor alongside U3..U6c multimodal fields.",
+          "resolution": "merged_both"
+        },
+        {
+          "file": "src/maxtext/layers/attention_deepseek41.py",
+          "rationale": "Adopted PR #5812 jax.vmap _scatter_bool and _chunked_attention while threading decoder_segment_ids through both dense and chunked attention paths.",
+          "resolution": "merged_both"
+        },
+        {
+          "file": "src/maxtext/layers/engram_deepseek41.py",
+          "rationale": "Adopted PR #5812 sharded_row_lookup all_to_all/psum_scatter/gather dispatch while keeping float32 promotion in Engram projections.",
+          "resolution": "merged_both"
+        },
+        {
+          "file": "src/maxtext/models/deepseek41.py",
+          "rationale": "Adopted PR #5812 hc_pre loop, MoE intermediate sowing, and DeepSeek41Block per-layer nnx.remat while preserving image_mask and decoder_segment_ids threading.",
+          "resolution": "merged_both"
+        },
+        {
+          "file": "src/maxtext/layers/nnx_decoders.py",
+          "rationale": "Adopted PR #5812 skip_block_remat per-layer remat and unscanned _apply_layer_with_remat while preserving U3..U6c multimodal vision embedding merge and image_mask propagation.",
+          "resolution": "merged_both"
+        },
+        {
+          "file": "src/maxtext/utils/maxtext_utils.py",
+          "rationale": "Adopted PR #5812 calculate_deepseek41_tflops_training_per_device (434.548349 TFLOPs/dev) and calculate_ds41_engram_tflops while keeping U7 calculate_deepseek41_vision_tflops (6.5195040768 TFLOPs/dev) registered solely in calculate_vision_encoder_tflops with zero double-counting.",
+          "resolution": "merged_both"
+        },
+        {
+          "file": "tests/utils/deepseek_v41_reference/engram.py",
+          "rationale": "Kept frozen reference oracle untouched at HEAD (PR #5812 final commit restored identical semantics).",
+          "resolution": "kept_ours_frozen_oracle"
+        },
+        {
+          "file": "tests/utils/deepseek_v41_reference/model.py",
+          "rationale": "Kept frozen multimodal reference oracle untouched at HEAD.",
+          "resolution": "kept_ours_frozen_oracle"
+        },
+        {
+          "file": "tests/unit/deepseek_v41_vision_tflops_test.py",
+          "rationale": "Updated backbone-diff assertion in test_total_training_tflops_adds_vision_term_when_multimodal to compare against calculate_deepseek41_tflops_training_per_device.",
+          "resolution": "updated_assertion_for_5812_backbone_formula"
+        }
+      ],
+      "integ_commit_sha": "dc4cd0dc41829c613edee840f05f90a68ce27330",
+      "order": 4,
+      "pr_number": 5812,
+      "title": "DeepSeek-V4.1-Flash E2E training fixes, _scatter_bool 9.7x speedup, and peak-roofline TFLOPs",
+      "upstream_merge_or_head_sha": "a3b5aa10b0a0767a5c29790f56e9a382d8202701",
+      "upstream_source_commit_sha": "5f3c0f513b6420534aeab9d8b54f52d26c8f9ef3..a3b5aa10b0a0767a5c29790f56e9a382d8202701"
+    }
+  ],
+  "decisions": {
+    "E12": "A_local_integration_branch_never_pushed",
+    "E14": "HOLD_U8_encoding_dsv41_pending_confirmation",
+    "W2_W3_AOT_HBM_GATE": "option_b_tpu7x_heap_compile_94p74_unclamped_telemetry"
+  },
+  "pr5812_bench_flags": {
+    "allow_split_physical_axes": true,
+    "bench_max_hbm_gib": 94.74,
+    "enable_tpu_profiling_options": true,
+    "grad_dtype": "bfloat16",
+    "log_period": 1,
+    "num_vocab_tiling": 8,
+    "quantization_local_shard_count": 8,
+    "ragged_buffer_factor": 2.0,
+    "use_gmm_v2": true,
+    "use_tokamax_gmm": true
+  },
+  "schema_version": 1,
+  "tflops_invariants": {
+    "multimodal_tflops_per_device_4096_pdb1_n4": 441.0678534144,
+    "text_tflops_per_device_4096_pdb1": 728.67341402112,
+    "tpu7x_bf16_peak_tflops_per_device": 1153.5,
+    "vision_tflops_per_device_n4_39x39_frozen": 6.5195040768
+  },
+  "w1_local_cherry_picks": [
+    {
+      "integ_commit_sha": "f110ca46b4cfb0a1380743fc1bd4d3364570f5b9",
+      "source_branch": "yaoyuchen/ds41-mm-w1-audit-fix",
+      "source_commit_sha": "c935662307a423517720339e7fdd85fc19a08cac",
+      "title": "Accept release multimodal token_types {-1, 0, 1, 2, 3} in logit checkers"
+    }
+  ]
+}
