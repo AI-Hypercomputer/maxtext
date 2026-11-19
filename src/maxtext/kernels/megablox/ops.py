@@ -198,6 +198,65 @@ def gmm(
   return out
 
 
+def gmm_pair_merged_dlhs(
+    lhs: jnp.ndarray,
+    rhs0: jnp.ndarray,
+    rhs1: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    preferred_element_type: jnp.dtype,
+    tiling: tuple[int, int, int, int, int, int, int, int, int],
+    group_offset: jnp.ndarray | None = None,
+    *,
+    use_gmm_v2_heuristic_tiling: bool = False,
+    use_dlhs_transpose_rhs: bool = False,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+  """(lhs @ rhs0, lhs @ rhs1) on unquantized tokamax gmm_v2, with one DLHS GMM in the backward.
+
+  lhs [m, k], rhs0 / rhs1 [g, k, n]. The forward GMMs and the two weight-gradient TGMMs are the ones gmm()
+  runs. The input gradient dout0 @ rhs0^T + dout1 @ rhs1^T is computed as concat([dout0, dout1]) @
+  concat([rhs0, rhs1])^T: one DLHS GMM contracting 2n instead of two DLHS GMMs contracting n plus an add of
+  their [m, k] outputs. When the DLHS K tile (tiling[4]) covers n, the merged GMM takes all 2n in one K tile,
+  so an n that is not a multiple of 128 is padded once instead of twice.
+  """
+  n0 = rhs0.shape[2]
+  dlhs_tile_k = n0 + rhs1.shape[2] if tiling[4] >= n0 else tiling[4]
+  dlhs_tiling = (*tiling[:4], dlhs_tile_k, *tiling[5:])
+
+  def _fwd(lhs, rhs0, rhs1, group_sizes, group_offset):
+    outs = tuple(
+        _fwd_run_tokamax_v2(
+            lhs, rhs, group_sizes, preferred_element_type, tiling, use_gmm_v2_heuristic_tiling, group_offset, None
+        )
+        for rhs in (rhs0, rhs1)
+    )
+    return outs, (lhs, rhs0, rhs1, group_sizes, group_offset)
+
+  def _bwd(residual, grads):
+    lhs, rhs0, rhs1, group_sizes, group_offset = residual
+    dout0, dout1 = grads
+    dlhs, _ = _dlhs_run_tokamax_v2(
+        jnp.concatenate([dout0, dout1], axis=-1),
+        jnp.concatenate([rhs0, rhs1], axis=-1),
+        group_sizes,
+        group_offset,
+        lhs.dtype,
+        dlhs_tiling,
+        use_gmm_v2_heuristic_tiling,
+        use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
+    )
+    drhs0, drhs1 = (
+        _drhs_run_tokamax_v2(
+            dout, lhs, group_sizes, group_offset, rhs.shape[0], rhs.dtype, tiling, use_gmm_v2_heuristic_tiling
+        )
+        for dout, rhs in ((dout0, rhs0), (dout1, rhs1))
+    )
+    return dlhs, drhs0, drhs1, None, None
+
+  pair = jax.custom_vjp(lambda *args: _fwd(*args)[0])
+  pair.defvjp(_fwd, _bwd)
+  return pair(lhs, rhs0, rhs1, group_sizes, group_offset)
+
+
 def _scale_like(scale: jnp.ndarray, x: jnp.ndarray, dtype) -> jnp.ndarray:
   """Per-tensor scale -> scalar; per-row scale [m, 1, ...] -> [m, 1, ..., 1] broadcastable to x."""
   if scale.size == 1:
