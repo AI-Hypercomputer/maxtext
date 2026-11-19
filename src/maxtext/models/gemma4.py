@@ -128,6 +128,7 @@ class Gemma4MoE(nnx.Module):
       intermediate_sharding: jax.sharding.NamedSharding | None = None,
       out_sharding: jax.sharding.NamedSharding | None = None,
       forced_routed_experts: jax.Array | None = None,
+      token_mask: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     shared_experts = self.moe_block.shared_experts(
         inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding
@@ -155,6 +156,7 @@ class Gemma4MoE(nnx.Module):
         gate_inputs=gate_inputs,
         out_sharding=out_sharding,
         forced_routed_experts=forced_routed_experts,
+        token_mask=token_mask,
     )
     routed_experts = self.post_feedforward_layernorm_2(routed_experts, out_sharding=out_sharding)
 
@@ -411,6 +413,7 @@ class Gemma4DecoderLayer(nnx.Module):
           intermediate_sharding=self.mlp_intermediate_sharding,
           out_sharding=self.out_sharding,
           forced_routed_experts=forced_routed_experts,
+          token_mask=moe.routing_token_mask(cfg, decoder_segment_ids, model_mode),
       )
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
         self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)

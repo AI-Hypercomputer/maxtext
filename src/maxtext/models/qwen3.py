@@ -2128,6 +2128,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
       forced_routed_experts: jnp.ndarray | None = None,
       intermediate_sharding: jax.sharding.NamedSharding | None = None,
       out_sharding: jax.sharding.NamedSharding | None = None,
+      token_mask: jnp.ndarray | None = None,
   ) -> tuple[Array, Array | None]:
     """Applies the sparse MoE block to the input hidden states.
 
@@ -2139,6 +2140,8 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         intermediate activation, honoured only under `ShardMode.EXPLICIT`.
       out_sharding: Optional layout for the block output, honoured only under
         `ShardMode.EXPLICIT`.
+      token_mask: Optional (batch, seq) bool, True for real tokens; see
+        `RoutedMoE.__call__`.
 
     Returns:
       A tuple containing:
@@ -2151,6 +2154,7 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
         hidden_states,
         out_sharding=out_sharding,
         forced_routed_experts=forced_routed_experts,
+        token_mask=token_mask,
     )
 
     if not self.use_shared_expert:
@@ -2684,7 +2688,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     """Builds the sparse MoE block."""
     return Qwen3NextSparseMoeBlock(config=self.config, mesh=self.mesh, quant=self.quant, rngs=rngs)
 
-  def _apply_mlp(self, hidden_states, deterministic, forced_routed_experts):
+  def _apply_mlp(self, hidden_states, deterministic, forced_routed_experts, token_mask=None):
     """Runs the block built by `_make_mlp`, returning `(output, load_balance_loss)`."""
     return self.mlp(
         hidden_states,
@@ -2692,6 +2696,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
         forced_routed_experts=forced_routed_experts,
         intermediate_sharding=self.mlp_intermediate_sharding,
         out_sharding=self.out_sharding,
+        token_mask=token_mask,
     )
 
   def __call__(
@@ -2756,7 +2761,12 @@ class Qwen3NextDecoderLayer(nnx.Module):
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     # Instantiate and call our `Qwen3NextSparseMoeBlock`.
-    mlp_output, load_balance_loss = self._apply_mlp(hidden_states, deterministic, forced_routed_experts)
+    mlp_output, load_balance_loss = self._apply_mlp(
+        hidden_states,
+        deterministic,
+        forced_routed_experts,
+        token_mask=moe.routing_token_mask(self.config, decoder_segment_ids, model_mode),
+    )
 
     # Keep the load balancing loss so it can be collected and added to the total loss during training. It is
     # assigned rather than sown: `sow` appends, so Intermediate would grow per call, which a scan body cannot express.
@@ -3035,7 +3045,11 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
         attention_metadata=attention_metadata,
     )
 
-    mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states, out_sharding=self.out_sharding)
+    mlp_lnx, load_balance_loss, _ = self.moe_block(
+        hidden_states,
+        out_sharding=self.out_sharding,
+        token_mask=moe.routing_token_mask(self.config, decoder_segment_ids, model_mode),
+    )
     mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.moe_lb_loss = nnx.Intermediate(load_balance_loss)

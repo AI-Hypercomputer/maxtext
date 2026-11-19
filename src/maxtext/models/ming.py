@@ -614,7 +614,10 @@ class MingDecoderLayer(nnx.Module):
     moe_bias_updates = None
     if self.is_moe:
       mlp_out, load_balance_loss, moe_bias_updates = self.moe_block(
-          hx, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
+          hx,
+          intermediate_sharding=self.mlp_intermediate_sharding,
+          out_sharding=self.out_sharding,
+          token_mask=moe.routing_token_mask(self.config, decoder_segment_ids, model_mode),
       )
     else:
       mlp_out = self.mlp(

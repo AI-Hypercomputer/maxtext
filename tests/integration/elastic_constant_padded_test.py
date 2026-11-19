@@ -91,12 +91,38 @@ class ElasticConstantPaddedTest(unittest.TestCase):
   @pytest.mark.tpu_only
   def test_every_factoring_trains_the_same_logical_batch(self):
     """Every factoring of the padded batch trains on the same real tokens and matches the legacy run's metrics."""
+    self._compare_factorings("padded")
+
+  @pytest.mark.integration_test
+  @pytest.mark.tpu_only
+  def test_every_factoring_trains_the_same_logical_batch_moe(self):
+    """MoE: the padded rows stay out of routing, capacity, the aux loss and the routed-bias update (`token_mask`)."""
+    moe_args = [
+        "decoder_block=mixtral",
+        "base_mlp_dim=256",
+        "base_moe_mlp_dim=256",
+        "num_experts=4",
+        "num_experts_per_tok=2",
+        "load_balance_loss_weight=0.01",
+    ]
+    with self.subTest(path="dense"):
+      self._compare_factorings("padded_moe_dense", moe_args + ["sparse_matmul=false", "megablox=false"])
+    with self.subTest(path="dense_capacity"):
+      self._compare_factorings(
+          "padded_moe_capacity", moe_args + ["sparse_matmul=false", "megablox=false", "capacity_factor=1.25"]
+      )
+    with self.subTest(path="sparse"):
+      self._compare_factorings("padded_moe_sparse", moe_args + ["sparse_matmul=true", "megablox=true"])
+
+  def _compare_factorings(self, prefix, model_args=()):
+    """Trains every factoring of the simulated resize with `model_args` and compares their metrics."""
     live_devices = len(jax.devices())
     # Pretend a job of 1.5x the present devices with per-device batch 3: the logical batch is 4.5 * live_devices
     # rows, which no factoring on the live devices covers exactly, so every run below pads. With 4 devices: 18
     # logical rows.
     job_devices = live_devices * 3 // 2
     shared = [
+        *model_args,
         f"elastic_simulate_job_devices={job_devices}",
         "per_device_batch_size=3",
         "gradient_accumulation_steps=1",
@@ -105,13 +131,13 @@ class ElasticConstantPaddedTest(unittest.TestCase):
     logical_rows = 3 * job_devices
     runs = {
         # B' = ceil(4.5) = 5, K' = 1: physical 5 * live_devices rows (20 with 4 devices, 2 padded).
-        "legacy": self._run("padded_legacy", padded + ["elastic_max_per_device_batch_size=-1"]),
+        "legacy": self._run(f"{prefix}_legacy", padded + ["elastic_max_per_device_batch_size=-1"]),
         # B' = 3, K' = 2: physical 6 * live_devices rows (24, 6 padded); the per-device batch is unchanged.
-        "fixed_b": self._run("padded_fixed_b", padded + ["elastic_max_per_device_batch_size=3"]),
+        "fixed_b": self._run(f"{prefix}_fixed_b", padded + ["elastic_max_per_device_batch_size=3"]),
         # Least padding within [3, 8] is B' = 5, K' = 1 again, found by the search rather than the legacy rule.
-        "bounded": self._run("padded_bounded", padded + ["elastic_max_per_device_batch_size=8"]),
+        "bounded": self._run(f"{prefix}_bounded", padded + ["elastic_max_per_device_batch_size=8"]),
         # The recommended mode: B' = 3, K' = 2 like "fixed_b", with no bound flag.
-        "grad_accum": self._run("grad_accum", shared + ["elastic_global_batch_size_mode=constant_grad_accum"]),
+        "grad_accum": self._run(f"{prefix}_grad_accum", shared + ["elastic_global_batch_size_mode=constant_grad_accum"]),
     }
     reference = runs["legacy"]
     for step in range(_STEPS):
@@ -120,6 +146,16 @@ class ElasticConstantPaddedTest(unittest.TestCase):
           self.assertEqual(float(run[step]["learning/total_weights"]), float(logical_rows * _SEQ_LEN))
           np.testing.assert_allclose(run[step]["learning/loss"], reference[step]["learning/loss"], rtol=1e-2)
           np.testing.assert_allclose(run[step]["learning/grad_norm"], reference[step]["learning/grad_norm"], rtol=1e-2)
+          if "learning/moe_lb_loss" in reference[step]:
+            # The aux loss is a per-sequence statistic averaged over the real rows only, so it must not scale with
+            # the number of padded rows. The factorings pad a different number of tail rows (2 or 6 with 4 devices),
+            # so on the sparse path (loss formed inside the shard_map) this also checks the cross-shard reduction of
+            # the masked loss: the runs then agree on the same 18-row mean (identical at step 0 on v6e-4, within
+            # 3e-4 after the drift of the training steps), whereas a per-shard statistic (shards with 3 / 5 and
+            # 0 / 6 real rows) would differ by several percent.
+            np.testing.assert_allclose(
+                run[step]["learning/moe_lb_loss"], reference[step]["learning/moe_lb_loss"], rtol=1e-3
+            )
 
 
 if __name__ == "__main__":

@@ -1655,7 +1655,18 @@ class ConfigTest(absltest.TestCase):
         ),
         ("enable_diloco=true", "not supported with DiLoCo"),
         ("use_dpo=true packing=false", "not supported with DPO"),
-        ("num_experts=4", "not supported with MoE"),
+        # MoE is supported through RoutedMoE's token_mask; only the MoE implementations that bypass it are rejected.
+        ("num_experts=4 te_moe_block=true sparse_matmul=true", "not supported with MoE and `te_moe_block=True`"),
+        (
+            "num_experts=4 use_batch_split_schedule=true decoder_block=deepseek attention_type=mla",
+            "not supported with MoE and `use_batch_split_schedule=True`",
+        ),
+        ("num_experts=4 use_lineage=true", "not supported with MoE and `use_lineage=True`"),
+        ("num_experts=4 use_m3_model=true", "not supported with MoE and `use_m3_model=True`"),
+        (
+            "num_experts=4 decoder_block=kimi_linear packing=false",
+            "not supported with MoE and `decoder_block=kimi_linear`",
+        ),
         (
             "use_indexer=true attention_type=mla q_lora_rank=1536 attention=dot_product"
             " indexer_topk=8 max_target_length=64 indexer_loss_scaling_factor=0.1",
@@ -1672,6 +1683,10 @@ class ConfigTest(absltest.TestCase):
 
     for extra in (
         "use_tunix_gradient_accumulation=true gradient_accumulation_steps=1 per_device_batch_size=5",
+        # A plain MoE (RoutedMoE routes with a token_mask) is accepted.
+        "num_experts=4 num_experts_per_tok=2 base_mlp_dim=256 base_moe_mlp_dim=256 per_device_batch_size=5",
+        "num_experts=4 num_experts_per_tok=2 base_mlp_dim=256 base_moe_mlp_dim=256 sparse_matmul=false capacity_factor=1.25"
+        " per_device_batch_size=5",
         "dataset_type=grain grain_train_files=/x/* grain_use_elastic_iterator=true grain_file_type=arrayrecord"
         " packing=false colocated_python_data_input=false per_device_batch_size=5",
         "dataset_type=grain grain_train_files=/x/* grain_use_elastic_iterator=true grain_file_type=arrayrecord"
@@ -2004,9 +2019,16 @@ class ConfigTest(absltest.TestCase):
             ]
         )
       # The simulation also enables the constant_padded validation.
-      with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with MoE"):
+      with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with MoE and `te_moe_block"):
         pyconfig.initialize(
-            argv + ["elastic_global_batch_size_mode=constant_padded", "elastic_simulate_job_devices=6", "num_experts=4"]
+            argv
+            + [
+                "elastic_global_batch_size_mode=constant_padded",
+                "elastic_simulate_job_devices=6",
+                "num_experts=4",
+                "te_moe_block=true",
+                "sparse_matmul=true",
+            ]
         )
       # Negative values and a pretended job smaller than the present devices are rejected.
       with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "`elastic_simulate_job_devices` must be >= 0"):

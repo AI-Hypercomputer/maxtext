@@ -6686,7 +6686,23 @@ class MaxTextConfig(
           (self.enable_rampup_batch_size, "is not supported with `enable_rampup_batch_size=True`"),
           (self.enable_diloco, "is not supported with DiLoCo (`enable_diloco=True`)"),
           (self.use_dpo, "is not supported with DPO (`use_dpo=True`)"),
-          (self.num_experts > 1, "is not supported with MoE (`num_experts > 1`)"),
+          # MoE: RoutedMoE keeps the padded rows out of routing, expert capacity, the load-balance loss and the
+          # routed-bias update through its `token_mask` (see `moe.routing_token_mask`). The MoE implementations
+          # below bypass RoutedMoE's routing and take no mask, so the padded rows would be routed and counted.
+          (
+              self.num_experts > 1 and self.te_moe_block,
+              "is not supported with MoE and `te_moe_block=True` (TransformerEngine routes the padded rows)",
+          ),
+          (
+              self.num_experts > 1 and self.use_batch_split_schedule,
+              "is not supported with MoE and `use_batch_split_schedule=True`",
+          ),
+          (self.num_experts > 1 and self.use_lineage, "is not supported with MoE and `use_lineage=True`"),
+          (self.num_experts > 1 and self.use_m3_model, "is not supported with MoE and `use_m3_model=True`"),
+          (
+              self.num_experts > 1 and self.decoder_block == DecoderBlockType.KIMI_LINEAR,
+              "is not supported with MoE and `decoder_block=kimi_linear` (its latent MoE block takes no `token_mask`)",
+          ),
           (self.indexer_loss_scaling_factor > 0.0, "is not supported with `indexer_loss_scaling_factor > 0`"),
           (self.use_qk_clip, "is not supported with QK-Clip (`use_qk_clip=True`)"),
           (

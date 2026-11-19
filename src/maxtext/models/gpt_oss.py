@@ -195,7 +195,11 @@ class GptOssDecoderLayer(nnx.Module):
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
 
     load_balance_loss = None
-    mlp_lnx, load_balance_loss, _ = self.GptOssMlp(hidden_states, out_sharding=self.out_sharding)
+    mlp_lnx, load_balance_loss, _ = self.GptOssMlp(
+        hidden_states,
+        out_sharding=self.out_sharding,
+        token_mask=moe.routing_token_mask(cfg, decoder_segment_ids, model_mode),
+    )
     mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     layer_output = mlp_lnx + intermediate_inputs

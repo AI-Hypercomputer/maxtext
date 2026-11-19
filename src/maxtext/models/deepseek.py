@@ -617,6 +617,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         slot,
     )
 
+    token_mask = moe.routing_token_mask(self.config, decoder_segment_ids, model_mode)
     if self.is_mhc_enabled:
       layer_output, metadata = self.mhc_mlp(
           self.post_attention_norm_op,
@@ -624,6 +625,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           x=intermediate_inputs,
           mhc_type=HyperConnectionType.MLP_MOE,
           input_ids=decoder_input_tokens,
+          token_mask=token_mask,
       )
       load_balance_loss = metadata["load_balance_loss"]
       moe_bias_updates = metadata["moe_bias_updates"]
@@ -632,6 +634,7 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
           hidden_states,
           deterministic,
           input_ids=decoder_input_tokens,
+          token_mask=token_mask,
       )
       layer_output = mlp_lnx + intermediate_inputs
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
@@ -644,5 +647,6 @@ class DeepSeekMoELayer(DeepSeekGenericLayer):
         intermediate_sharding=self.mlp_intermediate_sharding,
         out_sharding=self.out_sharding,
         input_ids=kwargs.get("input_ids"),
+        token_mask=kwargs.get("token_mask"),
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates

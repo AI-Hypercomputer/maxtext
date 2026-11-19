@@ -167,6 +167,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
     mlp_lnx, load_balance_loss, moe_bias_updates = self.mlp(
         inputs=inputs,
         input_ids=input_ids,
+        token_mask=kwargs.get("token_mask"),
     )
     return self.with_logical_constraint(mlp_lnx), load_balance_loss, moe_bias_updates
 
@@ -206,6 +207,7 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
         mhc_type=HyperConnectionType.MLP_MOE,
         deterministic=deterministic,
         input_ids=decoder_input_tokens,
+        token_mask=moe.routing_token_mask(self.config, decoder_segment_ids, model_mode),
     )
     load_balance_loss = metadata.get("load_balance_loss", None)
     moe_bias_updates = metadata.get("moe_bias_updates", None)
