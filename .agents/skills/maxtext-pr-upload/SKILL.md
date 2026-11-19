@@ -82,6 +82,9 @@ codespell -L ND,nd,sems,TE,te,als,ROUGE,rouge,astroid,ags,dout <changed files>
 python3 -m pytest -q -p no:cacheprovider <affected *_test.py files>
 ```
 
+For an adversarial spec-driven self-review before pushing, invoke
+`/maxtext-self-review` (`.agents/skills/maxtext-self-review/SKILL.md`).
+
 ### Common MaxText Test & CI Traps
 - **Test file discovery:** `pytest.ini` only collects `*_test.py` and `*_tests.py`. Files named `test_*.py` are silently ignored in CI.
 - **Run `pytest` serially (no `-n`):** Parallel workers contend on local XLA/TPU lockfiles.
