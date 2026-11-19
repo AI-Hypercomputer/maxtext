@@ -1998,6 +1998,14 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
+  moe_gmm_v2_small_tail_dot: bool = Field(
+      False,
+      description=(
+          "Run a short gmm_v2 tile (MoE forward and dlhs) whose rows fit its first "
+          "128/256 positions as a smaller matmul. Same result; requires "
+          "use_gmm_v2=true."
+      ),
+  )
 
 
 class DeepSeekMoE(BaseModel):
