@@ -41,7 +41,13 @@ from maxtext.common.common_types import (
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
-from maxtext.layers import fsdp_prefetch, fsdp_prefetch_inhomogeneous, nnx_scan
+from maxtext.layers import (
+    batch_split,
+    batch_split_inhomogeneous,
+    fsdp_prefetch,
+    fsdp_prefetch_inhomogeneous,
+    nnx_scan,
+)
 from maxtext.layers.attn_res import _apply_attn_res, attn_res_num_buffer_slots, init_attn_res_buffer
 from maxtext.layers.attentions import Attention
 from maxtext.layers.embeddings import Embed, PositionalEmbedding, attend_on_embedding
@@ -1397,6 +1403,48 @@ class NNXDecoder(nnx.Module):
         raise ValueError(
             f"per_iteration_kwargs must hold one entry per scan iteration ({length}); got {len(per_iteration_kwargs)}."
         )
+    if (
+        getattr(self.config, "enable_batch_split", False)
+        and kv_caches_stacked is None
+        and forced_routed_experts_scanned is None
+        and not self.config.parameter_memory_host_offload
+        and not getattr(self, "disable_quant_stats_update", False)
+    ):
+      inhom_stages = batch_split_inhomogeneous.sublayer_stages(layers)
+      if inhom_stages is not None:
+        if batch_split.can_split_batch(x_in, self.mesh, self.config):
+          return batch_split_inhomogeneous.apply_layers_with_batch_split(
+              layers,
+              inhom_stages,
+              x_in,
+              *args,
+              length=length,
+              mesh=self.mesh,
+              config=self.config,
+              metadata_axis_name=metadata_axis_name,
+              remat_policy=self._get_scan_safe_remat_policy(),
+              prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
+              **kwargs,
+          )
+        max_logging.info(
+            "enable_batch_split: per-device batch size is not even and >= 2; falling back to regular/prefetch scan."
+        )
+      elif batch_split.supports_batch_split(layers):
+        if batch_split.can_split_batch(x_in, self.mesh, self.config):
+          return batch_split.apply_layers_with_batch_split(
+              layers,
+              x_in,
+              *args,
+              length=length,
+              mesh=self.mesh,
+              config=self.config,
+              remat_policy=None if skip_block_remat else self.get_remat_policy(),
+              prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config),
+              **kwargs,
+          )
+        max_logging.info(
+            "enable_batch_split: per-device batch size is not even and >= 2; falling back to regular/prefetch scan."
+        )
     if self.config.prefetch_fsdp_weights and not fsdp_prefetch.mesh_uses_fsdp(self.mesh):
       max_logging.info("prefetch_fsdp_weights: no FSDP mesh axis spans more than one device; using the regular scan.")
     elif (
@@ -2537,6 +2585,14 @@ class NNXDecoder(nnx.Module):
                 **common_kwargs,
             )
           else:
+            if cfg.shard_mode == ShardMode.EXPLICIT and y.ndim == 3:
+              y = sharding.maybe_shard_with_logical(
+                  y,
+                  ("activation_batch", "activation_norm_length", "activation_embed"),
+                  self.mesh,
+                  cfg.shard_mode,
+                  debug_sharding=cfg.debug_sharding,
+              )
             y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,
                 y,

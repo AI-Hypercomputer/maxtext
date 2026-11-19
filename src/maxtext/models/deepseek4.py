@@ -29,6 +29,7 @@ from maxtext.models import deepseek
 from maxtext.utils.sharding import with_logical_constraint
 from jax.ad_checkpoint import checkpoint_name
 import jax
+import jax.numpy as jnp
 from jax.experimental import xla_metadata
 
 
@@ -215,6 +216,146 @@ class DeepSeek4DecoderLayer(deepseek.DeepSeekGenericLayer):
     layer_output = self.dropout_op(layer_output, deterministic=deterministic)
     return self.post_process(layer_output, load_balance_loss, moe_bias_updates, kv_cache)
 
+  # ---------------------------------------------------------------------------
+  # Generalized Batch-Split layer adapter (used only when config.enable_batch_split)
+  # ---------------------------------------------------------------------------
+
+  def batch_split_supported(self) -> bool:
+    """Returns True if this DeepSeek-V4 layer configuration supports `batch_split`."""
+    cfg = self.config
+    return (
+        self.is_mhc_enabled
+        and not self.mlp.is_hash_routing
+        and cfg.sparse_matmul
+        and cfg.use_ring_of_experts
+        and not cfg.te_moe_block
+        and not self.is_engram_enabled
+        and not getattr(cfg, "te_mhc", False)
+        and not (cfg.enable_mhc_lite and getattr(cfg, "use_mhc_pallas_kernel", False))
+        and not (cfg.use_indexer and cfg.indexer_loss_scaling_factor > 0.0)
+        and not getattr(cfg, "moe_use_fused_gmm3d", False)
+        and cfg.num_moe_emb_chunks <= 0
+        and not getattr(cfg, "record_internal_nn_metrics", False)
+        and cfg.dropout_rate == 0.0
+    )
+
+  def batch_split_attn_and_route(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      slot: None | int = None,
+      kv_cache=None,
+      attention_metadata=None,
+      decoder_input_tokens=None,
+  ):
+    """Phase 1/2 TC compute: CompressedAttention (HCA/CSA) + mHC pre/res/post mappings + router gate."""
+    del kv_cache, attention_metadata
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+    x = self.with_logical_constraint(inputs)
+    _, intermediate_inputs = self.self_attention_with_norm_op(
+        x,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        previous_chunk,
+        slot,
+    )
+
+    mhc_mod = self.mhc_mlp
+    b, s, k, d = intermediate_inputs.shape
+    with jax.named_scope("mhc_norm"):
+      norm_x = mhc_mod.mhc_norm(jnp.reshape(intermediate_inputs, (b, s, k * d)))
+    pre_alpha = jnp.asarray(mhc_mod.pre_alpha[...], mhc_mod.dtype)
+    post_alpha = jnp.asarray(mhc_mod.post_alpha[...], mhc_mod.dtype)
+    res_alpha = jnp.asarray(mhc_mod.res_alpha[...], mhc_mod.dtype)
+    alpha_concat = jnp.concatenate([pre_alpha, post_alpha, res_alpha], axis=-1)
+    h_concat = jnp.einsum("bsm,mn -> bsn", norm_x, alpha_concat, precision=mhc_mod.matmul_precision)
+    h_pre = h_concat[..., :k]
+    h_post = h_concat[..., k : 2 * k]
+    h_res = h_concat[..., 2 * k :]
+
+    pre_mapping = mhc_mod.mapping(
+        h_pre,
+        mhc_mod.pre_alpha_scale[...],
+        mhc_mod.pre_beta[...],
+        1.0,
+        eps=1e-6,
+    )
+    layer_input = jnp.einsum("bsk,bskd->bsd", pre_mapping, intermediate_inputs, precision=mhc_mod.matmul_precision)
+    hidden_states = self.post_attention_norm_op(layer_input)
+
+    post_mapping = mhc_mod.mapping(
+        h_post,
+        mhc_mod.post_alpha_scale[...],
+        mhc_mod.post_beta[...],
+        2.0,
+    )
+    res_mapping = mhc_mod.res_mapping(h_res)
+    res_out = jnp.einsum("bskm,bskd->bsmd", res_mapping, intermediate_inputs, precision=mhc_mod.matmul_precision)
+    h_skip = (res_out, post_mapping)
+
+    moe_in, route_in, seq_lb_loss = self.mlp.routed_moe.batch_split_route(
+        hidden_states,
+        input_ids=decoder_input_tokens,
+    )
+    return h_skip, moe_in, route_in, seq_lb_loss
+
+  def batch_split_dispatch(self, moe_in, route_in):
+    """Weight-free EP All-Gather of microbatch tokens and routing metadata on SC0."""
+    return self.mlp.routed_moe.batch_split_dispatch(moe_in, route_in)
+
+  def batch_split_dispatch_bwd(self, moe_in, route_in, g_x_val_ag, g_route_ag_diff):
+    """Weight-free backward of `batch_split_dispatch` (EP Reduce-Scatter on SC0)."""
+    return self.mlp.routed_moe.batch_split_dispatch_bwd(moe_in, route_in, g_x_val_ag, g_route_ag_diff)
+
+  def batch_split_experts(
+      self, moe_in_ref, x_val_ag, x_scale_ag, route_ag, decoder_input_tokens=None, return_wgrad_hooks: bool = False
+  ):
+    """Local expert permute + GMMs + unpermute without EP dispatch/combine."""
+    return self.mlp.routed_moe.batch_split_experts(
+        moe_in_ref,
+        x_val_ag,
+        x_scale_ag,
+        route_ag,
+        input_ids=decoder_input_tokens,
+        return_wgrad_hooks=return_wgrad_hooks,
+    )
+
+  def batch_split_shared_expert(self, moe_in):
+    """Shared expert MLP on local microbatch tokens."""
+    shared_out = self.mlp.shared_experts(
+        moe_in,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
+    )
+    return self.with_logical_constraint(shared_out)
+
+  def batch_split_combine(self, y_partial, moe_in_ref):
+    """Weight-free EP Reduce-Scatter of routed expert partial outputs on SC0."""
+    routed_out = self.mlp.routed_moe.batch_split_combine(y_partial, moe_in_ref)
+    return self.with_logical_constraint(routed_out)
+
+  def batch_split_post_combine(self, mlp_sum, h_skip):
+    """Weight-free mHC stream expansion and residual combination after routed + shared experts."""
+    res_out, post_mapping = h_skip
+    mlp_out = self.with_logical_constraint(mlp_sum)
+    post_out = jnp.expand_dims(mlp_out, axis=2) * jnp.expand_dims(post_mapping, axis=3)
+    return self.with_logical_constraint(res_out + post_out)
+
+  def batch_split_combine_bwd(self, g_out, moe_in_ref, *, defer_dequant: bool = False):
+    """Weight-free backward of `batch_split_combine` (EP All-Gather on SC0)."""
+    return self.mlp.routed_moe.batch_split_combine_bwd(g_out, moe_in_ref, defer_dequant=defer_dequant)
+
+  def batch_split_finalize_bias_updates(self, summed_counts):
+    """Finalizes microbatch-summed expert counts into routed bias updates."""
+    return self.mlp.routed_moe.batch_split_finalize_bias_updates(summed_counts)
+
 
 class DeepSeek4ScannableBlock(nnx.Module):
   """A scannable block containing exactly two DeepSeek V4 layers (HCA and CSA).
@@ -330,3 +471,7 @@ class DeepSeek4ScannableBlock(nnx.Module):
       )
 
     return y, None
+
+  def batch_split_sublayer_names(self) -> tuple[str, str]:
+    """Sub-layers of this block in execution order for `batch_split_inhomogeneous`."""
+    return ("layers_0", "layers_1")

@@ -57,6 +57,13 @@ Guide to setting up benchmarks, performing performance tuning, and analyzing met
 Overlap the FSDP all-gather of the next layer's weights with the current layer's compute.
 ```
 
+```{grid-item-card} ♊ Generalized Batch-Split Scheduling
+:link: optimization/batch_split
+:link-type: doc
+
+Interleave two microbatches across an 8-phase pipeline to hide Expert-Parallel MoE token collectives under compute.
+```
+
 ```{grid-item-card} 🔀 Shard Mode: explicit vs auto
 :link: optimization/shard_mode_performance
 :link-type: doc
@@ -73,6 +80,7 @@ maxdepth: 1
 optimization/custom_model.md
 optimization/sharding.md
 optimization/fsdp_prefetch.md
+optimization/batch_split.md
 optimization/custom_mesh_and_rule.md
 optimization/pallas_kernels_performance.md
 optimization/benchmark_and_performance.md

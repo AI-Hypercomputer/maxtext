@@ -1650,14 +1650,25 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # =========================================================================
     A_log = jnp.asarray(self.A_log[...], dtype=jnp.float32)
     dt_bias = jnp.asarray(self.dt_bias[...], dtype=jnp.float32)
-    if cfg.shard_mode == ShardMode.EXPLICIT:
+    a_sharding = getattr(jax.typeof(a), "sharding", None)
+    has_active_mesh = not jax.sharding.get_abstract_mesh().empty or (
+        self.mesh is not None
+        and a_sharding is not None
+        and not getattr(a_sharding, "mesh", jax.sharding.AbstractMesh((), ())).empty
+    )
+
+    def _reshard_pspec(arr, spec):
+      target = spec if not jax.sharding.get_abstract_mesh().empty else jax.sharding.NamedSharding(self.mesh, spec)
+      return jax.sharding.reshard(arr, target)
+
+    if cfg.shard_mode == ShardMode.EXPLICIT and has_active_mesh:
       # Both are stored replicated but broadcast against (B, S, H_v) activations whose
       # head axis is sharded, and explicit sharding requires broadcast operands to
       # agree -- the same fix `align_scale_with_normalized_axis` applies to the norm
       # scales.
       head_spec = jax.sharding.PartitionSpec(jax.typeof(a).sharding.spec[-1])
-      A_log = jax.sharding.reshard(A_log, head_spec)
-      dt_bias = jax.sharding.reshard(dt_bias, head_spec)
+      A_log = _reshard_pspec(A_log, head_spec)
+      dt_bias = _reshard_pspec(dt_bias, head_spec)
     # beta shape: (B, S, H_v)
     beta = jax.nn.sigmoid(b)
     # g shape: (B, S, H_v), computed in float32 to preserve precision for g_cumsum and A_log/dt_bias gradients
@@ -1685,7 +1696,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
           compute_dtype=cfg.dtype,
       )
-    elif self.mesh is not None:
+    elif self.mesh is not None and (cfg.shard_mode != ShardMode.EXPLICIT or has_active_mesh):
       logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = get_gdn_cp_sharding_info(cfg, self.mesh)
       cp_size = math.prod(self.mesh.shape[ax] for ax in cp_axes_active) if cp_axes_active else 1
       use_head_cp, _ = resolve_gdn_cp_mode(cfg, cp_size, self.num_k_heads, model_mode, prefer_head_cp=False)
@@ -1806,14 +1817,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         # shard_map manualises the mesh axes it is given and will not insert a reshard
         # for an operand whose layout differs from `in_specs`, so hand it arrays that
         # already match.
-        query = jax.sharding.reshard(query, qkv_pspec)
-        key = jax.sharding.reshard(key, qkv_pspec)
-        value = jax.sharding.reshard(value, qkv_pspec)
-        g = jax.sharding.reshard(g, g_beta_pspec)
-        beta = jax.sharding.reshard(beta, g_beta_pspec)
-        recurrent_state_arg = jax.sharding.reshard(recurrent_state_arg, state_pspec)
+        query = _reshard_pspec(query, qkv_pspec)
+        key = _reshard_pspec(key, qkv_pspec)
+        value = _reshard_pspec(value, qkv_pspec)
+        g = _reshard_pspec(g, g_beta_pspec)
+        beta = _reshard_pspec(beta, g_beta_pspec)
+        recurrent_state_arg = _reshard_pspec(recurrent_state_arg, state_pspec)
         if packed_segment_ids is not None:
-          packed_segment_ids = jax.sharding.reshard(packed_segment_ids, seg_pspec)
+          packed_segment_ids = _reshard_pspec(packed_segment_ids, seg_pspec)
 
       @functools.partial(
           jax.shard_map,
@@ -2782,6 +2793,144 @@ class Qwen3NextDecoderLayer(nnx.Module):
     )
     return layer_output, new_kv_cache
 
+  # ---------------------------------------------------------------------------
+  # Generalized Batch-Split layer adapter (used only when config.enable_batch_split)
+  # ---------------------------------------------------------------------------
+
+  def batch_split_supported(self) -> bool:
+    """Returns True if this hybrid Qwen3-Next / Qwen3.5 layer supports `batch_split`."""
+    cfg = self.config
+    return (
+        isinstance(self.mlp, Qwen3NextSparseMoeBlock)
+        and getattr(cfg, "num_experts", 1) > 1
+        and cfg.sparse_matmul
+        and cfg.use_ring_of_experts
+        and not cfg.te_moe_block
+        and not getattr(cfg, "moe_use_fused_gmm3d", False)
+        and cfg.num_moe_emb_chunks <= 0
+        and not getattr(cfg, "record_internal_nn_metrics", False)
+        and cfg.dropout_rate == 0.0
+    )
+
+  def batch_split_attn_and_route(
+      self,
+      inputs: jnp.ndarray,
+      decoder_segment_ids: None | jnp.ndarray,
+      decoder_positions: None | jnp.ndarray,
+      deterministic: bool,
+      model_mode: str,
+      previous_chunk=None,
+      slot: None | int = None,
+      kv_cache: None | dict[str, Array] = None,
+      attention_metadata: None | dict[str, Any] = None,
+      forced_routed_experts: jnp.ndarray | None = None,
+  ):
+    """Phase 1/2 TC compute: GatedDeltaNet or FullAttention + norms + MoE router gate."""
+    del previous_chunk, slot, kv_cache, forced_routed_experts
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    residual = inputs
+
+    if isinstance(attention_metadata, dict):
+      attention_metadata = attention_metadata.get(f"layer.{self.layer_idx}", attention_metadata.get(self.layer_idx))
+
+    hidden_states = self.input_layernorm(inputs, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+
+    if isinstance(self.attention, Qwen3NextFullAttention):
+      attention_output, _ = cast(Qwen3NextFullAttention, self.attention)(
+          hidden_states,
+          decoder_segment_ids,
+          decoder_positions,
+          deterministic,
+          model_mode,
+          kv_cache=None,
+          attention_metadata=attention_metadata,
+          out_sharding=self.out_sharding,
+      )
+    else:
+      attention_output, _ = cast(Qwen3NextGatedDeltaNet, self.attention)(
+          hidden_states,
+          model_mode=model_mode,
+          kv_cache=None,
+          decoder_segment_ids=decoder_segment_ids,
+          attention_metadata=attention_metadata,
+          out_sharding=self.out_sharding,
+      )
+
+    attention_output = self._maybe_shard_with_logical(attention_output, self.activation_axis_names)
+    hidden_states = residual + attention_output
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    residual = hidden_states
+
+    hidden_states = self.post_attention_layernorm(hidden_states, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+
+    moe_block = cast(Qwen3NextSparseMoeBlock, self.mlp)
+    moe_in, route_in, seq_lb_loss = moe_block.routed_experts.batch_split_route(hidden_states)
+    return residual, moe_in, route_in, seq_lb_loss
+
+  def batch_split_dispatch(self, moe_in, route_in):
+    """Weight-free EP All-Gather of microbatch tokens and routing metadata on SC0."""
+    moe_block = cast(Qwen3NextSparseMoeBlock, self.mlp)
+    return moe_block.routed_experts.batch_split_dispatch(moe_in, route_in)
+
+  def batch_split_dispatch_bwd(self, moe_in, route_in, g_x_val_ag, g_route_ag_diff):
+    """Weight-free backward of `batch_split_dispatch` (EP Reduce-Scatter on SC0)."""
+    moe_block = cast(Qwen3NextSparseMoeBlock, self.mlp)
+    return moe_block.routed_experts.batch_split_dispatch_bwd(moe_in, route_in, g_x_val_ag, g_route_ag_diff)
+
+  def batch_split_experts(
+      self, moe_in_ref, x_val_ag, x_scale_ag, route_ag, decoder_input_tokens=None, return_wgrad_hooks: bool = False
+  ):
+    """Local expert permute + GMMs + unpermute without EP dispatch/combine."""
+    del decoder_input_tokens
+    moe_block = cast(Qwen3NextSparseMoeBlock, self.mlp)
+    return moe_block.routed_experts.batch_split_experts(
+        moe_in_ref, x_val_ag, x_scale_ag, route_ag, return_wgrad_hooks=return_wgrad_hooks
+    )
+
+  def batch_split_shared_expert(self, moe_in):
+    """Sigmoid-gated shared expert MLP on local microbatch tokens (or zero if disabled)."""
+    moe_block = cast(Qwen3NextSparseMoeBlock, self.mlp)
+    if not moe_block.use_shared_expert:
+      return jnp.zeros_like(moe_in)
+    shared_expert_output = moe_block.shared_expert(
+        moe_in,
+        deterministic=True,
+        intermediate_sharding=self.mlp_intermediate_sharding,
+        out_sharding=self.out_sharding,
+    )
+    gate_sharding = None
+    if self.out_sharding is not None:
+      gate_sharding = jax.sharding.NamedSharding(
+          self.out_sharding.mesh, jax.sharding.PartitionSpec(*self.out_sharding.spec[:2], None)
+      )
+    gate_inputs = moe_in.astype(jnp.float32) if self.config.float32_gate_logits else moe_in
+    shared_gate_output = moe_block.shared_expert_gate(gate_inputs, out_sharding=gate_sharding)
+    if self.config.float32_gate_logits and self.config.float32_weight_sum:
+      gated = (jax.nn.sigmoid(shared_gate_output) * shared_expert_output.astype(jnp.float32)).astype(self.config.dtype)
+    else:
+      gated = jax.nn.sigmoid(shared_gate_output).astype(moe_in.dtype) * shared_expert_output
+    return self._maybe_shard_with_logical(gated, self.activation_axis_names)
+
+  def batch_split_combine(self, y_partial, moe_in_ref):
+    """Weight-free EP Reduce-Scatter of routed expert partial outputs on SC0."""
+    moe_block = cast(Qwen3NextSparseMoeBlock, self.mlp)
+    routed_out = moe_block.routed_experts.batch_split_combine(y_partial, moe_in_ref)
+    return self._maybe_shard_with_logical(routed_out, self.activation_axis_names)
+
+  def batch_split_combine_bwd(self, g_out, moe_in_ref, *, defer_dequant: bool = False):
+    """Weight-free backward of `batch_split_combine` (EP All-Gather on SC0)."""
+    moe_block = cast(Qwen3NextSparseMoeBlock, self.mlp)
+    return moe_block.routed_experts.batch_split_combine_bwd(g_out, moe_in_ref, defer_dequant=defer_dequant)
+
+  def batch_split_finalize_bias_updates(self, summed_counts):
+    """Finalizes microbatch-summed expert counts into routed bias updates."""
+    moe_block = cast(Qwen3NextSparseMoeBlock, self.mlp)
+    return moe_block.routed_experts.batch_split_finalize_bias_updates(summed_counts)
+
 
 # -----------------------------------------
 # The Base Decoder Layer for Qwen3
@@ -3068,6 +3217,86 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
       return (layer_output, stacked_kv_cache, layer_idx + 1), None  # pyrefly: ignore[unbound-name]
     else:
       return layer_output, kv_cache
+
+  # ---------------------------------------------------------------------------
+  # Generalized Batch-Split layer adapter (used only when config.enable_batch_split)
+  # ---------------------------------------------------------------------------
+
+  def batch_split_supported(self) -> bool:
+    """Returns True if this homogeneous Qwen3-MoE layer supports `batch_split`."""
+    cfg = self.config
+    return (
+        getattr(cfg, "num_experts", 1) > 1
+        and cfg.sparse_matmul
+        and cfg.use_ring_of_experts
+        and not cfg.te_moe_block
+        and not getattr(cfg, "moe_use_fused_gmm3d", False)
+        and cfg.num_moe_emb_chunks <= 0
+        and not getattr(cfg, "record_internal_nn_metrics", False)
+        and cfg.dropout_rate == 0.0
+    )
+
+  def batch_split_attn_and_route(
+      self,
+      inputs: jnp.ndarray,
+      decoder_segment_ids: None | jnp.ndarray,
+      decoder_positions: None | jnp.ndarray,
+      deterministic: bool,
+      model_mode: str,
+      previous_chunk=None,
+      slot: None | int = None,
+      kv_cache: None | jnp.ndarray = None,
+      attention_metadata: None | dict[str, Any] = None,
+  ):
+    """Phase 1/2 TC compute: GQA self-attention + norms + MoE router gate."""
+    del previous_chunk, slot, kv_cache
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+    hidden_states, intermediate_inputs, _ = self.apply_attention_with_norm(
+        inputs,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        kv_cache=None,
+        attention_metadata=attention_metadata,
+    )
+    moe_in, route_in, seq_lb_loss = self.moe_block.batch_split_route(hidden_states)
+    return intermediate_inputs, moe_in, route_in, seq_lb_loss
+
+  def batch_split_dispatch(self, moe_in, route_in):
+    """Weight-free EP All-Gather of microbatch tokens and routing metadata on SC0."""
+    return self.moe_block.batch_split_dispatch(moe_in, route_in)
+
+  def batch_split_dispatch_bwd(self, moe_in, route_in, g_x_val_ag, g_route_ag_diff):
+    """Weight-free backward of `batch_split_dispatch` (EP Reduce-Scatter on SC0)."""
+    return self.moe_block.batch_split_dispatch_bwd(moe_in, route_in, g_x_val_ag, g_route_ag_diff)
+
+  def batch_split_experts(
+      self, moe_in_ref, x_val_ag, x_scale_ag, route_ag, decoder_input_tokens=None, return_wgrad_hooks: bool = False
+  ):
+    """Local expert permute + GMMs + unpermute without EP dispatch/combine."""
+    del decoder_input_tokens
+    return self.moe_block.batch_split_experts(
+        moe_in_ref, x_val_ag, x_scale_ag, route_ag, return_wgrad_hooks=return_wgrad_hooks
+    )
+
+  def batch_split_shared_expert(self, moe_in):
+    """Qwen3-MoE (`qwen3_moe`) has no shared expert branch."""
+    return jnp.zeros_like(moe_in)
+
+  def batch_split_combine(self, y_partial, moe_in_ref):
+    """Weight-free EP Reduce-Scatter of routed expert partial outputs on SC0."""
+    routed_out = self.moe_block.batch_split_combine(y_partial, moe_in_ref)
+    return self._maybe_shard_with_logical(routed_out, self.activation_axis_names)
+
+  def batch_split_combine_bwd(self, g_out, moe_in_ref, *, defer_dequant: bool = False):
+    """Weight-free backward of `batch_split_combine` (EP All-Gather on SC0)."""
+    return self.moe_block.batch_split_combine_bwd(g_out, moe_in_ref, defer_dequant=defer_dequant)
+
+  def batch_split_finalize_bias_updates(self, summed_counts):
+    """Finalizes microbatch-summed expert counts into routed bias updates."""
+    return self.moe_block.batch_split_finalize_bias_updates(summed_counts)
 
 
 class Qwen3OmniMoeVisionPatchMerger(nnx.Module):

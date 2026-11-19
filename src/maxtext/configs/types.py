@@ -2703,6 +2703,18 @@ class LayoutAndSharding(BaseModel):
           " blocks prefetched per sub-layer, the reduce-scatters are deferred to the next sub-layer's step."
       ),
   )
+  enable_batch_split: bool = Field(
+      False,
+      description=(
+          "Enable generalized 2-microbatch interleaved batch-split scheduling on supported scanned MoE decoder"
+          " layers (isolated in layers/batch_split.py). Splits each device's local batch into two microbatches"
+          " and overlaps SparseCore-0 EP token dispatch/combine collectives with TensorCore attention and expert"
+          " compute, while overlapping SparseCore-1 FSDP weight all-gathers and deferred weight-gradient"
+          " reduce-scatters across full layers when prefetch_fsdp_weights=True. Requires scan_layers=True,"
+          " remat_policy!='none', and use_ring_of_experts=True for MoE layers. Mutually exclusive with legacy"
+          " use_batch_split_schedule and use_lineage."
+      ),
+  )
 
 
 class DcnParallelism(BaseModel):
@@ -5036,6 +5048,7 @@ def _validate_remat_policy(
     *,
     prefetch_fsdp_weights: bool,
     using_pipeline_parallelism: bool,
+    enable_batch_split: bool = False,
 ) -> None:
   """Rejects `remat_policy=none` with execution paths that require checkpointing."""
   if not _is_remat_disabled(remat_policy):
@@ -5045,6 +5058,11 @@ def _validate_remat_policy(
         "remat_policy='none' is not supported with prefetch_fsdp_weights=True; the FSDP weight-prefetch"
         " custom_vjp pipeline requires per-layer gradient checkpointing so gathered weights are not"
         " retained between the forward and backward pass."
+    )
+  if enable_batch_split:
+    raise ValueError(
+        "remat_policy='none' is not supported with enable_batch_split=True; the batch-split"
+        " custom_vjp pipeline requires per-layer gradient checkpointing."
     )
   if using_pipeline_parallelism:
     raise ValueError(
@@ -6557,7 +6575,17 @@ class MaxTextConfig(
         self.remat_policy,
         prefetch_fsdp_weights=self.prefetch_fsdp_weights,
         using_pipeline_parallelism=bool(self.using_pipeline_parallelism),
+        enable_batch_split=self.enable_batch_split,
     )
+    if self.enable_batch_split:
+      if not self.scan_layers:
+        raise ValueError("enable_batch_split=True requires scan_layers=True.")
+      if self.use_batch_split_schedule:
+        raise ValueError("enable_batch_split=True is mutually exclusive with legacy use_batch_split_schedule=True.")
+      if getattr(self, "use_lineage", False):
+        raise ValueError("enable_batch_split=True is mutually exclusive with use_lineage=True.")
+      if self.num_experts > 1 and not self.use_ring_of_experts:
+        raise ValueError("enable_batch_split=True requires use_ring_of_experts=True for MoE models.")
     if self.using_pipeline_parallelism:
       num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
       if self.num_pipeline_repeats == -1:
@@ -8686,6 +8714,7 @@ class RLConfig(
         self.remat_policy,
         prefetch_fsdp_weights=self.prefetch_fsdp_weights,
         using_pipeline_parallelism=self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1,
+        enable_batch_split=self.enable_batch_split,
     )
 
     def get_parallelism_map(prefix: str) -> dict[str, int]:

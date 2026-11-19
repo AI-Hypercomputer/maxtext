@@ -879,8 +879,13 @@ class MlpBlock(nnx.Module):
       x = self.wi(inputs, out_sharding=intermediate_sharding)
 
       # Enforce fused activations don't shard on num_activations axis
-      fused_intermediate_logical = self.intermediate_logical[:2] + (None,) + self.intermediate_logical[2:]
-      x = self._maybe_shard_with_logical(x, fused_intermediate_logical)
+      if intermediate_sharding is not None:
+        ispec = tuple(intermediate_sharding.spec)
+        fused_pspec = PartitionSpec(*(ispec[:2] + (None,) + ispec[2:]))
+        x = maybe_shard_with_pspec(x, fused_pspec, self.mesh, cfg.shard_mode, debug_sharding=cfg.debug_sharding)
+      else:
+        fused_intermediate_logical = self.intermediate_logical[:2] + (None,) + self.intermediate_logical[2:]
+        x = self._maybe_shard_with_logical(x, fused_intermediate_logical)
 
       x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
@@ -905,7 +910,12 @@ class MlpBlock(nnx.Module):
       x = functools.reduce(operator.mul, activations).astype(self.dtype)
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
-    x = self._maybe_shard_with_logical(x, self.intermediate_logical)
+    if intermediate_sharding is not None:
+      x = maybe_shard_with_pspec(
+          x, intermediate_sharding.spec, self.mesh, cfg.shard_mode, debug_sharding=cfg.debug_sharding
+      )
+    else:
+      x = self._maybe_shard_with_logical(x, self.intermediate_logical)
     output = self.wo(x, out_sharding=out_sharding)
 
     output = checkpoint_name(output, "mlpwo")

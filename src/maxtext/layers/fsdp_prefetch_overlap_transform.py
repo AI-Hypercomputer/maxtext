@@ -71,6 +71,10 @@ _DATA_FORMATTING_OPCODES = frozenset(
 )
 _DATA_FORMATTING_CUSTOM_CALLS = frozenset({"AllocateBuffer"})
 _FUSION_INTERNAL_EXTRA_OPCODES = frozenset({"kParameter", "kReduce"})
+# Extra plumbing opcodes enabled only on batch-split modules (static FP8 scale multiply + send/recv offset math).
+_BATCH_SPLIT_EXTRA_DATA_FORMATTING_OPCODES = frozenset(
+    {"kAnd", "kMultiply", "kPartitionId", "kReduceWindow", "kShiftRightLogical"}
+)
 
 _CONTROL_PREDECESSORS_RE = re.compile(r"control-predecessors=\{([^}]*)\}")
 _CALLS_RE = re.compile(r"\bcalls=(%?[\w.\-]+)")
@@ -289,7 +293,7 @@ def _move_before(order: Sequence[str], bundle: frozenset[str], anchor: str) -> l
   return rest[:index] + members + rest[index:]
 
 
-def reschedule(graph: ScheduleGraph) -> tuple[str, ...]:
+def reschedule(graph: ScheduleGraph, *, use_compute_epochs: bool = False) -> tuple[str, ...]:
   """Schedules async starts at the start of each layer and async dones at the end."""
   pairs = find_async_pairs(graph)
   if not pairs:
@@ -307,17 +311,36 @@ def reschedule(graph: ScheduleGraph) -> tuple[str, ...]:
   for d in dones:
     done_bundles[d], done_slots[d] = prune_bundle_for_done(graph, d, _closure(graph, d, graph.users), positions)
 
-  # Rank shared-queue completions by (start_slot + done_slot, done_slot, start_slot, done)
-  # and raise start floors so each FIFO queue issues in completion order.
-  completion_order = sorted(
-      dones,
-      key=lambda d: (
-          raw_start_slots.get(start_of_done[d], -1) + done_slots[d],
-          done_slots[d],
-          raw_start_slots.get(start_of_done[d], -1),
-          d,
-      ),
-  )
+  if use_compute_epochs:
+    # Group shared-queue starts by non-formatting `kCustomCall` phase (`splash_mha`, `gmm_v2`,
+    # `tgmm_v2`, `ragged_gather_tc`) without `kFusion` bucket cliffs, so collectives ready in the
+    # same inter-kernel gap break ties purely by `done_slot` (avoiding pre-kernel collectives
+    # capping cross-kernel `dispatch_bwd` / `combine_bwd` completions).
+    cc_prefix = [0] * (len(graph.order) + 1)
+    for idx, name in enumerate(graph.order):
+      w = 1 if (name not in graph.data_formatting and graph.opcodes.get(name) == "kCustomCall") else 0
+      cc_prefix[idx + 1] = cc_prefix[idx] + w
+    completion_order = sorted(
+        dones,
+        key=lambda d: (
+            cc_prefix[max(raw_start_slots.get(start_of_done[d], 0), 0)],
+            done_slots[d],
+            raw_start_slots.get(start_of_done[d], -1),
+            d,
+        ),
+    )
+  else:
+    # Rank shared-queue completions by (start_slot + done_slot, done_slot, start_slot, done)
+    # and raise start floors so each FIFO queue issues in completion order.
+    completion_order = sorted(
+        dones,
+        key=lambda d: (
+            raw_start_slots.get(start_of_done[d], -1) + done_slots[d],
+            done_slots[d],
+            raw_start_slots.get(start_of_done[d], -1),
+            d,
+        ),
+    )
   start_slots = dict(raw_start_slots)
   last_on_queue: dict[str, int] = {}
   for d in completion_order:
@@ -392,6 +415,7 @@ def _fusion_is_data_formatting(
     instruction_text: str,
     computations_by_name: Mapping[str, "_hlo.HloComputation"],
     cache: dict[str, bool],
+    extra_opcodes: frozenset[str] = frozenset(),
 ) -> bool:
   """Returns True if a fusion's body contains only data-formatting ops."""
   match = _CALLS_RE.search(instruction_text)
@@ -405,12 +429,12 @@ def _fusion_is_data_formatting(
     cache[callee] = False
     return False
   cache[callee] = False
-  allowed = _DATA_FORMATTING_OPCODES | _FUSION_INTERNAL_EXTRA_OPCODES
+  allowed = _DATA_FORMATTING_OPCODES | _FUSION_INTERNAL_EXTRA_OPCODES | extra_opcodes
   for inner in computation.instructions():
     opcode = inner.opcode.name
     if opcode in allowed:
       continue
-    if opcode == "kFusion" and _fusion_is_data_formatting(inner.to_string(), computations_by_name, cache):
+    if opcode == "kFusion" and _fusion_is_data_formatting(inner.to_string(), computations_by_name, cache, extra_opcodes):
       continue
     target = _CUSTOM_CALL_TARGET_RE.search(inner.to_string())
     if opcode == "kCustomCall" and target is not None and target.group(1) in _DATA_FORMATTING_CUSTOM_CALLS:
@@ -477,6 +501,8 @@ def _build_graph(
     computations_by_name: Mapping[str, "_hlo.HloComputation"],
     fusion_cache: dict[str, bool],
     async_bodies: Collection[str] = (),
+    *,
+    use_compute_epochs: bool = False,
 ) -> ScheduleGraph:
   """Builds a `ScheduleGraph` from a scheduled HLO instruction sequence."""
   order = [inst.name for inst in sequence]
@@ -486,6 +512,8 @@ def _build_graph(
   data_formatting: list[str] = []
   queues: dict[str, str] = {}
   fences: list[str] = []
+  extra_df_opcodes = _BATCH_SPLIT_EXTRA_DATA_FORMATTING_OPCODES if use_compute_epochs else frozenset()
+  allowed_df_opcodes = _DATA_FORMATTING_OPCODES | extra_df_opcodes
   for inst in sequence:
     text = inst.to_string()
     cp_match = _CONTROL_PREDECESSORS_RE.search(text)
@@ -498,8 +526,10 @@ def _build_graph(
     opcodes[inst.name] = opcode
     target = _CUSTOM_CALL_TARGET_RE.search(text) if opcode == "kCustomCall" else None
     if (
-        opcode in _DATA_FORMATTING_OPCODES
-        or (opcode == "kFusion" and _fusion_is_data_formatting(text, computations_by_name, fusion_cache))
+        opcode in allowed_df_opcodes
+        or (
+            opcode == "kFusion" and _fusion_is_data_formatting(text, computations_by_name, fusion_cache, extra_df_opcodes)
+        )
         or (target is not None and target.group(1) in _DATA_FORMATTING_CUSTOM_CALLS)
     ):
       data_formatting.append(inst.name)
@@ -552,7 +582,11 @@ def _while_and_async_body_names(module: "_hlo.HloModule") -> tuple[set[str], set
   return all_bodies, {b for b in all_bodies if issues(b)}
 
 
-def transform_module(module: "_hlo.HloModule") -> list[str]:
+def transform_module(
+    module: "_hlo.HloModule",
+    *,
+    use_compute_epochs: bool = False,
+) -> list[str]:
   """Rewrites the schedule of the entry computation and every collective-issuing while body in `module`."""
   schedule = module.schedule()
   if schedule is None:
@@ -572,8 +606,9 @@ def transform_module(module: "_hlo.HloModule") -> list[str]:
   if entry_match is None:
     raise ScheduleTransformError(f"Module {module.name} has no entry.")
 
+  entry_name = entry_match.group(1)
   _, async_bodies = _while_and_async_body_names(module)
-  selected = async_bodies | {entry_match.group(1)}
+  selected = async_bodies | {entry_name}
   computations_by_name = {c.name: c for c in module.computations()}
   fusion_cache: dict[str, bool] = {}
   rewritten: list[str] = []
@@ -581,14 +616,24 @@ def transform_module(module: "_hlo.HloModule") -> list[str]:
   for computation in module.make_nonfusion_computations():
     if computation.name not in selected:
       continue
+    if computation.name != entry_name and "_post_fusion_pipelined_body" in computation.name:
+      continue
     try:
       sequence = schedule.sequence(computation)
     except Exception:  # pylint: disable=broad-except
       continue
     if not sequence:
       continue
-    graph = _build_graph(sequence, computations_by_name, fusion_cache, async_bodies)
-    new_order = reschedule(graph)
+    graph = _build_graph(
+        sequence,
+        computations_by_name,
+        fusion_cache,
+        async_bodies,
+        use_compute_epochs=use_compute_epochs,
+    )
+    if use_compute_epochs and computation.name != entry_name and not graph.queues:
+      continue
+    new_order = reschedule(graph, use_compute_epochs=use_compute_epochs)
     validate_order(graph, new_order)
     by_name = {inst.name: inst for inst in sequence}
     schedule.set_sequence(computation, [by_name[name] for name in new_order])
@@ -599,11 +644,15 @@ def transform_module(module: "_hlo.HloModule") -> list[str]:
   return rewritten
 
 
-def fsdp_prefetch_overlap_transform(serialized_hlo: bytes) -> bytes:
+def fsdp_prefetch_overlap_transform(
+    serialized_hlo: bytes,
+    *,
+    use_compute_epochs: bool = False,
+) -> bytes:
   """XLA post-scheduler transformation pass for FSDP weight prefetching."""
   from_proto = getattr(_hlo.HloModule, "from_serialized_hlo_module_proto")
   module: _hlo.HloModule = from_proto(serialized_hlo)
-  transform_module(module)
+  transform_module(module, use_compute_epochs=use_compute_epochs)
   return module.as_serialized_hlo_module_proto()
 
 
@@ -614,9 +663,13 @@ def register_transform(
   """Registers the FSDP prefetch post-scheduler transformation with JAX/XLA."""
 
   def _transform_if_applicable(serialized_hlo: bytes) -> bytes | None:
-    if b"fsdp_prefetch" not in serialized_hlo:
+    has_batch_split = b"batch_split" in serialized_hlo
+    if b"fsdp_prefetch" not in serialized_hlo and not has_batch_split:
       return None
-    return fsdp_prefetch_overlap_transform(serialized_hlo)
+    return fsdp_prefetch_overlap_transform(
+        serialized_hlo,
+        use_compute_epochs=has_batch_split,
+    )
 
   unregister_transform(name=name, platforms=platforms)
   jex_xla.register_hlo_module_transformation(

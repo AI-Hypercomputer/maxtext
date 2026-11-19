@@ -59,6 +59,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     PREFILL_KV_BATCH,
     PREFILL_LENGTH,
+    ShardMode,
     AttentionType,
     DEFAULT_MASK_VALUE,
 )
@@ -1344,7 +1345,33 @@ class MLA(Attention):
       g = jax.ad_checkpoint.checkpoint_name(g, "attention_out")
       out = out * g
 
-    out_sharding = create_sharding(self.mesh, out_logical_name)
-    out = self.out_projection(out, out_sharding=out_sharding)
+    caller_out_sharding = out_sharding
+    dot_out_sharding = create_sharding(self.mesh, out_logical_name)
+    need_post_reshard = False
+    if self.config.shard_mode == ShardMode.EXPLICIT and caller_out_sharding is not None:
+      in_sharding = getattr(jax.typeof(out), "sharding", None)
+      if isinstance(in_sharding, NamedSharding):
+        in_parts = in_sharding.spec.partitions + (None,) * max(0, 4 - len(in_sharding.spec.partitions))
+        tgt_parts = caller_out_sharding.spec.partitions + (None,) * max(0, 3 - len(caller_out_sharding.spec.partitions))
+        if in_parts[:2] != tgt_parts[:2]:
+
+          def _flat_axes(entry):
+            if entry is None:
+              return ()
+            return tuple(entry) if isinstance(entry, (tuple, list)) else (entry,)
+
+          kept = set(_flat_axes(in_parts[0])) | set(_flat_axes(in_parts[1])) | set(_flat_axes(tgt_parts[2]))
+          contract_axes = tuple(
+              a for e in in_parts[2:] for a in _flat_axes(e) if self.mesh.shape.get(a, 1) > 1 and a not in kept
+          )
+          if contract_axes:
+            dot_out_sharding = NamedSharding(
+                self.mesh,
+                jax.sharding.PartitionSpec(in_parts[0], in_parts[1], tgt_parts[2], unreduced=frozenset(contract_axes)),
+            )
+            need_post_reshard = True
+    out = self.out_projection(out, out_sharding=dot_out_sharding)
+    if need_post_reshard:
+      out = jax.sharding.reshard(out, caller_out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
