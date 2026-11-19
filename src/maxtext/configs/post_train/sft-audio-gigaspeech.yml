@@ -37,8 +37,9 @@ dataset_type: hf
 hf_path: 'parquet'
 hf_train_files: 'gs://hengtaoguo-maxtext-euw4/data/gigaspeech_xs/train-*.parquet'
 train_split: 'train'
-hf_eval_files: 'gs://hengtaoguo-maxtext-euw4/data/gigaspeech_xs/train-*.parquet'  # replace with a validation shard set
-hf_eval_split: 'train'
+hf_eval_files: 'gs://hengtaoguo-maxtext-euw4/data/gigaspeech_dev/validation-*.parquet'
+hf_eval_split: 'validation'
+eval_steps: 50  # 50 x global batch dev clips per eval; dev has 6,750 clips
 
 train_audio_column: 'audio'
 eval_audio_column: 'audio'

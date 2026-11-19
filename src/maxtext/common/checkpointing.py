@@ -1161,6 +1161,7 @@ def load_params_from_path(
       )
 
   aliased_collections = {}
+  aux_collections = {}
   if restore_key in ("model_params", "model"):
     params_collection = want
   elif is_nnx and restore_key == "params":
@@ -1204,11 +1205,15 @@ def load_params_from_path(
     # Anything the checkpoint is KNOWN not to hold genuinely is not there; keep dropping it
     # so Orbax's partial_load does not hand back unmaterialized leaves. When the collection
     # set is unknown, request everything and let the post-load mismatch check adjudicate.
+    requested_collections = dict(params_collection)
     params_collection = {
         col: tree
         for col, tree in params_collection.items()
         if stored_collections is None or col in stored_collections or col == "params"
     }
+    # Train-state checkpoints keep non-Param NNX variables (e.g. the MoE router bias, `MoEBiasVar`)
+    # under `nnx_aux/model/...` instead of `params/<collection>/...`; fetch those collections from there.
+    aux_collections = {col: tree for col, tree in requested_collections.items() if col not in params_collection}
   else:
     # Only reachable when `is_nnx` is False: `restore_key` is normalized to one of three
     # values above, and the preceding branches claim both the non-"params" keys and every
@@ -1289,6 +1294,34 @@ def load_params_from_path(
     # remaining weights up a level, so the mismatch check reports the entire model
     # as missing. Only the NNX branch above needs per-collection flattening.
     restored_weights = restored_collection
+
+  if (
+      is_nnx
+      and restore_key == "params"
+      and aux_collections
+      and isinstance(stored, dict)
+      and isinstance(stored.get("nnx_aux"), dict)
+      and isinstance(stored["nnx_aux"].get("model"), dict)
+  ):
+    aux_want = {}
+    for col_tree in aux_collections.values():
+      aux_want = _deep_merge_dicts(aux_want, col_tree)
+    aux_context = checkpoint_context.build_context(
+        use_ocdbt=use_ocdbt,
+        use_zarr3=use_zarr3,
+        checkpoint_storage_concurrent_gb=checkpoint_storage_concurrent_gb,
+        partial_load=True,
+        enable_single_replica_ckpt_restoring=enable_single_replica_ckpt_restoring,
+        colocated_python_checkpointing=colocated_python_checkpointing,
+    )
+    with aux_context:
+      aux_restored = ocp.load(
+          path,
+          {"nnx_aux": {"model": aux_want}},
+          checkpointable_name=checkpointable_name,  # pyrefly: ignore[bad-argument-type]
+      )
+    restored_weights = _deep_merge_dicts(restored_weights, aux_restored["nnx_aux"]["model"])
+    max_logging.log(f"Loaded collections {sorted(aux_collections)} from nnx_aux/model of {path}")
 
   # Convert the restored 3D/4D routed-expert weights to the flat layout the model expects.
   for wpath, (flat_sds, stored_sds) in flat_moe_plan.items():

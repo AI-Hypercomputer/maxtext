@@ -1337,6 +1337,23 @@ def from_pretrained(
                 for col, col_target in item_to_restore["params"].items()
             }
         }
+        # Train-state checkpoints keep non-Param NNX variables (e.g. the MoE router bias `MoEBiasVar`)
+        # under `nnx_aux/model/...` rather than in a `params/<collection>`; restore those leaves too so a
+        # full train state can be loaded as decode params without a params-only conversion.
+        aux_model_meta = (
+            metadata.item_metadata.tree.get("nnx_aux", {}).get("model")
+            if isinstance(metadata.item_metadata.tree.get("nnx_aux"), dict)
+            else None
+        )
+        if isinstance(aux_model_meta, dict):
+          aux_target = _intersect_with_metadata(target_for_restore, aux_model_meta)
+          if aux_target:
+            item_to_restore["nnx_aux"] = {"model": aux_target}
+            restore_args["nnx_aux"] = {
+                "model": _fix_restore_args_for_shape_mismatch(
+                    ocp.checkpoint_utils.construct_restore_args(aux_target), aux_model_meta, mesh
+                )
+            }
       else:
         # NNX checkpoint: {'decoder': {'value': ...}}, or NNX-RL with extra 'base' nesting.
         # Restore only nnx.Param — RNG variable shapes may differ between checkpoint and model,
@@ -1425,6 +1442,8 @@ def from_pretrained(
         for col, col_tree in restored["params"].items():
           if col != "params":
             checkpoint = checkpointing._deep_merge_dicts(checkpoint, col_tree)  # pylint: disable=protected-access
+        if "nnx_aux" in restored:
+          checkpoint = checkpointing._deep_merge_dicts(checkpoint, restored["nnx_aux"]["model"])  # pylint: disable=protected-access
 
       if checkpoint:
         if config.use_m3_model:
