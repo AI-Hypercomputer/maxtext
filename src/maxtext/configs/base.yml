@@ -1044,6 +1044,8 @@ train_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected
 train_image_column: 'image'
 eval_data_columns: ['text'] # for DPO dataset containing "chosen" and "rejected"
 eval_image_column: 'image'
+train_audio_column: 'audio'  # audio SFT: column holding the clip (HF Audio dict / bytes / path)
+eval_audio_column: 'audio'
 default_prompt: ''
 packing: true
 # Whether to use continuous stream chunking (unpacked monolithic token stream with 0% padding,
@@ -1628,6 +1630,8 @@ image_placeholder: "<|image|>"
 video_placeholder: "<|video|>"
 audio_placeholder: "<|audio|>"
 use_audio_in_video: false
+# Audio SFT: static number of log-mel frames per clip (100 frames/s); clips are zero-padded / truncated to it.
+audio_max_mel_frames: 3000
 video_max_grid_t: null
 video_max_grid_h: null
 video_max_grid_w: null

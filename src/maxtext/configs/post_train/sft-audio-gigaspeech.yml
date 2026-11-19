@@ -1,0 +1,48 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Audio SFT (speech + text prompt -> text) on GigaSpeech, e.g. for the Ming-3.0-audio-tiny thinker.
+# Data: parquet shards written by tools/data_generation/prepare_gigaspeech_parquet.py
+# (columns: audio {bytes, path}, text, duration, segment_id), streamed from GCS.
+
+base_config: "base.yml"
+
+use_sft: true
+use_tunix_gradient_accumulation: true
+use_multimodal: true
+use_audio: true
+# The prompt holds the audio; the model trains only on the transcript tokens.
+sft_train_on_completion_only: true
+packing: false  # multimodal packing is not supported yet
+freeze_audio_encoder_params: true
+learning_rate: 2.e-5
+
+# Every clip is padded / truncated to a static 20 s (2000 mel frames -> 125 audio tokens for Ming).
+# GigaSpeech segments are <= 20 s. Lower it (e.g. 1000) if your data is shorter to save encoder compute.
+audio_max_mel_frames: 2000
+
+# -------------- HF pipeline --------------
+dataset_type: hf
+hf_path: 'parquet'
+hf_train_files: 'gs://hengtaoguo-maxtext-euw4/data/gigaspeech_xs/train-*.parquet'
+train_split: 'train'
+hf_eval_files: 'gs://hengtaoguo-maxtext-euw4/data/gigaspeech_xs/train-*.parquet'  # replace with a validation shard set
+hf_eval_split: 'train'
+
+train_audio_column: 'audio'
+eval_audio_column: 'audio'
+# 'prompt' is injected from default_prompt (the dataset has no prompt column); 'text' is the transcript.
+train_data_columns: ['prompt', 'text']
+eval_data_columns: ['prompt', 'text']
+default_prompt: "Transcribe the speech into text."

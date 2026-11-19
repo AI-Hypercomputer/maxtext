@@ -2767,6 +2767,10 @@ class DatasetGeneral(BaseModel):
   train_image_column: str | list[str] = Field("image", description="Column name(s) for images in the training data.")
   eval_data_columns: list[str] = Field(["text"], description="Column(s) to use from the evaluation data.")
   eval_image_column: str | list[str] = Field("image", description="Column name(s) for images in evaluation data.")
+  train_audio_column: str = Field(
+      "audio", description="Column holding the audio clip (HF Audio dict / bytes / path) for audio SFT."
+  )
+  eval_audio_column: str = Field("audio", description="Column holding the audio clip for audio SFT evaluation data.")
   default_prompt: str = Field(
       "",
       description="Default prompt injected into the dataset when the prompt column is missing.",
@@ -3968,6 +3972,14 @@ class MultimodalGeneral(BaseModel):
   video_placeholder: str = Field("<|video|>", description="Placeholder string for video in text prompts.")
   audio_placeholder: str = Field("<|audio|>", description="Placeholder string for audio in text prompts.")
   use_audio_in_video: bool = Field(False, description="Extract and use audio from video files.")
+  audio_max_mel_frames: int = Field(
+      3000,
+      description=(
+          "Static number of log-mel frames per audio clip in training batches (whisper-style frontends: 100 frames/s,"
+          " 3000 = 30 s). Clips are zero-padded / truncated to this length so every batch has one compiled shape;"
+          " the number of audio placeholder tokens still follows the clip's true length."
+      ),
+  )
   use_mrope: bool = Field(False, description="Enable Multi-dimensional RoPE for Qwen3-Omni models.")
   mrope_section: list[int] = Field([24, 20, 20], description="Dimensions for temporal, height, width in MRoPE.")
   position_id_per_seconds: int = Field(25, description="Temporal granularity for MRoPE (tokens per second).")
