@@ -513,6 +513,14 @@ def _pure_jax_gdn_cpu_fallback(
     cfg: QwenConfig,
 ) -> jax.Array:
   """Zero-Flax pure-JAX segmented causal Conv1D + Gated Delta Rule reference."""
+  cp_axis = cfg.cp_axis_name
+  local_seq_len = qkv.shape[1]
+  if cp_axis is not None:
+    qkv = jax.lax.all_gather(qkv, cp_axis, axis=1, tiled=True)
+    b = jax.lax.all_gather(b, cp_axis, axis=1, tiled=True)
+    a = jax.lax.all_gather(a, cp_axis, axis=1, tiled=True)
+    segment_ids = jax.lax.all_gather(segment_ids, cp_axis, axis=1, tiled=True)
+
   bsz, seq_len, _ = qkv.shape
   k_conv = cfg.gdn_conv_kernel_size
   qkv_f32 = qkv.astype(jnp.float32)
@@ -597,7 +605,13 @@ def _pure_jax_gdn_cpu_fallback(
       jnp.swapaxes(segment_ids, 0, 1),
   )
   _, outs_sbhd = jax.lax.scan(_step, (init_state, init_prev_seg), xs)
-  return jnp.swapaxes(outs_sbhd, 0, 1).astype(qkv.dtype)
+  out_bshd = jnp.swapaxes(outs_sbhd, 0, 1).astype(qkv.dtype)
+  if cp_axis is not None:
+    cp_rank = jax.lax.axis_index(cp_axis)
+    out_bshd = jax.lax.dynamic_slice_in_dim(
+        out_bshd, cp_rank * local_seq_len, local_seq_len, axis=1
+    )
+  return out_bshd
 
 
 def gdn_mixer(
@@ -663,7 +677,7 @@ def gdn_mixer(
         chunk_size=cfg.gdn_chunk_size,
         use_qk_norm_in_gdn=True,
         compute_dtype=compute_dt,
-        cp_axis_name=None,
+        cp_axis_name=cfg.cp_axis_name,
         segment_ids=segment_ids,
         conv_input_in_qkv_dtype=True,
         conv_dense_token_stack=True,
@@ -671,7 +685,7 @@ def gdn_mixer(
         bwd_natural_layout=cfg.gdn_bwd_natural_layout,
         conv_natural_layout=(conv_natural_layout and is_bf16),
         fwd_head_group_size=cfg.gdn_fwd_head_group_size,
-        precomputed_meta=precomputed_meta,
+        precomputed_meta=None if cfg.cp_axis_name is not None else precomputed_meta,
         keep_bf16_states=cfg.gdn_keep_bf16_states,
         recompute_t_inv_bwd=cfg.gdn_recompute_t_inv,
     )
@@ -753,7 +767,7 @@ def gdn_mixer_fwd_save_res(
           chunk_size=cfg.gdn_chunk_size,
           use_qk_norm_in_gdn=True,
           compute_dtype=compute_dt,
-          cp_axis_name=None,
+          cp_axis_name=cfg.cp_axis_name,
           segment_ids=segment_ids,
           conv_input_in_qkv_dtype=True,
           conv_dense_token_stack=True,
@@ -761,7 +775,7 @@ def gdn_mixer_fwd_save_res(
           bwd_natural_layout=cfg.gdn_bwd_natural_layout,
           conv_natural_layout=(conv_natural_layout and is_bf16),
           fwd_head_group_size=cfg.gdn_fwd_head_group_size,
-          precomputed_meta=precomputed_meta,
+          precomputed_meta=None if cfg.cp_axis_name is not None else precomputed_meta,
           keep_bf16_states=cfg.gdn_keep_bf16_states,
           recompute_t_inv_bwd=cfg.gdn_recompute_t_inv,
       )

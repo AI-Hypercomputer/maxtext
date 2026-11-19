@@ -172,7 +172,17 @@ def _splash_core(
     sa_v_seq_minor: bool | None = None,
 ) -> jax.Array:
   """Executes only the Splash Attention (or pure-JAX CPU) core."""
-  _, seq_len, _, _ = q_scaled.shape
+  cp_axis = cfg.cp_axis_name
+  if cp_axis is not None:
+    # Ulysses CP: swap sequence shards for head shards over `cp_axis` (e.g. intra-chip `ep_d2d`).
+    q_scaled = jax.lax.all_to_all(
+        q_scaled, cp_axis, split_axis=2, concat_axis=1, tiled=True
+    )
+    k = jax.lax.all_to_all(k, cp_axis, split_axis=2, concat_axis=1, tiled=True)
+    v = jax.lax.all_to_all(v, cp_axis, split_axis=2, concat_axis=1, tiled=True)
+    segment_ids = jax.lax.all_gather(segment_ids, cp_axis, axis=1, tiled=True)
+
+  _, seq_len, num_local_q_heads, _ = q_scaled.shape
   if cfg.use_pallas_kernels:
     q_bhsd = jnp.swapaxes(q_scaled, 1, 2)
     k_bhsd = jnp.swapaxes(k, 1, 2)
@@ -205,7 +215,7 @@ def _splash_core(
     )
     causal = splash_attention.CausalMask(shape=(seq_len, seq_len))
     mh_mask = splash_attention.MultiHeadMask(
-        masks=[causal for _ in range(cfg.num_query_heads)]
+        masks=[causal for _ in range(num_local_q_heads)]
     )
     splash_fn = splash_attention.make_splash_mha(
         mh_mask,
@@ -224,9 +234,14 @@ def _splash_core(
     )
     if cfg.attn_bf16_out_fused_gate:
       attn_bhsd = attn_bhsd.astype(q_scaled.dtype)
-    return jnp.swapaxes(attn_bhsd, 1, 2)
+    attn_out = jnp.swapaxes(attn_bhsd, 1, 2)
+    if cp_axis is not None:
+      attn_out = jax.lax.all_to_all(
+          attn_out, cp_axis, split_axis=1, concat_axis=2, tiled=True
+      )
+    return attn_out
 
-  repeats = cfg.num_query_heads // cfg.num_kv_heads
+  repeats = num_local_q_heads // k.shape[2]
   k_rep = jnp.repeat(k, repeats, axis=2)
   v_rep = jnp.repeat(v, repeats, axis=2)
   logits = jnp.einsum(
@@ -249,6 +264,10 @@ def _splash_core(
       v_rep.astype(jnp.float32),
       precision=jax.lax.Precision.HIGHEST,
   ).astype(q_scaled.dtype)
+  if cp_axis is not None:
+    attn_out = jax.lax.all_to_all(
+        attn_out, cp_axis, split_axis=1, concat_axis=2, tiled=True
+    )
   return checkpoint_name(attn_out, "context")
 
 

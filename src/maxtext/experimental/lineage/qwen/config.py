@@ -103,6 +103,9 @@ class QwenConfig:
   ep_core_minor: bool = (
       True  # Enforces ('expert', 'ep_d2d') [ICI, core] ring order
   )
+  cp_axis_name: str | None = (
+      None  # Optional Context Parallelism axis (e.g. 'ep_d2d' for CP=2 with pdb=1)
+  )
   dense_1stage_3d_fsdp: bool = (
       True  # Single-stage 3D ('fsdp', 'expert', 'ep_d2d') SC1 dense AG/RS
   )

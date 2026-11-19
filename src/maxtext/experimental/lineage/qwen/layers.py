@@ -461,27 +461,7 @@ def full_attn_mixer(
 
   # Standard GQA attention matching MaxText Attention (float32, d_h**-0.5).
   q_scaled = q * (float(d_h) ** -0.5)
-  gqa_groups = h_q // h_kv
-  q_g = q_scaled.reshape(bsz, seq_len, h_kv, gqa_groups, d_h)
-  logits = jnp.einsum(
-      "bshgd,bkhd->bhgsk",
-      q_g.astype(jnp.float32),
-      k.astype(jnp.float32),
-  )
-
-  causal = jnp.tril(jnp.ones((seq_len, seq_len), dtype=jnp.bool_))
-  seg_q = segment_ids[:, None, :, None] > 0
-  seg_eq = segment_ids[:, None, :, None] == segment_ids[:, None, None, :]
-  mask = causal[None, None, :, :] & seg_q & seg_eq
-  # Reshape mask to [B, 1, 1, S, S] to broadcast across (h_kv, gqa_groups).
-  mask_5d = mask[:, None, :, :, :]
-  logits = jnp.where(mask_5d, logits, -1e9)
-  probs = jax.nn.softmax(logits, axis=-1)
-  probs = jnp.where(mask_5d, probs, 0.0)
-  ctx = jnp.einsum("bhgsk,bkhd->bshgd", probs, v.astype(jnp.float32)).reshape(
-      bsz, seq_len, h_q, d_h
-  )
-  ctx = ctx.astype(normed.dtype)
+  ctx = _pure_jax_gqa_core(q_scaled, k, v, segment_ids, cfg).astype(normed.dtype)
 
   gated = (
       ctx.astype(jnp.float32) * jax.nn.sigmoid(gate.astype(jnp.float32))
@@ -499,8 +479,17 @@ def _pure_jax_gqa_core(
     cfg: QwenConfig,
 ) -> jax.Array:
   """Pure-JAX GQA attention core matching `layers.full_attn_mixer` fallback."""
+  cp_axis = cfg.cp_axis_name
+  if cp_axis is not None:
+    q_scaled = jax.lax.all_to_all(
+        q_scaled, cp_axis, split_axis=2, concat_axis=1, tiled=True
+    )
+    k = jax.lax.all_to_all(k, cp_axis, split_axis=2, concat_axis=1, tiled=True)
+    v = jax.lax.all_to_all(v, cp_axis, split_axis=2, concat_axis=1, tiled=True)
+    segment_ids = jax.lax.all_gather(segment_ids, cp_axis, axis=1, tiled=True)
+
   bsz, seq_len, h_q, d_h = q_scaled.shape
-  h_kv = cfg.num_kv_heads
+  h_kv = k.shape[2]
   gqa_groups = h_q // h_kv
   q_g = q_scaled.reshape(bsz, seq_len, h_kv, gqa_groups, d_h)
   logits = jnp.einsum(
@@ -519,7 +508,12 @@ def _pure_jax_gqa_core(
   ctx = jnp.einsum("bhgsk,bkhd->bshgd", probs, v.astype(jnp.float32)).reshape(
       bsz, seq_len, h_q, d_h
   )
-  return ctx.astype(q_scaled.dtype)
+  ctx = ctx.astype(q_scaled.dtype)
+  if cp_axis is not None:
+    ctx = jax.lax.all_to_all(
+        ctx, cp_axis, split_axis=1, concat_axis=2, tiled=True
+    )
+  return ctx
 
 
 def full_attn_mixer_fwd_save_res(

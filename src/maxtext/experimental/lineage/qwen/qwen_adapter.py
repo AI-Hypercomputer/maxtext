@@ -122,6 +122,28 @@ def validate_supported(cfg: Any) -> None:
     raise ValueError("use_lineage=True (Qwen) does not support this config: " + "; ".join(problems) + ".")
 
 
+def _cp_axis_from_config(cfg: Any) -> str | None:
+  """Returns the Context Parallelism mesh axis if `data_sharding` shards sequence."""
+  data_sharding = getattr(cfg, "data_sharding", None)
+  if data_sharding and len(data_sharding) >= 2 and data_sharding[1]:
+    seq_axes = data_sharding[1]
+    if isinstance(seq_axes, str):
+      return seq_axes
+    if len(seq_axes) == 1:
+      return str(seq_axes[0])
+    raise ValueError(f"Qwen Lineage CP supports a single sequence mesh axis, got data_sharding[1]={seq_axes!r}.")
+  return None
+
+
+def _data_pspec_from_config(cfg: Any, qwen_cfg: qwen_config.QwenConfig) -> P:
+  """Returns the 2D `[batch, seq]` PartitionSpec matching `cfg.data_sharding`."""
+  if qwen_cfg.cp_axis_name is not None:
+    data_sharding = getattr(cfg, "data_sharding", None)
+    batch_axes = tuple(data_sharding[0]) if isinstance(data_sharding[0], (list, tuple)) else (data_sharding[0],)
+    return P(batch_axes, qwen_cfg.cp_axis_name)
+  return P(qwen_cfg.all_sharded_axes, None)
+
+
 def qwen_config_from_maxtext(
     cfg: Any,
     mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
@@ -189,6 +211,7 @@ def qwen_config_from_maxtext(
       ep_size=ep_size,
       decouple_ep_d2d=decouple_ep_d2d,
       ep_core_minor=ep_core_minor,
+      cp_axis_name=_cp_axis_from_config(cfg),
       sa_block_q=int(getattr(cfg, "sa_block_q", base_cfg.sa_block_q)),
       sa_block_kv=int(getattr(cfg, "sa_block_kv", base_cfg.sa_block_kv)),
       sa_block_kv_compute=int(getattr(cfg, "sa_block_kv_compute", base_cfg.sa_block_kv_compute)),
@@ -405,7 +428,7 @@ def loss_and_aux(
 
     max_async_overlap_transform.register_max_async_overlap_transform(cfg)
   param_pspecs = qwen_params.get_param_pspecs(cfg)
-  data_pspec = P(cfg.all_sharded_axes, None)
+  data_pspec = _data_pspec_from_config(config, cfg)
 
   inputs = data["inputs"]
   targets = data["targets"]

@@ -181,6 +181,84 @@ class QwenLineageTest(unittest.TestCase):
     self.assertTrue(all(bool(jnp.all(jnp.isfinite(g))) for g in grad_leaves))
     self.assertIs(lineage_adapter.finalize_accumulated_step(model, aux), aux)
 
+  def test_cp2_per_device_batch_size_1_parity(self):
+    num_devices = len(jax.devices())
+    if num_devices < 4 or num_devices % 4 != 0:
+      self.skipTest(f"Requires >= 4 devices divisible by 4 for 3D CP=2 mesh, got {num_devices}.")
+    fsdp = num_devices // 4
+
+    def _make_cfg(cp2: bool):
+      ds = "[['fsdp','expert'],['ep_d2d']]" if cp2 else "[['fsdp','expert','ep_d2d']]"
+      return pyconfig.initialize([
+          "train.py",
+          get_test_config_path(),
+          "model_name=qwen3.5-397b-a17b-lineage",
+          f"run_name=qwen_lineage_cp2_{cp2}",
+          "hardware=cpu",
+          "skip_jax_distributed_system=true",
+          "override_model_config=true",
+          "mesh_axes=['fsdp','expert','ep_d2d']",
+          f"ici_fsdp_parallelism={fsdp}",
+          "ici_expert_parallelism=2",
+          f"ici_parallelism=[{fsdp},2,2]",
+          "dcn_parallelism=[1,1,1]",
+          f"data_sharding={ds}",
+          "base_num_decoder_layers=4",
+          "base_emb_dim=128",
+          "base_num_query_heads=4",
+          "base_num_kv_heads=2",
+          "head_dim=32",
+          "vocab_size=256",
+          "base_mlp_dim=64",
+          "base_moe_mlp_dim=64",
+          "num_experts=16",
+          "num_experts_per_tok=2",
+          "gdn_num_key_heads=2",
+          "gdn_num_value_heads=4",
+          "gdn_key_head_dim=32",
+          "gdn_value_head_dim=32",
+          "gdn_chunk_size=16",
+          "max_target_length=32",
+          "per_device_batch_size=1",
+          "ragged_buffer_factor=16.0",
+          "lineage_quantization=none",
+          "weight_dtype=float32",
+          "dtype=float32",
+      ])
+
+    cfg_cp1, cfg_cp2 = _make_cfg(False), _make_cfg(True)
+    devices_arr = lineage_adapter.create_device_mesh(cfg_cp1.ici_parallelism, jax.devices(), config=cfg_cp1)
+    mesh = Mesh(devices_arr, cfg_cp1.mesh_axes)
+    m1 = lineage_adapter.create_transformer(cfg_cp1, mesh, rngs=nnx.Rngs(params=0))
+    m2 = lineage_adapter.create_transformer(cfg_cp2, mesh, rngs=nnx.Rngs(params=0))
+    self.assertIsNone(m1.lineage_config().cp_axis_name)
+    self.assertEqual(m2.lineage_config().cp_axis_name, "ep_d2d")
+
+    global_b, seq_len = num_devices, 32
+    toks = jax.random.randint(jax.random.PRNGKey(1), (global_b, seq_len), 0, 256, jnp.int32)
+    tgts = jax.random.randint(jax.random.PRNGKey(2), (global_b, seq_len), 0, 256, jnp.int32)
+    pos = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (global_b, seq_len))
+    seg = jnp.ones((global_b, seq_len), dtype=jnp.int32)
+
+    def _shard(pspec):
+      sh = NamedSharding(mesh, pspec)
+      return {
+          "inputs": jax.device_put(toks, sh),
+          "targets": jax.device_put(tgts, sh),
+          "inputs_position": jax.device_put(pos, sh),
+          "inputs_segmentation": jax.device_put(seg, sh),
+          "targets_segmentation": jax.device_put(seg, sh),
+      }
+
+    d1 = _shard(P(("fsdp", "expert", "ep_d2d"), None))
+    d2 = _shard(P(("fsdp", "expert"), "ep_d2d"))
+    (l1, a1), _ = nnx.value_and_grad(lambda m: lineage_adapter.loss_and_aux(m, cfg_cp1, d1, is_train=True), has_aux=True)(m1)
+    (l2, a2), g2 = nnx.value_and_grad(lambda m: lineage_adapter.loss_and_aux(m, cfg_cp2, d2, is_train=True), has_aux=True)(m2)
+    self.assertAlmostEqual(float(l1), float(l2), places=4)
+    self.assertEqual(float(a1["total_weights"]), float(global_b * seq_len))
+    self.assertEqual(float(a2["total_weights"]), float(global_b * seq_len))
+    self.assertTrue(all(bool(jnp.all(jnp.isfinite(g))) for g in jax.tree.leaves(g2)))
+
 
 if __name__ == "__main__":
   unittest.main()
