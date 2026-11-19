@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795055168035,
+  "lastUpdate": 1795064969034,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -73154,6 +73154,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 2925.684,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 380,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "ddde39cd045b8bb2a4402dda39d11f7c8feb54fb",
+          "message": "[MaxText] Generic vLLM >= 0.33 hybrid Mamba config hook and MambaMetadata state indices\n\n# Description\n\nSupport vLLM >= 0.33 hybrid (attention + Mamba/GDN/linear-attention) model configs for all MaxText models, and read recurrent-state slot ids from both tpu-inference metadata layouts.\n\nThis builds on the root-cause analysis and initial Qwen3.5-specific fix by tsbao (vLLM `MODELS_CONFIG_MAP` lookup under the `MaxTextForCausalLM` wrapper architecture, and the nested `MambaMetadata.state_indices` move in tpu-inference). This change keeps that design and its tests but makes the hybrid detection model-agnostic.\n\n**Problem**\n\n1. vLLM deprecated `EngineArgs.mamba_cache_mode`. With prefix caching it now derives `cache_config.mamba_cache_mode = \"align\"` and `mamba_block_size` in `HybridAttentionMambaModelConfig`, which `VllmConfig.try_verify_and_update_config` only runs when `model_config.is_hybrid`. That flag comes from the registered model class, and the single `MaxTextForCausalLM` wrapper serves every MaxText model, so it is never set: `mamba_cache_mode` stays `\"none\"` and `gdn_mamba_block_size` stays `0`.\n2. Newer tpu-inference moved per-request recurrent-state slot ids from `attention_metadata.mamba_state_indices` to `attention_metadata.mamba.state_indices`. `Qwen3NextGatedDeltaNet` only read the top-level field, so in non-align mode it skipped the paged-state path and failed with `AttributeError: 'tuple' object has no attribute 'get_gdn_states'`.\n\n**Changes**\n\n- `hybrid_cache_utils.py`: add `is_hybrid_hf_config`, a model-agnostic check that reads the per-layer HF config fields used for hybrid models: `layer_types` / `layers_block_type`, then `full_attention_interval` (Qwen3-Next family when `layer_types` is not materialized, e.g. a generic `PretrainedConfig` on a transformers version that does not know the model type), `linear_attn_config` (Kimi Linear), and `attn_type_list` (MiniMax). For `layer_types` / `layers_block_type`, a config is hybrid only if it has at least one known recurrent layer type (`linear_attention`, `mamba`: the non-attention kinds of vLLM's `LayerBlockType`) and at least one other layer. Matching recurrent types inclusively, rather than excluding a list of attention spellings, keeps any attention spelling (`full_attention`, `sliding_attention`, `deepseek_sparse_attention`, `qwen_sparse_attention`, or a future one) from switching a pure-attention model into Mamba cache mode. Add `register_maxtext_hybrid_model_config`, which registers a `MaxTextForCausalLM` verifier in `MODELS_CONFIG_MAP` that applies only vLLM's generic `HybridAttentionMambaModelConfig` to hybrid models. No model family is hard-coded; attention-only models (Llama, Gemma, sparse-attention models, granite-4.0-micro, attention + MLP/MoE `layers_block_type`) are untouched, and the hook is skipped when vLLM already classifies the model as hybrid.\n- `hybrid_cache_utils.py`, `maxtext_vllm_adapter/adapter.py`: add `validate_hybrid_detection`, called from `MaxTextForCausalLM.__init__`, and `get_hf_text_config`, which both it and the `MODELS_CONFIG_MAP` verifier use to read the HF text config (unwrapping `hf_config.text_config` for multimodal configs). vLLM's cache mode comes from the HF config, but the KV cache specs come from the MaxText decoder block; if the two disagree (e.g. a checkpoint config format the HF detection does not understand), fail with an actionable error instead of serving the model with the wrong cache mode. The Qwen3.5-specific `Qwen3_5ForConditionalGenerationConfig` is not needed: it only sets `cache_config.mamba_ssm_cache_dtype`, which neither tpu-inference nor MaxText reads (MaxText builds its own `MambaSpec` dtypes).\n- `maxtext_vllm_adapter/adapter.py`, `maxtext_vllm_adapter/__init__.py`: add `patch_vllm_hybrid_model_config()` and call it from `register()`. It is a no-op on vLLM versions without `MODELS_CONFIG_MAP` / `HybridAttentionMambaModelConfig`.\n- `models/qwen3.py`: add `resolve_mamba_state_indices`, which reads `mamba_state_indices` with fallback to `mamba.state_indices`, and use it in `Qwen3NextGatedDeltaNet.__call__`. Align-mode block-table resolution (both None) is unchanged.\n\nA follow-up moves the hybrid config hook and the KV-cache-spec patch into opt-in tpu-inference hooks for JAX models.\n\n# Tests\n\n- `pytest -q tests/unit/vllm_adapter_mamba_block_size_test.py`: 17 passed (hybrid detection for Qwen3-Next/Qwen3.5 with and without materialized `layer_types`, Kimi Linear, Jamba, NemotronH, MiniMax; attention-only configs including sparse-attention and unknown attention spellings; HF vs. decoder-block consistency check; multimodal HF text-config unwrapping; verifier registration, idempotency, and skipping when vLLM already treats the model as hybrid).\n- `pytest -q tests/unit/qwen3_gdn_mamba_slots_test.py`: 9 passed (nested `MambaMetadata` in resident-slot and align modes through `Qwen3NextGatedDeltaNet.__call__`; `resolve_mamba_state_indices` precedence and missing/None cases).\n- `pyink --pyink --pyink-indentation=2 --line-length=122 --check` and `pylint --rcfile=pylintrc` clean on changed files.\n- End-to-end: 128-chip TPU v5p Qwen3.5-35B-A3B RL run with vLLM 0.33 + tpu-inference HEAD — pending; link will be added before merge.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1025220962",
+          "timestamp": "2026-11-19T04:48:20Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/ddde39cd045b8bb2a4402dda39d11f7c8feb54fb"
+        },
+        "date": 1795064967757,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 216.4759999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 53.608000000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1993.0959999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 120,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 178.48999999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 588.909,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 89,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 2890.1780000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 380,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1549.2409999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 120,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 419.3939999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 80,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 2925.608,
             "unit": "sec"
           },
           {
