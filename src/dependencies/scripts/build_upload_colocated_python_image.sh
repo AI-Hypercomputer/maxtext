@@ -97,7 +97,7 @@ else
 fi
 
 # --- Step 2: Find the Latest Compatible Base Image Tag ---
-BASE_IMAGE_REPO="us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar"
+BASE_IMAGE_REPO="us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/colocated_python_sidecar"
 TARGET_JAX_TAG_PART="jax_${JAX_VERSION}"
 echo "$(date): Searching for base image tag in '${BASE_IMAGE_REPO}' containing '${TARGET_JAX_TAG_PART}'..."
 
