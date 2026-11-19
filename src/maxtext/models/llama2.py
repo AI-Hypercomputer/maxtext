@@ -217,6 +217,6 @@ class LlamaDecoderLayer(nnx.Module):
       stacked_kv_cache = jax.tree_util.tree_map(update_cache, stacked_kv_cache, kv_cache)  # pyrefly: ignore[unbound-name]
       return (layer_output, stacked_kv_cache, layer_idx + 1), None  # pyrefly: ignore[unbound-name]
     else:
-      # Also under scan_layers: vLLM's static unroll over the scanned layers passes each layer its own
-      # `kv_cache` and keeps the cache returned here.
+      # Under scan_layers, vLLM statically unrolls the layers and keeps the kv_cache returned here; the training
+      # scan discards it.
       return layer_output, kv_cache

@@ -251,7 +251,6 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
 
     layer_output = inputs + layer_output
 
-    if self.config.scan_layers:
-      return layer_output, None
-    else:
-      return layer_output, kv_cache
+    # Under scan_layers, vLLM statically unrolls the layers and keeps the kv_cache returned here; the training scan
+    # discards it.
+    return layer_output, kv_cache

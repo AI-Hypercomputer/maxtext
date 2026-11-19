@@ -224,7 +224,6 @@ class Qwen2DecoderLayer(AttentionWithNorm):
     layer_output = intermediate_inputs + mlp_lnx
     layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
 
-    if self.config.scan_layers:
-      return layer_output, None
-    else:
-      return layer_output, kv_cache
+    # Under scan_layers, vLLM statically unrolls the layers and keeps the kv_cache returned here; the training scan
+    # discards it.
+    return layer_output, kv_cache

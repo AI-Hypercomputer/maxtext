@@ -55,8 +55,9 @@ from flax.linen import partitioning as nn_partitioning
 
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, ShardMode
 from maxtext.configs import pyconfig
-from maxtext.layers import attention_mla, attentions
-from maxtext.models import deepseek, gemma, gemma2, gemma3, gpt3, gpt_oss, llama2, mistral, qwen2, qwen3
+from maxtext.layers import attention_mla, attentions, nnx_decoders
+from maxtext.models import deepseek, gemma, gemma2, gemma3, gpt3, gpt_oss, llama2, mistral, mixtral, qwen2, qwen3
+from maxtext.models import qwen3_custom
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from tests.utils.test_helpers import get_test_config_path
@@ -162,6 +163,34 @@ _SHARD_MODE_LAYERS = [
     # Layer 0 is a GatedDeltaNet layer and layer 3 closes the 4-layer cycle with full attention.
     ("qwen3_next_linear_attention_tp", qwen3.Qwen3NextDecoderLayer, _QWEN3_NEXT_TP, {"layer_idx": 0, "quant": None}),
     ("qwen3_next_full_attention_tp", qwen3.Qwen3NextDecoderLayer, _QWEN3_NEXT_TP, {"layer_idx": 3, "quant": None}),
+]
+
+_MIXTRAL = {
+    "decoder_block": "mixtral",
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "base_moe_mlp_dim": 64,
+}
+
+# The custom attention projects to attention_output_dim, which feeds the MoE block. Matching it to the
+# embedding dim lets an attention stub return an output shaped like its input.
+_QWEN3_CUSTOM_MOE = {
+    "decoder_block": "qwen3_custom_moe",
+    "attention_output_dim": 64,
+    "moe_expert_input_dim": 64,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "base_moe_mlp_dim": 64,
+}
+
+# Single-layer decoder classes for the scanned KV-cache test, as (name, layer class, config, ctor kwargs).
+# DeepSeek's layers are left out: they do not hand the KV cache to their attention at all, scanned or not.
+_SCANNED_KV_CACHE_LAYERS = [case for case in _LAYERS if not issubclass(case[1], deepseek.DeepSeekGenericLayer)] + [
+    ("gemma3", gemma3.Gemma3DecoderLayer, _GEMMA3, {}),
+    ("gpt3", gpt3.Gpt3DecoderLayer, {"decoder_block": "gpt3", "fused_qkv": False}, {}),
+    ("mixtral", mixtral.MixtralDecoderLayer, _MIXTRAL, {}),
+    ("nnx_decoder_layer", nnx_decoders.NNXDecoderLayer, {}, {}),
+    ("qwen3_custom_moe", qwen3_custom.Qwen3CustomMoeDecoderLayer, _QWEN3_CUSTOM_MOE, {"quant": None}),
 ]
 
 
@@ -368,10 +397,7 @@ class DecoderLayerScannedKvCacheTest(parameterized.TestCase):
   cache and decoding degenerates.
   """
 
-  @parameterized.named_parameters(
-      ("llama2", llama2.LlamaDecoderLayer, {}, {}),
-      ("qwen3", qwen3.Qwen3DecoderLayer, {"decoder_block": "qwen3"}, {"quant": None}),
-  )
+  @parameterized.named_parameters(*_SCANNED_KV_CACHE_LAYERS)
   def test_scanned_layer_returns_attention_kv_cache(self, layer_cls, extra_config, ctor_kwargs):
     cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], **(_COMMON | extra_config | {"scan_layers": True}))
     mesh = _mesh(cfg)
@@ -393,7 +419,10 @@ class DecoderLayerScannedKvCacheTest(parameterized.TestCase):
       inputs = jnp.zeros((batch, 1, cfg.emb_dim), dtype=jnp.float32)
       positions = jnp.zeros((batch, 1), dtype=jnp.int32)
       segment_ids = jnp.ones((batch, 1), dtype=jnp.int32)
-      with mock.patch.object(attentions.Attention, "__call__", spy):
+      with (
+          mock.patch.object(attentions.Attention, "__call__", spy),
+          mock.patch.object(gpt3.Gpt3MultiHeadAttention, "__call__", spy),
+      ):
         _, kv_cache = layer(inputs, segment_ids, positions, True, MODEL_MODE_AUTOREGRESSIVE, kv_cache=jnp.zeros((2, 3)))
 
     self.assertIs(kv_cache, updated_kv_cache, "the scanned layer dropped the KV cache returned by its attention")
