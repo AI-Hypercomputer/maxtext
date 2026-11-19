@@ -25,6 +25,11 @@ Sections:
   * MTP draft block and integrated loss
 """
 
+import functools
+import importlib
+import importlib.util
+import os
+import re
 import types
 from typing import Any
 import unittest
@@ -1015,14 +1020,9 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
           np.testing.assert_array_equal(np.array(b_r), np.array(b_g))
 
   def test_flash_attention_kernel_parity_and_validation(self):
-    """Verifies attention_kernel='flash' matches 'dense' when s <= token_budget and rejects s > token_budget."""
+    """Verifies attention_kernel='flash' matches 'dense' for both s <= token_budget and s > token_budget."""
     with self.assertRaises(ValueError):
       modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(attention_kernel="invalid", rngs=nnx.Rngs(0))
-
-    args_16 = (64, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32)
-    flash_16 = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_16, attention_kernel="flash", rngs=nnx.Rngs(0))
-    with self.assertRaises(ValueError):
-      flash_16(jnp.zeros((1, 32, 64), dtype=jnp.float32))
 
     b, s, emb_dim = 2, 32, 64
     args_64 = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 64, 4, 1e-6, jnp.float32, jnp.float32)
@@ -1078,6 +1078,848 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
         self.assertTrue(np.all(np.isfinite(np.array(dx_f))))
         _assert_allclose_to_scale(dx_f, dx_d)
         _assert_allclose_to_scale(grads_f.q_proj.kernel[...], grads_d.q_proj.kernel[...])
+
+  def _check_flash_block_sparse_dispatch_parity(self, dt: Any, rng_seed: int, packed_only: bool | None = None) -> None:
+    """Verifies `s > token_budget` block-sparse flash attention forward/backward parity against dense."""
+    b, s_long, emb_dim, budget_short = 2, 48, 64, 16
+    rng = np.random.default_rng(rng_seed)
+    pos_long = jnp.tile(jnp.arange(s_long, dtype=jnp.int32), (b, 1))
+    args_long = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, budget_short, 4, 1e-6, dt, jnp.float32)
+    dense_long = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        *args_long, attention_kernel="dense", rngs=nnx.Rngs(23)
+    )
+    flash_long = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        *args_long, indexer_mask_mode="reshape", attention_kernel="flash", rngs=nnx.Rngs(23)
+    )
+    nnx.update(flash_long, nnx.state(dense_long))
+
+    x_long = jnp.array(rng.standard_normal((b, s_long, emb_dim), dtype=np.float32), dtype=dt)
+    mask_long = jnp.ones((b, s_long), dtype=jnp.int32).at[0, 40:].set(0).at[1, 44:].set(0)
+    seg_long = jnp.ones((b, s_long), dtype=jnp.int32).at[0, 18:36].set(2).at[0, 36:].set(0).at[1, 22:].set(2)
+    all_cases = (
+        ("unpacked", None, None),
+        ("mask_2d", mask_long, None),
+        ("packed_seg", None, seg_long),
+        ("both_mask_and_seg", mask_long, seg_long),
+    )
+    cases = all_cases if packed_only is None else (all_cases[2:] if packed_only else all_cases[:2])
+
+    for case_name, mask_in, seg_in in cases:
+      with self.subTest(mode="block_sparse", dtype=str(dt), case_name=case_name):
+        valid_l = jnp.ones((b, s_long), dtype=bool)
+        if mask_in is not None:
+          valid_l &= mask_in != 0
+        if seg_in is not None:
+          valid_l &= seg_in != 0
+        out_d, blk_d = dense_long(
+            x_long, position_ids=pos_long, attention_mask=mask_in, segment_ids=seg_in, return_selected_blocks=True
+        )
+        out_f, blk_f = flash_long(
+            x_long, position_ids=pos_long, attention_mask=mask_in, segment_ids=seg_in, return_selected_blocks=True
+        )
+        np.testing.assert_array_equal(np.array(blk_f), np.array(blk_d))
+        self.assertTrue(np.all(np.isfinite(np.array(out_f, dtype=np.float32))))
+        if dt == jnp.float32:
+          np.testing.assert_allclose(
+              np.array(out_f)[np.array(valid_l)], np.array(out_d)[np.array(valid_l)], rtol=1e-4, atol=1e-4
+          )
+        else:
+          _assert_allclose_to_scale(
+              jnp.where(valid_l[:, :, None], out_f, 0.0),
+              jnp.where(valid_l[:, :, None], out_d, 0.0),
+              rtol=2e-2,
+              atol_scale=2e-2,
+          )
+
+        def loss_long(
+            mod: modeling_qwen3_8_flash_next.Qwen3_8SparseAttention,
+            inp: jax.Array,
+            mask_in: jax.Array | None = mask_in,
+            seg_in: jax.Array | None = seg_in,
+            valid_l: jax.Array = valid_l,
+        ) -> jax.Array:
+          out = mod(inp, position_ids=pos_long, attention_mask=mask_in, segment_ids=seg_in)
+          assert isinstance(out, jax.Array)
+          w_out = jnp.arange(1, emb_dim + 1, dtype=jnp.float32) / float(emb_dim)
+          return jnp.sum(jnp.where(valid_l[:, :, None], out.astype(jnp.float32), 0.0) * w_out)
+
+        _, (grads_d, dx_d) = nnx.value_and_grad(loss_long, argnums=(0, 1))(dense_long, x_long)
+        _, (grads_f, dx_f) = nnx.value_and_grad(loss_long, argnums=(0, 1))(flash_long, x_long)
+        self.assertTrue(np.all(np.isfinite(np.array(dx_f, dtype=np.float32))))
+        tol = 1e-4 if dt == jnp.float32 else 2.5e-2
+        _assert_allclose_to_scale(dx_f, dx_d, rtol=tol, atol_scale=tol)
+        _assert_allclose_to_scale(grads_f.q_proj.kernel[...], grads_d.q_proj.kernel[...], rtol=tol, atol_scale=tol)
+        _assert_allclose_to_scale(grads_f.k_proj.kernel[...], grads_d.k_proj.kernel[...], rtol=tol, atol_scale=tol)
+        _assert_allclose_to_scale(grads_f.v_proj.kernel[...], grads_d.v_proj.kernel[...], rtol=tol, atol_scale=tol)
+
+  def test_flash_block_sparse_attention_dispatch_parity_fp32(self):
+    """Verifies `s > token_budget` block-sparse flash attention fp32 parity against dense."""
+    self._check_flash_block_sparse_dispatch_parity(jnp.float32, rng_seed=29)
+
+  def test_flash_block_sparse_attention_dispatch_parity_bf16_unpacked(self):
+    """Verifies `s > token_budget` block-sparse flash attention bf16 unpacked and 2D-masked parity."""
+    self._check_flash_block_sparse_dispatch_parity(jnp.bfloat16, rng_seed=31, packed_only=False)
+
+  def test_flash_block_sparse_attention_dispatch_parity_bf16_packed(self):
+    """Verifies `s > token_budget` block-sparse flash attention bf16 packed-segment parity."""
+    self._check_flash_block_sparse_dispatch_parity(jnp.bfloat16, rng_seed=31, packed_only=True)
+
+  def _check_qsa_nondivisible_or_multiword_case(
+      self, *, s_case: int, budget_case: int, bq_case: int, bkv_case: int, rng_seed: int
+  ) -> None:
+    """Verifies block-sparse flash parity against dense and corrupt-index negative control."""
+    rng = np.random.default_rng(rng_seed)
+    b, emb_dim = 2, 64
+    args_c = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, budget_case, 4, 1e-6, jnp.float32, jnp.float32)
+    dense_c = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_c, attention_kernel="dense", rngs=nnx.Rngs(31))
+    flash_c = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_c, attention_kernel="flash", rngs=nnx.Rngs(31))
+    nnx.update(flash_c, nnx.state(dense_c))
+    x_c = jnp.array(rng.standard_normal((b, s_case, emb_dim), dtype=np.float32))
+    pos_c = jnp.tile(jnp.arange(s_case, dtype=jnp.int32), (b, 1))
+    out_d, blk_d = dense_c(x_c, position_ids=pos_c, return_selected_blocks=True)
+    out_f, blk_f = flash_c(x_c, position_ids=pos_c, return_selected_blocks=True)
+    np.testing.assert_array_equal(np.array(blk_f), np.array(blk_d))
+    np.testing.assert_allclose(np.array(out_f), np.array(out_d), rtol=1e-4, atol=1e-4)
+
+    cos_c, sin_c = flash_c.rotary_emb(x_c, pos_c)
+    q_gate = flash_c.q_proj(x_c).reshape(b, s_case, 4, 64)
+    q_st = flash_c.q_norm(q_gate[..., :32])
+    k_st = flash_c.k_norm(flash_c.k_proj(x_c).reshape(b, s_case, 2, 32))
+    v_st = flash_c.v_proj(x_c).reshape(b, s_case, 2, 32)
+    q_st, k_st = modeling_qwen3_8_flash_next.apply_rotary_pos_emb(q_st, k_st, cos=cos_c, sin=sin_c, unsqueeze_dim=2)
+    ctx_good = flash_c.flash_block_sparse_attention(q_st, k_st, v_st, blk_f, block_q=bq_case, block_kv=bkv_case)
+    blk_corrupt = jnp.full_like(blk_f, -1)
+    ctx_corrupt = flash_c.flash_block_sparse_attention(q_st, k_st, v_st, blk_corrupt, block_q=bq_case, block_kv=bkv_case)
+    self.assertGreater(float(jnp.max(jnp.abs(ctx_good - ctx_corrupt))), 0.05)
+
+  def test_qsa_flash_block_sparse_tail_packing_sharding_and_negative_controls(self):
+    """Verifies 32-bit bitmap packing with duplicate/-1 slots and non-multiple-of-c tail block (`s=70`)."""
+    rng = np.random.default_rng(41)
+    b, s, topk, num_blocks, num_words = 2, 16, 12, 80, 3
+    raw_idx = rng.integers(-2, num_blocks, size=(b, s, topk), dtype=np.int32)
+    raw_idx[:, :, -2:] = raw_idx[:, :, :2]
+    sel_idx = jnp.array(raw_idx, dtype=jnp.int32)
+    packed = modeling_qwen3_8_flash_next.pack_qsa_block_mask_32bit(sel_idx, num_words)
+    self.assertEqual(packed.shape, (b, s, num_words))
+    self.assertEqual(packed.dtype, jnp.uint32)
+    bits = ((packed[:, :, :, None] >> jnp.arange(32, dtype=jnp.uint32)) & jnp.uint32(1)) != 0
+    unpacked_bool = bits.reshape(b, s, num_words * 32)[:, :, :num_blocks]
+    m_local = jnp.arange(num_blocks, dtype=jnp.int32)[None, None, :]
+    ref_bool = jnp.any((sel_idx[:, :, :, None] == m_local) & (sel_idx[:, :, :, None] >= 0), axis=2)
+    np.testing.assert_array_equal(np.array(unpacked_bool), np.array(ref_bool))
+    self._check_qsa_nondivisible_or_multiword_case(s_case=70, budget_case=20, bq_case=20, bkv_case=20, rng_seed=41)
+
+  def test_qsa_flash_block_sparse_multiword_s256_and_corrupt_control(self):
+    """Verifies multi-word `fast_unpacked` slice (`s=256, b_kv=128`) and corrupt-index negative control."""
+    self._check_qsa_nondivisible_or_multiword_case(s_case=256, budget_case=64, bq_case=64, bkv_case=128, rng_seed=42)
+
+  def test_qsa_flash_block_sparse_packed_2doc_isolation(self):
+    """Verifies packed 2-doc output and gradients match concatenated per-doc runs and leak without `segment_ids`."""
+    rng = np.random.default_rng(43)
+    emb_dim, len1, len2 = 64, 28, 24
+    args_p = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32)
+    flash_p = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_p, attention_kernel="flash", rngs=nnx.Rngs(53))
+    x1 = jnp.array(rng.standard_normal((1, len1, emb_dim), dtype=np.float32))
+    x2 = jnp.array(rng.standard_normal((1, len2, emb_dim), dtype=np.float32))
+    x_pack = jnp.concatenate([x1, x2], axis=1)
+    pos1 = jnp.arange(len1, dtype=jnp.int32)[None, :]
+    pos2 = jnp.arange(len2, dtype=jnp.int32)[None, :]
+    pos_pack = jnp.concatenate([pos1, pos2], axis=1)
+    seg_pack = jnp.concatenate([jnp.ones((1, len1), dtype=jnp.int32), jnp.full((1, len2), 2, dtype=jnp.int32)], axis=1)
+    w_probe = jnp.arange(1, emb_dim + 1, dtype=jnp.float32) / float(emb_dim)
+
+    def packed_loss(
+        mod: modeling_qwen3_8_flash_next.Qwen3_8SparseAttention, inp: jax.Array
+    ) -> tuple[jax.Array, jax.Array]:
+      out = mod(inp, position_ids=pos_pack, segment_ids=seg_pack)
+      assert isinstance(out, jax.Array)
+      return jnp.sum(out * w_probe), out
+
+    def unpacked_loss(
+        mod: modeling_qwen3_8_flash_next.Qwen3_8SparseAttention, inp1: jax.Array, inp2: jax.Array
+    ) -> tuple[jax.Array, jax.Array]:
+      out1 = mod(inp1, position_ids=pos1)
+      out2 = mod(inp2, position_ids=pos2)
+      assert isinstance(out1, jax.Array) and isinstance(out2, jax.Array)
+      out_cat = jnp.concatenate([out1, out2], axis=1)
+      return jnp.sum(out_cat * w_probe), out_cat
+
+    (_, out_pack), (g_pack, dx_pack) = nnx.value_and_grad(packed_loss, argnums=(0, 1), has_aux=True)(flash_p, x_pack)
+    (_, out_cat), (g_cat, dx1, dx2) = nnx.value_and_grad(unpacked_loss, argnums=(0, 1, 2), has_aux=True)(flash_p, x1, x2)
+    dx_cat = jnp.concatenate([dx1, dx2], axis=1)
+    np.testing.assert_allclose(np.array(out_pack), np.array(out_cat), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.array(dx_pack), np.array(dx_cat), rtol=1e-4, atol=1e-4)
+    _assert_allclose_to_scale(g_pack.q_proj.kernel[...], g_cat.q_proj.kernel[...])
+
+    out_leaked = flash_p(x_pack, position_ids=pos_pack, segment_ids=None)
+    assert isinstance(out_leaked, jax.Array)
+    self.assertGreater(float(jnp.max(jnp.abs(out_leaked[:, len1:, :] - out_cat[:, len1:, :]))), 0.05)
+
+  def test_qsa_indexer_token_mask_free_parity_and_jaxpr(self):
+    """Verifies `Qwen3_8QSAIndexer(return_token_mask=False)` bit-exact parity and zero `bool[B, S, S]` allocation."""
+    rng = np.random.default_rng(45)
+    emb_dim, b_ix, s_ix = 64, 2, 48
+    args_p = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32)
+    flash_p = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_p, attention_kernel="flash", rngs=nnx.Rngs(53))
+    x_ix = jnp.array(rng.standard_normal((b_ix, s_ix, emb_dim), dtype=np.float32))
+    pos_ix = jnp.tile(jnp.arange(s_ix, dtype=jnp.int32), (b_ix, 1))
+    cos_ix, sin_ix = flash_p.rotary_emb(x_ix, pos_ix)
+    mask_ix = jnp.ones((b_ix, s_ix), dtype=jnp.int32).at[0, 38:].set(0).at[1, :6].set(0)
+    seg_ix = jnp.ones((b_ix, s_ix), dtype=jnp.int32).at[:, 20:36].set(2).at[:, 36:].set(3)
+    for m_in, s_in in ((None, None), (mask_ix, None), (None, seg_ix), (mask_ix, seg_ix)):
+      tmask_t, blk_t = flash_p.indexer(
+          x_ix, (cos_ix, sin_ix), attention_mask=m_in, segment_ids=s_in, return_token_mask=True
+      )
+      tmask_f, blk_f = flash_p.indexer(
+          x_ix, (cos_ix, sin_ix), attention_mask=m_in, segment_ids=s_in, return_token_mask=False
+      )
+      self.assertIsNotNone(tmask_t)
+      self.assertIsNone(tmask_f)
+      np.testing.assert_array_equal(np.array(blk_f), np.array(blk_t))
+    ix_jaxpr = str(
+        jax.make_jaxpr(
+            lambda x_i, m_i, s_i: flash_p.indexer(
+                x_i, (cos_ix, sin_ix), attention_mask=m_i, segment_ids=s_i, return_token_mask=False
+            )[1]
+        )(x_ix, mask_ix, seg_ix)
+    )
+    self.assertNotIn("bool[2,48,48]", ix_jaxpr)
+
+  def test_qsa_flash_block_sparse_outer_scan_remat_no_branch_residuals(self):
+    """Verifies outer `lax.scan` + custom remat policies never stack 6D/7D branch residuals or dense masks."""
+    rng = np.random.default_rng(47)
+    emb_dim, b_rm, s_rm = 64, 2, 48
+    pos_rm = jnp.tile(jnp.arange(s_rm, dtype=jnp.int32), (b_rm, 1))
+    seg_rm = jnp.ones((b_rm, s_rm), dtype=jnp.int32).at[:, 24:].set(2)
+    args_rm = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32)
+    flash_rm = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_rm, attention_kernel="flash", rngs=nnx.Rngs(73))
+    gd_rm, params_rm, rest_rm = nnx.split(flash_rm, nnx.Param, ...)
+    stacked_params = jax.tree.map(lambda p: jnp.stack([p, p], axis=0), params_rm)
+    x_rm = jnp.array(rng.standard_normal((b_rm, s_rm, emb_dim), dtype=np.float32))
+
+    for pol in (
+        jax.checkpoint_policies.save_only_these_names("query_proj"),
+        jax.checkpoint_policies.nothing_saveable,
+        jax.checkpoint_policies.everything_saveable,
+    ):
+
+      def scanned_loss(
+          h_in: jax.Array,
+          sp_in: Any,
+          pol_fn: Any = pol,
+      ) -> jax.Array:
+        def body_fn(carry: jax.Array, p_slice: Any) -> tuple[jax.Array, None]:
+          @functools.partial(jax.checkpoint, policy=pol_fn, prevent_cse=True)
+          def _step(c_in: jax.Array, ps: Any) -> jax.Array:
+            mod = nnx.merge(gd_rm, ps, rest_rm)
+            out = mod(c_in, position_ids=pos_rm, segment_ids=seg_rm)
+            assert isinstance(out, jax.Array)
+            return c_in + out
+
+          return _step(carry, p_slice), None
+
+        h_out, _ = jax.lax.scan(body_fn, h_in, sp_in)
+        return jnp.sum(h_out)
+
+      jaxpr_str = str(jax.make_jaxpr(jax.grad(scanned_loss, argnums=(0, 1)))(x_rm, stacked_params))
+      for forbidden in (
+          "f32[3,3,",
+          "f32[4,4,",
+          "f32[3,2,12,2,2,12]",
+          "f32[4,2,16,2,2,16]",
+          "f32[2,4,48,48]",
+          "bool[2,48,48]",
+      ):
+        self.assertNotIn(forbidden, jaxpr_str)
+
+  def test_qsa_flash_block_sparse_4device_sharded_parity(self):
+    """Verifies 4-device CPU sharded parity (data=2, tensor=2) and TP head sharding for s > token_budget."""
+    if len(jax.devices()) < 4:
+      self.skipTest("Requires >= 4 JAX devices")
+    rng = np.random.default_rng(61)
+    emb_dim = 64
+    w_probe = jnp.arange(1, emb_dim + 1, dtype=jnp.float32) / float(emb_dim)
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("data", "tensor"))
+    P = jax.sharding.PartitionSpec
+
+    def ns(spec: jax.sharding.PartitionSpec) -> jax.sharding.NamedSharding:
+      return jax.sharding.NamedSharding(mesh, spec)
+
+    b_sh, s_sh = 2, 48
+    args_sh = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32)
+    dense_sh = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_sh, attention_kernel="dense", rngs=nnx.Rngs(61))
+    flash_sh = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_sh, attention_kernel="flash", rngs=nnx.Rngs(61))
+    nnx.update(flash_sh, nnx.state(dense_sh))
+    x_sh = jax.device_put(
+        jnp.array(rng.standard_normal((b_sh, s_sh, emb_dim), dtype=np.float32)), ns(P("data", None, None))
+    )
+    pos_sh = jax.device_put(jnp.tile(jnp.arange(s_sh, dtype=jnp.int32), (b_sh, 1)), ns(P("data", None)))
+    seg_sh = jax.device_put(jnp.ones((b_sh, s_sh), dtype=jnp.int32).at[:, 24:].set(2), ns(P("data", None)))
+    with jax.set_mesh(mesh):
+      out_sh_d = dense_sh(x_sh, position_ids=pos_sh, segment_ids=seg_sh)
+      out_sh_f = flash_sh(x_sh, position_ids=pos_sh, segment_ids=seg_sh)
+      np.testing.assert_allclose(np.array(out_sh_f), np.array(out_sh_d), rtol=1e-4, atol=1e-4)
+
+      def sh_loss(
+          mod: modeling_qwen3_8_flash_next.Qwen3_8SparseAttention,
+          inp: jax.Array,
+      ) -> jax.Array:
+        out = mod(inp, position_ids=pos_sh, segment_ids=seg_sh)
+        assert isinstance(out, jax.Array)
+        return jnp.sum(out * w_probe)
+
+      sh_grad_fn = nnx.jit(nnx.value_and_grad(sh_loss, argnums=(0, 1)))
+      _, (g_sh_d, dx_sh_d) = sh_grad_fn(dense_sh, x_sh)
+      _, (g_sh_f, dx_sh_f) = sh_grad_fn(flash_sh, x_sh)
+      np.testing.assert_allclose(np.array(dx_sh_f), np.array(dx_sh_d), rtol=1e-4, atol=1e-4)
+      _assert_allclose_to_scale(g_sh_f.q_proj.kernel[...], g_sh_d.q_proj.kernel[...])
+
+      # Verify TP head sharding (h_kv=2 -> 1 per TP rank on tensor=2) inside flash_block_sparse_attention HLO.
+      q_sh = jax.device_put(jnp.ones((b_sh, s_sh, 4, 32), dtype=jnp.float32), ns(P("data", None, "tensor", None)))
+      k_sh = jax.device_put(jnp.ones((b_sh, s_sh, 2, 32), dtype=jnp.float32), ns(P("data", None, "tensor", None)))
+      v_sh = jax.device_put(jnp.ones((b_sh, s_sh, 2, 32), dtype=jnp.float32), ns(P("data", None, "tensor", None)))
+      blk_sh = jax.device_put(jnp.zeros((b_sh, s_sh, 4), dtype=jnp.int32), ns(P("data", None, None)))
+      hlo_tp = (
+          jax.jit(
+              lambda q_i, k_i, v_i, b_i: jnp.sum(
+                  jax.grad(
+                      lambda qq, kk, vv: jnp.sum(
+                          flash_sh.flash_block_sparse_attention(qq, kk, vv, b_i, block_q=16, block_kv=16)
+                      ),
+                      argnums=(0, 1, 2),
+                  )(q_i, k_i, v_i)[0]
+              )
+          )
+          .lower(q_sh, k_sh, v_sh, blk_sh)
+          .compile()
+          .as_text()
+          or ""
+      )
+      self.assertIn("f32[1,16,1,2,16]", hlo_tp)
+      self.assertNotIn("f32[1,16,2,2,16]", hlo_tp)
+
+  def test_qsa_flash_block_sparse_sequence_sharding_and_custom_strategy(self):
+    """Verifies flash_block_sparse_attention preserves length_axes sharding and respects custom Sharding."""
+    if len(jax.devices()) < 4:
+      self.skipTest("Requires 4 devices.")
+    rng = np.random.default_rng(1309)
+    b, s, h_q, d = 2, 64, 4, 32
+    q_np = rng.standard_normal((b, s, h_q, d), dtype=np.float32)
+    k_np = rng.standard_normal((b, s, 2, d), dtype=np.float32)
+    v_np = rng.standard_normal((b, s, 2, d), dtype=np.float32)
+    blk_np = rng.integers(0, s // 4, size=(b, s, 4), dtype=np.int32)
+    seg_np = np.ones((b, s), dtype=np.int32)
+    seg_np[:, 40:] = 2
+    w_out = jnp.array(rng.standard_normal((b, s, h_q * d), dtype=np.float32))
+
+    mod_default = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        emb_dim=64,
+        num_query_heads=h_q,
+        num_kv_heads=2,
+        head_dim=d,
+        mrope_section=(2, 1, 1),
+        index_n_heads=2,
+        index_kv_heads=1,
+        index_head_dim=16,
+        token_budget=16,
+        compress_ratio=4,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        attention_kernel="flash",
+        rngs=nnx.Rngs(params=0),
+    )
+
+    def unsharded_loss(q_i, k_i, v_i, seg_i):
+      out = mod_default.flash_block_sparse_attention(
+          q_i, k_i, v_i, jnp.asarray(blk_np), segment_ids=seg_i, block_q=16, block_kv=16
+      )
+      return jnp.sum(out * w_out)
+
+    q_ref, k_ref, v_ref = jnp.asarray(q_np), jnp.asarray(k_np), jnp.asarray(v_np)
+    seg_ref = jnp.asarray(seg_np)
+    loss_ref, (dq_ref, dk_ref, dv_ref) = jax.jit(jax.value_and_grad(unsharded_loss, argnums=(0, 1, 2)))(
+        q_ref, k_ref, v_ref, seg_ref
+    )
+
+    # 1. Context + Tensor (2, 2) mesh: query & packed bitmap stay sharded on `context` (0 query all-gathers)
+    #    and also handles GQA head repetition when head_shards (2) > num_kv_heads (1).
+    P = jax.sharding.PartitionSpec
+    mesh_ct = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("context", "tensor"))
+
+    def ns_ct(spec):
+      return jax.sharding.NamedSharding(mesh_ct, spec)
+
+    with jax.set_mesh(mesh_ct):
+      q_ct = jax.device_put(q_ref, ns_ct(P(None, "context", "tensor", None)))
+      k_ct = jax.device_put(k_ref, ns_ct(P(None, None, "tensor", None)))
+      v_ct = jax.device_put(v_ref, ns_ct(P(None, None, "tensor", None)))
+      blk_ct = jax.device_put(jnp.asarray(blk_np), ns_ct(P(None, "context", None)))
+      seg_ct = jax.device_put(seg_ref, ns_ct(P(None, "context")))
+
+      w_ct = jax.device_put(w_out, ns_ct(P(None, "context", None)))
+      loss_ct, (dq_ct, dk_ct, dv_ct) = jax.jit(
+          jax.value_and_grad(
+              lambda qq, kk, vv: jnp.sum(
+                  mod_default.flash_block_sparse_attention(
+                      qq, kk, vv, blk_ct, segment_ids=seg_ct, block_q=16, block_kv=16
+                  )
+                  * w_ct
+              ),
+              argnums=(0, 1, 2),
+          )
+      )(q_ct, k_ct, v_ct)
+      np.testing.assert_allclose(float(loss_ct), float(loss_ref), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dq_ct), np.asarray(dq_ref), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dk_ct), np.asarray(dk_ref), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dv_ct), np.asarray(dv_ref), rtol=1e-4, atol=1e-4)
+
+      # Unpacked forward HLO with pre-replicated KV has zero all-gathers (positive control: forcing None on Q emits one).
+      fwd_hlo = (
+          jax.jit(
+              lambda qq, kk, vv, bb: mod_default.flash_block_sparse_attention(qq, kk, vv, bb, block_q=16, block_kv=16)
+          )
+          .lower(q_ct, k_ct, v_ct, blk_ct)
+          .compile()
+          .as_text()
+          or ""
+      )
+      pos_hlo = (
+          jax.jit(lambda qq: jnp.sum(jax.lax.with_sharding_constraint(qq, P(None, None, "tensor", None))))
+          .lower(q_ct)
+          .compile()
+          .as_text()
+          or ""
+      )
+      self.assertIn("all-gather(", pos_hlo)
+      self.assertNotIn("all-gather(", fwd_hlo)
+      # Each context shard only holds 2 local Q tiles (32 tokens = 2 * 16), never all 4 Q tiles.
+      self.assertIn("f32[2,2,16,1,2,32]", fwd_hlo)
+      self.assertNotIn("f32[4,2,16,1,2,32]", fwd_hlo)
+
+      # Eager call on SingleDeviceSharding inputs inside `with jax.set_mesh` also succeeds cleanly.
+      out_eager = mod_default.flash_block_sparse_attention(
+          q_ref, k_ref, v_ref, jnp.asarray(blk_np), block_q=16, block_kv=16
+      )
+      self.assertEqual(out_eager.shape, (b, s, h_q * d))
+
+    # GQA head repetition when head_shards (2) > num_kv_heads (1), compared against unsharded reference.
+    k1_ref, v1_ref = k_ref[:, :, :1, :], v_ref[:, :, :1, :]
+    l1_ref, (dq1_ref, dk1_ref, dv1_ref) = jax.jit(
+        jax.value_and_grad(
+            lambda qq, kk, vv: jnp.sum(
+                mod_default.flash_block_sparse_attention(qq, kk, vv, jnp.asarray(blk_np), block_q=16, block_kv=16) * w_out
+            ),
+            argnums=(0, 1, 2),
+        )
+    )(q_ref, k1_ref, v1_ref)
+    with jax.set_mesh(mesh_ct):
+      k1_ct = jax.device_put(k1_ref, ns_ct(P(None, None, None, None)))
+      v1_ct = jax.device_put(v1_ref, ns_ct(P(None, None, None, None)))
+      l1_ct, (dq1_ct, dk1_ct, dv1_ct) = jax.jit(
+          jax.value_and_grad(
+              lambda qq, kk, vv: jnp.sum(
+                  mod_default.flash_block_sparse_attention(qq, kk, vv, blk_ct, block_q=16, block_kv=16) * w_ct
+              ),
+              argnums=(0, 1, 2),
+          )
+      )(q_ct, k1_ct, v1_ct)
+      np.testing.assert_allclose(float(l1_ct), float(l1_ref), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dq1_ct), np.asarray(dq1_ref), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dk1_ct), np.asarray(dk1_ref), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dv1_ct), np.asarray(dv1_ref), rtol=1e-4, atol=1e-4)
+
+    # 2. Custom EP=CP Sharding (`batch -> fsdp`, `length -> expert`) + `tensor_sequence` head sharding.
+    class _EpCpSharding(modeling_qwen3_8_flash_next.DefaultSharding):
+      """Custom sharding mapping activation batch off `expert` and length onto `expert`."""
+
+      def map_axis(self, axis, tensor_name, tensor_type):
+        if tensor_type == modeling_qwen3_8_flash_next.TensorType.ACTIVATION:
+          if axis == "batch":
+            return ("data", "fsdp", "fsdp_transpose")
+          if axis == "length":
+            return ("context", "expert")
+        return super().map_axis(axis, tensor_name, tensor_type)
+
+    ep_cp = _EpCpSharding()
+    mod_epcp = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        emb_dim=64,
+        num_query_heads=h_q,
+        num_kv_heads=2,
+        head_dim=d,
+        mrope_section=(2, 1, 1),
+        index_n_heads=2,
+        index_kv_heads=1,
+        index_head_dim=16,
+        token_budget=16,
+        compress_ratio=4,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        sharding=ep_cp,
+        attention_kernel="flash",
+        rngs=nnx.Rngs(params=0),
+    )
+    mesh_ep = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "expert"))
+
+    def ns_ep(spec):
+      return jax.sharding.NamedSharding(mesh_ep, spec)
+
+    with jax.set_mesh(mesh_ep):
+      q_ep = jax.device_put(q_ref, ns_ep(P("fsdp", "expert", None, None)))
+      k_ep = jax.device_put(k_ref, ns_ep(P("fsdp", None, None, None)))
+      v_ep = jax.device_put(v_ref, ns_ep(P("fsdp", None, None, None)))
+      blk_ep = jax.device_put(jnp.asarray(blk_np), ns_ep(P("fsdp", "expert", None)))
+      w_ep = jax.device_put(w_out, ns_ep(P("fsdp", "expert", None)))
+      l_ep, (dq_ep, dk_ep, dv_ep) = jax.jit(
+          jax.value_and_grad(
+              lambda qq, kk, vv: jnp.sum(
+                  mod_epcp.flash_block_sparse_attention(qq, kk, vv, blk_ep, block_q=16, block_kv=16) * w_ep
+              ),
+              argnums=(0, 1, 2),
+          )
+      )(q_ep, k_ep, v_ep)
+    loss_unpacked_ref, (dq_u_ref, dk_u_ref, dv_u_ref) = jax.jit(
+        jax.value_and_grad(
+            lambda qq, kk, vv: jnp.sum(
+                mod_epcp.flash_block_sparse_attention(qq, kk, vv, jnp.asarray(blk_np), block_q=16, block_kv=16) * w_out
+            ),
+            argnums=(0, 1, 2),
+        )
+    )(q_ref, k_ref, v_ref)
+    with jax.set_mesh(mesh_ep):
+      np.testing.assert_allclose(float(l_ep), float(loss_unpacked_ref), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dq_ep), np.asarray(dq_u_ref), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dk_ep), np.asarray(dk_u_ref), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dv_ep), np.asarray(dv_u_ref), rtol=1e-4, atol=1e-4)
+      ep_hlo = (
+          jax.jit(lambda qq, kk, vv, bb: mod_epcp.flash_block_sparse_attention(qq, kk, vv, bb, block_q=16, block_kv=16))
+          .lower(q_ep, k_ep, v_ep, blk_ep)
+          .compile()
+          .as_text()
+          or ""
+      )
+      self.assertNotIn("all-gather(", ep_hlo)
+      self.assertIn("f32[2,1,16,2,2,32]", ep_hlo)
+
+    # 3. `tensor_sequence` head sharding via `get_heads_mesh_axes`.
+    mesh_tsp = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "tensor_sequence"))
+
+    def ns_tsp(spec):
+      return jax.sharding.NamedSharding(mesh_tsp, spec)
+
+    with jax.set_mesh(mesh_tsp):
+      q_tsp = jax.device_put(q_ref, ns_tsp(P("fsdp", None, "tensor_sequence", None)))
+      k_tsp = jax.device_put(k_ref, ns_tsp(P("fsdp", None, "tensor_sequence", None)))
+      v_tsp = jax.device_put(v_ref, ns_tsp(P("fsdp", None, "tensor_sequence", None)))
+      blk_tsp = jax.device_put(jnp.asarray(blk_np), ns_tsp(P("fsdp", None, None)))
+      tsp_hlo = (
+          jax.jit(
+              lambda qq, kk, vv, bb: mod_default.flash_block_sparse_attention(qq, kk, vv, bb, block_q=16, block_kv=16)
+          )
+          .lower(q_tsp, k_tsp, v_tsp, blk_tsp)
+          .compile()
+          .as_text()
+          or ""
+      )
+      self.assertIn("f32[4,1,16,1,2,32]", tsp_hlo)
+      self.assertNotIn("f32[4,1,16,2,2,32]", tsp_hlo)
+
+  @unittest.skipIf(
+      importlib.util.find_spec("libtpu") is None or os.getenv("JAX_PLATFORMS") == "proxy",
+      "requires libtpu virtual TPU topology support",
+  )
+  def test_qsa_flash_attention_virtual_tpu7x_tpu_custom_call(self):
+    """Verifies virtual TPU7x _flash_attention lowers to tpu_custom_call when batch_axes == ()."""
+    topo_mod = importlib.import_module("jax.experimental.topologies")
+    tpu_topo = topo_mod.get_topology_desc(platform="tpu", topology_name="tpu7x:2x2x1")
+    emb_dim = 64
+    attn_short = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        emb_dim=emb_dim,
+        num_query_heads=4,
+        num_kv_heads=2,
+        head_dim=128,
+        mrope_section=(8, 4, 4),
+        index_n_heads=2,
+        index_kv_heads=1,
+        index_head_dim=32,
+        token_budget=256,
+        compress_ratio=4,
+        dtype=jnp.bfloat16,
+        weight_dtype=jnp.float32,
+        attention_kernel="flash",
+        rngs=nnx.Rngs(params=13),
+    )
+    mesh_tpu_ct = jax.sharding.Mesh(
+        np.array(tpu_topo.devices).reshape(4, 2),
+        ("context", "tensor"),
+    )
+    P = jax.sharding.PartitionSpec
+    gd_s, p_s, r_s = nnx.split(attn_short, nnx.Param, ...)
+    p_abs = jax.tree.map(
+        lambda v: jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=jax.sharding.NamedSharding(mesh_tpu_ct, P())),
+        p_s,
+    )
+    x_abs = jax.ShapeDtypeStruct(
+        (2, 256, emb_dim),
+        jnp.bfloat16,
+        sharding=jax.sharding.NamedSharding(mesh_tpu_ct, P(None, "context", None)),
+    )
+    with jax.set_mesh(mesh_tpu_ct):
+      splash_tpu_hlo = jax.jit(lambda pp, xi: nnx.merge(gd_s, pp, r_s)(xi)).lower(p_abs, x_abs).compile().as_text() or ""
+    self.assertIn("tpu_custom_call", splash_tpu_hlo)
+
+  def test_qsa_pack_32bit_scatter_free(self):
+    """Verifies scatter-free and sort-free 32-bit QSA block-mask packing across <=16 and >16 words."""
+    rng = np.random.default_rng(1709)
+    for num_words in (3, 20):
+      max_blk = num_words * 32
+      raw = rng.integers(-4, max_blk + 8, size=(2, 12, 64), dtype=np.int32)
+      raw[0, 0, :32] = 31
+      raw[0, 0, 32:] = max_blk - 1
+      raw[1, 0, :] = -1
+      sel = jnp.asarray(raw, dtype=jnp.int32)
+      pack_jit = jax.jit(lambda x, nw=num_words: modeling_qwen3_8_flash_next.pack_qsa_block_mask_32bit(x, nw))
+      packed = pack_jit(sel)
+      self.assertEqual(packed.shape, (2, 12, num_words))
+      self.assertEqual(packed.dtype, jnp.uint32)
+      bits = ((packed[:, :, :, None] >> jnp.arange(32, dtype=jnp.uint32)) & jnp.uint32(1)) != 0
+      unpacked_bits = bits.reshape(2, 12, max_blk)
+      m_grid = jnp.arange(max_blk, dtype=jnp.int32)[None, None, :]
+      ref_bits = jnp.any((sel[:, :, :, None] == m_grid) & (sel[:, :, :, None] >= 0), axis=2)
+      np.testing.assert_array_equal(np.asarray(unpacked_bits), np.asarray(ref_bits))
+
+      pack_hlo = pack_jit.lower(sel).compile().as_text() or ""
+      self.assertNotIn("scatter(", pack_hlo)
+      self.assertNotIn("sort(", pack_hlo)
+
+  _qsa_remat_ref_cache: dict[tuple[float, bool], tuple[Any, float, Any]] = {}
+
+  def _check_qsa_saved_bitmap_remat(self, pol_name: str, aux_coeff: float, packed_segments: bool) -> None:
+    """Verifies scanned Qwen3.8 remat loss/grad parity, saved bitmap tags, and zero backward indexer recompute."""
+    rng = np.random.default_rng(1713)
+    toks_r = jnp.asarray(rng.integers(1, 64, size=(2, 48), dtype=np.int32))
+    tgts_r = jnp.asarray(rng.integers(1, 64, size=(2, 48), dtype=np.int32))
+    seg_arg = jnp.ones((2, 48), dtype=jnp.int32).at[:, 24:].set(2) if packed_segments else None
+
+    cache_key = (aux_coeff, packed_segments)
+    cached = type(self)._qsa_remat_ref_cache.get(cache_key)
+    if cached is None:
+      cfg_none = _get_mini_config(
+          scan_layers=True,
+          base_num_decoder_layers=4,
+          use_ple_layer=False,
+          qsa_attention_kernel="flash",
+          index_select_budget=16,
+          remat_policy="none",
+      )
+      m_none = m3_models.create_model(cfg_none, mesh=None)
+      ref_state = nnx.state(m_none)
+      gd_n, p_n, rest_n = nnx.split(m_none, nnx.Param, ...)
+
+      def _ref_loss(params: Any) -> jax.Array:
+        loss_val, _ = modeling_qwen3_8_flash_next.compute_total_loss(
+            nnx.merge(gd_n, params, rest_n),
+            toks_r,
+            tgts_r,
+            segment_ids=seg_arg,
+            router_aux_coeff=aux_coeff,
+            use_mtp=False,
+        )
+        return loss_val
+
+      l_ref_arr, g_ref = jax.jit(jax.value_and_grad(_ref_loss))(p_n)
+      cached = (ref_state, float(l_ref_arr), g_ref)
+      type(self)._qsa_remat_ref_cache[cache_key] = cached
+
+    ref_state, l_ref, g_ref = cached
+    cfg_pol = _get_mini_config(
+        scan_layers=True,
+        base_num_decoder_layers=4,
+        use_ple_layer=False,
+        qsa_attention_kernel="flash",
+        index_select_budget=16,
+        remat_policy=pol_name,
+    )
+    m_pol = m3_models.create_model(cfg_pol, mesh=None)
+    nnx.update(m_pol, ref_state)
+    gd_p, p_p, rest_p = nnx.split(m_pol, nnx.Param, ...)
+
+    def _pol_loss(params: Any) -> jax.Array:
+      loss_val, _ = modeling_qwen3_8_flash_next.compute_total_loss(
+          nnx.merge(gd_p, params, rest_p),
+          toks_r,
+          tgts_r,
+          segment_ids=seg_arg,
+          router_aux_coeff=aux_coeff,
+          use_mtp=False,
+      )
+      return loss_val
+
+    pol_vag = jax.value_and_grad(_pol_loss)
+    l_pol, g_pol = jax.jit(pol_vag)(p_p)
+    np.testing.assert_allclose(float(l_pol), float(l_ref), rtol=1e-5, atol=1e-5)
+    jax.tree.map(lambda a, b: np.testing.assert_allclose(a, b, rtol=1e-4, atol=1e-4), g_pol, g_ref)
+
+    def _all_jaxpr_text(jpr: Any) -> str:
+      parts = [str(jpr)]
+      for eq in jpr.eqns:
+        for val in eq.params.values():
+          if hasattr(val, "jaxpr"):
+            parts.append(_all_jaxpr_text(val.jaxpr))
+          elif isinstance(val, (list, tuple)):
+            for item in val:
+              if hasattr(item, "jaxpr"):
+                parts.append(_all_jaxpr_text(item.jaxpr))
+      return "\n".join(parts)
+
+    fwd_txt = _all_jaxpr_text(jax.make_jaxpr(_pol_loss)(p_p).jaxpr)
+    bwd_txt = _all_jaxpr_text(jax.make_jaxpr(pol_vag)(p_p).jaxpr)
+    self.assertIn("qsa_packed_mask", fwd_txt)
+    if packed_segments:
+      self.assertIn("qsa_local_pos", fwd_txt)
+    # Positive control: rematerialized sublayers + VJP run > 2x forward dot_general ops,
+    # whereas detached QSA index_qk_proj ([2, 48, 96]) is NEVER recomputed or differentiated in backward.
+    self.assertGreater(bwd_txt.count("dot_general["), 2 * fwd_txt.count("dot_general["))
+    self.assertLessEqual(bwd_txt.count("[2,48,96]"), fwd_txt.count("[2,48,96]"))
+
+  # Explicit per-case methods distribute across shards without adding new parameterized dep under Bazel strict_deps.
+  def test_qsa_saved_bitmap_remat_custom_aux_unpacked(self):
+    """Verifies `remat_policy='custom'` with router aux loss on unpacked sequences."""
+    self._check_qsa_saved_bitmap_remat("custom", 0.01, False)
+
+  def test_qsa_saved_bitmap_remat_custom_aux_packed(self):
+    """Verifies `remat_policy='custom'` with router aux loss on multi-segment packed sequences."""
+    self._check_qsa_saved_bitmap_remat("custom", 0.01, True)
+
+  def test_qsa_saved_bitmap_remat_custom_noaux_unpacked(self):
+    """Verifies `remat_policy='custom'` without router aux loss on unpacked sequences."""
+    self._check_qsa_saved_bitmap_remat("custom", 0.0, False)
+
+  def test_qsa_saved_bitmap_remat_custom_noaux_packed(self):
+    """Verifies `remat_policy='custom'` without router aux loss on multi-segment packed sequences."""
+    self._check_qsa_saved_bitmap_remat("custom", 0.0, True)
+
+  def test_qsa_saved_bitmap_remat_full_aux_unpacked(self):
+    """Verifies `remat_policy='full'` with router aux loss on unpacked sequences."""
+    self._check_qsa_saved_bitmap_remat("full", 0.01, False)
+
+  def test_qsa_saved_bitmap_remat_full_aux_packed(self):
+    """Verifies `remat_policy='full'` with router aux loss on multi-segment packed sequences."""
+    self._check_qsa_saved_bitmap_remat("full", 0.01, True)
+
+  def test_qsa_saved_bitmap_remat_full_noaux_unpacked(self):
+    """Verifies `remat_policy='full'` without router aux loss on unpacked sequences."""
+    self._check_qsa_saved_bitmap_remat("full", 0.0, False)
+
+  def test_qsa_saved_bitmap_remat_full_noaux_packed(self):
+    """Verifies `remat_policy='full'` without router aux loss on multi-segment packed sequences."""
+    self._check_qsa_saved_bitmap_remat("full", 0.0, True)
+
+  def test_qsa_epcp_sharded_kv_and_context_tensor_splash_4dev(self):
+    """Verifies 4-device ('context', 'tensor') Splash batch_axes==() and ('fsdp', 'expert') EP=CP KV parity."""
+    if len(jax.devices()) < 4:
+      self.skipTest("Requires >= 4 devices (set XLA_FLAGS=--xla_force_host_platform_device_count=4).")
+    rng = np.random.default_rng(1719)
+    emb_dim = 64
+
+    # 1. _flash_attention (s <= token_budget) on 4-device ('context', 'tensor') where batch_axes == ().
+    attn_short = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        emb_dim=emb_dim,
+        num_query_heads=4,
+        num_kv_heads=2,
+        head_dim=128,
+        mrope_section=(8, 4, 4),
+        index_n_heads=2,
+        index_kv_heads=1,
+        index_head_dim=32,
+        token_budget=256,
+        compress_ratio=4,
+        dtype=jnp.bfloat16,
+        weight_dtype=jnp.float32,
+        attention_kernel="flash",
+        rngs=nnx.Rngs(params=13),
+    )
+    mesh_ct = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("context", "tensor"))
+    x_ct = jnp.ones((1, 128, emb_dim), dtype=jnp.bfloat16)
+    with jax.set_mesh(mesh_ct):
+      out_ct = nnx.jit(lambda m, xi: m(xi))(attn_short, x_ct)
+      self.assertEqual(out_ct.shape, (1, 128, emb_dim))
+
+    # 2. Full Qwen3_8SparseAttention.__call__ on 4-device ('fsdp', 'expert') EP=CP mesh (kv_sharded_on_length=True).
+    class _EpCpFullSharding(modeling_qwen3_8_flash_next.DefaultSharding):
+      """EP=CP sharding mapping activation batch to fsdp and length to expert."""
+
+      def map_axis(self, axis, tensor_name, tensor_type):
+        if tensor_type == modeling_qwen3_8_flash_next.TensorType.ACTIVATION:
+          if axis == "batch":
+            return ("data", "fsdp", "fsdp_transpose")
+          if axis == "length":
+            return ("context", "expert")
+        return super().map_axis(axis, tensor_name, tensor_type)
+
+    ep_shd = _EpCpFullSharding()
+    b_ep, s_ep = 2, 64
+    args_ep = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32)
+    dense_ep = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        *args_ep, sharding=ep_shd, attention_kernel="dense", rngs=nnx.Rngs(91)
+    )
+    flash_ep = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+        *args_ep, sharding=ep_shd, attention_kernel="flash", rngs=nnx.Rngs(91)
+    )
+    nnx.update(flash_ep, nnx.state(dense_ep))
+    x_ep_np = rng.standard_normal((b_ep, s_ep, emb_dim), dtype=np.float32)
+    w_ep_probe = jnp.arange(1, emb_dim + 1, dtype=jnp.float32) / float(emb_dim)
+    pos_ep0 = jnp.tile(jnp.arange(s_ep, dtype=jnp.int32), (b_ep, 1))
+    seg_ep0 = jnp.ones((b_ep, s_ep), dtype=jnp.int32).at[:, 36:].set(2)
+
+    l_d_u, (g_d_u, dx_d_u) = nnx.jit(
+        nnx.value_and_grad(lambda m, xi: jnp.sum(m(xi, position_ids=pos_ep0) * w_ep_probe), argnums=(0, 1))
+    )(dense_ep, jnp.asarray(x_ep_np))
+    l_d_p, (g_d_p, dx_d_p) = nnx.jit(
+        nnx.value_and_grad(
+            lambda m, xi: jnp.sum(m(xi, position_ids=pos_ep0, segment_ids=seg_ep0) * w_ep_probe), argnums=(0, 1)
+        )
+    )(dense_ep, jnp.asarray(x_ep_np))
+
+    mesh_ep4 = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "expert"))
+    P = jax.sharding.PartitionSpec
+
+    def _ns_ep4(sp):
+      return jax.sharding.NamedSharding(mesh_ep4, sp)
+
+    with jax.set_mesh(mesh_ep4):
+      x_ep_sh = jax.device_put(jnp.asarray(x_ep_np), _ns_ep4(P("fsdp", "expert", None)))
+      pos_ep_sh = jax.device_put(pos_ep0, _ns_ep4(P("fsdp", "expert")))
+      seg_ep_sh = jax.device_put(seg_ep0, _ns_ep4(P("fsdp", "expert")))
+      l_f_u, (g_f_u, dx_f_u) = nnx.jit(
+          nnx.value_and_grad(lambda m, xi: jnp.sum(m(xi, position_ids=pos_ep_sh) * w_ep_probe), argnums=(0, 1))
+      )(flash_ep, x_ep_sh)
+      l_f_p, (g_f_p, dx_f_p) = nnx.jit(
+          nnx.value_and_grad(
+              lambda m, xi: jnp.sum(m(xi, position_ids=pos_ep_sh, segment_ids=seg_ep_sh) * w_ep_probe),
+              argnums=(0, 1),
+          )
+      )(flash_ep, x_ep_sh)
+      np.testing.assert_allclose(float(l_f_u), float(l_d_u), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(float(l_f_p), float(l_d_p), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dx_f_u), np.asarray(dx_d_u), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(dx_f_p), np.asarray(dx_d_p), rtol=1e-4, atol=1e-4)
+      _assert_allclose_to_scale(g_f_u.k_proj.kernel[...], g_d_u.k_proj.kernel[...])
+      _assert_allclose_to_scale(g_f_u.v_proj.kernel[...], g_d_u.v_proj.kernel[...])
+      _assert_allclose_to_scale(g_f_p.k_proj.kernel[...], g_d_p.k_proj.kernel[...])
+      _assert_allclose_to_scale(g_f_p.v_proj.kernel[...], g_d_p.v_proj.kernel[...])
+
+      # Unpacked indexer under EP=CP emits zero cross-expert all-reduce ops.
+      cos_ep, sin_ep = flash_ep.rotary_emb(x_ep_sh, pos_ep_sh)
+      gd_ix, p_ix, r_ix = nnx.split(flash_ep.indexer, nnx.Param, ...)
+      p_ix_sh = jax.tree.map(lambda a: jax.device_put(a, _ns_ep4(P())), p_ix)
+      ix_ep_hlo = (
+          jax.jit(lambda pp, xi, ci, si: nnx.merge(gd_ix, pp, r_ix)(xi, (ci, si), return_token_mask=False)[1])
+          .lower(p_ix_sh, x_ep_sh, cos_ep, sin_ep)
+          .compile()
+          .as_text()
+          or ""
+      )
+      self.assertEqual(len(re.findall(r"=\s*[^=]*\ball-reduce(?:-start)?\(", ix_ep_hlo)), 0)
 
 
 # =================================================================================================
@@ -1824,6 +2666,25 @@ class Qwen3_8BackboneTest(absltest.TestCase):
       for batch, constrained in ((8, True), (3, False), (1, False)):
         jaxpr = str(jax.make_jaxpr(modeling_qwen3_8_flash_next.shard_batch)(jnp.zeros((batch, 16))))
         self.assertEqual("sharding_constraint" in jaxpr, constrained, msg=f"batch={batch}")
+
+    class _EpCpBatchLenSharding(modeling_qwen3_8_flash_next.DefaultSharding):
+      """Maps activation batch onto fsdp and length onto expert."""
+
+      def map_axis(self, axis, tensor_name, tensor_type):
+        if tensor_type == modeling_qwen3_8_flash_next.TensorType.ACTIVATION:
+          if axis == "batch":
+            return ("fsdp",)
+          if axis == "length":
+            return ("expert",)
+        return super().map_axis(axis, tensor_name, tensor_type)
+
+    mesh_ep = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "expert"))
+    ep_sharding = _EpCpBatchLenSharding()
+    with jax.set_mesh(mesh_ep):
+      jaxpr_ep = str(
+          jax.make_jaxpr(lambda a: modeling_qwen3_8_flash_next.shard_batch(a, ep_sharding))(jnp.zeros((4, 16, 8)))
+      )
+      self.assertIn("spec=P('fsdp', 'expert', None)", jaxpr_ep)
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
   def test_pytorch_full_model_weight_copy_parity(self):
