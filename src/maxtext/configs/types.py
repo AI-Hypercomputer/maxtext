@@ -31,8 +31,17 @@ import yaml
 from typing import Any, Literal, NewType, Optional
 
 import jax
-from maxtext.common.common_types import AttentionType, DecoderBlockType, ReorderStrategy, ShardMode, CustomRule, VisionEncoderBlockType, is_fp8_dtype
-from maxtext.common.common_types import FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION
+from maxtext.common.common_types import (
+    AttentionType,
+    CustomRule,
+    DecoderBlockType,
+    FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION,
+    ReorderStrategy,
+    ShardMode,
+    VisionEncoderBlockType,
+    is_fp8_dtype,
+    is_module_unquantized,
+)
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
@@ -2113,6 +2122,35 @@ class Qwen3Next(BaseModel):
           "composition, 'head' transposes via all-to-all to shard key/value head groups across context ranks, "
           "and 'auto' selects automatically."
       ),
+  )
+  gdn_pin_in_proj_output_layout: bool = Field(
+      True,
+      description=(
+          "Whether to pin the GatedDeltaNet in_proj_qkvz output to row-major XLA layout under paged-state serving "
+          "to avoid materializing a transposed copy of the projection kernel."
+      ),
+  )
+  gdn_in_proj_kernel_order: bool = Field(
+      False,
+      description=(
+          "Whether to permute GatedDeltaNet in_proj_qkvz columns to flat [q | k | v | z] order in training so qkv "
+          "and z share one kernel gather and skip per-head splitting."
+      ),
+  )
+  gdn_out_proj_token_minor: bool = Field(
+      False,
+      description="Whether to constrain the GatedDeltaNet out_proj input to token-minor (0, 2, 1) layout in training.",
+  )
+  gdn_gated_norm_layout: Literal["auto", "natural", "natural_fwd_bwd", "token_minor"] = Field(
+      "auto",
+      description=(
+          "Memory layout constraint around Qwen3NextRMSNormGated when gdn_out_proj_token_minor=True: "
+          "'auto', 'natural', 'natural_fwd_bwd', or 'token_minor'."
+      ),
+  )
+  gdn_fp8_projections: bool = Field(
+      False,
+      description="Whether to run GatedDeltaNet in_proj_qkvz and out_proj as dynamic-absmax FP8 matmuls in training.",
   )
   gdn_mamba_block_size: int = Field(
       0,
@@ -5382,6 +5420,21 @@ class MaxTextConfig(
           "TE Collective GEMM operations are only supported for TE quantization recipes (i.e. starting with 'te_')."
       )
 
+  @staticmethod
+  def _validate_gdn_projection_quantization(cfg: Any) -> None:
+    """Rejects gdn_in_proj_kernel_order=True without gdn_fp8_projections=True when in_proj_qkvz is quantized."""
+    if (
+        cfg.gdn_in_proj_kernel_order
+        and not cfg.gdn_fp8_projections
+        and bool(cfg.quantization)
+        and (cfg.use_qwix_quantization or not is_module_unquantized(cfg, "in_proj_qkvz"))
+    ):
+      raise ValueError(
+          "gdn_in_proj_kernel_order=True with gdn_fp8_projections=False is incompatible with quantized "
+          "in_proj_qkvz; enable gdn_fp8_projections=True, set quantization='', or exclude 'in_proj_qkvz' "
+          "via unquantized_modules with use_qwix_quantization=False."
+      )
+
   def _validate_usp_context_parallelism(self):
     """Validates the USP (Ulysses over ring) context parallelism configuration."""
     if self.context_parallel_strategy != "usp":
@@ -7488,6 +7541,15 @@ class MaxTextConfig(
               f"gdn_cp_mode='head' requires gdn_num_key_heads ({self.gdn_num_key_heads}) to be divisible by "
               f"the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
           )
+      if self.gdn_gated_norm_layout != "auto" and not self.gdn_out_proj_token_minor:
+        raise ValueError("gdn_gated_norm_layout != 'auto' requires gdn_out_proj_token_minor=True.")
+      if (self.gdn_in_proj_kernel_order or self.gdn_fp8_projections) and self.shard_mode == ShardMode.EXPLICIT:
+        raise ValueError("gdn_in_proj_kernel_order and gdn_fp8_projections require shard_mode='auto'.")
+      if self.gdn_in_proj_kernel_order and self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True is incompatible with gdn_cp_mode='head' when context parallelism > 1."
+        )
+      self._validate_gdn_projection_quantization(self)
       if (
           not self.packing
           and self.dataset_type == DatasetType.GRAIN
@@ -7502,6 +7564,18 @@ class MaxTextConfig(
     else:
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
+      if (
+          self.gdn_in_proj_kernel_order
+          or self.gdn_out_proj_token_minor
+          or self.gdn_gated_norm_layout != "auto"
+          or self.gdn_fp8_projections
+          or not self.gdn_pin_in_proj_output_layout
+      ):
+        raise ValueError(
+            "GatedDeltaNet projection/norm layout options (gdn_in_proj_kernel_order, gdn_out_proj_token_minor, "
+            "gdn_gated_norm_layout, gdn_fp8_projections, gdn_pin_in_proj_output_layout) require a GatedDeltaNet "
+            "decoder_block ('qwen3_next' or 'qwen3_5')."
+        )
 
     tokenizer_path = getattr(self, "tokenizer_path", None)
     if (
@@ -8292,6 +8366,27 @@ class RLConfig(
               f"gdn_cp_mode='head' requires gdn_num_key_heads ({self.gdn_num_key_heads}) to be divisible by "
               f"the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
           )
+      if self.gdn_gated_norm_layout != "auto" and not self.gdn_out_proj_token_minor:
+        raise ValueError("gdn_gated_norm_layout != 'auto' requires gdn_out_proj_token_minor=True.")
+      if (self.gdn_in_proj_kernel_order or self.gdn_fp8_projections) and self.shard_mode == ShardMode.EXPLICIT:
+        raise ValueError("gdn_in_proj_kernel_order and gdn_fp8_projections require shard_mode='auto'.")
+      if self.gdn_in_proj_kernel_order and self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True is incompatible with gdn_cp_mode='head' when context parallelism > 1."
+        )
+      MaxTextConfig._validate_gdn_projection_quantization(self)  # pylint: disable=protected-access
+    elif (
+        self.gdn_in_proj_kernel_order
+        or self.gdn_out_proj_token_minor
+        or self.gdn_gated_norm_layout != "auto"
+        or self.gdn_fp8_projections
+        or not self.gdn_pin_in_proj_output_layout
+    ):
+      raise ValueError(
+          "GatedDeltaNet projection/norm layout options (gdn_in_proj_kernel_order, gdn_out_proj_token_minor, "
+          "gdn_gated_norm_layout, gdn_fp8_projections, gdn_pin_in_proj_output_layout) require a GatedDeltaNet "
+          "decoder_block ('qwen3_next' or 'qwen3_5')."
+      )
 
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)
