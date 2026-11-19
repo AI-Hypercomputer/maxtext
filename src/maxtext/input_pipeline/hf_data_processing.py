@@ -29,6 +29,7 @@ from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import elastic_utils
 
 
@@ -296,6 +297,151 @@ def vision_sft_preprocessing_pipeline(
   return multihost_gen
 
 
+def is_audio_sft(config) -> bool:
+  """Audio + text -> text SFT (e.g. Ming thinker): audio encoder but no vision tower."""
+  return bool(
+      config.use_sft and config.use_audio and mm_processor._get_vision_block(config) is None  # pylint: disable=protected-access
+  )
+
+
+def _sft_batch_size(config, global_batch_size):
+  """Per-host (micro-)batch size produced by the grain pipeline."""
+  # Tunix GA requires per-micro-batch slicing at the data level,
+  # whereas Native GA processes the full batch and splits it internally.
+  if config.elastic_enabled:
+    local_batch_size = elastic_utils.get_local_batch_size(config)
+  else:
+    local_batch_size = global_batch_size // jax.process_count()
+  if config.use_tunix_gradient_accumulation:
+    return local_batch_size // config.gradient_accumulation_steps
+  return local_batch_size
+
+
+def audio_sft_preprocessing_pipeline(
+    dataset,
+    config,
+    dataloading_host_index,
+    dataloading_host_count,
+    global_mesh,
+    text_columns,
+    audio_column,
+    global_batch_size,
+    shuffle,
+):
+  """Pipeline for audio SFT (one audio clip + text prompt -> text completion) with a HF dataset.
+
+  Every example becomes a static-shape batch element: text padded to `max_target_length`, audio
+  featurized to `[audio_max_mel_frames, n_mels]` (see `preprocess_audio_for_training`). Packing is
+  not supported yet; the per-example structure (prompt / response / "audios") is kept explicit so a
+  packed or length-bucketed variant can replace the `PadOrTrimToMaxLength` + `Batch` stage later.
+
+  Args:
+    text_columns: `[prompt_column, response_column]`. The prompt column may be missing from the
+      dataset, in which case `config.default_prompt` is injected.
+    audio_column: column holding the HF `Audio` dict (`{"bytes", "path"}` / `{"array", "sampling_rate"}`),
+      raw encoded bytes, or a path.
+  """
+  import datasets  # pylint: disable=import-outside-toplevel
+
+  assert len(text_columns) == 2, f"Need two text_columns for prompt and response, received {text_columns=}"
+  batch_size = _sft_batch_size(config, global_batch_size)
+
+  if shuffle and config.num_epoch > 1:
+    dataset = datasets.concatenate_datasets(
+        [dataset.shuffle(seed=config.data_shuffle_seed + i) for i in range(config.num_epoch)]
+    )
+  elif shuffle:
+    dataset = dataset.shuffle(seed=config.data_shuffle_seed)
+  elif config.num_epoch > 1:
+    dataset = dataset.repeat(config.num_epoch)
+
+  dataset = add_default_prompt_if_missing(dataset, text_columns, config)
+  dataset = dataset.select_columns(text_columns + [audio_column])
+  dataset = dataset.map(
+      input_pipeline_utils.reformat_prompt_audio,
+      fn_kwargs={
+          "column": text_columns[0],
+          "model_name": config.model_name,
+          "audio_placeholder": config.audio_placeholder,
+      },
+  )
+  dataset = dataset.map(
+      input_pipeline_utils.reformat_response,
+      fn_kwargs={"column": text_columns[1], "model_name": config.model_name},
+  )
+  dataset = dataset.map(
+      input_pipeline_utils.pre_process_audio_sft,
+      fn_kwargs={"audio_column": audio_column, "config": config},
+  )
+
+  tokenizer = transformers.AutoTokenizer.from_pretrained(
+      config.tokenizer_path,
+      add_bos_token=False,
+      add_eos_token=False,
+      legacy=False,
+      token=config.hf_access_token,
+      extra_special_tokens={},
+  )
+  pad_id = _get_pad_id(tokenizer)
+
+  dataset = dataset.map(
+      input_pipeline_utils.tokenization,
+      batched=True,
+      batch_size=global_batch_size,
+      fn_kwargs={
+          "hf_tokenizer": tokenizer,
+          "truncation": False,
+          "max_length": config.max_target_length,
+          "column_names": text_columns,
+      },
+  )
+  dataset = dataset.map(
+      input_pipeline_utils.prepare_text_for_audio_fusion,
+      fn_kwargs={"column_name": text_columns[0], "config": config},
+  )
+
+  dataset = input_pipeline_utils.HFDataSource(
+      dataset=dataset,
+      dataloading_host_index=dataloading_host_index,
+      dataloading_host_count=dataloading_host_count,
+      num_threads=1,
+      max_target_length=config.max_target_length,
+      data_column_names=text_columns,
+  )
+  operations = [
+      input_pipeline_utils.SFTPromptMaskingVision(
+          query_column=text_columns[0],
+          response_column=text_columns[1],
+          max_target_length=config.max_target_length,
+          pad_id=pad_id,
+          media_column="audios",
+      ),
+      # TODO(hengtaoguo): length bucketing / packing instead of padding every example to the max.
+      input_pipeline_utils.PadOrTrimToMaxLength(config.max_target_length, pad_id, config=config),
+      input_pipeline_utils.ExtractAudios(),
+      grain.Batch(batch_size=batch_size, drop_remainder=True),
+      input_pipeline_utils.ShiftData(ignored_ids=[pad_id], axis=1),
+  ]
+  dummy_index_sampler = grain.IndexSampler(
+      num_records=len(dataset),
+      num_epochs=1,
+      shard_options=grain.ShardOptions(
+          shard_index=dataloading_host_index, shard_count=dataloading_host_count, drop_remainder=False
+      ),
+      shuffle=False,
+      seed=0,
+  )
+  dataloader = grain.DataLoader(
+      data_source=dataset,
+      operations=operations,
+      sampler=dummy_index_sampler,
+      worker_count=config.grain_worker_count,
+      worker_buffer_size=1,
+      read_options=grain.ReadOptions(num_threads=1, prefetch_buffer_size=batch_size * 4),
+  )
+  return multihost_dataloading.MultiHostDataLoadIterator(dataloader, global_mesh)
+
+
 def preprocessing_pipeline(
     dataloading_host_index,
     dataloading_host_count,
@@ -527,7 +673,19 @@ def make_hf_train_iterator(
   dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
       config, process_indices_train
   )
-  if config.use_sft and config.use_multimodal:
+  if is_audio_sft(config):
+    train_iter = audio_sft_preprocessing_pipeline(
+        dataset=train_ds,
+        config=config,
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
+        global_mesh=global_mesh,
+        text_columns=config.train_data_columns,
+        audio_column=config.train_audio_column,
+        global_batch_size=config.global_batch_size_to_load,
+        shuffle=config.enable_data_shuffling,
+    )
+  elif config.use_sft and config.use_multimodal:
     train_iter = vision_sft_preprocessing_pipeline(
         dataset=train_ds,
         config=config,
@@ -593,7 +751,19 @@ def make_hf_eval_iterator(
   dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
       config, process_indices_eval
   )
-  if config.use_sft and config.use_multimodal:
+  if is_audio_sft(config):
+    eval_iter = audio_sft_preprocessing_pipeline(
+        dataset=eval_ds,
+        config=config,
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
+        global_mesh=global_mesh,
+        text_columns=config.eval_data_columns,
+        audio_column=config.eval_audio_column,
+        global_batch_size=config.global_batch_size_to_load_eval,
+        shuffle=False,
+    )
+  elif config.use_sft and config.use_multimodal:
     eval_iter = vision_sft_preprocessing_pipeline(
         dataset=eval_ds,
         config=config,
