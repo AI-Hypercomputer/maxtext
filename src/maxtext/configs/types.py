@@ -4077,15 +4077,26 @@ class ElasticTraining(BaseModel):
           " `elastic_global_batch_size_mode='constant_grad_accum'`, whose per-device batch never grows."
       ),
   )
+  elastic_simulate_job_devices: int = Field(
+      0,
+      description=(
+          "Testing only. With a constant-global-batch `elastic_global_batch_size_mode` (`constant_padded`,"
+          " `constant_grad_accum`), pretend the job has this many devices while running on the devices actually"
+          " present, without Pathways or `elastic_enabled`. The logical global batch is sized for the pretended devices"
+          " and the physical batch is planned and padded for the present ones, exactly as after a replica resize."
+          " 0 disables the simulation. Not in base.yml; pass it on the command line (tests only)."
+      ),
+  )
 
   @property
   def constant_global_batch_active(self) -> bool:
-    """Whether elastic training keeps the global batch of the full job constant when slices are down.
+    """Whether a constant-global-batch elastic mode is in effect, i.e. the logical global batch covers all job devices.
 
-    True for `elastic_global_batch_size_mode` in (`constant_padded`, `constant_grad_accum`) with `elastic_enabled`; the
-    two modes differ only in how the planner factors the constant batch over the live devices.
+    True for `elastic_global_batch_size_mode` in (`constant_padded`, `constant_grad_accum`) when elastic training is
+    enabled or a larger job is simulated (`elastic_simulate_job_devices`); the two modes differ only in how the planner
+    factors the constant batch over the live devices.
     """
-    return self.elastic_enabled and self.elastic_global_batch_size_mode in (
+    return (self.elastic_enabled or self.elastic_simulate_job_devices > 0) and self.elastic_global_batch_size_mode in (
         ElasticGlobalBatchSizeMode.CONSTANT_PADDED,
         ElasticGlobalBatchSizeMode.CONSTANT_GRAD_ACCUM,
     )
@@ -6202,7 +6213,11 @@ class MaxTextConfig(
         except (RuntimeError, IndexError):
           return self.num_target_devices, max(self.num_slices, 1)
 
-      if self.internal_compile or self.compile_topology or self.subslice_shape:
+      if self.elastic_simulate_job_devices > 0:
+        # Testing without Pathways: the present devices stand in for the live ones of a larger job.
+        job_devices, job_slices = self.elastic_simulate_job_devices, max(self.num_slices, 1)
+        live_slices = job_slices
+      elif self.internal_compile or self.compile_topology or self.subslice_shape:
         job_devices, job_slices = self.num_target_devices, max(self.num_slices, 1)
         live_slices = job_slices
       else:
@@ -6637,6 +6652,13 @@ class MaxTextConfig(
       )
     if self.elastic_enabled and not self.enable_single_controller:
       raise ValueError("Elastic training is only supported with Pathways (`enable_single_controller=True`).")
+    if self.elastic_simulate_job_devices < 0:
+      raise ValueError(f"`elastic_simulate_job_devices` must be >= 0, got {self.elastic_simulate_job_devices}.")
+    if 0 < self.elastic_simulate_job_devices < self.num_target_devices:
+      raise ValueError(
+          f"`elastic_simulate_job_devices` ({self.elastic_simulate_job_devices}) must be >= the number of present"
+          f" devices ({self.num_target_devices}); it simulates a larger job."
+      )
     if self.constant_global_batch_active:
       uses_elastic_iterator = self.dataset_type == DatasetType.GRAIN and self.grain_use_elastic_iterator
       # `constant_grad_accum`, and `constant_padded` with a per-device bound, may grow the accumulation steps on a

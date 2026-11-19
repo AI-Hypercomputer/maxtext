@@ -73,6 +73,25 @@ def _make_packed_segment_ids(batch_size: int, seq_len: int, max_segments_per_seq
   return jnp.cumsum(is_boundary, axis=-1, dtype=jnp.int32)
 
 
+def _pad_replica_blocks(rows: jnp.ndarray, num_replicas: int, batch_size: int) -> jnp.ndarray:
+  """Zero-pads each replica's block of `rows` to `batch_size` rows.
+
+  Args:
+    rows: Array [num_replicas * logical_batch_size, ...] holding the rows of each replica consecutively.
+    num_replicas: Number of data replicas.
+    batch_size: Rows per replica after padding (>= logical_batch_size).
+
+  Returns:
+    Array [num_replicas * batch_size, ...]; replica i's rows start at row i * batch_size, followed by zero rows.
+  """
+  logical_batch_size = rows.shape[0] // num_replicas
+  if logical_batch_size == batch_size:
+    return rows
+  blocks = rows.reshape(num_replicas, logical_batch_size, *rows.shape[1:])
+  blocks = jnp.pad(blocks, [(0, 0), (0, batch_size - logical_batch_size)] + [(0, 0)] * (rows.ndim - 1))
+  return blocks.reshape(num_replicas * batch_size, *rows.shape[1:])
+
+
 class SyntheticDataIterator:
   """Creates a synthetic data iterator for performance testing work"""
 
@@ -116,31 +135,41 @@ class SyntheticDataIterator:
     # of SPMD DiLoCo, which splits one global batch along its first axis. With one replica this is the full batch.
     replica_index, num_replicas = input_pipeline_utils.get_data_replica(config)
     all_replicas_batch_size = batch_size * num_replicas
+    # With a constant-global-batch `elastic_global_batch_size_mode`, only the logical rows carry data: they are generated
+    # exactly as they would be for the unpadded batch of the full job, so a padded run trains on the same rows, and
+    # the rows beyond them are zero with zero segmentation, which the loss masks out.
+    logical_batch_size = batch_size
+    if is_training and config.logical_global_batch_size_to_load is not None:
+      logical_batch_size = min(config.logical_global_batch_size_to_load, batch_size)
+    # Generate the logical rows of every replica with the shapes the unpadded full job uses, so they are bit-identical
+    # to its rows, then zero-pad each replica's block to `batch_size` rows (segmentation 0 masks the padding rows).
+    logical_rows = logical_batch_size * num_replicas
     # Pin threefry2x32: base.yml defaults prng_impl="unsafe_rbg", whose HLO rng-bit-generator
     # partitions per shard on Pathways TPU and diverges between shard_mode="auto" and "explicit".
     tokens = jax.random.randint(
         jax.random.key(0, impl="threefry2x32"),
-        (all_replicas_batch_size, config.max_target_length + 1),
+        (logical_rows, config.max_target_length + 1),
         0,
         config.vocab_size,
         dtype=jnp.int32,
     )
+    tokens = _pad_replica_blocks(tokens, num_replicas, batch_size)
 
     sequence_positions = jnp.arange(0, config.max_target_length + 1, dtype=jnp.int32).reshape(1, -1)
     batch_positions = jnp.broadcast_to(sequence_positions, (all_replicas_batch_size, config.max_target_length + 1))
     if config.packing:
       segmentation = _make_packed_segment_ids(
-          all_replicas_batch_size,
+          logical_rows,
           config.max_target_length,
           config.max_segments_per_seq,
       )
+      segmentation = _pad_replica_blocks(segmentation, num_replicas, batch_size)
     else:
       segmentation = jnp.ones((all_replicas_batch_size, config.max_target_length), dtype=jnp.int32)
     rows = slice(replica_index * batch_size, (replica_index + 1) * batch_size)
     tokens, batch_positions, segmentation = tokens[rows], batch_positions[rows], segmentation[rows]
-    if is_training and config.logical_global_batch_size_to_load is not None:
-      # With `elastic_global_batch_size_mode='constant_padded'`, mask out rows beyond the logical global batch.
-      segmentation = segmentation.at[config.logical_global_batch_size_to_load :].set(0)
+    if logical_batch_size < batch_size:
+      segmentation = segmentation.at[logical_batch_size:].set(0)
 
     output = {}
     output["inputs"] = tokens[:, :-1]

@@ -1939,6 +1939,83 @@ class ConfigTest(absltest.TestCase):
     ):
       self._elastic_config(*keep, "per_device_batch_size=0.5")
 
+  def test_elastic_simulate_job_devices_plans_without_pathways(self):
+    """`elastic_simulate_job_devices` sizes the logical batch for a pretended job on the present devices."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false"]
+    devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(4)]
+    with unittest.mock.patch.object(types.jax, "devices", return_value=devices, autospec=True):
+      cfg = pyconfig.initialize(
+          argv
+          + [
+              "elastic_global_batch_size_mode=constant_padded",
+              "elastic_simulate_job_devices=6",
+              "per_device_batch_size=3",
+              "elastic_max_per_device_batch_size=3",
+          ]
+      )
+      self.assertEqual(
+          (
+              cfg.elastic_enabled,
+              cfg.logical_global_batch_size_to_train_on,
+              cfg.per_device_batch_size,
+              cfg.gradient_accumulation_steps,
+              cfg.global_batch_size_to_train_on,
+          ),
+          (False, 18, 3.0, 2, 24),
+      )
+      legacy = pyconfig.initialize(
+          argv
+          + [
+              "elastic_global_batch_size_mode=constant_padded",
+              "elastic_simulate_job_devices=6",
+              "per_device_batch_size=3",
+          ]
+      )
+      self.assertEqual((legacy.per_device_batch_size, legacy.global_batch_size_to_train_on), (5.0, 20))
+      # `constant_grad_accum` plans the same simulated resize without a bound: B stays 3, K grows to 2.
+      grad_accum = pyconfig.initialize(
+          argv
+          + [
+              "elastic_global_batch_size_mode=constant_grad_accum",
+              "elastic_simulate_job_devices=6",
+              "per_device_batch_size=3",
+          ]
+      )
+      self.assertEqual(
+          (
+              grad_accum.elastic_enabled,
+              grad_accum.logical_global_batch_size_to_train_on,
+              grad_accum.per_device_batch_size,
+              grad_accum.gradient_accumulation_steps,
+              grad_accum.global_batch_size_to_train_on,
+          ),
+          (False, 18, 3.0, 2, 24),
+      )
+      with self.assertRaisesRegex(
+          (ValueError, pydantic.ValidationError), "`elastic_max_per_device_batch_size` is implied"
+      ):
+        pyconfig.initialize(
+            argv
+            + [
+                "elastic_global_batch_size_mode=constant_grad_accum",
+                "elastic_simulate_job_devices=6",
+                "per_device_batch_size=3",
+                "elastic_max_per_device_batch_size=3",
+            ]
+        )
+      # The simulation also enables the constant_padded validation.
+      with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with MoE"):
+        pyconfig.initialize(
+            argv + ["elastic_global_batch_size_mode=constant_padded", "elastic_simulate_job_devices=6", "num_experts=4"]
+        )
+      # Negative values and a pretended job smaller than the present devices are rejected.
+      with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "`elastic_simulate_job_devices` must be >= 0"):
+        pyconfig.initialize(argv + ["elastic_global_batch_size_mode=constant_padded", "elastic_simulate_job_devices=-1"])
+      with self.assertRaisesRegex(
+          (ValueError, pydantic.ValidationError), r"\(2\) must be >= the number of present devices \(4\)"
+      ):
+        pyconfig.initialize(argv + ["elastic_global_batch_size_mode=constant_padded", "elastic_simulate_job_devices=2"])
+
 
 class Qwen3StackConfigValidationTest(absltest.TestCase):
   """Cross-field validators of the Qwen3-235B v7x training knobs."""
