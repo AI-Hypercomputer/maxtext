@@ -1202,9 +1202,9 @@ class AttentionOp(nnx.Module):
         kernel that applies causality and the sliding window itself and only
         needs sequence separation. Defaults to `self.attention_type`.
       kv_cache_part: In single-token decode, which KV cache `key` comes from:
-        "prefill" or "ar". With `segment_positions`, the sliding window is then
-        measured between true query and key positions. None keeps the
-        slot-index approximation.
+        "prefill" or "ar". With `segment_positions`, the sliding window and the
+        attention chunk are then measured between true query and key positions.
+        None keeps the slot-index approximation.
 
     Returns:
       An `Array` representing the attention mask, with shape
@@ -1459,7 +1459,16 @@ class AttentionOp(nnx.Module):
       return jnp.concatenate([expanded_uncompressed_mask, compressed_mask], axis=-1)
 
     elif attention_type == AttentionType.CHUNK and output_mask is not None:
-      if use_segment_positions:
+      # In single-token decode the query sits at its true position, not at the last slot of
+      # whichever cache part `key` is (the prefill cache always has max_prefill_predict_length slots).
+      decode_positions = None
+      if model_mode == MODEL_MODE_AUTOREGRESSIVE and q_seq_len == 1:
+        decode_positions = self._decode_cache_positions(segment_positions, decoder_segment_ids, kv_seq_len, kv_cache_part)
+      if decode_positions is not None:
+        abs_q, abs_k = decode_positions
+        same_chunk = (abs_q // self.chunk_attn_window_size) == (abs_k // self.chunk_attn_window_size)
+        chunk_mask = (same_chunk & (abs_k <= abs_q))[:, None, None, :, :]
+      elif use_segment_positions:
         same_chunk = (position_row_ids // self.chunk_attn_window_size) == (
             position_col_ids // self.chunk_attn_window_size
         )
@@ -1994,8 +2003,10 @@ class AttentionOp(nnx.Module):
               value,
               decoder_segment_ids,
               model_mode,
+              segment_positions=segment_positions,
               bidirectional_mask=bidirectional_mask,
               record_max_logits=record_max_logits,
+              kv_cache_part=kv_cache_part,
               qk_product_einsum=qk_product_einsum,
               wv_product_einsum=wv_product_einsum,
           )
