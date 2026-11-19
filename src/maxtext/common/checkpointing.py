@@ -381,6 +381,24 @@ def _load_linen_checkpoint_into_nnx(
   return restored_linen_to_nnx(restored, abstract_nnx_state, config=config)
 
 
+def _rewrap_raw_prng_keys(restored, abstract):
+  """Re-wraps typed PRNG keys that a checkpoint without Orbax ArrayMetadata restores as raw key data."""
+  abstract_leaves = dict(jax.tree_util.tree_leaves_with_path(abstract))
+
+  def rewrap(path, leaf):
+    target_dtype = getattr(abstract_leaves.get(path), "dtype", None)
+    if (
+        isinstance(leaf, jax.Array)
+        and target_dtype is not None
+        and jax.dtypes.issubdtype(target_dtype, jax.dtypes.prng_key)
+        and not jax.dtypes.issubdtype(leaf.dtype, jax.dtypes.prng_key)
+    ):
+      return jax.random.wrap_key_data(leaf, dtype=target_dtype)
+    return leaf
+
+  return jax.tree_util.tree_map_with_path(rewrap, restored)
+
+
 def restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   """Reshapes a restored Linen-layout tree into the NNX state.
 
@@ -396,6 +414,7 @@ def restored_linen_to_nnx(restored_linen, abstract_nnx_state, config=None):
   Returns:
     The NNX state. Leaves the checkpoint doesn't hold, e.g. caches, stay `jax.ShapeDtypeStruct`s.
   """
+  restored_linen = _rewrap_raw_prng_keys(restored_linen, train_state_nnx.to_checkpoint_dict(abstract_nnx_state))
   _raise_on_weight_mismatch(*_expected_and_restored_params(abstract_nnx_state, restored_linen), config=config)
   return _linen_items_to_nnx(restored_linen, abstract_nnx_state)
 

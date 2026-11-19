@@ -123,6 +123,7 @@ def build_context(
       to the rest (replaces the v0 ``SingleReplicaArrayHandler``).
     replica_axis_index: Mesh axis separating replicas for load-and-broadcast.
     colocated_python_checkpointing: Use Pathways colocated-python checkpointing.
+      Skips Orbax's per-process ArrayMetadata.
     enable_pathways_persistence: Use the Pathways persistence array handler, which
       writes from the TPU workers directly to storage. Colocated Python takes
       precedence when both are set.
@@ -176,6 +177,10 @@ def build_context(
       use_colocated_python=colocated_python_checkpointing,
       use_persistence_array_handler=enable_pathways_persistence,
   )
+  if colocated_python_checkpointing:
+    # Otherwise each worker waits up to 600s for process 0 to create `array_metadatas/`,
+    # which hangs elastic resizes while process 0 is down or late (b/547505923).
+    ctx.array.saving.array_metadata_store = None
 
   if partial_load:
     ctx.pytree.loading.partial_load = True
