@@ -117,7 +117,7 @@ class Metrics:
 
 
 def iter_examples(files_glob: str, max_examples: int):
-  """Yields rows (segment_id, audio, text, duration) from the parquet shards matching , in file order."""
+  """Yields rows (segment_id, audio, text, duration) from the parquet shards matching files_glob, in file order."""
   fs, _, paths = fsspec.get_fs_token_paths(files_glob)
   count = 0
   for path in sorted(paths):
