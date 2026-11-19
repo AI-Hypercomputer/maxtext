@@ -36,6 +36,7 @@ from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from maxtext.common import common_types as ctypes
 from maxtext.common.common_types import ShardMode
+from maxtext.configs.types import A2A_QUANT_FORMATS, A2A_QUANT_SUPPORTED, parse_a2a_quant_method
 from maxtext.kernels import megablox as mblx
 from maxtext.kernels import sort_activations
 from maxtext.kernels.ragged.ragged_sort import a2a_ragged_sort
@@ -1191,6 +1192,180 @@ def _moe_combine_psum_scatter_bwd(
 
 
 _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psum_scatter_bwd)
+
+
+_A2A_QUANT_FORMATS = dict(zip(A2A_QUANT_FORMATS, (jnp.float8_e4m3fn, jnp.float8_e5m2)))
+
+
+def _parse_a2a_quant_method(method: str, default_qtype: jnp.dtype) -> jnp.dtype | None:
+  """Returns the FP8 wire dtype of a ragged all-to-all quantization method, or None for ''.
+
+  Args:
+    method: '' (unquantized), 'rowwise' (FP8 in `default_qtype`), 'rowwise@e4m3' or 'rowwise@e5m2'.
+    default_qtype: Wire dtype of 'rowwise' without an '@<format>' suffix.
+  """
+  if not method:
+    return None
+  try:
+    _, _, fmt = parse_a2a_quant_method(method)
+  except ValueError as e:
+    raise ValueError(
+        f"Unsupported ragged all-to-all quantization method: {method!r}. Supported: {A2A_QUANT_SUPPORTED}."
+    ) from e
+  return _A2A_QUANT_FORMATS[fmt] if fmt else default_qtype
+
+
+def _ra2a_maybe_quantized(
+    x: jax.Array,
+    output: jax.Array,
+    input_offsets: jax.Array,
+    send_sizes: jax.Array,
+    output_offsets: jax.Array,
+    recv_sizes: jax.Array,
+    axis_name: str,
+    qtype: jnp.dtype | None,
+) -> jax.Array:
+  """One ragged all-to-all wire: plain if `qtype` is None, else FP8 values plus one f32 scale per row.
+
+  The quantized wire sends `x` as `qtype` values with a dynamic absmax scale per row (over the trailing feature
+  axis) through two ragged all-to-alls on the same offsets, then dequantizes to `x.dtype`. The value and scale
+  receive buffers are zero-initialized, so rows that receive nothing dequantize to 0 whatever `output` holds (the
+  plain wire keeps `output` there). All-zero rows get scale 1 (qwix guards
+  tiny scales), so they stay 0 and never produce NaN.
+  """
+  if qtype is None:
+    return jax.lax.ragged_all_to_all(
+        x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name=axis_name
+    )
+  x_q = qpl.quantize(
+      x.astype(jnp.float32),
+      qtype=qtype,
+      channelwise_axes=tuple(range(x.ndim - 1)),
+      calibration_method="absmax",
+  )
+  # zeros_like keeps the varying manual axes (VMA) of `output` under shard_map(check_vma=True).
+  qvalue = jax.lax.ragged_all_to_all(
+      x_q.qvalue,
+      jnp.zeros_like(output, dtype=qtype),
+      input_offsets,
+      send_sizes,
+      output_offsets,
+      recv_sizes,
+      axis_name=axis_name,
+  )
+  # One f32 scale per row, sent as [rows]. XLA:TPU still moves each row as one (1, 128) f32 tile, i.e. 512 B/row
+  # (about 7% of the FP8 payload at 7168 features).
+  scale = jax.lax.ragged_all_to_all(
+      x_q.scale.reshape(x.shape[:-1]),
+      jnp.zeros_like(output, dtype=jnp.float32, shape=output.shape[:-1]),
+      input_offsets,
+      send_sizes,
+      output_offsets,
+      recv_sizes,
+      axis_name=axis_name,
+  )
+  return (qvalue.astype(jnp.float32) * scale[..., None]).astype(x.dtype)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9))
+def _quantized_ragged_all_to_all_vjp(
+    x: jax.Array,
+    output: jax.Array,
+    input_offsets: jax.Array,
+    send_sizes: jax.Array,
+    output_offsets: jax.Array,
+    recv_sizes: jax.Array,
+    axis_name: str,
+    fwd_method: str,
+    bwd_method: str,
+    operand_rows: int,
+) -> jax.Array:
+  """custom_vjp core of `_quantized_ragged_all_to_all`; `operand_rows` is `x.shape[0]`."""
+  del bwd_method, operand_rows
+  return _ra2a_maybe_quantized(
+      x,
+      output,
+      input_offsets,
+      send_sizes,
+      output_offsets,
+      recv_sizes,
+      axis_name,
+      _parse_a2a_quant_method(fwd_method, jnp.float8_e4m3fn),
+  )
+
+
+def _quantized_ragged_all_to_all_vjp_fwd(
+    x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name, fwd_method, bwd_method, operand_rows
+):
+  """Custom VJP forward pass: keeps only the integer routing as residuals."""
+  y = _quantized_ragged_all_to_all_vjp(
+      x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name, fwd_method, bwd_method, operand_rows
+  )
+  return y, (input_offsets, send_sizes, output_offsets, recv_sizes)
+
+
+def _quantized_ragged_all_to_all_vjp_bwd(axis_name, fwd_method, bwd_method, operand_rows, res, g):
+  """Sends the cotangent back along the reversed routes, as `_ragged_all_to_all_transpose` in jax/_src/lax/parallel.py.
+
+  The backward is a fresh (optionally quantized) forward ragged all-to-all of the cotangent, so no FP8 collective is
+  ever transposed. `output` is a fresh (zero or uninitialized) receive buffer at every call site: it gets no cotangent.
+  """
+  del fwd_method
+  input_offsets, send_sizes, output_offsets, recv_sizes = res
+  # Each shard learns where its rows landed on every receiver, and where every sender's rows came from.
+  output_offsets_ = jax.lax.all_to_all(output_offsets, axis_name, 0, 0, tiled=True)
+  input_offsets_ = jax.lax.all_to_all(input_offsets, axis_name, 0, 0, tiled=True)
+  dx = _ra2a_maybe_quantized(
+      g,
+      # Like `ad.zeros_like_aval(operand.aval)` in the JAX transpose; zeros_like keeps the VMA of the cotangent.
+      jnp.zeros_like(g, shape=(operand_rows, *g.shape[1:])),
+      output_offsets_,
+      recv_sizes,
+      input_offsets_,
+      send_sizes,
+      axis_name,
+      _parse_a2a_quant_method(bwd_method, jnp.float8_e5m2),
+  )
+  return dx, None, None, None, None, None
+
+
+_quantized_ragged_all_to_all_vjp.defvjp(_quantized_ragged_all_to_all_vjp_fwd, _quantized_ragged_all_to_all_vjp_bwd)
+
+
+def _quantized_ragged_all_to_all(
+    x: jax.Array,
+    output: jax.Array,
+    input_offsets: jax.Array,
+    send_sizes: jax.Array,
+    output_offsets: jax.Array,
+    recv_sizes: jax.Array,
+    *,
+    axis_name: str,
+    fwd_method: str = "",
+    bwd_method: str = "",
+) -> jax.Array:
+  """`jax.lax.ragged_all_to_all` with an optionally FP8-quantized wire in forward and/or backward.
+
+  Args:
+    x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name: As in `jax.lax.ragged_all_to_all`.
+      With `fwd_method` set, rows that receive nothing are 0 whatever `output` holds; `output` gets no cotangent.
+    fwd_method: Quantization of the forward wire (`x`): '' or 'rowwise[@e4m3|@e5m2]'; 'rowwise' means E4M3.
+    bwd_method: Quantization of the backward wire (the cotangent of the result, sent back along the reversed routes):
+      '' or 'rowwise[@e4m3|@e5m2]'; 'rowwise' means E5M2.
+
+  Returns:
+    The received rows in `x.dtype`. With both methods '' this is exactly `jax.lax.ragged_all_to_all`.
+  """
+  if not fwd_method and not bwd_method:
+    return jax.lax.ragged_all_to_all(
+        x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name=axis_name
+    )
+  # Validate both methods at trace time, before the backward is ever traced.
+  _parse_a2a_quant_method(fwd_method, jnp.float8_e4m3fn)
+  _parse_a2a_quant_method(bwd_method, jnp.float8_e5m2)
+  return _quantized_ragged_all_to_all_vjp(
+      x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name, fwd_method, bwd_method, x.shape[0]
+  )
 
 
 class RoutedMoE(nnx.Module):
@@ -3721,7 +3896,8 @@ class RoutedMoE(nnx.Module):
           buffer_init = jnp.zeros if ragged_buffer_factor > 0.0 else jax.lax.empty
           output_shape = buffer_init((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
 
-          x = jax.lax.ragged_all_to_all(
+          # Token Dispatch: leg 1 (forward) and leg 4 (backward) of the EP ragged all-to-all.
+          x = _quantized_ragged_all_to_all(
               x,
               output_shape,
               input_offsets,
@@ -3729,6 +3905,8 @@ class RoutedMoE(nnx.Module):
               output_offsets,
               recv_sizes,
               axis_name=self._expert_parallelism_name,
+              fwd_method=self.config.moe_quantize_dispatch_fwd_method,
+              bwd_method=self.config.moe_quantize_dispatch_bwd_method,
           )
           global_group_sizes = jax.lax.all_gather(group_sizes, axis_name=self._expert_parallelism_name)
           if getattr(self.config, "log_required_ragged_buffer_factor", False):
@@ -4038,6 +4216,14 @@ class RoutedMoE(nnx.Module):
         is_batch_sharded_by_expert,
     ):
       """Unsort tokens and return them to original shards using ragged all-to-all."""
+      # Token Combine: leg 2 (forward) and leg 3 (backward) of the EP ragged all-to-all. With ring of experts,
+      # moe_quantize_combine_bwd_method applies to the ring's all-gather instead.
+      combine_ra2a = functools.partial(
+          _quantized_ragged_all_to_all,
+          axis_name=self._expert_parallelism_name,
+          fwd_method=self.config.moe_quantize_combine_fwd_method,
+          bwd_method="" if self.config.use_ring_of_experts else self.config.moe_quantize_combine_bwd_method,
+      )
       if is_batch_sharded_by_expert:
         # locally unpermute back to the original order
         if self.config.use_ragged_sort:
@@ -4067,14 +4253,13 @@ class RoutedMoE(nnx.Module):
             buffer_size=buffer_size,
             is_dispatch=False,
         )
-        return jax.lax.ragged_all_to_all(
+        return combine_ra2a(
             local_output,
             output_shape,
             input_offsets,
             send_sizes,
             output_offsets,
             recv_sizes,
-            axis_name=self._expert_parallelism_name,
         )
 
       # If batch is replicated across EP shards then each shard should send
@@ -4087,14 +4272,13 @@ class RoutedMoE(nnx.Module):
           is_batch_sharded=False,
           is_dispatch=False,
       )
-      return jax.lax.ragged_all_to_all(
+      return combine_ra2a(
           intermediate_output,
           output_shape,
           input_offsets,
           send_sizes,
           output_offsets,
           recv_sizes,
-          axis_name=self._expert_parallelism_name,
       )
 
     def moe_emb_chunking(

@@ -258,3 +258,32 @@ Requirements:
 - `use_ring_of_experts=True`: Inherent architectural requirements.
 - `use_gmm_v2=True`: Tokamax GMM v2 grouped GEMM backend.
 - Static or dynamic per-token calibration for activations: e.g. `act_quantization_calibration_method="fixed,-224,224"` or `act_quantization_calibration_method="absmax"`.
+
+## Quantized Ragged All-to-All for MoE Expert Parallelism
+
+With standard Expert Parallelism (`use_ring_of_experts=False`), each MoE layer executes four `ragged_all_to_all` collectives across the EP mesh axis: Token Dispatch and Token Combine in both forward and backward passes. MaxText allows each collective to be quantized to FP8 independently, halving the collective value payload from BF16 to FP8 and dequantizing back to model dtype immediately after receive.
+
+### Collective Legs & Flags
+
+```text
+Forward:   x ───(1) Token Dispatch fwd ──► gmm ───(2) Token Combine fwd ──► y
+Backward: dx ◄──(4) Token Dispatch bwd ─── gmm ◄──(3) Token Combine bwd ─── dy
+```
+
+All four flags default to `""` (unquantized BF16):
+
+- **Token Dispatch forward (leg 1)**: `moe_quantize_dispatch_fwd_method` (default FP8 format: `e4m3`)
+- **Token Combine forward (leg 2)**: `moe_quantize_combine_fwd_method` (default FP8 format: `e4m3`)
+- **Token Combine backward (leg 3)**: `moe_quantize_combine_bwd_method` (default FP8 format: `e5m2`; also supports Ring of Experts backward all-gather when `use_ring_of_experts=True`)
+- **Token Dispatch backward (leg 4)**: `moe_quantize_dispatch_bwd_method` (default FP8 format: `e5m2`)
+
+### Scaling Modes
+
+Each flag accepts `"<scaling>[@e4m3|@e5m2]"`:
+
+- `rowwise`: Dynamic per-token f32 `absmax` scaling. Sends two `ragged_all_to_all` collectives on the same routing offsets—FP8 values (`[rows, H]`) and per-token f32 scales (`[rows]`).
+
+### Requirements
+
+- `use_ring_of_experts=False` (except `moe_quantize_combine_bwd_method`, which also supports Ring of Experts backward all-gather under `use_ring_of_experts=True` without `@<format>`).
+- `sparse_matmul=True` and `te_moe_block=False`.
