@@ -15,6 +15,7 @@
 """Unit tests for the line-range test-change detector in ``newly_added_detection``."""
 
 import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -476,8 +477,18 @@ _DEPS_IMAGE_INPUTS = {
 }
 
 
-def _run_analyze_script(tmp_path, env=None, detector_rc=0, detector_stdout="", change=None):
-  """Run analyze_code_changes.sh on a PR, with a fake ``python3`` as the detector."""
+def _run_analyze_script(
+    tmp_path,
+    env=None,
+    detector_rc=0,
+    detector_stdout="",
+    change=None,
+    gh_pr=None,
+    gh_events=None,
+    gh_rc=0,
+    expect_rc=0,
+):
+  """Run analyze_code_changes.sh on a PR, with a fake ``python3`` as the detector and optional fake ``gh``."""
   repo = _make_pr_repo(tmp_path, {"README.md": "base\n", **_DEPS_IMAGE_INPUTS}, change or {"README.md": "changed\n"})
   fake = tmp_path / "bin" / "python3"
   fake.parent.mkdir()
@@ -486,18 +497,43 @@ def _run_analyze_script(tmp_path, env=None, detector_rc=0, detector_stdout="", c
       f"#!/bin/sh\necho \"$@\" >> '{tmp_path}/calls'\ncat '{tmp_path}/stdout'\nexit {detector_rc}\n", encoding="utf-8"
   )
   fake.chmod(0o755)
+  if gh_pr is not None or gh_rc != 0:
+    (tmp_path / "pr.json").write_text(json.dumps(gh_pr or {}), encoding="utf-8")
+    (tmp_path / "events.json").write_text(json.dumps(gh_events or []), encoding="utf-8")
+    fake_gh = fake.parent / "gh"
+    fake_gh.write_text(
+        "#!/bin/sh\n"
+        f"if [ {gh_rc} -ne 0 ]; then exit {gh_rc}; fi\n"
+        f"src='{tmp_path}/pr.json'\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        "    */files) exit 1 ;;\n"
+        f"    */events*) src='{tmp_path}/events.json' ;;\n"
+        "  esac\n"
+        "done\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  if [ "$1" = "--jq" ]; then exec jq -r "$2" < "$src"; fi\n'
+        "  shift\n"
+        "done\n",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
   output = tmp_path / "github_output"
   output.touch()
   # Drop the values that the CI job running these tests has for the variables that the script reads.
   read_by_script = ("PR_NUMBER", "GITHUB_REPOSITORY", "FORCE_ALL_TESTS", "RUN_TPU7X", "EVENT_ACTION", "IS_DRAFT")
-  run_env = {
-      k: v for k, v in os.environ.items() if k not in read_by_script + ("HAS_SKIP_CI_TESTS_LABEL", "IS_COPYBARA_PR")
-  }
-  run_env.update(PATH=f"{fake.parent}{os.pathsep}{os.environ['PATH']}", EVENT_NAME="pull_request", GITHUB_BASE_REF="main")
+  extra_vars = ("HAS_SKIP_CI_TESTS_LABEL", "HAS_PULL_READY_LABEL", "IS_COPYBARA_PR", "GITHUB_RUN_ATTEMPT")
+  run_env = {k: v for k, v in os.environ.items() if k not in read_by_script + extra_vars}
+  run_env.update(
+      PATH=f"{fake.parent}{os.pathsep}{os.environ['PATH']}",
+      EVENT_NAME="pull_request",
+      GITHUB_BASE_REF="main",
+      API_RETRY_SLEEP_SECONDS="0",
+  )
   run_env.update(GITHUB_OUTPUT=str(output), **(env or {}))
   script = REPO_ROOT / ".github/scripts/analyze_code_changes.sh"
   result = subprocess.run(["bash", str(script)], cwd=repo, env=run_env, capture_output=True, text=True, check=False)
-  assert result.returncode == 0, result.stdout + result.stderr
+  assert result.returncode == expect_rc, result.stdout + result.stderr
   writes = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines() if "=" in line)
   calls = tmp_path / "calls"
   return writes, calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
@@ -527,20 +563,21 @@ _DEPS_IMAGE_DOCKERFILE = "src/dependencies/dockerfiles/test_deps_env.Dockerfile"
 
 
 @pytest.mark.parametrize(
-    "env",
+    "env, is_scheduled, newly_added",
     [
-        pytest.param({}, id="pull-request"),
-        pytest.param({"FORCE_ALL_TESTS": "true"}, id="scheduled-only-label"),
-        pytest.param({"EVENT_NAME": "schedule"}, id="scheduled-run"),
+        pytest.param({}, "false", "true", id="pull-request"),
+        pytest.param({"FORCE_ALL_TESTS": "true"}, "true", "false", id="scheduled-only-label"),
+        pytest.param({"EVENT_NAME": "schedule"}, "true", "false", id="scheduled-run"),
     ],
 )
-def test_analyze_code_changes_names_every_dependency_image_on_every_path(tmp_path, env):
+def test_analyze_code_changes_names_every_dependency_image_on_every_path(tmp_path, env, is_scheduled, newly_added):
   """An empty tag silently costs every test job a full dependency install, so no exit path may skip naming."""
   writes, _ = _run_analyze_script(tmp_path, env=env)
   tags = [writes.get(key, "") for key in _DEPS_IMAGE_TAGS]
   assert all(tag.startswith("deps-") for tag in tags), writes
   # Each image hashes only its own inputs, so a change to one must not rename the others.
   assert len(set(tags)) == len(tags), tags
+  assert writes["is_scheduled_run"] == is_scheduled and writes["newly_added_only"] == newly_added
 
 
 def test_analyze_code_changes_dockerfile_change_rebuilds_every_image(tmp_path):
@@ -561,8 +598,66 @@ def test_analyze_code_changes_run_tpu7x_selects_every_flavor_and_waits_for_skip_
   writes, calls = _run_analyze_script(tmp_path, env=env)
   assert not calls
   assert writes["run_tpu7x_tests"] == "true" and "tpu7x_flavors" not in writes
-  assert writes["run_tests"] == "true"
+  assert writes["run_tests"] == "true" and writes["newly_added_only"] == "false"
   assert writes["run_heavy_tests"] == "false" and writes["heavy_tests_gated"] == "true"
+
+
+def test_analyze_code_changes_live_pr_metadata_overrides_stale_env_and_fails_closed(tmp_path):
+  """Re-runs reuse the original webhook payload, so live PR draft/labels must win and API failures must fail closed."""
+  ok_dir, fail_dir = tmp_path / "ok", tmp_path / "fail"
+  ok_dir.mkdir()
+  fail_dir.mkdir()
+  pr_env = {"GITHUB_REPOSITORY": "AI-Hypercomputer/maxtext", "PR_NUMBER": "42", "IS_DRAFT": "true"}
+  writes, _ = _run_analyze_script(
+      ok_dir,
+      env={**pr_env, "HAS_SKIP_CI_TESTS_LABEL": "true"},
+      gh_pr={"draft": False, "labels": [{"name": "run-tpu7x"}]},
+      change={"src/maxtext/train.py": "# changed\n"},
+  )
+  assert writes["run_heavy_tests"] == "true" and writes["heavy_tests_gated"] == "false"
+  assert writes["run_tpu7x_tests"] == "true" and writes["newly_added_only"] == "false"
+
+  failed_writes, _ = _run_analyze_script(fail_dir, env=pr_env, gh_rc=1, expect_rc=1)
+  assert "run_heavy_tests" not in failed_writes and "heavy_tests_gated" not in failed_writes
+
+
+@pytest.mark.parametrize(
+    "attempt, copybara, labels, events, run_heavy, gated",
+    [
+        pytest.param("1", "false", [], [], "false", "true", id="new-pr-before-labeler"),
+        pytest.param("2", "false", [{"name": "run-tpu7x"}], [], "false", "true", id="initial-label-race-attempt-2"),
+        pytest.param("1", "true", [], [], "true", "false", id="copybara-exempt"),
+        pytest.param("1", "false", [{"name": "pull ready"}], [], "true", "false", id="fork-approved-after-pull-ready"),
+        pytest.param(
+            "1",
+            "false",
+            [],
+            [{"id": 9, "event": "unlabeled", "label": {"name": "skip-ci-tests"}}],
+            "true",
+            "false",
+            id="unlabeled-skip-ci-tests",
+        ),
+        pytest.param("2", "false", [{"name": "skip-ci-tests"}], [], "false", "true", id="rerun-with-skip-present"),
+    ],
+)
+def test_analyze_code_changes_opened_gates_until_skip_label_removed(
+    tmp_path, attempt, copybara, labels, events, run_heavy, gated
+):
+  """Rule 4 gates `opened` until `skip-ci-tests` has been removed or `pull ready` added, regardless of attempt number."""
+  writes, _ = _run_analyze_script(
+      tmp_path,
+      env={
+          "GITHUB_REPOSITORY": "AI-Hypercomputer/maxtext",
+          "PR_NUMBER": "42",
+          "EVENT_ACTION": "opened",
+          "GITHUB_RUN_ATTEMPT": attempt,
+          "IS_COPYBARA_PR": copybara,
+      },
+      gh_pr={"draft": False, "labels": labels},
+      gh_events=events,
+      change={"src/maxtext/train.py": "# changed\n"},
+  )
+  assert writes["run_heavy_tests"] == run_heavy and writes["heavy_tests_gated"] == gated
 
 
 @pytest.mark.parametrize(

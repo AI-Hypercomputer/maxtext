@@ -15,15 +15,16 @@
 # This workflow automatically adds a "pull ready" label to a PR that is not a draft and not from a fork, has
 # received at least 2 approving reviews and has a single commit. It doesn't wait for the checks: Copybara imports
 # the PR only after they pass. If the PR still has `skip-ci-tests` and no passing "All Required Tests Passed" run on
-# its head commit, it also removes `skip-ci-tests` with the repo's GitHub App token, which starts the full CI run
-# (a label removed with GITHUB_TOKEN would start no run). It does the same when someone adds "pull ready" by hand,
-# e.g. a maintainer on a PR from a fork. After a push, it removes a "pull ready" label that no longer applies.
+# its head commit, it removes `skip-ci-tests` with GITHUB_TOKEN (which starts no duplicate label workflow) and
+# dispatches `ci_label_trigger.yml` (`workflow_dispatch` is exempted from GITHUB_TOKEN recursion blocking) to re-run
+# full CI. It does the same when someone adds "pull ready" by hand, e.g. a maintainer on a PR from a fork. After a
+# push, it removes a "pull ready" label that no longer applies.
 
 name: Add Pull Ready Label
 
 on:
-  # zizmor: ignore[dangerous-triggers] Never checks out or executes PR code; only reads PR metadata
-  # and updates labels via numeric PR IDs.
+  # zizmor: ignore[dangerous-triggers] Never checks out or executes PR code; only reads PR metadata,
+  # updates labels, and dispatches `ci_label_trigger.yml` via numeric PR IDs.
   pull_request_target:
     types: [labeled, synchronize, ready_for_review]
   pull_request_review:
@@ -45,6 +46,7 @@ jobs:
       github.event.label.name == 'pull ready'
     permissions:
       checks: read
+      actions: write
       pull-requests: write
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -103,12 +105,59 @@ jobs:
               return !runs.some(r => r.status === 'completed' && r.conclusion === 'success')
             }
 
+            const removeSkipCiAndTriggerFullCi = async () => {
+              for (let attempt = 1; attempt <= 5; attempt++) {
+                try {
+                  await github.rest.issues.removeLabel({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    issue_number: pull_number,
+                    name: 'skip-ci-tests',
+                  })
+                  break
+                } catch (error) {
+                  if (error.status === 404) {
+                    core.info(`"skip-ci-tests" is already gone from PR #${pull_number}`)
+                    if (attempt === 1) return
+                    break
+                  }
+                  if (attempt === 5) throw error
+                  core.info(`Attempt ${attempt} to remove "skip-ci-tests" failed (${error.message}); retrying.`)
+                  await new Promise(resolve => setTimeout(resolve, attempt * 10000))
+                }
+              }
+
+              for (let attempt = 1; attempt <= 5; attempt++) {
+                try {
+                  await github.rest.actions.createWorkflowDispatch({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    workflow_id: 'ci_label_trigger.yml',
+                    ref: context.payload.repository?.default_branch || 'main',
+                    inputs: {
+                      pull_number: String(pull_number),
+                      head_sha: pullRequest.headRefOid,
+                    },
+                  })
+                  core.info(`Removed "skip-ci-tests" from PR #${pull_number} and triggered full CI.`)
+                  return
+                } catch (error) {
+                  if (error.status === 404) {
+                    core.warning('Removed "skip-ci-tests", but ci_label_trigger.yml is not on the default branch yet; re-run CI manually.')
+                    return
+                  }
+                  if (attempt === 5) throw error
+                  core.info(`Attempt ${attempt} to dispatch ci_label_trigger.yml failed (${error.message}); retrying.`)
+                  await new Promise(resolve => setTimeout(resolve, attempt * 10000))
+                }
+              }
+            }
+
             // 1. Manual "pull ready" added (collaborator or maintainer on a fork PR):
             //    run full CI first if not already green; Copybara waits on required_check_runs.
             if (context.eventName === 'pull_request_target' && context.payload.action === 'labeled') {
               if (!pullRequest.isDraft && await needsFullCi()) {
-                core.setOutput('remove_skip_ci_tests', 'true')
-                core.setOutput('pull_number', pull_number)
+                await removeSkipCiAndTriggerFullCi()
               }
               return
             }
@@ -157,47 +206,5 @@ jobs:
               })
             }
             if (await needsFullCi()) {
-              core.setOutput('remove_skip_ci_tests', 'true')
-              core.setOutput('pull_number', pull_number)
+              await removeSkipCiAndTriggerFullCi()
             }
-
-      - name: Mint App token
-        id: app_token
-        if: steps.decide.outputs.remove_skip_ci_tests == 'true' && vars.APP_ID != ''
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
-        with:
-          app-id: ${{ vars.APP_ID }}
-          private-key: ${{ secrets.APP_PRIVATE_KEY }}
-          permission-pull-requests: write
-
-      - name: Remove skip-ci-tests (starts the full CI)
-        if: steps.decide.outputs.remove_skip_ci_tests == 'true'
-        env:
-          # Never GITHUB_TOKEN: a label removed with it would not start the CI run.
-          GH_TOKEN: ${{ steps.app_token.outputs.token }}
-          PR_NUMBER: ${{ steps.decide.outputs.pull_number }}
-        run: |
-          if [[ ! "${PR_NUMBER}" =~ ^[0-9]+$ ]]; then
-            echo "::error::The decide step gave no valid PR number."
-            exit 1
-          fi
-          if [[ -z "${GH_TOKEN}" ]]; then
-            echo "::warning::No GitHub App is configured (vars.APP_ID), so 'skip-ci-tests' stays on PR #${PR_NUMBER}. A maintainer can remove it to run all tests."
-            exit 0
-          fi
-          # Retries transient GitHub errors, like add_skip_ci_tests_label.yml.
-          for attempt in 1 2 3 4 5; do
-            if output=$(gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/labels/skip-ci-tests" --silent 2>&1); then
-              echo "Removed 'skip-ci-tests' from PR #${PR_NUMBER}; full CI starts now."
-              exit 0
-            elif [[ "${output}" == *"(HTTP 404)"* ]]; then
-              echo "'skip-ci-tests' is already gone from PR #${PR_NUMBER}."
-              exit 0
-            fi
-            if (( attempt < 5 )); then
-              echo "Attempt ${attempt} to remove 'skip-ci-tests' failed (${output}); retrying in $(( attempt * 10 )) seconds."
-              sleep $(( attempt * 10 ))
-            fi
-          done
-          echo "::error::Could not remove 'skip-ci-tests': ${output}"
-          exit 1
