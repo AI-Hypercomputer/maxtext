@@ -336,9 +336,10 @@ class MetricLogger:
         f"total_weights={scalars['eval/total_weights']}",
         f"avg_z_loss={scalars.get('eval/avg_z_loss', 0.0):.3f}",
     ]
-    if self.config.num_experts > 1:
+    # Post-training eval (trainers/post_train/hooks.py) does not compute the MoE or MTP eval losses.
+    if self.config.num_experts > 1 and "eval/avg_moe_lb_loss" in scalars:
       log_parts.append(f"avg_moe_lb_loss={scalars['eval/avg_moe_lb_loss']:.3f}")
-    if getattr(self.config, "mtp_num_layers", 0) > 0:
+    if getattr(self.config, "mtp_num_layers", 0) > 0 and "eval/avg_mtp_loss" in scalars:
       log_parts.extend(
           [
               f"avg_mtp_loss={scalars['eval/avg_mtp_loss']:.3f}",
