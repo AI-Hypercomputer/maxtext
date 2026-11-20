@@ -53,6 +53,9 @@ from tests.utils.test_helpers import get_test_config_path, get_test_base_output_
 
 pytestmark = [pytest.mark.external_training]
 
+# What google.cloud.logging.Client() raises when no GCP project is configured (e.g. on a local dev box).
+_NO_GCP_PROJECT_ERROR = "Project was not passed and could not be determined from the environment."
+
 
 class _ConfigOverride:
   """Wrapper exposing overridden attributes on top of a read-only config."""
@@ -226,6 +229,81 @@ class GoodputUtilsTest(unittest.TestCase):
     mock_stop_rolling.assert_called_once()
     mock_stop_goodput.assert_called_once()
 
+  @mock.patch("maxtext.utils.max_logging.warning")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_rolling_window_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.stop_goodput_uploader")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor.start_goodput_uploader")
+  @mock.patch("google.cloud.logging.Client", side_effect=OSError(_NO_GCP_PROJECT_ERROR))
+  def test_monitor_goodput_without_gcp_project_degrades_gracefully(
+      self, mock_cloud_logger, mock_start_goodput, mock_stop_goodput, mock_start_rolling, mock_warning
+  ):
+    """Without GCP credentials or a project, monitoring warns once and the body runs with monitoring off."""
+    config = _ConfigOverride(self.config, enable_rolling_window_goodput=True)
+    body_ran = False
+
+    with maybe_monitor_goodput(config):  # Must not raise.
+      body_ran = True
+
+    self.assertTrue(body_ran)
+    mock_cloud_logger.assert_called_once()
+    mock_warning.assert_called_once()
+    self.assertIn(_NO_GCP_PROJECT_ERROR, mock_warning.call_args.args[0])
+    mock_start_goodput.assert_not_called()
+    mock_stop_goodput.assert_not_called()
+    mock_start_rolling.assert_not_called()
+
+    # Errors raised by training itself must still propagate with monitoring off.
+    class TrainingError(Exception):
+      pass
+
+    with self.assertRaises(TrainingError):
+      with maybe_monitor_goodput(config):
+        raise TrainingError()
+
+  @mock.patch("maxtext.utils.max_logging.warning")
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor")
+  def test_monitor_goodput_start_failure_degrades_gracefully(self, mock_monitor_cls, mock_warning):
+    """If the monitor is created but its uploader fails to start, warn once and run the body with monitoring off."""
+    monitor = mock_monitor_cls.return_value
+    monitor.start_goodput_uploader.side_effect = RuntimeError("start boom")
+    config = _ConfigOverride(self.config, enable_rolling_window_goodput=True)
+    body_ran = False
+
+    with maybe_monitor_goodput(config):  # Must not raise.
+      body_ran = True
+
+    self.assertTrue(body_ran)
+    mock_warning.assert_called_once()
+    self.assertIn("start boom", mock_warning.call_args.args[0])
+    monitor.start_rolling_window_goodput_uploader.assert_not_called()
+    # Stopping a monitor whose uploader never started would run a one-off final Goodput query.
+    monitor.stop_goodput_uploader.assert_not_called()
+
+  @mock.patch("ml_goodput_measurement.monitoring.GoodputMonitor")
+  def test_monitor_goodput_with_performance_metric_disables_gcp_step_deviation(self, mock_monitor_cls):
+    """report_performance_metric_for_gcp_monitoring turns off Goodput's step deviation upload to GCM.
+
+    Uses a real config instead of _ConfigOverride: the real one is read-only, which is what made the old
+    in-place `config.enable_gcp_step_deviation_metrics = False` raise.
+    """
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        base_output_directory=get_test_base_output_directory(),
+        run_name="runner_test",
+        enable_checkpointing=False,
+        monitor_goodput=True,
+        report_performance_metric_for_gcp_monitoring=True,
+    )
+    self.assertTrue(config.enable_gcp_step_deviation_metrics)
+
+    with maybe_monitor_goodput(config):  # Must not raise.
+      pass
+
+    gcp_options = mock_monitor_cls.call_args.kwargs["gcp_options"]
+    self.assertFalse(gcp_options.enable_gcp_step_deviation_metrics)
+    self.assertTrue(gcp_options.enable_gcp_goodput_metrics)
+    mock_monitor_cls.return_value.start_goodput_uploader.assert_called_once()
+
   def test_rolling_windows_seconds_rejects_empty_list(self):
     """An empty window list would spawn an idle uploader process, so config validation rejects it."""
     with self.assertRaisesRegex(Exception, "rolling_windows_seconds"):
@@ -378,6 +456,19 @@ class GoodputUtilsTest(unittest.TestCase):
     recorder = create_goodput_recorder(config)  # Must not raise.
 
     self.assertIsInstance(recorder, goodput.GoodputRecorder)
+
+  @mock.patch("maxtext.utils.max_logging.warning")
+  @mock.patch("google.cloud.logging.Client", side_effect=OSError(_NO_GCP_PROJECT_ERROR))
+  def test_create_goodput_recorder_without_gcp_project_degrades_gracefully(self, mock_cloud_logger, mock_warning):
+    """Without GCP credentials or a project, recorder creation warns once and returns None (recording off)."""
+    recorder = create_goodput_recorder(self.config)  # Must not raise.
+
+    self.assertIsNone(recorder)
+    mock_cloud_logger.assert_called_once()
+    mock_warning.assert_called_once()
+    self.assertIn(_NO_GCP_PROJECT_ERROR, mock_warning.call_args.args[0])
+    with maybe_record_goodput(recorder, GoodputEvent.JOB):  # A None recorder makes recording a no-op.
+      pass
 
   @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.flush")
   @mock.patch("ml_goodput_measurement.goodput.GoodputRecorder.record_job_end_time")
