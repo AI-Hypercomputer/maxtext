@@ -34,7 +34,11 @@ selectors, tolerations, reservations, Kueue labels and annotations) except:
   * optional knobs for A/B variants: --libtpu-extra / --libtpu-drop (written to
     every place the e2e render carries libtpu flags: the client's
     LIBTPU_INIT_ARGS, the pathways-proxy --xla_* args and the pw-node workers'
-    LIBTPU_INIT_ARGS), --extra-maxtext-flags (set
+    LIBTPU_INIT_ARGS, and to the config keys they come from:
+    `cluster_config.roles.trainer.env`,
+    `cluster_config.pathways.proxy_extra_args` and
+    `cluster_config.pathways.worker_env`, so CONFIG_ARGV describes the
+    rendered JobSet), --extra-maxtext-flags (set
     `dist_training_config.maxtext_extra_config` keys), --replace-maxtext-flags
     (replace a key the resolved `maxtext_extra_config` already has),
     --set-config (set any config key), --compute-logps-chunk-size,
@@ -80,6 +84,8 @@ TOPOLOGY_ANNOTATION = "cloud.google.com/gke-tpu-slice-topology"
 NODE_SELECTOR_TOPOLOGY = "cloud.google.com/gke-tpu-topology"
 MAXTEXT_EXTRA_CONFIG_KEY = "dist_training_config.maxtext_extra_config"
 TRAINER_LIBTPU_KEY = "cluster_config.roles.trainer.env.LIBTPU_INIT_ARGS"
+PROXY_EXTRA_ARGS_KEY = "cluster_config.pathways.proxy_extra_args"
+WORKER_LIBTPU_KEY = "cluster_config.pathways.worker_env.LIBTPU_INIT_ARGS"
 
 
 class _LiteralDumper(yaml.SafeDumper):
@@ -257,6 +263,54 @@ def rewrite_env_prefix(prefix: str, libtpu: list[str]) -> str:
   elif n > 1:
     raise ValueError(f"expected at most one LIBTPU_INIT_ARGS in the env prefix, found {n}")
   return prefix
+
+
+def rewrite_pathways_libtpu(
+    js: dict[str, Any],
+    hp: resolve_config.DistHyperParameters,
+    config_args: list[str],
+    base_libtpu: str,
+    libtpu: list[str],
+) -> list[str]:
+  """Writes `libtpu` into the pathways-proxy and pw-node worker flags of `js`.
+
+  The proxy keeps its other args and takes the `--xla_*` flags of `libtpu`. If
+  the render gives the workers a LIBTPU_INIT_ARGS (from
+  `cluster_config.pathways.worker_env`, empty by default), it becomes `libtpu`
+  plus the worker-only flags (those not in `base_libtpu`); otherwise the
+  workers keep none. The returned config arguments set the keys these come
+  from (`cluster_config.pathways.proxy_extra_args` and
+  `.worker_env.LIBTPU_INIT_ARGS`) to the rewritten values.
+
+  Args:
+    js: The trainer JobSet, updated in place.
+    hp: The resolved config of `config_args`.
+    config_args: The run's config arguments.
+    base_libtpu: The client's LIBTPU_INIT_ARGS in the e2e render.
+    libtpu: The bench's libtpu flags.
+
+  Returns:
+    `config_args` with the rewritten Pathways keys set.
+  """
+  xla = [f for f in libtpu if f.startswith("--xla_")]
+  proc, _ = _proc_main(js)
+  proxy = find(proc["initContainers"], "pathways-proxy")
+  head = [x for x in proxy["args"] if not x.startswith("--xla_") and not x.startswith("--sidecar_name")]
+  tail = [x for x in proxy["args"] if x.startswith("--sidecar_name")]
+  proxy["args"] = head + xla + tail
+  pathways = hp.config_mapping("cluster_config")["pathways"]
+  proxy_extra = [x for x in pathways["proxy_extra_args"].split() if not x.startswith("--xla_")]
+  config_args = set_config(config_args, PROXY_EXTRA_ARGS_KEY, " ".join(proxy_extra + xla))
+  pw_node = find(js["spec"]["replicatedJobs"], "pw-node")
+  worker_pod = pw_node["template"]["spec"]["template"]["spec"]
+  worker = find(worker_pod["containers"], "pathways-worker")
+  if not any(e["name"] == "LIBTPU_INIT_ARGS" for e in worker["env"]):
+    return config_args
+  env = find(worker["env"], "LIBTPU_INIT_ARGS")
+  base_keys = {x.split("=", 1)[0] for x in base_libtpu.split()}
+  extras = [f for f in env["value"].split() if f.split("=", 1)[0] not in base_keys]
+  env["value"] = " ".join(libtpu + extras)
+  return set_config(config_args, WORKER_LIBTPU_KEY, env["value"])
 
 
 def _mesh_context(hp: resolve_config.DistHyperParameters) -> int:
@@ -583,7 +637,7 @@ def main(argv=None):
       a.out = f"rendered/{a.name}.yaml"
 
   js = copy.deepcopy(train)
-  proc, main_c = _proc_main(js)
+  _, main_c = _proc_main(js)
   env_prefix, config_args = split_command(main_c["command"][-1])
   base_libtpu = libtpu_init_args(env_prefix)
   libtpu = compose_libtpu(base_libtpu, a.libtpu_drop, a.libtpu_extra)
@@ -603,6 +657,9 @@ def main(argv=None):
     if kv.split("=", 1)[0] not in extra:
       raise ValueError(f"--replace-maxtext-flags {kv!r}: key not in the resolved {MAXTEXT_EXTRA_CONFIG_KEY}")
     config_args = set_raw_configs(config_args, [f"{MAXTEXT_EXTRA_CONFIG_KEY}.{kv}"])
+  # The AOT exports read no Pathways container or key.
+  if (a.libtpu_drop or a.libtpu_extra) and not a.print_aot_env:
+    config_args = rewrite_pathways_libtpu(js, hp, config_args, base_libtpu, libtpu)
   if a.trainer_slice and a.trainer_slice != current_slice(js)[1]:
     config_args, summary = apply_trainer_slice(js, hp, config_args, a.trainer_slice, a.devices_per_chip)
     print(summary, file=sys.stderr)
@@ -640,21 +697,6 @@ def main(argv=None):
   main_c.pop("ports", None)
   if a.image:
     main_c["image"] = a.image
-
-  if a.libtpu_drop or a.libtpu_extra:
-    proxy = find(proc["initContainers"], "pathways-proxy")
-    orig = proxy["args"]
-    head = [x for x in orig if not x.startswith("--xla_") and not x.startswith("--sidecar_name")]
-    tail = [x for x in orig if x.startswith("--sidecar_name")]
-    proxy["args"] = head + [f for f in libtpu if f.startswith("--xla_")] + tail
-    worker_pod = find(js["spec"]["replicatedJobs"], "pw-node")["template"]["spec"]["template"]["spec"]
-    env = find(
-        find(worker_pod["containers"], "pathways-worker")["env"],
-        "LIBTPU_INIT_ARGS",
-    )
-    base_keys = {x.split("=", 1)[0] for x in base_libtpu.split()}
-    extras = [f for f in env["value"].split() if f.split("=", 1)[0] not in base_keys]
-    env["value"] = " ".join(libtpu + extras)
 
   if os.path.dirname(a.out):
     os.makedirs(os.path.dirname(a.out), exist_ok=True)
