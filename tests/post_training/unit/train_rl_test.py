@@ -23,6 +23,7 @@ import pickle
 import sys
 import tempfile
 import time
+from typing import Any
 import unittest
 from unittest import mock
 import grain
@@ -402,6 +403,87 @@ class TrainRLTest(unittest.TestCase):
     # `type` has no inspectable constructor signature; the filter cannot know
     # what it accepts, so it must pass everything through.
     self.assertEqual(train_rl._kwargs_supported_by(type, unknown=3), {"unknown": 3})
+
+  def test_build_rl_profiler_config_returns_none_when_not_xplane(self) -> None:
+    """build_rl_profiler_config returns None unless profiler='xplane'."""
+    config = types.RLConfig(model_name="qwen3-0.6b")
+    self.assertIsNone(train_rl.build_rl_profiler_config(config))
+
+  def _profile_config_kwargs(
+      self, declared_fields: set[str], **config_overrides: Any
+  ) -> dict[str, Any]:
+    """Runs build_rl_profiler_config with a fake RLProfileConfig."""
+    received: dict[str, Any] = {}
+
+    class FakeRLProfileConfig:
+
+      def __init__(self, **fields: Any):
+        unknown = sorted(set(fields) - set(declared_fields))
+        if unknown:
+          raise TypeError(f"unexpected keyword arguments {unknown}")
+        received.update(fields)
+
+    FakeRLProfileConfig.__signature__ = inspect.Signature(
+        [
+            inspect.Parameter(
+                name,
+                inspect.Parameter.KEYWORD_ONLY,
+                default=None,
+            )
+            for name in sorted(declared_fields)
+        ],
+    )
+    config = types.RLConfig(
+        model_name="qwen3-0.6b",
+        profiler="xplane",
+        tensorboard_dir="/tmp/tb",
+        **config_overrides,
+    )
+    with mock.patch.object(
+        train_rl.rl_cluster_lib,
+        train_rl.rl_cluster_lib.RLProfileConfig.__name__,
+        FakeRLProfileConfig,
+    ):
+      prof_cfg = train_rl.build_rl_profiler_config(config)
+    self.assertIsInstance(prof_cfg, FakeRLProfileConfig)
+    return received
+
+  def test_build_rl_profiler_config_forwards_enable_continuous_profiling(
+      self,
+  ) -> None:
+    """enable_continuous_profiling on RLConfig reaches RLProfileConfig."""
+    field = "enable_continuous_profiling"
+    sig = inspect.signature(train_rl.rl_cluster_lib.RLProfileConfig)
+    declared = set(sig.parameters) | {field}
+
+    default_received = self._profile_config_kwargs(declared)
+    self.assertIs(default_received[field], False)
+
+    for value in (False, True):
+      received = self._profile_config_kwargs(
+          declared, enable_continuous_profiling=value
+      )
+      self.assertIs(received[field], value)
+
+  def test_build_rl_profiler_config_drops_continuous_flag_for_older_tunix(
+      self,
+  ) -> None:
+    """Older RLProfileConfig without enable_continuous_profiling works cleanly."""
+    field = "enable_continuous_profiling"
+    sig = inspect.signature(train_rl.rl_cluster_lib.RLProfileConfig)
+    declared = set(sig.parameters) - {field}
+
+    with mock.patch.object(
+        train_rl.max_logging, train_rl.max_logging.log.__name__
+    ) as mock_log:
+      received = self._profile_config_kwargs(
+          declared, enable_continuous_profiling=True
+      )
+
+    self.assertNotIn(field, received)
+    self.assertEqual(received["output_dir"], "/tmp/tb")
+    mock_log.assert_called_once()
+    self.assertIn(field, mock_log.call_args.args[0])
 
   def test_rl_config_packing_budget_must_fit_a_maximal_sequence(self):
     """A packed row must hold prompt cap + generation cap (= max_target_length)."""

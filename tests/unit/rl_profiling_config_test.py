@@ -157,6 +157,18 @@ class RLProfilingConfigTest(parameterized.TestCase):
     self.assertEqual(cfg.rl.profiler_start_invocation, 7)
     self.assertEqual(cfg.rl.profiler_num_invocations, 4)
 
+  def test_enable_continuous_profiling_on_rl_config(self) -> None:
+    default_cfg = _rl_config(run_name="rl_profiling_test")
+    self.assertFalse(default_cfg.enable_continuous_profiling)
+
+    enabled_cfg = _rl_config(
+        "profiler=xplane",
+        "enable_continuous_profiling=true",
+        run_name="rl_profiling_test",
+    )
+    self.assertEqual(enabled_cfg.profiler, types.ProfilerType.XPLANE)
+    self.assertTrue(enabled_cfg.enable_continuous_profiling)
+
   def test_legacy_step_profiling_flags_still_exist_on_pretrain_config(self):
     for flag in _LEGACY_PROFILING_FLAGS:
       self.assertIn(flag.split("=", 1)[0], types.MaxTextConfig.model_fields)
