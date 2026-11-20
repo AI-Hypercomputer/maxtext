@@ -751,6 +751,8 @@ def create_model(
       model = m3_models.maybe_apply_remat(model, config, model_mode=model_mode)
       if model_mode == MODEL_MODE_TRAIN:
         m3_models.check_model_tags(model, config, mesh=mesh)
+      # Re-exported from m3.infra.fsdp_prefetch to preserve utils:model_creation_utils strict_deps.
+      model = m3_models.maybe_apply_fsdp_prefetch(model, config, mesh=mesh, model_mode=model_mode)
       if getattr(config, "quantization", "") and m3_models.ambient_mesh_is_explicit():
         raise ValueError(
             "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized "

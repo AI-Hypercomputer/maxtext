@@ -129,6 +129,10 @@ def _filter_layer_kwargs(layer_cls: type[Any], kwargs: dict[str, Any]) -> dict[s
   return {k: v for k, v in kwargs.items() if k in accepted}
 
 
+strip_layer_axis = _strip_layer_axis
+filter_layer_kwargs = _filter_layer_kwargs
+
+
 class ScannedLayers(nnx.Module):
   """Structurally identical layers with stacked state, executed via `jax.lax.scan`.
 
@@ -144,6 +148,7 @@ class ScannedLayers(nnx.Module):
       *,
       param_scan_axis: int = 1,
       remat: Any = None,
+      fsdp_prefetch: Any = None,
   ):  # pylint: disable=super-init-not-called
     if not isinstance(param_scan_axis, int) or param_scan_axis < 0:
       raise ValueError("param_scan_axis must be a non-negative integer.")
@@ -164,8 +169,16 @@ class ScannedLayers(nnx.Module):
     self._param_scan_axis = param_scan_axis
     self.num_layers = len(layers)
     self.remat = remat
+    self.fsdp_prefetch = fsdp_prefetch
 
   def __call__(self, carry: Any, **kwargs: Any) -> Any:
+    prefetch_runner = getattr(self, "fsdp_prefetch", None)
+    if prefetch_runner is not None:
+      return prefetch_runner(self, carry, **kwargs)
+    return self._run_regular_scan(carry, **kwargs)
+
+  def _run_regular_scan(self, carry: Any, **kwargs: Any) -> Any:
+    """Runs standard `jax.lax.scan` over stacked layer parameters without weight prefetch."""
     axis = self._param_scan_axis
     graphdef, params, rest = nnx.split(self, nnx.Param, ...)
     params = jax.tree.map(lambda x: jnp.moveaxis(x, min(axis, x.ndim - 1), 0), params)
@@ -259,11 +272,14 @@ def scan_run(
     *,
     param_scan_axis: int,
     remat: Any = None,
+    fsdp_prefetch: Any = None,
 ) -> ScannedLayers:
   """Stacks `layers` (all of one class) into a `Scanned<Layer>` instance."""
   if not layers:
     raise ValueError("Cannot scan an empty run of layers.")
-  return _scanned_class(type(layers[0]))(layers, param_scan_axis=param_scan_axis, remat=remat)
+  return _scanned_class(type(layers[0]))(
+      layers, param_scan_axis=param_scan_axis, remat=remat, fsdp_prefetch=fsdp_prefetch
+  )
 
 
 def _identical_runs(layers: Sequence[nnx.Module]) -> list[list[nnx.Module]]:
@@ -287,17 +303,19 @@ def scan_layers(layers: nnx.Sequential, *, param_scan_axis: int) -> nnx.Module:
   become an `nnx.Sequential` of `ScannedLayers`, one per run.
   """
   prior_remat = getattr(layers, "remat", None)
+  prior_prefetch = getattr(layers, "fsdp_prefetch", None)
   runs = _identical_runs(list(layers.layers))
   scanned = []
   for run in runs:
     if isinstance(run[0], ScannedLayers):
-      if prior_remat is not None:
-        for item in run:
-          if getattr(item, "remat", None) is None:
-            item.remat = prior_remat
+      for item in run:
+        if prior_remat is not None and getattr(item, "remat", None) is None:
+          item.remat = prior_remat
+        if prior_prefetch is not None and getattr(item, "fsdp_prefetch", None) is None:
+          item.fsdp_prefetch = prior_prefetch
       scanned.extend(run)
       continue
-    scanned.append(scan_run(run, param_scan_axis=param_scan_axis, remat=prior_remat))
+    scanned.append(scan_run(run, param_scan_axis=param_scan_axis, remat=prior_remat, fsdp_prefetch=prior_prefetch))
   if len(scanned) == 1:
     return scanned[0]
   return nnx.Sequential(*scanned)
