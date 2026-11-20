@@ -38,7 +38,7 @@ from maxtext.layers.normalizations import RMSNorm, align_scale_with_normalized_a
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
-from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, with_logical_constraint
+from maxtext.utils.sharding import create_sharding, get_logical_axis_rules, maybe_shard_with_logical, truncate_out_sharding, with_logical_constraint
 
 
 GEMMA4_ATTENTION_PATTERN = (
@@ -54,6 +54,54 @@ GEMMA4_ATTENTION_PATTERN = (
 def get_attention_type(layer_id):
   layer_id %= len(GEMMA4_ATTENTION_PATTERN)
   return GEMMA4_ATTENTION_PATTERN[layer_id]
+
+
+def _mul_aligned_scale(
+    x: jax.Array,
+    scale: jax.Array,
+    mesh: Mesh,
+    shard_mode: ShardMode,
+    check_vma: bool = True,
+    out_sharding: jax.sharding.NamedSharding | None = None,
+) -> jax.Array:
+  """Multiplies `x` `[..., K]` by aligned 1-D `scale` `[K]` on VPU while preserving `reduced` FSDP tags."""
+  if shard_mode != ShardMode.EXPLICIT:
+    return x * scale
+  scale_spec = getattr(getattr(jax.typeof(scale), "sharding", None), "spec", None)
+  if scale_spec is None or not scale_spec.reduced:
+    return x * scale
+  x_spec = getattr(getattr(jax.typeof(x), "sharding", None), "spec", None)
+  if x_spec is None or mesh is None:
+    eff_out = truncate_out_sharding(out_sharding, x.ndim) if out_sharding is not None else None
+    return jnp.einsum("...k,k->...k", x, scale, out_sharding=eff_out)
+  x_parts = tuple(x_spec.partitions) + (None,) * max(0, x.ndim - len(x_spec.partitions))
+  contract_axes = {
+      a
+      for entry in x_parts[:-1]
+      for a in ((entry,) if isinstance(entry, str) else (entry or ()))
+      if mesh.shape.get(a, 1) > 1
+  }
+  reduced_set = frozenset(scale_spec.reduced)
+  if not reduced_set.issubset(contract_axes):
+    eff_out = truncate_out_sharding(out_sharding, x.ndim) if out_sharding is not None else None
+    return jnp.einsum("...k,k->...k", x, scale, out_sharding=eff_out)
+  reduced_axes = tuple(sorted(reduced_set))
+  extra_axes = tuple(sorted(contract_axes - reduced_set))
+  x_full_spec = jax.sharding.PartitionSpec(*x_parts)
+
+  def _mul_local(x_l, s_l):
+    s_v = jax.lax.pcast(s_l, reduced_axes, to="varying")
+    if extra_axes:
+      s_v = jax.lax.pcast(s_v, extra_axes, to="varying")
+    return x_l * s_v
+
+  return jax.shard_map(
+      _mul_local,
+      mesh=mesh,
+      in_specs=(x_full_spec, scale_spec),
+      out_specs=x_full_spec,
+      check_vma=check_vma,
+  )(x, scale)
 
 
 class Gemma4MoE(nnx.Module):
@@ -148,7 +196,14 @@ class Gemma4MoE(nnx.Module):
       # The router scale is declared "embed" but multiplies an activation whose last axis is
       # "activation_embed", two different mesh axes under the default rules.
       router_scale = align_scale_with_normalized_axis(router_scale, unscaled_norm)
-    gate_inputs = unscaled_norm * root_size * router_scale
+    gate_inputs = _mul_aligned_scale(
+        unscaled_norm * root_size,
+        router_scale,
+        self.mesh,
+        self.config.shard_mode,
+        self.config.check_vma,
+        out_sharding,
+    )
 
     # 3. Pass both to routed_moe
     routed_experts, load_balance_loss, moe_bias_updates = self.moe_block.routed_moe(
@@ -456,6 +511,178 @@ class Gemma4DecoderLayer(nnx.Module):
       return (layer_output, stacked_kv_cache, layer_idx + 1), None
     else:
       return layer_output, kv_cache
+
+  # ---------------------------------------------------------------------------
+  # Generalized Batch-Split layer adapter (used only when config.enable_batch_split)
+  # ---------------------------------------------------------------------------
+
+  def batch_split_supported(self) -> bool:
+    """Returns True if this Gemma4 MoE sub-layer supports `batch_split`."""
+    cfg = self.config
+    return (
+        isinstance(self.mlp, Gemma4MoE)
+        and getattr(cfg, "num_experts", 1) > 1
+        and cfg.sparse_matmul
+        and cfg.use_ring_of_experts
+        and not cfg.te_moe_block
+        and not getattr(cfg, "moe_use_fused_gmm3d", False)
+        and cfg.num_moe_emb_chunks <= 0
+        and not getattr(cfg, "record_internal_nn_metrics", False)
+        and cfg.dropout_rate == 0.0
+    )
+
+  def batch_split_attn_and_route(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      page_state=None,
+      slot=None,
+      bidirectional_mask=None,
+      kv_cache=None,
+      attention_metadata=None,
+      forced_routed_experts: jnp.ndarray | None = None,
+  ):
+    """Phase 1/2 TC compute: Sliding/Global attention + norms + shared expert + MoE router gate."""
+    del previous_chunk, page_state, slot, kv_cache, forced_routed_experts
+    cfg = self.config
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+
+    lnx = self.pre_self_attention_norm(inputs, out_sharding=self.out_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
+
+    if self.attention_type != AttentionType.LOCAL_SLIDING:
+      bidirectional_mask = None
+
+    attention_lnx, _ = self.self_attention(
+        lnx,
+        lnx,
+        decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=deterministic,
+        model_mode=model_mode,
+        bidirectional_mask=bidirectional_mask,
+        out_sharding=self.out_sharding,
+        kv_cache=None,
+        attention_metadata=attention_metadata,
+    )
+    if cfg.use_post_attn_norm and self.post_self_attention_norm is not None:
+      attention_lnx = self.post_self_attention_norm(attention_lnx, out_sharding=self.out_sharding)
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
+
+    residual = attention_lnx + inputs
+    attn_output = self.pre_ffw_norm(residual, out_sharding=self.out_sharding)
+
+    shared_out = self.mlp.moe_block.shared_experts(
+        attn_output, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
+    )
+    shared_out = self.mlp.post_feedforward_layernorm_1(shared_out, out_sharding=self.out_sharding)
+
+    routed_inputs = self.mlp.pre_feedforward_layernorm_2(residual, out_sharding=self.out_sharding)
+    gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
+    unscaled_norm = self.mlp.gate_norm(residual, out_sharding=self.out_sharding)
+    root_size = cfg.emb_dim**-0.5
+    router_scale = jnp.asarray(self.mlp.pre_forward_scale_2.value, gate_dtype)
+    if cfg.shard_mode == ShardMode.EXPLICIT:
+      router_scale = align_scale_with_normalized_axis(router_scale, unscaled_norm)
+    gate_inputs = _mul_aligned_scale(
+        unscaled_norm * root_size,
+        router_scale,
+        self.mesh,
+        cfg.shard_mode,
+        cfg.check_vma,
+        self.out_sharding,
+    )
+
+    moe_in, route_in, seq_lb_loss = self.mlp.moe_block.routed_moe.batch_split_route(
+        routed_inputs,
+        gate_inputs=gate_inputs,
+    )
+
+    post_ln2_scale = jnp.asarray(self.mlp.post_feedforward_layernorm_2.scale.get_value(), jnp.float32)
+    if cfg.shard_mode == ShardMode.EXPLICIT:
+      post_ln2_scale = align_scale_with_normalized_axis(post_ln2_scale, residual)
+
+    post_ffw_scale = None
+    if cfg.use_post_ffw_norm and self.post_ffw_norm is not None:
+      post_ffw_scale = jnp.asarray(self.post_ffw_norm.scale.get_value(), jnp.float32)
+      if cfg.shard_mode == ShardMode.EXPLICIT:
+        post_ffw_scale = align_scale_with_normalized_axis(post_ffw_scale, residual)
+
+    layer_scalar = jnp.asarray(self.layer_scalar.value, cfg.dtype)
+    h_skip = (residual, shared_out, post_ln2_scale, post_ffw_scale, layer_scalar)
+    return h_skip, moe_in, route_in, seq_lb_loss
+
+  def batch_split_dispatch(self, moe_in, route_in):
+    """Weight-free EP All-Gather of microbatch tokens and routing metadata on SC0."""
+    return self.mlp.moe_block.routed_moe.batch_split_dispatch(moe_in, route_in)
+
+  def batch_split_dispatch_bwd(self, moe_in, route_in, g_x_val_ag, g_route_ag_diff):
+    """Weight-free backward of `batch_split_dispatch` (EP Reduce-Scatter on SC0)."""
+    return self.mlp.moe_block.routed_moe.batch_split_dispatch_bwd(moe_in, route_in, g_x_val_ag, g_route_ag_diff)
+
+  def batch_split_experts(
+      self, moe_in_ref, x_val_ag, x_scale_ag, route_ag, decoder_input_tokens=None, return_wgrad_hooks: bool = False
+  ):
+    """Local expert permute + GMMs + unpermute without EP dispatch/combine."""
+    del decoder_input_tokens
+    return self.mlp.moe_block.routed_moe.batch_split_experts(
+        moe_in_ref, x_val_ag, x_scale_ag, route_ag, return_wgrad_hooks=return_wgrad_hooks
+    )
+
+  def batch_split_shared_expert(self, moe_in):
+    """Shared expert runs in `batch_split_attn_and_route` (`attn_output` pre-norm branch) and rides `h_skip`."""
+    return jnp.zeros_like(moe_in)
+
+  def batch_split_combine(self, y_partial, moe_in_ref):
+    """Weight-free EP Reduce-Scatter of routed expert partial outputs on SC0."""
+    routed_out = self.mlp.moe_block.routed_moe.batch_split_combine(y_partial, moe_in_ref)
+    return self._maybe_shard_with_logical(routed_out, self.activation_axis_names)
+
+  @staticmethod
+  def _apply_rms_norm_pure(x: jax.Array, scale_fp32: jax.Array, norm_mod: RMSNorm, out_sharding) -> jax.Array:
+    """Applies `norm_mod`'s exact RMSNorm formula using pre-fetched `scale_fp32` (no `nnx.Param` reads)."""
+    x_f32 = jnp.asarray(x, jnp.float32)
+    inv_rms = jax.lax.rsqrt(jnp.mean(jax.lax.square(x_f32), axis=-1, keepdims=True) + norm_mod.epsilon)
+    eff_out_sharding = out_sharding if norm_mod.shard_mode == ShardMode.EXPLICIT else None
+    if eff_out_sharding is not None:
+      eff_out_sharding = truncate_out_sharding(eff_out_sharding, x.ndim)
+    if norm_mod.scale_offset != 0.0:
+      normed_f32 = x_f32 * inv_rms
+      offset = jnp.asarray(norm_mod.scale_offset, jnp.float32)
+      scale_reduced = jax.typeof(scale_fp32).sharding.spec.reduced
+      if scale_reduced:
+        offset = jax.sharding.reshard(offset, jax.sharding.PartitionSpec(reduced=scale_reduced))
+      y = jnp.einsum("...k,k->...k", normed_f32, scale_fp32 + offset, out_sharding=eff_out_sharding)
+      return jnp.asarray(y, norm_mod.dtype)
+    y = jnp.asarray(x_f32 * inv_rms, norm_mod.dtype)
+    return jnp.einsum("...k,k->...k", y, jnp.asarray(scale_fp32, norm_mod.dtype), out_sharding=eff_out_sharding)
+
+  def batch_split_post_combine(self, mlp_sum, h_skip):
+    """Weight-free Gemma4 post-combine norms, shared-expert addition, residual, and `layer_scalar`."""
+    residual, shared_out, post_ln2_scale, post_ffw_scale, layer_scalar = h_skip
+    routed_normed = self._apply_rms_norm_pure(
+        mlp_sum, post_ln2_scale, self.mlp.post_feedforward_layernorm_2, self.out_sharding
+    )
+    mlp_lnx = routed_normed + shared_out
+    if post_ffw_scale is not None and self.post_ffw_norm is not None:
+      mlp_lnx = self._apply_rms_norm_pure(mlp_lnx, post_ffw_scale, self.post_ffw_norm, self.out_sharding)
+    mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
+    layer_output = (mlp_lnx + residual) * jnp.asarray(layer_scalar, self.config.dtype)
+    return self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
+
+  def batch_split_combine_bwd(self, g_out, moe_in_ref, *, defer_dequant: bool = False):
+    """Weight-free backward of `batch_split_combine` (EP All-Gather on SC0)."""
+    return self.mlp.moe_block.routed_moe.batch_split_combine_bwd(g_out, moe_in_ref, defer_dequant=defer_dequant)
+
+  def batch_split_finalize_bias_updates(self, summed_counts):
+    """Finalizes microbatch-summed expert counts into routed bias updates."""
+    return self.mlp.moe_block.routed_moe.batch_split_finalize_bias_updates(summed_counts)
 
 
 class Gemma4ScannableBlock(nnx.Module):

@@ -1292,6 +1292,26 @@ class MTPReuseInputEmbeddingTest(unittest.TestCase):
   def test_reuse_input_embedding(self):
     self.assertEqual(self._check(), (2, 1))
 
+  def test_reuse_input_embedding_explicit_sharding(self):
+    sharding_kwargs = {
+        "shard_mode": "explicit",
+        "ici_data_parallelism": 1,
+        "ici_fsdp_parallelism": -1,
+        "override_logical_axis_rules": True,
+        "logical_axis_rules": [
+            ["activation_batch", ["fsdp"]],
+            ["activation_embed_and_logits_batch", ["fsdp"]],
+            ["embed_vocab", ["fsdp"]],
+            ["embed", ["fsdp"]],
+        ],
+    }
+    ref_loss, ref_mtp, ref_grads, ref_embeds = self._run(**sharding_kwargs)
+    loss, mtp, grads, embeds = self._run(mtp_reuse_input_embedding=True, **sharding_kwargs)
+    self.assertEqual((ref_embeds, embeds), (2, 1))
+    np.testing.assert_allclose(loss, ref_loss, rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(mtp, ref_mtp, rtol=1e-5, atol=1e-6)
+    self.assertEqual(grads.keys(), ref_grads.keys())
+
 
 class DeepSeekV4MTPForwardTest(unittest.TestCase):
   """Tests the DeepSeek-V4 mHC Multi-Token Prediction (MTP) forward pass."""

@@ -910,6 +910,35 @@ def _replace_router_logits_bwd(_, cotangent):
 _replace_router_logits.defvjp(_replace_router_logits_fwd, _replace_router_logits_bwd)
 
 
+def _cast_reduced_kernel(kernel: jax.Array, target_dtype) -> jax.Array:
+  """Casts a `reduced`-sharded kernel to `target_dtype` while preserving `unreduced` in backward."""
+  orig_dtype = kernel.dtype
+  k_sharding = getattr(jax.typeof(kernel), "sharding", None)
+  if (
+      orig_dtype == jnp.dtype(target_dtype)
+      or not isinstance(k_sharding, jax.sharding.NamedSharding)
+      or not k_sharding.spec.reduced
+  ):
+    return jnp.asarray(kernel, target_dtype)
+  mesh = k_sharding.mesh
+  fwd_spec = k_sharding.spec
+
+  @jax.custom_vjp
+  def _cast(x):
+    return jax.shard_map(lambda z: z.astype(target_dtype), mesh=mesh, in_specs=fwd_spec, out_specs=fwd_spec)(x)
+
+  def _cast_fwd(x):
+    return _cast(x), ()
+
+  def _cast_bwd(_, g):
+    g_spec = jax.typeof(g).sharding.spec
+    out = jax.shard_map(lambda z: z.astype(orig_dtype), mesh=mesh, in_specs=g_spec, out_specs=g_spec)(g)
+    return (out,)
+
+  _cast.defvjp(_cast_fwd, _cast_bwd)
+  return _cast(kernel)
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -1034,14 +1063,19 @@ class GateLogit(nnx.Module):
       kernel = jnp.zeros(kernel_shape, dtype=self.dtype)
     else:
       kernel = self.kernel[...]
-    kernel = jnp.asarray(kernel, self.dtype)
+    kernel = _cast_reduced_kernel(kernel, self.dtype)
 
     contract_ind = tuple(range(0, len(norm_axis)))
-    output_sharding = (
-        create_sharding(self.mesh, ("activation_batch", "activation_length", None))
-        if self.shard_mode == ShardMode.EXPLICIT
-        else None
-    )
+    if self.shard_mode == ShardMode.EXPLICIT:
+      in_sharding = getattr(jax.typeof(inputs), "sharding", None)
+      if isinstance(in_sharding, jax.sharding.NamedSharding) and len(in_sharding.spec) >= 2:
+        output_sharding = jax.sharding.NamedSharding(
+            self.mesh, jax.sharding.PartitionSpec(in_sharding.spec[0], in_sharding.spec[1], None)
+        )
+      else:
+        output_sharding = create_sharding(self.mesh, ("activation_batch", "activation_length", None))
+    else:
+      output_sharding = None
     output = linears._compute_dot_general_nnx(
         inputs,
         kernel,
@@ -1191,6 +1225,132 @@ def _moe_combine_psum_scatter_bwd(
 
 
 _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psum_scatter_bwd)
+
+
+def _on_sparse_core_ep(fn, x: jax.Array, *, mesh: jax.sharding.Mesh, core_id: int | None):
+  """Runs EP collective `fn(x)` on SparseCore `core_id` on TPU when `x` is wide enough.
+
+  Mirrors `fsdp_prefetch._on_sparse_core`: only pins on TPU and only for arrays whose
+  trailing dim is >= 128 (token tensors, not narrow routing/scale tensors), avoiding
+  SparseCore 128-lane padding and CPU/GPU errors.
+  """
+  if core_id is None or mesh.devices.flat[0].platform != "tpu":
+    return fn(x)
+  if x.ndim < 2 or x.shape[-1] < 128:
+    return fn(x)
+  return compute_on(
+      compute_type="tpu_sparsecore",
+      out_memory_spaces=jax.memory.Space.Device,
+      compiler_options={"sparse_core_config": {"core_ids": [core_id]}},
+  )(fn)(x)
+
+
+def _apply_wgrad_accum_hook(rhs_out, orig_shape, orig_dtype):
+  """Zero-valued custom-VJP hook that routes an incoming wgrad cotangent into `tgmm_v2` `partial_sum`."""
+  is_qa = isinstance(rhs_out, qpl.QArray)
+  rhs_shape = rhs_out.qvalue.shape if is_qa else rhs_out.shape
+  qtype = rhs_out.qtype if is_qa else None
+
+  @jax.custom_vjp
+  def _hook(rhs):
+    val = rhs.qvalue if isinstance(rhs, qpl.QArray) else rhs
+    return jnp.zeros(orig_shape, dtype=orig_dtype) * jnp.sum(val[:0]).astype(orig_dtype)
+
+  def _hook_fwd(rhs):
+    if is_qa:
+      res = (
+          jnp.zeros_like(rhs.scale),
+          jnp.zeros_like(rhs.zero_point) if rhs.zero_point is not None else None,
+      )
+    else:
+      res = ()
+    return jnp.zeros(orig_shape, dtype=orig_dtype), res
+
+  def _hook_bwd(res, g):
+    g_3d = jnp.reshape(g, rhs_shape).astype(orig_dtype)
+    if is_qa:
+      z_scale, z_zp = res
+      return (qpl.QArray(qvalue=g_3d, scale=z_scale, zero_point=z_zp, qtype=qtype),)
+    return (g_3d,)
+
+  _hook.defvjp(_hook_fwd, _hook_bwd)
+  return _hook(rhs_out)
+
+
+def _ep_all_gather_sc(
+    x: jax.Array,
+    axis_name: str | tuple[str, ...],
+    *,
+    mesh: jax.sharding.Mesh,
+    core_id: int | None,
+    axis: int = 0,
+    tiled: bool = True,
+) -> jax.Array:
+  """EP all-gather pinned to SparseCore `core_id` on TPU."""
+  return _on_sparse_core_ep(
+      lambda z: jax.lax.all_gather(z, axis_name=axis_name, axis=axis, tiled=tiled),
+      x,
+      mesh=mesh,
+      core_id=core_id,
+  )
+
+
+def _ep_reduce_scatter_sc(
+    x: jax.Array,
+    axis_name: str | tuple[str, ...],
+    *,
+    mesh: jax.sharding.Mesh,
+    core_id: int | None,
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+) -> jax.Array:
+  """EP psum_scatter pinned to SparseCore `core_id` on TPU."""
+  return _on_sparse_core_ep(
+      lambda z: jax.lax.psum_scatter(z, axis_name=axis_name, scatter_dimension=scatter_dimension, tiled=tiled),
+      x,
+      mesh=mesh,
+      core_id=core_id,
+  )
+
+
+def _ep_combine_bwd_all_gather_sc(
+    g: jax.Array,
+    axis_name: str | tuple[str, ...],
+    *,
+    mesh: jax.sharding.Mesh,
+    core_id: int | None,
+    scatter_dimension: int = 0,
+    tiled: bool = True,
+    bwd_method: str = "",
+    defer_dequant: bool = False,
+) -> jax.Array | tuple[jax.Array, jax.Array]:
+  """Backward of EP combine (`psum_scatter` -> optional quantized `all_gather` on SC)."""
+  if not bwd_method:
+    return _ep_all_gather_sc(g, axis_name, mesh=mesh, core_id=core_id, axis=scatter_dimension, tiled=tiled)
+  num_feature_axes = g.ndim - 2
+  static = bwd_method.startswith("fixed")
+  token_axes = tuple(range(g.ndim - num_feature_axes))
+  if not static and bwd_method != "rowwise":
+    raise ValueError(f"Unsupported method: {bwd_method!r}. Supported: 'rowwise', 'fixed,<bound>'.")
+  g_f32 = g.astype(jnp.float32)
+  if static:
+    g_q = qpl.quantize(g_f32, qtype=jnp.float8_e5m2, channelwise_axes=(), calibration_method=bwd_method)
+    scale = g_q.scale
+  else:
+    g_q = qpl.quantize(g_f32, qtype=jnp.float8_e5m2, channelwise_axes=token_axes, calibration_method="absmax")
+    if scatter_dimension == 0 and g_q.scale.ndim >= 2:
+      scale_2d = g_q.scale.reshape(g_q.scale.shape[0], -1)
+      gathered_scale = _ep_all_gather_sc(scale_2d, axis_name, mesh=mesh, core_id=core_id, axis=0, tiled=tiled)
+      scale = gathered_scale.reshape(*gathered_scale.shape[:-1], *g_q.scale.shape[1:])
+    else:
+      scale = jax.lax.all_gather(g_q.scale, axis_name=axis_name, axis=scatter_dimension, tiled=tiled)
+  gathered_qvals = _ep_all_gather_sc(
+      g_q.qvalue, axis_name, mesh=mesh, core_id=core_id, axis=scatter_dimension, tiled=tiled
+  )
+  if defer_dequant:
+    scale_out = jnp.asarray(scale, dtype=jnp.float32).reshape(()) if static else scale
+    return gathered_qvals, scale_out
+  return (gathered_qvals.astype(jnp.float32) * scale).astype(g.dtype)
 
 
 class RoutedMoE(nnx.Module):
@@ -1360,6 +1520,30 @@ class RoutedMoE(nnx.Module):
     elif self._tp_as_ep:
       # when custom mesh and rule is tp-as-ep, tensor axis is same with expert in MoE component.
       self._expert_parallelism_name = ("expert", "tensor")
+    elif (
+        self.mesh is not None
+        and not (
+            self.config.use_batch_split_schedule or self.config.shard_exp_on_fsdp or self.config.use_2d_fsdp_sharding
+        )
+        and (
+            getattr(self.config, "enable_batch_split", False)
+            or getattr(self.config, "override_logical_axis_rules", False)
+        )
+    ):
+      exp_rules = get_logical_axis_rules() or getattr(self.config, "logical_axis_rules", ())
+      exp_spec = logical_to_mesh_axes(("exp",), mesh=self.mesh, rules=exp_rules)[0]
+      if isinstance(exp_spec, (tuple, list)):
+        ep_axes = tuple(a for a in exp_spec if a not in ("fsdp", "fsdp_transpose"))
+      elif isinstance(exp_spec, str) and exp_spec not in ("fsdp", "fsdp_transpose"):
+        ep_axes = (exp_spec,)
+      else:
+        ep_axes = ()
+      if len(ep_axes) > 1:
+        self._expert_parallelism_name = ep_axes
+      elif len(ep_axes) == 1:
+        self._expert_parallelism_name = ep_axes[0]
+      else:
+        self._expert_parallelism_name = "expert"
     else:
       self._expert_parallelism_name = "expert"
 
@@ -1891,7 +2075,15 @@ class RoutedMoE(nnx.Module):
       if per_expert_scale is not None and not (
           self.config.model_call_mode == "inference" and self.config.fuse_expert_scales
       ):
-        per_expert_scale_topk = jnp.take_along_axis(per_expert_scale[None, None, :], top_k_indices, axis=-1)
+        topk_spec = (
+            getattr(getattr(jax.typeof(top_k_indices), "sharding", None), "spec", None)
+            if self.config.shard_mode == ShardMode.EXPLICIT
+            else None
+        )
+        if topk_spec is not None and any(ax is not None for ax in topk_spec):
+          per_expert_scale_topk = per_expert_scale.at[top_k_indices].get(out_sharding=topk_spec)
+        else:
+          per_expert_scale_topk = jnp.take_along_axis(per_expert_scale[None, None, :], top_k_indices, axis=-1)
         top_k_weights = top_k_weights * per_expert_scale_topk.astype(top_k_weights.dtype)
 
     return apply_token_mask(top_k_weights, top_k_indices)
@@ -2875,6 +3067,7 @@ class RoutedMoE(nnx.Module):
       input_ids=None,
       forced_routed_experts=None,
       token_mask=None,
+      _batch_split_dispatched=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts.
 
@@ -3331,7 +3524,12 @@ class RoutedMoE(nnx.Module):
           decoder_tokens_pspec,
       )
 
-    is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
+    if _batch_split_dispatched is not None:
+      is_batch_sharded_by_expert = _batch_split_dispatched["is_batch_sharded_by_expert"]
+      has_input_ids = _batch_split_dispatched.get("input_ids") is not None
+    else:
+      is_batch_sharded_by_expert = is_batch_sharded_by_ep(inputs)
+      has_input_ids = input_ids is not None
     weight_gather = explicitly_weight_ag()
     (
         batch_logical_axis,
@@ -3345,7 +3543,7 @@ class RoutedMoE(nnx.Module):
         w1_bias_pspec,
         wo_bias_pspec,
         decoder_tokens_pspec,
-    ) = get_routed_moe_shardings(is_batch_sharded_by_expert, input_ids is not None)
+    ) = get_routed_moe_shardings(is_batch_sharded_by_expert, has_input_ids)
     w0_pspec, w1_pspec, wo_pspec = maybe_aqt_partition(w0_kernel, w0_pspec, w1_kernel, w1_pspec, wo_kernel, wo_pspec)
 
     output_pspec = self._logical_to_mesh_axes(
@@ -3355,11 +3553,20 @@ class RoutedMoE(nnx.Module):
             "activation_embed_routed",
         )
     )
-    input_partition_pspec = maybe_replicate_incompatible_batch(input_partition_pspec, inputs)
-    gate_logits_pspec = maybe_replicate_incompatible_batch(gate_logits_pspec, gate_logits)
-    pre_bias_logits_pspec = maybe_replicate_incompatible_batch(pre_bias_logits_pspec, pre_bias_logits)
-    decoder_tokens_pspec = maybe_replicate_incompatible_batch(decoder_tokens_pspec, input_ids)
-    output_pspec = maybe_replicate_incompatible_batch(output_pspec, inputs)
+    if _batch_split_dispatched is not None:
+      input_partition_pspec = _batch_split_dispatched["input_partition_pspec"]
+      gate_logits_pspec = _batch_split_dispatched["gate_logits_pspec"]
+      pre_bias_logits_pspec = _batch_split_dispatched["pre_bias_logits_pspec"]
+      output_pspec = _batch_split_dispatched["output_pspec"]
+      decoder_tokens_pspec = maybe_replicate_incompatible_batch(
+          decoder_tokens_pspec, _batch_split_dispatched.get("input_ids")
+      )
+    else:
+      input_partition_pspec = maybe_replicate_incompatible_batch(input_partition_pspec, inputs)
+      gate_logits_pspec = maybe_replicate_incompatible_batch(gate_logits_pspec, gate_logits)
+      pre_bias_logits_pspec = maybe_replicate_incompatible_batch(pre_bias_logits_pspec, pre_bias_logits)
+      decoder_tokens_pspec = maybe_replicate_incompatible_batch(decoder_tokens_pspec, input_ids)
+      output_pspec = maybe_replicate_incompatible_batch(output_pspec, inputs)
     # token_mask is (batch, sequence) like input_ids, so it takes the same partition spec.
     token_mask_pspec = None
     if token_mask is not None:
@@ -4950,30 +5157,31 @@ class RoutedMoE(nnx.Module):
       w1_kernel = self._maybe_shard_with_logical(w1_kernel, ("exp_with_fsdp", None, "mlp_no_fsdp"))
       wo_kernel = self._maybe_shard_with_logical(wo_kernel, ("exp_with_fsdp", "mlp_no_fsdp", None))
 
-    input_logical_axes = (batch_logical_axis, "activation_norm_length_routed", None)
-    gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length_routed", None)
-    pre_bias_logits_logical_axes = (
-        (batch_logical_axis, "activation_norm_length_routed", None)
-        if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
-        else None
-    )
-    inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
-    gate_logits = self._maybe_shard_with_pspec(
-        gate_logits,
-        gate_logits_pspec,
-        logical_axes=gate_logits_logical_axes,
-    )
-    pre_bias_logits = self._maybe_shard_with_pspec(
-        pre_bias_logits,
-        pre_bias_logits_pspec,
-        logical_axes=pre_bias_logits_logical_axes,
-    )
-    if forced_routed_experts is not None:
-      forced_routed_experts = self._maybe_shard_with_pspec(
-          forced_routed_experts,
+    if _batch_split_dispatched is None:
+      input_logical_axes = (batch_logical_axis, "activation_norm_length_routed", None)
+      gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length_routed", None)
+      pre_bias_logits_logical_axes = (
+          (batch_logical_axis, "activation_norm_length_routed", None)
+          if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
+          else None
+      )
+      inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
+      gate_logits = self._maybe_shard_with_pspec(
+          gate_logits,
           gate_logits_pspec,
           logical_axes=gate_logits_logical_axes,
       )
+      pre_bias_logits = self._maybe_shard_with_pspec(
+          pre_bias_logits,
+          pre_bias_logits_pspec,
+          logical_axes=pre_bias_logits_logical_axes,
+      )
+      if forced_routed_experts is not None:
+        forced_routed_experts = self._maybe_shard_with_pspec(
+            forced_routed_experts,
+            gate_logits_pspec,
+            logical_axes=gate_logits_logical_axes,
+        )
     if token_mask is not None:
       token_mask = self._maybe_shard_with_pspec(
           token_mask, token_mask_pspec, logical_axes=(batch_logical_axis, "activation_norm_length")
@@ -5046,6 +5254,312 @@ class RoutedMoE(nnx.Module):
       # shard_map will not insert a reshard for an operand whose layout disagrees with
       # `in_specs`, and the scale is declared "exp" -> the expert axis.
       per_expert_scale = self._maybe_shard_with_pspec(per_expert_scale, P())
+
+    if _batch_split_dispatched is not None:
+      bs = _batch_split_dispatched
+      x_val_bs = bs["x_val"]
+      x_scale_bs = bs["x_scale"]
+      route_ag_bs = bs["route_ag"]
+      topk_before_ag_bs = bs["topk_before_all_gather"]
+      input_ids_bs = bs.get("input_ids")
+      emit_wgrad_hooks = bool(bs.get("emit_wgrad_hooks", False))
+
+      bs_in_specs = (
+          bs["x_val_pspec"],
+          bs["x_scale_pspec"],
+          bs["route_ag_pspec"],
+          keep_reduced(w0_pspec, w0_kernel),
+          keep_reduced(w1_pspec, w1_kernel),
+          keep_reduced(wo_pspec, wo_kernel),
+          keep_reduced(w0_bias_pspec, w0_bias),
+          keep_reduced(w1_bias_pspec, w1_bias),
+          keep_reduced(wo_bias_pspec, wo_bias),
+          decoder_tokens_pspec,
+          P(),
+          P() if per_expert_scale is not None else None,
+      )
+      bs_out_specs = (
+          bs["y_partial_pspec"],
+          P(),
+          P(roe_bias_axis_names, None, None) if defer_small_ars else P(),
+      )
+      if emit_wgrad_hooks:
+        # When `check_vma=False`, JAX's `_shard_map_transpose_fancy` divides output cotangents by the
+        # product of sizes of unmentioned mesh axes (`k > 1`), which fails on `{U:fsdp}` cotangents
+        # (`Denominator should be reduced along the same axes numerator is unreduced on`). Only emit
+        # `{U:...}` wgrad hooks when every size>1 mesh axis is mentioned in the weight spec.
+        def _hook_spec_safe(sp: P) -> bool:
+          if not sp.reduced:
+            return True
+          mentioned = set(sp.reduced) | set(sp.unreduced)
+          for entry in sp.partitions:
+            if isinstance(entry, tuple):
+              mentioned.update(entry)
+            elif entry is not None:
+              mentioned.add(entry)
+          return not any(size > 1 for axis, size in self.mesh.shape.items() if axis not in mentioned)
+
+        emit_wgrad_hooks = all(_hook_spec_safe(sp) for sp in bs_in_specs[3:6])
+      if emit_wgrad_hooks:
+        bs_out_specs = (*bs_out_specs, (bs_in_specs[3], bs_in_specs[4], bs_in_specs[5]))
+
+      @functools.partial(
+          jax.shard_map,
+          mesh=self.mesh,
+          in_specs=bs_in_specs,
+          out_specs=bs_out_specs,
+          check_vma=self.config.check_vma,
+      )
+      def _batch_split_experts_shard_map(
+          x_val_local,
+          x_scale_local,
+          route_ag_local,
+          w0,
+          w1,
+          wo,
+          w0_b,
+          w1_b,
+          wo_b,
+          sharded_input_ids_local,
+          rngs,
+          pes,
+      ):
+        num_ep = self.get_expert_parallelism_size()
+        expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name) if num_ep > 1 else 0
+        x_v = x_val_local[0]
+        x_in = qpl.QArray(qvalue=x_v, scale=x_scale_local[0], qtype=x_v.dtype) if x_scale_local is not None else x_v
+        local_batch_size = x_v.shape[0] // num_ep
+        sequence_length = x_v.shape[1]
+
+        if topk_before_ag_bs:
+          w_ag, sel_ag, dens_ag = route_ag_local
+          precomputed_topk = (w_ag[0], sel_ag[0])
+          precomputed_density_prob = None if dens_ag is None else dens_ag[0]
+          logits_local, pre_bias_local = None, None
+        else:
+          logits_ag, pre_bias_ag = route_ag_local
+          precomputed_topk = None
+          precomputed_density_prob = None
+          logits_local = logits_ag[0]
+          pre_bias_local = None if pre_bias_ag is None else pre_bias_ag[0]
+
+        num_experts_per_shard = self.config.num_experts // num_ep
+        (
+            x_sorted,
+            sorted_selected_experts,
+            weights,
+            group_sizes,
+            selected_experts,
+            lb_loss,
+            expert_counts,
+            local_group_sizes,
+            has_overflow,
+            max_load_ratio,
+            topk_argsort_indices,
+            tc_routing,
+        ) = self.permute(
+            x_in,
+            logits_local,
+            pre_bias_local,
+            self.config.use_custom_sort_vjp,
+            roll_to_expert_id=num_experts_per_shard * expert_shard_id,
+            rngs=rngs,
+            input_ids=sharded_input_ids_local,
+            forced_routed_experts=None,
+            force_dropless=getattr(self, "force_dropless", False),
+            mesh_axis_names=roe_bias_axis_names,
+            compute_lb_loss=not use_megatron_seq_aux_loss,
+            return_expert_counts=True,
+            defer_reductions=defer_small_ars,
+            precomputed_topk=precomputed_topk,
+            precomputed_density_prob=precomputed_density_prob,
+            per_expert_scale=pes,
+        )
+        routing = RouteOutput(
+            group_sizes=group_sizes,
+            selected_experts=selected_experts,
+            sorted_selected_experts=sorted_selected_experts,
+            weights=weights,
+            lb_loss=lb_loss,
+            bias_updates=expert_counts,
+            local_group_sizes=local_group_sizes,
+            has_overflow=has_overflow,
+            required_rbf=None,
+            max_load_ratio=max_load_ratio,
+            topk_argsort_indices=topk_argsort_indices,
+            tc_routing=tc_routing,
+        )
+        route_metadata = RouteMetadata(
+            expert_shard_id=expert_shard_id,
+            local_sorted_indices=None,
+            all_shards_group_sizes=None,
+            reshaped_group_sizes=None,
+        )
+
+        def _cn(t):
+          return adc.checkpoint_name(t, "moe_x_sorted") if isinstance(t, jax.Array) else t
+
+        x_sorted = jax.tree.map(_cn, x_sorted)
+        routing = jax.tree.map(_cn, routing)
+        route_metadata = jax.tree.map(_cn, route_metadata)
+
+        mask = local_rows_mask(x_sorted, routing, route_metadata)
+        if self.config.mlp_bias:
+          bias_experts = local_expert_ids(x_sorted, routing, route_metadata)
+          if not self.config.use_te_grouped_gemm:
+            w0_b, w1_b, wo_b = self.transform_bias(bias_experts, w0_b, w1_b, wo_b)
+          elif self.get_tensor_parallelism_size() > 1:
+            (wo_b,) = self.transform_bias(bias_experts, wo_b)
+
+        gmm_fn = get_gmm_for_local_experts(x_sorted, routing, route_metadata)
+        up_res = gmm_up(
+            x_sorted,
+            w0,
+            w1,
+            w0_b,
+            w1_b,
+            gmm_fn,
+            weight_gather,
+            mask=mask,
+            gather_weights=True,
+            return_weights=emit_wgrad_hooks,
+        )
+        if emit_wgrad_hooks:
+          output0, output1, w0_rhs, w1_rhs = up_res  # pylint: disable=unbalanced-tuple-unpacking
+        else:
+          output0, output1 = up_res  # pylint: disable=unbalanced-tuple-unpacking
+          w0_rhs, w1_rhs = None, None
+        tc_prescaled = (
+            self.config.use_ring_of_experts
+            and getattr(routing, "tc_routing", None) is not None
+            and self.config.moe_tc_ragged_weights_on_activation
+        )
+        if tc_prescaled:
+          w_rows = tc_buffer_row_weights(routing.tc_routing, jnp.ravel(routing.weights), output0.shape[0])
+          if self.config.moe_tc_routing_checkpoint != "remat":
+            w_rows = adc.checkpoint_name(w_rows, "moe_tc_routing_checkpoint")
+        intermediate_layer = self.apply_ffn_activation(output0, output1)
+        if tc_prescaled:
+          intermediate_layer = (intermediate_layer * w_rows[:, None]).astype(intermediate_layer.dtype)
+
+        wo_gather_axes, wo_tile_size = get_wo_gmm_params()
+        use_te_wo_bias = (
+            self.config.use_te_grouped_gemm
+            and self.config.mlp_bias
+            and wo_b is not None
+            and self.get_tensor_parallelism_size() == 1
+        )
+        x_is_3d = (
+            self.config.num_moe_emb_chunks <= 0
+            and (x_sorted.qvalue if isinstance(x_sorted, qpl.QArray) else x_sorted).ndim == 3
+        )
+        use_fused_tc_unsort = self.config.moe_bwd_prequant_before_unsort and tc_prescaled and x_is_3d
+        tc_unsort_kwargs = {}
+        if use_fused_tc_unsort:
+          tc_unsort_kwargs = {
+              "tc_routing": routing.tc_routing,
+              "tc_unsort_cfg": mblx.TcUnsortCfg(
+                  unpadded_cap=intermediate_layer.shape[0],
+                  num_out_tokens=routing.tc_routing.num_out_tokens,
+                  topk=self.num_experts_per_tok,
+                  blocks=(
+                      self.config.moe_tc_ragged_gather_block_size,
+                      self.config.moe_tc_ragged_flatten_block_size,
+                      True,
+                      True,
+                  ),
+                  mask_padding=self.config.moe_tc_ragged_mask_padding,
+                  combine_rs_cfg=None,
+              ),
+          }
+        wo_res = gmm_fn(
+            intermediate_layer,
+            wo,
+            tiling=wo_tile_size,
+            weight_gather_axes=wo_gather_axes,
+            bias=wo_b if use_te_wo_bias else None,
+            return_rhs=emit_wgrad_hooks,
+            **({"out_is_3d": True} if x_is_3d else {}),
+            **tc_unsort_kwargs,
+        )
+        if emit_wgrad_hooks:
+          intermediate_output, wo_rhs = wo_res
+        else:
+          intermediate_output, wo_rhs = wo_res, None
+        if self.get_tensor_parallelism_size() > 1:
+          intermediate_output = jax.lax.psum_scatter(
+              intermediate_output,
+              self._tensor_parallelism_name,
+              scatter_dimension=1,
+              tiled=True,
+          )
+        if self.config.mlp_bias:
+          if not use_te_wo_bias:
+            if tc_prescaled:
+              wo_b = (wo_b * w_rows[:, None]).astype(wo_b.dtype)
+            intermediate_output = intermediate_output + wo_b
+          intermediate_output = jnp.where(mask[:, None], intermediate_output, 0)
+        intermediate_output = adc.checkpoint_name(adc.checkpoint_name(intermediate_output, "mlpwo"), "moe_mlpwo")
+
+        if use_fused_tc_unsort:
+          y_part = intermediate_output.reshape(-1, sequence_length, *intermediate_output.shape[1:]).astype(self.dtype)
+        else:
+          y_part = self.unpermute(
+              intermediate_output,
+              routing.sorted_selected_experts,
+              routing.weights,
+              batch_size=local_batch_size,
+              sequence_length=sequence_length,
+              use_custom_sort_vjp=self.config.use_custom_sort_vjp,
+              group_sizes=routing.group_sizes,
+              topk_argsort_indices=routing.topk_argsort_indices,
+              tc_routing=routing.tc_routing,
+              tc_prescaled=tc_prescaled,
+              tc_out_3d=x_is_3d and use_tc_3d_dispatch(),
+          )
+        if y_part.ndim == 4:
+          y_part = jnp.reshape(y_part, (-1, sequence_length, *y_part.shape[2:]))
+        else:
+          y_part = jnp.reshape(
+              y_part,
+              (
+                  -1,
+                  sequence_length,
+                  self.moe_expert_input_dim // self.get_tensor_parallelism_size(),
+              ),
+          )
+          if use_tc_3d_dispatch():
+            # permute() may fall back to 2D SparseCore sort (e.g., force_dropless or buffer_size >= total_slots);
+            # keep y_part in the 4D (B_ep, seq, emb // 128, 128) layout expected by y_partial_pspec and combine.
+            y_part = jnp.reshape(y_part, (*y_part.shape[:2], y_part.shape[-1] // 128, 128))
+        raw_counts = routing.bias_updates
+        if defer_small_ars and raw_counts is not None:
+          if raw_counts.ndim == 1:
+            raw_counts = raw_counts[None, :]
+          raw_counts = raw_counts[None]
+        if emit_wgrad_hooks:
+          hooks = (
+              _apply_wgrad_accum_hook(w0_rhs, w0.shape, w0.dtype),
+              _apply_wgrad_accum_hook(w1_rhs, w1.shape, w1.dtype),
+              _apply_wgrad_accum_hook(wo_rhs, wo.shape, wo.dtype),
+          )
+          return y_part[None, ...], routing.lb_loss, raw_counts, hooks
+        return y_part[None, ...], routing.lb_loss, raw_counts
+
+      return _batch_split_experts_shard_map(
+          x_val_bs,
+          x_scale_bs,
+          route_ag_bs,
+          w0_kernel,
+          w1_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
+          input_ids_bs,
+          self.rngs,
+          per_expert_scale,
+      )
 
     route_and_compute_outputs = sparse_matmul_route_and_compute(
         inputs,
@@ -6355,7 +6869,7 @@ class RoutedMoE(nnx.Module):
             w1_bias,
             wo_bias,
         )
-      output, lb_loss, bias_updates = self.sparse_matmul(
+      output, lb_loss, bias_updates = self.sparse_matmul(  # pylint: disable=unbalanced-tuple-unpacking
           inputs,
           gate_logits,
           pre_bias_logits,
@@ -6385,6 +6899,590 @@ class RoutedMoE(nnx.Module):
           token_mask=token_mask,
       )
     return output, lb_loss, bias_updates
+
+  # ---------------------------------------------------------------------------
+  # Generalized Batch-Split primitives (used only when config.enable_batch_split)
+  # ---------------------------------------------------------------------------
+
+  def _batch_split_ep_core_id(self) -> int:
+    return int(getattr(self.config, "moe_ep_all_gather_sparse_core_id", 0))
+
+  def _batch_split_use_tc_3d_dispatch(self) -> bool:
+    """Returns True if 3D TensorCore ragged dispatch is enabled and validates its config prerequisites."""
+    if not self.config.moe_tc_ragged_3d_dispatch:
+      return False
+    requirements = {
+        "moe_tc_ragged_sort=True": self.config.moe_tc_ragged_sort,
+        "moe_tc_ragged_3d_gmm=True": self.config.moe_tc_ragged_3d_gmm,
+        "use_ring_of_experts=True": self.config.use_ring_of_experts,
+        "use_ragged_sort=True": self.config.use_ragged_sort,
+        "num_moe_emb_chunks <= 0": self.config.num_moe_emb_chunks <= 0,
+        "no tensor parallelism": self.get_tensor_parallelism_size() == 1,
+        "mlp_bias=False": not self.config.mlp_bias,
+        f"MoE expert input dim ({self.moe_expert_input_dim}) % 128 == 0": self.moe_expert_input_dim % 128 == 0,
+    }
+    unmet = [name for name, ok in requirements.items() if not ok]
+    if unmet:
+      raise ValueError(f"moe_tc_ragged_3d_dispatch=True requires: {', '.join(unmet)}.")
+    return True
+
+  def _batch_split_topk_before_ag(self) -> bool:
+    return self.config.moe_topk_before_ep_all_gather and not self.is_hash_routing and not self.config.use_random_routing
+
+  def _batch_split_use_megatron_seq_aux_loss(self) -> bool:
+    return (
+        self.config.load_balance_loss_weight > 0.0
+        and not self.is_hash_routing
+        and uses_megatron_seq_aux_loss(self.config)
+    )
+
+  def _batch_split_pspecs(self, inputs: jax.Array, has_pre_bias: bool) -> dict[str, Any]:
+    """Computes consistent PartitionSpecs for batch-split dispatch/experts/combine."""
+    is_batch_sharded_by_expert = inputs.shape[0] > 1
+    batch_logical_axis = "activation_batch" if is_batch_sharded_by_expert else "activation_batch_no_exp"
+    input_partition_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed", None))
+    gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed", None))
+    pre_bias_logits_pspec = gate_logits_pspec if has_pre_bias else None
+    output_pspec = self._logical_to_mesh_axes(
+        (batch_logical_axis, "activation_norm_length_routed", "activation_embed_routed")
+    )
+
+    num_ep = self.get_expert_parallelism_size()
+    if num_ep == 1:
+      input_partition_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+          input_partition_pspec, inputs.shape, self.mesh
+      )
+      gate_logits_pspec = remove_incompatible_mesh_axes_from_partition_spec(gate_logits_pspec, inputs.shape, self.mesh)
+      if pre_bias_logits_pspec is not None:
+        pre_bias_logits_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            pre_bias_logits_pspec, inputs.shape, self.mesh
+        )
+      output_pspec = remove_incompatible_mesh_axes_from_partition_spec(output_pspec, inputs.shape, self.mesh)
+
+    ep_axes_tuple = (
+        (self._expert_parallelism_name,)
+        if isinstance(self._expert_parallelism_name, str)
+        else tuple(self._expert_parallelism_name)
+    )
+    ep_spec = self._expert_parallelism_name if num_ep > 1 else None
+    disp_in = remove_mesh_axes_from_partition_spec(input_partition_pspec, ep_axes_tuple)
+    disp_gate = remove_mesh_axes_from_partition_spec(gate_logits_pspec, ep_axes_tuple)
+    disp_out = remove_mesh_axes_from_partition_spec(output_pspec, ep_axes_tuple)
+
+    use_3d = self._batch_split_use_tc_3d_dispatch()
+    if use_3d:
+      x_val_pspec = P(ep_spec, disp_in[0], disp_in[1], None, None)
+      y_partial_pspec = P(ep_spec, disp_out[0], disp_out[1], None, None)
+    else:
+      x_val_pspec = P(ep_spec, *disp_in)
+      y_partial_pspec = P(ep_spec, *disp_out)
+
+    if self.config.moe_quantize_token_all_gather:
+      scale_ndim = 4 if use_3d else 3
+      if quantizations.is_static_calibration(self.config.act_quantization_calibration_method):
+        x_scale_pspec = P(ep_spec, *(None,) * scale_ndim)
+      else:
+        x_scale_pspec = P(ep_spec, disp_in[0], disp_in[1], *(None,) * (scale_ndim - 2))
+    else:
+      x_scale_pspec = None
+
+    return {
+        "is_batch_sharded_by_expert": is_batch_sharded_by_expert,
+        "batch_logical_axis": batch_logical_axis,
+        "input_partition_pspec": input_partition_pspec,
+        "gate_logits_pspec": gate_logits_pspec,
+        "pre_bias_logits_pspec": pre_bias_logits_pspec,
+        "output_pspec": output_pspec,
+        "ep_spec": ep_spec,
+        "disp_gate": disp_gate,
+        "x_val_pspec": x_val_pspec,
+        "x_scale_pspec": x_scale_pspec,
+        "y_partial_pspec": y_partial_pspec,
+        "use_3d": use_3d,
+    }
+
+  def batch_split_route(
+      self,
+      inputs: jax.Array,
+      gate_inputs: jax.Array | None = None,
+      input_ids: jax.Array | None = None,
+  ) -> tuple[jax.Array, tuple, jax.Array | None]:
+    """Runs the MoE router gate (and optional local top-k) on local microbatch tokens.
+
+    Returns:
+      (moe_inputs, route_in, seq_lb_loss) where `route_in` is a tuple of local arrays
+      consumed by `batch_split_dispatch` and `seq_lb_loss` is the Megatron sequence aux
+      loss (when applicable) or None.
+    """
+    cfg = self.config
+    gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
+    routing_inputs = (inputs if gate_inputs is None else gate_inputs).astype(gate_dtype)
+    moe_inputs = inputs.astype(cfg.dtype)
+    gate_logits, pre_bias_logits = self.gate(routing_inputs)
+
+    use_megatron = self._batch_split_use_megatron_seq_aux_loss()
+    seq_lb_loss = None
+    if use_megatron:
+      seq_lb_loss = self.megatron_seq_aux_loss(pre_bias_logits if pre_bias_logits is not None else gate_logits)
+
+    if self._batch_split_topk_before_ag():
+      per_expert_scale = None if self.per_expert_scale is None else self.per_expert_scale[...]
+      if per_expert_scale is not None and cfg.shard_mode == ShardMode.EXPLICIT:
+        per_expert_scale = self._maybe_shard_with_pspec(per_expert_scale, P())
+      weights, selected_experts = self.get_topk(
+          gate_logits, pre_bias_logits, self.rngs, input_ids=input_ids, per_expert_scale=per_expert_scale
+      )
+      density_prob = None
+      if cfg.load_balance_loss_weight > 0.0 and not use_megatron:
+        probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
+        softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
+        density_prob = jnp.mean(softmax_probs, axis=1)
+      route_in = (weights, selected_experts, density_prob)
+    else:
+      route_in = (gate_logits, pre_bias_logits)
+    return moe_inputs, route_in, seq_lb_loss
+
+  def batch_split_dispatch(
+      self,
+      moe_inputs: jax.Array,
+      route_in: tuple,
+  ) -> tuple[jax.Array, jax.Array | None, tuple]:
+    """Weight-free EP All-Gather of microbatch tokens and routing metadata on SC0.
+
+    Returns:
+      (x_val_ag, x_scale_ag, route_ag), each carrying a leading size-1 EP axis
+      sharded over `self._expert_parallelism_name` so every EP shard owns an
+      independent local slice with zero boundary all-reduces in backward.
+    """
+    topk_before_ag = self._batch_split_topk_before_ag()
+    has_pre_bias = (not topk_before_ag) and (route_in[1] is not None)
+    specs = self._batch_split_pspecs(moe_inputs, has_pre_bias=has_pre_bias)
+    num_ep = self.get_expert_parallelism_size()
+    ep_axis = self._expert_parallelism_name
+    core_id = self._batch_split_ep_core_id()
+    use_3d = specs["use_3d"]
+    ep_spec = specs["ep_spec"]
+    disp_gate = specs["disp_gate"]
+    gate_pspec = specs["gate_logits_pspec"]
+
+    moe_inputs = self._maybe_shard_with_pspec(
+        moe_inputs,
+        specs["input_partition_pspec"],
+        logical_axes=(specs["batch_logical_axis"], "activation_norm_length_routed", None),
+    )
+    if topk_before_ag:
+      w_in, sel_in, dens_in = route_in
+      w_in = self._maybe_shard_with_pspec(w_in, gate_pspec)
+      sel_in = self._maybe_shard_with_pspec(sel_in, gate_pspec)
+      dens_pspec = P(gate_pspec[0], None) if dens_in is not None else None
+      if dens_in is not None:
+        dens_in = self._maybe_shard_with_pspec(dens_in, dens_pspec)
+      route_in_sharded = (w_in, sel_in, dens_in)
+      route_in_specs = (gate_pspec, gate_pspec, dens_pspec)
+      route_out_specs = (
+          P(ep_spec, *disp_gate),
+          P(ep_spec, *disp_gate),
+          P(ep_spec, disp_gate[0], None) if dens_in is not None else None,
+      )
+    else:
+      logits_in, pre_bias_in = route_in
+      logits_in = self._maybe_shard_with_pspec(logits_in, gate_pspec)
+      if pre_bias_in is not None:
+        pre_bias_in = self._maybe_shard_with_pspec(pre_bias_in, specs["pre_bias_logits_pspec"])
+      route_in_sharded = (logits_in, pre_bias_in)
+      route_in_specs = (gate_pspec, specs["pre_bias_logits_pspec"])
+      route_out_specs = (
+          P(ep_spec, *disp_gate),
+          P(ep_spec, *disp_gate) if pre_bias_in is not None else None,
+      )
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(specs["input_partition_pspec"], route_in_specs),
+        out_specs=(specs["x_val_pspec"], specs["x_scale_pspec"], route_out_specs),
+        check_vma=self.config.check_vma,
+    )
+    def _dispatch_body(x_local, r_local):
+      def _ag(z):
+        if num_ep <= 1:
+          return z
+        return _ep_all_gather_sc(z, ep_axis, mesh=self.mesh, core_id=core_id, tiled=True)
+
+      def _token_ag(z):
+        if use_3d:
+          z = z.reshape(*z.shape[:-1], z.shape[-1] // 128, 128)
+        return _ag(z)
+
+      if self.config.moe_quantize_token_all_gather:
+        cal_method = self.config.act_quantization_calibration_method
+        quantization_rule = qpl.get_current_rule("gmm")
+        if quantization_rule is None:
+          raise ValueError("Quantization rule is None, cannot quantize activation.")
+        is_static = quantizations.is_static_calibration(cal_method)
+        act_qtype = quantization_rule.act_qtype
+        if is_static:
+          x_q = qpl.quantize(x_local, qtype=act_qtype, channelwise_axes=(), calibration_method=cal_method)
+        else:
+          x_q = _ste_quantize_tokens(x_local.astype(self.dtype), act_qtype, tuple(range(x_local.ndim - 1)), cal_method)
+        x_val = _token_ag(x_q.qvalue)
+        if is_static:
+          x_scale = jnp.reshape(x_q.scale, (1,) * x_val.ndim)
+        else:
+          s2d = _ag(jnp.squeeze(x_q.scale, axis=-1))
+          x_scale = jax.lax.stop_gradient(jnp.reshape(s2d, s2d.shape + (1,) * (x_val.ndim - s2d.ndim)))
+        x_val_out = x_val[None, ...]
+        x_scale_out = x_scale[None, ...]
+      else:
+        x_val_out = _token_ag(x_local)[None, ...]
+        x_scale_out = None
+
+      r_out = tuple(_ag(t)[None, ...] if t is not None else None for t in r_local)
+      return x_val_out, x_scale_out, r_out
+
+    with jax.named_scope("batch_split_ep_dispatch"):
+      return _dispatch_body(moe_inputs, route_in_sharded)
+
+  def batch_split_dispatch_bwd(
+      self,
+      moe_inputs: jax.Array,
+      route_in: tuple,
+      g_x_val_ag: jax.Array,
+      g_route_ag_diff: tuple,
+  ) -> tuple[jax.Array, tuple]:
+    """Weight-free backward of `batch_split_dispatch` (EP Reduce-Scatter on SC0).
+
+    Explicitly implements the VJP of `batch_split_dispatch` instead of relying on
+    `jax.vjp` so that:
+      1. FP8 token all-gather (`moe_quantize_token_all_gather=True`) cleanly accepts
+         high-precision (`bfloat16`) `g_x_val_ag` cotangents from `gmm` backward without
+         hitting JAX's primal/cotangent dtype equality check on `float8`.
+      2. No dispatch VJP residuals need to be carried across backward phases.
+      3. The EP reduce-scatter runs pinned to SparseCore `core_id` (`SC0`).
+    """
+    topk_before_ag = self._batch_split_topk_before_ag()
+    has_pre_bias = (not topk_before_ag) and (route_in[1] is not None)
+    specs = self._batch_split_pspecs(moe_inputs, has_pre_bias=has_pre_bias)
+    num_ep = self.get_expert_parallelism_size()
+    ep_axis = self._expert_parallelism_name
+    core_id = self._batch_split_ep_core_id()
+    use_3d = specs["use_3d"]
+    ep_spec = specs["ep_spec"]
+    disp_gate = specs["disp_gate"]
+    gate_pspec = specs["gate_logits_pspec"]
+
+    if topk_before_ag:
+      # Differentiable leaves of route_in=(weights, selected_experts, density_prob)
+      # are (weights,) or (weights, density_prob).
+      has_dens = route_in[2] is not None
+      g_r_in_specs = (P(ep_spec, *disp_gate), P(ep_spec, disp_gate[0], None)) if has_dens else (P(ep_spec, *disp_gate),)
+      g_r_out_specs = (gate_pspec, P(gate_pspec[0], None)) if has_dens else (gate_pspec,)
+    else:
+      # Differentiable leaves of route_in=(gate_logits, pre_bias_logits).
+      g_r_in_specs = (P(ep_spec, *disp_gate), P(ep_spec, *disp_gate)) if has_pre_bias else (P(ep_spec, *disp_gate),)
+      g_r_out_specs = (gate_pspec, specs["pre_bias_logits_pspec"]) if has_pre_bias else (gate_pspec,)
+
+    moe_inputs = self._maybe_shard_with_pspec(
+        moe_inputs,
+        specs["input_partition_pspec"],
+        logical_axes=(specs["batch_logical_axis"], "activation_norm_length_routed", None),
+    )
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(specs["input_partition_pspec"], specs["x_val_pspec"], g_r_in_specs),
+        out_specs=(specs["input_partition_pspec"], g_r_out_specs),
+        check_vma=self.config.check_vma,
+    )
+    def _dispatch_bwd_body(x_local, g_xv_local, g_r_local):
+      def _rs(z):
+        if num_ep <= 1:
+          return z
+        return _ep_reduce_scatter_sc(z, ep_axis, mesh=self.mesh, core_id=core_id, scatter_dimension=0, tiled=True)
+
+      g_x = _rs(g_xv_local[0])
+      if use_3d:
+        g_x = jnp.reshape(g_x, (*g_x.shape[:2], -1))
+
+      if self.config.moe_quantize_token_all_gather:
+        cal_method = self.config.act_quantization_calibration_method
+        quantization_rule = qpl.get_current_rule("gmm")
+        if quantization_rule is None:
+          raise ValueError("Quantization rule is None, cannot unscale quantized activation gradient.")
+        is_static = quantizations.is_static_calibration(cal_method)
+        act_qtype = quantization_rule.act_qtype
+        if is_static:
+          scale = jnp.asarray(quantizations.get_static_scale(act_qtype, cal_method), dtype=jnp.float32)
+          finfo = jnp.finfo(act_qtype)
+          scaled = x_local.astype(jnp.float32) / scale
+          in_range = (scaled >= float(finfo.min)) & (scaled <= float(finfo.max))
+          g_x = jnp.where(in_range, g_x.astype(jnp.float32) / scale, 0.0).astype(x_local.dtype)
+        else:
+          x_q = qpl.quantize(
+              x_local.astype(self.dtype),
+              qtype=act_qtype,
+              channelwise_axes=tuple(range(x_local.ndim - 1)),
+              calibration_method=cal_method,
+          )
+          g_x = (g_x.astype(jnp.float32) / x_q.scale.astype(jnp.float32)).astype(x_local.dtype)
+      else:
+        g_x = g_x.astype(x_local.dtype)
+
+      g_r_out = tuple(_rs(t[0]) for t in g_r_local)
+      return g_x, g_r_out
+
+    with jax.named_scope("batch_split_ep_dispatch_bwd"):
+      return _dispatch_bwd_body(moe_inputs, g_x_val_ag, g_route_ag_diff)
+
+  def _batch_split_prepare_weights(self):
+    """Extracts MoE expert kernels and biases (matching RoutedMoE.__call__)."""
+    cfg = self.config
+    native_gmm = isinstance(self.quant, quantizations.ServeFp8WeightQuantization) and cfg.sparse_matmul and cfg.use_gmm_v2
+
+    def _maybe_native_gmm_weight(kernel, scale):
+      if native_gmm and ctypes.is_fp8_dtype(kernel.dtype) and scale is not None:
+        scheme, channel_axis = quantizations.infer_scale_granularity(scale.shape[1:])
+        if scheme == "per_tensor":
+          per_expert_scale = jnp.max(scale.reshape(scale.shape[0], -1), axis=1).reshape(-1, 1, 1)
+          return qpl.QArray(qvalue=kernel, scale=per_expert_scale)
+        elif scheme == "per_channel" and channel_axis == 1:
+          per_channel_scale = scale.reshape(scale.shape[0], 1, -1)
+          return qpl.QArray(qvalue=kernel, scale=per_channel_scale)
+      return linears.dequantize_weight(kernel, scale, self.dtype)
+
+    wo_scale = self.wo_scale[...] if self.wo_scale is not None else None
+    wo_kernel = _maybe_native_gmm_weight(self.wo[...], wo_scale)
+    if cfg.prefuse_moe_weights:
+      wi_scale = self.wi_scale[...] if self.wi_scale is not None else None
+      wi = quantizations.dequantize_weight(self.wi[...], wi_scale, self.dtype)
+      n = wi.shape[-1] // 2
+      w0_kernel = wi[..., :n]
+      w1_kernel = wi[..., n:]
+    else:
+      wi_0_scale = self.wi_0_scale[...] if self.wi_0_scale is not None else None
+      wi_1_scale = self.wi_1_scale[...] if self.wi_1_scale is not None else None
+      w0_kernel = _maybe_native_gmm_weight(self.wi_0[...], wi_0_scale)
+      w1_kernel = _maybe_native_gmm_weight(self.wi_1[...], wi_1_scale)
+
+    if cfg.fp8_moe_fake_quant:
+      w0_kernel = quantizations.fake_quantize_weight_per_channel(w0_kernel)
+      w1_kernel = quantizations.fake_quantize_weight_per_channel(w1_kernel)
+      wo_kernel = quantizations.fake_quantize_weight_per_channel(wo_kernel)
+
+    if self.wi_0_sparsity_module is not None:
+      _, w0_kernel = self.wi_0_sparsity_module(jnp.zeros_like(w0_kernel), w0_kernel)
+      _, w1_kernel = self.wi_1_sparsity_module(jnp.zeros_like(w1_kernel), w1_kernel)
+      _, wo_kernel = self.wo_sparsity_module(jnp.zeros_like(wo_kernel), wo_kernel)
+
+    if cfg.mlp_bias:
+      w0_bias = jnp.asarray(self.wi_0_bias[...], self.dtype)
+      w1_bias = jnp.asarray(self.wi_1_bias[...], self.dtype)
+      wo_bias = jnp.asarray(self.wo_bias[...], self.dtype)
+    else:
+      w0_bias, w1_bias, wo_bias = None, None, None
+    return w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias
+
+  def _batch_split_can_accum_wgrad(self) -> bool:
+    """Returns True if microbatch expert weight gradients can accumulate in-place via `tgmm_v2` `partial_sum`."""
+    cfg = self.config
+    return bool(
+        cfg.use_tokamax_gmm
+        and cfg.use_gmm_v2
+        and not cfg.prefuse_moe_weights
+        and not cfg.mlp_bias
+        and not cfg.fp8_moe_fake_quant
+        and not isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
+        and self.wi_0_scale is None
+        and self.wi_1_scale is None
+        and self.wo_scale is None
+        and self.wi_0_sparsity_module is None
+        and self.wi_1_sparsity_module is None
+        and self.wo_sparsity_module is None
+        and jnp.dtype(self.weight_dtype) == jnp.dtype(self.dtype)
+        and not (cfg.shard_exp_on_fsdp or cfg.shard_embed_moe_on_fsdp)
+        and not cfg.check_vma
+    )
+
+  def batch_split_experts(
+      self,
+      moe_inputs_ref: jax.Array,
+      x_val_ag: jax.Array,
+      x_scale_ag: jax.Array | None,
+      route_ag: tuple,
+      input_ids: jax.Array | None = None,
+      return_wgrad_hooks: bool = False,
+  ):
+    """Runs local expert permute -> GMMs -> unpermute without EP dispatch/combine."""
+    topk_before_ag = self._batch_split_topk_before_ag()
+    has_pre_bias = (not topk_before_ag) and (route_ag[1] is not None)
+    specs = self._batch_split_pspecs(moe_inputs_ref, has_pre_bias=has_pre_bias)
+    ep_spec = specs["ep_spec"]
+    disp_gate = specs["disp_gate"]
+    if topk_before_ag:
+      route_ag_pspec = (
+          P(ep_spec, *disp_gate),
+          P(ep_spec, *disp_gate),
+          P(ep_spec, disp_gate[0], None) if route_ag[2] is not None else None,
+      )
+    else:
+      route_ag_pspec = (
+          P(ep_spec, *disp_gate),
+          P(ep_spec, *disp_gate) if route_ag[1] is not None else None,
+      )
+    w0_kernel, w1_kernel, wo_kernel, w0_bias, w1_bias, wo_bias = self._batch_split_prepare_weights()
+    emit_wgrad_hooks = bool(return_wgrad_hooks and self._batch_split_can_accum_wgrad())
+    dispatched = {
+        "is_batch_sharded_by_expert": specs["is_batch_sharded_by_expert"],
+        "x_val": x_val_ag,
+        "x_scale": x_scale_ag,
+        "x_val_pspec": specs["x_val_pspec"],
+        "x_scale_pspec": specs["x_scale_pspec"],
+        "route_ag": route_ag,
+        "route_ag_pspec": route_ag_pspec,
+        "topk_before_all_gather": topk_before_ag,
+        "input_partition_pspec": specs["input_partition_pspec"],
+        "gate_logits_pspec": specs["gate_logits_pspec"],
+        "pre_bias_logits_pspec": specs["pre_bias_logits_pspec"],
+        "output_pspec": specs["output_pspec"],
+        "y_partial_pspec": specs["y_partial_pspec"],
+        "input_ids": input_ids,
+        "emit_wgrad_hooks": emit_wgrad_hooks,
+    }
+    with jax.named_scope("batch_split_experts"):
+      res = self.sparse_matmul(
+          None,
+          None,
+          None,
+          w0_kernel,
+          w1_kernel,
+          wo_kernel,
+          w0_bias,
+          w1_bias,
+          wo_bias,
+          input_ids=input_ids,
+          _batch_split_dispatched=dispatched,
+      )
+    if return_wgrad_hooks:
+      if len(res) == 4:
+        y_part, lb_loss, counts, (h0, h1, ho) = res  # pylint: disable=unbalanced-tuple-unpacking
+        return y_part, lb_loss, counts, ((self.wi_0[...], h0), (self.wi_1[...], h1), (self.wo[...], ho))
+      y_part, lb_loss, counts = res  # pylint: disable=unbalanced-tuple-unpacking
+      return y_part, lb_loss, counts, ()
+    return res
+
+  def batch_split_combine(self, y_partial: jax.Array, moe_inputs_ref: jax.Array) -> jax.Array:
+    """Weight-free EP Reduce-Scatter (`psum_scatter`) of expert partial outputs on SC0."""
+    specs = self._batch_split_pspecs(moe_inputs_ref, has_pre_bias=False)
+    num_ep = self.get_expert_parallelism_size()
+    ep_axis = self._expert_parallelism_name
+    core_id = self._batch_split_ep_core_id()
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=specs["y_partial_pspec"],
+        out_specs=specs["output_pspec"],
+        check_vma=self.config.check_vma,
+    )
+    def _combine_body(y_p):
+      y = y_p[0]
+      if num_ep > 1:
+        y = _ep_reduce_scatter_sc(y, ep_axis, mesh=self.mesh, core_id=core_id, scatter_dimension=0, tiled=True)
+      if y.ndim == 4:
+        y = jnp.reshape(y, (*y.shape[:2], -1))
+      return y
+
+    with jax.named_scope("batch_split_ep_combine"):
+      return _combine_body(y_partial)
+
+  def batch_split_combine_bwd(
+      self, g_out: jax.Array, moe_inputs_ref: jax.Array, *, defer_dequant: bool = False
+  ) -> jax.Array | tuple[jax.Array, jax.Array]:
+    """Weight-free backward of `batch_split_combine` (EP All-Gather on SC0, optional FP8)."""
+    specs = self._batch_split_pspecs(moe_inputs_ref, has_pre_bias=False)
+    num_ep = self.get_expert_parallelism_size()
+    ep_axis = self._expert_parallelism_name
+    core_id = self._batch_split_ep_core_id()
+    use_3d = specs["use_3d"]
+    bwd_method = self.config.moe_quantize_combine_bwd_method
+
+    g_out = self._maybe_shard_with_pspec(g_out, specs["output_pspec"])
+
+    if defer_dequant and bwd_method and num_ep > 1:
+      is_static = bwd_method.startswith("fixed")
+      scale_ndim = 4 if use_3d else 3
+      ep_spec = specs["ep_spec"]
+      y_pspec = specs["y_partial_pspec"]
+      scale_pspec = (
+          P(ep_spec, *(None,) * scale_ndim)
+          if is_static
+          else P(ep_spec, y_pspec[1], y_pspec[2], *(None,) * (scale_ndim - 2))
+      )
+
+      @functools.partial(
+          jax.shard_map,
+          mesh=self.mesh,
+          in_specs=specs["output_pspec"],
+          out_specs=(y_pspec, scale_pspec),
+          check_vma=self.config.check_vma,
+      )
+      def _combine_bwd_deferred_body(g):
+        if use_3d:
+          g = jnp.reshape(g, (*g.shape[:2], g.shape[-1] // 128, 128))
+        qvals, scale = _ep_combine_bwd_all_gather_sc(
+            g,
+            ep_axis,
+            mesh=self.mesh,
+            core_id=core_id,
+            scatter_dimension=0,
+            tiled=True,
+            bwd_method=bwd_method,
+            defer_dequant=True,
+        )
+        if is_static:
+          scale = jnp.reshape(scale, (1,) * qvals.ndim)
+        return qvals[None, ...], scale[None, ...]
+
+      with jax.named_scope("batch_split_ep_combine_bwd"):
+        return _combine_bwd_deferred_body(g_out)
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=specs["output_pspec"],
+        out_specs=specs["y_partial_pspec"],
+        check_vma=self.config.check_vma,
+    )
+    def _combine_bwd_body(g):
+      if use_3d:
+        g = jnp.reshape(g, (*g.shape[:2], g.shape[-1] // 128, 128))
+      if num_ep > 1:
+        g = _ep_combine_bwd_all_gather_sc(
+            g,
+            ep_axis,
+            mesh=self.mesh,
+            core_id=core_id,
+            scatter_dimension=0,
+            tiled=True,
+            bwd_method=bwd_method,
+        )
+      return g[None, ...]
+
+    with jax.named_scope("batch_split_ep_combine_bwd"):
+      return _combine_bwd_body(g_out)
+
+  def batch_split_finalize_bias_updates(self, summed_expert_counts: jax.Array | None) -> jax.Array | None:
+    """Converts microbatch-summed expert counts to bias updates (matching `sparse_matmul`)."""
+    if summed_expert_counts is None:
+      return None
+    if bool(getattr(self.config, "defer_small_all_reduces", False)) and self.config.use_ring_of_experts:
+      return summed_expert_counts
+    if getattr(self.config, "gradient_accumulation_steps", 1) > 1:
+      return summed_expert_counts
+    return load_balance_updates_from_counts(
+        summed_expert_counts, self.config.num_experts, self.config.routed_bias_update_rate
+    )
 
 
 class RoutedAndSharedMoE(nnx.Module):

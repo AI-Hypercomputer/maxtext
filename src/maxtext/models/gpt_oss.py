@@ -233,6 +233,95 @@ class GptOssDecoderLayer(nnx.Module):
       # `kv_cache` and keeps the cache returned here.
       return layer_output, kv_cache
 
+  # ---------------------------------------------------------------------------
+  # Generalized Batch-Split layer adapter (used only when config.enable_batch_split)
+  # ---------------------------------------------------------------------------
+
+  def batch_split_supported(self) -> bool:
+    """Returns True if this GPT-OSS sub-layer supports `batch_split`."""
+    cfg = self.config
+    return (
+        getattr(cfg, "num_experts", 1) > 1
+        and cfg.sparse_matmul
+        and cfg.use_ring_of_experts
+        and not cfg.te_moe_block
+        and not getattr(cfg, "moe_use_fused_gmm3d", False)
+        and cfg.num_moe_emb_chunks <= 0
+        and not getattr(cfg, "record_internal_nn_metrics", False)
+        and cfg.dropout_rate == 0.0
+    )
+
+  def batch_split_attn_and_route(
+      self,
+      inputs,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      previous_chunk=None,
+      slot=None,
+      kv_cache=None,
+      attention_metadata=None,
+  ):
+    """Phase 1/2 TC compute: Sliding/Global attention + norms + MoE router gate."""
+    del previous_chunk, slot, kv_cache
+    if isinstance(inputs, tuple):
+      inputs = inputs[0]
+    inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
+    lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=self.out_sharding)
+    lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
+    attention_lnx, _ = self.GptOssAttention(
+        lnx,
+        lnx,
+        decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+        deterministic=deterministic,
+        model_mode=model_mode,
+        out_sharding=self.out_sharding,
+        kv_cache=None,
+        attention_metadata=attention_metadata,
+    )
+    attention_lnx = self._maybe_shard_with_logical(attention_lnx, self.activation_axis_names)
+    intermediate_inputs = inputs + attention_lnx
+    hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=self.out_sharding)
+    hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
+    moe_in, route_in, seq_lb_loss = self.GptOssMlp.batch_split_route(hidden_states)
+    return intermediate_inputs, moe_in, route_in, seq_lb_loss
+
+  def batch_split_dispatch(self, moe_in, route_in):
+    """Weight-free EP All-Gather of microbatch tokens and routing metadata on SC0."""
+    return self.GptOssMlp.batch_split_dispatch(moe_in, route_in)
+
+  def batch_split_dispatch_bwd(self, moe_in, route_in, g_x_val_ag, g_route_ag_diff):
+    """Weight-free backward of `batch_split_dispatch` (EP Reduce-Scatter on SC0)."""
+    return self.GptOssMlp.batch_split_dispatch_bwd(moe_in, route_in, g_x_val_ag, g_route_ag_diff)
+
+  def batch_split_experts(
+      self, moe_in_ref, x_val_ag, x_scale_ag, route_ag, decoder_input_tokens=None, return_wgrad_hooks: bool = False
+  ):
+    """Local expert permute + GMMs + unpermute without EP dispatch/combine."""
+    del decoder_input_tokens
+    return self.GptOssMlp.batch_split_experts(
+        moe_in_ref, x_val_ag, x_scale_ag, route_ag, return_wgrad_hooks=return_wgrad_hooks
+    )
+
+  def batch_split_shared_expert(self, moe_in):
+    """GPT-OSS has no shared expert branch."""
+    return jnp.zeros_like(moe_in)
+
+  def batch_split_combine(self, y_partial, moe_in_ref):
+    """Weight-free EP Reduce-Scatter of routed expert partial outputs on SC0."""
+    routed_out = self.GptOssMlp.batch_split_combine(y_partial, moe_in_ref)
+    return self._maybe_shard_with_logical(routed_out, self.activation_axis_names)
+
+  def batch_split_combine_bwd(self, g_out, moe_in_ref, *, defer_dequant: bool = False):
+    """Weight-free backward of `batch_split_combine` (EP All-Gather on SC0)."""
+    return self.GptOssMlp.batch_split_combine_bwd(g_out, moe_in_ref, defer_dequant=defer_dequant)
+
+  def batch_split_finalize_bias_updates(self, summed_counts):
+    """Finalizes microbatch-summed expert counts into routed bias updates."""
+    return self.GptOssMlp.batch_split_finalize_bias_updates(summed_counts)
+
 
 class GptOssScannableBlock(nnx.Module):
   """A repeatable block of GPT OSS decoder layers.
@@ -279,6 +368,10 @@ class GptOssScannableBlock(nnx.Module):
           rngs=rngs,
       )
       setattr(self, layer_name, layer)
+
+  def batch_split_sublayer_names(self) -> tuple[str, ...]:
+    """Sub-layers of this block in execution order for `batch_split_inhomogeneous`."""
+    return tuple(f"layers_{i}" for i in range(self.config.inhomogeneous_layer_cycle_interval))
 
   def __call__(
       self,

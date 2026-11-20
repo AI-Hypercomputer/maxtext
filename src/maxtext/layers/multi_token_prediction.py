@@ -571,7 +571,17 @@ class MultiTokenPredictionBlock(nnx.Module):
     if main_token_embeddings is not None:
       # Rolled-in positions hold token id 0, so they take the embedding of token 0.
       token_zero_embedding = shared_embedding.embed_single_token(0)
-      not_filled = jnp.ones(input_ids.shape, dtype=jnp.int32)
+      if cfg.shard_mode == ShardMode.EXPLICIT:
+        # Slicing row 0 retains `embed_vocab` sharding (often sharded over batch/FSDP axes);
+        # reshard to `rolled_token_embeddings`'s trailing axis so `jnp.where` broadcast below
+        # does not collide with the token-sharded `is_filled` mask.
+        emb_spec = jax.typeof(rolled_token_embeddings).sharding.spec
+        emb_axis = emb_spec[2] if len(emb_spec) > 2 else None
+        token_zero_embedding = jax.reshard(
+            token_zero_embedding,
+            jax.sharding.NamedSharding(self.mesh, jax.sharding.PartitionSpec(emb_axis)),
+        )
+      not_filled = jnp.ones_like(input_ids, dtype=jnp.int32)
 
     for k in range(1, cfg.mtp_num_layers + 1):
       if main_token_embeddings is not None:
