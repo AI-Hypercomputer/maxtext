@@ -679,7 +679,19 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         is_leaf=lambda x: isinstance(x, NamedSharding),
     )
     opt_state = nnx.state(state.optimizer)
-    new_opt_state = jax.device_put(opt_state, device_opt_shardings)
+    if config.optimizer_device_resident_gib > 0.0:
+      new_opt_state = jax.tree_util.tree_map(
+          lambda arr, src_s, dst_s: (
+              jax.device_put(arr, dst_s)
+              if isinstance(src_s, NamedSharding) and src_s.memory_kind == "pinned_host"
+              else arr
+          ),
+          opt_state,
+          state_mesh_shardings.optimizer,
+          device_opt_shardings,
+      )
+    else:
+      new_opt_state = jax.device_put(opt_state, device_opt_shardings)
     nnx.update(state.optimizer, new_opt_state)
   if config.skip_step_on_spikes:
     # The skip-step optimizer is a GradientTransformationExtraArgs that reads

@@ -230,6 +230,7 @@ class ScaleStartupAndPretrainedTest(unittest.TestCase):
         source_checkpoint_layout="orbax",
         expansion_factor_real_data=False,
         optimizer_memory_host_offload=True,
+        optimizer_device_resident_gib=0.0,
         parameter_memory_host_offload=False,
         enable_diloco=False,
     )

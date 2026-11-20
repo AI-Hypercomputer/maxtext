@@ -3785,6 +3785,14 @@ class Optimizer(BaseModel):
   """Configuration for the optimizer and learning rate schedule."""
 
   opt_type: OptimizerType = Field(OptimizerType.ADAMW, description="The type of optimizer to use.")
+  optimizer_device_resident_gib: float = Field(
+      0.0,
+      description=(
+          "With optimizer_memory_host_offload=True: keep the largest non-scalar optimizer state leaves, up to this"
+          " many GiB per device, in device memory (HBM) between updates instead of pinned host memory. 0.0 (default)"
+          " offloads every optimizer leaf."
+      ),
+  )
   skip_step_on_spikes: bool = Field(
       False,
       description="If True, skip the training step when loss or gradient spike is detected.",
@@ -3843,6 +3851,14 @@ class Optimizer(BaseModel):
           "example: ['.*indexer.*']. If empty (default), all parameters are trained."
       ),
   )
+
+  @model_validator(mode="after")
+  def validate_optimizer_device_resident_gib(self) -> "Optimizer":
+    """Validates optimizer_device_resident_gib is finite and non-negative."""
+    gib = self.optimizer_device_resident_gib
+    if not math.isfinite(gib) or gib < 0:
+      raise ValueError(f"optimizer_device_resident_gib must be a finite number >= 0, got {gib}.")
+    return self
 
 
 class AdamW(BaseModel):
@@ -6126,6 +6142,28 @@ class MaxTextConfig(
     # Explicitly setting encoding removes the need for the pylint disable comment
     with open(custom_mesh_path, "r", encoding="utf-8") as f:
       return yaml.safe_load(f) or {}
+
+  @model_validator(mode="after")
+  def validate_optimizer_device_resident_budget(self) -> "MaxTextConfig":
+    """Validates cross-field compatibility of optimizer_device_resident_gib."""
+    if self.optimizer_device_resident_gib > 0:
+      if not self.optimizer_memory_host_offload:
+        raise ValueError(
+            "optimizer_device_resident_gib > 0 requires optimizer_memory_host_offload=True (without it every optimizer"
+            " leaf is already in device memory)."
+        )
+      if self.lora.enable_lora:
+        raise ValueError("optimizer_device_resident_gib > 0 is not supported with LoRA (lora.enable_lora=True).")
+      if self.enable_diloco:
+        raise ValueError("optimizer_device_resident_gib > 0 is not supported with DiLoCo (enable_diloco=True).")
+      for post_train_name, post_train_enabled in (
+          ("use_sft", self.use_sft),
+          ("use_dpo", self.use_dpo),
+          ("use_grpo", self.use_grpo),
+      ):
+        if post_train_enabled:
+          raise ValueError(f"optimizer_device_resident_gib > 0 is not supported with {post_train_name}=True.")
+    return self
 
   @model_validator(mode="after")
   def validate_moe_qwag_sharding(self) -> "MaxTextConfig":
@@ -9044,6 +9082,8 @@ class RLConfig(
           "RL path because the underlying Tunix RLCluster/Trainer does not "
           "support host offloading of the optimizer state."
       )
+    if self.optimizer_device_resident_gib > 0:
+      raise ValueError("optimizer_device_resident_gib > 0 is not supported on the post-training RL path (RLConfig).")
 
     if self.num_vocab_tiling > 1:
       raise ValueError(

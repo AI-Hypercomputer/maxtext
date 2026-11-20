@@ -190,6 +190,11 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     with self.assertRaises(ValueError):
       self.setup_config(model_name="")
 
+  def test_rejects_optimizer_device_resident_gib(self):
+    cfg_budget = self.setup_config(optimizer_memory_host_offload=True, optimizer_device_resident_gib=0.25)
+    with self.assertRaisesRegex(NotImplementedError, "optimizer_device_resident_gib"):
+      maxtext_engine.MaxTextTrainingEngine(cfg_budget)
+
   def test_max_text_trainer_instantiation_with_pyconfig(self):
     t = maxtext_engine.MaxTextTrainingEngine(self.mock_config)
     t.with_loss_fn(

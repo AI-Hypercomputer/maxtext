@@ -1643,6 +1643,7 @@ class TestNNXAbstractState(unittest.TestCase):
     init_weights_seed: int = 42
     shard_optimizer_over_data: bool = False
     optimizer_memory_host_offload: bool = False
+    optimizer_device_resident_gib: float = 0.0
     parameter_memory_host_offload: bool = False
     param_scan_axis: int = 0
     logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]], ["model", ["model"]]])

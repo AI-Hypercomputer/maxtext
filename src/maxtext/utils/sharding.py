@@ -1067,7 +1067,14 @@ def maybe_update_params_sharding_with_opt_nnx(
 
   def _update_model_var(path, var):
     if path in mu_lookup:
-      return var.replace(mu_lookup[path])
+      old_val = var.get_value()
+      new_sharding = mu_lookup[path]
+      if isinstance(old_val, NamedSharding) and new_sharding.memory_kind != old_val.memory_kind:
+        if old_val.memory_kind is None:
+          new_sharding = NamedSharding(new_sharding.mesh, new_sharding.spec)
+        else:
+          new_sharding = new_sharding.with_memory_kind(old_val.memory_kind)
+      return var.replace(new_sharding)
     return var
 
   new_model_shardings = jax.tree_util.tree_map_with_path(
