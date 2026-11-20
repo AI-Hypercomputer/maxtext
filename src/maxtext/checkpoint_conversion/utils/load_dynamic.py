@@ -77,10 +77,13 @@ import collections
 import concurrent.futures
 import contextlib
 import functools
+import json
 import multiprocessing
 import os
 import random
 import time
+
+from etils import epath
 
 from flax import nnx
 import flax.traverse_util
@@ -154,13 +157,65 @@ def build_gcs_cache_worker(fpath, gcs_cache_dir, hf_access_token):
         raise
 
 
-def get_hf_config_and_mappings(maxtext_config):
-  """Gets HF config and parameter mapping based on the MaxText config."""
+def _hub_files_to_cache(fs, repo_id):
+  """Returns the HF Hub files to cache in GCS: safetensors and config.json when present.
+
+  `config.json` may carry `quantization_config`, which determines how quantized checkpoints are
+  mapped and dequantized on load.
+  """
+  files = list(fs.glob(f"{repo_id}/*.safetensors"))
+  if fs.exists(f"{repo_id}/config.json") is True:
+    files.append(f"{repo_id}/config.json")
+  return files
+
+
+_NOT_QUANTIZED = "not quantized"
+
+
+def _checkpoint_quantization_config(path):
+  """Returns the `quantization_config` from `path/config.json`, `_NOT_QUANTIZED`, or None."""
+  if not path:
+    return None
+  config_path = epath.Path(path) / "config.json"
+  if not config_path.exists():
+    return None
+  config = json.loads(config_path.read_text())
+  for section in (config, config.get("text_config") or {}):
+    if isinstance(section.get("quantization_config"), dict):
+      return section["quantization_config"]
+  return _NOT_QUANTIZED
+
+
+def get_hf_config_and_mappings(maxtext_config, path=None, hf_keys=None):
+  """Gets HF config and parameter mapping based on the MaxText config.
+
+  If `path` has a `config.json`, its `quantization_config` (or absence thereof) overrides the
+  stock config's. When `hf_keys` is provided (from the loaded checkpoint state), any sibling
+  `*_scale_inv` / `*.scale` tensor names are recorded so quantized weights pair only with scale
+  tensors actually present in the checkpoint.
+  """
   model_key = maxtext_config.model_name
   if "-Instruct" in model_key:
     model_key = model_key.replace("-Instruct", "")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
   hf_config_dict = hf_config_obj.to_dict()
+
+  quantization_config = _checkpoint_quantization_config(path)
+  if quantization_config == _NOT_QUANTIZED:
+    hf_config_dict.pop("quantization_config", None)
+    if isinstance(hf_config_dict.get("text_config"), dict):
+      hf_config_dict["text_config"].pop("quantization_config", None)
+  elif quantization_config is not None:
+    hf_config_dict["quantization_config"] = quantization_config
+    hf_config_dict["_enable_dequantize"] = True
+
+  if hf_keys is not None:
+    scale_keys = frozenset(k for k in hf_keys if k.endswith(("_scale_inv", ".scale")))
+    hf_config_dict["_quantized_scale_keys"] = scale_keys
+    if scale_keys:
+      hf_config_dict["_enable_dequantize"] = True
+      if "quantization_config" not in hf_config_dict:
+        hf_config_dict["quantization_config"] = {}
 
   param_map_mt_to_hf = param_mapping.PARAM_MAPPING[model_key](
       hf_config_dict, maxtext_config, scan_layers=maxtext_config.scan_layers
@@ -481,7 +536,7 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
         t_gcs_start = time.time()
         # Only host 0 calls the HF API: anonymous calls from every host of a large job are rate-limited (HTTP 429).
         fs = huggingface_hub.HfFileSystem(token=maxtext_config.hf_access_token)
-        files = fs.glob(f"{repo_id}/*.safetensors")
+        files = _hub_files_to_cache(fs, repo_id)
 
         # List existing blobs to avoid spawning processes for already cached
         # files
@@ -538,7 +593,7 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
       raise ValueError("base_output_directory with gs:// prefix is required for " "huggingface downloads.")
 
   t_total = time.time()
-  param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config)
+  param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config, path)
   streaming = maxtext_config.safetensors_dynamic_streaming
   num_steps = 2 if streaming else 3
   max_logging.log(f"[1/{num_steps}] Mappings derived in {time.time() - t_total:.2f}s")
@@ -561,7 +616,10 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
     max_logging.log(f"[2/2] Streamed and converted HF weights in {time.time() - t1:.2f}s")
   else:
     t1 = time.time()
-    hf_state = rename_legacy_hf_keys(load_sharded_hf_state(path), param_map_mt_to_hf)
+    raw_hf_state = load_sharded_hf_state(path)
+    if any(k.endswith(("_scale_inv", ".scale")) for k in raw_hf_state):
+      param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config, path, hf_keys=raw_hf_state.keys())
+    hf_state = rename_legacy_hf_keys(raw_hf_state, param_map_mt_to_hf)
     max_logging.log(f"[2/3] Distributed Sharded GCS load completed in {time.time() - t1:.2f}s")
 
     t2 = time.time()

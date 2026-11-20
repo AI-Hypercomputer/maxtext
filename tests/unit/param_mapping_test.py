@@ -789,6 +789,54 @@ class ParamMappingTest(unittest.TestCase):
         hooks,
     )
 
+  def test_deepseek_fp8_quantized_mapping_and_hooks(self):
+    config = {
+        "num_hidden_layers": 2,
+        "first_k_dense_replace": 1,
+        "n_routed_experts": 2,
+        "quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]},
+        "_quantized_scale_keys": frozenset(
+            {
+                "model.layers.0.mlp.gate_proj.weight_scale_inv",
+                "model.layers.1.mlp.experts.0.gate_proj.weight_scale_inv",
+                "model.layers.1.mlp.experts.1.gate_proj.weight_scale_inv",
+            }
+        ),
+    }
+    maxtext_config = mock.Mock()
+    maxtext_config.num_decoder_layers = 2
+    maxtext_config.first_num_dense_layers = 1
+    maxtext_config.num_experts = 2
+    maxtext_config.mtp_num_layers = 0
+
+    mapping = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=True)
+    hooks = param_mapping.DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=True)
+
+    self.assertEqual(
+        mapping["params-decoder-dense_layers-mlp-wi_0-kernel"],
+        [("model.layers.0.mlp.gate_proj.weight", "model.layers.0.mlp.gate_proj.weight_scale_inv")],
+    )
+    # Non-quantized weight without a scale key stays a bare string.
+    self.assertEqual(
+        mapping["params-decoder-moe_layers-DeepSeekMoeBlock_0-MoeBlock_0-gate-kernel"],
+        ["model.layers.1.mlp.gate.weight"],
+    )
+
+    # Non-divisible 2D weight shape (160, 192) with 128x128 block scale (2, 2).
+    rng = np.random.RandomState(42)
+    raw_fp32 = rng.randn(160, 192).astype(np.float32)
+    q_np = jnp.asarray(raw_fp32).astype(jnp.float8_e4m3fn)
+    s_np = (rng.rand(2, 2) + 0.5).astype(np.float32)
+
+    hook_list = hooks["params-decoder-dense_layers-mlp-wi_0-kernel"]
+    self.assertIsInstance(hook_list, list)
+    actual = tensor_handling.apply_hook_fns((np.asarray(q_np), s_np), (192, 160), hook_list)
+
+    s_expanded = np.repeat(np.repeat(s_np, 128, axis=0), 128, axis=1)[:160, :192]
+    expected = jnp.asarray((np.asarray(q_np, dtype=np.float32) * s_expanded).T).astype(jnp.bfloat16)
+    self.assertEqual(actual.dtype, jnp.bfloat16)
+    np.testing.assert_array_equal(np.asarray(actual, dtype=np.float32), np.asarray(expected, dtype=np.float32))
+
   def test_single_axis_stack_axis_selection(self):
     """Single-axis stacking (to_maxtext) and slicing (to_huggingface) must pick the same, correct axis.
 
@@ -1218,6 +1266,48 @@ class ParamMappingTest(unittest.TestCase):
           mapping["MoEBiasVar-mtp_block-mtp_layer_1-mtp_1_transformer_layer-mlp-MoeBlock_0-gate-bias"],
           "mtp.0.ffn.gate.bias",
       )
+
+  def test_deepseek_v4_mxfp4_and_fp8_hooks_and_mtp_tuple(self):
+    config, maxtext_config = self._deepseek_v4_mtp_config()
+    config["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [32, 32]}
+    config["_quantized_scale_keys"] = frozenset(
+        {
+            "layers.0.attn.wq_a.weight",  # ignored here: only .scale / _scale_inv matter
+            "layers.0.attn.wq_a.scale",
+            "layers.0.ffn.experts.0.w1.scale",
+        }
+    )
+
+    mapping = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False)
+    hooks = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False)
+
+    self.assertEqual(
+        mapping["params-decoder-layers_0-self_attention-wq_a-kernel"],
+        ("layers.0.attn.wq_a.weight", "layers.0.attn.wq_a.scale"),
+    )
+    self.assertEqual(
+        mapping["params-decoder-layers_0-mlp-MoeBlock_0-wi_0"][0],
+        ("layers.0.ffn.experts.0.w1.weight", "layers.0.ffn.experts.0.w1.scale"),
+    )
+    # Multi-weight tuple for MTP fused projection must NOT get a dequantize hook.
+    mtp_proj_hook = hooks["params-mtp_block-mtp_layer_1-mtp_1_projection-kernel"]
+    self.assertFalse(isinstance(mtp_proj_hook, list))
+
+    # Packed int8 MXFP4 (out=8, in/2=32 -> unpacked (8, 64)) + uint8 E8M0 scales (8, 2).
+    rng = np.random.RandomState(7)
+    packed = rng.randint(-128, 128, size=(8, 32), dtype=np.int8)
+    e8m0_scales = rng.randint(120, 134, size=(8, 2), dtype=np.uint8)
+    expert_hooks = hooks["params-decoder-layers_0-mlp-MoeBlock_0-wi_0"]
+    self.assertIsInstance(expert_hooks, list)
+
+    actual = tensor_handling.apply_hook_fns((packed, e8m0_scales), (64, 8), expert_hooks)
+
+    lut = np.array(param_mapping._FP4_E2M1_VALUES, dtype=np.float32)  # pylint: disable=protected-access
+    u8 = packed.view(np.uint8)
+    unpacked_ref = np.stack([lut[u8 & 0xF], lut[(u8 >> 4) & 0xF]], axis=-1).reshape(8, 64)
+    scale_ref = np.repeat(np.ldexp(np.float32(1.0), e8m0_scales.astype(np.int32) - 127), 32, axis=1)
+    expected = jnp.asarray((unpacked_ref * scale_ref).T).astype(jnp.bfloat16)
+    np.testing.assert_array_equal(np.asarray(actual, dtype=np.float32), np.asarray(expected, dtype=np.float32))
 
   def test_deepseek_v4_mtp_absent_when_disabled(self):
     """MTP keys follow the MaxText config even when the HF config ships an MTP layer."""

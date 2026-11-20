@@ -14,6 +14,7 @@
 
 """Unit tests for the checkpointing components."""
 
+import json
 import os
 from typing import Any
 from unittest import mock
@@ -28,6 +29,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import orbax.checkpoint as ocp
 from maxtext.checkpoint_conversion.utils import load_dynamic
+from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.checkpoint_conversion.utils.tensor_handling import (
     _binary_chunked_stack,
@@ -657,7 +659,9 @@ class LoadDynamicTest(parameterized.TestCase):
     config = MockConfig()
 
     path = "repo/meta-llama"
-    dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None) as mock_qc:
+      dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
+    mock_qc.assert_called_once_with("gs://dummy-bucket/hf_cache/repo_meta-llama")
 
     self.assertIsNone(dummy_ret_val)
     self.assertEqual(loaded_vars, {"params": {}})
@@ -680,7 +684,8 @@ class LoadDynamicTest(parameterized.TestCase):
         safetensors_dynamic_streaming=False,
     )
 
-    load_dynamic.load_safetensors_dynamic_state("hf://repo/meta-llama", {}, config)
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None):
+      load_dynamic.load_safetensors_dynamic_state("hf://repo/meta-llama", {}, config)
 
     mock_hf_fs.assert_not_called()
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
@@ -693,7 +698,8 @@ class LoadDynamicTest(parameterized.TestCase):
     # safetensors_dynamic_streaming=True streams the checkpoint instead of reading all of it first.
     config = mock.Mock(model_name="llama3.1-8b", safetensors_dynamic_streaming=True)
 
-    _, loaded_vars = load_dynamic.load_safetensors_dynamic_state("gs://bucket/ckpt", {}, config)
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None):
+      _, loaded_vars = load_dynamic.load_safetensors_dynamic_state("gs://bucket/ckpt", {}, config)
 
     self.assertEqual(loaded_vars, {"params": {}})
     self.assertEqual(mock_load_streaming.call_args.args[0], "gs://bucket/ckpt")
@@ -825,6 +831,198 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     loaded_weight = loaded_vars["params"]["token_embedder"]["embedding"]
     np.testing.assert_allclose(loaded_weight, dummy_weight)
 
+  @parameterized.named_parameters(("with_config_json", True), ("auto_detect_from_scales", False))
+  def test_load_safetensors_dynamic_deepseek_v3_fp8_non_streaming(self, write_config_json):
+    """Non-streaming Orbax path dequantizes DeepSeek-V3 FP8 (`_scale_inv`) weights into BF16."""
+    if os.getenv("JAX_PLATFORMS") == "proxy":
+      self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
+
+    if write_config_json:
+      (self.safetensors_ckpt_dir / "config.json").write_text(
+          json.dumps({"quantization_config": {"quant_method": "fp8", "weight_block_size": [128, 128]}})
+      )
+
+    rng = np.random.RandomState(11)
+    # Use non-multiple of 128 (160 x 192) so block slicing and padding edge cases are exercised.
+    q_dense_np = np.asarray(jnp.asarray(rng.randn(160, 192), dtype=jnp.float8_e4m3fn))
+    s_dense_np = (rng.rand(2, 2) + 0.25).astype(np.float32)
+
+    q_exp0_np = np.asarray(jnp.asarray(rng.randn(128, 128), dtype=jnp.float8_e4m3fn))
+    s_exp0_np = (rng.rand(1, 1) + 0.5).astype(np.float32)
+    q_exp1_np = np.asarray(jnp.asarray(rng.randn(128, 128), dtype=jnp.float8_e4m3fn))
+    s_exp1_np = (rng.rand(1, 1) + 0.5).astype(np.float32)
+
+    gate_weight = rng.randn(2, 192).astype(np.float32)
+    gate_bias = np.array([1.25, -0.75], dtype=np.float32)
+    embed_weight = rng.randn(32, 16).astype(np.float32)
+
+    safetensors.numpy.save_file(
+        {
+            "model.embed_tokens.weight": embed_weight,
+            "model.layers.0.mlp.gate_proj.weight": q_dense_np,
+            "model.layers.0.mlp.gate_proj.weight_scale_inv": s_dense_np,
+            "model.layers.1.mlp.gate.weight": gate_weight,
+            "model.layers.1.mlp.gate.e_score_correction_bias": gate_bias,
+            "model.layers.1.mlp.experts.0.gate_proj.weight": q_exp0_np,
+            "model.layers.1.mlp.experts.0.gate_proj.weight_scale_inv": s_exp0_np,
+            "model.layers.1.mlp.experts.1.gate_proj.weight": q_exp1_np,
+            "model.layers.1.mlp.experts.1.gate_proj.weight_scale_inv": s_exp1_np,
+        },
+        str(self.safetensors_ckpt_path),
+    )
+
+    class MockDeepSeekConfig:
+      """Minimal DeepSeek-V3 config for non-streaming FP8 load tests."""
+
+      def __init__(self):
+        self.model_name = "deepseek3-671b"
+        self.base_output_directory = "gs://dummy-bucket"
+        self.scan_layers = True
+        self.param_scan_axis = 1
+        self.hf_access_token = None
+        self.safetensors_dynamic_streaming = False
+        self.num_decoder_layers = 2
+        self.first_num_dense_layers = 1
+        self.num_experts = 2
+        self.mtp_num_layers = 0
+
+    config = MockDeepSeekConfig()
+    target_tree = {
+        "token_embedder": {
+            "embedding": jax.ShapeDtypeStruct((32, 16), jnp.bfloat16, sharding=self.sharding),
+        },
+        "decoder": {
+            "dense_layers": {
+                "mlp": {
+                    "wi_0": {
+                        "kernel": jax.ShapeDtypeStruct((192, 1, 160), jnp.bfloat16, sharding=self.sharding),
+                    }
+                }
+            },
+            "moe_layers": {
+                "DeepSeekMoeBlock_0": {
+                    "MoeBlock_0": {
+                        "gate": {
+                            "kernel": jax.ShapeDtypeStruct((192, 1, 2), jnp.bfloat16, sharding=self.sharding),
+                            "bias": jax.ShapeDtypeStruct((1, 2), jnp.float32, sharding=self.sharding),
+                        },
+                        "wi_0": jax.ShapeDtypeStruct((2, 1, 128, 128), jnp.bfloat16, sharding=self.sharding),
+                    }
+                }
+            },
+        },
+    }
+
+    _, restored_state = load_dynamic.load_safetensors_dynamic_state(str(self.safetensors_ckpt_dir), target_tree, config)
+    restored = restored_state["params"]
+
+    s_dense_exp = np.repeat(np.repeat(s_dense_np, 128, axis=0), 128, axis=1)[:160, :192]
+    expected_dense = jnp.asarray((q_dense_np.astype(np.float32) * s_dense_exp).T).astype(jnp.bfloat16)
+    np.testing.assert_array_equal(
+        np.asarray(restored["decoder"]["dense_layers"]["mlp"]["wi_0"]["kernel"][:, 0, :], dtype=np.float32),
+        np.asarray(expected_dense, dtype=np.float32),
+    )
+
+    for e_idx, (q_e, s_e) in enumerate(((q_exp0_np, s_exp0_np), (q_exp1_np, s_exp1_np))):
+      expected_exp = jnp.asarray((q_e.astype(np.float32) * s_e[0, 0]).T).astype(jnp.bfloat16)
+      np.testing.assert_array_equal(
+          np.asarray(
+              restored["decoder"]["moe_layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi_0"][e_idx, 0],
+              dtype=np.float32,
+          ),
+          np.asarray(expected_exp, dtype=np.float32),
+      )
+
+    # Gate bias keeps fp32 precision without rounding to bf16.
+    bias_out = restored["decoder"]["moe_layers"]["DeepSeekMoeBlock_0"]["MoeBlock_0"]["gate"]["bias"]
+    self.assertEqual(bias_out.dtype, jnp.float32)
+    np.testing.assert_allclose(np.asarray(bias_out[0]), gate_bias)
+
+  def test_load_safetensors_dynamic_deepseek_v4_mxfp4_and_fp8_non_streaming(self):
+    """Non-streaming Orbax path dequantizes DeepSeek-V4 packed MXFP4 (`int8` + `.scale`) and FP8 weights."""
+    if os.getenv("JAX_PLATFORMS") == "proxy":
+      self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
+
+    (self.safetensors_ckpt_dir / "config.json").write_text(
+        json.dumps({"quantization_config": {"quant_method": "fp8", "weight_block_size": [32, 32]}})
+    )
+
+    rng = np.random.RandomState(23)
+    # Unrolled prefix layer 0: FP8 wq_a (32, 64) + uint8 E8M0 scale (1, 2), and MXFP4 expert (16, 32 packed -> 16, 64)
+    q_wqa = np.asarray(jnp.asarray(rng.randn(32, 64), dtype=jnp.float8_e4m3fn))
+    s_wqa = rng.randint(124, 131, size=(1, 2), dtype=np.uint8)
+    packed_exp = rng.randint(-128, 128, size=(16, 32), dtype=np.int8)
+    s_exp = rng.randint(123, 132, size=(16, 2), dtype=np.uint8)
+    tid2eid = np.arange(8, dtype=np.int32).reshape(2, 4)
+
+    safetensors.numpy.save_file(
+        {
+            "layers.0.attn.wq_a.weight": q_wqa,
+            "layers.0.attn.wq_a.scale": s_wqa,
+            "layers.0.ffn.experts.0.w1.weight": packed_exp,
+            "layers.0.ffn.experts.0.w1.scale": s_exp,
+            "layers.0.ffn.gate.tid2eid": tid2eid,
+        },
+        str(self.safetensors_ckpt_path),
+    )
+
+    class MockDeepSeekV4Config:
+      """Minimal DeepSeek-V4 config for non-streaming MXFP4/FP8 load tests."""
+
+      def __init__(self):
+        self.model_name = "deepseek4-284b"
+        self.base_output_directory = "gs://dummy-bucket"
+        self.scan_layers = False
+        self.param_scan_axis = 1
+        self.hf_access_token = None
+        self.safetensors_dynamic_streaming = False
+        self.base_num_decoder_layers = 1
+        self.first_num_hash_layers = 1
+        self.num_experts = 1
+        self.compress_ratios = [0]
+        self.mtp_num_layers = 0
+
+    config = MockDeepSeekV4Config()
+    target_tree = {
+        "decoder": {
+            "layers_0": {
+                "self_attention": {
+                    "wq_a": {"kernel": jax.ShapeDtypeStruct((64, 32), jnp.bfloat16, sharding=self.sharding)},
+                },
+                "mlp": {
+                    "MoeBlock_0": {
+                        "tid2eid": jax.ShapeDtypeStruct((2, 4), jnp.int32, sharding=self.sharding),
+                        "wi_0": jax.ShapeDtypeStruct((1, 64, 16), jnp.bfloat16, sharding=self.sharding),
+                    }
+                },
+            }
+        }
+    }
+
+    _, restored_state = load_dynamic.load_safetensors_dynamic_state(str(self.safetensors_ckpt_dir), target_tree, config)
+    restored = restored_state["params"]
+
+    s_wqa_ref = np.repeat(np.repeat(np.ldexp(np.float32(1.0), s_wqa.astype(np.int32) - 127), 32, axis=0), 32, axis=1)
+    expected_wqa = jnp.asarray((q_wqa.astype(np.float32) * s_wqa_ref).T).astype(jnp.bfloat16)
+    np.testing.assert_array_equal(
+        np.asarray(restored["decoder"]["layers_0"]["self_attention"]["wq_a"]["kernel"], dtype=np.float32),
+        np.asarray(expected_wqa, dtype=np.float32),
+    )
+
+    lut = np.array(param_mapping._FP4_E2M1_VALUES, dtype=np.float32)  # pylint: disable=protected-access
+    u8 = packed_exp.view(np.uint8)
+    unpacked_ref = np.stack([lut[u8 & 0xF], lut[(u8 >> 4) & 0xF]], axis=-1).reshape(16, 64)
+    s_exp_ref = np.repeat(np.ldexp(np.float32(1.0), s_exp.astype(np.int32) - 127), 32, axis=1)
+    expected_exp = jnp.asarray((unpacked_ref * s_exp_ref).T).astype(jnp.bfloat16)
+    np.testing.assert_array_equal(
+        np.asarray(restored["decoder"]["layers_0"]["mlp"]["MoeBlock_0"]["wi_0"][0], dtype=np.float32),
+        np.asarray(expected_exp, dtype=np.float32),
+    )
+    np.testing.assert_array_equal(
+        np.asarray(restored["decoder"]["layers_0"]["mlp"]["MoeBlock_0"]["tid2eid"]),
+        tid2eid,
+    )
+
 
 class LeadingAxisShardingTest(parameterized.TestCase):
   """On several processes, each HF tensor is split along its leading axis only and loads unchanged."""
@@ -857,6 +1055,84 @@ class LeadingAxisShardingTest(parameterized.TestCase):
     self.assertEqual(loaded["model.embed_tokens.weight"].sharding.spec, PartitionSpec(("process", "local")))
     self.assertEqual(loaded["model.layers.0.mlp.gate.weight"].sharding.spec, PartitionSpec("process"))
     self.assertEqual(loaded["model.norm.weight"].sharding.spec, PartitionSpec())
+
+  def test_leading_axis_sharded_dequantization_fp8_and_mxfp4(self):
+    """Multi-group leading-axis sharded weights (aligned and unaligned blocks) dequantize accurately."""
+    if os.getenv("JAX_PLATFORMS") == "proxy":
+      self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for two device groups.")
+
+    ckpt_dir = epath.Path(self.create_tempdir().full_path)
+    n = jax.device_count()
+    rng = np.random.RandomState(31)
+
+    # Case 1: unaligned 128x128 blocks where scale rows (2) are fewer than device count (n >= 4).
+    rows_fp8 = 128 + 32
+    cols_fp8 = 256
+    q_fp8 = np.asarray(jnp.asarray(rng.randn(rows_fp8, cols_fp8), dtype=jnp.float8_e4m3fn))
+    s_fp8 = (rng.rand(2, 2) + 0.5).astype(np.float32)
+
+    # Case 2: aligned 1x32 MXFP4 where scale.shape[0] == weight.shape[0], both sharded on ("process", "local").
+    rows_fp4 = 4 * n
+    packed_fp4 = rng.randint(-128, 128, size=(rows_fp4, 32), dtype=np.int8)
+    s_fp4 = rng.randint(122, 132, size=(rows_fp4, 2), dtype=np.uint8)
+
+    safetensors.numpy.save_file(
+        {
+            "model.layers.0.mlp.gate_proj.weight": q_fp8,
+            "model.layers.0.mlp.gate_proj.weight_scale_inv": s_fp8,
+            "layers.0.ffn.experts.0.w1.weight": packed_fp4,
+            "layers.0.ffn.experts.0.w1.scale": s_fp4,
+        },
+        str(ckpt_dir / "model.safetensors"),
+    )
+
+    hf_state = load_dynamic.load_sharded_hf_state(str(ckpt_dir), num_groups=2)
+    self.assertEqual(hf_state["model.layers.0.mlp.gate_proj.weight"].sharding.spec, PartitionSpec(("process", "local")))
+    self.assertEqual(hf_state["layers.0.ffn.experts.0.w1.weight"].sharding.spec, PartitionSpec(("process", "local")))
+    self.assertEqual(hf_state["layers.0.ffn.experts.0.w1.scale"].sharding.spec, PartitionSpec(("process", "local")))
+
+    mesh = Mesh(np.array(jax.devices()), ("x",))
+    target = {
+        "fp8": jax.ShapeDtypeStruct((cols_fp8, rows_fp8), jnp.bfloat16, sharding=NamedSharding(mesh, PartitionSpec())),
+        "fp4": jax.ShapeDtypeStruct((64, rows_fp4), jnp.bfloat16, sharding=NamedSharding(mesh, PartitionSpec())),
+    }
+    param_map = {
+        "params-fp8": ("model.layers.0.mlp.gate_proj.weight", "model.layers.0.mlp.gate_proj.weight_scale_inv"),
+        "params-fp4": ("layers.0.ffn.experts.0.w1.weight", "layers.0.ffn.experts.0.w1.scale"),
+    }
+
+    def transpose_hook(x, shape):
+      return x.T.reshape(shape)
+
+    hook_map = {
+        "params-fp8": [
+            lambda pair, shape: param_mapping.dequantize_block_scaled(pair, shape, weight_block_size=(128, 128)),
+            transpose_hook,
+        ],
+        "params-fp4": [param_mapping.dequantize_block_scaled, transpose_hook],
+    }
+
+    class MockCfg:
+      scan_layers = False
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(hf_state, target, param_map, hook_map, MockCfg())["params"]
+
+    s_fp8_ref = np.repeat(np.repeat(s_fp8, 128, axis=0), 128, axis=1)[:rows_fp8, :cols_fp8]
+    expected_fp8 = jnp.asarray((q_fp8.astype(np.float32) * s_fp8_ref).T).astype(jnp.bfloat16)
+    np.testing.assert_array_equal(
+        np.asarray(restored["fp8"], dtype=np.float32), np.asarray(expected_fp8, dtype=np.float32)
+    )
+
+    lut = np.array(param_mapping._FP4_E2M1_VALUES, dtype=np.float32)  # pylint: disable=protected-access
+    u8 = packed_fp4.view(np.uint8)
+    unpacked_ref = np.stack([lut[u8 & 0xF], lut[(u8 >> 4) & 0xF]], axis=-1).reshape(rows_fp4, 64)
+    s_fp4_ref = np.repeat(np.ldexp(np.float32(1.0), s_fp4.astype(np.int32) - 127), 32, axis=1)
+    expected_fp4 = jnp.asarray((unpacked_ref * s_fp4_ref).T).astype(jnp.bfloat16)
+    np.testing.assert_array_equal(
+        np.asarray(restored["fp4"], dtype=np.float32), np.asarray(expected_fp4, dtype=np.float32)
+    )
 
   def test_unequal_device_groups_raise(self):
     abstract_state = {"w": jax.ShapeDtypeStruct((4,), np.float32)}

@@ -51,12 +51,15 @@ The main conversion script uses these mappings to systematically transform each
 parameter from the source checkpoint and build the target checkpoint.
 """
 
+import functools
+import math
 import re
 from typing import Optional
 import warnings
 import numpy as np
 
 import jax
+from jax.experimental import multihost_utils
 import jax.numpy as jnp
 from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 
@@ -1808,6 +1811,293 @@ def QWEN3_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=F
   return hooks
 
 
+# FP4 E2M1 code -> value (sign bit is the high bit of each nibble).
+_FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0)
+
+_DEEPSEEK_FP8_QUANTIZED_SUFFIXES = (
+    "kv_a_proj_with_mqa.weight",
+    "kv_b_proj.weight",
+    "o_proj.weight",
+    "q_proj.weight",
+    "q_a_proj.weight",
+    "q_b_proj.weight",
+    "indexer.wk.weight",
+    "indexer.wq_b.weight",
+    "mlp.gate_proj.weight",
+    "mlp.up_proj.weight",
+    "mlp.down_proj.weight",
+    "gate_proj.weight",
+    "up_proj.weight",
+    "down_proj.weight",
+    "eh_proj.weight",
+)
+
+_DEEPSEEK_V4_QUANTIZED_SUFFIXES = (
+    "attn.wq_a.weight",
+    "attn.wq_b.weight",
+    "attn.wkv.weight",
+    "attn.wo_a.weight",
+    "attn.wo_b.weight",
+    "wgate.weight",
+    "compressor.wkv.weight",
+    "wq_b.weight",
+    "ffn.shared_experts.w1.weight",
+    "ffn.shared_experts.w3.weight",
+    "ffn.shared_experts.w2.weight",
+    "w1.weight",
+    "w3.weight",
+    "w2.weight",
+)
+
+
+def _cfg_get(cfg, key, default=None):
+  """Gets `key` from a config dict or object."""
+  if isinstance(cfg, dict):
+    return cfg.get(key, default)
+  return getattr(cfg, key, default)
+
+
+def _quantization_config_from(cfg):
+  """Returns the quantization_config dict/object from `cfg` or `cfg.text_config`, if any."""
+  for section in (cfg, _cfg_get(cfg, "text_config")):
+    if section is None:
+      continue
+    qcfg = _cfg_get(section, "quantization_config")
+    if qcfg is not None:
+      return qcfg
+  return None
+
+
+def _parse_weight_block_size(cfg):
+  """Extracts `(block_rows, block_cols)` from `cfg`'s `quantization_config`, or None."""
+  qcfg = _quantization_config_from(cfg)
+  if qcfg is None:
+    return None
+  raw = _cfg_get(qcfg, "weight_block_size")
+  if raw is None:
+    return None
+  if isinstance(raw, (list, tuple)):
+    return (int(raw[0]), int(raw[1]))
+  return (int(raw), int(raw))
+
+
+def _deepseek_is_quantized(cfg):
+  """Returns True when checkpoint metadata or loaded keys indicate on-the-fly dequantization."""
+  return bool(_cfg_get(cfg, "_quantized_scale_keys") or _cfg_get(cfg, "_enable_dequantize"))
+
+
+def _pair_hf_weight_with_scale(hf_key, scale_keys, fallback_suffix=None, fallback_quantized_suffixes=None):
+  """Pairs HF weight key(s) with companion scale tensor keys when present."""
+  if isinstance(hf_key, list):
+    return [_pair_hf_weight_with_scale(item, scale_keys, fallback_suffix, fallback_quantized_suffixes) for item in hf_key]
+  if isinstance(hf_key, str):
+    if scale_keys is not None:
+      if f"{hf_key}_scale_inv" in scale_keys:
+        return (hf_key, f"{hf_key}_scale_inv")
+      if hf_key.endswith(".weight"):
+        dot_scale = f"{hf_key[:-len('.weight')]}.scale"
+        if dot_scale in scale_keys:
+          return (hf_key, dot_scale)
+      return hf_key
+    if fallback_quantized_suffixes and hf_key.endswith(fallback_quantized_suffixes):
+      if fallback_suffix == "_scale_inv":
+        return (hf_key, f"{hf_key}_scale_inv")
+      if fallback_suffix == ".scale" and hf_key.endswith(".weight"):
+        return (hf_key, f"{hf_key[:-len('.weight')]}.scale")
+    return hf_key
+  return hf_key
+
+
+def _is_scale_pair(leaf):
+  """Returns True when `leaf` is a `(weight_key, scale_key)` pair rather than a multi-weight tuple."""
+  return (
+      isinstance(leaf, tuple)
+      and len(leaf) == 2
+      and isinstance(leaf[1], str)
+      and leaf[1].endswith(("_scale_inv", ".scale"))
+  )
+
+
+def _attach_dequant_hooks(mapping, param_map, weight_block_size=None):
+  """Prepends `dequantize_block_scaled` for every MaxText key mapped to a `(weight, scale)` pair."""
+  dequant_hook = functools.partial(dequantize_block_scaled, weight_block_size=weight_block_size)
+  for key, source in param_map.items():
+    leaf = source
+    while isinstance(leaf, list):
+      leaf = leaf[0]
+    if _is_scale_pair(leaf):
+      existing = mapping.get(key)
+      if existing is None:
+        mapping[key] = [dequant_hook]
+      elif isinstance(existing, list):
+        mapping[key] = [dequant_hook, *existing]
+      else:
+        mapping[key] = [dequant_hook, existing]
+
+
+def _unpack_quantized_to_fp32(xp, weight):
+  """Unpacks FP8 or packed 4-bit MXFP4 (`int8`/`uint8`, two E2M1 nibbles per byte, low nibble first) to float32."""
+  if weight.dtype not in (np.int8, np.uint8):
+    return weight.astype(xp.float32)
+  if weight.dtype == np.int8:
+    packed = jax.lax.bitcast_convert_type(weight, jnp.uint8) if xp is jnp else weight.view(np.uint8)
+  else:
+    packed = weight
+  codes = xp.stack([packed & 0xF, (packed >> 4) & 0xF], axis=-1).reshape(*weight.shape[:-1], 2 * weight.shape[-1])
+  return xp.take(xp.asarray(_FP4_E2M1_VALUES, dtype=xp.float32), codes.astype(xp.int32))
+
+
+def _decode_scale_to_fp32(xp, scale):
+  """Decodes float or E8M0 (`uint8` / `float8_e8m0fnu`) block scales to float32."""
+  if scale.dtype == np.uint8:
+    if xp is jnp:
+      return jax.lax.bitcast_convert_type(scale, jnp.float8_e8m0fnu).astype(jnp.float32)
+    return np.where(scale == 255, np.nan, np.ldexp(np.float32(1.0), scale.astype(np.int32) - 127)).astype(np.float32)
+  return scale.astype(xp.float32)
+
+
+def _resolve_block_shape(rows, cols, scale_rows, scale_cols, weight_block_size=None):
+  """Resolves `(block_rows, block_cols)` from tensor and scale shapes plus optional config block size."""
+  if weight_block_size is not None:
+    bm, bn = weight_block_size
+    if -(-rows // bm) == scale_rows and -(-cols // bn) == scale_cols:
+      return bm, bn
+  if rows % scale_rows == 0 and cols % scale_cols == 0:
+    return rows // scale_rows, cols // scale_cols
+  return -(-rows // scale_rows), -(-cols // scale_cols)
+
+
+def _dequantize_block_scaled_np(weight, scale, weight_block_size=None):
+  """Dequantizes a host NumPy FP8 / packed MXFP4 weight with its block scale to bfloat16."""
+  w = _unpack_quantized_to_fp32(np, weight)
+  s = _decode_scale_to_fp32(np, scale)
+  rows, cols = w.shape
+  block_rows, block_cols = _resolve_block_shape(rows, cols, s.shape[0], s.shape[1], weight_block_size)
+  if rows == block_rows * s.shape[0] and cols == block_cols * s.shape[1]:
+    blocks = w.reshape(s.shape[0], block_rows, s.shape[1], block_cols)
+    return (blocks * s[:, None, :, None]).reshape(rows, cols).astype(jnp.bfloat16)
+  s = np.repeat(s, block_rows, axis=0)[:rows]
+  s = np.repeat(s, block_cols, axis=1)[:, :cols]
+  return (w * s).astype(jnp.bfloat16)
+
+
+def _local_dequantize(weight, scale, rows, row_offset, local_scale, block_rows, block_cols):
+  """Dequantizes local rows `[row_offset, row_offset + local_rows)` using either local or full `scale`."""
+  w = _unpack_quantized_to_fp32(jnp, weight)
+  s = _decode_scale_to_fp32(jnp, scale)
+  local_rows, cols = w.shape
+  if local_scale:
+    s = jnp.repeat(s, block_rows, axis=0)
+  else:
+    s = jnp.take(s, (row_offset + jnp.arange(local_rows)) // block_rows, axis=0)
+  s = jnp.repeat(s, block_cols, axis=1)[:, :cols]
+  return (w * s).astype(jnp.bfloat16)
+
+
+def _row_axis(sharding):
+  """Returns the mesh axis a load sharding splits dim 0 over, or None."""
+  spec = sharding.spec if isinstance(sharding, jax.sharding.NamedSharding) else ()
+  return spec[0] if len(spec) and spec[0] is not None else None
+
+
+@functools.lru_cache(maxsize=128)
+def _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, rows, block_rows, block_cols, local_scale):
+  """Jitted per-shard dequantization running locally on each TPU chip to avoid XLA block-partitioning bugs."""
+  row_axis = weight_spec[0] if len(weight_spec) else None
+
+  def local(weight, scale):
+    offset = jax.lax.axis_index(row_axis) * weight.shape[0] if row_axis is not None else 0
+    return _local_dequantize(weight, scale, rows, offset, local_scale, block_rows, block_cols)
+
+  return jax.jit(
+      jax.shard_map(local, mesh=mesh, in_specs=(weight_spec, scale_spec), out_specs=weight_spec, check_vma=False)
+  )
+
+
+def _replicate_scale_on_mesh(scale, mesh):
+  """Places `scale` replicated (`PartitionSpec()`) on `mesh`, decoding E8M0/`uint8` locally before any collective."""
+  target_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+  if getattr(scale, "sharding", None) == target_sharding:
+    return scale
+  if scale.is_fully_replicated:
+    return jax.make_array_from_single_device_arrays(
+        scale.shape,
+        target_sharding,
+        [jax.device_put(scale.addressable_shards[0].data, d) for d in mesh.local_devices],
+    )
+  # Decode uint8 / E8M0 scales on their current shards before cross-chip collectives to avoid XLA E8M0 NaNs.
+  if scale.dtype in (np.uint8, jnp.float8_e8m0fnu):
+    scale = jax.jit(lambda x: _decode_scale_to_fp32(jnp, x), out_shardings=scale.sharding)(scale)
+  if scale.is_fully_addressable:
+    return jax.device_put(scale, target_sharding)
+  full_scale = multihost_utils.process_allgather(scale, tiled=True)
+  return jax.make_array_from_single_device_arrays(
+      full_scale.shape,
+      target_sharding,
+      [jax.device_put(full_scale, d) for d in mesh.local_devices],
+  )
+
+
+def _dequantize_on_device(weight, scale, weight_block_size=None):
+  """Dequantizes a device `weight` with its block `scale` per shard, returning BF16 with `weight`'s row sharding."""
+  if any(axis is not None for axis in tuple(weight.sharding.spec)[1:]):
+    if not weight.is_fully_addressable:
+      raise ValueError(f"Per-shard dequantization expects a weight split along dim 0 only, got {weight.sharding.spec}.")
+    devs = sorted(weight.sharding.device_set, key=lambda d: d.id)
+    row_mesh = jax.sharding.Mesh(np.array(devs), ("row",))
+    row_spec = jax.sharding.PartitionSpec("row") if weight.shape[0] % len(devs) == 0 else jax.sharding.PartitionSpec()
+    weight = jax.device_put(weight, jax.sharding.NamedSharding(row_mesh, row_spec))
+
+  mesh = weight.sharding.mesh
+  row_axis = _row_axis(weight.sharding)
+  weight_spec = jax.sharding.PartitionSpec(row_axis)
+  unpacked_cols = 2 * weight.shape[1] if weight.dtype in (np.int8, np.uint8) else weight.shape[1]
+  block_rows, block_cols = _resolve_block_shape(
+      weight.shape[0], unpacked_cols, scale.shape[0], scale.shape[1], weight_block_size
+  )
+
+  if row_axis is not None:
+    axes = row_axis if isinstance(row_axis, tuple) else (row_axis,)
+    num_row_shards = math.prod(mesh.shape[ax] for ax in axes)
+  else:
+    num_row_shards = 1
+  local_weight_rows = weight.shape[0] // num_row_shards
+
+  scale_row_aligned = (
+      isinstance(scale.sharding, jax.sharding.NamedSharding)
+      and scale.sharding.mesh == mesh
+      and _row_axis(scale.sharding) == row_axis
+      and weight.shape[0] % block_rows == 0
+      and local_weight_rows % block_rows == 0
+      and scale.shape[0] == weight.shape[0] // block_rows
+  )
+  if scale_row_aligned:
+    scale_spec = jax.sharding.PartitionSpec(row_axis)
+    local_scale = True
+  else:
+    scale = _replicate_scale_on_mesh(scale, mesh)
+    scale_spec = jax.sharding.PartitionSpec()
+    local_scale = False
+
+  fn = _dequantize_shard_map_fn(mesh, weight_spec, scale_spec, weight.shape[0], block_rows, block_cols, local_scale)
+  return fn(weight, scale)
+
+
+def dequantize_block_scaled(pair, target_shape=None, weight_block_size=None):
+  """Dequantizes `(weight, scale)` from FP8 / packed MXFP4 to BF16 (`float32` math per block)."""
+  weight, scale = pair
+  del target_shape
+  if isinstance(weight, jax.Array):
+    if not isinstance(weight.sharding, jax.sharding.NamedSharding):
+      devs = sorted(weight.sharding.device_set, key=lambda d: d.id)
+      weight = jax.device_put(
+          weight,
+          jax.sharding.NamedSharding(jax.sharding.Mesh(np.array(devs), ("copies",)), jax.sharding.PartitionSpec()),
+      )
+    return _dequantize_on_device(weight, scale, weight_block_size=weight_block_size)
+  return _dequantize_block_scaled_np(weight, scale, weight_block_size=weight_block_size)
+
+
 def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Generates a parameter mapping from MaxText to HuggingFace Deepseek weight paths.
 
@@ -1948,6 +2238,18 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=Fal
           f"model.layers.{hf_mtp_idx}.mlp.experts.{e}.{hf_key}" for e in range(num_experts)
       ]
 
+  if _deepseek_is_quantized(config):
+    scale_keys = _cfg_get(config, "_quantized_scale_keys")
+    mapping = {
+        k: _pair_hf_weight_with_scale(
+            v,
+            scale_keys,
+            fallback_suffix="_scale_inv",
+            fallback_quantized_suffixes=_DEEPSEEK_FP8_QUANTIZED_SUFFIXES,
+        )
+        for k, v in mapping.items()
+    }
+
   return mapping
 
 
@@ -2026,6 +2328,11 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
     mapping[f"{mtp_prefix}-mtp_{j + 1}_projection-kernel"] = reshape_kernel
     for key in moe_need_reshape:
       mapping[f"{mtp_prefix}-mtp_{j + 1}_transformer_layer-{key}"] = reshape_kernel
+
+  if not saving_to_hf and _deepseek_is_quantized(config):
+    param_map = DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=scan_layers)
+    weight_block_size = _parse_weight_block_size(config) or (128, 128)
+    _attach_dequant_hooks(mapping, param_map, weight_block_size=weight_block_size)
 
   return mapping
 
@@ -4574,6 +4881,18 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=
         compressor_type=None,
     )
 
+  if _deepseek_is_quantized(config):
+    scale_keys = _cfg_get(config, "_quantized_scale_keys")
+    mapping = {
+        k: _pair_hf_weight_with_scale(
+            v,
+            scale_keys,
+            fallback_suffix=".scale",
+            fallback_quantized_suffixes=_DEEPSEEK_V4_QUANTIZED_SUFFIXES,
+        )
+        for k, v in mapping.items()
+    }
+
   return mapping
 
 
@@ -4730,6 +5049,11 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
     mapping[f"{mtp_prefix}-mtp_{j + 1}_projection-kernel"] = reshape_mtp_projection
     mapping[f"{mtp_prefix}-hc_head-hc_fn"] = reshape_kernel
     _attach_layer_hooks(f"{mtp_prefix}-mtp_{j + 1}_transformer_layer")
+
+  if not saving_to_hf and _deepseek_is_quantized(config):
+    param_map = DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=scan_layers)
+    weight_block_size = _parse_weight_block_size(config)
+    _attach_dequant_hooks(mapping, param_map, weight_block_size=weight_block_size)
 
   return mapping
 
