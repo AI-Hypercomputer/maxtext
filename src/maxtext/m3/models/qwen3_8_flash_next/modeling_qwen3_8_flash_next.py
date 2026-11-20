@@ -49,7 +49,7 @@ from maxtext.m3.infra import remat as m3_remat
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as m3_moe
-from maxtext.m3.core.sharding import DefaultSharding, Sharding, param_metadata
+from maxtext.m3.core.sharding import DefaultSharding, Sharding, TensorType, param_metadata
 
 # =================================================================================================
 # Normalization layers and 4-stream gated residual (hyper-connection)
@@ -125,38 +125,69 @@ def l2norm(x: jax.Array, dim: int = -1, eps: float = 1e-6) -> jax.Array:
   return (x_f32 * jax.lax.rsqrt(jnp.sum(jnp.square(x_f32), axis=dim, keepdims=True) + eps)).astype(x.dtype)
 
 
-_BATCH_MESH_AXES = ("data", "stage", "fsdp", "fsdp_transpose", "expert")
+def _mesh_axis_names(entry: Any) -> tuple[str, ...]:
+  """Mesh axis names carried by one `PartitionSpec` entry."""
+  if entry is None:
+    return ()
+  return (entry,) if isinstance(entry, str) else tuple(entry)
 
 
-def get_batch_mesh_axes() -> tuple[str, ...]:
-  """Returns active batch mesh axis names when a multi-device mesh is set."""
+def get_batch_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
+  """Returns the active mesh axes `sharding` maps the `batch` axis onto when a multi-device mesh is set."""
   mesh = jax.sharding.get_abstract_mesh()
   if mesh.empty or mesh.size <= 1:
     return ()
-  return tuple(ax for ax in _BATCH_MESH_AXES if mesh.shape.get(ax, 1) > 1)
+  spec = (sharding or DefaultSharding())("batch", ("batch",), TensorType.ACTIVATION)
+  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
 
 
-def shard_batch(x: jax.Array) -> jax.Array:
-  """Constrains axis 0 of x to active batch mesh axes when a multi-device mesh is set.
+def get_length_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
+  """Returns the active mesh axes `sharding` maps the `length` axis onto when a multi-device mesh is set."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or mesh.size <= 1:
+    return ()
+  spec = (sharding or DefaultSharding())("length", ("length",), TensorType.ACTIVATION)
+  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
 
-  Batches that don't divide evenly over the batch shards (e.g. batch-1 decode) are left unconstrained, matching the
-  unsharded fallback in `Qwen3_8Experts`.
+
+def get_heads_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
+  """Returns the active mesh axes `sharding` maps the `heads` axis onto when a multi-device mesh is set."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or mesh.size <= 1:
+    return ()
+  spec = (sharding or DefaultSharding())("q", ("heads",), TensorType.ACTIVATION)
+  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
+
+
+def shard_batch(x: jax.Array, sharding: Sharding | None = None) -> jax.Array:
+  """Constrains batch (and sequence length when active) of `x` on multi-device AUTO meshes.
+
+  Dimensions that don't divide evenly over their active mesh axes (e.g. batch-1 decode) are left unconstrained,
+  matching the unsharded fallback in `Qwen3_8Experts`.
   """
   if x.ndim == 0:
     return x
-  batch_axes = get_batch_mesh_axes()
-  if not batch_axes:
-    return x
   mesh = jax.sharding.get_abstract_mesh()
-  if x.shape[0] % math.prod(mesh.shape[ax] for ax in batch_axes) != 0:
+  if mesh.empty or mesh.size <= 1 or any(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types):
     return x
-  spec = jax.sharding.PartitionSpec(batch_axes, *([None] * (x.ndim - 1)))
+  batch_axes = get_batch_mesh_axes(sharding)
+  b_spec = batch_axes if (batch_axes and x.shape[0] % math.prod(mesh.shape[ax] for ax in batch_axes) == 0) else None
+  length_axes = get_length_mesh_axes(sharding) if x.ndim >= 2 else ()
+  l_spec = length_axes if (length_axes and x.shape[1] % math.prod(mesh.shape[ax] for ax in length_axes) == 0) else None
+  if b_spec is None and l_spec is None:
+    return x
+  if x.ndim == 1:
+    spec = jax.sharding.PartitionSpec(b_spec)
+  else:
+    spec = jax.sharding.PartitionSpec(b_spec, l_spec, *([None] * (x.ndim - 2)))
   return jax.lax.with_sharding_constraint(x, spec)
 
 
-def init_hyper_connection_streams(token_embeddings: jax.Array, hc_count: int = 4) -> jax.Array:
+def init_hyper_connection_streams(
+    token_embeddings: jax.Array, hc_count: int = 4, *, sharding: Sharding | None = None
+) -> jax.Array:
   """Initializes residual stream by replicating token embeddings across streams."""
-  return shard_batch(jnp.concatenate([token_embeddings] * hc_count, axis=-1))
+  return shard_batch(jnp.concatenate([token_embeddings] * hc_count, axis=-1), sharding)
 
 
 class Qwen3_8GatedResidual(nnx.Module):
@@ -607,6 +638,21 @@ class Qwen3_8RotaryEmbedding(nnx.Module):
     return jnp.cos(emb).astype(x.dtype), jnp.sin(emb).astype(x.dtype)
 
 
+def _compute_qsa_doc_start(segment_ids: jax.Array) -> jax.Array:
+  """Computes first token index of each token's document segment in O(B * S log S) without O(S^2) masks."""
+  s = segment_ids.shape[-1]
+
+  def _row_doc_start(seg_row: jax.Array) -> jax.Array:
+    pos = jnp.arange(s, dtype=jnp.int32)
+    sorted_seg, sorted_pos = jax.lax.sort([seg_row.astype(jnp.int32), pos], dimension=-1, is_stable=True)
+    is_first = jnp.concatenate([jnp.ones((1,), dtype=bool), sorted_seg[1:] != sorted_seg[:-1]], axis=-1)
+    first_sorted_idx = jax.lax.associative_scan(jnp.maximum, jnp.where(is_first, pos, 0), axis=-1)
+    sorted_doc_start = jnp.where(sorted_seg != 0, jnp.take_along_axis(sorted_pos, first_sorted_idx, axis=-1), 0)
+    return jnp.zeros((s,), dtype=jnp.int32).at[sorted_pos].set(sorted_doc_start)
+
+  return jax.vmap(_row_doc_start)(segment_ids)
+
+
 class Qwen3_8QSAIndexer(nnx.Module):
   """MQA micro-block indexer selecting top-k complete blocks for QSA."""
 
@@ -621,6 +667,7 @@ class Qwen3_8QSAIndexer(nnx.Module):
       eps: float = 1e-6,
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
+      sharding: Sharding | None = None,
       *,
       mask_mode: str = "gather",
       rngs: nnx.Rngs,
@@ -634,6 +681,7 @@ class Qwen3_8QSAIndexer(nnx.Module):
       )
     if mask_mode not in ("gather", "reshape"):
       raise ValueError(f"Expected mask_mode in ('gather', 'reshape'), got {mask_mode!r}.")
+    self.sharding = sharding or DefaultSharding()
     self.index_head_dim, self.index_n_heads = index_head_dim, index_n_heads
     self.token_budget = token_budget
     self.compress_ratio, self.block_topk = compress_ratio, token_budget // compress_ratio
@@ -651,6 +699,8 @@ class Qwen3_8QSAIndexer(nnx.Module):
       attention_mask: jax.Array | None = None,
       segment_ids: jax.Array | None = None,
       return_token_mask: bool = True,
+      *,
+      doc_start: jax.Array | None = None,
   ) -> tuple[jax.Array | None, jax.Array]:
     """Computes sparse token mask (B, 1, S, S) and document-local block indices (B, S, topk).
 
@@ -661,6 +711,7 @@ class Qwen3_8QSAIndexer(nnx.Module):
       segment_ids: Optional (B, S) 1-indexed document IDs (0 = padding); when both are given, padding from
         attention_mask is folded into segment_ids.
       return_token_mask: Whether to construct and return the (B, 1, S, S) boolean token mask.
+      doc_start: Optional precomputed (B, S) document-start token indices when `return_token_mask` is False.
 
     Returns:
       Tuple of (token_mask_or_none, selected_block_indices).
@@ -671,45 +722,139 @@ class Qwen3_8QSAIndexer(nnx.Module):
     b, s, _ = hidden_states.shape
     c = self.compress_ratio
     full_cos, full_sin = position_embeddings
-    curr_cos, curr_sin = full_cos[:, -s:, :], full_sin[:, -s:, :]
+    mod: Qwen3_8QSAIndexer = self
+    if not return_token_mask:
+      # Block selection outputs non-differentiable int32 indices; detach inputs and params so
+      # jax.linearize inside outer jax.checkpoint never traces JVP tangents through the indexer.
+      hidden_states = jax.lax.stop_gradient(hidden_states)
+      full_cos = jax.lax.stop_gradient(full_cos)
+      full_sin = jax.lax.stop_gradient(full_sin)
+      gd_ix, params_ix, rest_ix = nnx.split(self, nnx.Param, ...)
+      mod = nnx.merge(gd_ix, jax.tree.map(jax.lax.stop_gradient, params_ix), rest_ix)
 
-    qk = self.index_qk_proj(hidden_states)
+    curr_cos, curr_sin = full_cos[:, -s:, :], full_sin[:, -s:, :]
+    qk = mod.index_qk_proj(hidden_states)
     q_dim = self.index_n_heads * self.index_head_dim
-    q = self.q_layernorm(qk[..., :q_dim].reshape(b, s, self.index_n_heads, self.index_head_dim))
+    q = mod.q_layernorm(qk[..., :q_dim].reshape(b, s, self.index_n_heads, self.index_head_dim))
     q_rot = apply_rotary_pos_emb(q, cos=curr_cos, sin=curr_sin, unsqueeze_dim=2)
     assert isinstance(q_rot, jax.Array)
     raw_keys = qk[..., q_dim:].reshape(b, s, self.index_head_dim)
+    if not return_token_mask:
+      _, _, updated_rest_ix = nnx.split(mod, nnx.Param, ...)
+      if jax.tree.leaves(updated_rest_ix):
+        nnx.update(self, updated_rest_ix)
 
     unpacked = segment_ids is None and attention_mask is None
-    if segment_ids is None:
-      segment_ids = jnp.ones((b, s), dtype=jnp.int32)
-    if attention_mask is not None:
-      segment_ids = jnp.where(attention_mask != 0, segment_ids, 0)
-
-    same_doc = (segment_ids[:, :, None] == segment_ids[:, None, :]) & (segment_ids[:, :, None] != 0)
-    doc_start = jnp.argmax(same_doc, axis=-1)
     num_blocks = max(1, s // c)
-    local_pos, end_t = jnp.arange(s)[None, :] - doc_start, jnp.clip(jnp.arange(s) + c - 1, 0, s - 1)
-    is_block_start = (
-        (segment_ids != 0)
-        & ((local_pos % c) == 0)
-        & ((jnp.arange(s) + c - 1 < s)[None, :])
-        & (segment_ids[:, end_t] == segment_ids)
-    )
+    if return_token_mask:
+      if segment_ids is None:
+        segment_ids = jnp.ones((b, s), dtype=jnp.int32)
+      if attention_mask is not None:
+        segment_ids = jnp.where(attention_mask != 0, segment_ids, 0)
+      same_doc = (segment_ids[:, :, None] == segment_ids[:, None, :]) & (segment_ids[:, :, None] != 0)
+      doc_start = jnp.argmax(same_doc, axis=-1)
+      local_pos, end_t = jnp.arange(s)[None, :] - doc_start, jnp.clip(jnp.arange(s) + c - 1, 0, s - 1)
+      is_block_start = (
+          (segment_ids != 0)
+          & ((local_pos % c) == 0)
+          & ((jnp.arange(s) + c - 1 < s)[None, :])
+          & (segment_ids[:, end_t] == segment_ids)
+      )
+      group_starts = jax.vmap(lambda m: jnp.nonzero(m, size=num_blocks, fill_value=0)[0])(is_block_start)
+      block_valid = jnp.arange(num_blocks)[None, :] < jnp.sum(is_block_start.astype(jnp.int32), axis=-1, keepdims=True)
+      block_seg_ids = jnp.take_along_axis(segment_ids, group_starts, axis=1)
+      block_token_idx = jnp.clip(group_starts[:, :, None] + jnp.arange(c)[None, None, :], 0, s - 1)
+      block_keys_raw = jax.vmap(lambda k, idx: k[idx])(raw_keys, block_token_idx)
+      pooled_keys = mod.k_layernorm(jnp.mean(block_keys_raw.astype(jnp.float32), axis=2).astype(raw_keys.dtype))
+      cos_blk = jax.vmap(lambda cb, idx: cb[idx])(full_cos, group_starts)
+      sin_blk = jax.vmap(lambda sb, idx: sb[idx])(full_sin, group_starts)
+      res = apply_rotary_pos_emb(pooled_keys[:, :, None, :], cos=cos_blk, sin=sin_blk, unsqueeze_dim=2)
+      assert isinstance(res, jax.Array)
+      block_keys = res.squeeze(2)
+    else:
+      same_doc = None
+      mesh = jax.sharding.get_abstract_mesh()
+      sharding_obj = getattr(self, "sharding", None) or DefaultSharding()
+      use_seq_ag = (
+          not mesh.empty
+          and mesh.size > 1
+          and not any(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types)
+          and bool(get_length_mesh_axes(sharding_obj))
+      )
+      b_axes = get_batch_mesh_axes(sharding_obj) if use_seq_ag else ()
+      b_shards = math.prod(mesh.shape[ax] for ax in b_axes) if b_axes else 1
+      b_spec = b_axes if (b_axes and b % b_shards == 0) else None
+      concrete_mesh: jax.sharding.Mesh | None = None
+      if use_seq_ag:
+        try:
+          cand_mesh = jax.sharding.get_mesh()
+          if isinstance(cand_mesh, jax.sharding.Mesh) and not cand_mesh.empty:
+            concrete_mesh = cand_mesh
+        except ValueError:
+          concrete_mesh = None
+        if concrete_mesh is None and isinstance(getattr(raw_keys, "sharding", None), jax.sharding.SingleDeviceSharding):
+          use_seq_ag = False
 
-    group_starts = jax.vmap(lambda m: jnp.nonzero(m, size=num_blocks, fill_value=0)[0])(is_block_start)
-    block_valid = jnp.arange(num_blocks)[None, :] < jnp.sum(is_block_start.astype(jnp.int32), axis=-1, keepdims=True)
-    block_seg_ids = jnp.take_along_axis(segment_ids, group_starts, axis=1)
+      def _replicated_on_seq(arr: jax.Array) -> jax.Array:
+        if not use_seq_ag:
+          return arr
+        sp = jax.sharding.PartitionSpec(b_spec, *([None] * (arr.ndim - 1)))
+        if concrete_mesh is not None and isinstance(getattr(arr, "sharding", None), jax.sharding.SingleDeviceSharding):
+          return jax.device_put(arr, jax.sharding.NamedSharding(concrete_mesh, sp))
+        return jax.lax.with_sharding_constraint(arr, sp)
 
-    block_token_idx = jnp.clip(group_starts[:, :, None] + jnp.arange(c)[None, None, :], 0, s - 1)
-    block_keys_raw = jax.vmap(lambda k, idx: k[idx])(raw_keys, block_token_idx)
-    pooled_keys = self.k_layernorm(jnp.mean(block_keys_raw.astype(jnp.float32), axis=2).astype(raw_keys.dtype))
-
-    cos_blk = jax.vmap(lambda cb, idx: cb[idx])(full_cos, group_starts)
-    sin_blk = jax.vmap(lambda sb, idx: sb[idx])(full_sin, group_starts)
-    res = apply_rotary_pos_emb(pooled_keys[:, :, None, :], cos=cos_blk, sin=sin_blk, unsqueeze_dim=2)
-    assert isinstance(res, jax.Array)
-    block_keys = res.squeeze(2)
+      if unpacked and s >= c:
+        segment_ids = jnp.ones((b, s), dtype=jnp.int32)
+        doc_start = jnp.zeros((b, s), dtype=jnp.int32)
+        usable_s = num_blocks * c
+        group_starts = jnp.broadcast_to((jnp.arange(num_blocks, dtype=jnp.int32) * c)[None, :], (b, num_blocks))
+        block_valid = jnp.ones((b, num_blocks), dtype=bool)
+        block_seg_ids = jnp.ones((b, num_blocks), dtype=jnp.int32)
+        # Pool keys and slice block RoPE shard-locally along sequence shards before all-gathering compact block_keys.
+        l_axes = get_length_mesh_axes(sharding_obj) if use_seq_ag else ()
+        l_shards = math.prod(mesh.shape[ax] for ax in l_axes) if l_axes else 1
+        keys_src = raw_keys if (not use_seq_ag or usable_s % l_shards == 0) else _replicated_on_seq(raw_keys)
+        cos_src = full_cos if (not use_seq_ag or usable_s % l_shards == 0) else _replicated_on_seq(full_cos)
+        sin_src = full_sin if (not use_seq_ag or usable_s % l_shards == 0) else _replicated_on_seq(full_sin)
+        block_keys_raw = keys_src[:, :usable_s, :].reshape(b, num_blocks, c, self.index_head_dim)
+        pooled_keys = mod.k_layernorm(jnp.mean(block_keys_raw.astype(jnp.float32), axis=2).astype(raw_keys.dtype))
+        cos_blk = cos_src[:, :usable_s:c, :]
+        sin_blk = sin_src[:, :usable_s:c, :]
+        res = apply_rotary_pos_emb(pooled_keys[:, :, None, :], cos=cos_blk, sin=sin_blk, unsqueeze_dim=2)
+        assert isinstance(res, jax.Array)
+        block_keys = _replicated_on_seq(res.squeeze(2))
+      else:
+        if segment_ids is None:
+          segment_ids = jnp.ones((b, s), dtype=jnp.int32)
+        if attention_mask is not None:
+          segment_ids = jnp.where(attention_mask != 0, segment_ids, 0)
+        seg_full = _replicated_on_seq(segment_ids)
+        if doc_start is None:
+          doc_start_full = jnp.zeros((b, s), dtype=jnp.int32) if unpacked else _compute_qsa_doc_start(seg_full)
+        else:
+          doc_start_full = _replicated_on_seq(doc_start)
+        local_pos, end_t = jnp.arange(s)[None, :] - doc_start_full, jnp.clip(jnp.arange(s) + c - 1, 0, s - 1)
+        is_block_start = (
+            (seg_full != 0)
+            & ((local_pos % c) == 0)
+            & ((jnp.arange(s) + c - 1 < s)[None, :])
+            & (seg_full[:, end_t] == seg_full)
+        )
+        group_starts = jax.vmap(lambda m: jnp.nonzero(m, size=num_blocks, fill_value=0)[0])(is_block_start)
+        block_valid = jnp.arange(num_blocks)[None, :] < jnp.sum(is_block_start.astype(jnp.int32), axis=-1, keepdims=True)
+        block_seg_ids = jnp.take_along_axis(seg_full, group_starts, axis=1)
+        keys_full = _replicated_on_seq(raw_keys)
+        cos_full = _replicated_on_seq(full_cos)
+        sin_full = _replicated_on_seq(full_sin)
+        block_token_idx = jnp.clip(group_starts[:, :, None] + jnp.arange(c)[None, None, :], 0, s - 1)
+        block_keys_raw = jnp.take_along_axis(keys_full[:, :, None, :], block_token_idx[:, :, :, None], axis=1)
+        pooled_keys = mod.k_layernorm(jnp.mean(block_keys_raw.astype(jnp.float32), axis=2).astype(raw_keys.dtype))
+        cos_blk = jnp.take_along_axis(cos_full, group_starts[:, :, None], axis=1)
+        sin_blk = jnp.take_along_axis(sin_full, group_starts[:, :, None], axis=1)
+        res = apply_rotary_pos_emb(pooled_keys[:, :, None, :], cos=cos_blk, sin=sin_blk, unsqueeze_dim=2)
+        assert isinstance(res, jax.Array)
+        block_keys = _replicated_on_seq(res.squeeze(2))
+        doc_start = doc_start_full
 
     raw_scores = jnp.einsum("bthd,bmd->bthm", q_rot.astype(jnp.float32), block_keys.astype(jnp.float32))
     scores = jnp.sum(jax.nn.relu(raw_scores), axis=2) / jnp.sqrt(float(self.index_head_dim))
@@ -723,6 +868,7 @@ class Qwen3_8QSAIndexer(nnx.Module):
 
     k_top = min(self.block_topk, num_blocks)
     top_vals, top_indices = jax.lax.top_k(jnp.where(valid_q_block, scores, -1e9), k_top)
+    # Shard-local doc_start slice when queries are sequence-sharded along axis 1.
     doc_local_idx = (jnp.take_along_axis(group_starts[:, None, :], top_indices, axis=2) - doc_start[:, :, None]) // c
     selected_block_indices = jnp.where(top_vals > -1e8, doc_local_idx, -1).astype(jnp.int32)
     if self.block_topk > k_top:
@@ -732,6 +878,7 @@ class Qwen3_8QSAIndexer(nnx.Module):
 
     if not return_token_mask:
       return None, selected_block_indices
+    assert same_doc is not None
     if self.mask_mode == "reshape" and s <= self.token_budget:
       ar_k, ar_q = jnp.arange(s)[None, None, :], jnp.arange(s)[None, :, None]
       token_mask = (same_doc & (ar_k <= ar_q))[:, None, :, :]
@@ -765,6 +912,40 @@ class Qwen3_8QSAIndexer(nnx.Module):
     return token_mask, selected_block_indices
 
 
+def pack_qsa_block_mask_32bit(selected_block_indices: jax.Array, num_words: int) -> jax.Array:
+  """Packs document-local selected_block_indices (B, S, topk) into a carry-free 32-bit uint32 bitmap (B, S, num_words)."""
+  if num_words <= 0:
+    raise ValueError(f"Expected num_words > 0, got {num_words}.")
+  idx = jax.lax.stop_gradient(selected_block_indices).astype(jnp.int32)
+  max_block = num_words * 32
+  valid = (idx >= 0) & (idx < max_block)
+  word_idx = jnp.where(valid, idx >> 5, -1)
+  bit_mask = jnp.where(valid, jnp.uint32(1) << (idx & 31).astype(jnp.uint32), jnp.uint32(0))
+
+  word_chunk = 16
+  if num_words <= word_chunk:
+    w_iota = jnp.arange(num_words, dtype=jnp.int32)[None, None, None, :]
+    return jnp.bitwise_or.reduce(
+        jnp.where(word_idx[..., None] == w_iota, bit_mask[..., None], jnp.uint32(0)),
+        axis=2,
+    )
+
+  num_chunks = (num_words + word_chunk - 1) // word_chunk
+  w_chunks = jnp.arange(num_chunks * word_chunk, dtype=jnp.int32).reshape(num_chunks, word_chunk)
+
+  def _pack_word_chunk(carry: None, w_c: jax.Array) -> tuple[None, jax.Array]:
+    chunk_words = jnp.bitwise_or.reduce(
+        jnp.where(word_idx[..., None] == w_c[None, None, None, :], bit_mask[..., None], jnp.uint32(0)),
+        axis=2,
+    )
+    return carry, chunk_words
+
+  _, packed_chunks = jax.lax.scan(_pack_word_chunk, None, w_chunks)
+  b, s, _ = idx.shape
+  packed = packed_chunks.transpose(1, 2, 0, 3).reshape(b, s, num_chunks * word_chunk)
+  return packed[:, :, :num_words] if num_chunks * word_chunk > num_words else packed
+
+
 class Qwen3_8SparseAttention(nnx.Module):
   """Qwen Sparse Attention (QSA) with RMSNorm, gated output, and micro-block indexer."""
 
@@ -785,13 +966,13 @@ class Qwen3_8SparseAttention(nnx.Module):
       eps: float = 1e-6,
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
-      sharding: Any | None = None,
+      sharding: Sharding | None = None,
       *,
       indexer_mask_mode: str = "gather",
       attention_kernel: str = "dense",
       rngs: nnx.Rngs,
   ):
-    del sharding
+    self.sharding = sharding or DefaultSharding()
     if num_query_heads % num_kv_heads != 0:
       raise ValueError(f"num_query_heads ({num_query_heads}) must be divisible by num_kv_heads ({num_kv_heads}).")
     if attention_kernel not in ("dense", "flash"):
@@ -819,6 +1000,7 @@ class Qwen3_8SparseAttention(nnx.Module):
         eps,
         dtype,
         weight_dtype,
+        sharding=self.sharding,
         mask_mode=indexer_mask_mode,
         rngs=rngs,
     )
@@ -858,6 +1040,7 @@ class Qwen3_8SparseAttention(nnx.Module):
         seg_q = jnp.pad(seg_q, ((0, 0), (0, pad_len)), constant_values=-2)
         seg_kv = jnp.pad(seg_kv, ((0, 0), (0, pad_len)), constant_values=-1)
 
+    mesh = jax.sharding.get_abstract_mesh()
     sa_config = tokamax_splash_kernel.SplashConfig(
         block_q=block_size,
         block_kv=block_size,
@@ -869,7 +1052,7 @@ class Qwen3_8SparseAttention(nnx.Module):
         block_kv_dq=block_size,
         fuse_reciprocal=True,
         use_base2_exp=True,
-        interpret=(jax.default_backend() != "tpu"),
+        interpret=(not m3_kernels.is_tpu_mesh(mesh)),
     )
     causal_mask = tokamax_splash_mask.CausalMask(shape=(padded_s, padded_s))
 
@@ -889,15 +1072,27 @@ class Qwen3_8SparseAttention(nnx.Module):
           )
       )(q_b, k_b, v_b, sq_b, skv_b)
 
-    mesh = jax.sharding.get_abstract_mesh()
-    batch_axes = get_batch_mesh_axes()
+    use_shmap = not mesh.empty and mesh.size > 1 and not any(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types)
+    batch_axes = get_batch_mesh_axes(self.sharding) if use_shmap else ()
     batch_shards = math.prod(mesh.shape[ax] for ax in batch_axes) if batch_axes else 1
-    if batch_axes and b % batch_shards == 0:
-      qkv_spec = jax.sharding.PartitionSpec(batch_axes, None, None, None)
-      seg_spec = jax.sharding.PartitionSpec(batch_axes, None) if seg_q is not None else None
+    b_spec: tuple[str, ...] | None = batch_axes if (batch_axes and b % batch_shards == 0) else None
+    concrete_mesh: jax.sharding.Mesh | None = None
+    if use_shmap:
+      try:
+        cand_mesh = jax.sharding.get_mesh()
+        if isinstance(cand_mesh, jax.sharding.Mesh) and not cand_mesh.empty:
+          concrete_mesh = cand_mesh
+      except ValueError:
+        concrete_mesh = None
+      if concrete_mesh is None and isinstance(getattr(q, "sharding", None), jax.sharding.SingleDeviceSharding):
+        use_shmap = False
+    shmap_mesh = concrete_mesh if concrete_mesh is not None else mesh
+    if use_shmap:
+      qkv_spec = jax.sharding.PartitionSpec(b_spec, None, None, None)
+      seg_spec = jax.sharding.PartitionSpec(b_spec, None) if seg_q is not None else None
       out = jax.shard_map(
           _run_batch,
-          mesh=mesh,
+          mesh=shmap_mesh,
           in_specs=(qkv_spec, qkv_spec, qkv_spec, seg_spec, seg_spec),
           out_specs=qkv_spec,
           check_vma=False,
@@ -907,6 +1102,586 @@ class Qwen3_8SparseAttention(nnx.Module):
 
     out = jnp.swapaxes(out[:, :, :s, :], 1, 2)
     return out.reshape(b, s, self.num_query_heads * self.head_dim)
+
+  def flash_block_sparse_attention(
+      self,
+      query_states: jax.Array,
+      key_states: jax.Array,
+      value_states: jax.Array,
+      selected_block_indices: jax.Array,
+      *,
+      attention_mask: jax.Array | None = None,
+      segment_ids: jax.Array | None = None,
+      doc_start: jax.Array | None = None,
+      block_q: int | None = None,
+      block_kv: int | None = None,
+      sharding: Sharding | None = None,
+      kv_sharded_on_length: bool = False,
+  ) -> jax.Array:
+    """Runs tiled online-softmax FlashAttention with a packed 32-bit block bitmap and LSE custom_vjp."""
+    b, s, h_q, d = query_states.shape
+    c = self.indexer.compress_ratio
+    num_blocks = max(1, s // c)
+    scale = 1.0 / math.sqrt(float(d))
+
+    if block_q is None:
+      b_q = 512 if s >= 1024 else max(c, ((max(8, s // 4) + c - 1) // c) * c)
+    else:
+      b_q = block_q
+    if block_kv is None:
+      b_kv = (1024 if s >= 2048 else 512) if s >= 1024 else b_q
+    else:
+      b_kv = block_kv
+
+    tile_lcm = math.lcm(b_q, b_kv)
+    pad_len = (tile_lcm - s % tile_lcm) % tile_lcm
+    s_pad = s + pad_len
+
+    unpacked = segment_ids is None and attention_mask is None
+    if unpacked:
+      seg = jnp.ones((b, s), dtype=jnp.int32)
+      local_pos = jnp.broadcast_to(jnp.arange(s, dtype=jnp.int32)[None, :], (b, s))
+    else:
+      seg = jnp.ones((b, s), dtype=jnp.int32) if segment_ids is None else segment_ids.astype(jnp.int32)
+      if attention_mask is not None:
+        seg = jnp.where(attention_mask != 0, seg, 0)
+      if doc_start is None:
+        doc_start = _compute_qsa_doc_start(seg)
+      local_pos = jnp.arange(s, dtype=jnp.int32)[None, :] - doc_start
+
+    fast_unpacked = unpacked and (pad_len == 0) and (s % c == 0) and (b_kv % (32 * c) == 0)
+    num_words = max(1, (s_pad // c) // 32) if fast_unpacked else max(1, (num_blocks + 31) // 32)
+    packed_mask = pack_qsa_block_mask_32bit(selected_block_indices, num_words)
+
+    q, k, v = query_states, key_states, value_states
+    if pad_len > 0:
+      q = jnp.pad(q, ((0, 0), (0, pad_len), (0, 0), (0, 0)))
+      k = jnp.pad(k, ((0, 0), (0, pad_len), (0, 0), (0, 0)))
+      v = jnp.pad(v, ((0, 0), (0, pad_len), (0, 0), (0, 0)))
+      packed_mask = jnp.pad(packed_mask, ((0, 0), (0, pad_len), (0, 0)))
+      seg = jnp.pad(seg, ((0, 0), (0, pad_len)), constant_values=0)
+      local_pos = jnp.pad(local_pos, ((0, 0), (0, pad_len)), constant_values=0)
+
+    mesh = jax.sharding.get_abstract_mesh()
+    sharding_obj = sharding or getattr(self, "sharding", None) or DefaultSharding()
+    use_sharding = (
+        not mesh.empty and mesh.size > 1 and not any(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types)
+    )
+    batch_axes = get_batch_mesh_axes(sharding_obj) if use_sharding else ()
+    batch_shards = math.prod(mesh.shape[ax] for ax in batch_axes) if batch_axes else 1
+    b_spec: tuple[str, ...] | None = batch_axes if (batch_axes and b % batch_shards == 0) else None
+
+    head_axes = get_heads_mesh_axes(sharding_obj) if use_sharding else ()
+    head_shards = math.prod(mesh.shape[ax] for ax in head_axes) if head_axes else 1
+    h_kv_total = k.shape[2]
+    tp_spec: tuple[str, ...] | None = None
+    if head_axes and h_q % head_shards == 0:
+      if h_kv_total % head_shards == 0:
+        tp_spec = head_axes
+      elif head_shards % h_kv_total == 0:
+        rep = head_shards // h_kv_total
+        k = jnp.repeat(k, rep, axis=2)
+        v = jnp.repeat(v, rep, axis=2)
+        tp_spec = head_axes
+
+    length_axes = get_length_mesh_axes(sharding_obj) if use_sharding else ()
+    q_seq_shards = math.prod(mesh.shape[ax] for ax in length_axes) if length_axes else 1
+    use_q_seq_shard_map = bool(length_axes) and s_pad % (q_seq_shards * b_q) == 0
+    length_spec: tuple[str, ...] | None = length_axes if use_q_seq_shard_map else None
+
+    concrete_mesh: jax.sharding.Mesh | None = None
+    if use_sharding:
+      try:
+        cand_mesh = jax.sharding.get_mesh()
+        if isinstance(cand_mesh, jax.sharding.Mesh) and not cand_mesh.empty:
+          concrete_mesh = cand_mesh
+      except ValueError:
+        concrete_mesh = None
+    if use_sharding and concrete_mesh is None:
+      raw_q = getattr(q, "primal", q)
+      if isinstance(getattr(raw_q, "sharding", None), jax.sharding.SingleDeviceSharding):
+        use_sharding = False
+        b_spec, tp_spec, length_spec = None, None, None
+        use_q_seq_shard_map = False
+    shmap_mesh = concrete_mesh if concrete_mesh is not None else mesh
+
+    def _apply_spec(x: jax.Array, spec: jax.sharding.PartitionSpec) -> jax.Array:
+      if concrete_mesh is not None and isinstance(getattr(x, "sharding", None), jax.sharding.SingleDeviceSharding):
+        return jax.device_put(x, jax.sharding.NamedSharding(concrete_mesh, spec))
+      return jax.lax.with_sharding_constraint(x, spec)
+
+    def _constrain_outer(x: jax.Array, *axes: tuple[str, ...] | None) -> jax.Array:
+      if not use_sharding or (b_spec is None and tp_spec is None and length_spec is None):
+        return x
+      return _apply_spec(x, jax.sharding.PartitionSpec(*axes))
+
+    def _constrain(x: jax.Array, *axes: tuple[str, ...] | None) -> jax.Array:
+      if use_q_seq_shard_map or not use_sharding or (b_spec is None and tp_spec is None):
+        return x
+      return _apply_spec(x, jax.sharding.PartitionSpec(*axes))
+
+    use_sharded_kv = kv_sharded_on_length and use_q_seq_shard_map and pad_len == 0
+    kv_seq_spec: tuple[str, ...] | None = length_spec if use_sharded_kv else None
+    seq_axis_name: Any = length_axes[0] if len(length_axes) == 1 else length_axes
+
+    q = _constrain_outer(q, b_spec, length_spec, tp_spec, None)
+    k = _constrain_outer(k, b_spec, kv_seq_spec, tp_spec, None)
+    v = _constrain_outer(v, b_spec, kv_seq_spec, tp_spec, None)
+    packed_mask = checkpoint_name(_constrain_outer(packed_mask, b_spec, length_spec, None), "qsa_packed_mask")
+    seg_q = _constrain_outer(seg, b_spec, length_spec)
+    local_pos_q = _constrain_outer(local_pos, b_spec, length_spec)
+    seg_k = _constrain_outer(seg, b_spec, None)
+    local_pos_k = _constrain_outer(local_pos, b_spec, None)
+    if not unpacked:
+      local_pos_q = checkpoint_name(local_pos_q, "qsa_local_pos")
+      local_pos_k = checkpoint_name(local_pos_k, "qsa_local_pos")
+
+    words_per_kv_tile = max(1, (b_kv // c) // 32)
+
+    def _q_tile_offset(num_q_tiles: int) -> jax.Array:
+      if not use_q_seq_shard_map:
+        return jnp.int32(0)
+      q_shard_idx = jnp.int32(0)
+      for ax in length_axes:
+        q_shard_idx = q_shard_idx * int(mesh.shape[ax]) + jax.lax.axis_index(ax)
+      return q_shard_idx * jnp.int32(num_q_tiles)
+
+    def _tile_valid_mask(
+        mask_t: jax.Array,
+        seg_q_t: jax.Array,
+        local_q_t: jax.Array,
+        seg_k_t: jax.Array,
+        local_k_t: jax.Array,
+        q_tile_idx: jax.Array,
+        kv_tile_idx: jax.Array,
+    ) -> jax.Array:
+      q_idx = q_tile_idx * b_q + jnp.arange(b_q, dtype=jnp.int32)
+      k_idx = kv_tile_idx * b_kv + jnp.arange(b_kv, dtype=jnp.int32)
+      causal = k_idx[None, None, :] <= q_idx[None, :, None]
+      if fast_unpacked:
+        w_start = kv_tile_idx * words_per_kv_tile
+        words = jax.lax.dynamic_slice_in_dim(mask_t, w_start, words_per_kv_tile, axis=-1)
+        bit_shifts_32 = jnp.arange(32, dtype=jnp.uint32)
+        bits = ((words[:, :, :, None] >> bit_shifts_32) & jnp.uint32(1)) != 0
+        blk_bool = bits.reshape(mask_t.shape[0], b_q, b_kv // c)
+        is_selected = jnp.repeat(blk_bool, c, axis=-1)
+        in_tail = k_idx[None, None, :] >= (((q_idx + 1) // c) * c)[None, :, None]
+        return (is_selected | in_tail) & causal
+
+      lblk_k = jnp.clip(local_k_t // c, 0, num_blocks - 1)
+      word_idx = lblk_k >> 5
+      bit_shift = (lblk_k & 31).astype(jnp.uint32)
+      gathered_words = jnp.take_along_axis(mask_t, word_idx[:, None, :], axis=-1)
+      is_selected = ((gathered_words >> bit_shift[:, None, :]) & jnp.uint32(1)) != 0
+      in_tail = local_k_t[:, None, :] >= (((local_q_t + 1) // c) * c)[:, :, None]
+      same_doc = (seg_q_t[:, :, None] == seg_k_t[:, None, :]) & (seg_q_t[:, :, None] != 0)
+      return same_doc & causal & (is_selected | in_tail)
+
+    def _fwd_impl(
+        q_in: jax.Array,
+        k_in: jax.Array,
+        v_in: jax.Array,
+        pmask: jax.Array,
+        seg_q_in: jax.Array,
+        lpos_q_in: jax.Array,
+        seg_k_in: jax.Array,
+        lpos_k_in: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+      k_full = jax.lax.all_gather(k_in, axis_name=seq_axis_name, axis=1, tiled=True) if use_sharded_kv else k_in
+      v_full = jax.lax.all_gather(v_in, axis_name=seq_axis_name, axis=1, tiled=True) if use_sharded_kv else v_in
+      b_loc, s_q_loc, h_q_loc, _ = q_in.shape
+      _, s_kv, h_kv, _ = k_full.shape
+      g = h_q_loc // h_kv
+      num_q_tiles = s_q_loc // b_q
+      num_kv_tiles = s_kv // b_kv
+
+      # Tie loop-invariant index and segment inputs to dynamic activations so outer scan/remat
+      # partial evaluation (_scan_known_hoisting / _cond_partial_eval) never treats tile indices
+      # as statically known and never stacks 6D/7D [num_q_tiles, num_kv_tiles, ...] branch residuals.
+      _unk_zero = jax.lax.optimization_barrier(
+          jnp.sum(q_in[:1, :1, :1, :1].astype(jnp.int32) * 0)
+          + jnp.sum(k_in[:1, :1, :1, :1].astype(jnp.int32) * 0)
+          + jnp.sum(v_in[:1, :1, :1, :1].astype(jnp.int32) * 0)
+      )
+      pmask = pmask + _unk_zero.astype(jnp.uint32)
+      seg_q_in = seg_q_in + _unk_zero
+      lpos_q_in = lpos_q_in + _unk_zero
+      seg_k_in = seg_k_in + _unk_zero
+      lpos_k_in = lpos_k_in + _unk_zero
+      q_tile_indices = _q_tile_offset(num_q_tiles) + jnp.arange(num_q_tiles, dtype=jnp.int32) + _unk_zero
+      kv_tile_indices = jnp.arange(num_kv_tiles, dtype=jnp.int32) + _unk_zero
+
+      q_tiled = _constrain(
+          q_in.reshape(b_loc, num_q_tiles, b_q, h_kv, g, d).transpose(1, 0, 2, 3, 4, 5),
+          None,
+          b_spec,
+          None,
+          tp_spec,
+          None,
+          None,
+      )
+      k_tiled = _constrain(
+          k_full.reshape(b_loc, num_kv_tiles, b_kv, h_kv, d).transpose(1, 0, 2, 3, 4),
+          None,
+          b_spec,
+          None,
+          tp_spec,
+          None,
+      )
+      v_tiled = _constrain(
+          v_full.reshape(b_loc, num_kv_tiles, b_kv, h_kv, d).transpose(1, 0, 2, 3, 4),
+          None,
+          b_spec,
+          None,
+          tp_spec,
+          None,
+      )
+      mask_tiled = _constrain(
+          pmask.reshape(b_loc, num_q_tiles, b_q, num_words).transpose(1, 0, 2, 3),
+          None,
+          b_spec,
+          None,
+          None,
+      )
+      seg_q_tiled = _constrain(seg_q_in.reshape(b_loc, num_q_tiles, b_q).transpose(1, 0, 2), None, b_spec, None)
+      local_q_tiled = _constrain(lpos_q_in.reshape(b_loc, num_q_tiles, b_q).transpose(1, 0, 2), None, b_spec, None)
+      seg_k_tiled = _constrain(seg_k_in.reshape(b_loc, num_kv_tiles, b_kv).transpose(1, 0, 2), None, b_spec, None)
+      local_k_tiled = _constrain(lpos_k_in.reshape(b_loc, num_kv_tiles, b_kv).transpose(1, 0, 2), None, b_spec, None)
+
+      def process_q_tile(carry: None, q_inputs: tuple[jax.Array, ...]) -> tuple[None, tuple[jax.Array, jax.Array]]:
+        del carry
+        q_t, mask_t, seg_q_t, local_q_t, q_tile_idx = q_inputs
+        m_init = _constrain(jnp.full((b_loc, b_q, h_kv, g), -1e30, dtype=jnp.float32), b_spec, None, tp_spec, None)
+        l_init = _constrain(jnp.zeros((b_loc, b_q, h_kv, g), dtype=jnp.float32), b_spec, None, tp_spec, None)
+        acc_init = _constrain(jnp.zeros((b_loc, b_q, h_kv, g, d), dtype=jnp.float32), b_spec, None, tp_spec, None, None)
+
+        def process_kv_tile(
+            kv_carry: tuple[jax.Array, jax.Array, jax.Array],
+            kv_inputs: tuple[jax.Array, ...],
+        ) -> tuple[tuple[jax.Array, jax.Array, jax.Array], None]:
+          m_prev, l_prev, acc_prev = kv_carry
+          k_t, v_t, seg_k_t, local_k_t, kv_tile_idx = kv_inputs
+          q_end = (q_tile_idx + 1) * b_q - 1
+          k_start = kv_tile_idx * b_kv
+
+          def compute_tile(_: None) -> tuple[jax.Array, jax.Array, jax.Array]:
+            valid_mask = _tile_valid_mask(mask_t, seg_q_t, local_q_t, seg_k_t, local_k_t, q_tile_idx, kv_tile_idx)
+            scores = (
+                jnp.einsum(
+                    "bqhgd,bkhd->bqhgk",
+                    q_t,
+                    k_t,
+                    preferred_element_type=jnp.float32,
+                )
+                * scale
+            )
+            scores = jnp.where(valid_mask[:, :, None, None, :], scores, -1e30)
+            m_curr = jnp.max(scores, axis=-1)
+            m_new = jnp.maximum(m_prev, m_curr)
+            alpha = jnp.exp(m_prev - m_new)
+            exp_scores = jnp.exp(jnp.where(valid_mask[:, :, None, None, :], scores - m_new[..., None], -1e30))
+            p = jnp.where(valid_mask[:, :, None, None, :], exp_scores, 0.0)
+            l_new = l_prev * alpha + jnp.sum(p, axis=-1)
+            acc_new = acc_prev * alpha[..., None] + jnp.einsum(
+                "bqhgk,bkhd->bqhgd",
+                p.astype(v_t.dtype),
+                v_t,
+                preferred_element_type=jnp.float32,
+            )
+            return (m_new, l_new, acc_new)
+
+          return (
+              jax.lax.cond(k_start <= q_end, compute_tile, lambda _: (m_prev, l_prev, acc_prev), operand=None),
+              None,
+          )
+
+        (m_fin, l_fin, acc_fin), _ = jax.lax.scan(
+            process_kv_tile,
+            (m_init, l_init, acc_init),
+            (k_tiled, v_tiled, seg_k_tiled, local_k_tiled, kv_tile_indices),
+        )
+        l_safe = jnp.where(l_fin > 0.0, l_fin, 1.0)
+        out_t = (acc_fin / l_safe[..., None]).astype(q_in.dtype)
+        lse_t = jnp.where(l_fin > 0.0, m_fin + jnp.log(l_safe), 0.0)
+        return None, (out_t, lse_t)
+
+      _, (out_tiled, lse_tiled) = jax.lax.scan(
+          process_q_tile,
+          None,
+          (
+              q_tiled,
+              mask_tiled,
+              seg_q_tiled,
+              local_q_tiled,
+              q_tile_indices,
+          ),
+      )
+      out = _constrain(
+          out_tiled.transpose(1, 0, 2, 3, 4, 5).reshape(b_loc, s_q_loc, h_q_loc, d),
+          b_spec,
+          None,
+          tp_spec,
+          None,
+      )
+      lse = _constrain(lse_tiled.transpose(1, 0, 2, 3, 4), b_spec, None, None, tp_spec, None)
+      return out, lse
+
+    @jax.custom_vjp
+    def _kernel(
+        q_in: jax.Array,
+        k_in: jax.Array,
+        v_in: jax.Array,
+        pmask: jax.Array,
+        seg_q_in: jax.Array,
+        lpos_q_in: jax.Array,
+        seg_k_in: jax.Array,
+        lpos_k_in: jax.Array,
+    ) -> jax.Array:
+      out, _ = _fwd_impl(q_in, k_in, v_in, pmask, seg_q_in, lpos_q_in, seg_k_in, lpos_k_in)
+      return out
+
+    def _fwd(
+        q_in: jax.Array,
+        k_in: jax.Array,
+        v_in: jax.Array,
+        pmask: jax.Array,
+        seg_q_in: jax.Array,
+        lpos_q_in: jax.Array,
+        seg_k_in: jax.Array,
+        lpos_k_in: jax.Array,
+    ) -> tuple[jax.Array, tuple[jax.Array, ...]]:
+      out, lse = _fwd_impl(q_in, k_in, v_in, pmask, seg_q_in, lpos_q_in, seg_k_in, lpos_k_in)
+      return out, (q_in, k_in, v_in, pmask, seg_q_in, lpos_q_in, seg_k_in, lpos_k_in, out, lse)
+
+    def _bwd(
+        res: tuple[jax.Array, ...],
+        do: jax.Array,
+    ) -> tuple[jax.Array, jax.Array, jax.Array, None, None, None, None, None]:
+      q_in, k_in, v_in, pmask, seg_q_in, lpos_q_in, seg_k_in, lpos_k_in, out, lse = res
+      k_full = jax.lax.all_gather(k_in, axis_name=seq_axis_name, axis=1, tiled=True) if use_sharded_kv else k_in
+      v_full = jax.lax.all_gather(v_in, axis_name=seq_axis_name, axis=1, tiled=True) if use_sharded_kv else v_in
+      b_loc, s_q_loc, h_q_loc, _ = q_in.shape
+      _, s_kv, h_kv, _ = k_full.shape
+      g = h_q_loc // h_kv
+      num_q_tiles = s_q_loc // b_q
+      num_kv_tiles = s_kv // b_kv
+
+      _unk_zero = jax.lax.optimization_barrier(
+          jnp.sum(do[:1, :1, :1, :1].astype(jnp.int32) * 0)
+          + jnp.sum(q_in[:1, :1, :1, :1].astype(jnp.int32) * 0)
+          + jnp.sum(k_in[:1, :1, :1, :1].astype(jnp.int32) * 0)
+          + jnp.sum(v_in[:1, :1, :1, :1].astype(jnp.int32) * 0)
+      )
+      pmask = pmask + _unk_zero.astype(jnp.uint32)
+      seg_q_in = seg_q_in + _unk_zero
+      lpos_q_in = lpos_q_in + _unk_zero
+      seg_k_in = seg_k_in + _unk_zero
+      lpos_k_in = lpos_k_in + _unk_zero
+      q_tile_indices = _q_tile_offset(num_q_tiles) + jnp.arange(num_q_tiles, dtype=jnp.int32) + _unk_zero
+      kv_tile_indices = jnp.arange(num_kv_tiles, dtype=jnp.int32) + _unk_zero
+
+      q_tiled = _constrain(
+          q_in.reshape(b_loc, num_q_tiles, b_q, h_kv, g, d).transpose(1, 0, 2, 3, 4, 5),
+          None,
+          b_spec,
+          None,
+          tp_spec,
+          None,
+          None,
+      )
+      k_tiled = _constrain(
+          k_full.reshape(b_loc, num_kv_tiles, b_kv, h_kv, d).transpose(1, 0, 2, 3, 4),
+          None,
+          b_spec,
+          None,
+          tp_spec,
+          None,
+      )
+      v_tiled = _constrain(
+          v_full.reshape(b_loc, num_kv_tiles, b_kv, h_kv, d).transpose(1, 0, 2, 3, 4),
+          None,
+          b_spec,
+          None,
+          tp_spec,
+          None,
+      )
+      do_tiled = _constrain(
+          do.reshape(b_loc, num_q_tiles, b_q, h_kv, g, d).transpose(1, 0, 2, 3, 4, 5),
+          None,
+          b_spec,
+          None,
+          tp_spec,
+          None,
+          None,
+      )
+      out_tiled = _constrain(
+          out.reshape(b_loc, num_q_tiles, b_q, h_kv, g, d).transpose(1, 0, 2, 3, 4, 5),
+          None,
+          b_spec,
+          None,
+          tp_spec,
+          None,
+          None,
+      )
+      lse_tiled = _constrain(lse.transpose(1, 0, 2, 3, 4), None, b_spec, None, tp_spec, None)
+      mask_tiled = _constrain(
+          pmask.reshape(b_loc, num_q_tiles, b_q, num_words).transpose(1, 0, 2, 3),
+          None,
+          b_spec,
+          None,
+          None,
+      )
+      seg_q_tiled = _constrain(seg_q_in.reshape(b_loc, num_q_tiles, b_q).transpose(1, 0, 2), None, b_spec, None)
+      local_q_tiled = _constrain(lpos_q_in.reshape(b_loc, num_q_tiles, b_q).transpose(1, 0, 2), None, b_spec, None)
+      seg_k_tiled = _constrain(seg_k_in.reshape(b_loc, num_kv_tiles, b_kv).transpose(1, 0, 2), None, b_spec, None)
+      local_k_tiled = _constrain(lpos_k_in.reshape(b_loc, num_kv_tiles, b_kv).transpose(1, 0, 2), None, b_spec, None)
+
+      delta_tiled = _constrain(
+          jnp.sum(out_tiled.astype(jnp.float32) * do_tiled.astype(jnp.float32), axis=-1),
+          None,
+          b_spec,
+          None,
+          tp_spec,
+          None,
+      )
+      dk_init = _constrain(jnp.zeros_like(k_tiled, dtype=jnp.float32), None, b_spec, None, tp_spec, None)
+      dv_init = _constrain(jnp.zeros_like(v_tiled, dtype=jnp.float32), None, b_spec, None, tp_spec, None)
+
+      def bwd_q_tile(
+          dk_dv_carry: tuple[jax.Array, jax.Array],
+          q_inputs: tuple[jax.Array, ...],
+      ) -> tuple[tuple[jax.Array, jax.Array], jax.Array]:
+        dk_acc, dv_acc = dk_dv_carry
+        q_t, do_t, lse_t, delta_t, mask_t, seg_q_t, local_q_t, q_tile_idx = q_inputs
+        dq_init = _constrain(jnp.zeros((b_loc, b_q, h_kv, g, d), dtype=jnp.float32), b_spec, None, tp_spec, None, None)
+
+        def bwd_kv_tile(
+            dq_carry: jax.Array,
+            kv_inputs: tuple[jax.Array, ...],
+        ) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+          k_t, v_t, dk_t, dv_t, seg_k_t, local_k_t, kv_tile_idx = kv_inputs
+          q_end = (q_tile_idx + 1) * b_q - 1
+          k_start = kv_tile_idx * b_kv
+
+          def compute_bwd(_: None) -> tuple[jax.Array, tuple[jax.Array, jax.Array]]:
+            valid_mask = _tile_valid_mask(mask_t, seg_q_t, local_q_t, seg_k_t, local_k_t, q_tile_idx, kv_tile_idx)
+            scores = (
+                jnp.einsum(
+                    "bqhgd,bkhd->bqhgk",
+                    q_t,
+                    k_t,
+                    preferred_element_type=jnp.float32,
+                )
+                * scale
+            )
+            scores = jnp.where(valid_mask[:, :, None, None, :], scores, -1e30)
+            exp_scores = jnp.exp(jnp.where(valid_mask[:, :, None, None, :], scores - lse_t[..., None], -1e30))
+            p = jnp.where(valid_mask[:, :, None, None, :], exp_scores, 0.0)
+            dv_new = dv_t + jnp.einsum(
+                "bqhgk,bqhgd->bkhd",
+                p.astype(do_t.dtype),
+                do_t,
+                preferred_element_type=jnp.float32,
+            )
+            dp = jnp.einsum(
+                "bqhgd,bkhd->bqhgk",
+                do_t,
+                v_t,
+                preferred_element_type=jnp.float32,
+            )
+            ds = p * (dp - delta_t[..., None]) * scale
+            ds_cast = ds.astype(q_t.dtype)
+            dq_new = dq_carry + jnp.einsum(
+                "bqhgk,bkhd->bqhgd",
+                ds_cast,
+                k_t,
+                preferred_element_type=jnp.float32,
+            )
+            dk_new = dk_t + jnp.einsum(
+                "bqhgk,bqhgd->bkhd",
+                ds_cast,
+                q_t,
+                preferred_element_type=jnp.float32,
+            )
+            return dq_new, (dk_new, dv_new)
+
+          return jax.lax.cond(
+              k_start <= q_end,
+              compute_bwd,
+              lambda _: (dq_carry, (dk_t, dv_t)),
+              operand=None,
+          )
+
+        dq_t, (dk_next, dv_next) = jax.lax.scan(
+            bwd_kv_tile,
+            dq_init,
+            (
+                k_tiled,
+                v_tiled,
+                dk_acc,
+                dv_acc,
+                seg_k_tiled,
+                local_k_tiled,
+                kv_tile_indices,
+            ),
+        )
+        return (dk_next, dv_next), dq_t.astype(q_in.dtype)
+
+      (dk_fin, dv_fin), dq_tiled = jax.lax.scan(
+          bwd_q_tile,
+          (dk_init, dv_init),
+          (
+              q_tiled,
+              do_tiled,
+              lse_tiled,
+              delta_tiled,
+              mask_tiled,
+              seg_q_tiled,
+              local_q_tiled,
+              q_tile_indices,
+          ),
+      )
+      dq = _constrain(
+          dq_tiled.transpose(1, 0, 2, 3, 4, 5).reshape(b_loc, s_q_loc, h_q_loc, d),
+          b_spec,
+          None,
+          tp_spec,
+          None,
+      )
+      dk_full = dk_fin.transpose(1, 0, 2, 3, 4).reshape(b_loc, s_kv, h_kv, d)
+      dv_full = dv_fin.transpose(1, 0, 2, 3, 4).reshape(b_loc, s_kv, h_kv, d)
+      if use_sharded_kv:
+        dk = jax.lax.psum_scatter(dk_full, axis_name=seq_axis_name, scatter_dimension=1, tiled=True).astype(k_in.dtype)
+        dv = jax.lax.psum_scatter(dv_full, axis_name=seq_axis_name, scatter_dimension=1, tiled=True).astype(v_in.dtype)
+      else:
+        dk = _constrain(dk_full.astype(k_in.dtype), b_spec, None, tp_spec, None)
+        dv = _constrain(dv_full.astype(v_in.dtype), b_spec, None, tp_spec, None)
+      return dq, dk, dv, None, None, None, None, None
+
+    _kernel.defvjp(_fwd, _bwd)
+    if use_q_seq_shard_map:
+      pspec = jax.sharding.PartitionSpec
+      out_pad = jax.shard_map(
+          _kernel,
+          mesh=shmap_mesh,
+          in_specs=(
+              pspec(b_spec, length_spec, tp_spec, None),
+              pspec(b_spec, kv_seq_spec, tp_spec, None),
+              pspec(b_spec, kv_seq_spec, tp_spec, None),
+              pspec(b_spec, length_spec, None),
+              pspec(b_spec, length_spec),
+              pspec(b_spec, length_spec),
+              pspec(b_spec, None),
+              pspec(b_spec, None),
+          ),
+          out_specs=pspec(b_spec, length_spec, tp_spec, None),
+          check_vma=False,
+      )(q, k, v, packed_mask, seg_q, local_pos_q, seg_k, local_pos_k)
+    else:
+      out_pad = _kernel(q, k, v, packed_mask, seg_q, local_pos_q, seg_k, local_pos_k)
+    if pad_len > 0:
+      out_pad = out_pad[:, :s, :, :]
+    return out_pad.reshape(b, s, h_q * d)
 
   def __call__(
       self,
@@ -930,21 +1705,41 @@ class Qwen3_8SparseAttention(nnx.Module):
       Attention output tensor, or tuple of (output, selected_block_indices) if return_selected_blocks is True.
     """
     b, s, _ = hidden_states.shape
-    if self.attention_kernel == "flash" and s > self.indexer.token_budget:
-      raise ValueError(
-          f"qsa_attention_kernel='flash' requires seq_len <= token_budget ({self.indexer.token_budget}), got seq_len={s}."
-      )
     if position_ids is None:
       position_ids = jnp.broadcast_to(jnp.arange(s)[None, :], (b, s))
 
     cos, sin = self.rotary_emb(hidden_states, position_ids)
-    selected_token_mask, selected_block_indices = self.indexer(
-        hidden_states,
-        (cos, sin),
-        attention_mask=attention_mask,
-        segment_ids=segment_ids,
-        return_token_mask=(self.attention_kernel == "dense"),
-    )
+    shared_doc_start: jax.Array | None = None
+    if self.attention_kernel == "flash" and (segment_ids is not None or attention_mask is not None):
+      if s > self.indexer.token_budget or return_selected_blocks:
+        seg_for_doc = jnp.ones((b, s), dtype=jnp.int32) if segment_ids is None else segment_ids.astype(jnp.int32)
+        if attention_mask is not None:
+          seg_for_doc = jnp.where(attention_mask != 0, seg_for_doc, 0)
+        mesh_ds = jax.sharding.get_abstract_mesh()
+        if (
+            not mesh_ds.empty
+            and mesh_ds.size > 1
+            and not any(t == jax.sharding.AxisType.Explicit for t in mesh_ds.axis_types)
+            and bool(get_length_mesh_axes(self.sharding))
+        ):
+          b_ax_ds = get_batch_mesh_axes(self.sharding)
+          b_sh_ds = math.prod(mesh_ds.shape[ax] for ax in b_ax_ds) if b_ax_ds else 1
+          b_sp_ds = b_ax_ds if (b_ax_ds and b % b_sh_ds == 0) else None
+          if not isinstance(getattr(seg_for_doc, "sharding", None), jax.sharding.SingleDeviceSharding):
+            seg_for_doc = jax.lax.with_sharding_constraint(seg_for_doc, jax.sharding.PartitionSpec(b_sp_ds, None))
+        shared_doc_start = _compute_qsa_doc_start(seg_for_doc)
+
+    if self.attention_kernel == "flash" and s <= self.indexer.token_budget and not return_selected_blocks:
+      selected_token_mask, selected_block_indices = None, jnp.zeros((b, s, self.indexer.block_topk), dtype=jnp.int32)
+    else:
+      selected_token_mask, selected_block_indices = self.indexer(
+          hidden_states,
+          (cos, sin),
+          attention_mask=attention_mask,
+          segment_ids=segment_ids,
+          return_token_mask=(self.attention_kernel == "dense"),
+          doc_start=shared_doc_start,
+      )
 
     q_and_gate = checkpoint_name(self.q_proj(hidden_states), "query_proj").reshape(
         b, s, self.num_query_heads, 2 * self.head_dim
@@ -963,9 +1758,22 @@ class Qwen3_8SparseAttention(nnx.Module):
     query_states, key_states = res
 
     if self.attention_kernel == "flash":
-      attn_output = self._flash_attention(
-          query_states, key_states, value_states, attention_mask=attention_mask, segment_ids=segment_ids
-      )
+      if s <= self.indexer.token_budget:
+        attn_output = self._flash_attention(
+            query_states, key_states, value_states, attention_mask=attention_mask, segment_ids=segment_ids
+        )
+      else:
+        attn_output = self.flash_block_sparse_attention(
+            query_states,
+            key_states,
+            value_states,
+            selected_block_indices,
+            attention_mask=attention_mask,
+            segment_ids=segment_ids,
+            doc_start=shared_doc_start,
+            sharding=self.sharding,
+            kv_sharded_on_length=True,
+        )
     else:
       assert selected_token_mask is not None
       if (rep := self.num_query_heads // self.num_kv_heads) > 1:
@@ -1395,10 +2203,12 @@ class Qwen3_8NGramEmbedding(nnx.Module):
       ple_layer_index: int = 0,
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
+      sharding: Sharding | None = None,
       *,
       rngs: nnx.Rngs,
   ):
     super().__init__()
+    self.sharding = sharding or DefaultSharding()
     self.ple_embed_dim = ple_embed_dim
     self.ngram_size = ngram_size
     self.heads_per_ngram = heads_per_ngram
@@ -1491,7 +2301,7 @@ class Qwen3_8NGramEmbedding(nnx.Module):
     mesh = jax.sharding.get_abstract_mesh()
     if not mesh.empty and mesh.size > 1:
       ngram_ids = jax.lax.with_sharding_constraint(ngram_ids, jax.sharding.PartitionSpec())
-    embeds = shard_batch(self.ngram_embedding(ngram_ids))
+    embeds = shard_batch(self.ngram_embedding(ngram_ids), self.sharding)
     return embeds.reshape(input_ids.shape[0], -1, self.ple_embed_dim)
 
 
@@ -1538,6 +2348,7 @@ class Qwen3_8PLELayer(nnx.Module):
         ple_layer_index,
         dtype,
         weight_dtype,
+        sharding=sharding_obj,
         rngs=rngs,
     )
 
@@ -1685,6 +2496,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
           compress_ratio=int(c.index_select_block_size),
           indexer_mask_mode=str(c.qsa_indexer_mask),
           attention_kernel=str(c.qsa_attention_kernel),
+          sharding=sharding or DefaultSharding(),
       )
     self.mlp_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
     moe_executor = m3_moe.moe_from_config(c, sharding_obj)
@@ -1722,9 +2534,19 @@ class Qwen3_8DecoderLayer(nnx.Module):
     if self.layer_type == "linear_attention":
       attn_out, s_idx = self.linear_attn(mixed, attention_mask=conv_mask), None
     else:
-      attn_out, s_idx = self.self_attn(
-          mixed, position_ids=positions, attention_mask=conv_mask, segment_ids=segment_ids, return_selected_blocks=True
-      )
+      if return_aux or self.self_attn.attention_kernel == "dense":
+        attn_out, s_idx = self.self_attn(
+            mixed, position_ids=positions, attention_mask=conv_mask, segment_ids=segment_ids, return_selected_blocks=True
+        )
+      else:
+        attn_out = self.self_attn(
+            mixed,
+            position_ids=positions,
+            attention_mask=conv_mask,
+            segment_ids=segment_ids,
+            return_selected_blocks=False,
+        )
+        s_idx = None
     hidden_states = self.attn_hyper_connection.combine(hidden_states, attn_out, inject)
     mixed, inject = self.mlp_hyper_connection.before_block(hidden_states)
     mlp_out, r_w, r_idx, r_probs = self.mlp(mixed, return_router_topk=True)
@@ -1742,6 +2564,7 @@ class Qwen3_8CycleBlock(nnx.Module):
   """4-layer cycle block composed of 3 GDN layers and 1 QSA layer."""
 
   def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
+    self.sharding = sharding or DefaultSharding()
     self.gdn_0, self.gdn_1, self.gdn_2, self.qsa_3 = (
         Qwen3_8DecoderLayer(config, i, include_ple=False, sharding=sharding, rngs=rngs) for i in range(4)
     )
@@ -1800,14 +2623,33 @@ def create_scanned_cycles(
   return nnx.merge(sp[0][0], *stacked_trees)
 
 
+_QSA_SAVED_CHECKPOINT_NAMES: frozenset[str] = frozenset({"qsa_packed_mask", "qsa_local_pos"})
+
+
+def _with_qsa_packed_mask_saved(pol: Callable[..., Any] | None) -> Callable[..., Any] | None:
+  """Marks compact stop-gradient QSA bitmap/position tags saveable so backward skips indexer recompute."""
+  if pol is None:
+    return None
+  if getattr(pol, "_saves_qsa_packed_mask", False):
+    return pol
+
+  def _wrapped(prim: Any, *args: Any, **params: Any) -> Any:
+    if prim.name == "name" and params.get("name") in _QSA_SAVED_CHECKPOINT_NAMES:
+      return jax.ad_checkpoint.Saveable
+    return pol(prim, *args, **params)
+
+  setattr(_wrapped, "_saves_qsa_packed_mask", True)
+  return _wrapped
+
+
 def _coerce_remat_callable(remat: Any) -> Callable[..., Any] | None:
   """Extracts a `jax.checkpoint` policy callable from `remat` (`Remat`, callable, or `None`)."""
-  return m3_remat.policy_callable(remat)
+  return _with_qsa_packed_mask_saved(m3_remat.policy_callable(remat))
 
 
 def _resolve_qwen3_8_remat_policy(config: Any) -> Callable[..., Any] | None:
   """Resolves `config.remat_policy` via the shared `maxtext.m3.infra.remat` policy table."""
-  return m3_remat.policy_callable(m3_remat.resolve_policy(config))
+  return _with_qsa_packed_mask_saved(m3_remat.policy_callable(m3_remat.resolve_policy(config)))
 
 
 def _run_qwen3_8_sublayer(
@@ -1865,10 +2707,11 @@ def apply_scanned_cycles(
   """Executes scan over stacked cycle weights with per-sublayer checkpoint barriers."""
   eff_policy = _coerce_remat_callable(remat_policy)
   if eff_policy is None and remat:
-    eff_policy = cp.nothing_saveable
+    eff_policy = _with_qsa_packed_mask_saved(cp.nothing_saveable)
   if num_cycles == 1 and eff_policy is not None:
-    eff_policy = m3_remat.scan_safe_policy(eff_policy)
+    eff_policy = _with_qsa_packed_mask_saved(m3_remat.scan_safe_policy(eff_policy))
   use_remat = eff_policy is not None
+  cyc_sharding = getattr(cycles, "sharding", None)
   if not use_remat:
     c_def, c_params, c_rest = nnx.split(cycles, nnx.Param, ...)
     p_def, p_state = nnx.split(ple_layer) if ple_layer is not None else (None, None)
@@ -1884,7 +2727,7 @@ def apply_scanned_cycles(
       return h
 
     def _unremat_scan_fn(carry, xs):
-      carry = shard_batch(carry)
+      carry = shard_batch(carry, cyc_sharding)
       p_slice = jax.tree.map(_strip_cycle_axis, xs[0], is_leaf=_is_nnx_var)
       r_slice = jax.tree.map(_strip_cycle_axis, xs[1], is_leaf=_is_nnx_var)
       blk = nnx.merge(c_def, p_slice, r_slice)
@@ -1894,9 +2737,9 @@ def apply_scanned_cycles(
         h, a1 = blk.gdn_1(ple_step(h, xs[2]), return_aux=True, **kw)
         h, a2 = blk.gdn_2(h, return_aux=True, **kw)
         h, a3 = blk.qsa_3(h, return_aux=True, **kw)
-        return shard_batch(h), (a0, a1, a2, a3)
+        return shard_batch(h, cyc_sharding), (a0, a1, a2, a3)
       h = ple_step(blk.gdn_0(carry, **kw), xs[2])
-      return shard_batch(blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw)), None
+      return shard_batch(blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw), cyc_sharding), None
 
     res = jax.lax.scan(_unremat_scan_fn, hidden_states, (c_params, c_rest, jnp.arange(num_cycles)))
     if return_aux:
@@ -1935,7 +2778,7 @@ def apply_scanned_cycles(
             lambda z: z,
             x_in,
         )
-        x_in = shard_batch(x_in)
+        x_in = shard_batch(x_in, cyc_sharding)
       lyr = nnx.merge(gd, p_in, r_in)
       return lyr(x_in, return_aux=return_aux, **kw_in)
 
@@ -1956,17 +2799,17 @@ def apply_scanned_cycles(
 
   def scan_fn(carry, xs):
     p_slices, r_slices, cyc_idx = xs
-    h = shard_batch(carry)
+    h = shard_batch(carry, cyc_sharding)
     if return_aux:
       h, a0 = _run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"], cyc_idx)
-      h, a1 = _run_slot("gdn_1", shard_batch(h), p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx)
-      h, a2 = _run_slot("gdn_2", shard_batch(h), p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx)
-      h, a3 = _run_slot("qsa_3", shard_batch(h), p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx)
-      return shard_batch(h), (a0, a1, a2, a3)
-    h = shard_batch(_run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"], cyc_idx))
-    h = shard_batch(_run_slot("gdn_1", h, p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx))
-    h = shard_batch(_run_slot("gdn_2", h, p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx))
-    h = shard_batch(_run_slot("qsa_3", h, p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx))
+      h, a1 = _run_slot("gdn_1", shard_batch(h, cyc_sharding), p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx)
+      h, a2 = _run_slot("gdn_2", shard_batch(h, cyc_sharding), p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx)
+      h, a3 = _run_slot("qsa_3", shard_batch(h, cyc_sharding), p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx)
+      return shard_batch(h, cyc_sharding), (a0, a1, a2, a3)
+    h = shard_batch(_run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"], cyc_idx), cyc_sharding)
+    h = shard_batch(_run_slot("gdn_1", h, p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx), cyc_sharding)
+    h = shard_batch(_run_slot("gdn_2", h, p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx), cyc_sharding)
+    h = shard_batch(_run_slot("qsa_3", h, p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx), cyc_sharding)
     return h, None
 
   if num_cycles == 1:
@@ -2070,7 +2913,7 @@ class Qwen3_8MTPBlock(nnx.Module):
     h_mtp_in = (h_proj + jnp.expand_dims(e_proj, axis=-2)).reshape(hc_hidden_states.shape)
     eff_policy = self.remat_policy if self.remat else None
     if self.remat and eff_policy is None:
-      eff_policy = cp.nothing_saveable
+      eff_policy = _with_qsa_packed_mask_saved(cp.nothing_saveable)
     out = _run_qwen3_8_sublayer(
         self.layers_0,
         h_mtp_in,
@@ -2276,6 +3119,7 @@ class Qwen3_8Decoder(nnx.Module):
 
   def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
     c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
+    self.sharding = sharding or DefaultSharding()
     self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
     self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
     self.remat_policy = _resolve_qwen3_8_remat_policy(c)
@@ -2323,14 +3167,14 @@ class Qwen3_8Decoder(nnx.Module):
     tok = decoder_input_tokens
     pos, cmask = _positions_and_conv_mask(tok, decoder_positions, decoder_segment_ids)
     pids = tok if cmask is None else jnp.where(cmask.astype(jnp.bool_), tok, self.eos_token_id)
-    tok_emb = shard_batch(self.token_embedder(tok))
+    tok_emb = shard_batch(self.token_embedder(tok), self.sharding)
     h, aux_list = (
-        init_hyper_connection_streams(tok_emb, hc_count=self.hc_count),
+        init_hyper_connection_streams(tok_emb, hc_count=self.hc_count, sharding=self.sharding),
         [],
     )
     eff_policy = self.remat_policy if self.remat else None
     if self.remat and eff_policy is None:
-      eff_policy = cp.nothing_saveable
+      eff_policy = _with_qsa_packed_mask_saved(cp.nothing_saveable)
     if self.scan_layers:
       res = apply_scanned_cycles(
           self.cycles,
@@ -2359,7 +3203,7 @@ class Qwen3_8Decoder(nnx.Module):
             segment_ids=decoder_segment_ids,
         )
         h, _ = (out[0], aux_list.append(out[1])) if return_aux else (out, None)
-    h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h))
+    h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h), self.sharding)
     if return_pre_mixer:
       return (h_mixed, h_4stream, aux_list) if return_aux else (h_mixed, h_4stream)
     return (h_mixed, aux_list) if return_aux else h_mixed
@@ -2383,6 +3227,7 @@ class Qwen3_8FlashNextModel(nnx.Module):
       rngs: nnx.Rngs,
   ):
     self.config, self.mesh, self.quant_mode = config, mesh, quant_mode
+    self.sharding = sharding or DefaultSharding()
     self.decoder = Qwen3_8Decoder(config, sharding=sharding, rngs=rngs)
     self.lm_head = nnx.Linear(
         self.decoder.emb_dim,
@@ -2434,15 +3279,15 @@ class Qwen3_8FlashNextModel(nnx.Module):
       pos, cmask = _positions_and_conv_mask(decoder_input_tokens, decoder_positions, decoder_segment_ids)
       mtp_out = self.mtp(
           h_4stream,
-          shard_batch(self.decoder.token_embedder(next_tok)),
+          shard_batch(self.decoder.token_embedder(next_tok), self.sharding),
           positions=pos,
           conv_mask=cmask,
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
       )
       mtp_h, mtp_aux = mtp_out if return_aux else (mtp_out, None)
-      mtp_logits = shard_batch(self.lm_head(mtp_h))
-      logits = shard_batch(self.lm_head(h_mixed))
+      mtp_logits = shard_batch(self.lm_head(mtp_h), self.sharding)
+      logits = shard_batch(self.lm_head(h_mixed), self.sharding)
       if return_aux:
         aux_dict = {"layer_aux": aux_list, "mtp_aux": mtp_aux, "mtp_logits": mtp_logits}
         return (logits, aux_dict)
@@ -2456,8 +3301,8 @@ class Qwen3_8FlashNextModel(nnx.Module):
         return_pre_mixer=return_hidden_states,
     )
     if return_hidden_states or return_aux:
-      return (shard_batch(self.lm_head(out[0])), *out[1:])
-    return shard_batch(self.lm_head(out))
+      return (shard_batch(self.lm_head(out[0]), self.sharding), *out[1:])
+    return shard_batch(self.lm_head(out), self.sharding)
 
 
 def create_qwen3_8_flash_next_model(
