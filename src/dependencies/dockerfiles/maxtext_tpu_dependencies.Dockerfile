@@ -14,7 +14,7 @@ RUN mkdir -p /airlock-apt-methods && \
         cp -a /usr/lib/apt/methods/ar+https /airlock-apt-methods/; \
     fi
 
-FROM $BASEIMAGE
+FROM $BASEIMAGE AS dependencies
 ARG USE_AIRLOCK=false
 
 # Install system dependencies including C++20 compiler for vLLM (uses Airlock apt repo when USE_AIRLOCK=true)
@@ -124,8 +124,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-trixie}") && \
         echo "deb http://deb.debian.org/debian ${CODENAME} main" > /etc/apt/sources.list; \
     fi && \
-    rm -f /usr/lib/apt/methods/ar+https
+    rm -f /usr/lib/apt/methods/ar+https && \
+    rm -rf /deps/src/maxtext
 
+ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+FROM dependencies AS full
+
+ARG PACKAGE_DIR
 # Now copy the remaining code (source files that may change frequently)
 COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
 # Now copy resource needed for pytest:
@@ -141,5 +147,3 @@ RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
         fi; \
     fi
-
-ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"

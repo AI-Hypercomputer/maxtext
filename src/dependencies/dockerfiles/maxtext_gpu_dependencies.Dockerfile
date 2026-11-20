@@ -16,7 +16,7 @@ RUN mkdir -p /airlock-apt-methods /airlock-ssl-certs && \
         cp /etc/ssl/certs/ca-certificates.crt /airlock-ssl-certs/; \
     fi
 
-FROM $BASEIMAGE
+FROM $BASEIMAGE AS dependencies
 
 ARG USE_AIRLOCK=false
 ARG TARGETARCH
@@ -163,7 +163,8 @@ RUN --mount=type=cache,id=uv-${TARGETARCH},target=/root/.cache/uv \
     fi && \
     rm -f /usr/lib/apt/methods/ar+https && \
     find /usr/local/lib -type d -path "*/nvidia/*/lib" ! -path "*/nvidia/nccl/lib" > /etc/ld.so.conf.d/nvidia-wheels.conf && \
-    ldconfig
+    ldconfig && \
+    rm -rf /deps/src/maxtext
 
 # Install CUDA 12-pinned libnccl2 and libnccl-dev and configure NCCL plugin path for multi-node GKE communication
 ARG NCCL_DEB_VERSION=2.32.3-1+cuda12.9
@@ -183,7 +184,11 @@ RUN (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do
     rm -rf /var/lib/apt/lists/*
 
 ENV NCCL_PLUGIN_PATH="/usr/local/gib/lib64:/usr/local/nvidia/lib64"
+ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"
 
+FROM dependencies AS full
+
+ARG PACKAGE_DIR
 # Now copy the remaining code (source files that may change frequently)
 COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
 # Now copy resource needed for pytest:
@@ -202,5 +207,3 @@ RUN (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do
         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
         fi; \
     fi
-
-ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"
