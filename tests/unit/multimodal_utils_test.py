@@ -497,9 +497,11 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
     self.assertEqual(mm_processor._get_vision_block("qwen3-vl-2b"), "qwen3_vl")
     self.assertEqual(mm_processor._get_decoder_block("qwen3-vl-2b"), "qwen3")
 
-    # Multimodal Qwen3.5
+    # Multimodal Qwen3.5 / Qwen3.8-27B
     self.assertEqual(mm_processor._get_vision_block("qwen3.5-35b-a3b"), "qwen3_5")
     self.assertEqual(mm_processor._get_decoder_block("qwen3.5-35b-a3b"), "qwen3_5")
+    self.assertEqual(mm_processor._get_vision_block("qwen3.8-27b"), "qwen3_5")
+    self.assertEqual(mm_processor._get_decoder_block("qwen3.8-27b"), "qwen3_5")
 
     # Small Gemma 4 (tests gemma4_small decoder block)
     self.assertEqual(mm_processor._get_vision_block("gemma4-e4b"), "gemma4")

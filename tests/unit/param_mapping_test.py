@@ -110,33 +110,38 @@ class ParamMappingTest(unittest.TestCase):
     self.assertIn("params-decoder-layers-pre_self_attention_layer_norm-scale", mapping)
 
   def test_qwen3_5_dense_mapping(self):
-    """Dense Qwen3.5 maps all MLP projections without MoE parameters."""
+    """Dense Qwen3.5 / Qwen3.8-27B maps all MLP projections without MoE parameters."""
     config = {"text_config": {"num_hidden_layers": 8, "num_experts": 1}}
     maxtext_config = mock.Mock(
-        num_decoder_layers=8, num_experts=1, inhomogeneous_layer_cycle_interval=4, weight_dtype="bfloat16"
+        num_decoder_layers=8,
+        num_experts=1,
+        inhomogeneous_layer_cycle_interval=4,
+        weight_dtype="bfloat16",
+        use_multimodal=False,
     )
-    for scanned in (False, True):
-      with self.subTest(scan_layers=scanned):
-        mapping = param_mapping.PARAM_MAPPING["qwen3.5-9b"](config, maxtext_config, scan_layers=scanned)
-        for mt_name, hf_name in (("wi_0", "gate_proj"), ("wi_1", "up_proj"), ("wo", "down_proj")):
+    for model_name in ("qwen3.5-9b", "qwen3.8-27b"):
+      for scanned in (False, True):
+        with self.subTest(model_name=model_name, scan_layers=scanned):
+          mapping = param_mapping.PARAM_MAPPING[model_name](config, maxtext_config, scan_layers=scanned)
+          for mt_name, hf_name in (("wi_0", "gate_proj"), ("wi_1", "up_proj"), ("wo", "down_proj")):
 
-          def hf_key(layer, hf_name=hf_name):
-            return f"model.language_model.layers.{layer}.mlp.{hf_name}.weight"
+            def hf_key(layer, hf_name=hf_name):
+              return f"model.language_model.layers.{layer}.mlp.{hf_name}.weight"
 
-          if scanned:
-            # The nested block scan stacks local layers [block][local] and the global layer [block].
-            self.assertEqual(
-                mapping[f"params-decoder-layers-local_layers-mlp-{mt_name}-kernel"],
-                [[hf_key(b * 4 + p) for p in range(3)] for b in range(2)],
-            )
-            self.assertEqual(
-                mapping[f"params-decoder-layers-global_layer-mlp-{mt_name}-kernel"],
-                [hf_key(b * 4 + 3) for b in range(2)],
-            )
-          else:
-            for index in range(8):
-              self.assertEqual(mapping[f"params-decoder-layers_{index}-mlp-{mt_name}-kernel"], hf_key(index))
-        self.assertFalse(any("routed_experts" in str(key) or "shared_expert" in str(key) for key in mapping))
+            if scanned:
+              # The nested block scan stacks local layers [block][local] and the global layer [block].
+              self.assertEqual(
+                  mapping[f"params-decoder-layers-local_layers-mlp-{mt_name}-kernel"],
+                  [[hf_key(b * 4 + p) for p in range(3)] for b in range(2)],
+              )
+              self.assertEqual(
+                  mapping[f"params-decoder-layers-global_layer-mlp-{mt_name}-kernel"],
+                  [hf_key(b * 4 + 3) for b in range(2)],
+              )
+            else:
+              for index in range(8):
+                self.assertEqual(mapping[f"params-decoder-layers_{index}-mlp-{mt_name}-kernel"], hf_key(index))
+          self.assertFalse(any("routed_experts" in str(key) or "shared_expert" in str(key) for key in mapping))
 
   def test_deepseek4_284b_mapping_unscanned(self):
     config = {
