@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795193775807,
+  "lastUpdate": 1795213891502,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -74279,6 +74279,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 400,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Abhinav Singh",
+            "username": "abhinavclemson",
+            "email": "abhinavsing@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "e9d3eed33188aafb383a5d18cae1edcc55cf986f",
+          "message": "Add MaxText guide for dynamic SafeTensors loading (`safetensors_dynamic`)\n\nDocument `source_checkpoint_layout=\"safetensors_dynamic\"` across the\nMaxText checkpointing guides, aligned with the structure and style of\nexisting `docs/guides/checkpointing_solutions/` guides:\n\n- Add `docs/guides/checkpointing_solutions/safetensors_dynamic.md`:\n  - Comparison table vs. offline `to_maxtext` + Orbax and streaming mode.\n  - Prerequisites, environment setup, and usage examples for GCS/local\n    SafeTensors, `hf://` / `HF_IDS` Hub caching, experimental streaming,\n    and `forward_pass_logit_checker` verification.\n  - MaxText configuration table (`Flag | Description | Type | Default`)\n    matching `base.yml` defaults, plus troubleshooting.\n- Update `docs/guides/checkpointing_solutions.md` to add the guide card\n  and `{toctree}` entry.\n\nTested:\n- Verified formatting with `mdformat --number --check` and `codespell`.\nPiperOrigin-RevId: 1026744138",
+          "timestamp": "2026-11-20T22:13:08Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/e9d3eed33188aafb383a5d18cae1edcc55cf986f"
+        },
+        "date": 1795213890657,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 219.03499999999988,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 54.357,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2233.84,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 177.01399999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 332.531,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3108.3660000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 404,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1881.2999999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 354.05099999999993,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3104.3200000000006,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 404,
             "unit": "count"
           }
         ]
