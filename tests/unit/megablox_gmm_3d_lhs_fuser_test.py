@@ -50,22 +50,29 @@ class Dispatch3dLhsFuserTest(parameterized.TestCase):
   """CPU-compatible dispatch and fallback tests for ops._call_gmm_v2."""
 
   @parameterized.named_parameters(
-      {"testcase_name": "3d_lhs_fuser", "lhs_shape": (512, 8, 128), "tile_k": 1024, "expect_fuser": True},
+      {"testcase_name": "3d_lhs_fuser", "lhs_shape": (512, 8, 128), "tile_k": 1024, "route": "fuser"},
       {
           "testcase_name": "3d_lhs_fuser_96pct_vmem",
           "lhs_shape": (512, 8, 128),
           "tile_k": 1024,
-          "expect_fuser": True,
+          "route": "fuser",
           "vmem_mib": 64,
       },
-      {"testcase_name": "out_is_3d", "lhs_shape": (512, 8, 128), "tile_k": 1024, "out_is_3d": True},
-      {"testcase_name": "partial_sum", "lhs_shape": (512, 8, 128), "tile_k": 1024, "has_partial_sum": True},
+      {"testcase_name": "out_is_3d", "lhs_shape": (512, 8, 128), "tile_k": 1024, "out_is_3d": True, "route": "fuser"},
+      {
+          "testcase_name": "partial_sum",
+          "lhs_shape": (512, 8, 128),
+          "tile_k": 1024,
+          "has_partial_sum": True,
+          "route": "upstream",
+      },
       {
           "testcase_name": "both_3d_out_and_ps",
           "lhs_shape": (512, 8, 128),
           "tile_k": 1024,
           "out_is_3d": True,
           "has_partial_sum": True,
+          "route": "upstream",
       },
       {"testcase_name": "2d_lhs", "lhs_shape": (512, 1024), "tile_k": 1024},
       {"testcase_name": "unaligned_window_tile", "lhs_shape": (512, 56, 128), "tile_k": 1792},
@@ -77,7 +84,7 @@ class Dispatch3dLhsFuserTest(parameterized.TestCase):
       self,
       lhs_shape: tuple[int, ...],
       tile_k: int,
-      expect_fuser: bool = False,
+      route: str = "fork",
       out_is_3d: bool = False,
       has_partial_sum: bool = False,
       hide_fuser: bool = False,
@@ -85,7 +92,7 @@ class Dispatch3dLhsFuserTest(parameterized.TestCase):
       tail_chunks: bool = False,
       vmem_mib: int | None = None,
   ):
-    if expect_fuser and gmm_fuser is None:
+    if route != "fork" and gmm_fuser is None:
       self.skipTest("Requires tokamax >= 0.0.18")
     k_dim = lhs_shape[1] * 128 if len(lhs_shape) == 3 else lhs_shape[1]
     out_shape = (512, 2, 128) if out_is_3d else (512, 256)
@@ -102,10 +109,15 @@ class Dispatch3dLhsFuserTest(parameterized.TestCase):
       fuser_cm = mock.patch.object(ops, "gmm_fuser", None)
     else:
       fuser_cm = mock.patch.object(
-          gmm_fuser, "_run_gmm_v2_fusible", autospec=True, return_value=jnp.zeros(out_shape, jnp.bfloat16)
+          gmm_fuser, "_run_gmm_v2_fusible", autospec=True, return_value=jnp.zeros((512, 256), jnp.bfloat16)
       )
+    up_cm = (
+        mock.patch.object(ops.tokamax_gmm_v2, "gmm_v2", autospec=True, return_value=jnp.zeros((512, 256), jnp.bfloat16))
+        if ops.tokamax_gmm_v2 is not None
+        else mock.patch.object(ops, "tokamax_gmm_v2", None)
+    )
 
-    with tpu_cm, fuser_cm as f_mock:
+    with tpu_cm, fuser_cm as f_mock, up_cm as u_mock:
       with mock.patch.object(
           ops.gmm_v2, "gmm_v2", autospec=True, return_value=jnp.ones(out_shape, jnp.bfloat16)
       ) as g_mock:
@@ -119,14 +131,19 @@ class Dispatch3dLhsFuserTest(parameterized.TestCase):
             out_is_3d=out_is_3d,
             tail_chunks=tail_chunks,
         )
-    if expect_fuser:
+    if route == "fuser":
       self.assertEqual(f_mock.call_count, 2)
       exp_vmem = int(0.96 * vmem_mib * 1024 * 1024) if vmem_mib else None
       self.assertEqual(f_mock.call_args.kwargs["vmem_limit_bytes"], exp_vmem)
       g_mock.assert_not_called()
+    elif route == "upstream":
+      u_mock.assert_called_once()
+      g_mock.assert_not_called()
     else:
       if f_mock is not None:
         f_mock.assert_not_called()
+      if u_mock is not None:
+        u_mock.assert_not_called()
       g_mock.assert_called_once()
     self.assertEqual(out.shape, out_shape)
 
