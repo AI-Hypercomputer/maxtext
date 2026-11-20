@@ -115,6 +115,7 @@ def _config():
       expansion_factor_real_data=-1,
       scan_layers=False,
       optimizer_memory_host_offload=False,
+      optimizer_device_resident_gib=0.0,
       parameter_memory_host_offload=False,
   )
 

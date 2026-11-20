@@ -989,8 +989,8 @@ class TrainDistillTest(unittest.TestCase):
         strategy=strategy,
         optimizer=optimizer1,
         training_config=train_config,
-        student_config=mock.Mock(),
-        teacher_config=mock.Mock(),
+        student_config=mock.Mock(optimizer_device_resident_gib=0.0),
+        teacher_config=mock.Mock(optimizer_device_resident_gib=0.0),
     )
     trainer1._lora_enabled = False
     trainer1.is_managed_externally = True
@@ -1048,8 +1048,8 @@ class TrainDistillTest(unittest.TestCase):
         strategy=strategy,
         optimizer=optimizer2,
         training_config=train_config,
-        student_config=mock.Mock(),
-        teacher_config=mock.Mock(),
+        student_config=mock.Mock(optimizer_device_resident_gib=0.0),
+        teacher_config=mock.Mock(optimizer_device_resident_gib=0.0),
     )
     trainer2._lora_enabled = False
 
@@ -1152,12 +1152,14 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.gradient_accumulation_steps = 1
     mock_student_cfg.enable_goodput_recording = False
     mock_student_cfg.monitor_goodput = False
+    mock_student_cfg.optimizer_device_resident_gib = 0.0
 
     mock_teacher_cfg = mock.Mock()
     mock_teacher_cfg.vocab_size = 32000
     mock_teacher_cfg.per_device_batch_size = 1
     mock_teacher_cfg.max_target_length = 16
     mock_teacher_cfg.gradient_accumulation_steps = 1
+    mock_teacher_cfg.optimizer_device_resident_gib = 0.0
     mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
 
     # 2. Model Loading
@@ -1264,12 +1266,14 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.gradient_accumulation_steps = 1
     mock_student_cfg.enable_goodput_recording = False
     mock_student_cfg.monitor_goodput = False
+    mock_student_cfg.optimizer_device_resident_gib = 0.0
 
     mock_teacher_cfg = mock.Mock()
     mock_teacher_cfg.vocab_size = 32000
     mock_teacher_cfg.per_device_batch_size = 1
     mock_teacher_cfg.max_target_length = 16
     mock_teacher_cfg.gradient_accumulation_steps = 1
+    mock_teacher_cfg.optimizer_device_resident_gib = 0.0
     mock_pyconfig_init.side_effect = [mock_global, mock_student_cfg, mock_teacher_cfg]
 
     mock_student_model = mock.Mock()
@@ -1348,8 +1352,8 @@ class TrainDistillTest(unittest.TestCase):
         strategy=strategy,
         optimizer=optax.sgd(0.1),
         training_config=train_config,
-        student_config=mock.Mock(),
-        teacher_config=mock.Mock(),
+        student_config=mock.Mock(optimizer_device_resident_gib=0.0),
+        teacher_config=mock.Mock(optimizer_device_resident_gib=0.0),
         student_freeze_param_filter=freeze_filter,
     )
     trainer._lora_enabled = False
@@ -1468,9 +1472,11 @@ class TrainDistillTest(unittest.TestCase):
     mock_student_cfg.monitor_goodput = False
     mock_student_cfg.goodput_job_name = "test-distill-job"
     mock_student_cfg.run_name = "test-distill-run"
+    mock_student_cfg.optimizer_device_resident_gib = 0.0
 
     mock_teacher_cfg = mock.Mock()
     mock_teacher_cfg.vocab_size = 32000
+    mock_teacher_cfg.optimizer_device_resident_gib = 0.0
 
     def fake_create_recorder(cfg):
       return mock_recorder if cfg.enable_goodput_recording else None
@@ -1527,6 +1533,7 @@ class TrainDistillTest(unittest.TestCase):
           "ici_context_parallelism": 1,
           "dcn_context_parallelism": 1,
           "context_sharding": "context",
+          "optimizer_device_resident_gib": 0.0,
       }
       return SimpleNamespace(**{**defaults, **overrides})
 

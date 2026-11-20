@@ -28,6 +28,7 @@ from jax.experimental.serialize_executable import deserialize_and_load
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh, NamedSharding
 from maxtext.common import checkpointing
+from maxtext.common import train_state_nnx
 from maxtext.common.common_types import (
     ATTENTION_LB_IDS,
     AttentionType,
@@ -2203,12 +2204,20 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
     )
     state_mesh_shardings.optimizer = optimizer_sharding
   if is_training and config.optimizer_memory_host_offload:
-    optimizer_sharding = jax.tree_util.tree_map_with_path(
-        maxtext_utils_nnx.move_memory_to_host,
-        state_mesh_shardings.optimizer,
-        is_leaf=lambda x: isinstance(x, NamedSharding),
-    )
-    state_mesh_shardings.optimizer = optimizer_sharding
+    device_resident_gib = float(config.optimizer_device_resident_gib)
+    if device_resident_gib > 0.0:
+      state_mesh_shardings = train_state_nnx.partition_optimizer_memory_shardings(
+          abstract_state,
+          state_mesh_shardings,
+          device_resident_gib=device_resident_gib,
+      )
+    else:
+      optimizer_sharding = jax.tree_util.tree_map_with_path(
+          maxtext_utils_nnx.move_memory_to_host,
+          state_mesh_shardings.optimizer,
+          is_leaf=lambda x: isinstance(x, NamedSharding),
+      )
+      state_mesh_shardings.optimizer = optimizer_sharding
   if is_training and config.parameter_memory_host_offload:
     assert config.param_scan_axis == 0, "You must set the scan axis 0 to enable parameter offloading."
     _, state_params, _ = nnx.split(state_mesh_shardings, nnx.Param, ...)
