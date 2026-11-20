@@ -24,7 +24,6 @@ from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
 import functools
-import gc
 import time
 from typing import Any, Optional
 
@@ -2861,19 +2860,41 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return True
 
   def _purge_raiden_buffers(self) -> int:
-    """Drops the converted tree bound to the Raiden synchronizer from the last round.
+    """Drops the converted tree bound to the Raiden synchronizer.
 
-    `bind()` keeps references to the converted arrays until the next `bind()`, so without this
-    the previous round's tree stays alive while the next one is converted.
+    `bind()` keeps references to the converted arrays until the next `bind()`,
+    so without this the previous round's tree stays alive while the next one is
+    converted. Staged `jax.Array` buffers not aliased by live model parameters
+    are freed directly via `.delete()` rather than running `gc.collect()`.
 
     Returns:
       The number of array references released.
     """
     if self._raiden_sync is None:
       return 0
+    staged_arrays: list[jax.Array] = []
+    for arr in self._raiden_sync.arrays:
+      raw = arr.get_value() if isinstance(arr, nnx.Variable) else arr
+      if isinstance(raw, jax.Array) and not raw.is_deleted():
+        staged_arrays.append(raw)
     released = self._raiden_sync.release_buffers()
-    if released:
-      gc.collect()
+    if staged_arrays:
+      live_ids: set[int] = set()
+      for tree in (self._params_pure, self._get_trainable_params_state()):
+        if tree is None:
+          continue
+        leaves = jax.tree_util.tree_leaves(tree, is_leaf=lambda x: isinstance(x, nnx.Variable))
+        for leaf in leaves:
+          val = leaf.get_value() if isinstance(leaf, nnx.Variable) else leaf
+          live_ids.add(id(val))
+      seen_ids: set[int] = set()
+      for raw in staged_arrays:
+        obj_id = id(raw)
+        if obj_id in live_ids or obj_id in seen_ids:
+          continue
+        seen_ids.add(obj_id)
+        if not raw.is_deleted():
+          raw.delete()
     return released
 
   def close(self) -> None:

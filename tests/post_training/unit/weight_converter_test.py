@@ -37,6 +37,7 @@ import jax  # pylint: disable=wrong-import-position
 import jax.numpy as jnp  # pylint: disable=wrong-import-position
 import numpy as np  # pylint: disable=wrong-import-position
 import pytest  # pylint: disable=wrong-import-position
+from flax import nnx  # pylint: disable=wrong-import-position
 from flax import traverse_util  # pylint: disable=wrong-import-position
 
 from maxtext.common.common_types import get_weight_dtype
@@ -1516,6 +1517,68 @@ class TargetFreeConversionTest(unittest.TestCase):
     converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
     with self.assertRaisesRegex(weight_converter.ConversionPlanError, "not an FP8-quantized MoE expert weight"):
       converter.convert(_source_tree(True), target_state=target)
+
+  def test_case_25_target_free_reuses_compiled_groups_and_nested_sharding(self):
+    """Target-free conversion caches per-group JITs and keeps 5D sharding."""
+    cfg = _config(
+        inhomogeneous_layer_cycle_interval=CYCLE,
+        num_decoder_layers=NUM_LAYERS,
+        prefuse_moe_weights=True,
+        kv_tp_size=1,
+        moe_mlp_tp_size=1,
+    )
+    source_1 = _nested_source_tree(True)
+    source_2 = jax.tree.map(lambda x: x * 2.0, source_1)
+
+    converter = weight_converter.WeightConverter(config=cfg, tp=1, rollout_backend="maxtext", fp8_moe=True)
+    with mock.patch.object(
+        weight_converter,
+        "quantize_weight_per_channel",
+        wraps=weight_converter.quantize_weight_per_channel,
+    ) as spy_quant:
+      out_1 = converter.convert(source_1, target_state=None)
+      first_trace_calls = spy_quant.call_count
+      self.assertGreater(first_trace_calls, 0)
+      out_2 = converter.convert(source_2, target_state=None)
+      self.assertEqual(spy_quant.call_count, first_trace_calls)
+
+    direct = converter._direct  # pylint: disable=protected-access
+    compiled_indices = {idx for idx, _, _ in direct._compiled_target_free_groups}  # pylint: disable=protected-access
+    identity_indices = {
+        idx for idx, grp in enumerate(direct._groups) if grp.op == "identity"  # pylint: disable=protected-access
+    }
+    self.assertGreater(len(identity_indices), 0)
+    self.assertTrue(compiled_indices.isdisjoint(identity_indices))
+
+    root_1 = out_1["base"] if "base" in out_1 else out_1
+    root_2 = out_2["base"] if "base" in out_2 else out_2
+    raw_s1 = root_1["decoder"]["layers_0"]["moe_block"]["wi_scale"]
+    raw_s2 = root_2["decoder"]["layers_0"]["moe_block"]["wi_scale"]
+    scale_1 = raw_s1.get_value() if isinstance(raw_s1, nnx.Variable) else raw_s1
+    scale_2 = raw_s2.get_value() if isinstance(raw_s2, nnx.Variable) else raw_s2
+    np.testing.assert_allclose(np.asarray(scale_2), np.asarray(scale_1) * 2.0, rtol=1e-5)
+
+    # Verify rank-5 nested-scan local_layers sharded on moe_dim (axis 4)
+    # resolves n_shards=2 before entering jax.jit when tp=1.
+    devs = jax.devices()
+    if len(devs) >= 2:
+      mesh = jax.sharding.Mesh(np.asarray(devs[:2]), ("tp",))
+      sharded_src = _nested_source_tree(True)
+      local_layers = sharded_src["base"]["decoder"]["layers"]["local_layers"]
+      local_moe = local_layers["moe_block"]
+      spec_5d = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, None, None, "tp"))
+      local_moe["wi_0"] = jax.device_put(local_moe["wi_0"], spec_5d)
+      local_moe["wi_1"] = jax.device_put(local_moe["wi_1"], spec_5d)
+
+      conv_sharded = weight_converter.WeightConverter(config=cfg, tp=1, rollout_backend="maxtext", fp8_moe=False)
+      out_sharded = conv_sharded.convert(sharded_src, target_state=None)
+      root_sharded = out_sharded["base"] if "base" in out_sharded else out_sharded
+      raw_wi = root_sharded["decoder"]["layers_0"]["moe_block"]["wi"]
+      wi_sharded = raw_wi.get_value() if isinstance(raw_wi, nnx.Variable) else raw_wi
+      wi_0_l0 = np.asarray(local_moe["wi_0"])[:, 0, 0]
+      wi_1_l0 = np.asarray(local_moe["wi_1"])[:, 0, 0]
+      plain_concat = np.concatenate([wi_0_l0, wi_1_l0], axis=-1)
+      self.assertFalse(np.allclose(np.asarray(wi_sharded, dtype=np.float32), plain_concat))
 
 
 if __name__ == "__main__":

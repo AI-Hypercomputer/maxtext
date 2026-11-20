@@ -41,6 +41,7 @@ import jax.numpy as jnp
 import pytest
 
 from absl.testing import absltest
+from flax import nnx
 from maxtext.configs import pyconfig
 from maxtext.training_engine import maxtext_engine
 from maxtext.training_engine.maxtext_engine import MaxTextTrainingEngine
@@ -108,6 +109,7 @@ class PrepareWeightSyncTest(unittest.TestCase):
     # set here. None is the default a real engine carries until the rollout worker calls
     # `set_target_state`, and it selects target-free conversion.
     self.engine._target_state = None
+    self.engine._params_pure = None
     self.engine._rollout_backend = "maxtext"
     self.engine._get_trainable_params_state = mock.MagicMock(return_value={"layer": jnp.zeros((4, 4))})
 
@@ -324,6 +326,40 @@ class PrepareWeightSyncTest(unittest.TestCase):
     self.assertTrue(res)
     self.assertIsNone(self.engine._last_staged_step)
     self.assertIsNone(self.engine._staged_metadata)
+
+  def test_purge_raiden_buffers_deletes_staged_arrays_preserving_live(self):
+    live_w = jnp.ones((4, 4), dtype=jnp.bfloat16)
+    pure_w = jnp.ones((2, 2), dtype=jnp.bfloat16)
+    staged_cast = jnp.full((4, 4), 2.0, dtype=jnp.bfloat16)
+    staged_scale = jnp.ones((4, 1), dtype=jnp.float32)
+
+    class _ArraySync:
+      """Minimal RaidenSynchronizer stub holding staged arrays."""
+
+      def __init__(self, arrays):
+        self.arrays = list(arrays)
+
+      def metrics(self):
+        return {"count": len(self.arrays)}
+
+      def release_buffers(self) -> int:
+        released = len(self.arrays)
+        self.arrays = []
+        return released
+
+    self.engine._params_pure = {"pure": pure_w}
+    self.engine._get_trainable_params_state = mock.MagicMock(return_value={"live": nnx.Param(live_w)})
+    self.engine._raiden_sync = _ArraySync([staged_cast, nnx.Param(staged_scale), live_w, pure_w])
+
+    with mock.patch.object(gc, "collect") as mock_gc:
+      res = self.engine.release_weight_sync()
+
+    self.assertTrue(res)
+    mock_gc.assert_not_called()
+    self.assertTrue(staged_cast.is_deleted())
+    self.assertTrue(staged_scale.is_deleted())
+    self.assertFalse(live_w.is_deleted())
+    self.assertFalse(pure_w.is_deleted())
 
   def test_close(self):
     mock_sync = mock.MagicMock()
