@@ -35,6 +35,7 @@ from maxtext.integration.vllm.hybrid_cache_utils import (
     call_with_supported_kwargs,
     gather_layer_kv_caches,
     get_hf_text_config,
+    maybe_install_tpu_hybrid_coordinator,
     normalize_vllm_input_positions,
     register_maxtext_hybrid_model_config,
     resolve_layer_kv_cache_indices,
@@ -631,6 +632,7 @@ def patch_kv_cache_manager():
           num_mamba_layers=num_mamba,
           group_size=group_size,
       )
+      maybe_install_tpu_hybrid_coordinator(getattr(self.runner, "vllm_config", None))
 
     kv_cache_spec = original_get_kv_cache_spec(self)
 

@@ -36,6 +36,30 @@ class GdnMambaBlockSizeFieldTest(unittest.TestCase):
     self.assertEqual(config_types.Qwen3Next.model_fields["gdn_mamba_block_size"].default, 0)
 
 
+class InstallTpuHybridCoordinatorTest(unittest.TestCase):
+  """Tests TPUHybridKVCacheCoordinator hook installation helper."""
+
+  def test_maybe_install_tpu_hybrid_coordinator_installs_hooks_and_skips_when_unavailable(
+      self,
+  ):
+    self.assertFalse(hybrid_cache_utils.maybe_install_tpu_hybrid_coordinator(None))
+
+    vllm_cfg = SimpleNamespace(additional_config={"_mamba_num_blocks": 9})
+
+    def missing_tpu_inference(_):
+      raise ImportError("No module named 'tpu_inference'")
+
+    self.assertFalse(hybrid_cache_utils.maybe_install_tpu_hybrid_coordinator(vllm_cfg, missing_tpu_inference))
+
+    older_mod = SimpleNamespace()
+    self.assertFalse(hybrid_cache_utils.maybe_install_tpu_hybrid_coordinator(vllm_cfg, lambda _: older_mod))
+
+    installed: list[object] = []
+    coord_mod = SimpleNamespace(maybe_install_hybrid_coordinator_hooks=installed.append)
+    self.assertTrue(hybrid_cache_utils.maybe_install_tpu_hybrid_coordinator(vllm_cfg, lambda _: coord_mod))
+    self.assertEqual(installed, [vllm_cfg])
+
+
 class IsHybridHfConfigTest(unittest.TestCase):
   """`is_hybrid_hf_config` is model-agnostic."""
 
