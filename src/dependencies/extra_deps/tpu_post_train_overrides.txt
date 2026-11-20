@@ -12,6 +12,7 @@ jax==0.11.0
 jaxlib==0.11.0
 libtpu==0.0.44
 markdown>=3.10.2
+ml-dtypes>=0.7.0
 mcp>=1.30.0
 multidict>=6.9.1
 oauthlib>=4.0.1

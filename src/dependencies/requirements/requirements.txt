@@ -18,6 +18,7 @@ jaxlib!=0.7.1
 jaxtyping
 jsonlines
 ml-collections
+ml-dtypes>=0.7.0
 ml-goodput-measurement
 numpy
 omegaconf

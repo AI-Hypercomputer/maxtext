@@ -6,6 +6,7 @@ gcsfs==2026.6.0
 orbax-checkpoint>=0.12.11
 etils[epath]>=1.15.0
 markdown>=3.10.2
+ml-dtypes>=0.7.0
 oauthlib>=4.0.1
 pillow>=13.0.0
 setuptools>=84.0.0

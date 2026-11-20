@@ -363,10 +363,12 @@ if [[ $MODE == "nightly" ]]; then
     if [[ $DEVICE == "tpu" ]]; then
         if [[ -n "$JAX_VERSION" ]]; then
             echo -e "\nInstalling jax-nightly, jaxlib-nightly ${JAX_VERSION}"
-            python3 -m uv pip install -U --pre --no-deps jax==${JAX_VERSION} jaxlib==${JAX_VERSION} -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m uv pip install --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} \
+                --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --index-strategy unsafe-best-match
         else
             echo -e "\nInstalling the latest jax-nightly, jaxlib-nightly"
-            python3 -m uv pip install --pre -U --no-deps jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m uv pip install --pre --upgrade-package jax --upgrade-package jaxlib jax jaxlib \
+                --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --index-strategy unsafe-best-match
         fi
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             install_custom_libtpu
@@ -381,12 +383,15 @@ if [[ $MODE == "nightly" ]]; then
     elif [[ $DEVICE == "gpu" ]]; then
         if [[ -n "$JAX_VERSION" ]]; then
             echo -e "\nInstalling jax-nightly, jaxlib-nightly ${JAX_VERSION}"
-            python3 -m uv pip install -U --pre --no-deps jax==${JAX_VERSION} jaxlib==${JAX_VERSION} \
-                jax-cuda12-plugin[with-cuda]==${JAX_VERSION} jax-cuda12-pjrt==${JAX_VERSION} -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m uv pip install --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} \
+                jax-cuda12-plugin[with-cuda]==${JAX_VERSION} jax-cuda12-pjrt==${JAX_VERSION} \
+                --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --index-strategy unsafe-best-match
         else
             echo -e "\nInstalling the latest jax-nightly, jaxlib-nightly"
-            python3 -m uv pip install -U --pre --no-deps jax jaxlib \
-                jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m uv pip install --pre --upgrade-package jax --upgrade-package jaxlib \
+                --upgrade-package jax-cuda12-plugin --upgrade-package jax-cuda12-pjrt \
+                jax jaxlib jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt \
+                --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --index-strategy unsafe-best-match
         fi
     fi
     exit 0
