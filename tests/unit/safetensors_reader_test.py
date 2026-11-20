@@ -166,6 +166,27 @@ class SafetensorsReaderTest(parameterized.TestCase):
       got = reader.read({"empty": jax.ShapeDtypeStruct((0, 4), jnp.float32, sharding=sharding)})
     self.assertEqual(got["empty"].shape, (0, 4))
 
+  @parameterized.named_parameters(
+      ("last_piece_all_padding", "f32_gcd_rows", 8),  # 6 rows -> 4 pieces of 2: the last is only zeros.
+      ("piece_partly_padding", "i32_full_copy", 8),  # 7 rows -> the last piece has 1 real row.
+      ("many_pad_rows", "bf16_rows", 16),
+  )
+  def test_reads_rows_padded_with_zeros(self, name, rows):
+    want = np.asarray(self.cases[name][0])
+    padded = np.concatenate([want, np.zeros((rows - want.shape[0],) + want.shape[1:], want.dtype)])
+    sharding = NamedSharding(self.mesh, P(("x", "y")))
+    with safetensors_reader.SafetensorsReader(self.dir) as reader:
+      got = reader.read({name: jax.ShapeDtypeStruct(padded.shape, want.dtype, sharding=sharding)})[name]
+    self.assertEqual(got.shape, padded.shape)
+    self.assertEqual(got.sharding, sharding)
+    np.testing.assert_array_equal(np.asarray(got), padded)
+
+  def test_fewer_rows_than_the_file_raises(self):
+    sharding = NamedSharding(self.mesh, P())
+    with safetensors_reader.SafetensorsReader(self.dir) as reader:
+      with self.assertRaisesRegex(ValueError, "Requested f32_gcd_rows"):
+        reader.read({"f32_gcd_rows": jax.ShapeDtypeStruct((4, 5), jnp.float32, sharding=sharding)})
+
   def test_missing_tensor_raises(self):
     sharding = NamedSharding(self.mesh, P())
     with safetensors_reader.SafetensorsReader(self.dir) as reader:
