@@ -19,12 +19,15 @@ import re
 import jax
 import jax.numpy as jnp
 
+from flax import nnx
 import optax
 from optax.contrib._muon import muon as optax_muon
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.optimizers.muon import muon as maxtext_muon
 from maxtext.utils import max_logging
+from maxtext.utils.muon_utils import MOE_BLOCK_NAMES
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
+from maxtext.utils.muon_utils import get_scan_axes
 from maxtext.utils.maxtext_muon_utils import get_maxtext_muon_weight_dimension_numbers
 
 
@@ -150,7 +153,10 @@ def skip_step_on_spikes(
 
     def skip_update():
       # b/500923599: Investigate logging compatible with jax.jit, jax.lax.cond, and Pathway
-      inner_updates = jax.tree_util.tree_map(jnp.zeros_like, updates)
+      # Match the dtypes `do_update` returns (e.g. bf16 updates from bf16 params while
+      # gradients are float32), since both `jax.lax.cond` branches must agree.
+      update_avals = jax.eval_shape(lambda: do_update()[0])
+      inner_updates = jax.tree_util.tree_map(lambda u, a: jnp.zeros_like(u, dtype=a.dtype), updates, update_avals)
       return inner_updates, state["inner_state"]
 
     inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
@@ -200,6 +206,38 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
         epsilon_root=config.adam_eps_root,
         weight_decay=config.adam_weight_decay,
         mask=get_adamw_mask(config),
+    )
+  elif config.opt_type == "adam_pax_low_memory":
+    if isinstance(model, nnx.Module):
+      param_scan_axes = get_param_scan_axes(model)
+    elif config.scan_layers:
+      raise ValueError(
+          "opt_type='adam_pax_low_memory' with scan_layers=True needs the NNX `model` passed to get_optimizer to"
+          " find each parameter's layer-scan axes, so that RMS normalization stays within a layer. Pass `model`"
+          " or set scan_layers=False."
+      )
+    else:
+      param_scan_axes = None
+    if config.bf16_update_rounding != "nearest" and jnp.dtype(config.weight_dtype) != jnp.bfloat16:
+      max_logging.warning(
+          f"bf16_update_rounding={config.bf16_update_rounding!r} only affects bfloat16 parameters, but"
+          f" weight_dtype={config.weight_dtype}; non-bf16 parameters use plain updates."
+      )
+    # `mu_dtype` defaults to `weight_dtype` (see types.py); only an explicit, different value overrides the
+    # params' dtype for the first moment.
+    mu_dtype = config.mu_dtype if jnp.dtype(config.mu_dtype) != jnp.dtype(config.weight_dtype) else None
+    base_opt = adam_pax_low_memory(
+        learning_rate_schedule,
+        beta1=config.adam_b1,
+        epsilon=config.adam_eps,
+        epsilon_root=config.adam_eps_root,
+        weight_decay=config.adam_weight_decay,
+        mask=get_adamw_mask(config),
+        update_rounding=config.bf16_update_rounding,
+        stochastic_rounding_seed=config.stochastic_rounding_seed,
+        moe_expert_lr_multiplier=config.moe_expert_lr_multiplier,
+        mu_dtype=mu_dtype,
+        param_scan_axes=param_scan_axes,
     )
   elif config.opt_type == "sgd":
     base_opt = optax.sgd(learning_rate_schedule)
@@ -335,6 +373,90 @@ def apply_trainable_parameters_mask(base_opt, config):
   )
 
 
+def _stochastic_round_update(u, p, step_size, key):
+  """Returns a bf16 update d with p + d == SR_bf16(p + step_size * u) whenever |step| <= |p|.
+
+  Stochastic rounding keeps tiny updates (|lr * u| < half a bf16 ulp) from being
+  silently rounded away; E[p_new] equals the exact fp32 result. Zero weights
+  with a zero update (2:4-masked entries) stay exactly zero.
+
+  The update is returned in bf16 so no param-sized float32 tree is materialized.
+  The bf16 delta is exact whenever the old and new weights are within a factor of
+  2 of each other (Sterbenz), which covers every sub-ULP or few-ULP step. Only a
+  step larger than the weight itself (|p| near 0) can land one bf16 ULP of the new
+  value away from the stochastically rounded target.
+  """
+  if p.dtype != jnp.bfloat16:
+    return (step_size * u).astype(u.dtype)
+  p32 = p.astype(jnp.float32)
+  new32 = p32 + jnp.asarray(step_size, jnp.float32) * u.astype(jnp.float32)
+  bits = jax.lax.bitcast_convert_type(new32, jnp.uint32)
+  noise = jax.random.bits(key, new32.shape, jnp.uint32) & jnp.uint32(0xFFFF)
+  bits = (bits + noise) & jnp.uint32(0xFFFF0000)
+  new_bf16 = jax.lax.bitcast_convert_type(bits, jnp.float32).astype(jnp.bfloat16)
+  return (new_bf16.astype(jnp.float32) - p32).astype(p.dtype)
+
+
+def _kahan_update(u, r, p, step_size):
+  """Returns (bf16 update, new residual) for a Kahan-compensated bf16 update of `p`.
+
+  The residual is computed from the weight `p + update` actually reaches when the
+  update is added in bf16 (as `optax.apply_updates` does), so nothing is lost even
+  when the bf16 delta cannot represent the exact step. Weights that are zero with a
+  zero update (e.g. N:M-masked entries) stay zero with a zero residual; any other
+  weight keeps carrying its residual.
+  """
+  p32 = p.astype(jnp.float32)
+  tot32 = r.astype(jnp.float32) + jnp.asarray(step_size, jnp.float32) * u.astype(jnp.float32)
+  update = ((p32 + tot32).astype(jnp.bfloat16).astype(jnp.float32) - p32).astype(p.dtype)
+  applied32 = (p + update).astype(p.dtype).astype(jnp.float32) - p32
+  new_r = (tot32 - applied32).astype(r.dtype)
+  masked = (p == 0) & (u == 0)
+  return jnp.where(masked, jnp.zeros_like(update), update), jnp.where(masked, jnp.zeros_like(new_r), new_r)
+
+
+_ROUTED_MOE_EXPERT_WEIGHT_NAMES = frozenset(("wi", "wi_0", "wi_1", "wo"))
+_SHARED_EXPERT_NAMES = frozenset(("shared_experts", "shared_expert"))
+
+
+def _key_names(path) -> tuple[str, ...]:
+  return tuple(str(getattr(k, "key", getattr(k, "name", getattr(k, "idx", k)))) for k in path)
+
+
+def _is_routed_moe_expert_path(path) -> bool:
+  """Returns True for routed MoE expert weights (`wi`, `wi_0`, `wi_1`, `wo` in a MoE block, not shared experts)."""
+  names = _key_names(path)
+  return (
+      any(n in MOE_BLOCK_NAMES for n in names)
+      and not any(n in _SHARED_EXPERT_NAMES for n in names)
+      and any(n in _ROUTED_MOE_EXPERT_WEIGHT_NAMES for n in names)
+  )
+
+
+def _dict_key_path(path) -> tuple[str, ...]:
+  """Returns the dict keys of a pytree key path, dropping attribute and sequence entries."""
+  return tuple(str(k.key) for k in path if isinstance(k, jax.tree_util.DictKey))
+
+
+def get_param_scan_axes(model) -> dict[tuple[str, ...], tuple[int, ...]]:
+  """Maps the dict-key path of each scanned `nnx.Param` of `model` to its layer-scan axes."""
+  _, abstract_params, _ = nnx.split(model, nnx.Param, ...)
+  leaves = jax.tree_util.tree_flatten_with_path(abstract_params, is_leaf=lambda x: isinstance(x, nnx.Variable))[0]
+  return {_dict_key_path(path): axes for path, variable in leaves if (axes := get_scan_axes(variable))}
+
+
+def _rms_reduction_axis(ndim: int, scan_axes: tuple[int, ...]):
+  """Returns the axis the RMS is taken over: the last non-scan axis.
+
+  Scalars use their magnitude (None reduces over everything), and a stack of
+  scalars (only scan axes) normalizes each element by its own magnitude (`()`).
+  """
+  if ndim == 0:
+    return None
+  feature_axes = [axis for axis in range(ndim) if axis not in scan_axes]
+  return feature_axes[-1] if feature_axes else ()
+
+
 def adam_pax(
     learning_rate_fn: optax.Schedule,
     beta1: float,
@@ -435,6 +557,163 @@ def adam_pax(
     step_size = -1.0 * (learning_rate_fn(count) if callable(learning_rate_fn) else learning_rate_fn)
     # Finally, fold in step size.
     updates = jax.tree_util.tree_map(lambda x: step_size * x, updates)
+
+    updated_states = optax.ScaleByAdamState(count=count + 1, mu=mu, nu=nu)
+    return updates, updated_states
+
+  return optax.GradientTransformation(init_fn, update_fn)
+
+
+def adam_pax_low_memory(
+    learning_rate_fn: optax.ScalarOrSchedule,
+    beta1: float,
+    epsilon: float,
+    epsilon_root: float,
+    weight_decay: float,
+    mask=None,
+    update_rounding: str = "nearest",
+    stochastic_rounding_seed: int = 0,
+    moe_expert_lr_multiplier: float = 1.0,
+    mu_dtype=None,
+    param_scan_axes: dict[tuple[str, ...], tuple[int, ...]] | None = None,
+) -> optax.GradientTransformation:
+  """Low-memory single-moment variant of `adam_pax` for bf16 parameters.
+
+  Instead of a per-parameter second moment, each gradient is normalized on the
+  fly by its RMS over its last feature axis (for MaxText `[in, out]` kernels this
+  is the output dimension, i.e. one scale per input row; 1-D params use one scale
+  per layer and scalars their magnitude). Layer-scan axes are never reduced over,
+  so scanned and unscanned layers are normalized the same way. Only the first
+  moment of the normalized gradient is kept. Optimizer state is the first moment
+  plus, for `update_rounding="kahan"`, a compensation residual with the bf16
+  params' shape and dtype.
+
+  The state is an `optax.ScaleByAdamState` so it checkpoints like `adam_pax`;
+  `nu` holds the Kahan residual (or 0-d placeholders where unused) rather than a
+  second moment.
+
+  Args:
+    learning_rate_fn: the learning rate, either a scalar or a callable that given
+      the current training step returns it.
+    beta1: decay rate to track the first moment.
+    epsilon: Small constant added to the RMS denominator (outside the sqrt).
+    epsilon_root: Small constant added inside the square root of the RMS.
+    weight_decay: If > 0, weight decay to apply.
+    mask: Optional weight decay mask (tree or callable).
+    update_rounding: How bf16 parameter updates are rounded: "nearest" (default
+      round-to-nearest), "kahan" (deterministic Kahan-compensated summation that
+      carries the sub-ULP residual in optimizer state), or "stochastic"
+      (unbiased stochastic rounding).
+    stochastic_rounding_seed: PRNG seed for `update_rounding="stochastic"`.
+    moe_expert_lr_multiplier: Multiplier on the learning rate of routed MoE
+      expert weights (`wi`, `wi_0`, `wi_1`, `wo` under a MoE block, excluding
+      shared experts), applied before rounding. 1.0 leaves all updates unchanged.
+    mu_dtype: Optional dtype for the first moment; defaults to each param's dtype.
+    param_scan_axes: Optional map from a param's dict-key path to its layer-scan
+      axes (see `get_param_scan_axes`); unlisted params have none.
+
+  Returns:
+    A `optax.GradientTransformation`.
+  """
+  if update_rounding not in ("nearest", "kahan", "stochastic"):
+    raise ValueError(f"Unsupported update_rounding: {update_rounding!r}")
+  use_kahan = update_rounding == "kahan"
+
+  def init_fn(params):
+    mu = jax.tree_util.tree_map(lambda p: jnp.zeros_like(p, dtype=mu_dtype), params)
+    if use_kahan:
+      # `nu` holds the Kahan compensation residual for bf16 params (same shape and
+      # dtype as the param, so it is sharded like it); other params never use it.
+      nu = jax.tree_util.tree_map(
+          lambda p: jnp.zeros_like(p) if p.dtype == jnp.bfloat16 else jnp.zeros([], jnp.float32), params
+      )
+    else:
+      nu = jnp.zeros([], jnp.float32)  # 0-d placeholder; no per-param state.
+    return optax.ScaleByAdamState(count=jnp.zeros([], jnp.int32), mu=mu, nu=nu)
+
+  def bias_corrected_decay(step: jnp.int32, decay: float):
+    t = step.astype(jnp.float32) + 1.0
+    return decay * (1.0 - jnp.power(decay, t - 1.0)) / (1.0 - jnp.power(decay, t))
+
+  def update_fn(updates, state, params=None):
+    if weight_decay > 0 or update_rounding != "nearest":
+      assert params is not None
+    count = state.count
+    num_scan_matches = 0
+
+    def _update_mu_rms(path, update, mu):
+      nonlocal num_scan_matches
+      scan_axes = ()
+      if param_scan_axes:
+        scan_axes = param_scan_axes.get(_dict_key_path(path), ())
+        num_scan_matches += bool(scan_axes)
+      u_f32 = update.astype(jnp.float32)
+      axis = _rms_reduction_axis(u_f32.ndim, scan_axes)
+      rms = jnp.sqrt(jnp.mean(jnp.square(u_f32), axis=axis, keepdims=True) + epsilon_root) + epsilon
+      # The EMA runs in float32 (a bf16 `beta1` is off by up to ~17% in `1 - beta1`); only `mu` is stored narrow.
+      beta1_decay = bias_corrected_decay(count, beta1)
+      return ((1.0 - beta1_decay) * (u_f32 / rms) + beta1_decay * mu.astype(jnp.float32)).astype(mu.dtype)
+
+    mu = jax.tree_util.tree_map_with_path(_update_mu_rms, updates, state.mu)
+    if param_scan_axes and not num_scan_matches:
+      max_logging.warning(
+          "adam_pax_low_memory: none of the model's scanned parameter paths (e.g."
+          f" {next(iter(param_scan_axes))}) match a trainable update, so no layer-scan axes were applied."
+      )
+    nu = state.nu
+    updates = mu
+
+    if weight_decay > 0:
+      if mask is not None:
+        mask_tree = mask(params) if callable(mask) else mask
+        updates = jax.tree_util.tree_map(
+            lambda x, v, m: x + weight_decay * v.astype(x.dtype) if m else x, updates, params, mask_tree
+        )
+      else:
+        updates = jax.tree_util.tree_map(lambda x, v: x + weight_decay * v.astype(x.dtype), updates, params)
+
+    step_size = -1.0 * (learning_rate_fn(count) if callable(learning_rate_fn) else learning_rate_fn)
+
+    u_paths_and_leaves, treedef = jax.tree_util.tree_flatten_with_path(updates)
+    u_leaves = [u for _, u in u_paths_and_leaves]
+    if moe_expert_lr_multiplier != 1.0:
+      is_expert = [_is_routed_moe_expert_path(path) for path, _ in u_paths_and_leaves]
+      if not any(is_expert):
+        max_logging.warning(
+            f"moe_expert_lr_multiplier={moe_expert_lr_multiplier} matched no routed MoE expert weights; it has no"
+            " effect."
+        )
+      step_sizes = [step_size * moe_expert_lr_multiplier if e else step_size for e in is_expert]
+    else:
+      step_sizes = [step_size] * len(u_leaves)
+
+    if update_rounding == "stochastic":
+      base_key = jax.random.fold_in(jax.random.PRNGKey(stochastic_rounding_seed), count)
+      p_leaves = treedef.flatten_up_to(params)
+      updates = jax.tree_util.tree_unflatten(
+          treedef,
+          [
+              _stochastic_round_update(u, p, s, jax.random.fold_in(base_key, i))
+              for i, (u, p, s) in enumerate(zip(u_leaves, p_leaves, step_sizes))
+          ],
+      )
+    elif use_kahan:
+      r_leaves = treedef.flatten_up_to(state.nu)
+      p_leaves = treedef.flatten_up_to(params)
+      new_u_leaves = []
+      new_r_leaves = []
+      for u, r, p, s in zip(u_leaves, r_leaves, p_leaves, step_sizes):
+        if p.dtype != jnp.bfloat16:
+          new_u_leaves.append((s * u).astype(u.dtype))
+          new_r_leaves.append(r)
+        else:
+          new_u, new_r = _kahan_update(u, r, p, s)
+          new_u_leaves.append(new_u)
+          new_r_leaves.append(new_r)
+      updates = jax.tree_util.tree_unflatten(treedef, new_u_leaves)
+      nu = jax.tree_util.tree_unflatten(treedef, new_r_leaves)
+    else:
+      updates = jax.tree_util.tree_unflatten(treedef, [(s * u).astype(u.dtype) for u, s in zip(u_leaves, step_sizes)])
 
     updated_states = optax.ScaleByAdamState(count=count + 1, mu=mu, nu=nu)
     return updates, updated_states
