@@ -1272,6 +1272,13 @@ class SplashAttention(BaseModel):
           " (sa_q_prescaled_log2e > sa_dkv_reuse_scaled_q > both False for non-absorbed MLA with fp8 q)."
       ),
   )
+  sa_dkv_segment_kv_trim: bool = Field(
+      False,
+      description=(
+          "Maps to dkv_segment_kv_trim in SplashConfig: on global causal dkv full tiles, skip leading 256-row kv"
+          " bands that share no segment id with the q block."
+      ),
+  )
   sa_ignore_segment_ids: bool = Field(
       False,
       description=(
