@@ -567,6 +567,10 @@ def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array |
   return jnp.full((1, 1), scale_val, jnp.float32)
 
 
+def _to_2d(x: jnp.ndarray) -> jnp.ndarray:
+  return x.reshape(x.shape[0], -1) if x.ndim == 3 else x
+
+
 def _tpu_vmem_limit_bytes() -> int | None:
   try:
     return int(0.96 * pltpu.get_tpu_info().vmem_capacity_bytes)
@@ -587,6 +591,15 @@ def _can_use_gmm_fuser_tiles(
   return tile_k == k_dim or tile_k % (8 * num_lanes) == 0
 
 
+def _to_tokamax_tiles(tile_info: gmm_v2.TileSizes):
+  return tokamax_gmm_v2.TileSizes(  # pyrefly: ignore[missing-attribute]
+      tile_m=tile_info.tile_m,
+      tile_k=tile_info.tile_k,
+      tile_n=tile_info.tile_n,
+      bucket_base=tile_info.tile_m,
+  )
+
+
 def _call_gmm_v2(
     *,
     lhs: jnp.ndarray,
@@ -604,46 +617,66 @@ def _call_gmm_v2(
     out_is_3d: bool = False,
     tail_chunks: bool = False,
 ) -> jnp.ndarray:
-  """Routes 3D-lhs GMM without partial_sum through Tokamax gmm_fuser when available."""
-  if (
-      lhs.ndim == 3
-      and not out_is_3d
-      and partial_sum is None
-      and not tail_chunks
-      and gmm_fuser is not None
-      # Heuristic (callable) tile_info can pick unaligned tile_k on 3D lhs; fall back for now.
-      and not callable(tile_info)
-      and _can_use_gmm_fuser_tiles(lhs, tile_info.tile_k)
-  ):
+  """Routes 3D GMM paths through upstream Tokamax gmm_fuser / gmm_v2 when available."""
+  ps_2d = _to_2d(partial_sum) if partial_sum is not None else None
+  has_3d_out_or_ps = out_is_3d or (partial_sum is not None and partial_sum.ndim == 3)
+  if gmm_fuser is not None and not tail_chunks and (lhs.ndim == 3 or has_3d_out_or_ps):
     fuser = gmm_fuser
-    fuser_tiles = tokamax_gmm_v2.TileSizes(  # pyrefly: ignore[missing-attribute]
-        tile_m=tile_info.tile_m,
-        tile_k=tile_info.tile_k,
-        tile_n=tile_info.tile_n,
-        bucket_base=tile_info.tile_m,
-    )
-    fuser_offset = jnp.atleast_1d(jnp.asarray(group_offset, dtype=jnp.int32)) if group_offset is not None else None
     vmem_limit_bytes = _tpu_vmem_limit_bytes()
+    fuser_offset = jnp.atleast_1d(jnp.asarray(group_offset, dtype=jnp.int32)) if group_offset is not None else None
+    use_fuser = (
+        lhs.ndim == 3
+        and ps_2d is None
+        # Heuristic (callable) tile_info can pick unaligned tile_k on 3D lhs.
+        and not callable(tile_info)
+        and _can_use_gmm_fuser_tiles(lhs, tile_info.tile_k)
+    )
+    if use_fuser:
+      fuser_tiles = _to_tokamax_tiles(tile_info)
 
-    def _fused_gmm(lhs_arr, rhs_arr, gs, r_scale, g_offset, l_scale):
-      return fuser.gmm_v2_fusible(
-          lhs=lhs_arr.reshape(lhs_arr.shape[0], -1),
-          rhs=rhs_arr,
-          group_sizes=gs,
-          rhs_scale=r_scale,
-          group_offset=g_offset,
-          lhs_scale=l_scale,
-          tile_info=fuser_tiles,
+      def _fused_gmm(lhs_arr, rhs_arr, gs, r_scale, g_offset, l_scale):
+        return fuser.gmm_v2_fusible(
+            lhs=lhs_arr.reshape(lhs_arr.shape[0], -1),
+            rhs=rhs_arr,
+            group_sizes=gs,
+            rhs_scale=r_scale,
+            group_offset=g_offset,
+            lhs_scale=l_scale,
+            tile_info=fuser_tiles,
+            vmem_limit_bytes=vmem_limit_bytes,
+            preferred_element_type=preferred_element_type,
+            maybe_quantize_lhs=maybe_quantize_lhs,
+            zero_initialize=zero_initialize,
+            transpose_rhs=transpose_rhs,
+        )
+
+      out = op_fusion.fuse(_fused_gmm)(  # pyrefly: ignore[missing-attribute]
+          lhs, rhs, group_sizes, rhs_scale, fuser_offset, lhs_scale
+      )
+      return out.reshape(out.shape[0], out.shape[1] // 128, 128) if out_is_3d else out
+
+    if has_3d_out_or_ps or ps_2d is not None:
+      upstream_tiles = (
+          tokamax_gmm_v2.calculate_tiling_from_request  # pyrefly: ignore[missing-attribute]
+          if callable(tile_info)
+          else _to_tokamax_tiles(tile_info)
+      )
+      out = tokamax_gmm_v2.gmm_v2(  # pyrefly: ignore[missing-attribute]
+          lhs=_to_2d(lhs),
+          rhs=rhs,
+          group_sizes=group_sizes,
+          rhs_scale=rhs_scale,
+          partial_sum=ps_2d,
+          tile_info=upstream_tiles,
           vmem_limit_bytes=vmem_limit_bytes,
-          preferred_element_type=preferred_element_type,
+          preferred_element_type=jnp.dtype(preferred_element_type),
+          group_offset=fuser_offset,
+          lhs_scale=lhs_scale,
           maybe_quantize_lhs=maybe_quantize_lhs,
           zero_initialize=zero_initialize,
           transpose_rhs=transpose_rhs,
       )
-
-    return op_fusion.fuse(_fused_gmm)(  # pyrefly: ignore[missing-attribute]
-        lhs, rhs, group_sizes, rhs_scale, fuser_offset, lhs_scale
-    )
+      return out.reshape(out.shape[0], out.shape[1] // 128, 128) if out_is_3d else out
 
   fallback_tiles = gmm_v2.calculate_tiling if callable(tile_info) else tile_info
   return gmm_v2.gmm_v2(
