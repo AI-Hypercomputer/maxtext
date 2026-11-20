@@ -35,7 +35,9 @@ from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
+from maxtext.m3.models.qwen3_vl import qwen3_vl_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model  # pylint: disable=no-name-in-module
+from maxtext.m3.infra import offload as _m3_offload
 from maxtext.m3.infra import remat as _m3_remat
 from maxtext.m3.models.qwen3 import qwen3_flops  # pylint: disable=no-name-in-module
 
@@ -114,6 +116,7 @@ validate_attention_config = m3_kernels.validate_attention_config
 validate_moe_config = _m3_moe.validate_moe_config
 maybe_apply_remat = _m3_remat.maybe_apply_remat
 check_model_tags = _m3_remat.check_model_tags
+maybe_offload_parameters = _m3_offload.maybe_offload_parameters
 _end_eager_placement = end_eager_placement
 
 
@@ -183,10 +186,10 @@ MODEL_FLOPS_REGISTRY: dict[str, Callable] = {
     "glm5.3-flash": calculate_glm5_3_flash_tflops_per_device,
     "granite-3.0-1b-a400m": calculate_granitemoe_tflops_per_device,
     "granitemoe": calculate_granitemoe_tflops_per_device,
+    "qwen3-0.6b": qwen3_flops.calculate_qwen3_tflops_per_device,
+    "qwen3-vl-2b": qwen3_vl_flops.calculate_qwen3_vl_tflops_per_device,
     "qwen3.8-flash-next": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
     "qwen3.8-flash-next-mini": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
-    "qwen3-0.6b": qwen3_flops.calculate_qwen3_tflops_per_device,
-    "qwen3-vl-2b": qwen3_flops.calculate_qwen3_tflops_per_device,
 }
 
 

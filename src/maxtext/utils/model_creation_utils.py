@@ -758,6 +758,9 @@ def create_model(
         )
       model = quantizations.maybe_quantize_model(model, config)
       model = add_named_scopes(model)
+      if model_mode == MODEL_MODE_TRAIN:
+        # Re-exported from m3.infra.offload to preserve utils:model_creation_utils strict_deps.
+        model = m3_models.maybe_offload_parameters(model, config)
     return model
 
   # Model definition

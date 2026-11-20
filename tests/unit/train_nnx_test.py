@@ -19,7 +19,7 @@ data pipeline. We use a tiny NNX module that mimics the call signature the
 production loss_fn uses (decoder_input_tokens, decoder_positions, ...).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import datetime
 import functools
 import inspect
@@ -80,6 +80,7 @@ class _Cfg:
   debug_sharding: bool = False
   weight_sparsity_n: int = 0
   weight_sparsity_m: int = 0
+  lora: pytypes.SimpleNamespace = field(default_factory=lambda: pytypes.SimpleNamespace(enable_lora=False))
 
 
 class _TinyDecoder(nnx.Module):
@@ -458,6 +459,72 @@ class TestTrainStepNNX(unittest.TestCase):
 
     # The custom gradient is 3.0. It must not be replaced by the old state (2.0).
     np.testing.assert_allclose(np.asarray(new_state.model.custom_state.get_value()), 3.0)
+
+  def test_parameter_host_offload_with_lora_and_missing_lora_stub(self):
+    """Verifies parameter_memory_host_offload filters params_shardings for LoRA and guards missing .lora."""
+
+    class _TinyDecoderWithLoRA(_TinyDecoder):
+      """`_TinyDecoder` carrying both frozen `nnx.Param` and trainable `nnx.LoRAParam`."""
+
+      def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs):
+        super().__init__(vocab_size, hidden, rngs=rngs)
+        self.lora_delta = nnx.LoRAParam(jnp.zeros((hidden, vocab_size), dtype=jnp.float32))
+
+      def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+        logits = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
+        h = self.embed(decoder_input_tokens)
+        return logits + h @ self.lora_delta.get_value()
+
+    cfg = _Cfg(parameter_memory_host_offload=True)
+    cfg.lora = pytypes.SimpleNamespace(enable_lora=True)
+    model = _TinyDecoderWithLoRA(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape((1, 1, 1, 1)), ("data", "fsdp", "expert", "context"))
+    model.mesh = mesh
+    ns = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    _, all_params, _ = nnx.split(model, nnx.Param, ...)
+    params_shardings = jax.tree.map(
+        lambda v: v.from_metadata(ns, v.get_metadata()),
+        all_params,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    frozen_before = np.asarray(model.proj.kernel.get_value()).copy()
+    ts = train_state_nnx.TrainStateNNX(
+        model,
+        nnx.Optimizer(model, optax.sgd(0.1), wrt=nnx.LoRAParam),
+    )
+    state_graphdef, state_pure = nnx.split(ts)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    new_state, metrics = pre_train.train_step(
+        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=params_shardings, state=state_pure, data=data
+    )
+    self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
+    np.testing.assert_array_equal(np.asarray(new_state.model.proj.kernel.get_value()), frozen_before)
+    self.assertGreater(float(jnp.max(jnp.abs(new_state.model.lora_delta.get_value()))), 0.0)
+
+    # Also verify GA > 1 with parameter_memory_host_offload=True when config stub has no `.lora` attribute.
+    cfg_ga, ts_ga = _build_state()
+    ts_ga.model.mesh = mesh
+    cfg_ga.parameter_memory_host_offload = True
+    cfg_ga.gradient_accumulation_steps = 2
+    stub_no_lora = pytypes.SimpleNamespace(**{k: v for k, v in vars(cfg_ga).items() if k != "lora"})
+    _, ga_all_params, _ = nnx.split(ts_ga.model, nnx.Param, ...)
+    ga_shardings = jax.tree.map(
+        lambda v: v.from_metadata(ns, v.get_metadata()),
+        ga_all_params,
+        is_leaf=lambda x: isinstance(x, nnx.Variable),
+    )
+    ga_graphdef, ga_pure = nnx.split(ts_ga)
+    ga_data = _make_data(batch=cfg_ga.micro_batch_size_to_train_on * 2, vocab=cfg_ga.vocab_size)
+    new_ga_state, ga_metrics = pre_train.train_step(
+        ga_graphdef,
+        stub_no_lora,
+        state_mesh_shardings=None,
+        params_shardings=ga_shardings,
+        state=ga_pure,
+        data=ga_data,
+    )
+    self.assertEqual(int(new_ga_state.optimizer.step.get_value()), 1)
+    self.assertTrue(jnp.isfinite(ga_metrics["scalar"]["learning/loss"]))
 
 
 class TestMoeOverflowLoggingNNX(unittest.TestCase):

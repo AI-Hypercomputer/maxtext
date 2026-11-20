@@ -1599,6 +1599,8 @@ class TestNNXAbstractState(unittest.TestCase):
     optimizer_memory_host_offload: bool = False
     parameter_memory_host_offload: bool = False
     param_scan_axis: int = 0
+    scan_layers: bool = True
+    use_m3_model: bool = False
     logical_axis_rules: list = field(default_factory=lambda: [["data", ["data"]], ["model", ["model"]]])
 
   class MockTrainState(nnx.Module):

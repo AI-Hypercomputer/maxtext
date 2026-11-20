@@ -49,6 +49,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
+from maxtext.utils import memory_report
 from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 
@@ -421,6 +422,11 @@ def main(argv: Sequence[str]) -> None:
   peak_bytes = getattr(memory_analysis, "peak_memory_in_bytes", None)
   if peak_bytes:
     print(f"Peak memory: {peak_bytes / 2**30:.2f} GiB")
+  if memory_analysis is not None:
+    print(
+        memory_report.format_memory_report(memory_report.memory_report({"update": compiled}, {})),
+        flush=True,
+    )
 
   # Dump HLO if requested
   if config.dump_hlo:
