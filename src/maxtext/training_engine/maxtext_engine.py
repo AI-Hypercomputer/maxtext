@@ -441,7 +441,7 @@ def _normalize_loss_output(out: Any, has_aux: bool) -> abstract_engine.LossOutpu
   )
 
 
-def _to_aval(value: Any, target_sharding: jax.sharding.Sharding | None = None) -> Any:
+def to_aval(value: Any, target_sharding: jax.sharding.Sharding | None = None) -> Any:
   """Returns `value` as a `jax.ShapeDtypeStruct` on `target_sharding` or its own, or unchanged if it has no shape."""
   if not hasattr(value, "shape") or not hasattr(value, "dtype"):
     return value
@@ -1177,6 +1177,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return f"state[{_MODEL_STATE_KEY!r}] is not the model's own state"
     return None
 
+  def _active_model(self) -> Any:
+    """Returns the model bound to `self._state` when present, else `self._model`."""
+    return getattr(self._state, _MODEL_STATE_KEY, self._model) if self._state is not None else self._model
+
   def _refresh_pure_state(self) -> None:
     """Re-reads the model and train state as pure `nnx.State`, and caches both.
 
@@ -1188,7 +1192,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
+    model = self._active_model()
     self._state_graphdef, state_pure = nnx.split(self._state)
     self._model_graphdef, params_pure, rest_pure = nnx.split(model, nnx.Param, ...)
 
@@ -1826,7 +1830,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._settle_state()
     self._refresh_pure_state()
     state_pure = self._read_state_pure()
-    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    params_pure, rest_pure = self._read_model_pure(self._active_model())
     self._freeze_mask_for(params_pure)
 
     def fwd_bwd(params, rest, dynamic):
@@ -2077,8 +2081,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def _mesh_avals(self, tree: Any) -> Any:
     """Turns array leaves into `ShapeDtypeStruct`s on their mesh shardings."""
     if self._mesh is None:
-      return jax.tree.map(_to_aval, tree)
-    return jax.tree.map(lambda leaf: _to_aval(leaf, self._mesh_sharding(leaf)), tree)
+      return jax.tree.map(to_aval, tree)
+    return jax.tree.map(lambda leaf: to_aval(leaf, self._mesh_sharding(leaf)), tree)
 
   def _batch_avals(self, dynamic_batch: Any) -> Any:
     """Turns dynamic batch leaves into `ShapeDtypeStruct`s on the engine's input data shardings.
@@ -2088,8 +2092,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     mesh shardings explicitly.
     """
     if self._mesh is None:
-      return jax.tree.map(_to_aval, dynamic_batch)
-    return jax.tree.map(_to_aval, dynamic_batch, self._batch_data_shardings(dynamic_batch))
+      return jax.tree.map(to_aval, dynamic_batch)
+    return jax.tree.map(to_aval, dynamic_batch, self._batch_data_shardings(dynamic_batch))
 
   def _compile_eval(self, dummy_data: abstract_engine.TrainerPayload, compiler_options: dict[str, Any] | None) -> None:
     """Compiles the forward-only eval kernel, so the first `eval_step` does not stall on XLA.
@@ -2101,7 +2105,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     dynamic_batch, static_batch = _split_static_and_dynamic(self._prepare_batch(dummy_data))
     self._compile_eval_for_batch(dynamic_batch, static_batch)
-    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    params_pure, rest_pure = self._read_model_pure(self._active_model())
     with self._sharding_ctx():
       # `_compile_eval_for_batch` leaves the jitted wrapper here; lowering it replaces it with
       # what it compiles to, which is what `eval_step` then dispatches through.
@@ -2139,7 +2143,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compile_for_batch(dynamic_batch, static_batch)
 
     state_aval = self._mesh_avals(self._read_state_pure())
-    params_pure, rest_pure = self._read_model_pure(getattr(self._state, _MODEL_STATE_KEY, self._model))
+    params_pure, rest_pure = self._read_model_pure(self._active_model())
     params_aval = self._mesh_avals(params_pure)
     rest_aval = self._mesh_avals(rest_pure)
     batch_aval = self._batch_avals(dynamic_batch)
@@ -2187,7 +2191,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
-    model = getattr(self._state, _MODEL_STATE_KEY, self._model)
+    model = self._active_model()
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
 
@@ -2358,7 +2362,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     batch = self._prepare_batch(payload)
 
-    model = getattr(self._state, "model", self._model) if self._state is not None else self._model
+    model = self._active_model()
     if not isinstance(model, nnx.Module):
       raise TypeError("MaxTextTrainingEngine requires an NNX model (flax.nnx.Module), got" f" {type(model).__name__}")
 
@@ -2674,7 +2678,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _get_trainable_params_state(self) -> Any:
     """Extracts pure parameter weights from the model, excluding optimizer and RNG state."""
-    model = getattr(self._state, "model", None) if self._state is not None else self._model
+    model = self._active_model()
     if isinstance(model, nnx.Module):
       return nnx.state(model, nnx.Param)
     return self.model
