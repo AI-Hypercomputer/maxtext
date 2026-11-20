@@ -58,17 +58,62 @@ in the deployment/launcher configuration, not in MaxText wrapper scripts.
 ## Supported configuration
 
 - A compatible JAX build providing `jax.fwd_and_bwd`.
-- NNX Llama (`decoder_block=llama2`) or DeepSeek V3 with `te_moe_block=true`;
-  DeepSeek also requires compatible Transformer Engine and one GPU per process.
+- NNX Llama (`decoder_block=llama2`), DeepSeek V3 or DeepSeek V4 (`decoder_block=deepseek4`). `te_moe_block` is optional:
+  with it, DeepSeek needs compatible Transformer Engine and one GPU per process;
+  the non-TE MoE path is not yet validated on GPU for this schedule.
 - `scan_layers=true`, `shard_mode=auto`, and `dropout_rate=0`.
 - Any `remat_policy`, including `custom` with per-tensor `device`/`offload`/`remat`
   settings. Layers are checkpointed exactly as in the regular decoder, and only
   the tensors the policy keeps are stored between a microbatch's forward and
   backward (offloaded ones stay in pinned host memory).
-- Llama is unquantized. DeepSeek supports `quantization=te_no_quant` or
-  `te_fp8_currentscaling`, and `te_gmm_quantization=te_no_quant` or `te_mxfp8`.
-- DeepSeek requires `load_balance_loss_weight=0` and
-  `routed_bias_update_rate=0`; an enabled router bias remains frozen.
+- Llama is unquantized. DeepSeek quantization recipes are not validated by the schedule; recipes
+  that keep mutable scale/amax state (e.g. delayed scaling) are unsupported.
+- DeepSeek V4 runs its decoder's own layout: each hash-routed prefix layer is its own
+  length-1 group (`layers_0`, `layers_1`, ...), followed by one scanned group of
+  two-layer (HCA + CSA) blocks. Like the decoder, the block count is
+  `(num_decoder_layers - first_num_hash_layers) // 2`; an odd remainder leaves a
+  trailing layer that neither the decoder nor this schedule builds or runs (a warning
+  is logged), and a model with fewer than two layers after the prefix has no scanned
+  group. The hyper-connection streams (`mhc_expansion_rate`) are expanded at the
+  embedding and reduced by the head, and every layer receives the microbatch's input
+  token ids for hash routing. V4 supports the CSA indexer loss in sparse training
+  (`use_indexer=true`, `indexer_loss_scaling_factor>0`, `indexer_sparse_training=true`);
+  the dense warm-up that skips the LM loss is rejected. Each
+  scanned block checkpoints its two layers internally; the schedule adds an outer
+  checkpoint so the inner scan's copies of the layer weights are not saved per slot.
+- `te_moe_block=true` works with DeepSeek V3 and V4. The TE capacity counters
+  (`te_moe_capacity_overflow`, `te_moe_total_recv_tokens`,
+  `te_moe_recv_capacity_per_rank`) are read from wherever the layer sowed them: a V3
+  layer sows them at the top level, but a V4 scanned block holds two layers, so its
+  counters sit under `layers_0` and `layers_1`. They are combined per block (any
+  overflow, largest receive count, smallest capacity) and then across blocks and
+  microbatches the same way, so the logged `learning/te_moe_*` metrics match the
+  serial schedule's. A block that sows no counters is an error; a hash-routed prefix
+  layer that sows none contributes neutral values. TE sows its own load-balance loss
+  and a float `+-rate` bias step per layer (not expert counts), so with
+  `te_moe_block` the aux loss is a plain mean over layers (Megatron's seq_aux_loss
+  does not apply) and the per-microbatch bias steps are summed, as serial gradient
+  accumulation does. This path needs a TE build with MoE support and cannot be run
+  on CPU, so it is covered by tests of the collection logic on stand-in layers, not
+  by a full-model comparison.
+- DeepSeek (V3 and V4) supports `load_balance_loss_weight>0` and
+  `routed_bias_update_rate>0`. The load-balance loss (and V4's indexer loss) joins
+  the objective with the same weighting as the serial schedule: each microbatch's
+  loss, averaged over the layers that have one (summed for Megatron's seq_aux_loss)
+  and scaled by its token count, is differentiated inside the fused layer scan, so it
+  reaches the router, the layer weights and earlier layers. Router-bias updates are
+  collected per layer and summed over microbatches; train_step applies one full-batch
+  rate * sign(mean load - load) update after the optimizer step. The bias stays fixed
+  during the accumulation window.
+- Backward cotangents have the same magnitude as under serial gradient accumulation.
+  Differentiating the token-summed loss would make every cotangent about W (the
+  step's valid-token count) times its value at GA=1, which saturates a static
+  (fixed-range) fp8 calibration of the backward pass. Like the serial path, dual_pipe
+  differentiates the loss scaled by 1/S (S = global batch size * `max_target_length`)
+  and divides the accumulated gradient by W/S; the gradient is mathematically
+  unchanged and the reported loss is not scaled. The scale, the microbatch layout,
+  the loss/aux-loss bookkeeping and the routed-bias finalization are shared with the
+  serial path in `maxtext.utils.gradient_accumulation`, so the two cannot drift.
 - Ordinary causal-LM loss with `num_vocab_tiling=1`. Other unsupported modes
   are rejected by `validate_training_config` in
   `src/maxtext/experimental/dualpipe_nnx.py`.

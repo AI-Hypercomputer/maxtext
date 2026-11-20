@@ -27,6 +27,7 @@ import pytest
 from jax.ad_checkpoint import checkpoint_name
 
 from maxtext.experimental.dualpipe_schedule import (
+    PER_LAYER_KEY,
     _layer_passes,
     _reduce_aux,
     _slot_tables,
@@ -472,6 +473,123 @@ class DenseTrainingScheduleTest(unittest.TestCase):
     step = make_training_schedule(prefix_apply, tuple(with_metrics(apply) for apply in functions), loss_apply)
     actual = jax.jit(step)(params, states, boundary, data)
     self.assert_tree_allclose(actual, (loss, expected_aux, layer_grads, boundary_grads))
+
+  def test_aux_loss_and_per_layer_metrics_match_full_autodiff(self):
+    """A differentiable per-layer loss (weighted per microbatch) and per-layer metrics, over dense+expert groups."""
+    scale = 0.37
+    for microbatches in (1, 2, 3):
+      for remat in (False, True):
+        functions, (params, states, boundary, data) = make_grouped_inputs((1, 3), microbatches)
+        states[1]["layer_id"] = jnp.arange(3, dtype=jnp.int32) + 100
+
+        def with_aux(apply, is_expert):
+          def layer(weights, hidden, state, positions, segments):
+            out, _ = apply(weights, hidden, state, positions, segments)
+            if not is_expert:  # the dense group returns neutral values and no per-layer metric
+              return out, {"lb": jnp.float32(0)}
+            counts = jnp.stack([jnp.sum(segments), state["layer_id"]]).astype(jnp.int32)
+            return out, {"lb": jnp.mean(jnp.square(out)), "counts": counts}
+
+          if remat:
+            return jax.checkpoint(layer, policy=jax.checkpoint_policies.nothing_saveable)
+          return layer
+
+        wrapped = tuple(with_aux(apply, i == 1) for i, apply in enumerate(functions))
+
+        def tokens(one):
+          return jnp.sum(one["targets_segmentation"] != 0).astype(jnp.float32)
+
+        def reference(p, b):
+          total, weights_total, lb_total = jnp.float32(0), jnp.int32(0), jnp.float32(0)
+          counts = jnp.zeros((3, 2), jnp.int32)
+          for m in range(microbatches):
+            one = jax.tree.map(lambda x: x[m], data)
+            hidden = prefix_apply(b, one)
+            lb_mb = jnp.float32(0)
+            for index, (apply, gp, st) in enumerate(zip(wrapped, p, states)):
+              for layer in range(jax.tree.leaves(gp)[0].shape[0]):
+                hidden, metrics = apply(
+                    jax.tree.map(lambda x: x[layer], gp),
+                    hidden,
+                    jax.tree.map(lambda x: x[layer], st),
+                    one["inputs_position"],
+                    one["inputs_segmentation"],
+                )
+                lb_mb += metrics["lb"]
+                if index == 1:
+                  counts = counts.at[layer].add(metrics["counts"])
+            loss, aux = loss_apply(b, hidden, one)
+            total += loss + tokens(one) * scale * lb_mb
+            weights_total += aux["total_weights"]
+            lb_total += lb_mb
+          return total, (loss_total_of(p, b), weights_total, lb_total, counts)
+
+        def loss_total_of(p, b):
+          return grouped_reference_loss(functions, p, b, states, data)[0]
+
+        # The reference objective includes the weighted aux loss; its xent-only value is reported in aux.
+        (objective, (xent, weights_total, lb_total, counts)), (layer_grads, boundary_grads) = jax.value_and_grad(
+            reference, argnums=(0, 1), has_aux=True
+        )(params, boundary)
+        del objective
+        with self.subTest(microbatches=microbatches, remat=remat):
+          step = make_training_schedule(
+              prefix_apply,
+              wrapped,
+              loss_apply,
+              aux_loss_key="lb",
+              aux_loss_cotangent=lambda one: tokens(one) * scale,
+              per_layer_keys=("counts",),
+          )
+          loss, aux, actual_layer_grads, actual_boundary_grads = jax.jit(step)(params, states, boundary, data)
+          self.assert_tree_allclose(loss, xent)
+          self.assert_tree_allclose(aux["lb"], lb_total)
+          self.assert_tree_allclose(aux["total_weights"], weights_total)
+          self.assertEqual(aux[PER_LAYER_KEY][0], {})
+          np.testing.assert_array_equal(aux[PER_LAYER_KEY][1]["counts"], counts)
+          self.assert_tree_allclose((actual_layer_grads, actual_boundary_grads), (layer_grads, boundary_grads))
+
+  def test_loss_scale_scales_every_gradient_and_not_the_reported_loss(self):
+    """loss_scale multiplies the differentiated objective (head loss and aux loss), not the returned loss."""
+    scale = 1.0 / 32
+    for microbatches in (1, 3):
+      functions, (params, states, boundary, data) = make_grouped_inputs((1, 3), microbatches)
+      lb_scale = 0.37
+
+      def with_aux(apply):
+        def layer(weights, hidden, state, positions, segments):
+          out, _ = apply(weights, hidden, state, positions, segments)
+          return out, {"lb": jnp.mean(jnp.square(out))}
+
+        return layer
+
+      wrapped = tuple(with_aux(apply) for apply in functions)
+
+      def tokens(one):
+        return jnp.sum(one["targets_segmentation"] != 0).astype(jnp.float32)
+
+      def run(loss_scale):
+        step = make_training_schedule(
+            prefix_apply,
+            wrapped,
+            loss_apply,
+            aux_loss_key="lb",
+            aux_loss_cotangent=lambda one: tokens(one) * lb_scale,
+            loss_scale=loss_scale,
+        )
+        return jax.jit(step)(params, states, boundary, data)
+
+      with self.subTest(microbatches=microbatches):
+        loss, aux, layer_grads, boundary_grads = run(1.0)
+        scaled_loss, scaled_aux, scaled_layer_grads, scaled_boundary_grads = run(scale)
+        self.assert_tree_allclose((scaled_loss, scaled_aux), (loss, aux))
+        expected = jax.tree.map(lambda g: g * scale, (layer_grads, boundary_grads))
+        self.assert_tree_allclose((scaled_layer_grads, scaled_boundary_grads), expected)
+        self.assertGreater(max(float(jnp.max(jnp.abs(g))) for g in jax.tree.leaves(layer_grads)), 0.0)
+
+  def test_aux_loss_key_and_cotangent_come_together(self):
+    with self.assertRaisesRegex(ValueError, "together"):
+      make_training_schedule(prefix_apply, (layer_apply,), loss_apply, aux_loss_key="lb")
 
   def test_empty_groups_must_be_omitted(self):
     functions, args = make_grouped_inputs((0,), 1)

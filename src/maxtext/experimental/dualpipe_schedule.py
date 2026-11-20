@@ -27,6 +27,11 @@ import jax.numpy as jnp
 import numpy as np
 
 
+# Key under which make_training_schedule returns the accumulated per-layer metrics: a tuple (one dict
+# per layer group) of arrays with the group's leading layer axis, summed over microbatches.
+PER_LAYER_KEY = "per_layer_metrics"
+
+
 def _reduce_aux(stacked_aux):
   """Match normal GA: sum loss metrics, but OR/max/min TE capacity metrics."""
   reducers = {
@@ -34,7 +39,10 @@ def _reduce_aux(stacked_aux):
       "te_moe_max_total_recv_tokens": jnp.max,
       "te_moe_recv_capacity_per_rank": jnp.min,
   }
-  return {key: reducers.get(key, jnp.sum)(value, axis=0) for key, value in stacked_aux.items()}
+  return {
+      key: jax.tree.map(lambda x, fn=reducers.get(key, jnp.sum): fn(x, axis=0), value)
+      for key, value in stacked_aux.items()
+  }
 
 
 class _ResidualLayout:
@@ -78,7 +86,7 @@ def _used_pullback_leaves(treedef, leaves, out):
 
     avals = [jax.ShapeDtypeStruct(x.shape, x.dtype) for x in leaves]
     closed = jax.make_jaxpr(lambda flat, dy: jax.tree.unflatten(treedef, flat)(dy))(
-        avals, jax.ShapeDtypeStruct(out.shape, out.dtype)
+        avals, jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype), out)
     )
     outvars = closed.jaxpr.outvars
     _, used_inputs = pe.dce_jaxpr(closed.jaxpr, [True] * len(outvars))
@@ -93,7 +101,7 @@ def _aval_key(x):
   return (aval.shape, aval.dtype, getattr(aval, "memory_space", None))
 
 
-def _layer_passes(apply):
+def _layer_passes(apply, aux_loss_key=None):
   """Forward/backward for one layer that save only the residuals its backward reads.
 
   apply may be wrapped in jax.checkpoint (the saved residuals are then what its
@@ -121,6 +129,10 @@ def _layer_passes(apply):
   jax.fwd_and_bwd, because its residuals would include the layer's weights, so
   every pool slot would hold a copy of them.
 
+  With aux_loss_key set, apply's metrics[aux_loss_key] is also a differentiable scalar loss output of the
+  layer: backward then takes its cotangent as an extra argument (aux_ct), so the loss contributes to both
+  the weight and the hidden-state gradients. forward still returns only the hidden state as `out`.
+
   backward always uses the first trace's treedef. The layout check compares the
   stored residuals, not the backward jaxpr, so every trace must produce the same
   backward computation. This relies on how jax.vjp flattens its pullback.
@@ -133,12 +145,19 @@ def _layer_passes(apply):
 
   def forward(weights, hidden, state, positions, segments):
     # Only weights and hidden are differentiated; state, positions and segments are closed-over constants.
-    out, pullback, metrics = jax.vjp(lambda w, x: apply(w, x, state, positions, segments), weights, hidden, has_aux=True)
+    def run(w, x):
+      out, metrics = apply(w, x, state, positions, segments)
+      if aux_loss_key is None:
+        return out, metrics
+      return (out, jnp.asarray(metrics[aux_loss_key], jnp.float32)), metrics
+
+    full_out, pullback, metrics = jax.vjp(run, weights, hidden, has_aux=True)
+    out = full_out if aux_loss_key is None else full_out[0]
     leaves, treedef = jax.tree.flatten(pullback)
     # A leaf that is the same object as an input is re-supplied at backward time; None marks a saved activation.
     index = {id(x): i for i, x in enumerate(inputs_of(weights, hidden, state, positions, segments))}
     sources = tuple(index.get(id(leaf)) for leaf in leaves)
-    used = _used_pullback_leaves(treedef, leaves, out)
+    used = _used_pullback_leaves(treedef, leaves, full_out)
     kept = tuple(source is None and u for source, u in zip(sources, used))
     saved = tuple(leaf for leaf, k in zip(leaves, kept) if k)
     # hidden directly follows the weight leaves in inputs_of and is a single array.
@@ -155,7 +174,7 @@ def _layer_passes(apply):
     layouts.append(layout)
     return out, saved, metrics
 
-  def backward(weights, state, positions, segments, saved, dy):
+  def backward(weights, state, positions, segments, saved, dy, aux_ct=None):
     layout = layouts[0]
     saved = list(saved)
     # When the pullback never reads the hidden input, any same-shaped placeholder
@@ -173,7 +192,8 @@ def _layer_passes(apply):
         # Never read by the backward, so XLA drops this placeholder.
         leaves.append(jnp.zeros(shape, dtype))
     # Calling the rebuilt pullback runs the recompute and backward; returns (dweights, dhidden).
-    return jax.tree.unflatten(layout.treedef, leaves)(dy)
+    cotangent = dy if aux_loss_key is None else (dy, jnp.asarray(aux_ct, jnp.float32))
+    return jax.tree.unflatten(layout.treedef, leaves)(cotangent)
 
   forward.layouts = layouts
   return forward, backward
@@ -279,6 +299,11 @@ def make_training_schedule(
     constrain_residual=None,
     anchor_segments=None,
     layer_loop_context=None,
+    aux_loss_key=None,
+    aux_loss_cotangent=None,
+    per_layer_keys=(),
+    layer_data_keys=(),
+    loss_scale=1.0,
 ):
   """Build a fused layer-level 1F1B loss/gradient computation.
 
@@ -299,7 +324,27 @@ def make_training_schedule(
   structure. Returned layer gradients have the same tuple structure. Only the
   small number of groups/segments is statically expanded, not individual layers.
 
-  Layer metrics are nondifferentiated and disjoint from loss aux. Use {} only
+  aux_loss_key / aux_loss_cotangent: if aux_loss_key is set, every layer's metrics[aux_loss_key] is a scalar
+  that is also part of the training objective (e.g. an MoE load-balance loss; dense groups return 0). The
+  objective's weight on it for a microbatch is aux_loss_cotangent(microbatch_data) -> scalar, and the layer's
+  backward is seeded with that value, so the term's gradient reaches the layer weights and earlier layers.
+  Its value is still summed over layers and microbatches in the returned aux like any metric.
+
+  per_layer_keys: metric keys that stay per layer instead of being reduced over layers. A group's value must
+  have no leading layer axis inside the callback; the returned aux[PER_LAYER_KEY][group][key] has the group's
+  layer axis first and is summed over microbatches. Groups may differ in which of these keys they return.
+
+  layer_data_keys: extra data keys (e.g. "inputs") every layer needs besides positions and segments. When
+  given, the callbacks' `segments` argument is a dict {"segments": inputs_segmentation, key: data[key], ...}
+  instead of the bare segmentation array; with the default () nothing changes.
+
+  loss_scale: factor the objective is multiplied by before it is differentiated (the head's loss and every layer's
+  aux loss), so every backward cotangent and all returned gradients carry it; the reported loss is unscaled. Serial
+  gradient accumulation does this with 1/token_capacity so the backward cotangents keep their GA=1 magnitude (static
+  fp8 calibration of the cotangents relies on it); the caller divides the gradients by loss_scale * token count. The
+  default 1.0 leaves the program unchanged.
+
+  Layer metrics are nondifferentiated (except aux_loss_key) and disjoint from loss aux. Use {} only
   if all groups have no metrics; otherwise use neutral values for dense groups.
   Loss metrics sum; TE overflow/capacity metrics use OR/max/min across layers and microbatches.
 
@@ -350,7 +395,9 @@ def make_training_schedule(
   if not layer_apply:
     raise ValueError("At least one layer group is required")
 
-  layer_passes = tuple(_layer_passes(apply) for apply in layer_apply)
+  if (aux_loss_key is None) != (aux_loss_cotangent is None):
+    raise ValueError("aux_loss_key and aux_loss_cotangent must be given together")
+  layer_passes = tuple(_layer_passes(apply, aux_loss_key) for apply in layer_apply)
   # Saved-residual layouts recorded when each forward is traced.
   residual_layouts = tuple(forward.layouts for forward, _ in layer_passes)
   # Reuse each forward trace's saved-VJP metadata between fill and steady state.
@@ -359,7 +406,21 @@ def make_training_schedule(
   prefix_backward = jax.jit(prefix_backward, inline=True)
   forwards = tuple(jax.jit(forward, inline=True) for forward, _ in layer_passes)
   backwards = tuple(jax.jit(backward, inline=True) for _, backward in layer_passes)
-  loss_and_grad = jax.jit(jax.value_and_grad(loss_apply, argnums=(0, 1), has_aux=True), inline=True)
+  if loss_scale == 1.0:
+    loss_and_grad = jax.jit(jax.value_and_grad(loss_apply, argnums=(0, 1), has_aux=True), inline=True)
+  else:
+
+    def scaled_loss(boundary_params, hidden, data):
+      loss, aux = loss_apply(boundary_params, hidden, data)
+      return loss * loss_scale, (loss, aux)
+
+    scaled_value_and_grad = jax.value_and_grad(scaled_loss, argnums=(0, 1), has_aux=True)
+
+    def loss_and_grad(boundary_params, hidden, data):
+      (_, (loss, aux)), grads = scaled_value_and_grad(boundary_params, hidden, data)
+      return (loss, aux), grads
+
+    loss_and_grad = jax.jit(loss_and_grad, inline=True)
 
   def accumulate(total, grads):
     return jax.tree.map(lambda a, g: a + g.astype(grad_dtype), total, grads)
@@ -393,22 +454,44 @@ def make_training_schedule(
     def put(buffer, value, index):
       return jax.lax.dynamic_update_index_in_dim(buffer, value.astype(buffer.dtype), index, axis=0)
 
+    def split_per_layer(metrics):
+      """(metrics reduced over layers, metrics kept per layer) for one stacked scan output."""
+      per = {k: v for k, v in metrics.items() if k in per_layer_keys}
+      return {k: v for k, v in metrics.items() if k not in per_layer_keys}, per
+
+    def with_per_layer(layer_metrics, per_step):
+      """Attach the per-group per-layer metrics (if any group has some) to the reduced layer metrics."""
+      if not any(per_step):
+        return layer_metrics
+      return {**layer_metrics, PER_LAYER_KEY: tuple(per_step)}
+
+    def layer_inputs(data):
+      """The callbacks' `segments` argument for one microbatch."""
+      if not layer_data_keys:
+        return data["inputs_segmentation"]
+      return {"segments": data["inputs_segmentation"], **{key: data[key] for key in layer_data_keys}}
+
+    def aux_cotangent(data):
+      return aux_loss_cotangent(data) * loss_scale if aux_loss_key is not None else None
+
     first_data = jax.tree.map(lambda x: x[0], microbatch_data)
     later_data = jax.tree.map(lambda x: x[1:], microbatch_data)
     hidden_shape = jax.eval_shape(lambda: prefix_forward(boundary_params, first_data)[0])
 
     # Trace each group's forward once (abstractly) to record the layout of its saved residuals.
     saved_layouts = []
+    per_layer_shapes = []
     for group in range(len(params)):
-      jax.eval_shape(
+      _, _, metric_shapes = jax.eval_shape(
           lambda g=group: forwards[g](
               take(params[g], 0),
               jnp.zeros(hidden_shape.shape, hidden_shape.dtype),
               take(states[g], 0),
               first_data["inputs_position"],
-              first_data["inputs_segmentation"],
+              layer_inputs(first_data),
           )
       )
+      per_layer_shapes.append({k: v for k, v in metric_shapes.items() if k in per_layer_keys})
       saved_layouts.append(residual_layouts[group][0].saved_avals)
     pool_layouts = list(dict.fromkeys(saved_layouts))
     group_pool = [pool_layouts.index(layout) for layout in saved_layouts]
@@ -553,6 +636,7 @@ def make_training_schedule(
       with jax.named_scope("prefix_forward"):
         hidden, prefix_residuals = prefix_forward(boundary_params, data)
       layer_metrics = None
+      per_step = []
       row = table_row(microbatch)
       for group, (forward, weights, state) in enumerate(zip(forwards, params, states)):
         count = boundaries[group + 1] - boundaries[group]
@@ -561,15 +645,18 @@ def make_training_schedule(
           hidden, pools = carry
           weights, state, loc = layer_data
           with jax.named_scope("forward"):
-            hidden, saved, metrics = forward(weights, hidden, state, data["inputs_position"], data["inputs_segmentation"])
+            hidden, saved, metrics = forward(weights, hidden, state, data["inputs_position"], layer_inputs(data))
           pools = write(pools, group, loc, microbatch % 2, saved)
           return (hidden, pools), metrics
 
         (hidden, pools), metrics = layer_scan(
             body, (hidden, pools), (weights, state, group_locs(row, group, np.arange(count)))
         )
+        metrics, per = split_per_layer(metrics)
+        per_step.append(per)
         metrics = _reduce_aux(metrics)
         layer_metrics = metrics if layer_metrics is None else _sum_aux(layer_metrics, metrics)
+      layer_metrics = with_per_layer(layer_metrics, per_step)
       with jax.named_scope("head_loss_and_backward"):
         (loss, aux), (head_grads, dhidden) = loss_and_grad(boundary_params, hidden, data)
       return prefix_residuals, pools, dhidden, loss, _merge_layer_metrics(aux, layer_metrics), head_grads
@@ -578,6 +665,7 @@ def make_training_schedule(
       """B only (drain): read the residuals from the last layer to the first."""
       layer_sums = list(layer_sums)
       row = table_row(microbatch)
+      aux_ct = aux_cotangent(data)
       for group in reversed(range(len(params))):
         count = boundaries[group + 1] - boundaries[group]
         layers = count - 1 - np.arange(count)
@@ -594,7 +682,7 @@ def make_training_schedule(
           weights, state = take((group_weights, group_state), layer)
           with jax.named_scope("backward"):
             dweights, dhidden = backwards[group](
-                weights, state, data["inputs_position"], data["inputs_segmentation"], saved, dhidden
+                weights, state, data["inputs_position"], layer_inputs(data), saved, dhidden, aux_ct
             )
           return (dhidden, add_layer(total, dweights, layer), next_saved), None
 
@@ -620,6 +708,11 @@ def make_training_schedule(
         next_hidden, next_prefix_residuals = prefix_forward(boundary_params, data)
       layer_sum = list(layer_sum)
       layer_metrics = None
+      per_step = [
+          {k: jnp.zeros((boundaries[g + 1] - boundaries[g],) + v.shape, v.dtype) for k, v in per_layer_shapes[g].items()}
+          for g in range(len(params))
+      ]
+      aux_ct = aux_cotangent(prev_data)
       dprefix = prev_dhidden
       read_row, write_row = table_row(microbatch - 1), table_row(microbatch)
       with jax.named_scope("combined_bf_layers"):
@@ -667,13 +760,14 @@ def make_training_schedule(
                   backward_weights,
                   backward_state,
                   prev_data["inputs_position"],
-                  prev_data["inputs_segmentation"],
+                  layer_inputs(prev_data),
                   saved,
                   dhidden,
+                  aux_ct,
               )
             with jax.named_scope("forward"):
               next_hidden, next_saved_fwd, metrics = forwards[forward_group](
-                  next_weights, next_hidden, next_state, data["inputs_position"], data["inputs_segmentation"]
+                  next_weights, next_hidden, next_state, data["inputs_position"], layer_inputs(data)
               )
             # ...and the new microbatch's forward stores its residuals into freed slots.
             with jax.named_scope("fwd_residual_write"):
@@ -700,8 +794,13 @@ def make_training_schedule(
                   group_locs(write_row, forward_group, forward_layers),
               ),
           )
+          metrics, per = split_per_layer(metrics)
+          for key, value in per.items():
+            stop = forward_start + length
+            per_step[forward_group][key] = per_step[forward_group][key].at[forward_start:stop].add(value)
           metrics = _reduce_aux(metrics)
           layer_metrics = metrics if layer_metrics is None else _sum_aux(layer_metrics, metrics)
+        layer_metrics = with_per_layer(layer_metrics, per_step)
 
       with jax.named_scope("prefix_backward"):
         (prefix_grads,) = prefix_backward(prev_prefix_residuals, dprefix)

@@ -27,6 +27,78 @@ from maxtext.utils import max_utils
 from maxtext.utils.sharding import maybe_shard_with_name
 
 
+def gradient_loss_scale(config):
+  """1/S, the factor the accumulated objective is scaled by before differentiation (1.0 if not applicable).
+
+  Under manual GA the objective is the token-summed xent, so differentiating it directly seeds the backward pass with 1
+  where the GA=1 loss (xent_sum / W) seeds it with 1/W: every backward cotangent is then about W times its GA=1 value.
+  A static (fixed-range) fp8 calibration of the backward cotangents (e.g. bwd_quantization_calibration_method=fixed,0.01)
+  is sized for the GA=1 magnitude and saturates, which distorts the gradient. Scaling the differentiated loss by 1/S,
+  with S the static global-batch token capacity, gives the cotangents the GA=1 magnitude; S is folded back into the final
+  division (by W / S). The accumulated gradient is mathematically unchanged: sum_i grad(L_i) / W.
+
+  Shared by serial GA and the dual_pipe schedule so both differentiate the same scaled objective.
+  """
+  if getattr(config, "use_tunix_gradient_accumulation", False):
+    return 1.0
+  logical_batch = getattr(config, "logical_global_batch_size_to_train_on", None)
+  batch_size = logical_batch if isinstance(logical_batch, int) else getattr(config, "global_batch_size_to_train_on", 0)
+  token_capacity = batch_size * getattr(config, "max_target_length", 0)
+  return 1.0 / float(token_capacity) if token_capacity > 0 else 1.0
+
+
+def reshape_to_microbatches(data, steps):
+  """[batch, ...] -> [steps, batch // steps, ...] for every leaf, with row r of microbatch m being global row r*steps+m.
+
+  The interleaved layout (microbatch m takes every steps-th row) is the one gradient accumulation has always used.
+  """
+
+  def reshape(batch_arr):
+    if batch_arr.ndim < 1 or batch_arr.shape[0] % steps:
+      raise ValueError(
+          f"The leading data dimension ({batch_arr.shape[:1]}) must be divisible by gradient_accumulation_steps={steps}"
+      )
+    reshaped = jnp.reshape(batch_arr, (batch_arr.shape[0] // steps, steps) + batch_arr.shape[1:])
+    return jnp.swapaxes(reshaped, 0, 1)
+
+  return jax.tree_util.tree_map(reshape, data)
+
+
+def finalize_accumulated_loss(xent_total, total_weights, aux_totals, steps):
+  """The step's loss from the sums accumulated over microbatches, as gradient accumulation reports it.
+
+  Args:
+    xent_total: cross-entropy (plus any other token-summed term) summed over microbatches.
+    total_weights: valid-token count summed over microbatches.
+    aux_totals: {name: value summed over microbatches} of the auxiliary losses that are per-microbatch means
+      (MoE load balance, indexer, MTP).
+    steps: gradient_accumulation_steps.
+
+  Returns:
+    (loss, aux_means, has_weights, denominator): the normalized loss (0 for a step with no valid token), each auxiliary
+    loss averaged over microbatches (its logged value, and its weight in the loss), whether any token was valid, and the
+    token-count divisor (at least 1) for the accumulated gradient.
+  """
+  has_weights = total_weights > 0
+  denominator = jnp.maximum(total_weights, 1)
+  aux_means = {name: total / steps for name, total in aux_totals.items()}
+  loss = xent_total / denominator
+  for mean in aux_means.values():
+    loss = loss + mean
+  return jnp.where(has_weights, loss, 0.0), aux_means, has_weights, denominator
+
+
+def finalize_bias_update(update, config):
+  """Routed-bias update from an accumulated one: summed integer expert counts become a single full-batch step.
+
+  RoutedMoE emits raw per-microbatch int32 expert counts when gradient_accumulation_steps > 1; summed over microbatches
+  they give one rate * sign(mean load - load) update for the whole batch. Float updates (already a step) pass through.
+  """
+  if isinstance(update, jax.Array) and jnp.issubdtype(update.dtype, jnp.integer):
+    return load_balance_updates_from_counts(update, config.num_experts, config.routed_bias_update_rate)
+  return update
+
+
 def gradient_accumulation_loss_and_grad(
     _loss_fn,
     config,
@@ -106,18 +178,11 @@ def gradient_accumulation_loss_and_grad(
 
   ga_params = jax.tree.map(_maybe_shard_with_name, ga_params, ga_params_shardings)
 
-  # Under manual GA, _loss_fn returns the token-summed xent (plus aux terms scaled by the microbatch token count), so
-  # differentiating it directly seeds the backward pass with 1 where the GA=1 loss (xent_sum / W) seeds it with 1/W.
-  # Every backward cotangent is then about W times its GA=1 value. A static (fixed-range) fp8 calibration of the
-  # backward cotangents (e.g. bwd_quantization_calibration_method=fixed,0.01) is sized for the GA=1 magnitude and
-  # saturates, which distorts the gradient. Scale the differentiated loss by 1/S, with S the static global-batch
-  # token capacity, so the cotangents carry the GA=1 magnitude, and fold S back into the final division below.
-  # The accumulated gradient is mathematically unchanged: sum_i grad(L_i) / W.
+  # Under manual GA, _loss_fn returns the token-summed xent (plus aux terms scaled by the microbatch token count); scale
+  # the differentiated loss by 1/S so the backward cotangents carry the GA=1 magnitude (see gradient_loss_scale), and
+  # fold S back into the final division below.
   use_tunix_ga = getattr(config, "use_tunix_gradient_accumulation", False)
-  logical_batch = getattr(config, "logical_global_batch_size_to_train_on", None)
-  batch_size = logical_batch if isinstance(logical_batch, int) else getattr(config, "global_batch_size_to_train_on", 0)
-  token_capacity = batch_size * getattr(config, "max_target_length", 0)
-  loss_scale = 1.0 / float(token_capacity) if (token_capacity > 0 and not use_tunix_ga) else 1.0
+  loss_scale = gradient_loss_scale(config)
 
   # functools.wraps keeps _loss_fn's signature visible, which nnx.value_and_grad needs to resolve is_train=.
   @functools.wraps(_loss_fn)
@@ -157,14 +222,7 @@ def gradient_accumulation_loss_and_grad(
     acc_grad_and_loss["total_weights"] += aux["total_weights"]
     return acc_grad_and_loss, aux
 
-  def reshape_to_microbatch_accumulations(batch_arr):
-    """Reshape global batch to microbatches, assuming batch axis is leading."""
-    num_microbatches = config.gradient_accumulation_steps
-    microbatch_shape = (batch_arr.shape[0] // num_microbatches, num_microbatches) + batch_arr.shape[1:]
-    reshaped_batch_arr = jnp.reshape(batch_arr, microbatch_shape)
-    return jnp.swapaxes(reshaped_batch_arr, 0, 1)
-
-  data = jax.tree_util.tree_map(reshape_to_microbatch_accumulations, data)
+  data = reshape_to_microbatches(data, config.gradient_accumulation_steps)
   init_grad = jax.tree_util.tree_map(jnp.zeros_like, ga_params)
   init_grad = jax.tree.map(_maybe_shard_with_name, init_grad, grad_shardings)
   init_grad_and_loss = {
@@ -182,15 +240,12 @@ def gradient_accumulation_loss_and_grad(
   grad_and_loss, aux = jax.lax.scan(
       accumulate_gradient, init_grad_and_loss, data, length=config.gradient_accumulation_steps
   )
-  has_weights = grad_and_loss["total_weights"] > 0
-  denominator = jnp.maximum(grad_and_loss["total_weights"], 1)
-  loss = (
-      grad_and_loss["loss"] / denominator
-      + grad_and_loss["moe_lb_loss"] / config.gradient_accumulation_steps
-      + grad_and_loss["indexer_loss"] / config.gradient_accumulation_steps
-      + grad_and_loss["mtp_loss"] / config.gradient_accumulation_steps
+  loss, _, has_weights, denominator = finalize_accumulated_loss(
+      grad_and_loss["loss"],
+      grad_and_loss["total_weights"],
+      {key: grad_and_loss[key] for key in ("moe_lb_loss", "indexer_loss", "mtp_loss")},
+      config.gradient_accumulation_steps,
   )
-  loss = jnp.where(has_weights, loss, 0.0)
   raw_grads = grad_and_loss["grad"]
   if data_parallel_active:
     # Mark the gradients unreduced over the "data" axis now that we're outside the
@@ -215,9 +270,7 @@ def gradient_accumulation_loss_and_grad(
     # RoutedMoE emits raw per-microbatch int32 expert counts when gradient_accumulation_steps > 1;
     # convert the counts summed across microbatches into a single full-batch sign() update.
     def finalize_bias(counts):
-      if isinstance(counts, jax.Array) and jnp.issubdtype(counts.dtype, jnp.integer):
-        return load_balance_updates_from_counts(counts, config.num_experts, config.routed_bias_update_rate)
-      return counts
+      return finalize_bias_update(counts, config)
 
     for key in ("moe_bias_updates", "mtp_moe_bias_updates"):
       if aux.get(key) is not None:

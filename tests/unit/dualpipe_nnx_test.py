@@ -19,6 +19,7 @@
 # pylint: disable=abstract-method,import-outside-toplevel
 
 from enum import Enum
+import importlib
 from itertools import product
 import sys
 import unittest
@@ -33,17 +34,27 @@ import optax
 
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.experimental.dualpipe_nnx import (
+    AUX_OBJECTIVE_KEY,
+    BIAS_UPDATES_KEY,
+    LB_LOSS_KEY,
+    _finalize_bias_updates,
     _layer_groups,
+    _lb_layer_scale,
     _make_boundaries,
     _make_layer_adapter,
     _make_residual_constraint,
+    _deepseek4_layout,
+    _indexer_layer_scale,
+    _is_unscanned_name,
+    _layer_stats,
     _microbatches,
     _restore_gradients,
     _remat_enabled,
     _te_layer_metrics,
+    _token_count_cotangent,
     validate_training_config,
 )
-from maxtext.experimental.dualpipe_schedule import _reduce_aux, make_training_schedule
+from maxtext.experimental.dualpipe_schedule import PER_LAYER_KEY, _reduce_aux, make_training_schedule
 from maxtext.layers import nnx_scan
 from maxtext.utils.globals import EPS
 
@@ -114,6 +125,29 @@ class TinyFrozenExpertLayer(nnx.Module):
     self.sow(nnx.Intermediate, "te_moe_total_recv_tokens", jnp.int32(hidden.shape[0] * hidden.shape[1]))
     self.sow(nnx.Intermediate, "te_moe_recv_capacity_per_rank", jnp.int32(128))
     return hidden, None
+
+
+LB_WEIGHT = 0.5
+
+
+class TinyBalancedExpertLayer(TinyFrozenExpertLayer):
+  """TinyFrozenExpertLayer that also sows a differentiable load-balance loss and expert counts."""
+
+  def __call__(self, hidden, *, decoder_segment_ids, decoder_positions, deterministic, model_mode):
+    scores = jax.nn.softmax(hidden @ self.gate.kernel[...], axis=-1)
+    selected = jnp.argmax(scores + self.gate.bias[...], axis=-1)
+    out, _ = super().__call__(
+        hidden,
+        decoder_segment_ids=decoder_segment_ids,
+        decoder_positions=decoder_positions,
+        deterministic=deterministic,
+        model_mode=model_mode,
+    )
+    # A Switch-style loss: it depends on the router weights and, through the hidden state, on earlier layers.
+    density = jnp.mean(jax.nn.one_hot(selected, 3), axis=(0, 1))
+    self.sow(nnx.Intermediate, LB_LOSS_KEY, jnp.sum(density * jnp.mean(scores, axis=(0, 1))) * 3 * LB_WEIGHT)
+    self.sow(nnx.Intermediate, BIAS_UPDATES_KEY, jnp.sum(jax.nn.one_hot(selected, 3, dtype=jnp.int32), axis=(0, 1)))
+    return out, None
 
 
 class TinyDecoder(nnx.Module):
@@ -491,6 +525,136 @@ class DenseTrainingNnxTest(unittest.TestCase):
         )
         self.assert_tree_allclose(nnx.state(updated_model, nnx.Not(nnx.Param)), original_state)
 
+  def test_load_balance_loss_and_routed_bias_updates_match_full_autodiff(self):
+    # Import moe before the sys.modules patches below: leaving them would un-import pallas, which cannot re-register.
+    importlib.import_module("maxtext.layers.moe")
+    with mock.patch.dict(sys.modules, {"maxtext.configs.pyconfig": SimpleNamespace(HyperParameters=object)}):
+      from maxtext.utils import maxtext_utils_nnx
+
+    model_modules = {
+        "maxtext.models.llama2": SimpleNamespace(LlamaDecoderLayer=TinyBalancedExpertLayer),
+        "maxtext.models.deepseek": SimpleNamespace(
+            DeepSeekDenseLayer=TinyBalancedExpertLayer, DeepSeekMoELayer=TinyBalancedExpertLayer
+        ),
+    }
+    bias_values = jnp.array([[0.5, -0.2, -0.3], [-0.2, 0.5, -0.3], [-0.3, -0.2, 0.5]])
+    rate = 0.01
+    layers, microbatches = 3, 3
+    model = TinyTransformer()
+    del model.decoder.layers
+    stack = nnx_scan.create_scanned_layers(
+        TinyBalancedExpertLayer,
+        length=layers,
+        param_scan_axis=0,
+        metadata_axis_name="moe_layers",
+        rngs=nnx.Rngs(7),
+    )
+    stack.gate.bias[...] = bias_values
+    model.decoder.moe_layers = stack
+    all_params = nnx.state(model, nnx.Param)
+    config = deepseek_config(
+        param_scan_axis=0,
+        num_decoder_layers=layers,
+        first_num_dense_layers=0,
+        num_experts=3,
+        te_moe_block=False,
+        routed_bias=True,
+        routed_bias_update_rate=rate,
+        load_balance_loss_weight=LB_WEIGHT,
+    )
+    validate_training_config(config)
+    with (
+        mock.patch.dict(sys.modules, model_modules),
+        mock.patch.multiple(
+            "maxtext.utils",
+            create=True,
+            maxtext_utils_nnx=maxtext_utils_nnx,
+            maxtext_utils=SimpleNamespace(should_prevent_cse_in_remat=lambda _: False),
+        ),
+    ):
+      apply, params, state = _make_layer_adapter(stack, config, "moe_layers", layers)
+    prefix, head, boundary = _make_boundaries(model, config, loss_from_logits, ("moe_layers",))
+    data = _microbatches(make_data(microbatches), microbatches, 2)
+
+    # The adapter turns the layer's sown values into the schedule's loss and per-layer metrics.
+    hidden = prefix(boundary, jax.tree.map(lambda x: x[0], data))
+
+    def first(tree):
+      return jax.tree.map(lambda x: x[0], tree)
+
+    _, stats = apply(first(params), hidden, first(state), data["inputs_position"][0], data["inputs_segmentation"][0])
+    self.assertEqual(set(stats), {LB_LOSS_KEY, AUX_OBJECTIVE_KEY, BIAS_UPDATES_KEY})
+    # The differentiable objective term is the load-balance loss with its per-layer weight.
+    np.testing.assert_allclose(stats[AUX_OBJECTIVE_KEY], stats[LB_LOSS_KEY] / layers, rtol=1e-6)
+    self.assertEqual(stats[LB_LOSS_KEY].dtype, jnp.float32)
+    self.assertEqual(stats[BIAS_UPDATES_KEY].shape, (3,))
+
+    scale = _lb_layer_scale(config, _layer_groups(config))
+    self.assertEqual(scale, 1.0 / layers)
+    cotangent = _token_count_cotangent
+
+    def reference(weights):
+      objective, xent, lb_total = jnp.float32(0), jnp.float32(0), jnp.float32(0)
+      counts = jnp.zeros((layers, 3), jnp.int32)
+      stacked = weights["decoder"]["moe_layers"]
+      gates, experts = stacked["gate"]["kernel"].get_value(), stacked["experts"].get_value()
+      for mb in range(microbatches):
+        batch = jax.tree.map(lambda x: x[mb], data)
+        hidden = weights["token_embedder"]["embedding"].get_value()[batch["inputs"]]
+        hidden *= weights["decoder"]["prefix_scale"].get_value()
+        lb_mb = jnp.float32(0)
+        for layer in range(layers):
+          scores = jax.nn.softmax(hidden @ gates[layer], axis=-1)
+          selected = jnp.argmax(scores + bias_values[layer], axis=-1)
+          density = jnp.mean(jax.nn.one_hot(selected, 3), axis=(0, 1))
+          lb_mb += jnp.sum(density * jnp.mean(scores, axis=(0, 1))) * 3 * LB_WEIGHT
+          counts = counts.at[layer].add(jnp.sum(jax.nn.one_hot(selected, 3, dtype=jnp.int32), axis=(0, 1)))
+          hidden = frozen_expert_output(hidden, gates[layer], experts[layer], bias_values[layer])
+        logits = hidden @ weights["token_embedder"]["embedding"].get_value().T
+        logits += weights["decoder"]["head_bias"].get_value()
+        mb_xent = loss_from_logits(logits, batch, config, None)[0]
+        xent += mb_xent
+        lb_total += lb_mb
+        objective += mb_xent + cotangent(batch) * scale * lb_mb
+      return objective, (xent, lb_total, counts)
+
+    (_, (xent, lb_total, counts)), expected_grads = jax.jit(jax.value_and_grad(reference, has_aux=True))(all_params)
+    schedule = make_training_schedule(
+        prefix,
+        (apply,),
+        head,
+        aux_loss_key=AUX_OBJECTIVE_KEY,
+        aux_loss_cotangent=cotangent,
+        per_layer_keys=(BIAS_UPDATES_KEY,),
+    )
+    loss, aux, layer_grads, boundary_grads = jax.jit(schedule)((params,), (state,), boundary, data)
+    grads = _restore_gradients(layer_grads, boundary_grads, 0, ("moe_layers",))
+    np.testing.assert_allclose(loss, xent, rtol=2e-5, atol=2e-6)
+    np.testing.assert_allclose(aux[LB_LOSS_KEY], lb_total, rtol=2e-5, atol=2e-6)
+    self.assert_tree_allclose(grads, expected_grads)
+    # The load-balance term must matter: without it the gradients differ.
+    plain = jax.jit(jax.grad(lambda w: reference(w)[1][0]))(all_params)
+    self.assertGreater(
+        float(
+            jnp.max(
+                jnp.abs(
+                    grads["decoder"]["moe_layers"]["gate"]["kernel"].get_value()
+                    - plain["decoder"]["moe_layers"]["gate"]["kernel"].get_value()
+                )
+            )
+        ),
+        1e-6,
+    )
+    # Per-layer expert counts summed over microbatches become one full-batch sign update per layer.
+    np.testing.assert_array_equal(aux[PER_LAYER_KEY][0][BIAS_UPDATES_KEY], counts)
+    (update,) = _finalize_bias_updates(aux[PER_LAYER_KEY], ("moe_layers",), config)
+    expected_update = jnp.sign(jnp.mean(counts, axis=-1, keepdims=True) - counts) * rate
+    np.testing.assert_allclose(update, expected_update)
+    self.assertEqual(update.shape, (layers, 3))
+    # Float updates (TE) are summed over microbatches, not re-derived.
+    floats = ({BIAS_UPDATES_KEY: jnp.full((layers, 3), 0.02, jnp.float32)},)
+    np.testing.assert_allclose(_finalize_bias_updates(floats, ("moe_layers",), config)[0], floats[0][BIAS_UPDATES_KEY])
+
   def test_residual_constraint_pins_only_batch_major_activations(self):
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape(1, 1), ("data", "tensor"))
     calls = []
@@ -538,14 +702,19 @@ class DenseTrainingNnxTest(unittest.TestCase):
     no_dense = SimpleNamespace(**{**vars(config), "first_num_dense_layers": 0})
     validate_training_config(no_dense)
     self.assertEqual(_layer_groups(no_dense), (("moe_layers", 4),))
-    for field, value in (
-        ("te_moe_block", False),
-        ("load_balance_loss_weight", 0.01),
-        ("routed_bias_update_rate", 0.01),
-        ("first_num_dense_layers", 4),
-    ):
+    for field, value in ():
       with self.subTest(field=field), self.assertRaises(ValueError):
         validate_training_config(SimpleNamespace(**{**vars(frozen_bias), field: value}))
+    for field, value in (("use_dpo", True), ("moe_dropless_fallback", "layer"), ("moe_dropless_fallback", "step")):
+      with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, field):
+        validate_training_config(SimpleNamespace(**{**vars(frozen_bias), field: value}))
+    validate_training_config(SimpleNamespace(**{**vars(frozen_bias), "moe_dropless_fallback": None, "use_dpo": False}))
+    # The load-balance loss and routed-bias updates are supported.
+    for field, value in (("load_balance_loss_weight", 0.01), ("routed_bias_update_rate", 0.01)):
+      with self.subTest(field=field):
+        validate_training_config(SimpleNamespace(**{**vars(frozen_bias), field: value}))
+    # te_moe_block is optional for DeepSeek.
+    validate_training_config(SimpleNamespace(**{**vars(frozen_bias), "te_moe_block": False}))
     llama = SimpleNamespace(
         **{
             **vars(config),
@@ -557,6 +726,147 @@ class DenseTrainingNnxTest(unittest.TestCase):
     )
     with self.assertRaisesRegex(ValueError, "routed_bias"):
       validate_training_config(llama)
+
+  def test_deepseek4_layer_groups_mirror_the_decoders_rounding(self):
+    """The decoder unrolls the hash-routed prefix and scans floor(remaining / 2) two-layer blocks."""
+    cases = (
+        # (decoder layers, hash layers) -> (prefix layers, scanned blocks)
+        ((43, 3), (3, 20)),  # deepseek4-284b / tiny
+        ((61, 3), (3, 29)),  # deepseek4-1600b
+        ((44, 3), (3, 20)),  # odd remainder: the decoder never builds the trailing layer
+        ((4, 3), (3, 0)),  # one layer after the prefix: no block at all
+        ((3, 3), (3, 0)),
+        ((2, 3), (3, 0)),  # fewer layers than prefix layers: the decoder still builds the whole prefix
+        ((8, 0), (0, 4)),  # no hash-routed prefix
+    )
+    for (layers, hash_layers), expected in cases:
+      config = SimpleNamespace(
+          decoder_block=DecoderBlockType.DEEPSEEK4, num_decoder_layers=layers, first_num_hash_layers=hash_layers
+      )
+      with self.subTest(layers=layers, hash_layers=hash_layers):
+        self.assertEqual(_deepseek4_layout(config), expected)
+        groups = tuple((f"layers_{i}", 1) for i in range(expected[0])) + (
+            (("scanned_blocks", expected[1]),) if expected[1] else ()
+        )
+        self.assertEqual(_layer_groups(config), groups)
+    self.assertTrue(_is_unscanned_name("layers_2"))
+    for name in ("layers", "scanned_blocks", "moe_layers", "dense_layers", "layers_x"):
+      self.assertFalse(_is_unscanned_name(name))
+
+  def test_deepseek4_te_moe_metrics_are_collected_from_nested_layers(self):
+    """A V4 scanned block sows TE counters, losses and bias updates under layers_0 / layers_1."""
+    config = SimpleNamespace(
+        decoder_block=DecoderBlockType.DEEPSEEK4,
+        te_moe_block=True,
+        load_balance_loss_weight=0.1,
+        routed_bias=True,
+        routed_bias_update_rate=0.01,
+        use_indexer=False,
+    )
+
+    def sow(layer, overflow, recv, capacity, lb=None, bias=None):
+      layer.sow(nnx.Intermediate, "te_moe_capacity_overflow", jnp.array(overflow))
+      layer.sow(nnx.Intermediate, "te_moe_total_recv_tokens", jnp.array(recv, jnp.int32))
+      layer.sow(nnx.Intermediate, "te_moe_recv_capacity_per_rank", jnp.int32(capacity))
+      if lb is not None:
+        layer.sow(nnx.Intermediate, "moe_lb_loss", jnp.float32(lb))
+      if bias is not None:  # TE emits a float sign step per layer, not counts
+        layer.sow(nnx.Intermediate, "moe_bias_updates", jnp.array(bias, jnp.float32))
+
+    block = nnx.Module()
+    block.layers_0, block.layers_1 = nnx.Module(), nnx.Module()
+    sow(block.layers_0, False, 7, 12, lb=1.0, bias=[0.01, -0.01])
+    sow(block.layers_1, True, 13, 16, lb=3.0, bias=[-0.01, 0.01])
+    stats = _layer_stats(block, config, "scanned_blocks", lb_scale=0.5, indexer_scale=1.0)
+    self.assertTrue(bool(stats["te_moe_capacity_overflow"]))
+    self.assertEqual(int(stats["te_moe_max_total_recv_tokens"]), 13)
+    self.assertEqual(int(stats["te_moe_recv_capacity_per_rank"]), 12)
+    np.testing.assert_allclose(stats[LB_LOSS_KEY], 4.0)
+    np.testing.assert_allclose(stats[AUX_OBJECTIVE_KEY], 2.0)  # 0.5 * (1 + 3)
+    np.testing.assert_allclose(stats["moe_bias_updates:layers_0"], [0.01, -0.01])
+    np.testing.assert_allclose(stats["moe_bias_updates:layers_1"], [-0.01, 0.01])
+    self.assertEqual(
+        set(stats),
+        {"te_moe_capacity_overflow", "te_moe_max_total_recv_tokens", "te_moe_recv_capacity_per_rank"}
+        | {LB_LOSS_KEY, AUX_OBJECTIVE_KEY, "moe_bias_updates:layers_0", "moe_bias_updates:layers_1"},
+    )
+
+    # A hash-routed prefix layer sows TE counters but no losses or bias: it adds the counters and zero to the loss.
+    prefix = nnx.Module()
+    sow(prefix, False, 5, 20)
+    stats = _layer_stats(prefix, config, "layers_1", lb_scale=0.5, indexer_scale=1.0)
+    self.assertEqual(int(stats["te_moe_max_total_recv_tokens"]), 5)
+    self.assertEqual(float(stats[LB_LOSS_KEY]), 0.0)
+    self.assertFalse(any(key.startswith("moe_bias_updates") for key in stats))
+    # A prefix layer with nothing sown gets neutral counters (they do not affect the reductions).
+    neutral = _layer_stats(nnx.Module(), config, "layers_0", lb_scale=0.5, indexer_scale=1.0)
+    self.assertFalse(bool(neutral["te_moe_capacity_overflow"]))
+    self.assertEqual(int(neutral["te_moe_max_total_recv_tokens"]), 0)
+    # ... but a scanned block that sows nothing is an error, not a silent zero.
+    with self.assertRaisesRegex(ValueError, "receive-capacity"):
+      _layer_stats(nnx.Module(), config, "scanned_blocks", lb_scale=0.5, indexer_scale=1.0)
+
+    # The helper also reads plain nested dicts (e.g. a pure-dict copy of the intermediates).
+    nested = {
+        name: {
+            "te_moe_capacity_overflow": (jnp.array(overflow),),
+            "te_moe_total_recv_tokens": (jnp.array(recv, jnp.int32),),
+            "te_moe_recv_capacity_per_rank": (jnp.int32(capacity),),
+        }
+        for name, overflow, recv, capacity in (("layers_0", False, 7, 12), ("layers_1", True, 13, 16))
+    }
+    metrics = _te_layer_metrics(nested, required=True)
+    self.assertTrue(bool(metrics["te_moe_capacity_overflow"]))
+    self.assertEqual(int(metrics["te_moe_max_total_recv_tokens"]), 13)
+    self.assertEqual(int(metrics["te_moe_recv_capacity_per_rank"]), 12)
+
+  def test_deepseek4_scales_and_validation(self):
+    base = dict(
+        decoder_block=DecoderBlockType.DEEPSEEK4,
+        scan_layers=True,
+        inhomogeneous_layer_cycle_interval=1,
+        num_decoder_layers=43,
+        first_num_hash_layers=3,
+        shard_mode=ShardMode.AUTO,
+        remat_policy="full",
+        dropout_rate=0,
+        quantization="",
+        num_experts=16,
+        mtp_num_layers=0,
+        te_moe_block=False,
+        load_balance_loss_weight=1e-4,
+        routed_bias=True,
+        routed_bias_update_rate=0.001,
+        num_vocab_tiling=1,
+        use_indexer=True,
+        indexer_sparse_training=True,
+        indexer_loss_scaling_factor=1.0,
+        compress_ratios=[0, 0, 4] + [128, 4] * 20,
+        mhc_expansion_rate=4,
+    )
+    config = SimpleNamespace(**base)
+    validate_training_config(config)  # the indexer and hyper-connections are allowed for DeepSeek V4
+    validate_training_config(SimpleNamespace(**{**base, "te_moe_block": True}))  # and so is TE MoE
+    groups = _layer_groups(config)
+    # Hash-routed prefix layers have no load-balance loss; only the blocks' layers do (2 per block). The CSA layers
+    # with an indexer loss are prefix layer 2 and the second layer of each block.
+    from maxtext.layers.moe import uses_megatron_seq_aux_loss  # pylint: disable=import-outside-toplevel
+
+    self.assertEqual(_lb_layer_scale(config, groups), 1.0 if uses_megatron_seq_aux_loss(config) else 1.0 / 40)
+    self.assertEqual(_indexer_layer_scale(config, groups), 1.0 / 21)
+    for override, message in (
+        ({"indexer_sparse_training": False}, "dense warm-up"),
+        ({"use_dpo": True}, "use_dpo"),
+        ({"engram_layers": [1]}, "engram_layers"),
+    ):
+      with self.subTest(override=override), self.assertRaisesRegex(ValueError, message):
+        validate_training_config(SimpleNamespace(**{**base, **override}))
+    # Without the dense warm-up (no indexer loss scaling) the indexer may stay on.
+    no_warmup = {**base, "indexer_sparse_training": False, "indexer_loss_scaling_factor": 0}
+    validate_training_config(SimpleNamespace(**no_warmup))
+    # The indexer stays unsupported for DeepSeek V3.2 (MLA indexer): only V4's CSA indexer is wired up.
+    with self.assertRaisesRegex(ValueError, "use_indexer"):
+      validate_training_config(deepseek_config(use_indexer=True))
 
   def test_deepseek_quantization_allowlists_accept_strings_and_string_enums(self):
     # Match the config enums' str/Enum behavior without heavy config imports.
@@ -577,30 +887,7 @@ class DenseTrainingNnxTest(unittest.TestCase):
             )
         )
 
-  def test_quantization_allowlists_reject_unrequested_recipes(self):
-    for field, unsupported in (
-        (
-            "quantization",
-            ("", "mxfp8", "te_fp8_current_scaling", "te_mxfp8", "te_fp8_delayedscaling", "te_nvfp4", "te_nvfp4_no_rht"),
-        ),
-        (
-            "te_gmm_quantization",
-            (
-                "",
-                "mxfp8",
-                "te_fp8_current_scaling",
-                "te_fp8_currentscaling",
-                "te_fp8_delayedscaling",
-                "te_nvfp4",
-                "te_nvfp4_no_rht",
-            ),
-        ),
-    ):
-      for value in unsupported:
-        with self.subTest(field=field, value=value), self.assertRaisesRegex(ValueError, "quantization"):
-          config = deepseek_config(quantization="te_fp8_currentscaling", te_gmm_quantization="te_mxfp8")
-          setattr(config, field, value)
-          validate_training_config(config)
+  def test_llama_quantization_allowlist(self):
     for recipe in ("", "te_no_quant", "te_fp8_currentscaling", "te_mxfp8", "te_fp8_delayedscaling", "te_nvfp4"):
       with self.subTest(llama_quantization=recipe):
         config = deepseek_config(
