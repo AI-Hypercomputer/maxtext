@@ -43,6 +43,7 @@ from maxtext.integration.vllm.convert_utils import (
     resolve_prefuse_moe_weights,
     resolve_rollout_tp,
 )
+from maxtext.m3.infra import offload as m3_offload
 from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
@@ -215,6 +216,8 @@ def _tag_sharding(named_sharding: jax.sharding.NamedSharding, field: str) -> jax
   sharded over `data`. Applied to `.partitions` rather than to the spec, because iterating a
   spec that already carries a tag raises.
   """
+  if getattr(named_sharding, "memory_kind", None) == _HOST_MEMORY_KIND:
+    return named_sharding
   if _DATA_AXIS in sharding.get_mesh_axes_used_by_tensor_spec(named_sharding.spec.partitions):
     return named_sharding
   return named_sharding.update(spec=named_sharding.spec.update(**{field: {_DATA_AXIS}}))
@@ -838,6 +841,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     # Set by `_compile_for_batch` under `optimizer_memory_host_offload`: the device shardings
     # `_update_kernel` moves the pinned-host optimizer state onto. `None` without offload.
     self._optimizer_device_shardings: Any = None
+    self._selective_grad_shardings: Any = None
+    self._selective_state_shardings: Any = None
     # Micro step count within the current training step. Resets on `update()`.
     self._micro_step_count = 0
     # Every micro step this run has ever folded in across optimizer steps.
@@ -925,6 +930,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     A subclass that cannot allocate moments overrides this, and may install `self._state` and
     rebind `self._model` on the way: `__init__` does not touch either again.
     """
+    if m3_offload.is_selective_host_offload_enabled(self._config):
+      return m3_offload.make_optimizer(self._model, tx, self._config, wrt=nnx.Param, dense_host_grads=True)
     return nnx.Optimizer(self._model, tx, wrt=nnx.Param)
 
   def _checkpoint_dir(self) -> str:
@@ -947,6 +954,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._compiled_eval = None
     self._compiled_eval_signature = None
     self._optimizer_device_shardings = None
+    self._selective_grad_shardings = None
+    self._selective_state_shardings = None
     self._compiled_fwd_only = None
     self._compiled_fwd_only_signature = None
     if reset_model:
@@ -1266,6 +1275,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return None
 
     def target(leaf, base):
+      if getattr(base, "memory_kind", None) == _HOST_MEMORY_KIND:
+        return base
       sharded = _zero1_sharding(self._mesh, leaf, base)
       return base if sharded is None else sharded
 
@@ -1302,6 +1313,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     state_pure = self._read_state_pure()
     zero1 = shard_zero1 and _zero1_active(self._config, self._mesh) is None
     offload = self._optimizer_offload_enabled()
+    selective_offload = m3_offload.is_selective_host_offload_enabled(self._config)
     moved = False
 
     def place(leaf: Any, is_optimizer: bool) -> Any:
@@ -1310,7 +1322,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       if not hasattr(leaf, "shape") or not hasattr(leaf, "dtype"):
         return leaf
       base = self._mesh_sharding(leaf)
-      target = (_zero1_sharding(self._mesh, leaf, base) or base) if (is_optimizer and zero1) else base
+      skip_zero1_host = selective_offload and getattr(base, "memory_kind", None) == _HOST_MEMORY_KIND
+      target = (
+          (_zero1_sharding(self._mesh, leaf, base) or base) if (is_optimizer and zero1 and not skip_zero1_host) else base
+      )
       if is_optimizer and offload and target.memory_kind != _HOST_MEMORY_KIND:
         target = target.with_memory_kind(_HOST_MEMORY_KIND)
       if getattr(leaf, "sharding", None) == target:
@@ -1365,14 +1380,18 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     params_pure = jax.tree.map(jax.sharding.reshard, params_pure, params_shardings)
     return self._with_model_state(state_pure, nnx.merge_state(params_pure, rest_pure))
 
-  def _to_grad_dtype(self, x: Any) -> Any:
+  def _to_grad_dtype(self, x: Any, leaf_sharding: Any = None) -> Any:
     """Returns one gradient leaf, or its `jax.ShapeDtypeStruct`, in `grad_dtype`."""
     if not hasattr(x, "dtype") or not jnp.issubdtype(x.dtype, jnp.floating):
       return x
     target = jnp.dtype(self._config.grad_dtype)
     if x.dtype == target:
       return x
-    return x.update(dtype=target) if isinstance(x, jax.ShapeDtypeStruct) else x.astype(target)
+    if isinstance(x, jax.ShapeDtypeStruct):
+      return x.update(dtype=target)
+    if m3_offload.is_selective_host_offload_enabled(self._config):
+      return m3_offload.cast_grad_leaf(x, target, sharding=leaf_sharding)
+    return x.astype(target)
 
   def _freeze_mask_for(self, tree: Any) -> Any:
     """Returns which leaves of `tree` `trainable_parameters_mask` freezes, or None if it freezes none.
@@ -1453,24 +1472,45 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # would put an all-reduce back into every micro-batch.
       params = jax.tree.map(jax.sharding.reshard, params, self._reduced_params_shardings)
 
-    grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
     # Every non-raising branch of `diff_wrapper` builds a LossOutput, so `loss_out` is always
     # one. The value returned by `value_and_grad` is the unreduced sum that was
     # differentiated, which `loss_out.primary_loss` already carries, so it is discarded here.
-    (_, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
+    if m3_offload.is_selective_host_offload_enabled(self._config):
+      (_, (loss_out, new_rest)), micro_grads = m3_offload.engine_value_and_grad(
+          diff_wrapper,
+          self._model_graphdef,
+          params,
+          rest,
+          batch,
+          param_shardings=self._selective_grad_shardings,
+      )
+    else:
+      grad_func = jax.value_and_grad(diff_wrapper, argnums=0, has_aux=True)
+      (_, (loss_out, new_rest)), micro_grads = grad_func(params, rest, batch)
 
     # Summed in `grad_dtype` by `_accumulate_kernel`. A float32 `grad_dtype` holds a float32
     # accumulator tree across kernel calls, and a second one while `fwd_bwd` runs, since these
     # gradients are returned in that dtype.
     if self._uncast_grad_mask is None:
-      micro_grads = jax.tree.map(self._to_grad_dtype, micro_grads)
+      if self._selective_grad_shardings is not None and m3_offload.is_selective_host_offload_enabled(self._config):
+        micro_grads = jax.tree.map(self._to_grad_dtype, micro_grads, self._selective_grad_shardings)
+      else:
+        micro_grads = jax.tree.map(self._to_grad_dtype, micro_grads)
     else:
       # Leaves whose gradients are summed across devices by an all-reduce alone are cast as they
       # join the running sum instead: `_start_running_sum` for the first micro-batch of an update,
       # `_accumulate_kernel` for the others. See `_all_reduced_grad_mask`.
-      micro_grads = jax.tree.map(
-          lambda g, uncast: g if uncast else self._to_grad_dtype(g), micro_grads, self._uncast_grad_mask
-      )
+      if self._selective_grad_shardings is not None and m3_offload.is_selective_host_offload_enabled(self._config):
+        micro_grads = jax.tree.map(
+            lambda g, uncast, sh: g if uncast else self._to_grad_dtype(g, sh),
+            micro_grads,
+            self._uncast_grad_mask,
+            self._selective_grad_shardings,
+        )
+      else:
+        micro_grads = jax.tree.map(
+            lambda g, uncast: g if uncast else self._to_grad_dtype(g), micro_grads, self._uncast_grad_mask
+        )
 
     # Accumulated UNREDUCED, with no `1/denominator` applied: `_update_kernel` divides once
     # by the total, so the optimizer sees `sum(grads)/sum(denom)` rather than a mean of
@@ -1480,7 +1520,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return loss_out.primary_loss, loss_out.aux_metrics, new_rest, micro_grads, denominator
 
   @staticmethod
-  def _accumulate_kernel(acc_grads, acc_denom, grads, denominator):
+  def _accumulate_kernel(acc_grads, acc_denom, grads, denominator, grad_shardings=None):
     """Adds one micro-batch's gradients and loss denominator to the running sums.
 
     Each micro-batch runs the same forward/backward program without receiving the running sum.
@@ -1503,6 +1543,13 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     Returns:
       `(acc_grads + grads, acc_denom + denominator)`.
     """
+    if m3_offload.has_host_leaves(acc_grads) or m3_offload.has_host_leaves(grads):
+      if grad_shardings is not None:
+        return (
+            jax.tree.map(m3_offload.accumulate_grad_leaves, acc_grads, grads, grad_shardings),
+            acc_denom + denominator,
+        )
+      return jax.tree.map(m3_offload.accumulate_grad_leaves, acc_grads, grads), acc_denom + denominator
     return jax.tree.map(lambda acc, g: acc + g.astype(acc.dtype), acc_grads, grads), acc_denom + denominator
 
   def _update_kernel(
@@ -1565,31 +1612,61 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         wide = jnp.promote_types(g.dtype, jnp.float32)
         return jnp.where(has_weights, (g.astype(wide) / safe_denominator).astype(g.dtype), jnp.zeros_like(g))
 
-      grads = jax.tree.map(normalize, accumulated_grads)
+      selective_offload = m3_offload.is_selective_host_offload_enabled(self._config)
+      active_grad_sh = (
+          self._zero1_params_shardings if self._zero1_params_shardings is not None else self._selective_grad_shardings
+      )
+      if selective_offload:
+        inv_denom = jnp.where(has_weights, 1.0 / safe_denominator, jnp.float32(0.0))
+        if active_grad_sh is not None:
+          grads = jax.tree.map(
+              lambda g, sh: m3_offload.scale_grad_leaf(g, inv_denom, sharding=sh), accumulated_grads, active_grad_sh
+          )
+        else:
+          grads = jax.tree.map(lambda g: m3_offload.scale_grad_leaf(g, inv_denom), accumulated_grads)
+      else:
+        grads = jax.tree.map(normalize, accumulated_grads)
       # Compute global grad_norm in float32 before clipping so a sum of squares over bf16
       # does not overflow. Frozen parameters already have exact zero gradients from
       # `_stop_frozen_gradients` in `_fwd_bwd_kernel`, so they do not contribute to `grad_norm`.
-      grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), grads))
+      if selective_offload:
+        grad_norm = m3_offload.l2norm_pytree(grads, shardings=active_grad_sh)
+      else:
+        grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), grads))
       if self._config.skip_step_on_nan:
         should_skip = jnp.logical_not(jnp.isfinite(grad_norm))
         # Zeroed, so a non-finite gradient cannot reach the optimizer's arithmetic either.
-        grads = jax.tree.map(lambda g: jnp.where(should_skip, jnp.zeros_like(g), g), grads)
+        if selective_offload:
+          grads = m3_offload.zero_tree_if(should_skip, grads, shardings=active_grad_sh)
+        else:
+          grads = jax.tree.map(lambda g: jnp.where(should_skip, jnp.zeros_like(g), g), grads)
 
       if self._config.gradient_clipping_threshold > 0:
-        grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
+        if selective_offload:
+          grads = m3_offload.clip_grads_by_global_norm(
+              grads, self._config.gradient_clipping_threshold, shardings=active_grad_sh
+          )
+        else:
+          grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if isinstance(local_state, train_state_nnx.TrainStateNNX):
-        if self._config.skip_step_on_spikes:
-          local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
-        else:
-          local_state.apply_gradients(grads)
+        with m3_offload.active_param_shardings(active_grad_sh if selective_offload else None):
+          if self._config.skip_step_on_spikes:
+            local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
+          else:
+            local_state.apply_gradients(grads)
       _, new_state_pure = nnx.split(local_state)
       if self._config.skip_step_on_spikes and _OPTIMIZER_STATE_KEY in new_state_pure:
         opt_state = nnx.to_pure_dict(new_state_pure[_OPTIMIZER_STATE_KEY])["opt_state"]
         if isinstance(opt_state, dict) and "is_skipped" in opt_state:
           is_skipped_val = opt_state["is_skipped"].astype(jnp.float32)
       if self._config.skip_step_on_nan:
-        new_state_pure = jax.tree.map(lambda new, old: jnp.where(should_skip, old, new), new_state_pure, state_pure)
+        if selective_offload:
+          new_state_pure = m3_offload.select_tree_if(
+              should_skip, state_pure, new_state_pure, shardings=self._selective_state_shardings
+          )
+        else:
+          new_state_pure = jax.tree.map(lambda new, old: jnp.where(should_skip, old, new), new_state_pure, state_pure)
         is_skipped_val = jnp.where(should_skip, 1.0, is_skipped_val)
 
       if self._zero1_params_shardings is not None:
@@ -1835,7 +1912,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       return self._fwd_bwd_kernel(params, rest, batch)
 
     def accumulate(acc_grads, acc_denom, grads, denominator):
-      return self._accumulate_kernel(acc_grads, acc_denom, grads, denominator)
+      return self._accumulate_kernel(acc_grads, acc_denom, grads, denominator, self._selective_grad_shardings)
 
     def update(state_pure, accumulated_grads, accumulated_denominator, mean_loss):
       # `_optimizer_device_shardings` is read at trace time, after it is set below.
@@ -1868,6 +1945,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         self._plain_grad_shardings = None
       else:
         self._plain_grad_shardings = params_shardings
+      self._selective_grad_shardings = grad_shardings
+      if self._zero1_params_shardings is not None and _MODEL_STATE_KEY in state_mesh_shardings:
+        _, rest_model_sh = nnx.split_state(state_mesh_shardings[_MODEL_STATE_KEY], nnx.Param, ...)
+        self._selective_state_shardings = self._with_model_state(
+            state_mesh_shardings, nnx.merge_state(self._zero1_params_shardings, rest_model_sh)
+        )
+      else:
+        self._selective_state_shardings = state_mesh_shardings
       self._uncast_grad_mask = _all_reduced_grad_mask(self._config, self._mesh, grad_shardings, params_pure)
       self._cast_uncast_grads = None
       if self._uncast_grad_mask is not None:
@@ -1879,7 +1964,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             if uncast
         ]
         self._cast_uncast_grads = jax.jit(
-            lambda leaves: [self._to_grad_dtype(g) for g in leaves],
+            lambda leaves: [self._to_grad_dtype(g, sh) for g, sh in zip(leaves, uncast_shardings)],
             in_shardings=(uncast_shardings,),
             out_shardings=uncast_shardings,
         )
@@ -1894,7 +1979,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # state onto the same shardings in device memory, and `update_out_shardings` returns the new
       # state to the host inside the same executable.
       self._optimizer_device_shardings = None
-      if self._optimizer_offload_enabled() and _OPTIMIZER_STATE_KEY in state_mesh_shardings:
+      if (
+          self._optimizer_offload_enabled()
+          and not m3_offload.is_selective_host_offload_enabled(self._config)
+          and _OPTIMIZER_STATE_KEY in state_mesh_shardings
+      ):
         self._optimizer_device_shardings = jax.tree.map(
             lambda s: s.with_memory_kind(_DEVICE_MEMORY_KIND),
             state_mesh_shardings[_OPTIMIZER_STATE_KEY],
@@ -1922,6 +2011,8 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       self._zero1_params_shardings = None
       self._gathered_params_shardings = None
       self._optimizer_device_shardings = None
+      self._selective_grad_shardings = None
+      self._selective_state_shardings = None
 
     # 1. JIT Compile Micro FWD/BWD Pass, and the add that accumulates it.
     #
@@ -2278,7 +2369,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._state is None:
       self._state = train_state_nnx.TrainStateNNX(self._model, self._optimizer)
     state_pure = self._read_state_pure()
-    if not self._compiled and self._optimizer_offload_enabled():
+    if (
+        not self._compiled
+        and self._optimizer_offload_enabled()
+        and not m3_offload.is_selective_host_offload_enabled(self._config)
+    ):
       state_pure = self._with_optimizer_on_device(state_pure)
 
     # `_update_kernel` reads `mean_loss` only under `skip_step_on_spikes`, which is traced off
@@ -2303,7 +2398,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
     nnx.update(self._state, new_state_pure)
     self._publish_state(new_state_pure)
-    if not self._compiled and self._optimizer_offload_enabled():
+    if (
+        not self._compiled
+        and self._optimizer_offload_enabled()
+        and not m3_offload.is_selective_host_offload_enabled(self._config)
+    ):
       # Back to pinned host memory without Zero-1 sharding, matching the eager update's input.
       self._settle_state(shard_zero1=False)
 

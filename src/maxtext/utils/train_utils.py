@@ -424,7 +424,12 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None, m
           if getattr(getattr(config, "lora", None), "enable_lora", False)
           else nnx.Param
       )
-      optimizer = nnx.Optimizer(model, tx, wrt=wrt)
+      if bool(getattr(config, "selective_host_offload", False)):
+        from maxtext.m3.infra import offload as m3_offload  # pylint: disable=import-outside-toplevel
+
+        optimizer = m3_offload.make_optimizer(model, tx, config, wrt=wrt)
+      else:
+        optimizer = nnx.Optimizer(model, tx, wrt=wrt)
       return train_state_nnx.TrainStateNNX(model, optimizer)
 
     init_state_fn = create_train_state_fn

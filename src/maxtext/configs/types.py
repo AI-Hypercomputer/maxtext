@@ -2938,6 +2938,51 @@ class RematAndOffload(BaseModel):
 
   optimizer_memory_host_offload: bool = Field(False, description="Offload optimizer state to host memory.")
   parameter_memory_host_offload: bool = Field(False, description="Offload parameters to host memory.")
+  selective_host_offload: bool = Field(
+      False,
+      description=(
+          "Offload only parameters matching `host_offload_param_patterns` and their matching optimizer "
+          "state to `pinned_host` memory, leaving all other parameters and optimizer state on device. "
+          "Saves HBM at the cost of synchronous host-CPU optimizer latency (e.g., ~1.5-1.9 s/step on "
+          "v5p-8 for a 2.5M x 160 table/chip under default 'host_compute'; ~24 -> 632 ms/step on v5p-8 mini)."
+      ),
+  )
+  host_offload_param_patterns: list[str] = Field(
+      default_factory=list,
+      description=(
+          "Regex patterns matching '/'-joined parameter paths to offload to `pinned_host` memory when "
+          "`selective_host_offload=True` (for example, ['(?:^|/)ple_embedding/ngram_embedding/embedding$'])."
+      ),
+  )
+  selective_host_offload_optimizer_mode: Literal["host_compute", "streamed_chunks", "lazy_sparse"] = Field(
+      "host_compute",
+      description=(
+          "Optimizer update mode for selectively host-offloaded embedding tables: "
+          "'host_compute' (default) runs exact dense AdamW on host CPU with zero full-table HBM transfer, "
+          "but scans all offloaded rows and moments in host DRAM synchronously each step (~1.5-1.9 s/step "
+          "measured on v5p-8 at 2.5M x 160 rows/chip; ~24 -> 632 ms/step on v5p-8 mini); "
+          "'streamed_chunks' streams `selective_host_offload_num_chunks` row chunks through device compute "
+          "for exact dense AdamW with zero host temp DRAM but is ~150x slower on live TPU (~284 s/step at "
+          "2.5M x 160 on v5p-8, diagnostic use only); "
+          "'lazy_sparse' (opt-in approximation) updates only touched rows, skipping weight and moment decay "
+          "on untouched rows, and fails closed with dense host gradients (such as MaxTextTrainingEngine)."
+      ),
+  )
+  selective_host_offload_num_chunks: int = Field(
+      16,
+      ge=1,
+      description="Number of row chunks used when `selective_host_offload_optimizer_mode` is 'streamed_chunks'.",
+  )
+
+  @model_validator(mode="after")
+  def validate_selective_host_offload(self) -> "RematAndOffload":
+    """Reject invalid selective pinned-host offload flag combinations."""
+    if self.selective_host_offload:
+      if self.parameter_memory_host_offload:
+        raise ValueError("selective_host_offload=True cannot be combined with parameter_memory_host_offload=True.")
+      if not self.host_offload_param_patterns:
+        raise ValueError("selective_host_offload=True requires non-empty host_offload_param_patterns.")
+    return self
 
 
 class Tokenizer(BaseModel):
@@ -8540,11 +8585,11 @@ class RLConfig(
           Please pass tokenizer_path in your command."
         )
 
-    if self.optimizer_memory_host_offload:
+    if self.optimizer_memory_host_offload or self.parameter_memory_host_offload or self.selective_host_offload:
       raise ValueError(
-          "optimizer_memory_host_offload=True is not supported on the post-training "
-          "RL path because the underlying Tunix RLCluster/Trainer does not "
-          "support host offloading of the optimizer state."
+          "Host offloading (optimizer_memory_host_offload, parameter_memory_host_offload, or "
+          "selective_host_offload) is not supported on the post-training RL path because the "
+          "underlying Tunix RLCluster/Trainer does not support host-offloaded parameters or optimizer state."
       )
 
     if self.num_vocab_tiling > 1:

@@ -2151,10 +2151,22 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
 
   state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(abstract_state)
 
+  selective_offload = is_training and bool(getattr(config, "selective_host_offload", False))
+  if selective_offload:
+    from maxtext.m3.infra import offload as m3_offload  # pylint: disable=import-outside-toplevel
+
+    state_mesh_shardings = m3_offload.apply_selective_memory_kind_to_shardings(abs_var_state, state_mesh_shardings)
+
   if is_training and config.shard_optimizer_over_data:
-    # Add data to sharding for optimizer state
+    # Add data to sharding for optimizer state while keeping selectively host-offloaded
+    # (`pinned_host`) leaves aligned with their unsharded-over-data parameters.
+    def _maybe_add_data_to_opt_sharding(path, opt_aval, opt_sharding):
+      if selective_offload and getattr(opt_sharding, "memory_kind", None) in ("pinned_host", "unpinned_host"):
+        return opt_sharding
+      return sharding.add_data_to_sharding(mesh, path, opt_aval, opt_sharding)
+
     optimizer_sharding = jax.tree_util.tree_map_with_path(
-        functools.partial(sharding.add_data_to_sharding, mesh),
+        _maybe_add_data_to_opt_sharding,
         abstract_state.optimizer,
         state_mesh_shardings.optimizer,
     )

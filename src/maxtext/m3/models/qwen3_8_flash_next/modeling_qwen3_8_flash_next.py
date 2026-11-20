@@ -1486,6 +1486,16 @@ class Qwen3_8NGramEmbedding(nnx.Module):
 
     return jnp.concatenate(blocks, axis=-1)[:, self.ngram_size - 1 :, :]
 
+  def embed_ids_from_tokens(self, tokens: jax.Array, segment_ids: jax.Array | None = None) -> jax.Array:
+    """Computes n-gram embedding row indices from token IDs and optional segment IDs."""
+    if segment_ids is not None:
+      tokens = jnp.where(segment_ids != 0, tokens, self.eos_token_id)
+    ngram_ids = self.compute_ngram_ids(tokens)
+    mesh = jax.sharding.get_abstract_mesh()
+    if not mesh.empty and mesh.size > 1:
+      ngram_ids = jax.lax.with_sharding_constraint(ngram_ids, jax.sharding.PartitionSpec())
+    return ngram_ids
+
   def __call__(self, input_ids: jax.Array) -> jax.Array:
     ngram_ids = self.compute_ngram_ids(input_ids)
     mesh = jax.sharding.get_abstract_mesh()

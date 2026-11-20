@@ -152,7 +152,12 @@ def get_shaped_inputs(topology_mesh, config):
         if getattr(getattr(config, "lora", None), "enable_lora", False)
         else nnx.Param
     )
-    optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
+    if bool(getattr(config, "selective_host_offload", False)):
+      from maxtext.m3.infra import offload as m3_offload  # pylint: disable=import-outside-toplevel
+
+      optimizer = m3_offload.make_optimizer(nnx_model, tx, config, wrt=wrt)
+    else:
+      optimizer = nnx.Optimizer(nnx_model, tx, wrt=wrt)
     return train_state_nnx.TrainStateNNX(nnx_model, optimizer)
 
   init_state_fn = create_train_state_fn

@@ -18,11 +18,11 @@ import datetime
 import os
 import re
 import sys
-from typing import Any, Optional, Sequence, Union
+from typing import Any, Literal, Optional, Sequence, Union
 import jax
 import jax.numpy as jnp
 from maxtext.utils import max_logging
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
 
@@ -184,6 +184,23 @@ class TrainerConfig(BaseModel):
   remat_policy: str = "NONE"
   names_which_can_be_saved: list[str] = Field(default_factory=list)
   names_which_can_be_offloaded: list[str] = Field(default_factory=list)
+  parameter_memory_host_offload: bool = False
+  optimizer_memory_host_offload: bool = False
+  selective_host_offload: bool = False
+  host_offload_param_patterns: list[str] = Field(default_factory=list)
+  selective_host_offload_optimizer_mode: Literal["host_compute", "streamed_chunks", "lazy_sparse"] = "host_compute"
+  selective_host_offload_num_chunks: int = Field(default=16, ge=1)
+
+  @model_validator(mode="after")
+  def validate_selective_host_offload(self) -> "TrainerConfig":
+    """Rejects invalid selective pinned-host offload flag combinations."""
+    if self.selective_host_offload:
+      if self.parameter_memory_host_offload:
+        raise ValueError("selective_host_offload=True cannot be combined with parameter_memory_host_offload=True.")
+      if not self.host_offload_param_patterns:
+        raise ValueError("selective_host_offload=True requires non-empty host_offload_param_patterns.")
+    return self
+
   enable_tile_search: bool = False
   tile_search_mode: str = "smart"
   tile_search_iters: int = 10
