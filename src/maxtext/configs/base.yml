@@ -487,10 +487,14 @@ return_routed_experts: false
 moe_fsdp_use_two_stage_all_gather: false
 # Shard the expert dimension of the MLP weights on the FSDP axis.
 # This configuration is recommended only when num_experts is a multiple of fsdp_parallelism
+# With fp8_full (qwix) and fixed/absmax weight calibration, QWAGs the experts in fp8 (XLA all-gather without use_tokamax_gmm).
 shard_exp_on_fsdp: false
 # Keep embed_moe sharded so we can manually QAG it over FSDP.
-# Requires quantization to be specified and weight_quantization_calibration_method to be fixed (static scaling mode).
+# Requires quantization and fixed or absmax weight calibration; without use_tokamax_gmm, falls back to the XLA all-gather.
 shard_embed_moe_on_fsdp: false
+# QWAG weight scale, only with absmax weight calibration (fixed is per-tensor): per_channel [1,1,N], per_tensor,
+# per_expert_channel [E,1,N] (needs use_gmm_v2; not with moe_flat_fsdp_weights or use_ring_of_experts).
+moe_weight_quantization_granularity: "per_channel"
 # use fsdp and fsdp_transpose axes for sharding the moe weights
 use_2d_fsdp_sharding: false
 

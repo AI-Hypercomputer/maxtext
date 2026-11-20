@@ -38,6 +38,8 @@ from maxtext.common.common_types import (
     MultimodalInput,
     ShardMode,
     get_weight_dtype,
+    is_fp8_dtype,
+    moe_qwag_flag,
 )
 from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import linears, mhc, moe, normalizations, quantizations
@@ -1338,6 +1340,7 @@ class NNXDecoder(nnx.Module):
       metadata_axis_name: str = "layers",
       forced_routed_experts_scanned=None,
       per_iteration_kwargs=None,
+      qwag_amax_fn=None,
       **kwargs,
   ):
     """Runs the layer stack using nnx.scan.
@@ -1376,6 +1379,8 @@ class NNXDecoder(nnx.Module):
         its static unroll calls each iteration separately. The values are passed
         as call arguments rather than closed over, so they stay correct when the
         body is wrapped in jax.checkpoint.
+      qwag_amax_fn: Optional fn from the stacked params to the per-layer
+        (wi_0, wi_1, wo) QWAG amax, passed to each layer as moe_qwag_weight_amax.
       **kwargs: Keyword args forwarded to the layer (filtered by the layer
         signature).
 
@@ -1449,10 +1454,17 @@ class NNXDecoder(nnx.Module):
         else ()
     )
     use_deferred_norm_grad = bool(defer_psum_axes)
+    use_qwag_amax = qwag_amax_fn is not None and not use_kv
 
     def layer_fn(carry, scanned_vars):
       # Ensure metadata rank matches the sliced values
       scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, "layers")
+
+      # The QWAG amax, when present, is the last scanned input.
+      moe_qwag_weight_amax = None
+      if use_qwag_amax:
+        *scanned_vars, moe_qwag_weight_amax = scanned_vars
+        scanned_vars = tuple(scanned_vars)
 
       # Unpack the sliced variables for THIS layer
       if use_kv:
@@ -1495,6 +1507,8 @@ class NNXDecoder(nnx.Module):
         call_kwargs["forced_routed_experts"] = forced_routed_experts_layer
       if iteration_kwargs:
         call_kwargs.update(iteration_kwargs)
+      if use_qwag_amax:
+        call_kwargs["moe_qwag_weight_amax"] = moe_qwag_weight_amax
 
       layer_out = layer(carry, *args, **call_kwargs)
 
@@ -1574,6 +1588,8 @@ class NNXDecoder(nnx.Module):
         scan_xs = (params, state, forced_routed_experts_scanned)
       else:
         scan_xs = (params, state)
+      if use_qwag_amax:
+        scan_xs = scan_xs + (qwag_amax_fn(params),)
       final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, scan_xs, unroll=unroll)
       returned_kv_stacked = None
 
@@ -1618,6 +1634,29 @@ class NNXDecoder(nnx.Module):
       )
     return fsdp_prefetch.apply_layers_with_fsdp_prefetch(
         layers, x_in, *args, skip_block_remat=skip_block_remat, **prefetch_kwargs, **kwargs
+    )
+
+  def _deepseek_moe_qwag_amax_fn(self):
+    """With dynamic QWAG, returns the per-layer (wi_0, wi_1, wo) amax fn for the DeepSeek MoE stack, else None."""
+    cfg = self.config
+    if moe_qwag_flag(cfg) is None or not quantizations.is_dynamic_qwag_calibration(
+        cfg.weight_quantization_calibration_method
+    ):
+      return None
+    # The precompute reads the stored params. Fall back to RoutedMoE's per-layer amax when it transforms the weights
+    # first (fp8 storage, fake quant, sparsity), when the MoE call does not take the amax (mHC), or when the params
+    # are on the host (the scan moves them to the device one layer at a time).
+    if (
+        cfg.fp8_moe
+        or is_fp8_dtype(get_weight_dtype(cfg, "routed_experts"))
+        or cfg.fp8_moe_fake_quant
+        or (cfg.weight_sparsity_n and cfg.weight_sparsity_m)
+        or cfg.mhc_expansion_rate > 1
+        or cfg.parameter_memory_host_offload
+    ):
+      return None
+    return lambda params: moe.scanned_qwag_weight_amax(
+        params["DeepSeekMoeBlock_0"]["MoeBlock_0"], cfg.dtype, cfg.moe_weight_quantization_granularity
     )
 
   def get_decoder_layers(self):
@@ -2579,6 +2618,7 @@ class NNXDecoder(nnx.Module):
                   y,
                   *layer_args,
                   length=num_moe,
+                  qwag_amax_fn=self._deepseek_moe_qwag_amax_fn(),
                   **layer_kwargs,
               )
 
