@@ -474,6 +474,7 @@ use_gmm_v2: false
 # When enabled, custom tile sizes (`wi_tile...`, `wo_tile...`) are ignored.
 use_gmm_v2_heuristic_tiling: false
 moe_bwd_wgrad_overlap: false # fence m3 MoE dx with expert wgrads in backward to overlap FSDP reduce-scatter.
+moe_dropless_buffer_factor: -1.0 # m3 MoE EP receive-buffer factor: -1.0 auto (2.0 when ep_size >= 8, unbounded when ep_size < 8), 0.0 unbounded, or > 0.0 to bound buffer at factor * num_slots and route overflow in conditional round(s) with zero dropped tokens.
 
 norm_topk_prob: false # boolean to enable the top-k probability normalization. qwen3-specific normalization of router weights.
 
