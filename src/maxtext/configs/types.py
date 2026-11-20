@@ -1272,6 +1272,15 @@ class SplashAttention(BaseModel):
           " (sa_q_prescaled_log2e > sa_dkv_reuse_scaled_q > both False for non-absorbed MLA with fp8 q)."
       ),
   )
+  sa_near_diagonal_static_segments: bool = Field(
+      False,
+      description=(
+          "Splash: with segment ids, keep the static mask schedule (skip"
+          " segment tile pruning) when every active block is on or next to the"
+          " diagonal of square blocks, e.g. sliding windows no wider than a"
+          " block. Experimental (SplashConfig.near_diagonal_static_segments)."
+      ),
+  )
   sa_ignore_segment_ids: bool = Field(
       False,
       description=(
