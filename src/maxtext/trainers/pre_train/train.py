@@ -1423,7 +1423,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       precompiled_eval = True
       if p_eval_step_dropless is not None:
         aot_compile_step(p_eval_step_dropless, eval_lower_args, compiler_options, prefix="eval_dropless")
-  prof = profiler.Profiler(config, offset_step=start_step)
+  prof = profiler.Profiler(config, offset_step=start_step, mesh=mesh)
   metric_logger_instance = metric_logger.MetricLogger(
       config=config, learning_rate_schedule=learning_rate_schedule, start_step=start_step
   )
