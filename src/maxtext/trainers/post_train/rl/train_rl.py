@@ -418,6 +418,7 @@ def build_rl_profiler_config(
       output_dir=trainer_config.tensorboard_dir,
       managed_mldiagnostics=trainer_config.managed_mldiagnostics,
       timeout_secs=timeout_secs,
+      enable_continuous_profiling=trainer_config.enable_continuous_profiling,
   )
 
 
