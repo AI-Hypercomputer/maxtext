@@ -16,6 +16,8 @@
 
 # pylint: disable=missing-function-docstring,protected-access
 
+import functools
+import json
 import sys
 import unittest
 
@@ -86,8 +88,17 @@ def _flat(tree):
 
 
 def _run(overrides=None, serial=True):
-  """(config, serial, dual_pipe) results, each (loss, aux, grads), on the same tiny V4 model and batch."""
-  cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], **{**_V4_SMALL, **(overrides or {})})
+  """(config, serial, dual_pipe) results, each (loss, aux, grads), on the same tiny V4 model and batch.
+
+  Memoized: building the model and compiling both paths dominates the cost, and several tests share a configuration.
+  """
+  return _run_cached(json.dumps(overrides or {}, sort_keys=True), serial)
+
+
+@functools.lru_cache(maxsize=None)
+def _run_cached(overrides_json, serial):
+  overrides = json.loads(overrides_json)
+  cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], **{**_V4_SMALL, **overrides})
   mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
   with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
     model = model_creation_utils.create_model(cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
@@ -113,6 +124,11 @@ def _run(overrides=None, serial=True):
 
 
 class DualPipeDeepSeek4Test(unittest.TestCase):
+
+  @classmethod
+  def tearDownClass(cls):
+    _run_cached.cache_clear()
+    super().tearDownClass()
 
   def assert_close(self, actual, expected, name, rtol=2e-4, atol=2e-6):
     np.testing.assert_allclose(actual, expected, rtol=rtol, atol=atol, err_msg=name)
@@ -148,6 +164,7 @@ class DualPipeDeepSeek4Test(unittest.TestCase):
       self.assertEqual(got[path].dtype, np.float32)
       self.assertTrue(np.all(np.abs(got[path]) == np.float32(cfg.routed_bias_update_rate)))
 
+  @pytest.mark.scheduled_only
   def test_auxiliary_losses_change_the_gradients(self):
     """The comparison above is not vacuous: the load-balance and indexer terms move the gradients."""
     _, _, (_, _, with_aux) = _run(serial=False)
@@ -158,6 +175,7 @@ class DualPipeDeepSeek4Test(unittest.TestCase):
     got, base = _flat(with_aux), _flat(without_aux)
     self.assertGreater(max(float(np.max(np.abs(got[path] - base[path]))) for path in got), 1e-5)
 
+  @pytest.mark.scheduled_only
   def test_odd_remainder_ignores_the_trailing_layer_like_serial(self):
     """5 layers = 2 prefix + 3 remaining: the decoder scans floor(3 / 2) = 1 block and never builds the last layer."""
     overrides = {"base_num_decoder_layers": 5, "compress_ratios": [0, 4, 128, 4, 128]}
@@ -171,6 +189,7 @@ class DualPipeDeepSeek4Test(unittest.TestCase):
     for path in want:
       self.assert_close(got[path], want[path], "/".join(map(str, path)), rtol=1e-3, atol=1e-5)
 
+  @pytest.mark.scheduled_only
   def test_prefix_only_model_without_scanned_blocks(self):
     """2 prefix layers + 1 remaining: floor(1 / 2) = 0 blocks, so there is no scanned stack and no routed bias."""
     overrides = {"base_num_decoder_layers": 3, "compress_ratios": [0, 4, 128]}
@@ -186,6 +205,7 @@ class DualPipeDeepSeek4Test(unittest.TestCase):
     for path in want:
       self.assert_close(got[path], want[path], "/".join(map(str, path)), rtol=1e-3, atol=1e-5)
 
+  @pytest.mark.scheduled_only
   def test_remat_policies_match_serial(self):
     """Without remat and with a name-saving policy (the scanned block also remats each layer internally)."""
     for policy in ("none", "minimal"):
