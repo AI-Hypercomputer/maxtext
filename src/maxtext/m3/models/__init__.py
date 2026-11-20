@@ -31,6 +31,7 @@ from flax import nnx
 import jax
 from jax._src import core as jax_core  # pylint: disable=protected-access
 
+from maxtext.m3.models.gemma3 import modeling_gemma3
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
@@ -58,6 +59,10 @@ def create_granitemoe_model(config, mesh=None, *, rngs, **kwargs):
 
 
 MODEL_REGISTRY: dict[str, Callable] = {
+    "gemma3-1b": modeling_gemma3.create_gemma3_model,
+    "gemma3-4b": modeling_gemma3.create_gemma3_model,
+    "gemma3-12b": modeling_gemma3.create_gemma3_model,
+    "gemma3-27b": modeling_gemma3.create_gemma3_model,
     "glm5.3-flash": create_glm5_3_flash_model,
     "granite-3.0-1b-a400m": create_granitemoe_model,
     "granitemoe": create_granitemoe_model,
@@ -147,6 +152,10 @@ def calculate_granitemoe_tflops_per_device(config, log: bool = True):
 
 
 MODEL_FLOPS_REGISTRY: dict[str, Callable] = {
+    "gemma3-1b": modeling_gemma3.calculate_gemma3_tflops_per_device,
+    "gemma3-4b": modeling_gemma3.calculate_gemma3_tflops_per_device,
+    "gemma3-12b": modeling_gemma3.calculate_gemma3_tflops_per_device,
+    "gemma3-27b": modeling_gemma3.calculate_gemma3_tflops_per_device,
     "glm5.3-flash": calculate_glm5_3_flash_tflops_per_device,
     "granite-3.0-1b-a400m": calculate_granitemoe_tflops_per_device,
     "granitemoe": calculate_granitemoe_tflops_per_device,
@@ -183,6 +192,10 @@ def configure_granitemoe_engine(engine):
 
 
 MODEL_ENGINE_CONFIG_REGISTRY: dict[str, Callable] = {
+    "gemma3-1b": modeling_gemma3.configure_gemma3_engine,
+    "gemma3-4b": modeling_gemma3.configure_gemma3_engine,
+    "gemma3-12b": modeling_gemma3.configure_gemma3_engine,
+    "gemma3-27b": modeling_gemma3.configure_gemma3_engine,
     "glm5.3-flash": configure_glm5_3_flash_engine,
     "granite-3.0-1b-a400m": configure_granitemoe_engine,
     "granitemoe": configure_granitemoe_engine,

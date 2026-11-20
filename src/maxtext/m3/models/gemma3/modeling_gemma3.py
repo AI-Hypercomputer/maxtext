@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Gemma 3 text configuration and core Flax NNX layers for MaxText m3.
+"""Gemma 3 text configuration, layers, scanned 5:1 decoder, and CausalLM for MaxText m3.
 
 Implements the Gemma 3 1B / 4B / 12B / 27B text architecture in pure Flax NNX
 matching Hugging Face `transformers.models.gemma3` numerical boundaries:
@@ -26,12 +26,18 @@ matching Hugging Face `transformers.models.gemma3` numerical boundaries:
   scaling, exclusive sliding-window masking (`0 <= q - k < sliding_window`),
   packed `decoder_segment_ids` + padding isolation, and a `float32` softmax.
 - GeGLU (`gelu_pytorch_tanh`) MLP and 4-RMSNorm pre/post residual decoder layer.
+- Heterogeneous 6-layer cycle scanning (`5` local SWA + `1` global) via shared
+  `maxtext.m3.infra.scan.scan_run` (`ScannedLayers`) plus trailing `layers_{idx}`
+  layers (`num_hidden_layers % 6`), per-sublayer `jax.checkpoint(..., prevent_cse=True)`
+  rematerialization, training FLOPs accounting, and `MaxTextTrainingEngine` hooks.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+import contextlib
 import dataclasses
+import functools
 import json
 import os
 from typing import Any
@@ -39,6 +45,7 @@ from typing import Any
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.m3.configs.config import BaseConfig
 from maxtext.m3.core.sharding import (
     DefaultSharding,
@@ -47,6 +54,7 @@ from maxtext.m3.core.sharding import (
     check_mesh,
     param_metadata,
 )
+from maxtext.m3.infra import scan as m3_scan
 import numpy as np
 
 
@@ -100,6 +108,50 @@ _GEMMA3_MODEL_PRESETS: dict[str, dict[str, Any]] = {
         "rope_linear_scaling_factor": 8.0,
     },
 }
+
+
+_GEMMA3_LOSS_BATCH_KEYS = (
+    "inputs",
+    "targets",
+    "targets_segmentation",
+    "inputs_segmentation",
+    "inputs_position",
+)
+
+_GEMMA3_UNSUPPORTED_MODEL_MEDIA_KWARGS = (
+    "encoder_images",
+    "encoder_image_masks",
+    "encoder_videos",
+    "encoder_video_masks",
+    "encoder_video_grid_thw",
+)
+
+_GEMMA3_UNSUPPORTED_ENGINE_MEDIA_KEYS = (
+    "images",
+    "image_masks",
+    "videos",
+    "video_masks",
+    "video_grid_thw",
+)
+
+
+@dataclasses.dataclass(frozen=True)
+class _FallbackWeightedMetric:
+  """Fallback WeightedMetric container used when Tunix post-training is absent."""
+
+  unreduced_sum: jax.Array
+  denominator: jax.Array
+
+
+def _resolve_weighted_metric_cls() -> Any:
+  """Resolves canonical `WeightedMetric` class (falling back cleanly in pre-train installs)."""
+  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  try:
+    from maxtext.training_engine import abstract_engine
+
+    return abstract_engine.WeightedMetric
+  except ImportError:
+    return _FallbackWeightedMetric
 
 
 # Defaults of HF `transformers` `Gemma3TextConfig.__init__` (v4.57 and v5). Published Gemma 3 `config.json`
@@ -491,6 +543,10 @@ class Gemma3Config:
           mapped[dst_cap] = cap_val if cap_val > 0.0 else None
       if "mlp_activations" in raw and raw["mlp_activations"] is not None:
         mapped["hidden_activation"] = _hidden_activation_from_mlp_activations(raw["mlp_activations"])
+      if "use_multimodal" in raw and bool(raw["use_multimodal"]):
+        raise ValueError(
+            "Gemma 3 m3 currently implements text-only Gemma3ForCausalLM; use_multimodal=True is unsupported."
+        )
       if "stack_cycles" not in mapped and "scan_layers" in mapped:
         mapped["stack_cycles"] = bool(mapped["scan_layers"])
       mapped.update(overrides)
@@ -524,6 +580,14 @@ class Gemma3Config:
 
     if not config.use_m3_model:
       raise ValueError("Gemma 3 m3 requires use_m3_model=True.")
+    has_use_multimodal = (
+        "use_multimodal" in config.get_keys() if "get_keys" in dir(config) else "use_multimodal" in dir(config)
+    )
+    if has_use_multimodal and bool(config.use_multimodal):
+      raise ValueError(
+          f"Multimodal is not yet supported for {config.model_name} with use_m3_model=True; "
+          "Gemma 3 m3 currently implements text-only Gemma3ForCausalLM (set use_m3_model=False for multimodal)."
+      )
 
     model_name = str(config.model_name)
     if model_name not in _GEMMA3_MODEL_PRESETS:
@@ -1092,3 +1156,552 @@ class Gemma3DecoderLayer(nnx.Module):
     ffw_out = self.mlp(ffw_in)
     ffw_out = self.post_ffw_norm(ffw_out)
     return _constrain(s, x + ffw_out, "layer_out", ("batch", "length", "embed"))
+
+
+def _remat_policy_fn(remat_policy: str) -> Any:
+  """Maps `Gemma3Config.remat_policy` to a `jax.checkpoint` policy (`None` saves nothing)."""
+  match remat_policy:
+    case "full":
+      return None
+    case "minimal":
+      return jax.checkpoint_policies.checkpoint_dots_with_no_batch_dims
+    case _:
+      raise ValueError(f"No checkpoint policy for remat_policy {remat_policy!r}.")
+
+
+def _execute_layer_maybe_remat(
+    sublayer: Gemma3DecoderLayer,
+    x: jax.Array,
+    *,
+    decoder_positions: jax.Array | None,
+    decoder_segment_ids: jax.Array | None,
+    remat_policy: str,
+) -> jax.Array:
+  """Executes `sublayer` directly or under `jax.checkpoint(..., prevent_cse=True)`."""
+  if remat_policy == "none":
+    return sublayer(
+        x,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+    )
+  graphdef, state = nnx.split(sublayer)
+
+  # `prevent_cse=True`: sublayers are unrolled inside one scan step (or flat loop), where CSE could fold recompute.
+  @functools.partial(jax.checkpoint, prevent_cse=True, policy=_remat_policy_fn(remat_policy))
+  def _remat_sublayer(
+      st: Any,
+      h: jax.Array,
+      pos: jax.Array | None,
+      seg: jax.Array | None,
+  ) -> jax.Array:
+    merged = nnx.merge(graphdef, st)
+    return merged(
+        h,
+        decoder_positions=pos,
+        decoder_segment_ids=seg,
+    )
+
+  return _remat_sublayer(state, x, decoder_positions, decoder_segment_ids)
+
+
+def _cycle_slice(state: Any, cycle_idx: int, param_scan_axis: int) -> Any:
+  """Returns cycle `cycle_idx` of stacked `state`, dropping the stacked axis from `out_sharding` metadata."""
+
+  def take(variable: nnx.Variable) -> nnx.Variable:
+    rank = variable.ndim - 1
+    axis = min(param_scan_axis, rank) if isinstance(variable, nnx.Param) else 0
+    value = jnp.take(variable[...], cycle_idx, axis=axis)
+    metadata = variable.get_metadata()
+    spec = metadata["out_sharding"] if "out_sharding" in metadata else None
+    if isinstance(spec, jax.sharding.PartitionSpec):
+      entries = list(spec)
+      del entries[axis]
+      return variable.replace(value, out_sharding=jax.sharding.PartitionSpec(*entries))
+    return variable.replace(value)
+
+  return jax.tree.map(take, state, is_leaf=lambda x: isinstance(x, nnx.Variable))
+
+
+class Gemma3CycleBlock(nnx.Module):
+  """One repeating Gemma 3 period (`sliding_window_pattern` layers: local SWA + global)."""
+
+  def __init__(
+      self,
+      config: Gemma3Config,
+      *,
+      rngs: nnx.Rngs,
+      sharding: Sharding | None = None,
+  ):
+    self.cycle_len = config.sliding_window_pattern
+    self.remat_policy = config.remat_policy
+    for block_idx in range(self.cycle_len):
+      setattr(
+          self,
+          f"layers_{block_idx}",
+          Gemma3DecoderLayer(
+              config,
+              layer_idx=block_idx,
+              rngs=rngs,
+              sharding=sharding,
+          ),
+      )
+
+  def __call__(
+      self,
+      inputs: jax.Array,
+      decoder_positions: jax.Array | None = None,
+      decoder_segment_ids: jax.Array | None = None,
+  ) -> jax.Array:
+    x = inputs
+    for block_idx in range(self.cycle_len):
+      sublayer: Gemma3DecoderLayer = getattr(self, f"layers_{block_idx}")
+      x = _execute_layer_maybe_remat(
+          sublayer,
+          x,
+          decoder_positions=decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+          remat_policy=self.remat_policy,
+      )
+    return x
+
+
+class Gemma3Decoder(nnx.Module):
+  """Gemma 3 transformer decoder supporting scanned 6-layer cycles and flat unscanned layout."""
+
+  def __init__(
+      self,
+      config: Gemma3Config,
+      *,
+      rngs: nnx.Rngs,
+      sharding: Sharding | None = None,
+  ):
+    self.config = config
+    self.dtype = resolve_jnp_dtype(config.dtype)
+    self.param_dtype = resolve_jnp_dtype(config.weight_dtype)
+    self.precision = resolve_precision(config.matmul_precision)
+    self.sharding = _resolve_optional_sharding(sharding, None, config)
+    s = self.sharding
+
+    self.cycle_len = config.sliding_window_pattern
+    self.num_hidden_layers = config.num_hidden_layers
+    self.stack_cycles = config.stack_cycles
+    self.scan_layers = config.scan_layers
+    self.param_scan_axis = config.param_scan_axis
+    self.remat_policy = config.remat_policy
+
+    if self.stack_cycles:
+      self.num_cycles = config.num_hidden_layers // self.cycle_len
+      self.num_remainder = config.num_hidden_layers % self.cycle_len
+      if self.num_cycles > 0:
+        cycles = [Gemma3CycleBlock(config, rngs=rngs, sharding=s) for _ in range(self.num_cycles)]
+        self.layers = m3_scan.scan_run(cycles, param_scan_axis=config.param_scan_axis)
+      start_rem = self.num_cycles * self.cycle_len
+      # Attach trailing layers directly as `decoder.layers_{idx}` so `m3/infra/quantization.py`
+      # (`r"decoder/layers(_\d+)?(/|$)"`) quantizes every projection alongside `self.layers`.
+      for rem_idx in range(self.num_remainder):
+        layer_idx = start_rem + rem_idx
+        setattr(
+            self,
+            f"layers_{layer_idx}",
+            Gemma3DecoderLayer(
+                config,
+                layer_idx=layer_idx,
+                rngs=rngs,
+                sharding=s,
+            ),
+        )
+    else:
+      self.num_cycles = 0
+      self.num_remainder = 0
+      for layer_idx in range(config.num_hidden_layers):
+        setattr(
+            self,
+            f"layers_{layer_idx}",
+            Gemma3DecoderLayer(
+                config,
+                layer_idx=layer_idx,
+                rngs=rngs,
+                sharding=s,
+            ),
+        )
+
+    self.decoder_norm = Gemma3RMSNorm(
+        config.hidden_size,
+        epsilon=config.rms_norm_eps,
+        param_dtype=self.param_dtype,
+        sharding=s,
+        name="decoder_norm",
+    )
+    if not config.tie_word_embeddings:
+      init_fn = nnx.initializers.normal(stddev=config.initializer_range)
+      self.logits_dense = nnx.Linear(
+          in_features=config.hidden_size,
+          out_features=config.vocab_size,
+          use_bias=False,
+          dtype=self.dtype,
+          param_dtype=self.param_dtype,
+          precision=self.precision,
+          kernel_init=init_fn,
+          kernel_metadata=_param_meta(s, "logits_dense", ("embed", "vocab")),
+          rngs=rngs,
+      )
+
+  def _run_unscanned_stacked_cycles(
+      self,
+      y: jax.Array,
+      *,
+      decoder_positions: jax.Array | None,
+      decoder_segment_ids: jax.Array | None,
+  ) -> jax.Array:
+    """Runs the stacked cycles as an unrolled Python loop (`scan_layers=False`, same state paths as scanned)."""
+    graphdef, params, rest = nnx.split(self.layers, nnx.Param, ...)
+    for cycle_idx in range(self.num_cycles):
+      cycle = nnx.merge(
+          graphdef,
+          _cycle_slice(params, cycle_idx, self.param_scan_axis),
+          _cycle_slice(rest, cycle_idx, 0),
+      )
+      y = Gemma3CycleBlock.__call__(
+          cycle,
+          y,
+          decoder_positions=decoder_positions,
+          decoder_segment_ids=decoder_segment_ids,
+      )
+    return y
+
+  def apply_output_head(
+      self,
+      shared_embedding: Gemma3TextScaledWordEmbedding,
+      y: jax.Array,
+  ) -> jax.Array:
+    """Applies final `decoder_norm`, tied/untied vocabulary projection, and optional softcap."""
+    s = self.sharding
+    y = self.decoder_norm(y)
+    if y.ndim == 2:
+      y = _constrain(s, y, "pre_logits", ("batch", "embed"))
+    else:
+      y = _constrain(s, y, "pre_logits", ("batch", "length", "embed"))
+
+    if self.config.tie_word_embeddings:
+      logits = shared_embedding.attend(y, precision=self.precision)
+    else:
+      logits = self.logits_dense(y)
+
+    # Logits leave the model in float32 (HF upcasts before the loss); the final softcap runs in float32.
+    logits = logits.astype(jnp.float32)
+    if self.config.final_logit_softcapping is not None:
+      cap = jnp.float32(self.config.final_logit_softcapping)
+      logits = jnp.tanh(logits / cap) * cap
+
+    if logits.ndim == 2:
+      return _constrain(s, logits, "logits", ("batch", "vocab"))
+    return _constrain(s, logits, "logits", ("batch", "length", "vocab"))
+
+  def __call__(
+      self,
+      shared_embedding: Gemma3TextScaledWordEmbedding,
+      decoder_input_tokens: jax.Array,
+      decoder_positions: jax.Array | None = None,
+      *,
+      decoder_segment_ids: jax.Array | None = None,
+  ) -> tuple[jax.Array, jax.Array]:
+    y = shared_embedding(decoder_input_tokens)
+    if self.stack_cycles:
+      if self.num_cycles > 0:
+        if self.scan_layers:
+          y = self.layers(
+              y,
+              decoder_positions=decoder_positions,
+              decoder_segment_ids=decoder_segment_ids,
+          )
+        else:
+          y = self._run_unscanned_stacked_cycles(
+              y,
+              decoder_positions=decoder_positions,
+              decoder_segment_ids=decoder_segment_ids,
+          )
+      start_rem = self.num_cycles * self.cycle_len
+      for rem_idx in range(self.num_remainder):
+        sublayer: Gemma3DecoderLayer = getattr(self, f"layers_{start_rem + rem_idx}")
+        y = _execute_layer_maybe_remat(
+            sublayer,
+            y,
+            decoder_positions=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            remat_policy=self.remat_policy,
+        )
+    else:
+      for layer_idx in range(self.num_hidden_layers):
+        sublayer: Gemma3DecoderLayer = getattr(self, f"layers_{layer_idx}")
+        y = _execute_layer_maybe_remat(
+            sublayer,
+            y,
+            decoder_positions=decoder_positions,
+            decoder_segment_ids=decoder_segment_ids,
+            remat_policy=self.remat_policy,
+        )
+
+    logits = self.apply_output_head(shared_embedding, y)
+    return logits, y
+
+
+class Gemma3ForCausalLM(nnx.Module):
+  """Top-level Gemma 3 autoregressive language model in MaxText m3 format."""
+
+  def __init__(
+      self,
+      config: Any,
+      mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh | None = None,
+      *,
+      rngs: nnx.Rngs,
+      sharding: Sharding | None = None,
+      **kwargs: Any,
+  ):
+    del kwargs
+    if rngs is None:
+      raise ValueError("Gemma3ForCausalLM requires a non-None nnx.Rngs instance.")
+    g3_cfg = Gemma3Config.from_config(config)
+    self.config = config
+    self.gemma3_config = g3_cfg
+    self.mesh = mesh
+
+    ambient = jax.sharding.get_abstract_mesh()
+    if (
+        mesh is not None
+        and not mesh.empty
+        and not ambient.empty
+        and (ambient.axis_sizes, ambient.axis_names) != (mesh.abstract_mesh.axis_sizes, mesh.abstract_mesh.axis_names)
+    ):
+      raise ValueError(f"Gemma3ForCausalLM was passed mesh {mesh} while a different mesh is in scope: {ambient}.")
+
+    with contextlib.ExitStack() as stack:
+      if mesh is not None and not mesh.empty and ambient.empty:
+        if isinstance(mesh, jax.sharding.Mesh):
+          try:
+            stack.enter_context(jax.set_mesh(mesh))
+          except ValueError as exc:
+            if "set_mesh" not in str(exc):
+              raise
+            stack.enter_context(jax.sharding.use_abstract_mesh(mesh.abstract_mesh))
+        else:
+          abstract = mesh.abstract_mesh
+          if all(t == jax.sharding.AxisType.Explicit for t in abstract.axis_types):
+            abstract = abstract.update(axis_types=(jax.sharding.AxisType.Auto,) * len(abstract.axis_names))
+          stack.enter_context(jax.sharding.use_abstract_mesh(abstract))
+
+      self.sharding = _resolve_optional_sharding(sharding, mesh, g3_cfg)
+      self.token_embedder = Gemma3TextScaledWordEmbedding(
+          num_embeddings=g3_cfg.vocab_size,
+          features=g3_cfg.hidden_size,
+          dtype=g3_cfg.dtype,
+          param_dtype=g3_cfg.weight_dtype,
+          initializer_range=g3_cfg.initializer_range,
+          sharding=self.sharding,
+          rngs=rngs,
+      )
+      self.decoder = Gemma3Decoder(
+          g3_cfg,
+          rngs=rngs,
+          sharding=self.sharding,
+      )
+
+    # Clear `eager_sharding` once parameters are placed so `nnx.Optimizer` rebuilds need no mesh scope.
+    for _, node in nnx.iter_graph(self):
+      if isinstance(node, nnx.Variable):
+        meta = node.get_metadata()
+        if (
+            "eager_sharding" in meta
+            and meta["eager_sharding"]
+            and "out_sharding" in meta
+            and meta["out_sharding"] is not None
+        ):
+          node.set_metadata(eager_sharding=False)
+
+  def logits_from_hidden_states_for_vocab_tiling(
+      self,
+      hidden_states: jax.Array,
+      deterministic: bool = True,
+      model_mode: str = MODEL_MODE_TRAIN,
+  ) -> jax.Array:
+    """Projects hidden states to logits for vocab-tiled loss (`utils/vocabulary_tiling.py` call contract)."""
+    del deterministic  # Gemma 3 has no dropout.
+    if model_mode != MODEL_MODE_TRAIN:
+      raise NotImplementedError(f"Gemma 3 m3 supports model_mode={MODEL_MODE_TRAIN!r} only, got {model_mode!r}.")
+    return self.decoder.apply_output_head(self.token_embedder, hidden_states)
+
+  def __call__(
+      self,
+      decoder_input_tokens: jax.Array,
+      decoder_positions: jax.Array | None = None,
+      decoder_segment_ids: jax.Array | None = None,
+      *,
+      cache: Any = None,
+      enable_dropout: bool = False,
+      true_length: int | None = None,
+      **kwargs: Any,
+  ) -> jax.Array:
+    del enable_dropout, true_length  # No dropout (rates are rejected by the config) and no decode trimming.
+    if cache is not None:
+      raise NotImplementedError("Gemma 3 m3 does not implement KV-cache decoding.")
+    if "model_mode" in kwargs and kwargs["model_mode"] != MODEL_MODE_TRAIN:
+      raise NotImplementedError(
+          f"Gemma 3 m3 supports model_mode={MODEL_MODE_TRAIN!r} only, got {kwargs['model_mode']!r}."
+      )
+    for media_key in _GEMMA3_UNSUPPORTED_MODEL_MEDIA_KWARGS:
+      if media_key in kwargs and kwargs[media_key] is not None:
+        raise NotImplementedError(f"Gemma 3 m3 implements text-only Gemma3ForCausalLM and does not accept {media_key!r}.")
+    logits, _ = self.decoder(
+        self.token_embedder,
+        decoder_input_tokens,
+        decoder_positions=decoder_positions,
+        decoder_segment_ids=decoder_segment_ids,
+    )
+    return logits
+
+
+def create_gemma3_model(
+    config: Any,
+    mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh | None = None,
+    *,
+    rngs: nnx.Rngs | None = None,
+    **kwargs: Any,
+) -> Gemma3ForCausalLM:
+  """Factory function registered in `m3.models.MODEL_REGISTRY` for Gemma 3."""
+  if rngs is None:
+    rngs = nnx.Rngs(0)
+  return Gemma3ForCausalLM(config, mesh, rngs=rngs, **kwargs)
+
+
+def calculate_gemma3_tflops_per_device(
+    config: Any,
+    log: bool = True,
+) -> tuple[float, float, float]:
+  """Calculates per-device training TFLOPs for Gemma 3 (`(total, weight, attention)`).
+
+  Global layers count the `S^2 / 2` causal triangle; local sliding-window layers count the
+  `S * W - W^2 / 2` causal pairs inside the window. Reads the MaxText training fields
+  `per_device_batch_size`, `max_target_length`, `gradient_accumulation_steps`, and `use_dpo`.
+  """
+  g3_cfg = Gemma3Config.from_config(config)
+  b_dim = float(config.per_device_batch_size)
+  s_dim = int(config.max_target_length)
+  grad_accum = int(config.gradient_accumulation_steps)
+  use_dpo = bool(config.use_dpo)
+
+  batch_len = b_dim * s_dim
+  h_dim = g3_cfg.hidden_size
+  i_dim = g3_cfg.intermediate_size
+  v_dim = g3_cfg.vocab_size
+  num_layers = g3_cfg.num_hidden_layers
+  num_q_heads = g3_cfg.num_attention_heads
+  num_kv_heads = g3_cfg.num_key_value_heads
+  head_dim = g3_cfg.head_dim
+
+  unembedding_flops = 2.0 * batch_len * h_dim * v_dim
+  q_dim = num_q_heads * head_dim
+  kv_dim = num_kv_heads * head_dim
+  attn_proj_flops_per_layer = 2.0 * batch_len * h_dim * (2 * q_dim + 2 * kv_dim)
+  mlp_flops_per_layer = 6.0 * batch_len * h_dim * i_dim
+
+  num_global_layers = sum(0 if g3_cfg.is_sliding_layer(i) else 1 for i in range(num_layers))
+  num_local_layers = num_layers - num_global_layers
+  window = min(g3_cfg.sliding_window, s_dim)
+
+  global_attn_flops_per_layer = 2.0 * b_dim * (s_dim**2) * num_q_heads * head_dim
+  local_attn_flops_per_layer = 4.0 * b_dim * (s_dim * window - 0.5 * (window**2)) * num_q_heads * head_dim
+
+  total_weight_flops_fwd = unembedding_flops + num_layers * (attn_proj_flops_per_layer + mlp_flops_per_layer)
+  total_attn_flops_fwd = num_global_layers * global_attn_flops_per_layer + num_local_layers * local_attn_flops_per_layer
+
+  learnable_weight_tflops = (3.0 * total_weight_flops_fwd / 1e12) * grad_accum
+  attention_tflops = (3.0 * total_attn_flops_fwd / 1e12) * grad_accum
+  if use_dpo:
+    ref_weight_tflops = learnable_weight_tflops / 3.0
+    attention_tflops = attention_tflops + (attention_tflops / 3.0)
+  else:
+    ref_weight_tflops = 0.0
+
+  total_tflops = learnable_weight_tflops + attention_tflops + ref_weight_tflops
+  if log:
+    pct_w = 100.0 * learnable_weight_tflops / max(total_tflops, 1e-12)
+    pct_a = 100.0 * attention_tflops / max(total_tflops, 1e-12)
+    print(
+        f"Gemma3 per train step:\nTotal TFLOPs: {total_tflops:.4f}\n"
+        f"split as {pct_w:.2f}% learnable weight flops and {pct_a:.2f}% attention flops"
+    )
+  return total_tflops, learnable_weight_tflops, attention_tflops
+
+
+def compute_gemma3_loss(
+    model: Gemma3ForCausalLM,
+    *,
+    tokens: jax.Array,
+    decoder_target_tokens: jax.Array,
+    decoder_target_mask: jax.Array | None = None,
+    decoder_segment_ids: jax.Array | None = None,
+    decoder_positions: jax.Array | None = None,
+) -> tuple[jax.Array, dict[str, jax.Array]]:
+  """Computes masked `float32` cross-entropy loss and auxiliary token statistics for Gemma 3."""
+  logits = model(
+      tokens,
+      decoder_positions=decoder_positions,
+      decoder_segment_ids=decoder_segment_ids,
+  )
+  log_probs = jax.nn.log_softmax(logits.astype(jnp.float32), axis=-1)
+  token_nll = -jnp.take_along_axis(log_probs, decoder_target_tokens[..., None], axis=-1).squeeze(-1)
+  if decoder_target_mask is not None:
+    weights = (decoder_target_mask != 0).astype(jnp.float32)
+  else:
+    weights = jnp.ones_like(token_nll, dtype=jnp.float32)
+  total_weights = jnp.sum(weights)
+  mean_loss = jnp.sum(token_nll * weights) / jnp.maximum(total_weights, 1.0)
+  aux = {
+      "total_loss": mean_loss,
+      "total_weights": total_weights,
+  }
+  return mean_loss, aux
+
+
+def gemma3_engine_loss_fn(
+    model: Gemma3ForCausalLM,
+    config: Any,
+    data: Mapping[str, Any],
+    dropout_rng: Any = None,
+    params: Any = None,
+    *,
+    is_train: bool,
+) -> tuple[Any, dict[str, jax.Array]]:
+  """`MaxTextTrainingEngine` loss function adapter for Gemma 3."""
+  del config, dropout_rng, params, is_train
+  for media_key in _GEMMA3_UNSUPPORTED_ENGINE_MEDIA_KEYS:
+    if media_key in data and data[media_key] is not None:
+      raise NotImplementedError(
+          f"Gemma 3 m3 implements text-only Gemma3ForCausalLM and does not accept batch key {media_key!r}."
+      )
+  metric_cls = _resolve_weighted_metric_cls()
+  filtered = {k: data[k] for k in _GEMMA3_LOSS_BATCH_KEYS if k in data}
+  target_mask = filtered["targets_segmentation"] if "targets_segmentation" in filtered else None
+  seg_ids = filtered["inputs_segmentation"] if "inputs_segmentation" in filtered else None
+  pos_ids = filtered["inputs_position"] if "inputs_position" in filtered else None
+  mean_loss, aux = compute_gemma3_loss(
+      model,
+      tokens=filtered["inputs"],
+      decoder_target_tokens=filtered["targets"],
+      decoder_target_mask=target_mask,
+      decoder_segment_ids=seg_ids,
+      decoder_positions=pos_ids,
+  )
+  return (
+      metric_cls(
+          unreduced_sum=(mean_loss * aux["total_weights"]).astype(jnp.float32),
+          denominator=aux["total_weights"],
+      ),
+      aux,
+  )
+
+
+def configure_gemma3_engine(engine: Any) -> Any:
+  """Registers `gemma3_engine_loss_fn` on `MaxTextTrainingEngine` (`MODEL_ENGINE_CONFIG_REGISTRY`)."""
+  engine.with_loss_fn(gemma3_engine_loss_fn, has_aux=True)
+  engine.with_gen_model_input_fn(None)
+  return engine

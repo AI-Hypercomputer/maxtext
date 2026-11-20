@@ -66,6 +66,7 @@ Example Usage:
     scan_layers=True
 """
 
+import copy
 import gc
 import os
 import time
@@ -207,6 +208,27 @@ def _get_model_mappings(
   }
 
 
+def _sync_overridden_layer_types(target_cfg) -> None:
+  """Regenerates periodic `layer_types` (e.g. Gemma 3) when `num_hidden_layers` is overridden."""
+  attrs = dir(target_cfg)
+  if "layer_types" not in attrs or "num_hidden_layers" not in attrs or "to_dict" not in attrs:
+    return
+  layer_types = target_cfg.layer_types
+  num_layers = target_cfg.num_hidden_layers
+  if not isinstance(layer_types, list) or not isinstance(num_layers, int) or len(layer_types) == num_layers:
+    return
+  cfg_dict = target_cfg.to_dict()
+  pattern = None
+  for pat_key in ("sliding_window_pattern", "_sliding_window_pattern"):
+    if pat_key in cfg_dict and cfg_dict[pat_key]:
+      pattern = int(cfg_dict[pat_key])
+      break
+  if pattern is not None and pattern > 0:
+    target_cfg.layer_types = [
+        "sliding_attention" if bool((i + 1) % pattern) else "full_attention" for i in range(num_layers)
+    ]
+
+
 def _validate_or_update_architecture(hf_config, max_config, override: bool):
   """Validates consistency between HF and MaxText configs or overrides HF config if requested.
 
@@ -310,6 +332,9 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
         setattr(target_cfg, hf_attr, mt_value)
       else:
         mismatches.append(f"{hf_attr} (HF={hf_value} vs MaxText={mt_value})")
+
+  if override:
+    _sync_overridden_layer_types(target_cfg)
 
   if mismatches:
     error_msg = (
@@ -506,7 +531,7 @@ def main(argv: Sequence[str]) -> None:
   model_key = config.model_name
   if model_key not in HF_IDS:
     raise ValueError(f"Unsupported model name: {config.model_name}. Supported models are: {list(HF_IDS.keys())}")
-  hf_config_obj = HF_MODEL_CONFIGS[model_key]
+  hf_config_obj = copy.deepcopy(HF_MODEL_CONFIGS[model_key])
 
   # Validate architecture consistency (raising ValueError on mismatch) or override HF config if specified.
   _validate_or_update_architecture(hf_config_obj, config, override=FLAGS.override_model_architecture)

@@ -471,7 +471,9 @@ def apply_m3_default_named_sharding(
     # all-`None` and relies on it for FSDP. Sharded specs are kept by `is_unsharded` below.
     metadata = a_var.get_metadata() if hasattr(a_var, "get_metadata") else {}
     rank = len(getattr(a_var.get_value() if hasattr(a_var, "get_value") else a_var, "shape", ()))
-    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec) and rank == 1:
+    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec) and (
+        rank == 1 or ("preserve_unsharded" in metadata and bool(metadata["preserve_unsharded"]))
+    ):
       return s_var
     cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
     is_unsharded = (

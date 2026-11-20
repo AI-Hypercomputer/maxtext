@@ -58,6 +58,7 @@ import numpy as np
 
 import jax
 import jax.numpy as jnp
+from maxtext.m3.models.gemma3 import checkpoint_mappings_gemma3
 from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 
 from maxtext.models.kimi_k3_layout import KimiScanLayout, kimi_scan_layout_from_spec
@@ -5884,14 +5885,31 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   return _kimi_k3_restack_scanned(hooks, layout, _kimi_k3_same_hook)
 
 
+def GEMMA3_DISPATCH_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Uses the m3 Gemma 3 text mapping when `maxtext_config.use_m3_model`, else the legacy mapping."""
+  if maxtext_config is not None and maxtext_config.use_m3_model:
+    return checkpoint_mappings_gemma3.GEMMA3_M3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
+  return GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
+
+
+def GEMMA3_DISPATCH_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Uses the m3 Gemma 3 text hooks when `maxtext_config.use_m3_model`, else the legacy hooks."""
+  if maxtext_config is not None and maxtext_config.use_m3_model:
+    return checkpoint_mappings_gemma3.GEMMA3_M3_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        config, maxtext_config, scan_layers, saving_to_hf
+    )
+  return GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers, saving_to_hf)
+
+
 PARAM_MAPPING = {
     "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
-    "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gemma3-1b": checkpoint_mappings_gemma3.GEMMA3_M3_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "gemma3-4b": GEMMA3_DISPATCH_PARAM_MAPPING,
+    "gemma3-12b": GEMMA3_DISPATCH_PARAM_MAPPING,
+    "gemma3-27b": GEMMA3_DISPATCH_PARAM_MAPPING,
     "gemma4-26b": GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma4-31b": GEMMA4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma4-e2b": GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -5957,9 +5975,10 @@ HOOK_FNS = {
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "gemma3-4b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "gemma3-12b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
-    "gemma3-27b": GEMMA3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gemma3-1b": checkpoint_mappings_gemma3.GEMMA3_M3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "gemma3-4b": GEMMA3_DISPATCH_PARAM_HOOK_FN,
+    "gemma3-12b": GEMMA3_DISPATCH_PARAM_HOOK_FN,
+    "gemma3-27b": GEMMA3_DISPATCH_PARAM_HOOK_FN,
     "gemma4-26b": GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma4-31b": GEMMA4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma4-e2b": GEMMA4_SMALL_MAXTEXT_TO_HF_PARAM_HOOK_FN,
