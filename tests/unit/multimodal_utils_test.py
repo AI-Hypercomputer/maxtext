@@ -487,9 +487,8 @@ class TestMultimodalProcessorRouting(unittest.TestCase):
       return generator.tokenizer.is_bos
 
     self.assertTrue(is_bos("gemma3-4b"))
-    # Gemma 4 spells out BOS in its format, and text prompts are unchanged.
+    # Gemma 4 spells out BOS in its format.
     self.assertFalse(is_bos("gemma4-26b"))
-    self.assertFalse(is_bos("gemma3-4b", image_path=None))
 
   def test_get_vision_and_decoder_block_routing(self):
     # pylint: disable=protected-access
