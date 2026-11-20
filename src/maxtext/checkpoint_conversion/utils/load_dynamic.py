@@ -60,17 +60,16 @@ Examples:
          run_name=my_run \
          model_name=llama3.1-8b \
          source_checkpoint_layout="safetensors_dynamic" \
-         base_output_directory="gs://my-bucket/output/"
+         base_output_directory="gs://my-bucket/output"
      ```
 
 Note:
   - Weights from the Hugging Face Hub are cached under `<base_output_directory>/hf_cache/`, so
-    `base_output_directory` must start with "gs://".
-  - `hf_access_token` is required if downloading gated models.
+    `base_output_directory` must start with "gs://" (without a trailing slash).
+  - `hf_access_token` (or the `HF_TOKEN` environment variable) is required when downloading gated models.
   - Loaded weights use `weight_dtype`, regardless of the checkpoint dtype.
-  - Only the training restore (`load_state_if_possible`) supports this layout; `from_pretrained` does
-    not.
-  - The Pathways backend is not supported.
+  - Both training (`load_state_if_possible`) and NNX `model_creation_utils.from_pretrained` support this layout.
+  - The Pathways backend (`enable_single_controller=True`) is not supported.
 """
 
 import collections
