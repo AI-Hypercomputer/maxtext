@@ -1930,7 +1930,7 @@ class RoutedMoE(nnx.Module):
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
         score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") else self.config.routed_score_func,
-        matmul_precision=self.config.matmul_precision,
+        matmul_precision=getattr(self.config, "gate_matmul_precision", "") or self.config.matmul_precision,
         shard_mode=config.shard_mode,
         rngs=self.rngs,
     )
@@ -2392,6 +2392,7 @@ class RoutedMoE(nnx.Module):
     if self.config.decoder_block in (
         ctypes.DecoderBlockType.DEEPSEEK,
         ctypes.DecoderBlockType.DEEPSEEK4,
+        ctypes.DecoderBlockType.DEEPSEEK41,
         ctypes.DecoderBlockType.MING,
         ctypes.DecoderBlockType.HY4,
     ) or (
@@ -2523,7 +2524,12 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
       elif (
           self.config.decoder_block
-          in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4, ctypes.DecoderBlockType.HY4)
+          in (
+              ctypes.DecoderBlockType.DEEPSEEK,
+              ctypes.DecoderBlockType.DEEPSEEK4,
+              ctypes.DecoderBlockType.DEEPSEEK41,
+              ctypes.DecoderBlockType.HY4,
+          )
           and self.config.mlp_activations_limit > 0.0
       ):
         # DeepSeek V4 uses bounds to clip the SwiGLU activations
@@ -7223,7 +7229,8 @@ class RoutedAndSharedMoE(nnx.Module):
     shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
     # DeepSeek-V4 clamps the shared expert's SwiGLU like the routed experts (apply_ffn_activation).
     clamp_shared = (
-        self.config.decoder_block == ctypes.DecoderBlockType.DEEPSEEK4 and self.config.mlp_activations_limit > 0.0
+        self.config.decoder_block in (ctypes.DecoderBlockType.DEEPSEEK4, ctypes.DecoderBlockType.DEEPSEEK41)
+        and self.config.mlp_activations_limit > 0.0
     )
     self.shared_experts = linears.MlpBlock(
         mesh=self.mesh,

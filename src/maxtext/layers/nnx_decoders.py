@@ -54,6 +54,7 @@ from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.models import (
     deepseek,
     deepseek4,
+    deepseek41,
     deepseek_batchsplit,
     deepseek_batchsplit_fp8,
     envy,
@@ -665,6 +666,7 @@ class NNXDecoder(nnx.Module):
     self.scanned_layers = None
     self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
     self.is_deepseek4 = self.config.decoder_block == DecoderBlockType.DEEPSEEK4
+    self.is_deepseek41 = self.config.decoder_block == DecoderBlockType.DEEPSEEK41
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
     self.is_gemma4_small = self.config.decoder_block == DecoderBlockType.GEMMA4_SMALL
@@ -698,7 +700,11 @@ class NNXDecoder(nnx.Module):
       # supported via an unrolled prefix/suffix around scanned cycles (_init_scanned_kimi).
       raise ValueError("kimi_linear (Kimi-K3) does not support pipeline parallelism; do not enable pipeline parallelism.")
 
-    if self.is_gemma4_small:
+    if self.is_deepseek41:
+      if getattr(config, "using_pipeline_parallelism", False):
+        raise ValueError("deepseek41 does not support pipeline parallelism.")
+      self._init_deepseek41_layers(rngs)
+    elif self.is_gemma4_small:
       # Gemma4 E2B/E4B: per-layer-index KV-share donor threading and a distinct attention_type
       # per layer are not expressible inside jax.lax.scan; pipeline parallelism is also unsupported.
       if getattr(config, "using_pipeline_parallelism", False) or getattr(config, "scan_layers", False):
@@ -874,6 +880,50 @@ class NNXDecoder(nnx.Module):
         self._get_scan_safe_remat_policy(),
         maxtext_utils.should_prevent_cse_in_remat(self.config),
     )
+
+  def _init_deepseek41_layers(self, rngs):
+    """DeepSeek-V4.1: `layers_{i}` when unscanned; otherwise one stack `segments_{k}` per segment of structurally
+    identical layer groups (see `deepseek41.build_segments`), each scan step being one group."""
+    config = self.config
+    specs = deepseek41.build_layer_specs(config)
+    if config.scan_layers:
+      for k, segment in enumerate(deepseek41.build_segments(config)):
+        stack = self._create_scanned_layers(
+            deepseek41.DeepSeek41Block,
+            length=segment.repeats,
+            metadata_axis_name="layers",
+            rngs=rngs,
+            specs=tuple(specs[i] for i in segment.groups[0]),
+        )
+        setattr(self, f"segments_{k}", stack)
+    else:
+      for i, spec in enumerate(specs):
+        self._create_and_register_layer(deepseek41.DeepSeek41DecoderLayer, rngs, "layers", i, spec=spec)
+
+  def _apply_deepseek41_layers(self, y, decoder_positions, decoder_input_tokens):
+    """Runs the DeepSeek-V4.1 layers on the embeddings and collapses the hyper-connection copies."""
+    cfg = self.config
+    carry = deepseek41.initial_carry(y, cfg.mhc_expansion_rate)
+    if cfg.scan_layers:
+      segments = deepseek41.build_segments(cfg)
+      plans = deepseek41.build_segment_carry_plans(cfg, segments)
+      for k, (segment, plan) in enumerate(zip(segments, plans)):
+        carry = deepseek41.add_placeholders(carry, plan.add_before, plan.compress_ratio, cfg)
+        stack = getattr(self, f"segments_{k}")
+        carry, stack, _ = self._apply_layers_sequentially(
+            stack,
+            carry,
+            decoder_positions,
+            decoder_input_tokens,
+            length=segment.repeats,
+            metadata_axis_name="layers",
+        )
+        setattr(self, f"segments_{k}", stack)
+        carry = {key: carry[key] for key in ("h", "pre_mix") + plan.keep_after}
+    else:
+      for i in range(cfg.num_decoder_layers):
+        carry = getattr(self, f"layers_{i}")(carry, decoder_positions, decoder_input_tokens)
+    return deepseek41.DeepSeek41DecoderLayer.hc_pre(carry["h"], carry["pre_mix"])
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
     """Initializes scanned DeepSeek layers with optional Engram support."""
@@ -1712,6 +1762,8 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
         DecoderBlockType.DEEPSEEK4: get_scannable(deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock),
+        # DeepSeek-V4.1 builds its own (heterogeneous) layer stacks in `_init_deepseek41_layers`.
+        DecoderBlockType.DEEPSEEK41: [deepseek41.DeepSeek41DecoderLayer],
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
         DecoderBlockType.QWEN3_5: get_scannable(qwen3_5.Qwen3_5DecoderLayer, qwen3_5.Qwen3_5ScannableBlock),
@@ -1917,6 +1969,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.DEEPSEEK41,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -2419,7 +2472,8 @@ class NNXDecoder(nnx.Module):
 
     if hasattr(cfg, "mhc_expansion_rate"):
       mhc_expand, _ = mhc.get_functions(cfg.mhc_expansion_rate)
-      if cfg.mhc_expansion_rate > 1:
+      # DeepSeek-V4.1 expands to hyper-connection copies inside `_apply_deepseek41_layers`.
+      if cfg.mhc_expansion_rate > 1 and not self.is_deepseek41:
         # (batch, length, emb_dim) --> (batch, length, mhc_expansion_rate, emb_dim)
         y = mhc_expand(y)
 
@@ -2561,7 +2615,13 @@ class NNXDecoder(nnx.Module):
                   kv_caches[kv_idx] = out[1]
 
     else:
-      if self.is_gemma4_small:
+      if self.is_deepseek41:
+        if model_mode == MODEL_MODE_AUTOREGRESSIVE or previous_chunk is not None or kv_caches is not None:
+          # The DeepSeek-V4.1 layers keep no KV cache yet: a decode step or a later prefill chunk would silently
+          # attend only to its own tokens.
+          raise NotImplementedError("deepseek41 supports training and single-shot prefill only (no KV cache yet).")
+        y = self._apply_deepseek41_layers(y, decoder_positions, decoder_input_tokens)
+      elif self.is_gemma4_small:
         y, kv_caches = self._apply_gemma4_small_layers(
             y,
             decoder_input_tokens,
@@ -3751,6 +3811,7 @@ class NNXDecoder(nnx.Module):
         _add(getattr(self.pipeline_module, "layers", None))
 
       _append_scanned("scanned_blocks")  # Gemma 4
+      _append_unscanned("segments")  # DeepSeek-V4.1 scanned segments
       _append_scanned("layers")
       _append_unscanned("layers")
 

@@ -803,7 +803,7 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.DEEPSEEK4):
+  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.DEEPSEEK4, DecoderBlockType.DEEPSEEK41):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -1351,6 +1351,7 @@ def calculate_tflops_training_per_device(config, log=True):
         DecoderBlockType.GEMMA4,
         DecoderBlockType.DEEPSEEK4,
         DecoderBlockType.HY4,
+        DecoderBlockType.DEEPSEEK41,
     ):
       total_ffn_flops = calculate_routed_and_shared_ffn_tflops_per_device(config)
       is_ffn_flops_already_total = True
