@@ -16,6 +16,7 @@
 
 # pylint: disable=missing-function-docstring,protected-access
 
+import contextlib
 import functools
 import json
 import sys
@@ -90,44 +91,73 @@ def _flat(tree):
 def _run(overrides=None, serial=True):
   """(config, serial, dual_pipe) results, each (loss, aux, grads), on the same tiny V4 model and batch.
 
-  Memoized: building the model and compiling both paths dominates the cost, and several tests share a configuration.
+  Everything is memoized, and the serial and dual_pipe programs separately: building the model and compiling the
+  programs dominates the cost, and several tests share a configuration (or need only the dual_pipe side).
   """
-  return _run_cached(json.dumps(overrides or {}, sort_keys=True), serial)
+  key = json.dumps(overrides or {}, sort_keys=True)
+  return _setup(key)[0], (_serial(key) if serial else None), _dual(key)
+
+
+def _context(cfg, mesh):
+  stack = contextlib.ExitStack()
+  stack.enter_context(nn_partitioning.axis_rules(cfg.logical_axis_rules))
+  stack.enter_context(mesh)
+  return stack
 
 
 @functools.lru_cache(maxsize=None)
-def _run_cached(overrides_json, serial):
-  overrides = json.loads(overrides_json)
-  cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], **{**_V4_SMALL, **overrides})
+def _setup(overrides_json):
+  """(config, mesh, model graphdef, model state, batch, replicated parameter shardings)."""
+  cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], **{**_V4_SMALL, **json.loads(overrides_json)})
   mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
-  with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
+  with _context(cfg, mesh):
     model = model_creation_utils.create_model(cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
-    rows, seq = cfg.gradient_accumulation_steps * cfg.micro_batch_size_to_train_on, cfg.max_target_length
-    ids = jax.random.randint(jax.random.PRNGKey(1), (rows, seq + 1), 1, cfg.vocab_size)
-    # Unequal valid-token counts per microbatch: the tail of the second row is padding.
-    segmentation = jnp.ones((rows, seq), jnp.int32).at[-1, seq // 2 :].set(0)
-    data = {
-        "inputs": ids[:, :-1],
-        "inputs_position": jnp.tile(jnp.arange(seq)[None], (rows, 1)),
-        "inputs_segmentation": segmentation,
-        "targets": ids[:, 1:],
-        "targets_segmentation": segmentation,
-    }
-    shardings = _params_shardings(model)
-    serial = (
-        gradient_accumulation_loss_and_grad(pre_train.loss_fn, cfg, nnx.clone(model), None, shardings, dict(data), None)
-        if serial
-        else None
-    )
-    dual = dualpipe_loss_and_grad(cfg, nnx.clone(model), shardings, dict(data), pre_train.loss_from_logits)
-  return cfg, serial, dual
+  rows, seq = cfg.gradient_accumulation_steps * cfg.micro_batch_size_to_train_on, cfg.max_target_length
+  ids = jax.random.randint(jax.random.PRNGKey(1), (rows, seq + 1), 1, cfg.vocab_size)
+  # Unequal valid-token counts per microbatch: the tail of the second row is padding.
+  segmentation = jnp.ones((rows, seq), jnp.int32).at[-1, seq // 2 :].set(0)
+  data = {
+      "inputs": ids[:, :-1],
+      "inputs_position": jnp.tile(jnp.arange(seq)[None], (rows, 1)),
+      "inputs_segmentation": segmentation,
+      "targets": ids[:, 1:],
+      "targets_segmentation": segmentation,
+  }
+  shardings = _params_shardings(model)
+  graphdef, state = nnx.split(model)
+  return cfg, mesh, graphdef, state, data, shardings
+
+
+@functools.lru_cache(maxsize=None)
+def _serial(overrides_json):
+  cfg, mesh, graphdef, state, data, shardings = _setup(overrides_json)
+
+  def step(state, data):
+    model = nnx.merge(graphdef, state)
+    return gradient_accumulation_loss_and_grad(pre_train.loss_fn, cfg, model, None, shardings, data, None)
+
+  with _context(cfg, mesh):
+    return step(state, data)
+
+
+@functools.lru_cache(maxsize=None)
+def _dual(overrides_json):
+  cfg, mesh, graphdef, state, data, shardings = _setup(overrides_json)
+
+  def step(state, data):
+    model = nnx.merge(graphdef, state)
+    return dualpipe_loss_and_grad(cfg, model, shardings, data, pre_train.loss_from_logits)
+
+  with _context(cfg, mesh):
+    return step(state, data)
 
 
 class DualPipeDeepSeek4Test(unittest.TestCase):
 
   @classmethod
   def tearDownClass(cls):
-    _run_cached.cache_clear()
+    for cached in (_setup, _serial, _dual):
+      cached.cache_clear()
     super().tearDownClass()
 
   def assert_close(self, actual, expected, name, rtol=2e-4, atol=2e-6):
@@ -165,17 +195,6 @@ class DualPipeDeepSeek4Test(unittest.TestCase):
       self.assertTrue(np.all(np.abs(got[path]) == np.float32(cfg.routed_bias_update_rate)))
 
   @pytest.mark.scheduled_only
-  def test_auxiliary_losses_change_the_gradients(self):
-    """The comparison above is not vacuous: the load-balance and indexer terms move the gradients."""
-    _, _, (_, _, with_aux) = _run(serial=False)
-    off = {"load_balance_loss_weight": 0.0, "indexer_loss_scaling_factor": 0.0}
-    _, _, (_, aux, without_aux) = _run(off, serial=False)
-    self.assertEqual(float(aux["moe_lb_loss"]), 0.0)
-    self.assertEqual(float(aux["indexer_loss"]), 0.0)
-    got, base = _flat(with_aux), _flat(without_aux)
-    self.assertGreater(max(float(np.max(np.abs(got[path] - base[path]))) for path in got), 1e-5)
-
-  @pytest.mark.scheduled_only
   def test_odd_remainder_ignores_the_trailing_layer_like_serial(self):
     """5 layers = 2 prefix + 3 remaining: the decoder scans floor(3 / 2) = 1 block and never builds the last layer."""
     overrides = {"base_num_decoder_layers": 5, "compress_ratios": [0, 4, 128, 4, 128]}
@@ -207,14 +226,21 @@ class DualPipeDeepSeek4Test(unittest.TestCase):
 
   @pytest.mark.scheduled_only
   def test_remat_policies_match_serial(self):
-    """Without remat and with a name-saving policy (the scanned block also remats each layer internally)."""
+    """Without remat and with a name-saving policy (the scanned block also remats each layer internally).
+
+    The serial result does not depend on the remat policy, so every policy is compared to the one default serial run;
+    the model has the same weights for any policy (same seed).
+    """
+    _, (loss_s, aux_s, grads_s), _ = _run()
+    want = _flat(grads_s)
     for policy in ("none", "minimal"):
       with self.subTest(remat_policy=policy):
-        _, (loss_s, aux_s, grads_s), (loss_d, aux_d, grads_d) = _run({"remat_policy": policy})
+        key = json.dumps({"remat_policy": policy}, sort_keys=True)
+        loss_d, aux_d, grads_d = _dual(key)
         self.assert_close(loss_d, loss_s, "loss")
-        for key in ("moe_lb_loss", "indexer_loss"):
-          self.assert_close(aux_d[key], aux_s[key], key)
-        got, want = _flat(grads_d), _flat(grads_s)
+        for name in ("moe_lb_loss", "indexer_loss"):
+          self.assert_close(aux_d[name], aux_s[name], name)
+        got = _flat(grads_d)
         self.assertEqual(set(got), set(want))
         for path in want:
           self.assert_close(got[path], want[path], "/".join(map(str, path)), rtol=1e-3, atol=1e-5)

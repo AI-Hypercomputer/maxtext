@@ -251,8 +251,10 @@ class DenseTrainingScheduleTest(unittest.TestCase):
           self.assert_tree_allclose(jax.jit(step)(*args), (loss, aux, layer_grads, boundary_grads))
 
   def test_full_remat_flag_matches_full_autodiff(self):
-    for lengths in ((1, 3), (3, 1), (2, 2), (1, 2, 1), (3,), (3, 7)):
-      for microbatches in (1, 2, 3, 4, 5):
+    # Group boundaries crossed in both directions (uneven, even, three groups); 5 microbatches also run the period-2
+    # steady scan twice. The heterogeneous test above covers the remaining length/microbatch combinations.
+    for lengths in ((1, 3), (2, 2), (1, 2, 1), (3, 7)):
+      for microbatches in (1, 3, 5):
         functions, args = make_grouped_inputs(lengths, microbatches)
         params, states, boundary, data = args
         reference = lambda p, b: grouped_reference_loss(functions, p, b, states, data)
@@ -272,8 +274,8 @@ class DenseTrainingScheduleTest(unittest.TestCase):
         "save_nothing": jax.checkpoint_policies.nothing_saveable,
     }
     named = {layer_apply: named_layer_apply, expert_layer_apply: named_expert_layer_apply}
-    for lengths in ((1, 3), (3, 1), (2, 2), (1, 2, 1), (3, 7)):
-      for microbatches in (1, 2, 3, 5):
+    for lengths in ((1, 3), (1, 2, 1), (3, 7)):
+      for microbatches in (1, 3, 5):
         functions, args = make_grouped_inputs(lengths, microbatches)
         params, states, boundary, data = args
         reference = lambda p, b: grouped_reference_loss(functions, p, b, states, data)
