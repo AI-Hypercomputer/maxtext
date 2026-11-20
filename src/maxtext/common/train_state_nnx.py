@@ -14,11 +14,13 @@
 
 """The NNX Unified TrainState."""
 
+import math
 from typing import Any
 
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from jax.sharding import NamedSharding
 
 from maxtext.utils import max_logging
 
@@ -84,6 +86,10 @@ def _cast_step(step, dtype):
   """
   if isinstance(step, jax.ShapeDtypeStruct):
     return jax.ShapeDtypeStruct(step.shape, dtype, sharding=getattr(step, "sharding", None))
+  sharding = getattr(step, "sharding", None)
+  if isinstance(sharding, NamedSharding) and sharding.memory_kind == "pinned_host":
+    out_sharding = sharding if dtype == jnp.uint32 else sharding.with_memory_kind("device")
+    return jax.jit(lambda x: jnp.asarray(x, dtype=dtype), in_shardings=sharding, out_shardings=out_sharding)(step)
   return jnp.asarray(step, dtype=dtype)
 
 
@@ -276,3 +282,117 @@ def apply_checkpoint_aux(aux_state: nnx.State, nnx_aux: dict[str, Any]) -> None:
     max_logging.log(f"Skipping {len(dropped)} nnx_aux entries absent from this model: {shown}{more}")
   if kept:
     nnx.replace_by_pure_dict(aux_state, nnx.traversals.unflatten_mapping(kept))
+
+
+_GIB_BYTES = 1 << 30
+
+
+def _path_to_key_tuple(path: tuple[Any, ...]) -> tuple[Any, ...]:
+  """Normalizes a JAX tree path or Flax flat-state path into raw key primitives."""
+  out = []
+  for entry in path:
+    if hasattr(entry, "key"):
+      out.append(entry.key)
+    elif hasattr(entry, "idx"):
+      out.append(entry.idx)
+    elif hasattr(entry, "name"):
+      out.append(entry.name)
+    else:
+      out.append(entry)
+  return tuple(out)
+
+
+def _per_device_leaf_bytes(aval: Any, sharding: Any) -> int:
+  """Computes per-device byte footprint of an optimizer state leaf (0 for scalars)."""
+  shape = getattr(aval, "shape", ())
+  dtype = getattr(aval, "dtype", None)
+  if dtype is None or len(shape) == 0:
+    return 0
+  shard_shape = sharding.shard_shape(shape) if isinstance(sharding, NamedSharding) else shape
+  return int(math.prod(int(d) for d in shard_shape)) * int(jnp.dtype(dtype).itemsize)
+
+
+def pick_device_resident_optimizer_leaves(
+    opt_abstract_tree: Any,
+    opt_sharding_tree: Any,
+    device_resident_gib: float,
+) -> tuple[set[tuple[Any, ...]], int, int]:
+  """Selects optimizer leaves to keep on HBM (`device`) up to `device_resident_gib` GiB/device.
+
+  Candidate non-scalar leaves are sorted deterministically by `(-per_device_bytes, canonical_path)`
+  so every SPMD process/host makes identical device vs `pinned_host` placement decisions.
+
+  Returns:
+    `(resident_key_tuples, resident_bytes_per_device, offloaded_bytes_per_device)`.
+  """
+  gib = float(device_resident_gib)
+  if not math.isfinite(gib) or gib < 0.0:
+    raise ValueError(f"device_resident_gib must be a finite number >= 0, got {device_resident_gib}.")
+  budget_bytes = int(gib * _GIB_BYTES) if gib > 0.0 else 0
+  aval_leaves, _ = jax.tree_util.tree_flatten_with_path(
+      opt_abstract_tree,
+      is_leaf=lambda x: isinstance(x, jax.ShapeDtypeStruct),
+  )
+  sharding_leaves, _ = jax.tree_util.tree_flatten_with_path(
+      opt_sharding_tree,
+      is_leaf=lambda x: isinstance(x, NamedSharding),
+  )
+  sharding_by_key = {_path_to_key_tuple(p): s for p, s in sharding_leaves}
+  candidates: list[tuple[int, str, tuple[Any, ...]]] = []
+  total_bytes = 0
+  for aval_path, aval in aval_leaves:
+    key_tuple = _path_to_key_tuple(aval_path)
+    sharding = sharding_by_key.get(key_tuple, getattr(aval, "sharding", None))
+    leaf_bytes = _per_device_leaf_bytes(aval, sharding)
+    total_bytes += leaf_bytes
+    if leaf_bytes > 0:
+      canonical_path = "/".join(f"{type(k).__name__}:{k}" for k in key_tuple)
+      candidates.append((leaf_bytes, canonical_path, key_tuple))
+
+  candidates.sort(key=lambda item: (-item[0], item[1]))
+  resident: set[tuple[Any, ...]] = set()
+  resident_bytes = 0
+  for leaf_bytes, _, key_tuple in candidates:
+    if resident_bytes + leaf_bytes <= budget_bytes:
+      resident.add(key_tuple)
+      resident_bytes += leaf_bytes
+
+  return resident, resident_bytes, total_bytes - resident_bytes
+
+
+def partition_optimizer_memory_shardings(
+    abstract_state: nnx.State,
+    state_mesh_shardings: nnx.State,
+    device_resident_gib: float,
+) -> nnx.State:
+  """Partitions optimizer `NamedSharding`s between HBM (`device`) and `pinned_host` under a GiB budget."""
+  resident_keys, resident_bytes, offloaded_bytes = pick_device_resident_optimizer_leaves(
+      abstract_state.optimizer,
+      state_mesh_shardings.optimizer,
+      device_resident_gib=device_resident_gib,
+  )
+  max_logging.log(
+      f"optimizer_device_resident_gib={device_resident_gib:.3f}: keeping {len(resident_keys)} optimizer leaves "
+      f"({resident_bytes / _GIB_BYTES:.3f} GiB/device) on HBM and offloading "
+      f"{offloaded_bytes / _GIB_BYTES:.3f} GiB/device to pinned_host."
+  )
+
+  # Explicitly tag non-offloaded state leaves with memory_kind="device" so JAX's donate_argnums
+  # buffer aliasing pairs matching memory spaces cleanly when optimizer leaves mix device & pinned_host.
+  state_mesh_shardings = jax.tree_util.tree_map(
+      lambda s: s.with_memory_kind("device") if isinstance(s, NamedSharding) and s.memory_kind is None else s,
+      state_mesh_shardings,
+      is_leaf=lambda x: isinstance(x, NamedSharding),
+  )
+
+  def _assign_opt_memory(jax_path, sharding: NamedSharding) -> NamedSharding:
+    key_tuple = _path_to_key_tuple(jax_path)
+    kind = "device" if key_tuple in resident_keys else "pinned_host"
+    return sharding.with_memory_kind(kind)
+
+  state_mesh_shardings.optimizer = jax.tree_util.tree_map_with_path(
+      _assign_opt_memory,
+      state_mesh_shardings.optimizer,
+      is_leaf=lambda x: isinstance(x, NamedSharding),
+  )
+  return state_mesh_shardings

@@ -70,6 +70,7 @@ class _Cfg:
   gradient_accumulation_steps: int = 1
   shard_optimizer_over_data: bool = False
   optimizer_memory_host_offload: bool = False
+  optimizer_device_resident_gib: float = 0.0
   parameter_memory_host_offload: bool = False
   gradient_clipping_threshold: float = 0.0
   grad_dtype: jnp.dtype = jnp.float32
@@ -1403,6 +1404,111 @@ class TestNNXNamedScopeContext(unittest.TestCase):
     with profiler.nnx_named_scope_context():
       hlo = jax.jit(mod.__call__).lower(x).as_text(debug_info=True)
     self.assertIn("_Attn/query_norm/rsqrt", hlo)
+
+
+class TestOptimizerDeviceResidentBudgetTrainStep(unittest.TestCase):
+  """Tests multi-step pre_train.train_step with optimizer_memory_host_offload=True and partial HBM budget."""
+
+  def test_partial_device_resident_budget_matches_full_offload_bit_exact(self):
+    tx = optax.adamw(learning_rate=1e-3, weight_decay=0.01)
+
+    def _make_cfg(budget_gib: float) -> _Cfg:
+      cfg = _Cfg(
+          gradient_accumulation_steps=2,
+          grad_dtype=jnp.float32,
+          optimizer_memory_host_offload=True,
+          optimizer_device_resident_gib=budget_gib,
+      )
+      cfg.global_batch_size_to_train_on = cfg.micro_batch_size_to_train_on * cfg.gradient_accumulation_steps
+      cfg.max_target_length = 4
+      return cfg
+
+    # _TinyDecoder(vocab=8, hidden=16) has f32 AdamW leaves:
+    # - embed.embedding: (8, 16) * 4 = 512 B (mu and nu)
+    # - proj.kernel:     (16, 8) * 4 = 512 B (mu and nu)
+    # - proj.bias:       (8,)    * 4 =  32 B (mu and nu)
+    # Budget 1060 B (~1e-6 GiB) keeps 2 x 512 B + 1 x 32 B = 1056 B on device and offloads the remaining leaves!
+    cfg_zero = _make_cfg(0.0)
+    cfg_part = _make_cfg(1060 / float(1 << 30))
+
+    m_zero = _TinyDecoder(cfg_zero.vocab_size, hidden=16, rngs=nnx.Rngs(7))
+    m_part = _TinyDecoder(cfg_part.vocab_size, hidden=16, rngs=nnx.Rngs(7))
+    ts_zero = train_state_nnx.TrainStateNNX(m_zero, nnx.Optimizer(m_zero, tx, wrt=nnx.Param))
+    ts_part = train_state_nnx.TrainStateNNX(m_part, nnx.Optimizer(m_part, tx, wrt=nnx.Param))
+
+    g_zero, s_zero = nnx.split(ts_zero)
+    g_part, s_part = nnx.split(ts_part)
+
+    repl_untagged = jax.sharding.NamedSharding(m_part.mesh, jax.sharding.PartitionSpec())
+    repl_dev = repl_untagged.with_memory_kind("device")
+    repl_host = repl_untagged.with_memory_kind("pinned_host")
+
+    # Full offload (0.0 GiB): model on device, all optimizer leaves on pinned_host.
+    shardings_zero = jax.tree.map(lambda _: repl_dev, s_zero)
+    shardings_zero.optimizer = jax.tree.map(lambda _: repl_host, s_zero.optimizer)
+
+    # Partial budget (> 0.0 GiB): partition_optimizer_memory_shardings tags model with "device"
+    # and splits optimizer leaves across {"device", "pinned_host"}.
+    abstract_part = jax.tree.map(
+        lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=repl_untagged),
+        s_part,
+    )
+    base_shardings_part = jax.tree.map(lambda _: repl_untagged, s_part)
+    shardings_part = train_state_nnx.partition_optimizer_memory_shardings(
+        abstract_part,
+        base_shardings_part,
+        device_resident_gib=cfg_part.optimizer_device_resident_gib,
+    )
+    opt_kinds = {
+        s.memory_kind
+        for s in jax.tree.leaves(
+            shardings_part.optimizer,
+            is_leaf=lambda x: isinstance(x, jax.sharding.NamedSharding),
+        )
+    }
+    self.assertEqual(opt_kinds, {"device", "pinned_host"})
+
+    _, params_shardings_zero, _ = nnx.split(shardings_zero.model, nnx.Param, ...)
+    _, params_shardings_part, _ = nnx.split(shardings_part.model, nnx.Param, ...)
+    s_zero = jax.device_put(s_zero, shardings_zero)
+    s_part = jax.device_put(s_part, shardings_part)
+
+    jitted_zero = jax.jit(
+        functools.partial(pre_train.train_step, g_zero, cfg_zero, shardings_zero, params_shardings_zero),
+        in_shardings=(shardings_zero, None),
+        out_shardings=(shardings_zero, None),
+        donate_argnums=(0,),
+    )
+    jitted_part = jax.jit(
+        functools.partial(pre_train.train_step, g_part, cfg_part, shardings_part, params_shardings_part),
+        in_shardings=(shardings_part, None),
+        out_shardings=(shardings_part, None),
+        donate_argnums=(0,),
+    )
+
+    total_batch = cfg_part.micro_batch_size_to_train_on * cfg_part.gradient_accumulation_steps
+    for step_idx in range(3):
+      data = _make_data(batch=total_batch, vocab=cfg_part.vocab_size)
+      data["inputs"] = jnp.mod(jnp.arange(total_batch * 4, dtype=jnp.int32).reshape(total_batch, 4) + step_idx, 8)
+      data["targets"] = jnp.mod(data["inputs"] + 1, 8)
+      with jax.set_mesh(m_zero.mesh):
+        s_zero, met_zero = jitted_zero(s_zero, data)
+      with jax.set_mesh(m_part.mesh):
+        s_part, met_part = jitted_part(s_part, data)
+
+      self.assertTrue(jnp.isfinite(met_part["scalar"]["learning/loss"]))
+      np.testing.assert_array_equal(
+          np.asarray(met_part["scalar"]["learning/loss"]),
+          np.asarray(met_zero["scalar"]["learning/loss"]),
+      )
+      live_opt_kinds = {
+          arr.sharding.memory_kind for arr in jax.tree.leaves(s_part["optimizer"]) if isinstance(arr, jax.Array)
+      }
+      self.assertEqual(live_opt_kinds, {"device", "pinned_host"})
+
+    self.assertEqual(int(s_part["optimizer"]["step"].get_value()), 3)
+    for leaf_part, leaf_zero in zip(jax.tree.leaves(s_part), jax.tree.leaves(s_zero)):
+      np.testing.assert_array_equal(np.asarray(leaf_part), np.asarray(leaf_zero))
 
 
 if __name__ == "__main__":

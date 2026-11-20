@@ -212,6 +212,11 @@ def setup_initial_lora_state(data_iterator, tx, config, mesh, checkpoint_manager
   lora_config = None
 
   if lora_adapter_path:
+    if config.optimizer_device_resident_gib > 0.0:
+      raise ValueError(
+          f"LoRA does not support optimizer_device_resident_gib > 0 (got {config.optimizer_device_resident_gib}); "
+          "set optimizer_device_resident_gib=0.0."
+      )
     max_logging.log(f"Setting initial state of LoRA with lora_adapter_path = {lora_adapter_path}")
     # pylint: disable=import-outside-toplevel
     from maxtext.common import train_state_nnx

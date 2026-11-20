@@ -754,6 +754,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           "MaxTextTrainingEngine does not support parameter_memory_host_offload; set it to False. "
           "optimizer_memory_host_offload is supported."
       )
+    if training_config.optimizer_device_resident_gib > 0.0:
+      raise NotImplementedError(
+          "MaxTextTrainingEngine does not support optimizer_device_resident_gib > 0 "
+          f"(got {training_config.optimizer_device_resident_gib}); set optimizer_device_resident_gib=0.0."
+      )
     # `train.py` evaluates under `logical_axis_rules_for_eval`; this engine evaluates under the
     # training rules, so reject a different eval rule set rather than silently ignore it.
     eval_rules = _normalize_axis_rules(training_config.logical_axis_rules_for_eval or ())
