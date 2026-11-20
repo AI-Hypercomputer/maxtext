@@ -670,6 +670,36 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_moe_deepseek_prefetch_fsdp_weights_context_parallelism(self):
+    """AOT test for FSDP weight prefetching with context parallelism and moe_flat_fsdp_weights."""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_prefetch_fsdp_weights_cp.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "use_iota_embed=False",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-tiny",
+            "ici_fsdp_parallelism=2",
+            "ici_context_parallelism=2",
+            "context_parallel_strategy=all_gather",
+            "shard_mode=explicit",
+            "moe_flat_fsdp_weights=True",
+            "sparse_matmul=True",
+            "megablox=True",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+            "prefetch_fsdp_weights=True",
+        )
+    )
+
   def test_moe_emb_chunking(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_emb_chunking.pickle")

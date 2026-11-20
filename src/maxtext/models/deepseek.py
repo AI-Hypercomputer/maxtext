@@ -244,7 +244,7 @@ class DeepSeekGenericLayer(nnx.Module):
   @property
   def mlp_logical_axis_names(self):
     """Generate logical names for activations in MLP."""
-    length_name = "prefill_activation_norm_length" if self.model_mode == MODEL_MODE_PREFILL else "activation_norm_length"
+    length_name = "prefill_activation_length" if self.model_mode == MODEL_MODE_PREFILL else "activation_length"
     axis_names = ["activation_batch", length_name, "activation_mlp"]
     return axis_names
 

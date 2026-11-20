@@ -58,7 +58,7 @@ class MistralDecoderLayer(nnx.Module):
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
 
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-    self.mlp_activation_axis_names = ("activation_batch", "activation_norm_length", "activation_mlp")
+    self.mlp_activation_axis_names = ("activation_batch", "activation_length", "activation_mlp")
 
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
     # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.

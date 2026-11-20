@@ -123,6 +123,19 @@ automatically handles compound sharding axes (`('fsdp', 'expert')`, `('fsdp', 'c
 - Compatible with default `EP_AS_FSDP` (`base.yml`), `custom_mesh_and_rule=ep-as-dp`, and
   `use_ring_of_experts=True`.
 
+Context parallelism (`ici_context_parallelism > 1`) is supported with both
+`context_parallel_strategy=all_gather` and `context_parallel_strategy=ring`:
+
+- Weights co-sharded over `('fsdp', 'context')` are gathered and reduce-scattered over both axes.
+  Weights sharded over `fsdp` only have their gradients reduce-scattered over `fsdp` and summed over
+  `context`.
+- The token embedding gradient uses a `reduce-scatter` (no `all-reduce`) when both the batch and
+  sequence dimensions are sharded.
+- With `context_parallel_strategy=ring`, DeepSeek-V3 needs backward splash attention blocks of 1024
+  (`sa_block_q_dkv`, `sa_block_kv_dkv`, `sa_block_kv_dkv_compute`, `sa_block_q_dq`,
+  `sa_block_kv_dq`) to stay within the scoped VMEM limit.
+- `context_parallel_strategy=ulysses` is not available for MLA attention models such as DeepSeek-V3.
+
 ## Recommended flags for best performance
 
 ### Quick-start command
@@ -243,6 +256,19 @@ With `remat_policy=custom` saving additional activations on device (`per_device_
 | `decoder_layer_input` only                                        | 2955 ms  | 2650 ms                 | −10.3%  | 38.4 / 58.4 GiB                |
 | + attention (`mla_q`, `mla_kv`, `out_proj`, `attention_out`)      | 2861 ms  | 2507 ms                 | −12.4%  | 46.6 / 58.8 GiB                |
 | + MoE (`moe_mlpwi_0`, `moe_mlpwi_1`, `moe_mlpwo`, `moe_x_sorted`) | 2703 ms  | 2418 ms                 | −10.5%  | 44.2 / 66.1 GiB                |
+
+### DeepSeek-V3 with context parallelism (`ici_context_parallelism=2`)
+
+Same DeepSeek-V3 setup as above (15 decoder layers, 128 routed experts, `num_experts_per_tok=4`,
+`per_device_batch_size=2`, `max_target_length=4096`, `shard_mode=explicit`, Tokamax `gmm_v2`,
+`moe_flat_fsdp_weights=True`) on 64 TPU7x chips (4x4x4) with `ici_context_parallelism=2`
+(`fsdp=64 x context=2`). Prefetch runs use `prefetch_fsdp_defer_grad_reduce_scatter=True`. The 10-step
+loss matches between prefetch off and on for both strategies.
+
+| `context_parallel_strategy`   | `prefetch_fsdp_weights=False` | `prefetch_fsdp_weights=True` | Speedup    |
+| ----------------------------- | ----------------------------- | ---------------------------- | ---------- |
+| `all_gather`                  | 2717.7 ms                     | **2268.7 ms**                | **−16.5%** |
+| `ring` (1024 backward blocks) | 2457.6 ms                     | **2094.6 ms**                | **−14.8%** |
 
 ### DeepSeek-V3 with Expert Parallelism (`ici_expert_parallelism=4`)
 

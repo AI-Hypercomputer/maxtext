@@ -92,9 +92,10 @@ def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False, src_sharding
   return sharding.maybe_shard_with_name(w, gathered_sharding, shard_mode=shard_mode, debug_sharding=debug_sharding)
 
 
-# Mesh axes, besides the FSDP axes, that activations are batch-sharded over (`activation_batch` in
-# `base.yml`): the gradient of every layer weight is summed over them.
-_BATCH_AXES = ("data", "expert")
+# Mesh axes, besides the FSDP axes, that activations are batch- or sequence-sharded over
+# (`activation_batch` and `activation_length` in `base.yml`): the gradient of every layer weight is
+# summed over them.
+_BATCH_AXES = ("data", "expert", "context", "context_usp_ulysses")
 
 
 def _extra_batch_axes(mesh, spec, ax):
@@ -393,14 +394,16 @@ def explicit_fsdp_embed_lookup(embedding, inputs, out_sharding, mesh):
 
   in_spec = tuple(in_sharding.spec) + (None,) * (inputs.ndim - len(tuple(in_sharding.spec)))
   out_spec = tuple(out_sharding.spec) + (None,) * (inputs.ndim + 1 - len(tuple(out_sharding.spec)))
-  if any(e is not None for e in in_spec[1:]) or any(e is not None for e in out_spec[1:]) or in_spec[0] != out_spec[0]:
+  if out_spec[-1] is not None:
     return embedding.at[inputs].get(out_sharding=out_sharding)
 
-  batch_entry = in_spec[0]
-  batch_axes = (
-      () if batch_entry is None else (tuple(batch_entry) if isinstance(batch_entry, (tuple, list)) else (batch_entry,))
-  )
-  batch_axes = tuple(a for a in batch_axes if mesh.shape[a] > 1)
+  batch_axes = []
+  for entry in out_spec[:-1]:
+    axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
+    for a in axes:
+      if mesh.shape[a] > 1 and a not in batch_axes:
+        batch_axes.append(a)
+  batch_axes = tuple(batch_axes)
   if not set(ax).issubset(set(batch_axes)):
     return embedding.at[inputs].get(out_sharding=out_sharding)
   extra = tuple(a for a in batch_axes if a not in ax)
@@ -412,7 +415,7 @@ def explicit_fsdp_embed_lookup(embedding, inputs, out_sharding, mesh):
   padded_minor = _sc_rs_padded_minor_size(orig_minor)
   padded_embed_shape = (padded_minor, embed_shape[1]) if minor_dim == 0 else (embed_shape[0], padded_minor)
   emb_pspec = jax.sharding.PartitionSpec(*emb_spec)
-  in_pspec = jax.sharding.PartitionSpec(*in_spec)
+  ids_pspec = jax.sharding.PartitionSpec(*out_spec[:-1])
   out_pspec = jax.sharding.PartitionSpec(*out_spec)
 
   @jax.custom_vjp
@@ -433,10 +436,12 @@ def explicit_fsdp_embed_lookup(embedding, inputs, out_sharding, mesh):
         d_emb = jax.lax.slice_in_dim(d_emb, 0, orig_minor, axis=minor_dim)
       return d_emb
 
+    if in_spec != out_spec[:-1]:
+      ids = jax.sharding.reshard(ids, NamedSharding(mesh, ids_pspec))
     d_emb = jax.shard_map(
         _scatter_add_and_rs,
         mesh=mesh,
-        in_specs=(in_pspec, out_pspec),
+        in_specs=(ids_pspec, out_pspec),
         out_specs=emb_pspec,
         check_vma=False,
     )(ids, dout)

@@ -3067,6 +3067,104 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
   def test_grad_parity_param_scan_axis_zero(self):
     self._assert_parity(num_layers=4, param_scan_axis=0)
 
+  def _assert_context_parallel_parity(self, num_layers, **overrides):
+    """Parity on a 2 x 2 FSDP x context mesh: weights co-sharded over ('fsdp', 'context'), sequence over 'context'."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    cp_overrides = {"ici_fsdp_parallelism": 2, "ici_context_parallelism": 2, "context_parallel_load_balance": False}
+    self._assert_parity(num_layers=num_layers, **{**cp_overrides, **overrides})
+
+  def test_grad_parity_context_parallelism(self):
+    self._assert_context_parallel_parity(num_layers=4)
+
+  def test_grad_parity_context_parallelism_load_balanced(self):
+    self._assert_context_parallel_parity(num_layers=5, context_parallel_load_balance=True)
+
+  def test_grad_parity_context_parallelism_deepseek(self):
+    # MLA attention and MoE layers, as in the DeepSeek-V3 recipes. `routed_bias` is off because this
+    # harness cannot trace the routed-bias variable in the plain scan, with or without context parallelism.
+    self._assert_context_parallel_parity(
+        num_layers=4,
+        model_name="deepseek3-tiny",
+        first_num_dense_layers=1,
+        base_emb_dim=64,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        base_mlp_dim=64,
+        base_moe_mlp_dim=64,
+        num_experts=4,
+        num_experts_per_tok=2,
+        routed_bias=False,
+        vocab_size=128,
+        sparse_matmul=False,
+        megablox=False,
+    )
+
+  def test_mlp_intermediate_sharding_preserves_context_parallelism(self):
+    # Under context parallelism, MLP intermediate shardings must pair `activation_length` / `prefill_activation_length`
+    # (not `*_activation_norm_length`) with `activation_mlp` so `tensor_sequence` does not conflict and drop `context`.
+    cases = (
+        ("deepseek", {"model_name": "deepseek3-tiny", "first_num_dense_layers": 1}),
+        ("qwen3", {}),
+        ("qwen2", {}),
+        ("mistral", {}),
+        ("simple_mlp", {}),
+        ("gemma4", {}),
+        (
+            "gemma4_small",
+            {"model_name": "gemma4-e2b", "hidden_size_per_layer_input": 64, "vocab_size_per_layer_input": 128},
+        ),
+        ("llama4", {"inhomogeneous_layer_cycle_interval": 2, "num_experts_per_tok": 1}),
+        ("hy4", {"model_name": "hy4-preview", "inhomogeneous_layer_cycle_interval": 2, "shard_mode": "auto"}),
+        ("ming", {"model_name": "ming-3.0-audio-tiny", "inhomogeneous_layer_cycle_interval": 2, "shard_mode": "auto"}),
+    )
+    for model_mode in (MODEL_MODE_TRAIN, MODEL_MODE_PREFILL):
+      for decoder_block, extra in cases:
+        with self.subTest(model_mode=model_mode, decoder_block=decoder_block):
+          overrides = {
+              "decoder_block": decoder_block,
+              "shard_mode": "explicit",
+              "ici_fsdp_parallelism": 2,
+              "ici_context_parallelism": 2,
+              "max_prefill_predict_length": 64,
+              "max_target_length": 128,
+              "base_emb_dim": 64,
+              "base_num_query_heads": 4,
+              "base_num_kv_heads": 4,
+              "base_mlp_dim": 64,
+              "base_moe_mlp_dim": 64,
+              "base_num_decoder_layers": 2,
+              "num_decoder_layers": 2,
+              "num_experts": 4,
+              "num_experts_per_tok": 2,
+              "vocab_size": 128,
+              **extra,
+          }
+          cfg = _make_config(**overrides)
+          mesh_cases = (
+              ({"fsdp": 2, "context": 2}, PartitionSpec("fsdp", "context", None)),
+              ({"fsdp": 2, "tensor_sequence": 2}, PartitionSpec("fsdp", None, "tensor_sequence")),
+              ({"fsdp": 2, "context": 2, "tensor_sequence": 2}, PartitionSpec("fsdp", "context", "tensor_sequence")),
+          )
+          for mesh_overrides, expected_spec in mesh_cases:
+            axis_sizes = {a: 1 for a in cfg.mesh_axes} | mesh_overrides
+            mesh = AbstractMesh(
+                tuple(axis_sizes.values()), tuple(axis_sizes), axis_types=(AxisType.Explicit,) * len(axis_sizes)
+            )
+            with jax.sharding.use_abstract_mesh(mesh), nn.logical_axis_rules(cfg.logical_axis_rules):
+              decoder = nnx.eval_shape(
+                  lambda cfg=cfg, mesh=mesh, mode=model_mode: NNXDecoder(
+                      config=cfg, mesh=mesh, model_mode=mode, rngs=nnx.Rngs(0)
+                  )
+              )
+            checked = 0
+            for _, mod in nnx.iter_modules(decoder):
+              mlp_sharding = getattr(mod, "mlp_intermediate_sharding", None) or getattr(mod, "mlp_sharding", None)
+              if mlp_sharding is not None:
+                self.assertEqual(mlp_sharding.spec, expected_spec, type(mod).__name__)
+                checked += 1
+            self.assertGreater(checked, 0)
+
   def _assert_parity_saved_residuals(self, num_layers, **overrides):
     """Asserts parity and returns how many residuals per layer the prefetch remat policy saves."""
     with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
@@ -3242,6 +3340,14 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
     if jax.device_count() < 4:
       self.skipTest("Needs 4 devices for an fsdp=2 x expert=2 mesh.")
     self._assert_qwen3_5_parity(num_blocks=2, ici_fsdp_parallelism=2, ici_expert_parallelism=2)
+
+  def test_qwen3_5_context_parallelism(self):
+    """Per-sub-layer prefetching matches the plain scanned stack on an fsdp=2 x context=2 mesh."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices for an fsdp=2 x context=2 mesh.")
+    self._assert_qwen3_5_parity(
+        num_blocks=2, ici_fsdp_parallelism=2, ici_context_parallelism=2, context_parallel_load_balance=False
+    )
 
   def test_qwen3_5_sub_layer_gathers_under_expert_parallelism(self):
     """Under EP, each sub-layer weight is gathered over the FSDP axes `sharding.fsdp_axes_for_dim` picks.
