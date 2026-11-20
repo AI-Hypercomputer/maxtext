@@ -873,7 +873,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._rollout_backend = self._config.rollout_backend
     rollout_tp = resolve_rollout_tp(self._config)
     kv_tp = self._config.kv_tp_size or rollout_tp
-    moe_tp = self._config.moe_mlp_tp_size or rollout_tp
+    moe_tp = self._config.moe_mlp_tp_size or (1 if self._rollout_backend == "vllm_torch" else rollout_tp)
     prefuse_moe = resolve_prefuse_moe_weights(self._config)
     if self._use_weight_converter:
       from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel

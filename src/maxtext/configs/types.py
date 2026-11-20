@@ -4588,9 +4588,9 @@ class VLLM(BaseModel):
       -1,
       description="Tensor parallelism per replica for rollout. If not specified, it will be auto-determined.",
   )
-  rollout_backend: Literal["maxtext", "vllm_torchax"] = Field(
+  rollout_backend: Literal["maxtext", "vllm_torchax", "vllm_torch"] = Field(
       "maxtext",
-      description="Rollout backend for trainer-side weight converter ('maxtext' or 'vllm_torchax').",
+      description="Rollout backend for trainer-side weight converter ('maxtext', 'vllm_torchax', or 'vllm_torch').",
   )
   rollout_weight_dtype: str = Field(
       "",

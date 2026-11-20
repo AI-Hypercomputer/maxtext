@@ -20,8 +20,9 @@ unrolled to one attribute per layer on the rollout side, with the rollout
 pre-fusing MoE `wi_0`/`wi_1` into a padded `wi`.
 """
 
-import os
+import copy
 import gc
+import os
 import resource
 
 # Must precede the first JAX import: the cross-mesh tests below need more than
@@ -37,7 +38,7 @@ import jax  # pylint: disable=wrong-import-position
 import jax.numpy as jnp  # pylint: disable=wrong-import-position
 import numpy as np  # pylint: disable=wrong-import-position
 import pytest  # pylint: disable=wrong-import-position
-from flax import traverse_util  # pylint: disable=wrong-import-position
+from flax import nnx, traverse_util  # pylint: disable=wrong-import-position
 
 from maxtext.common.common_types import get_weight_dtype
 from maxtext.integration.vllm import weight_converter
@@ -75,6 +76,7 @@ def _config(**overrides):
       dtype="bfloat16",
       fp8_moe=False,
       rollout_fp8_moe=False,
+      enable_dp_attention=False,
       kv_tp_size=1,
       moe_mlp_tp_size=1,
   )
@@ -1516,6 +1518,636 @@ class TargetFreeConversionTest(unittest.TestCase):
     converter = weight_converter.WeightConverter(config=cfg, rollout_backend="maxtext", fp8_moe=True)
     with self.assertRaisesRegex(weight_converter.ConversionPlanError, "not an FP8-quantized MoE expert weight"):
       converter.convert(_source_tree(True), target_state=target)
+
+
+def _vllm_torch_hybrid_source_and_layout(
+    *,
+    num_layers: int = 6,
+    cycle: int = 4,
+    moe: bool = True,
+    prefused_wi: bool = False,
+    tp_size: int = 2,
+    use_ep: bool = False,
+    padded_moe_interm_per_rank: int = MOE_DIM // 2,
+    qkvz_flipped: bool = False,
+    conv_transposed: bool = False,
+    logits_via_embedding: bool = False,
+    emit_lm_head: bool = True,
+):
+  """Constructs a real-naming Qwen3.5 trainer tree + rank-0 `param_layouts`."""
+  hd = 4
+  nq, nkv = 4, 2
+  hk, hv, dk, dv, conv_k = 2, 4, 4, 4, 4
+  num_full_blocks = num_layers // cycle
+  rem_layers = num_layers % cycle
+
+  def _make_gdn_sub(scan_dims: tuple[int, ...], seed: int):
+    def _s(*dims, off=0):
+      shape = list(dims)
+      for s_len in reversed(scan_dims):
+        shape.insert(SCAN_AXIS, s_len)
+      return _arr(*shape, offset=seed + off)
+
+    d = {
+        "input_layernorm": {"scale": _s(EMB, off=10)},
+        "post_attention_layernorm": {"scale": _s(EMB, off=20)},
+        "attention": {
+            "in_proj_qkvz": {"kernel": _s(EMB, 2 * hk * dk + 2 * hv * dv, off=30)},
+            "in_proj_ba": {"kernel": _s(EMB, 2 * hv, off=40)},
+            "conv1d": {"kernel": _s(conv_k, 1, 2 * hk * dk + hv * dv, off=50)},
+            "dt_bias": _s(hv, off=60),
+            "A_log": _s(hv, off=70),
+            "norm": {"scale": _s(dv, off=80)},
+            "out_proj": {"kernel": _s(hv * dv, EMB, off=90)},
+        },
+    }
+    if moe:
+      moe_d = {
+          "gate": {"kernel": _s(EMB, EXPERTS, off=100)},
+          "wo": _s(EXPERTS, MOE_DIM, EMB, off=130),
+          "shared_experts": {
+              "wi_0": {"kernel": _s(EMB, MOE_DIM, off=140)},
+              "wi_1": {"kernel": _s(EMB, MOE_DIM, off=150)},
+              "wo": {"kernel": _s(MOE_DIM, EMB, off=160)},
+          },
+          "shared_expert_gate": {"kernel": _s(EMB, 1, off=170)},
+      }
+      if prefused_wi:
+        w0 = _s(EXPERTS, EMB, MOE_DIM, off=110)
+        w1 = _s(EXPERTS, EMB, MOE_DIM, off=120)
+        moe_d["wi"] = jnp.concatenate([w0, w1], axis=-1)
+      else:
+        moe_d["wi_0"] = _s(EXPERTS, EMB, MOE_DIM, off=110)
+        moe_d["wi_1"] = _s(EXPERTS, EMB, MOE_DIM, off=120)
+      d["moe_block"] = moe_d
+    else:
+      d["mlp"] = {
+          "wi_0": {"kernel": _s(EMB, MOE_DIM, off=110)},
+          "wi_1": {"kernel": _s(EMB, MOE_DIM, off=120)},
+          "wo": {"kernel": _s(MOE_DIM, EMB, off=130)},
+      }
+    return d
+
+  def _make_full_sub(scan_dims: tuple[int, ...], seed: int):
+    def _s(*dims, off=0):
+      shape = list(dims)
+      for s_len in reversed(scan_dims):
+        shape.insert(SCAN_AXIS, s_len)
+      return _arr(*shape, offset=seed + off)
+
+    d = {
+        "input_layernorm": {"scale": _s(EMB, off=10)},
+        "post_attention_layernorm": {"scale": _s(EMB, off=20)},
+        "attention": {
+            "attention": {
+                "query": {"kernel": _s(EMB, nq, 2 * hd, off=30)},
+                "key": {"kernel": _s(EMB, nkv, hd, off=40)},
+                "value": {"kernel": _s(EMB, nkv, hd, off=50)},
+                "query_norm": {"scale": _s(hd, off=60)},
+                "key_norm": {"scale": _s(hd, off=70)},
+                "out": {"kernel": _s(nq * hd, EMB, off=80)},
+            }
+        },
+    }
+    if moe:
+      d["moe_block"] = _make_gdn_sub(scan_dims, seed)["moe_block"]
+    else:
+      d["mlp"] = _make_gdn_sub(scan_dims, seed)["mlp"]
+    return d
+
+  decoder: dict = {
+      "decoder_norm": {"scale": _arr(EMB, offset=5)},
+  }
+  if num_full_blocks > 0:
+    decoder["layers"] = {
+        "local_layers": _make_gdn_sub((num_full_blocks, cycle - 1), seed=1000),
+        "global_layer": _make_full_sub((num_full_blocks,), seed=2000),
+    }
+  if rem_layers > 0:
+    decoder["layers_remainder"] = {
+        "local_layers": _make_gdn_sub((rem_layers,), seed=3000),
+    }
+  if not logits_via_embedding:
+    decoder["logits_dense"] = {"kernel": _arr(EMB, 16, offset=9)}
+
+  source = {
+      "base": {
+          "token_embedder": {"embedding": _arr(16, EMB, offset=1)},
+          "decoder": decoder,
+      }
+  }
+
+  def _entry(local_shape, shard_dim=None, num_shards=1, domain="replicated", **extra):
+    global_shape = list(local_shape)
+    if shard_dim is not None and num_shards > 1:
+      global_shape[shard_dim] *= num_shards
+    spec = {
+        "local_shape": list(local_shape),
+        "global_shape": global_shape,
+        "dtype": "float32",
+        "shard_dim": shard_dim,
+        "num_shards": num_shards,
+        "shard_domain": domain,
+        "flipped": False,
+        "conv_transposed": False,
+    }
+    spec.update(extra)
+    return spec
+
+  layouts: dict = {
+      "embed_tokens.weight": _entry([16 // tp_size, EMB], 0, tp_size, "tp"),
+      "norm.weight": _entry([EMB]),
+  }
+  if emit_lm_head:
+    layouts["lm_head.weight"] = _entry([16 // tp_size, EMB], 0, tp_size, "tp")
+
+  k_local = max(1, hk // tp_size)
+  v_local = hv // tp_size
+  kq_rep = max(1, tp_size // hk)
+  kv_rep = max(1, tp_size // nkv)
+  nkv_local = max(1, nkv // tp_size)
+  nq_local = nq // tp_size
+
+  for lyr in range(num_layers):
+    pfx = f"layers.{lyr}."
+    layouts[pfx + "input_layernorm.weight"] = _entry([EMB])
+    layouts[pfx + "post_attention_layernorm.weight"] = _entry([EMB])
+    if lyr % cycle == cycle - 1:
+      layouts[pfx + "self_attn.qkv_proj.weight"] = _entry(
+          [(nq_local * 2 + 2 * nkv_local) * hd, EMB],
+          0,
+          tp_size,
+          "tp",
+          checkpoint_sizes=[nq * 2 * hd, nkv * hd, nkv * hd],
+          replication_factors=[1, kv_rep, kv_rep],
+      )
+      layouts[pfx + "self_attn.q_norm.weight"] = _entry([hd])
+      layouts[pfx + "self_attn.k_norm.weight"] = _entry([hd])
+      layouts[pfx + "self_attn.o_proj.weight"] = _entry([EMB, nq_local * hd], 1, tp_size, "tp")
+    else:
+      qkvz_out_local = 2 * k_local * dk + 2 * v_local * dv
+      qkvz_shape = [EMB, qkvz_out_local] if qkvz_flipped else [qkvz_out_local, EMB]
+      layouts[pfx + "linear_attn.in_proj_qkvz.weight"] = _entry(
+          qkvz_shape,
+          1 if qkvz_flipped else 0,
+          tp_size,
+          "tp",
+          flipped=qkvz_flipped,
+          checkpoint_sizes=[hk * dk, hk * dk, hv * dv, hv * dv],
+          replication_factors=[kq_rep, kq_rep, 1, 1],
+      )
+      layouts[pfx + "linear_attn.in_proj_ba.weight"] = _entry(
+          [2 * v_local, EMB],
+          0,
+          tp_size,
+          "tp",
+          checkpoint_sizes=[hv, hv],
+          replication_factors=[1, 1],
+      )
+      c_local = 2 * k_local * dk + v_local * dv
+      conv_shape = [conv_k, 1, c_local] if conv_transposed else [c_local, 1, conv_k]
+      layouts[pfx + "linear_attn.conv1d.weight"] = _entry(
+          conv_shape,
+          2 if conv_transposed else 0,
+          tp_size,
+          "tp",
+          conv_transposed=conv_transposed,
+      )
+      layouts[pfx + "linear_attn.dt_bias"] = _entry([v_local], 0, tp_size, "tp")
+      layouts[pfx + "linear_attn.A_log"] = _entry([v_local], 0, tp_size, "tp")
+      layouts[pfx + "linear_attn.norm.weight"] = _entry([dv])
+      layouts[pfx + "linear_attn.out_proj.weight"] = _entry([EMB, v_local * dv], 1, tp_size, "tp")
+
+    if moe:
+      layouts[pfx + "mlp.gate.weight"] = _entry([EXPERTS, EMB])
+      if use_ep:
+        layouts[pfx + "mlp.experts.w13_weight"] = _entry([EXPERTS // tp_size, 2 * MOE_DIM, EMB], 0, tp_size, "ep")
+        layouts[pfx + "mlp.experts.w2_weight"] = _entry([EXPERTS // tp_size, EMB, MOE_DIM], 0, tp_size, "ep")
+      else:
+        layouts[pfx + "mlp.experts.w13_weight"] = _entry([EXPERTS, 2 * padded_moe_interm_per_rank, EMB], 1, tp_size, "tp")
+        layouts[pfx + "mlp.experts.w2_weight"] = _entry([EXPERTS, EMB, padded_moe_interm_per_rank], 2, tp_size, "tp")
+      layouts[pfx + "mlp.shared_expert.gate_up_proj.weight"] = _entry([2 * (MOE_DIM // tp_size), EMB], 0, tp_size, "tp")
+      layouts[pfx + "mlp.shared_expert.down_proj.weight"] = _entry([EMB, MOE_DIM // tp_size], 1, tp_size, "tp")
+      layouts[pfx + "mlp.shared_expert_gate.weight"] = _entry([1, EMB])
+    else:
+      layouts[pfx + "mlp.gate_up_proj.weight"] = _entry([2 * (MOE_DIM // tp_size), EMB], 0, tp_size, "tp")
+      layouts[pfx + "mlp.down_proj.weight"] = _entry([EMB, MOE_DIM // tp_size], 1, tp_size, "tp")
+  return source, layouts
+
+
+class VllmTorchWeightConverterTest(unittest.TestCase):
+  """Unit tests for `rollout_backend='vllm_torch'` layout-driven conversion."""
+
+  def _cfg(self, num_layers=6, cycle=4, decoder_block="qwen3_5"):
+    return _config(
+        decoder_block=decoder_block,
+        num_decoder_layers=num_layers,
+        inhomogeneous_layer_cycle_interval=cycle,
+        scan_layers=True,
+        emb_dim=EMB,
+        head_dim=4,
+        num_query_heads=4,
+        num_kv_heads=2,
+        base_moe_mlp_dim=MOE_DIM,
+        moe_mlp_dim=MOE_DIM,
+        gdn_num_key_heads=2,
+        gdn_num_value_heads=4,
+        gdn_key_head_dim=4,
+        gdn_value_head_dim=4,
+        gdn_conv_kernel_dim=4,
+        dtype="float32",
+        weight_dtype="float32",
+        rollout_weight_dtype="",
+    )
+
+  @staticmethod
+  def _flat_arrays(tree):
+    return {
+        ".".join(str(p) for p in k): v.get_value() if hasattr(v, "get_value") else v
+        for k, v in traverse_util.flatten_dict(tree).items()
+    }
+
+  def test_default_ep_and_tp_moe_synthesis_and_target_state_forwarding(self):
+    source, _ = _vllm_torch_hybrid_source_and_layout(
+        num_layers=6,
+        cycle=4,
+        moe=True,
+        tp_size=2,
+        use_ep=True,
+    )
+    cfg = self._cfg(num_layers=6, cycle=4)
+    cfg.rollout_weight_dtype = "bfloat16"
+    converter_ep = WeightConverter(
+        config=cfg,
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    flat_ep = self._flat_arrays(converter_ep.convert(source))
+    self.assertEqual(flat_ep["embed_tokens.weight"].shape, (16, EMB))
+    self.assertEqual(flat_ep["embed_tokens.weight"].dtype, jnp.bfloat16)
+    self.assertEqual(flat_ep["layers.0.linear_attn.in_proj_qkvz.weight"].shape, (48, EMB))
+    self.assertEqual(flat_ep["layers.0.linear_attn.in_proj_ba.weight"].shape, (EMB, 8))
+    self.assertEqual(flat_ep["layers.0.linear_attn.A_log"].dtype, jnp.float32)
+    self.assertEqual(flat_ep["layers.3.self_attn.qkv_proj.weight"].shape, (EMB, 48))
+    self.assertEqual(flat_ep["layers.0.mlp.experts.w13_weight"].shape, (EXPERTS, EMB, 256))
+    self.assertEqual(flat_ep["layers.0.mlp.experts.w2_weight"].shape, (EXPERTS, 128, EMB))
+
+    # `target_state` dict fallback and synthesized TP-MoE (`moe_mlp_tp_size == tp`).
+    src_tp, tp_layouts = _vllm_torch_hybrid_source_and_layout(
+        num_layers=2,
+        cycle=2,
+        moe=True,
+        tp_size=2,
+        use_ep=False,
+        padded_moe_interm_per_rank=128,
+        qkvz_flipped=True,
+    )
+    conv = WeightConverter(
+        config=self._cfg(num_layers=2, cycle=2),
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    via_kwarg = self._flat_arrays(conv.convert(copy.deepcopy(src_tp), target_layout=tp_layouts))
+    via_state = self._flat_arrays(conv.convert(copy.deepcopy(src_tp), target_state=tp_layouts))
+    for k, arr in via_kwarg.items():
+      np.testing.assert_array_equal(np.asarray(arr), np.asarray(via_state[k]))
+
+    conv_tp = WeightConverter(
+        config=self._cfg(num_layers=2, cycle=2),
+        tp=2,
+        moe_mlp_tp_size=2,
+        rollout_backend="vllm_torch",
+    )
+    flat_tp = self._flat_arrays(conv_tp.convert(copy.deepcopy(src_tp)))
+    self.assertEqual(flat_tp["layers.0.mlp.experts.w13_weight"].shape, (EXPERTS, EMB, 4 * 128))
+    self.assertEqual(flat_tp["layers.0.mlp.experts.w2_weight"].shape, (EXPERTS, 2 * 128, EMB))
+
+  def test_nested_scan_remainder_only_and_flipped_kernels(self):
+    source, layouts = _vllm_torch_hybrid_source_and_layout(
+        num_layers=6,
+        cycle=4,
+        moe=True,
+        tp_size=2,
+        use_ep=False,
+        padded_moe_interm_per_rank=8,
+        qkvz_flipped=True,
+        conv_transposed=True,
+    )
+    conv = WeightConverter(
+        config=self._cfg(num_layers=6, cycle=4),
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    flat_out = self._flat_arrays(conv.convert(source, target_layout=layouts))
+    self.assertEqual(set(flat_out), set(layouts))
+    rem_scale = source["base"]["decoder"]["layers_remainder"]["local_layers"]["input_layernorm"]["scale"]
+    np.testing.assert_array_equal(
+        np.asarray(flat_out["layers.5.input_layernorm.weight"]),
+        np.asarray(jnp.take(rem_scale, 1, axis=SCAN_AXIS)),
+    )
+    w13 = np.asarray(flat_out["layers.0.mlp.experts.w13_weight"])
+    w2 = np.asarray(flat_out["layers.0.mlp.experts.w2_weight"])
+    np.testing.assert_array_equal(w13[:, 3:8, :], 0.0)
+    np.testing.assert_array_equal(w2[:, :, 3:8], 0.0)
+
+    # Remainder-only hybrid scan when `num_decoder_layers < cycle` (`layers` absent).
+    src_rem, _ = _vllm_torch_hybrid_source_and_layout(
+        num_layers=2,
+        cycle=4,
+        moe=True,
+        tp_size=2,
+        use_ep=True,
+    )
+    self.assertNotIn("layers", src_rem["base"]["decoder"])
+    conv_rem = WeightConverter(
+        config=self._cfg(num_layers=2, cycle=4),
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    rem_only_out = self._flat_arrays(conv_rem.convert(src_rem))
+    self.assertIn("layers.1.linear_attn.in_proj_qkvz.weight", rem_only_out)
+
+  def test_moe_dim_scaling_prefused_wi_and_multimodal_skip(self):
+    src_split, layouts = _vllm_torch_hybrid_source_and_layout(
+        num_layers=2,
+        cycle=2,
+        moe=True,
+        prefused_wi=False,
+        tp_size=2,
+        use_ep=True,
+    )
+    src_fused, _ = _vllm_torch_hybrid_source_and_layout(
+        num_layers=2,
+        cycle=2,
+        moe=True,
+        prefused_wi=True,
+        tp_size=2,
+        use_ep=True,
+    )
+    src_fused["base"]["audio_encoder"] = {
+        "conv2d1": {"kernel": jnp.ones((3, 3, 1, 8), dtype=jnp.float32)},
+    }
+    conv = WeightConverter(
+        config=self._cfg(num_layers=2, cycle=2),
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    out_split = self._flat_arrays(conv.convert(copy.deepcopy(src_split), target_layout=layouts))
+    out_fused = self._flat_arrays(conv.convert(src_fused, target_layout=layouts))
+    self.assertTrue(all("audio_encoder" not in k for k in out_fused))
+    for k, arr in out_split.items():
+      np.testing.assert_array_equal(np.asarray(arr), np.asarray(out_fused[k]))
+
+    # Scaled `moe_mlp_dim` wins over `base_moe_mlp_dim` (including `-1` sentinel).
+    ref_w13 = self._flat_arrays(conv.convert(copy.deepcopy(src_split)))["layers.0.mlp.experts.w13_weight"]
+    for base_dim in (-1, MOE_DIM // 2):
+      cfg = self._cfg(num_layers=2, cycle=2)
+      cfg.base_moe_mlp_dim = base_dim
+      cfg.moe_mlp_dim = MOE_DIM
+      scaled_conv = WeightConverter(
+          config=cfg,
+          tp=2,
+          rollout_backend="vllm_torch",
+      )
+      got = self._flat_arrays(scaled_conv.convert(copy.deepcopy(src_split)))
+      np.testing.assert_array_equal(np.asarray(got["layers.0.mlp.experts.w13_weight"]), np.asarray(ref_w13))
+
+  def test_dense_model_and_tied_embedding_deduplication(self):
+    src_dedup, layouts_dedup = _vllm_torch_hybrid_source_and_layout(
+        num_layers=4,
+        cycle=4,
+        moe=False,
+        tp_size=2,
+        logits_via_embedding=True,
+        emit_lm_head=False,
+    )
+    conv = WeightConverter(
+        config=self._cfg(num_layers=4, cycle=4),
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    flat_names = set(self._flat_arrays(conv.convert(src_dedup, target_layout=layouts_dedup)))
+    self.assertNotIn("lm_head.weight", flat_names)
+    self.assertIn("layers.0.mlp.gate_up_proj.weight", flat_names)
+    self.assertIn("layers.0.mlp.down_proj.weight", flat_names)
+
+  def test_multi_axis_out_sharding_on_8_cpu_mesh(self):
+    from maxtext.integration.vllm.vllm_torch_converter import _multi_axis_out_sharding  # pylint: disable=import-outside-toplevel
+
+    devices = jax.devices()
+    self.assertGreaterEqual(len(devices), 8)
+    mesh = jax.sharding.Mesh(np.array(devices[:8]).reshape((2, 2, 2)), ("expert", "fsdp", "tensor"))
+    mesh_2d = jax.sharding.Mesh(np.array(devices[:8]).reshape((4, 2)), ("expert", "fsdp"))
+    self.assertEqual(
+        _multi_axis_out_sharding(mesh_2d, (256, 2048, 1024), param_name="mlp.experts.w13_weight").spec,
+        jax.sharding.PartitionSpec("expert", "fsdp", None),
+    )
+    self.assertEqual(
+        _multi_axis_out_sharding(mesh_2d, (256, 512, 2048), param_name="mlp.experts.w2_weight").spec,
+        jax.sharding.PartitionSpec("expert", None, "fsdp"),
+    )
+    # Non-expert tensors prefer `fsdp` ahead of `expert`.
+    self.assertEqual(
+        _multi_axis_out_sharding(mesh_2d, (2048,), param_name="norm.weight").spec,
+        jax.sharding.PartitionSpec("fsdp"),
+    )
+
+    src, layouts = _vllm_torch_hybrid_source_and_layout(
+        num_layers=2,
+        cycle=2,
+        moe=True,
+        tp_size=2,
+        use_ep=True,
+    )
+    sharded_src = jax.tree.map(
+        lambda x: jax.device_put(
+            x,
+            jax.sharding.NamedSharding(
+                mesh,
+                jax.sharding.PartitionSpec("fsdp" if x.shape[0] % 2 == 0 else None),
+            ),
+        ),
+        src,
+    )
+    conv = WeightConverter(
+        config=self._cfg(num_layers=2, cycle=2),
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    ref_out = self._flat_arrays(conv.convert(src, target_layout=layouts))
+    shd_out = self._flat_arrays(conv.convert(sharded_src, target_layout=layouts))
+    for k, ref_arr in ref_out.items():
+      np.testing.assert_allclose(np.asarray(shd_out[k]), np.asarray(ref_arr))
+      if k.endswith(("experts.w13_weight", "experts.w2_weight")):
+        self.assertEqual(shd_out[k].sharding.spec[0], "expert")
+
+  def test_tristate_flipped_cache_and_replication_override(self):
+    src, base_layouts = _vllm_torch_hybrid_source_and_layout(
+        num_layers=2,
+        cycle=2,
+        moe=True,
+        tp_size=2,
+        use_ep=True,
+    )
+    layouts_omitted = copy.deepcopy(base_layouts)
+    layouts_omitted["layers.1.self_attn.qkv_proj.weight"].update(
+        {
+            "local_shape": [24, EMB],
+            "global_shape": [96, EMB],
+            "num_shards": 4,
+            "replication_factors": [1, 4, 4],
+        }
+    )
+    for lyr in range(2):
+      layouts_omitted[f"layers.{lyr}.mlp.experts.w2_weight"] = {
+          "local_shape": [EXPERTS // 2, EMB, EMB],
+          "global_shape": [EXPERTS, EMB, EMB],
+          "dtype": "float32",
+          "shard_dim": 0,
+          "num_shards": 2,
+          "shard_domain": "ep",
+      }
+    layouts_false = copy.deepcopy(layouts_omitted)
+    layouts_false["layers.0.mlp.experts.w2_weight"]["flipped"] = False
+
+    conv = WeightConverter(
+        config=self._cfg(num_layers=2, cycle=2),
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    out_omitted = self._flat_arrays(conv.convert(copy.deepcopy(src), target_layout=layouts_omitted))
+    out_false = self._flat_arrays(conv.convert(copy.deepcopy(src), target_layout=layouts_false))
+    np.testing.assert_array_equal(
+        np.swapaxes(np.asarray(out_omitted["layers.0.mlp.experts.w2_weight"]), 1, 2),
+        np.asarray(out_false["layers.0.mlp.experts.w2_weight"]),
+    )
+    qkv_arr = np.asarray(out_omitted["layers.1.self_attn.qkv_proj.weight"]).reshape(4, 24, EMB)
+    np.testing.assert_array_equal(qkv_arr[0, 8:, :], qkv_arr[3, 8:, :])
+
+  def test_nnx_state_and_non_param_cache_variables(self):
+    src, layouts = _vllm_torch_hybrid_source_and_layout(
+        num_layers=2,
+        cycle=2,
+        moe=True,
+        tp_size=2,
+        use_ep=True,
+    )
+    src["base"]["decoder"]["layers"]["local_layers"]["rng_step"] = nnx.Cache(jnp.zeros((1, 1), dtype=jnp.int32))
+    nnx_state = nnx.State(
+        jax.tree.map(
+            lambda x: x if isinstance(x, nnx.Variable) else nnx.Param(x),
+            src,
+            is_leaf=lambda x: isinstance(x, nnx.Variable),
+        )
+    )
+    conv = WeightConverter(
+        config=self._cfg(num_layers=2, cycle=2),
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    self.assertIsNotNone(conv.convert(nnx_state, target_layout=layouts))
+
+  def test_fail_closed_config_layout_and_layer_idx_validation(self):
+    src, base_layouts = _vllm_torch_hybrid_source_and_layout(
+        num_layers=2,
+        cycle=2,
+        moe=True,
+        tp_size=2,
+        use_ep=True,
+    )
+    conv = WeightConverter(
+        config=self._cfg(num_layers=2, cycle=2),
+        tp=2,
+        rollout_backend="vllm_torch",
+    )
+    for bad_block in ("llama2", "qwen3_moe"):
+      with self.assertRaisesRegex(ValueError, "decoder_block"):
+        WeightConverter(
+            config=self._cfg(num_layers=2, cycle=2, decoder_block=bad_block),
+            tp=2,
+            rollout_backend="vllm_torch",
+        )
+    with self.assertRaisesRegex(ValueError, "fp8_moe"):
+      WeightConverter(
+          config=self._cfg(num_layers=2, cycle=2),
+          tp=2,
+          rollout_backend="vllm_torch",
+          fp8_moe=True,
+      )
+    with self.assertRaisesRegex(ValueError, "Unsupported dtype"):
+      WeightConverter(
+          config=self._cfg(num_layers=2, cycle=2),
+          tp=2,
+          rollout_backend="vllm_torch",
+          target_dtype="float8_e4m3fn",
+      )
+    for bad_flag in ("moe_flat_fsdp_weights", "moe_use_fused_gmm3d", "fused_qkv"):
+      with self.subTest(bad_flag=bad_flag):
+        cfg_flag = self._cfg(num_layers=2, cycle=2)
+        setattr(cfg_flag, bad_flag, True)
+        with self.assertRaisesRegex(ValueError, bad_flag):
+          WeightConverter(config=cfg_flag, tp=2, rollout_backend="vllm_torch")
+
+    # Query head count (not just q_total) must be divisible by rollout tp.
+    src_q3 = copy.deepcopy(src)
+    q_key = src_q3["base"]["decoder"]["layers"]["global_layer"]["attention"]["attention"]["query"]
+    q_key["kernel"] = jnp.ones((1, EMB, 3, 8), dtype=jnp.float32)
+    with self.assertRaisesRegex(ValueError, "num_q_heads=3"):
+      conv.convert(src_q3)
+
+    # Out-of-range `moe_mlp_dim` must fail closed instead of silently clamping.
+    cfg_big_moe = self._cfg(num_layers=2, cycle=2)
+    cfg_big_moe.moe_mlp_dim = MOE_DIM + 4
+    conv_big_moe = WeightConverter(config=cfg_big_moe, tp=2, rollout_backend="vllm_torch")
+    with self.assertRaisesRegex(ValueError, "exceeds"):
+      conv_big_moe.convert(copy.deepcopy(src), target_layout=base_layouts)
+
+    # Passing a nested state pytree as `target_state` raises a descriptive ValueError.
+    with self.assertRaisesRegex(ValueError, "Invalid target_layout entry"):
+      conv.convert(copy.deepcopy(src), target_state={"layers": {"0": {}}})
+
+    for kwargs, err_re in (
+        ({"dp": 3}, "num_experts=4"),
+        ({"kv_tp_size": 4}, "kv_tp_size"),
+        ({"moe_mlp_tp_size": 4}, "moe_mlp_tp_size"),
+    ):
+      with self.subTest(kwargs=kwargs):
+        bad_conv = WeightConverter(
+            config=self._cfg(num_layers=2, cycle=2),
+            tp=2,
+            rollout_backend="vllm_torch",
+            **kwargs,
+        )
+        with self.assertRaisesRegex(ValueError, err_re):
+          bad_conv.convert(copy.deepcopy(src))
+
+    # Swapped `layer_idx` is caught against JAX pytree traversal order.
+    sorted_keys = sorted(base_layouts, key=lambda k: tuple(k.split(".")))
+    bad_idx = {k: {**base_layouts[k], "layer_idx": i} for i, k in enumerate(sorted_keys)}
+    bad_idx[sorted_keys[0]]["layer_idx"] = 1
+    bad_idx[sorted_keys[1]]["layer_idx"] = 0
+    with self.assertRaisesRegex(ValueError, "layer_idx"):
+      conv.convert(copy.deepcopy(src), target_layout=bad_idx)
+
+    for key, patch_dict in (
+        ("layers.1.self_attn.qkv_proj.weight", {"num_shards": 1, "replication_factors": [1, 2, 2]}),
+        ("layers.1.self_attn.qkv_proj.weight", {"shard_dim": None, "num_shards": 4}),
+        ("layers.0.linear_attn.conv1d.weight", {"num_shards": 0}),
+        ("layers.0.mlp.experts.w13_weight", {"dtype": "torch.float8_e4m3fn"}),
+        ("layers.0.mlp.experts.w13_weight", {"num_shards": 0}),
+        (
+            "layers.0.mlp.experts.w13_weight",
+            {"shard_domain": "tp", "shard_dim": 2, "num_shards": 3, "local_shape": [EXPERTS, EMB, 8]},
+        ),
+        ("layers.0.mlp.experts.w13_weight", {"local_shape": [EXPERTS // 2, EMB, 25]}),
+        ("layers.0.mlp.experts.w13_weight", {"local_shape": [EXPERTS // 2, EMB, 2 * (MOE_DIM - 2)]}),
+        ("layers.0.mlp.experts.w2_weight", {"local_shape": [EXPERTS // 2, MOE_DIM - 2, EMB]}),
+    ):
+      bad_layouts = copy.deepcopy(base_layouts)
+      bad_layouts[key] = {**bad_layouts[key], **patch_dict}
+      with self.subTest(key=key, patch_dict=patch_dict):
+        with self.assertRaises(ValueError):
+          conv.convert(copy.deepcopy(src), target_layout=bad_layouts)
 
 
 if __name__ == "__main__":
