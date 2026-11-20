@@ -286,6 +286,8 @@ ModelName = Literal[
     "deepseek4-tiny",
     "deepseek4-284b",
     "deepseek4-1600b",
+    "deepseek4.1-flash",
+    "deepseek4.1-flash-mini",
     "deepseek-custom",
     "glm5.1-744b",
     "glm5.2-744b",
@@ -572,6 +574,10 @@ class DataTypes(BaseModel):
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
       description="Precision level for matrix multiplications.",
+  )
+  gate_matmul_precision: Literal[""] | MatmulPrecision = Field(
+      "",
+      description="Precision level for MoE router gate matrix multiplications; empty follows matmul_precision.",
   )
   activations_in_float32: bool = Field(
       False,
@@ -1138,6 +1144,40 @@ def _validate_index_share(cfg: Any) -> None:
     if cfg.use_batch_split_schedule:
       raise ValueError("`use_index_share=True` is not supported with `use_batch_split_schedule=True`.")
     index_share_utils.parse_index_share_pattern(cfg.index_share_pattern, cfg.num_decoder_layers)
+
+
+class DeepSeek41(BaseModel):
+  """DeepSeek-V4.1 specific architecture settings (cross-layer KV / indexer sharing, engram, hyper-connections)."""
+
+  ds41_kv_source_layers: list[int] = Field(
+      default_factory=list,
+      description="Layers that compress their own KV; later layers with the same compress ratio reuse it.",
+  )
+  ds41_index_source_layers: list[int] = Field(
+      default_factory=list,
+      description="Layers that run the indexer; the layers after them reuse the selected top-k positions.",
+  )
+  ds41_candidate_source_layer: int = Field(
+      -1, description="Layer whose index scores pre-select candidate blocks for later index sources (-1: off)."
+  )
+  ds41_candidate_topk_blocks: NonNegativeInt = Field(0, description="Candidate blocks kept per query.")
+  ds41_candidate_block_size: NonNegativeInt = Field(0, description="Compressed positions per candidate block.")
+  ds41_compressed_rope_yarn: bool = Field(
+      False,
+      description="Apply YaRN (original_max_position_embeddings, rope_factor, beta_fast/slow) to the RoPE of"
+      " compressed layers.",
+  )
+  ds41_hc_sinkhorn_iters: PositiveInt = Field(20, description="Sinkhorn iterations of the hyper-connection mixes.")
+  ds41_hc_eps: float = Field(1e-6, description="Epsilon of the hyper-connection mixes.")
+  ds41_engram_layers: list[int] = Field(default_factory=list, description="Layers with an engram n-gram lookup.")
+  ds41_engram_vocab_size: NonNegativeInt = Field(0, description="Base bucket size for the engram hash primes.")
+  ds41_engram_max_ngram_size: PositiveInt = Field(1, description="Largest n-gram hashed by the engram.")
+  ds41_engram_n_heads: NonNegativeInt = Field(0, description="Engram hash heads per n-gram size.")
+  ds41_engram_head_dim: NonNegativeInt = Field(0, description="Engram table row size.")
+  ds41_engram_pad_id: int = Field(2, description="Token filling n-gram slots that have no history.")
+  ds41_engram_compressed_vocab_size: NonNegativeInt = Field(
+      0, description="Expected size of the compressed (normalized) tokenizer vocab (0: unchecked)."
+  )
 
 
 class AttentionIndexer(BaseModel):
@@ -5435,6 +5475,110 @@ def check_forced_routing_support(decoder_block: DecoderBlockType) -> None:
     )
 
 
+_DEEPSEEK_ROUTING_BLOCKS = (
+    DecoderBlockType.DEEPSEEK,
+    DecoderBlockType.DEEPSEEK4,
+    DecoderBlockType.DEEPSEEK41,
+    DecoderBlockType.GLM5,
+)
+
+
+def validate_loss_free_load_balancing(cfg) -> None:
+  """Loss-free load balancing (routing bias updates) is implemented by the DeepSeek/GLM decoder blocks only."""
+  if cfg.routed_bias and cfg.routed_bias_update_rate > 0.0 and cfg.decoder_block not in _DEEPSEEK_ROUTING_BLOCKS:
+    raise ValueError("Loss-free load balancing is only supported for the DeepSeek/GLM decoder block.")
+
+
+def validate_compress_ratios(cfg) -> None:
+  """Compressed attention ratios: 0 (off) or >= 4, except DeepSeek-V4.1 (also 2-to-1 and 1-to-1)."""
+  for val in cfg.compress_ratios:
+    # DeepSeek-V4.1 compresses 2-to-1 and 1-to-1 (a per-token projection selected by its indexer).
+    if cfg.decoder_block != DecoderBlockType.DEEPSEEK41 and val != 0 and val < 4:
+      raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
+
+
+def validate_deepseek41(cfg) -> None:
+  """Checks the DeepSeek-V4.1 layer layout the decoder relies on (see `maxtext.models.deepseek41`).
+
+  Shared attention state holds one compressed KV / index-key / top-k / candidate entry at a time, so every layer
+  that reuses one must find a source with the same compression ratio before it.
+  """
+  if cfg.decoder_block != DecoderBlockType.DEEPSEEK41:
+    return
+  num_layers = getattr(cfg, "num_decoder_layers", None) or cfg.base_num_decoder_layers
+  ratios = list(cfg.compress_ratios)
+  if len(ratios) != num_layers:
+    raise ValueError(f"deepseek41: compress_ratios has {len(ratios)} entries for {num_layers} decoder layers.")
+  if any(r < 0 for r in ratios):
+    raise ValueError(f"deepseek41: compress_ratios must be >= 0, got {ratios}.")
+  if cfg.mhc_expansion_rate < 2:
+    raise ValueError("deepseek41 requires hyper-connections (mhc_expansion_rate >= 2).")
+  if getattr(cfg, "packing", False):
+    # The attention masks, compressed KV and engram n-grams assume one sequence per row with positions from 0.
+    raise ValueError("deepseek41 does not support packed sequences yet: set packing=False.")
+  if cfg.routed_bias_update_rate > 0.0 or cfg.load_balance_loss_weight > 0.0:
+    # The decoder layer does not sow `moe_bias_updates` / `moe_lb_loss` yet, so both would be silently ignored.
+    raise ValueError(
+        "deepseek41 does not support training-time routing bias updates or the load-balancing loss yet: set"
+        " routed_bias_update_rate=0 and load_balance_loss_weight=0."
+    )
+  if cfg.ds41_engram_layers and cfg.ds41_engram_max_ngram_size < 2:
+    raise ValueError("deepseek41: ds41_engram_max_ngram_size must be >= 2 when ds41_engram_layers is set.")
+
+  kv_sources, index_sources = set(cfg.ds41_kv_source_layers), set(cfg.ds41_index_source_layers)
+  for name, layers in (
+      ("ds41_kv_source_layers", kv_sources),
+      ("ds41_index_source_layers", index_sources),
+      ("ds41_engram_layers", set(cfg.ds41_engram_layers)),
+  ):
+    if any(not 0 <= i < num_layers for i in layers):
+      raise ValueError(f"deepseek41: {name} {sorted(layers)} must be layer ids in [0, {num_layers}).")
+  for name, layers in (("ds41_kv_source_layers", kv_sources), ("ds41_index_source_layers", index_sources)):
+    if any(ratios[i] == 0 for i in layers):
+      raise ValueError(f"deepseek41: every layer in {name} must have compress_ratio > 0.")
+
+  kv_ratio = index_ratio = None  # Ratio of the latest KV / index source.
+  kv_has_index_k = False  # Whether the latest KV source also published index keys.
+  for i, ratio in enumerate(ratios):
+    if ratio == 0:
+      continue
+    if i in kv_sources:
+      kv_ratio, kv_has_index_k = ratio, i in index_sources
+    elif kv_ratio != ratio:
+      raise ValueError(
+          f"deepseek41: layer {i} (compress ratio {ratio}) reuses compressed KV, but the latest earlier"
+          f" ds41_kv_source_layers layer has ratio {kv_ratio}."
+      )
+    if i in index_sources:
+      if i not in kv_sources and not kv_has_index_k:
+        raise ValueError(f"deepseek41: index source {i} reuses index keys its KV source does not compute.")
+      index_ratio = ratio
+    elif index_ratio != ratio:
+      raise ValueError(
+          f"deepseek41: layer {i} (compress ratio {ratio}) reuses top-k selections, but the latest earlier"
+          f" ds41_index_source_layers layer has ratio {index_ratio}."
+      )
+
+  candidate_source = cfg.ds41_candidate_source_layer
+  if candidate_source >= 0:
+    if candidate_source not in index_sources:
+      raise ValueError("deepseek41: ds41_candidate_source_layer must be one of ds41_index_source_layers.")
+    if cfg.ds41_candidate_topk_blocks <= 0 or cfg.ds41_candidate_block_size <= 0:
+      raise ValueError("deepseek41: ds41_candidate_topk_blocks and ds41_candidate_block_size must be positive.")
+    if cfg.ds41_candidate_topk_blocks * cfg.ds41_candidate_block_size < cfg.indexer_topk:
+      # Otherwise the top-k could pick (and keep) reachable positions outside the candidate blocks.
+      raise ValueError(
+          "deepseek41: ds41_candidate_topk_blocks * ds41_candidate_block_size must be >= indexer_topk, got"
+          f" {cfg.ds41_candidate_topk_blocks} * {cfg.ds41_candidate_block_size} < {cfg.indexer_topk}."
+      )
+    later = [i for i in index_sources if i > candidate_source and ratios[i] != ratios[candidate_source]]
+    if later:
+      raise ValueError(
+          f"deepseek41: index sources {sorted(later)} use the candidates of layer {candidate_source}, which has a"
+          " different compress ratio."
+      )
+
+
 def _normalize_axes(axes: Any) -> tuple[str, ...]:
   """Normalize a logical-rule mapping value to a tuple of axis name strings.
 
@@ -5840,6 +5984,7 @@ class MaxTextConfig(
     Attention,
     MlaAttention,
     CompressedAttention,
+    DeepSeek41,
     MoBa,
     AttentionIndexer,
     Llama4Attention,
@@ -8285,12 +8430,7 @@ class MaxTextConfig(
           )
       if self.decoder_block == DecoderBlockType.GPT_OSS and not self.sparse_matmul and self.capacity_factor != -1:
         raise ValueError("GPT-OSS MoE only supports dropless (capacity_factor=-1) with dense matmul.")
-      if (
-          self.routed_bias
-          and self.routed_bias_update_rate > 0.0
-          and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4, DecoderBlockType.GLM5)
-      ):
-        raise ValueError("Loss-free load balancing is only supported for the DeepSeek/GLM decoder block.")
+      validate_loss_free_load_balancing(self)
       if self.te_moe_block and not self.sparse_matmul:
         raise ValueError("te_moe_block=True requires sparse_matmul=True.")
       if self.te_moe_quantize_before_fsdp_all_gather:
@@ -8877,6 +9017,7 @@ class MaxTextConfig(
     if self.opt_type == "muon" and self.decoder_block not in [
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.DEEPSEEK41,
         DecoderBlockType.QWEN3,
         DecoderBlockType.QWEN3_MOE,
         DecoderBlockType.QWEN3_CUSTOM_MOE,
@@ -9061,9 +9202,8 @@ class MaxTextConfig(
 
     _validate_moe_tc_kernels(self)
 
-    for val in self.compress_ratios:
-      if val != 0 and val < 4:
-        raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
+    validate_compress_ratios(self)
+    validate_deepseek41(self)
 
     if self.num_kv_shared_layers > 0:
       if self.fused_qkv:
@@ -9358,6 +9498,7 @@ class RLConfig(
     MoBa,
     MlaAttention,
     CompressedAttention,
+    DeepSeek41,
     AttentionIndexer,
     SplashAttention,
     Qwen3Next,
@@ -9635,6 +9776,11 @@ class RLConfig(
           Please pass tokenizer_path in your command."
         )
 
+    # Shared with MaxTextConfig.set_derived_values_and_validate (this class does not inherit it).
+    validate_loss_free_load_balancing(self)
+    validate_compress_ratios(self)
+    validate_deepseek41(self)
+
     if self.optimizer_memory_host_offload:
       raise ValueError(
           "optimizer_memory_host_offload=True is not supported on the post-training "
@@ -9743,12 +9889,7 @@ class RLConfig(
     MaxTextConfig._validate_moe_wo_fsdp_on_mlp(self, require_rule=False)  # pylint: disable=protected-access
     _resolve_prune_shared_indexers(self)
     _validate_index_share(self)
-    if (
-        self.routed_bias
-        and self.routed_bias_update_rate > 0.0
-        and self.decoder_block not in (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK4, DecoderBlockType.GLM5)
-    ):
-      raise ValueError("Loss-free load balancing is only supported for the DeepSeek/GLM decoder block.")
+    validate_loss_free_load_balancing(self)
 
     # Mirror into internal MaxText fields for backward compatibility.
     train_micro_batch_size = getattr(self.dataset, "train_micro_batch_size", -1)
