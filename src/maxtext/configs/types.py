@@ -1937,6 +1937,16 @@ class MoEGeneral(BaseModel):
       " always per-tensor): per_channel [1, 1, N], per_tensor [1, 1, 1], per_expert_channel [E, 1, N] (needs"
       " use_gmm_v2; not with moe_flat_fsdp_weights or use_ring_of_experts).",
   )
+  moe_wo_fsdp_on_mlp: bool = Field(
+      False,
+      description=(
+          "Shard RoutedMoE.wo ([experts, mlp, embed]) over FSDP on its intermediate mlp dimension instead of its"
+          " embed dimension by using ('exp', 'mlp_moe_out', 'embed_moe_out') from logical_axis_rules (such as"
+          " cp-as-ep, cp-as-ep-dense-no-cp, and cp-as-ep-dense-fsdp), so its backward weight-gradient"
+          " reduce-scatter scatters the middle dimension like wi's. Requires logical_axis_rules that define both"
+          " 'mlp_moe_out' and 'embed_moe_out', and moe_mlp_dim divisible by the 'mlp_moe_out' shard count."
+      ),
+  )
   use_2d_fsdp_sharding: bool = Field(
       False,
       description="Use `fsdp` and `fsdp_transpose` axes for 2D FSDP sharding.",
@@ -2701,6 +2711,20 @@ class HardwareAndMesh(BaseModel):
   custom_mesh_and_rule_for_eval: CustomRule = Field(
       CustomRule.DEFAULT,
       description="Customized mesh and logical rules for evaluation.",
+  )
+  dense_grad_reduce: Literal["reduce_scatter", "all_reduce"] = Field(
+      "reduce_scatter",
+      description=(
+          "How the gradients of the dense weights that a custom_mesh_and_rule replicates over context are reduced"
+          " (the rule sets that map 'embed_grad': cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp). 'reduce_scatter':"
+          " linears.route_dense_weight_grad reduce-scatters each such gradient over every token axis and, across an"
+          " optimization barrier, all-gathers the shard over the axes the weight is replicated on. 'all_reduce': the"
+          " 'embed_grad' rule is dropped from logical_axis_rules and logical_axis_rules_for_eval, so"
+          " route_dense_weight_grad returns the kernel unchanged; GSPMD emits a reduction+slice over the weight's"
+          " sharded token axes plus an all-reduce over the replicated token axes, which XLA:TPU folds into a combined"
+          " full-weight all-reduce across all token axes without optimization barriers. The forward is unchanged and"
+          " the gradients differ by summation order only."
+      ),
   )
   allow_split_physical_axes: bool = Field(False, description="Allow splitting physical axes for device mesh creation.")
   optimize_mesh_for_tpu_v6e: bool = Field(False, description="Apply transformations to the mesh for TPU v6e.")
@@ -5951,6 +5975,85 @@ class MaxTextConfig(
       )
 
   @staticmethod
+  def _apply_dense_grad_reduce(cfg: Any, *, require_rule: bool) -> None:
+    """When dense_grad_reduce='all_reduce', drops the 'embed_grad' rule from logical_axis_rules (and _for_eval).
+
+    linears.route_dense_weight_grad routes a dense weight's gradient through a reduce-scatter only under rules that map
+    'embed_grad'; without the rule it returns the kernel as is and XLA reduces the gradient without routing barriers.
+
+    Args:
+      cfg: the config, edited in place.
+      require_rule: refuse 'all_reduce' when logical_axis_rules do not map 'embed_grad' (the key would be a no-op).
+    """
+    if cfg.dense_grad_reduce == "reduce_scatter":
+      if cfg.shard_mode == ShardMode.EXPLICIT and any(
+          rule and rule[0] == "embed_grad"
+          for attr in ("logical_axis_rules", "logical_axis_rules_for_eval")
+          for rule in (getattr(cfg, attr, None) or ())
+      ):
+        raise ValueError(
+            "logical_axis_rules that map 'embed_grad' (cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp with"
+            " dense_grad_reduce='reduce_scatter') require shard_mode='auto'."
+        )
+      return
+    if require_rule and not any(rule and rule[0] == "embed_grad" for rule in (cfg.logical_axis_rules or ())):
+      raise ValueError(
+          "dense_grad_reduce='all_reduce' requires logical_axis_rules that map 'embed_grad' (custom_mesh_and_rule"
+          " cp-as-ep-dense-no-cp or cp-as-ep-dense-fsdp); under other rules the dense-weight gradients are already"
+          " reduced without 'embed_grad' routing and the key would change nothing."
+      )
+    for attr in ("logical_axis_rules", "logical_axis_rules_for_eval"):
+      rules = getattr(cfg, attr, None)
+      if not rules:
+        continue
+      setattr(
+          cfg,
+          attr,
+          [rule for rule in rules if not (rule and rule[0] == "embed_grad")],
+      )
+
+  @staticmethod
+  def _validate_moe_wo_fsdp_on_mlp(cfg: Any, *, require_rule: bool) -> None:
+    """Validates `moe_wo_fsdp_on_mlp=True` against incompatible MoE sharding modes, axis rules, and dimensions."""
+    if not getattr(cfg, "moe_wo_fsdp_on_mlp", False):
+      return
+    for flag_name in ("shard_exp_on_fsdp", "use_2d_fsdp_sharding", "use_batch_split_schedule", "moe_flat_fsdp_weights"):
+      if getattr(cfg, flag_name, False):
+        raise ValueError(f"moe_wo_fsdp_on_mlp=True is incompatible with {flag_name}=True.")
+    rules = getattr(cfg, "logical_axis_rules", None) or ()
+    if not {"mlp_moe_out", "embed_moe_out"} <= {rule[0] for rule in rules if rule}:
+      if require_rule:
+        raise ValueError(
+            "moe_wo_fsdp_on_mlp=True requires logical_axis_rules that map both 'mlp_moe_out' and 'embed_moe_out'"
+            " (e.g. custom_mesh_and_rule='cp-as-ep', 'cp-as-ep-dense-no-cp', or 'cp-as-ep-dense-fsdp')."
+        )
+      return
+
+    def _axis_shards(mesh_axis: str) -> int | None:
+      attr = {"stage": "pipeline", "model": "tensor"}.get(mesh_axis, mesh_axis)
+      ici = getattr(cfg, f"ici_{attr}_parallelism", 1)
+      dcn = getattr(cfg, f"dcn_{attr}_parallelism", 1)
+      if ici <= 0 or dcn <= 0:
+        return None
+      return int(ici) * int(dcn)
+
+    if getattr(cfg, "num_experts", 1) > 1:
+      moe_in_dim = cfg.emb_dim if getattr(cfg, "moe_expert_input_dim", 0) <= 0 else cfg.moe_expert_input_dim
+      mesh_axes = set(getattr(cfg, "mesh_axes", ()) or ())
+      for dim_name, dim_val, logical_axis in (
+          ("moe_mlp_dim", cfg.moe_mlp_dim, "mlp_moe_out"),
+          ("moe_expert_input_dim", moe_in_dim, "embed_moe_out"),
+      ):
+        sizes = [_axis_shards(ax) for ax in axes_for_logical(rules, logical_axis) if ax in mesh_axes]
+        if all(s is not None for s in sizes):
+          shards = prod(sizes) if sizes else 1
+          if dim_val % shards != 0:
+            raise ValueError(
+                f"moe_wo_fsdp_on_mlp=True requires {dim_name} ({dim_val}) to be divisible by the"
+                f" {logical_axis!r} shard count ({shards})."
+            )
+
+  @staticmethod
   def _load_mesh_config_from_yaml(rule_value: str) -> dict:
     """Helper to load and parse custom mesh YAML configurations."""
     custom_mesh_path = os.path.join(
@@ -6333,6 +6436,8 @@ class MaxTextConfig(
           if current != disabled_value:
             raise ValueError(f"When EP rank is 1, {flag_name} must be {disabled_value} (was {current}).")
 
+    self._apply_dense_grad_reduce(self, require_rule=True)
+
     # Handle eval custom mesh and rule
     if self.custom_mesh_and_rule_for_eval is CustomRule.DEFAULT:
       # Fallback to primary rule if eval is DEFAULT
@@ -6341,6 +6446,7 @@ class MaxTextConfig(
     else:
       eval_config = self._load_mesh_config_from_yaml(self.custom_mesh_and_rule_for_eval.value)
       self.logical_axis_rules_for_eval = eval_config.get("logical_axis_rules", self.logical_axis_rules)
+      self._apply_dense_grad_reduce(self, require_rule=False)
 
       # Only the logical rules are swapped for eval; the mesh itself is built once from
       # the primary rule. Axes the eval rule names but the mesh lacks silently resolve to
@@ -8414,6 +8520,7 @@ class MaxTextConfig(
             "moe_flat_fsdp_weights=True is incompatible with shard_exp_on_fsdp, use_2d_fsdp_sharding,"
             " use_batch_split_schedule, fp8 weight_dtype and the gemma4 decoder block."
         )
+    self._validate_moe_wo_fsdp_on_mlp(self, require_rule=True)
 
     if self.use_lineage:
       if not self.scan_layers:
@@ -8999,6 +9106,8 @@ class RLConfig(
     self.mlp_dim = int((2**mlp_dim_scale) * self.base_mlp_dim)
     self.moe_mlp_dim = int((2**mlp_dim_scale) * getattr(self, "base_moe_mlp_dim", 0))
     self.num_decoder_layers = int((2**layer_scale) * self.base_num_decoder_layers)
+    MaxTextConfig._apply_dense_grad_reduce(self, require_rule=False)  # pylint: disable=protected-access
+    MaxTextConfig._validate_moe_wo_fsdp_on_mlp(self, require_rule=False)  # pylint: disable=protected-access
 
     # Mirror into internal MaxText fields for backward compatibility.
     train_micro_batch_size = getattr(self.dataset, "train_micro_batch_size", -1)

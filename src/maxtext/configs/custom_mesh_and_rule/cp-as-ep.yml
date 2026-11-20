@@ -22,7 +22,10 @@ logical_axis_rules: [
                       # ==========================================
                       # Vocab Activations
                       ['activation_embed_and_logits_batch', ['data', 'stage', 'fsdp', 'expert']],
-                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'expert']],
+                      # Vocabulary tiling flattens [batch, length] into one dimension. It must also be sharded
+                      # over the length axis (context), or every context rank computes the logits of all the
+                      # context shards. context is last because it is the minor part of the flattened index.
+                      ['activation_embed_and_logits_batch_sequence', ['data', 'stage', 'fsdp', 'expert', 'context']],
                       # Vocab Weights
                       ['vocab', []],
                       ['embed_vocab', ['fsdp', 'context', 'expert']],
@@ -61,6 +64,9 @@ logical_axis_rules: [
                       ['exp', ['context', 'expert']],
                       ['embed_moe', ['fsdp']],
                       ['embed_router', ['fsdp']],
+                      # wo's dims when moe_wo_fsdp_on_mlp=True: FSDP on its mlp dim (see RoutedMoE.wo_kernel_axes)
+                      ['mlp_moe_out', ['fsdp']],
+                      ['embed_moe_out', []],
                       # ==========================================
                       # Standard MLP / Dense Layers / Model Structure
                       # ==========================================
