@@ -1984,6 +1984,12 @@ class MoEKernels(BaseModel):
       description="Whether to use Megablox kernels for MoE. Automatically disabled when hardware='cpu'.",
   )
   sparse_matmul: bool = Field(True, description="Whether to use sparse matmul kernels for MoE.")
+  moe_bwd_wgrad_overlap: bool = Field(
+      False,
+      description=(
+          "Tie token input cotangents to expert weight cotangents in m3 MoE backward to overlap wgrad reduce-scatter."
+      ),
+  )
   wi_tile_fwd_batch_seq: int = Field(
       512,
       description="forward pass tiling dimension for batch/sequence in GMM for wi.",

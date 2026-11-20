@@ -19,6 +19,7 @@ Modules:
   * `checkpoint.py` — legacy decoder layer-name translation.
   * `sharding.py` — `Sharding` ABC, `DefaultSharding` rules, mesh creation.
   * `kernels.py` — `AttentionKernel` and `SplashConfig` attention kernel dispatch.
+  * `moe.py` — `MoEExecutor` routed-expert runtime, load-balance loss, overlap hooks.
 
 Planned modules:
   * `interfaces.py` — shared ABCs and `CausalLMOutput`.
