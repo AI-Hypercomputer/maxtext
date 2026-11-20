@@ -319,6 +319,27 @@ def make_tgmm_configs(
   )
 
 
+def k_minor_out_applies(cfgs: gmm_v2.GmmConfigs) -> bool:
+  """Whether tgmm_v2(k_minor_out=True) writes its output k-minor for cfgs.
+
+  Requires a 2D unquantized config without partial_sum, a single N tile whose n
+  is not lane-aligned (a lane-aligned n-minor output needs no relayout), K tiles
+  that cover k exactly (so the [groups, n, k] buffer needs no slice before its
+  swapaxes), and n a multiple of the output's sublane tiling (n is the out
+  block's second-minor dim).
+  """
+  dims, tiles = cfgs.dims, cfgs.tiles
+  tpu_info = pltpu.get_tpu_info()
+  return (
+      not (cfgs.lhs_cfgs.is_3d or cfgs.rhs_cfgs.is_3d or cfgs.rhs_cfgs.has_scale or cfgs.has_partial_sum)
+      and tiles.tile_n >= dims.size_n
+      and dims.size_n % tpu_info.num_lanes != 0
+      and tiles.tile_k % tpu_info.num_lanes == 0
+      and dims.size_k % tiles.tile_k == 0
+      and dims.size_n % tpu_info.get_sublane_tiling(cfgs.out_dtype) == 0
+  )
+
+
 def tgmm_inner_kernel(
     step: pltpu.PipelineStep,
     tiled_lhs_ref: jax.Array,
@@ -333,6 +354,7 @@ def tgmm_inner_kernel(
     *,
     cfgs: gmm_v2.GmmConfigs,
     num_gm: jax.Array,
+    k_minor_out: bool = False,
 ):
   """Inner kernel for TGMM computation.
 
@@ -351,6 +373,8 @@ def tgmm_inner_kernel(
     metadata_ref: Contains metadata like group offsets and group IDs.
     cfgs: GmmConfigs object containing kernel configurations.
     num_gm: Total number of group-major tiles along grid axis 2.
+    k_minor_out: If set, tiled_out_ref is [None, size_n, tile_k] and the group's
+      final [tile_k, tile_n] result is stored transposed.
   """
   # NB: grid=(num_n, num_k, num_gm)
   tiled_rhs_scale_ref = tiled_rhs_ref.scale
@@ -436,7 +460,10 @@ def tgmm_inner_kernel(
         acc *= scale_slice
       if cfgs.has_partial_sum:
         acc += tiled_ps_ref[...].astype(acc.dtype)  # pyrefly: ignore[unsupported-operation]
-      tiled_out_ref[...] = acc.astype(tiled_out_ref.dtype)
+      out = acc.astype(tiled_out_ref.dtype)
+      if k_minor_out:
+        out = out.T[: tiled_out_ref.shape[0]]
+      tiled_out_ref[...] = out
     else:
       acc_ref[...] = acc
 
@@ -531,9 +558,16 @@ class TgmmIndexMaps:
     group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
     return (group_id, k_id, n_id)
 
+  def k_minor_out_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
+    del n_id  # A single N tile.
+    group_id = self.metadata_ref.gm_id_to_group_id[gm_id]
+    return (group_id, 0, k_id)
+
 
 def generate_tgmm_block_specs(
-    metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs
+    metadata_ref: gmm_v2.MetadataRef,
+    cfgs: gmm_v2.GmmConfigs,
+    k_minor_out: bool = False,
 ) -> Tuple[Tuple[pl.BlockSpec, OperandRef, pl.BlockSpec | None], pl.BlockSpec]:
   """Generates block specs for the given lhs, rhs, and out refs."""
   index_map = TgmmIndexMaps(metadata_ref, cfgs)
@@ -563,10 +597,13 @@ def generate_tgmm_block_specs(
         index_map.rhs_scale_index_map,
     )
   rhs_spec = OperandRef(value=rhs_block_spec, scale=rhs_scale_block_spec)
-  out_block_spec = pl.BlockSpec(
-      (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
-      index_map.out_index_map,
-  )
+  if k_minor_out:
+    out_block_spec = pl.BlockSpec((None, cfgs.dims.size_n, cfgs.tiles.tile_k), index_map.k_minor_out_index_map)
+  else:
+    out_block_spec = pl.BlockSpec(
+        (None, cfgs.tiles.tile_k, cfgs.tiles.tile_n),
+        index_map.out_index_map,
+    )
   ps_block_spec = None
   if cfgs.has_partial_sum:
     ps_block_spec = pl.BlockSpec(
@@ -581,15 +618,14 @@ def zero_out_start(
     lhs_group_sizes_ref,  # int32[size_lhs_group]
     group_offset_ref,  # int32[1]
     out_ref,  # [num_actual_groups, k, n]
-    zero_ref,  # [tile_zero_k, num_lanes]
+    zero_ref,  # [tile_zero_k, zero_lanes]
     semaphore_ref,  # [1]
 ):
   """If group_sizes[i]==0, kick off async DMAs to zero out drhs[i]."""
   num_actual_groups, aligned_k, aligned_n = out_ref.shape
-  tile_zero_k = zero_ref.shape[0]
+  tile_zero_k, zero_lanes = zero_ref.shape
   zero_ref = zero_ref.reshape(1, tile_zero_k, -1)
-  num_lanes = pltpu.get_tpu_info().num_lanes
-  assert aligned_n % num_lanes == 0
+  assert aligned_n % zero_lanes == 0
 
   zero_ref[...] = jnp.zeros_like(zero_ref)
 
@@ -597,12 +633,12 @@ def zero_out_start(
     should_copy_int = should_copy.astype(int)
     for i in range(pl.cdiv(aligned_k, tile_zero_k)):
       size_k_to_copy = min(tile_zero_k, aligned_k - i * tile_zero_k)
-      for j in range(aligned_n // num_lanes):
+      for j in range(aligned_n // zero_lanes):
         src = zero_ref.at[pl.ds(0, should_copy_int), pl.ds(0, size_k_to_copy)]
         dst = out_ref.at[
             pl.ds(local_group_id, should_copy_int),
             pl.ds(i * tile_zero_k, size_k_to_copy),
-            pl.ds(j * num_lanes, num_lanes),
+            pl.ds(j * zero_lanes, zero_lanes),
         ]
         pltpu.make_async_copy(
             src_ref=src,
@@ -647,10 +683,11 @@ def tgmm_kernel_main(
     # Scratch memory
     acc_ref: jax.Array,  # [tile_k, tile_n]
     metadata_ref: gmm_v2.MetadataRef,
-    zero_ref: jax.Array,  # [tile_zero_k, num_lanes]
+    zero_ref: jax.Array,  # [tile_zero_k, zero_lanes]
     semaphore_ref: jax.Array,  # [1]
     *,
     cfgs,
+    k_minor_out: bool = False,
 ):
   """Main kernel function for TGMM computation.
 
@@ -666,6 +703,7 @@ def tgmm_kernel_main(
     zero_ref: Scratch buffer for zeroing empty groups' output.
     semaphore_ref: DMA semaphore for the zeroing copies.
     cfgs: GmmConfigs object containing kernel configurations.
+    k_minor_out: Whether out_ref is [num_groups, n, k] (see tgmm_v2).
   """
   num_groups_to_zero = 0
   if not cfgs.has_partial_sum:
@@ -686,9 +724,9 @@ def tgmm_kernel_main(
       cfgs=cfgs,
   )
 
-  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
+  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs, k_minor_out)
   pipeline_fn = pltpu.emit_pipeline(
-      functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm),
+      functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm, k_minor_out=k_minor_out),
       grid=(num_n, num_k, num_gm),
       in_specs=in_specs,
       out_specs=out_specs,
@@ -749,6 +787,7 @@ def validate_tgmm_inputs(
         "precision",
         "preferred_element_type",
         "acc_dtype",
+        "k_minor_out",
     ],
 )
 def tgmm_v2(
@@ -765,6 +804,7 @@ def tgmm_v2(
     precision: jax.lax.Precision = jax.lax.Precision.DEFAULT,
     preferred_element_type: jnp.dtype | None = None,
     acc_dtype: jnp.dtype | None = None,
+    k_minor_out: bool = False,
 ):
   """Computes a transposed grouped matrix multiplication.
 
@@ -785,6 +825,12 @@ def tgmm_v2(
     precision: Unused. Exists for compatibility reasons.
     preferred_element_type: Optional jnp.dtype for the output matrix.
     acc_dtype: Optional jnp.dtype for the accumulator.
+    k_minor_out: Whether to write the output k-minor ([num_actual_groups,
+      size_n, size_k], each group's tile stored transposed) and return its
+      swapaxes when k_minor_out_applies (a 2D unquantized config without
+      partial_sum, one N tile with size_n % 128 != 0, size_k % tile_k == 0).
+      Consumers that want the result k-minor (XLA's choice when n is not
+      lane-aligned) then need no relayout copy. Same result.
 
   Returns:
     The result of the transposed grouped matrix multiplication, with shape
@@ -822,12 +868,16 @@ def tgmm_v2(
   tiles = cfgs.tiles
 
   num_lanes = pltpu.get_tpu_info().num_lanes
+  k_minor_out = k_minor_out and k_minor_out_applies(cfgs)
   aligned_n = gmm_v2.align_to(dims.size_n, num_lanes)
   # Pad K up to a tile_k multiple so (a) every k-tile written by the matmul
   # stays in-bounds, and (b) the zero-init path can slice in sublane-aligned
   # chunks. tile_k is num_lanes-aligned, which is also sublane-tile-aligned.
   aligned_k = gmm_v2.align_to(dims.size_k, tiles.tile_k)
-  out_init = jax.ShapeDtypeStruct((num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype)
+  if k_minor_out:
+    out_init = jax.ShapeDtypeStruct((num_actual_groups, dims.size_n, dims.size_k), cfgs.out_dtype)
+  else:
+    out_init = jax.ShapeDtypeStruct((num_actual_groups, aligned_k, aligned_n), cfgs.out_dtype)
   max_num_gm = dims.size_group + pl.cdiv(dims.size_m, tiles.tile_m) - 1
   scratch_shapes = [
       # acc_ref
@@ -845,9 +895,15 @@ def tgmm_v2(
   tile_zero_k = min(tile_zero_k, dims.size_k)
   size_out_sublane = pltpu.get_tpu_info().get_sublane_tiling(cfgs.out_dtype)
   tile_zero_k = (tile_zero_k // size_out_sublane) * size_out_sublane
+  zero_lanes = num_lanes
+  if k_minor_out:
+    # Zero [size_n, size_k] groups in full-width row chunks.
+    zero_lanes = dims.size_k
+    tile_zero_k = min(target_zero_ref_bytes // dims.size_k // out_bytes, dims.size_n)
+    tile_zero_k = (tile_zero_k // size_out_sublane) * size_out_sublane
   assert tile_zero_k > 0
   scratch_shapes += [
-      pltpu.VMEM((tile_zero_k, num_lanes), cfgs.out_dtype),
+      pltpu.VMEM((tile_zero_k, zero_lanes), cfgs.out_dtype),
       pltpu.SemaphoreType.DMA((1,)),
   ]
 
@@ -881,7 +937,7 @@ def tgmm_v2(
     input_output_aliases = {partial_sum_idx: 0}
 
   raw_out = pl.pallas_call(
-      functools.partial(tgmm_kernel_main, cfgs=cfgs),
+      functools.partial(tgmm_kernel_main, cfgs=cfgs, k_minor_out=k_minor_out),
       out_shape=out_init,
       grid_spec=pltpu.PrefetchScalarGridSpec(
           num_scalar_prefetch=2,
@@ -899,6 +955,7 @@ def tgmm_v2(
       # It does not affect the kernel's computation.
       metadata=gmm_v2.get_metadata(cfgs),  # pyrefly: ignore[bad-argument-type]
       input_output_aliases=input_output_aliases,
-  )(group_sizes, group_offset, lhs, rhs, partial_sum)[:, : dims.size_k, : dims.size_n]
-
-  return raw_out
+  )(group_sizes, group_offset, lhs, rhs, partial_sum)
+  if k_minor_out:
+    return jnp.swapaxes(raw_out, 1, 2)
+  return raw_out[:, : dims.size_k, : dims.size_n]
