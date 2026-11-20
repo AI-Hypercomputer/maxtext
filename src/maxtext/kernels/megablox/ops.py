@@ -103,6 +103,7 @@ def gmm(
     tc_unsort_cfg: TcUnsortCfg | None = None,
     rhs_amax: jnp.ndarray | None = None,
     rhs_scale_kept_axes: tuple[int, ...] = (),
+    gmm_v2_tail_chunks: bool = False,
 ):
   """Grouped matrix multiplication operation.
 
@@ -115,6 +116,8 @@ def gmm(
 
   `rhs_amax`: this shard's slice of the whole-weight amax for dynamic QWAG ([1, 1, 1], [1, 1, N] or [E, 1, N]).
   `rhs_scale_kept_axes`: the rhs axes that amax kept; the weight all-gather gathers the scale only along these.
+  `gmm_v2_tail_chunks` passes tail_chunks to the gmm_v2 forward and DLHS
+  kernels (see pallas_mosaic_tpu_v2_gmm_kernel.gmm_v2).
   """
   lhs_ndim = (lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs).ndim
   if (lhs_ndim == 3 or out_is_3d) and not (use_tokamax_backend and use_gmm_v2):
@@ -163,7 +166,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25, 27),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25, 27, 28),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -195,6 +198,7 @@ def gmm(
       tc_unsort_cfg,
       rhs_amax,
       rhs_scale_kept_axes,
+      gmm_v2_tail_chunks,
   )
   if return_lhs and return_rhs:
     return out, lhs_out, rhs_out
@@ -259,6 +263,7 @@ def _gmm_fwd(
     tc_unsort_cfg: TcUnsortCfg | None = None,
     rhs_amax: jnp.ndarray | None = None,
     rhs_scale_kept_axes: tuple[int, ...] = (),
+    gmm_v2_tail_chunks: bool = False,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
     tuple[
@@ -355,6 +360,7 @@ def _gmm_fwd(
         partial_sum,
         quantization_rule,
         out_is_3d=out_is_3d,
+        tail_chunks=gmm_v2_tail_chunks,
     )
   else:
     out = _fwd_run_megablox(
@@ -563,6 +569,7 @@ def _fwd_run_tokamax_v2(
     partial_sum: jnp.ndarray | None,
     quantization_rule: qwix.QtRule | None = None,
     out_is_3d: bool = False,
+    tail_chunks: bool = False,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
   rhs_operand = rhs
@@ -605,6 +612,7 @@ def _fwd_run_tokamax_v2(
       lhs_scale=lhs_scale,
       maybe_quantize_lhs=maybe_quantize_lhs,
       out_is_3d=out_is_3d,
+      tail_chunks=tail_chunks,
   )
 
   # gmm_v2 only rescales output when it quantizes lhs internally; for pre-quantized QArray
@@ -670,6 +678,7 @@ def _gmm_bwd(
     fuse_3d_dlhs_ps: bool,
     tc_unsort_cfg: TcUnsortCfg | None,
     rhs_scale_kept_axes: tuple[int, ...],
+    gmm_v2_tail_chunks: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -794,6 +803,7 @@ def _gmm_bwd(
       use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
       dlhs_is_3d=lhs_is_3d,
       fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
+      tail_chunks=gmm_v2_tail_chunks,
   )
 
   # 4. DRHS Gradient Execution
@@ -1017,6 +1027,7 @@ def _compute_dlhs(
     use_dlhs_transpose_rhs: bool = False,
     dlhs_is_3d: bool = False,
     fuse_3d_dlhs_ps: bool = False,
+    tail_chunks: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Routes execution of DLHS based on backend choices.
 
@@ -1047,6 +1058,7 @@ def _compute_dlhs(
         use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
         out_is_3d=dlhs_is_3d,
         fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
+        tail_chunks=tail_chunks,
     )
   else:
     dlhs = _dlhs_run_megablox(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, interpret, lhs_vma_axes)
@@ -1125,6 +1137,7 @@ def _dlhs_run_tokamax_v2(
     use_dlhs_transpose_rhs: bool = False,
     out_is_3d: bool = False,
     fuse_3d_dlhs_ps: bool = False,
+    tail_chunks: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
   is_qarray_dout = isinstance(dlhs_dout, qpl.QArray)
@@ -1172,6 +1185,7 @@ def _dlhs_run_tokamax_v2(
       maybe_quantize_lhs=not is_qarray_dout and kernel_lhs_scale is None,
       zero_initialize=not (fuse_3d_dlhs_ps and out_is_3d and kernel_partial_sum is not None),
       out_is_3d=out_is_3d,
+      tail_chunks=tail_chunks,
   )
 
   if not can_fuse_scale:

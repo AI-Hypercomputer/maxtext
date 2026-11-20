@@ -1430,6 +1430,16 @@ class MoEGeneral(BaseModel):
       False,
       description="Use native transpose_rhs in GMM v2 backward DLHS instead of an explicit RHS transpose.",
   )
+  moe_gmm_v2_tail_chunks: bool = Field(
+      False,
+      description=(
+          "On TPU7x, let the GMM v2 forward and backward DLHS kernels compute a tile whose rows fit in half of it"
+          " in 128-row chunks (256-row with a transposed rhs) instead of one full-tile matmul, when at least 1/16"
+          " of a call's tiles are that short. Bit-identical. Applies only to bf16 unquantized calls without bias"
+          " with a single K step, tile_m 256, 512 or 1024 and tile_n >= 512; such calls compile both pipelines."
+          " Requires use_tokamax_gmm=True and use_gmm_v2=True."
+      ),
+  )
   moe_bwd_prequant_before_unsort: bool = Field(
       False,
       description=(
@@ -6552,7 +6562,9 @@ class MaxTextConfig(
 
     # C. SET PRIMARY DEPENDENCIES & DEFAULTS
     # If learning_rate_schedule_steps is -1, it defaults to the total number of training steps.
-    if self.learning_rate_schedule_steps == -1:
+    # pylint's MRO walk does not always reach `learning_rate_schedule_steps` on the `Optimizer` mixin (a
+    # nondeterministic false positive, as in RLConfig below).
+    if self.learning_rate_schedule_steps == -1:  # pylint: disable=access-member-before-definition
       self.learning_rate_schedule_steps = self.steps
     # If steps is -1, it defaults to the length of the learning rate schedule.
     if self.steps == -1:
