@@ -1731,6 +1731,19 @@ class ConfigTest(absltest.TestCase):
       cfg = self._elastic_config(*keep, *extra.split())
       self.assertEqual((cfg.logical_global_batch_size_to_load, cfg.global_batch_size_to_load), (100, 112))
 
+  def test_moe_exclude_padding_from_routing_rejects_unsupported_configs(self):
+    """The flag needs routed experts and an MoE implementation that takes RoutedMoE's token_mask."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false", "moe_exclude_padding_from_routing=true"]
+    moe = ["num_experts=4", "num_experts_per_tok=2", "base_moe_mlp_dim=256", "base_mlp_dim=256"]
+    for extra, error_regex in (
+        (["num_experts=1"], "requires num_experts > 1"),
+        (moe + ["decoder_block=kimi_linear", "packing=false"], "not supported with decoder_block=kimi_linear"),
+        (moe + ["use_m3_model=true"], "not supported with use_m3_model=True"),
+    ):
+      with self.subTest(extra=extra), self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex):
+        pyconfig.initialize(argv + extra)
+    self.assertTrue(pyconfig.initialize(argv + moe).moe_exclude_padding_from_routing)
+
   def test_remat_policy_none_rejects_prefetch_fsdp_weights_and_pipeline_parallelism(self):
     """Tests that remat_policy=none is rejected with prefetch_fsdp_weights=True and pipeline parallelism."""
     base_argv = [

@@ -31,6 +31,7 @@ import subprocess
 import sys
 import types
 import unittest
+from unittest import mock
 
 from absl.testing import parameterized
 from flax.linen import partitioning as nn_partitioning
@@ -559,18 +560,32 @@ class MaskedLossFunctionsTest(unittest.TestCase):
 
 
 class RoutingTokenMaskTest(unittest.TestCase):
-  """routing_token_mask only masks when a logical (unpadded) global batch size is set, in training, with segment ids."""
+  """routing_token_mask masks in training, under moe_exclude_padding_from_routing or a logical global batch size."""
 
   def test_routing_token_mask(self):
     segment_ids = jnp.array([[1, 1, 1], [0, 0, 0]])
     # The constant-GBS modes (and any future mode padding the same way) set the logical global batch size.
     constant_padded = types.SimpleNamespace(
-        elastic_global_batch_size_mode="constant_padded", logical_global_batch_size_to_train_on=16
+        elastic_global_batch_size_mode="constant_padded",
+        logical_global_batch_size_to_train_on=16,
+        moe_exclude_padding_from_routing=False,
     )
     constant_grad_accum = types.SimpleNamespace(
-        elastic_global_batch_size_mode="constant_grad_accum", logical_global_batch_size_to_train_on=16
+        elastic_global_batch_size_mode="constant_grad_accum",
+        logical_global_batch_size_to_train_on=16,
+        moe_exclude_padding_from_routing=False,
     )
-    scaled = types.SimpleNamespace(elastic_global_batch_size_mode="scaled", logical_global_batch_size_to_train_on=None)
+    scaled = types.SimpleNamespace(
+        elastic_global_batch_size_mode="scaled",
+        logical_global_batch_size_to_train_on=None,
+        moe_exclude_padding_from_routing=False,
+    )
+    # moe_exclude_padding_from_routing masks padding without a logical global batch size, e.g. packed RL batches.
+    exclude_padding = types.SimpleNamespace(
+        elastic_global_batch_size_mode="scaled",
+        logical_global_batch_size_to_train_on=None,
+        moe_exclude_padding_from_routing=True,
+    )
     train, prefill = ctypes.MODEL_MODE_TRAIN, ctypes.MODEL_MODE_PREFILL
     np.testing.assert_array_equal(
         moe.routing_token_mask(constant_padded, segment_ids, train), [[True, True, True], [False, False, False]]
@@ -581,7 +596,19 @@ class RoutingTokenMaskTest(unittest.TestCase):
     self.assertIsNone(moe.routing_token_mask(constant_padded, None, train))
     self.assertIsNone(moe.routing_token_mask(constant_padded, segment_ids, prefill))
     self.assertIsNone(moe.routing_token_mask(scaled, segment_ids, train))
-    self.assertIsNone(moe.routing_token_mask(types.SimpleNamespace(), segment_ids, train))
+    self.assertIsNone(
+        moe.routing_token_mask(types.SimpleNamespace(moe_exclude_padding_from_routing=False), segment_ids, train)
+    )
+    np.testing.assert_array_equal(
+        moe.routing_token_mask(exclude_padding, segment_ids, train), [[True, True, True], [False, False, False]]
+    )
+    self.assertIsNone(moe.routing_token_mask(exclude_padding, segment_ids, prefill))
+    # Without segment ids there is nothing to mask: routing is unchanged, and the flag's no-op is logged.
+    with mock.patch.object(moe.max_logging, "warning") as warning:
+      self.assertIsNone(moe.routing_token_mask(exclude_padding, None, train))
+      self.assertIsNone(moe.routing_token_mask(constant_padded, None, train))
+    warning.assert_called_once()
+    self.assertIn("no decoder_segment_ids", warning.call_args.args[0])
 
 
 if __name__ == "__main__":

@@ -1319,6 +1319,16 @@ class MoEGeneral(BaseModel):
       -1.0,
       description="Evaluation ragged buffer factor, applied under eval logical axis rules. If < 0, worst case size.",
   )
+  moe_exclude_padding_from_routing: bool = Field(
+      False,
+      description=(
+          "Training only. Keep padding tokens (decoder_segment_ids == 0) out of MoE routing: they take no expert"
+          " capacity or ragged-buffer slot, add nothing to the load-balance loss or the routed-bias update, and get a"
+          " zero routed output (see moe.routing_token_mask). For packed batches whose padding would otherwise be"
+          " routed, such as Tunix RL micro-batches. The elastic constant-global-batch-size modes apply the same mask"
+          " without this flag."
+      ),
+  )
   expert_replicas_per_device: int = Field(
       0,
       ge=0,
@@ -5606,6 +5616,23 @@ class MaxTextConfig(
     if not self.override_logical_axis_rules and not ep_enabled(self):
       raise ValueError("expert_replicas_per_device > 0 requires expert parallelism > 1.")
 
+  def validate_moe_exclude_padding_from_routing(self):
+    """Validates that moe_exclude_padding_from_routing is used with an MoE implementation that takes a token mask."""
+    if not self.moe_exclude_padding_from_routing:
+      return
+    if self.num_experts <= 1:
+      raise ValueError("moe_exclude_padding_from_routing=True requires num_experts > 1.")
+    # These MoE implementations bypass RoutedMoE's routing and take no `token_mask`.
+    for setting, unsupported in (
+        ("te_moe_block=True", self.te_moe_block),
+        ("use_batch_split_schedule=True", self.use_batch_split_schedule),
+        ("use_lineage=True", self.use_lineage),
+        ("use_m3_model=True", self.use_m3_model),
+        ("decoder_block=kimi_linear", self.decoder_block == DecoderBlockType.KIMI_LINEAR),
+    ):
+      if unsupported:
+        raise ValueError(f"moe_exclude_padding_from_routing=True is not supported with {setting}.")
+
   def validate_moe_log_max_load_ratio(self):
     """Validates that moe_log_max_load_ratio is used with the ring-of-experts ragged path."""
     if self.moe_log_max_load_ratio and not (
@@ -7743,6 +7770,7 @@ class MaxTextConfig(
       self.validate_moe_dropless_fallback()
       self.validate_moe_log_max_load_ratio()
       self.validate_moe_tc_ragged_sort()
+    self.validate_moe_exclude_padding_from_routing()
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
     self.validate_moe_topk_before_ep_all_gather()
