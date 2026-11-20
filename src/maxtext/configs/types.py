@@ -290,6 +290,7 @@ ModelName = Literal[
     "gemma2-2b",
     "gemma2-9b",
     "gemma2-27b",
+    "gemma3-1b",
     "gemma3-4b",
     "gemma3-12b",
     "gemma3-27b",
@@ -7272,6 +7273,11 @@ class MaxTextConfig(
       # support is pending clipped-linears in the vision encoder.
       if self.model_name in ("gemma4-e2b", "gemma4-e4b"):
         raise ValueError(f"Multimodal is not yet supported for {self.model_name}; only text inputs are supported.")
+      if self.use_m3_model and self.decoder_block == DecoderBlockType.GEMMA3:
+        raise ValueError(
+            f"Multimodal is not yet supported for {self.model_name} with use_m3_model=True; "
+            "Gemma 3 m3 currently implements text-only Gemma3ForCausalLM (set use_m3_model=False for multimodal)."
+        )
       valid_mm_models = (
           "gemma3-4b",
           "gemma3-12b",
@@ -7784,6 +7790,8 @@ class MaxTextConfig(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
           f"`python3 -m maxtext.utils.muon_utils {self.model_name} True`"
       )
+    if self.opt_type == "muon" and self.use_m3_model and self.decoder_block == DecoderBlockType.GEMMA3:
+      raise ValueError("Muon dimension numbers are not yet supported for Gemma 3 with use_m3_model=True.")
     if self.force_q_layout and not self.use_jax_splash:
       raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
 
@@ -8715,5 +8723,13 @@ class RLConfig(
 
     dcn_map = get_parallelism_map("dcn")
     self.dcn_parallelism = _resolve_parallelism(self.dcn_parallelism, dcn_map, self.mesh_axes)
+
+    if self.use_multimodal and self.use_m3_model and self.decoder_block == DecoderBlockType.GEMMA3:
+      raise ValueError(
+          f"Multimodal is not yet supported for {self.model_name} with use_m3_model=True; "
+          "Gemma 3 m3 currently implements text-only Gemma3ForCausalLM (set use_m3_model=False for multimodal)."
+      )
+    if self.opt_type == "muon" and self.use_m3_model and self.decoder_block == DecoderBlockType.GEMMA3:
+      raise ValueError("Muon dimension numbers are not yet supported for Gemma 3 with use_m3_model=True.")
 
     return self

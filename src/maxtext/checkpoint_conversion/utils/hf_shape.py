@@ -15,6 +15,7 @@
 """Hugging Face shape checkpoint conversion utils."""
 
 import math
+from maxtext.m3.models.gemma3 import checkpoint_mappings_gemma3
 from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 
 
@@ -1844,13 +1845,27 @@ def KIMI_K3_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def GEMMA3_DISPATCH_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns multimodal Gemma 3 shapes when `vision_config` is present, else text-only m3 shapes."""
+  if config is None:
+    raw = {}
+  elif isinstance(config, dict):
+    raw = config
+  else:
+    raw = dict(config.to_dict())
+  if "vision_config" in raw and raw["vision_config"] is not None:
+    return GEMMA3_HF_WEIGHTS_TO_SHAPE(raw)
+  return checkpoint_mappings_gemma3.GEMMA3_M3_HF_WEIGHTS_TO_SHAPE(config)
+
+
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-27b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
-    "gemma3-4b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
-    "gemma3-12b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
-    "gemma3-27b": GEMMA3_HF_WEIGHTS_TO_SHAPE,
+    "gemma3-1b": checkpoint_mappings_gemma3.GEMMA3_M3_HF_WEIGHTS_TO_SHAPE,
+    "gemma3-4b": GEMMA3_DISPATCH_HF_WEIGHTS_TO_SHAPE,
+    "gemma3-12b": GEMMA3_DISPATCH_HF_WEIGHTS_TO_SHAPE,
+    "gemma3-27b": GEMMA3_DISPATCH_HF_WEIGHTS_TO_SHAPE,
     "gemma4-26b": GEMMA4_HF_WEIGHTS_TO_SHAPE,
     "gemma4-31b": GEMMA4_HF_WEIGHTS_TO_SHAPE,
     "gemma4-e2b": GEMMA4_SMALL_HF_WEIGHTS_TO_SHAPE,
