@@ -543,7 +543,7 @@ def main() -> int:
   # StandardRLProgram build them (the program sets the algorithm's temperature
   # from the generation args).
   algo_config = orchestrator.build_grpo_config(hp)
-  algo_config.temperature = orchestrator.build_generation_args(hp).temperature
+  algo_config.temperature = float(hp.config_mapping("rollout_config")["temperature"])
   trainer: Any = worker._trainer
   cfg = trainer._config
   if cfg.num_experts > 1 and algo_config.routed_experts_num_experts is None:
