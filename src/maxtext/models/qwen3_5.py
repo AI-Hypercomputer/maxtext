@@ -116,9 +116,21 @@ class Qwen3_5DecoderLayer(Qwen3NextDecoderLayer):
         rngs=rngs,
     )
 
-  def _apply_mlp(self, hidden_states, deterministic, forced_routed_experts):
+  def _apply_mlp(self, hidden_states, deterministic, forced_routed_experts, token_mask=None):
+    """Applies the MoE block when `num_experts > 1`, otherwise the dense MLP.
+
+    Args:
+      hidden_states: Normalized decoder-layer activations of shape `[batch, seq, emb_dim]`.
+      deterministic: Whether to disable dropout.
+      forced_routed_experts: Expert indices to replay in the MoE router, or None; ignored by the dense MLP.
+      token_mask: Optional `[batch, seq]` mask of real (non-padding) tokens, forwarded to the MoE block so padded
+        rows stay out of routing; ignored by the dense MLP.
+
+    Returns:
+      A tuple of the MLP output and the MoE load-balance loss (None for the dense MLP).
+    """
     if getattr(self.config, "num_experts", 1) > 1:
-      return super()._apply_mlp(hidden_states, deterministic, forced_routed_experts)
+      return super()._apply_mlp(hidden_states, deterministic, forced_routed_experts, token_mask=token_mask)
     # A dense MLP routes nothing, so there is no routing to replay and no load-balance loss.
     mlp_output = self.mlp(
         hidden_states,

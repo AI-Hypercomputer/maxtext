@@ -56,13 +56,13 @@ def init_pyconfig(**kwargs):
       "max_target_length": 256,
       "return_log_prob": True,  # <=== set this to True
       # Model
-      "model_name": "gemma2-2b",
+      "model_name": "gemma3-4b",
       "attention": "dot_product",
       "allow_split_physical_axes": True,
       "scan_layers": False,
       # Checkpoints
       "tokenizer_type": "huggingface",
-      "tokenizer_path": "google/gemma-2-2b-it",
+      "tokenizer_path": "google/gemma-3-4b-it",
       "hf_path": "trl-lib/tldr",
       # "load_parameters_path": "gs://inference-benchmarks/models/llama2-70b-chat/quant/int8_",
       "enable_single_controller": True,  # for pathways

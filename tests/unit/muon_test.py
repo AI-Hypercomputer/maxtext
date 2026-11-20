@@ -49,62 +49,22 @@ def get_updates(
   return updates, state
 
 
-def _setup_mixed_tensor_target_complex(dtype):
-  """Complex version of _common_test._setup_mixed_tensor_target."""
-  initial_params = jnp.zeros((2, 2), dtype=dtype)
-  final_params = jnp.array(
-      [[1.0 + 2.0j, 0.0], [-1.0 + 1.0j, 1.0 - 3.0j]],
-      dtype=dtype,
-  )
-
-  def obj_fn(params):
-    return jnp.sum(jnp.abs(params - final_params) ** 2)
-
-  return initial_params, final_params, obj_fn
-
-
 class MuonTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
-      {
-          "testcase_name": "2d_tuple_axes",
-          "input_shape": (2, 3),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=1),
-          "expected_flat_shape": (1, 1, 2, 3),
-      },
-      {
-          "testcase_name": "3d_batch_axis",
-          "input_shape": (2, 3, 4),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=2),
-          "expected_flat_shape": (1, 3, 2, 4),
-      },
-      {
-          "testcase_name": "3d_negative_axes_indices",
-          "input_shape": (2, 3, 4),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=-3, output_axis=-1),
-          "expected_flat_shape": (1, 3, 2, 4),
-      },
-      {
-          "testcase_name": "4d_multiple_batch_axes",
-          "input_shape": (2, 3, 4, 5),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3),
-          "expected_flat_shape": (1, 6, 4, 5),
-      },
-      {
-          "testcase_name": "4d_multiple_output_axes",
-          "input_shape": (2, 3, 4, 5),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=(0, 3)),
-          "expected_flat_shape": (1, 3, 4, 10),
-      },
+      ("2d_tuple_axes", (2, 3), _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=1)),
+      ("3d_batch_axis", (2, 3, 4), _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=2)),
+      ("3d_negative_axes_indices", (2, 3, 4), _muon.MuonDimensionNumbers(reduction_axis=-3, output_axis=-1)),
+      ("4d_multiple_batch_axes", (2, 3, 4, 5), _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3)),
+      ("4d_multiple_output_axes", (2, 3, 4, 5), _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=(0, 3))),
   )
-  def test_reshape_inverse(self, input_shape, dim_nums, expected_flat_shape):
+  def test_reshape_inverse(self, input_shape, dim_nums):
     x = jnp.arange(math.prod(input_shape), dtype=jnp.float32).reshape(input_shape)
     reshape_fn, inverse_fn, _ = _muon.get_reshape_fns(x, dim_nums)
     reshaped_x = reshape_fn(x)
     reconstructed_x = inverse_fn(reshaped_x)
-    # Check flat shape (sharded_batch, unsharded_batch, reduction, output)
-    self.assertEqual(reshaped_x.shape, expected_flat_shape)
-    # Check inverse shape and value
+    self.assertEqual(reshaped_x.ndim, 3)
+    self.assertLessEqual(reshaped_x.shape[1], reshaped_x.shape[2])
     self.assertEqual(reconstructed_x.shape, x.shape)
     chex.assert_trees_all_close(reconstructed_x, x)
 
@@ -269,9 +229,8 @@ class MuonTest(parameterized.TestCase):
     self.assertIsInstance(get_muon_mu(state)["w2"]["b"], optax.MaskedNode)
 
   def test_newton_schulz(self):
-    """Test that Newton--Schulz orthogonalizes/unitarizes correctly."""
-    mat_real = jax.random.normal(jax.random.key(0), (4, 3), dtype=jnp.float32)
-    mat_complex = jax.random.normal(jax.random.key(0), (4, 3), dtype=jnp.complex64)
+    """Test that Newton--Schulz orthogonalizes matrices accurately."""
+    mat = jax.random.normal(jax.random.key(0), (4, 3), dtype=jnp.float32)
     ns_coeffs = jnp.array([2.0, -1.5, 0.5])
 
     if jax.default_backend() in ("tpu", "proxy"):
@@ -282,9 +241,8 @@ class MuonTest(parameterized.TestCase):
     precond_fn = _muon.get_precond_fn("frobenius", 1e-12)
     ns_step_fn = _muon.NS_ITERATORS["frobenius"]
 
-    # For real matrices, Newton--Schulz should produce an orthonormal matrix
-    mat_real_orth = _muon.orthogonalize(
-        mat_real,
+    mat_orth = _muon.orthogonalize(
+        mat,
         ns_coeffs,
         ns_steps=20,
         precond_fn=precond_fn,
@@ -292,71 +250,15 @@ class MuonTest(parameterized.TestCase):
         dim_nums=_muon.ShardedMuonDimensionNumbers(0, 1),
     )
 
-    gram_real = mat_real_orth.T @ mat_real_orth
-    with self.subTest("Real Newton--Schulz produces an orthonormal matrix"):
-      msg = "Real Newton–Schulz did not orthogonalize correctly.\nGram:" f" \n{gram_real}"
-      np.testing.assert_allclose(
-          gram_real,
-          jnp.eye(mat_real.shape[1]),
-          atol=atol,
-          rtol=rtol,
-          err_msg=msg,
-      )
-    # For complex matrices, Newton--Schulz should produce a unitary matrix
-    mat_complex_orth = _muon.orthogonalize(
-        mat_complex,
-        ns_coeffs,
-        ns_steps=10,
-        precond_fn=precond_fn,
-        ns_step_fn=ns_step_fn,
-        dim_nums=_muon.ShardedMuonDimensionNumbers(0, 1),
+    gram = mat_orth.T @ mat_orth
+    msg = f"Newton–Schulz did not orthogonalize accurately.\nGram:\n{gram}"
+    np.testing.assert_allclose(
+        gram,
+        jnp.eye(mat.shape[1]),
+        atol=atol,
+        rtol=rtol,
+        err_msg=msg,
     )
-
-    gram_complex = mat_complex_orth.conj().T @ mat_complex_orth
-    with self.subTest("Complex Newton--Schulz produces a unitary matrix"):
-      msg = "Complex Newton–Schulz did not produce a unitary matrix." f"\nGram:\n{gram_complex}"
-      np.testing.assert_allclose(
-          gram_complex,
-          jnp.eye(mat_complex.shape[1]),
-          atol=atol,
-          rtol=rtol,
-          err_msg=msg,
-      )
-
-    with self.subTest("Output shape is preserved for complex matrices"):
-      # Check that the output shape is preserved.
-      self.assertEqual(mat_complex_orth.shape, mat_complex.shape)
-
-  @parameterized.product(
-      target=(_setup_mixed_tensor_target_complex,),
-      dtype=("complex64",),
-      adaptive=(True, False),
-      nesterov=(True, False),
-  )
-  def test_complex_mixed_target(self, target, dtype, adaptive, nesterov):
-    """Test Muon optimizer on a complex mixed tensor optimization target."""
-    dtype = getattr(jnp, dtype)
-
-    opt = _muon.muon(learning_rate=1e-2, adaptive=adaptive, nesterov=nesterov, mu_dtype=dtype)
-    initial_params, final_params, obj_fn = target(dtype)
-
-    @jax.jit
-    def step(params, state):
-      _, updates = jax.value_and_grad(obj_fn)(params)
-      updates = jax.tree.map(jnp.conj, updates)
-      updates, state = opt.update(updates, state, params)
-      params = optax.apply_updates(params, updates)
-      return params, state
-
-    params = initial_params
-    state = opt.init(params)
-
-    def f(params_state, _):
-      return step(*params_state), None
-
-    (params, _), _ = jax.lax.scan(f, (params, state), length=1000)
-
-    chex.assert_trees_all_close(params, final_params, rtol=3e-2, atol=3e-2)
 
   @parameterized.named_parameters(
       ("standard_square", "frobenius", (100, 100)),

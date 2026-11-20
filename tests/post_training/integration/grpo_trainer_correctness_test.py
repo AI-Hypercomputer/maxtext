@@ -264,9 +264,9 @@ class ReshardingTest(unittest.TestCase):
         "dataset_type": "hf",
         "hf_path": "trl-lib/tldr",
         "tokenizer_type": "huggingface",
-        "tokenizer_path": "google/gemma-2-2b-it",
+        "tokenizer_path": "google/gemma-3-4b-it",
         "attention": "dot_product",
-        "model_name": "gemma2-2b",
+        "model_name": "gemma3-4b",
     } | kwargs
     config = pyconfig.initialize(
         [

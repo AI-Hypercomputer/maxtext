@@ -101,6 +101,9 @@ enable_orbax_v1: false
 checkpoint_conversion_fn: none
 # optional checkpoint context to use for loading. options: "orbax", "safetensors"
 source_checkpoint_layout: "orbax"
+# Experimental, only with source_checkpoint_layout="safetensors_dynamic": stream the HF checkpoint
+# a few decoder layers at a time (hf_streaming_load) instead of reading all of it into HBM first.
+safetensors_dynamic_streaming: false
 
 # Only applicable to Single Controller/Pathways on Cloud. Experimental feature, under testing
 colocated_python_checkpointing: false
@@ -336,6 +339,7 @@ warmup_programs_in_init: false # before init_stop/run_start, run each precompile
 warmup_skip_train_dropless: false # requires warmup_programs_in_init=true; do not warm the train_dropless program (its warmup holds a second copy of the train state in HBM and can OOM). Use only when that warmup OOMs; the first dropless replay then pays the program's first load.
 log_step_diagnostics: false # append grad/param norms, max |grad|, routed-bias checksum, nonzero bias updates and the overflow flag to every training step log line
 moe_expert_input_dim: -1 # feature dimension of the tokens entering the MoE expert blocks.
+moe_router_input_dim: -1 # feature dimension of the router (gate) input, passed as `gate_inputs`; defaults to the expert input dim.
 base_moe_mlp_dim: -1 # intermediate dimension at MoE layer. For a fully MoE model, base_mlp_dim must be equal to base_moe_mlp_dim.
 load_balance_loss_weight: 0.0 # weight for the load balance loss
 moe_use_megatron_seq_aux_loss: false # when true, sigmoid and sqrtsoftplus routers use Megatron-LM's sequence-wise aux loss summed over MoE layers; false (default) uses the Switch-style loss averaged over MoE layers.
@@ -365,6 +369,11 @@ moe_dispatch_no_expert_sharding: false
 use_ragged_sort: false # whether to use the Pallas ragged-sort kernels in the MoE permute path; valid both with and
                        # without `use_ring_of_experts` (with EP > 1). When `use_ring_of_experts=True` the kernels run
                        # inside `permute`/`unpermute`; otherwise they run inside `local_permute`/local-unpermute.
+# Ring-of-experts ragged sort routing index maps: 'sort' = two stable argsorts (default); 'count' = one packed
+# single-operand sort plus counting for the inverse (and argmax passes for unforced router top-k selection).
+# Same permutation, same values. With moe_tc_ragged_sort the index maps apply to the dropless program only.
+# Needs sparse_matmul, use_ring_of_experts and use_ragged_sort (and te_moe_block=False).
+moe_routing_index_math: 'sort'
 moe_tc_ragged_sort: false # ring-of-experts ragged sort/unsort on TensorCore (Pallas DMA kernels) instead of the SparseCore
                           # kernels; requires use_ring_of_experts, use_ragged_sort and ragged_buffer_factor > 0.
 moe_tc_ragged_gather_block_size: 1024 # moe_tc_ragged_sort: rows per grid step of the TC ragged gather.
@@ -406,6 +415,7 @@ use_fused_qkv_kernel: false # fuse the QKV projection + per-head QK RMSNorm + Ro
 use_fused_out_kernel: false # use custom-VJP FSDP Attention out projection with local absmax bwd and early dw_o reduce-scatter.
 defer_norm_grad_allreduce: false # defer per-layer RMSNorm and QK-norm scale gradient all-reduces until after the decoder scan loop (scanned qwen3 / qwen3_moe decoder layers; no-op with a warning elsewhere).
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
+ragged_unsort_spread_masked_indices: false # bit-identical: masked slots of the count-index unsort gather read distinct entries, not entry 0
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
 ragged_gather_reduce_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
@@ -1018,6 +1028,9 @@ tokenizer_path: ""
 # grain and tfds pipeline supports tokenizer_type: sentencepiece, huggingface, tiktoken
 # hf pipeline only supports huggingface type, and will ignore tokenizer_type flag
 tokenizer_type: "sentencepiece" # Currently supporting: "tiktoken", "sentencepiece", "huggingface"
+# Pass trust_remote_code=True to AutoTokenizer (huggingface type / hf pipeline). This runs code from
+# tokenizer_path; only enable it for a trusted tokenizer (e.g. Kimi-K3's tiktoken-based HF tokenizer).
+tokenizer_trust_remote_code: false
 use_chat_template: false
 chat_template_path: "" # path to chat template json file
 chat_template: "" # Chat template to use with HF tokenizers. It should be a valid Jinja2-formatted template.
@@ -1116,9 +1129,10 @@ grain_file_type: 'arrayrecord' # arrayrecord, tfrecord, parquet, mmap, or mmap_n
 grain_packing_type: 'first_fit' # 'first_fit', 'best_fit' or 'concat_then_split'. See details of the corresponding module in https://google-grain.readthedocs.io/en/latest/grain.experimental.html
 grain_worker_count: 1 # Set to -1 to enable auto-tuning: automatically determines optimal worker count. See https://google-grain.readthedocs.io/en/latest/_autosummary/grain.experimental.pick_performance_config.html
 grain_per_worker_buffer_size: 1
-# num_threads and prefetch_buffer_size are per-worker per-dataset.
-# When using array_records, they are used in ReadOptions (https://google-grain.readthedocs.io/en/latest/tutorials/data_loader_tutorial.html#per-worker-readoptions)
-# The default value matches that in the Grain package. If mixing multiple data sources, consider lowering these values to reduce memory usage.
+# num_threads and prefetch_buffer_size are per-worker budgets (shared across components when mixing ArrayRecord datasets).
+# When using array_records, they are used in ReadOptions (https://google-grain.readthedocs.io/en/latest/tutorials/data_loader_tutorial.html#per-worker-readoptions).
+# When > 0, math.ceil gives each mixture component at least 1 reader thread and 1 buffer slot (>= D across D components); set 0 to disable thread-pool prefetching.
+# The default value matches that in the Grain package.
 # When using parquet, grain_num_threads is the number of files to read and interleave in parallel
 grain_num_threads: 16
 grain_prefetch_buffer_size: 500
@@ -1826,6 +1840,23 @@ elastic_timeout_seconds: 300
 elastic_max_retries: 10
 elastic_min_slice_count: -1
 # How the global batch size behaves when training on fewer than all slices of the job: "scaled" keeps
-# per_device_batch_size fixed so the global batch scales with the live slice count; "constant_padded" keeps the global
-# batch size of all slices by rounding up per_device_batch_size and padding the extra rows with zero segmentation.
+# per_device_batch_size fixed so the global batch scales with the live slice count; "constant_grad_accum" keeps the
+# global batch size of all slices and per_device_batch_size, growing only gradient_accumulation_steps to
+# ceil(global_batch / (live_devices * per_device_batch_size)), so activation memory and the compiled microbatch shapes
+# never change on a resize (recommended, in particular for recipes that fill HBM at the nominal batch);
+# "constant_padded" keeps the global batch size of all slices by rounding up per_device_batch_size (or, with
+# elastic_max_per_device_batch_size, by searching the per-device batches up to a bound for the least padding; advanced).
+# Both constant modes pad the extra rows with zero segmentation, which the loss masks out.
 elastic_global_batch_size_mode: "scaled"
+# With "constant_padded", how the constant global batch is covered on fewer slices. -1 keeps gradient_accumulation_steps
+# and rounds per_device_batch_size up (activation memory grows by the same factor). A value >= per_device_batch_size
+# bounds the per-device batch and grows gradient_accumulation_steps instead, picking the factoring with the least
+# padding among the per-device batches in [per_device_batch_size, bound] (ties go to the smaller per-device batch, and
+# it is never lowered below per_device_batch_size). With "constant_grad_accum" the bound is implied to be
+# per_device_batch_size and this must stay -1.
+elastic_max_per_device_batch_size: -1
+# With "constant_padded", the fraction of device HBM the compiled train step may use when a resize raised
+# per_device_batch_size above its nominal value. If it needs more, the attempt restarts with
+# elastic_max_per_device_batch_size set to the nominal per-device batch (only gradient_accumulation_steps grows).
+# 0 disables the check. A no-op with "constant_grad_accum", whose per-device batch never grows.
+elastic_hbm_budget_fraction: 0.9

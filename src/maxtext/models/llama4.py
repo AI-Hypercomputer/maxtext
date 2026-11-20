@@ -28,11 +28,11 @@ from maxtext.common.common_types import Array, AttentionType, Config, MODEL_MODE
 from maxtext.common.common_types import MODEL_MODE_PREFILL
 from maxtext.layers import initializers
 from maxtext.layers import linears
+from maxtext.layers import moe
 from maxtext.layers import quantizations
 from maxtext.layers.attentions import Attention
 from maxtext.layers.linears import Dropout
 from maxtext.layers.linears import MlpBlock
-from maxtext.layers.moe import RoutedAndSharedMoE
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_utils
@@ -408,7 +408,7 @@ class Llama4DecoderLayer(nnx.Module):
     if self.is_moe_layer:
       # NOTE: the name Llama4MoEBlock_0 is to ensure reverse compatibility with
       # existing checkpoints for MoE block.
-      self.Llama4MoEBlock_0 = RoutedAndSharedMoE(
+      self.Llama4MoEBlock_0 = moe.RoutedAndSharedMoE(
           config=config,
           mesh=self.mesh,
           kernel_init=initializers.nd_dense_init(config.dense_init_scale, "fan_in", "truncated_normal"),
@@ -496,6 +496,7 @@ class Llama4DecoderLayer(nnx.Module):
           hidden_states,
           intermediate_sharding=self.mlp_intermediate_sharding,
           out_sharding=self.out_sharding,
+          token_mask=moe.routing_token_mask(cfg, decoder_segment_ids, model_mode),
       )
     else:
       mlp_lnx = self.mlp(

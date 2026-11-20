@@ -290,8 +290,8 @@ class ManagedMLDiagnosticsTest(absltest.TestCase):
   def test_pydantic_rl_config_without_get_keys(self):
     """The RL trainer passes pydantic `RLConfig` objects (initialize_pydantic), which have no get_keys()."""
     trainer = types.RLConfig(
-        model_name="llama2-7b",
-        tokenizer_path="meta-llama/Llama-2-7b",
+        model_name="llama3.1-8b",
+        tokenizer_path="meta-llama/Llama-3.1-8B",
         run_name="rl_run",
         base_output_directory="gs://bucket/out",
         managed_mldiagnostics=True,
@@ -306,7 +306,7 @@ class ManagedMLDiagnosticsTest(absltest.TestCase):
     self.assertEqual(kwargs["gcs_path"], "gs://bucket/out/rl_run/managed-mldiagnostics")
     self.assertEqual(kwargs["region"], "us-central1")
     self.assertFalse(kwargs["on_demand_xprof"])
-    self.assertEqual(kwargs["configs"]["model_name"], "llama2-7b")
+    self.assertEqual(kwargs["configs"]["model_name"], "llama3.1-8b")
     self.assertEqual(kwargs["configs"]["sampler.debug"], sampler.debug)
     self.assertNotIn("sampler.model_name", kwargs["configs"])
     self.assertFalse(kwargs["metric_only_run"])

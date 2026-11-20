@@ -123,6 +123,7 @@ def setup_trainer_state(mt_config, goodput_recorder=None, test_only_training_hoo
         False,
         False,
         mt_config.hf_access_token,
+        trust_remote_code=getattr(mt_config, "tokenizer_trust_remote_code", False),
     )
     model, mesh = model_creation_utils.from_pretrained(
         mt_config,

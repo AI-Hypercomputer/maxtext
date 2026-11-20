@@ -85,6 +85,7 @@ HF_IDS = {
     "deepseek3.2-671b": "deepseek-ai/DeepSeek-V3.2",
     "deepseek4-284b": "deepseek-ai/DeepSeek-V4-Flash",
     "deepseek4-1600b": "deepseek-ai/DeepSeek-V4-Pro",
+    "kimi-k3": "moonshotai/Kimi-K3",
     "gpt-oss-20b": "unsloth/gpt-oss-20b-BF16",
     "gpt-oss-120b": "unsloth/gpt-oss-120b-BF16",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
@@ -114,13 +115,17 @@ HF_IDS = {
     "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
 }
 
+# Config keys holding secrets; excluded from logs, TensorBoard, and config.yml.
+KEYS_NO_LOGGING = ("hf_access_token",)
+
 __all__ = [
     "DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE",
     "EPS",
+    "HF_IDS",
+    "KEYS_NO_LOGGING",
     "MAXTEXT_ASSETS_ROOT",
     "MAXTEXT_CONFIGS_DIR",
     "MAXTEXT_PKG_DIR",
     "MAXTEXT_REPO_ROOT",
     "MAXTEXT_TEST_ASSETS_ROOT",
-    "HF_IDS",
 ]

@@ -45,6 +45,7 @@ def get_tokenizer_and_pad_id(config, add_bos: bool | None = None, add_eos: bool 
       bos,
       eos,
       config.hf_access_token,
+      trust_remote_code=getattr(config, "tokenizer_trust_remote_code", False),
   )
   if tokenizer_model.pad_id is not None:
     pad_id = tokenizer_model.pad_id

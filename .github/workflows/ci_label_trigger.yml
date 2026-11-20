@@ -1,0 +1,80 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# Starts a `MaxText Package Tests` (`ci_pipeline.yml`) re-run on the PR's head commit when a CI-controlling
+# label (`skip-ci-tests`, `scheduled-only`, or `run-tpu7x`) changes on an open PR (or when `auto_label_pr.yml`
+# removes `skip-ci-tests`), while ignoring unrelated labels such as `gemini-review` so `MaxText Package Tests`
+# never replaces its full check results with a near-empty run. Keep the 3 CI labels in sync with
+# `ci_pipeline.yml` and `analyze_code_changes.sh`.
+
+name: Trigger CI on PR Label
+
+on:
+  # zizmor: ignore[dangerous-triggers] Never checks out or executes PR code: checks out only `.github/scripts`
+  # from the base branch and calls the Actions REST API by run ID.
+  pull_request_target:
+    types: [labeled, unlabeled]
+  workflow_dispatch:
+    inputs:
+      pull_number:
+        description: "Pull request number"
+        required: true
+        type: string
+      head_sha:
+        description: "Pull request head commit SHA"
+        required: true
+        type: string
+
+concurrency:
+  # Only CI-controlling label changes and dispatches from `auto_label_pr.yml` share the PR's concurrency group,
+  # so adding an unrelated label such as `gemini-review` cannot cancel an in-progress CI re-run trigger.
+  group: >-
+    ${{
+      (github.event_name == 'workflow_dispatch' ||
+        (github.event.pull_request.state == 'open' &&
+          contains(fromJSON('["skip-ci-tests", "scheduled-only", "run-tpu7x"]'), github.event.label.name))) &&
+        format('{0}-pr-{1}', github.workflow, github.event.pull_request.number || inputs.pull_number) ||
+      github.run_id
+    }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  trigger_ci:
+    name: Trigger CI on Label Change
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.state == 'open' &&
+        contains(fromJSON('["skip-ci-tests", "scheduled-only", "run-tpu7x"]'), github.event.label.name))
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: write
+    steps:
+      - name: Check out CI scripts from base branch
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Re-run MaxText Package Tests for PR head commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha || inputs.head_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number || inputs.pull_number }}
+        run: |
+          bash .github/scripts/rerun_ci_for_pr.sh

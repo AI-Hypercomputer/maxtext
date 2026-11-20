@@ -84,7 +84,7 @@ _COMMON = {
 }
 
 _DEEPSEEK = {
-    "model_name": "deepseek2-16b",
+    "model_name": "deepseek3-test",
     "override_model_config": True,
     "mla_naive_kvcache": False,
     "first_num_dense_layers": 1,

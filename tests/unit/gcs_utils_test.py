@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 import os
 import tempfile
+import yaml
 
 # Module to be tested
 from maxtext.utils import gcs_utils
@@ -224,3 +225,42 @@ class GcsUtilsTest(unittest.TestCase):
     data_files = gcs_utils.gcs_glob_pattern("gs://bucket/ckpt/20/commit_success*")
 
     self.assertEqual(data_files, ["gs://bucket/ckpt/20/commit_success.txt"])
+
+  def test_write_config_raw_keys_for_gcs_skips_secret_keys(self):
+    """Tests that secret keys in KEYS_NO_LOGGING are omitted from config.yml."""
+    secret = "hf_gcs_secret_456"
+    raw_keys = {
+        "save_config_to_gcs": True,
+        "base_output_directory": "gs://bucket/out",
+        "run_name": "run",
+        "steps": 100,
+        "hf_access_token": secret,
+    }
+    uploaded_contents = []
+
+    def _capture_upload(dest_gcs_name, source_file_name):
+      del dest_gcs_name
+      with open(source_file_name, "rt", encoding="utf8") as f:
+        uploaded_contents.append(f.read())
+
+    with (
+        tempfile.TemporaryDirectory() as tmp_dir,
+        mock.patch("jax.process_index", return_value=0),
+        mock.patch.object(gcs_utils, "_gcs_guard", return_value=True),
+        mock.patch.object(gcs_utils, "upload_blob", side_effect=_capture_upload) as mock_upload_blob,
+    ):
+      prev_cwd = os.getcwd()
+      os.chdir(tmp_dir)
+      try:
+        gcs_utils.write_config_raw_keys_for_gcs(raw_keys)
+      finally:
+        os.chdir(prev_cwd)
+
+    mock_upload_blob.assert_called_once_with("gs://bucket/out/run/config.yml", "config.yml")
+    self.assertEqual(len(uploaded_contents), 1)
+    written = uploaded_contents[0]
+    parsed = yaml.safe_load(written)
+    self.assertEqual(parsed["steps"], 100)
+    self.assertNotIn("hf_access_token", parsed)
+    self.assertNotIn("hf_access_token", written)
+    self.assertNotIn(secret, written)
