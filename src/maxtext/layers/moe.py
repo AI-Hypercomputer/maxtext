@@ -56,15 +56,18 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import (
     CompoundLogicalAxis,
+    adjust_pspec_for_indivisible_shapes,
     create_sharding,
     get_logical_axis_rules,
     logical_to_mesh_axes,
+    logical_to_spec,
     maybe_shard_with_logical,
     maybe_shard_with_pspec,
     mesh_axes_for_dim,
     remove_expert_from_partition_spec,
     remove_fsdp_from_partition_spec,
     remove_incompatible_mesh_axes_from_partition_spec,
+    remove_size_one_mesh_axis,
 )
 import numpy as np
 import qwix
@@ -1395,6 +1398,215 @@ def _qwag_amax_pspec(amax: jax.Array, weight_pspec: P) -> P:
   """Partition spec of a QWAG amax: the weight's entry on each kept dim (size > 1), None on reduced dims."""
   entries = tuple(weight_pspec) + (None,) * (amax.ndim - len(weight_pspec))
   return P(*(entry if dim > 1 else None for entry, dim in zip(entries, amax.shape)))
+
+
+# Per-layer and per-stack per-device gathered byte caps up to which a scanned kernel is hoisted out of the scan.
+# Applies uniformly to all scanned kernels (including GateLogit and Attention.query): large projections such as
+# Attention.query on 70B+ models exceed these caps and can use query_proj_kernel_gather_once instead so only one
+# layer's gathered kernel is live at a time.
+_GATHER_ONCE_MAX_LAYER_BYTES = 16 * 1024 * 1024
+_GATHER_ONCE_MAX_STACK_BYTES = 512 * 1024 * 1024
+
+
+def _is_small_scanned_kernel(module, metadata_axis_name: str = "layers", non_fsdp_shards: int = 1) -> bool:
+  """Returns whether `module.kernel` is a scanned rank>=2 kernel within the per-layer and per-stack byte caps."""
+  kernel = getattr(module, "kernel", None)
+  if not isinstance(kernel, nnx.Param) or not hasattr(module, "kernel_axes"):
+    return False
+  val = kernel.get_value()
+  if not hasattr(val, "ndim") or not hasattr(val, "dtype"):
+    return False
+  meta = kernel.get_metadata()
+  names = next((meta[k] for k in ("out_sharding", "sharding_names", "sharding") if meta.get(k)), None)
+  outer_axis = meta.get(nnx.PARTITION_NAME) or metadata_axis_name
+  scan_axes = {outer_axis, metadata_axis_name, "local_layers"}
+  if isinstance(names, tuple) and len(names) == val.ndim and any(n in scan_axes for n in names):
+    scan_indices = [i for i, n in enumerate(names) if n in scan_axes]
+    if val.ndim - len(scan_indices) < 2:
+      return False
+    layers = math.prod(val.shape[i] for i in scan_indices)
+  else:
+    if val.ndim < 3:
+      return False
+    scan_axis = meta.get("param_scan_axis", 0)
+    if scan_axis >= val.ndim:
+      return False
+    layers = val.shape[scan_axis]
+  if layers <= 0:
+    return False
+  shards = max(non_fsdp_shards, 1)
+  layer_bytes = math.ceil((val.size // layers) * val.dtype.itemsize / shards)
+  stack_bytes = math.ceil(val.size * val.dtype.itemsize / shards)
+  return layer_bytes <= _GATHER_ONCE_MAX_LAYER_BYTES and stack_bytes <= _GATHER_ONCE_MAX_STACK_BYTES
+
+
+def _param_path(path) -> tuple:
+  """A params pytree path as the module path keys `nnx.iter_modules` yields, plus the param name.
+
+  Drops the trailing `GetAttrKey("value")` of each Variable leaf.
+  """
+  keys = []
+  for k in path:
+    if isinstance(k, jax.tree_util.DictKey):
+      keys.append(k.key)
+    elif isinstance(k, jax.tree_util.SequenceKey):
+      keys.append(k.idx)
+  return tuple(keys)
+
+
+def _resolve_raw_spec(logical_names, rules=None) -> P:
+  """Resolves `logical_names` to a PartitionSpec before stripping size-1 mesh axes."""
+  if not any(isinstance(name, CompoundLogicalAxis) for name in logical_names):
+    return logical_to_spec(logical_names, rules=rules)
+  groups = [tuple(name) if isinstance(name, CompoundLogicalAxis) else (name,) for name in logical_names]
+  flat_spec = list(logical_to_spec(tuple(n for group in groups for n in group), rules=rules))
+  grouped = []
+  for group in groups:
+    resolved, flat_spec = flat_spec[: len(group)], flat_spec[len(group) :]
+    axes = [ax for item in resolved if item is not None for ax in ((item,) if isinstance(item, str) else item)]
+    grouped.append(None if not axes else axes[0] if len(axes) == 1 else tuple(axes))
+  return P(*grouped)
+
+
+def _gathered_kernels(layers: nnx.Module, metadata_axis_name: str = "layers") -> dict:
+  """{kernel path within a scanned layer stack: its module}, for small scanned kernels eligible for hoisting."""
+  return {
+      path + ("kernel",): module
+      for path, module in nnx.iter_modules(layers)
+      if _is_small_scanned_kernel(module, metadata_axis_name=metadata_axis_name)
+  }
+
+
+def _gathered_kernel_shardings(
+    layers: nnx.Module, mesh: Mesh, rules=None, metadata_axis_name: str = "layers"
+) -> dict[tuple, tuple[NamedSharding, NamedSharding]]:
+  """{kernel path: (stacked_fsdp_gathered_sharding, per_layer_sharded_grad_sharding)} for hoisted kernels."""
+  if rules is None:
+    rules = get_logical_axis_rules()
+  out = {}
+  for path, module in nnx.iter_modules(layers):
+    kernel_var = getattr(module, "kernel", None)
+    if not isinstance(kernel_var, nnx.Param) or not hasattr(module, "kernel_axes"):
+      continue
+    val = kernel_var.get_value()
+    if not hasattr(val, "ndim") or not hasattr(val, "dtype"):
+      continue
+    meta = kernel_var.get_metadata()
+    names = next((meta[k] for k in ("out_sharding", "sharding_names", "sharding") if meta.get(k)), None)
+    outer_axis = meta.get(nnx.PARTITION_NAME) or metadata_axis_name
+    match_axis = outer_axis if (isinstance(names, tuple) and outer_axis in names) else metadata_axis_name
+    if isinstance(names, tuple) and match_axis in names and len(names) == val.ndim:
+      idx = names.index(match_axis)
+      logical_axes = names[:idx] + names[idx + 1 :]
+      layer_shape = val.shape[:idx] + val.shape[idx + 1 :]
+    else:
+      idx = meta.get("param_scan_axis", 0)
+      if idx >= val.ndim:
+        continue
+      logical_axes = tuple(module.kernel_axes)
+      layer_shape = val.shape[:idx] + val.shape[idx + 1 :]
+    raw_spec = _resolve_raw_spec(logical_axes, rules=rules)
+    layer_pspec = adjust_pspec_for_indivisible_shapes(remove_size_one_mesh_axis(raw_spec, mesh), layer_shape, mesh)
+    layer_gathered_pspec = adjust_pspec_for_indivisible_shapes(
+        remove_size_one_mesh_axis(remove_fsdp_from_partition_spec(raw_spec), mesh), layer_shape, mesh
+    )
+    if layer_gathered_pspec == layer_pspec:
+      continue
+    non_fsdp_shards = math.prod(mesh.shape.get(a, 1) for entry in layer_gathered_pspec for a in mesh_axes_for_dim(entry))
+    if not _is_small_scanned_kernel(module, metadata_axis_name=metadata_axis_name, non_fsdp_shards=non_fsdp_shards):
+      continue
+    out[path + ("kernel",)] = (
+        NamedSharding(mesh, P(None, *layer_gathered_pspec)),
+        NamedSharding(mesh, layer_pspec),
+    )
+  return out
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _with_sharding_constraint_identity_bwd(x, sharding):
+  """Constrains `x` to `sharding` in the forward pass with an identity backward."""
+  return jax.lax.with_sharding_constraint(x, sharding)
+
+
+def _with_sharding_constraint_identity_bwd_fwd(x, sharding):
+  return jax.lax.with_sharding_constraint(x, sharding), None
+
+
+def _with_sharding_constraint_identity_bwd_bwd(sharding, _, cotangent):
+  del sharding
+  return (cotangent,)
+
+
+_with_sharding_constraint_identity_bwd.defvjp(
+    _with_sharding_constraint_identity_bwd_fwd, _with_sharding_constraint_identity_bwd_bwd
+)
+
+
+def gather_scanned_kernels_once(layers: nnx.Module, params, mesh: Mesh, rules=None, metadata_axis_name: str = "layers"):
+  """Gathers small FSDP-sharded kernels of a scanned layer stack once over FSDP, before the scan.
+
+  Small FSDP-sharded kernels such as the MoE router (embed x num_experts, f32 under float32_gate_logits)
+  would otherwise be all-gathered inside every scanned layer in both forward and backward. Hoisting them
+  to their FSDP-stripped sharding (preserving tensor and other non-FSDP axes) issues one FSDP all-gather
+  per stack before the scan. The outer constraint uses an identity custom-VJP backward because
+  `reduce_scatter_gathered_grads` inside the scan already reduce-scatters each layer's cotangent back to
+  its FSDP sharding (transposing a bare outer sharding constraint would emit a redundant full-size
+  post-backward stacked gradient all-gather). `params` has the outer scan axis leading (axis 0).
+  """
+  shardings = _gathered_kernel_shardings(layers, mesh, rules=rules, metadata_axis_name=metadata_axis_name)
+  if not shardings:
+    return params
+
+  def hoist_fsdp(path, x):
+    keys = _param_path(path)
+    if keys not in shardings:
+      return x
+    return _with_sharding_constraint_identity_bwd(x, shardings[keys][0])
+
+  return jax.tree_util.tree_map_with_path(hoist_fsdp, params)
+
+
+def gathered_kernel_grad_shardings(layers: nnx.Module, mesh: Mesh, rules, metadata_axis_name: str = "layers") -> dict:
+  """{kernel path within one layer: the kernel's own sharding} for the kernels `gather_scanned_kernels_once` gathers."""
+  return {
+      path: grad_sharding
+      for path, (_, grad_sharding) in _gathered_kernel_shardings(
+          layers, mesh, rules=rules, metadata_axis_name=metadata_axis_name
+      ).items()
+  }
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _identity_with_grad_sharding(x, sharding):
+  """The identity on `x`; its cotangent is constrained to `sharding`."""
+  return x
+
+
+def _identity_with_grad_sharding_fwd(x, sharding):
+  del sharding
+  return x, None
+
+
+def _identity_with_grad_sharding_bwd(sharding, _, cotangent):
+  return (jax.lax.with_sharding_constraint(cotangent, sharding),)
+
+
+_identity_with_grad_sharding.defvjp(_identity_with_grad_sharding_fwd, _identity_with_grad_sharding_bwd)
+
+
+def reduce_scatter_gathered_grads(params, shardings: dict):
+  """Identity on one layer's params whose backward puts the gathered kernels' gradients back on their sharding.
+
+  A layer handed a slice of a replicated kernel otherwise gets a replicated gradient: an all-reduce per
+  layer, stacked at full size across the scan. Constraining it to the kernel's own sharding makes it a
+  reduce-scatter into a stacked shard, as when the layer gathered the kernel itself.
+  """
+
+  def apply(path, x):
+    keys = _param_path(path)
+    return _identity_with_grad_sharding(x, shardings[keys]) if keys in shardings else x
+
+  return jax.tree_util.tree_map_with_path(apply, params)
 
 
 class RoutedMoE(nnx.Module):
