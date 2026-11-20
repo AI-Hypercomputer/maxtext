@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import omegaconf
 
 from maxtext.configs import pyconfig_deprecated
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, HF_IDS, MAXTEXT_PKG_DIR
+from maxtext.utils.globals import DEFAULT_TOKENIZER_PATH, MAXTEXT_CONFIGS_DIR, HF_IDS, MAXTEXT_PKG_DIR
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.configs import types
 from maxtext.inference.inference_utils import str2bool
@@ -348,7 +348,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
         if model_name != "default":
           pydantic_kwargs["_auto_hf_tokenizer"] = True
       except KeyError:
-        new_value = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2")
+        new_value = DEFAULT_TOKENIZER_PATH
         max_logging.warning(
             "tokenizer_path not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
           Using the default src/maxtext/assets/tokenizers/tokenizer.llama2 instead. \

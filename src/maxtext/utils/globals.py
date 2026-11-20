@@ -34,7 +34,10 @@ MAXTEXT_REPO_ROOT = os.environ.get(
 MAXTEXT_CONFIGS_DIR = os.environ.get("MAXTEXT_CONFIGS_DIR", os.path.join(MAXTEXT_PKG_DIR, "configs"))
 
 # This is the assets root: with "tokenizers/"; &etc.
-MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "assets"))
+MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_PKG_DIR, "assets"))
+
+# Relative default tokenizer path so controller-local paths are not baked into configs before remote/sidecar execution.
+DEFAULT_TOKENIZER_PATH = os.path.join("assets", "tokenizers", "tokenizer.llama2")
 
 # This is the test assets root: with "golden_logits"; &etc.
 MAXTEXT_TEST_ASSETS_ROOT = os.environ.get("MAXTEXT_TEST_ASSETS_ROOT", os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets"))
@@ -113,7 +116,7 @@ HF_IDS = {
     "ming-3.0-audio-tiny-talker": "inclusionAI/Ming-3.0-audio-tiny",  # convert with --hf_model_path=<snapshot>/talker
     "hy4-preview": "tencent/Hy4-preview",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
-    "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
+    "default": DEFAULT_TOKENIZER_PATH,
 }
 
 # Config keys holding secrets; excluded from logs, TensorBoard, and config.yml.
@@ -121,6 +124,7 @@ KEYS_NO_LOGGING = ("hf_access_token",)
 
 __all__ = [
     "DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE",
+    "DEFAULT_TOKENIZER_PATH",
     "EPS",
     "HF_IDS",
     "KEYS_NO_LOGGING",

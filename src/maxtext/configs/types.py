@@ -48,7 +48,7 @@ from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import elastic_utils
-from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT, HF_IDS
+from maxtext.utils.globals import HF_IDS, MAXTEXT_ASSETS_ROOT
 from maxtext.utils import accelerator_to_spec_map
 from pydantic.config import ConfigDict
 from pydantic.fields import Field
@@ -5025,6 +5025,46 @@ def derive_managed_mldiagnostics_dir(
   return None
 
 
+_ASSET_TOKENIZER_PREFIXES = (
+    "src/maxtext/assets/",
+    "maxtext/src/maxtext/assets/",
+    "assets/",
+    "tokenizers/",
+)
+
+
+def resolve_tokenizer_path(tokenizer_path: str) -> str:
+  """Resolves a tokenizer path relative to the current process's cwd or MAXTEXT_ASSETS_ROOT."""
+  if (
+      not tokenizer_path
+      or tokenizer_path.startswith("gs://")
+      or os.path.exists(tokenizer_path)
+      or os.path.isabs(tokenizer_path)
+  ):
+    return tokenizer_path
+  stripped_path = tokenizer_path.rstrip("/")
+  if not stripped_path:
+    return tokenizer_path
+  assets_root = os.environ.get("MAXTEXT_ASSETS_ROOT") or MAXTEXT_ASSETS_ROOT
+  normalized = stripped_path.replace("\\", "/")
+  candidates = []
+  if "/" not in normalized:
+    candidates.append(os.path.join(assets_root, "tokenizers", normalized))
+    candidates.append(os.path.join(assets_root, normalized))
+  else:
+    for prefix in _ASSET_TOKENIZER_PREFIXES:
+      if normalized.startswith(prefix):
+        rel_in_assets = normalized.removeprefix(prefix)
+        if prefix == "tokenizers/":
+          candidates.append(os.path.join(assets_root, "tokenizers", rel_in_assets))
+        else:
+          candidates.append(os.path.join(assets_root, rel_in_assets))
+          if "/" not in rel_in_assets:
+            candidates.append(os.path.join(assets_root, "tokenizers", rel_in_assets))
+        break
+  return next(filter(os.path.exists, candidates), tokenizer_path)
+
+
 # Decoder blocks that support router replay (`forced_routed_experts`). All are
 # homogeneous-MoE, so a 4D layer axis is just the decoder layer index;
 # interleaved architectures (Llama4/Envy) would need a MoE-only counter.
@@ -6526,30 +6566,11 @@ class MaxTextConfig(
       )
 
     # B. RESOLVE TOKENIZER PATH
-    # If the tokenizer path is a relative name without a directory, resolve it against the assets root.
-    # This maintains backward compatibility for configs that just specify e.g., "tokenizer.llama2".
+    # When colocated_python_data_input is enabled, defer path resolution to the worker/sidecar process
+    # where the tokenizer is loaded so controller-local paths are not baked into the config.
     tokenizer_path = getattr(self, "tokenizer_path", "")
-    if (
-        tokenizer_path
-        and not os.path.exists(tokenizer_path)
-        and not tokenizer_path.startswith("gs://")
-        and not self.colocated_python_data_input
-    ):
-      tokenizer_path = next(
-          filter(
-              os.path.exists,
-              (
-                  os.path.join(
-                      MAXTEXT_ASSETS_ROOT,
-                      "tokenizers",
-                      os.path.basename(tokenizer_path),
-                  ),
-                  os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", tokenizer_path),
-              ),
-          ),
-          tokenizer_path,
-      )
-      self.tokenizer_path = tokenizer_path
+    if tokenizer_path and not self.colocated_python_data_input:
+      self.tokenizer_path = resolve_tokenizer_path(tokenizer_path)
 
     # validate chat_template format if defined
     chat_template = getattr(self, "chat_template", "")
