@@ -2022,6 +2022,16 @@ class MoEKernels(BaseModel):
   )
   wi_tile_fwd_embed_dim: int = Field(1024, description="forward pass tiling dimension for embedding in GMM for wi.")
   wi_tile_fwd_mlp_dim: int = Field(1024, description="forward pass tiling dimension for MLP in GMM for wi.")
+  wi_tile_fwd_rhs_buffer_count: Optional[int] = Field(
+      None,
+      description=(
+          "Optional VMEM pipeline buffer count (>= 2) for the RHS weight tile in forward wi GMM calls "
+          "(gmm_v2 rhs_buffer_count). None keeps the kernel default (3 for 2D LHS, 2 for 3D LHS). "
+          "Setting 2 frees one weight tile in VMEM to fit larger forward tiles on TPU; backward GMMs "
+          "and wo forward GMMs remain at the kernel default. Requires sparse_matmul=True, "
+          "use_tokamax_gmm=True, and use_gmm_v2=True."
+      ),
+  )
   eval_wi_tile_fwd_batch_seq: int = Field(
       512,
       description="evaluation forward pass tiling dimension for batch/sequence in GMM for wi.",
@@ -2089,6 +2099,90 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use Tokamax GMM v2 for MoE kernel.",
   )
+
+  enable_subtile_m: bool = Field(
+      False,
+      description=(
+          "Whether to enable dynamic M-dimension subtiling (down to 8 rows) on partial/skewed expert "
+          "tiles in Tokamax GMM v2 (2D forward and DLHS backward). Requires sparse_matmul=True, "
+          "use_tokamax_gmm=True, and use_gmm_v2=True."
+      ),
+  )
+
+  moe_wo_rhs_transpose: bool = Field(
+      False,
+      description=(
+          "Whether to transpose the MoE wo weight shard to [exp, embed_moe, mlp] before FSDP all-gather / QWAG "
+          "and run wo forward/backward with rhs_transpose=True / tgmm_v2(transpose_out=True), eliminating "
+          "the full-shape HBM transpose copy and minor-axis FSDP collectives on wo / dW_o. Requires "
+          "sparse_matmul=True, use_tokamax_gmm=True, and use_gmm_v2=True."
+      ),
+  )
+
+  @classmethod
+  def _reject_non_int_rhs_buffer_count(cls, v: Any) -> Any:
+    """Rejects booleans and floats so wi_tile_fwd_rhs_buffer_count only accepts None or integers."""
+    if isinstance(v, (bool, float)):
+      raise ValueError(f"wi_tile_fwd_rhs_buffer_count must be None or an int >= 2, got {v!r}.")
+    return v
+
+  _validate_wi_tile_fwd_rhs_buffer_count_type = field_validator("wi_tile_fwd_rhs_buffer_count", mode="before")(
+      _reject_non_int_rhs_buffer_count
+  )
+
+  @staticmethod
+  def _reject_unless(setting: str, requirements: list[tuple[bool, str]]) -> None:
+    """Raises a ValueError naming every requirement of `setting` that is not met."""
+    unmet = [requirement for met, requirement in requirements if not met]
+    if unmet:
+      raise ValueError(f"{setting} requires: {'; '.join(unmet)}.")
+
+  @model_validator(mode="after")
+  def validate_gmm_v2_kernel_options(self) -> "MoEKernels":
+    """Validates gmm_v2 subtile-M, transposed wo dW_o^T, and wi forward RHS buffer count options."""
+    if self.wi_tile_fwd_rhs_buffer_count is not None:
+      self._reject_unless(
+          f"wi_tile_fwd_rhs_buffer_count={self.wi_tile_fwd_rhs_buffer_count}",
+          [
+              (
+                  self.wi_tile_fwd_rhs_buffer_count >= 2,
+                  "wi_tile_fwd_rhs_buffer_count >= 2 (or None for the kernel default)",
+              ),
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (self.use_tokamax_gmm, "use_tokamax_gmm=True"),
+              (self.use_gmm_v2, "use_gmm_v2=True"),
+          ],
+      )
+    if self.enable_subtile_m:
+      self._reject_unless(
+          "enable_subtile_m=True",
+          [
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (self.use_tokamax_gmm, "use_tokamax_gmm=True"),
+              (self.use_gmm_v2, "use_gmm_v2=True"),
+          ],
+      )
+    if self.moe_wo_rhs_transpose:
+      self._reject_unless(
+          "moe_wo_rhs_transpose=True",
+          [
+              (self.sparse_matmul, "sparse_matmul=True"),
+              (not getattr(self, "te_moe_block", False), "te_moe_block=False"),
+              (self.use_tokamax_gmm, "use_tokamax_gmm=True"),
+              (self.use_gmm_v2, "use_gmm_v2=True"),
+              (not self.use_te_grouped_gemm, "use_te_grouped_gemm=False"),
+              (not getattr(self, "moe_flat_fsdp_weights", False), "moe_flat_fsdp_weights=False"),
+              (not getattr(self, "use_2d_fsdp_sharding", False), "use_2d_fsdp_sharding=False"),
+              (
+                  not getattr(self, "moe_fsdp_use_two_stage_all_gather", False),
+                  "moe_fsdp_use_two_stage_all_gather=False",
+              ),
+              (not getattr(self, "moe_use_fused_gmm3d", False), "moe_use_fused_gmm3d=False"),
+              (not getattr(self, "use_batch_split_schedule", False), "use_batch_split_schedule=False"),
+              (not getattr(self, "prefetch_fsdp_weights", False), "prefetch_fsdp_weights=False"),
+          ],
+      )
+    return self
 
   use_te_grouped_gemm: bool = Field(
       False,
