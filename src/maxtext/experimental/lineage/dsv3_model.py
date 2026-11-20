@@ -571,9 +571,20 @@ def dsv3_forward(
   yarn_freqs, splash_kernel = kernels
 
   assert state.router_bias is not None
-  decoder = _cast(params.decoder, m.dtype)
-  decoder = dataclasses.replace(decoder, sparse=with_router_bias(decoder.sparse, state.router_bias))
+  if k.stream_param_cast:
+    decoder = dataclasses.replace(
+        params.decoder,
+        dense=_cast(params.decoder.dense, m.dtype),
+        sparse=with_router_bias(params.decoder.sparse, state.router_bias),
+    )
+  else:
+    decoder = _cast(params.decoder, m.dtype)
+    decoder = dataclasses.replace(decoder, sparse=with_router_bias(decoder.sparse, state.router_bias))
   with jax.named_scope("decoder"):
+    dsv3_mla.set_mla_kernel_options(
+        out_proj_2d=k.out_proj_2d,
+        fp8_splash_out=k.fp8_splash_out,
+    )
     hidden, router_aux = dsv3.dsv3(
         token_embeddings,
         decoder,
@@ -581,7 +592,18 @@ def dsv3_forward(
         splash_kernel,
         segment_ids=segment_ids,
         max_async_overlap_transform=k.max_async_overlap_transform,
+        max_async_overlap_entry=k.max_async_overlap_entry,
         expert_permutations=state.expert_permutations,
+        mla_offload_fields=k.mla_offload_fields,
+        moe_offload_fields=k.moe_offload_fields,
+        offload_bank=k.offload_bank,
+        offload_w_grad=k.offload_w_grad,
+        remat_dense_layers=k.remat_dense_layers,
+        stream_param_cast=k.stream_param_cast,
+        compute_dtype=m.dtype if k.stream_param_cast else None,
+        router_metadata_sc0=k.router_metadata_sc0,
+        bwd_fp8_combine=k.bwd_fp8_combine,
+        norm_reduce_tc=k.norm_reduce_tc,
         **dsv3_layer_kwargs(cfg, mesh),
     )
   return DSv3ForwardOutputs(hidden=hidden, token_embeddings=token_embeddings, router_aux=router_aux)
@@ -757,6 +779,11 @@ def eval_config_and_params(
   if quant is not None and quant.combine_qtype is not None:
     quant = dataclasses.replace(quant, combine_qtype=None, combine_per_hop_scaling=False)
     cfg = dataclasses.replace(cfg, kernels=dataclasses.replace(cfg.kernels, quant=quant))
+  if cfg.kernels.bwd_fp8_combine or cfg.kernels.fp8_splash_out:
+    cfg = dataclasses.replace(
+        cfg,
+        kernels=dataclasses.replace(cfg.kernels, bwd_fp8_combine=False, fp8_splash_out=False),
+    )
   if cfg.eval_sharding is None:
     return cfg, params
   eval_cfg = dataclasses.replace(cfg, sharding=cfg.eval_sharding, eval_sharding=None)
@@ -800,7 +827,7 @@ def dsv3_loss_and_aux(
   """
   if not train:
     cfg, params = eval_config_and_params(cfg, params, mesh)
-  m, t, s = cfg.model, cfg.training, cfg.sharding
+  m, k, t, s = cfg.model, cfg.kernels, cfg.training, cfg.sharding
   token_sharding = _named_sharding(s.token, cfg, mesh)
   # Per-token arrays share the logits' batch / sequence layout.
   inputs = jax.reshard(batch.inputs, token_sharding)
@@ -812,7 +839,12 @@ def dsv3_loss_and_aux(
 
   kernels = init_kernels(batch.positions, cfg, mesh)
   fwd = dsv3_forward(params, state, batch, cfg, mesh=mesh, kernels=kernels)
-  if params.head.kernel is not None:
+  use_chunked_sharded_head = bool(
+      train and t.loss_chunk_tokens > 0 and not m.tied_head and params.head.kernel is not None
+  )
+  sharded_head_kernel = params.head.kernel
+  head_dot_dtype = jnp.float32 if m.head_dot_in_fp32 else m.dtype
+  if params.head.kernel is not None and not use_chunked_sharded_head:
     # One all-gather shared by the main and MTP heads, and one reduce-scatter
     # of their summed kernel cotangent.
     params = dataclasses.replace(
@@ -821,21 +853,75 @@ def dsv3_loss_and_aux(
             params.head,
             kernel=dsv3_embed.collect_head_kernel(
                 params.head.kernel,
-                dtype=jnp.float32 if m.head_dot_in_fp32 else m.dtype,
+                dtype=head_dot_dtype,
             ),
         ),
     )
   assert params.head.final_norm_scale is not None
   normed_hidden = dsv3_embed.final_norm(fwd.hidden, params.head.final_norm_scale, epsilon=m.norm_epsilon)
-  logits = dsv3_lm_head(params, normed_hidden, cfg, mesh=mesh)
-  with jax.named_scope("main_loss"):
-    sums = dsv3_loss.masked_token_loss(
-        logits,
-        targets,
-        target_mask,
-        z_loss_multiplier=t.z_loss_multiplier,
-        token_sharding=token_sharding,
-    )
+  head_params = DSv3Params(embed=params.embed, head=params.head)
+  head_fn = functools.partial(dsv3_lm_head, head_params, cfg=cfg, mesh=mesh)
+  mtp_chunked_loss_fn = None
+  if use_chunked_sharded_head:
+    assert sharded_head_kernel is not None
+    logits = None
+    with jax.named_scope("main_loss"):
+      xent_s, z_s, w_s = dsv3_loss.chunked_sharded_head_xent(
+          normed_hidden,
+          sharded_head_kernel,
+          targets,
+          target_mask,
+          t.loss_chunk_tokens,
+          t.z_loss_multiplier,
+          head_dot_dtype,
+          m.cast_logits_to_fp32,
+          "default",
+          token_sharding,
+          True,
+          False,
+      )
+      sums = dsv3_loss.DSv3TokenLossSums[jax.Array](xent=xent_s, z_loss=z_s, weights=w_s)
+
+    def _mtp_chunked_loss(normed_k, targets_k, mask_k):
+      l_s, _, w_k = dsv3_loss.chunked_sharded_head_xent(
+          normed_k,
+          sharded_head_kernel,
+          targets_k,
+          mask_k,
+          t.loss_chunk_tokens,
+          0.0,
+          head_dot_dtype,
+          m.cast_logits_to_fp32,
+          "default",
+          token_sharding,
+          False,
+          True,
+      )
+      return l_s, w_k
+
+    mtp_chunked_loss_fn = _mtp_chunked_loss
+  elif train and t.loss_chunk_tokens > 0:
+    logits = None
+    with jax.named_scope("main_loss"):
+      sums = dsv3_loss.chunked_masked_token_loss(
+          normed_hidden,
+          targets,
+          target_mask,
+          head_fn=head_fn,
+          loss_chunk_tokens=t.loss_chunk_tokens,
+          z_loss_multiplier=t.z_loss_multiplier,
+          token_sharding=token_sharding,
+      )
+  else:
+    logits = head_fn(normed_hidden)
+    with jax.named_scope("main_loss"):
+      sums = dsv3_loss.masked_token_loss(
+          logits,
+          targets,
+          target_mask,
+          z_loss_multiplier=t.z_loss_multiplier,
+          token_sharding=token_sharding,
+      )
   assert sums.xent is not None
   assert sums.z_loss is not None
   assert sums.weights is not None
@@ -885,6 +971,13 @@ def dsv3_loss_and_aux(
       )
 
     def layer_fn(h_prev, emb, w, expert_permutation):
+      dsv3.dsv3_router.set_router_metadata_sc0(k.router_metadata_sc0)
+      dsv3.dsv3_router.set_bwd_fp8_combine(k.bwd_fp8_combine and train)
+      dsv3.dsv3_sparse_layers.dsv3_sparse_layer.set_norm_reduce_tc(k.norm_reduce_tc)
+      dsv3_mla.set_mla_kernel_options(
+          out_proj_2d=k.out_proj_2d,
+          fp8_splash_out=k.fp8_splash_out and train,
+      )
       return dsv3_mtp.dsv3_mtp_layer(
           h_prev,
           emb,
@@ -911,7 +1004,7 @@ def dsv3_loss_and_aux(
           depth_weights,
           embed_fn=embed_fn,
           layer_fn=layer_fn,
-          head_fn=functools.partial(dsv3_lm_head, params, cfg=cfg, mesh=mesh),
+          head_fn=head_fn,
           dtype=m.dtype,
           norm_epsilon=m.norm_epsilon,
           compute_losses=train,
@@ -919,6 +1012,9 @@ def dsv3_loss_and_aux(
           expert_permutations=state.mtp_expert_permutations or None,
           main_token_embeddings=main_token_embeddings,
           token_zero_embedding=token_zero_embedding,
+          loss_chunk_tokens=t.loss_chunk_tokens if train else 0,
+          remat_layer=k.remat_mtp if train else False,
+          chunked_loss_fn=mtp_chunked_loss_fn,
       )
     if train:
       mtp_loss = dsv3_mtp_block.mtp_loss(mtp_outputs, scaling_factor=t.mtp_loss_scaling_factor)

@@ -113,6 +113,12 @@ def dsv3_sparse_layers(
     ragged_buffer_factor: float,
     quant: quantization.QuantConfig | None = None,
     expert_permutations: jt.Int[jax.Array, "L E"] | None = None,
+    mla_offload_fields: tuple[str, ...] = (),
+    moe_offload_fields: tuple[str, ...] = (),
+    offload_bank: bool = False,
+    offload_w_grad: bool = False,
+    stream_param_cast: bool = False,
+    compute_dtype: jax.typing.DTypeLike | None = None,
 ) -> tuple[
     jt.Num[jax.Array, "B T D"],
     dsv3_types.DSv3RouterAux[jax.Array],
@@ -178,10 +184,38 @@ def dsv3_sparse_layers(
   yarn_freqs_0, yarn_freqs_1 = ops.split_microbatches(yarn_freqs, mesh=mesh)
   segment_ids_0, segment_ids_1 = ops.split_microbatches(segment_ids, mesh=mesh)
 
-  _collect_w_dcn = functools.partial(
-      dsv3_sparse_layer.collect_w_dcn,
-      axis_mapping=axis_mapping,
-  )
+  quantize_enabled = bool(quant and (quant.routed_experts or quant.mla or quant.shared_mlp))
+
+  def _cast_sparse_layer(w_layer):
+    if not stream_param_cast or compute_dtype is None:
+      return w_layer
+
+    def _cast_leaf(path, a):
+      if a is None:
+        return None
+      if path and getattr(path[-1], "name", None) == "bias":
+        return a
+      return a.astype(compute_dtype)
+
+    return jax.tree_util.tree_map_with_path(_cast_leaf, w_layer, is_leaf=lambda a: a is None)
+
+  def _collect_w_dcn(w_layer):
+    if stream_param_cast:
+      w_layer = _cast_sparse_layer(w_layer)
+    w_dcn = dsv3_sparse_layer.collect_w_dcn(w_layer, axis_mapping=axis_mapping)
+    if stream_param_cast and quantize_enabled:
+      assert quant is not None
+      w_dcn = dsv3_sparse_layer.quantize_weights(w_dcn, quant=quant)
+    return w_dcn
+
+  def _reduce_w_dcn(grad_w, like):
+    # Return reduced gradients in compute/grad dtype (`bfloat16`) inside the
+    # backward scan so the 58-layer stacked accumulator takes 10.5 GiB instead
+    # of 21.0 GiB `float32`; `w_collect_pipelined_scan_prologue_epilogue_bwd`
+    # restores the primal `w` leaf dtypes once outside the scan where XLA fuses
+    # the `bf16 -> f32` cast directly into Optax AdamW.
+    return dsv3_sparse_layer.reduce_w_dcn(grad_w, like, axis_mapping=axis_mapping)
+
   _collect_w_ici_fwd = functools.partial(
       dsv3_sparse_layer.collect_w_ici,
       axis_mapping=axis_mapping,
@@ -378,7 +412,10 @@ def dsv3_sparse_layers(
           quant=quant,
       ),
   )
-  _reduce_w_ici_sc1 = functools.partial(dsv3_sparse_layer.reduce_w_ici_sc1, axis_mapping=axis_mapping)
+  _reduce_w_ici_sc1 = functools.partial(
+      dsv3_sparse_layer.reduce_w_ici_sc1,
+      axis_mapping=axis_mapping,
+  )
   _reduce_w_ici_sc0 = functools.partial(dsv3_sparse_layer.reduce_w_ici_sc0, axis_mapping=axis_mapping)
   collect_fn_pre = None
   reduce_fn_pre = None
@@ -426,22 +463,33 @@ def dsv3_sparse_layers(
       w,
       _collect_w_dcn,
       _collect_w_ici_fwd,
-      functools.partial(dsv3_sparse_layer.reduce_w_dcn, axis_mapping=axis_mapping),
+      _reduce_w_dcn,
       _reduce_w_ici_sc1,
       _reduce_w_ici_sc0,
       _collect_w_ici_bwd,
-      # Quantizes the routed expert and MLA weights of all layers once, so
-      # that they are collected in fp8 in both passes.
+      # Quantizes the routed expert and MLA weights of all layers once, unless
+      # `stream_param_cast` quantizes one layer at a time inside `_collect_w_dcn`.
       quantize_fn=(
           functools.partial(dsv3_sparse_layer.quantize_weights, quant=quant)
-          if quant and (quant.routed_experts or quant.mla)
+          if (quantize_enabled and not stream_param_cast)
           else None
       ),
-      offload_fn=dsv3_sparse_layer.offload_residuals,
-      load_fn=dsv3_sparse_layer.load_residuals,
+      offload_fn=functools.partial(
+          dsv3_sparse_layer.offload_residuals,
+          mla_fields=mla_offload_fields,
+          moe_fields=moe_offload_fields,
+          offload_bank=offload_bank,
+      ),
+      load_fn=functools.partial(
+          dsv3_sparse_layer.load_residuals,
+          mla_fields=mla_offload_fields,
+          moe_fields=moe_offload_fields,
+          offload_bank=offload_bank,
+      ),
       w_aux=expert_permutations,
       collect_fn_pre=collect_fn_pre,
       reduce_fn_pre=reduce_fn_pre,
+      offload_w_grad=offload_w_grad,
   )
   out = ops.merge_microbatches(out_mb0, out_mb1, mesh=mesh)
   return out, aux

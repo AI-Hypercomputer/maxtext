@@ -255,6 +255,27 @@ def _psum_scatter_and_reduce_sc0(
   return _rs_then_reduce(operands, reduce_operand)
 
 
+_FORCE_ROUTER_METADATA_SC0: bool = False
+_FORCE_BWD_FP8_COMBINE: bool = False
+
+
+def set_router_metadata_sc0(enabled: bool) -> None:
+  """Controls whether all routing metadata collectives run on SparseCore 0."""
+  global _FORCE_ROUTER_METADATA_SC0
+  _FORCE_ROUTER_METADATA_SC0 = bool(enabled)
+
+
+def set_bwd_fp8_combine(enabled: bool) -> None:
+  """Controls whether backward token combine uses FP8 `ops.reduce_scatter_sc0`."""
+  global _FORCE_BWD_FP8_COMBINE
+  _FORCE_BWD_FP8_COMBINE = bool(enabled)
+
+
+def _can_quantize_combine_rs(axis_name: str | tuple[str, ...]) -> bool:
+  """Whether `ops.reduce_scatter_sc0` supports `axis_name` (`(ring, 'core')`)."""
+  return isinstance(axis_name, tuple) and len(axis_name) == 2 and axis_name[1] == "core"
+
+
 def _all_gather_routing_metadata(
     x: jax.Array,
     *,
@@ -264,17 +285,9 @@ def _all_gather_routing_metadata(
   """All-gathers routing metadata along axis 0.
 
   Runs on SparseCore 0 unless `_should_tc_fallback` says to emit a plain
-  collective for XLA to schedule.
-
-  Args:
-    x: Array to all-gather along axis 0.
-    axis_name: Mesh axis or tuple of mesh axes along which to gather.
-    num_tokens: Per-shard token count, see `_should_tc_fallback`.
-
-  Returns:
-    The gathered array.
+  collective for XLA to schedule (bypassed when `_FORCE_ROUTER_METADATA_SC0`).
   """
-  if _should_tc_fallback(axis_name, num_tokens):
+  if not _FORCE_ROUTER_METADATA_SC0 and _should_tc_fallback(axis_name, num_tokens):
     return jax.lax.all_gather(x, axis_name=axis_name, axis=0, tiled=True)
   (x_ag,) = _all_gather_sc0(x, axis_name=axis_name)
   return x_ag
@@ -289,17 +302,9 @@ def _psum_scatter_routing_metadata(
   """Reduce-scatters routing metadata along dimension 0.
 
   Runs on SparseCore 0 unless `_should_tc_fallback` says to emit a plain
-  collective for XLA to schedule.
-
-  Args:
-    x: Array to psum_scatter along dimension 0.
-    axis_name: Mesh axis or tuple of mesh axes along which to scatter.
-    num_tokens: Per-shard token count, see `_should_tc_fallback`.
-
-  Returns:
-    The scattered array.
+  collective for XLA to schedule (bypassed when `_FORCE_ROUTER_METADATA_SC0`).
   """
-  if _should_tc_fallback(axis_name, num_tokens):
+  if not _FORCE_ROUTER_METADATA_SC0 and _should_tc_fallback(axis_name, num_tokens):
     return jax.lax.psum_scatter(x, axis_name=axis_name, scatter_dimension=0, tiled=True)
   (x_rs,) = _psum_scatter_sc0(x, axis_name=axis_name)
   return x_rs
@@ -345,6 +350,19 @@ def _scatter_sc0(
     Array of shape `x.shape` with `out.ravel()[indices.ravel()[i]] =
     x.ravel()[i]`.
   """
+  if x.size > 1_048_576:
+    flat_x = jnp.ravel(x)
+    out = (
+        jnp.zeros_like(flat_x)
+        .at[jnp.ravel(indices)]
+        .set(
+            flat_x,
+            mode="promise_in_bounds",
+            wrap_negative_indices=False,
+            unique_indices=True,
+        )
+    )
+    return jnp.reshape(out, x.shape)
 
   @compute_on(
       compute_type="tpu_sparsecore",
@@ -1099,7 +1117,16 @@ def _combine_with_coeff_grads_impl(
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"]]:
   """Per-shard body of `dsv3_combine_with_coeff_grads`."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
-  grad_x_local, grad_coeffs_local = _psum_scatter_sc0(grad_x_ag, grad_coeffs_ag, axis_name=physical_expert_axis_name)
+  if _FORCE_BWD_FP8_COMBINE and _can_quantize_combine_rs(physical_expert_axis_name):
+    grad_x_local = _quantized_reduce_scatter_sc0(
+        grad_x_ag,
+        axis_name=physical_expert_axis_name,
+        qtype=jnp.float8_e4m3fn,
+        per_hop_scaling=True,
+    )
+    (grad_coeffs_local,) = _psum_scatter_sc0(grad_coeffs_ag, axis_name=physical_expert_axis_name)
+  else:
+    grad_x_local, grad_coeffs_local = _psum_scatter_sc0(grad_x_ag, grad_coeffs_ag, axis_name=physical_expert_axis_name)
   return _reshape_combined_grads(
       grad_x_local,
       grad_coeffs_local,
@@ -1174,13 +1201,27 @@ def _combine_with_coeff_grads_and_reduce_impl(
 ) -> tuple[jt.Num[jax.Array, "B T D"], jt.Num[jax.Array, "BT k"], list[jax.Array]]:
   """Per-shard body of `dsv3_combine_with_coeff_grads_and_reduce`."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
-  (grad_x_local, grad_coeffs_local), reduced = _psum_scatter_and_reduce_sc0(
-      grad_x_ag,
-      grad_coeffs_ag,
-      axis_name=physical_expert_axis_name,
-      reduce_fn=reduce_fn,
-      reduce_operand=reduce_operand,
-  )
+  if _FORCE_BWD_FP8_COMBINE and _can_quantize_combine_rs(physical_expert_axis_name):
+    grad_x_local = _quantized_reduce_scatter_sc0(
+        grad_x_ag,
+        axis_name=physical_expert_axis_name,
+        qtype=jnp.float8_e4m3fn,
+        per_hop_scaling=True,
+    )
+    (grad_coeffs_local,), reduced = _psum_scatter_and_reduce_sc0(
+        grad_coeffs_ag,
+        axis_name=physical_expert_axis_name,
+        reduce_fn=reduce_fn,
+        reduce_operand=reduce_operand,
+    )
+  else:
+    (grad_x_local, grad_coeffs_local), reduced = _psum_scatter_and_reduce_sc0(
+        grad_x_ag,
+        grad_coeffs_ag,
+        axis_name=physical_expert_axis_name,
+        reduce_fn=reduce_fn,
+        reduce_operand=reduce_operand,
+    )
   grad_x, grad_coeffs = _reshape_combined_grads(
       grad_x_local,
       grad_coeffs_local,
@@ -1623,7 +1664,7 @@ def dsv3_combine_impl(
 ) -> jt.Num[jax.Array, "B T D"]:
   """Combines reduced expert output tokens across devices via psum_scatter."""
   physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
-  if combine_qtype is not None:
+  if combine_qtype is not None and _can_quantize_combine_rs(physical_expert_axis_name):
     y_local = _quantized_reduce_scatter_sc0(
         y_ag,
         axis_name=physical_expert_axis_name,
@@ -1670,20 +1711,22 @@ def dsv3_combine(
     Combined output tokens of shape (B, T, D).
   """
   out_specs_phys = ops.physical_pspec(out_specs, axis_mapping)
+  physical_expert_axis_name = axis_mapping.get(expert_axis_name, expert_axis_name)
+  eff_combine_qtype = combine_qtype if _can_quantize_combine_rs(physical_expert_axis_name) else None
   return jax.shard_map(
       functools.partial(
           dsv3_combine_impl,
           local_seq_length=local_seq_length,
           expert_axis_name=expert_axis_name,
           axis_mapping=axis_mapping,
-          combine_qtype=combine_qtype,
+          combine_qtype=eff_combine_qtype,
           combine_per_hop_scaling=combine_per_hop_scaling,
       ),
       mesh=mesh,
       out_specs=out_specs_phys,
       # The SparseCore Pallas lowering has no `pvary` rule, which VMA checking
       # inserts when resolving the kernel's remote DMA `device_id`s.
-      check_vma=combine_qtype is None,
+      check_vma=eff_combine_qtype is None,
   )(y_ag)
 
 
