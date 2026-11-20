@@ -888,6 +888,7 @@ class AttentionOp(nnx.Module):
           head_dim_kv=1,
           ulysses_size=self.mesh.shape[context_axis],
           attention_label="TPU Ulysses attention",
+          allow_kv_head_replication=True,
       )
       ulysses_attention.validate_dkv_sharding(
           axis_names_q=axis_names_q,
@@ -2596,9 +2597,19 @@ class AttentionOp(nnx.Module):
         return attention_output, None
 
       if use_ulysses:
-        query = ulysses_attention.ulysses_all_to_all(query, context_axis)
-        key = ulysses_attention.ulysses_all_to_all(key, context_axis)
-        value = ulysses_attention.ulysses_all_to_all(value, context_axis)
+        # With fewer local KV heads than context ranks (e.g. 2 KV heads at context 4), repeat each KV head so
+        # that every rank receives the one its block of query heads uses.
+        kv_replication = ulysses_attention.kv_head_replication(key.shape[1], self.mesh.shape[context_axis])
+        key = ulysses_attention.repeat_kv_heads_for_ulysses(key, kv_replication)
+        value = ulysses_attention.repeat_kv_heads_for_ulysses(value, kv_replication)
+        query, key, value = ulysses_attention.ulysses_all_to_all_qkv(
+            query, key, value, context_axis, self.mesh.shape[context_axis]
+        )
+        # Saving the exchanged Q/K/V (`ulysses_qkv=device|offload` under remat_policy=custom) keeps the backward
+        # from replaying the all-to-all to rebuild them for the Splash backward.
+        query = checkpoint_name(query, "ulysses_qkv")
+        key = checkpoint_name(key, "ulysses_qkv")
+        value = checkpoint_name(value, "ulysses_qkv")
         if decoder_segment_ids_q is not None:
           # Q and KV segment IDs are the same tensor in this train-only
           # self-attention path, so one gather serves both kernel operands.

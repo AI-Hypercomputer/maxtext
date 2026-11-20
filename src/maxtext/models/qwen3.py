@@ -66,11 +66,14 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.sharding import (
+    apply_layout_constraint,
     create_sharding,
     get_logical_axis_rules,
     logical_to_mesh_axes,
     maybe_shard_with_logical,
     maybe_shard_with_name,
+    pin_row_major_layout,
+    pin_row_major_with_cotangent,
     remove_incompatible_mesh_axes_from_partition_spec,
 )
 
@@ -152,30 +155,14 @@ _GDN_GATED_NORM_LAYOUT_LOGGED: set[str] = set()
 _GDN_IN_PROJ_KERNEL_ORDER_LOGGED: set[str] = set()
 
 
-def _with_layout_constraint(x: Array, major_to_minor: tuple[int, ...]) -> Array:
-  """Applies an XLA `major_to_minor` layout constraint when `x` is a JAX tracer."""
-  try:
-    from jax.experimental.layout import Layout, with_layout_constraint  # pylint: disable=import-outside-toplevel
-  except ImportError:
-    return x
-  if not isinstance(x, jax.core.Tracer):
-    return x
-  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor))
-
-
-def _pin_row_major_layout(x: Array) -> Array:
-  """Constrains `x` to its default row-major XLA layout under `jit`."""
-  return _with_layout_constraint(x, tuple(range(x.ndim)))
-
-
 @functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
 def _forward_layout_constraint(x: Array, major_to_minor: tuple[int, ...]) -> Array:
   """Constrains `x` to `major_to_minor` in the forward pass only, leaving its backward cotangent unconstrained."""
-  return _with_layout_constraint(x, major_to_minor)
+  return apply_layout_constraint(x, major_to_minor)
 
 
 def _forward_layout_constraint_fwd(x: Array, major_to_minor: tuple[int, ...]):
-  return _with_layout_constraint(x, major_to_minor), None
+  return apply_layout_constraint(x, major_to_minor), None
 
 
 def _forward_layout_constraint_bwd(_major_to_minor, _res, cotangent):
@@ -188,23 +175,6 @@ _forward_layout_constraint.defvjp(_forward_layout_constraint_fwd, _forward_layou
 def _forward_row_major(x: Array) -> Array:
   """Constrains `x` to row-major layout in the forward pass only."""
   return _forward_layout_constraint(x, tuple(range(x.ndim)))
-
-
-@jax.custom_vjp
-def _pin_row_major_fwd_and_bwd(x: Array) -> Array:
-  """Constrains `x` to row-major layout in both the forward pass and on its cotangent in the backward pass."""
-  return _pin_row_major_layout(x)
-
-
-def _pin_row_major_fwd_and_bwd_fwd(x: Array):
-  return _pin_row_major_layout(x), None
-
-
-def _pin_row_major_fwd_and_bwd_bwd(_res, cotangent: Array):
-  return (_pin_row_major_layout(cotangent),)
-
-
-_pin_row_major_fwd_and_bwd.defvjp(_pin_row_major_fwd_and_bwd_fwd, _pin_row_major_fwd_and_bwd_bwd)
 
 
 def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
@@ -222,7 +192,7 @@ def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
   if mode == "natural":
     return _forward_row_major(x)
   if mode == "natural_fwd_bwd":
-    return _pin_row_major_fwd_and_bwd(x)
+    return pin_row_major_with_cotangent(x)
   raise ValueError(f"gdn_gated_norm_layout must be 'auto', 'natural', 'natural_fwd_bwd' or 'token_minor', got {mode!r}.")
 
 
@@ -1292,7 +1262,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       else:
         qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
       if use_paged_state and getattr(cfg, "gdn_pin_in_proj_output_layout", True):
-        qkvz = _pin_row_major_layout(qkvz)
+        qkvz = pin_row_major_layout(qkvz)
       qkvz = checkpoint_name(qkvz, "qkv_proj")
 
       # =========================================================================

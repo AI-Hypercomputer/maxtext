@@ -1551,3 +1551,36 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
+
+
+def apply_layout_constraint(x, major_to_minor: tuple[int, ...]):
+  """Applies an XLA `major_to_minor` layout constraint when `x` is a JAX tracer."""
+  try:
+    from jax.experimental.layout import Layout, with_layout_constraint  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    return x
+  if not isinstance(x, Tracer):
+    return x
+  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor))
+
+
+def pin_row_major_layout(x):
+  """Constrains `x` to its default row-major XLA layout under `jit`."""
+  return apply_layout_constraint(x, tuple(range(x.ndim)))
+
+
+@jax.custom_vjp
+def pin_row_major_with_cotangent(x):
+  """Constrains `x` and its backward cotangent to default row-major XLA layout."""
+  return pin_row_major_layout(x)
+
+
+def _pin_row_major_with_cotangent_fwd(x):
+  return pin_row_major_layout(x), None
+
+
+def _pin_row_major_with_cotangent_bwd(_, cotangent):
+  return (pin_row_major_layout(cotangent),)
+
+
+pin_row_major_with_cotangent.defvjp(_pin_row_major_with_cotangent_fwd, _pin_row_major_with_cotangent_bwd)

@@ -957,6 +957,15 @@ class Attention(BaseModel):
   use_tokamax_splash: bool = Field(False, description="Whether to use tokamax splash attention.")
   use_jax_splash: bool = Field(False, description="Whether to use jax splash attention.")
   force_q_layout: bool = Field(False, description="Force the Q layout")
+  ulysses_pin_row_major_layout: Literal["auto", "always", "never"] = Field(
+      "auto",
+      description=(
+          "Controls row-major XLA layout pinning on Attention inputs/outputs (and their cotangents) under train-mode"
+          " Ulysses context parallelism: 'auto' enables it on MoE models (num_experts > 1) so tokens-minor backward"
+          " layouts do not propagate into adjacent expert-parallel MoE layers, and skips it on dense models;"
+          " 'always' and 'never' force it on or off."
+      ),
+  )
   use_qk_clip: bool = Field(False, description="Whether to use QK-Clip (MuonClip) for training stability.")
   qk_clip_threshold: float = Field(100.0, description="Threshold for QK-Clip (tau).")
   mla_qk_head_chunk_size: int = Field(
@@ -2892,6 +2901,16 @@ class RematAndOffload(BaseModel):
       RematLocation.REMAT, description="Remat policy for the indexer cutoff threshold (shape: [batch, seq_len])."
   )
   context: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the attention context.")
+  ulysses_qkv: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for Q/K/V after the Ulysses all-to-all (context_parallel_strategy='ulysses'). Saving them"
+          " (device or offload) keeps the backward from replaying the all-to-all; costs the exchanged Q/K/V per"
+          " attention layer. Under KV-head replication (ulysses_size > local_kv_heads), the saved post-exchange K and"
+          " V have shape [B, 1, S, D] vs. pre-exchange [B, H_kv_local, S/U, D] (U / H_kv_local times larger, e.g. 2x"
+          " at CP=4 and 4x at CP=8 for 2 KV heads)."
+      ),
+  )
   mlpwi: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the first MLP layer's intermediate output.",
@@ -6677,6 +6696,7 @@ class MaxTextConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "ulysses_qkv",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
@@ -7762,12 +7782,16 @@ class MaxTextConfig(
           if self.global_num_kv_heads > 0 and local_context_parallel_strategy
           else self.num_kv_heads
       )
-      if ulysses_num_kv_heads == 1:
-        raise ValueError("TPU Ulysses attention does not support MQA with context_parallel_size > 1.")
-      if ulysses_num_kv_heads % context_parallel_size != 0:
+      # Fewer KV heads than context ranks (including MQA with 1 KV head) is fine when the ranks are a multiple of
+      # them: each KV head is then repeated across the ranks whose query heads use it
+      # (ulysses_attention.repeat_kv_heads_for_ulysses).
+      if ulysses_num_kv_heads <= 0 or (
+          ulysses_num_kv_heads % context_parallel_size != 0 and context_parallel_size % ulysses_num_kv_heads != 0
+      ):
         raise ValueError(
             "TPU Ulysses attention requires num_kv_heads "
-            f"({ulysses_num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size})."
+            f"({ulysses_num_kv_heads}) to be divisible by context_parallel_size ({context_parallel_size}) or to "
+            "divide it."
         )
     self._validate_usp_context_parallelism()
     # STRIPED reorder strategy is a Transformer Engine feature and is GPU-only.
@@ -8835,6 +8859,7 @@ class RLConfig(
           "decoder_layer_input",
           "indexer_cutoff_threshold",
           "context",
+          "ulysses_qkv",
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
