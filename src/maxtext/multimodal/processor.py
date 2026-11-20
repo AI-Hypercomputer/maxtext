@@ -14,6 +14,7 @@
 
 """Multimodal data preprocessor router."""
 
+from maxtext.common.common_types import AudioDecoderBlockType
 from maxtext.multimodal import utils as mm_utils
 
 # model_name -> (vision_encoder_block, decoder_block) mapping
@@ -420,3 +421,37 @@ def downsample_video_mask_to_tokens(video_mask, config):
 
     return downsample_qwen3_video_mask(video_mask, config)
   raise ValueError(f"Model {config.model_name} does not support padded video-mask reduction.")
+
+
+# --------------------------------------------------------------------------
+# Speech generation (text -> speech) frontends, routed by `config.audio_decoder_block`.
+# --------------------------------------------------------------------------
+
+
+def split_tts_text(config) -> list[str]:
+  """Splits `config.prompt` into the text fragments the audio decoder synthesizes one at a time."""
+  if config.audio_decoder_block == AudioDecoderBlockType.MING_TALKER:
+    from maxtext.multimodal.processor_ming import split_text  # pylint: disable=import-outside-toplevel
+
+    return split_text(config.prompt, config.ming_talker_max_fragment_length)
+  raise ValueError(f"audio_decoder_block={config.audio_decoder_block} does not support speech generation.")
+
+
+def get_tts_input_ids(config, tokenizer, text: str):
+  """Decoder prompt token ids `[L]` that make the audio decoder speak `text`."""
+  if config.audio_decoder_block == AudioDecoderBlockType.MING_TALKER:
+    from maxtext.multimodal import processor_ming  # pylint: disable=import-outside-toplevel
+
+    prompt = processor_ming.build_tts_prompt(config.ming_talker_language)
+    instruction = processor_ming.build_ip_instruction(config.ming_talker_ip_name)
+    return processor_ming.talker_input_ids(tokenizer, text, prompt, instruction)
+  raise ValueError(f"audio_decoder_block={config.audio_decoder_block} does not support speech generation.")
+
+
+def postprocess_tts_waveform(config, waveform, sample_rate: int):
+  """Model-specific cleanup of one fragment's waveform `[T]` (e.g. trailing-silence trimming)."""
+  if config.audio_decoder_block == AudioDecoderBlockType.MING_TALKER:
+    from maxtext.multimodal.processor_ming import trim_trailing_silence  # pylint: disable=import-outside-toplevel
+
+    return trim_trailing_silence(waveform, sample_rate)
+  return waveform

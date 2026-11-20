@@ -23,12 +23,16 @@ Text decoder layer `i` (cycle length `inhomogeneous_layer_cycle_interval`, 4 for
 
 Audio encoder: OpenAI-whisper encoder (no 30 s padding) followed by a 3x strided Conv1d + linear
 projector whose outputs are L2-normalized and scattered into `<|audio_pad|>` token positions.
+
+Talker (text -> speech, HF subfolder `talker/`): the LLM is a regular `qwen2` MaxText decoder; this module
+holds its flow-matching DiT head, latent aggregator, stop/speaker heads and AudioVAE decoder (`MingTalker`).
 """
 
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
 import functools
+import math
 from typing import Any, Optional
 
 from flax import nnx
@@ -37,6 +41,8 @@ from jax import lax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
+import ml_dtypes
+import numpy as np
 
 from maxtext.common.common_types import (
     Array,
@@ -912,3 +918,586 @@ class MingAudioProjector(nnx.Module):
     if self.config.ming_norm_audio_embeds:
       x = l2_normalize(x, eps=1e-12).astype(x.dtype)
     return x
+
+
+# -----------------------------------------
+# Talker (text -> speech)
+# -----------------------------------------
+#
+# Reference: subfolder `talker/` of the HF repo (`inference.py`, `talker_module/{cfm,dit,aggregator,modules}.py`,
+# `AudioVAE/*`). The talker is a continuous-latent autoregressive TTS model:
+#
+#   * LLM: a Qwen2 decoder (24 layers, hidden 896): MaxText's regular `qwen2` decoder of `models.Transformer` fed
+#     with `decoder_input_embeddings`; its final-normed last hidden state conditions the flow-matching head.
+#   * CFM (`MingTalkerDiT` + `cfm_sample`): a DiT velocity network integrated with 10 Euler steps and
+#     classifier-free guidance, sampling one 64-dim AudioVAE latent per step from the LLM hidden state and the
+#     previous latent.
+#   * Aggregator (`MingTalkerAggregator`): embeds the sampled latent as the next LLM input embedding.
+#   * Stop head: `Linear(896, 2)`; generation stops when `softmax[1] > 0.5` (after the first few steps).
+#   * AudioVAE decoder (`MingAudioVAEDecoder`): latents -> linear x4 upsampling -> sliding-window causal Qwen2
+#     backbone -> ISTFT head -> 44.1 kHz waveform (3528 samples per latent).
+#
+# `MingTalker` is the `audio_decoder_block: ming_talker` block of `layers.encoders.AudioDecoder`; generation is
+# driven by `maxtext.inference.audio_decode`. The AudioVAE *encoder* and the CAM++ speaker encoder are
+# only used for voice cloning and are not ported.
+
+# Timesteps of the publisher's `get_epss_timesteps` (in units of 1/32) for the supported step counts.
+_EPSS_TIMESTEPS = {
+    5: [0, 2, 4, 8, 16, 32],
+    6: [0, 2, 4, 6, 8, 16, 32],
+    7: [0, 2, 4, 6, 8, 16, 24, 32],
+    10: [0, 2, 4, 6, 8, 12, 16, 20, 24, 28, 32],
+    12: [0, 2, 4, 6, 8, 10, 12, 14, 16, 20, 24, 28, 32],
+    16: [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 12, 14, 16, 20, 24, 28, 32],
+}
+# `CFM.sway_sampling_coef`.
+_SWAY_SAMPLING_COEF = -1.0
+
+
+def talker_bf16_round(x) -> np.ndarray:
+  """Rounds float32 values to bfloat16 precision (the publisher's checkpoint stores these buffers in bf16)."""
+  # Pure numpy (ml_dtypes) so it also works on trace-time constants inside jit.
+  return np.asarray(x, np.float32).astype(ml_dtypes.bfloat16).astype(np.float32)
+
+
+def epss_timesteps(steps: int) -> np.ndarray:
+  """`get_epss_timesteps` followed by CFM sway sampling, as float32 numpy array of length `steps + 1`."""
+  if steps in _EPSS_TIMESTEPS:
+    t = np.asarray(_EPSS_TIMESTEPS[steps], np.float32) * np.float32(1 / 32)
+  else:
+    t = np.linspace(0, 1, steps + 1, dtype=np.float32)
+  return (t + _SWAY_SAMPLING_COEF * (np.cos(np.pi / 2 * t) - 1 + t)).astype(np.float32)
+
+
+def dit_rope_freqs(seq_len: int, dim: int, base: float = 10000.0) -> np.ndarray:
+  """x-transformers `RotaryEmbedding(dim).forward_from_seq_len`: interleaved frequencies `[seq_len, dim]`.
+
+  The checkpoint persists `inv_freq` in bfloat16, so the frequencies are rounded the same way.
+  """
+  inv_freq = talker_bf16_round(1.0 / (base ** (np.arange(0, dim, 2, dtype=np.float32) / np.float32(dim))))
+  freqs = np.arange(seq_len, dtype=np.float32)[:, None] * inv_freq[None, :]
+  return np.repeat(freqs, 2, axis=-1)
+
+
+def apply_interleaved_rope(x: Array, freqs: Array) -> Array:
+  """x-transformers `apply_rotary_pos_emb` on `[B, T, H, D]` with interleaved pairs `(x[2i], x[2i+1])`."""
+  x32 = x.astype(jnp.float32)
+  pairs = x32.reshape(*x.shape[:-1], x.shape[-1] // 2, 2)
+  rotated = jnp.stack([-pairs[..., 1], pairs[..., 0]], axis=-1).reshape(x.shape)
+  cos = jnp.cos(freqs)[None, :, None, :]
+  sin = jnp.sin(freqs)[None, :, None, :]
+  return (x32 * cos + rotated * sin).astype(x.dtype)
+
+
+def talker_qwen2_rope(x: Array, positions: Array, theta: float) -> Array:
+  """Qwen2 (non-interleaved, rotate-half) rotary embedding on `[B, T, H, D]` with positions `[T]`."""
+  dim = x.shape[-1]
+  inv_freq = 1.0 / (theta ** (jnp.arange(0, dim, 2, dtype=jnp.float32) / dim))
+  freqs = positions.astype(jnp.float32)[:, None] * inv_freq[None, :]
+  emb = jnp.concatenate([freqs, freqs], axis=-1)
+  cos = jnp.cos(emb)[None, :, None, :]
+  sin = jnp.sin(emb)[None, :, None, :]
+  x32 = x.astype(jnp.float32)
+  x1, x2 = x32[..., : dim // 2], x32[..., dim // 2 :]
+  rotated = jnp.concatenate([-x2, x1], axis=-1)
+  return (x32 * cos + rotated * sin).astype(x.dtype)
+
+
+def _talker_dense(config: Config, in_features: int, out_features: int, kernel_axes, use_bias: bool, rngs: nnx.Rngs):
+  return DenseGeneral(
+      in_features_shape=in_features,
+      out_features_shape=out_features,
+      use_bias=use_bias,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      matmul_precision=config.matmul_precision,
+      kernel_axes=kernel_axes,
+      rngs=rngs,
+  )
+
+
+def _talker_rms_norm(config: Config, num_features: int, rngs: nnx.Rngs, eps: float = 1e-6):
+  return RMSNorm(
+      num_features=num_features,
+      epsilon=eps,
+      dtype=config.dtype,
+      weight_dtype=config.weight_dtype,
+      kernel_axes=("norm",),
+      rngs=rngs,
+  )
+
+
+# Logical axes of the talker activations.
+_TALKER_EMBED_AXES = ("activation_batch", "activation_length", "activation_embed")
+_TALKER_MLP_AXES = ("activation_batch", "activation_length", "activation_mlp")
+
+
+def _talker_shard(x: Array, config: Config, mesh: Mesh | None, logical_axes) -> Array:
+  """Logical sharding constraint on a talker activation (no-op without a mesh, e.g. in layer tests)."""
+  if mesh is None:
+    return x
+  return maybe_shard_with_logical(
+      x,
+      logical_axes=logical_axes,
+      mesh=mesh,
+      shard_mode=config.shard_mode,
+      debug_sharding=config.debug_sharding,
+      rules=get_logical_axis_rules(),
+  )
+
+
+def _talker_attention(q: Array, k: Array, v: Array, mask: Array | None = None) -> Array:
+  """Softmax attention in float32 on `[B, T, H, D]` (k/v may have fewer heads: grouped-query attention).
+
+  Dense `[B, H, T, T]` scores: used for the DiT/aggregator, whose sequences have 2-3 tokens.
+  """
+  num_heads, num_kv_heads, head_dim = q.shape[2], k.shape[2], q.shape[3]
+  if num_kv_heads != num_heads:
+    k = jnp.repeat(k, num_heads // num_kv_heads, axis=2)
+    v = jnp.repeat(v, num_heads // num_kv_heads, axis=2)
+  hp = lax.Precision.HIGHEST
+  logits = jnp.einsum("bqhd,bkhd->bhqk", q.astype(jnp.float32), k.astype(jnp.float32), precision=hp)
+  logits = logits * (head_dim**-0.5)
+  if mask is not None:
+    logits = jnp.where(mask, logits, jnp.finfo(jnp.float32).min)
+  probs = jax.nn.softmax(logits, axis=-1)
+  return jnp.einsum("bhqk,bkhd->bqhd", probs, v.astype(jnp.float32), precision=hp)
+
+
+def _talker_sliding_window_attention(q: Array, k: Array, v: Array, window: int) -> Array:
+  """Causal sliding-window attention (`0 <= q_pos - k_pos < window`) with memory linear in the length.
+
+  Matches the transformers sliding-window causal mask of the reference AudioVAE backbone.
+
+  The sequence is cut into blocks of `window` queries; each block attends to its own and the previous key block
+  (`[B, H, T / window, window, 2 * window]` scores instead of `[B, H, T, T]`). Same math as `_talker_attention`
+  with the dense sliding-window mask.
+
+  Args:
+    q: `[B, T, H, D]` queries.
+    k, v: `[B, T, KV, D]` keys/values (`H` must be a multiple of `KV`).
+    window: sliding-window size.
+
+  Returns:
+    `[B, T, H, D]` float32 attention outputs.
+  """
+  b, t, num_heads, head_dim = q.shape
+  num_kv_heads = k.shape[2]
+  if num_kv_heads != num_heads:
+    k = jnp.repeat(k, num_heads // num_kv_heads, axis=2)
+    v = jnp.repeat(v, num_heads // num_kv_heads, axis=2)
+  pad = -t % window
+  num_blocks = (t + pad) // window
+
+  def key_blocks(x):
+    # One leading block of padding so block i sees keys [(i - 1) * window, (i + 1) * window).
+    x = jnp.pad(x.astype(jnp.float32), ((0, 0), (window, pad), (0, 0), (0, 0)))
+    x = x.reshape(b, num_blocks + 1, window, num_heads, head_dim)
+    return jnp.concatenate([x[:, :-1], x[:, 1:]], axis=2)  # [B, nb, 2W, H, D]
+
+  qb = jnp.pad(q.astype(jnp.float32), ((0, 0), (0, pad), (0, 0), (0, 0))).reshape(
+      b, num_blocks, window, num_heads, head_dim
+  )
+  hp = lax.Precision.HIGHEST
+  logits = jnp.einsum("bnqhd,bnkhd->bnhqk", qb, key_blocks(k), precision=hp) * (head_dim**-0.5)
+  # Query a of block i is position i*W + a; key c is position (i-1)*W + c: valid iff a < c <= a + W
+  # (causal, within the window) and the key is not the leading padding.
+  a = np.arange(window)[:, None]
+  c = np.arange(2 * window)[None, :]
+  in_window = (c > a) & (c <= a + window)
+  not_padding = (np.arange(num_blocks)[:, None, None] * window - window + c[None]) >= 0
+  mask = jnp.asarray(in_window[None] & not_padding)[None, :, None]  # [1, nb, 1, W, 2W]
+  logits = jnp.where(mask, logits, jnp.finfo(jnp.float32).min)
+  probs = jax.nn.softmax(logits, axis=-1)
+  out = jnp.einsum("bnhqk,bnkhd->bnqhd", probs, key_blocks(v), precision=hp)
+  return out.reshape(b, num_blocks * window, num_heads, head_dim)[:, :t]
+
+
+# -----------------------------------------
+# DiT blocks shared by the CFM head and the aggregator
+# -----------------------------------------
+
+
+class MingTalkerDiTAttention(nnx.Module):
+  """`talker_module.modules.Attention`: bidirectional MHA with biases and interleaved RoPE on all heads."""
+
+  def __init__(self, config: Config, hidden_size: int, num_heads: int, *, rngs: nnx.Rngs):
+    self.num_heads = num_heads
+    self.head_dim = hidden_size // num_heads
+    self.to_q = _talker_dense(config, hidden_size, hidden_size, ("embed", "heads"), True, rngs)
+    self.to_k = _talker_dense(config, hidden_size, hidden_size, ("embed", "heads"), True, rngs)
+    self.to_v = _talker_dense(config, hidden_size, hidden_size, ("embed", "heads"), True, rngs)
+    self.to_out = _talker_dense(config, hidden_size, hidden_size, ("heads", "embed"), True, rngs)
+
+  def __call__(self, x: Array, rope_freqs: Array) -> Array:
+    b, t, d = x.shape
+    q = self.to_q(x).reshape(b, t, self.num_heads, self.head_dim)
+    k = self.to_k(x).reshape(b, t, self.num_heads, self.head_dim)
+    v = self.to_v(x).reshape(b, t, self.num_heads, self.head_dim)
+    q = apply_interleaved_rope(q, rope_freqs)
+    k = apply_interleaved_rope(k, rope_freqs)
+    o = _talker_attention(q, k, v)
+    return self.to_out(o.reshape(b, t, d).astype(x.dtype))
+
+
+class MingTalkerDiTBlock(nnx.Module):
+  """`talker_module.modules.DiTBlock`: pre-RMSNorm attention + pre-RMSNorm GELU(tanh) MLP."""
+
+  def __init__(
+      self, config: Config, hidden_size: int, num_heads: int, mlp_ratio: int, *, mesh: Mesh | None = None, rngs: nnx.Rngs
+  ):
+    self.config = config
+    self.mesh = mesh
+    inner = int(hidden_size * mlp_ratio)
+    self.norm1 = _talker_rms_norm(config, hidden_size, rngs)
+    self.attn = MingTalkerDiTAttention(config, hidden_size, num_heads, rngs=rngs)
+    self.norm2 = _talker_rms_norm(config, hidden_size, rngs)
+    self.mlp_in = _talker_dense(config, hidden_size, inner, ("embed", "mlp"), True, rngs)
+    self.mlp_out = _talker_dense(config, inner, hidden_size, ("mlp", "embed"), True, rngs)
+
+  def __call__(self, x: Array, rope_freqs: Array) -> Array:
+    x = _talker_shard(x + self.attn(self.norm1(x), rope_freqs), self.config, self.mesh, _TALKER_EMBED_AXES)
+    h = _talker_shard(jax.nn.gelu(self.mlp_in(self.norm2(x)), approximate=True), self.config, self.mesh, _TALKER_MLP_AXES)
+    return _talker_shard(x + self.mlp_out(h), self.config, self.mesh, _TALKER_EMBED_AXES)
+
+
+class MingTalkerDiT(nnx.Module):
+  """`talker_module.dit.DiT`: flow-matching velocity network conditioned on the LLM hidden state.
+
+  Input sequence: `[t_embed + cond_embed, x_embed(history latents), x_embed(noisy latents)]`.
+  """
+
+  def __init__(self, config: Config, *, mesh: Mesh | None = None, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    hidden = config.ming_talker_dit_hidden_size
+    latent = config.ming_talker_latent_dim
+    self.num_heads = config.ming_talker_dit_num_heads
+    self.freq_embed_dim = 256
+    self.x_embedder = _talker_dense(config, latent, hidden, ("mlp", "embed"), True, rngs)
+    self.c_embedder = _talker_dense(config, config.emb_dim, hidden, ("mlp", "embed"), True, rngs)
+    self.time_fc1 = _talker_dense(config, self.freq_embed_dim, hidden, ("mlp", "embed"), True, rngs)
+    self.time_fc2 = _talker_dense(config, hidden, hidden, ("mlp", "embed"), True, rngs)
+    for i in range(config.ming_talker_dit_num_layers):
+      setattr(
+          self,
+          f"blocks_{i}",
+          MingTalkerDiTBlock(config, hidden, self.num_heads, config.ming_talker_dit_mlp_ratio, mesh=mesh, rngs=rngs),
+      )
+    self.final_norm = _talker_rms_norm(config, hidden, rngs)
+    self.final_linear = _talker_dense(config, hidden, latent, ("embed", "mlp"), True, rngs)
+
+  def timestep_embedding(self, t: Array) -> Array:
+    """`SinusPositionEmbedding(256)` (scale 1000) followed by `time_mlp` (Linear, SiLU, Linear)."""
+    half = self.freq_embed_dim // 2
+    freqs = jnp.exp(jnp.arange(half, dtype=jnp.float32) * -(math.log(10000) / (half - 1)))
+    args = 1000.0 * t.astype(jnp.float32)[:, None] * freqs[None, :]
+    emb = jnp.concatenate([jnp.sin(args), jnp.cos(args)], axis=-1).astype(self.config.dtype)
+    return self.time_fc2(jax.nn.silu(self.time_fc1(emb)))
+
+  def __call__(self, x: Array, t: Array, cond: Array, history: Array) -> Array:
+    """Velocity for the noisy latents.
+
+    Args:
+      x: `[B, P, latent]` noisy latents.
+      t: `[B]` flow time in [0, 1].
+      cond: `[B, 1, emb]` LLM hidden state (zeros for the unconditional CFG branch).
+      history: `[B, H, latent]` previous latents.
+
+    Returns:
+      `[B, P, latent]` predicted velocity.
+    """
+    num_x = x.shape[1]
+    h = self.x_embedder(jnp.concatenate([history, x], axis=1).astype(self.config.dtype))
+    y = self.timestep_embedding(t)[:, None, :] + self.c_embedder(cond.astype(self.config.dtype))
+    h = _talker_shard(jnp.concatenate([y.astype(h.dtype), h], axis=1), self.config, self.mesh, _TALKER_EMBED_AXES)
+    freqs = jnp.asarray(dit_rope_freqs(h.shape[1], h.shape[-1] // self.num_heads))
+    for i in range(self.config.ming_talker_dit_num_layers):
+      h = getattr(self, f"blocks_{i}")(h, freqs)
+    out = self.final_linear(self.final_norm(h))
+    return out[:, -num_x:]
+
+  def forward_with_cfg(self, x: Array, t: Array, cond: Array, history: Array, cfg_strength) -> Array:
+    """Classifier-free guidance: `pred + (pred - pred_uncond) * cfg_strength` (one batched DiT call)."""
+    batch = x.shape[0]
+    out = self(
+        jnp.concatenate([x, x], axis=0),
+        jnp.broadcast_to(t, (2 * batch,)),
+        jnp.concatenate([cond, jnp.zeros_like(cond)], axis=0),
+        jnp.concatenate([history, history], axis=0),
+    )
+    pred, null_pred = out[:batch], out[batch:]
+    return pred + (pred - null_pred) * cfg_strength
+
+
+def cfm_sample(dit: MingTalkerDiT, cond, history, noise, steps: int, cfg_strength, sigma, temperature, sde_noise=None):
+  """`CFM.sample`: Euler integration of the guided velocity field from `noise` (t=0) to a latent (t=1).
+
+  Args:
+    dit: velocity network.
+    cond: `[B, 1, emb]` LLM hidden state.
+    history: `[B, H, latent]` previous latents.
+    noise: `[B, P, latent]` initial Gaussian noise.
+    steps: number of Euler steps.
+    cfg_strength, sigma, temperature: CFG scale and SDE noise parameters (`sde_args`).
+    sde_noise: optional `[steps, B, P, latent]` SDE noise; only used when `sigma * sqrt(temperature) != 0`.
+
+  Returns:
+    `[B, P, latent]` sampled latent (float32).
+  """
+  t = jnp.asarray(epss_timesteps(steps))
+  graphdef, state = nnx.split(dit)
+
+  # `fori_loop` keeps a single DiT instance in the HLO instead of one per Euler step.
+  def euler_step(step, y):
+    dt = t[step + 1] - t[step]
+    velocity = nnx.merge(graphdef, state).forward_with_cfg(y, t[step], cond, history, cfg_strength)
+    y = y + velocity.astype(jnp.float32) * dt
+    if sde_noise is not None:
+      y = y + sigma * jnp.sqrt(temperature) * jnp.sqrt(jnp.abs(dt)) * sde_noise[step].astype(jnp.float32)
+    return y
+
+  return jax.lax.fori_loop(0, steps, euler_step, noise.astype(jnp.float32))
+
+
+class MingTalkerAggregator(nnx.Module):
+  """`talker_module.aggregator.Aggregator`: latents `[B, P, latent]` -> next LLM input embedding `[B, 1, emb]`."""
+
+  def __init__(self, config: Config, *, mesh: Mesh | None = None, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    hidden = config.ming_talker_aggregator_hidden_size
+    self.num_heads = config.ming_talker_aggregator_num_heads
+    self.word_embedder = nnx.Param(
+        jax.nn.initializers.normal(stddev=0.02)(rngs.params(), (1, hidden), config.weight_dtype),
+        out_sharding=(None, "embed"),
+    )
+    self.x_embedder = _talker_dense(config, config.ming_talker_latent_dim, hidden, ("mlp", "embed"), True, rngs)
+    for i in range(config.ming_talker_aggregator_num_layers):
+      setattr(
+          self,
+          f"blocks_{i}",
+          MingTalkerDiTBlock(
+              config, hidden, self.num_heads, config.ming_talker_aggregator_mlp_ratio, mesh=mesh, rngs=rngs
+          ),
+      )
+    self.final_norm = _talker_rms_norm(config, hidden, rngs)
+    self.final_linear = _talker_dense(config, hidden, config.emb_dim, ("embed", "mlp"), True, rngs)
+
+  def __call__(self, latents: Array) -> Array:
+    h = self.x_embedder(latents.astype(self.config.dtype))
+    cls = jnp.broadcast_to(self.word_embedder[...].astype(h.dtype)[None], (h.shape[0], 1, h.shape[-1]))
+    h = _talker_shard(jnp.concatenate([cls, h], axis=1), self.config, self.mesh, _TALKER_EMBED_AXES)
+    freqs = jnp.asarray(dit_rope_freqs(h.shape[1], h.shape[-1] // self.num_heads))
+    for i in range(self.config.ming_talker_aggregator_num_layers):
+      h = getattr(self, f"blocks_{i}")(h, freqs)
+    return self.final_linear(self.final_norm(h))[:, :1]
+
+
+# -----------------------------------------
+# AudioVAE decoder
+# -----------------------------------------
+
+
+class MingVAEDecoderLayer(nnx.Module):
+  """Qwen2 decoder layer (q/k/v biases, GQA, SwiGLU) with causal sliding-window attention."""
+
+  def __init__(self, config: Config, *, mesh: Mesh | None = None, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    d = config.ming_vae_hidden_size
+    self.num_heads = config.ming_vae_num_heads
+    self.num_kv_heads = config.ming_vae_num_kv_heads
+    self.head_dim = d // self.num_heads
+    kv_dim = self.num_kv_heads * self.head_dim
+    eps = config.ming_vae_rms_norm_eps
+    self.input_layernorm = _talker_rms_norm(config, d, rngs, eps)
+    self.q_proj = _talker_dense(config, d, d, ("embed", "heads"), True, rngs)
+    self.k_proj = _talker_dense(config, d, kv_dim, ("embed", "kv_heads"), True, rngs)
+    self.v_proj = _talker_dense(config, d, kv_dim, ("embed", "kv_heads"), True, rngs)
+    self.o_proj = _talker_dense(config, d, d, ("heads", "embed"), False, rngs)
+    self.post_attention_layernorm = _talker_rms_norm(config, d, rngs, eps)
+    self.gate_proj = _talker_dense(config, d, config.ming_vae_mlp_dim, ("embed", "mlp"), False, rngs)
+    self.up_proj = _talker_dense(config, d, config.ming_vae_mlp_dim, ("embed", "mlp"), False, rngs)
+    self.down_proj = _talker_dense(config, config.ming_vae_mlp_dim, d, ("mlp", "embed"), False, rngs)
+
+  def __call__(self, x: Array, positions: Array) -> Array:
+    b, t, d = x.shape
+    h = self.input_layernorm(x)
+    q = self.q_proj(h).reshape(b, t, self.num_heads, self.head_dim)
+    k = self.k_proj(h).reshape(b, t, self.num_kv_heads, self.head_dim)
+    v = self.v_proj(h).reshape(b, t, self.num_kv_heads, self.head_dim)
+    theta = self.config.ming_vae_rope_theta
+    q = talker_qwen2_rope(q, positions, theta)
+    k = talker_qwen2_rope(k, positions, theta)
+    o = _talker_sliding_window_attention(q, k, v, self.config.ming_vae_sliding_window)
+    x = _talker_shard(x + self.o_proj(o.reshape(b, t, d).astype(x.dtype)), self.config, self.mesh, _TALKER_EMBED_AXES)
+    h = self.post_attention_layernorm(x)
+    h = _talker_shard(jax.nn.silu(self.gate_proj(h)) * self.up_proj(h), self.config, self.mesh, _TALKER_MLP_AXES)
+    return _talker_shard(x + self.down_proj(h), self.config, self.mesh, _TALKER_EMBED_AXES)
+
+
+def talker_linear_upsample(x: Array, scale: int) -> Array:
+  """`nn.Upsample(scale_factor=scale, mode="linear", align_corners=False)` along axis 1 of `[B, T, C]`."""
+  length = x.shape[1]
+  dst = np.arange(length * scale, dtype=np.float32)
+  src = np.maximum((dst + 0.5) / scale - 0.5, 0.0)
+  idx0 = np.floor(src).astype(np.int32)
+  idx1 = np.minimum(idx0 + 1, length - 1)
+  lam = jnp.asarray(src - idx0, x.dtype)[None, :, None]
+  return x[:, idx0] * (1 - lam) + x[:, idx1] * lam
+
+
+def periodic_hann_window(n: int) -> np.ndarray:
+  """`torch.hann_window(n)` (periodic), computed in float32 like PyTorch."""
+  k = np.arange(n, dtype=np.float32)
+  return (np.float32(0.5) - np.float32(0.5) * np.cos(k * np.float32(2 * np.pi / n))).astype(np.float32)
+
+
+def istft_same(spec_mag: Array, spec_phase: Array, n_fft: int, hop: int, num_frames: Array | None = None) -> Array:
+  """`AudioVAE.istft.ISTFT(padding="same")` (non-streaming) on `[B, T, n_fft // 2 + 1]` magnitude/phase.
+
+  The window is the bf16-rounded periodic Hann window stored in the checkpoint. Returns `[B, T * hop]`.
+  With `num_frames` (possibly traced), frames `>= num_frames` are padding: they are excluded from both the
+  overlap-add and the window envelope, so the first `num_frames * hop` samples equal the unpadded result.
+  """
+  window = jnp.asarray(talker_bf16_round(periodic_hann_window(n_fft)))
+  spec = spec_mag * (jnp.cos(spec_phase) + 1j * jnp.sin(spec_phase))
+  frames = jnp.fft.irfft(spec, n=n_fft, axis=-1).astype(jnp.float32) * window  # [B, T, n_fft]
+  t = frames.shape[1]
+  valid = jnp.ones((t,), jnp.float32) if num_frames is None else (jnp.arange(t) < num_frames).astype(jnp.float32)
+  frames = frames * valid[None, :, None]
+  overlap = n_fft // hop
+
+  def overlap_add(f):
+    out = jnp.zeros((f.shape[0], (t + overlap - 1) * hop), jnp.float32)
+    pieces = f.reshape(f.shape[0], t, overlap, hop)
+    for k in range(overlap):
+      out = out.at[:, k * hop : k * hop + t * hop].add(pieces[:, :, k].reshape(f.shape[0], t * hop))
+    return out
+
+  y = overlap_add(frames)
+  envelope = overlap_add((window**2)[None, None, :] * valid[None, :, None])
+  pad = (n_fft - hop) // 2
+  y, envelope = y[:, pad:-pad], envelope[:, pad:-pad]
+  # The envelope is positive over the real frames (the reference asserts > 1e-11); it vanishes only in the padded tail.
+  return y / jnp.maximum(envelope, 1e-11)
+
+
+class MingAudioVAEDecoder(nnx.Module):
+  """`AudioVAE.vae_modules.Decoder.low_level_reconstruct` (non-streaming): latents `[B, N, 64]` -> `[B, N * 3528]`."""
+
+  def __init__(self, config: Config, *, mesh: Mesh | None = None, rngs: nnx.Rngs):
+    self.config = config
+    self.mesh = mesh
+    d = config.ming_vae_hidden_size
+    self.hop = config.ming_vae_hop_length
+    self.n_fft = 4 * self.hop
+    self.fc1 = _talker_dense(config, config.ming_talker_latent_dim, d, ("mlp", "embed"), True, rngs)
+    for i in range(config.ming_vae_num_layers):
+      setattr(self, f"layers_{i}", MingVAEDecoderLayer(config, mesh=mesh, rngs=rngs))
+    self.norm = _talker_rms_norm(config, d, rngs, config.ming_vae_rms_norm_eps)
+    self.head_out = _talker_dense(config, d, self.n_fft + 2, ("embed", "mlp"), True, rngs)
+
+  def spectrogram(self, latents: Array) -> Array:
+    """Latents `[B, N, latent]` -> ISTFT-head outputs `[B, N * patch, n_fft + 2]` (log-magnitude | phase).
+
+    The backbone is causal, so frames only depend on earlier latents: callers may right-pad the latents (with
+    copies of the last latent, which keeps the linear upsampling of the last real latent unchanged) to bucket
+    shapes and slice the first `N * patch` frames.
+    """
+    cfg = self.config
+    x = self.fc1(latents.astype(cfg.dtype))
+    x = _talker_shard(talker_linear_upsample(x, cfg.ming_vae_patch_size), cfg, self.mesh, _TALKER_EMBED_AXES)
+    positions = jnp.arange(x.shape[1])
+    for i in range(cfg.ming_vae_num_layers):
+      x = getattr(self, f"layers_{i}")(x, positions)
+    x = self.norm(x)
+    return self.head_out(x).astype(jnp.float32)
+
+  def spectrogram_to_waveform(self, pred: Array, num_frames: Array | None = None) -> Array:
+    """ISTFT head: `[B, T, n_fft + 2]` -> `[B, T * hop]` waveform (frames `>= num_frames` are padding)."""
+    half = pred.shape[-1] // 2
+    mag = jnp.minimum(jnp.exp(pred[..., :half]), 1e2)
+    return istft_same(mag, pred[..., half:], self.n_fft, self.hop, num_frames)
+
+  def __call__(self, latents: Array, num_latents: Array | None = None) -> Array:
+    """Latents `[B, N, latent]` -> waveform `[B, N * patch * hop]`.
+
+    `num_latents` marks the real latents of an edge-padded input (shape bucketing); samples past
+    `num_latents * patch * hop` are not part of the output and must be sliced off by the caller.
+    """
+    num_frames = None if num_latents is None else num_latents * self.config.ming_vae_patch_size
+    return self.spectrogram_to_waveform(self.spectrogram(latents), num_frames)
+
+
+# -----------------------------------------
+# AudioDecoder block (see `layers.encoders.AudioDecoder`)
+# -----------------------------------------
+
+
+class MingTalker(nnx.Module):
+  """Non-LLM talker modules: CFM DiT, aggregator, stop/speaker heads and AudioVAE decoder."""
+
+  def __init__(self, config: Config, *, mesh: Mesh | None = None, rngs: nnx.Rngs):
+    self.config = config
+    self.cfm = MingTalkerDiT(config, mesh=mesh, rngs=rngs)
+    self.aggregator = MingTalkerAggregator(config, mesh=mesh, rngs=rngs)
+    self.stop_head = _talker_dense(config, config.emb_dim, 2, ("embed", None), True, rngs)
+    self.spk_head = _talker_dense(config, config.ming_talker_speaker_dim, config.emb_dim, (None, "embed"), True, rngs)
+    self.audio_vae = MingAudioVAEDecoder(config, mesh=mesh, rngs=rngs)
+
+  @property
+  def sample_rate(self) -> int:
+    return self.config.ming_vae_sample_rate
+
+  @property
+  def samples_per_latent(self) -> int:
+    return self.config.ming_vae_patch_size * self.config.ming_vae_hop_length
+
+  def init_state(self, batch: int) -> dict[str, Array]:
+    """`history`: the previous latents fed to the CFM DiT (zeros before the first step); `step`: steps done."""
+    cfg = self.config
+    history = jnp.zeros((batch, cfg.ming_talker_history_patch_size, cfg.ming_talker_latent_dim), jnp.float32)
+    return {"history": history, "step": jnp.zeros((), jnp.int32)}
+
+  def step(self, hidden: Array, state: dict[str, Array], key: Array):
+    """One talker step after the LLM.
+
+    Args:
+      hidden: `[B, 1, emb]` final-normed LLM hidden state of the last position.
+      state: see `init_state`.
+      key: PRNG key of this step's CFM noise.
+
+    Returns:
+      `(latent [B, P, latent], next input embedding [B, 1, emb], done [B], state)`. Reference stop rule:
+      `if step > 3 and stop > 0.5: break` after appending the latent of `step`.
+    """
+    cfg = self.config
+    batch = hidden.shape[0]
+    latent_shape = (batch, cfg.ming_talker_patch_size, cfg.ming_talker_latent_dim)
+    noise = jax.random.normal(key, latent_shape)
+    # SDE sampling only when `sigma * temperature != 0`; the default is the deterministic ODE.
+    sde_noise = None
+    if cfg.ming_talker_sigma * cfg.ming_talker_temperature:
+      sde_noise = jax.random.normal(jax.random.fold_in(key, 1), (cfg.ming_talker_cfm_steps, *latent_shape))
+    latent = cfm_sample(
+        self.cfm,
+        hidden,
+        state["history"],
+        noise,
+        cfg.ming_talker_cfm_steps,
+        cfg.ming_talker_cfg_strength,
+        cfg.ming_talker_sigma,
+        cfg.ming_talker_temperature,
+        sde_noise,
+    )
+    next_embed = self.aggregator(latent)
+    stop_prob = jax.nn.softmax(self.stop_head(hidden[:, -1]).astype(jnp.float32), axis=-1)[:, 1]
+    done = (state["step"] >= cfg.ming_talker_min_steps) & (stop_prob > cfg.ming_talker_stop_threshold)
+    history = jnp.concatenate([state["history"], latent], axis=1)[:, -cfg.ming_talker_history_patch_size :]
+    return latent, next_embed, done, {"history": history, "step": state["step"] + 1}
+
+  def decode_audio(self, latents: Array, num_latents: Array | None = None) -> Array:
+    """AudioVAE decoder: `[B, N, latent]` -> `[B, N * patch * hop]` waveform."""
+    return self.audio_vae(latents, num_latents)
