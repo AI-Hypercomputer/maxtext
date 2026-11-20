@@ -12,25 +12,25 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Post-construction transforms applied from training setup, never from models.
+"""Post-construction transforms applied from training setup.
 
 Modules:
   * `scan.py` — layer stacking via `jax.lax.scan` + `maybe_apply_scan`.
+  * `remat.py` — path-transparent remat policies, `maybe_apply_remat`, and `check_tags`.
   * `quantization.py` — `maybe_quantize`: qwix int8 / fp8 by interception, over
     the projection layers of the decoder stack.
   * `named_scopes.py` — `jax.named_scope` per submodule, so profiles and HLO
     dumps read `decoder/layers/3/mlp/wi_0`.
 
 Planned modules:
-  * `remat.py` — path-transparent remat wrapper + `maybe_apply_remat`.
   * `offload.py` — `to_host` for optimizer/parameter offloading.
 
 Composition order is fixed, and `maxtext.m3.train.loop.setup_model` is the
 reference for it:
-`construct -> remat -> scan -> quantize -> named scopes -> optimizer -> host offload`.
+`construct -> scan -> remat -> quantize -> named scopes -> optimizer -> host offload`.
 
 None of these wrap the model in another module, and quantization leaves the
-variable tree untouched (asserted). Model files contain only zero-cost
-annotations (`checkpoint_name` tags and sharding specs); they must never
-import from this package.
+variable tree untouched (asserted). Standard `nnx.Sequential` models rely only
+on `checkpoint_name` tags and sharding specs; models with custom internal scan
+loops may import policy helpers from `remat.py`, never full transforms.
 """

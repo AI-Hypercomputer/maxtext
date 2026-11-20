@@ -735,6 +735,7 @@ def create_model(
   """Instantiates and returns the model object, sharded across the mesh."""
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
+
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra.named_scopes import add_named_scopes  # pylint: disable=import-outside-toplevel
 
@@ -746,6 +747,10 @@ def create_model(
     ):
       model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
       model = m3_scan.maybe_apply_scan(model, config)
+      # Re-exported from m3.infra.remat to preserve utils:model_creation_utils strict_deps.
+      model = m3_models.maybe_apply_remat(model, config, model_mode=model_mode)
+      if model_mode == MODEL_MODE_TRAIN:
+        m3_models.check_model_tags(model, config, mesh=mesh)
       if getattr(config, "quantization", "") and m3_models.ambient_mesh_is_explicit():
         raise ValueError(
             "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized "

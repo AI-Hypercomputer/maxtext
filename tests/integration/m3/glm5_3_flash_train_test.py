@@ -139,7 +139,14 @@ class Glm5TrainTest(absltest.TestCase):
       self.assertNotIn(glm5_pkg, sys.modules)
       self.assertNotIn(glm5_flops_mod, sys.modules)
     finally:
+      for k in list(sys.modules):
+        if k.startswith(prefixes) and k not in saved_modules:
+          sys.modules.pop(k, None)
       sys.modules.update(saved_modules)
+      for k, mod in saved_modules.items():
+        parent_name, _, attr_name = k.rpartition(".")
+        if parent_name in sys.modules:
+          setattr(sys.modules[parent_name], attr_name, mod)
 
   def test_f23_remat_policy_mapping(self):
     """Verifies F23 remat_policy mapping to JAX checkpoint policies and loud rejection."""
@@ -176,7 +183,12 @@ class Glm5TrainTest(absltest.TestCase):
     with self.assertRaises(TypeError):
       modeling_glm5_3_flash.create_glm5_3_flash_model(bad_type_cfg, rngs=nnx.Rngs(0))
 
-    for bad_policy in ("", "minimal", "save_dot_except_mlp", "bogus_policy"):
+    for valid_policy in ("minimal", "save_dot_except_mlp"):
+      named_cfg = _make_train_cfg(num_hidden_layers=5, scan_layers=False, remat_policy=valid_policy)
+      m_named = modeling_glm5_3_flash.create_glm5_3_flash_model(named_cfg, rngs=nnx.Rngs(0))
+      self.assertTrue(callable(m_named.remat_policy))
+
+    for bad_policy in ("", "bogus_policy"):
       bad_cfg = _make_train_cfg(num_hidden_layers=5, scan_layers=False, remat_policy="none")
       object.__setattr__(bad_cfg, "remat_policy", bad_policy)
       with self.assertRaises(ValueError):
