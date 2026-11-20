@@ -63,6 +63,7 @@ def get_maxtext_muon_weight_dimension_numbers(model, config=None, mesh=None, ver
     logical_rules = ()
     include_routers = True
 
+  scan_layers = muon_utils.layers_all_stacked(config)
   with jax.set_mesh(mesh), logical_axis_rules(logical_rules):
     # Extract abstract parameters from the NNX model hierarchy
     _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
@@ -76,7 +77,9 @@ def get_maxtext_muon_weight_dimension_numbers(model, config=None, mesh=None, ver
       abs_val = _get_leaf_value(abs_leaf)
       val_shape = getattr(abs_val, "shape", None)
       dim_num = muon_utils.to_stacked_layout(
-          muon_utils.transform_logic(path_strings, shape=val_shape, include_routers=include_routers),
+          muon_utils.transform_logic(
+              path_strings, shape=val_shape, include_routers=include_routers, scan_layers=scan_layers
+          ),
           len(val_shape or ()),
           muon_utils.get_scan_axes(abs_leaf),
       )
