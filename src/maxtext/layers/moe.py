@@ -4024,7 +4024,24 @@ class RoutedMoE(nnx.Module):
 
       if self.config.prefuse_moe_weights:
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        w_fused = jnp.concatenate([w0, w1], axis=-1)
+        if isinstance(w0, qpl.QArray):
+          # Static fixed calibration shares a (1, 1, 1) scale across w0/w1; dynamic per-group scales
+          # (channelwise [L + R, 1, N] or per-tensor [L + R, 1, 1]) expand to [L + R, 1, 2N] for gmm_v2.
+          fused_scale = (
+              w0.scale
+              if w0.scale.shape == (1, 1, 1) and w1.scale.shape == (1, 1, 1)
+              else jnp.concatenate(
+                  [jnp.broadcast_to(w.scale, (w.qvalue.shape[0], 1, w.qvalue.shape[-1])) for w in (w0, w1)],
+                  axis=-1,
+              )
+          )
+          w_fused = dataclasses.replace(
+              w0,
+              qvalue=jnp.concatenate([w0.qvalue, w1.qvalue], axis=-1),
+              scale=fused_scale,
+          )
+        else:
+          w_fused = jnp.concatenate([w0, w1], axis=-1)
         fused_bias = None
         if use_te_bias and w0_bias is not None and w1_bias is not None:
           fused_bias = jnp.concatenate([w0_bias, w1_bias], axis=-1)
@@ -4481,9 +4498,33 @@ class RoutedMoE(nnx.Module):
                   f"(num_experts={self.config.num_experts} // num_ep={ep_size}), got shape {w_arr.shape}."
               )
           ep_name = self._expert_parallelism_name
-          w0 = moe_replica_weights.extend_with_replicas(w0, plan, ep_name, ep_size, self.dtype)
-          w1 = moe_replica_weights.extend_with_replicas(w1, plan, ep_name, ep_size, self.dtype)
-          wo = moe_replica_weights.extend_with_replicas(wo, plan, ep_name, ep_size, self.dtype)
+          gmm_rule = qpl.get_current_rule("gmm") if self.config.use_qwix_quantization else None
+          if gmm_rule is not None and gmm_rule.weight_qtype is not None:
+            # Quantize at home so home rows match R=0 codes/scales and replicas carry their home scale.
+            if not (self.config.use_tokamax_gmm and self.config.use_gmm_v2 and self.config.hardware != "cpu"):
+              raise NotImplementedError("quantized expert replication requires the tokamax gmm_v2 kernel on TPU.")
+            if (get_wi_gmm_params()[0] or get_wo_gmm_params()[0]) and not (
+                gmm_rule.bwd_qtype and gmm_rule.weight_calibration_method.lower().startswith("fixed")
+            ):
+              raise NotImplementedError("quantized expert replication with weight gathers requires fixed QAG.")
+            channelwise = () if gmm_rule.disable_channelwise_axes else (2,)
+            w0, w1, wo = (
+                moe_replica_weights.extend_quantized_with_replicas(
+                    w,
+                    plan,
+                    ep_name,
+                    ep_size,
+                    self.dtype,
+                    gmm_rule.weight_qtype,
+                    gmm_rule.weight_calibration_method,
+                    channelwise,
+                )
+                for w in (w0, w1, wo)
+            )
+          else:
+            w0 = moe_replica_weights.extend_with_replicas(w0, plan, ep_name, ep_size, self.dtype)
+            w1 = moe_replica_weights.extend_with_replicas(w1, plan, ep_name, ep_size, self.dtype)
+            wo = moe_replica_weights.extend_with_replicas(wo, plan, ep_name, ep_size, self.dtype)
 
         if use_fused_gmm3d:
           # The fused kernels gather the tokens in-kernel (route() returned x=None): the whole expert MLP and

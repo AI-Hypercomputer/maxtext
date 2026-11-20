@@ -16,24 +16,30 @@
 
 import contextlib
 import functools
+import math
 import types
 from unittest import mock
 
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
+from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 import numpy as np
 import pytest
+import qwix
+import qwix.pallas as qpl
 
 from maxtext.configs import pyconfig
+from maxtext.kernels.megablox import ops as mblx_ops
 from maxtext.layers import initializers
 from maxtext.layers import moe
 from maxtext.layers import moe_replica_planner as mrp
 from maxtext.layers import moe_replica_weights as mrw
+from maxtext.layers import quantizations
 from tests.utils import moe_replica_test_utils
 from tests.utils.test_helpers import get_test_config_path
 
@@ -50,11 +56,37 @@ def _pure_jax_gmm(lhs, rhs, group_sizes, preferred_element_type=jnp.float32, exi
   return out
 
 
-def _spec_shards_dim0_on_expert(spec):
-  if spec is None:
-    return False
-  parts = spec.partitions if isinstance(spec, P) else tuple(spec)
-  return bool(parts and parts[0] is not None and "expert" in (parts[0] if isinstance(parts[0], tuple) else (parts[0],)))
+def _spec_axes(spec, mesh_sizes):
+  """Returns active sharding axis names on dim 0 of `spec` whose size > 1."""
+  if not spec or not (parts := spec.partitions if isinstance(spec, P) else tuple(spec)) or parts[0] is None:
+    return ()
+  dim0 = parts[0] if isinstance(parts[0], tuple) else (parts[0],)
+  return tuple(ax for ax in dim0 if mesh_sizes.get(ax, 1) > 1)
+
+
+def _init_moe_cfg(run_name, **overrides):
+  """Initializes a small Mixtral sparse-matmul pyconfig with `overrides`."""
+  kwargs = {
+      "run_name": run_name,
+      "base_output_directory": f"/tmp/{run_name}",
+      "enable_checkpointing": False,
+      "model_name": "mixtral-8x7b",
+      "override_model_config": True,
+      "attention": "dot_product",
+      "dtype": "float32",
+      "weight_dtype": "float32",
+      "matmul_precision": "highest",
+      "float32_gate_logits": True,
+      "megablox": True,
+      "sparse_matmul": True,
+      "use_ring_of_experts": False,
+      "num_experts": 4,
+      "num_experts_per_tok": 2,
+      "load_balance_loss_weight": 0.0,
+      "routed_bias": False,
+  }
+  kwargs.update(overrides)
+  return pyconfig.initialize([None, get_test_config_path()], **kwargs)
 
 
 def _call_moe_body_return_weights(fn, s_args):
@@ -72,20 +104,7 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
 
   def _make_layer(self, *, num_ep=2, num_experts=4, num_experts_per_tok=2, emb_dim=16, mlp_dim=8, **overrides):
     """Builds a float32 RoutedMoE layer configured for multi-shard EP emulation on CPU."""
-    kwargs = {
-        "run_name": "moe_replication_wiring_cpu",
-        "base_output_directory": "/tmp/moe_expert_replication_test",
-        "enable_checkpointing": False,
-        "model_name": "mixtral-8x7b",
-        "override_model_config": True,
-        "attention": "dot_product",
-        "dtype": "float32",
-        "weight_dtype": "float32",
-        "matmul_precision": "highest",
-        "float32_gate_logits": True,
-        "megablox": True,
-        "sparse_matmul": True,
-        "use_ring_of_experts": False,
+    cfg_kw = {
         "base_emb_dim": emb_dim,
         "base_moe_mlp_dim": mlp_dim,
         "base_mlp_dim": mlp_dim,
@@ -93,15 +112,13 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
         "num_experts_per_tok": num_experts_per_tok,
         "per_device_batch_size": 2,
         "max_target_length": 4,
-        "load_balance_loss_weight": 0.0,
-        "routed_bias": False,
         "compile_topology": "v5e-8",
         "compile_topology_num_slices": 1,
         "ici_expert_parallelism": max(num_ep, 2),
         "ici_fsdp_parallelism": 8 // max(num_ep, 2),
+        **overrides,
     }
-    kwargs.update(overrides)
-    cfg = pyconfig.initialize([None, get_test_config_path()], **kwargs)
+    cfg = _init_moe_cfg("moe_replication_wiring_cpu", **cfg_kw)
     fake_mesh = types.SimpleNamespace(
         axis_names=("expert",),
         shape={"expert": num_ep},
@@ -129,14 +146,37 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
     return layer
 
   @contextlib.contextmanager
-  def _cpu_ep_runtime(self, layer, *, num_ep=2, cotangent=None, captured=None, wrap_shard_fn=None):
-    """Emulates multi-shard EP execution (and SPMD VJP when cotangent is given) on 1 CPU device."""
+  def _cpu_ep_runtime(
+      self, layer, *, num_ep=2, cotangent=None, captured=None, wrap_shard_fn=None, gmm_impl=None, num_fsdp=1
+  ):
+    """Emulates multi-shard EP (and optional FSDP) execution + SPMD VJP on 1 CPU device."""
     orig_hardware = layer.config.hardware
     shard_gs_box = []
+    mesh_axes = ("fsdp", "expert") if num_fsdp > 1 else ("expert",)
+    mesh_sizes = {"fsdp": num_fsdp, "expert": num_ep}
+
+    def _split(a, spec):
+      axes = _spec_axes(spec, mesh_sizes) if a is not None else ()
+      return (
+          jnp.reshape(
+              a, (*[mesh_sizes[ax] for ax in axes], a.shape[0] // math.prod(mesh_sizes[ax] for ax in axes), *a.shape[1:])
+          )
+          if axes
+          else a
+      )
+
+    def _vmap_axes(fn, specs):
+      for ax in reversed(mesh_axes):
+        fn = jax.vmap(
+            fn,
+            axis_name=ax,
+            in_axes=tuple(0 if ax in _spec_axes(s, mesh_sizes) else None for s in specs),
+            axis_size=mesh_sizes[ax],
+        )
+      return fn
 
     def fake_shard_map(fn, *, mesh, in_specs, out_specs, check_vma):
       del mesh, check_vma
-      in_axes = tuple(0 if _spec_shards_dim0_on_expert(s) else None for s in in_specs)
 
       def run_shard(s_args):
         shard_gs_box.clear()
@@ -144,12 +184,9 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
         return outs, (shard_gs_box[0] if shard_gs_box else None)
 
       def wrapped(*args):
-        split_args = [
-            jnp.reshape(a, (num_ep, a.shape[0] // num_ep, *a.shape[1:])) if (ax == 0 and a is not None) else a
-            for a, ax in zip(args, in_axes)
-        ]
+        split_args = [_split(a, s) for a, s in zip(args, in_specs)]
         if cotangent is not None:
-          cot_shards = jnp.reshape(cotangent, (num_ep, cotangent.shape[0] // num_ep, *cotangent.shape[1:]))
+          cot_shards = _split(cotangent, out_specs[0])
 
           def per_shard_fwd_bwd(*all_s):
             *s_args, cot_s = all_s
@@ -158,33 +195,36 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
               outs, gs = run_shard((x_, g_, s_args[2], w0_, w1_, wo_, *s_args[6:]))
               return outs[0], (outs, gs)
 
-            _, vjp_fn, (outs, gs) = jax.vjp(
-                diff_fn,
-                s_args[0],
-                s_args[1],
-                s_args[3],
-                s_args[4],
-                s_args[5],
-                has_aux=True,
-            )
+            _, vjp_fn, (outs, gs) = jax.vjp(diff_fn, s_args[0], s_args[1], s_args[3], s_args[4], s_args[5], has_aux=True)
             return outs, gs, vjp_fn(cot_s)
 
-          raw_outs, local_gs, shard_grads = jax.vmap(per_shard_fwd_bwd, axis_name="expert", in_axes=(*in_axes, 0))(
+          raw_outs, local_gs, shard_grads = _vmap_axes(per_shard_fwd_bwd, [*in_specs, out_specs[0]])(
               *split_args, cot_shards
           )
           if captured is not None:
-            captured["grads"] = tuple(jnp.reshape(g, (num_ep * g.shape[1], *g.shape[2:])) for g in shard_grads)
+
+            def _unsplit_grad(g, spec):
+              kept = _spec_axes(spec, mesh_sizes)
+              if sum_ax := tuple(i for i, ax in enumerate(mesh_axes) if ax not in kept):
+                g = jnp.sum(g, axis=sum_ax)
+              return jnp.reshape(g, (math.prod(g.shape[: len(kept) + 1]), *g.shape[len(kept) + 1 :])) if kept else g
+
+            grad_specs = (in_specs[0], in_specs[1], in_specs[3], in_specs[4], in_specs[5])
+            captured["grads"] = tuple(_unsplit_grad(g, s) for g, s in zip(shard_grads, grad_specs))
         else:
-          raw_outs, local_gs = jax.vmap(lambda *s_args: run_shard(s_args), axis_name="expert", in_axes=in_axes)(
-              *split_args
-          )
+          raw_outs, local_gs = _vmap_axes(lambda *s_args: run_shard(s_args), in_specs)(*split_args)
         if captured is not None:
           captured["local_group_sizes"] = local_gs
+        n_m = len(mesh_axes)
         return tuple(
             None
-            if val is None
-            else (jnp.reshape(val, (num_ep * val.shape[1], *val.shape[2:])) if _spec_shards_dim0_on_expert(s) else val[0])
-            for val, s in zip(raw_outs, out_specs)
+            if v is None
+            else (
+                jnp.reshape(v, (math.prod(v.shape[: n_m + 1]), *v.shape[n_m + 1 :]))
+                if _spec_axes(s, mesh_sizes)
+                else v[(0,) * n_m]
+            )
+            for v, s in zip(raw_outs, out_specs)
         )
 
       return wrapped
@@ -194,7 +234,7 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
         gs = kwargs.get("group_sizes", args[2] if len(args) > 2 else None)
         if gs is not None:
           shard_gs_box.append(gs)
-      return _pure_jax_gmm(*args, **kwargs)
+      return (gmm_impl or _pure_jax_gmm)(*args, **kwargs)
 
     try:
       object.__setattr__(layer.config, "hardware", "tpu")
@@ -207,15 +247,16 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
     finally:
       object.__setattr__(layer.config, "hardware", orig_hardware)
 
-  def _sample_tensors(self, seed, num_experts=4):
+  def _sample_tensors(self, seed, num_experts=4, batch=4, expert0_mult=1.0):
     k_in, k_log, k_w0, k_w1, k_wo, k_cot = jax.random.split(jax.random.PRNGKey(seed), 6)
+    mag = jnp.ones((num_experts, 1, 1), jnp.float32).at[0].set(expert0_mult)
     return (
-        jax.random.normal(k_in, (4, 4, 16), jnp.float32),
-        jax.random.normal(k_log, (4, 4, num_experts), jnp.float32),
-        jax.random.normal(k_w0, (num_experts, 16, 8), jnp.float32) * 0.25,
-        jax.random.normal(k_w1, (num_experts, 16, 8), jnp.float32) * 0.25,
-        jax.random.normal(k_wo, (num_experts, 8, 16), jnp.float32) * 0.25,
-        jax.random.normal(k_cot, (4, 4, 16), jnp.float32),
+        jax.random.normal(k_in, (batch, 4, 16), jnp.float32),
+        jax.random.normal(k_log, (batch, 4, num_experts), jnp.float32),
+        jax.random.normal(k_w0, (num_experts, 16, 8), jnp.float32) * 0.25 * mag,
+        jax.random.normal(k_w1, (num_experts, 16, 8), jnp.float32) * 0.25 * mag,
+        jax.random.normal(k_wo, (num_experts, 8, 16), jnp.float32) * 0.25 * mag,
+        jax.random.normal(k_cot, (batch, 4, 16), jnp.float32),
     )
 
   def test_flag_off_skips_replication_modules(self):
@@ -627,6 +668,373 @@ class PlannerDrivenReplicaWeightsTpuTest(parameterized.TestCase):
     np.testing.assert_array_equal(np.asarray(out, dtype=np.float32), np.concatenate([w_ref, reps_ref], axis=1))
     tol = 1e-2 if compute_dtype == jnp.bfloat16 else 1e-5
     np.testing.assert_allclose(np.asarray(dw), g_ref[:, :local] + dw_rep_ref, rtol=tol, atol=tol)
+
+
+_FP8_FULL_KW = {
+    "quantization": "fp8_full",
+    "use_qwix_quantization": True,
+    "use_tokamax_gmm": True,
+    "use_gmm_v2": True,
+    "quantize_router_proj": False,
+}
+
+
+def _group_bounds(group_sizes, group_offset, n_rows):
+  offset = 0 if group_offset is None else jnp.asarray(group_offset, jnp.int32).reshape(())
+  starts = jnp.concatenate([jnp.zeros((1,), jnp.int32), jnp.cumsum(group_sizes.astype(jnp.int32))])
+  return starts, offset, jnp.arange(n_rows, dtype=jnp.int32)
+
+
+def _ref_gmm_v2(
+    lhs, rhs, group_sizes, rhs_scale=None, rhs_bias=None, partial_sum=None, group_offset=None, lhs_scale=None, **kw
+):
+  """Pure-JAX stand-in for tokamax gmm_v2 (`rhs_scale` [G, 1, 1, N])."""
+  assert rhs_bias is None and not kw.get("out_is_3d")
+  rhs = rhs.swapaxes(1, 2) if kw.get("transpose_rhs") else rhs
+  x, post_scale = lhs.astype(jnp.float32), None if lhs_scale is None else lhs_scale.reshape(())
+  if kw.get("maybe_quantize_lhs", True) and jnp.dtype(rhs.dtype).itemsize == 1 and jnp.dtype(lhs.dtype).itemsize > 1:
+    if post_scale is None:
+      post_scale = jnp.maximum(jnp.max(jnp.abs(x), axis=1, keepdims=True), 1e-12) / 448.0
+    x = jnp.clip(x / post_scale, -448.0, 448.0).astype(jnp.float8_e4m3fn).astype(jnp.float32)
+  starts, offset, rows = _group_bounds(group_sizes, group_offset, x.shape[0])
+  out = jnp.zeros((x.shape[0], rhs.shape[2]), jnp.float32)
+  for g in range(rhs.shape[0]):
+    proj = jnp.dot(x, rhs[g].astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
+    if rhs_scale is not None:
+      proj = proj * rhs_scale[g, 0, 0][None, :]
+    out = jnp.where(((rows >= starts[offset + g]) & (rows < starts[offset + g + 1]))[:, None], proj, out)
+  out = out * post_scale if post_scale is not None else out
+  out = out + partial_sum.astype(jnp.float32) if partial_sum is not None else out
+  return out.astype(kw.get("preferred_element_type") or lhs.dtype)
+
+
+def _ref_tgmm_v2(lhs, rhs, group_sizes, num_actual_groups, rhs_scale=None, partial_sum=None, group_offset=None, **kw):
+  """Pure-JAX stand-in for tokamax tgmm_v2 (`out[g] = lhs[rows_g]^T @ rhs[rows_g] * rhs_scale`)."""
+  x, y = lhs.astype(jnp.float32), rhs.astype(jnp.float32)
+  starts, offset, rows = _group_bounds(group_sizes, group_offset, x.shape[0])
+  out = jnp.stack(
+      [
+          jnp.dot(
+              jnp.where(((rows >= starts[offset + g]) & (rows < starts[offset + g + 1]))[:, None], x, 0.0).T,
+              y,
+              precision=jax.lax.Precision.HIGHEST,
+          )
+          for g in range(num_actual_groups)
+      ]
+  )
+  out = out * rhs_scale.reshape(1, 1, -1) if rhs_scale is not None else out
+  out = out + partial_sum.astype(jnp.float32) if partial_sum is not None else out
+  return out.astype(kw.get("preferred_element_type") or jnp.float32)
+
+
+def _fp8_cal_kw(calibration):
+  w_act, bwd = {
+      "absmax": ("absmax", "absmax"),
+      "absmax_fixed_bwd": ("absmax", "fixed,0.00125"),
+      "fixed": ("fixed,-224,224", "fixed,0.00125"),
+  }[calibration]
+  return {
+      "weight_quantization_calibration_method": w_act,
+      "act_quantization_calibration_method": w_act,
+      "bwd_quantization_calibration_method": bwd,
+  }
+
+
+class RoutedMoEReplicationFp8Test(parameterized.TestCase):
+  """CPU tests for Qwix fp8_full (dynamic & static, prefused & unfused, 2D FSDP x EP, token_mask) and fp8_moe_fake_quant."""
+
+  _make_layer = RoutedMoEReplicationWiringTest._make_layer  # pylint: disable=protected-access
+  _cpu_ep_runtime = RoutedMoEReplicationWiringTest._cpu_ep_runtime  # pylint: disable=protected-access
+  _sample_tensors = RoutedMoEReplicationWiringTest._sample_tensors  # pylint: disable=protected-access
+
+  def _run(self, layer, tensors, forced, quantized, *, num_fsdp=1, token_mask=None):
+    """Runs sparse_matmul fwd+bwd with optional Qwix gmm rule and pure-JAX gmm_v2/tgmm_v2."""
+    inputs, logits, w0, w1, wo, cotangent = tensors
+    captured = {}
+    with contextlib.ExitStack() as stack:
+      gmm_impl = None
+      if quantized:
+        rule = quantizations.get_fp8_full_qwix_rule_w_sparsity(layer.config)[-1]
+        stack.enter_context(mock.patch.object(qpl, "get_current_rule", lambda op: rule if op == "gmm" else None))
+        stack.enter_context(mock.patch.object(mblx_ops.gmm_v2, "gmm_v2", _ref_gmm_v2))
+        stack.enter_context(mock.patch.object(mblx_ops.tgmm_v2, "tgmm_v2", _ref_tgmm_v2))
+        gmm_impl = mblx_ops.gmm
+      stack.enter_context(
+          self._cpu_ep_runtime(
+              layer, num_ep=2, num_fsdp=num_fsdp, cotangent=cotangent, captured=captured, gmm_impl=gmm_impl
+          )
+      )
+      out, _, _ = layer.sparse_matmul(
+          inputs, logits, None, w0, w1, wo, None, None, None, forced_routed_experts=forced, token_mask=token_mask
+      )
+    return out, captured
+
+  def _inputs(self, seed=7, batch=4):
+    """Generates skewed 4-expert routing inputs with 4x larger weights on hot expert 0."""
+    forced = jnp.broadcast_to(jnp.array([[0, 1], [0, 1], [0, 1], [0, 2]], dtype=jnp.int32)[None], (batch, 4, 2))
+    return self._sample_tensors(seed, batch=batch, expert0_mult=4.0), forced
+
+  def _assert_fp8_parity(self, out_rep, cap_rep, out_ref, cap_ref, out_hp, cap_hp, *, exact_dw):
+    """Asserts FP8 output/grad parity with R=0 and separation from BF16/FP32."""
+    self.assertGreater(float(np.max(np.abs(np.asarray(out_ref) - np.asarray(out_hp)))), 1e-4)
+    np.testing.assert_allclose(np.asarray(out_rep), np.asarray(out_ref), rtol=1e-5, atol=1e-5)
+    for name, g_rep, g_ref, g_hp in zip(
+        ("dx", "dlogits", "dw0", "dw1", "dwo"), cap_rep["grads"], cap_ref["grads"], cap_hp["grads"]
+    ):
+      with self.subTest(grad=name):
+        g_rep_a, g_ref_a, g_hp_a = (np.asarray(g, np.float64) for g in (g_rep, g_ref, g_hp))
+        if exact_dw or not name.startswith("dw"):
+          np.testing.assert_allclose(g_rep_a, g_ref_a, rtol=1e-5, atol=1e-5)
+        else:
+          self.assertLessEqual(
+              np.linalg.norm(g_rep_a - g_ref_a) / np.linalg.norm(g_ref_a),
+              np.linalg.norm(g_ref_a - g_hp_a) / np.linalg.norm(g_hp_a),
+          )
+
+  @parameterized.named_parameters(
+      ("absmax", "absmax", False, False, 1, True),
+      ("absmax_fixed_bwd", "absmax_fixed_bwd", False, False, 1, True),
+      ("fixed", "fixed", False, False, 1, True),
+      ("absmax_prefuse", "absmax", True, False, 1, True),
+      ("fixed_pertensor_prefuse", "fixed", True, True, 1, True),
+      ("fixed_2d_skewed", "fixed", False, False, 2, True),
+      ("fixed_2d_balanced_no_send", "fixed", False, False, 2, False),
+  )
+  def test_fp8_full_replication_matches_r0(self, calibration, prefuse, disable_cw, num_fsdp, skewed):
+    """Covers dynamic/static calibration, channelwise/per-tensor, prefuse, 1D/2D meshes, and zero-send."""
+    tensors, forced = self._inputs(seed=7 if num_fsdp == 1 else 13, batch=4 * num_fsdp)
+    if not skewed:
+      forced = jnp.broadcast_to(jnp.array([[0, 2], [1, 3], [0, 2], [1, 3]], dtype=jnp.int32)[None], (4 * num_fsdp, 4, 2))
+    fp8_kw = {
+        **_FP8_FULL_KW,
+        "prefuse_moe_weights": prefuse,
+        "qwix_disable_channelwise_axes": disable_cw,
+        "ici_expert_parallelism": 2,
+        "ici_fsdp_parallelism": num_fsdp if num_fsdp > 1 else 4,
+        **_fp8_cal_kw(calibration),
+    }
+
+    def _build(replicas, quant=True):
+      layer = self._make_layer(
+          num_ep=2,
+          expert_replicas_per_device=replicas,
+          expert_replica_max_send=2,
+          **(fp8_kw if quant else {"prefuse_moe_weights": prefuse}),
+      )
+      if num_fsdp > 1:
+
+        def _axes_2d(axes):
+          return P(
+              *(
+                  ("fsdp", "expert") if a == "activation_batch" else ("expert" if a in ("exp", "exp_with_fsdp") else None)
+                  for a in axes
+              )
+          )
+
+        layer._logical_to_mesh_axes = _axes_2d  # pylint: disable=protected-access
+      return layer
+
+    out_ref, cap_ref = self._run(_build(0), tensors, forced, True, num_fsdp=num_fsdp)
+    out_rep, cap_rep = self._run(_build(1), tensors, forced, True, num_fsdp=num_fsdp)
+    out_hp, cap_hp = self._run(_build(0, False), tensors, forced, False, num_fsdp=num_fsdp)
+    rep_gs = int(np.asarray(cap_rep["local_group_sizes"])[..., -1].sum())
+    if not skewed:
+      self.assertEqual(rep_gs, 0)
+    else:
+      self.assertGreater(rep_gs, 0)
+    self._assert_fp8_parity(out_rep, cap_rep, out_ref, cap_ref, out_hp, cap_hp, exact_dw=calibration != "absmax")
+
+  def test_fp8_moe_fake_quant_replication_matches_r0(self):
+    """fp8_moe_fake_quant rounds weights before sparse_matmul, so dense replication matches R=0."""
+    (inputs, _, w0, w1, wo, cotangent), forced = self._inputs(seed=21)
+
+    def _run_call(replicas, fake_quant=True):
+      layer = self._make_layer(
+          expert_replicas_per_device=replicas, expert_replica_max_send=2, fp8_moe_fake_quant=fake_quant
+      )
+      layer.wi_0[...], layer.wi_1[...], layer.wo[...] = w0, w1, wo
+      cap = {}
+      with self._cpu_ep_runtime(layer, cotangent=cotangent, captured=cap):
+        out, _, _ = layer(inputs, forced_routed_experts=forced)
+      return out, cap
+
+    out_hp, _ = _run_call(0, False)
+    out_ref, cap_ref = _run_call(0)
+    out_rep, cap_rep = _run_call(1)
+    self.assertGreater(float(np.max(np.abs(np.asarray(out_ref) - np.asarray(out_hp)))), 1e-4)
+    self.assertGreater(int(np.asarray(cap_rep["local_group_sizes"])[1, -1]), 0)
+    np.testing.assert_allclose(np.asarray(out_rep), np.asarray(out_ref), rtol=1e-5, atol=1e-5)
+    for g_rep, g_ref in zip(cap_rep["grads"], cap_ref["grads"]):
+      np.testing.assert_allclose(np.asarray(g_rep), np.asarray(g_ref), rtol=1e-5, atol=1e-5)
+
+  def test_quantized_runtime_requires_gmm_v2_on_tpu(self):
+    """Raises NotImplementedError when a Qwix gmm rule is active without tokamax gmm_v2 on TPU."""
+    (inputs, logits, w0, w1, wo, _), forced = self._inputs()
+    layer = self._make_layer(expert_replicas_per_device=1, expert_replica_max_send=2)
+    rule = qwix.QtRule(module_path=".*", weight_qtype=jnp.float8_e4m3fn, op_names=("gmm",))
+    object.__setattr__(layer.config, "use_qwix_quantization", True)
+    with (
+        mock.patch.object(qpl, "get_current_rule", lambda op: rule if op == "gmm" else None),
+        self._cpu_ep_runtime(layer),
+    ):
+      with self.assertRaisesRegex(NotImplementedError, "gmm_v2"):
+        layer.sparse_matmul(inputs, logits, None, w0, w1, wo, None, None, None, forced_routed_experts=forced)
+
+  @parameterized.named_parameters(("absmax", "absmax"), ("fixed", "fixed"))
+  def test_fp8_full_padded_tokens_stay_on_home_slots_and_match_r0(self, calibration):
+    """Padded tokens (token_mask=False) stay out of FP8 planner counts and replica slots, matching R=0."""
+    (inputs, base_logits, w0, w1, wo, cotangent), _ = self._inputs(seed=29)
+    token_mask = jnp.array(
+        [[False, False, False, False], [True, False, True, False], [True, True, True, True], [True, True, True, False]],
+        dtype=jnp.bool_,
+    )
+    logits = base_logits.at[:2, :, 2].set(12.0).at[:2, :, 0].set(9.0).at[:2, :, 1].set(-8.0).at[:2, :, 3].set(-8.0)
+    logits = logits.at[2:, :, 2].set(12.0).at[2:, :, 3].set(9.0).at[2:, :, 0].set(-8.0).at[2:, :, 1].set(-8.0)
+    fp8_kw = {**_FP8_FULL_KW, **_fp8_cal_kw(calibration)}
+    seen_counts, orig_plan = [], mrp.compute_plan_iter
+
+    def _run_padded(reps, pad_val, quant=True):
+      layer = self._make_layer(
+          expert_replicas_per_device=reps,
+          expert_replica_max_send=2,
+          ici_expert_parallelism=2,
+          **(fp8_kw if quant else {}),
+      )
+      padded = (jnp.where(token_mask[..., None], inputs, jnp.float32(pad_val)), logits, w0, w1, wo, cotangent)
+      return self._run(layer, padded, None, quant, token_mask=token_mask)
+
+    out_ref, cap_ref = _run_padded(0, 500.0)
+    out_hp, cap_hp = _run_padded(0, 500.0, False)
+    out_zero, cap_zero = _run_padded(1, 0.0)
+    with mock.patch.object(
+        mrp,
+        "compute_plan_iter",
+        side_effect=lambda c, *a: (jax.debug.callback(lambda x: seen_counts.append(np.asarray(x)), c), orig_plan(c, *a))[
+            1
+        ],
+    ):
+      out_rep, cap_rep = _run_padded(1, 500.0)
+    self.assertNotEmpty(seen_counts)
+    for c in seen_counts:
+      np.testing.assert_array_equal(c, np.array([[2, 0, 2, 0], [0, 0, 7, 7]], dtype=np.int32))
+    np.testing.assert_array_equal(np.asarray(cap_rep["local_group_sizes"])[:, 2], np.array([2, 0], dtype=np.int32))
+    pad_mask = ~np.asarray(token_mask)
+    np.testing.assert_array_equal(np.asarray(out_rep)[pad_mask], 0.0)
+    np.testing.assert_array_equal(np.asarray(cap_rep["grads"][0])[pad_mask], 0.0)
+    np.testing.assert_array_equal(np.asarray(cap_rep["grads"][1])[pad_mask], 0.0)
+    np.testing.assert_allclose(np.asarray(out_rep), np.asarray(out_zero), rtol=1e-5, atol=1e-5)
+    for g_rep, g_zero in zip(cap_rep["grads"], cap_zero["grads"]):
+      np.testing.assert_allclose(np.asarray(g_rep), np.asarray(g_zero), rtol=1e-5, atol=1e-5)
+    self._assert_fp8_parity(out_rep, cap_rep, out_ref, cap_ref, out_hp, cap_hp, exact_dw=calibration != "absmax")
+
+
+@pytest.mark.tpu_only
+class RoutedMoEReplicationFp8TpuTest(parameterized.TestCase):
+  """End-to-end TPU tests exercising real Qwix interception + Pallas gmm_v2/tgmm_v2 with R>0 vs R=0."""
+
+  _TILE_OVERRIDES = {
+      f"{p}_tile_{s}_{d}": 256 if d == "mlp_dim" else 128
+      for p in ("wi", "wo")
+      for s in ("fwd", "dlhs", "drhs")
+      for d in ("batch_seq", "embed_dim", "mlp_dim")
+  }
+
+  def _run_tpu(
+      self, replicas, calibration, prefuse, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp, forced, x, cotangent
+  ):
+    """Compiles and executes quantized RoutedMoE fwd+bwd on TPU via Qwix + tokamax gmm_v2/tgmm_v2."""
+    cfg = _init_moe_cfg(
+        "moe_replication_fp8_tpu",
+        **_FP8_FULL_KW,
+        **self._TILE_OVERRIDES,
+        **_fp8_cal_kw(calibration),
+        base_emb_dim=256,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=256,
+        dtype="bfloat16",
+        per_device_batch_size=2,
+        max_target_length=64,
+        prefuse_moe_weights=prefuse,
+        ici_expert_parallelism=ici_ep,
+        ici_fsdp_parallelism=ici_fsdp,
+        shard_embed_moe_on_fsdp=shard_embed_fsdp,
+        qwix_disable_channelwise_axes=disable_cw,
+        expert_replicas_per_device=replicas,
+        expert_replica_max_send=2,
+    )
+    mesh = Mesh(np.asarray(jax.devices()[: ici_ep * ici_fsdp]).reshape(ici_fsdp, ici_ep), ("fsdp", "expert"))
+    rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        weight_calibration_method=cfg.weight_quantization_calibration_method,
+        act_calibration_method=cfg.act_quantization_calibration_method,
+        bwd_calibration_method=cfg.bwd_quantization_calibration_method,
+        disable_channelwise_axes=cfg.qwix_disable_channelwise_axes,
+        op_names=("gmm", "ragged_dot"),
+    )
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      layer = moe.RoutedMoE(
+          config=cfg,
+          num_experts=4,
+          num_experts_per_tok=2,
+          mesh=mesh,
+          kernel_init=initializers.nd_dense_init(1.0, "fan_in", "truncated_normal"),
+          kernel_axes=("embed", "mlp"),
+          intermediate_dim=256,
+          dtype=jnp.bfloat16,
+          weight_dtype=jnp.float32,
+          rngs=nnx.Rngs(0),
+      )
+      layer = qwix.quantize_model(layer, qwix.QtProvider([rule]), x, forced_routed_experts=forced)
+      nnx.pop(layer, nnx.Intermediate)
+
+      @nnx.jit
+      def step(m, h):
+        def loss_fn(m_, h_):
+          out, _, _ = m_(h_, forced_routed_experts=forced)
+          return jnp.sum(out.astype(jnp.float32) * cotangent.astype(jnp.float32)), out
+
+        (_, out), (m_grad, x_grad) = nnx.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)(m, h)
+        return out, x_grad, m_grad
+
+      return step(layer, x)
+
+  @parameterized.named_parameters(
+      ("absmax_ep2", "absmax", False, False, 2, 1, False),
+      ("absmax_prefuse_ep2", "absmax", True, False, 2, 1, False),
+      ("fixed_pertensor_prefuse_ep2", "fixed", True, True, 2, 1, False),
+      ("fixed_2d_fsdp_ep_qag", "fixed", True, True, 2, 2, True),
+  )
+  def test_tpu_fp8_replication_parity_with_r0(self, calibration, prefuse, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp):
+    """Verifies real Pallas gmm_v2 + tgmm_v2 fwd/bwd parity between R=1 and R=0 on TPU."""
+    if len(jax.devices()) < ici_ep * ici_fsdp:
+      self.skipTest(f"Requires >= {ici_ep * ici_fsdp} TPU devices, got {len(jax.devices())}.")
+    total_batch = 2 * ici_ep * ici_fsdp
+    k_x, k_c = jax.random.split(jax.random.PRNGKey(31), 2)
+    x = jax.random.normal(k_x, (total_batch, 64, 256), jnp.bfloat16)
+    cotangent = jax.random.normal(k_c, (total_batch, 64, 256), jnp.float32)
+    forced = (
+        jnp.broadcast_to(jnp.broadcast_to(jnp.array([[0, 1]], jnp.int32), (64, 2))[None], (total_batch, 64, 2))
+        .at[:, -1, :]
+        .set(jnp.array([2, 3], jnp.int32))
+    )
+    args = (calibration, prefuse, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp, forced, x, cotangent)
+    out_ref, dx_ref, mg_ref = self._run_tpu(0, *args)
+    out_rep, dx_rep, mg_rep = self._run_tpu(1, *args)
+    tol = 2e-2 if calibration == "fixed" else 3e-2
+    np.testing.assert_allclose(np.asarray(out_rep, np.float32), np.asarray(out_ref, np.float32), rtol=tol, atol=tol)
+    np.testing.assert_allclose(np.asarray(dx_rep, np.float32), np.asarray(dx_ref, np.float32), rtol=tol, atol=tol)
+    for attr in ("wi", "wo") if prefuse else ("wi_0", "wi_1", "wo"):
+      g_rep, g_ref = np.asarray(getattr(mg_rep, attr)[...], np.float64), np.asarray(
+          getattr(mg_ref, attr)[...], np.float64
+      )
+      self.assertLess(
+          np.linalg.norm(g_rep - g_ref) / np.maximum(np.linalg.norm(g_ref), 1e-12),
+          2e-2 if calibration == "fixed" else 8e-2,
+          msg=attr,
+      )
 
 
 if __name__ == "__main__":
