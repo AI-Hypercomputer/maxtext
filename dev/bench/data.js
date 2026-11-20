@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795164188823,
+  "lastUpdate": 1795181273417,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -74050,6 +74050,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3057.927999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 400,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Tianshu Bao",
+            "username": "tianshub",
+            "email": "tsbao@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "23299595370d523ba3c958603c6477bbb0b99dd9",
+          "message": "Install `tpu_inference`'s dual-pool `TPUHybridKVCacheCoordinator` hooks during `patched_get_kv_cache_spec` for hybrid Qwen3-Next / Qwen3.5 vLLM rollouts.\n\nWhen `AsyncLLMEngine` spawns an `EngineCore` child process on a single host (`UniProcExecutor` with `enable_dp_attention=False`), `TPUPlatform.check_and_update_config` runs only in the parent process, and neither `UniProcExecutor` nor vLLM's default `Scheduler` re-installs `TPUHybridKVCacheCoordinator` in `EngineCore`. Consequently, `EngineCore` constructs upstream vLLM's single-pool `HybridKVCacheCoordinator` over the attention block pool (`num_gpu_blocks_override`) while physical Mamba state buffers are sized to `_mamba_num_blocks`, clamping block IDs `>= _mamba_num_blocks` onto the last Mamba state slot and corrupting recurrent states across concurrent multi-turn requests.\n\nInvoke `maybe_install_hybrid_coordinator_hooks` in `patched_get_kv_cache_spec` right after `_maybe_set_compact_mamba_num_blocks_override` populates `_mamba_num_blocks` and before `EngineCore` instantiates `Scheduler`, and add unit tests in `vllm_adapter_mamba_block_size_test.py`.\n\nPiperOrigin-RevId: 1026316341",
+          "timestamp": "2026-11-20T10:28:34Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/23299595370d523ba3c958603c6477bbb0b99dd9"
+        },
+        "date": 1795181272646,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 218.90199999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 55.419000000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2221.945,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 175.71399999999988,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 333.01300000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3056.973,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 400,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1877.562,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 353.46299999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 82,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3084.1209999999996,
             "unit": "sec"
           },
           {
