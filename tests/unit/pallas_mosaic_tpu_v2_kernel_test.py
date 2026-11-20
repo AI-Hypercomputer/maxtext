@@ -1788,5 +1788,122 @@ class GmmTest(parameterized.TestCase):
     chex.assert_trees_all_close(actual, expected, atol=atol, rtol=rtol)
 
 
+# Short, empty, sublane-unaligned, single- and multi-window groups (tile_m 256 to 1024), and padding rows past the last.
+_TGMM_STEP_GROUP_SIZES = (1, 0, 7, 255, 256, 257, 300, 511, 513, 700, 33, 1000, 1600, 2100)
+_TGMM_STEP_ROWS = 8192
+
+
+@pytest.mark.tpu_only
+class TgmmStepConfigTest(parameterized.TestCase):
+  """tgmm_v2 is bit-identical for every (windows per grid step, buffer depth) it can pick."""
+
+  def setUp(self):
+    if jax.default_backend() != "tpu":
+      self.skipTest("Only supported on TPUs.")
+    super().setUp()
+
+  def _run(self, step, lhs, rhs, tile_info, num_groups, **kwargs):
+    """tgmm_v2 with _TGMM_STEP_CANDIDATES = (step,); checks that tgmm_v2 picked step."""
+    jax.clear_caches()  # tgmm_v2 is jitted; retrace with the patched candidates.
+    picked = []
+    kernel_main = tgmm_backend.tgmm_kernel_main
+
+    def recording_kernel_main(*args, num_sub, num_buffers, **kw):
+      picked.append((num_sub, num_buffers))
+      return kernel_main(*args, num_sub=num_sub, num_buffers=num_buffers, **kw)
+
+    with (
+        mock.patch.object(tgmm_backend, "_TGMM_STEP_CANDIDATES", (step,)),
+        mock.patch.object(tgmm_backend, "tgmm_kernel_main", recording_kernel_main),
+    ):
+      out = tgmm_backend.tgmm_v2(
+          lhs,
+          rhs,
+          jnp.asarray(_TGMM_STEP_GROUP_SIZES, jnp.int32),
+          num_groups,
+          tile_info=tile_info,
+          preferred_element_type=jnp.bfloat16,
+          **kwargs,
+      )
+      out = jax.block_until_ready(out)
+    self.assertEqual(set(picked), {step})
+    return out
+
+  def _check(self, lhs, rhs, tile_info, num_groups=len(_TGMM_STEP_GROUP_SIZES), steps=None, reference=True, **kwargs):
+    """Every step in steps matches (1, 2) bit for bit; (1, 2) matches reference_tgmm within tolerance."""
+    steps = steps or ((2, 2), (3, 2), (1, 3), (2, 3), (3, 3))
+    want = self._run((1, 2), lhs, rhs, tile_info, num_groups, **kwargs)
+    self.assertGreater(float(jnp.abs(want.astype(jnp.float32)).max()), 0.0)
+    if reference:
+      expected = reference_tgmm(
+          lhs.swapaxes(0, 1),
+          rhs,
+          jnp.asarray(_TGMM_STEP_GROUP_SIZES, jnp.int32),
+          num_groups,
+          group_offset=kwargs.get("group_offset"),
+          partial_sum=kwargs.get("partial_sum"),
+      )
+      assert_arrays_all_close(want, expected)
+    for step in steps:
+      got = self._run(step, lhs, rhs, tile_info, num_groups, **kwargs)
+      chex.assert_trees_all_equal(got, want)
+
+  @parameterized.parameters(256, 512, 1024)
+  def test_2d_bf16(self, tile_m):
+    k0, k1 = jax.random.split(jax.random.key(tile_m))
+    lhs = jax.random.normal(k0, (_TGMM_STEP_ROWS, 768), jnp.bfloat16)
+    rhs = jax.random.normal(k1, (_TGMM_STEP_ROWS, 512), jnp.bfloat16)
+    self._check(lhs, rhs, gmm_backend.TileSizes(tile_m=tile_m, tile_k=768, tile_n=512))
+
+  def test_2d_partial_sum_group_offset(self):
+    k0, k1, k2 = jax.random.split(jax.random.key(1), 3)
+    lhs = jax.random.normal(k0, (_TGMM_STEP_ROWS, 512), jnp.bfloat16)
+    rhs = jax.random.normal(k1, (_TGMM_STEP_ROWS, 512), jnp.bfloat16)
+    partial_sum = jax.random.normal(k2, (9, 512, 512), jnp.bfloat16)
+    self._check(
+        lhs,
+        rhs,
+        gmm_backend.TileSizes(tile_m=512, tile_k=512, tile_n=512),
+        num_groups=9,
+        partial_sum=partial_sum,
+        group_offset=jnp.array([3], jnp.int32),
+    )
+
+  def test_2d_fp8_rhs_scale(self):
+    k0, k1, k2 = jax.random.split(jax.random.key(2), 3)
+    lhs = (jax.random.normal(k0, (_TGMM_STEP_ROWS, 512)) * 4).astype(jnp.float8_e4m3fn)
+    rhs = (jax.random.normal(k1, (_TGMM_STEP_ROWS, 512)) * 4).astype(jnp.float8_e4m3fn)
+    rhs_scale = jnp.abs(jax.random.normal(k2, (1, 1, 512), jnp.float32)) * 0.01
+    self._check(
+        lhs,
+        rhs,
+        gmm_backend.TileSizes(tile_m=512, tile_k=512, tile_n=512),
+        reference=False,
+        rhs_scale=rhs_scale,
+    )
+
+  @parameterized.parameters("lhs", "rhs")
+  def test_3d_matches_2d(self, which):
+    """3D lhs / rhs keep one window per step at depth 2 and match the 2D kernel's default pick."""
+    k0, k1 = jax.random.split(jax.random.key(3))
+    lhs = jax.random.normal(k0, (_TGMM_STEP_ROWS, 1024), jnp.bfloat16)
+    rhs = jax.random.normal(k1, (_TGMM_STEP_ROWS, 1024), jnp.bfloat16)
+    tile_info = gmm_backend.TileSizes(tile_m=512, tile_k=1024, tile_n=1024)
+    num_groups = len(_TGMM_STEP_GROUP_SIZES)
+    want = self._run((3, 3), lhs, rhs, tile_info, num_groups)
+    lhs3, rhs3 = (
+        (lhs.reshape(_TGMM_STEP_ROWS, -1, 128), rhs) if which == "lhs" else (lhs, rhs.reshape(_TGMM_STEP_ROWS, -1, 128))
+    )
+    got = tgmm_backend.tgmm_v2(
+        lhs3,
+        rhs3,
+        jnp.asarray(_TGMM_STEP_GROUP_SIZES, jnp.int32),
+        num_groups,
+        tile_info=tile_info,
+        preferred_element_type=jnp.bfloat16,
+    )
+    chex.assert_trees_all_equal(got, want)
+
+
 if __name__ == "__main__":
   absltest.main()
