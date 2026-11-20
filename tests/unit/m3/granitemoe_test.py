@@ -31,6 +31,7 @@ import math
 import re
 import subprocess
 import tempfile
+import types
 from typing import Any
 import unittest
 
@@ -231,16 +232,27 @@ def _assert_zero_expert_all_gather(hlo_text: str, forbidden: Mapping[tuple[int, 
   """Asserts that compiled HLO contains zero all-gather ops producing expert weight shapes."""
   for line in hlo_text.splitlines():
     stripped = line.strip()
-    if stripped.startswith("//"):
+    if stripped.startswith("//") or "=" not in stripped:
       continue
-    m = _ALL_GATHER_RE.search(stripped)
+    rhs = stripped.split("=", 1)[1]
+    m = _ALL_GATHER_RE.search(rhs)
     if m is None:
       continue
-    lhs = stripped[: m.start()]
-    for dims_str in _HLO_SHAPE_RE.findall(lhs):
+    shape_prefix = rhs[: m.start()]
+    for dims_str in _HLO_SHAPE_RE.findall(shape_prefix):
       shape = tuple(int(d) for d in dims_str.split(",") if d.strip())
       if shape in forbidden:
         raise AssertionError(f"[{tag}] Forbidden expert weight all-gather of {forbidden[shape]} {shape}: {stripped}")
+
+
+def _grad_jaxpr_text(module: nnx.Module, x: jax.Array, cot: jax.Array, *call_args: jax.Array) -> str:
+  """Returns the jaxpr text of `grad(sum(module(x, *call_args) * cot))` w.r.t. module state and `x`."""
+  graphdef, state = nnx.split(module)
+
+  def _pure(st, x_in):
+    return jnp.sum(nnx.merge(graphdef, st)(x_in, *call_args) * cot)
+
+  return str(jax.make_jaxpr(jax.grad(_pure, argnums=(0, 1)))(state, x))
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1256,6 +1268,401 @@ class GraniteMoeGoldenParityAndPerturbTest(absltest.TestCase):
 
     # Direct tensor pass-through:
     self.assertIs(_extract_hf_router_logits(expected_logits, num_experts), expected_logits)
+
+
+class GraniteMoeTokamaxExecutionTest(absltest.TestCase):
+  """Config validation, single-device, and multi-device Tokamax tests for GraniteMoe."""
+
+  def setUp(self):
+    super().setUp()
+    # Keep eager sharding on across full-suite collection (e.g., wan modules flip flax_always_shard_variable=False).
+    self.enter_context(nnx.use_eager_sharding(True))
+
+  def _sync_nnx_vars(self, src_mod: Any, dst_mod: Any) -> None:
+    for (_, s_var), (_, d_var) in zip(
+        _flatten_nnx_vars(nnx.state(src_mod)),
+        _flatten_nnx_vars(nnx.state(dst_mod)),
+        strict=True,
+    ):
+      shd = getattr(d_var.get_value(), "sharding", None)
+      d_var.set_value(jax.device_put(s_var.get_value(), shd) if shd is not None else jnp.asarray(s_var.get_value()))
+
+  def test_sparse_matmul_config_validation_and_sharding_axes(self):
+    self.assertTrue(modeling_granitemoe.GraniteMoeConfig().sparse_matmul)
+    self.assertFalse(_make_mini_config(sparse_matmul=False).sparse_matmul)
+    for bad_bool in ("yes", "false", 1, 0, None):
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        _make_mini_config(sparse_matmul=bad_bool)
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        modeling_granitemoe.GraniteMoeConfig.from_maxtext_config(types.SimpleNamespace(sparse_matmul=bad_bool))
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        modeling_granitemoe.GraniteMoeConfig.from_maxtext_config(
+            modeling_granitemoe.GraniteMoeConfig(), sparse_matmul=bad_bool
+        )
+
+    ns = types.SimpleNamespace(sparse_matmul=True)
+    self.assertTrue(modeling_granitemoe.GraniteMoeConfig.from_maxtext_config(ns).sparse_matmul)
+    self.assertFalse(modeling_granitemoe.GraniteMoeConfig.from_maxtext_config(ns, sparse_matmul=False).sparse_matmul)
+
+    ns_moe = types.SimpleNamespace(
+        sparse_matmul=True,
+        use_tokamax_gmm=True,
+        megablox=False,
+        capacity_factor=1.25,
+        ragged_buffer_factor=1.5,
+        use_ragged_sort=True,
+        moe_bwd_wgrad_overlap=True,
+        hardware="cpu",
+    )
+    c_moe = modeling_granitemoe.GraniteMoeConfig.from_maxtext_config(ns_moe)
+    self.assertTrue(c_moe.use_tokamax_gmm)
+    self.assertFalse(c_moe.megablox)
+    self.assertEqual(c_moe.capacity_factor, 1.25)
+    self.assertEqual(c_moe.ragged_buffer_factor, 1.5)
+    self.assertTrue(c_moe.use_ragged_sort)
+    self.assertTrue(c_moe.moe_bwd_wgrad_overlap)
+    self.assertEqual(c_moe.hardware, "cpu")
+    mesh_1 = m3_sharding.create_mesh(devices=jax.devices()[:1])
+    with jax.set_mesh(mesh_1):
+      exp_moe = modeling_granitemoe.GraniteMoeExperts(
+          dataclasses.replace(c_moe, hidden_size=32, intermediate_size=16, num_local_experts=4, num_experts_per_tok=2),
+          sharding=modeling_granitemoe.GraniteMoeSharding(),
+          rngs=nnx.Rngs(0),
+      )
+    self.assertEqual(exp_moe.executor.kind, "tokamax")
+    self.assertEqual(exp_moe.executor.capacity_factor, 1.25)
+    self.assertEqual(exp_moe.executor.ragged_buffer_factor, 1.5)
+    self.assertTrue(exp_moe.executor.use_ragged_sort)
+    self.assertTrue(exp_moe.executor.bwd_wgrad_overlap)
+
+    shd = modeling_granitemoe.GraniteMoeSharding()
+    self.assertEqual(
+        shd("input_linear", ("experts", "expert_embed", "expert_mlp")),
+        jax.sharding.PartitionSpec(("fsdp", "expert"), None, "tensor"),
+    )
+
+  def test_single_and_multidevice_tokamax_forward_vjp_parity_and_no_weight_all_gather(self):
+    cfg_ref = _make_mini_config(sparse_matmul=False)
+    cfg_tok = _make_mini_config(sparse_matmul=True)
+    exp_ref = modeling_granitemoe.GraniteMoeExperts(cfg_ref, rngs=nnx.Rngs(5))
+    exp_tok = modeling_granitemoe.GraniteMoeExperts(cfg_tok, rngs=nnx.Rngs(5))
+    self._sync_nnx_vars(exp_ref, exp_tok)
+
+    # Small token count (2 * 3 = 6 tokens * top_k=2 -> M=12 < 128) + sentinel -1 unassigned slot (F6, F8).
+    x = jax.random.normal(jax.random.PRNGKey(13), (2, 3, cfg_ref.hidden_size), dtype=jnp.float32)
+    idx = jnp.array([[[0, 1], [2, -1], [4, 5]], [[1, 3], [6, 7], [0, -1]]], dtype=jnp.int32)
+    gates = jnp.array(
+        [[[0.6, 0.4], [1.0, 0.9], [0.5, 0.5]], [[0.7, 0.3], [0.2, 0.8], [1.0, 0.5]]],
+        dtype=jnp.float32,
+    )
+    cot = jax.random.normal(jax.random.PRNGKey(17), x.shape, dtype=jnp.float32)
+
+    out_ref = exp_ref(x, idx, gates)
+    out_tok = exp_tok(x, idx, gates)
+    np.testing.assert_allclose(np.asarray(out_tok), np.asarray(out_ref), rtol=1e-5, atol=1e-5)
+
+    def _loss(mod, x_in):
+      return jnp.sum(mod(x_in, idx, gates) * cot)
+
+    _, (gmod_ref, gx_ref) = nnx.value_and_grad(_loss, argnums=(0, 1))(exp_ref, x)
+    _, (gmod_tok, gx_tok) = nnx.value_and_grad(_loss, argnums=(0, 1))(exp_tok, x)
+    np.testing.assert_allclose(np.asarray(gx_tok), np.asarray(gx_ref), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(gmod_tok.gate_up_proj.get_value()),
+        np.asarray(gmod_ref.gate_up_proj.get_value()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(gmod_tok.down_proj.get_value()),
+        np.asarray(gmod_ref.down_proj.get_value()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+    # Negative control: perturbing gate_up_proj breaks output parity.
+    exp_bad = modeling_granitemoe.GraniteMoeExperts(cfg_tok, rngs=nnx.Rngs(5))
+    self._sync_nnx_vars(exp_ref, exp_bad)
+    exp_bad.gate_up_proj.set_value(exp_bad.gate_up_proj.get_value() + 2.0)
+    self.assertGreater(float(jnp.max(jnp.abs(exp_bad(x, idx, gates) - out_ref))), 1e-3)
+
+    def _moe_forbidden_shapes(cfg: modeling_granitemoe.GraniteMoeConfig, tp_size: int) -> dict[tuple[int, ...], str]:
+      n_exp = cfg.num_local_experts
+      h_dim = cfg.hidden_size
+      i_dim = cfg.intermediate_size
+      forbidden: dict[tuple[int, ...], str] = {
+          (n_exp, h_dim, 2, i_dim): "experts.gate_up_proj",
+          (n_exp, h_dim, 2 * i_dim): "experts.gate_up_proj[collapsed]",
+          (n_exp, h_dim * 2, i_dim): "experts.gate_up_proj[collapsed]",
+          (n_exp, i_dim, h_dim): "experts.down_proj",
+      }
+      if tp_size > 1 and i_dim % tp_size == 0:
+        i_tp = i_dim // tp_size
+        forbidden[(n_exp, h_dim, 2, i_tp)] = "experts.gate_up_proj[tp_shard]"
+        forbidden[(n_exp, h_dim, 2 * i_tp)] = "experts.gate_up_proj[tp_shard_collapsed]"
+        forbidden[(n_exp, h_dim * 2, i_tp)] = "experts.gate_up_proj[tp_shard_collapsed]"
+        forbidden[(n_exp, i_tp, h_dim)] = "experts.down_proj[tp_shard]"
+      return forbidden
+
+    devices = jax.devices()
+    if len(devices) >= 4:
+      moe_ref = modeling_granitemoe.GraniteMoeMoE(cfg_ref, rngs=nnx.Rngs(31))
+      x3d = jax.random.normal(jax.random.PRNGKey(37), (4, 4, cfg_ref.hidden_size), dtype=jnp.float32)
+      cot3d = jax.random.normal(jax.random.PRNGKey(41), x3d.shape, dtype=jnp.float32)
+
+      @nnx.jit
+      def _ref_moe_step(m, inp, c):
+        def _l(mod, z):
+          y, _, _ = mod(z)
+          return jnp.sum(y * c), y
+
+        (loss_v, y_v), (gmod_v, dx_v) = nnx.value_and_grad(_l, argnums=(0, 1), has_aux=True)(m, inp)
+        return loss_v, y_v, gmod_v, dx_v
+
+      _, ref_y, ref_gmod, ref_dx = _ref_moe_step(moe_ref, x3d, cot3d)
+      ref_gmod_flat = list(nnx.to_flat_state(ref_gmod))
+
+      full_expert_ag_re = rf"f32\[{cfg_tok.num_local_experts},[0-9,]+\].*all-gather\("
+      h_dim = cfg_tok.hidden_size
+      i_dim = cfg_tok.intermediate_size
+      local_expert_wt_ag_re = (
+          rf"f32\[[0-9]+,{h_dim},2,{i_dim}\].*all-gather\(|f32\[[0-9]+,{i_dim},{h_dim}\].*all-gather\("
+      )
+
+      for ici in ({"data": 4}, {"fsdp": 2, "expert": 2}, {"fsdp": 2, "tensor": 2}):
+        mesh = m3_sharding.create_mesh(ici=ici, devices=devices[:4])
+        shd = modeling_granitemoe.GraniteMoeSharding.from_mesh(mesh, cfg_tok)
+        with jax.set_mesh(mesh):
+          moe_tok = modeling_granitemoe.GraniteMoeMoE(cfg_tok, sharding=shd, rngs=nnx.Rngs(31))
+          self._sync_nnx_vars(moe_ref, moe_tok)
+          x_shd = jax.device_put(
+              x3d,
+              jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(("data", "fsdp", "expert"), None, None)),
+          )
+          cot_shd = jax.device_put(cot3d, x_shd.sharding)
+
+          @nnx.jit
+          def _step(m, inp, c):
+            def _l(mod, z):
+              y, _, _ = mod(z)
+              return jnp.sum(y * c), y
+
+            (loss_v, y_v), (gmod_v, dx_v) = nnx.value_and_grad(_l, argnums=(0, 1), has_aux=True)(m, inp)
+            return loss_v, y_v, gmod_v, dx_v
+
+          hlo = _step.lower(moe_tok, x_shd, cot_shd).compile().as_text()
+          forbidden = _moe_forbidden_shapes(cfg_tok, tp_size=int(mesh.shape["tensor"]))
+          _assert_zero_expert_all_gather(hlo, forbidden, tag=f"granite_tokamax_{ici}")
+          full_expert_ag = re.findall(full_expert_ag_re, hlo)
+          self.assertEmpty(
+              full_expert_ag,
+              msg=f"Found forbidden full-expert weight all-gather on ici={ici}: {full_expert_ag}",
+          )
+          local_wt_ag = re.findall(local_expert_wt_ag_re, hlo)
+          self.assertEmpty(
+              local_wt_ag,
+              msg=f"Expected zero expert-weight all-gather on compound ici={ici}; got {local_wt_ag}",
+          )
+
+          if ici == {"fsdp": 2, "expert": 2}:
+            self.assertIsInstance(moe_tok.experts.gate_up_proj.get_value().sharding, jax.sharding.NamedSharding)
+            replicated_s = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(None, None, None, None))
+            hlo_pos = (
+                jax.jit(lambda v, s=replicated_s: jax.lax.with_sharding_constraint(v, s))
+                .lower(moe_tok.experts.gate_up_proj.get_value())
+                .compile()
+                .as_text()
+            )
+            with self.assertRaisesRegex(AssertionError, "Forbidden expert weight all-gather"):
+              _assert_zero_expert_all_gather(hlo_pos, forbidden, tag="granite_tokamax_pos_control")
+            self.assertNotEmpty(re.findall(full_expert_ag_re, hlo_pos))
+
+          _, y_tok, gmod_tok, dx_tok = _step(moe_tok, x_shd, cot_shd)
+          np.testing.assert_allclose(np.asarray(y_tok), np.asarray(ref_y), rtol=1e-4, atol=1e-4)
+          np.testing.assert_allclose(np.asarray(dx_tok), np.asarray(ref_dx), rtol=1e-4, atol=1e-4)
+          tok_gmod_flat = list(nnx.to_flat_state(gmod_tok))
+          self.assertLen(tok_gmod_flat, len(ref_gmod_flat))
+          for (p_ref, g_ref), (p_tok, g_tok) in zip(ref_gmod_flat, tok_gmod_flat):
+            self.assertEqual(p_tok, p_ref)
+            np.testing.assert_allclose(
+                np.asarray(g_tok),
+                np.asarray(g_ref),
+                rtol=1e-4,
+                atol=1e-4,
+                err_msg=f"Param grad mismatch for {p_tok} on ici={ici}",
+            )
+
+      # Non-compound EP > 1 layout (6 experts on fsdp=2, expert=2: 6 % (2*2) != 0, 6 % 2 == 0).
+      cfg_nc_ref = _make_mini_config(num_local_experts=6, sparse_matmul=False)
+      cfg_nc_tok = _make_mini_config(num_local_experts=6, sparse_matmul=True)
+      moe_nc_ref = modeling_granitemoe.GraniteMoeMoE(cfg_nc_ref, rngs=nnx.Rngs(43))
+      x_dec = jax.random.normal(jax.random.PRNGKey(47), (1, 1, cfg_nc_ref.hidden_size), dtype=jnp.float32)
+      _, ref_nc_y, ref_nc_gmod, ref_nc_dx = _ref_moe_step(moe_nc_ref, x3d, cot3d)
+      ref_nc_gmod_flat = list(nnx.to_flat_state(ref_nc_gmod))
+      ref_nc_dec_y, _, _ = nnx.jit(lambda m, inp: m(inp))(moe_nc_ref, x_dec)
+
+      mesh_nc = m3_sharding.create_mesh(ici={"fsdp": 2, "expert": 2}, devices=devices[:4])
+      shd_nc = modeling_granitemoe.GraniteMoeSharding.from_mesh(mesh_nc, cfg_nc_tok)
+      self.assertFalse(shd_nc.compound_ep)
+      with jax.set_mesh(mesh_nc):
+        moe_nc_tok = modeling_granitemoe.GraniteMoeMoE(cfg_nc_tok, sharding=shd_nc, rngs=nnx.Rngs(43))
+        self._sync_nnx_vars(moe_nc_ref, moe_nc_tok)
+        x_nc_shd = jax.device_put(
+            x3d,
+            jax.sharding.NamedSharding(mesh_nc, jax.sharding.PartitionSpec(("data", "fsdp", "expert"), None, None)),
+        )
+        cot_nc_shd = jax.device_put(cot3d, x_nc_shd.sharding)
+
+        @nnx.jit
+        def _step_nc(m, inp, c):
+          def _l(mod, z):
+            y, _, _ = mod(z)
+            return jnp.sum(y * c), y
+
+          (loss_v, y_v), (gmod_v, dx_v) = nnx.value_and_grad(_l, argnums=(0, 1), has_aux=True)(m, inp)
+          return loss_v, y_v, gmod_v, dx_v
+
+        hlo_nc = _step_nc.lower(moe_nc_tok, x_nc_shd, cot_nc_shd).compile().as_text()
+        forbidden_nc = _moe_forbidden_shapes(cfg_nc_tok, tp_size=int(mesh_nc.shape["tensor"]))
+        _assert_zero_expert_all_gather(hlo_nc, forbidden_nc, tag="granite_tokamax_non_compound_fsdp2_ep2")
+        full_nc_ag = re.findall(rf"f32\[{cfg_nc_tok.num_local_experts},[0-9,]+\].*all-gather\(", hlo_nc)
+        self.assertEmpty(
+            full_nc_ag,
+            msg=f"Found forbidden full-expert weight all-gather on non-compound EP=2: {full_nc_ag}",
+        )
+
+        _, nc_y_tok, nc_gmod_tok, nc_dx_tok = _step_nc(moe_nc_tok, x_nc_shd, cot_nc_shd)
+        np.testing.assert_allclose(np.asarray(nc_y_tok), np.asarray(ref_nc_y), rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(nc_dx_tok), np.asarray(ref_nc_dx), rtol=1e-4, atol=1e-4)
+        nc_tok_gmod_flat = list(nnx.to_flat_state(nc_gmod_tok))
+        self.assertLen(nc_tok_gmod_flat, len(ref_nc_gmod_flat))
+        for (p_ref, g_ref), (p_tok, g_tok) in zip(ref_nc_gmod_flat, nc_tok_gmod_flat):
+          self.assertEqual(p_tok, p_ref)
+          np.testing.assert_allclose(
+              np.asarray(g_tok),
+              np.asarray(g_ref),
+              rtol=1e-4,
+              atol=1e-4,
+              err_msg=f"Non-compound EP param grad mismatch for {p_tok}",
+          )
+
+        x_dec_shd = jax.device_put(
+            x_dec, jax.sharding.NamedSharding(mesh_nc, jax.sharding.PartitionSpec(None, None, None))
+        )
+        nc_dec_y_tok, _, _ = nnx.jit(lambda m, inp: m(inp))(moe_nc_tok, x_dec_shd)
+        np.testing.assert_allclose(np.asarray(nc_dec_y_tok), np.asarray(ref_nc_dec_y), rtol=1e-4, atol=1e-4)
+
+  def test_single_device_sparse_matmul_false_executes_dense_without_ragged_dot(self):
+    cfg_dense = _make_mini_config(sparse_matmul=False)
+    cfg_rdot = _make_mini_config(sparse_matmul=True, megablox=False, use_tokamax_gmm=False, hardware="tpu")
+    exp_dense = modeling_granitemoe.GraniteMoeExperts(cfg_dense, rngs=nnx.Rngs(11))
+    exp_rdot = modeling_granitemoe.GraniteMoeExperts(cfg_rdot, rngs=nnx.Rngs(11))
+    self.assertEqual(exp_dense.executor.kind, "dense")
+    self.assertEqual(exp_rdot.executor.kind, "ragged_dot")
+    self._sync_nnx_vars(exp_dense, exp_rdot)
+
+    x = jax.random.normal(jax.random.PRNGKey(21), (2, 3, cfg_dense.hidden_size), dtype=jnp.float32)
+    idx = jnp.array([[[0, 1], [2, -1], [4, 5]], [[1, 3], [6, 7], [0, -1]]], dtype=jnp.int32)
+    gates = jnp.array(
+        [[[0.6, 0.4], [1.0, 0.9], [0.5, 0.5]], [[0.7, 0.3], [0.2, 0.8], [1.0, 0.5]]],
+        dtype=jnp.float32,
+    )
+    cot = jax.random.normal(jax.random.PRNGKey(23), x.shape, dtype=jnp.float32)
+
+    @nnx.jit
+    def _step(mod, x_in):
+      def _loss(m, inp):
+        y = m(inp, idx, gates)
+        return jnp.sum(y * cot), y
+
+      (_, y_out), (gmod, gx) = nnx.value_and_grad(_loss, argnums=(0, 1), has_aux=True)(mod, x_in)
+      return y_out, gmod, gx
+
+    # Positive control on the jaxpr: CPU lowering decomposes `ragged_dot` into masked dots before HLO.
+    self.assertIn("ragged_dot", _grad_jaxpr_text(exp_rdot, x, cot, idx, gates))
+    self.assertNotIn("ragged_dot", _grad_jaxpr_text(exp_dense, x, cot, idx, gates))
+    self.assertNotIn("ragged-dot", _step.lower(exp_dense, x).compile().as_text())
+
+    y_dense, gmod_dense, gx_dense = _step(exp_dense, x)
+    y_rdot, gmod_rdot, gx_rdot = _step(exp_rdot, x)
+    np.testing.assert_allclose(np.asarray(y_dense), np.asarray(y_rdot), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.asarray(gx_dense), np.asarray(gx_rdot), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        np.asarray(gmod_dense.gate_up_proj.get_value()),
+        np.asarray(gmod_rdot.gate_up_proj.get_value()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+    np.testing.assert_allclose(
+        np.asarray(gmod_dense.down_proj.get_value()),
+        np.asarray(gmod_rdot.down_proj.get_value()),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
+  def test_multidevice_sparse_matmul_false_compound_dense_and_ep_guard(self):
+    if jax.device_count() < 4:
+      self.skipTest(f"Requires >= 4 JAX devices; got {jax.device_count()}.")
+    devices = jax.devices()[:4]
+    cfg_dense = _make_mini_config(sparse_matmul=False)
+    moe_ref = modeling_granitemoe.GraniteMoeMoE(cfg_dense, rngs=nnx.Rngs(51))
+    x3d = jax.random.normal(jax.random.PRNGKey(53), (4, 4, cfg_dense.hidden_size), dtype=jnp.float32)
+    cot3d = jax.random.normal(jax.random.PRNGKey(59), x3d.shape, dtype=jnp.float32)
+
+    @nnx.jit
+    def _step(m, inp, c):
+      def _l(mod, z):
+        y, _, _ = mod(z)
+        return jnp.sum(y * c), y
+
+      (_, y_v), (gmod_v, dx_v) = nnx.value_and_grad(_l, argnums=(0, 1), has_aux=True)(m, inp)
+      return y_v, gmod_v, dx_v
+
+    ref_y, ref_gmod, ref_dx = _step(moe_ref, x3d, cot3d)
+    ref_gmod_flat = list(nnx.to_flat_state(ref_gmod))
+
+    for ici in ({"data": 4}, {"fsdp": 2, "tensor": 2}, {"fsdp": 2, "expert": 2}):
+      mesh = m3_sharding.create_mesh(ici=ici, devices=devices)
+      shd = modeling_granitemoe.GraniteMoeSharding.from_mesh(mesh, cfg_dense)
+      self.assertTrue(shd.compound_ep)
+      with jax.set_mesh(mesh):
+        moe_dist = modeling_granitemoe.GraniteMoeMoE(cfg_dense, sharding=shd, rngs=nnx.Rngs(51))
+        self._sync_nnx_vars(moe_ref, moe_dist)
+        x_shd = jax.device_put(
+            x3d,
+            jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(("data", "fsdp", "expert"), None, None)),
+        )
+        cot_shd = jax.device_put(cot3d, x_shd.sharding)
+        hlo_dist = _step.lower(moe_dist, x_shd, cot_shd).compile().as_text()
+        self.assertNotIn("ragged-dot", hlo_dist, msg=f"Unexpected ragged-dot for sparse_matmul=False on ici={ici}")
+        got_y, got_gmod, got_dx = _step(moe_dist, x_shd, cot_shd)
+        np.testing.assert_allclose(np.asarray(got_y), np.asarray(ref_y), rtol=1e-4, atol=1e-4)
+        np.testing.assert_allclose(np.asarray(got_dx), np.asarray(ref_dx), rtol=1e-4, atol=1e-4)
+        for (p_ref, g_ref), (p_got, g_got) in zip(ref_gmod_flat, nnx.to_flat_state(got_gmod)):
+          self.assertEqual(p_got, p_ref)
+          np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+
+    # Inferred-mesh call outside `jax.set_mesh` also executes dense without ragged-dot.
+    mesh_ft = m3_sharding.create_mesh(ici={"fsdp": 2, "tensor": 2}, devices=devices)
+    exp_unshd = modeling_granitemoe.GraniteMoeExperts(cfg_dense, rngs=nnx.Rngs(61))
+    idx3d = jnp.zeros((4, 4, cfg_dense.num_experts_per_tok), dtype=jnp.int32)
+    w3d = jnp.full((4, 4, cfg_dense.num_experts_per_tok), 0.5, dtype=jnp.float32)
+    x_ft = jax.device_put(x3d, jax.sharding.NamedSharding(mesh_ft, jax.sharding.PartitionSpec("fsdp", None, None)))
+    hlo_inf = nnx.jit(lambda m, inp: m(inp, idx3d, w3d)).lower(exp_unshd, x_ft).compile().as_text()
+    self.assertNotIn("ragged-dot", hlo_inf)
+
+    # Non-compound EP > 1 (`6 % (2 * 2) != 0`) still raises NotImplementedError under `sparse_matmul=False`.
+    cfg_nc_dense = _make_mini_config(num_local_experts=6, sparse_matmul=False)
+    mesh_nc = m3_sharding.create_mesh(ici={"fsdp": 2, "expert": 2}, devices=devices)
+    shd_nc = modeling_granitemoe.GraniteMoeSharding.from_mesh(mesh_nc, cfg_nc_dense)
+    self.assertFalse(shd_nc.compound_ep)
+    with jax.set_mesh(mesh_nc):
+      moe_nc_dense = modeling_granitemoe.GraniteMoeMoE(cfg_nc_dense, sharding=shd_nc, rngs=nnx.Rngs(67))
+      x_nc = jax.device_put(
+          x3d, jax.sharding.NamedSharding(mesh_nc, jax.sharding.PartitionSpec(("data", "fsdp", "expert"), None, None))
+      )
+      with self.assertRaisesRegex(NotImplementedError, "Non-compound EP"):
+        nnx.jit(lambda m, inp: m(inp))(moe_nc_dense, x_nc)
 
 
 # ==============================================================================
