@@ -78,8 +78,8 @@ MODEL_SUPPORTED_MESH_AXES: dict[str, tuple[str, ...]] = {
     "granitemoe": _FOUR_AXIS_MESH,
     "qwen3-0.6b": m3_sharding.DEFAULT_SHARDING_AXES,
     "qwen3-vl-2b": _FOUR_AXIS_MESH,
-    "qwen3.8-flash-next": ("data", "fsdp", "fsdp_transpose", "tensor", "tensor_sequence", "expert"),
-    "qwen3.8-flash-next-mini": ("data", "fsdp", "fsdp_transpose", "tensor", "tensor_sequence", "expert"),
+    "qwen3.8-flash-next": ("data", "fsdp", "fsdp_transpose", "context", "tensor", "tensor_sequence", "expert"),
+    "qwen3.8-flash-next-mini": ("data", "fsdp", "fsdp_transpose", "context", "tensor", "tensor_sequence", "expert"),
 }
 MODEL_EXPLICIT_SHARDING_SUPPORT: frozenset[str] = frozenset({"qwen3-0.6b"})
 
@@ -131,6 +131,15 @@ def create_model(config, mesh, **kwargs):
         f"Registered models: {', '.join(sorted(MODEL_REGISTRY))}."
     )
   shard_mode = m3_sharding.get_enum(config, "shard_mode", m3_sharding.ShardMode.AUTO)
+  raw_preset = str(getattr(config, "sharding_preset", "") or "").strip().lower().replace("-", "_")
+  has_preset_override = raw_preset not in ("", "default", "default_sharding") or bool(
+      getattr(config, "compound_fsdp_ep", False)
+  )
+  if has_preset_override and config.model_name in ("glm5.3-flash", "granite-3.0-1b-a400m", "granitemoe"):
+    raise ValueError(
+        f"Model {config.model_name!r} uses a custom non-DefaultSharding parameter strategy and does not yet "
+        f"support sharding_preset={getattr(config, 'sharding_preset', '')!r} or compound_fsdp_ep=True."
+    )
   if mesh is not None:
     if kwargs.get("sharding") is None:
       m3_sharding.check_mesh(mesh, MODEL_SUPPORTED_MESH_AXES[config.model_name])

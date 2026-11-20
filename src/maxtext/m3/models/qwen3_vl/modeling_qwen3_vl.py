@@ -32,10 +32,10 @@ from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, MultimodalInput
 from maxtext.m3.core.sharding import (
-    DefaultSharding,
     Sharding,
     check_mesh,
     param_metadata,
+    sharding_from_config,
 )
 from maxtext.m3.models.qwen3.modeling_qwen3 import (
     Qwen3Decoder,
@@ -850,7 +850,7 @@ class Qwen3VLDecoderLayer(nnx.Module):
       sharding: Optional[Sharding] = None,
   ):
     self.config = config
-    s = sharding or DefaultSharding()
+    s = sharding or sharding_from_config(config)
     self.pre_self_attention_layer_norm = nnx.RMSNorm(
         num_features=config.emb_dim, **norm_kwargs(config, s, "pre_self_attention_layer_norm", rngs)
     )
@@ -1006,7 +1006,7 @@ class Qwen3VLModel(nnx.Module):
     check_construction_mesh()
     self.config = config
     self.mesh = mesh
-    self.sharding = sharding or DefaultSharding()
+    self.sharding = sharding or sharding_from_config(config)
 
     # 1. Vision Tower matching checkpoint parameter hierarchy
     self.vision_encoder = (
