@@ -20,8 +20,11 @@ from typing import Any, Sequence
 
 import numpy as np
 
+import jax
 import jax.numpy as jnp
+from flax import nnx
 from flax import struct
+from flax.nnx import variablelib
 
 Config = Any
 
@@ -33,6 +36,21 @@ Shape = Sequence[int]
 # `quantization` modes that do not support gradient accumulation (`gradient_accumulation_steps > 1`). Shared by the
 # config validation and the elastic HBM fallback, which must agree on when the accumulation steps may not change.
 FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION = ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
+
+
+class UntrainableParam(nnx.Param):  # pylint: disable=abstract-method
+  """A model weight saved and loaded like `nnx.Param`, with no gradient, optimizer update or weight decay."""
+
+  def get_value(self, **kwargs):
+    value = super().get_value(**kwargs)
+    return jax.lax.stop_gradient(value) if isinstance(value, jax.Array) else value
+
+
+def variable_collection_name(variable_type: type[nnx.Variable]) -> str:
+  """Returns the checkpoint collection of a Variable type; UntrainableParam is stored with the regular params."""
+  if issubclass(variable_type, UntrainableParam):
+    return "params"
+  return variablelib.variable_name_from_type(variable_type, allow_register=True)
 
 
 def is_fp8_dtype(dtype: Any) -> bool:

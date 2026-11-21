@@ -82,7 +82,7 @@ from tunix.sft import profiler
 # -----------------------------------------------------------------------------
 
 
-def get_distillation_optimizer(config, max_train_steps):
+def get_distillation_optimizer(config, max_train_steps, model=None):
   """Creates a custom optimizer for distillation that enables Learning Rate logging.
 
   This function constructs an optax optimizer using standard MaxText settings but
@@ -95,6 +95,7 @@ def get_distillation_optimizer(config, max_train_steps):
         `learning_rate`, `adam_b1`, `opt_type`, `gradient_clipping_threshold`).
     max_train_steps: The total number of training steps, used to calculate
         the warmup and cosine decay schedule.
+    model: The student model, whose UntrainableParam weights are frozen.
 
   Returns:
     An optax optimizer that:
@@ -116,11 +117,14 @@ def get_distillation_optimizer(config, max_train_steps):
       end_value=config.learning_rate_final_fraction * config.learning_rate,
   )
 
+  # inject_hyperparams reruns the factory inside jit, so read the model once here.
+  frozen_paths = optimizers.untrainable_paths(model)
+
   # 2. Define Factory (Required for inject_hyperparams)
   def optimizer_factory(learning_rate):
     # Reuse MaxText's standard logic to create the base optimizer.
     # We pass 'learning_rate' (which is the injected schedule) directly.
-    opt = optimizers.get_optimizer(config, learning_rate, model=None)
+    opt = optimizers.get_optimizer(config, learning_rate, model=None, frozen_paths=frozen_paths)
 
     # Apply Gradient Clipping
     if config.gradient_clipping_threshold > 0:
@@ -595,12 +599,14 @@ def build_training_components(
     teacher_config: pyconfig.HyperParameters,
     is_offline: bool = False,
     offline_data_dir: str | None = None,
+    student_model: nnx.Module | None = None,
 ):
   """Builds and returns the strategy, optimizer, and training config objects.
 
   Args:
     student_config: Configuration object for the Student model.
     teacher_config: Configuration object for the Teacher model.
+    student_model: The Student model, whose UntrainableParam weights the optimizer freezes.
 
   Returns:
     A tuple of (DistillationStrategy, Optimizer, TrainingConfig).
@@ -643,7 +649,7 @@ def build_training_components(
   )
 
   # Prepare optimizer
-  optimizer = get_distillation_optimizer(student_config, student_config.steps)
+  optimizer = get_distillation_optimizer(student_config, student_config.steps, model=student_model)
 
   checkpointing_options = checkpoint.CheckpointManagerOptions(
       save_interval_steps=student_config.checkpoint_period,
@@ -770,7 +776,7 @@ def _train_distill_impl(
     with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
       # Build Training Components
       strategy, optimizer, train_config = build_training_components(
-          student_config, teacher_config, is_offline, offline_data_dir
+          student_config, teacher_config, is_offline, offline_data_dir, student_model=student_model
       )
 
       # 3. Initialize Trainer

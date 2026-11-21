@@ -16,12 +16,13 @@
 """Utils that are only interesting to MaxText."""
 
 import re
+from flax import nnx
 import jax
 import jax.numpy as jnp
 
 import optax
 from optax.contrib._muon import muon as optax_muon
-from maxtext.common.common_types import DecoderBlockType
+from maxtext.common.common_types import DecoderBlockType, UntrainableParam
 from maxtext.optimizers.muon import muon as maxtext_muon
 from maxtext.utils import max_logging
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
@@ -50,6 +51,43 @@ def get_path_mask_fn(patterns, match_returns_true=True):
 def get_adamw_mask(config):
   """Create a mask function for AdamW optimizer to exclude certain parameters from weight decay."""
   return get_path_mask_fn(config.adamw_mask, match_returns_true=False)
+
+
+def untrainable_paths(model):
+  """Paths ("a/b/c") of `model`'s UntrainableParam weights; empty unless `model` is an NNX module."""
+  if not isinstance(model, nnx.Module):
+    return frozenset()
+  untrainable = nnx.to_flat_state(nnx.state(model, UntrainableParam))
+  return frozenset("/".join(str(key) for key in path) for path, _ in untrainable)
+
+
+def _leaf_path(path):
+  """Path as "a/b/c". At init a leaf is still inside its nnx.Variable, which adds a trailing `value` key."""
+  if path and isinstance(path[-1], jax.tree_util.GetAttrKey) and path[-1].name == "value":
+    path = path[:-1]
+  return jax.tree_util.keystr(path, simple=True, separator="/")
+
+
+def freeze_params(tx, frozen_paths):
+  """Wraps `tx` so the weights at `frozen_paths` get no update, weight decay or optimizer state."""
+  if frozen_paths:
+
+    def labels(params):
+      return jax.tree_util.tree_map_with_path(
+          lambda path, _: "frozen" if _leaf_path(path) in frozen_paths else "trainable", params
+      )
+
+    tx = optax.multi_transform({"trainable": tx, "frozen": optax.set_to_zero()}, labels)
+
+  def init(params):
+    # An optimizer built without the model would otherwise apply weight decay to these weights.
+    for path, variable in jax.tree_util.tree_leaves_with_path(params, is_leaf=lambda x: isinstance(x, nnx.Variable)):
+      name = _leaf_path(path)
+      if isinstance(variable, UntrainableParam) and name not in frozen_paths:
+        raise ValueError(f"UntrainableParam weights would be trained: {name}. Pass the model to get_optimizer.")
+    return tx.init(params)
+
+  return tx._replace(init=init)
 
 
 def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
@@ -177,8 +215,8 @@ def skip_step_on_spikes(
   return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
-def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
-  """Create optimizer."""
+def get_optimizer(config, learning_rate_schedule, model=None, mesh=None, frozen_paths=None):
+  """Create optimizer. `frozen_paths` overrides `untrainable_paths(model)`, for callers that run under jit."""
   if config.opt_type == "adamw":
     # Create AdamW Optimizer following Llama2's training details, see https://arxiv.org/pdf/2307.09288.pdf section 2.2
     base_opt = optax.adamw(
@@ -258,6 +296,8 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
       )
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
+
+  base_opt = freeze_params(base_opt, untrainable_paths(model) if frozen_paths is None else frozen_paths)
 
   # Apply `trainable_parameters_mask` before `skip_step_on_spikes` so `skip_step_on_spikes`
   # stays the outermost transformation: callers expect `opt_state` to be a top-level dict
