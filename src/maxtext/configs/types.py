@@ -3431,7 +3431,10 @@ class GrainDataset(BaseModel):
   )
   grain_file_type: str = Field(
       "arrayrecord",
-      description="File type for Grain data. Supported: arrayrecord, tfrecord, parquet, mmap, mmap_npy.",
+      description=(
+          "File type for Grain data. Supported: arrayrecord, tfrecord, parquet, hf, mmap, mmap_npy. "
+          "`hf` streams any `datasets.load_dataset` source configured by the `hf_*` fields."
+      ),
   )
   grain_use_elastic_iterator: bool = Field(
       False,
@@ -7786,8 +7789,10 @@ class MaxTextConfig(
         raise ValueError("`training_objective='block_diffusion'` is not compatible with MTP.")
       if self.num_vocab_tiling > 1:
         raise ValueError("`training_objective='block_diffusion'` is not compatible with vocabulary tiling.")
-      if self.dataset_type != "hf":
-        raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'`.")
+      if self.dataset_type not in ("hf", "grain"):
+        raise ValueError("`training_objective='block_diffusion'` currently requires `dataset_type='hf'` or 'grain'.")
+      if self.dataset_type == "grain" and self.grain_use_elastic_iterator:
+        raise ValueError("`training_objective='block_diffusion'` is not supported with `grain_use_elastic_iterator`.")
       if self.use_dpo:
         raise ValueError("`training_objective='block_diffusion'` is not compatible with DPO.")
       if self.use_multimodal or self.use_audio:
@@ -8444,6 +8449,14 @@ class MaxTextConfig(
         raise ValueError("Only supports <= 1 for now, more workers results in duplicated data")
     elif self.dataset_type == DatasetType.GRAIN:
       use_hf_parquet = self.hf_path and self.grain_file_type == "parquet"
+      use_hf_stream = self.hf_path and self.grain_file_type == "hf"
+      if self.grain_file_type == "hf":
+        if not self.hf_path:
+          raise ValueError("hf_path can't be empty when dataset_type=grain and grain_file_type=hf.")
+        if self.hf_eval_files:
+          self.hf_eval_split = "train"
+        if self.eval_interval > 0 and not self.hf_eval_split:
+          raise ValueError("Please specify hf_eval_split or hf_eval_files, or set eval_interval to <=0.")
       use_tfds_tfrecord_train = (
           self.grain_file_type == "tfrecord" and self.dataset_path and self.dataset_name and self.train_split
       )
@@ -8455,16 +8468,23 @@ class MaxTextConfig(
           not self.grain_train_files
           and not self.grain_train_mixture_config_path
           and not use_hf_parquet
+          and not use_hf_stream
           and not use_tfds_tfrecord_train
       ):
         raise ValueError(
             "When dataset_type=grain, set grain_train_files, "
-            "grain_train_mixture_config_path, use hf_path with grain_file_type=parquet, or use dataset_path, "
+            "grain_train_mixture_config_path, use hf_path with grain_file_type=parquet or hf, or use dataset_path, "
             "dataset_name, and train_split with grain_file_type=tfrecord."
         )
-      if self.eval_interval > 0 and not self.grain_eval_files and not use_hf_parquet and not use_tfds_tfrecord_eval:
+      if (
+          self.eval_interval > 0
+          and not self.grain_eval_files
+          and not use_hf_parquet
+          and not use_hf_stream
+          and not use_tfds_tfrecord_eval
+      ):
         raise ValueError(
-            "Please specify grain_eval_files, use hf_path with grain_file_type=parquet, or use dataset_path, "
+            "Please specify grain_eval_files, use hf_path with grain_file_type=parquet or hf, or use dataset_path, "
             "eval_dataset_name, and eval_split with grain_file_type=tfrecord; otherwise set eval_interval to <=0."
         )
       if self.grain_file_type in ("parquet", "tfrecord"):

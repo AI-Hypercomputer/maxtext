@@ -19,6 +19,7 @@ from concurrent import futures
 import dataclasses
 import functools
 import glob
+import importlib
 import itertools
 import json
 import math
@@ -39,6 +40,7 @@ from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import grain_tokenizer
 from maxtext.input_pipeline import dpo_utils
+from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline._mmap_datasource import MMapDatasetConfig, get_mmap_dataset, get_mmap_npy_dataset
 from maxtext.multimodal import processor as mm_processor
@@ -364,8 +366,23 @@ def get_datasets(
     split="train",
     grain_index_storage_option=None,
     file_instructions=None,
+    hf_dataset_kwargs=None,
 ):
   """Load a Grain dataset for the selected ``grain_file_type``."""
+  if data_file_type == "hf":
+    # Streams anything `datasets.load_dataset(..., streaming=True)` can read (Hub repos, json/jsonl,
+    # csv, text, parquet, arrow; local, gs:// or hf:// files), same as `dataset_type=hf`.
+    dataset = input_pipeline_utils.make_hf_streaming_iter_dataset(
+        **(hf_dataset_kwargs or {}),
+        hf_access_token=hf_access_token,
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
+        grain_worker_count=grain_worker_count,
+        num_epoch=num_epoch,
+    )
+    if shuffle:
+      dataset = grain.experimental.WindowShuffleIterDataset(dataset, window_size=shuffle_buffer_size, seed=shuffle_seed)
+    return dataset
   if data_file_type == "arrayrecord":
     # Helper function to find files, create data source, and wrap in MapDataset
     def create_dataset_from_pattern(pattern):
@@ -495,7 +512,7 @@ def get_datasets(
     )
   else:
     raise ValueError(
-        f"grain pipeline supports (arrayrecord, tfrecord, parquet, mmap, mmap_npy) as grain_file_type, "
+        f"grain pipeline supports (arrayrecord, tfrecord, parquet, hf, mmap, mmap_npy) as grain_file_type, "
         f"but got {data_file_type}"
     )
 
@@ -614,7 +631,13 @@ def pretrain_preprocessing_pipeline(
 
   batch_size = data_processing_utils.get_local_batch_size(config)
   dataset = data_processing_utils.format_and_batch(
-      dataset, config, batch_size, pad_id, tuple(pipeline_columns), tokenizer_model
+      dataset,
+      config,
+      batch_size,
+      pad_id,
+      tuple(pipeline_columns),
+      tokenizer_model,
+      target_transform=data_processing_utils.get_block_diffusion_transform(config, use_sft=False, pad_id=pad_id),
   )
 
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
@@ -703,6 +726,29 @@ def _tokenize_sft_chunks(element, text_column_name, tokenizer_model):
   return element
 
 
+def _apply_formatting_func(element, formatting_func, data_columns, formatting_func_kwargs):
+  """Element-wise equivalent of `dataset.map(formatting_func, remove_columns=data_columns)` in the HF pipeline."""
+  output = formatting_func(dict(element), **formatting_func_kwargs)
+  merged = {**element, **(output or {})}
+  if "messages" not in merged:
+    raise ValueError(f"formatting_func must produce a 'messages' column, got columns {sorted(merged)}.")
+  return {"messages": merged["messages"]}
+
+
+def _get_sft_formatting_func(config):
+  """Loads `formatting_func_path` (and its template) the same way as `dataset_type=hf`, or returns None."""
+  formatting_func_path = getattr(config, "formatting_func_path", "")
+  if not formatting_func_path:
+    return None, {}
+  kwargs = dict(getattr(config, "formatting_func_kwargs", None) or {})
+  template_path = kwargs.pop("template_path", None)
+  if template_path:
+    kwargs["template_config"] = instruction_data_processing.load_data_template_from_file(template_path)
+  kwargs.pop("remove_columns", None)  # Data columns are always replaced by "messages".
+  module_path, method_name = formatting_func_path.rsplit(".", 1)
+  return getattr(importlib.import_module(module_path), method_name), kwargs
+
+
 def sft_preprocessing_pipeline(
     dataset,
     config,
@@ -725,9 +771,22 @@ def sft_preprocessing_pipeline(
     if hasattr(base_tokenizer_model, "pad_id"):
       base_tokenizer_model.pad_id = pad_id
 
-  data_processing_utils.validate_and_configure_sft_columns(
-      data_columns, tokenizer_model, getattr(config, "chat_template", None)
+  chat_template = getattr(config, "chat_template", None) or instruction_data_processing.load_chat_template_from_file(
+      getattr(config, "chat_template_path", None)
   )
+  data_processing_utils.validate_and_configure_sft_columns(data_columns, tokenizer_model, chat_template)
+
+  formatting_func, formatting_func_kwargs = _get_sft_formatting_func(config)
+  if formatting_func is not None:
+    dataset = dataset.map(
+        functools.partial(
+            _apply_formatting_func,
+            formatting_func=formatting_func,
+            data_columns=data_columns,
+            formatting_func_kwargs=formatting_func_kwargs,
+        )
+    )
+    data_columns = ["messages"]
 
   dataset = dataset.map(
       functools.partial(
@@ -753,13 +812,20 @@ def sft_preprocessing_pipeline(
           completion_only=config.sft_train_on_completion_only,
           max_target_length=config.max_target_length,
           unk_id=pad_id,
+          training_objective=getattr(config, "training_objective", "causal_lm"),
       )
   )
   data_columns = ("inputs", "targets")
 
   batch_size = data_processing_utils.get_local_batch_size(config)
   dataset = data_processing_utils.format_and_batch(
-      dataset, config, batch_size, pad_id, data_columns, base_tokenizer_model
+      dataset,
+      config,
+      batch_size,
+      pad_id,
+      data_columns,
+      base_tokenizer_model,
+      target_transform=data_processing_utils.get_block_diffusion_transform(config, use_sft=True, pad_id=pad_id),
   )
   dataset = data_processing_utils.apply_multiprocessing_and_prefetch(
       dataset, config, grain_worker_count, grain_per_worker_buffer_size
@@ -792,6 +858,18 @@ def vision_sft_preprocessing_pipeline(
     columns_to_parse = text_columns + list(image_column)
   else:
     columns_to_parse = text_columns + [image_column]
+
+  if config.grain_file_type not in ("arrayrecord", "tfrecord"):
+    # Same dataset normalizations as dataset_type=hf, applied element-wise before column selection.
+    if image_column == "video":
+      dataset = dataset.map(functools.partial(input_pipeline_utils.maybe_format_sharegpt, text_columns=text_columns))
+    dataset = dataset.map(
+        functools.partial(
+            input_pipeline_utils.add_default_prompt_to_element,
+            prompt_column=text_columns[0],
+            default_prompt=config.default_prompt,
+        )
+    )
 
   dataset = data_processing_utils.parse_and_keep_features(dataset, config, columns_to_parse, tokenize=tokenize)
 
@@ -903,6 +981,25 @@ def vision_sft_preprocessing_pipeline(
       dataset, config, grain_worker_count, grain_per_worker_buffer_size
   )
   return dataset
+
+
+def _get_hf_dataset_kwargs(config, split):
+  """`datasets.load_dataset` arguments for ``grain_file_type=hf``, mirroring ``dataset_type=hf``."""
+  if config.grain_file_type != "hf":
+    return None
+  if split == "train":
+    data_files, hf_split = config.hf_train_files, config.train_split
+  else:
+    # Like dataset_type=hf, explicit eval files are loaded as the "train" split of those files.
+    data_files = config.hf_eval_files
+    hf_split = "train" if data_files else config.hf_eval_split
+  return {
+      "path": config.hf_path,
+      "name": config.hf_name,
+      "data_dir": config.hf_data_dir,
+      "data_files": data_files,
+      "split": hf_split,
+  }
 
 
 def _get_pipeline_fn(config):
@@ -1062,6 +1159,7 @@ def make_grain_train_iterator(
       hf_access_token=config.hf_access_token,
       dataset_config=dataset_config,
       split="train",
+      hf_dataset_kwargs=_get_hf_dataset_kwargs(config, "train"),
   )
 
   preprocessing_fn_kwargs = {
@@ -1223,6 +1321,7 @@ def make_grain_eval_iterator(
       hf_access_token=config.hf_access_token,
       dataset_config=dataset_config,
       split="eval",
+      hf_dataset_kwargs=_get_hf_dataset_kwargs(config, "eval"),
   )
 
   eval_preprocessing_fn_kwargs = {

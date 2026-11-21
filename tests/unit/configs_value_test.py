@@ -1133,7 +1133,16 @@ class ConfigTest(absltest.TestCase):
         ({"packing": True}, "packing=False"),
         ({"mtp_num_layers": 1}, "MTP"),
         ({"num_vocab_tiling": 2}, "vocabulary tiling"),
-        ({"dataset_type": "grain"}, "dataset_type='hf'"),
+        ({"dataset_type": "tfds"}, "dataset_type='hf'"),
+        (
+            {
+                "dataset_type": "grain",
+                "grain_file_type": "arrayrecord",
+                "grain_train_files": "/x/*",
+                "grain_use_elastic_iterator": True,
+            },
+            "grain_use_elastic_iterator",
+        ),
         ({"use_dpo": True}, "DPO"),
         ({"use_multimodal": True}, "text-only"),
         ({"block_diffusion_logit_alignment": "shifted"}, "seed_and_mask"),
