@@ -26,7 +26,6 @@ Training:
 from collections.abc import Callable, Iterator, Sequence
 import functools
 import itertools
-import os
 import time
 from typing import Any
 
@@ -50,7 +49,17 @@ def _micro_batch_splitter(
     num_micro_steps: int,
     data_sharding: jax.sharding.Sharding,
 ) -> Callable[[dict[str, Any]], list[dict[str, Any]]]:
-  """Returns the jitted split behind `_split_global_batch`, cached per `(num_micro_steps, data_sharding)`."""
+  """Returns the jitted split of a global batch into `num_micro_steps` micro-batches.
+
+  Cached per `(num_micro_steps, data_sharding)`. Micro-batch k is rows `k::num_micro_steps`,
+  as `gradient_accumulation.py` builds it. The order matters: under `per_device_batch_size < 1`,
+  train.py's `loss_fn` trains on only the first `micro_batch_size_to_train_on` rows of each
+  micro-batch.
+
+  Every field is batch-leading and carries `data_sharding`, as `DataLoader.load_next_batch`
+  places it. On such an array the strided split keeps each device's rows local, so it compiles
+  to no collectives, whereas a contiguous split would move rows between devices.
+  """
 
   def split(batch: dict[str, Any]) -> list[dict[str, Any]]:
     # As `reshape_to_microbatch_accumulations` in `gradient_accumulation.py`:
@@ -65,24 +74,6 @@ def _micro_batch_splitter(
   return jax.jit(split, out_shardings=data_sharding)
 
 
-def _split_global_batch(
-    batch: dict[str, Any],
-    num_micro_steps: int,
-    data_sharding: jax.sharding.Sharding,
-) -> list[dict[str, Any]]:
-  """Splits one global batch into `num_micro_steps` micro-batches, in `pre_train/train.py`'s order.
-
-  Micro-batch k is rows `k::num_micro_steps`, as `gradient_accumulation.py` builds it. The order
-  matters: under `per_device_batch_size < 1`, train.py's `loss_fn` trains on only the first
-  `micro_batch_size_to_train_on` rows of each micro-batch.
-
-  Every field is batch-leading and carries `data_sharding`, as `DataLoader.load_next_batch`
-  places it. On such an array the strided split keeps each device's rows local, so it compiles
-  to no collectives, whereas a contiguous split would move rows between devices.
-  """
-  return _micro_batch_splitter(num_micro_steps, data_sharding)(batch)
-
-
 def micro_batch_stream(
     data_loader: DataLoader,
     num_micro_steps: int,
@@ -92,12 +83,9 @@ def micro_batch_stream(
     while True:
       yield data_loader.load_next_batch()
   else:
+    split = _micro_batch_splitter(num_micro_steps, data_loader.input_data_shardings)
     while True:
-      yield from _split_global_batch(
-          data_loader.load_next_batch(),
-          num_micro_steps,
-          data_loader.input_data_shardings,
-      )
+      yield from split(data_loader.load_next_batch())
 
 
 def count_chips(devices: Sequence[Any]) -> int:
@@ -127,7 +115,11 @@ def log_peak_memory() -> None:
   On TPU this counter excludes XLA program temporaries, so it is not the HBM peak.
   """
   device = jax.local_devices()[0]
-  peak = (device.memory_stats() or {}).get("peak_bytes_in_use")
+  try:
+    stats = device.memory_stats()
+  except (RuntimeError, NotImplementedError):
+    stats = None
+  peak = (stats or {}).get("peak_bytes_in_use")
   if peak is None:
     return
   max_logging.log(
@@ -201,6 +193,9 @@ def run_training_loop(
       # to complete before measuring step wall time or closing the profiler window.
       engine._throttler.wait_for_all()
       step_time_s = max(time.perf_counter() - t0, 1e-9)
+      # The step's metrics have been logged; drain them from the engine's recorder, which otherwise
+      # keeps every completed step's buffer of device arrays until it reaches its history limit.
+      engine.get_metrics()
       tokens_per_s = tokens_per_step / step_time_s
       tflops_per_dev = total_tflops / step_time_s
       max_logging.log(
@@ -225,7 +220,6 @@ def run_training_loop(
 def main(argv: Sequence[str]) -> None:
   """Main function to run training."""
   pathwaysutils.initialize()
-  os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
 
   config = pyconfig.initialize(argv)
   max_utils.print_system_information()
