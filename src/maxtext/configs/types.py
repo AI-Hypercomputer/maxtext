@@ -1609,33 +1609,34 @@ class MoEGeneral(BaseModel):
   moe_quantize_combine_bwd_method: str = Field(
       "",
       description=(
-          "Quantization method for the Token Combine backward collective (leg 3). With use_ring_of_experts=True"
-          " (EP all-gather): '' = unquantized BF16; 'rowwise' = dynamic token-wise FP8 E5M2;"
-          " 'fixed,<bound>' = static per-tensor FP8 E5M2 (e.g. 'fixed,1.0', 'fixed,57344')."
-          " With use_ring_of_experts=False (EP ragged all-to-all): '', 'rowwise' (= 'rowwise@e5m2'), 'rowwise@e4m3'"
-          " or 'rowwise@e5m2'."
+          "Quantization method for the Token Combine backward collective (leg 3): the EP all-gather with"
+          " use_ring_of_experts=True, the EP ragged all-to-all otherwise. '' = unquantized BF16; 'rowwise' = dynamic"
+          " FP8 scale per token; 'fixed,<bound>' = static per-tensor scale bound/qmax, values beyond +-bound saturate"
+          " (e.g. 'fixed,1.0', 'fixed,57344'). Each takes an optional '@e4m3' / '@e5m2' suffix (default E5M2)."
       ),
   )
   moe_quantize_dispatch_fwd_method: str = Field(
       "",
       description=(
-          "Quantization of the Token Dispatch forward EP ragged all-to-all (leg 1, use_ring_of_experts=False):"
-          " '' = unquantized; 'rowwise' (= 'rowwise@e4m3'), 'rowwise@e4m3' or 'rowwise@e5m2' = FP8 values with a"
-          " dynamic f32 absmax scale per token, dequantized after the collective."
+          "Quantization of the Token Dispatch forward EP ragged all-to-all (leg 1, use_ring_of_experts=False),"
+          " dequantized after the collective: '' = unquantized; '<scaling>[@e4m3|@e5m2]' (default E4M3) = FP8 values"
+          " with scaling 'rowwise' (dynamic f32 absmax scale per token) or 'fixed,<bound>' (static scale bound/qmax,"
+          " values clipped to +-bound, no scale collective)."
       ),
   )
   moe_quantize_combine_fwd_method: str = Field(
       "",
       description=(
           "Quantization of the Token Combine forward EP ragged all-to-all (leg 2, use_ring_of_experts=False):"
-          " '', 'rowwise' (= 'rowwise@e4m3'), 'rowwise@e4m3' or 'rowwise@e5m2'."
+          " same values as moe_quantize_dispatch_fwd_method."
       ),
   )
   moe_quantize_dispatch_bwd_method: str = Field(
       "",
       description=(
           "Quantization of the Token Dispatch backward EP ragged all-to-all (leg 4, use_ring_of_experts=False):"
-          " '', 'rowwise' (= 'rowwise@e5m2'), 'rowwise@e4m3' or 'rowwise@e5m2'."
+          " '', 'rowwise' or 'fixed,<bound>' (static scale bound/qmax, values beyond +-bound saturate), with an"
+          " optional '@e4m3' / '@e5m2' suffix (default E5M2)."
       ),
   )
   ragged_sort_use_single_sparsecore: bool = Field(
@@ -5445,7 +5446,7 @@ def plan_constant_global_batch(
 # FP8 quantization methods of the MoE EP ragged all-to-all (`moe_quantize_*_method`), parsed once for the config
 # validation below and for layers/moe.py.
 A2A_QUANT_FORMATS = ("e4m3", "e5m2")
-A2A_QUANT_SUPPORTED = "'', 'rowwise[@e4m3|@e5m2]'"
+A2A_QUANT_SUPPORTED = "'', 'rowwise[@e4m3|@e5m2]', 'fixed,<bound>[@e4m3|@e5m2]'"
 
 
 class A2aQuantMethodNotImplementedError(ValueError):
@@ -5456,24 +5457,33 @@ def parse_a2a_quant_method(method: str) -> tuple[str, float | None, str | None]:
   """Parses a non-empty method `<scaling>[,<bound>][@<format>]`.
 
   Args:
-    method: 'rowwise', 'rowwise@e4m3' or 'rowwise@e5m2'.
+    method: 'rowwise' or 'fixed,<bound>' (a positive finite bound), with an optional '@e4m3' / '@e5m2' suffix.
 
   Returns:
-    (scaling, bound, fmt): 'rowwise', None (no bound) and 'e4m3' / 'e5m2', or None when '@<format>' is omitted.
+    (scaling, bound, fmt): 'rowwise' or 'fixed'; the 'fixed' bound, else None; and 'e4m3' / 'e5m2', or None when
+    '@<format>' is omitted.
 
   Raises:
-    A2aQuantMethodNotImplementedError: For 'tensor', 'block<n>' and 'fixed,<bound>' scalings.
+    A2aQuantMethodNotImplementedError: For 'tensor' and 'block<n>' scalings.
     ValueError: For any other method.
   """
   name, sep, fmt = method.partition("@")
-  scaling = name.partition(",")[0]
-  if scaling in ("tensor", "fixed") or scaling.startswith("block"):
+  scaling, comma, bound = name.partition(",")
+  if scaling == "tensor" or scaling.startswith("block"):
     raise A2aQuantMethodNotImplementedError(
         f"{method!r}: scaling {scaling!r} is not implemented. Supported: {A2A_QUANT_SUPPORTED}."
     )
-  if name != "rowwise" or (sep and fmt not in A2A_QUANT_FORMATS):
-    raise ValueError(f"Unsupported method {method!r}. Supported: {A2A_QUANT_SUPPORTED}.")
-  return name, None, fmt or None
+  if not sep or fmt in A2A_QUANT_FORMATS:
+    if name == "rowwise":
+      return name, None, fmt or None
+    if scaling == "fixed" and comma:
+      try:
+        value = float(bound)
+      except ValueError:
+        value = None
+      if value is not None and math.isfinite(value) and value > 0:
+        return scaling, value, fmt or None
+  raise ValueError(f"Unsupported method {method!r}. Supported: {A2A_QUANT_SUPPORTED}.")
 
 
 # ----------------------------------------------------------------------------
@@ -6142,15 +6152,34 @@ class MaxTextConfig(
     """
     if self.moe_quantize_combine_bwd_method and self.use_ring_of_experts:
       method = self.moe_quantize_combine_bwd_method
-      if not (method == "rowwise" or method.startswith("fixed")):
+      try:
+        scaling, _, _ = parse_a2a_quant_method(method)
+        # The ring's quantized all-gather (moe._all_gather_quantized_payload) implements these two scalings only.
+        if scaling not in ("rowwise", "fixed"):
+          raise ValueError(f"scaling {scaling!r} is not implemented on the ring of experts all-gather")
+      except ValueError as e:
         raise ValueError(
             f"Unsupported moe_quantize_combine_bwd_method: '{method}' with use_ring_of_experts=True. "
-            "Supported options: '', 'rowwise', 'fixed,<bound>'."
-        )
+            f"Supported options: {A2A_QUANT_SUPPORTED}."
+        ) from e
+      self._warn_fixed_bwd_with_manual_gradient_accumulation({"moe_quantize_combine_bwd_method": method})
+
+  def _warn_fixed_bwd_with_manual_gradient_accumulation(self, bwd_knobs: dict[str, str]):
+    """Warns when a backward-leg knob uses a static 'fixed' scale under manual gradient accumulation."""
+    if self.gradient_accumulation_steps <= 1 or self.use_tunix_gradient_accumulation:
+      return
+    fixed = [f"{k}={v!r}" for k, v in bwd_knobs.items() if v and parse_a2a_quant_method(v)[0] == "fixed"]
+    if fixed:
+      max_logging.warning(
+          f"{', '.join(fixed)}: with manual gradient accumulation (gradient_accumulation_steps="
+          f"{self.gradient_accumulation_steps} > 1, use_tunix_gradient_accumulation=False) loss_fn differentiates the"
+          " unnormalized xent_sum, so the backward cotangents scale up by the token count per step (~total_weights)"
+          " and a tight 'fixed,<bound>' silently saturates the gradients. Scale the bound accordingly or use 'rowwise'."
+      )
 
   @staticmethod
   def _validate_a2a_quant_method(knob: str, method: str):
-    """Validates one EP ragged all-to-all quantization method with the parser layers/moe.py uses."""
+    """Validates one EP ragged all-to-all quantization method, on any leg, with the parser layers/moe.py uses."""
     try:
       parse_a2a_quant_method(method)
     except A2aQuantMethodNotImplementedError as e:
@@ -6202,6 +6231,13 @@ class MaxTextConfig(
       max_logging.log(
           f"WARNING: {', '.join(a2a_knobs)} has no effect with expert parallelism 1 (no EP ragged all-to-all)."
       )
+    self._warn_fixed_bwd_with_manual_gradient_accumulation(
+        {
+            k: v
+            for k, v in a2a_knobs.items()
+            if k in ("moe_quantize_combine_bwd_method", "moe_quantize_dispatch_bwd_method")
+        }
+    )
 
   @staticmethod
   def _apply_dense_grad_reduce(cfg: Any, *, require_rule: bool) -> None:
