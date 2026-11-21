@@ -32,6 +32,7 @@ from maxtext.configs.pyconfig import (
     resolve_config_path,
     resolve_model_config_path,
 )
+from maxtext.configs import types
 from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
@@ -1315,6 +1316,61 @@ assert train._TF_AVAILABLE is False
             w for w in caught_active if issubclass(w.category, DeprecationWarning) and "qwen3-0.6b" in str(w.message)
         ]
         self.assertEqual(len(active_dep_warnings), 0)
+
+
+class ShouldSkipDefaultJaxCacheTest(unittest.TestCase):
+  """Whether `pyconfig.initialize` turns on the default JAX compilation cache (`should_skip_default_jax_cache`)."""
+
+  _DEFAULT_CACHE = types.MaxTextConfig.model_fields["jax_cache_dir"].default
+
+  def _set_cache_dir_calls(self, hardware, jax_cache_dir, process_count):
+    """Runs `pyconfig.initialize` in a distributed job of `process_count` processes; returns the `set_cache_dir` calls."""
+    with (
+        mock.patch.object(pyconfig.jax.distributed, "is_initialized", return_value=True),
+        mock.patch.object(pyconfig.jax, "process_count", return_value=process_count),
+        mock.patch("jax.experimental.compilation_cache.compilation_cache.set_cache_dir") as set_cache_dir,
+    ):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          hardware=hardware,
+          jax_cache_dir=jax_cache_dir,
+      )
+    return set_cache_dir.call_args_list
+
+  def test_default_cache_is_skipped_on_multiprocess_gpu(self):
+    for hardware in ("gpu", "gpu_multiprocess"):
+      with self.subTest(hardware=hardware):
+        self.assertEqual(self._set_cache_dir_calls(hardware, self._DEFAULT_CACHE, process_count=2), [])
+
+  def test_default_cache_is_used_on_single_process_gpu(self):
+    calls = self._set_cache_dir_calls("gpu", self._DEFAULT_CACHE, process_count=1)
+    self.assertEqual(calls, [mock.call(os.path.expanduser(self._DEFAULT_CACHE))])
+
+  def test_other_cache_dir_is_used_on_multiprocess_gpu(self):
+    calls = self._set_cache_dir_calls("gpu", "gs://bucket/jax_cache", process_count=2)
+    self.assertEqual(calls, [mock.call("gs://bucket/jax_cache")])
+
+  def test_default_cache_is_used_on_multihost_tpu(self):
+    calls = self._set_cache_dir_calls("tpu", self._DEFAULT_CACHE, process_count=4)
+    self.assertEqual(calls, [mock.call(os.path.expanduser(self._DEFAULT_CACHE))])
+
+  def test_backend_is_not_initialized_without_jax_distributed(self):
+    # Without `jax.distributed.initialize()` (a single-process run, or ahead-of-time compilation, where initializing the
+    # backend can fail), the check must not call `jax.process_count()`.
+    with (
+        mock.patch.object(pyconfig.jax.distributed, "is_initialized", return_value=False),
+        mock.patch.object(pyconfig.jax, "process_count", side_effect=RuntimeError("no backend")) as process_count,
+        mock.patch("jax.experimental.compilation_cache.compilation_cache.set_cache_dir") as set_cache_dir,
+    ):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          hardware="gpu",
+          jax_cache_dir=self._DEFAULT_CACHE,
+      )
+    process_count.assert_not_called()
+    self.assertEqual(set_cache_dir.call_args_list, [mock.call(os.path.expanduser(self._DEFAULT_CACHE))])
 
 
 if __name__ == "__main__":
