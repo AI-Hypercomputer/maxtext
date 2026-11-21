@@ -428,6 +428,7 @@ fused_out_early_dw_rs: false # start fused out-projection dw + reduce-scatter be
 defer_norm_grad_allreduce: false # defer per-layer RMSNorm and QK-norm scale gradient all-reduces until after the decoder scan loop (scanned qwen3 / qwen3_moe decoder layers; no-op with a warning elsewhere).
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_unsort_spread_masked_indices: false # bit-identical: masked slots of the count-index unsort gather read distinct entries, not entry 0
+moe_sc_gather_reduce: false # non-ring sparse_matmul: gather tokens in expert order and run the top-k sums (dispatch backward and combine) on the SparseCore gather-reduce kernel; f32 TensorCore sum for shapes it can't take. With expert parallelism 1, routing weights are applied before wo so the combine is a plain sum.
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
 ragged_gather_reduce_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
