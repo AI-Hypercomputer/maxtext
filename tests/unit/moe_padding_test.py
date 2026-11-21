@@ -565,12 +565,24 @@ class RoutingTokenMaskTest(unittest.TestCase):
     segment_ids = jnp.array([[1, 1, 1], [0, 0, 0]])
     # The constant-GBS modes (and any future mode padding the same way) set the logical global batch size.
     constant_padded = types.SimpleNamespace(
-        elastic_global_batch_size_mode="constant_padded", logical_global_batch_size_to_train_on=16
+        elastic_global_batch_size_mode="constant_padded",
+        logical_global_batch_size_to_train_on=16,
+        moe_exclude_padding_from_routing=False,
     )
     constant_grad_accum = types.SimpleNamespace(
-        elastic_global_batch_size_mode="constant_grad_accum", logical_global_batch_size_to_train_on=16
+        elastic_global_batch_size_mode="constant_grad_accum",
+        logical_global_batch_size_to_train_on=16,
+        moe_exclude_padding_from_routing=False,
     )
-    scaled = types.SimpleNamespace(elastic_global_batch_size_mode="scaled", logical_global_batch_size_to_train_on=None)
+    scaled = types.SimpleNamespace(
+        elastic_global_batch_size_mode="scaled",
+        logical_global_batch_size_to_train_on=None,
+        moe_exclude_padding_from_routing=False,
+    )
+    unset = types.SimpleNamespace(
+        logical_global_batch_size_to_train_on=None,
+        moe_exclude_padding_from_routing=False,
+    )
     train, prefill = ctypes.MODEL_MODE_TRAIN, ctypes.MODEL_MODE_PREFILL
     np.testing.assert_array_equal(
         moe.routing_token_mask(constant_padded, segment_ids, train), [[True, True, True], [False, False, False]]
@@ -581,7 +593,7 @@ class RoutingTokenMaskTest(unittest.TestCase):
     self.assertIsNone(moe.routing_token_mask(constant_padded, None, train))
     self.assertIsNone(moe.routing_token_mask(constant_padded, segment_ids, prefill))
     self.assertIsNone(moe.routing_token_mask(scaled, segment_ids, train))
-    self.assertIsNone(moe.routing_token_mask(types.SimpleNamespace(), segment_ids, train))
+    self.assertIsNone(moe.routing_token_mask(unset, segment_ids, train))
 
 
 if __name__ == "__main__":
