@@ -29,6 +29,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
+from maxtext.configs import types as config_types
 from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
@@ -88,6 +89,20 @@ def _restore_as_zeros(path, item=None, **kw):
   """Fake `ckptr.restore`: returns `item` with fresh arrays (from_pretrained frees the originals)."""
   del path, kw
   return jax.tree.map(lambda x: jnp.zeros(x.shape, x.dtype) if isinstance(x, jax.Array) else x, item)
+
+
+def _fake_pathways_rl_init(argv, config_class=None, **kwargs):
+  """Returns a lightweight Pathways RL config stub for slice-allocation tests."""
+  del argv, config_class
+  return types.SimpleNamespace(
+      num_trainer_slices=-1,
+      num_samplers_slices=-1,
+      num_slices=kwargs.get("num_slices", 2),
+      chips_per_vm=4,
+      use_pathways=True,
+      trainer_devices_fraction=kwargs.get("trainer_devices_fraction", 0.5),
+      sampler_devices_fraction=kwargs.get("sampler_devices_fraction", 0.5),
+  )
 
 
 def _make_config(**kwargs):
@@ -1624,6 +1639,407 @@ class TestFromPretrainedAuth(unittest.TestCase):
       model_creation_utils.from_pretrained(config, mesh)
 
     mock_run.assert_not_called()
+
+
+class TestCreateModelsAndMeshesColocatedPathways(unittest.TestCase):
+  """Tests for colocated RL buffer detachment and multi-slice setup logging."""
+
+  def test_create_models_and_meshes_detaches_actor_buffers_and_prng_keys(self):
+    """load_checkpoint_only_once=True detaches actor arrays and PRNG keys."""
+    devices = np.array(jax.devices()[:1])
+    mesh = Mesh(devices, ("data",))
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    sharded = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data"))
+
+    class _DummyBase(nnx.Module):
+      """Minimal NNX module with device arrays, PRNG keys, and non-array leaves."""
+
+      def __init__(self):
+        w = jnp.arange(8, dtype=jnp.float32).reshape(1, 8)
+        self.w = nnx.Param(jax.device_put(w, sharded))
+        self.scale = nnx.Param(jax.device_put(jnp.ones((4,), dtype=jnp.float32), replicated))
+        self.rng = nnx.RngKey(jax.device_put(jax.random.key(7), replicated))
+        self.cache = nnx.Cache(None)
+        self.step = nnx.Variable(42)
+        self.tag = nnx.Variable("actor_metadata")
+        self.host_arr = nnx.Variable(np.array([1, 2], dtype=np.int32))
+
+    class _DummyAdapter:
+      """Minimal adapter wrapper exposing base model and config attributes."""
+
+      def __init__(self, base_model, **_kwargs):
+        self.base = base_model
+        self.config = None
+
+    ref_adapter = _DummyAdapter(_DummyBase())
+    cfg = types.SimpleNamespace(
+        load_checkpoint_only_once=True,
+        vllm_additional_config={"maxtext_config": {}},
+        mesh_axes=("data",),
+    )
+
+    with (
+        patch.object(
+            model_creation_utils,
+            "from_pretrained",
+            return_value=(ref_adapter, mesh),
+        ),
+        patch.object(
+            model_creation_utils.maxtext_utils,
+            "create_device_mesh",
+            return_value=devices,
+        ),
+        patch.object(model_creation_utils, "TunixMaxTextAdapter", _DummyAdapter),
+    ):
+      ref_model, _, actor_model, _, _ = model_creation_utils.create_models_and_meshes(
+          cfg, cfg, list(devices), list(devices)
+      )
+
+    self.assertIsNot(ref_model.base.w[...], actor_model.base.w[...])
+    self.assertIsNot(ref_model.base.scale[...], actor_model.base.scale[...])
+    self.assertIsNot(ref_model.base.rng[...], actor_model.base.rng[...])
+    for ref_arr, actor_arr in (
+        (ref_model.base.w[...], actor_model.base.w[...]),
+        (ref_model.base.scale[...], actor_model.base.scale[...]),
+        (
+            jax.random.key_data(ref_model.base.rng[...]),
+            jax.random.key_data(actor_model.base.rng[...]),
+        ),
+    ):
+      for ref_shard, actor_shard in zip(ref_arr.addressable_shards, actor_arr.addressable_shards, strict=True):
+        self.assertNotEqual(
+            ref_shard.data.unsafe_buffer_pointer(),
+            actor_shard.data.unsafe_buffer_pointer(),
+        )
+    self.assertEqual(actor_model.base.w[...].sharding, sharded)
+    self.assertEqual(actor_model.base.scale[...].sharding, replicated)
+    self.assertTrue(jax.dtypes.issubdtype(actor_model.base.rng[...].dtype, jax.dtypes.prng_key))
+    np.testing.assert_array_equal(
+        np.asarray(jax.random.key_data(ref_model.base.rng[...])),
+        np.asarray(jax.random.key_data(actor_model.base.rng[...])),
+    )
+    self.assertIsNone(actor_model.base.cache.get_value())
+    self.assertIs(type(actor_model.base.step.get_value()), int)
+    self.assertEqual(actor_model.base.step.get_value(), 42)
+    self.assertEqual(actor_model.base.tag.get_value(), "actor_metadata")
+    self.assertIsInstance(actor_model.base.host_arr.get_value(), np.ndarray)
+
+    # Deleting an actor buffer must never invalidate the reference buffer.
+    actor_model.base.scale[...].delete()
+    self.assertFalse(ref_model.base.scale[...].is_deleted())
+    np.testing.assert_array_equal(
+        np.asarray(ref_model.base.scale[...]),
+        np.ones((4,), dtype=jnp.float32),
+    )
+
+    # Modules without jax.Array leaves return cleanly without error.
+    class _MetadataOnlyModule(nnx.Module):
+      """Minimal NNX module containing only non-jax.Array state."""
+
+      def __init__(self):
+        self.step = nnx.Variable(7)
+
+    meta_only = _MetadataOnlyModule()
+    model_creation_utils._detach_nnx_module_buffers(meta_only)  # pylint: disable=protected-access
+    self.assertEqual(meta_only.step.get_value(), 7)
+
+  def test_setup_configs_and_devices_logs_colocated_multislice(self):
+    """Colocated setup logs slice count when num_slices > 1."""
+    fake_devices = [MagicMock(id=i, slice_index=i // 4) for i in range(8)]
+    for num_slices, expected_msg in (
+        (1, "Running on a single slice"),
+        (2, "Running colocated across 2 slices"),
+    ):
+      with self.subTest(num_slices=num_slices):
+        fake_cfg = types.SimpleNamespace(
+            num_trainer_slices=-1,
+            num_samplers_slices=-1,
+            num_slices=num_slices,
+            chips_per_vm=4,
+            use_pathways=False,
+        )
+        with (
+            patch.object(
+                model_creation_utils.pyconfig,
+                "initialize_pydantic",
+                return_value=fake_cfg,
+            ),
+            patch.object(model_creation_utils.jax, "devices", return_value=fake_devices),
+            patch.object(model_creation_utils.max_logging, "log") as mock_log,
+        ):
+          trainer_cfg, sampler_cfg, trainer_devs, sampler_devs = model_creation_utils.setup_configs_and_devices(
+              argv=[""], config_class=object
+          )
+        self.assertIs(trainer_cfg, fake_cfg)
+        self.assertIs(sampler_cfg, fake_cfg)
+        self.assertEqual(trainer_devs, fake_devices)
+        self.assertEqual(sampler_devs, fake_devices)
+        mock_log.assert_called_once_with(expected_msg)
+
+  def test_setup_configs_and_devices_pathways_multislice_fractional_split(self):
+    """Fractional Pathways splits on multi-slice adjust per-role num_slices."""
+    fake_devices = [MagicMock(id=i, slice_index=i // 4) for i in range(8)]
+
+    with (
+        patch.object(
+            model_creation_utils.pyconfig,
+            "initialize_pydantic",
+            side_effect=_fake_pathways_rl_init,
+        ) as mock_init,
+        patch.object(model_creation_utils.jax, "devices", return_value=fake_devices),
+        patch.object(model_creation_utils.max_logging, "log") as mock_log,
+    ):
+      trainer_cfg, sampler_cfg, trainer_devs, sampler_devs = model_creation_utils.setup_configs_and_devices(
+          argv=[""], config_class=object
+      )
+
+    self.assertEqual(len(trainer_devs), 4)
+    self.assertEqual(len(sampler_devs), 4)
+    self.assertEqual(trainer_cfg.num_slices, 1)
+    self.assertEqual(sampler_cfg.num_slices, 1)
+    self.assertEqual(mock_init.call_count, 3)
+    mock_log.assert_any_call("Running across 2 slices (trainer=1 slice(s), sampler=1 slice(s))")
+
+    # Colocated 1.0/1.0 Pathways multi-slice reuses config without re-init.
+    with (
+        patch.object(
+            model_creation_utils.pyconfig,
+            "initialize_pydantic",
+            side_effect=_fake_pathways_rl_init,
+        ) as mock_init_coloc,
+        patch.object(model_creation_utils.jax, "devices", return_value=fake_devices),
+        patch.object(model_creation_utils.max_logging, "log") as mock_log_coloc,
+    ):
+      trainer_cfg, sampler_cfg, trainer_devs, sampler_devs = model_creation_utils.setup_configs_and_devices(
+          argv=[""],
+          config_class=object,
+          trainer_devices_fraction=1.0,
+          sampler_devices_fraction=1.0,
+      )
+
+    self.assertIs(trainer_cfg, sampler_cfg)
+    self.assertEqual(trainer_cfg.num_slices, 2)
+    self.assertEqual(trainer_devs, fake_devices)
+    self.assertEqual(sampler_devs, fake_devices)
+    self.assertEqual(mock_init_coloc.call_count, 1)
+    mock_log_coloc.assert_any_call("Running colocated across 2 slices")
+
+    # Asymmetric split (trainer=1.0, sampler=0.5) is not colocated and logs per-role slice counts.
+    with (
+        patch.object(
+            model_creation_utils.pyconfig,
+            "initialize_pydantic",
+            side_effect=_fake_pathways_rl_init,
+        ) as mock_init_asym,
+        patch.object(model_creation_utils.jax, "devices", return_value=fake_devices),
+        patch.object(model_creation_utils.max_logging, "log") as mock_log_asym,
+    ):
+      trainer_cfg, sampler_cfg, trainer_devs, sampler_devs = model_creation_utils.setup_configs_and_devices(
+          argv=[""],
+          config_class=object,
+          trainer_devices_fraction=1.0,
+          sampler_devices_fraction=0.5,
+      )
+
+    self.assertEqual(len(trainer_devs), 8)
+    self.assertEqual(len(sampler_devs), 4)
+    self.assertEqual(trainer_cfg.num_slices, 2)
+    self.assertEqual(sampler_cfg.num_slices, 1)
+    self.assertEqual(mock_init_asym.call_count, 2)
+    mock_log_asym.assert_any_call("Running across 2 slices (trainer=2 slice(s), sampler=1 slice(s))")
+
+  def test_count_device_slices_fallbacks_and_aligned_splits(self):
+    """Covers empty/missing-slice_index fallbacks, 4-slice 0.5/0.5, and 1-slice sub-slice splits."""
+    self.assertEqual(model_creation_utils._count_device_slices([], 2), 2)  # pylint: disable=protected-access
+    devices_without_slice_index = [types.SimpleNamespace(id=i) for i in range(8)]
+    self.assertEqual(
+        model_creation_utils._count_device_slices(devices_without_slice_index[:4], 2),  # pylint: disable=protected-access
+        2,
+    )
+    with (
+        patch.object(
+            model_creation_utils.pyconfig,
+            "initialize_pydantic",
+            side_effect=_fake_pathways_rl_init,
+        ) as mock_init_noslice,
+        patch.object(model_creation_utils.jax, "devices", return_value=devices_without_slice_index),
+        patch.object(model_creation_utils.max_logging, "log"),
+    ):
+      trainer_cfg, sampler_cfg, _, _ = model_creation_utils.setup_configs_and_devices(argv=[""], config_class=object)
+    self.assertEqual(trainer_cfg.num_slices, 2)
+    self.assertEqual(sampler_cfg.num_slices, 2)
+    self.assertEqual(mock_init_noslice.call_count, 1)
+
+    # Multi-slice aligned 4-slice 0.5/0.5 split succeeds (2 trainer slices, 2 sampler slices).
+    four_slice_devices = [MagicMock(id=i, slice_index=i // 4) for i in range(16)]
+    with (
+        patch.object(
+            model_creation_utils.pyconfig,
+            "initialize_pydantic",
+            side_effect=_fake_pathways_rl_init,
+        ),
+        patch.object(model_creation_utils.jax, "devices", return_value=four_slice_devices),
+        patch.object(model_creation_utils.max_logging, "log") as mock_log_4s,
+    ):
+      trainer_cfg, sampler_cfg, trainer_devs, sampler_devs = model_creation_utils.setup_configs_and_devices(
+          argv=[""], config_class=object, num_slices=4
+      )
+    self.assertEqual(len(trainer_devs), 8)
+    self.assertEqual(len(sampler_devs), 8)
+    self.assertEqual(trainer_cfg.num_slices, 2)
+    self.assertEqual(sampler_cfg.num_slices, 2)
+    mock_log_4s.assert_any_call("Running across 4 slices (trainer=2 slice(s), sampler=2 slice(s))")
+
+    # Single-slice multi-VM sub-slice split (0.25/0.75 on 1x8 slice) stays valid.
+    single_slice_2vm = [MagicMock(id=i, slice_index=0) for i in range(8)]
+    with (
+        patch.object(
+            model_creation_utils.pyconfig,
+            "initialize_pydantic",
+            side_effect=_fake_pathways_rl_init,
+        ),
+        patch.object(model_creation_utils.jax, "devices", return_value=single_slice_2vm),
+        patch.object(model_creation_utils.max_logging, "log"),
+    ):
+      trainer_cfg, sampler_cfg, trainer_devs, sampler_devs = model_creation_utils.setup_configs_and_devices(
+          argv=[""],
+          config_class=object,
+          num_slices=1,
+          trainer_devices_fraction=0.25,
+          sampler_devices_fraction=0.75,
+      )
+    self.assertEqual(len(trainer_devs), 2)
+    self.assertEqual(len(sampler_devs), 6)
+    self.assertEqual(trainer_cfg.num_slices, 1)
+    self.assertEqual(sampler_cfg.num_slices, 1)
+
+  def test_count_device_slices_rejects_partial_or_uneven_slice_splits(self):
+    """Non-aligned fractions, interleaved slice ordering, and ragged splits raise ValueError."""
+    two_16chip_slices = [types.SimpleNamespace(id=i, slice_index=i // 16) for i in range(32)]
+    for trainer_frac, sampler_frac, expected_regex in (
+        (0.75, 0.25, r"trainer_devices_fraction=0\.75 splits a slice: trainer devices per slice = \{0: 16, 1: 8\}"),
+        (0.5, 0.75, r"sampler_devices_fraction=0\.75 splits a slice: sampler devices per slice = \{0: 8, 1: 16\}"),
+    ):
+      with self.subTest(trainer_frac=trainer_frac, sampler_frac=sampler_frac):
+        with (
+            patch.object(
+                model_creation_utils.pyconfig,
+                "initialize_pydantic",
+                side_effect=_fake_pathways_rl_init,
+            ),
+            patch.object(model_creation_utils.jax, "devices", return_value=two_16chip_slices),
+            patch.object(model_creation_utils.max_logging, "log"),
+            self.assertRaisesRegex(ValueError, expected_regex),
+        ):
+          model_creation_utils.setup_configs_and_devices(
+              argv=[""],
+              config_class=object,
+              trainer_devices_fraction=trainer_frac,
+              sampler_devices_fraction=sampler_frac,
+          )
+
+    # Interleaved multi-slice ordering (equal partial counts across slices) is also rejected.
+    interleaved_devices = [types.SimpleNamespace(id=i, slice_index=i % 2) for i in range(16)]
+    with (
+        patch.object(
+            model_creation_utils.pyconfig,
+            "initialize_pydantic",
+            side_effect=_fake_pathways_rl_init,
+        ),
+        patch.object(model_creation_utils.jax, "devices", return_value=interleaved_devices),
+        patch.object(model_creation_utils.max_logging, "log"),
+        self.assertRaisesRegex(ValueError, r"trainer_devices_fraction=0\.5 splits a slice"),
+    ):
+      model_creation_utils.setup_configs_and_devices(argv=[""], config_class=object)
+
+    # Direct helper check without all_devices catches ragged slice counts too.
+    ragged_devices = [types.SimpleNamespace(id=i, slice_index=0) for i in range(4)] + [
+        types.SimpleNamespace(id=i + 4, slice_index=1) for i in range(2)
+    ]
+    with self.assertRaisesRegex(ValueError, r"splits a slice: role devices per slice = \{0: 4, 1: 2\}"):
+      model_creation_utils._count_device_slices(ragged_devices, 2)  # pylint: disable=protected-access
+
+  def test_setup_configs_and_devices_disaggregated_mesh_construction(self):
+    """Disaggregated 1+1 and 2+2 RL configs preserve sub-config num_slices in create_device_mesh."""
+    base_overrides = {
+        "enable_checkpointing": False,
+        "base_num_decoder_layers": 1,
+        "attention": "dot_product",
+        "max_target_length": 8,
+        "base_emb_dim": 128,
+        "base_num_query_heads": 2,
+        "base_num_kv_heads": 2,
+        "base_mlp_dim": 256,
+        "max_prefill_predict_length": 4,
+        "model_name": "llama2-7b",
+        "override_model_config": True,
+        "weight_dtype": "bfloat16",
+        "tokenizer_path": "meta-llama/Llama-2-7b",
+        "run_name": "disagg_mesh_test",
+    }
+    rl_argv = [sys.argv[0], get_test_config_path("post_train/rl.yml")]
+
+    # 1+1 disaggregated: sub-configs keep num_slices=1 and route to single-slice create_device_mesh.
+    devices_2x4 = [types.SimpleNamespace(id=i, slice_index=i // 4) for i in range(8)]
+    with (
+        patch.object(jax, "devices", return_value=devices_2x4),
+        patch.object(jax, "local_device_count", return_value=4),
+        patch.object(
+            maxtext_utils.mesh_utils,
+            "create_device_mesh",
+            side_effect=lambda shape, devs, **unused_kwargs: np.array(devs, dtype=object).reshape(shape),
+        ) as mock_single_mesh,
+        patch.object(maxtext_utils.mesh_utils, "create_hybrid_device_mesh") as mock_hybrid_mesh,
+    ):
+      trainer_cfg, sampler_cfg, trainer_devs, sampler_devs = model_creation_utils.setup_configs_and_devices(
+          rl_argv,
+          kwargs={**base_overrides, "num_trainer_slices": 1, "num_samplers_slices": 1},
+          config_class=config_types.RLConfig,
+      )
+      self.assertEqual(trainer_cfg.num_slices, 1)
+      self.assertEqual(sampler_cfg.num_slices, 1)
+      trainer_mesh = maxtext_utils.create_device_mesh(trainer_cfg, trainer_devs)
+      sampler_mesh = maxtext_utils.create_device_mesh(sampler_cfg, sampler_devs)
+
+    self.assertEqual(trainer_mesh.size, 4)
+    self.assertEqual(sampler_mesh.size, 4)
+    self.assertEqual(mock_single_mesh.call_count, 2)
+    mock_hybrid_mesh.assert_not_called()
+
+    # 2+2 disaggregated: sub-configs keep num_slices=2 and route to create_hybrid_device_mesh with DCN DP=2.
+    devices_4x4 = [types.SimpleNamespace(id=i, slice_index=i // 4) for i in range(16)]
+    with (
+        patch.object(jax, "devices", return_value=devices_4x4),
+        patch.object(jax, "local_device_count", return_value=4),
+        patch.object(maxtext_utils.mesh_utils, "create_device_mesh") as mock_single_mesh_2,
+        patch.object(
+            maxtext_utils.mesh_utils,
+            "create_hybrid_device_mesh",
+            side_effect=lambda ici, dcn, devs, **unused_kwargs: np.array(devs, dtype=object).reshape(
+                [i * d for i, d in zip(ici, dcn, strict=True)]
+            ),
+        ) as mock_hybrid_mesh_2,
+    ):
+      trainer_cfg, sampler_cfg, trainer_devs, sampler_devs = model_creation_utils.setup_configs_and_devices(
+          rl_argv,
+          kwargs={**base_overrides, "num_trainer_slices": 2, "num_samplers_slices": 2},
+          config_class=config_types.RLConfig,
+      )
+      self.assertEqual(trainer_cfg.num_slices, 2)
+      self.assertEqual(sampler_cfg.num_slices, 2)
+      trainer_mesh = maxtext_utils.create_device_mesh(trainer_cfg, trainer_devs)
+      sampler_mesh = maxtext_utils.create_device_mesh(sampler_cfg, sampler_devs)
+
+    self.assertEqual(trainer_mesh.size, 8)
+    self.assertEqual(sampler_mesh.size, 8)
+    mock_single_mesh_2.assert_not_called()
+    self.assertEqual(mock_hybrid_mesh_2.call_count, 2)
+    data_idx = trainer_cfg.mesh_axes.index("data")
+    fsdp_idx = trainer_cfg.mesh_axes.index("fsdp")
+    for call in mock_hybrid_mesh_2.call_args_list:
+      ici_shape, dcn_shape, _ = call.args
+      self.assertEqual(ici_shape[fsdp_idx], 4)
+      self.assertEqual(dcn_shape[data_idx], 2)
 
 
 if __name__ == "__main__":

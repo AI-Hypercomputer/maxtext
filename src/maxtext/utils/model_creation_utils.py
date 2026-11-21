@@ -810,6 +810,62 @@ def create_nnx_abstract_model(
     return _create_model, nnx.merge(graphdef, abstract_state)
 
 
+def _count_device_slices(
+    role_devices: Sequence[Any],
+    fallback_num_slices: int,
+    *,
+    all_devices: Sequence[Any] = (),
+    role_name: str = "role",
+    fraction_name: str = "devices_fraction",
+    fraction: float | None = None,
+) -> int:
+  """Counts whole slices in `role_devices` and validates slice boundaries.
+
+  Args:
+    role_devices: Devices assigned to a single role.
+    fallback_num_slices: Slice count returned when `role_devices` is empty or
+      any device lacks a `slice_index` attribute (or has `slice_index is None`).
+    all_devices: Full device list used to verify that multi-slice allocations do
+      not partially use any slice. When empty, only equal per-slice counts are
+      checked.
+    role_name: Role label included in validation error messages.
+    fraction_name: Config field name included in validation error messages.
+    fraction: Configured device fraction for the role, or `None` to omit the
+      fraction prefix from error messages.
+
+  Returns:
+    Number of distinct slices in `role_devices`, or `fallback_num_slices` when
+    slice metadata is unavailable.
+
+  Raises:
+    ValueError: If `role_devices` spans multiple slices with uneven counts or
+      partial slice allocations relative to `all_devices`.
+  """
+  if not role_devices:
+    return fallback_num_slices
+  slice_counts: dict[Any, int] = collections.Counter()
+  for dev in role_devices:
+    slice_idx = getattr(dev, "slice_index", None)
+    if slice_idx is None:
+      return fallback_num_slices
+    slice_counts[slice_idx] += 1
+
+  if len(slice_counts) > 1:
+    full_slice_counts = collections.Counter(getattr(dev, "slice_index", None) for dev in all_devices)
+    full_slice_counts.pop(None, None)
+    has_uneven_slices = len(set(slice_counts.values())) != 1
+    has_partial_slice = bool(full_slice_counts) and any(
+        count != full_slice_counts.get(slice_idx) for slice_idx, count in slice_counts.items()
+    )
+    if has_uneven_slices or has_partial_slice:
+      frac_prefix = f"{fraction_name}={fraction} " if fraction is not None else ""
+      raise ValueError(
+          f"{frac_prefix}splits a slice: {role_name} devices per slice = {dict(slice_counts)}; "
+          "use a fraction aligned to slice boundaries"
+      )
+  return len(slice_counts)
+
+
 def setup_configs_and_devices(
     argv: list[str] | None = None,
     kwargs: dict | None = None,
@@ -829,10 +885,12 @@ def setup_configs_and_devices(
   config = pyconfig.initialize_pydantic(argv, config_class=config_class, **combined_kwargs)
   devices = jax.devices()
   if config.num_trainer_slices == -1 and config.num_samplers_slices == -1:
-    max_logging.log("Running on a single slice")
+    num_slices = getattr(config, "num_slices", 1)
     num_vms = len(devices) // config.chips_per_vm
     trainer_devices = devices
     sampler_devices = devices
+    trainer_config = config
+    sampler_config = config
     if num_vms >= 2 and config.use_pathways:
       # Multiple hosts with Pathways - potentially split devices for trainer and sampler
       # based on trainer_devices_fraction and sampler_devices_fraction
@@ -846,8 +904,44 @@ def setup_configs_and_devices(
         max_logging.log(f"Using first {len(trainer_devices)} devices as Trainer devices")
       if config.sampler_devices_fraction != 1.0:
         max_logging.log(f"Using last {len(sampler_devices)} devices as Sampler devices")
-    trainer_config = config
-    sampler_config = config
+      if len(trainer_devices) != num_devices:
+        trainer_num_slices = _count_device_slices(
+            trainer_devices,
+            num_slices,
+            all_devices=devices,
+            role_name="trainer",
+            fraction_name="trainer_devices_fraction",
+            fraction=config.trainer_devices_fraction,
+        )
+        if trainer_num_slices != num_slices:
+          trainer_kwargs = dict(combined_kwargs)
+          trainer_kwargs["num_slices"] = trainer_num_slices
+          trainer_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **trainer_kwargs)
+      if len(sampler_devices) != num_devices:
+        sampler_num_slices = _count_device_slices(
+            sampler_devices,
+            num_slices,
+            all_devices=devices,
+            role_name="sampler",
+            fraction_name="sampler_devices_fraction",
+            fraction=config.sampler_devices_fraction,
+        )
+        if sampler_num_slices != num_slices:
+          sampler_kwargs = dict(combined_kwargs)
+          sampler_kwargs["num_slices"] = sampler_num_slices
+          sampler_config = pyconfig.initialize_pydantic(argv, config_class=config_class, **sampler_kwargs)
+    is_colocated = len(trainer_devices) == len(devices) and len(sampler_devices) == len(devices)
+    if num_slices > 1:
+      if is_colocated:
+        max_logging.log(f"Running colocated across {num_slices} slices")
+      else:
+        max_logging.log(
+            f"Running across {num_slices} slices "
+            f"(trainer={getattr(trainer_config, 'num_slices', 1)} slice(s), "
+            f"sampler={getattr(sampler_config, 'num_slices', 1)} slice(s))"
+        )
+    else:
+      max_logging.log("Running on a single slice")
   elif config.num_trainer_slices > 0 and config.num_samplers_slices > 0:
     max_logging.log("Running with Multislice")
     devices_by_slice = collections.defaultdict(list)
@@ -970,6 +1064,27 @@ def get_rollout_kwargs_for_parallelism(sampler_config, num_sampler_devices):
   return rollout_kwargs
 
 
+def _detach_nnx_module_buffers(module: nnx.Module) -> None:
+  """Copies all jax.Array leaves of `module` on-device, preserving shardings."""
+  state = nnx.state(module)
+  leaves, treedef = jax.tree_util.tree_flatten(state)
+  array_indices = [i for i, x in enumerate(leaves) if isinstance(x, jax.Array)]
+  if not array_indices:
+    return
+  array_leaves = [leaves[i] for i in array_indices]
+  out_shardings = [x.sharding for x in array_leaves]
+
+  copy_arrays_fn = jax.jit(
+      lambda xs: [x.copy() for x in xs],
+      out_shardings=out_shardings,
+  )
+  copied_arrays = copy_arrays_fn(array_leaves)
+  new_leaves = list(leaves)
+  for idx, copied in zip(array_indices, copied_arrays, strict=True):
+    new_leaves[idx] = copied
+  nnx.update(module, jax.tree_util.tree_unflatten(treedef, new_leaves))
+
+
 def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sampler_devices, tokenizer_pad_id=None):
   """Create reference and actor models and their respective meshes.
   This API is particularly useful for Reinforcement Learning (RL) where we need 2 models (wrapped in TunixMaxTextAdapter
@@ -994,6 +1109,15 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
     max_logging.log("Creating policy model by copying reference model instead of restoring from checkpoint again.")
     with reference_mesh:
       actor_base_model = nnx.clone(reference_model.base)
+      # nnx.clone duplicates the Python graph but aliases the underlying
+      # jax.Array buffers with reference_model. Under colocated Pathways RL,
+      # weight sync in Tunix releases predating google/tunix#3368 can delete
+      # old rollout buffers without pointer-level alias checks, so any
+      # replicated tensor passed through a no-op reshard on sync 0 would delete
+      # reference_model's weights on sync 1. Copy arrays on-device preserving
+      # exact shardings so actor and reference own disjoint buffers (both as
+      # defense-in-depth and for older OSS Tunix releases).
+      _detach_nnx_module_buffers(actor_base_model)
       use_no_op_mappings = "maxtext_config" in trainer_config.vllm_additional_config
       # TunixMaxTextAdapter wraps MaxText models to be compatible with Tunix's default APIs
       # The weight mappings for vllm (which is interfaced to from MaxText via Tunix) are model specific.
