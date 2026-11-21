@@ -104,6 +104,9 @@ def gmm(
     rhs_amax: jnp.ndarray | None = None,
     rhs_scale_kept_axes: tuple[int, ...] = (),
     gmm_v2_tail_chunks: bool = False,
+    tgmm_v2_deep_buffering: bool = False,
+    tgmm_v2_small_tail_contraction: bool = False,
+    tgmm_v2_k_minor_out: bool = False,
 ):
   """Grouped matrix multiplication operation.
 
@@ -166,7 +169,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25, 27, 28),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25, 27, 28, 29, 30, 31),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -199,6 +202,9 @@ def gmm(
       rhs_amax,
       rhs_scale_kept_axes,
       gmm_v2_tail_chunks,
+      tgmm_v2_deep_buffering,
+      tgmm_v2_small_tail_contraction,
+      tgmm_v2_k_minor_out,
   )
   if return_lhs and return_rhs:
     return out, lhs_out, rhs_out
@@ -264,6 +270,9 @@ def _gmm_fwd(
     rhs_amax: jnp.ndarray | None = None,
     rhs_scale_kept_axes: tuple[int, ...] = (),
     gmm_v2_tail_chunks: bool = False,
+    tgmm_v2_deep_buffering: bool = False,
+    tgmm_v2_small_tail_contraction: bool = False,
+    tgmm_v2_k_minor_out: bool = False,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
     tuple[
@@ -679,6 +688,9 @@ def _gmm_bwd(
     tc_unsort_cfg: TcUnsortCfg | None,
     rhs_scale_kept_axes: tuple[int, ...],
     gmm_v2_tail_chunks: bool,
+    tgmm_v2_deep_buffering: bool,
+    tgmm_v2_small_tail_contraction: bool,
+    tgmm_v2_k_minor_out: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -825,6 +837,9 @@ def _gmm_bwd(
       use_gmm_v2_heuristic_tiling,
       partial_sum=drhs_partial_sum,
       flat_rhs_shard=flat_fsdp_shard is not None,
+      tgmm_v2_deep_buffering=tgmm_v2_deep_buffering,
+      tgmm_v2_small_tail_contraction=tgmm_v2_small_tail_contraction,
+      tgmm_v2_k_minor_out=tgmm_v2_k_minor_out,
   )
 
   # 5. Output Formatting
@@ -1248,6 +1263,9 @@ def _compute_drhs(
     use_gmm_v2_heuristic_tiling: bool,
     partial_sum: jnp.ndarray | None = None,
     flat_rhs_shard: bool = False,
+    tgmm_v2_deep_buffering: bool = False,
+    tgmm_v2_small_tail_contraction: bool = False,
+    tgmm_v2_k_minor_out: bool = False,
 ) -> jnp.ndarray:
   """Routes execution of DRHS based on backend choices."""
   if use_tokamax_backend and not use_gmm_v2:
@@ -1263,6 +1281,9 @@ def _compute_drhs(
         tiling,
         use_gmm_v2_heuristic_tiling,
         partial_sum=partial_sum,
+        deep_buffering=tgmm_v2_deep_buffering,
+        small_tail_contraction=tgmm_v2_small_tail_contraction,
+        k_minor_out=tgmm_v2_k_minor_out,
     )
   else:
     drhs = _drhs_run_megablox(
@@ -1349,6 +1370,9 @@ def _drhs_run_tokamax_v2(
     tiling: tuple,
     use_gmm_v2_heuristic_tiling: bool,
     partial_sum: jnp.ndarray | None = None,
+    deep_buffering: bool = False,
+    small_tail_contraction: bool = False,
+    k_minor_out: bool = False,
 ) -> jnp.ndarray:
   """Executes Tokamax TGMM V2 backend for DRHS = LHS^T @ DRHS_dout."""
   drhs_rhs = drhs_dout.qvalue if isinstance(drhs_dout, qpl.QArray) else drhs_dout
@@ -1374,6 +1398,9 @@ def _drhs_run_tokamax_v2(
       preferred_element_type=rhs_dtype,
       group_offset=group_offset,
       tile_info=drhs_tiling,
+      deep_buffering=deep_buffering,
+      small_tail_contraction=small_tail_contraction,
+      k_minor_out=k_minor_out,
   )
 
 

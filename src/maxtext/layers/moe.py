@@ -3618,6 +3618,9 @@ class RoutedMoE(nnx.Module):
             use_gmm_v2_heuristic_tiling=self.config.use_gmm_v2_heuristic_tiling,
             use_dlhs_transpose_rhs=self.config.moe_gmm_v2_dlhs_transpose_rhs,
             gmm_v2_tail_chunks=self.config.moe_gmm_v2_tail_chunks,
+            tgmm_v2_deep_buffering=self.config.moe_tgmm_v2_deep_buffering,
+            tgmm_v2_small_tail_contraction=self.config.moe_tgmm_v2_small_tail_contraction,
+            tgmm_v2_k_minor_out=tgmm_v2_k_minor_out(),
             partial_sum=partial_sum,
             interpret=megablox_interpret,
             return_lhs=return_lhs,
@@ -4462,6 +4465,27 @@ class RoutedMoE(nnx.Module):
           self.config.wo_tile_drhs_embed_dim,  # Called n in megablox, and indeed is the RHS batch dim
       )
       return wo_gather_axes, wo_tile_size
+
+    def expert_weight_grads_reduced():
+      """Whether a mesh axis of size > 1 does not shard wi or wo as its gmm uses it.
+
+      The weight gradient is then summed over that axis: reduce-scattered over FSDP, or all-reduced.
+      """
+      wi_gather_axes, wo_gather_axes = get_wi_gmm_params()[0], get_wo_gmm_params()[0]
+      for pspec, gather_axes in ((w0_pspec, wi_gather_axes), (w1_pspec, wi_gather_axes), (wo_pspec, wo_gather_axes)):
+        axes = set()
+        for dim in pspec:
+          axes.update((dim,) if isinstance(dim, str) else (dim or ()))
+        axes -= {axis for axis, _ in gather_axes}
+        if any(size > 1 and axis not in axes for axis, size in self.mesh.shape.items()):
+          return True
+      return False
+
+    # tgmm_v2's k-minor output only pays when the expert weight gradients stay on their device: on TPU v7x the
+    # SparseCore reduce-scatter of a k-minor wi gradient was ~35% slower than of the n-minor one and was no
+    # longer combined with its sibling's, which made gemma4-26b training 0.5% slower.
+    def tgmm_v2_k_minor_out():
+      return self.config.moe_tgmm_v2_k_minor_out and not expert_weight_grads_reduced()
 
     def gmm_up(
         x,
