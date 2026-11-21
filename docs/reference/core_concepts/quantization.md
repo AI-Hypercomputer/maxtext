@@ -295,8 +295,9 @@ All four flags default to `""` (unquantized BF16):
 Each flag accepts `"<scaling>[@e4m3|@e5m2]"`:
 
 - `rowwise`: Dynamic per-token f32 `absmax` scaling. Sends two `ragged_all_to_all` collectives on the same routing offsets—FP8 values (`[rows, H]`) and per-token f32 scales (`[rows]`).
+- `fixed,<bound>`: Static scaling (`scale = bound / qmax`, clipping inputs to `[-bound, bound]`). Sends a single FP8 `ragged_all_to_all` (`[rows, H]`) with no dynamic reduction and no scale collective. Bounds must be positive finite floats tuned per leg.
 
 ### Requirements
 
-- `use_ring_of_experts=False` (except `moe_quantize_combine_bwd_method`, which also supports Ring of Experts backward all-gather under `use_ring_of_experts=True` without `@<format>`).
+- `use_ring_of_experts=False` (except `moe_quantize_combine_bwd_method`, which also supports `rowwise` and `fixed,<bound>`, with the same optional `@<format>`, under `use_ring_of_experts=True`).
 - `sparse_matmul=True` and `te_moe_block=False`.
