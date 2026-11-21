@@ -64,6 +64,9 @@ from jax.experimental import xla_metadata
 import jax.numpy as jnp
 
 LANES = 128
+# Checkpoint name (and remat-location config field) of the routing state of the top-k router and the packed
+# routing sort, saved across remat with `moe_packed_routing_maps=device`.
+MOE_PACKED_ROUTING_MAPS = "moe_packed_routing_maps"
 _SUBLANE_FP8 = 32
 
 
@@ -133,6 +136,7 @@ class FusedGmm3dParams:
   overlap_dcoeffs_scatter: bool = False
   wgrad_schedule_mode: int = 0
   wi_ag_latency_ns: int = 0
+  save_reduce_meta: bool = False
   use_reference: bool = False
 
   @property
@@ -492,6 +496,7 @@ def _kernel_fwd(
     *,
     need_bank: bool = True,
     sort_indices: jax.Array | None = None,
+    precomputed_reduce_meta: jax.Array | None = None,
 ):
   """gather_gate_gmm + (linear_gmm_fp8 + ragged_gather_reduce_tc | linear_combine_fwd).
 
@@ -564,8 +569,10 @@ def _kernel_fwd(
               out_2d=p.exact_topk_out_2d,
           )
       ):
-        if p.inv_perm_combine and sort_indices is not None:
-          reduce_meta: Any = _inv_perm_src_rows(sort_indices)
+        if precomputed_reduce_meta is not None:
+          reduce_meta: Any = precomputed_reduce_meta
+        elif p.inv_perm_combine and sort_indices is not None:
+          reduce_meta = _inv_perm_src_rows(sort_indices)
         else:
           reduce_meta = lineage_ops.exact_topk_gather_reduce_tc_src_rows(token_indices)
         y3d = lineage_ops.exact_topk_gather_reduce_tc(
@@ -1065,7 +1072,6 @@ def _kernel_bwd(
 # -----------------------------------------------------------------------------
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
 def fused_moe_experts(
     p: FusedGmm3dParams,
     x2d: jax.Array,  # [N, D] compute dtype
@@ -1081,8 +1087,44 @@ def fused_moe_experts(
   ``silu(x @ wi[:, :F]) * (x @ wi[:, F:]) * coeff`` per expert, ``@ wo`` per expert
   and sum each token's top_k rows, with fp8 per-tensor quantization of the
   tokens, weights and activations and e5m2 output gradients in the backward.
+
+  With ``p.save_reduce_meta`` the exact-top_k combine ``src_rows`` are computed
+  outside the custom VJP and checkpointed on HBM (``moe_packed_routing_maps``), so the
+  backward pass reuses them instead of re-sorting the routing under remat.
   """
-  return _primal_fwd(p, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes)
+  pre_meta: jax.Array | None = None
+  if (
+      p.save_reduce_meta
+      and not p.use_reference
+      and p.use_gmm_linear_combine
+      and p.exact_topk_combine
+      and not p.inv_perm_combine
+      and sort_indices.shape[0] == x2d.shape[0] * p.top_k
+  ):
+    lineage_ops = _lineage()[0]
+    if lineage_ops.can_use_exact_topk_gather_reduce_tc(
+        x2d.shape[0], p.top_k, p.emb_dim // LANES, LANES, jnp.bfloat16, out_2d=p.exact_topk_out_2d
+    ):
+      token_indices = (sort_indices // p.top_k).astype(jnp.int32)
+      pre_meta = jax.ad_checkpoint.checkpoint_name(
+          lineage_ops.exact_topk_gather_reduce_tc_src_rows(token_indices), MOE_PACKED_ROUTING_MAPS
+      )
+  return _fused_moe_experts_vjp(p, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes, pre_meta)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
+def _fused_moe_experts_vjp(
+    p: FusedGmm3dParams,
+    x2d: jax.Array,
+    wi_local: jax.Array,
+    wo_local: jax.Array,
+    sorted_coeffs: jax.Array,
+    sort_indices: jax.Array,
+    group_sizes: jax.Array,
+    precomputed_reduce_meta: jax.Array | None = None,
+) -> jax.Array:
+  """Custom-VJP core of `fused_moe_experts`; `precomputed_reduce_meta` is an optional saved combine `src_rows`."""
+  return _primal_fwd(p, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes, precomputed_reduce_meta)
 
 
 def _prepare(
@@ -1139,7 +1181,16 @@ def _prepare(
   return x_q, w_gate_q, wo_q, coeffs, token_indices
 
 
-def _primal_fwd(p: FusedGmm3dParams, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes):
+def _primal_fwd(
+    p: FusedGmm3dParams,
+    x2d,
+    wi_local,
+    wo_local,
+    sorted_coeffs,
+    sort_indices,
+    group_sizes,
+    precomputed_reduce_meta=None,
+):
   """Forward of the fused MoE experts without residuals (the primal of the custom VJP)."""
   group_sizes = group_sizes.astype(jnp.int32)
   x_q, w_gate_q, wo_q, coeffs, token_indices = _prepare(
@@ -1149,12 +1200,30 @@ def _primal_fwd(p: FusedGmm3dParams, x2d, wi_local, wo_local, sorted_coeffs, sor
     y2d, _, _ = _ref_fwd(p, x_q, w_gate_q, wo_q, coeffs, token_indices, group_sizes)
   else:
     y2d, _, _ = _kernel_fwd(
-        p, x_q, w_gate_q, wo_q, coeffs, token_indices, group_sizes, need_bank=False, sort_indices=sort_indices
+        p,
+        x_q,
+        w_gate_q,
+        wo_q,
+        coeffs,
+        token_indices,
+        group_sizes,
+        need_bank=False,
+        sort_indices=sort_indices,
+        precomputed_reduce_meta=precomputed_reduce_meta,
     )
   return y2d.astype(x2d.dtype)
 
 
-def _fused_fwd(p: FusedGmm3dParams, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes):
+def _fused_fwd(
+    p: FusedGmm3dParams,
+    x2d,
+    wi_local,
+    wo_local,
+    sorted_coeffs,
+    sort_indices,
+    group_sizes,
+    precomputed_reduce_meta=None,
+):
   """Custom-VJP forward of the fused MoE experts; returns the output and the backward residuals."""
   group_sizes = group_sizes.astype(jnp.int32)
   # Keep x_q 2D when SparseCore gathers routed rows (`sc_routed_gather`) so gather_offload + tgmm_v2 stay 2D.
@@ -1167,7 +1236,16 @@ def _fused_fwd(p: FusedGmm3dParams, x2d, wi_local, wo_local, sorted_coeffs, sort
     reduce_meta = None
   else:
     y2d, bank, reduce_meta = _kernel_fwd(
-        p, x_q, w_gate_q, wo_q, coeffs, token_indices, group_sizes, need_bank=True, sort_indices=sort_indices
+        p,
+        x_q,
+        w_gate_q,
+        wo_q,
+        coeffs,
+        token_indices,
+        group_sizes,
+        need_bank=True,
+        sort_indices=sort_indices,
+        precomputed_reduce_meta=precomputed_reduce_meta,
     )
   # The local weight shards are only kept for the shape / dtype of their gradients (they are inputs, so
   # saving them costs nothing); the gathered fp8 weights are recomputed under remat like the gmm_v2 path.
@@ -1250,7 +1328,8 @@ def _fused_bwd(p: FusedGmm3dParams, residuals, dy2d):
       dcoeffs_out,
       None,
       None,
+      None,
   )
 
 
-fused_moe_experts.defvjp(_fused_fwd, _fused_bwd, optimize_remat=True)
+_fused_moe_experts_vjp.defvjp(_fused_fwd, _fused_bwd, optimize_remat=True)

@@ -176,24 +176,36 @@ class RouteOutput:
   sorted_weights: Optional[jax.Array] = None
 
 
-@jax.custom_vjp
-def _sort_packed_route_and_weights(packed_route: jax.Array, weights_1d: jax.Array):
+# Checkpoint name (and remat-location config field) of the routing state saved by `moe_packed_routing_maps`.
+MOE_PACKED_ROUTING_MAPS = moe_fused_gmm3d.MOE_PACKED_ROUTING_MAPS
+
+
+def _save_packed_routing_maps(config) -> bool:
+  """Whether `moe_packed_routing_maps` saves the routing state of the top-k router and the packed routing sort."""
+  return getattr(config, "moe_packed_routing_maps", "remat") != "remat"
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2,))
+def _sort_packed_route_and_weights(packed_route: jax.Array, weights_1d: jax.Array, save_routing: bool = False):
   """Sorts `(packed_route, weights_1d)` on TensorCore so `sorted_coeffs` avoids a SparseCore gather."""
+  return _sort_packed_route_and_weights_fwd(packed_route, weights_1d, save_routing)[0]
+
+
+def _sort_packed_route_and_weights_fwd(packed_route: jax.Array, weights_1d: jax.Array, save_routing: bool):
   sorted_packed, sorted_w = jax.lax.sort((packed_route, weights_1d), dimension=0, num_keys=1, is_stable=False)
   sort_indices = (sorted_packed & jnp.uint32(0xFFFFF)).astype(jnp.int32)
-  return sort_indices, sorted_w[:, None]
+  sorted_coeffs = sorted_w[:, None]
+  if save_routing:
+    sort_indices = adc.checkpoint_name(sort_indices, MOE_PACKED_ROUTING_MAPS)
+    sorted_coeffs = adc.checkpoint_name(sorted_coeffs, MOE_PACKED_ROUTING_MAPS)
+  return (sort_indices, sorted_coeffs), sort_indices
 
 
-def _sort_packed_route_and_weights_fwd(packed_route: jax.Array, weights_1d: jax.Array):
-  sort_indices, sorted_coeffs = _sort_packed_route_and_weights(packed_route, weights_1d)
-  return (sort_indices, sorted_coeffs), (sort_indices, weights_1d.shape[0])
-
-
-def _sort_packed_route_and_weights_bwd(res, g):
-  sort_indices, n = res
+def _sort_packed_route_and_weights_bwd(save_routing: bool, sort_indices: jax.Array, g):
+  del save_routing
   _, grad_sorted_coeffs = g
   grad_w = (
-      jnp.zeros((n, 1), dtype=grad_sorted_coeffs.dtype)
+      jnp.zeros_like(grad_sorted_coeffs)
       .at[sort_indices]
       .add(grad_sorted_coeffs, mode="promise_in_bounds", unique_indices=True)[:, 0]
   )
@@ -398,22 +410,29 @@ def _take_along_last_axis_dense_vjp_bwd(num_classes, indices, g):
 take_along_last_axis_dense_vjp.defvjp(_take_along_last_axis_dense_vjp_fwd, _take_along_last_axis_dense_vjp_bwd)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
-def top_k_dense_vjp(x: jax.Array, k: int, num_classes: int) -> tuple[jax.Array, jax.Array]:
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3))
+def top_k_dense_vjp(x: jax.Array, k: int, num_classes: int, save_routing: bool = False) -> tuple[jax.Array, jax.Array]:
   """`jax.lax.top_k(x, k)` with a dense compare-select-reduce VJP instead of TPU scatter-add."""
-  del num_classes
-  vals, idx = jax.lax.top_k(x, k)
-  return vals, idx
+  return _top_k_dense_vjp_fwd(x, k, num_classes, save_routing)[0]
 
 
-def _top_k_dense_vjp_fwd(x, k, num_classes):
-  del num_classes
+def _top_k_dense_vjp_fwd(x, k, num_classes, save_routing):
+  """`top_k_dense_vjp` forward; `save_routing` tags the top-k values and indices with the routing checkpoint name."""
+  if x.shape[-1] != num_classes:
+    raise ValueError(f"top_k_dense_vjp: num_classes={num_classes} must equal x.shape[-1]={x.shape[-1]}.")
   vals, idx = jax.lax.top_k(x, k)
+  if save_routing:
+    vals = adc.checkpoint_name(vals, MOE_PACKED_ROUTING_MAPS)
+    if num_classes <= 256:
+      idx_u8 = adc.checkpoint_name(idx.astype(jnp.uint8), MOE_PACKED_ROUTING_MAPS)
+      idx = idx_u8.astype(idx.dtype)
+    else:
+      idx = adc.checkpoint_name(idx, MOE_PACKED_ROUTING_MAPS)
   return (vals, idx), idx
 
 
-def _top_k_dense_vjp_bwd(k, num_classes, idx, g):
-  del k
+def _top_k_dense_vjp_bwd(k, num_classes, save_routing, idx, g):
+  del k, save_routing
   dx, _ = _take_along_last_axis_dense_vjp_bwd(num_classes, idx, g[0])
   return (dx,)
 
@@ -911,9 +930,8 @@ def init_tid2eid(key, vocab_size, num_experts, num_experts_per_tok):
   return expert_ids.astype(jnp.float32)
 
 
-# Models that use DeepSeek-V3-style routing: sigmoid scores plus a correction bias that only steers top-k
-# selection, with the routing weights gathered from the pre-bias scores (`GateLogit` returns both).
-DEEPSEEK_V3_ROUTING_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4", "kimi-k3")
+# Models that use DeepSeek-V3-style routing (`GateLogit` returns both the biased and the pre-bias scores).
+DEEPSEEK_V3_ROUTING_MODEL_PREFIXES = ctypes.DEEPSEEK_V3_ROUTING_MODEL_PREFIXES
 # Models whose router bias is stored as a `MoEBiasVar` (outside `nnx.Param`). The bias only steers top-k
 # selection, so it has no gradient; keeping it out of `nnx.Param` also keeps it out of the optimizer, so AdamW
 # weight decay cannot pull it toward zero and no Adam moments are allocated for it. The variable path
@@ -2322,7 +2340,12 @@ class RoutedMoE(nnx.Module):
           top_k_weights = jnp.take_along_axis(gate_logits, top_k_indices, axis=-1)
       else:
         if getattr(self.config, "router_topk_matmul_vjp", False):
-          top_k_weights, top_k_indices = top_k_dense_vjp(gate_logits, self.num_experts_per_tok, gate_logits.shape[-1])
+          top_k_weights, top_k_indices = top_k_dense_vjp(
+              gate_logits,
+              self.num_experts_per_tok,
+              gate_logits.shape[-1],
+              _save_packed_routing_maps(self.config),
+          )
         else:
           top_k_weights, top_k_indices = jax.lax.top_k(gate_logits, self.num_experts_per_tok)
 
@@ -2786,12 +2809,19 @@ class RoutedMoE(nnx.Module):
             and not bool(getattr(self.config, "moe_fused_gmm3d_overlap_dcoeffs_scatter", False))
         ):
           sorted_selected_experts, sorted_weights = _sort_packed_route_and_weights(
-              packed_route, jnp.ravel(weights).astype(jnp.float32)
+              packed_route,
+              jnp.ravel(weights).astype(jnp.float32),
+              _save_packed_routing_maps(self.config),
           )
         else:
           sorted_selected_experts = (jax.lax.sort(packed_route, is_stable=False) & jnp.uint32(0xFFFFF)).astype(jnp.int32)
+          if _save_packed_routing_maps(self.config):
+            sorted_selected_experts = adc.checkpoint_name(sorted_selected_experts, MOE_PACKED_ROUTING_MAPS)
       else:
         sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
+        if _save_packed_routing_maps(self.config):
+          # Forced routing, or more than 2**20 route slots / 2**11 sort bins for the packed key.
+          sorted_selected_experts = adc.checkpoint_name(sorted_selected_experts, MOE_PACKED_ROUTING_MAPS)
       if skip_token_gather:
         # moe_use_fused_gmm3d: the fused expert kernels DMA the routed rows straight from the token buffer.
         sorted_inputs = None
@@ -2812,6 +2842,8 @@ class RoutedMoE(nnx.Module):
         group_size = jnp.sum(summed_expert_mask, axis=tuple(range(summed_expert_mask.ndim - 1)), dtype=jnp.int32)
       else:
         group_size = jnp.bincount(flatten_selected_experts_safe, length=num_sort_bins)
+      if _save_packed_routing_maps(self.config):
+        group_size = adc.checkpoint_name(group_size, MOE_PACKED_ROUTING_MAPS)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -4940,6 +4972,7 @@ class RoutedMoE(nnx.Module):
           overlap_dcoeffs_scatter=bool(getattr(self.config, "moe_fused_gmm3d_overlap_dcoeffs_scatter", False)),
           wgrad_schedule_mode=int(getattr(self.config, "moe_fused_gmm3d_wgrad_schedule_mode", 0) or 0),
           wi_ag_latency_ns=int(getattr(self.config, "moe_wi_ag_latency_ns", 0) or 0),
+          save_reduce_meta=_save_packed_routing_maps(self.config),
           use_reference=use_reference,
       )
       sort_indices = routing.sorted_selected_experts.astype(jnp.int32)
@@ -6021,7 +6054,9 @@ class RoutedMoE(nnx.Module):
     # Get fraction of tokens dispatched to each expert
     # jnp.mean over axis=1 (sequence length) isolates the token density per sequence.
     # divide by top_k so that sum(density) == 1 across experts (Switch Transformer topk=1)
-    density = masked_sequence_mean(summed_expert_mask, token_mask) / self.num_experts_per_tok
+    density = jax.lax.stop_gradient(masked_sequence_mean(summed_expert_mask, token_mask) / self.num_experts_per_tok)
+    if _save_packed_routing_maps(self.config):
+      density = adc.checkpoint_name(density, MOE_PACKED_ROUTING_MAPS)
     # get fraction of probability allocated to each expert
     # jnp.mean over axis=1 isolates the routing probability per sequence.
     if density_prob is None:

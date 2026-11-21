@@ -35,6 +35,7 @@ from maxtext.common.common_types import (
     AttentionType,
     AudioDecoderBlockType,
     CustomRule,
+    DEEPSEEK_V3_ROUTING_MODEL_PREFIXES,
     DecoderBlockType,
     FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION,
     ReorderStrategy,
@@ -3157,6 +3158,23 @@ class RematAndOffload(BaseModel):
           "and group sizes)."
       ),
   )
+  moe_packed_routing_maps: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the routing state of the default top-k router and the packed routing sort (requires"
+          " router_topk_matmul_vjp=True and moe_packed_routing_sort=True): the top-k values and ids, the sorted"
+          " routing ids and weights, the group sizes and the load-balance density, plus the exact-top_k combine"
+          " `src_rows` on the fused gmm3d exact-top_k combine path (moe_use_fused_gmm3d with"
+          " moe_fused_gmm3d_gmm_combine and moe_fused_gmm3d_exact_topk_combine, without"
+          " moe_fused_gmm3d_inv_perm_combine). 'device' keeps them in HBM and 'offload' on pinned host, so the backward"
+          " re-runs neither top-k nor the routing sorts; they are small, so 'device' is usually the better choice."
+          " Not supported with use_ring_of_experts=True and"
+          " use_ragged_sort=True or with DeepSeek-V3-style, Gemma 4 or random routing (moe_routing_maps covers the"
+          " DeepSeek-V3 router and the ragged sorts). Only the routing computed in `RoutedMoE.permute` is saved: the"
+          " inverse-permutation argsorts in `unpermute` and in the expert-parallel `local_permute` /"
+          " `unsort_output_and_ra2a` paths are still recomputed."
+      ),
+  )
   # TODO: Update to moe_tc_routing_weights.
   moe_tc_routing_checkpoint: RematLocation = Field(
       RematLocation.REMAT,
@@ -5388,6 +5406,42 @@ def _qwix_supports_explicit_sharding() -> bool:
   return hasattr(dot_general_qt.DotGeneralQtConfig, "out_sharding")
 
 
+def _validate_moe_packed_routing_maps(config: "MaxTextConfig | RLConfig") -> None:
+  """Validates `moe_packed_routing_maps`; the custom remat `tensors` list places its checkpoint name.
+
+  Shared by `MaxTextConfig` and `RLConfig`.
+  """
+  if config.moe_packed_routing_maps == RematLocation.REMAT:
+    return
+  if config.remat_policy != "custom":
+    raise ValueError(f"moe_packed_routing_maps requires remat_policy='custom', got remat_policy={config.remat_policy!r}.")
+  # The saved top-k selection and sorted routing come from the custom VJPs that these two options enable;
+  # without them the backward pass would silently recompute the routing sorts.
+  if not (config.router_topk_matmul_vjp and config.moe_packed_routing_sort):
+    raise ValueError(
+        "moe_packed_routing_maps requires router_topk_matmul_vjp=True and moe_packed_routing_sort=True, got"
+        f" router_topk_matmul_vjp={config.router_topk_matmul_vjp!r} and"
+        f" moe_packed_routing_sort={config.moe_packed_routing_sort!r}."
+    )
+  # The ring-of-experts ragged sort (`RoutedMoE.permute`'s `use_ragged_in_permute` path) bypasses the packed routing
+  # sort and does not tag its routing state; `moe_routing_maps` / `moe_tc_routing_checkpoint` save that path instead.
+  if config.use_ring_of_experts and config.use_ragged_sort:
+    raise ValueError(
+        "moe_packed_routing_maps does not support use_ring_of_experts=True with use_ragged_sort=True; save that path's"
+        " routing with moe_routing_maps / moe_tc_routing_checkpoint instead."
+    )
+  # Only the default router's `top_k_dense_vjp` (`RoutedMoE.get_topk`) saves the top-k selection; these routers
+  # would silently recompute it in the backward pass. (`moe_routing_index_math='count'` needs the ring-of-experts
+  # ragged sort, rejected above.)
+  if config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES) or config.decoder_block == DecoderBlockType.GEMMA4:
+    raise ValueError(
+        "moe_packed_routing_maps does not support DeepSeek-V3-style or Gemma 4 routing, got"
+        f" model_name={config.model_name!r}, decoder_block={config.decoder_block!r}."
+    )
+  if config.use_random_routing:
+    raise ValueError("moe_packed_routing_maps does not support use_random_routing=True.")
+
+
 def _validate_remat_policy(
     remat_policy: str | None,
     *,
@@ -7213,6 +7267,7 @@ class MaxTextConfig(
           "moe_mlpwi_0",
           "moe_x_sorted",
           "moe_routing_maps",
+          "moe_packed_routing_maps",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
@@ -7253,6 +7308,7 @@ class MaxTextConfig(
         self.tensors_on_device.append("context_device")
       if "context_offload" not in self.tensors_to_offload:
         self.tensors_to_offload.append("context_offload")
+    _validate_moe_packed_routing_maps(self)
     if self.sa_num_stacked_q_heads < 1:
       raise ValueError(f"sa_num_stacked_q_heads must be >= 1, got {self.sa_num_stacked_q_heads}.")
     if self.sa_num_stacked_q_heads > 1 and self.num_kv_heads > 0:
@@ -9383,6 +9439,7 @@ class RLConfig(
           "moe_mlpwi_0",
           "moe_x_sorted",
           "moe_routing_maps",
+          "moe_packed_routing_maps",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
@@ -9422,6 +9479,7 @@ class RLConfig(
         self.tensors_on_device.append("context_device")
       if "context_offload" not in self.tensors_to_offload:
         self.tensors_to_offload.append("context_offload")
+    _validate_moe_packed_routing_maps(self)
 
     _validate_remat_policy(
         self.remat_policy,

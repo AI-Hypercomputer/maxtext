@@ -634,6 +634,7 @@ moe_mlpwo: 'remat'
 te_moe_dispatch_remat_location: 'remat' # TE EP dispatch outputs: recompute, save on device, or offload under custom remat.
 moe_x_sorted: 'remat' # routed (expert-sorted) MoE input plus its routing metadata; 'device' keeps it in HBM (tokens x top-k x emb per layer) so the backward skips the dispatch all-gather and ragged sort, 'offload' moves it to host, 'remat' recomputes it. Not supported with num_moe_emb_chunks > 0.
 moe_routing_maps: 'remat' # MoE routing maps (top-k expert ids, ragged-sort permutations, sorted token indices and group sizes); with moe_tc_window_routing, also the TC group sizes
+moe_packed_routing_maps: 'remat' # routing state of the top-k router + packed routing sort (top-k values/ids, sorted routing, group sizes, density, fused gmm3d exact-top_k combine src_rows); 'device' or 'offload' needs remat_policy=custom, router_topk_matmul_vjp and moe_packed_routing_sort; not with use_ring_of_experts + use_ragged_sort, DeepSeek-V3-style / Gemma 4 routing, or use_random_routing
 # TODO: Update to moe_tc_routing_weights.
 moe_tc_routing_checkpoint: 'remat' # TC per-buffer-row routing weights (moe_tc_ragged_sort with moe_tc_ragged_weights_on_activation)
 query_proj: 'remat'

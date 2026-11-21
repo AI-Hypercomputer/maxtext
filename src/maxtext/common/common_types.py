@@ -34,6 +34,11 @@ Shape = Sequence[int]
 # config validation and the elastic HBM fallback, which must agree on when the accumulation steps may not change.
 FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION = ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
 
+# Models that use DeepSeek-V3-style routing: sigmoid scores plus a correction bias that only steers top-k
+# selection, with the routing weights gathered from the pre-bias scores. `layers/moe.py` routes on it and
+# `configs/types.py` validates against it.
+DEEPSEEK_V3_ROUTING_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4", "kimi-k3")
+
 
 def is_fp8_dtype(dtype: Any) -> bool:
   """Checks whether a dtype is FP8."""
