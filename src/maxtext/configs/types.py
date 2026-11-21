@@ -3198,6 +3198,10 @@ class RematAndOffload(BaseModel):
       description="Remat policy for the MLA key and value weighted attention projection.",
   )
   qkv_proj: RematLocation = Field(RematLocation.REMAT, description="Remat policy for fused QKV projection.")
+  indexer_teacher: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the DeepSeek-V4 CSA indexer loss teacher distribution.",
+  )
   out_proj: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the attention output projection.",
@@ -7229,6 +7233,7 @@ class MaxTextConfig(
           "mla_kv",
           "mla_q",
           "qkv_proj",
+          "indexer_teacher",
           "attention_out",
           "out_proj",
           "gdn",
@@ -9398,6 +9403,7 @@ class RLConfig(
           "mla_kv",
           "mla_q",
           "qkv_proj",
+          "indexer_teacher",
           "attention_out",
           "out_proj",
           "gdn",
