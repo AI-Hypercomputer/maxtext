@@ -17,6 +17,7 @@
 import copy
 import dataclasses
 import os
+import re
 from typing import Any
 
 from absl import logging
@@ -47,6 +48,9 @@ class CheckpointRestoreError(RuntimeError):
 # Orbax would use the controller-side handler, which stages every shard through host RAM.
 _PATHWAYS_PERSISTENCE_HANDLERS = ("CloudPathwaysArrayHandler",)
 
+# The mount table consulted to tell a shared FUSE mount from a node-local directory.
+_MOUNTS_FILE = "/proc/mounts"
+
 
 class PathwaysCheckpointingUnavailableError(RuntimeError):
   """Pathways persistence checkpointing was explicitly requested but is not available."""
@@ -58,6 +62,26 @@ def _pathways_persistence_requested() -> bool:
   # `orbax.checkpoint._src.multihost.multihost.is_cloud_pathways_persistence_enabled()`,
   # called from `orbax.checkpoint._src.serialization.pathways_handler_registry`.
   return os.environ.get("ENABLE_PATHWAYS_PERSISTENCE", "") == "1"
+
+
+def _is_on_fuse_mount(path: str) -> bool:
+  """Returns whether `path` sits on a FUSE filesystem (e.g. a GCSFuse mount) per `_MOUNTS_FILE`."""
+  path = os.path.realpath(path)
+  best_mount_point, best_fs_type = "", ""
+  try:
+    with open(_MOUNTS_FILE, encoding="utf-8") as f:
+      for line in f:
+        fields = line.split()
+        if len(fields) < 3:
+          continue
+        # The kernel writes space, tab, newline and backslash in a mount point as octal escapes.
+        mount_point = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), fields[1])
+        # `>=` lets a later mount over the same mount point win, as it hides the earlier one.
+        if os.path.commonpath([path, mount_point]) == mount_point and len(mount_point) >= len(best_mount_point):
+          best_mount_point, best_fs_type = mount_point, fields[2]
+  except OSError:
+    return False
+  return best_fs_type == "fuse" or best_fs_type.startswith("fuse.")
 
 
 def _resolve_array_handler(context: ocp.Context) -> Any:
@@ -126,8 +150,9 @@ class CheckpointManager:
       config: The training configuration.
 
     Raises:
-      ValueError: If ENABLE_PATHWAYS_PERSISTENCE=1 and `checkpoint_dir` is not a gs:// URI, or if
-        `checkpoint_storage_use_ocdbt` or `checkpoint_storage_use_zarr3` is enabled.
+      ValueError: If ENABLE_PATHWAYS_PERSISTENCE=1 and `checkpoint_dir` is neither a gs:// URI nor
+        on a FUSE mount, or if `checkpoint_storage_use_ocdbt` or `checkpoint_storage_use_zarr3`
+        is enabled.
       PathwaysCheckpointingUnavailableError: If ENABLE_PATHWAYS_PERSISTENCE=1 but no Pathways
         persistence handler is available.
     """
@@ -148,10 +173,12 @@ class CheckpointManager:
             f"use_ocdbt={config.checkpoint_storage_use_ocdbt}, "
             f"use_zarr3={config.checkpoint_storage_use_zarr3}."
         )
-      if not str(checkpoint_dir).startswith("gs://"):
+      # A node-local path would have every worker fill its own disk; a FUSE mount is shared storage.
+      if not str(checkpoint_dir).startswith("gs://") and not _is_on_fuse_mount(str(checkpoint_dir)):
         raise ValueError(
             "ENABLE_PATHWAYS_PERSISTENCE=1 dispatches persistence writes to every "
-            f"pathways-worker; checkpoint_dir must be a gs:// URI, got {checkpoint_dir!r}."
+            "pathways-worker; checkpoint_dir must be a gs:// URI or a path on a FUSE mount "
+            f"present on every worker, got {checkpoint_dir!r}."
         )
     # TODO(igorts): Support config.colocated_python_checkpointing when single-controller Pathways is used.
     context = checkpoint_context.build_context(
