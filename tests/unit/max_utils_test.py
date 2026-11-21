@@ -173,6 +173,136 @@ class MaxUtilsCustomMesh(unittest.TestCase):
       max_utils.is_valid_custom_mesh([1, 1, 1, 1, 1, 16, 16, 1], "invalid_strategy")
 
 
+class RingAxisDeviceMeshTest(unittest.TestCase):
+  """Tests ring-axis device mesh creation."""
+
+  class FakeDevice:
+
+    def __init__(self, device_id, coords):
+      self.id = device_id
+      self.coords = coords
+
+  AXES = ["data", "fsdp", "tensor", "expert"]
+  SIZES = [1, 1, 8, 16]
+
+  def _devices(self):
+    return [self.FakeDevice(x * 16 + y, (x, y, 0)) for x in range(8) for y in range(16)]
+
+  def _cyclic_hops(self, group):
+    return [
+        tuple(abs(a - b) for a, b in zip(first.coords, second.coords))
+        for first, second in zip(group, list(group[1:]) + [group[0]])
+    ]
+
+  def test_ring_axis_groups_are_physical_cycles(self):
+    devices = self._devices()
+    mesh = max_utils.create_ring_axis_device_mesh(self.SIZES, self.AXES, devices, "tensor")
+    self.assertEqual(mesh.shape, tuple(self.SIZES))
+    self.assertEqual(sorted(d.id for d in mesh.flatten()), sorted(d.id for d in devices))
+    for tensor_group in mesh.squeeze().T:
+      hops = self._cyclic_hops(tensor_group)
+      self.assertEqual(len(hops), 8)
+      for hop in hops:
+        self.assertEqual(sorted(hop), [0, 0, 1])
+
+  def test_default_mesh_leaves_the_ring_axis_open(self):
+    devices = self._devices()
+    default = np.asarray(devices, dtype=object).reshape(self.SIZES)
+    hops = self._cyclic_hops(default.squeeze()[:, 0])
+    self.assertEqual(sum(sorted(hop) != [0, 0, 1] for hop in hops), 1)
+
+  def test_rejects_odd_ring_axis(self):
+    with self.assertRaises(ValueError):
+      max_utils.create_ring_axis_device_mesh([1, 1, 8, 16], self.AXES, self._devices(), "data")
+
+  def test_transposes_grid_when_needed_for_tiling(self):
+    """Test that a 2x16 grid is transposed to 16x2 when ring=8."""
+    devices = [self.FakeDevice(x * 16 + y, (x, y, 0)) for x in range(2) for y in range(16)]
+    # A 2x16 physical grid can only be tiled by 4x2 blocks (for ring=8) if transposed.
+    mesh = max_utils.create_ring_axis_device_mesh([1, 1, 8, 4], self.AXES, devices, "tensor")
+    self.assertEqual(mesh.shape, (1, 1, 8, 4))
+    self.assertEqual(sorted(d.id for d in mesh.flatten()), sorted(d.id for d in devices))
+
+  def test_transposes_grid_to_align_with_logical_axes(self):
+    """Test that a 4x32 grid is transposed to 32x4 so the other axes map to separate physical dimensions."""
+    devices = [self.FakeDevice(x * 32 + y, (x, y, 0)) for x in range(4) for y in range(32)]
+    # Untransposed, the 4x2 ring blocks form a 1x16 grid and fsdp=8, expert=2 would both run along y.
+    # Transposed, the blocks form an 8x2 grid matching (fsdp, expert).
+    mesh = max_utils.create_ring_axis_device_mesh([1, 8, 8, 2], self.AXES, devices, "tensor")
+    self.assertEqual(mesh.shape, (1, 8, 8, 2))
+    self.assertEqual(sorted(d.id for d in mesh.flatten()), sorted(d.id for d in devices))
+    ring_starts = mesh[0, :, 0, :]
+    fsdp_steps = {tuple(np.subtract(b.coords, a.coords)) for a, b in zip(ring_starts[:-1, 0], ring_starts[1:, 0])}
+    expert_steps = {tuple(np.subtract(b.coords, a.coords)) for a, b in zip(ring_starts[0, :-1], ring_starts[0, 1:])}
+    self.assertEqual(fsdp_steps, {(0, 4, 0)})
+    self.assertEqual(expert_steps, {(2, 0, 0)})
+
+  def _grid(self, rows, cols):
+    """Fake devices filling a rows x cols slice of the torus."""
+    return [self.FakeDevice(x * cols + y, (x, y, 0)) for x in range(rows) for y in range(cols)]
+
+  def _assert_valid_ring_mesh(self, mesh, sizes, devices, ring_axis_index):
+    """Checks the mesh shape, that it uses every device once, and that each ring is a physical cycle."""
+    self.assertEqual(mesh.shape, tuple(sizes))
+    self.assertEqual(sorted(d.id for d in mesh.flatten()), sorted(d.id for d in devices))
+    rings = np.moveaxis(mesh, ring_axis_index, -1).reshape(-1, sizes[ring_axis_index])
+    for ring in rings:
+      for hop in self._cyclic_hops(ring):
+        self.assertEqual(sorted(hop), [0, 0, 1])
+
+  def _ring_start_steps(self, mesh, axis_index):
+    """Coordinate steps between consecutive rings along one of the two non-trivial other axes."""
+    starts = np.take(mesh, 0, axis=2)  # first device of every ring; "tensor" is the ring axis
+    starts = np.moveaxis(starts.squeeze(), axis_index, 0)
+    return {tuple(np.subtract(b.coords, a.coords)) for a, b in zip(starts[:-1].flatten(), starts[1:].flatten())}
+
+  def test_rejects_unknown_ring_axis(self):
+    with self.assertRaisesRegex(ValueError, "is not one of the mesh axes"):
+      max_utils.create_ring_axis_device_mesh(self.SIZES, self.AXES, self._devices(), "context")
+
+  def test_rejects_non_2d_physical_grid(self):
+    line = [self.FakeDevice(x, (x, 0, 0)) for x in range(8)]
+    cube = [self.FakeDevice(x * 4 + y * 2 + z, (x, y, z)) for x in range(2) for y in range(2) for z in range(2)]
+    for name, devices in (("line", line), ("cube", cube)):
+      with self.subTest(name), self.assertRaisesRegex(ValueError, "needs a 2D slice"):
+        max_utils.create_ring_axis_device_mesh([1, 1, 4, 2], self.AXES, devices, "tensor")
+
+  def test_rejects_grid_with_missing_devices(self):
+    devices = self._grid(4, 4)[:-1]  # (3, 3) is absent, leaving a hole in the 4x4 grid
+    with self.assertRaisesRegex(ValueError, "not fully populated"):
+      max_utils.create_ring_axis_device_mesh([1, 1, 4, 4], self.AXES, devices, "tensor")
+
+  def test_rejects_multiple_devices_per_chip(self):
+    # TPU7x exposes each chip's two TensorCores as separate devices with the same coords.
+    # Its tpu7x-8 failures: 8 devices on a 2x2 chip grid, for both ring sizes it reported.
+    devices = [self.FakeDevice(2 * chip.id + core, chip.coords) for chip in self._grid(2, 2) for core in (0, 1)]
+    for sizes in ([1, 1, 2, 4], [1, 1, 8, 1]):
+      with self.subTest(sizes=sizes):
+        with self.assertRaisesRegex(ValueError, "one device per chip; got 8 devices on 4 chip coordinates"):
+          max_utils.create_ring_axis_device_mesh(sizes, self.AXES, devices, "tensor")
+
+  def test_rejects_grid_that_ring_blocks_cannot_tile(self):
+    # A ring of 4 is a 2x2 block, which tiles a 3x4 grid neither as is nor transposed.
+    with self.assertRaisesRegex(ValueError, "needs a 2x2 block to tile"):
+      max_utils.create_ring_axis_device_mesh([1, 1, 4, 3], self.AXES, self._grid(3, 4), "tensor")
+
+  def test_keeps_grid_when_untransposed_blocks_match_logical_axes(self):
+    """4x8 grid, ring=4: 2x2 blocks form a 2x4 grid that already matches (fsdp=2, expert=4)."""
+    sizes, devices = [1, 2, 4, 4], self._grid(4, 8)
+    mesh = max_utils.create_ring_axis_device_mesh(sizes, self.AXES, devices, "tensor")
+    self._assert_valid_ring_mesh(mesh, sizes, devices, 2)
+    self.assertEqual(self._ring_start_steps(mesh, 0), {(2, 0, 0)})  # fsdp runs along x
+    self.assertEqual(self._ring_start_steps(mesh, 1), {(0, 2, 0)})  # expert runs along y
+
+  def test_transposes_tall_grid_when_no_orientation_matches_logical_axes(self):
+    """16x4 grid, ring=4: blocks fit both ways but neither 8x2 nor 2x8 is (fsdp=4, expert=4); the tall grid is laid flat."""
+    sizes, devices = [1, 4, 4, 4], self._grid(16, 4)
+    mesh = max_utils.create_ring_axis_device_mesh(sizes, self.AXES, devices, "tensor")
+    self._assert_valid_ring_mesh(mesh, sizes, devices, 2)
+    # Untransposed, consecutive rings would step along y; laid flat, they step along x.
+    self.assertEqual(self._ring_start_steps(mesh, 1), {(2, 0, 0)})
+
+
 class FillUnspecifiedMeshAxesTest(unittest.TestCase):
   """Tests for fill_unspecified_mesh_axes."""
 

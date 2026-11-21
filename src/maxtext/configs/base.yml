@@ -1553,6 +1553,19 @@ custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
 allow_split_physical_axes: false
 # Apply transformations to the mesh to optimize for TPU v6e
 optimize_mesh_for_tpu_v6e: false
+# Logical mesh axis to lay out as physical TPU rings; empty disables. Each group
+# of the axis is placed on a (size/2)x2 block of chips, so every hop of its ring,
+# including the closing one, is a single ICI link.
+# - Scope: TPU only, a single slice that is a 2D grid with one device per chip
+#   (v5e/v6e; v4/v5p 2x2x1), and an even axis size whose (size/2)x2 blocks tile
+#   the grid. Ignores custom_mesh, allow_split_physical_axes and
+#   optimize_mesh_for_tpu_v6e.
+# - Tradeoff: the other mesh axes stride over the blocks, so they lose locality
+#   and any wraparound ring they had. Use it only when the ring axis would
+#   otherwise sit on a dimension without wraparound (e.g. the 8-long dimension of
+#   v6e-128). It is counterproductive on full-torus slices such as v6e-256, where
+#   the default layout already forms rings.
+mesh_ring_axis: ""
 
 shardy: true # Whether to use shardy XLA backend (default in Jax starting 0.7.0), or GSPMD (to be fully deprecated ~2026)
 
