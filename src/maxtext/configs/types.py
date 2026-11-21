@@ -2329,6 +2329,13 @@ class Qwen3Next(BaseModel):
       False,
       description="Whether to use the Tokamax Gated Delta Net kernel for GDN layers.",
   )
+  gdn_two_pass_bf16: bool = Field(
+      False,
+      description=(
+          "Whether to refine the bfloat16 triangular inverse with one Newton-Schulz residual step and keep "
+          "chunk WY/state intermediates in float32 in the Tokamax Mosaic TPU Gated Delta Net kernel."
+      ),
+  )
   gdn_pin_in_proj_output_layout: bool = Field(
       True,
       description=(
@@ -5939,19 +5946,23 @@ class MaxTextConfig(
       raise ValueError(f"{prefix} does not support shard_mode='explicit'.")
 
   @staticmethod
-  def _validate_tokamax_gdn(cfg: Any, gdn_context_parallel_size: int) -> None:
-    """Validates Tokamax GatedDeltaNet (`use_tokamax_gdn`) configuration constraints."""
+  def _validate_tokamax_gdn(
+      cfg: Any,
+      gdn_context_parallel_size: int,
+      *,
+      is_packed: bool | None = None,
+  ) -> None:
+    """Validates Tokamax GatedDeltaNet (`use_tokamax_gdn` / `gdn_two_pass_bf16`) configuration constraints."""
     if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
       if cfg.use_tokamax_gdn:
         raise ValueError("use_tokamax_gdn=True requires a GatedDeltaNet decoder_block ('qwen3_next' or 'qwen3_5').")
+      if cfg.gdn_two_pass_bf16:
+        raise ValueError("gdn_two_pass_bf16=True requires a GatedDeltaNet decoder_block ('qwen3_next' or 'qwen3_5').")
       return
     if not cfg.use_tokamax_gdn:
+      if cfg.gdn_two_pass_bf16:
+        raise ValueError("gdn_two_pass_bf16=True requires use_tokamax_gdn=True.")
       return
-    if cfg.packing or getattr(cfg, "max_seq_token_per_tpu", 0) > 0:
-      raise ValueError(
-          "use_tokamax_gdn=True does not yet support sequence packing (packing=True); "
-          "set packing=False or use_tokamax_gdn=False."
-      )
     if jax.numpy.dtype(cfg.dtype) not in (jax.numpy.bfloat16, jax.numpy.float32):
       raise ValueError(f"use_tokamax_gdn=True requires dtype in ('bfloat16', 'float32'), got {cfg.dtype!r}.")
     if int(cfg.gdn_key_head_dim) < 1 or int(cfg.gdn_key_head_dim) > 256 or int(cfg.gdn_value_head_dim) < 1:
@@ -5959,9 +5970,29 @@ class MaxTextConfig(
           "use_tokamax_gdn=True requires gdn_key_head_dim in [1, 256] and gdn_value_head_dim >= 1, "
           f"got gdn_key_head_dim={cfg.gdn_key_head_dim}, gdn_value_head_dim={cfg.gdn_value_head_dim}."
       )
-    if cfg.gdn_chunk_size != 64:
-      raise ValueError(f"use_tokamax_gdn=True currently requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}.")
-    if cfg.max_target_length > 0 and cfg.max_target_length % cfg.gdn_chunk_size != 0:
+
+    cp_size = int(gdn_context_parallel_size)
+    num_k_heads = int(cfg.gdn_num_key_heads)
+    if cp_size > 1:
+      if cfg.gdn_cp_mode == "head":
+        use_head_cp, use_seq_cp = True, False
+      elif cfg.gdn_cp_mode == "seq":
+        use_head_cp, use_seq_cp = False, True
+      else:
+        use_head_cp = 1 < cp_size <= min(2, num_k_heads) and (num_k_heads % cp_size == 0)
+        use_seq_cp = not use_head_cp
+    else:
+      use_head_cp, use_seq_cp = False, False
+
+    packed_cfg = bool(cfg.packing) if is_packed is None else bool(is_packed)
+    allowed_chunk_sizes = (16, 32, 64, 128) if (packed_cfg or use_seq_cp) else (16, 32, 64, 128, 256, 512)
+    if cfg.gdn_chunk_size not in allowed_chunk_sizes:
+      mode_suffix = " when sequence packing or sequence-sharded CP is enabled" if (packed_cfg or use_seq_cp) else ""
+      raise ValueError(
+          f"use_tokamax_gdn=True requires gdn_chunk_size in {allowed_chunk_sizes}{mode_suffix}, "
+          f"got {cfg.gdn_chunk_size}."
+      )
+    if cfg.max_target_length > 0 and int(cfg.max_target_length) % int(cfg.gdn_chunk_size) != 0:
       raise ValueError(
           f"use_tokamax_gdn=True requires max_target_length ({cfg.max_target_length}) to be divisible by "
           f"gdn_chunk_size ({cfg.gdn_chunk_size})."
@@ -5980,16 +6011,11 @@ class MaxTextConfig(
           "remat_policy='custom' and scan_layers=True (or scan_layers_per_stage=True); "
           "use 'remat' or 'device', or set scan_layers=False."
       )
-    if gdn_context_parallel_size > 1:
-      if cfg.gdn_cp_mode == "seq":
+    if use_head_cp:
+      if num_k_heads % cp_size != 0:
         raise ValueError(
-            "use_tokamax_gdn=True does not yet support gdn_cp_mode='seq' when context parallelism > 1; "
-            "use gdn_cp_mode='head' (or 'auto') or use_tokamax_gdn=False."
-        )
-      if int(cfg.gdn_num_key_heads) % int(gdn_context_parallel_size) != 0:
-        raise ValueError(
-            f"use_tokamax_gdn=True with context parallelism requires gdn_num_key_heads ({cfg.gdn_num_key_heads}) "
-            f"to be divisible by the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
+            f"use_tokamax_gdn=True with head-sharded context parallelism requires gdn_num_key_heads "
+            f"({cfg.gdn_num_key_heads}) to be divisible by the GatedDeltaNet context-parallel size ({cp_size})."
         )
       tp_shards = (
           max(1, int(cfg.ici_tensor_parallelism))
@@ -5997,22 +6023,53 @@ class MaxTextConfig(
           * max(1, int(cfg.ici_tensor_sequence_parallelism))
           * max(1, int(cfg.dcn_tensor_sequence_parallelism))
       )
-      total_head_shards = tp_shards * int(gdn_context_parallel_size)
-      if int(cfg.gdn_num_key_heads) % total_head_shards != 0:
+      total_head_shards = tp_shards * cp_size
+      if num_k_heads % total_head_shards != 0:
         raise ValueError(
             f"use_tokamax_gdn=True with head-sharded context parallelism requires gdn_num_key_heads "
             f"({cfg.gdn_num_key_heads}) to be divisible by total GatedDeltaNet head shards "
-            f"({total_head_shards} = tensor_parallelism {tp_shards} * context_parallelism {gdn_context_parallel_size})."
+            f"({total_head_shards} = tensor_parallelism {tp_shards} * context_parallelism {cp_size})."
         )
-      if cfg.max_target_length > 0 and int(cfg.max_target_length) % int(gdn_context_parallel_size) != 0:
+      if cfg.max_target_length > 0 and int(cfg.max_target_length) % cp_size != 0:
         raise ValueError(
-            f"use_tokamax_gdn=True with context parallelism requires max_target_length ({cfg.max_target_length}) "
-            f"to be divisible by the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
+            f"use_tokamax_gdn=True with head-sharded context parallelism requires max_target_length "
+            f"({cfg.max_target_length}) to be divisible by the GatedDeltaNet context-parallel size ({cp_size})."
         )
       if cfg.gdn_in_proj_kernel_order:
         raise ValueError(
             "gdn_in_proj_kernel_order=True is incompatible with head-sharded GDN context parallelism "
-            "(active when use_tokamax_gdn=True and context parallelism > 1)."
+            "(active when use_tokamax_gdn=True resolves to head-sharded CP)."
+        )
+    elif use_seq_cp:
+      active_cp_knobs = sum(
+          int(int(x) > 1)
+          for x in (
+              cfg.ici_context_parallelism,
+              cfg.dcn_context_parallelism,
+              cfg.ici_context_usp_ulysses_parallelism,
+              cfg.dcn_context_usp_ulysses_parallelism,
+          )
+      )
+      if active_cp_knobs > 1:
+        raise ValueError(
+            "use_tokamax_gdn=True with sequence-sharded context parallelism supports at most one active "
+            "context-parallel mesh axis among (ici_context_parallelism, dcn_context_parallelism, "
+            "ici_context_usp_ulysses_parallelism, dcn_context_usp_ulysses_parallelism), got "
+            f"({cfg.ici_context_parallelism}, {cfg.dcn_context_parallelism}, "
+            f"{cfg.ici_context_usp_ulysses_parallelism}, {cfg.dcn_context_usp_ulysses_parallelism})."
+        )
+      if int(cfg.gdn_key_head_dim) % 128 != 0 or int(cfg.gdn_value_head_dim) % 128 != 0:
+        raise ValueError(
+            "use_tokamax_gdn=True with sequence-sharded context parallelism requires gdn_key_head_dim and "
+            "gdn_value_head_dim to be multiples of 128, got "
+            f"gdn_key_head_dim={cfg.gdn_key_head_dim}, gdn_value_head_dim={cfg.gdn_value_head_dim}."
+        )
+      min_seq_multiple = cp_size * int(cfg.gdn_chunk_size)
+      if cfg.max_target_length > 0 and int(cfg.max_target_length) % min_seq_multiple != 0:
+        raise ValueError(
+            f"use_tokamax_gdn=True with sequence-sharded context parallelism requires max_target_length "
+            f"({cfg.max_target_length}) to be divisible by context_parallel_size * gdn_chunk_size "
+            f"({cp_size} * {cfg.gdn_chunk_size} = {min_seq_multiple})."
         )
 
   def _validate_usp_context_parallelism(self):
@@ -9255,7 +9312,11 @@ class RLConfig(
           * self.ici_context_usp_ulysses_parallelism
           * self.dcn_context_usp_ulysses_parallelism
       )
-      MaxTextConfig._validate_tokamax_gdn(self, gdn_context_parallel_size)  # pylint: disable=protected-access
+      MaxTextConfig._validate_tokamax_gdn(  # pylint: disable=protected-access
+          self,
+          gdn_context_parallel_size,
+          is_packed=bool(self.packing or self.max_seq_token_per_tpu > 0),
+      )
       if not self.packing and self.max_seq_token_per_tpu > 0:
         raise ValueError(
             f"GatedDeltaNet ({self.decoder_block.value}) with max_seq_token_per_tpu > 0 requires packing=True: "
@@ -9278,7 +9339,11 @@ class RLConfig(
         )
       MaxTextConfig._validate_gdn_projection_quantization(self)  # pylint: disable=protected-access
     else:
-      MaxTextConfig._validate_tokamax_gdn(self, 1)  # pylint: disable=protected-access
+      MaxTextConfig._validate_tokamax_gdn(  # pylint: disable=protected-access
+          self,
+          1,
+          is_packed=bool(self.packing or self.max_seq_token_per_tpu > 0),
+      )
       if (
           self.gdn_in_proj_kernel_order
           or self.gdn_out_proj_token_minor
