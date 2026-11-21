@@ -58,7 +58,10 @@ def _stack_variables(variables: Sequence[nnx.Variable], param_scan_axis: int) ->
   axis = _stack_axis(first, param_scan_axis)
   value = jnp.stack([v[...] for v in variables], axis=axis)
   spec = first.get_metadata().get("out_sharding")
-  changes = {}
+  changes: dict[str, Any] = {
+      nnx.PARTITION_NAME: "layers",
+      "param_scan_axis": axis,
+  }
   if isinstance(spec, P):
     entries = list(spec)
     entries.extend([None] * max(0, axis - len(entries)))

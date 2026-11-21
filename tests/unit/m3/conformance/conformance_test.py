@@ -298,7 +298,7 @@ class _ShardedToyModule(nnx.Module):
       ok_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", col_ax))
       self.prefix_proj = nnx.Param(
           jax.device_put(p_init, ok_shd),
-          out_sharding=jax.sharding.PartitionSpec("stage", col_ax),
+          out_sharding=jax.sharding.PartitionSpec("fake_axis", col_ax),
           eager_sharding=False,
       )
     elif mode == "unconstrained_spec" and isinstance(mesh, jax.sharding.Mesh):
@@ -875,7 +875,16 @@ class ConformanceTest(parameterized.TestCase):
     self.assertEqual(driver_mesh.axis_names, m3_sharding.MESH_AXIS_NAMES)
     self.assertEqual(
         {**driver_mesh.shape},
-        {"data": 1, "fsdp": 2, "tensor": 2, "expert": 1},
+        {
+            "data": 1,
+            "stage": 1,
+            "fsdp": 2,
+            "fsdp_transpose": 1,
+            "context": 1,
+            "tensor": 2,
+            "tensor_sequence": 1,
+            "expert": 1,
+        },
     )
     with mock.patch.object(jax, "devices", return_value=jax.devices()[:2]):
       with self.assertRaisesRegex(AssertionError, "require >= 4 JAX devices"):
@@ -916,7 +925,7 @@ class ConformanceTest(parameterized.TestCase):
         ("param_wrong_mesh", r"prefix_proj sharding\.mesh is not driver_mesh"),
         (
             "bad_meta_axis",
-            r"prefix_proj\.out_sharding: non-m3 mesh axes \['stage'\]",
+            r"prefix_proj\.out_sharding: non-m3 mesh axes \['fake_axis'\]",
         ),
         (
             "unconstrained_spec",
@@ -1102,7 +1111,16 @@ class ConformanceTest(parameterized.TestCase):
     expected_tensor = 2 if len(jax.devices()) >= 8 else 1
     self.assertEqual(
         dict(ep_mesh.shape),
-        {"data": 1, "fsdp": 2, "tensor": expected_tensor, "expert": 2},
+        {
+            "data": 1,
+            "stage": 1,
+            "fsdp": 2,
+            "fsdp_transpose": 1,
+            "context": 1,
+            "tensor": expected_tensor,
+            "tensor_sequence": 1,
+            "expert": 2,
+        },
     )
     for bad_spec, pattern in (
         (

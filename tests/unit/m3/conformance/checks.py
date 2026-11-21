@@ -1731,10 +1731,15 @@ def check_full_scale_topology_aot_and_remat_hbm(
     raise AssertionError(f"{name}: spec.build_full_scale_abstract_model is None (required for" " Check 12)")
   single_mesh = _create_single_device_mesh()
   for topo_name, axis_sizes in spec_obj.full_scale_topologies:
-    if set(axis_sizes.keys()) != _VALID_MESH_AXES:
-      raise AssertionError(f"{name}: topology {topo_name!r} axes {sorted(axis_sizes)} !=" f" {sorted(_VALID_MESH_AXES)}")
+    unknown_axes = set(axis_sizes.keys()) - _VALID_MESH_AXES
+    missing_core = {"data", "fsdp", "tensor", "expert"} - set(axis_sizes.keys())
+    if unknown_axes or missing_core:
+      raise AssertionError(
+          f"{name}: topology {topo_name!r} axes {sorted(axis_sizes)} invalid "
+          f"(unknown={sorted(unknown_axes)}, missing_core={sorted(missing_core)})"
+      )
     abs_mesh = jax.sharding.AbstractMesh(
-        tuple(int(axis_sizes[ax]) for ax in m3_sharding.MESH_AXIS_NAMES),
+        tuple(int(axis_sizes.get(ax, 1)) for ax in m3_sharding.MESH_AXIS_NAMES),
         m3_sharding.MESH_AXIS_NAMES,
     )
     with jax.sharding.set_mesh(single_mesh), nnx.use_eager_sharding(True):
