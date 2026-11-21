@@ -130,6 +130,10 @@ class DecodeTests(unittest.TestCase):
           "prompt=I love to",
       ],
   }
+  # Quantized KV cache only, in the cache layout used by the MLPerf inference scripts.
+  _MLPERF_CACHE_LAYOUT = ["prefill_cache_axis_order=0,2,1,3", "ar_cache_axis_order=0,2,1,3", "compute_axis_order=0,2,1,3"]
+  CONFIGS["int4_kv"] = CONFIGS["base"] + ["quantize_kvcache=True", "kv_quant_dtype=int4"] + _MLPERF_CACHE_LAYOUT
+  CONFIGS["fp8_kv"] = CONFIGS["base"] + ["quantize_kvcache=True", "kv_quant_dtype=fp8"] + _MLPERF_CACHE_LAYOUT
   SAMPLING_STRATEGY_CONFIG = {
       "greedy": [
           "decode_sampling_strategy=greedy",
@@ -163,6 +167,14 @@ class DecodeTests(unittest.TestCase):
   @pytest.mark.gpu_only
   def test_gpu_int8(self):
     decode_main(DecodeTests.CONFIGS["int8"] + ["attention=dot_product"])
+
+  @pytest.mark.tpu_only
+  def test_tpu_int4_kv(self):
+    decode_main(DecodeTests.CONFIGS["int4_kv"] + ["attention=dot_product"])
+
+  @pytest.mark.tpu_only
+  def test_tpu_fp8_kv(self):
+    decode_main(DecodeTests.CONFIGS["fp8_kv"] + ["attention=dot_product"])
 
   @pytest.mark.tpu_only
   def test_tpu_pdb_lt_1(self):

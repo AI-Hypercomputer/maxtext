@@ -20,10 +20,7 @@ import jax
 import jax.numpy as jnp
 
 from flax import nnx
-
-from aqt.jax.v2 import config as aqt_config
-from aqt.jax.v2.aqt_tensor import QTensor as KVTensor
-from aqt.jax.v2.flax import aqt_flax
+import qwix
 
 
 from maxtext.common.common_types import Array, AxisNames, AxisIdxes, Config, CACHE_BATCH_PREFILL, DType, MODEL_MODE_PREFILL, MODEL_MODE_TRAIN, MODEL_MODE_AUTOREGRESSIVE, CACHE_HEADS_NONE, DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -31,9 +28,8 @@ from maxtext.common.common_types import CACHE_BATCH, CACHE_SEQUENCE, CACHE_HEADS
 from maxtext.utils.sharding import with_logical_constraint
 
 
-MAX_INT8 = 127.5
-MAX_INT4 = 7.5
-E4M3_MAX = jnp.finfo(jnp.float8_e4m3fn).max.astype(jnp.float32)
+# dtype of the cached_*_scale buffers.
+KV_SCALE_DTYPE = jnp.bfloat16
 
 
 def reverse_transpose(transposed_array, transpose_axis_order):
@@ -64,86 +60,30 @@ class KVQuant:
       return jnp.float8_e4m3fn
     raise ValueError(f"Invalid kv_quant_dtype: {dtype_cfg}")
 
-  def _get_max_axis(self, axis_names: AxisNames):
+  def _get_channelwise_axes(self, axis_names: AxisNames) -> tuple[int, ...]:
+    """Returns the axes that get separate scales in `qwix.quantize`.
+
+    `kv_quant_axis` names the axes reduced into a single scale (`dkv`, or `heads` and `dkv`),
+    whereas Qwix's `channelwise_axes` expects the remaining axes.
+    """
     if self.axis_cfg == "dkv":
-      return axis_names.index(CACHE_KV)
-    if self.axis_cfg == "heads_and_dkv":
-      return (axis_names.index(CACHE_HEADS), axis_names.index(CACHE_KV))
-    raise ValueError(f"Invalid KV quant axis cfg: {self.axis_cfg}")
+      reduced_axes = {axis_names.index(CACHE_KV)}
+    elif self.axis_cfg == "heads_and_dkv":
+      reduced_axes = {axis_names.index(CACHE_HEADS), axis_names.index(CACHE_KV)}
+    else:
+      raise ValueError(f"Invalid KV quant axis cfg: {self.axis_cfg}")
+    return tuple(i for i in range(len(axis_names)) if i not in reduced_axes)
 
-  def quantize(self, kv: Array, axis_names: AxisNames):
-    """Quantize key/values stored in kvcache."""
+  def quantize(self, kv: Array, axis_names: AxisNames) -> tuple[Array, Array]:
+    """Quantizes a key or value tensor into `(qvalue, scale)` for the KV cache."""
     assert self.axis_cfg, "KV quant axis cannot be None"
-    max_axis = self._get_max_axis(axis_names)
-    scale = jnp.max(jnp.abs(kv), axis=max_axis, keepdims=True)
-    if self.dtype == jnp.int8:
-      value = jnp.int8(jnp.rint(kv * (MAX_INT8 / scale)))
-      return value, scale
-    if self.dtype == jnp.int4:
-      value = jnp.int4(jnp.rint(kv * (MAX_INT4 / scale)))
-      return value, scale
-    if self.dtype == jnp.float8_e4m3fn:
-      value = jnp.float8_e4m3fn(kv * (E4M3_MAX / scale))
-      return value, scale
-    raise ValueError(f"Invalid KV quant dtype:{self.dtype}.")
-
-  def einsum_fn_with_rhs_qtensor(
-      self,
-      rhs_dequant_mode=None,
-      rhs_calibration_mode=None,
-      lhs_dequant_mode=None,
-      lhs_calibration_mode=None,
-  ):
-    """einsum function where QTensor is the right-hand-side"""
-    # Assumes kv is already quantized.
-    einsum = jnp.einsum
-    if self.dtype != jnp.float8_e4m3fn:
-      num_bits = 4 if self.dtype == jnp.int4 else 8
-      kv_cfg = aqt_config.dot_general_make(
-          lhs_bits=None,
-          rhs_bits=num_bits,
-          bwd_bits=None,
-          use_fwd_quant=False,
-      )
-    else:
-      kv_cfg = aqt_config.config_fwd_fp8()
-
-    if rhs_dequant_mode:
-      aqt_config.set_fwd_dequant_mode(kv_cfg, rhs_dequant_mode=rhs_dequant_mode)
-    if rhs_calibration_mode:
-      aqt_config.set_fwd_calibration_mode(
-          kv_cfg,
-          rhs_calibration_mode=rhs_calibration_mode,
-      )
-    if lhs_dequant_mode:
-      aqt_config.set_fwd_dequant_mode(kv_cfg, lhs_dequant_mode=lhs_dequant_mode)
-    if lhs_calibration_mode:
-      aqt_config.set_fwd_calibration_mode(
-          kv_cfg,
-          lhs_calibration_mode=lhs_calibration_mode,
-      )
-    einsum = aqt_flax.AqtEinsum(
-        rhs_quant_mode=aqt_flax.QuantMode.TRAIN,
-        lhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-        rhs_freeze_mode=aqt_flax.FreezerMode.NONE,
-        cfg=kv_cfg,
+    quantized = qwix.quantize(
+        kv,
+        self.dtype,
+        channelwise_axes=self._get_channelwise_axes(axis_names),
+        scale_dtype=KV_SCALE_DTYPE,
     )
-    return einsum
-
-  def einsum_fn_with_rhs_qtensor_and_dequant(self):
-    """Get einstein summation for different dequant modes."""
-    if self.dtype == jnp.float8_e4m3fn:
-      return self.einsum_fn_with_rhs_qtensor(
-          lhs_dequant_mode=aqt_config.DequantMode.THIS_INPUT,
-          lhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
-          rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
-          rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
-      )
-    else:
-      return self.einsum_fn_with_rhs_qtensor(
-          rhs_dequant_mode=aqt_config.DequantMode.OTHER_INPUT,
-          rhs_calibration_mode=aqt_config.CalibrationMode.REMAINING_AXIS,
-      )
+    return quantized.qvalue, quantized.scale
 
 
 class BaseCache(nnx.Module):
@@ -364,11 +304,11 @@ class KVCache(BaseCache):
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.prefill_cache_axis_order)
 
       self.cached_prefill_key_scale = nnx.Cache(
-          jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
+          jnp.zeros(cache_key_scale_shape, dtype=KV_SCALE_DTYPE),
           out_sharding=cache_scale_axis_names,
       )
       self.cached_prefill_value_scale = nnx.Cache(
-          jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
+          jnp.zeros(cache_value_scale_shape, dtype=KV_SCALE_DTYPE),
           out_sharding=cache_scale_axis_names,
       )
     else:
@@ -471,11 +411,11 @@ class KVCache(BaseCache):
       cache_value_scale_shape = transpose_tuple(cache_scale_logical_shape, self.ar_cache_axis_order)
 
       self.cached_ar_key_scale = nnx.Cache(
-          jnp.zeros(cache_key_scale_shape, dtype=jnp.bfloat16),
+          jnp.zeros(cache_key_scale_shape, dtype=KV_SCALE_DTYPE),
           out_sharding=cache_scale_axis_names,
       )
       self.cached_ar_value_scale = nnx.Cache(
-          jnp.zeros(cache_value_scale_shape, dtype=jnp.bfloat16),
+          jnp.zeros(cache_value_scale_shape, dtype=KV_SCALE_DTYPE),
           out_sharding=cache_scale_axis_names,
       )
     else:
@@ -695,6 +635,9 @@ class KVCache(BaseCache):
     one_token_value_shaped_for_cache = jnp.transpose(one_token_value, self.ar_cache_axis_order)
 
     ar_cache_axis_names = transpose_tuple(self.cache_logical_axis_names, self.ar_cache_axis_order)
+    if self.kv_quant and use_ragged_attention:
+      # Ragged decoding writes each batch row at its own sequence length, whereas scale updates below use one index.
+      raise NotImplementedError("quantize_kvcache=True is not supported with use_ragged_attention=True.")
     if self.kv_quant:
       one_token_key_shaped_for_cache, one_token_key_scale_shaped_for_cache = self.kv_quant.quantize(
           one_token_key_shaped_for_cache, ar_cache_axis_names
@@ -733,9 +676,15 @@ class KVCache(BaseCache):
       one_hot_indices = one_hot_indices.astype(int)
 
       # Align batch size for cache with new token in decoding
-      if cached_key.get_value().shape[2] != one_token_key_shaped_for_cache.shape[2]:
-        cached_key.set_value(jnp.repeat(cached_key.get_value(), one_token_key_shaped_for_cache.shape[2], axis=2))
-        cached_value.set_value(jnp.repeat(cached_value.get_value(), one_token_value_shaped_for_cache.shape[2], axis=2))
+      token_batch = one_token_key_shaped_for_cache.shape[ar_cache_batch_axis]
+      if cached_key.get_value().shape[ar_cache_batch_axis] != token_batch:
+        cached_key.set_value(jnp.repeat(cached_key.get_value(), token_batch, axis=ar_cache_batch_axis))
+        cached_value.set_value(jnp.repeat(cached_value.get_value(), token_batch, axis=ar_cache_batch_axis))
+        if self.kv_quant:
+          # Scale caches use the same ar_cache_axis_order as K/V caches.
+          assert cached_key_scale is not None and cached_value_scale is not None
+          cached_key_scale.set_value(jnp.repeat(cached_key_scale.get_value(), token_batch, axis=ar_cache_batch_axis))
+          cached_value_scale.set_value(jnp.repeat(cached_value_scale.get_value(), token_batch, axis=ar_cache_batch_axis))
 
       cached_key.set_value(
           jax.lax.dynamic_update_index_in_dim(
@@ -772,28 +721,18 @@ class KVCache(BaseCache):
           )
       )
 
-  def get_cached_values(self, cache_vars, target_dtype, cache_axis_order) -> jax.Array | KVTensor:
-    """get cached values"""
+  def get_cached_values(self, cache_vars, target_dtype, cache_axis_order) -> jax.Array | qwix.QArray:
+    """Returns cached K or V in `[batch, sequence, heads, d_kv]` order.
+
+    When quantized, wraps `(qvalue, scale)` in a `qwix.QArray` without dequantizing `qvalue`,
+    casting `scale` to `target_dtype` so downstream attention ops output `target_dtype`.
+    """
     cache_var, cache_scale_var = cache_vars
     assert cache_var is not None
     cache_value = cache_var.get_value()
     if cache_scale_var is not None:
-      scale_value = cache_scale_var.get_value()
-      dtype = cache_value.dtype
-      if dtype == jnp.int8:
-        scale_value /= MAX_INT8
-      elif dtype == jnp.int4:
-        scale_value /= MAX_INT4
-      elif dtype == jnp.float8_e4m3fn:
-        scale_value /= E4M3_MAX
-
-      cache_value = KVTensor(
-          qvalue=cache_value,  # pyrefly: ignore[unexpected-keyword]
-          scale=[scale_value],  # pyrefly: ignore[unexpected-keyword]
-          scale_t=None,  # pyrefly: ignore[unexpected-keyword]
-          dequant_dtype=target_dtype,  # pyrefly: ignore[unexpected-keyword]
-          bias=[],  # pyrefly: ignore[unexpected-keyword]
-      )  # pyrefly: ignore[unexpected-keyword]
+      cache_value = qwix.QArray(cache_value, cache_scale_var.get_value().astype(target_dtype))
+    # Transposes both qvalue and scale when cache_value is a QArray.
     cache_value_in_logical_shape = jax.tree.map(lambda x: reverse_transpose(x, cache_axis_order), cache_value)
     return cache_value_in_logical_shape
 

@@ -159,7 +159,9 @@ activations_in_float32: false # sets activations to float32 before nonlinearity 
 replicate_quant_scale: false
 # path to file with quantization config for intmp.
 quant_cfg_path: ""
-quantize_kvcache: false # set to true to quantize kv cache values, defaults to false
+# Set to true to quantize the KV cache with Qwix (defaults to false).
+# Stores cached K/V in kv_quant_dtype (with bfloat16 scales) for decoding; prefill uses full-precision K/V.
+quantize_kvcache: false
 # valid kv_quant_axis values:
 #   - "" is valid only when quantize_kvcache is false
 #   - "dkv" indicates quantize kv cache over the cache_kv, i.e. kv dimension axis
@@ -167,7 +169,7 @@ quantize_kvcache: false # set to true to quantize kv cache values, defaults to f
 # default to "heads_and_dkv" for faster compution, kv_quant_axis is not used when quantize_kvcache is false
 #   - "dkv" is expected with better accuracy but degraded computation
 kv_quant_axis: "heads_and_dkv"
-kv_quant_dtype: "int8"
+kv_quant_dtype: "int8" # one of "int8", "int4", "fp8" (float8_e4m3fn).
 quantize_mtp: false # set to true to quantize mtp layers when quantization is enabled. requires mtp_num_layers > 0 and quantization=fp8_full.
 quantize_router_proj: true # set to false to exclude the moe router (gate) projection matmul from quantization when quantization is enabled. default is true for backward compatibility. applicable when use_qwix_quantization=true and quantization is set; ignored otherwise.
 quantize_logits_proj: false # set to true to quantize output logits projection (logits_dense) when quantization is enabled. requires quantization=fp8_full, logits_via_embedding=false, num_vocab_tiling=1. also covers the mtp logits projection, which reuses the same head.

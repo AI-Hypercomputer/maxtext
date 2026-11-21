@@ -66,6 +66,7 @@ from maxtext.configs import pyconfig
 from maxtext.models.qwen3 import Qwen3NextGatedDeltaNet
 import numpy as np
 import pytest
+import qwix
 
 from tests.utils import attention_test_util
 from tests.utils import hlo_test_utils
@@ -1252,8 +1253,6 @@ class BlockCausalMaskTest(unittest.TestCase):
           segment_positions=None,
           lengths=None,
           model_mode=MODEL_MODE_TRAIN,
-          qk_product_einsum=jnp.einsum,
-          wv_product_einsum=jnp.einsum,
       )
 
     global_op = self._make_flash_op(attention_type=AttentionType.GLOBAL)
@@ -1267,8 +1266,6 @@ class BlockCausalMaskTest(unittest.TestCase):
           segment_positions=None,
           lengths=None,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
-          qk_product_einsum=jnp.einsum,
-          wv_product_einsum=jnp.einsum,
       )
 
     self.assertIs(actual, expected)
@@ -7686,7 +7683,7 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
         self.assertFalse(jnp.isnan(loss_q))
 
   def test_apply_attention_dot_kv_quant_sharding_paths(self):
-    """Verifies KVTensor sharding branches in apply_attention_dot for prefill and decode modes."""
+    """Verifies quantized-KV (qwix.QArray) sharding branches in apply_attention_dot for prefill and decode."""
     cfg_args = self.config_arguments.copy()
     cfg_args.update(
         {
@@ -7723,17 +7720,19 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
 
     batch_size = cfg.global_batch_size_to_train_on
 
-    def make_kv_tensor(seq_len):
-      qval = jnp.ones((batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim), dtype=jnp.int8)
-      scale = jnp.ones((batch_size, seq_len, cfg.num_kv_heads, 1), dtype=jnp.bfloat16)
-      return attention_op.KVTensor(qvalue=qval, scale=[scale], scale_t=None, bias=[], dequant_dtype=jnp.bfloat16)
+    def make_kv_tensor(seq_len, seed):
+      qval = jax.random.randint(
+          jax.random.PRNGKey(seed), (batch_size, seq_len, cfg.num_kv_heads, cfg.head_dim), -127, 128, dtype=jnp.int8
+      )
+      scale = jnp.full((batch_size, seq_len, cfg.num_kv_heads, 1), 0.01, dtype=jnp.bfloat16)
+      return qwix.QArray(qval, scale)
 
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      # 1. Prefill mode (q_seq_len > 1) with KVTensor
+      # 1. Prefill mode (q_seq_len > 1) with quantized K/V
       prefill_len = cfg.max_prefill_predict_length
       q_prefill = jnp.ones((batch_size, prefill_len, cfg.num_query_heads, cfg.head_dim), dtype=jnp.bfloat16)
-      k_prefill = make_kv_tensor(prefill_len)
-      v_prefill = make_kv_tensor(prefill_len)
+      k_prefill = make_kv_tensor(prefill_len, 0)
+      v_prefill = make_kv_tensor(prefill_len, 1)
       seg_prefill = jnp.ones((batch_size, prefill_len), dtype=jnp.int32)
       out_prefill, _, _ = op.apply_attention_dot(
           query=q_prefill,
@@ -7741,17 +7740,15 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
           value=v_prefill,
           decoder_segment_ids=seg_prefill,
           model_mode=MODEL_MODE_PREFILL,
-          qk_product_einsum=op.AqtEinsum_0,
-          wv_product_einsum=op.AqtEinsum_1,
       )
       self.assertEqual(out_prefill.shape, q_prefill.shape)
       self.assertFalse(jnp.isnan(out_prefill).any())
 
-      # 2. Decode mode (q_seq_len == 1, is_partition_in_decode == True) with KVTensor
+      # 2. Decode mode (q_seq_len == 1, is_partition_in_decode == True) with quantized K/V
       target_len = cfg.max_target_length
       q_ar = jnp.ones((batch_size, 1, cfg.num_query_heads, cfg.head_dim), dtype=jnp.bfloat16)
-      k_ar = make_kv_tensor(target_len)
-      v_ar = make_kv_tensor(target_len)
+      k_ar = make_kv_tensor(target_len, 2)
+      v_ar = make_kv_tensor(target_len, 3)
       seg_ar = jnp.ones((batch_size, target_len), dtype=jnp.int32)
       out_ar, _, _ = op.apply_attention_dot(
           query=q_ar,
@@ -7759,11 +7756,20 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
           value=v_ar,
           decoder_segment_ids=seg_ar,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
-          qk_product_einsum=op.AqtEinsum_2,
-          wv_product_einsum=op.AqtEinsum_3,
       )
       self.assertEqual(out_ar.shape, q_ar.shape)
       self.assertFalse(jnp.isnan(out_ar).any())
+
+      # Quantized attention should match attention on explicitly dequantized K/V up to bf16 rounding.
+      out_ar_dense, _, _ = op.apply_attention_dot(
+          query=q_ar,
+          key=qwix.dequantize(k_ar),
+          value=qwix.dequantize(v_ar),
+          decoder_segment_ids=seg_ar,
+          model_mode=MODEL_MODE_AUTOREGRESSIVE,
+      )
+      out_ar, out_ar_dense = np.asarray(out_ar, np.float32), np.asarray(out_ar_dense, np.float32)
+      self.assertLess(np.linalg.norm(out_ar - out_ar_dense) / np.linalg.norm(out_ar_dense), 2e-2)
 
 
 if __name__ == "__main__":
