@@ -1470,11 +1470,15 @@ deepseek41_flash_mini_dict = {
 
 # TODO: replace with the transformers config class once DeepSeek-V4.1 is available in transformers.
 class DeepseekV41Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
+  """Hugging Face configuration for DeepSeek-V4.1 checkpoint conversion."""
+
   model_type = "deepseek_v41_text"
 
   def __init__(self, **kwargs):
     self.max_position_embeddings = kwargs.get("max_position_embeddings", 1048576)
     super().__init__(**kwargs)
+    if hasattr(self, "quantization_config") and self.quantization_config is None:
+      del self.quantization_config
 
 
 deepseek41_flash_config = DeepseekV41Config(**deepseek41_flash_dict)

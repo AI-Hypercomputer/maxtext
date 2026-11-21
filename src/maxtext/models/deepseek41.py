@@ -33,7 +33,7 @@ DeepSeek-V4.1-Flash: [0] [1+engram] [2-7, 8-13] [14-19 (+engram)] [20-23] [24-27
 """
 
 import dataclasses
-from typing import Optional
+from typing import Any, Optional
 
 import jax
 import jax.numpy as jnp
@@ -48,6 +48,7 @@ from maxtext.layers import moe
 from maxtext.layers import quantizations
 from maxtext.layers.engram import StaticWrapper
 from maxtext.layers.normalizations import RMSNorm
+from maxtext.models import deepseek4
 
 SHARED_STATE_KEYS = ("compress_kv", "index_k", "topk_mask", "candidates")
 
@@ -178,6 +179,7 @@ class DeepSeek41DecoderLayer(nnx.Module):
   ):
     self.config = config
     self.mesh = mesh
+    self.model_mode = model_mode
     self.spec = spec
     self.hc_mult = config.mhc_expansion_rate
     self.norm_eps = config.normalization_layer_epsilon
@@ -247,7 +249,13 @@ class DeepSeek41DecoderLayer(nnx.Module):
   @staticmethod
   def hc_pre(h: jax.Array, mix: jax.Array) -> jax.Array:
     """Collapses the hc copies: [B, S, hc, D] x [B, S, hc] -> [B, S, D]."""
-    return jnp.sum(mix[..., None] * h.astype(jnp.float32), axis=2).astype(h.dtype)
+    work_dtype = jnp.promote_types(h.dtype, jnp.float32)
+    hf = h.astype(work_dtype)
+    mix_w = mix.astype(work_dtype)
+    out = mix_w[..., 0, None] * hf[:, :, 0]
+    for k in range(1, h.shape[2]):
+      out = out + mix_w[..., k, None] * hf[:, :, k]
+    return out.astype(h.dtype)
 
   @staticmethod
   def hc_post(x: jax.Array, residual: jax.Array, post: jax.Array, comb: jax.Array) -> jax.Array:
@@ -255,22 +263,34 @@ class DeepSeek41DecoderLayer(nnx.Module):
     mixed = jnp.einsum("bsjk,bsjd->bskd", comb, residual.astype(jnp.float32), precision=jax.lax.Precision.HIGHEST)
     return (post[..., None] * x.astype(jnp.float32)[:, :, None, :] + mixed).astype(x.dtype)
 
-  def __call__(self, carry: dict, decoder_positions: jax.Array, decoder_input_tokens: jax.Array) -> dict:
+  def __call__(
+      self,
+      carry: dict,
+      decoder_positions: jax.Array,
+      decoder_input_tokens: jax.Array,
+      decoder_segment_ids: jax.Array | None = None,
+  ) -> dict:
     h, pre_mix = carry["h"], carry["pre_mix"]
     shared = {k: v for k, v in carry.items() if k in SHARED_STATE_KEYS}
     if self.spec.has_engram:
-      h = self.engram(h, self.engram_hasher.val(decoder_input_tokens))
+      hash_ids = self.engram_hasher.val(decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
+      h = self.engram(h, hash_ids, decoder_segment_ids=decoder_segment_ids)
 
     residual = h
     attn_pre, attn_post, attn_comb = self.hc_mixes(h, "hc_attn")
     x = self.pre_self_attention_layer_norm(self.hc_pre(h, pre_mix))
-    x, updates = self.self_attention(x, decoder_positions, shared)
+    x, updates = self.self_attention(x, decoder_positions, shared, decoder_segment_ids=decoder_segment_ids)
     h = self.hc_post(x, residual, attn_post, attn_comb)
 
     residual = h
     ffn_pre, ffn_post, ffn_comb = self.hc_mixes(h, "hc_ffn")
     x = self.post_self_attention_layer_norm(self.hc_pre(h, attn_pre))
-    x, _, _ = self.mlp(x)
+    token_mask = moe.routing_token_mask(self.config, decoder_segment_ids, self.model_mode)
+    x, load_balance_loss, moe_bias_updates = self.mlp(x, token_mask=token_mask)
+    if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
+      self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
+    if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
+      self.sow(nnx.Intermediate, "moe_bias_updates", moe_bias_updates)
     h = self.hc_post(x, residual, ffn_post, ffn_comb)
     return {**carry, **updates, "h": h, "pre_mix": ffn_pre}
 
@@ -285,9 +305,15 @@ class DeepSeek41Block(nnx.Module):
       model_mode: str,
       specs: tuple[LayerSpec, ...],
       quant: Optional[quantizations.AqtQuantization] = None,
+      remat_policy_fn: Any = None,
+      prevent_cse_in_remat: Optional[bool] = None,
       *,
       rngs: nnx.Rngs,
   ):
+    self.config = config
+    self.model_mode = model_mode
+    self.remat_policy_fn = remat_policy_fn
+    self.prevent_cse_in_remat = prevent_cse_in_remat
     self.num_layers = len(specs)
     for j, spec in enumerate(specs):
       setattr(
@@ -296,10 +322,31 @@ class DeepSeek41Block(nnx.Module):
           DeepSeek41DecoderLayer(config=config, mesh=mesh, model_mode=model_mode, spec=spec, quant=quant, rngs=rngs),
       )
 
-  def __call__(self, carry: dict, decoder_positions: jax.Array, decoder_input_tokens: jax.Array):
+  def __call__(
+      self,
+      carry: dict,
+      decoder_positions: jax.Array,
+      decoder_input_tokens: jax.Array,
+      decoder_segment_ids: jax.Array | None = None,
+  ):
+    use_remat, policy_fn = deepseek4.resolve_block_remat_policy(self, self.model_mode)
     out = carry
     for j in range(self.num_layers):
-      out = getattr(self, f"layers_{j}")(out, decoder_positions, decoder_input_tokens)
+      layer = getattr(self, f"layers_{j}")
+      if use_remat:
+        out = deepseek4._run_deepseek4_layer_remat(  # pylint: disable=protected-access
+            layer,
+            out,
+            carry_in_xs=True,
+            decoder_positions=decoder_positions,
+            decoder_input_tokens=decoder_input_tokens,
+            decoder_segment_ids=decoder_segment_ids,
+            config=self.config,
+            policy=policy_fn,
+            prevent_cse=self.prevent_cse_in_remat,
+        )
+      else:
+        out = layer(out, decoder_positions, decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
     # A scan carry keeps its structure: drop shared state that only lives inside this group. Every group starts
     # with its own sharing source, so nothing produced here is needed by a later repeat.
     return {k: out[k] for k in carry}, None

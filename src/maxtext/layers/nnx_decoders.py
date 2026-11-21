@@ -887,6 +887,7 @@ class NNXDecoder(nnx.Module):
     config = self.config
     specs = deepseek41.build_layer_specs(config)
     if config.scan_layers:
+      remat_policy_fn, prevent_cse_in_remat = self._get_deepseek4_remat_policy_and_cse()
       for k, segment in enumerate(deepseek41.build_segments(config)):
         stack = self._create_scanned_layers(
             deepseek41.DeepSeek41Block,
@@ -894,19 +895,22 @@ class NNXDecoder(nnx.Module):
             metadata_axis_name="layers",
             rngs=rngs,
             specs=tuple(specs[i] for i in segment.groups[0]),
+            remat_policy_fn=remat_policy_fn,
+            prevent_cse_in_remat=prevent_cse_in_remat,
         )
         setattr(self, f"segments_{k}", stack)
     else:
       for i, spec in enumerate(specs):
         self._create_and_register_layer(deepseek41.DeepSeek41DecoderLayer, rngs, "layers", i, spec=spec)
 
-  def _apply_deepseek41_layers(self, y, decoder_positions, decoder_input_tokens):
+  def _apply_deepseek41_layers(self, y, decoder_positions, decoder_input_tokens, decoder_segment_ids=None):
     """Runs the DeepSeek-V4.1 layers on the embeddings and collapses the hyper-connection copies."""
     cfg = self.config
     carry = deepseek41.initial_carry(y, cfg.mhc_expansion_rate)
     if cfg.scan_layers:
       segments = deepseek41.build_segments(cfg)
       plans = deepseek41.build_segment_carry_plans(cfg, segments)
+      self._sync_remat_policy_override(*(getattr(self, f"segments_{k}") for k in range(len(segments))))
       for k, (segment, plan) in enumerate(zip(segments, plans)):
         carry = deepseek41.add_placeholders(carry, plan.add_before, plan.compress_ratio, cfg)
         stack = getattr(self, f"segments_{k}")
@@ -915,14 +919,32 @@ class NNXDecoder(nnx.Module):
             carry,
             decoder_positions,
             decoder_input_tokens,
+            decoder_segment_ids,
             length=segment.repeats,
             metadata_axis_name="layers",
+            skip_block_remat=True,
         )
         setattr(self, f"segments_{k}", stack)
         carry = {key: carry[key] for key in ("h", "pre_mix") + plan.keep_after}
     else:
+      use_remat = self.model_mode == MODEL_MODE_TRAIN and self._remat_enabled()
+      remat_policy_fn, prevent_cse = self._get_deepseek4_remat_policy_and_cse() if use_remat else (None, None)
       for i in range(cfg.num_decoder_layers):
-        carry = getattr(self, f"layers_{i}")(carry, decoder_positions, decoder_input_tokens)
+        layer = getattr(self, f"layers_{i}")
+        if use_remat:
+          carry = deepseek4._run_deepseek4_layer_remat(  # pylint: disable=protected-access
+              layer,
+              carry,
+              carry_in_xs=True,
+              decoder_positions=decoder_positions,
+              decoder_input_tokens=decoder_input_tokens,
+              decoder_segment_ids=decoder_segment_ids,
+              config=cfg,
+              policy=remat_policy_fn,
+              prevent_cse=prevent_cse,
+          )
+        else:
+          carry = layer(carry, decoder_positions, decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
     return deepseek41.DeepSeek41DecoderLayer.hc_pre(carry["h"], carry["pre_mix"])
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
@@ -1833,20 +1855,28 @@ class NNXDecoder(nnx.Module):
         ),
     )
     save_names, offload_names = maxtext_utils.get_save_and_offload_names(policy_cfg)
+    if offload_names:
+      log_key = (remat_policy, tuple(offload_names))
+      if getattr(self, "_logged_scan_safe_offload_key", None) != log_key:
+        self._logged_scan_safe_offload_key = log_key
+        max_logging.log(f"Per-layer scan remat ({remat_policy}): keeping offloaded residuals on device: {offload_names}")
     if save_names or offload_names:
       return jax.checkpoint_policies.save_only_these_names(*(save_names + offload_names))
     return self.get_remat_policy()
 
-  def _sync_remat_policy_override(self, block: nnx.Module) -> None:
-    """Propagates `remat_policy_override` (or clears stale overrides) onto a child block."""
+  def _sync_remat_policy_override(self, *blocks: nnx.Module) -> None:
+    """Propagates `remat_policy_override` (or clears stale overrides) onto child blocks."""
     override = getattr(self, "remat_policy_override", None)
-    block.remat_policy_override = override
     if override is None:
-      block.remat_policy_fn_override = None
-      block.scan_safe_remat_policy_fn_override = None
+      policy_fn = None
+      scan_safe_fn = None
     else:
-      block.remat_policy_fn_override = self.get_remat_policy()
-      block.scan_safe_remat_policy_fn_override = self._get_scan_safe_remat_policy()
+      policy_fn = self.get_remat_policy()
+      scan_safe_fn = self._get_scan_safe_remat_policy()
+    for block in blocks:
+      block.remat_policy_override = override
+      block.remat_policy_fn_override = policy_fn
+      block.scan_safe_remat_policy_fn_override = scan_safe_fn
 
   def get_remat_policy(self):
     """Get remat policy for jax.checkpoint."""
@@ -2620,7 +2650,7 @@ class NNXDecoder(nnx.Module):
           # The DeepSeek-V4.1 layers keep no KV cache yet: a decode step or a later prefill chunk would silently
           # attend only to its own tokens.
           raise NotImplementedError("deepseek41 supports training and single-shot prefill only (no KV cache yet).")
-        y = self._apply_deepseek41_layers(y, decoder_positions, decoder_input_tokens)
+        y = self._apply_deepseek41_layers(y, decoder_positions, decoder_input_tokens, decoder_segment_ids)
       elif self.is_gemma4_small:
         y, kv_caches = self._apply_gemma4_small_layers(
             y,

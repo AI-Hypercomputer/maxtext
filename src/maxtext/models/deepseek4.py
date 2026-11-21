@@ -32,42 +32,75 @@ import jax
 from jax.experimental import xla_metadata
 
 
+def resolve_block_remat_policy(block: nnx.Module, model_mode: str) -> tuple[bool, Any]:
+  """Resolves `(use_remat, policy_fn)` for a DeepSeek block, honoring `remat_policy_override`."""
+  override = getattr(block, "remat_policy_override", None)
+  remat_policy = block.config.remat_policy if override is None else override
+  if model_mode != "train" or not remat_policy or remat_policy == "none":
+    return False, None
+  if override is None:
+    return True, block.remat_policy_fn
+  return True, getattr(block, "scan_safe_remat_policy_fn_override", None)
+
+
 def _run_deepseek4_layer_remat(
     layer: nnx.Module,
-    y: jax.Array,
+    y: Any,
     *,
+    carry_in_xs: bool = False,
     config: Config,
     policy: Any = None,
     prevent_cse: Optional[bool] = None,
     **layer_kwargs,
 ):
-  """Runs one DeepSeek4DecoderLayer under jax.checkpoint inside a length-1 scan.
+  """Runs one DeepSeek4 / DeepSeek41 decoder layer under jax.checkpoint inside a length-1 scan.
 
   The trip-count-one scan boundary keeps only one layer's backward working set
   live at a time, as in Gemma4ScannableBlock._scan_global_layer. Params go in as
   scan xs: carrying them, as Gemma4 does, multiplies the DeepSeek-V4 train-step
   temporaries in TPU AOT. All other state, including RNG counters and variables
-  the layer creates during the call (sown aux losses, `indexer_losses`), goes
-  through xs/ys and is written back. `policy` is the decoder's resolved remat
-  policy (None means full remat).
+  the layer creates during the call (sown aux losses, `indexer_losses`, lazy
+  `LoRAParam` weights), goes through xs/ys and is written back. When
+  `carry_in_xs=True` (DeepSeek-V4.1, whose dict carry changes keys across
+  layers), `y` also rides through `xs`/`ys` with an empty scan carry. `policy`
+  is the decoder's resolved remat policy (None means full remat).
   """
   params_filter = nnx.All(nnx.Param, nnx.Not(nnx.LoRAParam))
   graphdef, params, other = nnx.split(layer, params_filter, ...)
   params_xs = jax.tree.map(lambda x: x[None], params)
   other_xs = jax.tree.map(lambda x: x[None], other)
 
-  def run_single_layer(carry, xs_slice):
-    params_slice, other_slice = xs_slice
-    merged_layer = nnx.merge(graphdef, params_slice, other_slice)
-    out_y, _ = merged_layer(carry, **layer_kwargs)
-    _, _, new_other = nnx.split(merged_layer, params_filter, ...)
-    return out_y, new_other
+  if carry_in_xs:
+    carry_xs = jax.tree.map(lambda x: x[None], y)
+
+    def run_single_layer(dummy_carry, xs_slice):
+      params_slice, other_slice, carry_slice = xs_slice
+      merged_layer = nnx.merge(graphdef, params_slice, other_slice)
+      out_carry = merged_layer(carry_slice, **layer_kwargs)
+      _, _, new_other = nnx.split(merged_layer, params_filter, ...)
+      return dummy_carry, (out_carry, new_other)
+
+  else:
+
+    def run_single_layer(carry, xs_slice):
+      params_slice, other_slice = xs_slice
+      merged_layer = nnx.merge(graphdef, params_slice, other_slice)
+      out_y, _ = merged_layer(carry, **layer_kwargs)
+      _, _, new_other = nnx.split(merged_layer, params_filter, ...)
+      return out_y, new_other
 
   if prevent_cse is None:
     prevent_cse = not config.scan_layers and not (
         config.gradient_accumulation_steps > 1 and config.hardware in ("gpu", "gpu_multiprocess")
     )
   run_single_layer = jax.checkpoint(run_single_layer, policy=policy, prevent_cse=prevent_cse)
+  if carry_in_xs:
+    with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
+      _, (stacked_out_carry, stacked_other) = jax.lax.scan(
+          run_single_layer, (), (params_xs, other_xs, carry_xs), length=1
+      )
+    nnx.update(layer, jax.tree.map(lambda x: x[0], stacked_other))
+    return jax.tree.map(lambda x: x[0], stacked_out_carry)
   with xla_metadata.set_xla_metadata(**{"skip-simplify-while-loops_trip-count-one": "true"}):
     y_out, stacked_other = jax.lax.scan(run_single_layer, y, (params_xs, other_xs), length=1)
   nnx.update(layer, jax.tree.map(lambda x: x[0], stacked_other))
@@ -282,9 +315,8 @@ class DeepSeek4ScannableBlock(nnx.Module):
     inputs = checkpoint_name(inputs, "decoder_layer_input")
     y = inputs
 
-    override = getattr(self, "remat_policy_override", None)
-    remat_policy = self.config.remat_policy if override is None else override
-    if model_mode == "train" and bool(remat_policy) and remat_policy != "none":
+    use_remat, policy_fn = resolve_block_remat_policy(self, model_mode)
+    if use_remat:
       call_kwargs = dict(  # pylint: disable=use-dict-literal
           decoder_segment_ids=decoder_segment_ids,
           decoder_positions=decoder_positions,
@@ -296,10 +328,6 @@ class DeepSeek4ScannableBlock(nnx.Module):
           attention_metadata=attention_metadata,
           decoder_input_tokens=decoder_input_tokens,
       )
-      if override is None:
-        policy_fn = self.remat_policy_fn
-      else:
-        policy_fn = getattr(self, "scan_safe_remat_policy_fn_override", None)
       remat_kwargs = {"config": self.config, "policy": policy_fn, "prevent_cse": self.prevent_cse_in_remat}
       y = _run_deepseek4_layer_remat(self.layers_0, y, **remat_kwargs, **call_kwargs)
       y = _run_deepseek4_layer_remat(self.layers_1, y, **remat_kwargs, **call_kwargs)

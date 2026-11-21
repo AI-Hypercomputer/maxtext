@@ -778,6 +778,7 @@ ds41_engram_n_heads: 0 # Engram hash heads per n-gram size.
 ds41_engram_head_dim: 0 # Engram table row size.
 ds41_engram_pad_id: 2 # Token filling n-gram slots that have no history.
 ds41_engram_compressed_vocab_size: 0 # Expected size of the compressed (normalized) tokenizer vocab (0: unchecked).
+ds41_activation_quant: false # Emulate TileLang FP8/FP4 activation quantize-dequantize round-trips.
 
 # QK-Clip (Muon Clip) Configuration
 use_qk_clip: false  # Enable QK-Clip (supported in MLA with DotProduct or Tokamax Splash)
