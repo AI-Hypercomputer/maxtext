@@ -17,7 +17,7 @@
 
 import functools
 import os
-from typing import Sequence
+from typing import Any, Sequence
 
 from flax import nnx, traverse_util
 from flax.core.spmd import logical_axis_rules as axis_rules
@@ -795,7 +795,12 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.MING, DecoderBlockType.HY4):
+  if config.decoder_block in (
+      DecoderBlockType.DEEPSEEK,
+      DecoderBlockType.MING,
+      DecoderBlockType.HY4,
+      DecoderBlockType.MUSE_SPARK,
+  ):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
@@ -1331,6 +1336,85 @@ def calculate_hy4_tflops_training_per_device(config, total_ffn_flops_all_layers,
   )
 
 
+def calculate_muse_spark_tflops_training_per_device(config, qkv_flops, projection_flops, embedding_flops):
+  """Calculates the training TFLOPs per device for Muse Spark (`DecoderBlockType.MUSE_SPARK`).
+
+  Muse Spark combines:
+  1. Gated GQA attention on every layer: `q_proj`, `k_proj`, `v_proj`, `gate_proj`
+     (`emb_dim -> num_query_heads * head_dim`, same size as `out_proj`), and `out_proj`.
+  2. Hybrid 3:1 sliding-window (`W = sliding_window_size = 2048`) and global causal
+     attention core: layer `i` is global when `(num_decoder_layers - 1 - i) % cycle == 0`
+     (with `cycle = inhomogeneous_layer_cycle_interval`, default 4) and sliding-window
+     otherwise.
+  3. Width-bottlenecked Sparse MoE (`MuseSparkMoE`) on MoE layers (`i >= first_num_dense_layers`):
+     - Router `gate` operating on full `emb_dim`: `2 * B * S * emb_dim * num_experts`
+     - Shared bottleneck down/up projections `pre_expert_proj` (`emb_dim -> moe_expert_input_dim`)
+       and `post_expert_proj` (`moe_expert_input_dim -> emb_dim`): `4 * B * S * emb_dim * moe_expert_input_dim`
+     - `num_experts_per_tok` routed SwiGLU experts operating at `in_dim = moe_expert_input_dim`:
+       `num_experts_per_tok * calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim, in_dim=expert_in_dim)`
+
+  Args:
+    config: MaxTextConfig instance.
+    qkv_flops: Per-layer QKV projection FLOPs (1x forward).
+    projection_flops: Per-layer attention output projection FLOPs (1x forward).
+    embedding_flops: Unembedding (LM head) projection FLOPs (1x forward).
+
+  Returns:
+    A tuple of `(attention_tflops, learnable_weight_tflops)`.
+  """
+  batch_size = config.per_device_batch_size
+  seq_len = int(config.max_target_length)
+  emb_dim = int(config.emb_dim)
+  num_layers = int(config.num_decoder_layers)
+  raw_cycle = int(getattr(config, "inhomogeneous_layer_cycle_interval", 4))
+  cycle = raw_cycle if raw_cycle > 0 else 4
+
+  # 1. Attention projections: QKV + out_proj + gate_proj (same shape as out_proj)
+  gate_proj_flops = projection_flops
+  attn_proj_flops_per_layer = qkv_flops + projection_flops + gate_proj_flops
+
+  # 2. FFN / MoB-E FLOPs
+  if config.num_experts > 1:
+    num_dense_layers, num_moe_layers = get_dense_moe_layers(config)
+    dense_ffn_flops = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * num_dense_layers
+    raw_expert_in_dim = int(getattr(config, "moe_expert_input_dim", 0))
+    expert_in_dim = raw_expert_in_dim if raw_expert_in_dim > 0 else emb_dim
+    gate_flops = 2 * batch_size * seq_len * emb_dim * config.num_experts
+    bottleneck_proj_flops = 2 * (2 * batch_size * seq_len * emb_dim * expert_in_dim)
+    routed_experts_flops = (
+        calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim, in_dim=expert_in_dim)
+        * config.num_experts_per_tok
+    )
+    moe_ffn_flops = (gate_flops + bottleneck_proj_flops + routed_experts_flops) * num_moe_layers
+    total_ffn_flops_all_layers = dense_ffn_flops + moe_ffn_flops
+  else:
+    total_ffn_flops_all_layers = calculate_ffn_mamtul_tflops_per_device(config, config.mlp_dim) * num_layers
+
+  # 3. Hybrid SWA(W=2048) / Global causal attention core FLOPs
+  num_global_layers = sum(1 for i in range(num_layers) if (num_layers - 1 - i) % cycle == 0)
+  num_sliding_layers = num_layers - num_global_layers
+  raw_window_size = int(getattr(config, "sliding_window_size", 0))
+  window_size = raw_window_size if raw_window_size > 0 else seq_len
+  w = min(window_size, seq_len)
+  swa_pairs = (w * (w + 1)) // 2 + (seq_len - w) * w
+  global_pairs = (seq_len * (seq_len + 1)) // 2
+  total_attention_flops = (
+      4
+      * batch_size
+      * config.num_query_heads
+      * config.head_dim
+      * (num_sliding_layers * swa_pairs + num_global_layers * global_pairs)
+  )
+
+  total_weight_flops = (
+      total_ffn_flops_all_layers + attn_proj_flops_per_layer * num_layers + embedding_flops
+  )
+  return (
+      total_attention_flops * 3 / 10**12,
+      total_weight_flops * 3 / 10**12,
+  )
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   if config.use_m3_model:
@@ -1495,6 +1579,10 @@ def calculate_tflops_training_per_device(config, log=True):
     # Attention TFLOPs:
     total_attn = (causal_attention_flops * num_full_attn_layers) + (gdn_attn_flops_per_layer * num_linear_attn_layers)
     attention_tflops = total_attn * 3 / 10**12
+  elif config.decoder_block == DecoderBlockType.MUSE_SPARK:
+    attention_tflops, learnable_weight_tflops = calculate_muse_spark_tflops_training_per_device(
+        config, qkv_flops, projection_flops, embedding_flops
+    )
   else:
     # multiply by 3 for both feed forward and back propagation flops
     learnable_weight_tflops = (
@@ -1526,6 +1614,16 @@ def calculate_tflops_training_per_device(config, log=True):
         )
         routed_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
         last_layer_ffn_flops = gate_flops + shared_flops + routed_flops
+      elif config.decoder_block == DecoderBlockType.MUSE_SPARK:
+        expert_in_dim = int(config.moe_expert_input_dim) if config.moe_expert_input_dim > 0 else config.emb_dim
+        bottleneck_proj_flops = (
+            4 * config.per_device_batch_size * config.max_target_length * config.emb_dim * expert_in_dim
+        )
+        routed_flops = (
+            calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim, in_dim=expert_in_dim)
+            * config.num_experts_per_tok
+        )
+        last_layer_ffn_flops = gate_flops + bottleneck_proj_flops + routed_flops
       else:
         routed_flops = calculate_ffn_mamtul_tflops_per_device(config, config.moe_mlp_dim) * config.num_experts_per_tok
         last_layer_ffn_flops = gate_flops + routed_flops
@@ -1536,7 +1634,12 @@ def calculate_tflops_training_per_device(config, log=True):
     # Calculate total weight FLOPs per MTP module.
     # Crucially, MTP shares the base model's vocabulary embeddings and final output
     # projections, so we strictly add only the FFN, QKV, and standard projection FLOPs.
-    mtp_weight_flops = (last_layer_ffn_flops + qkv_flops + projection_flops) * mtp_num_layers
+    mtp_attn_proj_flops = (
+        qkv_flops + 2 * projection_flops
+        if config.decoder_block == DecoderBlockType.MUSE_SPARK
+        else qkv_flops + projection_flops
+    )
+    mtp_weight_flops = (last_layer_ffn_flops + mtp_attn_proj_flops) * mtp_num_layers
 
     # Attention FLOPs scale linearly with the number of MTP modules.
     mtp_attn_flops = causal_attention_flops * mtp_num_layers
@@ -2249,6 +2352,86 @@ def add_config_to_summary_writer(config, summary_writer):
       max_utils.add_text_to_summary_writer(key, str(value), summary_writer)
 
 
+_TPU7X_PHYS_DIMS = ("x", "y", "z", "core")
+
+# Torus-aligned custom meshes for 256-chip TPU v7x (4x8x8 chips, 512 TensorCores). Each MaxText mesh axis lists the
+# physical dims it spans, major to minor: `x`, `y`, `z` (chip coordinates) and `core` (TensorCore on the chip). Axes
+# that are not listed have size 1.
+TPU7X_512_MESH_PRESETS: dict[str, dict[str, tuple[str, ...]]] = {
+    # EP=8 over the z ring of 8 chips; FSDP=64 over the 4x8 (x, y) plane and the 2 cores of a chip.
+    "ep8_z_fsdp64_xycore": {"expert": ("z",), "fsdp": ("x", "y", "core")},
+}
+
+
+def _tpu7x_device_phys(dev: Any) -> dict[str, int]:
+  coords = tuple(int(c) for c in (getattr(dev, "coords", None) or (0, 0, 0)))
+  coords = (coords + (0, 0, 0))[:3]
+  return {"x": coords[0], "y": coords[1], "z": coords[2], "core": int(getattr(dev, "core_on_chip", 0) or 0)}
+
+
+def _tpu7x_physical_bounds(devices: Sequence[Any]) -> dict[str, int]:
+  phys = [_tpu7x_device_phys(d) for d in devices]
+  return {k: max(p[k] for p in phys) + 1 for k in _TPU7X_PHYS_DIMS}
+
+
+def _tpu7x_factor(dim: str, p: dict[str, int], bounds: dict[str, int]) -> tuple[int, int]:
+  if dim not in _TPU7X_PHYS_DIMS:
+    raise ValueError(f"Bad mesh factor {dim!r} (want one of {_TPU7X_PHYS_DIMS}).")
+  return p[dim], bounds[dim]
+
+
+def _tpu7x_spec_axis_sizes(spec: dict[str, Sequence[str]], bounds: dict[str, int]) -> dict[str, int]:
+  zero = {d: 0 for d in _TPU7X_PHYS_DIMS}
+  sizes = {}
+  for axis, facs in spec.items():
+    size = 1
+    for f in facs:
+      size *= _tpu7x_factor(f, zero, bounds)[1]
+    sizes[axis] = size
+  return sizes
+
+
+def build_device_array(
+    devices: Sequence[Any],
+    mesh_axes: Sequence[str],
+    mesh_shape: Sequence[int],
+    spec: dict[str, Sequence[str]] | str,
+):
+  """Device ndarray of `mesh_shape` placing each device by the mixed-radix value of its physical factors."""
+  if isinstance(spec, str):
+    if spec not in TPU7X_512_MESH_PRESETS:
+      raise ValueError(f"Unknown custom_mesh preset {spec!r}; known: {sorted(TPU7X_512_MESH_PRESETS)}")
+    spec = TPU7X_512_MESH_PRESETS[spec]
+  mesh_axes = list(mesh_axes)
+  bounds = _tpu7x_physical_bounds(devices)
+  sizes = _tpu7x_spec_axis_sizes(spec, bounds)
+  unknown = sorted(set(sizes) - set(mesh_axes))
+  if unknown:
+    raise ValueError(f"Mesh spec axes {unknown} are not MaxText mesh axes {mesh_axes}.")
+  for i, a in enumerate(mesh_axes):
+    if int(mesh_shape[i]) != sizes.get(a, 1):
+      raise ValueError(
+          f"Mesh spec gives {a}={sizes.get(a, 1)} but the config's ICI mesh has {a}={mesh_shape[i]} "
+          f"(shape {dict(zip(mesh_axes, mesh_shape))}); set ici_*_parallelism to match the spec."
+      )
+  arr = np.empty(tuple(int(s) for s in mesh_shape), dtype=object)
+  for d in devices:
+    p = _tpu7x_device_phys(d)
+    idx = [0] * len(mesh_axes)
+    for a, facs in spec.items():
+      v = 0
+      for f in facs:
+        fv, fn = _tpu7x_factor(f, p, bounds)
+        v = v * fn + fv
+      idx[mesh_axes.index(a)] = v
+    if arr[tuple(idx)] is not None:
+      raise ValueError(f"Mesh spec {spec} maps two devices to {tuple(idx)}: it must cover every physical dim once.")
+    arr[tuple(idx)] = d
+  if any(x is None for x in arr.flat):
+    raise ValueError(f"Mesh spec {spec} leaves mesh slots empty for {len(devices)} devices.")
+  return arr
+
+
 def create_device_mesh(config, devices=None):
   """Creates a device mesh with each slice in its own data parallel group. If there is only one slice, uses two replicas"""
   if devices is None:
@@ -2284,6 +2467,14 @@ def create_device_mesh(config, devices=None):
   # its `mesh_axes`, so they are the single source of truth for the mesh shape.
   ici_parallelism = config.ici_parallelism.copy()
   ici_parallelism = max_utils.fill_unspecified_mesh_axes(ici_parallelism, num_devices_per_slice, "ICI")
+
+  custom_mesh_name = config.custom_mesh or ""
+  if custom_mesh_name in TPU7X_512_MESH_PRESETS and num_devices == 512 and num_slices == 1:
+    spec = TPU7X_512_MESH_PRESETS[custom_mesh_name]
+    mesh_axes = list(config.mesh_axes)
+    mesh = build_device_array(devices, mesh_axes, ici_parallelism, spec)
+    max_logging.log(f"Num_devices: {num_devices}, custom_mesh={custom_mesh_name}, shape {mesh.shape}")
+    return mesh
 
   allow_split_physical_axes = config.allow_split_physical_axes if config.allow_split_physical_axes else False
 

@@ -67,7 +67,7 @@ except (NameError, AttributeError):
 from maxtext.layers import nnx_wrappers
 
 from maxtext.configs.types import JAX_MX_QUANTIZATIONS, TeCommGemmOverlapPolicy
-from maxtext.common.common_types import Array, DType, Config, is_fp8_dtype, get_weight_dtype
+from maxtext.common.common_types import Array, DecoderBlockType, DType, Config, is_fp8_dtype, get_weight_dtype
 from maxtext.inference.kvcache import KVQuant
 from maxtext.utils import max_logging
 
@@ -1063,6 +1063,15 @@ def get_quant_mode(quant_mode_str: str = "train"):
   raise ValueError(f"Invalid quantization mode {quant_mode_str}.")
 
 
+def _is_muse_spark(config: Config) -> bool:
+  return getattr(config, "decoder_block", None) == DecoderBlockType.MUSE_SPARK
+
+
+def _uses_qwix(config: Config) -> bool:
+  """Whether the model is quantized by Qwix interception; Muse Spark always runs `fp8_full` that way."""
+  return bool(config.use_qwix_quantization or (_is_muse_spark(config) and config.quantization == "fp8_full"))
+
+
 def configure_quantization(config: Config, quant_mode_str: str = "train"):
   """Configure quantization based on user config and quant mode."""
   if config.quantization == "serve_fp8_weight":
@@ -1079,7 +1088,9 @@ def configure_quantization(config: Config, quant_mode_str: str = "train"):
     # The pure JAX version of batch-split that uses manual quantization for dot general.
     return None
 
-  if config.quantization and config.use_qwix_quantization:
+  if _is_muse_spark(config) and config.quantization not in ("", "fp8_full"):
+    raise ValueError(f"Muse Spark only supports quantization='fp8_full'; got {config.quantization!r}.")
+  if config.quantization and _uses_qwix(config):
     return None
   quant_cfg = _get_quant_config(config)
   if quant_cfg:
@@ -1406,6 +1417,37 @@ def _drhs_grad_calibration_override(config: Config) -> dict:
   return {"drhs_grad_calibration_method": m} if m else {}
 
 
+def _get_muse_spark_unquantized_rules() -> list[qwix.QtRule]:
+  """Returns the Qwix rules that keep Muse Spark's router, norms, residual gates, embeddings and logits unquantized.
+
+  Like the router rule above, these must come before the layer catch-all rule.
+  """
+  ops = ("dot_general", "einsum", "gmm", "ragged_dot")
+  return [
+      qwix.QtRule(
+          module_path=r".*(/gate$|/moe_block$)",
+          weight_qtype=None,
+          act_qtype=None,
+          bwd_qtype=None,
+          op_names=("dot_general", "einsum"),
+      ),
+      qwix.QtRule(
+          module_path=r".*(norm|layernorm|residual_gate)$",
+          weight_qtype=None,
+          act_qtype=None,
+          bwd_qtype=None,
+          op_names=ops,
+      ),
+      qwix.QtRule(
+          module_path=r".*(embedder|logits_dense).*",
+          weight_qtype=None,
+          act_qtype=None,
+          bwd_qtype=None,
+          op_names=ops,
+      ),
+  ]
+
+
 def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
@@ -1418,10 +1460,13 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
     )
 
   rules = []
-  if not config.quantize_router_proj:
+  is_muse_spark = _is_muse_spark(config)
+  if is_muse_spark:
+    rules.extend(_get_muse_spark_unquantized_rules())
+  elif not config.quantize_router_proj:
     rules.append(_get_router_proj_unquantized_rule())
 
-  if config.quantize_logits_proj:
+  if config.quantize_logits_proj and not is_muse_spark:
     logits_calib = config.logits_proj_quant_calibration_method or None
     logits_bwd_calib = config.logits_proj_bwd_quant_calibration_method or None
     # A logits-specific bwd calibration applies to both gradient arms and takes precedence over the
@@ -1570,7 +1615,7 @@ def get_qt_provider(config):
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   # Batch split is not using Qwix's interception feature but manual plumbing
-  if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
+  if config.quantization and _uses_qwix(config) and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config)
     if quantization_provider:
       input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
