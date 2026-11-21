@@ -761,7 +761,7 @@ def _convert_huggingface_to_jax_weights(
     wk = np.reshape(wk, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
     wv = np.reshape(wv, [base_num_query_heads * head_dim, base_num_kv_heads, head_dim])
 
-    if model_size[:8] == "llama3.1":
+    if model_size[:8] in llama3_variants:
       wq = max_utils.permute_to_match_maxtext_rope(wq)
       wk = max_utils.permute_to_match_maxtext_rope(wk)
 

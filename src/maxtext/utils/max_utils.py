@@ -904,7 +904,7 @@ def unpermute_from_match_maxtext_rope(arr, model_size):
   """
   Function to get the RoPE values in correct ordering
   """
-  if model_size[:8] != "llama3.1":
+  if model_size[:8] not in ("llama3.1", "llama3.3"):
     return arr
   evens = arr[..., ::2]
   odds = arr[..., 1::2]

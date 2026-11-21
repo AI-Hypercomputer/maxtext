@@ -14,10 +14,23 @@
 
 """Tests for kernels"""
 
+import os
+import tempfile
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock
+from flax import nnx
+import jax
+from jax.sharding import Mesh
 import numpy as np
+import psutil
+from safetensors.torch import save_file
+import torch
+from maxtext.checkpoint_conversion.standalone_scripts.llama_or_mistral_ckpt import (
+    _convert_huggingface_to_jax_weights,
+)
+from maxtext.layers import attentions, embeddings
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 from maxtext.utils.max_utils import permute_to_match_maxtext_rope, unpermute_from_match_maxtext_rope
 from maxtext.checkpoint_conversion import to_huggingface as to_hf
 from maxtext.checkpoint_conversion.to_huggingface import (
@@ -102,6 +115,83 @@ class HFCheckpointConversionTest(unittest.TestCase):
     self.assertEqual(hf_config.rope_scaling["mscale"], 0.707)
     self.assertEqual(hf_config.rope_scaling["mscale_all_dim"], 0.707)
     self.assertTrue(hf_config.rope_scaling["truncate"])
+
+  def test_llama33_70b_rope_layout_and_scaling(self):
+    # pylint: disable=import-outside-toplevel
+    from maxtext.configs import pyconfig
+
+    base_yml = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+    config = pyconfig.initialize(["", base_yml, "model_name=llama3.3-70b", "run_name=test", "enable_checkpointing=false"])
+    self.assertEqual(config.rope_type, "llama3.1")
+    mesh = Mesh(jax.devices(), ("data",))
+    attn = attentions.Attention(
+        config=config,
+        num_query_heads=1,
+        num_kv_heads=1,
+        head_dim=config.head_dim,
+        max_target_length=8,
+        mesh=mesh,
+        attention_kernel="dot_product",
+        inputs_q_shape=(1, 8, config.head_dim),
+        inputs_kv_shape=(1, 8, config.head_dim),
+        dtype=config.dtype,
+        weight_dtype=config.weight_dtype,
+        rngs=nnx.Rngs(0),
+    )
+    rotary = attn.rotary_embedding
+    self.assertIsInstance(rotary, embeddings.LLaMARotaryEmbedding)
+    self.assertTrue(rotary.use_scale)
+
+    base_num_query_heads = 2
+    head_dim = 4
+    emb_dim = base_num_query_heads * head_dim
+    wq = np.arange(emb_dim * emb_dim, dtype=np.float32).reshape(emb_dim, base_num_query_heads, head_dim)
+    wq_permuted = permute_to_match_maxtext_rope(wq)
+    wq_unpermuted = unpermute_from_match_maxtext_rope(wq_permuted, "llama3.3-70b")
+    np.testing.assert_array_equal(wq, np.asarray(wq_unpermuted))
+
+    tiny_params = {
+        "num_layers": 1,
+        "num_heads": 2,
+        "num_kv_heads": 1,
+        "dims_per_head": 4,
+        "vocab": 8,
+        "base_emb_dim": 8,
+        "base_mlp_dim": 16,
+    }
+    kv_dim = 4
+    mlp_dim = 16
+    vocab = 8
+    tensors = {
+        "model.embed_tokens.weight": torch.ones((vocab, emb_dim), dtype=torch.float32),
+        "model.norm.weight": torch.ones(emb_dim, dtype=torch.float32),
+        "lm_head.weight": torch.ones((vocab, emb_dim), dtype=torch.float32),
+        "model.layers.0.input_layernorm.weight": torch.ones(emb_dim, dtype=torch.float32),
+        "model.layers.0.post_attention_layernorm.weight": torch.ones(emb_dim, dtype=torch.float32),
+        "model.layers.0.self_attn.q_proj.weight": torch.arange(emb_dim * emb_dim, dtype=torch.float32).reshape(
+            emb_dim, emb_dim
+        ),
+        "model.layers.0.self_attn.k_proj.weight": torch.arange(kv_dim * emb_dim, dtype=torch.float32).reshape(
+            kv_dim, emb_dim
+        ),
+        "model.layers.0.self_attn.v_proj.weight": torch.ones((kv_dim, emb_dim), dtype=torch.float32),
+        "model.layers.0.self_attn.o_proj.weight": torch.ones((emb_dim, emb_dim), dtype=torch.float32),
+        "model.layers.0.mlp.gate_proj.weight": torch.ones((mlp_dim, emb_dim), dtype=torch.float32),
+        "model.layers.0.mlp.up_proj.weight": torch.ones((mlp_dim, emb_dim), dtype=torch.float32),
+        "model.layers.0.mlp.down_proj.weight": torch.ones((emb_dim, mlp_dim), dtype=torch.float32),
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+      save_file(tensors, os.path.join(tmpdir, "model.safetensors"))
+      weights_31 = _convert_huggingface_to_jax_weights(tmpdir, "llama3.1-70b", tiny_params, psutil.Process())
+      weights_33 = _convert_huggingface_to_jax_weights(tmpdir, "llama3.3-70b", tiny_params, psutil.Process())
+    np.testing.assert_array_equal(
+        weights_31["decoder"]["layers"]["self_attention"]["query"]["kernel"],
+        weights_33["decoder"]["layers"]["self_attention"]["query"]["kernel"],
+    )
+    np.testing.assert_array_equal(
+        weights_31["decoder"]["layers"]["self_attention"]["key"]["kernel"],
+        weights_33["decoder"]["layers"]["self_attention"]["key"]["kernel"],
+    )
 
 
 class MaxTextToHFLoRAConversionTest(unittest.TestCase):
