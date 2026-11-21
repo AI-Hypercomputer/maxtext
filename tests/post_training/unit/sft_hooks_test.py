@@ -58,7 +58,7 @@ class SFTHooksTest(unittest.TestCase):
     shutil.rmtree(self.test_dir)
     super().tearDown()
 
-  @patch("maxtext.trainers.post_train.hooks.create_data_iterator")
+  @patch.object(post_train_hooks, "create_data_iterator")
   def test_sft_data_hooks_load_next_train_batch(self, mock_create_data_iterator):
     expected_batch = {"inputs": np.zeros([jax.device_count(), self.config.max_target_length], dtype=int)}
     mock_data_iterator = MagicMock()

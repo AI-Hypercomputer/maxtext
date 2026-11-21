@@ -23,6 +23,7 @@ pytestmark = [pytest.mark.tpu_only, pytest.mark.post_training]
 
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from typing import Literal
 from unittest import mock
@@ -33,11 +34,13 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from absl.testing import absltest
+from jax.sharding import Mesh
 
 # Import the module under test
 from maxtext.trainers.post_train.distillation import train_distill
 from maxtext.trainers.post_train.distillation import distillation_utils
 from maxtext.configs import pyconfig
+from maxtext.utils import sharding
 from tests.utils.test_helpers import get_test_config_path
 
 
@@ -1515,6 +1518,92 @@ class TrainDistillTest(unittest.TestCase):
     """Verifies train_distill with enable_goodput_recording=False performs zero recorder calls."""
     mock_recorder = self._run_train_distill_with_goodput(enable_goodput_recording=False)
     self.assertEqual(len(mock_recorder.method_calls), 0)
+
+  def test_validate_config_rejects_load_balanced_cp(self):
+
+    def _cfg(**overrides):
+      defaults = {
+          "context_parallel_load_balance": True,
+          "ici_context_parallelism": 1,
+          "dcn_context_parallelism": 1,
+          "context_sharding": "context",
+      }
+      return SimpleNamespace(**{**defaults, **overrides})
+
+    train_distill.validate_config(_cfg(), _cfg(), is_offline=False)
+    train_distill.validate_config(
+        _cfg(context_parallel_load_balance=False, ici_context_parallelism=2),
+        _cfg(context_parallel_load_balance=False, ici_context_parallelism=2),
+        is_offline=False,
+    )
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      train_distill.validate_config(_cfg(ici_context_parallelism=2), _cfg(), is_offline=False)
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      train_distill.validate_config(_cfg(), _cfg(ici_context_parallelism=2), is_offline=False)
+    # Offline mode skips teacher validation.
+    train_distill.validate_config(_cfg(), _cfg(ici_context_parallelism=2), is_offline=True)
+    # Post-mesh auto CP (-1) > 1 raises.
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      train_distill.validate_config(
+          _cfg(ici_context_parallelism=-1),
+          _cfg(),
+          is_offline=True,
+          mesh=SimpleNamespace(shape={"context": 2}),
+      )
+
+    # End-to-end: train_distill fails after mesh setup before loading any models.
+    student_cfg = _cfg(
+        vocab_size=32000,
+        enable_goodput_recording=False,
+        monitor_goodput=False,
+        mesh_axes=("context",),
+        ici_context_parallelism=2,
+    )
+    teacher_cfg = _cfg(vocab_size=32000)
+    fake_devices = [mock.Mock(), mock.Mock()]
+    with (
+        mock.patch.object(train_distill.jax, "devices", return_value=fake_devices),
+        mock.patch.object(train_distill.maxtext_utils, "create_device_mesh", return_value=np.array(fake_devices)),
+        mock.patch.object(train_distill.jax.sharding, "Mesh", return_value=SimpleNamespace(shape={"context": 2})),
+        mock.patch.object(train_distill, "get_maxtext_model") as mock_get_model,
+    ):
+      with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+        train_distill.train_distill(student_cfg, teacher_cfg, is_offline=False)
+      mock_get_model.assert_not_called()
+
+  def test_build_training_components_uses_2d_input_data_sharding(self):
+    config_path = get_test_config_path("post_train/distillation.yml")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      student_cfg = pyconfig.initialize(
+          [
+              "train_distill.py",
+              config_path,
+              f"base_output_directory={tmp_dir}",
+              "run_name=test_sharding",
+              "skip_jax_distributed_system=True",
+              "steps=10",
+          ]
+      )
+      teacher_cfg = pyconfig.initialize(
+          [
+              "train_distill.py",
+              config_path,
+              f"base_output_directory={tmp_dir}",
+              "run_name=test_sharding",
+              "skip_jax_distributed_system=True",
+              "steps=10",
+          ]
+      )
+      if jax.device_count() >= 4:
+        mesh = Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "context"))
+        expected_spec = ("fsdp", "context")
+      else:
+        mesh = Mesh(np.array(jax.devices()[:1]), ("data",))
+        expected_spec = tuple(sharding.get_input_data_sharding(student_cfg, mesh).spec)
+
+      with mock.patch.object(train_distill.tokenizer, "build_tokenizer", return_value=mock.Mock(pad_id=0)):
+        _, _, train_cfg = train_distill.build_training_components(student_cfg, teacher_cfg, mesh=mesh)
+      self.assertEqual(train_cfg.data_sharding_axis, expected_spec)
 
 
 if __name__ == "__main__":

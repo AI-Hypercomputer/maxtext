@@ -305,5 +305,28 @@ class RLDerivedStepsConfigTest(absltest.TestCase):
     self.assertEqual(types.RLConfig(**dumped).train_steps, 50)
 
 
+class RLContextParallelConfigTest(absltest.TestCase):
+  """Tests for load-balanced context parallelism validation on `RLConfig`."""
+
+  def test_rejects_load_balanced_cp_when_cp_gt_one(self):
+    for flag in ("ici_context_parallelism=2", "dcn_context_parallelism=2"):
+      with self.subTest(flag=flag):
+        with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "context_parallel_load_balance=False"):
+          _rl_config(flag, run_name="rl_cp_test")
+
+  def test_allows_cp_when_load_balance_disabled(self):
+    cfg = _rl_config("ici_context_parallelism=2", "context_parallel_load_balance=false", run_name="rl_cp_test")
+    self.assertEqual(cfg.ici_context_parallelism, 2)
+    self.assertFalse(cfg.context_parallel_load_balance)
+
+  def test_direct_rl_config_rejects_load_balanced_cp(self):
+    with self.assertRaisesRegex(pydantic.ValidationError, "context_parallel_load_balance=False"):
+      types.RLConfig(
+          model_name="llama2-7b",
+          tokenizer_path="meta-llama/Llama-2-7b",
+          ici_context_parallelism=2,
+      )
+
+
 if __name__ == "__main__":
   absltest.main()

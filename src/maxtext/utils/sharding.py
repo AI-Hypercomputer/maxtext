@@ -16,7 +16,7 @@
 """Utils that are only interesting to MaxText and sharding related."""
 
 import collections
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import contextlib
 import inspect  # for debugging only
 import math
@@ -54,6 +54,22 @@ def get_input_data_sharding(config, mesh, rules=None):
   else:
     data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=rules)
   return data_sharding
+
+
+def get_tunix_data_sharding_axis(config, mesh) -> tuple | None:
+  """Returns the input data sharding spec in the form of Tunix's `TrainingConfig.data_sharding_axis`.
+
+  Tunix re-shards fully addressable batches to `data_sharding_axis`, so it has to match the sharding the MaxText
+  data loader already applied. Returns None when that sharding cannot be resolved from `config` and `mesh`; callers
+  then keep their previous value.
+  """
+  if (
+      mesh is not None
+      and isinstance(getattr(mesh, "shape", None), Mapping)
+      and isinstance(getattr(config, "input_data_sharding_logical_axes", None), (list, tuple))
+  ):
+    return tuple(get_input_data_sharding(config, mesh).spec)
+  return None
 
 
 def get_logical_axis_rules():

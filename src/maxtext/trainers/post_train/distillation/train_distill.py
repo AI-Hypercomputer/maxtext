@@ -59,6 +59,7 @@ from maxtext.optimizers import optimizers
 from maxtext.trainers.post_train.distillation import distillation_utils, lti_utils
 from maxtext.trainers.post_train.hooks import GoodputTrainingHooks
 from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.common.goodput import (
     GoodputEvent,
@@ -70,6 +71,7 @@ from maxtext.common.goodput import (
     record_goodput,
 )
 from maxtext.utils import model_creation_utils
+from maxtext.utils import sharding
 
 # Tunix Imports
 from tunix.sft import peft_trainer
@@ -590,11 +592,19 @@ def get_maxtext_model(config: pyconfig.HyperParameters, mesh: jax.sharding.Mesh)
 # -----------------------------------------------------------------------------
 
 
+def validate_config(student_config, teacher_config=None, is_offline: bool = False, mesh=None) -> None:
+  """Validates configuration parameters for distillation training."""
+  max_utils.check_no_load_balanced_context_parallelism(student_config, "train_distill", mesh=mesh)
+  if not is_offline and teacher_config is not None:
+    max_utils.check_no_load_balanced_context_parallelism(teacher_config, "train_distill (teacher)", mesh=mesh)
+
+
 def build_training_components(
     student_config: pyconfig.HyperParameters,
     teacher_config: pyconfig.HyperParameters,
     is_offline: bool = False,
     offline_data_dir: str | None = None,
+    mesh=None,
 ):
   """Builds and returns the strategy, optimizer, and training config objects.
 
@@ -666,6 +676,10 @@ def build_training_components(
       log_dir=student_config.tensorboard_dir, flush_every_n_steps=student_config.log_period
   )
 
+  data_sharding_axis = sharding.get_tunix_data_sharding_axis(student_config, mesh)
+  if data_sharding_axis is None:
+    data_sharding_axis = tuple(student_config.data_sharding)
+
   train_config = peft_trainer.TrainingConfig(
       max_steps=student_config.steps,
       eval_every_n_steps=student_config.eval_interval,
@@ -674,7 +688,7 @@ def build_training_components(
       checkpoint_root_directory=None,  # Tunix should NOT checkpoint our ModelBundle. MaxTextCheckpointManager handles this.
       checkpointing_options=checkpointing_options,
       gradient_accumulation_steps=student_config.gradient_accumulation_steps,
-      data_sharding_axis=tuple(student_config.data_sharding),
+      data_sharding_axis=data_sharding_axis,
   )
 
   return strategy, optimizer, train_config
@@ -727,6 +741,7 @@ def _train_distill_impl(
     devices = jax.devices()
     devices_array = maxtext_utils.create_device_mesh(student_config, devices)
     mesh = jax.sharding.Mesh(devices_array, student_config.mesh_axes)
+    validate_config(student_config, teacher_config, is_offline=is_offline, mesh=mesh)
 
     # 2. Load Models
     max_logging.log("Applying logical axis rules for model initialization and training...")
@@ -770,7 +785,7 @@ def _train_distill_impl(
     with maybe_record_goodput(goodput_recorder, GoodputEvent.TRAINING_PREPARATION):
       # Build Training Components
       strategy, optimizer, train_config = build_training_components(
-          student_config, teacher_config, is_offline, offline_data_dir
+          student_config, teacher_config, is_offline, offline_data_dir, mesh=mesh
       )
 
       # 3. Initialize Trainer

@@ -91,7 +91,7 @@ from maxtext.integration.vllm.maxtext_vllm_rollout import MaxTextVllmRollout
 from maxtext.trainers.post_train.rl.evaluate_rl import evaluate
 from maxtext.trainers.post_train.rl import utils_rl
 from maxtext.input_pipeline.instruction_data_processing import load_data_template_from_file
-from maxtext.utils import max_logging, max_utils, model_creation_utils
+from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 from maxtext.utils.model_creation_utils import get_rollout_kwargs_for_parallelism
 
 _RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset((DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5))
@@ -711,6 +711,13 @@ def rl_train(argv: Sequence[str], kwargs: dict):
       kwargs,
       config_class=types.RLConfig,
   )
+  if getattr(trainer_config, "context_parallel_load_balance", False) and (
+      getattr(trainer_config, "ici_context_parallelism", 1) != 1
+      or getattr(trainer_config, "dcn_context_parallelism", 1) != 1
+      or getattr(trainer_config, "context_sharding", "context") != "context"
+  ):
+    trainer_mesh = maxtext_utils.get_mesh_from_config(trainer_config, trainer_devices)
+    max_utils.check_no_load_balanced_context_parallelism(trainer_config, "train_rl", mesh=trainer_mesh)
   install_pathways_multihost_profiler_patch(trainer_config.rl.profiler_max_num_hosts)
 
   # Create the ML Diagnostics run before any tunix object: `RLCluster` builds

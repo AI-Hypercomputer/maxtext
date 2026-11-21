@@ -73,6 +73,7 @@ from maxtext.utils import max_logging
 # Placeholder: internal
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from maxtext.utils import sharding
 
 
 class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
@@ -196,11 +197,12 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
     return train_step
 
 
-def get_tunix_config(mt_config):
+def get_tunix_config(mt_config, mesh=None):
   """Gets the Tunix training configurations from the MaxText config.
 
   Args:
     mt_config: MaxText config.
+    mesh: Optional JAX device mesh used to resolve 2D input data sharding.
 
   Returns:
     A Tunix `TrainingConfig` object.
@@ -230,6 +232,10 @@ def get_tunix_config(mt_config):
         enable_continuous_profiling=mt_config.enable_continuous_profiling,
     )
 
+  data_sharding_axis = sharding.get_tunix_data_sharding_axis(mt_config, mesh)
+  if data_sharding_axis is None:
+    data_sharding_axis = tuple(mt_config.data_sharding)
+
   return peft_trainer.TrainingConfig(
       eval_every_n_steps=mt_config.eval_interval,
       max_steps=mt_config.steps,
@@ -240,7 +246,7 @@ def get_tunix_config(mt_config):
       checkpointing_options=checkpointing_options,
       metrics_logging_options=metrics_logging_options,
       profiler_options=profiler_options,
-      data_sharding_axis=tuple(mt_config.data_sharding),
+      data_sharding_axis=data_sharding_axis,
   )
 
 
@@ -346,10 +352,11 @@ def validate_config(config):
 def setup_trainer_state(mt_config, goodput_recorder=None):
   """Set up prerequisites for training loop."""
   validate_config(mt_config)
-  tunix_config = get_tunix_config(mt_config)
 
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
     model, mesh = model_creation_utils.from_pretrained(mt_config)
+
+  tunix_config = get_tunix_config(mt_config, mesh=mesh)
 
   with jax.set_mesh(mesh), logical_axis_rules(mt_config.logical_axis_rules):
     if mt_config.lora.enable_lora:
