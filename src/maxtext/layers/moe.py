@@ -1398,7 +1398,9 @@ def _quantized_ragged_all_to_all(
     x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name: As in `jax.lax.ragged_all_to_all`.
       With `fwd_method` set, rows that receive nothing are 0 whatever `output` holds; `output` gets no cotangent.
     fwd_method: Quantization of the forward wire (`x`): '' or `<scaling>[@<format>]` (see `_parse_a2a_quant_method`);
-      the format defaults to E4M3.
+      the format defaults to E4M3. With 'fixed,<bound>' the backward passes the cotangent through unmasked (a plain
+      straight-through estimator): unlike qwix's `clip_gradient_to_calibration`, it does not zero the gradient of
+      forward-saturated elements.
     bwd_method: Quantization of the backward wire (the cotangent of the result, sent back along the reversed routes):
       '' or `<scaling>[@<format>]` as for `fwd_method`; the format defaults to E5M2. With 'fixed,<bound>' the
       cotangent is clipped to [-bound, bound] (values beyond it saturate) and sent with the static scale bound / qmax.

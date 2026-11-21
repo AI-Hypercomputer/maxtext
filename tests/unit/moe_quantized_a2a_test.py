@@ -41,6 +41,7 @@ from maxtext.configs import pyconfig
 from maxtext.layers import moe
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
+from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 
@@ -179,6 +180,21 @@ class QuantizedA2aConfigTest(parameterized.TestCase):
   def test_junk_methods_rejected(self, knob, method):
     with self.assertRaisesRegex(ValueError, re.escape(f"Unsupported {knob}={method!r} on the EP ragged all-to-all")):
       _config(f"qa2a_junk_{knob}", base_emb_dim=512, **{knob: method})
+
+  @parameterized.named_parameters(
+      ("ragged_combine_bwd", {"moe_quantize_combine_bwd_method": "fixed,1.0"}, False, 2, True),
+      ("ring_combine_bwd", {"moe_quantize_combine_bwd_method": "fixed,1.0"}, True, 2, True),
+      ("ragged_dispatch_bwd", {"moe_quantize_dispatch_bwd_method": "fixed,1.0@e5m2"}, False, 2, True),
+      ("no_gradient_accumulation", {"moe_quantize_dispatch_bwd_method": "fixed,1.0"}, False, 1, False),
+      ("fixed_forward_only", {_LEG1: "fixed,1.0"}, False, 2, False),
+      ("rowwise_backward", {"moe_quantize_combine_bwd_method": "rowwise"}, False, 2, False),
+  )
+  def test_fixed_backward_warns_with_manual_gradient_accumulation(self, knobs, ring, ga_steps, warns):
+    """Manual gradient accumulation differentiates the unnormalized xent_sum: backward fixed bounds may saturate."""
+    with mock.patch.object(max_logging, "warning") as warning:
+      _config(f"qa2a_ga_{ga_steps}", use_ring_of_experts=ring, gradient_accumulation_steps=ga_steps, **knobs)
+    ga_warnings = [call for call in warning.call_args_list if "xent_sum" in str(call.args[0])]
+    self.assertEqual(bool(ga_warnings), warns, warning.call_args_list)
 
   @parameterized.parameters(*_A2A_KNOBS)
   def test_new_knob_rejected_with_ring_of_experts(self, knob):

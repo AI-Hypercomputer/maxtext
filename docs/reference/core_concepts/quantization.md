@@ -295,7 +295,7 @@ All four flags default to `""` (unquantized BF16):
 Each flag accepts `"<scaling>[@e4m3|@e5m2]"`:
 
 - `rowwise`: Dynamic per-token f32 `absmax` scaling. Sends two `ragged_all_to_all` collectives on the same routing offsets—FP8 values (`[rows, H]`) and per-token f32 scales (`[rows]`).
-- `fixed,<bound>`: Static scaling (`scale = bound / qmax`, clipping inputs to `[-bound, bound]`). Sends a single FP8 `ragged_all_to_all` (`[rows, H]`) with no dynamic reduction and no scale collective. Bounds must be positive finite floats tuned per leg.
+- `fixed,<bound>`: Static scaling (`scale = bound / qmax`, clipping inputs to `[-bound, bound]`). Sends a single FP8 `ragged_all_to_all` (`[rows, H]`) with no dynamic reduction and no scale collective. Bounds must be positive finite floats tuned per leg. Backward-leg bounds (legs 3 and 4, and the Ring of Experts combine backward) are absolute cotangent magnitudes that depend on loss normalization (global batch size, sequence length and `gradient_accumulation_steps`; manual gradient accumulation differentiates the unnormalized `xent_sum`, scaling cotangents by the token count per step), so retune them when those change. With E5M2 (about 30 binades of normal range), generous backward bounds lose almost no precision while avoiding silent clipping.
 
 ### Requirements
 

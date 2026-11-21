@@ -6162,6 +6162,20 @@ class MaxTextConfig(
             f"Unsupported moe_quantize_combine_bwd_method: '{method}' with use_ring_of_experts=True. "
             f"Supported options: {A2A_QUANT_SUPPORTED}."
         ) from e
+      self._warn_fixed_bwd_with_manual_gradient_accumulation({"moe_quantize_combine_bwd_method": method})
+
+  def _warn_fixed_bwd_with_manual_gradient_accumulation(self, bwd_knobs: dict[str, str]):
+    """Warns when a backward-leg knob uses a static 'fixed' scale under manual gradient accumulation."""
+    if self.gradient_accumulation_steps <= 1 or self.use_tunix_gradient_accumulation:
+      return
+    fixed = [f"{k}={v!r}" for k, v in bwd_knobs.items() if v and parse_a2a_quant_method(v)[0] == "fixed"]
+    if fixed:
+      max_logging.warning(
+          f"{', '.join(fixed)}: with manual gradient accumulation (gradient_accumulation_steps="
+          f"{self.gradient_accumulation_steps} > 1, use_tunix_gradient_accumulation=False) loss_fn differentiates the"
+          " unnormalized xent_sum, so the backward cotangents scale up by the token count per step (~total_weights)"
+          " and a tight 'fixed,<bound>' silently saturates the gradients. Scale the bound accordingly or use 'rowwise'."
+      )
 
   @staticmethod
   def _validate_a2a_quant_method(knob: str, method: str):
@@ -6217,6 +6231,13 @@ class MaxTextConfig(
       max_logging.log(
           f"WARNING: {', '.join(a2a_knobs)} has no effect with expert parallelism 1 (no EP ragged all-to-all)."
       )
+    self._warn_fixed_bwd_with_manual_gradient_accumulation(
+        {
+            k: v
+            for k, v in a2a_knobs.items()
+            if k in ("moe_quantize_combine_bwd_method", "moe_quantize_dispatch_bwd_method")
+        }
+    )
 
   @staticmethod
   def _apply_dense_grad_reduce(cfg: Any, *, require_rule: bool) -> None:
