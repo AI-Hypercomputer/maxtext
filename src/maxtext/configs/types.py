@@ -4589,6 +4589,20 @@ class VLLM(BaseModel):
           "the legacy transfer_state_directly / transfer_state_with_mappings paths."
       ),
   )
+  use_weight_planner: bool = Field(
+      False,
+      description=(
+          "Route trainer->rollout weight sync through the consolidated weight planner "
+          "(maxtext.weights). Takes precedence over use_weight_converter."
+      ),
+  )
+  weight_sync_manifest_check: bool = Field(
+      False,
+      description=(
+          "Before staging a weight sync, compare the converted weights' names, shapes and dtypes "
+          "with the state the rollout published, and raise on any difference."
+      ),
+  )
   use_raiden_ffi: Optional[bool] = Field(
       None,
       description="Use Raiden FFI transport for weight sync.",
@@ -5362,6 +5376,21 @@ def parse_a2a_quant_method(method: str) -> tuple[str, float | None, str | None]:
   if name != "rowwise" or (sep and fmt not in A2A_QUANT_FORMATS):
     raise ValueError(f"Unsupported method {method!r}. Supported: {A2A_QUANT_SUPPORTED}.")
   return name, None, fmt or None
+
+
+def _validate_weight_planner(config: Any) -> None:
+  """Rejects `use_weight_planner=True` with the rollout setups the planner does not cover yet."""
+  if not config.use_weight_planner:
+    return
+  unsupported = {
+      "rollout_backend != 'maxtext'": config.rollout_backend != "maxtext",
+      "fp8_moe": config.fp8_moe,
+      "rollout_fp8_moe": config.rollout_fp8_moe,
+      "weight_dtype='float8_e4m3fn'": config.weight_dtype == DType.FLOAT8_E4M3FN,
+  }
+  rejected = [name for name, is_set in unsupported.items() if is_set]
+  if rejected:
+    raise ValueError(f"use_weight_planner=True does not yet support: {', '.join(rejected)}.")
 
 
 # ----------------------------------------------------------------------------
@@ -7592,6 +7621,7 @@ class MaxTextConfig(
         )
       if self.block_diffusion_canvas_policy == "seed_and_mask" and self.causal_block_size < 2:
         raise ValueError("`block_diffusion_canvas_policy='seed_and_mask'` requires `causal_block_size >= 2`.")
+    _validate_weight_planner(self)
     if self.quantize_kvcache and not self.kv_quant_axis:
       raise ValueError("`kv_quant_axis` cannot be empty when quantize_kvcache is True.")
     if self.mtp_reuse_input_embedding and self.use_multimodal:
@@ -9139,6 +9169,7 @@ class RLConfig(
     ]:
       if val != -1 and val <= 0:
         raise ValueError(f"`{name}` must be -1 or > 0, got {val}.")
+    _validate_weight_planner(self)
 
     # Dynamically inject model dimensions.
     emb_scale, num_head_scale, mlp_dim_scale, layer_scale = get_individual_scales(self.global_parameter_scale)
