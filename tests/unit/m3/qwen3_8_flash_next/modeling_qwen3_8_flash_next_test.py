@@ -25,6 +25,7 @@ Sections:
   * MTP draft block and integrated loss
 """
 
+import inspect
 import types
 from typing import Any
 import unittest
@@ -49,6 +50,17 @@ try:
   import torch  # pylint: disable=g-import-not-at-top
   from transformers.models.qwen4_exp import configuration_qwen4_exp  # pylint: disable=g-import-not-at-top
   from transformers.models.qwen4_exp import modeling_qwen4_exp  # pylint: disable=g-import-not-at-top
+
+  # Force pure-PyTorch reference implementations so CPU/TPU environments with
+  # `fla` or `causal_conv1d` installed do not dispatch into Triton/CUDA kernels.
+  for _fn_name in (
+      "torch_chunk_gated_delta_rule",
+      "torch_recurrent_gated_delta_rule",
+      "causal_conv1d_fn",
+      "causal_conv1d_update",
+  ):
+    if hasattr(modeling_qwen4_exp, _fn_name):
+      setattr(modeling_qwen4_exp, _fn_name, inspect.unwrap(getattr(modeling_qwen4_exp, _fn_name)))
 
   _HAS_QWEN4_EXP = True
 except ImportError:
