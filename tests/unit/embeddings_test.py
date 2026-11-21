@@ -199,6 +199,53 @@ class LLaMARotaryEmbeddingTest(unittest.TestCase):
     expected = jnp.array([[[[1.0, 1.0, 1.0, 1.0]], [[-0.300781, 1.38281, 0.988281, 1.00781]]]])
     np.testing.assert_allclose(outputs, expected, atol=1e-5)
 
+  def test_llama4_scout_rope_scaling_parameters(self):
+    # pylint: disable=import-outside-toplevel
+    import math
+    from maxtext.layers import attentions
+
+    head_dim = 128
+    theta = 500000.0
+    scout_cfg = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        model_name="llama4-17b-16e",
+        per_device_batch_size=1.0,
+        run_name="test",
+        enable_checkpointing=False,
+        max_target_length=8,
+    )
+    self.assertEqual(scout_cfg.rope_scaling_factor, 16.0)
+    self.assertEqual(scout_cfg.rope_low_freq_factor, 1.0)
+    self.assertEqual(scout_cfg.rope_high_freq_factor, 1.0)
+
+    attn = attentions.Attention(
+        config=scout_cfg,
+        num_query_heads=1,
+        num_kv_heads=1,
+        head_dim=head_dim,
+        max_target_length=8,
+        mesh=self.mesh,
+        attention_kernel="dot_product",
+        inputs_q_shape=(1, 8, head_dim),
+        inputs_kv_shape=(1, 8, head_dim),
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        rngs=self.rngs,
+    )
+    rotary = attn.rotary_embedding
+    self.assertIsInstance(rotary, embeddings.LLaMARotaryEmbedding)
+    self.assertTrue(rotary.use_scale)
+    self.assertEqual(rotary.scale_factor, 16.0)
+    self.assertEqual(rotary.low_freq_factor, 1.0)
+    self.assertEqual(rotary.high_freq_factor, 1.0)
+
+    freqs = 1.0 / (theta ** (np.arange(0, head_dim, 2, dtype=np.float32) / head_dim))
+    wavelen = 2.0 * math.pi / freqs
+    expected_inv_freq = np.where(wavelen > 8192.0, freqs / 16.0, freqs).astype(np.float32)
+    expected_timescale = np.repeat(1.0 / expected_inv_freq, 2)
+    got_timescale = np.asarray(rotary.timescale, dtype=np.float32)[0, 0, 0]
+    np.testing.assert_allclose(got_timescale, expected_timescale, rtol=1e-5, atol=1e-5)
+
 
 class YarnRotaryEmbeddingTest(unittest.TestCase):
 
