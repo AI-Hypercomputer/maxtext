@@ -961,6 +961,67 @@ class ParamMappingTest(unittest.TestCase):
         np.testing.assert_array_equal(out[f"b{b}_l{l}"], value_of(b, l))
 
   # Specific tests with assertions
+  def test_deepseek4_mhc_reshaped_hooks(self):
+    config = {"num_hidden_layers": 1, "n_routed_experts": 2}
+    maxtext_config = mock.Mock()
+    maxtext_config.mtp_num_layers = 0
+    maxtext_config.mhc_split_axis_contraction = True
+    prefix = "params-decoder-layers_0-mhc_attention"
+    keys = tuple(f"{prefix}-{name}_alpha" for name in ("pre", "post", "res"))
+    hf_weight = np.arange(24 * 8, dtype=np.float32).reshape(24, 8)
+
+    from_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config)
+    split_weights = (
+        from_hf[keys[0]](hf_weight, (4, 2, 4)),
+        from_hf[keys[1]](hf_weight, (4, 2, 4)),
+        from_hf[keys[2]](hf_weight, (4, 2, 16)),
+    )
+    self.assertEqual([w.shape for w in split_weights], [(4, 2, 4), (4, 2, 4), (4, 2, 16)])
+
+    to_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, saving_to_hf=True)
+    np.testing.assert_array_equal(to_hf[keys](split_weights, hf_weight.shape), hf_weight)
+
+  def test_deepseek4_mhc_flat_alpha_hooks_round_trip(self):
+    """Without the split flag the alphas stay flat (k * dim, n) and round-trip unchanged."""
+    config = {"num_hidden_layers": 1, "n_routed_experts": 2}
+    maxtext_config = mock.Mock()
+    maxtext_config.mtp_num_layers = 0
+    maxtext_config.mhc_split_axis_contraction = False
+    prefix = "params-decoder-layers_0-mhc_attention"
+    keys = tuple(f"{prefix}-{name}_alpha" for name in ("pre", "post", "res"))
+    hf_weight = np.arange(24 * 8, dtype=np.float32).reshape(24, 8)
+
+    from_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config)
+    flat_weights = (
+        from_hf[keys[0]](hf_weight, (8, 4)),
+        from_hf[keys[1]](hf_weight, (8, 4)),
+        from_hf[keys[2]](hf_weight, (8, 16)),
+    )
+    self.assertEqual([w.shape for w in flat_weights], [(8, 4), (8, 4), (8, 16)])
+
+    to_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, saving_to_hf=True)
+    np.testing.assert_array_equal(to_hf[keys](flat_weights, hf_weight.shape), hf_weight)
+
+  def test_deepseek4_mhc_beta_hooks_keep_layout_with_split(self):
+    """The split flag only re-lays out the alphas; beta (k, k, k*k) still splits and reshapes as before."""
+    config = {"num_hidden_layers": 1, "n_routed_experts": 2}
+    maxtext_config = mock.Mock()
+    maxtext_config.mtp_num_layers = 0
+    maxtext_config.mhc_split_axis_contraction = True
+    prefix = "params-decoder-layers_0-mhc_attention"
+    keys = tuple(f"{prefix}-{name}_beta" for name in ("pre", "post", "res"))
+    k = 4
+    hf_beta = np.arange(k + k + k * k, dtype=np.float32)
+
+    from_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config)
+    target_shapes = ((k,), (k,), (k, k))
+    betas = tuple(from_hf[key](hf_beta, shape) for key, shape in zip(keys, target_shapes))
+    self.assertEqual([b.shape for b in betas], list(target_shapes))
+    np.testing.assert_array_equal(betas[2], hf_beta[2 * k :].reshape(k, k))
+
+    to_hf = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, saving_to_hf=True)
+    np.testing.assert_array_equal(to_hf[keys](betas, hf_beta.shape), hf_beta)
+
   def test_reshape_kernel_hook(self):
     config = {
         "text_config": {"num_hidden_layers": 2, "hidden_size": 256},
@@ -1150,6 +1211,7 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config.base_num_decoder_layers = 4
     maxtext_config.first_num_hash_layers = 2
     maxtext_config.mtp_num_layers = 0
+    maxtext_config.mhc_split_axis_contraction = False
     hooks_to_mt = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
         config, maxtext_config, scan_layers=False, saving_to_hf=False
     )
@@ -1177,6 +1239,7 @@ class ParamMappingTest(unittest.TestCase):
     maxtext_config.first_num_hash_layers = 3
     maxtext_config.compress_ratios = [0, 0, 4, 128, 4]
     maxtext_config.mtp_num_layers = 1
+    maxtext_config.mhc_split_axis_contraction = False
     return config, maxtext_config
 
   def test_deepseek_v4_mtp_mapping(self):

@@ -484,7 +484,7 @@ class _MoeLikeNNXModel(nnx.Module):
     self.MoeBlock_0 = _MoeSubModule()
 
 
-class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
+class TestGetMuonWeightDimensionNumbersNNX(parameterized.TestCase):
   """Covers the NNX branch of get_muon_weight_dimension_numbers (isinstance(model, nnx.Module))."""
 
   def setUp(self):
@@ -520,6 +520,37 @@ class TestGetMuonWeightDimensionNumbersNNX(unittest.TestCase):
     result_false = muon_utils.get_muon_weight_dimension_numbers(self.model, config=cfg_false)
     self.assertIsNone(result_false["MoeBlock_0"]["gate"]["kernel"])
     self.assertEqual(result_false["MoeBlock_0"]["wi_0"], mdn((-2,), (-1,)))
+
+  @parameterized.named_parameters(
+      {"testcase_name": "optax_muon", "sharded": False, "with_config": True},
+      {"testcase_name": "maxtext_muon", "sharded": True, "with_config": True},
+      {"testcase_name": "optax_muon_no_config", "sharded": False, "with_config": False},
+      {"testcase_name": "maxtext_muon_no_config", "sharded": True, "with_config": False},
+  )
+  def test_split_mhc_alphas_reduce_rate_and_embed_axes(self, sharded, with_config):
+    model = nnx.Module()
+    model.mhc_attention = nnx.Module()
+    model.mhc_attention.pre_alpha = nnx.Param(jnp.ones((4, 8, 4)))
+    model.mhc_mlp = nnx.Module()
+    model.mhc_mlp.res_alpha = _scanned_param((4, 2, 8, 16), 1, (None, "layers", "activation_embed", None))
+    # The flat [k*d, n] layout keeps the standard 2D rule.
+    model.mhc_mlp.post_alpha = nnx.Param(jnp.ones((32, 4)))
+    config = mock.Mock(mhc_split_axis_contraction=True, muon_include_routers=True, logical_axis_rules=())
+
+    if sharded:
+      mesh = jax.sharding.Mesh(jax.devices()[:1], ("data",))
+      result = maxtext_muon_utils.get_maxtext_muon_weight_dimension_numbers(
+          model, config if with_config else None, mesh=mesh
+      )
+    else:
+      result = muon_utils.get_muon_weight_dimension_numbers(model, config if with_config else None)
+
+    def axes(dim):
+      return dim.reduction_axis, dim.output_axis
+
+    self.assertEqual(axes(result["mhc_attention"]["pre_alpha"]), ((0, 1), (-1,)))
+    self.assertEqual(axes(result["mhc_mlp"]["res_alpha"]), ((0, 2), (-1,)))
+    self.assertEqual(axes(result["mhc_mlp"]["post_alpha"]), ((0,), (-1,)))
 
   def test_nnx_verbose_path_executes_print_debug(self):
     """verbose=True should also execute _print_structure_debug without raising."""
@@ -748,10 +779,11 @@ class TestScannedNNXModel(unittest.TestCase):
     self.assertEqual(result["layers"]["self_attention"]["out"], mdn((1, -2), (-1,)))
 
 
-def _dimension_numbers_by_path(model_name, param_scan_axis, sharded=False):
+def _dimension_numbers_by_path(model_name, param_scan_axis, sharded=False, extra_args=()):
   """Returns {path: (shape, scan axes, Muon dimension numbers)} for every parameter of `model_name`.
 
   `sharded` selects MaxText's Muon (`ShardedMuonDimensionNumbers`) over Optax's (`MuonDimensionNumbers`).
+  `extra_args` are further `key=value` config overrides.
   """
   config = pyconfig.initialize(
       [
@@ -764,6 +796,7 @@ def _dimension_numbers_by_path(model_name, param_scan_axis, sharded=False):
           # A layer count unlike any feature dim, so that indexing a layer axis cannot pass for a feature axis.
           "override_model_config=True",
           "base_num_decoder_layers=20",
+          *extra_args,
       ]
   )
   mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
@@ -816,6 +849,32 @@ class TestScannedLayoutDimensionNumbers(parameterized.TestCase):
         remapped += (dim.reduction_axis, dim.output_axis) != (reference_dim.reduction_axis, reference_dim.output_axis)
     # The scanned parameters' dimension numbers do move with the layer axis.
     self.assertGreater(remapped, 0)
+
+
+class TestOptaxAndMaxTextMuonAgree(parameterized.TestCase):
+  """Optax's and MaxText's Muon contract the same axes of every parameter."""
+
+  @parameterized.product(split_axis_contraction=(False, True), param_scan_axis=(0, 1))
+  def test_deepseek4_mhc_dimension_numbers_match(self, split_axis_contraction, param_scan_axis):
+    extra_args = (f"mhc_split_axis_contraction={split_axis_contraction}",)
+    optax_dims = _dimension_numbers_by_path("deepseek4-tiny", param_scan_axis, sharded=False, extra_args=extra_args)
+    maxtext_dims = _dimension_numbers_by_path("deepseek4-tiny", param_scan_axis, sharded=True, extra_args=extra_args)
+    self.assertEqual(optax_dims.keys(), maxtext_dims.keys())
+
+    alphas = 0
+    for path, (shape, scan_axes, dim) in optax_dims.items():
+      maxtext_dim = maxtext_dims[path][2]
+      with self.subTest(path=path):
+        self.assertEqual(dim is None, maxtext_dim is None)
+        if dim is None:
+          continue
+        self.assertEqual((dim.reduction_axis, dim.output_axis), (maxtext_dim.reduction_axis, maxtext_dim.output_axis))
+        if any(name in path for name in ("pre_alpha", "post_alpha", "res_alpha")):
+          alphas += 1
+          # The alphas always contract the whole k*d input, flat or split.
+          n_features = len(shape) - len(scan_axes)
+          self.assertLen(dim.reduction_axis, n_features - 1)
+    self.assertGreater(alphas, 0)
 
 
 if __name__ == "__main__":
