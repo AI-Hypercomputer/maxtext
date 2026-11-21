@@ -423,6 +423,7 @@ moe_packed_routing_sort: false # pack (expert_id << 20) | slot_idx into a single
 use_fused_qkv_kernel: false # fuse the QKV projection + per-head QK RMSNorm + RoPE + Splash layout in a Pallas kernel (self-attention with QK RMSNorm and standard RoPE, e.g. Qwen3).
 use_fused_out_kernel: false # use custom-VJP FSDP Attention out projection with local absmax bwd and early dw_o reduce-scatter.
 defer_norm_grad_allreduce: false # defer per-layer RMSNorm and QK-norm scale gradient all-reduces until after the decoder scan loop (scanned qwen3 / qwen3_moe decoder layers; no-op with a warning elsewhere).
+moe_unsliced_prefused_wi: false # when true (with prefuse_moe_weights=true and sparse_matmul=true), pass the fused wi [E, emb, 2*mlp] across shard_map as a single operand (w1_kernel=None) instead of slicing into w0/w1 and re-concatenating inside gmm_up. requires tensor parallelism = 1.
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_unsort_spread_masked_indices: false # bit-identical: masked slots of the count-index unsort gather read distinct entries, not entry 0
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
