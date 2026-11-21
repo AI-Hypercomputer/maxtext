@@ -4,11 +4,18 @@ This guide covers Phase 2 of the MaxText model bring-up workflow: implementing l
 
 ## 1. Layer Implementation Strategy
 
-- **Maximize Architectural Reuse**: Before writing JAX code from scratch, examine what layers already exist in MaxText that can be reused or configured to form the target layer. For example, inspect `src/maxtext/layers/attentions.py` to see if attention block mechanisms (MHA, GQA, RoPE) can be re-used or adapted.
+- **Maximize Architectural Reuse**: Before writing JAX code from scratch, examine what layers already exist in MaxText that can be reused or configured to form the target layer. For example, inspect `src/maxtext/layers/attentions.py` to see if attention block mechanisms (MHA, GQA, RoPE) can be reused or adapted.
 - Review existing layers in `src/maxtext/layers/` (e.g. `decoders.py`, `attentions.py`, `moe.py`).
 - Inherit or extend standard MaxText structures (like scanned layers blocks) whenever possible.
 - If a new model architecture introduces new layers, implement them in JAX. Maintain Flax styling where layer parameters are managed in a PyTree.
 - **Autoregressive Generation Support**: Ensure custom decoder and attention layers support autoregressive generation (`decode=True` in Flax/linen), including KV cache management, position index handling, and causal attention masks during single-step token generation.
+- **Static Numerics, Masking & Scale Audit**: Run `check_jax_numerics_and_scale.py` on your new layer `.py` and model `.yml` files to catch post-`exp` masking NaNs, `bfloat16` router/RoPE precision drops, missing `decoder_segment_ids != 0` masks, 3D expert initializer fan-in bugs, and full-scale production tensor OOMs:
+  ```bash
+  python3 .agents/skills/model-bringup/scripts/check_jax_numerics_and_scale.py \
+    --hf-dir /dev/shm/hf_mini/{model_name}_{N}layers \
+    src/maxtext/configs/models/{model_name}.yml \
+    src/maxtext/layers/{new_layer_file}.py
+  ```
 
 > [!IMPORTANT]
 > **Direct TPU VM Development**:
@@ -34,75 +41,85 @@ If the model is multimodal (e.g., VLM or ALM) and requires specific preprocessin
 
 ## 2. Write Layer-Wise Unit Tests
 Write layer-wise tests in a new file under `tests/unit/{model_name}_vs_reference_test.py`.
-For each class of layers, define a test that compares the JAX output directly to PyTorch.
+For each class of layers, define a test that compares the JAX output and per-leaf parameter gradients directly to PyTorch (or against SHA-256-pinned `.npz` goldens captured via `scripts/capture_golden.py`).
 
 > [!TIP]
-> **Testing Reference**:
-> Refer to existing reference-parity tests such as `tests/unit/qwen3_next_vs_reference_test.py` or `tests/unit/hy4_vs_reference_test.py` as codebase references, and see [mini_verification.md](mini_verification.md) for broader mini-model-verification checks.
+> **Testing Reference & Parity Helpers**:
+> Refer to existing reference-parity tests such as `tests/unit/qwen3_next_vs_reference_test.py` or `tests/unit/hy4_vs_reference_test.py` as codebase references, use `.agents/skills/model-bringup/scripts/layer_parity.py` (`check_parity`, `negative_control_fires`, `reference_noise_floor`) + `scripts/negctl.py` (`perturb_one_leaf` within `REL_NORM_BAND = (5e-3, 2e-2)`), and see [mini_verification.md](mini_verification.md) for broader mini-model-verification checks.
 
 ### Unit Test Best Practices:
 
-1. **Use Mini-Layer Dimensions**: Use small parameters to make tests fast and runnable on CPU:
-   - `batch_size = 2`, `seq_len = 4`, `hidden_dim = 128`, `num_heads = 4`.
-2. **Generate Fixed Random Inputs**: Share the same random input tensors between PyTorch and JAX:
+1. **Torch-Free CI Compatibility**: Never put an unguarded top-level `import torch` in `tests/unit/*_test.py`. Compute `HAS_TORCH = importlib.util.find_spec("torch") is not None` and decorate only PyTorch-dependent test methods with `@unittest.skipUnless(HAS_TORCH, "Requires PyTorch")` so torch-free CPU CI suites collect and run all pure-JAX/golden tests.
+2. **Use Mini-Layer Dimensions**: Use small parameters to make tests fast and runnable on CPU:
+   - `batch_size = 2`, `seq_len = 4`, `hidden_dim = 128`, `num_heads = 4` (with `2 * intermediate_size != hidden_size` to avoid square-matrix transpose blind spots).
+3. **Generate Fixed Random Inputs**: Share the same random input tensors between PyTorch and JAX:
    - Create inputs using `numpy` or standard seed, then cast to PyTorch `torch.Tensor` and JAX `jnp.ndarray`.
-3. **Explicitly Copy PyTorch Weights to Flax PyTree**:
-   - Retrieve weights from the PyTorch model layer.
-   - Convert them using `.detach().numpy()`.
+4. **Explicitly Copy PyTorch Weights to Flax PyTree & Run Negative Controls**:
+   - Retrieve weights from the PyTorch model layer and convert them using `.detach().numpy()`.
    - Remember to **TRANSPOSE** linear weights! PyTorch shape is `(out_features, in_features)`, JAX/Flax shape is `(in_features, out_features)`.
-   - Map them exactly to your Flax model parameter dictionary.
+   - Verify both forward outputs and all-leaf gradients (`layer_parity.check_parity`), then perturb one candidate weight leaf via `negctl.perturb_one_leaf` (`layer_parity.negative_control_fires`) and assert the parity check fails.
 
 ### Concrete Unit Test Template:
 
 ```python
+import importlib.util
+import unittest
 import jax
 import jax.numpy as jnp
 import numpy as np
-import torch
 from maxtext.layers import decoders as maxtext_decoders
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+
 
 def to_jax(pt_tensor):
   return jnp.array(pt_tensor.detach().numpy())
 
-def test_layer_correctness():
-  # 1. Setup dimensions
-  batch, seq, hidden_dim = 2, 4, 128
-  
-  # 2. Initialize PyTorch Reference Layer
-  pt_layer = PyTorchReferenceLayer(hidden_dim)
-  
-  # 3. Initialize MaxText (Flax/JAX) Layer
-  jax_layer = maxtext_decoders.NewJaxLayer(hidden_dim)
-  
-  # 4. Generate fixed random inputs
-  np_input = np.random.randn(batch, seq, hidden_dim).astype(np.float32)
-  pt_input = torch.tensor(np_input)
-  jax_input = jnp.array(np_input)
-  
-  # 5. Run PyTorch forward pass
-  pt_output = pt_layer(pt_input)
-  
-  # 6. Initialize JAX variables and replace weights
-  init_rng = jax.random.PRNGKey(0)
-  variables = jax_layer.init(init_rng, jax_input)
-  params = variables["params"]
-  
-  # WEIGHT COPYING & TRANSPOSITION GOTCHA:
-  # PyTorch weights (out_features, in_features) must be transposed to JAX (in_features, out_features)
-  params["query"]["kernel"] = to_jax(pt_layer.q_proj.weight).transpose()
-  params["out_proj"]["kernel"] = to_jax(pt_layer.out_proj.weight).transpose()
-  
-  # 7. Run JAX forward pass
-  jax_output = jax_layer.apply({"params": params}, jax_input)
-  
-  # 8. Compare outputs using allclose
-  np.testing.assert_allclose(
-      to_jax(pt_output),
-      jax_output,
-      rtol=1e-3,
-      atol=0.05,
-      err_msg="JAX output does not match PyTorch reference!"
-  )
+
+class NewLayerParityTest(unittest.TestCase):
+
+  @unittest.skipUnless(HAS_TORCH, "Requires PyTorch reference")
+  def test_layer_correctness(self):
+    import torch
+
+    # 1. Setup dimensions
+    batch, seq, hidden_dim = 2, 4, 128
+
+    # 2. Initialize PyTorch Reference Layer
+    pt_layer = PyTorchReferenceLayer(hidden_dim)
+
+    # 3. Initialize MaxText (Flax/JAX) Layer
+    jax_layer = maxtext_decoders.NewJaxLayer(hidden_dim)
+
+    # 4. Generate fixed random inputs
+    np_input = np.random.RandomState(0).randn(batch, seq, hidden_dim).astype(np.float32)
+    pt_input = torch.tensor(np_input)
+    jax_input = jnp.array(np_input)
+
+    # 5. Run PyTorch forward pass
+    pt_output = pt_layer(pt_input)
+
+    # 6. Initialize JAX variables and replace weights
+    init_rng = jax.random.PRNGKey(0)
+    variables = jax_layer.init(init_rng, jax_input)
+    params = variables["params"]
+
+    # WEIGHT COPYING & TRANSPOSITION GOTCHA:
+    # PyTorch weights (out_features, in_features) must be transposed to JAX (in_features, out_features)
+    params["query"]["kernel"] = to_jax(pt_layer.q_proj.weight).transpose()
+    params["out_proj"]["kernel"] = to_jax(pt_layer.out_proj.weight).transpose()
+
+    # 7. Run JAX forward pass
+    jax_output = jax_layer.apply({"params": params}, jax_input)
+
+    # 8. Compare outputs using allclose
+    np.testing.assert_allclose(
+        to_jax(pt_output),
+        jax_output,
+        rtol=1e-3,
+        atol=0.05,
+        err_msg="JAX output does not match PyTorch reference!",
+    )
 ```
 
 ### 2.1 Multimodal Preprocessing Unit Tests (If applicable)
@@ -128,6 +145,7 @@ class TestModelNamePreprocessing(unittest.TestCase):
         image_path=test_image_path,
     )
 
+  @unittest.skipUnless(HAS_TORCH, "Requires HuggingFace processor with PyTorch")
   def test_preprocess_matches_hf(self):
     # 1. Run MaxText Preprocessor
     mt_outputs = mm_processor.preprocess_mm_data(self.config)
@@ -170,6 +188,6 @@ python3 -m maxtext.inference.decode   src/maxtext/configs/base.yml   model_name=
 ## 5. Handover Document Update
 Update `{model_name}_handover.md` in the MaxText root directory:
 - Log layer implementation details (e.g., reuse of attention blocks, custom layer definitions).
-- Record layer unit test results and tolerances (`rtol`, `atol`).
+- Record layer unit test results, negative-control status, and tolerances (`rtol`, `atol`).
 - Document any shape or numerical bugs found and how they were resolved.
 - Set Phase 2 status to `DONE` and Phase 3 to `IN PROGRESS`.

@@ -13,13 +13,25 @@ This guide covers Phase 1 of the MaxText model bring-up workflow: identifying th
 > Use a different temporary directory only if the user explicitly requests it.
 
 To implement JAX layers and do parameter copy verification, you must understand the original PyTorch/HF implementation.
-- **Option A (Python Inspection)**: Use python to dynamically inspect the configuration and module:
+- **Option A (Automated Header & AST Contract Inspection — Recommended First Step)**:
+  Run `inspect_hf_artifacts.py` and `family_diff.py` to inspect `config.json`, safetensors tensor headers (without loading multi-GB weights into RAM), precision casts (`float32` router/RoPE/norm sites), and symbol diffs against the closest existing reference family:
+  ```bash
+  python3 .agents/skills/model-bringup/scripts/inspect_hf_artifacts.py \
+    --hf-dir /dev/shm/hf_cache/{model_name} \
+    --out /tmp/{model_name}_hf_contract.json
+
+  python3 .agents/skills/model-bringup/scripts/family_diff.py \
+    --old path/to/modeling_existing.py --new path/to/modeling_{model_name}.py \
+    --old-config path/to/old_config.json --new-config /dev/shm/hf_cache/{model_name}/config.json \
+    --out /tmp/{model_name}_family_diff.json --md /tmp/{model_name}_family_diff.md
+  ```
+- **Option B (Python Inspection)**: Use python to dynamically inspect the configuration and module:
   ```python
   from transformers import AutoConfig, AutoModelForCausalLM
   config = AutoConfig.from_pretrained("HuggingFace/Model-ID", trust_remote_code=True)
   print(config)
   ```
-- **Option B (Source Code Inspection)**: Search the `huggingface/transformers` repository or cached files to examine the model implementation class (usually in `src/transformers/models/{model_name}/modeling_{model_name}.py`).
+- **Option C (Source Code Inspection)**: Search the `huggingface/transformers` repository or cached files to examine the model implementation class (usually in `src/transformers/models/{model_name}/modeling_{model_name}.py`).
 
 ## 3. Key Architectural Components & Decoder Pattern Analysis
 Examine the model's PyTorch class (typically subclassing `nn.Module`) and identify:
@@ -27,7 +39,7 @@ Examine the model's PyTorch class (typically subclassing `nn.Module`) and identi
 1. **Decoder Layer Pattern (Homogeneous vs Inhomogeneous)**:
    - **Homogeneous**: All decoder layers are identical and repeated (e.g., standard LLaMA/Gemma). Smallest test subset: **1 layer** ($N=1$).
    - **Dense-to-MoE Transition**: Early layers are dense (e.g., layers 0, 1, 2) and subsequent layers are MoE. Smallest test subset: **First $M$ dense layers + 1 MoE layer** (e.g., 3 + 1 = 4 layers).
-   - **Cyclic Attention Patterns**: Alternating attention mechanisms (e.g., local sliding window $\\to$ local $\\to$ global attention; or linear attention with periodic full softmax attention). Smallest test subset: **1 full cycle** (e.g., 4 layers).
+   - **Cyclic Attention Patterns**: Alternating attention mechanisms (e.g., local sliding window $\to$ local $\to$ global attention; or linear attention with periodic full softmax attention). Smallest test subset: **1 full cycle** (e.g., 4 layers).
 
 2. **Layer Normalization style**: RMSNorm vs LayerNorm, custom scaling, epsilon values.
 3. **Attention Block style**:
@@ -43,44 +55,22 @@ Examine the model's PyTorch class (typically subclassing `nn.Module`) and identi
 
 ## 4. Prepare Mini HF Safetensors Subset in `/dev/shm/hf_mini`
 
-To drastically speed up iteration, save memory, and eliminate large checkpoint download/conversion bottlenecks, create a minimal safetensors model containing only the smallest layer subset ($N$ layers):
+To drastically speed up iteration, save memory, and eliminate large checkpoint download/conversion bottlenecks, create a minimal safetensors model containing only the smallest representative layer subset ($N$ layers):
 
 1. Target Directory: `/dev/shm/hf_mini/{model_name}_{N}layers`
-2. Extract and save:
-   - `config.json` with `num_hidden_layers` (or `num_layers`) set to $N$.
+2. Use `scripts/slice_hf_mini.py` to deterministically slice kept layer indices, renumber layer tensors (`0..N-1`), re-index per-layer config lists (such as `layer_types`), copy tokenizer/processor files, and record SHA-256 digests in `mini_manifest.json`:
+   ```bash
+   python3 .agents/skills/model-bringup/scripts/slice_hf_mini.py \
+     --hf-dir /dev/shm/hf_cache/{model_name} \
+     --out-dir /dev/shm/hf_mini/{model_name}_{N}layers \
+     --slice 'num_hidden_layers=\.layers\.(\d+)\.:0,1,2,3'
+   ```
+3. Extract and verify that the output directory contains:
+   - `config.json` with `num_hidden_layers` (or `num_layers`) set to $N$ (pass `--set key=<json>` if `slice_hf_mini.py` flags layer-indexed config fields such as `first_k_dense_replace`).
    - Tokenizer files (`tokenizer.json`, `tokenizer_config.json`, etc.).
-   - Model weights containing ONLY:
-     - Token embeddings (`embed_tokens.weight`)
-     - Layers $0$ through $N-1$ (`layers.0.*` through `layers.{N-1}.*`)
-     - Final normalization (`norm.weight` / `model.norm.weight`)
-     - Output language model head (`lm_head.weight` if untied)
-3. Use real pretrained weights for this mini subset.
-4. This mini HF model will be used in Phase 3 for fast `to_maxtext` conversion and in Phase 4 for [mini-model-verification](mini_verification.md) and multi-token masked prefill.
-
-```python
-# Quick snippet to slice HF model to mini safetensors subset
-import os
-from safetensors.torch import load_file, save_file
-from transformers import AutoConfig, AutoTokenizer
-
-model_id = "{hf_model_id}"
-model_name = model_id.rsplit("/", 1)[-1]
-N = 1  # Adjust to the minimal representative layer subset identified above.
-out_dir = f"/dev/shm/hf_mini/{model_name}_{N}layers"
-os.makedirs(out_dir, exist_ok=True)
-
-# 1. Save modified config
-config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
-config.num_hidden_layers = N  # minimal representative subset
-config.save_pretrained(out_dir)
-
-# 2. Save tokenizer
-tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=True)
-tokenizer.save_pretrained(out_dir)
-
-# 3. Slice and save safetensors weights (layers 0..N-1, embed_tokens, norm, lm_head)
-# Save sliced state_dict to out_dir/model.safetensors
-```
+   - `model.safetensors` containing ONLY token embeddings, renumbered layers `0..N-1`, final normalization, and `lm_head.weight` (if untied), plus `mini_manifest.json`.
+4. Use real pretrained weights for this mini subset.
+5. This mini HF model will be used in Phase 3 for fast `to_maxtext` conversion and in Phase 4 for [mini-model-verification](mini_verification.md) and multi-token masked prefill.
 
 ---
 
@@ -88,5 +78,5 @@ tokenizer.save_pretrained(out_dir)
 
 At the end of Phase 1, create and populate `{model_name}_handover.md` in the MaxText root directory:
 - Document all HF architectural parameters, epsilon, theta, dimensions, and decoder pattern.
-- Note the chosen minimal layer count ($N$) and mini safetensors directory path.
+- Note the chosen minimal layer count ($N$), `slice_hf_mini.py` command, and mini safetensors directory path.
 - Mark Phase 1 as `DONE` and Phase 2 as `IN PROGRESS`.
