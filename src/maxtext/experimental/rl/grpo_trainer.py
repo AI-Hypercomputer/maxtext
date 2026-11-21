@@ -778,6 +778,7 @@ def train_loop(config, config_inference, recorder, state=None):
   generation_thread.start()
 
   _job_completed_gracefully = False
+  hlo_uploaded = False
   try:
     last_step_completion = datetime.datetime.now()
     for step in np.arange(start_step, config.steps):
@@ -833,6 +834,7 @@ def train_loop(config, config_inference, recorder, state=None):
             delete_local_after=config.dump_hlo_delete_local_after,
             all_host_upload=config.dump_hlo_upload_all,
         )
+        hlo_uploaded = True
 
       if config.eval_interval > 0 and step > start_step and (step + 1) % config.eval_interval == 0:
         assert eval_data_iterator
@@ -885,6 +887,8 @@ def train_loop(config, config_inference, recorder, state=None):
     generation_thread.join(timeout=60.0)  # Increased timeout
     if generation_thread.is_alive():
       max_logging.log("Warning: Generation worker did not stop in time after loop completion.")
+    if config.dump_hlo and not hlo_uploaded:
+      gcs_utils.upload_hlo_dump(config)
 
   return state
 
