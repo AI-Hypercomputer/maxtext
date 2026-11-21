@@ -1,0 +1,105 @@
+{
+  "model_name": "deepseek4.1-flash",
+  "forward_logit_checker": {
+    "short_text_max_seq_len": 16,
+    "short_text_prompts": {
+      "description": "Scanned/unscanned short text prompts (seq_len <= 16): max KL <= 2e-7, last-token top-10 10/10",
+      "max_kl": 2e-07,
+      "last_token_top10_matches": 10
+    },
+    "long_text_prompts": {
+      "description": "Scanned/unscanned 462-token text prompt (seq_len > 16): max KL <= 0.0212, mean KL <= 1e-4, last-token top-10 10/10",
+      "max_kl": 0.0212,
+      "mean_kl": 0.0001,
+      "last_token_top10_matches": 10
+    },
+    "multimodal_cases": {
+      "L1": {
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "top1_agreement": 0.99,
+        "last_token_top10_matches": 10
+      },
+      "L2": {
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "top1_agreement": 0.99,
+        "last_token_top10_matches": 10
+      },
+      "L3": {
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "top1_agreement": 0.99,
+        "last_token_top10_matches": 10
+      },
+      "L4": {
+        "max_kl": 0.05,
+        "mean_kl": 0.0005,
+        "top1_agreement": 0.985,
+        "last_token_top10_matches": 10
+      },
+      "mm_short_prompts": {
+        "description": "Multimodal forward short cases L1-L3 (<= 512 tokens, no indexer truncation): gated strictly on text_positions (token_types == -1); all_positions and image_positions are diagnostics",
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "top1_agreement": 0.99,
+        "last_token_top10_matches": 10
+      },
+      "mm_long_prompts": {
+        "description": "Multimodal forward long case L4 (~900 tokens, 4 images, truncation on ratio-1 layers): gated strictly on text_positions (token_types == -1); all_positions and image_positions are diagnostics",
+        "max_kl": 0.05,
+        "mean_kl": 0.0005,
+        "top1_agreement": 0.985,
+        "last_token_top10_matches": 10
+      }
+    }
+  },
+  "masked_prefill": {
+    "description": "Masked-prefill parity and batch-determinism thresholds (40 text + M1..M8 multimodal; cos_sim_diagnostic_only=false for all M1..M8)",
+    "p95_kl": 0.005,
+    "p99_kl": 0.002,
+    "mean_cos_sim": 0.999,
+    "rerun_bitwise_identical": true,
+    "rerun_argmax_identical": true,
+    "mean_batch_diff": 0.0001,
+    "diagnostic_only_fields": [
+      "intra_shard_max_diff",
+      "intra_shard_mean_diff",
+      "cross_shard_max_diff",
+      "cross_shard_mean_diff",
+      "max_batch_diff"
+    ],
+    "cross_shard_rel_warn": 0.0005,
+    "cos_sim_diagnostic_only": false,
+    "length_buckets": {
+      "<= 512": {
+        "max_seq_len": 512,
+        "max_kl": 0.025,
+        "mean_kl": 0.0002,
+        "p99_kl": 0.002,
+        "top1_agreement": 0.99
+      },
+      "513 - 1024": {
+        "max_seq_len": 1024,
+        "max_kl": 0.05,
+        "mean_kl": 0.0005,
+        "p99_kl": 0.002,
+        "top1_agreement": 0.985
+      },
+      "1025 - 2048": {
+        "max_seq_len": 2048,
+        "max_kl": 0.08,
+        "mean_kl": 0.001,
+        "p99_kl": 0.002,
+        "top1_agreement": 0.98
+      },
+      "2049 - 4096": {
+        "max_seq_len": 4096,
+        "max_kl": 0.08,
+        "mean_kl": 0.001,
+        "p99_kl": 0.005,
+        "top1_agreement": 0.98
+      }
+    }
+  }
+}
