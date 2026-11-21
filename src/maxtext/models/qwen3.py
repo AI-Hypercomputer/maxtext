@@ -948,14 +948,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       a_vals = jax.random.uniform(key, shape=shape, dtype=jnp.float32, minval=1e-9, maxval=16.0)
       return jnp.log(a_vals).astype(dtype)
 
-    self.A_log = nnx.Param(a_log_init(rngs.params(), (self.num_v_heads,), dtype=get_weight_dtype(cfg, "A_log")))
-    self.dt_bias = nnx.Param(
-        nnx.initializers.ones(
-            rngs.params(),
-            (self.num_v_heads,),
-            dtype=get_weight_dtype(cfg, "dt_bias"),
-        )
+    a_log_val = a_log_init(rngs.params(), (self.num_v_heads,), dtype=get_weight_dtype(cfg, "A_log"))
+    dt_bias_val = nnx.initializers.ones(
+        rngs.params(),
+        (self.num_v_heads,),
+        dtype=get_weight_dtype(cfg, "dt_bias"),
     )
+    self.A_log = nnx.Param(a_log_val, keep_fp32_master=a_log_val.dtype == jnp.float32)  # pylint: disable=invalid-name
+    self.dt_bias = nnx.Param(dt_bias_val, keep_fp32_master=dt_bias_val.dtype == jnp.float32)
 
     self.norm = Qwen3NextRMSNormGated(
         num_features=self.head_v_dim,  # Normalize over the head dimension (D_v)
@@ -2087,6 +2087,8 @@ class Qwen3NextSparseMoeBlock(nnx.Module):
           shard_mode=cfg.shard_mode,
           rngs=rngs,
       )
+      if cfg.float32_gate_logits and self.shared_expert_gate.kernel.get_value().dtype == jnp.float32:
+        self.shared_expert_gate.kernel.set_metadata(keep_fp32_master=True)
     else:
       self.shared_expert = None
       self.shared_expert_gate = None

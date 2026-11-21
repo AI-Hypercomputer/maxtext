@@ -381,6 +381,8 @@ def _path_key(entry: Any) -> str:
 def _param_tree(
     params: dsv3_model.DSv3Params,
     shardings: dsv3_model.DSv3Params,
+    *,
+    float32_gate_logits: bool = False,
 ) -> tuple[dict[str, Any], tuple[tuple[str, ...], ...]]:
   """Wraps `params`' leaves in `nnx.Param`s, nested as dicts keyed by field names."""
   leaves_with_path, _ = jax.tree_util.tree_flatten_with_path(params)
@@ -390,7 +392,13 @@ def _param_tree(
   flat = {}
   for (path, leaf), sharding in zip(leaves_with_path, sharding_leaves):
     key = tuple(_path_key(entry) for entry in path)
-    flat[key] = nnx.Param(leaf, out_sharding=sharding, eager_sharding=False)
+    is_router = len(key) >= 2 and key[-2] == "router"
+    flat[key] = nnx.Param(
+        leaf,
+        out_sharding=sharding,
+        eager_sharding=False,
+        keep_fp32_master=bool(is_router and float32_gate_logits and leaf.dtype == jnp.float32),
+    )
   return traverse_util.unflatten_dict(flat), tuple(flat)
 
 
@@ -464,7 +472,11 @@ class LineageTransformer(nnx.Module):
     param_shardings, state_shardings = dsv3_model.dsv3_param_shardings(cfg, mesh)
     with _mesh_scope(mesh):
       params, state = dsv3_model.init_dsv3_params(rngs.params(), cfg, mesh)
-    params_dict, self._param_paths = _param_tree(params, param_shardings)
+    params_dict, self._param_paths = _param_tree(
+        params,
+        param_shardings,
+        float32_gate_logits=cfg.model.router_dtype == jnp.float32,
+    )
     self.params = nnx.data(params_dict)
     assert state.router_bias is not None
     assert state_shardings.router_bias is not None

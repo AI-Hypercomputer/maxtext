@@ -159,6 +159,9 @@ class Indexer(nnx.Module):
 
     # Key Normalization with Bias
     self.k_norm = nnx.LayerNorm(num_features=self.head_dim, use_bias=True, dtype=self.weight_dtype, rngs=rngs)
+    if self.k_norm.dtype == jnp.float32 and self.k_norm.scale.get_value().dtype == jnp.float32:
+      self.k_norm.scale.set_metadata(keep_fp32_master=True)
+      self.k_norm.bias.set_metadata(keep_fp32_master=True)
 
     # Projection: Input -> Importance Weights for Heads
     # deepseek3.2 enforces FP32 and does not quantize, for precision and stability.
@@ -176,6 +179,7 @@ class Indexer(nnx.Module):
         weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
+    self.weights_proj.kernel.set_metadata(keep_fp32_master=True)
 
   def update_indexer_cache(self, kv_cache, k, decoder_segment_ids, model_mode, previous_chunk):
     """Updates Indexer buffers by processing KV cache results."""

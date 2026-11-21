@@ -28,6 +28,7 @@ from jax.experimental.serialize_executable import deserialize_and_load
 import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh, NamedSharding
 from maxtext.common import checkpointing
+from maxtext.common import train_state_nnx
 from maxtext.common.common_types import (
     ATTENTION_LB_IDS,
     AttentionType,
@@ -1942,8 +1943,11 @@ def setup_initial_state(
     # Always build the concrete init state, then overlay whatever we loaded. Anything the
     # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
     # value, so restore doesn't depend on knowing exactly what was saved.
-    if is_training and config.optimizer_memory_host_offload and not config.parameter_memory_host_offload:
-      # Initialize on device first, then move host-offloaded optimizer leaves to pinned_host in a
+    if is_training and (
+        (config.optimizer_memory_host_offload and not config.parameter_memory_host_offload)
+        or (config.parameter_memory_host_offload and config.fp32_master_storage == "residual16")
+    ):
+      # Initialize on device first, then move host-offloaded leaves to pinned_host in a
       # separate jit; a single jit with mixed memory kinds lets XLA CSE differently sharded zero
       # broadcasts in pinned_host.
       device_state_mesh_shardings = jax.tree_util.tree_map(
@@ -1971,6 +1975,7 @@ def setup_initial_state(
     if raw_params and native:
       # Lineage-native model: convert the MaxText-layout params into the Lineage layout.
       lineage_adapter.restore_params(state["model"], raw_params, config, mesh)
+      train_state_nnx.resplit_model_params_with_residual16(state)
     elif raw_params:
       # Params-only load (base model weights): overlay restored weights, keep init for everything else.
       target_model = (
@@ -1985,28 +1990,29 @@ def setup_initial_state(
         raw_model_params = raw_model_params.to_pure_dict()
       if isinstance(raw_model_params, dict) and "params" in raw_model_params:
         raw_model_params = raw_model_params["params"]
-      target_pure = target_model.to_pure_dict() if hasattr(target_model, "to_pure_dict") else target_model
+      if not train_state_nnx.overlay_raw_params_with_residual16(state, raw_model_params):
+        target_pure = target_model.to_pure_dict() if hasattr(target_model, "to_pure_dict") else target_model
 
-      def _reshard_aligned(target, raw):
-        """Aligns raw arrays with target device shardings using Flax's native flatten_dict utilities."""
-        target_flat = traverse_util.flatten_dict(target)
-        raw_flat = traverse_util.flatten_dict(raw)
+        def _reshard_aligned(target, raw):
+          """Aligns raw arrays with target device shardings using Flax's native flatten_dict utilities."""
+          target_flat = traverse_util.flatten_dict(target)
+          raw_flat = traverse_util.flatten_dict(raw)
 
-        res_flat = {}
-        for k, target_val in target_flat.items():
-          if k in raw_flat and not isinstance(raw_flat[k], jax.ShapeDtypeStruct):
-            raw_val = raw_flat[k]
-            if hasattr(target_val, "sharding") and target_val.sharding is not None:
-              res_flat[k] = jax.device_put(raw_val, target_val.sharding)
+          res_flat = {}
+          for k, target_val in target_flat.items():
+            if k in raw_flat and not isinstance(raw_flat[k], jax.ShapeDtypeStruct):
+              raw_val = raw_flat[k]
+              if hasattr(target_val, "sharding") and target_val.sharding is not None:
+                res_flat[k] = jax.device_put(raw_val, target_val.sharding)
+              else:
+                res_flat[k] = raw_val
             else:
-              res_flat[k] = raw_val
-          else:
-            res_flat[k] = target_val
+              res_flat[k] = target_val
 
-        return traverse_util.unflatten_dict(res_flat)
+          return traverse_util.unflatten_dict(res_flat)
 
-      sharded_aligned = _reshard_aligned(target_pure, raw_model_params)
-      nnx.update(target_model, sharded_aligned)
+        sharded_aligned = _reshard_aligned(target_pure, raw_model_params)
+        nnx.update(target_model, sharded_aligned)
 
     if restored:
       is_emergency = isinstance(

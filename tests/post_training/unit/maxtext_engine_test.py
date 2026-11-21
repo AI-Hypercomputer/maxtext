@@ -181,6 +181,11 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     saved.custom_metadata = {} if custom_metadata is None else custom_metadata
     mock_orbax_mgr.checkpointables_metadata.return_value = saved
 
+  def test_rejects_residual16_master_storage(self):
+    cfg_res16 = self.setup_config(fp32_master_storage="residual16")
+    with self.assertRaisesRegex(NotImplementedError, "fp32_master_storage"):
+      maxtext_engine.MaxTextTrainingEngine(cfg_res16)
+
   def test_raises_type_error_for_non_pyconfig(self):
     invalid_config = abstract_engine.TrainingConfig()
     with self.assertRaises(TypeError):

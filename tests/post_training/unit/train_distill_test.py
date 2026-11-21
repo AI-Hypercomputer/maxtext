@@ -60,7 +60,18 @@ DEFAULT_DATA_SHARDING = [
 class TrainDistillTest(unittest.TestCase):
 
   def setUp(self):
+    super().setUp()
     self.test_dir = tempfile.mkdtemp()
+    orig_mock = mock.Mock
+
+    def _mock_with_default_master_storage(*args, **kwargs):
+      if "spec" not in kwargs and "spec_set" not in kwargs and "wraps" not in kwargs:
+        kwargs.setdefault("fp32_master_storage", "f32")
+      return orig_mock(*args, **kwargs)
+
+    patcher = mock.patch.object(mock, "Mock", side_effect=_mock_with_default_master_storage)
+    patcher.start()
+    self.addCleanup(patcher.stop)
 
   def tearDown(self):
     shutil.rmtree(self.test_dir)

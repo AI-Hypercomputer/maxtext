@@ -1640,6 +1640,7 @@ class TestNNXAbstractState(unittest.TestCase):
 
   @dataclass
   class MockConfig:
+    fp32_master_storage: str = "f32"
     init_weights_seed: int = 42
     shard_optimizer_over_data: bool = False
     optimizer_memory_host_offload: bool = False

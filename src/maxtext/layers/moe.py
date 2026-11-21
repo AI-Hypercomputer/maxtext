@@ -984,15 +984,17 @@ class GateLogit(nnx.Module):
     kernel_out_axis = np.arange(len(self.axis), len(self.axis) + len(self.out_features_shape))
 
     if not quantizations.in_serve_mode(self.quant):
+      kernel_val = self.kernel_init(
+          rngs.params(),
+          kernel_shape,
+          self.weight_dtype,
+          kernel_in_axis,
+          kernel_out_axis,
+      )
       self.kernel = nnx.Param(
-          self.kernel_init(
-              rngs.params(),
-              kernel_shape,
-              self.weight_dtype,
-              kernel_in_axis,
-              kernel_out_axis,
-          ),
+          kernel_val,
           out_sharding=self.kernel_axes,
+          keep_fp32_master=self.dtype == jnp.float32 and kernel_val.dtype == jnp.float32,
       )
 
     if self.use_bias:
@@ -1005,9 +1007,11 @@ class GateLogit(nnx.Module):
             out_sharding=bias_axes,
         )
       else:
+        bias_val = default_bias_init(rngs.params(), bias_shape, self.weight_dtype)
         self.bias = nnx.Param(
-            default_bias_init(rngs.params(), bias_shape, self.weight_dtype),
+            bias_val,
             out_sharding=bias_axes,
+            keep_fp32_master=bias_val.dtype == jnp.float32,
         )
     else:
       self.bias = None

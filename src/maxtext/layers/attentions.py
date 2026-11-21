@@ -362,9 +362,11 @@ class Attention(nnx.Module):
     self._init_projections(inputs_q_shape, inputs_kv_shape)
 
     if self.config.attention_sink:
+      sinks_val = default_bias_init(self.rngs.params(), (self.config.num_query_heads,), self.weight_dtype)
       self.sinks = nnx.Param(
-          default_bias_init(self.rngs.params(), (self.config.num_query_heads,), self.weight_dtype),
+          sinks_val,
           out_sharding=(None,),
+          keep_fp32_master=sinks_val.dtype == jnp.float32,
       )
     else:
       self.sinks = None

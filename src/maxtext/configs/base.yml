@@ -222,6 +222,19 @@ decoder_block: "llama2" # which style of decoderblock to use.
 # then you should explicitly set base_embed_dim, base_num_query_heads, base_num_kv_heads,
 # base_mlp_dim, base_num_decoder_layers and/or head_dim.
 weight_dtype: "float32"
+# Master weight storage format ("f32" or "residual16"):
+# - "f32" (default): stores float32 parameters (4 B/param). With float32 AdamW mu/nu (8 B/param), steady-state
+#   persistent device state is 12 B/param per device shard under both default FSDP and shard_optimizer_over_data=True
+#   (ZeRO-1, which also shards params over data via maybe_update_params_sharding_with_opt), and 4 B/param per shard on
+#   device (+ 8 B/param per shard on pinned_host) under optimizer_memory_host_offload=True.
+# - "residual16": stores bfloat16 working weights (2 B/param) plus signed int16 master_residuals (2 B/param, sharded
+#   and offloaded identically to Optax mu/nu), reconstructing exact float32 master weights on update and checkpoint
+#   save. Under un-offloaded FSDP or shard_optimizer_over_data=True (ZeRO-1), steady-state persistent device state is
+#   unchanged (12 B/param per shard) and the benefit is bfloat16 parameter all-gathers and backward weight-gradient
+#   reduce-scatters (trading per-step reconstruct/split and save-time float32 reconstruction). Net persistent device
+#   HBM savings require optimizer_memory_host_offload=True, which halves persistent device state from 4 to 2 B/param
+#   per shard while growing pinned_host state from 8 to 10 B/param per shard (+2 B/param per shard of residuals).
+fp32_master_storage: "f32"
 # List of module names or patterns to keep unquantized even when weight_dtype is FP8.
 # For any module included here, its weights will be instantiated using `dtype` (e.g. bfloat16).
 # Accepted module names include: 'token_embedder', 'logits_dense', 'gate' (MoE router),

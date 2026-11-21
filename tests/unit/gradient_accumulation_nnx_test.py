@@ -34,6 +34,8 @@ from maxtext.utils import gradient_accumulation
 
 @dataclass
 class _Cfg:
+  """Minimal config stub for gradient accumulation unit tests."""
+
   gradient_accumulation_steps: int = 2
   use_tunix_gradient_accumulation: bool = False
   shard_optimizer_over_data: bool = False
@@ -41,7 +43,8 @@ class _Cfg:
   ici_data_parallelism: int = 1
   debug_sharding: bool = False
   training_objective: str = "causal_lm"
-  use_tunix_gradient_accumulation: bool = False
+  fp32_master_storage: str = "f32"
+  grad_dtype: jnp.dtype = jnp.float32
 
 
 class _TinyNNX(nnx.Module):
