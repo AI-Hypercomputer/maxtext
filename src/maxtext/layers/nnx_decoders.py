@@ -870,7 +870,10 @@ class NNXDecoder(nnx.Module):
 
   def _get_deepseek4_remat_policy_and_cse(self):
     """Returns the scan-safe per-layer remat policy and prevent_cse flag for DeepSeek-V4."""
-    return self._get_scan_safe_remat_policy(), maxtext_utils.should_prevent_cse_in_remat(self.config)
+    return (
+        self._get_scan_safe_remat_policy(),
+        maxtext_utils.should_prevent_cse_in_remat(self.config),
+    )
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
     """Initializes scanned DeepSeek layers with optional Engram support."""
@@ -1773,6 +1776,9 @@ class NNXDecoder(nnx.Module):
         remat_policy=remat_policy,
         tensors_on_device=self.config.tensors_on_device,
         tensors_to_offload=self.config.tensors_to_offload,
+        context_parallel_attention_load_balance_hoist_ids=getattr(
+            self.config, "context_parallel_attention_load_balance_hoist_ids", False
+        ),
     )
     save_names, offload_names = maxtext_utils.get_save_and_offload_names(policy_cfg)
     if save_names or offload_names:

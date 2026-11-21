@@ -49,6 +49,7 @@ from maxtext.common.common_types import (
     KV_HEAD_DIM,
     KV_BATCH,
     ATTN_EMBED,
+    ATTENTION_LB_IDS,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_TRAIN,
     MODEL_MODE_PREFILL,
@@ -1655,6 +1656,21 @@ class Attention(nnx.Module):
       same_kv = inputs_kv is inputs_q
       inputs_q = pin_row_major_with_cotangent(inputs_q)
       inputs_kv = inputs_q if same_kv else pin_row_major_with_cotangent(inputs_kv)
+
+    # context_parallel_attention_load_balance: run this layer in DUAL_CHUNK_SWAP token order so every
+    # context rank does the same share of the causal work, and restore natural order on the output.
+    # Everything between here and the output reorder acts token by token, except attention, which gets
+    # the load-balanced mask. Other layers (e.g. GatedDeltaNet) never see the permuted tokens.
+    sequence_load_balanced = self._attention_load_balance_size(model_mode, rope_kwargs, bidirectional_mask) > 1
+    if sequence_load_balanced:
+      inputs_q, inputs_kv, inputs_positions, decoder_segment_ids = self._to_load_balanced_order(
+          inputs_q,
+          inputs_kv,
+          inputs_positions,
+          decoder_segment_ids,
+          use_shared_kv=use_shared_kv,
+      )
+
     is_self_attn = inputs_q is inputs_kv
     inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
     inputs_kv = inputs_q if is_self_attn else self._maybe_shard_with_logical(inputs_kv, input_axis_names)
@@ -1799,6 +1815,7 @@ class Attention(nnx.Module):
           previous_chunk,
           bidirectional_mask,
           self.sinks,
+          sequence_load_balanced=sequence_load_balanced,
       )
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
     if model_mode == MODEL_MODE_PREFILL:
@@ -1811,9 +1828,70 @@ class Attention(nnx.Module):
       out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
       out = out * jax.nn.sigmoid(gate)
     out = self.out_projection(out, out_sharding=out_sharding, model_mode=model_mode)
+    if sequence_load_balanced:
+      out = self.attention_op.reorder_for_attention_load_balance(out, to_natural=True)
     if getattr(self.config, "distill_beta", 0.0) > 0.0:
       self.sow(nnx.Intermediate, "out_projection_activations", out)
     if pin_layout:
       out = pin_row_major_with_cotangent(out)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
+
+  def _attention_load_balance_size(self, model_mode: str, rope_kwargs: dict | None, bidirectional_mask: Any) -> int:
+    """How many context shards this call load-balances over; 1 means it keeps natural token order.
+
+    See `AttentionOp.attention_load_balance_context_size`. Only the tokens, positions and segment ids are
+    permuted, so a call whose rotary angles come from `rope_kwargs` (e.g. a vision grid) or that applies a
+    `bidirectional_mask`, both laid out in natural token order, keeps natural order.
+    """
+    if (
+        not self.config.context_parallel_attention_load_balance
+        or rope_kwargs is not None
+        or bidirectional_mask is not None
+    ):
+      return 1
+    return self.attention_op.attention_load_balance_context_size(model_mode)
+
+  def _to_load_balanced_order(
+      self,
+      inputs_q: Array,
+      inputs_kv: Array,
+      inputs_positions: Array | None,
+      decoder_segment_ids: Array | None,
+      *,
+      use_shared_kv: bool,
+  ) -> tuple[Array, Array, Array, Array | None]:
+    """Permutes the layer inputs into DUAL_CHUNK_SWAP order for attention-local load balancing.
+
+    Positions travel with their tokens so RoPE (and the dot-product causal mask) see each token's
+    original position; segment ids travel with them so packing boundaries still hold. Missing positions
+    are materialized first, since the default RoPE positions are the natural-order iota.
+
+    With `context_parallel_attention_load_balance_hoist_ids`, the reordered positions and segment ids are
+    named `ATTENTION_LB_IDS`, which `remat_policy=custom` then saves.
+    """
+    if use_shared_kv:
+      raise ValueError(
+          "context_parallel_attention_load_balance does not support shared_key / shared_value: the donor "
+          "layer's K/V would be in a different token order."
+      )
+    if inputs_kv is not inputs_q and inputs_kv.shape[:2] != inputs_q.shape[:2]:
+      raise ValueError(
+          "context_parallel_attention_load_balance needs self-attention inputs with matching batch and "
+          f"sequence dims, got inputs_q {inputs_q.shape} and inputs_kv {inputs_kv.shape}."
+      )
+    if inputs_positions is None:
+      inputs_positions = jnp.broadcast_to(jnp.arange(inputs_q.shape[1], dtype=jnp.int32), inputs_q.shape[:2])
+    reorder = self.attention_op.reorder_for_attention_load_balance
+    reordered_q = reorder(inputs_q)
+    reordered_kv = reordered_q if inputs_kv is inputs_q else reorder(inputs_kv)
+    reordered_positions = reorder(inputs_positions)
+    reordered_segment_ids = reorder(decoder_segment_ids)
+    if self.config.context_parallel_attention_load_balance_hoist_ids:
+      # Both depend only on the batch, so the saved value is a loop invariant of the layer scan, which
+      # jax.lax.scan hoists out of the loop: the backward replay of every attention layer then reads the
+      # forward's copy instead of reordering the positions and segment ids again. Same values.
+      reordered_positions = checkpoint_name(reordered_positions, ATTENTION_LB_IDS)
+      if reordered_segment_ids is not None:
+        reordered_segment_ids = checkpoint_name(reordered_segment_ids, ATTENTION_LB_IDS)
+    return reordered_q, reordered_kv, reordered_positions, reordered_segment_ids

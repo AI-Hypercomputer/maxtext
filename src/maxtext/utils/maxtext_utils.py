@@ -29,6 +29,7 @@ import jax.numpy as jnp
 from jax.sharding import AxisType, Mesh, NamedSharding
 from maxtext.common import checkpointing
 from maxtext.common.common_types import (
+    ATTENTION_LB_IDS,
     AttentionType,
     DecoderBlockType,
     ReorderStrategy,
@@ -255,7 +256,8 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
   Returns a ``(save_names, offload_names)`` tuple:
     * ``custom``: ``(config.tensors_on_device, config.tensors_to_offload)`` -- the per-tensor
       assignments. Either list may be empty: all tensors set to ``device`` gives an empty offload
-      list, all set to ``remat`` gives ``([], [])``.
+      list, all set to ``remat`` gives ``([], [])``. With
+      ``context_parallel_attention_load_balance_hoist_ids``, ``ATTENTION_LB_IDS`` is saved too.
     * ``qkv_proj_offloaded`` / ``minimal_offloaded``: ``([], <hardcoded offload names>)`` -- presets
       that only offload and save nothing on device.
     * any other policy (``full``, ``minimal``, ``save_*``, ``none``, ...): ``([], [])`` -- these do
@@ -287,6 +289,9 @@ def get_save_and_offload_names(config) -> tuple[list[str], list[str]]:
           "GDN custom remat settings place the same checkpointed tensors in both device HBM and host offload: "
           f"{overlap}. Choose compatible locations for 'gdn' and 'gdn_states'."
       )
+    if getattr(config, "context_parallel_attention_load_balance_hoist_ids", False) and ATTENTION_LB_IDS not in save_names:
+      # On device: the saved value depends only on the batch, so jax.lax.scan keeps one copy, outside the layer loop.
+      save_names.append(ATTENTION_LB_IDS)
     return save_names, offload_names
   return [], []
 
@@ -2049,7 +2054,13 @@ def setup_initial_state(
         state_mesh_shardings=state_mesh_shardings,
         restored=restored,
     )
-  return state, state_mesh_annotations, state_mesh_shardings, data_iterator, was_restored
+  return (
+      state,
+      state_mesh_annotations,
+      state_mesh_shardings,
+      data_iterator,
+      was_restored,
+  )
 
 
 def get_abstract_state(config, mesh, init_state_fn, is_training=True):
