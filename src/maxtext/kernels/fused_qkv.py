@@ -1598,6 +1598,7 @@ class FusedOutTrainParams:
   extra_w_psum_axes: tuple[str, ...] = ()
   ctx_dtype: Any = jnp.bfloat16
   wo_dtype: Any = jnp.float32
+  early_dw_rs: bool = False
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
@@ -1624,10 +1625,17 @@ def _fused_out_local_fwd(
     ctx_q = static_quantize(ctx_c, p.act_qtype, p.act_scale)
     wo_l_q = static_quantize(wo_c, w_qtype, p.weight_scale)
     deq = jnp.asarray(p.act_scale * p.weight_scale, p.compute_dtype)
-    wo_q = _all_gather_axis(wo_l_q, p.weight_gather_axes, axis=2)
-    y_bsd = (
-        lax.dot_general(ctx_q, wo_q, (((2, 3), (0, 1)), ((), ())), preferred_element_type=p.compute_dtype) * deq
-    ).astype(p.compute_dtype)
+    if p.early_dw_rs and p.bwd_qtype is not None and p.weight_gather_axes:
+      wo_l_ehd = jnp.moveaxis(wo_l_q, 2, 0)
+      wo_q = _all_gather_axis(wo_l_ehd, p.weight_gather_axes, axis=0)
+      y_bsd = (
+          lax.dot_general(ctx_q, wo_q, (((2, 3), (1, 2)), ((), ())), preferred_element_type=p.compute_dtype) * deq
+      ).astype(p.compute_dtype)
+    else:
+      wo_q = _all_gather_axis(wo_l_q, p.weight_gather_axes, axis=2)
+      y_bsd = (
+          lax.dot_general(ctx_q, wo_q, (((2, 3), (0, 1)), ((), ())), preferred_element_type=p.compute_dtype) * deq
+      ).astype(p.compute_dtype)
   else:
     ctx_q = ctx_c
     wo_q = _all_gather_axis(wo_c, p.weight_gather_axes, axis=2)
@@ -1653,13 +1661,24 @@ def _fused_out_local_bwd(p: FusedOutTrainParams, residuals, dy_bsd):
       dy_q = jnp.clip(dy_c / s_dy, -fmax, fmax).astype(p.bwd_qtype)
     scale_dw = jnp.asarray(p.act_scale, p.compute_dtype) * s_dy
     scale_dctx = s_dy * jnp.asarray(p.weight_scale, p.compute_dtype)
-    dw_full = (
-        lax.dot_general(ctx_q, dy_q, (((0, 1), (0, 1)), ((), ())), preferred_element_type=p.compute_dtype) * scale_dw
-    ).astype(p.compute_dtype)
-    dctx = (
-        lax.dot_general(dy_q, wo_q, (((2,), (2,)), ((), ())), preferred_element_type=p.compute_dtype) * scale_dctx
-    ).astype(p.ctx_dtype)
-    dw_local = _reduce_scatter_axis(dw_full, p.weight_gather_axes, axis=2)
+    if p.early_dw_rs and p.weight_gather_axes:
+      dw_ehd = (
+          lax.dot_general(dy_q, ctx_q, (((0, 1), (0, 1)), ((), ())), preferred_element_type=p.compute_dtype) * scale_dw
+      ).astype(p.compute_dtype)
+      dw_sharded_ehd = _reduce_scatter_axis(dw_ehd, p.weight_gather_axes, axis=0)
+      scale_dctx = _guard_with_tensor(scale_dctx, dw_sharded_ehd)
+      dctx = (
+          lax.dot_general(dy_q, wo_q, (((2,), (0,)), ((), ())), preferred_element_type=p.compute_dtype) * scale_dctx
+      ).astype(p.ctx_dtype)
+      dw_local = jnp.moveaxis(dw_sharded_ehd, 0, 2)
+    else:
+      dw_full = (
+          lax.dot_general(ctx_q, dy_q, (((0, 1), (0, 1)), ((), ())), preferred_element_type=p.compute_dtype) * scale_dw
+      ).astype(p.compute_dtype)
+      dctx = (
+          lax.dot_general(dy_q, wo_q, (((2,), (2,)), ((), ())), preferred_element_type=p.compute_dtype) * scale_dctx
+      ).astype(p.ctx_dtype)
+      dw_local = _reduce_scatter_axis(dw_full, p.weight_gather_axes, axis=2)
   else:
     dctx = lax.dot_general(
         dy_c, wo_q, (((2,), (2,)), ((), ())), preferred_element_type=_F32, precision=lax.Precision.HIGHEST

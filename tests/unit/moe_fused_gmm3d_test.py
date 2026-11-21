@@ -35,6 +35,7 @@ Run with 4 CPU devices: XLA_FLAGS=--xla_force_host_platform_device_count=4.
 
 
 import dataclasses
+import functools
 import importlib.util
 import unittest
 
@@ -568,7 +569,7 @@ class FusedGmm3dRoutedMoeTest(parameterized.TestCase):
           # Legacy kernels: linear_combine_fwd forward and gate_bwd_fused backward.
           (0, False, False, False, False, False, False, True, False),
           # The kernel options of the Qwen3-235B v7x training config.
-          (10, True, True, True, True, True, False, True, True),
+          (17, True, True, True, True, True, False, True, True),
       ):
         p_tpu = moe_fused_gmm3d.FusedGmm3dParams(
             num_experts=4,
@@ -609,6 +610,8 @@ class FusedGmm3dRoutedMoeTest(parameterized.TestCase):
         def moe_fn(x_, wi_, wo_, c_, s_, g_, pp=p_tpu):
           return moe_fused_gmm3d.fused_moe_experts(pp, x_, wi_, wo_, c_, s_, g_)
 
+        if sched_mode == 17 and split_dw:
+          moe_fn = jax.checkpoint(moe_fn, policy=jax.checkpoint_policies.nothing_saveable)
         aot_moe = (
             jax.jit(
                 jax.value_and_grad(
@@ -628,6 +631,8 @@ class FusedGmm3dRoutedMoeTest(parameterized.TestCase):
             .as_text()
         )
         self.assertIn("tpu_custom_call", aot_moe, f"sched_mode={sched_mode}")
+        if sched_mode == 17 and split_dw:
+          self.assertIn("quantize_relayout_2d_to_3d", aot_moe, f"sched_mode={sched_mode}")
 
     # The kernel backward's weight-gradient reduce-scatters (`_compute_dwo`, `_rs_wi_half` + concat) only exist
     # with FSDP gather axes, so also lower the shipped options (the last row above) inside a 4-device `shard_map`
@@ -707,6 +712,141 @@ class FusedGmm3dRoutedMoeTest(parameterized.TestCase):
       np.testing.assert_allclose(
           np.asarray(g_w11[k], np.float32), np.asarray(g_base_k, np.float32), rtol=1e-5, atol=1e-5, err_msg=k
       )
+
+  def test_decoder_layer_input_unalias_bitwise_parity(self):
+    """Verifies `decoder_layer_input_unalias` preserves exact bf16 outputs and grads under remat + offload."""
+    from maxtext.common import common_types  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+    from maxtext.models import qwen3  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    extra_layer_kw = {
+        "base_emb_dim": _D,
+        "emb_dim": _D,
+        "base_mlp_dim": _F,
+        "base_moe_mlp_dim": _F,
+        "base_num_query_heads": 4,
+        "base_num_kv_heads": 2,
+        "num_query_heads": 4,
+        "num_kv_heads": 2,
+        "head_dim": 64,
+        "mlp_dim": _F,
+        "moe_mlp_dim": _F,
+        "attention": "dot_product",
+        "use_qk_norm": True,
+        "rope_max_timescale": 1_000_000,
+        "normalization_layer_epsilon": 1e-6,
+        "per_device_batch_size": 2.0,
+        "max_target_length": 32,
+        "moe_flat_fsdp_weights": True,
+        "remat_policy": "custom",
+        "decoder_layer_input": "offload",
+    }
+    cfg0 = _make_config(True, "bfloat16", False, decoder_layer_input_unalias=False, **extra_layer_kw)
+    cfg1 = _make_config(True, "bfloat16", False, decoder_layer_input_unalias=True, **extra_layer_kw)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg0), cfg0.mesh_axes)
+    with mesh, nn_partitioning.axis_rules(cfg0.logical_axis_rules):
+      layer0 = qwen3.Qwen3MoeDecoderLayer(cfg0, mesh, common_types.MODEL_MODE_TRAIN, None, nnx.Rngs(params=0))
+      layer1 = qwen3.Qwen3MoeDecoderLayer(cfg1, mesh, common_types.MODEL_MODE_TRAIN, None, nnx.Rngs(params=0))
+
+    batch = int(cfg0.per_device_batch_size) * jax.device_count()
+    seq = cfg0.max_target_length
+    kx, kc = jax.random.split(jax.random.PRNGKey(1803))
+    x = jax.random.normal(kx, (batch, seq, _D), jnp.bfloat16)
+    cot = jax.random.normal(kc, (batch, seq, _D), jnp.float32)
+    seg = jnp.ones((batch, seq), jnp.int32)
+    pos = jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32), (batch, seq))
+
+    def eval_remat_scan(cfg, layer):
+      nnx.pop(layer, nnx.Intermediate)
+      graphdef, params, rest = nnx.split(layer, nnx.Param, ...)
+      policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+          names_which_can_be_saved=list(cfg.tensors_on_device),
+          names_which_can_be_offloaded=list(cfg.tensors_to_offload),
+          offload_src="device",
+          offload_dst="pinned_host",
+      )
+
+      @functools.partial(jax.checkpoint, policy=policy)
+      def ckpt_layer(p_, x_):
+        m = nnx.merge(graphdef, p_, rest)
+        y, _ = m(x_, seg, pos, deterministic=True, model_mode=common_types.MODEL_MODE_TRAIN)
+        return y
+
+      def loss_fn(p_, x_):
+        def body(carry, _):
+          return ckpt_layer(p_, carry), None
+
+        y, _ = jax.lax.scan(body, x_, None, length=2)
+        return jnp.sum(y.astype(jnp.float32) * cot), y
+
+      with mesh, nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        jitted = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
+        hlo = jitted.lower(params, x).as_text()
+        (_, y), (gp, gx) = jitted(params, x)
+      return np.asarray(y, np.float32), _state_dict(gp), np.asarray(gx, np.float32), hlo
+
+    y0, gp0, gx0, hlo0 = eval_remat_scan(cfg0, layer0)
+    y1, gp1, gx1, hlo1 = eval_remat_scan(cfg1, layer1)
+    np.testing.assert_array_equal(y1, y0)
+    np.testing.assert_array_equal(gx1, gx0)
+    for k, v0 in gp0.items():
+      np.testing.assert_array_equal(gp1[k], v0, err_msg=f"grad {k}")
+    # Differentiated remat emits an optimization barrier with the flag off too, so compare the counts.
+    self.assertGreater(hlo1.count("optimization_barrier"), hlo0.count("optimization_barrier"))
+
+  def test_moe_tc_routing_offload_free_bitwise_parity(self):
+    """`moe_tc_routing_offload_free=True` matches `False` bit-for-bit in fwd+bwd and omits bincount scatter."""
+    cfg0 = _make_config(
+        True,
+        "bfloat16",
+        True,
+        moe_packed_routing_sort=True,
+        moe_tc_routing_offload_free=False,
+        load_balance_loss_weight=0.01,
+    )
+    cfg1 = _make_config(
+        True,
+        "bfloat16",
+        True,
+        moe_packed_routing_sort=True,
+        moe_tc_routing_offload_free=True,
+        load_balance_loss_weight=0.01,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg0), cfg0.mesh_axes)
+    m0 = self._build(cfg0, mesh, True)
+    m1 = self._build(cfg1, mesh, True)
+    batch = int(cfg0.per_device_batch_size) * jax.device_count()
+    kx, kc = jax.random.split(jax.random.PRNGKey(77), 2)
+    x = jax.random.normal(kx, (batch, cfg0.max_target_length, _D), jnp.bfloat16)
+    cot = jax.random.normal(kc, x.shape, jnp.float32)
+
+    def eval_with_lb(cfg, model):
+      nnx.pop(model, nnx.Intermediate)
+      graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+
+      def loss_fn(p_, x_):
+        mm = nnx.merge(graphdef, p_, rest)
+        y, lb, _ = mm(x_)
+        lb_term = jnp.float32(0.0) if lb is None else lb.astype(jnp.float32)
+        return jnp.sum(y.astype(jnp.float32) * cot) + lb_term, (y, lb_term)
+
+      with mesh, nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        fwd_hlo = jax.jit(lambda p_, x_: loss_fn(p_, x_)[1]).lower(params, x).as_text()
+        jitted = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
+        (_, (y, lb)), (gp, gx) = jitted(params, x)
+      return np.asarray(y, np.float32), float(lb), _state_dict(gp), np.asarray(gx, np.float32), fwd_hlo
+
+    y0, lb0, gp0, gx0, hlo0 = eval_with_lb(cfg0, m0)
+    y1, lb1, gp1, gx1, hlo1 = eval_with_lb(cfg1, m1)
+    np.testing.assert_array_equal(y1, y0)
+    self.assertEqual(lb1, lb0)
+    np.testing.assert_array_equal(gx1, gx0)
+    for k, v0 in gp0.items():
+      np.testing.assert_array_equal(np.asarray(gp1[k], np.float32), np.asarray(v0, np.float32), err_msg=f"grad {k}")
+    # CPU `_ref_fwd` has 1 combine scatter; `moe_tc_routing_offload_free=True` removes the bincount scatter (-1),
+    # removes the `weights_flat` gather (-1), and emits a 2-operand `(ui32, f32)` co-sort.
+    self.assertEqual(hlo1.count('"stablehlo.scatter"'), hlo0.count('"stablehlo.scatter"') - 1)
+    self.assertEqual(hlo1.count('"stablehlo.gather"'), hlo0.count('"stablehlo.gather"') - 1)
+    self.assertIn("(tensor<128xui32>, tensor<128xf32>)", hlo1)
 
 
 if __name__ == "__main__":

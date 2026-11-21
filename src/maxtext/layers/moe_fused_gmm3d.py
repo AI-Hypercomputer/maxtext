@@ -52,6 +52,7 @@ the saturating clip in the activation quantization, while the unfused backward p
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import math
@@ -59,6 +60,7 @@ from typing import Any, Sequence
 
 from absl import logging
 import jax
+from jax.experimental import xla_metadata
 import jax.numpy as jnp
 
 LANES = 128
@@ -130,6 +132,7 @@ class FusedGmm3dParams:
   fused_quant_relayout: bool = False
   overlap_dcoeffs_scatter: bool = False
   wgrad_schedule_mode: int = 0
+  wi_ag_latency_ns: int = 0
   use_reference: bool = False
 
   @property
@@ -142,8 +145,8 @@ class FusedGmm3dParams:
       raise ValueError(f"emb_dim ({self.emb_dim}) and mlp_dim ({self.mlp_dim}) must be multiples of {LANES}.")
     if self.quantized and self.weight_qtype is None:
       raise ValueError("weight_qtype must not be None when act_qtype is set.")
-    if self.wgrad_schedule_mode not in range(17):
-      raise ValueError(f"wgrad_schedule_mode ({self.wgrad_schedule_mode}) must be in 0..16.")
+    if self.wgrad_schedule_mode not in range(18):
+      raise ValueError(f"wgrad_schedule_mode ({self.wgrad_schedule_mode}) must be in 0..17.")
     if not self.use_reference:
       if not self.quantized or self.weight_qtype is None or self.bwd_qtype is None:
         raise ValueError("The fused gmm3d kernels require fp8 act / weight / bwd quantization.")
@@ -211,12 +214,23 @@ def _reduce_scatter_rows(x: jax.Array, axes: Sequence[str]) -> jax.Array:
   return x
 
 
+@contextlib.contextmanager
+def _ag_latency_scope(latency_ns: int):
+  if latency_ns <= 0:
+    yield
+    return
+  with xla_metadata.set_xla_metadata(latency_metadata=str(int(latency_ns))):
+    yield
+
+
 def quantize_and_gather_weight(
     w_local: jax.Array,
     qtype: Any,
     scale: float,
     gather_axes: Sequence[str],
     gathered_shape: tuple[int, int, int],
+    *,
+    latency_ns: int = 0,
 ) -> jax.Array:
   """Quantizes a flat ``[rows_local, cols]`` weight shard and all-gathers it (QAG).
 
@@ -226,7 +240,9 @@ def quantize_and_gather_weight(
   """
   if qtype is not None:
     w_local = static_quantize(w_local, qtype, scale)
-  return _all_gather_rows(w_local, gather_axes).reshape(gathered_shape)
+  with _ag_latency_scope(latency_ns):
+    gathered = _all_gather_rows(w_local, gather_axes)
+  return gathered.reshape(gathered_shape)
 
 
 def reduce_scatter_weight_grad(dw_full: jax.Array, gather_axes: Sequence[str], w_local: jax.Array) -> jax.Array:
@@ -721,14 +737,18 @@ def _kernel_bwd(
         dwo_ = reduce_scatter_weight_grad(dwo_raw_, p.wo_gather_axes, wo_local) if wo_local is not None else dwo_raw_
         return dwo_raw_, dwo_
 
-    if (p.early_dwo_rs and p.wgrad_schedule_mode < 15) or (1 <= p.wgrad_schedule_mode <= 14):
+    if (
+        (p.early_dwo_rs and p.wgrad_schedule_mode < 15)
+        or (1 <= p.wgrad_schedule_mode <= 14)
+        or p.wgrad_schedule_mode == 17
+    ):
       dwo_raw, dwo = _compute_dwo()
     else:
       dwo_raw, dwo = None, None
     fmax = _finfo_max(p.bwd_qtype)
     exp = jnp.ceil(jnp.log2(jnp.maximum(dgrad.grad_gate_amax / fmax, 1e-30)))
     dgate_scale = jnp.where(dgrad.grad_gate_amax > 0, jnp.exp2(exp), 1.0).astype(jnp.float32)
-    if 1 <= p.wgrad_schedule_mode <= 14 and dwo_raw is not None:
+    if (1 <= p.wgrad_schedule_mode <= 14 or p.wgrad_schedule_mode == 17) and dwo_raw is not None:
       dgate_scale = _guard_array_with_tensors(dgate_scale, (dwo_raw,))
     # The [C, 1] coefficient gradient; schedule modes 13/14 hang zero-copy reduce-scatter guards on it.
     grad_coeffs = dgrad.grad_coeffs
@@ -876,7 +896,7 @@ def _kernel_bwd(
               dwi_1 if not isinstance(dw_gate, jax.Array) else None,
           ),
       )
-    elif p.wgrad_schedule_mode in (10, 11, 12, 13, 14):
+    elif p.wgrad_schedule_mode in (10, 11, 12, 13, 14, 17):
       # Scalar-only guard schedule (ZERO copy on 512 MB dx3d!):
       #   linear_bwd_dgrad -> linear_bwd_wgrad -> tgmm_v2 dw_0 -> tgmm_v2 dw_1 -> gate_dx -> combine_dx -> Attn bwd.
       # Hides sc_routed_gather behind linear_bwd_dgrad + linear_bwd_wgrad (~14.4 ms), dwo RS behind dw_0,
@@ -886,6 +906,10 @@ def _kernel_bwd(
       #       XLA starts that RS right after dw_1 and it overlaps gate_dx + combine_dx rather than the next layer.
       #   14: mode 10 + all three RSs (dwo, dwi_0, dwi_1) guarded on grad_coeffs only (none forced before
       #       gate_dx), letting XLA spread them across dw_0 + dw_1 + gate_dx + combine_dx (~20 ms of TC work).
+      #   17: mode 10 + all three RSs guarded on the combined dx3d instead of grad_coeffs: grad_coeffs feeds the
+      #       SparseCore dcoeffs scatter, which the scheduler issues early and thereby pulls the RS dones before
+      #       gate_dx; dx3d is consumed only by the attention backward, so the RSs may finish anywhere during
+      #       gate_dx + combine_dx (the dx3d select costs one 512 MiB pass).
       routed = _ensure_routed(routed)
       dw_gate, dw_0, dw_1, dwi_0, dwi_1 = _run_gate_wgrad(routed, dgate_scale, chain_halves=True)
       last_dw = dw_1 if dw_1 is not None else dw_0
@@ -903,6 +927,9 @@ def _kernel_bwd(
         grad_coeffs = _guard_array_with_tensors(grad_coeffs, (post_rs_1,))
       elif p.wgrad_schedule_mode == 14:
         grad_coeffs = _guard_array_with_tensors(grad_coeffs, (dwo, post_rs_0, post_rs_1))
+      elif p.wgrad_schedule_mode == 17:
+        wi_rs = (dw_gate,) if (dwi_0 is None and isinstance(dw_gate, jax.Array)) else (post_rs_0, post_rs_1)
+        dx3d = _guard_array_with_tensors(dx3d, (dwo, *wi_rs))
     elif p.wgrad_schedule_mode in (15, 16):
       # Un-delayed gate_dx + combine_dx (Attention bwd runs immediately), while forcing
       # linear_bwd_wgrad (dwo_raw, pre-RS, does NOT need `routed` and frees 2.75 GiB act_q + dy3d)
@@ -1087,9 +1114,21 @@ def _prepare(
   else:
     x_q = x2d.astype(p.compute_dtype)
   w_gate_q = quantize_and_gather_weight(
-      wi_local, p.weight_qtype, p.weight_scale, p.wi_gather_axes, (size_e, size_d, 2 * size_f)
+      wi_local,
+      p.weight_qtype,
+      p.weight_scale,
+      p.wi_gather_axes,
+      (size_e, size_d, 2 * size_f),
+      latency_ns=p.wi_ag_latency_ns,
   )
-  wo_q = quantize_and_gather_weight(wo_local, p.weight_qtype, p.weight_scale, p.wo_gather_axes, (size_e, size_f, size_d))
+  wo_q = quantize_and_gather_weight(
+      wo_local,
+      p.weight_qtype,
+      p.weight_scale,
+      p.wo_gather_axes,
+      (size_e, size_f, size_d),
+      latency_ns=p.wi_ag_latency_ns // 2,
+  )
   token_indices = (sort_indices // p.top_k).astype(jnp.int32)
   coeffs_in = sorted_coeffs.reshape(size_c, 1).astype(jnp.float32)
   coeffs = (

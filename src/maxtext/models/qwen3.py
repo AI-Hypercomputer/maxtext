@@ -2861,6 +2861,8 @@ class AttentionWithNorm(nnx.Module):
     """Applies self-attention with pre and post-layer normalization."""
     inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
+    if getattr(self.config, "decoder_layer_input_unalias", False) and model_mode == MODEL_MODE_TRAIN:
+      inputs = _unalias_decoder_layer_input(inputs)
     # Pre attention norm
     lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=self.out_sharding)
     lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
@@ -2883,6 +2885,24 @@ class AttentionWithNorm(nnx.Module):
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=self.out_sharding)
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
     return hidden_states, intermediate_inputs, kv_cache
+
+
+@jax.custom_vjp
+def _unalias_decoder_layer_input(x: jnp.ndarray) -> jnp.ndarray:
+  """Materializes a distinct HBM buffer after `decoder_layer_input` prefetch."""
+  one = jax.lax.optimization_barrier(jnp.ones((), dtype=x.dtype))
+  return jax.lax.optimization_barrier(x * one)
+
+
+def _unalias_decoder_layer_input_fwd(x: jnp.ndarray):
+  return _unalias_decoder_layer_input(x), None
+
+
+def _unalias_decoder_layer_input_bwd(_, g: jnp.ndarray):
+  return (g,)
+
+
+_unalias_decoder_layer_input.defvjp(_unalias_decoder_layer_input_fwd, _unalias_decoder_layer_input_bwd)
 
 
 # -----------------------------------------

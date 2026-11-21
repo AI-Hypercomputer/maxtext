@@ -173,6 +173,34 @@ class RouteOutput:
   # moe_tc_ragged_sort: TcRouting shared by the TensorCore ragged sort and unsort of this chunk.
   tc_routing: Optional[Any] = None
   # Optional [num_slots, 1] float32 routing weights already permuted by TensorCore sort.
+  sorted_weights: Optional[jax.Array] = None
+
+
+@jax.custom_vjp
+def _sort_packed_route_and_weights(packed_route: jax.Array, weights_1d: jax.Array):
+  """Sorts `(packed_route, weights_1d)` on TensorCore so `sorted_coeffs` avoids a SparseCore gather."""
+  sorted_packed, sorted_w = jax.lax.sort((packed_route, weights_1d), dimension=0, num_keys=1, is_stable=False)
+  sort_indices = (sorted_packed & jnp.uint32(0xFFFFF)).astype(jnp.int32)
+  return sort_indices, sorted_w[:, None]
+
+
+def _sort_packed_route_and_weights_fwd(packed_route: jax.Array, weights_1d: jax.Array):
+  sort_indices, sorted_coeffs = _sort_packed_route_and_weights(packed_route, weights_1d)
+  return (sort_indices, sorted_coeffs), (sort_indices, weights_1d.shape[0])
+
+
+def _sort_packed_route_and_weights_bwd(res, g):
+  sort_indices, n = res
+  _, grad_sorted_coeffs = g
+  grad_w = (
+      jnp.zeros((n, 1), dtype=grad_sorted_coeffs.dtype)
+      .at[sort_indices]
+      .add(grad_sorted_coeffs, mode="promise_in_bounds", unique_indices=True)[:, 0]
+  )
+  return None, grad_w
+
+
+_sort_packed_route_and_weights.defvjp(_sort_packed_route_and_weights_fwd, _sort_packed_route_and_weights_bwd)
 
 
 def _truncate_matrix(all_shards_group_sizes: jax.Array, buffer_size: int) -> jax.Array:
@@ -2475,6 +2503,7 @@ class RoutedMoE(nnx.Module):
       skip_token_gather=False,
       token_mask=None,
       physical_route_fn=None,
+      _return_sorted_weights=False,
   ):
     """Permute tokens to group by expert to fit gmm call.
 
@@ -2523,6 +2552,19 @@ class RoutedMoE(nnx.Module):
           per_expert_scale=per_expert_scale,
           token_mask=token_mask,
       )
+    # Unused slots (expert id -1, from forced routing or token_mask padding) and physical_route_fn's replica bins are
+    # counted by the bincount group sizes below but not by summed_expert_mask, so those calls keep that path.
+    tc_offload_free = (
+        bool(getattr(self.config, "moe_tc_routing_offload_free", False))
+        and not has_invalid_slots
+        and physical_route_fn is None
+        and roll_to_expert_id is None
+        and not (self.config.use_ragged_sort and self.config.use_ring_of_experts)
+    )
+    summed_expert_mask = None
+    if tc_offload_free:
+      expert_mask = jax.nn.one_hot(selected_experts, num_classes=self.num_experts, dtype=jnp.int32)
+      summed_expert_mask = jnp.sum(expert_mask, axis=-2)
     lb_loss = None
     if compute_lb_loss and self.config.load_balance_loss_weight > 0.0 and not self.is_hash_routing:
       # permute() runs inside the sparse path's shard_map, so with a token_mask the masked loss reduces its sum and
@@ -2537,13 +2579,18 @@ class RoutedMoE(nnx.Module):
             density_prob=precomputed_density_prob,
             token_mask=token_mask,
             reduce_axis_names=lb_reduce_axis_names,
+            summed_expert_mask=summed_expert_mask,
         )
       else:
         # Using pre_bias_logits ensures the router bias does not leak into the auxiliary loss gradient
         probs_logits = pre_bias_logits if pre_bias_logits is not None else gate_logits
         softmax_probs = jax.nn.softmax(probs_logits.astype(jnp.float32), axis=-1).astype(self.dtype)
         lb_loss = self.load_balance_loss(
-            selected_experts, softmax_probs, token_mask=token_mask, reduce_axis_names=lb_reduce_axis_names
+            selected_experts,
+            softmax_probs,
+            token_mask=token_mask,
+            reduce_axis_names=lb_reduce_axis_names,
+            summed_expert_mask=summed_expert_mask,
         )
 
     if self.should_update_load_balance():
@@ -2625,6 +2672,7 @@ class RoutedMoE(nnx.Module):
       # 3D dispatch layout but this call does not use the TC sort (e.g. dropless fallback): back to 2D.
       inputs_2d = jnp.reshape(inputs_2d, (bsz_times_seq_len, -1))
     sorted_scale_1d = None
+    sorted_weights = None
     if use_ragged_in_permute and use_tc_sort:
       sorted_inputs, group_size, sorted_selected_experts, tc_routing = ring_ragged_sort_tc(
           inputs_2d,
@@ -2717,18 +2765,31 @@ class RoutedMoE(nnx.Module):
         # Expert replication: sort by physical slot (home or replica) instead of logical expert.
         flatten_selected_experts_safe, num_sort_bins = physical_route_fn(flatten_selected_experts_safe, valid_mask)
 
-      if (
-          getattr(self.config, "moe_packed_routing_sort", False)
-          and forced_routed_experts is None
-          and flatten_selected_experts_safe.shape[0] <= (1 << 20)
-          and num_sort_bins <= (1 << 11)
-      ):
-        num_route_slots = flatten_selected_experts_safe.shape[0]
+      num_route_slots = flatten_selected_experts_safe.shape[0]
+      # The packed key (expert_id << 20) | slot_idx must fit in uint32.
+      packed_route_fits = num_route_slots <= (1 << 20) and num_sort_bins <= (1 << 11)
+      if tc_offload_free and not packed_route_fits:
+        max_logging.warning(
+            f"moe_tc_routing_offload_free=True but {num_route_slots} route slots / {num_sort_bins} experts exceed"
+            " the packed routing sort limits (2**20 slots, 2**11 experts); this call uses argsort and gathers the"
+            " routing weights on SparseCore instead of co-sorting them on TensorCore."
+        )
+      if getattr(self.config, "moe_packed_routing_sort", False) and forced_routed_experts is None and packed_route_fits:
         iota_vma = (flatten_selected_experts_safe.astype(jnp.int32) * jnp.int32(0)).astype(jnp.uint32) + jnp.arange(
             num_route_slots, dtype=jnp.uint32
         )
         packed_route = (flatten_selected_experts_safe.astype(jnp.uint32) << jnp.uint32(20)) | iota_vma
-        sorted_selected_experts = (jax.lax.sort(packed_route, is_stable=False) & jnp.uint32(0xFFFFF)).astype(jnp.int32)
+        if (
+            tc_offload_free
+            and _return_sorted_weights
+            and skip_token_gather
+            and not bool(getattr(self.config, "moe_fused_gmm3d_overlap_dcoeffs_scatter", False))
+        ):
+          sorted_selected_experts, sorted_weights = _sort_packed_route_and_weights(
+              packed_route, jnp.ravel(weights).astype(jnp.float32)
+          )
+        else:
+          sorted_selected_experts = (jax.lax.sort(packed_route, is_stable=False) & jnp.uint32(0xFFFFF)).astype(jnp.int32)
       else:
         sorted_selected_experts = jnp.argsort(flatten_selected_experts_safe)
       if skip_token_gather:
@@ -2747,7 +2808,10 @@ class RoutedMoE(nnx.Module):
       if not is_qarray and sorted_inputs is not None:
         sorted_inputs = sorted_inputs.astype(self.dtype)
 
-      group_size = jnp.bincount(flatten_selected_experts_safe, length=num_sort_bins)
+      if tc_offload_free and summed_expert_mask is not None:
+        group_size = jnp.sum(summed_expert_mask, axis=tuple(range(summed_expert_mask.ndim - 1)), dtype=jnp.int32)
+      else:
+        group_size = jnp.bincount(flatten_selected_experts_safe, length=num_sort_bins)
 
     num_tokens = bsz_times_seq_len * self.num_experts_per_tok
     use_truncated_buffer = use_ragged_in_permute and buffer_size is not None and buffer_size < num_tokens
@@ -2800,7 +2864,7 @@ class RoutedMoE(nnx.Module):
         sorted_scale = jnp.reshape(inputs.scale, (1,) * sorted_inputs.ndim)
       sorted_inputs = dataclasses.replace(inputs, qvalue=sorted_inputs, scale=sorted_scale)
 
-    return (
+    ret = (
         sorted_inputs,
         sorted_selected_experts,
         weights,
@@ -2814,6 +2878,7 @@ class RoutedMoE(nnx.Module):
         topk_argsort_indices,
         tc_routing,
     )
+    return (*ret, sorted_weights) if _return_sorted_weights else ret
 
   def unpermute(
       self,
@@ -4218,6 +4283,7 @@ class RoutedMoE(nnx.Module):
           _,
           _,
           _,
+          sorted_weights,
       ) = self.permute(
           x,
           logits,
@@ -4233,6 +4299,7 @@ class RoutedMoE(nnx.Module):
           skip_token_gather=skip_token_gather,
           token_mask=token_mask,
           physical_route_fn=physical_route_fn,
+          _return_sorted_weights=True,
       )
 
       if num_ep > 1:
@@ -4322,6 +4389,7 @@ class RoutedMoE(nnx.Module):
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
               required_rbf=required_rbf,
+              sorted_weights=sorted_weights,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -4871,17 +4939,21 @@ class RoutedMoE(nnx.Module):
           fused_quant_relayout=bool(getattr(self.config, "moe_fused_gmm3d_fused_quant_relayout", False)),
           overlap_dcoeffs_scatter=bool(getattr(self.config, "moe_fused_gmm3d_overlap_dcoeffs_scatter", False)),
           wgrad_schedule_mode=int(getattr(self.config, "moe_fused_gmm3d_wgrad_schedule_mode", 0) or 0),
+          wi_ag_latency_ns=int(getattr(self.config, "moe_wi_ag_latency_ns", 0) or 0),
           use_reference=use_reference,
       )
       sort_indices = routing.sorted_selected_experts.astype(jnp.int32)
       # Routing coefficients in sorted-slot order (fused into the GLU epilogue). A [C, 1] gather with unique
       # indices: its transpose is a [C, 1] scatter-add of the coefficient gradient (no second argsort).
-      weights_flat = jnp.reshape(routing.weights, (-1, 1)).astype(jnp.float32)
-      sorted_coeffs = (
-          weights_flat
-          if params.overlap_dcoeffs_scatter
-          else weights_flat.at[sort_indices].get(mode="promise_in_bounds", unique_indices=True)
-      )
+      if routing.sorted_weights is not None and not params.overlap_dcoeffs_scatter:
+        sorted_coeffs = routing.sorted_weights
+      else:
+        weights_flat = jnp.reshape(routing.weights, (-1, 1)).astype(jnp.float32)
+        sorted_coeffs = (
+            weights_flat
+            if params.overlap_dcoeffs_scatter
+            else weights_flat.at[sort_indices].get(mode="promise_in_bounds", unique_indices=True)
+        )
       y2d = quantizations.without_qwix_interception(moe_fused_gmm3d.fused_moe_experts)(
           params,
           jnp.reshape(x_tokens, (num_tokens, emb_dim)).astype(self.dtype),
@@ -5905,6 +5977,7 @@ class RoutedMoE(nnx.Module):
       density_prob: jax.Array | None = None,
       token_mask: jax.Array | None = None,
       reduce_axis_names: str | Sequence[str] | None = None,
+      summed_expert_mask: jax.Array | None = None,
   ) -> jax.Array:
     """Compute the sequence-wise load balance loss.
 
@@ -5936,12 +6009,15 @@ class RoutedMoE(nnx.Module):
         per-shard statistic. Without it, padding placed at the tail of the batch (whole shards without a valid
         sequence contribute 0 and would be averaged with equal weight once the shard outputs are combined) would
         dilute the loss and its gradient. The unmasked branch is unchanged (no reduction, as before).
+      summed_expert_mask: Optional precomputed `one_hot(top_k_indices).sum(axis=2)`, (batch, sequence, num_experts),
+        so a caller that already has it skips the one_hot here. Computed from `top_k_indices` if None.
 
     Returns:
       Scalar loss averaged over the (valid) sequences of the batch, already scaled by load_balance_loss_weight.
     """
-    expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
-    summed_expert_mask = jnp.sum(expert_mask, axis=2)
+    if summed_expert_mask is None:
+      expert_mask = jax.nn.one_hot(top_k_indices, num_classes=self.num_experts, dtype=jnp.int32)
+      summed_expert_mask = jnp.sum(expert_mask, axis=2)
     # Get fraction of tokens dispatched to each expert
     # jnp.mean over axis=1 (sequence length) isolates the token density per sequence.
     # divide by top_k so that sum(density) == 1 across experts (Switch Transformer topk=1)
