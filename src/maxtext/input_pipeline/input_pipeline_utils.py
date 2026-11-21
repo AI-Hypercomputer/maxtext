@@ -14,11 +14,13 @@
 
 """Operations used by Grain"""
 
+import bisect
+from collections.abc import Mapping
 import dataclasses
 import re
-import warnings
-from threading import current_thread
+import threading
 from typing import Any, Iterable, TYPE_CHECKING
+import warnings
 
 if TYPE_CHECKING:
   import datasets
@@ -40,6 +42,7 @@ from maxtext.utils import max_logging
 
 Features = dict[str, Any]
 INPUT_TOKENS_KEY = "input_ids"
+SFT_TOKEN_IDS_COLUMN = "_sft_token_ids"
 
 ########## Functions used by TFDS pipeline
 
@@ -312,51 +315,834 @@ def fix_pad_token_if_needed(tokenizer_model) -> bool:
   return True
 
 
-def _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs):
-  """Splits a conversational round (system + user + assistant) into prompt and completion formatted strings.
+_EMPTY_THINK_PREFIX = re.compile(r"^(?:<think>\s*</think>|<\|channel>thought\s*<channel\|>)\s*$")
+_TURN_CLOSER_PREFIX = re.compile(r"^(?:<\|im_end\|>|<end_of_turn>|<turn\|>|<\|eot_id\|>|<\|endoftext\|>|</s>)+")
+_VALID_SFT_LABEL_MODES = ("generation_blocks", "prefix")
+_SFT_FALLBACK_LOCK = threading.Lock()
+_SFT_FALLBACK_COUNTS: dict[str, int] = {}
 
-  Uses the longest-common-prefix between the full conversation tokens and the
-  generation-prompt tokens to locate where the prompt ends and completion begins.
 
-  Args:
-    tokenizer_model: The tokenizer instance.
-    round_msgs: Messages for the current conversational turn including the assistant response.
+def _record_sft_fallback(reason: str, message: str) -> None:
+  """Increments SFT masking fallback counter and logs rate-limited warnings."""
+  with _SFT_FALLBACK_LOCK:
+    count = _SFT_FALLBACK_COUNTS.get(reason, 0) + 1
+    _SFT_FALLBACK_COUNTS[reason] = count
+  if count <= 3 or (count < 100 and count % 10 == 0) or count % 100 == 0:
+    max_logging.warning(f"[SFT masking fallback:{reason} count={count}] {message}")
 
-  Returns:
-    A tuple of (prompt_str, completion_str).
-  """
-  full_tokens = extract_token_ids(
-      tokenizer_model.apply_chat_template(round_msgs, add_generation_prompt=False, tokenize=True)
-  )
-  prompt_tokens = extract_token_ids(
-      tokenizer_model.apply_chat_template(round_msgs[:-1], add_generation_prompt=True, tokenize=True)
-  )
 
-  # Find the longest common prefix where prompt ends and completion begins
-  common_len = 0
-  for full_id, prompt_id in zip(full_tokens, prompt_tokens):
-    if full_id == prompt_id:
-      common_len += 1
+def get_sft_masking_fallback_counts_for_test() -> Mapping[str, int]:
+  """Returns a snapshot of SFT chat-template masking fallback counts keyed by reason."""
+  with _SFT_FALLBACK_LOCK:
+    return dict(_SFT_FALLBACK_COUNTS)
+
+
+def _lcp_len(a, b):
+  """Length of the longest common prefix of two sequences."""
+  if isinstance(a, str) and isinstance(b, str):
+    if a == b:
+      return len(a)
+    lo, hi = 0, min(len(a), len(b))
+    while lo < hi:
+      mid = (lo + hi + 1) // 2
+      if a[:mid] == b[:mid]:
+        lo = mid
+      else:
+        hi = mid - 1
+    return lo
+  n = 0
+  for x, y in zip(a, b):
+    if x == y:
+      n += 1
     else:
       break
+  return n
 
-  if common_len == 0:
-    raise ValueError(
-        "Chat template generation prompt mismatch: no common prefix tokens found.\n"
-        f"Full conversation tokens: {full_tokens} ('{tokenizer_model.decode(full_tokens)}')\n"
-        f"Generation prompt tokens: {prompt_tokens} ('{tokenizer_model.decode(prompt_tokens)}')\n"
-        "Cannot determine completion boundary."
+
+def _assistant_span_is_clean(
+    messages,
+    message_idx,
+    rendered,
+    span_text,
+    *,
+    span_char_end=None,
+    next_char_start=None,
+    safe_end=None,
+    closer=None,
+):
+  """Checks whether a derived assistant span lines up cleanly with its message.
+
+  Verifies that the span covers the message content without pulling in the
+  assistant role header, earlier messages, or later messages. Reasoning traces
+  (such as Gemma 4 `reasoning`, Qwen 3 `reasoning_content`, or empty `<think>`
+  tags) preceding `content` are allowed. Turns whose content the template
+  rewrites are skipped.
+
+  Args:
+    messages: Full list of conversation message dicts.
+    message_idx: Index of the assistant message in `messages`.
+    rendered: Full chat-template rendering of `messages`.
+    span_text: Decoded text of the candidate assistant token span.
+    span_char_end: Optional end character offset of the candidate token span.
+    next_char_start: Optional start character offset of the next message content.
+    safe_end: Optional verified prefix end offset that precedes later messages.
+    closer: Optional closer string emitted right after this assistant turn.
+
+  Returns:
+    True if the span cleanly matches the assistant message, False otherwise.
+  """
+  msg = messages[message_idx]
+  content = msg.get("content")
+  content_found = isinstance(content, str) and bool(content) and content in rendered
+  if content_found:
+    if content not in span_text:
+      return False
+    content_pos = span_text.rindex(content)
+    lead = span_text[:content_pos].lstrip()
+    if lead:
+      reasoning = msg.get("reasoning") or msg.get("reasoning_content")
+      if isinstance(reasoning, str) and reasoning and reasoning in lead:
+        if not (lead.startswith(reasoning) or lead.startswith("<think>")):
+          return False
+      elif not _EMPTY_THINK_PREFIX.match(lead):
+        return False
+    tail = span_text[content_pos + len(content) :]
+  else:
+    tail = span_text
+
+  if span_char_end is not None and next_char_start is not None:
+    return span_char_end <= next_char_start
+  if span_char_end is not None and safe_end is not None and span_char_end <= safe_end:
+    return True
+
+  if closer:
+    if content_found and tail.startswith(closer):
+      tail = tail[len(closer) :]
+    elif not content_found and tail.endswith(closer):
+      tail = tail[: -len(closer)]
+  elif content_found:
+    match = _TURN_CLOSER_PREFIX.match(tail)
+    tail = tail[match.end() :].lstrip() if match else tail.lstrip()
+
+  return not any(
+      isinstance(m.get("content"), str) and m["content"].strip() and m["content"] in tail
+      for m in messages[message_idx + 1 :]
+  )
+
+
+_UNSET_OFFSETS = object()
+
+
+def _monotonic_token_ends(offsets):
+  """Returns sorted token end-offsets when `offsets` is non-decreasing, else None."""
+  if offsets is None:
+    return None
+  prev_start = -1
+  prev_end = -1
+  ends = []
+  for tok_start, tok_end in offsets:
+    if tok_start < prev_start or tok_end < prev_end:
+      return None
+    prev_start = tok_start
+    prev_end = tok_end
+    ends.append(tok_end)
+  return ends
+
+
+def _token_offsets(tokenizer_model, rendered, full_tokens):
+  """Returns token character offsets of `rendered` if they reproduce `full_tokens`, else None."""
+  try:
+    enc = tokenizer_model(rendered, add_special_tokens=False, return_offsets_mapping=True)
+    if list(enc["input_ids"]) == list(full_tokens) and "offset_mapping" in enc:
+      return enc["offset_mapping"]
+  except (TypeError, NotImplementedError, ValueError):
+    # Offset mappings are unsupported on slow/custom tokenizers; callers fall back to prefix probing.
+    return None
+  return None
+
+
+def _char_offset_to_token_end(
+    tokenizer_model, rendered, full_tokens, char_pos, offsets=_UNSET_OFFSETS, *, token_ends=None
+):
+  """Maps a character end-offset in `rendered` to the corresponding token end-index in `full_tokens`.
+
+  Args:
+    tokenizer_model: Hugging Face tokenizer instance.
+    rendered: Full chat-template rendering.
+    full_tokens: Token IDs of `rendered`.
+    char_pos: Character end-offset in `rendered`.
+    offsets: Precomputed `_token_offsets(...)` result (None when offsets are unavailable). Computed on demand when
+      omitted; pass it when mapping several positions of the same rendering to avoid re-tokenizing it each time.
+    token_ends: Optional precomputed monotonic end-offset list for binary search.
+
+  Returns:
+    Token end-index in `full_tokens`.
+  """
+  if char_pos <= 0:
+    return 0
+  if char_pos >= len(rendered):
+    return len(full_tokens)
+  if offsets is _UNSET_OFFSETS:
+    offsets = _token_offsets(tokenizer_model, rendered, full_tokens)
+  if offsets is not None:
+    if token_ends is not None:
+      idx = bisect.bisect_right(token_ends, char_pos)
+      if idx < len(offsets):
+        tok_start, _ = offsets[idx]
+        if tok_start < char_pos and rendered[tok_start:char_pos].strip():
+          idx += 1
+      return idx
+    end_idx = 0
+    for i, (tok_start, tok_end) in enumerate(offsets):
+      if tok_end <= char_pos:
+        end_idx = i + 1
+      elif tok_start < char_pos:
+        if rendered[tok_start:char_pos].strip():
+          end_idx = i + 1
+        break
+      else:
+        break
+    return end_idx
+  prefix_tokens = extract_token_ids(tokenizer_model(rendered[:char_pos], add_special_tokens=False))
+  return _lcp_len(full_tokens, prefix_tokens)
+
+
+def _find_turn_boundary(
+    tokenizer_model,
+    conversation,
+    idx,
+    rendered,
+    *,
+    r_thru=None,
+    r_prev=None,
+    probed_starts=None,
+):
+  """Finds the end offset, next message start offset, and closer string of assistant message `idx`."""
+  if idx == len(conversation) - 1:
+    return len(rendered), None, None
+
+  def render(msgs):
+    return tokenizer_model.apply_chat_template(msgs, add_generation_prompt=False, tokenize=False)
+
+  if r_thru is None:
+    r_thru = render(conversation[: idx + 1])
+  if rendered.startswith(r_thru):
+    return len(r_thru), None, None
+
+  asst_content = conversation[idx].get("content")
+  next_content = conversation[idx + 1].get("content")
+  if (asst_content is not None and not isinstance(asst_content, str)) or (
+      next_content is not None and not isinstance(next_content, str)
+  ):
+    lcp_thru = _lcp_len(rendered, r_thru)
+    return (lcp_thru if lcp_thru > 0 else len(r_thru)), None, None
+
+  marker = " __MAXTEXT_SPAN_PROBE_9f3a__ "
+  while marker in rendered:
+    marker += "x"
+
+  asst_probed = {**conversation[idx], "content": (asst_content or "") + marker}
+  c_asst = list(conversation)
+  c_asst[idx] = asst_probed
+  rendered_asst = render(c_asst)
+  after_asst = _lcp_len(rendered, rendered_asst)
+
+  next_char_start = None
+  before_next = len(rendered)
+  for next_idx in range(idx + 1, len(conversation)):
+    cand_content = conversation[next_idx].get("content")
+    if cand_content is not None and not isinstance(cand_content, str):
+      break
+    if probed_starts is not None and next_idx in probed_starts:
+      pos = probed_starts[next_idx]
+    else:
+      c_next = list(conversation)
+      c_next[next_idx] = {**conversation[next_idx], "content": marker + (cand_content or "")}
+      rendered_next = render(c_next)
+      pos = len(rendered) if rendered_next == rendered else _lcp_len(rendered, rendered_next)
+      if probed_starts is not None and not (not cand_content and conversation[next_idx].get("tool_calls")):
+        probed_starts[next_idx] = pos
+    if next_idx == idx + 1:
+      before_next = pos
+    if pos < len(rendered):
+      if pos >= after_asst:
+        next_char_start = pos
+      break
+
+  if rendered_asst == rendered:
+    # The template ignored `content` for this assistant turn (e.g. a `tool_calls`-only turn).
+    lcp_thru = _lcp_len(rendered, r_thru)
+    if r_prev is None and idx > 0:
+      r_prev = render(conversation[:idx])
+    lcp_prev = _lcp_len(rendered, r_prev) if idx > 0 else 0
+    upper = before_next if before_next < len(rendered) else len(rendered)
+    if lcp_prev < lcp_thru <= upper and lcp_thru < len(rendered):
+      valid_next = next_char_start if next_char_start is not None and lcp_thru <= next_char_start else None
+      return lcp_thru, valid_next, None
+    return None, None, None
+
+  if before_next < after_asst:
+    return after_asst, None, None
+  gap = rendered[after_asst:before_next]
+  if not gap:
+    return after_asst, next_char_start, ""
+
+  # Candidate 1: turn closer from conversation[:idx + 1] (handles Qwen 3, Gemma 4, Llama 2, tool_calls).
+  c_short = list(conversation[:idx]) + [asst_probed]
+  short_closer = r_thru[_lcp_len(r_thru, render(c_short)) :]
+  if short_closer and gap.startswith(short_closer):
+    return after_asst + len(short_closer), next_char_start, short_closer
+
+  # Candidate 2: non-last closer from message idx - 1 (handles templates like OLMo-3 whose last message
+  # closes with `<|endoftext|>` instead of `<|im_end|>\n`).
+  if idx > 0:
+    prev_content = conversation[idx - 1].get("content")
+    if prev_content is None or isinstance(prev_content, str):
+      if r_prev is None:
+        r_prev = render(conversation[:idx])
+      prev_end = _lcp_len(rendered, r_prev)
+      c_prev = list(conversation)
+      c_prev[idx - 1] = {**conversation[idx - 1], "content": (prev_content or "") + marker}
+      after_prev = _lcp_len(rendered, render(c_prev))
+      non_last_closer = rendered[after_prev:prev_end]
+      if non_last_closer and gap.startswith(non_last_closer):
+        return after_asst + len(non_last_closer), next_char_start, non_last_closer
+
+  lcp_thru = _lcp_len(rendered, r_thru)
+  if after_asst <= lcp_thru <= before_next:
+    return lcp_thru, next_char_start, rendered[after_asst:lcp_thru] or None
+  return after_asst, next_char_start, None
+
+
+def _find_turn_start_char(tokenizer_model, conversation, idx, rendered, *, probed_starts=None):
+  """Fallback character start-offset of assistant message `idx` when an earlier turn diverged."""
+  asst_content = conversation[idx].get("content")
+  if asst_content is not None and not isinstance(asst_content, str):
+    return None
+  marker = " __MAXTEXT_SPAN_PROBE_9f3a__ "
+  while marker in rendered:
+    marker += "x"
+  candidates = []
+  if asst_content or not conversation[idx].get("tool_calls"):
+    if probed_starts is not None and idx in probed_starts:
+      pos = probed_starts[idx]
+    else:
+      c_content = list(conversation)
+      c_content[idx] = {**conversation[idx], "content": marker + (asst_content or "")}
+      pos = _lcp_len(
+          rendered, tokenizer_model.apply_chat_template(c_content, add_generation_prompt=False, tokenize=False)
+      )
+      if probed_starts is not None:
+        probed_starts[idx] = pos
+    if pos < len(rendered):
+      candidates.append(pos)
+  for key in ("reasoning", "reasoning_content"):
+    val = conversation[idx].get(key)
+    if isinstance(val, str) and val:
+      c_reason = list(conversation)
+      c_reason[idx] = {**conversation[idx], key: marker + val}
+      pos = _lcp_len(rendered, tokenizer_model.apply_chat_template(c_reason, add_generation_prompt=False, tokenize=False))
+      if pos < len(rendered):
+        candidates.append(pos)
+  return min(candidates) if candidates else None
+
+
+def _segments_from_spans(full_tokens, spans):
+  """(token ids, is_prompt) runs covering `full_tokens`, with the token ranges in `spans` trained."""
+  segments = []
+  pos = 0
+  for start, end in spans:
+    start = max(start, pos)
+    if start > pos:
+      segments.append((list(full_tokens[pos:start]), True))
+    if end > start:
+      segments.append((list(full_tokens[start:end]), False))
+    pos = max(pos, end)
+  if pos < len(full_tokens):
+    segments.append((list(full_tokens[pos:]), True))
+  return segments
+
+
+_GENERATION_BLOCK = re.compile(r"\{%[-+]?\s*generation\s*[-+]?%\}")
+
+
+def _generation_block_segments(tokenizer_model, conversation, template):
+  """Computes (token_ids, is_prompt) segments using `{% generation %}` blocks.
+
+  Renders once with generation character ranges, tokenizes the rendering with
+  offsets, and trains every token overlapping a range (boundary merges included,
+  zero-width offsets excluded). If a turn terminator (EOS or `<|im_end|>`)
+  immediately follows a generation block outside its span, falls back to
+  prefix-based boundary splitting so stop tokens remain in the completion.
+
+  Args:
+    tokenizer_model: Hugging Face tokenizer instance.
+    conversation: List of conversation message dicts.
+    template: Jinja chat template string containing `{% generation %}` blocks.
+
+  Returns:
+    List of `(token_ids, is_prompt)` segment tuples covering the conversation.
+  """
+  from transformers.utils import chat_template_utils  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+  rendered_chats, generation_indices = chat_template_utils.render_jinja_template(
+      conversations=[conversation],
+      chat_template=template,
+      return_assistant_tokens_mask=True,
+      add_generation_prompt=False,
+      **tokenizer_model.special_tokens_map,
+  )
+  rendered, ranges = rendered_chats[0], [tuple(r) for r in generation_indices[0]]
+  offsets = None
+  try:
+    enc = tokenizer_model(rendered, add_special_tokens=False, return_offsets_mapping=True)
+    full_tokens = extract_token_ids(enc)
+    if "offset_mapping" in enc:
+      offsets = np.asarray(enc["offset_mapping"]).reshape(-1, 2)
+  except (TypeError, NotImplementedError, ValueError):
+    full_tokens = extract_token_ids(tokenizer_model(rendered, add_special_tokens=False))
+  if not any(start < end for start, end in ranges):
+    if any(m["role"] == "assistant" for m in conversation):
+      _record_sft_fallback(
+          "empty_generation_blocks",
+          "Chat template has {% generation %} blocks, but none matched any assistant tokens; masking conversation.",
+      )
+      return [(list(full_tokens), True)]
+    return []
+  terminators = {t for t in (tokenizer_model.eos_token, "<|im_end|>") if t}
+  for start, end in ranges:
+    if start == end:
+      continue
+    t0 = end
+    while t0 < len(rendered) and rendered[t0].isspace():
+      t0 += 1
+    for terminator in terminators:
+      if rendered.startswith(terminator, t0):
+        covered = t0
+        for b0, b1 in sorted(ranges):
+          if b0 <= covered < b1:
+            covered = b1
+        if covered < t0 + len(terminator):
+          _record_sft_fallback(
+              "terminator_outside_generation_block",
+              f"Chat template {terminator!r} sits outside its {{% generation %}} block; falling back to prefix masking.",
+          )
+          return _prefix_conversation_segments(tokenizer_model, conversation)
+  trained = np.zeros(len(full_tokens), dtype=bool)
+  if offsets is not None:
+    for start, end in ranges:
+      if start < end:
+        trained |= (offsets[:, 1] > start) & (offsets[:, 0] < end)
+    trained &= offsets[:, 0] < offsets[:, 1]
+  else:
+    for start, end in ranges:
+      if start < end:
+        tok_start = _char_offset_to_token_end(tokenizer_model, rendered, full_tokens, start, offsets=None)
+        tok_end = _char_offset_to_token_end(tokenizer_model, rendered, full_tokens, end, offsets=None)
+        if 0 < end < len(rendered) and tok_end < len(full_tokens):
+          end_prefix = extract_token_ids(tokenizer_model(rendered[:end], add_special_tokens=False))
+          if tok_end < len(end_prefix):
+            tok_end += 1
+        trained[tok_start:tok_end] = True
+  spans, i = [], 0
+  while i < len(trained):
+    if trained[i]:
+      j = i
+      while j < len(trained) and trained[j]:
+        j += 1
+      spans.append((i, j))
+      i = j
+    else:
+      i += 1
+  return _segments_from_spans(full_tokens, spans)
+
+
+def _locate_turns_single_render(tokenizer_model, conversation, rendered):
+  """Locates content/reasoning character offsets in one template render, or returns None if unsafe."""
+  nonce = "9f3a"
+  while f"__MT_M_{nonce}_" in rendered:
+    nonce += "x"
+
+  c_marked = []
+  markers = {}
+  for i, msg in enumerate(conversation):
+    updated = dict(msg)
+    content = msg.get("content")
+    if content is None or isinstance(content, str):
+      s_mark = f"__MT_M_{nonce}_S{i}__"
+      e_mark = f"__MT_M_{nonce}_E{i}__"
+      markers[s_mark] = (i, "S")
+      markers[e_mark] = (i, "E")
+      updated["content"] = f"{s_mark}{content or ''}{e_mark}"
+    for key in ("reasoning", "reasoning_content"):
+      val = msg.get(key)
+      if isinstance(val, str) and val:
+        r_mark = f"__MT_M_{nonce}_R{i}__"
+        markers[r_mark] = (i, "R")
+        updated[key] = f"{r_mark}{val}"
+        break
+    c_marked.append(updated)
+
+  if not markers:
+    return None
+
+  rendered_marked = tokenizer_model.apply_chat_template(c_marked, add_generation_prompt=False, tokenize=False)
+  marker_re = re.compile(rf"__MT_M_{re.escape(nonce)}_[RSE]\d+__")
+  parsed = _extract_marked_positions(rendered_marked, rendered, marker_re, markers)
+  if parsed is None:
+    return None
+  positions, counts = parsed
+  if not _verify_marked_monotonicity(conversation, nonce, positions, counts):
+    return None
+  return positions
+
+
+def _extract_marked_positions(rendered_marked, rendered, marker_re, markers):
+  """Extracts marker positions in `rendered` and verifies marker removal matches `rendered`."""
+  positions = {}
+  counts = {}
+  stripped_parts = []
+  last = 0
+  removed_len = 0
+  for match in marker_re.finditer(rendered_marked):
+    tok = match.group(0)
+    info = markers.get(tok)
+    if info is None:
+      return None
+    stripped_parts.append(rendered_marked[last : match.start()])
+    orig_pos = match.start() - removed_len
+    counts[tok] = counts.get(tok, 0) + 1
+    positions[info] = orig_pos
+    removed_len += match.end() - match.start()
+    last = match.end()
+  stripped_parts.append(rendered_marked[last:])
+  if "".join(stripped_parts) != rendered:
+    return None
+  return positions, counts
+
+
+def _verify_marked_monotonicity(conversation, nonce, positions, counts):
+  """Checks that every assistant turn appears once and all tracked turns stay ordered."""
+  prev_pos = 0
+  for i, msg in enumerate(conversation):
+    s_mark = f"__MT_M_{nonce}_S{i}__"
+    e_mark = f"__MT_M_{nonce}_E{i}__"
+    if msg["role"] == "assistant":
+      if counts.get(s_mark) != 1 or counts.get(e_mark) != 1:
+        return False
+      s_pos = positions[(i, "S")]
+      e_pos = positions[(i, "E")]
+      r_pos = positions.get((i, "R"))
+      if r_pos is not None and counts.get(f"__MT_M_{nonce}_R{i}__") != 1:
+        return False
+      anchor = r_pos if r_pos is not None and r_pos < s_pos else s_pos
+      if anchor < prev_pos or s_pos > e_pos:
+        return False
+      prev_pos = e_pos
+    elif (i, "S") in positions and counts.get(s_mark) == 1:
+      s_pos = positions[(i, "S")]
+      e_pos = positions.get((i, "E"))
+      if s_pos < prev_pos or (e_pos is not None and e_pos < s_pos):
+        return False
+      if e_pos is not None and counts.get(e_mark) == 1:
+        prev_pos = e_pos
+  return True
+
+
+@dataclasses.dataclass
+class _PrefixMaskingContext:
+  """Per-conversation state shared across prefix-based turn-boundary helpers."""
+
+  tokenizer_model: Any
+  conversation: list[dict[str, Any]]
+  rendered: str
+  full_tokens: list[int]
+  offsets: Any
+  token_ends: list[int] | None
+  rendered_thru: dict[int, str]
+  rendered_prompt: dict[int, str]
+  prefix_stable: bool
+  marked_positions: dict[tuple[int, str], int] | None
+  rendered_prev: dict[int, str] = dataclasses.field(default_factory=dict)
+  probed_starts: dict[int, int] = dataclasses.field(default_factory=dict)
+  start_gap_cache: dict[tuple[str, bool], int] = dataclasses.field(default_factory=dict)
+  end_gap_cache: dict[str, tuple[int, str | None]] = dataclasses.field(default_factory=dict)
+
+  def to_token(self, char_pos: int) -> int:
+    """Maps a character offset in `self.rendered` to a token index in `self.full_tokens`."""
+    return _char_offset_to_token_end(
+        self.tokenizer_model,
+        self.rendered,
+        self.full_tokens,
+        char_pos,
+        self.offsets,
+        token_ends=self.token_ends,
     )
 
-  prompt_str = tokenizer_model.decode(full_tokens[:common_len], skip_special_tokens=False)
-  completion_str = tokenizer_model.decode(full_tokens[common_len:], skip_special_tokens=False)
-  return prompt_str, completion_str
+
+def _locate_turn_start(ctx: _PrefixMaskingContext, idx: int, prev_end: int) -> tuple[int | None, int | None]:
+  """Locates `(start_token, start_char)` for assistant message `idx`, or `(None, None)` if unlocated."""
+  if idx == 0:
+    from transformers.utils import chat_template_utils  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+
+    template_err = getattr(getattr(chat_template_utils, "jinja2", None), "TemplateError", ValueError)
+    try:
+      empty_prompt = ctx.tokenizer_model.apply_chat_template([], add_generation_prompt=True, tokenize=False)
+      if empty_prompt and ctx.rendered.startswith(empty_prompt):
+        start_char = len(empty_prompt)
+        if ctx.offsets is not None:
+          return ctx.to_token(start_char), start_char
+        prompt_tokens = extract_token_ids(
+            ctx.tokenizer_model.apply_chat_template([], add_generation_prompt=True, tokenize=True)
+        )
+        return _lcp_len(ctx.full_tokens, prompt_tokens), start_char
+    except (ValueError, TypeError, LookupError, AttributeError, template_err):
+      # Templates indexing `messages[0]` reject `[]`; fall back to probing assistant turn 0 below.
+      pass
+    start_char = _find_turn_start_char(
+        ctx.tokenizer_model, ctx.conversation, 0, ctx.rendered, probed_starts=ctx.probed_starts
+    )
+    return (0, 0) if start_char is None else (ctx.to_token(start_char), start_char)
+
+  r_prompt = ctx.rendered_prompt.get(idx)
+  if r_prompt is None:
+    r_prompt = ctx.tokenizer_model.apply_chat_template(ctx.conversation[:idx], add_generation_prompt=True, tokenize=False)
+    ctx.rendered_prompt[idx] = r_prompt
+
+  start_char = None
+  if ctx.rendered.startswith(r_prompt):
+    start_char = len(r_prompt)
+    if ctx.offsets is not None:
+      start = ctx.to_token(start_char)
+    else:
+      prompt_tokens = extract_token_ids(
+          ctx.tokenizer_model.apply_chat_template(ctx.conversation[:idx], add_generation_prompt=True, tokenize=True)
+      )
+      start = _lcp_len(ctx.full_tokens, prompt_tokens)
+  else:
+    r_prev = ctx.tokenizer_model.apply_chat_template(ctx.conversation[:idx], add_generation_prompt=False, tokenize=False)
+    ctx.rendered_prev[idx] = r_prev
+    if ctx.rendered.startswith(r_prev):
+      prompt_tokens = extract_token_ids(
+          ctx.tokenizer_model.apply_chat_template(ctx.conversation[:idx], add_generation_prompt=True, tokenize=True)
+      )
+      start = _lcp_len(ctx.full_tokens, prompt_tokens)
+    else:
+      start_char = _find_turn_start_char(
+          ctx.tokenizer_model, ctx.conversation, idx, ctx.rendered, probed_starts=ctx.probed_starts
+      )
+      return (None, None) if start_char is None else (max(prev_end, ctx.to_token(start_char)), start_char)
+
+  if start < prev_end:
+    probed = _find_turn_start_char(
+        ctx.tokenizer_model, ctx.conversation, idx, ctx.rendered, probed_starts=ctx.probed_starts
+    )
+    if probed is not None:
+      start_char = probed
+      start = max(prev_end, ctx.to_token(start_char))
+  return start, start_char
 
 
-def _get_completion_in_chat_template(tokenizer_model, round_msgs):
-  """Calculates the completion part of a conversation turn formatted with a chat template."""
-  _, completion_str = _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs)
-  return completion_str
+def _resolve_turn_start(ctx: _PrefixMaskingContext, idx: int, prev_end: int) -> int | None:
+  """Resolves assistant turn start index using interstitial gap cache when available."""
+  cache_meta = None
+  if ctx.marked_positions is not None and idx > 0:
+    pos_s = ctx.marked_positions[(idx, "S")]
+    pos_r = ctx.marked_positions.get((idx, "R"))
+    has_reason = pos_r is not None and pos_r < pos_s
+    anchor = pos_r if has_reason else pos_s
+    prev_content_end = ctx.marked_positions.get((idx - 1, "E"))
+    if prev_content_end is not None and prev_content_end <= anchor:
+      cache_key = (ctx.rendered[prev_content_end:anchor], has_reason)
+      if cache_key in ctx.start_gap_cache:
+        return max(prev_end, ctx.to_token(anchor - ctx.start_gap_cache[cache_key]))
+      cache_meta = (cache_key, prev_content_end, anchor)
+
+  start, start_char = _locate_turn_start(ctx, idx, prev_end)
+  if cache_meta is not None and start is not None and start_char is not None:
+    cache_key, prev_content_end, anchor = cache_meta
+    if prev_content_end <= start_char <= anchor:
+      ctx.start_gap_cache[cache_key] = anchor - start_char
+  return start
+
+
+def _resolve_turn_end(ctx: _PrefixMaskingContext, idx: int) -> tuple[int | None, int | None, int | None, str | None]:
+  """Resolves `(end_token, next_char_start, safe_end, closer)` for assistant turn `idx`."""
+  if idx == len(ctx.conversation) - 1:
+    return len(ctx.full_tokens), None, None, None
+  if ctx.prefix_stable:
+    return ctx.to_token(len(ctx.rendered_thru[idx])), None, None, None
+
+  suffix_gap = None
+  pos_e = None
+  next_anchor = None
+  if ctx.marked_positions is not None and (idx + 1, "S") in ctx.marked_positions:
+    pos_e = ctx.marked_positions[(idx, "E")]
+    next_s = ctx.marked_positions[(idx + 1, "S")]
+    next_r = ctx.marked_positions.get((idx + 1, "R"))
+    next_anchor = next_r if next_r is not None and next_r < next_s else next_s
+    if pos_e <= next_anchor:
+      suffix_gap = ctx.rendered[pos_e:next_anchor]
+      if suffix_gap in ctx.end_gap_cache:
+        closer_len, closer = ctx.end_gap_cache[suffix_gap]
+        return ctx.to_token(pos_e + closer_len), next_anchor, None, closer
+
+  r_thru = ctx.rendered_thru.get(idx)
+  if suffix_gap is None and r_thru is None:
+    r_thru = ctx.tokenizer_model.apply_chat_template(
+        ctx.conversation[: idx + 1], add_generation_prompt=False, tokenize=False
+    )
+  if suffix_gap is None and ctx.rendered.startswith(r_thru):
+    return ctx.to_token(len(r_thru)), None, len(r_thru), None
+
+  end_char, next_char_start, closer = _find_turn_boundary(
+      ctx.tokenizer_model,
+      ctx.conversation,
+      idx,
+      ctx.rendered,
+      r_thru=r_thru,
+      r_prev=ctx.rendered_prev.get(idx),
+      probed_starts=ctx.probed_starts,
+  )
+  if end_char is None:
+    return None, None, None, None
+  if suffix_gap is not None and pos_e is not None and next_anchor is not None and pos_e <= end_char <= next_anchor:
+    if next_char_start is None:
+      next_char_start = next_anchor
+    if closer is None:
+      closer = ctx.rendered[pos_e:end_char] or None
+    ctx.end_gap_cache[suffix_gap] = (end_char - pos_e, closer)
+  return ctx.to_token(end_char), next_char_start, None, closer
+
+
+def _prefix_conversation_segments(tokenizer_model, conversation):
+  """Computes `(token_ids, is_prompt)` segments via prefix comparisons and boundary probes."""
+  full_tokens = extract_token_ids(
+      tokenizer_model.apply_chat_template(conversation, add_generation_prompt=False, tokenize=True)
+  )
+  rendered = tokenizer_model.apply_chat_template(conversation, add_generation_prompt=False, tokenize=False)
+  assistant_indices = [idx for idx, message in enumerate(conversation) if message["role"] == "assistant"]
+  if not assistant_indices:
+    return []
+
+  marked_positions = (
+      _locate_turns_single_render(tokenizer_model, conversation, rendered) if len(assistant_indices) >= 3 else None
+  )
+  if marked_positions is None:
+    rendered_thru = {
+        idx: tokenizer_model.apply_chat_template(conversation[: idx + 1], add_generation_prompt=False, tokenize=False)
+        for idx in assistant_indices
+    }
+    rendered_prompt = {
+        idx: tokenizer_model.apply_chat_template(conversation[:idx], add_generation_prompt=True, tokenize=False)
+        for idx in assistant_indices
+        if idx > 0
+    }
+    prefix_stable = all(
+        rendered.startswith(rendered_thru[idx]) and (idx == 0 or rendered.startswith(rendered_prompt[idx]))
+        for idx in assistant_indices
+    )
+  else:
+    rendered_thru, rendered_prompt, prefix_stable = {}, {}, False
+
+  # Tokenize the whole rendering with offsets once and reuse it for every span boundary.
+  offsets = _token_offsets(tokenizer_model, rendered, full_tokens)
+  ctx = _PrefixMaskingContext(
+      tokenizer_model=tokenizer_model,
+      conversation=conversation,
+      rendered=rendered,
+      full_tokens=full_tokens,
+      offsets=offsets,
+      token_ends=_monotonic_token_ends(offsets),
+      rendered_thru=rendered_thru,
+      rendered_prompt=rendered_prompt,
+      prefix_stable=prefix_stable,
+      marked_positions=marked_positions,
+  )
+
+  spans = []
+  prev_end = 0
+  for idx in assistant_indices:
+    start = _resolve_turn_start(ctx, idx, prev_end)
+    if start is None:
+      _record_sft_fallback(
+          "unlocated_turn_boundary",
+          f"Not training on a conversation whose assistant span {idx} start boundary could not be located.",
+      )
+      return [(list(full_tokens), True)]
+
+    end, next_char_start, safe_end, closer = _resolve_turn_end(ctx, idx)
+    if end is None:
+      _record_sft_fallback(
+          "unlocated_turn_boundary",
+          f"Not training on a conversation whose assistant span {idx} boundary could not be located.",
+      )
+      return [(list(full_tokens), True)]
+    if not ctx.prefix_stable and start < end:
+      span_char_end = int(offsets[end - 1][1]) if offsets is not None else None
+      span_ok = _assistant_span_is_clean(
+          conversation,
+          idx,
+          rendered,
+          tokenizer_model.decode(full_tokens[start:end], skip_special_tokens=False),
+          span_char_end=span_char_end,
+          next_char_start=next_char_start,
+          safe_end=safe_end,
+          closer=closer,
+      )
+      if not span_ok:
+        _record_sft_fallback(
+            "unclean_assistant_span",
+            f"Not training on a conversation whose assistant span {idx} does not match its content.",
+        )
+        return [(list(full_tokens), True)]
+    spans.append((start, end))
+    prev_end = max(prev_end, end)
+  return _segments_from_spans(full_tokens, spans)
+
+
+def _split_conversation_into_segments(tokenizer_model, conversation, label_mode="generation_blocks"):
+  """Splits a conversation into `(token_ids, is_prompt)` segments.
+
+  The conversation is templated once as a whole and every segment is cut from
+  that rendering, preserving exact whole-conversation semantics (single `<bos>`
+  or default system prompt, no extra EOS tokens between turns, template-driven
+  historical reasoning stripping, and preservation of `tool` or trailing `user`
+  turns as masked context). Note that on reasoning templates that omit prior-turn
+  thoughts in multi-turn history (e.g., Qwen 3, Gemma 4), non-final turns match the
+  template's inference context without `<think>` blocks, while the final turn keeps
+  full reasoning supervision. If a checked span cannot be cleanly isolated, the
+  conversation is fully masked and a rate-limited warning is logged.
+
+  Args:
+    tokenizer_model: Hugging Face tokenizer instance.
+    conversation: List of conversation message dicts.
+    label_mode: Masking strategy (`"generation_blocks"` or `"prefix"`).
+
+  Returns:
+    List of `(token_ids, is_prompt)` pairs covering the whole conversation.
+  """
+  if label_mode not in _VALID_SFT_LABEL_MODES:
+    raise ValueError(f"Unsupported sft_label_mode {label_mode!r}; expected one of {_VALID_SFT_LABEL_MODES}.")
+
+  # A single-message conversation with role="document" is pretraining-style raw text (e.g.
+  # long-context replay): tokenize without the chat template, append one EOS token, and train
+  # on every token.
+  if len(conversation) == 1 and conversation[0]["role"] == "document":
+    eos_id = getattr(tokenizer_model, "eos_token_id", None)
+    if eos_id is None:
+      raise ValueError("Cannot format 'document' SFT example because tokenizer.eos_token_id is None.")
+    ids = extract_token_ids(tokenizer_model(conversation[0]["content"], add_special_tokens=False))
+    return [(list(ids) + [eos_id], False)]
+
+  template = (
+      tokenizer_model.get_chat_template()
+      if hasattr(tokenizer_model, "get_chat_template")
+      else getattr(tokenizer_model, "chat_template", None)
+  )
+  if label_mode == "generation_blocks" and isinstance(template, str) and _GENERATION_BLOCK.search(template):
+    return _generation_block_segments(tokenizer_model, conversation, template)
+  return _prefix_conversation_segments(tokenizer_model, conversation)
 
 
 _DS4_TURN_RE = re.compile(
@@ -441,7 +1227,7 @@ def _format_conversations_dsv4(example, data_column_name):
   return example
 
 
-def apply_chat_template(example, tokenizer_model, data_column_name, model_name=None):
+def apply_chat_template(example, tokenizer_model, data_column_name, model_name=None, label_mode="generation_blocks"):
   """Formats conversational data by applying the tokenizer's chat template
   and identifying prompt/completion segments for SFT masking.
 
@@ -454,53 +1240,63 @@ def apply_chat_template(example, tokenizer_model, data_column_name, model_name=N
       that contains the list of messages.
     model_name: Optional model name used as a fallback to identify models
       that use a custom chat encoder when `tokenizer_model.chat_template` is None.
+    label_mode: Strategy for determining trainable completion spans
+      (`"generation_blocks"` or `"prefix"`).
 
   Returns:
     The modified `example` dictionary.
-      - The `data_column_name` column will be updated to a list of
-        messages, each formatted according to the tokenizer's chat template.
+      - The `data_column_name` column will be updated to a list of decoded
+        segment strings formatted according to the tokenizer's chat template.
+      - A new column `SFT_TOKEN_IDS_COLUMN` carries the exact pre-tokenized
+        integer token-ID list per segment so downstream tokenization preserves
+        whole-conversation boundaries (including `document` rows and
+        boundary-merged segments) with a uniform Arrow column schema.
       - A new column "is_prompt" is added, where `True` indicates the
         tokens contain the system message, user message, and generation
         prompt (if applicable). `False` indicates the expected LLM
         completion, excluding the assistant's start tokens.
   """
-  messages = []
-  is_prompt = []
-  round_msgs = []
+  if label_mode not in _VALID_SFT_LABEL_MODES:
+    raise ValueError(f"Unsupported sft_label_mode {label_mode!r}; expected one of {_VALID_SFT_LABEL_MODES}.")
+  conversation = list(example[data_column_name])
   try:
     if getattr(tokenizer_model, "chat_template", None) is None and _is_deepseek_v4(tokenizer_model, model_name):
       return _format_conversations_dsv4(example, data_column_name)
-    for idx, message in enumerate(example[data_column_name]):
-      if message["role"] == "system":
-        if idx != 0:
-          raise ValueError(f"System message found at index {idx}. System messages must be at index 0.")
-        round_msgs.append(message)
-      elif message["role"] == "user":
-        round_msgs.append(message)
-      elif message["role"] == "assistant":
-        round_msgs.append(message)
-        prompt_str, completion_str = _split_turn_into_prompt_and_completion(tokenizer_model, round_msgs)
-        messages.extend([prompt_str, completion_str])
-        is_prompt.extend([True, False])
-        # Round ended, clearing the buffer.
-        round_msgs.clear()
+    for idx, message in enumerate(conversation):
+      if message["role"] == "system" and idx != 0:
+        raise ValueError(f"System message found at index {idx}. System messages must be at index 0.")
+    segments = _split_conversation_into_segments(tokenizer_model, conversation, label_mode=label_mode)
   except ValueError as e:
     max_logging.log(f"Unable to apply chat template: {e}")
     raise e
-  example["is_prompt"] = is_prompt
-  example[data_column_name] = messages
+  example["is_prompt"] = [is_prompt for _, is_prompt in segments]
+  example[data_column_name] = [tokenizer_model.decode(ids, skip_special_tokens=False) for ids, _ in segments]
+  example[SFT_TOKEN_IDS_COLUMN] = [list(ids) for ids, _ in segments]
   return example
+
+
+def _tokenize_entry(entry, hf_tokenizer, truncation, max_length):
+  """Tokenizes a string or (possibly nested) list of strings, passing pre-tokenized ID lists through."""
+  if isinstance(entry, str):
+    return hf_tokenizer(entry, truncation=truncation, max_length=max_length)["input_ids"]
+  if isinstance(entry, list):
+    if not entry:
+      return entry
+    if all(isinstance(x, str) for x in entry):
+      return hf_tokenizer(entry, truncation=truncation, max_length=max_length)["input_ids"]
+    if all(isinstance(x, int) for x in entry):
+      return entry
+    return [_tokenize_entry(sub, hf_tokenizer, truncation, max_length) for sub in entry]
+  return entry
 
 
 def tokenization(example, hf_tokenizer, truncation, max_length, column_names):
   """Tokenize a HuggingFace dataset"""
+  if not truncation and len(column_names) == 1 and SFT_TOKEN_IDS_COLUMN in example:
+    example[column_names[0]] = example[SFT_TOKEN_IDS_COLUMN]
+    return example
   for column_name in column_names:
-    if isinstance(example[column_name], list):
-      example[column_name] = [
-          hf_tokenizer(x, truncation=truncation, max_length=max_length)["input_ids"] for x in example[column_name]
-      ]
-    elif isinstance(example[column_name], str):
-      example[column_name] = hf_tokenizer(example[column_name], truncation=truncation, max_length=max_length)["input_ids"]
+    example[column_name] = _tokenize_entry(example[column_name], hf_tokenizer, truncation, max_length)
   return example
 
 
@@ -658,7 +1454,7 @@ class HFDataSource(grain.RandomAccessDataSource):
     The next item in the iterator is returned."""
     if not self.data_iters:
       self.data_iters = [iter(x) for x in self.datasets]
-    idx = int(current_thread().name.split("_")[1])
+    idx = int(threading.current_thread().name.split("_")[1])
 
     while True:
       try:

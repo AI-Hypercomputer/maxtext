@@ -1147,6 +1147,8 @@ use_dpo: false
 use_sft: false
 # sft_train_on_completion_only=false trains on both prompt and completion tokens; trains only on completion tokens otherwise
 sft_train_on_completion_only: false
+# How SFT locates trainable completion spans: 'generation_blocks' (default) or 'prefix'
+sft_label_mode: "generation_blocks"
 
 # dataset_type must be synthetic, hf, grain, tfds
 # details in: https://github.com/AI-Hypercomputer/maxtext/blob/main/docs/guides/data_input_pipeline.md

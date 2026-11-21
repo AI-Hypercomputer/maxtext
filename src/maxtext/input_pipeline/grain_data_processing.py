@@ -662,7 +662,7 @@ def dpo_preprocessing_pipeline(
   return dataset
 
 
-def _format_chat_template_grain(element, data_columns, tokenizer_model, model_name=None):
+def _format_chat_template_grain(element, data_columns, tokenizer_model, model_name=None, label_mode="generation_blocks"):
   """Grain-compatible mapping function to format raw columns into conversational messages."""
   # Convert raw columns to conversational messages
   if "messages" in data_columns:
@@ -692,14 +692,23 @@ def _format_chat_template_grain(element, data_columns, tokenizer_model, model_na
   element[data_columns[0]] = messages
 
   return input_pipeline_utils.apply_chat_template(
-      element, tokenizer_model=tokenizer_model, data_column_name=data_columns[0], model_name=model_name
+      element,
+      tokenizer_model=tokenizer_model,
+      data_column_name=data_columns[0],
+      model_name=model_name,
+      label_mode=label_mode,
   )
 
 
 def _tokenize_sft_chunks(element, text_column_name, tokenizer_model):
-  """Tokenize each chunk individually without truncating."""
-  text_chunks = element[text_column_name]
-  element[text_column_name] = [tokenizer_model.encode(chunk) for chunk in text_chunks]
+  """Tokenize each chunk individually without truncating; use pre-tokenized SFT IDs when available."""
+  if input_pipeline_utils.SFT_TOKEN_IDS_COLUMN in element:
+    element[text_column_name] = [list(ids) for ids in element.pop(input_pipeline_utils.SFT_TOKEN_IDS_COLUMN)]
+    return element
+  chunks = element[text_column_name]
+  element[text_column_name] = [
+      tokenizer_model.encode(chunk) if isinstance(chunk, str) else list(chunk) for chunk in chunks
+  ]
   return element
 
 
@@ -724,6 +733,13 @@ def sft_preprocessing_pipeline(
     pad_id = tokenizer_model.pad_token_id
     if hasattr(base_tokenizer_model, "pad_id"):
       base_tokenizer_model.pad_id = pad_id
+  eos_id = getattr(tokenizer_model, "eos_token_id", None)
+  if pad_id is not None and pad_id == eos_id:
+    max_logging.warning(
+        f"SFT pad_id ({pad_id}) equals eos_token_id; prompt masking and ShiftData will drop completion EOS "
+        "targets from loss (for example GPT-2 style tokenizers without a distinct pad token). "
+        "Configure a distinct pad_token if available."
+    )
 
   data_processing_utils.validate_and_configure_sft_columns(
       data_columns, tokenizer_model, getattr(config, "chat_template", None)
@@ -735,6 +751,7 @@ def sft_preprocessing_pipeline(
           data_columns=data_columns,
           tokenizer_model=tokenizer_model,
           model_name=getattr(config, "model_name", None),
+          label_mode=getattr(config, "sft_label_mode", "generation_blocks"),
       )
   )
 
