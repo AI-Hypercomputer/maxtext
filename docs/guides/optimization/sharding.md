@@ -417,6 +417,8 @@ The layer outputs between stages of size $BE$. These are collectively permuted (
 
 Note that for MoE models, this arithmetic intensity grows by a factor of `experts_per_token` since the compute grows by this factor, but the communication is independent of this factor.
 
+For inspecting multi-stage pipeline schedules, SPMD bubbles, and `collective-permute` waits directly in XProf traces, see [Pipeline Parallelism Profiling with XProf](pipeline_parallelism_profiling.md).
+
 ## Context Autoregressive
 
 Context Autoregressive shards the KV cache on the sequence dimension. It shards feed forward layer by experts for both activations and weights. This is used for inference only, see [inference.yml](https://github.com/AI-Hypercomputer/maxtext/blob/2052c22e3219b9f3a3fd66813bc6be793d79c963/src/maxtext/configs/inference/inference.yml#L4) for the modified logical axis rules for inference.

@@ -44,4 +44,6 @@ The following parameters control how profiling is executed within MaxText, allow
 
 - `skip_first_n_steps_for_profiler` specifies the number of initial training steps to skip before the profiling capture begins. This is typically used to bypass model warmup and capture steady-state performance. default is 1.
 
+- `enable_pipeline_stage_profiling` enables automatic multi-stage trace capture and in-place augmentation when `profiler=xplane` is used with pipeline parallelism (`ici_pipeline_parallelism > 1` or `dcn_pipeline_parallelism > 1`). MaxText automatically profiles one representative host per pipeline stage and merges the clock-aligned multi-stage timeline into Process 0's `.xplane.pb` trace. Default is `true`. See [Pipeline Parallelism Profiling with XProf](../optimization/pipeline_parallelism_profiling.md) for details.
+
 For more information about XProf tools, see the [XProf documentation](https://openxla.org/xprof).
