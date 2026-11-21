@@ -202,11 +202,15 @@ def _merge_mm_embeddings_inner(
   if token_mask is not None:
     # This logic packs valid multimodal tokens to the front of the array.
     # It correctly handles cases where some multimodal tokens are just padding.
-    sort_indices = jnp.argsort(-token_mask)  # Sorts descending, putting 1s first
+    token_mask_int = (token_mask != 0).astype(jnp.int32)
+    num_valid = jnp.sum(token_mask_int)
+    sort_indices = jnp.argsort(-token_mask_int)  # Sorts descending, putting 1s first
     multimodal_embeddings = multimodal_embeddings[sort_indices]
+  else:
+    num_valid = multimodal_embeddings.shape[0]
 
   cumsum_mask = jnp.cumsum(mask != 0)
-  mask_bool = (mask != 0) & (cumsum_mask <= multimodal_embeddings.shape[0])
+  mask_bool = (mask != 0) & (cumsum_mask <= num_valid)
   mask_expanded = mask_bool[:, jnp.newaxis]
   mm_token_idx = jnp.clip(cumsum_mask - 1, 0, multimodal_embeddings.shape[0] - 1)
   mm_aligned = multimodal_embeddings[mm_token_idx, :]

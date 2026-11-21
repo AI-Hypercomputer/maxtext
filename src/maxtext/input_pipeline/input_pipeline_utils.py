@@ -1020,6 +1020,25 @@ class PadOrTrimToMaxLength(grain.MapTransform):
           f"registered in `PadOrTrimToMaxLength`. Qwen models use native dynamic grids and must be "
           f"registered to bypass image padding."
       )
+    elif vision_block == "deepseek41":
+      max_num_items = self.max_num_images_per_example if self.max_num_images_per_example > 0 else 1
+
+      def _pad_ds41(tensor: np.ndarray, label: str) -> np.ndarray:
+        if tensor.shape[0] > max_num_items:
+          raise ValueError(f"Number of {label} ({tensor.shape[0]}) exceeds the maximum allowed ({max_num_items}).")
+        if tensor.shape[0] < max_num_items:
+          pad_shape = (max_num_items - tensor.shape[0],) + tensor.shape[1:]
+          pad_arr = np.zeros(pad_shape, dtype=tensor.dtype)
+          tensor = np.concatenate([tensor, pad_arr], axis=0) if tensor.size > 0 else pad_arr
+        return tensor
+
+      preprocessed_image.pixel_values = _pad_ds41(preprocessed_image.pixel_values, "images")
+      if preprocessed_image.pixel_mask is not None:
+        preprocessed_image.pixel_mask = _pad_ds41(preprocessed_image.pixel_mask, "masks")
+      image_grids = getattr(preprocessed_image, "image_grids", None)
+      if image_grids is not None:
+        preprocessed_image.image_grids = _pad_ds41(image_grids, "image_grids")  # type: ignore[attr-defined]
+      return preprocessed_image
 
     # Determine the maximum number of images/masks allowed.
     image_offsets = mm_processor.get_image_offsets(self.config, preprocessed_image)
@@ -1161,6 +1180,9 @@ class ExtractImagesAndMasks(grain.MapTransform):
     pixel_grid_thw = getattr(preprocessed_image, "pixel_grid_thw", None)
     if pixel_grid_thw is not None:
       output["image_grid_thw"] = pixel_grid_thw
+    image_grids = getattr(preprocessed_image, "image_grids", None)
+    if image_grids is not None:
+      output["image_grids"] = image_grids
 
     return output
 
@@ -1182,10 +1204,11 @@ class FoldImagesIntoBatch(grain.MapTransform):
   """
 
   model_name: str | None = None
+  config: Any = None
 
   def __post_init__(self):
     """Initializes the target shape after the dataclass is created."""
-    self.target_shape = mm_processor.get_dummy_image_shape_for_init(self.model_name)
+    self.target_shape = mm_processor.get_dummy_image_shape_for_init(self.model_name, config=self.config)
 
   def map(self, element: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
     """Applies the folding transformation to the 'images' field if present."""
@@ -1203,6 +1226,16 @@ class FoldImagesIntoBatch(grain.MapTransform):
       second_per_grids = element.get("second_per_grids")
       if second_per_grids is not None:
         element["second_per_grids"] = second_per_grids.reshape(-1)
+      return element
+
+    image_grids = element.get("image_grids")
+    if image_grids is not None:
+      if images.ndim > 4:
+        element["images"] = images.reshape(-1, *images.shape[-3:])
+        image_masks = element.get("image_masks")
+        if image_masks is not None and image_masks.ndim > 2:
+          element["image_masks"] = image_masks.reshape(-1, image_masks.shape[-1])
+        element["image_grids"] = image_grids.reshape(-1, *image_grids.shape[-2:])
       return element
 
     # If ndim is greater than the expected ndim for a batched image tensor,

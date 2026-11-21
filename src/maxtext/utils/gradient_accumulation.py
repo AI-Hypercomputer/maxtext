@@ -22,7 +22,7 @@ from jax.sharding import NamedSharding
 from flax import nnx
 
 from maxtext.common.common_types import ShardMode
-from maxtext.layers.moe import load_balance_updates_from_counts
+from maxtext.layers.moe import load_balance_updates_from_counts, resolve_vl_bias_update_rate
 from maxtext.utils import max_utils
 from maxtext.utils.sharding import maybe_shard_with_name
 
@@ -211,22 +211,33 @@ def gradient_accumulation_loss_and_grad(
   for key in ("moe_lb_loss", "indexer_loss", "mtp_loss"):
     if key in aux:
       aux[key] = aux[key] / config.gradient_accumulation_steps
-  if getattr(config, "routed_bias", False) and getattr(config, "routed_bias_update_rate", 0.0) > 0.0:
+  text_bias_rate = float(getattr(config, "routed_bias_update_rate", 0.0))
+  vl_rate = resolve_vl_bias_update_rate(config)
+  if getattr(config, "routed_bias", False) and (text_bias_rate > 0.0 or vl_rate > 0.0):
     # RoutedMoE emits raw per-microbatch int32 expert counts when gradient_accumulation_steps > 1;
     # convert the counts summed across microbatches into a single full-batch sign() update.
-    def finalize_bias(counts):
+    def finalize_bias(counts, rate=text_bias_rate):
       if isinstance(counts, jax.Array) and jnp.issubdtype(counts.dtype, jnp.integer):
-        return load_balance_updates_from_counts(counts, config.num_experts, config.routed_bias_update_rate)
+        return load_balance_updates_from_counts(counts, config.num_experts, rate)
       return counts
 
-    for key in ("moe_bias_updates", "mtp_moe_bias_updates"):
-      if aux.get(key) is not None:
-        aux[key] = jax.tree.map(finalize_bias, aux[key])
+    if text_bias_rate > 0.0:
+      for key in ("moe_bias_updates", "mtp_moe_bias_updates"):
+        if aux.get(key) is not None:
+          aux[key] = jax.tree.map(finalize_bias, aux[key])
     if "intermediate_outputs" in aux:
+
+      def _finalize_intermediate_leaf(path, val):
+        # nnx.Intermediate sows 1-tuples (counts,), so path[-1] is SequenceKey(idx=0); inspect all dict keys on path.
+        keys = {getattr(k, "key", getattr(k, "name", None)) for k in path}
+        if "moe_bias_vl_updates" in keys and vl_rate > 0.0:
+          return finalize_bias(val, vl_rate)
+        if "moe_bias_updates" in keys and text_bias_rate > 0.0:
+          return finalize_bias(val, text_bias_rate)
+        return val
+
       aux["intermediate_outputs"] = jax.tree_util.tree_map_with_path(
-          lambda path, val: (
-              finalize_bias(val) if path and getattr(path[-1], "key", None) == "moe_bias_updates" else val
-          ),
+          _finalize_intermediate_leaf,
           aux["intermediate_outputs"],
       )
   if "te_moe_capacity_overflow" in scanned_aux:

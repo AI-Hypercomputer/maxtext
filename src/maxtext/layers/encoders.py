@@ -85,6 +85,13 @@ class VisionEncoder(nnx.Module):
           self, encoder_name, qwen3_vl_vision.Qwen3VLVisionEncoder(config=self.config, mesh=self.mesh, rngs=self.rngs)
       )
       setattr(self, projector_name, qwen3_vl_vision.Qwen3VLVisionProjector(config=self.config, rngs=self.rngs))
+    elif self.vision_encoder_block == VisionEncoderBlockType.DEEPSEEK41:
+      from maxtext.models import deepseek41_vision  # pylint: disable=import-outside-toplevel
+
+      encoder_name = "DeepSeek41VisionEncoder_0"
+      projector_name = "DeepSeek41VisionProjector_0"
+      setattr(self, encoder_name, deepseek41_vision.DeepSeek41VisionEncoder(config=self.config, rngs=self.rngs))
+      setattr(self, projector_name, deepseek41_vision.DeepSeek41VisionProjector(config=self.config, rngs=self.rngs))
     else:
       supported_blocks = [block.value for block in VisionEncoderBlockType if block != VisionEncoderBlockType.NONE]
       raise ValueError(
@@ -104,12 +111,24 @@ class VisionEncoder(nnx.Module):
 
     return encoder_name, projector_name
 
-  def __call__(self, input_images, input_masks=None, video_grid_thw=None, deterministic=False):
+  def __call__(
+      self,
+      input_images,
+      input_masks=None,
+      video_grid_thw=None,
+      deterministic=False,
+      image_grids=None,
+  ):
     # vision encoder output, frozen params in many cases
     encoder = getattr(self, self.encoder_name)
+    is_ds41_dynamic = self.vision_encoder_block == VisionEncoderBlockType.DEEPSEEK41 and image_grids is not None
     if self.vision_encoder_block.value.startswith("qwen3") and input_masks is not None:
       encoder_output = encoder(
           input_images, video_mask=input_masks, video_grid_thw=video_grid_thw, deterministic=deterministic
+      )
+    elif is_ds41_dynamic:
+      encoder_output = encoder(
+          input_images, deterministic=deterministic, image_grids=image_grids, image_masks=input_masks
       )
     else:
       encoder_output = encoder(input_images, deterministic=deterministic)
@@ -127,7 +146,10 @@ class VisionEncoder(nnx.Module):
 
     # vision embedder / projection layer, not frozen in most cases, trained / finetuned together with main model
     projector = getattr(self, self.projector_name)
-    embeddings = projector(embeddings)
+    if is_ds41_dynamic:
+      embeddings = projector(embeddings, image_grids=image_grids, image_masks=input_masks)
+    else:
+      embeddings = projector(embeddings)
 
     return embeddings, deep_feats
 

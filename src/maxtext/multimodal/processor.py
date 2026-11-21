@@ -49,6 +49,9 @@ _MODEL_TO_BLOCKS = {
     "weaver-max": ("qwen3_vl", "qwen3"),
     # Ming (audio-only, no vision tower)
     "ming-3.0-audio-tiny": (None, "ming"),
+    # DeepSeek V4.1
+    "deepseek4.1-flash": ("deepseek41", "deepseek41"),
+    "deepseek4.1-flash-mini": ("deepseek41", "deepseek41"),
 }
 
 
@@ -116,6 +119,11 @@ def preprocess_mm_data(config):
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     processor_outputs = preprocess_mm_data_qwen3_omni(config)
+  elif vision_block in ["deepseek41"]:
+    from maxtext.multimodal.processor_deepseek41 import preprocess_mm_data_deepseek41  # pylint: disable=import-outside-toplevel
+
+    images = [mm_utils.load_image_from_path(p) for p in config.image_path.split(",") if p]
+    processor_outputs = preprocess_mm_data_deepseek41(images, config)
   elif _get_decoder_block(config) in ["ming"]:
     from maxtext.multimodal.processor_ming import preprocess_mm_data_ming  # pylint: disable=import-outside-toplevel
 
@@ -147,6 +155,10 @@ def preprocess_image_for_training(image, config):
     from maxtext.multimodal.processor_qwen3_omni import preprocess_mm_data_qwen3_omni_for_training  # pylint: disable=import-outside-toplevel
 
     return preprocess_mm_data_qwen3_omni_for_training(image, config)
+  elif vision_block in ["deepseek41"]:
+    from maxtext.multimodal.processor_deepseek41 import preprocess_mm_data_deepseek41  # pylint: disable=import-outside-toplevel
+
+    return preprocess_mm_data_deepseek41(image, config)
   else:
     raise ValueError(f"Model {config.model_name} (vision block {vision_block}) not supported for image preprocessing.")
 
@@ -176,6 +188,10 @@ def get_image_offsets(config, processor_output: mm_utils.PreprocessorOutput | No
     from maxtext.multimodal.processor_qwen3_omni import get_mm_offsets_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return get_mm_offsets_qwen3_omni(config, processor_output)
+  elif vision_block in ["deepseek41"]:
+    from maxtext.multimodal.processor_deepseek41 import get_image_offsets_deepseek41  # pylint: disable=import-outside-toplevel
+
+    return get_image_offsets_deepseek41(config, processor_output)
   elif decoder_block in ["ming"]:
     from maxtext.multimodal.processor_ming import get_audio_offsets_ming  # pylint: disable=import-outside-toplevel
 
@@ -222,6 +238,10 @@ def reformat_prompt(
         video_placeholder=video_placeholder,
         num_videos=num_videos,
     )
+  elif decoder_block in ["deepseek41"]:
+    from maxtext.multimodal.processor_deepseek41 import reformat_prompt_deepseek41  # pylint: disable=import-outside-toplevel
+
+    return reformat_prompt_deepseek41(prompt, image_placeholder, num_images)
   elif decoder_block in ["ming"]:
     from maxtext.multimodal.processor_ming import reformat_prompt_ming  # pylint: disable=import-outside-toplevel
 
@@ -261,6 +281,10 @@ def reformat_response(response, model_name):
   elif decoder_block in ["qwen3", "qwen3_moe", "qwen3_5"]:
     formatted_response = f"{response}<|im_end|>"
     return formatted_response
+  elif decoder_block in ["deepseek41"]:
+    from maxtext.multimodal.processor_deepseek41 import reformat_response_deepseek41  # pylint: disable=import-outside-toplevel
+
+    return reformat_response_deepseek41(response)
   elif decoder_block in ["ming"]:
     formatted_response = f"{response}<|role_end|>"
     return formatted_response
@@ -299,6 +323,10 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     from maxtext.multimodal.processor_qwen3_omni import add_extra_tokens_for_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     return add_extra_tokens_for_qwen3_omni(tokens, config, processor_output)
+  elif vision_block in ["deepseek41"]:
+    from maxtext.multimodal.processor_deepseek41 import add_extra_tokens_for_images_deepseek41  # pylint: disable=import-outside-toplevel
+
+    return add_extra_tokens_for_images_deepseek41(tokens, config, processor_output)
   elif decoder_block in ["ming"]:
     from maxtext.multimodal.processor_ming import add_extra_tokens_for_ming  # pylint: disable=import-outside-toplevel
 
@@ -307,10 +335,14 @@ def prepare_text_for_image_fusion(tokens, config, processor_output=None):
     raise ValueError(f"Model {config.model_name} (vision block {vision_block}) does not support multimodal inference.")
 
 
-def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_sequence=1):
+def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_sequence=1, config=None):
   """Return the shape of the dummy image for specific model's initialization."""
   image_shape = ()
   vision_block = _get_vision_block(model_name)
+  if vision_block is None and config is not None:
+    cand_block = _get_vision_block(config)
+    if cand_block in {b for b, _ in _MODEL_TO_BLOCKS.values() if b is not None}:
+      vision_block = cand_block
   if vision_block in ["gemma3"]:
     from maxtext.multimodal.processor_gemma3 import get_dummy_image_shape_for_init_gemma3  # pylint: disable=import-outside-toplevel
 
@@ -327,6 +359,12 @@ def get_dummy_image_shape_for_init(model_name, batch_size=1, num_image_per_seque
     from maxtext.multimodal.processor_qwen3_omni import get_dummy_image_shape_for_init_qwen3_omni  # pylint: disable=import-outside-toplevel
 
     image_shape = get_dummy_image_shape_for_init_qwen3_omni(batch_size)
+  elif vision_block in ["deepseek41"]:
+    from maxtext.multimodal.processor_deepseek41 import get_dummy_image_shape_for_init_deepseek41  # pylint: disable=import-outside-toplevel
+
+    image_shape = get_dummy_image_shape_for_init_deepseek41(
+        batch_size=batch_size, num_image_per_sequence=num_image_per_sequence, config=config
+    )
   return image_shape
 
 
@@ -390,6 +428,16 @@ def get_bidirectional_mask_vision(config, decoder_input_tokens, is_video: bool =
       bidirectional_mask_vision = decoder_input_tokens == tokens.video_pad
     else:
       bidirectional_mask_vision = decoder_input_tokens == tokens.image_pad
+  elif vision_block in ["deepseek41"]:
+    if is_video:
+      raise ValueError("DeepSeek-V4.1 does not support video inputs.")
+    token_id = config.ds41_image_token_id
+    if token_id <= 0 or token_id >= config.vocab_size:
+      raise ValueError(
+          "get_bidirectional_mask_vision for DeepSeek-V4.1 requires 0 < ds41_image_token_id < vocab_size "
+          f"({config.vocab_size}), got {token_id!r}."
+      )
+    bidirectional_mask_vision = decoder_input_tokens == token_id
   return bidirectional_mask_vision
 
 

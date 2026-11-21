@@ -433,6 +433,7 @@ SOWN_MICROBATCH_REDUCTIONS = {
     "moe_has_overflow": jnp.any,
     "moe_lb_loss": jnp.mean,
     "moe_bias_updates": jnp.sum,  # per-expert token counts under PP (decoded in train.py)
+    "moe_bias_vl_updates": jnp.sum,
     "max_logits": jnp.max,
     "te_moe_total_recv_tokens": jnp.max,
     "te_moe_recv_capacity_per_rank": jnp.min,

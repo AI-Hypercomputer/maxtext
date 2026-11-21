@@ -68,7 +68,7 @@ from maxtext.configs.types import DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
 from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, single_stack_axis, slice_shape, stacked_axes
-from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
+from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, read_safetensor_slice, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
 from maxtext.utils import max_logging, max_utils, maxtext_utils, model_creation_utils
 from maxtext.utils.globals import HF_IDS
@@ -95,7 +95,7 @@ def resolve_scale_key(key: str, container) -> str:
   return key
 
 
-def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray:
+def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16", is_ds41: bool = False) -> np.ndarray:
   """Converts a PyTorch tensor or NumPy array to the target NumPy format.
 
   Args:
@@ -109,6 +109,13 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
   """
   if torch is not None and isinstance(tensor, torch.Tensor):
     tensor = tensor.detach().cpu()
+    if is_ds41:
+      if tensor.dtype in (torch.int8, torch.uint8):
+        return tensor.numpy()
+      if tensor.dtype == torch.float8_e4m3fn:
+        return tensor.view(torch.uint8).numpy().view(ml_dtypes.float8_e4m3fn)
+      if hasattr(torch, "float8_e8m0fnu") and tensor.dtype == torch.float8_e8m0fnu:
+        return tensor.view(torch.uint8).numpy().view(ml_dtypes.float8_e8m0fnu)
     # If target is float32, convert all tensors to float32
     if save_dtype in ("float32", DType.FLOAT32):
       return tensor.to(torch.float32).numpy()
@@ -139,6 +146,15 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
 
     return tensor.numpy()
 
+  if is_ds41:
+    arr = np.asarray(tensor)
+    if arr.dtype in (np.int8, np.uint8, ml_dtypes.float8_e4m3fn, ml_dtypes.float8_e8m0fnu):
+      return arr
+    if save_dtype in ("float32", DType.FLOAT32) and arr.dtype != np.float32:
+      return arr.astype(np.float32)
+    if save_dtype in ("bfloat16", DType.BFLOAT16) and arr.dtype != ml_dtypes.bfloat16:
+      return arr.astype(ml_dtypes.bfloat16)
+    return arr
   if isinstance(tensor, np.ndarray):
     if save_dtype in ("float32", DType.FLOAT32) and tensor.dtype != np.float32:
       return tensor.astype(np.float32)
@@ -152,6 +168,10 @@ _FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
 _FULL_PRECISION_SUBSTRINGS = (
     "-attn_hc-",
     "-ffn_hc-",
+    "-hc_attn_",
+    "-hc_ffn_",
+    "-hc_attn-",
+    "-hc_ffn-",
     "-hc_head-",
     "-self_attention-sinks",
     "-self_attention-indexer-k_norm-",
@@ -207,11 +227,12 @@ class LazyHFLoader:
   can still occur in parallel.
   """
 
-  def __init__(self, model_id, token, revision=None, save_dtype: str = "bfloat16"):
+  def __init__(self, model_id, token, revision=None, save_dtype: str = "bfloat16", is_ds41: bool = False):
     self.model_id = model_id
     self.token = token
     self.revision = revision
     self.save_dtype = save_dtype
+    self.is_ds41 = is_ds41
     # Whether loads from local directory
     self.is_local = os.path.isdir(self.model_id)
     self.shard_map = {}
@@ -307,10 +328,15 @@ class LazyHFLoader:
     # STEP 2: Lock ONLY the reading into RAM.
     # This prevents multiple threads from simultaneously allocating large chunks of RAM.
     with self._ram_lock:
-      framework = "pt" if torch is not None else "np"
+      framework = "flax" if (self.is_ds41 and torch is None) else ("pt" if torch is not None else "np")
       with safe_open(local_path, framework=framework, device="cpu") as f:
-        t = f.get_tensor(resolved_key)
-        return _convert_tensor_to_numpy(t, dtype or self.save_dtype)
+        try:
+          t = f.get_tensor(resolved_key)
+        except (AttributeError, TypeError):
+          if not (self.is_ds41 and torch is None):
+            raise
+          t = read_safetensor_slice(local_path, resolved_key)
+        return _convert_tensor_to_numpy(t, dtype or self.save_dtype, is_ds41=self.is_ds41)
 
 
 class LazyTensor:
@@ -379,6 +405,8 @@ class LazyTensor:
     if not isinstance(arr, np.ndarray):
       arr = np.array(arr)
 
+    if self.dtype == np.dtype(np.float32) and arr.dtype == ml_dtypes.bfloat16:
+      arr = arr.astype(np.float32)
     if dtype is not None and arr.dtype != dtype:
       return arr.astype(dtype)
     return arr
@@ -662,6 +690,8 @@ def _get_maxtext_weight(
     # In eager mode, we execute the function immediately to get the
     # NumPy array and append it to our list of weights.
     final_mt_tensor_numpy = load_fn()
+    if save_dtype in ("float32", DType.FLOAT32) and final_mt_tensor_numpy.dtype == ml_dtypes.bfloat16:
+      final_mt_tensor_numpy = final_mt_tensor_numpy.astype(np.float32)
     if not is_composite_mt_key:
       # Case 1.1: Eager mode, `atomic_mt_key`
       final_mt_weights[mt_target_idx_or_indices] = final_mt_tensor_numpy
@@ -1064,10 +1094,12 @@ def main(
     hf_state_dict_numpy = None
     hf_loader = None
 
+    is_ds41 = config.model_name.startswith("deepseek4.1")
+
     # Define the appropriate tensor getter based on mode
     if lazy_load_tensors:
       max_logging.log(f"Lazy loading ENABLED. Initializing LazyHFLoader for: {model_id}...")
-      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision, save_dtype=save_dtype)
+      hf_loader = LazyHFLoader(model_id, hf_token, revision=revision, save_dtype=save_dtype, is_ds41=is_ds41)
 
       print_ram_usage("After LazyLoader init")
       tensor_getter = hf_loader.get_tensor
@@ -1100,10 +1132,13 @@ def main(
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/config.json#L54
         hf_state_dict_numpy = load_hf_dict_from_transformers(model_id, token=hf_token, revision=revision, dtype="auto")
       elif eager_load_method == "safetensors":
-        max_logging.log("Eager load with Safetensors backend, safe_open with pt framework")
+        st_framework = "flax" if (is_ds41 and torch is None) else "pt"
+        max_logging.log(f"Eager load with Safetensors backend, safe_open with {st_framework} framework")
         # For safe_open, loaded dtype is the same as original safetensor
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/model.safetensors.index.json
-        hf_state_dict_numpy = load_hf_dict_from_safetensors(model_id, token=hf_token, revision=revision, framework="pt")
+        hf_state_dict_numpy = load_hf_dict_from_safetensors(
+            model_id, token=hf_token, revision=revision, framework=st_framework
+        )
       else:
         raise NotImplementedError
 
@@ -1134,7 +1169,7 @@ def main(
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
 
         v = hf_state_dict_numpy[resolved_key]
-        return _convert_tensor_to_numpy(v, dtype or save_dtype)
+        return _convert_tensor_to_numpy(v, dtype or save_dtype, is_ds41=is_ds41)
 
       tensor_getter = _eager_getter
 
@@ -1146,6 +1181,17 @@ def main(
     # load config
     hf_config_obj = HF_MODEL_CONFIGS[model_key]
     hf_config_dict = hf_config_obj.to_dict()
+    if is_ds41:
+      ckpt_config_path = os.path.join(model_id, "config.json") if model_id else ""
+      if ckpt_config_path and os.path.isfile(ckpt_config_path):
+        with open(ckpt_config_path, encoding="utf-8") as f:
+          ckpt_cfg = json.load(f)
+        if "quantization_config" in ckpt_cfg:
+          hf_config_dict["quantization_config"] = ckpt_cfg["quantization_config"]
+        elif isinstance(ckpt_cfg.get("text_config"), dict) and "quantization_config" in ckpt_cfg["text_config"]:
+          hf_config_dict["quantization_config"] = ckpt_cfg["text_config"]["quantization_config"]
+        else:
+          hf_config_dict.pop("quantization_config", None)
     # example of param mapping (gemma2, maxtext:huggingface):
     # "params-decoder-layers_{maxtext_layer_idx}-pre_self_attention_norm_global-scale":
     #   f"model.layers.{global_layer_idx}.input_layernorm.weight",

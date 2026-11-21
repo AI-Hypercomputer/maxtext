@@ -101,6 +101,7 @@ class EncoderKwargs(TypedDict, total=False):
 
   encoder_images: Any
   encoder_image_masks: Any
+  encoder_image_grids: Any
   encoder_videos: Any
   encoder_video_masks: Any
   encoder_video_grid_thw: Any
@@ -207,6 +208,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         "encoder_images": encoder_images,
         "encoder_image_masks": encoder_image_masks,
     }
+    if config.use_multimodal and data.get("image_grids") is not None:
+      encoder_kwargs["encoder_image_grids"] = data["image_grids"]
   # Flax NNX model: forward pass, then pop Intermediates sown during it.
   logits = model(
       decoder_input_tokens=data["inputs"],
@@ -503,7 +506,7 @@ def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
   return None
 
 
-def _decode_moe_bias_update(update, config):
+def _decode_moe_bias_update(update, config, rate: float | None = None):
   """Returns the value to add to a routed gate bias from a sown `moe_bias_updates`.
 
   Under pipeline parallelism the MoE layers sow per-expert token counts instead of the +-rate step (see
@@ -514,29 +517,43 @@ def _decode_moe_bias_update(update, config):
   if not getattr(config, "using_pipeline_parallelism", False):
     return update
   counts = update.astype(jnp.float32)
-  return jnp.sign(jnp.mean(counts, axis=-1, keepdims=True) - counts) * config.routed_bias_update_rate
+  effective_rate = config.routed_bias_update_rate if rate is None else rate
+  return jnp.sign(jnp.mean(counts, axis=-1, keepdims=True) - counts) * effective_rate
 
 
 def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, config) -> None:
-  """Adds every sown `moe_bias_updates` to the gate bias of the module that sowed it.
+  """Adds every sown `moe_bias_updates` / `moe_bias_vl_updates` to the gate bias of the module that sowed it.
 
   Needed under pipeline parallelism, where the decoder's MoE layers live in two stacks with different
   gate-bias layouts: `moe_layers_outside_pipeline` ([layers, experts]) and the pipeline stage module
   `pipeline_module.layers` ([repeats, stages, experts]). Each stack sows an update shaped like its bias.
   """
+  vl_rate = moe.resolve_vl_bias_update_rate(config)
   for path, update in traverse_util.flatten_dict(intermediates).items():
-    if path[-1] != "moe_bias_updates":
+    if path[-1] not in ("moe_bias_updates", "moe_bias_vl_updates"):
+      continue
+    is_vl = path[-1] == "moe_bias_vl_updates"
+    step_rate = vl_rate if is_vl else config.routed_bias_update_rate
+    if step_rate <= 0.0:
       continue
     target = root
     for key in path[:-1]:
       target = getattr(target, key)
-    bias = _find_gate_bias(target)
+    bias = None
+    if is_vl:
+      for _, node in nnx.iter_graph(target):
+        if type(node).__name__ == "GateLogit":
+          bias = getattr(node, "bias_vl", None)
+          if bias is not None:
+            break
+    else:
+      bias = _find_gate_bias(target)
     if bias is None:
       continue
-    update = _decode_moe_bias_update(update, config)
+    update = _decode_moe_bias_update(update, config, rate=step_rate)
     if update.shape != bias.value.shape:
       raise ValueError(
-          f"moe_bias_updates at {'/'.join(map(str, path))} has shape {update.shape}, "
+          f"{path[-1]} at {'/'.join(map(str, path))} has shape {update.shape}, "
           f"but the gate bias it updates has shape {bias.value.shape}."
       )
     bias.value = bias.value + update.astype(bias.value.dtype)
@@ -696,12 +713,20 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   if lineage_adapter.is_native(config):
     diag_bias_values = list(aux.get("diag_bias_values", ()))
     diag_bias_updates = list(aux.get("diag_bias_updates", ()))
-  elif config.routed_bias and config.routed_bias_update_rate > 0.0:
-    if getattr(config, "model_name", "").startswith("deepseek4"):
+  elif config.routed_bias and (config.routed_bias_update_rate > 0.0 or moe.resolve_vl_bias_update_rate(config) > 0.0):
+    has_ds41_decoder = any(
+        type(n).__name__ == "DeepSeek41DecoderLayer" for _, n in nnx.iter_graph(new_state.model.decoder)
+    )
+    if has_ds41_decoder or getattr(config, "model_name", "").startswith("deepseek4"):
       max_logging.log("DeepSeek V4: Applying auxiliary-loss-free routing bias via pure NNX MoEBiasVar.")
+      vl_rate = moe.resolve_vl_bias_update_rate(config)
       flat_intermediates = traverse_util.flatten_dict(aux.get("intermediate_outputs", {}))
       for path, update in flat_intermediates.items():
-        if path[-1] != "moe_bias_updates":
+        if path[-1] not in ("moe_bias_updates", "moe_bias_vl_updates"):
+          continue
+        is_vl_update = path[-1] == "moe_bias_vl_updates"
+        step_rate = vl_rate if is_vl_update else config.routed_bias_update_rate
+        if step_rate <= 0.0:
           continue
         target = new_state.model
         prefix = path[1:-1] if path[0] == "intermediates" else path[:-1]
@@ -716,16 +741,20 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
         if target is None:
           continue
         for _, node in nnx.iter_graph(target):
-          if type(node).__name__ == "GateLogit" and hasattr(node, "bias") and node.bias is not None:
-            update_val = _decode_moe_bias_update(update, config)
+          if type(node).__name__ == "GateLogit":
+            bias_var = getattr(node, "bias_vl" if is_vl_update else "bias", None)
+            if bias_var is None:
+              continue
+            update_val = _decode_moe_bias_update(update, config, rate=step_rate)
             name_prefix = "-".join(map(str, prefix))
+            metric_tag = "moe_bias_vl" if is_vl_update else "moe_bias"
             if getattr(config, "log_moe_bias_norms", False):
-              bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(node.bias.value)
-            node.bias.value = node.bias.value + jnp.array(update_val)
-            diag_bias_values.append(node.bias.value)
+              bias_metrics[f"learning/{metric_tag}_before_norm_{name_prefix}"] = jnp.linalg.norm(bias_var.value)
+            bias_var.value = bias_var.value + jnp.array(update_val)
+            diag_bias_values.append(bias_var.value)
             diag_bias_updates.append(update_val)
             if getattr(config, "log_moe_bias_norms", False):
-              bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
+              bias_metrics[f"learning/{metric_tag}_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
     else:
       if getattr(config, "using_pipeline_parallelism", False):
         # 1. Update the decoder MoE layers outside and inside the pipeline (two stacks, two bias layouts).

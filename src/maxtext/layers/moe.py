@@ -579,7 +579,9 @@ def topk_indices_by_argmax(scores: jax.Array, k: int) -> jax.Array:
   return jnp.stack(picks, axis=-1)
 
 
-def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=None, return_counts=False):
+def calculate_load_balance_updates(
+    top_k_indices, num_experts, rate, axis_names=None, return_counts=False, token_mask=None
+):
   """Computes a bias adjustment update based on expert load.
 
   Used in DeepSeek V3: https://arxiv.org/html/2412.19437v1.
@@ -600,23 +602,29 @@ def calculate_load_balance_updates(top_k_indices, num_experts, rate, axis_names=
   Returns:
       update: The value to add to the expert bias (or the expert counts). Shape (num_experts,).
   """
-  expert_counts = calculate_expert_counts(top_k_indices, num_experts, axis_names=axis_names)
+  expert_counts = calculate_expert_counts(top_k_indices, num_experts, axis_names=axis_names, token_mask=token_mask)
   if return_counts:
     return expert_counts
   return load_balance_updates_from_counts(expert_counts, num_experts, rate)
 
 
-def calculate_expert_counts(top_k_indices, num_experts, axis_names=None):
+def calculate_expert_counts(top_k_indices, num_experts, axis_names=None, token_mask=None):
   """Counts the token assignments routed to each expert.
 
   Args:
       top_k_indices: Integer expert ids of any shape, e.g. (batch, sequence, top_k).
       num_experts: Total number of experts.
       axis_names: Optional mesh axis names to psum the counts across.
+      token_mask: Optional boolean mask over token dimensions ``top_k_indices.shape[:-1]``.
 
   Returns:
       int32 array of shape (num_experts,).
   """
+  if token_mask is not None:
+    mask = jnp.asarray(token_mask, dtype=jnp.bool_)
+    if mask.shape != top_k_indices.shape[:-1]:
+      raise ValueError(f"token_mask shape {mask.shape} must match top_k_indices token dims {top_k_indices.shape[:-1]}.")
+    top_k_indices = jnp.where(mask[..., None], top_k_indices, -1)
   flat_indices = top_k_indices.ravel()
   # one_hot rather than bincount: bincount clips out-of-range values, so the -1
   # padding that forced routing uses would all be counted as expert 0.
@@ -638,7 +646,13 @@ def load_balance_updates_from_counts(expert_counts, num_experts, rate):
   return direction * rate
 
 
-def finalize_deferred_bias_signal(partial_counts, config):
+def resolve_vl_bias_update_rate(config) -> float:
+  """Returns the effective update rate for multimodal `bias_vl` (`0.0` freezes `bias_vl` by default)."""
+  raw_vl_rate = float(getattr(config, "ds41_routed_bias_vl_update_rate", 0.0))
+  return float(config.routed_bias_update_rate) if raw_vl_rate < 0.0 else raw_vl_rate
+
+
+def finalize_deferred_bias_signal(partial_counts, config, rate: Optional[float] = None):
   """Reduces the stacked partial expert counts of defer_small_all_reduces into the routed-bias signal.
 
   Under defer_small_all_reduces each ring-of-experts MoE layer emits its local (per-shard) expert counts, per token
@@ -658,22 +672,27 @@ def finalize_deferred_bias_signal(partial_counts, config):
   counts = jnp.sum(partial_counts, axis=(-3, -2))  # (..., num_experts)
   if getattr(config, "gradient_accumulation_steps", 1) > 1:
     return counts
-  return load_balance_updates_from_counts(counts, counts.shape[-1], config.routed_bias_update_rate)
+  effective_rate = config.routed_bias_update_rate if rate is None else rate
+  return load_balance_updates_from_counts(counts, counts.shape[-1], effective_rate)
 
 
 def finalize_deferred_intermediates(intermediate_outputs, config):
-  """Applies finalize_deferred_bias_signal to every "moe_bias_updates" leaf when defer_small_all_reduces is on.
+  """Applies finalize_deferred_bias_signal to deferred MoE bias count leaves when defer_small_all_reduces is on.
 
   The "moe_has_overflow" leaves need no rewrite: the layers emit them unreduced (per-device local flags) with or
   without the flag, and loss_fn reduces them once with jnp.any.
   """
   if not getattr(config, "defer_small_all_reduces", False):
     return intermediate_outputs
+  vl_rate = resolve_vl_bias_update_rate(config)
 
   def _fix(path, leaf):
     keys = [getattr(k, "key", getattr(k, "name", None)) for k in path]
-    if "moe_bias_updates" in keys and leaf is not None and getattr(leaf, "ndim", 0) >= 3:
-      return finalize_deferred_bias_signal(leaf, config)
+    if leaf is not None and getattr(leaf, "ndim", 0) >= 3 and jnp.issubdtype(jnp.asarray(leaf).dtype, jnp.integer):
+      if "moe_bias_vl_updates" in keys:
+        return finalize_deferred_bias_signal(leaf, config, rate=vl_rate)
+      if "moe_bias_updates" in keys:
+        return finalize_deferred_bias_signal(leaf, config, rate=config.routed_bias_update_rate)
     return leaf
 
   return jax.tree_util.tree_map_with_path(_fix, intermediate_outputs)
@@ -977,6 +996,13 @@ DEEPSEEK_V3_ROUTING_MODEL_PREFIXES = ctypes.DEEPSEEK_V3_ROUTING_MODEL_PREFIXES
 MOE_BIAS_VAR_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4", "kimi-k3")
 
 
+def _uses_deepseek_v3_routing(config) -> bool:
+  """Returns True when config uses DeepSeek-V3/V4 routing (gate pre-bias logits)."""
+  decoder_block = getattr(config, "decoder_block", None)
+  model_name = getattr(config, "model_name", "")
+  return decoder_block == ctypes.DecoderBlockType.DEEPSEEK41 or model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
+
+
 class MoEBiasVar(nnx.Variable):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
 
@@ -1024,6 +1050,8 @@ class GateLogit(nnx.Module):
       kernel_axes: Tuple[Optional[str], ...] = (),
       use_bias: bool = False,
       bias_dtype: Optional[ctypes.DType] = None,
+      use_bias_vl: bool = False,
+      decoder_block: Optional[ctypes.DecoderBlockType] = None,
       score_func: str = "",
       quant: Optional[quantizations.AqtQuantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
@@ -1045,6 +1073,9 @@ class GateLogit(nnx.Module):
         this bias aids expert load balancing (like in DeepSeek V3), and is not
         part of the loss calculation.
       bias_dtype: Data type of the learnable routing bias; defaults to weight_dtype.
+      use_bias_vl: Whether to allocate a separate `bias_vl` buffer for image tokens. By default
+        (`ds41_routed_bias_vl_update_rate=0.0`), `train.py` updates only text `self.bias` (excluding
+        `image_mask` tokens) and keeps `self.bias_vl` frozen unless `ds41_routed_bias_vl_update_rate > 0`.
       score_func: Scoring function for output normalization before applying bias.
       quant: The quantization configuration. If None, no quantization is applied.
       matmul_precision: The precision level for the matrix multiplication.
@@ -1062,6 +1093,8 @@ class GateLogit(nnx.Module):
     self.kernel_axes = kernel_axes
     self.use_bias = use_bias
     self.bias_dtype = bias_dtype or self.weight_dtype
+    self.use_bias_vl = use_bias_vl
+    self.decoder_block = decoder_block
     self.score_func = score_func
     self.quant = quant
     self.shard_mode = shard_mode
@@ -1084,11 +1117,23 @@ class GateLogit(nnx.Module):
           out_sharding=self.kernel_axes,
       )
 
+    is_deepseek_bias_var = (
+        self.use_bias_vl
+        or self.decoder_block
+        in (
+            ctypes.DecoderBlockType.DEEPSEEK,
+            ctypes.DecoderBlockType.DEEPSEEK4,
+            ctypes.DecoderBlockType.DEEPSEEK41,
+            ctypes.DecoderBlockType.MING,
+            ctypes.DecoderBlockType.HY4,
+        )
+        or self.model_name.startswith(MOE_BIAS_VAR_MODEL_PREFIXES)
+    )
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      if self.model_name.startswith(MOE_BIAS_VAR_MODEL_PREFIXES):
-        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
+      if is_deepseek_bias_var:
+        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates.
         self.bias = MoEBiasVar(
             default_bias_init(rngs.params(), bias_shape, self.bias_dtype),
             out_sharding=bias_axes,
@@ -1100,6 +1145,19 @@ class GateLogit(nnx.Module):
         )
     else:
       self.bias = None
+
+    if self.use_bias_vl:
+      if not (self.use_bias and isinstance(self.bias, MoEBiasVar)):
+        raise ValueError(
+            f"GateLogit use_bias_vl=True requires use_bias=True with MoEBiasVar "
+            f"(model_name={self.model_name!r}, use_bias={self.use_bias})."
+        )
+      self.bias_vl = MoEBiasVar(
+          default_bias_init(rngs.params(), bias_shape, jnp.float32),
+          out_sharding=bias_axes,
+      )
+    else:
+      self.bias_vl = None
 
     if quant and not isinstance(quant, quantizations.ServeFp8WeightQuantization):
       self._quant_dot_general_name, quant_dot_general = quantizations.make_dot_general(quant, kernel_axes, rngs)
@@ -1121,7 +1179,12 @@ class GateLogit(nnx.Module):
     return getattr(self, self._quant_dot_general_name)
 
   def __call__(
-      self, inputs: jax.Array, _initializing: bool = False, *, routing_key: jax.Array | None = None
+      self,
+      inputs: jax.Array,
+      _initializing: bool = False,
+      image_mask: jax.Array | None = None,
+      *,
+      routing_key: jax.Array | None = None,
   ) -> Tuple[jax.Array, Optional[jax.Array]]:
     inputs = jnp.asarray(inputs, self.dtype)
     norm_axis = linears.normalize_axes(self.axis, inputs.ndim)
@@ -1161,12 +1224,55 @@ class GateLogit(nnx.Module):
       output = linears._convert_to_activation_function(self.score_func)(output)
 
     # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
+    if (
+        self.use_bias_vl
+        or self.decoder_block
+        in (
+            ctypes.DecoderBlockType.DEEPSEEK,
+            ctypes.DecoderBlockType.DEEPSEEK4,
+            ctypes.DecoderBlockType.DEEPSEEK41,
+            ctypes.DecoderBlockType.MING,
+            ctypes.DecoderBlockType.HY4,
+        )
+        or self.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
+    ):
       pre_bias_logits = output
 
+    if image_mask is not None:
+      if not self.use_bias_vl or self.bias_vl is None or self.bias is None:
+        raise ValueError(
+            f"GateLogit received image_mask with use_bias_vl={self.use_bias_vl}, "
+            f"bias_vl={self.bias_vl is not None}, bias={self.bias is not None}."
+        )
+      token_shape = output.shape[: -len(self.out_features_shape)]
+      if image_mask.shape != token_shape:
+        raise ValueError(
+            f"GateLogit image_mask shape {image_mask.shape} must match token shape {token_shape} "
+            f"for inputs shape {inputs.shape}."
+        )
+
+    is_ds41_gate = (
+        self.use_bias_vl
+        or self.decoder_block == ctypes.DecoderBlockType.DEEPSEEK41
+        or self.model_name.startswith("deepseek4.1")
+    )
     if self.use_bias:
-      bias = jnp.asarray(self.bias[...], self.dtype)
-      output += bias
+      if isinstance(self.bias, MoEBiasVar) and is_ds41_gate:
+        # Selection-only bias: add in at least float32 so bf16 compute does not round it away (see __init__).
+        promote_dtype = jnp.promote_types(output.dtype, jnp.float32)
+        text_bias = jnp.asarray(self.bias.get_value(), promote_dtype)
+        if image_mask is not None:
+          vl_bias = jnp.asarray(self.bias_vl.get_value(), promote_dtype)
+          mask_expand = jnp.asarray(image_mask, dtype=jnp.bool_)
+          for _ in range(len(self.out_features_shape)):
+            mask_expand = mask_expand[..., None]
+          routing_bias = jnp.where(mask_expand, vl_bias, text_bias)
+        else:
+          routing_bias = text_bias
+        output = output.astype(promote_dtype) + routing_bias
+      else:
+        bias = jnp.asarray(self.bias[...], self.dtype)
+        output += bias
     return output, pre_bias_logits
 
 
@@ -1741,6 +1847,7 @@ class RoutedMoE(nnx.Module):
       dtype: ctypes.DType = jnp.float32,
       quant: Optional[quantizations.AqtQuantization] = None,
       is_hash_routing: bool = False,
+      use_bias_vl: bool = False,
       force_dropless: bool = False,
       weight_quant: Optional[quantizations.WeightQuantConfig] = None,
   ):
@@ -1794,6 +1901,9 @@ class RoutedMoE(nnx.Module):
         if config.te_moe_block and config.use_random_routing
         else None
     )
+    self.use_bias_vl = use_bias_vl
+    if self.use_bias_vl and self.is_hash_routing:
+      raise ValueError("RoutedMoE use_bias_vl=True is incompatible with is_hash_routing=True.")
     self.weight_quant = weight_quant
 
     # DeepSeek V4 Hash Routing
@@ -1933,6 +2043,8 @@ class RoutedMoE(nnx.Module):
         kernel_axes=self.kernel_axes,
         use_bias=self.use_gate_bias,
         bias_dtype=jnp.float32 if self.config.float32_gate_logits else gate_weight_dtype,
+        use_bias_vl=self.use_bias_vl,
+        decoder_block=getattr(self.config, "decoder_block", None),
         # tpu-inference applies the score function in the fused_moe_gmm kernel,
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
@@ -2293,6 +2405,65 @@ class RoutedMoE(nnx.Module):
     """
     return self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and not self.is_hash_routing
 
+  def should_update_vl_load_balance(self) -> bool:
+    """Returns True when multimodal VL routed-bias updates are active for image tokens."""
+    return (
+        bool(self.config.routed_bias)
+        and not self.is_hash_routing
+        and bool(self.use_bias_vl)
+        and resolve_vl_bias_update_rate(self.config) > 0.0
+    )
+
+  def _compute_multimodal_bias_updates(
+      self,
+      top_k_indices: jax.Array,
+      image_mask: jax.Array,
+      *,
+      defer_ars: bool = False,
+  ) -> tuple[Optional[jax.Array], Optional[jax.Array]]:
+    """Computes separate text (`~image_mask`) and VL (`image_mask`) routed-bias updates."""
+    img_mask = jnp.asarray(image_mask, dtype=jnp.bool_)
+    text_mask = jnp.logical_not(img_mask)
+    return_counts = (
+        defer_ars
+        or getattr(self.config, "gradient_accumulation_steps", 1) > 1
+        or getattr(self.config, "using_pipeline_parallelism", False)
+    )
+    if self.config.routed_bias_update_rate > 0.0:
+      if return_counts:
+        text_updates = calculate_expert_counts(
+            top_k_indices, self.config.num_experts, axis_names=None, token_mask=text_mask
+        )
+        if defer_ars:
+          text_updates = text_updates[None, None, :]
+      else:
+        text_updates = calculate_load_balance_updates(
+            top_k_indices,
+            self.config.num_experts,
+            self.config.routed_bias_update_rate,
+            axis_names=None,
+            token_mask=text_mask,
+        )
+    else:
+      text_updates = None
+    vl_rate = resolve_vl_bias_update_rate(self.config)
+    if self.use_bias_vl and vl_rate > 0.0:
+      if return_counts:
+        vl_updates = calculate_expert_counts(top_k_indices, self.config.num_experts, axis_names=None, token_mask=img_mask)
+        if defer_ars:
+          vl_updates = vl_updates[None, None, :]
+      else:
+        vl_updates = calculate_load_balance_updates(
+            top_k_indices,
+            self.config.num_experts,
+            vl_rate,
+            axis_names=None,
+            token_mask=img_mask,
+        )
+    else:
+      vl_updates = None
+    return text_updates, vl_updates
+
   def get_topk(
       self,
       gate_logits,
@@ -2363,7 +2534,7 @@ class RoutedMoE(nnx.Module):
         top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
         top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
       # NOTE: deepseek2 has a different pattern
-      elif self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
+      elif _uses_deepseek_v3_routing(self.config):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
@@ -3477,6 +3648,7 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts=None,
       token_mask=None,
       moe_qwag_weight_amax=None,
+      image_mask=None,
   ):
     """Perform sparse matrix multiplication of inputs and Experts.
 
@@ -3878,7 +4050,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
+      if _uses_deepseek_v3_routing(self.config):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -5718,9 +5890,7 @@ class RoutedMoE(nnx.Module):
     input_logical_axes = (batch_logical_axis, "activation_norm_length_routed", None)
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length_routed", None)
     pre_bias_logits_logical_axes = (
-        (batch_logical_axis, "activation_norm_length_routed", None)
-        if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
-        else None
+        (batch_logical_axis, "activation_norm_length_routed", None) if _uses_deepseek_v3_routing(self.config) else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
     gate_logits = self._maybe_shard_with_pspec(
@@ -5847,6 +6017,24 @@ class RoutedMoE(nnx.Module):
       self.sow(nnx.Intermediate, "moe_required_rbf", required_rbf)
     if max_load_ratio is not None:
       self.sow(nnx.Intermediate, "moe_max_load_ratio", max_load_ratio)
+    if image_mask is not None and (self.should_update_load_balance() or self.should_update_vl_load_balance()):
+      if self.config.use_random_routing:
+        raise ValueError("use_random_routing=True does not support multimodal image_mask load balancing.")
+      _, mm_top_k_indices = self.get_topk(
+          gate_logits,
+          pre_bias_logits,
+          self.rngs,
+          input_ids=input_ids,
+          forced_routed_experts=forced_routed_experts,
+          token_mask=token_mask,
+      )
+      bias_updates, bias_vl_updates = self._compute_multimodal_bias_updates(
+          mm_top_k_indices,
+          image_mask,
+          defer_ars=bool(getattr(self.config, "defer_small_all_reduces", False)),
+      )
+      if bias_vl_updates is not None:
+        self.sow(nnx.Intermediate, "moe_bias_vl_updates", bias_vl_updates)
     return output, lb_loss, bias_updates
 
   def reshape_and_update_weights(self, weights, indices, safe_updates=False):
@@ -6226,6 +6414,7 @@ class RoutedMoE(nnx.Module):
       input_ids=None,
       forced_routed_experts=None,
       token_mask: jax.Array | None = None,
+      image_mask=None,
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
     """Dense matrix multiplication.
 
@@ -6235,7 +6424,7 @@ class RoutedMoE(nnx.Module):
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
+    if _uses_deepseek_v3_routing(self.config):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
@@ -6290,9 +6479,13 @@ class RoutedMoE(nnx.Module):
 
     # Calculate routed bias updates (loss-free)
     # The bias update logic is only applicable to Top-K routed layers.
-    if self.should_update_load_balance():
+    if image_mask is not None and (self.should_update_load_balance() or self.should_update_vl_load_balance()):
       # Under plain JIT (dense_matmul), GSPMD automatically inserts the all-reduce
       # across partitioned batch/sequence axes on global arrays, so axis_names=None.
+      bias_updates, bias_vl_updates = self._compute_multimodal_bias_updates(top_k_indices, image_mask)
+      if bias_vl_updates is not None:
+        self.sow(nnx.Intermediate, "moe_bias_vl_updates", bias_vl_updates)
+    elif self.should_update_load_balance():
       if getattr(self.config, "gradient_accumulation_steps", 1) > 1 or getattr(
           self.config, "using_pipeline_parallelism", False
       ):
@@ -6924,6 +7117,7 @@ class RoutedMoE(nnx.Module):
       forced_routed_experts: jax.Array | None = None,
       token_mask: jax.Array | None = None,
       moe_qwag_weight_amax: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+      image_mask: jax.Array | None = None,
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
     """Executes the routed MoE block.
 
@@ -6940,6 +7134,7 @@ class RoutedMoE(nnx.Module):
         load-balance loss and the routed-bias update, and get a zero output; real tokens are computed exactly
         as without the mask. Not supported with `te_moe_block` or the fused inference MoE kernel.
       moe_qwag_weight_amax: Optional precomputed (wi_0, wi_1, wo) amax for dynamic QWAG; computed here if None.
+      image_mask: Optional boolean mask selecting `bias_vl` instead of `bias` on image tokens.
 
     Returns:
       A tuple containing the MoE output, the load balance loss (if applicable),
@@ -6955,6 +7150,10 @@ class RoutedMoE(nnx.Module):
           f"moe_router_input_dim={self.moe_router_input_dim} differs from the expert input dim"
           f" {self.moe_expert_input_dim}, so the router input must be passed as `gate_inputs`."
       )
+    if cfg.te_moe_block and image_mask is not None:
+      raise ValueError("te_moe_block=True does not support multimodal image_mask.")
+    if self.is_hash_routing and image_mask is not None:
+      raise ValueError("is_hash_routing=True does not support multimodal image_mask.")
     if cfg.te_moe_block and quantizations.in_serve_mode(self.quant):
       raise ValueError("te_moe_block=True does not support serve-mode quantized weights.")
     if cfg.te_moe_block and token_mask is not None:
@@ -6999,9 +7198,13 @@ class RoutedMoE(nnx.Module):
           out_sharding=out_sharding,
       )
 
-    gate_logits, pre_bias_logits = self.gate(routing_inputs)
+    gate_logits, pre_bias_logits = (
+        self.gate(routing_inputs, image_mask=image_mask) if image_mask is not None else self.gate(routing_inputs)
+    )
 
     is_fused_moe_path = cfg.attention in ("vllm_rpa", "vllm_batched_rpa") and not self.is_hash_routing
+    if is_fused_moe_path and image_mask is not None:
+      raise ValueError("vllm_rpa fused_moe_matmul does not support multimodal image_mask.")
 
     native_gmm = (
         isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
@@ -7163,6 +7366,7 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
           token_mask=token_mask,
           moe_qwag_weight_amax=moe_qwag_weight_amax,
+          image_mask=image_mask,
       )
     else:
       output, lb_loss, bias_updates = self.dense_matmul(
@@ -7178,6 +7382,7 @@ class RoutedMoE(nnx.Module):
           input_ids=input_ids,
           forced_routed_experts=forced_routed_experts,
           token_mask=token_mask,
+          image_mask=image_mask,
       )
     return output, lb_loss, bias_updates
 
@@ -7196,6 +7401,7 @@ class RoutedAndSharedMoE(nnx.Module):
       dtype: ctypes.DType = jnp.float32,
       quant: Optional[quantizations.AqtQuantization] = None,
       is_hash_routing: bool = False,
+      use_bias_vl: bool = False,
   ):
     """Initializes the RoutedAndSharedMoE module.
 
@@ -7219,6 +7425,7 @@ class RoutedAndSharedMoE(nnx.Module):
     self.quant = quant
     self.rngs = rngs
     self.is_hash_routing = is_hash_routing
+    self.use_bias_vl = use_bias_vl
     self.moe_expert_input_dim = (
         self.config.emb_dim if self.config.moe_expert_input_dim <= 0 else self.config.moe_expert_input_dim
     )
@@ -7240,6 +7447,7 @@ class RoutedAndSharedMoE(nnx.Module):
         quant=self.quant,
         rngs=self.rngs,
         is_hash_routing=self.is_hash_routing,
+        use_bias_vl=self.use_bias_vl,
     )
 
     shared_expert_mlp_dim = maxtext_utils.get_shared_expert_mlp_dim(self.config)
@@ -7279,6 +7487,7 @@ class RoutedAndSharedMoE(nnx.Module):
       forced_routed_experts: jax.Array | None = None,
       token_mask: jax.Array | None = None,
       moe_qwag_weight_amax: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+      image_mask: jax.Array | None = None,
   ) -> tuple[jax.Array, jax.Array | None, jax.Array | None]:
     """Executes both the routed experts and the shared expert block.
 
@@ -7307,6 +7516,7 @@ class RoutedAndSharedMoE(nnx.Module):
         forced_routed_experts=forced_routed_experts,
         token_mask=token_mask,
         moe_qwag_weight_amax=moe_qwag_weight_amax,
+        image_mask=image_mask,
     )
     shared_experts = self.shared_experts(
         inputs,
