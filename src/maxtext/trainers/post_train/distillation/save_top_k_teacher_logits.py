@@ -47,6 +47,7 @@ from maxtext.utils import model_creation_utils
 from maxtext.input_pipeline import input_pipeline_interface
 from maxtext.utils import maxtext_utils
 from maxtext.utils import max_logging
+from maxtext.utils import max_utils
 
 from jax.experimental import multihost_utils
 from array_record.python import array_record_module
@@ -170,6 +171,11 @@ def teacher_step(model, batch, k):
 
 def generate_and_save_data(config, local_args):
   """Generates top-k logits from the teacher model and saves them locally, optionally uploading to GCS"""
+  devices = jax.devices()
+  devices_array = maxtext_utils.create_device_mesh(config, devices)
+  mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
+  max_utils.check_no_load_balanced_context_parallelism(config, "save_top_k_teacher_logits", mesh=mesh)
+
   k_val = local_args.top_k
   optional_keys = local_args.optional_keys
   gcs_upload_path = local_args.gcs_upload_path
@@ -187,10 +193,6 @@ def generate_and_save_data(config, local_args):
   write_executor = ThreadPoolExecutor(max_workers=1)
   # New executor purely for CPU-bound protobuf serialization
   serialization_executor = ThreadPoolExecutor(max_workers=local_args.serialization_workers)
-
-  devices = jax.devices()
-  devices_array = maxtext_utils.create_device_mesh(config, devices)
-  mesh = jax.sharding.Mesh(devices_array, config.mesh_axes)
 
   if jax.process_index() == 0:
     max_logging.log(f"Loading Teacher Model from {config.load_parameters_path}...")
