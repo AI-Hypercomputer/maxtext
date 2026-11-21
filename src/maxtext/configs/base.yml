@@ -349,6 +349,7 @@ use_custom_sort_vjp: true # whether to use a custom VJP sort for efficient backw
 router_topk_matmul_vjp: false # deepseek routing: dense one-hot VJP for the top-k weight gather (no scatter-add in the backward)
 use_ring_of_experts: false # whether to use ring of experts for sparse matmul expert parallelism
 moe_topk_before_ep_all_gather: false # ring of experts: run top-k on local tokens and all-gather top-k weights/ids instead of router logits
+moe_ring_pipeline_mode: "none" # chunked ring-of-experts schedule: "none" (plain chunk loop), "combine_per_chunk" (order chunk c's unpermute after chunk c-1's combine reduce-scatter), or "software_pipeline" (overlap dispatch and combine collectives across chunks via forward-only optimization barriers)
 te_moe_block: false # whether to use TransformerEngine's MoEBlock for routed MoE layers
 te_moe_disable_cudnn_gmm_fusion: false # force te_moe.moe(..., use_cudnn_fusion=False); false leaves TransformerEngine's default unchanged
 te_moe_quantize_before_fsdp_all_gather: false # true: quantize TE MoE weights before FSDP all-gather; false: quantize after

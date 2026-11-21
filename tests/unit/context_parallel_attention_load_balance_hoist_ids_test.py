@@ -165,6 +165,7 @@ def _remat_cfg(**fields):
           "remat_policy": "custom",
           "tensors_on_device": None,
           "tensors_to_offload": None,
+          "moe_ring_pipeline_mode": "none",
           **fields,
       }
   )
