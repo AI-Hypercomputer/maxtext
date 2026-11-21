@@ -23,7 +23,7 @@ from flax import linen as nn
 from flax import nnx
 from aqt.jax.v2 import aqt_tensor
 
-from maxtext.common.common_types import Array, DType, Shape, PRNGKey, is_fp8_dtype
+from maxtext.common.common_types import Array, DType, Shape, PRNGKey, UntrainableParam, is_fp8_dtype
 
 Initializer = Callable[[PRNGKey, Shape, DType], Array]
 InitializerAxis = int | tuple[int, ...]
@@ -108,7 +108,7 @@ def variable_to_logically_partitioned(variable: nnx.Variable):
   if out_sharding is not None:
     if nnx.PARTITION_NAME in metadata:
       partition_name = metadata[nnx.PARTITION_NAME]
-      scan_axis = metadata.get("param_scan_axis", 0) if variable.type == nnx.Param else 0
+      scan_axis = metadata.get("param_scan_axis", 0) if variable.type in (nnx.Param, UntrainableParam) else 0
 
       sharding_list = [out_sharding] if isinstance(out_sharding, str) else list(out_sharding)
       if partition_name not in sharding_list:
