@@ -2849,6 +2849,15 @@ class LayoutAndSharding(BaseModel):
           " blocks prefetched per sub-layer, the reduce-scatters are deferred to the next sub-layer's step."
       ),
   )
+  prefetch_fsdp_two_stage_dcn: bool = Field(
+      True,
+      description=(
+          "With prefetch_fsdp_defer_grad_reduce_scatter=True and shard_mode=explicit on a multi-slice mesh"
+          " where a batch axis spans slices, pipeline each weight gradient's cross-slice DCN all-reduce one"
+          " backward step behind its intra-slice FSDP reduce-scatter. Set to False to fall back to the"
+          " single-stage reduction path."
+      ),
+  )
 
 
 class DcnParallelism(BaseModel):

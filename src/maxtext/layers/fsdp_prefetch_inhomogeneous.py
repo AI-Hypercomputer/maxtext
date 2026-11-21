@@ -344,6 +344,18 @@ def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, 
   and ys of the single-trip loops, whose dW structures differ), and the reduced gradients accumulate
   in the carry. The first block step defers a placeholder reduce-scatter of zeros, and the last
   sub-layer's deferred reduce-scatter runs after the block loop.
+
+  Multi-slice runs are assumed to keep FSDP within a slice and run data parallelism across slices
+  (see `fsdp_prefetch._dcn_mesh_axes`). When a gradient is also summed over a mesh axis that spans
+  slices (DCN), the reduction is split
+  in two stages as in `fsdp_prefetch._custom_vjp_prefetch_pipeline_bwd`: the step of sub-layer j-1
+  issues the ICI reduce-scatter of sub-layer j's dW (keeping the DCN axes unreduced) and the DCN
+  all-reduce of sub-layer j+1's already reduce-scattered dW, so the DCN all-reduce no longer waits
+  behind an ICI reduce-scatter in the same step. Both deferred gradients ride in the carries, so the
+  first same-group step, whose DCN all-reduce belongs to another group, also runs in its own
+  single-trip loop:
+
+    Group of n sub-layers (backward): [entry: n-1] -> [n-2] -> [same group: n-3 .. 1] -> [exit: 0]
   """
   ys, saved, params_leaves, state_leaves, d_args, d_kwargs = res
   g, _ = g_out  # Non-parameter layer state is not differentiated.
@@ -383,26 +395,6 @@ def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, 
     i, b, k = owner
     return write(d_acc, i, rs_fns[i](pend, "tagged"), b, k, "tagged")
 
-  def boundary_step(i, k, b, gather_fn, owner):
-    """A single-trip loop for sub-layer k of group i that defers a dW of another structure (or shape).
-
-    Unreduced arrays cannot be sliced, so both deferred dWs ride in the carry: the incoming one
-    (flushed here, passed through) and the outgoing one (a typed placeholder on entry).
-    """
-
-    def step(carry, xs_step):
-      g, w, d_acc, pend, _ = carry
-      y_k, saved_k, layer_state, p_prev = xs_step
-      if offload_ys:
-        y_k = fsdp_prefetch._host_stack_read(ys[i], y_k)
-      d_acc = flush(d_acc, owner, pend)  # RS(j+1) || bwd(j).
-      w_prev = gather_fn(p_prev)  # AG(j-1) || bwd(j).
-      g, dw = bwd(i, y_k, w, layer_state, g, saved_k)
-      d_acc = write(d_acc, i, dw, b, k, "untagged")
-      return (g, w, d_acc, pend, deferred(i, dw)), w_prev
-
-    return step
-
   pending_avals = {}
 
   def pending_zeros(i):
@@ -419,10 +411,71 @@ def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, 
       pending_avals[i] = jax.eval_shape(first_dw, g)
     return jax.tree.map(lambda s: jnp.zeros(s.shape, s.dtype, out_sharding=s.sharding), pending_avals[i])
 
+  # Tracing `pending_zeros` fixes each group's deferred-leaf choice, which `has_dcn_stage` reads.
+  two_stage = any(
+      rs_fns[i].has_dcn_stage(jax.tree_util.tree_leaves(jax.eval_shape(lambda i=i: pending_zeros(i))))
+      for i in range(num_groups)
+  )
+
+  def ici_zeros(i):
+    """Zeros typed like a group-i dW after its ICI reduce-scatter (still unreduced over DCN axes)."""
+    pending_zeros(i)
+    return jax.tree.map(
+        lambda s: jnp.zeros(s.shape, s.dtype, out_sharding=s.sharding), jax.eval_shape(rs_fns[i].ici, pending_avals[i])
+    )
+
+  def reduce_deferred(d_acc, owners, pend):
+    """Issues the deferred reductions of `pend` = (dW, ICI-reduced dW) of `owners`; returns the new stage-2 dW.
+
+    With one stage, `pend` is the dW of `owners[0]` alone and is fully reduce-scattered into `d_acc`.
+    """
+    if not two_stage:
+      return flush(d_acc, owners[0], pend), None
+    p1, p2 = pend
+    (i1, _, _), (i2, b2, k2) = owners
+    d_acc = write(d_acc, i2, rs_fns[i2].dcn(p2), b2, k2, "tagged")  # AR_DCN(j+2) || bwd(j).
+    return d_acc, rs_fns[i1].ici(p1)  # RS_ICI(j+1) || bwd(j).
+
+  def next_pend(i, dw, p2):
+    return (deferred(i, dw), p2) if two_stage else deferred(i, dw)
+
+  def pend_zeros(i, owners):
+    """Typed placeholder for the deferred dW(s) a group-i step hands to the next step."""
+    return (pending_zeros(i), ici_zeros(owners[0][0])) if two_stage else pending_zeros(i)
+
+  def boundary_step(i, k, b, gather_fn, owners):
+    """A single-trip loop for sub-layer k of group i that defers a dW of another structure (or shape).
+
+    Unreduced arrays cannot be sliced, so both deferred dWs ride in the carry: the incoming one
+    (flushed here, passed through) and the outgoing one (a typed placeholder on entry).
+    """
+
+    def step(carry, xs_step):
+      g, w, d_acc, pend, _ = carry
+      y_k, saved_k, layer_state, p_prev = xs_step
+      if offload_ys:
+        y_k = fsdp_prefetch._host_stack_read(ys[i], y_k)
+      d_acc, p2 = reduce_deferred(d_acc, owners, pend)  # RS(j+1) || bwd(j).
+      w_prev = gather_fn(p_prev)  # AG(j-1) || bwd(j).
+      g, dw = bwd(i, y_k, w, layer_state, g, saved_k)
+      d_acc = write(d_acc, i, dw, b, k, "untagged")
+      return (g, w, d_acc, pend, next_pend(i, dw, p2)), w_prev
+
+    return step
+
+  def successor(i, b, k):
+    """The sub-layer after (group i, block b, sub-layer k) in forward order (processed before it backward)."""
+    if k + 1 < sizes[i]:
+      return (i, b, k + 1)
+    if i + 1 < num_groups:
+      return (i + 1, b, 0)
+    return (0, (b + 1) % length, 0)
+
   def body(carry, xs):
     g, w, d_acc, pend = carry  # `w`: this block's gathered last sub-layer; `pend`: next block's sub-layer 0.
     b, b_ys, b_saved, b_state, b_params = xs  # Group i's leaves are `[sizes[i], ...]`.
-    owner = (0, (b + 1) % length, 0)
+    first = (0, (b + 1) % length, 0)
+    owners = (first, successor(*first))  # Owners of the deferred dW(s) in `pend`.
     for i in reversed(range(num_groups)):
       n = sizes[i]
       if i > 0:
@@ -432,28 +485,37 @@ def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, 
         prv_last = fsdp_prefetch._slice_at(_index_at(params[-1], (b - 1) % length), sizes[-1] - 1)
         gather_prv = gather[-1]
 
-      def run_boundary(carry, k, p_prev, gather_fn, owner, pend, i=i, n=n):
+      def run_boundary(carry, k, p_prev, gather_fn, owners, pend, i=i, n=n):
         # The sub-layer's inputs ride in xs, so XLA cannot hoist its recompute as a loop invariant.
         y_arg = b * n + k if offload_ys else fsdp_prefetch._slice_at(b_ys[i], k)
         xs_step = fsdp_prefetch._expand0(
             (y_arg,) + tuple(fsdp_prefetch._slice_at(t, k) for t in (b_saved[i], b_state[i])) + (p_prev,)
         )
         g, w, d_acc = carry
-        carry = (g, w, d_acc, pend, pending_zeros(i))
-        (g, _, d_acc, _, new_pend), w_prev = _sublayer_scan(boundary_step(i, k, b, gather_fn, owner), carry, xs_step)
-        return (g, fsdp_prefetch._slice_at(w_prev, 0), d_acc), new_pend
+        carry = (g, w, d_acc, pend, pend_zeros(i, owners))
+        (g, _, d_acc, _, new_pend), w_prev = _sublayer_scan(boundary_step(i, k, b, gather_fn, owners), carry, xs_step)
+        return (g, fsdp_prefetch._slice_at(w_prev, 0), d_acc), new_pend, ((i, b, k), owners[0])
 
       # Entry step (sub-layer n-1): prefetches sub-layer n-2, or the previous group's last one if n == 1.
       if n >= 2:
         entry_prev, entry_gather = fsdp_prefetch._slice_at(b_params[i], n - 2), gather[i]
       else:
         entry_prev, entry_gather = prv_last, gather_prv
-      (g, w, d_acc), pend = run_boundary((g, w, d_acc), n - 1, entry_prev, entry_gather, owner, pend)
-      owner = (i, b, n - 1)
+      (g, w, d_acc), pend, owners = run_boundary((g, w, d_acc), n - 1, entry_prev, entry_gather, owners, pend)
 
-      if n >= 3:
-        # Same-group steps k = n-2 .. 1, unrolled by 2 with >= 2 of them (see the plain backward pass).
-        ordered = n - 2 >= 2
+      # With two stages, the DCN all-reduce of sub-layer n-2's step belongs to the previous group, so
+      # that step runs in its own single-trip loop and the same-group scan starts at sub-layer n-3.
+      top = n - 2
+      if two_stage and n >= 3:
+        k = n - 2
+        (g, w, d_acc), pend, owners = run_boundary(
+            (g, w, d_acc), k, fsdp_prefetch._slice_at(b_params[i], k - 1), gather[i], owners, pend
+        )
+        top = n - 3
+
+      if top >= 1:
+        # Same-group steps k = top .. 1, unrolled by 2 with >= 2 of them (see the plain backward pass).
+        ordered = top >= 2
         y_group = None if offload_ys else b_ys[i]
 
         def same_group(carry, k, i=i, n=n, p=b_params[i], s=b_state[i], y_=y_group, sv=b_saved[i], ordered=ordered):
@@ -464,33 +526,42 @@ def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, 
             # In the 2nd unrolled step, waits for the 1st step's g (barrier-tied to its dW) so
             # W(j+1) and dW(j+1) are dead before AG(j-1) and recompute(j) start.
             g, y_k, saved_k, p_prev = jax.lax.optimization_barrier((g, y_k, saved_k, p_prev))
-          d_acc = flush(d_acc, (i, b, k + 1), pend)  # RS(j+1) || bwd(j).
+          d_acc, p2 = reduce_deferred(d_acc, ((i, b, k + 1), (i, b, k + 2)), pend)  # RS(j+1) || bwd(j).
           w_prev = gather[i](p_prev)  # AG(j-1) || bwd(j).
           g, dw = bwd(i, y_k, w, _index_at(s, k), g, saved_k)
           if ordered:
             g, dw = jax.lax.optimization_barrier((g, dw))
           d_acc = write(d_acc, i, dw, b, k, "untagged")
-          return (g, w_prev, d_acc, deferred(i, dw)), None
+          return (g, w_prev, d_acc, next_pend(i, dw, p2)), None
 
         (g, w, d_acc, pend), _ = _sublayer_scan(
-            same_group, (g, w, d_acc, pend), jnp.arange(1, n - 1), reverse=True, unroll=2 if ordered else 1
+            same_group, (g, w, d_acc, pend), jnp.arange(1, top + 1), reverse=True, unroll=2 if ordered else 1
         )
-        owner = (i, b, 1)
+        owners = ((i, b, 1), (i, b, 2))
 
       if n >= 2:
         # Exit step (sub-layer 0): prefetches the previous group's last sub-layer.
-        (g, w, d_acc), pend = run_boundary((g, w, d_acc), 0, prv_last, gather_prv, owner, pend)
-        owner = (i, b, 0)
+        (g, w, d_acc), pend, owners = run_boundary((g, w, d_acc), 0, prv_last, gather_prv, owners, pend)
     return (g, w, d_acc, pend), None
 
   w = gather[-1](fsdp_prefetch._slice_at(fsdp_prefetch._slice_at(params[-1], length - 1), sizes[-1] - 1))
   d_acc = tuple(jax.tree.map(jnp.zeros_like, p) for p in params)
-  # The first block step flushes zeros into block 0's sub-layer 0, which the flush below overwrites.
-  pend = pending_zeros(0)
+  # The first block step flushes zeros into block 0's first sub-layer(s), which the flushes below
+  # overwrite (every placeholder write happens before any real one).
+  first = (0, 0, 0)
+  last_owners = (first, successor(*first))
+  pend = (pending_zeros(0), ici_zeros(last_owners[1][0])) if two_stage else pending_zeros(0)
   ys_xs = () if offload_ys else ys
   xs = (jnp.arange(length), ys_xs, saved, tuple(state), tuple(params))
   (g, _, d_acc, pend), _ = jax.lax.scan(body, (g, w, d_acc, pend), xs, reverse=True)
-  d_acc = flush(d_acc, (0, 0, 0), pend)  # Block 0's sub-layer 0, the last backward step.
+  if two_stage:
+    # AR_DCN of block 0's second-to-last backward sub-layer, then the full reduction of its last one.
+    p1, p2 = pend
+    i2, b2, k2 = last_owners[1]
+    d_acc = write(d_acc, i2, rs_fns[i2].dcn(p2), b2, k2, "tagged")
+    d_acc = flush(d_acc, first, p1)
+  else:
+    d_acc = flush(d_acc, first, pend)  # Block 0's sub-layer 0, the last backward step.
 
   params_bar_leaves = tuple(tuple(jax.tree_util.tree_leaves(d)) for d in d_acc)
   diff_args_bar_leaves = tuple(jnp.zeros_like(x) for x in d_args)

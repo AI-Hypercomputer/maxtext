@@ -63,7 +63,54 @@ def _on_sparse_core(fn, core_id, x=None):
   )
 
 
-def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False, src_sharding=None, sparse_core_id=None):
+def _dcn_mesh_axes(mesh, config=None) -> frozenset[str]:
+  """Mesh axis names of `mesh` (of size > 1) that span multiple slices (DCN).
+
+  The prefetch pipeline assumes multi-slice training keeps the FSDP axes within a slice and runs
+  data parallelism (e.g. `dcn_data_parallelism`) across slices: the DCN axes found here are then
+  batch axes, whose gradient all-reduce gets its own pipeline stage (see
+  `_custom_vjp_prefetch_pipeline_bwd`). FSDP axes that span slices still give correct gradients, but
+  their collectives are left to XLA (not pinned to a SparseCore) and are not tuned.
+  """
+  dcn = set()
+  axis_names = getattr(mesh, "axis_names", None)
+  devices = None if isinstance(mesh, jax.sharding.AbstractMesh) else getattr(mesh, "devices", None)
+  if (
+      axis_names is not None
+      and devices is not None
+      and getattr(devices, "size", 0) > 0
+      and devices.ndim == len(axis_names)
+  ):
+    for i, name in enumerate(axis_names):
+      if devices.shape[i] <= 1:
+        continue
+      rows = iter(devices.swapaxes(0, i).reshape(devices.shape[i], -1))
+      ref = [getattr(d, "slice_index", 0) for d in next(rows)]
+      if any([getattr(d, "slice_index", 0) for d in row] != ref for row in rows):
+        dcn.add(name)
+  if config is not None and axis_names is not None:
+    cfg_axes = getattr(config, "mesh_axes", None)
+    cfg_dcn = getattr(config, "dcn_parallelism", None)
+    if cfg_axes is not None and cfg_dcn is not None:
+      for name, deg in zip(cfg_axes, cfg_dcn):
+        if deg and deg > 1 and mesh.shape.get(name, 1) > 1:
+          dcn.add(name)
+    for name, attr in (
+        ("data", "dcn_data_parallelism"),
+        ("fsdp", "dcn_fsdp_parallelism"),
+        ("fsdp_transpose", "dcn_fsdp_transpose_parallelism"),
+        ("expert", "dcn_expert_parallelism"),
+        ("context", "dcn_context_parallelism"),
+        ("context_usp_ulysses", "dcn_context_usp_ulysses_parallelism"),
+    ):
+      if (getattr(config, attr, 1) or 1) > 1 and mesh.shape.get(name, 1) > 1:
+        dcn.add(name)
+  return frozenset(dcn)
+
+
+def _apply_sharding_hint(
+    w, mesh, shard_mode, debug_sharding=False, src_sharding=None, sparse_core_id=None, dcn_axes=frozenset()
+):
   """All-gathers `w` over the FSDP mesh axes by resharding it to its FSDP-stripped sharding.
 
   Leaves without a NamedSharding are returned unchanged. `src_sharding` overrides the sharding read
@@ -86,6 +133,7 @@ def _apply_sharding_hint(w, mesh, shard_mode, debug_sharding=False, src_sharding
       gathered_sharding.spec,
       reduced=shard_mode == ShardMode.EXPLICIT,
       sparse_core_id=sparse_core_id,
+      dcn_axes=dcn_axes,
   )
   if out is not None:
     return out
@@ -108,7 +156,42 @@ def _expected_unreduced_axes(mesh, src_spec, fsdp_axes):
   return frozenset(fsdp_axes) | frozenset(_extra_batch_axes(mesh, src_spec, fsdp_axes))
 
 
-def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, sparse_core_id=None):
+def _sparse_core_all_gather(x, ax_name, dim, sparse_core_id, *, to=None):
+  """All-gathers `x` over `ax_name` along `dim`, pinning to `sparse_core_id` when set.
+
+  When pinned to a SparseCore, moves `dim` to axis 0, pins the `compute_on` boundary to row-major
+  layout so the lowered gather always updates along the physical major-most dimension, and
+  zero-pads a narrow minor dimension (< 128) up to 128 so every 2D+ weight stays on the dedicated
+  SparseCore instead of falling back to an unpinned collective that synchronizes across SparseCores.
+  """
+  ag_kwargs = {"axis": dim, "tiled": True}
+  if to is not None:
+    ag_kwargs["to"] = to
+  if sparse_core_id is None or sparse_core_id < 0 or x.ndim < 2:
+    return jax.lax.all_gather(x, ax_name, **ag_kwargs)
+  if dim != 0:
+    x = jnp.moveaxis(x, dim, 0)
+    ag_kwargs["axis"] = 0
+  orig_last = x.shape[-1]
+  pad_last = 128 - orig_last if orig_last < 128 else 0
+  if pad_last:
+    x = jnp.pad(x, [(0, 0)] * (x.ndim - 1) + [(0, pad_last)])
+  row_major = Layout(tuple(range(x.ndim)))
+
+  def _ag(t):
+    t = with_layout_constraint(t, row_major)
+    out = jax.lax.all_gather(t, ax_name, **ag_kwargs)
+    return with_layout_constraint(out, row_major)
+
+  x = _on_sparse_core(_ag, sparse_core_id, x)(x)
+  if pad_last:
+    x = jax.lax.slice_in_dim(x, 0, orig_last, axis=-1)
+  if dim != 0:
+    x = jnp.moveaxis(x, 0, dim)
+  return x
+
+
+def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, sparse_core_id=None, dcn_axes=frozenset()):
   """All-gathers `w` over its FSDP mesh axes with an explicit all_gather.
 
   With `reduced` (explicit sharding mode, one gathered dimension), the result is typed `reduced` over
@@ -116,7 +199,9 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, s
   backward pass emits no all-reduce for it and `_explicit_fsdp_reduce_scatter` performs the only
   reduction.
 
-  With `sparse_core_id`, the gather runs on that SparseCore (see `_on_sparse_core`).
+  With `sparse_core_id`, intra-slice FSDP gathers run on that SparseCore (see `_on_sparse_core`);
+  dimensions whose FSDP axes intersect `dcn_axes` stay unpinned so XLA can lower the cross-slice
+  transfer (FSDP is expected to stay within a slice; see `_dcn_mesh_axes`).
 
   Returns None (the caller falls back to resharding) if the FSDP axes of a dimension are not its
   minor-most mesh axes, since a tiled gather would then not produce the target layout.
@@ -137,6 +222,7 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, s
 
   if reduced and len(dims) == 1:
     dim, ax = dims[0]
+    sc_id = None if bool(frozenset(ax) & dcn_axes) else sparse_core_id
     gathered = tuple(gathered_spec) + (None,) * (w.ndim - len(tuple(gathered_spec)))
     # Size-1 FSDP (co-)axes (e.g. `fsdp_transpose`, `context`), which `ax` skips but `gathered_spec`
     # strips, are first resharded away (a no-op on the data); otherwise the output would be typed as
@@ -158,11 +244,8 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, s
     # back `unreduced` over every axis it must be summed over.
     extra = _extra_batch_axes(mesh, in_spec, ax)
 
-    def all_gather_reduced(x):
-      return jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=dim, tiled=True, to="reduced")
-
     def gather_reduced(x):
-      x = _on_sparse_core(all_gather_reduced, sparse_core_id, x)(x)
+      x = _sparse_core_all_gather(x, ax if len(ax) > 1 else ax[0], dim, sc_id, to="reduced")
       if extra:
         x = jax.lax.pcast(x, extra if len(extra) > 1 else extra[0], to="reduced")
       return x
@@ -176,14 +259,12 @@ def _explicit_fsdp_all_gather(w, mesh, src_spec, gathered_spec, reduced=False, s
 
   def gather_all(x):
     for i, ax in dims:
-      x = jax.lax.all_gather(x, ax if len(ax) > 1 else ax[0], axis=i, tiled=True)
+      sc_id = None if bool(frozenset(ax) & dcn_axes) else sparse_core_id
+      x = _sparse_core_all_gather(x, ax if len(ax) > 1 else ax[0], i, sc_id)
     return x
 
-  def gather(x):
-    return _on_sparse_core(gather_all, sparse_core_id, x)(x)
-
   return jax.shard_map(
-      gather, mesh=mesh, in_specs=jax.sharding.PartitionSpec(*spec), out_specs=gathered_spec, check_vma=False
+      gather_all, mesh=mesh, in_specs=jax.sharding.PartitionSpec(*spec), out_specs=gathered_spec, check_vma=False
   )(w)
 
 
@@ -260,14 +341,26 @@ def _pad_unreduced(x, pad_width, axes):
   return jax.lax.pad(x, zero, [(lo, hi, 0) for lo, hi in pad_width])
 
 
-def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, pad_minor=False, sparse_core_id=None):
+def _explicit_fsdp_reduce_scatter(
+    g,
+    mesh,
+    src_spec,
+    gathered_spec,
+    pad_minor=False,
+    sparse_core_id=None,
+    dcn_axes=frozenset(),
+    defer_dcn_all_reduce=False,
+):
   """Reduce-scatters a gathered-weight gradient `g` over its FSDP mesh axes.
 
   The inverse of the `reduced` `_explicit_fsdp_all_gather`: `g` is `unreduced` over the FSDP axes
   (each device holds a partial sum) with the gathered sharding `gathered_spec`, and the result is the
   summed gradient with the parameter's FSDP sharding `src_spec`. With `pad_minor`, the minor dimension
   of a 2D gradient is padded (if needed) so the SparseCore reduce-scatter is not decomposed into an
-  all-reduce. With `sparse_core_id`, the reduce-scatter runs on that SparseCore (see `_on_sparse_core`).
+  all-reduce. With `sparse_core_id`, intra-slice FSDP reduce-scatters run on that SparseCore (see
+  `_on_sparse_core`). With `defer_dcn_all_reduce`, any extra batch axes in `dcn_axes` (e.g. `data`
+  over DCN) remain `unreduced` on the `1 / FSDP`-sized output so `_explicit_fsdp_dcn_all_reduce` can
+  pipeline the cross-slice all-reduce one backward layer later.
 
   Returns None (the caller falls back to resharding) if `g` is not unreduced over exactly the FSDP
   axes of a single dimension: reduce-scattering an already-reduced gradient would sum it again.
@@ -277,6 +370,9 @@ def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, pad_minor=Fa
     return None
   dim, ax = scatter
   extra = _extra_batch_axes(mesh, src_spec, ax)
+  dcn_extra = tuple(a for a in extra if a in dcn_axes) if defer_dcn_all_reduce else ()
+  ici_extra = tuple(a for a in extra if a not in dcn_extra)
+  sc_id = None if (sparse_core_id is None or sparse_core_id < 0 or bool(frozenset(ax) & dcn_axes)) else sparse_core_id
   spec = tuple(src_spec) + (None,) * (g.ndim - len(tuple(src_spec)))
   gathered = tuple(gathered_spec) + (None,) * (g.ndim - len(tuple(gathered_spec)))
   g_spec = jax.typeof(g).sharding.spec
@@ -292,43 +388,73 @@ def _explicit_fsdp_reduce_scatter(g, mesh, src_spec, gathered_spec, pad_minor=Fa
       pad_width[minor_dim] = (0, padded_minor - orig_minor)
       x = _pad_unreduced(x, pad_width, tuple(ax) + tuple(extra))
       x = _pin_scatter_dim_major(x, dim)
-    if dim != 0 and sparse_core_id is not None and sparse_core_id >= 0:
+    ax_name = ax if len(ax) > 1 else ax[0]
+    if sc_id is not None and x.ndim >= 2:
       # `compute_on` outlines its body into an HLO `call` whose boundary defaults to row-major
-      # `{N-1, ..., 0}` layout, ignoring `_pin_scatter_dim_major` outside the call and turning any
-      # `dim != 0` scatter into a non-major SparseCore reduce-scatter (which XLA rewrites into an
-      # all-reduce + dynamic-slice on 2D weights like `bf16[2048, 7168]`, or miscompiles on 3D+
-      # weights like `bf16[128, 128, 7168]` sharded on `dim=2`). Moving `dim` to axis 0 across the
-      # `compute_on` boundary makes the call parameter row-major with the scatter dimension
-      # major-most, lowering to zero-copy bitcasts around a `scatter_dimension=0` reduce-scatter.
-      x = jnp.moveaxis(x, dim, 0)
-      x = _on_sparse_core(
-          functools.partial(
-              jax.lax.psum_scatter, axis_name=ax if len(ax) > 1 else ax[0], scatter_dimension=0, tiled=True
-          ),
-          sparse_core_id,
-          x,
-      )(x)
-      x = jnp.moveaxis(x, 0, dim)
+      # layout, ignoring `_pin_scatter_dim_major` outside the call and turning a non-dim-0
+      # scatter into a minor-dimension SparseCore reduce-scatter (which XLA can rewrite into an
+      # all-reduce + dynamic-slice on 2D weights like `bf16[2048, 7168]`, or miscompile on 3D+
+      # weights like `bf16[128, 128, 7168]` sharded on `dim=2`). Moving `dim` to axis 0 across
+      # the `compute_on` boundary makes the call
+      # parameter row-major with the scatter dimension major-most, and zero-padding a narrow minor
+      # dimension (< 128) keeps every 2D+ gradient on the dedicated SparseCore.
+      if dim != 0:
+        x = jnp.moveaxis(x, dim, 0)
+      orig_last = x.shape[-1]
+      pad_last = 128 - orig_last if orig_last < 128 else 0
+      if pad_last:
+        pad_width = [(0, 0)] * (x.ndim - 1) + [(0, pad_last)]
+        x = _pad_unreduced(x, pad_width, tuple(ax) + tuple(extra))
+      row_major = Layout(tuple(range(x.ndim)))
+
+      def _rs(t):
+        t = with_layout_constraint(t, row_major)
+        out = jax.lax.psum_scatter(t, axis_name=ax_name, scatter_dimension=0, tiled=True)
+        return with_layout_constraint(out, row_major)
+
+      x = _on_sparse_core(_rs, sc_id, x)(x)
+      if pad_last:
+        x = jax.lax.slice_in_dim(x, 0, orig_last, axis=-1)
+      if dim != 0:
+        x = jnp.moveaxis(x, 0, dim)
     else:
-      x = _on_sparse_core(
-          functools.partial(
-              jax.lax.psum_scatter, axis_name=ax if len(ax) > 1 else ax[0], scatter_dimension=dim, tiled=True
-          ),
-          sparse_core_id,
-          x,
-      )(x)
-    if extra:
-      x = jax.lax.psum(x, extra if len(extra) > 1 else extra[0])
+      x = jax.lax.psum_scatter(x, ax_name, scatter_dimension=dim, tiled=True)
+    if ici_extra:
+      x = jax.lax.psum(x, ici_extra if len(ici_extra) > 1 else ici_extra[0])
     if padded_minor is not None and padded_minor > orig_minor:
       x = jax.lax.slice_in_dim(x, 0, orig_minor, axis=minor_dim)
     return x
 
+  out_spec = (
+      jax.sharding.PartitionSpec(*spec, unreduced=frozenset(dcn_extra), unreduced_kind=g_spec.unreduced_kind)
+      if dcn_extra
+      else jax.sharding.PartitionSpec(*spec)
+  )
   return jax.shard_map(
       psum_scatter,
       mesh=mesh,
       in_specs=jax.sharding.PartitionSpec(
           *gathered, unreduced=frozenset(ax) | frozenset(extra), unreduced_kind=g_spec.unreduced_kind
       ),
+      out_specs=out_spec,
+  )(g)
+
+
+def _explicit_fsdp_dcn_all_reduce(g, mesh, src_spec):
+  """All-reduces an ICI-reduce-scattered weight gradient `g` over any remaining unreduced DCN batch axes."""
+  g_sharding = getattr(jax.typeof(g), "sharding", None)
+  if not isinstance(g_sharding, NamedSharding) or not g_sharding.spec.unreduced:
+    return g
+  g_spec = g_sharding.spec
+  axes = tuple(a for a in mesh.axis_names if a in g_spec.unreduced)
+  if not axes:
+    return g
+  spec = tuple(src_spec) + (None,) * (g.ndim - len(tuple(src_spec)))
+  ax_name = axes if len(axes) > 1 else axes[0]
+  return jax.shard_map(
+      lambda x: jax.lax.psum(x, ax_name),
+      mesh=mesh,
+      in_specs=jax.sharding.PartitionSpec(*spec, unreduced=g_spec.unreduced, unreduced_kind=g_spec.unreduced_kind),
       out_specs=jax.sharding.PartitionSpec(*spec),
   )(g)
 
@@ -502,6 +628,20 @@ def _needs_minor_dim_layout_pin(stacked, layer_sharding, mesh):
   return bool(sharding.fsdp_axes_for_dim(axes))
 
 
+def _uses_sparse_core_gather(stacked, layer_sharding, ctx):
+  """Whether a per-layer parameter's FSDP gather runs inside a SparseCore `compute_on` region."""
+  if ctx.sparse_core_id is None or ctx.sparse_core_id < 0 or getattr(stacked, "ndim", 0) - 1 < 2:
+    return False
+  if not ctx.dcn_axes or layer_sharding is None or layer_sharding.spec is None:
+    return True
+  for entry in layer_sharding.spec:
+    entry_axes = () if entry is None else (tuple(entry) if isinstance(entry, (tuple, list)) else (entry,))
+    ax = sharding.fsdp_axes_for_dim(tuple(a for a in entry_axes if ctx.mesh.shape.get(a, 1) > 1))
+    if ax and (frozenset(ax) & ctx.dcn_axes):
+      return False
+  return True
+
+
 _PrefetchCtx = collections.namedtuple(
     "_PrefetchCtx",
     [
@@ -521,7 +661,10 @@ _PrefetchCtx = collections.namedtuple(
         "offload_layer_inputs",
         "sparse_core_id",
         "layout_cache",
+        "dcn_axes",
+        "two_stage_dcn",
     ],
+    defaults=(frozenset(), True),
 )
 
 # Primitives that pass their (single) operand through unchanged. A remat residual produced only by a
@@ -673,19 +816,26 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   layer_shardings = [_per_layer_sharding(p, ctx.mesh) for p in params_leaves]
   consts = (tuple(diff_args_leaves), tuple(diff_kwargs_leaves))
 
-  pin_layout_flags = [_needs_minor_dim_layout_pin(p, s, ctx.mesh) for p, s in zip(params_leaves, layer_shardings)]
+  pin_layout_flags = [
+      _needs_minor_dim_layout_pin(p, s, ctx.mesh) and not _uses_sparse_core_gather(p, s, ctx)
+      for p, s in zip(params_leaves, layer_shardings)
+  ]
 
   def gather_fn(layer_params):
     """All-gathers one layer's FSDP-sharded params (bf16[E, D/fsdp, F] -> bf16[E, D, F])."""
     leaves, treedef = jax.tree_util.tree_flatten(layer_params)
     out = []
     for x, pin in zip(leaves, pin_layout_flags):
-      x = _apply_sharding_hint(x, ctx.mesh, ctx.shard_mode, ctx.debug_sharding, sparse_core_id=ctx.sparse_core_id)
+      x = _apply_sharding_hint(
+          x, ctx.mesh, ctx.shard_mode, ctx.debug_sharding, sparse_core_id=ctx.sparse_core_id, dcn_axes=ctx.dcn_axes
+      )
       if pin:
         # 3D+ weights gathered on their minor-most dimension (e.g. [E, F, D/fsdp] where D/fsdp is not a
         # multiple of 128) exit all-gather in layout {1, 0, 2}. Pinning only those weights to default
         # major-to-minor layout keeps their relayout on the gather output (offloaded to SparseCore)
         # without forcing unnecessary SparseCore data-format copies on weights gathered on major dims.
+        # Skipped when SC-pinned because `_sparse_core_all_gather` already moves the gather dim to axis 0
+        # with an explicit row-major layout inside the `compute_on` region.
         x = with_layout_constraint(x, Layout(tuple(range(x.ndim))))
       out.append(x)
     return jax.tree_util.tree_unflatten(treedef, out)
@@ -707,13 +857,19 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
   def layer_fn(y, layer_weights, layer_state):
     return layer_pure(y, layer_weights, layer_state, consts)
 
-  def rs_one(g, s, tag):
+  def rs_one(g, s, tag, defer_dcn_all_reduce=False):
     """Reduce-scatters one gathered-weight gradient leaf back to its FSDP parameter sharding `s`."""
     if s is None:
       return g
     if tag:
       out = _explicit_fsdp_reduce_scatter(
-          g, ctx.mesh, s.spec, sharding.remove_fsdp_from_sharding(s).spec, sparse_core_id=ctx.sparse_core_id
+          g,
+          ctx.mesh,
+          s.spec,
+          sharding.remove_fsdp_from_sharding(s).spec,
+          sparse_core_id=ctx.sparse_core_id,
+          dcn_axes=ctx.dcn_axes,
+          defer_dcn_all_reduce=defer_dcn_all_reduce,
       )
       if out is not None:
         return out
@@ -735,6 +891,37 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
       tag_cache["flags"] = flags
     return tag_cache["flags"]
 
+  def has_dcn_stage(leaves):
+    """Whether any tagged leaf has a DCN batch axis to reduce in a separate 2nd backward stage."""
+    if not ctx.two_stage_dcn or not ctx.dcn_axes:
+      return False
+    for g, s, tag in zip(leaves, layer_shardings, tag_flags(leaves)):
+      if not tag or s is None:
+        continue
+      scatter = _fsdp_scatter_dim(g.ndim, ctx.mesh, s.spec)
+      if scatter is not None and (frozenset(_extra_batch_axes(ctx.mesh, s.spec, scatter[1])) & ctx.dcn_axes):
+        return True
+    return False
+
+  def rs_ici_fn(layer_grads):
+    """Stage 1 of 2-stage DCN reduction: ICI reduce-scatter of tagged leaves, keeping DCN axes unreduced."""
+    leaves, treedef = jax.tree_util.tree_flatten(layer_grads)
+    flags = tag_flags(leaves)
+    out = [
+        rs_one(g, s, tag, defer_dcn_all_reduce=True) if tag else g for g, s, tag in zip(leaves, layer_shardings, flags)
+    ]
+    return jax.tree_util.tree_unflatten(treedef, out)
+
+  def rs_dcn_fn(layer_grads):
+    """Stage 2 of 2-stage DCN reduction: DCN all-reduce of already ICI-reduce-scattered tagged leaves."""
+    leaves, treedef = jax.tree_util.tree_flatten(layer_grads)
+    flags = tag_flags(leaves)
+    out = [
+        _explicit_fsdp_dcn_all_reduce(g, ctx.mesh, s.spec) if tag and s is not None else g
+        for g, s, tag in zip(leaves, layer_shardings, flags)
+    ]
+    return jax.tree_util.tree_unflatten(treedef, out)
+
   def rs_fn(layer_grads, which="all"):
     """Reduce-scatters one layer's gathered-weight gradients back to the FSDP parameter sharding.
 
@@ -749,6 +936,9 @@ def _prefetch_setup(graphdef, params_leaves, state_leaves, diff_args_leaves, dif
     return jax.tree_util.tree_unflatten(treedef, out)
 
   rs_fn.tag_flags = tag_flags
+  rs_fn.has_dcn_stage = has_dcn_stage
+  rs_fn.ici = rs_ici_fn
+  rs_fn.dcn = rs_dcn_fn
 
   # Full remat (no policy): save only each layer's input and recompute the whole layer in the backward pass.
   # Tracing `_vjp_residual_layout` once in the forward pass and caching it on `ctx.layout_cache` for the
@@ -969,6 +1159,63 @@ def _custom_vjp_prefetch_pipeline_bwd(graphdef, length, ctx, res, g_out):
   d_params = jax.tree.map(jnp.zeros_like, params)
   if length == 1:
     d_params = write(d_params, rs_fn(dw), last, "all")
+  elif rs_fn.has_dcn_stage(jax.tree_util.tree_leaves(dw)):
+    # Assumes FSDP stays within a slice and data parallelism runs across slices (see `_dcn_mesh_axes`).
+    # 2-stage backward reduction when an extra batch axis spans DCN (e.g. `data`): step k issues
+    # Stage 2 (`AR_DCN` of layer k+2's already `1/FSDP`-reduced gradient) and Stage 1 (`RS_ICI` of
+    # layer k+1's gradient) concurrently with `AG(k-1)` and `bwd(k)`, decoupling DCN all-reduces
+    # from the preceding step's ICI reduce-scatters.
+    d_params = write(d_params, rs_fn(dw, "untagged"), last, "untagged")
+    pend_ici = deferred(dw)
+    if length == 2:
+      pend_dcn_1 = rs_fn.ici(pend_ici)  # RS_ICI(1) || bwd(0).
+      g, dw0 = layer_vjp_fn(x_in, w_prev, _slice_at(state, 0), g, saved_0, layout)
+      d_params = write(d_params, rs_fn.dcn(pend_dcn_1), 1, "tagged")  # AR_DCN(1) || RS_ICI(0).
+      d_params = write(d_params, rs_fn(dw0), 0, "all")
+    else:
+      # The reverse scan covers the same layers (k = length-2 .. 1) as the 1-stage pipeline, so no
+      # extra backward layer is peeled out of the loop (where its collectives would not overlap).
+      # `pend_dcn` starts as typed zeros: the first step all-reduces them and writes them to row
+      # `min(k + 2, last)` = `last`, which the next step overwrites with the real `AR_DCN(last)`.
+      ordered = (length - 2) // 2 >= 2
+      offload_mid = ctx.offload_layer_inputs and ordered  # As in the forward pass.
+      pend_dcn = jax.tree.map(
+          lambda s: jnp.zeros(s.shape, s.dtype, out_sharding=s.sharding), jax.eval_shape(rs_fn.ici, pend_ici)
+      )
+
+      def body_dcn(carry, xs):
+        g_k, w_k, d_acc, pend_ici_k, pend_dcn_k = carry
+        y_k, saved_k, state_k, k_idx = xs
+        if offload_mid:
+          y_k = _host_stack_read(ys_mid, k_idx - 1)
+        params_prev = _slice_at(params, k_idx - 1)
+        if ordered:
+          g_k, y_k, saved_k, params_prev = jax.lax.optimization_barrier((g_k, y_k, saved_k, params_prev))
+        dcn_row = jnp.minimum(k_idx + 2, last)
+        d_acc = write(d_acc, rs_fn.dcn(pend_dcn_k), dcn_row, "tagged")  # AR_DCN(k+2) || bwd(k).
+        next_pend_dcn = rs_fn.ici(pend_ici_k)  # RS_ICI(k+1) || bwd(k).
+        w_km1 = gather_fn(params_prev)  # AG(k-1) || bwd(k).
+        g_km1, dw_k = layer_vjp_fn(y_k, w_k, state_k, g_k, saved_k, layout)
+        dw_k = rs_fn(dw_k, "untagged")
+        if ordered:
+          g_km1, dw_k = jax.lax.optimization_barrier((g_km1, dw_k))
+        d_acc = write(d_acc, dw_k, k_idx, "untagged")
+        return (g_km1, w_km1, d_acc, deferred(dw_k), next_pend_dcn), None
+
+      # Iterates k = length-2 .. 1; element j of xs is layer k = j + 1.
+      ys_xs = jnp.zeros((length - 2, 0), jnp.int8) if offload_mid else ys_mid
+      (g, w_prev, d_params, pend_ici, pend_dcn), _ = jax.lax.scan(
+          body_dcn,
+          (g, w_prev, d_params, pend_ici, pend_dcn),
+          (ys_xs, saved_mid, _slice_range(state, 1, length - 1), jnp.arange(1, length - 1, dtype=jnp.int32)),
+          reverse=True,
+          unroll=2,
+      )
+      d_params = write(d_params, rs_fn.dcn(pend_dcn), 2, "tagged")  # AR_DCN(2) || bwd(0).
+      pend_dcn_1 = rs_fn.ici(pend_ici)  # RS_ICI(1) || bwd(0).
+      g, dw0 = layer_vjp_fn(x_in, w_prev, _slice_at(state, 0), g, saved_0, layout)
+      d_params = write(d_params, rs_fn.dcn(pend_dcn_1), 1, "tagged")  # AR_DCN(1) || RS_ICI(0).
+      d_params = write(d_params, rs_fn(dw0), 0, "all")
   else:
     d_params = write(d_params, rs_fn(dw, "untagged"), last, "untagged")
     pending = deferred(dw)
@@ -1084,6 +1331,13 @@ def _layer_major(params, state, scan_axis, length, move_scan_axis=True):
   return params, state
 
 
+def _first_mesh_device(mesh):
+  if isinstance(mesh, jax.sharding.AbstractMesh):
+    return getattr(mesh, "abstract_device", None)
+  devices = getattr(mesh, "devices", None)
+  return devices.flat[0] if devices is not None and getattr(devices, "size", 0) > 0 else None
+
+
 def _default_sparse_core_id(mesh) -> int | None:
   """SparseCore ID to pin FSDP prefetch collectives to on `mesh`, or None to leave unpinned.
 
@@ -1095,9 +1349,10 @@ def _default_sparse_core_id(mesh) -> int | None:
   sink reduce-scatter dones to the bottom without contending with SC0. Chips with a single
   SparseCore (e.g. TPU v6e) cannot pin to SC1 and return None.
   """
-  if mesh.devices.size == 0:
+  dev = _first_mesh_device(mesh)
+  if dev is None:
     return None
-  device_kind = getattr(mesh.devices.flat[0], "device_kind", "").lower()
+  device_kind = getattr(dev, "device_kind", "").lower()
   if any(tag in device_kind for tag in ("7x", "tpu7", "v7")):
     return 1
   return None
@@ -1120,7 +1375,8 @@ def _register_overlap_transform(mesh):
   registration, so tracing the model more than once is safe. Skipped when `mesh` is not on TPU
   (e.g. CPU unit tests, where the TPU PJRT client is not initialized).
   """
-  if mesh.devices.size == 0 or getattr(mesh.devices.flat[0], "platform", None) != "tpu":
+  dev = _first_mesh_device(mesh)
+  if dev is None or getattr(dev, "platform", None) != "tpu":
     return
   from maxtext.layers import fsdp_prefetch_overlap_transform  # pylint: disable=import-outside-toplevel
 
@@ -1198,6 +1454,8 @@ def _prepare_prefetch_call(layers, args, kwargs, *, length, mesh, config, remat_
       offload_layer_inputs=offload_layer_inputs,
       sparse_core_id=_default_sparse_core_id(mesh),
       layout_cache=layout_cache,
+      dcn_axes=_dcn_mesh_axes(mesh, config),
+      two_stage_dcn=bool(getattr(config, "prefetch_fsdp_two_stage_dcn", True)),
   )
   return graphdef, tuple(params_leaves), tuple(state_leaves), diff_args_leaves, diff_kwargs_leaves, ctx
 
