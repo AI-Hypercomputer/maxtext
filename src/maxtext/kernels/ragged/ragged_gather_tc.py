@@ -294,7 +294,9 @@ _RAGGED_GATHER_REDUCE_TC_NUM_BUFFERS = 4
 _RAGGED_GATHER_REDUCE_TC_LOOKAHEAD = _RAGGED_GATHER_REDUCE_TC_NUM_BUFFERS - 2
 # Static bodies per trip of the row DMA issue and reduce loops.
 _RAGGED_GATHER_REDUCE_TC_ISSUE_UNROLL = 64
-_RAGGED_GATHER_REDUCE_TC_REDUCE_UNROLL = 8
+_RAGGED_GATHER_REDUCE_TC_REDUCE_UNROLL = 32
+# Largest static store of the output token zeroing.
+_RAGGED_GATHER_REDUCE_TC_ZERO_UNROLL = 256
 # Alignment of dynamic 1D int32 HBM slices.
 _RAGGED_GATHER_REDUCE_TC_ALIGN = 128
 # Slots per chunk of the two-level search for block boundaries.
@@ -686,6 +688,21 @@ def ragged_gather_reduce_tc(
 
         off = off + bit
 
+    def _unrolled_chunks(n, max_unroll, fn):
+      """Calls fn(off, size) on static sizes of at most max_unroll covering [0, n)."""
+
+      def _do_pow2(off, size):
+        unroll = min(size, max_unroll)
+        if size == unroll:
+          fn(off, unroll)
+        else:
+
+          @pl.loop(0, size // unroll)
+          def _chunk(c):
+            fn(off + c * unroll, unroll)
+
+      _pow2_chunks(n, _do_pow2)
+
     def _wait_rows(b, n, sem):
       def _wait(off, size):
         del off
@@ -739,10 +756,12 @@ def ragged_gather_reduce_tc(
       b = blk % num_buffers
       _, _, token_start, num_tokens = _block(blk)
 
-      # Tokens without valid rows are zero.
-      @pl.loop(0, num_tokens)
-      def _zero_token(t):
-        vmem_ref[b, t, :, :] = jnp.zeros((dim0, dim1), x.dtype)
+      # Tokens without valid rows are zero. The zeros are stored in static
+      # chunks, not one token per loop trip.
+      def _zero_tokens(off, size):
+        vmem_ref[b, pl.ds(off, size), :, :] = jnp.zeros((size, dim0, dim1), x.dtype)
+
+      _unrolled_chunks(num_tokens, _RAGGED_GATHER_REDUCE_TC_ZERO_UNROLL, _zero_tokens)
 
       # A token's valid rows are contiguous in the compacted order, so sum
       # them in a running float32 total that restarts when the token changes.

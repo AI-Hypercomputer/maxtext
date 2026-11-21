@@ -346,6 +346,48 @@ class RaggedSortTcTest(parameterized.TestCase):
         np.testing.assert_array_equal(on[name][s][rows], off[name][s][rows], err_msg=f"{name}[{s}]")
 
 
+class RaggedGatherReduceTcTest(parameterized.TestCase):
+  """TC ragged gather-reduce vs a float32 scatter-add of the valid rows in buffer order."""
+
+  def setUp(self):
+    super().setUp()
+    if not any(d.platform == "tpu" for d in jax.devices()):
+      self.skipTest("The TC ragged gather-reduce kernel requires TPU.")
+
+  @pytest.mark.tpu_only
+  @parameterized.named_parameters(
+      ("block_896", 896, (0, 1, 37, 300, 1500, 6000, 16381)),
+      ("block_128", 128, (0, 5, 600, 16381)),
+  )
+  def test_gather_reduce_block_token_counts(self, block_size, counts):
+    """Bitwise result over blocks of many token counts, with VMEM buffers reused from earlier blocks."""
+    num_out_tokens, top_k, start = 4096, 4, 3
+    n = num_out_tokens * top_k
+    perm = jax.random.permutation(jax.random.PRNGKey(0), n).astype(jnp.int32)
+    indices = perm // top_k
+    x_valid = jax.random.normal(jax.random.PRNGKey(1), (n, 16, 128), jnp.float32).astype(jnp.bfloat16)
+    gather_reduce = jax.jit(
+        functools.partial(ragged_sort_tc.tc.ragged_gather_reduce_tc, num_out_tokens=num_out_tokens, top_k=top_k)
+    )
+    covered = 0
+    for count in counts:
+      # Rows past count are NaN: the kernel must never read them.
+      x = jnp.where((jnp.arange(n) < count)[:, None, None], x_valid, jnp.nan)
+      meta = ragged_sort_tc.tc.ragged_gather_reduce_tc_metadata(indices, start, count, top_k=top_k, block_size=block_size)
+      out = gather_reduce(x, meta)
+      expected = np.zeros((num_out_tokens, 16, 128), np.float32)
+      np.add.at(expected, np.asarray(indices)[start : start + count], np.asarray(x[:count], np.float32))
+      np.testing.assert_array_equal(
+          np.asarray(out).view(np.uint16), expected.astype(jnp.bfloat16).view(np.uint16), err_msg=f"count={count}"
+      )
+      blocks = np.asarray(meta.blocks)
+      for num_tokens in blocks[4::4][: blocks[0]]:
+        covered |= int(num_tokens)
+    # A block holds at most block_size - top_k tokens. Some block's token count sets each bit of that, so every
+    # static zeroing chunk size runs.
+    self.assertEqual(covered, (1 << (block_size - top_k).bit_length()) - 1)
+
+
 class RaggedSortTcWindowCpuTest(parameterized.TestCase):
   """CPU tests for moe_tc_window_routing: packed sort, windowed combine metadata and row weights."""
 
