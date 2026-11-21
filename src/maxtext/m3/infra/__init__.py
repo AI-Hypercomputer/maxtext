@@ -16,7 +16,7 @@
 
 Modules:
   * `scan.py` — layer stacking via `jax.lax.scan` + `maybe_apply_scan`.
-  * `quantization.py` — `maybe_quantize`: qwix int8 / fp8 by interception, over
+  * `quantization.py` — `maybe_quantize`: qwix int4 / int8 / fp4 / fp8 by interception, over
     the projection layers of the decoder stack.
   * `named_scopes.py` — `jax.named_scope` per submodule, so profiles and HLO
     dumps read `decoder/layers/3/mlp/wi_0`.

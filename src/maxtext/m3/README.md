@@ -75,7 +75,7 @@ moments, bfloat16 compute, float32 loss — and each concern lives in exactly on
 | Compute dtype | `dtype=` on every NNX layer at construction | `dtype` |
 | Float32 islands (softmax, logits, routing, MoE combine) | the model's own arithmetic | — |
 | Matmul precision for float32 operands | `jax.default_matmul_precision` around setup and the step (`train/loop.py`) | `matmul_precision` |
-| int8 / fp8 matmuls | `infra.quantization.maybe_quantize`, after construction | `quantization` |
+| Quantized (int4 / int8 / fp4 / fp8) matmuls | `infra.quantization.maybe_quantize`, after construction | `quantization` |
 
 `matmul_precision` matters only when matmul operands are float32: on TPU `default` runs them as
 one bfloat16 pass, `highest` as full float32. With bfloat16 compute it changes nothing, as in
@@ -94,14 +94,17 @@ Qwen3-VL, whose language-model attention still uses a hand-rolled `DenseGeneral`
 
 | `quantization=` | weights, activations | gradients |
 | :---- | :---- | :---- |
+| `int4` | int4 | int4 |
 | `int8` | int8 | int8 |
+| `fp4` | float4_e2m1fn | float4_e2m1fn |
 | `fp8`, `fp8_e4m3` | float8_e4m3fn | float8_e4m3fn |
 | `fp8_e5m2` | float8_e5m2 | float8_e5m2 |
 | `fp8_full` | float8_e4m3fn | float8_e5m2 |
 
 The names mean what they mean in legacy's qwix path. Quantization requires
 `use_qwix_quantization=true`: with it false, legacy trains the same config with AQT, which m3
-doesn't have, so m3 refuses rather than switching recipe.
+doesn't have, so m3 refuses rather than switching recipe. On TPU7x, XLA compiles the `int4`
+matmuls with float8_e4m3fn operands, which hold every int4 value exactly.
 
 Scales are dynamic, calibration absmax. `quantization` and `quantize_router_proj` are the legacy
 quantization fields m3 reads. A config that turns on a legacy knob m3 does not implement — `quantize_logits_proj`,
@@ -112,7 +115,7 @@ traces one forward pass of the training shape and requires one matmul in the rec
 planned projection; a model with no projections under `decoder/layers` is refused, not trained
 unquantized. Not yet: MoE grouped matmuls (they will join the plan through `ragged_dot`; the
 Pallas executors need in-kernel quantization), fp8 attention (a kernel feature, not a qwix rule),
-int4 / fp4, static scales, and weight-only quantization for serving. The legacy drivers
+OCP MX (`jax_mxfp8` / `jax_mxfp4`), static scales, and weight-only quantization for serving. The legacy drivers
 (`model_creation_utils.create_model`) do not apply m3 transforms yet.
 
 ## Sharding
