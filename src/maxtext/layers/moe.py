@@ -7059,6 +7059,9 @@ class RoutedMoE(nnx.Module):
           forced_routed_experts=forced_routed_experts,
           token_mask=token_mask,
       )
+    # Remat tag for the routed output after unpermute and the top-k combine (custom policy, moe_routed_output):
+    # saving it lets the backward skip replaying the wo matmul, unpermute and combine.
+    output = adc.checkpoint_name(output, "moe_routed_output")
     return output, lb_loss, bias_updates
 
 
