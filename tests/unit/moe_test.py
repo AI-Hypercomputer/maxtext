@@ -167,7 +167,6 @@ class FixedRandomRouterTest(unittest.TestCase):
     gate = moe.GateLogit(in_features_shape=4, out_features_shape=8, model_name="test", mesh=None, rngs=nnx.Rngs(0))
     layer = SimpleNamespace(
         config=cfg,
-        quant=SimpleNamespace(get_moe_block_quantizer_sets=lambda *a, **k: (None, None)),
         is_hash_routing=False,
         use_gate_bias=False,
         mesh=SimpleNamespace(shape={"fsdp": 1, "expert": 1}),
@@ -196,10 +195,15 @@ class FixedRandomRouterTest(unittest.TestCase):
         mock.patch.object(moe, "_get_te_moe_checkpoint_kwargs", return_value={}),
         mock.patch.object(moe, "_get_te_moe_weight_layout_kwargs", return_value={}),
         mock.patch.object(moe.max_utils, "get_te_moe_recv_capacity_per_rank", return_value=64),
+        mock.patch.object(
+            quantizations.TransformerEngineQuantization, "get_moe_block_quantizer_sets", return_value=(None, None)
+        ) as get_sets,
     ):
       args = (layer, inputs, None, None, None, None, None, None)
       result = moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
       np.testing.assert_array_equal(result[0], inputs)
+      # The quantizer sets come from te_gmm_quantization alone; the layer has no `quant` attribute at all.
+      self.assertEqual(get_sets.call_args.args[0], "te_no_quant")
       info = backend.call_args.kwargs["router_info"]
       expected_weights, expected_indices = layer.get_topk(*gate(inputs, routing_key=layer.fixed_routing_key[...]))
       np.testing.assert_array_equal(info.routing_indices, expected_indices)
@@ -213,6 +217,10 @@ class FixedRandomRouterTest(unittest.TestCase):
           with self.assertRaisesRegex(ImportError, "RoutingMapInfo"):
             moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
           setattr(te_moe, missing, saved)
+
+      cfg.te_gmm_quantization = ""
+      with self.assertRaisesRegex(ValueError, "requires te_gmm_quantization"):
+        moe.RoutedMoE._te_moe_block(*args)  # pylint: disable=protected-access
 
   def test_rejects_forced_expert_indices(self):
     layer = SimpleNamespace(config=SimpleNamespace(dtype=jnp.float32, te_moe_block=True, use_random_routing=True))

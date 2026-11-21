@@ -706,6 +706,15 @@ class TrainTests(unittest.TestCase):
   @pytest.mark.integration_test
   @pytest.mark.gpu_only
   def test_gpu_te_moe_block(self):
+    self._run_gpu_te_moe_block(dense_quantization="te_no_quant")
+
+  @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_moe_block_without_te_dense_quantization(self):
+    """TE MoE block with plain XLA dense layers (quantization unset, te_gmm_quantization set)."""
+    self._run_gpu_te_moe_block(dense_quantization="")
+
+  def _run_gpu_te_moe_block(self, dense_quantization):
     gpu_device = jax.devices("gpu")[0]
     compute_capability = getattr(gpu_device, "compute_capability", None)
     try:
@@ -718,7 +727,7 @@ class TrainTests(unittest.TestCase):
         TrainTests.CONFIGS["synthetic"]
         + [
             "attention=dot_product",
-            "quantization=te_no_quant",
+            f"quantization={dense_quantization}",
             "base_emb_dim=32",
             "decoder_block=deepseek",
             "attention_type=mla",
