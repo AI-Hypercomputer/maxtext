@@ -42,6 +42,7 @@ python3 -m maxtext.inference.decode \
     per_device_batch_size=1 run_name=${run_id} \
     max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+    ici_tensor_parallelism=4 \
     scan_layers=false hardware=gpu prompt='I love to' attention='dot_product'
 
 # Step 2: Run 2 steps of 2-node GPU pre-training on the converted checkpoint and save checkpoints to GCS
@@ -54,7 +55,7 @@ python3 -m maxtext.trainers.pre_train.train \
     per_device_batch_size=1 run_name=${train_run_name} \
     max_target_length=2048 steps=2 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
-    model_name=${MODEL_NAME} hardware=gpu attention=cudnn_flash_te \
+    model_name=${MODEL_NAME} hardware=gpu attention=dot_product \
     max_segments_per_seq=32 \
     scan_layers=false
 
@@ -65,4 +66,5 @@ python3 -m maxtext.inference.decode \
     per_device_batch_size=1 run_name=${train_run_name} \
     max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
+    ici_tensor_parallelism=4 \
     scan_layers=false hardware=gpu prompt='I love to' attention='dot_product'
