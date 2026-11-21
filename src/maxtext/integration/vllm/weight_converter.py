@@ -19,7 +19,7 @@ import dataclasses
 import gc
 import logging
 import re
-from typing import Any, Dict, Iterator, List, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Mapping, Optional, Tuple, Union
 
 from flax import nnx, traverse_util
 import jax
@@ -828,6 +828,7 @@ class MaxTextToMaxTextConverter:
 
     self._plan: Optional[List[_PlanEntry]] = None
     self._groups: Optional[List[_PlanGroup]] = None
+    self._compiled_target_free_groups: Dict[Tuple[int, Optional[int], Any], Callable[..., Tuple[jax.Array, ...]]] = {}
 
     logging.info(
         "MaxTextToMaxTextConverter: %d layers, cycle=%d, %d scanned blocks, "
@@ -1138,8 +1139,16 @@ class MaxTextToMaxTextConverter:
 
     return _jit_unstack(val, self.scan_axis)
 
-  def _fuse_moe_bulk_target_free(self, wi_0: Any, wi_1: Any, path: str):
-    """Fuses gate/up MoE kernels without a target state to derive shapes from."""
+  def _fuse_moe_bulk_target_free(
+      self,
+      wi_0: Any,
+      wi_1: Any,
+      path: str,
+      *,
+      n_shards_override: Optional[int] = None,
+  ):
+    """Fuses gate/up MoE kernels without a target state."""
+    del path
     unpadded_dim = wi_0.shape[-1]
     target_intermediate = (
         self.padded_base_moe_mlp_dim
@@ -1159,8 +1168,12 @@ class MaxTextToMaxTextConverter:
         n_shards = self.moe_mlp_tp_size
       elif self.kv_tp_size > 1 and self.moe_mlp_tp_size == 1:
         n_shards = 1
+      elif self.tp > 1:
+        n_shards = self.tp
+      elif n_shards_override is not None:
+        n_shards = n_shards_override
       else:
-        n_shards = self.tp if self.tp > 1 else _get_n_shards(wi_0, scan_fused_axis)
+        n_shards = _get_n_shards(wi_0, scan_fused_axis)
       return _fuse_and_unstack_moe(
           wi_0,
           wi_1,
@@ -1182,7 +1195,13 @@ class MaxTextToMaxTextConverter:
 
     raise ConversionPlanError(f"Unknown moe_fused_layout: {self.moe_fused_layout!r}")
 
-  def _execute_group_target_free(self, group: _PlanGroup, src_flat):
+  def _execute_group_target_free(
+      self,
+      group: _PlanGroup,
+      src_flat,
+      *,
+      n_shards_override: Optional[int] = None,
+  ):
     """Executes a conversion plan group without a target state."""
     path = group.source_path
     target_dtype = self._resolve_target_dtype()
@@ -1216,7 +1235,7 @@ class MaxTextToMaxTextConverter:
           _cast_target_free_floating_leaf(self._take_cycle_slot(raw_1, group), calc_dtype, path),
       )
       self._check_scan_axis(wi_0, path)
-      per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
+      per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path, n_shards_override=n_shards_override)
       if not group.quantize_to_fp8:
         return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
       return _quantize_fp8_targets(group, per_block)
@@ -1229,6 +1248,51 @@ class MaxTextToMaxTextConverter:
     if not group.quantize_to_fp8:
       return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
     return _quantize_fp8_targets(group, per_block)
+
+  def _resolve_target_free_moe_shards(self, group: _PlanGroup, raw_0: jax.Array) -> Optional[int]:
+    """Resolves MoE shard count from concrete `raw_0` before `jax.jit`."""
+    if (
+        group.op != "fuse_moe"
+        or self.moe_fused_layout != MoEFusedLayout.PER_SHARD_INTERLEAVE
+        or self.moe_mlp_tp_size > 1
+        or (self.kv_tp_size > 1 and self.moe_mlp_tp_size == 1)
+        or self.tp > 1
+    ):
+      return None
+    post_slot_ndim = raw_0.ndim - (1 if group.local_index is not None else 0)
+    tgt_fused_axis = post_slot_ndim - 2
+    wi_0_fused_axis = tgt_fused_axis if tgt_fused_axis < self.scan_axis else tgt_fused_axis + 1
+    has_slot_before_fused = group.local_index is not None and wi_0_fused_axis >= self.scan_axis + 1
+    raw_fused_axis = wi_0_fused_axis + 1 if has_slot_before_fused else wi_0_fused_axis
+    return _get_n_shards(raw_0, raw_fused_axis)
+
+  def _execute_group_target_free_cached(self, group_idx: int, group: _PlanGroup, src_flat):
+    """Executes non-identity `group` via a cached per-group `jax.jit` executable."""
+    if group.op == "identity" or self.debug:
+      return self._execute_group_target_free(group, src_flat)
+    ops = tuple(src_flat[k] for k in group.source_keys)
+    if not all(isinstance(op, jax.Array) for op in ops):
+      return self._execute_group_target_free(group, src_flat)
+    n_shards_override = self._resolve_target_free_moe_shards(group, ops[0])
+    cache_key = (group_idx, n_shards_override, self._resolve_target_dtype())
+    compiled_fn = self._compiled_target_free_groups.get(cache_key)
+    if compiled_fn is None:
+      src_keys = group.source_keys
+
+      def _group_fn(
+          *group_ops,
+          _group=group,
+          _keys=src_keys,
+          _n_shards=n_shards_override,
+      ):
+        local_src = dict(zip(_keys, group_ops))
+        pairs = self._execute_group_target_free(_group, local_src, n_shards_override=_n_shards)
+        return tuple(arr for _, arr in pairs)
+
+      compiled_fn = jax.jit(_group_fn)
+      self._compiled_target_free_groups[cache_key] = compiled_fn
+    out_arrays = compiled_fn(*ops)
+    return [(tgt_key, arr) for (_, tgt_key), arr in zip(group.targets, out_arrays)]
 
   def _execute_group(self, group: _PlanGroup, src_flat, tgt_flat):
     """Produces every target leaf in `group`. Returns (target_key, array) pairs."""
@@ -1436,6 +1500,7 @@ class MaxTextToMaxTextConverter:
     if self._plan is None:
       self._plan = self._build_target_free_plan(src_flat)
       self._groups = _group_plan(self._plan, fp8_moe=self.fp8_moe, src_flat=src_flat)
+      self._compiled_target_free_groups.clear()
 
     groups_per_piece = max(1, groups_per_piece)
     last_reader = _last_group_reading(self._groups)
@@ -1443,7 +1508,7 @@ class MaxTextToMaxTextConverter:
       piece_groups = self._groups[i : i + groups_per_piece]
       piece_result: Dict[Tuple[Any, ...], Any] = {}
       for group_idx, group in enumerate(piece_groups, start=i):
-        outs = self._execute_group_target_free(group, src_flat)
+        outs = self._execute_group_target_free_cached(group_idx, group, src_flat)
         for k in group.source_keys:
           if last_reader[k] == group_idx:
             src_flat.pop(k, None)
