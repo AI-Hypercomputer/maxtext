@@ -523,5 +523,52 @@ class TestGradientAccumulationNNX(unittest.TestCase):
         np.testing.assert_allclose(seen_ga2[0][: len(real_mb0)], seen_ref[0][real_mb0] * scale, rtol=1e-6, atol=1e-6)
 
 
+class SharedAccumulationHelpersTest(unittest.TestCase):
+  """The loss scale, microbatch layout, loss/aux bookkeeping and bias finalization shared with dual_pipe."""
+
+  def test_gradient_loss_scale(self):
+    cfg = _CausalLMCfg(logical_global_batch_size_to_train_on=8, max_target_length=4)
+    self.assertEqual(gradient_accumulation.gradient_loss_scale(cfg), 1.0 / 32)
+    # Without a logical batch it falls back to the global batch; with Tunix GA or no capacity it is 1.
+    cfg = _CausalLMCfg(logical_global_batch_size_to_train_on=None, global_batch_size_to_train_on=6, max_target_length=2)
+    self.assertEqual(gradient_accumulation.gradient_loss_scale(cfg), 1.0 / 12)
+    self.assertEqual(gradient_accumulation.gradient_loss_scale(_CausalLMCfg(use_tunix_gradient_accumulation=True)), 1.0)
+    self.assertEqual(gradient_accumulation.gradient_loss_scale(_CausalLMCfg(max_target_length=0)), 1.0)
+
+  def test_reshape_to_microbatches_interleaves_rows(self):
+    data = {"x": jnp.arange(12).reshape(6, 2), "y": jnp.arange(6)}
+    out = gradient_accumulation.reshape_to_microbatches(data, 2)
+    self.assertEqual(out["x"].shape, (2, 3, 2))
+    np.testing.assert_array_equal(out["y"], [[0, 2, 4], [1, 3, 5]])  # microbatch m takes rows m, m+steps, ...
+    with self.assertRaisesRegex(ValueError, "divisible"):
+      gradient_accumulation.reshape_to_microbatches(data, 4)
+
+  def test_finalize_accumulated_loss(self):
+    aux = {"moe_lb_loss": jnp.float32(0.6), "indexer_loss": jnp.float32(0.2)}
+    loss, means, has_weights, denominator = gradient_accumulation.finalize_accumulated_loss(
+        jnp.float32(8.0), jnp.int32(4), aux, 2
+    )
+    np.testing.assert_allclose(loss, 8.0 / 4 + 0.3 + 0.1, rtol=1e-6)
+    np.testing.assert_allclose([means["moe_lb_loss"], means["indexer_loss"]], [0.3, 0.1], rtol=1e-6)
+    self.assertTrue(bool(has_weights))
+    self.assertEqual(int(denominator), 4)
+    # A step without any valid token has zero loss and a divisor of 1, never a division by zero.
+    loss, _, has_weights, denominator = gradient_accumulation.finalize_accumulated_loss(
+        jnp.float32(5.0), jnp.int32(0), aux, 2
+    )
+    self.assertEqual(float(loss), 0.0)
+    self.assertFalse(bool(has_weights))
+    self.assertEqual(int(denominator), 1)
+
+  def test_finalize_bias_update(self):
+    cfg = _CausalLMCfg(num_experts=4, routed_bias_update_rate=0.01)
+    counts = jnp.array([[7, 15, 22, 20]], jnp.int32)
+    np.testing.assert_allclose(
+        gradient_accumulation.finalize_bias_update(counts, cfg), [[0.01, 0.01, -0.01, -0.01]], rtol=1e-6
+    )
+    steps = jnp.array([[0.01, -0.01]], jnp.float32)  # an update that is already a step is left alone
+    np.testing.assert_array_equal(gradient_accumulation.finalize_bias_update(steps, cfg), steps)
+
+
 if __name__ == "__main__":
   absltest.main()
