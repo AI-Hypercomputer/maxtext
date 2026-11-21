@@ -122,6 +122,8 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `eval_ragged_buffer_factor`: Evaluation override for `ragged_buffer_factor`.
 
+`moe_exclude_padding_from_routing` (default `False`): In training, keeps padding tokens (`decoder_segment_ids == 0`) out of MoE routing. They take no expert capacity or ragged buffer slot, add nothing to the load-balance loss or the routed-bias update, and get a zero routed output. Use it with packed batches whose padding would otherwise be routed, such as Tunix RL micro-batches. Not supported with `te_moe_block`, `use_batch_split_schedule`, `use_lineage`, `use_m3_model` or `decoder_block=kimi_linear`.
+
 `moe_dropless_fallback`: What to do when `ragged_buffer_factor > 0` and the ragged buffer would drop tokens. This allows training with a smaller tuned buffer for speed/memory efficiency while guaranteeing no token dropping. Requires `use_ring_of_experts=True` and `use_ragged_sort=True`.
 
 - `None` (default): tokens that overflow the buffer are dropped.

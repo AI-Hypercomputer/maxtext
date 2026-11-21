@@ -684,7 +684,10 @@ def uses_megatron_seq_aux_loss(config) -> bool:
 
 
 def routing_token_mask(config: Any, decoder_segment_ids: jax.Array | None, model_mode: str) -> jax.Array | None:
-  """The `token_mask` a decoder layer hands its MoE block when the batch is padded to a constant global batch size.
+  """The `token_mask` a decoder layer hands its MoE block to keep padding tokens out of routing, or None.
+
+  `moe_exclude_padding_from_routing` turns the mask on for every training batch, for packed batches whose padding
+  would otherwise be routed (such as Tunix RL micro-batches).
 
   Constant-global-batch-size elastic modes (`elastic_global_batch_size_mode` `constant_padded`,
   `constant_grad_accum`) set `logical_global_batch_size_to_train_on`, the same signal `synthetic_data_processing.py`
@@ -692,12 +695,11 @@ def routing_token_mask(config: Any, decoder_segment_ids: jax.Array | None, model
   rows such a mode pads have `decoder_segment_ids == 0` everywhere (the CE loss masks them the same way), so the
   mask is `decoder_segment_ids != 0`.
 
-  The mask is token-level, not row-level: once a logical batch size is set (including at 100% live slices, before
-  any resize) it also drops every `segment_id == 0` token of a real row, e.g. the trailing pad tokens of
-  unpacked (`packing=False`) or partially filled packed sequences of a real dataset. Those tokens then take no part
-  in routing, expert capacity, the aux loss or the routed-bias update. This is consistent across resizes within a
-  `constant_padded` / `constant_grad_accum` run, but differs from `proportional` and non-elastic runs, where this
-  returns None and such pad tokens keep being routed as before.
+  The mask is token-level, not row-level: whenever it is on (`moe_exclude_padding_from_routing`, or a logical batch
+  size, including at 100% live slices before any resize) it drops every `segment_id == 0` token of a real row as
+  well, e.g. the trailing pad tokens of unpacked (`packing=False`) or partially filled packed sequences. Those tokens
+  then take no part in routing, expert capacity, the aux loss or the routed-bias update. With neither set, as in
+  `proportional` and non-elastic runs by default, this returns None and such pad tokens keep being routed as before.
 
   Edge case of the sequence-chunked Switch loss: with `num_moe_token_chunks > 1` (the ring-of-experts chunk loop
   averages the per-chunk losses as `sum(lb_losses) / n_chunks`) or `moe_dropless_fallback='layer'` (the dropless
@@ -706,18 +708,30 @@ def routing_token_mask(config: Any, decoder_segment_ids: jax.Array | None, model
   as one of the chunks in the average. The Megatron seq aux loss is computed on whole sequences and is unaffected.
 
   Args:
-    config: The model config; only `logical_global_batch_size_to_train_on` is read (missing counts as None).
+    config: The model config; `moe_exclude_padding_from_routing` and `logical_global_batch_size_to_train_on` (missing
+      counts as None) are read.
     decoder_segment_ids: (batch, sequence) segment ids of the decoder inputs, 0 for padding tokens, or None.
     model_mode: One of the `common_types.MODEL_MODE_*` values.
 
   Returns:
     A (batch, sequence) bool array, True for real tokens. None (routing unchanged) when any of these holds:
     `decoder_segment_ids` is None; `model_mode` is not `MODEL_MODE_TRAIN` (prefill/decode keep their numerics, and
-    the fused inference MoE kernel takes no mask); or `logical_global_batch_size_to_train_on` is unset (sequence
-    padding tokens of ordinary batches keep taking part in routing, capacity and the aux loss as before).
+    the fused inference MoE kernel takes no mask); or both `moe_exclude_padding_from_routing` is off and
+    `logical_global_batch_size_to_train_on` is unset (sequence padding tokens of ordinary batches keep taking part in
+    routing, capacity and the aux loss as before).
   """
-  if decoder_segment_ids is None or model_mode != ctypes.MODEL_MODE_TRAIN:
+  if model_mode != ctypes.MODEL_MODE_TRAIN:
     return None
+  if decoder_segment_ids is None:
+    if config.moe_exclude_padding_from_routing:
+      # Not raised: model initialization runs in train mode without segment ids.
+      max_logging.warning(
+          "moe_exclude_padding_from_routing=True, but the MoE layer got no decoder_segment_ids, so its padding tokens"
+          " are routed."
+      )
+    return None
+  if config.moe_exclude_padding_from_routing:
+    return decoder_segment_ids != 0
   if getattr(config, "logical_global_batch_size_to_train_on", None) is None:
     return None
   return decoder_segment_ids != 0
