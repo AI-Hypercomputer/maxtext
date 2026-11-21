@@ -57,6 +57,25 @@ async def no_op():
   return None
 
 
+def _elastic_iterator_of(data_iterator: Any) -> Any:
+  """Returns the grain `ElasticIterator` that a `MultiHostDataLoadIterator` reads from, or None.
+
+  `MultiHostDataLoadIterator.local_iterator` is `iter(dataloader)`. MaxText's `_PaddedElasticIterator` returns itself
+  there, but OSS grain 0.2.x's plain `ElasticIterator` returns its internal `_default_iterator`, which is not an
+  `ElasticIterator`. Checking only `local_iterator` therefore saved an unpadded `ElasticIterator` through the
+  per-process path (`process_0-of-1.json`) and a padded one as the shared `process_0.json`, so a replica resize that
+  adds or removes padding (e.g. `elastic_global_batch_size_mode="constant_grad_accum"` going from 3 to 2 slices) could
+  not restore the checkpoint written before it. The `ElasticIterator` (the `dataloader`) delegates `get_state` and
+  `set_state` to that same cached `_default_iterator`, so it is the right object to checkpoint in both cases.
+  """
+  if isinstance(data_iterator, list):
+    return None
+  for candidate in (getattr(data_iterator, "local_iterator", None), getattr(data_iterator, "dataloader", None)):
+    if isinstance(candidate, ElasticIterator):
+      return candidate
+  return None
+
+
 class GrainCheckpointable(ocp.StatefulCheckpointable):
   """Orbax v1 `StatefulCheckpointable` for MaxText grain data iterators.
 
@@ -168,6 +187,13 @@ class GrainCheckpointable(ocp.StatefulCheckpointable):
 
       async def _read_elastic():
         filename = directory / _PROCESS_0_FILENAME
+        if not await asyncio.to_thread(filename.exists) and isinstance(item, ElasticIterator):
+          # Checkpoints written before `_elastic_iterator_of` saved an unpadded `ElasticIterator` per process
+          # (`process_{index}-of-{count}.json`). Every shard of an `ElasticIterator` stores the same global position,
+          # so any of those files restores it.
+          legacy = await asyncio.to_thread(lambda: sorted(directory.glob("process_*-of-*.json")))
+          if legacy:
+            filename = legacy[0]
         if not await asyncio.to_thread(filename.exists):
           raise ValueError(f"File {filename} does not exist.")
         item.set_state(json.loads(await asyncio.to_thread(filename.read_text)))
@@ -218,12 +244,8 @@ def for_save(data_iterator: Any, expansion_factor_real_data: int) -> GrainCheckp
   if isinstance(data_iterator, RemoteIteratorWrapper):
     return GrainCheckpointable(data_iterator)
 
-  if (
-      not isinstance(data_iterator, list)
-      and hasattr(data_iterator, "local_iterator")
-      and isinstance(data_iterator.local_iterator, ElasticIterator)
-  ):
-    return GrainCheckpointable(data_iterator.local_iterator)
+  if (elastic_iterator := _elastic_iterator_of(data_iterator)) is not None:
+    return GrainCheckpointable(elastic_iterator)
 
   iterators = data_iterator if isinstance(data_iterator, list) else [data_iterator]
   process_count_total = jax.process_count() * len(iterators)
@@ -251,12 +273,8 @@ def for_restore(
   if isinstance(data_iterator, RemoteIteratorWrapper):
     return GrainCheckpointable(data_iterator)
 
-  if (
-      not isinstance(data_iterator, list)
-      and hasattr(data_iterator, "local_iterator")
-      and isinstance(data_iterator.local_iterator, ElasticIterator)
-  ):
-    return GrainCheckpointable(data_iterator.local_iterator)
+  if (elastic_iterator := _elastic_iterator_of(data_iterator)) is not None:
+    return GrainCheckpointable(elastic_iterator)
 
   directory = checkpoint_manager.directory / str(step) / "iter"
   process_count_jax = jax.process_count()
