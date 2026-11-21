@@ -19,6 +19,8 @@ import os
 import time
 from typing import Sequence
 import jax
+import numpy as np
+import PIL.Image
 
 from maxtext.inference import aot_cache
 from maxtext.m3.configs import config as config_lib
@@ -30,14 +32,34 @@ import flax
 jax.config.update("jax_use_shardy_partitioner", True)
 
 
-def _upload_video(gcs_output_path: str, video_path: str):
-  """Best-effort upload of a generated video to `<gcs_output_path>/videos/` (a failed upload never fails the run)."""
-  destination = os.path.join(gcs_output_path, "videos", os.path.basename(video_path))
+def _is_image_model(config) -> bool:
+  """Text-to-image models (`model_type: T2I`) save PNG images instead of videos."""
+  return getattr(config, "model_type", "") == "T2I"
+
+
+def _upload_video(gcs_output_path: str, video_path: str, subdir: str = "videos"):
+  """Best-effort upload of a generated video (or image) to `<gcs_output_path>/<subdir>/` (never fails the run)."""
+  destination = os.path.join(gcs_output_path, subdir, os.path.basename(video_path))
   try:
     max_logging.log(f"Uploading {video_path} to {destination}...")
     gcs_utils.upload_blob(destination, video_path)
   except Exception as e:  # pylint: disable=broad-exception-caught
     max_logging.log(f"Failed to upload {video_path} to {destination}: {e}")
+
+
+def _save_output(config, sample, path: str, gcs_output_path):
+  """Saves one generated sample (uint8 video frames, or an image for T2I models) and uploads it to GCS."""
+  if _is_image_model(config):
+    image = np.asarray(sample)
+    if image.ndim == 4:  # (frames=1, H, W, C)
+      image = image[0]
+    if image.dtype != np.uint8:  # float in [0, 1]
+      image = (np.clip(image, 0.0, 1.0) * 255.0).round().astype(np.uint8)
+    PIL.Image.fromarray(image).save(path)  # uint8 (H, W, 4) -> RGBA PNG, (H, W, 3) -> RGB.
+  else:
+    export_to_video(sample, path, fps=config.fps)
+  if gcs_output_path:
+    _upload_video(gcs_output_path, path, subdir="images" if _is_image_model(config) else "videos")
 
 
 def call_pipeline(config, pipeline, prompt, negative_prompt, num_inference_steps=None):
@@ -64,15 +86,17 @@ def call_pipeline(config, pipeline, prompt, negative_prompt, num_inference_steps
 # `maxtext.m3.diffuser_pipelines`, imported on demand. Register new models here.
 MODEL_NAME_TO_PIPELINE = {
     "wan2.1": "wan_pipeline.WanPipeline2_1",
+    "ming-image": "ming_image_pipeline.MingImagePipeline",
 }
 
 
 def _get_output_filename(config, filename_prefix: str, idx: int) -> str:
-  """Output video filename, e.g. `wan2.1_output_<seed>_<idx>.mp4`."""
+  """Output filename, e.g. `wan2.1_output_<seed>_<idx>.mp4` (`.png` for T2I models)."""
   output_pattern = getattr(config, "output_filename_pattern", None)
   if output_pattern:
     return output_pattern.format(prefix=filename_prefix, seed=config.seed, index=idx)
-  return f"{filename_prefix}{config.model_name}_output_{config.seed}_{idx}.mp4"
+  extension = "png" if _is_image_model(config) else "mp4"
+  return f"{filename_prefix}{config.model_name}_output_{config.seed}_{idx}.{extension}"
 
 
 def get_pipeline_class(config):
@@ -111,10 +135,9 @@ def inference_generate_video(config, pipeline, filename_prefix=""):
     max_logging.log(f"video {filename_prefix}, generation time:" f" {(time.perf_counter() - s0):.2f}s")
     for i, video in enumerate(videos):
       video_path = _get_output_filename(config, filename_prefix, i)
-      export_to_video(video, video_path, fps=config.fps)
+      _save_output(config, video, video_path, gcs_output_path)
       saved_video_paths.append(video_path)
       if gcs_output_path:
-        _upload_video(gcs_output_path, video_path)
         utils_wan.delete_file(f"./{video_path}")
   else:
     for i, padded_chunk, actual_chunk_len in utils_wan.chunk_and_pad(prompts, batch_size):
@@ -124,10 +147,9 @@ def inference_generate_video(config, pipeline, filename_prefix=""):
       for j in range(actual_chunk_len):
         prompt_idx = i + j
         video_path = _get_output_filename(config, filename_prefix, prompt_idx)
-        export_to_video(videos[j], video_path, fps=config.fps)
+        _save_output(config, videos[j], video_path, gcs_output_path)
         saved_video_paths.append(video_path)
         if gcs_output_path:
-          _upload_video(gcs_output_path, video_path)
           utils_wan.delete_file(f"./{video_path}")
     max_logging.log(f"all videos {filename_prefix}, total generation time:" f" {(time.perf_counter() - s0):.2f}s")
 
@@ -260,10 +282,8 @@ def run(config, pipeline=None, filename_prefix=""):
       trace = {}
     for i, video in enumerate(videos):
       video_path = _get_output_filename(config, filename_prefix, i)
-      export_to_video(video, video_path, fps=config.fps)
+      _save_output(config, video, video_path, gcs_output_path)
       saved_video_path.append(video_path)
-      if gcs_output_path:
-        _upload_video(gcs_output_path, video_path)
   else:
     trace = {}
     for i, padded_chunk, actual_chunk_len in utils_wan.chunk_and_pad(prompts, batch_size):
@@ -277,10 +297,8 @@ def run(config, pipeline=None, filename_prefix=""):
       for j in range(actual_chunk_len):
         prompt_idx = i + j
         video_path = _get_output_filename(config, filename_prefix, prompt_idx)
-        export_to_video(videos[j], video_path, fps=config.fps)
+        _save_output(config, videos[j], video_path, gcs_output_path)
         saved_video_path.append(video_path)
-        if gcs_output_path:
-          _upload_video(gcs_output_path, video_path)
 
   generation_time = time.perf_counter() - s0
   max_logging.log(f"generation_time: {generation_time}")

@@ -830,6 +830,7 @@ class WanEncoder3d(nnx.Module):
       dtype: jnp.dtype = jnp.float32,
       weights_dtype: jnp.dtype = jnp.float32,
       precision: jax.lax.Precision = None,
+      input_channels: int = 3,
   ):
     dim_mult = [1, 2, 4, 4] if dim_mult is None else dim_mult
     attn_scales = [] if attn_scales is None else attn_scales
@@ -849,7 +850,7 @@ class WanEncoder3d(nnx.Module):
     # init block
     self.conv_in = WanCausalConv3d(
         rngs=rngs,
-        in_channels=3,
+        in_channels=input_channels,
         out_channels=dims[0],
         kernel_size=3,
         padding=1,
@@ -1013,6 +1014,7 @@ class WanDecoder3d(nnx.Module):
       dtype: jnp.dtype = jnp.float32,
       weights_dtype: jnp.dtype = jnp.float32,
       precision: jax.lax.Precision = None,
+      input_channels: int = 3,
   ):
     dim_mult = [1, 2, 4, 4] if dim_mult is None else dim_mult
     temperal_upsample = [False, True, True] if temperal_upsample is None else temperal_upsample
@@ -1101,7 +1103,7 @@ class WanDecoder3d(nnx.Module):
     self.conv_out = WanCausalConv3d(
         rngs=rngs,
         in_channels=out_dim,
-        out_channels=3,
+        out_channels=input_channels,
         kernel_size=3,
         padding=1,
         sharding=sharding,
@@ -1286,13 +1288,16 @@ class AutoencoderKLWan(nnx.Module):
       precision: jax.lax.Precision = None,
       vae_decode_chunk: int = 1,
       vae_encode_chunk: int = 4,
+      input_channels: int = 3,
   ):
+    """`input_channels` is the pixel channel count: 3 (RGB, Wan) or 4 (RGBA, e.g. QwenImage-style VAEs)."""
     dim_mult = [1, 2, 4, 4] if dim_mult is None else dim_mult
     attn_scales = [] if attn_scales is None else attn_scales
     temperal_downsample = [False, True, True] if temperal_downsample is None else temperal_downsample
     latents_mean = list(_DEFAULT_LATENTS_MEAN) if latents_mean is None else latents_mean
     latents_std = list(_DEFAULT_LATENTS_STD) if latents_std is None else latents_std
     self.z_dim = z_dim
+    self.input_channels = input_channels
     assert vae_decode_chunk >= 1 or vae_decode_chunk == -1, f"vae_decode_chunk must be >= 1 or -1, got {vae_decode_chunk}"
     assert vae_encode_chunk >= 1 or vae_encode_chunk == -1, f"vae_encode_chunk must be >= 1 or -1, got {vae_encode_chunk}"
     self.vae_decode_chunk = vae_decode_chunk
@@ -1324,6 +1329,7 @@ class AutoencoderKLWan(nnx.Module):
         dtype=dtype,
         weights_dtype=weights_dtype,
         precision=precision,
+        input_channels=input_channels,
     )
     self.quant_conv = WanCausalConv3d(
         rngs=rngs,
@@ -1360,16 +1366,19 @@ class AutoencoderKLWan(nnx.Module):
         dtype=dtype,
         weights_dtype=weights_dtype,
         precision=precision,
+        input_channels=input_channels,
     )
     self.sharding = sharding
 
   def _encode(self, x: jax.Array, feat_cache: AutoencoderKLWanCache):
     """Encode video chunk-by-chunk with a causal feature cache."""
     feat_cache.init_cache()
-    if x.shape[-1] != 3:
+    if x.shape[-1] != self.input_channels:
       # reshape channel last for JAX
       x = jnp.transpose(x, (0, 2, 3, 4, 1))
-      assert x.shape[-1] == 3, f"Expected input shape (N, D, H, W, 3), got {x.shape}"
+      assert (
+          x.shape[-1] == self.input_channels
+      ), f"Expected input shape (N, D, H, W, {self.input_channels}), got {x.shape}"
     x = x.astype(self.encoder.conv_in.conv.dtype)
 
     t = x.shape[1]

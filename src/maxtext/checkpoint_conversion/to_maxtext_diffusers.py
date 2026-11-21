@@ -58,7 +58,8 @@ except ImportError:
 # ==============================================================================
 
 # Diffusers sub-folders that can be stored; each becomes `<name>_state` + `<name>_config` items.
-_COMPONENT_ITEMS = ("transformer", "transformer_2", "vae", "text_encoder")
+# `mllm` / `connector` / `mlp`: Ming-Image text-conditioning components.
+_COMPONENT_ITEMS = ("transformer", "transformer_2", "vae", "text_encoder", "mllm", "connector", "mlp")
 # Weight-free diffusers sub-folders stored as a `<name>_config` item only: {name: config file}.
 _CONFIG_ONLY_COMPONENTS = {"scheduler": "scheduler_config.json"}
 # Item names written by earlier versions of this converter (restore-only).
