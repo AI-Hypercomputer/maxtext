@@ -3134,6 +3134,11 @@ class RoutedMoE(nnx.Module):
       )
     else:
       sorted_inputs = _sort_activations(inputs, sorted_indices, use_custom_sort_vjp)
+      if not is_offset:
+        # Rows from valid_count on are the uninitialized tail of the receive buffer, sorted to the end. Zero them,
+        # as a2a_ragged_sort does, so they cannot poison reductions over all rows of the gmm (e.g. the fp8 absmax
+        # of the drhs cotangent, where 0 * NaN = NaN).
+        sorted_inputs = jnp.where((jnp.arange(inputs.shape[0]) < valid_count)[:, None], sorted_inputs, 0)
     sorted_experts_ids = expert_indices[sorted_indices]
     return (
         sorted_inputs,
@@ -3470,8 +3475,10 @@ class RoutedMoE(nnx.Module):
             preferred_element_type=self.dtype,
         )
       if isinstance(kernel, aqt.QTensor):
-        # Multiply outputs by the kernely scale
-        scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0)
+        # Multiply outputs by the kernely scale. Padding rows carry the out-of-range expert id
+        # local_expert_size (see local_permute); clip it so they read a finite scale instead of
+        # jnp.take's default NaN fill (their ragged_dot output is 0, and 0 * NaN = NaN).
+        scales = jnp.take(kernel.scale[0].squeeze(), indices=expert_assignments, axis=0, mode="clip")
         if padding_amount > 0:
           scales = jax.lax.pad(
               scales,
@@ -4360,8 +4367,10 @@ class RoutedMoE(nnx.Module):
               buffer_size=buffer_size,
           )
 
-          buffer_init = jnp.zeros if ragged_buffer_factor > 0.0 else jax.lax.empty
-          output_shape = buffer_init((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
+          # No memset for any ragged_buffer_factor: the rows past the routed count stay uninitialized, and
+          # local_permute keeps them out of the gmm input (the ragged sort gathers only the valid prefix; the
+          # XLA sort zeroes the tail).
+          output_shape = jax.lax.empty((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
 
           # Token Dispatch: leg 1 (forward) and leg 4 (backward) of the EP ragged all-to-all.
           x = _quantized_ragged_all_to_all(
