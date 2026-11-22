@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795322520351,
+  "lastUpdate": 1795336948672,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -75282,6 +75282,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3367.3959999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 438,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "9ef16767485aa8adf88887ed2169b7744443d5fe",
+          "message": "Reject load-balanced CP in non-SFT MaxText post-training; pass 2D sharding to Tunix.\n\n# Description\n\nFollow-up to the Tunix SFT fix for https://github.com/AI-Hypercomputer/maxtext/issues/5909. Attention selects the load-balanced context-parallel path from the config and mesh alone, and only `setup_train_loop` and the Tunix SFT data hooks permute batches to match. `train_dpo`, `train_rl`, `train_distill` and `save_top_k_teacher_logits` do not, so they now raise a `ValueError` at startup when `context_parallel_load_balance=True` and the context-parallel size exceeds 1, pointing to `context_parallel_load_balance=False`. This rejects configurations that previously started.\n\nTunix re-shards fully addressable batches to `TrainingConfig.data_sharding_axis`. `train_sft` and `train_distill` built it from the 1D `data_sharding` config, and `train_dpo` left Tunix's default. All three now derive it from `get_input_data_sharding(config, mesh).spec` through one helper, so batches keep MaxText's 2D (batch, context) input sharding. `train_rl` still uses Tunix's default.\n\nTest-only: the touched post-training hook tests patch `create_data_iterator` on the imported module object instead of by dotted path, `train_sft_test.py` runs under `absltest.main()`, and `diffusion_sft_test.py` gets a `pytest` entry point.\n\n# Tests\n\nUnit tests cover the validation helper, the fail-fast path of each entrypoint, and the derived `data_sharding_axis` for `train_sft`, `train_distill` and `train_dpo`. The helper tests in `tests/unit/max_utils_test.py`, `tests/unit/rl_profiling_config_test.py`, and the hook tests in `tests/post_training/unit/hooks_test.py` and `tests/post_training/unit/sft_hooks_test.py` pass with 4 host devices.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1027221063",
+          "timestamp": "2026-11-21T19:14:50Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/9ef16767485aa8adf88887ed2169b7744443d5fe"
+        },
+        "date": 1795336947667,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 219.19999999999987,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 55.75199999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2218.338,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 176.9639999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 13,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 335.796,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3125.117000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 438,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1887.5839999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 355.517,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3372.777000000001,
             "unit": "sec"
           },
           {
