@@ -31,17 +31,19 @@ from flax import nnx
 from flax.nnx import variablelib
 import jax
 import jax.numpy as jnp
-from maxtext.layers import nnx_scan
 import numpy as np
-from maxtext.common import train_state_nnx
+import optax
+
 from maxtext.common import metric_logger
 from maxtext.common import profiler
+from maxtext.common import train_state_nnx
 from maxtext.common.metric_logger import record_activation_metrics
+from maxtext.layers import moe
+from maxtext.layers import nnx_scan
+from maxtext.layers.multi_token_prediction import mtp_losses
 from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train import train as pre_train
-from maxtext.layers.multi_token_prediction import mtp_losses
 from maxtext.utils import gradient_accumulation
-import optax
 
 
 @dataclass
@@ -145,7 +147,7 @@ class _MoEBiasStub(nnx.Module):
     self.sow(
         nnx.Intermediate,
         "moe_bias_updates",
-        jnp.full(self.sow_shape, self.update_val),
+        jnp.full(self.sow_shape, self.update_val, dtype=jnp.float32),
     )
 
 
@@ -595,6 +597,42 @@ class TestSkipStepOnSpikesNNX(unittest.TestCase):
 
 class TestRoutedBiasReadNNX(unittest.TestCase):
   """loss_fn must find the DeepSeek `moe_bias_updates` intermediate on the NNX (model-rooted) shape."""
+
+  def test_deepseek4_bias_dtype_stable_across_train_steps(self):
+    """Float32 routing updates must not change the train state's input types."""
+    for bias_dtype in (jnp.bfloat16, jnp.float32):
+      for bias_shape in ((3,), (2, 3)):
+        with self.subTest(dtype=bias_dtype, shape=bias_shape):
+          self._check_deepseek4_bias_dtype(bias_dtype, bias_shape)
+
+  def _check_deepseek4_bias_dtype(self, bias_dtype, bias_shape):
+    """Run three steps with the same sharding and verify stable state dtypes."""
+    cfg = _Cfg(model_name="deepseek4-tiny", routed_bias=True, routed_bias_update_rate=0.001)
+    model = _TinyDecoderMoEBias(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0))
+    model.decoder = _MoEBiasStub(bias_shape, bias_shape, update_val=cfg.routed_bias_update_rate)
+    model.decoder.gate.bias = moe.MoEBiasVar(jnp.zeros(bias_shape, dtype=bias_dtype))
+    optimizer = nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param)
+    graphdef, state = nnx.split(train_state_nnx.TrainStateNNX(model, optimizer))
+    state = jax.device_put(state, jax.sharding.NamedSharding(model.mesh, jax.sharding.PartitionSpec()))
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    traces = []
+
+    @jax.jit
+    def step(state, data):
+      traces.append(None)
+      return pre_train.train_step(graphdef, cfg, None, None, state, data)
+
+    with jax.set_mesh(model.mesh):
+      for step_index in range(3):
+        state, _ = step(state, data)
+        bias = state.model.decoder.gate.bias.value
+        self.assertEqual(bias.dtype, bias_dtype)
+        np.testing.assert_allclose(
+            np.asarray(bias, dtype=np.float32),
+            (step_index + 1) * cfg.routed_bias_update_rate,
+            rtol=0.01,
+        )
+    self.assertEqual(len(traces), 1)
 
   def test_routed_bias_update_found_by_suffix(self):
     cfg = _Cfg()
