@@ -364,8 +364,12 @@ def find_periodic_sequences(
   max_period = min(max_period, len(arr) // 3)
 
   for period in range(min_period, max_period + 1):
-    pad = (period - (len(arr) % period)) % period
-    padded_arr = np.pad(arr, (0, pad), constant_values=mask_value) if pad else arr
+    # Always pad at least one sentinel row, even when the length is already a multiple of
+    # ``period``. The row after the last repeating one must exist and must differ from every
+    # real row, so that ``end_row + 1`` is in range and cannot extend the span: it is what
+    # keeps ``start_row - 1 >= 0`` and the reported ``times`` inside the array.
+    pad = period - (len(arr) % period)
+    padded_arr = np.pad(arr, (0, pad), constant_values=mask_value)
     shaped_arr = padded_arr.reshape(-1, period)
 
     is_equal_to_prev_row = shaped_arr == np.roll(shaped_arr, shift=1, axis=0)
@@ -380,7 +384,7 @@ def find_periodic_sequences(
       start_offset = _find_start_last_consecutive_true(is_equal_to_prev_row[start_row - 1])
       start_offset = period - start_offset if start_offset > 0 else 0
 
-      end_offset = _find_end_first_consecutive_true(is_equal_to_prev_row[(end_row + 1) % shaped_arr.shape[0]])
+      end_offset = _find_end_first_consecutive_true(is_equal_to_prev_row[end_row + 1])
 
       start_pos = (start_row - 1) * period - start_offset
       end_pos = ((end_row + 1) * period) + end_offset
