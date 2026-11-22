@@ -75,6 +75,7 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
       indexer_sparse_training=False,
       csa_qk_head_chunk_size=0,
       indexer_topk=None,
+      csa_teacher_two_pass=False,
   ):
     """Constructs a test MaxTextConfig with CSA indexer configuration."""
     topk = indexer_topk if indexer_topk is not None else self.indexer_topk
@@ -89,6 +90,7 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
         f"indexer_loss_scaling_factor={indexer_loss_scaling_factor}",
         f"indexer_sparse_training={indexer_sparse_training}",
         f"csa_qk_head_chunk_size={csa_qk_head_chunk_size}",
+        f"csa_teacher_two_pass={csa_teacher_two_pass}",
         f"max_target_length={self.seq_len}",
         f"indexer_topk={topk}",
         f"indexer_n_heads={self.indexer_n_heads}",
@@ -246,6 +248,45 @@ class DeepSeekV4IndexerLossTest(unittest.TestCase):
         scaling_factor=1.0,
     )
     np.testing.assert_allclose(float(loss_chunked), float(loss_native), rtol=1e-5, atol=1e-5)
+
+  def test_csa_indexer_loss_two_pass_parity(self):
+    """Test that the two-pass teacher produces the same loss as the native one-pass teacher, dense and sparse."""
+    config_two_pass = self._get_config(csa_teacher_two_pass=True)
+    config_native = self._get_config(csa_teacher_two_pass=False)
+    attn_two_pass = self._init_csa_attention(config_two_pass)
+    attn_native = self._init_csa_attention(config_native)
+
+    n_windows = self.seq_len // self.compress_ratio
+    rng = jax.random.PRNGKey(42)
+    k1, k2, k3, k4 = jax.random.split(rng, 4)
+    query = jax.random.normal(k1, (self.batch_size, self.seq_len, config_native.num_query_heads, config_native.head_dim))
+    compressed_kv = jax.random.normal(
+        k2, (self.batch_size, n_windows, config_native.num_kv_heads, config_native.head_dim)
+    )
+    indexer_score = jax.random.normal(k3, (self.batch_size, self.seq_len, n_windows))
+    # Sparse case: mask out a random half of the compressed blocks.
+    sparse_mask = jnp.where(jax.random.bernoulli(k4, 0.5, (self.batch_size, 1, self.seq_len, n_windows)), -1e9, 0.0)
+
+    for sparse_loss, compressed_mask in (
+        (False, jnp.zeros((self.batch_size, 1, self.seq_len, n_windows))),
+        (True, sparse_mask),
+    ):
+      with self.subTest(sparse_loss=sparse_loss):
+        losses = [
+            attn.calculate_csa_indexer_loss(
+                indexer_score=indexer_score,
+                query=query,
+                compressed_kv=compressed_kv,
+                compressed_mask=compressed_mask,
+                segment_mask=None,
+                position_ids=None,
+                sparse_loss=sparse_loss,
+                scaling_factor=1.0,
+            )
+            for attn in (attn_two_pass, attn_native)
+        ]
+        self.assertTrue(np.isfinite(float(losses[0])))
+        np.testing.assert_allclose(float(losses[0]), float(losses[1]), rtol=1e-5, atol=1e-5)
 
   def test_csa_indexer_scoring_head_chunking_parity(self):
     """Test that indexer forward scoring produces identical top-k indices and scores with chunking."""
