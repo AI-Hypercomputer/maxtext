@@ -35,6 +35,8 @@ EXCLUDED_PATH_PREFIXES = (
     ".github/",
     ".gemini/",
     ".agents/",
+    # Internal maintainer guides (CI, release, and Docker image pipelines); not user-facing release notes material.
+    "docs/development/",
     "src/maxtext/training_engine/",
     "src/maxtext/experimental/",
     "experimental/",

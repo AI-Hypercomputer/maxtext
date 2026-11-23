@@ -147,6 +147,11 @@ class GatherChangesTest(unittest.TestCase):
     self.assertIn(":(exclude).agents/", self.gc.EXCLUDED_PATHSPECS)
     self.assertIn(":(exclude)AGENTS.md", self.gc.EXCLUDED_PATHSPECS)
 
+  def test_ci_and_developer_docs_excluded_from_pathspecs(self):
+    # A release-pipeline change (PR #5616) touched only `.github/` and `docs/development/`, yet surfaced in the notes.
+    self.assertIn(":(exclude).github/", self.gc.EXCLUDED_PATHSPECS)
+    self.assertIn(":(exclude)docs/development/", self.gc.EXCLUDED_PATHSPECS)
+
 
 if __name__ == "__main__":
   unittest.main()
