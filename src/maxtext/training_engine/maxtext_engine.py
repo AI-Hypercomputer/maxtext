@@ -39,10 +39,10 @@ from maxtext.common import train_state_nnx
 from maxtext.configs import pyconfig
 from maxtext.integration.tunix.weight_mapping import raiden_unscan
 from maxtext.integration.vllm.convert_utils import (
-    is_verify_weights_enabled,
     resolve_prefuse_moe_weights,
     resolve_rollout_tp,
 )
+from maxtext.integration.vllm.weight_converter import WeightConverter
 from maxtext.optimizers import optimizers
 from maxtext.trainers.pre_train import train as maxtext_train
 from maxtext.training_engine import abstract_engine
@@ -196,6 +196,14 @@ _UNCOMPARABLE_STRUCTURE_HINT = (
     "dtypes, which compare cleanly. Recompilation stays correct, but the cost is now paid "
     "every step, so this is worth reporting rather than living with."
 )
+
+
+def _strip_metadata(payload: Any) -> Any:
+  """Returns `payload` with any dataclass `metadata` field cleared to `{}`."""
+  if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
+    return dataclasses.replace(payload, metadata={})
+  return payload
+
 
 # The mesh axis a data-parallel gradient all-reduce runs over. Only this one is ever tagged
 # `reduced`/`unreduced`; see `_deferred_all_reduce_shardings`.
@@ -451,174 +459,6 @@ def _to_aval(value: Any, target_sharding: jax.sharding.Sharding | None = None) -
       value.dtype,
       sharding=target_sharding if target_sharding is not None else getattr(value, "sharding", None),
   )
-
-
-def _row_and_mask(payload: abstract_engine.RLTrainerPayload) -> tuple[jax.Array, jax.Array]:
-  """Returns the `[batch, seq]` model row and its mask, prompt part then completion part.
-
-  The two parts are not equal in size and the prompt one can be empty.
-  `RLTrainerPayload` is prompt/completion-split, and concatenating is
-  uniform across both of Tunix's assemblers rather than a special case for either:
-  `PaddedBatchAssembler` fills `[B, P]` and `[B, C]`, while `SequencePackedBatchAssembler`
-  puts the entire packed row in the completion part and leaves the prompt zero-width
-  (`to_rl_trainer_payload` in `tunix/experimental/orchestrator/batch_assembly.py`).
-  """
-  parts = [jnp.asarray(payload.prompt_ids), jnp.asarray(payload.completion_ids)]
-  masks = [
-      jnp.ones_like(part) if mask is None else jnp.asarray(mask).astype(jnp.int32)
-      for part, mask in zip(parts, (payload.prompt_mask, payload.completion_mask))
-  ]
-  return jnp.concatenate(parts, axis=-1), jnp.concatenate(masks, axis=-1).astype(jnp.int32)
-
-
-def _aligned(field: Any, name: str, width: int) -> jax.Array | None:
-  """Returns `field` as an array, or None, having checked it spans the whole model row.
-
-  Tunix documents `segment_ids` and `segment_positions` as `[B, T]` *or* `[B, C]`, and only
-  the packed assembler ever sets them -- where the prompt part is zero-width, so the two
-  widths coincide. A caller that supplies a completion-width array against a non-empty
-  prompt would otherwise have it silently broadcast or truncated against the full row.
-  """
-  if field is None:
-    return None
-  array = jnp.asarray(field)
-  if array.shape[-1] != width:
-    raise ValueError(
-        f"{name} has width {array.shape[-1]} but the model row is {width} wide. Tunix sets "
-        f"{name} only on the packed path, where `prompt_ids` is zero-width and the two agree; "
-        "a completion-width array cannot be aligned against a non-empty prompt."
-    )
-  return array
-
-
-def router_replay_gen_model_input_fn(payload: abstract_engine.RLTrainerPayload) -> dict[str, Any]:
-  """Adapts Tunix's `RLTrainerPayload` into router_replay_loss_fn's kwargs.
-
-  Output keys are unpacked directly as `loss_fn(model, **kwargs)` by
-  `_fwd_bwd_kernel`, so they must match the loss function's parameter names --
-  they are not nested inside a `data` dict.
-
-  Args:
-    payload: A Tunix `RLTrainerPayload`. Its `routed_experts` is the routing the rollout
-      actually took; it reaches the model under the model-side name
-      `forced_routed_experts`, overriding the gate. `-1` (Tunix's `UNSET_ROUTED_EXPERT`)
-      marks a padded slot, which is the sentinel MaxText's decoder blocks already expect.
-      See `check_forced_routing_support` in `maxtext.configs.types` for which of them do.
-
-  Returns:
-    `inputs`, `inputs_position`, `inputs_segmentation`, `targets`,
-    `targets_segmentation`, and (when present) `forced_routed_experts`.
-  """
-  token_ids, token_mask = _row_and_mask(payload)
-  width = token_ids.shape[-1]
-  segment_ids = _aligned(payload.segment_ids, "segment_ids", width)
-  segment_positions = _aligned(payload.segment_positions, "segment_positions", width)
-  if segment_ids is None:
-    segment_ids = token_mask
-
-  if segment_positions is not None:
-    positions = segment_positions.astype(jnp.int32)
-  else:
-    # Rows are left-padded prompt + right-padded completion, so a plain arange would put
-    # the first real token at a nonzero RoPE position, shifting every token away from the
-    # rollout that produced the routing. Count real tokens instead, restarting at each
-    # segment -- otherwise the second sequence in a packed row is rotated by the length of
-    # the first. `cummax` carries each segment's starting count forward to subtract off.
-    # The count is exclusive -- real tokens strictly *before* each index, not up to and
-    # including it -- because it is sampled at each segment's first index to get the
-    # pre-segment total. An inclusive count only equals that total when the first slot of
-    # the segment is real; when it is padding the count has not yet incremented and every
-    # position in the segment comes out one too high. The difference below is non-negative
-    # by construction, so it needs no clamp.
-    real = (token_mask != 0).astype(jnp.int32)
-    preceding = jnp.cumsum(real, axis=-1) - real
-    starts = jnp.concatenate(
-        [jnp.ones((segment_ids.shape[0], 1), dtype=bool), segment_ids[:, 1:] != segment_ids[:, :-1]], axis=-1
-    )
-    # `lax.cummax` takes an XLA dimension number, so it rejects the `axis=-1` used
-    # everywhere else here. `jnp.cumulative_max` would canonicalize it but is not in the
-    # pinned JAX.
-    segment_start_count = jax.lax.cummax(jnp.where(starts, preceding, -1), axis=preceding.ndim - 1)
-    positions = (preceding - segment_start_count).astype(jnp.int32)
-
-  # `targets` is a roll(-1), so position i predicts token i+1 and the weight at i is the
-  # mask of that *target*: token_mask shifted left by one. Applied unshifted, a packed
-  # segment's last prompt slot -- the position that predicts its first completion token --
-  # carries the prompt's 0, so that token is never scored and the segment trains on
-  # completion tokens 2..N. The shifted and unshifted forms agree wherever segment_ids fell
-  # back to token_mask, which is why only a payload supplying both can tell them apart.
-  # TODO(mazumdera): on the padded path token_mask spans the prompt, so the prompt is
-  # scored. Whether router replay intends that is undocumented.
-  targets_segmentation = jnp.roll(token_mask, -1, axis=-1)
-  # roll(-1) wraps token 0 into the last position, which is not its real next token, so
-  # mask that position out. Same at every packed segment end: the next token there
-  # belongs to a different sequence.
-  targets_segmentation = targets_segmentation.at[:, -1].set(0)
-  same_segment = segment_ids[:, :-1] == segment_ids[:, 1:]
-  targets_segmentation = targets_segmentation.at[:, :-1].multiply(same_segment.astype(token_mask.dtype))
-
-  kwargs = {
-      "inputs": token_ids,
-      "inputs_position": positions,
-      "inputs_segmentation": segment_ids,
-      "targets": jnp.roll(token_ids, -1, axis=-1),
-      "targets_segmentation": targets_segmentation,
-  }
-  routed_experts = getattr(payload, "routed_experts", None)
-  if routed_experts is not None:
-    kwargs["forced_routed_experts"] = jnp.asarray(routed_experts)
-  return kwargs
-
-
-def make_router_replay_loss_fn(
-    config: pyconfig.HyperParameters, dropout_rng: jax.Array | None = None
-) -> Callable[..., Any]:
-  """Builds a loss fn with the flat kwarg names router_replay_gen_model_input_fn
-
-  produces, wrapping train.loss_fn's `(model, config, data, ...)` calling
-  convention so the pair can be used together via `with_gen_model_input_fn` +
-  `with_loss_fn` (see `_fwd_bwd_kernel`'s `loss_callable(mdl, **b)` call).
-
-  Args:
-    config: The MaxText config to pass through to `train.loss_fn`.
-    dropout_rng: Required when `config.enable_dropout` is set.
-
-  Returns:
-    A callable `(model, inputs, inputs_position, inputs_segmentation,
-    targets, targets_segmentation, forced_routed_experts=None)` suitable for
-    `MaxTextTrainingEngine.with_loss_fn`.
-
-  Raises:
-    ValueError: If dropout is enabled but no `dropout_rng` was supplied.
-  """
-  if config.enable_dropout and dropout_rng is None:
-    raise ValueError(
-        "make_router_replay_loss_fn requires a dropout_rng when"
-        " config.enable_dropout is set; pass one, or set enable_dropout=False"
-        " for router replay."
-    )
-
-  def router_replay_loss_fn(
-      model,
-      inputs,
-      inputs_position,
-      inputs_segmentation,
-      targets,
-      targets_segmentation,
-      forced_routed_experts=None,
-  ):
-    data = {
-        "inputs": inputs,
-        "inputs_position": inputs_position,
-        "inputs_segmentation": inputs_segmentation,
-        "targets": targets,
-        "targets_segmentation": targets_segmentation,
-    }
-    if forced_routed_experts is not None:
-      data["forced_routed_experts"] = forced_routed_experts
-    return maxtext_train.loss_fn(model, config, data, dropout_rng=dropout_rng, params=None, is_train=True)
-
-  return router_replay_loss_fn
 
 
 def _profiled_step(name: str, control_profile: bool = False) -> Callable[..., Any]:
@@ -877,8 +717,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     moe_tp = self._config.moe_mlp_tp_size or rollout_tp
     prefuse_moe = resolve_prefuse_moe_weights(self._config)
     if self._use_weight_converter:
-      from maxtext.integration.vllm.weight_converter import WeightConverter  # pylint: disable=g-import-not-at-top,import-outside-toplevel
-
       self._weight_converter = WeightConverter(
           config=self._config,
           tp=rollout_tp,
@@ -1664,9 +1502,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
   def _prepare_batch(self, payload: Any) -> Any:
     """Maps a payload to the inputs the loss function is called with."""
     if self._gen_model_input_fn is not None:
-      if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
-        payload = dataclasses.replace(payload, metadata={})
-      return self._gen_model_input_fn(payload)
+      return self._gen_model_input_fn(_strip_metadata(payload))
 
     if dataclasses.is_dataclass(payload):
       return {
@@ -2005,21 +1841,6 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       compiler_options: Optional dictionary of compilation options passed to XLA compiler.
     """
 
-    def _resolve_dummy_routed_experts(data: Any) -> Any:
-      if not isinstance(data, abstract_engine.RLTrainerPayload):
-        return data
-      routed_experts = data.routed_experts
-      if routed_experts is None or routed_experts.size != 0:
-        return data
-      num_layers = self._config.num_decoder_layers
-      top_k = self._config.num_experts_per_tok
-      batch_size, seq_len = routed_experts.shape[:2]
-      expanded = np.zeros(
-          (batch_size, seq_len, num_layers, top_k),
-          dtype=routed_experts.dtype,
-      )
-      return dataclasses.replace(data, routed_experts=expanded)
-
     # Recorded even when compilation is deferred: it is what tells `fwd_bwd` the caller
     # wants the compiled path at all. Engines that never call `compile` stay eager.
     self._compile_requested = True
@@ -2036,7 +1857,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
       return
 
-    dummy_data = _resolve_dummy_routed_experts(dummy_data)
+    if isinstance(dummy_data, abstract_engine.RLTrainerPayload):
+      from tunix.dist_rl.train import abstract_trainer  # pylint: disable=import-outside-toplevel
+
+      dummy_data = abstract_trainer.resolve_dummy_routed_experts(self, dummy_data)
     compiled = self.compile_kernels(dummy_data, compiler_options)
     self._compiled_fwd_bwd = compiled["fwd_bwd"]
     self._compiled_accumulate = compiled["accumulate"]
@@ -2467,8 +2291,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if self._fwd_only_fn is None:
       raise ValueError("MaxTextTrainingEngine.fwd_only needs a callback: call with_fwd_only_fn() first.")
     model = self._live_model()
-    if dataclasses.is_dataclass(payload) and "metadata" in payload.__dataclass_fields__:
-      payload = dataclasses.replace(payload, metadata={})
+    payload = _strip_metadata(payload)
     signature = _batch_signature(payload, {})
 
     # Bound the dispatch queue as every other entry point does. Not a correctness
@@ -2756,6 +2579,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           if self._use_weight_converter:
             converted_state = self._weight_converter.convert(params_state, target_state=self._target_state)
           else:
+            # Cast floating-point parameters to bfloat16 before unscanning and staging.
             params_state = jax.tree_util.tree_map(
                 lambda x: x.astype(jnp.bfloat16) if hasattr(x, "dtype") and jnp.issubdtype(x.dtype, jnp.floating) else x,
                 params_state,
@@ -2793,7 +2617,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
             self._raiden_sync.d2h()
 
         timer.timings["checksum_s"] = 0.0
-        if is_verify_weights_enabled():
+        if self._config.weight_sync_debug:
           with timer.measure("checksum_s"):
             logging.info("Source weights checksums: %s", self._raiden_sync.checksums())
 

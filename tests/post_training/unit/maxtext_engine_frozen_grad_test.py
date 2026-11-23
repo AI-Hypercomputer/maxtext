@@ -33,7 +33,7 @@ These run in a subprocess with four CPU devices, for the reason given in
 fixed before this file is imported.
 
 On a one-layer Qwen3.5 MoE, with the MLPerf RL recipes' own mask, which freezes the router: the same
-comparison through Tunix's router replay payload and loss. It runs on one device, in the pytest process.
+comparison through `train.loss_fn`. It runs on one device, in the pytest process.
 """
 
 import collections
@@ -56,7 +56,6 @@ import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.models import models
-from maxtext.training_engine import abstract_engine
 from maxtext.training_engine import maxtext_engine
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
@@ -133,16 +132,17 @@ def _moe_rig_cfg(**kwargs) -> pyconfig.HyperParameters:
   )
 
 
-def _moe_rig_payload(first_token: int = 10) -> abstract_engine.RLTrainerPayload:
-  """One 8-token row in the completion half, as the sequence-packed batch assembler emits it."""
+def _moe_rig_batch(first_token: int = 10) -> dict[str, jax.Array]:
+  """One 8-token row shaped for `maxtext.trainers.pre_train.train.loss_fn`."""
   token_ids = jnp.arange(8, dtype=jnp.int32)[None, :] + first_token
-  return abstract_engine.RLTrainerPayload(
-      prompt_ids=jnp.zeros((1, 0), dtype=jnp.int32),
-      prompt_mask=jnp.zeros((1, 0), dtype=jnp.int32),
-      completion_ids=token_ids,
-      completion_mask=jnp.ones_like(token_ids),
-      advantages=jnp.zeros((1,), dtype=jnp.float32),
-  )
+  ones = jnp.ones_like(token_ids)
+  return {
+      "inputs": token_ids,
+      "inputs_position": jnp.arange(8, dtype=jnp.int32)[None, :],
+      "inputs_segmentation": ones,
+      "targets": jnp.roll(token_ids, -1, axis=-1),
+      "targets_segmentation": ones.at[:, -1].set(0),
+  }
 
 
 class FrozenGradSubprocessTest(absltest.TestCase):
@@ -372,8 +372,8 @@ def _fwd_bwd_dots(stop=None) -> collections.Counter[str]:
 def _train_moe_rig(stop=None) -> dict[str, Any]:
   """`_run` on the one-layer Qwen3.5 MoE rig (`_moe_rig_cfg`), with the recipes' router mask.
 
-  Through Tunix's router replay payload and loss, and `compile(None)` as Tunix's `TrainerWorker` calls
-  it, so the kernels compile on the first `fwd_bwd`. Two updates of two micro-batches.
+  Uses the engine's built-in `train.loss_fn` path and `compile(None)` so the kernels compile on
+  the first `fwd_bwd`. Two updates of two micro-batches.
   """
   with _with_stop(stop):
     cfg = _moe_rig_cfg(
@@ -385,12 +385,10 @@ def _train_moe_rig(stop=None) -> dict[str, Any]:
     model = models.Transformer(config=cfg, mesh=mesh, quant=None, model_mode="train", rngs=nnx.Rngs(0))
     with mock.patch.object(maxtext_engine.model_creation_utils, "from_pretrained", return_value=model):
       engine = maxtext_engine.MaxTextTrainingEngine(cfg, mesh=mesh)
-    engine.with_gen_model_input_fn(maxtext_engine.router_replay_gen_model_input_fn)
-    engine.with_loss_fn(maxtext_engine.make_router_replay_loss_fn(cfg), has_aux=True)
     engine.compile(None)
     return _run(
         engine,
-        [[_moe_rig_payload(10), _moe_rig_payload(20)], [_moe_rig_payload(30), _moe_rig_payload(40)]],
+        [[_moe_rig_batch(10), _moe_rig_batch(20)], [_moe_rig_batch(30), _moe_rig_batch(40)]],
         zero_frozen_before_update=stop is _no_stop,
     )
 
