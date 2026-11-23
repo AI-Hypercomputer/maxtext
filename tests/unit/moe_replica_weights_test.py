@@ -349,7 +349,9 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       ("absmax_channelwise", "absmax", (2,)),
+      ("absmax_neg_axis", "absmax", (-1,)),
       ("absmax_pertensor", "absmax", ()),
+      ("none_calibration", None, (2,)),
       ("fixed_channelwise_arg", "fixed,-224,224", (2,)),
       ("fixed_pertensor", "fixed,224", ()),
   )
@@ -357,7 +359,9 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
     out = self._extend(calibration, channelwise_axes)
     self.assertEqual(out.qvalue.dtype, jnp.float8_e4m3fn)
     self.assertEqual(out.qvalue.shape, (NUM_EP, LOCAL + NUM_REPLICAS, DIM, 4))
-    is_static = calibration.startswith("fixed")
+    ref_cal = calibration or "absmax"
+    ref_axes = [a % 3 for a in channelwise_axes]
+    is_static = ref_cal.lower().startswith("fixed")
     expected_scale_shape = (
         (NUM_EP, 1, 1, 1) if is_static else (NUM_EP, LOCAL + NUM_REPLICAS, 1, 4 if channelwise_axes else 1)
     )
@@ -370,8 +374,8 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
       ref = qpl.quantize(
           jnp.asarray(self.w[d]),
           jnp.float8_e4m3fn,
-          channelwise_axes=list(channelwise_axes),
-          calibration_method=calibration,
+          channelwise_axes=ref_axes,
+          calibration_method=ref_cal,
       )
       np.testing.assert_array_equal(codes[d, :LOCAL], np.asarray(ref.qvalue.astype(jnp.float32)))
       if is_static:
@@ -387,8 +391,8 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
         home = qpl.quantize(
             jnp.asarray(self.w[h]),
             jnp.float8_e4m3fn,
-            channelwise_axes=list(channelwise_axes),
-            calibration_method=calibration,
+            channelwise_axes=ref_axes,
+            calibration_method=ref_cal,
         )
         loc = int(rep_slot[d, s])
         np.testing.assert_array_equal(codes[d, LOCAL + s], np.asarray(home.qvalue.astype(jnp.float32))[loc])
@@ -428,11 +432,14 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
     )
 
   @parameterized.named_parameters(
-      ("absmax_f32", "absmax", (2,), jnp.float32),
-      ("absmax_pertensor_bf16", "absmax", (), jnp.bfloat16),
-      ("fixed_bf16", "fixed,-224,224", (), jnp.bfloat16),
+      ("absmax_f32", "absmax", (2,), jnp.float32, jnp.float32),
+      ("absmax_pertensor_f32_weights_bf16_compute", "absmax", (), jnp.bfloat16, jnp.float32),
+      ("fixed_f32_weights_bf16_compute", "fixed,-224,224", (), jnp.bfloat16, jnp.float32),
+      ("absmax_pure_bf16", "absmax", (2,), jnp.bfloat16, jnp.bfloat16),
+      ("fixed_pure_bf16", "fixed,-224,224", (), jnp.bfloat16, jnp.bfloat16),
   )
-  def test_straight_through_grads_return_home_like_dense_move(self, calibration, channelwise_axes, dtype):
+  def test_straight_through_grads_return_home_like_dense_move(self, calibration, channelwise_axes, dtype, weight_dtype):
+    w_in = jnp.asarray(self.w, dtype=weight_dtype)
     g_in = jnp.asarray(self.g, dtype=dtype)
 
     def per_device(w, g):
@@ -448,13 +455,15 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
 
       return jax.grad(loss_q)(w), jax.grad(loss_dense)(w)
 
-    dw_q, dw_dense = jax.jit(jax.vmap(per_device, axis_name=AXIS))(jnp.asarray(self.w), g_in)
-    self.assertEqual(dw_q.dtype, jnp.float32)
+    dw_q, dw_dense = jax.jit(jax.vmap(per_device, axis_name=AXIS))(w_in, g_in)
+    self.assertEqual(dw_q.dtype, weight_dtype)
+    self.assertEqual(dw_dense.dtype, weight_dtype)
+    w_ref = np.asarray(w_in, dtype=np.float32)
     g_ref = np.asarray(g_in, dtype=np.float32)
-    _, dw_rep = moe_replica_test_utils.replica_reference(self.w, g_ref[:, LOCAL:], self.plan)
-    tol = 1e-2 if dtype == jnp.bfloat16 else 1e-6
-    np.testing.assert_allclose(np.asarray(dw_q), g_ref[:, :LOCAL] + dw_rep, rtol=tol, atol=tol)
-    np.testing.assert_array_equal(np.asarray(dw_q), np.asarray(dw_dense))
+    _, dw_rep = moe_replica_test_utils.replica_reference(w_ref, g_ref[:, LOCAL:], self.plan)
+    tol = 2e-2 if jnp.bfloat16 in (dtype, weight_dtype) else 1e-6
+    np.testing.assert_allclose(np.asarray(dw_q, dtype=np.float32), g_ref[:, :LOCAL] + dw_rep, rtol=tol, atol=tol)
+    np.testing.assert_array_equal(np.asarray(dw_q, dtype=np.float32), np.asarray(dw_dense, dtype=np.float32))
 
   def test_noop_when_zero_replicas_or_single_device(self):
     w_single = jnp.asarray(self.w[0], dtype=jnp.float32)
@@ -491,6 +500,10 @@ class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
     with self.assertRaises(ValueError):
       mrw.extend_quantized_with_replicas(
           w_single, self.plan, AXIS, NUM_EP, jnp.float32, jnp.float8_e4m3fn, "absmax", (0, 2)
+      )
+    with self.assertRaises(ValueError):
+      mrw.extend_quantized_with_replicas(
+          w_single, self.plan, AXIS, NUM_EP, jnp.float32, jnp.float8_e4m3fn, "absmax", (-4,)
       )
     with self.assertRaises(NotImplementedError):
       jax.jit(
