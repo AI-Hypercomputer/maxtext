@@ -54,12 +54,10 @@ def tiny_config(scan_layers=False):
   )
 
 
-TOKENS = jnp.array([[1, 2, 3, 4], [4, 3, 2, 1]])
-POSITIONS = jnp.array([[0, 1, 2, 3], [0, 1, 2, 3]])
-
-
 def forward(model):
-  return model(TOKENS, POSITIONS)
+  tokens = jnp.array([[1, 2, 3, 4], [4, 3, 2, 1]])
+  positions = jnp.array([[0, 1, 2, 3], [0, 1, 2, 3]])
+  return model(tokens, positions)
 
 
 def loss(model):
