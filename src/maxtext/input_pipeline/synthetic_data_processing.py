@@ -12,11 +12,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Input pipeline for synthetic dataset."""
+"""Input pipeline for synthetic dataset.
+
+`SyntheticDataIterator` is the static batch of random token ids text training runs on. `SyntheticMultimodalDataSource`
+is its multimodal counterpart at the dataset level: rows of random text and random media (images of random size and
+count) in the raw form a real multimodal SFT dataset provides, so the same model-specific processing turns them into
+training batches.
+"""
 
 from collections.abc import Callable
 from typing import Any
 
+import grain.python as grain
 import numpy as np
 
 import jax
@@ -227,3 +234,97 @@ class PlaceHolderDataIterator:
         yield batch
 
     return infinite_iterator()
+
+
+########## Multimodal synthetic dataset
+
+# The dataset is infinite in practice; grain's index sampler only needs an upper bound.
+_NUM_SYNTHETIC_RECORDS = 10_000_000_000
+# Words of random letters stand in for text: tokenized by any tokenizer, they contain no special tokens.
+_PROMPT_WORDS = 24
+_MIN_WORD_LENGTH, _MAX_WORD_LENGTH = 2, 8
+
+
+def synthetic_modalities(config) -> list[str]:
+  """The media modalities `SyntheticMultimodalDataSource` generates for `config`.
+
+  Images when `use_multimodal` and `synthetic_num_images_per_example_range` allows at least one image. Future modalities
+  (video, audio, ...) add their trigger here and their generator to `_MEDIA_GENERATORS`.
+  """
+  modalities = []
+  if config.use_multimodal and config.synthetic_num_images_per_example_range[1] > 0:
+    modalities.append("image")
+  return modalities
+
+
+def generate_synthetic_images(rng: np.random.Generator, config, largest: bool = False) -> list[np.ndarray]:
+  """Draws the images of one example: random uint8 RGB arrays of shape (H, W, 3) of random size and count.
+
+  The count, height and width (independent, so any aspect ratio) are uniform over the inclusive
+  `synthetic_num_images_per_example_range` and `synthetic_image_{height,width}_range`. With `largest`, every range
+  yields its maximum (the largest example the config can produce).
+  """
+  min_images, max_images = config.synthetic_num_images_per_example_range
+  min_height, max_height = config.synthetic_image_height_range
+  min_width, max_width = config.synthetic_image_width_range
+  if largest:
+    min_images, min_height, min_width = max_images, max_height, max_width
+  images = []
+  for _ in range(int(rng.integers(min_images, max_images + 1))):
+    height = int(rng.integers(min_height, max_height + 1))
+    width = int(rng.integers(min_width, max_width + 1))
+    # `rng.bytes` is the fastest way to fill the pixels.
+    images.append(np.frombuffer(rng.bytes(height * width * 3), dtype=np.uint8).reshape(height, width, 3))
+  return images
+
+
+# Media generators by modality: `(rng, config, largest) -> the media of one example`, in the raw form a real dataset
+# provides them (uint8 RGB arrays for images). The row of an example holds each modality's media under the modality
+# name.
+_MEDIA_GENERATORS: dict[str, Callable[[np.random.Generator, Any, bool], list]] = {"image": generate_synthetic_images}
+
+
+class SyntheticMultimodalDataSource(grain.RandomAccessDataSource):
+  """A synthetic multimodal SFT dataset: rows of random text and random media, like the rows of a real dataset.
+
+  Each row holds a `prompt` and a `completion` of random words (the completion has enough words to fill any
+  `max_target_length` once tokenized and truncated) and, per modality of `synthetic_modalities(config)`, the media of
+  the example under the modality name (e.g. `image`: a list of uint8 RGB arrays). The model-specific processing (chat
+  format, tokenization, media preprocessing) is left to the consuming pipeline, exactly as for a real dataset. Row
+  `index` is a pure function of `(seed, index)`, so every host and worker produces the same row for the same index.
+  """
+
+  TEXT_COLUMNS = ("prompt", "completion")
+
+  def __init__(self, config, seed: int):
+    self.config = config
+    self.seed = seed
+    self.modalities = synthetic_modalities(config)
+    if not self.modalities:
+      raise ValueError(
+          "SyntheticMultimodalDataSource needs a media modality: use_multimodal with a"
+          " synthetic_num_images_per_example_range that allows images."
+      )
+
+  def __len__(self):
+    return _NUM_SYNTHETIC_RECORDS
+
+  @staticmethod
+  def _words(rng: np.random.Generator, num_words: int) -> str:
+    lengths = rng.integers(_MIN_WORD_LENGTH, _MAX_WORD_LENGTH + 1, size=num_words)
+    letters = rng.integers(ord("a"), ord("z") + 1, size=int(lengths.sum()), dtype=np.uint8).tobytes().decode()
+    starts = np.concatenate([[0], np.cumsum(lengths)[:-1]])
+    return " ".join(letters[start : start + length] for start, length in zip(starts, lengths))
+
+  def generate(self, rng: np.random.Generator, largest: bool = False) -> dict[str, Any]:
+    """Draws one row from `rng`; with `largest`, the largest row the config can produce (see the generators)."""
+    row = {
+        "prompt": self._words(rng, _PROMPT_WORDS),
+        "completion": self._words(rng, self.config.max_target_length),
+    }
+    for modality in self.modalities:
+      row[modality] = _MEDIA_GENERATORS[modality](rng, self.config, largest)
+    return row
+
+  def __getitem__(self, index):
+    return self.generate(np.random.default_rng([self.seed, int(index)]))
