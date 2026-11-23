@@ -1844,6 +1844,130 @@ def KIMI_K3_HF_WEIGHTS_TO_SHAPE(config):
   return mapping
 
 
+def _inkling2_hf_text_config(config) -> dict:
+  """Returns the Inkling 2 Loop text config as a plain dict."""
+  if hasattr(config, "to_dict"):
+    config = config.to_dict()
+  if not isinstance(config, dict):
+    raise TypeError(f"inkling2 expects the HF config as a dict or PretrainedConfig, got {type(config).__name__}")
+  text_config = config.get("text_config")
+  if text_config is not None:
+    config = text_config.to_dict() if hasattr(text_config, "to_dict") else dict(text_config)
+  return config
+
+
+def INKLING2_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns HF weight name -> shape mapping for Inkling 2 Loop text weights (`model.llm.*`)."""
+  cfg = _inkling2_hf_text_config(config)
+  loop_cfg = cfg.get("loop_config") or {}
+
+  hidden_size = int(cfg["hidden_size"])
+  vocab_size = int(cfg["vocab_size"])
+  num_layers = int(cfg["num_hidden_layers"])
+  num_q_heads = int(cfg["num_attention_heads"])
+  num_kv_heads = int(cfg["num_key_value_heads"])
+  head_dim = int(cfg["head_dim"])
+  d_rel = int(cfg.get("d_rel", 16))
+  rel_extent = int(cfg.get("rel_extent", 1024))
+  sliding_window_size = int(cfg.get("sliding_window_size", cfg.get("sliding_window", rel_extent)))
+  conv_kernel = int(cfg.get("conv_kernel_size", cfg.get("sconv_kernel_size", 4)))
+  block_size = int(cfg.get("n_layers_per_attn_res_block", 6))
+  core_start = int(cfg.get("loop_layer_index_start", loop_cfg.get("core_start", 6)))
+  core_end = int(cfg.get("loop_layer_index_end", loop_cfg.get("core_end", 18)))
+  gate_rank = int(cfg.get("loop_gate_rank", loop_cfg.get("gate_rank", 64)))
+  num_experts = int(cfg.get("n_routed_experts", cfg.get("num_local_experts", 128)))
+  moe_inter = int(cfg.get("moe_intermediate_size", cfg.get("intermediate_size", 1152)))
+
+  num_core_layers = core_end - core_start
+  q_dim = num_q_heads * head_dim
+  kv_dim = num_kv_heads * head_dim
+
+  mapping = {
+      "model.llm.embed.weight": [vocab_size, hidden_size],
+      "model.llm.embed_norm.weight": [hidden_size],
+      "model.llm.norm.weight": [hidden_size],
+      "model.llm.unembed.weight": [vocab_size, hidden_size],
+      "model.llm.attn_res.output_query": [hidden_size],
+      "model.llm.middle_cycle_cross_pass_queries": [2 * num_core_layers, hidden_size],
+      "model.llm.middle_cycle_cross_pass_kv_queries": [2 * num_core_layers, hidden_size],
+      (
+          "model.llm.middle_cycle_cross_pass_queries",
+          "model.llm.middle_cycle_cross_pass_kv_queries",
+      ): (
+          [2 * num_core_layers, hidden_size],
+          [2 * num_core_layers, hidden_size],
+      ),
+  }
+
+  for i in range(num_layers):
+    is_full = (i + 1) % block_size == 0
+    is_loop = core_start <= i < core_end
+    p = f"model.llm.layers.{i}"
+
+    if i > 0:
+      mapping[f"model.llm.attn_res.attn_queries.{i - 1}"] = [3, hidden_size] if is_full else [hidden_size]
+    mapping[f"model.llm.attn_res.mlp_queries.{i}"] = [hidden_size]
+
+    if is_full:
+      mapping[f"{p}.q_input_norm.weight"] = [hidden_size]
+      mapping[f"{p}.k_input_norm.weight"] = [hidden_size]
+      mapping[f"{p}.v_input_norm.weight"] = [hidden_size]
+      mapping[f"{p}.attn.k_sconv.static_w"] = [conv_kernel, kv_dim]
+      mapping[f"{p}.attn.k_sconv.weight_proj"] = [num_kv_heads * conv_kernel, hidden_size]
+      mapping[f"{p}.attn.v_sconv.static_w"] = [conv_kernel, kv_dim]
+      mapping[f"{p}.attn.v_sconv.weight_proj"] = [num_kv_heads * conv_kernel, hidden_size]
+    else:
+      mapping[f"{p}.attn_norm.weight"] = [hidden_size]
+      mapping[f"{p}.attn.k_sconv.weight"] = [kv_dim, 1, conv_kernel]
+      mapping[f"{p}.attn.v_sconv.weight"] = [kv_dim, 1, conv_kernel]
+
+    mapping.update(
+        {
+            f"{p}.mlp_norm.weight": [hidden_size],
+            f"{p}.attn.wq_du.weight": [q_dim, hidden_size],
+            f"{p}.attn.wk_dv.weight": [kv_dim, hidden_size],
+            f"{p}.attn.wv_dv.weight": [kv_dim, hidden_size],
+            f"{p}.attn.wr_du.weight": [num_q_heads * d_rel, hidden_size],
+            f"{p}.attn.wo_ud.weight": [hidden_size, q_dim],
+            f"{p}.attn.gate_attn.weight": [q_dim, hidden_size],
+            f"{p}.attn.attn_sink_proj.weight": [num_q_heads, hidden_size],
+            f"{p}.attn.q_l2_clip.scale": [num_q_heads, head_dim],
+            f"{p}.attn.rel_l2_clip.scale": [num_q_heads, d_rel],
+            f"{p}.attn.rel_logits_proj.proj": [d_rel, rel_extent if is_full else sliding_window_size],
+            f"{p}.attn_sconv.weight": [hidden_size, 1, conv_kernel],
+            f"{p}.mlp_sconv.weight": [hidden_size, 1, conv_kernel],
+            f"{p}.mlp.gate.weight": [num_experts, hidden_size],
+            f"{p}.mlp.gate.bias": [num_experts],
+            f"{p}.mlp.experts.w13_weight": [num_experts, 2 * moe_inter, hidden_size],
+            f"{p}.mlp.experts.w2_weight": [num_experts, hidden_size, moe_inter],
+            # 4-tuple keys matching `PARAM_MAPPING["inkling2-mini"]` (unquantized export emits only the weight tensor).
+            (
+                f"{p}.mlp.experts.w13_weight",
+                f"{p}.mlp.experts.w13_weight_scale",
+                f"{p}.mlp.experts.w13_weight_amax",
+                f"{p}.mlp.experts.w13_weight_outer_scale_denominator",
+            ): ([num_experts, 2 * moe_inter, hidden_size],),
+            (
+                f"{p}.mlp.experts.w2_weight",
+                f"{p}.mlp.experts.w2_weight_scale",
+                f"{p}.mlp.experts.w2_weight_amax",
+                f"{p}.mlp.experts.w2_weight_outer_scale_denominator",
+            ): ([num_experts, hidden_size, moe_inter],),
+        }
+    )
+
+    if is_loop:
+      for ctrl in ("attn", "k", "v", "mlp"):
+        mapping[f"{p}.controllers.{ctrl}.down_weight"] = [gate_rank, 2 * hidden_size]
+        mapping[f"{p}.controllers.{ctrl}.forget_weight"] = [hidden_size, gate_rank]
+        mapping[f"{p}.controllers.{ctrl}.gain_weight"] = [hidden_size, gate_rank]
+
+  return mapping
+
+
+INKLING2_HF_SHAPE = INKLING2_HF_WEIGHTS_TO_SHAPE
+
+
 HF_SHAPE = {
     "gemma2-2b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
     "gemma2-9b": GEMMA2_HF_WEIGHTS_TO_SHAPE,
@@ -1897,4 +2021,5 @@ HF_SHAPE = {
     "qwen3.8-flash-next": QWEN3_8_FLASH_NEXT_HF_WEIGHTS_TO_SHAPE,
     "qwen3.8-flash-next-mini": QWEN3_8_FLASH_NEXT_HF_WEIGHTS_TO_SHAPE,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_HF_WEIGHTS_TO_SHAPE,
+    "inkling2-mini": INKLING2_HF_WEIGHTS_TO_SHAPE,
 }

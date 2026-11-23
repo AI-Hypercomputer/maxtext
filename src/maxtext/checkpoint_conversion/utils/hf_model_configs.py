@@ -2701,6 +2701,73 @@ granite_3_0_1b_a400m_dict = {
 }
 granite_3_0_1b_a400m_config = PTConfig(**granite_3_0_1b_a400m_dict)
 
+# from https://huggingface.co/thinkingmachines/Inkling-2-Mini/blob/main/config.json (`text_config`, flattened).
+# The released checkpoint is saved from `Inkling2LoopForConditionalGeneration` with text weights under
+# `model.llm.*` (and vision weights under `model.visual.*`). Using `Inkling2LoopTextConfig`
+# (`model_type="inkling2_loop_text"`, `architectures=["Inkling2LoopForCausalLM"]`) matches text-only
+# MaxText training and lets `AutoModelForCausalLM.from_pretrained` reload exported `model.llm.*` checkpoints
+# via transformers' `inkling2_loop_text` conversion mapping.
+inkling2_mini_dict = {
+    "architectures": ["Inkling2LoopForCausalLM"],
+    "model_type": "inkling2_loop_text",
+    "dtype": "bfloat16",
+    "eos_token_id": 200006,
+    "vocab_size": 201024,
+    "unpadded_vocab_size": 200058,
+    "hidden_size": 2304,
+    "num_hidden_layers": 24,
+    "num_attention_heads": 24,
+    "num_key_value_heads": 8,
+    "head_dim": 128,
+    "swa_num_attention_heads": 24,
+    "swa_num_key_value_heads": 8,
+    "swa_head_dim": 128,
+    "sliding_window_size": 1024,
+    "d_rel": 16,
+    "rel_extent": 1024,
+    "log_scaling_n_floor": 8192,
+    "log_scaling_alpha": 0.1,
+    "layer_types": ["hybrid" if (i + 1) % 6 == 0 else "hybrid_sliding" for i in range(24)],
+    "max_position_embeddings": 1048576,
+    "rms_norm_eps": 1e-06,
+    "conv_kernel_size": 4,
+    "hidden_act": "silu",
+    "moe_intermediate_size": 1152,
+    "n_routed_experts": 128,
+    "num_experts_per_tok": 8,
+    "route_scale": 8.0,
+    "qk_l2_clip_threshold": 22.627416997969522,
+    "rel_l2_clip_threshold": 8.0,
+    "n_layers_per_attn_res_block": 6,
+    "mlp_gate_softcap": 4.0,
+    "mlp_up_softcap": 25.0,
+    "final_logit_softcapping": 30.0,
+    "scoring_func": "sigmoid",
+    "use_cache": True,
+    "loop_layer_index_start": 6,
+    "loop_layer_index_end": 18,
+    "loop_num_passes": 3,
+    "loop_gate_rank": 64,
+}
+
+
+class Inkling2LoopTextFallbackConfig(PTConfig):  # pyrefly: ignore[invalid-inheritance]
+  """Minimal stand-in for `Inkling2LoopTextConfig` when transformers predates Inkling 2 Loop."""
+
+  model_type = "inkling2_loop_text"
+
+  def __init__(self, **kwargs):
+    kwargs.setdefault("max_position_embeddings", 1048576)
+    super().__init__(**kwargs)
+
+
+try:
+  # pylint: disable=unexpected-keyword-arg
+  inkling2_mini_config = transformers.Inkling2LoopTextConfig(**inkling2_mini_dict)  # pyrefly: ignore[missing-attribute]
+  # pylint: enable=unexpected-keyword-arg
+except AttributeError:
+  inkling2_mini_config = Inkling2LoopTextFallbackConfig(**inkling2_mini_dict)
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
     "gemma2-2b": gemma2_2b_config,
@@ -2768,4 +2835,5 @@ HF_MODEL_CONFIGS = {
     "ming-3.0-audio-tiny": ming_3_0_audio_tiny_config,
     "ming-3.0-audio-tiny-talker": ming_3_0_audio_tiny_talker_config,
     "granite-3.0-1b-a400m": granite_3_0_1b_a400m_config,
+    "inkling2-mini": inkling2_mini_config,
 }

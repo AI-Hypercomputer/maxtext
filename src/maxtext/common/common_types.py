@@ -37,7 +37,7 @@ FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION = ("fp8", "nanoo_fp8", "fp8_gpu"
 # Models that use DeepSeek-V3-style routing: sigmoid scores plus a correction bias that only steers top-k
 # selection, with the routing weights gathered from the pre-bias scores. `layers/moe.py` routes on it and
 # `configs/types.py` validates against it.
-DEEPSEEK_V3_ROUTING_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4", "kimi-k3")
+DEEPSEEK_V3_ROUTING_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4", "kimi-k3", "inkling2")
 
 
 def is_fp8_dtype(dtype: Any) -> bool:
@@ -195,6 +195,7 @@ class DecoderBlockType(enum.Enum):
   MING = "ming"
   HY4 = "hy4"
   KIMI_LINEAR = "kimi_linear"
+  INKLING2 = "inkling2"
 
 
 class VisionEncoderBlockType(enum.Enum):

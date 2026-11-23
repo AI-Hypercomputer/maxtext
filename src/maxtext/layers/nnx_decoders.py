@@ -65,6 +65,7 @@ from maxtext.models import (
     gpt3,
     gpt_oss,
     hy4,
+    inkling2,
     kimi_k3,
     llama2,
     llama4,
@@ -672,6 +673,7 @@ class NNXDecoder(nnx.Module):
     self.is_ming = self.config.decoder_block == DecoderBlockType.MING
     self.is_hy4 = self.config.decoder_block == DecoderBlockType.HY4
     self.is_kimi_linear = self.config.decoder_block == DecoderBlockType.KIMI_LINEAR
+    self.is_inkling2 = self.config.decoder_block == DecoderBlockType.INKLING2
 
     if config.mhc_expansion_rate > 1 and config.decoder_block == DecoderBlockType.DEEPSEEK4:
       self.hc_head = mhc.DeepSeek4HyperHead(
@@ -697,6 +699,8 @@ class NNXDecoder(nnx.Module):
       # layer index), which the pipeline stage builder cannot express. scan_layers=True is
       # supported via an unrolled prefix/suffix around scanned cycles (_init_scanned_kimi).
       raise ValueError("kimi_linear (Kimi-K3) does not support pipeline parallelism; do not enable pipeline parallelism.")
+    if self.is_inkling2 and getattr(config, "using_pipeline_parallelism", False):
+      raise ValueError("inkling2 does not support pipeline parallelism; do not enable pipeline parallelism.")
 
     if self.is_gemma4_small:
       # Gemma4 E2B/E4B: per-layer-index KV-share donor threading and a distinct attention_type
@@ -804,8 +808,77 @@ class NNXDecoder(nnx.Module):
       self._init_scanned_hy4(rngs)
     elif self.is_kimi_linear:
       self._init_scanned_kimi(rngs, mesh)
+    elif self.is_inkling2:
+      self._init_scanned_inkling2(rngs, mesh)
     else:
       self._init_scanned_generic(decoder_block_classes, rngs)
+
+  def _init_inkling2_top_level_modules(self, rngs, mesh):
+    """Creates Inkling 2 decoder-level modules (`embed_norm`, `final_input`, `message_input`, decode cache)."""
+    cfg = self.config
+    self.embed_norm = RMSNorm(
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        weight_dtype=cfg.weight_dtype,
+        kernel_axes=("norm",),
+        epsilon=cfg.normalization_layer_epsilon,
+        shard_mode=cfg.shard_mode,
+        mesh=mesh,
+        rngs=rngs,
+    )
+    self.final_input = inkling2.Inkling2BlockAttnRes(
+        emb_dim=cfg.emb_dim,
+        num_queries=1,
+        eps=cfg.normalization_layer_epsilon,
+        mesh=mesh,
+        shard_mode=cfg.shard_mode,
+        debug_sharding=cfg.debug_sharding,
+    )
+    num_core_layers = cfg.inkling2_core_end - cfg.inkling2_core_start
+    self.message_input = inkling2.Inkling2MessageAttnRes(
+        num_core_layers=num_core_layers,
+        emb_dim=cfg.emb_dim,
+        eps=cfg.normalization_layer_epsilon,
+        mesh=mesh,
+        shard_mode=cfg.shard_mode,
+        debug_sharding=cfg.debug_sharding,
+    )
+    self.inkling2_cache = inkling2.Inkling2DecodeCache(cfg) if self.model_mode != MODEL_MODE_TRAIN else None
+
+  def _init_scanned_inkling2(self, rngs, mesh):
+    """Initializes scanned Inkling 2: unrolled prelude & coda around 1-level scanned core blocks."""
+    cfg = self.config
+    block_size = cfg.attn_res_block_size
+    core_start = cfg.inkling2_core_start
+    core_end = cfg.inkling2_core_end
+    num_core_blocks = (core_end - core_start) // block_size
+
+    # Unrolled prelude [0..core_start-1] and coda [core_end..num_decoder_layers-1]
+    for lyr in list(range(core_start)) + list(range(core_end, cfg.num_decoder_layers)):
+      layer = inkling2.Inkling2DecoderLayer(
+          config=cfg,
+          mesh=mesh,
+          rngs=rngs,
+          is_full_layer=((lyr + 1) % block_size == 0),
+          is_loop_layer=False,
+          has_attention_input=(lyr > 0),
+          is_block_boundary=(lyr % block_size == 0),
+          quant=self.quant,
+      )
+      setattr(self, f"layers_{lyr}", layer)
+
+    if num_core_blocks > 0:
+      self.scanned_blocks = self._create_scanned_layers(
+          inkling2.Inkling2CoreScannableBlock,
+          length=num_core_blocks,
+          metadata_axis_name="scanned_blocks",
+          rngs=rngs,
+          remat_enabled=self._remat_enabled(),
+          remat_policy_fn=self._get_scan_safe_remat_policy(),
+          prevent_cse=maxtext_utils.should_prevent_cse_in_remat(cfg),
+      )
+
+    self._init_inkling2_top_level_modules(rngs, mesh)
 
   def _init_scanned_kimi(self, rngs, mesh):
     """Initializes scanned Kimi-K3 layers: unrolled prefix/suffix layers around scanned cycles.
@@ -1129,8 +1202,30 @@ class NNXDecoder(nnx.Module):
       self._init_sequential_deepseek(decoder_block_classes, rngs)
     elif self.is_kimi_linear:
       self._init_sequential_kimi(decoder_block_classes, rngs, self.mesh)
+    elif self.is_inkling2:
+      self._init_sequential_inkling2(rngs, self.mesh)
     else:
       self._init_sequential_generic(decoder_block_classes, rngs)
+
+  def _init_sequential_inkling2(self, rngs, mesh):
+    """Initializes unrolled Inkling 2 decoder layers (`layers_0`..`layers_{L-1}`)."""
+    cfg = self.config
+    block_size = cfg.attn_res_block_size
+    core_start = cfg.inkling2_core_start
+    core_end = cfg.inkling2_core_end
+    for lyr in range(cfg.num_decoder_layers):
+      layer = inkling2.Inkling2DecoderLayer(
+          config=cfg,
+          mesh=mesh,
+          rngs=rngs,
+          is_full_layer=((lyr + 1) % block_size == 0),
+          is_loop_layer=(core_start <= lyr < core_end),
+          has_attention_input=(lyr > 0),
+          is_block_boundary=(lyr % block_size == 0),
+          quant=self.quant,
+      )
+      setattr(self, f"layers_{lyr}", layer)
+    self._init_inkling2_top_level_modules(rngs, mesh)
 
   def _init_sequential_kimi(self, decoder_block_classes, rngs, mesh):
     """Initializes sequential Kimi-K3 decoder layers and output AttnRes modules."""
@@ -1722,6 +1817,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MING: get_scannable(ming.MingDecoderLayer, ming.MingScannableBlock),
         DecoderBlockType.HY4: get_scannable(hy4.Hy4DecoderLayer, hy4.Hy4ScannableBlock),
         DecoderBlockType.KIMI_LINEAR: [kimi_k3.KimiK3DecoderLayer],
+        DecoderBlockType.INKLING2: [inkling2.Inkling2DecoderLayer],
     }
 
     if cfg.decoder_block not in layer_map:
@@ -1935,6 +2031,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MING,
         DecoderBlockType.HY4,
         DecoderBlockType.KIMI_LINEAR,
+        DecoderBlockType.INKLING2,
     }:
       return functools.partial(
           RMSNorm,
@@ -1986,6 +2083,13 @@ class NNXDecoder(nnx.Module):
         if decoder_input_embeddings is not None
         else self.embed_tokens(shared_embedding, decoder_input_tokens, model_mode)
     )
+    if self.is_inkling2 and decoder_input_embeddings is None:
+      embed_norm_out_sharding = (
+          create_sharding(self.mesh, ("activation_batch", "activation_norm_length", "activation_embed"))
+          if cfg.shard_mode == ShardMode.EXPLICIT
+          else None
+      )
+      y = self.embed_norm(y, out_sharding=embed_norm_out_sharding)
 
     # Precomputed embeddings are complete (including any multimodal replacements),
     # so only merge modality embeddings when token embeddings were created here.
@@ -2228,8 +2332,26 @@ class NNXDecoder(nnx.Module):
       else:
         logits = self.logits_dense(y, out_sharding=out_sharding, kernel_all_gather_fn=kernel_all_gather_fn)
 
+      if cfg.final_logits_soft_cap:
+        orig_dtype = logits.dtype
+        logits_f32 = logits.astype(jnp.float32)
+        logits = jnp.tanh(logits_f32 / cfg.final_logits_soft_cap) * cfg.final_logits_soft_cap
+        if not self.config.cast_logits_to_fp32:
+          logits = logits.astype(orig_dtype)
+
     if self.config.cast_logits_to_fp32:
       logits = logits.astype(jnp.float32)
+
+    if 0 < cfg.unpadded_vocab_size < logits.shape[-1]:
+      vocab_axis = (
+          "activation_vocab" if model_mode in {MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE} else head_out_axes[-1]
+      )
+      vocab_mask = jnp.arange(logits.shape[-1], dtype=jnp.int32) < cfg.unpadded_vocab_size
+      if cfg.shard_mode == ShardMode.EXPLICIT:
+        vocab_mask = sharding.maybe_shard_with_logical(
+            vocab_mask, (vocab_axis,), self.mesh, cfg.shard_mode, debug_sharding=cfg.debug_sharding
+        )
+      logits = jnp.where(vocab_mask.reshape((1,) * (logits.ndim - 1) + (-1,)), logits, jnp.asarray(-1e9, logits.dtype))
 
     return logits
 
@@ -2424,6 +2546,7 @@ class NNXDecoder(nnx.Module):
         y = mhc_expand(y)
 
     layer_args = (decoder_segment_ids, decoder_positions, deterministic, model_mode)
+    inkling2_expert_indices = None
 
     layer_kwargs = {
         "slot": slot,
@@ -2574,6 +2697,15 @@ class NNXDecoder(nnx.Module):
             attention_metadata=attention_metadata,
             previous_chunk=previous_chunk,
             slot=slot,
+        )
+      elif self.is_inkling2:
+        y, inkling2_expert_indices = self._apply_inkling2_layers(
+            y,
+            decoder_segment_ids=decoder_segment_ids,
+            decoder_positions=decoder_positions,
+            deterministic=deterministic,
+            model_mode=model_mode,
+            forced_routed_experts=forced_routed_experts,
         )
       elif cfg.scan_layers and not self.is_kimi_linear:  # Kimi-K3 scans inside _apply_kimi_layers.
         if self.is_deepseek:
@@ -2963,31 +3095,32 @@ class NNXDecoder(nnx.Module):
     else:
       logits = self.apply_output_head(shared_embedding, hidden_state, deterministic, model_mode)
 
-    expert_indices = None
-    try:
+    expert_indices = inkling2_expert_indices if self.is_inkling2 and not cfg.using_pipeline_parallelism else None
+    if expert_indices is None:
+      try:
 
-      def _path_sort_key(path):
-        key = []
-        for part in path:
-          nums = re.findall(r"\d+", str(part))
-          key.append(int(nums[0]) if nums else str(part))
-        return tuple(key)
+        def _path_sort_key(path):
+          key = []
+          for part in path:
+            nums = re.findall(r"\d+", str(part))
+            key.append(int(nums[0]) if nums else str(part))
+          return tuple(key)
 
-      intermediates = nnx.state(self, nnx.Intermediate)
-      flat_items = [
-          (path, val.value if hasattr(val, "value") else val)
-          for path, val in intermediates.flat_state()
-          if path and str(path[-1]) == "selected_experts"
-      ]
-      flat_items.sort(key=lambda item: _path_sort_key(item[0]))
-      expert_indices_list = [v for _, v in flat_items]
-      if expert_indices_list:
-        # Scanned blocks already carry a leading layer axis (3D); sequential
-        # layers are 2D and need that axis added before concatenating.
-        expert_indices_list = [v if v.ndim == 3 else jnp.expand_dims(v, axis=0) for v in expert_indices_list]
-        expert_indices = jnp.concatenate(expert_indices_list, axis=0)
-    except Exception:  # pylint: disable=broad-exception-caught
-      expert_indices = None
+        intermediates = nnx.state(self, nnx.Intermediate)
+        flat_items = [
+            (path, val.value if hasattr(val, "value") else val)
+            for path, val in intermediates.flat_state()
+            if path and str(path[-1]) == "selected_experts"
+        ]
+        flat_items.sort(key=lambda item: _path_sort_key(item[0]))
+        expert_indices_list = [v for _, v in flat_items]
+        if expert_indices_list:
+          # Scanned blocks already carry a leading layer axis (3D); sequential
+          # layers are 2D and need that axis added before concatenating.
+          expert_indices_list = [v if v.ndim == 3 else jnp.expand_dims(v, axis=0) for v in expert_indices_list]
+          expert_indices = jnp.concatenate(expert_indices_list, axis=0)
+      except Exception:  # pylint: disable=broad-exception-caught
+        expert_indices = None
 
     if expert_indices is not None:
       return logits, hidden_state, kv_caches, expert_indices
@@ -3698,6 +3831,425 @@ class NNXDecoder(nnx.Module):
     )
     return y, kv_caches
 
+  def _apply_inkling2_unrolled_layer(
+      self,
+      lyr: int,
+      hidden_states,
+      block_states,
+      *,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      layer_messages=None,
+      forced_routed_experts=None,
+      cache_slice=None,
+  ):
+    """Applies unrolled Inkling 2 layer `layers_{lyr}`, wrapping in `jax.checkpoint` only when remat is enabled."""
+    cfg = self.config
+    layer = getattr(self, f"layers_{lyr}")
+    if self._remat_enabled() and model_mode == MODEL_MODE_TRAIN:
+      policy = self.get_remat_policy()
+      # Unrolled prelude/coda layers are outside `jax.lax.scan`, so enable `prevent_cse=True`
+      # on TPU even when `scan_layers=True` (only disabling for GPU gradient accumulation).
+      prevent_cse = not (cfg.gradient_accumulation_steps > 1 and cfg.hardware in ("gpu", "gpu_multiprocess"))
+      graphdef, params, rest = nnx.split(layer, nnx.Param, ...)
+      carried_param_paths = {path for path, _ in nnx.to_flat_state(params)}
+
+      def _pure_fn(state_in, h_in, b_in, msgs_in, fre_in):
+        p_in, r_in = state_in
+        merged = nnx.merge(graphdef, p_in, r_in)
+        h_out, b_out, c_out, exp_out = merged(
+            h_in,
+            b_in,
+            decoder_segment_ids,
+            decoder_positions,
+            deterministic,
+            model_mode,
+            layer_messages=msgs_in,
+            forced_routed_experts=fre_in,
+            cache_slice=cache_slice,
+        )
+        # Propagate newly materialized params (e.g. Qwix LoRA adapters) and sown intermediates
+        # while keeping carried Param and MoEBiasVar read-only (avoids TraceContextError).
+        _, updated_params, new_intermediates, _ = nnx.split(merged, nnx.Param, nnx.Intermediate, ...)
+        new_params = nnx.from_flat_state(
+            [(path, val) for path, val in nnx.to_flat_state(updated_params) if path not in carried_param_paths]
+        )
+        return (h_out, b_out, c_out, exp_out), (new_params, new_intermediates)
+
+      ckpt_fn = jax.checkpoint(_pure_fn, policy=policy, prevent_cse=prevent_cse)
+      (h_out, b_out, c_out, exp_out), (new_params, new_intermediates) = ckpt_fn(
+          (params, rest), hidden_states, block_states, layer_messages, forced_routed_experts
+      )
+      if list(new_params.flat_state()):
+        nnx.update(layer, new_params)
+      if list(new_intermediates.flat_state()):
+        nnx.update(layer, new_intermediates)
+      return h_out, b_out, c_out, exp_out
+
+    return layer(
+        hidden_states,
+        block_states,
+        decoder_segment_ids,
+        decoder_positions,
+        deterministic,
+        model_mode,
+        layer_messages=layer_messages,
+        forced_routed_experts=forced_routed_experts,
+        cache_slice=cache_slice,
+    )
+
+  def _apply_inkling2_scanned_core(
+      self,
+      init_carry,
+      *,
+      length: int,
+      apply_fn,
+      xs=None,
+  ):
+    """Applies `self.scanned_blocks` via `jax.lax.scan` without mutating read-only `MoEBiasVar`.
+
+    `nnx_scan.apply_scanned_layers` writes the entire non-Param `rest` state back via `nnx.update`,
+    which mutates outer-trace `MoEBiasVar` leaves and raises `TraceContextError` under
+    `jax.value_and_grad`. Here `nnx.Param` and `MoEBiasVar` are passed read-only into the scan and
+    only newly created params (e.g., Qwix LoRA) and sown `nnx.Intermediate` leaves are returned.
+    """
+    if length <= 0:
+      return init_carry, None, None
+
+    param_scan_axis = self.config.param_scan_axis
+    layer_graphdef, params, rest = nnx.split(self.scanned_blocks, nnx.Param, ...)
+    if param_scan_axis != 0:
+      params = jax.tree.map(lambda x: jnp.moveaxis(x, param_scan_axis, 0) if x.ndim > param_scan_axis else x, params)
+
+    carried_param_paths = {path for path, _ in nnx.to_flat_state(params)}
+
+    def _ensure_stacked(x):
+      if hasattr(x, "ndim") and x.ndim == 0:
+        return jnp.broadcast_to(x, (length,))
+      return x
+
+    rest = jax.tree.map(_ensure_stacked, rest)
+
+    def _strip_scan_metadata(leaf):
+      if hasattr(leaf, "replace") and hasattr(leaf, "value"):  # pylint: disable=too-many-nested-blocks
+        replace_kwargs = {}
+        if hasattr(leaf, "get_metadata"):
+          replace_kwargs.update(leaf.get_metadata())
+        replace_kwargs.pop(nnx.PARTITION_NAME, None)
+        replace_kwargs.pop("param_scan_axis", None)
+        val = getattr(leaf, "value", None)
+        val_ndim = getattr(val, "ndim", None)
+        for key in ("sharding", "out_sharding", "kernel_axes", "sharding_names"):
+          value = getattr(leaf, key, None)
+          if value is None and key in replace_kwargs:
+            value = replace_kwargs[key]
+          if value is not None:
+            if isinstance(value, str):
+              value = (value,)
+            if isinstance(value, tuple) and val_ndim is not None and len(value) > val_ndim:
+              filtered = tuple(
+                  axis for axis in value if axis not in ("local_layers", "layers", "scanned_blocks", "decoder_layers")
+              )
+              if len(filtered) > val_ndim:
+                filtered = filtered[:val_ndim]
+              replace_kwargs[key] = filtered
+        return leaf.replace(**replace_kwargs)
+      return leaf
+
+    def _is_var_leaf(x):
+      return hasattr(x, "replace") and hasattr(x, "value")
+
+    def _scan_body(current_carry, scanned_state):
+      if xs is None:
+        current_params, current_rest = scanned_state
+        apply_args = ()
+      else:
+        current_params, current_rest, current_xs = scanned_state
+        apply_args = (current_xs,)
+      current_params = jax.tree.map(_strip_scan_metadata, current_params, is_leaf=_is_var_leaf)
+      current_rest = jax.tree.map(_strip_scan_metadata, current_rest, is_leaf=_is_var_leaf)
+      current_layer = nnx.merge(layer_graphdef, current_params, current_rest)
+      nnx.pop(current_layer, nnx.Intermediate)
+      next_carry = apply_fn(current_layer, current_carry, *apply_args)
+      _, updated_params, new_intermediates, _ = nnx.split(current_layer, nnx.Param, nnx.Intermediate, ...)
+      new_params = nnx.from_flat_state(
+          [(path, value) for path, value in nnx.to_flat_state(updated_params) if path not in carried_param_paths]
+      )
+      return next_carry, (new_params, new_intermediates)
+
+    scan_xs = (params, rest) if xs is None else (params, rest, xs)
+    final_carry, (scanned_new_params, scanned_intermediates) = jax.lax.scan(
+        _scan_body, init_carry, scan_xs, length=length
+    )
+    if param_scan_axis != 0 and list(scanned_new_params.flat_state()):
+      scanned_new_params = jax.tree.map(
+          lambda x: jnp.moveaxis(x, 0, param_scan_axis) if x.ndim > param_scan_axis else x,
+          scanned_new_params,
+      )
+    return final_carry, scanned_new_params, scanned_intermediates
+
+  def _apply_inkling2_layers(
+      self,
+      y,
+      *,
+      decoder_segment_ids,
+      decoder_positions,
+      deterministic,
+      model_mode,
+      forced_routed_experts=None,
+  ):
+    """Executes Inkling 2 prelude, N-pass looped core with cross-pass messages, coda, and `final_input`."""
+    cfg = self.config
+    block_size = cfg.attn_res_block_size
+    core_start = cfg.inkling2_core_start
+    core_end = cfg.inkling2_core_end
+    num_core_layers = core_end - core_start
+    num_core_blocks = num_core_layers // block_size
+    num_pre_loop_blocks = core_start // block_size
+    num_passes = cfg.inkling2_num_passes
+    total_visits = inkling2.total_logical_layers(cfg)
+
+    fre_all = (
+        forced_routed_experts_per_layer(forced_routed_experts, total_visits)
+        if forced_routed_experts is not None
+        else None
+    )
+    cache_active = model_mode != MODEL_MODE_TRAIN and self.inkling2_cache is not None
+    batch_size = y.shape[0]
+    collected_experts = [] if cfg.return_routed_experts else None
+
+    if cfg.scan_layers:
+      max_blocks = cfg.num_decoder_layers // block_size
+      block_states = inkling2.init_inkling2_attn_res_buffer(
+          y, max_blocks=max_blocks, mesh=self.mesh, shard_mode=cfg.shard_mode, debug_sharding=cfg.debug_sharding
+      )
+    else:
+      block_states = jnp.zeros((y.shape[0], y.shape[1], 0, y.shape[2]), dtype=y.dtype)
+      if self.mesh is not None:
+        block_states = sharding.maybe_shard_with_logical(
+            block_states,
+            ("activation_batch", "activation_norm_length", None, "activation_embed"),
+            self.mesh,
+            cfg.shard_mode,
+            debug_sharding=cfg.debug_sharding,
+        )
+
+    visit_idx = 0
+
+    # 1. Prelude layers [0 .. core_start - 1]
+    for lyr in range(core_start):
+      fre_v = None if fre_all is None else fre_all[visit_idx]
+      c_in = self.inkling2_cache.get_slot(visit_idx, batch_size) if cache_active else None
+      y, block_states, c_out, exp_v = self._apply_inkling2_unrolled_layer(
+          lyr,
+          y,
+          block_states,
+          decoder_segment_ids=decoder_segment_ids,
+          decoder_positions=decoder_positions,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          forced_routed_experts=fre_v,
+          cache_slice=c_in,
+      )
+      if cache_active and c_out is not None:
+        self.inkling2_cache.set_slot(visit_idx, c_out)
+      if collected_experts is not None and exp_v is not None:
+        collected_experts.append(exp_v)
+      visit_idx += 1
+
+    pre_loop_y = y
+    pre_loop_block_states = block_states
+    prev_pass_y = y
+    prev_pass_block_states = block_states
+
+    # 2. Looped Core [core_start .. core_end - 1] repeated `num_passes` times
+    scanned_pass_new_params = None
+    scanned_pass_intermediates = []
+    for pass_idx in range(num_passes):
+      if pass_idx == 0:
+        pass_messages = None
+      else:
+        prev_blocks_arr = (
+            prev_pass_block_states.blocks
+            if isinstance(prev_pass_block_states, inkling2.Inkling2AttnResBuffer)
+            else prev_pass_block_states
+        )
+        # Skip prelude blocks AND the first core boundary commit (which holds pre_loop_y).
+        prev_core_blocks = prev_blocks_arr[:, :, num_pre_loop_blocks + 1 : num_pre_loop_blocks + num_core_blocks, :]
+        pass_messages = self.message_input(prev_core_blocks, prev_pass_y)  # [B, T, num_core_layers, 4, H]
+
+      y = pre_loop_y
+      block_states = pre_loop_block_states
+
+      if cfg.scan_layers and num_core_blocks > 0:
+        # Sync remat flags in case remat_policy_override changed dynamically.
+        self.scanned_blocks.remat_enabled = self._remat_enabled()
+        self.scanned_blocks.remat_policy_fn = self._get_scan_safe_remat_policy()
+        self.scanned_blocks.prevent_cse = maxtext_utils.should_prevent_cse_in_remat(cfg)
+
+        msg_blocks = (
+            pass_messages.reshape(y.shape[0], y.shape[1], num_core_blocks, block_size, 4, y.shape[2]).transpose(
+                2, 0, 1, 3, 4, 5
+            )
+            if pass_messages is not None
+            else None
+        )
+        fre_blocks = (
+            fre_all[visit_idx : visit_idx + num_core_layers].reshape(
+                num_core_blocks, block_size, y.shape[0], y.shape[1], cfg.num_experts_per_tok
+            )
+            if fre_all is not None
+            else None
+        )
+        cache_blocks_in = None
+        if cache_active:
+          flat_slices = [self.inkling2_cache.get_slot(visit_idx + c, batch_size) for c in range(num_core_layers)]
+          stacked_flat = jax.tree.map(lambda *xs: jnp.stack(xs, axis=0), *flat_slices)
+          cache_blocks_in = jax.tree.map(
+              lambda arr: arr.reshape((num_core_blocks, block_size) + arr.shape[1:]), stacked_flat
+          )
+
+        has_xs = (msg_blocks is not None) or (fre_blocks is not None) or (cache_blocks_in is not None)
+        xs_tree = (msg_blocks, fre_blocks, cache_blocks_in) if has_xs else None
+
+        experts_buf_init = (
+            jnp.zeros((num_core_blocks, block_size, y.shape[0], y.shape[1], cfg.num_experts_per_tok), dtype=jnp.int32)
+            if collected_experts is not None
+            else None
+        )
+        cache_buf_init = cache_blocks_in if cache_active else None
+        init_carry = (y, block_states, jnp.asarray(0, dtype=jnp.int32), cache_buf_init, experts_buf_init)
+
+        def _scan_apply(block, carry, xs_item=None):
+          cur_y, cur_blocks, b_idx, cur_c_buf, cur_e_buf = carry
+          b_msg, b_fre, b_cache = xs_item if xs_item is not None else (None, None, None)
+          (next_y, next_blocks), upd_c, blk_exp = block(
+              (cur_y, cur_blocks),
+              decoder_segment_ids,
+              decoder_positions,
+              deterministic,
+              model_mode,
+              block_messages=b_msg,
+              block_forced_routed_experts=b_fre,
+              block_cache_slices=b_cache,
+          )
+          if cur_c_buf is not None and upd_c is not None:
+            cur_c_buf = jax.tree.map(lambda buf, u: buf.at[b_idx].set(u), cur_c_buf, upd_c)
+          if cur_e_buf is not None and blk_exp is not None:
+            cur_e_buf = cur_e_buf.at[b_idx].set(blk_exp)
+          return (next_y, next_blocks, b_idx + jnp.asarray(1, dtype=jnp.int32), cur_c_buf, cur_e_buf)
+
+        final_carry, pass_new_params, pass_inter = self._apply_inkling2_scanned_core(
+            init_carry,
+            length=num_core_blocks,
+            apply_fn=_scan_apply,
+            xs=xs_tree,
+        )
+        if pass_new_params is not None and list(pass_new_params.flat_state()):
+          scanned_pass_new_params = pass_new_params
+        if pass_inter is not None and list(pass_inter.flat_state()):
+          scanned_pass_intermediates.append(pass_inter)
+        y, block_states, _, updated_cache_blocks, pass_experts_buf = final_carry
+        if cache_active and updated_cache_blocks is not None:
+          flat_updated = jax.tree.map(lambda arr: arr.reshape((num_core_layers,) + arr.shape[2:]), updated_cache_blocks)
+          for c in range(num_core_layers):
+            self.inkling2_cache.set_slot(visit_idx + c, jax.tree.map(lambda arr, idx=c: arr[idx], flat_updated))
+        if collected_experts is not None and pass_experts_buf is not None:
+          flat_exp = pass_experts_buf.reshape((num_core_layers, y.shape[0], y.shape[1], cfg.num_experts_per_tok))
+          for c in range(num_core_layers):
+            collected_experts.append(flat_exp[c])
+        visit_idx += num_core_layers
+      else:
+        for offset, lyr in enumerate(range(core_start, core_end)):
+          msg_l = None if pass_messages is None else pass_messages[:, :, offset, :, :]
+          fre_v = None if fre_all is None else fre_all[visit_idx]
+          c_in = self.inkling2_cache.get_slot(visit_idx, batch_size) if cache_active else None
+          y, block_states, c_out, exp_v = self._apply_inkling2_unrolled_layer(
+              lyr,
+              y,
+              block_states,
+              decoder_segment_ids=decoder_segment_ids,
+              decoder_positions=decoder_positions,
+              deterministic=deterministic,
+              model_mode=model_mode,
+              layer_messages=msg_l,
+              forced_routed_experts=fre_v,
+              cache_slice=c_in,
+          )
+          if cache_active and c_out is not None:
+            self.inkling2_cache.set_slot(visit_idx, c_out)
+          if collected_experts is not None and exp_v is not None:
+            collected_experts.append(exp_v)
+          visit_idx += 1
+
+      prev_pass_y = y
+      prev_pass_block_states = block_states
+
+    if cfg.scan_layers and num_core_blocks > 0:
+      if scanned_pass_new_params is not None:
+        nnx.update(self.scanned_blocks, scanned_pass_new_params)
+      if scanned_pass_intermediates:
+        if len(scanned_pass_intermediates) == 1:
+          combined_inter = scanned_pass_intermediates[0]
+        else:
+
+          def _combine_pass_leaf(path, *vals):
+            path_keys = {getattr(p, "key", getattr(p, "name", str(p))) for p in path}
+            if path_keys & {"moe_has_overflow", "moe_dropless_fallback"} or vals[0].dtype == jnp.bool_:
+              out = vals[0]
+              for v in vals[1:]:
+                out = jnp.logical_or(out, v)
+              return out
+            if path_keys & {"moe_required_rbf", "moe_max_load_ratio"}:
+              out = vals[0]
+              for v in vals[1:]:
+                out = jnp.maximum(out, v)
+              return out
+            if "moe_lb_loss" in path_keys:
+              return jnp.stack(vals, axis=0)
+            if "moe_bias_updates" in path_keys:
+              out = vals[0]
+              for v in vals[1:]:
+                out = out + v
+              return out
+            out = vals[0]
+            for v in vals[1:]:
+              out = out + v
+            return out / len(vals)
+
+          combined_inter = jax.tree_util.tree_map_with_path(_combine_pass_leaf, *scanned_pass_intermediates)
+        nnx.update(self.scanned_blocks, combined_inter)
+
+    # 3. Coda layers [core_end .. num_decoder_layers - 1]
+    y = prev_pass_y
+    block_states = prev_pass_block_states
+    for lyr in range(core_end, cfg.num_decoder_layers):
+      fre_v = None if fre_all is None else fre_all[visit_idx]
+      c_in = self.inkling2_cache.get_slot(visit_idx, batch_size) if cache_active else None
+      y, block_states, c_out, exp_v = self._apply_inkling2_unrolled_layer(
+          lyr,
+          y,
+          block_states,
+          decoder_segment_ids=decoder_segment_ids,
+          decoder_positions=decoder_positions,
+          deterministic=deterministic,
+          model_mode=model_mode,
+          forced_routed_experts=fre_v,
+          cache_slice=c_in,
+      )
+      if cache_active and c_out is not None:
+        self.inkling2_cache.set_slot(visit_idx, c_out)
+      if collected_experts is not None and exp_v is not None:
+        collected_experts.append(exp_v)
+      visit_idx += 1
+
+    # 4. Final Block AttnRes pooling (before decoder_norm + logits_dense)
+    y = self.final_input(block_states, y).astype(cfg.dtype)
+    expert_indices = jnp.stack(collected_experts, axis=0) if collected_experts else None
+    return y, expert_indices
+
   def get_layers(self) -> list[nnx.Module]:
     """Returns all decoder layer modules/blocks in their forward-pass execution order."""
     layers = []
@@ -3731,6 +4283,15 @@ class NNXDecoder(nnx.Module):
           _add(getattr(self, f"layers_{lyr}", None))
         _append_scanned("scanned_blocks")
         for lyr in range(suffix_start, self.config.num_decoder_layers):
+          _add(getattr(self, f"layers_{lyr}", None))
+      else:
+        _append_unscanned("layers")
+    elif self.is_inkling2:
+      if self.config.scan_layers:
+        for lyr in range(self.config.inkling2_core_start):
+          _add(getattr(self, f"layers_{lyr}", None))
+        _append_scanned("scanned_blocks")
+        for lyr in range(self.config.inkling2_core_end, self.config.num_decoder_layers):
           _add(getattr(self, f"layers_{lyr}", None))
       else:
         _append_unscanned("layers")

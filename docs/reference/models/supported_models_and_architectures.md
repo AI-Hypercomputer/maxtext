@@ -71,6 +71,11 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 - **Variants**: K2 (1T), K2-Thinking (1T), K2.5 (text), K2.6 (text)
 - **Notes**: DeepSeek V3 architecture; MuonClip optimizer
 
+### Inkling 2
+
+- **Variants**: Inkling 2 Mini (26B total / 5.4B effective active, text; 24 physical layers / 48 logical layer visits)
+- **Notes**: Looped MoE transformer (3-pass middle core with cross-pass rank-64 message gates); Block Attention Residuals; hybrid sliding-window (1024) & full attention (5:1); NoPE with hidden-state-conditioned relative position bias, L2-clipped Q/K/R, unweighted V-norm, per-token attention sinks, sigmoid output gate; static & dynamic depthwise causal short convolutions; 128 routed experts (top-8) with Softcapped SwiGLU (SiTU) and auxiliary-loss-free sigmoid routing.
+
 ## Parallelism building blocks
 
 MaxText supports a wide range of parallelism strategies for scaling training and inference across TPUs and GPUs:
@@ -109,6 +114,7 @@ The following summarizes observed runtime efficiency and scaling behaviors of Ma
     [Qwen3.5 & Qwen3.8 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/qwen3_5.py)
   - **GPT-OSS**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gpt_oss/run_gpt_oss.md) | [GPT-OSS Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/gpt_oss.py)
   - **Kimi**: [Guide](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/kimi/Run_Kimi.md) | [K2 reuses DeepSeek Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/deepseek.py)
+  - **Inkling 2**: [Inkling 2 Source](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/maxtext/models/inkling2.py)
 
 - **Technical Explanations:**
 

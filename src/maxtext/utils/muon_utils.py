@@ -57,6 +57,12 @@ EXCLUDED_SUBSTRINGS = (
     "dt_bias",
     "conv1d",
     "shared_expert_gate",
+    "post_attention_convolution",
+    "post_mlp_convolution",
+    "attention_input",
+    "mlp_input",
+    "final_input",
+    "message_input",
 )
 
 EXCLUDED_EXACT_SEGMENTS = {
@@ -82,6 +88,9 @@ ATTENTION_QKV_NAMES = (
     "wq_b",
     "wkv_b",
     "wkv",
+    "gate_attn",
+    "rel_proj",
+    "weight_proj",
 )
 
 ATTENTION_OUT_NAMES = ("out",)
@@ -111,6 +120,7 @@ def transform_logic(
     path: Tuple[str, ...],
     shape: Optional[Tuple[int, ...]] = None,
     include_routers: bool = True,
+    feature_ndim: Optional[int] = None,
 ) -> Optional[mdn]:
   """Determines Muon dimension numbers based on parameter path and shape.
 
@@ -171,8 +181,35 @@ def transform_logic(
   ):
     return None
 
+  # Exclude Inkling 2 depthwise short-conv kernels/static weights (k_sconv/v_sconv) while keeping
+  # dynamic conv `weight_proj` 3D linear projections eligible for head-aware Muon below.
+  if _is_path_contain_any(("k_sconv", "v_sconv"), path) and "weight_proj" not in path:
+    return None
+
   # MoE routed expert weights: [num_experts, (num_layers), in_features, out_features]
-  if _is_path_contain_any(MOE_BLOCK_NAMES, path) and not _is_path_contain_any(("shared_experts", "shared_expert"), path):
+  is_3d_routed_mlp_leaf = (
+      bool(path)
+      and path[-1] in ("wi", "wi_0", "wi_1", "wo", "gate_up_proj")
+      and (
+          (feature_ndim is not None and feature_ndim >= 3)
+          or (
+              feature_ndim is None
+              and shape is not None
+              and (
+                  len(shape) >= 4
+                  or (
+                      len(shape) == 3
+                      and not _is_path_contain_any(SCANNED_LAYER_NAMES, path)
+                      and any(seg.startswith(("layers_", "sub_layer_")) for seg in path)
+                  )
+              )
+          )
+      )
+  )
+  is_routed_mlp = "mlp" in path and (is_3d_routed_mlp_leaf or "gate" in path)
+  if (_is_path_contain_any(MOE_BLOCK_NAMES, path) or is_routed_mlp) and not _is_path_contain_any(
+      ("shared_experts", "shared_expert"), path
+  ):
     if _is_path_contain_any(("wi", "wi_0", "wi_1", "wo", "gate_up_proj"), path):
       return mdn((-2,), (-1,))
     # MoE router weights (e.g. gate.kernel): [in_features, (num_layers), num_experts]
@@ -279,8 +316,10 @@ def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
     # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
     path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
     val_shape = getattr(variable.get_value(), "shape", None)
-    dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
-    return to_stacked_layout(dim_num, len(val_shape or ()), get_scan_axes(variable))
+    scan_axes = get_scan_axes(variable)
+    feature_ndim = None if val_shape is None else len(val_shape) - len(scan_axes)
+    dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers, feature_ndim=feature_ndim)
+    return to_stacked_layout(dim_num, len(val_shape or ()), scan_axes)
 
   # Map over whole variables so each one's scan metadata is at hand; the result is an nnx.State
   # with the same structure, holding the mdn result in place of each Param.

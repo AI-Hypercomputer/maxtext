@@ -1331,6 +1331,67 @@ def calculate_hy4_tflops_training_per_device(config, total_ffn_flops_all_layers,
   )
 
 
+def calculate_inkling2_tflops_training_per_device(config, embedding_flops):
+  """Calculates training TFLOPs per device for Inkling 2 (looped MoE + Block AttnRes).
+
+  Accounts for all logical layer visits across the looped core (e.g., 48 visits = 40 sliding
+  + 8 full on Inkling 2 Mini), top-k MoE experts, cross-pass message gates on passes >= 1,
+  relative-position bias projections, output sigmoid gates, and dynamic short-conv projections.
+  """
+  batch_size = config.per_device_batch_size
+  seq_len = config.max_target_length
+  n_tok = batch_size * seq_len
+  emb_dim = config.emb_dim
+  num_q_heads = config.num_query_heads
+  num_kv_heads = config.num_kv_heads
+  head_dim = config.head_dim
+  d_rel = config.inkling2_d_rel
+  rel_extent = config.inkling2_rel_extent
+  conv_k = config.short_conv_kernel_size
+  msg_rank = config.inkling2_message_gate_rank
+  block_size = config.attn_res_block_size
+  window_size = min(config.sliding_window_size, seq_len)
+
+  num_core_layers = config.inkling2_core_end - config.inkling2_core_start
+  num_logical_layers = config.num_decoder_layers + (config.inkling2_num_passes - 1) * num_core_layers
+  num_full_visits = num_logical_layers // block_size
+  num_sliding_visits = num_logical_layers - num_full_visits
+  num_message_visits = (config.inkling2_num_passes - 1) * num_core_layers
+
+  # Attention dot-product FLOPs (causal full vs causal sliding window)
+  full_attn_flops = 2 * n_tok * seq_len * num_q_heads * head_dim
+  sliding_attn_flops = 4 * batch_size * (seq_len * window_size - 0.5 * window_size**2) * num_q_heads * head_dim
+  attention_tflops = (num_full_visits * full_attn_flops + num_sliding_visits * sliding_attn_flops) * 3 / 10**12
+
+  # Attention learnable-weight projections per logical visit:
+  # Q + O + gate_attn (3 * H * Hq * D), K + V (2 * H * Hkv * D), R (H * Hq * Dr),
+  # sink_proj (H * Hq), rel_logits_proj (Hq * Dr * rel_extent_layer).
+  base_attn_proj = (
+      2 * n_tok * emb_dim * (3 * num_q_heads * head_dim + 2 * num_kv_heads * head_dim + num_q_heads * d_rel + num_q_heads)
+  )
+  full_rel_proj = 2 * n_tok * num_q_heads * d_rel * rel_extent
+  sliding_rel_proj = 2 * n_tok * num_q_heads * d_rel * config.sliding_window_size
+  dyn_conv_proj_per_full = 2 * n_tok * (2 * emb_dim * num_kv_heads * conv_k)
+
+  # Sparse MoE per logical visit: router gate (H * E) + top-k SwiGLU experts (3 * k * H * I)
+  moe_per_visit = (
+      2 * n_tok * (emb_dim * config.num_experts + 3 * config.num_experts_per_tok * emb_dim * config.moe_mlp_dim)
+  )
+
+  # Cross-pass message gates per message-passing visit (4 controllers x [2H->R + R->H + R->H] = 4 * 4 * H * R)
+  msg_gate_per_visit = 2 * n_tok * (16 * emb_dim * msg_rank)
+
+  total_weight_flops = (
+      num_logical_layers * (base_attn_proj + moe_per_visit)
+      + num_full_visits * (full_rel_proj + dyn_conv_proj_per_full)
+      + num_sliding_visits * sliding_rel_proj
+      + num_message_visits * msg_gate_per_visit
+      + embedding_flops
+  )
+  learnable_weight_tflops = total_weight_flops * 3 / 10**12
+  return attention_tflops, learnable_weight_tflops
+
+
 def calculate_tflops_training_per_device(config, log=True):
   """Calculate training TFLOP"""
   if config.use_m3_model:
@@ -1449,6 +1510,8 @@ def calculate_tflops_training_per_device(config, log=True):
     attention_tflops, learnable_weight_tflops = calculate_hy4_tflops_training_per_device(
         config, total_ffn_flops_all_layers, embedding_flops
     )
+  elif config.decoder_block == DecoderBlockType.INKLING2:
+    attention_tflops, learnable_weight_tflops = calculate_inkling2_tflops_training_per_device(config, embedding_flops)
   elif config.decoder_block == DecoderBlockType.DEEPSEEK:
     learnable_weight_tflops = (
         (total_ffn_flops_all_layers + (qkv_flops + projection_flops) * config.num_decoder_layers + embedding_flops)

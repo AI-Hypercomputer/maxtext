@@ -244,6 +244,15 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
       ("index_head_dim", "indexer_head_dim"),
       ("o_lora_rank", "o_lora_rank"),
       ("o_groups", "o_groups"),
+      ("unpadded_vocab_size", "unpadded_vocab_size"),
+      ("n_layers_per_attn_res_block", "attn_res_block_size"),
+      ("loop_layer_index_start", "inkling2_core_start"),
+      ("loop_layer_index_end", "inkling2_core_end"),
+      ("loop_num_passes", "inkling2_num_passes"),
+      ("loop_gate_rank", "inkling2_message_gate_rank"),
+      ("d_rel", "inkling2_d_rel"),
+      ("rel_extent", "inkling2_rel_extent"),
+      ("conv_kernel_size", "short_conv_kernel_size"),
   ]
 
   if max_config.attention_type == "mla":
@@ -318,6 +327,33 @@ def _validate_or_update_architecture(hf_config, max_config, override: bool):
         + "\n\nAction Required: Pass the flag `--override_model_architecture` to force the conversion using MaxText values."
     )
     raise ValueError(error_msg)
+
+  if max_config.model_name == "inkling2-mini":
+    # HF Inkling2LoopTextConfig (@strict) requires a float `final_logit_softcapping`, and
+    # Inkling2LoopSoftcap unconditionally computes `tanh(logits / softcap) * softcap` (so
+    # `None` fails validation/forward and `0.0` divides by zero -> NaN).
+    if max_config.final_logits_soft_cap is None or float(max_config.final_logits_soft_cap) <= 0:
+      raise ValueError(
+          "HuggingFace Inkling2LoopTextConfig requires a strictly positive float for "
+          "`final_logit_softcapping` (Inkling2LoopSoftcap unconditionally divides logits by it), "
+          f"but MaxText `final_logits_soft_cap` is {max_config.final_logits_soft_cap!r}."
+      )
+    if override:
+      num_layers = int(getattr(max_config, "num_decoder_layers", getattr(target_cfg, "num_hidden_layers", 24)))
+      block_size = int(getattr(max_config, "attn_res_block_size", getattr(target_cfg, "n_layers_per_attn_res_block", 6)))
+      target_cfg.layer_types = ["hybrid" if (i + 1) % block_size == 0 else "hybrid_sliding" for i in range(num_layers)]
+      target_cfg.swa_num_attention_heads = int(max_config.num_query_heads)
+      target_cfg.swa_num_key_value_heads = int(max_config.num_kv_heads)
+      target_cfg.swa_head_dim = int(max_config.head_dim)
+      target_cfg.sliding_window_size = int(max_config.sliding_window_size)
+      target_cfg.log_scaling_n_floor = int(max_config.inkling2_log_scaling_n_floor)
+      target_cfg.log_scaling_alpha = float(max_config.inkling2_log_scaling_alpha)
+      target_cfg.qk_l2_clip_threshold = float(max_config.inkling2_qk_l2_clip_threshold)
+      target_cfg.rel_l2_clip_threshold = float(max_config.inkling2_rel_l2_clip_threshold)
+      target_cfg.mlp_gate_softcap = float(max_config.mlp_gate_softcap)
+      target_cfg.mlp_up_softcap = float(max_config.mlp_up_softcap)
+      target_cfg.final_logit_softcapping = float(max_config.final_logits_soft_cap)
+      target_cfg.route_scale = float(max_config.routed_scaling_factor)
 
 
 def _apply_yarn_rope_config(hf_config, max_config) -> None:

@@ -55,7 +55,7 @@ from pydantic.config import ConfigDict
 from pydantic.fields import Field
 from pydantic.functional_validators import field_validator, model_validator
 from pydantic.main import BaseModel
-from pydantic.types import NonNegativeFloat, NonNegativeInt, PositiveInt
+from pydantic.types import NonNegativeFloat, NonNegativeInt, PositiveFloat, PositiveInt
 
 
 class XProfTPUPowerTraceMode(enum.IntEnum):  # pylint: disable=invalid-name
@@ -357,6 +357,7 @@ ModelName = Literal[
     "ming-3.0-audio-tiny",
     "ming-3.0-audio-tiny-talker",
     "hy4-preview",
+    "inkling2-mini",
 ]
 
 
@@ -878,6 +879,13 @@ class LogitsAndLoss(BaseModel):
       None,
       description="Soft-cap value for the final logits. None or 0.0 means no cap.",
   )
+  unpadded_vocab_size: NonNegativeInt = Field(
+      0,
+      description=(
+          "Active output vocabulary size when checkpoint embeddings/unembeddings are padded to `vocab_size`. "
+          "0 disables output-vocab masking (uses full `vocab_size`)."
+      ),
+  )
   z_loss_multiplier: float = Field(0.0, description="The multiplier for the z-loss (e.g., 1e-4). 0.0 to disable.")
   num_vocab_tiling: int = Field(
       1,
@@ -1317,6 +1325,21 @@ class MoEGeneral(BaseModel):
 
   fp8_moe: bool = Field(False, description="Store MoE weights in fp8 with per-channel scale.")
   fp8_moe_fake_quant: bool = Field(False, description="Train dense MoE weights with fp8 per-channel fake quantization.")
+  gate_matmul_precision: Literal["", "default", "high", "highest", "bfloat16", "float32"] = Field(
+      "",
+      description=(
+          "Optional matmul precision override for the MoE router (GateLogit) projection. "
+          "Empty string inherits `matmul_precision`."
+      ),
+  )
+  mlp_gate_softcap: PositiveFloat = Field(
+      4.0,
+      description="Softcap beta applied to the linear gate factor in Softcapped SwiGLU (SiTU).",
+  )
+  mlp_up_softcap: PositiveFloat = Field(
+      25.0,
+      description="Softcap beta applied to the up projection in Softcapped SwiGLU (SiTU).",
+  )
   num_experts: PositiveInt = Field(1, description="The total number of experts in each MoE layer.")
   num_experts_per_tok: PositiveInt = Field(1, description="The number of experts to route each token to.")
   capacity_factor: float = Field(-1.0, description="Expert capacity factor. If < 0, no token dropping.")
@@ -2552,6 +2575,122 @@ class KimiK3(BaseModel):
             f"num_shared_experts = {self.moe_intermediate_size} * {self.num_shared_experts} = {expected}."
         )
     return self
+
+
+class Inkling2(BaseModel):
+  """Configuration specific to Inkling 2 looped MoE models (e.g., Inkling 2 Mini)."""
+
+  inkling2_core_start: NonNegativeInt = Field(
+      6,
+      description="First physical layer index of the looped core (must be a positive multiple of attn_res_block_size).",
+  )
+  inkling2_core_end: NonNegativeInt = Field(
+      18,
+      description="Exclusive end physical layer index of the looped core (must be a multiple of attn_res_block_size).",
+  )
+  inkling2_num_passes: PositiveInt = Field(
+      3,
+      description="Number of forward passes executed through the looped core layers [core_start, core_end).",
+  )
+  inkling2_message_gate_rank: PositiveInt = Field(
+      64,
+      description="Low-rank bottleneck dimension for cross-pass MessageGate controllers (q, k, v, mlp).",
+  )
+  inkling2_d_rel: PositiveInt = Field(
+      16,
+      description="Per-head relative position state dimension projected by wr_du.",
+  )
+  inkling2_rel_extent: PositiveInt = Field(
+      1024,
+      description="Maximum backward distance for hidden-state-conditioned relative position bias on full layers.",
+  )
+  inkling2_qk_l2_clip_threshold: PositiveFloat = Field(
+      22.627416997969522,
+      description="Per-head L2 norm clip threshold for query and key vectors (16 * sqrt(2)).",
+  )
+  inkling2_rel_l2_clip_threshold: PositiveFloat = Field(
+      8.0,
+      description="Per-head L2 norm clip threshold for relative position state vectors.",
+  )
+  inkling2_log_scaling_n_floor: PositiveFloat = Field(
+      8192.0,
+      description="Position floor for full-attention logarithmic attention scaling.",
+  )
+  inkling2_log_scaling_alpha: NonNegativeFloat = Field(
+      0.1,
+      description="Slope for full-attention logarithmic attention scaling.",
+  )
+  inkling2_contiguous_segment_positions: bool = Field(
+      True,
+      description=(
+          "When True, use a static zero-gather/zero-scatter Toeplitz skew for Inkling 2 relative position bias "
+          "during non-AR self-attention (exact for all standard unpacked, packed multi-doc, and padded batches "
+          "where within-segment positions have unit stride). Set False to use general `take_along_axis` gather "
+          "for arbitrary non-unit-stride custom `decoder_positions`."
+      ),
+  )
+
+
+def _validate_inkling2_config(config: Any) -> None:
+  """Validates `unpadded_vocab_size` and Inkling 2 structural/parallelism constraints."""
+  if config.unpadded_vocab_size > config.vocab_size:
+    raise ValueError(f"unpadded_vocab_size ({config.unpadded_vocab_size}) must be <= vocab_size ({config.vocab_size}).")
+  if config.decoder_block != DecoderBlockType.INKLING2:
+    return
+  if config.num_decoder_layers % config.attn_res_block_size != 0:
+    raise ValueError(
+        f"decoder_block=inkling2 requires num_decoder_layers ({config.num_decoder_layers}) to be divisible "
+        f"by attn_res_block_size ({config.attn_res_block_size})."
+    )
+  if config.inkling2_core_start % config.attn_res_block_size != 0:
+    raise ValueError(
+        f"decoder_block=inkling2 requires inkling2_core_start ({config.inkling2_core_start}) to be divisible "
+        f"by attn_res_block_size ({config.attn_res_block_size})."
+    )
+  if config.inkling2_core_end % config.attn_res_block_size != 0:
+    raise ValueError(
+        f"decoder_block=inkling2 requires inkling2_core_end ({config.inkling2_core_end}) to be divisible "
+        f"by attn_res_block_size ({config.attn_res_block_size})."
+    )
+  if not 0 < config.inkling2_core_start < config.inkling2_core_end <= config.num_decoder_layers:
+    raise ValueError(
+        "decoder_block=inkling2 requires 0 < inkling2_core_start < inkling2_core_end <= num_decoder_layers; "
+        f"got core_start={config.inkling2_core_start}, core_end={config.inkling2_core_end}, "
+        f"num_decoder_layers={config.num_decoder_layers}."
+    )
+  if config.sliding_window_size <= 0:
+    raise ValueError(f"decoder_block=inkling2 requires sliding_window_size > 0, got {config.sliding_window_size}.")
+  context_parallel_size = getattr(config, f"ici_{config.context_sharding}_parallelism", 1) * getattr(
+      config, f"dcn_{config.context_sharding}_parallelism", 1
+  )
+  if any(
+      deg > 1
+      for deg in (
+          context_parallel_size,
+          config.ici_context_parallelism,
+          config.dcn_context_parallelism,
+          config.ici_context_usp_ulysses_parallelism,
+          config.dcn_context_usp_ulysses_parallelism,
+          config.ici_context_autoregressive_parallelism,
+          config.dcn_context_autoregressive_parallelism,
+      )
+  ):
+    raise ValueError(
+        "decoder_block=inkling2 does not support context parallelism yet: short causal convolutions and "
+        "dense causal masks do not propagate state across sequence shards or unpermute load-balanced "
+        "(DUAL_CHUNK_SWAP) batches."
+    )
+  if config.routed_bias_update_rate > 0:
+    raise ValueError(
+        "decoder_block=inkling2 does not support online routed_bias_update_rate > 0 yet "
+        "(Inkling 2 uses fixed routed_bias_update_rate=0.0; non-pipeline train.py only consumes a single "
+        "decoder bias-update leaf). Set routed_bias_update_rate=0.0."
+    )
+  if config.use_chunked_prefill:
+    raise ValueError(
+        "decoder_block=inkling2 does not support use_chunked_prefill=True yet "
+        "(Inkling2DecodeCache prefill writes from offset 0)."
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -5251,6 +5390,7 @@ FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS = (
     DecoderBlockType.QWEN3_5,
     DecoderBlockType.MIXTRAL,
     DecoderBlockType.GEMMA4,
+    DecoderBlockType.INKLING2,
 )
 
 
@@ -5605,6 +5745,7 @@ class MaxTextConfig(
     Qwen3_8FlashNext,
     Ming,
     KimiK3,
+    Inkling2,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -8148,6 +8289,7 @@ class MaxTextConfig(
           "gemma3",
           "gemma4",
           "gemma4_small",
+          "inkling2",
       }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(
@@ -8216,6 +8358,7 @@ class MaxTextConfig(
           "KDA layers do not propagate recurrent/conv state across sequence shards or unpermute "
           "load-balanced (DUAL_CHUNK_SWAP) batches."
       )
+    _validate_inkling2_config(self)
     if self.attention_type == AttentionType.COMPRESSED.value:
       # `compress_ratios` is per-layer and a ratio of 0 downgrades that layer to local sliding
       # attention (see CompressedAttention.__init__), so context parallelism stays legal when no
@@ -9075,6 +9218,8 @@ class RLConfig(
     Qwen3Next,
     Qwen3_8FlashNext,
     Ming,
+    KimiK3,
+    Inkling2,
     MultimodalGeneral,
     Muon,
     FineTuning,
@@ -9510,6 +9655,7 @@ class RLConfig(
       if "context_offload" not in self.tensors_to_offload:
         self.tensors_to_offload.append("context_offload")
     _validate_moe_packed_routing_maps(self)
+    _validate_inkling2_config(self)
 
     _validate_remat_policy(
         self.remat_policy,
