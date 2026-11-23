@@ -2304,7 +2304,7 @@ def GPT_OSS_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, savin
       wi_0_1 = input_tensor
       wi_0 = wi_0_1[..., ::2]
       wi_1 = wi_0_1[..., 1::2]
-      return np.stack([wi_0, wi_1], axis=-1)
+      return _array_module(wi_0_1).stack([wi_0, wi_1], axis=-1)
 
   n_layers = config["num_hidden_layers"]  # hf config
   layer_cycle_interval = maxtext_config.inhomogeneous_layer_cycle_interval
@@ -4215,8 +4215,9 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
       gate_up = np.concatenate([wi_0, wi_1], axis=-1)
       return gate_up
     else:
-      gate, up = np.split(input_tensor, 2, axis=-1)
-      return np.stack([gate, up], axis=-1)
+      xp = _array_module(input_tensor)
+      gate, up = xp.split(input_tensor, 2, axis=-1)
+      return xp.stack([gate, up], axis=-1)
 
   mapping.update(text_hooks)
 
@@ -4266,7 +4267,7 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
         q_mt = q_hf.T.reshape(target_shape[0])  # pyrefly: ignore[unsupported-operation]
         k_mt = k_hf.T.reshape(target_shape[1])  # pyrefly: ignore[unsupported-operation]
         v_mt = v_hf.T.reshape(target_shape[2])  # pyrefly: ignore[unsupported-operation]
-        return np.stack([q_mt, k_mt, v_mt], axis=-1)
+        return _array_module(input_tensor).stack([q_mt, k_mt, v_mt], axis=-1)
 
     def process_qkv_bias_vision(input_tensor, target_shape=None):
       """Handles composite_mt_key: maxtext (query_bias, key_bias, value_bias) <-> hf (qkv_bias)."""
@@ -4283,7 +4284,7 @@ def QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
         qb_mt = qb_hf.reshape(target_shape[0])  # pyrefly: ignore[unsupported-operation]
         kb_mt = kb_hf.reshape(target_shape[1])  # pyrefly: ignore[unsupported-operation]
         vb_mt = vb_hf.reshape(target_shape[2])  # pyrefly: ignore[unsupported-operation]
-        return np.stack([qb_mt, kb_mt, vb_mt], axis=-1)
+        return _array_module(input_tensor).stack([qb_mt, kb_mt, vb_mt], axis=-1)
 
     def reshape_vision_attn_out(input_tensor, target_shape):
       """Reshape vision attention output projection."""
@@ -4855,7 +4856,7 @@ def DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=
       return e_proj, h_proj
     else:
       e_proj, h_proj = weights
-      return np.concatenate([e_proj.T, h_proj.T], axis=0)
+      return _array_module(e_proj, h_proj).concatenate([e_proj.T, h_proj.T], axis=0)
 
   mapping = {
       "params-token_embedder-embedding": unpad_hf_embedding_layer,
@@ -5864,10 +5865,11 @@ def HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
       wi_0, wi_1 = input_tensor
       gate_up = np.concatenate([wi_0, wi_1], axis=-1)
       return gate_up.swapaxes(-1, -2)
-    gate, up = np.split(input_tensor, 2, axis=-2)
+    xp = _array_module(input_tensor)
+    gate, up = xp.split(input_tensor, 2, axis=-2)
     gate = gate.swapaxes(-1, -2)
     up = up.swapaxes(-1, -2)
-    return np.stack([gate, up], axis=-1)
+    return xp.stack([gate, up], axis=-1)
 
   hooks = {
       "params-decoder-hc_head-hc_fn": reshape_kernel,
