@@ -37,7 +37,11 @@ from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
+from maxtext.common.data_loader import DataLoader
+from maxtext.input_pipeline.synthetic_data_processing import SyntheticDataIterator
+from maxtext.trainers.pre_train import train as pre_train
 from maxtext.utils import sharding
+from maxtext.utils import train_utils
 from maxtext.utils.sharding import assert_params_sufficiently_sharded, get_formatted_sharding_annotations
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
@@ -191,7 +195,11 @@ class UpdateStateParamTest(unittest.TestCase):
         "decoder": {"gate": {"bias": jnp.array([0.5, 0.5])}},
     }
     self.state = train_state.TrainState(
-        step=0, apply_fn=self.model.apply, params=self.initial_params, tx=None, opt_state={}
+        step=0,
+        apply_fn=self.model.apply,
+        params=self.initial_params,
+        tx=None,
+        opt_state={},
     )
 
   def test_update_mode_add(self):
@@ -953,7 +961,7 @@ class TestMeshUtils(unittest.TestCase):
     else:
       self.devices_array = np.array(devices)
 
-  @patch("maxtext.utils.maxtext_utils.create_device_mesh")
+  @patch.object(maxtext_utils, "create_device_mesh")
   def test_get_mesh_explicit_mode(self, mock_create_device_mesh):
     """Tests that ShardMode.EXPLICIT sets axis_types to MANUAL."""
     # 1. Setup Mock
@@ -972,7 +980,7 @@ class TestMeshUtils(unittest.TestCase):
     # In JAX, AxisType.MANUAL is the equivalent for explicit control
     self.assertEqual(mesh.axis_types, (AxisType.Explicit,))
 
-  @patch("maxtext.utils.maxtext_utils.create_device_mesh")
+  @patch.object(maxtext_utils, "create_device_mesh")
   def test_get_mesh_auto_mode(self, mock_create_device_mesh):
     """Tests that ShardMode.AUTO sets axis_types to AUTO."""
     # 1. Setup Mock
@@ -986,7 +994,7 @@ class TestMeshUtils(unittest.TestCase):
     self.assertEqual(len(mesh.axis_types), 2)
     self.assertTrue(all(t == AxisType.Auto for t in mesh.axis_types))
 
-  @patch("maxtext.utils.maxtext_utils.create_device_mesh")
+  @patch.object(maxtext_utils, "create_device_mesh")
   def test_get_mesh_with_provided_devices(self, mock_create_device_mesh):
     """Tests that provided devices are passed through to the mesh creator."""
     config = self.MockConfig()
@@ -1000,8 +1008,20 @@ class TestMeshUtils(unittest.TestCase):
 
   def test_create_device_mesh_honors_non_default_mesh_axes(self):
     """Tests mesh creation for the vLLM inference axes, which include dcp and pcp."""
-    mesh_axes = ["data", "attn_dp", "model", "expert", "attn_dp_expert", "dcp", "pcp"]
-    config = pyconfig.initialize([None, get_test_config_path()], enable_checkpointing=False, mesh_axes=mesh_axes)
+    mesh_axes = [
+        "data",
+        "attn_dp",
+        "model",
+        "expert",
+        "attn_dp_expert",
+        "dcp",
+        "pcp",
+    ]
+    config = pyconfig.initialize(
+        [None, get_test_config_path()],
+        enable_checkpointing=False,
+        mesh_axes=mesh_axes,
+    )
 
     self.assertEqual(len(config.ici_parallelism), len(mesh_axes))
     self.assertEqual(len(config.dcn_parallelism), len(mesh_axes))
@@ -1014,7 +1034,17 @@ class TestGetFunctionalTrainWithSignature(unittest.TestCase):
   """Tests for get_functional_train_with_signature."""
 
   def _make_mock_step(self):
-    def train_step(_model, _config, _state_shardings, _params_shardings, state, _batch, _rng=None):
+    """Returns a minimal functional train_step stub for signature tests."""
+
+    def train_step(
+        _model,
+        _config,
+        _state_shardings,
+        _params_shardings,
+        state,
+        _batch,
+        _rng=None,
+    ):
       return state, {}
 
     return train_step
@@ -1225,9 +1255,23 @@ class TestGetShapedBatch(unittest.TestCase):
         # text-only + MRoPE → still (B, S)
         ({"use_mrope": True, "use_multimodal": False}, (4, 16)),
         # multimodal SFT + MRoPE → (B, S, 3)
-        ({"use_mrope": True, "use_multimodal": True, "model_name": "qwen3-vl-2b"}, (4, 16, 3)),
+        (
+            {
+                "use_mrope": True,
+                "use_multimodal": True,
+                "model_name": "qwen3-vl-2b",
+            },
+            (4, 16, 3),
+        ),
         # multimodal SFT without MRoPE → (B, S)
-        ({"use_mrope": False, "use_multimodal": True, "model_name": "qwen3-vl-2b"}, (4, 16)),
+        (
+            {
+                "use_mrope": False,
+                "use_multimodal": True,
+                "model_name": "qwen3-vl-2b",
+            },
+            (4, 16),
+        ),
     )
     for cfg_kwargs, expected_inputs_position_shape in cases:
       with self.subTest(**cfg_kwargs):
@@ -1259,6 +1303,247 @@ class TestGetShapedBatch(unittest.TestCase):
     self.assertIn("inputs", shaped_batch)
     self.assertEqual(shaped_batch["inputs"].sharding, sharding_spec)
 
+  def test_get_shaped_batch_simplenamespace_mock_without_vision_encoder_block(self):
+    """Verify SimpleNamespace mocks without vision_encoder_block do not raise AttributeError."""
+    cfg = SimpleNamespace(
+        enable_diloco=False,
+        global_batch_size_to_load=4,
+        max_target_length=16,
+        use_multimodal=True,
+        micro_batch_size_to_train_on=4,
+        model_name="gemma3-4b",
+        use_audio=False,
+        use_mrope=False,
+    )
+    batch = maxtext_utils.get_shaped_batch(cfg)
+    self.assertIn("images", batch)
+    self.assertEqual(batch["images"].dtype, jnp.int32)
+
+  def test_get_shaped_batch_deepseek41_diloco_5d_shape(self):
+    """Verify DeepSeek-V4.1 with DiLoCo produces 5D images shape matching runtime iterator."""
+    cfg = SimpleNamespace(
+        enable_diloco=True,
+        num_diloco_replicas=2,
+        global_batch_size_to_load=4,
+        max_target_length=16,
+        use_multimodal=True,
+        micro_batch_size_to_train_on=2,
+        model_name="deepseek4.1-flash",
+        vision_encoder_block="deepseek41",
+        dataset_type="synthetic",
+        ds41_vision_grid=[39, 39],
+        max_num_images_per_example=1,
+        num_channels_for_vit=3,
+        patch_size_for_vit=16,
+        use_audio=False,
+        use_mrope=False,
+    )
+    batch = maxtext_utils.get_shaped_batch(cfg)
+    self.assertIn("images", batch)
+    self.assertEqual(batch["images"].ndim, 5)
+    self.assertEqual(batch["images"].shape[0], 2)
+    self.assertEqual(batch["images"].shape[1], 2)
+    self.assertEqual(batch["images"].dtype, jnp.float32)
+
+  def test_get_shaped_batch_deepseek41_leading_batch_sharding(self):
+    """Verify 2D batch_sharding applies only to batch axis of 4D images without sharding num_images."""
+    cfg = SimpleNamespace(
+        enable_diloco=False,
+        global_batch_size_to_load=4,
+        max_target_length=16,
+        use_multimodal=True,
+        micro_batch_size_to_train_on=4,
+        model_name="deepseek4.1-flash",
+        vision_encoder_block="deepseek41",
+        dataset_type="synthetic",
+        ds41_vision_grid=[39, 39],
+        max_num_images_per_example=2,
+        num_channels_for_vit=3,
+        patch_size_for_vit=16,
+        use_audio=False,
+        use_mrope=False,
+    )
+    devices = np.array(jax.local_devices()[:1]).reshape(1, 1)
+    mesh = Mesh(devices, ("data", "fsdp"))
+    batch_shd = NamedSharding(mesh, PartitionSpec("data", "fsdp"))
+    batch = maxtext_utils.get_shaped_batch(cfg, batch_sharding=batch_shd)
+    self.assertIn("images", batch)
+    self.assertEqual(batch["images"].sharding.spec, PartitionSpec("data", None, None, None))
+
+  def test_get_shaped_batch_deepseek41_diloco_1d_spec_matches_5d_rank(self):
+    """Verify 1D DiLoCo data_sharding still yields a rank-5 PartitionSpec for 5D DS4.1 images."""
+    cfg = SimpleNamespace(
+        enable_diloco=True,
+        num_diloco_replicas=1,
+        global_batch_size_to_load=2,
+        max_target_length=16,
+        use_multimodal=True,
+        micro_batch_size_to_train_on=2,
+        model_name="deepseek4.1-flash",
+        vision_encoder_block="deepseek41",
+        dataset_type="synthetic",
+        ds41_vision_grid=[4, 4],
+        max_num_images_per_example=1,
+        num_channels_for_vit=3,
+        patch_size_for_vit=16,
+        use_audio=False,
+        use_mrope=False,
+    )
+    mesh = Mesh(np.array(jax.local_devices()[:1]), ("diloco",))
+    batch_shd = NamedSharding(mesh, PartitionSpec("diloco"))
+    batch = maxtext_utils.get_shaped_batch(cfg, batch_sharding=batch_shd)
+    self.assertEqual(batch["images"].ndim, 5)
+    self.assertEqual(
+        batch["images"].sharding.spec,
+        PartitionSpec("diloco", None, None, None, None),
+    )
+
+  def test_deepseek41_cp_gt_num_images_loader_warmup_eval_and_jit(self):
+    """End-to-end CP=2 > max_num_images_per_example=1 across DataLoader, warmup, eval, and jit."""
+    if jax.device_count() < 2:
+      self.skipTest("Requires >= 2 host devices for ici_context_parallelism=2.")
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        run_name="test_ds41_cp_gt_images",
+        enable_checkpointing=False,
+        model_name="deepseek4.1-flash-mini",
+        override_model_config=True,
+        dataset_type="synthetic",
+        use_multimodal=True,
+        max_num_images_per_example=1,
+        ds41_vision_grid=[4, 4],
+        ds41_vision_downsample_ratio=2,
+        ds41_image_token_id=100,
+        vocab_size=256,
+        num_channels_for_vit=3,
+        patch_size_for_vit=16,
+        per_device_batch_size=2.0,
+        eval_per_device_batch_size=2.0,
+        max_target_length=32,
+        ici_context_parallelism=2,
+        ici_data_parallelism=max(jax.device_count() // 2, 1),
+        ici_fsdp_parallelism=1,
+        warm_input_reshard_before_run_start=True,
+        warm_eval_input_reshard_before_run_start=True,
+        skip_jax_distributed_system=True,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    train_base_shd = sharding.get_input_data_sharding(cfg, mesh)
+    self.assertIn("context", str(train_base_shd.spec[1]))
+
+    data_iter = SyntheticDataIterator(cfg, mesh, is_training=True)
+    data_loader = DataLoader(cfg, mesh, data_iter, None)
+    loaded_batch = data_loader.load_next_batch()
+    self.assertEqual(loaded_batch["inputs"].sharding.spec[1], "context")
+    self.assertIsNone(loaded_batch["images"].sharding.spec[1])
+
+    shaped_train = maxtext_utils.get_shaped_batch(cfg, batch_sharding=train_base_shd)
+    eval_base_shd = sharding.get_input_data_sharding(cfg, mesh, rules=cfg.logical_axis_rules_for_eval)
+    shaped_eval = maxtext_utils.get_shaped_batch(cfg, batch_sharding=eval_base_shd, is_eval=True)
+
+    train_utils.prepare_before_run_start(
+        cfg,
+        {"w": jnp.ones((1,), dtype=jnp.float32)},
+        lambda step: jnp.float32(1.0),
+        0,
+        mesh,
+        data_loader,
+        shaped_train,
+        shaped_eval_batch=shaped_eval,
+    )
+
+    train_shd = sharding.get_input_batch_sharding(cfg, data_loader.input_data_shardings, shaped_train.keys())
+    train_shaped_warmup = {
+        k: jax.ShapeDtypeStruct(
+            v.shape,
+            v.dtype,
+            sharding=train_shd[k] if isinstance(train_shd, dict) else train_shd,
+        )
+        for k, v in shaped_train.items()
+    }
+    warmup_batch = pre_train.make_synthetic_batch(cfg, train_shaped_warmup, seed=0)
+    self.assertIsNone(warmup_batch["images"].sharding.spec[1])
+
+    eval_iter = SyntheticDataIterator(cfg, mesh, is_training=False)
+    eval_batch_shd = sharding.get_input_batch_sharding(cfg, eval_base_shd, next(eval_iter).keys())
+    eval_put = jax.device_put(next(eval_iter), eval_batch_shd)
+    self.assertIsNone(eval_put["images"].sharding.spec[1])
+
+    replicated = NamedSharding(mesh, PartitionSpec())
+
+    def _dummy_train(_m, _c, _ss, _ps, state, batch):
+      return state, {"sum": jnp.sum(batch["inputs"]) + jnp.sum(batch["images"])}
+
+    def _dummy_eval(_m, _c, _state, batch):
+      return {"sum": jnp.sum(batch["inputs"]) + jnp.sum(batch["images"])}
+
+    fn_train, in_tr, out_tr, _, donate_tr = maxtext_utils.get_functional_train_with_signature(
+        _dummy_train, train_base_shd, replicated, None, cfg
+    )
+    fn_eval, in_ev, out_ev, _, _ = maxtext_utils.get_functional_eval_with_signature(
+        _dummy_eval, eval_base_shd, replicated, None, cfg
+    )
+    self.assertIsInstance(in_tr[1], dict)
+    self.assertIsInstance(in_ev[1], dict)
+    self.assertIsNone(in_tr[1]["images"].spec[1])
+    self.assertIsNone(in_ev[1]["images"].spec[1])
+
+    p_train = jax.jit(fn_train, in_shardings=in_tr, out_shardings=out_tr, donate_argnums=donate_tr)
+    p_eval = jax.jit(fn_eval, in_shardings=in_ev, out_shardings=out_ev)
+    _, tr_out = p_train(jnp.array(1.0), loaded_batch)
+    ev_out = p_eval(jnp.array(1.0), eval_put)
+    self.assertTrue(bool(jnp.isfinite(tr_out["sum"])))
+    self.assertTrue(bool(jnp.isfinite(ev_out["sum"])))
+
+  def test_get_batch_sharding_for_batch_non_dict_vs_dict(self):
+    """Returns base data_sharding for non-dict batches and per-key shardings for dicts."""
+    cfg = SimpleNamespace(use_multimodal=True, vision_encoder_block="deepseek41", enable_diloco=False)
+    mesh = Mesh(np.array(jax.local_devices()[:1]).reshape(1, 1), ("data", "context"))
+    base_shd = NamedSharding(mesh, PartitionSpec("data", "context"))
+    self.assertIs(sharding.get_batch_sharding_for_batch(cfg, base_shd, jnp.zeros((1, 4))), base_shd)
+    dict_shd = sharding.get_batch_sharding_for_batch(
+        cfg,
+        base_shd,
+        {"inputs": None, "images": None, "image_masks": None, "image_grids": None},
+    )
+    self.assertIsInstance(dict_shd, dict)
+    self.assertEqual(dict_shd["inputs"], base_shd)
+    self.assertEqual(dict_shd["images"].spec, PartitionSpec("data", None, None, None))
+    self.assertEqual(dict_shd["image_masks"].spec, PartitionSpec("data", None))
+    self.assertEqual(dict_shd["image_grids"].spec, PartitionSpec("data", None, None))
+
+  def test_get_shaped_batch_deepseek41_dynamic_vision_grid(self):
+    """Verifies get_shaped_batch emits P_max images, image_masks, and image_grids with leading-batch shardings."""
+    cfg = SimpleNamespace(
+        enable_diloco=False,
+        global_batch_size_to_load=4,
+        max_target_length=16,
+        use_multimodal=True,
+        micro_batch_size_to_train_on=4,
+        model_name="deepseek4.1-flash",
+        vision_encoder_block="deepseek41",
+        dataset_type="hf",
+        ds41_dynamic_vision_grid=True,
+        ds41_vision_grid=[6, 9],
+        ds41_vision_downsample_ratio=3,
+        ds41_vision_max_n_token=32,
+        max_num_images_per_example=2,
+        num_channels_for_vit=3,
+        patch_size_for_vit=14,
+        use_audio=False,
+        use_mrope=False,
+    )
+    mesh = Mesh(np.array(jax.local_devices()[:1]).reshape(1, 1), ("data", "context"))
+    base_shd = NamedSharding(mesh, PartitionSpec("data", "context"))
+    batch = maxtext_utils.get_shaped_batch(cfg, batch_sharding=base_shd)
+    p_max = 9 * (32 - 3)
+    self.assertEqual(batch["images"].shape, (4, 2, p_max, 588))
+    self.assertEqual(batch["image_masks"].shape, (4, 2))
+    self.assertEqual(batch["image_grids"].shape, (4, 2, 2))
+    self.assertEqual(batch["images"].sharding.spec, PartitionSpec("data", None, None, None))
+    self.assertEqual(batch["image_masks"].sharding.spec, PartitionSpec("data", None))
+    self.assertEqual(batch["image_grids"].sharding.spec, PartitionSpec("data", None, None))
+
 
 class TestShouldPreventCseInRemat(unittest.TestCase):
   """Tests for should_prevent_cse_in_remat."""
@@ -1278,7 +1563,11 @@ class TestShouldPreventCseInRemat(unittest.TestCase):
     self.assertFalse(maxtext_utils.should_prevent_cse_in_remat(cfg))
 
   def test_gpu_multiprocess_with_grad_accum_returns_false(self):
-    cfg = self._make_cfg(scan_layers=False, gradient_accumulation_steps=4, hardware="gpu_multiprocess")
+    cfg = self._make_cfg(
+        scan_layers=False,
+        gradient_accumulation_steps=4,
+        hardware="gpu_multiprocess",
+    )
     self.assertFalse(maxtext_utils.should_prevent_cse_in_remat(cfg))
 
   def test_tpu_with_grad_accum_returns_true(self):
@@ -1364,7 +1653,14 @@ class TestCalculateFfnMatmulTflops(unittest.TestCase):
 class TestGetDenseMoeLayers(unittest.TestCase):
   """Tests for get_dense_moe_layers."""
 
-  def _make_cfg(self, decoder_block, num_decoder_layers=32, first_num_dense_layers=3, interleave_moe_layer_step=4):
+  def _make_cfg(
+      self,
+      decoder_block,
+      num_decoder_layers=32,
+      first_num_dense_layers=3,
+      interleave_moe_layer_step=4,
+  ):
+    """Builds a mock config with the given decoder block and MoE cadence."""
     cfg = MagicMock()
     cfg.decoder_block = decoder_block
     cfg.num_decoder_layers = num_decoder_layers
@@ -1480,7 +1776,7 @@ class TestSaveQuantizedCheckpoint(unittest.TestCase):
     with self.assertRaises(AssertionError):
       maxtext_utils.save_quantized_checkpoint_if_configured(cfg, params={})
 
-  @unittest.mock.patch("maxtext.utils.maxtext_utils.checkpointing")
+  @unittest.mock.patch.object(maxtext_utils, "checkpointing")
   def test_skips_save_when_path_empty(self, mock_ckpt):
     cfg = MagicMock()
     cfg.quantization = "int8"
@@ -1488,7 +1784,7 @@ class TestSaveQuantizedCheckpoint(unittest.TestCase):
     maxtext_utils.save_quantized_checkpoint_if_configured(cfg, params={})
     mock_ckpt.save_params_to_path.assert_not_called()
 
-  @unittest.mock.patch("maxtext.utils.maxtext_utils.checkpointing")
+  @unittest.mock.patch.object(maxtext_utils, "checkpointing")
   def test_calls_save_when_path_set(self, mock_ckpt):
     cfg = MagicMock()
     cfg.quantization = "int8"
@@ -1507,7 +1803,7 @@ class TestAddConfigToSummaryWriter(unittest.TestCase):
     cfg.get_keys.return_value = {"learning_rate": 0.001, "steps": 100}
     mock_writer = MagicMock()
 
-    with unittest.mock.patch("maxtext.utils.max_utils.add_text_to_summary_writer") as mock_add:
+    with unittest.mock.patch.object(max_utils, "add_text_to_summary_writer") as mock_add:
       maxtext_utils.add_config_to_summary_writer(cfg, mock_writer)
       # Should have been called once per config key (process_index==0 in tests)
       if jax.process_index() == 0:
@@ -1654,7 +1950,10 @@ class TestNNXAbstractState(unittest.TestCase):
       # Model parameters
       device_num = len(jax.local_devices())
       self.params = nnx.Linear(
-          2, 4, kernel_init=nnx.with_partitioning(nnx.initializers.ones, sharding=("model",)), rngs=rngs
+          2,
+          4,
+          kernel_init=nnx.with_partitioning(nnx.initializers.ones, sharding=("model",)),
+          rngs=rngs,
       )
       # Simulated optimizer state
       self.optimizer = nnx.Variable(jnp.zeros((device_num,)), sharding=("model",))
@@ -1662,7 +1961,10 @@ class TestNNXAbstractState(unittest.TestCase):
   def setUp(self):
     # Create a real 1D mesh on local devices
     devices = jax.local_devices()
-    self.mesh = Mesh(mesh_utils.create_device_mesh((len(devices), 1)), axis_names=("model", "data"))
+    self.mesh = Mesh(
+        mesh_utils.create_device_mesh((len(devices), 1)),
+        axis_names=("model", "data"),
+    )
     self.config = self.MockConfig()
     # Stub remove_size_one_mesh_axis so that resolved specs are returned unreduced,
     # allowing verification of naming resolution without being stripped by size-one mesh dims.
@@ -1746,7 +2048,12 @@ class TestKVCacheScanHelpers(unittest.TestCase):
   """Tests for KV cache scan helper functions."""
 
   def test_prepare_kv_caches_for_scan_valid(self):
-    kv_caches = [jnp.array([1.0]), jnp.array([2.0]), jnp.array([3.0]), jnp.array([4.0])]
+    kv_caches = [
+        jnp.array([1.0]),
+        jnp.array([2.0]),
+        jnp.array([3.0]),
+        jnp.array([4.0]),
+    ]
     # scan_length = 2, block_len = 2
     grouped = maxtext_utils.prepare_kv_caches_for_scan(kv_caches, scan_length=2, block_len=2, stack=False)
     self.assertEqual(len(grouped), 2)
@@ -1763,8 +2070,16 @@ class TestKVCacheScanHelpers(unittest.TestCase):
       maxtext_utils.prepare_kv_caches_for_scan(kv_caches_array, scan_length=1, block_len=2)
 
   def test_update_kv_caches_after_scan_valid(self):
-    kv_caches = [jnp.array([1.0]), jnp.array([2.0]), jnp.array([3.0]), jnp.array([4.0])]
-    returned_kv_cache = [(jnp.array([10.0]), jnp.array([20.0])), (jnp.array([30.0]), jnp.array([40.0]))]
+    kv_caches = [
+        jnp.array([1.0]),
+        jnp.array([2.0]),
+        jnp.array([3.0]),
+        jnp.array([4.0]),
+    ]
+    returned_kv_cache = [
+        (jnp.array([10.0]), jnp.array([20.0])),
+        (jnp.array([30.0]), jnp.array([40.0])),
+    ]
 
     maxtext_utils.update_kv_caches_after_scan(kv_caches, returned_kv_cache, scan_length=2, block_len=2, stacked=False)
 

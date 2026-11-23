@@ -250,7 +250,11 @@ def is_oom(argv: Sequence[str]) -> bool:
   )
 
   # Get data sharding
-  data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
+  data_sharding = sharding.get_batch_sharding_for_batch(
+      config,
+      sharding.get_input_data_sharding(config, topology_mesh),
+      shaped_train_args[1],
+  )
 
   # Get function to compile and shardings
   (
@@ -331,7 +335,11 @@ def main(argv: Sequence[str]) -> None:
   )
 
   # Get data sharding
-  data_sharding = sharding.get_input_data_sharding(config, topology_mesh)
+  data_sharding = sharding.get_batch_sharding_for_batch(
+      config,
+      sharding.get_input_data_sharding(config, topology_mesh),
+      shaped_train_args[1],
+  )
   if config.enable_diloco:
     # Build abstract DiLoCo state and shardings for AOT compilation
     abstract_state = shaped_train_args[0]
@@ -345,7 +353,9 @@ def main(argv: Sequence[str]) -> None:
     # Wrap train_step with diloco
     train_step_partial = functools.partial(train.train_step, model, config, inner_state_shardings, params_shardings)
     train_step_fn = diloco.build_diloco_train_step(
-        config, train_step_partial, outer_params_shardings=state_mesh_shardings.params
+        config,
+        train_step_partial,
+        outer_params_shardings=state_mesh_shardings.params,
     )
 
     # For DiLoCo, the train_step_fn is already fully wrapped and takes (state, batch, prng)

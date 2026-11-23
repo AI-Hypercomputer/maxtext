@@ -94,12 +94,18 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
 
 
 def get_functional_train_with_signature(
-    train_step, data_sharding, state_mesh_shardings, model, config, params_shardings=None
+    train_step,
+    data_sharding,
+    state_mesh_shardings,
+    model,
+    config,
+    params_shardings=None,
 ):
   """Get the shardings (both state and data) for `train_step`."""
   functional_train = functools.partial(train_step, model, config, state_mesh_shardings, params_shardings)
   functional_train.__name__ = "train_step"  # pyrefly: ignore[missing-attribute]
-  in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
+  batch_sharding = sharding.get_input_batch_sharding(config, data_sharding)
+  in_shardings = (state_mesh_shardings, batch_sharding)  # State, batch
   out_shardings = (state_mesh_shardings, None)  # State, metrics
   static_argnums = ()  # We partial out the static argnums of model and config
   donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
@@ -110,7 +116,8 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
   """Get the shardings (both state and data) for `eval_step`."""
   functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"  # pyrefly: ignore[missing-attribute]
-  in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
+  batch_sharding = sharding.get_input_batch_sharding(config, data_sharding)
+  in_shardings = (state_mesh_shardings, batch_sharding)  # State, batch
   out_shardings = None  # metrics
   static_argnums = ()  # We partial out the static argnums of model, config
   donate_argnums = ()  # state will be kept instead of being donated in eval_step
@@ -118,7 +125,11 @@ def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shar
 
 
 def shard_reorder_causal_load_balanced(
-    batch, cp_size, shard_mode, reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP, hardware="tpu"
+    batch,
+    cp_size,
+    shard_mode,
+    reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP,
+    hardware="tpu",
 ):
   """Shard the output of the reordered sequence."""
   reordered = max_utils.reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware)
@@ -129,7 +140,12 @@ def shard_reorder_causal_load_balanced(
   return reordered
 
 
-def get_reorder_callable(cp_size, shard_mode, reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP, hardware="tpu"):
+def get_reorder_callable(
+    cp_size,
+    shard_mode,
+    reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP,
+    hardware="tpu",
+):
   """Creates a callable that can be used with map() to reorder batches."""
   return functools.partial(
       shard_reorder_causal_load_balanced,
@@ -144,6 +160,7 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
   """Return the shape of the batch - this is what eval_shape would return for the
   output of create_data_iterator, but eval_shape doesn't work, see b/306901078."""
   global_batch_size = config.global_batch_size_to_load_eval if is_eval else config.global_batch_size_to_load
+  base_sharding = batch_sharding.get("inputs") if isinstance(batch_sharding, dict) else batch_sharding
   if config.enable_diloco:
     batch_shape = (
         config.num_diloco_replicas,
@@ -153,17 +170,17 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
   else:
     batch_shape = (global_batch_size, config.max_target_length)
   shaped_batch = {}
-  shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  # MRoPE uses (batch, seq, 3); same batch/seq axes as 1D positions so batch_sharding applies as-is.
+  shaped_batch["inputs"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=base_sharding)
+  # MRoPE uses (batch, seq, 3); same batch/seq axes as 1D positions so base_sharding applies as-is.
   position_shape = batch_shape + (3,) if config.use_mrope and config.use_multimodal else batch_shape
-  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(position_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-  shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+  shaped_batch["inputs_position"] = jax.ShapeDtypeStruct(position_shape, jnp.int32, sharding=base_sharding)
+  shaped_batch["inputs_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=base_sharding)
+  shaped_batch["targets"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=base_sharding)
+  shaped_batch["targets_position"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=base_sharding)
+  shaped_batch["targets_segmentation"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=base_sharding)
   if getattr(config, "training_objective", "causal_lm") == "block_diffusion":
-    shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
-    shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=batch_sharding)
+    shaped_batch["corruption_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=base_sharding)
+    shaped_batch["targets_loss_mask"] = jax.ShapeDtypeStruct(batch_shape, jnp.int32, sharding=base_sharding)
   if config.use_multimodal:
     batch_size = config.micro_batch_size_to_eval_on if is_eval else config.micro_batch_size_to_train_on
     is_video = getattr(config, "video_max_grid_t", None) is not None
@@ -174,19 +191,27 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
       tps = config.temporal_patch_size_for_vit
       patch = config.patch_size_for_vit
       channels = config.num_channels_for_vit
-      video_shape = (batch_size, channels, max_t * tps, max_h * patch, max_w * patch)
-      video_mask_shape = (batch_size, 1, max_t * tps, max_h * patch, max_w * patch)
-      shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=batch_sharding)
-      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=batch_sharding)
-      shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=batch_sharding)
-    else:
-      is_ds41_mm = str(getattr(config, "vision_encoder_block", "")) in (
-          "deepseek41",
-          str(VisionEncoderBlockType.DEEPSEEK41),
-          VisionEncoderBlockType.DEEPSEEK41.value,
+      video_shape = (
+          batch_size,
+          channels,
+          max_t * tps,
+          max_h * patch,
+          max_w * patch,
       )
-      if is_ds41_mm:
-        base_img_shape = mm_processor.get_dummy_image_shape_for_init(
+      video_mask_shape = (
+          batch_size,
+          1,
+          max_t * tps,
+          max_h * patch,
+          max_w * patch,
+      )
+      shaped_batch["images"] = jax.ShapeDtypeStruct(video_shape, jnp.float32, sharding=base_sharding)
+      shaped_batch["image_masks"] = jax.ShapeDtypeStruct(video_mask_shape, jnp.int32, sharding=base_sharding)
+      shaped_batch["video_grid_thw"] = jax.ShapeDtypeStruct((batch_size, 3), jnp.int32, sharding=base_sharding)
+    else:
+      if sharding.is_ds41_multimodal(config):
+        img_dtype = jnp.float32
+        base_shape = mm_processor.get_dummy_image_shape_for_init(
             getattr(config, "model_name", ""),
             batch_size=global_batch_size,
             config=config,
@@ -195,49 +220,50 @@ def get_shaped_batch(config, batch_sharding=None, is_eval=False):
           image_shape = (
               config.num_diloco_replicas,
               global_batch_size // config.num_diloco_replicas,
-          ) + base_img_shape[1:]
+          ) + base_shape[1:]
         else:
-          image_shape = base_img_shape
-
-        def _ds41_lead_sharding(trailing_ndim: int):
-          base = batch_sharding.get("inputs") if isinstance(batch_sharding, dict) else batch_sharding
-          if base is None or not hasattr(base, "mesh") or not hasattr(base, "spec"):
-            return base
-          lead_n = 2 if getattr(config, "enable_diloco", False) else 1
-          lead = tuple(base.spec[:lead_n]) + (None,) * max(0, lead_n - len(base.spec))
-          return jax.sharding.NamedSharding(base.mesh, jax.sharding.PartitionSpec(*(lead + (None,) * trailing_ndim)))
-
+          image_shape = base_shape
         img_shd = (
             batch_sharding["images"]
             if isinstance(batch_sharding, dict) and "images" in batch_sharding
-            else _ds41_lead_sharding(3)
+            else sharding.get_ds41_image_sharding(
+                base_sharding,
+                enable_diloco=bool(getattr(config, "enable_diloco", False)),
+            )
         )
-        shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.float32, sharding=img_shd)
-        if getattr(config, "dataset_type", "synthetic") in ("grain", "hf") or bool(
-            getattr(config, "ds41_dynamic_vision_grid", False)
-        ):
-          mask_shd = (
-              batch_sharding["image_masks"]
-              if isinstance(batch_sharding, dict) and "image_masks" in batch_sharding
-              else _ds41_lead_sharding(1)
-          )
-          grid_shd = (
-              batch_sharding["image_grids"]
-              if isinstance(batch_sharding, dict) and "image_grids" in batch_sharding
-              else _ds41_lead_sharding(2)
-          )
-          shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:-2], jnp.int32, sharding=mask_shd)
-          shaped_batch["image_grids"] = jax.ShapeDtypeStruct(image_shape[:-2] + (2,), jnp.int32, sharding=grid_shd)
       else:
-        image_shape = mm_processor.get_dummy_image_shape_for_init(config.model_name, batch_size=batch_size, config=config)
-        shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, jnp.int32, sharding=batch_sharding)
-        # Image masks are only used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
-        # Other multimodal models (Gemma, Qwen, ...) leave masks unset.
-        if "llama4" in config.model_name:
-          shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=batch_sharding)
+        img_batch_size = batch_size
+        img_dtype = jnp.int32
+        image_shape = mm_processor.get_dummy_image_shape_for_init(
+            getattr(config, "model_name", ""),
+            batch_size=img_batch_size,
+            config=config,
+        )
+        img_shd = base_sharding
+      shaped_batch["images"] = jax.ShapeDtypeStruct(image_shape, img_dtype, sharding=img_shd)
+      if sharding.is_ds41_multimodal(config) and (
+          getattr(config, "dataset_type", "synthetic") in ("grain", "hf")
+          or bool(getattr(config, "ds41_dynamic_vision_grid", False))
+      ):
+        enable_diloco = bool(getattr(config, "enable_diloco", False))
+        img_mask_shd = (
+            batch_sharding["image_masks"]
+            if isinstance(batch_sharding, dict) and "image_masks" in batch_sharding
+            else sharding.get_ds41_image_mask_sharding(base_sharding, enable_diloco=enable_diloco)
+        )
+        img_grid_shd = (
+            batch_sharding["image_grids"]
+            if isinstance(batch_sharding, dict) and "image_grids" in batch_sharding
+            else sharding.get_ds41_image_grid_sharding(base_sharding, enable_diloco=enable_diloco)
+        )
+        shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:-2], jnp.int32, sharding=img_mask_shd)
+        shaped_batch["image_grids"] = jax.ShapeDtypeStruct(image_shape[:-2] + (2,), jnp.int32, sharding=img_grid_shd)
+      elif "llama4" in config.model_name:
+        # Image masks are used by Llama4 (shape (B*N, num_tiles)) for empty tiles.
+        shaped_batch["image_masks"] = jax.ShapeDtypeStruct(image_shape[:2], jnp.int32, sharding=base_sharding)
   if config.use_audio:
     audio_shape = mm_processor.get_dummy_audio_shape_for_init(config)
-    shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=batch_sharding)
+    shaped_batch["audios"] = jax.ShapeDtypeStruct(audio_shape, jnp.float32, sharding=base_sharding)
   return shaped_batch
 
 
@@ -257,7 +283,10 @@ def should_prevent_cse_in_remat(config):
   if config.scan_layers:
     return False
 
-  if config.gradient_accumulation_steps > 1 and config.hardware in ("gpu", "gpu_multiprocess"):
+  if config.gradient_accumulation_steps > 1 and config.hardware in (
+      "gpu",
+      "gpu_multiprocess",
+  ):
     return False
 
   return True
@@ -408,7 +437,12 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
 
 
 def calculate_mixed_attention_model_tflops_training_per_device(
-    config, total_ffn_flops_all_layers, qkv_flops, projection_flops, embedding_flops, attention_pattern_length
+    config,
+    total_ffn_flops_all_layers,
+    qkv_flops,
+    projection_flops,
+    embedding_flops,
+    attention_pattern_length,
 ):
   """
   Calculate training TFLOPs for models with a mixed attention pattern of local
@@ -845,7 +879,11 @@ def calculate_routed_and_shared_ffn_tflops_per_device(config):
 
 def get_dense_moe_layers(config):
   """Helper function to calculate number of dense and moe layers"""
-  if config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.MING, DecoderBlockType.HY4):
+  if config.decoder_block in (
+      DecoderBlockType.DEEPSEEK,
+      DecoderBlockType.MING,
+      DecoderBlockType.HY4,
+  ):
     num_dense_layers = config.first_num_dense_layers
     num_moe_layers = config.num_decoder_layers - config.first_num_dense_layers
     return num_dense_layers, num_moe_layers
@@ -853,7 +891,11 @@ def get_dense_moe_layers(config):
     num_moe_layers = config.num_decoder_layers // config.interleave_moe_layer_step
     num_dense_layers = config.num_decoder_layers - num_moe_layers
     return num_dense_layers, num_moe_layers
-  elif config.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.DEEPSEEK4, DecoderBlockType.DEEPSEEK41):
+  elif config.decoder_block in (
+      DecoderBlockType.QWEN3_NEXT,
+      DecoderBlockType.DEEPSEEK4,
+      DecoderBlockType.DEEPSEEK41,
+  ):
     return 0, config.num_decoder_layers
   elif config.decoder_block == DecoderBlockType.DEFAULT:
     raise ValueError("Unsupported decoder block for dense/MoE layer calculation")
@@ -1537,11 +1579,21 @@ def calculate_tflops_training_per_device(config, log=True):
     )
   elif config.decoder_block == DecoderBlockType.GEMMA3:
     attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
-        config, total_ffn_flops_all_layers, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=6
+        config,
+        total_ffn_flops_all_layers,
+        qkv_flops,
+        projection_flops,
+        embedding_flops,
+        attention_pattern_length=6,
     )
   elif config.decoder_block == DecoderBlockType.GPT_OSS:
     attention_tflops, learnable_weight_tflops = calculate_mixed_attention_model_tflops_training_per_device(
-        config, total_ffn_flops_all_layers, qkv_flops, projection_flops, embedding_flops, attention_pattern_length=2
+        config,
+        total_ffn_flops_all_layers,
+        qkv_flops,
+        projection_flops,
+        embedding_flops,
+        attention_pattern_length=2,
     )
   elif config.decoder_block == DecoderBlockType.LLAMA4:
     # Use the new helper to calculate attention TFLOPs correctly.
@@ -1554,7 +1606,10 @@ def calculate_tflops_training_per_device(config, log=True):
     )
   elif config.decoder_block == DecoderBlockType.GEMMA4:
     attention_tflops, learnable_weight_tflops = calculate_gemma4_tflops_training_per_device(
-        config, total_ffn_flops_all_layers, embedding_flops, attention_pattern_length=6
+        config,
+        total_ffn_flops_all_layers,
+        embedding_flops,
+        attention_pattern_length=6,
     )
   elif config.decoder_block == DecoderBlockType.GEMMA4_SMALL:
     # The small path derives its own attention pattern from
@@ -1919,7 +1974,9 @@ def get_abstract_param(model, config):
   # Cleanly fetch the shapes from the processor using the correct micro_batch_size
   if config.use_multimodal:
     image_shape = mm_processor.get_dummy_image_shape_for_init(
-        config.model_name, batch_size=config.micro_batch_size_to_train_on, config=config
+        config.model_name,
+        batch_size=config.micro_batch_size_to_train_on,
+        config=config,
     )
   else:
     image_shape = None

@@ -153,7 +153,11 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
     loss: average loss
     aux: a dictionary including intermediate_outputs, xent_sum, and total_weights
   """
-  del dropout_rng, params, sparsity_state  # unused for NNX (kept for signature parity)
+  del (
+      dropout_rng,
+      params,
+      sparsity_state,
+  )  # unused for NNX (kept for signature parity)
   is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
   if getattr(config, "attention_type", "global") == "block_diffusion" and not is_block_diffusion:
     raise ValueError(
@@ -429,7 +433,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   if config.moe_dropless_fallback == "layer":
     fallback_flags = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_dropless_fallback")
     aux["moe_dropless_fallback_layers"] = sum(
-        (jnp.sum(jnp.asarray(x).astype(jnp.int32)) for x in fallback_flags), jnp.int32(0)
+        (jnp.sum(jnp.asarray(x).astype(jnp.int32)) for x in fallback_flags),
+        jnp.int32(0),
     )
   if getattr(config, "log_required_ragged_buffer_factor", False):
     # Probe: per-MoE-layer minimum ragged_buffer_factor that would have avoided drops (RoutedMoE sows it next to
@@ -445,6 +450,10 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       load_ratios = jnp.concatenate(load_ratios)
       aux["moe_max_load_ratio"] = jnp.max(load_ratios)
       aux["moe_max_load_ratio_mean"] = jnp.mean(load_ratios)
+  if bool(getattr(config, "log_moe_dropped_frac", False)):
+    dropped_frac_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_dropped_frac")
+    if dropped_frac_values:
+      aux["moe_dropped_frac"] = jnp.concatenate([x.astype(jnp.float32) for x in dropped_frac_values])
   return loss, aux
 
 
@@ -623,7 +632,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if config.shard_optimizer_over_data:
       param_sharding_lookup = {}
       for p, s in jax.tree_util.tree_leaves_with_path(
-          params_shardings, is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding, jax.sharding.Sharding))
+          params_shardings,
+          is_leaf=lambda x: isinstance(x, (nnx.Variable, NamedSharding, jax.sharding.Sharding)),
       ):
         param_sharding_lookup[p] = s.get_value() if isinstance(s, nnx.Variable) else s
 
@@ -758,7 +768,11 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     else:
       if getattr(config, "using_pipeline_parallelism", False):
         # 1. Update the decoder MoE layers outside and inside the pipeline (two stacks, two bias layouts).
-        _apply_moe_bias_updates_by_path(new_state.model.decoder, intermediate_outputs.get("decoder", {}), config)
+        _apply_moe_bias_updates_by_path(
+            new_state.model.decoder,
+            intermediate_outputs.get("decoder", {}),
+            config,
+        )
       else:
         # 1. Update main decoder scanned MoE layers.
         # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
@@ -846,6 +860,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   if getattr(config, "log_required_ragged_buffer_factor", False) and "moe_required_rbf" in aux:
     # Top-level (not "scalar"): a per-layer vector, read by training_loop_iteration for the REQUIRED_RBF line.
     metrics["moe_required_rbf"] = aux["moe_required_rbf"]
+  if "moe_dropped_frac" in aux:
+    metrics["moe_dropped_frac"] = aux["moe_dropped_frac"]
   if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
 
@@ -904,6 +920,35 @@ def _maybe_log_required_rbf(config, step, metrics, program):
     return
   per_layer_str = ",".join(f"{v:.4f}" for v in per_layer)
   max_logging.log(f"REQUIRED_RBF step={step} max={per_layer.max():.4f} per_layer=[{per_layer_str}] program={program}")
+
+
+def _maybe_log_step0_moe_dropped_frac(
+    config: Any,
+    step: int,
+    start_step: int,
+    metrics: dict[str, Any],
+    ragged_buffer_factor: float | None = None,
+    program: str = "normal",
+) -> str | None:
+  """Logs per-layer routed MoE dropped-token fraction on step 0 (`step == start_step`) only."""
+  if int(step) != int(start_step):
+    return None
+  if "moe_dropped_frac" not in metrics or metrics["moe_dropped_frac"] is None:
+    return None
+  per_layer = np.asarray(jax.device_get(metrics["moe_dropped_frac"]), dtype=np.float32).reshape(-1)
+  if per_layer.size == 0:
+    return None
+  raw_rbf = getattr(config, "ragged_buffer_factor", -1.0) if ragged_buffer_factor is None else ragged_buffer_factor
+  rbf = float(raw_rbf)
+  mean_val = float(np.mean(per_layer))
+  max_val = float(np.max(per_layer))
+  per_layer_str = ",".join(f"{float(v):.6f}" for v in per_layer)
+  line = (
+      f"MOE_DROPPED_FRAC step={int(step)} ragged_buffer_factor={rbf} "
+      f"mean={mean_val:.6f} max={max_val:.6f} per_layer=[{per_layer_str}] program={program}"
+  )
+  max_logging.log(line)
+  return line
 
 
 def training_loop_iteration(
@@ -984,6 +1029,14 @@ def training_loop_iteration(
           max_logging.log(f"Step {step}: dropless first-phase program")
           state, metrics = p_train_step_dropless(state, example_batch, *step_rng_args)
           _maybe_log_required_rbf(config, step, metrics, "dropless")
+          _maybe_log_step0_moe_dropped_frac(
+              config,
+              step,
+              start_step,
+              metrics,
+              ragged_buffer_factor=-1.0,
+              program="dropless",
+          )
         else:
           # With first_phase_ragged_buffer_factor > 0, first-phase steps attempt the first-phase program (larger
           # finite ragged buffer) instead of the normal one; an overflow still replays with the dropless program.
@@ -991,11 +1044,24 @@ def training_loop_iteration(
             max_logging.log(
                 f"Step {step}: first-phase program (ragged_buffer_factor={config.first_phase_ragged_buffer_factor})"
             )
-            p_attempt, attempt_name = p_train_step_first_phase, "first_phase"
+            p_attempt, attempt_name = (
+                p_train_step_first_phase,
+                "first_phase",
+            )
+            attempt_rbf = float(config.first_phase_ragged_buffer_factor)
           else:
             p_attempt, attempt_name = p_train_step, "normal"
+            attempt_rbf = float(getattr(config, "ragged_buffer_factor", -1.0))
           state, metrics = p_attempt(state, example_batch, *step_rng_args)
           _maybe_log_required_rbf(config, step, metrics, attempt_name)
+          _maybe_log_step0_moe_dropped_frac(
+              config,
+              step,
+              start_step,
+              metrics,
+              ragged_buffer_factor=attempt_rbf,
+              program=attempt_name,
+          )
           if (
               config.moe_dropless_fallback == "step"
               and p_train_step_dropless is not None
@@ -1005,6 +1071,14 @@ def training_loop_iteration(
             # The attempt rolled its update back, so `state` is still the pre-step state.
             state, metrics = p_train_step_dropless(state, example_batch, *step_rng_args)
             _maybe_log_required_rbf(config, step, metrics, "dropless")
+            _maybe_log_step0_moe_dropped_frac(
+                config,
+                step,
+                start_step,
+                metrics,
+                ragged_buffer_factor=-1.0,
+                program="dropless",
+            )
 
   step_time_delta = datetime.datetime.now() - last_step_completion
   last_step_completion = datetime.datetime.now()
@@ -1053,9 +1127,12 @@ def training_loop_iteration(
     # pylint: disable=not-callable
     for eval_batch in eval_data_iterator:
       # Shard input eval data
-      eval_batch = jax.device_put(
-          eval_batch, sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+      eval_batch_sharding = sharding.get_batch_sharding_for_batch(
+          config,
+          sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval),
+          eval_batch,
       )
+      eval_batch = jax.device_put(eval_batch, eval_batch_sharding)
       with jax.set_mesh(mesh), logical_axis_rules(logical_axis_rules_for_eval):
         eval_metrics = p_eval_step(state, eval_batch, *step_rng_args)
         if (
@@ -1071,7 +1148,10 @@ def training_loop_iteration(
       eval_step_time_delta = datetime.datetime.now() - last_eval_step_completion
       last_eval_step_completion = datetime.datetime.now()
       metric_logger_instance.buffer_and_write_metrics(
-          eval_metrics, eval_step_count, step_time_delta=eval_step_time_delta, is_training=False
+          eval_metrics,
+          eval_step_count,
+          step_time_delta=eval_step_time_delta,
+          is_training=False,
       )
       eval_step_count += 1
       # Stop before fetching another batch: the extra fetch would reshard a batch that
@@ -1140,7 +1220,8 @@ def build_eval_graphdef(config, jit_model, state):
 
 def build_first_phase_graphdef(config, jit_model, state):
   """Graphdef of the first-phase train program: the normal graphdef with RoutedMoE ragged_buffer_factor_override =
-  config.first_phase_ragged_buffer_factor. None when first_phase_ragged_buffer_factor is 0 (off)."""
+  config.first_phase_ragged_buffer_factor. None when first_phase_ragged_buffer_factor is 0 (off).
+  """
   if getattr(config, "first_phase_ragged_buffer_factor", 0.0) <= 0:
     return None
   reconstructed = nnx.merge(jit_model, state)
@@ -1168,7 +1249,8 @@ def make_synthetic_batch(config, shaped_batch, seed=0):
   """Materializes a batch with the keys, shapes, dtypes and shardings of `shaped_batch` (ShapeDtypeStructs) without
   touching the dataset: token ids are drawn from jax.random.PRNGKey(seed), positions are an arange over the sequence
   axis, segmentations and other integer fields are ones, float fields are zeros. Built inside one jit whose
-  out_shardings are the structs' shardings, so the result is a global array like the loader's device_put batch."""
+  out_shardings are the structs' shardings, so the result is a global array like the loader's device_put batch.
+  """
   names = sorted(shaped_batch)
   seq_len = int(getattr(config, "max_target_length", 0))
 
@@ -1208,7 +1290,15 @@ def _delete_outputs(outputs, keep_ids):
 
 
 def warmup_programs(
-    programs, state, mesh, train_rules, eval_rules, train_batch, eval_batch, rng_args=(), copy_train_state=False
+    programs,
+    state,
+    mesh,
+    train_rules,
+    eval_rules,
+    train_batch,
+    eval_batch,
+    rng_args=(),
+    copy_train_state=False,
 ):
   """warmup_programs_in_init: executes each program once through its jit (the same dispatch path as the loop, so
   step 0 hits the jit cache and the executable is loaded) under the loop's mesh / logical-axis-rule contexts.
@@ -1411,19 +1501,30 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       # the compile, so the compile itself is part of the check. The dropless and first-phase programs run with the
       # same raised per-device batch (and the dropless one has larger MoE buffers), so they are checked too.
       elastic_utils.compile_and_check_hbm_budget(
-          config, lambda: aot_compile_step(p_train_step, lower_args, compiler_options, prefix="train")
+          config,
+          lambda: aot_compile_step(p_train_step, lower_args, compiler_options, prefix="train"),
       )
       precompiled_train = True
       if p_train_step_dropless is not None:
         # Precompile the dropless retry program here so no compile happens inside the timed loop.
         elastic_utils.compile_and_check_hbm_budget(
             config,
-            lambda: aot_compile_step(p_train_step_dropless, lower_args, compiler_options, prefix="train_dropless"),
+            lambda: aot_compile_step(
+                p_train_step_dropless,
+                lower_args,
+                compiler_options,
+                prefix="train_dropless",
+            ),
         )
       if p_train_step_first_phase is not None:
         elastic_utils.compile_and_check_hbm_budget(
             config,
-            lambda: aot_compile_step(p_train_step_first_phase, lower_args, compiler_options, prefix="train_first_phase"),
+            lambda: aot_compile_step(
+                p_train_step_first_phase,
+                lower_args,
+                compiler_options,
+                prefix="train_first_phase",
+            ),
         )
     elif jax.config.jax_enable_pgle and elastic_utils.hbm_preflight_nominal_batch(config) is not None:
       max_logging.log(
@@ -1451,10 +1552,17 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       aot_compile_step(p_eval_step, eval_lower_args, compiler_options, prefix="eval")
       precompiled_eval = True
       if p_eval_step_dropless is not None:
-        aot_compile_step(p_eval_step_dropless, eval_lower_args, compiler_options, prefix="eval_dropless")
+        aot_compile_step(
+            p_eval_step_dropless,
+            eval_lower_args,
+            compiler_options,
+            prefix="eval_dropless",
+        )
   prof = profiler.Profiler(config, offset_step=start_step)
   metric_logger_instance = metric_logger.MetricLogger(
-      config=config, learning_rate_schedule=learning_rate_schedule, start_step=start_step
+      config=config,
+      learning_rate_schedule=learning_rate_schedule,
+      start_step=start_step,
   )
 
   # Write train config params, num model params, and XLA flags to tensorboard
@@ -1531,11 +1639,20 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
         else:
           warmup_list.append(("train_dropless", "train", p_train_step_dropless))
       if precompiled_eval:
-        warmup_list += [("eval", "eval", p_eval_step), ("eval_dropless", "eval", p_eval_step_dropless)]
+        warmup_list += [
+            ("eval", "eval", p_eval_step),
+            ("eval_dropless", "eval", p_eval_step_dropless),
+        ]
       # Same shardings as the loop's batches: the loader's device_put sharding for train, the eval rules for eval.
-      train_batch_sharding = getattr(data_loader, "input_data_shardings", None) or data_sharding
+      base_train_sharding = getattr(data_loader, "input_data_shardings", None) or data_sharding
+      train_batch_sharding = sharding.get_input_batch_sharding(config, base_train_sharding, shaped_batch.keys())
       train_shaped = {
-          k: jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=train_batch_sharding) for k, v in shaped_batch.items()
+          k: jax.ShapeDtypeStruct(
+              v.shape,
+              v.dtype,
+              sharding=train_batch_sharding[k] if isinstance(train_batch_sharding, dict) else train_batch_sharding,
+          )
+          for k, v in shaped_batch.items()
       }
       warmup_train_batch = make_synthetic_batch(config, train_shaped, seed=0) if precompiled_train else None
       warmup_eval_batch = make_synthetic_batch(config, shaped_eval_batch, seed=1) if precompiled_eval else None
@@ -1586,7 +1703,10 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
     while python_vars["step"] < immutable_data["steps"]:
       step = python_vars["step"]
       metrics = training_loop_iteration(
-          jax_device_state, python_vars, immutable_data, elastic_retry_cache=elastic_retry_cache
+          jax_device_state,
+          python_vars,
+          immutable_data,
+          elastic_retry_cache=elastic_retry_cache,
       )
       python_vars["step"] += 1
 
@@ -1651,7 +1771,11 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       samples_count = (python_vars["step"] - immutable_data["start_step"]) * train_batch_size
       # Only reached when eval never hit target_eval_loss; a converged run already
       # logged RUN_STOP with status "success" from eval_stop.
-      mllog_utils.run_stop(status="aborted", current_epoch_num=samples_count, step=python_vars["step"])
+      mllog_utils.run_stop(
+          status="aborted",
+          current_epoch_num=samples_count,
+          step=python_vars["step"],
+      )
     train_utils.maybe_cleanup_dcn_throttling(config)
 
   return state
@@ -1677,7 +1801,10 @@ def initialize(argv: Sequence[str]) -> tuple[pyconfig.HyperParameters, Any]:
   gpu_collective_overlap_pass.register()
   jax.config.update("jax_default_prng_impl", config.prng_impl)
   jax.config.update("jax_use_shardy_partitioner", config.shardy)
-  jax.config.update("jax_remove_size_one_mesh_axis_from_type", config.remove_size_one_mesh_axis_from_type)
+  jax.config.update(
+      "jax_remove_size_one_mesh_axis_from_type",
+      config.remove_size_one_mesh_axis_from_type,
+  )
   os.environ["TFDS_DATA_DIR"] = config.dataset_path or ""
   vertex_tensorboard_manager = VertexTensorboardManager()
   if config.use_vertex_tensorboard or os.environ.get("UPLOAD_DATA_TO_TENSORBOARD"):
@@ -1736,7 +1863,9 @@ def get_train_func(config, recorder, argv):
         # recorded by earlier attempts (e.g. the per-device batch bound below).
         attempt_argv = [*argv, *elastic_retry_cache.config_overrides]
         elastic_config, elastic_recorder = elastic_utils.get_or_build(
-            elastic_retry_cache, "initialize", functools.partial(initialize, attempt_argv)
+            elastic_retry_cache,
+            "initialize",
+            functools.partial(initialize, attempt_argv),
         )
         try:
           run(

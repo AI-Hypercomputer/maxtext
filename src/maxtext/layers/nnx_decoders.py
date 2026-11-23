@@ -911,18 +911,33 @@ class NNXDecoder(nnx.Module):
       decoder_input_tokens,
       decoder_segment_ids=None,
       image_mask=None,
+      forced_routed_experts=None,
   ):
     """Runs the DeepSeek-V4.1 layers on the embeddings and collapses the hyper-connection copies."""
     cfg = self.config
     carry = deepseek41.initial_carry(y, cfg.mhc_expansion_rate)
+    per_layer = (
+        None
+        if forced_routed_experts is None
+        else forced_routed_experts_per_layer(forced_routed_experts, cfg.num_decoder_layers)
+    )
     scan_kwargs = {"image_mask": image_mask} if image_mask is not None else {}
     if cfg.scan_layers:
       segments = deepseek41.build_segments(cfg)
       plans = deepseek41.build_segment_carry_plans(cfg, segments)
       self._sync_remat_policy_override(*(getattr(self, f"segments_{k}") for k in range(len(segments))))
+      layer_offset = 0
       for k, (segment, plan) in enumerate(zip(segments, plans)):
         carry = deepseek41.add_placeholders(carry, plan.add_before, plan.compress_ratio, cfg)
         stack = getattr(self, f"segments_{k}")
+        seg_len = segment.repeats * segment.block_size
+        seg_fre = None
+        if per_layer is not None:
+          seg_fre = jnp.reshape(
+              per_layer[layer_offset : layer_offset + seg_len],
+              (segment.repeats, segment.block_size) + per_layer.shape[1:],
+          )
+        layer_offset += seg_len
         carry, stack, _ = self._apply_layers_sequentially(
             stack,
             carry,
@@ -932,6 +947,7 @@ class NNXDecoder(nnx.Module):
             length=segment.repeats,
             metadata_axis_name="layers",
             skip_block_remat=True,
+            forced_routed_experts_scanned=seg_fre,
             **scan_kwargs,
         )
         setattr(self, f"segments_{k}", stack)
@@ -941,6 +957,11 @@ class NNXDecoder(nnx.Module):
       remat_policy_fn, prevent_cse = self._get_deepseek4_remat_policy_and_cse() if use_remat else (None, None)
       for i in range(cfg.num_decoder_layers):
         layer = getattr(self, f"layers_{i}")
+        call_kwargs = {"decoder_segment_ids": decoder_segment_ids}
+        if image_mask is not None:
+          call_kwargs["image_mask"] = image_mask
+        if per_layer is not None:
+          call_kwargs["forced_routed_experts"] = per_layer[i]
         if use_remat:
           carry = deepseek4._run_deepseek4_layer_remat(  # pylint: disable=protected-access
               layer,
@@ -948,22 +969,13 @@ class NNXDecoder(nnx.Module):
               carry_in_xs=True,
               decoder_positions=decoder_positions,
               decoder_input_tokens=decoder_input_tokens,
-              decoder_segment_ids=decoder_segment_ids,
-              image_mask=image_mask,
+              **call_kwargs,
               config=cfg,
               policy=remat_policy_fn,
               prevent_cse=prevent_cse,
           )
-        elif image_mask is not None:
-          carry = layer(
-              carry,
-              decoder_positions,
-              decoder_input_tokens,
-              decoder_segment_ids=decoder_segment_ids,
-              image_mask=image_mask,
-          )
         else:
-          carry = layer(carry, decoder_positions, decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
+          carry = layer(carry, decoder_positions, decoder_input_tokens, **call_kwargs)
     return deepseek41.DeepSeek41DecoderLayer.hc_pre(carry["h"], carry["pre_mix"])
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
@@ -2688,6 +2700,7 @@ class NNXDecoder(nnx.Module):
             decoder_input_tokens,
             decoder_segment_ids,
             image_mask=ds41_image_mask,
+            forced_routed_experts=forced_routed_experts,
         )
       elif self.is_gemma4_small:
         y, kv_caches = self._apply_gemma4_small_layers(

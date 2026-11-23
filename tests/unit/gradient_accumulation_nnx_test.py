@@ -109,6 +109,14 @@ def _fake_loss_fn(model, config, data, dropout_rng, params, is_train=True):
   return xent_sum, aux
 
 
+def _dropped_frac_loss_fn(model, config, data, dropout_rng, params, is_train=True):
+  """`_fake_loss_fn` plus a per-layer `moe_dropped_frac` that differs between the two microbatches."""
+  xent_sum, aux = _fake_loss_fn(model, config, data, dropout_rng, params, is_train=is_train)
+  first_input = data["inputs"][0, 0]
+  aux["moe_dropped_frac"] = jnp.where(first_input < 1.0, jnp.array([0.2, 0.6]), jnp.array([0.4, 0.8]))
+  return xent_sum, aux
+
+
 def _zero_weight_loss_fn(model, config, data, dropout_rng, params, is_train=True):
   """Produces model-dependent sums with a zero token denominator."""
   del config, dropout_rng, params, is_train
@@ -221,6 +229,20 @@ class TestGradientAccumulationNNX(unittest.TestCase):
     self.assertEqual(len(grad_leaves), 2)  # linear.kernel + linear.bias
     for g in grad_leaves:
       self.assertTrue(jnp.all(jnp.isfinite(g)))
+
+  def test_moe_dropped_frac_is_averaged_over_microbatches(self):
+    """GA=2 logs the mean per-layer dropped fraction (a fraction in [0, 1]), not the sum over microbatches."""
+    _, aux, _ = gradient_accumulation.gradient_accumulation_loss_and_grad(
+        _dropped_frac_loss_fn,
+        self.cfg,
+        self.model,
+        params=None,
+        params_shardings=self._params_shardings(),
+        data=self.data,
+        dropout_rng=None,
+    )
+    np.testing.assert_allclose(np.asarray(aux["moe_dropped_frac"]), [0.3, 0.7], rtol=0, atol=1e-7)
+    self.assertTrue(bool(jnp.all((aux["moe_dropped_frac"] >= 0.0) & (aux["moe_dropped_frac"] <= 1.0))))
 
   def test_positive_weights_match_direct_causal_batch(self):
     """The guarded denominator preserves ordinary causal accumulation."""

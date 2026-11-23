@@ -61,6 +61,7 @@ class _Cfg:
   num_vocab_tiling: int = 1
   num_experts: int = 1
   moe_dropless_fallback: str | None = None
+  log_moe_dropped_frac: bool = False
   routed_bias: bool = False
   routed_bias_update_rate: float = 0.0
   mtp_num_layers: int = 0
@@ -200,6 +201,30 @@ class _TinyDecoderMoEOverflow(_TinyDecoder):
   def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
     out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
     self.sow(nnx.Intermediate, "moe_has_overflow", jnp.bool_(self.has_overflow))
+    return out
+
+
+class _MoEDroppedFracStub(nnx.Module):
+  """Sows one layer's moe_dropped_frac intermediate like RoutedMoE.sparse_matmul."""
+
+  def __init__(self, dropped_frac: float):
+    self.dropped_frac = dropped_frac
+
+  def __call__(self):
+    self.sow(nnx.Intermediate, "moe_dropped_frac", jnp.array([self.dropped_frac], dtype=jnp.float32))
+
+
+class _TinyDecoderMoEDroppedFrac(_TinyDecoder):
+  """`_TinyDecoder` with MoE layer stubs that sow `moe_dropped_frac`."""
+
+  def __init__(self, vocab_size: int, hidden: int, rngs: nnx.Rngs, dropped_fracs: tuple[float, ...]):
+    super().__init__(vocab_size, hidden, rngs=rngs)
+    self.moe_layers = nnx.List([_MoEDroppedFracStub(f) for f in dropped_fracs])
+
+  def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
+    out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
+    for layer in self.moe_layers:
+      layer()
     return out
 
 
@@ -364,7 +389,12 @@ class TestLossFnNNX(unittest.TestCase):
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
 
     loss_without_indexer, _ = pre_train.loss_fn(
-        _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0)), cfg, data, None, None, is_train=True
+        _TinyDecoder(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0)),
+        cfg,
+        data,
+        None,
+        None,
+        is_train=True,
     )
 
     loss, aux = pre_train.loss_fn(model, cfg, data, None, None, is_train=True)
@@ -384,7 +414,12 @@ class TestTrainStepNNX(unittest.TestCase):
 
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     new_state, metrics = pre_train.train_step(
-        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=state_pure,
+        data=data,
     )
     # NNX path returns nnx.State (via nnx.state(new_state)) and a metrics dict.
     self.assertIsInstance(new_state, nnx.State)
@@ -400,7 +435,12 @@ class TestTrainStepNNX(unittest.TestCase):
     pre_step = int(state_pure.optimizer.step.get_value())
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     new_state, _ = pre_train.train_step(
-        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=state_pure,
+        data=data,
     )
     self.assertEqual(int(new_state.optimizer.step.get_value()), pre_step + 1)
 
@@ -411,7 +451,12 @@ class TestTrainStepNNX(unittest.TestCase):
     state_graphdef, state_pure = nnx.split(ts)
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     new_state, metrics = pre_train.train_step(
-        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=state_pure,
+        data=data,
     )
     self.assertIsInstance(new_state, nnx.State)
     self.assertTrue(jnp.isfinite(metrics["scalar"]["learning/loss"]))
@@ -469,11 +514,17 @@ class TestMoeOverflowLoggingNNX(unittest.TestCase):
     return cfg, train_state_nnx.TrainStateNNX(model, optimizer)
 
   def _metrics(self, has_overflow, step_fallback):
+    """Runs one train_step on the overflow stub model and returns metrics."""
     cfg, ts = self._build_state(has_overflow, step_fallback)
     state_graphdef, state_pure = nnx.split(ts)
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     _, metrics = pre_train.train_step(
-        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=state_pure,
+        data=data,
     )
     return metrics
 
@@ -520,7 +571,12 @@ class TestMoeOverflowLoggingNNX(unittest.TestCase):
 
     def step(state, data):
       return pre_train.train_step(
-          state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state, data=data
+          state_graphdef,
+          cfg,
+          state_mesh_shardings=None,
+          params_shardings=None,
+          state=state,
+          data=data,
       )
 
     new_state, _ = (jax.jit(step) if jit else step)(state_pure, data)
@@ -532,7 +588,10 @@ class TestMoeOverflowLoggingNNX(unittest.TestCase):
         before, after = self._before_after(has_overflow=True, step_fallback=True, jit=jit)
         self.assertEqual(len(before), len(after))
         for i, (b, a) in enumerate(zip(before, after)):
-          self.assertTrue(bool(jnp.array_equal(b, a)), f"state leaf {i} changed despite a token-drop rollback")
+          self.assertTrue(
+              bool(jnp.array_equal(b, a)),
+              f"state leaf {i} changed despite a token-drop rollback",
+          )
 
   def test_state_advances_without_overflow(self):
     for jit in (False, True):
@@ -543,6 +602,67 @@ class TestMoeOverflowLoggingNNX(unittest.TestCase):
             any(not bool(jnp.array_equal(b, a)) for b, a in zip(before, after)),
             "train_step left the state untouched with has_overflow=False -- the rollback test proves nothing.",
         )
+
+
+class TestMoeDroppedFracLoggingNNX(unittest.TestCase):
+  """Covers loss_fn and train_step forwarding of sowed `moe_dropped_frac` intermediates."""
+
+  def _build_state(self, dropped_fracs: tuple[float, ...], log_moe_dropped_frac: bool):
+    cfg = _Cfg(log_moe_dropped_frac=log_moe_dropped_frac)
+    model = _TinyDecoderMoEDroppedFrac(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0), dropped_fracs=dropped_fracs)
+    optimizer = nnx.Optimizer(model, optax.sgd(0.01), wrt=nnx.Param)
+    return cfg, train_state_nnx.TrainStateNNX(model, optimizer)
+
+  def test_loss_fn_and_train_step_forward_moe_dropped_frac(self):
+    cfg, ts = self._build_state((0.25, 0.75), log_moe_dropped_frac=True)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    _, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+    self.assertIn("moe_dropped_frac", aux)
+    self.assertEqual(aux["moe_dropped_frac"].shape, (2,))
+    self.assertAlmostEqual(float(aux["moe_dropped_frac"][0]), 0.25, places=6)
+    self.assertAlmostEqual(float(aux["moe_dropped_frac"][1]), 0.75, places=6)
+
+    state_graphdef, state_pure = nnx.split(ts)
+    _, metrics = pre_train.train_step(
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=state_pure,
+        data=data,
+    )
+    self.assertIn("moe_dropped_frac", metrics)
+    self.assertAlmostEqual(float(metrics["moe_dropped_frac"][0]), 0.25, places=6)
+    self.assertAlmostEqual(float(metrics["moe_dropped_frac"][1]), 0.75, places=6)
+
+    object.__setattr__(cfg, "ragged_buffer_factor", 0.5)
+    with mock.patch.object(pre_train.max_logging, "log") as log:
+      line = pre_train._maybe_log_step0_moe_dropped_frac(  # pylint: disable=protected-access
+          cfg, step=0, start_step=0, metrics=metrics
+      )
+    self.assertEqual(
+        line,
+        "MOE_DROPPED_FRAC step=0 ragged_buffer_factor=0.5 mean=0.500000 max=0.750000"
+        " per_layer=[0.250000,0.750000] program=normal",
+    )
+    log.assert_called_once_with(line)
+
+  def test_key_absent_when_flag_off(self):
+    cfg, ts = self._build_state((0.25, 0.75), log_moe_dropped_frac=False)
+    data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
+    _, aux = pre_train.loss_fn(ts.model, cfg, data, None, None, is_train=True)
+    self.assertNotIn("moe_dropped_frac", aux)
+
+    state_graphdef, state_pure = nnx.split(ts)
+    _, metrics = pre_train.train_step(
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=state_pure,
+        data=data,
+    )
+    self.assertNotIn("moe_dropped_frac", metrics)
 
 
 class TestEvalStepNNX(unittest.TestCase):
@@ -566,7 +686,8 @@ class TestEvalStepNNX(unittest.TestCase):
 
 class TestSkipStepOnSpikesNNX(unittest.TestCase):
   """The NNX optimizer must actually skip a loss/grad spike — i.e. apply_gradients forwards
-  loss/grad_norm to the GradientTransformationExtraArgs, and a skipped step freezes params."""
+  loss/grad_norm to the GradientTransformationExtraArgs, and a skipped step freezes params.
+  """
 
   def _is_skipped(self, optimizer):
     return bool(nnx.to_pure_dict(nnx.state(optimizer))["opt_state"]["is_skipped"])
@@ -696,8 +817,16 @@ class _TinyDecoderAuxLosses(_TinyDecoder):
   def __call__(self, decoder_input_tokens, decoder_positions, **kwargs):
     out = super().__call__(decoder_input_tokens, decoder_positions, **kwargs)
     h = self.embed(decoder_input_tokens)
-    self.sow(nnx.Intermediate, "moe_lb_loss", jnp.atleast_1d(jnp.mean(jax.nn.sigmoid(h @ self.lb_w[...]))))
-    self.sow(indexer_losses, "indexer_loss", jnp.mean(jnp.sin(h @ self.indexer_w[...]) ** 2))
+    self.sow(
+        nnx.Intermediate,
+        "moe_lb_loss",
+        jnp.atleast_1d(jnp.mean(jax.nn.sigmoid(h @ self.lb_w[...]))),
+    )
+    self.sow(
+        indexer_losses,
+        "indexer_loss",
+        jnp.mean(jnp.sin(h @ self.indexer_w[...]) ** 2),
+    )
     self.mtp_block(h)
     return out
 
@@ -755,7 +884,13 @@ class TestGradientAccumulationAuxLosses(unittest.TestCase):
     data = self._data()
     ga_model = _TinyDecoderAuxLosses(8, hidden=4, rngs=nnx.Rngs(0))
     ga_loss, aux, ga_grads = gradient_accumulation.gradient_accumulation_loss_and_grad(
-        pre_train.loss_fn, self._cfg(2, 4), ga_model, None, _params_shardings(ga_model), dict(data), None
+        pre_train.loss_fn,
+        self._cfg(2, 4),
+        ga_model,
+        None,
+        _params_shardings(ga_model),
+        dict(data),
+        None,
     )
     self.assertGreater(float(aux["mtp_loss"]), 0.0)
     self.assertGreater(float(aux["indexer_loss"]), 0.0)
@@ -796,8 +931,16 @@ class TestRecordActivationMetricsParity(unittest.TestCase):
 
   def test_scanned_layout_linen_matches_nnx(self):
     num_layers = 3
-    mean, std, fz = jnp.array([0.1, 0.2, 0.3]), jnp.array([1.0, 1.1, 1.2]), jnp.array([0.5, 0.4, 0.3])
-    triples = {"activation_mean": (mean,), "activation_stdev": (std,), "activation_fraction_zero": (fz,)}
+    mean, std, fz = (
+        jnp.array([0.1, 0.2, 0.3]),
+        jnp.array([1.0, 1.1, 1.2]),
+        jnp.array([0.5, 0.4, 0.3]),
+    )
+    triples = {
+        "activation_mean": (mean,),
+        "activation_stdev": (std,),
+        "activation_fraction_zero": (fz,),
+    }
     # Linen scanned: intermediates/decoder/decoder/<key>[0][layer]
     linen = {"intermediates": {"decoder": {"decoder": triples}}}
     # NNX scanned: model-rooted, one stacked array per key (no "intermediates" prefix)
@@ -853,7 +996,13 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
       train_calls=None,
       with_first_phase=False,
       first_phase_overflow=False,
+      normal_overflow=False,
       required_rbf=None,
+      start_step=-1,
+      ragged_buffer_factor=1.0,
+      moe_dropped_frac=None,
+      first_phase_dropped_frac=None,
+      dropless_dropped_frac=None,
   ):
     """Runs training_loop_iteration with fake step fns and returns (eval loss used, dropless call count).
 
@@ -863,27 +1012,33 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
     log_required_ragged_buffer_factor and makes every fake train step return it as metrics["moe_required_rbf"].
     """
 
-    def _train_metrics(overflow=False):
-      metrics = {"scalar": {}, "scalars": {}, "has_moe_overflow": jnp.bool_(overflow)}
+    def _train_metrics(overflow=False, dropped_frac=None):
+      metrics = {
+          "scalar": {},
+          "scalars": {},
+          "has_moe_overflow": jnp.bool_(overflow),
+      }
       if required_rbf is not None:
         metrics["moe_required_rbf"] = jnp.array(required_rbf, dtype=jnp.float32)
+      if dropped_frac is not None:
+        metrics["moe_dropped_frac"] = jnp.array(dropped_frac, dtype=jnp.float32)
       return metrics
 
     def p_train_step(state, batch, *rng_args):
       del batch, rng_args
       if train_calls is not None:
         train_calls.append("normal")
-      return state, _train_metrics()
+      return state, _train_metrics(overflow=normal_overflow, dropped_frac=moe_dropped_frac)
 
     def p_train_step_dropless(state, batch, *rng_args):
       del batch, rng_args
       train_calls.append("dropless")
-      return state, _train_metrics()
+      return state, _train_metrics(dropped_frac=dropless_dropped_frac)
 
     def p_train_step_first_phase(state, batch, *rng_args):
       del batch, rng_args
       train_calls.append("first_phase")
-      return state, _train_metrics(overflow=first_phase_overflow)
+      return state, _train_metrics(overflow=first_phase_overflow, dropped_frac=first_phase_dropped_frac)
 
     def p_eval_step(state, batch, *rng_args):
       del state, batch, rng_args
@@ -905,6 +1060,7 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
         enable_diloco=False,
         moe_dropless_fallback="step" if step_fallback else None,
         retry_dropless_first_steps=retry_dropless_first_steps,
+        ragged_buffer_factor=ragged_buffer_factor,
         first_phase_ragged_buffer_factor=5.0 if with_first_phase else 0.0,
         log_required_ragged_buffer_factor=required_rbf is not None,
         logical_axis_rules_for_eval=(),
@@ -941,7 +1097,7 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
         "logical_axis_rules_for_eval": (),
         "eval_interval": 1,
         "eval_steps": 0,
-        "start_step": -1,  # != step, so the print_mem_stats branch is skipped
+        "start_step": start_step,
         "eval_start_step": 0,
         "dump_hlo": False,
         "dump_step": -1,
@@ -1059,7 +1215,64 @@ class TestTrainingLoopIterationEvalRetry(unittest.TestCase):
           required_rbf=[1.5, 3.25],
       )
     lines = [c.args[0] for c in log.call_args_list if c.args and str(c.args[0]).startswith("REQUIRED_RBF")]
-    self.assertEqual(lines, ["REQUIRED_RBF step=0 max=3.2500 per_layer=[1.5000,3.2500] program=first_phase"])
+    self.assertEqual(
+        lines,
+        ["REQUIRED_RBF step=0 max=3.2500 per_layer=[1.5000,3.2500] program=first_phase"],
+    )
+
+  def test_logs_step0_moe_dropped_frac_overflow_before_dropless_replay(self):
+    """Step-0 capped overflow logs dropped fraction before dropless replay overwrites metrics."""
+    train_calls = []
+    with mock.patch.object(pre_train.max_logging, "log") as log:
+      with mock.patch.object(pre_train.max_utils, "print_mem_stats"):
+        self._run(
+            step_fallback=True,
+            has_overflow=False,
+            with_dropless=True,
+            train_calls=train_calls,
+            normal_overflow=True,
+            start_step=0,
+            ragged_buffer_factor=0.5,
+            moe_dropped_frac=[0.75, 0.25],
+            dropless_dropped_frac=[0.0, 0.0],
+        )
+    self.assertEqual(train_calls, ["normal", "dropless"])
+    lines = [c.args[0] for c in log.call_args_list if c.args and str(c.args[0]).startswith("MOE_DROPPED_FRAC")]
+    self.assertEqual(
+        lines,
+        [
+            "MOE_DROPPED_FRAC step=0 ragged_buffer_factor=0.5 mean=0.500000 max=0.750000"
+            " per_layer=[0.750000,0.250000] program=normal",
+            "MOE_DROPPED_FRAC step=0 ragged_buffer_factor=-1.0 mean=0.000000 max=0.000000"
+            " per_layer=[0.000000,0.000000] program=dropless",
+        ],
+    )
+
+  def test_logs_step0_moe_dropped_frac_first_phase_factor(self):
+    """Step-0 first-phase run logs first_phase_ragged_buffer_factor rather than config.ragged_buffer_factor."""
+    train_calls = []
+    with mock.patch.object(pre_train.max_logging, "log") as log:
+      with mock.patch.object(pre_train.max_utils, "print_mem_stats"):
+        self._run(
+            step_fallback=True,
+            has_overflow=False,
+            with_dropless=True,
+            retry_dropless_first_steps=2,
+            train_calls=train_calls,
+            with_first_phase=True,
+            start_step=0,
+            ragged_buffer_factor=0.5,
+            first_phase_dropped_frac=[0.1, 0.3],
+        )
+    self.assertEqual(train_calls, ["first_phase"])
+    lines = [c.args[0] for c in log.call_args_list if c.args and str(c.args[0]).startswith("MOE_DROPPED_FRAC")]
+    self.assertEqual(
+        lines,
+        [
+            "MOE_DROPPED_FRAC step=0 ragged_buffer_factor=5.0 mean=0.200000 max=0.300000"
+            " per_layer=[0.100000,0.300000] program=first_phase",
+        ],
+    )
 
 
 def _state_checksum(state):
@@ -1093,7 +1306,12 @@ class TestWarmupProgramsInInit(unittest.TestCase):
     eval_fn = functools.partial(pre_train.eval_step, graphdef, cfg)
     p_train = jax.jit(train_fn, donate_argnums=(0,) if donate else ())
     p_eval = jax.jit(eval_fn)
-    return state, p_train, p_eval, model.mesh  # the loop's mesh context must be the model's mesh
+    return (
+        state,
+        p_train,
+        p_eval,
+        model.mesh,
+    )  # the loop's mesh context must be the model's mesh
 
   def _check_state_unchanged(self, donate):
     """Warms train (twice, as normal and dropless) and eval programs and checks every state leaf is bit-identical."""
@@ -1111,7 +1329,11 @@ class TestWarmupProgramsInInit(unittest.TestCase):
     changed = [not np.array_equal(a, b) for a, b in zip(before, _state_checksum(new_state))]
     self.assertGreaterEqual(sum(changed), 3)
 
-    programs = [("train", "train", p_train), ("train_dropless", "train", p_train), ("eval", "eval", p_eval)]
+    programs = [
+        ("train", "train", p_train),
+        ("train_dropless", "train", p_train),
+        ("eval", "eval", p_eval),
+    ]
     pre_train.warmup_programs(programs, state, mesh, (), (), batch, batch, copy_train_state=donate)
 
     self.assertFalse(any(leaf.is_deleted() for leaf in jax.tree_util.tree_leaves(state)))
@@ -1164,11 +1386,20 @@ class TestWarmupProgramsInInit(unittest.TestCase):
     state, p_train, _, mesh = self._routed_bias_programs(cfg, donate=False)
     shaped = self._shaped(mesh)  # NamedSharding like the loader's input_data_shardings
     pre_train.warmup_programs(
-        [("train", "train", p_train)], state, mesh, (), (), pre_train.make_synthetic_batch(cfg, shaped), None
+        [("train", "train", p_train)],
+        state,
+        mesh,
+        (),
+        (),
+        pre_train.make_synthetic_batch(cfg, shaped),
+        None,
     )
     self.assertEqual(p_train._cache_size(), 1)  # pylint: disable=protected-access
     # The loop's first step: a real batch with the same shapes and sharding hits the warmed entry.
-    real = jax.device_put({k: np.zeros(v.shape, v.dtype) for k, v in shaped.items()}, shaped["inputs"].sharding)
+    real = jax.device_put(
+        {k: np.zeros(v.shape, v.dtype) for k, v in shaped.items()},
+        shaped["inputs"].sharding,
+    )
     with jax.set_mesh(mesh), pre_train.logical_axis_rules(()):
       p_train(state, real)
     self.assertEqual(p_train._cache_size(), 1)  # pylint: disable=protected-access
@@ -1192,11 +1423,18 @@ class TestWarmupProgramsInInit(unittest.TestCase):
     order = []
     names = ("init_print", "init_stop", "run_start", "block_start")
     patches = [
-        mock.patch.object(pre_train.mllog_utils, n, side_effect=lambda *a, _n=n, **k: order.append(_n)) for n in names
+        mock.patch.object(
+            pre_train.mllog_utils,
+            n,
+            side_effect=lambda *a, _n=n, **k: order.append(_n),
+        )
+        for n in names
     ]
     patches.append(
         mock.patch.object(
-            pre_train.multihost_utils, "sync_global_devices", side_effect=lambda *_: order.append("barrier")
+            pre_train.multihost_utils,
+            "sync_global_devices",
+            side_effect=lambda *_: order.append("barrier"),
         )
     )
     python_vars = {"last_step_completion": None}
@@ -1216,7 +1454,17 @@ class TestWarmupProgramsInInit(unittest.TestCase):
 
   def test_run_start_after_warmup_and_barrier(self):
     order, python_vars = self._clock_order(with_warmup=True)
-    self.assertEqual(order, ["init_print", "warmup", "barrier", "init_stop", "run_start", "block_start"])
+    self.assertEqual(
+        order,
+        [
+            "init_print",
+            "warmup",
+            "barrier",
+            "init_stop",
+            "run_start",
+            "block_start",
+        ],
+    )
     self.assertIsNotNone(python_vars["last_step_completion"])  # step 0's step time excludes the warmup
 
   def test_knob_off_keeps_original_mllog_sequence_without_barrier(self):
@@ -1243,7 +1491,11 @@ class TestStepDiagnosticsNNX(unittest.TestCase):
     cfg = _Cfg(gradient_clipping_threshold=1e-3, moe_dropless_fallback="step")
     cfg.log_step_diagnostics = log_step_diagnostics
     if model_cls == "bias":
-      cfg.routed_bias, cfg.routed_bias_update_rate, cfg.mtp_num_layers = True, 0.001, 2
+      cfg.routed_bias, cfg.routed_bias_update_rate, cfg.mtp_num_layers = (
+          True,
+          0.001,
+          2,
+      )
       model = _TinyDecoderMoEBiasWithMTP(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0), num_mtp_layers=2)
     else:
       model = _TinyDecoderMoEOverflow(cfg.vocab_size, hidden=4, rngs=nnx.Rngs(0), has_overflow=True)
@@ -1251,7 +1503,12 @@ class TestStepDiagnosticsNNX(unittest.TestCase):
     state_graphdef, state_pure = nnx.split(train_state_nnx.TrainStateNNX(model, optimizer))
     data = _make_data(batch=cfg.micro_batch_size_to_train_on, vocab=cfg.vocab_size)
     _, metrics = pre_train.train_step(
-        state_graphdef, cfg, state_mesh_shardings=None, params_shardings=None, state=state_pure, data=data
+        state_graphdef,
+        cfg,
+        state_mesh_shardings=None,
+        params_shardings=None,
+        state=state_pure,
+        data=data,
     )
     return cfg, metrics
 
@@ -1292,7 +1549,11 @@ class TestStepDiagnosticsNNX(unittest.TestCase):
         log_step_diagnostics=True,
     )
     scalars = {k: float(v) for k, v in metrics["scalar"].items()}
-    perf = ("perf/step_time_seconds", "perf/per_device_tflops_per_sec", "perf/per_device_tokens_per_sec")
+    perf = (
+        "perf/step_time_seconds",
+        "perf/per_device_tflops_per_sec",
+        "perf/per_device_tokens_per_sec",
+    )
     scalars.update({k: 1.0 for k in perf})
     with mock.patch.object(metric_logger.max_logging, "log") as log:
       logger.log_metrics({"scalar": scalars}, step=3, metric_type="train")
@@ -1300,7 +1561,10 @@ class TestStepDiagnosticsNNX(unittest.TestCase):
     self.assertIn("completed step: 3", line)
     self.assertIn("diag: raw_grad_norm=", line)
     diag = line.split("diag: ")[1].split(",")[0].split()
-    self.assertEqual([d.split("=")[0] for d in diag], [n for n, _ in metric_logger.STEP_DIAGNOSTICS_KEYS])
+    self.assertEqual(
+        [d.split("=")[0] for d in diag],
+        [n for n, _ in metric_logger.STEP_DIAGNOSTICS_KEYS],
+    )
     for d in diag:
       self.assertTrue(np.isfinite(float(d.split("=")[1])), d)
     self.assertIn("moe_bias_checksum=2.100000000e+01", line)

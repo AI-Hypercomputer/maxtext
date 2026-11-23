@@ -34,12 +34,15 @@ from orbax.checkpoint import v1 as ocp
 import pytest
 
 from maxtext.common import grain_utility
+from maxtext.configs import pyconfig
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.trainers.pre_train import train
 from maxtext.utils import elastic_utils
 from maxtext.utils import max_utils
+from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
+from tests.utils.test_helpers import get_test_config_path
 from maxtext.utils.train_utils import (
     validate_train_config,
     create_training_optimizer,
@@ -640,6 +643,158 @@ class TestElasticTrainWrapperHbmFallback(unittest.TestCase):
     )
     self.assertEqual(self.mocks["run"].call_count, 2)
     self.mocks["cleanup_iterators"].assert_called_once()
+
+
+class TestDeepSeek41MultimodalJitStep(unittest.TestCase):
+  """Tests jit_train_and_eval_step and DiLoCo jit_train_step across varying DS4.1 batch key sets."""
+
+  # pylint: disable=protected-access
+
+  def test_aot_and_variable_key_batches_with_cp_gt_num_images(self):
+    if jax.device_count() < 2:
+      self.skipTest("Requires >= 2 host devices to test CP=2 > max_num_images_per_example=1.")
+    n_dp = max(jax.device_count() // 2, 1)
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        use_multimodal=True,
+        vision_encoder_block="deepseek41",
+        max_num_images_per_example=1,
+        per_device_batch_size=1.0,
+        eval_per_device_batch_size=1.0,
+        max_target_length=32,
+        ici_context_parallelism=2,
+        ici_data_parallelism=n_dp,
+        ici_fsdp_parallelism=1,
+        skip_jax_distributed_system=True,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    state_shd = {"w": replicated}
+    bsz = int(round(cfg.per_device_batch_size * jax.device_count()))
+
+    def make_state():
+      return {"w": jax.device_put(np.ones((bsz, cfg.max_target_length), dtype=np.float32), replicated)}
+
+    def dummy_train(_m, _c, _ss, _ps, state, batch):
+      total = jax.numpy.sum(batch["inputs"])
+      if "images" in batch:
+        total = total + jax.numpy.sum(batch["images"]).astype(jax.numpy.int32)
+      if "forced_routed_experts" in batch:
+        total = total + jax.numpy.sum(batch["forced_routed_experts"])
+      if "image_masks" in batch:
+        total = total + jax.numpy.sum(batch["image_masks"])
+      return {"w": state["w"] + batch["inputs"].astype(jax.numpy.float32)}, {"loss": total}
+
+    def dummy_eval(_m, _c, state, batch):
+      total = jax.numpy.sum(state["w"]) + jax.numpy.sum(batch["inputs"]).astype(jax.numpy.float32)
+      if "images" in batch:
+        total = total + jax.numpy.sum(batch["images"]).astype(jax.numpy.float32)
+      if "image_masks" in batch:
+        total = total + jax.numpy.sum(batch["image_masks"]).astype(jax.numpy.float32)
+      return {"eval_loss": total}
+
+    p_train_step, p_eval_step = train_utils.jit_train_and_eval_step(
+        cfg,
+        model=None,
+        mesh=mesh,
+        state=make_state(),
+        state_mesh_shardings=state_shd,
+        train_step=dummy_train,
+        eval_step=dummy_eval,
+        eval_data_iterator=[1],
+        params_shardings=state_shd,
+    )
+
+    train_base_shd = sharding.get_input_data_sharding(cfg, mesh, rules=cfg.logical_axis_rules)
+    eval_base_shd = sharding.get_input_data_sharding(cfg, mesh, rules=cfg.logical_axis_rules_for_eval)
+    shaped_train = maxtext_utils.get_shaped_batch(cfg, batch_sharding=train_base_shd)
+    shaped_eval = maxtext_utils.get_shaped_batch(cfg, batch_sharding=eval_base_shd, is_eval=True)
+
+    def make_real_batch(shaped, base_shd, extra_keys=(), drop_keys=()):
+      raw = {
+          k: np.ones(v.shape, dtype=np.int32 if v.dtype == jax.numpy.int32 else np.float32)
+          for k, v in shaped.items()
+          if k not in drop_keys
+      }
+      for k, shape in extra_keys:
+        raw[k] = np.ones(shape, dtype=np.int32)
+      return jax.device_put(raw, sharding.get_batch_sharding_for_batch(cfg, base_shd, raw))
+
+    mm_train = make_real_batch(shaped_train, train_base_shd)
+    mm_eval = make_real_batch(shaped_eval, eval_base_shd)
+    text_train = make_real_batch(shaped_train, train_base_shd, drop_keys=("images",))
+    text_eval = make_real_batch(shaped_eval, eval_base_shd, drop_keys=("images",))
+    replay_train = make_real_batch(shaped_train, train_base_shd, extra_keys=(("forced_routed_experts", (bsz, 32, 2)),))
+    masks_train = make_real_batch(shaped_train, train_base_shd, extra_keys=(("image_masks", (bsz, 1)),))
+    masks_eval = make_real_batch(shaped_eval, eval_base_shd, extra_keys=(("image_masks", (bsz, 1)),))
+
+    pxla = sys.modules["jax._src.interpreters.pxla"]
+    with mock.patch.object(pxla.UnloadedMeshExecutable, "from_hlo", wraps=pxla.UnloadedMeshExecutable.from_hlo) as spy:
+      with jax.set_mesh(mesh):
+        train_utils.aot_compile_step(p_train_step, (make_state(), shaped_train), prefix="train")
+        train_utils.aot_compile_step(p_eval_step, (make_state(), shaped_eval), prefix="eval")
+        aot_calls = spy.call_count
+        _, m_mm = p_train_step(make_state(), mm_train)
+        ev_mm = p_eval_step(make_state(), mm_eval)
+        jax.block_until_ready((m_mm, ev_mm))
+        # Canonical 7-key batch reuses the AOT executables without recompiling.
+        self.assertEqual(spy.call_count, aot_calls)
+
+      for name, tr_b in (("text_only", text_train), ("router_replay", replay_train), ("image_masks", masks_train)):
+        with self.subTest(train_variant=name):
+          _, m = p_train_step(make_state(), tr_b)
+          self.assertGreater(int(m["loss"]), 0)
+
+      for name, ev_b in (("text_only", text_eval), ("image_masks", masks_eval)):
+        with self.subTest(eval_variant=name):
+          m = p_eval_step(make_state(), ev_b)
+          self.assertGreater(float(m["eval_loss"]), 0.0)
+
+  def test_diloco_jit_train_step_handles_mm_and_text_only_batches(self):
+    if jax.device_count() < 4:
+      self.skipTest("Requires >= 4 host devices to test DiLoCo=2 x CP=2 > max_num_images_per_example=1.")
+    cfg = pyconfig.initialize(
+        [None, get_test_config_path()],
+        use_multimodal=True,
+        vision_encoder_block="deepseek41",
+        max_num_images_per_example=1,
+        enable_diloco=True,
+        ici_diloco_parallelism=2,
+        per_device_batch_size=1.0,
+        max_target_length=32,
+        ici_context_parallelism=2,
+        ici_data_parallelism=1,
+        ici_fsdp_parallelism=1,
+        skip_jax_distributed_system=True,
+    )
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    base_shd = sharding.get_input_data_sharding(cfg, mesh, rules=cfg.logical_axis_rules)
+    shaped_batch = maxtext_utils.get_shaped_batch(cfg, batch_sharding=base_shd)
+    replicated = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    state_shd = {"w": replicated}
+    rng = jax.random.PRNGKey(0)
+
+    def make_state():
+      return {"w": jax.device_put(np.ones((2, 2, 32), dtype=np.float32), replicated)}
+
+    def diloco_train(state, batch, step_rng):
+      del step_rng
+      total = jax.numpy.sum(batch["inputs"])
+      if "images" in batch:
+        total = total + jax.numpy.sum(batch["images"]).astype(jax.numpy.int32)
+      return {"w": state["w"] + batch["inputs"].astype(jax.numpy.float32)}, {"loss": total}
+
+    p_train = train_utils.jit_train_step(cfg, None, make_state(), state_shd, base_shd, diloco_train, state_shd, mesh=mesh)
+    mm_raw = {
+        k: np.ones(v.shape, dtype=np.int32 if v.dtype == jax.numpy.int32 else np.float32) for k, v in shaped_batch.items()
+    }
+    text_raw = {k: v for k, v in mm_raw.items() if k != "images"}
+    mm_batch = jax.device_put(mm_raw, sharding.get_batch_sharding_for_batch(cfg, base_shd, mm_raw))
+    text_batch = jax.device_put(text_raw, sharding.get_batch_sharding_for_batch(cfg, base_shd, text_raw))
+
+    _, m_mm = p_train(make_state(), mm_batch, rng)
+    _, m_text = p_train(make_state(), text_batch, rng)
+    self.assertGreater(int(m_mm["loss"]), int(m_text["loss"]))
 
 
 if __name__ == "__main__":

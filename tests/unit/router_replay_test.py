@@ -26,6 +26,7 @@ environment this file runs under.
 import os
 import sys
 import unittest
+from unittest import mock
 
 from flax import nnx
 from flax import traverse_util
@@ -39,14 +40,16 @@ from maxtext.configs.types import check_forced_routing_support
 from maxtext.layers import moe
 from maxtext.layers.initializers import nd_dense_init
 from maxtext.layers.nnx_decoders import reshape_forced_routed_experts_for_scan
+from maxtext.models import deepseek41
 from maxtext.models import models
 from maxtext.trainers.pre_train import train
 from maxtext.utils import maxtext_utils
 from maxtext.utils import maxtext_utils_nnx
 from maxtext.utils import model_creation_utils
-from tests.utils.test_helpers import get_test_config_path
-from tests.utils import linen_wrappers
+import numpy as np
 import pytest
+from tests.utils import linen_wrappers
+from tests.utils.test_helpers import get_test_config_path
 
 
 def _init_test_cfg(extra_args=(), **kwargs):
@@ -285,6 +288,7 @@ class CheckForcedRoutingSupportTest(unittest.TestCase):
         ctypes.DecoderBlockType.QWEN3_5,
         ctypes.DecoderBlockType.MIXTRAL,
         ctypes.DecoderBlockType.GEMMA4,
+        ctypes.DecoderBlockType.DEEPSEEK41,
     ):
       check_forced_routing_support(decoder_block)  # must not raise
 
@@ -1202,6 +1206,50 @@ class GetTopkForcedRoutingParityTest(unittest.TestCase):
   def test_parity_gemma4(self):
     self._assert_parity(DummyConfig(decoder_block=ctypes.DecoderBlockType.GEMMA4))
 
+  def _assert_deepseek41_parity(self, router_topk_matmul_vjp: bool):
+    """Asserts DeepSeek-V4.1 forced routing gathers from pre_bias_logits, not biased gate_logits."""
+    config = DummyConfig(
+        model_name="deepseek4.1-flash",
+        decoder_block=ctypes.DecoderBlockType.DEEPSEEK41,
+    )
+    config.routed_score_func = "sqrtsoftplus"
+    config.routed_scaling_factor = 1.5
+    config.norm_topk_prob = True
+    config.router_topk_matmul_vjp = router_topk_matmul_vjp
+    model = DummyRoutedMoE(config)
+
+    # Bias flips the ranking in gate_logits relative to pre_bias_logits.
+    pre_bias_logits = jnp.array([[[0.2, 1.5, 0.8], [1.2, 0.4, 2.0]]])
+    bias = jnp.array([[[3.0, -2.0, 0.0], [0.0, 5.0, -3.0]]])
+    gate_logits = pre_bias_logits + bias
+
+    unforced_weights, unforced_indices = moe.RoutedMoE.get_topk(model, gate_logits, pre_bias_logits)
+    forced_weights, forced_indices = moe.RoutedMoE.get_topk(
+        model, gate_logits, pre_bias_logits, forced_routed_experts=unforced_indices
+    )
+    self.assertTrue(jnp.array_equal(unforced_indices, forced_indices))
+    np.testing.assert_allclose(np.asarray(forced_weights), np.asarray(unforced_weights), rtol=1e-6, atol=1e-6)
+
+    # Negative control: gathering from gate_logits directly would disagree substantially.
+    wrong_raw = jnp.take_along_axis(gate_logits, unforced_indices, axis=-1)
+    wrong_weights = wrong_raw / (wrong_raw.sum(-1, keepdims=True) + 1e-20) * config.routed_scaling_factor
+    self.assertGreater(float(jnp.max(jnp.abs(forced_weights - wrong_weights))), 0.1)
+
+    # Gradients flow strictly to pre_bias_logits, with zero gradient to selection-only gate_logits.
+    def loss(gl, pbl):
+      w, _ = moe.RoutedMoE.get_topk(model, gl, pbl, forced_routed_experts=unforced_indices)
+      return jnp.sum(w**2)
+
+    grad_gl, grad_pbl = jax.grad(loss, argnums=(0, 1))(gate_logits, pre_bias_logits)
+    self.assertTrue(bool(jnp.all(grad_gl == 0.0)))
+    self.assertGreater(float(jnp.max(jnp.abs(grad_pbl))), 0.0)
+
+  def test_parity_deepseek41(self):
+    self._assert_deepseek41_parity(router_topk_matmul_vjp=False)
+
+  def test_parity_deepseek41_dense_vjp(self):
+    self._assert_deepseek41_parity(router_topk_matmul_vjp=True)
+
 
 # pylint: disable=attribute-defined-outside-init
 class RaggedSortGuardTest(unittest.TestCase):
@@ -1402,6 +1450,396 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
             f"{float(jnp.max(jnp.abs(out_ragged.astype(jnp.float32) - out_ref.astype(jnp.float32))))}"
         ),
     )
+
+
+class DeepSeek41ForcedRoutingTest(unittest.TestCase):
+  """DeepSeek-V4.1 forced routing unit, padding-scaling, and end-to-end parity tests."""
+
+  def _tiny_ds41_cfg(self, *, run_name, scan_layers, remat_policy, ds41_activation_quant):
+    return _init_test_cfg(
+        run_name=run_name,
+        override_model_config=True,
+        model_name="deepseek4.1-flash",
+        decoder_block="deepseek41",
+        scan_layers=scan_layers,
+        remat_policy=remat_policy,
+        ds41_activation_quant=ds41_activation_quant,
+        sparse_matmul=False,
+        capacity_factor=-1,
+        base_num_decoder_layers=7,
+        num_decoder_layers=7,
+        compress_ratios=[0, 2, 2, 2, 2, 1, 1],
+        ds41_kv_source_layers=[1, 3, 5],
+        ds41_index_source_layers=[1, 3, 5, 6],
+        ds41_candidate_source_layer=5,
+        ds41_candidate_topk_blocks=2,
+        ds41_candidate_block_size=4,
+        indexer_topk=3,
+        indexer_n_heads=2,
+        indexer_head_dim=32,
+        sliding_window_size=4,
+        q_lora_rank=32,
+        o_groups=2,
+        o_lora_rank=32,
+        base_emb_dim=64,
+        base_num_query_heads=4,
+        base_num_kv_heads=1,
+        head_dim=32,
+        qk_rope_head_dim=16,
+        base_mlp_dim=32,
+        base_moe_mlp_dim=32,
+        num_experts=4,
+        num_experts_per_tok=2,
+        mhc_expansion_rate=2,
+        ds41_hc_sinkhorn_iters=3,
+        ds41_engram_layers=[],
+        vocab_size=64,
+        max_target_length=8,
+        max_prefill_predict_length=8,
+        per_device_batch_size=1.0,
+        dtype="float32",
+        weight_dtype="float32",
+        matmul_precision="highest",
+        gate_matmul_precision="highest",
+        float32_gate_logits=True,
+        routed_bias=True,
+        routed_score_func="sqrtsoftplus",
+        routed_scaling_factor=1.5,
+        norm_topk_prob=True,
+        load_balance_loss_weight=0.0,
+    )
+
+  def _init_ds41_with_nonzero_bias(self, cfg):
+    """Builds a DeepSeek-V4.1 model with distinct nonzero MoE gate.bias tensors."""
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=jax.random.PRNGKey(0))
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
+    # Give every MoE gate.bias distinct nonzero values so bias actively steers routing.
+    graphdef, state = nnx.split(model)
+    bias_pattern = jnp.array([-2.0, 0.5, 3.0, -1.0], dtype=jnp.float32)
+    bias_count = 0
+
+    def _set_bias(path, leaf):
+      nonlocal bias_count
+      keys = [getattr(k, "key", getattr(k, "name", None)) for k in path]
+      if len(keys) >= 3 and keys[-3:] == ["gate", "bias", "value"]:
+        bias_count += 1
+        bcast = jnp.broadcast_to(bias_pattern, leaf.shape)
+        if leaf.ndim == 2:
+          offsets = jnp.arange(leaf.shape[0], dtype=jnp.float32)[:, None] * 0.25
+          bcast = bcast + offsets
+        return bcast
+      return leaf
+
+    state = jax.tree_util.tree_map_with_path(_set_bias, state)
+    self.assertGreater(bias_count, 0)
+    return nnx.merge(graphdef, state), mesh
+
+  def _capture_unforced_4d_indices(self, model, cfg, mesh, tokens, positions, seg_ids):
+    """Captures [B, S, num_layers, top_k] natural routing indices via an unscanned, un-rematted copy."""
+    cap_cfg = self._tiny_ds41_cfg(
+        run_name=f"{cfg.run_name}_capture",
+        scan_layers=False,
+        remat_policy="none",
+        ds41_activation_quant=cfg.ds41_activation_quant,
+    )
+    rngs = maxtext_utils_nnx.create_nnx_rngs(cap_cfg, rng_key=jax.random.PRNGKey(0))
+    with nn_partitioning.axis_rules(cap_cfg.logical_axis_rules):
+      cap_model = model_creation_utils.from_config(cap_cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
+
+    if not cfg.scan_layers:
+      nnx.update(cap_model, nnx.state(model))
+    else:
+      _, src_params, src_rest = nnx.split(model, nnx.Param, ...)
+      cap_graphdef, dst_params, dst_rest = nnx.split(cap_model, nnx.Param, ...)
+      src_p_dict = src_params.to_pure_dict()
+      src_r_dict = src_rest.to_pure_dict()
+      dst_p_dict = dst_params.to_pure_dict()
+      dst_r_dict = dst_rest.to_pure_dict()
+      for top_k, top_v in src_p_dict.items():
+        if top_k != "decoder":
+          dst_p_dict[top_k] = top_v
+
+      def _merge_matching(dst, src):
+        if isinstance(dst, dict) and isinstance(src, dict):
+          return {k: _merge_matching(dst[k], src[k]) if k in src else dst[k] for k in dst}
+        return src
+
+      for top_k, top_v in src_r_dict.items():
+        if top_k != "decoder" and top_k in dst_r_dict:
+          dst_r_dict[top_k] = _merge_matching(dst_r_dict[top_k], top_v)
+      for dec_k, dec_v in src_p_dict["decoder"].items():
+        if not dec_k.startswith("segments_") and dec_k in dst_p_dict["decoder"]:
+          dst_p_dict["decoder"][dec_k] = dec_v
+      for dec_k, dec_v in src_r_dict["decoder"].items():
+        if not dec_k.startswith("segments_") and dec_k in dst_r_dict["decoder"]:
+          dst_r_dict["decoder"][dec_k] = _merge_matching(dst_r_dict["decoder"][dec_k], dec_v)
+
+      scan_axis = int(cfg.param_scan_axis)
+      for seg_idx, segment in enumerate(deepseek41.build_segments(cfg)):
+        seg_p = src_p_dict["decoder"][f"segments_{seg_idx}"]
+        seg_r = src_r_dict["decoder"][f"segments_{seg_idx}"]
+        for rep_idx, group in enumerate(segment.groups):
+          for sub_idx, global_idx in enumerate(group):
+            sub_key = f"layers_{sub_idx}"
+            dst_key = f"layers_{global_idx}"
+            dst_p_dict["decoder"][dst_key] = jax.tree.map(
+                lambda a, r=rep_idx: jnp.take(a, r, axis=scan_axis if a.ndim > scan_axis else 0),
+                seg_p[sub_key],
+            )
+            sliced_r = jax.tree.map(
+                lambda a, r=rep_idx: jnp.take(a, r, axis=0),
+                seg_r[sub_key],
+            )
+            dst_r_dict["decoder"][dst_key] = _merge_matching(dst_r_dict["decoder"][dst_key], sliced_r)
+      dst_params.replace_by_pure_dict(dst_p_dict)
+      dst_rest.replace_by_pure_dict(dst_r_dict)
+      cap_model = nnx.merge(cap_graphdef, dst_params, dst_rest)
+
+    captured_indices: list[jax.Array] = []
+    orig_get_topk = moe.RoutedMoE.get_topk
+
+    def _capture_get_topk(self_moe, gate_logits, pre_bias_logits, *args, **kwargs):
+      w, idx = orig_get_topk(self_moe, gate_logits, pre_bias_logits, *args, **kwargs)
+      captured_indices.append(idx)
+      return w, idx
+
+    with nn_partitioning.axis_rules(cap_cfg.logical_axis_rules), jax.set_mesh(mesh):
+      with mock.patch.object(moe.RoutedMoE, "get_topk", _capture_get_topk):
+        cap_model(tokens, positions, seg_ids, enable_dropout=False, model_mode=ctypes.MODEL_MODE_TRAIN)
+    self.assertEqual(len(captured_indices), cfg.num_decoder_layers)
+    return jnp.stack(captured_indices, axis=2)
+
+  def _check_padding_scaling_case(self, score_func: str, dense_vjp: bool):
+    """Verifies DeepSeek -1 padding exclusion and zero gradient for one score/vjp pair."""
+    config = DummyConfig(
+        model_name="deepseek4.1-flash",
+        decoder_block=ctypes.DecoderBlockType.DEEPSEEK41,
+    )
+    config.routed_score_func = score_func
+    config.routed_scaling_factor = 1.5
+    config.router_topk_matmul_vjp = dense_vjp
+    model = DummyRoutedMoE(config)
+
+    # Expert 0 has a large pre-bias score (0.8), so failing to mask [-1] before
+    # deepseek_scale_weights would dilute slot 1 (expert 2, score 0.5) below 1.5.
+    pre_bias_logits = jnp.array([[[0.8, 0.3, 0.5]]])
+    gate_logits = pre_bias_logits + 5.0
+
+    padded_weights, _ = moe.RoutedMoE.get_topk(
+        model, gate_logits, pre_bias_logits, forced_routed_experts=jnp.array([[[-1, 2]]])
+    )
+    self.assertEqual(float(padded_weights[0, 0, 0]), 0.0)
+    self.assertAlmostEqual(float(padded_weights[0, 0, 1]), 1.5, places=6)
+
+    # Negative control: [0, 2] includes expert 0 in the normalization denominator.
+    unpadded_weights, _ = moe.RoutedMoE.get_topk(
+        model, gate_logits, pre_bias_logits, forced_routed_experts=jnp.array([[[0, 2]]])
+    )
+    self.assertLess(float(unpadded_weights[0, 0, 1]), 1.0)
+
+    # All -1 slots produce zero weights, no NaNs, and zero gradients on both logit tensors.
+    all_pad = jnp.array([[[-1, -1]]])
+    all_pad_weights, _ = moe.RoutedMoE.get_topk(model, gate_logits, pre_bias_logits, forced_routed_experts=all_pad)
+    self.assertFalse(bool(jnp.any(jnp.isnan(all_pad_weights))))
+    np.testing.assert_array_equal(np.asarray(all_pad_weights), np.zeros((1, 1, 2), dtype=np.float32))
+
+    def pad_loss(gl, pbl):
+      w, _ = moe.RoutedMoE.get_topk(model, gl, pbl, forced_routed_experts=all_pad)
+      return jnp.sum(w**2)
+
+    grad_gl, grad_pbl = jax.grad(pad_loss, argnums=(0, 1))(gate_logits, pre_bias_logits)
+    self.assertTrue(bool(jnp.all(grad_gl == 0.0)))
+    self.assertTrue(bool(jnp.all(grad_pbl == 0.0)))
+
+  def test_padding_slots_excluded_from_deepseek_normalization_and_grads(self):
+    """Padding slot (-1) gets exact 0 weight, does not dilute valid slots, and all-padding has zero grad."""
+    for score_func in ("sqrtsoftplus", "sigmoid"):
+      for dense_vjp in (False, True):
+        with self.subTest(score_func=score_func, dense_vjp=dense_vjp):
+          self._check_padding_scaling_case(score_func, dense_vjp)
+
+  def _check_ds41_end_to_end_parity_case(self, scan_layers: bool, remat_policy: str, act_quant: bool):
+    """Verifies 4D forced replay forward/gradient parity against natural DS4.1 routing."""
+    cfg = self._tiny_ds41_cfg(
+        run_name=f"ds41_fre_scan_{scan_layers}_remat_{remat_policy}_quant_{act_quant}",
+        scan_layers=scan_layers,
+        remat_policy=remat_policy,
+        ds41_activation_quant=act_quant,
+    )
+    model, mesh = self._init_ds41_with_nonzero_bias(cfg)
+    batch = _batch_rows(cfg)
+    seq = cfg.max_target_length
+    tokens = jax.random.randint(jax.random.PRNGKey(1), (batch, seq), 0, cfg.vocab_size, dtype=jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32)[None, :], (batch, seq))
+    seg_ids = jnp.ones((batch, seq), dtype=jnp.int32)
+
+    forced_4d = self._capture_unforced_4d_indices(model, cfg, mesh, tokens, positions, seg_ids)
+
+    def loss_fn(m, forced):
+      logits = m(
+          tokens,
+          positions,
+          seg_ids,
+          enable_dropout=False,
+          model_mode=ctypes.MODEL_MODE_TRAIN,
+          forced_routed_experts=forced,
+      )
+      return jnp.mean(logits.astype(jnp.float32) ** 2), logits
+
+    diff_filter = nnx.DiffState(0, (nnx.Param, moe.MoEBiasVar))
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules), jax.set_mesh(mesh):
+      (_, unforced_logits), unforced_grads = nnx.value_and_grad(loss_fn, argnums=diff_filter, has_aux=True)(model, None)
+      (_, forced_logits), forced_grads = nnx.value_and_grad(loss_fn, argnums=diff_filter, has_aux=True)(model, forced_4d)
+
+      np.testing.assert_allclose(
+          np.asarray(forced_logits),
+          np.asarray(unforced_logits),
+          rtol=1e-5,
+          atol=1e-5,
+      )
+
+      gate_kernel_checked = 0
+      gate_bias_checked = 0
+      for (path, g_forced), g_unforced in zip(
+          jax.tree_util.tree_leaves_with_path(forced_grads),
+          jax.tree_util.tree_leaves(unforced_grads),
+          strict=True,
+      ):
+        np.testing.assert_allclose(
+            np.asarray(g_forced),
+            np.asarray(g_unforced),
+            rtol=1e-4,
+            atol=1e-4,
+            err_msg=f"Gradient mismatch at {jax.tree_util.keystr(path)}",
+        )
+        keys = [getattr(k, "key", getattr(k, "name", None)) for k in path]
+        if len(keys) >= 3 and keys[-3:] == ["gate", "kernel", "value"]:
+          self.assertGreater(float(jnp.max(jnp.abs(g_forced))), 0.0)
+          gate_kernel_checked += 1
+        if len(keys) >= 3 and keys[-3:] == ["gate", "bias", "value"]:
+          self.assertTrue(bool(jnp.all(g_forced == 0.0)))
+          gate_bias_checked += 1
+      self.assertGreater(gate_kernel_checked, 0)
+      self.assertGreater(gate_bias_checked, 0)
+
+      # Negative control: shifting forced expert IDs must change the output logits.
+      corrupted_4d = (forced_4d + 1) % cfg.num_experts
+      corrupted_logits = model(
+          tokens,
+          positions,
+          seg_ids,
+          enable_dropout=False,
+          model_mode=ctypes.MODEL_MODE_TRAIN,
+          forced_routed_experts=corrupted_4d,
+      )
+      self.assertGreater(float(jnp.max(jnp.abs(corrupted_logits - unforced_logits))), 1e-3)
+
+  def test_deepseek41_end_to_end_parity_scanned_unscanned_remat_and_quant(self):
+    """4D forced replay of natural DS4.1 choices matches forward logits and gradients across scan/remat/quant."""
+    cases = (
+        (False, "none", False),
+        (False, "full", False),
+        (True, "none", False),
+        (True, "full", True),
+    )
+    for scan_layers, remat_policy, act_quant in cases:
+      with self.subTest(scan_layers=scan_layers, remat_policy=remat_policy, act_quant=act_quant):
+        self._check_ds41_end_to_end_parity_case(scan_layers, remat_policy, act_quant)
+
+  def test_deepseek41_3d_forced_routing_broadcasts_across_layers(self):
+    """3D [B, S, top_k] forced_routed_experts matches broadcasting to [B, S, num_layers, top_k]."""
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        cfg = self._tiny_ds41_cfg(
+            run_name=f"ds41_fre_3d_scan_{scan_layers}",
+            scan_layers=scan_layers,
+            remat_policy="none",
+            ds41_activation_quant=False,
+        )
+        model, mesh = self._init_ds41_with_nonzero_bias(cfg)
+        batch = _batch_rows(cfg)
+        seq = cfg.max_target_length
+        tokens = jax.random.randint(jax.random.PRNGKey(2), (batch, seq), 0, cfg.vocab_size, dtype=jnp.int32)
+        positions = jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32)[None, :], (batch, seq))
+        seg_ids = jnp.ones((batch, seq), dtype=jnp.int32)
+
+        forced_3d = jnp.broadcast_to(
+            jnp.array([[[1, 3]]], dtype=jnp.int32),
+            (batch, seq, cfg.num_experts_per_tok),
+        )
+        forced_4d = jnp.broadcast_to(
+            forced_3d[:, :, None, :],
+            (batch, seq, cfg.num_decoder_layers, cfg.num_experts_per_tok),
+        )
+        with nn_partitioning.axis_rules(cfg.logical_axis_rules), jax.set_mesh(mesh):
+          logits_3d = model(
+              tokens,
+              positions,
+              seg_ids,
+              enable_dropout=False,
+              model_mode=ctypes.MODEL_MODE_TRAIN,
+              forced_routed_experts=forced_3d,
+          )
+          logits_4d = model(
+              tokens,
+              positions,
+              seg_ids,
+              enable_dropout=False,
+              model_mode=ctypes.MODEL_MODE_TRAIN,
+              forced_routed_experts=forced_4d,
+          )
+        np.testing.assert_allclose(np.asarray(logits_3d), np.asarray(logits_4d), rtol=1e-6, atol=1e-6)
+
+  def test_deepseek41_invalid_forced_routing_shapes_raise(self):
+    """Invalid ndim/layer-count or block leading-axis forced_routed_experts raises ValueError."""
+    cfg = self._tiny_ds41_cfg(
+        run_name="ds41_fre_bad_shapes",
+        scan_layers=True,
+        remat_policy="none",
+        ds41_activation_quant=False,
+    )
+    model, mesh = self._init_ds41_with_nonzero_bias(cfg)
+    batch = _batch_rows(cfg)
+    seq = cfg.max_target_length
+    tokens = jnp.ones((batch, seq), dtype=jnp.int32)
+    positions = jnp.broadcast_to(jnp.arange(seq, dtype=jnp.int32)[None, :], (batch, seq))
+    seg_ids = jnp.ones((batch, seq), dtype=jnp.int32)
+
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules), jax.set_mesh(mesh):
+      with self.assertRaisesRegex(ValueError, "forced_routed_experts"):
+        model(
+            tokens,
+            positions,
+            seg_ids,
+            enable_dropout=False,
+            model_mode=ctypes.MODEL_MODE_TRAIN,
+            forced_routed_experts=jnp.zeros((batch, seq), dtype=jnp.int32),
+        )
+      with self.assertRaisesRegex(ValueError, "forced_routed_experts"):
+        model(
+            tokens,
+            positions,
+            seg_ids,
+            enable_dropout=False,
+            model_mode=ctypes.MODEL_MODE_TRAIN,
+            forced_routed_experts=jnp.zeros((batch, seq, cfg.num_decoder_layers + 1, 2), dtype=jnp.int32),
+        )
+
+    # Direct DeepSeek41Block.__call__ leading-axis mismatch check.
+    specs = deepseek41.build_layer_specs(cfg)
+    block = deepseek41.DeepSeek41Block(
+        config=cfg,
+        mesh=mesh,
+        model_mode=ctypes.MODEL_MODE_TRAIN,
+        specs=(specs[1], specs[2]),
+        rngs=nnx.Rngs(params=0),
+    )
+    carry = deepseek41.initial_carry(jnp.zeros((batch, seq, cfg.emb_dim), dtype=jnp.float32), cfg.mhc_expansion_rate)
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules), jax.set_mesh(mesh):
+      with self.assertRaisesRegex(ValueError, "leading axis"):
+        block(carry, positions, tokens, forced_routed_experts=jnp.zeros((1, batch, seq, 2), dtype=jnp.int32))
 
 
 if __name__ == "__main__":
