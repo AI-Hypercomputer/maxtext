@@ -14,6 +14,10 @@
 # ==============================================================================
 # Forked from:
 # https://github.com/openxla/tokamax/blob/a1105e7513c4cc8604bad5627d099dcf09430ca1/tokamax/_src/ops/ragged_dot/pallas_mosaic_tpu_v2_gmm_kernel.py
+#
+# DEPRECATED: do not add new features to this fork. Add them to upstream Tokamax
+# (tokamax/_src/ops/gmm_v2/) instead. MaxText is moving to the upstream gmm_v2/tgmm_v2
+# kernels and this file will be deleted (b/560195193).
 """GMM kernel implemented using Pallas."""
 
 from abc import ABC, abstractmethod
