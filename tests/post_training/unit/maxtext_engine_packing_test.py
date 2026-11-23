@@ -374,6 +374,14 @@ class _GrpoConfig:
   epsilon_c: float | None = None
   # Tunix's AlgorithmConfig default. Inert here: these examples carry no old_per_token_logps.
   use_rollout_logps: bool = True
+  sampler_is: str | None = None
+  sampler_is_threshold: float | None = 2.0
+  sampler_rs: str | None = None
+  sampler_rs_min: float | None = None
+  sampler_rs_max: float | None = None
+  seq_logprob_error_threshold: float | None = None
+  score_centering: bool = False
+  score_centering_eps: float = 1e-6
 
 
 def _sequences(seed=11, n=_NUM_SEQ):
