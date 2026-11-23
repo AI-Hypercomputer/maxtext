@@ -26,6 +26,7 @@ import datetime
 import numpy as np
 
 import jax
+import jax.numpy as jnp
 from maxtext.utils.globals import EPS
 from maxtext.common.gcloud_stub import mldiagnostics_modules
 from maxtext.common.gcloud_stub import workload_monitor
@@ -128,24 +129,398 @@ def _materialize_metric_scalars(metrics):
     target_dict[key] = host_val
 
 
+def _natural_path_sort_key(path_keys):
+  """Sort key that orders numeric-suffixed path segments (e.g. layers_2 < layers_10) numerically."""
+  result = []
+  for k in path_keys:
+    s = str(k)
+    prefix, sep, suffix = s.rpartition("_")
+    if sep and suffix.isdigit():
+      result.append((prefix + sep, 0, int(suffix), ""))
+    else:
+      result.append((s, 1, 0, s))
+  return tuple(result)
+
+
+def _collect_per_layer_intermediates(intermediate_outputs, key):
+  """Collects per-decoder-layer intermediate scalars for `key` in logical layer order.
+
+  - Ignores leaves whose path contains `"mtp_block"` so decoder indices are not shifted.
+  - Detects paired `("local_layers", "global_layer")` leaves from `Qwen3NextScannableBlock` /
+    `Qwen3_5ScannableBlock` and interleaves `[local_0, ..., local_{k-1}, global]` per block.
+  - Sorts unscanned `layers_<int>` keys numerically instead of lexicographically.
+  """
+  matched = []
+  for path, val in jax.tree_util.tree_leaves_with_path(intermediate_outputs):
+    path_keys = tuple(k.key for k in path if hasattr(k, "key"))
+    if not path_keys or path_keys[-1] != key:
+      continue
+    if "mtp_block" in path_keys:
+      continue
+    matched.append((path_keys, jnp.asarray(val)))
+
+  if not matched:
+    return None
+
+  global_entries = {}
+  for path_keys, val in matched:
+    if "global_layer" in path_keys and "local_layers" not in path_keys:
+      idx = path_keys.index("global_layer")
+      pair_key = (path_keys[:idx], path_keys[idx + 1 :])
+      global_entries[pair_key] = val
+
+  consumed_globals = set()
+  entries = []
+  for path_keys, val in matched:
+    if "global_layer" in path_keys and "local_layers" not in path_keys:
+      continue
+    if "local_layers" in path_keys:
+      idx = path_keys.index("local_layers")
+      pair_key = (path_keys[:idx], path_keys[idx + 1 :])
+      g_val = global_entries.get(pair_key)
+      if g_val is not None and val.ndim >= 1 and g_val.shape == val.shape[:-1]:
+        interleaved = jnp.concatenate([val, g_val[..., None]], axis=-1).reshape(-1)
+        consumed_globals.add(pair_key)
+        entries.append((path_keys[:idx] + path_keys[idx + 1 :], interleaved))
+        continue
+    entries.append((path_keys, jnp.ravel(val)))
+
+  for path_keys, val in matched:
+    if "global_layer" in path_keys and "local_layers" not in path_keys:
+      idx = path_keys.index("global_layer")
+      pair_key = (path_keys[:idx], path_keys[idx + 1 :])
+      if pair_key not in consumed_globals:
+        entries.append((path_keys, jnp.ravel(val)))
+
+  entries.sort(key=lambda item: _natural_path_sort_key(item[0]))
+  return jnp.concatenate([arr for _, arr in entries])
+
+
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
   """Adds the activation metrics to the metrics dict.
 
   Collects each metric by path suffix rather than a hardcoded path, so it works for
   both the Linen ("intermediates"-prefixed) and NNX (model-rooted) layouts and for
-  both scanned (one stacked leaf) and unscanned (one leaf per layer) decoders.
+  scanned (including hybrid local/global scannable blocks) and unscanned decoders.
   """
   for label, key in (
       ("activ_fraction_zero", "activation_fraction_zero"),
       ("activ_mean", "activation_mean"),
       ("activ_stdev", "activation_stdev"),
+      ("activ_amax", "activation_amax"),
+      ("activ_mlp_wo_amax", "mlp_wo_input_amax"),
+      ("activ_moe_wo_amax", "moe_wo_input_amax"),
   ):
-    vals = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, key)
-    if not vals:
+    per_layer = _collect_per_layer_intermediates(intermediate_outputs, key)
+    if per_layer is None:
       continue
-    per_layer = jax.numpy.concatenate(vals)
-    for layer_num in range(config.num_decoder_layers):
+    for layer_num in range(min(config.num_decoder_layers, per_layer.shape[0])):
       output_metrics["scalar"][f"{label}/layer_{layer_num:03d}"] = per_layer[layer_num]
+
+
+def _is_nnx_var_leaf(x):
+  """Duck-types NNX Variable / VariableState without importing flax."""
+  return hasattr(x, "get_metadata") and (hasattr(x, "value") or hasattr(x, "get_value"))
+
+
+def _path_to_keys(path):
+  """Converts a JAX KeyPath into normalized string keys, stripping trailing value/raw_value."""
+  keys = []
+  for p in path:
+    if hasattr(p, "key"):
+      keys.append(str(p.key))
+    elif hasattr(p, "name"):
+      keys.append(str(p.name))
+    elif hasattr(p, "idx"):
+      keys.append(str(p.idx))
+    else:
+      keys.append(str(p))
+  while keys and keys[-1] in ("value", "raw_value"):
+    keys.pop()
+  return tuple(keys)
+
+
+def _extract_param_leaves(tree):
+  """Extracts inexact array leaves and any NNX variable metadata keyed by normalized path."""
+  if tree is None:
+    return {}
+  entries = {}
+  leaves_with_path, _ = jax.tree_util.tree_flatten_with_path(tree, is_leaf=_is_nnx_var_leaf)
+  for path, leaf in leaves_with_path:
+    meta = {}
+    if _is_nnx_var_leaf(leaf):
+      raw_meta = leaf.get_metadata()
+      if isinstance(raw_meta, dict):
+        meta.update(raw_meta)
+      for attr in ("sharding", "out_sharding", "kernel_axes", "sharding_names", "param_scan_axis"):
+        if attr not in meta or meta[attr] is None:
+          attr_val = getattr(leaf, attr, None)
+          if attr_val is not None:
+            meta[attr] = attr_val
+      val = leaf.get_value() if hasattr(leaf, "get_value") else leaf.value
+    else:
+      val = leaf
+    base_keys = _path_to_keys(path)
+    if hasattr(val, "dtype") and hasattr(val, "ndim"):
+      if jnp.issubdtype(val.dtype, jnp.inexact):
+        entries[base_keys] = (val, meta)
+    elif val is not None:
+      sub_leaves, _ = jax.tree_util.tree_flatten_with_path(val)
+      for sub_path, sub_val in sub_leaves:
+        if hasattr(sub_val, "dtype") and hasattr(sub_val, "ndim") and jnp.issubdtype(sub_val.dtype, jnp.inexact):
+          sub_keys = _path_to_keys(sub_path)
+          entries[base_keys + sub_keys] = (sub_val, meta)
+  return entries
+
+
+def _find_axis_in_meta(meta, target_names, ndim):
+  """Returns the array axis index matching any name in `target_names` from leaf sharding metadata."""
+  if not meta or ndim <= 0:
+    return None
+  for meta_key in ("sharding", "kernel_axes", "out_sharding", "sharding_names"):
+    axes = meta.get(meta_key)
+    if axes is None:
+      continue
+    if isinstance(axes, str):
+      axes = (axes,)
+    if not isinstance(axes, (tuple, list)):
+      continue
+    for idx, ax in enumerate(axes):
+      if idx >= ndim:
+        break
+      if ax in target_names:
+        return idx
+      if isinstance(ax, (tuple, list)) and any(sub in target_names for sub in ax):
+        return idx
+  return None
+
+
+def _resolve_decoder_layer_mapping(path_keys, meta, ndim, config, prefix_local_k):
+  """Resolves how a parameter/grad leaf maps onto logical decoder layer indices."""
+  if "mtp_block" in path_keys:
+    return None
+
+  # Layout 1: unscanned `layers_<int>` in path keys.
+  for k in path_keys:
+    if k.startswith("layers_") and k[len("layers_") :].isdigit():
+      return ("single", int(k[len("layers_") :]))
+
+  scan_axis = meta.get("param_scan_axis", getattr(config, "param_scan_axis", 0))
+  outer_names = ("layers", "decoder_layers", "scanned_blocks")
+
+  # Layout 3: hybrid Qwen3NextScannableBlock / Qwen3_5ScannableBlock (`local_layers` + `global_layer`).
+  if "local_layers" in path_keys:
+    idx = path_keys.index("local_layers")
+    prefix = path_keys[:idx]
+    outer_axis = _find_axis_in_meta(meta, outer_names, ndim)
+    inner_axis = _find_axis_in_meta(meta, ("local_layers",), ndim)
+    is_outer_scanned = outer_axis is not None or any(k in ("layers", "scanned_blocks") for k in prefix)
+    if is_outer_scanned:
+      if outer_axis is None and inner_axis is None and ndim >= 2:
+        outer_axis = min(scan_axis, ndim - 2)
+        inner_axis = outer_axis + 1
+      elif outer_axis is None and inner_axis is not None and ndim >= 2:
+        cand = scan_axis if scan_axis < ndim else 0
+        outer_axis = cand if cand != inner_axis else (0 if inner_axis != 0 else 1)
+      elif inner_axis is None and outer_axis is not None and ndim >= 2:
+        inner_axis = outer_axis + 1 if outer_axis + 1 < ndim else (0 if outer_axis != 0 else 1)
+      if outer_axis is not None and inner_axis is not None and outer_axis != inner_axis:
+        return ("hybrid_local", outer_axis, inner_axis)
+    else:
+      if inner_axis is None and ndim >= 1:
+        inner_axis = scan_axis if scan_axis < ndim else 0
+      if inner_axis is not None:
+        offset = 0
+        if "layers_remainder" in prefix:
+          num_layers = getattr(config, "num_decoder_layers", 0)
+          cfg_cycle = getattr(config, "inhomogeneous_layer_cycle_interval", 1)
+          if cfg_cycle and cfg_cycle > 1 and num_layers > 0:
+            offset = (num_layers // cfg_cycle) * cfg_cycle
+        return ("scanned_1d", inner_axis, offset)
+    return None
+
+  if "global_layer" in path_keys:
+    idx = path_keys.index("global_layer")
+    prefix = path_keys[:idx]
+    outer_axis = _find_axis_in_meta(meta, outer_names, ndim)
+    is_outer_scanned = outer_axis is not None or any(k in ("layers", "scanned_blocks") for k in prefix)
+    k_val = prefix_local_k.get(prefix)
+    cfg_cycle = getattr(config, "inhomogeneous_layer_cycle_interval", None)
+    if k_val is not None:
+      cycle = int(cfg_cycle) if (cfg_cycle is not None and int(cfg_cycle) >= k_val + 1) else (k_val + 1)
+      global_offset = k_val
+    elif cfg_cycle is not None and int(cfg_cycle) > 1:
+      cycle = int(cfg_cycle)
+      global_offset = cycle - 1
+    else:
+      cycle = 1
+      global_offset = 0
+    if is_outer_scanned:
+      if outer_axis is None and ndim >= 1:
+        outer_axis = scan_axis if scan_axis < ndim else 0
+      if outer_axis is not None:
+        return ("hybrid_global", outer_axis, cycle, global_offset)
+    else:
+      return ("single", global_offset)
+    return None
+
+  # Layout 2: standard scanned decoder.
+  layer_axis = _find_axis_in_meta(meta, outer_names, ndim)
+  if layer_axis is None and any(k in ("layers", "scanned_blocks") for k in path_keys) and ndim >= 1:
+    layer_axis = scan_axis if scan_axis < ndim else 0
+  if layer_axis is not None:
+    return ("scanned_1d", layer_axis, 0)
+
+  return None
+
+
+def _reduce_leaf_for_axes(arr, keep_axes, compute_max):
+  """Reduces sum-of-squares (and optionally absmax) over all axes except `keep_axes`."""
+  if arr.size == 0:
+    zero = jnp.float32(0.0)
+    if not keep_axes:
+      return zero, (zero if compute_max else None)
+    shape = tuple(arr.shape[a] for a in keep_axes)
+    zeros = jnp.zeros(shape, dtype=jnp.float32)
+    return zeros, (zeros if compute_max else None)
+
+  arr_f32 = arr.astype(jnp.float32)
+  reduce_axes = tuple(i for i in range(arr_f32.ndim) if i not in keep_axes)
+  if reduce_axes:
+    sq = jnp.sum(jnp.square(arr_f32), axis=reduce_axes)
+    amax = jnp.max(jnp.abs(arr_f32), axis=reduce_axes) if compute_max else None
+  else:
+    sq = jnp.square(arr_f32)
+    amax = jnp.abs(arr_f32) if compute_max else None
+
+  # When keeping 2 axes (outer, inner), transpose if outer > inner so dim 0 is always outer.
+  if len(keep_axes) == 2 and keep_axes[0] > keep_axes[1]:
+    sq = jnp.swapaxes(sq, 0, 1)
+    if amax is not None:
+      amax = jnp.swapaxes(amax, 0, 1)
+  return sq, amax
+
+
+def compute_per_module_norms(raw_grads, model_params, config):
+  """Computes per-module and per-decoder-layer grad_norm, grad_max, and param_norm float32 scalars."""
+  grad_entries = _extract_param_leaves(raw_grads)
+  param_entries = _extract_param_leaves(model_params)
+
+  all_paths = list(grad_entries.keys())
+  seen = set(all_paths)
+  for path_keys in param_entries:
+    if path_keys not in seen:
+      all_paths.append(path_keys)
+      seen.add(path_keys)
+
+  # Pre-pass: discover K (local layers per block) for each hybrid scannable-block prefix.
+  prefix_local_k = {}
+  for path_keys in all_paths:
+    if "local_layers" not in path_keys or "mtp_block" in path_keys:
+      continue
+    g, g_meta = grad_entries.get(path_keys, (None, {}))
+    p, p_meta = param_entries.get(path_keys, (None, {}))
+    ref = p if p is not None else g
+    meta = {k: v for k, v in g_meta.items() if v is not None}
+    meta.update({k: v for k, v in p_meta.items() if v is not None})
+    idx = path_keys.index("local_layers")
+    prefix = path_keys[:idx]
+    inner_axis = _find_axis_in_meta(meta, ("local_layers",), ref.ndim)
+    if inner_axis is None:
+      outer_axis = _find_axis_in_meta(meta, ("layers", "decoder_layers", "scanned_blocks"), ref.ndim)
+      is_outer_scanned = outer_axis is not None or any(k in ("layers", "scanned_blocks") for k in prefix)
+      scan_axis = meta.get("param_scan_axis", getattr(config, "param_scan_axis", 0))
+      if is_outer_scanned and ref.ndim >= 2:
+        outer_ax = outer_axis if outer_axis is not None else min(scan_axis, ref.ndim - 2)
+        inner_axis = outer_ax + 1 if outer_ax + 1 < ref.ndim else (0 if outer_ax != 0 else 1)
+      elif not is_outer_scanned and ref.ndim >= 1:
+        inner_axis = scan_axis if scan_axis < ref.ndim else 0
+    if inner_axis is not None and inner_axis < ref.ndim:
+      prefix_local_k[prefix] = ref.shape[inner_axis]
+
+  metrics = {}
+  layer_grad_sq = defaultdict(list)
+  layer_grad_max = defaultdict(list)
+  layer_param_sq = defaultdict(list)
+
+  for path_keys in all_paths:
+    name = "/".join(path_keys)
+    g, g_meta = grad_entries.get(path_keys, (None, {}))
+    p, p_meta = param_entries.get(path_keys, (None, {}))
+    meta = {k: v for k, v in g_meta.items() if v is not None}
+    meta.update({k: v for k, v in p_meta.items() if v is not None})
+    ref = p if p is not None else g
+
+    mapping = _resolve_decoder_layer_mapping(path_keys, meta, ref.ndim, config, prefix_local_k)
+    if mapping is None or mapping[0] == "single":
+      keep_axes = ()
+    elif mapping[0] in ("scanned_1d", "hybrid_global"):
+      keep_axes = (mapping[1],)
+    elif mapping[0] == "hybrid_local":
+      keep_axes = (mapping[1], mapping[2])
+    else:
+      keep_axes = ()
+
+    def _record_layer_slices(sq_arr, amax_arr, target_sq, target_max, leaf_mapping, leaf_shape):
+      if leaf_mapping is None:
+        return
+      kind = leaf_mapping[0]
+      if kind == "single":
+        layer_idx = leaf_mapping[1]
+        target_sq[layer_idx].append(sq_arr)
+        if target_max is not None and amax_arr is not None:
+          target_max[layer_idx].append(amax_arr)
+      elif kind == "scanned_1d":
+        axis, offset = leaf_mapping[1], leaf_mapping[2]
+        for i in range(leaf_shape[axis]):
+          layer_idx = offset + i
+          target_sq[layer_idx].append(sq_arr[i])
+          if target_max is not None and amax_arr is not None:
+            target_max[layer_idx].append(amax_arr[i])
+      elif kind == "hybrid_local":
+        outer_axis, inner_axis = leaf_mapping[1], leaf_mapping[2]
+        num_blocks = leaf_shape[outer_axis]
+        num_local = leaf_shape[inner_axis]
+        cfg_cycle = getattr(config, "inhomogeneous_layer_cycle_interval", None)
+        cycle = int(cfg_cycle) if (cfg_cycle is not None and int(cfg_cycle) >= num_local + 1) else (num_local + 1)
+        for b in range(num_blocks):
+          for k in range(num_local):
+            layer_idx = b * cycle + k
+            target_sq[layer_idx].append(sq_arr[b, k])
+            if target_max is not None and amax_arr is not None:
+              target_max[layer_idx].append(amax_arr[b, k])
+      elif kind == "hybrid_global":
+        outer_axis, cycle, global_offset = leaf_mapping[1], leaf_mapping[2], leaf_mapping[3]
+        num_blocks = leaf_shape[outer_axis]
+        for b in range(num_blocks):
+          layer_idx = b * cycle + global_offset
+          target_sq[layer_idx].append(sq_arr[b])
+          if target_max is not None and amax_arr is not None:
+            target_max[layer_idx].append(amax_arr[b])
+
+    if g is not None:
+      g_keep = keep_axes if all(a < g.ndim for a in keep_axes) else ()
+      g_sq, g_max = _reduce_leaf_for_axes(g, g_keep, compute_max=True)
+      metrics[f"grad_norm/{name}"] = jnp.sqrt(jnp.sum(g_sq))
+      metrics[f"grad_max/{name}"] = jnp.max(g_max)
+      if g_keep == keep_axes:
+        _record_layer_slices(g_sq, g_max, layer_grad_sq, layer_grad_max, mapping, g.shape)
+
+    if p is not None:
+      p_keep = keep_axes if all(a < p.ndim for a in keep_axes) else ()
+      p_sq, _ = _reduce_leaf_for_axes(p, p_keep, compute_max=False)
+      metrics[f"param_norm/{name}"] = jnp.sqrt(jnp.sum(p_sq))
+      if p_keep == keep_axes:
+        _record_layer_slices(p_sq, None, layer_param_sq, None, mapping, p.shape)
+
+  for layer_idx in sorted(layer_grad_sq):
+    metrics[f"layer_grad_norm/layer_{layer_idx:03d}"] = jnp.sqrt(jnp.sum(jnp.stack(layer_grad_sq[layer_idx])))
+  for layer_idx in sorted(layer_grad_max):
+    metrics[f"layer_grad_max/layer_{layer_idx:03d}"] = jnp.max(jnp.stack(layer_grad_max[layer_idx]))
+  for layer_idx in sorted(layer_param_sq):
+    metrics[f"layer_param_norm/layer_{layer_idx:03d}"] = jnp.sqrt(jnp.sum(jnp.stack(layer_param_sq[layer_idx])))
+
+  return metrics
 
 
 class MetadataKey(enum.Enum):
@@ -299,6 +674,8 @@ class MetricLogger:
     if self.config.num_experts > 1:
       moe_lb_loss = scalars.get("learning/moe_lb_loss", 0.0)
       log_parts.append(f"moe_lb_loss: {moe_lb_loss:.6f}")
+      if "learning/moe_lb_loss_unweighted" in scalars:
+        log_parts.append(f"moe_lb_loss_unweighted: {scalars['learning/moe_lb_loss_unweighted']:.6f}")
       if "learning/moe_max_load_ratio" in scalars:
         log_parts.append(f"moe_max_load_ratio: {scalars['learning/moe_max_load_ratio']:.4f}")
         log_parts.append(f"moe_max_load_ratio_mean: {scalars['learning/moe_max_load_ratio_mean']:.4f}")
@@ -338,6 +715,8 @@ class MetricLogger:
     ]
     if self.config.num_experts > 1:
       log_parts.append(f"avg_moe_lb_loss={scalars['eval/avg_moe_lb_loss']:.3f}")
+      if "eval/avg_moe_lb_loss_unweighted" in scalars:
+        log_parts.append(f"avg_moe_lb_loss_unweighted={scalars['eval/avg_moe_lb_loss_unweighted']:.6f}")
     if getattr(self.config, "mtp_num_layers", 0) > 0:
       log_parts.extend(
           [
@@ -578,6 +957,10 @@ class MetricLogger:
     self.cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(scalar.get("evaluation/total_loss", 0.0))
     self.cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(scalar.get("evaluation/total_weights", 0.0))
     self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss"] += float(scalar.get("evaluation/moe_lb_loss", 0.0))
+    if "evaluation/moe_lb_loss_unweighted" in scalar:
+      self.cumulative_eval_metrics["scalar"]["eval/moe_lb_loss_unweighted"] += float(
+          scalar["evaluation/moe_lb_loss_unweighted"]
+      )
     self.cumulative_eval_metrics["scalar"]["eval/indexer_loss"] += float(scalar.get("evaluation/indexer_loss", 0.0))
     self.cumulative_eval_metrics["scalar"]["eval/mtp_loss"] += float(scalar.get("evaluation/mtp_loss", 0.0))
     self.cumulative_eval_metrics["scalar"]["eval/mtp_acceptance_rate_percent"] += float(
@@ -662,6 +1045,8 @@ class MetricLogger:
     cumulative["eval/avg_loss"] = eval_loss
     cumulative["eval/avg_perplexity"] = np.exp(eval_loss)
     cumulative["eval/avg_moe_lb_loss"] = cumulative["eval/moe_lb_loss"] / eval_step_count
+    if "eval/moe_lb_loss_unweighted" in cumulative:
+      cumulative["eval/avg_moe_lb_loss_unweighted"] = cumulative["eval/moe_lb_loss_unweighted"] / eval_step_count
     cumulative["eval/avg_indexer_loss"] = cumulative["eval/indexer_loss"] / eval_step_count
     cumulative["eval/avg_mtp_loss"] = cumulative["eval/mtp_loss"] / eval_step_count
     cumulative["eval/avg_mtp_acceptance_rate_percent"] = cumulative["eval/mtp_acceptance_rate_percent"] / eval_step_count

@@ -1525,6 +1525,14 @@ class MoEGeneral(BaseModel):
       description="Padded intermediate dimension at MoE layer for efficient GMM_v2 kernel execution.",
   )
   load_balance_loss_weight: NonNegativeFloat = Field(0.0, description="Weight for the load balancing auxiliary loss.")
+  moe_log_unweighted_lb_loss: bool = Field(
+      False,
+      description=(
+          "Log unweighted MoE load balancing auxiliary loss (learning/moe_lb_loss_unweighted and"
+          " evaluation/moe_lb_loss_unweighted) as a stop-gradient diagnostic metric even when"
+          " load_balance_loss_weight == 0.0."
+      ),
+  )
   moe_use_megatron_seq_aux_loss: bool = Field(
       False,
       description=(
@@ -4366,6 +4374,12 @@ class Metrics(BaseModel):
   gcs_metrics: bool = Field(False, description="If True, save metrics to GCS.")
   save_config_to_gcs: bool = Field(False, description="If True, save config to GCS.")
   record_internal_nn_metrics: int = Field(0, description="Record internal neural network metrics.")
+  log_per_module_norms: bool = Field(
+      False,
+      description=(
+          "Log per-module and per-decoder-layer raw_grad_norm, grad_max, and param_norm scalar metrics in train_step."
+      ),
+  )
   prometheus_port: int = Field(0, description="Port for Prometheus metrics server. 0 disables it.")
   enable_checkpoint_cloud_logger: bool = Field(False, description="Enables structured logging for checkpointing.")
   enable_wandb: bool = Field(False, description="Enable Weights & Biases logging.")

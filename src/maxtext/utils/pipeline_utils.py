@@ -430,8 +430,12 @@ def unflatten_nnx_state(arrays, treedef, is_var_flags, var_types, var_metadata):
 # entry use the dtype rule (bool: any, float: mean, int: sum), which suits the per-layer logging statistics
 # (activation_mean / activation_stdev / activation_fraction_zero).
 SOWN_MICROBATCH_REDUCTIONS = {
+    "activation_amax": jnp.max,
+    "mlp_wo_input_amax": jnp.max,
+    "moe_wo_input_amax": jnp.max,
     "moe_has_overflow": jnp.any,
     "moe_lb_loss": jnp.mean,
+    "moe_lb_loss_unweighted": jnp.mean,
     "moe_bias_updates": jnp.sum,  # per-expert token counts under PP (decoded in train.py)
     "max_logits": jnp.max,
     "te_moe_total_recv_tokens": jnp.max,

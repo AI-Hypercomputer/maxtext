@@ -1098,6 +1098,8 @@ class MlpBlock(nnx.Module):
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
     x = self._maybe_shard_with_logical(x, self.intermediate_logical)
+    if getattr(cfg, "record_internal_nn_metrics", False):
+      self.mlp_wo_input_amax = nnx.Intermediate(jax.lax.stop_gradient(jnp.max(jnp.abs(x)).astype(jnp.float32)))
     output = self.wo(x, out_sharding=out_sharding)
 
     output = checkpoint_name(output, "mlpwo")
