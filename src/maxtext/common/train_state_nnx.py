@@ -42,12 +42,14 @@ class TrainStateNNX(nnx.Module):
     self.model = model
     self.optimizer = optimizer
 
-  def apply_gradients(self, grads: Any, **kwargs):
+  def apply_gradients(self, grads: Any, stochastic_rounding_seed: int | None = None, **kwargs):
     """Mimics the Linen apply_gradients function.
 
     Updates the optimizer state, applies updates to parameters, and increments
     the step counter. Only updates `self.model`. Extra kwargs (e.g. loss/grad_norm
     for the skip-step-on-spikes optimizer) are forwarded to the optax update.
+    With `stochastic_rounding_seed` set, bf16 parameters are updated with stochastic
+    rounding seeded from it; None keeps round-to-nearest.
     """
     if self.optimizer is None:
       raise RuntimeError(
@@ -55,7 +57,55 @@ class TrainStateNNX(nnx.Module):
           " an optimizer. This usually happens when the state was created for"
           " inference only."
       )
-    self.optimizer.update(self.model, grads, **kwargs)
+    if stochastic_rounding_seed is None:
+      return self.optimizer.update(self.model, grads, **kwargs)
+    return _update_with_stochastic_rounding(self.optimizer, self.model, grads, stochastic_rounding_seed, **kwargs)
+
+
+_STOCHASTIC_ROUNDING_STREAM = 0x5EED
+
+
+def stochastic_round_to(x: jax.Array, dtype, key: jax.Array) -> jax.Array:
+  """Unbiased stochastic rounding of an f32 array to bf16 (other dtypes: plain cast)."""
+  if jnp.dtype(dtype) != jnp.bfloat16:
+    return x.astype(dtype)
+  x = x.astype(jnp.float32)
+  bits = jax.lax.bitcast_convert_type(x, jnp.uint32)
+  noise = jax.random.bits(key, x.shape, jnp.uint32) & jnp.uint32(0xFFFF)
+  # Adding uniform noise below the bf16 mantissa to the magnitude bits, then truncating, rounds |x| up with
+  # probability (dropped bits / 2^16): E[round(x)] = x. Sign-magnitude makes this correct for both signs.
+  rounded = (bits + noise) & jnp.uint32(0xFFFF0000)
+  out = jax.lax.bitcast_convert_type(rounded, jnp.float32)
+  # Non-finite inputs, and a round-up past the largest bf16, fall back to round-to-nearest.
+  out = jnp.where(jnp.isfinite(out), out, x)
+  return out.astype(jnp.bfloat16)
+
+
+def _update_with_stochastic_rounding(optimizer, model, grads, seed, **kwargs):
+  """Runs nnx.Optimizer.update, then re-applies its updates in f32 with stochastic rounding into bf16 params.
+
+  optimizer.update advances the optimizer state and step exactly as usual and returns the updates; only the
+  parameter write is redone, from a snapshot of the parameters taken before the update.
+  """
+  graph = getattr(optimizer, "graph", None)
+  # Snapshot of the parameters before the update (plain arrays, so the update below does not change them).
+  old_params = nnx.as_pure(nnx.state(model, optimizer.wrt, graph=graph))
+  step = jnp.asarray(optimizer.step[...]).astype(jnp.uint32)
+  # Standard optimizer update: advances optimizer state and step, returns the updates (param write redone below).
+  updates = optimizer.update(model, grads, **kwargs)
+  # A stream of its own (tagged), so it never repeats the weight-init draws of the same seed.
+  key = jax.random.fold_in(jax.random.fold_in(jax.random.PRNGKey(seed), _STOCHASTIC_ROUNDING_STREAM), step)
+  leaves, treedef = jax.tree.flatten(old_params)
+  # One independent subkey per parameter, in the params' tree structure, so no two parameters share rounding noise.
+  keys = treedef.unflatten(list(jax.random.split(key, max(len(leaves), 1))[: len(leaves)]))
+
+  def _apply(p, u, k):
+    if u is None:
+      return p
+    return stochastic_round_to(p.astype(jnp.float32) + u.astype(jnp.float32), p.dtype, k)
+
+  nnx.update(model, jax.tree.map(_apply, old_params, updates, keys))
+  return updates
 
 
 # On-disk checkpoint format.

@@ -75,6 +75,7 @@ class _Cfg:
   grad_dtype: jnp.dtype = jnp.float32
   record_internal_nn_metrics: bool = False
   skip_step_on_spikes: bool = False
+  param_update_stochastic_rounding: bool = False
   shard_mode: int = 0  # ShardMode.AUTO
   debug_sharding: bool = False
   weight_sparsity_n: int = 0

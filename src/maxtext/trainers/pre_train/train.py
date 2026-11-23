@@ -681,14 +681,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     opt_state = nnx.state(state.optimizer)
     new_opt_state = jax.device_put(opt_state, device_opt_shardings)
     nnx.update(state.optimizer, new_opt_state)
+  sr_seed = config.init_weights_seed if config.param_update_stochastic_rounding else None
   if config.skip_step_on_spikes:
     # The skip-step optimizer is a GradientTransformationExtraArgs that reads
     # loss/grad_norm to decide whether to zero the update on a spike. nnx
     # Optimizer.update forwards these kwargs to tx.update.
     grad_norm = max_utils.l2norm_pytree(grads)
-    state.apply_gradients(grads, loss=loss, grad_norm=grad_norm)
+    state.apply_gradients(grads, loss=loss, grad_norm=grad_norm, stochastic_rounding_seed=sr_seed)
   else:
-    state.apply_gradients(grads)
+    state.apply_gradients(grads, stochastic_rounding_seed=sr_seed)
   new_state = state
 
   # Apply updates for Auxiliary-Loss-Free load balancing for DeepSeek family

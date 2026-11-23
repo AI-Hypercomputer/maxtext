@@ -1370,6 +1370,7 @@ gradient_clipping_threshold: 1.0
 gradient_accumulation_steps: 1
 
 opt_type: "adamw"  # one of "adamw", "adam_pax", "sgd", or "muon"
+param_update_stochastic_rounding: false # Stochastically round optimizer updates into bf16 params (no fp32 master copy otherwise loses small updates).
 
 # If true, skip the training step when loss or gradient spike is detected
 # No updates for both weights and momentums (if applies)

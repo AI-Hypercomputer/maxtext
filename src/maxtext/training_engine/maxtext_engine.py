@@ -1578,10 +1578,11 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
       if isinstance(local_state, train_state_nnx.TrainStateNNX):
+        sr_seed = self._config.init_weights_seed if self._config.param_update_stochastic_rounding else None
         if self._config.skip_step_on_spikes:
-          local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
+          local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm, stochastic_rounding_seed=sr_seed)
         else:
-          local_state.apply_gradients(grads)
+          local_state.apply_gradients(grads, stochastic_rounding_seed=sr_seed)
       _, new_state_pure = nnx.split(local_state)
       if self._config.skip_step_on_spikes and _OPTIMIZER_STATE_KEY in new_state_pure:
         opt_state = nnx.to_pure_dict(new_state_pure[_OPTIMIZER_STATE_KEY])["opt_state"]
