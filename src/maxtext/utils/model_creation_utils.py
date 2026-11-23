@@ -738,6 +738,7 @@ def create_model(
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra.named_scopes import add_named_scopes  # pylint: disable=import-outside-toplevel
 
+    m3_models.validate_attention_config(config, mesh=mesh)
     with m3_models.enter_mesh_scope(
         mesh if jax.sharding.get_abstract_mesh().empty else None,
         shard_mode=getattr(config, "shard_mode", "auto"),

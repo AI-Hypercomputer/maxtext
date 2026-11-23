@@ -29,11 +29,13 @@ from collections.abc import Callable
 
 from flax import nnx
 import jax
+from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model  # pylint: disable=no-name-in-module
+from maxtext.m3.models.qwen3 import qwen3_flops  # pylint: disable=no-name-in-module
 
 
 def create_glm5_3_flash_model(config, mesh=None, *, rngs, **kwargs):
@@ -106,6 +108,7 @@ m3_sharding.register_model_mesh_validator(_unsupported_model_mesh_settings)
 ambient_mesh_is_explicit = m3_sharding.ambient_mesh_is_explicit
 end_eager_placement = m3_sharding.end_eager_placement
 enter_mesh_scope = m3_sharding.enter_mesh_scope
+validate_attention_config = m3_kernels.validate_attention_config
 _end_eager_placement = end_eager_placement
 
 
@@ -177,6 +180,8 @@ MODEL_FLOPS_REGISTRY: dict[str, Callable] = {
     "granitemoe": calculate_granitemoe_tflops_per_device,
     "qwen3.8-flash-next": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
     "qwen3.8-flash-next-mini": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
+    "qwen3-0.6b": qwen3_flops.calculate_qwen3_tflops_per_device,
+    "qwen3-vl-2b": qwen3_flops.calculate_qwen3_tflops_per_device,
 }
 
 
