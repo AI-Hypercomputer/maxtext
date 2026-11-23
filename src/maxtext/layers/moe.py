@@ -22,7 +22,7 @@ import functools
 import inspect
 import math
 import random
-from typing import Any, Iterable, Optional, Tuple, Union
+from typing import Any, Iterable, NamedTuple, Optional, Tuple, Union
 
 from aqt.jax.v2 import aqt_tensor as aqt
 from flax import nnx
@@ -1182,7 +1182,8 @@ def _all_gather_quantized_payload(
     axis_name: Mesh axis name(s) to gather over.
     axis: Axis of `x` to gather along.
     tiled: Same as `jax.lax.all_gather`.
-    method: One of
+    method: `<scaling>[@e4m3|@e5m2]`, parsed like the ragged all-to-all methods (`_parse_a2a_quant_method`);
+      the optional suffix picks the FP8 wire format, else `qtype`. Scaling is one of
       'fixed,<b>': static per-tensor scale b/qmax. The scale is identical on all
         shards, so only qvalues are gathered. For E5M2, |x| > ~b saturates and
         |x| < ~1.3e-10*b flushes to zero.
@@ -1191,7 +1192,7 @@ def _all_gather_quantized_payload(
         for 2D), matching the per-row gradient quantization in megablox
         `_bwd_quantize_gradient`. Scales differ per shard, so they are
         gathered alongside qvalues.
-    qtype: Wire dtype of the quantized payload.
+    qtype: Wire dtype of the quantized payload when `method` has no '@<format>' suffix (default E5M2).
     num_feature_axes: Number of trailing axes that form one token's features.
       'rowwise' computes one scale per token over these axes, e.g. 2 for the
       (batch, seq, emb // 128, 128) layout of moe_tc_ragged_3d_dispatch.
@@ -1199,10 +1200,11 @@ def _all_gather_quantized_payload(
   Returns:
     The gathered, dequantized array in `x.dtype`.
   """
-  static = method.startswith("fixed")
+  spec = _parse_a2a_quant_method(method, qtype)
+  if spec is None or spec.scaling not in ("rowwise", "fixed"):
+    raise ValueError(f"Unsupported method: {method!r}. Supported: {A2A_QUANT_SUPPORTED}.")
+  static = spec.scaling == "fixed"
   token_axes = tuple(range(x.ndim - num_feature_axes))
-  if not static and method != "rowwise":
-    raise ValueError(f"Unsupported method: {method!r}. Supported: 'rowwise', 'fixed,<bound>'.")
   if not static and axis % x.ndim not in token_axes:
     raise ValueError(f"'rowwise' requires gathering along a token axis, got axis={axis}.")
 
@@ -1210,15 +1212,15 @@ def _all_gather_quantized_payload(
   if static:
     x_q = qpl.quantize(
         x_f32,
-        qtype=qtype,
+        qtype=spec.qtype,
         channelwise_axes=(),
-        calibration_method=method,
+        calibration_method=f"fixed,{spec.bound}",
     )
     scale = x_q.scale
   else:  # dynamic rowwise with per-token scale
     x_q = qpl.quantize(
         x_f32,
-        qtype=qtype,
+        qtype=spec.qtype,
         channelwise_axes=token_axes,
         calibration_method="absmax",
     )
@@ -1290,22 +1292,65 @@ _moe_combine_psum_scatter.defvjp(_moe_combine_psum_scatter_fwd, _moe_combine_psu
 _A2A_QUANT_FORMATS = dict(zip(A2A_QUANT_FORMATS, (jnp.float8_e4m3fn, jnp.float8_e5m2)))
 
 
-def _parse_a2a_quant_method(method: str, default_qtype: jnp.dtype) -> jnp.dtype | None:
-  """Returns the FP8 wire dtype of a ragged all-to-all quantization method, or None for ''.
+class A2aQuantSpec(NamedTuple):
+  """A parsed EP ragged all-to-all quantization method `<scaling>[@<format>]`.
+
+  Attributes:
+    scaling: 'rowwise' (dynamic absmax scale per row) or 'fixed' (static per-tensor scale `bound / qmax`).
+    qtype: FP8 wire dtype of the values.
+    bound: 'fixed' only: values are clipped to [-bound, bound].
+  """
+
+  scaling: str
+  qtype: jnp.dtype
+  bound: float | None = None
+
+
+def _parse_a2a_quant_method(method: str, default_qtype: jnp.dtype) -> A2aQuantSpec | None:
+  """Parses a ragged all-to-all quantization method; returns None for '' (unquantized).
 
   Args:
-    method: '' (unquantized), 'rowwise' (FP8 in `default_qtype`), 'rowwise@e4m3' or 'rowwise@e5m2'.
-    default_qtype: Wire dtype of 'rowwise' without an '@<format>' suffix.
+    method: '' or `<scaling>[@<format>]`, with scaling 'rowwise' or 'fixed,<bound>' (bound > 0) and format 'e4m3'
+      or 'e5m2'.
+    default_qtype: Wire dtype when the '@<format>' suffix is omitted.
+
+  Returns:
+    None for '', else the `A2aQuantSpec`.
+
+  Raises:
+    ValueError: On any other method.
   """
   if not method:
     return None
   try:
-    _, _, fmt = parse_a2a_quant_method(method)
+    scaling, bound, fmt = parse_a2a_quant_method(method)
   except ValueError as e:
     raise ValueError(
         f"Unsupported ragged all-to-all quantization method: {method!r}. Supported: {A2A_QUANT_SUPPORTED}."
     ) from e
-  return _A2A_QUANT_FORMATS[fmt] if fmt else default_qtype
+  return A2aQuantSpec(scaling, _A2A_QUANT_FORMATS[fmt] if fmt else default_qtype, bound)
+
+
+def _a2a_quantize_rows(x: jax.Array, spec: A2aQuantSpec) -> tuple[jax.Array, jax.Array]:
+  """Quantizes [rows, features] `x` in f32 math.
+
+  Returns:
+    (qvalue, scale): `spec.qtype` values of `x`'s shape and the f32 scale: [rows, 1] ('rowwise') or the static
+    [1, 1] scale ('fixed').
+  """
+  x_f32 = x.astype(jnp.float32)
+  if spec.scaling == "fixed":
+    # Same quantizer as the 'fixed' branch of `_all_gather_quantized_payload`: values beyond the bound saturate.
+    x_q = qpl.quantize(x_f32, qtype=spec.qtype, channelwise_axes=(), calibration_method=f"fixed,{spec.bound}")
+    return x_q.qvalue, x_q.scale
+  # All-zero rows get scale 1 (qwix guards tiny scales), so they stay 0 and never produce NaN.
+  x_q = qpl.quantize(x_f32, qtype=spec.qtype, channelwise_axes=(0,), calibration_method="absmax")
+  return x_q.qvalue, x_q.scale
+
+
+def _a2a_dequantize_rows(qvalue: jax.Array, scale: jax.Array, dtype: jnp.dtype) -> jax.Array:
+  """Inverse of `_a2a_quantize_rows`: [rows, features] values times their f32 scale, cast to `dtype`."""
+  return (qvalue.astype(jnp.float32) * scale).astype(dtype)
 
 
 def _ra2a_maybe_quantized(
@@ -1316,48 +1361,42 @@ def _ra2a_maybe_quantized(
     output_offsets: jax.Array,
     recv_sizes: jax.Array,
     axis_name: str,
-    qtype: jnp.dtype | None,
+    spec: A2aQuantSpec | None,
 ) -> jax.Array:
-  """One ragged all-to-all wire: plain if `qtype` is None, else FP8 values plus one f32 scale per row.
+  """One ragged all-to-all wire of [rows, features] `x`: plain if `spec` is None, else FP8 values and f32 scales.
 
-  The quantized wire sends `x` as `qtype` values with a dynamic absmax scale per row (over the trailing feature
-  axis) through two ragged all-to-alls on the same offsets, then dequantizes to `x.dtype`. The value and scale
-  receive buffers are zero-initialized, so rows that receive nothing dequantize to 0 whatever `output` holds (the
-  plain wire keeps `output` there). All-zero rows get scale 1 (qwix guards
-  tiny scales), so they stay 0 and never produce NaN.
+  The quantized wire sends `x` as `spec.qtype` values and dequantizes them to `x.dtype` on the receiver:
+    'fixed': one ragged all-to-all of the values; the static scale is known on both sides.
+    'rowwise': a second ragged all-to-all of the f32 scales on the same offsets.
+  Receive buffers are zero-initialized, so rows that receive nothing dequantize to 0 whatever `output` holds (the
+  plain wire keeps `output` there).
+
+  Args:
+    x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name: As in `jax.lax.ragged_all_to_all`.
+    spec: The parsed quantization method, or None.
   """
-  if qtype is None:
-    return jax.lax.ragged_all_to_all(
-        x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name=axis_name
-    )
-  x_q = qpl.quantize(
-      x.astype(jnp.float32),
-      qtype=qtype,
-      channelwise_axes=tuple(range(x.ndim - 1)),
-      calibration_method="absmax",
-  )
-  # zeros_like keeps the varying manual axes (VMA) of `output` under shard_map(check_vma=True).
-  qvalue = jax.lax.ragged_all_to_all(
-      x_q.qvalue,
-      jnp.zeros_like(output, dtype=qtype),
-      input_offsets,
-      send_sizes,
-      output_offsets,
-      recv_sizes,
+  ra2a = functools.partial(
+      jax.lax.ragged_all_to_all,
+      input_offsets=input_offsets,
+      send_sizes=send_sizes,
+      output_offsets=output_offsets,
+      recv_sizes=recv_sizes,
       axis_name=axis_name,
   )
+  if spec is None:
+    return ra2a(x, output)
+  if x.ndim != 2:
+    raise ValueError(f"Quantized ragged all-to-all expects [rows, features] operands, got {x.shape}.")
+  out_rows = output.shape[0]
+  qvalue, scale = _a2a_quantize_rows(x, spec)
+  # zeros_like keeps the varying manual axes (VMA) of `output` under shard_map(check_vma=True).
+  if spec.scaling == "fixed":
+    return _a2a_dequantize_rows(ra2a(qvalue, jnp.zeros_like(output, dtype=spec.qtype)), scale, x.dtype)
+  recv_qvalue = ra2a(qvalue, jnp.zeros_like(output, dtype=spec.qtype))
   # One f32 scale per row, sent as [rows]. XLA:TPU still moves each row as one (1, 128) f32 tile, i.e. 512 B/row
   # (about 7% of the FP8 payload at 7168 features).
-  scale = jax.lax.ragged_all_to_all(
-      x_q.scale.reshape(x.shape[:-1]),
-      jnp.zeros_like(output, dtype=jnp.float32, shape=output.shape[:-1]),
-      input_offsets,
-      send_sizes,
-      output_offsets,
-      recv_sizes,
-      axis_name=axis_name,
-  )
-  return (qvalue.astype(jnp.float32) * scale[..., None]).astype(x.dtype)
+  recv_scale = ra2a(scale.reshape(-1), jnp.zeros_like(output, dtype=jnp.float32, shape=(out_rows,)))
+  return _a2a_dequantize_rows(recv_qvalue, recv_scale[:, None], x.dtype)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(6, 7, 8, 9))
@@ -1442,9 +1481,13 @@ def _quantized_ragged_all_to_all(
   Args:
     x, output, input_offsets, send_sizes, output_offsets, recv_sizes, axis_name: As in `jax.lax.ragged_all_to_all`.
       With `fwd_method` set, rows that receive nothing are 0 whatever `output` holds; `output` gets no cotangent.
-    fwd_method: Quantization of the forward wire (`x`): '' or 'rowwise[@e4m3|@e5m2]'; 'rowwise' means E4M3.
+    fwd_method: Quantization of the forward wire (`x`): '' or `<scaling>[@<format>]` (see `_parse_a2a_quant_method`);
+      the format defaults to E4M3. With 'fixed,<bound>' the backward passes the cotangent through unmasked (a plain
+      straight-through estimator): unlike qwix's `clip_gradient_to_calibration`, it does not zero the gradient of
+      forward-saturated elements.
     bwd_method: Quantization of the backward wire (the cotangent of the result, sent back along the reversed routes):
-      '' or 'rowwise[@e4m3|@e5m2]'; 'rowwise' means E5M2.
+      '' or `<scaling>[@<format>]` as for `fwd_method`; the format defaults to E5M2. With 'fixed,<bound>' the
+      cotangent is clipped to [-bound, bound] (values beyond it saturate) and sent with the static scale bound / qmax.
 
   Returns:
     The received rows in `x.dtype`. With both methods '' this is exactly `jax.lax.ragged_all_to_all`.
