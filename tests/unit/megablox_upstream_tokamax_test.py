@@ -31,11 +31,6 @@ import pytest
 import qwix
 import qwix.pallas as qpl
 
-try:  # decoupled-requirements.txt pins tokamax==0.0.12, before gmm_fuser existed.
-  from tokamax._src.ops.gmm_v2 import gmm_fuser  # pylint: disable=g-import-not-at-top
-except ImportError:
-  gmm_fuser = None
-
 _TILES = forked_gmm_v2.TileSizes(256, 1024, 256)
 _W1792 = forked_gmm_v2.TileSizes(256, 1792, 256)
 _FULL_3584 = forked_gmm_v2.TileSizes(256, 3584, 256)
@@ -110,21 +105,25 @@ class UpstreamTokamaxDispatchTest(parameterized.TestCase):
   def test_call_gmm_v2_wiring(
       self, lhs_shape, want: str, out_is_3d: bool = False, ps_3d: bool = False, hide_fuser: bool = False
   ):
-    if want != "fork" and gmm_fuser is None:
-      self.skipTest("Requires tokamax >= 0.0.18")
     out_shape = (512, 2, 128) if out_is_3d else (512, 256)
     lhs, rhs = jnp.ones(lhs_shape, jnp.bfloat16), jnp.ones((2, 1024, 256), jnp.bfloat16)
     gs = jnp.array([256, 256], jnp.int32)
     ps = jnp.ones(out_shape, jnp.bfloat16) if ps_3d else None
-    tpu_cm = mock.patch.object(ops.pltpu, "get_tpu_info", autospec=True, return_value=mock.Mock(vmem_capacity_bytes=64))
-    if hide_fuser or gmm_fuser is None:
-      fuser_cm, up_cm = mock.patch.object(ops, "gmm_fuser", None), mock.patch.object(ops, "tokamax_gmm_v2", None)
-    else:
-      zero_2d = jnp.zeros((512, 256), jnp.bfloat16)
-      fuser_cm = mock.patch.object(gmm_fuser, "_run_gmm_v2_fusible", autospec=True, return_value=zero_2d)
-      up_cm = mock.patch.object(ops.tokamax_gmm_v2, "gmm_v2", autospec=True, return_value=zero_2d)
-    fork_cm = mock.patch.object(ops.gmm_v2, "gmm_v2", autospec=True, return_value=jnp.ones(out_shape, jnp.bfloat16))
-    with tpu_cm, fuser_cm as f_mock, up_cm as u_mock, fork_cm as g_mock:
+    zero_2d = jnp.zeros((512, 256), jnp.bfloat16)
+    # Stand-in Tokamax modules: tests the routing and argument wiring on any tokamax version (GitHub CPU CI
+    # pins tokamax==0.0.12, which predates gmm_fuser). Kernel numerics are covered by the TPU parity tests.
+    fuser = mock.Mock(gmm_v2_fusible=mock.Mock(return_value=zero_2d))
+    up_gmm = mock.Mock(gmm_v2=mock.Mock(return_value=zero_2d))
+    fusion = mock.Mock(fuse=lambda f: f)
+    if hide_fuser:
+      fuser = up_gmm = fusion = None
+    with (
+        mock.patch.object(ops.pltpu, "get_tpu_info", autospec=True, return_value=mock.Mock(vmem_capacity_bytes=64)),
+        mock.patch.object(ops, "gmm_fuser", fuser),
+        mock.patch.object(ops, "tokamax_gmm_v2", up_gmm),
+        mock.patch.object(ops, "op_fusion", fusion),
+        mock.patch.object(ops.gmm_v2, "gmm_v2", autospec=True, return_value=jnp.ones(out_shape, jnp.bfloat16)) as fork,
+    ):
       out = ops._call_gmm_v2(  # pylint: disable=protected-access
           lhs=lhs,
           rhs=rhs,
@@ -136,17 +135,18 @@ class UpstreamTokamaxDispatchTest(parameterized.TestCase):
       )
     self.assertEqual(out.shape, out_shape)
     if want == "fuser":
-      self.assertEqual(f_mock.call_count, 2)
-      self.assertEqual(f_mock.call_args.kwargs["vmem_limit_bytes"], int(0.96 * 64))
-      u_mock.assert_not_called()
-      g_mock.assert_not_called()
+      fuser.gmm_v2_fusible.assert_called_once()
+      self.assertEqual(fuser.gmm_v2_fusible.call_args.kwargs["lhs"].shape, (512, 1024))
+      self.assertEqual(fuser.gmm_v2_fusible.call_args.kwargs["vmem_limit_bytes"], int(0.96 * 64))
+      up_gmm.gmm_v2.assert_not_called()
+      fork.assert_not_called()
     elif want == "upstream":
-      u_mock.assert_called_once()
-      self.assertEqual(u_mock.call_args.kwargs["lhs"].shape, (512, 1024))
-      self.assertEqual(u_mock.call_args.kwargs["partial_sum"].shape, (512, 256))
-      g_mock.assert_not_called()
+      up_gmm.gmm_v2.assert_called_once()
+      self.assertEqual(up_gmm.gmm_v2.call_args.kwargs["lhs"].shape, (512, 1024))
+      self.assertEqual(up_gmm.gmm_v2.call_args.kwargs["partial_sum"].shape, (512, 256))
+      fork.assert_not_called()
     else:
-      g_mock.assert_called_once()
+      fork.assert_called_once()
 
 
 @pytest.mark.tpu_only
