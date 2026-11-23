@@ -20,6 +20,7 @@ import os
 import re
 import sys
 from typing import Any
+from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
@@ -168,6 +169,16 @@ class MaxTextEngineTrainTest(absltest.TestCase):
     unsplit = next(engine_train_script.micro_batch_stream(single_loader, 1))
     for key, arr in single_batch.items():
       np.testing.assert_array_equal(np.asarray(unsplit[key]), arr, err_msg=key)
+
+  def test_log_peak_memory_tolerates_a_device_without_memory_stats(self):
+    """A Pathways device raises from `memory_stats()`; that must not end the run."""
+    device = mock.Mock()
+    device.memory_stats.side_effect = jax.errors.JaxRuntimeError(
+        "INVALID_ARGUMENT: MemoryStats is only supported for addressable PjRt devices."
+    )
+    with mock.patch.object(jax, "local_devices", return_value=[device]):
+      engine_train_script.log_peak_memory()
+    device.memory_stats.assert_called_once_with()
 
   def test_train_main_matches_pre_train(self):
     """Runs `train.main()` on `qwen3-0.6b` and verifies parameter parity with `pre_train.train_loop`."""
