@@ -155,7 +155,7 @@ class _QuantMoveSpec(NamedTuple):
   dtype: jnp.dtype
   wdtype: jnp.dtype
   qtype: jnp.dtype
-  calibration_method: str
+  calibration_method: str | None
   channelwise_axes: tuple[int, ...]
 
 
@@ -176,7 +176,7 @@ def _extend_quantized(spec, w, idx):
   # Static fixed-range calibration yields a constant (1, 1, 1) scale identical on all shards, so keep it
   # unmoved (matching R=0); dynamic calibration depends on the home shard's weights, so move one scale row
   # per replica alongside the FP8 codes.
-  if spec.calibration_method.lower().startswith("fixed") and q.scale.size == 1:
+  if (spec.calibration_method or "").lower().startswith("fixed") and q.scale.size == 1:
     scale = q.scale
   else:
     scale = jnp.broadcast_to(q.scale, (w.shape[0], *q.scale.shape[1:]))
@@ -213,9 +213,11 @@ def extend_quantized_with_replicas(
   """
   if w_local.ndim != 3:
     raise ValueError(f"Expected a 3D [L, K, N] expert weight, got shape {w_local.shape}.")
-  channelwise_axes = tuple(channelwise_axes)
+  raw_axes = tuple(channelwise_axes)
+  channelwise_axes = tuple(dict.fromkeys(d % w_local.ndim if -w_local.ndim <= d < w_local.ndim else d for d in raw_axes))
   if not set(channelwise_axes).issubset({2}):
-    raise ValueError(f"Expected channelwise_axes subset of (2,), got {channelwise_axes}.")
+    raise ValueError(f"Expected channelwise_axes subset of (2,), got {raw_axes}.")
+  calibration_method = calibration_method or "absmax"
   move = _prepare_move(w_local, plan, axis_name, num_ep)
   r_slots, max_send, idx = (0, 0, None) if move is None else move
   spec = _QuantMoveSpec(
