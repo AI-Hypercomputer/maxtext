@@ -4024,24 +4024,7 @@ class RoutedMoE(nnx.Module):
 
       if self.config.prefuse_moe_weights:
         # Weights are stored as (G,K,2N); w0/w1 are adjacent slices so XLA elides this concat.
-        if isinstance(w0, qpl.QArray):
-          # Static fixed calibration shares a (1, 1, 1) scale across w0/w1; dynamic per-group scales
-          # (channelwise [L + R, 1, N] or per-tensor [L + R, 1, 1]) expand to [L + R, 1, 2N] for gmm_v2.
-          fused_scale = (
-              w0.scale
-              if w0.scale.shape == (1, 1, 1) and w1.scale.shape == (1, 1, 1)
-              else jnp.concatenate(
-                  [jnp.broadcast_to(w.scale, (w.qvalue.shape[0], 1, w.qvalue.shape[-1])) for w in (w0, w1)],
-                  axis=-1,
-              )
-          )
-          w_fused = dataclasses.replace(
-              w0,
-              qvalue=jnp.concatenate([w0.qvalue, w1.qvalue], axis=-1),
-              scale=fused_scale,
-          )
-        else:
-          w_fused = jnp.concatenate([w0, w1], axis=-1)
+        w_fused = jnp.concatenate([w0, w1], axis=-1)
         fused_bias = None
         if use_te_bias and w0_bias is not None and w1_bias is not None:
           fused_bias = jnp.concatenate([w0_bias, w1_bias], axis=-1)

@@ -5374,6 +5374,10 @@ class MaxTextConfig(
             "expert_replicas_per_device > 0 with quantization='fp8_full' requires "
             "use_tokamax_gmm=True and use_gmm_v2=True (per-group replica weight scales)."
         )
+      if self.prefuse_moe_weights:
+        raise ValueError(
+            "expert_replicas_per_device > 0 with quantization='fp8_full' does not support prefuse_moe_weights."
+        )
       if self.weight_sparsity_n and self.weight_sparsity_m:
         raise ValueError("expert_replicas_per_device > 0 with quantization='fp8_full' does not support weight sparsity.")
     if not self.override_logical_axis_rules and not ep_enabled(self):

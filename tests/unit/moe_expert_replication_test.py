@@ -741,7 +741,7 @@ def _fp8_cal_kw(calibration):
 
 
 class RoutedMoEReplicationFp8Test(parameterized.TestCase):
-  """CPU tests for Qwix fp8_full (dynamic & static, prefused & unfused, 2D FSDP x EP, token_mask) and fp8_moe_fake_quant."""
+  """CPU tests for Qwix fp8_full (dynamic & static, 2D FSDP x EP, token_mask) and fp8_moe_fake_quant."""
 
   _make_layer = RoutedMoEReplicationWiringTest._make_layer  # pylint: disable=protected-access
   _cpu_ep_runtime = RoutedMoEReplicationWiringTest._cpu_ep_runtime  # pylint: disable=protected-access
@@ -792,22 +792,19 @@ class RoutedMoEReplicationFp8Test(parameterized.TestCase):
           )
 
   @parameterized.named_parameters(
-      ("absmax", "absmax", False, False, 1, True),
-      ("absmax_fixed_bwd", "absmax_fixed_bwd", False, False, 1, True),
-      ("fixed", "fixed", False, False, 1, True),
-      ("absmax_prefuse", "absmax", True, False, 1, True),
-      ("fixed_pertensor_prefuse", "fixed", True, True, 1, True),
-      ("fixed_2d_skewed", "fixed", False, False, 2, True),
-      ("fixed_2d_balanced_no_send", "fixed", False, False, 2, False),
+      ("absmax", "absmax", False, 1, True),
+      ("absmax_fixed_bwd", "absmax_fixed_bwd", False, 1, True),
+      ("fixed", "fixed", False, 1, True),
+      ("fixed_2d_skewed", "fixed", False, 2, True),
+      ("fixed_2d_balanced_no_send", "fixed", False, 2, False),
   )
-  def test_fp8_full_replication_matches_r0(self, calibration, prefuse, disable_cw, num_fsdp, skewed):
-    """Covers dynamic/static calibration, channelwise/per-tensor, prefuse, 1D/2D meshes, and zero-send."""
+  def test_fp8_full_replication_matches_r0(self, calibration, disable_cw, num_fsdp, skewed):
+    """Covers dynamic/static calibration, channelwise/per-tensor, 1D/2D meshes, and zero-send."""
     tensors, forced = self._inputs(seed=7 if num_fsdp == 1 else 13, batch=4 * num_fsdp)
     if not skewed:
       forced = jnp.broadcast_to(jnp.array([[0, 2], [1, 3], [0, 2], [1, 3]], dtype=jnp.int32)[None], (4 * num_fsdp, 4, 2))
     fp8_kw = {
         **_FP8_FULL_KW,
-        "prefuse_moe_weights": prefuse,
         "qwix_disable_channelwise_axes": disable_cw,
         "ici_expert_parallelism": 2,
         "ici_fsdp_parallelism": num_fsdp if num_fsdp > 1 else 4,
@@ -819,7 +816,7 @@ class RoutedMoEReplicationFp8Test(parameterized.TestCase):
           num_ep=2,
           expert_replicas_per_device=replicas,
           expert_replica_max_send=2,
-          **(fp8_kw if quant else {"prefuse_moe_weights": prefuse}),
+          **(fp8_kw if quant else {}),
       )
       if num_fsdp > 1:
 
@@ -939,9 +936,7 @@ class RoutedMoEReplicationFp8TpuTest(parameterized.TestCase):
       for d in ("batch_seq", "embed_dim", "mlp_dim")
   }
 
-  def _run_tpu(
-      self, replicas, calibration, prefuse, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp, forced, x, cotangent
-  ):
+  def _run_tpu(self, replicas, calibration, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp, forced, x, cotangent):
     """Compiles and executes quantized RoutedMoE fwd+bwd on TPU via Qwix + tokamax gmm_v2/tgmm_v2."""
     cfg = _init_moe_cfg(
         "moe_replication_fp8_tpu",
@@ -954,7 +949,7 @@ class RoutedMoEReplicationFp8TpuTest(parameterized.TestCase):
         dtype="bfloat16",
         per_device_batch_size=2,
         max_target_length=64,
-        prefuse_moe_weights=prefuse,
+        prefuse_moe_weights=False,
         ici_expert_parallelism=ici_ep,
         ici_fsdp_parallelism=ici_fsdp,
         shard_embed_moe_on_fsdp=shard_embed_fsdp,
@@ -1002,12 +997,11 @@ class RoutedMoEReplicationFp8TpuTest(parameterized.TestCase):
       return step(layer, x)
 
   @parameterized.named_parameters(
-      ("absmax_ep2", "absmax", False, False, 2, 1, False),
-      ("absmax_prefuse_ep2", "absmax", True, False, 2, 1, False),
-      ("fixed_pertensor_prefuse_ep2", "fixed", True, True, 2, 1, False),
-      ("fixed_2d_fsdp_ep_qag", "fixed", True, True, 2, 2, True),
+      ("absmax_ep2", "absmax", False, 2, 1, False),
+      ("fixed_pertensor_ep2", "fixed", True, 2, 1, False),
+      ("fixed_2d_fsdp_ep_qag", "fixed", True, 2, 2, True),
   )
-  def test_tpu_fp8_replication_parity_with_r0(self, calibration, prefuse, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp):
+  def test_tpu_fp8_replication_parity_with_r0(self, calibration, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp):
     """Verifies real Pallas gmm_v2 + tgmm_v2 fwd/bwd parity between R=1 and R=0 on TPU."""
     if len(jax.devices()) < ici_ep * ici_fsdp:
       self.skipTest(f"Requires >= {ici_ep * ici_fsdp} TPU devices, got {len(jax.devices())}.")
@@ -1020,13 +1014,13 @@ class RoutedMoEReplicationFp8TpuTest(parameterized.TestCase):
         .at[:, -1, :]
         .set(jnp.array([2, 3], jnp.int32))
     )
-    args = (calibration, prefuse, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp, forced, x, cotangent)
+    args = (calibration, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp, forced, x, cotangent)
     out_ref, dx_ref, mg_ref = self._run_tpu(0, *args)
     out_rep, dx_rep, mg_rep = self._run_tpu(1, *args)
     tol = 2e-2 if calibration == "fixed" else 3e-2
     np.testing.assert_allclose(np.asarray(out_rep, np.float32), np.asarray(out_ref, np.float32), rtol=tol, atol=tol)
     np.testing.assert_allclose(np.asarray(dx_rep, np.float32), np.asarray(dx_ref, np.float32), rtol=tol, atol=tol)
-    for attr in ("wi", "wo") if prefuse else ("wi_0", "wi_1", "wo"):
+    for attr in ("wi_0", "wi_1", "wo"):
       g_rep, g_ref = np.asarray(getattr(mg_rep, attr)[...], np.float64), np.asarray(
           getattr(mg_ref, attr)[...], np.float64
       )

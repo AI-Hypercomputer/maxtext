@@ -74,20 +74,6 @@ class ExpertReplicationConfigTest(parameterized.TestCase):
           "fp8_full_dynamic",
           {"quantization": "fp8_full", "use_qwix_quantization": True, "use_tokamax_gmm": True, "use_gmm_v2": True},
       ),
-      (
-          "fp8_full_static_pertensor_prefuse",
-          {
-              "quantization": "fp8_full",
-              "use_qwix_quantization": True,
-              "use_tokamax_gmm": True,
-              "use_gmm_v2": True,
-              "weight_quantization_calibration_method": "fixed,-224,224",
-              "act_quantization_calibration_method": "fixed,-224,224",
-              "bwd_quantization_calibration_method": "fixed,0.00125",
-              "qwix_disable_channelwise_axes": True,
-              "prefuse_moe_weights": True,
-          },
-      ),
       ("fp8_moe_fake_quant", {"fp8_moe_fake_quant": True}),
   )
   def test_config_validator_accepts_fp8_recipes(self, overrides):
@@ -148,6 +134,17 @@ class ExpertReplicationConfigTest(parameterized.TestCase):
               "weight_sparsity_m": 4,
           },
           "does not support weight sparsity",
+      ),
+      (
+          "fp8_full_prefuse",
+          {
+              "quantization": "fp8_full",
+              "use_qwix_quantization": True,
+              "use_tokamax_gmm": True,
+              "use_gmm_v2": True,
+              "prefuse_moe_weights": True,
+          },
+          "does not support prefuse_moe_weights",
       ),
       ("fp8_moe", {"fp8_moe": True, "weight_dtype": "float8_e4m3fn"}, "fp8_moe=True"),
       ("te_gmm_quantization", {"te_gmm_quantization": "te_mxfp8"}, "te_gmm_quantization"),
