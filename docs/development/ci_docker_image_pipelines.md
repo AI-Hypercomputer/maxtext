@@ -34,6 +34,12 @@ workflows call it, and these are the only events that build an image:
 | GPU Docker Images Pipeline (`gpu_docker_images_pipeline.yml`) | Nightly at 00:00 UTC, or manual **Run workflow**              | `maxtext_gpu_jax_stable`, `maxtext_gpu_jax_nightly`                                                                                    |
 | Release Candidate Pipeline (`rc_release.yml`)                 | Weekly on Sunday at 19:00 Pacific, or manual **Run workflow** | `tpu_pre_training`, `tpu_post_training`. Always a full build (`release_pipeline.yml` verifies and promotes these certified RC images). |
 
+Each daily TPU and GPU matrix entry also builds and publishes a companion
+dependencies-only image (`<image>_dependencies`) from the Dockerfile `dependencies`
+stage (`--target dependencies`) without MaxText source code baked into `/deps/src`
+(full builds reuse the same BuildKit cache so dependencies match identically;
+`fast-rebuild` overlays do not rebuild `*_dependencies` images).
+
 Nothing else builds an image:
 
 - A `git push` or a pull request never builds an image. The PR pipeline

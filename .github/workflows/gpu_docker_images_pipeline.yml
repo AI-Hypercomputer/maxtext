@@ -96,25 +96,30 @@ jobs:
             build_mode: stable
             workflow: pre-training
             image_name: maxtext_gpu_jax_stable
+            dependencies_image_name: maxtext_gpu_jax_stable_dependencies
             platform: amd64
           - name: "GPU Pre-Training Nightly (amd64)"
             build_mode: nightly
             workflow: pre-training
             image_name: maxtext_gpu_jax_nightly
+            dependencies_image_name: maxtext_gpu_jax_nightly_dependencies
             platform: amd64
           - name: "GPU Pre-Training Stable (arm64)"
             build_mode: stable
             workflow: pre-training
             image_name: maxtext_gpu_jax_stable
+            dependencies_image_name: maxtext_gpu_jax_stable_dependencies
             platform: arm64
           - name: "GPU Pre-Training Nightly (arm64)"
             build_mode: nightly
             workflow: pre-training
             image_name: maxtext_gpu_jax_nightly
+            dependencies_image_name: maxtext_gpu_jax_nightly_dependencies
             platform: arm64
     uses: ./.github/workflows/build_and_push_docker_image.yml
     with:
       image_name: ${{ matrix.image_name }}
+      dependencies_image_name: ${{ matrix.dependencies_image_name }}
       repository_name: ${{ inputs.repository_name || 'maxtext-images' }}
       device: gpu
       build_mode: ${{ matrix.build_mode }}
