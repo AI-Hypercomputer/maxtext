@@ -182,6 +182,7 @@ class OptimizerType(str, Enum):
 
   ADAMW = "adamw"
   ADAM_PAX = "adam_pax"
+  ADAM_PAX_LOW_MEMORY = "adam_pax_low_memory"
   SGD = "sgd"
   MUON = "muon"
 
@@ -4061,6 +4062,30 @@ class AdamW(BaseModel):
   )
 
 
+class AdamPaxLowMemory(BaseModel):
+  """Configuration specific to the `adam_pax_low_memory` optimizer (shares `adam_*` settings with AdamW)."""
+
+  bf16_update_rounding: Literal["nearest", "kahan", "stochastic"] = Field(
+      "nearest",
+      description=(
+          "Rounding of bf16 parameter updates for opt_type='adam_pax_low_memory': 'nearest' (round to nearest), "
+          "'kahan' (deterministic Kahan-compensated summation; keeps a residual with the bf16 params' shape "
+          "and dtype in optimizer state), or 'stochastic' (unbiased stochastic rounding). Non-default values require "
+          "opt_type='adam_pax_low_memory'."
+      ),
+  )
+  stochastic_rounding_seed: int = Field(0, description="PRNG seed for bf16_update_rounding='stochastic'.")
+  moe_expert_lr_multiplier: float = Field(
+      1.0,
+      gt=0.0,
+      description=(
+          "Learning-rate multiplier for routed MoE expert weights (wi/wi_0/wi_1/wo in a MoE block, excluding "
+          "shared experts) with opt_type='adam_pax_low_memory'. 1.0 (default) leaves updates unchanged; other "
+          "values require opt_type='adam_pax_low_memory'."
+      ),
+  )
+
+
 class Muon(BaseModel):
   """Configuration specific to the Muon optimizer."""
 
@@ -5644,6 +5669,7 @@ class MaxTextConfig(
     DilocoParams,
     Optimizer,
     AdamW,
+    AdamPaxLowMemory,
     Muon,
     FineTuning,
     Distillation,
@@ -6979,6 +7005,17 @@ class MaxTextConfig(
     if self.distill_beta > 0.0:
       if not self.scan_layers:
         raise ValueError("a value of self.distill_beta > 0.0 requires self.scan_layers = True")
+
+    if self.bf16_update_rounding != "nearest" and self.opt_type != OptimizerType.ADAM_PAX_LOW_MEMORY:
+      raise ValueError(
+          f"bf16_update_rounding={self.bf16_update_rounding!r} requires opt_type='adam_pax_low_memory', "
+          f"got opt_type={self.opt_type!r}."
+      )
+    if self.moe_expert_lr_multiplier != 1.0 and self.opt_type != OptimizerType.ADAM_PAX_LOW_MEMORY:
+      raise ValueError(
+          f"moe_expert_lr_multiplier={self.moe_expert_lr_multiplier} requires opt_type='adam_pax_low_memory', "
+          f"got opt_type={self.opt_type!r}."
+      )
 
     # Validate distillation schedule parameters
     if self.distill_alpha_end is not None and not 0.0 <= self.distill_alpha_end <= 1.0:
@@ -9131,6 +9168,7 @@ class RLConfig(
     DataTypes,
     Tokenizer,
     AdamW,
+    AdamPaxLowMemory,
     Optimizer,
     TrainingLoop,
     Quantization,
