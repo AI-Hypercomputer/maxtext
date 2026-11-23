@@ -143,6 +143,10 @@ class GatherChangesTest(unittest.TestCase):
         gc.generate_changelog_block(commits), "- Revert of: Add support for dynamic loading. [ref:bbbbbbbbb]"
     )
 
+  def test_agent_files_excluded_from_pathspecs(self):
+    self.assertIn(":(exclude).agents/", self.gc.EXCLUDED_PATHSPECS)
+    self.assertIn(":(exclude)AGENTS.md", self.gc.EXCLUDED_PATHSPECS)
+
 
 if __name__ == "__main__":
   unittest.main()
