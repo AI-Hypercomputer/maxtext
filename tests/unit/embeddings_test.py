@@ -162,6 +162,30 @@ class RotaryEmbeddingTest(unittest.TestCase):
     expected = jnp.array([[[[1.0, 1.0, 1.0, 1.0]], [[-0.300781, 0.988281, 1.38281, 1.00781]]]])
     np.testing.assert_allclose(outputs, expected, atol=1e-5)
 
+  def test_matches_rotate_half_formula(self):
+    """The split-half form equals x * cos + rotate_half(x) * sin on the duplicated half-width sin / cos."""
+    for dims, dtype, atol in ((8, jnp.float32, 1e-6), (64, jnp.float32, 1e-6), (64, jnp.bfloat16, 2e-2)):
+      layer = embeddings.RotaryEmbedding(
+          min_timescale=1,
+          max_timescale=10000,
+          mesh=self.mesh,
+          embedding_dims=dims,
+          cast_as_fprop_dtype=False,
+          rngs=self.rngs,
+      )
+      inputs = jax.random.normal(jax.random.PRNGKey(dims), (2, 16, 3, dims), dtype)
+      position = jnp.broadcast_to(jnp.arange(16)[None, :], (2, 16))
+
+      sinusoid = position[:, :, None, None] / layer.timescale
+      sin_half, cos_half = jnp.sin(sinusoid).astype(dtype), jnp.cos(sinusoid).astype(dtype)
+      expected = layer.apply_rotary(
+          inputs, jnp.concatenate([cos_half, cos_half], axis=-1), jnp.concatenate([sin_half, sin_half], axis=-1)
+      )
+
+      outputs = layer(inputs, position=position)
+      self.assertEqual(outputs.shape, inputs.shape)
+      np.testing.assert_allclose(np.asarray(outputs, np.float32), np.asarray(expected, np.float32), rtol=0, atol=atol)
+
 
 class LLaMARotaryEmbeddingTest(unittest.TestCase):
 
