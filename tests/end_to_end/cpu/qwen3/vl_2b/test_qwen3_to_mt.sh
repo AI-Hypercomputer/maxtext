@@ -4,7 +4,7 @@
 
 # The flow of this script is as follows:
 # 1. Install PyTorch (CPU) required for checkpoint conversion.
-# 2. Convert the HuggingFace checkpoint to MaxText format in both unscanned and scanned formats.
+# 2. Convert the HuggingFace checkpoint to an unscanned multimodal MaxText checkpoint.
 # 3. Run a forward pass logits check to verify the converted checkpoint matches the original HF model.
 
 # Usage:
@@ -26,7 +26,7 @@ BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
 python3 -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 python3 -m pip install decord
 
-# Step 2: Convert to scanned multimodal checkpoint (for multimodal training)
+# Step 2: Convert to an unscanned multimodal checkpoint (for multimodal training)
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned_multimodal/${run_id} \

@@ -21,10 +21,10 @@ unset M_RUN_NAME
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='gemma4-26b'
-# Pretrained checkpoint by default: the pre-training scripts train on raw text and decode a raw prompt, and on raw text
-# the instruction-tuned google/gemma-4-26b-a4b-it is at chance level (also in Hugging Face itself).
-# Set HF_GOLDEN_MODEL=google/gemma-4-26b-a4b-it to convert the instruction-tuned checkpoint instead.
-HF_GOLDEN_MODEL="${HF_GOLDEN_MODEL:-google/gemma-4-26b-a4b}"
+# Instruction-tuned checkpoint by default, as the TPU E2E tests have always converted. The pre-training scripts train on
+# raw text and decode a raw prompt, where google/gemma-4-26b-a4b-it is at chance level (also in Hugging Face itself);
+# set HF_GOLDEN_MODEL=google/gemma-4-26b-a4b to convert the pretrained checkpoint instead.
+HF_GOLDEN_MODEL="${HF_GOLDEN_MODEL:-google/gemma-4-26b-a4b-it}"
 
 # To convert the multimodal model, make sure use_multimodal is set to true
 USE_MULTIMODAL=${2:-false}

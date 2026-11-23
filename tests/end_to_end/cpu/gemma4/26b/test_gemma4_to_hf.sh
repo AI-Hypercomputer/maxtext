@@ -17,6 +17,9 @@ USE_MULTIMODAL=${3:-false}
 SCAN_LAYERS=${4:-false}
 
 MODEL_NAME='gemma4-26b'
+# Bundle the tokenizer of the Hugging Face checkpoint the model was converted from (same default and override as
+# test_gemma4_to_mt.sh), e.g. HF_GOLDEN_MODEL=google/gemma-4-26b-a4b for a model fine-tuned from the pretrained one.
+HF_GOLDEN_MODEL="${HF_GOLDEN_MODEL:-google/gemma-4-26b-a4b-it}"
 BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/${MODEL_NAME}}"
 
 if [ "${SCAN_LAYERS,,}" = "true" ]; then
@@ -35,4 +38,5 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
     hardware=cpu \
-    skip_jax_distributed_system=true
+    skip_jax_distributed_system=true \
+    --hf_model_path=${HF_GOLDEN_MODEL}
