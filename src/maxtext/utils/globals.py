@@ -97,6 +97,7 @@ HF_IDS = {
     "qwen3.8-flash-next-mini": "Qwen/Qwen3.8-Flash-Next",
     "qwen3.5-397b-a17b": "Qwen/Qwen3.5-397B-A17B",
     "qwen3.5-397b-a17b-fp8": "Qwen/Qwen3.5-397B-A17B-FP8",
+    "qwen3.5-27b": "Qwen/Qwen3.5-27B",
     "qwen3.5-35b-a3b": "Qwen/Qwen3.5-35B-A3B",
     "qwen3.5-35b-a3b-fp8": "Qwen/Qwen3.5-35B-A3B-FP8",
     "qwen3.5-35b-fp8": "Qwen/Qwen3.5-35B-A3B-FP8",

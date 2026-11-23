@@ -1789,6 +1789,9 @@ gdn_num_value_heads: 32
 gdn_chunk_size: 64
 # Whether to apply L2 normalization to query and key tensors inside the Gated Delta Rule kernel.
 use_qk_norm_in_gdn: true
+# Run the GDN recurrence through tokamax.ops.gated_delta_net when there is no initial state, no packed
+# segment IDs and no GDN context parallelism. Needs a Tokamax release with gated_delta_net.
+use_tokamax_gdn: false
 # Context parallelism mode for Gated Delta Net ('auto', 'head', or 'seq')
 gdn_cp_mode: 'auto'
 # The ratio of dimension to apply ROPE on

@@ -2414,6 +2414,14 @@ class Qwen3_8FlashNext(BaseModel):
   gdn_output_gate_activation: str = Field(
       "sigmoid", description="Output gate activation function for GDN linear attention."
   )
+  use_tokamax_gdn: bool = Field(
+      False,
+      description=(
+          "Run the GDN chunked recurrence (Qwen3-Next, Qwen3.5, Qwen3.8) through `tokamax.ops.gated_delta_net`"
+          " when there is no initial state, no packed segment IDs and no GDN context parallelism; other calls"
+          " keep `jax_chunk_gated_delta_rule`. Needs a Tokamax release with `gated_delta_net`."
+      ),
+  )
   gdn_chunk_inverse: Literal["solve", "block_doubling"] = Field(
       "block_doubling",
       description=(

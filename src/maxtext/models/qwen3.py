@@ -76,6 +76,7 @@ from maxtext.utils.sharding import (
     pin_row_major_with_cotangent,
     remove_incompatible_mesh_axes_from_partition_spec,
 )
+import tokamax
 
 # -----------------------------------------
 # Qwen3-Next Layer Implementations
@@ -419,6 +420,34 @@ def segmented_causal_depthwise_conv1d(
       conv_halo_seg=conv_halo_seg,
       dtype=dtype,
   )
+
+
+def tokamax_chunk_gated_delta_rule(
+    query: Array,
+    key: Array,
+    value: Array,
+    g: Array,
+    beta: Array,
+    chunk_size: int,
+    use_qk_norm_in_gdn: bool,
+    compute_dtype: jnp.dtype,
+) -> Array:
+  """Gated delta rule through `tokamax.ops.gated_delta_net` on `[B, S, H, D]` inputs.
+
+  Covers what `jax_chunk_gated_delta_rule` computes without an initial state,
+  segment IDs or context parallelism: L2-normalized (optional) and scaled
+  queries, grouped query/key heads, and one log-space decay per value head.
+  """
+  out, _ = tokamax.ops.gated_delta_net(
+      query.astype(compute_dtype),
+      key.astype(compute_dtype),
+      value.astype(compute_dtype),
+      g.astype(jnp.float32),
+      beta.astype(compute_dtype),
+      use_qk_l2norm=use_qk_norm_in_gdn,
+      chunk_size=chunk_size,
+  )
+  return out
 
 
 def jax_chunk_gated_delta_rule(
@@ -1785,6 +1814,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
         if packed_segment_ids is not None:
           packed_segment_ids = jax.sharding.reshard(packed_segment_ids, seg_pspec)
 
+      use_tokamax = (
+          cfg.use_tokamax_gdn
+          and not use_head_cp
+          and not cp_axes_for_scan
+          and not has_initial_state
+          and packed_segment_ids is None
+      )
+
       @functools.partial(
           jax.shard_map,
           mesh=self.mesh,
@@ -1804,6 +1841,19 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           check_vma=False,
       )
       def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h, seg_val):
+        if use_tokamax:
+          out = tokamax_chunk_gated_delta_rule(
+              q,
+              k,
+              v,
+              g_val,
+              beta_val,
+              chunk_size=cfg.gdn_chunk_size,
+              use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+              compute_dtype=cfg.dtype,
+          )
+          # No incoming state, so the final state is not consumed.
+          return out, init_h
         out, next_state = jax_chunk_gated_delta_rule(
             query=q,
             key=k,
@@ -1830,6 +1880,18 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       )
       if cfg.shard_mode == ShardMode.EXPLICIT and head_sharding is not None:
         core_attn_out = jax.sharding.reshard(core_attn_out, head_sharding)
+    elif cfg.use_tokamax_gdn and recurrent_state is None and packed_segment_ids is None:
+      core_attn_out = tokamax_chunk_gated_delta_rule(
+          query,
+          key,
+          value,
+          g,
+          beta,
+          chunk_size=cfg.gdn_chunk_size,
+          use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+          compute_dtype=cfg.dtype,
+      )
+      next_recurrent_state = None
     else:
       core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
           query,
