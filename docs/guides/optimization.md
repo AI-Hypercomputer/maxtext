@@ -57,6 +57,13 @@ Guide to setting up benchmarks, performing performance tuning, and analyzing met
 Overlap the FSDP all-gather of the next layer's weights with the current layer's compute.
 ```
 
+```{grid-item-card} ⏩ Dual-pipe Gradient Accumulation
+:link: optimization/dualpipe_training
+:link-type: doc
+
+Experimental layer-level 1F1B schedule that overlaps one microbatch's backward with the next microbatch's forward.
+```
+
 ```{grid-item-card} 🔀 Shard Mode: explicit vs auto
 :link: optimization/shard_mode_performance
 :link-type: doc
@@ -77,4 +84,5 @@ optimization/custom_mesh_and_rule.md
 optimization/pallas_kernels_performance.md
 optimization/benchmark_and_performance.md
 optimization/shard_mode_performance.md
+optimization/dualpipe_training.md
 ```
