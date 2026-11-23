@@ -36,6 +36,8 @@ Split by dependency and review purpose, not file count/equal size. Each layer ne
 
 Do not force five PRs: combine small scaffolding/config changes and reorder config after blocks if needed. Keep blocks and tests together. Shared framework changes may form a prerequisite with regression tests. Every intermediate state must avoid dangling imports, missing hooks, and configs selecting unimplemented decoders.
 
+Reusable playbooks distilled into [`.agents/wiki/`](../../../wiki/index.md) are decoupled from the model stack: either ship them immediately as an independent 1-commit PR against `origin/main` (preferred when unblocking other bring-ups) or include them in the final documentation layer. Validate with `python3 .agents/wiki/scripts/validate_wiki.py` and stage with `git add -f .agents/wiki/...` (while `.agents/` is in `.gitignore`).
+
 Before rearranging commits, write a stack manifest: each layer's title, purpose, files/hunks, predecessor, and validation commands/results. Assign shared-file hunks by dependency; cover every intended change exactly once.
 
 ## 4. Prepare the stack and hand off upload mechanics

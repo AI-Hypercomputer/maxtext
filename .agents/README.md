@@ -9,9 +9,17 @@ and are maintained in `.agents/skills/`.
 ```text
 .agents/
 ├── README.md
-└── skills/
-    └── <skill-name>/
-        └── SKILL.md
+├── skills/
+│   └── <skill-name>/
+│       └── SKILL.md
+└── wiki/
+    ├── index.md
+    ├── PROTOCOL.md
+    ├── scripts/
+    │   ├── harvest_candidates.py
+    │   └── validate_wiki.py
+    └── <category>/
+        └── <topic>.md
 ```
 
 Each skill has a `SKILL.md` with YAML `name` and `description` fields, followed by
@@ -19,6 +27,12 @@ workflow instructions. Use lowercase kebab-case for skill names, such as
 `model-bringup`, and match the directory name to the frontmatter `name`.
 Add `references/`, `scripts/`, or `assets/` inside a skill only when it needs
 supporting documentation, executable helpers, or templates.
+
+Shared cross-skill troubleshooting playbooks, parity diagnostics, and architecture
+or checkpoint-conversion recipes live in [`.agents/wiki/index.md`](wiki/index.md).
+Use [`maxtext-wiki-distill`](skills/maxtext-wiki-distill/SKILL.md) (backed by
+`harvest_candidates.py` and `validate_wiki.py --check-drift`) when distilling
+verified lessons into `.agents/wiki/`.
 
 ## Using the skills
 

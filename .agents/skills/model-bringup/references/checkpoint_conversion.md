@@ -9,7 +9,7 @@ This guide covers Phase 3 of the MaxText model bring-up workflow: extending the 
 ---
 
 ## 1. The Central Mapping System (`param_mapping.py`)
-All weight parameter translation maps and value transformation functions are configured centrally in `src/maxtext/checkpoint_conversion/utils/param_mapping.py`.
+All weight parameter translation maps and value transformation functions are configured centrally in `src/maxtext/checkpoint_conversion/utils/param_mapping.py`. Before writing custom split/reshape hooks or mixed-dtype Orbax rules, check any `conversion/` entries in [`../../../wiki/index.md`](../../../wiki/index.md).
 
 To support a new model, you must extend this file:
 1. **`PARAM_MAPPING` Registration**:
@@ -70,8 +70,8 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface   src/maxtext/configs/ba
 
 ---
 
-## 4. Handover Document Update
+## 4. Handover Document Update (Inline Capture Only)
 Update `{model_name}_handover.md` in the MaxText root directory:
 - Record the exact conversion CLI commands (mini and full).
-- Document any weight transposition, tensor reshaping, or key mapping bugs discovered.
+- Append any verified weight transposition, tensor reshaping, strict-`fp32` dtype, or key mapping fixes as rows in Section 4 (`Wiki Disposition = pending`; defer `.agents/wiki/` edits until Phase 4 passes).
 - Set Phase 3 status to `DONE` and Phase 4 to `IN PROGRESS`.

@@ -4,7 +4,8 @@ This guide covers Phase 2 of the MaxText model bring-up workflow: implementing l
 
 ## 1. Layer Implementation Strategy
 
-- **Maximize Architectural Reuse**: Before writing JAX code from scratch, examine what layers already exist in MaxText that can be reused or configured to form the target layer. For example, inspect `src/maxtext/layers/attentions.py` to see if attention block mechanisms (MHA, GQA, RoPE) can be re-used or adapted.
+- **Pre-Flight Wiki Check**: Before coding custom RoPE, inhomogeneous `scan_layers` cycles, MoE routing/sharding, or multimodal fusion, consult [`../../../wiki/index.md`](../../../wiki/index.md) (`patterns/` and `parity/`).
+- **Maximize Architectural Reuse**: Before writing JAX code from scratch, examine what layers already exist in MaxText that can be reused or configured to form the target layer. For example, inspect `src/maxtext/layers/attentions.py` to see if attention block mechanisms (MHA, GQA, RoPE) can be reused or adapted.
 - Review existing layers in `src/maxtext/layers/` (e.g. `decoders.py`, `attentions.py`, `moe.py`).
 - Inherit or extend standard MaxText structures (like scanned layers blocks) whenever possible.
 - If a new model architecture introduces new layers, implement them in JAX. Maintain Flax styling where layer parameters are managed in a PyTree.
@@ -167,9 +168,9 @@ export HF_HOME=/dev/shm/$USER
 python3 -m maxtext.inference.decode   src/maxtext/configs/base.yml   model_name={model_name}   base_num_decoder_layers=1   force_random_weights=true   per_device_batch_size=1   max_target_length=64
 ```
 
-## 5. Handover Document Update
+## 5. Handover Document Update (Inline Capture Only)
 Update `{model_name}_handover.md` in the MaxText root directory:
 - Log layer implementation details (e.g., reuse of attention blocks, custom layer definitions).
 - Record layer unit test results and tolerances (`rtol`, `atol`).
-- Document any shape or numerical bugs found and how they were resolved.
+- Append any verified shape, mask, or numerical bug fixes as structured rows in Section 4 with `Wiki Disposition` set to `pending` (do **not** edit `.agents/wiki/` mid-debugging; distillation runs after Phase 4 passes).
 - Set Phase 2 status to `DONE` and Phase 3 to `IN PROGRESS`.

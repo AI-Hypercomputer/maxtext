@@ -53,7 +53,7 @@ python3 -m tests.utils.zero_gen_logits_checker \
 
 ## 4. Training & SFT Correctness Smoke Check (If Applicable)
 
-Verify multi-step training stability (`remat_policy=full`) on both `scanned` and `unscanned` full checkpoints (if TPU HBM is insufficient on your TPU VM or cluster, apply the HBM-saving ladder in [wiki/hbm_verification.md](wiki/hbm_verification.md)):
+Verify multi-step training stability (`remat_policy=full`) on both `scanned` and `unscanned` full checkpoints (if TPU HBM is insufficient on your TPU VM or cluster, apply the HBM-saving ladder in [hbm_verification.md](../../../wiki/troubleshooting/hbm_verification.md)):
 1. **Pre-training**: Run 5–10 steps of `maxtext.trainers.pre_train.train` on C4 (from converted checkpoint and/or random init) and confirm finite, matching `scanned` / `unscanned` loss trajectories.
 2. **SFT**: Run 5–10 steps of `maxtext.trainers.post_train.sft.train_sft_native` with assistant-only completion masking (and optional `--mode=holdout_ce` check).
 
@@ -95,3 +95,4 @@ If discrepancies persist:
 Once `mini-model-verification` passes and the full model checkpoints (`scanned` & `unscanned`) are validated:
 1. Finalize `{model_name}_handover.md` in the MaxText root directory using the template in [roadmap.md](roadmap.md).
 2. Ensure every completed stage pairs its **quantitative result table**, **exact reproduction command**, and **log/checkpoint/golden artifact paths** alongside the HF architectural findings and resolved pitfalls so all evidence is easy to audit.
+3. Evaluate every pitfall in Section 4 against the 4-Gate Promotion Rubric in [`../../../wiki/PROTOCOL.md`](../../../wiki/PROTOCOL.md), merge or add reusable cross-model playbooks under `.agents/wiki/`, and verify with `python3 .agents/wiki/scripts/validate_wiki.py`.

@@ -31,6 +31,7 @@ Maintain `{model_name}_handover.md` in the MaxText root directory as a single au
 - Identify the HuggingFace Model ID.
 - **IMPORTANT**: Set `export HF_HOME=/dev/shm/$USER` before loading or downloading models to avoid filling up the TPU VM root disk.
 - **Decoder Pattern Inspection**: Determine if layers are homogeneous (identical repeated blocks) or inhomogeneous (e.g., layers 0–2 dense followed by MoE, or alternating local/global sliding window attention).
+- **Match Reference Archetype**: Check the *Model Archetype & Reference Precedents* table in [`.agents/wiki/index.md`](../../wiki/index.md) to locate the closest existing MaxText model/test and pre-read any linked wiki pages.
 - **Identify Smallest Subset**: Determine the minimal representative layer count (e.g. 1 layer for homogeneous, 4 layers for a 4-layer cycle).
 - **Create Mini Safetensors Subset**: Download/slice a mini safetensors directory in `/dev/shm/hf_mini/{model_name}_xlayers` containing only config, tokenizer, embeddings, output head, and the smallest layer subset weights.
 - Initialize `{model_name}_handover.md` in the MaxText root directory with HF findings and set Phase 1 status to `DONE`.
@@ -63,7 +64,7 @@ Maintain `{model_name}_handover.md` in the MaxText root directory as a single au
 - **Multi-Token Masked Prefill**: Convert full `scanned` (`scan_layers=true`) and `unscanned` (`scan_layers=false`) checkpoints and verify multi-token masked prefill parity via `zero_gen_logits_checker.py` / `forward_pass_logit_checker.py` (using router replay and unforced checks for MoE).
 - **Training & SFT Check** *(if applicable)*: Run short pre-training and SFT smoke checks on both `scanned` and `unscanned` checkpoints.
 - **Deep Profiling via Activations Mapping**: If outputs diverge, run HF and MaxText step-by-step with `layers=1` and compare intermediate layer activations.
-- **Wrap Up Handover**: Finalize `{model_name}_handover.md` with all pitfalls found and full reproduction commands.
+- **Wrap Up Handover & Distill Wiki**: Finalize `{model_name}_handover.md` with all pitfalls found and full reproduction commands, then promote reusable cross-model lessons into [`.agents/wiki/`](../../wiki/PROTOCOL.md).
 - For details, see [logits_checker.md](references/logits_checker.md) and [mini_verification.md](references/mini_verification.md).
 
 ---
@@ -76,9 +77,9 @@ Maintain `{model_name}_handover.md` in the MaxText root directory as a single au
 
 ---
 
-## [Bring-up Troubleshooting Wiki](references/wiki/index.md)
+## [Model Bring-up & Engineering Wiki](../../wiki/index.md)
 
-When verification or conversion hits resource bottlenecks (such as TPU HBM OOM on single TPU VMs or multi-host TPU clusters), consult [references/wiki/index.md](references/wiki/index.md) (e.g., [hbm_verification.md](references/wiki/hbm_verification.md)) and merge newly discovered reusable workarounds back into the wiki.
+Consult [`.agents/wiki/index.md`](../../wiki/index.md) proactively during Phase 1 (to match model archetypes) and reactively whenever bring-up hits resource bottlenecks (e.g., [hbm_verification.md](../../wiki/troubleshooting/hbm_verification.md)), numerical parity divergences, `scan_layers` / sharding subtleties, or checkpoint conversion traps. After verification passes, invoke [`maxtext-wiki-distill`](../maxtext-wiki-distill/SKILL.md) (`harvest_candidates.py` $\to$ [`PROTOCOL.md`](../../wiki/PROTOCOL.md) $\to$ `validate_wiki.py --check-drift`) to distill verified reusable fixes from `{model_name}_handover.md` and shared-infra diffs into `.agents/wiki/`.
 
 ---
 

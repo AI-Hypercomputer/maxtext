@@ -84,9 +84,10 @@ tokenizer.save_pretrained(out_dir)
 
 ---
 
-## 5. Handover Document Update
+## 5. Handover Document Update & Archetype Pre-Flight
 
-At the end of Phase 1, create and populate `{model_name}_handover.md` in the MaxText root directory:
+At the end of Phase 1, match the discovered traits against the *Model Archetype & Reference Precedents* table in [`../../../wiki/index.md`](../../../wiki/index.md) to identify the closest MaxText reference model/test and pre-read any linked wiki pages, then initialize `{model_name}_handover.md` in the MaxText root directory:
 - Document all HF architectural parameters, epsilon, theta, dimensions, and decoder pattern.
 - Note the chosen minimal layer count ($N$) and mini safetensors directory path.
+- Initialize Section 4 (*Bugs, Pitfalls & Wiki Distillation Log* table from [`roadmap.md`](roadmap.md)) for inline capture during Phases 2–4.
 - Mark Phase 1 as `DONE` and Phase 2 as `IN PROGRESS`.

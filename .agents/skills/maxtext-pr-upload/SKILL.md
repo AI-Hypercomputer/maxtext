@@ -20,6 +20,8 @@ Merging into `AI-Hypercomputer/maxtext` requires:
 | [`scripts/ci_status.py`](scripts/ci_status.py) | Queries PR commit count, active vs. superseded CI runs, and blocking vs. non-blocking job failures |
 | [`scripts/pr_comments.py`](scripts/pr_comments.py) | Fetches review states and inline comment threads, flagging unanswered reviewer comments |
 | [`scripts/check_doc_train_cmds.py`](scripts/check_doc_train_cmds.py) | Extracts `maxtext.train` commands from Markdown docs and validates them through `pyconfig` |
+| [`../../wiki/scripts/harvest_candidates.py`](../../wiki/scripts/harvest_candidates.py) | Mines handover docs, shared-infra diffs, `base.yml` keys, and overlapping `.agents/wiki/` pages for post-bring-up distillation |
+| [`../../wiki/scripts/validate_wiki.py`](../../wiki/scripts/validate_wiki.py) | Validates `.agents/wiki/` index bijection, frontmatter schema, line budgets, relative links, live `code_refs` / `config_keys`, and `--check-drift` |
 | [`references/ci_mechanics.md`](references/ci_mechanics.md) | Job step failure classification, `_Cfg` and `hlo_diff_test.py` CI traps, and `pull ready` rules |
 | [`references/stacked_prs.md`](references/stacked_prs.md) | Bottom-up merge, retargeting, and rebase sequence for stacked PRs |
 
@@ -93,6 +95,10 @@ python3 -m pytest -q -p no:cacheprovider <affected *_test.py files>
   python3 .agents/skills/maxtext-pr-upload/scripts/check_doc_train_cmds.py <doc.md> \
     --start "<section heading>" --end "<next heading>" \
     --subst BASE_OUTPUT_DIRECTORY=/tmp/out --keys model_name,per_device_batch_size
+  ```
+- **`.agents/wiki/` and `.agents/skills/` updates:** `.agents/` is listed in `.gitignore` (stage new files with `git add -f`). Whenever modifying `.agents/wiki/`, follow [`../../wiki/PROTOCOL.md`](../../wiki/PROTOCOL.md) and run:
+  ```bash
+  python3 .agents/wiki/scripts/validate_wiki.py
   ```
 
 ---

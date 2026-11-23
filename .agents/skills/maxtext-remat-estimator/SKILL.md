@@ -174,8 +174,10 @@ recomputation, so that figure is also comparable across remat policies.
 - **`ValueError: Abnormal min_pdb=... or max_pdb=0.0 values` means nothing
   fits.** Mode 1 raises it right after printing `OOM at minimum batch size`,
   when even the smallest batch runs out of memory with full remat. Add more
-  sharding, set `decoder_layer_input=offload`, or turn on optimizer or parameter
-  host offload, and then search again.
+  sharding, set `decoder_layer_input=offload`, turn on optimizer or parameter
+  host offload, or apply the verification HBM escalation ladder in
+  [`hbm_verification.md`](../../wiki/troubleshooting/hbm_verification.md), and
+  then search again.
 - **Errors other than OOM end the search with a traceback.** To see the full
   compiler log, rerun `train_compile` with the pdb and policy from the last
   probe.

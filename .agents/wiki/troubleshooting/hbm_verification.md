@@ -1,9 +1,42 @@
+---
+title: Saving TPU HBM in Verification Runs
+category: troubleshooting
+status: active
+phases: [phase4, benchmark]
+applies_to: [linen, m3]
+tags: [hbm, oom, moe, remat, offload, fsdp, ep]
+code_refs:
+  - src/maxtext/configs/base.yml
+  - src/maxtext/utils/estimator.py
+  - src/maxtext/trainers/pre_train/train_compile.py
+  - tests/integration/hlo_diff_test.py
+  - tests/unit/train_nnx_test.py
+config_keys:
+  - param_scan_axis
+  - ici_fsdp_parallelism
+  - ici_expert_parallelism
+  - ici_tensor_parallelism
+  - optimizer_memory_host_offload
+  - mu_dtype
+  - opt_type
+  - num_vocab_tiling
+  - per_device_batch_size
+  - ragged_buffer_factor
+  - remat_policy
+  - parameter_memory_host_offload
+verified_on:
+  - "Qwen 3.8 (TPU v5p, PR #6402)"
+last_verified: 2026-11-19
+---
+
 # Saving TPU HBM in Verification Runs
 
 ## Symptom / When to Use
 Verification or training/SFT smoke checks exceed per-chip TPU HBM on either a single TPU VM or a multi-host TPU cluster (e.g., fitting a model onto a single TPU VM, or fitting a 512-chip model onto 64–128 chips). Verification prioritizes **fitting in HBM** over step throughput ("unoptimizing" MaxText).
 
-## Action Ladder (Apply Stage-by-Stage)
+## Action Ladder
+
+Apply stage-by-stage, stopping at the earliest stage that fits your target TPU slice:
 
 ### Stage 1: Zero-Code Config, Sharding & Offload Flags (Try First)
 1. **Contiguous Layer-Scan Axis (`param_scan_axis=0`)**:
@@ -37,4 +70,9 @@ Verification or training/SFT smoke checks exceed per-chip TPU HBM on either a si
 
 ## Guardrails & Cleanup
 - **Monitor Host DRAM**: Heavy host offloading (`optimizer_memory_host_offload`, `parameter_memory_host_offload`, Stage 3 streaming) shifts pressure to CPU RAM (e.g., ~`69–92 GiB/chip` host DRAM); tune partial offload ratios so hosts do not OOM.
-- **Protect Default MFU & HLO CI**: Stage 1 CLI flags require no code changes. Any Stage 2/3 code modifications used solely to fit verification into HBM must either be gated behind an opt-in config flag (default `False` so `tests/integration/hlo_diff_test.py` and benchmark MFU are unaffected) or reverted during [pr_cleanup.md](../pr_cleanup.md) after archiving verification logs.
+- **Protect Default MFU & HLO CI**: Stage 1 CLI flags require no code changes. Any Stage 2/3 code modifications used solely to fit verification into HBM must either be gated behind an opt-in config flag (default `False`, and added to `_Cfg` in `tests/unit/train_nnx_test.py` if read in `train_step` / `loss_fn` so `tests/integration/hlo_diff_test.py` and benchmark MFU are unaffected) or reverted during [`pr_cleanup.md`](../../skills/model-bringup/references/pr_cleanup.md) after archiving verification logs.
+
+## Related
+- **[`maxtext-remat-estimator`](../../skills/maxtext-remat-estimator/SKILL.md)**: Automated AOT search (`maxtext.utils.estimator`) for `remat_policy=custom` tensor offload/remat policies and `per_device_batch_size` without physical target chips.
+- **[`logits_checker.md`](../../skills/model-bringup/references/logits_checker.md)**: Phase 4 multi-token masked prefill and training/SFT smoke verification workflow.
+- **[`model-bringup-m3`](../../skills/model-bringup-m3/SKILL.md)**: Pure-NNX M3 `param_scan_axis: 0` stacked layers and zero-all-gather compound `EP×TP×FSDP` dispatch.

@@ -46,6 +46,7 @@ Record the following benchmark artifacts and steady-state metrics (e.g., steps 1
 - **Configuration**: Hardware topology & TensorCore count, precision, `max_target_length`, `per_device_batch_size`, global batch tokens, and `(FSDP, TP, EP)` sharding (plus any `LIBTPU_INIT_ARGS` / SparseCore offload flags and `shard_map` / per-layer remat optimizations needed to fit HBM).
 - **Memory & HLO Artifacts**: Compile-time `Total estimated memory size` (`output`, `temp`, `argument` GB vs device HBM capacity), `after_optimizations-memory-usage-report.txt`, HLO dumps (`before_optimizations`, `after_optimizations`, `buffer-assignment`), and XPlane traces (`.xplane.pb`, `.trace.json.gz`).
 - **Throughput**: Step `Total TFLOPs` (and weight/attention % split), steady-state `seconds/step`, `TFLOP/s/device` (and MFU % vs hardware `bf16` peak), `Tokens/s/device`, and cluster `Tokens/s`.
+- **HBM / VMEM Bottlenecks & Capture**: If benchmark compilation hits HBM or VMEM limits, check [`../../../wiki/index.md`](../../../wiki/index.md) (e.g., [`hbm_verification.md`](../../../wiki/troubleshooting/hbm_verification.md) and [`maxtext-remat-estimator`](../../maxtext-remat-estimator/SKILL.md)), and record verified sharding/remat lessons in `{model_name}_handover.md` Section 4 for post-verification distillation.
 
 ---
 

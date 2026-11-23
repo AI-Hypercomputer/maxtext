@@ -21,7 +21,7 @@ Follow this execution order when onboarding a new model:
 | **9** | Mini-Model-Verification | Run [mini-model-verification](mini_verification.md) on trimmed/mini checkpoints | Trimmed/mini model parity against PyTorch reference | Record mini-model-verification metrics |
 | **10** | Full Checkpoint & Verification | Convert full `scanned` & `unscanned` checkpoints; run multi-token masked prefill ([logits_checker.md](logits_checker.md)) & training/SFT checks | `scanned` & `unscanned` masked prefill parity and training stability | Record full run commands & metrics |
 | **11** | FLOPs, Benchmark & Roofline | `src/maxtext/utils/maxtext_utils.py` & [performance_and_roofline.md](performance_and_roofline.md) | Unit-tested TFLOPs, TPU training benchmark (XPlane + HLO HBM), and analytical vs measured roofline report | Record benchmark & roofline summary |
-| **12** | Handover Wrap-up | `{model_name}_handover.md` in MaxText repository root | Complete summary of pitfalls, gotchas, and full CLI commands | Mark all phases `DONE` |
+| **12** | Handover Wrap-up & Wiki Distillation | `{model_name}_handover.md` & `.agents/wiki/` ([PROTOCOL.md](../../../wiki/PROTOCOL.md)) | Complete summary of pitfalls, full CLI commands, and `validate_wiki.py` pass on any distilled wiki playbooks | Mark all phases `DONE` & record wiki dispositions |
 
 ---
 
@@ -83,8 +83,10 @@ Maintain `{model_name}_handover.md` under the MaxText repository root so archite
 - **Results Table**: Topology, precision, seq len, batch tokens, `(FSDP, TP, EP)`, step TFLOPs, steady-state `s/step`, `TFLOP/s/device` (MFU %), `Tokens/s/device`, compiled HBM vs roofline lower bound.
 - **Command & Artifacts**: Benchmark command (including `LIBTPU_INIT_ARGS`), console log, HLO memory report, XPlane profile paths, and roofline report link.
 
-## 4. Bugs & Model-Specific Pitfalls
-- Concise list of bugs encountered, root causes, fixes, and architectural gotchas.
+## 4. Bugs, Pitfalls & Wiki Distillation Log
+| Stage | Symptom | Root Cause & Fix | Verified Evidence | Wiki Disposition (`local-only` / `merged:<page>` / `new:<page>`) |
+| :--- | :--- | :--- | :--- | :--- |
+| ... | ... | ... | ... | ... |
 ```
 
 ---

@@ -156,3 +156,8 @@ Execute real-weight TPU verification under `/dev/shm/<user>_m3_poc/` (passing `c
 - **Torch-free collection smoke check:** `pytest --collect-only tests/unit/m3/<family>_test.py`
 - **CPU 8-device unit + conformance + HLO suite:** `JAX_PLATFORMS=cpu XLA_FLAGS="--xla_force_host_platform_device_count=8" pytest -v tests/unit/m3/<family>_test.py`
 - **TPU VM real-weight parity + unit suite:** `pytest -v tests/unit/m3/<family>_tpu_parity_test.py && pytest --noconftest -v tests/unit/m3/<family>_test.py`
+
+## 6. Shared Bring-up Wiki (`.agents/wiki/`)
+
+- **Pre-Flight & Blocker Lookup:** Consult [`.agents/wiki/index.md`](../../wiki/index.md) before coding or inventing workarounds for M3 archetype precedents, TPU HBM bottlenecks ([`hbm_verification.md`](../../wiki/troubleshooting/hbm_verification.md)), parity divergences, or Orbax round-trip quirks.
+- **Post-Verification Distillation:** After all conformance and TPU parity gates pass, invoke [`maxtext-wiki-distill`](../maxtext-wiki-distill/SKILL.md) (`harvest_candidates.py` + [`PROTOCOL.md`](../../wiki/PROTOCOL.md) + `validate_wiki.py --check-drift`) to distill verified reusable lessons into `.agents/wiki/`.
