@@ -530,6 +530,55 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     mock_get_array_handler.assert_not_called()
 
   @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  @mock.patch(_GET_ARRAY_HANDLER, return_value=type("CloudPathwaysArrayHandler", (), {})())
+  def test_pathways_persistence_accepts_only_a_fuse_mounted_local_dir(self, _, mock_checkpointer):
+    cfg = self.setup_config(
+        enable_checkpointing=True,
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+    )
+    mounts = self.create_tempfile(
+        content=(
+            "overlay / overlay rw,relatime 0 0\n"
+            "fusectl /sys/fs/fuse/connections fusectl rw 0 0\n"
+            "my-rapid-bucket /gcs/ckpt fuse.gcsfuse rw,nosuid,nodev 0 0\n"
+            "tmpfs /gcs/ckpt/scratch tmpfs rw 0 0\n"
+            "bucket-b /gcs/my\\040ckpt fuse.gcsfuse rw 0 0\n"
+            "bucket-c /gcs/hidden fuse.gcsfuse rw 0 0\n"
+            "tmpfs /gcs/hidden tmpfs rw 0 0\n"
+            "tmpfs /gcs/remounted tmpfs rw 0 0\n"
+            "bucket-d /gcs/remounted fuse.gcsfuse rw 0 0\n"
+        )
+    ).full_path
+    with mock.patch.object(checkpointing, "_MOUNTS_FILE", mounts):
+      # A sibling of the mount point, a non-FUSE mount nested in it, fusectl, the rootfs, and a
+      # FUSE mount hidden by a later tmpfs mount over the same mount point.
+      for rejected in (
+          "/gcs/ckptx/run",
+          "/gcs/ckpt/scratch/run",
+          "/sys/fs/fuse/connections/run",
+          "/var/run",
+          "/gcs/hidden/run",
+      ):
+        with self.subTest(rejected=rejected):
+          with self.assertRaisesRegex(ValueError, "gs:// URI or a path on a FUSE mount"):
+            checkpointing.CheckpointManager(rejected, cfg)
+      mock_checkpointer.assert_not_called()
+
+      # A plain FUSE mount, one whose mount point has a space, and one mounted over a tmpfs.
+      accepted = ("/gcs/ckpt/run/checkpoints/", "/gcs/my ckpt/run/", "/gcs/remounted/run/")
+      for path in accepted:
+        with self.subTest(accepted=path):
+          checkpointing.CheckpointManager(path, cfg)
+          self.assertEqual(mock_checkpointer.call_args.args[0], path)
+    self.assertEqual(mock_checkpointer.call_count, len(accepted))
+
+    with mock.patch.object(checkpointing, "_MOUNTS_FILE", "/nonexistent/mounts"):
+      with self.assertRaisesRegex(ValueError, "FUSE mount"):
+        checkpointing.CheckpointManager("/gcs/ckpt/run/checkpoints/", cfg)
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
   @mock.patch(_GET_ARRAY_HANDLER)
   def test_pathways_persistence_rejects_ocdbt_and_zarr3(self, mock_get_array_handler):
     for use_ocdbt, use_zarr3 in ((True, True), (True, False), (False, True)):
