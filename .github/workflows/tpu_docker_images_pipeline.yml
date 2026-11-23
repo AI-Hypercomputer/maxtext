@@ -14,6 +14,9 @@
 
 # This workflow builds and pushes TPU MaxText images.
 # It runs automatically daily at 19:00 Pacific time, or manually via Workflow Dispatch.
+# On Sundays it builds the images and runs CI but skips the E2E tests, because the
+# RC pipeline (rc_release.yml) runs them on the same commit at the same time.
+# promote_docker_image.yml tags the Sunday images latest when the RC E2E tests pass.
 
 name: TPU Docker Images Pipeline
 
@@ -21,8 +24,11 @@ on:
   schedule:
     # Run daily at 19:00 Pacific time, one hour before the daily 20:00-24:00
     # Pacific TPU quota window of the queue that runs the E2E tests, so the TPU
-    # jobs are submitted when the window opens.
-    - cron: '0 19 * * *'
+    # jobs are submitted when the window opens. Sunday has its own entry so that
+    # run_e2e_tests can skip it.
+    - cron: '0 19 * * 1-6'
+      timezone: 'America/Los_Angeles'
+    - cron: '0 19 * * 0'
       timezone: 'America/Los_Angeles'
   workflow_dispatch:
     inputs:
@@ -163,10 +169,12 @@ jobs:
   run_e2e_tests:
     name: Run E2E tests
     needs: build_and_push_docker_images
+    # Skipped on the Sunday schedule: the RC pipeline runs the E2E tests on the same commit.
     if: >-
       ${{ !cancelled() &&
       needs.build_and_push_docker_images.result == 'success' &&
-      (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.e2e_test_scope != 'none')) }}
+      ((github.event_name == 'schedule' && github.event.schedule != '0 19 * * 0') ||
+      (github.event_name == 'workflow_dispatch' && inputs.e2e_test_scope != 'none')) }}
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
       mode: stable
