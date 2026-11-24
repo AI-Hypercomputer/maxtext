@@ -1824,6 +1824,35 @@ class FlatMoeWeightsLoadTest(parameterized.TestCase):
     plan = checkpointing._flat_moe_restore_plan({"wi_0": want}, {"wi_0": stored})  # pylint: disable=protected-access
     self.assertEqual(plan[("wi_0",)][1].sharding.spec, PartitionSpec(None, None, "fsdp", None))
 
+  def test_restore_plan_wo_shards_embed_dim_last(self):
+    """Restoring 3D/4D `wo` into flat layout shards FSDP on the last (`embed`) dim to match 3D checkpoints."""
+    e, l, mlp, emb = self.num_experts, self.layers, self.cols, self.rows
+    want = {
+        "wi_0": self._flat_target((e * emb, l, mlp)),
+        "wo": self._flat_target((e * mlp, l, emb)),
+        "mtp": {"wo": self._flat_target((e * mlp, emb))},
+        "single_axis": {
+            "wo": jax.ShapeDtypeStruct(
+                (e * mlp, l, emb), jnp.float32, sharding=NamedSharding(self.mesh, PartitionSpec("fsdp", None, None))
+            )
+        },
+    }
+    stored = {
+        "wi_0": jax.ShapeDtypeStruct((e, l, emb, mlp), jnp.float32),
+        "wo": jax.ShapeDtypeStruct((e, l, mlp, emb), jnp.float32),
+        "mtp": {"wo": jax.ShapeDtypeStruct((e, mlp, emb), jnp.float32)},
+        "single_axis": {"wo": jax.ShapeDtypeStruct((e, l, mlp, emb), jnp.float32)},
+    }
+    plan = checkpointing._flat_moe_restore_plan(want, stored)  # pylint: disable=protected-access
+    self.assertEqual(plan[("wi_0",)][1].sharding.spec, PartitionSpec("expert", None, "fsdp", None))
+    self.assertEqual(plan[("wo",)][1].sharding.spec, PartitionSpec("expert", None, None, "fsdp"))
+    self.assertEqual(plan[("mtp", "wo")][1].sharding.spec, PartitionSpec("expert", None, "fsdp"))
+    self.assertEqual(plan[("single_axis", "wo")][1].sharding.spec, PartitionSpec(None, None, None, "fsdp"))
+    wo_ref = np.arange(e * l * mlp * emb, dtype=np.float32).reshape(e, l, mlp, emb)
+    wo_arr = jax.device_put(jnp.asarray(wo_ref), plan[("wo",)][1].sharding)
+    flat_wo = checkpointing._flat_moe_convert(wo_arr, want["wo"])  # pylint: disable=protected-access
+    np.testing.assert_array_equal(np.asarray(flat_wo), wo_ref.transpose(0, 2, 1, 3).reshape(e * mlp, l, emb))
+
 
 if __name__ == "__main__":
   absltest.main()
