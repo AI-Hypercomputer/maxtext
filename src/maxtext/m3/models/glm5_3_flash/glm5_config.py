@@ -143,7 +143,7 @@ class Glm5ModelConfig(ModelConfig):
     return self.qk_nope_head_dim + self.qk_rope_head_dim
 
   def to_pyconfig_dict(self) -> dict[str, Any]:
-    """Returns `MaxTextConfig` field defaults matching `glm5.3-flash.yml`."""
+    """Returns `MaxTextConfig` field defaults for `glm5.3-flash`."""
     return {
         "base_emb_dim": self.hidden_size,
         "base_num_query_heads": self.num_attention_heads,

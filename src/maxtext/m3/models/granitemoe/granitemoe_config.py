@@ -73,7 +73,7 @@ class GraniteMoeModelConfig(ModelConfig):
     return self.hidden_size // self.num_attention_heads
 
   def to_pyconfig_dict(self) -> dict[str, Any]:
-    """Returns `MaxTextConfig` field defaults matching `granite-3.0-1b-a400m.yml`."""
+    """Returns `MaxTextConfig` field defaults for `granite-3.0-1b-a400m`."""
     return {
         "model_name": self.model_name,
         "use_m3_model": True,

@@ -33,6 +33,7 @@ MODEL_GARDEN_REGISTRY: dict[str, ModelConfigFactory] = {
     "qwen3-0.6b": Qwen3Config.qwen3_0_6b,
     "qwen3-vl-2b": Qwen3VLConfig.qwen3_vl_2b,
     "qwen3.8-flash-next": Qwen3_8FlashNextConfig.qwen3_8_flash_next,
+    "qwen3.8-flash-next-mini": Qwen3_8FlashNextConfig.qwen3_8_flash_next_mini,
 }
 
 

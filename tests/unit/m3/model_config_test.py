@@ -245,10 +245,7 @@ class ModelConfigTest(absltest.TestCase):
       ModelConfig(model_type="x", vocab_size=16, hidden_size=16, num_hidden_layers=1, extra_key=1)
 
   def test_registry_matches_m3_model_registry(self):
-    self.assertEqual(
-        set(MODEL_GARDEN_REGISTRY),
-        set(m3_models.MODEL_REGISTRY) - {"qwen3.8-flash-next-mini"},
-    )
+    self.assertEqual(set(MODEL_GARDEN_REGISTRY), set(m3_models.MODEL_REGISTRY))
 
     expected_types: dict[str, type[ModelConfig]] = {
         "glm5.3-flash": Glm5ModelConfig,
@@ -257,6 +254,7 @@ class ModelConfigTest(absltest.TestCase):
         "qwen3-0.6b": Qwen3Config,
         "qwen3-vl-2b": Qwen3VLConfig,
         "qwen3.8-flash-next": Qwen3_8FlashNextConfig,
+        "qwen3.8-flash-next-mini": Qwen3_8FlashNextConfig,
     }
     for name, expected_cls in expected_types.items():
       cfg = ModelConfig.from_model_name(name)
@@ -289,15 +287,11 @@ class ModelConfigTest(absltest.TestCase):
       ModelConfig.from_model_name("nonexistent-model")
 
   def test_to_pyconfig_dict_matches_model_yamls(self):
-    cases = [
+    yaml_cases = [
         ("qwen3-0.6b", "qwen3-0.6b.yml"),
         ("qwen3-vl-2b", "qwen3-vl-2b.yml"),
-        ("glm5.3-flash", "glm5.3-flash.yml"),
-        ("granite-3.0-1b-a400m", "granite-3.0-1b-a400m.yml"),
-        ("granitemoe", "granite-3.0-1b-a400m.yml"),
-        ("qwen3.8-flash-next", "qwen3.8-flash-next.yml"),
     ]
-    for model_name, yaml_name in cases:
+    for model_name, yaml_name in yaml_cases:
       with self.subTest(model=model_name, yaml=yaml_name):
         with open(_MODEL_YAML_DIR / yaml_name, encoding="utf-8") as f:
           expected = yaml.safe_load(f)
@@ -306,6 +300,18 @@ class ModelConfigTest(absltest.TestCase):
         assert actual is not None
         for key in expected:
           self.assertIs(type(actual[key]), type(expected[key]), f"Type mismatch for {model_name}.{key}")
+
+    # `m3`-only model families are YAML-free (owned solely by Python `ModelConfig` classes).
+    for model_name in ("glm5.3-flash", "granite-3.0-1b-a400m", "qwen3.8-flash-next", "qwen3.8-flash-next-mini"):
+      with self.subTest(yaml_free_model=model_name):
+        self.assertFalse((_MODEL_YAML_DIR / f"{model_name}.yml").exists())
+        cfg_dict = get_pyconfig_model_dict(model_name)
+        assert cfg_dict is not None
+        self.assertTrue(cfg_dict["use_m3_model"])
+    self.assertEqual(
+        get_pyconfig_model_dict("granitemoe"),
+        get_pyconfig_model_dict("granite-3.0-1b-a400m"),
+    )
 
   def test_glm5_dataclass_and_hf_json_parity(self):
     full_cfg = Glm5ModelConfig.glm5_3_flash()

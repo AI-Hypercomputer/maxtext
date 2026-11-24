@@ -60,12 +60,17 @@ class PyconfigBridgeTest(absltest.TestCase):
         return False
       return orig_exists(path)
 
+    models_dir = pathlib.Path(_BASE_YML).parent / "models"
+    for model_name in ("glm5.3-flash", "granite-3.0-1b-a400m", "qwen3.8-flash-next", "qwen3.8-flash-next-mini"):
+      self.assertFalse((models_dir / f"{model_name}.yml").exists())
+
     cases: list[tuple[str, type, tuple[str, ...]]] = [
         ("qwen3-0.6b", Qwen3Config, ()),
         ("qwen3-vl-2b", Qwen3VLConfig, ("scan_layers=false",)),
         ("glm5.3-flash", Glm5ModelConfig, ()),
         ("granite-3.0-1b-a400m", GraniteMoeModelConfig, ()),
         ("qwen3.8-flash-next", Qwen3_8FlashNextConfig, ()),
+        ("qwen3.8-flash-next-mini", Qwen3_8FlashNextConfig, ()),
     ]
     for model_name, expected_cls, extra in cases:
       with self.subTest(model=model_name):

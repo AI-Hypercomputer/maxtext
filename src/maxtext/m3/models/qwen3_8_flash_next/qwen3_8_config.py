@@ -133,7 +133,7 @@ class Qwen3_8FlashNextConfig(ModelConfig):  # pylint: disable=invalid-name
     return self
 
   def to_pyconfig_dict(self) -> dict[str, Any]:
-    """Returns `MaxTextConfig` field defaults matching `qwen3.8-flash-next.yml`."""
+    """Returns `MaxTextConfig` field defaults for this Qwen3.8-Flash-Next variant."""
     return {
         "decoder_block": "qwen3_next",
         "base_emb_dim": self.hidden_size,
@@ -193,3 +193,41 @@ class Qwen3_8FlashNextConfig(ModelConfig):  # pylint: disable=invalid-name
   def qwen3_8_flash_next(cls, **overrides: Any) -> "Qwen3_8FlashNextConfig":
     """Returns the full Qwen3.8-Flash-Next (180B) architecture configuration."""
     return cls(**overrides)
+
+  @classmethod
+  def qwen3_8_flash_next_mini(cls, **overrides: Any) -> "Qwen3_8FlashNextConfig":
+    """Returns the 4-layer / 1-cycle CPU/CI testing variant (`qwen3.8-flash-next-mini`)."""
+    defaults: dict[str, Any] = {
+        "model_name": "qwen3.8-flash-next-mini",
+        "hidden_size": 256,
+        "num_hidden_layers": 4,
+        "num_attention_heads": 4,
+        "num_key_value_heads": 2,
+        "head_dim": 64,
+        "vocab_size": 1024,
+        "hc_count": 4,
+        "hc_lowrank": 32,
+        "shared_expert_intermediate_size": 64,
+        "moe_intermediate_size": 64,
+        "n_routed_experts": 8,
+        "num_experts_per_tok": 2,
+        "linear_key_head_dim": 64,
+        "linear_value_head_dim": 64,
+        "linear_num_key_heads": 2,
+        "linear_num_value_heads": 4,
+        "gdn_chunk_size": 16,
+        "mrope_section": (3, 3, 2),
+        "indexer_n_heads": 2,
+        "indexer_kv_heads": 1,
+        "indexer_head_dim": 32,
+        "indexer_compress_ratio": 4,
+        "indexer_budget": 16,
+        "ple_embed_dim": 256,
+        "heads_per_ngram": 2,
+        "ngram_vocab_size_base": 1000,
+        "make_ngram_vocab_size_divisible_by": 4,
+        "split_ngram_parts": 4,
+        "eos_token_id": 3,
+    }
+    defaults.update(overrides)
+    return cls(**defaults)
