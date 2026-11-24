@@ -5314,6 +5314,31 @@ class MaxTextConfig(
       if self.num_moe_emb_chunks > 0:
         raise ValueError("log_required_ragged_buffer_factor=True does not support num_moe_emb_chunks > 0.")
 
+  def _has_active_expert_weight_gather(self) -> bool:
+    """Returns True if sparse_matmul gathers expert weights across an active non-EP mesh axis."""
+    ep_axes = set(infer_ep_axes(self.logical_axis_rules))
+    gather_axes = tuple(
+        ax
+        for logical in ("embed_moe", "mlp_no_fsdp")
+        for ax in axes_for_logical(self.logical_axis_rules, logical)
+        if ax not in ep_axes
+    )
+    if not gather_axes:
+      return False
+    alias = {"stage": "pipeline", "model": "tensor"}
+    slices = max(self.num_slices, 1)
+    devs_per_slice = max(self.num_target_devices // slices, 1)
+    for prefix, total in (("ici", devs_per_slice), ("dcn", slices)):
+      axis_map = {"attn_dp": 1, "attn_dp_expert": 1, "dcp": 1, "pcp": 1}
+      for axis in self.mesh_axes:
+        attr = f"{prefix}_{alias.get(axis, axis)}_parallelism"
+        if hasattr(self, attr):
+          axis_map[axis] = getattr(self, attr)
+      par = _resolve_parallelism(getattr(self, f"{prefix}_parallelism"), axis_map, self.mesh_axes)
+      if _resolved_axis_product(self.mesh_axes, par, total, gather_axes) > 1:
+        return True
+    return False
+
   def validate_expert_replication(self):
     """Validates prerequisites for online hot-expert replication (expert_replicas_per_device > 0)."""
     if self.expert_replicas_per_device <= 0:
@@ -5377,6 +5402,16 @@ class MaxTextConfig(
       if self.prefuse_moe_weights:
         raise ValueError(
             "expert_replicas_per_device > 0 with quantization='fp8_full' does not support prefuse_moe_weights."
+        )
+      if (
+          not self.override_logical_axis_rules
+          and self.shard_embed_moe_on_fsdp
+          and not (self.weight_quantization_calibration_method or "").lower().startswith("fixed")
+          and self._has_active_expert_weight_gather()
+      ):
+        raise ValueError(
+            "expert_replicas_per_device > 0 with dynamic weight calibration requires expert weights without "
+            "FSDP gathers; use a fixed weight calibration (quantized all-gather) instead."
         )
       if self.weight_sparsity_n and self.weight_sparsity_m:
         raise ValueError("expert_replicas_per_device > 0 with quantization='fp8_full' does not support weight sparsity.")
@@ -5770,7 +5805,6 @@ class MaxTextConfig(
     with open(custom_mesh_path, "r", encoding="utf-8") as f:
       return yaml.safe_load(f) or {}
 
-  @model_validator(mode="after")
   def validate_shard_embed_moe_on_fsdp(self) -> "MaxTextConfig":
     """Raise ValueError if shard_embed_moe_on_fsdp is used without fixed weight quantization calibration."""
     if self.shard_embed_moe_on_fsdp and (
@@ -7262,6 +7296,7 @@ class MaxTextConfig(
     self.validate_splash_diag_skip()
     self.validate_retry_dropless_first_steps_and_first_phase_buffer()
     self.validate_expert_replication()
+    self.validate_shard_embed_moe_on_fsdp()
     if self.warmup_skip_train_dropless and not self.warmup_programs_in_init:
       raise ValueError("warmup_skip_train_dropless=True requires warmup_programs_in_init=True.")
 

@@ -4486,10 +4486,15 @@ class RoutedMoE(nnx.Module):
             # Quantize at home so home rows match R=0 codes/scales and replicas carry their home scale.
             if not (self.config.use_tokamax_gmm and self.config.use_gmm_v2 and self.config.hardware != "cpu"):
               raise NotImplementedError("quantized expert replication requires the tokamax gmm_v2 kernel on TPU.")
+            # ops.gmm only runs QAG (_fwd_gather_weight / _drhs_scatter_weight) when both bwd_qtype and fixed
+            # weight calibration are set, and pre-gather home quantization also requires a static weight scale.
             if (get_wi_gmm_params()[0] or get_wo_gmm_params()[0]) and not (
-                gmm_rule.bwd_qtype and gmm_rule.weight_calibration_method.lower().startswith("fixed")
+                gmm_rule.bwd_qtype and (gmm_rule.weight_calibration_method or "").lower().startswith("fixed")
             ):
-              raise NotImplementedError("quantized expert replication with weight gathers requires fixed QAG.")
+              raise NotImplementedError(
+                  "expert_replicas_per_device > 0 with dynamic weight calibration requires expert weights without "
+                  "FSDP gathers; use a fixed weight calibration (quantized all-gather) instead."
+              )
             channelwise = () if gmm_rule.disable_channelwise_axes else (2,)
             w0, w1, wo = (
                 moe_replica_weights.extend_quantized_with_replicas(

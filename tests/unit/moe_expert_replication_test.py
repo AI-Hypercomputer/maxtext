@@ -877,6 +877,48 @@ class RoutedMoEReplicationFp8Test(parameterized.TestCase):
       with self.assertRaisesRegex(NotImplementedError, "gmm_v2"):
         layer.sparse_matmul(inputs, logits, None, w0, w1, wo, None, None, None, forced_routed_experts=forced)
 
+  def test_quantized_weight_gather_requires_bwd_qtype(self):
+    """Defense-in-depth: sparse_matmul rejects weight gathers without bwd_qtype (needed for QAG)."""
+    (inputs, logits, w0, w1, wo, _), forced = self._inputs(batch=8)
+    layer = self._make_layer(
+        num_ep=2,
+        expert_replicas_per_device=1,
+        expert_replica_max_send=2,
+        **_FP8_FULL_KW,
+        **_fp8_cal_kw("fixed"),
+        shard_embed_moe_on_fsdp=True,
+        ici_expert_parallelism=2,
+        ici_fsdp_parallelism=2,
+    )
+    layer.mesh = types.SimpleNamespace(
+        axis_names=("fsdp", "expert"),
+        shape={"fsdp": 2, "expert": 2},
+        devices=layer.mesh.devices,
+        local_devices=layer.mesh.local_devices,
+        empty=False,
+    )
+    layer._logical_to_mesh_axes = lambda axes: P(  # pylint: disable=protected-access
+        *(
+            ("fsdp", "expert")
+            if a == "activation_batch"
+            else ("fsdp" if a == "embed_moe" else ("expert" if a in ("exp", "exp_with_fsdp") else None))
+            for a in axes
+        )
+    )
+    rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.float8_e4m3fn,
+        weight_calibration_method="fixed,-224,224",
+        bwd_qtype=None,
+        op_names=("gmm",),
+    )
+    with (
+        mock.patch.object(qpl, "get_current_rule", lambda op: rule if op == "gmm" else None),
+        self._cpu_ep_runtime(layer, num_ep=2, num_fsdp=2, gmm_impl=mblx_ops.gmm),
+    ):
+      with self.assertRaisesRegex(NotImplementedError, "requires expert weights without FSDP gathers"):
+        layer.sparse_matmul(inputs, logits, None, w0, w1, wo, None, None, None, forced_routed_experts=forced)
+
   @parameterized.named_parameters(("absmax", "absmax"), ("fixed", "fixed"))
   def test_fp8_full_padded_tokens_stay_on_home_slots_and_match_r0(self, calibration):
     """Padded tokens (token_mask=False) stay out of FP8 planner counts and replica slots, matching R=0."""
