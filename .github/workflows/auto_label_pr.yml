@@ -54,7 +54,7 @@ jobs:
     steps:
       - name: Decide label updates
         id: decide
-        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b # v7.1.0
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
         with:
           script: |
             const pull_number = context.payload.pull_request?.number ?? Number(context.payload.inputs?.pull_number)

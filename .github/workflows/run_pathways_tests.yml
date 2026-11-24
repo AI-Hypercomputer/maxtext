@@ -94,7 +94,7 @@ jobs:
           git fetch origin "$MAXTEXT_SHA"
           git checkout FETCH_HEAD
       - name: Download the maxtext wheel
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: maxtext-wheel
       - name: Install the maxtext wheel
@@ -411,7 +411,7 @@ jobs:
           done
       - name: Upload Pathways daemon logs
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: pathways-logs-${{ inputs.device_name }}-${{ !contains(inputs.pytest_marker, 'not integration_test') && 'integration' || 'unit' }}-${{ inputs.worker_group }}
           path: /tmp/pathways-logs
