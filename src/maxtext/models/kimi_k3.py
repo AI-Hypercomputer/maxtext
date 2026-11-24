@@ -98,6 +98,7 @@ class KimiK3DecoderLayer(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         kernel_axes=("norm",),
         epsilon=self.config.normalization_layer_epsilon,
+        shard_mode=self.config.shard_mode,
         rngs=rngs,
     )
 
@@ -107,6 +108,7 @@ class KimiK3DecoderLayer(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         kernel_axes=("norm",),
         epsilon=self.config.normalization_layer_epsilon,
+        shard_mode=self.config.shard_mode,
         rngs=rngs,
     )
 
@@ -116,6 +118,7 @@ class KimiK3DecoderLayer(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         kernel_axes=("norm",),
         epsilon=self.config.normalization_layer_epsilon,
+        shard_mode=self.config.shard_mode,
         rngs=rngs,
     )
 
@@ -126,6 +129,7 @@ class KimiK3DecoderLayer(nnx.Module):
         kernel_axes=("embed", None),
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
+        shard_mode=self.config.shard_mode,
         rngs=rngs,
     )
 
@@ -135,6 +139,7 @@ class KimiK3DecoderLayer(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         kernel_axes=("norm",),
         epsilon=self.config.normalization_layer_epsilon,
+        shard_mode=self.config.shard_mode,
         rngs=rngs,
     )
 
@@ -145,6 +150,7 @@ class KimiK3DecoderLayer(nnx.Module):
         kernel_axes=("embed", None),
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
+        shard_mode=self.config.shard_mode,
         rngs=rngs,
     )
 
@@ -268,7 +274,14 @@ class KimiK3DecoderLayer(nnx.Module):
 
     Returns:
       (prefix_sum, block_residual, kv_cache), with `block_residual` of the same kind as given.
+      When called directly with a 3-tuple scan carry `(y, AttnResBuffer, layer_idx)` and
+      `block_residual=None` (used by `fsdp_prefetch_inhomogeneous`), returns
+      `((prefix_sum, block_residual, layer_idx + 1), kv_cache)`.
     """
+    carry_mode = block_residual is None and isinstance(inputs, tuple) and len(inputs) == 3
+    if carry_mode:
+      inputs, block_residual, layer_idx = inputs
+
     x = self.with_logical_constraint(inputs)
     x = checkpoint_name(x, "decoder_layer_input")
     prefix_sum = x  # [B, S, D]
@@ -330,7 +343,12 @@ class KimiK3DecoderLayer(nnx.Module):
         )
       # Only the tokamax KDA kernel honors segment ids (kda_max_num_segments > 0); otherwise packed
       # inputs would leak state across documents, which the config validator rejects.
-      attn_out, _, _ = self.self_attention(normed_attn_in, model_mode=model_mode, decoder_segment_ids=decoder_segment_ids)
+      attn_out, _, _ = self.self_attention(
+          normed_attn_in,
+          model_mode=model_mode,
+          decoder_segment_ids=decoder_segment_ids,
+          out_sharding=self.out_sharding,
+      )
     else:
       attn_out, kv_cache = self.self_attention(
           normed_attn_in,
@@ -356,11 +374,13 @@ class KimiK3DecoderLayer(nnx.Module):
 
     # STEP 6
     normed_mlp_in = self.post_self_attention_layer_norm(pooled)
-    mlp_out = self.mlp(normed_mlp_in)
+    mlp_out = self.mlp(normed_mlp_in, out_sharding=self.out_sharding)
     mlp_out = self.with_logical_constraint(mlp_out)
 
     # STEP 7
     prefix_sum = prefix_sum + mlp_out
+    if carry_mode:
+      return (prefix_sum, block_residual, layer_idx + 1), kv_cache
     return prefix_sum, block_residual, kv_cache
 
 
@@ -433,6 +453,10 @@ class KimiK3ScannableBlock(nnx.Module):
           is_moe=is_moe,
       )
       setattr(self, f"layers_{j}", layer)
+
+  def prefetch_sublayer_names(self):
+    """Sub-layer attribute names in call order for `fsdp_prefetch_inhomogeneous`."""
+    return tuple(f"layers_{j}" for j in range(self.num_of_layers))
 
   def __call__(  # pylint: disable=too-many-positional-arguments  # scanned-layer call signature
       self,

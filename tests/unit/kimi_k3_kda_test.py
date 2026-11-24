@@ -455,6 +455,72 @@ class KimiK3KDATest(unittest.TestCase):
     for got, ref in zip(jax.tree.leaves(grads), jax.tree.leaves(g_ref)):
       np.testing.assert_allclose(np.asarray(got), np.asarray(ref), rtol=1e-4, atol=2e-4)  # sharded reduction order
 
+  def test_explicit_sharding_fsdp_tp_parity_and_checkpoint_names(self):
+    """Explicit FSDP x TP `KimiDeltaAttention` matches unsharded forward/grads and emits remat names."""
+    if jax.device_count() < 4:
+      self.skipTest("needs 4 devices (XLA_FLAGS=--xla_force_host_platform_device_count=4)")
+    layer_ref = self._layer(chunk_size=4)
+    graphdef_ref, params_ref, rest_ref = nnx.split(layer_ref, nnx.Param, ...)
+    x = jax.random.normal(jax.random.PRNGKey(8), (4, 8, 32))
+
+    def ref_loss(params, x_in):
+      y, _, _ = nnx.merge(graphdef_ref, params, rest_ref)(x_in, model_mode=MODEL_MODE_TRAIN)
+      return jnp.sum(y**2), y
+
+    jaxpr_str = str(jax.make_jaxpr(ref_loss)(params_ref, x))
+    self.assertIn("name=attention_out", jaxpr_str)
+    self.assertIn("name=out_proj", jaxpr_str)
+
+    (_, y_ref), g_ref = jax.jit(jax.value_and_grad(ref_loss, has_aux=True))(params_ref, x)
+
+    mesh = jax.make_mesh(
+        (2, 2), ("fsdp", "tensor"), axis_types=(jax.sharding.AxisType.Explicit,) * 2, devices=jax.devices()[:4]
+    )
+    out_sharding = NamedSharding(mesh, P("fsdp", None, None))
+    layer_exp = KimiDeltaAttention(
+        hidden_size=32,
+        num_heads=2,
+        head_dim=8,
+        conv_size=4,
+        chunk_size=4,
+        shard_mode=ShardMode.EXPLICIT,
+        rngs=nnx.Rngs(params=0),
+    )
+    graphdef_exp, _, rest_exp = nnx.split(layer_exp, nnx.Param, ...)
+
+    def explicit_param_sharding(path, p):
+      names = tuple(getattr(k, "key", getattr(k, "name", str(k))) for k in path)
+      # Mirror `logical_axis_rules`: `heads` -> `tensor`, `embed` -> `fsdp` (where divisible).
+      if any(n in names for n in ("q_proj", "k_proj", "v_proj", "g_proj", "b_proj")):
+        return NamedSharding(mesh, P("fsdp", "tensor"))
+      if "f_a_proj" in names:
+        return NamedSharding(mesh, P("fsdp", None))
+      if "f_b_proj" in names:
+        return NamedSharding(mesh, P(None, "tensor"))
+      if "out" in names:
+        return NamedSharding(mesh, P("tensor", "fsdp"))
+      if any(n in names for n in ("q_conv1d", "k_conv1d", "v_conv1d")):
+        return NamedSharding(mesh, P(None, None, "tensor"))
+      if any(n in names for n in ("A_log", "dt_bias")):
+        return NamedSharding(mesh, P("tensor"))
+      return NamedSharding(mesh, P(*([None] * p.ndim)))
+
+    def exp_loss(params, x_in):
+      y, _, _ = nnx.merge(graphdef_exp, params, rest_exp)(x_in, model_mode=MODEL_MODE_TRAIN, out_sharding=out_sharding)
+      return jnp.sum(y**2), y
+
+    with jax.set_mesh(mesh):
+      params_sharded = jax.tree_util.tree_map_with_path(
+          lambda path, p: jax.device_put(p, explicit_param_sharding(path, p)), params_ref
+      )
+      x_sharded = jax.device_put(x, out_sharding)
+      (_, y), grads = jax.jit(jax.value_and_grad(exp_loss, has_aux=True))(params_sharded, x_sharded)
+
+    self.assertEqual(jax.typeof(y).sharding.spec.partitions, ("fsdp", None, None))
+    np.testing.assert_allclose(np.asarray(y), np.asarray(y_ref), rtol=1e-5, atol=1e-5)
+    for got, ref in zip(jax.tree.leaves(grads), jax.tree.leaves(g_ref)):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(ref), rtol=1e-4, atol=2e-4)
+
 
 if __name__ == "__main__":
   unittest.main()

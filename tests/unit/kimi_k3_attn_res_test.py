@@ -317,6 +317,49 @@ class KimiK3AttnResTest(parameterized.TestCase):
         self.assertEqual(back.shape, want.shape)
         np.testing.assert_allclose(back, want)
 
+  def test_explicit_sharding_reduced_proj_and_tp_norm(self):
+    """Explicit-mode `_apply_attn_res` aligns `reduced` proj weights and TP-sharded norm scales."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    prefix, blocks, proj, norm = _make_inputs(3, seed=11)
+    p_ref, b_ref, w_ref, n_ref = _to_jax(prefix, blocks, proj, norm)
+
+    def loss_fn(p, b, w, n):
+      out = _apply_attn_res(p, b, w, n, epsilon=_EPS)
+      return jnp.sum(jnp.sin(out)), out
+
+    (_, ref_out), ref_grads = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3), has_aux=True))(
+        p_ref, b_ref, w_ref, n_ref
+    )
+
+    mesh = jax.make_mesh(
+        (2, 2), ("fsdp", "tensor"), axis_types=(jax.sharding.AxisType.Explicit,) * 2, devices=jax.devices()[:4]
+    )
+    with jax.set_mesh(mesh):
+      p_s = jax.device_put(p_ref, NamedSharding(mesh, P("fsdp", None, None)))
+      b_s = jax.device_put(b_ref, NamedSharding(mesh, P("fsdp", None, None, None)))
+      # Mimic `prefetch_fsdp_weights` + `ShardMode.EXPLICIT`: proj weight arrives typed `reduced`
+      # over `fsdp`, while norm scale is sharded over `tensor`.
+      w_s = jax.device_put(w_ref, NamedSharding(mesh, P(None, None, reduced={"fsdp"})))
+      n_s = jax.device_put(n_ref, NamedSharding(mesh, P("tensor")))
+
+      def sharded_val_and_grad(p, b, w, n):
+        (_, out_s), grads_s = jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3), has_aux=True)(p, b, w, n)
+        # `w` is typed `reduced={"fsdp"}`, so its gradient carries `unreduced={"fsdp"}`; reduce it for comparison.
+        grads_reduced = tuple(
+            jax.sharding.reshard(g, P(*jax.typeof(g).sharding.spec.partitions))
+            if jax.typeof(g).sharding.spec.unreduced
+            else g
+            for g in grads_s
+        )
+        return out_s, grads_reduced
+
+      out, grads = jax.jit(sharded_val_and_grad)(p_s, b_s, w_s, n_s)
+
+    np.testing.assert_allclose(np.asarray(out), np.asarray(ref_out), rtol=1e-5, atol=1e-5)
+    for got, want in zip(grads, ref_grads):
+      np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-4, atol=1e-4)
+
 
 if __name__ == "__main__":
   unittest.main()

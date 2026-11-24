@@ -1162,6 +1162,7 @@ class NNXDecoder(nnx.Module):
         weight_dtype=cfg.weight_dtype,
         kernel_axes=("norm",),
         epsilon=cfg.normalization_layer_epsilon,
+        shard_mode=cfg.shard_mode,
         rngs=rngs,
     )
     self.output_attn_res_proj = linears.DenseGeneral(
@@ -1171,6 +1172,7 @@ class NNXDecoder(nnx.Module):
         kernel_axes=("embed", None),
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        shard_mode=cfg.shard_mode,
         rngs=rngs,
     )
 

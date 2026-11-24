@@ -28,6 +28,7 @@ import sys
 import unittest
 
 from absl.testing import parameterized
+from flax import linen as nn
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -38,7 +39,9 @@ from maxtext.configs import pyconfig
 from maxtext.layers import attn_res
 from maxtext.layers import moe
 from maxtext.models import kimi_k3
+from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from maxtext.utils import sharding
 from tests.utils.test_helpers import get_test_config_path
 
 _NUM_LAYERS = 13
@@ -345,6 +348,123 @@ class KimiK3ScannedParityTest(parameterized.TestCase):
         assert_close(var.get_value(), ref_flat[path])
         checked += 1
     self.assertEqual(checked, len(ref_flat))
+
+  def test_explicit_sharding_sublayer_prefetch_parity(self):
+    """Explicit sharding + inhomogeneous sub-layer FSDP prefetch matches unscanned loss & grads."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    block_size = 5
+    unscanned = self._unscanned_model(block_size, "full")
+    cfg = _toy_config(
+        scan_layers=True,
+        attn_res_block_size=block_size,
+        remat_policy="full",
+        shard_mode="explicit",
+        ici_fsdp_parallelism=4,
+        prefetch_fsdp_weights=True,
+        prefetch_fsdp_defer_grad_reduce_scatter=True,
+    )
+    mesh = jax.sharding.Mesh(
+        maxtext_utils.create_device_mesh(cfg),
+        cfg.mesh_axes,
+        axis_types=(jax.sharding.AxisType.Explicit,) * len(cfg.mesh_axes),
+    )
+    tokens, positions = _inputs(batch=4)
+    val_ref, g_ref = nnx.jit(nnx.value_and_grad(_loss))(unscanned, tokens, positions)
+
+    with jax.set_mesh(mesh), nn.logical_axis_rules(cfg.logical_axis_rules):
+      scanned = model_creation_utils.from_config(cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+      self.assertEqual(
+          scanned.decoder.scanned_blocks.prefetch_sublayer_names(), ("layers_0", "layers_1", "layers_2", "layers_3")
+      )
+      # Copy unscanned params onto the sharded explicit-mode scanned model, preserving each leaf's sharding.
+      num_prefix, num_blocks, _, pattern = kimi_k3.kimi_scan_layout(cfg)
+      weights = nnx.All(nnx.Variable, nnx.Not(nnx.RngState))
+      src = dict(nnx.to_flat_state(nnx.state(unscanned, weights)))
+      dst_state = nnx.state(scanned, weights)
+      new_flat = []
+      for path, var in nnx.to_flat_state(dst_state):
+        axis = cfg.param_scan_axis if isinstance(var, nnx.Param) else 0
+        if "scanned_blocks" in path:
+          i = path.index("scanned_blocks")
+          j = int(path[i + 1].split("_")[1])
+          per_block = [
+              np.asarray(src[path[:i] + (f"layers_{num_prefix + b * len(pattern) + j}",) + path[i + 2 :]].get_value())
+              for b in range(num_blocks)
+          ]
+          value = np.stack(per_block, axis=axis)
+        else:
+          value = np.asarray(src[path].get_value())
+        target_sharding = jax.sharding.NamedSharding(mesh, jax.typeof(var.get_value()).sharding.spec)
+        new_flat.append((path, var.replace(jax.device_put(value, target_sharding))))
+      nnx.update(scanned, nnx.from_flat_state(new_flat))
+
+      in_sharding = sharding.create_sharding(
+          mesh, ("activation_batch", "activation_length"), rules=sharding.get_logical_axis_rules()
+      )
+      tokens_s = jax.device_put(tokens, in_sharding)
+      positions_s = jax.device_put(positions, in_sharding)
+      val_pref, g_pref = nnx.jit(nnx.value_and_grad(_loss))(scanned, tokens_s, positions_s)
+
+    np.testing.assert_allclose(np.asarray(val_pref), np.asarray(val_ref), rtol=1e-4, atol=1e-4)
+    ref_flat = {p: v.get_value() for p, v in nnx.to_flat_state(g_ref)}
+    checked = 0
+
+    def assert_close(got, want):
+      want = np.asarray(want)
+      np.testing.assert_allclose(np.asarray(got), want, rtol=1e-3, atol=1e-3 * float(np.max(np.abs(want))) + 1e-8)
+
+    for path, var in nnx.to_flat_state(g_pref):
+      if "scanned_blocks" in path:
+        i = path.index("scanned_blocks")
+        j = int(path[i + 1].split("_")[1])
+        for b in range(num_blocks):
+          ref_path = path[:i] + (f"layers_{num_prefix + b * len(pattern) + j}",) + path[i + 2 :]
+          assert_close(jnp.take(var.get_value(), b, axis=cfg.param_scan_axis), ref_flat[ref_path])
+          checked += 1
+      else:
+        assert_close(var.get_value(), ref_flat[path])
+        checked += 1
+    self.assertEqual(checked, len(ref_flat))
+
+    # Fast abstract trace checks covering TP=2, EP=2 Ring-of-Experts, and host offload under explicit sharding.
+    for extra_name, extra_overrides in (
+        ("fsdp2_tp2", {"ici_fsdp_parallelism": 2, "ici_tensor_parallelism": 2}),
+        ("fsdp2_ep2_roe", {"ici_fsdp_parallelism": 2, "ici_expert_parallelism": 2, "use_ring_of_experts": True}),
+        ("fsdp4_offload", {"ici_fsdp_parallelism": 4, "remat_policy": "custom", "decoder_layer_input": "offload"}),
+    ):
+      with self.subTest(trace_case=extra_name):
+        extra_cfg = _toy_config(
+            scan_layers=True,
+            attn_res_block_size=block_size,
+            shard_mode="explicit",
+            prefetch_fsdp_weights=True,
+            prefetch_fsdp_defer_grad_reduce_scatter=True,
+            **extra_overrides,
+        )
+        extra_mesh = jax.sharding.Mesh(
+            maxtext_utils.create_device_mesh(extra_cfg),
+            extra_cfg.mesh_axes,
+            axis_types=(jax.sharding.AxisType.Explicit,) * len(extra_cfg.mesh_axes),
+        )
+        with jax.set_mesh(extra_mesh), nn.logical_axis_rules(extra_cfg.logical_axis_rules):
+          abs_model = nnx.eval_shape(
+              lambda c=extra_cfg, m=extra_mesh: model_creation_utils.from_config(
+                  c, mesh=m, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0)
+              )
+          )
+          in_sh = sharding.create_sharding(
+              extra_mesh, ("activation_batch", "activation_length"), rules=sharding.get_logical_axis_rules()
+          )
+          t_abs = jax.ShapeDtypeStruct((4, _SEQ_LEN), jnp.int32, sharding=in_sh)
+          p_abs = jax.ShapeDtypeStruct((4, _SEQ_LEN), jnp.int32, sharding=in_sh)
+
+          # Avoid indexing a single vocab slot when logits' vocab dim is sharded on `tensor`.
+          def _trace_loss(m, t, p):
+            logits = m(t, p, model_mode=MODEL_MODE_TRAIN, enable_dropout=False)
+            return jnp.mean(logits.astype(jnp.float32) ** 2)
+
+          nnx.eval_shape(nnx.value_and_grad(_trace_loss), abs_model, t_abs, p_abs)
 
 
 if __name__ == "__main__":

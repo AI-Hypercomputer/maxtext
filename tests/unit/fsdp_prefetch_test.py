@@ -32,6 +32,7 @@ from jax.sharding import AbstractMesh, AxisType, Mesh, NamedSharding, PartitionS
 import numpy as np
 
 from maxtext.common.common_types import ShardMode
+from maxtext.layers import attn_res
 from maxtext.layers import fsdp_prefetch
 from maxtext.layers import fsdp_prefetch_inhomogeneous
 from maxtext.layers import fsdp_prefetch_overlap_transform
@@ -2070,6 +2071,208 @@ class FsdpPrefetchTwoStageDcnPipelineTest(unittest.TestCase):
     self.assertEqual(hlo_opt_out, hlo_dcn1_off)
     for g, r in zip(jax.tree.leaves(got_opt_out), jax.tree.leaves(ref)):
       np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+
+
+class _ToyAttnResSubLayer(nnx.Module):
+  """Toy sub-layer with Kimi-K3's `(y, AttnResBuffer, layer_idx)` carry semantics."""
+
+  def __init__(self, dim, rngs, *, hidden_scale=1, block_size=3):
+    self.block_size = block_size
+    self.w1 = nnx.Param(jax.random.normal(rngs.params(), (dim, dim * hidden_scale)) / dim**0.5)
+    self.w2 = nnx.Param(jax.random.normal(rngs.params(), (dim * hidden_scale, dim)) / (dim * hidden_scale) ** 0.5)
+    self.res_proj = nnx.Param(jax.random.normal(rngs.params(), (dim, 1)) * 0.25)
+    self.res_norm = nnx.Param(jnp.ones((dim,), dtype=jnp.float32))
+
+  def __call__(self, carry):
+    y, buf, layer_idx = carry
+    y = ad_checkpoint.checkpoint_name(y, "decoder_layer_input")
+    h = attn_res._apply_attn_res(  # pylint: disable=protected-access
+        prefix_sum=y,
+        block_residual=buf.blocks,
+        proj_weight=self.res_proj[...],
+        norm_weight=self.res_norm[...],
+        epsilon=1e-5,
+        num_blocks=buf.blocks.shape[-2],
+        num_committed=buf.count,
+    )
+    is_commit = layer_idx % self.block_size == 0
+    buf = attn_res.commit_attn_res_block(buf, y, is_commit)
+    mid = ad_checkpoint.checkpoint_name(jnp.tanh(jnp.einsum("bsd,dh->bsh", h, self.w1[...])), "mlpwi")
+    delta = jnp.einsum("bsh,hd->bsd", mid, self.w2[...])
+    y_out = jnp.where(is_commit, delta, y + delta)
+    return (y_out, buf, layer_idx + 1), None
+
+
+class _ToyAttnResBlock(nnx.Module):
+  """Inhomogeneous 3+1 toy block using `KimiK3ScannableBlock`'s sub-layer prefetch interface."""
+
+  def __init__(self, dim, rngs, *, block_size=3):
+    self.layers_0 = _ToyAttnResSubLayer(dim, rngs, hidden_scale=1, block_size=block_size)
+    self.layers_1 = _ToyAttnResSubLayer(dim, rngs, hidden_scale=1, block_size=block_size)
+    self.layers_2 = _ToyAttnResSubLayer(dim, rngs, hidden_scale=1, block_size=block_size)
+    self.layers_3 = _ToyAttnResSubLayer(dim, rngs, hidden_scale=2, block_size=block_size)
+
+  def prefetch_sublayer_names(self):
+    return ("layers_0", "layers_1", "layers_2", "layers_3")
+
+  def __call__(self, carry):
+    for name in self.prefetch_sublayer_names():
+      carry, _ = getattr(self, name)(carry)
+    return carry, None
+
+
+class FsdpPrefetchPyTreeAndAttnResTest(unittest.TestCase):
+  """Tests PyTree carries, host offloading with scalar leaves, and shared `AttnResBuffer.blocks`."""
+
+  def test_homogeneous_prefetch_pytree_carry_and_offload(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    mesh = jax.make_mesh((4,), ("fsdp",), axis_types=(AxisType.Explicit,), devices=jax.devices()[:4])
+    length, batch, seq, dim, slots = 6, 4, 2, 8, 4
+    layers = [_ToyAttnResSubLayer(dim, nnx.Rngs(params=i), block_size=2) for i in range(length)]
+    graphdef = nnx.graphdef(layers[0])
+    params = jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(l, nnx.Param) for l in layers])
+    x_np = np.random.default_rng(1).standard_normal((batch, seq, dim)).astype(np.float32)
+
+    def ref_loss(p, x):
+      carry = (x, attn_res.init_attn_res_buffer(x, slots), jnp.asarray(0, jnp.int32))
+      for i in range(length):
+        carry, _ = nnx.merge(graphdef, jax.tree.map(lambda v, i=i: v[i], p))(carry)
+      return (carry[0] ** 2).sum() + (carry[1].blocks ** 2).sum() * 0.1
+
+    ref_val, ref_grads = jax.value_and_grad(ref_loss, argnums=(0, 1))(params, x_np)
+
+    for decoder_layer_input in ("device", "offload"):
+      with self.subTest(decoder_layer_input=decoder_layer_input):
+        offload = decoder_layer_input == "offload"
+        config = types.SimpleNamespace(
+            param_scan_axis=0,
+            shard_mode=ShardMode.EXPLICIT,
+            debug_sharding=False,
+            prefetch_fsdp_defer_grad_reduce_scatter=True,
+            decoder_layer_input=decoder_layer_input,
+        )
+        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+            names_which_can_be_saved=["mlpwi"] + ([] if offload else ["decoder_layer_input"]),
+            names_which_can_be_offloaded=["decoder_layer_input"] if offload else [],
+            offload_src="device",
+            offload_dst="pinned_host",
+        )
+
+        def loss(p, x, config=config, policy=policy):
+          carry = (x, attn_res.init_attn_res_buffer(x, slots), jnp.asarray(0, jnp.int32))
+          out, _, _ = fsdp_prefetch.apply_layers_with_fsdp_prefetch(
+              nnx.merge(graphdef, p), carry, length=length, mesh=mesh, config=config, remat_policy=policy
+          )
+          return (out[0] ** 2).sum() + (out[1].blocks ** 2).sum() * 0.1
+
+        with jax.set_mesh(mesh):
+          p_sharded = jax.tree.map(
+              lambda v: jax.device_put(v, PartitionSpec(None, "fsdp", None) if v.ndim == 3 else PartitionSpec()), params
+          )
+          x_s = jax.device_put(x_np, PartitionSpec("fsdp", None, None))
+          val, grads = jax.jit(jax.value_and_grad(loss, argnums=(0, 1)))(p_sharded, x_s)
+
+        np.testing.assert_allclose(np.asarray(val), np.asarray(ref_val), rtol=1e-5, atol=1e-5)
+        for g, r in zip(jax.tree.leaves(grads), jax.tree.leaves(ref_grads)):
+          np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+
+  def test_inhomogeneous_shared_attnres_blocks_parity_and_single_saved_buffer(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    num_blocks, batch, seq, dim, slots = 2, 4, 2, 8, 5
+    blocks = [_ToyAttnResBlock(dim, nnx.Rngs(params=b), block_size=3) for b in range(num_blocks)]
+    graphdef = nnx.graphdef(blocks[0])
+    params = jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(b, nnx.Param) for b in blocks])
+    x_np = np.random.default_rng(2).standard_normal((batch, seq, dim)).astype(np.float32)
+
+    def ref_loss(p, x):
+      carry = (x, attn_res.init_attn_res_buffer(x, slots), jnp.asarray(1, jnp.int32))
+      for b in range(num_blocks):
+        carry, _ = nnx.merge(graphdef, jax.tree.map(lambda v, b=b: v[b], p))(carry)
+      return (carry[0] ** 2).sum() + (carry[1].blocks ** 2).sum() * 0.1
+
+    ref_val, ref_grads = jax.value_and_grad(ref_loss, argnums=(0, 1))(params, x_np)
+
+    cases = [
+        ("fsdp4_nodefer_full", (4,), ("fsdp",), PartitionSpec("fsdp", None, None), False, 1, "device", None),
+        ("fsdp4_defer_full", (4,), ("fsdp",), PartitionSpec("fsdp", None, None), True, 1, "device", None),
+        (
+            "fsdp4_defer_custom",
+            (4,),
+            ("fsdp",),
+            PartitionSpec("fsdp", None, None),
+            True,
+            1,
+            "device",
+            jax.checkpoint_policies.save_only_these_names("mlpwi", "decoder_layer_input"),
+        ),
+        (
+            "fsdp4_defer_offload",
+            (4,),
+            ("fsdp",),
+            PartitionSpec("fsdp", None, None),
+            True,
+            1,
+            "offload",
+            jax.checkpoint_policies.save_and_offload_only_these_names(
+                names_which_can_be_saved=["mlpwi"],
+                names_which_can_be_offloaded=["decoder_layer_input"],
+                offload_src="device",
+                offload_dst="pinned_host",
+            ),
+        ),
+        (
+            "dcn2_fsdp2_defer_2stage",
+            (2, 2),
+            ("data", "fsdp"),
+            PartitionSpec(("data", "fsdp"), None, None),
+            True,
+            2,
+            "device",
+            None,
+        ),
+    ]
+
+    for name, mesh_shape, mesh_axes, x_spec, defer, dcn_dp, layer_in, policy in cases:
+      with self.subTest(case=name):
+        mesh = jax.make_mesh(
+            mesh_shape, mesh_axes, axis_types=(AxisType.Explicit,) * len(mesh_axes), devices=jax.devices()[:4]
+        )
+        config = types.SimpleNamespace(
+            param_scan_axis=0,
+            shard_mode=ShardMode.EXPLICIT,
+            debug_sharding=False,
+            prefetch_fsdp_defer_grad_reduce_scatter=defer,
+            prefetch_fsdp_two_stage_dcn=True,
+            dcn_data_parallelism=dcn_dp,
+            decoder_layer_input=layer_in,
+        )
+
+        def loss(p, x, mesh=mesh, config=config, policy=policy):
+          layers = nnx.merge(graphdef, p)
+          stages = fsdp_prefetch_inhomogeneous.sublayer_stages(layers)
+          carry = (x, attn_res.init_attn_res_buffer(x, slots), jnp.asarray(1, jnp.int32))
+          out, _, _ = fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
+              layers, stages, carry, length=num_blocks, mesh=mesh, config=config, remat_policy=policy
+          )
+          return (out[0] ** 2).sum() + (out[1].blocks ** 2).sum() * 0.1
+
+        with jax.set_mesh(mesh):
+          p_sharded = jax.tree.map(
+              lambda v: jax.device_put(v, PartitionSpec(None, "fsdp", None) if v.ndim == 3 else PartitionSpec()), params
+          )
+          x_s = jax.device_put(x_np, x_spec)
+          if name == "fsdp4_defer_full":
+            # Verify shared `AttnResBuffer.blocks`: without sharing, the forward scan stacks
+            # `[num_blocks, 3, batch, seq, slots, dim]` = `f32[2,3,4,2,5,8]` as a saved residual.
+            grad_jaxpr = str(jax.make_jaxpr(jax.value_and_grad(loss, argnums=(0, 1)))(p_sharded, x_s))
+            self.assertNotIn(f"f32[{num_blocks},3,{batch},{seq},{slots},{dim}]", grad_jaxpr)
+          val, grads = jax.jit(jax.value_and_grad(loss, argnums=(0, 1)))(p_sharded, x_s)
+
+        np.testing.assert_allclose(np.asarray(val), np.asarray(ref_val), rtol=1e-5, atol=1e-5)
+        for g, r in zip(jax.tree.leaves(grads), jax.tree.leaves(ref_grads)):
+          np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

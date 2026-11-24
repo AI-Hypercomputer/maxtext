@@ -33,6 +33,7 @@ from flax import nnx
 import jax
 from jax.experimental import xla_metadata
 import jax.numpy as jnp
+from maxtext.layers import attn_res
 from maxtext.layers import fsdp_prefetch
 from maxtext.utils import max_logging
 
@@ -141,12 +142,41 @@ def _custom_vjp_nested_prefetch_pipeline(
   return out
 
 
+def _can_share_attnres_blocks(carry) -> bool:
+  """Whether `carry` is a Kimi-K3 `(y, AttnResBuffer, layer_idx)` carry with append-only `blocks`.
+
+  `AttnResBuffer.blocks` is strictly append-only across sub-layers (committed slots `0..count-1`
+  never mutate and slots `>= count` are masked to `-inf` in softmax pooling), so saving a single
+  final `blocks` tensor plus each sub-layer's scalar `count` is bit-exact with saving a full
+  `blocks` copy per sub-layer while avoiding `O(num_layers)` HBM copies.
+  """
+  return (
+      isinstance(carry, tuple)
+      and len(carry) == 3
+      and isinstance(carry[1], attn_res.AttnResBuffer)
+      and carry[1].pending is None
+  )
+
+
+def _unpack_shared_ys(ys, g):
+  """Unpacks `(ys, shared_blocks)` and returns `(ys, restore_y)` for backward sub-layer recompute."""
+  if not _can_share_attnres_blocks(g):
+    return ys, lambda y_val: y_val
+  ys, shared_blocks = ys
+  return ys, lambda y_val: (y_val[0], attn_res.AttnResBuffer(blocks=shared_blocks, count=y_val[1]), y_val[2])
+
+
 def _custom_vjp_nested_prefetch_pipeline_fwd(
     graphdefs, x_in, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, length, ctxs, sizes
 ):
   """Forward pass of `_custom_vjp_nested_prefetch_pipeline`: one scan step per block."""
   num_groups = len(graphdefs)
   offload_ys = bool(ctxs and ctxs[0].offload_layer_inputs)
+  share_blocks = _can_share_attnres_blocks(x_in)
+
+  def _save_y(y_val):
+    return (y_val[0], y_val[1].count, y_val[2]) if share_blocks else y_val
+
   params, state, gather, _, layout_fns, fwd_layers, _ = _setup_groups(
       graphdefs, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctxs
   )
@@ -188,10 +218,11 @@ def _custom_vjp_nested_prefetch_pipeline_fwd(
             y, p_next = jax.lax.optimization_barrier((y, p_next))
           w_next = gather[i](p_next)  # AG(j+1) || sub-layer j.
           y_out, saved_k = fwd(i, y, w, _index_at(s, k))
+          y_saved = _save_y(y)
           if offload_ys:
-            ys_buf_i = fsdp_prefetch._host_stack_write(ys_buf_i, y, b * n + k)
+            ys_buf_i = fsdp_prefetch._host_stack_write(ys_buf_i, y_saved, b * n + k)
             return (y_out, w_next, ys_buf_i), (None, saved_k)
-          return (y_out, w_next, ys_buf_i), (y, saved_k)
+          return (y_out, w_next, ys_buf_i), (y_saved, saved_k)
 
         (y, w, ys_buf_i), (ys_k, saved_k) = _sublayer_scan(
             same_group, (y, w, ys_buf_i), jnp.arange(n - 1), unroll=2 if ordered else 1
@@ -206,12 +237,12 @@ def _custom_vjp_nested_prefetch_pipeline_fwd(
         w_next = gather_nxt(nxt)  # AG(j+1) || sub-layer j, where sub-layer j+1 is of another group.
         y_out, saved_last = fwd(i, y, w, layer_state)
         if offload_ys:
-          ys_buf_i = fsdp_prefetch._host_stack_write(ys_buf_i, y, b * n + (n - 1))
+          ys_buf_i = fsdp_prefetch._host_stack_write(ys_buf_i, _save_y(y), b * n + (n - 1))
         return (y_out, w, ys_buf_i), (w_next, saved_last)
 
       # The last sub-layer's state and next params ride in xs, so XLA cannot hoist them as loop invariants.
       last_xs = fsdp_prefetch._expand0((fsdp_prefetch._slice_at(b_state[i], n - 1), nxt_first))
-      y_last_in = y
+      y_last_in = _save_y(y)
       (y, _, ys_buf_i), (w_next, saved_last) = _sublayer_scan(last, (y, w, ys_buf_i), last_xs)
       w = fsdp_prefetch._slice_at(w_next, 0)
       if offload_ys:
@@ -224,12 +255,13 @@ def _custom_vjp_nested_prefetch_pipeline_fwd(
     return (y, w, ys_buf), (tuple(ys), tuple(saved))
 
   w = gather[0](fsdp_prefetch._slice_at(fsdp_prefetch._slice_at(params[0], 0), 0))
-  ys_buf = tuple(fsdp_prefetch._host_stack_buffer(x_in, length * n) for n in sizes) if offload_ys else ()
+  ys_buf = tuple(fsdp_prefetch._host_stack_buffer(_save_y(x_in), length * n) for n in sizes) if offload_ys else ()
   xs = (jnp.arange(length), tuple(state), tuple(params))
   (y, _, ys_buf), (ys, saved) = jax.lax.scan(body, (x_in, w, ys_buf), xs)
   if offload_ys:
     ys = ys_buf
-  residuals = (ys, saved, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves)
+  ys_res = (ys, y[1].blocks) if share_blocks else ys
+  residuals = (ys_res, saved, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves)
   return (y, state_leaves), residuals
 
 
@@ -239,6 +271,7 @@ def _custom_vjp_nested_prefetch_pipeline_bwd(graphdefs, length, ctxs, sizes, res
     return _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, g_out)
   ys, saved, params_leaves, state_leaves, d_args, d_kwargs = res
   g, _ = g_out  # Non-parameter layer state is not differentiated.
+  ys, restore_y = _unpack_shared_ys(ys, g)
   num_groups = len(graphdefs)
   offload_ys = bool(ctxs and ctxs[0].offload_layer_inputs)
   params, state, gather, rs_fns, layout_fns, _, layer_vjp_fns = _setup_groups(
@@ -250,6 +283,7 @@ def _custom_vjp_nested_prefetch_pipeline_bwd(graphdefs, length, ctxs, sizes, res
   layouts = {}
 
   def bwd(i, y, w, layer_state, g, saved_k):
+    y = restore_y(y)
     if i not in layouts:
       layouts[i] = layout_fns[i](y, w, layer_state)
     g, dw = layer_vjp_fns[i](y, w, layer_state, g, saved_k, layouts[i])
@@ -359,6 +393,7 @@ def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, 
   """
   ys, saved, params_leaves, state_leaves, d_args, d_kwargs = res
   g, _ = g_out  # Non-parameter layer state is not differentiated.
+  ys, restore_y = _unpack_shared_ys(ys, g)
   num_groups = len(graphdefs)
   offload_ys = bool(ctxs and ctxs[0].offload_layer_inputs)
   params, state, gather, rs_fns, layout_fns, _, layer_vjp_fns = _setup_groups(
@@ -371,6 +406,7 @@ def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, 
 
   def bwd(i, y, w, layer_state, g, saved_k):
     """Recompute + vjp of a group-i sub-layer; the untagged reduce-scatters run within the step."""
+    y = restore_y(y)
     if i not in layouts:
       layouts[i] = layout_fns[i](y, w, layer_state)
     g, dw = layer_vjp_fns[i](y, w, layer_state, g, saved_k, layouts[i])
@@ -402,7 +438,7 @@ def _nested_prefetch_pipeline_bwd_deferred(graphdefs, length, ctxs, sizes, res, 
     if i not in pending_avals:
 
       def first_dw(g):
-        y0 = fsdp_prefetch._host_stack_read(ys[i], 0) if offload_ys else jax.tree.map(lambda x: x[0, 0], ys[i])
+        y0 = restore_y(fsdp_prefetch._host_stack_read(ys[i], 0) if offload_ys else jax.tree.map(lambda x: x[0, 0], ys[i]))
         saved0, state0 = (jax.tree.map(lambda x: x[0, 0], t) for t in (saved[i], state[i]))
         w0 = gather[i](jax.tree.map(lambda x: x[0, 0], params[i]))
         _, dw = layer_vjp_fns[i](y0, w0, state0, g, saved0, layout_fns[i](y0, w0, state0))
