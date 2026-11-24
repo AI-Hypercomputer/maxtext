@@ -921,8 +921,13 @@ class OfflineEngine:
         # Input is too long, truncate to max_prefill_length
         padded_tokens = item.tokens[:target_length]
 
-        # Create new InputData with padded tokens
-      padded_data.append(InputData(id=item.id, tokens=padded_tokens, true_length=item.true_length))
+      true_length = min(item.true_length, len(padded_tokens))
+      if true_length < item.true_length:
+        max_logging.log(
+            f"Input {item.id}: {item.true_length} tokens is longer than the largest prefill length"
+            f" {target_length}; only its first {true_length} tokens are used"
+        )
+      padded_data.append(InputData(id=item.id, tokens=padded_tokens, true_length=true_length))
 
     return padded_data
 
