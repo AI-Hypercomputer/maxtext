@@ -1,0 +1,293 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#      https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Tests helpers of the checkpoint load benchmark harness, benchmark_ckpt_load_time.py."""
+
+import importlib.util
+import json
+import os
+import shutil
+import sys
+import tempfile
+import types
+import unittest
+
+# pylint: disable=protected-access
+
+_HARNESS_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "benchmark_ckpt_load_time.py")
+_spec = importlib.util.spec_from_file_location("benchmark_ckpt_load_time", _HARNESS_PATH)
+harness = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(harness)
+
+
+class PersistWorkerUploadMaxTest(unittest.TestCase):
+  """The worker writes the phase result JSON before the parent has parsed the upload times from the worker log."""
+
+  RESULT = {"hf_to_gcs_s": 41.5, "safetensors_and_convert_s": 97.25}
+
+  def setUp(self):
+    super().setUp()
+    tmp_dir = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, tmp_dir)
+    self.result_json = os.path.join(tmp_dir, "safetensors_dynamic_result.json")
+    with open(self.result_json, "w", encoding="utf-8") as f:
+      json.dump(self.RESULT, f, indent=2)
+
+  def _read_text(self) -> str:
+    with open(self.result_json, "r", encoding="utf-8") as f:
+      return f.read()
+
+  def test_writes_the_slowest_upload_into_the_result_json(self):
+    harness._persist_worker_upload_max_s(self.result_json, [3.5, 9.25, 4.0])
+    self.assertEqual(json.loads(self._read_text()), {**self.RESULT, "worker_upload_max_s": 9.25})
+
+  def test_returns_the_result_it_persisted(self):
+    data = harness._persist_worker_upload_max_s(self.result_json, [3.5, 9.25, 4.0])
+    self.assertEqual(data, json.loads(self._read_text()))
+
+  def test_leaves_the_result_json_untouched_without_uploads(self):
+    before = self._read_text()
+    data = harness._persist_worker_upload_max_s(self.result_json, [])
+    self.assertEqual(data, self.RESULT)
+    self.assertEqual(self._read_text(), before)
+
+
+class OncePerProcessTest(unittest.TestCase):
+  """Each worker runs SITE_CUSTOMIZE_CONTENT twice: as sitecustomize.py at interpreter start and again from main()."""
+
+  TEST_SENTINEL = "_benchmark_ckpt_load_time_test_sentinel"
+
+  def setUp(self):
+    super().setUp()
+    # The sentinels are attributes of `sys`: clear them for the test and restore them afterwards.
+    for sentinel in (self.TEST_SENTINEL, harness._SITE_CUSTOMIZE_SENTINEL):
+      saved = vars(sys).pop(sentinel, None)
+      self.addCleanup(self._restore_sys_attr, sentinel, saved)
+
+  @staticmethod
+  def _restore_sys_attr(name: str, value) -> None:
+    vars(sys).pop(name, None)
+    if value is not None:
+      setattr(sys, name, value)
+
+  def test_second_run_does_not_patch_again(self):
+    target = types.SimpleNamespace(load=lambda: "load")
+    code = harness._once_per_process(
+        "_orig_load = target.load\ntarget.load = lambda: 'patched ' + _orig_load()\n", self.TEST_SENTINEL
+    )
+    # Separate globals, like the sitecustomize module and then the harness module.
+    exec(code, {"target": target})  # pylint: disable=exec-used
+    exec(code, {"target": target})  # pylint: disable=exec-used
+    self.assertEqual(target.load(), "patched load")
+
+  def test_site_customize_content_does_nothing_once_applied(self):
+    setattr(sys, harness._SITE_CUSTOMIZE_SENTINEL, True)
+    namespace = {}
+    exec(harness.SITE_CUSTOMIZE_CONTENT, namespace)  # pylint: disable=exec-used
+    self.assertEqual(set(namespace) - {"__builtins__", "sys"}, set())
+
+
+class CodeVersionTest(unittest.TestCase):
+  """Phase results record the CODE_VERSION.json at the root of the code tree that the harness runs from."""
+
+  CODE_VERSION = {"git_branch_name": "bench/branch", "git_commit": "0123456789abcdef0123456789abcdef01234567"}
+
+  def setUp(self):
+    super().setUp()
+    # A code tree laid out like the extracted code tarball, with a copy of the harness.
+    self.code_root = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, self.code_root)
+    harness_copy_path = os.path.join(self.code_root, "checkpoint_load_benchmark", "benchmark_ckpt_load_time.py")
+    os.makedirs(os.path.dirname(harness_copy_path))
+    shutil.copyfile(_HARNESS_PATH, harness_copy_path)
+    spec = importlib.util.spec_from_file_location("benchmark_ckpt_load_time_copy", harness_copy_path)
+    self.harness_copy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(self.harness_copy)
+
+  def _write_code_version_json(self, text: str) -> None:
+    with open(os.path.join(self.code_root, "CODE_VERSION.json"), "w", encoding="utf-8") as f:
+      f.write(text)
+
+  def test_loads_code_version_json_from_the_root_of_the_code_tree(self):
+    self._write_code_version_json(json.dumps(self.CODE_VERSION))
+    self.assertEqual(self.harness_copy._load_code_version(), self.CODE_VERSION)
+
+  def test_reports_an_unknown_commit_without_code_version_json(self):
+    self.assertEqual(
+        self.harness_copy._load_code_version(), {"git_commit": "unknown", "source": "CODE_VERSION.json not found"}
+    )
+
+  def test_reports_an_unknown_commit_for_invalid_json(self):
+    self._write_code_version_json('{"git_commit": ')
+    code_version = self.harness_copy._load_code_version()
+    self.assertEqual(code_version["git_commit"], "unknown")
+    self.assertIn("CODE_VERSION.json is not valid JSON", code_version["source"])
+
+  def test_reports_an_unknown_commit_for_json_that_is_not_an_object(self):
+    self._write_code_version_json("[1, 2]")
+    self.assertEqual(
+        self.harness_copy._load_code_version(),
+        {"git_commit": "unknown", "source": "CODE_VERSION.json is not a JSON object"},
+    )
+
+  def test_writes_the_result_json_when_code_version_json_cannot_be_read(self):
+    os.mkdir(os.path.join(self.code_root, "CODE_VERSION.json"))  # Opening it raises IsADirectoryError.
+    result_json = os.path.join(self.code_root, "to_maxtext_step1_result.json")
+    self.harness_copy._write_result_json(result_json, {"status": "FAILED"})
+    with open(result_json, "r", encoding="utf-8") as f:
+      code_version = json.load(f)["code_version"]
+    self.assertEqual(code_version["git_commit"], "unknown")
+    self.assertIn("CODE_VERSION.json could not be read", code_version["source"])
+
+  def test_writes_the_code_version_into_the_result_json(self):
+    self._write_code_version_json(json.dumps(self.CODE_VERSION))
+    result_json = os.path.join(self.code_root, "to_maxtext_step1_result.json")
+    self.harness_copy._write_result_json(result_json, {"status": "FAILED", "hf_to_gcs_s": 0.0})
+    with open(result_json, "r", encoding="utf-8") as f:
+      self.assertEqual(json.load(f), {"status": "FAILED", "hf_to_gcs_s": 0.0, "code_version": self.CODE_VERSION})
+
+
+class LoadDynamicDownloadCapTest(unittest.TestCase):
+  """load_dynamic's ProcessPoolExecutor(max_workers=32) is capped at 16 at runtime without touching src/."""
+
+  def _make_fake_load_dynamic(self, recorded_calls: list[tuple[tuple, dict]]):
+    """Returns a fake load_dynamic module whose ProcessPoolExecutor records call args."""
+
+    class _FakePool:
+
+      def __init__(self, *args, **kwargs):
+        recorded_calls.append((args, kwargs))
+
+      def __enter__(self):
+        return self
+
+      def __exit__(self, *exc):
+        return False
+
+    fake_futures = types.SimpleNamespace(ProcessPoolExecutor=_FakePool, wait=lambda *a, **kw: (set(), set()))
+    fake_concurrent = types.SimpleNamespace(futures=fake_futures)
+    return types.SimpleNamespace(concurrent=fake_concurrent), _FakePool
+
+  def test_caps_keyword_positional_and_unspecified_max_workers_at_16(self):
+    recorded: list[tuple[tuple, dict]] = []
+    fake_ld, fake_pool = self._make_fake_load_dynamic(recorded)
+    with harness._cap_load_dynamic_download_workers(fake_ld):
+      fake_ld.concurrent.futures.ProcessPoolExecutor(max_workers=32, mp_context="spawn")
+      fake_ld.concurrent.futures.ProcessPoolExecutor(32, mp_context="spawn")
+      fake_ld.concurrent.futures.ProcessPoolExecutor(max_workers=4, mp_context="spawn")
+      fake_ld.concurrent.futures.ProcessPoolExecutor(mp_context="spawn")
+      fake_ld.concurrent.futures.ProcessPoolExecutor(max_workers=None, mp_context="spawn")
+      # Other attributes of concurrent.futures remain reachable through the proxy.
+      self.assertEqual(fake_ld.concurrent.futures.wait(), (set(), set()))
+
+    self.assertEqual(recorded[0], ((), {"max_workers": 16, "mp_context": "spawn"}))
+    self.assertEqual(recorded[1], ((16,), {"mp_context": "spawn"}))
+    self.assertEqual(recorded[2], ((), {"max_workers": 4, "mp_context": "spawn"}))
+    self.assertEqual(recorded[3], ((), {"max_workers": 16, "mp_context": "spawn"}))
+    self.assertEqual(recorded[4], ((), {"max_workers": 16, "mp_context": "spawn"}))
+    # Restored outside the context manager.
+    self.assertIs(fake_ld.concurrent.futures.ProcessPoolExecutor, fake_pool)
+
+  def test_restores_on_exception(self):
+    recorded: list[tuple[tuple, dict]] = []
+    fake_ld, fake_pool = self._make_fake_load_dynamic(recorded)
+    with self.assertRaises(RuntimeError):
+      with harness._cap_load_dynamic_download_workers(fake_ld):
+        raise RuntimeError("boom")
+    self.assertIs(fake_ld.concurrent.futures.ProcessPoolExecutor, fake_pool)
+
+
+class GetParallelismFlagsTest(unittest.TestCase):
+  """Tests `_get_parallelism_flags` mesh divisibility handling for `gpt-oss` on 256-chip slices."""
+
+  def test_caps_gpt_oss_ici_fsdp_at_64_on_256_devices(self):
+    args_256 = types.SimpleNamespace(
+        model="gpt-oss-120b",
+        num_slices=1,
+        num_hosts_per_slice=64,
+        devices_per_slice=256,
+        dcn_parallelism_axis="auto",
+    )
+    flags_256 = harness._get_parallelism_flags(args_256, concurrent_gb=45)
+    self.assertIn("ici_data_parallelism=4", flags_256)
+    self.assertIn("allow_split_physical_axes=True", flags_256)
+    self.assertIn("ici_fsdp_parallelism=-1", flags_256)
+
+    args_64 = types.SimpleNamespace(
+        model="gpt-oss-120b",
+        num_slices=1,
+        num_hosts_per_slice=16,
+        devices_per_slice=64,
+        dcn_parallelism_axis="auto",
+    )
+    flags_64 = harness._get_parallelism_flags(args_64, concurrent_gb=45)
+    self.assertFalse(any(f.startswith("ici_data_parallelism=") for f in flags_64))
+
+
+class ShouldStageSparseBf16Test(unittest.TestCase):
+  """Synthetic sparse DeepSeek files must never replace a real checkpoint staged in GCS."""
+
+  def setUp(self):
+    super().setUp()
+    keys = ("STAGE_SPARSE_DEEPSEEK_OOM", "STAGE_SPARSE_ALL_LARGE", "BENCH_SAFETENSORS_GCS_DIR")
+    saved = {k: os.environ.get(k) for k in keys}
+
+    def _restore():
+      for k, v in saved.items():
+        if v is None:
+          os.environ.pop(k, None)
+        else:
+          os.environ[k] = v
+
+    self.addCleanup(_restore)
+    for k in keys:
+      os.environ.pop(k, None)
+
+  def test_stages_sparse_files_when_no_gcs_checkpoint_is_set(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    self.assertTrue(harness._should_stage_sparse_bf16("deepseek3-671b"))
+
+  def test_loads_the_real_gcs_checkpoint_even_with_the_sparse_flag(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    os.environ["BENCH_SAFETENSORS_GCS_DIR"] = "gs://bucket/mesa-bench-v2/hf_cache_bf16/deepseek3-671b"
+    self.assertFalse(harness._should_stage_sparse_bf16("deepseek3-671b"))
+
+  def test_loads_the_real_gcs_checkpoint_even_with_the_all_large_flag(self):
+    os.environ["STAGE_SPARSE_ALL_LARGE"] = "1"
+    os.environ["BENCH_SAFETENSORS_GCS_DIR"] = "gs://bucket/mesa-bench-v2/hf_cache/qwen3-480b-a35b"
+    self.assertFalse(harness._should_stage_sparse_bf16("qwen3-480b-a35b"))
+
+  def test_ignores_a_blank_gcs_checkpoint_dir(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    os.environ["BENCH_SAFETENSORS_GCS_DIR"] = "  "
+    self.assertTrue(harness._should_stage_sparse_bf16("deepseek4-1600b"))
+
+  def test_source_fields_label_sparse_staging_as_synthetic(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    self.assertEqual(
+        harness._checkpoint_source_fields("deepseek4-284b", "/tmp/hf_local_deepseek4-284b"),
+        {"checkpoint_weights_kind": "synthetic_sparse", "checkpoint_load_source_uri": "/tmp/hf_local_deepseek4-284b"},
+    )
+
+  def test_source_fields_label_a_gcs_checkpoint_as_real(self):
+    os.environ["STAGE_SPARSE_DEEPSEEK_OOM"] = "1"
+    os.environ["BENCH_SAFETENSORS_GCS_DIR"] = "gs://b/hf_cache_bf16/deepseek4-284b"
+    self.assertEqual(
+        harness._checkpoint_source_fields("deepseek4-284b", "gs://b/hf_cache_bf16/deepseek4-284b"),
+        {"checkpoint_weights_kind": "real", "checkpoint_load_source_uri": "gs://b/hf_cache_bf16/deepseek4-284b"},
+    )
+
+
+if __name__ == "__main__":
+  unittest.main()
