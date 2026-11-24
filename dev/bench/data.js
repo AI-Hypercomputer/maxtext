@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795512891694,
+  "lastUpdate": 1795530598800,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -76245,6 +76245,98 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 440,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Leilei Wu",
+            "username": "uwlei",
+            "email": "lewu@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "b5a81850bb2fccdf27c8d74e7d0326117c5f0d05",
+          "message": "Fix pre-fused MoE weights with Muon/expert-replication and dropless combine fallback.\n\n# Description\n\nEnabling `prefuse_moe_weights=True` with Muon (`opt_type=\"muon\"`) previously orthogonalized the pre-fused `[wi_0 | wi_1]` tensor as a single `(K, 2*N)` matrix per expert, coupling the gate and up projection subspaces during Newton-Schulz iterations and computing RMS/adaptive norm scaling over `2*N` instead of `N`. In addition, `moe_unsliced_prefused_wi=True` rejected online expert replication (`expert_replicas_per_device > 0`) because `moe_replica_weights.extend_with_replicas` assumed `w1` was non-`None`, and `_moe_body` / `unsort_output_and_ra2a` continued using the capped `ragged_buffer_factor` on `force_dropless=True` chunks (`jnp.zeros` buffer init and `_truncate_matrix`).\n\n- Split pre-fused routed MoE `wi` along its output dimension (`split_output_chunks=2`) in `ShardedMuonDimensionNumbers` (`maxtext_muon`) and via a state-preserving tree wrapper along each leaf's normalized `output_axis` in `optax_muon` so Muon updates `[wi_0 | wi_1]` identically to separate `wi_0` and `wi_1` projections across unsharded (`TP=1`) and sharded (`TP > 1`) meshes. When the un-split local batch size is `1` and `split_output_chunks < matrix_shards`, replicate `reduction_axes` once before the batched Newton-Schulz loop to avoid spurious all-to-all batch padding and repeated per-step collectives (and preserve `preconditioning=\"spectral\"` under Explicit sharding).\n- Enable `moe_unsliced_prefused_wi=True` with online expert replication (`expert_replicas_per_device > 0`) by handling `w1 is None` in `moe_replica_weights.extend_with_replicas` and lifting the config validator guard in `types.py`.\n- Honor `force_dropless` in `_moe_body` and `unsort_output_and_ra2a` so dropless chunks skip zero-filling and combine-stage matrix truncation.\n\n# Tests\n\n- `tests/unit/moe_prefuse_and_fallback_test.py`\n- `tests/unit/muon_test.py`\n- `tests/unit/maxtext_muon_utils_test.py`\n- `tests/unit/muon_utils_test.py`\n- `tests/unit/optimizers_test.py`\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1028768974",
+          "timestamp": "2026-11-24T07:26:55Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/b5a81850bb2fccdf27c8d74e7d0326117c5f0d05"
+        },
+        "date": 1795530598116,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 223.90299999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 54.384,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2284.61,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 178.69099999999986,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 14,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 332.466,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3233.9230000000025,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 440,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 356.3620000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
             "unit": "count"
           }
         ]
