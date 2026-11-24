@@ -16,7 +16,10 @@ set -ex
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='qwen3-30b-a3b-base'
-HF_GOLDEN_MODEL='Qwen/Qwen3-30B-A3B-Base'
+# The post-training tests decode with the chat template, so convert the
+# post-trained checkpoint. A base checkpoint doesn't end its turn and runs on
+# until the token limit. Both use the qwen3-30b-a3b-base architecture config.
+HF_GOLDEN_MODEL='Qwen/Qwen3-30B-A3B'
 
 
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
@@ -27,6 +30,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 # Step 2: Convert the checkpoint from Hugging Face
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
+    --hf_model_path=${HF_GOLDEN_MODEL} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id} \
     scan_layers=false \
     hardware=cpu skip_jax_distributed_system=True \
@@ -40,6 +44,7 @@ echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
 # Convert to scanned format
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
+    --hf_model_path=${HF_GOLDEN_MODEL} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id} \
     scan_layers=true \
     hardware=cpu skip_jax_distributed_system=True \
