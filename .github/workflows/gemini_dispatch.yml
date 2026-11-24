@@ -228,7 +228,7 @@ jobs:
     # Runs after the debounce for reviews on push; the debounce is skipped for
     # all other triggers. A debounce cancelled by a newer push skips the review.
     if: |-
-      ${{ always() && needs.dispatch.result == 'success' && needs.dispatch.outputs.command == 'review' && (needs.debounce.result == 'success' || needs.debounce.result == 'skipped') }}
+      ${{ !cancelled() && needs.dispatch.result == 'success' && needs.dispatch.outputs.command == 'review' && (needs.debounce.result == 'success' || needs.debounce.result == 'skipped') }}
     uses: './.github/workflows/gemini_review.yml'
     permissions:
       contents: 'read'
@@ -290,7 +290,7 @@ jobs:
     # Reviews on push are never requested by a person, so a failed one is left
     # to the workflow logs rather than answered with a comment.
     if: |-
-      ${{ always() && !cancelled() && github.event.action != 'synchronize' && (failure() || needs.dispatch.outputs.command == 'fallthrough') }}
+      ${{ !cancelled() && github.event.action != 'synchronize' && (failure() || needs.dispatch.outputs.command == 'fallthrough') }}
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
