@@ -14,6 +14,7 @@
 
 """Model-specific helpers shared by MaxText's vLLM adapter."""
 
+from collections.abc import Callable
 import importlib
 import inspect
 import math
@@ -287,40 +288,267 @@ def is_hybrid_hf_config(hf_text_config: Any) -> bool:
   return False
 
 
+def is_pure_recurrent_hf_config(hf_text_config: Any) -> bool:
+  """Returns True if ``hf_text_config`` has only recurrent (non-KV-cache) layers."""
+  if hf_text_config is None:
+    return False
+  for field in ("layer_types", "layers_block_type"):
+    layer_types = getattr(hf_text_config, field, None)
+    if layer_types:
+      return all(t in _RECURRENT_LAYER_TYPES for t in layer_types)
+  linear_attn_config = getattr(hf_text_config, "linear_attn_config", None)
+  if isinstance(linear_attn_config, dict):
+    return bool(linear_attn_config.get("kda_layers")) and not bool(linear_attn_config.get("full_attn_layers"))
+  attn_type_list = getattr(hf_text_config, "attn_type_list", None)
+  if attn_type_list:
+    return all(t == 0 for t in attn_type_list)
+  return False
+
+
+def has_recurrent_layers_hf_config(hf_text_config: Any) -> bool:
+  """Returns True if ``hf_text_config`` contains any recurrent layers.
+
+  Matches both hybrid attention + recurrent configs (``is_hybrid_hf_config``)
+  and pure-recurrent configs (``is_pure_recurrent_hf_config``).
+
+  Args:
+    hf_text_config: The HF text config (``ModelConfig.hf_text_config``).
+
+  Returns:
+    Whether the model has at least one recurrent layer.
+  """
+  return is_hybrid_hf_config(hf_text_config) or is_pure_recurrent_hf_config(hf_text_config)
+
+
+def compute_hybrid_kv_cache_groups(
+    num_attn: int,
+    num_mamba: int,
+    imbalance_threshold: float = 1.5,
+) -> tuple[int, int, int]:
+  """Computes ``(group_size, num_attn_groups, num_mamba_groups)`` for page sizing.
+
+  Groups layers for uniform KV/recurrent cache allocation without dividing by
+  zero when a model or small test config has zero attention layers (pure
+  recurrent or ``num_layers < interval``) or zero recurrent layers.
+
+  Args:
+    num_attn: Number of attention layers (>= 0).
+    num_mamba: Number of recurrent/Mamba layers (>= 0).
+    imbalance_threshold: Ratio threshold above which grouping uses the minority
+      layer count to avoid inflating the uniform page size with padding.
+
+  Returns:
+    ``(group_size, num_attn_groups, num_mamba_groups)``.
+
+  Raises:
+    ValueError: If either count is negative or both counts are zero.
+  """
+  if num_attn < 0 or num_mamba < 0 or (num_attn == 0 and num_mamba == 0):
+    raise ValueError(
+        f"Expected non-negative layer counts with at least one layer, got num_attn={num_attn}, num_mamba={num_mamba}."
+    )
+  if num_attn == 0:
+    return num_mamba, 0, 1
+  if num_mamba == 0:
+    return num_attn, 1, 0
+
+  min_count = min(num_attn, num_mamba)
+  max_count = max(num_attn, num_mamba)
+  if max_count < min_count * imbalance_threshold:
+    group_size = max_count
+  else:
+    group_size = min_count
+  num_attn_groups = (num_attn + group_size - 1) // group_size
+  num_mamba_groups = (num_mamba + group_size - 1) // group_size
+  return group_size, num_attn_groups, num_mamba_groups
+
+
+def make_patched_get_kv_cache_spec(
+    original_get_kv_cache_spec: Callable[[Any], dict[str, Any]],
+    mamba_spec_cls: Any,
+    torch_mod: Any,
+    *,
+    imbalance_threshold: float = 1.5,
+    import_module: Callable[[str], Any] = importlib.import_module,
+) -> Callable[[Any], dict[str, Any]]:
+  """Builds a patched ``KVCacheManager.get_kv_cache_spec`` for recurrent/hybrid models.
+
+  For decoder blocks in ``HYBRID_DECODER_BLOCKS``, computes uniform page sizing
+  via ``compute_hybrid_kv_cache_groups`` and replaces recurrent layers with
+  ``MambaSpec``. When ``num_attn == 0`` (pure recurrent or ``num_layers <
+  interval``), skips attention page sizing and dual-pool TPU coordinator hooks
+  that divide by ``num_attn_layers * attn_page_size_bytes``.
+
+  Args:
+    original_get_kv_cache_spec: Unpatched ``KVCacheManager.get_kv_cache_spec``.
+    mamba_spec_cls: vLLM ``MambaSpec`` class.
+    torch_mod: ``torch`` module used to compute Mamba cache dtype item sizes.
+    imbalance_threshold: Layer-count imbalance ratio passed to
+      ``compute_hybrid_kv_cache_groups``.
+    import_module: Module importer callable (injectable for unit tests).
+
+  Returns:
+    Replacement ``get_kv_cache_spec`` method for ``KVCacheManager``.
+  """
+
+  def patched_get_kv_cache_spec(self: Any) -> dict[str, Any]:
+    """Computes KV/Mamba cache specs for hybrid and pure-recurrent blocks."""
+    # pylint: disable=protected-access
+    runner = self.runner
+    if not hasattr(runner, "model"):
+      return original_get_kv_cache_spec(self)
+
+    model = runner.model
+    if not hasattr(model, "maxtext_config"):
+      return original_get_kv_cache_spec(self)
+
+    cfg = model.maxtext_config
+    decoder_block = getattr(cfg, "decoder_block", "")
+    decoder_block_str = ""
+    if isinstance(decoder_block, str):
+      decoder_block_str = decoder_block
+    elif hasattr(decoder_block, "value"):
+      decoder_block_str = decoder_block.value
+
+    is_hybrid_block = decoder_block_str in HYBRID_DECODER_BLOCKS
+    mamba_cache_mode = "none"
+    interval = 1
+    mamba_shapes: tuple[tuple[int, ...], ...] = ()
+    mamba_dtypes: tuple[Any, ...] = ()
+    num_kv_heads = 0
+    head_size = 0
+
+    if is_hybrid_block:
+      mamba_cache_mode = getattr(self.runner.cache_config, "mamba_cache_mode", "none")
+      interval = cfg.inhomogeneous_layer_cycle_interval
+
+      # Qwen GDN keeps its short convolution history in BF16, but recurrence is
+      # accumulated and persisted in FP32. Declaring both caches as the model
+      # dtype silently quantizes the recurrent state after every generated token.
+      mamba_shapes, mamba_dtypes, unpadded_mamba_page_size = build_qwen_gdn_cache_layout(cfg, torch_mod)
+
+      num_layers = cfg.base_num_decoder_layers
+      num_attn = num_layers // interval
+      num_mamba = num_layers - num_attn
+
+      attn_page_size_bytes = 0
+      if num_attn > 0:
+        sharding_mod = import_module("tpu_inference.layers.common.sharding")
+        common_utils = import_module("tpu_inference.utils")
+        kv_cache_mod = import_module("tpu_inference.runner.kv_cache")
+
+        sharding_axis_name = sharding_mod.ShardingAxisName
+        tp_axis_name = getattr(sharding_axis_name, "KV_HEAD", sharding_axis_name.ATTN_HEAD)
+        model_cnt = common_utils.get_mesh_shape_product(self.runner.mesh, tp_axis_name)
+
+        model_config = self.runner.model_config
+        text_config = getattr(model_config, "hf_text_config", getattr(model_config, "hf_config", None))
+        base_num_kv_heads = model_config.get_total_num_kv_heads()
+        base_head_size = model_config.get_head_size()
+
+        num_kv_heads = getattr(text_config, "num_global_key_value_heads", None) or base_num_kv_heads
+        head_size = getattr(text_config, "global_head_dim", None) or base_head_size
+
+        num_kv_heads = common_utils.get_padded_num_heads(num_kv_heads, model_cnt)
+        head_size = common_utils.get_padded_head_dim(head_size)
+
+        block_size = self.runner.cache_config.block_size
+        attn_page_size_bytes = kv_cache_mod.get_attention_page_size_bytes(
+            self.runner.mesh, block_size, num_kv_heads, head_size, self.runner.kv_cache_dtype, False
+        )
+
+      group_size, num_attn_groups, num_mamba_groups = compute_hybrid_kv_cache_groups(
+          num_attn,
+          num_mamba,
+          imbalance_threshold=imbalance_threshold,
+      )
+      uniform_page_size_bytes = num_attn_groups * attn_page_size_bytes + num_mamba_groups * unpadded_mamba_page_size
+
+      self._hybrid_uniform_page_size_bytes = int(uniform_page_size_bytes)
+      self.runner.cache_config.mamba_page_size_padded = int(uniform_page_size_bytes)
+
+      # Compact dual-pool mamba sizing and TPUHybridKVCacheCoordinator require
+      # both attention and mamba pools (tpu-inference divides by
+      # num_attn_layers * attn_page_size_bytes). Skip when only one pool exists.
+      if num_attn > 0 and num_mamba > 0:
+        call_with_supported_kwargs(
+            self._maybe_set_compact_mamba_num_blocks_override,
+            attn_page_size_bytes=attn_page_size_bytes,
+            unpadded_mamba_page_size_bytes=int(unpadded_mamba_page_size),
+            num_attn_groups=num_attn_groups,
+            num_mamba_groups=num_mamba_groups,
+            num_attn_layers=num_attn,
+            num_mamba_layers=num_mamba,
+            group_size=group_size,
+        )
+        maybe_install_tpu_hybrid_coordinator(
+            getattr(self.runner, "vllm_config", None),
+            import_module_fn=import_module,
+        )
+
+    kv_cache_spec = original_get_kv_cache_spec(self)
+
+    if is_hybrid_block:
+      for i in range(cfg.base_num_decoder_layers):
+        layer_name = f"layer.{i}"
+        if (i + 1) % interval != 0:
+          if layer_name in kv_cache_spec:
+            kv_cache_spec[layer_name] = mamba_spec_cls(
+                block_size=kv_cache_spec[layer_name].block_size,
+                shapes=mamba_shapes,
+                dtypes=mamba_dtypes,
+                page_size_padded=self._hybrid_uniform_page_size_bytes,
+                mamba_cache_mode=mamba_cache_mode,
+            )
+        elif layer_name in kv_cache_spec:
+          kv_cache_spec[layer_name] = self._create_attention_spec(
+              kv_cache_spec[layer_name].block_size,
+              num_kv_heads,
+              head_size,
+              sliding_window=getattr(kv_cache_spec[layer_name], "sliding_window", None),
+          )
+
+    return kv_cache_spec
+
+  return patched_get_kv_cache_spec
+
+
 # MaxText decoder blocks whose recurrent layers the vLLM adapter gives Mamba
 # KV cache specs.
 HYBRID_DECODER_BLOCKS = frozenset({"qwen3_next", "qwen3_5"})
 
 
 def validate_hybrid_detection(decoder_block: Any, hf_text_config: Any) -> None:
-  """Fails if the HF config and the MaxText decoder block disagree on hybrid-ness.
+  """Fails if the HF config and the MaxText decoder block disagree on recurrent cache mode.
 
-  vLLM's hybrid cache config (``mamba_cache_mode``, ``mamba_block_size``) is
-  derived from the HF config (``is_hybrid_hf_config``), but the KV cache specs
-  come from the MaxText decoder block. If they disagree, vLLM would serve the
-  model with the wrong cache mode, so raise with an actionable message instead.
+  vLLM's hybrid/Mamba cache config (``mamba_cache_mode``, ``mamba_block_size``)
+  is derived from the HF config (``has_recurrent_layers_hf_config``), but the
+  KV cache specs come from the MaxText decoder block. If they disagree, vLLM
+  would serve the model with the wrong cache mode, so raise with an actionable
+  message instead.
 
   Args:
     decoder_block: The MaxText ``decoder_block`` (string or enum).
     hf_text_config: The HF text config (``ModelConfig.hf_text_config``).
 
   Raises:
-    ValueError: if exactly one of the two describes a hybrid model.
+    ValueError: if exactly one of the two expects recurrent KV cache support.
   """
   name = getattr(decoder_block, "value", decoder_block) or ""
   maxtext_hybrid = name in HYBRID_DECODER_BLOCKS
-  hf_hybrid = is_hybrid_hf_config(hf_text_config)
-  if maxtext_hybrid and not hf_hybrid:
+  hf_has_recurrent = has_recurrent_layers_hf_config(hf_text_config)
+  if maxtext_hybrid and not hf_has_recurrent:
     raise ValueError(
         f"MaxText decoder_block={name!r} has recurrent (Mamba/GDN) layers, but the HF config "
-        f"(model_type={getattr(hf_text_config, 'model_type', None)!r}) does not describe a hybrid model, so vLLM "
-        "would not enable its hybrid cache mode. Add the per-layer types to the HF config (e.g. `layer_types` or "
-        "`full_attention_interval` via hf_overrides), or extend `is_hybrid_hf_config` for this config format."
+        f"(model_type={getattr(hf_text_config, 'model_type', None)!r}) does not describe a hybrid or pure-recurrent "
+        "model, so vLLM would not enable its Mamba cache mode. Add the per-layer types to the HF config (e.g. "
+        "`layer_types` or `full_attention_interval` via hf_overrides), or extend `has_recurrent_layers_hf_config` "
+        "for this config format."
     )
-  if hf_hybrid and not maxtext_hybrid:
+  if hf_has_recurrent and not maxtext_hybrid:
     raise ValueError(
-        f"The HF config (model_type={getattr(hf_text_config, 'model_type', None)!r}) describes a hybrid "
-        f"attention + recurrent model, but MaxText decoder_block={name!r} has no hybrid KV cache support in the vLLM "
+        f"The HF config (model_type={getattr(hf_text_config, 'model_type', None)!r}) describes a model with "
+        f"recurrent layers, but MaxText decoder_block={name!r} has no hybrid KV cache support in the vLLM "
         f"adapter (supported: {sorted(HYBRID_DECODER_BLOCKS)})."
     )
 
@@ -339,9 +567,11 @@ def register_maxtext_hybrid_model_config(
   ``model_config.is_hybrid``. That flag comes from the registered model class,
   and the MaxText wrapper class serves every MaxText model, so it is not set.
 
-  The registered verifier detects hybrid models from the HF config
-  (``is_hybrid_hf_config``) and applies vLLM's generic hybrid hook to them. No
-  model family is hard-coded, and non-hybrid MaxText models are left untouched.
+  The registered verifier detects models with recurrent layers from the HF
+  config (``has_recurrent_layers_hf_config``, covering both hybrid and
+  pure-recurrent architectures) and applies vLLM's generic Mamba/hybrid hook to
+  them. No model family is hard-coded, and attention-only MaxText models are
+  left untouched.
 
   Args:
     models_config_map: Mutable architecture-to-verifier mapping from vLLM.
@@ -356,11 +586,11 @@ def register_maxtext_hybrid_model_config(
     return False
 
   class MaxTextForCausalLMConfig(verify_base_cls):
-    """Applies vLLM's hybrid attention/Mamba config update to hybrid models."""
+    """Applies vLLM's hybrid/Mamba config update to models with recurrent layers."""
 
     @staticmethod
     def verify_and_update_config(vllm_config: Any) -> None:
-      """Runs HybridAttentionMambaModelConfig if the HF config is hybrid."""
+      """Runs HybridAttentionMambaModelConfig when the HF config has recurrent layers."""
       model_config = getattr(vllm_config, "model_config", None)
       if model_config is None:
         return
@@ -368,7 +598,7 @@ def register_maxtext_hybrid_model_config(
       # itself right after this verifier; don't apply it twice.
       if getattr(model_config, "is_hybrid", False):
         return
-      if is_hybrid_hf_config(get_hf_text_config(model_config)):
+      if has_recurrent_layers_hf_config(get_hf_text_config(model_config)):
         hybrid_config_cls.verify_and_update_config(vllm_config)
 
   models_config_map[MAXTEXT_VLLM_ARCHITECTURE] = MaxTextForCausalLMConfig

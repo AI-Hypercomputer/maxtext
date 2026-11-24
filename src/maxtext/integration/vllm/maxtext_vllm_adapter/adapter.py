@@ -31,11 +31,9 @@ from maxtext.integration.vllm.convert_utils import (
     get_moe_intermediate_size,
 )
 from maxtext.integration.vllm.hybrid_cache_utils import (
-    build_qwen_gdn_cache_layout,
-    call_with_supported_kwargs,
     gather_layer_kv_caches,
     get_hf_text_config,
-    maybe_install_tpu_hybrid_coordinator,
+    make_patched_get_kv_cache_spec,
     normalize_vllm_input_positions,
     register_maxtext_hybrid_model_config,
     resolve_layer_kv_cache_indices,
@@ -534,131 +532,12 @@ def patch_kv_cache_manager():
         "This usually indicates a vLLM / tpu-inference API change or version mismatch."
     ) from e
 
-  def patched_get_kv_cache_spec(self):
-    runner = self.runner
-    if not hasattr(runner, "model"):
-      return original_get_kv_cache_spec(self)
-
-    model = runner.model
-    if not hasattr(model, "maxtext_config"):
-      return original_get_kv_cache_spec(self)
-
-    cfg = model.maxtext_config
-    decoder_block = getattr(cfg, "decoder_block", "")
-
-    decoder_block_str = ""
-    if isinstance(decoder_block, str):
-      decoder_block_str = decoder_block
-    elif hasattr(decoder_block, "value"):
-      decoder_block_str = decoder_block.value
-
-    if decoder_block_str in ("qwen3_next", "qwen3_5"):
-      mamba_cache_mode = getattr(self.runner.cache_config, "mamba_cache_mode", "none")
-      interval = cfg.inhomogeneous_layer_cycle_interval
-
-      # Qwen GDN keeps its short convolution history in BF16, but recurrence is
-      # accumulated and persisted in FP32. Declaring both caches as the model
-      # dtype silently quantizes the recurrent state after every generated token.
-      mamba_shapes, mamba_dtypes, unpadded_mamba_page_size = build_qwen_gdn_cache_layout(cfg, torch)
-
-      # Calculate attn_page_size_bytes
-      from tpu_inference.layers.common.sharding import ShardingAxisName
-      from tpu_inference import utils as common_utils
-
-      tp_axis_name = getattr(ShardingAxisName, "KV_HEAD", ShardingAxisName.ATTN_HEAD)
-      model_cnt = common_utils.get_mesh_shape_product(self.runner.mesh, tp_axis_name)
-
-      model_config = self.runner.model_config
-      text_config = getattr(model_config, "hf_text_config", getattr(model_config, "hf_config", None))
-      base_num_kv_heads = model_config.get_total_num_kv_heads()
-      base_head_size = model_config.get_head_size()
-
-      num_kv_heads = getattr(text_config, "num_global_key_value_heads", None) or base_num_kv_heads
-      head_size = getattr(text_config, "global_head_dim", None) or base_head_size
-
-      num_kv_heads = common_utils.get_padded_num_heads(num_kv_heads, model_cnt)
-      head_size = common_utils.get_padded_head_dim(head_size)
-
-      from tpu_inference.runner.kv_cache import get_attention_page_size_bytes
-
-      block_size = self.runner.cache_config.block_size
-
-      attn_page_size_bytes = get_attention_page_size_bytes(
-          self.runner.mesh, block_size, num_kv_heads, head_size, self.runner.kv_cache_dtype, False
-      )
-
-      # Calculate groups
-      num_layers = cfg.base_num_decoder_layers
-      num_attn = num_layers // interval
-      num_mamba = num_layers - num_attn
-
-      # To allocate memory uniformly for a hybrid model's KV/recurrent cache page table,
-      # we group layers together. The uniform page size must support both attention and
-      # mamba layers.
-      # If the ratio of attention to mamba layers is relatively balanced (less than _HYBRID_LAYER_IMBALANCE_THRESHOLD),
-      # we use the larger count as the group size to minimize the total number of groups.
-      # If they are highly imbalanced (>= _HYBRID_LAYER_IMBALANCE_THRESHOLD), we group by the smaller count to prevent
-      # the page size from being inflated by excessive padding for the minority layer type.
-      min_count = min(num_attn, num_mamba)
-      max_count = max(num_attn, num_mamba)
-      if max_count < min_count * _HYBRID_LAYER_IMBALANCE_THRESHOLD:
-        group_size = max_count
-      else:
-        group_size = min_count
-      num_attn_groups = (num_attn + group_size - 1) // group_size
-      num_mamba_groups = (num_mamba + group_size - 1) // group_size
-
-      uniform_page_size_bytes = num_attn_groups * attn_page_size_bytes + num_mamba_groups * unpadded_mamba_page_size
-
-      # Set the padded page size on manager and config
-      self._hybrid_uniform_page_size_bytes = int(uniform_page_size_bytes)
-      self.runner.cache_config.mamba_page_size_padded = int(uniform_page_size_bytes)
-
-      # Size the mamba/attention block pools. The signature of this
-      # tpu-inference private helper has changed across versions: older
-      # revisions also take the vLLM kv-cache group layout
-      # (`num_attn_groups`, `num_mamba_groups`, `group_size`), newer ones
-      # re-derive it internally and only take the page sizes and layer
-      # counts. Pass by keyword and keep only the parameters the installed
-      # version declares, so the adapter works with either revision instead
-      # of dying with a TypeError before the KV cache spec is built.
-      call_with_supported_kwargs(
-          self._maybe_set_compact_mamba_num_blocks_override,
-          attn_page_size_bytes=attn_page_size_bytes,
-          unpadded_mamba_page_size_bytes=int(unpadded_mamba_page_size),
-          num_attn_groups=num_attn_groups,
-          num_mamba_groups=num_mamba_groups,
-          num_attn_layers=num_attn,
-          num_mamba_layers=num_mamba,
-          group_size=group_size,
-      )
-      maybe_install_tpu_hybrid_coordinator(getattr(self.runner, "vllm_config", None))
-
-    kv_cache_spec = original_get_kv_cache_spec(self)
-
-    if decoder_block_str in ("qwen3_next", "qwen3_5"):
-      for i in range(cfg.base_num_decoder_layers):
-        layer_name = f"layer.{i}"
-        if (i + 1) % interval != 0:
-          if layer_name in kv_cache_spec:
-            kv_cache_spec[layer_name] = MambaSpec(
-                block_size=kv_cache_spec[layer_name].block_size,
-                shapes=mamba_shapes,
-                dtypes=mamba_dtypes,
-                page_size_padded=self._hybrid_uniform_page_size_bytes,
-                mamba_cache_mode=mamba_cache_mode,
-            )
-        elif layer_name in kv_cache_spec:
-          kv_cache_spec[layer_name] = self._create_attention_spec(
-              kv_cache_spec[layer_name].block_size,
-              num_kv_heads,
-              head_size,
-              sliding_window=getattr(kv_cache_spec[layer_name], "sliding_window", None),
-          )
-
-    return kv_cache_spec
-
-  KVCacheManager.get_kv_cache_spec = patched_get_kv_cache_spec
+  KVCacheManager.get_kv_cache_spec = make_patched_get_kv_cache_spec(
+      original_get_kv_cache_spec,
+      MambaSpec,
+      torch,
+      imbalance_threshold=_HYBRID_LAYER_IMBALANCE_THRESHOLD,
+  )
   max_logging.log("Successfully applied KVCacheManager patch for hybrid GDN models.")
 
 
@@ -666,9 +545,9 @@ def patch_vllm_hybrid_model_config():
   """Registers a MaxTextForCausalLM verifier in vLLM's MODELS_CONFIG_MAP.
 
   The verifier applies vLLM's generic HybridAttentionMambaModelConfig to any
-  MaxText model whose HF config mixes attention with recurrent layers, so
-  vLLM >= 0.33 derives mamba_cache_mode / mamba_block_size for it. See
-  `register_maxtext_hybrid_model_config`.
+  MaxText model whose HF config contains recurrent layers (hybrid or
+  pure-recurrent), so vLLM >= 0.33 derives mamba_cache_mode / mamba_block_size
+  for it. See `register_maxtext_hybrid_model_config`.
 
   TODO: Replace with a tpu-inference platform hook for JAX hybrid models.
   """
