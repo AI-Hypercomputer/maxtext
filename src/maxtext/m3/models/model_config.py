@@ -14,10 +14,40 @@
 
 """Base `ModelConfig` for m3 Model Garden families."""
 
+from collections.abc import Mapping
 from typing import Any
 
 from maxtext.configs.types import DType
 from pydantic import BaseModel, ConfigDict, Field
+
+
+def coerce_dtype(value: Any) -> DType:
+  """Converts a `DType`, string, NumPy/JAX dtype object, or scalar type to `DType` without importing JAX."""
+  if isinstance(value, DType):
+    return value
+  if isinstance(value, str):
+    return DType(value)
+  if hasattr(value, "value"):
+    return DType(str(value.value))
+  if hasattr(value, "name"):
+    return DType(str(value.name))
+  type_name = getattr(value, "__name__", None)
+  if isinstance(type_name, str):
+    return DType(type_name)
+  return DType(str(value))
+
+
+def extract_config_attrs(config: Any, field_map: Mapping[str, tuple[str, ...]]) -> dict[str, Any]:
+  """Reads the first non-`None` attribute per target field name from `config`, skipping absent keys."""
+  extracted: dict[str, Any] = {}
+  for target, candidates in field_map.items():
+    for attr in candidates:
+      if hasattr(config, attr):
+        val = getattr(config, attr)
+        if val is not None:
+          extracted[target] = val
+          break
+  return extracted
 
 
 class ModelConfig(BaseModel):

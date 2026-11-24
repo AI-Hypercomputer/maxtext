@@ -16,8 +16,67 @@
 
 from typing import Any, Literal
 
-from maxtext.m3.models.model_config import ModelConfig
+from maxtext.m3.models.model_config import ModelConfig, coerce_dtype, extract_config_attrs
 from pydantic import Field, model_validator
+
+# Keys that collide with DeepSeek/GLM fields on `MaxTextConfig` (`indexer_n_heads`, `indexer_head_dim`,
+# `moe_intermediate_size`) prioritize the legacy Qwen3.8 `MaxTextConfig` names when adapting legacy configs.
+_QWEN3_8_ATTR_MAP: dict[str, tuple[str, ...]] = {
+    "model_name": ("model_name",),
+    "vocab_size": ("vocab_size",),
+    "hidden_size": ("hidden_size", "emb_dim", "base_emb_dim"),
+    "num_hidden_layers": ("num_hidden_layers", "num_decoder_layers", "base_num_decoder_layers"),
+    "num_attention_heads": ("num_attention_heads", "num_query_heads", "base_num_query_heads"),
+    "num_key_value_heads": ("num_key_value_heads", "num_kv_heads", "base_num_kv_heads"),
+    "head_dim": ("head_dim",),
+    "rms_norm_eps": ("rms_norm_eps", "normalization_layer_epsilon"),
+    "tie_word_embeddings": ("tie_word_embeddings", "logits_via_embedding"),
+    "hc_count": ("hc_count",),
+    "hc_lowrank": ("hc_lowrank",),
+    "shared_expert_intermediate_size": ("shared_expert_intermediate_size", "mlp_dim", "base_mlp_dim"),
+    "moe_intermediate_size": ("moe_mlp_dim", "base_moe_mlp_dim", "moe_intermediate_size"),
+    "n_routed_experts": ("n_routed_experts", "num_experts"),
+    "num_experts_per_tok": ("num_experts_per_tok",),
+    "n_shared_experts": ("n_shared_experts", "shared_experts"),
+    "routed_scaling_factor": ("routed_scaling_factor",),
+    "norm_topk_prob": ("norm_topk_prob",),
+    "router_aux_loss_coef": ("router_aux_loss_coef", "load_balance_loss_weight"),
+    "full_attention_interval": ("full_attention_interval", "inhomogeneous_layer_cycle_interval"),
+    "linear_conv_kernel_dim": ("linear_conv_kernel_dim", "gdn_conv_kernel_dim"),
+    "linear_key_head_dim": ("linear_key_head_dim", "gdn_key_head_dim"),
+    "linear_value_head_dim": ("linear_value_head_dim", "gdn_value_head_dim"),
+    "linear_num_key_heads": ("linear_num_key_heads", "gdn_num_key_heads"),
+    "linear_num_value_heads": ("linear_num_value_heads", "gdn_num_value_heads"),
+    "gdn_chunk_size": ("gdn_chunk_size",),
+    "gdn_output_gate_activation": ("gdn_output_gate_activation",),
+    "use_qk_norm_in_gdn": ("use_qk_norm_in_gdn",),
+    "gdn_chunk_inverse": ("gdn_chunk_inverse",),
+    "rope_theta": ("rope_theta", "rope_max_timescale"),
+    "partial_rotary_factor": ("partial_rotary_factor",),
+    "mrope_section": ("mrope_section",),
+    "indexer_n_heads": ("index_n_heads", "indexer_n_heads"),
+    "indexer_kv_heads": ("indexer_kv_heads", "index_kv_heads"),
+    "indexer_head_dim": ("index_head_dim", "indexer_head_dim"),
+    "indexer_compress_ratio": ("indexer_compress_ratio", "index_select_block_size"),
+    "indexer_budget": ("indexer_budget", "index_select_budget"),
+    "qsa_indexer_mask": ("qsa_indexer_mask",),
+    "qsa_attention_kernel": ("qsa_attention_kernel",),
+    "use_ple_layer": ("use_ple_layer",),
+    "ple_layer_id": ("ple_layer_id",),
+    "ple_embed_dim": ("ple_embed_dim",),
+    "ple_conv_kernel_size": ("ple_conv_kernel_size",),
+    "ngram_size": ("ngram_size",),
+    "heads_per_ngram": ("heads_per_ngram",),
+    "ngram_vocab_size_base": ("ngram_vocab_size_base",),
+    "make_ngram_vocab_size_divisible_by": ("make_ngram_vocab_size_divisible_by",),
+    "split_ngram_parts": ("split_ngram_parts",),
+    "ple_seed": ("ple_seed",),
+    "eos_token_id": ("ple_eos_token_id", "eos_token_id"),
+    "num_nextn_predict_layers": ("num_nextn_predict_layers", "mtp_num_layers"),
+    "mtp_loss_scaling_factor": ("mtp_loss_scaling_factor",),
+    "param_dtype": ("param_dtype", "weight_dtype"),
+    "compute_dtype": ("compute_dtype", "dtype"),
+}
 
 
 class Qwen3_8FlashNextConfig(ModelConfig):  # pylint: disable=invalid-name
@@ -188,6 +247,24 @@ class Qwen3_8FlashNextConfig(ModelConfig):  # pylint: disable=invalid-name
         "param_scan_axis": 0,
         "enable_dropout": False,
     }
+
+  @classmethod
+  def from_config(cls, config: Any) -> "Qwen3_8FlashNextConfig":
+    """Returns a `Qwen3_8FlashNextConfig` from either a `Qwen3_8FlashNextConfig` or a legacy config."""
+    if isinstance(config, cls):
+      return config
+    kwargs = extract_config_attrs(config, _QWEN3_8_ATTR_MAP)
+    if "param_dtype" in kwargs:
+      kwargs["param_dtype"] = coerce_dtype(kwargs["param_dtype"])
+    if "compute_dtype" in kwargs:
+      kwargs["compute_dtype"] = coerce_dtype(kwargs["compute_dtype"])
+    if "mrope_section" in kwargs:
+      kwargs["mrope_section"] = tuple(int(v) for v in kwargs["mrope_section"])
+    for key in ("gdn_output_gate_activation", "gdn_chunk_inverse", "qsa_indexer_mask", "qsa_attention_kernel"):
+      if key in kwargs:
+        val = kwargs[key]
+        kwargs[key] = str(getattr(val, "value", val))
+    return cls(**kwargs)
 
   @classmethod
   def qwen3_8_flash_next(cls, **overrides: Any) -> "Qwen3_8FlashNextConfig":

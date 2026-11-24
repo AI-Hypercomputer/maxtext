@@ -18,8 +18,29 @@ import math
 from typing import Any
 
 from maxtext.configs.types import DType
-from maxtext.m3.models.qwen3.qwen3_config import Qwen3Config
+from maxtext.m3.models.model_config import coerce_dtype, extract_config_attrs
+from maxtext.m3.models.qwen3.qwen3_config import Qwen3Config, extract_qwen3_kwargs
 from pydantic import Field, model_validator
+
+_QWEN3_VL_ATTR_MAP: dict[str, tuple[str, ...]] = {
+    "use_mrope": ("use_mrope",),
+    "mrope_section": ("mrope_section",),
+    "use_multimodal": ("use_multimodal",),
+    "vision_dtype": ("vision_dtype", "dtype_mm"),
+    "vision_image_size": ("vision_image_size", "image_size_for_vit"),
+    "vision_hidden_size": ("vision_hidden_size", "hidden_size_for_vit"),
+    "vision_intermediate_size": ("vision_intermediate_size", "intermediate_size_for_vit"),
+    "vision_num_heads": ("vision_num_heads", "num_attention_heads_for_vit"),
+    "vision_depth": ("vision_depth", "num_hidden_layers_for_vit"),
+    "vision_in_channels": ("vision_in_channels", "num_channels_for_vit"),
+    "vision_patch_size": ("vision_patch_size", "patch_size_for_vit"),
+    "vision_temporal_patch_size": ("vision_temporal_patch_size", "temporal_patch_size_for_vit"),
+    "vision_spatial_merge_size": ("vision_spatial_merge_size", "spatial_merge_size_for_vit"),
+    "vision_out_hidden_size": ("vision_out_hidden_size", "out_hidden_size_for_vit"),
+    "vision_num_position_embeddings": ("vision_num_position_embeddings", "num_position_embeddings_for_vit"),
+    "vision_rope_theta": ("vision_rope_theta", "rope_theta_for_vit"),
+    "deepstack_visual_indexes": ("deepstack_visual_indexes", "deepstack_visual_indexes_for_vit"),
+}
 
 
 class Qwen3VLConfig(Qwen3Config):
@@ -114,6 +135,21 @@ class Qwen3VLConfig(Qwen3Config):
         }
     )
     return out
+
+  @classmethod
+  def from_config(cls, config: Any) -> "Qwen3VLConfig":
+    """Returns a `Qwen3VLConfig` from either a `Qwen3VLConfig` or a legacy `MaxTextConfig` / namespace."""
+    if isinstance(config, cls):
+      return config
+    kwargs = extract_qwen3_kwargs(config)
+    kwargs.update(extract_config_attrs(config, _QWEN3_VL_ATTR_MAP))
+    if "vision_dtype" in kwargs:
+      kwargs["vision_dtype"] = coerce_dtype(kwargs["vision_dtype"])
+    if "mrope_section" in kwargs:
+      kwargs["mrope_section"] = tuple(int(v) for v in kwargs["mrope_section"])
+    if "deepstack_visual_indexes" in kwargs:
+      kwargs["deepstack_visual_indexes"] = tuple(int(v) for v in kwargs["deepstack_visual_indexes"])
+    return cls(**kwargs)
 
   @classmethod
   def qwen3_vl_2b(cls, **overrides: Any) -> "Qwen3VLConfig":

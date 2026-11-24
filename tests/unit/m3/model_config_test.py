@@ -23,14 +23,18 @@ from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from maxtext.configs import pyconfig
+from maxtext.configs.types import DType
 from maxtext.m3 import models as m3_models
 from maxtext.m3.configs.glm5_3_flash_config import Glm5Config
 from maxtext.m3.configs.training_config import TrainingConfig, validate_training_config
+from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5ModelConfig
 from maxtext.m3.models.granitemoe.granitemoe_config import GraniteMoeModelConfig
 from maxtext.m3.models.granitemoe.modeling_granitemoe import GraniteMoeConfig
-from maxtext.m3.models.model_config import ModelConfig
+from maxtext.m3.models.model_config import ModelConfig, coerce_dtype
 from maxtext.m3.models.qwen3.qwen3_config import Qwen3Config
+from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next
 from maxtext.m3.models.qwen3_8_flash_next.qwen3_8_config import Qwen3_8FlashNextConfig
 from maxtext.m3.models.qwen3_vl.qwen3_vl_config import Qwen3VLConfig
 from maxtext.m3.models.registry import (
@@ -428,21 +432,103 @@ class ModelConfigTest(absltest.TestCase):
     with self.assertRaisesRegex(ValueError, "n_routed_experts"):
       validate_training_config(_mini_qwen3_8(), train_cfg, mesh_shape={"expert": 3})
 
+  def test_from_config_parity_and_dtype_coercion(self):
+    self.assertEqual(coerce_dtype(DType.BFLOAT16), DType.BFLOAT16)
+    self.assertEqual(coerce_dtype("float32"), DType.FLOAT32)
+    self.assertEqual(coerce_dtype(np.dtype("float32")), DType.FLOAT32)
+    self.assertEqual(coerce_dtype(jnp.dtype("bfloat16")), DType.BFLOAT16)
+    self.assertEqual(coerce_dtype(jnp.float32), DType.FLOAT32)
+    self.assertEqual(coerce_dtype(jnp.bfloat16), DType.BFLOAT16)
+    self.assertEqual(coerce_dtype(np.float32), DType.FLOAT32)
+
+    base_yml = str(_REPO_ROOT / "src" / "maxtext" / "configs" / "base.yml")
+    tmpdir = self.create_tempdir().full_path
+    common = ["", base_yml, f"base_output_directory={tmpdir}", "skip_jax_distributed_system=true"]
+
+    q3_py = pyconfig.initialize([*common, "model_name=qwen3-0.6b"])
+    self.assertEqual(Qwen3Config.from_config(q3_py), Qwen3Config.qwen3_0_6b(float32_logits=False))
+    self.assertIs(Qwen3Config.from_config(q3_ref := _mini_qwen3()), q3_ref)
+
+    qvl_py = pyconfig.initialize([*common, "model_name=qwen3-vl-2b", "scan_layers=false"])
+    self.assertEqual(Qwen3VLConfig.from_config(qvl_py), Qwen3VLConfig.qwen3_vl_2b(float32_logits=False))
+    self.assertIs(Qwen3VLConfig.from_config(qvl_ref := _mini_qwen3_vl()), qvl_ref)
+    self.assertIs(Qwen3Config.from_config(qvl_ref), qvl_ref)
+
+    for name, ref in (
+        ("qwen3.8-flash-next", Qwen3_8FlashNextConfig.qwen3_8_flash_next()),
+        ("qwen3.8-flash-next-mini", Qwen3_8FlashNextConfig.qwen3_8_flash_next_mini()),
+    ):
+      q38_py = pyconfig.initialize([*common, f"model_name={name}"])
+      self.assertEqual(Qwen3_8FlashNextConfig.from_config(q38_py), ref)
+
+    # `GraniteMoeConfig.from_config` honors `compute_dtype` and `param_dtype` on `GraniteMoeModelConfig`.
+    gm_bf16 = _mini_granitemoe(compute_dtype=DType.BFLOAT16, param_dtype=DType.BFLOAT16)
+    self.assertEqual(GraniteMoeConfig.from_config(gm_bf16), gm_bf16.to_granitemoe_config())
+    self.assertEqual(GraniteMoeConfig.from_config(gm_bf16).dtype, "bfloat16")
+    self.assertEqual(GraniteMoeConfig.from_config(gm_bf16).weight_dtype, "bfloat16")
+
+    # `Glm5Config.from_maxtext_config` converts `Glm5ModelConfig` directly and honors overrides.
+    glm_mini = _mini_glm5()
+    self.assertEqual(Glm5Config.from_maxtext_config(glm_mini), glm_mini.to_glm5_config())
+    self.assertFalse(Glm5Config.from_maxtext_config(glm_mini, scan_layers=False).scan_layers)
+
   def test_live_mini_model_construction(self):
     devices = np.array(jax.devices())
     num_devices = devices.size
+    mesh_full = create_mesh(devices=jax.devices())
     mesh_4 = jax.sharding.Mesh(devices.reshape((1, num_devices, 1, 1)), ("data", "fsdp", "tensor", "expert"))
+    mesh_5 = jax.sharding.Mesh(
+        devices.reshape((1, num_devices, 1, 1, 1)),
+        ("data", "fsdp", "fsdp_transpose", "tensor", "expert"),
+    )
     batch = max(2, num_devices)
     tokens = jnp.ones((batch, 8), dtype=jnp.int32)
     positions = jnp.broadcast_to(jnp.arange(8)[None, :], (batch, 8))
 
-    gm = m3_models.create_model(_mini_granitemoe(), mesh_4, rngs=nnx.Rngs(0))
-    gm_logits = gm(tokens, positions)
-    self.assertEqual(gm_logits.shape, (batch, 8, 256))
+    # 1. Qwen3 dense from `Qwen3Config` + parameter tree shape parity vs `pyconfig`.
+    q3_cfg = _mini_qwen3(compute_dtype=DType.FLOAT32)
+    q3 = m3_models.create_model(q3_cfg, mesh_full, rngs=nnx.Rngs(0))
+    self.assertEqual(type(q3).__name__, "Qwen3Model")
+    self.assertEqual(q3(tokens, positions).shape, (batch, 8, 256))
+    self.assertEqual(q3.config, q3_cfg)
 
-    glm_cfg = _mini_glm5().to_glm5_config(scan_layers=False, remat_policy="none")
+    # 2. Qwen3-VL multimodal from `Qwen3VLConfig` (instantiation + vision encoder).
+    qvl_cfg = _mini_qwen3_vl(
+        vision_patch_size=16,
+        vision_hidden_size=16,
+        vision_num_position_embeddings=64,
+        deepstack_visual_indexes=(1,),
+        compute_dtype=DType.FLOAT32,
+    )
+    qvl = m3_models.create_model(qvl_cfg, mesh_4, rngs=nnx.Rngs(0))
+    self.assertEqual(type(qvl).__name__, "Qwen3VLModel")
+    self.assertEqual(qvl.config, qvl_cfg)
+    imgs = jnp.zeros((1, 3, 2, 32, 32), dtype=jnp.float32)
+    vis_out, deep_feats = qvl.vision_encoder(imgs, video_grid_thw=jnp.array([[1, 2, 2]], dtype=jnp.int32))
+    self.assertEqual(vis_out.shape, (1, 1, 64))
+    self.assertLen(deep_feats, 1)
+
+    # 3. GraniteMoE from `GraniteMoeModelConfig` (including bfloat16 preservation).
+    gm_cfg = _mini_granitemoe(compute_dtype=DType.BFLOAT16, param_dtype=DType.BFLOAT16)
+    gm = m3_models.create_model(gm_cfg, mesh_4, rngs=nnx.Rngs(0))
+    self.assertEqual(gm.config.dtype, "bfloat16")
+    self.assertEqual(gm.config.weight_dtype, "bfloat16")
+    self.assertEqual(gm(tokens, positions).shape, (batch, 8, 256))
+
+    # 4. GLM-5.3-Flash directly from `Glm5ModelConfig` (no manual `.to_glm5_config()`).
+    glm_cfg = _mini_glm5(num_hidden_layers=5)
     glm = m3_models.create_model(glm_cfg, mesh_4, rngs=nnx.Rngs(0))
     self.assertEqual(type(glm).__name__, "Glm5Model")
+    self.assertEqual(glm.config.num_hidden_layers, 5)
+
+    # 5. Qwen3.8-Flash-Next directly from `Qwen3_8FlashNextConfig` + `compute_total_loss`.
+    q38_cfg = _mini_qwen3_8(compute_dtype=DType.FLOAT32, num_nextn_predict_layers=1)
+    q38 = m3_models.create_model(q38_cfg, mesh_5, rngs=nnx.Rngs(0))
+    self.assertEqual(type(q38).__name__, "Qwen3_8FlashNextModel")
+    self.assertEqual(q38(tokens).shape, (batch, 8, 256))
+    loss, metrics = modeling_qwen3_8_flash_next.compute_total_loss(q38, tokens, tokens)
+    self.assertTrue(bool(jnp.isfinite(loss)))
+    self.assertIn("mtp_loss", metrics)
 
 
 if __name__ == "__main__":

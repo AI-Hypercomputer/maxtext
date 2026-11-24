@@ -15,6 +15,7 @@
 """Configuration and logical-axis sharding rules for GLM-5.3-Flash."""
 
 import dataclasses
+import sys
 from typing import Any
 
 import jax
@@ -250,7 +251,11 @@ class Glm5Config:
 
   @classmethod
   def from_maxtext_config(cls, config: Any, **overrides: Any) -> "Glm5Config":
-    """Maps a MaxText configuration object into a Glm5Config instance without silent fallbacks."""
+    """Maps a `Glm5Config`, `Glm5ModelConfig`, or `MaxTextConfig` into a `Glm5Config`."""
+    glm5_mod = sys.modules.get("maxtext.m3.models.glm5_3_flash.glm5_config")
+    glm5_model_cls = getattr(glm5_mod, "Glm5ModelConfig", None)
+    if isinstance(glm5_model_cls, type) and isinstance(config, glm5_model_cls):
+      config = config.to_glm5_config()
     if isinstance(config, cls):
       if not overrides:
         return config
