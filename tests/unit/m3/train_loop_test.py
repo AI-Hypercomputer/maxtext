@@ -28,8 +28,18 @@ import jax.numpy as jnp
 import numpy as np
 
 from maxtext.configs import pyconfig
+from maxtext.configs.types import DType, ProfilerType, Profiling, QuantizationType
+from maxtext.m3.configs.pyconfig_bridge import from_pyconfig
+from maxtext.m3.configs.training_config import (
+    MeshConfig,
+    OptimizerConfig,
+    TrainingConfig,
+    TransformConfig,
+)
 from maxtext.m3.core.sharding import DefaultSharding, create_mesh
 from maxtext.m3.infra import quantization
+from maxtext.m3.models.granitemoe.granitemoe_config import GraniteMoeModelConfig
+from maxtext.m3.models.qwen3.qwen3_config import Qwen3Config
 from maxtext.m3.train import loop
 from tests.utils.test_helpers import get_test_config_path
 
@@ -173,6 +183,192 @@ class TrainLoopTest(absltest.TestCase):
     """`per_device_batch_size=0.5` never splits: batch 0 on one device, n // 2 on n devices."""
     with self.assertRaisesRegex(ValueError, "does not split over"):
       loop.train_loop(_tiny_config(self.output_dir, per_device_batch_size=0.5))
+
+  def _tiny_typed_configs(
+      self,
+      *,
+      mesh: MeshConfig | None = None,
+      transforms: TransformConfig | None = None,
+      profiling: Profiling | None = None,
+      **train_overrides,
+  ) -> tuple[Qwen3Config, TrainingConfig]:
+    """Builds a tiny typed `(Qwen3Config, TrainingConfig)` pair for CPU tests."""
+    model_cfg = Qwen3Config(
+        model_name="qwen3-0.6b",
+        vocab_size=256,
+        hidden_size=64,
+        intermediate_size=128,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        head_dim=16,
+        float32_logits=False,
+    )
+    train_kwargs = {
+        "run_name": "m3_loop_typed_test",
+        "base_output_directory": self.output_dir,
+        "per_device_batch_size": 2.0,
+        "max_target_length": 16,
+        "steps": 3,
+        "mesh": mesh or MeshConfig(),
+        "transforms": transforms or TransformConfig(scan_layers=False),
+        "optimizer": OptimizerConfig(),
+        "profiling": profiling or Profiling(),
+    }
+    train_kwargs.update(train_overrides)
+    train_cfg = TrainingConfig(**train_kwargs)
+    return model_cfg, train_cfg
+
+  def test_typed_train_loop_matches_pyconfig_loss(self):
+    # `base.yml` defaults `float32_logits=false`, whereas `Qwen3Config` defaults to `true`;
+    # pass it explicitly so both paths run the same attention softmax precision.
+    legacy_cfg = _tiny_config(self.output_dir, steps=2, float32_logits="true")
+    bridged_model, bridged_train = from_pyconfig(legacy_cfg)
+    legacy_loss = loop.train_loop(legacy_cfg)
+    typed_loss = loop.train_loop(bridged_model, bridged_train)
+    self.assertTrue(math.isfinite(typed_loss))
+    self.assertAlmostEqual(typed_loss, legacy_loss, places=6)
+
+    # Explicit sharding executes cleanly with zero-YAML typed configs.
+    model_cfg, train_cfg = self._tiny_typed_configs(mesh=MeshConfig(shard_mode="explicit"), steps=2)
+    self.assertTrue(math.isfinite(loop.train_loop(model_cfg, train_cfg)))
+
+  def test_typed_xplane_profile_quantization_and_named_scopes_toggle(self):
+    model_cfg, prof_train = self._tiny_typed_configs(
+        run_name="typed_prof",
+        steps=2,
+        profiling=Profiling(profiler=ProfilerType.XPLANE, skip_first_n_steps_for_profiler=0, profiler_steps=1),
+    )
+    loop.train_loop(model_cfg, prof_train)
+    tb_dir = os.path.join(self.output_dir, "typed_prof", "tensorboard")
+    traces = glob.glob(os.path.join(tb_dir, "**", "*.xplane.pb"), recursive=True)
+    self.assertNotEmpty(traces, f"no .xplane.pb under {tb_dir}")
+
+    # `quantization=int8` works via `TransformConfig` and `named_scopes` toggles wrapping.
+    mesh = create_mesh()
+    with jax.set_mesh(mesh):
+      _, tx_on = self._tiny_typed_configs(
+          transforms=TransformConfig(scan_layers=False, quantization=QuantizationType.INT8, named_scopes=True)
+      )
+      model_q, opt_q = loop.setup_model(model_cfg, mesh, train_cfg=tx_on)
+      batch = loop.make_synthetic_batch(
+          model_cfg, mesh, loop.batch_spec(DefaultSharding()), jax.random.key(0), train_cfg=tx_on
+      )
+      hlo_on = loop.train_step.lower(model_q, opt_q, batch).compile().as_text()
+      self.assertGreater(quantization.quantized_matmuls(model_q, jnp.int8, batch["inputs"], batch["positions"]), 0)
+      names_on = {re.sub(r"\w+\(|\)", "", n) for n in re.findall(r'op_name="([^"]*)"', hlo_on)}
+      self.assertTrue(any("decoder/layers/0/mlp/wi_0/" in n for n in names_on))
+
+      _, tx_off = self._tiny_typed_configs(transforms=TransformConfig(scan_layers=False, named_scopes=False))
+      model_off, opt_off = loop.setup_model(model_cfg, mesh, train_cfg=tx_off)
+      hlo_off = loop.train_step.lower(model_off, opt_off, batch).compile().as_text()
+      self.assertNotIn("decoder/layers/0/mlp/wi_0/", hlo_off)
+
+  def test_typed_validation_errors(self):
+    model_cfg, train_cfg = self._tiny_typed_configs()
+    with self.assertRaises(TypeError):
+      loop.train_loop(model_cfg)
+    with self.assertRaises(TypeError):
+      loop.train_loop(_tiny_config(self.output_dir), train_cfg)
+    with self.assertRaises(TypeError):
+      loop.train_loop(model_cfg, "not_a_training_config")  # type: ignore[arg-type]
+    with self.assertRaisesRegex(ValueError, "grad_dtype=bfloat16"):
+      loop.train_loop(model_cfg, self._tiny_typed_configs(grad_dtype=DType.BFLOAT16)[1])
+    with self.assertRaisesRegex(ValueError, "gradient_accumulation_steps=2"):
+      loop.train_loop(model_cfg, self._tiny_typed_configs(gradient_accumulation_steps=2)[1])
+    with self.assertRaisesRegex(ValueError, "does not split over"):
+      loop.train_loop(model_cfg, self._tiny_typed_configs(per_device_batch_size=0.5)[1])
+    with self.assertRaisesRegex(ValueError, "shard_mode='explicit'"):
+      loop.train_loop(
+          model_cfg,
+          self._tiny_typed_configs(
+              mesh=MeshConfig(shard_mode="explicit"),
+              transforms=TransformConfig(scan_layers=False, quantization=QuantizationType.INT8),
+          )[1],
+      )
+    with self.assertRaisesRegex(ValueError, "shard_mode"):
+      loop.train_loop(
+          GraniteMoeModelConfig(),
+          self._tiny_typed_configs(mesh=MeshConfig(shard_mode="explicit"))[1],
+      )
+
+  def test_typed_granitemoe_runs_end_to_end(self):
+    gm_cfg = GraniteMoeModelConfig(
+        vocab_size=256,
+        hidden_size=64,
+        intermediate_size=32,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        num_local_experts=4,
+        num_experts_per_tok=2,
+        compute_dtype=DType.FLOAT32,
+    )
+    train_cfg = TrainingConfig(
+        run_name="gm_typed_test",
+        base_output_directory=self.output_dir,
+        per_device_batch_size=1.0,
+        max_target_length=8,
+        steps=1,
+        transforms=TransformConfig(scan_layers=False),
+    )
+    self.assertTrue(math.isfinite(loop.train_loop(gm_cfg, train_cfg)))
+
+  def test_parse_argv_dispatches_zero_yaml_and_legacy_yaml(self):
+    cli_argv = [
+        "loop.py",
+        "--model_name=qwen3-0.6b",
+        "--model.vocab_size=256",
+        "--model.hidden_size=64",
+        "--model.intermediate_size=128",
+        "--model.num_hidden_layers=2",
+        "--model.num_attention_heads=4",
+        "--model.num_key_value_heads=2",
+        "--model.head_dim=16",
+        "--transforms.scan_layers=false",
+        "--per_device_batch_size=2",
+        "--max_target_length=16",
+        "--steps=1",
+        f"--base_output_directory={self.output_dir}",
+        "--run_name=cli_test",
+    ]
+    model_cfg, train_cfg = loop.parse_argv(cli_argv)
+    self.assertIsInstance(model_cfg, Qwen3Config)
+    self.assertEqual(model_cfg.hidden_size, 64)
+    self.assertFalse(train_cfg.transforms.scan_layers)
+    self.assertEqual(train_cfg.steps, 1)
+    loop.main(cli_argv)
+
+    yml_argv = [
+        "loop.py",
+        get_test_config_path(),
+        "model_name=qwen3-0.6b",
+        "override_model_config=true",
+        "base_num_decoder_layers=2",
+        "base_emb_dim=64",
+        "base_mlp_dim=128",
+        "base_num_query_heads=4",
+        "base_num_kv_heads=2",
+        "head_dim=16",
+        "vocab_size=256",
+        "scan_layers=false",
+        "steps=2",
+        f"base_output_directory={self.output_dir}",
+        "run_name=yml_test",
+        "skip_jax_distributed_system=true",
+    ]
+    yml_model, yml_train = loop.parse_argv(yml_argv)
+    self.assertIsInstance(yml_model, Qwen3Config)
+    self.assertEqual(yml_model.hidden_size, 64)
+    self.assertEqual(yml_train.steps, 2)
+
+    # Non-`.py` program tokens and flag-only argv sequences also route to `ArgumentParser`.
+    bin_model, bin_train = loop.parse_argv(["maxtext-loop", "--model_name=qwen3-0.6b", "--steps=4"])
+    self.assertIsInstance(bin_model, Qwen3Config)
+    self.assertEqual(bin_train.steps, 4)
+    bare_model, bare_train = loop.parse_argv(["--model_name=qwen3-0.6b", "--steps=5"])
+    self.assertIsInstance(bare_model, Qwen3Config)
+    self.assertEqual(bare_train.steps, 5)
 
 
 if __name__ == "__main__":

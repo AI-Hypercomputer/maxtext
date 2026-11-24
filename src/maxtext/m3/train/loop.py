@@ -19,36 +19,32 @@ next-token cross entropy, no checkpointing, no eval, no metrics writer. It
 exists so an m3 model can be stepped end to end and traced; it is not a
 replacement for `maxtext.trainers.pre_train.train`.
 
-Configuration reuses the legacy `pyconfig` surface, because that is what m3
-model constructors take today. The fields read here are `steps`,
-`per_device_batch_size`, `max_target_length`, `learning_rate`, the optimizer
-fields consumed by `maxtext.optimizers.optimizers.get_optimizer`,
-`gradient_clipping_threshold`, `init_weights_seed`, the precision fields
-`matmul_precision` and `quantization`, the mesh and sharding fields consumed
-by `maxtext.m3.core.sharding.mesh_from_config` and `sharding_from_config`
-(`ici_*_parallelism`, `dcn_*_parallelism`, `shard_mode`),
-and the profiler fields consumed by `maxtext.common.profiler.Profiler`
-(`profiler`, `skip_first_n_steps_for_profiler`, `profiler_steps`, ...). The
-trace is written under `config.tensorboard_dir`. `gradient_accumulation_steps > 1`,
-`grad_dtype` other than float32, and batch or sequence sizes that do not split
-over the mesh are rejected rather than emulated.
+Configuration accepts typed `(ModelConfig, TrainingConfig)` directly via
+`ArgumentParser` (zero-YAML `--model_name` CLI), or a legacy `pyconfig`
+(`MaxTextConfig` / `HyperParameters`) object for backwards compatibility with
+existing `base.yml key=value` invocations (bridged via `from_pyconfig` at the
+CLI entrypoint `parse_argv`). `gradient_accumulation_steps > 1`, `grad_dtype`
+other than float32, and batch or sequence sizes that do not split over the mesh
+are rejected rather than emulated.
 
 `setup_model` is where infrastructure is composed, in the order every m3
 driver follows:
 
-    construct -> quantize -> named scopes -> optimizer
+    construct -> scan -> quantize -> named scopes -> optimizer
 
-Each transform is a function from `maxtext.m3.infra`. Named scopes always
-apply; the others read one config field and are a no-op when that field is
-off. Models never see any of it.
+Each transform is a function from `maxtext.m3.infra`. Named scopes apply when
+`train_cfg.transforms.named_scopes` is True (always for legacy configs); the
+others read one config field and are a no-op when that field is off. Models
+never see any of it.
 
-Precision follows legacy MaxText: `weight_dtype` (float32 master weights)
-and `dtype` (bfloat16 compute) are applied by the model at construction;
-the optimizer keeps its moments in `weight_dtype`; the loss is computed in
-float32; and `matmul_precision` is applied here, by running setup and every
-step under `jax.default_matmul_precision`. It only affects float32 matmul
-operands -- on TPU, `default` is one bfloat16 pass and `highest` is full
-float32 -- so with bfloat16 compute it is a no-op, as in legacy.
+Precision follows legacy MaxText: `param_dtype` / `weight_dtype` (float32
+master weights) and `compute_dtype` / `dtype` (bfloat16 compute) are applied by
+the model at construction; the optimizer keeps its moments in `mu_dtype` /
+`weight_dtype`; the loss is computed in float32; and `matmul_precision` is
+applied here, by running setup and every step under
+`jax.default_matmul_precision`. It only affects float32 matmul operands -- on
+TPU, `default` is one bfloat16 pass and `highest` is full float32 -- so with
+bfloat16 compute it is a no-op, as in legacy.
 
 Parameters are sharded by the model at construction from its own `Sharding`
 strategy (`DefaultSharding` for Qwen3: FSDP over the model dimension, tensor
@@ -57,8 +53,17 @@ and residuals, and batch over the data axes). `train_loop` resolves
 `sharding_from_config(config)` to lay out the input batch and logs the fraction
 of parameters each device holds, so replication is visible.
 
-Example (CPU or TPU)::
+Examples (CPU or TPU)::
 
+    # Native zero-YAML CLI (via `ArgumentParser`):
+    python3 -m maxtext.m3.train.loop \\
+      --model_name=qwen3-0.6b --transforms.scan_layers=false \\
+      --per_device_batch_size=1 --max_target_length=256 --steps=8 \\
+      --profiling.profiler=xplane --profiling.skip_first_n_steps_for_profiler=3 \\
+      --profiling.profiler_steps=3 --base_output_directory=/tmp/m3 \\
+      --run_name=qwen3_profile
+
+    # Transitional YAML CLI (via `pyconfig.initialize` -> `from_pyconfig`):
     python3 -m maxtext.m3.train.loop src/maxtext/configs/base.yml \\
       model_name=qwen3-0.6b use_m3_model=true scan_layers=false \\
       per_device_batch_size=1 max_target_length=256 steps=8 \\
@@ -70,9 +75,13 @@ Example (CPU or TPU)::
 from collections.abc import Sequence
 import functools
 import math
+import os
 import time
+import types
+from typing import Any
 
 from absl import app
+from absl import flags
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -83,8 +92,12 @@ import optax
 from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
+from maxtext.m3.configs.cli_parser import ArgumentParser
+from maxtext.m3.configs.pyconfig_bridge import from_pyconfig
+from maxtext.m3.configs.training_config import TrainingConfig
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core.sharding import (
+    MESH_AXIS_NAMES,
     Sharding,
     TensorType,
     ambient_mesh_is_explicit,
@@ -95,41 +108,144 @@ from maxtext.m3.core.sharding import (
 from maxtext.m3.infra import quantization
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.m3.infra.named_scopes import add_named_scopes
+from maxtext.m3.models.model_config import ModelConfig
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 
 
-def make_optimizer(config) -> optax.GradientTransformation:
+def _validate_config_pair(config: Any, train_cfg: TrainingConfig | None) -> bool:
+  """Returns True when called with a typed `(ModelConfig, TrainingConfig)` pair; False for legacy `config`."""
+  if isinstance(config, ModelConfig):
+    if train_cfg is None:
+      raise TypeError("When passing a `ModelConfig`, `train_cfg: TrainingConfig` must also be provided.")
+    if not isinstance(train_cfg, TrainingConfig):
+      raise TypeError(f"Expected `TrainingConfig` for `train_cfg`; got {type(train_cfg).__name__}.")
+    return True
+  if train_cfg is not None:
+    raise TypeError(f"Expected `ModelConfig` when `train_cfg` is provided; got {type(config).__name__}.")
+  return False
+
+
+def _global_batch_size(train_cfg: TrainingConfig) -> int:
+  """Returns the global per-step batch size derived from `per_device_batch_size` and device count."""
+  return int(train_cfg.per_device_batch_size * len(jax.devices()))
+
+
+def _tensorboard_dir(train_cfg: TrainingConfig) -> str:
+  """Derives the profiler/TensorBoard directory matching `MaxTextConfig.tensorboard_dir`."""
+  base_dir = train_cfg.base_output_directory or os.path.abspath("maxtext_output")
+  if train_cfg.run_name:
+    return os.path.join(base_dir, train_cfg.run_name, "tensorboard", "")
+  return os.path.join(base_dir, "tensorboard", "")
+
+
+def _mesh_config_view(model_cfg: ModelConfig, train_cfg: TrainingConfig) -> types.SimpleNamespace:
+  """Builds a `mesh_from_config`-compatible namespace from `(model_cfg, train_cfg.mesh)`."""
+  ici = train_cfg.mesh.ici or {"fsdp": -1}
+  dcn = train_cfg.mesh.dcn or {"data": -1}
+  fields: dict[str, Any] = {
+      "model_name": model_cfg.model_name,
+      "shard_mode": train_cfg.mesh.shard_mode,
+  }
+  for axis in MESH_AXIS_NAMES:
+    if axis == "stage":
+      continue
+    fields[f"ici_{axis}_parallelism"] = ici.get(axis, 1)
+    fields[f"dcn_{axis}_parallelism"] = dcn.get(axis, 1)
+  return types.SimpleNamespace(**fields)
+
+
+def _optimizer_view(train_cfg: TrainingConfig) -> types.SimpleNamespace:
+  """Builds an `optimizers.get_optimizer`-compatible namespace from `TrainingConfig`."""
+  opt = train_cfg.optimizer
+  return types.SimpleNamespace(
+      opt_type=opt.optimizer_type,
+      adam_b1=opt.adam_b1,
+      adam_b2=opt.adam_b2,
+      adam_eps=opt.adam_eps,
+      adam_eps_root=opt.adam_eps_root,
+      adam_weight_decay=opt.adam_weight_decay,
+      mu_dtype=opt.mu_dtype.value,
+      adamw_mask=opt.adamw_mask,
+      trainable_parameters_mask=opt.trainable_parameters_mask,
+      skip_step_on_spikes=train_cfg.skip_step_on_spikes,
+      skip_step_interval=train_cfg.skip_step_interval,
+      skip_step_scaling_factor=train_cfg.skip_step_scaling_factor,
+  )
+
+
+def _profiler_view(train_cfg: TrainingConfig) -> types.SimpleNamespace:
+  """Builds a `profiler.Profiler`-compatible namespace from `TrainingConfig`."""
+  prof_fields = {k: getattr(v, "value", v) for k, v in train_cfg.profiling.model_dump().items()}
+  return types.SimpleNamespace(
+      **prof_fields,
+      steps=train_cfg.steps,
+      tensorboard_dir=_tensorboard_dir(train_cfg),
+      managed_mldiagnostics=False,
+  )
+
+
+def make_optimizer(config: Any) -> optax.GradientTransformation:
   """`optimizers.get_optimizer` plus global-norm clipping, which it leaves to the caller."""
-  tx = optimizers.get_optimizer(config, config.learning_rate)
-  if config.gradient_clipping_threshold > 0:
-    return optax.chain(optax.clip_by_global_norm(config.gradient_clipping_threshold), tx)
+  if isinstance(config, TrainingConfig):
+    tx = optimizers.get_optimizer(_optimizer_view(config), config.optimizer.learning_rate)
+    clip = config.optimizer.gradient_clipping_threshold
+  else:
+    tx = optimizers.get_optimizer(config, config.learning_rate)
+    clip = config.gradient_clipping_threshold
+  if clip > 0:
+    return optax.chain(optax.clip_by_global_norm(clip), tx)
   return tx
 
 
-def setup_model(config, mesh: Mesh, sharding: Sharding | None = None) -> tuple[nnx.Module, nnx.Optimizer]:
+def setup_model(
+    config: Any,
+    mesh: Mesh,
+    sharding: Sharding | None = None,
+    *,
+    train_cfg: TrainingConfig | None = None,
+) -> tuple[nnx.Module, nnx.Optimizer]:
   """Builds the model and optimizer with every transform applied, in the fixed order.
 
-  Must run inside `jax.set_mesh(mesh)`. The model places its parameters from
-  `sharding` (or its own default strategy when `sharding` is `None`) as it is
-  constructed. Scan comes before quantization, which records module paths and
-  so must see the final structure; quantization traces one forward pass of the
-  training shape. Named scopes come after both: they only label ops, and scan
-  needs identical layer classes. The optimizer comes last, as it must see the
-  final model.
+  Must run inside `jax.set_mesh(mesh)`. Accepts either a typed `ModelConfig`
+  (with keyword `train_cfg: TrainingConfig`) or a legacy `pyconfig` config. The
+  model places its parameters from `sharding` (or its own default strategy when
+  `sharding` is `None`) as it is constructed. Scan comes before quantization,
+  which records module paths and so must see the final structure; quantization
+  traces one forward pass of the training shape. Named scopes come after both:
+  they only label ops, and scan needs identical layer classes. The optimizer
+  comes last, as it must see the final model.
   """
+  is_typed = _validate_config_pair(config, train_cfg)
   create_kw = {"sharding": sharding} if sharding is not None else {}
-  model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed), **create_kw)
-  model = m3_scan.maybe_apply_scan(model, config)
-  if getattr(config, "quantization", "") and ambient_mesh_is_explicit():
+  if is_typed:
+    assert train_cfg is not None
+    seed = train_cfg.seed
+    tx_cfg: Any = train_cfg.transforms
+    opt_cfg: Any = train_cfg
+    batch_shape = (_global_batch_size(train_cfg), train_cfg.max_target_length)
+    example_args = (jax.ShapeDtypeStruct(batch_shape, jnp.int32), jax.ShapeDtypeStruct(batch_shape, jnp.int32))
+    apply_scopes = train_cfg.transforms.named_scopes
+  else:
+    seed = config.init_weights_seed
+    tx_cfg = config
+    opt_cfg = config
+    example_args = quantization.example_inputs(config)
+    apply_scopes = True
+
+  model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(seed), **create_kw)
+  model = m3_scan.maybe_apply_scan(model, tx_cfg)
+  quant_val = getattr(tx_cfg, "quantization", "")
+  if getattr(quant_val, "value", quant_val) and ambient_mesh_is_explicit():
     raise ValueError(
         "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized matmuls. "
         "Use shard_mode='auto'."
     )
-  model = quantization.maybe_quantize(model, config, *quantization.example_inputs(config))
-  model = add_named_scopes(model)
-  optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
+  model = quantization.maybe_quantize(model, tx_cfg, *example_args)
+  if apply_scopes:
+    model = add_named_scopes(model)
+  optimizer = nnx.Optimizer(model, make_optimizer(opt_cfg), wrt=nnx.Param)
   return model, optimizer
 
 
@@ -177,16 +293,29 @@ def _synthetic_batch_fn(batch_size: int, seq_len: int, vocab_size: int, mesh: Me
   return jax.jit(body, out_shardings=NamedSharding(mesh, project_spec_to_mesh(spec, mesh)))
 
 
-def make_synthetic_batch(config, mesh: Mesh, spec: P | Sharding, key: jax.Array) -> dict[str, jax.Array]:
+def make_synthetic_batch(
+    config: Any,
+    mesh: Mesh,
+    spec: P | Sharding,
+    key: jax.Array,
+    *,
+    train_cfg: TrainingConfig | None = None,
+) -> dict[str, jax.Array]:
   """Random token batch, laid out as `spec` (`batch_spec` of the strategy).
 
   Targets are the inputs shifted left by one, so the loss is ordinary
   next-token prediction rather than a constant.
   """
+  is_typed = _validate_config_pair(config, train_cfg)
+  if is_typed:
+    assert train_cfg is not None
+    batch_size = _global_batch_size(train_cfg)
+    seq_len = train_cfg.max_target_length
+  else:
+    batch_size = config.global_batch_size_to_train_on
+    seq_len = config.max_target_length
   spec_p = batch_spec(spec) if isinstance(spec, Sharding) else spec
-  fn = _synthetic_batch_fn(
-      config.global_batch_size_to_train_on, config.max_target_length, config.vocab_size, mesh, spec_p
-  )
+  fn = _synthetic_batch_fn(batch_size, seq_len, config.vocab_size, mesh, spec_p)
   return fn(key)
 
 
@@ -225,10 +354,57 @@ def _log_step(step: int, loss: jax.Array, last_done: float, tokens_per_step: int
   return loss, done
 
 
-def train_loop(config) -> float:
-  """Builds the model and optimizer, runs `config.steps` steps, and returns the last loss."""
-  mesh = mesh_from_config(config)
-  m3_kernels.validate_attention_config(config, mesh=mesh)
+def _extract_runtime_view(config: Any, train_cfg: TrainingConfig | None) -> types.SimpleNamespace:
+  """Extracts flat scalar runtime settings for either `(ModelConfig, TrainingConfig)` or a legacy config."""
+  if _validate_config_pair(config, train_cfg):
+    assert train_cfg is not None
+    return types.SimpleNamespace(
+        mesh_cfg=_mesh_config_view(config, train_cfg),
+        attn_cfg=config,
+        model_name=config.model_name,
+        steps=train_cfg.steps,
+        seed=train_cfg.seed,
+        per_device_batch_size=train_cfg.per_device_batch_size,
+        batch_size=_global_batch_size(train_cfg),
+        max_target_length=train_cfg.max_target_length,
+        gradient_accumulation_steps=train_cfg.gradient_accumulation_steps,
+        grad_dtype=jnp.dtype(train_cfg.grad_dtype.value),
+        matmul_precision=train_cfg.matmul_precision.value,
+        quantization=train_cfg.transforms.quantization.value or "none",
+        prof_cfg=_profiler_view(train_cfg),
+        profiler_enabled=bool(train_cfg.profiling.profiler.value),
+        tensorboard_dir=_tensorboard_dir(train_cfg),
+    )
+  grad_dt = getattr(config.grad_dtype, "value", config.grad_dtype)
+  prof_mode = getattr(config.profiler, "value", config.profiler)
+  return types.SimpleNamespace(
+      mesh_cfg=config,
+      attn_cfg=config,
+      model_name=config.model_name,
+      steps=config.steps,
+      seed=config.init_weights_seed,
+      per_device_batch_size=config.per_device_batch_size,
+      batch_size=config.global_batch_size_to_train_on,
+      max_target_length=config.max_target_length,
+      gradient_accumulation_steps=config.gradient_accumulation_steps,
+      grad_dtype=jnp.dtype(grad_dt),
+      matmul_precision=getattr(config.matmul_precision, "value", config.matmul_precision),
+      quantization=getattr(config.quantization, "value", config.quantization) or "none",
+      prof_cfg=config,
+      profiler_enabled=bool(prof_mode),
+      tensorboard_dir=config.tensorboard_dir,
+  )
+
+
+def train_loop(config: Any, train_cfg: TrainingConfig | None = None) -> float:
+  """Builds the model and optimizer, runs `steps` steps, and returns the last loss.
+
+  Accepts either `(model_cfg: ModelConfig, train_cfg: TrainingConfig)` or a
+  single legacy `pyconfig` (`MaxTextConfig` / `HyperParameters`) object.
+  """
+  rt = _extract_runtime_view(config, train_cfg)
+  mesh = mesh_from_config(rt.mesh_cfg)
+  m3_kernels.validate_attention_config(rt.attn_cfg, mesh=mesh)
   # Lays out the input batch; `setup_model` lets the model resolve its own
   # parameter strategy from `config`.
   sharding = sharding_from_config(config)
@@ -240,48 +416,44 @@ def train_loop(config) -> float:
 
   # `global_batch_size_to_train_on` already includes gradient accumulation, and
   # the loop does none, so GA > 1 would silently run one GA-times-larger step.
-  if config.gradient_accumulation_steps > 1:
+  if rt.gradient_accumulation_steps > 1:
     raise ValueError(
-        "m3 loop does not accumulate gradients yet; "
-        f"got gradient_accumulation_steps={config.gradient_accumulation_steps}."
+        f"m3 loop does not accumulate gradients yet; got gradient_accumulation_steps={rt.gradient_accumulation_steps}."
     )
   # Legacy casts gradients to `grad_dtype` before the optimizer; this loop keeps
   # them in float32, so any other setting would be ignored rather than applied.
-  if jnp.dtype(config.grad_dtype) != jnp.float32:
-    raise ValueError(f"m3 loop keeps gradients in float32; got grad_dtype={jnp.dtype(config.grad_dtype).name}.")
-  batch_size = config.global_batch_size_to_train_on
+  if rt.grad_dtype != jnp.float32:
+    raise ValueError(f"m3 loop keeps gradients in float32; got grad_dtype={rt.grad_dtype.name}.")
   spec = batch_spec(sharding)
   batch_shards = _batch_shards(mesh, spec)
-  if batch_size == 0 or batch_size % batch_shards:
+  if rt.batch_size == 0 or rt.batch_size % batch_shards:
     raise ValueError(
-        f"per_device_batch_size={config.per_device_batch_size} gives a global batch of {batch_size}, which does not "
+        f"per_device_batch_size={rt.per_device_batch_size} gives a global batch of {rt.batch_size}, which does not "
         f"split over the {batch_shards} shards of {spec}."
     )
   norm_seq_spec = sharding("decoder_layer_input", ("batch", "norm_length", "embed"), TensorType.ACTIVATION)
   seq_shards = _axis_shards(mesh, norm_seq_spec, 1)
-  if config.max_target_length % seq_shards:
+  if rt.max_target_length % seq_shards:
     raise ValueError(
-        f"max_target_length={config.max_target_length} is not divisible by the {seq_shards} sequence shards of "
+        f"max_target_length={rt.max_target_length} is not divisible by the {seq_shards} sequence shards of "
         f"{norm_seq_spec}."
     )
 
-  # Same strings as legacy (`default` / `high` / `highest`); pyconfig hands over a `str` Enum.
-  matmul_precision = getattr(config.matmul_precision, "value", config.matmul_precision)
-  with jax.set_mesh(mesh), jax.default_matmul_precision(matmul_precision):
-    model, optimizer = setup_model(config, mesh)
+  with jax.set_mesh(mesh), jax.default_matmul_precision(rt.matmul_precision):
+    model, optimizer = setup_model(config, mesh, train_cfg=train_cfg)
 
     num_params = sum(x.size for x in jax.tree.leaves(nnx.state(model, nnx.Param)))
-    tokens_per_step = config.global_batch_size_to_train_on * config.max_target_length
+    tokens_per_step = rt.batch_size * rt.max_target_length
     max_logging.log(
-        f"m3 loop: {config.model_name}, {num_params / 1e9:.3f}B params, "
+        f"m3 loop: {rt.model_name}, {num_params / 1e9:.3f}B params, "
         f"{params_held_per_device(model):.1%} of them per device, "
-        f"batch {config.global_batch_size_to_train_on} x {config.max_target_length} tokens, "
-        f"matmul_precision={matmul_precision}, "
-        f"quantization={getattr(config.quantization, 'value', config.quantization) or 'none'}"
+        f"batch {rt.batch_size} x {rt.max_target_length} tokens, "
+        f"matmul_precision={rt.matmul_precision}, "
+        f"quantization={rt.quantization}"
     )
 
-    prof = profiler.Profiler(config, offset_step=0)
-    data_key = jax.random.key(config.init_weights_seed)
+    prof = profiler.Profiler(rt.prof_cfg, offset_step=0)
+    data_key = jax.random.key(rt.seed)
     loss = float("nan")
     # Walk the model and optimizer graphs once before the loop so `nnx.jit`
     # does not split and merge them on every step.
@@ -293,8 +465,8 @@ def train_loop(config) -> float:
     # between consecutive completions, so step 0's includes compilation.
     pending = None  # (step, loss) dispatched but not yet logged.
     last_done = time.perf_counter()
-    for step in range(config.steps):
-      batch = make_synthetic_batch(config, mesh, spec, jax.random.fold_in(data_key, step))
+    for step in range(rt.steps):
+      batch = make_synthetic_batch(config, mesh, spec, jax.random.fold_in(data_key, step), train_cfg=train_cfg)
       prof.maybe_activate_profiler(step, pending)
       with jax.profiler.StepTraceAnnotation("train", step_num=step):
         step_loss = step_fn(batch)
@@ -305,15 +477,25 @@ def train_loop(config) -> float:
     if pending is not None:
       loss, last_done = _log_step(*pending, last_done, tokens_per_step)
 
-    if config.profiler:
-      max_logging.log(f"m3 loop: profile written under {config.tensorboard_dir}")
+    if rt.profiler_enabled:
+      max_logging.log(f"m3 loop: profile written under {rt.tensorboard_dir}")
     return loss
 
 
+def parse_argv(argv: Sequence[str]) -> tuple[ModelConfig, TrainingConfig]:
+  """Dispatches `*.yml`/`*.yaml` config paths (`argv[1]`) to `from_pyconfig`, else `ArgumentParser`."""
+  if len(argv) >= 2 and not argv[1].startswith("-") and argv[1].lower().endswith((".yml", ".yaml")):
+    return from_pyconfig(pyconfig.initialize(list(argv)))
+  cli_tokens = (
+      argv[1:] if argv and not argv[0].startswith("-") and not argv[0].lower().endswith((".yml", ".yaml")) else argv
+  )
+  return ArgumentParser().parse_args(cli_tokens)
+
+
 def main(argv: Sequence[str]) -> None:
-  config = pyconfig.initialize(argv)
-  train_loop(config)
+  model_cfg, train_cfg = parse_argv(argv)
+  train_loop(model_cfg, train_cfg)
 
 
 if __name__ == "__main__":
-  app.run(main)
+  app.run(main, flags_parser=lambda argv: flags.FLAGS(argv, known_only=True))
