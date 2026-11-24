@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795533197277,
+  "lastUpdate": 1795538794286,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -76444,6 +76444,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3463.721,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 440,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Leilei Wu",
+            "username": "uwlei",
+            "email": "lewu@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "588ec2ec090024e9ac641b05869910427566c426",
+          "message": "Support full attention on TPU Ulysses CP in MaxText.\n\nModels configured with `attention_type=\"full\"` could not use TPU Ulysses context parallelism because config validation and `AttentionOp` rejected non-causal attention on Ulysses meshes, and default `Attention` layers kept `AttentionType.GLOBAL` unless individual model decoders explicitly passed `config.attention_type`.\n\nAllow `AttentionType.FULL` in TPU Ulysses config validation and `AttentionOp`, resolve default global `Attention` layers to `AttentionType.FULL` when configured, and construct Tokamax `FullMask` on the Ulysses Splash path so full bidirectional and packed-segment attention run across Ulysses shards.\n\nAlso guard against accidental misuse and update FLOPs accounting for `attention_type=\"full\"` (bidirectional non-causal attention):\n- Clarify in `common_types.py`, `base.yml`, `configs/types.py`, and `sharding.md` that `full` means non-causal bidirectional full attention (unlike `global` / HuggingFace `full_attention`).\n- Guard `train.py::loss_fn` against `attention_type=\"full\"` to prevent next-token label leakage under causal pre-training/SFT objectives.\n- Reject `attention_type=\"full\"` on GPU cuDNN flash paths (`cudnn_flash_te`, `cudnn_flash_jax`) in `configs/types.py` and `AttentionOp.__call__` (plus `cudnn_jax_flash_attention` non-autoregressive mode) so configs do not silently fall back to causal masks.\n- Count unhalved non-causal attention FLOPs (`2x` causal) on global attention layers in `utils/maxtext_utils.py` (`calculate_tflops_training_per_device`, Gemma2/3/4/4-small, GPT-OSS, Llama4, Qwen3-Next/3.5, MTP, and `calculate_prefill_tflops_per_device`).\n\nPiperOrigin-RevId: 1029062265",
+          "timestamp": "2026-11-24T16:09:51Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/588ec2ec090024e9ac641b05869910427566c426"
+        },
+        "date": 1795538793234,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 226.40699999999993,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 54.213,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2277.526,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 179.8659999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 14,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 333.929,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3229.5690000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 440,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1887.8149999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 356.77700000000004,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3457.183999999999,
             "unit": "sec"
           },
           {
