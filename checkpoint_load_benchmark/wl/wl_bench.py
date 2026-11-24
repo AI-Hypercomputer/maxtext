@@ -15,7 +15,7 @@
 """One-off operations of benchmark v3: code bundles, weight downloads, checks and the cache proof.
 
   wl_bench.py bundle --build baseline|candidate   # build the bundle of the checked-out branch, upload and verify it
-  wl_bench.py step1 --platform v7x [--models m ...] [--dry-run]       # cold HF -> GCS downloads (CPU Jobs)
+  wl_bench.py step1 --platform v7x [--models m ...] [--max-running 4] # cold HF -> GCS downloads (CPU Jobs)
   wl_bench.py step1b [--models m ...] [--dry-run]                     # DeepSeek FP8/MXFP4 -> BF16 (v7x CPU Jobs)
   wl_bench.py copy-region --platform v6e [--models m ...] [--dry-run] # BF16 copies into another region
   wl_bench.py scan --platform v7x          # compare every .safetensors header with its object size
@@ -35,8 +35,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-import urllib.parse
-import urllib.request
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -106,21 +105,65 @@ def cmd_bundle(args) -> None:
     print(f"{args.build}: {json.load(f)['git_commit']} -> {dest}")
 
 
+def _job_state(platform: str, name: str) -> str:
+  """Returns `missing`, `active`, `complete` or `failed` for the Job `name` on `platform`."""
+  res = common.kubectl(platform, "get", "job", name, "-o", "json", check=False)
+  if res.returncode:
+    return "missing"
+  conditions = {
+      c["type"] for c in json.loads(res.stdout).get("status", {}).get("conditions", []) if c["status"] == "True"
+  }
+  return "complete" if "Complete" in conditions else ("failed" if "Failed" in conditions else "active")
+
+
+def _run_jobs(platform: str, docs: list[dict], max_running: int, dry_run: bool) -> None:
+  """Creates the Jobs of `docs` on `platform`, smallest model first, at most `max_running` at a time (0: all at once).
+
+  With a limit it waits for all of them and exits non-zero if one failed. A Job that already exists is not recreated.
+  """
+  names = [d["metadata"]["name"] for d in docs]
+  if dry_run or not max_running:
+    for doc in docs:
+      if common.apply_manifest(platform, doc, dry_run) and not dry_run:
+        print(f"created job/{doc['metadata']['name']} on {platform}")
+    return
+  waiting, reported = list(docs), set()
+  while True:
+    states = {name: _job_state(platform, name) for name in names}
+    for name, state in states.items():
+      if state in ("complete", "failed") and name not in reported:
+        reported.add(name)
+        print(f"{common.utc_now()} {state} job/{name}", flush=True)
+    while waiting and sum(1 for s in states.values() if s == "active") < max_running:
+      doc = waiting.pop(0)
+      name = doc["metadata"]["name"]
+      if states[name] == "missing" and common.apply_manifest(platform, doc):
+        print(f"{common.utc_now()} created job/{name} on {platform}", flush=True)
+        states[name] = "active"
+    if not waiting and all(s in ("complete", "failed") for s in states.values()):
+      break
+    time.sleep(30)
+  if any(s == "failed" for s in states.values()):
+    sys.exit(f"failed jobs on {platform}: {sorted(n for n, s in states.items() if s == 'failed')}")
+
+
 def cmd_step1(args) -> None:
   """Creates the cold HF -> GCS download Job of every model placed in the platform's region."""
   source_only = args.platform != STEP1B_SOURCE_PLATFORM
-  for model in _models(args.platform, args.models):
+  docs = []
+  for model in sorted(_models(args.platform, args.models), key=lambda m: float(m["hf_download_gb"])):
     if model.get("needs_step1b") and source_only:
       continue  # The quantized files are only needed where Step 1b runs; other regions get the BF16 copy.
-    doc = manifests_v2.build_step1_cpu_job(
-        platform=args.platform,
-        model_name=model["model_name"],
-        run_id=f"wl3-s1-{args.platform}",
-        clean_target=True,
-        code_dir=common.code_dir("candidate"),
+    docs.append(
+        manifests_v2.build_step1_cpu_job(
+            platform=args.platform,
+            model_name=model["model_name"],
+            run_id=f"wl3-s1-{args.platform}",
+            clean_target=True,
+            code_dir=common.code_dir("candidate"),
+        )
     )
-    if common.apply_manifest(args.platform, doc, args.dry_run) and not args.dry_run:
-      print(f"created job/{doc['metadata']['name']} on {args.platform}")
+  _run_jobs(args.platform, docs, args.max_running, args.dry_run)
 
 
 def cmd_step1b(args) -> None:
@@ -149,36 +192,37 @@ def cmd_copy_region(args) -> None:
   if args.platform == STEP1B_SOURCE_PLATFORM:
     sys.exit(f"{STEP1B_SOURCE_PLATFORM} holds the converted files; copy to another platform's region")
   source_root = common.regional_root(STEP1B_SOURCE_PLATFORM)
-  for model in _models(args.platform, args.models, step1b=True):
-    doc = manifests_v2.build_copy_region_cpu_job(
-        dest_platform=args.platform,
-        model_name=model["model_name"],
-        source_gcs_dir=f"{source_root}/hf_cache_bf16/{model['model_name']}",
-        run_id=f"wl3-copy-{args.platform}",
-        clean_target=True,
-        code_dir=common.code_dir("candidate"),
-    )
-    if common.apply_manifest(args.platform, doc, args.dry_run) and not args.dry_run:
-      print(f"created job/{doc['metadata']['name']} on {args.platform}")
+  docs = [
+      manifests_v2.build_copy_region_cpu_job(
+          dest_platform=args.platform,
+          model_name=model["model_name"],
+          source_gcs_dir=f"{source_root}/hf_cache_bf16/{model['model_name']}",
+          run_id=f"wl3-copy-{args.platform}",
+          clean_target=True,
+          code_dir=common.code_dir("candidate"),
+      )
+      for model in sorted(_models(args.platform, args.models, step1b=True), key=lambda m: float(m["loaded_bf16_gb"]))
+  ]
+  _run_jobs(args.platform, docs, args.max_running, args.dry_run)
 
 
-def _read_range(bucket: str, name: str, start: int, end: int, token: str) -> bytes:
-  url = f"https://storage.googleapis.com/storage/v1/b/{bucket}/o/{urllib.parse.quote(name, safe='')}?alt=media"
-  request = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}", "Range": f"bytes={start}-{end}"})
-  with urllib.request.urlopen(request, timeout=120) as response:
-    return response.read()
+def _read_range(uri: str, start: int, end: int) -> bytes:
+  """Returns bytes `start` to `end` (inclusive) of the GCS object `uri`."""
+  res = subprocess.run(["gcloud", "storage", "cat", "-r", f"{start}-{end}", uri], capture_output=True, check=False)
+  if res.returncode:
+    raise OSError(res.stderr.decode(errors="replace").strip()[-300:])
+  return res.stdout
 
 
-def _check_safetensors(uri: str, size: int, token: str) -> str:
+def _check_safetensors(uri: str, size: int) -> str:
   """Returns '' if the tensors that the header of `uri` lists end exactly at the object's size, else the problem."""
-  bucket, _, name = uri[len("gs://") :].partition("/")
   try:
-    head = _read_range(bucket, name, 0, min(size, 1 << 20) - 1, token)
+    head = _read_range(uri, 0, min(size, 1 << 20) - 1)
     (header_len,) = struct.unpack("<Q", head[:8])
     if 8 + header_len > size:
       return f"header of {header_len} bytes is longer than the object ({size})"
     if 8 + header_len > len(head):
-      head += _read_range(bucket, name, len(head), 8 + header_len - 1, token)
+      head += _read_range(uri, len(head), 8 + header_len - 1)
     header = json.loads(head[8 : 8 + header_len])
     data_end = max((v["data_offsets"][1] for k, v in header.items() if k != "__metadata__"), default=0)
     expected = 8 + header_len + data_end
@@ -187,23 +231,31 @@ def _check_safetensors(uri: str, size: int, token: str) -> str:
     return f"cannot check: {type(e).__name__}: {e}"
 
 
-def cmd_scan(args) -> None:
-  """Checks every .safetensors file of the platform's region against the size its header implies."""
-  root = common.regional_root(args.platform)
-  token = common.run(["gcloud", "auth", "print-access-token"]).stdout.strip()
+def scan_weights(prefixes: list[str]) -> tuple[int, int, list[tuple[str, str]]]:
+  """Checks every .safetensors file under the GCS `prefixes` against the size that its header implies.
+
+  Returns the number of files, their total bytes, and the (URI, problem) of every file that does not match.
+  """
   files = []
-  for sub in ("hf_cache", "hf_cache_bf16"):
-    listing = common.run(["gcloud", "storage", "ls", "-l", f"{root}/{sub}/**"], check=False, timeout=1800).stdout
+  for prefix in prefixes:
+    listing = common.run(["gcloud", "storage", "ls", "-l", f"{prefix.rstrip('/')}/**"], check=False, timeout=1800).stdout
     for line in listing.splitlines():
       parts = line.split()
       if len(parts) == 3 and parts[2].endswith(".safetensors"):
         files.append((parts[2], int(parts[0])))
-  with concurrent.futures.ThreadPoolExecutor(max_workers=32) as pool:
-    problems = list(pool.map(lambda f: _check_safetensors(f[0], f[1], token), files))
+  with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+    problems = list(pool.map(lambda f: _check_safetensors(f[0], f[1]), files))
   bad = [(uri, problem) for (uri, _), problem in zip(files, problems) if problem]
+  return len(files), sum(size for _, size in files), bad
+
+
+def cmd_scan(args) -> None:
+  """Checks every .safetensors file of the platform's region against the size its header implies."""
+  root = common.regional_root(args.platform)
+  count, size, bad = scan_weights([f"{root}/hf_cache", f"{root}/hf_cache_bf16"])
   for uri, problem in bad:
     print(f"BAD {uri}: {problem}")
-  print(f"{root}: {len(files)} .safetensors files, {sum(s for _, s in files) / 1e12:.2f} TB, {len(bad)} bad")
+  print(f"{root}: {count} .safetensors files, {size / 1e12:.2f} TB, {len(bad)} bad")
   if bad:
     sys.exit(1)
 
@@ -253,6 +305,7 @@ def main() -> None:
     p = sub.add_parser(name)
     p.add_argument("--platform", required=True, choices=common.PLATFORMS)
     p.add_argument("--models", nargs="+")
+    p.add_argument("--max-running", type=int, default=0, help="Jobs at a time; with it, wait for all of them")
     p.add_argument("--dry-run", action="store_true")
   p = sub.add_parser("step1b")
   p.add_argument("--models", nargs="+")

@@ -21,6 +21,8 @@ Rules it enforces:
   * The tasks of a unit (baseline and candidate of one configuration) run back to back in one lane.
   * At most one unit with 64 or more hosts runs per region, because of the GCS egress quota.
   * The run directory of a task must be empty before its first attempt.
+  * A unit starts only when the weights of its model are in the region: the Step 1 result (for DeepSeek the Step 1b
+    or regional copy result) is OK, and every .safetensors file has the size that its header implies.
   * A task whose pods died is not retried silently: the results of the attempt are copied to
     <run dir>/attempts/a<N>/, the reason is logged, and the next attempt re-runs the phases without an OK result.
   * Nothing is submitted to a cluster on which v2 benchmark pods are running, nor to v5e without free slices.
@@ -32,6 +34,7 @@ events are appended to DIR/events.log, one line each: `<UTC time> <INFO|ATTN> <t
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import sys
@@ -40,8 +43,10 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from wl import common  # pylint: disable=wrong-import-position
+from wl import wl_bench  # pylint: disable=wrong-import-position
 from bench import manifests_v2  # pylint: disable=wrong-import-position
 from bench import platforms  # pylint: disable=wrong-import-position
+from bench import schema_v2  # pylint: disable=wrong-import-position
 
 DEFAULT_LANES = {"v7x": 2, "v6e": 2, "v5p": 3, "v5e": 1}
 BIG_UNIT_HOSTS = 64
@@ -120,17 +125,12 @@ class Driver:
     if os.path.exists(self.state_path):
       with open(self.state_path, "r", encoding="utf-8") as f:
         self.state = json.load(f)
+    self.weights_asked: dict[str, float] = {}
+    self.needs_step1b = {m["model_name"]: bool(m.get("needs_step1b")) for m in schema_v2.load_models_v2()["models"]}
     self.lanes = dict(DEFAULT_LANES)
     for item in args.lanes or []:
       name, _, count = item.partition("=")
       self.lanes[name] = int(count)
-    index = {}
-    for i, unit in enumerate(self.units):
-      for task in unit["tasks"]:
-        index[task_key(task)] = i
-    self.unit_of = index
-    self.seq = {task_key(t): n for n, t in enumerate(t for u in plan["units"] for t in u["tasks"])}
-    self.active: dict[str, list[int]] = {p: [] for p in common.PLATFORMS}
 
   # ---- bookkeeping ----
   def event(self, level: str, text: str) -> None:
@@ -207,6 +207,37 @@ class Driver:
     self.note_once("v5e:busy", "INFO", "")
     return True
 
+  def weights_ready(self, unit: dict) -> bool:
+    """Returns whether the weights of the unit's model are complete in its region; asks GCS at most every 5 min."""
+    if self.args.skip_weights_check:
+      return True
+    platform, model = unit["platform"], unit["model"]
+    root = common.regional_root(platform)
+    key = f"{root}/{model}"
+    known = self.state.setdefault("weights", {})
+    if key in known:
+      return known[key] == "ok"
+    if time.time() - self.weights_asked.get(key, 0.0) < 300:
+      return False
+    self.weights_asked[key] = time.time()
+    if self.needs_step1b[model]:
+      at_source = platform == wl_bench.STEP1B_SOURCE_PLATFORM
+      result = f"{root}/step1b/{model}_{'step1b' if at_source else 'copy'}_result.json"
+      weights = f"{root}/hf_cache_bf16/{model}"
+    else:
+      result, weights = f"{root}/step1/{model}_step1_result.json", f"{root}/hf_cache/{model}"
+    rec = common.gcs_cat_json(result)
+    if not isinstance(rec, dict) or rec.get("run_status") != "OK":
+      return False
+    count, size, bad = wl_bench.scan_weights([weights])
+    if bad or not count:
+      known[key] = f"bad: {bad[:3] or 'no .safetensors files'}"
+      self.event("ATTN", f"WEIGHTS_BAD {weights}: {known[key]}")
+      return False
+    known[key] = "ok"
+    self.event("INFO", f"WEIGHTS_OK {weights}: {count} files, {size / 1e9:.1f} GB, headers match sizes")
+    return True
+
   # ---- launching ----
   def launch(self, unit: dict, task: dict) -> None:
     """Starts the next attempt of `task`: its own queue with this one task, and a worker JobSet that takes it."""
@@ -214,8 +245,14 @@ class Driver:
     ts = self.task_state(task)
     attempt = len(ts["attempts"]) + 1
     if attempt == 1 and common.gcs_ls(task["run_dir"]):
-      ts["status"] = "blocked"
-      self.event("ATTN", f"BLOCKED {task_key(task)}: run directory is not empty: {task['run_dir']}")
+      # Not ours to overwrite, unless an earlier driver run (e.g. the smoke) finished this very task.
+      if any("/done/" in u for u in common.gcs_ls(task["queue_root"], recursive=True)):
+        good, summary = summarize_results(task)
+        ts["status"] = "done"
+        self.event("INFO" if good else "ATTN", f"ALREADY_DONE {task_key(task)} by an earlier driver run: {summary}")
+      else:
+        ts["status"] = "blocked"
+        self.event("ATTN", f"BLOCKED {task_key(task)}: run directory is not empty: {task['run_dir']}")
       return
     queue = f"{task['queue_root']}/a{attempt}"
     queued = copy.deepcopy(task)
@@ -223,7 +260,8 @@ class Driver:
       # A retry runs again every phase that has no OK result; the earlier results are in attempts/.
       queued["env"]["SKIP_FAILED_RESULTS"] = "0"
     common.gcs_write_verified(f"{queue}/tasks.json", json.dumps({"tasks": [queued]}, indent=1))
-    worker = f"wl3{self.phase[0]}{task['build'][0]}{self.seq[task_key(task)]:03d}a{attempt}"
+    # The name depends on the task and the attempt only, so a restarted driver finds the JobSet it created.
+    worker = f"wl3{task['build'][0]}{hashlib.sha1(task_key(task).encode()).hexdigest()[:8]}a{attempt}"
     doc = manifests_v2.build_queue_worker_jobset(
         platform=task["platform"],
         topology=task["topology"],
@@ -248,13 +286,16 @@ class Driver:
     if patched != 1:
       raise ValueError(f"expected one runner script in the worker JobSet, found {patched}")
     name = doc["metadata"]["name"]
+    verb = "LAUNCH"
     if not common.apply_manifest(task["platform"], doc):
-      ts["status"] = "blocked"
-      self.event("ATTN", f"BLOCKED {task_key(task)}: JobSet {name} already exists")
-      return
+      if name not in self.jobsets(task["platform"]):
+        ts["status"] = "blocked"
+        self.event("ATTN", f"BLOCKED {task_key(task)}: {name} exists and is not labelled app={common.APP}")
+        return
+      verb = "ADOPT"  # Created by a driver that stopped before it saved its state.
     ts["status"] = "running"
     ts["attempts"].append({"n": attempt, "jobset": name, "queue": queue, "started": common.utc_now()})
-    self.event("INFO", f"LAUNCH {task_key(task)} attempt {attempt}: {name}")
+    self.event("INFO", f"{verb} {task_key(task)} attempt {attempt}: {name}")
 
   # ---- polling ----
   def jobsets(self, platform: str) -> dict[str, dict]:
@@ -282,6 +323,7 @@ class Driver:
               "node": pod["spec"].get("nodeName", ""),
               "phase": status.get("phase", ""),
               "reason": status.get("reason", "") or terminated.get("reason", ""),
+              "message": status.get("message", ""),
               "exit_code": terminated.get("exitCode"),
               "start_time": status.get("startTime", ""),
               "image_id": container.get("imageID", ""),
@@ -300,8 +342,10 @@ class Driver:
   def finish_jobset(self, platform: str, attempt: dict) -> None:
     """Saves the runner log of a finished JobSet and, if allowed, deletes the JobSet."""
     name = attempt["jobset"]
-    log = common.kubectl(platform, "logs", f"{name}-slice0-0-0", "--tail=-1", check=False)
-    if log.returncode == 0:
+    runner = f"jobset.sigs.k8s.io/jobset-name={name},jobset.sigs.k8s.io/replicatedjob-name=slice0"
+    runner += ",batch.kubernetes.io/job-completion-index=0"
+    log = common.kubectl(platform, "logs", "-l", runner, "--tail=-1", check=False)
+    if log.returncode == 0 and log.stdout:
       with open(os.path.join(self.args.state_dir, "logs", f"{name}.log"), "w", encoding="utf-8") as f:
         f.write(log.stdout)
     if self.args.delete_finished_jobsets:
@@ -352,7 +396,13 @@ class Driver:
       attempt["outcome"] = "done"
       self.event("INFO" if good else "ATTN", f"TASK_DONE {key} attempt {attempt['n']}: {summary}")
       return
-    bad = sorted({f"{p['reason'] or p['phase']}(exit {p['exit_code']})" for p in pods if p["phase"] != "Succeeded"})
+    bad = sorted(
+        {
+            f"{p['reason'] or p['phase']}(exit {p['exit_code']}) {p['message']}".strip()
+            for p in pods
+            if p["phase"] != "Succeeded"
+        }
+    )
     reason = f"JobSet {terminal}; pods: {', '.join(bad) or 'none left'}"
     attempt["outcome"], attempt["reason"] = "interrupted", reason
     archive = f"{task['run_dir']}/attempts/a{attempt['n']}"
@@ -397,6 +447,8 @@ class Driver:
             for u in self.units
         ):
           continue
+        if not self.weights_ready(unit):
+          continue
         if not self.cluster_free(unit):
           break
         self.launch(unit, unit["tasks"][0])
@@ -436,6 +488,7 @@ def main() -> None:
   parser.add_argument("--poll-s", type=int, default=60)
   parser.add_argument("--heartbeat-s", type=int, default=1800)
   parser.add_argument("--delete-finished-jobsets", action="store_true")
+  parser.add_argument("--skip-weights-check", action="store_true", help="Do not wait for Step 1 results (tests only)")
   common.use_v3_profiles()
   Driver(parser.parse_args()).run()
 

@@ -68,10 +68,13 @@ class FakeWorld:
       return types.SimpleNamespace(returncode=0, stdout=json.dumps({"items": []}))
     return types.SimpleNamespace(returncode=1, stdout="")
 
-  def gcs_ls(self, uri):
-    """Lists the fake objects under `uri`."""
+  def gcs_ls(self, uri, recursive=False):
+    """Lists the fake objects under `uri`: all of them if `recursive`, else the entries directly under it."""
     prefix = uri.rstrip("/") + "/"
-    return sorted(k for k in self.objects if k.startswith(prefix))
+    below = sorted(k for k in self.objects if k.startswith(prefix))
+    if recursive:
+      return below
+    return sorted({prefix + k[len(prefix) :].split("/")[0] + ("/" if "/" in k[len(prefix) :] else "") for k in below})
 
   def gcs_write_verified(self, uri, text):
     """Stores a fake object."""
@@ -135,6 +138,7 @@ class WlDriverTest(unittest.TestCase):
         poll_s=0,
         heartbeat_s=10**9,
         delete_finished_jobsets=False,
+        skip_weights_check=True,
     )
     for key, value in overrides.items():
       setattr(args, key, value)
@@ -219,6 +223,38 @@ class WlDriverTest(unittest.TestCase):
     self.assertFalse(drv.step())
     self.assertFalse(self.world.jobsets)
     self.assertIn("run directory is not empty", self._events())
+
+  def test_a_task_finished_by_an_earlier_driver_is_not_run_again_and_a_created_jobset_is_adopted(self):
+    units = plan.build_units("tm", ["v5p"], ["qwen3-0.6b"])[:2]
+    first, second = units[0]["tasks"][0], units[1]["tasks"][0]
+    self.world.objects[f"{first['run_dir']}/logs/x.json"] = "{}"
+    self.world.objects[f"{first['queue_root']}/a1/done/{first['id']}.json"] = "{}"
+    for uri in driver.phase_result_uris(first).values():
+      self.world.objects[uri] = json.dumps({"run_status": "OK", "cache_valid": True})
+    earlier = self._driver([units[1]])
+    earlier.step()  # Creates the JobSet of the second task; its state is then lost.
+    self.assertEqual(len(self.world.jobsets), 1)
+    os.remove(os.path.join(self.tmp, "state", "state.json"))
+    drv = self._driver(units)
+    drv.step()
+    self.assertEqual(len(self.world.jobsets), 1)
+    self.assertIn(f"ALREADY_DONE {driver.task_key(first)}", self._events())
+    self.assertIn(f"ADOPT {driver.task_key(second)}", self._events())
+
+  def test_a_unit_waits_for_its_weights_and_for_their_header_scan(self):
+    unit = plan.build_units("tm", ["v6e"], ["deepseek3-671b"])[0]
+    root = common.regional_root("v6e")
+    drv = self._driver([unit], skip_weights_check=False)
+    with mock.patch.object(driver.wl_bench, "scan_weights", return_value=(10, 10**12, [])) as scan:
+      self.assertTrue(drv.step())
+      self.assertFalse(self.world.jobsets)
+      scan.assert_not_called()
+      self.world.objects[f"{root}/step1b/deepseek3-671b_copy_result.json"] = json.dumps({"run_status": "OK"})
+      drv.weights_asked.clear()
+      drv.step()
+      scan.assert_called_once_with([f"{root}/hf_cache_bf16/deepseek3-671b"])
+    self.assertEqual(len(self.world.jobsets), 1)
+    self.assertIn("WEIGHTS_OK", self._events())
 
   def test_only_one_64_host_unit_runs_per_region_and_state_survives_a_restart(self):
     units = plan.build_units("tm", ["v5e"], ["qwen3-0.6b", "llama3.1-8b"])[:2]
