@@ -1002,6 +1002,22 @@ def _replace_router_logits_bwd(_, cotangent):
 _replace_router_logits.defvjp(_replace_router_logits_fwd, _replace_router_logits_bwd)
 
 
+def _uses_moe_bias_var(model_name: str, decoder_block: Optional[ctypes.DecoderBlockType | str] = None) -> bool:
+  """Returns whether router gate bias is stored as `MoEBiasVar` (outside `nnx.Param`)."""
+  return model_name.startswith(MOE_BIAS_VAR_MODEL_PREFIXES) or decoder_block in (
+      ctypes.DecoderBlockType.GLM5,
+      ctypes.DecoderBlockType.GLM5.value,
+  )
+
+
+def _uses_deepseek_routing(model_name: str, decoder_block: Optional[ctypes.DecoderBlockType | str] = None) -> bool:
+  """Returns whether MoE routing uses DeepSeek/GLM5 top-k group routing and bias semantics."""
+  return model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES) or decoder_block in (
+      ctypes.DecoderBlockType.GLM5,
+      ctypes.DecoderBlockType.GLM5.value,
+  )
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -1023,6 +1039,7 @@ class GateLogit(nnx.Module):
       quant: Optional[quantizations.AqtQuantization] = None,
       shard_mode: ShardMode = ShardMode.AUTO,
       matmul_precision: str = "default",
+      decoder_block: Optional[ctypes.DecoderBlockType] = None,
   ):
     """Initializes the GateLogit module.
 
@@ -1043,12 +1060,14 @@ class GateLogit(nnx.Module):
       score_func: Scoring function for output normalization before applying bias.
       quant: The quantization configuration. If None, no quantization is applied.
       matmul_precision: The precision level for the matrix multiplication.
+      decoder_block: Optional decoder block type for routing/bias conventions.
     """
     if isinstance(quant, quantizations.ServeFp8WeightQuantization) and not ctypes.is_fp8_dtype(weight_dtype):
       quant = None
     self.in_features_shape = linears.canonicalize_tuple(in_features_shape)
     self.out_features_shape = linears.canonicalize_tuple(out_features_shape)
     self.model_name = model_name
+    self.decoder_block = decoder_block
     self.mesh = mesh
     self.axis = linears.canonicalize_tuple(axis)
     self.weight_dtype = weight_dtype
@@ -1082,8 +1101,8 @@ class GateLogit(nnx.Module):
     if self.use_bias:
       bias_axes = self.kernel_axes[-len(self.out_features_shape) :]
       bias_shape = kernel_shape[-len(self.out_features_shape) :]
-      if self.model_name.startswith(MOE_BIAS_VAR_MODEL_PREFIXES):
-        # DeepSeek uses MoEBiasVar to naturally isolate from sequence-wise updates
+      if _uses_moe_bias_var(self.model_name, self.decoder_block):
+        # DeepSeek / GLM5 / Kimi-K3 use MoEBiasVar to naturally isolate from sequence-wise updates.
         self.bias = MoEBiasVar(
             default_bias_init(rngs.params(), bias_shape, self.bias_dtype),
             out_sharding=bias_axes,
@@ -1156,7 +1175,7 @@ class GateLogit(nnx.Module):
       output = linears._convert_to_activation_function(self.score_func)(output)
 
     # NOTE: deepseek2 has a different pattern
-    if self.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
+    if _uses_deepseek_routing(self.model_name, self.decoder_block):
       pre_bias_logits = output
 
     if self.use_bias:
@@ -1975,6 +1994,7 @@ class RoutedMoE(nnx.Module):
         score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") else self.config.routed_score_func,
         matmul_precision=self.config.matmul_precision,
         shard_mode=config.shard_mode,
+        decoder_block=self.config.decoder_block,
         rngs=self.rngs,
     )
     rule = qpl.get_current_rule("gmm")
@@ -2399,7 +2419,7 @@ class RoutedMoE(nnx.Module):
         top_k_indices = tid2eid_int[input_ids.astype(jnp.int32)]
         top_k_weights = jnp.take_along_axis(pre_bias_logits, top_k_indices, axis=-1)
       # NOTE: deepseek2 has a different pattern
-      elif self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
+      elif _uses_deepseek_routing(self.config.model_name, self.config.decoder_block):
         top_k_weights, top_k_indices = self.deepseek_routing(gate_logits, pre_bias_logits)
       elif self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
@@ -2437,6 +2457,7 @@ class RoutedMoE(nnx.Module):
         ctypes.DecoderBlockType.DEEPSEEK4,
         ctypes.DecoderBlockType.MING,
         ctypes.DecoderBlockType.HY4,
+        ctypes.DecoderBlockType.GLM5,
     ) or (
         self.config.decoder_block == ctypes.DecoderBlockType.KIMI_LINEAR
         and self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
@@ -2566,7 +2587,12 @@ class RoutedMoE(nnx.Module):
         intermediate_layer = jnp.multiply(glu, (layer_w1 + 1))
       elif (
           self.config.decoder_block
-          in (ctypes.DecoderBlockType.DEEPSEEK, ctypes.DecoderBlockType.DEEPSEEK4, ctypes.DecoderBlockType.HY4)
+          in (
+              ctypes.DecoderBlockType.DEEPSEEK,
+              ctypes.DecoderBlockType.DEEPSEEK4,
+              ctypes.DecoderBlockType.HY4,
+              ctypes.DecoderBlockType.GLM5,
+          )
           and self.config.mlp_activations_limit > 0.0
       ):
         # DeepSeek V4 uses bounds to clip the SwiGLU activations
@@ -3908,7 +3934,7 @@ class RoutedMoE(nnx.Module):
 
       gate_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed", None))
       # NOTE: deepseek2 has a different pattern
-      if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
+      if _uses_deepseek_routing(self.config.model_name, self.config.decoder_block):
         pre_bias_logits_pspec = self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed", None))
       else:
         # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
@@ -5756,7 +5782,7 @@ class RoutedMoE(nnx.Module):
     gate_logits_logical_axes = (batch_logical_axis, "activation_norm_length_routed", None)
     pre_bias_logits_logical_axes = (
         (batch_logical_axis, "activation_norm_length_routed", None)
-        if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
+        if _uses_deepseek_routing(self.config.model_name, self.config.decoder_block)
         else None
     )
     inputs = self._maybe_shard_with_pspec(inputs, input_partition_pspec, logical_axes=input_logical_axes)
@@ -6272,7 +6298,7 @@ class RoutedMoE(nnx.Module):
     # gate_logits: batch, length, expert
     gate_logits = self._maybe_shard_with_logical(gate_logits, ("activation_batch_moe", "activation_length_moe", None))
     # NOTE: deepseek2 has a different pattern
-    if self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
+    if _uses_deepseek_routing(self.config.model_name, self.config.decoder_block):
       # pre_bias_logits is None for non-deepseek3/4 models, including deepseek2
       pre_bias_logits = self._maybe_shard_with_logical(
           pre_bias_logits, ("activation_batch_moe", "activation_length_moe", None)
