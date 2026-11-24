@@ -244,22 +244,7 @@ class Driver:
     del unit
     ts = self.task_state(task)
     attempt = len(ts["attempts"]) + 1
-    if attempt == 1 and common.gcs_ls(task["run_dir"]):
-      # Not ours to overwrite, unless an earlier driver run (e.g. the smoke) finished this very task.
-      if any("/done/" in u for u in common.gcs_ls(task["queue_root"], recursive=True)):
-        good, summary = summarize_results(task)
-        ts["status"] = "done"
-        self.event("INFO" if good else "ATTN", f"ALREADY_DONE {task_key(task)} by an earlier driver run: {summary}")
-      else:
-        ts["status"] = "blocked"
-        self.event("ATTN", f"BLOCKED {task_key(task)}: run directory is not empty: {task['run_dir']}")
-      return
     queue = f"{task['queue_root']}/a{attempt}"
-    queued = copy.deepcopy(task)
-    if attempt > 1:
-      # A retry runs again every phase that has no OK result; the earlier results are in attempts/.
-      queued["env"]["SKIP_FAILED_RESULTS"] = "0"
-    common.gcs_write_verified(f"{queue}/tasks.json", json.dumps({"tasks": [queued]}, indent=1))
     # The name depends on the task and the attempt only, so a restarted driver finds the JobSet it created.
     worker = f"wl3{task['build'][0]}{hashlib.sha1(task_key(task).encode()).hexdigest()[:8]}a{attempt}"
     doc = manifests_v2.build_queue_worker_jobset(
@@ -274,25 +259,41 @@ class Driver:
         min_slices=task["slices"],
         code_dir=common.code_dir(task["build"]),
     )
-    doc["spec"]["failurePolicy"]["maxRestarts"] = 0
-    patched = 0
-    for job in doc["spec"]["replicatedJobs"]:
-      for env in job["template"]["spec"]["template"]["spec"]["containers"][0]["env"]:
-        if env["name"] == "RUNNER_SCRIPT" and env.get("value"):
-          if not env["value"].endswith(QUEUE_TAIL):
-            raise ValueError("the queue worker script changed; update ONE_TASK_TAIL")
-          env["value"] = env["value"][: -len(QUEUE_TAIL)] + ONE_TASK_TAIL
-          patched += 1
-    if patched != 1:
-      raise ValueError(f"expected one runner script in the worker JobSet, found {patched}")
     name = doc["metadata"]["name"]
     verb = "LAUNCH"
-    if not common.apply_manifest(task["platform"], doc):
-      if name not in self.jobsets(task["platform"]):
+    if name in self.jobsets(task["platform"]):
+      verb = "ADOPT"  # Created by a driver that stopped before it saved its state.
+    elif attempt == 1 and common.gcs_ls(task["run_dir"]):
+      # Not ours to overwrite, unless an earlier driver run (e.g. the smoke) finished this very task.
+      if any("/done/" in u for u in common.gcs_ls(task["queue_root"], recursive=True)):
+        good, summary = summarize_results(task)
+        ts["status"] = "done"
+        self.event("INFO" if good else "ATTN", f"ALREADY_DONE {task_key(task)} by an earlier driver run: {summary}")
+      else:
+        ts["status"] = "blocked"
+        self.event("ATTN", f"BLOCKED {task_key(task)}: run directory is not empty: {task['run_dir']}")
+      return
+    else:
+      queued = copy.deepcopy(task)
+      if attempt > 1:
+        # A retry runs again every phase that has no OK result; the earlier results are in attempts/.
+        queued["env"]["SKIP_FAILED_RESULTS"] = "0"
+      common.gcs_write_verified(f"{queue}/tasks.json", json.dumps({"tasks": [queued]}, indent=1))
+      doc["spec"]["failurePolicy"]["maxRestarts"] = 0
+      patched = 0
+      for job in doc["spec"]["replicatedJobs"]:
+        for env in job["template"]["spec"]["template"]["spec"]["containers"][0]["env"]:
+          if env["name"] == "RUNNER_SCRIPT" and env.get("value"):
+            if not env["value"].endswith(QUEUE_TAIL):
+              raise ValueError("the queue worker script changed; update ONE_TASK_TAIL")
+            env["value"] = env["value"][: -len(QUEUE_TAIL)] + ONE_TASK_TAIL
+            patched += 1
+      if patched != 1:
+        raise ValueError(f"expected one runner script in the worker JobSet, found {patched}")
+      if not common.apply_manifest(task["platform"], doc):
         ts["status"] = "blocked"
         self.event("ATTN", f"BLOCKED {task_key(task)}: {name} exists and is not labelled app={common.APP}")
         return
-      verb = "ADOPT"  # Created by a driver that stopped before it saved its state.
     ts["status"] = "running"
     ts["attempts"].append({"n": attempt, "jobset": name, "queue": queue, "started": common.utc_now()})
     self.event("INFO", f"{verb} {task_key(task)} attempt {attempt}: {name}")
@@ -349,7 +350,8 @@ class Driver:
       with open(os.path.join(self.args.state_dir, "logs", f"{name}.log"), "w", encoding="utf-8") as f:
         f.write(log.stdout)
     if self.args.delete_finished_jobsets:
-      common.kubectl(platform, "delete", "jobset", name, "-l", f"app={common.APP}", "--wait=false", check=False)
+      if name in self.jobsets(platform):  # Listed by our label: never a JobSet of someone else.
+        common.kubectl(platform, "delete", "jobset", name, "--wait=false", check=False)
 
   def poll(self, unit: dict, task: dict, jobsets: dict[str, dict]) -> None:
     """Checks the running attempt of `task`; when its JobSet has ended, records the task or retries it."""
