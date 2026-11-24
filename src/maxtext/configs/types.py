@@ -1353,6 +1353,14 @@ class MoEGeneral(BaseModel):
       le=8,
       description="Max replicas a single home device sends per layer (capped at 8).",
   )
+  expert_replica_lagged_plan: bool = Field(
+      False,
+      description=(
+          "When True with expert_replicas_per_device > 0, cache each MoE layer's replica plan "
+          "from step t-1 expert counts updated once per step outside scan_layers instead of "
+          "all-gathering counts and running the planner inside every layer."
+      ),
+  )
   moe_dropless_fallback: Literal["step", "layer"] | None = Field(
       None,
       description=(
