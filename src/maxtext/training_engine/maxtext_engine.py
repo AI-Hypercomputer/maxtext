@@ -2178,11 +2178,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return treedef.unflatten([next(cast) if is_uncast else g for g, is_uncast in zip(leaves, uncast)])
 
   @_profiled_step("fwd_bwd", control_profile=True)
-  def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> None:
+  def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> jax.Array:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
 
     Args:
       payload: Packed micro-batch training input.
+
+    Returns:
+      An un-donated scalar on-device array tracking completion of this pass.
     """
     batch = self._prepare_batch(payload)
 
@@ -2255,6 +2258,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_denominator = acc_denom
     self._micro_step_count += 1
     self._total_micro_steps += 1
+    return loss.unreduced_sum if isinstance(loss, abstract_engine.WeightedMetric) else loss
 
   @_profiled_step("update")
   def update(self) -> int:

@@ -245,7 +245,7 @@ class AbstractMaxTextEngine(maxtext_engine.MaxTextTrainingEngine):
         "exists to be traced and compiled: call `compile_kernels()`, or build a MaxTextTrainingEngine instead."
     )
 
-  def fwd_bwd(self, payload: Any) -> None:
+  def fwd_bwd(self, payload: Any) -> jax.Array:
     raise self._cannot_run("fwd_bwd")
 
   def update(self) -> int:

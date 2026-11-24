@@ -3940,7 +3940,8 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
     params_before = jax.tree.map(np.asarray, nnx.state(engine.model, nnx.Param))
 
     with mock.patch.object(engine, "_compile_for_batch", wraps=engine._compile_for_batch) as mock_compile:
-      engine.fwd_bwd(real_payload)
+      tok = engine.fwd_bwd(real_payload)
+      self.assertIsInstance(tok, jax.Array)
       step = engine.update()
       mock_compile.assert_not_called()
 
