@@ -240,6 +240,12 @@ class WlDriverTest(unittest.TestCase):
     self.assertEqual(len(self.world.jobsets), 1)
     self.assertIn(f"ALREADY_DONE {driver.task_key(first)}", self._events())
     self.assertIn(f"ADOPT {driver.task_key(second)}", self._events())
+    # The JobSet ends and is deleted while no driver is watching: the done marker still tells the outcome.
+    name = next(iter(self.world.jobsets))
+    self.world.finish(name, second)
+    del self.world.jobsets[name]
+    self.assertFalse(self._driver(units).step())
+    self.assertIn(f"TASK_DONE {driver.task_key(second)}", self._events())
 
   def test_a_unit_waits_for_its_weights_and_for_their_header_scan(self):
     unit = plan.build_units("tm", ["v6e"], ["deepseek3-671b"])[0]
