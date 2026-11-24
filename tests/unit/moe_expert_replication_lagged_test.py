@@ -16,6 +16,7 @@
 
 import contextlib
 import os
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -456,6 +457,44 @@ class _LaggedReplicationSuiteMixin:
 
 class RoutedMoEReplicationLaggedCpuTest(_LaggedReplicationSuiteMixin, parameterized.TestCase):
   """CPU tests (4 simulated host devices) for `expert_replica_lagged_plan=True`."""
+
+  def test_stub_configs_without_lagged_fields_do_not_raise(self):
+    """Lightweight `SimpleNamespace` stub configs lacking `MoEGeneral` fields safely no-op."""
+    stub_cfg = types.SimpleNamespace()
+    train._update_moe_replica_plans(None, {"moe_replica_counts": jnp.ones((2, 4))}, stub_cfg)  # pylint: disable=protected-access
+    fake_moe = types.SimpleNamespace(
+        config=types.SimpleNamespace(
+            shard_exp_on_fsdp=False,
+            use_2d_fsdp_sharding=False,
+            shard_embed_moe_on_fsdp=False,
+            model_name="qwen3.5-35b-a3b",
+            check_vma=False,
+            moe_fsdp_use_two_stage_all_gather=False,
+            moe_pin_sparse_core_all_gathers=False,
+            moe_flat_fsdp_weights=False,
+            moe_dropless_fallback=None,
+            load_balance_loss_weight=0.0,
+        ),
+        mesh=types.SimpleNamespace(axis_names=("fsdp", "expert"), shape={"fsdp": 2, "expert": 2}),
+        rngs=object(),
+        get_expert_parallelism_size=lambda: 2,
+        _expert_parallelism_name="expert",
+        per_expert_scale=None,
+        weight_dtype=jnp.float32,
+        dtype=jnp.bfloat16,
+        _logical_to_mesh_axes=lambda axes: P(*(("fsdp", "expert") if ax == "activation_batch" else None for ax in axes)),
+        _maybe_shard_with_pspec=lambda value, _pspec, **_kwargs: value,
+        sow=lambda *_args, **_kwargs: None,
+    )
+    arr = types.SimpleNamespace(shape=(4, 16, 32))
+    logits = types.SimpleNamespace(shape=(4, 16, 8))
+    w0 = types.SimpleNamespace(shape=(8, 32, 16))
+    wo = types.SimpleNamespace(shape=(8, 16, 32))
+    with mock.patch.object(
+        jax, "shard_map", side_effect=lambda *_a, **_k: lambda x, *_args: (x, None, None, False, False, None)
+    ):
+      out, _, _ = moe.RoutedMoE.sparse_matmul(fake_moe, arr, logits, None, w0, w0, wo, None, None, None)
+    self.assertIs(out, arr)
 
 
 @pytest.mark.tpu_only

@@ -1939,7 +1939,10 @@ class RoutedMoE(nnx.Module):
     else:
       self._expert_parallelism_name = "expert"
 
-    if self.config.expert_replicas_per_device > 0 and self.config.expert_replica_lagged_plan:
+    # Unit-test config stubs (e.g. SimpleNamespace in native_fp8_dot_general_test) may omit MoEGeneral fields.
+    if getattr(self.config, "expert_replicas_per_device", 0) > 0 and getattr(
+        self.config, "expert_replica_lagged_plan", False
+    ):
       ep_size_init = max(self.get_expert_parallelism_size(), 1)
       init_plan = moe_replica_planner.identity_plan(
           ep_size_init,
@@ -5516,10 +5519,11 @@ class RoutedMoE(nnx.Module):
     # shard_map below. A shard_map cannot close over an array that lives on explicit
     # mesh axes, so it is threaded down as an argument instead of read off the module.
     per_expert_scale = None if self.per_expert_scale is None else self.per_expert_scale[...]
+    # Unit-test stubs (e.g. fake_moe in moe_test) call sparse_matmul without MoEGeneral or cache attributes.
     use_lagged_replication = (
-        self.config.expert_replicas_per_device > 0
-        and self.config.expert_replica_lagged_plan
-        and self.rep_route_table is not None
+        getattr(self.config, "expert_replicas_per_device", 0) > 0
+        and getattr(self.config, "expert_replica_lagged_plan", False)
+        and getattr(self, "rep_route_table", None) is not None
     )
     lagged_plan_arrays = (
         (

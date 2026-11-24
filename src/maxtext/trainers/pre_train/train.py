@@ -567,7 +567,12 @@ def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, confi
 
 def _update_moe_replica_plans(root: nnx.Module, intermediates: dict, config) -> None:
   """Updates per-layer `MoEReplicaPlanCache` from sown `moe_replica_counts` once per step outside `scan_layers`."""
-  if config.expert_replicas_per_device <= 0 or not config.expert_replica_lagged_plan or not intermediates:
+  # Unit-test config stubs (e.g. _Cfg in train_nnx_test) may omit MoEGeneral fields.
+  if (
+      getattr(config, "expert_replicas_per_device", 0) <= 0
+      or not getattr(config, "expert_replica_lagged_plan", False)
+      or not intermediates
+  ):
     return
   grouped_counts: dict[tuple, list[jax.Array]] = {}
   for path, val in jax.tree_util.tree_leaves_with_path(intermediates):
