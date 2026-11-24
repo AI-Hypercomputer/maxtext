@@ -31,20 +31,21 @@ import importlib.util
 import os
 import re
 import types
-from typing import Any
 import unittest
+from typing import Any
 from unittest import mock
 
-from absl.testing import absltest
-from flax import nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
+import pytest
+from absl.testing import absltest
+from flax import nnx
+
 from maxtext.configs import pyconfig  # pylint: disable=no-name-in-module
 from maxtext.m3 import models as m3_models  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next  # pylint: disable=no-name-in-module
 from maxtext.utils import globals as maxtext_globals  # pylint: disable=no-name-in-module
-import numpy as np
-import pytest
 
 torch: Any
 configuration_qwen4_exp: Any
@@ -670,6 +671,464 @@ class Qwen3_8GDNNumericsTest(absltest.TestCase):
           # Two different fp32 inverse algorithms through a 256-step recurrence differ by accumulation-order noise
           # (~1e-7 absolute); the product-form inverse this guards against is off by O(1) here.
           _assert_allclose_to_scale(g_block_doubling, g_solve, atol_scale=1e-4)
+
+  def test_chunk_and_recurrent_packed_segment_reset_forward_and_grad(self):
+    """Verifies packed `segment_ids` resets match concatenated unpacked runs in forward, state, and grads."""
+    rng = np.random.default_rng(2029)
+    b, h, d_k, d_v, chunk_size = 2, 4, 16, 24, 16
+    lens = [7, 13, 16, 11]
+    docs = [
+        (
+            jnp.array(rng.standard_normal((b, l, h, d_k), dtype=np.float32)),
+            jnp.array(rng.standard_normal((b, l, h, d_k), dtype=np.float32)),
+            jnp.array(rng.standard_normal((b, l, h, d_v), dtype=np.float32)),
+            jnp.array(-rng.uniform(0.02, 0.4, size=(b, l, h)).astype(np.float32)),
+            jnp.array(rng.uniform(0.1, 0.9, size=(b, l, h)).astype(np.float32)),
+        )
+        for l in lens
+    ]
+    q_p, k_p, v_p, g_p, b_p = (jnp.concatenate([d[i] for d in docs], axis=1) for i in range(5))
+    seg_p = jnp.concatenate([jnp.full((b, l), idx + 1, dtype=jnp.int32) for idx, l in enumerate(lens)], axis=1)
+
+    unpacked_outs = []
+    last_state_want = None
+    for q_d, k_d, v_d, g_d, b_d in docs:
+      o_d, s_d = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+          q_d, k_d, v_d, g_d, b_d, chunk_size=chunk_size, output_final_state=True
+      )
+      unpacked_outs.append(o_d)
+      last_state_want = s_d
+    out_want = jnp.concatenate(unpacked_outs, axis=1)
+
+    for inv_mode in ("block_doubling", "solve"):
+      out_got, state_got = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+          q_p,
+          k_p,
+          v_p,
+          g_p,
+          b_p,
+          chunk_size=chunk_size,
+          output_final_state=True,
+          chunk_inverse=inv_mode,
+          segment_ids=seg_p,
+      )
+      np.testing.assert_allclose(np.array(out_got), np.array(out_want), rtol=1e-5, atol=1e-5)
+      np.testing.assert_allclose(np.array(state_got), np.array(last_state_want), rtol=1e-5, atol=1e-5)
+
+    rec_out, rec_state = modeling_qwen3_8_flash_next.jax_recurrent_gated_delta_rule(
+        q_p, k_p, v_p, g_p, b_p, output_final_state=True, segment_ids=seg_p
+    )
+    np.testing.assert_allclose(np.array(rec_out), np.array(out_want), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.array(rec_state), np.array(last_state_want), rtol=1e-5, atol=1e-5)
+
+    # Negative control: omitting `segment_ids` leaks recurrent state from doc 1 into later docs.
+    out_leaked, _ = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+        q_p, k_p, v_p, g_p, b_p, chunk_size=chunk_size, segment_ids=None
+    )
+    self.assertGreater(float(jnp.max(jnp.abs(out_leaked[:, lens[0] :] - out_want[:, lens[0] :]))), 1e-2)
+
+    cotangent = jnp.array(rng.standard_normal(out_want.shape, dtype=np.float32))
+    splits = list(np.cumsum(lens[:-1]))
+
+    def loss_packed(q_in, k_in, v_in, g_in, b_in):
+      o, _ = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+          q_in, k_in, v_in, g_in, b_in, chunk_size=chunk_size, segment_ids=seg_p
+      )
+      return jnp.sum(o * cotangent)
+
+    def loss_unpacked(q_in, k_in, v_in, g_in, b_in):
+      parts = zip(*(jnp.split(x, splits, axis=1) for x in (q_in, k_in, v_in, g_in, b_in)))
+      outs = [
+          modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(qd, kd, vd, gd, bd, chunk_size=chunk_size)[0]
+          for qd, kd, vd, gd, bd in parts
+      ]
+      return jnp.sum(jnp.concatenate(outs, axis=1) * cotangent)
+
+    grads_got = jax.grad(loss_packed, argnums=(0, 1, 2, 3, 4))(q_p, k_p, v_p, g_p, b_p)
+    grads_want = jax.grad(loss_unpacked, argnums=(0, 1, 2, 3, 4))(q_p, k_p, v_p, g_p, b_p)
+    for g_got, g_want in zip(grads_got, grads_want):
+      np.testing.assert_allclose(np.array(g_got), np.array(g_want), rtol=1e-5, atol=1e-5)
+
+    # Steep decay (-5.0) gradient finiteness under packed segments.
+    g_steep = jnp.full_like(g_p, -5.0)
+    grads_steep = jax.grad(loss_packed, argnums=(0, 1, 2, 3, 4))(q_p, k_p, v_p, g_steep, b_p)
+    for grad in grads_steep:
+      self.assertTrue(np.all(np.isfinite(np.array(grad))))
+
+    # Leading padding + interior padding + non-None initial_state parity (forward, state, and jax.grad vs recurrent).
+    init_st = jnp.array(rng.standard_normal((b, h, d_k, d_v), dtype=np.float32))
+    lead_pad = 3
+    q_lp = jnp.pad(q_p[:, :24], ((0, 0), (lead_pad, 0), (0, 0), (0, 0)))
+    k_lp = jnp.pad(k_p[:, :24], ((0, 0), (lead_pad, 0), (0, 0), (0, 0)))
+    v_lp = jnp.pad(v_p[:, :24], ((0, 0), (lead_pad, 0), (0, 0), (0, 0)))
+    g_lp = jnp.pad(g_p[:, :24], ((0, 0), (lead_pad, 0), (0, 0)))
+    b_lp = jnp.pad(b_p[:, :24], ((0, 0), (lead_pad, 0), (0, 0)))
+    seg_lp = jnp.concatenate(
+        [
+            jnp.zeros((b, lead_pad), dtype=jnp.int32),
+            jnp.ones((b, 9), dtype=jnp.int32),
+            jnp.zeros((b, 2), dtype=jnp.int32),
+            jnp.full((b, 13), 2, dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+    cot_lp = jnp.array(rng.standard_normal(v_lp.shape, dtype=np.float32))
+
+    def _chunk_lp(inputs):
+      q_i, k_i, v_i, g_i, b_i, s_i = inputs
+      o, st = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+          q_i, k_i, v_i, g_i, b_i, chunk_size=chunk_size, initial_state=s_i, output_final_state=True, segment_ids=seg_lp
+      )
+      return jnp.sum(o * cot_lp) + jnp.sum(st), (o, st)
+
+    def _rec_lp(inputs):
+      q_i, k_i, v_i, g_i, b_i, s_i = inputs
+      o, st = modeling_qwen3_8_flash_next.jax_recurrent_gated_delta_rule(
+          q_i, k_i, v_i, g_i, b_i, initial_state=s_i, output_final_state=True, segment_ids=seg_lp
+      )
+      return jnp.sum(o * cot_lp) + jnp.sum(st), (o, st)
+
+    lp_inputs = (q_lp, k_lp, v_lp, g_lp, b_lp, init_st)
+    (_, (o_c_lp, st_c_lp)), g_c_lp = jax.value_and_grad(_chunk_lp, has_aux=True)(lp_inputs)
+    (_, (o_r_lp, st_r_lp)), g_r_lp = jax.value_and_grad(_rec_lp, has_aux=True)(lp_inputs)
+    np.testing.assert_allclose(np.array(o_c_lp), np.array(o_r_lp), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.array(st_c_lp), np.array(st_r_lp), rtol=1e-5, atol=1e-5)
+    for gc, gr in zip(g_c_lp, g_r_lp):
+      np.testing.assert_allclose(np.array(gc), np.array(gr), rtol=1e-5, atol=1e-5)
+
+  def test_gdn_layer_packed_sequences_forward_grad_and_negative_control(self):
+    """Verifies `Qwen3_8GatedDeltaNet` resets both conv1d and chunked recurrence on packed sequences."""
+    rng = np.random.default_rng(2030)
+    b, emb_dim = 2, 64
+    mod = modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(
+        emb_dim=emb_dim,
+        num_k_heads=2,
+        num_v_heads=4,
+        head_k_dim=16,
+        head_v_dim=24,
+        conv_kernel_size=4,
+        chunk_size=16,
+        output_gate_activation="sigmoid",
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        rngs=nnx.Rngs(7),
+    )
+    lens = [9, 14, 11]
+    pad_mid, pad_end = 3, 5
+    x1 = jnp.array(rng.standard_normal((b, lens[0], emb_dim), dtype=np.float32))
+    x2 = jnp.array(rng.standard_normal((b, lens[1], emb_dim), dtype=np.float32))
+    x_pad_mid = jnp.array(rng.standard_normal((b, pad_mid, emb_dim), dtype=np.float32))
+    x3 = jnp.array(rng.standard_normal((b, lens[2], emb_dim), dtype=np.float32))
+    x_pad_end = jnp.array(rng.standard_normal((b, pad_end, emb_dim), dtype=np.float32))
+
+    x_pack = jnp.concatenate([x1, x2, x_pad_mid, x3, x_pad_end], axis=1)
+    seg_pack = jnp.concatenate(
+        [
+            jnp.full((b, lens[0]), 1, dtype=jnp.int32),
+            jnp.full((b, lens[1]), 2, dtype=jnp.int32),
+            jnp.zeros((b, pad_mid), dtype=jnp.int32),
+            jnp.full((b, lens[2]), 3, dtype=jnp.int32),
+            jnp.zeros((b, pad_end), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+    conv_mask = (seg_pack != 0).astype(jnp.int32)
+
+    out_pack, state_pack = mod(x_pack, attention_mask=conv_mask, segment_ids=seg_pack, output_final_state=True)
+    out1, _ = mod(x1, output_final_state=True)
+    out2, _ = mod(x2, output_final_state=True)
+    out3, state3 = mod(x3, output_final_state=True)
+    out_want = jnp.concatenate(
+        [
+            out1,
+            out2,
+            jnp.zeros((b, pad_mid, emb_dim), dtype=jnp.float32),
+            out3,
+            jnp.zeros((b, pad_end, emb_dim), dtype=jnp.float32),
+        ],
+        axis=1,
+    )
+    np.testing.assert_allclose(np.array(out_pack), np.array(out_want), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.array(state_pack), np.array(state3), rtol=1e-5, atol=1e-5)
+
+    # Negative control: passing only `attention_mask=conv_mask` without `segment_ids` leaks conv1d + recurrence across docs.
+    out_no_seg = mod(x_pack, attention_mask=conv_mask, segment_ids=None)
+    self.assertGreater(float(jnp.max(jnp.abs(out_no_seg[:, lens[0] : lens[0] + lens[1]] - out2))), 1e-2)
+
+    # Parameter and input gradient parity between packed call and unpacked per-document calls.
+    cot1 = jnp.array(rng.standard_normal(out1.shape, dtype=np.float32))
+    cot2 = jnp.array(rng.standard_normal(out2.shape, dtype=np.float32))
+    cot3 = jnp.array(rng.standard_normal(out3.shape, dtype=np.float32))
+    cot_pack = jnp.concatenate(
+        [
+            cot1,
+            cot2,
+            jnp.zeros((b, pad_mid, emb_dim), dtype=jnp.float32),
+            cot3,
+            jnp.zeros((b, pad_end, emb_dim), dtype=jnp.float32),
+        ],
+        axis=1,
+    )
+
+    def packed_loss(m, x_in):
+      return jnp.sum(m(x_in, attention_mask=conv_mask, segment_ids=seg_pack) * cot_pack)
+
+    def unpacked_loss(m, x1_in, x2_in, x3_in):
+      return jnp.sum(m(x1_in) * cot1) + jnp.sum(m(x2_in) * cot2) + jnp.sum(m(x3_in) * cot3)
+
+    (_, (g_mod_pack, gx_pack)) = nnx.value_and_grad(packed_loss, argnums=(0, 1))(mod, x_pack)
+    (_, (g_mod_unp, gx1, gx2, gx3)) = nnx.value_and_grad(unpacked_loss, argnums=(0, 1, 2, 3))(mod, x1, x2, x3)
+    _assert_allclose_to_scale(gx_pack[:, : lens[0]], gx1, rtol=1e-5, atol_scale=1e-5)
+    _assert_allclose_to_scale(gx_pack[:, lens[0] : lens[0] + lens[1]], gx2, rtol=1e-5, atol_scale=1e-5)
+    _assert_allclose_to_scale(
+        gx_pack[:, lens[0] + lens[1] + pad_mid : lens[0] + lens[1] + pad_mid + lens[2]],
+        gx3,
+        rtol=1e-5,
+        atol_scale=1e-5,
+    )
+    for p_got, p_want in zip(jax.tree_util.tree_leaves(g_mod_pack), jax.tree_util.tree_leaves(g_mod_unp)):
+      _assert_allclose_to_scale(p_got, p_want, rtol=1e-5, atol_scale=1e-5)
+
+    # Reused segment IDs (`[1, ..., 2, 1, ...]`) and interior `attention_mask == 0` gap (`eff_seg=[1, ..., 0, 1, ...]`)
+    # must reset both `_causal_conv1d` taps (`w_len=4`) and recurrence rather than leaking across repeated ID `1`.
+    x_short_mid = jnp.array(rng.standard_normal((b, 1, emb_dim), dtype=np.float32))
+    x_reuse = jnp.concatenate([x1, x_short_mid, x2], axis=1)
+    seg_reuse = jnp.concatenate(
+        [
+            jnp.ones((b, lens[0]), dtype=jnp.int32),
+            jnp.full((b, 1), 2, dtype=jnp.int32),
+            jnp.ones((b, lens[1]), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+    out_reuse = mod(x_reuse, segment_ids=seg_reuse)
+    np.testing.assert_allclose(np.array(out_reuse[:, lens[0] + 1 :]), np.array(out2), rtol=1e-5, atol=1e-5)
+
+    mask_gap = jnp.concatenate(
+        [
+            jnp.ones((b, lens[0]), dtype=jnp.int32),
+            jnp.zeros((b, 1), dtype=jnp.int32),
+            jnp.ones((b, lens[1]), dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+    out_mask_gap = mod(x_reuse, attention_mask=mask_gap, segment_ids=jnp.ones_like(mask_gap))
+    np.testing.assert_allclose(np.array(out_mask_gap[:, lens[0] + 1 :]), np.array(out2), rtol=1e-5, atol=1e-5)
+
+    # Verify 4-device data-sharded packed execution matches unsharded output.
+    devs = jax.devices()
+    if len(devs) >= 4:
+      mesh = jax.sharding.Mesh(np.array(devs[:4]), ("data",))
+      sh_tok = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data", None, None))
+      sh_seg = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data", None))
+      x_pack_4 = jnp.repeat(x_pack, 2, axis=0)
+      mask_4 = jnp.repeat(conv_mask, 2, axis=0)
+      seg_4 = jnp.repeat(seg_pack, 2, axis=0)
+      out_want_4 = jnp.repeat(out_want, 2, axis=0)
+      out_sharded = jax.jit(lambda x_in, m_in, s_in: mod(x_in, attention_mask=m_in, segment_ids=s_in))(
+          jax.device_put(x_pack_4, sh_tok),
+          jax.device_put(mask_4, sh_seg),
+          jax.device_put(seg_4, sh_seg),
+      )
+      np.testing.assert_allclose(np.array(out_sharded), np.array(out_want_4), rtol=1e-5, atol=1e-5)
+
+  def test_chunk_gated_delta_rule_remat_chunks_parity_and_residual_reduction(self):
+    """Verifies `remat_chunks=True` is bit-identical to `remat_chunks=False` while eliminating (C, C) scan residuals."""
+    rng = np.random.default_rng(3041)
+    b, s, h, d_k, d_v, chunk_size = 2, 48, 3, 8, 12, 16
+    q = jnp.array(rng.standard_normal((b, s, h, d_k), dtype=np.float32))
+    k = jnp.array(rng.standard_normal((b, s, h, d_k), dtype=np.float32))
+    v = jnp.array(rng.standard_normal((b, s, h, d_v), dtype=np.float32))
+    g = -jnp.abs(jnp.array(rng.standard_normal((b, s, h), dtype=np.float32))) * 0.4
+    beta = jax.nn.sigmoid(jnp.array(rng.standard_normal((b, s, h), dtype=np.float32)))
+    init_state = jnp.array(rng.standard_normal((b, h, d_k, d_v), dtype=np.float32))
+    seg = jnp.concatenate(
+        [
+            jnp.full((b, 11), 1, dtype=jnp.int32),
+            jnp.full((b, 19), 2, dtype=jnp.int32),
+            jnp.zeros((b, 3), dtype=jnp.int32),
+            jnp.full((b, 15), 3, dtype=jnp.int32),
+        ],
+        axis=1,
+    )
+    cot_out = jnp.array(rng.standard_normal((b, s, h, d_v), dtype=np.float32))
+    cot_st = jnp.array(rng.standard_normal((b, h, d_k, d_v), dtype=np.float32))
+
+    def _eval_case(inv_mode: str, seg_arg: jax.Array | None, remat_flag: bool):
+      def _loss(inputs):
+        q_in, k_in, v_in, g_in, b_in, st_in = inputs
+        o, st = modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+            q_in,
+            k_in,
+            v_in,
+            g_in,
+            b_in,
+            chunk_size=chunk_size,
+            initial_state=st_in,
+            output_final_state=True,
+            chunk_inverse=inv_mode,
+            segment_ids=seg_arg,
+            remat_chunks=remat_flag,
+        )
+        return jnp.sum(o.astype(jnp.float32) * cot_out) + jnp.sum(st * cot_st), (o, st)
+
+      return jax.value_and_grad(_loss, has_aux=True)
+
+    for inv_mode in ("block_doubling", "solve"):
+      for seg_arg in (None, seg):
+        for dt in (jnp.float32, jnp.bfloat16):
+          q_dt, k_dt, v_dt, b_dt = (x.astype(dt) for x in (q, k, v, beta))
+          (loss_t, (out_t, st_t)), grads_t = _eval_case(inv_mode, seg_arg, True)((q_dt, k_dt, v_dt, g, b_dt, init_state))
+          (loss_f, (out_f, st_f)), grads_f = _eval_case(inv_mode, seg_arg, False)((q_dt, k_dt, v_dt, g, b_dt, init_state))
+          np.testing.assert_array_equal(np.array(loss_t), np.array(loss_f))
+          np.testing.assert_array_equal(np.array(out_t), np.array(out_f))
+          np.testing.assert_array_equal(np.array(st_t), np.array(st_f))
+          tol = (1e-6, 1e-6) if dt == jnp.float32 else (1e-2, 1e-3)
+          for gt, gf in zip(grads_t, grads_f):
+            np.testing.assert_allclose(np.array(gt), np.array(gf), rtol=tol[0], atol=tol[1])
+
+    # Negative control via JVP/linearize residual inspection:
+    # With `remat_chunks=False`, intra-chunk `(chunk_size, chunk_size)` matrices are saved across all chunks.
+    # With `remat_chunks=True`, zero `(chunk_size, chunk_size)` intra-chunk matrices are saved on the forward tape.
+    def _residual_stats(remat_flag: bool) -> tuple[int, int]:
+      def _fwd(q_in, k_in, v_in, g_in, b_in):
+        return modeling_qwen3_8_flash_next.jax_chunk_gated_delta_rule(
+            q_in,
+            k_in,
+            v_in,
+            g_in,
+            b_in,
+            chunk_size=chunk_size,
+            chunk_inverse="block_doubling",
+            segment_ids=seg,
+            remat_chunks=remat_flag,
+        )[0]
+
+      _, f_vjp = jax.vjp(_fwd, q, k, v, g, beta)
+      leaves = [x for x in jax.tree_util.tree_leaves(f_vjp) if isinstance(x, jax.Array)]
+      cc_tensors = [x for x in leaves if x.ndim >= 2 and x.shape[-2:] == (chunk_size, chunk_size)]
+      total_bytes = sum(int(x.size) * int(x.dtype.itemsize) for x in leaves)
+      return len(cc_tensors), total_bytes
+
+    cc_no_remat, bytes_no_remat = _residual_stats(False)
+    cc_remat, bytes_remat = _residual_stats(True)
+    self.assertGreater(cc_no_remat, 0)
+    self.assertEqual(cc_remat, 0)
+    self.assertLess(bytes_remat, bytes_no_remat // 2)
+
+  def test_gdn_layer_and_decoder_remat_chunks_composition_and_param_paths(self):
+    """Verifies `Qwen3_8GatedDeltaNet` `remat_chunks` preserves `nnx.Param` paths and composes with sublayer remat."""
+    rng = np.random.default_rng(4052)
+    b, s, emb_dim = 2, 32, 64
+    mod_remat = modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(
+        emb_dim=emb_dim,
+        num_k_heads=2,
+        num_v_heads=4,
+        head_k_dim=16,
+        head_v_dim=24,
+        conv_kernel_size=4,
+        chunk_size=16,
+        output_gate_activation="sigmoid",
+        remat_chunks=True,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        rngs=nnx.Rngs(19),
+    )
+    mod_no_remat = modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(
+        emb_dim=emb_dim,
+        num_k_heads=2,
+        num_v_heads=4,
+        head_k_dim=16,
+        head_v_dim=24,
+        conv_kernel_size=4,
+        chunk_size=16,
+        output_gate_activation="sigmoid",
+        remat_chunks=False,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        rngs=nnx.Rngs(19),
+    )
+    paths_remat = [(p, v.shape, v.dtype) for p, v in nnx.to_flat_state(nnx.state(mod_remat, nnx.Param))]
+    paths_no_remat = [(p, v.shape, v.dtype) for p, v in nnx.to_flat_state(nnx.state(mod_no_remat, nnx.Param))]
+    self.assertEqual(paths_remat, paths_no_remat)
+
+    x = jnp.array(rng.standard_normal((b, s, emb_dim), dtype=np.float32))
+    seg = jnp.concatenate(
+        [jnp.ones((b, 14), dtype=jnp.int32), jnp.full((b, 18), 2, dtype=jnp.int32)],
+        axis=1,
+    )
+    cot = jnp.array(rng.standard_normal((b, s, emb_dim), dtype=np.float32))
+
+    def layer_loss(m, x_in):
+      return jnp.sum(m(x_in, segment_ids=seg) * cot)
+
+    loss_r, (gm_r, gx_r) = nnx.value_and_grad(layer_loss, argnums=(0, 1))(mod_remat, x)
+    loss_n, (gm_n, gx_n) = nnx.value_and_grad(layer_loss, argnums=(0, 1))(mod_no_remat, x)
+    np.testing.assert_array_equal(np.array(loss_r), np.array(loss_n))
+    np.testing.assert_allclose(np.array(gx_r), np.array(gx_n), rtol=1e-6, atol=1e-6)
+    for pr, pn in zip(jax.tree_util.tree_leaves(gm_r), jax.tree_util.tree_leaves(gm_n)):
+      _assert_allclose_to_scale(pr, pn, rtol=1e-6, atol_scale=1e-6)
+
+    # Compose with Qwen3_8Decoder per-sublayer remat (`full` and `custom`) in scanned mode.
+    toks = jnp.ones((b, 16), dtype=jnp.int32)
+    seg_d = jnp.concatenate(
+        [jnp.ones((b, 7), dtype=jnp.int32), jnp.full((b, 9), 2, dtype=jnp.int32)],
+        axis=1,
+    )
+    cot_d = jnp.array(rng.standard_normal((b, 16, emb_dim), dtype=np.float32))
+    for pol in ("full", "custom"):
+      cfg = _create_mini_config(
+          num_layers=4,
+          scan_layers=True,
+          remat_policy=pol,
+          tensors_on_device=["moe_routed_output"],
+          dtype=jnp.float32,
+      )
+      dec = modeling_qwen3_8_flash_next.Qwen3_8Decoder(cfg, rngs=nnx.Rngs(params=23))
+      for sub_name in ("gdn_0", "gdn_1", "gdn_2"):
+        self.assertFalse(getattr(dec.cycles, sub_name).linear_attn.remat_chunks)
+      pol_fn = (
+          jax.checkpoint_policies.nothing_saveable
+          if pol == "full"
+          else jax.checkpoint_policies.save_and_offload_only_these_names(
+              names_which_can_be_saved=["moe_routed_output"],
+              names_which_can_be_offloaded=[],
+              offload_src="device",
+              offload_dst="pinned_host",
+          )
+      )
+      dec.set_remat(pol_fn)
+      for sub_name in ("gdn_0", "gdn_1", "gdn_2"):
+        self.assertTrue(getattr(dec.cycles, sub_name).linear_attn.remat_chunks)
+      loss_d, grads_d = nnx.value_and_grad(lambda d: jnp.sum(d(toks, decoder_segment_ids=seg_d) * cot_d))(dec)
+      self.assertTrue(bool(jnp.isfinite(loss_d)))
+      for leaf in jax.tree_util.tree_leaves(grads_d):
+        self.assertTrue(np.all(np.isfinite(np.array(leaf))))
+      dec.set_remat(None)
+      for sub_name in ("gdn_0", "gdn_1", "gdn_2"):
+        self.assertFalse(getattr(dec.cycles, sub_name).linear_attn.remat_chunks)
+      dec.set_remat(jax.checkpoint_policies.nothing_saveable)
+      for sub_name in ("gdn_0", "gdn_1", "gdn_2"):
+        self.assertTrue(getattr(dec.cycles, sub_name).linear_attn.remat_chunks)
+
+    cfg_none = _create_mini_config(num_layers=4, scan_layers=True, remat_policy="none", dtype=jnp.float32)
+    dec_none = modeling_qwen3_8_flash_next.Qwen3_8Decoder(cfg_none, rngs=nnx.Rngs(params=23))
+    for sub_name in ("gdn_0", "gdn_1", "gdn_2"):
+      self.assertFalse(getattr(dec_none.cycles, sub_name).linear_attn.remat_chunks)
+
+    cfg_unscan = _create_mini_config(num_layers=4, scan_layers=False, remat_policy="full", dtype=jnp.float32)
+    dec_unscan = modeling_qwen3_8_flash_next.Qwen3_8Decoder(cfg_unscan, rngs=nnx.Rngs(params=23))
+    for idx in range(3):
+      self.assertFalse(getattr(dec_unscan, f"layers_{idx}").linear_attn.remat_chunks)
+    dec_unscan.set_remat(jax.checkpoint_policies.nothing_saveable)
+    for idx in range(3):
+      self.assertTrue(getattr(dec_unscan, f"layers_{idx}").linear_attn.remat_chunks)
+    dec_unscan.set_remat(None)
+    for idx in range(3):
+      self.assertFalse(getattr(dec_unscan, f"layers_{idx}").linear_attn.remat_chunks)
+    dec_unscan.set_remat(jax.checkpoint_policies.nothing_saveable)
+    for idx in range(3):
+      self.assertTrue(getattr(dec_unscan, f"layers_{idx}").linear_attn.remat_chunks)
 
 
 # =================================================================================================
@@ -2638,6 +3097,37 @@ class Qwen3_8BackboneTest(absltest.TestCase):
         modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(m3_models.create_model(cu, mesh=None), ms)
     with self.assertRaises(ValueError):
       modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(ms, ms)
+
+  def test_decoder_layer_linear_attn_plumbs_segment_ids(self):
+    """Verifies `Qwen3_8DecoderLayer` plumbs `segment_ids` to `linear_attn` so packed documents do not leak."""
+    cfg = _get_mini_config(
+        base_output_directory="/tmp/maxtext_test_out",
+        scan_layers=False,
+        base_num_decoder_layers=4,
+        dtype="float32",
+        weight_dtype="float32",
+    )
+    layer = modeling_qwen3_8_flash_next.Qwen3_8DecoderLayer(cfg, layer_idx=0, include_ple=False, rngs=nnx.Rngs(11))
+    self.assertEqual(layer.layer_type, "linear_attention")
+    rng = np.random.default_rng(2031)
+    b, s1, s2 = 1, 10, 12
+    hc_emb = int(cfg.hc_count) * int(cfg.emb_dim)
+    h1_a = jnp.array(rng.standard_normal((b, s1, hc_emb), dtype=np.float32))
+    h1_b = jnp.array(rng.standard_normal((b, s1, hc_emb), dtype=np.float32) * 5.0)
+    h2 = jnp.array(rng.standard_normal((b, s2, hc_emb), dtype=np.float32))
+    seg = jnp.concatenate([jnp.ones((b, s1), dtype=jnp.int32), jnp.full((b, s2), 2, dtype=jnp.int32)], axis=1)
+    cmask = jnp.ones((b, s1 + s2), dtype=jnp.int32)
+
+    out_a = layer(jnp.concatenate([h1_a, h2], axis=1), conv_mask=cmask, segment_ids=seg)
+    out_b = layer(jnp.concatenate([h1_b, h2], axis=1), conv_mask=cmask, segment_ids=seg)
+    out_doc2_unpacked = layer(h2)
+    np.testing.assert_allclose(np.array(out_a[:, s1:]), np.array(out_b[:, s1:]), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(np.array(out_a[:, s1:]), np.array(out_doc2_unpacked), rtol=1e-5, atol=1e-5)
+
+    # Negative control: without `segment_ids`, perturbing doc 1 changes doc 2's output in `Qwen3_8DecoderLayer`.
+    out_a_unreset = layer(jnp.concatenate([h1_a, h2], axis=1), conv_mask=cmask, segment_ids=None)
+    out_b_unreset = layer(jnp.concatenate([h1_b, h2], axis=1), conv_mask=cmask, segment_ids=None)
+    self.assertGreater(float(jnp.max(jnp.abs(out_a_unreset[:, s1:] - out_b_unreset[:, s1:]))), 1e-2)
 
   def test_scan_remat_matches_no_remat(self):
     """Verifies the checkpointed scanned cycle (remat) matches the uncheckpointed one (loss and gradients)."""

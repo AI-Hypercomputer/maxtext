@@ -1137,11 +1137,42 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
       m_scan = model_creation_utils.create_model(cfg_scan, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
       nnx.update(m_full, nnx.state(m_none, nnx.Param))
       toks = jax.random.randint(jax.random.PRNGKey(3), (1, 16), 0, cfg_none.vocab_size)
-      jaxpr_unscanned = str(jax.make_jaxpr(m_full)(toks))
-      jaxpr_scanned = str(jax.make_jaxpr(m_scan)(toks))
-      self.assertIn("prevent_cse=True", jaxpr_unscanned)
-      self.assertNotIn("prevent_cse=False", jaxpr_unscanned)
-      self.assertIn("prevent_cse=True", jaxpr_scanned)
+
+      def _collect_remat_eqns(jaxpr_or_closed: Any, parent: str = "root") -> list[tuple[str, Any]]:
+        jx = jaxpr_or_closed.jaxpr if hasattr(jaxpr_or_closed, "jaxpr") else jaxpr_or_closed
+        found: list[tuple[str, Any]] = []
+        for eqn in jx.eqns:
+          prim = eqn.primitive.name
+          if prim == "remat2":
+            found.append((parent, eqn))
+          for val in eqn.params.values():
+            if hasattr(val, "eqns") or (hasattr(val, "jaxpr") and hasattr(val.jaxpr, "eqns")):
+              found.extend(_collect_remat_eqns(val, prim))
+        return found
+
+      self.assertEmpty(_collect_remat_eqns(jax.make_jaxpr(m_none)(toks)))
+
+      unscanned_remat = _collect_remat_eqns(jax.make_jaxpr(m_full)(toks))
+      outer_unscanned = [(parent, eqn) for parent, eqn in unscanned_remat if parent != "scan"]
+      scan_unscanned = [eqn for parent, eqn in unscanned_remat if parent == "scan"]
+      self.assertLen(outer_unscanned, cfg_full.base_num_decoder_layers)
+      for parent, eqn in outer_unscanned:
+        self.assertEqual(parent, "root")
+        self.assertTrue(eqn.params.get("prevent_cse", False))
+      # GDN intra-chunk `jax.lax.scan` checkpoints `_chunk_step` with `prevent_cse=False`.
+      self.assertLen(scan_unscanned, 3)
+      for eqn in scan_unscanned:
+        self.assertFalse(eqn.params.get("prevent_cse", True))
+
+      scanned_jaxpr = jax.make_jaxpr(m_scan)(toks).jaxpr
+      cycle_scans = [eqn for eqn in scanned_jaxpr.eqns if eqn.primitive.name == "scan"]
+      self.assertLen(cycle_scans, 1)
+      cycle_body = cycle_scans[0].params["jaxpr"]
+      cycle_body = cycle_body.jaxpr if hasattr(cycle_body, "jaxpr") else cycle_body
+      cycle_sublayer_remat = [eqn for eqn in cycle_body.eqns if eqn.primitive.name == "remat2"]
+      self.assertGreaterEqual(len(cycle_sublayer_remat), 4)
+      for eqn in cycle_sublayer_remat:
+        self.assertTrue(eqn.params.get("prevent_cse", False))
 
       def _loss(m, x):
         logits = m(x)

@@ -282,6 +282,40 @@ def _init_state(shape: tuple[int, ...], state: jax.Array | None) -> jax.Array:
   return jnp.zeros(shape, jnp.float32) if state is None else state.astype(jnp.float32)
 
 
+def _compute_segment_resets(segment_ids: jax.Array) -> jax.Array:
+  """Returns boolean mask [B, S] that is True at the first token of each new packed segment after the first."""
+  seg = segment_ids.astype(jnp.int32)
+  valid = seg != 0
+  prev_seg = jnp.concatenate([seg[:, :1], seg[:, :-1]], axis=1)
+  had_valid_before = jnp.cumsum(valid.astype(jnp.int32), axis=1) > valid.astype(jnp.int32)
+  return valid & (seg != prev_seg) & had_valid_before
+
+
+def _causal_conv1d(conv: nnx.Conv, x: jax.Array, segment_ids: jax.Array | None = None) -> jax.Array:
+  """Applies depthwise causal 1D convolution, resetting tap history across packed `segment_ids` boundaries."""
+  if segment_ids is None:
+    return conv(x)
+  w = jnp.squeeze(conv.kernel[...], axis=1).astype(x.dtype).astype(jnp.float32)
+  w_len, s = w.shape[0], x.shape[1]
+  valid_tok = segment_ids != 0
+  x_clean = jnp.where(valid_tok[:, :, None], x, 0)
+  if w_len == 1:
+    return jnp.where(valid_tok[:, :, None], conv(x_clean), 0)
+  x_pad = jnp.pad(x_clean.astype(jnp.float32), ((0, 0), (w_len - 1, 0), (0, 0)))
+  seg_run = jnp.where(valid_tok, jnp.cumsum(_compute_segment_resets(segment_ids).astype(jnp.int32), axis=1) + 1, 0)
+  seg_pad = jnp.pad(seg_run, ((0, 0), (w_len - 1, 0)), constant_values=0)
+  terms = [
+      jnp.where((valid_tok & (seg_pad[:, k : k + s] == seg_run))[:, :, None], x_pad[:, k : k + s, :], 0.0) * w[k]
+      for k in range(w_len)
+  ]
+  while len(terms) > 1:
+    nxt = [terms[i] + terms[i + 1] for i in range(0, len(terms) - 1, 2)]
+    if len(terms) % 2 == 1:
+      nxt.append(terms[-1])
+    terms = nxt
+  return terms[0].astype(x.dtype)
+
+
 def _block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax.Array:
   """Computes the exact inverse of (I + s_mat) for strictly lower-triangular s_mat with MXU-friendly matmuls.
 
@@ -317,57 +351,145 @@ def jax_chunk_gated_delta_rule(
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = True,
     chunk_inverse: str = "block_doubling",
+    segment_ids: jax.Array | None = None,
+    remat_chunks: bool = True,
 ) -> tuple[jax.Array, jax.Array | None]:
-  """Chunked Gated DeltaNet forward pass in float32."""
+  """Chunked Gated DeltaNet forward pass in float32 with per-chunk boundary-state remat and segment resets."""
   if chunk_inverse not in ("solve", "block_doubling"):
     raise ValueError(f"Expected chunk_inverse in ('solve', 'block_doubling'), got {chunk_inverse!r}.")
+  if segment_ids is not None and segment_ids.shape != (
+      query.shape[0],
+      query.shape[1],
+  ):
+    raise ValueError(f"segment_ids shape {segment_ids.shape} must match (batch, seq_len)={query.shape[:2]}.")
   init_dtype = value.dtype
   if use_qk_l2norm_in_kernel:
     query, key = l2norm(query, dim=-1, eps=1e-6), l2norm(key, dim=-1, eps=1e-6)
+  if segment_ids is not None:
+    valid_tok = segment_ids != 0
+    query = jnp.where(valid_tok[:, :, None, None], query, 0.0)
+    key = jnp.where(valid_tok[:, :, None, None], key, 0.0)
+    value = jnp.where(valid_tok[:, :, None, None], value, 0.0)
+    beta = jnp.where(valid_tok[:, :, None], beta, 0.0)
+    g = jnp.where(valid_tok[:, :, None], g, 0.0)
 
   query, key, value, beta, g = (jnp.swapaxes(x.astype(jnp.float32), 1, 2) for x in (query, key, value, beta, g))
   b, h, s, d_k = key.shape
   d_v = value.shape[-1]
   pad_size = (chunk_size - s % chunk_size) % chunk_size
+  seg = None if segment_ids is None else segment_ids.astype(jnp.int32)
   if pad_size > 0:
     query, key, value = (jnp.pad(x, ((0, 0), (0, 0), (0, pad_size), (0, 0))) for x in (query, key, value))
     beta, g = (jnp.pad(x, ((0, 0), (0, 0), (0, pad_size))) for x in (beta, g))
+    if seg is not None:
+      seg = jnp.pad(seg, ((0, 0), (0, pad_size)), constant_values=0)
 
   total_s = s + pad_size
   num_chunks = total_s // chunk_size
-  beta_c = jnp.expand_dims(beta.reshape(b, h, num_chunks, chunk_size), -1)
   query = (query * (1.0 / jnp.sqrt(d_k))).reshape(b, h, num_chunks, chunk_size, d_k)
   key = key.reshape(b, h, num_chunks, chunk_size, d_k)
-  k_beta, v_beta = key * beta_c, value.reshape(b, h, num_chunks, chunk_size, d_v) * beta_c
+  value = value.reshape(b, h, num_chunks, chunk_size, d_v)
+  beta = beta.reshape(b, h, num_chunks, chunk_size)
   g = g.reshape(b, h, num_chunks, chunk_size)
 
-  prec = jax.lax.Precision.HIGHEST
-  g_cumsum = jnp.cumsum(g, axis=-1)
-  decay_mask = jnp.tril(jnp.exp(jnp.tril(jnp.expand_dims(g_cumsum, -1) - jnp.expand_dims(g_cumsum, -2))))
-  s_mat = (jnp.matmul(k_beta, jnp.swapaxes(key, -1, -2), precision=prec)) * jnp.tril(decay_mask, k=-1)
-  rhs = jnp.concatenate([v_beta, k_beta * jnp.expand_dims(jnp.exp(g_cumsum), -1)], axis=-1)
-  if chunk_inverse == "block_doubling":
-    solved = jnp.matmul(_block_doubling_unit_lower_inverse(s_mat, chunk_size), rhs, precision=prec)
+  if seg is None:
+    seg_scan = (None, None, None)
   else:
-    i_plus_s = jnp.eye(chunk_size, dtype=jnp.float32) + s_mat
-    solved = jax.scipy.linalg.solve_triangular(i_plus_s, rhs, lower=True, unit_diagonal=True)
-  v_inv, k_cumdecay = jnp.split(solved, [d_v], axis=-1)
+    seg_group = jnp.cumsum(_compute_segment_resets(seg).astype(jnp.int32), axis=1)
+    seg_c = seg.reshape(b, num_chunks, chunk_size)
+    seg_group_c = seg_group.reshape(b, num_chunks, chunk_size)
+    prev_chunk_group = jnp.concatenate([seg_group_c[:, :1, 0], seg_group_c[:, :-1, -1]], axis=1)
+    seg_scan = (
+        jnp.moveaxis(seg_c, 1, 0),
+        jnp.moveaxis(seg_group_c, 1, 0),
+        jnp.moveaxis(prev_chunk_group, 1, 0),
+    )
 
+  prec = jax.lax.Precision.HIGHEST
   init_state = _init_state((b, h, d_k, d_v), initial_state)
 
   def _chunk_step(carry, xs):
-    q_i, k_i, v_i, k_cd_i, dm_i, g_i = xs
-    v_new = v_i - jnp.matmul(k_cd_i, carry, precision=prec)
-    attn_inter = jnp.matmul(q_i * jnp.expand_dims(jnp.exp(g_i), -1), carry, precision=prec)
-    core_out = attn_inter + jnp.matmul(
-        (jnp.matmul(q_i, jnp.swapaxes(k_i, -1, -2), precision=prec)) * dm_i, v_new, precision=prec
-    )
-    decay_last = jnp.expand_dims(jnp.exp(g_i[..., -1:]), -1)
-    k_decay = k_i * jnp.expand_dims(jnp.exp(g_i[..., -1:] - g_i), -1)
-    return carry * decay_last + jnp.matmul(jnp.swapaxes(k_decay, -1, -2), v_new, precision=prec), core_out
+    q_i, k_i, v_raw_i, beta_i, g_raw_i, seg_c_i, seg_group_c_i, prev_group_i = xs
+    beta_ci = jnp.expand_dims(beta_i, -1)
+    k_beta_i, v_beta_i = k_i * beta_ci, v_raw_i * beta_ci
+    g_i = jnp.cumsum(g_raw_i, axis=-1)
+    g_diff_i = jnp.expand_dims(g_i, -1) - jnp.expand_dims(g_i, -2)
+    if seg_c_i is None:
+      dm_i = jnp.tril(jnp.exp(jnp.tril(g_diff_i)))
+      s_mat_i = (jnp.matmul(k_beta_i, jnp.swapaxes(k_i, -1, -2), precision=prec)) * jnp.tril(dm_i, k=-1)
+      k_beta_g_i = k_beta_i * jnp.expand_dims(jnp.exp(g_i), -1)
+      from_prev_i = in_last_i = keep_carry_i = None
+    else:
+      from_prev_i = ((seg_c_i != 0) & (seg_group_c_i == prev_group_i[:, None]))[:, None, :]
+      in_last_i = ((seg_c_i != 0) & (seg_group_c_i == seg_group_c_i[:, -1:]))[:, None, :]
+      keep_carry_i = (seg_group_c_i[:, -1] == prev_group_i)[:, None]
+      tril_mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.bool_))
+      strict_tril_mask = jnp.tril(jnp.ones((chunk_size, chunk_size), dtype=jnp.bool_), k=-1)
+      same_seg_ij = (
+          (seg_c_i[:, None, :, None] != 0)
+          & (seg_c_i[:, None, None, :] != 0)
+          & (seg_group_c_i[:, None, :, None] == seg_group_c_i[:, None, None, :])
+      )
+      causal_same = same_seg_ij & tril_mask
+      strict_same = same_seg_ij & strict_tril_mask
+      dm_i = jnp.where(causal_same, jnp.exp(jnp.where(causal_same, g_diff_i, 0.0)), 0.0)
+      s_mat_i = jnp.matmul(k_beta_i, jnp.swapaxes(k_i, -1, -2), precision=prec) * jnp.where(strict_same, dm_i, 0.0)
+      k_beta_g_i = jnp.where(
+          from_prev_i[..., None],
+          k_beta_i * jnp.expand_dims(jnp.exp(jnp.where(from_prev_i, g_i, 0.0)), -1),
+          0.0,
+      )
 
-  xs = tuple(jnp.moveaxis(x, 2, 0) for x in (query, key, v_inv, k_cumdecay, decay_mask, g_cumsum))
-  final_state, core_chunks = jax.lax.scan(_chunk_step, init_state, xs)
+    rhs_i = jnp.concatenate([v_beta_i, k_beta_g_i], axis=-1)
+    if chunk_inverse == "block_doubling":
+      solved_i = jnp.matmul(
+          _block_doubling_unit_lower_inverse(s_mat_i, chunk_size),
+          rhs_i,
+          precision=prec,
+      )
+    else:
+      i_plus_s_i = jnp.eye(chunk_size, dtype=jnp.float32) + s_mat_i
+      solved_i = jax.scipy.linalg.solve_triangular(i_plus_s_i, rhs_i, lower=True, unit_diagonal=True)
+    v_i, k_cd_i = jnp.split(solved_i, [d_v], axis=-1)
+
+    v_new = v_i - jnp.matmul(k_cd_i, carry, precision=prec)
+    if from_prev_i is None:
+      q_g = q_i * jnp.expand_dims(jnp.exp(g_i), -1)
+      decay_last = jnp.expand_dims(jnp.exp(g_i[..., -1:]), -1)
+      k_decay = k_i * jnp.expand_dims(jnp.exp(g_i[..., -1:] - g_i), -1)
+    else:
+      q_g = jnp.where(
+          from_prev_i[..., None],
+          q_i * jnp.expand_dims(jnp.exp(jnp.where(from_prev_i, g_i, 0.0)), -1),
+          0.0,
+      )
+      decay_last = jnp.where(
+          keep_carry_i[..., None, None],
+          jnp.expand_dims(jnp.exp(jnp.where(keep_carry_i, g_i[..., -1], 0.0)), (-1, -2)),
+          0.0,
+      )
+      k_decay = jnp.where(
+          in_last_i[..., None],
+          k_i * jnp.expand_dims(jnp.exp(jnp.where(in_last_i, g_i[..., -1:] - g_i, 0.0)), -1),
+          0.0,
+      )
+    attn_inter = jnp.matmul(q_g, carry, precision=prec)
+    core_out = attn_inter + jnp.matmul(
+        (jnp.matmul(q_i, jnp.swapaxes(k_i, -1, -2), precision=prec)) * dm_i,
+        v_new,
+        precision=prec,
+    )
+    return (
+        carry * decay_last + jnp.matmul(jnp.swapaxes(k_decay, -1, -2), v_new, precision=prec),
+        core_out,
+    )
+
+  xs = (
+      *tuple(jnp.moveaxis(x, 2, 0) for x in (query, key, value, beta, g)),
+      *seg_scan,
+  )
+  step_fn = jax.checkpoint(_chunk_step, prevent_cse=False) if remat_chunks else _chunk_step
+  final_state, core_chunks = jax.lax.scan(step_fn, init_state, xs)
   core_out = jnp.moveaxis(core_chunks, 0, 2).reshape(b, h, total_s, d_v)
   core_out = jnp.swapaxes(core_out[:, :, :s, :], 1, 2).astype(init_dtype)
   return core_out, (final_state if output_final_state else None)
@@ -382,12 +504,28 @@ def jax_recurrent_gated_delta_rule(
     initial_state: jax.Array | None = None,
     output_final_state: bool = False,
     use_qk_l2norm_in_kernel: bool = True,
+    segment_ids: jax.Array | None = None,
 ) -> tuple[jax.Array, jax.Array | None]:
-  """Recurrent Gated DeltaNet forward pass in float32."""
+  """Recurrent Gated DeltaNet forward pass in float32, resetting state across packed `segment_ids`."""
+  if segment_ids is not None and segment_ids.shape != (
+      query.shape[0],
+      query.shape[1],
+  ):
+    raise ValueError(f"segment_ids shape {segment_ids.shape} must match (batch, seq_len)={query.shape[:2]}.")
   prec = jax.lax.Precision.HIGHEST
   init_dtype = value.dtype
   if use_qk_l2norm_in_kernel:
     query, key = l2norm(query, dim=-1, eps=1e-6), l2norm(key, dim=-1, eps=1e-6)
+  if segment_ids is not None:
+    valid_tok = segment_ids != 0
+    query = jnp.where(valid_tok[:, :, None, None], query, 0.0)
+    key = jnp.where(valid_tok[:, :, None, None], key, 0.0)
+    value = jnp.where(valid_tok[:, :, None, None], value, 0.0)
+    beta = jnp.where(valid_tok[:, :, None], beta, 0.0)
+    g = jnp.where(valid_tok[:, :, None], g, 0.0)
+    seg_reset = jnp.moveaxis(_compute_segment_resets(segment_ids), 1, 0)
+  else:
+    seg_reset = None
 
   b, _, h, d_k = key.shape
   d_v = value.shape[-1]
@@ -397,14 +535,19 @@ def jax_recurrent_gated_delta_rule(
   init_state = _init_state((b, h, d_k, d_v), initial_state)
 
   def _step(state, inputs):
-    q_t, k_t, v_t, beta_t, g_t = inputs
+    q_t, k_t, v_t, beta_t, g_t, reset_t = inputs
+    if reset_t is not None:
+      state = jnp.where(reset_t[:, None, None, None], 0.0, state)
     state = state * jnp.expand_dims(jnp.exp(g_t), (-1, -2))
     kv_mem = jnp.squeeze(jnp.matmul(jnp.expand_dims(k_t, -2), state, precision=prec), -2)
     delta = (v_t - kv_mem) * jnp.expand_dims(beta_t, -1)
     state = state + jnp.matmul(jnp.expand_dims(k_t, -1), jnp.expand_dims(delta, -2), precision=prec)
     return state, jnp.squeeze(jnp.matmul(jnp.expand_dims(q_t, -2), state, precision=prec), -2)
 
-  xs = tuple(jnp.moveaxis(x, 2, 0) for x in (query, key, value, beta, g))
+  xs = (
+      *tuple(jnp.moveaxis(x, 2, 0) for x in (query, key, value, beta, g)),
+      seg_reset,
+  )
   final_state, outs = jax.lax.scan(_step, init_state, xs)
   core_out = jnp.swapaxes(jnp.moveaxis(outs, 0, 2), 1, 2).astype(init_dtype)
   return core_out, (final_state if output_final_state else None)
@@ -454,12 +597,18 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
       *,
       output_gate_activation: str,
       chunk_inverse: str = "block_doubling",
+      remat_chunks: bool = True,
       rngs: nnx.Rngs,
   ):
     sharding_obj = sharding or DefaultSharding()
     if chunk_inverse not in ("solve", "block_doubling"):
       raise ValueError(f"Expected chunk_inverse in ('solve', 'block_doubling'), got {chunk_inverse!r}.")
-    self.emb_dim, self.chunk_size, self.chunk_inverse = emb_dim, chunk_size, chunk_inverse
+    self.emb_dim, self.chunk_size, self.chunk_inverse = (
+        emb_dim,
+        chunk_size,
+        chunk_inverse,
+    )
+    self.remat_chunks = bool(remat_chunks)
     self.num_k_heads, self.num_v_heads = num_k_heads, num_v_heads
     if num_v_heads % num_k_heads != 0:
       raise ValueError(f"num_v_heads ({num_v_heads}) must be divisible by num_k_heads ({num_k_heads}).")
@@ -471,7 +620,12 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
     self.value_dim = num_v_heads * head_v_dim
     conv_dim = self.key_dim * 2 + self.value_dim
 
-    kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
+    kw = {
+        "use_bias": False,
+        "dtype": dtype,
+        "param_dtype": weight_dtype,
+        "rngs": rngs,
+    }
     self.in_proj_qkv = nnx.Linear(emb_dim, conv_dim, **kw)
     self.in_proj_z = nnx.Linear(emb_dim, self.value_dim, **kw)
     self.in_proj_b = nnx.Linear(emb_dim, num_v_heads, **kw)
@@ -501,13 +655,22 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
       attention_mask: jax.Array | None = None,
       initial_state: jax.Array | None = None,
       output_final_state: bool = False,
+      segment_ids: jax.Array | None = None,
+      remat_chunks: bool | None = None,
   ) -> jax.Array | tuple[jax.Array, jax.Array | None]:
+    b, s, _ = hidden_states.shape
+    if segment_ids is not None and segment_ids.shape != (b, s):
+      raise ValueError(f"segment_ids shape {segment_ids.shape} must match (batch, seq_len)=({b}, {s}).")
+    eff_seg = segment_ids
+    if eff_seg is not None and attention_mask is not None:
+      eff_seg = jnp.where(attention_mask != 0, eff_seg, 0)
     if attention_mask is not None:
       hidden_states = (hidden_states * jnp.expand_dims(attention_mask, -1)).astype(hidden_states.dtype)
+    if eff_seg is not None:
+      hidden_states = jnp.where((eff_seg != 0)[:, :, None], hidden_states, 0)
 
-    b, s, _ = hidden_states.shape
     qkv = checkpoint_name(self.in_proj_qkv(hidden_states), "qkv_proj")
-    mixed_qkv = jax.nn.silu(self.conv1d(qkv))
+    mixed_qkv = jax.nn.silu(_causal_conv1d(self.conv1d, qkv, segment_ids=eff_seg))
     z = self.in_proj_z(hidden_states).reshape(b, s, self.num_v_heads, self.head_v_dim)
 
     beta = jax.nn.sigmoid(self.in_proj_b(hidden_states))
@@ -520,8 +683,8 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
     key = mixed_qkv[..., kd : kd * 2].reshape(b, s, self.num_k_heads, self.head_k_dim)
     value = mixed_qkv[..., kd * 2 :].reshape(b, s, self.num_v_heads, self.head_v_dim)
 
-    if attention_mask is not None:
-      mask = attention_mask != 0
+    if attention_mask is not None or eff_seg is not None:
+      mask = (attention_mask != 0) if eff_seg is None else (eff_seg != 0)
       key = jnp.where(mask[:, :, None, None], key, 0.0)
       value = jnp.where(mask[:, :, None, None], value, 0.0)
       g = jnp.where(mask[:, :, None], g, 0.0)
@@ -540,6 +703,7 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
           initial_state=initial_state,
           output_final_state=output_final_state,
           use_qk_l2norm_in_kernel=True,
+          segment_ids=eff_seg,
       )
     else:
       core_attn_out, last_state = jax_chunk_gated_delta_rule(
@@ -553,6 +717,8 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
           output_final_state=output_final_state,
           use_qk_l2norm_in_kernel=True,
           chunk_inverse=self.chunk_inverse,
+          segment_ids=eff_seg,
+          remat_chunks=self.remat_chunks if remat_chunks is None else bool(remat_chunks),
       )
     core_normed = self.norm(core_attn_out, z).reshape(b, s, self.value_dim)
     out = checkpoint_name(self.out_proj(core_normed), "out_proj")
@@ -2477,6 +2643,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
           conv_kernel_size=int(c.gdn_conv_kernel_dim),
           output_gate_activation=str(c.gdn_output_gate_activation),
           chunk_inverse=str(c.gdn_chunk_inverse),
+          remat_chunks=False,
       )
     else:
       self.self_attn = Qwen3_8SparseAttention(
@@ -2531,7 +2698,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
       hidden_states = hidden_states + self.ple(hidden_states, ple_input_ids, conv_mask=conv_mask)
     mixed, inject = self.attn_hyper_connection.before_block(hidden_states)
     if self.layer_type == "linear_attention":
-      attn_out, s_idx = self.linear_attn(mixed, attention_mask=conv_mask), None
+      attn_out, s_idx = self.linear_attn(mixed, attention_mask=conv_mask, segment_ids=segment_ids), None
     else:
       if return_aux or self.self_attn.attention_kernel == "dense":
         attn_out, s_idx = self.self_attn(
@@ -2925,6 +3092,8 @@ class Qwen3_8MTPBlock(nnx.Module):
     """Updates the MTP block's activation checkpointing policy in place."""
     self.remat_policy = _coerce_remat_callable(remat)
     self.remat = self.remat_policy is not None
+    if self.layers_0.layer_type == "linear_attention":
+      self.layers_0.linear_attn.remat_chunks = self.remat
 
 
 # =================================================================================================
@@ -3203,9 +3372,17 @@ class Qwen3_8Decoder(nnx.Module):
     return (h_mixed, aux_list) if return_aux else h_mixed
 
   def set_remat(self, remat: Any) -> None:
-    """Updates the decoder's per-sublayer activation checkpointing policy in place."""
+    """Updates the decoder's per-sublayer and GDN intra-chunk activation checkpointing policy in place."""
     self.remat_policy = _coerce_remat_callable(remat)
     self.remat = self.remat_policy is not None
+    if self.scan_layers:
+      for sub_name in ("gdn_0", "gdn_1", "gdn_2"):
+        getattr(self.cycles, sub_name).linear_attn.remat_chunks = self.remat
+    else:
+      for i in range(self.num_layers):
+        layer = getattr(self, f"layers_{i}")
+        if layer.layer_type == "linear_attention":
+          layer.linear_attn.remat_chunks = self.remat
 
 
 class Qwen3_8FlashNextModel(nnx.Module):
