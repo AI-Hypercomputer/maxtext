@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795460650063,
+  "lastUpdate": 1795486356456,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -76021,6 +76021,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 438,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "55d1bda5d0f5235496c17f454da47ed4d5b9e4c8",
+          "message": "Bump google-tunix pin to google/tunix@21fa70f92a\n\n# Description\n\nMoves the post-training `google-tunix` archive pin in `src/dependencies/extra_deps/post_train_github_deps.txt` from google/tunix@a51a3bd154 to the current Tunix head, google/tunix@21fa70f92a (142 commits). The newer Tunix is version 0.1.9 and relaxes its JAX bound from `<0.11.1` to `<0.12`; its other dependencies are unchanged apart from test-only OpenTelemetry minimums.\n\nTunix's `grpo_loss_fn` now also reads the sampler-agreement settings (`sampler_is`, `sampler_is_threshold`, `sampler_rs`, `sampler_rs_min`, `sampler_rs_max`, `seq_logprob_error_threshold`) and the Score Centering settings (`score_centering`, `score_centering_eps`) off its algorithm config. The `_GrpoConfig` stand-ins in `maxtext_engine_packing_test.py` and `maxtext_engine_grpo_loss_test.py` get those fields with Tunix's `AlgorithmConfig` defaults, all of which leave the features off.\n\n# Tests\n\nGitHub CI on the exported pull request.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1028589170",
+          "timestamp": "2026-11-24T01:27:26Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/55d1bda5d0f5235496c17f454da47ed4d5b9e4c8"
+        },
+        "date": 1795486355763,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 227.2119999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 56.345,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2219.1929999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 178.59299999999993,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 14,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 333.618,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3232.289000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 439,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1872.5859999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 356.59000000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3421.8199999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 439,
             "unit": "count"
           }
         ]
