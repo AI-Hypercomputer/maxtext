@@ -264,3 +264,236 @@ class GcsUtilsTest(unittest.TestCase):
     self.assertNotIn("hf_access_token", parsed)
     self.assertNotIn("hf_access_token", written)
     self.assertNotIn(secret, written)
+
+  def _populate_dump_dir(self, local_dir):
+    os.makedirs(os.path.join(local_dir, "nested"), exist_ok=True)
+    with open(os.path.join(local_dir, "module_0001.jit_train_step.txt"), "w", encoding="utf-8") as f:
+      f.write("hlo-train-step")
+    with open(os.path.join(local_dir, "module_0002.jit_other.txt"), "w", encoding="utf-8") as f:
+      f.write("hlo-other")
+    with open(os.path.join(local_dir, "nested", "sub.jit_train_step.txt"), "w", encoding="utf-8") as f:
+      f.write("hlo-nested")
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  @mock.patch("jax.process_index", return_value=0)
+  def test_upload_dump_local_target_copies_matching_and_cleans_staging(self, _mock_proc, mock_storage_client):
+    """Non-GCS target copies matching files without invoking GCS and preserves final artifacts."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_dir = os.path.join(tmp_dir, "staging")
+      target_dir = os.path.join(tmp_dir, "mounted_out", "run1", "xla_dump")
+      self._populate_dump_dir(local_dir)
+
+      gcs_utils.upload_dump(
+          local_dir,
+          target_dir,
+          module_name="jit_train_step",
+          delete_local_after=True,
+          all_host_upload=False,
+      )
+
+      mock_storage_client.assert_not_called()
+      self.assertFalse(os.path.exists(local_dir))
+      self.assertTrue(os.path.isfile(os.path.join(target_dir, "module_0001.jit_train_step.txt")))
+      self.assertTrue(os.path.isfile(os.path.join(target_dir, "nested", "sub.jit_train_step.txt")))
+      self.assertFalse(os.path.exists(os.path.join(target_dir, "module_0002.jit_other.txt")))
+      with open(os.path.join(target_dir, "module_0001.jit_train_step.txt"), encoding="utf-8") as f:
+        self.assertEqual(f.read(), "hlo-train-step")
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  @mock.patch("jax.process_index", return_value=0)
+  def test_upload_dump_local_target_keeps_local_when_delete_false(self, _mock_proc, mock_storage_client):
+    """When delete_local_after=False, both staging local_dir and target_dir retain artifacts."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_dir = os.path.join(tmp_dir, "staging")
+      target_dir = os.path.join(tmp_dir, "mounted_out")
+      self._populate_dump_dir(local_dir)
+
+      gcs_utils.upload_dump(
+          local_dir,
+          target_dir,
+          module_name="",
+          delete_local_after=False,
+          all_host_upload=False,
+      )
+
+      mock_storage_client.assert_not_called()
+      self.assertTrue(os.path.isfile(os.path.join(local_dir, "module_0001.jit_train_step.txt")))
+      self.assertTrue(os.path.isfile(os.path.join(target_dir, "module_0001.jit_train_step.txt")))
+      self.assertTrue(os.path.isfile(os.path.join(target_dir, "module_0002.jit_other.txt")))
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  @mock.patch("jax.process_index", return_value=0)
+  def test_upload_dump_local_same_path_and_symlink_not_deleted(self, _mock_proc, mock_storage_client):
+    """When target_dir equals local_dir (including via symlink), files are kept in place and not deleted."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_dir = os.path.join(tmp_dir, "same_dump")
+      symlink_target = os.path.join(tmp_dir, "link_dump")
+      self._populate_dump_dir(local_dir)
+      os.symlink(local_dir, symlink_target)
+
+      for target_dir in (local_dir, local_dir + os.sep, symlink_target):
+        with self.subTest(target_dir=target_dir):
+          gcs_utils.upload_dump(
+              local_dir,
+              target_dir,
+              module_name="jit_train_step",
+              delete_local_after=True,
+              all_host_upload=False,
+          )
+          self.assertTrue(os.path.isfile(os.path.join(local_dir, "module_0001.jit_train_step.txt")))
+          self.assertTrue(os.path.isfile(os.path.join(local_dir, "module_0002.jit_other.txt")))
+
+      mock_storage_client.assert_not_called()
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  @mock.patch("jax.process_index", return_value=0)
+  def test_upload_dump_local_target_inside_local_dir_not_deleted(self, _mock_proc, mock_storage_client):
+    """When target_dir is nested inside local_dir, files are copied safely and local_dir is not rmtreed."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_dir = os.path.join(tmp_dir, "dump_root")
+      target_dir = os.path.join(local_dir, "saved_sub")
+      self._populate_dump_dir(local_dir)
+
+      gcs_utils.upload_dump(
+          local_dir,
+          target_dir,
+          module_name="jit_train_step",
+          delete_local_after=True,
+          all_host_upload=False,
+      )
+
+      mock_storage_client.assert_not_called()
+      self.assertTrue(os.path.isdir(local_dir))
+      self.assertTrue(os.path.isfile(os.path.join(target_dir, "module_0001.jit_train_step.txt")))
+      self.assertFalse(os.path.exists(os.path.join(target_dir, "saved_sub")))
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  @mock.patch("socket.gethostname", return_value="worker-host-1")
+  def test_upload_dump_local_multihost_all_host_upload_toggle(self, _mock_host, mock_storage_client):
+    """Non-zero process skips when all_host_upload=False, and writes under hostname subdir when True."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_dir = os.path.join(tmp_dir, "staging")
+      target_dir = os.path.join(tmp_dir, "shared_mount")
+      self._populate_dump_dir(local_dir)
+
+      with mock.patch("jax.process_index", return_value=1):
+        gcs_utils.upload_dump(
+            local_dir,
+            target_dir,
+            module_name="jit_train_step",
+            delete_local_after=True,
+            all_host_upload=False,
+        )
+        self.assertFalse(os.path.exists(target_dir))
+        self.assertTrue(os.path.isdir(local_dir))
+
+        gcs_utils.upload_dump(
+            local_dir,
+            target_dir,
+            module_name="jit_train_step",
+            delete_local_after=True,
+            all_host_upload=True,
+        )
+
+      mock_storage_client.assert_not_called()
+      self.assertFalse(os.path.exists(local_dir))
+      self.assertTrue(os.path.isfile(os.path.join(target_dir, "worker-host-1", "module_0001.jit_train_step.txt")))
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  @mock.patch("jax.process_index", return_value=0)
+  def test_upload_dump_local_works_when_gcs_decoupled(self, _mock_proc, mock_storage_client):
+    """Non-GCS target still copies artifacts even when GCS storage is unavailable / decoupled."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_dir = os.path.join(tmp_dir, "staging")
+      target_dir = os.path.join(tmp_dir, "local_out")
+      self._populate_dump_dir(local_dir)
+
+      with mock.patch.object(gcs_utils, "_gcs_guard", return_value=False) as mock_guard:
+        gcs_utils.upload_dump(
+            local_dir,
+            target_dir,
+            module_name="jit_train_step",
+            delete_local_after=True,
+            all_host_upload=False,
+        )
+
+      mock_guard.assert_not_called()
+      mock_storage_client.assert_not_called()
+      self.assertTrue(os.path.isfile(os.path.join(target_dir, "module_0001.jit_train_step.txt")))
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  @mock.patch("socket.gethostname", return_value="tpu-host-0")
+  @mock.patch("jax.process_index", return_value=0)
+  def test_upload_dump_gcs_target_regression(self, _mock_proc, _mock_host, mock_storage_client):
+    """Regression test: gs:// target preserves GCS upload, filtering, host subdir, and delete_local_after."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_dir = os.path.join(tmp_dir, "staging")
+      self._populate_dump_dir(local_dir)
+
+      mock_bucket = mock_storage_client.return_value.get_bucket.return_value
+      uploaded = {}
+
+      def _fake_blob(blob_name):
+        blob = mock.MagicMock()
+        blob.upload_from_filename.side_effect = lambda src: uploaded.__setitem__(blob_name, src)
+        return blob
+
+      mock_bucket.blob.side_effect = _fake_blob
+
+      with mock.patch.object(gcs_utils, "_gcs_guard", return_value=True):
+        gcs_utils.upload_dump(
+            local_dir,
+            "gs://my-bucket/out/run/xla_dump/",
+            module_name="jit_train_step",
+            delete_local_after=True,
+            all_host_upload=True,
+        )
+
+      mock_storage_client.return_value.get_bucket.assert_called_once_with("my-bucket")
+      self.assertEqual(
+          set(uploaded.keys()),
+          {
+              "out/run/xla_dump/tpu-host-0/module_0001.jit_train_step.txt",
+              "out/run/xla_dump/tpu-host-0/nested/sub.jit_train_step.txt",
+          },
+      )
+      self.assertFalse(os.path.exists(local_dir))
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  @mock.patch("jax.process_index", return_value=0)
+  def test_upload_dump_local_jaxpr_file_filter_and_preservation(self, _mock_proc, mock_storage_client):
+    """Simulates maybe_dump_jaxpr saving train_step.jaxpr to a non-GCS base_output_directory."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_dir = os.path.join(tmp_dir, "jaxpr_staging")
+      target_dir = os.path.join(tmp_dir, "mounted_out", "run1", "jaxpr_dump")
+      os.makedirs(local_dir, exist_ok=True)
+      with open(os.path.join(local_dir, "train_step.jaxpr"), "w", encoding="utf-8") as f:
+        f.write("{ lambda ; a:f32[2,3]. let b:f32[2,3] = add a 1.0 in (b,) }")
+
+      gcs_utils.upload_dump(
+          local_dir,
+          target_dir,
+          module_name="train_step.jaxpr",
+          delete_local_after=True,
+          all_host_upload=False,
+      )
+
+      mock_storage_client.assert_not_called()
+      self.assertFalse(os.path.exists(local_dir))
+      dumped = os.path.join(target_dir, "train_step.jaxpr")
+      self.assertTrue(os.path.isfile(dumped))
+      with open(dumped, encoding="utf-8") as f:
+        self.assertIn("add a 1.0", f.read())
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  @mock.patch("jax.process_index", return_value=0)
+  def test_upload_dump_empty_target_dir_is_noop(self, _mock_proc, mock_storage_client):
+    """Empty target_dir returns without touching GCS or deleting local_dir."""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      local_dir = os.path.join(tmp_dir, "staging")
+      self._populate_dump_dir(local_dir)
+
+      gcs_utils.upload_dump(local_dir, "", module_name="jit_train_step", delete_local_after=True)
+
+      mock_storage_client.assert_not_called()
+      self.assertTrue(os.path.isfile(os.path.join(local_dir, "module_0001.jit_train_step.txt")))
