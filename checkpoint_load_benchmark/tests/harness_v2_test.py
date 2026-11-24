@@ -561,6 +561,111 @@ mod.main()
     self.assertFalse(harness._is_completed_result_to_skip(failed_res, skip_failed=False))  # pylint: disable=protected-access
     self.assertTrue(harness._is_completed_result_to_skip(failed_res, skip_failed=True))  # pylint: disable=protected-access
 
+  def test_phase_cache_env_is_unique_per_phase_and_overrides_the_maxtext_cache_dir(self):
+    with mock.patch.dict(os.environ, {}, clear=False):
+      os.environ.pop("KEEP_JAX_CACHE", None)
+      env_a = harness_v2.phase_cache_env("run_x-qwen3-0.6b-scanned-safetensors_dynamic")
+      env_b = harness_v2.phase_cache_env("run_x-qwen3-0.6b-scanned-safetensors_dynamic")
+    self.assertNotEqual(env_a["BENCH_JAX_CACHE_DIR"], env_b["BENCH_JAX_CACHE_DIR"])
+    self.assertEqual(env_a["M_JAX_CACHE_DIR"], env_a["BENCH_JAX_CACHE_DIR"])
+    self.assertEqual(env_a["JAX_COMPILATION_CACHE_DIR"], env_a["BENCH_JAX_CACHE_DIR"])
+    self.assertTrue(env_a["HF_HOME"].startswith(os.path.dirname(env_a["BENCH_JAX_CACHE_DIR"])))
+    self.assertEqual(env_a["BENCH_CACHE_STATE"], "empty")
+    with mock.patch.dict(os.environ, {"KEEP_JAX_CACHE": "1", "BENCH_JAX_CACHE_DIR": "/x/earlier/jax_cache"}):
+      kept = harness_v2.phase_cache_env("anything")
+    self.assertEqual(kept["M_JAX_CACHE_DIR"], "/x/earlier/jax_cache")
+    self.assertEqual(kept["BENCH_CACHE_STATE"], "kept")
+
+  def test_prepare_phase_caches_empties_the_directories_and_counts_earlier_tasks(self):
+    tmp = tempfile.mkdtemp()
+    self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+    jax_dir, default_dir = os.path.join(tmp, "phase", "jax_cache"), os.path.join(tmp, "default_jax_cache")
+    for d in (jax_dir, default_dir):
+      os.makedirs(d)
+      with open(os.path.join(d, "entry"), "w", encoding="utf-8") as f:
+        f.write("x")
+    env = {"BENCH_JAX_CACHE_DIR": jax_dir, "HF_HOME": os.path.join(tmp, "phase", "hf_home"), "BENCH_RUN_ID": "task-b"}
+    history = os.path.join(tmp, "history.jsonl")
+    with open(history, "w", encoding="utf-8") as f:
+      f.write(json.dumps({"run_id": "task-a", "phase": "safetensors_dynamic"}) + "\n")
+    with (
+        mock.patch.dict(os.environ, env),
+        mock.patch.object(harness_v2, "DEFAULT_JAX_CACHE_DIRS", (default_dir,)),
+        mock.patch.object(harness_v2, "POD_HISTORY_PATH", history),
+    ):
+      os.environ.pop("KEEP_JAX_CACHE", None)
+      evidence = harness_v2.prepare_phase_caches("safetensors_dynamic")
+      self.assertFalse(os.path.exists(default_dir))
+      self.assertEqual(evidence["jax_cache_files_at_start"], 0)
+      self.assertEqual(evidence["default_jax_cache_files_removed"], 2)
+      self.assertEqual(evidence["pod_tasks_before"], 1)
+      self.assertEqual(evidence["pod_phases_before"], 1)
+      with open(os.path.join(jax_dir, "compiled"), "w", encoding="utf-8") as f:
+        f.write("x")
+      self.assertEqual(harness_v2.finish_phase_caches(evidence)["jax_cache_files_at_end"], 1)
+      # A second phase of the same task in this pod: no other task before it, and KEEP_JAX_CACHE=1 keeps the files.
+      os.environ["KEEP_JAX_CACHE"] = "1"
+      kept = harness_v2.prepare_phase_caches("safetensors_dynamic")
+    self.assertTrue(kept["jax_cache_kept"])
+    self.assertEqual(kept["jax_cache_files_at_start"], 1)
+    self.assertEqual(kept["pod_tasks_before"], 1)
+    self.assertEqual(kept["pod_phases_before"], 2)
+
+  def test_summarize_cache_evidence_flags_hits_reused_pods_and_missing_hosts(self):
+    def _host(**overrides):
+      evidence = {
+          "jax_cache_dir": "/tmp/bench_phase_caches/p/jax_cache",
+          "jax_cache_kept": False,
+          "jax_cache_files_at_start": 0,
+          "jax_cache_files_at_end": 3,
+          "pod_started_at_utc": "2026-11-24T00:00:00Z",
+          "pod_tasks_before": 0,
+          "pod_phases_before": 1,
+      }
+      evidence.update(overrides)
+      return {"cache_evidence": evidence}
+
+    def _merged(hosts, hits=0.0):
+      return {
+          "hosts": hosts,
+          "monitoring_summary": {
+              harness_v2.CACHE_REQUESTS_EVENT: {"sum_over_hosts": 8.0},
+              harness_v2.CACHE_HITS_EVENT: {"sum_over_hosts": hits},
+              harness_v2.CACHE_MISSES_EVENT: {"sum_over_hosts": 8.0 - hits},
+          },
+      }
+
+    clean = harness_v2.summarize_cache_evidence(_merged([_host(), _host()]), expected_hosts=2)
+    self.assertTrue(clean["cache_valid"], clean)
+    self.assertEqual(clean["cache_jax_files_at_end"], 6)
+    self.assertEqual(clean["cache_jax_misses"], 8)
+    warm = harness_v2.summarize_cache_evidence(
+        _merged([_host(jax_cache_kept=True, jax_cache_files_at_start=3)], hits=5.0), expected_hosts=1
+    )
+    self.assertFalse(warm["cache_valid"])
+    self.assertIn("5 JAX persistent-cache hits", warm["cache_invalid_reason"])
+    self.assertIn("kept", warm["cache_invalid_reason"])
+    reused = harness_v2.summarize_cache_evidence(_merged([_host(pod_tasks_before=2)]), expected_hosts=1)
+    self.assertIn("pod had run 2 other tasks", reused["cache_invalid_reason"])
+    missing = harness_v2.summarize_cache_evidence(_merged([_host()]), expected_hosts=64)
+    self.assertIn("1 of 64 hosts", missing["cache_invalid_reason"])
+
+  def test_full_checksums_are_exact_and_ignore_only_the_sign_of_zero(self):
+    import jax  # pylint: disable=import-outside-toplevel
+    import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
+
+    base = np.arange(24, dtype=np.float32).reshape(4, 6)
+    with mock.patch.dict(os.environ, {"BENCH_FULL_CHECKSUMS": "1"}):
+      cs = harness_v2.compute_parameter_checksums({"w": jnp.asarray(base)}, jax)["w"]
+      swapped = harness_v2.compute_parameter_checksums({"w": jnp.asarray(base[::-1].copy())}, jax)["w"]
+      neg_zero = base.copy()
+      neg_zero[0, 0] = -0.0
+      signed = harness_v2.compute_parameter_checksums({"w": jnp.asarray(neg_zero)}, jax)["w"]
+    self.assertEqual(cs["bits_sum"], swapped["bits_sum"])
+    self.assertNotEqual(cs["bits_pos"], swapped["bits_pos"])
+    self.assertNotEqual(cs["bits_sum"], signed["bits_sum"])
+    self.assertEqual((cs["bitsz_sum"], cs["bitsz_pos"]), (signed["bitsz_sum"], signed["bitsz_pos"]))
+
 
 if __name__ == "__main__":
   unittest.main()

@@ -44,6 +44,13 @@ DURATION_MONITORING_EVENTS: tuple[str, ...] = (
     "/jax/checkpoint/sync_global_devices_duration_sec",
 )
 
+# Events without a value: the collector counts them. They show whether the JAX persistent compilation cache was read.
+COUNT_MONITORING_EVENTS: tuple[str, ...] = (
+    "/jax/compilation_cache/compile_requests_use_cache",
+    "/jax/compilation_cache/cache_hits",
+    "/jax/compilation_cache/cache_misses",
+)
+
 SCALAR_MONITORING_EVENTS: tuple[str, ...] = (
     "/jax/orbax/read/safetensors/bytes_read",
     "/jax/orbax/read/safetensors/num_reads",
@@ -260,6 +267,8 @@ class MonitoringCollector:
     self._monitoring_mod: Any = None
     self._registered_durations: list[tuple[str, Any]] = []
     self._registered_scalars: list[tuple[str, Any]] = []
+    self._registered_counts: list[tuple[str, Any]] = []
+    self._count_event_set: set[str] = set()
     self._active_events: list[str] = []
     self._allowed_events: set[str] = set()
     self._duration_event_set: set[str] = set()
@@ -272,6 +281,10 @@ class MonitoringCollector:
     if event_name in self._duration_event_set and (fval < 0.0 or fval > 1e7):
       return
     self._record(event_name, fval)
+
+  def _on_count_event(self, event_name: str, **_metadata: Any) -> None:
+    if event_name in self._count_event_set:
+      self._record(event_name, 1.0)
 
   def _record(self, event_name: str, value: float) -> None:
     """Thread-safely records a monitoring duration/scalar sample for the active stage."""
@@ -293,6 +306,7 @@ class MonitoringCollector:
       monitoring_mod: Any,
       duration_events: Sequence[str] = DURATION_MONITORING_EVENTS,
       scalar_events: Sequence[str] = SCALAR_MONITORING_EVENTS,
+      count_events: Sequence[str] = COUNT_MONITORING_EVENTS,
   ) -> list[str]:
     """Attaches listeners to `monitoring_mod` (`jax.monitoring`); returns tracked event names."""
     if monitoring_mod is None:
@@ -302,6 +316,7 @@ class MonitoringCollector:
     self._allowed_events = set(duration_events) | set(scalar_events)
     reg_dur = getattr(monitoring_mod, "register_event_duration_secs_listener", None)
     reg_scl = getattr(monitoring_mod, "register_scalar_listener", None)
+    reg_cnt = getattr(monitoring_mod, "register_event_listener", None)
 
     if callable(reg_dur):
       try:
@@ -316,6 +331,15 @@ class MonitoringCollector:
         reg_scl(self._on_event)
         self._registered_scalars.append(("", self._on_event))
         self._active_events.extend(scalar_events)
+      except Exception:  # pylint: disable=broad-exception-caught
+        pass
+
+    if callable(reg_cnt):
+      try:
+        self._count_event_set = set(count_events)
+        reg_cnt(self._on_count_event)
+        self._registered_counts.append(("", self._on_count_event))
+        self._active_events.extend(count_events)
       except Exception:  # pylint: disable=broad-exception-caught
         pass
     return list(self._active_events)
@@ -344,6 +368,14 @@ class MonitoringCollector:
         except Exception:  # pylint: disable=broad-exception-caught
           pass
     self._registered_scalars.clear()
+    unreg_cnt = getattr(mod, "unregister_event_listener", None)
+    if callable(unreg_cnt):
+      for _, cb in self._registered_counts:
+        try:
+          unreg_cnt(cb)  # pylint: disable=not-callable
+        except Exception:  # pylint: disable=broad-exception-caught
+          pass
+    self._registered_counts.clear()
 
   def snapshot(self) -> dict[str, Any]:
     """Returns copies of global and stage-bucketed monitoring counters."""

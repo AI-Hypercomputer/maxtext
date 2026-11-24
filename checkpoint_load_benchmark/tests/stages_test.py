@@ -147,6 +147,20 @@ class StagesRecorderTest(unittest.TestCase):
     self.assertEqual(dur_callbacks, [])
     self.assertEqual(scalar_callbacks, [])
 
+  def test_monitoring_collector_counts_compilation_cache_events(self):
+    callbacks = []
+    fake = types.SimpleNamespace(register_event_listener=callbacks.append, unregister_event_listener=callbacks.remove)
+    coll = stages.MonitoringCollector(stages.StageRecorder())
+    self.assertIn("/jax/compilation_cache/cache_hits", coll.register(fake))
+    for event in ("cache_misses", "cache_misses", "cache_hits", "tasks_using_cache"):
+      callbacks[0](f"/jax/compilation_cache/{event}")
+    events = coll.snapshot()["events"]
+    self.assertEqual(events["/jax/compilation_cache/cache_misses"]["sum"], 2.0)
+    self.assertEqual(events["/jax/compilation_cache/cache_hits"]["sum"], 1.0)
+    self.assertNotIn("/jax/compilation_cache/tasks_using_cache", events)
+    coll.unregister()
+    self.assertEqual(callbacks, [])
+
   def test_emit_parse_and_merge_host_stages(self):
     buf = io.StringIO()
     p0 = {

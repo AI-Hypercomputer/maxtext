@@ -21,6 +21,7 @@ import datetime
 import functools
 import gc
 import glob
+import json
 import os
 import re
 import signal
@@ -312,9 +313,34 @@ def install_safetensors_dynamic_hooks(
         "safetensors_dynamic_step2_copy_host_ram_to_tpu_hbm_seconds",
         reentrant_guard=True,
     )
+    _log_slow_reshards(tensor_handling_mod)
   for target_mod in (load_dynamic_mod, tensor_handling_mod):
     _wrap_get_hf_loading_function(recorder, target_mod, slowest_state)
   return slowest_state
+
+
+def _log_slow_reshards(tensor_handling_mod: Any, min_seconds: float = 1.0) -> None:
+  """Prints every `tensor_handling._reshard` call that takes at least `min_seconds`, with its shapes and shardings."""
+  orig = getattr(tensor_handling_mod, "_reshard", None)
+  if orig is None or getattr(orig, "__bench_reshard_logged__", False):
+    return
+
+  @functools.wraps(orig)
+  def _logged_reshard(array, sharding, *args, **kwargs):
+    t0 = time.perf_counter()
+    result = orig(array, sharding, *args, **kwargs)
+    elapsed = time.perf_counter() - t0
+    if elapsed >= min_seconds:
+      source = getattr(getattr(array, "sharding", None), "spec", None)
+      print(
+          f"[reshard] {elapsed:.2f}s shape={tuple(getattr(array, 'shape', ()))} dtype={getattr(array, 'dtype', None)} "
+          f"nbytes={getattr(array, 'nbytes', 0)} source_spec={source} target_spec={getattr(sharding, 'spec', None)}",
+          flush=True,
+      )
+    return result
+
+  setattr(_logged_reshard, "__bench_reshard_logged__", True)
+  tensor_handling_mod._reshard = _logged_reshard  # pylint: disable=protected-access
 
 
 def _wrap_get_hf_loading_function(
@@ -493,9 +519,32 @@ def compute_parameter_checksums(
   import jax.numpy as jnp  # pylint: disable=import-outside-toplevel
 
   leaves = _flatten_params(raw_params)
-  chosen = select_checksum_indices(len(leaves), max_leaves=max_leaves)
+  # BENCH_FULL_CHECKSUMS=1: every leaf, plus exact checksums of the raw bits (see _leaf_bits).
+  full = os.environ.get("BENCH_FULL_CHECKSUMS", "0") == "1"
+  chosen = list(range(len(leaves))) if full else select_checksum_indices(len(leaves), max_leaves=max_leaves)
   if not chosen:
     return {}
+
+  @jax_mod.jit
+  def _leaf_bits(arr):
+    # uint32 sums wrap modulo 2**32, so they are exact and do not depend on the sharding or the reduction order.
+    # The second sum weights every element by its index along each axis, so it changes if elements are reordered.
+    if arr.dtype == jnp.bool_:
+      bits = arr.astype(jnp.uint32)
+    else:
+      uint = {1: jnp.uint8, 2: jnp.uint16, 4: jnp.uint32}[arr.dtype.itemsize]
+      bits = jax_mod.lax.bitcast_convert_type(arr, uint).astype(jnp.uint32)
+    weight = jnp.ones((), jnp.uint32)
+    for axis, prime in zip(range(arr.ndim), (2654435761, 40503, 2246822519, 3266489917, 668265263, 374761393)):
+      index_shape = [1] * arr.ndim
+      index_shape[axis] = arr.shape[axis]
+      weight = weight + (jnp.arange(arr.shape[axis], dtype=jnp.uint32) * jnp.uint32(prime)).reshape(index_shape)
+    return jnp.sum(bits, dtype=jnp.uint32), jnp.sum(bits * weight, dtype=jnp.uint32)
+
+  @jax_mod.jit
+  def _leaf_bits_unsigned_zero(arr):
+    # The same sums with -0.0 counted as +0.0: XLA may reshard with a sum over zero-padded shards, which drops the sign.
+    return _leaf_bits(jnp.where(arr == 0, jnp.zeros((), arr.dtype), arr))
 
   @jax_mod.jit
   def _leaf_stats(arr):
@@ -516,6 +565,14 @@ def compute_parameter_checksums(
         "l2": round(float(jax_mod.device_get(l2_val)), 6),
         "abs_max": round(float(jax_mod.device_get(amax_val)), 6),
     }
+    if full and arr.ndim <= 6 and arr.dtype.itemsize <= 4:
+      bits_sum, bits_pos = _leaf_bits(arr)
+      results[norm_name]["bits_sum"] = int(jax_mod.device_get(bits_sum))
+      results[norm_name]["bits_pos"] = int(jax_mod.device_get(bits_pos))
+      if jnp.issubdtype(arr.dtype, jnp.floating):
+        bits_sum, bits_pos = _leaf_bits_unsigned_zero(arr)
+        results[norm_name]["bitsz_sum"] = int(jax_mod.device_get(bits_sum))
+        results[norm_name]["bitsz_pos"] = int(jax_mod.device_get(bits_pos))
   return results
 
 
@@ -568,20 +625,169 @@ def inspect_gcs_or_local_safetensors(path: str) -> dict[str, Any]:
     return {}
 
 
-def prepare_clean_jax_compilation_cache() -> str:
-  """Clears default local JAX persistent compilation cache directories unless `KEEP_JAX_CACHE=1`."""
-  if os.environ.get("KEEP_JAX_CACHE", "0") == "1":
-    return os.environ.get("BENCH_CACHE_STATE", "warm")
-  candidates = [
-      "/tmp/jax_cache",
-      os.environ.get("JAX_COMPILATION_CACHE_DIR", "").strip(),
-  ]
-  for cand in candidates:
-    if cand and not cand.startswith("gs://") and os.path.isdir(cand):
-      import shutil  # pylint: disable=import-outside-toplevel
+# Where a phase would find a JAX persistent compilation cache without the per-phase directory: `/tmp/jax_cache` and
+# MaxText's default `jax_cache_dir`.
+DEFAULT_JAX_CACHE_DIRS = ("/tmp/jax_cache", "~/jax_cache")
+PHASE_CACHE_ROOT = "/tmp/bench_phase_caches"
+POD_HISTORY_PATH = "/tmp/bench_pod_history.jsonl"
+CACHE_REQUESTS_EVENT = "/jax/compilation_cache/compile_requests_use_cache"
+CACHE_HITS_EVENT = "/jax/compilation_cache/cache_hits"
+CACHE_MISSES_EVENT = "/jax/compilation_cache/cache_misses"
 
-      shutil.rmtree(cand, ignore_errors=True)
-  return os.environ.get("BENCH_CACHE_STATE", "empty")
+
+def _keep_jax_cache() -> bool:
+  return os.environ.get("KEEP_JAX_CACHE", "0") == "1"
+
+
+def _count_files(path: str) -> int:
+  """Returns the number of files under the local directory `path`, 0 if it does not exist."""
+  return sum(len(files) for _, _, files in os.walk(path)) if path and os.path.isdir(path) else 0
+
+
+def phase_cache_env(tag: str) -> dict[str, str]:
+  """Returns the environment that gives one phase its own JAX compilation cache and HF cache directories.
+
+  The directories are named after `tag` plus a random suffix, so no two phases share them, and the same environment
+  reaches every host of the phase. `M_JAX_CACHE_DIR` overrides MaxText's `jax_cache_dir` (default `~/jax_cache`), which
+  is the directory that the loads really use. With `KEEP_JAX_CACHE=1` and `BENCH_JAX_CACHE_DIR` set, that directory is
+  kept: this is how a deliberately warm run is made.
+  """
+  if _keep_jax_cache() and os.environ.get("BENCH_JAX_CACHE_DIR"):
+    jax_dir = os.environ["BENCH_JAX_CACHE_DIR"]
+    phase_root = os.path.dirname(jax_dir.rstrip("/"))
+  else:
+    slug = re.sub(r"[^A-Za-z0-9._-]+", "-", tag).strip("-")[:120] or "phase"
+    phase_root = os.path.join(PHASE_CACHE_ROOT, f"{slug}-{os.urandom(4).hex()}")
+    jax_dir = os.path.join(phase_root, "jax_cache")
+  return {
+      "BENCH_JAX_CACHE_DIR": jax_dir,
+      "JAX_COMPILATION_CACHE_DIR": jax_dir,
+      "M_JAX_CACHE_DIR": jax_dir,
+      "HF_HOME": os.path.join(phase_root, "hf_home"),
+      "BENCH_CACHE_STATE": "kept" if _keep_jax_cache() else "empty",
+  }
+
+
+def _container_started_at_utc() -> str:
+  """Returns when PID 1 of this container started, which is when the pod's container started."""
+  try:
+    started = os.stat("/proc/1").st_mtime
+  except OSError:
+    return ""
+  return datetime.datetime.fromtimestamp(started, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def prepare_phase_caches(phase: str) -> dict[str, Any]:
+  """Empties this host's caches before a phase and returns the evidence of the state the phase starts in.
+
+  Runs in every worker process, so on every host of the phase. Unless `KEEP_JAX_CACHE=1`, it deletes the default JAX
+  cache directories and the per-phase directory of `phase_cache_env`. A worker that was not given a per-phase
+  directory (one started by hand or by a test, outside a benchmark pod) deletes nothing. It also appends the phase to
+  a history file in the container, from which it counts the tasks and phases that ran in this pod before.
+  """
+  import shutil  # pylint: disable=import-outside-toplevel
+
+  keep = _keep_jax_cache()
+  jax_dir = os.environ.get("BENCH_JAX_CACHE_DIR", "").strip()
+  hf_home = os.environ.get("HF_HOME", "").strip()
+  removed = 0
+  if not keep and jax_dir:
+    for cand in (*DEFAULT_JAX_CACHE_DIRS, jax_dir):
+      cand = os.path.expanduser(cand)
+      if cand and os.path.isdir(cand):
+        removed += _count_files(cand)
+        shutil.rmtree(cand, ignore_errors=True)
+  for path in (jax_dir, hf_home):
+    if path:
+      os.makedirs(path, exist_ok=True)
+
+  run_id = os.environ.get("BENCH_RUN_ID", "")
+  history: list[dict[str, Any]] = []
+  try:
+    with open(POD_HISTORY_PATH, "r", encoding="utf-8") as f:
+      history = [json.loads(line) for line in f if line.strip()]
+  except (OSError, ValueError):
+    pass
+  if jax_dir:
+    try:
+      with open(POD_HISTORY_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps({"run_id": run_id, "phase": phase, "started_at_utc": utc_now_iso()}) + "\n")
+    except OSError:
+      pass
+
+  evidence = {
+      "jax_cache_dir": jax_dir,
+      "jax_cache_kept": keep,
+      "jax_cache_files_at_start": _count_files(jax_dir),
+      "default_jax_cache_files_removed": removed,
+      "hf_home": hf_home,
+      "hf_home_files_at_start": _count_files(hf_home),
+      "pod_started_at_utc": _container_started_at_utc(),
+      "pod_tasks_before": len({h.get("run_id") for h in history} - {run_id}),
+      "pod_phases_before": len(history),
+  }
+  print(f"[cache] {phase}: {json.dumps(evidence, sort_keys=True)}", flush=True)
+  return evidence
+
+
+def finish_phase_caches(evidence: dict[str, Any]) -> dict[str, Any]:
+  """Adds the end-of-phase file counts to `evidence`: a phase that compiled leaves files in its own cache directory."""
+  evidence["jax_cache_files_at_end"] = _count_files(evidence.get("jax_cache_dir", ""))
+  evidence["default_jax_cache_files_at_end"] = sum(_count_files(os.path.expanduser(d)) for d in DEFAULT_JAX_CACHE_DIRS)
+  return evidence
+
+
+def summarize_cache_evidence(merged_stages: Mapping[str, Any], expected_hosts: int) -> dict[str, Any]:
+  """Reduces the per-host cache evidence of one phase to result fields and one `cache_valid` verdict.
+
+  A phase is valid when every host reported, started with an empty JAX cache directory, ran in a pod that had run no
+  other task, and JAX reported no persistent-cache hit on any host.
+  """
+  hosts = [h.get("cache_evidence") for h in merged_stages.get("hosts", [])]
+  hosts = [h for h in hosts if isinstance(h, dict)]
+  mon = merged_stages.get("monitoring_summary", {})
+
+  def _events(name: str) -> int:
+    return int(round(mon.get(name, {}).get("sum_over_hosts", 0.0)))
+
+  def _total(key: str) -> int:
+    return sum(int(h.get(key) or 0) for h in hosts)
+
+  def _highest(key: str) -> int:
+    return max((int(h.get(key) or 0) for h in hosts), default=0)
+
+  started = sorted(h["pod_started_at_utc"] for h in hosts if h.get("pod_started_at_utc"))
+  out: dict[str, Any] = {
+      "cache_evidence_host_count": len(hosts),
+      "cache_jax_dir": hosts[0].get("jax_cache_dir", "") if hosts else "",
+      "cache_jax_kept": any(h.get("jax_cache_kept") for h in hosts),
+      "cache_jax_files_at_start": _highest("jax_cache_files_at_start"),
+      "cache_jax_files_at_end": _total("jax_cache_files_at_end"),
+      "cache_default_jax_files_removed": _total("default_jax_cache_files_removed"),
+      "cache_default_jax_files_at_end": _total("default_jax_cache_files_at_end"),
+      "cache_hf_home_files_at_start": _highest("hf_home_files_at_start"),
+      "cache_jax_compile_requests": _events(CACHE_REQUESTS_EVENT),
+      "cache_jax_hits": _events(CACHE_HITS_EVENT),
+      "cache_jax_misses": _events(CACHE_MISSES_EVENT),
+      "cache_pod_tasks_before": _highest("pod_tasks_before"),
+      "cache_pod_phases_before": _highest("pod_phases_before"),
+      "cache_pod_first_started_at_utc": started[0] if started else "",
+      "cache_pod_last_started_at_utc": started[-1] if started else "",
+  }
+  problems = []
+  if len(hosts) < expected_hosts:
+    problems.append(f"cache evidence from {len(hosts)} of {expected_hosts} hosts")
+  if out["cache_jax_kept"]:
+    problems.append("JAX cache directory was kept (KEEP_JAX_CACHE=1)")
+  if out["cache_jax_files_at_start"]:
+    problems.append(f"{out['cache_jax_files_at_start']} files in the JAX cache directory at start")
+  if out["cache_jax_hits"]:
+    problems.append(f"{out['cache_jax_hits']} JAX persistent-cache hits")
+  if out["cache_pod_tasks_before"]:
+    problems.append(f"pod had run {out['cache_pod_tasks_before']} other tasks")
+  out["cache_valid"] = not problems
+  out["cache_invalid_reason"] = "; ".join(problems)
+  return out
 
 
 def classify_failure(
@@ -871,6 +1077,8 @@ def build_v2_phase_record(
 
   if parameter_checksums:
     rec["parameter_checksums"] = dict(parameter_checksums)
+  if run_status != "SKIPPED":
+    rec.update(summarize_cache_evidence(merged_stages, expected_hosts=total_hosts))
   rec["stages_merged"] = {
       "host_count": merged_stages.get("host_count", 0),
       "stages_summary": merged_stages.get("stages_summary", {}),

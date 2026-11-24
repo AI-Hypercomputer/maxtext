@@ -3452,8 +3452,9 @@ def invoke_worker_subprocess(
   env = os.environ.copy()
   env.setdefault("MALLOC_TRIM_THRESHOLD_", "65536")
   env.setdefault("PYTHONUNBUFFERED", "1")
-  cache_state = harness_v2.prepare_clean_jax_compilation_cache()
-  env["BENCH_CACHE_STATE"] = cache_state
+  # Every phase gets new, empty JAX compilation cache and HF cache directories on every host: see phase_cache_env.
+  env.update(harness_v2.phase_cache_env(f"{os.path.basename(gcs_run_dir.rstrip('/'))}-{model}-{scan_dir_name}-{phase}"))
+  cache_state = env["BENCH_CACHE_STATE"]
   env["BENCH_PLATFORM"] = resolved_platform
   env["BENCH_SLICE_TOPOLOGY"] = resolved_topology
   site_dir = os.path.join(local_work_dir, "_sitecustomize")
@@ -4217,6 +4218,7 @@ def main() -> None:
     args._recorder = recorder  # pylint: disable=protected-access
     args._monitoring = mon  # pylint: disable=protected-access
     args._sampler = sampler  # pylint: disable=protected-access
+    cache_evidence = harness_v2.prepare_phase_caches(args.worker_phase)
 
     self_wd = _start_self_oom_watchdog(platform_name=getattr(args, "platform", None))
     worker_exit_code = 0
@@ -4270,6 +4272,7 @@ def main() -> None:
           "active_stage": "" if worker_exit_code == 0 else (recorder.current_stage() or ""),
           "monitoring": mon_snapshot,
           "memory": mem_payload,
+          "cache_evidence": harness_v2.finish_phase_caches(cache_evidence),
           **recorder.snapshot(),
       }
       stages.emit_host_stages_line(host_payload)

@@ -31,6 +31,11 @@ DEFAULT_PACKAGES: tuple[tuple[str, str], ...] = (
     ("transformers", "transformers_version"),
     ("safetensors", "safetensors_version"),
     ("numpy", "numpy_version"),
+    # TensorFlow decides which GCS reader etils uses; gcsfs is the other reader.
+    ("tensorflow", "tensorflow_version"),
+    ("gcsfs", "gcsfs_version"),
+    ("etils", "etils_version"),
+    ("huggingface_hub", "huggingface_hub_version"),
 )
 
 _SCALE_SUFFIXES = ("_scale_inv", ".scale", "_scale")
