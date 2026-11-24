@@ -42,7 +42,7 @@ fi
 # mandatory but can drastically speed up the conversion if you have a large CPU machine.
 python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
   model_name=${MODEL_NAME} scan_layers=true \
-  base_output_directory=${BASE_OUTPUT_PATH}/scanned hf_access_token=$HF_TOKEN \
+  base_output_directory=${BASE_OUTPUT_PATH}/scanned \
   hardware=cpu skip_jax_distributed_system=True \
   --hf_model_path=$BF16_LOCAL_PATH \
   --lazy_load_tensors=False \
@@ -53,7 +53,7 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml
 # Note: Simulating CPU devices and disabling lazy load here also optimizes conversion performance.
 python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
   model_name=${MODEL_NAME} scan_layers=false attention=dot_product \
-  base_output_directory=${BASE_OUTPUT_PATH}/unscanned hf_access_token=$HF_TOKEN \
+  base_output_directory=${BASE_OUTPUT_PATH}/unscanned \
   hardware=cpu skip_jax_distributed_system=True \
   --hf_model_path=$BF16_LOCAL_PATH \
   --lazy_load_tensors=False \

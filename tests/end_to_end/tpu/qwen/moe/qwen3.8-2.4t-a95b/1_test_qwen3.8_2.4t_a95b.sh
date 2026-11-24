@@ -23,7 +23,7 @@ export HF_MODEL_PATH="${HF_MODEL_PATH:-}"
 # Base output path for MaxText generations.
 export BASE_OUTPUT_PATH="${BASE_OUTPUT_PATH:-gs://your-gcs-bucket/qwen3.8-2.4t-a95b_maxtext_ckpt}"
 
-if [ -z "${HF_TOKEN}" ] && [ -z "${HF_MODEL_PATH}" ]; then
+if [ -z "${HF_TOKEN:+set}" ] && [ -z "${HF_MODEL_PATH}" ]; then
   echo "Error: HF_TOKEN environment variable is not set and HF_MODEL_PATH is not provided. Please export your Hugging Face token."
   echo "Example: export HF_TOKEN=hf_..."
   exit 1
@@ -46,7 +46,6 @@ fi
 JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
     model_name=${MODEL_NAME} \
     base_output_directory=${BASE_OUTPUT_PATH}/scanned \
-    hf_access_token=${HF_TOKEN} \
     scan_layers=true \
     use_multimodal=false \
     ${HF_LOCAL_ARG}
@@ -55,7 +54,6 @@ JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtex
 JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
     model_name=${MODEL_NAME} \
     base_output_directory=${BASE_OUTPUT_PATH}/unscanned \
-    hf_access_token=${HF_TOKEN} \
     scan_layers=false \
     use_multimodal=false \
     ${HF_LOCAL_ARG}
