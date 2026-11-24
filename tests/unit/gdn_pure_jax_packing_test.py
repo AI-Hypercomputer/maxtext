@@ -500,7 +500,7 @@ class GdnPureJaxPackingTest(unittest.TestCase):
           decoder_block=config_types.DecoderBlockType.QWEN3_NEXT,
           tokenizer_path="Qwen/Qwen3-Next-80B-A3B-Instruct",
           packing=False,
-          max_seq_token_per_tpu=4096,
+          max_seq_tokens_per_device=4096,
           max_target_length=2048,
       )
 

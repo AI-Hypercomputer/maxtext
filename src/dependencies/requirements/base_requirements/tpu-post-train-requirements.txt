@@ -7,7 +7,7 @@ cbor2
 fastapi>=0.139.0
 gepa
 gguf
-google-tunix
+google-tunix>=0.1.8
 gspread
 ipykernel
 ipywidgets

@@ -74,11 +74,11 @@ class TrainRLTest(unittest.TestCase):
     """Packing is off and the vLLM page size is backend-chosen unless set."""
     config = types.RLConfig(model_name="gemma4-26b")
 
-    self.assertEqual(config.max_seq_token_per_tpu, 0)
+    self.assertEqual(config.max_seq_tokens_per_device, 0)
     self.assertIsNone(config.vllm_block_size)
 
-    config = types.RLConfig(model_name="gemma4-26b", max_seq_token_per_tpu=12288, vllm_block_size=128)
-    self.assertEqual(config.max_seq_token_per_tpu, 12288)
+    config = types.RLConfig(model_name="gemma4-26b", max_seq_tokens_per_device=12288, vllm_block_size=128)
+    self.assertEqual(config.max_seq_tokens_per_device, 12288)
     self.assertEqual(config.vllm_block_size, 128)
 
   def test_rl_config_tunix_knob_defaults(self):
@@ -405,11 +405,11 @@ class TrainRLTest(unittest.TestCase):
 
   def test_rl_config_packing_budget_must_fit_a_maximal_sequence(self):
     """A packed row must hold prompt cap + generation cap (= max_target_length)."""
-    with self.assertRaisesRegex(ValueError, "max_seq_token_per_tpu"):
-      types.RLConfig(model_name="gemma4-26b", max_target_length=4096, max_seq_token_per_tpu=2048)
+    with self.assertRaisesRegex(ValueError, "max_seq_tokens_per_device"):
+      types.RLConfig(model_name="gemma4-26b", max_target_length=4096, max_seq_tokens_per_device=2048)
 
-    config = types.RLConfig(model_name="gemma4-26b", max_target_length=4096, max_seq_token_per_tpu=4096)
-    self.assertEqual(config.max_seq_token_per_tpu, 4096)
+    config = types.RLConfig(model_name="gemma4-26b", max_target_length=4096, max_seq_tokens_per_device=4096)
+    self.assertEqual(config.max_seq_tokens_per_device, 4096)
 
   @pytest.mark.cpu_only
   def test_rollout_prefix_caching_respects_config_for_attention_model(self):

@@ -40,7 +40,7 @@ def get_rl_micro_batch(
   into payloads via `payload_builder.create_trainer_payloads`, and assembles one
   micro-batch
   using Tunix's `create_batch_assembler`:
-  - When `config.max_seq_token_per_tpu > 0`, uses `SequencePackedBatchAssembler`
+  - When `config.max_seq_tokens_per_device > 0`, uses `SequencePackedBatchAssembler`
     with one packed row per data-parallel shard (`fsdp * data * fsdp_transpose *
     expert`)
     and at most `config.max_segments_per_packed_row` sequences per row.
@@ -79,7 +79,7 @@ def get_rl_micro_batch(
           train_micro_batch_size=int(config.micro_batch_size_to_train_on),
           max_prompt_length=prompt_length,
           max_response_length=completion_length,
-          max_seq_token_per_tpu=config.max_seq_token_per_tpu or None,
+          max_seq_tokens_per_device=config.max_seq_tokens_per_device or None,
           max_segments_per_packed_row=config.max_segments_per_packed_row or None,
           num_data_shards=num_data_shards,
       ),
