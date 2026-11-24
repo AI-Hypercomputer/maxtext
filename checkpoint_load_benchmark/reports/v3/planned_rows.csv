@@ -1,0 +1,679 @@
+platform,model,tier,topology,slices,hosts,chips,scan_mode,pipeline,build,repetitions,fix_group,expected_outcome
+v7x,qwen3-0.6b,S,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,control,OK
+v7x,qwen3-0.6b,S,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,control,OK
+v6e,qwen3-0.6b,S,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,control,OK
+v6e,qwen3-0.6b,S,2x4,1,1,8,scanned,safetensors_dynamic,baseline,1,control,OK
+v6e,qwen3-0.6b,S,2x4,1,1,8,scanned,to_maxtext,candidate,1,control,OK
+v6e,qwen3-0.6b,S,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,control,OK
+v6e,qwen3-0.6b,S,2x4,1,1,8,unscanned,safetensors_dynamic,baseline,1,control,OK
+v6e,qwen3-0.6b,S,2x4,1,1,8,unscanned,to_maxtext,candidate,1,control,OK
+v6e,qwen3-0.6b,S,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,control,OK
+v6e,qwen3-0.6b,S,2x4,2,2,16,scanned,safetensors_dynamic,baseline,1,control,OK
+v6e,qwen3-0.6b,S,2x4,2,2,16,scanned,to_maxtext,candidate,1,control,OK
+v6e,qwen3-0.6b,S,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,control,OK
+v6e,qwen3-0.6b,S,2x4,2,2,16,unscanned,safetensors_dynamic,baseline,1,control,OK
+v6e,qwen3-0.6b,S,2x4,2,2,16,unscanned,to_maxtext,candidate,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,control,OK
+v5p,qwen3-0.6b,S,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,control,OK
+v5e,qwen3-0.6b,S,16x16,1,64,256,scanned,safetensors_dynamic,candidate,1,control,OK
+v5e,qwen3-0.6b,S,16x16,1,64,256,scanned,safetensors_dynamic,baseline,1,control,OK
+v5e,qwen3-0.6b,S,16x16,1,64,256,scanned,to_maxtext,candidate,1,control,OK
+v5e,qwen3-0.6b,S,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,1,control,OK
+v5e,qwen3-0.6b,S,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,1,control,OK
+v5e,qwen3-0.6b,S,16x16,1,64,256,unscanned,to_maxtext,candidate,1,control,OK
+v7x,gemma2-2b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,gemma2-2b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v7x,gemma2-2b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,gemma2-2b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v7x,gemma2-2b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,gemma2-2b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v7x,gemma2-2b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,gemma2-2b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,gemma2-2b,B,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,gemma2-2b,B,2x4,1,1,8,scanned,to_maxtext,candidate,1,,OK
+v6e,gemma2-2b,B,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,gemma2-2b,B,2x4,1,1,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,gemma2-2b,B,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,gemma2-2b,B,2x4,2,2,16,scanned,to_maxtext,candidate,1,,OK
+v6e,gemma2-2b,B,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,gemma2-2b,B,2x4,2,2,16,unscanned,to_maxtext,candidate,1,,OK
+v5p,gemma2-2b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,gemma2-2b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v5p,gemma2-2b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,gemma2-2b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v5p,gemma2-2b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,gemma2-2b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v5p,gemma2-2b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,gemma2-2b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v7x,qwen3-4b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,qwen3-4b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v7x,qwen3-4b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,qwen3-4b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v7x,qwen3-4b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,qwen3-4b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v7x,qwen3-4b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,qwen3-4b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,qwen3-4b,B,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,qwen3-4b,B,2x4,1,1,8,scanned,to_maxtext,candidate,1,,OK
+v6e,qwen3-4b,B,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,qwen3-4b,B,2x4,1,1,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,qwen3-4b,B,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,qwen3-4b,B,2x4,2,2,16,scanned,to_maxtext,candidate,1,,OK
+v6e,qwen3-4b,B,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,qwen3-4b,B,2x4,2,2,16,unscanned,to_maxtext,candidate,1,,OK
+v5p,qwen3-4b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,qwen3-4b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v5p,qwen3-4b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,qwen3-4b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v5p,qwen3-4b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,qwen3-4b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v5p,qwen3-4b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,qwen3-4b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v7x,gemma3-4b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,gemma3-4b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v7x,gemma3-4b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,gemma3-4b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v7x,gemma3-4b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,gemma3-4b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v7x,gemma3-4b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,gemma3-4b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,gemma3-4b,B,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,gemma3-4b,B,2x4,1,1,8,scanned,to_maxtext,candidate,1,,OK
+v6e,gemma3-4b,B,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,gemma3-4b,B,2x4,1,1,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,gemma3-4b,B,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,gemma3-4b,B,2x4,2,2,16,scanned,to_maxtext,candidate,1,,OK
+v6e,gemma3-4b,B,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,gemma3-4b,B,2x4,2,2,16,unscanned,to_maxtext,candidate,1,,OK
+v5p,gemma3-4b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,gemma3-4b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v5p,gemma3-4b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,gemma3-4b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v5p,gemma3-4b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,gemma3-4b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v5p,gemma3-4b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,gemma3-4b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v7x,llama3.1-8b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,1,1,4,scanned,to_maxtext,candidate,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,1,1,4,unscanned,to_maxtext,candidate,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,control,OK
+v7x,llama3.1-8b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,control,OK
+v6e,llama3.1-8b,A,2x4,1,1,8,scanned,safetensors_dynamic,candidate,3,control,OK
+v6e,llama3.1-8b,A,2x4,1,1,8,scanned,safetensors_dynamic,baseline,3,control,OK
+v6e,llama3.1-8b,A,2x4,1,1,8,scanned,to_maxtext,candidate,3,control,OK
+v6e,llama3.1-8b,A,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,3,control,OK
+v6e,llama3.1-8b,A,2x4,1,1,8,unscanned,safetensors_dynamic,baseline,3,control,OK
+v6e,llama3.1-8b,A,2x4,1,1,8,unscanned,to_maxtext,candidate,3,control,OK
+v6e,llama3.1-8b,A,2x4,2,2,16,scanned,safetensors_dynamic,candidate,3,control,OK
+v6e,llama3.1-8b,A,2x4,2,2,16,scanned,safetensors_dynamic,baseline,3,control,OK
+v6e,llama3.1-8b,A,2x4,2,2,16,scanned,to_maxtext,candidate,3,control,OK
+v6e,llama3.1-8b,A,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,3,control,OK
+v6e,llama3.1-8b,A,2x4,2,2,16,unscanned,safetensors_dynamic,baseline,3,control,OK
+v6e,llama3.1-8b,A,2x4,2,2,16,unscanned,to_maxtext,candidate,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,1,1,4,scanned,to_maxtext,candidate,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,1,1,4,unscanned,to_maxtext,candidate,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,control,OK
+v5p,llama3.1-8b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,control,OK
+v5e,llama3.1-8b,A,16x16,1,64,256,scanned,safetensors_dynamic,candidate,3,control,OK
+v5e,llama3.1-8b,A,16x16,1,64,256,scanned,safetensors_dynamic,baseline,3,control,OK
+v5e,llama3.1-8b,A,16x16,1,64,256,scanned,to_maxtext,candidate,3,control,OK
+v5e,llama3.1-8b,A,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,3,control,OK
+v5e,llama3.1-8b,A,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,3,control,OK
+v5e,llama3.1-8b,A,16x16,1,64,256,unscanned,to_maxtext,candidate,3,control,OK
+v7x,qwen3-8b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,qwen3-8b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v7x,qwen3-8b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,qwen3-8b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v7x,qwen3-8b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,qwen3-8b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v7x,qwen3-8b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,qwen3-8b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,qwen3-8b,B,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,qwen3-8b,B,2x4,1,1,8,scanned,to_maxtext,candidate,1,,OK
+v6e,qwen3-8b,B,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,qwen3-8b,B,2x4,1,1,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,qwen3-8b,B,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,qwen3-8b,B,2x4,2,2,16,scanned,to_maxtext,candidate,1,,OK
+v6e,qwen3-8b,B,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,qwen3-8b,B,2x4,2,2,16,unscanned,to_maxtext,candidate,1,,OK
+v5p,qwen3-8b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,qwen3-8b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v5p,qwen3-8b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,qwen3-8b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v5p,qwen3-8b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,qwen3-8b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v5p,qwen3-8b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,qwen3-8b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v7x,qwen3-14b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,qwen3-14b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,1,1,8,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,1,1,8,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,1,1,8,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,1,1,8,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,2,2,16,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,2,2,16,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,2,2,16,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,qwen3-14b,B,2x4,2,2,16,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,qwen3-14b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,qwen3-32b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,1,1,8,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,1,1,8,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,1,1,8,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,1,1,8,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,2,2,16,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,2,2,16,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,2,2,16,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,qwen3-32b,B,2x4,2,2,16,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,qwen3-32b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,deepseek2-16b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek2-16b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v7x,deepseek2-16b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek2-16b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v7x,deepseek2-16b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek2-16b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v7x,deepseek2-16b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek2-16b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,deepseek2-16b,B,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,deepseek2-16b,B,2x4,1,1,8,scanned,to_maxtext,candidate,1,,OK
+v6e,deepseek2-16b,B,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,deepseek2-16b,B,2x4,1,1,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,deepseek2-16b,B,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,deepseek2-16b,B,2x4,2,2,16,scanned,to_maxtext,candidate,1,,OK
+v6e,deepseek2-16b,B,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,deepseek2-16b,B,2x4,2,2,16,unscanned,to_maxtext,candidate,1,,OK
+v5p,deepseek2-16b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek2-16b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v5p,deepseek2-16b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek2-16b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v5p,deepseek2-16b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek2-16b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v5p,deepseek2-16b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek2-16b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v7x,gpt-oss-20b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v7x,gpt-oss-20b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,1,1,8,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,1,1,8,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,1,1,8,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,1,1,8,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,2,2,16,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,2,2,16,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,2,2,16,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v6e,gpt-oss-20b,B,2x4,2,2,16,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,hidden size not a power of two,OK
+v5p,gpt-oss-20b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,hidden size not a power of two,OK
+v7x,qwen3-30b-a3b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,1,1,4,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,1,1,4,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-30b-a3b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,1,1,8,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,1,1,8,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,1,1,8,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,1,1,8,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,1,1,8,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,2,2,16,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,2,2,16,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,2,2,16,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,2,2,16,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-30b-a3b,A,2x4,2,2,16,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,1,1,4,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,1,1,4,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-30b-a3b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5e,qwen3-30b-a3b,A,16x16,1,64,256,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5e,qwen3-30b-a3b,A,16x16,1,64,256,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OOM-HOST: the bug that the GCS read fix removes
+v5e,qwen3-30b-a3b,A,16x16,1,64,256,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5e,qwen3-30b-a3b,A,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5e,qwen3-30b-a3b,A,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OOM-HOST: the bug that the GCS read fix removes
+v5e,qwen3-30b-a3b,A,16x16,1,64,256,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,mixtral-8x7b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,mixtral-8x7b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v7x,mixtral-8x7b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,mixtral-8x7b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v7x,mixtral-8x7b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,mixtral-8x7b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v7x,mixtral-8x7b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,mixtral-8x7b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,mixtral-8x7b,B,2x4,1,1,8,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,mixtral-8x7b,B,2x4,1,1,8,scanned,to_maxtext,candidate,1,,OK
+v6e,mixtral-8x7b,B,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,mixtral-8x7b,B,2x4,1,1,8,unscanned,to_maxtext,candidate,1,,OK
+v6e,mixtral-8x7b,B,2x4,2,2,16,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,mixtral-8x7b,B,2x4,2,2,16,scanned,to_maxtext,candidate,1,,OK
+v6e,mixtral-8x7b,B,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,mixtral-8x7b,B,2x4,2,2,16,unscanned,to_maxtext,candidate,1,,OK
+v5p,mixtral-8x7b,B,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,mixtral-8x7b,B,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OK
+v5p,mixtral-8x7b,B,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,mixtral-8x7b,B,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OK
+v5p,mixtral-8x7b,B,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,mixtral-8x7b,B,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OK
+v5p,mixtral-8x7b,B,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,mixtral-8x7b,B,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OK
+v7x,llama3.1-70b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,1,1,4,scanned,to_maxtext,candidate,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,1,1,4,unscanned,to_maxtext,candidate,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,control,OK
+v7x,llama3.1-70b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,control,OK
+v6e,llama3.1-70b,A,2x4,1,1,8,scanned,safetensors_dynamic,candidate,3,control,OK
+v6e,llama3.1-70b,A,2x4,1,1,8,scanned,safetensors_dynamic,baseline,3,control,OK
+v6e,llama3.1-70b,A,2x4,1,1,8,scanned,to_maxtext,candidate,3,control,OK
+v6e,llama3.1-70b,A,2x4,1,1,8,unscanned,safetensors_dynamic,candidate,3,control,OK
+v6e,llama3.1-70b,A,2x4,1,1,8,unscanned,safetensors_dynamic,baseline,3,control,OK
+v6e,llama3.1-70b,A,2x4,1,1,8,unscanned,to_maxtext,candidate,3,control,OK
+v6e,llama3.1-70b,A,2x4,2,2,16,scanned,safetensors_dynamic,candidate,3,control,OK
+v6e,llama3.1-70b,A,2x4,2,2,16,scanned,safetensors_dynamic,baseline,3,control,OK
+v6e,llama3.1-70b,A,2x4,2,2,16,scanned,to_maxtext,candidate,3,control,OK
+v6e,llama3.1-70b,A,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,3,control,OK
+v6e,llama3.1-70b,A,2x4,2,2,16,unscanned,safetensors_dynamic,baseline,3,control,OK
+v6e,llama3.1-70b,A,2x4,2,2,16,unscanned,to_maxtext,candidate,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,1,1,4,scanned,to_maxtext,candidate,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,1,1,4,unscanned,to_maxtext,candidate,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,control,OK
+v5p,llama3.1-70b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,control,OK
+v5e,llama3.1-70b,A,16x16,1,64,256,scanned,safetensors_dynamic,candidate,3,control,OK
+v5e,llama3.1-70b,A,16x16,1,64,256,scanned,safetensors_dynamic,baseline,3,control,OK
+v5e,llama3.1-70b,A,16x16,1,64,256,scanned,to_maxtext,candidate,3,control,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,llama3.1-70b,A,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,3,control,OK
+v5e,llama3.1-70b,A,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,3,control,OK
+v5e,llama3.1-70b,A,16x16,1,64,256,unscanned,to_maxtext,candidate,3,control,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,gpt-oss-120b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,1,1,4,scanned,to_maxtext,candidate,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,1,1,4,unscanned,to_maxtext,candidate,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v7x,gpt-oss-120b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,2x4,2,2,16,scanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,2x4,2,2,16,scanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,2x4,2,2,16,scanned,to_maxtext,candidate,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,2x4,2,2,16,unscanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,2x4,2,2,16,unscanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,2x4,2,2,16,unscanned,to_maxtext,candidate,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,4x4,1,4,16,scanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,4x4,1,4,16,scanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,4x4,1,4,16,scanned,to_maxtext,candidate,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,4x4,1,4,16,unscanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,4x4,1,4,16,unscanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v6e,gpt-oss-120b,A,4x4,1,4,16,unscanned,to_maxtext,candidate,3,hidden size not a power of two,OK
+v5p,gpt-oss-120b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v5p,gpt-oss-120b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v5p,gpt-oss-120b,A,2x2x1,1,1,4,scanned,to_maxtext,candidate,3,hidden size not a power of two,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,gpt-oss-120b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v5p,gpt-oss-120b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v5p,gpt-oss-120b,A,2x2x1,1,1,4,unscanned,to_maxtext,candidate,3,hidden size not a power of two,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,gpt-oss-120b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v5p,gpt-oss-120b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v5p,gpt-oss-120b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,hidden size not a power of two,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,gpt-oss-120b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v5p,gpt-oss-120b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v5p,gpt-oss-120b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,hidden size not a power of two,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,gpt-oss-120b,A,16x16,1,64,256,scanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v5e,gpt-oss-120b,A,16x16,1,64,256,scanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v5e,gpt-oss-120b,A,16x16,1,64,256,scanned,to_maxtext,candidate,3,hidden size not a power of two,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,gpt-oss-120b,A,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,3,hidden size not a power of two,OK
+v5e,gpt-oss-120b,A,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,3,hidden size not a power of two,OK
+v5e,gpt-oss-120b,A,16x16,1,64,256,unscanned,to_maxtext,candidate,3,hidden size not a power of two,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3-235b-a22b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-235b-a22b,A,2x2x1,1,1,4,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-235b-a22b,A,2x2x1,1,1,4,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3-235b-a22b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-235b-a22b,A,2x2x1,1,1,4,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-235b-a22b,A,2x2x1,1,1,4,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3-235b-a22b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-235b-a22b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-235b-a22b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3-235b-a22b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-235b-a22b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-235b-a22b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,qwen3-235b-a22b,A,8x8,1,16,64,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-235b-a22b,A,8x8,1,16,64,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-235b-a22b,A,8x8,1,16,64,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,qwen3-235b-a22b,A,8x8,1,16,64,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-235b-a22b,A,8x8,1,16,64,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-235b-a22b,A,8x8,1,16,64,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3-235b-a22b,A,2x2x2,1,2,8,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-235b-a22b,A,2x2x2,1,2,8,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-235b-a22b,A,2x2x2,1,2,8,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3-235b-a22b,A,2x2x2,1,2,8,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-235b-a22b,A,2x2x2,1,2,8,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-235b-a22b,A,2x2x2,1,2,8,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3-235b-a22b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-235b-a22b,A,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-235b-a22b,A,2x2x1,2,2,8,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3-235b-a22b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-235b-a22b,A,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-235b-a22b,A,2x2x1,2,2,8,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,qwen3-235b-a22b,A,16x16,1,64,256,scanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5e,qwen3-235b-a22b,A,16x16,1,64,256,scanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OOM-HOST: the bug that the GCS read fix removes
+v5e,qwen3-235b-a22b,A,16x16,1,64,256,scanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,qwen3-235b-a22b,A,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,3,fine-grained MoE on several hosts or slices,OK
+v5e,qwen3-235b-a22b,A,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,3,fine-grained MoE on several hosts or slices,OOM-HOST: the bug that the GCS read fix removes
+v5e,qwen3-235b-a22b,A,16x16,1,64,256,unscanned,to_maxtext,candidate,3,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek4-284b,C,2x2x1,1,1,4,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek4-284b,C,2x2x1,1,1,4,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek4-284b,C,2x2x1,1,1,4,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek4-284b,C,2x2x1,1,1,4,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek4-284b,C,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek4-284b,C,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek4-284b,C,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek4-284b,C,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,deepseek4-284b,C,8x8,1,16,64,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,deepseek4-284b,C,8x8,1,16,64,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,deepseek4-284b,C,8x8,1,16,64,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,deepseek4-284b,C,8x8,1,16,64,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek4-284b,C,2x2x4,1,4,16,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek4-284b,C,2x2x4,1,4,16,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek4-284b,C,2x2x4,1,4,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek4-284b,C,2x2x4,1,4,16,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek4-284b,C,2x2x2,2,4,16,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek4-284b,C,2x2x2,2,4,16,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek4-284b,C,2x2x2,2,4,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek4-284b,C,2x2x2,2,4,16,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,deepseek4-284b,C,16x16,1,64,256,scanned,safetensors_dynamic,candidate,1,,OK
+v5e,deepseek4-284b,C,16x16,1,64,256,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,deepseek4-284b,C,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,1,,OK
+v5e,deepseek4-284b,C,16x16,1,64,256,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3.5-397b-a17b,C,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,qwen3.5-397b-a17b,C,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,qwen3.5-397b-a17b,C,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3.5-397b-a17b,C,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,qwen3.5-397b-a17b,C,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,qwen3.5-397b-a17b,C,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3.5-397b-a17b,C,2x2x2,1,2,8,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,qwen3.5-397b-a17b,C,2x2x2,1,2,8,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,qwen3.5-397b-a17b,C,2x2x2,1,2,8,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3.5-397b-a17b,C,2x2x2,1,2,8,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,qwen3.5-397b-a17b,C,2x2x2,1,2,8,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,qwen3.5-397b-a17b,C,2x2x2,1,2,8,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,qwen3.5-397b-a17b,C,8x8,1,16,64,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v6e,qwen3.5-397b-a17b,C,8x8,1,16,64,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v6e,qwen3.5-397b-a17b,C,8x8,1,16,64,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,qwen3.5-397b-a17b,C,8x8,1,16,64,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v6e,qwen3.5-397b-a17b,C,8x8,1,16,64,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v6e,qwen3.5-397b-a17b,C,8x8,1,16,64,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3.5-397b-a17b,C,2x2x4,1,4,16,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,qwen3.5-397b-a17b,C,2x2x4,1,4,16,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,qwen3.5-397b-a17b,C,2x2x4,1,4,16,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3.5-397b-a17b,C,2x2x4,1,4,16,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,qwen3.5-397b-a17b,C,2x2x4,1,4,16,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,qwen3.5-397b-a17b,C,2x2x4,1,4,16,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3.5-397b-a17b,C,2x4x4,1,8,32,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,qwen3.5-397b-a17b,C,2x4x4,1,8,32,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,qwen3.5-397b-a17b,C,2x4x4,1,8,32,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3.5-397b-a17b,C,2x4x4,1,8,32,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,qwen3.5-397b-a17b,C,2x4x4,1,8,32,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,qwen3.5-397b-a17b,C,2x4x4,1,8,32,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,qwen3.5-397b-a17b,C,16x16,1,64,256,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5e,qwen3.5-397b-a17b,C,16x16,1,64,256,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5e,qwen3.5-397b-a17b,C,16x16,1,64,256,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,qwen3.5-397b-a17b,C,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5e,qwen3.5-397b-a17b,C,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5e,qwen3.5-397b-a17b,C,16x16,1,64,256,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3-480b-a35b,C,2x2x1,2,2,8,scanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-480b-a35b,C,2x2x1,2,2,8,scanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-480b-a35b,C,2x2x1,2,2,8,scanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3-480b-a35b,C,2x2x1,2,2,8,unscanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-480b-a35b,C,2x2x1,2,2,8,unscanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-480b-a35b,C,2x2x1,2,2,8,unscanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3-480b-a35b,C,2x2x2,1,2,8,scanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-480b-a35b,C,2x2x2,1,2,8,scanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-480b-a35b,C,2x2x2,1,2,8,scanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,qwen3-480b-a35b,C,2x2x2,1,2,8,unscanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-480b-a35b,C,2x2x2,1,2,8,unscanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v7x,qwen3-480b-a35b,C,2x2x2,1,2,8,unscanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,qwen3-480b-a35b,C,8x8,1,16,64,scanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-480b-a35b,C,8x8,1,16,64,scanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-480b-a35b,C,8x8,1,16,64,scanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,qwen3-480b-a35b,C,8x8,1,16,64,unscanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-480b-a35b,C,8x8,1,16,64,unscanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v6e,qwen3-480b-a35b,C,8x8,1,16,64,unscanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3-480b-a35b,C,2x2x4,1,4,16,scanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-480b-a35b,C,2x2x4,1,4,16,scanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-480b-a35b,C,2x2x4,1,4,16,scanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3-480b-a35b,C,2x2x4,1,4,16,unscanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-480b-a35b,C,2x2x4,1,4,16,unscanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-480b-a35b,C,2x2x4,1,4,16,unscanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3-480b-a35b,C,2x4x4,1,8,32,scanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-480b-a35b,C,2x4x4,1,8,32,scanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-480b-a35b,C,2x4x4,1,8,32,scanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,qwen3-480b-a35b,C,2x4x4,1,8,32,unscanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-480b-a35b,C,2x4x4,1,8,32,unscanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OK
+v5p,qwen3-480b-a35b,C,2x4x4,1,8,32,unscanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,qwen3-480b-a35b,C,16x16,1,64,256,scanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v5e,qwen3-480b-a35b,C,16x16,1,64,256,scanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OOM-HOST: the bug that the GCS read fix removes
+v5e,qwen3-480b-a35b,C,16x16,1,64,256,scanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,qwen3-480b-a35b,C,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,1,fine-grained MoE on several hosts or slices,OK
+v5e,qwen3-480b-a35b,C,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,1,fine-grained MoE on several hosts or slices,OOM-HOST: the bug that the GCS read fix removes
+v5e,qwen3-480b-a35b,C,16x16,1,64,256,unscanned,to_maxtext,candidate,1,fine-grained MoE on several hosts or slices,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek3-671b,C,2x2x4,1,4,16,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,deepseek3-671b,C,2x2x4,1,4,16,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,deepseek3-671b,C,2x2x4,1,4,16,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek3-671b,C,2x2x4,1,4,16,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,deepseek3-671b,C,2x2x4,1,4,16,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,deepseek3-671b,C,2x2x4,1,4,16,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek3-671b,C,2x2x2,2,4,16,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,deepseek3-671b,C,2x2x2,2,4,16,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,deepseek3-671b,C,2x2x2,2,4,16,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek3-671b,C,2x2x2,2,4,16,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,deepseek3-671b,C,2x2x2,2,4,16,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,deepseek3-671b,C,2x2x2,2,4,16,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,deepseek3-671b,C,16x16,1,64,256,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v6e,deepseek3-671b,C,16x16,1,64,256,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v6e,deepseek3-671b,C,16x16,1,64,256,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,deepseek3-671b,C,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v6e,deepseek3-671b,C,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v6e,deepseek3-671b,C,16x16,1,64,256,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek3-671b,C,2x4x4,1,8,32,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,deepseek3-671b,C,2x4x4,1,8,32,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,deepseek3-671b,C,2x4x4,1,8,32,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek3-671b,C,2x4x4,1,8,32,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,deepseek3-671b,C,2x4x4,1,8,32,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,deepseek3-671b,C,2x4x4,1,8,32,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek3-671b,C,2x2x4,2,8,32,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,deepseek3-671b,C,2x2x4,2,8,32,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,deepseek3-671b,C,2x2x4,2,8,32,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek3-671b,C,2x2x4,2,8,32,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,deepseek3-671b,C,2x2x4,2,8,32,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,deepseek3-671b,C,2x2x4,2,8,32,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,deepseek3-671b,C,16x16,1,64,256,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5e,deepseek3-671b,C,16x16,1,64,256,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5e,deepseek3-671b,C,16x16,1,64,256,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,deepseek3-671b,C,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5e,deepseek3-671b,C,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5e,deepseek3-671b,C,16x16,1,64,256,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek3.2-671b,C,2x2x4,1,4,16,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek3.2-671b,C,2x2x4,1,4,16,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek3.2-671b,C,2x2x4,1,4,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek3.2-671b,C,2x2x4,1,4,16,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek3.2-671b,C,2x2x2,2,4,16,scanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek3.2-671b,C,2x2x2,2,4,16,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek3.2-671b,C,2x2x2,2,4,16,unscanned,safetensors_dynamic,candidate,1,,OK
+v7x,deepseek3.2-671b,C,2x2x2,2,4,16,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,deepseek3.2-671b,C,16x16,1,64,256,scanned,safetensors_dynamic,candidate,1,,OK
+v6e,deepseek3.2-671b,C,16x16,1,64,256,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,deepseek3.2-671b,C,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,1,,OK
+v6e,deepseek3.2-671b,C,16x16,1,64,256,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek3.2-671b,C,2x4x4,1,8,32,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek3.2-671b,C,2x4x4,1,8,32,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek3.2-671b,C,2x4x4,1,8,32,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek3.2-671b,C,2x4x4,1,8,32,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek3.2-671b,C,2x2x4,2,8,32,scanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek3.2-671b,C,2x2x4,2,8,32,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek3.2-671b,C,2x2x4,2,8,32,unscanned,safetensors_dynamic,candidate,1,,OK
+v5p,deepseek3.2-671b,C,2x2x4,2,8,32,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,deepseek3.2-671b,C,16x16,1,64,256,scanned,safetensors_dynamic,candidate,1,,OK
+v5e,deepseek3.2-671b,C,16x16,1,64,256,scanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,deepseek3.2-671b,C,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,1,,OK
+v5e,deepseek3.2-671b,C,16x16,1,64,256,unscanned,to_maxtext,candidate,1,,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek4-1600b,C,2x4x4,1,8,32,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,deepseek4-1600b,C,2x4x4,1,8,32,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,deepseek4-1600b,C,2x4x4,1,8,32,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v7x,deepseek4-1600b,C,2x4x4,1,8,32,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v7x,deepseek4-1600b,C,2x4x4,1,8,32,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v7x,deepseek4-1600b,C,2x4x4,1,8,32,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,deepseek4-1600b,C,16x16,1,64,256,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v6e,deepseek4-1600b,C,16x16,1,64,256,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v6e,deepseek4-1600b,C,16x16,1,64,256,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v6e,deepseek4-1600b,C,16x16,1,64,256,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v6e,deepseek4-1600b,C,16x16,1,64,256,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v6e,deepseek4-1600b,C,16x16,1,64,256,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek4-1600b,C,4x4x4,1,16,64,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,deepseek4-1600b,C,4x4x4,1,16,64,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,deepseek4-1600b,C,4x4x4,1,16,64,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5p,deepseek4-1600b,C,4x4x4,1,16,64,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5p,deepseek4-1600b,C,4x4x4,1,16,64,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5p,deepseek4-1600b,C,4x4x4,1,16,64,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,deepseek4-1600b,C,16x16,2,128,512,scanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OOM-HBM: stacking needs more than 16 GiB per chip (open issue)
+v5e,deepseek4-1600b,C,16x16,2,128,512,scanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OOM-HBM: stacking needs more than 16 GiB per chip (open issue)
+v5e,deepseek4-1600b,C,16x16,2,128,512,scanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
+v5e,deepseek4-1600b,C,16x16,2,128,512,unscanned,safetensors_dynamic,candidate,1,scanned stacked MoE on many chips,OK
+v5e,deepseek4-1600b,C,16x16,2,128,512,unscanned,safetensors_dynamic,baseline,1,scanned stacked MoE on many chips,OK
+v5e,deepseek4-1600b,C,16x16,2,128,512,unscanned,to_maxtext,candidate,1,scanned stacked MoE on many chips,OOM-HOST or NOT RUN: the conversion does not fit in one host's RAM
