@@ -23,6 +23,15 @@ on:
         type: 'string'
         description: 'Any additional context from the request'
         required: false
+      mode:
+        type: 'string'
+        description: >-
+          'full' always runs a full review (explicit requests). 'auto' (automatic
+          triggers) skips the review when the PR diff is unchanged since the
+          bot's last review or the per-PR limit is reached, and otherwise runs
+          an incremental review of what changed since the last review.
+        required: false
+        default: 'full'
     secrets:
       APP_PRIVATE_KEY:
         required: false
@@ -32,9 +41,14 @@ on:
         required: false
 
 concurrency:
-  # any single pull request, only one review runs at a time
-  group: '${{ github.workflow }}-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}'
-  cancel-in-progress: true
+  # Any single pull request, only one review runs at a time, whatever the
+  # trigger (push, label, or comment), so two runs never follow up on the same
+  # earlier threads concurrently. An explicit request cancels a running review;
+  # an automatic review waits for the running one instead of cancelling it.
+  # A cancelled review can leave a pending review behind; the next run's
+  # prepare step deletes it before the model runs.
+  group: '${{ github.workflow }}-review-${{ github.event.pull_request.number || github.event.issue.number }}'
+  cancel-in-progress: ${{ inputs.mode != 'auto' }}
 
 defaults:
   run:
@@ -87,8 +101,28 @@ jobs:
           PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
           ADDITIONAL_CONTEXT: '${{ inputs.additional_context }}'
 
+      - name: 'Decide review mode and gather earlier review state'
+        # Writes .gemini/review_mode.json, review_delta.md,
+        # previous_threads.json, and other_findings.json for the prompt.
+        # Reads the PR only through the GitHub API; the script comes from the
+        # checked-out base for `pull_request_target` runs. If the GitHub API
+        # fails, explicit requests fall back to a full review and automatic
+        # reviews are skipped; the step itself does not fail.
+        id: 'prepare'
+        env:
+          GH_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          BOT_LOGIN: '${{ steps.mint_identity_token.outputs.app-slug && format(''{0}[bot]'', steps.mint_identity_token.outputs.app-slug) || ''github-actions[bot]'' }}'
+          MAX_AUTO_REVIEWS: '${{ vars.GEMINI_MAX_AUTO_REVIEWS || 20 }}'
+          MODE: '${{ inputs.mode == ''auto'' && ''auto'' || ''full'' }}'
+        run: |-
+          python3 .github/scripts/gemini_review_state.py prepare --mode "${MODE}"
+
       - name: 'Run Gemini pull request review'
         # reviews code with detailed set of instructions for the Gemini
+        if: |-
+          ${{ steps.prepare.outputs.mode != 'skip' }}
         uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
         id: 'gemini_pr_review'
         env:
@@ -163,3 +197,19 @@ jobs:
           # including gemini-review.toml, into .gemini/commands/ and would
           # overwrite ours.
           prompt: '/maxtext-review'
+
+      - name: 'Follow up on earlier review threads'
+        # Replies to, and resolves, the bot's own earlier threads based on the
+        # verdicts at the end of the model's response. The script only touches
+        # threads listed in previous_threads.json (the bot's own, unresolved).
+        if: |-
+          ${{ steps.prepare.outputs.mode != 'skip' && steps.prepare.outputs.previous_thread_count != '0' && steps.gemini_pr_review.outcome == 'success' }}
+        env:
+          GH_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          BOT_LOGIN: '${{ steps.mint_identity_token.outputs.app-slug && format(''{0}[bot]'', steps.mint_identity_token.outputs.app-slug) || ''github-actions[bot]'' }}'
+          GEMINI_RESPONSE: '${{ steps.gemini_pr_review.outputs.summary }}'
+          HEAD_SHA: '${{ steps.prepare.outputs.head_sha }}'
+        run: |-
+          python3 .github/scripts/gemini_review_state.py apply --head-sha "${HEAD_SHA}"

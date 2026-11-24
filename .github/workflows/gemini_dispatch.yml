@@ -27,14 +27,18 @@ on:
   pull_request_review:
     types: ['submitted']
 
-  # Trigger when a comment is added to the main conversation of a PR/Issue
-  issue_comment:
+  # Trigger when a comment is added to the main conversation of a PR/Issue.
+  # The dispatch job below only acts on comments that start with @gemini-cli
+  # from an OWNER, MEMBER, or COLLABORATOR, and never runs PR code.
+  issue_comment:  # zizmor: ignore[dangerous-triggers] gated to maintainers; never runs PR code
     types: ['created']
 
-  # Trigger when any label is attached to the PR, and when a PR is opened or
-  # marked ready for review (automatic review).
+  # Trigger when any label is attached to the PR, and when a PR is opened,
+  # marked ready for review, or pushed to (automatic review). Reviews on push
+  # (`synchronize`) run only when the repository variable GEMINI_REVIEW_ON_PUSH
+  # is 'true'; they are debounced and incremental (see gemini_review.yml).
   pull_request:
-    types: ['labeled', 'opened', 'ready_for_review']
+    types: ['labeled', 'opened', 'ready_for_review', 'synchronize']
 
   # Automatic review of PRs from forks, which do not receive secrets on
   # `pull_request` events. SECURITY: this event runs with secrets and the
@@ -42,8 +46,8 @@ on:
   # out, build, or execute code from the PR head; the review reads the PR only
   # through the GitHub API. It is gated below to fork PRs whose author is a
   # CONTRIBUTOR, MEMBER, COLLABORATOR, or OWNER of this repository.
-  pull_request_target:
-    types: ['opened', 'ready_for_review']
+  pull_request_target:  # zizmor: ignore[dangerous-triggers] never checks out or runs PR code (see above)
+    types: ['opened', 'ready_for_review', 'synchronize']
 
 defaults:
   run:
@@ -74,7 +78,8 @@ jobs:
     # For PRs from branches of this repository: reviews run when a
     # gemini-review/gemini-investigate label is added, or automatically when a
     # non-draft PR opened by a human (not a bot, e.g. Copybara exports of
-    # internal changes) is opened or marked ready for review.
+    # internal changes) is opened or marked ready for review, or when a human
+    # pushes to it and the GEMINI_REVIEW_ON_PUSH repository variable is 'true'.
     # For PRs from forks (pull_request_target): automatic review only, and only
     # if the PR author is a CONTRIBUTOR, MEMBER, COLLABORATOR, or OWNER. Other
     # fork PRs can be reviewed by a maintainer commenting @gemini-cli /review.
@@ -88,13 +93,19 @@ jobs:
       ) || (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.fork == false &&
-        (github.event.action == 'opened' || github.event.action == 'ready_for_review') &&
+        (
+          github.event.action == 'opened' || github.event.action == 'ready_for_review' ||
+          (github.event.action == 'synchronize' && vars.GEMINI_REVIEW_ON_PUSH == 'true')
+        ) &&
         github.event.pull_request.draft == false &&
         github.event.sender.type == 'User'
       ) || (
         github.event_name == 'pull_request_target' &&
         github.event.pull_request.head.repo.full_name != github.repository &&
-        (github.event.action == 'opened' || github.event.action == 'ready_for_review') &&
+        (
+          github.event.action == 'opened' || github.event.action == 'ready_for_review' ||
+          (github.event.action == 'synchronize' && vars.GEMINI_REVIEW_ON_PUSH == 'true')
+        ) &&
         github.event.pull_request.draft == false &&
         github.event.sender.type == 'User' &&
         contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR"]'), github.event.pull_request.author_association)
@@ -140,7 +151,7 @@ jobs:
             const payload = context.payload;
             core.setOutput('request', request);
 
-            if (payload.action === 'opened' || payload.action === 'ready_for_review') {
+            if (payload.action === 'opened' || payload.action === 'ready_for_review' || payload.action === 'synchronize') {
               core.setOutput('command', 'review');
               core.setOutput('automatic', 'true');
             } else if (payload.action === 'labeled' && payload.label && payload.label.name.includes('gemini-review')) {
@@ -165,6 +176,10 @@ jobs:
             }
 
       - name: 'Acknowledge request'
+        # Reviews on push are silent until they post a review: most pushes are
+        # debounced or skipped, so an acknowledgement would only add noise.
+        if: |-
+          ${{ github.event.action != 'synchronize' }}
         env:
           GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
           ISSUE_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
@@ -182,10 +197,38 @@ jobs:
             --body "${MESSAGE}" \
             --repo "${REPOSITORY}"
 
-  review:
+  debounce:
+    # Debounces reviews on push: each push restarts the wait and cancels the
+    # previous push's pending wait, so a burst of pushes produces one review of
+    # the latest commit once the PR has been quiet for the debounce period.
     needs: 'dispatch'
     if: |-
-      ${{ needs.dispatch.outputs.command == 'review' }}
+      ${{ needs.dispatch.outputs.command == 'review' && github.event.action == 'synchronize' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 30
+    permissions: {}
+    concurrency:
+      group: 'gemini-review-debounce-${{ github.event.pull_request.number }}'
+      cancel-in-progress: true
+    steps:
+      - name: 'Wait for the PR to be quiet'
+        env:
+          DEBOUNCE_SECONDS: '${{ vars.GEMINI_REVIEW_DEBOUNCE_SECONDS || 300 }}'
+        run: |-
+          if [[ ! "${DEBOUNCE_SECONDS}" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid GEMINI_REVIEW_DEBOUNCE_SECONDS: '${DEBOUNCE_SECONDS}'"
+            exit 1
+          fi
+          sleep "${DEBOUNCE_SECONDS}"
+
+  review:
+    needs:
+      - 'dispatch'
+      - 'debounce'
+    # Runs after the debounce for reviews on push; the debounce is skipped for
+    # all other triggers. A debounce cancelled by a newer push skips the review.
+    if: |-
+      ${{ always() && needs.dispatch.result == 'success' && needs.dispatch.outputs.command == 'review' && (needs.debounce.result == 'success' || needs.debounce.result == 'skipped') }}
     uses: './.github/workflows/gemini_review.yml'
     permissions:
       contents: 'read'
@@ -194,6 +237,11 @@ jobs:
       pull-requests: 'write'
     with:
       additional_context: '${{ needs.dispatch.outputs.additional_context }}'
+      # Reviews on push may be skipped (no change since the last review, or
+      # the per-PR limit) or incremental. Explicit requests, and PRs being
+      # opened or marked ready for review (which are acknowledged with a
+      # comment), always get a full review.
+      mode: '${{ github.event.action == ''synchronize'' && ''auto'' || ''full'' }}'
     secrets:
       APP_PRIVATE_KEY: ${{ secrets.APP_PRIVATE_KEY }}
       GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
@@ -239,8 +287,10 @@ jobs:
       - 'review'
       - 'invoke'
       - 'investigate'
+    # Reviews on push are never requested by a person, so a failed one is left
+    # to the workflow logs rather than answered with a comment.
     if: |-
-      ${{ always() && !cancelled() && (failure() || needs.dispatch.outputs.command == 'fallthrough') }}
+      ${{ always() && !cancelled() && github.event.action != 'synchronize' && (failure() || needs.dispatch.outputs.command == 'fallthrough') }}
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'

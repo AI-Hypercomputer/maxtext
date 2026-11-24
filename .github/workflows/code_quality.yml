@@ -55,6 +55,12 @@ jobs:
          path: ~/.cache/pre-commit
          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
 
+    - name: Test Gemini review state script
+      # Unit tests for .github/scripts/gemini_review_state.py (used by
+      # gemini_review.yml). Standard library only, so no install is needed.
+      # They live outside tests/, so pytest-based CI does not collect them.
+      run: python3 .github/scripts/gemini_review_state_test.py
+
     - name: Run code quality checks
       run: |
         . "$GITHUB_WORKSPACE"/venv/bin/activate
