@@ -44,7 +44,7 @@ from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as 
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as m3_moe
-from maxtext.m3.core.sharding import DefaultSharding, Sharding, param_metadata
+from maxtext.m3.core.sharding import DefaultSharding, Sharding, TensorType, param_metadata, sharding_from_config
 
 # =================================================================================================
 # Normalization layers and 4-stream gated residual (hyper-connection)
@@ -123,35 +123,68 @@ def l2norm(x: jax.Array, dim: int = -1, eps: float = 1e-6) -> jax.Array:
 _BATCH_MESH_AXES = ("data", "stage", "fsdp", "fsdp_transpose", "expert")
 
 
-def get_batch_mesh_axes() -> tuple[str, ...]:
-  """Returns active batch mesh axis names when a multi-device mesh is set."""
+def get_batch_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
+  """Returns active batch mesh axis names for `sharding` when a multi-device mesh is set."""
   mesh = jax.sharding.get_abstract_mesh()
   if mesh.empty or mesh.size <= 1:
     return ()
+  if sharding is not None:
+    mapped = m3_kernels.mesh_axis_names(sharding.map_axis("batch", "tokens", TensorType.ACTIVATION))
+    len_mapped = set(m3_kernels.mesh_axis_names(sharding.map_axis("length", "tokens", TensorType.ACTIVATION)))
+    candidates = ("data", "stage", *[ax for ax in mapped if ax not in ("data", "stage") and ax not in len_mapped])
+    return tuple(ax for ax in candidates if mesh.shape.get(ax, 1) > 1)
   return tuple(ax for ax in _BATCH_MESH_AXES if mesh.shape.get(ax, 1) > 1)
 
 
-def shard_batch(x: jax.Array) -> jax.Array:
-  """Constrains axis 0 of x to active batch mesh axes when a multi-device mesh is set.
+def _get_length_mesh_axes(sharding: Sharding | None) -> tuple[str, ...]:
+  """Returns active sequence-length mesh axis names when `sharding` maps `length` outside batch axes."""
+  if sharding is None:
+    return ()
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or mesh.size <= 1:
+    return ()
+  batch_set = set(get_batch_mesh_axes(sharding))
+  mapped = m3_kernels.mesh_axis_names(sharding.map_axis("length", "tokens", TensorType.ACTIVATION))
+  return tuple(ax for ax in mapped if ax not in batch_set and mesh.shape.get(ax, 1) > 1)
+
+
+def shard_batch(x: jax.Array, sharding: Sharding | None = None) -> jax.Array:
+  """Constrains batch (and preset sequence-length) axes of `x` when a multi-device mesh is set.
 
   Batches that don't divide evenly over the batch shards (e.g. batch-1 decode) are left unconstrained, matching the
   unsharded fallback in `Qwen3_8Experts`.
   """
   if x.ndim == 0:
     return x
-  batch_axes = get_batch_mesh_axes()
-  if not batch_axes:
-    return x
   mesh = jax.sharding.get_abstract_mesh()
-  if x.shape[0] % math.prod(mesh.shape[ax] for ax in batch_axes) != 0:
+  if mesh.empty or mesh.size <= 1:
     return x
-  spec = jax.sharding.PartitionSpec(batch_axes, *([None] * (x.ndim - 1)))
+  batch_axes = get_batch_mesh_axes(sharding)
+  eff_batch: str | tuple[str, ...] | None = None
+  if batch_axes and x.shape[0] % math.prod(mesh.shape[ax] for ax in batch_axes) == 0:
+    eff_batch = batch_axes[0] if len(batch_axes) == 1 else batch_axes
+  eff_len: str | tuple[str, ...] | None = None
+  if x.ndim >= 2 and x.shape[1] > 1:
+    len_axes = _get_length_mesh_axes(sharding)
+    if len_axes and x.shape[1] % math.prod(mesh.shape[ax] for ax in len_axes) == 0:
+      eff_len = len_axes[0] if len(len_axes) == 1 else len_axes
+  if eff_batch is None and eff_len is None:
+    return x
+  if x.ndim == 1:
+    spec = jax.sharding.PartitionSpec(eff_batch)
+  else:
+    spec = jax.sharding.PartitionSpec(eff_batch, eff_len, *([None] * (x.ndim - 2)))
   return jax.lax.with_sharding_constraint(x, spec)
 
 
-def init_hyper_connection_streams(token_embeddings: jax.Array, hc_count: int = 4) -> jax.Array:
+def init_hyper_connection_streams(
+    token_embeddings: jax.Array,
+    hc_count: int = 4,
+    *,
+    sharding: Sharding | None = None,
+) -> jax.Array:
   """Initializes residual stream by replicating token embeddings across streams."""
-  return shard_batch(jnp.concatenate([token_embeddings] * hc_count, axis=-1))
+  return shard_batch(jnp.concatenate([token_embeddings] * hc_count, axis=-1), sharding=sharding)
 
 
 class Qwen3_8GatedResidual(nnx.Module):
@@ -781,7 +814,7 @@ class Qwen3_8SparseAttention(nnx.Module):
       attention_kernel: str = "dense",
       rngs: nnx.Rngs,
   ):
-    del sharding
+    self.sharding = sharding
     if num_query_heads % num_kv_heads != 0:
       raise ValueError(f"num_query_heads ({num_query_heads}) must be divisible by num_kv_heads ({num_kv_heads}).")
     if attention_kernel not in ("dense", "flash"):
@@ -880,7 +913,7 @@ class Qwen3_8SparseAttention(nnx.Module):
       )(q_b, k_b, v_b, sq_b, skv_b)
 
     mesh = jax.sharding.get_abstract_mesh()
-    batch_axes = get_batch_mesh_axes()
+    batch_axes = get_batch_mesh_axes(self.sharding)
     batch_shards = math.prod(mesh.shape[ax] for ax in batch_axes) if batch_axes else 1
     if batch_axes and b % batch_shards == 0:
       qkv_spec = jax.sharding.PartitionSpec(batch_axes, None, None, None)
@@ -1154,6 +1187,7 @@ class Qwen3_8TopKRouter(nnx.Module):
       routed_scaling_factor: float = 1.0,
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
+      sharding: Sharding | None = None,
       *,
       rngs: nnx.Rngs,
   ):
@@ -1162,12 +1196,16 @@ class Qwen3_8TopKRouter(nnx.Module):
     self.norm_topk_prob = norm_topk_prob
     self.routed_scaling_factor = routed_scaling_factor
     self.dtype = dtype
+    use_meta = not jax.sharding.get_abstract_mesh().empty
+    sharding_obj = sharding or DefaultSharding()
+    router_meta = {"kernel_metadata": param_metadata(sharding_obj, "router", ("embed_router", None))} if use_meta else {}
     self.linear = nnx.Linear(
         emb_dim,
         num_experts,
         use_bias=False,
         dtype=dtype,
         param_dtype=weight_dtype,
+        **router_meta,
         rngs=rngs,
     )
 
@@ -1220,6 +1258,7 @@ class Qwen3_8SparseMoeBlock(nnx.Module):
         routed_scaling_factor=routed_scaling_factor,
         dtype=dtype,
         weight_dtype=weight_dtype,
+        sharding=sharding,
         rngs=rngs,
     )
     self.experts = Qwen3_8Experts(
@@ -1376,10 +1415,12 @@ class Qwen3_8NGramEmbedding(nnx.Module):
       ple_layer_index: int = 0,
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
+      sharding: Sharding | None = None,
       *,
       rngs: nnx.Rngs,
   ):
     super().__init__()
+    self.sharding = sharding
     self.ple_embed_dim = ple_embed_dim
     self.ngram_size = ngram_size
     self.heads_per_ngram = heads_per_ngram
@@ -1472,7 +1513,7 @@ class Qwen3_8NGramEmbedding(nnx.Module):
     mesh = jax.sharding.get_abstract_mesh()
     if not mesh.empty and mesh.size > 1:
       ngram_ids = jax.lax.with_sharding_constraint(ngram_ids, jax.sharding.PartitionSpec())
-    embeds = shard_batch(self.ngram_embedding(ngram_ids))
+    embeds = shard_batch(self.ngram_embedding(ngram_ids), sharding=self.sharding)
     return embeds.reshape(input_ids.shape[0], -1, self.ple_embed_dim)
 
 
@@ -1519,6 +1560,7 @@ class Qwen3_8PLELayer(nnx.Module):
         ple_layer_index,
         dtype,
         weight_dtype,
+        sharding=sharding_obj,
         rngs=rngs,
     )
 
@@ -1631,7 +1673,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
     c, emb, dt, wdt = config, int(config.emb_dim), jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
     ckw = {"eps": float(c.normalization_layer_epsilon), "dtype": dt, "weight_dtype": wdt, "rngs": rngs}
     hc_kw = {"emb_dim": emb, "hc_count": int(c.hc_count), "hc_lowrank": int(c.hc_lowrank), **ckw}
-    sharding_obj = sharding or DefaultSharding()
+    sharding_obj = sharding or sharding_from_config(config)
     cyc = int(c.inhomogeneous_layer_cycle_interval)
     self.layer_type = "linear_attention" if (layer_idx % cyc) != (cyc - 1) else "full_attention"
     self.attn_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
@@ -1664,6 +1706,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
           index_head_dim=int(c.index_head_dim),
           token_budget=int(c.index_select_budget),
           compress_ratio=int(c.index_select_block_size),
+          sharding=sharding_obj,
           indexer_mask_mode=str(c.qsa_indexer_mask),
           attention_kernel=str(c.qsa_attention_kernel),
       )
@@ -1792,6 +1835,7 @@ def apply_scanned_cycles(
     segment_ids: jax.Array | None = None,
     return_aux: bool = False,
     remat: bool = False,
+    sharding: Sharding | None = None,
 ) -> Any:
   """Executes scan over stacked cycle weights with conditional PLE at cycle 0."""
   c_def, c_params, c_rest = nnx.split(cycles, nnx.Param, ...)
@@ -1805,7 +1849,7 @@ def apply_scanned_cycles(
     return h
 
   def scan_fn(carry, xs):
-    carry = shard_batch(carry)
+    carry = shard_batch(carry, sharding=sharding)
     p_slice = jax.tree.map(_strip_cycle_axis, xs[0], is_leaf=_is_nnx_var)
     r_slice = jax.tree.map(_strip_cycle_axis, xs[1], is_leaf=_is_nnx_var)
     blk = nnx.merge(c_def, p_slice, r_slice)
@@ -1815,9 +1859,9 @@ def apply_scanned_cycles(
       h, a1 = blk.gdn_1(ple_step(h, xs[2]), return_aux=True, **kw)
       h, a2 = blk.gdn_2(h, return_aux=True, **kw)
       h, a3 = blk.qsa_3(h, return_aux=True, **kw)
-      return shard_batch(h), (a0, a1, a2, a3)
+      return shard_batch(h, sharding=sharding), (a0, a1, a2, a3)
     h = ple_step(blk.gdn_0(carry, **kw), xs[2])
-    return shard_batch(blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw)), None
+    return shard_batch(blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw), sharding=sharding), None
 
   step_fn = jax.checkpoint(scan_fn, prevent_cse=False) if remat else scan_fn
   res = jax.lax.scan(step_fn, hidden_states, (c_params, c_rest, jnp.arange(num_cycles)))
@@ -2103,6 +2147,8 @@ class Qwen3_8Decoder(nnx.Module):
   """Decoder stack with token embedding, 4-stream residual, and final mixer."""
 
   def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
+    sharding = sharding or sharding_from_config(config)
+    self.sharding = sharding
     c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
     self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
     self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
@@ -2154,9 +2200,9 @@ class Qwen3_8Decoder(nnx.Module):
     tok = decoder_input_tokens
     pos, cmask = _positions_and_conv_mask(tok, decoder_positions, decoder_segment_ids)
     pids = tok if cmask is None else jnp.where(cmask.astype(jnp.bool_), tok, self.eos_token_id)
-    tok_emb = shard_batch(self.token_embedder(tok))
+    tok_emb = shard_batch(self.token_embedder(tok), sharding=self.sharding)
     h, aux_list = (
-        init_hyper_connection_streams(tok_emb, hc_count=self.hc_count),
+        init_hyper_connection_streams(tok_emb, hc_count=self.hc_count, sharding=self.sharding),
         [],
     )
     if self.scan_layers:
@@ -2171,6 +2217,7 @@ class Qwen3_8Decoder(nnx.Module):
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
           remat=self.remat,
+          sharding=self.sharding,
       )
       h, aux_list = res if return_aux else (res, [])
     else:
@@ -2179,7 +2226,7 @@ class Qwen3_8Decoder(nnx.Module):
             h, positions=pos, conv_mask=cmask, ple_input_ids=pids, segment_ids=decoder_segment_ids, return_aux=return_aux
         )
         h, _ = (out[0], aux_list.append(out[1])) if return_aux else (out, None)
-    h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h))
+    h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h), sharding=self.sharding)
     if return_pre_mixer:
       return (h_mixed, h_4stream, aux_list) if return_aux else (h_mixed, h_4stream)
     return (h_mixed, aux_list) if return_aux else h_mixed
@@ -2197,7 +2244,9 @@ class Qwen3_8FlashNextModel(nnx.Module):
       sharding: Sharding | None = None,
       rngs: nnx.Rngs,
   ):
+    sharding = sharding or sharding_from_config(config)
     self.config, self.mesh, self.quant_mode = config, mesh, quant_mode
+    self.sharding = sharding
     self.decoder = Qwen3_8Decoder(config, sharding=sharding, rngs=rngs)
     self.lm_head = nnx.Linear(
         self.decoder.emb_dim,
@@ -2249,15 +2298,15 @@ class Qwen3_8FlashNextModel(nnx.Module):
       pos, cmask = _positions_and_conv_mask(decoder_input_tokens, decoder_positions, decoder_segment_ids)
       mtp_out = self.mtp(
           h_4stream,
-          shard_batch(self.decoder.token_embedder(next_tok)),
+          shard_batch(self.decoder.token_embedder(next_tok), sharding=self.sharding),
           positions=pos,
           conv_mask=cmask,
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
       )
       mtp_h, mtp_aux = mtp_out if return_aux else (mtp_out, None)
-      mtp_logits = shard_batch(self.lm_head(mtp_h))
-      logits = shard_batch(self.lm_head(h_mixed))
+      mtp_logits = shard_batch(self.lm_head(mtp_h), sharding=self.sharding)
+      logits = shard_batch(self.lm_head(h_mixed), sharding=self.sharding)
       if return_aux:
         aux_dict = {"layer_aux": aux_list, "mtp_aux": mtp_aux, "mtp_logits": mtp_logits}
         return (logits, aux_dict)
@@ -2271,8 +2320,8 @@ class Qwen3_8FlashNextModel(nnx.Module):
         return_pre_mixer=return_hidden_states,
     )
     if return_hidden_states or return_aux:
-      return (shard_batch(self.lm_head(out[0])), *out[1:])
-    return shard_batch(self.lm_head(out))
+      return (shard_batch(self.lm_head(out[0]), sharding=self.sharding), *out[1:])
+    return shard_batch(self.lm_head(out), sharding=self.sharding)
 
 
 def create_qwen3_8_flash_next_model(

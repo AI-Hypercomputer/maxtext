@@ -2880,6 +2880,63 @@ class HardwareAndMesh(BaseModel):
       description="The names of the axes in the logical device mesh.",
   )
   shard_mode: ShardMode = Field("auto", description="can be either auto or explicit")
+  sharding_preset: str = Field(
+      "",
+      description=(
+          "Optional m3 sharding preset name (e.g. ep_as_dp, fsdp_as_dp_for_attn, " "ep_as_cp, cp_as_ep, tp_as_ep)."
+      ),
+  )
+  compound_fsdp_ep: bool = Field(
+      False,
+      description=(
+          "Whether to shard m3 routed-expert weights across compound (fsdp, expert) " "with expert_embed unsharded."
+      ),
+  )
+
+  @model_validator(mode="after")
+  def validate_m3_sharding_preset(self) -> "HardwareAndMesh":
+    """Validates sharding_preset names, compound_fsdp_ep compatibility, and use_m3_model requirement."""
+    # Kept inline without importing maxtext.m3.core.sharding to satisfy downstream Bazel strict_deps.
+    valid_presets = {
+        "",
+        "default",
+        "default_sharding",
+        "ep_as_dp",
+        "epasdp",
+        "fsdp_x_ep",
+        "fsdpxep",
+        "expert_on_fsdp_ep",
+        "shard_exp_on_fsdp",
+        "ep_as_cp",
+        "epascp",
+        "cp_as_ep",
+        "cpasep",
+        "tp_as_ep",
+        "tpasep",
+        "tp_x_ep",
+        "tpxep",
+        "fsdp_as_dp_for_attn",
+        "fsdpasdpforattn",
+        "fsdp_as_dp_for_attn_rf",
+        "fsdp_as_dp_for_attn_no_rf",
+        "fsdp_as_dp_for_attn_replicated_router",
+    }
+    raw_preset = "" if self.sharding_preset is None else str(self.sharding_preset).strip().lower().replace("-", "_")
+    if raw_preset not in valid_presets:
+      raise ValueError(f"Unknown m3 sharding preset {self.sharding_preset!r}.")
+    if raw_preset in ("default", "default_sharding") and self.compound_fsdp_ep:
+      raise ValueError(
+          "compound_fsdp_ep=True cannot be combined with sharding_preset='default'; "
+          "use sharding_preset='' or 'ep_as_dp' / 'fsdp_x_ep'."
+      )
+    if (
+        hasattr(self, "use_m3_model")
+        and not bool(self.use_m3_model)
+        and (raw_preset not in ("", "default", "default_sharding") or bool(self.compound_fsdp_ep))
+    ):
+      raise ValueError("sharding_preset and compound_fsdp_ep require use_m3_model=True.")
+    return self
+
   inhomogeneous_layer_cycle_interval: int = Field(1, description="The interval of repeated inhomogeneous layer patterns.")
   scan_layers: bool = Field(
       True,
