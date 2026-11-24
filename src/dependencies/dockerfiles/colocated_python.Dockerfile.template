@@ -9,10 +9,13 @@ WORKDIR /app
 # Copy the current directory (MaxText repo) into the image
 COPY . /app/maxtext/
 
-# Install MaxText dependencies
-# We assume requirements.txt is in maxtext/src/dependencies/requirements/generated_requirements/tpu-requirements.txt based on repo structure
+# Install MaxText dependencies.
+ARG REQUIREMENTS_FILE=src/dependencies/requirements/generated_requirements/tpu-requirements.txt
 RUN uv pip install --upgrade pip setuptools wheel
-RUN uv pip install -r maxtext/src/dependencies/requirements/generated_requirements/tpu-requirements.txt -c /opt/venv/server_constraints.txt
+# The base image's constraints pin jax and jaxlib to the Pathways server's version.
+# The requirement file's own pins are dropped so they cannot contradict it.
+RUN sed -E '/^jax(lib)?(==|>=)/d' "maxtext/${REQUIREMENTS_FILE}" > /tmp/requirements.txt && \
+    uv pip install -r /tmp/requirements.txt -c /opt/venv/server_constraints.txt
 
 # Ensure MaxText src is in PYTHONPATH
 ENV PYTHONPATH=/app/maxtext/src:$PYTHONPATH

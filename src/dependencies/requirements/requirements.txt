@@ -23,7 +23,7 @@ ml-goodput-measurement
 numpy
 omegaconf
 optax
-orbax-checkpoint>=0.12.11
+orbax-checkpoint>=0.12.12
 pathwaysutils
 pillow
 pre-commit

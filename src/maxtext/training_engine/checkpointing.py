@@ -53,7 +53,7 @@ _MOUNTS_FILE = "/proc/mounts"
 
 
 class PathwaysCheckpointingUnavailableError(RuntimeError):
-  """Pathways persistence checkpointing was explicitly requested but is not available."""
+  """Pathways persistence or colocated Python checkpointing was requested but is not available."""
 
 
 def _pathways_persistence_requested() -> bool:
@@ -135,6 +135,57 @@ def _verify_pathways_persistence(context: ocp.Context) -> None:
   )
 
 
+def _verify_colocated_python(context: ocp.Context) -> None:
+  """Checks that `context` resolves to an array handler with a colocated Python dispatcher.
+
+  With `colocated_python_checkpointing=True`, the colocated Python sidecar on each worker host
+  writes and reads the arrays. Off a Pathways backend, Orbax silently uses the controller-side
+  handler instead, which has no dispatcher and stages every shard through controller memory.
+
+  Args:
+    context: The Orbax context the checkpointer saves and restores with.
+
+  Raises:
+    PathwaysCheckpointingUnavailableError: If `context` does not resolve to an array handler
+      with a dispatcher.
+  """
+  try:
+    handler = _resolve_array_handler(context)
+    has_dispatcher = handler.has_dispatcher()
+  except (ImportError, AttributeError, NotImplementedError, ValueError, TypeError) as e:
+    raise PathwaysCheckpointingUnavailableError(
+        "colocated_python_checkpointing=True requires a colocated Python array handler, but "
+        f"resolving it failed ({type(e).__name__}: {e})."
+    ) from e
+
+  if not has_dispatcher:
+    raise PathwaysCheckpointingUnavailableError(
+        "colocated_python_checkpointing=True requires an array handler with a colocated Python "
+        f"dispatcher, got {type(handler).__name__} without one."
+    )
+
+  logging.info("Using colocated Python array handler (%s).", type(handler).__name__)
+
+
+def _require_shared_storage(checkpoint_dir: str, writer: str) -> None:
+  """Raises if the workers would write `checkpoint_dir` to a node-local disk.
+
+  Args:
+    checkpoint_dir: The root directory for saving checkpoints.
+    writer: The setting that makes the workers write the checkpoint, for the error message.
+
+  Raises:
+    ValueError: If `checkpoint_dir` is neither a gs:// URI nor on a FUSE mount.
+  """
+  # A node-local path would have every worker fill its own disk; a FUSE mount is shared storage.
+  if str(checkpoint_dir).startswith("gs://") or _is_on_fuse_mount(str(checkpoint_dir)):
+    return
+  raise ValueError(
+      f"{writer} writes the checkpoint from every worker host; checkpoint_dir must be a "
+      f"gs:// URI or a path on a FUSE mount present on every worker, got {checkpoint_dir!r}."
+  )
+
+
 class CheckpointManager:
   """Orbax `training.Checkpointer` wrapper for MaxText training engine."""
 
@@ -150,21 +201,36 @@ class CheckpointManager:
       config: The training configuration.
 
     Raises:
-      ValueError: If ENABLE_PATHWAYS_PERSISTENCE=1 and `checkpoint_dir` is neither a gs:// URI nor
-        on a FUSE mount, or if `checkpoint_storage_use_ocdbt` or `checkpoint_storage_use_zarr3`
-        is enabled.
-      PathwaysCheckpointingUnavailableError: If ENABLE_PATHWAYS_PERSISTENCE=1 but no Pathways
-        persistence handler is available.
+      ValueError: If the workers write the checkpoint (ENABLE_PATHWAYS_PERSISTENCE=1 or
+        `colocated_python_checkpointing`) and `checkpoint_dir` is neither a gs:// URI nor on a
+        FUSE mount; or if Pathways persistence is used with `checkpoint_storage_use_ocdbt` or
+        `checkpoint_storage_use_zarr3`.
+      PathwaysCheckpointingUnavailableError: If Pathways persistence or colocated Python
+        checkpointing is requested but its array handler is not available.
     """
     self._checkpoint_manager: ocp.training.Checkpointer | None = None
     self._use_async = bool(config.async_checkpointing)
     # The step of the save most recently handed to Orbax, so a failure that surfaces later can
     # be attributed to it.
     self._in_flight_step: int | None = None
+    self._uses_colocated_python = False
     if not checkpoint_dir:
       return
 
-    enable_pathways_persistence = _pathways_persistence_requested()
+    colocated_python = bool(config.colocated_python_checkpointing)
+    self._uses_colocated_python = colocated_python
+    if colocated_python and config.checkpoint_storage_device_host_concurrent_gb is not None:
+      # With a transfer budget Orbax copies the arrays to host in the background, after the next
+      # optimizer step may have donated them, so the save has to finish before it returns.
+      if self._use_async:
+        logging.warning(
+            "colocated_python_checkpointing with checkpoint_storage_device_host_concurrent_gb=%s "
+            "saves synchronously; async_checkpointing is ignored.",
+            config.checkpoint_storage_device_host_concurrent_gb,
+        )
+      self._use_async = False
+    # Colocated Python takes precedence over Pathways persistence when both are requested.
+    enable_pathways_persistence = _pathways_persistence_requested() and not colocated_python
     if enable_pathways_persistence:
       if config.checkpoint_storage_use_ocdbt or config.checkpoint_storage_use_zarr3:
         raise ValueError(
@@ -173,23 +239,22 @@ class CheckpointManager:
             f"use_ocdbt={config.checkpoint_storage_use_ocdbt}, "
             f"use_zarr3={config.checkpoint_storage_use_zarr3}."
         )
-      # A node-local path would have every worker fill its own disk; a FUSE mount is shared storage.
-      if not str(checkpoint_dir).startswith("gs://") and not _is_on_fuse_mount(str(checkpoint_dir)):
-        raise ValueError(
-            "ENABLE_PATHWAYS_PERSISTENCE=1 dispatches persistence writes to every "
-            "pathways-worker; checkpoint_dir must be a gs:// URI or a path on a FUSE mount "
-            f"present on every worker, got {checkpoint_dir!r}."
-        )
-    # TODO(igorts): Support config.colocated_python_checkpointing when single-controller Pathways is used.
+    if colocated_python:
+      _require_shared_storage(checkpoint_dir, "colocated_python_checkpointing=True")
+    elif enable_pathways_persistence:
+      _require_shared_storage(checkpoint_dir, "ENABLE_PATHWAYS_PERSISTENCE=1")
     context = checkpoint_context.build_context(
         use_ocdbt=config.checkpoint_storage_use_ocdbt,
         use_zarr3=config.checkpoint_storage_use_zarr3,
         checkpoint_storage_device_host_concurrent_gb=config.checkpoint_storage_device_host_concurrent_gb,
         # Deadline for the background half of a save (storage writes and finalization).
         async_checkpointing_timeout_secs=config.async_checkpointing_timeout_secs,
+        colocated_python_checkpointing=colocated_python,
         enable_pathways_persistence=enable_pathways_persistence,
     )
-    if enable_pathways_persistence:
+    if colocated_python:
+      _verify_colocated_python(context)
+    elif enable_pathways_persistence:
       _verify_pathways_persistence(context)
     policies = ocp.training.save_decision_policies
     save_policies = [
@@ -358,7 +423,10 @@ class CheckpointManager:
           return jax.ShapeDtypeStruct(leaf.shape, leaf.dtype, sharding=sharding.with_memory_kind("device"))
         return leaf
 
-      abstract_checkpointables["optimizer_state"] = jax.tree.map(_device_restore_target, optimizer_state)
+      # Colocated Python restores `pinned_host` leaves into host memory, so they keep their target.
+      if not self._uses_colocated_python:
+        optimizer_state = jax.tree.map(_device_restore_target, optimizer_state)
+      abstract_checkpointables["optimizer_state"] = optimizer_state
 
     try:
       restored_items = self._checkpoint_manager.load_checkpointables(step, abstract_checkpointables)

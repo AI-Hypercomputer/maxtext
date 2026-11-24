@@ -17,7 +17,7 @@ mcp>=1.30.0
 multidict>=6.9.1
 oauthlib>=4.0.1
 optax==0.2.6
-orbax-checkpoint>=0.12.11
+orbax-checkpoint>=0.12.12
 etils[epath]>=1.15.0
 pillow>=13.0.0
 pyasn1>=0.6.5
