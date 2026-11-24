@@ -39,7 +39,6 @@ indexer_head_dim: 128
 indexer_topk: 2048
 indexer_loss_scaling_factor: 0.0
 routed_score_func: "sigmoid"
-routed_bias_update_rate: 0.0
 norm_topk_prob: true
 n_routing_groups: 1
 topk_routing_group: 1

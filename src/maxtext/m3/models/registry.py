@@ -17,12 +17,24 @@
 from collections.abc import Callable
 from typing import Any
 
+from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5ModelConfig
+from maxtext.m3.models.granitemoe.granitemoe_config import GraniteMoeModelConfig
 from maxtext.m3.models.model_config import ModelConfig
+from maxtext.m3.models.qwen3.qwen3_config import Qwen3Config
+from maxtext.m3.models.qwen3_8_flash_next.qwen3_8_config import Qwen3_8FlashNextConfig
+from maxtext.m3.models.qwen3_vl.qwen3_vl_config import Qwen3VLConfig
 
 # Zero-argument preset factory (e.g. a `ModelConfig` subclass or a `@classmethod` preset).
 ModelConfigFactory = Callable[[], ModelConfig]
 
-MODEL_GARDEN_REGISTRY: dict[str, ModelConfigFactory] = {}
+MODEL_GARDEN_REGISTRY: dict[str, ModelConfigFactory] = {
+    "glm5.3-flash": Glm5ModelConfig.glm5_3_flash,
+    "granite-3.0-1b-a400m": GraniteMoeModelConfig.granite_3_0_1b_a400m,
+    "granitemoe": GraniteMoeModelConfig.granite_3_0_1b_a400m,
+    "qwen3-0.6b": Qwen3Config.qwen3_0_6b,
+    "qwen3-vl-2b": Qwen3VLConfig.qwen3_vl_2b,
+    "qwen3.8-flash-next": Qwen3_8FlashNextConfig.qwen3_8_flash_next,
+}
 
 
 def normalize_model_name(model_name: str) -> str:
