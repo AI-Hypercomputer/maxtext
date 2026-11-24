@@ -17,7 +17,7 @@
   wl_bench.py bundle --build baseline|candidate   # build the bundle of the checked-out branch, upload and verify it
   wl_bench.py step1 --platform v7x [--models m ...] [--max-running 4] # cold HF -> GCS downloads (CPU Jobs)
   wl_bench.py step1b [--models m ...] [--dry-run]                     # DeepSeek FP8/MXFP4 -> BF16 (v7x CPU Jobs)
-  wl_bench.py copy-region --platform v6e [--models m ...] [--dry-run] # BF16 copies into another region
+  wl_bench.py copy-region --platform v6e [--models m ...] [--dry-run] # DeepSeek BF16 copies into a region
   wl_bench.py scan --platform v7x          # compare every .safetensors header with its object size
   wl_bench.py proof --platform v5p [--dry-run]                        # the three-run cache proof (cache_proof.py)
   wl_bench.py status [--platform v5e]
@@ -166,12 +166,29 @@ def cmd_step1(args) -> None:
   _run_jobs(args.platform, docs, args.max_running, args.dry_run)
 
 
+def _team_buckets() -> dict[str, str]:
+  """Returns the DeepSeek models whose BF16 weights the MaxText team already keeps in a bucket, and where."""
+  return schema_v2.load_models_v2().get("deepseek_bf16_team_buckets", {})
+
+
 def cmd_step1b(args) -> None:
-  """Creates the scratch PVC and the FP8/MXFP4 -> BF16 conversion Job of every DeepSeek model."""
+  """Creates the scratch PVC and the FP8/MXFP4 -> BF16 conversion Job of the DeepSeek models without a team copy.
+
+  As in v2, the conversion runs on the CPU pool of v7x; the models with a BF16 copy in a team bucket are not
+  converted but copied from there (`copy-region`).
+  """
   platform = STEP1B_SOURCE_PLATFORM
   for model in _models(platform, args.models, step1b=True):
+    if model["model_name"] in _team_buckets():
+      continue
     docs = manifests_v2.build_deepseek_step1b_manifests(
-        model_name=model["model_name"], run_id="wl3-s1b", clean_target=True
+        model_name=model["model_name"],
+        run_id="wl3-s1b",
+        clean_target=True,
+        cache_size=2,
+        node_pool=platforms.get_profile(platform).cpu_node_pool,
+        memory_request="160Gi",
+        cpu_request="36",
     )
     # The builder names the scratch PVC after the model only, which is also its name in the v2 benchmark.
     pvc, job = docs
@@ -188,21 +205,36 @@ def cmd_step1b(args) -> None:
 
 
 def cmd_copy_region(args) -> None:
-  """Creates the Jobs that copy the converted BF16 weights into the platform's region."""
-  if args.platform == STEP1B_SOURCE_PLATFORM:
-    sys.exit(f"{STEP1B_SOURCE_PLATFORM} holds the converted files; copy to another platform's region")
+  """Creates the Jobs that copy DeepSeek BF16 weights into the platform's region.
+
+  A model with a team copy comes from the team bucket, in every region. The others come from where Step 1b wrote
+  them, so only to the other regions and only after Step 1b.
+  """
   source_root = common.regional_root(STEP1B_SOURCE_PLATFORM)
-  docs = [
-      manifests_v2.build_copy_region_cpu_job(
-          dest_platform=args.platform,
-          model_name=model["model_name"],
-          source_gcs_dir=f"{source_root}/hf_cache_bf16/{model['model_name']}",
-          run_id=f"wl3-copy-{args.platform}",
-          clean_target=True,
-          code_dir=common.code_dir("candidate"),
-      )
-      for model in sorted(_models(args.platform, args.models, step1b=True), key=lambda m: float(m["loaded_bf16_gb"]))
-  ]
+  docs = []
+  for model in sorted(_models(args.platform, args.models, step1b=True), key=lambda m: float(m["loaded_bf16_gb"])):
+    name = model["model_name"]
+    if name in _team_buckets():
+      source, kind = _team_buckets()[name], "copied_from_maxtext_team_bucket"
+    elif args.platform == STEP1B_SOURCE_PLATFORM:
+      continue
+    else:
+      source, kind = f"{source_root}/hf_cache_bf16/{name}", "converted_by_this_benchmark"
+      result = common.gcs_cat_json(f"{source_root}/step1b/{name}_step1b_result.json")
+      if not isinstance(result, dict) or result.get("run_status") != "OK":
+        print(f"skipping {name}: Step 1b has not finished in {source_root}")
+        continue
+    docs.append(
+        manifests_v2.build_copy_region_cpu_job(
+            dest_platform=args.platform,
+            model_name=name,
+            source_gcs_dir=source,
+            run_id=f"wl3-copy-{args.platform}",
+            clean_target=True,
+            bf16_source=kind,
+            code_dir=common.code_dir("candidate"),
+        )
+    )
   _run_jobs(args.platform, docs, args.max_running, args.dry_run)
 
 

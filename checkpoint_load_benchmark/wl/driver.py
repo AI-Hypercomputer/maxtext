@@ -221,13 +221,13 @@ class Driver:
       return False
     self.weights_asked[key] = time.time()
     if self.needs_step1b[model]:
-      at_source = platform == wl_bench.STEP1B_SOURCE_PLATFORM
-      result = f"{root}/step1b/{model}_{'step1b' if at_source else 'copy'}_result.json"
+      # Converted in this region (Step 1b) or copied into it.
+      results = [f"{root}/step1b/{model}_{kind}_result.json" for kind in ("copy", "step1b")]
       weights = f"{root}/hf_cache_bf16/{model}"
     else:
-      result, weights = f"{root}/step1/{model}_step1_result.json", f"{root}/hf_cache/{model}"
-    rec = common.gcs_cat_json(result)
-    if not isinstance(rec, dict) or rec.get("run_status") != "OK":
+      results, weights = [f"{root}/step1/{model}_step1_result.json"], f"{root}/hf_cache/{model}"
+    records = [common.gcs_cat_json(uri) for uri in results]
+    if not any(isinstance(rec, dict) and rec.get("run_status") == "OK" for rec in records):
       return False
     count, size, bad = wl_bench.scan_weights([weights])
     if bad or not count:
@@ -358,8 +358,8 @@ class Driver:
     platform, key = task["platform"], task_key(task)
     jobset = jobsets.get(attempt["jobset"])
     if jobset is None:
-      self.note_once(f"gone:{key}", "ATTN", f"MISSING JobSet {attempt['jobset']} of {key}")
-      return
+      # Deleted after it ended, by a driver that stopped before it saved the outcome: the queue tells which outcome.
+      jobset = {"status": {"terminalState": "gone"}}
     terminal = jobset.get("status", {}).get("terminalState")
     if not terminal:
       now = time.time()
@@ -389,7 +389,8 @@ class Driver:
     attempt["ended"] = common.utc_now()
     attempt["terminal_state"] = terminal
     done = any(u.endswith(f"/{task['id']}.json") for u in common.gcs_ls(f"{attempt['queue']}/done"))
-    self.finish_jobset(platform, attempt)
+    if terminal != "gone":
+      self.finish_jobset(platform, attempt)
     if done:
       good, summary = summarize_results(task)
       ts["status"] = "done"
