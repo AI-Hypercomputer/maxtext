@@ -42,7 +42,6 @@ from maxtext.checkpoint_conversion.utils import hf_shape
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
-from maxtext.m3.configs import config as m3_config
 from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 from maxtext.m3.models.granitemoe import modeling_granitemoe
@@ -962,16 +961,8 @@ class GraniteMoeConformanceTest(absltest.TestCase):
   def test_yaml_config_registry_and_flops_analytical_accuracy(self):
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
     base_yml = os.path.join(repo_root, "src", "maxtext", "configs", "base.yml")
-    yml_path = os.path.join(repo_root, "src", "maxtext", "configs", "models", "granite-3.0-1b-a400m.yml")
-    cfg = m3_config.initialize(
-        ["test", yml_path, "per_device_batch_size=2", "max_target_length=1024", "gradient_accumulation_steps=1"],
-        unittest=True,
-    )
-    self.assertEqual(cfg.model_name, "granite-3.0-1b-a400m")
-    self.assertTrue(cfg.use_m3_model)
-
-    # Also verify `pyconfig.initialize` (`MaxTextConfig`) loads `granite-3.0-1b-a400m.yml` cleanly
-    # and enforces `use_m3_model=True`.
+    # Verify `pyconfig.initialize` resolves `granite-3.0-1b-a400m` via `MODEL_GARDEN_REGISTRY`
+    # with no model YAML on disk and enforces `use_m3_model=True`.
     mt_cfg = pyconfig.initialize(
         [None, base_yml],
         model_name="granite-3.0-1b-a400m",
@@ -980,6 +971,7 @@ class GraniteMoeConformanceTest(absltest.TestCase):
         gradient_accumulation_steps=1,
         skip_jax_distributed_system=True,
     )
+    self.assertEqual(mt_cfg.model_name, "granite-3.0-1b-a400m")
     self.assertTrue(mt_cfg.use_m3_model)
     self.assertEqual(mt_cfg.param_scan_axis, 0)
     self.assertEqual(mt_cfg.load_balance_loss_weight, 0.0)
@@ -992,7 +984,7 @@ class GraniteMoeConformanceTest(absltest.TestCase):
           skip_jax_distributed_system=True,
       )
 
-    total_tflops, weight_tflops, attn_tflops = m3_models.calculate_tflops_per_device(cfg, log=False)
+    total_tflops, weight_tflops, attn_tflops = m3_models.calculate_tflops_per_device(mt_cfg, log=False)
     mt_total_tflops, _, _ = utils_granitemoe.calculate_granitemoe_tflops_per_device(mt_cfg, log=False)
     self.assertAlmostEqual(total_tflops, mt_total_tflops, places=9)
     # Analytical check for Granite-3.0-1B-A400M:
@@ -1019,7 +1011,7 @@ class GraniteMoeConformanceTest(absltest.TestCase):
     }
     mesh = m3_sharding.create_mesh(devices=_get_devices(1))
     mini_m3 = m3_models.create_model(
-        cfg,
+        mt_cfg,
         mesh,
         rngs=nnx.Rngs(0),
         quant_mode_str="train",
@@ -1050,7 +1042,7 @@ class GraniteMoeConformanceTest(absltest.TestCase):
 
     mesh_4 = m3_sharding.create_mesh(ici={"fsdp": 2, "tensor": 2}, devices=_get_devices(4))
     abs_m3 = nnx.eval_shape(
-        lambda: m3_models.create_model(cfg, mesh_4, rngs=nnx.Rngs(0), quant_mode_str="train", **mini_overrides)
+        lambda: m3_models.create_model(mt_cfg, mesh_4, rngs=nnx.Rngs(0), quant_mode_str="train", **mini_overrides)
     )
     self.assertIs(abs_m3.mesh, mesh_4)
     for path, var in _flatten_nnx_vars(nnx.state(abs_m3, nnx.Param)):
