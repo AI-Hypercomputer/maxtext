@@ -250,6 +250,9 @@ def gradient_accumulation_loss_and_grad(
   if "moe_max_load_ratio" in scanned_aux:
     aux["moe_max_load_ratio"] = jnp.max(scanned_aux["moe_max_load_ratio"], axis=0)
     aux["moe_max_load_ratio_mean"] = jnp.mean(scanned_aux["moe_max_load_ratio_mean"], axis=0)
+  if "moe_dropped_frac" in scanned_aux:
+    # Per-layer fractions of equally sized microbatches: the step's fraction is their mean, not their sum.
+    aux["moe_dropped_frac"] = jnp.mean(scanned_aux["moe_dropped_frac"], axis=0)
 
   if is_nnx:
     nnx.update(model, grad_and_loss["rest_state"])

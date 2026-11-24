@@ -72,6 +72,104 @@ def get_tunix_data_sharding_axis(config, mesh) -> tuple | None:
   return None
 
 
+def is_ds41_multimodal(config) -> bool:
+  """Returns True when DeepSeek-V4.1 multimodal image batch handling applies."""
+  if not bool(getattr(config, "use_multimodal", False)):
+    return False
+  vis_block = getattr(config, "vision_encoder_block", None)
+  return getattr(vis_block, "value", vis_block) == "deepseek41"
+
+
+def _ds41_leading_batch_sharding(batch_sharding, trailing_ndim: int, enable_diloco: bool):
+  """Returns a NamedSharding preserving only leading batch axes plus `trailing_ndim` replicated axes."""
+  if batch_sharding is None or not hasattr(batch_sharding, "mesh") or not hasattr(batch_sharding, "spec"):
+    return batch_sharding
+  spec = batch_sharding.spec
+  if len(spec) == 0:
+    leading_spec = ()
+  elif enable_diloco:
+    batch_axis = spec[1] if len(spec) >= 2 else None
+    leading_spec = (spec[0], batch_axis) + (None,) * trailing_ndim
+  else:
+    leading_spec = (spec[0],) + (None,) * trailing_ndim
+  return NamedSharding(batch_sharding.mesh, P(*leading_spec))
+
+
+def get_ds41_image_sharding(batch_sharding, enable_diloco: bool):
+  """Returns an explicit NamedSharding for DeepSeek-V4.1 multimodal images.
+
+  Shards only along leading batch axes so `num_images < context_parallelism`
+  never partitions axis 1 of `images`.
+  """
+  return _ds41_leading_batch_sharding(batch_sharding, trailing_ndim=3, enable_diloco=enable_diloco)
+
+
+def get_ds41_image_mask_sharding(batch_sharding, enable_diloco: bool):
+  """Returns leading-batch NamedSharding for DeepSeek-V4.1 `[B, N]` (or DiLoCo `[R, B//R, N]`) `image_masks`."""
+  return _ds41_leading_batch_sharding(batch_sharding, trailing_ndim=1, enable_diloco=enable_diloco)
+
+
+def get_ds41_image_grid_sharding(batch_sharding, enable_diloco: bool):
+  """Returns leading-batch NamedSharding for DeepSeek-V4.1 `[B, N, 2]` (or DiLoCo `[R, B//R, N, 2]`) `image_grids`."""
+  return _ds41_leading_batch_sharding(batch_sharding, trailing_ndim=2, enable_diloco=enable_diloco)
+
+
+def get_input_batch_sharding(config, data_sharding, batch_keys=None):
+  """Returns per-key batch shardings for DS4.1 multimodal batches, or `data_sharding` unchanged."""
+  if isinstance(data_sharding, dict):
+    return {k: data_sharding[k] for k in batch_keys} if batch_keys is not None else data_sharding
+  if not is_ds41_multimodal(config) or not hasattr(data_sharding, "mesh") or not hasattr(data_sharding, "spec"):
+    return data_sharding
+  if batch_keys is None:
+    keys = [
+        "inputs",
+        "inputs_position",
+        "inputs_segmentation",
+        "targets",
+        "targets_position",
+        "targets_segmentation",
+    ]
+    if getattr(config, "training_objective", "causal_lm") == "block_diffusion":
+      keys.extend(["corruption_mask", "targets_loss_mask"])
+    if getattr(config, "video_max_grid_t", None) is None:
+      keys.append("images")
+      if getattr(config, "dataset_type", "synthetic") in ("grain", "hf") or bool(
+          getattr(config, "ds41_dynamic_vision_grid", False)
+      ):
+        keys.extend(["image_masks", "image_grids"])
+    else:
+      keys.extend(["images", "image_masks", "video_grid_thw"])
+    if bool(getattr(config, "use_audio", False)):
+      keys.append("audios")
+  else:
+    keys = list(batch_keys)
+    if "images" not in keys and "image_masks" not in keys and "image_grids" not in keys:
+      return data_sharding
+  enable_diloco = bool(getattr(config, "enable_diloco", False))
+  img_shd = get_ds41_image_sharding(data_sharding, enable_diloco)
+  img_mask_shd = get_ds41_image_mask_sharding(data_sharding, enable_diloco)
+  img_grid_shd = get_ds41_image_grid_sharding(data_sharding, enable_diloco)
+  return {
+      k: (
+          img_shd
+          if k == "images"
+          else img_mask_shd
+          if k == "image_masks"
+          else img_grid_shd
+          if k == "image_grids"
+          else data_sharding
+      )
+      for k in keys
+  }
+
+
+def get_batch_sharding_for_batch(config, data_sharding, batch):
+  """Returns per-key batch shardings when `batch` is a dict, or `data_sharding` unchanged."""
+  if not isinstance(batch, dict):
+    return data_sharding
+  return get_input_batch_sharding(config, data_sharding, batch_keys=batch.keys())
+
+
 def get_logical_axis_rules():
   """Get the logical axis rules for the flax model"""
   return flax_get_logical_axis_rules()
@@ -162,7 +260,13 @@ def _get_sharding_desc(inputs, extra_stack_level):
 
 
 def maybe_shard_with_name(
-    inputs, named_sharding, shard_mode, debug_sharding=False, extra_stack_level=0, sharding_desc="", logical_axes=None
+    inputs,
+    named_sharding,
+    shard_mode,
+    debug_sharding=False,
+    extra_stack_level=0,
+    sharding_desc="",
+    logical_axes=None,
 ):
   """
   In auto shardmode, this function hints inputs follow given named_sharding.
@@ -195,10 +299,21 @@ def maybe_shard_with_name(
       logical_axes = tuple(logical_axes)
 
     pspec = remove_size_one_mesh_axis(getattr(named_sharding, "spec"), getattr(named_sharding, "mesh"))
-    log_key = (sharding_desc, str(jax.typeof(inputs)), tuple(pspec), extra_stack_level)
+    log_key = (
+        sharding_desc,
+        str(jax.typeof(inputs)),
+        tuple(pspec),
+        extra_stack_level,
+    )
     if log_key not in _LOGGED_ACTIVATION_SHARDINGS:
-      max_logging.info(f"{sharding_desc} Logical: {log_key[1]:.<60} {logical_axes}.", stacklevel=3 + extra_stack_level)
-      max_logging.info(f"{sharding_desc} Physical: {log_key[1]:.<60} {log_key[2]}.", stacklevel=3 + extra_stack_level)
+      max_logging.info(
+          f"{sharding_desc} Logical: {log_key[1]:.<60} {logical_axes}.",
+          stacklevel=3 + extra_stack_level,
+      )
+      max_logging.info(
+          f"{sharding_desc} Physical: {log_key[1]:.<60} {log_key[2]}.",
+          stacklevel=3 + extra_stack_level,
+      )
       _LOGGED_ACTIVATION_SHARDINGS.add(log_key)
 
       _ACTIVATION_SHARDINGS_DUMP.append(
@@ -239,7 +354,14 @@ def maybe_shard_with_pspec(
 
 
 def maybe_shard_with_logical(
-    inputs, logical_axes, mesh, shard_mode, rules=None, debug_sharding=False, extra_stack_level=0, sharding_desc=""
+    inputs,
+    logical_axes,
+    mesh,
+    shard_mode,
+    rules=None,
+    debug_sharding=False,
+    extra_stack_level=0,
+    sharding_desc="",
 ):
   """
   A wrapper of maybe_shard_with_name when logical axes are inputs
@@ -538,7 +660,9 @@ class CompoundLogicalAxis(tuple):
 
 # NNX walks every tuple as a pytree node, so JAX must flatten this subclass too (it treats unregistered ones as leaves).
 jax.tree_util.register_pytree_node(
-    CompoundLogicalAxis, lambda x: (tuple(x), None), lambda _, children: CompoundLogicalAxis(children)
+    CompoundLogicalAxis,
+    lambda x: (tuple(x), None),
+    lambda _, children: CompoundLogicalAxis(children),
 )
 
 
@@ -618,7 +742,10 @@ def vocab_parallel_one_hot(targets, num_classes, mesh, logical_axes, shard_mode,
     # `out_sharding` only accepts explicit mesh axes, so under auto the iota is laid out
     # by constraining it after the fact and letting GSPMD sink the sharding into it.
     vocab_ids = maybe_shard_with_pspec(
-        jax.lax.broadcasted_iota(targets.dtype, shape, targets.ndim), out_sharding.spec, mesh, shard_mode
+        jax.lax.broadcasted_iota(targets.dtype, shape, targets.ndim),
+        out_sharding.spec,
+        mesh,
+        shard_mode,
     )
   return (vocab_ids == targets[..., None]).astype(dtype)
 
@@ -645,9 +772,17 @@ def lm_head_logical_axes(vocab_parallel: bool):
   """
   if vocab_parallel:
     return (
-        ("activation_embed_and_logits_batch_no_fsdp", "activation_length", "activation_embed"),
+        (
+            "activation_embed_and_logits_batch_no_fsdp",
+            "activation_length",
+            "activation_embed",
+        ),
         ("embed_vocab_replicated", "vocab_fsdp"),
-        ("activation_embed_and_logits_batch_no_fsdp", "activation_length", "activation_vocab_fsdp"),
+        (
+            "activation_embed_and_logits_batch_no_fsdp",
+            "activation_length",
+            "activation_vocab_fsdp",
+        ),
     )
   return (
       None,
@@ -896,7 +1031,10 @@ def assert_params_sufficiently_sharded(params, mesh, tolerance):
   # Check if the amount of unsharded parameters is within the tolerance and
   # raise an exception if it is not.
   _raise_if_unsharded_exceeds_tolerance(
-      unsharded_params_total_size, total_num_params, tolerance, problematic_tensors_details
+      unsharded_params_total_size,
+      total_num_params,
+      tolerance,
+      problematic_tensors_details,
   )
 
 
@@ -1087,7 +1225,9 @@ def maybe_update_params_sharding_with_opt_nnx(
     return var
 
   new_model_shardings = jax.tree_util.tree_map_with_path(
-      _update_model_var, model_shardings, is_leaf=lambda x: isinstance(x, nnx.Variable)
+      _update_model_var,
+      model_shardings,
+      is_leaf=lambda x: isinstance(x, nnx.Variable),
   )
   # Use jax.tree_util.tree_map (identity) to create a new nnx.State via JAX's unflatten
   # mechanism (not the nnx.State constructor). This is critical because:
@@ -1142,7 +1282,9 @@ def _raw_key_sharding(raw: jax.Array, key_sharding: NamedSharding, key_ndim: int
   """Sharding for `jax.random.key_data(key)`: the key's spec, with the trailing key-data dims replicated."""
   spec = tuple(key_sharding.spec) + (None,) * (key_ndim - len(key_sharding.spec))
   target = NamedSharding(
-      key_sharding.mesh, P(*spec, *([None] * (raw.ndim - key_ndim))), memory_kind=key_sharding.memory_kind
+      key_sharding.mesh,
+      P(*spec, *([None] * (raw.ndim - key_ndim))),
+      memory_kind=key_sharding.memory_kind,
   )
   if (
       getattr(raw, "_committed", False)

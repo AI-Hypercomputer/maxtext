@@ -76,7 +76,8 @@ def prepare_before_run_start(
       local = np.zeros((local_rows,) + tuple(leaf.shape[1:]), dtype=leaf.dtype)
       return multihost_dataloading._form_global_array((), local, mesh)  # pylint: disable=protected-access
 
-    warm = jax.device_put(jax.tree.map(_synthetic_global, shaped_batch), data_loader.input_data_shardings)
+    warm_shardings = sharding.get_input_batch_sharding(config, data_loader.input_data_shardings, shaped_batch.keys())
+    warm = jax.device_put(jax.tree.map(_synthetic_global, shaped_batch), warm_shardings)
     jax.block_until_ready(warm)
     del warm
     timings.append(f"input reshard warm {time.perf_counter() - t:.3f} s")
@@ -92,7 +93,11 @@ def prepare_before_run_start(
       local = np.zeros((local_rows_eval,) + tuple(leaf.shape[1:]), dtype=leaf.dtype)
       return multihost_dataloading._form_global_array((), local, mesh)  # pylint: disable=protected-access
 
-    eval_input_sharding = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
+    eval_input_sharding = sharding.get_input_batch_sharding(
+        config,
+        sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval),
+        shaped_eval_batch.keys(),
+    )
     warm_eval = jax.device_put(jax.tree.map(_synthetic_global_eval, shaped_eval_batch), eval_input_sharding)
     jax.block_until_ready(warm_eval)
     del warm_eval
@@ -232,11 +237,36 @@ def create_checkpoint_manager(config, mesh, init_state_fn):
   return checkpoint_manager
 
 
-def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, train_step, params_shardings, mesh=None):
+def _jit_batch_sharding(config, data_sharding):
+  """Returns `None` for unserialized DS4.1 multimodal jit steps unless a dict sharding is provided.
+
+  DS4.1 multimodal batches arrive already sharded per key by DataLoader,
+  SyntheticDataIterator, warmup, or get_shaped_batch, and their keys vary across
+  text-only, multimodal, image_masks, and router-replay steps. Letting jax.jit
+  inherit per-array shardings avoids a fixed 7-key pytree structure check on
+  `in_shardings[1]` while preserving `data_sharding` for serialized AOT loads.
+  """
+  if config.compiled_trainstep_file == "" and sharding.is_ds41_multimodal(config) and not isinstance(data_sharding, dict):
+    return None
+  return data_sharding
+
+
+def jit_train_step(
+    config,
+    model,
+    state,
+    state_mesh_shardings,
+    data_sharding,
+    train_step,
+    params_shardings,
+    mesh=None,
+):
   """Returns a JIT-compiled train step function, which is loaded from a file if specified in the config."""
+  batch_data_sharding = _jit_batch_sharding(config, data_sharding)
   if config.enable_diloco:
     functional_train = train_step
-    in_shardings = (state_mesh_shardings, data_sharding, None)  # State, batch, rng
+    batch_sharding = sharding.get_input_batch_sharding(config, batch_data_sharding)
+    in_shardings = (state_mesh_shardings, batch_sharding, None)  # State, batch, rng
     out_shardings = (state_mesh_shardings, None)  # State, metrics
     static_argnums = ()  # We partial out the static argnums of model and config
     donate_argnums = 0  # This is the index of the state - we allow the compiler to make use of this memory.
@@ -248,7 +278,12 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
         static_argnums,
         donate_argnums,
     ) = maxtext_utils.get_functional_train_with_signature(
-        train_step, data_sharding, state_mesh_shardings, model, config, params_shardings
+        train_step,
+        batch_data_sharding,
+        state_mesh_shardings,
+        model,
+        config,
+        params_shardings,
     )
 
   # Define the compilation of functional_train, either by loading the compiled version or wrapping a new one in a jit
@@ -258,9 +293,16 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
     execution_mesh = mesh if mesh is not None else model.mesh
     execution_devices = execution_mesh.devices.flatten().tolist()
     # Need to pass train signature and state to determine i/o shapes of train_state for now.
-    with jax.set_mesh(execution_mesh), logical_axis_rules(config.logical_axis_rules):
+    with (
+        jax.set_mesh(execution_mesh),
+        logical_axis_rules(config.logical_axis_rules),
+    ):
       p_train_step = maxtext_utils.load_compiled(
-          config, functional_train, state, execution_devices, data_sharding=data_sharding
+          config,
+          functional_train,
+          state,
+          execution_devices,
+          data_sharding=data_sharding,
       )
     max_logging.log("Loaded compiled function!")
   else:
@@ -279,13 +321,16 @@ def jit_train_step(config, model, state, state_mesh_shardings, data_sharding, tr
 
 def jit_eval_step(config, model, state_mesh_shardings, data_sharding, eval_step):
   """Returns a JIT-compiled eval step function."""
+  batch_data_sharding = _jit_batch_sharding(config, data_sharding)
   (
       functional_eval,
       in_shardings,
       out_shardings,
       static_argnums,
       donate_argnums,
-  ) = maxtext_utils.get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config)
+  ) = maxtext_utils.get_functional_eval_with_signature(
+      eval_step, batch_data_sharding, state_mesh_shardings, model, config
+  )
 
   p_eval_step = None
   if config.compiled_trainstep_file == "":
@@ -330,12 +375,22 @@ def jit_train_and_eval_step(
           f"enable_diloco requires state_mesh_shardings to be a DiLoCoTrainState, got {type(state_mesh_shardings)}."
       )
     train_step = diloco.build_diloco_train_step(
-        config, train_step_partial, mesh=mesh, outer_params_shardings=state_mesh_shardings.params
+        config,
+        train_step_partial,
+        mesh=mesh,
+        outer_params_shardings=state_mesh_shardings.params,
     )
   data_sharding_for_train = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules)
   data_sharding_for_eval = sharding.get_input_data_sharding(config, mesh, rules=config.logical_axis_rules_for_eval)
   p_train_step = jit_train_step(
-      config, model, state, state_mesh_shardings, data_sharding_for_train, train_step, params_shardings, mesh=mesh
+      config,
+      model,
+      state,
+      state_mesh_shardings,
+      data_sharding_for_train,
+      train_step,
+      params_shardings,
+      mesh=mesh,
   )
   p_eval_step = None
   if eval_data_iterator:
@@ -404,7 +459,9 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None, m
       # Build the mesh, or take the one from the previous elastic attempt if it ran on the same slices.
       # `elastic_retry_cache` is None outside elastic training, in which case the mesh is simply built.
       mesh = elastic_utils.get_or_build(
-          elastic_retry_cache, "mesh", functools.partial(maxtext_utils.get_mesh_from_config, config, devices)
+          elastic_retry_cache,
+          "mesh",
+          functools.partial(maxtext_utils.get_mesh_from_config, config, devices),
       )
     context_parallel_size = mesh.shape.get(config.context_sharding, 1)
     # Create abstract NNX model. Like the mesh, it is reused across elastic attempts on the same slices: it holds
@@ -440,7 +497,12 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None, m
     # Validate context parallelism with packing configuration
     context_parallel_strategy = config.context_parallel_strategy.lower()
     if context_parallel_size > 1 and config.packing:
-      if context_parallel_strategy not in ("all_gather", "ring", "ulysses", "usp"):
+      if context_parallel_strategy not in (
+          "all_gather",
+          "ring",
+          "ulysses",
+          "usp",
+      ):
         raise ValueError(
             "Context parallelism with sequence packing supports context_parallel_strategy='all_gather', 'ring', "
             "'ulysses', or 'usp'."
@@ -463,7 +525,10 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None, m
         # Determine load balancing reorder strategy (resolves AUTO).
         reorder_strategy = max_utils.resolve_reorder_strategy(config)
         reorder_fn = maxtext_utils.get_reorder_callable(
-            reorder_cp_size, config.shard_mode, reorder_strategy, config.hardware
+            reorder_cp_size,
+            config.shard_mode,
+            reorder_strategy,
+            config.hardware,
         )
         # data_iterator itself stays unwrapped because checkpointing dispatches on
         # its concrete type; only batch consumers receive the reordered view.
@@ -484,7 +549,12 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None, m
     else:
       snapshotter = elastic_retry_cache.snapshotter
     state, _, state_mesh_shardings, data_iterator, _ = maxtext_utils.setup_training_state(
-        data_iterator, config, mesh, checkpoint_manager, init_state_fn, snapshotter=snapshotter
+        data_iterator,
+        config,
+        mesh,
+        checkpoint_manager,
+        init_state_fn,
+        snapshotter=snapshotter,
     )
     if getattr(getattr(config, "lora", None), "enable_lora", False) and getattr(config.lora, "lora_restore_path", None):
       # Restore standalone LoRA adapter weights onto the base model state after initialization.
@@ -556,7 +626,12 @@ def setup_train_loop(config, recorder, devices=None, elastic_retry_cache=None, m
       logical_annotations_params = None
 
       max_utils.print_non_trivial_mesh_axis(model.mesh)  # pyrefly: ignore[missing-attribute]
-      maxtext_utils.print_shardings_params(state_params, state_mesh_shardings_params, mesh, logical_annotations_params)
+      maxtext_utils.print_shardings_params(
+          state_params,
+          state_mesh_shardings_params,
+          mesh,
+          logical_annotations_params,
+      )
 
   if config.enable_diloco:
     # Don't merge the DiLoCoTrainState into the plain-model graphdef. The inner
@@ -644,7 +719,21 @@ def maybe_apply_dcn_throttling(config):
 
   max_logging.log(f"Applying tc egress limit of {rate} (burst: {burst}, latency: {latency}) on {interface}...")
   try:
-    cmd = ["tc", "qdisc", "add", "dev", interface, "root", "tbf", "rate", rate, "burst", burst, "latency", latency]
+    cmd = [
+        "tc",
+        "qdisc",
+        "add",
+        "dev",
+        interface,
+        "root",
+        "tbf",
+        "rate",
+        rate,
+        "burst",
+        burst,
+        "latency",
+        latency,
+    ]
     subprocess.run(cmd, check=True)
     max_logging.log("DCN Bandwidth throttling applied successfully.")
   except Exception as e:  # pylint: disable=broad-exception-caught

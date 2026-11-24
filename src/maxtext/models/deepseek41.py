@@ -271,6 +271,7 @@ class DeepSeek41DecoderLayer(nnx.Module):
       decoder_input_tokens: jax.Array,
       decoder_segment_ids: jax.Array | None = None,
       image_mask: jax.Array | None = None,
+      forced_routed_experts: jax.Array | None = None,
   ) -> dict:
     h, pre_mix = carry["h"], carry["pre_mix"]
     shared = {k: v for k, v in carry.items() if k in SHARED_STATE_KEYS}
@@ -290,7 +291,12 @@ class DeepSeek41DecoderLayer(nnx.Module):
     ffn_pre, ffn_post, ffn_comb = self.hc_mixes(h, "hc_ffn")
     x = self.post_self_attention_layer_norm(self.hc_pre(h, attn_pre))
     token_mask = moe.routing_token_mask(self.config, decoder_segment_ids, self.model_mode)
-    x, load_balance_loss, moe_bias_updates = self.mlp(x, image_mask=image_mask, token_mask=token_mask)
+    x, load_balance_loss, moe_bias_updates = self.mlp(
+        x,
+        forced_routed_experts=forced_routed_experts,
+        image_mask=image_mask,
+        token_mask=token_mask,
+    )
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
     if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
@@ -333,11 +339,22 @@ class DeepSeek41Block(nnx.Module):
       decoder_input_tokens: jax.Array,
       decoder_segment_ids: jax.Array | None = None,
       image_mask: jax.Array | None = None,
+      forced_routed_experts: jax.Array | None = None,
   ):
+    if forced_routed_experts is not None and forced_routed_experts.shape[0] != self.num_layers:
+      raise ValueError(
+          f"forced_routed_experts must carry one slice per sub-layer of the block: expected leading axis "
+          f"{self.num_layers}, got {forced_routed_experts.shape[0]} (shape {forced_routed_experts.shape})."
+      )
     use_remat, policy_fn = deepseek4.resolve_block_remat_policy(self, self.model_mode)
     out = carry
     for j in range(self.num_layers):
       layer = getattr(self, f"layers_{j}")
+      call_kwargs: dict[str, Any] = {"decoder_segment_ids": decoder_segment_ids}
+      if image_mask is not None:
+        call_kwargs["image_mask"] = image_mask
+      if forced_routed_experts is not None:
+        call_kwargs["forced_routed_experts"] = forced_routed_experts[j]
       if use_remat:
         out = deepseek4._run_deepseek4_layer_remat(  # pylint: disable=protected-access
             layer,
@@ -345,22 +362,13 @@ class DeepSeek41Block(nnx.Module):
             carry_in_xs=True,
             decoder_positions=decoder_positions,
             decoder_input_tokens=decoder_input_tokens,
-            decoder_segment_ids=decoder_segment_ids,
-            image_mask=image_mask,
+            **call_kwargs,
             config=self.config,
             policy=policy_fn,
             prevent_cse=self.prevent_cse_in_remat,
         )
-      elif image_mask is not None:
-        out = layer(
-            out,
-            decoder_positions,
-            decoder_input_tokens,
-            decoder_segment_ids=decoder_segment_ids,
-            image_mask=image_mask,
-        )
       else:
-        out = layer(out, decoder_positions, decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
+        out = layer(out, decoder_positions, decoder_input_tokens, **call_kwargs)
     # A scan carry keeps its structure: drop shared state that only lives inside this group. Every group starts
     # with its own sharing source, so nothing produced here is needed by a later repeat.
     return {k: out[k] for k in carry}, None

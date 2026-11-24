@@ -26,7 +26,7 @@ from maxtext.common.goodput import (
 from maxtext.utils import diloco_sharding
 from maxtext.utils import elastic_utils
 from maxtext.utils import exceptions
-from maxtext.utils.sharding import get_input_data_sharding
+from maxtext.utils.sharding import get_batch_sharding_for_batch, get_input_data_sharding
 
 
 @contextlib.contextmanager
@@ -94,7 +94,8 @@ class DataLoader:
     example_batch = self.load_next_batch_pre_sharding()
     if self.config.enable_diloco:
       example_batch = diloco_sharding.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, example_batch)
-    return jax.device_put(example_batch, self.input_data_shardings)
+    batch_shardings = get_batch_sharding_for_batch(self.config, self.input_data_shardings, example_batch)
+    return jax.device_put(example_batch, batch_shardings)
 
   def check_example_batch(self):
     if self.config.max_checkify:
@@ -132,7 +133,10 @@ class RampUpDataLoader(DataLoader):
     if not self.rampup_active:
       return super().load_next_batch()
 
-    slice_start, slice_end = self.buffer_start, self.buffer_start + rampup_manager.global_batch_size_current
+    slice_start, slice_end = (
+        self.buffer_start,
+        self.buffer_start + rampup_manager.global_batch_size_current,
+    )
 
     # Load new batch if batch_buffer is None
     if self.batch_buffer is None:
@@ -141,7 +145,10 @@ class RampUpDataLoader(DataLoader):
 
     # If the slice end overpast batch end we collect new batch data
     if slice_end > rampup_manager.global_batch_size_end:
-      old_buffer, self.batch_buffer = self.batch_buffer, super().load_next_batch_pre_sharding()
+      old_buffer, self.batch_buffer = (
+          self.batch_buffer,
+          super().load_next_batch_pre_sharding(),
+      )
 
       # self.global_batch_size_end is batch_buffer size
       def _slice_and_concat(old_data, new_data):
@@ -176,7 +183,8 @@ class RampUpDataLoader(DataLoader):
     self.rampup_active = rampup_manager.update()
     if self.config.enable_diloco:
       output = diloco_sharding.reshape_first_axis_with_diloco(self.config.num_diloco_replicas, output)
-    return jax.device_put(output, self.input_data_shardings)
+    batch_shardings = get_batch_sharding_for_batch(self.config, self.input_data_shardings, output)
+    return jax.device_put(output, batch_shardings)
 
 
 def create_dataloader(config, mesh, data_iterator, goodput_recorder, rampup_manager):

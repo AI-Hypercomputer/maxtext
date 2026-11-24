@@ -207,6 +207,48 @@ class DataLoaderTest(unittest.TestCase):
       )
       self.assertTrue((batch["inputs"] == 1).all())
 
+  def test_load_next_batch_non_dict_ds41_multimodal(self):
+    """Non-dict batches under DS4.1 multimodal fall back to base input_data_shardings."""
+    mm_cfg = self.get_test_config(
+        reuse_example_batch=False,
+        per_device_batch_size=1,
+        model_name="deepseek4.1-flash",
+        override_model_config=True,
+        use_multimodal=True,
+        vision_encoder_block="deepseek41",
+    )
+    mm_mesh = Mesh(create_device_mesh(mm_cfg), mm_cfg.mesh_axes)
+    expected_batch = np.ones((jax.device_count(), mm_cfg.max_target_length), dtype=np.int32)
+    self.mock_data_iterator.__next__.return_value = expected_batch
+    data_loader = DataLoader(mm_cfg, mm_mesh, self.mock_data_iterator, None)
+    batch = data_loader.load_next_batch()
+    self.assertEqual(batch.shape, expected_batch.shape)
+    self.assertTrue((np.asarray(batch) == 1).all())
+
+  def test_rampup_load_next_batch_non_dict_ds41_multimodal(self):
+    """RampUpDataLoader handles non-dict batches under DS4.1 multimodal without pytree mismatch."""
+    mm_rampup_cfg = self.get_test_config(
+        reuse_example_batch=False,
+        per_device_batch_size=4.0,
+        enable_rampup_batch_size=True,
+        per_device_batch_size_start=1.0,
+        per_device_batch_size_increment=1.0,
+        global_rampup_samples=3 * (1 * jax.device_count() * 5),
+        model_name="deepseek4.1-flash",
+        override_model_config=True,
+        use_multimodal=True,
+        vision_encoder_block="deepseek41",
+    )
+    mm_mesh = Mesh(create_device_mesh(mm_rampup_cfg), mm_rampup_cfg.mesh_axes)
+    full_batch_size = int(mm_rampup_cfg.per_device_batch_size * mm_rampup_cfg.num_target_devices)
+    full_batch = np.ones((full_batch_size, mm_rampup_cfg.max_target_length), dtype=np.int32)
+    self.mock_data_iterator.__next__.return_value = full_batch
+    rampup_manager = RampupBatchManager(mm_rampup_cfg, -1)
+    data_loader = RampUpDataLoader(mm_rampup_cfg, mm_mesh, self.mock_data_iterator, None)
+    batch = data_loader.load_next_batch(rampup_manager=rampup_manager)
+    self.assertEqual(batch.shape, (mm_rampup_cfg.num_target_devices, mm_rampup_cfg.max_target_length))
+    self.assertTrue((np.asarray(batch) == 1).all())
+
 
 if __name__ == "__main__":
   unittest.main()
