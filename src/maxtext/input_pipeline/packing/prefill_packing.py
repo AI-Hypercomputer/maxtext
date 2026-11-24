@@ -126,14 +126,13 @@ class PrefillProcessor:
     """Process a new input."""
 
     process_fn = self._process_compiled(model_params, len(input_tokens_padded), return_prompt_logp)
-    return process_fn(
-        model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, rng, return_prompt_logp
-    )
+    # return_prompt_logp is static: it is compiled into process_fn, which takes the other six arguments
+    return process_fn(model_params, input_tokens_padded, decode_slot, input_true_length, decode_state, rng)
 
   def _process_compiled(self, params: Params, padded_length: int, return_prompt_logp: bool = False):
     """Ahead-of-time compilation wrapper of _process()."""
 
-    if padded_length not in self.process_func:
+    if (padded_length, return_prompt_logp) not in self.process_func:
       log.info("compile prefill process(%d)", padded_length)
       self.process_func[(padded_length, return_prompt_logp)] = (
           jax.jit(
