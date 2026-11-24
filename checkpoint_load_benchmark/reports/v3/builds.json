@@ -1,0 +1,17 @@
+{
+ "pinned_main": "74ede7cc1776f535dc72e124fe6740f7f83765d8",
+ "container_image": "gcr.io/cloud-tpu-shared-capacity/yaoyuchen-runner:ds41-2026-10-22-16-03-48",
+ "builds": {
+  "baseline": {
+   "branch": "bench/checkpoint-load-v3-baseline",
+   "commit": "2f74b08abe5f0e49d6f036b8ea0cde75bea162cb",
+   "tarball_sha256": "3cb1456c6479c5d24ca1e8db3f691d7ca5ecd24d2259449013f12c57ef90ef9d"
+  },
+  "candidate": {
+   "branch": "bench/checkpoint-load-v3",
+   "commit": "65ade9858865e77839556d9c01666d1849a1d72e",
+   "tarball_sha256": "10d8f41b956cd5847db207fb7f3859fc4221e36f0115c64e395775ec831706c0"
+  }
+ },
+ "container_image_digest": "gcr.io/cloud-tpu-shared-capacity/yaoyuchen-runner@sha256:bda382027affe383c8ef889f1f971893c2de76885736800baafccd231acd686b"
+}

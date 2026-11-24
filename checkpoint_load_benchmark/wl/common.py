@@ -117,9 +117,9 @@ def gcs_cat_json(uri: str):
     return None
 
 
-def gcs_ls(uri: str) -> list[str]:
-  """Returns the object and directory URIs directly under `uri`; an empty list if there are none."""
-  res = run(["gcloud", "storage", "ls", uri.rstrip("/") + "/"], check=False)
+def gcs_ls(uri: str, recursive: bool = False) -> list[str]:
+  """Returns the URIs directly under `uri`, or every object below it if `recursive`; empty if there are none."""
+  res = run(["gcloud", "storage", "ls", uri.rstrip("/") + ("/**" if recursive else "/")], check=False)
   return [line for line in res.stdout.split() if line.startswith("gs://")] if res.returncode == 0 else []
 
 
