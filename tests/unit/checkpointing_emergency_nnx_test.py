@@ -38,6 +38,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.common import checkpointing
 from maxtext.common import train_state_nnx
+import numpy as np
 import optax
 
 
@@ -175,6 +176,49 @@ class TestEmergencyManagerAbstractLayout(unittest.TestCase):
     """A Linen state is already in the on-disk layout, so it is handed over as-is."""
     linen_like = SimpleNamespace(params={"a": 1}, opt_state=(), step=0)
     self.assertIs(self._abstract_handed_to_manager(linen_like), linen_like)
+
+
+class TestEmergencyManagerReplicaAxis(unittest.TestCase):
+  """The manager is pointed at the `data` mesh axis, not Orbax's default axis 0.
+
+  Orbax is mocked, so this runs in normal CI without an emergency-checkpoint setup.
+  """
+
+  def _replica_axis_handed_to_manager(self, mesh):
+    """Calls the constructor with Orbax mocked, and returns the replica_axis_index it was handed."""
+    with (
+        mock.patch.object(checkpointing.emergency_checkpointing, "CheckpointManager") as manager_cls,
+        mock.patch.object(
+            checkpointing.emergency_checkpointing.gcs_utils, "mkdir_and_check_permissions", side_effect=epath.Path
+        ),
+        tempfile.TemporaryDirectory() as d,
+    ):
+      checkpointing.create_orbax_emergency_checkpoint_manager(
+          os.path.join(d, "local"),
+          os.path.join(d, "persist"),
+          mesh,
+          _abstract_state(_Model),
+          local_save_interval_steps=1,
+          persistent_save_interval_steps=1,
+      )
+    return manager_cls.call_args.kwargs["options"].replica_axis_index
+
+  def test_data_axis_is_used_even_when_not_first(self):
+    """MaxText's mesh has `diloco` before `data`; the replica axis must still be `data`."""
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()).reshape((1, -1)), ("diloco", "data"))
+    self.assertEqual(self._replica_axis_handed_to_manager(mesh), 1)
+
+  def test_mesh_without_data_axis_keeps_orbax_default(self):
+    """Meshes that have no `data` axis fall back to axis 0."""
+    mesh = jax.sharding.Mesh(jax.devices(), ("x",))
+    self.assertEqual(self._replica_axis_handed_to_manager(mesh), 0)
+
+  def test_single_replica_on_data_axis_logs_warning(self):
+    """Warns when the replica axis has fewer than 2 replicas so the persistent-only fallback is visible."""
+    mesh = jax.sharding.Mesh(np.asarray(jax.devices()).reshape((1, 1, -1)), ("diloco", "data", "fsdp"))
+    with mock.patch.object(checkpointing.emergency_checkpointing.max_logging, "warning") as warn_mock:
+      self.assertEqual(self._replica_axis_handed_to_manager(mesh), 1)
+    warn_mock.assert_called_once()
 
 
 class TestEmergencySaveRestoreRoundTrip(unittest.TestCase):
