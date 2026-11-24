@@ -17,6 +17,7 @@
 import jax
 import jax.numpy as jnp
 from flax import nnx
+from maxtext.utils import muon_utils
 
 
 def _get_key_name(k):
@@ -82,15 +83,40 @@ def _max_logits_at(curr):
   return ml
 
 
-def _scale_from_max_logits(max_logits_batch, tau):
-  axes = tuple(range(max_logits_batch.ndim - 1))
-  s_max = jnp.max(max_logits_batch, axis=axes)
+def _scale_from_max_logits(max_logits_batch, tau, *, preserve_scan_axis: bool = False):
+  start_axis = 1 if preserve_scan_axis else 0
+  axes = tuple(range(start_axis, max_logits_batch.ndim - 1))
+  s_max = jnp.max(max_logits_batch, axis=axes) if axes else max_logits_batch
   return jnp.minimum(1.0, tau / (s_max + 1e-6))
 
 
-def _clip_mla_weight(layer_name, param, scale, qk_nope):
-  """Apply the per-head scale to a wq_b or wkv_b kernel."""
-  scale_b = jnp.expand_dims(scale, axis=-1)  # broadcasts over [..., rank, heads, dim]
+def _resolve_scan_axis(param, max_logits_batch, config, param_var=None):
+  """Returns the scan axis index on `param` if `max_logits_batch` is layer-stacked, else None."""
+  if param.ndim < 4 or max_logits_batch.ndim < 3:
+    return None
+  if param_var is not None:
+    scan_axes = muon_utils.get_scan_axes(param_var)
+    if len(scan_axes) == 1 and param.shape[scan_axes[0]] == max_logits_batch.shape[0]:
+      return scan_axes[0]
+  psa = getattr(config, "param_scan_axis", None)
+  if isinstance(psa, int) and not isinstance(psa, bool) and 0 <= psa < param.ndim - 2:
+    if param.shape[psa] == max_logits_batch.shape[0]:
+      return psa
+  return None
+
+
+def _clip_mla_weight(layer_name, param, scale, qk_nope, scan_axis=None):
+  """Apply the per-head (and per-scanned-layer when scanned) scale to a wq_b or wkv_b kernel."""
+  if scan_axis is not None and scale.ndim == 2:
+    heads_axis = param.ndim - 2
+    bcast_shape = [1] * param.ndim
+    bcast_shape[scan_axis] = scale.shape[0]
+    bcast_shape[heads_axis] = scale.shape[1]
+    if scan_axis > heads_axis:
+      scale = jnp.swapaxes(scale, 0, 1)
+    scale_b = scale.reshape(bcast_shape)
+  else:
+    scale_b = jnp.expand_dims(scale, axis=-1)  # broadcasts over [..., rank, heads, dim]
   head = param[..., :qk_nope]
   tail = param[..., qk_nope:]
   head_new = head * jnp.sqrt(scale_b)
@@ -128,8 +154,9 @@ def apply_qk_clip(state, intermediate_outputs, config):
     if max_logits_batch is None:
       return param
 
-    scale = _scale_from_max_logits(max_logits_batch, tau)
-    return _clip_mla_weight(layer_name, param, scale, config.qk_nope_head_dim)
+    scan_axis = _resolve_scan_axis(param, max_logits_batch, config)
+    scale = _scale_from_max_logits(max_logits_batch, tau, preserve_scan_axis=scan_axis is not None)
+    return _clip_mla_weight(layer_name, param, scale, config.qk_nope_head_dim, scan_axis=scan_axis)
 
   new_params = jax.tree_util.tree_map_with_path(clip_mla_weights, state.params)
   return state.replace(params=new_params)
@@ -151,14 +178,13 @@ def apply_qk_clip_nnx(state, intermediate_outputs, config):
   tau = float(config.qk_clip_threshold)
 
   _, params_state, _ = nnx.split(state.model, nnx.Param, ...)
-  params_dict = params_state.to_pure_dict()  # pyrefly: ignore[missing-attribute]
 
-  def clip_mla_weights(path, param):
+  def clip_mla_weights(path, param_var):
     if len(path) < 2:
-      return param
+      return param_var
     layer_name = _get_key_name(path[-2])
     if layer_name not in ("wq_b", "wkv_b"):
-      return param
+      return param_var
 
     curr = intermediate_outputs
     for node in path[:-2]:
@@ -166,16 +192,21 @@ def apply_qk_clip_nnx(state, intermediate_outputs, config):
       if isinstance(curr, dict) and key in curr:
         curr = curr[key]
       else:
-        return param
+        return param_var
 
     max_logits_batch = _max_logits_at(curr)
     if max_logits_batch is None:
-      return param
+      return param_var
 
-    scale = _scale_from_max_logits(max_logits_batch, tau)
-    return _clip_mla_weight(layer_name, param, scale, config.qk_nope_head_dim)
+    param = param_var.get_value()
+    scan_axis = _resolve_scan_axis(param, max_logits_batch, config, param_var=param_var)
+    scale = _scale_from_max_logits(max_logits_batch, tau, preserve_scan_axis=scan_axis is not None)
+    return param_var.replace(
+        value=_clip_mla_weight(layer_name, param, scale, config.qk_nope_head_dim, scan_axis=scan_axis)
+    )
 
-  new_params_dict = jax.tree_util.tree_map_with_path(clip_mla_weights, params_dict)
-  nnx.replace_by_pure_dict(params_state, new_params_dict)
-  nnx.update(state.model, params_state)
+  new_params_state = jax.tree_util.tree_map_with_path(
+      clip_mla_weights, params_state, is_leaf=lambda x: isinstance(x, nnx.Variable)
+  )
+  nnx.update(state.model, new_params_state)
   return state

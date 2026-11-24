@@ -310,5 +310,75 @@ class TestPrefusedMoeWiShardedDimensionNumbers(unittest.TestCase):
     self.assertFalse(muon_utils.is_prefused_moe_wi_path(("MoeBlock_0", "embedding", "wi"), shape=(4, 8, 16)))
 
 
+class _KimiLikeNNXModel(nnx.Module):
+  """Placeholder Kimi-K3 model with KDA, MLA, and AttnRes projections."""
+
+  def __init__(self):
+    self.layers_0 = nnx.Module()
+    self.layers_0.self_attention = nnx.Module()
+    self.layers_0.self_attention.q_proj = nnx.Module()
+    self.layers_0.self_attention.q_proj.kernel = nnx.Param(jnp.ones((16, 32)))
+    self.layers_0.self_attention.k_proj = nnx.Module()
+    self.layers_0.self_attention.k_proj.kernel = nnx.Param(jnp.ones((16, 32)))
+    self.layers_0.self_attention.v_proj = nnx.Module()
+    self.layers_0.self_attention.v_proj.kernel = nnx.Param(jnp.ones((16, 32)))
+    self.layers_0.self_attention.g_proj = nnx.Module()
+    self.layers_0.self_attention.g_proj.kernel = nnx.Param(jnp.ones((16, 32)))
+    self.layers_0.self_attention.out = nnx.Module()
+    self.layers_0.self_attention.out.kernel = nnx.Param(jnp.ones((32, 16)))
+    self.layers_0.self_attention_res_proj = nnx.Module()
+    self.layers_0.self_attention_res_proj.kernel = nnx.Param(jnp.ones((16, 1)))
+
+    self.layers_3 = nnx.Module()
+    self.layers_3.self_attention = nnx.Module()
+    self.layers_3.self_attention.wq_b = nnx.Module()
+    self.layers_3.self_attention.wq_b.kernel = nnx.Param(jnp.ones((8, 4, 12)))
+    self.layers_3.self_attention.wkv_b = nnx.Module()
+    self.layers_3.self_attention.wkv_b.kernel = nnx.Param(jnp.ones((8, 4, 16)))
+    self.layers_3.self_attention.g_proj = nnx.Module()
+    self.layers_3.self_attention.g_proj.kernel = nnx.Param(jnp.ones((16, 4, 8)))
+    self.layers_3.self_attention.out = nnx.Module()
+    self.layers_3.self_attention.out.kernel = nnx.Param(jnp.ones((4, 8, 16)))
+
+
+class TestPerHeadMuonShardedDimensionNumbers(unittest.TestCase):
+  """get_maxtext_muon_weight_dimension_numbers sets per-head axes and split chunks for Kimi-K3."""
+
+  def setUp(self):
+    super().setUp()
+    self.model = _KimiLikeNNXModel()
+    self.mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape((1, 1)), ("data", "model"))
+
+  def test_per_head_qkv_enabled(self):
+    config = types.SimpleNamespace(
+        logical_axis_rules=(),
+        muon_include_routers=True,
+        prefuse_moe_weights=False,
+        muon_per_head_qkv=True,
+        num_query_heads=4,
+        qk_nope_head_dim=8,
+        v_head_dim=8,
+    )
+    result = maxtext_muon_utils.get_maxtext_muon_weight_dimension_numbers(self.model, config=config, mesh=self.mesh)
+    kda = result["layers_0"]["self_attention"]
+    for name in ("q_proj", "k_proj", "v_proj"):
+      self.assertEqual(kda[name]["kernel"].reduction_axis, (0,))
+      self.assertEqual(kda[name]["kernel"].output_axis, (-1,))
+      self.assertEqual(kda[name]["kernel"].split_output_chunks, 4)
+    self.assertEqual(kda["g_proj"]["kernel"].split_output_chunks, 1)
+    self.assertEqual(kda["out"]["kernel"].split_output_chunks, 1)
+    self.assertIsNone(result["layers_0"]["self_attention_res_proj"]["kernel"])
+
+    mla = result["layers_3"]["self_attention"]
+    self.assertEqual(mla["wq_b"]["kernel"].reduction_axis, (0,))
+    self.assertEqual(mla["wq_b"]["kernel"].output_axis, (-1,))
+    self.assertEqual(mla["wq_b"]["kernel"].split_output_chunks, 1)
+    self.assertEqual(mla["wkv_b"]["kernel"].reduction_axis, (0,))
+    self.assertEqual(mla["wkv_b"]["kernel"].output_axis, (-1,))
+    self.assertEqual(mla["wkv_b"]["kernel"].split_output_chunks, 2)
+    self.assertEqual(mla["g_proj"]["kernel"].output_axis, (-2, -1))
+    self.assertEqual(mla["out"]["kernel"].reduction_axis, (0, -2))
+
+
 if __name__ == "__main__":
   absltest.main()

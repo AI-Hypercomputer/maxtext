@@ -72,6 +72,16 @@ class TestTransformLogic(unittest.TestCase):
   def test_logits_dense_is_excluded(self):
     self.assertIsNone(muon_utils.transform_logic(("decoder", "logits_dense", "kernel")))
 
+  def test_attn_res_proj_is_excluded(self):
+    self.assertIsNone(
+        muon_utils.transform_logic(("decoder", "layers_0", "self_attention_res_proj", "kernel"), shape=(256, 1))
+    )
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "layers_0", "mlp_res_proj", "kernel"), shape=(256, 1)))
+    self.assertIsNone(muon_utils.transform_logic(("decoder", "output_attn_res_proj", "kernel"), shape=(256, 1)))
+    self.assertIsNone(
+        muon_utils.transform_logic(("decoder", "scanned_blocks", "layers_0", "mlp_res_proj", "kernel"), shape=(256, 2, 1))
+    )
+
   # --- 2.1 MoE ---
   def test_moe_wi_0_uses_last_two_axes(self):
     self.assertEqual(muon_utils.transform_logic(("decoder", "MoeBlock_0", "wi_0")), mdn((-2,), (-1,)))
@@ -873,6 +883,115 @@ class TestPrefusedMoeWiHelpers(unittest.TestCase):
     self.assertFalse(pure_mask["MoeBlock_0"]["gate"]["kernel"])
     self.assertFalse(pure_mask["shared_experts"]["wi"])
     self.assertFalse(pure_mask["scale"])
+
+
+class TestPerHeadMuonQkv(unittest.TestCase):
+  """Tests for Kimi-K3 Per-Head Muon dimension numbers and output chunk splitting."""
+
+  def test_per_head_qkv_transform_logic(self):
+    for name in ("query", "key", "value", "wq_b", "wkv_b"):
+      path = ("decoder", "layers_3", "self_attention", name, "kernel")
+      self.assertEqual(muon_utils.transform_logic(path, shape=(64, 8, 32), per_head_qkv=True), mdn((0,), (-1,)))
+      self.assertEqual(muon_utils.transform_logic(path, shape=(64, 8, 32), per_head_qkv=False), mdn((0,), (-2, -1)))
+    # Output projection and MLA output gate remain full-matrix even with per_head_qkv=True.
+    out_path = ("decoder", "layers_3", "self_attention", "out", "kernel")
+    gate_path = ("decoder", "layers_3", "self_attention", "g_proj", "kernel")
+    self.assertEqual(muon_utils.transform_logic(out_path, shape=(8, 32, 256), per_head_qkv=True), mdn((0, -2), (-1,)))
+    self.assertEqual(muon_utils.transform_logic(gate_path, shape=(256, 8, 32), per_head_qkv=True), mdn((0,), (-2, -1)))
+
+  def test_get_split_output_chunks_per_head_qkv(self):
+    cfg = mock.MagicMock()
+    cfg.prefuse_moe_weights = False
+    cfg.muon_per_head_qkv = True
+    cfg.num_query_heads = 8
+    cfg.qk_nope_head_dim = 32
+    cfg.v_head_dim = 32
+
+    # KDA flat Q/K/V split by num_query_heads; G/out/decay projections stay 1.
+    for proj in ("q_proj", "k_proj", "v_proj"):
+      path = ("decoder", "layers_0", "self_attention", proj, "kernel")
+      self.assertEqual(muon_utils.get_split_output_chunks(path, shape=(256, 256), config=cfg), 8)
+    for proj in ("g_proj", "out", "f_a_proj", "f_b_proj", "b_proj"):
+      path = ("decoder", "layers_0", "self_attention", proj, "kernel")
+      self.assertEqual(muon_utils.get_split_output_chunks(path, shape=(256, 256), config=cfg), 1)
+    # MLA wkv_b splits into K and V (2 chunks); wq_b uses head axis directly (1 chunk).
+    wkv_b_path = ("decoder", "layers_3", "self_attention", "wkv_b", "kernel")
+    wq_b_path = ("decoder", "layers_3", "self_attention", "wq_b", "kernel")
+    self.assertEqual(muon_utils.get_split_output_chunks(wkv_b_path, shape=(32, 8, 64), config=cfg), 2)
+    self.assertEqual(muon_utils.get_split_output_chunks(wq_b_path, shape=(64, 8, 48), config=cfg), 1)
+
+    # Unequal qk_nope_head_dim != v_head_dim raises ValueError on MLA wkv_b.
+    cfg.v_head_dim = 16
+    with self.assertRaisesRegex(ValueError, "qk_nope_head_dim == v_head_dim"):
+      muon_utils.get_split_output_chunks(wkv_b_path, shape=(32, 8, 48), config=cfg)
+
+  def test_kimi_k3_feature_axes_match_across_scan_axes(self):
+    """Kimi-K3 Muon dimension numbers and split chunks stay consistent across param_scan_axis=0 and 1."""
+
+    def _kimi_dims(psa):
+      cfg = pyconfig.initialize(
+          [
+              None,
+              os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+              "model_name=kimi-k3",
+              "override_model_config=True",
+              "opt_type=muon",
+              "muon_type=maxtext_muon",
+              f"param_scan_axis={psa}",
+              "base_num_decoder_layers=13",
+              "full_attn_layers=[3,7,11,12]",
+              "base_emb_dim=128",
+              "base_mlp_dim=256",
+              "base_moe_mlp_dim=64",
+              "moe_intermediate_size=64",
+              "shared_intermediate_size=128",
+              "routed_expert_hidden_size=64",
+              "moe_expert_input_dim=64",
+              "moe_router_input_dim=128",
+              "base_num_query_heads=4",
+              "base_num_kv_heads=4",
+              "head_dim=32",
+              "qk_nope_head_dim=32",
+              "qk_rope_head_dim=16",
+              "v_head_dim=32",
+              "q_lora_rank=32",
+              "kv_lora_rank=16",
+              "num_experts=4",
+              "num_experts_per_tok=2",
+              "vocab_size=128",
+              "attn_res_block_size=4",
+              "attention=dot_product",
+              "skip_jax_distributed_system=True",
+          ]
+      )
+      mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+      _, model = model_creation_utils.create_nnx_abstract_model(cfg, mesh)
+      _, params, _ = nnx.split(model, nnx.Param, ...)
+      dims = maxtext_muon_utils.get_maxtext_muon_weight_dimension_numbers(model, cfg, mesh=mesh)
+      return {
+          tuple(path): (var.get_value().shape, dim)
+          for (path, var), (_, dim) in zip(nnx.to_flat_state(params), nnx.to_flat_state(dims), strict=True)
+      }
+
+    d0 = _kimi_dims(0)
+    d1 = _kimi_dims(1)
+    self.assertEqual(d0.keys(), d1.keys())
+    for path, (s0, dim0) in d0.items():
+      s1, dim1 = d1[path]
+      if any("res_proj" in str(p) for p in path):
+        self.assertIsNone(dim0)
+        self.assertIsNone(dim1)
+        continue
+      self.assertEqual(dim0 is None, dim1 is None)
+      if dim0 is None:
+        continue
+      self.assertEqual(tuple(s0[a] for a in dim0.reduction_axis), tuple(s1[a] for a in dim1.reduction_axis))
+      self.assertEqual(tuple(s0[a] for a in dim0.output_axis), tuple(s1[a] for a in dim1.output_axis))
+      self.assertEqual(dim0.split_output_chunks, dim1.split_output_chunks)
+      if path[-2:] == ("wkv_b", "kernel"):
+        self.assertEqual(dim0.split_output_chunks, 2)
+      elif path[-2:] in (("q_proj", "kernel"), ("k_proj", "kernel"), ("v_proj", "kernel")):
+        self.assertEqual(dim0.split_output_chunks, 4)
 
 
 if __name__ == "__main__":

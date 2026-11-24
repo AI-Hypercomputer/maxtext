@@ -695,6 +695,78 @@ class MuonTest(parameterized.TestCase):
     np.testing.assert_array_equal(updates["frozen"], grads["frozen"])
     self.assertEqual(updates["w"].shape, grads["w"].shape)
 
+  @parameterized.product(
+      explicit_axes=(False, True),
+      mesh_shape=((2, 2), (1, 4), (4, 1)),
+      use_all_to_all=(True, False),
+  )
+  def test_per_head_split_output_chunks_tp_sharded(self, explicit_axes, mesh_shape, use_all_to_all):
+    """Verifies multi-head split_output_chunks=8 matches separate per-head matrices across FSDP+TP meshes."""
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Requires at least 4 devices for sharded Muon mesh tests.")
+
+    fsdp_sz, tp_sz = mesh_shape
+    axis_type = jax.sharding.AxisType.Explicit if explicit_axes else jax.sharding.AxisType.Auto
+    mesh = jax.sharding.Mesh(
+        np.array(devices[:4]).reshape((fsdp_sz, tp_sz)),
+        axis_names=("fsdp", "tensor"),
+        axis_types=(axis_type, axis_type),
+    )
+    num_heads, head_dim, in_dim = 8, 6, 16
+    sharding_flat = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", "tensor"))
+    sharding_head = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", "tensor", None))
+
+    k1, k2 = jax.random.split(jax.random.key(73))
+    w_host = jax.random.normal(k1, (in_dim, num_heads * head_dim), dtype=jnp.float32)
+    g_host = jax.random.normal(k2, (in_dim, num_heads * head_dim), dtype=jnp.float32)
+
+    w_flat = jax.device_put(w_host, sharding_flat)
+    g_flat = jax.device_put(g_host, sharding_flat)
+    w_3d = jax.device_put(w_host.reshape(in_dim, num_heads, head_dim), sharding_head)
+    g_3d = jax.device_put(g_host.reshape(in_dim, num_heads, head_dim), sharding_head)
+
+    opt_flat = _muon.muon(
+        learning_rate=1e-2,
+        consistent_rms=0.2,
+        use_all_to_all=use_all_to_all,
+        muon_weight_dimension_numbers={
+            "w": _muon.ShardedMuonDimensionNumbers(
+                reduction_axis=(0,),
+                output_axis=(-1,),
+                sharding=sharding_flat,
+                split_output_chunks=num_heads,
+            )
+        },
+    )
+    opt_3d = _muon.muon(
+        learning_rate=1e-2,
+        consistent_rms=0.2,
+        use_all_to_all=use_all_to_all,
+        muon_weight_dimension_numbers={
+            "w": _muon.ShardedMuonDimensionNumbers(
+                reduction_axis=(0,),
+                output_axis=(-1,),
+                sharding=sharding_head,
+                split_output_chunks=1,
+            )
+        },
+    )
+
+    with jax.set_mesh(mesh):
+      s_flat = opt_flat.init({"w": w_flat})
+      s_3d = opt_3d.init({"w": w_3d})
+      u_flat, _ = jax.jit(opt_flat.update)({"w": g_flat}, s_flat, {"w": w_flat})
+      u_3d, _ = jax.jit(opt_3d.update)({"w": g_3d}, s_3d, {"w": w_3d})
+
+    self.assertEqual(u_flat["w"].sharding, sharding_flat)
+    np.testing.assert_allclose(
+        np.asarray(jax.device_get(u_flat["w"])),
+        np.asarray(jax.device_get(u_3d["w"])).reshape(in_dim, num_heads * head_dim),
+        rtol=1e-5,
+        atol=1e-5,
+    )
+
 
 if __name__ == "__main__":
   absltest.main()

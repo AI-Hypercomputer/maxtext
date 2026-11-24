@@ -57,6 +57,7 @@ EXCLUDED_SUBSTRINGS = (
     "dt_bias",
     "conv1d",
     "shared_expert_gate",
+    "res_proj",
 )
 
 EXCLUDED_EXACT_SEGMENTS = {
@@ -82,6 +83,14 @@ ATTENTION_QKV_NAMES = (
     "wq_b",
     "wkv_b",
     "wkv",
+)
+
+# Flat 2D linear-attention Q/K/V projections (e.g. Kimi-K3 KDA `[emb_dim, num_heads * head_dim]`).
+# Under Per-Head Muon (`muon_per_head_qkv=True`), their output axis is split into `num_heads` blocks.
+KDA_QKV_NAMES = (
+    "q_proj",
+    "k_proj",
+    "v_proj",
 )
 
 ATTENTION_OUT_NAMES = ("out",)
@@ -128,10 +137,55 @@ def is_prefused_moe_wi_path(path: Tuple[str, ...], shape: Optional[Tuple[int, ..
   )
 
 
+def is_per_head_qkv_enabled(config) -> bool:
+  """Returns True iff `config.muon_per_head_qkv` is an explicit boolean `True`."""
+  val = getattr(config, "muon_per_head_qkv", False)
+  return isinstance(val, bool) and val
+
+
+def _get_positive_int_attr(config, *names: str) -> Optional[int]:
+  for name in names:
+    val = getattr(config, name, None)
+    if isinstance(val, int) and not isinstance(val, bool) and val > 0:
+      return val
+  return None
+
+
+def get_split_output_chunks(
+    path: Tuple[str, ...],
+    shape: Optional[Tuple[int, ...]] = None,
+    config=None,
+) -> int:
+  """Returns the number of independent output blocks concatenated along `output_axis`."""
+  if shape is not None and len(shape) < 2:
+    return 1
+  if _is_excluded_path(path):
+    return 1
+  if is_prefuse_moe_weights_enabled(config) and is_prefused_moe_wi_path(path, shape=shape):
+    return 2
+  if is_per_head_qkv_enabled(config) and _is_path_contain_any(ATTENTION_BLOCK_NAMES, path):
+    # MLA wkv_b packs [K_nope | V] along the last dim per head: split into 2 independent blocks.
+    if "wkv_b" in path and (shape is None or len(shape) > 2):
+      qk_nope = _get_positive_int_attr(config, "qk_nope_head_dim")
+      v_dim = _get_positive_int_attr(config, "v_head_dim")
+      if qk_nope is not None and v_dim is not None and qk_nope != v_dim:
+        raise ValueError(
+            "Per-Head Muon splitting of MLA wkv_b requires qk_nope_head_dim == v_head_dim," f" got {qk_nope} and {v_dim}."
+        )
+      return 2
+    # KDA q_proj/k_proj/v_proj are flat [emb_dim, (num_layers,) num_heads * head_dim]: split into `num_heads`.
+    if _is_path_contain_any(KDA_QKV_NAMES, path):
+      num_heads = _get_positive_int_attr(config, "num_query_heads", "base_num_query_heads")
+      if num_heads is not None and num_heads > 1:
+        return num_heads
+  return 1
+
+
 def transform_logic(
     path: Tuple[str, ...],
     shape: Optional[Tuple[int, ...]] = None,
     include_routers: bool = True,
+    per_head_qkv: bool = False,
 ) -> Optional[mdn]:
   """Determines Muon dimension numbers based on parameter path and shape.
 
@@ -203,8 +257,10 @@ def transform_logic(
   # Head-expanded attention projections (3D unscanned or 4D scanned)
   if _is_path_contain_any(ATTENTION_BLOCK_NAMES, path) and (shape is None or len(shape) > 2):
     if _is_path_contain_any(ATTENTION_QKV_NAMES, path):
-      # [in_features, (num_layers), num_heads, head_dim] -> reduce (0,), output (-2, -1)
-      return mdn((0,), (-2, -1))
+      # [in_features, (num_layers), num_heads, head_dim]:
+      # - Per-Head Muon: leave `num_heads` as a batch axis -> reduce (0,), output (-1,)
+      # - Standard Muon: flatten heads into output -> reduce (0,), output (-2, -1)
+      return mdn((0,), (-1,)) if per_head_qkv else mdn((0,), (-2, -1))
     if (
         shape is not None
         and _is_path_contain_any(ATTENTION_GATE_NAMES, path)
@@ -276,26 +332,30 @@ def to_stacked_layout(dim_num: Optional[mdn], ndim: int, scan_axes: Tuple[int, .
   return mdn(remap(dim_num.reduction_axis), remap(dim_num.output_axis))
 
 
-def get_transform_tree(tree, path=(), include_routers: bool = True):
+def get_transform_tree(tree, path=(), include_routers: bool = True, per_head_qkv: bool = False):
   """Recursively extracts `MuonDimensionNumbers` for Linen abstract parameters."""
   if isinstance(tree, (dict, collections.abc.Mapping)) or hasattr(tree, "items"):
-    return {k: get_transform_tree(v, path=path + (k,), include_routers=include_routers) for k, v in tree.items()}
+    return {
+        k: get_transform_tree(v, path=path + (k,), include_routers=include_routers, per_head_qkv=per_head_qkv)
+        for k, v in tree.items()
+    }
   else:
     val = getattr(tree, "value", tree)
     val_shape = getattr(val, "shape", None)
-    return transform_logic(path, shape=val_shape, include_routers=include_routers)
+    return transform_logic(path, shape=val_shape, include_routers=include_routers, per_head_qkv=per_head_qkv)
 
 
 def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
   """Extracts a matching pytree of `MuonDimensionNumbers` from a model."""
   include_routers = getattr(config, "muon_include_routers", True) if config is not None else True
+  per_head_qkv = is_per_head_qkv_enabled(config)
   _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
 
   def apply_transform_nnx(path: Tuple[jax.tree_util.KeyEntry, ...], variable):
     # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
     path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
     val_shape = getattr(variable.get_value(), "shape", None)
-    dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
+    dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers, per_head_qkv=per_head_qkv)
     return to_stacked_layout(dim_num, len(val_shape or ()), get_scan_axes(variable))
 
   # Map over whole variables so each one's scan metadata is at hand; the result is an nnx.State
@@ -330,6 +390,25 @@ def get_prefused_moe_wi_mask(model, config=None):
   if not any(jax.tree.leaves(mask)):
     return None
   return mask
+
+
+def get_split_output_chunks_tree(model, config=None):
+  """Returns an `nnx.State` of `split_output_chunks` ints (> 1 where split), or `None` if all leaves are 1."""
+  if not isinstance(model, nnx.Module):
+    return None
+  if not (is_prefuse_moe_weights_enabled(config) or is_per_head_qkv_enabled(config)):
+    return None
+  _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
+
+  def split_leaf(path: Tuple[jax.tree_util.KeyEntry, ...], variable):
+    path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
+    val_shape = getattr(variable.get_value(), "shape", None)
+    return get_split_output_chunks(path_strings, shape=val_shape, config=config)
+
+  chunks = jax.tree.map_with_path(split_leaf, abstract_param, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  if not any(c > 1 for c in jax.tree.leaves(chunks)):
+    return None
+  return chunks
 
 
 def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):

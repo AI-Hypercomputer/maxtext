@@ -22,12 +22,13 @@ import jax
 import jax.numpy as jnp
 
 import optax
+from optax.contrib._muon import MuonDimensionNumbers as optax_mdn
 from optax.contrib._muon import muon as optax_muon
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.optimizers.muon import muon as maxtext_muon
 from maxtext.utils import max_logging
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
-from maxtext.utils.muon_utils import get_prefused_moe_wi_mask
+from maxtext.utils.muon_utils import get_split_output_chunks_tree
 from maxtext.utils.maxtext_muon_utils import get_maxtext_muon_weight_dimension_numbers
 
 
@@ -187,88 +188,84 @@ def _resolve_mask_container(mask, tree):
   return mask
 
 
-def _is_split_axis_leaf(x) -> bool:
-  return x is None or (isinstance(x, int) and not isinstance(x, bool))
+def _is_split_spec_leaf(x) -> bool:
+  return x is None or (isinstance(x, tuple) and len(x) == 2 and all(isinstance(v, int) for v in x))
 
 
-def _extract_split_axis_tree(mask, dim_nums):
-  """Maps each masked `wi` leaf to its single `output_axis` int from `dim_nums`, or `None` otherwise."""
-  resolved_mask = _resolve_mask_container(mask, dim_nums)
+def _extract_split_spec_tree(chunks_tree, dim_nums):
+  """Maps each split leaf to `(output_axis, num_chunks)` from `dim_nums`, or `None` otherwise."""
+  resolved_chunks = _resolve_mask_container(chunks_tree, dim_nums)
 
-  def _extract_axis(should_split: bool, dim_num):
-    if not should_split or dim_num is None:
+  def _extract_spec(num_chunks: int, dim_num):
+    if num_chunks <= 1 or dim_num is None:
       return None
     out_ax = dim_num.output_axis
     if isinstance(out_ax, int):
-      return out_ax
+      return (out_ax, num_chunks)
     out_axes = tuple(out_ax)
     if len(out_axes) != 1:
-      raise ValueError(f"Pre-fused MoE `wi` splitting requires a single output_axis, got {out_axes}")
-    return out_axes[0]
+      raise ValueError(f"split_output_chunks > 1 requires a single output_axis, got {out_axes}")
+    return (out_axes[0], num_chunks)
 
   return jax.tree.map(
-      _extract_axis,
-      resolved_mask,
+      _extract_spec,
+      resolved_chunks,
       dim_nums,
-      is_leaf=lambda m: isinstance(m, bool),
+      is_leaf=lambda c: isinstance(c, int) and not isinstance(c, bool),
   )
 
 
 def _normalize_split_axis(axis: int, shape: tuple[int, ...]) -> int:
   ndim = len(shape)
   if not -ndim <= axis < ndim:
-    raise ValueError(f"Pre-fused MoE `wi` output axis {axis} out of range for shape {shape}.")
+    raise ValueError(f"split output axis {axis} out of range for shape {shape}.")
   return axis % ndim
 
 
-def _split_wi_tree(split_axes, tree):
-  """Splits pre-fused MoE `wi` leaves into `{'0': wi_0, '1': wi_1}` along each leaf's `output_axis`."""
+def _split_output_tree(split_specs, tree):
+  """Reshapes leaves with `k > 1` chunks from `(..., k * d, ...)` to `(..., k, d, ...)` along `output_axis`."""
   if tree is None:
     return None
-  resolved_axes = _resolve_mask_container(split_axes, tree)
+  resolved_specs = _resolve_mask_container(split_specs, tree)
 
-  def _split_leaf(split_axis: int | None, leaf):
-    if split_axis is None or leaf is None:
+  def _split_leaf(spec: tuple[int, int] | None, leaf):
+    if spec is None or leaf is None:
       return leaf
-    arr_leaves = jax.tree.leaves(leaf)
-    if not arr_leaves:
-      return {"0": leaf, "1": leaf}
+    split_axis, k = spec
 
-    def _slice_half(a, second_half: bool):
+    def _reshape_split(a):
       norm_ax = _normalize_split_axis(split_axis, a.shape)
       size = a.shape[norm_ax]
-      if size % 2 != 0:
-        raise ValueError(
-            f"Pre-fused MoE `wi` output axis {norm_ax} of size {size} is not divisible by 2 for shape {a.shape}."
-        )
-      half = size // 2
-      return jax.lax.slice_in_dim(a, half if second_half else 0, size if second_half else half, axis=norm_ax)
+      if size % k != 0:
+        raise ValueError(f"Split output axis {norm_ax} of size {size} is not divisible by {k} for shape {a.shape}.")
+      new_shape = (*a.shape[:norm_ax], k, size // k, *a.shape[norm_ax + 1 :])
+      return jnp.reshape(a, new_shape)
 
-    return {
-        "0": jax.tree.map(lambda a: _slice_half(a, False), leaf),
-        "1": jax.tree.map(lambda a: _slice_half(a, True), leaf),
-    }
+    return jax.tree.map(_reshape_split, leaf)
 
-  return jax.tree.map(_split_leaf, resolved_axes, tree, is_leaf=_is_split_axis_leaf)
+  return jax.tree.map(_split_leaf, resolved_specs, tree, is_leaf=_is_split_spec_leaf)
 
 
-def _merge_wi_tree(split_axes, tree):
-  """Concatenates split `{'0': wi_0, '1': wi_1}` subtrees back along each leaf's `output_axis`."""
+def _merge_output_tree(split_specs, tree):
+  """Reshapes split leaves `(..., k, d, ...)` back to `(..., k * d, ...)`."""
   if tree is None:
     return None
-  resolved_axes = _resolve_mask_container(split_axes, tree)
+  resolved_specs = _resolve_mask_container(split_specs, tree)
 
-  def _merge_leaf(split_axis: int | None, subtree):
-    if split_axis is None or subtree is None:
-      return subtree
-    v0, v1 = subtree["0"], subtree["1"]
-    return jax.tree.map(
-        lambda a, b: jnp.concatenate([a, b], axis=_normalize_split_axis(split_axis, a.shape)),
-        v0,
-        v1,
-    )
+  def _merge_leaf(spec: tuple[int, int] | None, leaf):
+    if spec is None or leaf is None:
+      return leaf
+    split_axis, k = spec
 
-  return jax.tree.map(_merge_leaf, resolved_axes, tree, is_leaf=_is_split_axis_leaf)
+    def _reshape_merge(a):
+      orig_ndim = a.ndim - 1
+      norm_ax = _normalize_split_axis(split_axis, (0,) * orig_ndim)
+      new_shape = (*a.shape[:norm_ax], k * a.shape[norm_ax + 1], *a.shape[norm_ax + 2 :])
+      return jnp.reshape(a, new_shape)
+
+    return jax.tree.map(_reshape_merge, leaf)
+
+  return jax.tree.map(_merge_leaf, resolved_specs, tree, is_leaf=_is_split_spec_leaf)
 
 
 def _map_opt_state_trees(fn, state):
@@ -286,32 +283,48 @@ def _map_opt_state_trees(fn, state):
   return state
 
 
-def _build_prefused_wi_optax_muon(muon_kwargs: dict[str, Any], split_wi_mask) -> optax.GradientTransformation:
-  """Wraps `optax_muon` so pre-fused `wi = [wi_0 | wi_1]` is orthogonalized per projection while keeping stacked state."""
+def _build_split_output_optax_muon(muon_kwargs: dict[str, Any], split_chunks_tree) -> optax.GradientTransformation:
+  """Wraps `optax_muon` so split output tensors (pre-fused MoE `wi`, per-head Q/K/V, MLA `wkv_b`) are
+  orthogonalized per chunk while keeping optimizer state in the original unsplit parameter shape."""
   dim_nums = muon_kwargs["muon_weight_dimension_numbers"]
-  split_axes = _extract_split_axis_tree(split_wi_mask, dim_nums)
-  static_split_dim_nums = jax.tree.map(
-      lambda m, d: {"0": d, "1": d} if (m and d is not None) else d,
-      _resolve_mask_container(split_wi_mask, dim_nums),
-      dim_nums,
-      is_leaf=lambda m: isinstance(m, bool),
-  )
+  split_specs = _extract_split_spec_tree(split_chunks_tree, dim_nums)
+
+  def _shifted_dim_nums_fn(split_params):
+    resolved_specs = _resolve_mask_container(split_specs, split_params)
+    resolved_dims = _resolve_mask_container(dim_nums, split_params)
+
+    def _shift_leaf(spec, d, leaf):
+      if spec is None or d is None:
+        return d
+      arr_leaves = jax.tree.leaves(leaf)
+      if not arr_leaves:
+        return d
+      orig_ndim = arr_leaves[0].ndim - 1
+      out_ax, _ = spec
+      norm_out = out_ax % orig_ndim
+      red = (d.reduction_axis,) if isinstance(d.reduction_axis, int) else tuple(d.reduction_axis)
+      norm_red = tuple(ax % orig_ndim for ax in red)
+      shifted_red = tuple(ax + 1 if ax >= norm_out else ax for ax in norm_red)
+      return optax_mdn(reduction_axis=shifted_red, output_axis=(norm_out + 1,))
+
+    return jax.tree.map(_shift_leaf, resolved_specs, resolved_dims, split_params, is_leaf=_is_split_spec_leaf)
+
   inner_kwargs = dict(muon_kwargs)
-  inner_kwargs["muon_weight_dimension_numbers"] = lambda p: _resolve_mask_container(static_split_dim_nums, p)
+  inner_kwargs["muon_weight_dimension_numbers"] = _shifted_dim_nums_fn
   inner_opt = optax_muon(**inner_kwargs)  # pyrefly: ignore[bad-argument-type]
 
   def init_fn(params):
-    split_state = inner_opt.init(_split_wi_tree(split_axes, params))
-    return _map_opt_state_trees(lambda t: _merge_wi_tree(split_axes, t), split_state)
+    split_state = inner_opt.init(_split_output_tree(split_specs, params))
+    return _map_opt_state_trees(lambda t: _merge_output_tree(split_specs, t), split_state)
 
   def update_fn(updates, state, params=None):
-    split_updates = _split_wi_tree(split_axes, updates)
-    split_state = _map_opt_state_trees(lambda t: _split_wi_tree(split_axes, t), state)
-    split_params = _split_wi_tree(split_axes, params)
+    split_updates = _split_output_tree(split_specs, updates)
+    split_state = _map_opt_state_trees(lambda t: _split_output_tree(split_specs, t), state)
+    split_params = _split_output_tree(split_specs, params)
     new_updates, new_state = inner_opt.update(split_updates, split_state, split_params)
     return (
-        _merge_wi_tree(split_axes, new_updates),
-        _map_opt_state_trees(lambda t: _merge_wi_tree(split_axes, t), new_state),
+        _merge_output_tree(split_specs, new_updates),
+        _map_opt_state_trees(lambda t: _merge_output_tree(split_specs, t), new_state),
     )
 
   return optax.GradientTransformation(init_fn, update_fn)
@@ -379,9 +392,9 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
       else:
         raise ValueError("Please specify model to extract muon dimension number.")
       muon_kwargs = muon_kwargs | {"muon_weight_dimension_numbers": muon_weight_dimension_numbers}
-      split_wi_mask = get_prefused_moe_wi_mask(model, config)
-      if split_wi_mask is not None:
-        base_opt = _build_prefused_wi_optax_muon(muon_kwargs, split_wi_mask)
+      split_chunks_tree = get_split_output_chunks_tree(model, config)
+      if split_chunks_tree is not None:
+        base_opt = _build_split_output_optax_muon(muon_kwargs, split_chunks_tree)
       else:
         base_opt = optax_muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
     elif muon_type in ("maxtext", "maxtext_muon"):

@@ -1431,6 +1431,155 @@ class TestMuonLogic(parameterized.TestCase):
         atol=1e-6,
     )
 
+  @parameterized.named_parameters(
+      ("optax_muon", "optax_muon"),
+      ("maxtext_muon", "maxtext_muon"),
+  )
+  def test_per_head_muon_matches_separate_heads(self, muon_type):
+    """Kimi-K3 Per-Head Muon matches explicit per-head KDA Q/K/V, MLA wq_b/wkv_b, and AdamW AttnRes."""
+    num_heads, head_dim, emb_dim, kv_lora, q_lora = 4, 6, 16, 8, 10
+
+    class FusedKimiAttnModel(nnx.Module):
+      """Kimi-K3-like NNX module with flat KDA Q, MLA wq_b/wkv_b, and AttnRes proj."""
+
+      def __init__(self, q_heads, wq_b, wk_b, wv_b, res_proj):
+        self.layers_0 = nnx.Module()
+        self.layers_0.self_attention = nnx.Module()
+        self.layers_0.self_attention.q_proj = nnx.Module()
+        # Flat [emb_dim, num_heads * head_dim]
+        self.layers_0.self_attention.q_proj.kernel = nnx.Param(q_heads.reshape(emb_dim, num_heads * head_dim))
+        self.layers_0.self_attention_res_proj = nnx.Module()
+        self.layers_0.self_attention_res_proj.kernel = nnx.Param(res_proj)
+
+        self.layers_3 = nnx.Module()
+        self.layers_3.self_attention = nnx.Module()
+        self.layers_3.self_attention.wq_b = nnx.Module()
+        self.layers_3.self_attention.wq_b.kernel = nnx.Param(wq_b)
+        self.layers_3.self_attention.wkv_b = nnx.Module()
+        self.layers_3.self_attention.wkv_b.kernel = nnx.Param(jnp.concatenate([wk_b, wv_b], axis=-1))
+
+    class SplitRefModel(nnx.Module):
+      """Reference model with explicitly separated per-head 2D matrices."""
+
+      def __init__(self, q_heads, wq_b, wk_b, wv_b, res_proj):
+        # Independent 2D matrices per head so default Muon orthogonalizes each head independently.
+        for h in range(num_heads):
+          setattr(self, f"q_h{h}", nnx.Param(q_heads[:, h, :]))
+          setattr(self, f"wqb_h{h}", nnx.Param(wq_b[:, h, :]))
+          setattr(self, f"wkb_h{h}", nnx.Param(wk_b[:, h, :]))
+          setattr(self, f"wvb_h{h}", nnx.Param(wv_b[:, h, :]))
+        # 1D vector so AdamW runs on it identically to excluded [emb_dim, 1] res_proj.
+        self.res_proj_1d = nnx.Param(res_proj[:, 0])
+
+    keys = jax.random.split(jax.random.key(55), 10)
+    q_heads = jax.random.normal(keys[0], (emb_dim, num_heads, head_dim), dtype=jnp.float32)
+    wq_b = jax.random.normal(keys[1], (q_lora, num_heads, head_dim + 4), dtype=jnp.float32)
+    wk_b = jax.random.normal(keys[2], (kv_lora, num_heads, head_dim), dtype=jnp.float32)
+    wv_b = jax.random.normal(keys[3], (kv_lora, num_heads, head_dim), dtype=jnp.float32)
+    res_proj = jax.random.normal(keys[4], (emb_dim, 1), dtype=jnp.float32)
+
+    g_q_heads = jax.random.normal(keys[5], q_heads.shape, dtype=jnp.float32)
+    g_wq_b = jax.random.normal(keys[6], wq_b.shape, dtype=jnp.float32)
+    g_wk_b = jax.random.normal(keys[7], wk_b.shape, dtype=jnp.float32)
+    g_wv_b = jax.random.normal(keys[8], wv_b.shape, dtype=jnp.float32)
+    g_res_proj = jax.random.normal(keys[9], res_proj.shape, dtype=jnp.float32)
+
+    model_kimi = FusedKimiAttnModel(q_heads, wq_b, wk_b, wv_b, res_proj)
+    model_ref = SplitRefModel(q_heads, wq_b, wk_b, wv_b, res_proj)
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape((1, 1)), ("data", "model"))
+
+    cfg = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "run_name=test_per_head_muon",
+            "opt_type=muon",
+            f"muon_type={muon_type}",
+            "muon_per_head_qkv=True",
+            "muon_consistent_rms=0.2",
+            "muon_weight_decay=0.1",
+            "adam_weight_decay=0.1",
+            f"base_num_query_heads={num_heads}",
+            f"base_num_kv_heads={num_heads}",
+            f"qk_nope_head_dim={head_dim}",
+            f"v_head_dim={head_dim}",
+        ]
+    )
+    tx_kimi = optimizers.get_optimizer(cfg, lambda _: 1e-2, model=model_kimi, mesh=mesh)
+    tx_ref = optimizers.get_optimizer(cfg, lambda _: 1e-2, model=model_ref, mesh=mesh)
+    opt_kimi = nnx.Optimizer(model_kimi, tx_kimi, wrt=nnx.Param)
+    opt_ref = nnx.Optimizer(model_ref, tx_ref, wrt=nnx.Param)
+
+    # Verify optimizer state keeps original unsplit shapes.
+    kimi_state_shapes = [x.shape for x in jax.tree.leaves(nnx.as_pure(nnx.state(opt_kimi))) if hasattr(x, "shape")]
+    self.assertIn((emb_dim, num_heads * head_dim), kimi_state_shapes)
+    self.assertIn((kv_lora, num_heads, 2 * head_dim), kimi_state_shapes)
+
+    grads_kimi = nnx.clone(nnx.state(model_kimi, nnx.Param))
+    grads_kimi["layers_0"]["self_attention"]["q_proj"]["kernel"].set_value(
+        g_q_heads.reshape(emb_dim, num_heads * head_dim)
+    )
+    grads_kimi["layers_0"]["self_attention_res_proj"]["kernel"].set_value(g_res_proj)
+    grads_kimi["layers_3"]["self_attention"]["wq_b"]["kernel"].set_value(g_wq_b)
+    grads_kimi["layers_3"]["self_attention"]["wkv_b"]["kernel"].set_value(jnp.concatenate([g_wk_b, g_wv_b], axis=-1))
+
+    grads_ref = nnx.clone(nnx.state(model_ref, nnx.Param))
+    for h in range(num_heads):
+      grads_ref[f"q_h{h}"].set_value(g_q_heads[:, h, :])
+      grads_ref[f"wqb_h{h}"].set_value(g_wq_b[:, h, :])
+      grads_ref[f"wkb_h{h}"].set_value(g_wk_b[:, h, :])
+      grads_ref[f"wvb_h{h}"].set_value(g_wv_b[:, h, :])
+    grads_ref["res_proj_1d"].set_value(g_res_proj[:, 0])
+
+    opt_kimi.update(model_kimi, grads_kimi)
+    opt_ref.update(model_ref, grads_ref)
+
+    expected_q = jnp.stack([getattr(model_ref, f"q_h{h}").get_value() for h in range(num_heads)], axis=1).reshape(
+        emb_dim, num_heads * head_dim
+    )
+    expected_wqb = jnp.stack([getattr(model_ref, f"wqb_h{h}").get_value() for h in range(num_heads)], axis=1)
+    expected_wkb = jnp.stack([getattr(model_ref, f"wkb_h{h}").get_value() for h in range(num_heads)], axis=1)
+    expected_wvb = jnp.stack([getattr(model_ref, f"wvb_h{h}").get_value() for h in range(num_heads)], axis=1)
+    expected_wkvb = jnp.concatenate([expected_wkb, expected_wvb], axis=-1)
+
+    np.testing.assert_allclose(
+        model_kimi.layers_0.self_attention.q_proj.kernel.get_value(), expected_q, rtol=1e-5, atol=1e-5
+    )
+    np.testing.assert_allclose(
+        model_kimi.layers_3.self_attention.wq_b.kernel.get_value(), expected_wqb, rtol=1e-5, atol=1e-5
+    )
+    np.testing.assert_allclose(
+        model_kimi.layers_3.self_attention.wkv_b.kernel.get_value(), expected_wkvb, rtol=1e-5, atol=1e-5
+    )
+    np.testing.assert_allclose(
+        model_kimi.layers_0.self_attention_res_proj.kernel.get_value()[:, 0],
+        model_ref.res_proj_1d.get_value(),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+
+  def test_kimi_k3_muon_config_validation(self):
+    """Kimi-K3 accepts opt_type=muon with muon_per_head_qkv=True and rejects unsafe combinations."""
+    base_args = [
+        "",
+        get_test_config_path(),
+        "model_name=kimi-k3",
+        "override_model_config=True",
+        "attention=dot_product",
+        "opt_type=muon",
+        "muon_type=maxtext_muon",
+        "skip_jax_distributed_system=True",
+    ]
+    cfg = pyconfig.initialize(base_args)
+    self.assertTrue(cfg.muon_per_head_qkv)
+
+    with self.assertRaisesRegex(ValueError, "moe_flat_fsdp_weights"):
+      pyconfig.initialize(base_args + ["moe_flat_fsdp_weights=True"])
+    with self.assertRaisesRegex(ValueError, "prefetch_fsdp_weights"):
+      pyconfig.initialize(base_args + ["use_qk_clip=True", "prefetch_fsdp_weights=True", "remat_policy=full"])
+    with self.assertRaisesRegex(ValueError, "qk_nope_head_dim == v_head_dim"):
+      pyconfig.initialize(base_args + ["qk_nope_head_dim=32", "v_head_dim=16"])
+
 
 if __name__ == "__main__":
   absltest.main()
