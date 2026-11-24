@@ -166,10 +166,17 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   """
   del dropout_rng, params, sparsity_state  # unused for NNX (kept for signature parity)
   is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
-  if getattr(config, "attention_type", "global") == "block_diffusion" and not is_block_diffusion:
+  attention_type = getattr(config, "attention_type", "global")
+  if attention_type == "block_diffusion" and not is_block_diffusion:
     raise ValueError(
         "Block-diffusion attention requires target-aligned block-diffusion losses; "
         "causal next-token labels would leak within a bidirectional block."
+    )
+  if attention_type == "full":
+    raise ValueError(
+        "attention_type='full' is bidirectional (non-causal) full attention; "
+        "causal next-token labels would leak in pre-training loss_fn. "
+        "Use attention_type='global' for global causal attention."
     )
   if is_block_diffusion:
     required_masks = {"corruption_mask", "targets_loss_mask"}

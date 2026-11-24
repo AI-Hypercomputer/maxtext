@@ -897,7 +897,11 @@ class Attention(BaseModel):
       description="The attention algorithm to use (dot_product, flash, cudnn_flash_te, vllm_rpa, vllm_batched_rpa, etc).",
   )
   attention_type: Literal["global", "local_sliding", "chunk", "mla", "full", "compressed", "block_diffusion"] = Field(
-      "global", description="The variant of attention to use."
+      "global",
+      description=(
+          "The variant of attention to use. 'global' is global causal attention; "
+          "'full' is non-causal bidirectional full attention (unlike HuggingFace 'full_attention')."
+      ),
   )
   share_kv_projections: bool = Field(
       False,
@@ -7935,6 +7939,15 @@ class MaxTextConfig(
         not isinstance(self.sliding_window_size, int) or self.sliding_window_size <= 0
     ):
       raise ValueError("`sliding_window_size` must be an integer > 0 for 'local_sliding' attention.")
+    if self.attention_type == AttentionType.FULL.value and self.attention in (
+        "cudnn_flash_te",
+        "cudnn_flash_jax",
+    ):
+      raise ValueError(
+          "attention_type='full' (bidirectional non-causal attention) is not supported with "
+          f"attention={self.attention!r}, which always applies a causal mask. "
+          "Use attention='dot_product' or attention='flash' (or attention_type='global' for causal attention)."
+      )
     if self.attention_type == AttentionType.BLOCK_DIFFUSION.value:
       if self.packing:
         # Document-local block origins inside a packed sequence are not tracked
@@ -8435,13 +8448,13 @@ class MaxTextConfig(
         raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
       if self.use_indexer:
         raise ValueError("TPU Ulysses attention does not support sparse indexer masks.")
-      if self.attention_type != "global":
-        raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
+      if self.attention_type not in ("global", "full"):
+        raise ValueError("TPU Ulysses attention supports only global causal or full attention.")
       if self.context_parallel_load_balance:
         raise ValueError(
             "TPU Ulysses attention requires context_parallel_load_balance=False: after the all-to-all every device "
             "attends over the full sequence in natural order, so the load-balancing reorder is unnecessary and "
-            "would corrupt the causal mask."
+            "would corrupt sequence ordering."
         )
       if self.use_ragged_attention:
         raise ValueError("TPU Ulysses attention does not support ragged attention.")

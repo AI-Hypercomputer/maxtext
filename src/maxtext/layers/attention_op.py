@@ -125,11 +125,15 @@ class _SplashBlocks(NamedTuple):
 
 
 def _resolve_attention_type(config: Config, attention_type: AttentionType | str | None) -> AttentionType:
+  """Resolves effective layer `AttentionType` from `config.attention_type`."""
   configured_attention_type = AttentionType(getattr(config, "attention_type", AttentionType.GLOBAL.value))
   if attention_type is None:
     return configured_attention_type
   resolved_attention_type = AttentionType(attention_type)
-  if configured_attention_type == AttentionType.BLOCK_DIFFUSION and resolved_attention_type == AttentionType.GLOBAL:
+  if (
+      configured_attention_type in (AttentionType.BLOCK_DIFFUSION, AttentionType.FULL)
+      and resolved_attention_type == AttentionType.GLOBAL
+  ):
     return configured_attention_type
   return resolved_attention_type
 
@@ -861,8 +865,8 @@ class AttentionOp(nnx.Module):
         raise ValueError("TPU Ulysses attention requires use_tokamax_splash=True.")
       if self.config.use_jax_splash:
         raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
-      if self.attention_type != AttentionType.GLOBAL:
-        raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
+      if self.attention_type not in (AttentionType.GLOBAL, AttentionType.FULL):
+        raise ValueError("TPU Ulysses attention supports only global causal or full attention.")
       if self.config.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Ulysses attention does not support dropout yet.")
       if self.use_ragged_attention:
@@ -1941,6 +1945,12 @@ class AttentionOp(nnx.Module):
   ):
     """Apply attention"""
     if self.attention_kernel == "cudnn_flash_jax":
+      if self.attention_type == AttentionType.FULL:
+        raise ValueError(
+            "AttentionType.FULL (bidirectional non-causal attention) is not supported with "
+            "attention_kernel='cudnn_flash_jax', which applies a causal mask. "
+            "Use attention='dot_product' or attention='flash' (or attention_type='global' for causal attention)."
+        )
       validate_gpu_flash_attention(sinks, record_max_logits)
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -2110,6 +2120,12 @@ class AttentionOp(nnx.Module):
           )
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
+      if self.attention_type == AttentionType.FULL:
+        raise ValueError(
+            "AttentionType.FULL (bidirectional non-causal attention) is not supported with "
+            "attention_kernel='cudnn_flash_te', which applies a causal mask. "
+            "Use attention='dot_product' or attention='flash' (or attention_type='global' for causal attention)."
+        )
       validate_gpu_flash_attention(sinks, record_max_logits, attention_kernel=self.attention_kernel)
       if isinstance(key, KVTensor):
         key = key.dequant()
@@ -2427,7 +2443,10 @@ class AttentionOp(nnx.Module):
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
       mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
-      mask = tokamax_splash_mask.CausalMask(shape=mask_shape)
+      if self.attention_type == AttentionType.FULL:
+        mask = tokamax_splash_mask.FullMask(mask_shape)
+      else:
+        mask = tokamax_splash_mask.CausalMask(shape=mask_shape)
 
       @partial(
           jax.jit,
@@ -3200,6 +3219,8 @@ class AttentionOp(nnx.Module):
       raise ValueError("Chunk attention is not supported with CUDNN context parallelism.")
 
     # Initialize default attention configuration
+    # NOTE: This path currently always applies a causal mask ('padding_causal'/'causal').
+    # Bidirectional AttentionType.FULL is rejected at config validation and in __call__ dispatch.
     sliding_window_size = None
     mask_type = "padding_causal"
     qkv_layout = "BSHD_BSHD_BSHD"  # Non-packed format: 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
@@ -3371,6 +3392,11 @@ class AttentionOp(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> tuple[Array, Array]:
     """CUDNN Flash Attention with JAX SDPA API."""
+    if model_mode != MODEL_MODE_AUTOREGRESSIVE and self.attention_type == AttentionType.FULL:
+      raise ValueError(
+          "AttentionType.FULL (bidirectional non-causal attention) is not supported with "
+          "cudnn_jax_flash_attention, which applies MaskType.CAUSAL."
+      )
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
     from jax._src.cudnn.fused_attention_stablehlo import (

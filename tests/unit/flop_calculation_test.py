@@ -773,6 +773,139 @@ class FlopCalculation(parameterized.TestCase):
 
     self.assertAlmostEqual(attention_tflops, expected_attention_tflops, places=5)
 
+  def test_full_attention_tflops_doubles_global_layers_only(self):
+    """Non-causal attention_type='full' doubles global layers while keeping causal/linear layers intact."""
+    # Standard dense decoder (Llama3-8B): all layers are global.
+    llama_global = self._initialize_model_config(
+        "llama3.1-8b", max_target_length=8192, per_device_batch_size=1, attention_type="global"
+    )
+    llama_full = self._initialize_model_config(
+        "llama3.1-8b", max_target_length=8192, per_device_batch_size=1, attention_type="full"
+    )
+    total_c, wt_c, attn_c = calculate_tflops_training_per_device(llama_global, log=False)
+    total_f, wt_f, attn_f = calculate_tflops_training_per_device(llama_full, log=False)
+    self.assertAlmostEqual(wt_f, wt_c, places=8)
+    self.assertAlmostEqual(attn_f, 2.0 * attn_c, places=8)
+    self.assertAlmostEqual(total_f, wt_f + attn_f, places=8)
+    self.assertGreater(total_f, total_c)
+
+    # Gemma2: 1 global + 1 local_sliding per decoder layer.
+    gemma2_cfg = MagicMock()
+    gemma2_cfg.per_device_batch_size = 2
+    gemma2_cfg.max_target_length = 4096
+    gemma2_cfg.sliding_window_size = 512
+    gemma2_cfg.num_query_heads = 8
+    gemma2_cfg.head_dim = 128
+    gemma2_cfg.num_decoder_layers = 4
+    gemma2_cfg.attention_type = "global"
+    g2_attn_c, g2_wt_c = maxtext_utils.calculate_gemma2_tflops_training_per_device(gemma2_cfg, 0, 0, 0, 0)
+    gemma2_cfg.attention_type = "full"
+    g2_attn_f, g2_wt_f = maxtext_utils.calculate_gemma2_tflops_training_per_device(gemma2_cfg, 0, 0, 0, 0)
+    expected_g2_delta = 2 * 2 * (4096**2) * 8 * 128 * 4 * 3 / 10**12
+    self.assertAlmostEqual(g2_wt_f, g2_wt_c, places=8)
+    self.assertAlmostEqual(g2_attn_f - g2_attn_c, expected_g2_delta, places=5)
+
+    # Mixed attention (Gemma3/GPT-OSS): global layers double, sliding layers unchanged.
+    mixed_cfg = MagicMock()
+    mixed_cfg.per_device_batch_size = 2
+    mixed_cfg.max_target_length = 4096
+    mixed_cfg.sliding_window_size = 512
+    mixed_cfg.num_query_heads = 8
+    mixed_cfg.head_dim = 128
+    mixed_cfg.num_decoder_layers = 12
+    mixed_cfg.attention_type = "global"
+    m_attn_c, m_wt_c = maxtext_utils.calculate_mixed_attention_model_tflops_training_per_device(
+        mixed_cfg, 0, 0, 0, 0, attention_pattern_length=6
+    )
+    mixed_cfg.attention_type = "full"
+    m_attn_f, m_wt_f = maxtext_utils.calculate_mixed_attention_model_tflops_training_per_device(
+        mixed_cfg, 0, 0, 0, 0, attention_pattern_length=6
+    )
+    expected_m_delta = (12 // 6) * 2 * 2 * (4096**2) * 8 * 128 * 3 / 10**12
+    self.assertAlmostEqual(m_wt_f, m_wt_c, places=8)
+    self.assertAlmostEqual(m_attn_f - m_attn_c, expected_m_delta, places=5)
+
+    # Gemma4: global layers double (using global_head_dim), sliding layers unchanged.
+    g4_cfg = MagicMock()
+    g4_cfg.per_device_batch_size = 2
+    g4_cfg.max_target_length = 4096
+    g4_cfg.sliding_window_size = 512
+    g4_cfg.num_query_heads = 16
+    g4_cfg.num_kv_heads = 8
+    g4_cfg.head_dim = 128
+    g4_cfg.global_head_dim = 256
+    g4_cfg.global_num_kv_heads = 2
+    g4_cfg.share_kv_projections = True
+    g4_cfg.num_decoder_layers = 12
+    g4_cfg.emb_dim = 1024
+    g4_cfg.attention_type = "global"
+    g4_attn_c, g4_wt_c = maxtext_utils.calculate_gemma4_tflops_training_per_device(
+        g4_cfg, 0, 0, attention_pattern_length=6
+    )
+    g4_cfg.attention_type = "full"
+    g4_attn_f, g4_wt_f = maxtext_utils.calculate_gemma4_tflops_training_per_device(
+        g4_cfg, 0, 0, attention_pattern_length=6
+    )
+    expected_g4_delta = (12 // 6) * 2 * 2 * (4096**2) * 16 * 256 * 3 / 10**12
+    self.assertAlmostEqual(g4_wt_f, g4_wt_c, places=8)
+    self.assertAlmostEqual(g4_attn_f - g4_attn_c, expected_g4_delta, places=5)
+
+    # Gemma4 small (e2b, period-5 -> 7 global layers, 28 local sliding layers).
+    g4s_cfg = MagicMock()
+    g4s_cfg.model_name = "gemma4-e2b"
+    g4s_cfg.per_device_batch_size = 1
+    g4s_cfg.max_target_length = 2048
+    g4s_cfg.sliding_window_size = 512
+    g4s_cfg.num_query_heads = 8
+    g4s_cfg.num_kv_heads = 1
+    g4s_cfg.head_dim = 256
+    g4s_cfg.global_head_dim = 512
+    g4s_cfg.global_num_kv_heads = 0
+    g4s_cfg.num_decoder_layers = 35
+    g4s_cfg.num_kv_shared_layers = 20
+    g4s_cfg.use_double_wide_mlp = True
+    g4s_cfg.emb_dim = 1536
+    g4s_cfg.mlp_dim = 6144
+    g4s_cfg.mlp_activations = ["gelu", "linear"]
+    g4s_cfg.hidden_size_per_layer_input = 256
+    g4s_cfg.attention_type = "global"
+    g4s_attn_c, g4s_wt_c = maxtext_utils.calculate_gemma4_small_tflops_training_per_device(g4s_cfg, 0)
+    g4s_cfg.attention_type = "full"
+    g4s_attn_f, g4s_wt_f = maxtext_utils.calculate_gemma4_small_tflops_training_per_device(g4s_cfg, 0)
+    expected_g4s_delta = 7 * 2 * 1 * (2048**2) * 8 * 512 * 3 / 10**12
+    self.assertAlmostEqual(g4s_wt_f, g4s_wt_c, places=8)
+    self.assertAlmostEqual(g4s_attn_f - g4s_attn_c, expected_g4s_delta, places=5)
+
+    # Llama4: global NoPE layers double, chunked layers stay causal.
+    l4_cfg = MagicMock()
+    l4_cfg.num_decoder_layers = 16
+    l4_cfg.max_target_length = 4096
+    l4_cfg.chunk_attn_window_size = 1024
+    l4_cfg.nope_layer_interval = 4
+    l4_cfg.per_device_batch_size = 2
+    l4_cfg.num_query_heads = 16
+    l4_cfg.head_dim = 128
+    l4_cfg.attention_type = "global"
+    l4_attn_c = maxtext_utils.calculate_llama4_attention_tflops(l4_cfg)
+    l4_cfg.attention_type = "full"
+    l4_attn_f = maxtext_utils.calculate_llama4_attention_tflops(l4_cfg)
+    expected_l4_delta = (16 // 4) * 2 * 2 * (4096**2) * 16 * 128 * 3 / 10**12
+    self.assertAlmostEqual(l4_attn_f - l4_attn_c, expected_l4_delta, places=5)
+
+    # Qwen3-Next hybrid: global attention layers double, Gated Delta Net linear layers unchanged.
+    qwen_c = self._initialize_model_config(
+        "qwen3-next-80b-a3b", max_target_length=4096, per_device_batch_size=1, attention_type="global"
+    )
+    qwen_f = self._initialize_model_config(
+        "qwen3-next-80b-a3b", max_target_length=4096, per_device_batch_size=1, attention_type="full"
+    )
+    _, qw_c, qa_c = calculate_tflops_training_per_device(qwen_c, log=False)
+    _, qw_f, qa_f = calculate_tflops_training_per_device(qwen_f, log=False)
+    num_global = qwen_c.num_decoder_layers // qwen_c.inhomogeneous_layer_cycle_interval
+    expected_q_delta = num_global * 2 * 1 * (4096**2) * qwen_c.num_query_heads * qwen_c.head_dim * 3 / 10**12
+    self.assertAlmostEqual(qw_f, qw_c, places=6)
+    self.assertAlmostEqual(qa_f - qa_c, expected_q_delta, places=4)
+
   def test_calculate_gemma4_tflops_training_per_device_shared_kv(self):
     """Test calculate_gemma4_tflops_training_per_device_shared_kv."""
     config = MagicMock()

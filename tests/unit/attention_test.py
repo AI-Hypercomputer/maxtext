@@ -25,6 +25,7 @@ import unittest
 import copy
 from unittest import mock
 
+from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
@@ -1795,6 +1796,128 @@ class AttentionTypeResolutionTest(unittest.TestCase):
 
     self.assertEqual(full_op.attention_type, AttentionType.FULL)
 
+  def test_config_selects_full_without_model_dispatch(self):
+    config = types.SimpleNamespace(attention_type=AttentionType.FULL.value)
+
+    self.assertEqual(_resolve_attention_type(config, None), AttentionType.FULL)
+    self.assertEqual(_resolve_attention_type(config, AttentionType.GLOBAL), AttentionType.FULL)
+    self.assertEqual(_resolve_attention_type(config, AttentionType.LOCAL_SLIDING), AttentionType.LOCAL_SLIDING)
+    self.assertEqual(_resolve_attention_type(config, AttentionType.CHUNK), AttentionType.CHUNK)
+
+  def test_ulysses_attention_op_accepts_full_and_selects_masks(self):
+    fake_device = types.SimpleNamespace(platform="tpu")
+    fake_mesh = types.SimpleNamespace(
+        devices=np.array([fake_device] * 4),
+        shape={"context": 4},
+        axis_names=("context",),
+    )
+
+    def make_cfg(attn_type):
+      return types.SimpleNamespace(
+          attention_type=attn_type,
+          context_parallel_strategy="ulysses",
+          local_context_parallel_strategy="",
+          context_parallel_load_balance=False,
+          context_sharding="context",
+          use_tokamax_splash=True,
+          use_jax_splash=False,
+          enable_dropout=False,
+          sa_block_q=128,
+          sa_block_kv=128,
+          sa_block_kv_compute=128,
+          eval_sa_block_q=128,
+          eval_sa_block_kv=128,
+          eval_sa_block_kv_compute=128,
+          sa_block_q_dkv=128,
+          sa_block_kv_dkv=128,
+          sa_block_kv_dkv_compute=128,
+          sa_block_q_dq=128,
+          sa_block_kv_dq=128,
+          sa_use_fused_bwd_kernel=True,
+          sa_q_layout="HEAD_DIM_MINOR",
+          sa_k_layout="HEAD_DIM_MINOR",
+          sa_v_layout="HEAD_DIM_MINOR",
+          eval_sa_q_layout="HEAD_DIM_MINOR",
+          eval_sa_k_layout="HEAD_DIM_MINOR",
+          eval_sa_v_layout="HEAD_DIM_MINOR",
+          use_splash_scheduler=False,
+          sa_fuse_reciprocal=False,
+          sa_use_base2_exp=False,
+          sa_qk_diag_skip=True,
+          sa_sv_diag_skip=True,
+          sa_qk_diag_grid=2,
+          cost_estimate_flops_fwd=-1,
+          cost_estimate_flops_bwd=-1,
+          dq_reduction_steps=0,
+          use_max_logit_estimate=0,
+          shard_mode="auto",
+          logical_axis_rules=[("activation_length", "context")],
+      )
+
+    with nn_partitioning.axis_rules([("activation_length", "context")]):
+      with self.assertRaisesRegex(ValueError, "global causal or full attention"):
+        AttentionOp(
+            config=make_cfg("chunk"),
+            num_query_heads=8,
+            num_kv_heads=4,
+            max_target_length=256,
+            mesh=fake_mesh,
+            attention_kernel="flash",
+            attention_type=AttentionType.CHUNK,
+            chunk_attn_window_size=128,
+        )
+
+      query = jnp.zeros((1, 256, 8, 64), dtype=jnp.float32)
+
+      def check_mask(attn_type_str, expected_mask_cls):
+        op = AttentionOp(
+            config=make_cfg(attn_type_str),
+            num_query_heads=8,
+            num_kv_heads=4,
+            max_target_length=256,
+            mesh=fake_mesh,
+            attention_kernel="flash",
+            attention_type=AttentionType.GLOBAL,
+        )
+        self.assertEqual(op.attention_type, AttentionType(attn_type_str))
+        captured_calls = []
+
+        def fake_make_splash_mha(mask, config, q_seq_shards):
+          del q_seq_shards
+          captured_calls.append((mask, config))
+          return jax.tree_util.Partial(lambda *a, **k: None)
+
+        with (
+            mock.patch.object(
+                attention_op.tokamax_splash_kernel,
+                "make_splash_mha",
+                side_effect=fake_make_splash_mha,
+            ),
+            mock.patch.object(op, "_maybe_shard_with_pspec", side_effect=lambda x, _: x),
+            mock.patch.object(
+                attention_op.jax,
+                "shard_map",
+                return_value=lambda *args: (query, None),
+            ),
+        ):
+          op.tpu_flash_attention(
+              query,
+              query,
+              query,
+              decoder_segment_ids=None,
+              model_mode=MODEL_MODE_TRAIN,
+          )
+        self.assertEqual(len(captured_calls), 1)
+        captured_mask, captured_config = captured_calls[0]
+        self.assertIsInstance(captured_mask, expected_mask_cls)
+        self.assertEqual(captured_mask.shape, (256, 256))
+        expect_diag_skip = attn_type_str == "global"
+        self.assertEqual(captured_config.qk_diag_skip, expect_diag_skip)
+        self.assertEqual(captured_config.sv_diag_skip, expect_diag_skip)
+
+      check_mask("global", attention_op.tokamax_splash_mask.CausalMask)
+      check_mask("full", attention_op.tokamax_splash_mask.FullMask)
+
 
 class LoadBalancedMaskTest(unittest.TestCase):
   """Tests for load-balanced Splash masks."""
@@ -2225,6 +2348,52 @@ class CudnnFlashJaxInferenceTest(unittest.TestCase):
     self.assertEqual(q_seqlen.shape, (8,))
     self.assertEqual(kv_seqlen.shape, (8,))
 
+  def test_cudnn_flash_rejects_full_attention_type(self):
+    gpu_device = types.SimpleNamespace(platform="gpu")
+    gpu_mesh = types.SimpleNamespace(devices=np.array([gpu_device]), shape={"context": 1})
+    config = types.SimpleNamespace(
+        attention_type="full",
+        context_sharding="context",
+        ulysses_context_sharding="context_usp_ulysses",
+        context_parallel_strategy="all_gather",
+        local_context_parallel_strategy="",
+        ici_context_autoregressive_parallelism=0,
+    )
+    dummy_qkv = jnp.zeros((1, 4, 2, 64))
+    for kernel in ("cudnn_flash_te", "cudnn_flash_jax"):
+      with self.subTest(kernel=kernel):
+        op = AttentionOp(
+            config=config,
+            mesh=gpu_mesh,
+            attention_kernel=kernel,
+            max_target_length=4,
+            num_query_heads=2,
+            num_kv_heads=2,
+            attention_type=AttentionType.GLOBAL,
+        )
+        self.assertEqual(op.attention_type, AttentionType.FULL)
+        with self.assertRaisesRegex(ValueError, f"attention_kernel={kernel!r}"):
+          op(
+              dummy_qkv,
+              dummy_qkv,
+              dummy_qkv,
+              decoder_segment_ids=None,
+              inputs_positions=None,
+              model_mode=MODEL_MODE_TRAIN,
+          )
+
+    jax_op = AttentionOp(
+        config=config,
+        mesh=gpu_mesh,
+        attention_kernel="cudnn_flash_jax",
+        max_target_length=4,
+        num_query_heads=2,
+        num_kv_heads=2,
+        attention_type=AttentionType.FULL,
+    )
+    with self.assertRaisesRegex(ValueError, "MaskType.CAUSAL"):
+      jax_op.cudnn_jax_flash_attention(dummy_qkv, dummy_qkv, dummy_qkv, None, model_mode=MODEL_MODE_TRAIN)
+
 
 class AttentionTest(parameterized.TestCase):
   """Test for the Attention"""
@@ -2611,7 +2780,8 @@ class AttentionTest(parameterized.TestCase):
   def _get_cp_generic_ref(self, dtype, max_target_length, packing, need_grad=False, **overrides):
     """Returns cached (lnx, decoder_segment_ids, decoder_positions, generic_state, output, grad) for dot_product.
 
-    `overrides` (e.g. head counts) are applied to the reference config so its weights match the CP module's.
+    `overrides` (e.g. head counts or attention_type) are applied to the reference config so its weights match the CP
+    module's.
     """
     cache = getattr(self.__class__, "_cp_generic_cache", {})
     key = (str(dtype), max_target_length, packing, tuple(sorted(overrides.items())))
@@ -3016,11 +3186,12 @@ class AttentionTest(parameterized.TestCase):
         f"dq_reduction_steps={dq_reduction_steps}, ring_scan_unroll={ring_scan_unroll}, packing={packing}.",
     )
 
-  def _ulysses_test_config(self, ici_context_parallelism, packing=False, **heads):
+  def _ulysses_test_config(self, ici_context_parallelism, packing=False, attention_type="global", **heads):
     return pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         **self.config_arguments,
         attention="flash",
+        attention_type=attention_type,
         context_parallel_strategy="ulysses",
         context_parallel_load_balance=False,
         ici_context_parallelism=ici_context_parallelism,
@@ -3087,17 +3258,36 @@ class AttentionTest(parameterized.TestCase):
           "packing": True,
           "kv_heads": 1,
       },
+      {
+          "testcase_name": "ulysses_size_4_full",
+          "ici_context_parallelism": 4,
+          "packing": False,
+          "attention_type": "full",
+      },
+      {
+          "testcase_name": "ulysses_size_4_full_packed",
+          "ici_context_parallelism": 4,
+          "packing": True,
+          "attention_type": "full",
+      },
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ulysses_context_parallel(self, ici_context_parallelism, packing, kv_heads=None):
+  def test_tpu_flash_attention_ulysses_context_parallel(
+      self,
+      ici_context_parallelism,
+      packing,
+      kv_heads=None,
+      attention_type="global",
+  ):
     """Test equivalence between dot_product and flash attention + Ulysses context parallelism"""
 
     heads = {} if kv_heads is None else {"base_num_query_heads": 8, "base_num_kv_heads": kv_heads}
-    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing, **heads)
+    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing, attention_type=attention_type, **heads)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    ref_overrides = {**heads, **({} if attention_type == "global" else {"attention_type": attention_type})}
     lnx, decoder_segment_ids, decoder_positions, generic_state, mha_generic_output, _ = self._get_cp_generic_ref(
-        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False, **heads
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=False, **ref_overrides
     )
     _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
     nnx.update(attention_as_mha_flash_cp, generic_state)
@@ -3116,7 +3306,7 @@ class AttentionTest(parameterized.TestCase):
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_cp_output, rtol=1e-02, atol=1e-02, equal_nan=False),
         msg="Logits from generic dot product and flash attention + Ulysses context parallelism are not close. "
-        f"ici_context_parallelism={ici_context_parallelism}, packing={packing}.",
+        f"ici_context_parallelism={ici_context_parallelism}, packing={packing}, attention_type={attention_type}.",
     )
 
   @parameterized.named_parameters(
@@ -3135,17 +3325,36 @@ class AttentionTest(parameterized.TestCase):
           "packing": True,
           "kv_heads": 1,
       },
+      {
+          "testcase_name": "ulysses_size_4_full",
+          "ici_context_parallelism": 4,
+          "packing": False,
+          "attention_type": "full",
+      },
+      {
+          "testcase_name": "ulysses_size_4_full_packed",
+          "ici_context_parallelism": 4,
+          "packing": True,
+          "attention_type": "full",
+      },
   )
   @pytest.mark.tpu_only
-  def test_tpu_flash_attention_ulysses_context_parallel_grad(self, ici_context_parallelism, packing, kv_heads=None):
+  def test_tpu_flash_attention_ulysses_context_parallel_grad(
+      self,
+      ici_context_parallelism,
+      packing,
+      kv_heads=None,
+      attention_type="global",
+  ):
     """Test input-gradient equivalence between dot_product and flash attention + Ulysses context parallelism"""
 
     heads = {} if kv_heads is None else {"base_num_query_heads": 8, "base_num_kv_heads": kv_heads}
-    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing, **heads)
+    cfg_cp = self._ulysses_test_config(ici_context_parallelism, packing=packing, attention_type=attention_type, **heads)
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
+    ref_overrides = {**heads, **({} if attention_type == "global" else {"attention_type": attention_type})}
     lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_cp_generic_ref(
-        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True, **heads
+        cfg_cp.dtype, cfg_cp.max_target_length, packing=packing, need_grad=True, **ref_overrides
     )
     _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
     nnx.update(attention_as_mha_flash_cp, generic_state)
@@ -3167,8 +3376,8 @@ class AttentionTest(parameterized.TestCase):
 
     self.assertTrue(
         jax.numpy.allclose(generic_grad, ulysses_grad, rtol=1e-02, atol=1e-07, equal_nan=False),
-        msg="Input gradients from generic dot product and flash attention + Ulysses context parallelism are not "
-        f"close. ici_context_parallelism={ici_context_parallelism}, packing={packing}.",
+        msg="Input gradients from generic dot product and flash attention + Ulysses context parallelism are not close. "
+        f"ici_context_parallelism={ici_context_parallelism}, packing={packing}, attention_type={attention_type}.",
     )
 
   @pytest.mark.tpu_only
@@ -7767,4 +7976,4 @@ class MLAAbsorbedMQATest(attention_test_util.MLATestBase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

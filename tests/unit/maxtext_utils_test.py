@@ -1447,6 +1447,22 @@ class TestCalculatePrefillTflops(unittest.TestCase):
     # Attention scales quadratically with prefill length
     self.assertGreater(attn_long, attn_short * 3)
 
+  def test_full_attention_doubles_prefill_attention_tflops(self):
+    causal_cfg = self._make_cfg()
+    causal_cfg.attention_type = "global"
+    full_cfg = self._make_cfg()
+    full_cfg.attention_type = "full"
+    total_c, lw_c, attn_c = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_parameters=1_000_000, prefill_length=128, config=causal_cfg, log=False
+    )
+    total_f, lw_f, attn_f = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_parameters=1_000_000, prefill_length=128, config=full_cfg, log=False
+    )
+    self.assertAlmostEqual(lw_f, lw_c, places=10)
+    self.assertAlmostEqual(attn_f, 2.0 * attn_c, places=10)
+    self.assertAlmostEqual(total_f, lw_f + attn_f, places=10)
+    self.assertGreater(total_f, total_c)
+
 
 class TestSetupTrainingState(unittest.TestCase):
   """Tests for setup_training_state (thin wrapper over setup_initial_state)."""

@@ -330,14 +330,24 @@ def calculate_tokens_training_per_device(config):
   return config.max_target_length * config.per_device_batch_size * config.gradient_accumulation_steps
 
 
+def _is_full_attention(config) -> bool:
+  """Returns True when config requests bidirectional (non-causal) full attention."""
+  return getattr(config, "attention_type", "global") == AttentionType.FULL.value
+
+
 def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flops, projection_flops, embedding_flops):
   """
   Calculate training TFLOP for Gemma2 as in Gemma2 we combine [local_attention, global_attention] into one decoder
   layer and we use sliding window attention in local_attention
   """
   window = min(config.sliding_window_size, config.max_target_length)
-  global_causal_flops = (
-      2 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+  global_multiplier = 4 if _is_full_attention(config) else 2
+  global_attention_flops = (
+      global_multiplier
+      * config.per_device_batch_size
+      * config.max_target_length**2
+      * config.num_query_heads
+      * config.head_dim
   )
   local_causal_flops = (
       4
@@ -346,8 +356,8 @@ def calculate_gemma2_tflops_training_per_device(config, total_ffn_flops, qkv_flo
       * config.num_query_heads
       * config.head_dim
   )
-  causal_attention_flops = global_causal_flops + local_causal_flops
-  attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+  attention_flops = global_attention_flops + local_causal_flops
+  attention_tflops = attention_flops * config.num_decoder_layers * 3 / 10**12
 
   # multiply num_decoder_layers by 2 because we combine [local_attention, global_attention] into one decoder layer
   learnable_weight_tflops = (
@@ -369,10 +379,15 @@ def calculate_mixed_attention_model_tflops_training_per_device(
   num_global_layers = num_layers // attention_pattern_length
   num_local_layers = num_layers - num_global_layers
 
-  # Global causal attention uses a multiplier of 2 (instead of 4 for non-causal)
-  # since we only compute the lower triangular half of the attention matrix.
-  global_causal_flops_per_layer = (
-      2 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * config.head_dim
+  # Global causal attention uses a multiplier of 2 (lower-triangular half);
+  # non-causal bidirectional full attention computes the entire S x S matrix (multiplier of 4).
+  global_multiplier = 4 if _is_full_attention(config) else 2
+  global_attention_flops_per_layer = (
+      global_multiplier
+      * config.per_device_batch_size
+      * config.max_target_length**2
+      * config.num_query_heads
+      * config.head_dim
   )
 
   # Local sliding window attention directly computes the exact causal interactions
@@ -386,12 +401,10 @@ def calculate_mixed_attention_model_tflops_training_per_device(
       * config.head_dim
   )
 
-  causal_attention_flops = (
-      num_global_layers * global_causal_flops_per_layer + num_local_layers * local_causal_flops_per_layer
-  )
+  attention_flops = num_global_layers * global_attention_flops_per_layer + num_local_layers * local_causal_flops_per_layer
 
   # Convert to TFLOPs and multiply by 3 for fwd/bwd pass
-  attention_tflops = causal_attention_flops * 3 / 10**12
+  attention_tflops = attention_flops * 3 / 10**12
 
   total_learnable_flops = total_ffn_flops_all_layers
 
@@ -420,10 +433,15 @@ def calculate_gemma4_tflops_training_per_device(
   global_head_dim = config.global_head_dim or config.head_dim
   global_num_kv_heads = config.global_num_kv_heads or config.num_kv_heads
 
-  # Global causal attention uses a multiplier of 2 (instead of 4 for non-causal)
-  # since we only compute the lower triangular half of the attention matrix.
-  global_causal_flops_per_layer = (
-      2 * config.per_device_batch_size * config.max_target_length**2 * config.num_query_heads * global_head_dim
+  # Global causal attention uses a multiplier of 2 (lower-triangular half);
+  # non-causal bidirectional full attention computes the entire S x S matrix (multiplier of 4).
+  global_multiplier = 4 if _is_full_attention(config) else 2
+  global_attention_flops_per_layer = (
+      global_multiplier
+      * config.per_device_batch_size
+      * config.max_target_length**2
+      * config.num_query_heads
+      * global_head_dim
   )
 
   # Local sliding window attention directly computes the exact causal interactions
@@ -437,12 +455,10 @@ def calculate_gemma4_tflops_training_per_device(
       * config.head_dim
   )
 
-  causal_attention_flops = (
-      num_global_layers * global_causal_flops_per_layer + num_local_layers * local_causal_flops_per_layer
-  )
+  attention_flops = num_global_layers * global_attention_flops_per_layer + num_local_layers * local_causal_flops_per_layer
 
   # Convert to TFLOPs and multiply by 3 for fwd/bwd pass
-  attention_tflops = causal_attention_flops * 3 / 10**12
+  attention_tflops = attention_flops * 3 / 10**12
 
   global_qkv_flops_per_layer = (
       2
@@ -521,11 +537,13 @@ def calculate_gemma4_small_tflops_training_per_device(config, embedding_flops):
   num_activations = len(config.mlp_activations)
   window = min(config.sliding_window_size, s)
 
+  global_multiplier = 4 if _is_full_attention(config) else 2
+
   # Per-layer FLOP closures parameterized by attention type.
   def attention_flops_for(attn_type):
     if attn_type == AttentionType.GLOBAL:
-      # Causal global attention: factor of 2 (lower-triangular half).
-      return 2 * b * s * s * config.num_query_heads * global_head_dim
+      # Causal global attention: factor of 2 (lower-triangular half); full attention: factor of 4.
+      return global_multiplier * b * s * s * config.num_query_heads * global_head_dim
     # Sliding-window: exact closed-form for the causal-and-windowed mask.
     return 4 * b * (s * window - 0.5 * window**2) * config.num_query_heads * config.head_dim
 
@@ -606,17 +624,16 @@ def calculate_llama4_attention_tflops(config):
       4 * config.per_device_batch_size * seq_len**2 * config.num_query_heads * config.head_dim
   )
 
-  # FLOPs for a single chunked attention layer (non-causal)
+  # FLOPs for a single chunked attention layer (non-causal).
   chunked_attention_flops_per_layer = _calculate_chunked_attention_flops_per_layer(config, seq_len, chunk_size)
 
-  # Total non-causal attention FLOPs is the sum of all global and all chunked layers
-  noncausal_attention_flops = (num_global_layers * global_attention_flops_per_layer) + (
-      num_chunked_layers * chunked_attention_flops_per_layer
+  # Global layers run full bidirectional attention when config.attention_type == "full",
+  # while chunked layers remain causal (_resolve_attention_type preserves CHUNK).
+  global_divisor = 1 if _is_full_attention(config) else 2
+  attention_flops = (num_global_layers * global_attention_flops_per_layer / global_divisor) + (
+      num_chunked_layers * chunked_attention_flops_per_layer / 2
   )
-
-  # Apply causal mask and convert to TFLOPs (multiply by 3 for fwd/bwd pass)
-  causal_attention_flops = noncausal_attention_flops / 2
-  attention_tflops = causal_attention_flops * 3 / 10**12
+  attention_tflops = attention_flops * 3 / 10**12
 
   return attention_tflops
 
@@ -1376,7 +1393,7 @@ def calculate_tflops_training_per_device(config, log=True):
 
   # Attention flops
   if config.attention_type == "mla":
-    qkv_flops, causal_attention_flops, projection_flops = calculate_mla_tflops_per_device(config)
+    qkv_flops, attention_flops_per_layer, projection_flops = calculate_mla_tflops_per_device(config)
   else:
     kv_multiplier = 1 if config.share_kv_projections else 2
     qkv_flops = (
@@ -1399,11 +1416,11 @@ def calculate_tflops_training_per_device(config, log=True):
         * config.head_dim
     )
 
-    # Divide attention flops by 2 due to causal mask
+    # Divide attention flops by 2 for causal attention; full attention is bidirectional (no halving).
     # References:
     # NVIDIA/Megatron-LM (2025 March): https://github.com/NVIDIA/Megatron-LM/blob/250b79415dcc4b660521273c87f15334c804eeae/megatron/training/training.py#L361-L362
     # NVIDIA/NeMo (2025 April): https://github.com/NVIDIA/NeMo/blob/ba4d6d116463de512ff0cfc14641aa6cf4577a42/nemo/utils/flops_formulas.py#L259-L272
-    causal_attention_flops = noncausal_attention_flops / 2
+    attention_flops_per_layer = noncausal_attention_flops if _is_full_attention(config) else noncausal_attention_flops / 2
 
   # Embedding flops (counts only the unembedding projection; the embedding lookup is a gather operation
   # that performs no dense math, matching standard MFU hardware calculations)
@@ -1455,7 +1472,7 @@ def calculate_tflops_training_per_device(config, log=True):
         * 3
         / 10**12
     )
-    attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+    attention_tflops = attention_flops_per_layer * config.num_decoder_layers * 3 / 10**12
   elif config.decoder_block == DecoderBlockType.QWEN3_CUSTOM_MOE:
     # Attention output projects (num_query_heads * head_dim) -> attention_output_dim, not -> emb_dim.
     qwen3_custom_proj_flops = (
@@ -1473,7 +1490,7 @@ def calculate_tflops_training_per_device(config, log=True):
     per_layer_flops = qkv_flops + qwen3_custom_proj_flops + layer_up_proj_flops
     total_weight_flops = total_ffn_flops_all_layers + per_layer_flops * config.num_decoder_layers + embedding_flops
     learnable_weight_tflops = total_weight_flops * 3 / 10**12
-    attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+    attention_tflops = attention_flops_per_layer * config.num_decoder_layers * 3 / 10**12
   elif config.decoder_block in (
       DecoderBlockType.QWEN3_NEXT,
       DecoderBlockType.QWEN3_5,
@@ -1493,7 +1510,7 @@ def calculate_tflops_training_per_device(config, log=True):
     learnable_weight_tflops = total_weights * 3 / 10**12
 
     # Attention TFLOPs:
-    total_attn = (causal_attention_flops * num_full_attn_layers) + (gdn_attn_flops_per_layer * num_linear_attn_layers)
+    total_attn = (attention_flops_per_layer * num_full_attn_layers) + (gdn_attn_flops_per_layer * num_linear_attn_layers)
     attention_tflops = total_attn * 3 / 10**12
   else:
     # multiply by 3 for both feed forward and back propagation flops
@@ -1502,7 +1519,7 @@ def calculate_tflops_training_per_device(config, log=True):
         * 3
         / 10**12
     )
-    attention_tflops = causal_attention_flops * config.num_decoder_layers * 3 / 10**12
+    attention_tflops = attention_flops_per_layer * config.num_decoder_layers * 3 / 10**12
 
   # MTP (Multi-Token Prediction) FLOPs Calculation
   mtp_num_layers = getattr(config, "mtp_num_layers", 0)
@@ -1539,7 +1556,7 @@ def calculate_tflops_training_per_device(config, log=True):
     mtp_weight_flops = (last_layer_ffn_flops + qkv_flops + projection_flops) * mtp_num_layers
 
     # Attention FLOPs scale linearly with the number of MTP modules.
-    mtp_attn_flops = causal_attention_flops * mtp_num_layers
+    mtp_attn_flops = attention_flops_per_layer * mtp_num_layers
 
     # Convert to TFLOPs (multiply by 3 to account for 1 forward pass + 2 backward passes).
     # Add directly to the running totals before Engram and Vision calculations.
@@ -1602,19 +1619,21 @@ def calculate_prefill_tflops_per_device(num_model_parameters, prefill_length, co
       / jax.device_count()
       / 1e12
   )
-  causal_attention_tflops = noncausal_attention_flops / 2  # due to causality in attention
-  total_tflops = learnable_weight_tflops + causal_attention_tflops
+  is_full_attention = _is_full_attention(config)
+  attention_tflops = noncausal_attention_flops if is_full_attention else noncausal_attention_flops / 2
+  total_tflops = learnable_weight_tflops + attention_tflops
 
   if log:
+    attn_label = "Full attention TFLOPs" if is_full_attention else "Causal attention TFLOPs"
     print(
         "Per prefill step per device: \n",
         f"\tTotal TFLOPs: {total_tflops:.2f} \n",
         f"\t\tLearnable weight TFLOPs: {learnable_weight_tflops:.2f} ",
         f"({100 * learnable_weight_tflops/total_tflops:.2f})% of Total\n",
-        f"\t\tCausal attention TFLOPs: {causal_attention_tflops:.2f} ",
-        f"({100 * causal_attention_tflops/total_tflops:.2f})% of Total",
+        f"\t\t{attn_label}: {attention_tflops:.2f} ",
+        f"({100 * attention_tflops/total_tflops:.2f})% of Total",
     )
-  return total_tflops, learnable_weight_tflops, causal_attention_tflops
+  return total_tflops, learnable_weight_tflops, attention_tflops
 
 
 def apply_gradient_clipping(raw_grads, state, clipping_threshold):

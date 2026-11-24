@@ -222,7 +222,7 @@ class AttentionType(enum.Enum):
   CHUNK = "chunk"
   MLA = "mla"
   COMPRESSED = "compressed"
-  FULL = "full"
+  FULL = "full"  # non-causal, bidirectional full attention
   BLOCK_DIFFUSION = "block_diffusion"
 
 
