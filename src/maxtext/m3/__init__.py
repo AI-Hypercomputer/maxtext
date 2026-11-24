@@ -23,7 +23,7 @@ model code.
 Subpackages:
   * `core` — primitives m3 must write itself (RoPE, sharding, checkpoint, data).
   * `infra` — post-construction transforms (remat, scan, quantization, offload).
-  * `configs` — slim Pydantic config types plus the YAML defaults.
+  * `configs` — Pydantic training and diffusion config types.
   * `models` — one self-contained file per model family, plus its sharding rules.
   * `train` — m3's own training loop (one of two supported drivers; the other is
     `maxtext.training_engine.maxtext_engine`).
