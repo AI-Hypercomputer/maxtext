@@ -768,7 +768,7 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
     )
 
   pathways_retry = elastic_manager.elastic_retry(
-      max_retries=config.elastic_max_retries,
+      retry_policy=manager.ElasticRetryLimit(config.elastic_max_retries),
       timeout=config.elastic_timeout_seconds,
       minimum_slice_count=minimum_slice_count,
       pre_callback=effective_pre_callback,

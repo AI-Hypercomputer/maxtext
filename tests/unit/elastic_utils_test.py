@@ -439,6 +439,19 @@ class ElasticUtilsTest(parameterized.TestCase):
     kwargs = self.fake_manager.elastic_retry.call_args.kwargs
     self.assertIsNone(kwargs["minimum_slice_count"])
 
+  def test_elastic_retry_passes_retry_policy(self):
+    """Tests that elastic_retry limits attempts with a retry_policy instead of max_retries."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+
+    elastic_utils.elastic_retry(config)
+
+    kwargs = self.fake_manager.elastic_retry.call_args.kwargs
+    self.assertNotIn("max_retries", kwargs)
+    retry_policy = kwargs["retry_policy"]
+    self.assertIsInstance(retry_policy, pathwaysutils.elastic.manager.ElasticRetryLimit)
+    self.assertEqual(retry_policy.max_attempts, config.elastic_max_retries)
+
   def test_elastic_retry_pre_callback_without_pre_callback_fn(self):
     """pre_callback still works when pre_callback_fn is not supplied."""
     config = FakeConfig()
