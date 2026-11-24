@@ -115,6 +115,28 @@ def _concat_1d(items: list[Any]) -> jax.Array:
   return jnp.concatenate([jnp.ravel(jnp.asarray(x)) for x in items])
 
 
+def _stack_microbatches(
+    existing: jax.Array | None, items: list[Any]
+) -> jax.Array:
+  """Stacks structured per-microbatch metric arrays along axis 0.
+
+  Preserves trailing sufficient-statistic dimensions (for example, shape `(3,)`
+  for `PearsonMetric` becomes `(M, 3)` across `M` micro-batches) and appends
+  along axis 0 across incremental flushes on the same step.
+
+  Args:
+    existing: Previously flushed array for the metric on this step, or `None`.
+    items: Pending per-microbatch metric arrays to stack along axis 0.
+
+  Returns:
+    Stacked array with micro-batches along axis 0.
+  """
+  stacked = jnp.stack([jnp.asarray(x) for x in items], axis=0)
+  if existing is None:
+    return stacked
+  return jnp.concatenate([existing, stacked], axis=0)
+
+
 class Mode(str, enum.Enum):
   TRAIN = "train"
   EVAL = "eval"
@@ -238,7 +260,7 @@ class MetricsRecorder:
       self._pending_scalar.setdefault(key, {}).setdefault(name, []).append(metric)
 
   def _flush_buffer(self, buffer: abstract_engine.MetricsBuffer) -> None:
-    """Materializes pending Python lists into 1D JAX arrays on `buffer`.
+    """Materializes pending Python lists into JAX arrays on `buffer`.
 
     All-or-nothing: every pending item is converted first, and `buffer` and the pending
     dicts are only updated once all conversions succeed. An item that `jnp.asarray` rejects
@@ -257,15 +279,41 @@ class MetricsRecorder:
     new_weighted: dict[str, abstract_engine.WeightedMetric] = {}
     for name, items in (pending_w or {}).items():
       existing = buffer.weighted_metrics.get(name)
-      prefix = [existing] if existing is not None else []
-      # The live items carry the metric's eps/min_denom.
+      # The live items carry the concrete type and eps/min_denom bounds.
       template = items[0]
-      new_weighted[name] = abstract_engine.WeightedMetric(
-          unreduced_sum=_concat_1d([m.unreduced_sum for m in prefix + items]),
-          denominator=_concat_1d([m.denominator for m in prefix + items]),
-          eps=template.eps,
-          min_denom=template.min_denom,
-      )
+      metric_type = type(template)
+      existing_type = type(existing) if existing is not None else None
+      if existing_type is not None and existing_type is not metric_type:
+        raise TypeError(
+            f"Metric '{name}' was previously recorded as"
+            f" {existing_type.__name__}, cannot record as"
+            f" {metric_type.__name__}."
+        )
+      # Exact class match: subclasses must not mix with base WeightedMetric.
+      if any(type(m) is not metric_type for m in items[1:]):  # pylint: disable=unidiomatic-typecheck
+        raise TypeError(
+            f"Metric '{name}' cannot mix {metric_type.__name__} with other"
+            " WeightedMetric types."
+        )
+      if metric_type is abstract_engine.WeightedMetric:
+        prefix = [existing] if existing is not None else []
+        new_weighted[name] = abstract_engine.WeightedMetric(
+            unreduced_sum=_concat_1d([m.unreduced_sum for m in prefix + items]),
+            denominator=_concat_1d([m.denominator for m in prefix + items]),
+            eps=template.eps,
+            min_denom=template.min_denom,
+        )
+      else:
+        new_weighted[name] = template.replace(
+            unreduced_sum=_stack_microbatches(
+                existing.unreduced_sum if existing is not None else None,
+                [m.unreduced_sum for m in items],
+            ),
+            denominator=_stack_microbatches(
+                existing.denominator if existing is not None else None,
+                [m.denominator for m in items],
+            ),
+        )
 
     new_scalar: dict[str, jax.Array] = {}
     for name, items in (pending_s or {}).items():

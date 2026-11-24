@@ -91,6 +91,61 @@ class DummyPayload(abstract_engine.TrainerPayload):
   metadata: dict[str, Any] = struct.field(pytree_node=False, default_factory=dict)
 
 
+@struct.dataclass
+class _StructuredWeightedMetric(abstract_engine.WeightedMetric):
+  """WeightedMetric subclass storing Chan Pearson statistics of shape (3,)."""
+
+  @classmethod
+  def from_arrays(
+      cls, x: np.ndarray, y: np.ndarray, *, min_denom: float = 1e-12
+  ) -> "_StructuredWeightedMetric":
+    n = float(len(x))
+    if n == 0.0:
+      return cls(
+          unreduced_sum=jnp.zeros((3,), dtype=jnp.float32),
+          denominator=jnp.zeros((3,), dtype=jnp.float32),
+          min_denom=min_denom,
+      )
+    mx = float(np.mean(x))
+    my = float(np.mean(y))
+    dx = x - mx
+    dy = y - my
+    return cls(
+        unreduced_sum=jnp.asarray(
+            [
+                float(np.sum(dx * dy)),
+                float(np.sum(dx * dx)),
+                float(np.sum(dy * dy)),
+            ],
+            jnp.float32,
+        ),
+        denominator=jnp.asarray([n, mx, my], jnp.float32),
+        min_denom=min_denom,
+    )
+
+  def reduce_stacked(self) -> float:
+    """Combines per-microbatch (M, 3) statistics via Chan's parallel formula."""
+    sums = np.atleast_2d(np.asarray(self.unreduced_sum, dtype=np.float64))
+    denoms = np.atleast_2d(np.asarray(self.denominator, dtype=np.float64))
+    ns, mean_xs, mean_ys = denoms[:, 0], denoms[:, 1], denoms[:, 2]
+    total_n = float(ns.sum())
+    if total_n <= 0.0:
+      return 0.0
+    gx = float((ns * mean_xs).sum() / total_n)
+    gy = float((ns * mean_ys).sum() / total_n)
+    dx = mean_xs - gx
+    dy = mean_ys - gy
+    total_c_xy = float(sums[:, 0].sum() + (ns * dx * dy).sum())
+    total_c_xx = float(sums[:, 1].sum() + (ns * dx * dx).sum())
+    total_c_yy = float(sums[:, 2].sum() + (ns * dy * dy).sum())
+    denom = float(np.sqrt(max(total_c_xx * total_c_yy, 0.0)))
+    if self.eps is not None:
+      denom += self.eps
+    if self.min_denom is not None:
+      denom = max(denom, self.min_denom)
+    return total_c_xy / denom if denom else 0.0
+
+
 def _nested_tuples(value):
   """A logical axis rule set with every list turned into a tuple, so two spellings of it compare equal."""
   return tuple(_nested_tuples(v) for v in value) if isinstance(value, (list, tuple)) else value
@@ -1476,6 +1531,107 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     recorder.buffer_metrics(train_step=1, name="grad_norm", metric=jnp.array(0.5))
     step_buf = recorder.get_step_metrics(1)
     self.assertEqual(step_buf.scalar_metrics["grad_norm"].shape, (1,))
+
+  def test_metrics_recorder_preserves_weighted_metric_subclass_and_stacks_axis0(
+      self,
+  ):
+    """Subclasses retain their type and stack along axis 0 across flushes."""
+    recorder = metrics_module.MetricsRecorder()
+    x0 = np.array([0.1, 0.4, 0.7, 0.9], dtype=np.float64)
+    y0 = np.array([0.12, 0.38, 0.72, 0.85], dtype=np.float64)
+    recorder.buffer_metrics(
+        train_step=0,
+        name="corr",
+        metric=_StructuredWeightedMetric.from_arrays(x0, y0),
+    )
+
+    step0 = recorder.get_step_metrics(0)
+    self.assertIsNotNone(step0)
+    stored0 = step0.weighted_metrics["corr"]
+    self.assertIs(type(stored0), _StructuredWeightedMetric)
+    self.assertEqual(stored0.unreduced_sum.shape, (1, 3))
+    self.assertEqual(stored0.denominator.shape, (1, 3))
+    self.assertEqual(stored0.min_denom, 1e-12)
+    self.assertAlmostEqual(
+        stored0.reduce_stacked(), float(np.corrcoef(x0, y0)[0, 1]), places=6
+    )
+
+    # Unequal micro-batches (including an empty 0-count micro-batch): single
+    # flush and incremental mid-step flush produce identical (4, 3) statistics
+    # matching global np.corrcoef.
+    rng = np.random.default_rng(42)
+    xs = [rng.uniform(0.01, 0.99, size=n) for n in (3, 17, 0, 11)]
+    ys = [
+        np.clip(x + rng.normal(0.0, 0.05, size=len(x)), 0.001, 0.999)
+        for x in xs
+    ]
+    items = [
+        _StructuredWeightedMetric.from_arrays(x, y) for x, y in zip(xs, ys)
+    ]
+
+    rec_all = metrics_module.MetricsRecorder()
+    for item in items:
+      rec_all.buffer_metrics(train_step=1, name="corr", metric=item)
+    stored_all = rec_all.get_step_metrics(1).weighted_metrics["corr"]
+    self.assertIs(type(stored_all), _StructuredWeightedMetric)
+    self.assertEqual(stored_all.unreduced_sum.shape, (4, 3))
+    self.assertEqual(stored_all.denominator.shape, (4, 3))
+
+    rec_inc = metrics_module.MetricsRecorder()
+    for item in items[:2]:
+      rec_inc.buffer_metrics(train_step=1, name="corr", metric=item)
+    mid = rec_inc.get_step_metrics(1).weighted_metrics["corr"]
+    self.assertEqual(mid.unreduced_sum.shape, (2, 3))
+    for item in items[2:]:
+      rec_inc.buffer_metrics(train_step=1, name="corr", metric=item)
+    stored_inc = rec_inc.get_step_metrics(1).weighted_metrics["corr"]
+    self.assertIs(type(stored_inc), _StructuredWeightedMetric)
+    self.assertEqual(stored_inc.unreduced_sum.shape, (4, 3))
+    np.testing.assert_allclose(
+        stored_inc.unreduced_sum, stored_all.unreduced_sum
+    )
+    np.testing.assert_allclose(stored_inc.denominator, stored_all.denominator)
+
+    expected_r = float(
+        np.corrcoef(np.concatenate(xs), np.concatenate(ys))[0, 1]
+    )
+    self.assertAlmostEqual(stored_all.reduce_stacked(), expected_r, places=6)
+    self.assertAlmostEqual(stored_inc.reduce_stacked(), expected_r, places=6)
+
+  def test_metrics_recorder_rejects_mixing_weighted_metric_subclasses(self):
+    """Mixing WeightedMetric and a subclass raises without mutating buffer."""
+    sample = _StructuredWeightedMetric.from_arrays(
+        np.array([0.1, 0.9]), np.array([0.2, 0.8])
+    )
+    plain = abstract_engine.WeightedMetric(
+        unreduced_sum=jnp.array(1.0), denominator=jnp.array(1.0)
+    )
+
+    # Mixed within a single flush.
+    recorder = metrics_module.MetricsRecorder()
+    recorder.buffer_metrics(train_step=0, name="m", metric=sample)
+    recorder.buffer_metrics(train_step=0, name="m", metric=plain)
+    buf0 = recorder._metrics_buffer[-1]
+    with self.assertRaisesRegex(
+        TypeError, r"cannot mix _StructuredWeightedMetric"
+    ):
+      recorder.get_step_metrics(0)
+    self.assertEmpty(buf0.weighted_metrics)
+
+    # Mixed across flushes leaves the already-committed subclass untouched.
+    recorder_inc = metrics_module.MetricsRecorder()
+    recorder_inc.buffer_metrics(train_step=1, name="m", metric=sample)
+    committed = recorder_inc.get_step_metrics(1).weighted_metrics["m"]
+    recorder_inc.buffer_metrics(train_step=1, name="m", metric=plain)
+    with self.assertRaisesRegex(
+        TypeError,
+        r"previously recorded as _StructuredWeightedMetric, cannot record as"
+        r" WeightedMetric",
+    ):
+      recorder_inc.get_step_metrics(1)
+    self.assertIs(
+        recorder_inc._metrics_buffer[-1].weighted_metrics["m"], committed
+    )
 
   def test_metrics_recorder_keeps_same_id_buffers_apart(self):
     """Two history buffers with the same step id never share pending items.
