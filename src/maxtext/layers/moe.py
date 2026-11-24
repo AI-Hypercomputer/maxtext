@@ -46,7 +46,7 @@ from maxtext.kernels.ragged.ragged_sort import ring_ragged_unsort
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_sort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import ring_ragged_unsort_tc
 from maxtext.kernels.ragged.ragged_sort_tc import tc_buffer_row_weights
-from maxtext.layers import attentions, linears, nnx_wrappers, quantizations
+from maxtext.layers import attentions, deepseek41_quant, linears, nnx_wrappers, quantizations
 from maxtext.layers import moe_fused_gmm3d
 from maxtext.layers import moe_replica_planner
 from maxtext.layers import moe_replica_weights
@@ -1002,6 +1002,11 @@ def _replace_router_logits_bwd(_, cotangent):
 _replace_router_logits.defvjp(_replace_router_logits_fwd, _replace_router_logits_bwd)
 
 
+def _resolve_gate_logit_dtype(dtype: ctypes.DType, float32_gate_logits: bool) -> ctypes.DType:
+  """Preserves float64 gate logits for float64 layers; otherwise promotes to float32 when enabled."""
+  return dtype if not float32_gate_logits or jnp.dtype(dtype) == jnp.float64 else jnp.float32
+
+
 class GateLogit(nnx.Module):
   """A layer used to compute gate logits, allowing to return the pre bias values for DeepSeek routing."""
 
@@ -1914,12 +1919,14 @@ class RoutedMoE(nnx.Module):
     # full hidden state but runs the experts on a down-projected latent; that input arrives as `gate_inputs`.
     router_input_dim = getattr(self.config, "moe_router_input_dim", -1)
     self.moe_router_input_dim = self.moe_expert_input_dim if router_input_dim <= 0 else router_input_dim
+    gate_dtype = _resolve_gate_logit_dtype(self.dtype, self.config.float32_gate_logits)
+    gate_matmul_precision = getattr(self.config, "gate_matmul_precision", "") or self.config.matmul_precision
     self.gate = GateLogit(
         in_features_shape=self.moe_router_input_dim,
         out_features_shape=self.num_experts,
         mesh=self.mesh,
         model_name=self.config.model_name,
-        dtype=jnp.float32 if self.config.float32_gate_logits else self.dtype,
+        dtype=gate_dtype,
         weight_dtype=gate_weight_dtype,
         quant=ctypes.get_quant(self.config, "gate", self.quant),
         kernel_init=self.kernel_init,
@@ -1930,7 +1937,7 @@ class RoutedMoE(nnx.Module):
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
         score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") else self.config.routed_score_func,
-        matmul_precision=getattr(self.config, "gate_matmul_precision", "") or self.config.matmul_precision,
+        matmul_precision=gate_matmul_precision,
         shard_mode=config.shard_mode,
         rngs=self.rngs,
     )
@@ -6513,6 +6520,11 @@ class RoutedMoE(nnx.Module):
               "activation_embed_moe",
           ),
       )
+      # DeepSeek-V4.1 reference: FP8 activation round trips into both expert GEMMs, and the routing weight is
+      # applied before the down projection (so before its input is quantized).
+      ds41_quant = deepseek41_quant.enabled(self.config)
+      if ds41_quant:
+        inputs = deepseek41_quant.fp8_qdq(inputs)
       with jax.named_scope("wi_0"):
         layer_w0 = self.get_einsum(rhs_mesh_axes=self.wi_kernel_axes, einsum_name=WI_0)(
             "BSM,EMH -> BSEH", inputs, w0_kernel, precision=matmul_precision
@@ -6532,6 +6544,10 @@ class RoutedMoE(nnx.Module):
           layer_w1 = layer_w1.astype(jnp.float32)
         layer_w1 = adc.checkpoint_name(adc.checkpoint_name(layer_w1, "mlpwi_1"), "moe_mlpwi_1")
       layer_multiply = self.apply_ffn_activation(layer_w0, layer_w1)
+      if ds41_quant:
+        layer_multiply = layer_multiply.astype(jnp.float32) * weights.astype(jnp.float32)[..., None]
+        layer_multiply = deepseek41_quant.fp8_qdq(layer_multiply).astype(self.dtype)
+        weights = (weights != 0).astype(weights.dtype)
 
       with jax.named_scope("wo"):
         intermediate_layer = self.get_einsum(rhs_mesh_axes=self.wo_kernel_axes, einsum_name=WO)(
@@ -6944,7 +6960,7 @@ class RoutedMoE(nnx.Module):
     if cfg.te_moe_block and token_mask is not None:
       raise ValueError("te_moe_block=True does not support token_mask (TransformerEngine routes every token).")
 
-    gate_dtype = jnp.float32 if cfg.float32_gate_logits else cfg.dtype
+    gate_dtype = _resolve_gate_logit_dtype(self.dtype, cfg.float32_gate_logits)
     routing_inputs = (inputs if gate_inputs is None else gate_inputs).astype(gate_dtype)
     inputs = inputs.astype(cfg.dtype)
 
@@ -7243,6 +7259,7 @@ class RoutedAndSharedMoE(nnx.Module):
         weight_dtype=self.config.weight_dtype,
         config=self.config,
         quant=self.quant,
+        act_quant_fn=deepseek41_quant.fp8_qdq if deepseek41_quant.enabled(self.config) else None,
         rngs=self.rngs,
         activations_limit=self.config.mlp_activations_limit if clamp_shared else None,
     )

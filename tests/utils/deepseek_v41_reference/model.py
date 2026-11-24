@@ -214,10 +214,11 @@ class ParallelEmbedding(nn.Module):
 
 
 def linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
-  """Plain floating-point GEMM (upstream picks an FP8/FP4 GEMM from the weight dtype; the unquantized
-  reference only ever holds floating-point weights)."""
+  """Floating-point GEMM; quantizes `x` to FP8 when upstream stores `weight` in FP8/FP4 and `act_quant` is enabled."""
   assert bias is None
   assert weight.dtype in (torch.float32, torch.bfloat16, torch.float16), weight.dtype
+  if getattr(weight, "quantized_input", False) and getattr(act_quant, "enabled", True):
+    x = act_quant(x.clone(), fp8_block_size, scale_fmt, scale_dtype, True)
   if compute_fp32:
     return F.linear(x.float(), weight.float())
   return F.linear(x.to(weight.dtype), weight)
@@ -226,21 +227,23 @@ def linear(x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = No
 def _plain_dtype(dtype):
   """Upstream pins some weights to bf16 (and quantizes the rest). Here those follow the model dtype, so an fp32
   reference runs in fp32 end to end; weights explicitly kept in fp32 upstream stay fp32."""
-  if dtype is None or dtype == torch.bfloat16:
+  if dtype is None or dtype in (torch.bfloat16, torch.float8_e4m3fn, torch.float4_e2m1fn_x2):
     return default_dtype
   assert dtype in (torch.float32, torch.float16), f"quantized dtype {dtype} is not supported by the reference"
   return dtype
 
 
 class Linear(nn.Module):
-  """Plain floating-point weights (upstream: bf16, fp8 or fp4 weights with a `scale`)."""
+  """Plain floating-point weights; records `weight.quantized_input` when upstream stores the weight as FP8 or FP4."""
 
   def __init__(self, in_features: int, out_features: int, bias: bool = False, dtype=None):
     super().__init__()
     self.in_features = in_features
     self.out_features = out_features
+    quantized_input = dtype is None or dtype in (torch.float8_e4m3fn, torch.float4_e2m1fn_x2)
     dtype = _plain_dtype(dtype)
     self.weight = nn.Parameter(torch.empty(out_features, in_features, dtype=dtype))
+    self.weight.quantized_input = quantized_input
     self.register_parameter("scale", None)
     if bias:
       self.bias = nn.Parameter(torch.empty(out_features))

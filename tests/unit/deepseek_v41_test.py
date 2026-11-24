@@ -29,7 +29,10 @@ import numpy as np
 from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.configs import pyconfig
+from maxtext.configs import types
+from maxtext.layers import attention_deepseek41
 from maxtext.layers import engram_deepseek41
+from maxtext.layers import moe
 from maxtext.models import deepseek41
 
 _FP4_E2M1 = np.array(param_mapping._FP4_E2M1_VALUES, np.float32)  # pylint: disable=protected-access
@@ -216,18 +219,40 @@ class ConfigValidationTest(parameterized.TestCase):
       _flash_config(override_model_config=True, **overrides)
 
   def test_rejects_packed_data(self):
-    with self.assertRaisesRegex(ValueError, "packed sequences"):
-      _flash_config(packing=True, override_model_config=True)  # also on (default) synthetic data
+    with self.assertRaisesRegex(ValueError, "deepseek41 does not support packed sequences yet: set packing=False"):
+      _flash_config(packing=True, override_model_config=True)
+    with self.assertRaisesRegex(ValueError, "deepseek41 does not support packed sequences yet: set packing=False"):
+      _flash_config(dataset_type="hf", hf_path="dummy", packing=True, override_model_config=True)
 
   def test_rejects_engram_without_ngrams(self):
     with self.assertRaisesRegex(ValueError, "ds41_engram_max_ngram_size must be >= 2"):
       _flash_config(ds41_engram_max_ngram_size=1, override_model_config=True)
 
-  def test_rejects_training_moe_balancing(self):
-    with self.assertRaisesRegex(ValueError, "routing bias updates or the load-balancing loss"):
-      _flash_config(routed_bias_update_rate=0.001, override_model_config=True)
-    with self.assertRaisesRegex(ValueError, "routing bias updates or the load-balancing loss"):
-      _flash_config(load_balance_loss_weight=0.0001, override_model_config=True)
+  def test_training_moe_balancing(self):
+    from flax import nnx  # pylint: disable=import-outside-toplevel
+
+    for model_name in ("deepseek4.1-flash", "deepseek4.1-flash-mini"):
+      cfg = _flash_config(model_name)
+      self.assertEqual(cfg.routed_bias_update_rate, 0.001)
+      self.assertEqual(cfg.load_balance_loss_weight, 0.0001)
+    with self.assertRaisesRegex(ValueError, "routed_bias_update_rate must be >= 0"):
+      _flash_config(routed_bias_update_rate=-0.001, override_model_config=True)
+    with self.assertRaises(ValueError):
+      _flash_config(load_balance_loss_weight=-0.0001, override_model_config=True)
+    tokens = jnp.ones((1, _TINY_SEQ), jnp.int32)
+    for scan_layers in (False, True):
+      _, model = _tiny_model(scan_layers=scan_layers)
+      _logits(model, tokens)
+      intermediates = nnx.traversals.flatten_mapping(nnx.state(model, nnx.Intermediate).to_pure_dict())
+      lb_keys = [k for k in intermediates if "moe_lb_loss" in k]
+      bias_keys = [k for k in intermediates if "moe_bias_updates" in k]
+      self.assertTrue(lb_keys, f"missing moe_lb_loss for scan_layers={scan_layers}")
+      self.assertTrue(bias_keys, f"missing moe_bias_updates for scan_layers={scan_layers}")
+      for k in lb_keys:
+        self.assertTrue(np.isfinite(np.asarray(intermediates[k])).all(), f"non-finite {k}")
+        self.assertGreater(float(np.sum(np.asarray(intermediates[k]))), 0.0, f"non-positive {k}")
+      for k in bias_keys:
+        self.assertTrue(np.isfinite(np.asarray(intermediates[k])).all(), f"non-finite {k}")
 
   def test_gate_matmul_precision(self):
     self.assertEqual(_flash_config().gate_matmul_precision, "highest")
@@ -235,6 +260,28 @@ class ConfigValidationTest(parameterized.TestCase):
 
   def test_muon_allowed(self):
     self.assertEqual(_flash_config(opt_type="muon").opt_type, "muon")
+
+  def test_rejects_invalid_gate_matmul_precision_and_prefetch_fsdp_weights(self):
+    with self.assertRaises(ValueError):
+      _flash_config(gate_matmul_precision="not_a_real_precision", override_model_config=True)
+    with self.assertRaises(ValueError):
+      types.RLConfig(model_name="deepseek4.1-flash-mini", gate_matmul_precision="not_a_real_precision")
+    self.assertEqual(
+        _flash_config(gate_matmul_precision="high", override_model_config=True).gate_matmul_precision,
+        types.MatmulPrecision.HIGH,
+    )
+    with self.assertRaisesRegex(ValueError, "prefetch_fsdp_weights"):
+      _flash_config(prefetch_fsdp_weights=True, override_model_config=True)
+
+  def test_megatron_seq_aux_loss_enabled_for_ds41_configs(self):
+    for model_name in ("deepseek4.1-flash", "deepseek4.1-flash-mini"):
+      with self.subTest(model_name=model_name):
+        cfg = _flash_config(model_name)
+        self.assertTrue(cfg.moe_use_megatron_seq_aux_loss)
+        self.assertTrue(moe.uses_megatron_seq_aux_loss(cfg))
+        cfg_off = _flash_config(model_name, override_model_config=True, moe_use_megatron_seq_aux_loss=False)
+        self.assertFalse(cfg_off.moe_use_megatron_seq_aux_loss)
+        self.assertFalse(moe.uses_megatron_seq_aux_loss(cfg_off))
 
 
 class CheckpointHookTest(parameterized.TestCase):
@@ -324,8 +371,6 @@ class MuonTest(unittest.TestCase):
 class RotaryTest(unittest.TestCase):
 
   def test_inv_freq_computed_on_host_in_float64(self):
-    from maxtext.layers import attention_deepseek41  # pylint: disable=import-outside-toplevel
-
     rope = attention_deepseek41.DeepSeek41RotaryEmbedding(
         head_dim=512,
         partial_rotary_factor=64 / 512,
@@ -424,7 +469,6 @@ class TinyForwardTest(unittest.TestCase):
   def test_scanned_matches_unscanned(self):
     """The scanned segments (stacks, carry plans and placeholders) compute what the unscanned layers do."""
     from flax import nnx  # pylint: disable=import-outside-toplevel
-    from maxtext.layers import moe  # pylint: disable=import-outside-toplevel
 
     config, unscanned = _tiny_model(scan_layers=False)
     _, scanned = _tiny_model(scan_layers=True)
@@ -475,6 +519,39 @@ class DecodeGuardTest(unittest.TestCase):
           enable_dropout=False,
           model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
+
+
+class RotaryAndCandidateBlockTest(unittest.TestCase):
+  """Torch-free unit tests for DeepSeek-V4.1 rotary invertibility and candidate selection."""
+
+  def test_rotary_invertibility_and_candidate_blocks(self):
+    rng = np.random.default_rng(0)
+    x = jnp.asarray(rng.standard_normal((2, 32, 3, 32), dtype=np.float32))
+    positions = jnp.broadcast_to(jnp.arange(32, dtype=jnp.int32), (2, 32))
+    for orig_len, theta in ((65536, 160000.0), (0, 10000.0)):
+      rope = attention_deepseek41.DeepSeek41RotaryEmbedding(
+          head_dim=32,
+          partial_rotary_factor=8 / 32,
+          rope_theta=theta,
+          rope_type="yarn" if orig_len > 0 else "default",
+          original_max_position_embeddings=orig_len if orig_len > 0 else 65536,
+          rope_factor=16,
+          beta_fast=32,
+          beta_slow=1,
+      )
+      rotated = rope(x, positions, unsqueeze_dim=-2)
+      np.testing.assert_array_equal(np.asarray(rotated[..., :-8]), np.asarray(x[..., :-8]))
+      recovered = rope(rotated, positions, unsqueeze_dim=-2, reverse=True)
+      np.testing.assert_allclose(np.asarray(recovered), np.asarray(x), rtol=1e-5, atol=1e-5)
+
+    raw_logits = rng.standard_normal((2, 16, 16), dtype=np.float32)
+    lens_np = np.broadcast_to(np.arange(1, 17, dtype=np.int32)[:, None], (2, 16, 1))
+    masked_logits = jnp.asarray(np.where(np.arange(16)[None, None, :] >= lens_np, -np.inf, raw_logits))
+    lens = jnp.broadcast_to(jnp.arange(1, 17, dtype=jnp.int32), (2, 16))
+    selected = attention_deepseek41.select_candidate_blocks(masked_logits, lens, topk_blocks=2, block_size=4)
+    self.assertEqual(selected.shape, (2, 16, 16))
+    self.assertEqual(selected.dtype, jnp.bool_)
+    np.testing.assert_array_equal(np.asarray(selected[:, -1]).sum(axis=-1), np.array([8, 8]))
 
 
 if __name__ == "__main__":

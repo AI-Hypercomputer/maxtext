@@ -6889,6 +6889,65 @@ class RoutedMoeRouterInputAndUpActivationTest(parameterized.TestCase):
         _, pre_bias = gate(jnp.ones((1, 2, self._EMB), jnp.float32))
         self.assertEqual(pre_bias is not None, has_pre_bias)
 
+  def test_gate_matmul_precision_defaults_to_matmul_precision(self):
+    """Empty `gate_matmul_precision` preserves non-DS4.1 gate precision and StableHLO; setting it overrides only the gate."""
+    cfg_default = self._cfg(
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        matmul_precision="default",
+        float32_gate_logits=True,
+        sparse_matmul=False,
+        capacity_factor=-1.0,
+    )
+    self.assertEqual(cfg_default.gate_matmul_precision, "")
+    block_default, mesh = self._block(cfg_default)
+    self.assertEqual(block_default.gate.dtype, jnp.float32)
+    self.assertEqual(block_default.gate.matmul_precision, cfg_default.matmul_precision)
+
+    # Reference block constructed with explicit `matmul_precision` matching pre-flag behavior.
+    block_ref, _ = self._block(cfg_default)
+    block_ref.gate.matmul_precision = cfg_default.matmul_precision
+
+    x = jnp.ones((jax.device_count(), self._SEQ, self._EMB), dtype=jnp.bfloat16)
+
+    def lower_stablehlo(blk):
+      graphdef, state = nnx.split(blk)
+
+      @jax.jit
+      def fn(st, inp):
+        merged = nnx.merge(graphdef, st)
+        out, lb, _ = merged(inp)
+        return out, lb
+
+      with jax.set_mesh(mesh):
+        return fn.lower(state, x).as_text("stablehlo")
+
+    hlo_default = lower_stablehlo(block_default)
+    hlo_ref = lower_stablehlo(block_ref)
+    self.assertEqual(hlo_default, hlo_ref)
+    dot_lines_default = [ln.strip() for ln in hlo_default.splitlines() if "stablehlo.dot_general" in ln]
+    self.assertGreaterEqual(len(dot_lines_default), 4)
+    self.assertIn("precision = [DEFAULT, DEFAULT]", dot_lines_default[0])
+
+    # Positive control: overriding `gate_matmul_precision="highest"` upgrades only the router gate dot_general.
+    cfg_hi = self._cfg(
+        dtype="bfloat16",
+        weight_dtype="bfloat16",
+        matmul_precision="default",
+        gate_matmul_precision="highest",
+        float32_gate_logits=True,
+        sparse_matmul=False,
+        capacity_factor=-1.0,
+    )
+    block_hi, _ = self._block(cfg_hi)
+    self.assertEqual(block_hi.gate.matmul_precision, "highest")
+    hlo_hi = lower_stablehlo(block_hi)
+    dot_lines_hi = [ln.strip() for ln in hlo_hi.splitlines() if "stablehlo.dot_general" in ln]
+    self.assertEqual(len(dot_lines_hi), len(dot_lines_default))
+    self.assertIn("precision = [HIGHEST, HIGHEST]", dot_lines_hi[0])
+    for expert_dot in dot_lines_hi[1:]:
+      self.assertIn("precision = [DEFAULT, DEFAULT]", expert_dot)
+
 
 if __name__ == "__main__":
   absltest.main()
