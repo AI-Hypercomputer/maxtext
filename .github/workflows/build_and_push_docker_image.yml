@@ -53,23 +53,13 @@ on:
         required: false
         type: boolean
         default: false
-      fast_rebuild:
-        description: 'Use code-overlay rebuild instead of full build'
-        required: false
-        type: boolean
-        default: false
-      source_run_id:
-        description: 'Run ID of the source image for fast-rebuild'
+      platform:
+        description: 'Target platform for the Docker image build (e.g., amd64, arm64)'
         required: false
         type: string
         default: ''
-      allow_dependency_drift:
-        description: 'Allow fast-rebuild even if dependency files changed'
-        required: false
-        type: boolean
-        default: false
-      platform:
-        description: 'Target platform for the Docker image build (e.g., amd64, arm64)'
+      deps_image_name:
+        description: 'Optional Artifact Registry image name for a cached dependencies-only build'
         required: false
         type: string
         default: ''
@@ -115,56 +105,22 @@ jobs:
             echo "Skipping $IMAGE_NAME build for device: $INPUT_DEVICE in $BUILD_MODE mode."
           fi
 
-  drift_guard:
-    name: Fast-rebuild Pre-flight
+  resolve_deps:
+    name: Resolve Dependencies Image
     needs: pre_build_check
-    runs-on: ubuntu-latest
-    outputs:
-      overlay_variant: ${{ steps.guard.outputs.overlay_variant }}
-    if: needs.pre_build_check.outputs.should_run == 'true' && inputs.fast_rebuild
-    # Runs the guard script from the workflow's own checkout (not from inputs.maxtext_sha)
-    # and only reads the source/current commits as git data; no code from the commit being
-    # built executes here. Fails fast before a build runner is allocated.
-    steps:
-      - name: Validate fast-rebuild inputs
-        env:
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-        run: |
-          if [ -z "${SOURCE_RUN_ID}" ]; then
-            echo "::error::source_run_id is required when using fast-rebuild mode."
-            echo "Find the run ID in the Actions tab → previous pipeline run → run ID in the URL."
-            exit 1
-          fi
-          echo "Fast-rebuild mode: overlaying new code on source run ${SOURCE_RUN_ID}"
-
-      - name: Checkout workflow ref
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          persist-credentials: false
-
-      - name: Dependency drift guard
-        id: guard
-        env:
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          CURRENT_SHA: ${{ inputs.maxtext_sha }}
-          ALLOW_DRIFT: ${{ inputs.allow_dependency_drift }}
-          WORKFLOW: ${{ inputs.workflow }}
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          bash .github/scripts/fast_rebuild_drift_guard.sh
-
-  build_and_push:
-    name: Build and Push Docker Image
-    needs: [pre_build_check, drift_guard]
     runs-on: linux-x86-n4-16-buildkit
     container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
-    # drift_guard is skipped in build-all mode, so !cancelled() keeps this job eligible;
-    # in fast-rebuild mode the guard must have passed.
-    if: ${{ !cancelled() && needs.pre_build_check.outputs.should_run == 'true' && (!inputs.fast_rebuild || needs.drift_guard.result == 'success') }}
+    if: needs.pre_build_check.outputs.should_run == 'true'
     outputs:
-      image_digest: ${{ steps.build_push.outputs.digest || steps.build_push_fast.outputs.digest }}
       build_repo: ${{ steps.determine_repo.outputs.build_repo }}
+      docker_platform: ${{ steps.determine_repo.outputs.docker_platform }}
+      tag_prefix: ${{ steps.determine_repo.outputs.tag_prefix }}
+      airlock_base: ${{ steps.determine_repo.outputs.airlock_base }}
       maxtext_short_sha: ${{ steps.determine_repo.outputs.maxtext_short_sha }}
+      base_image_pinned: ${{ steps.resolve_deps.outputs.base_image_pinned }}
+      deps_tag: ${{ steps.resolve_deps.outputs.deps_tag }}
+      should_build_deps: ${{ steps.resolve_deps.outputs.should_build_deps }}
+      deps_image: ${{ steps.resolve_deps.outputs.deps_image }}
     steps:
       - name: Matrix Debugger
         env:
@@ -172,6 +128,7 @@ jobs:
           WORKFLOW: ${{ inputs.workflow }}
           BUILD_MODE: ${{ inputs.build_mode }}
           IMAGE_NAME: ${{ inputs.image_name }}
+          DEPS_IMAGE_NAME: ${{ inputs.deps_image_name }}
           DOCKERFILE: ${{ inputs.dockerfile }}
           PLATFORM: ${{ inputs.platform }}
         run: |
@@ -179,66 +136,25 @@ jobs:
           echo "workflow: $WORKFLOW"
           echo "build_mode: $BUILD_MODE"
           echo "image_name: $IMAGE_NAME"
+          echo "deps_image_name: $DEPS_IMAGE_NAME"
           echo "dockerfile: $DOCKERFILE"
           echo "platform: $PLATFORM"
 
-      - name: Set up Syft
-        id: download_syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
-
-      - name: Checkout MaxText
+      # Runs compute_deps_tag.sh from the workflow's own trusted checkout (not from
+      # inputs.maxtext_sha) and only reads target commit files as git data via
+      # `git archive` when maxtext_sha differs from HEAD, satisfying CodeQL's
+      # actions/cache-poisoning check.
+      - name: Checkout workflow ref
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
-          ref: ${{ inputs.maxtext_sha }}
+          sparse-checkout: src/dependencies
           persist-credentials: false
 
       - name: Mark git repositories as safe
         run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
 
-      - name: Configure Docker and prepare Airlock credentials
-        run: |
-          gcloud auth configure-docker us-docker.pkg.dev -q
-          mkdir -p /tmp/airlock
-          if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]; then
-            cp "${GOOGLE_APPLICATION_CREDENTIALS}" /tmp/airlock/credentials.json
-          elif [ -f "$HOME/.config/gcloud/application_default_credentials.json" ]; then
-            cp "$HOME/.config/gcloud/application_default_credentials.json" /tmp/airlock/credentials.json
-          else
-            touch /tmp/airlock/credentials.json
-          fi
-
-      - name: Set up Docker BuildX
-        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
-        with:
-          driver: remote
-          endpoint: tcp://localhost:1234
-
-      - name: Download MaxText wheel
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: maxtext-wheel
-          path: .
-
-      - name: Install uv and set Python version
-        # zizmor: ignore[cache-poisoning]
-        uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78 # v7.6.0
-        with:
-          python-version: '3.12'
-          enable-cache: true
-
-      - name: Install MaxText wheel
-        shell: bash
-        run: |
-          uv venv --seed
-          maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
-          uv pip install --python .venv/bin/python "${maxtext_wheel}[runner]" --resolution=lowest
-
-      - name: Copy tests assets to package directory
-        if: inputs.include_test_assets == true
-        shell: bash
-        run: |
-          cp -r "${PWD}/tests" .venv/lib/python3.12/site-packages/
-          cp "${PWD}/pytest.ini" .venv/lib/python3.12/site-packages/
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
 
       - name: Determine build vs target repository
         id: determine_repo
@@ -246,7 +162,10 @@ jobs:
         env:
           INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
           INPUTS_PLATFORM: ${{ inputs.platform }}
+          INPUTS_DOCKERFILE: ${{ inputs.dockerfile }}
+          INPUTS_MAXTEXT_SHA: ${{ inputs.maxtext_sha }}
         run: |
+          set -euo pipefail
           if [[ "${INPUTS_REPOSITORY_NAME}" == "maxtext-images" ]]; then
             BUILD_REPO="maxtext-images-staging"
           else
@@ -260,116 +179,322 @@ jobs:
             DOCKER_PLATFORM="linux/amd64"
             TAG_PREFIX=""
           fi
-          {
-            echo "BUILD_REPO=${BUILD_REPO}"
-            echo "DOCKER_PLATFORM=${DOCKER_PLATFORM}"
-            echo "TAG_PREFIX=${TAG_PREFIX}"
-          } >> "$GITHUB_ENV"
-          echo "build_repo=${BUILD_REPO}" >> "$GITHUB_OUTPUT"
-          echo "maxtext_short_sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve source image digest
-        if: ${{ inputs.fast_rebuild }}
-        id: resolve_source
+          if [[ "${INPUTS_MAXTEXT_SHA}" == -* ]]; then
+            echo "::error::Invalid maxtext_sha '${INPUTS_MAXTEXT_SHA}'."
+            exit 1
+          fi
+          HEAD_SHA=$(git rev-parse HEAD)
+          if [[ -z "${INPUTS_MAXTEXT_SHA}" || "${INPUTS_MAXTEXT_SHA}" == "${HEAD_SHA}" ]]; then
+            DEPS_REPO_ROOT="${GITHUB_WORKSPACE}"
+            MAXTEXT_SHORT_SHA=$(git rev-parse --short=7 HEAD)
+          else
+            TARGET_REF="${INPUTS_MAXTEXT_SHA}"
+            if ! git cat-file -e "${TARGET_REF}^{commit}" 2>/dev/null; then
+              git fetch --depth=1 origin "${INPUTS_MAXTEXT_SHA}"
+              TARGET_REF="FETCH_HEAD"
+            fi
+            MAXTEXT_SHORT_SHA=$(git rev-parse --short=7 "${TARGET_REF}^{commit}")
+            DEPS_REPO_ROOT="${RUNNER_TEMP}/target-deps"
+            rm -rf "${DEPS_REPO_ROOT}"
+            mkdir -p "${DEPS_REPO_ROOT}"
+            git archive "${TARGET_REF}^{commit}" -- src/dependencies | tar -x -C "${DEPS_REPO_ROOT}"
+          fi
+
+          AIRLOCK_BASEIMAGE=$(bash src/dependencies/scripts/compute_deps_tag.sh \
+            --print-base-image \
+            --dockerfile="${DEPS_REPO_ROOT}/src/dependencies/dockerfiles/${INPUTS_DOCKERFILE}")
+          {
+            echo "TAG_PREFIX=${TAG_PREFIX}"
+            echo "AIRLOCK_BASEIMAGE=${AIRLOCK_BASEIMAGE}"
+            echo "DEPS_REPO_ROOT=${DEPS_REPO_ROOT}"
+          } >> "$GITHUB_ENV"
+          {
+            echo "build_repo=${BUILD_REPO}"
+            echo "docker_platform=${DOCKER_PLATFORM}"
+            echo "tag_prefix=${TAG_PREFIX}"
+            echo "airlock_base=${AIRLOCK_BASEIMAGE}"
+            echo "maxtext_short_sha=${MAXTEXT_SHORT_SHA}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Resolve cached dependency image
+        if: ${{ inputs.deps_image_name != '' }}
+        id: resolve_deps
         shell: bash
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
-          REPOSITORY_NAME: ${{ inputs.repository_name }}
-          IMAGE_NAME: ${{ inputs.image_name }}
-          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
-          OVERLAY_VARIANT: ${{ needs.drift_guard.outputs.overlay_variant }}
+          # Dependencies-only images are internal build caches: they live only in the build
+          # repository (maxtext-images-staging for releases) and are never promoted.
+          BUILD_REPO: ${{ steps.determine_repo.outputs.build_repo }}
+          DEPS_IMAGE_NAME: ${{ inputs.deps_image_name }}
+          DEVICE: ${{ inputs.device }}
+          WORKFLOW: ${{ inputs.workflow }}
         run: |
-          echo "Overlay variant selected by the drift guard: ${OVERLAY_VARIANT}"
-          IMAGE_PATH="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${IMAGE_NAME}"
-          SOURCE_REF="${IMAGE_PATH}:${TAG_PREFIX}${SOURCE_RUN_ID}"
-          echo "Looking up source image: ${SOURCE_REF}"
+          set -euo pipefail
 
-          DIGEST=$(gcloud container images describe "${SOURCE_REF}" \
-            --format='value(image_summary.digest)' 2>/dev/null) || {
-            echo "::error::Source image not found: ${SOURCE_REF}"
-            echo "The source run's image may have been garbage-collected, the run ID may be incorrect,"
-            echo "or the source run pushed to a different repository_name."
-            echo "Available recent tags:"
-            gcloud container images list-tags "${IMAGE_PATH}" \
-              --limit=5 --format='table(digest.slice(7,19),tags,timestamp.date())' || true
+          # Resolve the Airlock base image digest so OS security updates automatically trigger a rebuild.
+          BASE_DIGEST=$(gcloud container images describe "${AIRLOCK_BASEIMAGE}" \
+            --format='value(image_summary.digest)') || {
+            echo "::error::Could not read digest of Airlock base image ${AIRLOCK_BASEIMAGE}."
             exit 1
           }
-
-          if [ -z "${DIGEST}" ]; then
-            echo "::error::Could not read the digest of ${SOURCE_REF}"
+          if [[ ! "${BASE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Unexpected digest '${BASE_DIGEST}' for ${AIRLOCK_BASEIMAGE}."
             exit 1
           fi
 
-          SOURCE_IMAGE="${IMAGE_PATH}@${DIGEST}"
-          echo "Resolved source image: ${SOURCE_IMAGE}"
-          echo "source_image=${SOURCE_IMAGE}" >> "$GITHUB_OUTPUT"
+          DEPS_TAG=$(bash src/dependencies/scripts/compute_deps_tag.sh \
+            --device="${DEVICE}" \
+            --workflow="${WORKFLOW}" \
+            --tf=true \
+            --repo-root="${DEPS_REPO_ROOT}" \
+            --base-digest="${BASE_DIGEST}")
 
-      - name: Build and push Docker image (full build)
-        if: ${{ !inputs.fast_rebuild }}
-        id: build_push
+          DEPS_FULL_TAG="${TAG_PREFIX:-}${DEPS_TAG}"
+
+          DEPS_IMAGE_PATH="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${DEPS_IMAGE_NAME}"
+          DEPS_REF="${DEPS_IMAGE_PATH}:${DEPS_FULL_TAG}"
+          echo "Resolved dependency image: ${DEPS_REF}"
+
+          DEPS_EXISTS="false"
+          DEPS_IMAGE=""
+          ERR_FILE=$(mktemp)
+          if DESCRIBE_DIGEST=$(gcloud container images describe "${DEPS_REF}" \
+            --format='value(image_summary.digest)' 2>"${ERR_FILE}"); then
+            if [[ "${DESCRIBE_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              DEPS_EXISTS="true"
+              DEPS_IMAGE="${DEPS_IMAGE_PATH}@${DESCRIBE_DIGEST}"
+              echo "Cache HIT: reusing ${DEPS_IMAGE}"
+            else
+              echo "::error::Unexpected digest '${DESCRIBE_DIGEST}' returned for ${DEPS_REF}."
+              rm -f "${ERR_FILE}"
+              exit 1
+            fi
+          elif grep -qiE 'not found|NOT_FOUND|does not exist' "${ERR_FILE}"; then
+            echo "Cache MISS: ${DEPS_REF} does not exist yet; it will be built."
+          else
+            echo "::error::Could not determine whether ${DEPS_REF} exists: $(cat "${ERR_FILE}")"
+            rm -f "${ERR_FILE}"
+            exit 1
+          fi
+          rm -f "${ERR_FILE}"
+
+          SHOULD_BUILD_DEPS="true"
+          if [[ "${DEPS_EXISTS}" == "true" ]]; then
+            SHOULD_BUILD_DEPS="false"
+          fi
+
+          {
+            echo "base_image_pinned=${AIRLOCK_BASEIMAGE%:*}@${BASE_DIGEST}"
+            echo "deps_tag=${DEPS_FULL_TAG}"
+            echo "should_build_deps=${SHOULD_BUILD_DEPS}"
+            echo "deps_image=${DEPS_IMAGE}"
+          } >> "$GITHUB_OUTPUT"
+
+  build_deps:
+    name: Build Dependencies Image
+    # Runs on dependency cache miss (stable builds), nightly, or RC builds.
+    needs: resolve_deps
+    if: ${{ !cancelled() && needs.resolve_deps.result == 'success' && needs.resolve_deps.outputs.should_build_deps != 'false' }}
+    uses: ./.github/workflows/build_deps_image.yml
+    with:
+      repository_name: ${{ needs.resolve_deps.outputs.build_repo }}
+      base_image: ${{ needs.resolve_deps.outputs.base_image_pinned || needs.resolve_deps.outputs.airlock_base }}
+      dockerfile: ${{ inputs.dockerfile }}
+      # Stable cached builds push to <deps_image_name>:<deps_tag>; nightly/RC push an
+      # intermediate staging tag <image_name>:[arch-]deps-<run_id> for the overlay job below.
+      deps_image: ${{ inputs.deps_image_name || inputs.image_name }}
+      device: ${{ inputs.device }}
+      build_mode: ${{ inputs.build_mode }}
+      workflow: ${{ inputs.workflow }}
+      platform: ${{ needs.resolve_deps.outputs.docker_platform }}
+      deps_tag: ${{ inputs.deps_image_name != '' && needs.resolve_deps.outputs.deps_tag || format('{0}deps-{1}', needs.resolve_deps.outputs.tag_prefix, github.run_id) }}
+      maxtext_sha: ${{ inputs.maxtext_sha }}
+      tf: true
+      use_airlock: true
+      provenance: mode=max
+      cache_from: type=gha
+      # Allow up to GitHub's 6h default for cold QEMU-emulated arm64 GPU and vLLM builds.
+      timeout_minutes: 360
+
+  build_overlay:
+    name: Build and Push Code Overlay Image
+    needs: [resolve_deps, build_deps]
+    if: ${{ !cancelled() && needs.resolve_deps.result == 'success' && (needs.build_deps.result == 'success' || needs.build_deps.result == 'skipped') }}
+    runs-on: linux-x86-n4-16-buildkit
+    container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
+    outputs:
+      image_digest: ${{ steps.build_push_overlay.outputs.digest }}
+    steps:
+      - name: Checkout MaxText
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ inputs.maxtext_sha }}
+          persist-credentials: false
+
+      - name: Mark git repositories as safe
+        run: git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
+
+      # The cloud-sdk container has no buildx plugin, and setup-buildx-action's
+      # runtime download can exit 0 without installing it. Install a pinned,
+      # checksum-verified buildx first so setup-buildx-action skips its download.
+      - name: Install Docker Buildx
+        shell: bash
+        env:
+          BUILDX_VERSION: v0.39.1
+          BUILDX_SHA256: 903090816da68f8bc1a2ff5346dd163a5adacfce4548d003c75df42cd47a9bf4
+        run: |
+          set -euo pipefail
+          plugin_dir="${DOCKER_CONFIG:-${HOME}/.docker}/cli-plugins"
+          mkdir -p "${plugin_dir}"
+          tmp_bin="$(mktemp)"
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 20 -o "${tmp_bin}" \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64"
+          echo "${BUILDX_SHA256}  ${tmp_bin}" | sha256sum -c -
+          install -m 0755 "${tmp_bin}" "${plugin_dir}/docker-buildx"
+          rm -f "${tmp_bin}"
+          docker buildx version
+
+      - name: Set up Docker BuildX
+        uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+        with:
+          driver: remote
+          endpoint: tcp://localhost:1234
+
+      - name: Verify Docker Buildx builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx version
+          inspect_out="$(docker buildx inspect)"
+          echo "${inspect_out}"
+          if ! grep -Eq '^Driver:[[:space:]]+remote$' <<< "${inspect_out}"; then
+            echo "::error::Docker Buildx is not using the remote BuildKit builder at tcp://localhost:1234."
+            exit 1
+          fi
+
+      - name: Download MaxText wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: maxtext-wheel
+          path: ${{ runner.temp }}/maxtext-wheel
+
+      - name: Unpack MaxText wheel
+        shell: bash
+        env:
+          WHEEL_DIR: ${{ runner.temp }}/maxtext-wheel
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          wheels=("${WHEEL_DIR}"/maxtext-*-py3-none-any.whl)
+          if [[ "${#wheels[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly 1 maxtext wheel in ${WHEEL_DIR}, found ${#wheels[@]}."
+            exit 1
+          fi
+          rm -rf .wheel
+          python3 - "${wheels[0]}" .wheel <<'PY'
+          import os, shutil, stat, sys, zipfile
+
+          wheel_path, dest_root = sys.argv[1], os.path.realpath(sys.argv[2])
+          os.makedirs(dest_root, exist_ok=True)
+          with zipfile.ZipFile(wheel_path) as zf:
+            for info in zf.infolist():
+              if info.is_dir():
+                continue
+              unix_mode = info.external_attr >> 16
+              if stat.S_ISLNK(unix_mode):
+                raise RuntimeError(f"Refusing symlink entry in wheel: {info.filename}")
+              target = os.path.realpath(os.path.join(dest_root, info.filename))
+              if not target.startswith(dest_root + os.sep):
+                raise RuntimeError(f"Unsafe path in wheel: {info.filename}")
+              os.makedirs(os.path.dirname(target), exist_ok=True)
+              with zf.open(info) as src, open(target, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+              perms = unix_mode & 0o777
+              if perms:
+                os.chmod(target, perms | 0o644)
+          PY
+
+      - name: Download test assets from GCS
+        if: ${{ inputs.include_test_assets == true }}
+        shell: bash
+        run: |
+          set -uo pipefail
+          # Copy only the top-level objects (like the Dockerfiles and test workflows do).
+          # A recursive copy also pulls the bucket's subdirectories (~50 GB), which
+          # nothing reads from the image and which made the overlay build take ~30 min.
+          dest="${PWD}/tests/assets/golden_logits"
+          echo "Downloading top-level test assets from gs://maxtext-test-assets into ${dest}..."
+          mkdir -p "${dest}"
+          if ! gcloud storage ls gs://maxtext-test-assets/ | awk '!/\/$/' \
+              | gcloud storage cp --read-paths-from-stdin "${dest}/"; then
+            echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests."
+          fi
+          du -sh "${dest}" || true
+
+      - name: Build and push Docker image (code overlay)
+        id: build_push_overlay
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
           push: true
           context: .
-          platforms: ${{ env.DOCKER_PLATFORM }}
-          file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ inputs.dockerfile }}
-          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ env.BUILD_REPO }}/${{ inputs.image_name }}:${{ env.TAG_PREFIX }}${{ github.run_id }}
-          cache-from: type=gha
+          platforms: ${{ needs.resolve_deps.outputs.docker_platform }}
+          file: .wheel/dependencies/dockerfiles/maxtext_code_overlay.Dockerfile
+          target: overlay-${{ inputs.workflow }}
+          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ needs.resolve_deps.outputs.build_repo }}/${{ inputs.image_name }}:${{ needs.resolve_deps.outputs.tag_prefix }}${{ github.run_id }}
           provenance: mode=max
           sbom: false
-          outputs: type=image,push=true,compression=zstd,force-compression=true
-          secret-files: |
-            credentials=/tmp/airlock/credentials.json
-          build-args: |
-            BASEIMAGE=${{ inputs.device == 'gpu' && 'us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/ubuntu:24.04' || 'us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/python:3.12-slim-trixie' }}
-            USE_AIRLOCK=true
-            DEVICE=${{ inputs.device }}
-            MODE=${{ inputs.build_mode }}
-            WORKFLOW=${{ inputs.workflow }}
-            PACKAGE_DIR=.venv/lib/python3.12/site-packages
-            INCLUDE_TEST_ASSETS=${{ inputs.include_test_assets }}
-
-      - name: Build and push Docker image (fast-rebuild overlay)
-        if: ${{ inputs.fast_rebuild }}
-        id: build_push_fast
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
-        with:
-          push: true
-          context: .
-          platforms: ${{ env.DOCKER_PLATFORM }}
-          # The drift guard picks the COPY-only fast variant unless code files were removed
-          # (or, for post-training, the vLLM adapter changed), see the guard script.
-          file: .venv/lib/python3.12/site-packages/dependencies/dockerfiles/${{ needs.drift_guard.outputs.overlay_variant == 'clean' && 'maxtext_code_overlay.Dockerfile' || 'maxtext_code_overlay_fast.Dockerfile' }}
-          tags: us-docker.pkg.dev/${{ vars.PROJECT_NAME }}/${{ env.BUILD_REPO }}/${{ inputs.image_name }}:${{ env.TAG_PREFIX }}${{ github.run_id }}
-          provenance: mode=max
-          sbom: false
-          # No force-compression: the source image's layers pass through untouched, only
-          # the new code layers are compressed and uploaded.
+          # No force-compression: the dependencies image layers pass through untouched,
+          # and only the new code layers are compressed and uploaded.
           outputs: type=image,push=true,compression=zstd
           build-args: |
-            SOURCE_IMAGE=${{ steps.resolve_source.outputs.source_image }}
-            WORKFLOW=${{ inputs.workflow }}
-            PACKAGE_DIR=.venv/lib/python3.12/site-packages
-            INCLUDE_TEST_ASSETS=${{ inputs.include_test_assets }}
+            SOURCE_IMAGE=${{ needs.resolve_deps.outputs.deps_image || format('us-docker.pkg.dev/{0}/{1}/{2}@{3}', vars.PROJECT_NAME, needs.resolve_deps.outputs.build_repo, inputs.deps_image_name || inputs.image_name, needs.build_deps.outputs.digest) }}
+            PACKAGE_DIR=.wheel
+
+  sbom_and_promote:
+    # Only the full image is SBOM-scanned and promoted; its SBOM covers every layer,
+    # including the internal dependencies-only base, which stays in the build repo.
+    name: SBOM and Promote
+    needs: [resolve_deps, build_overlay]
+    if: ${{ !cancelled() && needs.build_overlay.result == 'success' }}
+    runs-on: linux-x86-n4-16-buildkit
+    container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
+    steps:
+      - name: Checkout workflow ref
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          sparse-checkout: .github/scripts
+          persist-credentials: false
+
+      - name: Set up Syft
+        id: download_syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0
+
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
 
       - name: Generate SPDX SBOM and upload to Container Analysis / SCILo
         shell: bash
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           SBOM_BUCKET: ${{ vars.SBOM_BUCKET }}
-          BUILD_REPO: ${{ env.BUILD_REPO }}
-          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
-          IMAGE_DIGEST: ${{ steps.build_push.outputs.digest || steps.build_push_fast.outputs.digest }}
+          BUILD_REPO: ${{ needs.resolve_deps.outputs.build_repo }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_DIGEST: ${{ needs.build_overlay.outputs.image_digest }}
+          DOCKER_PLATFORM: ${{ needs.resolve_deps.outputs.docker_platform }}
           SYFT_CMD: ${{ steps.download_syft.outputs.cmd }}
-          DOCKER_PLATFORM: ${{ env.DOCKER_PLATFORM }}
         run: |
-          if [ -z "${IMAGE_DIGEST}" ]; then
-            echo "::error::Image digest is empty; the Docker build step did not complete or push an image."
+          if [[ -z "${IMAGE_NAME}" || -z "${IMAGE_DIGEST}" ]]; then
+            echo "::error::Missing image name ('${IMAGE_NAME}') or digest ('${IMAGE_DIGEST}'); the Docker build step did not complete or push an image."
             exit 1
           fi
-          IMAGE_URI="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${INPUTS_IMAGE_NAME}@${IMAGE_DIGEST}"
+          IMAGE_URI="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${IMAGE_NAME}@${IMAGE_DIGEST}"
           echo "Generating SPDX JSON SBOM for ${IMAGE_URI} (${DOCKER_PLATFORM})..."
 
+          rm -f /tmp/sbom.spdx.json
           if "${SYFT_CMD}" "registry:${IMAGE_URI}" --platform "${DOCKER_PLATFORM}" -o spdx-json=/tmp/sbom.spdx.json; then
             echo "Uploading SPDX SBOM reference to Container Analysis / SCILo..."
             gcloud artifacts sbom load \
@@ -397,53 +522,47 @@ jobs:
             fi
           done
 
-  promote_and_tag:
-    name: Promote and Tag Docker Image
-    needs: [pre_build_check, build_and_push]
-    if: ${{ !cancelled() && needs.build_and_push.result == 'success' }}
-    runs-on: linux-x86-n4-16-buildkit
-    container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
-    # Runs promotion and tagging in a separate job from the workflow's own checkout
-    # (not from inputs.maxtext_sha and without caching enabled) so we can invoke
-    # .github/scripts/promote_artifacts.sh directly without triggering CodeQL's
-    # actions/cache-poisoning rule.
-    steps:
-      - name: Checkout workflow ref
-        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
-        with:
-          sparse-checkout: .github/scripts
-          persist-credentials: false
-
-      - name: Configure Docker
-        run: gcloud auth configure-docker us-docker.pkg.dev -q
-
       - name: Promote Docker image from staging to production via Exit Gate
         if: inputs.repository_name == 'maxtext-images'
         shell: bash
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
           SBOM_BUCKET: ${{ vars.SBOM_BUCKET }}
-          STAGING_REPO: ${{ needs.build_and_push.outputs.build_repo }}
+          STAGING_REPO: ${{ needs.resolve_deps.outputs.build_repo }}
           PROD_REPO: ${{ inputs.repository_name }}
-          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
-          IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_DIGEST: ${{ needs.build_overlay.outputs.image_digest }}
         run: |
           bash .github/scripts/promote_artifacts.sh \
-            "${PROJECT_NAME}" "${STAGING_REPO}" "${PROD_REPO}" "${INPUTS_IMAGE_NAME}" "${IMAGE_DIGEST}" "${SBOM_BUCKET}"
+            "${PROJECT_NAME}" "${STAGING_REPO}" "${PROD_REPO}" "${IMAGE_NAME}" "${IMAGE_DIGEST}" "${SBOM_BUCKET}"
+
+  tag_images:
+    name: Tag Docker Image
+    needs: [resolve_deps, build_overlay, sbom_and_promote]
+    if: ${{ !cancelled() && needs.build_overlay.result == 'success' && needs.sbom_and_promote.result == 'success' }}
+    runs-on: linux-x86-n4-16-buildkit
+    container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
+    steps:
+      - name: Configure Docker
+        run: gcloud auth configure-docker us-docker.pkg.dev -q
 
       - name: Add tags to Docker image
         shell: bash
+        env:
+          PROJECT_NAME: ${{ vars.PROJECT_NAME }}
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
+          IMAGE_NAME: ${{ inputs.image_name }}
+          IMAGE_DIGEST: ${{ needs.build_overlay.outputs.image_digest }}
+          TAG_PREFIX: ${{ needs.resolve_deps.outputs.tag_prefix }}
+          IMAGE_DATE: ${{ inputs.image_date }}
+          IS_RC: ${{ inputs.is_rc }}
+          MAXTEXT_SHA: ${{ needs.resolve_deps.outputs.maxtext_short_sha }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
         run: |
-          TAG_PREFIX=""
-          if [[ -n "${INPUTS_PLATFORM}" ]]; then
-            TAG_PREFIX="${INPUTS_PLATFORM#linux/}-"
-          fi
-          STAGING_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${BUILD_REPO}/${INPUTS_IMAGE_NAME}"
-          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${INPUTS_REPOSITORY_NAME}/${INPUTS_IMAGE_NAME}"
-          TEMP_IMG="${SOURCE_IMAGE}:${TAG_PREFIX}${GITHUB_RUN_ID}"
+          SOURCE_IMAGE="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${IMAGE_NAME}"
 
           # Ensure run_id tag is applied to the digest in the target repository
-          gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${TEMP_IMG}" --quiet
+          gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${TAG_PREFIX}${GITHUB_RUN_ID}" --quiet
 
           # Add date tag
           gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${TAG_PREFIX}${IMAGE_DATE}" --quiet
@@ -457,30 +576,9 @@ jobs:
           # Add Release Candidate tags
           if [[ "${IS_RC}" == "true" ]]; then
             gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${TAG_PREFIX}${MAXTEXT_SHA}" --quiet
-            if [[ "${INPUTS_REPOSITORY_NAME}" == "maxtext-images" ]]; then
+            if [[ "${REPOSITORY_NAME}" == "maxtext-images" ]]; then
               gcloud container images add-tag "${SOURCE_IMAGE}@${IMAGE_DIGEST}" "${SOURCE_IMAGE}:${TAG_PREFIX}latest-rc" --quiet
             else
               echo "Skipping :${TAG_PREFIX}latest-rc tag (functional and performance tests disabled for this run)."
             fi
           fi
-
-          # Also keep staging tags in sync when promoting
-          if [[ "${BUILD_REPO}" != "${INPUTS_REPOSITORY_NAME}" ]]; then
-            gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${TAG_PREFIX}${IMAGE_DATE}" --quiet
-            gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${TAG_PREFIX}maxtext_${MAXTEXT_SHA}_${clean_date}" --quiet
-            if [[ "${IS_RC}" == "true" ]]; then
-              gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${TAG_PREFIX}${MAXTEXT_SHA}" --quiet
-              gcloud container images add-tag "${STAGING_IMAGE}@${IMAGE_DIGEST}" "${STAGING_IMAGE}:${TAG_PREFIX}latest-rc" --quiet
-            fi
-          fi
-        env:
-          BUILD_REPO: ${{ needs.build_and_push.outputs.build_repo }}
-          IMAGE_DIGEST: ${{ needs.build_and_push.outputs.image_digest }}
-          IMAGE_DATE: ${{ inputs.image_date }}
-          IS_RC: ${{ inputs.is_rc }}
-          MAXTEXT_SHA: ${{ needs.build_and_push.outputs.maxtext_short_sha }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          INPUTS_REPOSITORY_NAME: ${{ inputs.repository_name }}
-          INPUTS_IMAGE_NAME: ${{ inputs.image_name }}
-          INPUTS_PLATFORM: ${{ inputs.platform }}
-          PROJECT_NAME: ${{ vars.PROJECT_NAME }}

@@ -71,9 +71,9 @@ jobs:
       issues: read
       pull-requests: read
     outputs:
-      tpu_pre_train_deps_tag: ${{ steps.check.outputs.tpu_pre_train_deps_tag }}
-      tpu_post_train_deps_tag: ${{ steps.check.outputs.tpu_post_train_deps_tag }}
-      gpu_pre_train_deps_tag: ${{ steps.check.outputs.gpu_pre_train_deps_tag }}
+      tpu_pre_train_deps_tag: ${{ steps.deps_tags.outputs.tpu_pre_train_deps_tag }}
+      tpu_post_train_deps_tag: ${{ steps.deps_tags.outputs.tpu_post_train_deps_tag }}
+      gpu_pre_train_deps_tag: ${{ steps.deps_tags.outputs.gpu_pre_train_deps_tag }}
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
       run_pretrain_tests: ${{ steps.check.outputs.run_pretrain_tests }}
@@ -110,6 +110,20 @@ jobs:
           IS_COPYBARA_PR: ${{ github.event.pull_request.user.login == 'copybara-service[bot]' }}
         run: |
           bash .github/scripts/analyze_code_changes.sh
+      - name: Compute dependency image tags
+        id: deps_tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          script='src/dependencies/scripts/compute_deps_tag.sh'
+          tpu_pre=$(bash "$script" --device=tpu --workflow=pre-training --tf=false)
+          tpu_post=$(bash "$script" --device=tpu --workflow=post-training --tf=false)
+          gpu_pre=$(bash "$script" --device=gpu --workflow=pre-training --tf=false)
+          {
+            echo "tpu_pre_train_deps_tag=${tpu_pre}"
+            echo "tpu_post_train_deps_tag=${tpu_post}"
+            echo "gpu_pre_train_deps_tag=${gpu_pre}"
+          } >> "$GITHUB_OUTPUT"
 
   code_quality_check:
     # Copybara matches "Code Quality Check / Pre-commit Linters"; keep this job name in sync.
@@ -159,15 +173,12 @@ jobs:
       tpu_pre_train_image: ${{ steps.resolve.outputs.tpu_pre_train_image }}
       tpu_pre_train_tag: ${{ steps.resolve.outputs.tpu_pre_train_tag }}
       tpu_pre_train_missing: ${{ steps.resolve.outputs.tpu_pre_train_missing }}
-      tpu_pre_train_base: ${{ steps.resolve.outputs.tpu_pre_train_base }}
       tpu_post_train_image: ${{ steps.resolve.outputs.tpu_post_train_image }}
       tpu_post_train_tag: ${{ steps.resolve.outputs.tpu_post_train_tag }}
       tpu_post_train_missing: ${{ steps.resolve.outputs.tpu_post_train_missing }}
-      tpu_post_train_base: ${{ steps.resolve.outputs.tpu_post_train_base }}
       gpu_pre_train_image: ${{ steps.resolve.outputs.gpu_pre_train_image }}
       gpu_pre_train_tag: ${{ steps.resolve.outputs.gpu_pre_train_tag }}
       gpu_pre_train_missing: ${{ steps.resolve.outputs.gpu_pre_train_missing }}
-      gpu_pre_train_base: ${{ steps.resolve.outputs.gpu_pre_train_base }}
       # The fork and bot guard, in one place rather than on each build job.
       can_build: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]') }}
     steps:
@@ -182,46 +193,49 @@ jobs:
           TPU_POST_TRAIN_TAG: ${{ needs.analyze_code_changes.outputs.tpu_post_train_deps_tag }}
           GPU_PRE_TRAIN_TAG: ${{ needs.analyze_code_changes.outputs.gpu_pre_train_deps_tag }}
         run: |
-          repo="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images"
+          set -euo pipefail
+          repo="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-test-images"
 
           resolve() {
-            local key="$1" image="$2" reqs_tag="$3" base="$4" digest err missing
-            if [ -z "${reqs_tag}" ]; then
+            local key="$1" image="$2" tag="$3"
+            local missing err_file
+            # If no tag was emitted, skip setting outputs so test jobs fall back to installing deps in full.
+            if [ -z "${tag}" ]; then
               echo "::warning::analyze_code_changes named no ${image}; tests will install dependencies in full."
               return 0
             fi
-            if [[ ! "${reqs_tag}" =~ ^deps-[0-9a-f]{16}$ ]]; then
-              echo "::error::analyze_code_changes produced a malformed tag for ${image}: ${reqs_tag}"
+            # Fail fast on unexpected formats (guards against corrupted tags before passing to gcloud).
+            if [[ ! "${tag}" =~ ^deps-[0-9a-f]{16}$ ]]; then
+              echo "::error::analyze_code_changes produced a malformed tag for ${image}: ${tag}"
               exit 1
             fi
-            if ! digest=$(gcloud container images describe "${repo}/${base}" --format='value(image_summary.digest)' 2>/dev/null) ||
-              [ -z "${digest}" ]; then
-              echo "::error::Could not read the digest of ${repo}/${base}; the base image is missing."
-              exit 1
-            fi
-            digest="${digest#sha256:}"
-            local tag="${reqs_tag}-b${digest:0:12}"
-            if err=$(gcloud container images describe "${repo}/${image}:${tag}" 2>&1 >/dev/null); then
+
+            err_file=$(mktemp)
+            if gcloud container images describe "${repo}/${image}:${tag}" >/dev/null 2>"${err_file}"; then
+              # Cache hit: reuse existing maxtext_*_deps_ci image.
               missing=false
-              echo "${image}:${tag} is present."
-            elif grep -qiE 'not found|NOT_FOUND|does not exist' <<< "${err}"; then
+              echo "${repo}/${image}:${tag} is present."
+            elif grep -qiE 'not found|NOT_FOUND|does not exist' "${err_file}"; then
+              # Cache miss: signal the downstream build job to build and push the image.
               missing=true
-              echo "${image}:${tag} is missing and will be built."
+              echo "${repo}/${image}:${tag} is missing and will be built."
             else
-              echo "::error::Could not determine whether ${image}:${tag} exists: ${err}"
+              # Unexpected error (auth, quota, network, etc.): abort instead of misclassifying as a miss.
+              echo "::error::Could not determine whether ${repo}/${image}:${tag} exists: $(cat "${err_file}")"
+              rm -f "${err_file}"
               exit 1
             fi
+            rm -f "${err_file}"
 
             {
               echo "${key}_image=${image}:${tag}"
               echo "${key}_tag=${tag}"
               echo "${key}_missing=${missing}"
-              echo "${key}_base=${base%%:*}@sha256:${digest}"
             } >> "$GITHUB_OUTPUT"
           }
-          resolve tpu_pre_train maxtext-deps-tpu-pre-train "${TPU_PRE_TRAIN_TAG}" maxtext-unit-test-tpu:py312-bookworm
-          resolve tpu_post_train maxtext-deps-tpu-post-train "${TPU_POST_TRAIN_TAG}" maxtext-unit-test-tpu:py312-bookworm
-          resolve gpu_pre_train maxtext-deps-gpu-pre-train "${GPU_PRE_TRAIN_TAG}" maxtext-unit-test-cuda12:py312
+          resolve tpu_pre_train maxtext_tpu_pre_train_deps_ci "${TPU_PRE_TRAIN_TAG}"
+          resolve tpu_post_train maxtext_tpu_post_train_deps_ci "${TPU_POST_TRAIN_TAG}"
+          resolve gpu_pre_train maxtext_gpu_pre_train_deps_ci "${GPU_PRE_TRAIN_TAG}"
 
   build_deps_tpu_pre_train:
     name: Build TPU Pre-Training Dependency Image
@@ -237,9 +251,11 @@ jobs:
           needs.analyze_code_changes.outputs.run_tpu7x_tests == 'true')))
     uses: ./.github/workflows/build_deps_image.yml
     with:
-      base_image: ${{ needs.resolve_deps_images.outputs.tpu_pre_train_base }}
-      deps_image: maxtext-deps-tpu-pre-train
-      maxtext_extra: tpu
+      repository_name: maxtext-test-images
+      dockerfile: maxtext_tpu_dependencies.Dockerfile
+      deps_image: maxtext_tpu_pre_train_deps_ci
+      device: tpu
+      workflow: pre-training
       deps_tag: ${{ needs.resolve_deps_images.outputs.tpu_pre_train_tag }}
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
@@ -257,9 +273,11 @@ jobs:
           needs.analyze_code_changes.outputs.run_tpu7x_tests == 'true')))
     uses: ./.github/workflows/build_deps_image.yml
     with:
-      base_image: ${{ needs.resolve_deps_images.outputs.tpu_post_train_base }}
-      deps_image: maxtext-deps-tpu-post-train
-      maxtext_extra: tpu-post-train
+      repository_name: maxtext-test-images
+      dockerfile: maxtext_tpu_dependencies.Dockerfile
+      deps_image: maxtext_tpu_post_train_deps_ci
+      device: tpu
+      workflow: post-training
       deps_tag: ${{ needs.resolve_deps_images.outputs.tpu_post_train_tag }}
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
@@ -274,9 +292,12 @@ jobs:
       needs.analyze_code_changes.outputs.run_heavy_tests == 'true'
     uses: ./.github/workflows/build_deps_image.yml
     with:
-      base_image: ${{ needs.resolve_deps_images.outputs.gpu_pre_train_base }}
-      deps_image: maxtext-deps-gpu-pre-train
-      maxtext_extra: cuda12
+      repository_name: maxtext-test-images
+      dockerfile: maxtext_gpu_dependencies.Dockerfile
+      deps_image: maxtext_gpu_pre_train_deps_ci
+      device: gpu
+      workflow: pre-training
+      platform: linux/amd64
       deps_tag: ${{ needs.resolve_deps_images.outputs.gpu_pre_train_tag }}
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
@@ -552,7 +573,7 @@ jobs:
     # auto_label_pr.yml and Copybara match this check name; Copybara imports a "pull ready" PR once any run of it
     # passed on the PR's head commit. Keep this job name in sync.
     name: All Required Tests Passed
-    needs: [analyze_code_changes, build_and_upload_maxtext_package, dev_tests, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [analyze_code_changes, resolve_deps_images, build_deps_tpu_pre_train, build_deps_tpu_post_train, build_deps_gpu_pre_train, build_and_upload_maxtext_package, dev_tests, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()  # must fail, not skip, on cancel: skipped required checks count as passing
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -561,6 +582,10 @@ jobs:
         run: |
           # Check that build and all tests passed or were skipped
           echo "Analyze Code Changes result: ${NEEDS_ANALYZE_CODE_CHANGES_RESULT}"
+          echo "Resolve Dependency Images result: ${NEEDS_RESOLVE_DEPS_IMAGES_RESULT}"
+          echo "Build TPU Pre-Training Deps result: ${NEEDS_BUILD_DEPS_TPU_PRE_TRAIN_RESULT}"
+          echo "Build TPU Post-Training Deps result: ${NEEDS_BUILD_DEPS_TPU_POST_TRAIN_RESULT}"
+          echo "Build GPU Pre-Training Deps result: ${NEEDS_BUILD_DEPS_GPU_PRE_TRAIN_RESULT}"
           echo "Build result: ${NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT}"
           echo "Code Quality result: ${NEEDS_CODE_QUALITY_CHECK_RESULT}"
           echo "Docs Build result: ${NEEDS_DOCS_BUILD_CHECK_RESULT}"
@@ -598,6 +623,10 @@ jobs:
           HEAVY_TESTS_GATED: ${{ needs.analyze_code_changes.outputs.heavy_tests_gated }}
           GATE_MESSAGE: ${{ needs.analyze_code_changes.outputs.heavy_tests_gate_message }}
           NEEDS_ANALYZE_CODE_CHANGES_RESULT: ${{ needs.analyze_code_changes.result }}
+          NEEDS_RESOLVE_DEPS_IMAGES_RESULT: ${{ needs.resolve_deps_images.result }}
+          NEEDS_BUILD_DEPS_TPU_PRE_TRAIN_RESULT: ${{ needs.build_deps_tpu_pre_train.result }}
+          NEEDS_BUILD_DEPS_TPU_POST_TRAIN_RESULT: ${{ needs.build_deps_tpu_post_train.result }}
+          NEEDS_BUILD_DEPS_GPU_PRE_TRAIN_RESULT: ${{ needs.build_deps_gpu_pre_train.result }}
           NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
           NEEDS_CODE_QUALITY_CHECK_RESULT: ${{ needs.code_quality_check.result }}
           NEEDS_DOCS_BUILD_CHECK_RESULT: ${{ needs.docs_build_check.result }}

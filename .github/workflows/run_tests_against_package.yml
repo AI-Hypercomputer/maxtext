@@ -29,10 +29,10 @@ on:
         required: true
         type: string
       repository_name:
-        description: 'Artifact Registry repository name'
+        description: 'Artifact Registry repository name (defaults to maxtext-test-images for *_deps_ci images, else maxtext-images)'
         required: false
         type: string
-        default: 'maxtext-images'
+        default: ''
       base_image:
         required: true
         type: string
@@ -105,7 +105,7 @@ jobs:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     timeout-minutes: 90
     container:
-      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.repository_name || 'maxtext-images' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
+      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.repository_name || ((contains(inputs.base_image, '_deps_ci:') || contains(inputs.base_image, '_deps_ci@')) && 'maxtext-test-images' || 'maxtext-images') }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
@@ -149,8 +149,8 @@ jobs:
           INPUTS_WORKER_GROUP: ${{ inputs.worker_group }}
         run: |
           case "${BASE_IMAGE}" in
-            maxtext-deps-*) deps_preinstalled=true;  install_mode=wheelonly ;;
-            *)              deps_preinstalled=false; install_mode=full ;;
+            maxtext_*_deps:*|maxtext_*_deps@*|maxtext_*_deps_ci:*|maxtext_*_deps_ci@*) deps_preinstalled=true;  install_mode=wheelonly ;;
+            *)                                                                         deps_preinstalled=false; install_mode=full ;;
           esac
 
           echo "DEPS_PREINSTALLED=${deps_preinstalled}" >> "$GITHUB_ENV"
@@ -159,7 +159,7 @@ jobs:
           if [ "${install_mode}" = "full" ]; then
             slug="${BASE_IMAGE//[^a-zA-Z0-9]/-}"
           else
-            slug="${BASE_IMAGE%%:*}"
+            slug="${BASE_IMAGE%%[:@]*}"
           fi
           prefix="uv-${slug}-${MAXTEXT_PACKAGE_EXTRA}-${install_mode}-lowest-"
           echo "key=${prefix}${REQS_HASH}" >> "$GITHUB_OUTPUT"
@@ -186,34 +186,32 @@ jobs:
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           echo "Installing ${maxtext_wheel} for ${MAXTEXT_PACKAGE_EXTRA}..."
 
-          # A maxtext-deps-* image already has every dependency in a venv.
           if [ "${DEPS_PREINSTALLED}" == "true" ]; then
-            rm -rf .venv
-            ln -s /opt/maxtext-venv .venv
+            # Prebuilt maxtext_*_deps[_ci] images install all dependencies into system Python.
+            python3 -m uv pip install --system --no-deps "${maxtext_wheel}"
+            if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
+              # Refresh only the local vLLM adapter from this commit without recompiling vLLM.
+              python3 -m uv pip install --system --no-deps src/maxtext/integration/vllm
+            fi
           else
             python3 -m uv venv --seed
-          fi
-          source .venv/bin/activate
-
-          if [ "${DEPS_PREINSTALLED}" == "true" ]; then
-            uv pip install --no-deps "${maxtext_wheel}"
-          else
+            source .venv/bin/activate
             uv pip install "${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}]" --resolution=lowest
-          fi
 
-          if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
-            if ! command -v gcc-12 &> /dev/null && command -v apt-get &> /dev/null; then
-              echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
-              if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
-                echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
-                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build)
-              else
-                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build)
+            if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
+              if ! command -v gcc-12 &> /dev/null && command -v apt-get &> /dev/null; then
+                echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
+                if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
+                  echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
+                  (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build)
+                else
+                  (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build)
+                fi
               fi
+              install_tpu_post_train_extra_deps
+            else
+              install_tpu_pre_train_extra_deps
             fi
-            install_tpu_post_train_extra_deps
-          else
-            install_tpu_pre_train_extra_deps
           fi
           if [ "${INPUTS_INSTALL_TORCH_CPU}" == "true" ]; then
             python3 -m pip install --quiet torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu --no-deps
@@ -258,6 +256,12 @@ jobs:
             PYTHON_EXE="python3"
             # Disable coverage flags when testing against a pre-installed package
             PYTEST_COV_ARGS=""
+          elif [ "${DEPS_PREINSTALLED}" == "true" ]; then
+            # Prebuilt maxtext_*_deps[_ci] images install into system Python (no .venv).
+            PYTHON_EXE="python3"
+            # Ensure pytest-cov is available and enable coverage flags
+            python3 -m uv pip install --system pytest-cov
+            PYTEST_COV_ARGS="--cov=maxtext --cov-report=xml --cov-report=term"
           else
             source .venv/bin/activate
             # Use the local virtual environment created in Step 3
@@ -305,9 +309,9 @@ jobs:
           else
             # For cuda12, explicitly point to the pip-installed CUDA libraries
             # to avoid conflicts with system-level installations on the runner.
-            # Dynamically discover the 'nvidia' folder and prepend all its sub-library
-            # directories (including nccl, cublas, cudnn) to LD_LIBRARY_PATH to prevent
-            # JAX from partially loading incompatible system-level CUDA libraries.
+            # Prebuilt maxtext_gpu_pre_train_deps[_ci] images register those
+            # libraries via /etc/ld.so.conf.d/nvidia-wheels.conf + ldconfig and
+            # have no .venv directory, so this loop runs only on the .venv fallback.
             if [ -d ".venv/lib" ]; then
               NVIDIA_DIR=$(find .venv/lib/ -maxdepth 3 -name "nvidia" -type d 2>/dev/null | head -n 1)
               if [ -n "${NVIDIA_DIR}" ]; then

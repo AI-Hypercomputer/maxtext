@@ -12,46 +12,107 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Ensures a CI test image with MaxText's dependencies pre-installed exists for a
-# given dependency-set hash, building and pushing it only when it does not.
-#
-# The tag is a content hash of the pinned requirements, so this is a no-op on
-# every run where no dependency changed.
+# Builds and pushes a dependencies-only Docker image (`--target dependencies`)
+# from `maxtext_{tpu,gpu}_dependencies.Dockerfile` with `PACKAGE_DIR=src`.
+# Shared by `ci_pipeline.yml` (pushing `maxtext-test-images/maxtext_*_deps_ci`
+# with `TF=false`, no Airlock) and `build_and_push_docker_image.yml` (pushing
+# stable/nightly/RC deps to the staging/target repo with `TF=true` and Airlock).
+# Callers are responsible for checking AR existence beforehand so this workflow
+# only runs on a cache miss (or nightly/RC builds).
 
-name: Build MaxText Test Dependency Image
+name: Build MaxText Dependency Image
 
 on:
   workflow_call:
     inputs:
+      repository_name:
+        description: 'Target Artifact Registry repository for pushes (defaults to maxtext-test-images for CI)'
+        required: false
+        type: string
+        default: 'maxtext-test-images'
       base_image:
-        description: 'Clean-interpreter image to build on, e.g. maxtext-unit-test-tpu:py312-bookworm'
+        description: 'Optional BASEIMAGE override (e.g. Airlock mirror digest pin); empty uses Dockerfile default'
+        required: false
+        type: string
+        default: ''
+      dockerfile:
+        description: 'Dockerfile filename under src/dependencies/dockerfiles/'
         required: true
         type: string
       deps_image:
-        description: 'Name of the image to produce, e.g. maxtext-deps-tpu-pre-train'
+        description: 'Target AR image name to build, e.g. maxtext_tpu_pre_train_deps_ci'
         required: true
         type: string
-      maxtext_extra:
-        description: 'Optional-dependency group to install: tpu, cuda12 or tpu-post-train'
+      device:
+        description: 'Target device: tpu or gpu'
         required: true
         type: string
+      build_mode:
+        description: 'Build mode: stable or nightly'
+        required: false
+        type: string
+        default: 'stable'
+      workflow:
+        description: 'Workflow: pre-training or post-training'
+        required: false
+        type: string
+        default: 'pre-training'
+      platform:
+        description: 'Target platform for Docker BuildX (e.g. linux/amd64, linux/arm64)'
+        required: false
+        type: string
+        default: 'linux/amd64'
       deps_tag:
-        description: 'Content hash of the dependency definitions, used as the image tag'
+        description: 'Image tag to push (e.g. deps-<16hex>, amd64-deps-<16hex>-b<12hex>, or deps-<run_id>)'
         required: true
         type: string
       maxtext_sha:
         description: 'Git SHA to check out for the dependency definitions'
         required: true
         type: string
+      tf:
+        description: 'Install optional TensorFlow/JetStream extras from tf_requirements.txt'
+        required: false
+        type: boolean
+        default: false
+      use_airlock:
+        description: 'Use Airlock apt/PyPI mirrors (ar+https / python-3p-trusted) during the Docker build'
+        required: false
+        type: boolean
+        default: false
+      provenance:
+        description: 'Optional BuildX provenance setting (e.g. mode=max for release builds)'
+        required: false
+        type: string
+        default: ''
+      cache_from:
+        description: 'Optional BuildX cache-from source (e.g. type=gha)'
+        required: false
+        type: string
+        default: ''
+      timeout_minutes:
+        description: 'Build-step timeout in minutes (increase for QEMU-emulated arm64 builds)'
+        required: false
+        type: number
+        default: 90
+    outputs:
+      digest:
+        description: 'Manifest digest (sha256:...) of the pushed dependencies-only image'
+        value: ${{ jobs.build.outputs.digest }}
 
 permissions:
   contents: read
 
 jobs:
   build:
+    name: Build Dependencies Image
     runs-on: linux-x86-n4-16-buildkit
     container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
-    timeout-minutes: 90
+    # Outer job cap matches GitHub's 6h default; the caller-configurable cap is
+    # applied to the build_push step because `inputs` is valid on step timeouts.
+    timeout-minutes: 360
+    outputs:
+      digest: ${{ steps.build_push.outputs.digest }}
     steps:
       - name: Checkout MaxText
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
@@ -65,47 +126,104 @@ jobs:
       - name: Configure Docker
         run: gcloud auth configure-docker us-docker.pkg.dev -q
 
-      - name: Check whether the dependency image already exists
-        id: check
+      - name: Prepare Airlock credentials
+        if: inputs.use_airlock
+        run: |
+          mkdir -p /tmp/airlock
+          if [ -n "${GOOGLE_APPLICATION_CREDENTIALS:-}" ] && [ -f "${GOOGLE_APPLICATION_CREDENTIALS}" ]; then
+            cp "${GOOGLE_APPLICATION_CREDENTIALS}" /tmp/airlock/credentials.json
+          elif [ -f "$HOME/.config/gcloud/application_default_credentials.json" ]; then
+            cp "$HOME/.config/gcloud/application_default_credentials.json" /tmp/airlock/credentials.json
+          else
+            touch /tmp/airlock/credentials.json
+          fi
+
+      - name: Validate build inputs
+        id: validate
         shell: bash
         env:
           PROJECT_NAME: ${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}
-          REPOSITORY_NAME: 'maxtext-images'
+          REPOSITORY_NAME: ${{ inputs.repository_name }}
           DEPS_IMAGE: ${{ inputs.deps_image }}
+          BUILD_MODE: ${{ inputs.build_mode }}
+          WORKFLOW: ${{ inputs.workflow }}
           DEPS_TAG: ${{ inputs.deps_tag }}
         run: |
-          if [ -z "${DEPS_TAG}" ]; then
+          set -euo pipefail
+          if [[ -z "${DEPS_TAG}" ]]; then
             echo "::error::deps_tag is empty; refusing to build an unnamed image."
+            exit 1
+          fi
+          if [[ "${BUILD_MODE}" != "stable" && "${BUILD_MODE}" != "nightly" ]]; then
+            echo "::error::Invalid build_mode '${BUILD_MODE}'; expected 'stable' or 'nightly'."
+            exit 1
+          fi
+          if [[ "${WORKFLOW}" != "pre-training" && "${WORKFLOW}" != "post-training" ]]; then
+            echo "::error::Invalid workflow '${WORKFLOW}'; expected 'pre-training' or 'post-training'."
             exit 1
           fi
           TARGET="us-docker.pkg.dev/${PROJECT_NAME}/${REPOSITORY_NAME}/${DEPS_IMAGE}:${DEPS_TAG}"
           echo "target=${TARGET}" >> "$GITHUB_OUTPUT"
-          if err=$(gcloud container images describe "${TARGET}" 2>&1 >/dev/null); then
-            echo "Dependency image ${TARGET} already exists; nothing to build."
-            echo "exists=true" >> "$GITHUB_OUTPUT"
-          elif grep -qiE 'not found|NOT_FOUND|does not exist' <<< "${err}"; then
-            echo "Dependency image ${TARGET} is missing; it will be built."
-            echo "exists=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "::error::Could not determine whether ${TARGET} exists: ${err}"
-            exit 1
-          fi
+
+      # The cloud-sdk container has no buildx plugin, and setup-buildx-action's
+      # runtime download can exit 0 without installing it. Install a pinned,
+      # checksum-verified buildx first so setup-buildx-action skips its download.
+      - name: Install Docker Buildx
+        shell: bash
+        env:
+          BUILDX_VERSION: v0.39.1
+          BUILDX_SHA256: 903090816da68f8bc1a2ff5346dd163a5adacfce4548d003c75df42cd47a9bf4
+        run: |
+          set -euo pipefail
+          plugin_dir="${DOCKER_CONFIG:-${HOME}/.docker}/cli-plugins"
+          mkdir -p "${plugin_dir}"
+          tmp_bin="$(mktemp)"
+          curl -fsSL --retry 5 --retry-all-errors --connect-timeout 20 -o "${tmp_bin}" \
+            "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64"
+          echo "${BUILDX_SHA256}  ${tmp_bin}" | sha256sum -c -
+          install -m 0755 "${tmp_bin}" "${plugin_dir}/docker-buildx"
+          rm -f "${tmp_bin}"
+          docker buildx version
 
       - name: Set up Docker BuildX
-        if: steps.check.outputs.exists == 'false'
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
         with:
           driver: remote
           endpoint: tcp://localhost:1234
 
+      - name: Verify Docker Buildx builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker buildx version
+          inspect_out="$(docker buildx inspect)"
+          echo "${inspect_out}"
+          if ! grep -Eq '^Driver:[[:space:]]+remote$' <<< "${inspect_out}"; then
+            echo "::error::Docker Buildx is not using the remote BuildKit builder at tcp://localhost:1234."
+            exit 1
+          fi
+
       - name: Build and push the dependency image
-        if: steps.check.outputs.exists == 'false'
+        id: build_push
+        timeout-minutes: ${{ inputs.timeout_minutes }}
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
         with:
+          push: true
           context: .
-          file: src/dependencies/dockerfiles/test_deps_env.Dockerfile
-          tags: ${{ steps.check.outputs.target }}
+          platforms: ${{ inputs.platform }}
+          file: src/dependencies/dockerfiles/${{ inputs.dockerfile }}
+          target: dependencies
+          tags: ${{ steps.validate.outputs.target }}
+          cache-from: ${{ inputs.cache_from }}
+          provenance: ${{ inputs.provenance }}
+          sbom: false
           outputs: type=image,push=true,compression=zstd,force-compression=true
+          secret-files: ${{ inputs.use_airlock && 'credentials=/tmp/airlock/credentials.json' || '' }}
           build-args: |
-            BASE_IMAGE=us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/maxtext-images/${{ inputs.base_image }}
-            MAXTEXT_EXTRA=${{ inputs.maxtext_extra }}
+            DEVICE=${{ inputs.device }}
+            MODE=${{ inputs.build_mode }}
+            WORKFLOW=${{ inputs.workflow }}
+            TF=${{ inputs.tf }}
+            USE_AIRLOCK=${{ inputs.use_airlock }}
+            PACKAGE_DIR=src
+            ${{ inputs.base_image != '' && format('BASEIMAGE={0}', inputs.base_image) || '' }}
