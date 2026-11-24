@@ -1991,6 +1991,49 @@ class MoEGeneral(BaseModel):
       " the decoder layer scan loop. Takes effect in the scanned layers of decoder blocks that support it"
       " (currently qwen3 / qwen3_moe); elsewhere it is a no-op with a warning.",
   )
+  moe_tc_combine: bool = Field(
+      False,
+      description=(
+          "Experimental: run the MoE combine (unpermute + Top-K weighted sum) on the TensorCore with the fused Pallas"
+          " kernel (kernels/moe_combine_tc.py). Requires sparse_matmul=True, use_ring_of_experts=False,"
+          " use_ragged_sort=False, moe_use_fused_gmm3d=False, bfloat16 activations, expert parallelism = 1 and tensor"
+          " parallelism = 1. Not used when model_call_mode=inference."
+      ),
+  )
+  moe_tc_combine_block_tokens: int = Field(
+      256,
+      description="Tokens per grid step for moe_tc_combine=True (power of two >= 128).",
+  )
+  moe_tc_combine_expert_chunks: int = Field(
+      1,
+      description="Number of expert chunks per token block for moe_tc_combine=True (1 = single pass).",
+  )
+  moe_tc_combine_col_chunks: int = Field(
+      1,
+      description="Number of hidden-dimension column chunks for moe_tc_combine=True (1 = single pass).",
+  )
+  moe_tc_permute: bool = Field(
+      False,
+      description=(
+          "Experimental: run the MoE token permute (gather into expert-sorted order) on the TensorCore with the fused"
+          " Pallas kernel (kernels/moe_combine_tc.py). Requires sparse_matmul=True,"
+          " moe_use_direct_token_gather=True, use_ring_of_experts=False, use_ragged_sort=False,"
+          " moe_use_fused_gmm3d=False, bfloat16 activations, expert parallelism = 1 and tensor parallelism = 1. Not used"
+          " when model_call_mode=inference."
+      ),
+  )
+  moe_tc_permute_block_tokens: int = Field(
+      512,
+      description="Tokens per grid step for moe_tc_permute=True (power of two >= 128).",
+  )
+  moe_tc_permute_expert_chunks: int = Field(
+      1,
+      description="Number of expert chunks per token block for moe_tc_permute=True (1 = single pass).",
+  )
+  moe_tc_permute_col_chunks: int = Field(
+      1,
+      description="Number of hidden-dimension column chunks for moe_tc_permute=True (1 = single pass).",
+  )
   use_gather_mosaic_kernel: bool = Field(
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
@@ -5748,6 +5791,36 @@ def _validate_moe_unsliced_prefused_wi(config) -> None:
     raise ValueError(f"moe_unsliced_prefused_wi=True requires {', '.join(unmet)}.")
 
 
+def _validate_moe_tc_kernels(config) -> None:
+  """moe_tc_combine / moe_tc_permute only replace the plain sparse_matmul unsort / token gather; reject them elsewhere."""
+  for block_field in ("moe_tc_combine_block_tokens", "moe_tc_permute_block_tokens"):
+    block_tokens = getattr(config, block_field)
+    if block_tokens < 128 or (block_tokens & (block_tokens - 1)) != 0:
+      raise ValueError(f"`{block_field}` must be a power of two >= 128, got {block_tokens}.")
+  for chunk_field in (
+      "moe_tc_combine_expert_chunks",
+      "moe_tc_combine_col_chunks",
+      "moe_tc_permute_expert_chunks",
+      "moe_tc_permute_col_chunks",
+  ):
+    if getattr(config, chunk_field) < 1:
+      raise ValueError(f"`{chunk_field}` must be >= 1, got {getattr(config, chunk_field)}.")
+  if (config.moe_tc_combine or config.moe_tc_permute) and config.hardware != "tpu":
+    raise ValueError("`moe_tc_combine` and `moe_tc_permute` are only supported on TPU (`hardware=tpu`).")
+  for flag, extra in (("moe_tc_combine", ()), ("moe_tc_permute", ("moe_use_direct_token_gather",))):
+    if not getattr(config, flag, False):
+      continue
+    if not getattr(config, "sparse_matmul", False):
+      raise ValueError(f"`{flag}=True` requires `sparse_matmul=True`.")
+    for required in extra:
+      if not getattr(config, required, False):
+        raise ValueError(f"`{flag}=True` requires `{required}=True`.")
+    if getattr(config, "use_ring_of_experts", False) or getattr(config, "use_ragged_sort", False):
+      raise ValueError(f"`{flag}=True` requires `use_ring_of_experts=False` and `use_ragged_sort=False`.")
+    if getattr(config, "moe_use_fused_gmm3d", False):
+      raise ValueError(f"`{flag}=True` requires `moe_use_fused_gmm3d=False`.")
+
+
 class MaxTextConfig(
     # Run and Checkpointing
     RunInfo,
@@ -8986,6 +9059,8 @@ class MaxTextConfig(
     if self.use_gmm_v2_heuristic_tiling and not self.use_gmm_v2:
       raise ValueError("`use_gmm_v2_heuristic_tiling=True` requires `use_gmm_v2=True`.")
 
+    _validate_moe_tc_kernels(self)
+
     for val in self.compress_ratios:
       if val != 0 and val < 4:
         raise ValueError(f"compress_ratio must be 0 (disabled) or >= 4, got {val}")
@@ -9496,6 +9571,7 @@ class RLConfig(
     if model_name is None:
       raise ValueError("model_name is not set. Please pass model_name in your command.")
     _validate_moe_unsliced_prefused_wi(self)
+    _validate_moe_tc_kernels(self)
 
     # With sequence packing on, a maximal sequence (prompt cap + generation
     # cap = max_target_length) must fit in one packed row. Tunix checks this
