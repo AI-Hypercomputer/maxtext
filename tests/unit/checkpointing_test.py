@@ -22,6 +22,7 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
+from etils.epath import backend as epath_backend
 from flax import nnx
 from flax.training import train_state
 import jax
@@ -500,6 +501,65 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_array_equal(result, np.arange(32, dtype=np.float32).reshape(8, 4))
     self.assertEqual(result.sharding, sharding)
     self.assertEqual(device_put.call_count, num_device_puts)
+
+  @parameterized.named_parameters(
+      # The byte limit alone gives slices of 2 * rows_per_shard * n + 1 rows, which the n source shards do not divide.
+      ("multiple_of_rows_per_shard", 4),
+      # Fewer rows than `_RESHARD_ROWS_PER_SHARD_MULTIPLE` per shard fit: the slices still divide over the shards.
+      ("multiple_of_shards_only", 1),
+  )
+  def test_reshard_slices_divide_evenly_over_the_source_shards(self, rows_per_shard):
+    n = jax.device_count()
+    if n < 2:
+      self.skipTest("Needs at least 2 devices.")
+    devices = np.array(jax.devices())
+    rows = 2 * rows_per_shard * n
+    host = np.arange(3 * rows * n, dtype=np.float32).reshape(3 * rows, n)
+    array = jax.device_put(host, NamedSharding(Mesh(devices, ("d",)), PartitionSpec("d")))
+    sharding = NamedSharding(Mesh(devices, ("x",)), PartitionSpec(None, "x"))
+
+    with (
+        mock.patch.object(tensor_handling, "_MAX_RESHARD_BYTES", (rows + 1) * host[0].nbytes),
+        mock.patch.object(tensor_handling, "_RESHARD_ROWS_PER_SHARD_MULTIPLE", 4),
+        mock.patch.object(jax, "device_put", wraps=jax.device_put) as device_put,
+    ):
+      result = tensor_handling._reshard(array, sharding)  # pylint: disable=protected-access
+
+    np.testing.assert_array_equal(result, host)
+    self.assertEqual(result.sharding, sharding)
+    slices = [call.args[0] for call in device_put.call_args_list]
+    self.assertEqual([s.shape[0] for s in slices], [rows] * 3)
+    for s in slices:
+      # A slice the shards do not divide is copied to every device before it is placed.
+      self.assertFalse(s.sharding.is_fully_replicated)
+
+  def test_reshard_compiles_one_slice_program_for_an_unsplit_axis(self):
+    n = jax.device_count()
+    if n < 2:
+      self.skipTest("Needs at least 2 devices.")
+    devices = np.array(jax.devices())
+    # 7 layers of (n, n), split along the last axis; the target splits axis 1, so the layers are sliced.
+    host = np.arange(7 * n * n, dtype=np.float32).reshape(7, n, n)
+    array = jax.device_put(host, NamedSharding(Mesh(devices, ("d",)), PartitionSpec(None, None, "d")))
+    sharding = NamedSharding(Mesh(devices[::-1], ("x",)), PartitionSpec(None, "x", None))
+    tensor_handling._slice_fn.cache_clear()  # pylint: disable=protected-access
+
+    with (
+        mock.patch.object(tensor_handling, "_MAX_RESHARD_BYTES", 2 * host[0].nbytes),
+        mock.patch.object(jax.lax, "slice_in_dim", wraps=jax.lax.slice_in_dim) as slice_in_dim,
+        mock.patch.object(jax, "device_put", wraps=jax.device_put) as device_put,
+    ):
+      result = tensor_handling._reshard(array, sharding)  # pylint: disable=protected-access
+
+    np.testing.assert_array_equal(result, host)
+    self.assertEqual(result.sharding, sharding)
+    slices = [call.args[0] for call in device_put.call_args_list]
+    self.assertEqual([s.shape[0] for s in slices], [2, 2, 2, 1])
+    for s in slices:
+      self.assertFalse(s.sharding.is_fully_replicated)
+    # The start of a slice is an argument: one program for the three slices of 2 layers, one for the last layer.
+    slice_in_dim.assert_not_called()
+    self.assertEqual(tensor_handling._slice_fn.cache_info().currsize, 2)  # pylint: disable=protected-access,no-value-for-parameter
 
   @parameterized.named_parameters(
       ("single_key", "w0", (4, 4)),
@@ -985,6 +1045,61 @@ class LeadingAxisShardingTest(parameterized.TestCase):
     self.assertEqual(block_sizes_in_read, [0])
     self.assertEqual(gcsfs.GCSFileSystem.default_block_size, block_size)
     np.testing.assert_array_equal(loaded["w"], np.ones((4, 2), dtype=np.float32))
+
+  @parameterized.named_parameters(
+      # tf.io.gfile, etils' default if TensorFlow is installed, would read 64 MiB for a smaller range.
+      ("small_range_with_gcsfs", (64 << 20) - 1, True),
+      ("large_range_with_default_backend", 64 << 20, False),
+      ("whole_file_with_default_backend", -1, False),
+  )
+  def test_gcs_path_picks_the_backend_by_read_size(self, num_bytes, uses_gcsfs):
+    path = load_dynamic._GcsfsPath("gs://bucket/ckpt") / "model.safetensors"  # pylint: disable=protected-access
+    self.assertIsInstance(path, load_dynamic._GcsfsPath)  # pylint: disable=protected-access
+    default_backend = mock.MagicMock()
+    default_file = default_backend.open.return_value.__enter__.return_value
+    default_file.read.return_value = b"default"
+
+    with (
+        mock.patch.object(load_dynamic.gpath.PosixGPath, "_backend", default_backend),
+        mock.patch.object(epath_backend.fsspec_backend, "fs") as gcsfs,
+    ):
+      gcsfs.return_value.cat_file.return_value = b"gcsfs"
+      with path.open("rb") as f:
+        f.seek(100)
+        data = f.read(num_bytes)
+        position = f.tell()
+
+    uri = "gs://bucket/ckpt/model.safetensors"
+    self.assertEqual(position, 100 + len(data))
+    if uses_gcsfs:
+      self.assertEqual(data, b"gcsfs")
+      gcsfs.return_value.cat_file.assert_called_once_with(uri, start=100, end=100 + num_bytes)
+      default_backend.open.assert_not_called()
+    else:
+      self.assertEqual(data, b"default")
+      default_backend.open.assert_called_once_with(uri, "rb")
+      default_file.seek.assert_called_once_with(100)
+      default_file.read.assert_called_once_with(num_bytes)
+      gcsfs.assert_not_called()
+
+  @parameterized.named_parameters(
+      ("gcs", "gs://bucket/ckpt", True),
+      ("local", "/tmp/ckpt", False),
+  )
+  def test_load_reads_gcs_through_gcsfs(self, path, uses_gcsfs):
+    pytest.importorskip("gcsfs")
+    with (
+        mock.patch.object(load_dynamic.ocp_v1, "Context", wraps=load_dynamic.ocp_v1.Context) as context,
+        mock.patch.object(load_dynamic.ocp_v1, "pytree_metadata", side_effect=RuntimeError("stop")),
+        self.assertRaisesRegex(RuntimeError, "stop"),
+    ):
+      load_dynamic.load_sharded_hf_state(path)
+
+    file_options = context.call_args.kwargs["file_options"]
+    if uses_gcsfs:
+      self.assertIs(file_options.path_class, load_dynamic._GcsfsPath)  # pylint: disable=protected-access
+    else:
+      self.assertIsNone(file_options)
 
 
 class CheckpointMetadataTest(parameterized.TestCase):

@@ -77,12 +77,15 @@ import collections
 import concurrent.futures
 import contextlib
 import functools
+import importlib.util
 import json
 import multiprocessing
 import os
 import random
 import time
 
+from etils.epath import backend as epath_backend
+from etils.epath import gpath
 from flax import nnx
 import flax.traverse_util
 import huggingface_hub
@@ -286,6 +289,67 @@ def _no_gcs_read_ahead():
     gcsfs.GCSFileSystem.default_block_size = block_size
 
 
+# tf.io.gfile reads `gs://` files through a buffer of this size (`GCS_READ_CACHE_BLOCK_SIZE_MB`).
+_TF_GCS_BUFFER_BYTES = 64 << 20
+
+
+class _GcsRangeFile:
+  """A `gs://` file opened for reading, which reads small ranges with gcsfs and others with etils' default backend.
+
+  If TensorFlow is installed, etils opens `gs://` files with `tf.io.gfile`. A read smaller than its 64 MiB buffer
+  fills the buffer, which stays until the file is closed, and Orbax opens the file again for each byte range. A host
+  that needs one small range of each of thousands of tensors (fine-grained MoE on many hosts) then downloads up to
+  64 MiB per range and holds many such buffers at once. A small range is instead fetched with one gcsfs request for
+  exactly its bytes. A range of at least the buffer size is not over-read by `tf.io.gfile`, which reads it about 3
+  times faster than gcsfs (llama3.1-70b on one v5p host: 169 s against 536 s), so such ranges keep the default backend.
+  """
+
+  def __init__(self, path: str, default_backend):
+    self._path = path
+    self._default_backend = default_backend
+    self._offset = 0
+
+  def __enter__(self):
+    return self
+
+  def __exit__(self, *unused_exc_info):
+    return False
+
+  def close(self):
+    pass
+
+  def tell(self) -> int:
+    return self._offset
+
+  def seek(self, offset: int, whence: int = os.SEEK_SET) -> int:
+    if whence != os.SEEK_SET:
+      raise ValueError(f"Only os.SEEK_SET is supported, got whence={whence}.")
+    self._offset = offset
+    return offset
+
+  def read(self, n: int = -1) -> bytes:
+    """Reads `n` bytes from the current offset, or up to the end of the file if `n` is negative."""
+    if 0 <= n < _TF_GCS_BUFFER_BYTES:
+      # `cat_file` needs no open file, whose metadata request would double the requests of a small range.
+      fs = epath_backend.fsspec_backend.fs(self._path)
+      data = fs.cat_file(self._path, start=self._offset, end=self._offset + n) if n else b""
+    else:
+      with self._default_backend.open(self._path, "rb") as f:
+        f.seek(self._offset)
+        data = f.read(n)
+    self._offset += len(data)
+    return data
+
+
+class _GcsfsPath(gpath.PosixGPath):
+  """A `gs://` path whose files are read through `_GcsRangeFile`."""
+
+  def open(self, mode="r", **kwargs):
+    if mode != "rb":
+      return super().open(mode, **kwargs)
+    return _GcsRangeFile(self._path_str, self._backend)
+
+
 def load_sharded_hf_state(path, num_groups=None):
   """Loads HF state sharded across the TPU mesh to avoid host OOM.
 
@@ -313,8 +377,12 @@ def load_sharded_hf_state(path, num_groups=None):
   # Leading-axis shards are contiguous, so never read whole spans: with more than 1024 tensors in a file
   # (fine-grained MoE), Orbax's automatic choice would otherwise read whole spans again.
   safetensors_options = ocp_v1.options.SafetensorsOptions(max_over_read_ratio=1.0) if multi_process else None
+  use_gcsfs = str(path).startswith("gs://") and importlib.util.find_spec("gcsfs") is not None
+  file_options = ocp_v1.options.FileOptions(path_class=_GcsfsPath) if use_gcsfs else None
   context = ocp_v1.Context(
-      checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS, safetensors_options=safetensors_options
+      checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS,
+      safetensors_options=safetensors_options,
+      file_options=file_options,
   )
   with context:
     metadata = ocp_v1.pytree_metadata(path)

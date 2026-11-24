@@ -168,11 +168,19 @@ def _get_hf_tensor(tensor_getter_fn: Callable[[str], np.ndarray], hf_key: Any):
 # A reshard from the leading-axis read layout to the model's sharding can copy the whole array to every device, so an
 # array larger than this is resharded in slices of at most this many bytes.
 _MAX_RESHARD_BYTES = 1 << 30
+# Rows that each source shard of a reshard slice is a multiple of; see `_reshard`.
+_RESHARD_ROWS_PER_SHARD_MULTIPLE = 128
 
 
 @functools.lru_cache(maxsize=None)
 def _concatenate_fn(axis, sharding):
   return jax.jit(lambda *pieces: np.concatenate(pieces, axis=axis), out_shardings=sharding)
+
+
+@functools.lru_cache(maxsize=None)
+def _slice_fn(axis, length):
+  """Returns a jitted function that takes `length` entries of an array along `axis` from a given start."""
+  return jax.jit(lambda array, start: jax.lax.dynamic_slice_in_dim(array, start, length, axis=axis))
 
 
 def _reshard(array, sharding):
@@ -181,6 +189,18 @@ def _reshard(array, sharding):
   The read layout orders the devices by process and the model's mesh by topology. Between two device orders, XLA can
   reshard by gathering the whole array on every device: on two v5e-256 slices with data parallelism across them, the
   80-layer llama3.1-70b `wi_0` (37.6 GB) needed 70 GB per device. Slices of at most `_MAX_RESHARD_BYTES` bound that copy.
+
+  Each slice keeps `_RESHARD_ROWS_PER_SHARD_MULTIPLE` rows, or a multiple of them, on every shard `array` has along the
+  sliced axis. The slices hold the same bytes either way, but XLA on TPU compiles the reshard of other lengths slowly:
+  on one v5p host (4 devices), moving a (151936, 5120) bf16 embedding took 446 s with slices of 104857 rows, which do
+  not divide over the 4 shards and are copied to every device, 108 s with 104856 rows (26214 per shard) and 1.3 s with
+  104448 rows (26112 per shard). Shards of a multiple of 8 rows were fast, and of 4 rows or fewer were not.
+
+  If `array` is not split along the sliced axis (a stack of layers or experts), the start of a slice is passed as an
+  argument (`_slice_fn`), so all slices of one length share one compiled program. With the start as a constant, XLA
+  compiles one program per slice: on 64 v5e hosts the 256 slices of the stacked DeepSeek-V3 `wo` took 119 s to
+  compile, and take 0.5 s with one program. An array split along the sliced axis keeps constant starts, which let
+  XLA keep each slice split over the devices.
   """
   if not isinstance(array, jax.Array) or array.nbytes <= _MAX_RESHARD_BYTES or not hasattr(sharding, "spec"):
     return jax.device_put(array, sharding)
@@ -190,10 +210,19 @@ def _reshard(array, sharding):
     return jax.device_put(array, sharding)
   size = array.shape[axis]
   step = max(1, size * _MAX_RESHARD_BYTES // array.nbytes)
-  pieces = [
-      jax.device_put(jax.lax.slice_in_dim(array, start, min(start + step, size), axis=axis), sharding)
-      for start in range(0, size, step)
-  ]
+  num_shards = size // array.sharding.shard_shape(array.shape)[axis]
+  for unit in (num_shards * _RESHARD_ROWS_PER_SHARD_MULTIPLE, num_shards):
+    if step > unit:
+      step -= step % unit
+      break
+  pieces = []
+  for start in range(0, size, step):
+    length = min(step, size - start)
+    if num_shards == 1:
+      piece = _slice_fn(axis, length)(array, numpy.int32(start))
+    else:
+      piece = jax.lax.slice_in_dim(array, start, start + length, axis=axis)
+    pieces.append(jax.device_put(piece, sharding))
   return _concatenate_fn(axis, sharding)(*pieces)
 
 
