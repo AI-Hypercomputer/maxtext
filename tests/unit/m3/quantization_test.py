@@ -41,6 +41,7 @@ from maxtext.m3.train import loop
 from tests.utils import m3_test_utils
 
 _E4M3, _E5M2 = jnp.dtype(jnp.float8_e4m3fn), jnp.dtype(jnp.float8_e5m2)
+_INT4, _E2M1 = jnp.dtype(jnp.int4), jnp.dtype(jnp.float4_e2m1fn)
 
 
 class _HandRolled(nnx.Module):
@@ -278,7 +279,9 @@ class QuantizationTest(parameterized.TestCase):
     self.assertTrue(all(np.all(np.isfinite(g)) for g in m3_test_utils.flat_params(grads).values()))
 
   @parameterized.parameters(
+      ("int4", _INT4, _INT4),
       ("int8", jnp.dtype(jnp.int8), jnp.dtype(jnp.int8)),
+      ("fp4", _E2M1, _E2M1),
       ("fp8", _E4M3, _E4M3),
       ("fp8_full", _E4M3, _E5M2),
       ("fp8_e4m3", _E4M3, _E4M3),
@@ -300,7 +303,7 @@ class QuantizationTest(parameterized.TestCase):
     # The grad trace repeats the forward matmuls; each projection then adds two with the gradient dtype.
     with_gradient = sum(n for pair, n in pairs.items() if gradient in pair)
     self.assertEqual(with_gradient - (planned if gradient == forward else 0), 2 * planned, pairs)
-    for unused in {_E4M3, _E5M2} - {forward, gradient}:
+    for unused in {_E4M3, _E5M2, _INT4, _E2M1} - {forward, gradient}:
       self.assertNotIn(unused, {d for pair in pairs for d in pair})
 
   @parameterized.parameters(
@@ -398,11 +401,17 @@ class QuantizedLoopTest(parameterized.TestCase):
 
 @pytest.mark.tpu_only
 class QuantizedTrainingTpuTest(parameterized.TestCase):
-  """int8 and fp8 matmuls have to survive compilation; CPU traces cannot show that."""
+  """Quantized matmuls have to survive compilation; CPU traces cannot show that."""
 
-  @parameterized.parameters(("int8", "s8"), ("fp8", "f8e4m3fn"), ("fp8_e5m2", "f8e5m2"))
+  @parameterized.parameters(
+      ("int4", "s4"), ("int8", "s8"), ("fp4", "f4e2m1fn"), ("fp8", "f8e4m3fn"), ("fp8_e5m2", "f8e5m2")
+  )
   def test_compiled_matmuls_take_quantized_operands(self, name, hlo_type):
-    mesh = create_mesh(devices=jax.devices()[:1])
+    device = jax.devices()[0]
+    # TPU7x compiles int4 dots as e4m3 (exact for int4 values); v6e keeps them s4.
+    if hlo_type == "s4" and device.device_kind == "TPU7x":
+      hlo_type = "f8e4m3fn"
+    mesh = create_mesh(devices=[device])
     with jax.set_mesh(mesh):
       config = m3_test_utils.tiny_config("qwen3-0.6b", quantization=name, use_qwix_quantization="true")
       example = quantization.example_inputs(config)
@@ -421,7 +430,7 @@ class QuantizedTrainingTpuTest(parameterized.TestCase):
         quantized += bool(operands) and all(types.get(o) == hlo_type for o in operands)
     self.assertEqual(quantized, planned)
 
-  @parameterized.parameters("int8", "fp8")
+  @parameterized.parameters("int4", "int8", "fp4", "fp8")
   def test_train_loop_runs(self, name):
     config = m3_test_utils.tiny_config(
         "qwen3-0.6b",

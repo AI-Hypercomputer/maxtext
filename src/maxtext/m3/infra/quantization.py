@@ -91,7 +91,9 @@ class Recipe:
 
 
 RECIPES: dict[str, Recipe] = {
+    "int4": Recipe(jnp.int4, jnp.int4),
     "int8": Recipe(jnp.int8, jnp.int8),
+    "fp4": Recipe(jnp.float4_e2m1fn, jnp.float4_e2m1fn),
     "fp8": Recipe(jnp.float8_e4m3fn, jnp.float8_e4m3fn),  # same as legacy qwix
     "fp8_e4m3": Recipe(jnp.float8_e4m3fn, jnp.float8_e4m3fn),
     "fp8_e5m2": Recipe(jnp.float8_e5m2, jnp.float8_e5m2),
