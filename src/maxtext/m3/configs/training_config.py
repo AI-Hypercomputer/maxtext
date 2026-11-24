@@ -350,6 +350,9 @@ def validate_training_config(
 
   ep_size = int(mesh_shape.get("expert", 1))
   if ep_size > 1:
-    n_experts = getattr(model_cfg, "n_routed_experts", None)
-    if n_experts is not None and n_experts % ep_size != 0:
-      raise ValueError(f"n_routed_experts ({n_experts}) must be divisible by expert parallelism size ({ep_size}).")
+    for attr in ("n_routed_experts", "num_local_experts"):
+      n_experts = getattr(model_cfg, attr, None)
+      if n_experts is not None:
+        if n_experts % ep_size != 0:
+          raise ValueError(f"{attr} ({n_experts}) must be divisible by expert parallelism size ({ep_size}).")
+        break
