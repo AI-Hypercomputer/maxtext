@@ -1108,6 +1108,48 @@ class DeepSeek41(BaseModel):
   ds41_engram_compressed_vocab_size: NonNegativeInt = Field(
       0, description="Expected size of the compressed (normalized) tokenizer vocab (0: unchecked)."
   )
+  ds41_vision_downsample_ratio: PositiveInt = Field(
+      3, description="Spatial downsample factor of the DeepSeek-V4.1 vision aligner (r x r ViT patches)."
+  )
+  ds41_vision_grid: list[int] = Field(
+      default_factory=lambda: [39, 39],
+      description=(
+          "Default/synthetic [n_vit_h, n_vit_w] ViT patch grid used when per-image dynamic image_grids "
+          "are not supplied (and for nominal static TFLOPs accounting)."
+      ),
+  )
+  ds41_vision_min_pixels: NonNegativeInt = Field(
+      544 * 544,
+      description=("Minimum target pixel area (544 * 544) for DeepSeek-V4.1 aspect-preserving dynamic image resize."),
+  )
+  ds41_vision_max_n_token: PositiveInt = Field(
+      1024,
+      description=(
+          "Maximum LLM token span budget (1 + n_llm_h * (n_llm_w + 1) + 1 <= max_n_token) per DeepSeek-V4.1 image."
+      ),
+  )
+  ds41_vision_max_wh_ratio: float | None = Field(
+      None,
+      description="Optional maximum width-to-height aspect ratio cap for DeepSeek-V4.1 image preprocessing.",
+  )
+  ds41_dynamic_vision_grid: bool = Field(
+      False,
+      description=(
+          "When True, synthetic data and AOT shape helpers emit max-padded P_max patches with per-image "
+          "image_grids and image_masks (Grain/HF pipelines emit dynamic grids automatically)."
+      ),
+  )
+  ds41_image_token_id: int = Field(
+      129264,
+      description="Placeholder token ID marking DeepSeek-V4.1 image span positions.",
+  )
+  ds41_routed_bias_vl_update_rate: float = Field(
+      0.0,
+      description=(
+          "Update rate for multimodal MoE gate bias_vl (0.0 freezes bias_vl by default; "
+          "< 0 inherits routed_bias_update_rate)."
+      ),
+  )
 
 
 class AttentionIndexer(BaseModel):
@@ -5334,7 +5376,8 @@ _DEEPSEEK_ROUTING_BLOCKS = (DecoderBlockType.DEEPSEEK, DecoderBlockType.DEEPSEEK
 
 def validate_loss_free_load_balancing(cfg) -> None:
   """Loss-free load balancing (routing bias updates) is implemented by the DeepSeek decoder blocks only."""
-  if cfg.routed_bias and cfg.routed_bias_update_rate > 0.0 and cfg.decoder_block not in _DEEPSEEK_ROUTING_BLOCKS:
+  has_active_rate = cfg.routed_bias_update_rate > 0.0 or cfg.ds41_routed_bias_vl_update_rate > 0.0
+  if cfg.routed_bias and has_active_rate and cfg.decoder_block not in _DEEPSEEK_ROUTING_BLOCKS:
     raise ValueError("Loss-free load balancing is only supported for the DeepSeek decoder block.")
 
 
@@ -5357,6 +5400,24 @@ def validate_deepseek41(cfg) -> None:
         "ds41_activation_quant is only implemented in the dense, non-dropping MoE path: set sparse_matmul=false and"
         " capacity_factor=-1 (or ds41_activation_quant=false)."
     )
+  if len(cfg.ds41_vision_grid) != 2 or any(dim <= 0 for dim in cfg.ds41_vision_grid):
+    raise ValueError(f"ds41_vision_grid must be [n_vit_h, n_vit_w] of positive ints, got {cfg.ds41_vision_grid!r}.")
+  if cfg.ds41_vision_max_n_token < 4:
+    raise ValueError(f"ds41_vision_max_n_token must be >= 4, got {cfg.ds41_vision_max_n_token!r}.")
+  if cfg.ds41_vision_max_wh_ratio is not None and cfg.ds41_vision_max_wh_ratio <= 0:
+    raise ValueError(f"ds41_vision_max_wh_ratio must be positive when set, got {cfg.ds41_vision_max_wh_ratio!r}.")
+  is_ds41_cfg = cfg.decoder_block == DecoderBlockType.DEEPSEEK41 or cfg.model_name.startswith("deepseek4.1")
+  if cfg.use_multimodal and is_ds41_cfg:
+    if cfg.vision_encoder_block != VisionEncoderBlockType.DEEPSEEK41:
+      raise ValueError(
+          "Multimodal DeepSeek-V4.1 requires vision_encoder_block='deepseek41', "
+          f"got {cfg.vision_encoder_block.value!r}."
+      )
+    if cfg.ds41_image_token_id <= 0 or cfg.ds41_image_token_id >= cfg.vocab_size:
+      raise ValueError(
+          "Multimodal DeepSeek-V4.1 requires 0 < ds41_image_token_id < vocab_size "
+          f"({cfg.vocab_size}), got {cfg.ds41_image_token_id!r}."
+      )
   if cfg.decoder_block != DecoderBlockType.DEEPSEEK41:
     return
   num_layers = getattr(cfg, "num_decoder_layers", None) or cfg.base_num_decoder_layers
@@ -5610,7 +5671,10 @@ def _validate_moe_packed_routing_maps(config: "MaxTextConfig | RLConfig") -> Non
   # Only the default router's `top_k_dense_vjp` (`RoutedMoE.get_topk`) saves the top-k selection; these routers
   # would silently recompute it in the backward pass. (`moe_routing_index_math='count'` needs the ring-of-experts
   # ragged sort, rejected above.)
-  if config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES) or config.decoder_block == DecoderBlockType.GEMMA4:
+  if config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES) or config.decoder_block in (
+      DecoderBlockType.GEMMA4,
+      DecoderBlockType.DEEPSEEK41,
+  ):
     raise ValueError(
         "moe_packed_routing_maps does not support DeepSeek-V3-style or Gemma 4 routing, got"
         f" model_name={config.model_name!r}, decoder_block={config.decoder_block!r}."
@@ -8306,6 +8370,8 @@ class MaxTextConfig(
           "weaver-max",
           "weaver-mini-diffuser",
           "ming-3.0-audio-tiny",
+          "deepseek4.1-flash",
+          "deepseek4.1-flash-mini",
       )
       if self.model_name not in valid_mm_models and self.model_name != "default":
         raise ValueError(f"Multimodal is only supported for {valid_mm_models}, not {self.model_name}")

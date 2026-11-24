@@ -213,6 +213,7 @@ class DeepSeek41DecoderLayer(nnx.Module):
         weight_dtype=config.weight_dtype,
         quant=quant,
         is_hash_routing=False,
+        use_bias_vl=config.use_multimodal,
         rngs=rngs,
     )
     mix_hc = (2 + self.hc_mult) * self.hc_mult
@@ -269,12 +270,15 @@ class DeepSeek41DecoderLayer(nnx.Module):
       decoder_positions: jax.Array,
       decoder_input_tokens: jax.Array,
       decoder_segment_ids: jax.Array | None = None,
+      image_mask: jax.Array | None = None,
   ) -> dict:
     h, pre_mix = carry["h"], carry["pre_mix"]
     shared = {k: v for k, v in carry.items() if k in SHARED_STATE_KEYS}
     if self.spec.has_engram:
-      hash_ids = self.engram_hasher.val(decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)
-      h = self.engram(h, hash_ids, decoder_segment_ids=decoder_segment_ids)
+      hash_ids = self.engram_hasher.val(
+          decoder_input_tokens, decoder_segment_ids=decoder_segment_ids, image_mask=image_mask
+      )
+      h = self.engram(h, hash_ids, decoder_segment_ids=decoder_segment_ids, image_mask=image_mask)
 
     residual = h
     attn_pre, attn_post, attn_comb = self.hc_mixes(h, "hc_attn")
@@ -286,7 +290,7 @@ class DeepSeek41DecoderLayer(nnx.Module):
     ffn_pre, ffn_post, ffn_comb = self.hc_mixes(h, "hc_ffn")
     x = self.post_self_attention_layer_norm(self.hc_pre(h, attn_pre))
     token_mask = moe.routing_token_mask(self.config, decoder_segment_ids, self.model_mode)
-    x, load_balance_loss, moe_bias_updates = self.mlp(x, token_mask=token_mask)
+    x, load_balance_loss, moe_bias_updates = self.mlp(x, image_mask=image_mask, token_mask=token_mask)
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
       self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
     if self.config.routed_bias and self.config.routed_bias_update_rate > 0.0 and moe_bias_updates is not None:
@@ -328,6 +332,7 @@ class DeepSeek41Block(nnx.Module):
       decoder_positions: jax.Array,
       decoder_input_tokens: jax.Array,
       decoder_segment_ids: jax.Array | None = None,
+      image_mask: jax.Array | None = None,
   ):
     use_remat, policy_fn = deepseek4.resolve_block_remat_policy(self, self.model_mode)
     out = carry
@@ -341,9 +346,18 @@ class DeepSeek41Block(nnx.Module):
             decoder_positions=decoder_positions,
             decoder_input_tokens=decoder_input_tokens,
             decoder_segment_ids=decoder_segment_ids,
+            image_mask=image_mask,
             config=self.config,
             policy=policy_fn,
             prevent_cse=self.prevent_cse_in_remat,
+        )
+      elif image_mask is not None:
+        out = layer(
+            out,
+            decoder_positions,
+            decoder_input_tokens,
+            decoder_segment_ids=decoder_segment_ids,
+            image_mask=image_mask,
         )
       else:
         out = layer(out, decoder_positions, decoder_input_tokens, decoder_segment_ids=decoder_segment_ids)

@@ -21,7 +21,7 @@ import jax.numpy as jnp
 
 import optax
 from optax.contrib._muon import muon as optax_muon
-from maxtext.common.common_types import DecoderBlockType
+from maxtext.common.common_types import DecoderBlockType, VisionEncoderBlockType
 from maxtext.optimizers.muon import muon as maxtext_muon
 from maxtext.utils import max_logging
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
@@ -287,10 +287,18 @@ def apply_trainable_parameters_mask(base_opt, config):
   gradients on frozen parameters inside its forward-backward kernel so frozen
   parameters are excluded from both gradient computation and `grad_norm`.
   """
-  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
+  # Freeze non-matching leaves when trainable_parameters_mask is set, and freeze DeepSeek41VisionEncoder_0
+  # when use_multimodal and freeze_vision_encoder_params are active (avoiding AdamW decay and state allocation).
   trainable_patterns = config.trainable_parameters_mask
   freeze_mask_fn = get_path_mask_fn(trainable_patterns, match_returns_true=False)
-  if freeze_mask_fn is None:
+  vis_block = getattr(config, "vision_encoder_block", None)
+  vis_block_val = getattr(vis_block, "value", vis_block)
+  freeze_ds41_vit = (
+      bool(getattr(config, "use_multimodal", False))
+      and bool(getattr(config, "freeze_vision_encoder_params", False))
+      and vis_block_val == VisionEncoderBlockType.DEEPSEEK41.value
+  )
+  if freeze_mask_fn is None and not freeze_ds41_vit:
     return base_opt
 
   has_logged = False
@@ -306,14 +314,29 @@ def apply_trainable_parameters_mask(base_opt, config):
     up front. Log the counts once so the intent is checkable against the run log.
     """
     nonlocal has_logged
-    labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params))
+    if freeze_mask_fn is not None:
+      mask_tree = freeze_mask_fn(params)
+    else:
+      mask_tree = jax.tree_util.tree_map(lambda _: False, params)
+    if freeze_ds41_vit:
+
+      def _mark_ds41_vit_frozen(path, is_frozen):
+        path_str = jax.tree_util.keystr(path, simple=True, separator="/")
+        is_vit = "DeepSeek41VisionEncoder_0/" in path_str or path_str.endswith("DeepSeek41VisionEncoder_0")
+        return bool(is_frozen or is_vit)
+
+      mask_tree = jax.tree_util.tree_map_with_path(_mark_ds41_vit_frozen, mask_tree)
+    labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", mask_tree)
     if not has_logged:
       has_logged = True
       leaves = jax.tree_util.tree_flatten_with_path(labels)[0]
       frozen = [p for p, v in leaves if v == "frozen"]
-      max_logging.log(
-          f"trainable_parameters_mask={trainable_patterns}: freezing {len(frozen)}" f" of {len(leaves)} parameter arrays"
+      mask_desc = (
+          f"trainable_parameters_mask={trainable_patterns}"
+          if freeze_mask_fn is not None
+          else "freeze_vision_encoder_params=True"
       )
+      max_logging.log(f"{mask_desc}: freezing {len(frozen)} of {len(leaves)} parameter arrays")
       if not frozen:
         max_logging.warning("trainable_parameters_mask froze nothing -- did the pattern match everything?")
       elif len(frozen) == len(leaves):

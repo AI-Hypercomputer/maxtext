@@ -156,6 +156,7 @@ class MultimodalInput:
 
   image_embeddings: Array | None = None
   image_masks: Array | None = None
+  image_grids: Array | None = None
   video_embeddings: Array | None = None
   video_masks: Array | None = None
   audio_embeddings: Array | None = None
@@ -208,6 +209,7 @@ class VisionEncoderBlockType(enum.Enum):
   GEMMA4 = "gemma4"
   QWEN3_5 = "qwen3_5"
   QWEN3_VL = "qwen3_vl"
+  DEEPSEEK41 = "deepseek41"
 
 
 class AudioDecoderBlockType(enum.Enum):

@@ -1767,6 +1767,16 @@ temporal_patch_size_for_vit: 2
 num_position_embeddings_for_vit: 1024
 deepstack_visual_indexes_for_vit: []
 
+# DeepSeek-V4.1 vision encoder
+ds41_vision_downsample_ratio: 3
+ds41_vision_grid: [39, 39]
+ds41_vision_min_pixels: 295936 # 544 * 544 minimum pixel floor for dynamic-resolution resize
+ds41_vision_max_n_token: 1024 # Maximum LLM image-span tokens per image under dynamic resolution
+ds41_vision_max_wh_ratio: null # Optional maximum width/height aspect ratio before resize
+ds41_dynamic_vision_grid: false # Opt synthetic/AOT shape helpers into max-padded P_max dynamic grids
+ds41_image_token_id: 129264
+ds41_routed_bias_vl_update_rate: 0.0 # Multimodal MoE bias_vl update rate (0.0 freezes bias_vl; < 0 inherits routed_bias_update_rate).
+
 ### Audio encoder configs (Qwen3-OmniMoe)
 d_model_for_audio: 256
 encoder_attention_heads_for_audio: 4

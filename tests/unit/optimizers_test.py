@@ -916,6 +916,153 @@ class TrainableParametersMaskTest(parameterized.TestCase):
       mock_warning.assert_called_once()
       self.assertIn("froze EVERY parameter", mock_warning.call_args[0][0])
 
+  def test_freeze_ds41_vit_adamw_no_mu_nu_no_decay_and_aligner_updates(self):
+    """DS4.1 frozen ViT allocates no AdamW mu/nu state, prevents weight decay, and updates aligner."""
+    config = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "model_name=deepseek4.1-flash-mini",
+            "run_name=test_ds41_vit_freeze",
+            "use_multimodal=True",
+            "freeze_vision_encoder_params=True",
+            "opt_type=adamw",
+            "adam_weight_decay=0.1",
+            "trainable_parameters_mask=[]",
+        ]
+    )
+    opt = optimizers.get_optimizer(config, lambda _: 1e-2)
+
+    params = {
+        "vision_encoder": {
+            "DeepSeek41VisionEncoder_0": {
+                "patch_embed": {"kernel": jnp.full((4, 4), 2.0), "bias": jnp.full((4,), 1.5)},
+                "blocks_0": {"mlp": {"w1": {"kernel": jnp.full((4, 8), -1.25)}}},
+            },
+            "DeepSeek41VisionProjector_0": {
+                "w1": {"kernel": jnp.full((4, 4), 2.0), "bias": jnp.full((4,), 0.5)},
+                "w2": {"kernel": jnp.full((4, 4), 1.0), "bias": jnp.full((4,), -0.5)},
+                "image_start": jnp.ones((4,)),
+                "image_end": jnp.ones((4,)),
+                "image_newline": jnp.ones((4,)),
+            },
+        },
+        "decoder": {"layers": {"mlp": {"kernel": jnp.full((4, 4), 3.0)}}},
+    }
+    params_before = jax.tree_util.tree_map(lambda x: np.array(x, copy=True), params)
+    opt_state = opt.init(params)
+
+    self.assertIsInstance(opt_state, optax.PartitionState)
+    self.assertIsInstance(opt_state.inner_states["frozen"], optax.MaskedState)
+    self.assertIsInstance(opt_state.inner_states["frozen"].inner_state, optax.EmptyState)
+    trainable_chain = opt_state.inner_states["trainable"].inner_state
+    adam_state = next(s for s in trainable_chain if hasattr(s, "mu") and hasattr(s, "nu"))
+    for moment_name, moment_tree in (("mu", adam_state.mu), ("nu", adam_state.nu)):
+      vit_sub = moment_tree["vision_encoder"]["DeepSeek41VisionEncoder_0"]
+      self.assertIsInstance(vit_sub["patch_embed"]["kernel"], optax.MaskedNode, msg=moment_name)
+      self.assertIsInstance(vit_sub["patch_embed"]["bias"], optax.MaskedNode, msg=moment_name)
+      self.assertIsInstance(vit_sub["blocks_0"]["mlp"]["w1"]["kernel"], optax.MaskedNode, msg=moment_name)
+      proj_sub = moment_tree["vision_encoder"]["DeepSeek41VisionProjector_0"]
+      self.assertIsInstance(proj_sub["w1"]["kernel"], jax.Array, msg=moment_name)
+      self.assertIsInstance(proj_sub["w2"]["kernel"], jax.Array, msg=moment_name)
+      self.assertIsInstance(proj_sub["image_start"], jax.Array, msg=moment_name)
+      self.assertIsInstance(moment_tree["decoder"]["layers"]["mlp"]["kernel"], jax.Array, msg=moment_name)
+
+    # Step 1: zero ViT gradients (as after stop_gradient) with weight_decay=0.1 must not decay ViT weights.
+    zero_vit_grads = {
+        "vision_encoder": {
+            "DeepSeek41VisionEncoder_0": jax.tree_util.tree_map(
+                jnp.zeros_like, params["vision_encoder"]["DeepSeek41VisionEncoder_0"]
+            ),
+            "DeepSeek41VisionProjector_0": jax.tree_util.tree_map(
+                lambda x: jnp.full_like(x, 0.25), params["vision_encoder"]["DeepSeek41VisionProjector_0"]
+            ),
+        },
+        "decoder": jax.tree_util.tree_map(lambda x: jnp.full_like(x, 0.25), params["decoder"]),
+    }
+    updates, opt_state = opt.update(zero_vit_grads, opt_state, params)
+    params_step1 = optax.apply_updates(params, updates)
+    for leaf_after, leaf_before in zip(
+        jax.tree_util.tree_leaves(params_step1["vision_encoder"]["DeepSeek41VisionEncoder_0"]),
+        jax.tree_util.tree_leaves(params_before["vision_encoder"]["DeepSeek41VisionEncoder_0"]),
+    ):
+      np.testing.assert_array_equal(np.asarray(leaf_after), leaf_before)
+    for leaf_after, leaf_before in zip(
+        jax.tree_util.tree_leaves(params_step1["vision_encoder"]["DeepSeek41VisionProjector_0"]),
+        jax.tree_util.tree_leaves(params_before["vision_encoder"]["DeepSeek41VisionProjector_0"]),
+    ):
+      self.assertFalse(np.array_equal(np.asarray(leaf_after), leaf_before))
+    self.assertFalse(
+        np.array_equal(
+            np.asarray(params_step1["decoder"]["layers"]["mlp"]["kernel"]),
+            params_before["decoder"]["layers"]["mlp"]["kernel"],
+        )
+    )
+
+    # Step 2: even with nonzero ViT gradients, set_to_zero keeps ViT bit-exact.
+    nonzero_grads = jax.tree_util.tree_map(lambda x: jnp.full_like(x, 0.5), params_step1)
+    updates2, _ = opt.update(nonzero_grads, opt_state, params_step1)
+    params_step2 = optax.apply_updates(params_step1, updates2)
+    for leaf_after, leaf_before in zip(
+        jax.tree_util.tree_leaves(params_step2["vision_encoder"]["DeepSeek41VisionEncoder_0"]),
+        jax.tree_util.tree_leaves(params_before["vision_encoder"]["DeepSeek41VisionEncoder_0"]),
+    ):
+      np.testing.assert_array_equal(np.asarray(leaf_after), leaf_before)
+
+  def test_freeze_vision_encoder_params_scoped_to_ds41_only(self):
+    """Optimizer-level vision freeze applies only when DS4.1 multimodal freeze is enabled."""
+    base_opt = optax.sgd(0.1)
+    for extra in (
+        [
+            "model_name=gemma3-4b",
+            "override_model_config=True",
+            "use_multimodal=True",
+            "freeze_vision_encoder_params=True",
+        ],
+        [
+            "model_name=deepseek4.1-flash-mini",
+            "override_model_config=True",
+            "use_multimodal=False",
+            "freeze_vision_encoder_params=True",
+        ],
+        [
+            "model_name=deepseek4.1-flash-mini",
+            "override_model_config=True",
+            "use_multimodal=True",
+            "freeze_vision_encoder_params=False",
+        ],
+    ):
+      cfg = pyconfig.initialize(
+          ["", get_test_config_path(), "run_name=test_scope", "trainable_parameters_mask=[]"] + extra
+      )
+      self.assertIs(optimizers.apply_trainable_parameters_mask(base_opt, cfg), base_opt)
+
+    cfg_both = pyconfig.initialize(
+        [
+            "",
+            get_test_config_path(),
+            "model_name=deepseek4.1-flash-mini",
+            "run_name=test_scope_both",
+            "use_multimodal=True",
+            "freeze_vision_encoder_params=True",
+            "trainable_parameters_mask=['.*DeepSeek41VisionProjector_0.*']",
+        ]
+    )
+    wrapped = optimizers.apply_trainable_parameters_mask(base_opt, cfg_both)
+    params = {
+        "vision_encoder": {
+            "DeepSeek41VisionEncoder_0": {"w": jnp.ones((2,))},
+            "DeepSeek41VisionProjector_0": {"w": jnp.ones((2,))},
+        },
+        "decoder": {"w": jnp.ones((2,))},
+    }
+    st = wrapped.init(params)
+    grads = jax.tree_util.tree_map(jnp.ones_like, params)
+    upd, _ = wrapped.update(grads, st, params)
+    self.assertTrue(bool(jnp.all(upd["vision_encoder"]["DeepSeek41VisionEncoder_0"]["w"] == 0)))
+    self.assertTrue(bool(jnp.all(upd["decoder"]["w"] == 0)))
+    self.assertFalse(bool(jnp.all(upd["vision_encoder"]["DeepSeek41VisionProjector_0"]["w"] == 0)))
+
 
 class SkipStepOnSpikesTest(parameterized.TestCase):
   """Tests for the skip_step_on_spikes optimizer wrapper."""

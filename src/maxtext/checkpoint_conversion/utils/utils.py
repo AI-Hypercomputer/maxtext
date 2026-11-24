@@ -19,6 +19,7 @@ import gc
 import io
 import logging
 import os
+import struct
 import tempfile
 import time
 import json
@@ -207,6 +208,45 @@ def _process(hf_path, processed_slice, output_weights, current_hook_fns, hf_shap
     output_weights.append((hf_path, numpy_slice))
 
 
+_FULL_PRECISION_PREFIXES = ("MoEBiasVar-", "Tid2EidVar-")
+_DS41_FULL_PRECISION_SUFFIXES = (
+    "-hc_attn_fn",
+    "-hc_attn_base",
+    "-hc_attn_scale",
+    "-hc_ffn_fn",
+    "-hc_ffn_base",
+    "-hc_ffn_scale",
+    "-self_attention-sinks",
+)
+
+
+def _is_bfloat16_dtype(save_dtype: Any) -> bool:
+  """Returns True when `save_dtype` represents bfloat16 (string, DType enum, or NumPy/JAX dtype)."""
+  if save_dtype == "bfloat16" or getattr(save_dtype, "value", None) == "bfloat16":
+    return True
+  if isinstance(save_dtype, (np.dtype, jnp.dtype, type, str)):
+    try:
+      return jnp.dtype(save_dtype) == jnp.bfloat16
+    except (TypeError, ValueError, RecursionError):
+      return False
+  return False
+
+
+def _param_save_dtype(
+    mt_param_key_or_keys,
+    save_dtype: Any,
+    is_ds41: bool = False,
+    preserve_router_prefixes: bool = False,
+):
+  """Returns float32 for full-precision router, hyper-connection, and sink state when saving bfloat16."""
+  if not (is_ds41 or preserve_router_prefixes) or not _is_bfloat16_dtype(save_dtype):
+    return save_dtype
+  keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
+  if any(k.startswith(_FULL_PRECISION_PREFIXES) or (is_ds41 and k.endswith(_DS41_FULL_PRECISION_SUFFIXES)) for k in keys):
+    return "float32"
+  return save_dtype
+
+
 def process_maxtext_param(
     maxtext_param_key: str | tuple[str, ...],
     maxtext_param_weight: jax.Array | list[jax.Array],
@@ -261,6 +301,12 @@ def process_maxtext_param(
 
   # This list will store tuples of (hf_path, hf_weight)
   output_weights = []
+  is_ds41 = (
+      hasattr(maxtext_config, "model_name")
+      and isinstance(maxtext_config.model_name, str)
+      and maxtext_config.model_name.startswith("deepseek4.1")
+  )
+  save_dtype = _param_save_dtype(maxtext_param_key, maxtext_config.weight_dtype, is_ds41=is_ds41)
 
   # Case 1: Unscanned
   if not isinstance(hf_target_paths, list):
@@ -272,7 +318,7 @@ def process_maxtext_param(
         output_weights,
         current_hook_fns,
         hf_shape_map,
-        save_dtype=maxtext_config.weight_dtype,
+        save_dtype=save_dtype,
     )
     return output_weights
 
@@ -308,7 +354,7 @@ def process_maxtext_param(
           output_weights,
           current_hook_fns,
           hf_shape_map,
-          save_dtype=maxtext_config.weight_dtype,
+          save_dtype=save_dtype,
       )
 
     return output_weights
@@ -332,7 +378,7 @@ def process_maxtext_param(
           output_weights,
           current_hook_fns,
           hf_shape_map,
-          save_dtype=maxtext_config.weight_dtype,
+          save_dtype=save_dtype,
       )
       return
     axis_to_slice = axes[level] - level
@@ -883,27 +929,36 @@ def load_orbax_checkpoint(config) -> dict:
   devices = np.array(jax.devices()).reshape((-1,))
   single_device_mesh = jax.sharding.Mesh(devices, ("x",))
 
-  def create_restore_args(tree_metadata):
+  is_ds41 = (
+      hasattr(config, "model_name") and isinstance(config.model_name, str) and config.model_name.startswith("deepseek4.1")
+  )
+  weight_dtype_val = config.weight_dtype if hasattr(config, "weight_dtype") else None
+  has_valid_weight_dtype = isinstance(weight_dtype_val, (np.dtype, jnp.dtype, type, str))
+
+  def create_restore_args(path, tree_metadata):
     """Create restore args for unsharded restoration."""
     if hasattr(tree_metadata, "shape"):
       restore_dtype = None
-      if hasattr(tree_metadata, "dtype") and tree_metadata.dtype is not None:
+      raw_dtype = tree_metadata.dtype if hasattr(tree_metadata, "dtype") else None
+      if isinstance(raw_dtype, (np.dtype, jnp.dtype, type, str)):
         try:
-          orig_dtype = jnp.dtype(tree_metadata.dtype)
-          if jnp.issubdtype(orig_dtype, jnp.floating) and getattr(config, "weight_dtype", None) is not None:
-            restore_dtype = jnp.dtype(config.weight_dtype)
+          orig_dtype = jnp.dtype(raw_dtype)
+          parts = param_key_parts_from_path(path)
+          if len(parts) >= 2 and parts[0] == "params" and parts[1] in ("params", "MoEBiasVar", "Tid2EidVar"):
+            parts = parts[1:]
+          flat_key = "-".join(parts)
+          keep_fp32 = is_ds41 and _param_save_dtype(flat_key, weight_dtype_val, is_ds41=True) == "float32"
+          if jnp.issubdtype(orig_dtype, jnp.floating) and has_valid_weight_dtype and not keep_fp32:
+            restore_dtype = jnp.dtype(weight_dtype_val)
           else:
             restore_dtype = orig_dtype
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, RecursionError):
           restore_dtype = None
       return ocp.ArrayRestoreArgs(
           sharding=jax.sharding.NamedSharding(single_device_mesh, jax.sharding.PartitionSpec()),
           dtype=restore_dtype,
       )
-    elif isinstance(tree_metadata, dict):
-      return {k: create_restore_args(v) for k, v in tree_metadata.items()}
-    else:
-      return None
+    return None
 
   lora_path = config.lora.lora_restore_path
   paths = [p for p in [config.load_parameters_path, lora_path] if p]
@@ -923,8 +978,8 @@ def load_orbax_checkpoint(config) -> dict:
           checkpoint_tree = filtered_tree
           max_logging.log(f"Filtering checkpoint to exclude optimizer keys from {path}")
 
-    restore_args = jax.tree_util.tree_map(
-        lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
+    restore_args = jax.tree_util.tree_map_with_path(
+        lambda path, x: create_restore_args(path, x) if hasattr(x, "shape") else None,
         checkpoint_tree,
         is_leaf=lambda x: hasattr(x, "shape"),
     )
@@ -1147,6 +1202,41 @@ def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | No
   return hf_model.state_dict()
 
 
+_RAW_SAFETENSORS_DTYPES = {
+    "BOOL": np.bool_,
+    "U8": np.uint8,
+    "I8": np.int8,
+    "I16": np.int16,
+    "U16": np.uint16,
+    "I32": np.int32,
+    "U32": np.uint32,
+    "I64": np.int64,
+    "U64": np.uint64,
+    "F16": np.float16,
+    "BF16": jnp.bfloat16,
+    "F32": np.float32,
+    "F64": np.float64,
+    "F8_E4M3": jnp.float8_e4m3fn,
+    "F8_E5M2": jnp.float8_e5m2,
+    "F8_E8M0": jnp.float8_e8m0fnu,
+}
+
+
+def read_safetensor_slice(ckpt_path: str | os.PathLike[str], key: str) -> np.ndarray:
+  """Reads a single SafeTensors entry directly into a NumPy array without requiring PyTorch."""
+  with open(ckpt_path, "rb") as sf:
+    header_len = struct.unpack("<Q", sf.read(8))[0]
+    header = json.loads(sf.read(header_len))
+    if key not in header:
+      raise KeyError(f"Key {key!r} not found in {ckpt_path}")
+    entry = header[key]
+    np_dtype = np.dtype(_RAW_SAFETENSORS_DTYPES[entry["dtype"]])
+    begin, end = entry["data_offsets"]
+    sf.seek(8 + header_len + begin)
+    raw_bytes = sf.read(end - begin)
+  return np.frombuffer(raw_bytes, dtype=np_dtype).reshape(tuple(entry["shape"])).copy()
+
+
 def load_hf_dict_from_safetensors(model_id_or_path, token, revision, framework="pt"):
   """
   If the safetensor contains more HF keys than MaxText model,
@@ -1171,7 +1261,10 @@ def load_hf_dict_from_safetensors(model_id_or_path, token, revision, framework="
   for ckpt_path in tqdm(ckpt_paths, total=len(ckpt_paths)):
     with safe_open(ckpt_path, framework=framework, device="cpu") as f:
       for key in f.keys():
-        hf_state_dict[key] = f.get_tensor(key)
+        try:
+          hf_state_dict[key] = f.get_tensor(key)
+        except (AttributeError, TypeError):
+          hf_state_dict[key] = read_safetensor_slice(ckpt_path, key)
   return hf_state_dict
 
 
