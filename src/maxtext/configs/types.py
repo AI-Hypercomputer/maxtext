@@ -5635,7 +5635,6 @@ def _validate_moe_unsliced_prefused_wi(config) -> None:
           ("num_moe_emb_chunks=0", config.num_moe_emb_chunks == 0),
           ("moe_fsdp_use_two_stage_all_gather=False", not config.moe_fsdp_use_two_stage_all_gather),
           ("te_moe_block=False", not config.te_moe_block),
-          ("expert_replicas_per_device=0", config.expert_replicas_per_device == 0),
       )
       if not ok
   ]

@@ -818,5 +818,62 @@ class TestScannedLayoutDimensionNumbers(parameterized.TestCase):
     self.assertGreater(remapped, 0)
 
 
+class _PrefusedMoeNNXModel(nnx.Module):
+  """NNX model containing a pre-fused routed MoE `wi` parameter and non-prefused leaves."""
+
+  def __init__(self):
+    self.MoeBlock_0 = nnx.Module()  # pylint: disable=invalid-name
+    self.MoeBlock_0.gate = nnx.Module()
+    self.MoeBlock_0.gate.kernel = nnx.Param(jnp.ones((4, 8)))
+    self.MoeBlock_0.wi = nnx.Param(jnp.ones((8, 4, 16)))
+    self.MoeBlock_0.wo = nnx.Param(jnp.ones((8, 8, 4)))
+    self.shared_experts = nnx.Module()
+    self.shared_experts.wi = nnx.Param(jnp.ones((4, 16)))
+    self.scale = nnx.Param(jnp.ones((4,)))
+
+
+class TestPrefusedMoeWiHelpers(unittest.TestCase):
+  """Tests for is_prefused_moe_wi_path and get_prefused_moe_wi_mask."""
+
+  def test_is_prefused_moe_wi_path(self):
+    self.assertTrue(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi"), shape=(8, 4, 16)))
+    self.assertTrue(muon_utils.is_prefused_moe_wi_path(("decoder", "routed_experts", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi_0")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wo")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi_scale")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi_bias")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "DeepSeekMoeBlock_0", "shared_experts", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "moe_block", "shared_experts", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "moe_block", "shared_expert", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "mlp", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi"), shape=(8,)))
+
+  def test_get_prefused_moe_wi_mask_returns_none_when_disabled_or_absent(self):
+    model = _PrefusedMoeNNXModel()
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(model, config=None))
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(model, config=mock.MagicMock()))
+    cfg_false = mock.MagicMock()
+    cfg_false.prefuse_moe_weights = False
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(model, config=cfg_false))
+
+    cfg_true = mock.MagicMock()
+    cfg_true.prefuse_moe_weights = True
+    dense_model = _MoeLikeNNXModel(rngs=nnx.Rngs(0))
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(dense_model, config=cfg_true))
+
+  def test_get_prefused_moe_wi_mask_marks_only_routed_wi(self):
+    model = _PrefusedMoeNNXModel()
+    cfg_true = mock.MagicMock()
+    cfg_true.prefuse_moe_weights = True
+    mask = muon_utils.get_prefused_moe_wi_mask(model, config=cfg_true)
+    self.assertIsNotNone(mask)
+    pure_mask = nnx.to_pure_dict(mask)
+    self.assertTrue(pure_mask["MoeBlock_0"]["wi"])
+    self.assertFalse(pure_mask["MoeBlock_0"]["wo"])
+    self.assertFalse(pure_mask["MoeBlock_0"]["gate"]["kernel"])
+    self.assertFalse(pure_mask["shared_experts"]["wi"])
+    self.assertFalse(pure_mask["scale"])
+
+
 if __name__ == "__main__":
   unittest.main()

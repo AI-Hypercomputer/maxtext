@@ -4793,6 +4793,7 @@ class RoutedMoE(nnx.Module):
         route_metadata,
         output_shape,
         is_batch_sharded_by_expert,
+        force_dropless=False,
     ):
       """Unsort tokens and return them to original shards using ragged all-to-all."""
       # Token Combine: leg 2 (forward) and leg 3 (backward) of the EP ragged all-to-all. With ring of experts,
@@ -4824,11 +4825,12 @@ class RoutedMoE(nnx.Module):
           )
 
         buffer_size = intermediate_output.shape[0]
+        ragged_buffer_factor = -1.0 if force_dropless else self.get_ragged_buffer_factor()
         input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
             route_metadata.all_shards_group_sizes,
             route_metadata.expert_shard_id,
             self.get_expert_parallelism_size(),
-            ragged_buffer_factor=self.get_ragged_buffer_factor(),
+            ragged_buffer_factor=ragged_buffer_factor,
             buffer_size=buffer_size,
             is_dispatch=False,
         )
@@ -5177,6 +5179,8 @@ class RoutedMoE(nnx.Module):
           ep_size = self.get_expert_parallelism_size()
           expected_local = self.config.num_experts // ep_size
           for w_name, w_arr in (("w0", w0), ("w1", w1), ("wo", wo)):
+            if w_name == "w1" and w_arr is None:
+              continue
             if w_arr.ndim != 3 or w_arr.shape[0] != expected_local:
               raise ValueError(
                   f"expert replication expects 3D local {w_name} weights with leading dim {expected_local} "
@@ -5184,7 +5188,8 @@ class RoutedMoE(nnx.Module):
               )
           ep_name = self._expert_parallelism_name
           w0 = moe_replica_weights.extend_with_replicas(w0, plan, ep_name, ep_size, self.dtype)
-          w1 = moe_replica_weights.extend_with_replicas(w1, plan, ep_name, ep_size, self.dtype)
+          if w1 is not None:
+            w1 = moe_replica_weights.extend_with_replicas(w1, plan, ep_name, ep_size, self.dtype)
           wo = moe_replica_weights.extend_with_replicas(wo, plan, ep_name, ep_size, self.dtype)
 
         if use_fused_gmm3d:
@@ -5388,7 +5393,8 @@ class RoutedMoE(nnx.Module):
           raise ValueError("original_inputs_first_dim does not match the original tensor" " shape!")
         # Rows of tokens dropped by a capped ragged buffer are never written by the
         # return ragged_all_to_all; zero them so dropped tokens contribute nothing.
-        buffer_init = jnp.zeros if self.get_ragged_buffer_factor() > 0.0 else jax.lax.empty
+        effective_rbf = -1.0 if force_dropless else self.get_ragged_buffer_factor()
+        buffer_init = jnp.zeros if effective_rbf > 0.0 else jax.lax.empty
         output_shape = buffer_init(
             (
                 original_inputs_first_dim,
@@ -5403,6 +5409,7 @@ class RoutedMoE(nnx.Module):
             route_metadata,
             output_shape,
             is_batch_sharded_by_expert,
+            force_dropless=force_dropless,
         )
 
       output = self.unpermute(

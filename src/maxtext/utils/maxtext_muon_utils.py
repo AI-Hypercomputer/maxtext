@@ -59,9 +59,11 @@ def get_maxtext_muon_weight_dimension_numbers(model, config=None, mesh=None, ver
   if config is not None:
     logical_rules = getattr(config, "logical_axis_rules", ())
     include_routers = getattr(config, "muon_include_routers", True)
+    prefuse_moe_weights = muon_utils.is_prefuse_moe_weights_enabled(config)
   else:
     logical_rules = ()
     include_routers = True
+    prefuse_moe_weights = False
 
   with jax.set_mesh(mesh), logical_axis_rules(logical_rules):
     # Extract abstract parameters from the NNX model hierarchy
@@ -82,10 +84,14 @@ def get_maxtext_muon_weight_dimension_numbers(model, config=None, mesh=None, ver
       )
       if dim_num is not None:
         sharding = _extract_sharding(leaf)
+        split_chunks = (
+            2 if prefuse_moe_weights and muon_utils.is_prefused_moe_wi_path(path_strings, shape=val_shape) else 1
+        )
         return smdn(
             reduction_axis=dim_num.reduction_axis,
             output_axis=dim_num.output_axis,
             sharding=sharding,
+            split_output_chunks=split_chunks,
         )
       return None
 
