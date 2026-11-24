@@ -1,9 +1,9 @@
 # MaxText Review Focus Area: GitHub Workflows and CI
 
 <!--
-Shared focus area for MaxText code review. Used by the GitHub PR review
-(.gemini/commands/maxtext-review.toml) and by an internal Code Review Agent
-skill. Keep it platform-neutral.
+Shared domain checklist for MaxText authoring and code review. Referenced from
+AGENTS.md, the GitHub PR review (.gemini/commands/maxtext-review.toml), and an
+internal Code Review Agent skill. Keep it platform-neutral.
 -->
 
 **Applies when the change touches:** `.github/` (workflows, reusable
@@ -58,7 +58,7 @@ executed, or broken).
     GitHub CI results back to internal code review. Flag renaming or removing
     such a job; the internal configuration must be updated in the same change.
 8.  **Gemini workflows.** Changes to the Gemini review/invoke/investigate
-    workflows or `.gemini/` must keep the tool allowlist minimal (read-only
+    workflows, `.gemini/`, or `.agents/review/` must keep the tool allowlist minimal (read-only
     shell commands and a short `allowEnv` list without secrets), keep untrusted
     PR content out of instructions, and never give the model write credentials
     beyond posting comments. Automatic runs on fork PRs

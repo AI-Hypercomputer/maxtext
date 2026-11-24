@@ -1,9 +1,9 @@
 # MaxText Review Focus Area: TPU and GPU Performance and Sharding
 
 <!--
-Shared focus area for MaxText code review. Used by the GitHub PR review
-(.gemini/commands/maxtext-review.toml) and by an internal Code Review Agent
-skill. Keep it platform-neutral.
+Shared domain checklist for MaxText authoring and code review. Referenced from
+AGENTS.md, the GitHub PR review (.gemini/commands/maxtext-review.toml), and an
+internal Code Review Agent skill. Keep it platform-neutral.
 -->
 
 **Applies when the change touches:** `src/maxtext/layers/`,

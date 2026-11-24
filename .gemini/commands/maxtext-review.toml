@@ -1,8 +1,9 @@
 description = "Reviews a pull request with Gemini CLI as an adversarial senior software engineer"
-# The PR context is read with !{cat ...} rather than @{...}: .gemini/ is
-# gitignored, and Gemini CLI silently drops gitignored files from @{...}.
-# The review criteria live in maxtext-review-criteria.md so that they can be
-# shared with the Google-internal Code Review Agent skill.
+# The PR context and shared rule files are read with !{cat ...} rather than
+# @{...}: .gemini/ and .agents/ are gitignored, and Gemini CLI silently drops
+# gitignored files from @{...}. Coding/testing rules live in AGENTS.md and
+# review guidelines live in .agents/review/ so they are shared across coding
+# agents, GitHub PR reviews, and Google-internal CL reviews.
 prompt = """
 ## Environment
 
@@ -92,9 +93,13 @@ In both modes:
 
 ## Execution Workflow
 
-Follow this three-step process sequentially: Step 1 (analysis) and Step 2 (selection) from the review guidelines below, then Step 3 (submission on GitHub) at the end of this prompt. In Step 1, also apply every Path-Specific Focus Area (listed after the guidelines) whose paths the pull request touches; in Step 2, rank their findings together with all other findings under the same Output Budget.
+Follow this three-step process sequentially: Step 1 (analysis) and Step 2 (selection) from the review protocol below (evaluating code and tests against the shared MaxText standards in `AGENTS.md`), then Step 3 (submission on GitHub) at the end of this prompt. In Step 1, also apply every Path-Specific Focus Area (listed after the protocol) whose paths the pull request touches; in Step 2, rank their findings together with all other findings under the same Output Budget.
 
-!{cat .gemini/commands/maxtext-review-criteria.md}
+!{cat AGENTS.md}
+
+-----
+
+!{cat .agents/review/protocol.md}
 
 -----
 
@@ -102,13 +107,13 @@ Follow this three-step process sequentially: Step 1 (analysis) and Step 2 (selec
 
 Each focus area below states which paths it applies to. Apply a focus area only if the pull request changes files under those paths (check with `pull_request_read.get_files`); otherwise ignore it. Findings from focus areas are part of the same review: rank them together with all other findings and keep within the same Output Budget.
 
-!{cat .gemini/commands/maxtext-review-workflows.md}
+!{cat .agents/review/workflows.md}
 
-!{cat .gemini/commands/maxtext-review-config-checkpoint.md}
+!{cat .agents/review/config-checkpoint.md}
 
-!{cat .gemini/commands/maxtext-review-kernels.md}
+!{cat .agents/review/kernels.md}
 
-!{cat .gemini/commands/maxtext-review-performance.md}
+!{cat .agents/review/performance.md}
 
 -----
 

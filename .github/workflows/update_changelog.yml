@@ -61,12 +61,12 @@ jobs:
 
       - name: Run gather_changes unit tests
         run: |
-          python3 -m unittest discover -s .gemini/skills/update-changelog/scripts -p 'gather_changes_test.py'
+          python3 -m unittest discover -s .agents/skills/update-changelog/scripts -p 'gather_changes_test.py'
 
       - name: Collect candidate commits
         id: collect_commits
         run: |
-          python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode collect
+          python3 .agents/skills/update-changelog/scripts/gather_changes.py --mode collect
           if [ ! -s raw_commits.txt ]; then
             echo "No new candidate commits to announce."
             echo "has_changes=false" >> "${GITHUB_OUTPUT}"
@@ -114,13 +114,13 @@ jobs:
             echo "Error: Gemini did not produce new_notes.md."
             exit 1
           fi
-          python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode verify
+          python3 .agents/skills/update-changelog/scripts/gather_changes.py --mode verify
 
       - name: Deterministically inject release notes
         if: steps.collect_commits.outputs.has_changes == 'true'
         run: |
           git checkout -- docs/release_notes.md
-          python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode inject
+          python3 .agents/skills/update-changelog/scripts/gather_changes.py --mode inject
           rm -f raw_commits.txt new_notes.md
 
       - name: Format release notes with the pre-commit mdformat hook

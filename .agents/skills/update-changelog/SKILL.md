@@ -14,15 +14,15 @@ This skill automates gathering, categorizing, synthesizing, and documenting majo
 
 ### 1. Gather Commits & Pull Requests (`raw_commits.txt`)
 
-Run the helper script [gather_changes.py](../update-changelog/scripts/gather_changes.py) from the repository root with `--mode collect` to extract all valid commits since `**Last Updated**: <commit_hash>` in `docs/release_notes.md` into `raw_commits.txt`, tagged with reconciliation IDs (`[ref:#XXXX]` or `[ref:<hash>]`):
+Run the helper script [gather_changes.py](scripts/gather_changes.py) from the repository root with `--mode collect` to extract all valid commits since `**Last Updated**: <commit_hash>` in `docs/release_notes.md` into `raw_commits.txt`, tagged with reconciliation IDs (`[ref:#XXXX]` or `[ref:<hash>]`):
 
 ```bash
-python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode collect
+python3 .agents/skills/update-changelog/scripts/gather_changes.py --mode collect
 ```
 
 The script automatically:
 - Walks `--first-parent` on `main` and resolves GitHub Merge PR numbers (`#XXXX`) to their initial feature/fix commit on the PR branch (ignoring follow-up review feedback or comment cleanup commits).
-- Excludes any changes in `tests/`, `.github/`, `.gemini/`, `src/maxtext/training_engine/`, `src/maxtext/experimental/` (`experimental/`), `src/dependencies/dockerfiles/`, `src/dependencies/scripts/`, `tools/`, `pytest.ini`, `README.md`, `docs/conf.py`, `src/maxtext/version.py`, `*Dockerfile`, and `docs/release_notes.md`. Keep this list in sync with `EXCLUDED_PATH_PREFIXES` / `EXCLUDED_FILES` in the script.
+- Excludes any changes in `tests/`, `.github/`, `.gemini/`, `.agents/`, `src/maxtext/training_engine/`, `src/maxtext/experimental/` (`experimental/`), `src/dependencies/dockerfiles/`, `src/dependencies/scripts/`, `tools/`, `pytest.ini`, `README.md`, `AGENTS.md`, `docs/conf.py`, `src/maxtext/version.py`, `*Dockerfile`, and `docs/release_notes.md`. Keep this list in sync with `EXCLUDED_PATH_PREFIXES` / `EXCLUDED_FILES` in the script.
 - Excludes container/Docker image vulnerability fixes, Docker registry migrations (e.g., Artifact Registry), Gemini/agent skill updates, `pytest-split` / test runner splitting, `Latest News` announcements, `"No public description"` commits, release preparation / version bumps (`Prepare for vX.Y.Z release`), broken link / `toctree` / Sphinx / ReadTheDocs doc-build or dynamic version-tag plumbing fixes, pre-commit/lint-only fixes, and test-only fixes.
 - Drops a commit together with the revert that undoes it (`Reverts <hash>` / `This reverts commit <hash>` in the subject or body) when both land in the window, and prefixes reverts of older commits with `Revert of: `.
 - Strips Copybara/Piper internal metadata (`PiperOrigin-RevId`).
@@ -71,7 +71,7 @@ Read `raw_commits.txt` and categorize + rewrite the entries into a polished, syn
    Verify that `new_notes.md` contains every `[ref:...]` ID from `raw_commits.txt`:
 
    ```bash
-   python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode verify
+   python3 .agents/skills/update-changelog/scripts/gather_changes.py --mode verify
    ```
 
    If any commit/PR ID was dropped during synthesis, the script exits with code `1` and prints the exact dropped IDs. Fix `new_notes.md` so all IDs are accounted for and re-run `--mode verify`.
@@ -80,7 +80,7 @@ Read `raw_commits.txt` and categorize + rewrite the entries into a polished, syn
    Once verification passes, strip all temporary `[ref:...]` tags from `new_notes.md`, update `**Last Updated**: <head_commit_hash>`, and deterministically splice the clean Markdown block into [docs/release_notes.md](../../../docs/release_notes.md):
 
    ```bash
-   python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode inject
+   python3 .agents/skills/update-changelog/scripts/gather_changes.py --mode inject
    ```
 
    Keep `raw_commits.txt` and `new_notes.md` in the workspace so the CI workflow can also run `--mode verify` and `--mode inject` before committing `docs/release_notes.md`.
@@ -90,4 +90,4 @@ Read `raw_commits.txt` and categorize + rewrite the entries into a polished, syn
 Verify your changes before completing the task:
 1. Run `git diff docs/release_notes.md` to ensure clean Markdown formatting and that `**Last Updated**: <head_commit_hash>` is updated.
 2. Confirm that bullets do not contain GitHub PR links or leftover `[ref:...]` tags, and that any documentation links point to ReadTheDocs (`https://maxtext.readthedocs.io/en/latest/...`).
-3. Re-run `python3 .gemini/skills/update-changelog/scripts/gather_changes.py --mode collect` to verify that it detects `**Last Updated**: <head_commit_hash>` and reports `No new commits`.
+3. Re-run `python3 .agents/skills/update-changelog/scripts/gather_changes.py --mode collect` to verify that it detects `**Last Updated**: <head_commit_hash>` and reports `No new commits`.
