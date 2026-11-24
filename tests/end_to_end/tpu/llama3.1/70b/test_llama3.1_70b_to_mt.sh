@@ -18,7 +18,10 @@ set -ex
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='llama3.1-70b'
-HF_GOLDEN_MODEL='meta-llama/Llama-3.1-70B'
+# The post-training tests decode with the Instruct chat template, so convert
+# the Instruct checkpoint. A base checkpoint never ends its turn and repeats
+# itself until the token limit.
+HF_GOLDEN_MODEL='meta-llama/Llama-3.1-70B-Instruct'
 
 # To convert the multimodal model, make sure the use_multimodal is set to be true
 USE_MULTIMODAL=${2:-false}
@@ -34,6 +37,7 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 # Step 2.a: Convert to unscanned checkpoint (for inference)
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
+    --hf_model_path=${HF_GOLDEN_MODEL} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=false --lazy_load_tensors=True \
@@ -46,6 +50,7 @@ echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
 # Step 2.b: Convert to scanned checkpoint (for training)
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
+    --hf_model_path=${HF_GOLDEN_MODEL} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id} \
     use_multimodal=${USE_MULTIMODAL} \
     scan_layers=true --lazy_load_tensors=True \
