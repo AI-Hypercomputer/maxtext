@@ -10,31 +10,35 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_gpt_oss_to_mt.sh $RUN_ID - to convert the checkpoint and run logit check
+# bash tests/end_to_end/cpu/gpt_oss/20b/test_gpt_oss_to_mt.sh $RUN_ID
+
 
 set -ex
 
-export PYTHONPATH=src
+# Avoid conflict between M_RUN_NAME env var and CLI run_name argument in pyconfig
+unset M_RUN_NAME
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='gpt-oss-20b'
+HF_GOLDEN_MODEL='unsloth/gpt-oss-20b-BF16'
 
-# Non-Googlers please remember to point BASE_OUTPUT_DIRECTORY to the GCS paths where you want to store scanned and unscanned checkpoints
+# Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you want to store scanned and unscanned checkpoints
 # BASE_OUTPUT_PATH is also honored as is: callers of the former tests/end_to_end/tpu/gpt_oss/20b scripts set it and
 # load the checkpoint back from the same path.
-BASE_OUTPUT_DIRECTORY=${BASE_OUTPUT_PATH:-gs://runner-maxtext-logs/${MODEL_NAME}}/to_maxtext
+BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-${BASE_OUTPUT_PATH:-gs://runner-maxtext-logs/${MODEL_NAME}}}"
 
-# Step 1: Install torch
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Step 1: Install torch if not already installed
+if ! python3 -c "import torch" &>/dev/null; then
+    python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+fi
 
 # Step 2: Convert the checkpoint from Hugging Face to make it compatible with MaxText
 
 # Step 2.a: Convert to unscanned checkpoint (for inference)
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
-    --hf_model_path="unsloth/gpt-oss-20b-BF16" \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id} \
-    use_multimodal=false \
+    --hf_model_path=${HF_GOLDEN_MODEL} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id} \
     scan_layers=false \
     hardware=cpu \
     skip_jax_distributed_system=True \
@@ -42,15 +46,14 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     checkpoint_storage_use_ocdbt=False \
     attention="dot_product"
 
-UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id}/0/items
+UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
 echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
 
 # Step 2.b: Convert to scanned checkpoint (for training)
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
-    --hf_model_path="unsloth/gpt-oss-20b-BF16" \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id} \
-    use_multimodal=false \
+    --hf_model_path=${HF_GOLDEN_MODEL} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id} \
     scan_layers=true \
     hardware=cpu \
     skip_jax_distributed_system=True \
@@ -58,20 +61,23 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     checkpoint_storage_use_ocdbt=False \
     attention="dot_product"
 
-SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
+SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
+echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
+
 # Step 3: Test whether the forward pass logits match the original HF model
-# to get higher precision (eg. float32) run on CPU with hardware=cpu
+# to get higher precision (eg. float32) run on CPU with `hardware=cpu`
 python3 -m tests.utils.forward_pass_logit_checker \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
     model_name=${MODEL_NAME} \
-    use_multimodal=false \
     scan_layers=false \
     global_batch_size_to_train_on=1 \
     per_device_batch_size=1 \
     max_target_length=512 \
     dtype=float32 \
     attention=dot_product \
-    --hf_model_path="unsloth/gpt-oss-20b-BF16" \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    --hf_model_path=${HF_GOLDEN_MODEL} \
     --run_hf_model=true \
     --max_kl_div=0.01 \
     hardware=cpu \

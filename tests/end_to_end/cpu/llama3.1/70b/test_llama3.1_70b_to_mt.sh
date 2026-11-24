@@ -10,11 +10,13 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_llama3.1_70b_to_mt.sh $RUN_ID - to convert the checkpoint and run logit check for non-multimodal version
-# bash test_llama3.1_70b_to_mt.sh $RUN_ID true - to convert the checkpoint and run logit check for multimodal version
+# bash tests/end_to_end/cpu/llama3.1/70b/test_llama3.1_70b_to_mt.sh $RUN_ID
 
 
 set -ex
+
+# Avoid conflict between M_RUN_NAME env var and CLI run_name argument in pyconfig
+unset M_RUN_NAME
 
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='llama3.1-70b'
@@ -23,14 +25,13 @@ MODEL_NAME='llama3.1-70b'
 # itself until the token limit.
 HF_GOLDEN_MODEL='meta-llama/Llama-3.1-70B-Instruct'
 
-# To convert the multimodal model, make sure the use_multimodal is set to be true
-USE_MULTIMODAL=${2:-false}
-
 # Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you want to store scanned and unscanned checkpoints
-BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}/to_maxtext
+BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-gs://runner-maxtext-logs/${MODEL_NAME}}"
 
-# Step 1: Install torch
-python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+# Step 1: Install torch if not already installed
+if ! python3 -c "import torch" &>/dev/null; then
+    python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
+fi
 
 # Step 2: Convert the checkpoint from Hugging Face to make it compatible with MaxText
 
@@ -38,42 +39,38 @@ python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
     --hf_model_path=${HF_GOLDEN_MODEL} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id} \
-    use_multimodal=${USE_MULTIMODAL} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id} \
     scan_layers=false --lazy_load_tensors=True \
     hardware=cpu skip_jax_distributed_system=True \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
 
-UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/unscanned/${run_id}/0/items
+UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
 echo "Unscanned checkpoint path: ${UNSCANNED_CKPT_PATH}"
 
 # Step 2.b: Convert to scanned checkpoint (for training)
 python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
     --hf_model_path=${HF_GOLDEN_MODEL} \
-    base_output_directory=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id} \
-    use_multimodal=${USE_MULTIMODAL} \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id} \
     scan_layers=true --lazy_load_tensors=True \
     hardware=cpu skip_jax_distributed_system=True \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False
 
-SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/scanned/${run_id}/0/items
+SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 echo "Scanned checkpoint path: ${SCANNED_CKPT_PATH}"
 
 # Step 3: Test whether the forward pass logits match the original HF model
-# to get higher precision (eg. float32) run on CPU with `JAX_PLATFORMS=cpu`
-# ToDo: improve forward_pass_logit_checker to test multi-modal prompt
-if [ "${USE_MULTIMODAL}" = "false" ]; then
-    python3 -m tests.utils.forward_pass_logit_checker \
-        load_parameters_path=${UNSCANNED_CKPT_PATH} \
-        model_name=${MODEL_NAME} \
-        use_multimodal=${USE_MULTIMODAL} \
-        scan_layers=false \
-        weight_dtype=bfloat16 \
-        --hf_model_path=${HF_GOLDEN_MODEL} \
-        --max_kl_div=0.03 \
-        --run_hf_model=true \
-        attention=dot_product \
-        hardware=cpu \
-        skip_jax_distributed_system=True
-fi
+# to get higher precision (eg. float32) run on CPU with `hardware=cpu`
+python3 -m tests.utils.forward_pass_logit_checker \
+    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    model_name=${MODEL_NAME} \
+    scan_layers=false \
+    weight_dtype=bfloat16 \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    --hf_model_path=${HF_GOLDEN_MODEL} \
+    --max_kl_div=0.03 \
+    --run_hf_model=true \
+    attention=dot_product \
+    hardware=cpu \
+    skip_jax_distributed_system=True

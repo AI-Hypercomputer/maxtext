@@ -1,19 +1,25 @@
 #!/bin/bash
 
-# Converts a MaxText checkpoint to a Hugging Face model checkpoint for GPTOSS-20B.
+# Converts a MaxText checkpoint to a Hugging Face model checkpoint.
+
+# Usage:
+# export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
+# bash tests/end_to_end/cpu/gpt_oss/20b/test_gpt_oss_to_hf.sh $RUN_ID $CHECKPOINT_PATH $SCAN_LAYERS
 
 set -ex
 
-run_id=$1
-CKPT_PATH=$2
+# Avoid conflict between M_RUN_NAME env var and CLI run_name argument in pyconfig
+unset M_RUN_NAME
+
+run_id=${1:?"Error: run_id (argument 1) is required"}
+CKPT_PATH=${2:?"Error: CKPT_PATH (argument 2) is required"}
 SCAN_LAYERS=${3:-false}
 
-export MODEL_NAME='gpt-oss-20b'
-
-if [ -z "${BASE_OUTPUT_PATH}" ]; then
-  export BASE_OUTPUT_PATH=gs://runner-maxtext-logs/${MODEL_NAME}
-fi
+MODEL_NAME='gpt-oss-20b'
+# BASE_OUTPUT_PATH is also honored, minus a trailing "/" as before: callers of the former
+# tests/end_to_end/tpu/gpt_oss/20b scripts set it.
 BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
+BASE_OUTPUT_DIRECTORY="${BASE_OUTPUT_DIRECTORY:-${BASE_OUTPUT_PATH:-gs://runner-maxtext-logs/${MODEL_NAME}}}"
 
 if [ "${SCAN_LAYERS,,}" = "true" ]; then
     scan_status="scanned"
@@ -25,7 +31,9 @@ python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name=${MODEL_NAME} \
     tokenizer_type="huggingface" \
     load_parameters_path=${CKPT_PATH} \
-    base_output_directory=${BASE_OUTPUT_PATH}/to_huggingface/${scan_status}/${run_id} \
-    use_multimodal=false \
+    base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
     scan_layers=$SCAN_LAYERS \
+    checkpoint_storage_use_zarr3=False \
+    checkpoint_storage_use_ocdbt=False \
+    hardware=cpu \
     skip_jax_distributed_system=true
