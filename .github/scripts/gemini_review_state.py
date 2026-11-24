@@ -14,7 +14,7 @@
 
 """Deterministic state handling for the MaxText Gemini pull request review.
 
-Used by `.github/workflows/gemini_review.yml`, with two subcommands:
+Used by `.github/workflows/gemini_review.yml`, with these subcommands:
 
 * `prepare` runs before the model. It decides the review mode (`skip`, `full`, or `incremental`), deletes pending
   reviews left behind by cancelled runs, and writes the context the prompt reads: `review_mode.json`,
@@ -22,7 +22,17 @@ Used by `.github/workflows/gemini_review.yml`, with two subcommands:
   review threads), and `other_findings.json` (the bot's other findings, which must not be raised again). If the GitHub
   API fails, explicit requests fall back to a full review without earlier state and automatic reviews are skipped.
 * `apply` runs after the model. It reads the per-thread verdicts from the model's final response and replies to, or
-  resolves, the bot's own threads. The model itself never gets reply or resolve tools.
+  resolves, the bot's own threads. The model itself never gets reply or resolve tools. It records what it did in
+  `apply_result.json`.
+* `classify` reads the model step's error output and decides whether the failure is transient (HTTP 429 or 503) and
+  worth one retry.
+* `before-retry` runs before that retry. It reports whether the failed attempt already posted its review (then the
+  retry is skipped, so the review is never posted twice), and otherwise deletes the attempt's pending review.
+* `telemetry` runs last, whatever happened. It writes one record of the run (trigger, mode, delta size, outcome,
+  failure type, inline comments posted, verdicts on earlier findings, durations, and the token counts of the last model
+  attempt from Gemini CLI's JSON output) to the job summary and to a JSON
+  file that the workflow uploads as an artifact. The record holds only counts and status values, no code or comment
+  text, because the repository is public.
 
 SECURITY: this script never checks out, builds, or executes pull request code. It reads the pull request only through
 the GitHub API (via the `gh` CLI), and treats all pull request text as untrusted data.
@@ -31,12 +41,14 @@ Only the Python standard library and the `gh` CLI are used, so that the script r
 """
 
 import argparse
+import calendar
 import hashlib
 import json
 import os
 import re
 import subprocess
 import sys
+import time
 
 MODE_SKIP = "skip"
 MODE_FULL = "full"
@@ -65,7 +77,7 @@ VERDICTS_TAG = "maxtext-review-verdicts"
 # Only replies from these participants (or the pull request author) count as a dispute of a finding.
 TRUSTED_ASSOCIATIONS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
 
-DEFAULT_MAX_AUTO_REVIEWS = 20
+DEFAULT_MAX_AUTO_REVIEWS = 5
 # The compare API returns at most 300 files. A diff with exactly 300 files is indistinguishable from a truncated one,
 # so it is also treated as incomplete (and falls back to a full review).
 COMPARE_MAX_FILES = 300
@@ -81,6 +93,36 @@ MAX_COMMENT_CHARS = 2_000
 MAX_RESOLVED_FINDING_CHARS = 300
 MAX_REASON_CHARS = 500
 NO_DELTA_TEXT = "No incremental delta: this is a full review."
+
+# Files that run-gemini-cli writes for each attempt (the last attempt overwrites them).
+GEMINI_STDERR_LOG = os.path.join("gemini-artifacts", "stderr.log")
+GEMINI_STDOUT_LOG = os.path.join("gemini-artifacts", "stdout.log")
+MAX_ERROR_CHARS = 200_000
+
+# Failure types of the model step. Only rate limiting and unavailability are transient enough to retry.
+FAILURE_RATE_LIMITED = "rate_limited"
+FAILURE_UNAVAILABLE = "unavailable"
+FAILURE_TURN_LIMIT = "turn_limit"
+FAILURE_OTHER = "other"
+RETRYABLE_FAILURES = frozenset({FAILURE_RATE_LIMITED, FAILURE_UNAVAILABLE})
+# Status codes only count next to an HTTP/status/code label (or their reason phrase), so that a stray number in a long
+# debug log (a line number, a token count) does not make a failure retryable. Status names are case-sensitive.
+_FAILURE_PATTERNS = (
+    (
+        FAILURE_RATE_LIMITED,
+        re.compile(
+            r"(?i:\b(?:HTTP|code|status)\b[\"':\s=]*429\b|too many requests|rate limit exceeded|quota exceeded)"
+            r"|\bRESOURCE_EXHAUSTED\b"
+        ),
+    ),
+    (
+        FAILURE_UNAVAILABLE,
+        re.compile(
+            r"(?i:\b(?:HTTP|code|status)\b[\"':\s=]*503\b|service unavailable|model is overloaded)|\bUNAVAILABLE\b"
+        ),
+    ),
+    (FAILURE_TURN_LIMIT, re.compile(r"(?i:max(imum)?[ _]?session[ _]?turns|turn limit)")),
+)
 
 THREADS_QUERY = """
 query($owner: String!, $repo: String!, $number: Int!, $cursor: String) {
@@ -492,6 +534,164 @@ def extract_verdicts(text):
   return [v for v in verdicts if isinstance(v, dict)]
 
 
+def classify_failure(error_text):
+  """Classifies the model step's error output.
+
+  Args:
+    error_text: The `error` output of the run-gemini-cli step (possibly empty).
+
+  Returns:
+    One of `rate_limited`, `unavailable`, `turn_limit`, or `other`; the first matching pattern wins.
+  """
+  for failure_type, pattern in _FAILURE_PATTERNS:
+    if pattern.search(error_text or ""):
+      return failure_type
+  return FAILURE_OTHER
+
+
+def count_delta_lines(delta):
+  """Returns the number of added and removed lines in the current patches of the delta's files."""
+  total = 0
+  for entry in delta:
+    for line in (entry.get("new_patch") or "").splitlines():
+      if line.startswith(("+", "-")):
+        total += 1
+  return total
+
+
+def find_posted_review(reviews, bot_login, head_sha, since_epoch):
+  """Returns the bot's summary review of `head_sha` submitted at or after `since_epoch`, or None.
+
+  Args:
+    reviews: Review entries from the GitHub REST API.
+    bot_login: The bot's login.
+    head_sha: The commit the run reviewed.
+    since_epoch: Start of the run, in seconds since the epoch.
+  """
+  posted = [
+      r
+      for r in bot_reviews(reviews, bot_login)
+      if r.get("commit_id") == head_sha and _epoch(r.get("submitted_at")) >= since_epoch
+  ]
+  return posted[-1] if posted else None
+
+
+def _epoch(timestamp):
+  """Parses a GitHub `YYYY-MM-DDTHH:MM:SSZ` timestamp; returns 0 if it is missing or malformed."""
+  try:
+    return calendar.timegm(time.strptime(timestamp, "%Y-%m-%dT%H:%M:%SZ"))
+  except (TypeError, ValueError):
+    return 0
+
+
+def build_telemetry(env, review_mode, apply_result, posted_review, inline_comments, now, tokens=None):
+  """Builds the telemetry record of one review run.
+
+  Args:
+    env: Mapping with the workflow-provided values (see the `telemetry` step in gemini_review.yml).
+    review_mode: Contents of `review_mode.json`, or {} if `prepare` did not run.
+    apply_result: Contents of `apply_result.json`, or {} if `apply` did not run.
+    posted_review: The review this run posted (from `find_posted_review`), or None.
+    inline_comments: Number of inline comments in `posted_review`, or None if unknown.
+    now: Current time, in seconds since the epoch.
+    tokens: Token counts of the last model attempt (from `gemini_token_stats`), or None.
+
+  Returns:
+    A dict of counts and status values only (no code or comment text).
+  """
+
+  def as_int(value):
+    try:
+      return int(value)
+    except (TypeError, ValueError):
+      return None
+
+  first, retry = env.get("FIRST_OUTCOME") or "", env.get("RETRY_OUTCOME") or ""
+  mode = review_mode.get("mode") or ""
+  if mode == MODE_SKIP:
+    outcome = "skipped"
+  elif posted_review is not None:
+    outcome = "posted"
+  elif "failure" in (first, retry):
+    outcome = "failed"
+  elif env.get("JOB_STATUS") == "cancelled" or "cancelled" in (first, retry):
+    outcome = "cancelled"
+  else:
+    outcome = "not_posted"
+  started, prepared = as_int(env.get("STARTED_AT")), as_int(env.get("PREPARED_AT"))
+  return {
+      "schema_version": 1,
+      "repository": env.get("REPOSITORY"),
+      "pull_request": as_int(env.get("PULL_REQUEST_NUMBER")),
+      "run_id": as_int(env.get("RUN_ID")),
+      "run_attempt": as_int(env.get("RUN_ATTEMPT")),
+      "trigger": env.get("TRIGGER") or "",
+      "requested_mode": env.get("REQUESTED_MODE") or "",
+      "mode": mode,
+      "mode_reason": review_mode.get("reason") or "",
+      "head_sha": review_mode.get("head_sha") or "",
+      "prior_bot_reviews": review_mode.get("prior_review_count"),
+      "delta_files": len(review_mode.get("changed_files") or []),
+      "delta_lines": review_mode.get("delta_lines"),
+      "earlier_threads": review_mode.get("previous_thread_count"),
+      "outcome": outcome,
+      "first_attempt": first or "skipped",
+      "first_failure_type": env.get("FIRST_FAILURE_TYPE") or "",
+      "retried": retry not in ("", "skipped"),
+      "retry_attempt": retry or "skipped",
+      "retry_skipped_reason": {"true": "already_posted", "unknown": "api_error"}.get(env.get("ALREADY_POSTED"), ""),
+      "inline_comments": inline_comments,
+      "verdicts": apply_result.get("verdict_counts") or {},
+      "thread_replies": apply_result.get("replies"),
+      "threads_resolved": apply_result.get("resolved"),
+      "thread_action_failures": apply_result.get("failures"),
+      "apply_status": apply_result.get("status") or "",
+      "job_seconds": now - started if started else None,
+      "review_seconds": now - prepared if prepared else None,
+      "tokens": tokens or {},
+  }
+
+
+def gemini_token_stats(stdout_text):
+  """Sums the token counts in Gemini CLI's JSON output (`--output-format json`).
+
+  Args:
+    stdout_text: The CLI's stdout, as saved by run-gemini-cli.
+
+  Returns:
+    A dict with `requests`, `prompt`, `candidates`, `cached`, `thoughts`, and `total` token counts summed over models,
+    or {} if the output has no stats.
+  """
+  try:
+    data = json.loads(stdout_text)
+  except ValueError:
+    return {}
+  models = ((data.get("stats") or {}).get("models") or {}) if isinstance(data, dict) else {}
+  if not isinstance(models, dict) or not models:
+    return {}
+  totals = {"requests": 0, "prompt": 0, "candidates": 0, "cached": 0, "thoughts": 0, "total": 0}
+  for model in models.values():
+    if not isinstance(model, dict):
+      continue
+    requests = (model.get("api") or {}).get("totalRequests")
+    totals["requests"] += requests if isinstance(requests, int) else 0
+    for key, value in (model.get("tokens") or {}).items():
+      if key in totals and isinstance(value, int):
+        totals[key] += value
+  return totals
+
+
+def render_telemetry_summary(record):
+  """Renders the telemetry record as a Markdown table for the job summary."""
+  lines = ["### MaxText Gemini review run", "", "| Field | Value |", "| --- | --- |"]
+  for key, value in record.items():
+    if isinstance(value, dict):
+      value = ", ".join(f"{k}: {v}" for k, v in sorted(value.items())) or "none"
+    text = "" if value is None else str(value)
+    lines.append(f"| {key} | {text.replace('|', '/')} |")
+  return "\n".join(lines) + "\n"
+
+
 def sanitize_reason(reason):
   """Makes model-written text safe to post under the bot identity.
 
@@ -700,6 +900,7 @@ def gather_review_state(args):
   delta_text = NO_DELTA_TEXT
   previous_sha = reviews[-1].get("commit_id") if reviews else None
   changed_files = []
+  delta_lines = 0
 
   if mode == "compare":
     old_files = fetch_compare_files(repository, base_ref, previous_sha)
@@ -713,6 +914,7 @@ def gather_review_state(args):
       else:
         delta_text = render_delta(delta, previous_sha, head_sha)
         changed_files = [{"filename": d["filename"], "kind": d["kind"]} for d in delta]
+        delta_lines = count_delta_lines(delta)
         if len(delta_text) > MAX_DELTA_CHARS:
           mode, reason = MODE_FULL, f"the delta since {previous_sha} is too large for an incremental review"
           delta_text = NO_DELTA_TEXT
@@ -733,6 +935,8 @@ def gather_review_state(args):
       "head_sha": head_sha,
       "previous_review_sha": previous_sha,
       "changed_files": changed_files,
+      "delta_lines": delta_lines,
+      "prior_review_count": len(reviews),
       "delta_text": delta_text,
       "threads": [summarize_thread(t, args.bot_login, pr_author) for t in threads],
       "other_findings": other_bot_findings(all_threads, args.bot_login),
@@ -759,6 +963,8 @@ def fallback_review_state(requested_mode, error):
       "head_sha": "",
       "previous_review_sha": None,
       "changed_files": [],
+      "delta_lines": 0,
+      "prior_review_count": None,
       "delta_text": NO_DELTA_TEXT,
       "threads": [],
       "other_findings": [],
@@ -784,6 +990,10 @@ def prepare(args):
           "head_sha": result["head_sha"],
           "previous_review_sha": result["previous_review_sha"],
           "changed_files": result["changed_files"],
+          # For telemetry only; the prompt ignores these.
+          "delta_lines": result["delta_lines"],
+          "prior_review_count": result["prior_review_count"],
+          "previous_thread_count": len(result["threads"]),
       },
   )
   with open(os.path.join(args.output_dir, "review_delta.md"), "w", encoding="utf-8") as f:
@@ -793,10 +1003,18 @@ def prepare(args):
   write_output("mode", result["mode"])
   write_output("head_sha", result["head_sha"])
   write_output("previous_thread_count", len(result["threads"]))
+  write_output("prepared_at", int(time.time()))
 
 
 def apply(args):
-  """Applies the model's per-thread verdicts to the bot's own threads."""
+  """Applies the model's per-thread verdicts to the bot's own threads and records the result for telemetry."""
+  result = _apply(args)
+  write_json(os.path.join(args.output_dir, "apply_result.json"), result)
+
+
+def _apply(args):
+  """Implements `apply`; returns a dict with `status`, `verdict_counts`, `replies`, `resolved`, and `failures`."""
+  result = {"status": "", "verdict_counts": {}, "replies": 0, "resolved": 0, "failures": 0}
   repository = args.repository
   owner, repo = repository.split("/", 1)
   number = args.pull_number
@@ -804,12 +1022,16 @@ def apply(args):
     allowed_thread_ids = {t["thread_id"] for t in json.load(f)}
   if not allowed_thread_ids:
     print("No earlier bot threads; nothing to apply.")
-    return
+    return dict(result, status="no_threads")
 
   verdicts = extract_verdicts(os.environ.get("GEMINI_RESPONSE", ""))
   if verdicts is None:
     print("::warning::No valid verdicts block in the model response; leaving earlier review threads unchanged.")
-    return
+    return dict(result, status="no_verdicts")
+  for verdict in verdicts:
+    kind = verdict.get("verdict")
+    if kind in VERDICTS:
+      result["verdict_counts"][kind] = result["verdict_counts"].get(kind, 0) + 1
 
   try:
     pull = gh_api(f"repos/{repository}/pulls/{number}")
@@ -817,11 +1039,10 @@ def apply(args):
     live_threads = fetch_review_threads(owner, repo, number)
   except GitHubError as error:
     print(f"::warning::Could not read the review threads; leaving earlier review threads unchanged: {error}")
-    return
+    return dict(result, status="read_failed")
   actions = plan_thread_actions(
       verdicts, live_threads, allowed_thread_ids, args.bot_login, args.head_sha, pr_author=pr_author
   )
-  failures = 0
   for action in actions:
     try:
       gh_api(
@@ -829,13 +1050,106 @@ def apply(args):
           method="POST",
           fields={"body": action["body"]},
       )
+      result["replies"] += 1
       if action["resolve"]:
         gh_api("graphql", method="POST", fields={"query": RESOLVE_MUTATION, "threadId": action["thread_id"]})
+        result["resolved"] += 1
       print(f"Thread {action['thread_id']}: {action['verdict']} (resolved={action['resolve']})")
     except GitHubError as error:
-      failures += 1
+      result["failures"] += 1
       print(f"::warning::Could not update thread {action['thread_id']}: {error}")
+  failures = result["failures"]
   print(f"Applied {len(actions) - failures} of {len(actions)} thread action(s) from {len(verdicts)} verdict(s).")
+  return dict(result, status="applied")
+
+
+def _read_tail(path, max_chars):
+  """Returns the last `max_chars` characters of a text file, or "" if it cannot be read."""
+  try:
+    with open(path, encoding="utf-8", errors="replace") as f:
+      return f.read()[-max_chars:]
+  except OSError:
+    return ""
+
+
+def classify(_args):
+  """Classifies the model step's failure and writes the `failure_type` and `retryable` step outputs.
+
+  The error text comes from the stderr log that run-gemini-cli saves, which can be large; it is read from the file
+  rather than passed in an environment variable.
+  """
+  failure_type = classify_failure(_read_tail(GEMINI_STDERR_LOG, MAX_ERROR_CHARS))
+  write_output("failure_type", failure_type)
+  write_output("retryable", str(failure_type in RETRYABLE_FAILURES).lower())
+
+
+def before_retry(args):
+  """Prepares the retry of a failed model step.
+
+  Writes the `already_posted` step output: `true` if the failed attempt already submitted its review (e.g., it failed
+  after posting), so the retry is skipped and the review is never posted twice; `false` after deleting the attempt's
+  pending review, so the retry starts clean; or `unknown` on a GitHub API error, so the retry is skipped (a missing
+  review is better than a duplicate one) but the job still fails.
+
+  Args:
+    args: Parsed `before-retry` arguments.
+  """
+  try:
+    reviews = gh_api(f"repos/{args.repository}/pulls/{args.pull_number}/reviews?per_page=100", paginate=True) or []
+  except GitHubError as error:
+    # Not "true": nothing is known to be posted, so the job must still fail if no attempt posted a review.
+    print(f"::warning::Could not read the reviews, so the review is not retried: {error}")
+    write_output("already_posted", "unknown")
+    return
+  if find_posted_review(reviews, args.bot_login, args.head_sha, args.since) is not None:
+    print("The failed attempt already posted its review; not retrying.")
+    write_output("already_posted", "true")
+    return
+  delete_pending_reviews(args.repository, args.pull_number, reviews, args.bot_login)
+  write_output("already_posted", "false")
+
+
+def _read_json_or_empty(path):
+  """Returns the JSON object in `path`, or {} if the file is missing or invalid."""
+  try:
+    with open(path, encoding="utf-8") as f:
+      data = json.load(f)
+  except (OSError, ValueError):
+    return {}
+  return data if isinstance(data, dict) else {}
+
+
+def telemetry(args):
+  """Writes the telemetry record of this run to the job summary and to `--output`. Never fails the run."""
+  review_mode = _read_json_or_empty(os.path.join(args.output_dir, "review_mode.json"))
+  apply_result = _read_json_or_empty(os.path.join(args.output_dir, "apply_result.json"))
+  posted_review, inline_comments = None, None
+  head_sha = review_mode.get("head_sha")
+  started = os.environ.get("STARTED_AT") or ""
+  if head_sha and review_mode.get("mode") != MODE_SKIP and started.isdigit():
+    try:
+      reviews = gh_api(f"repos/{args.repository}/pulls/{args.pull_number}/reviews?per_page=100", paginate=True) or []
+      posted_review = find_posted_review(reviews, args.bot_login, head_sha, int(started))
+      if posted_review is not None:
+        comments = gh_api(
+            f"repos/{args.repository}/pulls/{args.pull_number}/reviews/{posted_review['id']}/comments?per_page=100",
+            paginate=True,
+        )
+        inline_comments = len(comments or [])
+    except (GitHubError, KeyError, TypeError, ValueError) as error:
+      print(f"::warning::Could not read the posted review for telemetry: {error}")
+  tokens = gemini_token_stats(_read_tail(GEMINI_STDOUT_LOG, 10_000_000)) if review_mode.get("mode") != MODE_SKIP else {}
+  record = build_telemetry(
+      os.environ, review_mode, apply_result, posted_review, inline_comments, int(time.time()), tokens=tokens
+  )
+  with open(args.output, "w", encoding="utf-8") as f:
+    json.dump(record, f, indent=2)
+    f.write("\n")
+  summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+  if summary_path:
+    with open(summary_path, "a", encoding="utf-8") as f:
+      f.write(render_telemetry_summary(record))
+  print(json.dumps(record, sort_keys=True))
 
 
 def parse_max_auto_reviews(value):
@@ -855,7 +1169,7 @@ def parse_max_auto_reviews(value):
 def main(argv=None):
   parser = argparse.ArgumentParser(description=__doc__.split("\n", 1)[0])
   subparsers = parser.add_subparsers(dest="command", required=True)
-  for name in ("prepare", "apply"):
+  for name in ("prepare", "apply", "classify", "before-retry", "telemetry"):
     sub = subparsers.add_parser(name)
     sub.add_argument("--repository", default=os.environ.get("REPOSITORY"))
     sub.add_argument("--pull-number", type=int, default=os.environ.get("PULL_REQUEST_NUMBER"))
@@ -866,6 +1180,9 @@ def main(argv=None):
       "--max-auto-reviews", type=parse_max_auto_reviews, default=os.environ.get("MAX_AUTO_REVIEWS") or ""
   )
   subparsers.choices["apply"].add_argument("--head-sha", required=True)
+  subparsers.choices["before-retry"].add_argument("--head-sha", required=True)
+  subparsers.choices["before-retry"].add_argument("--since", type=int, required=True, help="Run start (epoch seconds).")
+  subparsers.choices["telemetry"].add_argument("--output", required=True, help="Path of the telemetry JSON file.")
   args = parser.parse_args(argv)
 
   if not args.repository or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", args.repository):
@@ -873,10 +1190,14 @@ def main(argv=None):
   if not args.pull_number or args.pull_number <= 0:
     parser.error(f"invalid --pull-number: {args.pull_number!r}")
 
-  if args.command == "prepare":
-    prepare(args)
-  else:
-    apply(args)
+  commands = {
+      "prepare": prepare,
+      "apply": apply,
+      "classify": classify,
+      "before-retry": before_retry,
+      "telemetry": telemetry,
+  }
+  commands[args.command](args)
   return 0
 
 

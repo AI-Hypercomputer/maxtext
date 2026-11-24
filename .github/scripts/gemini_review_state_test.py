@@ -321,8 +321,9 @@ class PlanThreadActionsTest(unittest.TestCase):
 class FakeGitHub:
   """A fake of `gh_api` for one pull request (`o/r#7`), recording write calls."""
 
-  def __init__(self, reviews=(), files_by_sha=None, threads=None, issue_comments=None, fail_on=None):
+  def __init__(self, reviews=(), files_by_sha=None, threads=None, issue_comments=None, fail_on=None, review_comments=0):
     self.reviews = list(reviews)
+    self.review_comments = review_comments
     self.files_by_sha = files_by_sha or {}
     self.threads = threads or []
     self.issue_comments = issue_comments or []
@@ -354,6 +355,8 @@ class FakeGitHub:
     if path.startswith("repos/o/r/pulls/7/reviews/") and method == "DELETE":
       self.deleted.append(int(path.rsplit("/", 1)[1]))
       return {}
+    if path.startswith("repos/o/r/pulls/7/reviews/") and "/comments" in path:
+      return [{"id": i} for i in range(self.review_comments)]
     if path.startswith("repos/o/r/pulls/7/reviews"):
       return self.reviews
     if path.startswith("repos/o/r/pulls/7/comments/") and path.endswith("/replies"):
@@ -432,6 +435,8 @@ class PrepareTest(unittest.TestCase):
     self.assertEqual([t["thread_id"] for t in result["threads"]], ["T"])
     self.assertEqual([c["trusted"] for c in result["threads"][0]["comments"]], [False, True])
     self.assertEqual([r["finding"] for r in result["other"]], ["old finding"])
+    self.assertEqual((result["delta_lines"], result["prior_review_count"], result["previous_thread_count"]), (2, 1, 1))
+    self.assertIn("prepared_at=", result["outputs"])
 
   def test_reply_reviews_do_not_hide_the_delta(self):
     # The bot's thread replies (empty-body reviews) were submitted after HEAD was pushed; they must not count as a
@@ -504,6 +509,7 @@ class PrepareTest(unittest.TestCase):
     self.assertEqual(state.parse_max_auto_reviews(None), state.DEFAULT_MAX_AUTO_REVIEWS)
     self.assertEqual(state.parse_max_auto_reviews("-3"), state.DEFAULT_MAX_AUTO_REVIEWS)
     self.assertEqual(state.parse_max_auto_reviews(" 5 "), 5)
+    self.assertEqual(state.DEFAULT_MAX_AUTO_REVIEWS, 5)
 
 
 class ApplyTest(unittest.TestCase):
@@ -528,6 +534,8 @@ class ApplyTest(unittest.TestCase):
               f"--head-sha={HEAD}",
           ]
       )
+      with open(os.path.join(tmp, "apply_result.json"), encoding="utf-8") as f:
+        return json.load(f)
 
   @staticmethod
   def _response(verdicts):
@@ -544,7 +552,17 @@ class ApplyTest(unittest.TestCase):
         {"thread_id": "C", "verdict": "still_open_changed", "reason": "moved"},
         {"thread_id": "X", "verdict": "fixed", "reason": "not listed in previous_threads.json"},
     ]
-    self._run(fake, ["F", "C"], self._response(verdicts))
+    result = self._run(fake, ["F", "C"], self._response(verdicts))
+    self.assertEqual(
+        result,
+        {
+            "status": "applied",
+            "verdict_counts": {"fixed": 2, "still_open_changed": 1},
+            "replies": 2,
+            "resolved": 1,
+            "failures": 0,
+        },
+    )
     self.assertEqual([r[0] for r in fake.replies], [100, 110])
     self.assertIn("Addressed in `bbbbbbb`: guarded", fake.replies[0][1])
     self.assertIn("Still applies after `bbbbbbb`: moved", fake.replies[1][1])
@@ -552,13 +570,218 @@ class ApplyTest(unittest.TestCase):
 
   def test_reply_failure_continues(self):
     fake = FakeGitHub(threads=[_thread("F", ["maxtext-bot"])], fail_on="/replies")
-    self._run(fake, ["F"], self._response([{"thread_id": "F", "verdict": "fixed", "reason": "r"}]))
+    result = self._run(fake, ["F"], self._response([{"thread_id": "F", "verdict": "fixed", "reason": "r"}]))
     self.assertEqual(fake.resolved, [])
+    self.assertEqual((result["replies"], result["failures"]), (0, 1))
 
   def test_missing_verdicts_changes_nothing(self):
     fake = FakeGitHub(threads=[_thread("F", ["maxtext-bot"])])
-    self._run(fake, ["F"], "Review posted, no verdicts.")
+    self.assertEqual(self._run(fake, ["F"], "Review posted, no verdicts.")["status"], "no_verdicts")
     self.assertEqual((fake.replies, fake.resolved), ([], []))
+    self.assertEqual(self._run(fake, [], "")["status"], "no_threads")
+
+
+class FailureClassificationTest(unittest.TestCase):
+
+  def test_classify_failure(self):
+    cases = {
+        '{"code": 429, "status": "RESOURCE_EXHAUSTED"}': "rate_limited",
+        "Error: Too Many Requests": "rate_limited",
+        "got status: 503 Service Unavailable": "unavailable",
+        "The model is overloaded. Please try again later.": "unavailable",
+        "Reached max session turns for this session": "turn_limit",
+        "TypeError: fetch failed": "other",
+        "": "other",
+        # Stray numbers and lowercase words in a debug log are not transient failures.
+        "at parse (file.js:429:12)\nprocessed 503 tokens": "other",
+        "Reached max session turns; cache file unavailable": "turn_limit",
+        "HTTP 429": "rate_limited",
+        "status=503": "unavailable",
+    }
+    for text, expected in cases.items():
+      self.assertEqual(state.classify_failure(text), expected, text)
+
+  def test_classify_reads_stderr_log(self):
+    with tempfile.TemporaryDirectory() as tmp:
+      os.makedirs(os.path.join(tmp, "gemini-artifacts"))
+      with open(os.path.join(tmp, state.GEMINI_STDERR_LOG), "w", encoding="utf-8") as f:
+        f.write("debug noise\n[API Error: 503 UNAVAILABLE]\n")
+      cwd = os.getcwd()
+      os.chdir(tmp)
+      try:
+        with mock.patch.dict(os.environ, {"GITHUB_OUTPUT": os.path.join(tmp, "out")}):
+          state.main(["classify", "--repository=o/r", "--pull-number=7"])
+      finally:
+        os.chdir(cwd)
+      with open(os.path.join(tmp, "out"), encoding="utf-8") as f:
+        self.assertEqual(f.read(), "failure_type=unavailable\nretryable=true\n")
+
+
+class BeforeRetryTest(unittest.TestCase):
+  """Runs `before-retry` against a fake GitHub API."""
+
+  SINCE = 1767225600  # 2026-01-01T00:00:00Z
+
+  def _run(self, fake):
+    """Runs `before-retry` and returns its step output."""
+    with (
+        tempfile.TemporaryDirectory() as tmp,
+        mock.patch.object(state, "gh_api", fake),
+        mock.patch.dict(os.environ, {"GITHUB_OUTPUT": os.path.join(tmp, "out")}),
+    ):
+      state.main(
+          [
+              "before-retry",
+              "--repository=o/r",
+              "--pull-number=7",
+              f"--bot-login={BOT}",
+              f"--head-sha={HEAD}",
+              f"--since={self.SINCE}",
+          ]
+      )
+      with open(os.path.join(tmp, "out"), encoding="utf-8") as f:
+        return f.read().strip()
+
+  def test_already_posted_skips_retry(self):
+    fake = FakeGitHub([_summary(HEAD, submitted_at="2026-01-01T00:05:00Z")])
+    self.assertEqual(self._run(fake), "already_posted=true")
+
+  def test_older_review_does_not_count_and_pending_is_deleted(self):
+    pending = {"id": 55, "user": {"login": BOT}, "state": "PENDING", "submitted_at": None, "commit_id": HEAD, "body": ""}
+    fake = FakeGitHub([_summary(HEAD, submitted_at="2025-12-31T23:59:00Z"), pending])
+    self.assertEqual(self._run(fake), "already_posted=false")
+    self.assertEqual(fake.deleted, [55])
+
+  def test_api_failure_skips_retry(self):
+    self.assertEqual(self._run(FakeGitHub(fail_on="pulls/7/reviews")), "already_posted=unknown")
+
+
+class TelemetryTest(unittest.TestCase):
+
+  ENV = {
+      "REPOSITORY": "o/r",
+      "PULL_REQUEST_NUMBER": "7",
+      "RUN_ID": "123",
+      "RUN_ATTEMPT": "1",
+      "TRIGGER": "pull_request.synchronize",
+      "REQUESTED_MODE": "auto",
+      "STARTED_AT": "1000",
+      "PREPARED_AT": "1030",
+  }
+  MODE = {
+      "mode": "incremental",
+      "reason": "2 file(s) changed",
+      "head_sha": HEAD,
+      "changed_files": [{"filename": "a.py", "kind": "changed"}, {"filename": "b.py", "kind": "added"}],
+      "delta_lines": 12,
+      "prior_review_count": 2,
+      "previous_thread_count": 3,
+  }
+
+  def test_outcomes(self):
+    def outcome(env=None, mode=None, posted=None):
+      return state.build_telemetry(dict(self.ENV, **(env or {})), mode or self.MODE, {}, posted, None, 1100)["outcome"]
+
+    self.assertEqual(outcome(mode={"mode": "skip"}), "skipped")
+    self.assertEqual(outcome(env={"FIRST_OUTCOME": "success"}, posted={"id": 1}), "posted")
+    self.assertEqual(outcome(env={"FIRST_OUTCOME": "failure", "RETRY_OUTCOME": "success"}, posted={"id": 1}), "posted")
+    self.assertEqual(outcome(env={"FIRST_OUTCOME": "failure"}), "failed")
+    self.assertEqual(outcome(env={"FIRST_OUTCOME": "cancelled"}), "cancelled")
+    self.assertEqual(outcome(env={"FIRST_OUTCOME": "success"}), "not_posted")
+
+  def test_retry_skipped_reason(self):
+    def reason(already_posted):
+      env = dict(self.ENV, ALREADY_POSTED=already_posted)
+      return state.build_telemetry(env, self.MODE, {}, None, None, 1100)["retry_skipped_reason"]
+
+    self.assertEqual([reason("true"), reason("unknown"), reason("false")], ["already_posted", "api_error", ""])
+
+  def test_record(self):
+    env = dict(self.ENV, FIRST_OUTCOME="failure", FIRST_FAILURE_TYPE="rate_limited", RETRY_OUTCOME="success")
+    apply_result = {"status": "applied", "verdict_counts": {"fixed": 2}, "replies": 2, "resolved": 2, "failures": 0}
+    record = state.build_telemetry(env, self.MODE, apply_result, {"id": 9}, 3, 1100, tokens={"total": 50})
+    expected = {
+        "pull_request": 7,
+        "trigger": "pull_request.synchronize",
+        "mode": "incremental",
+        "delta_files": 2,
+        "delta_lines": 12,
+        "prior_bot_reviews": 2,
+        "earlier_threads": 3,
+        "outcome": "posted",
+        "first_attempt": "failure",
+        "first_failure_type": "rate_limited",
+        "retried": True,
+        "inline_comments": 3,
+        "verdicts": {"fixed": 2},
+        "threads_resolved": 2,
+        "job_seconds": 100,
+        "review_seconds": 70,
+        "tokens": {"total": 50},
+    }
+    self.assertEqual({k: record[k] for k in expected}, expected)
+    summary = state.render_telemetry_summary(record)
+    self.assertIn("| outcome | posted |", summary)
+    self.assertIn("| verdicts | fixed: 2 |", summary)
+
+  def test_token_stats(self):
+    stdout = json.dumps(
+        {
+            "response": "Review posted.",
+            "stats": {
+                "models": {
+                    "gemini-pro": {
+                        "api": {"totalRequests": 4},
+                        "tokens": {"prompt": 100, "candidates": 20, "total": 120},
+                    },
+                    "gemini-flash": {"api": {"totalRequests": 1}, "tokens": {"prompt": 10, "total": 10, "cached": 5}},
+                }
+            },
+        }
+    )
+    self.assertEqual(
+        state.gemini_token_stats(stdout),
+        {"requests": 5, "prompt": 110, "candidates": 20, "cached": 5, "thoughts": 0, "total": 130},
+    )
+    self.assertEqual(state.gemini_token_stats("not json"), {})
+    self.assertEqual(state.gemini_token_stats("{}"), {})
+
+  def test_end_to_end(self):
+    fake = FakeGitHub([dict(_summary(HEAD, submitted_at="1970-01-01T00:20:00Z"), id=9)], review_comments=2)
+    with tempfile.TemporaryDirectory() as tmp:
+      state.write_json(os.path.join(tmp, "review_mode.json"), self.MODE)
+      env = dict(self.ENV, FIRST_OUTCOME="success", GITHUB_STEP_SUMMARY=os.path.join(tmp, "summary.md"))
+      with mock.patch.object(state, "gh_api", fake), mock.patch.dict(os.environ, env):
+        state.main(
+            [
+                "telemetry",
+                "--repository=o/r",
+                "--pull-number=7",
+                f"--bot-login={BOT}",
+                f"--output-dir={tmp}",
+                f"--output={os.path.join(tmp, 'telemetry.json')}",
+            ]
+        )
+      with open(os.path.join(tmp, "telemetry.json"), encoding="utf-8") as f:
+        record = json.load(f)
+      with open(os.path.join(tmp, "summary.md"), encoding="utf-8") as f:
+        summary = f.read()
+    self.assertEqual((record["outcome"], record["inline_comments"], record["apply_status"]), ("posted", 2, ""))
+    self.assertIn("MaxText Gemini review run", summary)
+
+  def test_missing_state_still_writes_record(self):
+    with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ, {"GITHUB_STEP_SUMMARY": ""}):
+      state.main(
+          [
+              "telemetry",
+              "--repository=o/r",
+              "--pull-number=7",
+              f"--output-dir={tmp}",
+              f"--output={os.path.join(tmp, 'telemetry.json')}",
+          ]
+      )
+      with open(os.path.join(tmp, "telemetry.json"), encoding="utf-8") as f:
+        self.assertEqual(json.load(f)["outcome"], "not_posted")
 
 
 class GhApiTest(unittest.TestCase):

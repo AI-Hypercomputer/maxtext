@@ -57,7 +57,23 @@ executed, or broken).
     Linters") are mirrored in the internal Copybara configuration that reports
     GitHub CI results back to internal code review. Flag renaming or removing
     such a job; the internal configuration must be updated in the same change.
-8.  **Gemini workflows.** Changes to the Gemini review/invoke/investigate
+8.  **Step outputs, conditions, and error paths.** For each new step output
+    (`$GITHUB_OUTPUT`) or outcome, check every value it can take, including
+    error and fallback branches, against every `if:` and step that reads it.
+    Flag error paths that let a job pass when its work failed (fail-open), and
+    `continue-on-error: true` steps whose failure is never reported later in
+    the job.
+9.  **Retries, sleeps, and timeouts.** When a change adds attempts, retries,
+    `sleep`, or long-running steps, check that the worst case still fits in the
+    job's `timeout-minutes` (even if that line is unchanged), and prefer
+    per-step `timeout-minutes` so one attempt cannot use up the whole budget.
+    Check that a retry cannot repeat a side effect (e.g., post a second review
+    or comment).
+10. **Classifiers over logs.** Patterns that classify failures by searching
+    logs or command output (e.g., for retryable HTTP 429/503) must require
+    context, such as a status label or reason phrase, so that a stray number or
+    word in a long log does not match.
+11. **Gemini workflows.** Changes to the Gemini review/invoke/investigate
     workflows, `.gemini/`, or `.agents/review/` must keep the tool allowlist minimal (read-only
     shell commands and a short `allowEnv` list without secrets), keep untrusted
     PR content out of instructions, and never give the model write credentials
