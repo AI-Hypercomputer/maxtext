@@ -1626,5 +1626,224 @@ class TestFromPretrainedAuth(unittest.TestCase):
     mock_run.assert_not_called()
 
 
+class TestFromPretrainedPathwaysZarr2(unittest.TestCase):
+  """Tests for Pathways Zarr v2 handler registration in from_pretrained."""
+
+  def setUp(self):
+    super().setUp()
+    metadata_patcher = patch.object(
+        model_creation_utils.checkpointing,
+        "load_checkpoint_metadata",
+        return_value={},
+    )
+    metadata_patcher.start()
+    self.addCleanup(metadata_patcher.stop)
+
+  def _make_nnx_metadata_mock(self):
+    metadata = MagicMock()
+    metadata.item_metadata.tree.keys.return_value = ["decoder"]
+    metadata.item_metadata.tree.get.return_value = {}
+    return metadata
+
+  def _build_registry(self, config):
+    # pylint: disable-next=protected-access
+    return model_creation_utils._create_pathways_zarr2_registry(config)
+
+  def _snapshot_global_handlers(self):
+    handlers = {}
+    for handler_type in ocp.type_handlers.supported_types():
+      handlers[handler_type] = ocp.type_handlers.get_type_handler(
+          handler_type,
+      )
+    return handlers
+
+  def test_from_pretrained_uses_scoped_registry_on_pathways_zarr2(self):
+    config = _make_config(
+        load_parameters_path="gs://fake_bucket/fake_ckpt",
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+    )
+    mesh = _make_mesh(config)
+    original_handlers = self._snapshot_global_handlers()
+    array_typestr = original_handlers[jax.Array].typestr()
+    fake_pathways_handler = MagicMock(spec=ocp.type_handlers.ArrayHandler)
+    fake_pathways_handler.typestr.return_value = array_typestr
+    pathways_client = types.SimpleNamespace(runtime_type="pathways")
+    pathways_device = types.SimpleNamespace(client=pathways_client)
+    call_order = []
+
+    def _fake_register(**_):
+      call_order.append("register")
+      ocp.type_handlers.register_type_handler(
+          jax.Array,
+          fake_pathways_handler,
+          override=True,
+      )
+
+    mock_checkpointer = MagicMock()
+    mock_checkpointer.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_checkpointer.restore.side_effect = _restore_as_zeros
+
+    def _fake_pytree_handler(**kwargs):
+      call_order.append("pytree_handler")
+      return kwargs
+
+    with (
+        patch.object(jax, "devices", return_value=[pathways_device]),
+        patch.object(
+            ocp.pathways,
+            "register_type_handlers",
+            side_effect=_fake_register,
+        ) as mock_register,
+        patch.object(
+            ocp,
+            "PyTreeCheckpointHandler",
+            side_effect=_fake_pytree_handler,
+        ) as mock_handler,
+        patch.object(ocp, "Checkpointer", return_value=mock_checkpointer),
+        patch.object(
+            ocp.checkpoint_utils,
+            "construct_restore_args",
+            return_value={},
+        ),
+    ):
+      model = model_creation_utils.from_pretrained(config, mesh)
+
+    self.assertIsInstance(model, models.Transformer)
+    mock_register.assert_called_once()
+    mock_handler.assert_called_once()
+    self.assertEqual(call_order, ["register", "pytree_handler"])
+    scoped_registry = mock_handler.call_args.kwargs["type_handler_registry"]
+    self.assertIs(scoped_registry.get(jax.Array), fake_pathways_handler)
+    self.assertEqual(self._snapshot_global_handlers(), original_handlers)
+
+  def test_pathways_client_attr_and_colocated_options(self):
+    config = _make_config(
+        load_parameters_path="gs://fake_bucket/fake_ckpt",
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+        enable_single_controller=True,
+        colocated_python_checkpointing=True,
+        enable_single_replica_ckpt_restoring=True,
+    )
+    mesh = _make_mesh(config)
+    original_handlers = self._snapshot_global_handlers()
+    pathways_client = types.SimpleNamespace(pathways=object())
+    pathways_device = types.SimpleNamespace(client=pathways_client)
+    mock_checkpointer = MagicMock()
+    mock_checkpointer.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_checkpointer.restore.side_effect = _restore_as_zeros
+
+    with (
+        patch.object(jax, "devices", return_value=[pathways_device]),
+        patch.object(
+            ocp.pathways,
+            "register_type_handlers",
+            wraps=ocp.pathways.register_type_handlers,
+        ) as mock_register,
+        patch.object(
+            ocp,
+            "PyTreeCheckpointHandler",
+            wraps=ocp.PyTreeCheckpointHandler,
+        ) as mock_handler,
+        patch.object(ocp, "Checkpointer", return_value=mock_checkpointer),
+        patch.object(
+            ocp.checkpoint_utils,
+            "construct_restore_args",
+            return_value={},
+        ),
+    ):
+      model = model_creation_utils.from_pretrained(config, mesh)
+
+    self.assertIsInstance(model, models.Transformer)
+    expected_impl = ocp.pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+        use_persistence_array_handler=True,
+    )
+    mock_register.assert_called_once_with(
+        use_single_replica_array_handler=False,
+        checkpointing_impl=expected_impl,
+    )
+    scoped_registry = mock_handler.call_args.kwargs["type_handler_registry"]
+    array_handler = scoped_registry.get(jax.Array)
+    self.assertIsInstance(array_handler, ocp.type_handlers.ArrayHandler)
+    self.assertNotIsInstance(
+        array_handler,
+        ocp.type_handlers.SingleReplicaArrayHandler,
+    )
+    self.assertEqual(self._snapshot_global_handlers(), original_handlers)
+
+  def test_skips_registration_for_ocdbt_zarr3_or_non_pathways(self):
+    pathways_client = types.SimpleNamespace(runtime_type="pathways")
+    pathways_device = types.SimpleNamespace(client=pathways_client)
+    cpu_device = types.SimpleNamespace(
+        client=types.SimpleNamespace(runtime_type="tfrt"),
+    )
+    cases = [
+        ("ocdbt", [pathways_device], True, False),
+        ("zarr3", [pathways_device], False, True),
+        ("non_pathways", [cpu_device], False, False),
+    ]
+    for name, devices, use_ocdbt, use_zarr3 in cases:
+      with self.subTest(case=name):
+        config = _make_config(
+            load_parameters_path="gs://fake_bucket/fake_ckpt",
+            checkpoint_storage_use_ocdbt=use_ocdbt,
+            checkpoint_storage_use_zarr3=use_zarr3,
+        )
+        with (
+            patch.object(jax, "devices", return_value=devices),
+            patch.object(
+                ocp.pathways,
+                "register_type_handlers",
+            ) as mock_register,
+        ):
+          registry = self._build_registry(config)
+        self.assertIsNone(registry)
+        mock_register.assert_not_called()
+
+  def test_fallback_on_registration_error_restores_global_registry(self):
+    config = _make_config(
+        load_parameters_path="gs://fake_bucket/fake_ckpt",
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+    )
+    original_handlers = self._snapshot_global_handlers()
+    pathways_client = types.SimpleNamespace(runtime_type="pathways")
+    pathways_device = types.SimpleNamespace(client=pathways_client)
+    fake_scalar_handler = MagicMock(spec=ocp.type_handlers.ScalarHandler)
+    fake_scalar_handler.typestr.return_value = original_handlers[int].typestr()
+    numpy_typestr = original_handlers[np.ndarray].typestr()
+    fake_numpy_handler = MagicMock(spec=ocp.type_handlers.NumpyHandler)
+    fake_numpy_handler.typestr.return_value = numpy_typestr
+    errors = (ImportError("missing dep"), NotImplementedError("oss"))
+    for error in errors:
+
+      def _partial_register_then_fail(*_, exc=error, **__):
+        ocp.type_handlers.register_type_handler(
+            int,
+            fake_scalar_handler,
+            override=True,
+        )
+        ocp.type_handlers.register_type_handler(
+            np.ndarray,
+            fake_numpy_handler,
+            override=True,
+        )
+        raise exc
+
+      with (
+          patch.object(jax, "devices", return_value=[pathways_device]),
+          patch.object(
+              ocp.pathways,
+              "register_type_handlers",
+              side_effect=_partial_register_then_fail,
+          ),
+      ):
+        registry = self._build_registry(config)
+      self.assertIsNone(registry)
+      self.assertEqual(self._snapshot_global_handlers(), original_handlers)
+
+
 if __name__ == "__main__":
   absltest.main()

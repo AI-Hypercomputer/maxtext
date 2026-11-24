@@ -37,6 +37,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 from typing import Any, Callable, overload
 from etils import epath
 from flax import nnx
@@ -1124,6 +1125,73 @@ def _load_safetensors_dynamic(model, sharded_state, config):
   nnx.update(model, restored_state.filter(lambda path, var: not isinstance(var.get_value(), jax.ShapeDtypeStruct)))
 
 
+_PATHWAYS_REGISTRY_LOCK = threading.Lock()
+
+
+def _snapshot_global_type_handlers() -> list[tuple[Any, Any]]:
+  """Returns a snapshot of all handlers in Orbax's global type registry."""
+  handlers = []
+  for handler_type in ocp.type_handlers.supported_types():
+    handlers.append(
+        (handler_type, ocp.type_handlers.get_type_handler(handler_type)),
+    )
+  return handlers
+
+
+def _create_pathways_zarr2_registry(
+    config: Any,
+) -> ocp.type_handlers.TypeHandlerRegistry | None:
+  """Builds a scoped Pathways TypeHandlerRegistry for Zarr v2 restores.
+
+  Args:
+    config: MaxText configuration containing checkpoint storage flags.
+
+  Returns:
+    A checkpointer-scoped ``TypeHandlerRegistry`` configured with Pathways
+    handlers for plain Zarr v2 checkpoints, or ``None`` when OCDBT or Zarr3 is
+    enabled, when no Pathways client/runtime is active, or when Pathways
+    handler registration fails.
+  """
+  if config.checkpoint_storage_use_ocdbt:
+    return None
+  if config.checkpoint_storage_use_zarr3:
+    return None
+  clients = [getattr(device, "client", None) for device in jax.devices()]
+  has_pathways_client = any(hasattr(client, "pathways") for client in clients)
+  runtimes = [getattr(client, "runtime_type", None) for client in clients]
+  if not has_pathways_client and "pathways" not in runtimes:
+    return None
+  use_colocated = getattr(config, "colocated_python_checkpointing", False)
+  with _PATHWAYS_REGISTRY_LOCK:
+    previous_handlers = _snapshot_global_type_handlers()
+    try:
+      checkpointing_impl = ocp.pathways.CheckpointingImpl.from_options(
+          use_colocated_python=use_colocated,
+          use_persistence_array_handler=True,
+      )
+      # Keep `use_single_replica_array_handler=False`: `from_pretrained` builds
+      # `ArrayRestoreArgs` via `construct_restore_args`, whereas
+      # `SingleReplicaArrayHandler` requires `SingleReplicaArrayRestoreArgs`.
+      ocp.pathways.register_type_handlers(
+          use_single_replica_array_handler=False,
+          checkpointing_impl=checkpointing_impl,
+      )
+      pathways_handlers = _snapshot_global_type_handlers()
+      return ocp.type_handlers.create_type_handler_registry(*pathways_handlers)
+    except (ImportError, NotImplementedError, ValueError, RuntimeError) as exc:
+      max_logging.log(
+          f"Falling back to default Orbax array handler on Pathways: {exc}",
+      )
+      return None
+    finally:
+      for handler_type, handler in previous_handlers:
+        ocp.type_handlers.register_type_handler(
+            handler_type,
+            handler,
+            override=True,
+        )
+
+
 # pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
@@ -1230,12 +1298,23 @@ def from_pretrained(
     if loads_safetensors_dynamic:
       _load_safetensors_dynamic(model, sharded_state, config)
     elif config.load_parameters_path:
+      # Orbax v0 PyTreeCheckpointHandler does not auto-register Pathways array
+      # handlers; without one, the single CPU controller reads every shard into
+      # host RAM and stages them over gRPC. Build a scoped Pathways persistence
+      # registry for plain Zarr v2 (both OCDBT and Zarr3 off, since
+      # PathwaysPersistenceArrayHandler hardcodes `driver: 'zarr'`) without
+      # mutating GLOBAL_TYPE_HANDLER_REGISTRY for subsequent checkpoints.
+      handler_kwargs: dict[str, Any] = {}
+      pathways_registry = _create_pathways_zarr2_registry(config)
+      if pathways_registry is not None:
+        handler_kwargs["type_handler_registry"] = pathways_registry
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
               save_concurrent_gb=config.checkpoint_storage_concurrent_gb,
               use_ocdbt=config.checkpoint_storage_use_ocdbt,
               use_zarr3=config.checkpoint_storage_use_zarr3,
+              **handler_kwargs,
           )
       )
 
