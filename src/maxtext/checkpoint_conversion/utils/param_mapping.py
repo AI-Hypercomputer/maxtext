@@ -63,6 +63,26 @@ from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 from maxtext.models.kimi_k3_layout import KimiScanLayout, kimi_scan_layout_from_spec
 
 
+class OptionalHFKey(str):
+  """String key marking an optional Hugging Face tensor (returns None if absent).
+
+  Used for mixed-precision or unquantized companion tensors such as Inkling 2's
+  NVFP4/MXFP8 expert quantization metadata (`*_weight_scale`, `*_weight_amax`,
+  `*_weight_outer_scale_denominator`).
+  """
+
+
+_INKLING2_NVFP4_E2M1_VALUES = np.array(
+    [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, -0.0, -0.5, -1.0, -1.5, -2.0, -3.0, -4.0, -6.0],
+    dtype=np.float32,
+)
+_INKLING2_NVFP4_BYTE_LUT = np.stack(
+    [_INKLING2_NVFP4_E2M1_VALUES[np.arange(256) & 0xF], _INKLING2_NVFP4_E2M1_VALUES[np.arange(256) >> 4]],
+    axis=-1,
+)
+_INKLING2_EXPERTS_PER_CHUNK = 8
+
+
 def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
   """Generates a parameter mapping from MaxText to Hugging Face for Gemma3.
 
@@ -5972,6 +5992,409 @@ def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fals
   return _kimi_k3_restack_scanned(hooks, layout, _kimi_k3_same_hook)
 
 
+def _inkling2_text_config(config) -> dict:
+  """Returns the Inkling 2 Loop text config as a plain dict."""
+  if config is None:
+    return {}
+  if hasattr(config, "to_dict"):
+    config = config.to_dict()
+  if not isinstance(config, dict):
+    raise TypeError(f"inkling2 expects the HF config as a dict or PretrainedConfig, got {type(config).__name__}")
+  text_config = config.get("text_config")
+  if text_config is not None:
+    config = text_config.to_dict() if hasattr(text_config, "to_dict") else dict(text_config)
+  return config
+
+
+def _inkling2_layout_params(config, maxtext_config) -> dict[str, int]:
+  """Resolves Inkling 2 layout dimensions, preferring `maxtext_config` overrides over `config` defaults."""
+  cfg = _inkling2_text_config(config)
+  loop_cfg = cfg.get("loop_config") or {}
+
+  def _pick(mt_attrs, hf_val):
+    if maxtext_config is not None:
+      for attr in mt_attrs:
+        val = getattr(maxtext_config, attr, None)
+        if val is not None:
+          return int(val)
+    return int(hf_val)
+
+  num_layers = _pick(("num_decoder_layers", "base_num_decoder_layers"), cfg.get("num_hidden_layers", 24))
+  block_size = _pick(("attn_res_block_size",), cfg.get("n_layers_per_attn_res_block", 6))
+  core_start = _pick(
+      ("inkling2_core_start",),
+      cfg.get("loop_layer_index_start", loop_cfg.get("core_start", 6)),
+  )
+  core_end = _pick(
+      ("inkling2_core_end",),
+      cfg.get("loop_layer_index_end", loop_cfg.get("core_end", 18)),
+  )
+  num_kv_heads = _pick(("num_kv_heads", "base_num_kv_heads"), cfg.get("num_key_value_heads", 8))
+  head_dim = _pick(("head_dim",), cfg.get("head_dim", 128))
+
+  if block_size <= 0 or num_layers % block_size != 0:
+    raise ValueError(f"inkling2 requires num_decoder_layers ({num_layers}) divisible by block_size ({block_size}).")
+  if core_start <= 0 or core_start >= core_end or core_end > num_layers:
+    raise ValueError(
+        f"inkling2 requires 0 < core_start ({core_start}) < core_end ({core_end}) <= num_decoder_layers ({num_layers})."
+    )
+  if core_start % block_size != 0 or core_end % block_size != 0:
+    raise ValueError(
+        f"inkling2 requires core_start ({core_start}) and core_end ({core_end}) to be multiples of "
+        f"block_size ({block_size})."
+    )
+  return {
+      "num_layers": num_layers,
+      "block_size": block_size,
+      "core_start": core_start,
+      "core_end": core_end,
+      "num_core_blocks": (core_end - core_start) // block_size,
+      "num_kv_heads": num_kv_heads,
+      "head_dim": head_dim,
+  }
+
+
+def _dequantize_inkling2_experts(weight, scale, amax, denominator):
+  """Dequantizes Inkling 2 Loop MoE experts from NVFP4 or MXFP8 to FP32, or passes through unquantized tensors.
+
+  Matches Hugging Face `Inkling2LoopDequantizeExperts` bit-for-bit:
+  - NVFP4 (`amax is not None`): uint8 packed E2M1 codes (low nibble = even, high nibble = odd),
+    float8_e4m3fn scale per 16 values, per-expert `amax / denominator`.
+  - MXFP8 (`scale is not None and amax is None`): float8_e4m3fn weights with UE8M0 uint8 scale
+    `2 ** (scale - 127)` per 32 values.
+  - Unquantized (`scale is None`): returns `weight` unchanged.
+  """
+  if scale is None:
+    return weight
+
+  if amax is not None:
+    if denominator is None:
+      raise ValueError("NVFP4 expert dequantization requires `*_weight_outer_scale_denominator`.")
+    num_experts, rows, half_cols = weight.shape
+    cols = half_cols * 2
+    out = np.empty((num_experts, rows, cols), dtype=np.float32)
+    expert_factor = np.asarray(amax).astype(np.float32) / np.asarray(denominator).astype(np.float32)
+    for start in range(0, num_experts, _INKLING2_EXPERTS_PER_CHUNK):
+      sl = slice(start, min(start + _INKLING2_EXPERTS_PER_CHUNK, num_experts))
+      codes = np.asarray(weight[sl], dtype=np.uint8)
+      block_scale = np.asarray(scale[sl]).astype(np.float32)
+      values = _INKLING2_NVFP4_BYTE_LUT[codes].reshape(*block_scale.shape, 16) * block_scale[..., None]
+      values = values * expert_factor[sl, None, None, None]
+      out[sl] = values.reshape(-1, rows, cols)
+    return out
+
+  num_experts, rows, cols = weight.shape
+  out = np.empty((num_experts, rows, cols), dtype=np.float32)
+  for start in range(0, num_experts, _INKLING2_EXPERTS_PER_CHUNK):
+    sl = slice(start, min(start + _INKLING2_EXPERTS_PER_CHUNK, num_experts))
+    block_scale = np.asarray(scale[sl]).astype(np.float32)
+    values = np.asarray(weight[sl]).astype(np.float32).reshape(*block_scale.shape, 32)
+    values = values * np.exp2(block_scale - 127.0)[..., None]
+    out[sl] = values.reshape(-1, rows, cols)
+  return out
+
+
+def _inkling2_single_layer_param_mapping(
+    layer_prefix: str, bias_prefix: str, layer_idx: int, *, is_full: bool, is_loop: bool
+) -> dict:
+  """Builds the MaxText -> HF parameter mapping for a single Inkling 2 decoder layer."""
+  p = f"model.llm.layers.{layer_idx}"
+  layer_map = {}
+
+  if layer_idx > 0:
+    layer_map[f"{layer_prefix}-attention_input-query"] = f"model.llm.attn_res.attn_queries.{layer_idx - 1}"
+  layer_map[f"{layer_prefix}-mlp_input-query"] = f"model.llm.attn_res.mlp_queries.{layer_idx}"
+
+  if is_full:
+    layer_map[f"{layer_prefix}-q_input_layernorm-scale"] = f"{p}.q_input_norm.weight"
+    layer_map[f"{layer_prefix}-k_input_layernorm-scale"] = f"{p}.k_input_norm.weight"
+    layer_map[f"{layer_prefix}-v_input_layernorm-scale"] = f"{p}.v_input_norm.weight"
+  else:
+    layer_map[f"{layer_prefix}-input_layernorm-scale"] = f"{p}.attn_norm.weight"
+  layer_map[f"{layer_prefix}-post_attention_layernorm-scale"] = f"{p}.mlp_norm.weight"
+
+  layer_map.update(
+      {
+          f"{layer_prefix}-self_attention-query-kernel": f"{p}.attn.wq_du.weight",
+          f"{layer_prefix}-self_attention-key-kernel": f"{p}.attn.wk_dv.weight",
+          f"{layer_prefix}-self_attention-value-kernel": f"{p}.attn.wv_dv.weight",
+          f"{layer_prefix}-self_attention-rel_proj-kernel": f"{p}.attn.wr_du.weight",
+          f"{layer_prefix}-self_attention-out-kernel": f"{p}.attn.wo_ud.weight",
+          f"{layer_prefix}-self_attention-gate_attn-kernel": f"{p}.attn.gate_attn.weight",
+          f"{layer_prefix}-self_attention-sink_proj-kernel": f"{p}.attn.attn_sink_proj.weight",
+          f"{layer_prefix}-self_attention-q_l2_clip_scale": f"{p}.attn.q_l2_clip.scale",
+          f"{layer_prefix}-self_attention-rel_l2_clip_scale": f"{p}.attn.rel_l2_clip.scale",
+          f"{layer_prefix}-self_attention-rel_logits_proj": f"{p}.attn.rel_logits_proj.proj",
+      }
+  )
+
+  if is_full:
+    layer_map.update(
+        {
+            f"{layer_prefix}-self_attention-k_sconv-static_w": f"{p}.attn.k_sconv.static_w",
+            f"{layer_prefix}-self_attention-k_sconv-weight_proj-kernel": f"{p}.attn.k_sconv.weight_proj",
+            f"{layer_prefix}-self_attention-v_sconv-static_w": f"{p}.attn.v_sconv.static_w",
+            f"{layer_prefix}-self_attention-v_sconv-weight_proj-kernel": f"{p}.attn.v_sconv.weight_proj",
+        }
+    )
+  else:
+    layer_map.update(
+        {
+            f"{layer_prefix}-self_attention-k_sconv-kernel": f"{p}.attn.k_sconv.weight",
+            f"{layer_prefix}-self_attention-v_sconv-kernel": f"{p}.attn.v_sconv.weight",
+        }
+    )
+
+  layer_map[f"{layer_prefix}-post_attention_convolution-kernel"] = f"{p}.attn_sconv.weight"
+  layer_map[f"{layer_prefix}-post_mlp_convolution-kernel"] = f"{p}.mlp_sconv.weight"
+
+  if is_loop:
+    for mt_ctrl, hf_ctrl in (("q", "attn"), ("k", "k"), ("v", "v"), ("mlp", "mlp")):
+      layer_map[f"{layer_prefix}-{mt_ctrl}_message_gate-down_proj-kernel"] = f"{p}.controllers.{hf_ctrl}.down_weight"
+      layer_map[f"{layer_prefix}-{mt_ctrl}_message_gate-forget_gate_proj-kernel"] = (
+          f"{p}.controllers.{hf_ctrl}.forget_weight"
+      )
+      layer_map[f"{layer_prefix}-{mt_ctrl}_message_gate-message_gate_proj-kernel"] = (
+          f"{p}.controllers.{hf_ctrl}.gain_weight"
+      )
+
+  layer_map[f"{layer_prefix}-mlp-gate-kernel"] = f"{p}.mlp.gate.weight"
+  layer_map[f"{bias_prefix}-mlp-gate-bias"] = f"{p}.mlp.gate.bias"
+  layer_map[(f"{layer_prefix}-mlp-wi_0", f"{layer_prefix}-mlp-wi_1")] = (
+      f"{p}.mlp.experts.w13_weight",
+      OptionalHFKey(f"{p}.mlp.experts.w13_weight_scale"),
+      OptionalHFKey(f"{p}.mlp.experts.w13_weight_amax"),
+      OptionalHFKey(f"{p}.mlp.experts.w13_weight_outer_scale_denominator"),
+  )
+  layer_map[f"{layer_prefix}-mlp-wo"] = (
+      f"{p}.mlp.experts.w2_weight",
+      OptionalHFKey(f"{p}.mlp.experts.w2_weight_scale"),
+      OptionalHFKey(f"{p}.mlp.experts.w2_weight_amax"),
+      OptionalHFKey(f"{p}.mlp.experts.w2_weight_outer_scale_denominator"),
+  )
+  return layer_map
+
+
+def INKLING2_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates MaxText -> Hugging Face parameter mapping for Inkling 2 Loop (`model.llm.*`)."""
+  layout = _inkling2_layout_params(config, maxtext_config)
+  num_layers = layout["num_layers"]
+  block_size = layout["block_size"]
+  core_start = layout["core_start"]
+  core_end = layout["core_end"]
+  num_core_blocks = layout["num_core_blocks"]
+
+  mapping = {
+      "params-token_embedder-embedding": "model.llm.embed.weight",
+      "params-decoder-embed_norm-scale": "model.llm.embed_norm.weight",
+      "params-decoder-decoder_norm-scale": "model.llm.norm.weight",
+      "params-decoder-logits_dense-kernel": "model.llm.unembed.weight",
+      "params-decoder-final_input-query": "model.llm.attn_res.output_query",
+      "params-decoder-message_input-query": (
+          "model.llm.middle_cycle_cross_pass_queries",
+          "model.llm.middle_cycle_cross_pass_kv_queries",
+      ),
+  }
+
+  def _add_unrolled(layer_idx: int):
+    mapping.update(
+        _inkling2_single_layer_param_mapping(
+            f"params-decoder-layers_{layer_idx}",
+            f"MoEBiasVar-decoder-layers_{layer_idx}",
+            layer_idx,
+            is_full=((layer_idx + 1) % block_size == 0),
+            is_loop=(core_start <= layer_idx < core_end),
+        )
+    )
+
+  if not scan_layers:
+    for i in range(num_layers):
+      _add_unrolled(i)
+    return mapping
+
+  # Prelude (unrolled)
+  for i in range(core_start):
+    _add_unrolled(i)
+
+  # Core (1-level scanned blocks: scanned_blocks-sub_layer_{s})
+  for s in range(block_size):
+    is_full = (s + 1) % block_size == 0
+    layer_prefix = f"params-decoder-scanned_blocks-sub_layer_{s}"
+    bias_prefix = f"MoEBiasVar-decoder-scanned_blocks-sub_layer_{s}"
+    per_block = [
+        _inkling2_single_layer_param_mapping(
+            layer_prefix,
+            bias_prefix,
+            core_start + b * block_size + s,
+            is_full=is_full,
+            is_loop=True,
+        )
+        for b in range(num_core_blocks)
+    ]
+    for mt_key in per_block[0]:
+      mapping[mt_key] = [block_map[mt_key] for block_map in per_block]
+
+  # Coda (unrolled)
+  for i in range(core_end, num_layers):
+    _add_unrolled(i)
+
+  return mapping
+
+
+def INKLING2_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Returns bidirectional transformation hooks for Inkling 2 Loop checkpoints."""
+  layout = _inkling2_layout_params(config, maxtext_config)
+  num_layers = layout["num_layers"]
+  block_size = layout["block_size"]
+  core_start = layout["core_start"]
+  core_end = layout["core_end"]
+  num_kv_heads = layout["num_kv_heads"]
+  head_dim = layout["head_dim"]
+
+  def transpose_2d(input_tensor, target_shape=None):
+    del target_shape
+    return input_tensor.T
+
+  def reshape_kernel(input_tensor, target_shape=None):
+    if saving_to_hf:
+      if target_shape is not None:
+        return input_tensor.reshape((int(target_shape[1]), int(target_shape[0]))).T
+      return input_tensor.T
+    transposed = input_tensor.T
+    return transposed.reshape(target_shape) if target_shape is not None else transposed
+
+  def reshape_static_w(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.reshape(target_shape if target_shape is not None else (input_tensor.shape[0], -1))
+    return input_tensor.reshape(
+        target_shape if target_shape is not None else (input_tensor.shape[0], num_kv_heads, head_dim)
+    )
+
+  def convert_head_sconv(input_tensor, target_shape=None):
+    if saving_to_hf:
+      # MT [K, Hkv, D] -> HF [Hkv * D, 1, K]
+      return input_tensor.reshape((input_tensor.shape[0], -1)).T[:, None, :]
+    # HF [Hkv * D, 1, K] -> MT [K, Hkv, D]
+    transposed = input_tensor[:, 0, :].T
+    return transposed.reshape(target_shape if target_shape is not None else (transposed.shape[0], num_kv_heads, head_dim))
+
+  def convert_hidden_sconv(input_tensor, target_shape=None):
+    del target_shape
+    if saving_to_hf:
+      # MT [K, H] -> HF [H, 1, K]
+      return input_tensor.T[:, None, :]
+    # HF [H, 1, K] -> MT [K, H]
+    return input_tensor[:, 0, :].T
+
+  def convert_message_queries(input_tensor, target_shape=None):
+    del target_shape
+    if saving_to_hf:
+      # MT [Nc, 4, H] ([q, k, v, mlp]) -> HF ([2*Nc, H] [q, mlp], [2*Nc, H] [k, v])
+      xp = _array_module(input_tensor)
+      hidden = input_tensor.shape[-1]
+      queries = xp.stack([input_tensor[:, 0, :], input_tensor[:, 3, :]], axis=1).reshape(-1, hidden)
+      kv_queries = input_tensor[:, 1:3, :].reshape(-1, hidden)
+      return queries, kv_queries
+    queries, kv_queries = input_tensor
+    xp = _array_module(queries, kv_queries)
+    hidden = queries.shape[-1]
+    q_mlp = queries.reshape(-1, 2, hidden)
+    kv = kv_queries.reshape(-1, 2, hidden)
+    return xp.concatenate([q_mlp[:, :1, :], kv, q_mlp[:, 1:, :]], axis=1)
+
+  def process_w13(input_tensor, target_shape=None):
+    del target_shape
+    if saving_to_hf:
+      # MT (wi_0 [E, H, I], wi_1 [E, H, I]) -> HF (w13_weight [E, 2*I, H],) interleaved [g_0, u_0, ...]
+      wi_0, wi_1 = input_tensor
+      xp = _array_module(wi_0, wi_1)
+      gate = wi_0.swapaxes(-1, -2)
+      up = wi_1.swapaxes(-1, -2)
+      w13 = xp.stack([gate, up], axis=2).reshape(gate.shape[0], 2 * gate.shape[1], gate.shape[2])
+      return (w13,)
+    if isinstance(input_tensor, tuple):
+      weight, scale, amax, denominator = input_tensor
+    else:
+      weight, scale, amax, denominator = input_tensor, None, None, None
+    dequant = _dequantize_inkling2_experts(weight, scale, amax, denominator)
+    xp = _array_module(dequant)
+    gate = dequant[:, 0::2, :].swapaxes(-1, -2)
+    up = dequant[:, 1::2, :].swapaxes(-1, -2)
+    return xp.stack([gate, up], axis=-1)
+
+  def process_w2(input_tensor, target_shape=None):
+    del target_shape
+    if saving_to_hf:
+      # MT wo [E, I, H] -> HF (w2_weight [E, H, I],)
+      return (input_tensor.swapaxes(-1, -2),)
+    if isinstance(input_tensor, tuple):
+      weight, scale, amax, denominator = input_tensor
+    else:
+      weight, scale, amax, denominator = input_tensor, None, None, None
+    dequant = _dequantize_inkling2_experts(weight, scale, amax, denominator)
+    return dequant.swapaxes(-1, -2)
+
+  hooks = {
+      "params-decoder-logits_dense-kernel": transpose_2d,
+      "params-decoder-message_input-query": convert_message_queries,
+  }
+
+  def _attach_layer_hooks(layer_prefix: str, *, is_full: bool, is_loop: bool):
+    for k in ("query", "key", "value", "rel_proj", "out", "gate_attn"):
+      hooks[f"{layer_prefix}-self_attention-{k}-kernel"] = reshape_kernel
+    hooks[f"{layer_prefix}-self_attention-sink_proj-kernel"] = transpose_2d
+    if is_full:
+      hooks[f"{layer_prefix}-self_attention-k_sconv-static_w"] = reshape_static_w
+      hooks[f"{layer_prefix}-self_attention-k_sconv-weight_proj-kernel"] = reshape_kernel
+      hooks[f"{layer_prefix}-self_attention-v_sconv-static_w"] = reshape_static_w
+      hooks[f"{layer_prefix}-self_attention-v_sconv-weight_proj-kernel"] = reshape_kernel
+    else:
+      hooks[f"{layer_prefix}-self_attention-k_sconv-kernel"] = convert_head_sconv
+      hooks[f"{layer_prefix}-self_attention-v_sconv-kernel"] = convert_head_sconv
+    hooks[f"{layer_prefix}-post_attention_convolution-kernel"] = convert_hidden_sconv
+    hooks[f"{layer_prefix}-post_mlp_convolution-kernel"] = convert_hidden_sconv
+    if is_loop:
+      for ctrl in ("q", "k", "v", "mlp"):
+        hooks[f"{layer_prefix}-{ctrl}_message_gate-down_proj-kernel"] = transpose_2d
+        hooks[f"{layer_prefix}-{ctrl}_message_gate-forget_gate_proj-kernel"] = transpose_2d
+        hooks[f"{layer_prefix}-{ctrl}_message_gate-message_gate_proj-kernel"] = transpose_2d
+    hooks[f"{layer_prefix}-mlp-gate-kernel"] = transpose_2d
+    hooks[(f"{layer_prefix}-mlp-wi_0", f"{layer_prefix}-mlp-wi_1")] = process_w13
+    hooks[f"{layer_prefix}-mlp-wo"] = process_w2
+
+  if not scan_layers:
+    for i in range(num_layers):
+      _attach_layer_hooks(
+          f"params-decoder-layers_{i}",
+          is_full=((i + 1) % block_size == 0),
+          is_loop=(core_start <= i < core_end),
+      )
+    return hooks
+
+  for i in range(core_start):
+    _attach_layer_hooks(
+        f"params-decoder-layers_{i}",
+        is_full=((i + 1) % block_size == 0),
+        is_loop=False,
+    )
+  for s in range(block_size):
+    _attach_layer_hooks(
+        f"params-decoder-scanned_blocks-sub_layer_{s}",
+        is_full=((s + 1) % block_size == 0),
+        is_loop=True,
+    )
+  for i in range(core_end, num_layers):
+    _attach_layer_hooks(
+        f"params-decoder-layers_{i}",
+        is_full=((i + 1) % block_size == 0),
+        is_loop=False,
+    )
+  return hooks
+
+
+INKLING2_HOOK_FNS = INKLING2_MAXTEXT_TO_HF_PARAM_HOOK_FN
+
+
 PARAM_MAPPING = {
     "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -6038,6 +6461,7 @@ PARAM_MAPPING = {
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_MAPPING,
     "ming-3.0-audio-tiny-talker": MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "inkling2-mini": INKLING2_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
@@ -6108,6 +6532,7 @@ HOOK_FNS = {
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "ming-3.0-audio-tiny-talker": MING_TALKER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "inkling2-mini": INKLING2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
 VLLM_HOOK_FNS = {

@@ -974,7 +974,7 @@ DEEPSEEK_V3_ROUTING_MODEL_PREFIXES = ctypes.DEEPSEEK_V3_ROUTING_MODEL_PREFIXES
 # selection, so it has no gradient; keeping it out of `nnx.Param` also keeps it out of the optimizer, so AdamW
 # weight decay cannot pull it toward zero and no Adam moments are allocated for it. The variable path
 # (`.../gate/bias`) is unchanged, and checkpoints that store it under `params` are aliased on restore.
-MOE_BIAS_VAR_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4", "kimi-k3")
+MOE_BIAS_VAR_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4", "kimi-k3", "inkling2")
 
 
 class MoEBiasVar(nnx.Variable):
@@ -1951,7 +1951,7 @@ class RoutedMoE(nnx.Module):
     else:
       self.quant_einsums = None
 
-    gate_weight_dtype = ctypes.get_weight_dtype(self.config, "gate")
+    gate_weight_dtype = jnp.float32 if self.config.float32_gate_logits else ctypes.get_weight_dtype(self.config, "gate")
     self.use_gate_bias = self.config.routed_bias and not self.is_hash_routing
     # The router may read a different (wider) input than the experts, e.g. Kimi-K3's latent MoE routes on the
     # full hidden state but runs the experts on a down-projected latent; that input arrives as `gate_inputs`.
@@ -1973,7 +1973,7 @@ class RoutedMoE(nnx.Module):
         # so we don't apply it here to avoid redundant computation.
         # See https://github.com/vllm-project/tpu-inference/blob/main/tpu_inference/layers/common/fused_moe_gmm.py#L58.
         score_func="" if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") else self.config.routed_score_func,
-        matmul_precision=self.config.matmul_precision,
+        matmul_precision=getattr(self.config, "gate_matmul_precision", "") or self.config.matmul_precision,
         shard_mode=config.shard_mode,
         rngs=self.rngs,
     )
@@ -2375,6 +2375,8 @@ class RoutedMoE(nnx.Module):
       if self.config.decoder_block == ctypes.DecoderBlockType.GEMMA4:
         router_probs = jax.nn.softmax(gate_logits.astype(jnp.float32), axis=-1)
         top_k_weights = jnp.take_along_axis(router_probs, gather_indices, axis=-1).astype(self.dtype)
+      elif pre_bias_logits is not None and self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES):
+        top_k_weights = jnp.take_along_axis(pre_bias_logits, gather_indices, axis=-1)
       else:
         top_k_weights = jnp.take_along_axis(gate_logits, gather_indices, axis=-1)
     else:
@@ -2437,6 +2439,7 @@ class RoutedMoE(nnx.Module):
         ctypes.DecoderBlockType.DEEPSEEK4,
         ctypes.DecoderBlockType.MING,
         ctypes.DecoderBlockType.HY4,
+        ctypes.DecoderBlockType.INKLING2,
     ) or (
         self.config.decoder_block == ctypes.DecoderBlockType.KIMI_LINEAR
         and self.config.model_name.startswith(DEEPSEEK_V3_ROUTING_MODEL_PREFIXES)
@@ -2579,8 +2582,14 @@ class RoutedMoE(nnx.Module):
         layer_act = self.activation_fn(layer_w0)
         intermediate_layer = jnp.multiply(layer_act, layer_w1)
       elif self.is_situ_glu:
-        # Kimi-K3 SiTU GLU: gate * up in fp32 with a single final cast, matching HF `SituAndMul`.
-        intermediate_layer = linears.situ_and_mul(layer_w0, layer_w1, dtype=self.dtype)
+        # Kimi-K3 / Inkling-2 SiTU GLU: gate * up in fp32 with a single final cast, matching HF `SituAndMul`.
+        intermediate_layer = linears.situ_and_mul(
+            layer_w0,
+            layer_w1,
+            gate_beta=getattr(self.config, "mlp_gate_softcap", linears.KIMI_K3_SITU_BETA),
+            linear_beta=getattr(self.config, "mlp_up_softcap", linears.KIMI_K3_SITU_LINEAR_BETA),
+            dtype=self.dtype,
+        )
       else:
         layer_act = self.activation_fn(layer_w0)
         intermediate_layer = jnp.multiply(layer_act, self.up_activation_fn(layer_w1))

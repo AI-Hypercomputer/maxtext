@@ -115,6 +115,7 @@ HF_IDS = {
     "ming-3.0-audio-tiny": "inclusionAI/Ming-3.0-audio-tiny",
     "ming-3.0-audio-tiny-talker": "inclusionAI/Ming-3.0-audio-tiny",  # convert with --hf_model_path=<snapshot>/talker
     "hy4-preview": "tencent/Hy4-preview",
+    "inkling2-mini": "thinkingmachines/Inkling-2-Mini",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
     "default": DEFAULT_TOKENIZER_PATH,
 }

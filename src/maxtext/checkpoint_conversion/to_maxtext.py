@@ -66,7 +66,7 @@ import jax
 from maxtext.configs import pyconfig
 from maxtext.configs.types import DType
 from maxtext.checkpoint_conversion.utils.hf_model_configs import HF_MODEL_CONFIGS
-from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, PARAM_MAPPING
+from maxtext.checkpoint_conversion.utils.param_mapping import HOOK_FNS, OptionalHFKey, PARAM_MAPPING
 from maxtext.checkpoint_conversion.utils.tensor_handling import apply_hook_fns, nesting_depth, single_stack_axis, slice_shape, stacked_axes
 from maxtext.checkpoint_conversion.utils.utils import MemoryMonitorTqdm, load_hf_dict_from_transformers, load_hf_dict_from_safetensors, param_key_parts_from_path, print_peak_memory, print_ram_usage, save_weights_to_checkpoint, validate_and_filter_param_map_keys
 from maxtext.inference.inference_utils import str2bool
@@ -109,6 +109,14 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
   """
   if torch is not None and isinstance(tensor, torch.Tensor):
     tensor = tensor.detach().cpu()
+    # Raw pass-through mode preserves exact quantization bytes/scales (e.g. NVFP4 uint8, MXFP8 float8_e4m3fn).
+    if save_dtype == "raw":
+      if tensor.dtype == torch.float8_e4m3fn:
+        return tensor.view(torch.uint8).numpy().view(ml_dtypes.float8_e4m3fn)
+      if tensor.dtype == torch.bfloat16:
+        return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
+      return tensor.numpy()
+
     # If target is float32, convert all tensors to float32
     if save_dtype in ("float32", DType.FLOAT32):
       return tensor.to(torch.float32).numpy()
@@ -130,7 +138,9 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
 
     # Target is bfloat16
     if save_dtype in ("bfloat16", DType.BFLOAT16):
-      if tensor.dtype == torch.bfloat16:
+      if tensor.dtype == torch.uint8:
+        return tensor.numpy()
+      elif tensor.dtype == torch.bfloat16:
         return tensor.view(torch.int16).numpy().view(ml_dtypes.bfloat16)
       elif tensor.dtype == torch.float8_e4m3fn:
         return tensor.to(torch.float32).numpy().astype(ml_dtypes.bfloat16)
@@ -140,8 +150,16 @@ def _convert_tensor_to_numpy(tensor, save_dtype: str = "bfloat16") -> np.ndarray
     return tensor.numpy()
 
   if isinstance(tensor, np.ndarray):
+    if save_dtype == "raw":
+      return tensor
     if save_dtype in ("float32", DType.FLOAT32) and tensor.dtype != np.float32:
       return tensor.astype(np.float32)
+    if (
+        save_dtype in ("bfloat16", DType.BFLOAT16)
+        and (np.issubdtype(tensor.dtype, np.floating) or tensor.dtype == ml_dtypes.float8_e4m3fn)
+        and tensor.dtype != ml_dtypes.bfloat16
+    ):
+      return tensor.astype(np.float32).astype(ml_dtypes.bfloat16)
     return tensor
   return np.asarray(tensor)
 
@@ -170,6 +188,19 @@ _FULL_PRECISION_SUFFIXES_BY_MODEL = {
         "-self_attention-v_conv1d-kernel",
         "-self_attention-o_norm-scale",
     ),
+    "inkling2-mini": (
+        "-mlp-gate-kernel",
+        "-post_attention_convolution-kernel",
+        "-post_mlp_convolution-kernel",
+        "-k_sconv-kernel",
+        "-v_sconv-kernel",
+        "-attention_input-query",
+        "-mlp_input-query",
+        "-final_input-query",
+        "-message_input-query",
+        "-forget_gate_proj-kernel",
+        "-message_gate_proj-kernel",
+    ),
 }
 
 
@@ -184,6 +215,24 @@ def _param_save_dtype(mt_param_key_or_keys, save_dtype: str, model_name: str | N
   if suffixes and any(k.endswith(suffixes) for k in keys):
     return "float32"
   return save_dtype
+
+
+def _needs_raw_hf_tensors(hf_source_keys_or_key) -> bool:
+  """Returns True if any HF source key is an OptionalHFKey (e.g. quantized expert bundles)."""
+  if isinstance(hf_source_keys_or_key, OptionalHFKey):
+    return True
+  if isinstance(hf_source_keys_or_key, (list, tuple)):
+    return any(_needs_raw_hf_tensors(k) for k in hf_source_keys_or_key)
+  return False
+
+
+def _target_numpy_dtype(dtype_str: str):
+  """Maps a MaxText checkpoint dtype string to the matching NumPy / ml_dtypes scalar type."""
+  if dtype_str in ("bfloat16", DType.BFLOAT16):
+    return ml_dtypes.bfloat16
+  if dtype_str in ("float8_e4m3fn", DType.FLOAT8_E4M3FN):
+    return ml_dtypes.float8_e4m3fn
+  return np.float32
 
 
 class LazyHFLoader:
@@ -266,7 +315,7 @@ class LazyHFLoader:
       index_data = json.load(f)
     self.shard_map = index_data["weight_map"]
 
-  def get_tensor(self, key: str, dtype: str | None = None) -> np.ndarray:
+  def get_tensor(self, key: str, dtype: str | None = None) -> np.ndarray | None:
     """
     Retrieves a specific tensor by name, lazily loading its shard if necessary.
 
@@ -284,6 +333,8 @@ class LazyHFLoader:
     if shard_name is None and None in self.shard_map:
       shard_name = self.shard_map[None]
     elif shard_name is None:
+      if isinstance(key, OptionalHFKey):
+        return None
       # Fallback: sometimes keys in index don't perfectly match requested keys if there are prefix mismatches.
       # You might need advanced fuzzy matching here if you encounter errors.
       raise ValueError(f"Key {key} not found in HF checkpoint index.")
@@ -309,7 +360,12 @@ class LazyHFLoader:
     with self._ram_lock:
       framework = "pt" if torch is not None else "np"
       with safe_open(local_path, framework=framework, device="cpu") as f:
-        t = f.get_tensor(resolved_key)
+        str_key = str(resolved_key)
+        if str_key not in f.keys():
+          if isinstance(key, OptionalHFKey):
+            return None
+          raise ValueError(f"Key {key} not found in {local_path}.")
+        t = f.get_tensor(str_key)
         return _convert_tensor_to_numpy(t, dtype or self.save_dtype)
 
 
@@ -355,7 +411,7 @@ class LazyTensor:
   def itemsize(self):
     return self.dtype.itemsize
 
-  def __array__(self, dtype=None):
+  def __array__(self, dtype=None, copy=None):
     """
     Materializes the tensor data.
 
@@ -364,6 +420,7 @@ class LazyTensor:
     and transformation of the tensor from the Hugging Face checkpoint. The
     resulting NumPy array is then returned to the caller.
     """
+    del copy
     # This method is called just-in-time by Orbax when saving this specific leaf.
     try:
       arr = self._load_fn()
@@ -537,13 +594,18 @@ def _build_single_axis_stacked_tensor(
   """
   tensors_to_stack = []
 
-  axis_to_stack = single_stack_axis(mt_key, config, target_shape)
+  is_composite = isinstance(target_shape, list)
+  sample_target_shape = target_shape[0] if is_composite else target_shape
+  axis_to_stack = single_stack_axis(mt_key, config, sample_target_shape)
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
-  mt_slice_shape_list = list(target_shape)
-  del mt_slice_shape_list[axis_to_stack]
-  mt_slice_shape = tuple(mt_slice_shape_list)
+  if is_composite:
+    mt_slice_shape = [tuple(dim for j, dim in enumerate(shape) if j != axis_to_stack) for shape in target_shape]
+  else:
+    mt_slice_shape_list = list(target_shape)
+    del mt_slice_shape_list[axis_to_stack]
+    mt_slice_shape = tuple(mt_slice_shape_list)
 
   for hf_key_single in hf_source_keys:
     if isinstance(hf_key_single, (list, tuple)):
@@ -1095,6 +1157,12 @@ def main(
       #   changed and the 'transformers' method may produce different key structures.
       # - Use 'transformers' only if explicitly needed for backward-compatible key mapping (e.g. Gemma3).
       if eager_load_method == "transformers":
+        if model_name_original == "inkling2-mini":
+          raise ValueError(
+              "inkling2-mini checkpoint conversion reads raw `model.llm.*` safetensors directly "
+              "(including NVFP4/MXFP8 expert dequantization); use `lazy_load_tensors=True` or "
+              "`eager_load_method='safetensors'`."
+          )
         max_logging.log("Eager load with Transformers backend, from_pretrained with auto dtype")
         # For auto mode, loaded dtype is the same as `dtype` specified in config.json (or `torch_dtype` for older version)
         # e.g., https://huggingface.co/deepseek-ai/DeepSeek-V2-Lite/blob/main/config.json#L54
@@ -1131,6 +1199,8 @@ def main(
           return None
         resolved_key = resolve_scale_key(key, hf_state_dict_numpy)
         if resolved_key not in hf_state_dict_numpy:
+          if isinstance(key, OptionalHFKey):
+            return None
           raise ValueError(f"HuggingFace key {key} not found in state_dict.")
 
         v = hf_state_dict_numpy[resolved_key]
@@ -1191,11 +1261,22 @@ def main(
       # Step 2: Determine the loading function for hf key
       # based on hf_key form (unscanned, scanned, unscanned with expert stacking, or scanned with expert stacking)
       param_save_dtype = _param_save_dtype(mt_param_key_or_keys, save_dtype, model_key)
-      getter = tensor_getter if param_save_dtype == save_dtype else partial(tensor_getter, dtype=param_save_dtype)
+      if _needs_raw_hf_tensors(hf_source_keys_or_key):
+        getter = partial(tensor_getter, dtype="raw")
+        target_np_dtype = _target_numpy_dtype(param_save_dtype)
+
+        def _cast_hook(weight, target_shape, _hook=hook_fn, _dtype=target_np_dtype):
+          out = apply_hook_fns(weight, target_shape, _hook)
+          return out.astype(_dtype) if getattr(out, "dtype", None) != _dtype else out
+
+        effective_hook_fn = _cast_hook
+      else:
+        getter = tensor_getter if param_save_dtype == save_dtype else partial(tensor_getter, dtype=param_save_dtype)
+        effective_hook_fn = hook_fn
       load_fn = _get_hf_loading_function(
           hf_source_keys_or_key,
           getter,
-          hook_fn,
+          effective_hook_fn,
           mt_target_shape_or_shapes,
           config,
           mt_param_key_or_keys,
@@ -1231,14 +1312,26 @@ def main(
   max_logging.log(f"Length of state_params leaves: {len(leaves)}")
   if leaves:
     max_logging.log(f"Type of first leaf before saving: {type(leaves[0])}")
-  if lazy_load_tensors and not is_adapter_only:
+  # Save the converted weights to a MaxText checkpoint.
+  # When simulated_cpu_devices_count > 1 (the default), save_weights_to_checkpoint runs
+  # shard_jax_weights, which streams LazyTensors one leaf at a time into sharded jax.Arrays.
+  # When simulated_cpu_devices_count <= 1, shard_jax_weights is skipped and leaves go directly
+  # to Orbax V1 (whose StandardLeafHandlerRegistry has no LazyTensor handler), so materialize
+  # LazyTensors to NumPy arrays here.
+  if simulated_cpu_devices_count <= 1 and lazy_load_tensors and not is_adapter_only:
+    max_logging.log(
+        "Single-device save (simulated_cpu_devices_count <= 1) skips shard_jax_weights; "
+        "materializing LazyTensors into NumPy arrays for Orbax V1 compatibility "
+        "(use simulated_cpu_devices_count > 1 for streaming low-RAM saves)."
+    )
+    state_params = jax.tree_util.tree_map(
+        lambda x: np.asarray(x) if isinstance(x, LazyTensor) else x,
+        state_params,
+    )
+  elif lazy_load_tensors and not is_adapter_only:
     max_logging.log("Starting checkpoint save (loading weights just-in-time)...")
   else:
     max_logging.log("Starting checkpoint save...")
-
-  # Save the converted weights to a MaxText checkpoint.
-  # If simulated_cpu_devices_count > 1, weights are promoted from NumPy to JAX arrays
-  # and sharded across virtual devices.
   save_weights_to_checkpoint(
       output_directory,
       state_params,
