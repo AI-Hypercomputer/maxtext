@@ -2712,5 +2712,486 @@ class ValidationErrorTest(parameterized.TestCase):
     self.assertIsNone(_ALL_GATHER_OP_RE.search(async_done_line.split("=", 1)[1]))
 
 
+class MoEDroplessOverflowBufferTest(parameterized.TestCase):
+  """Verifies capacity-bounded EP receive buffer + conditional overflow rounds (`moe_dropless_buffer_factor`)."""
+
+  def test_config_and_executor_validation_and_auto_resolution(self):
+    self.assertEqual(m3_moe.resolve_dropless_buffer_factor(-1.0, ep_size=1), 0.0)
+    self.assertEqual(m3_moe.resolve_dropless_buffer_factor(-1.0, ep_size=4), 0.0)
+    self.assertEqual(m3_moe.resolve_dropless_buffer_factor(-1.0, ep_size=8), 2.0)
+    self.assertEqual(m3_moe.resolve_dropless_buffer_factor(-1.0, ep_size=16), 2.0)
+    self.assertEqual(m3_moe.resolve_dropless_buffer_factor(0.0, ep_size=16), 0.0)
+    self.assertEqual(m3_moe.resolve_dropless_buffer_factor(1.25, ep_size=4), 1.25)
+    self.assertEqual(m3_moe.resolve_dropless_buffer_factor(4.0, ep_size=4), 0.0)
+    self.assertEqual(m3_moe.resolve_dropless_buffer_factor(-1.0, ep_size=16, capacity_factor=1.25), 0.0)
+    self.assertEqual(m3_moe.resolve_dropless_buffer_factor(-1.0, ep_size=16, ragged_buffer_factor=2.0), 0.0)
+
+    ex_auto = m3_moe.moe_from_config(SimpleNamespace(num_experts=8, sparse_matmul=True))
+    self.assertEqual(ex_auto.dropless_buffer_factor, -1.0)
+    ex_zero = m3_moe.moe_from_config(SimpleNamespace(num_experts=8, sparse_matmul=True, moe_dropless_buffer_factor=0.0))
+    self.assertEqual(ex_zero.dropless_buffer_factor, 0.0)
+    ex_explicit = m3_moe.moe_from_config(
+        SimpleNamespace(num_experts=8, sparse_matmul=True, moe_dropless_buffer_factor=1.5)
+    )
+    self.assertEqual(ex_explicit.dropless_buffer_factor, 1.5)
+
+    from maxtext.configs import types as maxtext_types  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.configs import config as m3_cfg  # pylint: disable=import-outside-toplevel
+
+    for bad_dbf in (-2.0, -0.5, float("nan"), float("inf"), float("-inf"), True, False):
+      with self.assertRaisesRegex(ValueError, "moe_dropless_buffer_factor"):
+        maxtext_types.MoEGeneral(moe_dropless_buffer_factor=bad_dbf)
+      with self.assertRaisesRegex(ValueError, "moe_dropless_buffer_factor"):
+        m3_cfg.TransformerConfig(moe_dropless_buffer_factor=bad_dbf)
+      with self.assertRaisesRegex(ValueError, "dropless_buffer_factor"):
+        m3_moe.resolve_dropless_buffer_factor(bad_dbf, ep_size=8)
+      with self.assertRaisesRegex(ValueError, "dropless_buffer_factor"):
+        m3_moe.validate_moe_config(SimpleNamespace(num_experts=8, sparse_matmul=True, moe_dropless_buffer_factor=bad_dbf))
+      with self.assertRaisesRegex(ValueError, "dropless_buffer_factor"):
+        m3_moe.moe_from_config(SimpleNamespace(num_experts=8, sparse_matmul=True, moe_dropless_buffer_factor=bad_dbf))
+      with self.assertRaisesRegex(ValueError, "dropless_buffer_factor"):
+        m3_moe.MoEExecutor(kind="tokamax", dropless_buffer_factor=bad_dbf)
+
+    with self.assertRaisesRegex(ValueError, "cannot both be set"):
+      maxtext_types.MoEGeneral(moe_dropless_buffer_factor=1.5, ragged_buffer_factor=1.5)
+    with self.assertRaisesRegex(ValueError, "cannot both be set"):
+      maxtext_types.MoEGeneral(moe_dropless_buffer_factor=1.5, capacity_factor=1.25)
+    with self.assertRaisesRegex(ValueError, "cannot both be set"):
+      m3_cfg.TransformerConfig(moe_dropless_buffer_factor=1.5, ragged_buffer_factor=1.5)
+    with self.assertRaisesRegex(ValueError, "cannot both be set"):
+      m3_cfg.TransformerConfig(moe_dropless_buffer_factor=1.5, capacity_factor=1.25)
+    with self.assertRaisesRegex(ValueError, "cannot both be set"):
+      m3_moe.moe_from_config(
+          SimpleNamespace(
+              num_experts=8,
+              sparse_matmul=True,
+              ragged_buffer_factor=1.5,
+              moe_dropless_buffer_factor=1.5,
+          )
+      )
+    with self.assertRaisesRegex(ValueError, "cannot both be set"):
+      m3_moe.moe_from_config(
+          SimpleNamespace(
+              num_experts=8,
+              sparse_matmul=True,
+              capacity_factor=1.25,
+              moe_dropless_buffer_factor=1.5,
+          )
+      )
+
+    # Unwired models must allow default -1.0 and fail closed on explicit moe_dropless_buffer_factor overrides.
+    for unwired_model in ("glm5.3-flash", "granitemoe"):
+      m3_moe.validate_moe_config(
+          SimpleNamespace(model_name=unwired_model, num_experts=8, moe_dropless_buffer_factor=-1.0),
+          check_executor_backend=False,
+      )
+      for explicit_dbf in (0.0, 1.5):
+        with self.assertRaisesRegex(ValueError, "moe_dropless_buffer_factor"):
+          m3_moe.validate_moe_config(
+              SimpleNamespace(model_name=unwired_model, num_experts=8, moe_dropless_buffer_factor=explicit_dbf),
+              check_executor_backend=False,
+          )
+
+  @parameterized.named_parameters(
+      ("auto_m1_ep4", -1.0, 4, 1),
+      ("unbounded_0_ep4", 0.0, 4, 1),
+      ("ep2_tp2_f125", 1.25, 2, 2),
+      ("ep2_tp2_f150", 1.5, 2, 2),
+      ("bounded_2p0_ep4", 2.0, 4, 1),
+      ("bounded_3p0_ep4", 3.0, 4, 1),
+  )
+  def test_ep_dropless_overflow_buffer_matches_dense_and_unbounded(self, dbf, ep, tp):
+    if jax.device_count() < 4:
+      self.skipTest("Requires >= 4 JAX devices.")
+    mesh = create_mesh(ici={"fsdp": 1, "expert": ep, "tensor": tp}, devices=jax.devices()[:4])
+    x, weights, indices, _ = _make_routing_inputs(
+        batch=4,
+        length=8,
+        embed=16,
+        num_experts=8,
+        top_k=2,
+    )
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=8, embed=16, mlp=12)
+    # TP > 1 requires 4D (E, D, 2, M) fused weights so gate and up shard cleanly across tensor ranks.
+    w_gu_fixture = jnp.stack([wi_0, wi_1], axis=2) if tp > 1 else jnp.concatenate([wi_0, wi_1], axis=-1)
+    w_dn = wo
+    target = jax.random.normal(jax.random.PRNGKey(77), x.shape, dtype=jnp.float32)
+
+    def _loss_sep(ex):
+      def _fn(x_in, w_in, w0, w1, w_out):
+        y = m3_moe.routed_experts(x_in, w_in, indices, w0, w1, w_out, executor=ex)
+        return jnp.sum((y - target) ** 2), y
+
+      return jax.jit(jax.value_and_grad(_fn, argnums=(0, 1, 2, 3, 4), has_aux=True))(x, weights, wi_0, wi_1, wo)
+
+    def _loss_fused(ex):
+      def _fn(x_in, w_in, w_gu, w_out):
+        y = m3_moe.routed_experts_fused(x_in, w_in, indices, w_gu, w_out, executor=ex)
+        return jnp.sum((y - target) ** 2), y
+
+      return jax.jit(jax.value_and_grad(_fn, argnums=(0, 1, 2, 3), has_aux=True))(x, weights, w_gu_fixture, w_dn)
+
+    (_, ref_sep), grads_ref_sep = _loss_sep(m3_moe.DENSE)
+    (_, ref_fused), grads_ref_fused = _loss_fused(m3_moe.DENSE)
+
+    ex_test = m3_moe.MoEExecutor(
+        kind="tokamax",
+        batch="expert",
+        experts="expert",
+        mlp="tensor",
+        dropless_buffer_factor=dbf,
+    )
+    with jax.set_mesh(mesh):
+      (_, out_sep), grads_sep = _loss_sep(ex_test)
+      (_, out_fused), grads_fused = _loss_fused(ex_test)
+
+    np.testing.assert_allclose(np.asarray(out_sep), np.asarray(ref_sep), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(out_fused), np.asarray(ref_fused), rtol=1e-4, atol=1e-4)
+    for g_got, g_ref in zip(grads_sep, grads_ref_sep):
+      np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+    for g_got, g_ref in zip(grads_fused, grads_ref_fused):
+      np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+
+  def test_extreme_and_half_skew_trigger_overflow_rounds_with_zero_dropped_tokens(self):
+    if jax.device_count() < 4:
+      self.skipTest("Requires >= 4 JAX devices.")
+    mesh = create_mesh(ici={"fsdp": 1, "expert": 4, "tensor": 1}, devices=jax.devices()[:4])
+    x, weights, indices, _ = _make_routing_inputs(
+        batch=4,
+        length=8,
+        embed=16,
+        num_experts=8,
+        top_k=2,
+    )
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=8, embed=16, mlp=12)
+    w_gu_3d = jnp.concatenate([wi_0, wi_1], axis=-1)
+    w_dn = wo
+    target = jax.random.normal(jax.random.PRNGKey(99), x.shape, dtype=jnp.float32)
+
+    # Case 1: 100% of tokens from all 4 EP ranks route to EP rank 0 experts {0, 1} -> 4.0x load on rank 0.
+    full_skew_indices = jnp.broadcast_to(jnp.array([[[0, 1]]], dtype=jnp.int32), (4, 8, 2))
+    stats_1p25 = m3_moe.compute_ep_overflow_stats(
+        full_skew_indices, num_experts=8, ep_size=4, dropless_buffer_factor=1.25
+    )
+    self.assertTrue(stats_1p25["overflow_triggered"])
+    self.assertEqual(stats_1p25["overflow_rounds"], 3)
+    self.assertEqual(stats_1p25["tokens_dropped"], 0)
+    self.assertAlmostEqual(stats_1p25["max_load_factor"], 4.0)
+
+    stats_1p5 = m3_moe.compute_ep_overflow_stats(full_skew_indices, num_experts=8, ep_size=4, dropless_buffer_factor=1.5)
+    self.assertTrue(stats_1p5["overflow_triggered"])
+    self.assertEqual(stats_1p5["overflow_rounds"], 2)
+    self.assertEqual(stats_1p5["tokens_dropped"], 0)
+
+    # Case 2: 50% of sequence positions forced to EP rank 0 experts {0, 1} -> ~2.5x load on rank 0.
+    seq_pos = jnp.arange(8, dtype=jnp.int32)
+    is_half_skew = (seq_pos % 2 == 0)[None, :, None]
+    rank0_pair = jnp.broadcast_to(jnp.array([[[0, 1]]], dtype=jnp.int32), (4, 8, 2))
+    half_skew_indices = jnp.where(is_half_skew, rank0_pair, indices)
+    stats_half = m3_moe.compute_ep_overflow_stats(half_skew_indices, num_experts=8, ep_size=4, dropless_buffer_factor=1.5)
+    self.assertTrue(stats_half["overflow_triggered"])
+    self.assertGreaterEqual(stats_half["overflow_rounds"], 1)
+    self.assertEqual(stats_half["tokens_dropped"], 0)
+
+    for idx_case in (full_skew_indices, half_skew_indices):
+
+      def _eval(ex, idx_in=idx_case):
+        def _fn(x_in, w_in, w_gu, w_out):
+          y = m3_moe.routed_experts_fused(x_in, w_in, idx_in, w_gu, w_out, executor=ex)
+          return jnp.sum((y - target) ** 2), y
+
+        return jax.jit(jax.value_and_grad(_fn, argnums=(0, 1, 2, 3), has_aux=True))(x, weights, w_gu_3d, w_dn)
+
+      (_, ref_y), ref_grads = _eval(m3_moe.DENSE)
+      with jax.set_mesh(mesh):
+        for dbf in (0.0, 1.25, 1.5, 2.0, 3.0):
+          ex = m3_moe.MoEExecutor(
+              kind="tokamax",
+              batch="expert",
+              experts="expert",
+              mlp="tensor",
+              dropless_buffer_factor=dbf,
+          )
+          (_, got_y), got_grads = _eval(ex)
+          np.testing.assert_allclose(np.asarray(got_y), np.asarray(ref_y), rtol=1e-4, atol=1e-4)
+          for g_got, g_ref in zip(got_grads, ref_grads):
+            np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+
+  def test_float32_routing_weights_preserved_during_bfloat16_combine(self):
+    if jax.device_count() < 4:
+      self.skipTest("Requires >= 4 JAX devices.")
+    mesh = create_mesh(ici={"fsdp": 1, "expert": 4, "tensor": 1}, devices=jax.devices()[:4])
+    x_f32, _, indices, _ = _make_routing_inputs(batch=4, length=4, embed=16, num_experts=8, top_k=2)
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=8, embed=16, mlp=12)
+    w_gu_bf16 = jnp.concatenate([wi_0, wi_1], axis=-1).astype(jnp.bfloat16)
+    w_dn_bf16 = wo.astype(jnp.bfloat16)
+    x_bf16 = x_f32.astype(jnp.bfloat16)
+    # Construct float32 routing weights with sub-bf16 mantissa detail (1.0 + 2^-10 vs 1.0).
+    w_f32 = jnp.full((4, 4, 2), 1.0 + (2.0**-10), dtype=jnp.float32)
+
+    ex_ep = m3_moe.MoEExecutor(
+        kind="tokamax",
+        batch="expert",
+        experts="expert",
+        mlp="tensor",
+        dropless_buffer_factor=1.5,
+    )
+    ex_ep_unbounded = m3_moe.MoEExecutor(
+        kind="tokamax",
+        batch="expert",
+        experts="expert",
+        mlp="tensor",
+        dropless_buffer_factor=0.0,
+    )
+    with jax.set_mesh(mesh):
+      out_dense = m3_moe.routed_experts_fused(x_bf16, w_f32, indices, w_gu_bf16, w_dn_bf16, executor=m3_moe.DENSE)
+      out_ep_unbounded = m3_moe.routed_experts_fused(
+          x_bf16, w_f32, indices, w_gu_bf16, w_dn_bf16, executor=ex_ep_unbounded
+      )
+      out_ep = m3_moe.routed_experts_fused(x_bf16, w_f32, indices, w_gu_bf16, w_dn_bf16, executor=ex_ep)
+      out_ep_bf16 = m3_moe.routed_experts_fused(
+          x_bf16, w_f32.astype(jnp.bfloat16).astype(jnp.float32), indices, w_gu_bf16, w_dn_bf16, executor=ex_ep
+      )
+    np.testing.assert_array_equal(np.asarray(out_ep), np.asarray(out_ep_unbounded))
+    np.testing.assert_allclose(np.asarray(out_ep), np.asarray(out_dense), rtol=1e-2, atol=5e-3)
+    self.assertFalse(np.array_equal(np.asarray(out_ep), np.asarray(out_ep_bf16)))
+
+  def test_compute_ep_overflow_stats_num_ep_groups_isolates_fsdp_replicas(self):
+    # Two independent EP=4 groups across FSDP=2 (B=8): group 0 overloads EP rank 0 (experts 0,1)
+    # while group 1 overloads EP rank 2 (experts 4,5).
+    g0 = jnp.broadcast_to(jnp.array([[[0, 1]]], dtype=jnp.int32), (4, 8, 2))
+    g1 = jnp.broadcast_to(jnp.array([[[4, 5]]], dtype=jnp.int32), (4, 8, 2))
+    idx_fsdp2 = jnp.concatenate([g0, g1], axis=0)
+
+    # Treating all B=8 as one EP group averages the two disjoint overloads down to 2.0x.
+    merged = m3_moe.compute_ep_overflow_stats(idx_fsdp2, num_experts=8, ep_size=4, dropless_buffer_factor=2.0)
+    self.assertFalse(merged["overflow_triggered"])
+    self.assertAlmostEqual(merged["max_load_factor"], 2.0)
+
+    # Passing num_ep_groups=2 isolates each EP group load (4.0x skew -> 1 overflow round at dbf=2.0).
+    split = m3_moe.compute_ep_overflow_stats(
+        idx_fsdp2, num_experts=8, ep_size=4, dropless_buffer_factor=2.0, num_ep_groups=2
+    )
+    self.assertEqual(split["num_slots_per_rank"], 16)
+    self.assertEqual(split["dst_counts"].shape, (2, 4))
+    self.assertTrue(split["overflow_triggered"])
+    self.assertEqual(split["overflow_rounds"], 1)
+    self.assertAlmostEqual(split["max_load_factor"], 4.0)
+
+    with self.assertRaisesRegex(ValueError, "num_ep_groups"):
+      m3_moe.compute_ep_overflow_stats(idx_fsdp2, num_experts=8, ep_size=4, num_ep_groups=0)
+    with self.assertRaisesRegex(ValueError, "divisible by num_ep_groups"):
+      m3_moe.compute_ep_overflow_stats(idx_fsdp2, num_experts=8, ep_size=4, num_ep_groups=3)
+
+  def test_odd_bfloat16_dropless_buffer_aligns_to_32bit_for_sparsecore_ragged_sort(self):
+    if jax.device_count() < 4:
+      self.skipTest("Requires >= 4 JAX devices.")
+    from jax.experimental.pallas import tpu as pltpu  # pylint: disable=import-outside-toplevel
+
+    # Per-rank num_slots = 1 * 5 * 1 = 5; ceil(5 * 1.3) = 7 (odd in bf16), which aligns up to 8 rows.
+    mesh = create_mesh(ici={"fsdp": 1, "expert": 4, "tensor": 1}, devices=jax.devices()[:4])
+    x, weights, indices, _ = _make_routing_inputs(
+        batch=4, length=5, embed=1024, num_experts=8, top_k=1, dtype=jnp.bfloat16
+    )
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=8, embed=1024, mlp=16, dtype=jnp.bfloat16)
+    w_gu = jnp.stack([wi_0, wi_1], axis=2)
+
+    seen_sort_rows: list[int] = []
+
+    def fake_sort(arr, perm, valid_end):
+      del valid_end
+      seen_sort_rows.append(int(arr.shape[0]))
+      return arr[perm]
+
+    def fake_unsort(arr, inv_perm, valid_end):
+      del valid_end
+      return arr[inv_perm]
+
+    def fake_gmm_f(
+        *,
+        lhs,
+        rhs,
+        group_sizes,
+        rhs_scale,
+        tile_info,
+        preferred_element_type,
+        maybe_quantize_lhs,
+        transpose_rhs=False,
+    ):
+      del rhs_scale, tile_info, maybe_quantize_lhs
+      rhs_eff = rhs.swapaxes(1, 2) if transpose_rhs else rhs
+      return jax.lax.ragged_dot(lhs, rhs_eff, group_sizes, preferred_element_type=jnp.float32).astype(
+          preferred_element_type
+      )
+
+    def fake_tgmm_f(
+        *,
+        lhs,
+        rhs,
+        group_sizes,
+        num_actual_groups=None,
+        rhs_scale=None,
+        precision=None,
+        preferred_element_type,
+        tile_info,
+    ):
+      del num_actual_groups, rhs_scale, precision, tile_info
+      g = group_sizes.shape[0]
+      ends = jnp.cumsum(group_sizes)
+      gid = jnp.searchsorted(ends, jnp.arange(lhs.shape[0], dtype=jnp.int32), side="right")
+      valid = jnp.arange(lhs.shape[0], dtype=jnp.int32) < ends[-1]
+      one_hot = jax.nn.one_hot(jnp.minimum(gid, g - 1), g, dtype=jnp.float32) * valid[:, None]
+      return jnp.einsum("mg,mk,mn->gkn", one_hot, lhs.astype(jnp.float32), rhs.astype(jnp.float32)).astype(
+          preferred_element_type
+      )
+
+    def fake_ra2a_f(operand, output, in_off, send_sz, out_off, recv_sz, *, axis_name):
+      return _cpu_ragged_all_to_all_ref(operand, output, in_off, send_sz, out_off, recv_sz, axis_name=axis_name)
+
+    sc_7x = SimpleNamespace(num_cores=2, num_subcores=16, num_lanes=16)
+    ex = m3_moe.MoEExecutor(
+        kind="gmm_v2",
+        batch="expert",
+        experts="expert",
+        mlp="tensor",
+        dropless_buffer_factor=1.3,
+        use_ragged_sort=True,
+    )
+    ref_out = m3_moe.routed_experts_fused(x, weights, indices, w_gu, wo, executor=m3_moe.DENSE)
+    with (
+        mock.patch.object(m3_kernels, "is_tpu_mesh", return_value=True),
+        mock.patch.object(pltpu, "is_tpu_device", return_value=True),
+        mock.patch.object(pltpu, "get_tpu_info", return_value=SimpleNamespace(num_lanes=128, sparse_core=sc_7x)),
+        mock.patch.object(gmm_v2, "gmm_v2", side_effect=fake_gmm_f),
+        mock.patch.object(tgmm_v2, "tgmm_v2", side_effect=fake_tgmm_f),
+        mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=fake_ra2a_f),
+        mock.patch.object(ragged_sort, "a2a_ragged_sort", side_effect=fake_sort),
+        mock.patch.object(ragged_sort, "a2a_ragged_unsort", side_effect=fake_unsort),
+        jax.set_mesh(mesh),
+    ):
+      got_out = m3_moe.routed_experts_fused(x, weights, indices, w_gu, wo, executor=ex)
+
+    stats_bf16 = m3_moe.compute_ep_overflow_stats(
+        indices, num_experts=8, ep_size=4, dropless_buffer_factor=1.3, dtype=jnp.bfloat16
+    )
+    self.assertEqual(stats_bf16["recv_buf_len"], 8)
+    self.assertNotEmpty(seen_sort_rows)
+    self.assertTrue(all(r == 8 for r in seen_sort_rows), msg=f"Expected aligned row count 8, got {seen_sort_rows}")
+    np.testing.assert_allclose(np.asarray(got_out), np.asarray(ref_out), rtol=2e-2, atol=2e-2)
+
+  def test_active_overflow_explicit_tp_context_and_divergent_fsdp(self):
+    """Verifies active overflow (any_overflow=True) across Explicit, TP, context>1, and divergent FSDP."""
+    if jax.device_count() < 4:
+      self.skipTest("Requires >= 4 JAX devices.")
+    from jax.sharding import AxisType  # pylint: disable=import-outside-toplevel
+
+    devs = jax.devices()[:4]
+    x, weights, _, _ = _make_routing_inputs(batch=4, length=8, embed=16, num_experts=8, top_k=2)
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=8, embed=16, mlp=12)
+    w_gu_4d = jnp.stack([wi_0, wi_1], axis=2)
+    target = jax.random.normal(jax.random.PRNGKey(314), x.shape, dtype=jnp.float32)
+
+    # 100% of slots target EP rank 0 experts {0, 1}, forcing active overflow rounds at dbf=1.25.
+    skew_idx = jnp.broadcast_to(jnp.array([[[0, 1]]], dtype=jnp.int32), (4, 8, 2))
+    self.assertTrue(
+        m3_moe.compute_ep_overflow_stats(skew_idx, num_experts=8, ep_size=2, dropless_buffer_factor=1.25)[
+            "overflow_triggered"
+        ]
+    )
+
+    def _run_sep(ex, idx_in):
+      def _fn(x_in, w_in, w0, w1, w_out):
+        y = m3_moe.routed_experts(x_in, w_in, idx_in, w0, w1, w_out, executor=ex)
+        return jnp.sum((y - target) ** 2), y
+
+      return jax.jit(jax.value_and_grad(_fn, argnums=(0, 1, 2, 3, 4), has_aux=True))(x, weights, wi_0, wi_1, wo)
+
+    def _run_fused(ex, idx_in):
+      def _fn(x_in, w_in, w_gu, w_out):
+        y = m3_moe.routed_experts_fused(x_in, w_in, idx_in, w_gu, w_out, executor=ex)
+        return jnp.sum((y - target) ** 2), y
+
+      return jax.jit(jax.value_and_grad(_fn, argnums=(0, 1, 2, 3), has_aux=True))(x, weights, w_gu_4d, wo)
+
+    (_, ref_sep), grads_ref_sep = _run_sep(m3_moe.DENSE, skew_idx)
+    (_, ref_fused), grads_ref_fused = _run_fused(m3_moe.DENSE, skew_idx)
+
+    # 1. ep=2, tp=2 with 4D gate_up_proj (both fused and unfused).
+    mesh_ep_tp = create_mesh(ici={"expert": 2, "tensor": 2}, devices=devs)
+    ex_ep_tp = m3_moe.MoEExecutor(
+        kind="tokamax",
+        batch="expert",
+        experts="expert",
+        mlp="tensor",
+        dropless_buffer_factor=1.25,
+    )
+    with jax.set_mesh(mesh_ep_tp):
+      (_, got_sep), grads_sep = _run_sep(ex_ep_tp, skew_idx)
+      (_, got_fused), grads_fused = _run_fused(ex_ep_tp, skew_idx)
+    np.testing.assert_allclose(np.asarray(got_sep), np.asarray(ref_sep), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(got_fused), np.asarray(ref_fused), rtol=1e-4, atol=1e-4)
+    for g_got, g_ref in zip(grads_sep, grads_ref_sep):
+      np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+    for g_got, g_ref in zip(grads_fused, grads_ref_fused):
+      np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+
+    # 2. AxisType.Explicit mesh with active overflow.
+    exp_mesh = jax.sharding.Mesh(
+        np.asarray(devs).reshape(2, 2),
+        ("expert", "tensor"),
+        axis_types=(AxisType.Explicit, AxisType.Explicit),
+    )
+    with jax.set_mesh(exp_mesh):
+      x_e = jax.device_put(x, NamedSharding(exp_mesh, P("expert", None, None)))
+      w_e = jax.device_put(weights, NamedSharding(exp_mesh, P("expert", None, None)))
+      i_e = jax.device_put(skew_idx, NamedSharding(exp_mesh, P("expert", None, None)))
+      gu_e = jax.device_put(w_gu_4d, NamedSharding(exp_mesh, P("expert", None, None, "tensor")))
+      dn_e = jax.device_put(wo, NamedSharding(exp_mesh, P("expert", "tensor", None)))
+      t_e = jax.device_put(target, NamedSharding(exp_mesh, P("expert", None, None)))
+
+      def _exp_fn(x_in, w_in, gu_in, dn_in):
+        y = m3_moe.routed_experts_fused(x_in, w_in, i_e, gu_in, dn_in, executor=ex_ep_tp)
+        return jnp.sum((y - t_e) ** 2), y
+
+      (_, got_exp), grads_exp = jax.jit(jax.value_and_grad(_exp_fn, argnums=(0, 1, 2, 3), has_aux=True))(
+          x_e, w_e, gu_e, dn_e
+      )
+    np.testing.assert_allclose(np.asarray(got_exp), np.asarray(ref_fused), rtol=1e-4, atol=1e-4)
+    for g_got, g_ref in zip(grads_exp, grads_ref_fused):
+      np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+
+    # 3. context=2, ep=2 with active overflow.
+    mesh_cp_ep = create_mesh(ici={"context": 2, "expert": 2}, devices=devs)
+    ex_cp_ep = m3_moe.MoEExecutor(
+        kind="tokamax",
+        batch="expert",
+        experts="expert",
+        length="context",
+        dropless_buffer_factor=1.25,
+    )
+    with jax.set_mesh(mesh_cp_ep):
+      (_, got_cp), grads_cp = _run_fused(ex_cp_ep, skew_idx)
+    np.testing.assert_allclose(np.asarray(got_cp), np.asarray(ref_fused), rtol=1e-4, atol=1e-4)
+    for g_got, g_ref in zip(grads_cp, grads_ref_fused):
+      np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+
+    # 4. Divergent fsdp=2, ep=2 skew (group 0 overflows, group 1 balanced).
+    bal_g1 = jnp.broadcast_to(jnp.array([[[0, 4]]], dtype=jnp.int32), (2, 8, 2))
+    div_idx = jnp.concatenate([skew_idx[:2], bal_g1], axis=0)
+    (_, ref_div), grads_ref_div = _run_fused(m3_moe.DENSE, div_idx)
+    mesh_fsdp_ep = create_mesh(ici={"fsdp": 2, "expert": 2}, devices=devs)
+    ex_fsdp_ep = m3_moe.MoEExecutor(
+        kind="tokamax",
+        batch=("fsdp", "expert"),
+        experts="expert",
+        dropless_buffer_factor=1.25,
+    )
+    with jax.set_mesh(mesh_fsdp_ep):
+      (_, got_div), grads_div = _run_fused(ex_fsdp_ep, div_idx)
+    np.testing.assert_allclose(np.asarray(got_div), np.asarray(ref_div), rtol=1e-4, atol=1e-4)
+    for g_got, g_ref in zip(grads_div, grads_ref_div):
+      np.testing.assert_allclose(np.asarray(g_got), np.asarray(g_ref), rtol=1e-4, atol=1e-4)
+
+
 if __name__ == "__main__":
   absltest.main()

@@ -61,6 +61,19 @@ def _align_up(value: int, multiple: int) -> int:
   return max(multiple, ((int(value) + multiple - 1) // multiple) * multiple)
 
 
+def _validate_dropless_buffer_factor(value: Any, *, field_name: str = "dropless_buffer_factor") -> float:
+  """Validates a dropless receive-buffer factor (`-1.0` auto, `0.0` unbounded, or `> 0.0`)."""
+  if isinstance(value, bool) or not isinstance(value, (int, float)):
+    raise ValueError(f"{field_name} must be a float (-1.0, 0.0, or > 0.0); got {value!r}.")
+  val = float(value)
+  if not math.isfinite(val) or (val < 0.0 and val != -1.0):
+    raise ValueError(
+        f"{field_name} must be -1.0 (auto: 2.0 when ep_size >= 8, unbounded when ep_size < 8), "
+        f"0.0 (unbounded), or > 0.0; got {value!r}."
+    )
+  return val
+
+
 # ==============================================================================
 # Permutation & grouped-matmul primitives
 # ==============================================================================
@@ -303,8 +316,16 @@ class MoEExecutor:
   mlp: MeshAxes = None
   capacity_factor: float = -1.0
   ragged_buffer_factor: float = -1.0
+  dropless_buffer_factor: float = -1.0
   use_ragged_sort: bool = False
   length: MeshAxes = None
+
+  def __post_init__(self) -> None:
+    _validate_dropless_buffer_factor(self.dropless_buffer_factor)
+    if self.ragged_buffer_factor > 0.0 and self.dropless_buffer_factor > 0.0:
+      raise ValueError("ragged_buffer_factor > 0 and dropless_buffer_factor > 0 cannot both be set.")
+    if self.capacity_factor > 0.0 and self.dropless_buffer_factor > 0.0:
+      raise ValueError("capacity_factor > 0 and dropless_buffer_factor > 0 cannot both be set.")
 
   def __call__(
       self,
@@ -676,6 +697,34 @@ def _validate_executor_backend_config(config: Any, *, mesh: Any = None) -> Execu
   return kind
 
 
+def resolve_dropless_buffer_factor(
+    dropless_buffer_factor: float,
+    ep_size: int,
+    *,
+    capacity_factor: float = -1.0,
+    ragged_buffer_factor: float = -1.0,
+) -> float:
+  """Resolves effective dropless receive-buffer factor (`0.0` when unbounded/disabled)."""
+  dropless_buffer_factor = _validate_dropless_buffer_factor(dropless_buffer_factor)
+  if dropless_buffer_factor == 0.0 or ep_size <= 1:
+    return 0.0
+  if dropless_buffer_factor == -1.0:
+    if ep_size >= 8 and capacity_factor <= 0.0 and ragged_buffer_factor <= 0.0:
+      return 2.0
+    return 0.0
+  if dropless_buffer_factor >= float(ep_size):
+    return 0.0
+  return float(dropless_buffer_factor)
+
+
+def _extract_dropless_buffer_factor(config: Any) -> float:
+  """Extracts and validates `moe_dropless_buffer_factor` from `config`."""
+  raw_dbf = getattr(config, "moe_dropless_buffer_factor", -1.0)
+  if raw_dbf is None:
+    return -1.0
+  return _validate_dropless_buffer_factor(raw_dbf, field_name="moe_dropless_buffer_factor")
+
+
 def validate_moe_config(
     config: Any,
     *,
@@ -687,6 +736,7 @@ def validate_moe_config(
   num_experts = int(getattr(config, "num_experts", 1) or 1)
   capacity_factor = float(getattr(config, "capacity_factor", -1.0))
   ragged_buffer_factor = float(getattr(config, "ragged_buffer_factor", -1.0))
+  dropless_buffer_factor = _extract_dropless_buffer_factor(config)
   use_ragged_sort = bool(getattr(config, "use_ragged_sort", False))
   use_ring_of_experts = bool(getattr(config, "use_ring_of_experts", False))
 
@@ -694,6 +744,10 @@ def validate_moe_config(
     raise ValueError("capacity_factor cannot be 0.0; set < 0 for dropless routing or > 0 for capacity dropping.")
   if ragged_buffer_factor == 0.0:
     raise ValueError("ragged_buffer_factor cannot be 0.0; set < 0 for worst-case buffer or > 0 to bound buffer size.")
+  if ragged_buffer_factor > 0.0 and dropless_buffer_factor > 0.0:
+    raise ValueError("ragged_buffer_factor > 0 and moe_dropless_buffer_factor > 0 cannot both be set.")
+  if capacity_factor > 0.0 and dropless_buffer_factor > 0.0:
+    raise ValueError("capacity_factor > 0 and moe_dropless_buffer_factor > 0 cannot both be set.")
 
   unsupported = unsupported_moe_settings(config)
   if unsupported:
@@ -715,6 +769,8 @@ def validate_moe_config(
         for field in ("use_tokamax_gmm", "use_gmm_v2", "use_ragged_sort")
         if bool(getattr(config, field, False))
     }
+    if dropless_buffer_factor != -1.0:
+      unwired["moe_dropless_buffer_factor"] = dropless_buffer_factor
     if unwired:
       raise ValueError(
           f"Model {getattr(config, 'model_name', '<unknown>')!r} does not use MoEExecutor yet; "
@@ -733,6 +789,7 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
 
   capacity_factor = float(getattr(config, "capacity_factor", -1.0))
   ragged_buffer_factor = float(getattr(config, "ragged_buffer_factor", -1.0))
+  dbf = _extract_dropless_buffer_factor(config)
   use_ragged_sort = bool(getattr(config, "use_ragged_sort", False))
 
   cap = capacity_factor if capacity_factor > 0.0 else -1.0
@@ -744,6 +801,7 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
         kind="dense",
         capacity_factor=cap,
         ragged_buffer_factor=rbf,
+        dropless_buffer_factor=dbf,
     )
 
   if kind == "ragged_dot":
@@ -752,6 +810,7 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
         kind="ragged_dot",
         capacity_factor=cap,
         ragged_buffer_factor=rbf,
+        dropless_buffer_factor=dbf,
     )
 
   tokens_spec = sharding("moe_tokens", ("batch", "length", "embed"), TensorType.ACTIVATION)
@@ -763,9 +822,89 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
       mlp=wi_spec[2],
       capacity_factor=cap,
       ragged_buffer_factor=rbf,
+      dropless_buffer_factor=dbf,
       use_ragged_sort=use_ragged_sort,
       length=tokens_spec[1],
   )
+
+
+def compute_ep_overflow_stats(  # public-api
+    indices: jax.Array,
+    num_experts: int,
+    ep_size: int,
+    dropless_buffer_factor: float = -1.0,
+    *,
+    num_ep_groups: int = 1,
+    dtype: jax.typing.DTypeLike = jnp.float32,
+) -> dict[str, Any]:
+  """Computes per-EP-rank receive counts and overflow-round trigger statistics.
+
+  Args:
+    indices: Routing expert indices as 3D `(B, S, K)` partitioned across
+      `num_ep_groups * ep_size` token shards (a single EP group slice when
+      `num_ep_groups == 1`), 4D `(ep_size, B_loc, S, K)` for one EP group, or
+      5D `(num_ep_groups, ep_size, B_loc, S, K)`.
+    num_experts: Total number of routed experts (`E`).
+    ep_size: Expert-parallel group size (`EP`).
+    dropless_buffer_factor: Configured `moe_dropless_buffer_factor` (`-1.0` for auto).
+    num_ep_groups: Number of independent EP groups across `data * fsdp` (`>= 1`).
+  """
+  if isinstance(num_ep_groups, bool) or num_ep_groups < 1:
+    raise ValueError(f"num_ep_groups must be >= 1; got {num_ep_groups!r}.")
+  if ep_size < 1 or num_experts % ep_size != 0:
+    raise ValueError(f"num_experts ({num_experts}) must be divisible by ep_size ({ep_size}).")
+  eff_dbf = resolve_dropless_buffer_factor(dropless_buffer_factor, ep_size)
+  e_loc = num_experts // ep_size
+  idx = jnp.asarray(indices, dtype=jnp.int32)
+  if idx.ndim == 3:
+    total_shards = num_ep_groups * ep_size
+    if idx.shape[0] % total_shards != 0:
+      raise ValueError(
+          f"Batch ({idx.shape[0]}) must be divisible by num_ep_groups * ep_size "
+          f"({num_ep_groups} * {ep_size} = {total_shards})."
+      )
+    idx = jnp.reshape(idx, (num_ep_groups, ep_size, idx.shape[0] // total_shards, idx.shape[1], idx.shape[2]))
+  elif idx.ndim == 4 and idx.shape[0] == ep_size:
+    if num_ep_groups != 1:
+      raise ValueError(f"4D (ep_size, B_loc, S, K) indices represent 1 EP group; got num_ep_groups={num_ep_groups}.")
+    idx = idx[None, ...]
+  elif idx.ndim == 5 and idx.shape[1] == ep_size:
+    if num_ep_groups not in (1, idx.shape[0]):
+      raise ValueError(f"5D indices leading axis ({idx.shape[0]}) must match num_ep_groups ({num_ep_groups}).")
+  else:
+    raise ValueError(
+        f"Expected 3D (B, S, K), 4D (ep_size, B_loc, S, K), or 5D (G, ep_size, B_loc, S, K) indices; got {idx.shape}."
+    )
+  num_slots = int(idx.shape[2] * idx.shape[3] * idx.shape[4])
+  row_align = max(1, 32 // jax.dtypes.itemsize_bits(jnp.dtype(dtype)))
+  if eff_dbf > 0.0:
+    dbf_cap = _align_up(max(1, int(math.ceil(num_slots * eff_dbf))), row_align)
+    recv_buf_len = min(ep_size * num_slots, dbf_cap)
+  else:
+    recv_buf_len = ep_size * num_slots
+
+  def _group_dst_counts(group_idx: jax.Array) -> jax.Array:
+    flat = jnp.reshape(group_idx, (-1,))
+    valid = (flat >= 0) & (flat < num_experts)
+    safe = jnp.where(valid, flat, 0)
+    exp_counts = jnp.bincount(safe, weights=valid.astype(jnp.int32), length=num_experts)
+    return jnp.sum(jnp.reshape(exp_counts, (ep_size, e_loc)), axis=1)
+
+  group_dst = jax.vmap(_group_dst_counts)(idx)
+  dst_counts = group_dst[0] if group_dst.shape[0] == 1 else group_dst
+  max_dst = int(jnp.max(group_dst))
+  overflow_rounds = max(0, int(math.ceil(max_dst / recv_buf_len)) - 1) if max_dst > 0 else 0
+  return {
+      "effective_buffer_factor": eff_dbf,
+      "num_slots_per_rank": num_slots,
+      "recv_buf_len": recv_buf_len,
+      "dst_counts": dst_counts,
+      "max_dst_tokens": max_dst,
+      "max_load_factor": float(max_dst) / float(max(num_slots, 1)),
+      "overflow_triggered": bool(max_dst > recv_buf_len),
+      "overflow_rounds": overflow_rounds,
+      "tokens_dropped": 0,
+  }
 
 
 # ==============================================================================
@@ -1137,7 +1276,7 @@ def _grouped_unsharded(
       out_dtype=_COMBINE_DTYPE,
   )
   unsorted_out = _permute_rows(expert_out, inv_perm)
-  eff_w = jnp.where(slot_valid, flat_w, 0).astype(_COMBINE_DTYPE)
+  eff_w = jnp.where(slot_valid, flat_w.astype(_COMBINE_DTYPE), 0.0)
   safe_out = jnp.where(slot_valid[:, None], unsorted_out.astype(_COMBINE_DTYPE), 0.0)
   weighted = safe_out * eff_w[:, None]
   combined = jnp.sum(jnp.reshape(weighted, (num_tokens, top_k, embed)), axis=1)
@@ -1343,7 +1482,7 @@ def _sharded_grouped(
       else:
         unsorted_out = _permute_rows(expert_out, inv_perm)
 
-      eff_w = jnp.where(slot_valid, flat_w, 0).astype(_COMBINE_DTYPE)
+      eff_w = jnp.where(slot_valid, flat_w.astype(_COMBINE_DTYPE), 0.0)
       safe_out = jnp.where(slot_valid[:, None], unsorted_out.astype(_COMBINE_DTYPE), 0.0)
       weighted = safe_out * eff_w[:, None]
       combined = jnp.sum(jnp.reshape(weighted, (num_tokens, top_k, d_dim)), axis=1)
@@ -1355,87 +1494,200 @@ def _sharded_grouped(
     ep_axis = ep_axes[0]
     ep_id = jax.lax.axis_index(ep_axis)
 
+    def _ep_dispatch_round(
+        s_rows: jax.Array,
+        s_idx: jax.Array,
+        r_valid: jax.Array,
+        buf_len: int,
+        projs_in: tuple[jax.Array, ...],
+        *,
+        clamp_to_buf: bool,
+    ) -> tuple[jax.Array, jax.Array, jax.Array]:
+      n_slots_in = s_rows.shape[0]
+      local_exp_counts = jnp.bincount(s_idx, weights=r_valid.astype(jnp.int32), length=num_experts).astype(jnp.int32)
+      all_exp_counts = jax.lax.all_gather(local_exp_counts, ep_axis, axis=0, tiled=False)
+
+      if clamp_to_buf:
+        by_dst = jnp.transpose(jnp.reshape(all_exp_counts, (ep_size, ep_size, e_loc)), (1, 0, 2))
+        flat_by_dst = jnp.reshape(by_dst, (ep_size, ep_size * e_loc))
+        cum_end = jnp.cumsum(flat_by_dst, axis=1)
+        cum_start = cum_end - flat_by_dst
+        clamped_flat = jnp.clip(buf_len - cum_start, 0, flat_by_dst)
+        round_exp_counts = jnp.reshape(
+            jnp.transpose(jnp.reshape(clamped_flat, (ep_size, ep_size, e_loc)), (1, 0, 2)),
+            (ep_size, num_experts),
+        )
+        allowed_local = round_exp_counts[ep_id]
+        pre_key = jnp.where(r_valid, s_idx, num_experts)
+        pre_order = jnp.argsort(pre_key, stable=True)
+        pre_starts = jnp.cumsum(local_exp_counts) - local_exp_counts
+        pre_exp = s_idx[pre_order]
+        pre_rank = jnp.arange(n_slots_in, dtype=jnp.int32) - pre_starts[pre_exp]
+        keep_pre = r_valid[pre_order] & (pre_rank < allowed_local[pre_exp])
+        round_valid = keep_pre[jnp.argsort(pre_order)]
+        leftover_valid = r_valid & ~round_valid
+        any_overflow = jnp.any(cum_end[:, -1] > buf_len)
+      else:
+        round_exp_counts = all_exp_counts
+        round_valid = r_valid
+        leftover_valid = jnp.zeros_like(r_valid)
+        any_overflow = jnp.bool_(False)
+
+      send_key = jnp.where(round_valid, s_idx, num_experts)
+      send_perm = jnp.argsort(send_key, stable=True)
+      inv_send_perm = jnp.argsort(send_perm)
+      send_x = _permute_rows(s_rows, send_perm)
+
+      counts_matrix = jnp.sum(jnp.reshape(round_exp_counts, (ep_size, ep_size, e_loc)), axis=2)
+      recv_x = _ep_ragged_exchange(send_x, buf_len, counts_matrix, ep_id, ep_axis, is_tpu=is_tpu)
+
+      recv_exp_by_src = jax.lax.dynamic_slice_in_dim(round_exp_counts, ep_id * e_loc, e_loc, axis=1)
+      local_group_sizes = jnp.sum(recv_exp_by_src, axis=0)
+      chunk_sizes = jnp.reshape(recv_exp_by_src, (ep_size * e_loc,))
+      chunk_ends = jnp.cumsum(chunk_sizes)
+      recv_valid_end = chunk_ends[-1]
+      row_idx = jnp.arange(buf_len, dtype=jnp.int32)
+      chunk_idx = jnp.searchsorted(chunk_ends, row_idx, side="right")
+      recv_local_exp = jnp.where(row_idx < recv_valid_end, chunk_idx % e_loc, e_loc)
+
+      local_perm = jnp.argsort(recv_local_exp, stable=True)
+      inv_local_perm = jnp.argsort(local_perm)
+
+      if executor.use_ragged_sort and is_tpu and _can_use_sparsecore_ragged_sort(buf_len, d_dim, recv_x.dtype):
+        from maxtext.kernels.ragged import ragged_sort  # pylint: disable=import-outside-toplevel
+
+        sorted_recv_x = ragged_sort.a2a_ragged_sort(recv_x, local_perm, recv_valid_end)
+      else:
+        sorted_recv_x = _permute_rows(recv_x, local_perm)
+        sorted_recv_x = jnp.where((row_idx < recv_valid_end)[:, None], sorted_recv_x, 0)
+
+      expert_out = _run_local_expert_mlp(
+          sorted_recv_x,
+          projs_in,
+          local_group_sizes,
+          fused=fused,
+          matmul_fn=matmul_fn,
+          activation=activation,
+          swiglu_limit=swiglu_limit,
+      )
+
+      if executor.use_ragged_sort and is_tpu and _can_use_sparsecore_ragged_sort(buf_len, d_dim, expert_out.dtype):
+        from maxtext.kernels.ragged import ragged_sort  # pylint: disable=import-outside-toplevel
+
+        recv_unsorted = ragged_sort.a2a_ragged_unsort(expert_out, inv_local_perm, recv_valid_end)
+      else:
+        recv_unsorted = _permute_rows(expert_out, inv_local_perm)
+        recv_unsorted = jnp.where((row_idx < recv_valid_end)[:, None], recv_unsorted, 0)
+
+      returned_sorted_slots = _ep_ragged_exchange(
+          recv_unsorted, n_slots_in, counts_matrix.T, ep_id, ep_axis, is_tpu=is_tpu
+      )
+      unsorted_slots = _permute_rows(returned_sorted_slots, inv_send_perm)
+      safe_slots = jnp.where(round_valid[:, None], unsorted_slots.astype(_COMBINE_DTYPE), 0.0)
+      return safe_slots, leftover_valid, any_overflow
+
+    eff_dbf = resolve_dropless_buffer_factor(
+        executor.dropless_buffer_factor,
+        ep_size,
+        capacity_factor=executor.capacity_factor,
+        ragged_buffer_factor=executor.ragged_buffer_factor,
+    )
+    # Align fractional buffer bounds to 32-bit packing so bfloat16 SparseCore ragged_sort stays valid.
+    row_align = max(1, 32 // jax.dtypes.itemsize_bits(x_sh.dtype))
     recv_buf_len = ep_size * num_slots
     if executor.capacity_factor > 0.0:
       expert_cap = max(1, int(math.ceil((num_slots / e_loc) * executor.capacity_factor)))
       recv_buf_len = min(recv_buf_len, e_loc * expert_cap)
     if executor.ragged_buffer_factor > 0.0:
-      rbf_cap = max(1, int(math.ceil(num_slots * executor.ragged_buffer_factor)))
+      rbf_cap = _align_up(max(1, int(math.ceil(num_slots * executor.ragged_buffer_factor))), row_align)
       recv_buf_len = min(recv_buf_len, rbf_cap)
+    if eff_dbf > 0.0:
+      dbf_cap = _align_up(max(1, int(math.ceil(num_slots * eff_dbf))), row_align)
+      recv_buf_len = min(recv_buf_len, dbf_cap)
 
-    local_exp_counts = jnp.bincount(safe_idx, weights=slot_valid.astype(jnp.int32), length=num_experts).astype(jnp.int32)
-    all_exp_counts = jax.lax.all_gather(local_exp_counts, ep_axis, axis=0, tiled=False)
-
-    if recv_buf_len < ep_size * num_slots:
-      by_dst = jnp.transpose(jnp.reshape(all_exp_counts, (ep_size, ep_size, e_loc)), (1, 0, 2))
-      flat_by_dst = jnp.reshape(by_dst, (ep_size, ep_size * e_loc))
-      cum_end = jnp.cumsum(flat_by_dst, axis=1)
-      cum_start = cum_end - flat_by_dst
-      clamped_flat = jnp.clip(recv_buf_len - cum_start, 0, flat_by_dst)
-      all_exp_counts = jnp.reshape(
-          jnp.transpose(jnp.reshape(clamped_flat, (ep_size, ep_size, e_loc)), (1, 0, 2)),
-          (ep_size, num_experts),
-      )
-      allowed_local = all_exp_counts[ep_id]
-      pre_key = jnp.where(slot_valid, safe_idx, num_experts)
-      pre_order = jnp.argsort(pre_key, stable=True)
-      pre_starts = jnp.cumsum(local_exp_counts) - local_exp_counts
-      pre_exp = safe_idx[pre_order]
-      pre_rank = jnp.arange(num_slots, dtype=jnp.int32) - pre_starts[pre_exp]
-      keep_pre = slot_valid[pre_order] & (pre_rank < allowed_local[pre_exp])
-      slot_valid = keep_pre[jnp.argsort(pre_order)]
-
-    send_key = jnp.where(slot_valid, safe_idx, num_experts)
-    send_perm = jnp.argsort(send_key, stable=True)
-    inv_send_perm = jnp.argsort(send_perm)
-    send_x = _permute_rows(slot_rows, send_perm)
-
-    counts_matrix = jnp.sum(jnp.reshape(all_exp_counts, (ep_size, ep_size, e_loc)), axis=2)
-    recv_x = _ep_ragged_exchange(send_x, recv_buf_len, counts_matrix, ep_id, ep_axis, is_tpu=is_tpu)
-
-    recv_exp_by_src = jax.lax.dynamic_slice_in_dim(all_exp_counts, ep_id * e_loc, e_loc, axis=1)
-    local_group_sizes = jnp.sum(recv_exp_by_src, axis=0)
-    chunk_sizes = jnp.reshape(recv_exp_by_src, (ep_size * e_loc,))
-    chunk_ends = jnp.cumsum(chunk_sizes)
-    recv_valid_end = chunk_ends[-1]
-    row_idx = jnp.arange(recv_buf_len, dtype=jnp.int32)
-    chunk_idx = jnp.searchsorted(chunk_ends, row_idx, side="right")
-    recv_local_exp = jnp.where(row_idx < recv_valid_end, chunk_idx % e_loc, e_loc)
-
-    local_perm = jnp.argsort(recv_local_exp, stable=True)
-    inv_local_perm = jnp.argsort(local_perm)
-
-    if executor.use_ragged_sort and is_tpu and _can_use_sparsecore_ragged_sort(recv_buf_len, d_dim, recv_x.dtype):
-      from maxtext.kernels.ragged import ragged_sort  # pylint: disable=import-outside-toplevel
-
-      sorted_recv_x = ragged_sort.a2a_ragged_sort(recv_x, local_perm, recv_valid_end)
-    else:
-      sorted_recv_x = _permute_rows(recv_x, local_perm)
-      sorted_recv_x = jnp.where((row_idx < recv_valid_end)[:, None], sorted_recv_x, 0)
-
-    expert_out = _run_local_expert_mlp(
-        sorted_recv_x,
+    safe_slots, rem_valid, any_overflow = _ep_dispatch_round(
+        slot_rows,
+        safe_idx,
+        slot_valid,
+        recv_buf_len,
         local_projs,
-        local_group_sizes,
-        fused=fused,
-        matmul_fn=matmul_fn,
-        activation=activation,
-        swiglu_limit=swiglu_limit,
+        clamp_to_buf=(recv_buf_len < ep_size * num_slots),
     )
 
-    if executor.use_ragged_sort and is_tpu and _can_use_sparsecore_ragged_sort(recv_buf_len, d_dim, expert_out.dtype):
-      from maxtext.kernels.ragged import ragged_sort  # pylint: disable=import-outside-toplevel
+    # Bounded receive buffer + conditional overflow round(s) with zero dropped tokens.
+    if eff_dbf > 0.0 and recv_buf_len < ep_size * num_slots:
+      max_overflow_rounds = max(1, int(math.ceil((ep_size * num_slots) / recv_buf_len)) - 1)
 
-      recv_unsorted = ragged_sort.a2a_ragged_unsort(expert_out, inv_local_perm, recv_valid_end)
-    else:
-      recv_unsorted = _permute_rows(expert_out, inv_local_perm)
-      recv_unsorted = jnp.where((row_idx < recv_valid_end)[:, None], recv_unsorted, 0)
+      @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
+      def _maybe_run_overflow_rounds(
+          acc_slots: jax.Array,
+          s_rows: jax.Array,
+          s_idx: jax.Array,
+          r_valid_init: jax.Array,
+          ov_init: jax.Array,
+          *projs_in: jax.Array,
+      ) -> jax.Array:
+        projs_tup = tuple(projs_in)
 
-    returned_sorted_slots = _ep_ragged_exchange(recv_unsorted, num_slots, counts_matrix.T, ep_id, ep_axis, is_tpu=is_tpu)
-    unsorted_slots = _permute_rows(returned_sorted_slots, inv_send_perm)
+        def _do_round(
+            op: tuple[jax.Array, jax.Array],
+            round_projs: tuple[jax.Array, ...],
+        ) -> tuple[jax.Array, jax.Array, jax.Array]:
+          cur_acc, cur_valid = op
+          extra_slots, next_valid, next_ov = _ep_dispatch_round(
+              s_rows, s_idx, cur_valid, recv_buf_len, round_projs, clamp_to_buf=True
+          )
+          return cur_acc + extra_slots, next_valid, next_ov
 
-    eff_w = jnp.where(slot_valid, flat_w, 0).astype(_COMBINE_DTYPE)
-    safe_slots = jnp.where(slot_valid[:, None], unsorted_slots.astype(_COMBINE_DTYPE), 0.0)
+        def _skip_round(op: tuple[jax.Array, jax.Array]) -> tuple[jax.Array, jax.Array, jax.Array]:
+          cur_acc, cur_valid = op
+          return cur_acc, cur_valid, jnp.bool_(False)
+
+        if max_overflow_rounds == 1:
+          out_acc, _, _ = jax.lax.cond(
+              ov_init,
+              lambda op: _do_round(op, projs_tup),
+              _skip_round,
+              (acc_slots, r_valid_init),
+          )
+          return out_acc
+
+        @functools.partial(jax.checkpoint, policy=jax.checkpoint_policies.nothing_saveable)
+        def _ov_step(
+            c_acc: jax.Array,
+            c_valid: jax.Array,
+            c_ov: jax.Array,
+            *step_projs: jax.Array,
+        ) -> tuple[jax.Array, jax.Array, jax.Array]:
+          return jax.lax.cond(
+              c_ov,
+              lambda op: _do_round(op, tuple(step_projs)),
+              _skip_round,
+              (c_acc, c_valid),
+          )
+
+        def _run_multi_overflow(op: tuple[jax.Array, jax.Array]) -> tuple[jax.Array, jax.Array, jax.Array]:
+          init_acc, init_valid = op
+
+          def _ov_scan_body(state, _):
+            c_acc, c_valid, c_ov = state
+            next_state = _ov_step(c_acc, c_valid, c_ov, *projs_tup)
+            return next_state, None
+
+          final_state, _ = jax.lax.scan(
+              _ov_scan_body,
+              (init_acc, init_valid, jnp.bool_(True)),
+              None,
+              length=max_overflow_rounds,
+          )
+          return final_state
+
+        out_acc, _, _ = jax.lax.cond(ov_init, _run_multi_overflow, _skip_round, (acc_slots, r_valid_init))
+        return out_acc
+
+      safe_slots = _maybe_run_overflow_rounds(safe_slots, slot_rows, safe_idx, rem_valid, any_overflow, *local_projs)
+
+    eff_w = jnp.where(slot_valid, flat_w.astype(_COMBINE_DTYPE), 0.0)
     weighted = safe_slots * eff_w[:, None]
     combined = jnp.sum(jnp.reshape(weighted, (num_tokens, top_k, d_dim)), axis=1)
     if tp_axes:
