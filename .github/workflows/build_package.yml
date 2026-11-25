@@ -77,12 +77,12 @@ jobs:
           WHEEL_FILE=$(ls dist/maxtext-*.whl)
           "${SYFT_CMD}" "${WHEEL_FILE}" -o spdx-json=sbom/maxtext-wheel.spdx.json
       - name: Upload the built maxtext wheel
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: maxtext-wheel
           path: dist/*
       - name: Upload the maxtext wheel SPDX SBOM
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: maxtext-wheel-sbom
           path: sbom/maxtext-wheel.spdx.json

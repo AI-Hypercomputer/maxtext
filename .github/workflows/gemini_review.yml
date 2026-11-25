@@ -74,7 +74,7 @@ jobs:
         id: 'mint_identity_token'
         if: |-
           ${{ vars.APP_ID }}
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
         with:
           app-id: '${{ vars.APP_ID }}'
           private-key: '${{ secrets.APP_PRIVATE_KEY }}'
@@ -299,7 +299,7 @@ jobs:
         if: |-
           ${{ always() && steps.telemetry.outcome == 'success' }}
         continue-on-error: true
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: 'gemini-review-telemetry-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}'
           path: '${{ runner.temp }}/gemini-review-telemetry.json'

@@ -135,7 +135,7 @@ jobs:
           persist-credentials: false
       - name: Download the maxtext wheel
         if: ${{ !inputs.maxtext_installed }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: maxtext-wheel
       - name: Configure install mode and uv cache
@@ -174,7 +174,7 @@ jobs:
           fi
       - name: Cache uv downloads
         if: ${{ !inputs.maxtext_installed && steps.uv_cache.outputs.use_cache == 'true' }}
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ${{ runner.temp }}/uv-cache
           key: ${{ steps.uv_cache.outputs.key }}
@@ -228,7 +228,7 @@ jobs:
         # Every shard must split the tests with the same durations, or the shards overlap and some tests run nowhere.
         # So when the coordinator uploaded them, a failed download fails this shard instead of using another split.
         if: inputs.total_workers > 1 && inputs.test_durations_uploaded
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: test-durations-${{ github.run_id }}-${{ inputs.flavor }}
           path: ${{ inputs.maxtext_installed && '/deps' || '.' }}
@@ -513,14 +513,14 @@ jobs:
             --junitxml=test-results-decoupled-targeted.xml
       - name: Upload Reference HLO
         if: ${{ inputs.is_update_hlo }}
-        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: reference-hlo
           path: ${{ inputs.maxtext_installed && '/deps/tests/utils/reference_hlo_*.txt' || 'tests/utils/reference_hlo_*.txt' }}
           if-no-files-found: ignore
       - name: Upload results to Codecov
         if: ${{ !inputs.maxtext_installed }} # Skip code coverage upload for maxtext image testing
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -532,7 +532,7 @@ jobs:
         # Not for a run of only the touched tests: their timings include XLA compiles that a full run shares
         # across a test class, which track_performance.yml would report as regressions against its baseline.
         if: ${{ !cancelled() && !inputs.newly_added_only }}
-        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: test-results-${{ inputs.flavor }}-${{ inputs.worker_group }}-${{ github.run_id }}
           path: ${{ inputs.maxtext_installed && '/deps/test-results-*.xml' || 'test-results-*.xml' }}
