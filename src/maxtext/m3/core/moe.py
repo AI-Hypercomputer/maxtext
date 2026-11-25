@@ -32,7 +32,6 @@ attribute across `nnx.split`, `nnx.merge`, `jax.jit`, and layer scan transforms.
 """
 
 from collections.abc import Callable
-import contextlib
 import dataclasses
 import functools
 import math
@@ -52,13 +51,6 @@ ExecutorKind = Literal["dense", "ragged_dot", "gmm_v2", "tokamax"]
 SHARDED_EXECUTOR_KINDS: tuple[str, ...] = ("gmm_v2", "tokamax")
 
 _COMBINE_DTYPE = jnp.float32
-_TOKAMAX_M_ALIGN = 256
-_TOKAMAX_KN_ALIGN = 128
-
-
-def _align_up(value: int, multiple: int) -> int:
-  """Rounds `value` up to a positive multiple of `multiple`."""
-  return max(multiple, ((int(value) + multiple - 1) // multiple) * multiple)
 
 
 # ==============================================================================
@@ -113,202 +105,8 @@ def _matmul_precision(dtype: Any) -> jax.lax.Precision:
   return jax.lax.Precision.HIGHEST
 
 
-def _pallas_matmul_precision_context(dtype: Any) -> contextlib.AbstractContextManager[Any]:
-  """Enables `float32` MXU passes inside Pallas `gmm_v2`/`tgmm_v2` on `float32` inputs."""
-  if jnp.dtype(dtype) == jnp.dtype(jnp.float32):
-    return jax.default_matmul_precision("float32")
-  return contextlib.nullcontext()
-
-
-@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5))
-def _pallas_grouped_matmul(
-    lhs: jax.Array,
-    rhs: jax.Array,
-    group_sizes: jax.Array,
-    backend_kind: str,
-    is_tpu: bool,
-    out_dtype: Any,
-) -> jax.Array:
-  """Runs grouped matmul `lhs @ rhs[g]` on the TPU `gmm_v2` backend."""
-  group_sizes_i32 = group_sizes.astype(jnp.int32)
-  valid_count = jnp.sum(group_sizes_i32)
-  valid_rows = (jnp.arange(lhs.shape[0], dtype=jnp.int32) < valid_count)[:, None]
-  lhs_safe = jnp.where(valid_rows, lhs, jnp.zeros((), dtype=lhs.dtype))
-
-  if backend_kind == "gmm_v2":
-    if not is_tpu:
-      out = jax.lax.ragged_dot(
-          lhs_safe,
-          rhs,
-          group_sizes_i32,
-          precision=_matmul_precision(lhs.dtype),
-          preferred_element_type=jnp.float32,
-      ).astype(out_dtype)
-      return jnp.where(valid_rows, out, jnp.zeros((), dtype=out_dtype))
-
-    from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2  # pylint: disable=import-outside-toplevel
-
-    m, k = lhs.shape
-    _, _, n = rhs.shape
-    m_pad = _align_up(m, _TOKAMAX_M_ALIGN)
-    k_pad = _align_up(k, _TOKAMAX_KN_ALIGN)
-    n_pad = _align_up(n, _TOKAMAX_KN_ALIGN)
-    lhs_pad = jnp.pad(lhs_safe, ((0, m_pad - m), (0, k_pad - k)))
-    rhs_pad = jnp.pad(rhs, ((0, 0), (0, k_pad - k), (0, n_pad - n)))
-    with _pallas_matmul_precision_context(lhs.dtype):
-      out_pad = gmm_v2.gmm_v2(
-          lhs=lhs_pad,
-          rhs=rhs_pad,
-          group_sizes=group_sizes_i32,
-          rhs_scale=None,
-          tile_info=gmm_v2.calculate_tiling,
-          preferred_element_type=out_dtype,
-          maybe_quantize_lhs=False,
-      )
-    out = out_pad[:m, :n].astype(out_dtype)
-    return jnp.where(valid_rows, out, jnp.zeros((), dtype=out_dtype))
-
-  raise ValueError(f"Unsupported Pallas grouped matmul backend {backend_kind!r}.")
-
-
-def _pallas_grouped_matmul_fwd(
-    lhs: jax.Array,
-    rhs: jax.Array,
-    group_sizes: jax.Array,
-    backend_kind: str,
-    is_tpu: bool,
-    out_dtype: Any,
-) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
-  out = _pallas_grouped_matmul(lhs, rhs, group_sizes, backend_kind, is_tpu, out_dtype)
-  return out, (lhs, rhs, group_sizes.astype(jnp.int32))
-
-
-def _pallas_grouped_matmul_bwd(
-    backend_kind: str,
-    is_tpu: bool,
-    out_dtype: Any,
-    residuals: tuple[jax.Array, jax.Array, jax.Array],
-    grad: jax.Array,
-) -> tuple[jax.Array, jax.Array, None]:
-  """Backward pass for the TPU `gmm_v2` / `tgmm_v2` grouped matmuls."""
-  lhs, rhs, group_sizes = residuals
-  m, k = lhs.shape
-  num_groups, _, n = rhs.shape
-  valid_count = jnp.sum(group_sizes)
-  valid_rows = (jnp.arange(m, dtype=jnp.int32) < valid_count)[:, None]
-  lhs_safe = jnp.where(valid_rows, lhs, jnp.zeros((), dtype=lhs.dtype))
-
-  if backend_kind == "gmm_v2":
-    if not is_tpu:
-      prec = _matmul_precision(lhs.dtype)
-      _, vjp_fn = jax.vjp(
-          lambda l, r: jax.lax.ragged_dot(
-              l,
-              r,
-              group_sizes,
-              precision=prec,
-              preferred_element_type=jnp.float32,
-          ).astype(out_dtype),
-          lhs_safe,
-          rhs,
-      )
-      grad_safe = jnp.where(valid_rows, grad.astype(out_dtype), jnp.zeros((), dtype=out_dtype))
-      dlhs, drhs = vjp_fn(grad_safe)
-      dlhs = jnp.where(valid_rows, dlhs, jnp.zeros((), dtype=lhs.dtype))
-      return dlhs, drhs, None
-
-    from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2  # pylint: disable=import-outside-toplevel
-    from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2  # pylint: disable=import-outside-toplevel
-
-    m_pad = _align_up(m, _TOKAMAX_M_ALIGN)
-    k_pad = _align_up(k, _TOKAMAX_KN_ALIGN)
-    n_pad = _align_up(n, _TOKAMAX_KN_ALIGN)
-    lhs_pad = jnp.pad(lhs_safe, ((0, m_pad - m), (0, k_pad - k)))
-    rhs_pad = jnp.pad(rhs, ((0, 0), (0, k_pad - k), (0, n_pad - n)))
-    grad_safe = jnp.where(valid_rows, grad.astype(lhs.dtype), jnp.zeros((), dtype=lhs.dtype))
-    grad_pad = jnp.pad(grad_safe, ((0, m_pad - m), (0, n_pad - n)))
-    kernel_transpose_rhs = jax.dtypes.itemsize_bits(rhs_pad.dtype) >= 8
-    dlhs_rhs = rhs_pad if kernel_transpose_rhs else rhs_pad.swapaxes(1, 2)
-    with _pallas_matmul_precision_context(lhs.dtype):
-      dlhs_pad = gmm_v2.gmm_v2(
-          lhs=grad_pad,
-          rhs=dlhs_rhs,
-          group_sizes=group_sizes,
-          rhs_scale=None,
-          tile_info=gmm_v2.calculate_tiling,
-          preferred_element_type=lhs_pad.dtype,
-          maybe_quantize_lhs=False,
-          transpose_rhs=kernel_transpose_rhs,
-      )
-      drhs_pad = tgmm_v2.tgmm_v2(
-          lhs=lhs_pad,
-          rhs=grad_pad,
-          group_sizes=group_sizes,
-          num_actual_groups=num_groups,
-          rhs_scale=None,
-          precision=jax.lax.Precision.DEFAULT,
-          preferred_element_type=rhs_pad.dtype,
-          tile_info=tgmm_v2.calculate_tgmm_tiling,
-      )
-    dlhs = jnp.where(valid_rows, dlhs_pad[:m, :k].astype(lhs.dtype), jnp.zeros((), dtype=lhs.dtype))
-    return dlhs, drhs_pad[:, :k, :n].astype(rhs.dtype), None
-
-  raise ValueError(f"Unsupported Pallas grouped matmul backend {backend_kind!r}.")
-
-
-_pallas_grouped_matmul.defvjp(_pallas_grouped_matmul_fwd, _pallas_grouped_matmul_bwd)
-
-
-def grouped_matmul(
-    lhs: jax.Array,
-    rhs: jax.Array,
-    group_sizes: jax.Array,
-    *,
-    backend: str = "ragged_dot",
-    is_tpu: bool = False,
-    preferred_element_type: Any = None,
-) -> jax.Array:
-  """Grouped matmul dispatcher across `ragged_dot`, `gmm_v2`, and `tokamax`."""
-  if backend not in ("ragged_dot", "gmm_v2", "tokamax"):
-    raise ValueError(f"Unknown grouped matmul backend {backend!r}; expected 'ragged_dot', 'gmm_v2', or 'tokamax'.")
-
-  out_dtype = jnp.dtype(lhs.dtype if preferred_element_type is None else preferred_element_type)
-  group_sizes_i32 = group_sizes.astype(jnp.int32)
-  valid_rows = (jnp.arange(lhs.shape[0], dtype=jnp.int32) < jnp.sum(group_sizes_i32))[:, None]
-  lhs_safe = jnp.where(valid_rows, lhs, jnp.zeros((), dtype=lhs.dtype))
-
-  if backend == "ragged_dot" or not is_tpu:
-    out = jax.lax.ragged_dot(
-        lhs_safe,
-        rhs,
-        group_sizes_i32,
-        precision=_matmul_precision(lhs.dtype),
-        preferred_element_type=jnp.float32,
-    ).astype(out_dtype)
-    return jnp.where(valid_rows, out, jnp.zeros((), dtype=out_dtype))
-
-  if backend == "tokamax":
-    import tokamax  # pylint: disable=import-outside-toplevel
-
-    m, k = lhs.shape
-    _, _, n = rhs.shape
-    m_pad = _align_up(m, _TOKAMAX_M_ALIGN)
-    k_pad = _align_up(k, _TOKAMAX_KN_ALIGN)
-    n_pad = _align_up(n, _TOKAMAX_KN_ALIGN)
-    lhs_pad = jnp.pad(lhs_safe, ((0, m_pad - m), (0, k_pad - k)))
-    rhs_pad = jnp.pad(rhs, ((0, 0), (0, k_pad - k), (0, n_pad - n)))
-    out_pad = tokamax.ragged_dot(
-        lhs=lhs_pad,
-        rhs=rhs_pad,
-        group_sizes=tokamax.RaggedDotGroupSizes(group_sizes_i32, m_pad),
-        preferred_element_type=out_dtype,
-        precision=_matmul_precision(lhs.dtype),
-        implementation="mosaic",
-    )
-    out = out_pad[:m, :n].astype(out_dtype)
-    return jnp.where(valid_rows, out, jnp.zeros((), dtype=out_dtype))
-
-  return _pallas_grouped_matmul(lhs, rhs, group_sizes_i32, backend, is_tpu, out_dtype)
+_pallas_grouped_matmul = kernels._vendored_pallas_grouped_matmul  # pylint: disable=protected-access
+grouped_matmul = kernels.grouped_matmul
 
 
 # ==============================================================================

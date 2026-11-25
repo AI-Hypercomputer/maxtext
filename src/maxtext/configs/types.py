@@ -890,6 +890,13 @@ class LogitsAndLoss(BaseModel):
       False,
       description="All gather the output head weight once before the tiled loss so the backward reuses it.",
   )
+  use_tokamax_linear_ce: bool = Field(
+      True,
+      description=(
+          "Use Tokamax Pallas fused linear softmax cross-entropy loss in m3 models on TPU when eligible "
+          "(unsharded vocab, z_loss_multiplier=0, num_vocab_tiling=1)."
+      ),
+  )
 
 
 class Attention(BaseModel):
@@ -2577,6 +2584,15 @@ class Qwen3_8FlashNext(BaseModel):
           "GDN chunk-matrix inverse (Qwen3-Next, Qwen3.5, Qwen3.8). 'block_doubling' (default) builds the exact"
           " inverse from MXU matmuls via bottom-up block doubling (TPU-friendly; stable in float32 even for"
           " correlated keys with weak decay); 'solve' uses jax.scipy.linalg.solve_triangular as the reference path."
+      ),
+  )
+  gdn_kernel_backend: Literal["auto", "tokamax", "jax"] = Field(
+      "auto",
+      description=(
+          "Qwen3.8 GDN training-prefill execution backend (single-step decode and stateful calls always use the"
+          " JAX path): 'auto' (default) dispatches to Tokamax Mosaic TPU on TPU gen >= 6 and falls back to"
+          " pure-JAX chunked GDN elsewhere; 'tokamax' fails closed if Tokamax TPU GDN cannot run; 'jax' forces"
+          " the pure-JAX chunked GDN path."
       ),
   )
   qsa_indexer_mask: Literal["gather", "reshape"] = Field(
