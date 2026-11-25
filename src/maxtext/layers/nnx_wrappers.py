@@ -81,7 +81,7 @@ def to_nnx_var(col: str, x: meta.AxisMetadata | Any) -> variablelib.Variable:
   """Convert a Linen variable to an NNX variable."""
   vtype = variablelib.variable_type_from_name(col, allow_register=True)
   if isinstance(x, nnx.bridge.NNXMeta):
-    assert vtype == x.var_type, f"Type stored in NNXMeta {x.var_type} != type inferred from collection name {vtype}"
+    assert variable_collection_name(x.var_type) == col, f"Type stored in NNXMeta {x.var_type} is not in collection {col}"
     return x.to_nnx_variable()
   if isinstance(x, meta.AxisMetadata):
     x_metadata = vars(x)
@@ -133,7 +133,7 @@ def nnx_attrs_to_linen_vars(nnx_attrs: dict) -> dict:
       # attaches bookkeeping attrs like qwix_path/qwix_rngs/disable_quant_stats_update
       # to the module during interception; leave them on the module and skip them here.
       continue
-    col_name = variablelib.variable_name_from_type(v.type)
+    col_name = variable_collection_name(v.type)
     v = to_linen_var(v)
     linen_structured[(col_name, *kp)] = v
   variables = nnx.traversals.unflatten_mapping(linen_structured)

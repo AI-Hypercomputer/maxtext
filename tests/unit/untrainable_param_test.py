@@ -57,6 +57,17 @@ class _Clipped(nnx.Module):
     return jnp.minimum(x * self.kernel[...], self.bound[...])
 
 
+class _Scaled(nnx.Module):
+  """A Param and an untrainable weight that has metadata."""
+
+  def __init__(self):
+    self.kernel = nnx.Param(jnp.ones(1))
+    self.scale = UntrainableParam(jnp.full(1, 2.0), sharding=(None,))
+
+  def __call__(self, x):
+    return x * self.kernel[...] * self.scale[...]
+
+
 def _train_state(model):
   tx = optimizers.freeze_params(optax.adamw(1e-2, weight_decay=0.5), optimizers.untrainable_paths(model))
   return nnx.state(train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, tx, wrt=nnx.Param)))
@@ -171,6 +182,13 @@ class UntrainableParamLinenBridgeTest(unittest.TestCase):
     np.testing.assert_array_equal(model.apply(loaded, x), _BOUND + 1)
     grads = jax.grad(lambda variables: model.apply(variables, x).sum())(loaded)
     np.testing.assert_array_equal(grads["params"]["bound"], np.zeros(3))
+
+  def test_round_trip_through_to_nnx_keeps_the_type(self):
+    x = jnp.ones(1)
+    model = nnx_wrappers.ToNNX(nnx_wrappers.to_linen(_Scaled, skip_rng=True), rngs=nnx.Rngs(0)).lazy_init(x)
+
+    self.assertIsInstance(model.scale, UntrainableParam)
+    np.testing.assert_array_equal(model(x), [2.0])
 
 
 if __name__ == "__main__":
