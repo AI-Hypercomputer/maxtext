@@ -1854,6 +1854,7 @@ class AttentionOp(nnx.Module):
           fuse_reciprocal=self.fuse_reciprocal,
           use_base2_exp=self.use_base2_exp,
           dkv_reuse_scaled_q=getattr(config, "sa_dkv_reuse_scaled_q", False),
+          local_band_mask=getattr(config, "sa_local_band_mask", False),
           q_prescaled_log2e=getattr(config, "sa_q_prescaled_log2e", False),
           residual_checkpoint_name="context",
           fwd_cost_estimate=pl.CostEstimate(

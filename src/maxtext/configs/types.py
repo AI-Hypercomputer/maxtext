@@ -1259,6 +1259,15 @@ class SplashAttention(BaseModel):
   sa_fuse_reciprocal: bool = Field(True, description="Maps to fuse_reciprocal in SplashConfig.")
   sa_use_base2_exp: bool = Field(True, description="Maps to use_base2_exp in SplashConfig.")
   sa_qk_diag_skip: bool = Field(False, description="Maps to qk_diag_skip in SplashConfig.")
+  sa_local_band_mask: bool = Field(
+      False,
+      description=(
+          "Experimental (SplashConfig.local_band_mask): on an aligned causal sliding-window mask (left"
+          " window block_q - 1, equal square blocks), the splash dkv kernel applies the partial mask only to"
+          " the triangle band of each compute tile of the two partial blocks and treats the rest as"
+          " statically visible or masked. Ignored for other masks. Bit-identical."
+      ),
+  )
   sa_sv_diag_skip: bool = Field(False, description="Maps to sv_diag_skip in SplashConfig.")
   sa_qk_diag_grid: int = Field(2, description="Maps to qk_diag_grid in SplashConfig.")
   sa_num_stacked_q_heads: int = Field(
