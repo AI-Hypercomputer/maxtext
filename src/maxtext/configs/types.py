@@ -2527,6 +2527,10 @@ class Qwen3Next(BaseModel):
           "and 'auto' selects automatically."
       ),
   )
+  use_tokamax_gdn: bool = Field(
+      False,
+      description="Whether to use the Tokamax Gated Delta Net kernel for GDN layers.",
+  )
   gdn_pin_in_proj_output_layout: bool = Field(
       True,
       description=(
@@ -6364,6 +6368,83 @@ class MaxTextConfig(
     if self.shard_mode == ShardMode.EXPLICIT:
       raise ValueError(f"{prefix} does not support shard_mode='explicit'.")
 
+  @staticmethod
+  def _validate_tokamax_gdn(cfg: Any, gdn_context_parallel_size: int) -> None:
+    """Validates Tokamax GatedDeltaNet (`use_tokamax_gdn`) configuration constraints."""
+    if cfg.decoder_block not in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
+      if cfg.use_tokamax_gdn:
+        raise ValueError("use_tokamax_gdn=True requires a GatedDeltaNet decoder_block ('qwen3_next' or 'qwen3_5').")
+      return
+    if not cfg.use_tokamax_gdn:
+      return
+    if cfg.packing or getattr(cfg, "max_seq_token_per_tpu", 0) > 0:
+      raise ValueError(
+          "use_tokamax_gdn=True does not yet support sequence packing (packing=True); "
+          "set packing=False or use_tokamax_gdn=False."
+      )
+    if jax.numpy.dtype(cfg.dtype) not in (jax.numpy.bfloat16, jax.numpy.float32):
+      raise ValueError(f"use_tokamax_gdn=True requires dtype in ('bfloat16', 'float32'), got {cfg.dtype!r}.")
+    if int(cfg.gdn_key_head_dim) < 1 or int(cfg.gdn_key_head_dim) > 256 or int(cfg.gdn_value_head_dim) < 1:
+      raise ValueError(
+          "use_tokamax_gdn=True requires gdn_key_head_dim in [1, 256] and gdn_value_head_dim >= 1, "
+          f"got gdn_key_head_dim={cfg.gdn_key_head_dim}, gdn_value_head_dim={cfg.gdn_value_head_dim}."
+      )
+    if cfg.gdn_chunk_size != 64:
+      raise ValueError(f"use_tokamax_gdn=True currently requires gdn_chunk_size=64, got {cfg.gdn_chunk_size}.")
+    if cfg.max_target_length > 0 and cfg.max_target_length % cfg.gdn_chunk_size != 0:
+      raise ValueError(
+          f"use_tokamax_gdn=True requires max_target_length ({cfg.max_target_length}) to be divisible by "
+          f"gdn_chunk_size ({cfg.gdn_chunk_size})."
+      )
+    if (
+        cfg.remat_policy == "custom"
+        and (cfg.scan_layers or cfg.scan_layers_per_stage)
+        and (
+            cfg.gdn == "offload"
+            or cfg.gdn_states == "offload"
+            or bool({"gdn", "gdn_states", "gdn_chunk_states"} & set(cfg.tensors_to_offload or ()))
+        )
+    ):
+      raise ValueError(
+          "use_tokamax_gdn=True does not yet support gdn='offload' or gdn_states='offload' when "
+          "remat_policy='custom' and scan_layers=True (or scan_layers_per_stage=True); "
+          "use 'remat' or 'device', or set scan_layers=False."
+      )
+    if gdn_context_parallel_size > 1:
+      if cfg.gdn_cp_mode == "seq":
+        raise ValueError(
+            "use_tokamax_gdn=True does not yet support gdn_cp_mode='seq' when context parallelism > 1; "
+            "use gdn_cp_mode='head' (or 'auto') or use_tokamax_gdn=False."
+        )
+      if int(cfg.gdn_num_key_heads) % int(gdn_context_parallel_size) != 0:
+        raise ValueError(
+            f"use_tokamax_gdn=True with context parallelism requires gdn_num_key_heads ({cfg.gdn_num_key_heads}) "
+            f"to be divisible by the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
+        )
+      tp_shards = (
+          max(1, int(cfg.ici_tensor_parallelism))
+          * max(1, int(cfg.dcn_tensor_parallelism))
+          * max(1, int(cfg.ici_tensor_sequence_parallelism))
+          * max(1, int(cfg.dcn_tensor_sequence_parallelism))
+      )
+      total_head_shards = tp_shards * int(gdn_context_parallel_size)
+      if int(cfg.gdn_num_key_heads) % total_head_shards != 0:
+        raise ValueError(
+            f"use_tokamax_gdn=True with head-sharded context parallelism requires gdn_num_key_heads "
+            f"({cfg.gdn_num_key_heads}) to be divisible by total GatedDeltaNet head shards "
+            f"({total_head_shards} = tensor_parallelism {tp_shards} * context_parallelism {gdn_context_parallel_size})."
+        )
+      if cfg.max_target_length > 0 and int(cfg.max_target_length) % int(gdn_context_parallel_size) != 0:
+        raise ValueError(
+            f"use_tokamax_gdn=True with context parallelism requires max_target_length ({cfg.max_target_length}) "
+            f"to be divisible by the GatedDeltaNet context-parallel size ({gdn_context_parallel_size})."
+        )
+      if cfg.gdn_in_proj_kernel_order:
+        raise ValueError(
+            "gdn_in_proj_kernel_order=True is incompatible with head-sharded GDN context parallelism "
+            "(active when use_tokamax_gdn=True and context parallelism > 1)."
+        )
+
   def _validate_usp_context_parallelism(self):
     """Validates the USP (Ulysses over ring) context parallelism configuration."""
     if self.context_parallel_strategy != "usp":
@@ -8812,6 +8893,7 @@ class MaxTextConfig(
             "reorder because it rebuilds the causal mask from positions; a recurrence cannot. The run still trains "
             "and the loss still falls, so set this explicitly rather than relying on the failure being visible."
         )
+      self._validate_tokamax_gdn(self, gdn_context_parallel_size)
       if self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
         if int(self.gdn_num_key_heads) % int(gdn_context_parallel_size) != 0:
           raise ValueError(
@@ -8839,6 +8921,7 @@ class MaxTextConfig(
             "and with packing=False GatedDeltaNet ignores their segment IDs in training."
         )
     else:
+      self._validate_tokamax_gdn(self, 1)
       if self.partial_rotary_factor is not None and self.partial_rotary_factor != 1.0:
         raise ValueError("`partial_rotary_factor` is only effective when `decoder_block` is set to 'qwen3_next'.")
       if (
@@ -9643,18 +9726,19 @@ class RLConfig(
           f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
       )
     if self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
-      if not self.packing and self.max_seq_token_per_tpu > 0:
-        raise ValueError(
-            f"GatedDeltaNet ({self.decoder_block.value}) with max_seq_token_per_tpu > 0 requires packing=True: "
-            "packed rows hold several sequences, and with packing=False GatedDeltaNet ignores their segment IDs "
-            "in training."
-        )
       gdn_context_parallel_size = (
           self.ici_context_parallelism
           * self.dcn_context_parallelism
           * self.ici_context_usp_ulysses_parallelism
           * self.dcn_context_usp_ulysses_parallelism
       )
+      MaxTextConfig._validate_tokamax_gdn(self, gdn_context_parallel_size)  # pylint: disable=protected-access
+      if not self.packing and self.max_seq_token_per_tpu > 0:
+        raise ValueError(
+            f"GatedDeltaNet ({self.decoder_block.value}) with max_seq_token_per_tpu > 0 requires packing=True: "
+            "packed rows hold several sequences, and with packing=False GatedDeltaNet ignores their segment IDs "
+            "in training."
+        )
       if self.gdn_cp_mode == "head" and gdn_context_parallel_size > 1:
         if int(self.gdn_num_key_heads) % int(gdn_context_parallel_size) != 0:
           raise ValueError(
@@ -9670,18 +9754,20 @@ class RLConfig(
             "gdn_in_proj_kernel_order=True is incompatible with gdn_cp_mode='head' when context parallelism > 1."
         )
       MaxTextConfig._validate_gdn_projection_quantization(self)  # pylint: disable=protected-access
-    elif (
-        self.gdn_in_proj_kernel_order
-        or self.gdn_out_proj_token_minor
-        or self.gdn_gated_norm_layout != "auto"
-        or self.gdn_fp8_projections
-        or not self.gdn_pin_in_proj_output_layout
-    ):
-      raise ValueError(
-          "GatedDeltaNet projection/norm layout options (gdn_in_proj_kernel_order, gdn_out_proj_token_minor, "
-          "gdn_gated_norm_layout, gdn_fp8_projections, gdn_pin_in_proj_output_layout) require a GatedDeltaNet "
-          "decoder_block ('qwen3_next' or 'qwen3_5')."
-      )
+    else:
+      MaxTextConfig._validate_tokamax_gdn(self, 1)  # pylint: disable=protected-access
+      if (
+          self.gdn_in_proj_kernel_order
+          or self.gdn_out_proj_token_minor
+          or self.gdn_gated_norm_layout != "auto"
+          or self.gdn_fp8_projections
+          or not self.gdn_pin_in_proj_output_layout
+      ):
+        raise ValueError(
+            "GatedDeltaNet projection/norm layout options (gdn_in_proj_kernel_order, gdn_out_proj_token_minor, "
+            "gdn_gated_norm_layout, gdn_fp8_projections, gdn_pin_in_proj_output_layout) require a GatedDeltaNet "
+            "decoder_block ('qwen3_next' or 'qwen3_5')."
+        )
 
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)
