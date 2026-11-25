@@ -21,12 +21,15 @@ from jax.sharding import PartitionSpec as P
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline.grain_data_processing import make_grain_train_iterator
 from maxtext.input_pipeline.grain_data_processing import make_grain_eval_iterator
+from maxtext.input_pipeline.grain_data_processing import make_synthetic_multimodal_train_iterator
+from maxtext.input_pipeline.grain_data_processing import make_synthetic_multimodal_eval_iterator
 from maxtext.input_pipeline.hf_data_processing import make_hf_train_iterator
 from maxtext.input_pipeline.hf_data_processing import make_hf_eval_iterator
 from maxtext.input_pipeline.olmo_grain_data_processing import make_olmo_grain_train_iterator
 from maxtext.input_pipeline.olmo_grain_data_processing import make_olmo_grain_eval_iterator
 from maxtext.input_pipeline.synthetic_data_processing import SyntheticDataIterator
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
+from maxtext.input_pipeline.synthetic_data_processing import synthetic_modalities
 from maxtext.utils import max_logging
 from maxtext.utils.sharding import remove_size_one_mesh_axis
 
@@ -66,32 +69,36 @@ def create_data_iterator(config: pyconfig.HyperParameters, mesh):
 
   # Return synthetic dataset if selected
   if config.dataset_type == "synthetic":
-    eval_iterator = SyntheticDataIterator(config, mesh, is_training=False) if config.eval_interval > 0 else None
-    return SyntheticDataIterator(config, mesh), eval_iterator
-  dataset_type_to_train_eval_iterator = {
-      "grain": (make_grain_train_iterator, make_grain_eval_iterator),
-      "hf": (make_hf_train_iterator, make_hf_eval_iterator),
-      "olmo_grain": (make_olmo_grain_train_iterator, make_olmo_grain_eval_iterator),
-  }
-  if config.dataset_type in ("tfds", "c4_mlperf"):
-    from maxtext.input_pipeline.tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator  # pylint: disable=import-outside-toplevel
-    from maxtext.input_pipeline.tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator  # pylint: disable=import-outside-toplevel
-
-    dataset_type_to_train_eval_iterator["tfds"] = (make_tfds_train_iterator, make_tfds_eval_iterator)
-    dataset_type_to_train_eval_iterator["c4_mlperf"] = (make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator)
-
-  # Collect train and eval iterators
-  if config.dataset_type in ["tfds", "grain", "hf", "c4_mlperf", "olmo_grain"]:
-    if config.dataset_type == "c4_mlperf":
-      assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
-    train_iterator, eval_iterator = dataset_type_to_train_eval_iterator[config.dataset_type]
+    if not synthetic_modalities(config):
+      eval_iterator = SyntheticDataIterator(config, mesh, is_training=False) if config.eval_interval > 0 else None
+      return SyntheticDataIterator(config, mesh), eval_iterator
+    train_iterator = make_synthetic_multimodal_train_iterator
+    eval_iterator = make_synthetic_multimodal_eval_iterator
   else:
-    max_logging.log(
-        f"WARNING: '{config.dataset_type}' is not a supported dataset type."
-        "Using synthetic data. Please choose from 'tfds', 'grain', 'hf', or 'c4_mlperf'."
-    )
-    output_train_iterator, output_eval_iterator = SyntheticDataIterator(config, mesh), None
-    return output_train_iterator, output_eval_iterator
+    dataset_type_to_train_eval_iterator = {
+        "grain": (make_grain_train_iterator, make_grain_eval_iterator),
+        "hf": (make_hf_train_iterator, make_hf_eval_iterator),
+        "olmo_grain": (make_olmo_grain_train_iterator, make_olmo_grain_eval_iterator),
+    }
+    if config.dataset_type in ("tfds", "c4_mlperf"):
+      from maxtext.input_pipeline.tfds_data_processing import make_tfds_train_iterator, make_tfds_eval_iterator  # pylint: disable=import-outside-toplevel
+      from maxtext.input_pipeline.tfds_data_processing_c4_mlperf import make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator  # pylint: disable=import-outside-toplevel
+
+      dataset_type_to_train_eval_iterator["tfds"] = (make_tfds_train_iterator, make_tfds_eval_iterator)
+      dataset_type_to_train_eval_iterator["c4_mlperf"] = (make_c4_mlperf_train_iterator, make_c4_mlperf_eval_iterator)
+
+    # Collect train and eval iterators
+    if config.dataset_type in ["tfds", "grain", "hf", "c4_mlperf", "olmo_grain"]:
+      if config.dataset_type == "c4_mlperf":
+        assert config.packing, "c4_mlperf dataloader only works with packing. For padded version, use tfds dataloader"
+      train_iterator, eval_iterator = dataset_type_to_train_eval_iterator[config.dataset_type]
+    else:
+      max_logging.log(
+          f"WARNING: '{config.dataset_type}' is not a supported dataset type."
+          "Using synthetic data. Please choose from 'tfds', 'grain', 'hf', or 'c4_mlperf'."
+      )
+      output_train_iterator, output_eval_iterator = SyntheticDataIterator(config, mesh), None
+      return output_train_iterator, output_eval_iterator
 
   # Generate output train iterator
   process_indices_train = get_process_loading_real_data(

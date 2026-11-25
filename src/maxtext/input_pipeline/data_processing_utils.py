@@ -27,7 +27,7 @@ from maxtext.utils import elastic_utils
 
 def parse_and_keep_features(dataset, config, data_columns, tokenize):
   """Parse arrayrecord features or keep specified columns for other formats."""
-  if config.grain_file_type in ("arrayrecord", "tfrecord"):
+  if config.dataset_type != "synthetic" and config.grain_file_type in ("arrayrecord", "tfrecord"):
     dataset = dataset.map(input_pipeline_utils.ParseFeatures(data_columns, tokenize))
     dataset = dataset.map(input_pipeline_utils.NormalizeFeatures(data_columns, tokenize))
   else:
@@ -67,12 +67,13 @@ def validate_and_configure_sft_columns(data_columns, tokenizer_model, chat_templ
   ), f"Dataset column names mismatch. Expected columns to match one of {supported_columns}, but got {data_columns}"
 
 
-def get_local_batch_size(config):
+def get_local_batch_size(config, is_training: bool = True):
   """Computes local batch size based on process count and expansion factor."""
-  if config.elastic_enabled:
+  if config.elastic_enabled and is_training:
     batch_size = elastic_utils.get_local_batch_size(config)
   else:
-    batch_size = config.global_batch_size_to_load // jax.process_count()
+    global_batch_size = config.global_batch_size_to_load if is_training else config.global_batch_size_to_load_eval
+    batch_size = global_batch_size // jax.process_count()
   if config.expansion_factor_real_data > 1:
     # global_batch_size_to_load has been expanded in pyconfig.py when expansion_factor_real_data > 1.
     # But when using Grain, we want to keep the batch_size consistent with that in the checkpoint.
