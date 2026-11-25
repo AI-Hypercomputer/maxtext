@@ -32,7 +32,7 @@ on:
         required: true
         type: string
       test_scope:
-        description: 'Which test suites the DAG should run: all, pre-training or post-training.'
+        description: 'Which test suites the DAG should run: tpu (both TPU suites), tpu-pre-training, tpu-post-training, gpu-pre-training, or all (release_candidate only).'
         required: false
         type: string
         default: all
@@ -70,7 +70,7 @@ jobs:
           PROJECT_NAME: ${{ vars.PROJECT_NAME }}
         run: |
           IAP_TOKEN=$(gcloud auth print-access-token)
-          PAYLOAD=$(python3 -c 'import json, os
+          PAYLOAD=$(python3 -c 'import json, os, sys
           from datetime import datetime, timezone
           mode = os.environ["BUILD_MODE"]
           run_id = os.environ["RUN_ID"]
@@ -84,10 +84,26 @@ jobs:
           else:
               pre_img = f"us-docker.pkg.dev/{project}/maxtext-images/maxtext_jax_{mode}:{run_id}"
               post_img = f"us-docker.pkg.dev/{project}/maxtext-images/maxtext_post_training_{mode}:{run_id}"
+          # Each pipeline triggers the suites for the images it built: the TPU
+          # pipelines send TPU scopes, the GPU pipeline sends gpu-pre-training.
+          tpu_scopes = ("tpu", "tpu-pre-training", "tpu-post-training")
+          if test_scope not in tpu_scopes + ("gpu-pre-training", "all"):
+              sys.exit(f"Error: unknown test_scope {test_scope!r}")
+          # TPU and GPU images come from separate runs with different run_ids. Only
+          # release candidates share a tag (the commit SHA).
+          if test_scope == "all" and mode != "release_candidate":
+              sys.exit("Error: test_scope all is only supported in release_candidate mode")
+          docker_images = {}
+          if test_scope in tpu_scopes + ("all",):
+              docker_images["tpu_pre_training"] = pre_img
+              docker_images["tpu_post_training"] = post_img
+          # Release candidates have no GPU image yet.
+          if test_scope in ("all", "gpu-pre-training") and mode != "release_candidate":
+              docker_images["gpu_pre_training"] = f"us-docker.pkg.dev/{project}/maxtext-images/maxtext_gpu_jax_{mode}:amd64-{run_id}"
           now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
           print(json.dumps({
               "dag_run_id": f"auto_gha__{run_id}__{now}",
-              "note": f"Automated E2E TPU test suite ({test_scope}) triggered by GitHub Actions.\n\nWorkflow Run: https://github.com/{repo}/actions/runs/{run_id}",
+              "note": f"Automated E2E test suite ({test_scope}) triggered by GitHub Actions.\n\nWorkflow Run: https://github.com/{repo}/actions/runs/{run_id}",
               "conf": {
                   "build_mode": mode,
                   "commit_sha": sha,
@@ -96,10 +112,7 @@ jobs:
                   "github_token": os.environ["GITHUB_TOKEN"],
                   "is_automated": True,
                   "test_scope": test_scope,
-                  "docker_images": {
-                      "tpu_pre_training": pre_img,
-                      "tpu_post_training": post_img,
-                  },
+                  "docker_images": docker_images,
               }
           }))')
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \

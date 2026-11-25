@@ -28,6 +28,14 @@ on:
         required: false
         type: string
         default: "maxtext-test-images"
+      e2e_test_scope:
+        description: 'Which E2E test suites to run after building the Docker images (needs repository_name maxtext-images)'
+        required: false
+        type: choice
+        default: none
+        options:
+          - none
+          - gpu-pre-training
 
 permissions:
   contents: read
@@ -105,9 +113,28 @@ jobs:
       device: gpu
       workflow: ${{ matrix.workflow }}
 
+  run_e2e_tests:
+    name: Run E2E tests
+    needs: build_and_push_docker_images
+    # run_e2e_tests.yml sends maxtext-images URIs, so manual runs only run E2E
+    # when they push there.
+    if: >-
+      ${{ !cancelled() &&
+      needs.build_and_push_docker_images.result == 'success' &&
+      (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.e2e_test_scope != 'none' && inputs.repository_name == 'maxtext-images')) }}
+    uses: ./.github/workflows/run_e2e_tests.yml
+    with:
+      mode: stable
+      # Scheduled runs exercise the GPU suite; manual runs pick a scope.
+      test_scope: ${{ github.event_name == 'schedule' && 'gpu-pre-training' || inputs.e2e_test_scope }}
+      run_id: ${{ github.run_id }}
+      maxtext_sha: ${{ github.sha }}
+    secrets:
+      AIRFLOW_CALLBACK_TOKEN: ${{ secrets.AIRFLOW_CALLBACK_TOKEN }}
+
   notify_failure:
     name: Notify failed build
-    needs: [build_and_push_docker_images, run_ci_tests]
+    needs: [build_and_push_docker_images, run_ci_tests, run_e2e_tests]
     if: ${{ failure() && (github.event_name == 'schedule' || inputs.repository_name == 'maxtext-images') }}
     runs-on: ubuntu-latest
     permissions:
@@ -125,7 +152,7 @@ jobs:
 
   investigate_failure:
     name: Investigate failed build # investigates the failure and comments on the tracking issue
-    needs: [build_and_push_docker_images, run_ci_tests, notify_failure]
+    needs: [build_and_push_docker_images, run_ci_tests, run_e2e_tests, notify_failure]
     if: ${{ failure() && (github.event_name == 'schedule' || inputs.repository_name == 'maxtext-images') }}
     uses: ./.github/workflows/gemini_investigate.yml
     permissions:

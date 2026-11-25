@@ -146,6 +146,8 @@ jobs:
     uses: ./.github/workflows/run_e2e_tests.yml
     with:
       mode: release_candidate
+      # Release candidates have no GPU image yet, so test the TPU suites only.
+      test_scope: tpu
       run_id: ${{ github.run_id }}
       maxtext_sha: ${{ needs.get_maxtext_sha.outputs.short_sha }}
     secrets:
