@@ -6072,11 +6072,6 @@ class MaxTextConfig(
       raise ValueError("expert_replicas_per_device > 0 does not support mlp_bias=True.")
     if self.moe_accumulate_chunk_wgrad:
       raise ValueError("expert_replicas_per_device > 0 does not support moe_accumulate_chunk_wgrad=True.")
-    if self.moe_dropless_fallback is not None:
-      raise ValueError(
-          "expert_replicas_per_device > 0 does not support moe_dropless_fallback "
-          "(the overflow check uses pre-replication logical shard counts)."
-      )
     if self.attention in ("vllm_rpa", "vllm_batched_rpa"):
       raise ValueError(f"expert_replicas_per_device > 0 does not support attention={self.attention!r}.")
     for flag_name in (

@@ -3565,11 +3565,15 @@ class RoutedMoE(nnx.Module):
       n_chunks,
       per_expert_scale=None,
       token_mask=None,
+      non_ep_batch_axes=(),
   ):
     """Returns True if permute()'s ragged buffer would overflow for any chunk on any EP shard.
 
     Counts this device's (token, k) pairs per chunk per destination EP shard, all-reduces the counts
     over EP (what each shard receives after the all-gather) and compares them with the buffer size.
+    When hot-expert replication is enabled on the ragged all-to-all path, destination shards are
+    computed from post-replication physical slots so capacities freed by replication do not trigger
+    false-positive fallbacks.
     """
     num_ep = self.get_expert_parallelism_size()
     _, selected_experts = self.get_topk(
@@ -3582,12 +3586,38 @@ class RoutedMoE(nnx.Module):
         token_mask=token_mask,
     )
     batch, seq_len, top_k = selected_experts.shape
-    # Forced-routing and token_mask padding (-1) maps to no shard, so one_hot gives it an all-zero row.
-    target_shard = selected_experts // (self.config.num_experts // num_ep)
-    counts = jax.nn.one_hot(target_shard, num_ep, dtype=jnp.int32)
-    counts = counts.reshape(batch, n_chunks, -1, num_ep).sum(axis=(0, 2))  # [n_chunks, EP]
-    if num_ep > 1:
-      counts = jax.lax.psum(counts, self._expert_parallelism_name)
+    num_replicas = self.config.expert_replicas_per_device
+    if num_replicas > 0 and num_ep > 1 and not self.config.use_ring_of_experts:
+      expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name)
+      chunk_len = seq_len // n_chunks
+      chunk_counts = []
+      for c in range(n_chunks):
+        sel_c = selected_experts[:, c * chunk_len : (c + 1) * chunk_len, :]
+        valid_c = valid_expert_mask(sel_c, self.config.num_experts)
+        if token_mask is not None:
+          valid_c = valid_c & jnp.asarray(token_mask[:, c * chunk_len : (c + 1) * chunk_len, None], dtype=jnp.bool_)
+        flat_safe = jnp.where(valid_c, sel_c, 0).ravel()
+        valid_flat = valid_c.ravel()
+        local_counts = jnp.bincount(
+            flat_safe, weights=valid_flat.astype(jnp.int32), length=self.config.num_experts
+        ).astype(jnp.int32)
+        if non_ep_batch_axes:
+          local_counts = jax.lax.psum(local_counts, axis_name=non_ep_batch_axes)
+        counts_src = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
+        plan_c = moe_replica_planner.compute_plan_iter(
+            counts_src, num_ep, num_replicas, self.config.expert_replica_max_send
+        )
+        phys_c = plan_c.route_table[expert_shard_id][flat_safe]
+        dst_c = jnp.where(valid_flat, phys_c // plan_c.num_slots, -1)
+        chunk_counts.append(jnp.sum(jax.nn.one_hot(dst_c, num_ep, dtype=jnp.int32), axis=0))
+      counts = jax.lax.psum(jnp.stack(chunk_counts, axis=0), self._expert_parallelism_name)
+    else:
+      # Forced-routing and token_mask padding (-1) maps to no shard, so one_hot gives it an all-zero row.
+      target_shard = selected_experts // (self.config.num_experts // num_ep)
+      counts = jax.nn.one_hot(target_shard, num_ep, dtype=jnp.int32)
+      counts = counts.reshape(batch, n_chunks, -1, num_ep).sum(axis=(0, 2))  # [n_chunks, EP]
+      if num_ep > 1:
+        counts = jax.lax.psum(counts, self._expert_parallelism_name)
     buffer_size = self.get_ragged_buffer_size(
         batch * (seq_len // n_chunks) * top_k, num_ep, self.config.num_experts, top_k, self.get_ragged_buffer_factor()
     )
@@ -4447,6 +4477,7 @@ class RoutedMoE(nnx.Module):
       local_sorted_indices = None
       all_shards_group_sizes = None
       reshaped_group_sizes = None
+      has_overflow = False
       required_rbf = None
       replica_plan = None
       local_tokens = math.prod(x.shape[:-1])
@@ -4479,6 +4510,8 @@ class RoutedMoE(nnx.Module):
           local_counts = jnp.bincount(flat_logical, weights=count_weights, length=self.config.num_experts).astype(
               jnp.int32
           )
+          if roe_bias_axis_names and self.config.shard_embed_moe_on_fsdp and weight_gather:
+            local_counts = jax.lax.psum(local_counts, axis_name=roe_bias_axis_names)
           counts_src = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
           replica_plan = moe_replica_planner.compute_plan_iter(
               counts_src,
@@ -4549,6 +4582,8 @@ class RoutedMoE(nnx.Module):
               self.config.num_experts_per_tok,
               ragged_buffer_factor,
           )
+          if ragged_buffer_factor > 0.0:
+            has_overflow = jnp.sum(all_shards_group_sizes[:, expert_shard_id]) > buffer_size
           input_offsets, send_sizes, output_offsets, recv_sizes = RoutedMoE.get_all_to_all_params(
               all_shards_group_sizes,
               expert_shard_id,
@@ -4617,6 +4652,7 @@ class RoutedMoE(nnx.Module):
               lb_loss=lb_loss,
               bias_updates=bias_updates,
               local_group_sizes=local_group_sizes,
+              has_overflow=has_overflow,
               required_rbf=required_rbf,
               sorted_weights=sorted_weights,
           ),
@@ -5761,6 +5797,7 @@ class RoutedMoE(nnx.Module):
           n_chunks,
           per_expert_scale,
           token_mask=token_mask,
+          non_ep_batch_axes=roe_bias_axis_names if (self.config.shard_embed_moe_on_fsdp and weight_gather) else (),
       )
 
       # Both branches return required_rbf with the same structure: None when the

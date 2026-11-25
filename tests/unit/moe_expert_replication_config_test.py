@@ -83,11 +83,6 @@ class ExpertReplicationConfigTest(parameterized.TestCase):
       ("emb_chunks", {"num_moe_emb_chunks": 2}, "num_moe_emb_chunks > 0"),
       ("mlp_bias", {"mlp_bias": True}, "mlp_bias=True"),
       ("chunk_wgrad", {"moe_accumulate_chunk_wgrad": True}, "moe_accumulate_chunk_wgrad=True"),
-      (
-          "dropless_fallback",
-          {"moe_dropless_fallback": "layer", "use_ragged_sort": True, "ragged_buffer_factor": 1.25},
-          "moe_dropless_fallback",
-      ),
       ("ep_1", {"ici_expert_parallelism": 1, "ici_fsdp_parallelism": 8}, "expert parallelism > 1"),
       ("no_sparse_matmul", {"sparse_matmul": False}, "sparse_matmul=True"),
       ("num_experts_1", {"num_experts": 1, "num_experts_per_tok": 1}, "num_experts > 1"),
