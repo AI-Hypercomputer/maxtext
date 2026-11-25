@@ -322,12 +322,17 @@ class NNXDecoderLayer(nnx.Module):
     layer_output = _maybe_shard_with_logical(layer_output, logical_axis_names)
 
     if getattr(cfg, "record_internal_nn_metrics", False):
-      self.sow(nnx.Intermediate, "activation_mean", jnp.mean(layer_output))
-      self.sow(nnx.Intermediate, "activation_stdev", jnp.std(layer_output))
+      self.sow(nnx.Intermediate, "activation_mean", jax.lax.stop_gradient(jnp.mean(layer_output)))
+      self.sow(nnx.Intermediate, "activation_stdev", jax.lax.stop_gradient(jnp.std(layer_output)))
       self.sow(
           nnx.Intermediate,
           "activation_fraction_zero",
-          jnp.sum(layer_output == 0) / jnp.size(layer_output),
+          jax.lax.stop_gradient(jnp.sum(layer_output == 0) / jnp.size(layer_output)),
+      )
+      self.sow(
+          nnx.Intermediate,
+          "activation_amax",
+          jax.lax.stop_gradient(jnp.max(jnp.abs(layer_output)).astype(jnp.float32)),
       )
 
     if cfg.scan_layers:

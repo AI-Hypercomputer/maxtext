@@ -2750,6 +2750,13 @@ class Qwen3NextDecoderLayer(nnx.Module):
         layer_output,
         self.activation_axis_names,
     )
+    if getattr(self.config, "record_internal_nn_metrics", False):
+      self.activation_mean = nnx.Intermediate(jax.lax.stop_gradient(jnp.mean(layer_output)))
+      self.activation_stdev = nnx.Intermediate(jax.lax.stop_gradient(jnp.std(layer_output)))
+      self.activation_fraction_zero = nnx.Intermediate(
+          jax.lax.stop_gradient(jnp.sum(layer_output == 0) / jnp.size(layer_output))
+      )
+      self.activation_amax = nnx.Intermediate(jax.lax.stop_gradient(jnp.max(jnp.abs(layer_output)).astype(jnp.float32)))
     return layer_output, new_kv_cache
 
 
@@ -3046,6 +3053,14 @@ class Qwen3MoeDecoderLayer(AttentionWithNorm):
 
     layer_output = intermediate_inputs + mlp_lnx
     layer_output = self._maybe_shard_with_logical(layer_output, self.activation_axis_names)
+
+    if getattr(self.config, "record_internal_nn_metrics", False):
+      self.activation_mean = nnx.Intermediate(jax.lax.stop_gradient(jnp.mean(layer_output)))
+      self.activation_stdev = nnx.Intermediate(jax.lax.stop_gradient(jnp.std(layer_output)))
+      self.activation_fraction_zero = nnx.Intermediate(
+          jax.lax.stop_gradient(jnp.sum(layer_output == 0) / jnp.size(layer_output))
+      )
+      self.activation_amax = nnx.Intermediate(jax.lax.stop_gradient(jnp.max(jnp.abs(layer_output)).astype(jnp.float32)))
 
     if is_scan_carry:
 

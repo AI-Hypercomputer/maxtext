@@ -383,6 +383,7 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
 
   # get MoE load balance loss
   moe_lb_loss = 0.0
+  moe_lb_loss_unweighted = None
   if config.num_experts > 1:
     moe_lb_losses = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "moe_lb_loss")
     if moe_lb_losses:
@@ -393,6 +394,15 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       loss = _add_aux_loss(loss, moe_lb_loss)
     else:
       max_logging.debug("\nNo MoE load balance loss found. Defaulting to 0.0.")
+    if getattr(config, "moe_log_unweighted_lb_loss", False):
+      moe_lb_losses_unweighted = maxtext_utils.collect_intermediates_by_suffix(
+          intermediate_outputs, "moe_lb_loss_unweighted"
+      )
+      if moe_lb_losses_unweighted:
+        lb_losses_unweighted = jnp.concatenate(moe_lb_losses_unweighted)
+        moe_lb_loss_unweighted = (
+            jnp.sum(lb_losses_unweighted) if moe.uses_megatron_seq_aux_loss(config) else jnp.mean(lb_losses_unweighted)
+        )
 
   # get MoE routed bias term updates
   moe_bias_updates = None
@@ -430,6 +440,8 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
       "mtp_loss": mtp_loss,
       "batch_stats": (intermediate_outputs.get("batch_stats", None) if hasattr(intermediate_outputs, "get") else None),
   }
+  if moe_lb_loss_unweighted is not None:
+    aux["moe_lb_loss_unweighted"] = moe_lb_loss_unweighted
   te_moe_block = getattr(config, "te_moe_block", False)
   if te_moe_block:
     overflow_values = maxtext_utils.collect_intermediates_by_suffix(intermediate_outputs, "te_moe_capacity_overflow")
@@ -837,6 +849,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     )
   if config.moe_dropless_fallback == "layer":
     scalar_metrics["learning/moe_dropless_fallback_layers"] = aux["moe_dropless_fallback_layers"]
+  if "moe_lb_loss_unweighted" in aux:
+    scalar_metrics["learning/moe_lb_loss_unweighted"] = aux["moe_lb_loss_unweighted"]
   if "moe_max_load_ratio" in aux:
     scalar_metrics["learning/moe_max_load_ratio"] = aux["moe_max_load_ratio"]
     scalar_metrics["learning/moe_max_load_ratio_mean"] = aux["moe_max_load_ratio_mean"]
@@ -848,6 +862,7 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit
 
+  model_params = None
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
@@ -859,7 +874,14 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if "learning/raw_grad_norm" not in scalar_metrics:  # optimizer_memory_host_offload skips the norms above
       scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
       scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
-      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(nnx.state(new_state.model, nnx.Param))
+      if model_params is None:
+        model_params = nnx.state(new_state.model, nnx.Param)
+      scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(model_params)
+
+  if getattr(config, "log_per_module_norms", False):
+    if model_params is None:
+      model_params = nnx.state(new_state.model, nnx.Param)
+    scalar_metrics.update(metric_logger.compute_per_module_norms(raw_grads, model_params, config))
 
   # Surface skip-step rejections as a TB metric. The skip-step optimizer stores
   # is_skipped in its opt_state; read it back off the optimizer just updated in place.
@@ -920,6 +942,8 @@ def eval_step(model, config, state, data, dropout_rng=None):
           "evaluation/mtp_acceptance_rate_percent": mtp_acceptance_rate,
       },
   }
+  if "moe_lb_loss_unweighted" in aux:
+    metrics["scalar"]["evaluation/moe_lb_loss_unweighted"] = aux["moe_lb_loss_unweighted"]
   if config.moe_dropless_fallback == "step":
     metrics["has_moe_overflow"] = aux.get("has_moe_overflow", False)
   if config.moe_dropless_fallback == "layer":
