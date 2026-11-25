@@ -2441,6 +2441,21 @@ class MoEKernels(BaseModel):
       False,
       description="Whether to use the heuristic tiling from Tokamax GMM v2, when use_gmm_v2=true.",
   )
+  moe_tgmm_v2_deep_buffering: bool = Field(
+      False,
+      description=(
+          "Triple-buffer the lhs, rhs and out blocks of the tgmm_v2 kernel (MoE "
+          "drhs) when VMEM allows. Same result; requires use_gmm_v2=true."
+      ),
+  )
+  moe_tgmm_v2_small_tail_contraction: bool = Field(
+      False,
+      description=(
+          "In the tgmm_v2 kernel (MoE drhs), contract a group's last tile over only "
+          "its first tile_m // 2 rows when the group's remaining rows fit there "
+          "(2D, unquantized, no partial_sum). Same result; requires use_gmm_v2=true."
+      ),
+  )
 
 
 class DeepSeekMoE(BaseModel):
