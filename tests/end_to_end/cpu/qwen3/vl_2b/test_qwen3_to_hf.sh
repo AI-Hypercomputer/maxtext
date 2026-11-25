@@ -4,16 +4,16 @@
 
 # Usage:
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_qwen3.5_to_hf.sh $RUN_ID $CHECKPOINT_PATH $SCAN_LAYERS
-
+# bash tests/end_to_end/cpu/qwen3/vl_2b/test_qwen3_to_hf.sh $RUN_ID $CHECKPOINT_PATH $USE_MULTIMODAL $SCAN_LAYERS
 
 set -ex
 
 run_id=$1
 CKPT_PATH=$2
-SCAN_LAYERS=${3:-false}
+USE_MULTIMODAL=${3:-false}
+SCAN_LAYERS=${4:-false}
 
-MODEL_NAME='qwen3.5-35b-a3b'
+MODEL_NAME='qwen3-vl-2b'
 BASE_OUTPUT_DIRECTORY="gs://runner-maxtext-logs/${MODEL_NAME}"
 
 if [ "${SCAN_LAYERS,,}" = "true" ]; then
@@ -22,11 +22,11 @@ else
     scan_status="unscanned"
 fi
 
-# Convert the checkpoint to Hugging Face format
 python3 -m maxtext.checkpoint_conversion.to_huggingface \
     model_name=${MODEL_NAME} \
     tokenizer_type="huggingface" \
     load_parameters_path=${CKPT_PATH} \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/to_huggingface/${scan_status}/${run_id} \
+    use_multimodal=${USE_MULTIMODAL} \
     scan_layers=$SCAN_LAYERS \
     skip_jax_distributed_system=true

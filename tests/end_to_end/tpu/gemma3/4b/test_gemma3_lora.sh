@@ -11,7 +11,7 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M)
-# bash test_gemma3_to_mt.sh $RUN_ID
+# bash tests/end_to_end/cpu/gemma3/4b/test_gemma3_to_mt.sh $RUN_ID
 # bash test_gemma3_lora.sh $RUN_ID
 
 

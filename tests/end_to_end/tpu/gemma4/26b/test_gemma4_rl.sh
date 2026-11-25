@@ -10,7 +10,7 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_gemma4_to_mt.sh $RUN_ID
+# bash tests/end_to_end/cpu/gemma4/26b/test_gemma4_to_mt.sh $RUN_ID
 # bash test_gemma4_rl.sh $RUN_ID
 
 
