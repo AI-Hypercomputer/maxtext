@@ -1748,6 +1748,13 @@ posemb_type_for_vit: "learn"
 # -1 means no limit, and will pad to the max possible number of images determined by sequence length.
 # Set it to avoid unnecessary padding if you know the maximum number of images per example.
 max_num_images_per_example: -1
+# Synthetic multimodal data (SyntheticMultimodalDataSource in input_pipeline/synthetic_data_processing.py): rows of
+# random text and random media in the raw form a real dataset provides. Images are generated when use_multimodal is set
+# and the count range allows them: source height and width (pixels, sampled independently, so any aspect ratio in
+# between) and the count per example are drawn uniformly from these inclusive ranges.
+synthetic_image_height_range: [224, 2160]
+synthetic_image_width_range: [224, 3840]
+synthetic_num_images_per_example_range: [1, 1]
 vision_output_length: -1 # The output length (number of soft tokens) from vision encoder, used in Gemma4.
 
 ### llama4 multi modal configs

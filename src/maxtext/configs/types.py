@@ -4726,6 +4726,18 @@ class MultimodalGeneral(BaseModel):
       -1,
       description="Maximum number of images per example for training with image lists. -1 means no limit.",
   )
+  synthetic_image_height_range: list[int] = Field(
+      [224, 2160],
+      description="Inclusive [min, max] source height in pixels of synthetic images (synthetic multimodal data).",
+  )
+  synthetic_image_width_range: list[int] = Field(
+      [224, 3840],
+      description="Inclusive [min, max] source width in pixels of synthetic images (synthetic multimodal data).",
+  )
+  synthetic_num_images_per_example_range: list[int] = Field(
+      [1, 1],
+      description="Inclusive [min, max] number of synthetic images per example (synthetic multimodal data).",
+  )
   video_path: PathStr = Field("", description="Path to a video for decoding.")
   audio_path: PathStr = Field("", description="Path to an audio file for decoding.")
   video_placeholder: str = Field("<|video|>", description="Placeholder string for video in text prompts.")
@@ -4752,6 +4764,18 @@ class MultimodalGeneral(BaseModel):
     max_grid = (self.video_max_grid_t, self.video_max_grid_h, self.video_max_grid_w)
     if any(dim is None for dim in max_grid) and not all(dim is None for dim in max_grid):
       raise ValueError("video_max_grid_t, video_max_grid_h, and video_max_grid_w must be set together.")
+    return self
+
+  @model_validator(mode="after")
+  def validate_synthetic_image_ranges(self) -> "MultimodalGeneral":
+    """The synthetic image ranges are inclusive `[min, max]` pairs: positive sizes, a count >= 0."""
+    for name, bounds, lowest in (
+        ("synthetic_image_height_range", self.synthetic_image_height_range, 1),
+        ("synthetic_image_width_range", self.synthetic_image_width_range, 1),
+        ("synthetic_num_images_per_example_range", self.synthetic_num_images_per_example_range, 0),
+    ):
+      if len(bounds) != 2 or not lowest <= bounds[0] <= bounds[1]:
+        raise ValueError(f"{name} must be [min, max] with {lowest} <= min <= max, got {bounds}.")
     return self
 
 
