@@ -37,9 +37,10 @@ import tokamax
 try:
   from tokamax._src.ops.gmm_v2 import gmm_fuser  # pylint: disable=g-import-not-at-top
   from tokamax._src.ops.gmm_v2 import gmm_v2 as tokamax_gmm_v2  # pylint: disable=g-import-not-at-top
+  from tokamax._src.ops.gmm_v2 import tgmm_v2 as tokamax_tgmm_v2  # pylint: disable=g-import-not-at-top
   from tokamax.ops import op_fusion  # pylint: disable=g-import-not-at-top
 except ImportError:
-  gmm_fuser, tokamax_gmm_v2, op_fusion = None, None, None
+  gmm_fuser, tokamax_gmm_v2, tokamax_tgmm_v2, op_fusion = None, None, None, None
 
 
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
@@ -1502,6 +1503,112 @@ def _drhs_prepare_bwd_scale(drhs_dout: qpl.QArray) -> jnp.ndarray:
   return rhs_scale
 
 
+def _tgmm_route(
+    lhs_ndim: int,
+    rhs_ndim: int,
+    has_partial_sum: bool,
+    tile_info: gmm_v2.TileSizes | Callable[..., Any],
+    *,
+    k_dim: int | None = None,
+    n_dim: int | None = None,
+) -> Literal["fuser", "upstream", "fork"]:
+  """Selects the TGMM v2 execution backend route.
+
+  | Condition                                                        | Route      |
+  |------------------------------------------------------------------|------------|
+  | heuristic (callable) tile_info, or 2D lhs & 2D rhs               | "fork"     |
+  | 3D lhs or rhs, not partial_sum, explicit aligned tiles           | "fuser"    |
+  | 3D lhs or rhs with explicit tiles + partial_sum / unaligned      | "upstream" |
+  """
+  if callable(tile_info) or (lhs_ndim != 3 and rhs_ndim != 3):
+    # Plain 2D and heuristic calls stay on the fork until the forked kernels are removed (b/560195193).
+    return "fork"
+  if not has_partial_sum:
+    lhs_ok = lhs_ndim != 3 or _is_fuser_aligned_tile(tile_info.tile_k, k_dim)
+    rhs_ok = rhs_ndim != 3 or _is_fuser_aligned_tile(tile_info.tile_n, n_dim)
+    if lhs_ok and rhs_ok:
+      return "fuser"
+  return "upstream"
+
+
+def _call_tgmm_v2(
+    *,
+    lhs: jnp.ndarray,
+    rhs: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    num_actual_groups: int,
+    rhs_scale: jnp.ndarray | None,
+    group_offset: jnp.ndarray | None,
+    partial_sum: jnp.ndarray | None,
+    preferred_element_type: jax.typing.DTypeLike,
+    tiling: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
+) -> jnp.ndarray:
+  """Routes 3D DRHS TGMM through upstream Tokamax gmm_fuser / tgmm_v2 when available."""
+  explicit_tiles = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
+  tile_info = tgmm_v2.calculate_tgmm_tiling if use_gmm_v2_heuristic_tiling else explicit_tiles
+  if (
+      (fuser := gmm_fuser) is not None
+      and (up_gmm := tokamax_gmm_v2) is not None
+      and (up_tgmm := tokamax_tgmm_v2) is not None
+      and (fusion := op_fusion) is not None
+  ):
+    route = _tgmm_route(
+        lhs.ndim,
+        rhs.ndim,
+        partial_sum is not None,
+        tile_info,
+        k_dim=lhs.shape[1] * lhs.shape[2] if lhs.ndim == 3 else None,
+        n_dim=rhs.shape[1] * rhs.shape[2] if rhs.ndim == 3 else None,
+    )
+    if route == "fuser":
+      vmem_limit_bytes = _tpu_vmem_limit_bytes()
+      fuser_tiles = _upstream_tiles(explicit_tiles, up_gmm)
+      offset_1d = _group_offset_1d(group_offset)
+      out_dtype = jnp.dtype(preferred_element_type)
+
+      def _fused_tgmm(lhs_arr, rhs_arr, gs, r_scale, g_offset):
+        return fuser.tgmm_v2_fusible(
+            lhs=_to_2d(lhs_arr),
+            rhs=_to_2d(rhs_arr),
+            group_sizes=gs,
+            num_actual_groups=num_actual_groups,
+            rhs_scale=r_scale,
+            group_offset=g_offset,
+            tile_info=fuser_tiles,
+            vmem_limit_bytes=vmem_limit_bytes,
+            preferred_element_type=out_dtype,
+        )
+
+      return fusion.fuse(_fused_tgmm)(lhs, rhs, group_sizes, rhs_scale, offset_1d)
+    if route == "upstream":
+      return up_tgmm.tgmm_v2(
+          lhs=_to_2d(lhs),
+          rhs=_to_2d(rhs),
+          group_sizes=group_sizes,
+          num_actual_groups=num_actual_groups,
+          rhs_scale=rhs_scale,
+          partial_sum=partial_sum,
+          preferred_element_type=jnp.dtype(preferred_element_type),
+          group_offset=_group_offset_1d(group_offset),
+          tile_info=_upstream_tiles(explicit_tiles, up_gmm),
+          vmem_limit_bytes=_tpu_vmem_limit_bytes(),
+      )
+
+  return tgmm_v2.tgmm_v2(
+      lhs=lhs,
+      rhs=rhs,
+      group_sizes=group_sizes,
+      num_actual_groups=num_actual_groups,
+      rhs_scale=rhs_scale,
+      partial_sum=partial_sum,
+      precision=jax.lax.Precision.DEFAULT,
+      preferred_element_type=preferred_element_type,
+      group_offset=group_offset,
+      tile_info=tile_info,
+  )
+
+
 def _drhs_run_tokamax_v2(
     drhs_dout: jnp.ndarray | qpl.QArray,
     lhs: jnp.ndarray,
@@ -1521,22 +1628,17 @@ def _drhs_run_tokamax_v2(
   if isinstance(drhs_dout, qpl.QArray):
     rhs_scale = _drhs_prepare_bwd_scale(drhs_dout)
 
-  if use_gmm_v2_heuristic_tiling:
-    drhs_tiling = tgmm_v2.calculate_tgmm_tiling
-  else:
-    drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
-
-  return tgmm_v2.tgmm_v2(
+  return _call_tgmm_v2(
       lhs=drhs_lhs,
       rhs=drhs_rhs,
       group_sizes=group_sizes,
       num_actual_groups=num_actual_groups,
       rhs_scale=rhs_scale,
-      partial_sum=partial_sum,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=rhs_dtype,
       group_offset=group_offset,
-      tile_info=drhs_tiling,
+      partial_sum=partial_sum,
+      preferred_element_type=rhs_dtype,
+      tiling=tiling,
+      use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
   )
 
 
