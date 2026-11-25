@@ -1014,6 +1014,14 @@ class Attention(BaseModel):
           " not rematerialized, and the backward already gathers the kernel once."
       ),
   )
+  csa_teacher_two_pass: bool = Field(
+      False,
+      description=(
+          "DeepSeek-V4 CSA indexer loss (unchunked teacher): two-pass [b,t,h,w] teacher (per-row logsumexp, then "
+          "head-summed probabilities recomputed from the bf16 scores); avoids the 4-D f32 probability tensor and "
+          "hoisted 4-D constant broadcasts."
+      ),
+  )
 
 
 class MoBa(BaseModel):

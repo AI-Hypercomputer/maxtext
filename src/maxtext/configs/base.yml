@@ -279,6 +279,7 @@ float32_qk_product: false # in dot_product attention, whether to cast to fp32 th
 float32_logits: false # in dot_product attention, whether to cast to fp32 the inputs to softmax
 mla_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the MLA Indexer (DeepSeek-V3 / DeepSeek-V3.2) across the unsharded local heads dimension natively.
 csa_qk_head_chunk_size: 0 # Limits HBM footprint by sequentially evaluating the QK matrix in the CSA Indexer (DeepSeek-V4) across the unsharded local heads dimension natively.
+csa_teacher_two_pass: false # CSA indexer-loss teacher: two-pass [b,t,h,w] form (no 4-D f32 probs, no hoisted 4-D constant broadcasts).
 # float32_weight_sum - whether to use fp32 accumulation for the MoE combine reduction after GMM for numerical stability (weighted sum of expert outputs by routing weights).
 float32_weight_sum: true
 # float32_gate_logits - whether to run the MoE gate (router) module before GMM in fp32 for numerical stability.
