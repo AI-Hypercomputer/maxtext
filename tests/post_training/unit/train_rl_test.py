@@ -81,6 +81,23 @@ class TrainRLTest(unittest.TestCase):
     self.assertEqual(config.max_seq_token_per_tpu, 12288)
     self.assertEqual(config.vllm_block_size, 128)
 
+  def test_rollout_engine_dtype_defaults_to_weight_dtype(self):
+    """Without rollout_weight_dtype the engines keep the trainer's weight dtype."""
+    config = types.RLConfig(model_name="gemma4-26b", weight_dtype="float32")
+
+    self.assertEqual(config.rollout_weight_dtype, "")
+    self.assertEqual(train_rl.rollout_engine_dtype(config), "float32")
+
+  def test_rollout_engine_dtype_follows_rollout_weight_dtype(self):
+    """float32 master weights can sample with bfloat16 engines."""
+    config = types.RLConfig(model_name="gemma4-26b", weight_dtype="float32", rollout_weight_dtype="bfloat16")
+
+    self.assertEqual(train_rl.rollout_engine_dtype(config), "bfloat16")
+    self.assertEqual(
+        train_rl.rollout_engine_dtype(SimpleNamespace(weight_dtype=types.DType.BFLOAT16, rollout_weight_dtype="")),
+        "bfloat16",
+    )
+
   def test_rl_config_tunix_knob_defaults(self):
     """The forwarded tunix knobs default to tunix's own defaults."""
     config = types.RLConfig(model_name="gemma4-26b")
