@@ -3207,6 +3207,7 @@ class Qwen3_8Experts(nnx.Module):
           batch=tok_spec[0],
           length=tok_spec[1],
           experts=wi_spec[0],
+          expert_embed=wi_spec[1],
           mlp=wi_spec[2],
       )
     else:
@@ -3253,7 +3254,11 @@ class Qwen3_8Experts(nnx.Module):
       if exec_cfg.kind in m3_moe.SHARDED_EXECUTOR_KINDS:
         batch_ax = m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.batch)
         batch_shards = m3_kernels.mesh_axis_size(active_mesh, batch_ax)
-        ep_size = m3_kernels.mesh_axis_size(active_mesh, m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.experts))
+        exp_axes_resolved = m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.experts)
+        exp_axis_names = m3_kernels.mesh_axis_names(exp_axes_resolved)
+        if len(m3_kernels.mesh_axis_names(exec_cfg.experts)) > 1:
+          exp_axis_names = tuple(ax for ax in exp_axis_names if ax not in m3_moe.COMPOUND_FSDP_AXES)
+        ep_size = m3_kernels.mesh_axis_size(active_mesh, exp_axis_names or None)
         length_ax = m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.length)
         if x_in.shape[1] % m3_kernels.mesh_axis_size(active_mesh, length_ax) != 0:
           exec_cfg = dataclasses.replace(exec_cfg, length=None)

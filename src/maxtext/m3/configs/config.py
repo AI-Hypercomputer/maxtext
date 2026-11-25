@@ -96,6 +96,7 @@ class DeviceConfig(BaseModel):
   )
   shard_mode: str = "auto"
   sharding_preset: str = ""
+  compound_fsdp_ep: bool = False
 
   @model_validator(mode="after")
   def _validate_sharding_preset(self) -> "DeviceConfig":

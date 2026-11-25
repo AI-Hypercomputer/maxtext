@@ -878,6 +878,7 @@ compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_s
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
 sharding_preset: "" # Optional m3 sharding preset name (e.g. ep_as_cp)
+compound_fsdp_ep: false # shard m3 routed-expert weights across compound FSDP x EP axes on dimension 0.
 custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
 # Gradients of the dense weights a custom_mesh_and_rule replicates over context (rules that map 'embed_grad':
 # cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp): "reduce_scatter" = reduce-scatter over every token axis, then all-gather over

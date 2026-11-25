@@ -2951,21 +2951,24 @@ class HardwareAndMesh(BaseModel):
       "",
       description="Optional m3 sharding preset name (e.g. ep_as_cp).",
   )
+  compound_fsdp_ep: bool = Field(
+      False,
+      description="Shard m3 routed-expert weights across compound FSDP x EP axes on dimension 0.",
+  )
 
   @model_validator(mode="after")
   def validate_m3_sharding_preset(self) -> "HardwareAndMesh":
-    """Validates `sharding_preset` names and requires `use_m3_model=True` for non-default presets."""
+    """Validates `sharding_preset` and `compound_fsdp_ep` against `use_m3_model=True`."""
     # Kept inline without importing maxtext.m3.core.sharding to satisfy downstream Bazel strict_deps.
     valid_presets = {"", "default", "default_sharding", "ep_as_cp", "epascp"}
     raw_preset = "" if self.sharding_preset is None else str(self.sharding_preset).strip().lower().replace("-", "_")
     if raw_preset not in valid_presets:
       raise ValueError(f"Unknown m3 sharding preset {self.sharding_preset!r}.")
-    if (
-        hasattr(self, "use_m3_model")
-        and not bool(self.use_m3_model)
-        and raw_preset not in ("", "default", "default_sharding")
-    ):
-      raise ValueError("sharding_preset requires use_m3_model=True.")
+    if hasattr(self, "use_m3_model") and not bool(self.use_m3_model):
+      if raw_preset not in ("", "default", "default_sharding"):
+        raise ValueError("sharding_preset requires use_m3_model=True.")
+      if self.compound_fsdp_ep:
+        raise ValueError("compound_fsdp_ep requires use_m3_model=True.")
     return self
 
   inhomogeneous_layer_cycle_interval: int = Field(1, description="The interval of repeated inhomogeneous layer patterns.")

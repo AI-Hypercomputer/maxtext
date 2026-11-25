@@ -2722,6 +2722,160 @@ class FP8AndTCRaggedMoETest(parameterized.TestCase):
         cos = float(np.dot(va, vr) / (np.linalg.norm(va) * np.linalg.norm(vr) + 1e-12))
         self.assertGreater(cos, 0.99, msg=f"Low FP8 cosine similarity on {name}: {cos}")
 
+  @parameterized.named_parameters(
+      ("hoisted_f32", False, False, jnp.float32),
+      ("hoisted_tc_fp8", True, True, jnp.float32),
+      ("hoisted_a2a_fp8", False, True, jnp.float32),
+      ("hoisted_tc_fp8_bf16", True, True, jnp.bfloat16),
+  )
+  def test_compound_fsdp_ep_hoisted_4d_weight_gather_and_dense_parity(
+      self,
+      ep_allgather_tc: bool,
+      moe_fp8: bool,
+      dtype: jnp.dtype,
+  ):
+    if jax.device_count() < 4:
+      self.skipTest(f"Requires >= 4 devices; got {jax.device_count()}.")
+    mesh = create_mesh(ici={"fsdp": 2, "expert": 2, "tensor": 1}, devices=jax.devices()[:4])
+    sharding = m3_sharding.EPasCP(compound_fsdp_ep=True)
+    b, s, d, m, e, k = 2, 8, 128, 128, 8, 2
+    x, weights, indices, _ = _make_routing_inputs(batch=b, length=s, embed=d, num_experts=e, top_k=k, dtype=dtype)
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=e, embed=d, mlp=m, dtype=dtype)
+    w_gu_4d = jnp.stack([wi_0, wi_1], axis=2)
+    cot = jax.random.normal(jax.random.key(919), x.shape, dtype=dtype)
+
+    ref_loss, ref_grads = jax.value_and_grad(
+        lambda xi, wi, gui, dni: jnp.sum(
+            m3_moe.DENSE.fused(xi, wi, indices, gui, dni).astype(jnp.float32) * cot.astype(jnp.float32)
+        ),
+        argnums=(0, 1, 2, 3),
+    )(x, weights, w_gu_4d, wo)
+    ref_out = m3_moe.DENSE.fused(x, weights, indices, w_gu_4d, wo)
+
+    with jax.set_mesh(mesh):
+      cfg = SimpleNamespace(
+          num_experts=e,
+          sparse_matmul=True,
+          use_tokamax_gmm=True,
+          use_gmm_v2=True,
+          moe_ep_allgather_tc=ep_allgather_tc,
+          moe_fp8=moe_fp8,
+          moe_fused_bwd_quant=moe_fp8,
+          ragged_buffer_factor=1.5,
+      )
+      exec_hoist = m3_moe.moe_from_config(cfg, sharding)
+      exec_in_shmap = dataclasses.replace(exec_hoist, hoist_routed_weight_gather=False)
+      tok_shd = NamedSharding(mesh, sharding("moe_tokens", ("batch", "length", "embed"), m3_moe.TensorType.ACTIVATION))
+      gu_shd = NamedSharding(mesh, sharding("gate_up_proj", ("experts", "expert_embed", None, "expert_mlp")))
+      dn_shd = NamedSharding(mesh, sharding("down_proj", ("experts", "expert_mlp", "expert_embed")))
+
+      xs = jax.device_put(x, tok_shd)
+      ws = jax.device_put(weights, tok_shd)
+      idxs = jax.device_put(indices, tok_shd)
+      cots = jax.device_put(cot, tok_shd)
+      gus = jax.device_put(w_gu_4d, gu_shd)
+      dns = jax.device_put(wo, dn_shd)
+
+      def _eval(ex):
+        def _loss_fn(xi, wi, gui, dni):
+          out = ex.fused(xi, wi, idxs, gui, dni)
+          return jnp.sum(out.astype(jnp.float32) * cots.astype(jnp.float32)), out
+
+        return jax.jit(jax.value_and_grad(_loss_fn, argnums=(0, 1, 2, 3), has_aux=True))(xs, ws, gus, dns)
+
+      (loss_h, out_h), grads_h = _eval(exec_hoist)
+      (loss_s, out_s), grads_s = _eval(exec_in_shmap)
+
+      # Verify HLO emits 4D axis-0 routed-weight `all-gather` (`dimensions={0}`) under hoisted path.
+      fwd_hlo = (
+          jax.jit(lambda xi, wi, gui, dni: exec_hoist.fused(xi, wi, idxs, gui, dni))
+          .lower(xs, ws, gus, dns)
+          .compile()
+          .as_text()
+      )
+      self.assertIn("dimensions={0}", fwd_hlo)
+
+    rtol = 2e-2 if dtype == jnp.bfloat16 else 1e-4
+    atol = 2e-2 if dtype == jnp.bfloat16 else 1e-4
+    np.testing.assert_allclose(float(loss_h), float(loss_s), rtol=rtol, atol=atol)
+    np.testing.assert_allclose(
+        np.asarray(out_h, dtype=np.float32), np.asarray(out_s, dtype=np.float32), rtol=rtol, atol=atol
+    )
+    for gh, gs in zip(grads_h, grads_s, strict=True):
+      np.testing.assert_allclose(np.asarray(gh, dtype=np.float32), np.asarray(gs, dtype=np.float32), rtol=rtol, atol=atol)
+
+    if not moe_fp8:
+      np.testing.assert_allclose(float(loss_h), float(ref_loss), rtol=rtol, atol=atol)
+      np.testing.assert_allclose(
+          np.asarray(out_h, dtype=np.float32), np.asarray(ref_out, dtype=np.float32), rtol=rtol, atol=atol
+      )
+      for gh, gr in zip(grads_h, ref_grads, strict=True):
+        np.testing.assert_allclose(
+            np.asarray(gh, dtype=np.float32), np.asarray(gr, dtype=np.float32), rtol=rtol, atol=atol
+        )
+    else:
+      for name, gh, gr in zip(
+          ("out", "dx", "dw", "dgu", "ddn"),
+          (out_h, *grads_h),
+          (ref_out, *ref_grads),
+          strict=True,
+      ):
+        vh = np.asarray(gh, dtype=np.float64).ravel()
+        vr = np.asarray(gr, dtype=np.float64).ravel()
+        cos = float(np.dot(vh, vr) / (np.linalg.norm(vh) * np.linalg.norm(vr) + 1e-12))
+        self.assertGreater(cos, 0.99, msg=f"Low compound FP8 cosine similarity on {name}: {cos}")
+
+  def test_tpu_compound_fsdp_ep_hoisted_fp8_parity_and_bench(self):
+    if jax.default_backend() != "tpu" or jax.device_count() < 8:
+      self.skipTest("Requires >= 8 TPU TensorCores (e.g. TPU v7x 2x2x1) for FSDP=4 x EP=2 compound FP8 verification.")
+    mesh = create_mesh(ici={"fsdp": 4, "expert": 2, "tensor": 1}, devices=jax.devices()[:8])
+    sharding = m3_sharding.EPasCP(compound_fsdp_ep=True)
+    b, s, d, m, e, k = 4, 256, 2560, 640, 64, 10
+    x, weights, indices, _ = _make_routing_inputs(batch=b, length=s, embed=d, num_experts=e, top_k=k, dtype=jnp.bfloat16)
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=e, embed=d, mlp=m, dtype=jnp.bfloat16)
+    w_gu_4d = jnp.stack([wi_0, wi_1], axis=2)
+    cot = jax.random.normal(jax.random.key(2026), x.shape, dtype=jnp.bfloat16)
+
+    with jax.set_mesh(mesh):
+      cfg = SimpleNamespace(
+          num_experts=e,
+          sparse_matmul=True,
+          use_tokamax_gmm=True,
+          use_gmm_v2=True,
+          moe_ep_allgather_tc=True,
+          moe_fp8=True,
+          moe_fused_bwd_quant=True,
+          moe_tc_ragged_flatten_block_size=512,
+          ragged_buffer_factor=1.25,
+      )
+      exec_hoist = m3_moe.moe_from_config(cfg, sharding)
+      exec_in_shmap = dataclasses.replace(exec_hoist, hoist_routed_weight_gather=False)
+      tok_shd = NamedSharding(mesh, sharding("moe_tokens", ("batch", "length", "embed"), m3_moe.TensorType.ACTIVATION))
+      gu_shd = NamedSharding(mesh, sharding("gate_up_proj", ("experts", "expert_embed", None, "expert_mlp")))
+      dn_shd = NamedSharding(mesh, sharding("down_proj", ("experts", "expert_mlp", "expert_embed")))
+      xs = jax.device_put(x, tok_shd)
+      ws = jax.device_put(weights, tok_shd)
+      idxs = jax.device_put(indices, tok_shd)
+      cots = jax.device_put(cot, tok_shd)
+      gus = jax.device_put(w_gu_4d, gu_shd)
+      dns = jax.device_put(wo, dn_shd)
+
+      def _run(ex):
+        def _loss_fn(xi, wi, gui, dni):
+          out = ex.fused(xi, wi, idxs, gui, dni)
+          return jnp.sum(out.astype(jnp.float32) * cots.astype(jnp.float32)), out
+
+        return jax.jit(jax.value_and_grad(_loss_fn, argnums=(0, 1, 2, 3), has_aux=True))(xs, ws, gus, dns)
+
+      (lh, oh), gh = _run(exec_hoist)
+      (ls, os_), gs = _run(exec_in_shmap)
+      np.testing.assert_allclose(float(lh), float(ls), rtol=2e-2, atol=2e-2)
+      for name, a_t, b_t in zip(("out", "dx", "dw", "dgu", "ddn"), (oh, *gh), (os_, *gs), strict=True):
+        va = np.asarray(a_t, dtype=np.float64).ravel()
+        vb = np.asarray(b_t, dtype=np.float64).ravel()
+        cos = float(np.dot(va, vb) / (np.linalg.norm(va) * np.linalg.norm(vb) + 1e-12))
+        self.assertGreater(cos, 0.998, msg=f"TPU hoisted vs in-shmap mismatch on {name}: {cos}")
+
 
 if __name__ == "__main__":
   absltest.main()

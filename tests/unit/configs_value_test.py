@@ -2306,6 +2306,34 @@ class GrainReadOptionsConfigTest(absltest.TestCase):
         self._initialize(f"grain_file_type={file_type}", "grain_train_files=/tmp/train*", "grain_num_threads=0")
 
 
+class M3CompoundFsdpEpConfigTest(absltest.TestCase):
+  """Tests M3 `compound_fsdp_ep` validation."""
+
+  def test_compound_fsdp_ep_requires_use_m3_model(self):
+    cfg = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "use_m3_model=true",
+            "compound_fsdp_ep=true",
+            "dataset_type=synthetic",
+        ]
+    )
+    self.assertTrue(cfg.compound_fsdp_ep)
+    with self.assertRaisesRegex(pydantic.ValidationError, "compound_fsdp_ep requires use_m3_model=True"):
+      pyconfig.initialize(
+          [
+              "",
+              _BASE_CONFIG_PATH,
+              "run_name=test",
+              "use_m3_model=false",
+              "compound_fsdp_ep=true",
+              "dataset_type=synthetic",
+          ]
+      )
+
+
 class M3QsaConfigTest(absltest.TestCase):
   """Tests M3 Qwen3.8 `qsa_attention_kernel='pallas'` and `sa_ignore_segment_ids` validation."""
 

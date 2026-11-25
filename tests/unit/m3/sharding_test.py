@@ -604,6 +604,29 @@ class DefaultShardingTest(parameterized.TestCase):
     self.assertEqual(sharding_from_config(SimpleNamespace(sharding_preset="default")), DefaultSharding())
     self.assertEqual(sharding_from_config(SimpleNamespace(sharding_preset="ep_as_cp")), EPasCP())
     self.assertEqual(sharding_from_config(SimpleNamespace(sharding_preset="ep-as-cp")), EPasCP())
+    self.assertEqual(
+        sharding_from_config(SimpleNamespace(compound_fsdp_ep=True)),
+        DefaultSharding(compound_fsdp_ep=True),
+    )
+    self.assertEqual(
+        sharding_from_config(SimpleNamespace(sharding_preset="ep_as_cp", compound_fsdp_ep=True)),
+        EPasCP(compound_fsdp_ep=True),
+    )
+
+  def test_compound_fsdp_ep_weight_and_activation_rules(self):
+    for shd in (DefaultSharding(compound_fsdp_ep=True), EPasCP(compound_fsdp_ep=True)):
+      self.assertEqual(
+          shd("gate_up_proj", ("experts", "expert_embed", None, "expert_mlp"), TensorType.WEIGHT),
+          P(("fsdp", "fsdp_transpose", "context", "expert"), None, None, ("tensor", "tensor_sequence")),
+      )
+      self.assertEqual(
+          shd("down_proj", ("experts", "expert_mlp", "expert_embed"), TensorType.WEIGHT),
+          P(("fsdp", "fsdp_transpose", "context", "expert"), ("tensor", "tensor_sequence"), None),
+      )
+      self.assertEqual(
+          shd("moe_act", ("experts", "expert_embed"), TensorType.ACTIVATION),
+          P("expert", None),
+      )
 
   @parameterized.parameters(
       "embed",

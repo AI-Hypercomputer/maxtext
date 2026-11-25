@@ -54,6 +54,8 @@ SHARDED_EXECUTOR_KINDS: tuple[str, ...] = ("gmm_v2", "tokamax")
 
 _COMBINE_DTYPE = jnp.float32
 _TOKAMAX_M_ALIGN = 256
+COMPOUND_FSDP_AXES: frozenset[str] = frozenset({"fsdp", "fsdp_transpose", "context"})
+_COMPOUND_FSDP_AXES = COMPOUND_FSDP_AXES
 _DRHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
     dot_dimension_numbers=(((0,), (0,)), ((), ())),
     lhs_ragged_dimensions=(0,),
@@ -90,6 +92,23 @@ def on_any_sparse_core(fn: Callable[..., Any], enabled: bool = True) -> Callable
       compute_type="tpu_sparsecore",
       out_memory_spaces=jax.memory.Space.Device,
   )
+
+
+@jax.custom_vjp
+def _forward_optimization_barrier(operands: Any) -> Any:
+  """Applies `jax.lax.optimization_barrier` in forward; identity in backward."""
+  return jax.lax.optimization_barrier(operands)
+
+
+def _forward_barrier_fwd(operands: Any) -> tuple[Any, None]:
+  return jax.lax.optimization_barrier(operands), None
+
+
+def _forward_barrier_bwd(_: None, cotangents: Any) -> tuple[Any]:
+  return (cotangents,)
+
+
+_forward_optimization_barrier.defvjp(_forward_barrier_fwd, _forward_barrier_bwd)
 
 
 @jax.custom_vjp
@@ -277,29 +296,213 @@ def _window_token_scale(
   return jnp.where(valid, scale_1d[safe_ids], jnp.zeros((), scale_1d.dtype))
 
 
-@jax.custom_vjp
-def _ste_quantize_routed_weight(w_local: jax.Array) -> qpl.QArray:
-  """Quantizes local `[e_loc, K, N]` weights to `float8_e4m3fn` via per-`(expert, out_channel)` STE."""
+def _routed_w_to_tiles(w: jax.Array) -> jax.Array:
+  """Views `[..., rows, cols]` routed expert weights in `T(8, 128)`-friendly `[..., rows // 8, 8, cols]` layout."""
+  if w.ndim >= 2 and w.shape[-2] % 8 == 0:
+    return jnp.reshape(w, (*w.shape[:-2], w.shape[-2] // 8, 8, w.shape[-1]))
+  return w
+
+
+def _routed_w_from_tiles(w: jax.Array, orig_ndim: int = 3) -> jax.Array:
+  """Restores `[..., rows, cols]` view from `_routed_w_to_tiles`."""
+  if w.ndim > orig_ndim:
+    return jnp.reshape(w, (*w.shape[:-3], w.shape[-3] * 8, w.shape[-1]))
+  return w
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _gather_routed_weight(
+    w_local: jax.Array,
+    w_fsdp_axes: tuple[str, ...],
+) -> jax.Array:
+  """All-gathers compound-sharded routed expert weights over `w_fsdp_axes` in `T(8, 128)` tile layout."""
+  out = _routed_w_to_tiles(w_local)
+  for ax in reversed(w_fsdp_axes):
+    out = jax.lax.all_gather(out, ax, axis=0, tiled=True)
+  return _routed_w_from_tiles(out, w_local.ndim)
+
+
+def _gather_routed_weight_fwd(
+    w_local: jax.Array,
+    w_fsdp_axes: tuple[str, ...],
+) -> tuple[jax.Array, None]:
+  """Forward rule for `_gather_routed_weight`."""
+  return _gather_routed_weight(w_local, w_fsdp_axes), None
+
+
+def _gather_routed_weight_bwd(
+    w_fsdp_axes: tuple[str, ...],
+    _: None,
+    dw_gathered: jax.Array,
+) -> tuple[jax.Array]:
+  """Backward rule `psum_scatter`ing gathered routed-weight cotangents."""
+  out = _routed_w_to_tiles(dw_gathered)
+  for ax in w_fsdp_axes:
+    out = jax.lax.psum_scatter(out, ax, scatter_dimension=0, tiled=True)
+  return (_routed_w_from_tiles(out, dw_gathered.ndim),)
+
+
+_gather_routed_weight.defvjp(_gather_routed_weight_fwd, _gather_routed_weight_bwd)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def _ste_quantize_and_gather_routed_weight(
+    w_local: jax.Array,
+    w_fsdp_axes: tuple[str, ...],
+) -> qpl.QArray:
+  """Quantizes local `[e_cell, K, N]` weights via per-`(expert, out_channel)` STE and gathers over `w_fsdp_axes`."""
   qa = qpl.quantize(
       w_local.astype(jnp.float32),
       qtype=jnp.float8_e4m3fn,
       channelwise_axes=(0, 2),
       calibration_method="absmax",
   )
-  return qpl.QArray(qvalue=qa.qvalue, scale=jax.lax.stop_gradient(qa.scale))
+  qval = qa.qvalue
+  scale = jax.lax.stop_gradient(qa.scale)
+  if w_fsdp_axes:
+    q_tiled = _routed_w_to_tiles(qval)
+    for ax in reversed(w_fsdp_axes):
+      q_tiled = jax.lax.all_gather(q_tiled, ax, axis=0, tiled=True)
+    qval = _routed_w_from_tiles(q_tiled, w_local.ndim)
+    for ax in reversed(w_fsdp_axes):
+      scale = jax.lax.all_gather(scale, ax, axis=0, tiled=True)
+  return qpl.QArray(qvalue=qval, scale=scale)
 
 
-def _ste_quantize_routed_weight_fwd(w_local: jax.Array) -> tuple[qpl.QArray, jax.Array]:
-  """Forward rule for `_ste_quantize_routed_weight`."""
-  return _ste_quantize_routed_weight(w_local), jnp.zeros((), dtype=w_local.dtype)
+def _ste_quantize_and_gather_routed_weight_fwd(
+    w_local: jax.Array,
+    w_fsdp_axes: tuple[str, ...],
+) -> tuple[qpl.QArray, jax.Array]:
+  """Forward rule for `_ste_quantize_and_gather_routed_weight`."""
+  return _ste_quantize_and_gather_routed_weight(w_local, w_fsdp_axes), jnp.zeros((), dtype=w_local.dtype)
 
 
-def _ste_quantize_routed_weight_bwd(dtype_proto: jax.Array, g_qa: qpl.QArray) -> tuple[jax.Array]:
-  """Backward rule passing through unscaled `drhs` from `megablox.ops._gmm_bwd`."""
-  return (g_qa.qvalue.astype(dtype_proto.dtype),)
+def _ste_quantize_and_gather_routed_weight_bwd(
+    w_fsdp_axes: tuple[str, ...],
+    dtype_proto: jax.Array,
+    g_qa: qpl.QArray,
+) -> tuple[jax.Array]:
+  """Backward rule passing through unscaled `drhs` and `psum_scatter`ing over `w_fsdp_axes`."""
+  dw = g_qa.qvalue.astype(dtype_proto.dtype)
+  if w_fsdp_axes:
+    dw_tiled = _routed_w_to_tiles(dw)
+    for ax in w_fsdp_axes:
+      dw_tiled = jax.lax.psum_scatter(dw_tiled, ax, scatter_dimension=0, tiled=True)
+    dw = _routed_w_from_tiles(dw_tiled, dw.ndim)
+  return (dw,)
 
 
-_ste_quantize_routed_weight.defvjp(_ste_quantize_routed_weight_fwd, _ste_quantize_routed_weight_bwd)
+_ste_quantize_and_gather_routed_weight.defvjp(
+    _ste_quantize_and_gather_routed_weight_fwd,
+    _ste_quantize_and_gather_routed_weight_bwd,
+)
+
+
+def _ste_quantize_routed_weight(w_local: jax.Array) -> qpl.QArray:
+  """Quantizes local `[e_loc, K, N]` weights to `float8_e4m3fn` via per-`(expert, out_channel)` STE."""
+  return _ste_quantize_and_gather_routed_weight(w_local, ())
+
+
+def _constrain_mesh_spec(x: jax.Array, spec: P, mesh: Any) -> jax.Array:
+  """Applies `with_sharding_constraint` on Auto meshes or `reshard` on Explicit meshes."""
+  axis_types = tuple(getattr(mesh, "axis_types", ()))
+  if axis_types and all(t == jax.sharding.AxisType.Explicit for t in axis_types):
+    out = kernels.ensure_explicit_spec(x, spec, mesh)
+    assert out is not None
+    return out
+  if not isinstance(x, jax.core.Tracer) and hasattr(x, "sharding"):
+    if not isinstance(x.sharding, jax.sharding.NamedSharding) or x.sharding.mesh.is_scalar:
+      if isinstance(mesh, jax.sharding.Mesh) and not mesh.empty:
+        return jax.device_put(x, jax.sharding.NamedSharding(mesh, spec))
+  return jax.lax.with_sharding_constraint(x, spec)
+
+
+@jax.custom_vjp
+def _bind_fp8_ste_carrier(
+    w_ste: jax.Array,
+    qval: jax.Array,
+    scale: jax.Array,
+) -> qpl.QArray:
+  """Reconstructs `qpl.QArray(qval, scale)` while routing full-precision `drhs` cotangents onto `w_ste`."""
+  del w_ste
+  return qpl.QArray(qvalue=jax.lax.stop_gradient(qval), scale=jax.lax.stop_gradient(scale))
+
+
+def _bind_fp8_ste_carrier_fwd(
+    w_ste: jax.Array,
+    qval: jax.Array,
+    scale: jax.Array,
+) -> tuple[qpl.QArray, jax.Array]:
+  return _bind_fp8_ste_carrier(w_ste, qval, scale), jnp.zeros((), dtype=w_ste.dtype)
+
+
+def _bind_fp8_ste_carrier_bwd(
+    ste_proto: jax.Array,
+    g_qa: qpl.QArray,
+) -> tuple[jax.Array, None, None]:
+  return g_qa.qvalue.astype(ste_proto.dtype), None, None
+
+
+_bind_fp8_ste_carrier.defvjp(_bind_fp8_ste_carrier_fwd, _bind_fp8_ste_carrier_bwd)
+
+
+def _hoist_fp8_routed_weight_4d_impl(
+    w_4d: jax.Array,
+    gathered_4d_spec: P,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Quantizes 4D compound-sharded routed weights locally and gathers `(w_ste, qval, scale)` via GSPMD."""
+  mesh = kernels.mesh_in_scope()
+  qa = qpl.quantize(
+      w_4d.astype(jnp.float32),
+      qtype=jnp.float8_e4m3fn,
+      channelwise_axes=(0, 1, 3),
+      calibration_method="absmax",
+  )
+  qval_g = _constrain_mesh_spec(jax.lax.stop_gradient(qa.qvalue), gathered_4d_spec, mesh)
+  scale_g = _constrain_mesh_spec(jax.lax.stop_gradient(qa.scale), gathered_4d_spec, mesh)
+  w_ste_g = _constrain_mesh_spec(
+      jax.lax.broadcast(jnp.zeros((), dtype=w_4d.dtype), w_4d.shape),
+      gathered_4d_spec,
+      mesh,
+  )
+  return w_ste_g, qval_g, scale_g
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def _hoist_fp8_routed_weight_4d(
+    w_4d: jax.Array,
+    sharded_4d_spec: P,
+    gathered_4d_spec: P,
+) -> tuple[jax.Array, jax.Array, jax.Array]:
+  """Custom-VJP wrapper for GSPMD-hoisted 4D FP8 routed expert weight gather."""
+  del sharded_4d_spec
+  return _hoist_fp8_routed_weight_4d_impl(w_4d, gathered_4d_spec)
+
+
+def _hoist_fp8_routed_weight_4d_fwd(
+    w_4d: jax.Array,
+    sharded_4d_spec: P,
+    gathered_4d_spec: P,
+) -> tuple[tuple[jax.Array, jax.Array, jax.Array], jax.Array]:
+  del sharded_4d_spec
+  return _hoist_fp8_routed_weight_4d_impl(w_4d, gathered_4d_spec), jnp.zeros((), dtype=w_4d.dtype)
+
+
+def _hoist_fp8_routed_weight_4d_bwd(
+    sharded_4d_spec: P,
+    gathered_4d_spec: P,
+    w_proto: jax.Array,
+    cotangents: tuple[jax.Array, Any, Any],
+) -> tuple[jax.Array]:
+  """Reshards full-precision `dw_ste` cotangent back to `sharded_4d_spec` via GSPMD."""
+  del gathered_4d_spec
+  mesh = kernels.mesh_in_scope()
+  dw_ste_g, _, _ = cotangents
+  dw_4d = _constrain_mesh_spec(dw_ste_g.astype(w_proto.dtype), sharded_4d_spec, mesh)
+  return (dw_4d,)
+
+
+_hoist_fp8_routed_weight_4d.defvjp(_hoist_fp8_routed_weight_4d_fwd, _hoist_fp8_routed_weight_4d_bwd)
 
 
 def _ep_all_gather_aligned128(arr: jax.Array, ep_axis: str, *, is_tpu: bool = False) -> jax.Array:
@@ -721,6 +924,7 @@ class MoEExecutor:
   kind: ExecutorKind = "dense"
   batch: MeshAxes = None
   experts: MeshAxes = None
+  expert_embed: MeshAxes = None
   mlp: MeshAxes = None
   capacity_factor: float = -1.0
   ragged_buffer_factor: float = -1.0
@@ -735,6 +939,7 @@ class MoEExecutor:
   tc_3d_gmm: bool = False
   fused_bwd_quant: bool = False
   tc_ragged_flatten_block_size: int = 0
+  hoist_routed_weight_gather: bool = True
 
   def __call__(
       self,
@@ -1083,7 +1288,10 @@ def _require_sharded_gmm_for_ep_or_tp(
     )
     if sharding is not None:
       wi_spec = sharding("wi_0", ("experts", "expert_embed", "expert_mlp"), TensorType.WEIGHT)
-      mesh_ep = max(mesh_ep, kernels.mesh_axis_size(active_mesh, wi_spec[0]))
+      wi_exp_axes = kernels.mesh_axis_names(wi_spec[0])
+      if bool(getattr(sharding, "compound_fsdp_ep", False)):
+        wi_exp_axes = tuple(ax for ax in wi_exp_axes if ax not in _COMPOUND_FSDP_AXES)
+      mesh_ep = max(mesh_ep, kernels.mesh_axis_size(active_mesh, wi_exp_axes or None))
       mesh_tp = max(mesh_tp, kernels.mesh_axis_size(active_mesh, wi_spec[2]))
 
   if ep_cfg > 1 or tp_cfg > 1 or ep_auto or tp_auto or mesh_ep > 1 or mesh_tp > 1:
@@ -1235,6 +1443,7 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
       kind=kind,
       batch=tokens_spec[0],
       experts=wi_spec[0],
+      expert_embed=wi_spec[1],
       mlp=wi_spec[2],
       capacity_factor=cap,
       ragged_buffer_factor=rbf,
@@ -1699,20 +1908,47 @@ def _sharded_grouped(
   mlp_ax = kernels.resolve_mesh_axes(mesh, executor.mlp)
 
   batch_shards = kernels.mesh_axis_size(mesh, batch_ax)
-  ep_size = kernels.mesh_axis_size(mesh, experts_ax)
   tp_size = kernels.mesh_axis_size(mesh, mlp_ax)
-  ep_axes = kernels.mesh_axis_names(experts_ax)
   tp_axes = kernels.mesh_axis_names(mlp_ax)
 
-  if len(ep_axes) > 1:
-    raise NotImplementedError(f"Expert sharding supports at most one mesh axis; got {ep_axes}.")
+  raw_cfg_exp_axes = kernels.mesh_axis_names(executor.experts)
+  all_exp_axes = kernels.mesh_axis_names(experts_ax)
+  if len(raw_cfg_exp_axes) <= 1 and len(all_exp_axes) <= 1:
+    ep_axes = all_exp_axes
+    w_fsdp_axes: tuple[str, ...] = ()
+    fsdp_major_experts = False
+  else:
+    cfg_seq = raw_cfg_exp_axes if len(raw_cfg_exp_axes) > 1 else all_exp_axes
+    ep_candidate = "expert" if "expert" in cfg_seq else cfg_seq[-1]
+    other_cfg_axes = tuple(ax for ax in cfg_seq if ax != ep_candidate)
+    non_fsdp = [ax for ax in other_cfg_axes if ax not in _COMPOUND_FSDP_AXES]
+    if non_fsdp:
+      raise NotImplementedError(
+          f"Compound expert sharding only supports FSDP-family axes alongside {ep_candidate!r}; got {cfg_seq}."
+      )
+    ep_idx = cfg_seq.index(ep_candidate)
+    if ep_idx == len(cfg_seq) - 1:
+      fsdp_major_experts = True
+    elif ep_idx == 0:
+      fsdp_major_experts = False
+    else:
+      raise ValueError(f"Compound expert sharding requires {ep_candidate!r} to be first or last in {cfg_seq}.")
+    ep_axes = (ep_candidate,) if (ep_candidate in all_exp_axes and int(mesh.shape[ep_candidate]) > 1) else ()
+    w_fsdp_axes = tuple(ax for ax in all_exp_axes if ax != ep_candidate and int(mesh.shape[ax]) > 1)
+
+  ep_size = math.prod(int(mesh.shape[ax]) for ax in ep_axes)
+  w_fsdp_size = math.prod(int(mesh.shape[ax]) for ax in w_fsdp_axes)
+  total_expert_shards = ep_size * w_fsdp_size
+
   if x.shape[0] % batch_shards != 0:
     raise ValueError(f"Batch {x.shape[0]} does not divide over the {batch_shards} token shards of {batch_ax!r}.")
-  if num_experts % ep_size != 0:
+  if num_experts % total_expert_shards != 0:
     raise ValueError(
-        f"num_experts ({num_experts}) must be divisible by expert parallelism size ({ep_size}) on {experts_ax!r}."
+        f"num_experts ({num_experts}) must be divisible by expert parallelism ({total_expert_shards}) on {experts_ax!r}."
     )
 
+  axis_types = tuple(getattr(mesh, "axis_types", ()))
+  is_explicit = bool(axis_types) and all(t == jax.sharding.AxisType.Explicit for t in axis_types)
   if fused:
     w_gu_global, w_dn_global = projections
     is_4d_fused = w_gu_global.ndim == 4
@@ -1720,8 +1956,6 @@ def _sharded_grouped(
       mlp_dim = w_gu_global.shape[3]
       if w_dn_global.shape[1] != mlp_dim:
         raise ValueError(f"down_proj MLP dim ({w_dn_global.shape[1]}) must match gate_up MLP dim ({mlp_dim}).")
-      axis_types = tuple(getattr(mesh, "axis_types", ()))
-      is_explicit = bool(axis_types) and all(t == jax.sharding.AxisType.Explicit for t in axis_types)
       cur_spec = tuple(getattr(jax.typeof(w_gu_global).sharding, "spec", ())) if is_explicit else ()
       dim2_shards = kernels.mesh_axis_size(mesh, cur_spec[2]) if len(cur_spec) > 2 else 1
       if tp_size == 1 and dim2_shards == 1:
@@ -1780,6 +2014,7 @@ def _sharded_grouped(
 
   d_embed = x.shape[2]
   e_loc = num_experts // ep_size
+  e_cell = num_experts // total_expert_shards
   m_tp = mlp_dim // tp_size
   if executor.moe_fp8:
     if tp_size > 1:
@@ -1803,6 +2038,62 @@ def _sharded_grouped(
   else:
     matmul_fn = functools.partial(grouped_matmul, backend=executor.kind, is_tpu=is_tpu)
 
+  hoist_w_gather = (
+      executor.hoist_routed_weight_gather
+      and not is_explicit
+      and len(w_fsdp_axes) == 1
+      and tp_size == 1
+      and not is_4d_fused
+      and not executor.bwd_wgrad_overlap
+  )
+
+  if hoist_w_gather:
+    w_fsdp_ax = w_fsdp_axes[0]
+    ep_spec_ax: MeshAxes = ep_axes[0] if len(ep_axes) == 1 else None
+    kernels.log_kernel_dispatch(
+        f"moe_hoist_w_gather_fp8{int(executor.moe_fp8)}_{w_fsdp_ax}_{ep_spec_ax}",
+        f"m3.moe: hoisting 4D routed weight gather over {w_fsdp_ax!r} (ep_axis={ep_spec_ax!r}, "
+        f"moe_fp8={executor.moe_fp8}, fsdp_major={fsdp_major_experts}).",
+    )
+    if fsdp_major_experts:
+      sharded_4d_spec = P(w_fsdp_ax, ep_spec_ax, None, None)
+      gathered_4d_spec = P(None, ep_spec_ax, None, None)
+      dim0_4d, dim1_4d = w_fsdp_size, ep_size * e_cell
+    else:
+      sharded_4d_spec = P(ep_spec_ax, w_fsdp_ax, None, None)
+      gathered_4d_spec = P(ep_spec_ax, None, None, None)
+      dim0_4d, dim1_4d = ep_size, w_fsdp_size * e_cell
+
+    if not fused and (executor.ep_allgather_tc or executor.moe_fp8):
+      wi_0_g, wi_1_g, wo_g = projections
+      projs_to_hoist: tuple[jax.Array, ...] = (jnp.concatenate([wi_0_g, wi_1_g], axis=-1), wo_g)
+    else:
+      projs_to_hoist = projections
+
+    tok_proj_in_list: list[jax.Array] = []
+    if executor.moe_fp8:
+      for p_3d in projs_to_hoist:
+        w_4d = _constrain_mesh_spec(
+            jnp.reshape(p_3d, (dim0_4d, dim1_4d, p_3d.shape[1], p_3d.shape[2])),
+            sharded_4d_spec,
+            mesh,
+        )
+        tok_proj_in_list.extend(_hoist_fp8_routed_weight_4d(w_4d, sharded_4d_spec, gathered_4d_spec))
+    else:
+      for p_3d in projs_to_hoist:
+        w_4d = _constrain_mesh_spec(
+            jnp.reshape(p_3d, (dim0_4d, dim1_4d, p_3d.shape[1], p_3d.shape[2])),
+            sharded_4d_spec,
+            mesh,
+        )
+        w_4d = _forward_optimization_barrier(w_4d)
+        tok_proj_in_list.append(_constrain_mesh_spec(w_4d, gathered_4d_spec, mesh))
+    tok_proj_in: tuple[jax.Array, ...] = tuple(tok_proj_in_list)
+    tok_proj_specs: tuple[P, ...] = (gathered_4d_spec,) * len(tok_proj_in)
+  else:
+    tok_proj_specs = proj_specs
+    tok_proj_in = tuple(kernels.ensure_explicit_spec(p, spec, mesh) for p, spec in zip(projections, proj_specs))
+
   def _slice_local_projections(proj_local: tuple[jax.Array, ...]) -> tuple[Any, ...]:
     if not fused:
       wi_0_loc, wi_1_loc, wo_loc = proj_local
@@ -1813,18 +2104,51 @@ def _sharded_grouped(
     else:
       w_gu, w_dn = proj_local
       if is_4d_fused:
-        out_projs = (jnp.reshape(w_gu, (e_loc, w_gu.shape[1], 2 * m_tp)), w_dn)
+        out_projs = (jnp.reshape(w_gu, (w_gu.shape[0], w_gu.shape[1], 2 * m_tp)), w_dn)
       else:
         out_projs = (w_gu, w_dn)
     if executor.moe_fp8:
-      return tuple(_ste_quantize_routed_weight(p) for p in out_projs)
+      return tuple(_ste_quantize_and_gather_routed_weight(p, w_fsdp_axes) for p in out_projs)
+    if w_fsdp_axes:
+      out_projs = tuple(_gather_routed_weight(p, w_fsdp_axes) for p in out_projs)
     return out_projs
+
+  def _resolve_local_projs(proj_tuple: tuple[jax.Array, ...]) -> tuple[Any, ...]:
+    if not hoist_w_gather:
+      return _slice_local_projections(proj_tuple)
+    if executor.moe_fp8:
+      if len(proj_tuple) == 6:
+        ste_gu, qv_gu, sc_gu, ste_dn, qv_dn, sc_dn = proj_tuple
+        return (
+            _bind_fp8_ste_carrier(
+                jnp.reshape(ste_gu, (e_loc, ste_gu.shape[2], ste_gu.shape[3])),
+                jnp.reshape(qv_gu, (e_loc, qv_gu.shape[2], qv_gu.shape[3])),
+                jnp.reshape(sc_gu, (e_loc, 1, sc_gu.shape[3])),
+            ),
+            _bind_fp8_ste_carrier(
+                jnp.reshape(ste_dn, (e_loc, ste_dn.shape[2], ste_dn.shape[3])),
+                jnp.reshape(qv_dn, (e_loc, qv_dn.shape[2], qv_dn.shape[3])),
+                jnp.reshape(sc_dn, (e_loc, 1, sc_dn.shape[3])),
+            ),
+        )
+      return tuple(
+          _bind_fp8_ste_carrier(
+              jnp.reshape(proj_tuple[3 * idx], (e_loc, proj_tuple[3 * idx].shape[2], proj_tuple[3 * idx].shape[3])),
+              jnp.reshape(
+                  proj_tuple[3 * idx + 1],
+                  (e_loc, proj_tuple[3 * idx + 1].shape[2], proj_tuple[3 * idx + 1].shape[3]),
+              ),
+              jnp.reshape(proj_tuple[3 * idx + 2], (e_loc, 1, proj_tuple[3 * idx + 2].shape[3])),
+          )
+          for idx in range(len(proj_tuple) // 3)
+      )
+    return tuple(jnp.reshape(p_sh, (e_loc, p_sh.shape[2], p_sh.shape[3])) for p_sh in proj_tuple)
 
   def per_device(x_sh: jax.Array, weights_sh: jax.Array, indices_sh: jax.Array, *proj_sh: jax.Array) -> jax.Array:
     proj_tuple: tuple[jax.Array, ...] = tuple(proj_sh)
     if executor.bwd_wgrad_overlap:
       x_sh, proj_tuple = _backward_wgrad_tie(x_sh, proj_tuple)
-    local_projs = _slice_local_projections(proj_tuple)
+    local_projs = _resolve_local_projs(proj_tuple)
 
     b_loc, seq_len, d_dim = x_sh.shape
     top_k = indices_sh.shape[-1]
@@ -1838,6 +2162,12 @@ def _sharded_grouped(
 
     slot_valid = (flat_idx >= 0) & (flat_idx < num_experts)
     safe_idx = jnp.where(slot_valid, flat_idx, 0)
+    if fsdp_major_experts and ep_size > 1 and w_fsdp_size > 1:
+      stride = ep_size * e_cell
+      f_idx = safe_idx // stride
+      e_idx = (safe_idx % stride) // e_cell
+      j_idx = safe_idx % e_cell
+      safe_idx = e_idx * e_loc + f_idx * e_cell + j_idx
 
     if executor.capacity_factor > 0.0:
       expert_cap = max(1, int(math.ceil((num_slots / e_loc) * executor.capacity_factor)))
@@ -2314,15 +2644,14 @@ def _sharded_grouped(
   sharded_fn = jax.shard_map(
       per_device,
       mesh=mesh,
-      in_specs=(tokens_spec, tokens_spec, tokens_spec, *proj_specs),
+      in_specs=(tokens_spec, tokens_spec, tokens_spec, *tok_proj_specs),
       out_specs=tokens_spec,
       check_vma=False,
   )
   x_in = kernels.ensure_explicit_spec(x, tokens_spec, mesh)
   weights_in = kernels.ensure_explicit_spec(weights, tokens_spec, mesh)
   indices_in = kernels.ensure_explicit_spec(indices, tokens_spec, mesh)
-  proj_in = tuple(kernels.ensure_explicit_spec(p, spec, mesh) for p, spec in zip(projections, proj_specs))
-  return sharded_fn(x_in, weights_in, indices_in, *proj_in)
+  return sharded_fn(x_in, weights_in, indices_in, *tok_proj_in)
 
 
 # ==============================================================================
