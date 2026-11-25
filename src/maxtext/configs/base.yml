@@ -401,6 +401,8 @@ moe_ep_combine_mode: "auto" # m3 MoE EP combine/bwd-gather placement: "auto" (Sp
 moe_row_scale_placement: "tc" # m3 MoE 1D row-weight/scale placement: "tc", "auto", or "sc" (explicit SparseCore).
 moe_tc_3d_gmm: false # enable validated 3D T(8,128) MoE token layout when d_dim % 4096 == 0 (fp8) or % 2048 == 0 (bf16).
 moe_fused_bwd_quant: false # fuse Megablox GMM backward rhs/lhs scaling + e5m2 quantization in Pallas VMEM.
+use_m3_batch_split: false # enable 2-microbatch Dual-SparseCore schedule in m3 inhomogeneous decoders.
+moe_sparsecore_pinning: false # pin m3 MoE EP collectives to SparseCore 0 and FSDP collectives to SparseCore 1.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
 moe_use_fused_gmm3d: false # EP=1 only: Lineage fused 3D-layout GMMv2 expert kernels (in-kernel token gather, SwiGLU + fp8 quantization,
                            # top-k combine); the gate weight becomes one flat fused param wi [E * emb, 2 * mlp]. See configs/types.py.

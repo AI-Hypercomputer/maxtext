@@ -80,6 +80,8 @@ _QWEN3_8_MINI_CFG: dict[str, Any] = {
     "megablox": False,
     "use_tokamax_gmm": True,
     "use_gmm_v2": True,
+    "use_m3_batch_split": False,
+    "moe_sparsecore_pinning": False,
     "use_ple_layer": True,
     "ple_layer_id": _PLE_LAYER_ID,
     "ple_embed_dim": 64,

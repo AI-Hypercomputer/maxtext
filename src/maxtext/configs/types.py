@@ -1867,6 +1867,14 @@ class MoEGeneral(BaseModel):
       False,
       description="Fuse Megablox gmm_v2 backward rhs/lhs scaling + float8_e5m2 quantization in Pallas VMEM.",
   )
+  use_m3_batch_split: bool = Field(
+      False,
+      description="Enable 2-microbatch Dual-SparseCore schedule in m3 inhomogeneous decoders.",
+  )
+  moe_sparsecore_pinning: bool = Field(
+      False,
+      description="Pin m3 MoE EP collectives to SparseCore 0 and FSDP collectives to SparseCore 1.",
+  )
   moe_use_direct_token_gather: bool = Field(
       False,
       description="Whether to gather tokens directly in expert order instead of materializing Top-K copies.",
