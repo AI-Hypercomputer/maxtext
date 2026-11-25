@@ -270,6 +270,21 @@ class TransformerConfig(BaseModel):
   moe_fused_bwd_quant: bool = False
   use_hc_pallas: bool = False
   use_gdn_conv_pallas: bool = False
+  qsa_pallas_bkv: int = 0
+  qsa_pallas_bkv_dkv: int = 0
+  qsa_indexer_approx_topk: bool = False
+  sa_ignore_segment_ids: bool = False
+  logical_global_batch_size_to_load: Optional[int] = None
+
+  @model_validator(mode="after")
+  def _validate_sa_ignore_segment_ids(self) -> "TransformerConfig":
+    """Rejects `sa_ignore_segment_ids=True` on standalone `m3` configs lacking dataset packing fields."""
+    if self.sa_ignore_segment_ids:
+      raise ValueError(
+          "sa_ignore_segment_ids=True requires MaxText pyconfig initialization so dataset single-segment "
+          "preconditions are validated."
+      )
+    return self
 
 
 # ----------------------------------------------------------------------------

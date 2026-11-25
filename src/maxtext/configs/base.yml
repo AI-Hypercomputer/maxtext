@@ -1630,6 +1630,9 @@ eval_sa_v_layout: "HEAD_DIM_MINOR"
 sa_gqa_head_stacking: false # fold pairs of head_dim=64 GQA query heads in m3 Splash attention.
 use_hc_pallas: false # enable VMEM-fused Pallas Mosaic TPU 4-stream HyperConnection kernels in m3 Qwen3.8.
 use_gdn_conv_pallas: false # enable VMEM-fused Pallas Mosaic TPU 4-tap causal Conv1D + SiLU + Q/K L2Norm in m3 Qwen3.8 GDN.
+qsa_pallas_bkv: 0 # KV tile size override for m3 Qwen3.8 Pallas QSA forward (0 uses kernel default 512).
+qsa_pallas_bkv_dkv: 0 # KV tile size override for m3 Qwen3.8 Pallas QSA backward (0 uses kernel default 512).
+qsa_indexer_approx_topk: false # use approximate top-k (approx_max_k, recall_target=0.87) in m3 Qwen3.8 QSA indexer.
 use_splash_scheduler: false # to use tokamax splash attention scheduler.
 ring_scan_unroll: 1 # unroll factor for Tokamax ring attention scans; 0 or >= ring size fully unrolls.
 sa_fuse_reciprocal: true # defaults to true in Tokamax

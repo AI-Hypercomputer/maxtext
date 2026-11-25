@@ -2306,5 +2306,46 @@ class GrainReadOptionsConfigTest(absltest.TestCase):
         self._initialize(f"grain_file_type={file_type}", "grain_train_files=/tmp/train*", "grain_num_threads=0")
 
 
+class M3QsaConfigTest(absltest.TestCase):
+  """Tests M3 Qwen3.8 `qsa_attention_kernel='pallas'` and `sa_ignore_segment_ids` validation."""
+
+  def test_m3_sa_ignore_segment_ids_and_qsa_pallas_validation(self):
+    cfg = pyconfig.initialize(
+        [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "model_name=qwen3.8-flash-next",
+            "override_model_config=true",
+            "use_m3_model=true",
+            "dataset_type=synthetic",
+            "packing=false",
+            "qsa_attention_kernel=pallas",
+            "qsa_pallas_bkv=2048",
+            "qsa_pallas_bkv_dkv=2048",
+            "sa_ignore_segment_ids=true",
+        ]
+    )
+    self.assertEqual(cfg.qsa_attention_kernel, "pallas")
+    self.assertEqual(cfg.qsa_pallas_bkv, 2048)
+    self.assertTrue(cfg.sa_ignore_segment_ids)
+
+    with self.assertRaisesRegex(pydantic.ValidationError, r"qsa_attention_kernel in \('flash', 'pallas'\)"):
+      pyconfig.initialize(
+          [
+              "",
+              _BASE_CONFIG_PATH,
+              "run_name=test",
+              "model_name=qwen3.8-flash-next",
+              "override_model_config=true",
+              "use_m3_model=true",
+              "dataset_type=synthetic",
+              "packing=false",
+              "qsa_attention_kernel=dense",
+              "sa_ignore_segment_ids=true",
+          ]
+      )
+
+
 if __name__ == "__main__":
   absltest.main()

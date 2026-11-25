@@ -2638,13 +2638,27 @@ class Qwen3_8FlashNext(BaseModel):
           " broadcast/reshape expansion plus a gather-free one-hot contraction when segment ids are present."
       ),
   )
-  qsa_attention_kernel: Literal["dense", "flash"] = Field(
+  qsa_attention_kernel: Literal["dense", "flash", "pallas"] = Field(
       "dense",
       description=(
           "Qwen3.8 QSA attention kernel: 'dense' materializes the full score matrix; 'flash' dispatches through"
           " Tokamax Splash Attention when s <= index_select_budget and tiled block-sparse FlashAttention with a"
-          " 32-bit packed block bitmap when s > index_select_budget."
+          " 32-bit packed block bitmap when s > index_select_budget; 'pallas' dispatches eligible unpacked TPU"
+          " long-context calls (s > index_select_budget) to the VMEM-fused GQA-grouped Mosaic TPU Pallas QSA kernel"
+          " with Zig-Zag paired CP load balancing, falling back to 'flash' on padded/packed or non-TPU calls."
       ),
+  )
+  qsa_pallas_bkv: NonNegativeInt = Field(
+      0,
+      description="KV tile size override for m3 Qwen3.8 Pallas QSA forward (0 uses kernel default 512).",
+  )
+  qsa_pallas_bkv_dkv: NonNegativeInt = Field(
+      0,
+      description="KV tile size override for m3 Qwen3.8 Pallas QSA backward (0 uses kernel default 512).",
+  )
+  qsa_indexer_approx_topk: bool = Field(
+      False,
+      description="Use approximate top-k (approx_max_k, recall_target=0.87) in m3 Qwen3.8 QSA indexer.",
   )
   use_ple_layer: bool = Field(False, description="Whether to use Per-Layer Embedding (PLE).")
   ple_layer_id: int = Field(
@@ -9136,14 +9150,22 @@ class MaxTextConfig(
             " packed segments (max_segments_per_seq < 2); packed sequences need"
             " the segment mask."
         )
-      if self.attention != "flash":
-        raise ValueError("sa_ignore_segment_ids only applies to attention='flash'; got" f" attention='{self.attention}'.")
-      # Types whose masks come from positions only. COMPRESSED also uses segment ids (-1) to mask block padding.
-      if self.attention_type not in ("global", "mla", "local_sliding", "chunk"):
+      if not self.use_m3_model:
+        if self.attention != "flash":
+          raise ValueError(
+              "sa_ignore_segment_ids only applies to attention='flash'; got" f" attention='{self.attention}'."
+          )
+        # Types whose masks come from positions only. COMPRESSED also uses segment ids (-1) to mask block padding.
+        if self.attention_type not in ("global", "mla", "local_sliding", "chunk"):
+          raise ValueError(
+              "sa_ignore_segment_ids supports attention_type in ('global',"
+              " 'mla', 'local_sliding', 'chunk'); got"
+              f" attention_type='{self.attention_type}'."
+          )
+      elif getattr(self, "qsa_attention_kernel", "dense") not in ("flash", "pallas"):
         raise ValueError(
-            "sa_ignore_segment_ids supports attention_type in ('global',"
-            " 'mla', 'local_sliding', 'chunk'); got"
-            f" attention_type='{self.attention_type}'."
+            "sa_ignore_segment_ids with use_m3_model=True requires qsa_attention_kernel in ('flash', 'pallas');"
+            f" got qsa_attention_kernel='{self.qsa_attention_kernel}'."
         )
       if self.use_lineage:
         raise ValueError("sa_ignore_segment_ids is not supported with use_lineage=True.")
