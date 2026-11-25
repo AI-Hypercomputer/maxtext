@@ -12,11 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Quantized training via qwix, applied after the model is built.
+"""Quantized training by interception, applied after the model is built.
 
 qwix intercepts `dot_general` / `einsum` / `ragged_dot` while the model runs
 and quantizes them by module path, so model files don't change and params stay
-`nnx.Param` with the same paths.
+`nnx.Param` with the same paths. `int4` / `int8` / `fp4` / `fp8*` use qwix's
+quantized training (`QtProvider`, dynamic absmax scales); OCP MX (`jax_mxfp8` /
+`jax_mxfp4`) uses the same interception mechanism to route matched projections
+to `jax.nn.scaled_dot_general`.
 
 We quantize the NNX projection layers (`nnx.Linear`, `nnx.LinearGeneral`,
 `nnx.Einsum`) under `decoder/layers`, plus MoE routers unless
@@ -28,12 +31,12 @@ quantized, same as legacy.
 `maybe_quantize` raises instead of silently skipping: on weights under the
 stack it can't quantize (e.g. a hand-rolled `DenseGeneral`), on legacy knobs m3
 doesn't implement, and if any planned projection does no quantized matmul.
-Scales are dynamic absmax.
 """
 
 from collections.abc import Iterator
 import collections
 import dataclasses
+import math
 import re
 from typing import Any
 
@@ -45,6 +48,7 @@ import jax.numpy as jnp
 import numpy as np
 import qwix
 
+from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.infra import scan as m3_scan
 
 # NNX layers that do exactly one weight matmul.
@@ -53,8 +57,8 @@ _PROJECTIONS = (nnx.Linear, nnx.LinearGeneral, nnx.Einsum)
 _LAYER_STACK = re.compile(r"decoder/layers(_\d+)?(/|$)")
 # MoE router attribute names (HF and legacy both use `gate`).
 _ROUTERS = frozenset({"gate"})
-# `jax.lax.ragged_dot` binds `ragged_dot_general`.
-_MATMULS = frozenset({"dot_general", "ragged_dot_general"})
+# `jax.lax.ragged_dot` binds `ragged_dot_general`; `jax.nn.scaled_dot_general` binds `scaled_matmul_wrapper`.
+_MATMULS = frozenset({"dot_general", "ragged_dot_general", "scaled_matmul_wrapper"})
 # Legacy knobs m3 doesn't implement, with their "off" value. Setting one raises.
 _UNSUPPORTED_WHEN_SET = {
     "quantize_logits_proj": False,
@@ -84,11 +88,18 @@ def unsupported_settings(config) -> dict[str, Any]:
 
 @dataclasses.dataclass(frozen=True)
 class Recipe:
-  """Dtypes of one quantized-training recipe."""
+  """Dtypes (and MX modes, when set) of one quantized-training recipe."""
 
   forward: Any  # weights and activations
   gradient: Any  # incoming gradient in the backward matmuls
+  mx_mode: str | None = None
+  mx_gradient_mode: str | None = None
 
+
+_MX_DTYPES: dict[str, Any] = {
+    "mxfp8": jnp.float8_e4m3fn,
+    "mxfp4": jnp.float4_e2m1fn,
+}
 
 RECIPES: dict[str, Recipe] = {
     "int4": Recipe(jnp.int4, jnp.int4),
@@ -98,6 +109,8 @@ RECIPES: dict[str, Recipe] = {
     "fp8_e4m3": Recipe(jnp.float8_e4m3fn, jnp.float8_e4m3fn),
     "fp8_e5m2": Recipe(jnp.float8_e5m2, jnp.float8_e5m2),
     "fp8_full": Recipe(jnp.float8_e4m3fn, jnp.float8_e5m2),
+    "jax_mxfp8": Recipe(jnp.float8_e4m3fn, jnp.float8_e4m3fn, mx_mode="mxfp8", mx_gradient_mode="mxfp8"),
+    "jax_mxfp4": Recipe(jnp.float4_e2m1fn, jnp.float4_e2m1fn, mx_mode="mxfp4", mx_gradient_mode="mxfp4"),
 }
 
 
@@ -117,11 +130,18 @@ class Plan:
     return text
 
 
-def recipe(name: str) -> Recipe:
-  """The recipe for `quantization=name`."""
+def recipe(name: str, gradient_mode: str = "") -> Recipe:
+  """The recipe for `quantization=name` (with optional `jax_mx_gradient_mode`)."""
   if name not in RECIPES:
     raise ValueError(f"m3 supports quantization in {sorted(RECIPES)}; got {name!r}.")
-  return RECIPES[name]
+  the_recipe = RECIPES[name]
+  if gradient_mode:
+    if the_recipe.mx_mode is None:
+      raise ValueError(f"jax_mx_gradient_mode={gradient_mode!r} applies only to jax_mxfp8 / jax_mxfp4, not {name!r}.")
+    if gradient_mode not in _MX_DTYPES:
+      raise ValueError(f"jax_mx_gradient_mode must be in {sorted(_MX_DTYPES)}; got {gradient_mode!r}.")
+    return dataclasses.replace(the_recipe, gradient=_MX_DTYPES[gradient_mode], mx_gradient_mode=gradient_mode)
+  return the_recipe
 
 
 def _owns_weights(module: nnx.Module, layer_axes: int = 0) -> bool:
@@ -275,18 +295,194 @@ def _variable_paths(model: nnx.Module) -> list[tuple]:
   return [path for path, _ in nnx.to_flat_state(nnx.state(model))]
 
 
+def _mx_config(quantization_name: str, mode: str) -> Any:
+  """Fetches a `jax.nn.scaled_dot_general` BlockScaleConfig or raises a clear error."""
+  try:
+    return jax.nn.get_scaled_dot_general_config(mode)
+  except (AttributeError, ValueError) as e:
+    raise ValueError(
+        f"quantization={quantization_name!r} needs a JAX with scaled_dot_general mode {mode!r} (mxfp4: jax>=0.12.0)."
+    ) from e
+
+
+def _check_mx_contracting_dims(
+    lhs: jax.Array,
+    rhs: jax.Array,
+    dimension_numbers: jax.lax.DotDimensionNumbers,
+    block: int,
+    quantization_name: str,
+) -> None:
+  """Checks that forward, dx, and dW all contract over a whole number of MX blocks."""
+  (lhs_contract, rhs_contract), (lhs_batch, rhs_batch) = dimension_numbers
+  lhs_free = [d for d in range(lhs.ndim) if d not in lhs_contract and d not in lhs_batch]
+  rhs_free = [d for d in range(rhs.ndim) if d not in rhs_contract and d not in rhs_batch]
+  contracting_sizes = {
+      "forward (y = x @ W)": math.prod(lhs.shape[d] for d in lhs_contract),
+      "input gradient (dx = g @ W^T)": math.prod(rhs.shape[d] for d in rhs_free),
+      "weight gradient (dW = x^T @ g)": math.prod(lhs.shape[d] for d in lhs_free),
+  }
+  for gemm, k in contracting_sizes.items():
+    if k < block or k % block != 0:
+      raise ValueError(
+          f"quantization={quantization_name!r}: the {gemm} GEMM contracts over {k} elements, "
+          f"which must be at least {block} and a multiple of {block}; "
+          f"lhs {lhs.shape}, rhs {rhs.shape}, dimension_numbers {dimension_numbers}."
+      )
+
+
+class _JaxMxProvider(qwix.QuantizationProvider):
+  """Routes matched `dot_general` and `einsum` ops to `jax.nn.scaled_dot_general`."""
+
+  def __init__(self, provider_rules: list[qwix.QtRule], quantization_name: str, fwd_cfg: Any, bwd_cfg: Any):
+    super().__init__(provider_rules)
+    self._name = quantization_name
+    self._fwd_cfg = fwd_cfg
+    self._bwd_cfg = bwd_cfg
+    self._block_size = math.lcm(fwd_cfg.block_size, bwd_cfg.block_size)
+
+  def _scaled_dot(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      dimension_numbers: jax.lax.DotDimensionNumbers,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+      *,
+      out_sharding=None,
+      **kwargs: Any,
+  ) -> jax.Array:
+    """Validates MX constraints and dispatches to `jax.nn.scaled_dot_general`."""
+    # jax.nn.scaled_dot_general takes no precision argument.
+    del precision
+    if out_sharding is not None:
+      raise ValueError(f"quantization={self._name!r} does not support explicit out_sharding (use shard_mode='auto').")
+    if kwargs:
+      raise ValueError(f"quantization={self._name!r} does not support dot_general kwargs {sorted(kwargs)}.")
+    _check_mx_contracting_dims(lhs, rhs, dimension_numbers, self._block_size, self._name)
+    output_dtype = jnp.result_type(lhs, rhs) if preferred_element_type is None else preferred_element_type
+    return jax.nn.scaled_dot_general(
+        lhs,
+        rhs,
+        dimension_numbers,
+        preferred_element_type=output_dtype,
+        configs=[self._fwd_cfg, self._fwd_cfg, self._bwd_cfg],
+    )
+
+  def dot_general(
+      self,
+      lhs: jax.Array,
+      rhs: jax.Array,
+      dimension_numbers: jax.lax.DotDimensionNumbers,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+      *,
+      out_sharding=None,
+      **kwargs: Any,
+  ) -> jax.Array:
+    """Intercepts `jax.lax.dot_general` on planned modules."""
+    rule, _ = self._get_current_rule_and_op_id("dot_general")
+    if rule is None:
+      return jax.lax.dot_general(
+          lhs,
+          rhs,
+          dimension_numbers,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          out_sharding=out_sharding,
+          **kwargs,
+      )
+    return self._scaled_dot(
+        lhs,
+        rhs,
+        dimension_numbers,
+        precision=precision,
+        preferred_element_type=preferred_element_type,
+        out_sharding=out_sharding,
+        **kwargs,
+    )
+
+  def einsum(
+      self,
+      einsum_str: str,
+      *operands: jax.Array,
+      precision: jax.lax.PrecisionLike = None,
+      preferred_element_type: jax.typing.DTypeLike | None = None,
+      _dot_general=jax.lax.dot_general,
+      out_sharding=None,
+      **kwargs: Any,
+  ) -> jax.Array:
+    """Intercepts `jnp.einsum` on planned modules."""
+    rule, _ = self._get_current_rule_and_op_id("einsum")
+    if rule is None:
+      return jnp.einsum(
+          einsum_str,
+          *operands,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          _dot_general=_dot_general,
+          out_sharding=out_sharding,
+          **kwargs,
+      )
+    if len(operands) != 2:
+      raise ValueError(
+          f"quantization={self._name!r}: expected 2 operands for einsum {einsum_str!r}, got {len(operands)}."
+      )
+    if out_sharding is not None:
+      raise ValueError(f"quantization={self._name!r} does not support explicit out_sharding (use shard_mode='auto').")
+    # Disable jit so jnp.einsum's internal jit wrapper invokes _scaled_dot under interception.
+    with jax.disable_jit():
+      return jnp.einsum(
+          einsum_str,
+          *operands,
+          precision=precision,
+          preferred_element_type=preferred_element_type,
+          _dot_general=self._scaled_dot,
+          **kwargs,
+      )
+
+  def get_intercept_map(self):
+    """Returns the qwix interception map for MX matmuls."""
+    return super().get_intercept_map() | {
+        "jax.lax.dot_general": self.dot_general,
+        "jax.numpy.einsum": self.einsum,
+    }
+
+
 def maybe_quantize(model: nnx.Module, config, *example_args: Any, **example_kwargs: Any) -> nnx.Module:
   """Returns `model` quantized per `config.quantization` (or unchanged if unset).
 
   Call after scan and before creating the optimizer. `example_args` are shapes
   from `example_inputs`, used only for tracing.
   """
+  gradient_mode = getattr(config, "jax_mx_gradient_mode", "") or ""
   if not config.quantization:
+    if gradient_mode:
+      raise ValueError(
+          f"jax_mx_gradient_mode={gradient_mode!r} applies only to jax_mxfp8 / jax_mxfp4, "
+          f"not {config.quantization!r}."
+      )
     return model
   # pyconfig passes a `str` Enum.
   name = getattr(config.quantization, "value", config.quantization)
-  the_recipe = recipe(name)
-  if not getattr(config, "use_qwix_quantization", True):
+  the_recipe = recipe(name, gradient_mode=gradient_mode)
+  fwd_cfg = bwd_cfg = None
+  if the_recipe.mx_mode is not None:
+    if getattr(config, "use_qwix_quantization", False):
+      raise ValueError(
+          f"quantization={name!r} uses jax.nn.scaled_dot_general and does not support use_qwix_quantization=true."
+      )
+    # Assumes `maybe_quantize` runs under the target `jax.set_mesh(...)` (as `setup_model` does);
+    # callers quantizing outside a mesh hit the raw CustomSPMDPartitioning error on multi-chip TPU.
+    mesh = jax.sharding.get_abstract_mesh()
+    if not mesh.empty and mesh.size > 1 and m3_kernels.is_tpu_mesh():
+      raise ValueError(
+          f"quantization={name!r} uses jax.nn.scaled_dot_general, whose custom_partitioning is not supported on "
+          "multi-chip TPU (jax-ml/jax#38196). Use a single-chip TPU mesh, CPU, or GPU."
+      )
+    assert the_recipe.mx_gradient_mode is not None
+    fwd_cfg = _mx_config(name, the_recipe.mx_mode)
+    bwd_cfg = _mx_config(name, the_recipe.mx_gradient_mode)
+  elif not getattr(config, "use_qwix_quantization", True):
     raise ValueError(
         f"quantization={name!r} with use_qwix_quantization=false means AQT in legacy MaxText; "
         "m3 only supports qwix. Set use_qwix_quantization=true."
@@ -305,7 +501,11 @@ def maybe_quantize(model: nnx.Module, config, *example_args: Any, **example_kwar
     )
   if not the_plan.quantized:
     raise ValueError(f"quantization={name!r}: {type(model).__name__} has no projections under decoder/layers.")
-  provider = qwix.QtProvider(rules(the_plan, the_recipe))
+  provider_rules = rules(the_plan, the_recipe)
+  if the_recipe.mx_mode is not None:
+    provider: qwix.QuantizationProvider = _JaxMxProvider(provider_rules, name, fwd_cfg, bwd_cfg)
+  else:
+    provider = qwix.QtProvider(provider_rules)
   before = _variable_paths(model)
   # Dynamic scales have no state, so skip qwix's eager init pass (a full forward step).
   quantized = qwix.quantize_model(model, provider, *example_args, skip_nnx_init=True, **example_kwargs)
