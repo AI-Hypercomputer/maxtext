@@ -45,6 +45,7 @@ full_attn_layers: [
 
 # Attention Residuals (AttnRes)
 attn_res_block_size: 12
+use_attn_res_pallas_kernel: true
 
 # MLP and MoE Specifications
 first_num_dense_layers: 1

@@ -2716,6 +2716,14 @@ class KimiK3(BaseModel):
   """
 
   attn_res_block_size: PositiveInt = Field(12, description="Attention residual block interval.")
+  use_attn_res_pallas_kernel: bool = Field(
+      False,
+      description=(
+          "Whether to use the fused Pallas TPU kernel for Kimi-K3 Block Attention Residuals "
+          "(including fused AttnRes + pre-attention / pre-MLP RMSNorm) when running on TPU with "
+          "compatible token and embedding dimensions."
+      ),
+  )
   full_attn_layers: list[NonNegativeInt] = Field(
       default_factory=list,
       description="0-indexed decoder layers that use full (MLA) attention; all others use KDA linear attention.",

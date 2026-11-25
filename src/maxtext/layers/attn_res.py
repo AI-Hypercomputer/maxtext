@@ -15,9 +15,9 @@
 """Attention Residuals (AttnRes) softmax pooling for Kimi-K3.
 
 Kimi-K3 replaces the plain residual stream with a learned softmax pooling over
-a list of block residuals plus the running prefix sum. This module provides only
-the pooling primitive; the decoder layer owns the per-site weights (RMSNorm scale
-and a [D, 1] projection) and decides when a new block residual is committed.
+a list of block residuals plus the running prefix sum. This module provides the
+pooling primitive and fused `AttnRes` + sublayer `RMSNorm` entry point, backed
+by the Pallas TPU kernel in `maxtext.kernels.attn_res` when enabled on TPU.
 
   V = [block_residual_0, ..., block_residual_{K-1}, prefix_sum]
   k = V * rsqrt(mean(V**2, -1) + eps)          (RMSNorm without scale, fp32)
@@ -29,11 +29,18 @@ For lax.scan over layers the growing block list is replaced by a fixed-size
 """
 
 import math
-from typing import NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, Sequence
 
 import jax
 from jax import lax
 import jax.numpy as jnp
+
+from maxtext.common.common_types import ShardMode
+from maxtext.kernels.attn_res import pallas_kernel
+from maxtext.layers.normalizations import RMSNorm
+from maxtext.utils import sharding as maxtext_sharding
+
+_DEFAULT_PALLAS_CONFIG = pallas_kernel.AttnResKernelConfig()
 
 
 class AttnResBuffer(NamedTuple):
@@ -116,6 +123,128 @@ def _check_attn_res_shapes(prefix_sum, block_residual, proj_weight, norm_weight)
     raise ValueError(f"proj_weight must have shape ({d}, 1), got {tuple(proj_weight.shape)}")
 
 
+def _resolve_activation_pspec(
+    prefix_sum: jnp.ndarray,
+    mesh: Any,
+    shard_mode: Any,
+    logical_axis_names: Optional[Sequence[str]],
+    logical_axis_rules: Optional[Any] = None,
+) -> Optional[jax.sharding.PartitionSpec]:
+  """Resolves the 3D activation `PartitionSpec` for `ShardMode.AUTO`."""
+  if shard_mode != ShardMode.AUTO or mesh is None or getattr(mesh, "empty", True):
+    return None
+  if logical_axis_names is None:
+    return None
+  rules = maxtext_sharding.get_logical_axis_rules() or logical_axis_rules
+  if not rules:
+    return None
+  act_axes = maxtext_sharding.logical_to_mesh_axes(tuple(logical_axis_names), mesh, rules=rules)
+  parts = tuple(act_axes) + (None,) * max(0, 3 - len(act_axes))
+  pspec = jax.sharding.PartitionSpec(*parts[:3])
+  return maxtext_sharding.adjust_pspec_for_indivisible_shapes(pspec, prefix_sum.shape, mesh)
+
+
+def _try_pallas_attn_res(
+    prefix_sum: jnp.ndarray,
+    block_buffer: jnp.ndarray,
+    num_committed: int | jnp.ndarray,
+    proj_weight: jnp.ndarray,
+    norm_weight: jnp.ndarray,
+    *,
+    epsilon: float,
+    rms_norm: Optional[RMSNorm] = None,
+    pending: Optional[jnp.ndarray] = None,
+    has_pending: Optional[jnp.ndarray] = None,
+    mesh: Any = None,
+    shard_mode: Any = ShardMode.AUTO,
+    logical_axis_names: Optional[Sequence[str]] = None,
+    logical_axis_rules: Optional[Any] = None,
+    kernel_config: Optional[pallas_kernel.AttnResKernelConfig] = None,
+) -> Optional[jnp.ndarray]:
+  """Dispatches the Pallas kernel when inputs satisfy its contract, else returns None."""
+  if block_buffer.shape[-2] <= 0:
+    return None
+  k_cfg = _DEFAULT_PALLAS_CONFIG if kernel_config is None else kernel_config
+  act_pspec = _resolve_activation_pspec(prefix_sum, mesh, shard_mode, logical_axis_names, logical_axis_rules)
+  sub_scale = rms_norm.scale.get_value() if rms_norm is not None else None
+  norm_dtype = (jnp.float32 if rms_norm.dtype is None else rms_norm.dtype) if rms_norm is not None else None
+  if not pallas_kernel.can_use_attn_res_pallas(
+      prefix_sum,
+      block_buffer,
+      pending=pending,
+      sublayer_norm_scale=sub_scale,
+      norm_dtype=norm_dtype,
+      mesh=mesh,
+      activation_pspec=act_pspec,
+      config=k_cfg,
+  ):
+    return None
+  if rms_norm is not None:
+    assert sub_scale is not None
+    return pallas_kernel.attn_res_rms_norm_pallas(
+        prefix_sum,
+        block_buffer,
+        num_committed,
+        norm_weight,
+        proj_weight,
+        sub_scale,
+        pending=pending,
+        has_pending=has_pending,
+        res_epsilon=epsilon,
+        norm_epsilon=rms_norm.epsilon,
+        norm_dtype=norm_dtype,
+        mesh=mesh,
+        activation_pspec=act_pspec,
+        config=k_cfg,
+    )
+  return pallas_kernel.attn_res_pallas(
+      prefix_sum,
+      block_buffer,
+      num_committed,
+      norm_weight,
+      proj_weight,
+      pending=pending,
+      has_pending=has_pending,
+      epsilon=epsilon,
+      mesh=mesh,
+      activation_pspec=act_pspec,
+      config=k_cfg,
+  )
+
+
+def _validate_attn_res_args(
+    prefix_sum: jnp.ndarray,
+    block_residual: Optional[jnp.ndarray],
+    proj_weight: jnp.ndarray,
+    norm_weight: jnp.ndarray,
+    *,
+    num_blocks: Optional[int],
+    num_committed: Optional[jnp.ndarray],
+    pending: Optional[jnp.ndarray],
+    has_pending: Optional[jnp.ndarray],
+) -> tuple[bool, int | jnp.ndarray]:
+  """Validates AttnRes args and returns `(has_blocks, resolved_num_committed)`."""
+  if num_blocks is not None:
+    if block_residual is None or block_residual.shape[-2] != num_blocks:
+      raise ValueError(
+          f"Static-padded AttnRes expects a [..., {num_blocks}, D] block buffer, got "
+          f"{None if block_residual is None else tuple(block_residual.shape)}."
+      )
+    if num_committed is None:
+      raise ValueError("Static-padded AttnRes (num_blocks != None) requires num_committed.")
+    _check_attn_res_shapes(prefix_sum, block_residual, proj_weight, norm_weight)
+    if (pending is None) != (has_pending is None):
+      raise ValueError("pending and has_pending must be given together.")
+    return True, num_committed
+
+  if num_committed is not None or pending is not None or has_pending is not None:
+    raise ValueError("num_committed / pending / has_pending are only valid with num_blocks (static-padded AttnRes).")
+  if block_residual is None or block_residual.shape[-2] == 0:
+    return False, 0
+  _check_attn_res_shapes(prefix_sum, block_residual, proj_weight, norm_weight)
+  return True, block_residual.shape[-2]
+
+
 def _pool(v: jnp.ndarray, proj_weight, norm_weight, epsilon, valid=None) -> jnp.ndarray:
   """Softmax pooling over axis -2 of `v` [..., K, D] in fp32; `valid` [K] masks out slots."""
   # fp32 materialization of V is deliberate, to match the HF reference numerics.
@@ -141,30 +270,37 @@ def _apply_attn_res_masked(
     epsilon: float = 1e-5,
     pending: Optional[jnp.ndarray] = None,
     has_pending: Optional[jnp.ndarray] = None,
+    use_pallas_kernel: bool = False,
+    mesh: Any = None,
+    shard_mode: Any = ShardMode.AUTO,
+    logical_axis_names: Optional[Sequence[str]] = None,
+    logical_axis_rules: Optional[Any] = None,
+    kernel_config: Optional[pallas_kernel.AttnResKernelConfig] = None,
 ) -> jnp.ndarray:
-  """Static-shape AttnRes: pools the first `num_committed` slots of `block_buffer` and `prefix_sum`.
-
-  Equal (up to fp summation order) to `_apply_attn_res(prefix_sum, block_buffer[..., :n, :])`
-  with n = num_committed, including n == 0 (identity, up to the promoted output dtype).
-  Empty slots get a -inf score, i.e. an exactly-zero softmax weight. With `pending`
-  ([..., D]) and `has_pending`, `pending` is pooled as block n when `has_pending` is true.
-
-  Args:
-    prefix_sum: [..., D].
-    block_buffer: [..., M, D] fixed-size block buffer.
-    num_committed: int scalar (may be traced), 0 <= num_committed <= M.
-    proj_weight: [D, 1].
-    norm_weight: [D].
-    epsilon: RMSNorm variance epsilon.
-    pending: Optional extra block [..., D] (see `AttnResBuffer.pending`).
-    has_pending: bool scalar; required with `pending`.
-
-  Returns:
-    Pooled hidden states of shape [..., D] in the promoted dtype of `block_buffer` and `prefix_sum`.
-  """
+  """Static-shape AttnRes: pools the first `num_committed` slots of `block_buffer` and `prefix_sum`."""
   _check_attn_res_shapes(prefix_sum, block_buffer, proj_weight, norm_weight)
   if (pending is None) != (has_pending is None):
     raise ValueError("pending and has_pending must be given together.")
+
+  if use_pallas_kernel:
+    out = _try_pallas_attn_res(
+        prefix_sum,
+        block_buffer,
+        num_committed,
+        proj_weight,
+        norm_weight,
+        epsilon=epsilon,
+        pending=pending,
+        has_pending=has_pending,
+        mesh=mesh,
+        shard_mode=shard_mode,
+        logical_axis_names=logical_axis_names,
+        logical_axis_rules=logical_axis_rules,
+        kernel_config=kernel_config,
+    )
+    if out is not None:
+      return out
+
   num_slots = block_buffer.shape[-2]
   parts = [block_buffer]
   valid = [jnp.arange(num_slots) < num_committed]
@@ -190,45 +326,29 @@ def _apply_attn_res(
     num_committed: Optional[jnp.ndarray] = None,
     pending: Optional[jnp.ndarray] = None,
     has_pending: Optional[jnp.ndarray] = None,
+    use_pallas_kernel: bool = False,
+    mesh: Any = None,
+    shard_mode: Any = ShardMode.AUTO,
+    logical_axis_names: Optional[Sequence[str]] = None,
+    logical_axis_rules: Optional[Any] = None,
+    kernel_config: Optional[pallas_kernel.AttnResKernelConfig] = None,
 ) -> jnp.ndarray:
-  """Softmax-pools `block_residual` and `prefix_sum` (port of HF `_apply_attn_res`).
-
-  Callers must pass `epsilon=cfg.normalization_layer_epsilon` (the HF RMSNorm
-  `variance_epsilon`, 1e-5 for Kimi-K3; `KimiLinearConfig` defaults to 1e-6).
-  In each decoder layer the pre-attention pooling (`self_attention_res`) runs on
-  the incoming blocks *before* `prefix_sum` is committed as a new block at
-  `layer_idx % attn_res_block_size == 0`; the pre-MLP pooling then sees the
-  updated block list.
-
-  Args:
-    prefix_sum: Running prefix sum of shape [..., D].
-    block_residual: Committed block residuals of shape [..., K, D], or None.
-      With no blocks (None or K == 0) the pooling is the identity and
-      `prefix_sum` is returned unchanged.
-    proj_weight: Projection kernel of shape [D, 1] (MaxText `DenseGeneral`
-      layout, i.e. the transpose of the HF [1, D] `nn.Linear` weight).
-    norm_weight: RMSNorm scale of shape [D].
-    epsilon: RMSNorm variance epsilon.
-    num_blocks: None for the dynamic-concat path (unscanned). An int selects the
-      static-padded path (`_apply_attn_res_masked`, used under lax.scan); it must
-      equal `block_residual.shape[-2]`.
-    num_committed: Number of valid leading slots of the static buffer (may be
-      traced); required iff `num_blocks` is set.
-    pending: Optional pending block of the static path (see `AttnResBuffer.pending`).
-    has_pending: Whether `pending` is valid; required with `pending`.
-
-  Returns:
-    Pooled hidden states of shape [..., D] in the promoted dtype of
-    `block_residual` and `prefix_sum` (HF casts to `v.dtype`).
-  """
+  """Softmax-pools `block_residual` and `prefix_sum` (port of HF `_apply_attn_res`)."""
+  has_blocks, resolved_committed = _validate_attn_res_args(
+      prefix_sum,
+      block_residual,
+      proj_weight,
+      norm_weight,
+      num_blocks=num_blocks,
+      num_committed=num_committed,
+      pending=pending,
+      has_pending=has_pending,
+  )
+  if not has_blocks:
+    return prefix_sum
+  assert block_residual is not None
   if num_blocks is not None:
-    if block_residual is None or block_residual.shape[-2] != num_blocks:
-      raise ValueError(
-          f"Static-padded AttnRes expects a [..., {num_blocks}, D] block buffer, got "
-          f"{None if block_residual is None else tuple(block_residual.shape)}."
-      )
-    if num_committed is None:
-      raise ValueError("Static-padded AttnRes (num_blocks != None) requires num_committed.")
+    assert num_committed is not None
     return _apply_attn_res_masked(
         prefix_sum,
         block_residual,
@@ -238,13 +358,111 @@ def _apply_attn_res(
         epsilon=epsilon,
         pending=pending,
         has_pending=has_pending,
+        use_pallas_kernel=use_pallas_kernel,
+        mesh=mesh,
+        shard_mode=shard_mode,
+        logical_axis_names=logical_axis_names,
+        logical_axis_rules=logical_axis_rules,
+        kernel_config=kernel_config,
     )
-  if num_committed is not None or pending is not None or has_pending is not None:
-    raise ValueError("num_committed / pending / has_pending are only valid with num_blocks (static-padded AttnRes).")
-  # No blocks: softmax over a single slot is 1, so the result is prefix_sum itself.
-  if block_residual is None or block_residual.shape[-2] == 0:
-    return prefix_sum
-
-  _check_attn_res_shapes(prefix_sum, block_residual, proj_weight, norm_weight)
+  if use_pallas_kernel:
+    out = _try_pallas_attn_res(
+        prefix_sum,
+        block_residual,
+        resolved_committed,
+        proj_weight,
+        norm_weight,
+        epsilon=epsilon,
+        mesh=mesh,
+        shard_mode=shard_mode,
+        logical_axis_names=logical_axis_names,
+        logical_axis_rules=logical_axis_rules,
+        kernel_config=kernel_config,
+    )
+    if out is not None:
+      return out
   v = jnp.concatenate([block_residual, jnp.expand_dims(prefix_sum, axis=-2)], axis=-2)  # [..., K+1, D]
   return _pool(v, proj_weight, norm_weight, epsilon).astype(v.dtype)
+
+
+def _can_fuse_rms_norm(rms_norm: RMSNorm) -> bool:
+  return (
+      isinstance(rms_norm, RMSNorm)
+      and rms_norm.with_scale
+      and rms_norm.scale is not None
+      and rms_norm.scale_offset == 0.0
+      and not rms_norm.defer_scale_grad_allreduce
+      and not rms_norm.parameter_memory_host_offload
+  )
+
+
+def apply_attn_res_rms_norm(
+    prefix_sum: jnp.ndarray,
+    block_residual: Optional[jnp.ndarray],
+    proj_weight: jnp.ndarray,
+    norm_weight: jnp.ndarray,
+    rms_norm: RMSNorm,
+    *,
+    epsilon: float = 1e-5,
+    num_blocks: Optional[int] = None,
+    num_committed: Optional[jnp.ndarray] = None,
+    pending: Optional[jnp.ndarray] = None,
+    has_pending: Optional[jnp.ndarray] = None,
+    use_pallas_kernel: bool = False,
+    mesh: Any = None,
+    shard_mode: Any = ShardMode.AUTO,
+    logical_axis_names: Optional[Sequence[str]] = None,
+    logical_axis_rules: Optional[Any] = None,
+    kernel_config: Optional[pallas_kernel.AttnResKernelConfig] = None,
+) -> jnp.ndarray:
+  """Fuses `_apply_attn_res` and sublayer `RMSNorm` on TPU when `use_pallas_kernel=True`."""
+  if use_pallas_kernel and _can_fuse_rms_norm(rms_norm):
+    has_blocks, resolved_committed = _validate_attn_res_args(
+        prefix_sum,
+        block_residual,
+        proj_weight,
+        norm_weight,
+        num_blocks=num_blocks,
+        num_committed=num_committed,
+        pending=pending,
+        has_pending=has_pending,
+    )
+    if has_blocks:
+      assert block_residual is not None
+      out = _try_pallas_attn_res(
+          prefix_sum,
+          block_residual,
+          resolved_committed,
+          proj_weight,
+          norm_weight,
+          epsilon=epsilon,
+          rms_norm=rms_norm,
+          pending=pending,
+          has_pending=has_pending,
+          mesh=mesh,
+          shard_mode=shard_mode,
+          logical_axis_names=logical_axis_names,
+          logical_axis_rules=logical_axis_rules,
+          kernel_config=kernel_config,
+      )
+      if out is not None:
+        return out
+
+  pooled = _apply_attn_res(
+      prefix_sum=prefix_sum,
+      block_residual=block_residual,
+      proj_weight=proj_weight,
+      norm_weight=norm_weight,
+      epsilon=epsilon,
+      num_blocks=num_blocks,
+      num_committed=num_committed,
+      pending=pending,
+      has_pending=has_pending,
+      use_pallas_kernel=use_pallas_kernel,
+      mesh=mesh,
+      shard_mode=shard_mode,
+      logical_axis_names=logical_axis_names,
+      logical_axis_rules=logical_axis_rules,
+      kernel_config=kernel_config,
+  )
+  return rms_norm(pooled)

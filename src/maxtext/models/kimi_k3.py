@@ -44,7 +44,12 @@ from maxtext.layers import (
     linears,
     quantizations,
 )
-from maxtext.layers.attn_res import AttnResBuffer, _apply_attn_res, commit_attn_res_block, flush_attn_res_pending
+from maxtext.layers.attn_res import (
+    AttnResBuffer,
+    apply_attn_res_rms_norm,
+    commit_attn_res_block,
+    flush_attn_res_pending,
+)
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.models.kimi_k3_layout import KimiScanLayout, kimi_scan_layout_from_spec
 from maxtext.models.kimi_k3_layout import build_kimi_layer_spec  # pylint: disable=unused-import  # re-exported
@@ -282,32 +287,55 @@ class KimiK3DecoderLayer(nnx.Module):
     # Python bool for a static index, traced bool scalar inside the scanned block.
     is_commit = layer_idx % self.attn_res_block_size == 0
 
-    def pool(prefix, blocks, proj, norm):
+    use_pallas = self.config.use_attn_res_pallas_kernel
+
+    def pool_and_norm(prefix, blocks, proj, norm, sublayer_norm):
       if use_buffer:
-        return _apply_attn_res(
+        return apply_attn_res_rms_norm(
             prefix_sum=prefix,
             block_residual=blocks.blocks,
             proj_weight=proj.kernel.value,
             norm_weight=norm.scale.value,
+            rms_norm=sublayer_norm,
             epsilon=self.eps,
             num_blocks=blocks.blocks.shape[-2],
             num_committed=blocks.count,
             pending=blocks.pending,
             has_pending=blocks.has_pending,
+            use_pallas_kernel=use_pallas,
+            mesh=self.mesh,
+            shard_mode=self.config.shard_mode,
+            logical_axis_names=self.logical_axis_names,
+            logical_axis_rules=self.config.logical_axis_rules,
         )
-      return _apply_attn_res(
+      return apply_attn_res_rms_norm(
           prefix_sum=prefix,
           block_residual=blocks,
           proj_weight=proj.kernel.value,
           norm_weight=norm.scale.value,
+          rms_norm=sublayer_norm,
           epsilon=self.eps,
           num_blocks=None,  # dynamic-concat path; unscanned only
+          use_pallas_kernel=use_pallas,
+          mesh=self.mesh,
+          shard_mode=self.config.shard_mode,
+          logical_axis_names=self.logical_axis_names,
+          logical_axis_rules=self.config.logical_axis_rules,
       )
 
-    # STEP 1: pre-attention AttnRes pooling (only if blocks exist; the masked pooling of an
-    # empty buffer is the identity, so the buffer path needs no branch).
+    # STEP 1 + STEP 3 pre-norm: pre-attention AttnRes pooling fused with `pre_self_attention_layer_norm`.
+    # Step 2 commits `prefix_sum` (not the pooled activation), so fusing pre-attention pooling with
+    # `pre_self_attention_layer_norm` before committing `prefix_sum` is mathematically identical.
     if use_buffer or (block_residual is not None and block_residual.shape[-2] > 0):
-      hidden_states = pool(prefix_sum, block_residual, self.self_attention_res_proj, self.self_attention_res_norm)
+      normed_attn_in = pool_and_norm(
+          prefix_sum,
+          block_residual,
+          self.self_attention_res_proj,
+          self.self_attention_res_norm,
+          self.pre_self_attention_layer_norm,
+      )
+    else:
+      normed_attn_in = self.pre_self_attention_layer_norm(hidden_states)
 
     # STEP 2: block-boundary checkpoint
     if use_buffer:
@@ -321,7 +349,6 @@ class KimiK3DecoderLayer(nnx.Module):
       )
 
     # STEP 3: attention
-    normed_attn_in = self.pre_self_attention_layer_norm(hidden_states)
     if self.is_linear_attn:
       if model_mode == MODEL_MODE_AUTOREGRESSIVE:
         raise NotImplementedError(
@@ -351,11 +378,14 @@ class KimiK3DecoderLayer(nnx.Module):
     else:
       prefix_sum = jnp.where(is_commit, attn_out, prefix_sum + attn_out)
 
-    # STEP 5: pre-MLP AttnRes pooling (ALWAYS, using mlp_res_* weights)
-    pooled = pool(prefix_sum, block_residual, self.mlp_res_proj, self.mlp_res_norm)
-
-    # STEP 6
-    normed_mlp_in = self.post_self_attention_layer_norm(pooled)
+    # STEP 5 + STEP 6: pre-MLP AttnRes pooling fused with `post_self_attention_layer_norm`
+    normed_mlp_in = pool_and_norm(
+        prefix_sum,
+        block_residual,
+        self.mlp_res_proj,
+        self.mlp_res_norm,
+        self.post_self_attention_layer_norm,
+    )
     mlp_out = self.mlp(normed_mlp_in)
     mlp_out = self.with_logical_constraint(mlp_out)
 
