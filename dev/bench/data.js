@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795624935892,
+  "lastUpdate": 1795639327200,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -77218,6 +77218,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3509.1539999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 450,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Rohan Bierneni",
+            "username": "Rohan-Bierneni",
+            "email": "rbierneni@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "3d9aefac10b53329585ed2221694270aca5442f1",
+          "message": "Add Tokamax GatedDeltaNet adapter (use_tokamax_gdn)\n\n# Description\n\n> **Upstreamed from `atwigg/mlperf` & companion GDN kernel PRs:** [#5344](https://github.com/AI-Hypercomputer/maxtext/pull/5344), [#5363](https://github.com/AI-Hypercomputer/maxtext/pull/5363), [#5628](https://github.com/AI-Hypercomputer/maxtext/pull/5628)\n> **Co-authors:** Jian Tan (@jiantanfig, `jiantan@google.com`), Zhijing Li (@tissue3, `zhijingli@google.com`)\n\n`Qwen3NextGatedDeltaNet` (`qwen3_next` and `qwen3_5`) currently runs chunked Gated Delta Net recurrence through pure-JAX XLA operations, which materializes intermediate intra-chunk attention tensors in HBM.\n\nAdd `tokamax_chunk_gated_delta_rule` in `src/maxtext/kernels/attention/tokamax_gdn.py` and an opt-in `use_tokamax_gdn` flag (default `False`, preserving existing JAXpr and HLO when disabled) to dispatch `Qwen3NextGatedDeltaNet` training and chunk-aligned unpacked prefill to `tokamax.ops.gated_delta_net`:\n- Validate `use_tokamax_gdn` across `MaxTextConfig` and `RLConfig` (`qwen3_next`/`qwen3_5` decoder blocks, `bfloat16`/`float32` compute dtype, `gdn_key_head_dim <= 256`, `gdn_chunk_size == 64`, chunk-aligned `max_target_length`, unpacked inputs, and head-sharded `TP * CP` divisibility when context parallelism > 1).\n- Dispatch strictly to `\"mosaic\"` on TPU (raising `NotImplementedError` on offline CPU-to-TPU cross-compilation instead of silently falling back to XLA) and `\"xla\"` on CPU reference tests, passing pre-activated `float32` `g` (`use_gate_in_kernel=False`), pre-sigmoid `b` (`use_beta_sigmoid_in_kernel=True`), and `residual_checkpoint_name=\"gdn_chunk_states\"` for custom remat policies.\n- Route `Qwen3NextGatedDeltaNet` across `ShardMode.AUTO` and `ShardMode.EXPLICIT` with head-sharded context parallelism (`gdn_cp_mode=\"auto\"` or `\"head\"`) without allocating dummy initial recurrent states during stateless training.\n\n# Tests\n\n- Added `tests/unit/tokamax_gdn_test.py` verifying config validation across `pyconfig`, `MaxTextConfig`, and `RLConfig`, `ImportError` and offline cross-compile guards, multi-chunk forward and backward parity against `jax_chunk_gated_delta_rule` (with GQA, `use_qk_norm_in_gdn` on/off, and `initial_state`), and end-to-end `Qwen3NextGatedDeltaNet` forward and parameter-gradient parity across unsharded, 2D `(data=2, context=2)` `AUTO`/`EXPLICIT` meshes, left-padded batches, prefill `kv_cache` updates, and `jax.checkpoint` remat policies.\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nCo-authored-by: Jian Tan <jiantan@google.com>\nCo-authored-by: Zhijing Li <zhijingli@google.com>\nPiperOrigin-RevId: 1030103257",
+          "timestamp": "2026-11-25T20:07:21Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/3d9aefac10b53329585ed2221694270aca5442f1"
+        },
+        "date": 1795639326238,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 223.15199999999993,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 56.355999999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2252.428,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 174.13699999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 14,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 330.35099999999994,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3310.881000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 450,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1840.4179999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 356.97299999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3536.169999999999,
             "unit": "sec"
           },
           {
