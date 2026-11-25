@@ -264,6 +264,7 @@ class _FallbackReplicationSuiteMixin:
     self.assertTrue(fb_r0)
 
     # At R=1 with rbf=1.25, post-replication physical load (152 <= 160) suppresses fallback and matches R=0 dropless.
+    # `_capped_branch` reuses the plan built in `_check_ragged_overflow` (traced 2x total: pre-check + dropless branch).
     cfg_r1_fb = _build_routed_moe_config(
         hardware=self.HARDWARE,
         megablox=self.MEGABLOX,
@@ -274,9 +275,11 @@ class _FallbackReplicationSuiteMixin:
         ragged_buffer_factor=1.25,
         moe_dropless_fallback="layer",
     )
-    out_r1, dx_r1, mg_r1, ov_r1, fb_r1, _ = _run_layer_fwd_bwd(
-        cfg_r1_fb, mesh, x, cotangent, forced, ref_state=state_ref, use_cpu_ra2a=self.USE_CPU_RA2A
-    )
+    with mock.patch.object(mrp, "compute_plan_iter", wraps=mrp.compute_plan_iter) as mock_plan:
+      out_r1, dx_r1, mg_r1, ov_r1, fb_r1, _ = _run_layer_fwd_bwd(
+          cfg_r1_fb, mesh, x, cotangent, forced, ref_state=state_ref, use_cpu_ra2a=self.USE_CPU_RA2A
+      )
+    self.assertEqual(mock_plan.call_count, 2)
     self.assertFalse(ov_r1)
     self.assertFalse(fb_r1)
     self._assert_parity(out_r1, dx_r1, mg_r1, out_ref, dx_ref, mg_ref)

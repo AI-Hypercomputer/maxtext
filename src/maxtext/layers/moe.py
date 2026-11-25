@@ -3453,6 +3453,25 @@ class RoutedMoE(nnx.Module):
     target = min(math.ceil(n_chunks * ep / factor), seq_len)
     return next(d for d in range(target, seq_len + 1) if seq_len % d == 0)
 
+  def _local_expert_counts(self, expert_ids, valid_mask=None):
+    """Counts valid `[0, num_experts)` assignments in `expert_ids` into `[num_experts]` int32."""
+    flat = expert_ids.ravel()
+    if valid_mask is None:
+      return jnp.bincount(flat, length=self.config.num_experts).astype(jnp.int32)
+    valid = valid_mask.ravel()
+    return jnp.bincount(
+        jnp.where(valid, flat, 0), weights=valid.astype(jnp.int32), length=self.config.num_experts
+    ).astype(jnp.int32)
+
+  def _build_replica_plan(self, local_counts, num_ep, non_ep_batch_axes=()):
+    """Builds a `ReplicaPlan` from local `[num_experts]` counts, reducing across non-EP batch axes if needed."""
+    if non_ep_batch_axes:
+      local_counts = jax.lax.psum(local_counts, axis_name=non_ep_batch_axes)
+    counts_src = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
+    return moe_replica_planner.compute_plan_iter(
+        counts_src, num_ep, self.config.expert_replicas_per_device, self.config.expert_replica_max_send
+    )
+
   def _check_ragged_overflow(
       self,
       logits,
@@ -3464,14 +3483,15 @@ class RoutedMoE(nnx.Module):
       per_expert_scale=None,
       token_mask=None,
       non_ep_batch_axes=(),
+      precomputed_plan=None,
   ):
-    """Returns True if permute()'s ragged buffer would overflow for any chunk on any EP shard.
+    """Returns `(took_fallback, precomputed_plans)` for `permute()`'s ragged buffer across `n_chunks`.
 
     Counts this device's (token, k) pairs per chunk per destination EP shard, all-reduces the counts
     over EP (what each shard receives after the all-gather) and compares them with the buffer size.
     When hot-expert replication is enabled on the ragged all-to-all path, destination shards are
-    computed from post-replication physical slots so capacities freed by replication do not trigger
-    false-positive fallbacks.
+    computed from post-replication physical slots and the per-chunk plans are returned so `_capped_branch`
+    reuses them instead of running a second in-layer `all_gather` and planner.
     """
     num_ep = self.get_expert_parallelism_size()
     _, selected_experts = self.get_topk(
@@ -3484,30 +3504,19 @@ class RoutedMoE(nnx.Module):
         token_mask=token_mask,
     )
     batch, seq_len, top_k = selected_experts.shape
-    num_replicas = self.config.expert_replicas_per_device
-    if num_replicas > 0 and num_ep > 1 and not self.config.use_ring_of_experts:
-      expert_shard_id = jax.lax.axis_index(self._expert_parallelism_name)
-      chunk_len = seq_len // n_chunks
-      chunk_counts = []
-      for c in range(n_chunks):
-        sel_c = selected_experts[:, c * chunk_len : (c + 1) * chunk_len, :]
-        valid_c = valid_expert_mask(sel_c, self.config.num_experts)
-        if token_mask is not None:
-          valid_c = valid_c & jnp.asarray(token_mask[:, c * chunk_len : (c + 1) * chunk_len, None], dtype=jnp.bool_)
-        flat_safe = jnp.where(valid_c, sel_c, 0).ravel()
-        valid_flat = valid_c.ravel()
-        local_counts = jnp.bincount(
-            flat_safe, weights=valid_flat.astype(jnp.int32), length=self.config.num_experts
-        ).astype(jnp.int32)
-        if non_ep_batch_axes:
-          local_counts = jax.lax.psum(local_counts, axis_name=non_ep_batch_axes)
-        counts_src = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
-        plan_c = moe_replica_planner.compute_plan_iter(
-            counts_src, num_ep, num_replicas, self.config.expert_replica_max_send
+    plans = None
+    if getattr(self.config, "expert_replicas_per_device", 0) > 0 and num_ep > 1 and not self.config.use_ring_of_experts:
+      shard_id = jax.lax.axis_index(self._expert_parallelism_name)
+      plans, chunk_counts = [], []
+      for sel_c in jnp.split(selected_experts, n_chunks, axis=1):
+        raw = self._local_expert_counts(sel_c, valid_expert_mask(sel_c, self.config.num_experts))
+        plan = (
+            precomputed_plan if precomputed_plan is not None else self._build_replica_plan(raw, num_ep, non_ep_batch_axes)
         )
-        phys_c = plan_c.route_table[expert_shard_id][flat_safe]
-        dst_c = jnp.where(valid_flat, phys_c // plan_c.num_slots, -1)
-        chunk_counts.append(jnp.sum(jax.nn.one_hot(dst_c, num_ep, dtype=jnp.int32), axis=0))
+        plans.append(plan)
+        dst = plan.route_table[shard_id] // plan.num_slots
+        chunk_counts.append(jnp.bincount(dst, weights=raw, length=num_ep).astype(jnp.int32))
+      plans = tuple(plans)
       counts = jax.lax.psum(jnp.stack(chunk_counts, axis=0), self._expert_parallelism_name)
     else:
       # Forced-routing and token_mask padding (-1) maps to no shard, so one_hot gives it an all-zero row.
@@ -3520,7 +3529,7 @@ class RoutedMoE(nnx.Module):
         batch * (seq_len // n_chunks) * top_k, num_ep, self.config.num_experts, top_k, self.get_ragged_buffer_factor()
     )
     overflow = jnp.any(counts > buffer_size).astype(jnp.int32)
-    return jax.lax.psum(overflow, tuple(self.mesh.axis_names)) > 0
+    return jax.lax.psum(overflow, tuple(self.mesh.axis_names)) > 0, plans
 
   def sparse_matmul(
       self,
@@ -4371,6 +4380,7 @@ class RoutedMoE(nnx.Module):
         per_expert_scale=None,
         skip_token_gather=False,
         token_mask=None,
+        precomputed_plan=None,
     ):
       local_sorted_indices = None
       all_shards_group_sizes = None
@@ -4396,27 +4406,20 @@ class RoutedMoE(nnx.Module):
           )
 
         local_num_home_experts = self.config.num_experts // num_ep
+        non_ep_axes = roe_bias_axis_names if (self.config.shard_embed_moe_on_fsdp and weight_gather) else ()
 
         def _physical_route_fn(flat_logical, valid_mask=None):
-          # Build the replica plan inside permute() once flattened top-k expert IDs are available,
-          # and capture it in ra2a_and_route's scope so RouteMetadata can thread it to _moe_body.
-          # When has_invalid_slots is True (forced_routed_experts or token_mask), permute() has
-          # already replaced -1 slots with round-robin dummy indices in [0, num_experts); mask them
-          # out of the planner's [EP, E] counts and keep them in home slots [0, L) (never replicas).
+          # Build (or reuse precomputed) replica plan inside permute() once flattened top-k expert IDs are
+          # available, and capture it in ra2a_and_route's scope so RouteMetadata can thread it to _moe_body.
+          # When has_invalid_slots is True (forced_routed_experts or token_mask), permute() has already replaced
+          # -1 slots with round-robin dummy indices in [0, num_experts); mask them out of the planner's [EP, E]
+          # counts and keep them in home slots [0, L) (never replicas).
           nonlocal replica_plan
-          count_weights = None if valid_mask is None else valid_mask.astype(jnp.int32)
-          local_counts = jnp.bincount(flat_logical, weights=count_weights, length=self.config.num_experts).astype(
-              jnp.int32
-          )
-          if roe_bias_axis_names and self.config.shard_embed_moe_on_fsdp and weight_gather:
-            local_counts = jax.lax.psum(local_counts, axis_name=roe_bias_axis_names)
-          counts_src = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
-          replica_plan = moe_replica_planner.compute_plan_iter(
-              counts_src,
-              num_ep,
-              num_replicas,
-              self.config.expert_replica_max_send,
-          )
+          if precomputed_plan is not None:
+            replica_plan = precomputed_plan
+          else:
+            local_counts = self._local_expert_counts(flat_logical, valid_mask)
+            replica_plan = self._build_replica_plan(local_counts, num_ep, non_ep_axes)
           phys = replica_plan.route_table[expert_shard_id][flat_logical]
           if valid_mask is not None:
             home_phys = (
@@ -4574,6 +4577,7 @@ class RoutedMoE(nnx.Module):
         per_expert_scale=None,
         skip_token_gather=False,
         token_mask=None,
+        precomputed_plan=None,
     ):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
@@ -4613,6 +4617,7 @@ class RoutedMoE(nnx.Module):
             per_expert_scale=per_expert_scale,
             skip_token_gather=skip_token_gather,
             token_mask=token_mask,
+            precomputed_plan=precomputed_plan,
         )
 
     def non_expert_axes(pspec_dim_axes):
@@ -5151,6 +5156,7 @@ class RoutedMoE(nnx.Module):
         per_expert_scale=None,
         token_mask=None,
         moe_qwag_weight_amax=None,
+        precomputed_plan=None,
     ):
       batch_size, sequence_length, embed_dim = x.shape
       use_fused_gmm3d = getattr(self.config, "moe_use_fused_gmm3d", False)
@@ -5190,6 +5196,7 @@ class RoutedMoE(nnx.Module):
             per_expert_scale=per_expert_scale,
             skip_token_gather=use_fused_gmm3d,
             token_mask=token_mask,
+            precomputed_plan=precomputed_plan,
         )
 
         # moe_x_sorted: tag the routed (expert-sorted) MoE input and its small routing/metadata
@@ -5564,7 +5571,7 @@ class RoutedMoE(nnx.Module):
       if barrier_enabled is None:
         barrier_enabled = self.config.moe_chunk_barrier
 
-      def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled):
+      def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled, precomputed_plans=None):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
         if n_chunks <= 1:
           out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, _ = _moe_body(
@@ -5584,6 +5591,7 @@ class RoutedMoE(nnx.Module):
               per_expert_scale=per_expert_scale,
               token_mask=token_mask,
               moe_qwag_weight_amax=moe_qwag_weight_amax,
+              precomputed_plan=None if not precomputed_plans else precomputed_plans[0],
           )
           if not defer_small_ars:
             bias_updates = finalize_bias_updates(bias_updates)
@@ -5639,6 +5647,7 @@ class RoutedMoE(nnx.Module):
               per_expert_scale=per_expert_scale,
               token_mask=None if token_mask is None else token_mask[:, sl],
               moe_qwag_weight_amax=moe_qwag_weight_amax,
+              precomputed_plan=None if precomputed_plans is None else precomputed_plans[c],
           )
           if accum_chunk_wgrad:
             cur_w0, cur_w1, cur_wo = chunk_weights
@@ -5686,7 +5695,7 @@ class RoutedMoE(nnx.Module):
 
       # In-layer dropless fallback: calculate the overflow, then run either the
       # normal capped path or a chunked dropless path for this layer only (no step replay).
-      took_fallback = self._check_ragged_overflow(
+      took_fallback, precomputed_plans = self._check_ragged_overflow(
           logits,
           pre_bias_logits,
           rngs,
@@ -5702,7 +5711,9 @@ class RoutedMoE(nnx.Module):
       # log_required_ragged_buffer_factor probe is off, a float32 scalar otherwise. The dropless
       # branch returns the probe value of its own (fallback_chunks) chunking.
       def _capped_branch():
-        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _route_and_compute(False)
+        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _route_and_compute(
+            False, precomputed_plans=precomputed_plans
+        )
         return out, lb_loss, bias_updates, jnp.asarray(has_overflow, dtype=jnp.bool_), required_rbf, max_load_ratio
 
       def _dropless_chunks(n_chunks):
