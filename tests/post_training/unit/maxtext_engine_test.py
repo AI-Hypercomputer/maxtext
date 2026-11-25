@@ -1330,7 +1330,10 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
 
     step0_metrics: Any = t.get_metrics(clear_cache=True)
     self.assertIsInstance(step0_metrics, abstract_engine.MetricsBuffer)
+    self.assertIs(type(step0_metrics.mode), str)
     self.assertIn("loss", step0_metrics.weighted_metrics)
+    self.assertIsInstance(step0_metrics.weighted_metrics["loss"].unreduced_sum, np.ndarray)
+    self.assertIsInstance(step0_metrics.weighted_metrics["loss"].denominator, np.ndarray)
     np.testing.assert_array_equal(
         step0_metrics.weighted_metrics["loss"].unreduced_sum,
         jnp.array([20.0, 30.0]),
@@ -1340,6 +1343,7 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
         jnp.array([4.0, 6.0]),
     )
     self.assertIn("lr", step0_metrics.scalar_metrics)
+    self.assertIsInstance(step0_metrics.scalar_metrics["lr"], np.ndarray)
     np.testing.assert_array_equal(step0_metrics.scalar_metrics["lr"], jnp.array([0.002]))
     self.assertIn("lr", step0_metrics.aggregation_fns)
     self.assertEqual(step0_metrics.aggregation_fns["lr"](jnp.array([0.002])), 0.002)
