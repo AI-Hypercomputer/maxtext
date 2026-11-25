@@ -32,6 +32,7 @@ import jax
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as _m3_moe
 from maxtext.m3.core import sharding as m3_sharding
+from maxtext.m3.models.deepseek_v3 import modeling_deepseek_v3  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
@@ -60,6 +61,8 @@ def create_granitemoe_model(config, mesh=None, *, rngs, **kwargs):
 
 
 MODEL_REGISTRY: dict[str, Callable] = {
+    "deepseek3-671b": modeling_deepseek_v3.create_deepseek_v3_model,
+    "deepseek3-tiny": modeling_deepseek_v3.create_deepseek_v3_model,
     "glm5.3-flash": create_glm5_3_flash_model,
     "granite-3.0-1b-a400m": create_granitemoe_model,
     "granitemoe": create_granitemoe_model,
@@ -73,6 +76,8 @@ MODEL_REGISTRY: dict[str, Callable] = {
 
 _FOUR_AXIS_MESH = ("data", "fsdp", "tensor", "expert")
 MODEL_SUPPORTED_MESH_AXES: dict[str, tuple[str, ...]] = {
+    "deepseek3-671b": modeling_deepseek_v3.DEEPSEEK_V3_MESH_AXES,
+    "deepseek3-tiny": modeling_deepseek_v3.DEEPSEEK_V3_MESH_AXES,
     "glm5.3-flash": _FOUR_AXIS_MESH,
     "granite-3.0-1b-a400m": _FOUR_AXIS_MESH,
     "granitemoe": _FOUR_AXIS_MESH,
@@ -82,7 +87,9 @@ MODEL_SUPPORTED_MESH_AXES: dict[str, tuple[str, ...]] = {
     "qwen3.8-flash-next-mini": ("data", "fsdp", "fsdp_transpose", "tensor", "tensor_sequence", "expert"),
 }
 MODEL_EXPLICIT_SHARDING_SUPPORT: frozenset[str] = frozenset({"qwen3-0.6b"})
-MODEL_MOE_EXECUTOR_SUPPORT: frozenset[str] = frozenset({"qwen3.8-flash-next", "qwen3.8-flash-next-mini"})
+MODEL_MOE_EXECUTOR_SUPPORT: frozenset[str] = frozenset(
+    {"deepseek3-671b", "deepseek3-tiny", "qwen3.8-flash-next", "qwen3.8-flash-next-mini"}
+)
 
 
 def _unsupported_model_mesh_settings(config) -> dict[str, object]:

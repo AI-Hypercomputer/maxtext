@@ -43,6 +43,28 @@ _TINY = {
         "vocab_size": 256,
         "use_multimodal": False,
     },
+    # 1 dense + 2 MoE layers, so both layer kinds and both scan runs exist; group-limited routing on.
+    # `megablox` off because m3 does not run the legacy Megablox kernel that `base.yml` defaults to.
+    "deepseek3-tiny": {
+        "base_num_decoder_layers": 3,
+        "first_num_dense_layers": 1,
+        "base_emb_dim": 64,
+        "base_mlp_dim": 48,
+        "base_moe_mlp_dim": 24,
+        "base_num_query_heads": 4,
+        "base_num_kv_heads": 4,
+        "vocab_size": 256,
+        "q_lora_rank": 32,
+        "kv_lora_rank": 16,
+        "qk_nope_head_dim": 16,
+        "qk_rope_head_dim": 8,
+        "v_head_dim": 16,
+        "num_experts": 8,
+        "num_experts_per_tok": 2,
+        "n_routing_groups": 4,
+        "topk_routing_group": 2,
+        "megablox": False,
+    },
 }
 
 
