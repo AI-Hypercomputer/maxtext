@@ -63,11 +63,14 @@ def untrainable_paths(model):
   return frozenset("/".join(str(key) for key in path) for path, _ in untrainable)
 
 
-def _leaf_path(path):
-  """Path as "a/b/c". At init a leaf is still inside its nnx.Variable, which adds a trailing `value` key."""
-  if path and isinstance(path[-1], jax.tree_util.GetAttrKey) and path[-1].name == "value":
-    path = path[:-1]
+def _path_str(path):
+  """A pytree key path as "a/b/c"."""
   return jax.tree_util.keystr(path, simple=True, separator="/")
+
+
+def _is_frozen(path, frozen_paths):
+  """True if the leaf at `path` is, or lies inside, a weight in `frozen_paths`."""
+  return any(_path_str(path[:end]) in frozen_paths for end in range(1, len(path) + 1))
 
 
 def freeze_params(tx, frozen_paths):
@@ -76,7 +79,7 @@ def freeze_params(tx, frozen_paths):
 
     def labels(params):
       return jax.tree_util.tree_map_with_path(
-          lambda path, _: "frozen" if _leaf_path(path) in frozen_paths else "trainable", params
+          lambda path, _: "frozen" if _is_frozen(path, frozen_paths) else "trainable", params
       )
 
     tx = optax.multi_transform({"trainable": tx, "frozen": optax.set_to_zero()}, labels)
@@ -84,7 +87,7 @@ def freeze_params(tx, frozen_paths):
   def init(params):
     # An optimizer built without the model would otherwise apply weight decay to these weights.
     for path, variable in jax.tree_util.tree_leaves_with_path(params, is_leaf=lambda x: isinstance(x, nnx.Variable)):
-      name = _leaf_path(path)
+      name = _path_str(path)
       if isinstance(variable, UntrainableParam) and name not in frozen_paths:
         raise ValueError(f"UntrainableParam weights would be trained: {name}. Pass the model to get_optimizer.")
     return tx.init(params)

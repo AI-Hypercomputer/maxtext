@@ -981,6 +981,17 @@ class UntrainableParamWeightDecayTest(parameterized.TestCase):
     tx = optax.inject_hyperparams(factory)(learning_rate=1.0)
     self._assert_untrainable_unchanged(model, self._apply_zero_grads(model, tx))
 
+  def test_freeze_covers_a_weight_whose_value_is_a_pytree(self):
+    model = nnx.Dict(quantized=nnx.Param({"qvalue": jnp.ones(2), "scale": jnp.ones(1)}), kernel=nnx.Param(jnp.ones(2)))
+    tx = optimizers.freeze_params(optax.adamw(1.0, weight_decay=0.5), frozenset({"quantized"}))
+    optimizer = self._apply_zero_grads(model, tx)
+
+    self.assertTrue(jnp.array_equal(model.kernel[...], jnp.full(2, 0.5)))
+    for value in model.quantized.get_value().values():
+      self.assertTrue(jnp.array_equal(value, jnp.ones_like(value)))
+    slots = [jax.tree_util.keystr(path) for path, _ in jax.tree_util.tree_leaves_with_path(nnx.state(optimizer))]
+    self.assertFalse([s for s in slots if "quantized" in s], slots)
+
   def test_no_untrainable_params_leaves_optimizer_state_unchanged(self):
     params = {"kernel": jnp.ones((2, 2))}
     config = self._config("opt_type=adamw")
