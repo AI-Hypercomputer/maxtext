@@ -52,7 +52,7 @@ _PROJECTIONS = (nnx.Linear, nnx.LinearGeneral, nnx.Einsum)
 # The decoder stack (`layers/<i>`, `layers_<i>`, `layers` when scanned, or `first_cycle` / `cycles`) and everything under it.
 _LAYER_STACK = re.compile(r"decoder/(layers(_\d+)?|first_cycle|cycles)(/|$)")
 # MoE router attribute names (HF and legacy both use `gate`).
-_ROUTERS = frozenset({"gate"})
+_ROUTERS = frozenset({"gate", "shared_expert_gate"})
 # `jax.lax.ragged_dot` binds `ragged_dot_general`.
 _MATMULS = frozenset({"dot_general", "ragged_dot_general"})
 # Legacy knobs m3 doesn't implement, with their "off" value. Setting one raises.

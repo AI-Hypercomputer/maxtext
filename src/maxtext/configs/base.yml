@@ -394,6 +394,13 @@ moe_tc_ragged_flatten_block_size: 0 # moe_tc_ragged_sort: if > 0, Pallas (N, D/1
 moe_tc_ragged_3d_gmm: false # moe_tc_ragged_sort with tokamax gmm_v2: keep the sorted buffer in the (buffer, emb // 128, 128) layout through the GMMs.
 moe_tc_ragged_3d_dispatch: false # moe_tc_ragged_sort + moe_tc_ragged_3d_gmm: keep tokens in the (batch, seq, emb // 128, 128) layout through the EP all-gather and combine.
 moe_tc_window_routing: false # moe_tc_ragged_sort: keep only the shard's [start, start + cap) routing window, packed uint32 sorts.
+moe_bwd_wgrad_overlap: false # fence m3 MoE dx with expert wgrads in backward to overlap FSDP reduce-scatter.
+moe_ep_allgather_tc: false # use EP token all_gather + TensorCore ring_ragged_sort_tc + psum_scatter combine in m3 MoE.
+moe_fp8: false # enable per-token dynamic FP8 QArray dispatch and STE weight quantization in m3 MoE.
+moe_ep_combine_mode: "auto" # m3 MoE EP combine/bwd-gather placement: "auto" (SparseCore) or "tensorcore".
+moe_row_scale_placement: "tc" # m3 MoE 1D row-weight/scale placement: "tc", "auto", or "sc" (explicit SparseCore).
+moe_tc_3d_gmm: false # enable validated 3D T(8,128) MoE token layout when d_dim % 4096 == 0 (fp8) or % 2048 == 0 (bf16).
+moe_fused_bwd_quant: false # fuse Megablox GMM backward rhs/lhs scaling + e5m2 quantization in Pallas VMEM.
 moe_use_direct_token_gather: false # whether to gather tokens directly in expert order instead of materializing Top-K copies
 moe_use_fused_gmm3d: false # EP=1 only: Lineage fused 3D-layout GMMv2 expert kernels (in-kernel token gather, SwiGLU + fp8 quantization,
                            # top-k combine); the gate weight becomes one flat fused param wi [E * emb, 2 * mlp]. See configs/types.py.

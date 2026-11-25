@@ -326,9 +326,20 @@ class QuantizationTest(parameterized.TestCase):
 
   def test_aqt_default_is_refused(self):
     """Legacy trains `quantization=int8` with AQT unless `use_qwix_quantization=true`."""
+    from maxtext.layers import quantizations as legacy_quantizations  # pylint: disable=import-outside-toplevel
+
     config, model = self._model(quantization="int8", use_qwix_quantization="false")
     with self.assertRaisesRegex(ValueError, "use_qwix_quantization=true"):
       quantization.maybe_quantize(model, config, *quantization.example_inputs(config))
+    with self.assertRaisesRegex(ValueError, "use_qwix_quantization=True"):
+      legacy_quantizations.maybe_quantize_model(model, config)
+
+  def test_shared_expert_gate_exempt_when_quantize_routers_false(self):
+    model = _Model(nnx.Rngs(0))
+    model.decoder.layers_0.shared_expert_gate = nnx.Linear(4, 1, rngs=nnx.Rngs(1))
+    off = quantization.plan(model, quantize_routers=False)
+    self.assertNotIn("decoder/layers_0/shared_expert_gate", off.quantized)
+    self.assertIn("decoder/layers_0/shared_expert_gate", off.routers)
 
   def test_router_that_wraps_a_linear(self):
     """Qwen3-Next's router holds `self.linear`; turning routers off must skip `gate/linear` too."""

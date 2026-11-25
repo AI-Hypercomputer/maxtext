@@ -22,6 +22,7 @@ from typing import List, Literal, NamedTuple, Tuple
 import jax
 import jax.numpy as jnp
 from maxtext.kernels.megablox import backend
+from maxtext.kernels.megablox import pallas_fused_quant
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.kernels.ragged import ragged_sort_tc
@@ -104,6 +105,7 @@ def gmm(
     rhs_amax: jnp.ndarray | None = None,
     rhs_scale_kept_axes: tuple[int, ...] = (),
     gmm_v2_tail_chunks: bool = False,
+    use_fused_bwd_quant: bool = False,
 ):
   """Grouped matrix multiplication operation.
 
@@ -168,7 +170,10 @@ def gmm(
       gmm_fwd_bwd,
       nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25, 27, 28),
   )
-  gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
+  gmm_fwd_bwd.defvjp(
+      _gmm_fwd,
+      functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype, use_fused_bwd_quant=use_fused_bwd_quant),
+  )
   out, lhs_out, rhs_out = gmm_fwd_bwd(
       lhs,
       rhs,
@@ -690,6 +695,8 @@ def _gmm_bwd(
         object,
     ],
     grad: jnp.ndarray,
+    *,
+    use_fused_bwd_quant: bool = False,
 ) -> tuple[
     jnp.ndarray | qpl.QArray,
     jnp.ndarray | qpl.QArray,
@@ -745,19 +752,35 @@ def _gmm_bwd(
   #  - dlhs_dout: the incoming gradient used to calculate dlhs.
   #  - drhs_dout: the incoming gradient used to calculate drhs.
 
-  # 1. Scale Application & QArray Unwrapping
-  dlhs_dout, drhs_dout, lhs, rhs = _bwd_prepare_inputs(
+  # 1. Scale Application & QArray Unwrapping + 2. Backward Pass Quantization
+  if use_fused_bwd_quant and pallas_fused_quant.can_fuse_bwd_prepare_and_quantize(
       grad,
       residual_lhs,
       residual_rhs,
-      group_sizes,
-      use_gmm_v2,
       quantization_rule,
-  )
-
-  # 2. Backward Pass Quantization
-  if quantization_rule:
-    dlhs_dout, drhs_dout = _bwd_quantize_gradient(dlhs_dout, drhs_dout, quantization_rule)
+      use_tokamax_backend=use_tokamax_backend,
+      use_gmm_v2=use_gmm_v2,
+      tc_unsort_cfg=tc_unsort_cfg,
+  ):
+    assert isinstance(residual_lhs, qpl.QArray) and isinstance(residual_rhs, qpl.QArray)
+    dlhs_dout, drhs_dout, lhs, rhs = pallas_fused_quant.fused_bwd_prepare_and_quantize(
+        grad,
+        residual_lhs,
+        residual_rhs,
+        group_sizes,
+        interpret=interpret,
+    )
+  else:
+    dlhs_dout, drhs_dout, lhs, rhs = _bwd_prepare_inputs(
+        grad,
+        residual_lhs,
+        residual_rhs,
+        group_sizes,
+        use_gmm_v2,
+        quantization_rule,
+    )
+    if quantization_rule:
+      dlhs_dout, drhs_dout = _bwd_quantize_gradient(dlhs_dout, drhs_dout, quantization_rule)
 
   # 2b. Fused TC unsort: gather the (already scaled / quantized) token-order cotangent into expert slots.
   if tc_unsort_cfg is not None:
