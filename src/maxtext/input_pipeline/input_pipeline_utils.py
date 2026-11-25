@@ -48,9 +48,11 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, trust_remote_code=False):
   # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  tokenizer_model = tokenizer.build_tokenizer(
+      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, trust_remote_code=trust_remote_code
+  )
   return tokenizer_model
 
 
@@ -173,6 +175,22 @@ def pre_process_image_sft(example, image_column, config):
     return image
 
   example[image_column] = _process_image_fn(example[image_column])
+  return example
+
+
+def prepend_bos(example, column_name, bos_id):
+  """Prepends `bos_id` to the token ids in `example[column_name]` unless they already start with it.
+
+  Multimodal SFT tokenizes without BOS because `reformat_prompt` writes the chat format, so prompts whose format
+  leaves BOS to the token ids (see `mm_processor.reformatted_prompt_needs_bos`) get it here.
+  """
+  tokens = example[column_name]
+  if len(tokens) == 0 or tokens[0] != bos_id:
+    if isinstance(tokens, np.ndarray):
+      tokens = np.concatenate([np.asarray([bos_id], dtype=tokens.dtype), tokens])
+    else:
+      tokens = [bos_id, *tokens]
+  example[column_name] = tokens
   return example
 
 

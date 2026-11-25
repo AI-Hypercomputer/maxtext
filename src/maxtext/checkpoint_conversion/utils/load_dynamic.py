@@ -19,10 +19,18 @@ directly during MaxText training or evaluation runs, performing on-the-fly shard
 restore and CPU/TPU transformations. This avoids offline pre-conversion steps
 and prevents host OOM.
 
+By default the whole checkpoint is read (`load_sharded_hf_state`) and then converted
+(`transform_hf_state_to_mt_state`), so HBM holds the HF checkpoint and the MaxText weights at
+once. With `safetensors_dynamic_streaming=True` (experimental) the checkpoint is instead streamed
+a few decoder layers at a time (see `hf_streaming_load`): each read call's tensors (about 4 GiB
+per host) are read straight into HBM, converted on the TPU chips, and written into the sharded
+MaxText weights.
+
 Usage:
   To load Hugging Face checkpoints directly, configure the following flags:
   1. `source_checkpoint_layout`: Set to `"safetensors_dynamic"`.
   2. `load_parameters_path`: Set to the source path of the Hugging Face checkpoint.
+  3. Optional: `safetensors_dynamic_streaming=True` to stream the checkpoint layer by layer.
 
 Examples:
   A. Load from a Google Cloud Storage (GCS) directory containing `.safetensors`:
@@ -69,20 +77,19 @@ import collections
 import concurrent.futures
 import contextlib
 import functools
-import importlib.util
+import json
 import multiprocessing
 import os
 import random
 import time
 
-from etils.epath import backend as epath_backend
-from etils.epath import gpath
 from flax import nnx
 import flax.traverse_util
 import huggingface_hub
 import jax
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from maxtext.checkpoint_conversion.utils import hf_model_configs
+from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import param_mapping
 from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.common.gcloud_stub import gcs_storage
@@ -148,13 +155,61 @@ def build_gcs_cache_worker(fpath, gcs_cache_dir, hf_access_token):
         raise
 
 
-def get_hf_config_and_mappings(maxtext_config):
-  """Gets HF config and parameter mapping based on the MaxText config."""
+def _hub_files_to_cache(fs, repo_id):
+  """The files of an HF Hub repo to copy to the GCS cache: the safetensors, and config.json if there is one.
+
+  config.json's `quantization_config` decides how the mappings read the tensors.
+  """
+  files = list(fs.glob(f"{repo_id}/*.safetensors"))
+  if fs.exists(f"{repo_id}/config.json"):
+    files.append(f"{repo_id}/config.json")
+  return files
+
+
+# `_checkpoint_quantization_config` result for a checkpoint whose config.json has no `quantization_config`.
+_NOT_QUANTIZED = "not quantized"
+
+
+def _checkpoint_quantization_config(path):
+  """The `quantization_config` in the checkpoint's own config.json.
+
+  Returns the dict (possibly empty), `_NOT_QUANTIZED` if config.json has none, or None if the checkpoint
+  has no config.json. Any other error reading it raises: every host reads config.json on its own, and a
+  host that fell back to the stock config would build different mappings than the others and hang them.
+  """
+  if not path:
+    return None
+  from etils import epath  # pylint: disable=import-outside-toplevel
+
+  config_path = epath.Path(path) / "config.json"
+  if not config_path.exists():
+    return None
+  config = json.loads(config_path.read_text())
+  for section in (config, config.get("text_config") or {}):
+    if isinstance(section.get("quantization_config"), dict):
+      return section["quantization_config"]
+  return _NOT_QUANTIZED
+
+
+def get_hf_config_and_mappings(maxtext_config, path=None):
+  """Gets HF config and parameter mapping based on the MaxText config.
+
+  If the checkpoint at `path` has a config.json, its `quantization_config` (or its absence) overrides the stock
+  config's, so mappings that dequantize on load follow the checkpoint actually being read.
+  """
   model_key = maxtext_config.model_name
   if "-Instruct" in model_key:
     model_key = model_key.replace("-Instruct", "")
   hf_config_obj = HF_MODEL_CONFIGS[model_key]
   hf_config_dict = hf_config_obj.to_dict()
+  quantization_config = _checkpoint_quantization_config(path)
+  if quantization_config == _NOT_QUANTIZED:
+    # Drop the stock config's: hooks read it with `config.get("quantization_config", {})`.
+    hf_config_dict.pop("quantization_config", None)
+    if isinstance(hf_config_dict.get("text_config"), dict):
+      hf_config_dict["text_config"].pop("quantization_config", None)
+  elif quantization_config is not None:
+    hf_config_dict["quantization_config"] = quantization_config
 
   param_map_mt_to_hf = param_mapping.PARAM_MAPPING[model_key](
       hf_config_dict, maxtext_config, scan_layers=maxtext_config.scan_layers
@@ -213,7 +268,7 @@ def _leading_axis_shardings(abstract_state, devices, num_groups=None):
 def _no_gcs_read_ahead():
   """Makes gcsfs read only the requested bytes of a `gs://` file within this context.
 
-  Orbax reads each byte range through `epath` with gcsfs (see `_GcsfsPath`), which also reads `default_block_size`
+  Orbax reads each byte range through `epath`, whose `gs://` backend (gcsfs) also reads `default_block_size`
   (5 MiB) ahead. Each host reads one range per tensor, so a host of DeepSeek-V3 on 128 hosts needed about
   230 KB per tensor but downloaded 5.3 MB. The class attribute is set because gcsfs instances are cached per
   thread and Orbax opens files from worker threads. Writes still use blocks of at least 256 KiB.
@@ -231,26 +286,14 @@ def _no_gcs_read_ahead():
     gcsfs.GCSFileSystem.default_block_size = block_size
 
 
-class _GcsfsPath(gpath.PosixGPath):
-  """A path whose `gs://` files etils opens with gcsfs, even if TensorFlow is installed.
-
-  If TensorFlow is installed, etils opens `gs://` files with `tf.io.gfile`. A read smaller than 64 MiB
-  (`GCS_READ_CACHE_BLOCK_SIZE_MB`) fills a 64 MiB buffer, which stays until the file is closed, and Orbax
-  opens the file again for each byte range. A host that needs one small range of each of thousands of tensors
-  (fine-grained MoE on many hosts) then downloads up to 64 MiB per range and holds many such buffers at once.
-  With gcsfs, `_no_gcs_read_ahead` reads only the requested bytes.
-  """
-
-  @property
-  def _backend(self):
-    return epath_backend.fsspec_backend
-
-
 def load_sharded_hf_state(path, num_groups=None):
   """Loads HF state sharded across the TPU mesh to avoid host OOM.
 
   On one process, each tensor is sharded as much as possible. On several processes, each tensor is
   sharded along its leading axis only; see `_leading_axis_shardings`.
+
+  This holds the whole HF checkpoint in HBM at once. With `safetensors_dynamic_streaming=True`,
+  `load_safetensors_dynamic_state` streams it with `hf_streaming_load` instead.
 
   Args:
     path: A directory path (either local or GCS starting with gs://) containing
@@ -270,12 +313,8 @@ def load_sharded_hf_state(path, num_groups=None):
   # Leading-axis shards are contiguous, so never read whole spans: with more than 1024 tensors in a file
   # (fine-grained MoE), Orbax's automatic choice would otherwise read whole spans again.
   safetensors_options = ocp_v1.options.SafetensorsOptions(max_over_read_ratio=1.0) if multi_process else None
-  use_gcsfs = str(path).startswith("gs://") and importlib.util.find_spec("gcsfs") is not None
-  file_options = ocp_v1.options.FileOptions(path_class=_GcsfsPath) if use_gcsfs else None
   context = ocp_v1.Context(
-      checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS,
-      safetensors_options=safetensors_options,
-      file_options=file_options,
+      checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS, safetensors_options=safetensors_options
   )
   with context:
     metadata = ocp_v1.pytree_metadata(path)
@@ -336,7 +375,10 @@ def rename_legacy_hf_keys(hf_state, param_map_mt_to_hf):
 
 
 def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config):
-  """Transforms HF state into MaxText state by applying param mappings and mathematical hooks."""
+  """Transforms HF state into MaxText state by applying param mappings and mathematical hooks.
+
+  `hf_streaming_load` (used with `safetensors_dynamic_streaming=True`) must produce the same weights.
+  """
   t0 = time.time()
 
   # An HF tensor may feed several MaxText leaves (gemma4 maps `experts.gate_up_proj` to both `wi_0`
@@ -390,72 +432,28 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
 
     leaves = [flat_target[name] for name in check_names]
     hook_fn = hook_fn_map_mt.get(mt_key)
-    # A composite key with a stacked (list) source builds each of its leaves on its own (`num_parts`), so the
-    # stacked composite never holds them all at once. A composite key with one source tensor (unscanned) loads its
-    # leaves as one target and splits it below.
-    num_parts = len(leaves) if isinstance(mt_key, tuple) and isinstance(hf_source, list) else 0
     if isinstance(mt_key, tuple):
-      target_leaf = leaves[0] if num_parts else tensor_handling.composite_target_leaf(leaves)
+      target_leaf = tensor_handling.composite_target_leaf(leaves)
       hook_fn = tensor_handling.composite_hook_fn(hook_fn, len(leaves))
     else:
       target_leaf = leaves[0]
 
-    # Device buffers of HF tensors that this leaf consumed for the last time (popped from `hf_state`), freed as
-    # soon as the hook has produced its output, so the stacked tensor and its inputs do not coexist in HBM.
-    # Tensors that a later leaf still needs stay in `hf_state` and are never freed here.
-    last_popped = []
-
-    def _pop_and_track(popped, k):
-      arr = tensor_getter(k)
-      if isinstance(arr, jax.Array) and k not in hf_state:
-        popped.append(arr)
-      return arr
-
-    if hook_fn is not None:
-      _orig_hook_fn = hook_fn
-
-      def _deleting_hook_fn(popped, w, shape, _fn=_orig_hook_fn):
-        res = tensor_handling.apply_hook_fns(w, shape, _fn)
-        tensor_handling._delete_inputs(res, popped)  # pylint: disable=protected-access
-        popped.clear()
-        return res
-
-      hook_fn = functools.partial(_deleting_hook_fn, last_popped)
-
     load_fn = get_hf_loading_function(
         hf_source,
-        functools.partial(_pop_and_track, last_popped),
+        tensor_getter,
         hook_fn,
         target_leaf,
         maxtext_config,
-        mt_key if isinstance(mt_key, tuple) else mt_keys[0],
-        num_parts=num_parts,
+        mt_keys[0],
     )
 
     # Execute transformation and assign to flat_restored
     t_layer = time.time()
     loaded = load_fn()
-    # A popped HF tensor may also be the loaded leaf itself, or share its buffer: _delete_inputs keeps those.
-    tensor_handling._delete_inputs(loaded if num_parts else [loaded], last_popped)  # pylint: disable=protected-access
-    last_popped.clear()
-    if num_parts:
-      for name, leaf, part in zip(check_names, leaves, loaded):
-        # The parts were placed with the first leaf's sharding.
-        if hasattr(leaf, "sharding") and getattr(part, "sharding", None) != leaf.sharding:
-          part = tensor_handling._reshard(part, leaf.sharding, delete_input=True)  # pylint: disable=protected-access
-        flat_restored[name] = part
-      del loaded
-    elif isinstance(mt_key, tuple):
-      parts = [jax.lax.slice_in_dim(loaded, i, i + 1, axis=-1)[..., 0] for i in range(len(leaves))]
-      tensor_handling._delete_inputs(parts, (loaded,))  # pylint: disable=protected-access
-      del loaded
+    if isinstance(mt_key, tuple):
       for i, (name, leaf) in enumerate(zip(check_names, leaves)):
-        part, parts[i] = parts[i], None
-        flat_restored[name] = (
-            tensor_handling._reshard(part, leaf.sharding, delete_input=True)  # pylint: disable=protected-access
-            if hasattr(leaf, "sharding")
-            else part
-        )
+        part = loaded[..., i]
+        flat_restored[name] = jax.device_put(part, leaf.sharding) if hasattr(leaf, "sharding") else part
     else:
       flat_restored[check_names[0]] = loaded
 
@@ -480,8 +478,9 @@ def transform_hf_state_to_mt_state(hf_state, target_tree, param_map_mt_to_hf, ho
 def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
   """Loads HF safetensors and converts them into MaxText weights on device.
 
-  Reads every tensor sharded across `jax.devices()`, then maps, transforms and stacks the tensors into
-  the target layout.
+  By default, reads every tensor sharded across `jax.devices()`, then maps, transforms and stacks the
+  tensors into the target layout. With `maxtext_config.safetensors_dynamic_streaming`, streams the
+  checkpoint a few decoder layers at a time instead (see `hf_streaming_load`).
 
   Args:
     path: The safetensors source: a `gs://` or local directory, or an HF repo ID with or without the
@@ -531,7 +530,10 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
         t_gcs_start = time.time()
         # Only host 0 calls the HF API: anonymous calls from every host of a large job are rate-limited (HTTP 429).
         fs = huggingface_hub.HfFileSystem(token=maxtext_config.hf_access_token)
-        files = fs.glob(f"{repo_id}/*.safetensors")
+        if maxtext_config.safetensors_dynamic_streaming:
+          files = _hub_files_to_cache(fs, repo_id)
+        else:
+          files = fs.glob(f"{repo_id}/*.safetensors")
 
         # List existing blobs to avoid spawning processes for already cached
         # files
@@ -588,22 +590,40 @@ def load_safetensors_dynamic_state(path, abstract_params, maxtext_config):
       raise ValueError("base_output_directory with gs:// prefix is required for " "huggingface downloads.")
 
   t_total = time.time()
-  param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config)
-  max_logging.log(f"[1/3] Mappings derived in {time.time() - t_total:.2f}s")
+  streaming = maxtext_config.safetensors_dynamic_streaming
+  # Only the streaming loader takes `quantization_config` from the checkpoint's own config.json.
+  param_map_mt_to_hf, hook_fn_map_mt = get_hf_config_and_mappings(maxtext_config, path if streaming else None)
+  num_steps = 2 if streaming else 3
+  max_logging.log(f"[1/{num_steps}] Mappings derived in {time.time() - t_total:.2f}s")
 
   target_tree = abstract_params.to_pure_dict() if isinstance(abstract_params, nnx.State) else abstract_params
 
-  t1 = time.time()
-  hf_state = rename_legacy_hf_keys(load_sharded_hf_state(path), param_map_mt_to_hf)
-  max_logging.log(f"[2/3] Distributed Sharded GCS load completed in {time.time() - t1:.2f}s")
+  if streaming:
+    t1 = time.time()
+    # Read, convert, and place the weights a few decoder layers at a time. The next
+    # read call is fetched while the current one is converted, so at most two calls
+    # of HF tensors (about 4 GiB per host each) are in host RAM / HBM at once.
+    restored_params = hf_streaming_load.load_hf_params_streaming(
+        path,
+        target_tree,
+        param_map_mt_to_hf,
+        hook_fn_map_mt,
+        maxtext_config,
+        rename_hf_keys=functools.partial(rename_legacy_hf_keys, param_map_mt_to_hf=param_map_mt_to_hf),
+    )
+    max_logging.log(f"[2/2] Streamed and converted HF weights in {time.time() - t1:.2f}s")
+  else:
+    t1 = time.time()
+    hf_state = rename_legacy_hf_keys(load_sharded_hf_state(path), param_map_mt_to_hf)
+    max_logging.log(f"[2/3] Distributed Sharded GCS load completed in {time.time() - t1:.2f}s")
 
-  t2 = time.time()
-  # Transform Hugging Face weight tensors on-the-fly into MaxText format
-  # in-memory. This is done in-memory on each host, sharded across the mesh.
-  restored_params = transform_hf_state_to_mt_state(
-      hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config
-  )
-  max_logging.log(f"[3/3] CPU Transformations completed in {time.time() - t2:.2f}s")
+    t2 = time.time()
+    # Transform Hugging Face weight tensors on-the-fly into MaxText format
+    # in-memory. This is done in-memory on each host, sharded across the mesh.
+    restored_params = transform_hf_state_to_mt_state(
+        hf_state, target_tree, param_map_mt_to_hf, hook_fn_map_mt, maxtext_config
+    )
+    max_logging.log(f"[3/3] CPU Transformations completed in {time.time() - t2:.2f}s")
   max_logging.log(f"Total safetensors_dynamic duration: {time.time() - t_total:.2f}s")
 
   return None, restored_params

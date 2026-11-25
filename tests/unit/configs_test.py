@@ -266,6 +266,7 @@ def test_qwen_configs(config_file):
 
 KIMI_CONFIGS = [
     os.path.join(CONFIGS_DIR, "models", "kimi-k2-1t.yml"),
+    os.path.join(CONFIGS_DIR, "models", "kimi-k3.yml"),
 ]
 
 
@@ -308,3 +309,45 @@ INFERENCE_CONFIGS = [
 @pytest.mark.parametrize("config_file", INFERENCE_CONFIGS)
 def test_inference_configs(config_file):
   run_config_validation(config_file)
+
+
+# --- Test Group: use_weight_planner validation ---
+
+
+def _base_config_with(**overrides):
+  config_dict = deepcopy(load_and_merge_yamls(os.path.join(CONFIGS_DIR, "base.yml")))
+  config_dict = {key: None if value == "None" else value for key, value in config_dict.items()}
+  config_dict.update(overrides)
+  return pydantic_types.MaxTextConfig(**config_dict)
+
+
+def test_weight_planner_flags_default_off():
+  config = _base_config_with()
+  assert config.use_weight_planner is False
+  assert config.weight_sync_manifest_check is False
+
+
+def test_weight_planner_accepts_default_rollout():
+  assert _base_config_with(use_weight_planner=True, weight_sync_manifest_check=True).use_weight_planner is True
+
+
+WEIGHT_PLANNER_UNSUPPORTED = [
+    ({"rollout_backend": "vllm_torchax"}, "rollout_backend != 'maxtext'"),
+    ({"fp8_moe": True}, "fp8_moe"),
+    ({"rollout_fp8_moe": True}, "rollout_fp8_moe"),
+    ({"weight_dtype": "float8_e4m3fn"}, "weight_dtype='float8_e4m3fn'"),
+]
+
+
+def _rl_config_with(**overrides):
+  return pydantic_types.RLConfig(model_name="gemma4-26b", **overrides)
+
+
+# RL training builds an RLConfig, which does not inherit MaxTextConfig's validator.
+@pytest.mark.parametrize("make_config", [_base_config_with, _rl_config_with])
+@pytest.mark.parametrize("overrides, named", WEIGHT_PLANNER_UNSUPPORTED)
+def test_weight_planner_rejects_unsupported(make_config, overrides, named):
+  # Each combination is valid without the planner, so the planner check is what rejects it.
+  make_config(**overrides)
+  with pytest.raises(ValidationError, match=f"does not yet support: {named}\\."):
+    make_config(use_weight_planner=True, **overrides)

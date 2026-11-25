@@ -123,6 +123,49 @@ automatically handles compound sharding axes (`('fsdp', 'expert')`, `('fsdp', 'c
 - Compatible with default `EP_AS_FSDP` (`base.yml`), `custom_mesh_and_rule=ep-as-dp`, and
   `use_ring_of_experts=True`.
 
+Context parallelism (`ici_context_parallelism > 1`) is supported with both
+`context_parallel_strategy=all_gather` and `context_parallel_strategy=ring`:
+
+- Weights co-sharded over `('fsdp', 'context')` are gathered and reduce-scattered over both axes.
+  Weights sharded over `fsdp` only have their gradients reduce-scattered over `fsdp` and summed over
+  `context`.
+- The token embedding gradient uses a `reduce-scatter` (no `all-reduce`) when both the batch and
+  sequence dimensions are sharded.
+- With `context_parallel_strategy=ring`, DeepSeek-V3 needs backward splash attention blocks of 1024
+  (`sa_block_q_dkv`, `sa_block_kv_dkv`, `sa_block_kv_dkv_compute`, `sa_block_q_dq`,
+  `sa_block_kv_dq`) to stay within the scoped VMEM limit.
+- `context_parallel_strategy=ulysses` is not available for MLA attention models such as DeepSeek-V3.
+
+## Multi-slice training (data parallelism over DCN)
+
+For multi-slice runs, the prefetch pipelines assume that **FSDP stays within a slice and data
+parallelism runs across slices** (for example `dcn_data_parallelism=N`, `dcn_fsdp_parallelism=1`).
+Each weight gradient is then reduce-scattered over the FSDP axes inside the slice (ICI) and
+all-reduced over the data-parallel axis across slices (DCN).
+
+With `prefetch_fsdp_defer_grad_reduce_scatter=True` and a batch axis that spans slices, both
+`fsdp_prefetch` and `fsdp_prefetch_inhomogeneous` automatically split this reduction into two
+pipelined stages, one layer (or sub-layer) apart:
+
+| Backward step of layer `k` | Collective                                                                                   |
+| -------------------------- | -------------------------------------------------------------------------------------------- |
+| Stage 1 (ICI)              | Reduce-scatter of layer `k+1`'s gradient over the FSDP axes, keeping the DCN axes unreduced. |
+| Stage 2 (DCN)              | All-reduce of layer `k+2`'s already reduce-scattered (`1 / FSDP`-sized) gradient over DCN.   |
+
+The DCN all-reduce therefore never waits behind an ICI reduce-scatter issued in the same step, and
+gets a whole layer of backward compute to overlap with. The extra memory is one layer of
+`1 / FSDP`-sized gradients. Without DCN axes (single slice, or data parallelism within a slice)
+the pipeline is unchanged. Set `prefetch_fsdp_two_stage_dcn=False` to opt out and fall back to the single-stage reduction path.
+
+On multi-slice TPU7x runs where intra-slice FSDP (or co-sharded `('fsdp', 'expert')` / `('fsdp', 'context')`) gathers
+weights across an entire slice (`>= 64` devices), also include
+`--xla_tpu_prefer_async_allgather_to_allreduce=true` in `LIBTPU_INIT_ARGS` so intra-slice
+SparseCore 1 weight gathers stay native async `all-gather` collectives rather than being decomposed
+into an `all-reduce`.
+
+FSDP axes that span slices (`dcn_fsdp_parallelism > 1`) still produce correct gradients, but their
+collectives are left to XLA (they are not pinned to a SparseCore) and this configuration is not tuned.
+
 ## Recommended flags for best performance
 
 ### Quick-start command
@@ -131,7 +174,8 @@ automatically handles compound sharding axes (`('fsdp', 'expert')`, `('fsdp', 'c
 export LIBTPU_INIT_ARGS="\
   --xla_tpu_enable_offloading_copy_to_sparsecore=false \
   --xla_tpu_num_sparse_cores_for_gather_offloading=1 \
-  --xla_tpu_num_sparse_cores_for_scatter_offloading=1"
+  --xla_tpu_num_sparse_cores_for_scatter_offloading=1 \
+  --xla_tpu_prefer_async_allgather_to_allreduce=true"
 
 python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
   ... \
@@ -148,25 +192,27 @@ python3 -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
 
 ### MaxText flags
 
-| Flag                                                                             | Applies to                                     | Purpose & notes                                                                                                                                                                                                                                                         |
-| -------------------------------------------------------------------------------- | ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `prefetch_fsdp_weights=True` + `scan_layers=True`                                | All models                                     | Enables cross-layer FSDP weight prefetching on scanned decoder layers, automatically registers the post-scheduler `fsdp_prefetch_overlap_transform` on TPU, and pins FSDP prefetch collectives to SparseCore 1 on dual-SparseCore chips (TPU7x).                        |
-| `shard_mode=explicit`                                                            | All models *(required for deferred RS)*        | Preserves `NamedSharding` inside `custom_vjp` so gathers use `to="reduced"` and gradients reduce-scatter once on SparseCore.                                                                                                                                            |
-| `prefetch_fsdp_defer_grad_reduce_scatter=True`                                   | All models *(when HBM allows)*                 | Defers step *k*'s `reduce-scatter` to the start of step *k*−1, hiding exposed backward RS (+1 layer/sub-layer of unreduced dW in HBM).                                                                                                                                  |
-| `moe_flat_fsdp_weights=True`                                                     | MoE models                                     | Stores routed-expert weights as 2D `[E * rows, cols]` sharded `P(('expert', 'fsdp'), ...)` on major dim 0, eliminating multi-GiB SparseCore `{1,0,2} ↔ {2,1,0}` relayout transposes and TensorCore copies (requires `sparse_matmul=True`, `prefuse_moe_weights=False`). |
-| `moe_gmm_v2_dlhs_transpose_rhs=True`                                             | MoE with Tokamax `gmm_v2`                      | Uses native `transpose_rhs` inside backward `dlhs` `gmm_v2` instead of materializing explicit 3.5 GiB RHS weight transposes on TensorCore/SparseCore.                                                                                                                   |
-| `moe_use_direct_token_gather=True`                                               | MoE with `use_gather_mosaic_kernel=False`      | Gathers tokens directly in expert-sorted order instead of materializing `top_k` replicated copies first.                                                                                                                                                                |
-| `use_ring_of_experts=True` / `custom_mesh_and_rule=ep-as-dp`                     | MoE with `ici_expert_parallelism > 1`          | Reduces EP dispatch/combine overhead (`use_ring_of_experts`) or avoids over-sharding small projections across `('fsdp', 'expert')` (`ep-as-dp`).                                                                                                                        |
-| `moe_pin_sparse_core_ep_all_gathers=True` + `moe_ep_all_gather_sparse_core_id=0` | MoE with `ici_expert_parallelism > 1` on TPU7x | Pins Ring-of-Experts EP all-gathers to SparseCore 0 so they do not share SparseCore 1 with the FSDP prefetch collectives.                                                                                                                                               |
+| Flag                                                                             | Applies to                                                      | Purpose & notes                                                                                                                                                                                                                                                         |
+| -------------------------------------------------------------------------------- | --------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `prefetch_fsdp_weights=True` + `scan_layers=True`                                | All models                                                      | Enables cross-layer FSDP weight prefetching on scanned decoder layers, automatically registers the post-scheduler `fsdp_prefetch_overlap_transform` on TPU, and pins FSDP prefetch collectives to SparseCore 1 on dual-SparseCore chips (TPU7x).                        |
+| `shard_mode=explicit`                                                            | All models *(required for deferred RS)*                         | Preserves `NamedSharding` inside `custom_vjp` so gathers use `to="reduced"` and gradients reduce-scatter once on SparseCore.                                                                                                                                            |
+| `prefetch_fsdp_defer_grad_reduce_scatter=True`                                   | All models *(when HBM allows)*                                  | Defers step *k*'s `reduce-scatter` to the start of step *k*−1, hiding exposed backward RS (+1 layer/sub-layer of unreduced dW in HBM).                                                                                                                                  |
+| `prefetch_fsdp_two_stage_dcn=True`                                               | Multi-slice with `prefetch_fsdp_defer_grad_reduce_scatter=True` | Pipelines each weight gradient's DCN `all-reduce` one backward step behind its intra-slice FSDP `reduce-scatter` (+1 layer of `1 / FSDP`-sized gradients); set `False` to fall back to 1-stage reduction.                                                               |
+| `moe_flat_fsdp_weights=True`                                                     | MoE models                                                      | Stores routed-expert weights as 2D `[E * rows, cols]` sharded `P(('expert', 'fsdp'), ...)` on major dim 0, eliminating multi-GiB SparseCore `{1,0,2} ↔ {2,1,0}` relayout transposes and TensorCore copies (requires `sparse_matmul=True`, `prefuse_moe_weights=False`). |
+| `moe_gmm_v2_dlhs_transpose_rhs=True`                                             | MoE with Tokamax `gmm_v2`                                       | Uses native `transpose_rhs` inside backward `dlhs` `gmm_v2` instead of materializing explicit 3.5 GiB RHS weight transposes on TensorCore/SparseCore.                                                                                                                   |
+| `moe_use_direct_token_gather=True`                                               | MoE with `use_gather_mosaic_kernel=False`                       | Gathers tokens directly in expert-sorted order instead of materializing `top_k` replicated copies first.                                                                                                                                                                |
+| `use_ring_of_experts=True` / `custom_mesh_and_rule=ep-as-dp`                     | MoE with `ici_expert_parallelism > 1`                           | Reduces EP dispatch/combine overhead (`use_ring_of_experts`) or avoids over-sharding small projections across `('fsdp', 'expert')` (`ep-as-dp`).                                                                                                                        |
+| `moe_pin_sparse_core_ep_all_gathers=True` + `moe_ep_all_gather_sparse_core_id=0` | MoE with `ici_expert_parallelism > 1` on TPU7x                  | Pins Ring-of-Experts EP all-gathers to SparseCore 0 so they do not share SparseCore 1 with the FSDP prefetch collectives.                                                                                                                                               |
 
 ### XLA flags (`LIBTPU_INIT_ARGS`)
 
-| XLA flag                                                            | Purpose                                                                                                                                                                                |
-| ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `--xla_tpu_rerun_latency_hiding_scheduler_post_sc_assignment=false` | Optional with Expert Parallelism (`ici_expert_parallelism > 1`); prevents a post-SparseCore-assignment scheduler pass from pulling `all-gather-done` ahead of the layer's MoE compute. |
-| `--xla_tpu_enable_offloading_copy_to_sparsecore=false`              | Keeps data-formatting copies on the TensorCore. Copies offloaded to the SparseCores run on both SparseCores at once and block the FSDP collectives queued on either of them.           |
-| `--xla_tpu_num_sparse_cores_for_gather_offloading=1`                | Runs each offloaded MoE gather on a single SparseCore instead of both, for the same reason.                                                                                            |
-| `--xla_tpu_num_sparse_cores_for_scatter_offloading=1`               | Same, for offloaded MoE scatters.                                                                                                                                                      |
+| XLA flag                                                            | Purpose                                                                                                                                                                                                                          |
+| ------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--xla_tpu_rerun_latency_hiding_scheduler_post_sc_assignment=false` | Optional with Expert Parallelism (`ici_expert_parallelism > 1`); prevents a post-SparseCore-assignment scheduler pass from pulling `all-gather-done` ahead of the layer's MoE compute.                                           |
+| `--xla_tpu_enable_offloading_copy_to_sparsecore=false`              | Keeps data-formatting copies on the TensorCore. Copies offloaded to the SparseCores run on both SparseCores at once and block the FSDP collectives queued on either of them.                                                     |
+| `--xla_tpu_num_sparse_cores_for_gather_offloading=1`                | Runs each offloaded MoE gather on a single SparseCore instead of both, for the same reason.                                                                                                                                      |
+| `--xla_tpu_num_sparse_cores_for_scatter_offloading=1`               | Same, for offloaded MoE scatters.                                                                                                                                                                                                |
+| `--xla_tpu_prefer_async_allgather_to_allreduce=true`                | Keeps full-slice (`>= 64`-device) intra-slice SparseCore weight gathers as native async `all-gather`s instead of decomposing them into an `all-reduce`; required on multi-slice TPU7x when weights shard across an entire slice. |
 
 ### Automatic SparseCore isolation and post-scheduler overlap
 
@@ -192,6 +238,8 @@ Each SparseCore executes its offloaded collectives in a single in-order FIFO que
 - FSDP must be in use: when no FSDP mesh axis (`fsdp`, `fsdp_transpose`) spans more than one
   device, there is nothing to prefetch and the regular scan is used.
 - `prefetch_fsdp_defer_grad_reduce_scatter=True` requires `shard_mode=explicit`.
+- Multi-slice runs are expected to keep FSDP within a slice and use data parallelism across slices
+  (see [Multi-slice training](#multi-slice-training-data-parallelism-over-dcn)).
 - `remat_policy='none'` is not supported: the prefetch `custom_vjp` pipeline
   requires per-layer gradient checkpointing so gathered weights are not
   retained between the forward and backward pass.
@@ -243,6 +291,19 @@ With `remat_policy=custom` saving additional activations on device (`per_device_
 | `decoder_layer_input` only                                        | 2955 ms  | 2650 ms                 | −10.3%  | 38.4 / 58.4 GiB                |
 | + attention (`mla_q`, `mla_kv`, `out_proj`, `attention_out`)      | 2861 ms  | 2507 ms                 | −12.4%  | 46.6 / 58.8 GiB                |
 | + MoE (`moe_mlpwi_0`, `moe_mlpwi_1`, `moe_mlpwo`, `moe_x_sorted`) | 2703 ms  | 2418 ms                 | −10.5%  | 44.2 / 66.1 GiB                |
+
+### DeepSeek-V3 with context parallelism (`ici_context_parallelism=2`)
+
+Same DeepSeek-V3 setup as above (15 decoder layers, 128 routed experts, `num_experts_per_tok=4`,
+`per_device_batch_size=2`, `max_target_length=4096`, `shard_mode=explicit`, Tokamax `gmm_v2`,
+`moe_flat_fsdp_weights=True`) on 64 TPU7x chips (4x4x4) with `ici_context_parallelism=2`
+(`fsdp=64 x context=2`). Prefetch runs use `prefetch_fsdp_defer_grad_reduce_scatter=True`. The 10-step
+loss matches between prefetch off and on for both strategies.
+
+| `context_parallel_strategy`   | `prefetch_fsdp_weights=False` | `prefetch_fsdp_weights=True` | Speedup    |
+| ----------------------------- | ----------------------------- | ---------------------------- | ---------- |
+| `all_gather`                  | 2717.7 ms                     | **2268.7 ms**                | **−16.5%** |
+| `ring` (1024 backward blocks) | 2457.6 ms                     | **2094.6 ms**                | **−14.8%** |
 
 ### DeepSeek-V3 with Expert Parallelism (`ici_expert_parallelism=4`)
 

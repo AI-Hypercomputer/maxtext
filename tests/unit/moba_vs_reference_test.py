@@ -270,9 +270,7 @@ class MobaTest(unittest.TestCase):
         need_attend,
     ) = intermediates
 
-    unnormalized_output, _, exponentials_sum = attention_op.apply_attention_dot(
-        q_scaled_jax, k_jax, v_jax, None, "train", qk_product_einsum=jnp.einsum, wv_product_einsum=jnp.einsum
-    )
+    unnormalized_output, _, exponentials_sum = attention_op.apply_attention_dot(q_scaled_jax, k_jax, v_jax, None, "train")
     output = unnormalized_output / exponentials_sum
 
     k, g, s, n = gate_before.shape

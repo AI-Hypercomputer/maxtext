@@ -84,7 +84,7 @@ class Gemma4MoE(nnx.Module):
 
     self.pre_forward_scale_2 = nnx.Param(
         jnp.ones((self.config.emb_dim,), dtype=self.config.weight_dtype),
-        sharding=("embed",),
+        sharding=("norm",),
     )
     self.pre_feedforward_layernorm_2 = RMSNorm(
         num_features=self.config.emb_dim,
@@ -128,6 +128,7 @@ class Gemma4MoE(nnx.Module):
       intermediate_sharding: jax.sharding.NamedSharding | None = None,
       out_sharding: jax.sharding.NamedSharding | None = None,
       forced_routed_experts: jax.Array | None = None,
+      token_mask: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     shared_experts = self.moe_block.shared_experts(
         inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding
@@ -144,8 +145,8 @@ class Gemma4MoE(nnx.Module):
     root_size = self.config.emb_dim**-0.5
     router_scale = jnp.asarray(self.pre_forward_scale_2.value, gate_dtype)
     if self.config.shard_mode == ShardMode.EXPLICIT:
-      # The router scale is declared "embed" but multiplies an activation whose last axis is
-      # "activation_embed", two different mesh axes under the default rules.
+      # The router scale ("norm") and the activation's last axis ("activation_embed") can be on different
+      # mesh axes, depending on the logical axis rules.
       router_scale = align_scale_with_normalized_axis(router_scale, unscaled_norm)
     gate_inputs = unscaled_norm * root_size * router_scale
 
@@ -155,6 +156,7 @@ class Gemma4MoE(nnx.Module):
         gate_inputs=gate_inputs,
         out_sharding=out_sharding,
         forced_routed_experts=forced_routed_experts,
+        token_mask=token_mask,
     )
     routed_experts = self.post_feedforward_layernorm_2(routed_experts, out_sharding=out_sharding)
 
@@ -200,7 +202,8 @@ class Gemma4DecoderLayer(nnx.Module):
       self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
       self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-    self.mlp_activation_axis_names = self.activation_axis_names[:-1] + ("activation_mlp",)
+    mlp_length_name = "prefill_activation_length" if model_mode == MODEL_MODE_PREFILL else "activation_length"
+    self.mlp_activation_axis_names = ("activation_batch", mlp_length_name, "activation_mlp")
 
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
     # ShardMode.AUTO these are set to None so callees do not pin physical out_sharding
@@ -411,6 +414,7 @@ class Gemma4DecoderLayer(nnx.Module):
           intermediate_sharding=self.mlp_intermediate_sharding,
           out_sharding=self.out_sharding,
           forced_routed_experts=forced_routed_experts,
+          token_mask=moe.routing_token_mask(cfg, decoder_segment_ids, model_mode),
       )
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
         self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)

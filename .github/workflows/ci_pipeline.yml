@@ -18,7 +18,8 @@
 name: MaxText Package Tests
 
 on:
-  # Labels change which CI runs on a PR:
+  # Labels change which CI runs on a PR (ci_label_trigger.yml re-runs this pipeline when one of these
+  # three labels is added or removed, while unrelated labels such as `gemini-review` start no CI run):
   # - `skip-ci-tests` (added to new PRs, except the ones Copybara exports or that are opened with
   #   `scheduled-only`) skips the heavy TPU/GPU suites. Removing it runs them. auto_label_pr.yml removes
   #   it when the PR gets the "pull ready" label (after 2 approvals), unless the full CI already passed;
@@ -28,11 +29,9 @@ on:
   # - `run-tpu7x` runs the full TPU7X suite instead of only the TPU7X tests that the PR touched. Like the
   #   other heavy suites, it waits until `skip-ci-tests` is removed.
   # Drafts never run the heavy suites; `ready_for_review` re-runs the pipeline when a draft PR is
-  # marked ready for review. `labeled` and `unlabeled` fire for every label, so the entry jobs are
-  # gated on the label name: a run for any other label runs no tests, and All Required Tests Passed
-  # repeats the result of the newest full run on the same commit.
+  # marked ready for review.
   pull_request:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_call:
     inputs:
       maxtext_sha:
@@ -51,16 +50,9 @@ on:
 
 concurrency:
   # Dedup pull requests (canceling previous runs of the same workflow for same PR) and queue overlapping scheduled runs.
-  # A run triggered by adding or removing an unrelated label (any label other than `scheduled-only`, `run-tpu7x`
-  # and `skip-ci-tests`, the labels that the entry jobs accept) gets its own group, so it never cancels a test
-  # run in progress.
   group: >
     ${{
-      github.event_name == 'pull_request' &&
-        ((github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-          github.event.label.name == 'scheduled-only' || github.event.label.name == 'run-tpu7x' ||
-          github.event.label.name == 'skip-ci-tests') &&
-        format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
+      github.event_name == 'pull_request' && format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) ||
       github.event_name == 'schedule' && format('{0}-schedule', github.workflow) ||
       github.run_id
     }}
@@ -71,26 +63,17 @@ permissions:
 jobs:
   analyze_code_changes:
     name: Analyze Code Changes for Test Orchestration
-    # `labeled` and `unlabeled` fire for every label, so ignore label events other than the ones
-    # that opt the PR into a scheduled run or the full TPU7X suite, or skip CI tests. Pushes and scheduled runs are
-    # unaffected. all_tests_passed and all_notebooks_passed treat a run where this job was skipped as a run for an
-    # unrelated label.
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-      github.event.label.name == 'scheduled-only' ||
-      github.event.label.name == 'run-tpu7x' ||
-      github.event.label.name == 'skip-ci-tests'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
       contents: read
-      # Needed to list the PR's changed files via the GitHub REST API.
+      # Needed to read the PR's live draft state, labels, label events, and changed files via the GitHub REST API.
+      issues: read
       pull-requests: read
     outputs:
-      tpu_pre_train_deps_tag: ${{ steps.check.outputs.tpu_pre_train_deps_tag }}
-      tpu_post_train_deps_tag: ${{ steps.check.outputs.tpu_post_train_deps_tag }}
-      gpu_pre_train_deps_tag: ${{ steps.check.outputs.gpu_pre_train_deps_tag }}
+      tpu_pre_train_deps_tag: ${{ steps.deps_tags.outputs.tpu_pre_train_deps_tag }}
+      tpu_post_train_deps_tag: ${{ steps.deps_tags.outputs.tpu_post_train_deps_tag }}
+      gpu_pre_train_deps_tag: ${{ steps.deps_tags.outputs.gpu_pre_train_deps_tag }}
       run_tests: ${{ steps.check.outputs.run_tests }}
       run_notebooks: ${{ steps.check.outputs.run_notebooks }}
       run_pretrain_tests: ${{ steps.check.outputs.run_pretrain_tests }}
@@ -105,6 +88,9 @@ jobs:
       # Select tpu7x-tests on pull requests without scheduled-only; tpu7x_flavors is unset when every flavor runs.
       run_tpu7x_tests: ${{ steps.check.outputs.run_tpu7x_tests }}
       tpu7x_flavors: ${{ steps.check.outputs.tpu7x_flavors }}
+      # Live label-derived scheduling flags (re-runs reuse the original webhook payload, so labels are read via API).
+      is_scheduled_run: ${{ steps.check.outputs.is_scheduled_run }}
+      newly_added_only: ${{ steps.check.outputs.newly_added_only }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -118,54 +104,42 @@ jobs:
           GITHUB_BASE_REF: ${{ github.base_ref }}
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          # A `scheduled-only` PR mirrors a scheduled run, so run every suite
-          # regardless of which files the PR touched.
-          FORCE_ALL_TESTS: ${{ contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-          # A `run-tpu7x` PR runs every TPU7X flavor, not only the TPU7X tests it touched.
-          RUN_TPU7X: ${{ contains(github.event.pull_request.labels.*.name, 'run-tpu7x') }}
-          # Inputs of the heavy-test gate in analyze_code_changes.sh.
+          # Inputs of the heavy-test gate in analyze_code_changes.sh; draft state and labels are read live via GH API.
           EVENT_ACTION: ${{ github.event.action }}
-          IS_DRAFT: ${{ github.event.pull_request.draft }}
-          HAS_SKIP_CI_TESTS_LABEL: ${{ contains(github.event.pull_request.labels.*.name, 'skip-ci-tests') }}
           # add_skip_ci_tests_label.yml skips the PRs that Copybara exports; keep the author in sync.
           IS_COPYBARA_PR: ${{ github.event.pull_request.user.login == 'copybara-service[bot]' }}
         run: |
           bash .github/scripts/analyze_code_changes.sh
+      - name: Compute dependency image tags
+        id: deps_tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          script='src/dependencies/scripts/compute_deps_tag.sh'
+          tpu_pre=$(bash "$script" --device=tpu --workflow=pre-training --tf=false)
+          tpu_post=$(bash "$script" --device=tpu --workflow=post-training --tf=false)
+          gpu_pre=$(bash "$script" --device=gpu --workflow=pre-training --tf=false)
+          {
+            echo "tpu_pre_train_deps_tag=${tpu_pre}"
+            echo "tpu_post_train_deps_tag=${tpu_post}"
+            echo "gpu_pre_train_deps_tag=${gpu_pre}"
+          } >> "$GITHUB_OUTPUT"
 
   code_quality_check:
-    # The all_tests_passed job below matches this check name to tell full runs from runs triggered by
-    # unrelated labels, so this job must keep skipping those runs (the `if:` below).
+    # Copybara matches "Code Quality Check / Pre-commit Linters"; keep this job name in sync.
     name: Code Quality Check
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-      github.event.label.name == 'scheduled-only' ||
-      github.event.label.name == 'run-tpu7x' ||
-      github.event.label.name == 'skip-ci-tests'
     uses: ./.github/workflows/code_quality.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   docs_build_check:
     name: Documentation Build Check
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-      github.event.label.name == 'scheduled-only' ||
-      github.event.label.name == 'run-tpu7x' ||
-      github.event.label.name == 'skip-ci-tests'
     uses: ./.github/workflows/check_docs_build.yml
     with:
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
   dev_tests:
     name: Development Tests
-    if: >-
-      github.event_name != 'pull_request' ||
-      (github.event.action != 'labeled' && github.event.action != 'unlabeled') ||
-      github.event.label.name == 'scheduled-only' ||
-      github.event.label.name == 'run-tpu7x' ||
-      github.event.label.name == 'skip-ci-tests'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -199,15 +173,12 @@ jobs:
       tpu_pre_train_image: ${{ steps.resolve.outputs.tpu_pre_train_image }}
       tpu_pre_train_tag: ${{ steps.resolve.outputs.tpu_pre_train_tag }}
       tpu_pre_train_missing: ${{ steps.resolve.outputs.tpu_pre_train_missing }}
-      tpu_pre_train_base: ${{ steps.resolve.outputs.tpu_pre_train_base }}
       tpu_post_train_image: ${{ steps.resolve.outputs.tpu_post_train_image }}
       tpu_post_train_tag: ${{ steps.resolve.outputs.tpu_post_train_tag }}
       tpu_post_train_missing: ${{ steps.resolve.outputs.tpu_post_train_missing }}
-      tpu_post_train_base: ${{ steps.resolve.outputs.tpu_post_train_base }}
       gpu_pre_train_image: ${{ steps.resolve.outputs.gpu_pre_train_image }}
       gpu_pre_train_tag: ${{ steps.resolve.outputs.gpu_pre_train_tag }}
       gpu_pre_train_missing: ${{ steps.resolve.outputs.gpu_pre_train_missing }}
-      gpu_pre_train_base: ${{ steps.resolve.outputs.gpu_pre_train_base }}
       # The fork and bot guard, in one place rather than on each build job.
       can_build: ${{ github.event_name != 'pull_request' || (github.event.pull_request.head.repo.fork == false && github.actor != 'dependabot[bot]') }}
     steps:
@@ -222,46 +193,49 @@ jobs:
           TPU_POST_TRAIN_TAG: ${{ needs.analyze_code_changes.outputs.tpu_post_train_deps_tag }}
           GPU_PRE_TRAIN_TAG: ${{ needs.analyze_code_changes.outputs.gpu_pre_train_deps_tag }}
         run: |
-          repo="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-images"
+          set -euo pipefail
+          repo="us-docker.pkg.dev/${PROJECT_NAME}/maxtext-test-images"
 
           resolve() {
-            local key="$1" image="$2" reqs_tag="$3" base="$4" digest err missing
-            if [ -z "${reqs_tag}" ]; then
+            local key="$1" image="$2" tag="$3"
+            local missing err_file
+            # If no tag was emitted, skip setting outputs so test jobs fall back to installing deps in full.
+            if [ -z "${tag}" ]; then
               echo "::warning::analyze_code_changes named no ${image}; tests will install dependencies in full."
               return 0
             fi
-            if [[ ! "${reqs_tag}" =~ ^deps-[0-9a-f]{16}$ ]]; then
-              echo "::error::analyze_code_changes produced a malformed tag for ${image}: ${reqs_tag}"
+            # Fail fast on unexpected formats (guards against corrupted tags before passing to gcloud).
+            if [[ ! "${tag}" =~ ^deps-[0-9a-f]{16}$ ]]; then
+              echo "::error::analyze_code_changes produced a malformed tag for ${image}: ${tag}"
               exit 1
             fi
-            if ! digest=$(gcloud container images describe "${repo}/${base}" --format='value(image_summary.digest)' 2>/dev/null) ||
-              [ -z "${digest}" ]; then
-              echo "::error::Could not read the digest of ${repo}/${base}; the base image is missing."
-              exit 1
-            fi
-            digest="${digest#sha256:}"
-            local tag="${reqs_tag}-b${digest:0:12}"
-            if err=$(gcloud container images describe "${repo}/${image}:${tag}" 2>&1 >/dev/null); then
+
+            err_file=$(mktemp)
+            if gcloud container images describe "${repo}/${image}:${tag}" >/dev/null 2>"${err_file}"; then
+              # Cache hit: reuse existing maxtext_*_deps_ci image.
               missing=false
-              echo "${image}:${tag} is present."
-            elif grep -qiE 'not found|NOT_FOUND|does not exist' <<< "${err}"; then
+              echo "${repo}/${image}:${tag} is present."
+            elif grep -qiE 'not found|NOT_FOUND|does not exist' "${err_file}"; then
+              # Cache miss: signal the downstream build job to build and push the image.
               missing=true
-              echo "${image}:${tag} is missing and will be built."
+              echo "${repo}/${image}:${tag} is missing and will be built."
             else
-              echo "::error::Could not determine whether ${image}:${tag} exists: ${err}"
+              # Unexpected error (auth, quota, network, etc.): abort instead of misclassifying as a miss.
+              echo "::error::Could not determine whether ${repo}/${image}:${tag} exists: $(cat "${err_file}")"
+              rm -f "${err_file}"
               exit 1
             fi
+            rm -f "${err_file}"
 
             {
               echo "${key}_image=${image}:${tag}"
               echo "${key}_tag=${tag}"
               echo "${key}_missing=${missing}"
-              echo "${key}_base=${base%%:*}@sha256:${digest}"
             } >> "$GITHUB_OUTPUT"
           }
-          resolve tpu_pre_train maxtext-deps-tpu-pre-train "${TPU_PRE_TRAIN_TAG}" maxtext-unit-test-tpu:py312-bookworm
-          resolve tpu_post_train maxtext-deps-tpu-post-train "${TPU_POST_TRAIN_TAG}" maxtext-unit-test-tpu:py312-bookworm
-          resolve gpu_pre_train maxtext-deps-gpu-pre-train "${GPU_PRE_TRAIN_TAG}" maxtext-unit-test-cuda12:py312
+          resolve tpu_pre_train maxtext_tpu_pre_train_deps_ci "${TPU_PRE_TRAIN_TAG}"
+          resolve tpu_post_train maxtext_tpu_post_train_deps_ci "${TPU_POST_TRAIN_TAG}"
+          resolve gpu_pre_train maxtext_gpu_pre_train_deps_ci "${GPU_PRE_TRAIN_TAG}"
 
   build_deps_tpu_pre_train:
     name: Build TPU Pre-Training Dependency Image
@@ -273,13 +247,15 @@ jobs:
       (needs.analyze_code_changes.outputs.run_pretrain_tests == 'true' ||
       (needs.analyze_code_changes.outputs.run_heavy_tests == 'true' &&
         (github.event_name != 'pull_request' ||
-          contains(github.event.pull_request.labels.*.name, 'scheduled-only') ||
+          needs.analyze_code_changes.outputs.is_scheduled_run == 'true' ||
           needs.analyze_code_changes.outputs.run_tpu7x_tests == 'true')))
     uses: ./.github/workflows/build_deps_image.yml
     with:
-      base_image: ${{ needs.resolve_deps_images.outputs.tpu_pre_train_base }}
-      deps_image: maxtext-deps-tpu-pre-train
-      maxtext_extra: tpu
+      repository_name: maxtext-test-images
+      dockerfile: maxtext_tpu_dependencies.Dockerfile
+      deps_image: maxtext_tpu_pre_train_deps_ci
+      device: tpu
+      workflow: pre-training
       deps_tag: ${{ needs.resolve_deps_images.outputs.tpu_pre_train_tag }}
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
@@ -293,13 +269,15 @@ jobs:
       (needs.analyze_code_changes.outputs.run_posttrain_tests == 'true' ||
       (needs.analyze_code_changes.outputs.run_heavy_tests == 'true' &&
         (github.event_name != 'pull_request' ||
-          contains(github.event.pull_request.labels.*.name, 'scheduled-only') ||
+          needs.analyze_code_changes.outputs.is_scheduled_run == 'true' ||
           needs.analyze_code_changes.outputs.run_tpu7x_tests == 'true')))
     uses: ./.github/workflows/build_deps_image.yml
     with:
-      base_image: ${{ needs.resolve_deps_images.outputs.tpu_post_train_base }}
-      deps_image: maxtext-deps-tpu-post-train
-      maxtext_extra: tpu-post-train
+      repository_name: maxtext-test-images
+      dockerfile: maxtext_tpu_dependencies.Dockerfile
+      deps_image: maxtext_tpu_post_train_deps_ci
+      device: tpu
+      workflow: post-training
       deps_tag: ${{ needs.resolve_deps_images.outputs.tpu_post_train_tag }}
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
@@ -314,9 +292,12 @@ jobs:
       needs.analyze_code_changes.outputs.run_heavy_tests == 'true'
     uses: ./.github/workflows/build_deps_image.yml
     with:
-      base_image: ${{ needs.resolve_deps_images.outputs.gpu_pre_train_base }}
-      deps_image: maxtext-deps-gpu-pre-train
-      maxtext_extra: cuda12
+      repository_name: maxtext-test-images
+      dockerfile: maxtext_gpu_dependencies.Dockerfile
+      deps_image: maxtext_gpu_pre_train_deps_ci
+      device: gpu
+      workflow: pre-training
+      platform: linux/amd64
       deps_tag: ${{ needs.resolve_deps_images.outputs.gpu_pre_train_tag }}
       maxtext_sha: ${{ inputs.maxtext_sha || github.sha }}
 
@@ -403,7 +384,7 @@ jobs:
              || needs.build_deps_tpu_pre_train.result == 'success')
             && needs.resolve_deps_images.outputs.tpu_pre_train_image
             || 'maxtext-unit-test-tpu:py312-bookworm' }}
-      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+      is_scheduled_run: ${{ needs.analyze_code_changes.outputs.is_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   tpu-posttrain-tests:
@@ -426,7 +407,7 @@ jobs:
              || needs.build_deps_tpu_post_train.result == 'success')
             && needs.resolve_deps_images.outputs.tpu_post_train_image
             || 'maxtext-unit-test-tpu:py312-bookworm' }}
-      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+      is_scheduled_run: ${{ needs.analyze_code_changes.outputs.is_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
 
@@ -441,7 +422,7 @@ jobs:
       needs.gate_test_run.result == 'success' &&
       needs.analyze_code_changes.outputs.run_heavy_tests == 'true' &&
       (github.event_name != 'pull_request' ||
-        contains(github.event.pull_request.labels.*.name, 'scheduled-only') ||
+        needs.analyze_code_changes.outputs.is_scheduled_run == 'true' ||
         needs.analyze_code_changes.outputs.run_tpu7x_tests == 'true')
     uses: ./.github/workflows/run_tests_coordinator.yml
     strategy:
@@ -461,8 +442,8 @@ jobs:
                  || needs.build_deps_tpu_pre_train.result == 'success')
                 && needs.resolve_deps_images.outputs.tpu_pre_train_image
                 || 'maxtext-unit-test-tpu:py312-bookworm') }}
-      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
-      newly_added_only: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'run-tpu7x') && !contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+      is_scheduled_run: ${{ needs.analyze_code_changes.outputs.is_scheduled_run == 'true' }}
+      newly_added_only: ${{ needs.analyze_code_changes.outputs.newly_added_only == 'true' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   gpu-tests:
@@ -485,7 +466,7 @@ jobs:
              || needs.build_deps_gpu_pre_train.result == 'success')
             && needs.resolve_deps_images.outputs.gpu_pre_train_image
             || 'maxtext-unit-test-cuda12:py312' }}
-      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+      is_scheduled_run: ${{ needs.analyze_code_changes.outputs.is_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-pretrain-tests:
@@ -507,7 +488,7 @@ jobs:
              || needs.build_deps_tpu_pre_train.result == 'success')
             && needs.resolve_deps_images.outputs.tpu_pre_train_image
             || 'maxtext-unit-test-tpu:py312-bookworm' }}
-      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+      is_scheduled_run: ${{ needs.analyze_code_changes.outputs.is_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   cpu-posttrain-tests:
@@ -529,7 +510,7 @@ jobs:
              || needs.build_deps_tpu_post_train.result == 'success')
             && needs.resolve_deps_images.outputs.tpu_post_train_image
             || 'maxtext-unit-test-tpu:py312-bookworm' }}
-      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+      is_scheduled_run: ${{ needs.analyze_code_changes.outputs.is_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
 
   maxtext_tpu_pathways_unit_tests:
@@ -555,7 +536,7 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--init --privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+      is_scheduled_run: ${{ needs.analyze_code_changes.outputs.is_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
       total_workers: ${{ needs.gate_test_run.outputs.total_workers || '2' }}
       worker_group: ${{ matrix.group }}
@@ -583,28 +564,28 @@ jobs:
       xla_python_client_mem_fraction: 0.75
       tf_force_gpu_allow_growth: false
       container_resource_option: "--init --privileged"
-      is_scheduled_run: ${{ github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'scheduled-only') }}
+      is_scheduled_run: ${{ needs.analyze_code_changes.outputs.is_scheduled_run == 'true' }}
       maxtext_sha: ${{ needs.gate_test_run.outputs.maxtext_sha }}
       total_workers: '2'
       worker_group: ${{ matrix.group }}
 
   all_tests_passed:
     # auto_label_pr.yml and Copybara match this check name; Copybara imports a "pull ready" PR once any run of it
-    # passed on the PR's head commit. The check below matches the names of this job and of the Code Quality job in
-    # this workflow's runs; keep them in sync.
+    # passed on the PR's head commit. Keep this job name in sync.
     name: All Required Tests Passed
-    needs: [analyze_code_changes, build_and_upload_maxtext_package, dev_tests, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
+    needs: [analyze_code_changes, resolve_deps_images, build_deps_tpu_pre_train, build_deps_tpu_post_train, build_deps_gpu_pre_train, build_and_upload_maxtext_package, dev_tests, gate_test_run, tpu-pretrain-tests, tpu-posttrain-tests, tpu7x-tests, gpu-tests, cpu-pretrain-tests, cpu-posttrain-tests, maxtext_tpu_pathways_unit_tests, maxtext_tpu_pathways_integration_tests, code_quality_check, docs_build_check]
     if: always()  # must fail, not skip, on cancel: skipped required checks count as passing
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    permissions:
-      # release_pipeline.yml, which calls this workflow, grants it too.
-      actions: read  # reads the earlier runs of this workflow on the same commit (see below)
     steps:
       - name: Check test results
         run: |
           # Check that build and all tests passed or were skipped
           echo "Analyze Code Changes result: ${NEEDS_ANALYZE_CODE_CHANGES_RESULT}"
+          echo "Resolve Dependency Images result: ${NEEDS_RESOLVE_DEPS_IMAGES_RESULT}"
+          echo "Build TPU Pre-Training Deps result: ${NEEDS_BUILD_DEPS_TPU_PRE_TRAIN_RESULT}"
+          echo "Build TPU Post-Training Deps result: ${NEEDS_BUILD_DEPS_TPU_POST_TRAIN_RESULT}"
+          echo "Build GPU Pre-Training Deps result: ${NEEDS_BUILD_DEPS_GPU_PRE_TRAIN_RESULT}"
           echo "Build result: ${NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT}"
           echo "Code Quality result: ${NEEDS_CODE_QUALITY_CHECK_RESULT}"
           echo "Docs Build result: ${NEEDS_DOCS_BUILD_CHECK_RESULT}"
@@ -625,59 +606,6 @@ jobs:
             exit 1
           fi
 
-          # A run triggered by an unrelated label skips analyze_code_changes, Code Quality, Docs, the build and
-          # every test, so its own results prove nothing. It passes only if the newest full run of this workflow
-          # on the same commit (a run in which Code Quality ran) passed this check. Otherwise adding or removing a
-          # label could turn this check green without any test, even right after a failed run.
-          if [ "${NEEDS_ANALYZE_CODE_CHANGES_RESULT}" == "skipped" ]; then
-            if [ -z "${HEAD_SHA}" ]; then
-              echo "::error::analyze_code_changes was skipped in a run that is not for a pull request."
-              exit 1
-            fi
-            # Sets `atp` to "<status> <conclusion>" of All Required Tests Passed in the newest full run, to
-            # "missing" if that run has not created the job yet (its tests are still running), or to "none".
-            find_newest_full_run() {
-              local run_ids run_id jobs full_run_atp
-              atp="none"
-              run_ids=$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci_pipeline.yml/runs?head_sha=${HEAD_SHA}&event=pull_request&per_page=100" \
-                --paginate --jq '.workflow_runs[].id')
-              while read -r run_id; do
-                [ -n "${run_id}" ] || continue
-                jobs=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
-                  --paginate --jq '.jobs[] | [.name, .status, .conclusion // "none"] | @tsv')
-                full_run_atp=$(awk -F'\t' '
-                  $1 == "Code Quality Check / Pre-commit Linters" { full_run = 1 }
-                  $1 == "All Required Tests Passed" { atp = $2 " " $3 }
-                  END { if (full_run) print (atp == "" ? "missing" : atp) }' <<< "${jobs}")
-                if [ -n "${full_run_atp}" ]; then
-                  atp="${full_run_atp}"
-                  return
-                fi
-              done < <(sort -rn <<< "${run_ids}")
-            }
-            find_newest_full_run
-            # Wait a little if that run is just finishing its own All Required Tests Passed job.
-            for _ in {1..10}; do
-              case "${atp}" in
-                "queued "* | "in_progress "* | "waiting "* | "pending "* | "requested "*) ;;
-                *) break ;;
-              esac
-              sleep 30
-              find_newest_full_run
-            done
-            case "${atp}" in
-              "completed success")
-                echo "This run was triggered by an unrelated label and ran no tests; the newest full run on this commit passed."
-                exit 0
-                ;;
-              none) reason="there is no full run on this commit" ;;
-              missing) reason="the newest full run on this commit is still running its tests" ;;
-              *) reason="All Required Tests Passed of the newest full run on this commit is '${atp}'" ;;
-            esac
-            echo "::error::This run was triggered by an unrelated label and ran no tests, so it passes only after a passing full run, but ${reason}."
-            exit 1
-          fi
-
           # Fail if the heavy-test gate skipped TPU/GPU suites that this change needs (the PR is a draft or new,
           # or has the `skip-ci-tests` label), or if analyze_code_changes gave missing or invalid gate outputs, so
           # a broken gate cannot silently skip every heavy suite.
@@ -691,12 +619,14 @@ jobs:
 
           echo "All required tests passed successfully"
         env:
-          GH_TOKEN: ${{ github.token }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           RUN_HEAVY_TESTS: ${{ needs.analyze_code_changes.outputs.run_heavy_tests }}
           HEAVY_TESTS_GATED: ${{ needs.analyze_code_changes.outputs.heavy_tests_gated }}
           GATE_MESSAGE: ${{ needs.analyze_code_changes.outputs.heavy_tests_gate_message }}
           NEEDS_ANALYZE_CODE_CHANGES_RESULT: ${{ needs.analyze_code_changes.result }}
+          NEEDS_RESOLVE_DEPS_IMAGES_RESULT: ${{ needs.resolve_deps_images.result }}
+          NEEDS_BUILD_DEPS_TPU_PRE_TRAIN_RESULT: ${{ needs.build_deps_tpu_pre_train.result }}
+          NEEDS_BUILD_DEPS_TPU_POST_TRAIN_RESULT: ${{ needs.build_deps_tpu_post_train.result }}
+          NEEDS_BUILD_DEPS_GPU_PRE_TRAIN_RESULT: ${{ needs.build_deps_gpu_pre_train.result }}
           NEEDS_BUILD_AND_UPLOAD_MAXTEXT_PACKAGE_RESULT: ${{ needs.build_and_upload_maxtext_package.result }}
           NEEDS_CODE_QUALITY_CHECK_RESULT: ${{ needs.code_quality_check.result }}
           NEEDS_DOCS_BUILD_CHECK_RESULT: ${{ needs.docs_build_check.result }}
@@ -712,12 +642,10 @@ jobs:
           NEEDS_MAXTEXT_TPU_PATHWAYS_INTEGRATION_TESTS_RESULT: ${{ needs.maxtext_tpu_pathways_integration_tests.result }}
 
   all_notebooks_passed:
+    # Copybara matches this check name; keep it in sync.
     name: All Notebooks Passed
     needs: [analyze_code_changes, build_and_upload_maxtext_package, maxtext_jupyter_notebooks]
-    # Skipped in runs for unrelated labels (analyze_code_changes was skipped): they run no notebook, and Copybara
-    # imports a "pull ready" PR once any run of this check passed. Otherwise it must fail, not skip, on cancel
-    # (see all_tests_passed); if this check ever becomes required on GitHub, repeat the full run like that job does.
-    if: always() && needs.analyze_code_changes.result != 'skipped'
+    if: always()  # must fail, not skip, on cancel (see all_tests_passed)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

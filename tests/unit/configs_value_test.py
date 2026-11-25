@@ -14,6 +14,7 @@
 
 """Tests for the new pydantic-based configuration system."""
 
+import math
 import os
 import sys
 import unittest.mock
@@ -60,11 +61,11 @@ class ConfigTest(absltest.TestCase):
 
   def test_model_override(self):
     """Tests that model-specific configs override base.yml."""
-    argv = ["", _BASE_CONFIG_PATH, "model_name=llama2-7b", "run_name=test"]
+    argv = ["", _BASE_CONFIG_PATH, "model_name=llama3.1-8b", "run_name=test"]
     config = pyconfig.initialize(argv)
-    self.assertEqual(config.base_emb_dim, 4096)  # From llama2-7b.yml
-    self.assertEqual(config.base_num_decoder_layers, 32)  # From llama2-7b.yml
-    self.assertEqual(config.decoder_block, types.DecoderBlockType.LLAMA2)  # from llama2-7b.yml
+    self.assertEqual(config.base_emb_dim, 4096)  # From llama3.1-8b.yml
+    self.assertEqual(config.base_num_decoder_layers, 32)  # From llama3.1-8b.yml
+    self.assertEqual(config.decoder_block, types.DecoderBlockType.LLAMA2)  # from llama3.1-8b.yml
     self.assertEqual(config.steps, 150001)  # From base.yml, not overridden
 
   def test_derived_values(self):
@@ -676,6 +677,38 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.ici_context_parallelism, 4)
     self.assertFalse(config.context_parallel_load_balance)
 
+  def test_tpu_ulysses_config_validation_accepts_fewer_kv_heads_than_context_ranks(
+      self,
+  ):
+    """1 (MQA) or 2 KV heads at context 4 or 8 are repeated across the context ranks."""
+    for base_num_kv_heads in (1, 2):
+      for ici_context_parallelism in (4, 8):
+        with self.subTest(
+            base_num_kv_heads=base_num_kv_heads,
+            ici_context_parallelism=ici_context_parallelism,
+        ):
+          argv = [
+              "",
+              _BASE_CONFIG_PATH,
+              "run_name=test",
+              "attention=flash",
+              "use_tokamax_splash=True",
+              "use_jax_splash=False",
+              "context_parallel_strategy=ulysses",
+              "context_parallel_load_balance=False",
+              f"ici_context_parallelism={ici_context_parallelism}",
+              "base_num_query_heads=32",
+              f"base_num_kv_heads={base_num_kv_heads}",
+              "hardware=tpu",
+              "packing=True",
+              "skip_jax_distributed_system=True",
+          ]
+          mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+          with unittest.mock.patch("jax.devices", return_value=mock_devices):
+            config = pyconfig.initialize(argv)
+          self.assertEqual(config.num_kv_heads, base_num_kv_heads)
+          self.assertEqual(config.context_parallel_strategy, "ulysses")
+
   def test_tpu_ulysses_config_validation_accepts_packing(self):
     argv = [
         "",
@@ -695,6 +728,29 @@ class ConfigTest(absltest.TestCase):
     with unittest.mock.patch("jax.devices", return_value=mock_devices):
       config = pyconfig.initialize(argv)
 
+    self.assertTrue(config.packing)
+
+  def test_tpu_ulysses_config_validation_accepts_full_attention(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=full",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ulysses",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.attention_type, "full")
     self.assertTrue(config.packing)
 
   def test_context_parallel_strategy_is_normalized(self):
@@ -737,14 +793,17 @@ class ConfigTest(absltest.TestCase):
     ]
     cases = [
         (["context_parallel_load_balance=True"], ["context_parallel_load_balance=False"], "load_balance"),
-        (["base_num_kv_heads=1"], [], "MQA"),
         (["base_num_query_heads=18"], [], "requires num_query_heads"),
         (["base_num_kv_heads=10"], [], "requires num_kv_heads"),
-        (["attention_type=mla"], [], "global causal attention"),
-        (["attention_type=local_sliding", "sliding_window_size=128"], [], "global causal attention"),
-        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "global causal attention"),
-        (["attention_type=full"], [], "global causal attention"),
-        (["attention_type=compressed"], [], "global causal attention"),
+        (
+            ["base_num_query_heads=24", "base_num_kv_heads=6"],
+            [],
+            r"requires num_kv_heads \(6\).*or to divide it",
+        ),
+        (["attention_type=mla"], [], "global causal or full attention"),
+        (["attention_type=local_sliding", "sliding_window_size=128"], [], "global causal or full attention"),
+        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "global causal or full attention"),
+        (["attention_type=compressed"], [], "global causal or full attention"),
         (["use_qk_clip=True"], [], "QK-Clip"),
         (["dq_reduction_steps=2"], [], "dq_reduction_steps"),
         (["attention=dot_product"], ["attention=flash"], "attention=flash"),
@@ -1022,6 +1081,22 @@ class ConfigTest(absltest.TestCase):
         with self.assertRaises((ValueError, pydantic.ValidationError)):
           pyconfig.initialize(argv)
 
+  def test_full_attention_rejects_cudnn_flash_kernels(self):
+    for kernel in ("cudnn_flash_te", "cudnn_flash_jax"):
+      with self.subTest(attention=kernel):
+        argv = [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "attention_type=full",
+            f"attention={kernel}",
+            "hardware=gpu",
+            "skip_jax_distributed_system=True",
+        ]
+        with self.assertRaisesRegex(pydantic.ValidationError, f"attention={kernel!r}"):
+          pyconfig.initialize(argv)
+
   def test_default_attention_remains_global(self):
     config = pyconfig.initialize(["", _BASE_CONFIG_PATH, "run_name=test", "steps=1"])
 
@@ -1251,7 +1326,7 @@ class ConfigTest(absltest.TestCase):
     argv = [
         "",
         _BASE_CONFIG_PATH,
-        "model_name=llama3-8b",
+        "model_name=llama3.1-8b",
         "tokenizer_path=assets/tokenizer_llama3.tiktoken",
         "run_name=test",
     ]
@@ -1654,7 +1729,18 @@ class ConfigTest(absltest.TestCase):
         ),
         ("enable_diloco=true", "not supported with DiLoCo"),
         ("use_dpo=true packing=false", "not supported with DPO"),
-        ("num_experts=4", "not supported with MoE"),
+        # MoE is supported through RoutedMoE's token_mask; only the MoE implementations that bypass it are rejected.
+        ("num_experts=4 te_moe_block=true sparse_matmul=true", "not supported with MoE and `te_moe_block=True`"),
+        (
+            "num_experts=4 use_batch_split_schedule=true decoder_block=deepseek attention_type=mla",
+            "not supported with MoE and `use_batch_split_schedule=True`",
+        ),
+        ("num_experts=4 use_lineage=true", "not supported with MoE and `use_lineage=True`"),
+        ("num_experts=4 use_m3_model=true", "not supported with MoE and `use_m3_model=True`"),
+        (
+            "num_experts=4 decoder_block=kimi_linear packing=false",
+            "not supported with MoE and `decoder_block=kimi_linear`",
+        ),
         (
             "use_indexer=true attention_type=mla q_lora_rank=1536 attention=dot_product"
             " indexer_topk=8 max_target_length=64 indexer_loss_scaling_factor=0.1",
@@ -1671,6 +1757,10 @@ class ConfigTest(absltest.TestCase):
 
     for extra in (
         "use_tunix_gradient_accumulation=true gradient_accumulation_steps=1 per_device_batch_size=5",
+        # A plain MoE (RoutedMoE routes with a token_mask) is accepted.
+        "num_experts=4 num_experts_per_tok=2 base_mlp_dim=256 base_moe_mlp_dim=256 per_device_batch_size=5",
+        "num_experts=4 num_experts_per_tok=2 base_mlp_dim=256 base_moe_mlp_dim=256 sparse_matmul=false capacity_factor=1.25"
+        " per_device_batch_size=5",
         "dataset_type=grain grain_train_files=/x/* grain_use_elastic_iterator=true grain_file_type=arrayrecord"
         " packing=false colocated_python_data_input=false per_device_batch_size=5",
         "dataset_type=grain grain_train_files=/x/* grain_use_elastic_iterator=true grain_file_type=arrayrecord"
@@ -1678,6 +1768,19 @@ class ConfigTest(absltest.TestCase):
     ):
       cfg = self._elastic_config(*keep, *extra.split())
       self.assertEqual((cfg.logical_global_batch_size_to_load, cfg.global_batch_size_to_load), (100, 112))
+
+  def test_moe_exclude_padding_from_routing_rejects_unsupported_configs(self):
+    """The flag needs routed experts and an MoE implementation that takes RoutedMoE's token_mask."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false", "moe_exclude_padding_from_routing=true"]
+    moe = ["num_experts=4", "num_experts_per_tok=2", "base_moe_mlp_dim=256", "base_mlp_dim=256"]
+    for extra, error_regex in (
+        (["num_experts=1"], "requires num_experts > 1"),
+        (moe + ["decoder_block=kimi_linear", "packing=false"], "not supported with decoder_block=kimi_linear"),
+        (moe + ["use_m3_model=true"], "not supported with use_m3_model=True"),
+    ):
+      with self.subTest(extra=extra), self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex):
+        pyconfig.initialize(argv + extra)
+    self.assertTrue(pyconfig.initialize(argv + moe).moe_exclude_padding_from_routing)
 
   def test_remat_policy_none_rejects_prefetch_fsdp_weights_and_pipeline_parallelism(self):
     """Tests that remat_policy=none is rejected with prefetch_fsdp_weights=True and pipeline parallelism."""
@@ -1747,6 +1850,281 @@ class ConfigTest(absltest.TestCase):
                 **bad_kwargs,
             )
 
+  def test_plan_constant_global_batch(self):
+    """`plan_constant_global_batch` picks the least-padded (B', K') within the per-device bound, else rounds B up."""
+    # (per_device_batch_size, gradient_accumulation_steps, job_devices, live_devices, alignment, max) -> (B', K').
+    for args, expected in (
+        # Legacy (-1): keep K, round B up to cover the logical batch. 4 -> 3 slices of 32 chips.
+        ((1, 16, 128, 96, 1, -1), (2, 16)),
+        ((8, 1, 128, 96, 1, -1), (11, 1)),
+        # Bound == B: keep B, grow K; padding is less than one microbatch.
+        ((1, 16, 128, 96, 1, 1), (1, 22)),  # 2048 logical -> 2112 physical (3%), not 3072 (33%).
+        ((8, 1, 128, 96, 1, 8), (8, 2)),  # 1024 -> 1536: with K=1 nominal the padding equals the legacy B'=11 case.
+        ((1, 8, 256, 224, 1, 1), (1, 10)),  # 8 -> 7 slices: 2048 -> 2240.
+        ((1, 8, 256, 160, 1, 1), (1, 13)),  # 8 -> 5 slices: 2048 -> 2080.
+        # Bound > B: the search may raise B when that pads less (1024 on 96 devices: B'=11, K'=1 pads 32 rows).
+        ((8, 1, 128, 96, 1, 16), (11, 1)),
+        # Alignment: B' must be a multiple of 2, even when the bound equals B (96 < 100 rows, so K' = 2).
+        ((5, 1, 20, 16, 2, 5), (6, 2)),
+        ((4, 1, 20, 16, 2, 4), (4, 2)),
+        # Zero padding whenever the logical batch divides by the live microbatch.
+        ((1, 16, 20, 16, 1, 1), (1, 20)),
+        # The search never lowers B' below B: with B=8, K=2 on 128 -> 96 devices (logical 2048) the bound keeps B'=8,
+        # K'=3 (2304 rows) rather than B'=2, K'=11 (2112 rows) so the microbatch shapes and scan count stay fixed.
+        ((8, 2, 128, 96, 1, 8), (8, 3)),
+    ):
+      with self.subTest(args=args):
+        self.assertEqual(types.plan_constant_global_batch(*args), expected)
+    # Padding ties (B'=1, K'=22 and B'=2, K'=11 both pad 64 rows) go to the smaller B' (less activation memory).
+    self.assertEqual(types.plan_constant_global_batch(1, 16, 128, 96, 1, 4), (1, 22))
+    # With the bound equal to B (`constant_grad_accum`), B' = B and K' = ceil(logical / (live * B)) exactly.
+    for b, k, job, live in ((1, 16, 128, 96), (8, 1, 128, 96), (3, 4, 256, 224), (5, 1, 20, 16)):
+      with self.subTest(b=b, k=k, job=job, live=live):
+        self.assertEqual(
+            types.plan_constant_global_batch(b, k, job, live, 1, b), (b, math.ceil(b * k * job / (live * b)))
+        )
+
+  def test_elastic_constant_padded_mode_bounded_per_device_batch(self):
+    """With `elastic_max_per_device_batch_size`, the per-device batch stays bounded and accumulation steps grow."""
+    keep = ("elastic_global_batch_size_mode=constant_padded",)
+    # 20 job devices, 16 live: logical 5 * 20 = 100 is covered by B'=5 on 16 devices with K'=2 (160 physical rows).
+    cfg = self._elastic_config(*keep, "per_device_batch_size=5", "elastic_max_per_device_batch_size=5")
+    self.assertEqual(
+        (
+            cfg.per_device_batch_size,
+            cfg.gradient_accumulation_steps,
+            cfg.logical_global_batch_size_to_train_on,
+            cfg.global_batch_size_to_train_on,
+            cfg.micro_batch_size_to_train_on,
+            cfg.global_batch_size_to_load,
+        ),
+        (5.0, 2, 100, 160, 80, 160),
+    )
+    # Nominal K=16 with B=1: logical 320 = 16 live devices * 20 steps, zero padding.
+    cfg = self._elastic_config(
+        *keep, "per_device_batch_size=1", "gradient_accumulation_steps=16", "elastic_max_per_device_batch_size=1"
+    )
+    self.assertEqual(
+        (cfg.per_device_batch_size, cfg.gradient_accumulation_steps, cfg.global_batch_size_to_train_on), (1.0, 20, 320)
+    )
+    # A looser bound lets the planner raise B when that pads less: logical 80 = 5 * 16 exactly.
+    cfg = self._elastic_config(*keep, "per_device_batch_size=4", "elastic_max_per_device_batch_size=8")
+    self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (5.0, 1))
+    # Pipeline alignment (step 2 on 16 live devices) is honoured without changing B=4; K grows instead.
+    cfg = self._elastic_config(
+        *keep,
+        "per_device_batch_size=4",
+        "elastic_max_per_device_batch_size=4",
+        "ici_pipeline_parallelism=4",
+        "pipeline_delay_activation_forwarding=true",
+        "base_num_decoder_layers=8",
+        "eval_interval=5",
+    )
+    self.assertEqual(
+        (cfg.per_device_batch_size, cfg.eval_per_device_batch_size, cfg.gradient_accumulation_steps), (4.0, 4.0, 2)
+    )
+    # With every slice live (or none yet), the bound changes nothing.
+    for live in (20, 0):
+      cfg = self._elastic_config(
+          *keep, "per_device_batch_size=5", "elastic_max_per_device_batch_size=5", num_live_devices=live
+      )
+      self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (5.0, 1))
+    # The legacy default is unchanged, and records the nominal per-device batch for the HBM budget check.
+    cfg = self._elastic_config(*keep, "per_device_batch_size=5")
+    self.assertEqual(
+        (cfg.per_device_batch_size, cfg.gradient_accumulation_steps, cfg.elastic_nominal_per_device_batch_size),
+        (7.0, 1, 5),
+    )
+    # When the per-device batch is unchanged there is nothing to fall back to.
+    cfg = self._elastic_config(*keep, "per_device_batch_size=5", "elastic_max_per_device_batch_size=5")
+    self.assertIsNone(cfg.elastic_nominal_per_device_batch_size)
+    # logical 320 on 16 devices: B'=1 K'=20 and B'=2 K'=10 both pad nothing; the tie goes to the smaller B'.
+    cfg = self._elastic_config(
+        *keep, "per_device_batch_size=1", "gradient_accumulation_steps=16", "elastic_max_per_device_batch_size=2"
+    )
+    self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (1.0, 20))
+
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError),
+        "requires `elastic_max_per_device_batch_size` to be -1 or >= `per_device_batch_size`",
+    ):
+      self._elastic_config(*keep, "per_device_batch_size=5", "elastic_max_per_device_batch_size=3")
+    # Rejected even when no resize is pending (all 20 devices live), since a later resize could change K.
+    with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "may change `gradient_accumulation_steps`"):
+      self._elastic_config(
+          *keep,
+          "per_device_batch_size=5",
+          "elastic_max_per_device_batch_size=5",
+          "use_tunix_gradient_accumulation=true",
+          num_live_devices=20,
+      )
+    # FP8 quantization asserts `gradient_accumulation_steps == 1` at train time, so a bound that may grow the steps on
+    # a later resize is rejected up front, even with every device live.
+    for quantization in ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling"):
+      with self.subTest(quantization=quantization):
+        with self.assertRaisesRegex(
+            (ValueError, pydantic.ValidationError), "may change `gradient_accumulation_steps`.*FP8 quantization"
+        ):
+          self._elastic_config(
+              *keep,
+              "per_device_batch_size=5",
+              "elastic_max_per_device_batch_size=5",
+              f"quantization={quantization}",
+              num_live_devices=20,
+          )
+
+  def test_elastic_constant_grad_accum_mode(self):
+    """`constant_grad_accum` keeps B and grows K to `ceil(GBS / (live * B))`; the per-device bound is implied."""
+    keep = ("elastic_global_batch_size_mode=constant_grad_accum",)
+    # 20 job devices, 16 live. (B, K) -> (B, ceil(B * 20 * K / (16 * B))) with the physical batch B * 16 * K'.
+    for b, k, expected_steps in ((5, 1, 2), (1, 16, 20), (4, 1, 2), (3, 2, 3)):
+      with self.subTest(b=b, k=k):
+        cfg = self._elastic_config(*keep, f"per_device_batch_size={b}", f"gradient_accumulation_steps={k}")
+        self.assertEqual(expected_steps, math.ceil(b * 20 * k / (16 * b)))
+        self.assertEqual(
+            (
+                cfg.per_device_batch_size,
+                cfg.gradient_accumulation_steps,
+                cfg.logical_global_batch_size_to_train_on,
+                cfg.global_batch_size_to_train_on,
+                cfg.micro_batch_size_to_train_on,
+            ),
+            (float(b), expected_steps, b * 20 * k, b * 16 * expected_steps, b * 16),
+        )
+    # Same plan as `constant_padded` with the bound set to B by hand.
+    padded = self._elastic_config(
+        "elastic_global_batch_size_mode=constant_padded", "per_device_batch_size=5", "elastic_max_per_device_batch_size=5"
+    )
+    grad_accum = self._elastic_config(*keep, "per_device_batch_size=5")
+    self.assertEqual(
+        (padded.per_device_batch_size, padded.gradient_accumulation_steps, padded.global_batch_size_to_load),
+        (grad_accum.per_device_batch_size, grad_accum.gradient_accumulation_steps, grad_accum.global_batch_size_to_load),
+    )
+    # Pipeline alignment (step 2 on 16 live devices) never changes B; K grows instead.
+    cfg = self._elastic_config(
+        *keep,
+        "per_device_batch_size=4",
+        "ici_pipeline_parallelism=4",
+        "pipeline_delay_activation_forwarding=true",
+        "base_num_decoder_layers=8",
+        "eval_interval=5",
+    )
+    self.assertEqual(
+        (cfg.per_device_batch_size, cfg.eval_per_device_batch_size, cfg.gradient_accumulation_steps), (4.0, 4.0, 2)
+    )
+    # With every slice live (or none yet) nothing changes.
+    for live in (20, 0):
+      cfg = self._elastic_config(*keep, "per_device_batch_size=5", num_live_devices=live)
+      self.assertEqual((cfg.per_device_batch_size, cfg.gradient_accumulation_steps), (5.0, 1))
+    # An explicit bound is rejected: it is implied by the mode.
+    for bound in (5, 8):
+      with self.subTest(bound=bound):
+        with self.assertRaisesRegex(
+            (ValueError, pydantic.ValidationError),
+            "`elastic_global_batch_size_mode='constant_grad_accum'`.*`elastic_max_per_device_batch_size` is implied"
+            " and must stay -1",
+        ):
+          self._elastic_config(*keep, "per_device_batch_size=5", f"elastic_max_per_device_batch_size={bound}")
+    # The steps may change on a resize, so Tunix gradient accumulation and FP8 are rejected even with every device live.
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError), "constant_grad_accum.*may change `gradient_accumulation_steps`"
+    ):
+      self._elastic_config(*keep, "per_device_batch_size=5", "use_tunix_gradient_accumulation=true", num_live_devices=20)
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError), "may change `gradient_accumulation_steps`.*FP8 quantization"
+    ):
+      self._elastic_config(*keep, "per_device_batch_size=5", "quantization=fp8", num_live_devices=20)
+    # The shared constant-mode restrictions apply with the mode's own name in the message.
+    with self.assertRaisesRegex(
+        (ValueError, pydantic.ValidationError),
+        "`elastic_global_batch_size_mode='constant_grad_accum'` requires an integer `per_device_batch_size >= 1`",
+    ):
+      self._elastic_config(*keep, "per_device_batch_size=0.5")
+
+  def test_elastic_simulate_job_devices_plans_without_pathways(self):
+    """`elastic_simulate_job_devices` sizes the logical batch for a pretended job on the present devices."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false"]
+    devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(4)]
+    with unittest.mock.patch.object(types.jax, "devices", return_value=devices, autospec=True):
+      cfg = pyconfig.initialize(
+          argv
+          + [
+              "elastic_global_batch_size_mode=constant_padded",
+              "elastic_simulate_job_devices=6",
+              "per_device_batch_size=3",
+              "elastic_max_per_device_batch_size=3",
+          ]
+      )
+      self.assertEqual(
+          (
+              cfg.elastic_enabled,
+              cfg.logical_global_batch_size_to_train_on,
+              cfg.per_device_batch_size,
+              cfg.gradient_accumulation_steps,
+              cfg.global_batch_size_to_train_on,
+          ),
+          (False, 18, 3.0, 2, 24),
+      )
+      legacy = pyconfig.initialize(
+          argv
+          + [
+              "elastic_global_batch_size_mode=constant_padded",
+              "elastic_simulate_job_devices=6",
+              "per_device_batch_size=3",
+          ]
+      )
+      self.assertEqual((legacy.per_device_batch_size, legacy.global_batch_size_to_train_on), (5.0, 20))
+      # `constant_grad_accum` plans the same simulated resize without a bound: B stays 3, K grows to 2.
+      grad_accum = pyconfig.initialize(
+          argv
+          + [
+              "elastic_global_batch_size_mode=constant_grad_accum",
+              "elastic_simulate_job_devices=6",
+              "per_device_batch_size=3",
+          ]
+      )
+      self.assertEqual(
+          (
+              grad_accum.elastic_enabled,
+              grad_accum.logical_global_batch_size_to_train_on,
+              grad_accum.per_device_batch_size,
+              grad_accum.gradient_accumulation_steps,
+              grad_accum.global_batch_size_to_train_on,
+          ),
+          (False, 18, 3.0, 2, 24),
+      )
+      with self.assertRaisesRegex(
+          (ValueError, pydantic.ValidationError), "`elastic_max_per_device_batch_size` is implied"
+      ):
+        pyconfig.initialize(
+            argv
+            + [
+                "elastic_global_batch_size_mode=constant_grad_accum",
+                "elastic_simulate_job_devices=6",
+                "per_device_batch_size=3",
+                "elastic_max_per_device_batch_size=3",
+            ]
+        )
+      # The simulation also enables the constant_padded validation.
+      with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "not supported with MoE and `te_moe_block"):
+        pyconfig.initialize(
+            argv
+            + [
+                "elastic_global_batch_size_mode=constant_padded",
+                "elastic_simulate_job_devices=6",
+                "num_experts=4",
+                "te_moe_block=true",
+                "sparse_matmul=true",
+            ]
+        )
+      # Negative values and a pretended job smaller than the present devices are rejected.
+      with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "`elastic_simulate_job_devices` must be >= 0"):
+        pyconfig.initialize(argv + ["elastic_global_batch_size_mode=constant_padded", "elastic_simulate_job_devices=-1"])
+      with self.assertRaisesRegex(
+          (ValueError, pydantic.ValidationError), r"\(2\) must be >= the number of present devices \(4\)"
+      ):
+        pyconfig.initialize(argv + ["elastic_global_batch_size_mode=constant_padded", "elastic_simulate_job_devices=2"])
+
 
 class Qwen3StackConfigValidationTest(absltest.TestCase):
   """Cross-field validators of the Qwen3-235B v7x training knobs."""
@@ -1792,11 +2170,23 @@ class Qwen3StackConfigValidationTest(absltest.TestCase):
     self.assertTrue(config.qwix_disable_channelwise_axes)
 
   def test_moe_fused_gmm3d_wgrad_schedule_mode_bounds(self):
-    for mode in (-1, 17):
+    for mode in (-1, 18):
       with self.subTest(mode=mode):
         with self.assertRaises(pydantic.ValidationError):
           self._initialize(f"moe_fused_gmm3d_wgrad_schedule_mode={mode}")
-    self.assertEqual(self._initialize("moe_fused_gmm3d_wgrad_schedule_mode=16").moe_fused_gmm3d_wgrad_schedule_mode, 16)
+    self.assertEqual(self._initialize("moe_fused_gmm3d_wgrad_schedule_mode=17").moe_fused_gmm3d_wgrad_schedule_mode, 17)
+
+  def test_moe_tc_routing_offload_free_prerequisites(self):
+    with self.assertRaisesRegex(self._ERRORS, "requires moe_packed_routing_sort=True"):
+      self._initialize("moe_tc_routing_offload_free=true")
+    config = self._initialize("moe_packed_routing_sort=true", "moe_tc_routing_offload_free=true")
+    self.assertTrue(config.moe_tc_routing_offload_free)
+    # The ring-of-experts ragged sort needs expert parallelism > 1, so check that rule on the validator directly.
+    ring_config = unittest.mock.Mock(
+        moe_tc_routing_offload_free=True, moe_packed_routing_sort=True, use_ring_of_experts=True, use_ragged_sort=True
+    )
+    with self.assertRaisesRegex(ValueError, "does not support use_ring_of_experts=True"):
+      types.MaxTextConfig.validate_moe_tc_routing_offload_free(ring_config)
 
   def test_moe_use_fused_gmm3d_prerequisites(self):
     # A fully-MoE model: base_moe_mlp_dim must match base_mlp_dim (7168 in base.yml).
@@ -1841,10 +2231,10 @@ class Qwen3StackConfigValidationTest(absltest.TestCase):
         "base_num_kv_heads": 2,
         "base_mlp_dim": 256,
         "max_prefill_predict_length": 4,
-        "model_name": "llama2-7b",
+        "model_name": "llama3.1-8b",
         "override_model_config": True,
         "weight_dtype": "bfloat16",
-        "tokenizer_path": "meta-llama/Llama-2-7b",
+        "tokenizer_path": "meta-llama/Llama-3.1-8B",
     }
 
     def rl_config(*cli_args):
@@ -1861,6 +2251,20 @@ class Qwen3StackConfigValidationTest(absltest.TestCase):
     self.assertIn("context_device", config.tensors_on_device)
     self.assertIn("context_offload", config.tensors_to_offload)
 
+    config_qkv_dev = rl_config("remat_policy=custom", "ulysses_qkv=device")
+    self.assertIn("ulysses_qkv", config_qkv_dev.tensors_on_device)
+    self.assertNotIn("ulysses_qkv", config_qkv_dev.tensors_to_offload)
+
+    config_qkv_off = rl_config("remat_policy=custom", "ulysses_qkv=offload")
+    self.assertNotIn("ulysses_qkv", config_qkv_off.tensors_on_device)
+    self.assertIn("ulysses_qkv", config_qkv_off.tensors_to_offload)
+
+    self.assertEqual(rl_config().ulysses_pin_row_major_layout, "auto")
+    for mode in ("auto", "always", "never"):
+      self.assertEqual(rl_config(f"ulysses_pin_row_major_layout={mode}").ulysses_pin_row_major_layout, mode)
+    with self.assertRaises(pydantic.ValidationError):
+      rl_config("ulysses_pin_row_major_layout=invalid")
+
 
 class MMapDatasetConfigTest(absltest.TestCase):
   """Tests for mmap-specific configuration defaults and accepted values."""
@@ -1876,6 +2280,30 @@ class MMapDatasetConfigTest(absltest.TestCase):
   def test_zero_disables_merging_round_trip(self):
     config = types.MMapDataset(packing_max_segments_per_sample=0)
     self.assertEqual(config.packing_max_segments_per_sample, 0)
+
+
+class GrainReadOptionsConfigTest(absltest.TestCase):
+  """Tests pyconfig validation for Grain ReadOptions."""
+
+  def _initialize(self, *overrides):
+    return pyconfig.initialize(
+        ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false", "dataset_type=grain", *overrides]
+    )
+
+  def test_read_options_bounds(self):
+    cfg = self._initialize(
+        "grain_train_files=/tmp/train*",
+        "grain_num_threads=0",
+        "grain_prefetch_buffer_size=0",
+        "grain_num_threads_eval=0",
+        "grain_prefetch_buffer_size_eval=0",
+    )
+    self.assertEqual((cfg.grain_num_threads, cfg.grain_prefetch_buffer_size), (0, 0))
+    with self.assertRaises(pydantic.ValidationError):
+      self._initialize("grain_train_files=/tmp/train*", "grain_num_threads=-1")
+    for file_type in ("parquet", "tfrecord"):
+      with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "grain_num_threads.*must be > 0"):
+        self._initialize(f"grain_file_type={file_type}", "grain_train_files=/tmp/train*", "grain_num_threads=0")
 
 
 if __name__ == "__main__":

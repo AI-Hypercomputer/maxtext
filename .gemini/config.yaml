@@ -15,20 +15,21 @@
 # Gemini Code Assist configuration for https://github.com/AI-Hypercomputer/maxtext
 # Reference: https://developers.google.com/gemini-code-assist/docs/customize-gemini-behavior-github
 #
-# Automatic code review is done by the MaxText review workflow
+# Code review is done by the MaxText review workflow
 # (.github/workflows/gemini_dispatch.yml -> gemini_review.yml, using
-# .gemini/commands/maxtext-review.toml) for PRs from branches of this
-# repository and for fork PRs from returning contributors, so Gemini Code
-# Assist only posts a PR summary when a PR is opened. Comment "/gemini review"
-# on a pull request to request a Gemini Code Assist review on demand.
+# .gemini/commands/maxtext-review.toml): automatically when a PR is opened or
+# marked ready for review, incrementally after pushes when the
+# GEMINI_REVIEW_ON_PUSH repository variable is 'true', and on demand with the
+# `gemini-review` label or an `@gemini-cli /review` comment. Gemini Code Assist
+# reviews and PR summaries are disabled to avoid duplicate bot comments.
 have_fun: false
 code_review:
-  disable: false
+  disable: true
   comment_severity_threshold: MEDIUM
   max_review_comments: -1
   pull_request_opened:
     help: false
-    summary: true
+    summary: false
     code_review: false
     include_drafts: false
 ignore_patterns: []

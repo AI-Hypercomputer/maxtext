@@ -35,6 +35,8 @@ import pytest
 
 from maxtext.common import grain_utility
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.trainers.pre_train import train
+from maxtext.utils import elastic_utils
 from maxtext.utils import max_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
@@ -579,6 +581,65 @@ class TestCompileXlaFlags(unittest.TestCase):
         new_state, _ = p_train_step(state, real_batch)
         jax.block_until_ready(new_state)
         self.assertEqual(from_hlo_spy.call_count, 1)
+
+
+class TestElasticTrainWrapperHbmFallback(unittest.TestCase):
+  """`get_train_func`'s `elastic_train_wrapper` rebuilds an attempt with the per-device batch bound on HBM overrun."""
+
+  def setUp(self):
+    super().setUp()
+    self.config = SimpleNamespace(elastic_enabled=True)
+    self.argv = ["train.py", "base.yml", "per_device_batch_size=2"]
+    self.attempt_argvs = []
+
+    def fake_initialize(argv):
+      self.attempt_argvs.append(list(argv))
+      return SimpleNamespace(attempt=len(self.attempt_argvs)), mock.sentinel.recorder
+
+    def fake_elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=None):
+      del config, callback_fn, pre_callback_fn
+      # Calls straight through, with the retry cache turned on as `elastic_retry` does for the run.
+      retry_cache.reset(enabled=True)
+      return lambda fn: fn
+
+    patches = {
+        "initialize": mock.patch.object(train, "initialize", side_effect=fake_initialize),
+        "run": mock.patch.object(train, "run"),
+        "elastic_retry": mock.patch.object(train.elastic_utils, "elastic_retry", side_effect=fake_elastic_retry),
+        "cleanup_iterators": mock.patch.object(train.elastic_utils, "cleanup_iterators"),
+        "create_snapshotter": mock.patch.object(train.snapshotting, "create_snapshotter", return_value=None),
+    }
+    self.mocks = {name: self.enterContext(patch) for name, patch in patches.items()}
+
+  def test_hbm_budget_exceeded_rebuilds_the_attempt_with_the_bound(self):
+    """The first attempt overruns HBM; the rebuild carries the override and succeeds without consuming a retry."""
+    self.mocks["run"].side_effect = [elastic_utils.HbmBudgetExceededError(1, required_bytes=95, budget_bytes=90), None]
+
+    train.get_train_func(self.config, mock.sentinel.recorder, self.argv)()
+
+    self.assertEqual(
+        self.attempt_argvs,
+        [self.argv, [*self.argv, "elastic_max_per_device_batch_size=1"]],
+    )
+    self.assertEqual(self.mocks["run"].call_count, 2)
+    # The rebuilt attempt runs with the config built from the overridden argv, not the cached one.
+    self.assertEqual(self.mocks["run"].call_args.args[0].attempt, 2)
+    self.mocks["cleanup_iterators"].assert_called_once()
+    self.mocks["elastic_retry"].assert_called_once()
+
+  def test_repeated_hbm_budget_exceeded_with_the_same_override_propagates(self):
+    """A rebuilt attempt that still overruns HBM with the same bound raises instead of looping."""
+    self.mocks["run"].side_effect = elastic_utils.HbmBudgetExceededError(1, required_bytes=95, budget_bytes=90)
+
+    with self.assertRaises(elastic_utils.HbmBudgetExceededError):
+      train.get_train_func(self.config, mock.sentinel.recorder, self.argv)()
+
+    self.assertEqual(
+        self.attempt_argvs,
+        [self.argv, [*self.argv, "elastic_max_per_device_batch_size=1"]],
+    )
+    self.assertEqual(self.mocks["run"].call_count, 2)
+    self.mocks["cleanup_iterators"].assert_called_once()
 
 
 if __name__ == "__main__":

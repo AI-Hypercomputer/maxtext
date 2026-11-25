@@ -14,6 +14,7 @@
 
 """Unit tests for the checkpointing components."""
 
+import json
 import os
 from typing import Any
 from unittest import mock
@@ -21,7 +22,6 @@ from unittest import mock
 from absl.testing import absltest
 from absl.testing import parameterized
 from etils import epath
-from etils.epath import backend as epath_backend
 from flax import nnx
 from flax.training import train_state
 import jax
@@ -411,85 +411,6 @@ class TensorHandlingTest(parameterized.TestCase):
     self.assertEqual(restored["wi_0"].sharding, sharding)
 
   @parameterized.named_parameters(
-      ("single_axis", ["gate_up_0", "gate_up_1", "gate_up_2"], (4, 3, 8)),
-      ("multi_axis", [["gate_up_0", "gate_up_1"], ["gate_up_2", "gate_up_3"]], (2, 2, 4, 8)),
-  )
-  def test_stacked_composite_leaves_are_stacked_separately(self, hf_source, leaf_shape):
-    # A stacked composite key is split slice by slice and each leaf is stacked on its own: no stacked tensor with
-    # the composite's last axis is ever built, and the leaves match splitting the stacked composite.
-    class MockConfig:
-
-      def __init__(self):
-        self.scan_layers = True
-        self.param_scan_axis = 1
-
-    flat_keys = [k for row in hf_source for k in (row if isinstance(row, list) else [row])]
-    hf_state = {
-        k: jax.device_put(np.arange(64, dtype=np.float32).reshape(4, 16) + 100 * i) for i, k in enumerate(flat_keys)
-    }
-    expected = {k: np.asarray(v) for k, v in hf_state.items()}
-    composite_shapes = []
-
-    def split(weight, target_shape):
-      del target_shape
-      out = np.stack([weight[:, :8], weight[:, 8:]], axis=-1)
-      composite_shapes.append(out.shape)
-      return out
-
-    sharding = NamedSharding(self.mesh, PartitionSpec())
-    leaf = jax.ShapeDtypeStruct(shape=leaf_shape, dtype=np.float32, sharding=sharding)
-    target_tree = {"mlp": {"wi_0": leaf, "wi_1": leaf}}
-    mt_key = ("params-mlp-wi_0", "params-mlp-wi_1")
-
-    with mock.patch.object(
-        tensor_handling, "_binary_chunked_stack", wraps=tensor_handling._binary_chunked_stack  # pylint: disable=protected-access
-    ) as stack:
-      restored = load_dynamic.transform_hf_state_to_mt_state(
-          hf_state, target_tree, {mt_key: hf_source}, {mt_key: split}, MockConfig()
-      )["params"]["mlp"]
-
-    # The hook still sees one HF slice at a time (4 x 8 leaves stacked on a last axis of 2) ...
-    self.assertEqual(set(composite_shapes), {(4, 8, 2)})
-    # ... but nothing stacks tensors that still have that axis.
-    for call in stack.call_args_list:
-      self.assertTrue(all(t.shape[-1] != 2 for t in call.args[0]))
-    for i, k in enumerate(flat_keys):
-      # Multi-axis: (outer, inner) leading axes; single-axis: the scan axis 1.
-      index = divmod(i, leaf_shape[1]) if len(leaf_shape) == 4 else (slice(None), i)
-      np.testing.assert_array_equal(restored["wi_0"][index], expected[k][:, :8])
-      np.testing.assert_array_equal(restored["wi_1"][index], expected[k][:, 8:])
-    self.assertEqual(restored["wi_0"].sharding, sharding)
-    self.assertEqual(restored["wi_1"].sharding, sharding)
-    self.assertEmpty(hf_state)
-
-  @parameterized.named_parameters(("one", 1), ("two", 2), ("three", 3), ("seven", 7), ("eight", 8))
-  def test_pieces_are_concatenated_in_pairs(self, num_pieces):
-    # One jitted concatenate of many pieces can take several times its result in XLA temporaries, so the pieces of a
-    # reshard are joined two at a time.
-    sharding = NamedSharding(self.mesh, PartitionSpec(None, "x"))
-    pieces = [jax.device_put(np.full((2, 4), i, dtype=np.float32), sharding) for i in range(num_pieces)]
-    expected = np.concatenate([np.asarray(p) for p in pieces], axis=0)
-    real_fn = tensor_handling._concatenate_fn  # pylint: disable=protected-access
-    arities = []
-
-    def counting_fn(axis, shard):
-      fn = real_fn(axis, shard)
-
-      def wrapped(*args):
-        arities.append(len(args))
-        return fn(*args)
-
-      return wrapped
-
-    with mock.patch.object(tensor_handling, "_concatenate_fn", side_effect=counting_fn):
-      result = tensor_handling._concatenate_pieces(pieces, 0, sharding)  # pylint: disable=protected-access
-
-    np.testing.assert_array_equal(result, expected)
-    self.assertEqual(result.sharding, sharding)
-    self.assertLen(arities, num_pieces - 1)
-    self.assertTrue(all(a == 2 for a in arities))
-
-  @parameterized.named_parameters(
       # Tensors split over all devices: one reshard of the whole stack. Host tensors: one per tensor, per inner
       # stack and of the whole.
       ("single_axis_on_device", ["w0", "w1"], True, 1),
@@ -652,8 +573,76 @@ class TensorHandlingTest(parameterized.TestCase):
     self.assertEqual(result.sharding, target_leaf.sharding)
 
 
+class CheckpointQuantizationConfigTest(parameterized.TestCase):
+  """safetensors_dynamic takes `quantization_config` from the checkpoint's own config.json."""
+
+  def _write(self, config):
+    directory = self.create_tempdir().full_path
+    with open(os.path.join(directory, "config.json"), "w", encoding="utf-8") as f:
+      f.write(config if isinstance(config, str) else json.dumps(config))
+    return directory
+
+  @parameterized.named_parameters(
+      ("top_level", {"quantization_config": {"weight_block_size": [128, 128]}}, {"weight_block_size": [128, 128]}),
+      ("in_text_config", {"text_config": {"quantization_config": {"fmt": "e4m3"}}}, {"fmt": "e4m3"}),
+      ("explicit_empty", {"quantization_config": {}}, {}),
+      ("none", {"hidden_size": 8}, "not quantized"),
+      ("null", {"quantization_config": None}, "not quantized"),
+      ("null_text_config", {"text_config": None}, "not quantized"),
+  )
+  def test_reads_config_json(self, config, want):
+    got = load_dynamic._checkpoint_quantization_config(self._write(config))  # pylint: disable=protected-access
+    self.assertEqual(got, want)
+
+  def test_no_config_json_is_unknown(self):
+    self.assertIsNone(load_dynamic._checkpoint_quantization_config(self.create_tempdir().full_path))  # pylint: disable=protected-access
+
+  def test_unreadable_config_json_raises(self):
+    """A host must not quietly fall back to the stock config while the others read the checkpoint's."""
+    with self.assertRaises(json.JSONDecodeError):
+      load_dynamic._checkpoint_quantization_config(self._write("{not json"))  # pylint: disable=protected-access
+
+  def test_unquantized_checkpoint_drops_the_stock_config(self):
+    """Hooks read `config.get("quantization_config", {})`, so the key must go, not become None."""
+    seen = {}
+
+    def mapping(hf_config, maxtext_config, scan_layers=False):
+      del maxtext_config, scan_layers
+      seen["config"] = hf_config
+      return {}
+
+    def hooks(hf_config, maxtext_config, scan_layers=False, saving_to_hf=False):
+      del maxtext_config, scan_layers, saving_to_hf
+      block = hf_config.get("quantization_config", {}).get("weight_block_size", 128)
+      text_block = hf_config["text_config"].get("quantization_config", {}).get("weight_block_size", 128)
+      return {"block": block, "text_block": text_block}
+
+    stock = {"quantization_config": {"weight_block_size": [64, 64]}, "text_config": {"quantization_config": {}}}
+    model = "fake-model-for-quantization-config-test"
+    with (
+        mock.patch.dict(load_dynamic.HF_MODEL_CONFIGS, {model: mock.Mock(to_dict=lambda: json.loads(json.dumps(stock)))}),
+        mock.patch.dict(load_dynamic.param_mapping.PARAM_MAPPING, {model: mapping}),
+        mock.patch.dict(load_dynamic.param_mapping.HOOK_FNS, {model: hooks}),
+    ):
+      config = mock.Mock(model_name=model, scan_layers=True)
+      _, got = load_dynamic.get_hf_config_and_mappings(config, self._write({"hidden_size": 8}))
+      self.assertEqual(got, {"block": 128, "text_block": 128})
+      self.assertNotIn("quantization_config", seen["config"])
+      _, got = load_dynamic.get_hf_config_and_mappings(config, self.create_tempdir().full_path)
+      self.assertEqual(got["block"], [64, 64])  # No config.json: the stock config stays.
+
+
 class LoadDynamicTest(parameterized.TestCase):
   """Tests for cache downloads and dynamic loading of safetensors."""
+
+  @parameterized.parameters(True, False)
+  def test_hub_cache_copies_config_json(self, has_config):
+    fs = mock.Mock()
+    fs.glob.return_value = ["org/model/model-1.safetensors", "org/model/model-2.safetensors"]
+    fs.exists.return_value = has_config
+    files = load_dynamic._hub_files_to_cache(fs, "org/model")  # pylint: disable=protected-access
+    want = ["org/model/model-1.safetensors", "org/model/model-2.safetensors"]
+    self.assertEqual(files, want + (["org/model/config.json"] if has_config else []))
 
   @mock.patch("huggingface_hub.HfFileSystem")
   @mock.patch.object(load_dynamic.storage, "Client")
@@ -698,16 +687,20 @@ class LoadDynamicTest(parameterized.TestCase):
       with self.assertRaises(Exception):
         load_dynamic.build_gcs_cache_worker("some_repo/model.safetensors", "gs://my-bucket/cache", "token")
 
+  @parameterized.named_parameters(("default", False), ("streaming", True))
   @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
   @mock.patch.object(load_dynamic.storage, "Client")
   @mock.patch.object(load_dynamic, "load_sharded_hf_state")
   @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state")
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming", return_value={"params": {}})
   @mock.patch("jax.process_index", return_value=0)
   @mock.patch("jax.experimental.multihost_utils.sync_global_devices")
   def test_load_safetensors_dynamic_from_hf_hub(
       self,
+      streaming,
       mock_sync,
       mock_process_index,
+      mock_load_streaming,
       mock_transform,
       mock_load_sharded,
       mock_storage_client,
@@ -715,11 +708,13 @@ class LoadDynamicTest(parameterized.TestCase):
   ):
     mock_fs_instance = mock_hf_fs.return_value
     mock_fs_instance.glob.return_value = ["repo/meta-llama/model.safetensors"]
+    mock_fs_instance.exists.return_value = True  # The repo has a config.json, already in the cache.
 
     mock_client_instance = mock_storage_client.return_value
-    mock_blob = mock.MagicMock()
-    mock_blob.name = "hf_cache/repo_meta-llama/model.safetensors"
-    mock_client_instance.list_blobs.return_value = [mock_blob]
+    blobs = [mock.MagicMock(), mock.MagicMock()]
+    blobs[0].name = "hf_cache/repo_meta-llama/model.safetensors"
+    blobs[1].name = "hf_cache/repo_meta-llama/config.json"
+    mock_client_instance.list_blobs.return_value = blobs
 
     mock_load_sharded.return_value = {}
     mock_transform.return_value = {"params": {}}
@@ -732,11 +727,20 @@ class LoadDynamicTest(parameterized.TestCase):
         self.scan_layers = True
         self.param_scan_axis = 0
         self.hf_access_token = "dummy_token"
+        self.safetensors_dynamic_streaming = streaming
 
     config = MockConfig()
 
     path = "repo/meta-llama"
-    dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
+    # The cached config.json is in a GCS bucket that doesn't exist; it has no quantization_config.
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None) as mock_qc:
+      dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
+    # Only the streaming loader copies config.json to the cache and reads its quantization_config.
+    cache_dir = "gs://dummy-bucket/hf_cache/repo_meta-llama"
+    mock_qc.assert_called_once_with(cache_dir if streaming else None)
+    self.assertEqual(mock_fs_instance.exists.called, streaming)
+    (mock_load_streaming if streaming else mock_load_sharded).assert_called_once()
+    self.assertEqual((mock_load_streaming if streaming else mock_load_sharded).call_args.args[0], cache_dir)
 
     self.assertIsNone(dummy_ret_val)
     self.assertEqual(loaded_vars, {"params": {}})
@@ -752,13 +756,50 @@ class LoadDynamicTest(parameterized.TestCase):
       self, mock_sync, mock_process_index, mock_transform, mock_load_sharded, mock_hf_fs
   ):
     # Only host 0 lists and downloads the repo; the other hosts wait for it and read the GCS cache.
-    config = mock.Mock(model_name="llama3.1-8b", hf_access_token=None, base_output_directory="gs://dummy-bucket")
+    config = mock.Mock(
+        model_name="llama3.1-8b",
+        hf_access_token=None,
+        base_output_directory="gs://dummy-bucket",
+        safetensors_dynamic_streaming=False,
+    )
 
-    load_dynamic.load_safetensors_dynamic_state("hf://repo/meta-llama", {}, config)
+    # The cached config.json is in a GCS bucket that doesn't exist; it has no quantization_config.
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None):
+      load_dynamic.load_safetensors_dynamic_state("hf://repo/meta-llama", {}, config)
 
     mock_hf_fs.assert_not_called()
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
     mock_load_sharded.assert_called_once_with("gs://dummy-bucket/hf_cache/repo_meta-llama")
+
+  @parameterized.named_parameters(("default", False, None), ("streaming", True, "gs://bucket/ckpt"))
+  @mock.patch.object(load_dynamic, "load_sharded_hf_state", return_value={})
+  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state", return_value={"params": {}})
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming", return_value={"params": {}})
+  @mock.patch.object(load_dynamic, "get_hf_config_and_mappings", return_value=({}, {}))
+  def test_only_streaming_reads_checkpoint_config_json(
+      self, streaming, want_path, mock_mappings, mock_streaming, mock_transform, mock_sharded
+  ):
+    # The default loader keeps the stock HF config; only streaming takes the checkpoint's quantization_config.
+    config = mock.Mock(model_name="llama3.1-8b", safetensors_dynamic_streaming=streaming)
+
+    load_dynamic.load_safetensors_dynamic_state("gs://bucket/ckpt", {}, config)
+
+    self.assertEqual(mock_mappings.call_args.args, (config, want_path))
+
+  @mock.patch.object(load_dynamic, "load_sharded_hf_state")
+  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state")
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming", return_value={"params": {}})
+  def test_streaming_flag_selects_streaming_loader(self, mock_load_streaming, mock_transform, mock_load_sharded):
+    # safetensors_dynamic_streaming=True streams the checkpoint instead of reading all of it first.
+    config = mock.Mock(model_name="llama3.1-8b", safetensors_dynamic_streaming=True)
+
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None):
+      _, loaded_vars = load_dynamic.load_safetensors_dynamic_state("gs://bucket/ckpt", {}, config)
+
+    self.assertEqual(loaded_vars, {"params": {}})
+    self.assertEqual(mock_load_streaming.call_args.args[0], "gs://bucket/ckpt")
+    mock_load_sharded.assert_not_called()
+    mock_transform.assert_not_called()
 
   @parameterized.named_parameters(
       ("base", "llama3.1-8b"),
@@ -833,7 +874,8 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
         },
     )
 
-  def test_load_safetensors_dynamic_single_key(self):
+  @parameterized.named_parameters(("default", False), ("streaming", True))
+  def test_load_safetensors_dynamic_single_key(self, streaming):
     if os.getenv("JAX_PLATFORMS") == "proxy":
       self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
     # Save a single key (embedding weight) to a safetensors file
@@ -849,6 +891,7 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
         self.scan_layers = True
         self.param_scan_axis = 0
         self.hf_access_token = None
+        self.safetensors_dynamic_streaming = streaming
 
     config = MockConfig()
 
@@ -943,31 +986,6 @@ class LeadingAxisShardingTest(parameterized.TestCase):
     self.assertEqual(gcsfs.GCSFileSystem.default_block_size, block_size)
     np.testing.assert_array_equal(loaded["w"], np.ones((4, 2), dtype=np.float32))
 
-  def test_gcs_path_opens_files_with_gcsfs(self):
-    # With TensorFlow installed, etils would open `gs://` files with tf.io.gfile, which reads 64 MiB per open file.
-    path = load_dynamic._GcsfsPath("gs://bucket/ckpt")  # pylint: disable=protected-access
-    self.assertIs(path._backend, epath_backend.fsspec_backend)  # pylint: disable=protected-access
-    self.assertIsInstance(path / "model.safetensors", load_dynamic._GcsfsPath)  # pylint: disable=protected-access
-
-  @parameterized.named_parameters(
-      ("gcs", "gs://bucket/ckpt", True),
-      ("local", "/tmp/ckpt", False),
-  )
-  def test_load_reads_gcs_through_gcsfs(self, path, uses_gcsfs):
-    pytest.importorskip("gcsfs")
-    with (
-        mock.patch.object(load_dynamic.ocp_v1, "Context", wraps=load_dynamic.ocp_v1.Context) as context,
-        mock.patch.object(load_dynamic.ocp_v1, "pytree_metadata", side_effect=RuntimeError("stop")),
-        self.assertRaisesRegex(RuntimeError, "stop"),
-    ):
-      load_dynamic.load_sharded_hf_state(path)
-
-    file_options = context.call_args.kwargs["file_options"]
-    if uses_gcsfs:
-      self.assertIs(file_options.path_class, load_dynamic._GcsfsPath)  # pylint: disable=protected-access
-    else:
-      self.assertIsNone(file_options)
-
 
 class CheckpointMetadataTest(parameterized.TestCase):
   """Tests for loading checkpoint custom metadata."""
@@ -1057,7 +1075,6 @@ class SaveCheckpointBackupTest(parameterized.TestCase):
 
   def test_backup_forwarded_to_multi_tier_checkpointing_manager(self):
     manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
-    manager.all_steps.return_value = [0]  # step 5 not saved yet
     manager.save.return_value = True
 
     saved = checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
@@ -1068,23 +1085,14 @@ class SaveCheckpointBackupTest(parameterized.TestCase):
     self.assertTrue(kwargs["backup"])
     self.assertTrue(kwargs["force"])  # a step to back up is always saved locally
 
-  def test_backup_rejected_for_already_saved_step(self):
-    # The request rides on the save that writes the step; a second forced save of the
-    # same step would raise StepAlreadyExistsError without requesting the backup.
+  def test_backup_for_already_saved_step_surfaces_orbax_error(self):
+    # save_checkpoint is expected at most once per step; a second call with backup=True is not
+    # intercepted, so Orbax's StepAlreadyExistsError reaches the caller instead of being skipped.
     manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
-    manager.all_steps.return_value = [0, 5]
+    manager.save.side_effect = ocp.checkpoint_manager.StepAlreadyExistsError("step 5 already exists")
 
-    with self.assertRaisesRegex(ValueError, "step 5 is already saved"):
+    with self.assertRaises(ocp.checkpoint_manager.StepAlreadyExistsError):
       checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
-    manager.save.assert_not_called()
-
-  def test_backup_allowed_when_saved_steps_unknown(self):
-    # Pathways colocated mode cannot list saved steps on the host; the request still goes through.
-    manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
-    manager.all_steps.side_effect = NotImplementedError("all_steps is not supported in colocated mode.")
-    manager.save.return_value = True
-
-    self.assertTrue(checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True))
     self.assertTrue(manager.save.call_args.kwargs["backup"])
 
   def test_no_backup_keeps_multi_tier_checkpointing_save_call_unchanged(self):

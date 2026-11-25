@@ -31,9 +31,16 @@ import numpy as np
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, MultimodalInput
+from maxtext.m3.core.sharding import (
+    DefaultSharding,
+    Sharding,
+    check_mesh,
+    param_metadata,
+)
 from maxtext.m3.models.qwen3.modeling_qwen3 import (
-    Qwen3MLP,
     Qwen3Decoder,
+    Qwen3MLP,
+    norm_kwargs,
 )
 
 # ---------------------------------------------------------------------------
@@ -840,18 +847,19 @@ class Qwen3VLDecoderLayer(nnx.Module):
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
+      sharding: Optional[Sharding] = None,
   ):
     self.config = config
-    norm_kw = {
-        "epsilon": config.normalization_layer_epsilon,
-        "dtype": config.dtype,
-        "param_dtype": config.weight_dtype,
-        "rngs": rngs,
-    }
-    self.pre_self_attention_layer_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kw)
-    self.post_self_attention_layer_norm = nnx.RMSNorm(num_features=config.emb_dim, **norm_kw)
+    s = sharding or DefaultSharding()
+    self.pre_self_attention_layer_norm = nnx.RMSNorm(
+        num_features=config.emb_dim, **norm_kwargs(config, s, "pre_self_attention_layer_norm", rngs)
+    )
+    self.post_self_attention_layer_norm = nnx.RMSNorm(
+        num_features=config.emb_dim, **norm_kwargs(config, s, "post_self_attention_layer_norm", rngs)
+    )
+    # The attention is hand-rolled (`DenseGeneral`) and carries no sharding yet; the shared MLP does.
     self.self_attention = Qwen3VLAttention(config, rngs=rngs)
-    self.mlp = Qwen3MLP(config, rngs=rngs)
+    self.mlp = Qwen3MLP(config, rngs=rngs, sharding=s)
 
   def __call__(
       self,
@@ -894,8 +902,9 @@ class Qwen3VLDecoder(Qwen3Decoder):
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
+      sharding: Optional[Sharding] = None,
   ):
-    super().__init__(config, mesh, rngs=rngs, layer_cls=Qwen3VLDecoderLayer)
+    super().__init__(config, mesh, rngs=rngs, layer_cls=Qwen3VLDecoderLayer, sharding=sharding)
 
   def __call__(
       self,
@@ -970,6 +979,15 @@ def merge_multimodal_embeddings(
   return jax.vmap(_merge_single, in_axes=(0, 0, 0))(text_embeddings, flat_mm, mask)
 
 
+def check_construction_mesh() -> None:
+  """Refuses a mesh in scope that `Qwen3VLModel` cannot use (`core.sharding.check_mesh`)."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if not mesh.empty:
+    check_mesh(mesh, ("data", "fsdp", "tensor", "expert"))
+    if any(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types):
+      raise ValueError("m3 Qwen3-VL does not implement shard_mode='explicit' yet. Use shard_mode='auto'.")
+
+
 class Qwen3VLModel(nnx.Module):
   """Top-level self-contained Qwen3-VL multimodal model in m3 format."""
 
@@ -979,12 +997,16 @@ class Qwen3VLModel(nnx.Module):
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
+      sharding: Optional[Sharding] = None,
       **kwargs,
   ):
     # DeepStack injects visual features between individual decoder layers.
     if config.scan_layers:
       raise ValueError("m3 Qwen3-VL does not support layer scanning. Set scan_layers=false.")
+    check_construction_mesh()
     self.config = config
+    self.mesh = mesh
+    self.sharding = sharding or DefaultSharding()
 
     # 1. Vision Tower matching checkpoint parameter hierarchy
     self.vision_encoder = (
@@ -997,11 +1019,13 @@ class Qwen3VLModel(nnx.Module):
         features=config.emb_dim,
         dtype=config.dtype,
         param_dtype=config.weight_dtype,
+        embedding_metadata=param_metadata(self.sharding, "token_embedder", ("vocab", "embed")),
         rngs=rngs,
     )
     self.decoder = Qwen3VLDecoder(
         config=config,
         rngs=rngs,
+        sharding=self.sharding,
     )
 
   def logits_from_hidden_states_for_vocab_tiling(

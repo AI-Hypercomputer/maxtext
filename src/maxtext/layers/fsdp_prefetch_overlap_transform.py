@@ -23,6 +23,7 @@ transfers in their existing XLA schedule.
 
 from collections.abc import Collection, Iterable, Mapping, Sequence
 import dataclasses
+import json
 import re
 
 from jax._src.lib import hlo as _hlo
@@ -78,6 +79,7 @@ _BODY_RE = re.compile(r"\bbody=(%?[\w.\-]+)")
 _INSTRUCTION_NAME_RE = re.compile(r"%([\w.\-]+)")
 _ASYNC_THREAD_RE = re.compile(r'async_execution_thread="([^"]+)"')
 _CORE_IDS_RE = re.compile(r'"core_ids":\s*\[([^\]]*)\]')
+_NON_COLLECTIVE_DMA_OP_RE = re.compile(r"\bdynamic-(?:update-)?slice-(?:start|done)\(")
 _ENTRY_RE = re.compile(r"^ENTRY %([\w.\-]+)", re.MULTILINE)
 
 _HOST_MEMORY_SPACE = "S(5)"
@@ -418,25 +420,66 @@ def _fusion_is_data_formatting(
   return True
 
 
-def _is_host_async_start(opcode: str, instruction_text: str) -> bool:
-  """Returns True if an async-start is a host DMA transfer or host call."""
-  if opcode != "kAsyncStart":
+def _is_non_collective_async(opcode: str, instruction_text: str) -> bool:
+  """Returns True if `kAsyncStart`/`kAsyncDone` is a host or intra-core VMEM DMA rather than a collective."""
+  if opcode not in ("kAsyncStart", "kAsyncDone"):
     return False
   if _HOST_MEMORY_SPACE in instruction_text:
     return True
   thread = _ASYNC_THREAD_RE.search(instruction_text)
-  return thread is not None and thread.group(1) == "host"
+  if thread is not None:
+    if thread.group(1) == "host":
+      return True
+    if thread.group(1) == "sparsecore":
+      return False
+  return (
+      '"dma_priority":' in instruction_text
+      or r"\"dma_priority\":" in instruction_text
+      or _NON_COLLECTIVE_DMA_OP_RE.search(instruction_text) is not None
+  )
+
+
+def _extract_top_level_core_ids(instruction_text: str) -> str | None:
+  """Extracts `sparse_core_config.core_ids` from `backend_config`, ignoring nested `consumers`/`producers`."""
+  marker = "backend_config="
+  idx = instruction_text.find(marker)
+  if idx >= 0:
+    try:
+      bc, _ = json.JSONDecoder().raw_decode(instruction_text[idx + len(marker) :])
+      if isinstance(bc, str):
+        bc = json.loads(bc)
+    except json.JSONDecodeError:
+      return None
+    if isinstance(bc, dict):
+      sc_cfg = bc.get("sparse_core_config")
+      if isinstance(sc_cfg, dict) and isinstance(sc_cfg.get("core_ids"), list):
+        return ",".join(str(c).strip('"') for c in sc_cfg["core_ids"])
+    return None
+  cores = _CORE_IDS_RE.search(instruction_text)
+  if cores is None:
+    return None
+  return ",".join(part.strip().strip('"') for part in cores.group(1).split(",") if part.strip())
 
 
 def async_queue(opcode: str, instruction_text: str) -> str | None:
   """Returns the hardware FIFO queue an async collective start runs on, or None."""
-  if opcode not in _ASYNC_START_OPCODES or _is_host_async_start(opcode, instruction_text):
+  if opcode not in _ASYNC_START_OPCODES or _is_non_collective_async(opcode, instruction_text):
     return None
   thread = _ASYNC_THREAD_RE.search(instruction_text)
-  cores = _CORE_IDS_RE.search(instruction_text)
-  if thread is None or cores is None:
+  core_ids = _extract_top_level_core_ids(instruction_text)
+  if thread is None or core_ids is None:
     return None
-  return f"{thread.group(1)}:{cores.group(1).strip()}"
+  return f"{thread.group(1)}:{core_ids}"
+
+
+def issues_queued_async_work(opcode: str, instruction_text: str) -> bool:
+  """Returns True if an instruction starts async work on a hardware FIFO queue the transform reorders.
+
+  Only nested loops that issue such work (for example SparseCore collectives in an inner scan) fence
+  the schedule of the loop around them. Loops that only issue TensorCore collectives, such as the
+  collective-permutes of ring attention under context parallelism, do not.
+  """
+  return async_queue(opcode, instruction_text) is not None
 
 
 def _build_graph(
@@ -458,8 +501,8 @@ def _build_graph(
     cp_match = _CONTROL_PREDECESSORS_RE.search(text)
     control_preds[inst.name] = () if cp_match is None else tuple(_INSTRUCTION_NAME_RE.findall(cp_match.group(1)))
     opcode = inst.opcode.name
-    if _is_host_async_start(opcode, text):
-      opcode = "kHostAsyncStart"
+    if _is_non_collective_async(opcode, text):
+      opcode = "kHostAsyncStart" if opcode == "kAsyncStart" else "kHostAsyncDone"
     elif opcode == "kAsyncDone" and operands[inst.name] and opcodes.get(operands[inst.name][0]) == "kHostAsyncStart":
       opcode = "kHostAsyncDone"
     opcodes[inst.name] = opcode
@@ -491,7 +534,7 @@ def _build_graph(
 
 
 def _while_and_async_body_names(module: "_hlo.HloModule") -> tuple[set[str], set[str]]:
-  """Returns (all while-body names, while-body names that issue async work)."""
+  """Returns (all while-body names, while-body names that issue queued async work)."""
   issues_directly: dict[str, bool] = {}
   nested_bodies: dict[str, list[str]] = {}
   for computation in module.make_nonfusion_computations():
@@ -499,10 +542,11 @@ def _while_and_async_body_names(module: "_hlo.HloModule") -> tuple[set[str], set
     nested_bodies[computation.name] = []
     for inst in computation.instructions():
       opcode = inst.opcode.name
-      if opcode in _ASYNC_START_OPCODES:
+      text = inst.to_string()
+      if opcode in _ASYNC_START_OPCODES and issues_queued_async_work(opcode, text):
         issues_directly[computation.name] = True
       elif opcode == "kWhile":
-        match = _BODY_RE.search(inst.to_string())
+        match = _BODY_RE.search(text)
         if match is not None:
           nested_bodies[computation.name].append(match.group(1).lstrip("%"))
 
@@ -519,7 +563,7 @@ def _while_and_async_body_names(module: "_hlo.HloModule") -> tuple[set[str], set
 
 
 def transform_module(module: "_hlo.HloModule") -> list[str]:
-  """Rewrites the schedule of the entry computation and every while body in `module`."""
+  """Rewrites the schedule of the entry computation and every collective-issuing while body in `module`."""
   schedule = module.schedule()
   if schedule is None:
     return []
@@ -538,8 +582,8 @@ def transform_module(module: "_hlo.HloModule") -> list[str]:
   if entry_match is None:
     raise ScheduleTransformError(f"Module {module.name} has no entry.")
 
-  while_bodies, async_bodies = _while_and_async_body_names(module)
-  selected = while_bodies | {entry_match.group(1)}
+  _, async_bodies = _while_and_async_body_names(module)
+  selected = async_bodies | {entry_match.group(1)}
   computations_by_name = {c.name: c for c in module.computations()}
   fusion_cache: dict[str, bool] = {}
   rewritten: list[str] = []

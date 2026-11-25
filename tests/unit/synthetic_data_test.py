@@ -28,6 +28,7 @@ from jax.experimental import mesh_utils
 
 from maxtext.configs import pyconfig
 from maxtext.input_pipeline import input_pipeline_interface
+from maxtext.input_pipeline import synthetic_data_processing
 from maxtext.input_pipeline.synthetic_data_processing import PlaceHolderDataIterator
 from maxtext.input_pipeline.synthetic_data_processing import SyntheticDataIterator
 from maxtext.utils import elastic_utils
@@ -143,6 +144,57 @@ class SyntheticDataShardingTest(parameterized.TestCase):
     self.assertEqual(eval_batch["inputs"].shape, (config.global_batch_size_to_load_eval, 8))
     self.assertTrue(bool(jnp.all(eval_batch["inputs_segmentation"] == 1)))
     self.assertTrue(bool(jnp.all(eval_batch["targets_segmentation"] == 1)))
+
+
+class SyntheticDataPaddedRowsTest(parameterized.TestCase):
+  """The logical rows of a padded synthetic batch match the rows of the unpadded full-job batch."""
+
+  def _data(self, batch_size, logical_batch_size=None, packing=True, num_replicas=1, replica_index=0):
+    """The (tokens, positions, segmentation) rows a `SyntheticDataIterator` builds for one replica."""
+    config = types.SimpleNamespace(
+        global_batch_size_to_load=batch_size,
+        global_batch_size_to_load_eval=batch_size,
+        logical_global_batch_size_to_load=logical_batch_size,
+        logical_axis_rules_for_eval=None,
+        max_target_length=16,
+        max_segments_per_seq=4,
+        vocab_size=128,
+        packing=packing,
+        num_data_replicas_per_process=num_replicas,
+        data_replica_index=replica_index,
+        enable_diloco=False,
+    )
+    batch = SyntheticDataIterator.raw_generate_synthetic_data(config, is_training=True)
+    return batch["inputs"], batch["inputs_position"], batch["inputs_segmentation"]
+
+  @parameterized.product(
+      packing=[True, False], replica=[(1, 0), (2, 0), (2, 1)], prng_impl=["unsafe_rbg", "threefry2x32"]
+  )
+  def test_logical_rows_match_unpadded_batch(self, packing, replica, prng_impl):
+    # `base.yml` defaults to `prng_impl: unsafe_rbg`; on TPU a smaller draw is not a row-prefix of a larger one.
+    self.addCleanup(jax.config.update, "jax_default_prng_impl", jax.config.jax_default_prng_impl)
+    jax.config.update("jax_default_prng_impl", prng_impl)
+    num_replicas, replica_index = replica
+    full = self._data(4, packing=packing, num_replicas=num_replicas, replica_index=replica_index)
+    padded = self._data(6, 4, packing=packing, num_replicas=num_replicas, replica_index=replica_index)
+    for full_part, padded_part in zip(full, padded, strict=True):
+      self.assertTrue(bool(jnp.array_equal(padded_part[:4], full_part)))
+    tokens, _, segmentation = padded
+    self.assertTrue(bool(jnp.all(segmentation[4:] == 0)))
+    self.assertTrue(bool(jnp.all(tokens[4:] == 0)))
+    if packing:
+      self.assertGreater(int(jnp.max(full[2])), 1)  # Packed: several segments per row.
+
+  @parameterized.parameters((1, 4), (2, 8))
+  def test_packed_segment_ids_are_generated_for_the_logical_rows_only(self, num_replicas, logical_rows):
+    # On CPU a smaller draw is a row-prefix of a larger one for both PRNGs, so check the generated shape directly.
+    with mock.patch.object(
+        synthetic_data_processing,
+        "_make_packed_segment_ids",
+        wraps=synthetic_data_processing._make_packed_segment_ids,  # pylint: disable=protected-access
+    ) as make_segment_ids:
+      self._data(6, 4, num_replicas=num_replicas)
+    make_segment_ids.assert_called_once_with(logical_rows, 16, 4)
 
 
 class PlaceHolderDataIteratorTest(absltest.TestCase):

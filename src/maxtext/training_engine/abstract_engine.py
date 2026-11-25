@@ -172,13 +172,16 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: TrainerPayload) -> None:
+  def fwd_bwd(self, payload: TrainerPayload) -> jax.Array:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
 
     Args:
       payload: Packed micro-batch payload for training.
+
+    Returns:
+      An un-donated scalar on-device array tracking completion of this pass.
     """
 
   @abc.abstractmethod

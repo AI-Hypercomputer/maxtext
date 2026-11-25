@@ -17,6 +17,8 @@
 import math
 from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 
+from maxtext.utils import index_share_utils
+
 
 def GEMMA3_HF_WEIGHTS_TO_SHAPE(config):
   """Generates a shape mapping for Hugging Face Gemma3 parameters.
@@ -612,6 +614,59 @@ def DEEPSEEK_HF_WEIGHTS_TO_SHAPE(config):
     mapping.update(layer_mapping)
 
   return mapping
+
+
+def normalize_glm_hf_config(config) -> dict:
+  """Normalizes a GLM-5.1/5.2 HF config (dict or PreTrainedConfig) so first_k_dense_replace is always populated."""
+  cfg = config.to_dict() if hasattr(config, "to_dict") else dict(config)
+  if cfg.get("first_k_dense_replace") is None:
+    mlp_layer_types = cfg.get("mlp_layer_types")
+    if isinstance(mlp_layer_types, (list, tuple)):
+      first_dense = 0
+      for layer_type in mlp_layer_types:
+        if layer_type == "dense":
+          first_dense += 1
+        else:
+          break
+      cfg["first_k_dense_replace"] = first_dense
+    else:
+      cfg["first_k_dense_replace"] = min(3, int(cfg["num_hidden_layers"]))
+  return cfg
+
+
+def _get_glm5_2_shared_layers(cfg: dict) -> set[int]:
+  """Returns the set of Shared (S) layer indices for a GLM-5.2 HF config dictionary."""
+  num_hidden_layers = int(cfg["num_hidden_layers"])
+  indexer_types = cfg.get("indexer_types")
+  if isinstance(indexer_types, (list, tuple)):
+    if len(indexer_types) != num_hidden_layers:
+      raise ValueError(f"indexer_types length ({len(indexer_types)}) must match num_hidden_layers ({num_hidden_layers}).")
+    return {i for i, t in enumerate(indexer_types) if t == "shared"}
+
+  pattern = cfg.get("index_share_pattern")
+  if isinstance(pattern, str) and pattern:
+    pattern_tuple = index_share_utils.parse_index_share_pattern(pattern, num_hidden_layers)
+    return {i for i in range(num_hidden_layers) if index_share_utils.is_shared_layer(i, pattern_tuple)}
+
+  freq = max(int(cfg.get("index_topk_freq", 4)), 1)
+  offset = int(cfg.get("index_skip_topk_offset", cfg.get("first_k_dense_replace", 3)))
+  return {i for i in range(num_hidden_layers) if (max(i - offset + 1, 0) % freq) != 0}
+
+
+def GLM5_1_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns HuggingFace parameter shapes for GLM-5.1 (all decoder layers carry full DSA indexer weights)."""
+  return DEEPSEEK_HF_WEIGHTS_TO_SHAPE(normalize_glm_hf_config(config))
+
+
+def GLM5_2_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns HuggingFace parameter shapes for GLM-5.2 (indexer weights emitted only on Full layers)."""
+  cfg = normalize_glm_hf_config(config)
+  shapes = DEEPSEEK_HF_WEIGHTS_TO_SHAPE(cfg)
+  shared_layers = _get_glm5_2_shared_layers(cfg)
+  if not shared_layers:
+    return shapes
+  shared_indexer_prefixes = tuple(f"model.layers.{i}.self_attn.indexer." for i in sorted(shared_layers))
+  return {k: v for k, v in shapes.items() if not (isinstance(k, str) and k.startswith(shared_indexer_prefixes))}
 
 
 def QWEN3_NEXT_HF_WEIGHTS_TO_SHAPE(config):
@@ -1663,6 +1718,184 @@ def HY4_HF_WEIGHTS_TO_SHAPE(config):
               f"{pfx}.mlp.shared_experts.down_proj.weight": [hidden_size, moe_intermediate_size],
           }
       )
+
+  return mapping
+
+
+# Local copies of the Kimi-K3 config helpers in `param_mapping.py` (kept in sync by
+# `kimi_k3_config_test`): this module stays dependency-free (stdlib only, no `maxtext.*` imports).
+def _kimi_k3_hf_text_config(config) -> dict:
+  """Returns the Kimi-K3 language-model HF config as a plain dict.
+
+  Accepts a dict or a `PretrainedConfig` (normalized with `.to_dict()`, which also turns
+  nested configs into dicts). The released moonshotai/Kimi-K3 `config.json`
+  (`KimiK3ForConditionalGeneration`) nests every language-model field under `text_config`,
+  so that is unwrapped when present; `hf_model_configs.kimi_k3_dict` is the already-flat
+  `text_config`. All Kimi-K3 mapping/hook/shape functions go through this helper.
+  """
+  if hasattr(config, "to_dict"):
+    config = config.to_dict()
+  if not isinstance(config, dict):
+    raise TypeError(f"kimi-k3 expects the HF config as a dict or PretrainedConfig, got {type(config).__name__}")
+  text_config = config.get("text_config")
+  if text_config is not None:
+    config = text_config.to_dict() if hasattr(text_config, "to_dict") else dict(text_config)
+  return config
+
+
+def _kimi_k3_hf_require(config: dict, key: str):
+  """Returns `config[key]`, raising instead of falling back to a production default."""
+  if config.get(key) is None:
+    raise ValueError(f"kimi-k3 checkpoint conversion requires `{key}` in the HF (text) config")
+  return config[key]
+
+
+def _kimi_k3_hf_full_attn_layers(config) -> set[int]:
+  """Returns the 0-indexed set of full-attention (MLA) layer indices.
+
+  Two sources are accepted, with an explicit index base for each rather than sniffing:
+    * `config["linear_attn_config"]["full_attn_layers"]` -- the Hugging Face field. It is
+      1-indexed by definition (`KimiLinearConfig.is_kda_layer` tests `layer_idx + 1`) and
+      is authoritative when present.
+    * `config["full_attn_layers"]` at the top level -- the MaxText convention used by
+      `kimi-k3.yml` and by test configs, 0-indexed.
+  There is no default layout: a config with neither field (or without `num_hidden_layers`)
+  raises, so a reduced config cannot silently pick up the production KDA/MLA split.
+  """
+  config = _kimi_k3_hf_text_config(config)
+  if config.get("num_hidden_layers") is None:
+    raise ValueError("kimi-k3 param mapping requires `num_hidden_layers` in the HF config")
+  num_layers = int(config["num_hidden_layers"])
+  linear_cfg = config.get("linear_attn_config") or {}
+  if linear_cfg.get("full_attn_layers") is not None:
+    full_attn_layers = {int(x) - 1 for x in linear_cfg["full_attn_layers"]}
+  elif config.get("full_attn_layers") is not None:
+    full_attn_layers = {int(x) for x in config["full_attn_layers"]}
+  else:
+    raise ValueError(
+        "kimi-k3 param mapping requires `linear_attn_config.full_attn_layers` (HF, 1-indexed) "
+        "or a top-level `full_attn_layers` (0-indexed)"
+    )
+  bad = sorted(i for i in full_attn_layers if not 0 <= i < num_layers)
+  if bad:
+    raise ValueError(f"kimi-k3 full_attn_layers resolved to out-of-range 0-indexed layers {bad} for {num_layers} layers")
+  return full_attn_layers
+
+
+def KIMI_K3_HF_WEIGHTS_TO_SHAPE(config):
+  """Returns the HF weight name -> shape map for the released moonshotai/Kimi-K3 language model.
+
+  Keys carry the `language_model.` prefix of the released `KimiK3ForConditionalGeneration`
+  checkpoint, matching `param_mapping.KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING`. Accepts the flat
+  `text_config` dict, the nested released `config.json` dict, or a `PretrainedConfig`.
+  """
+  config = _kimi_k3_hf_text_config(config)
+
+  def req(key):
+    return int(_kimi_k3_hf_require(config, key))
+
+  hidden = req("hidden_size")
+  vocab = req("vocab_size")
+  num_layers = req("num_hidden_layers")
+  first_dense = req("first_k_dense_replace")
+  full_attn_layers = _kimi_k3_hf_full_attn_layers(config)
+  linear_cfg = config.get("linear_attn_config") or {}
+
+  lm = "language_model.model"
+  mapping = {
+      f"{lm}.embed_tokens.weight": [vocab, hidden],
+      f"{lm}.norm.weight": [hidden],
+      "language_model.lm_head.weight": [vocab, hidden],
+      f"{lm}.output_attn_res_norm.weight": [hidden],
+      f"{lm}.output_attn_res_proj.weight": [1, hidden],
+  }
+
+  for i in range(num_layers):
+    p = f"{lm}.layers.{i}"
+    mapping.update(
+        {
+            f"{p}.input_layernorm.weight": [hidden],
+            f"{p}.post_attention_layernorm.weight": [hidden],
+            f"{p}.self_attention_res_norm.weight": [hidden],
+            f"{p}.self_attention_res_proj.weight": [1, hidden],
+            f"{p}.mlp_res_norm.weight": [hidden],
+            f"{p}.mlp_res_proj.weight": [1, hidden],
+        }
+    )
+    a = f"{p}.self_attn"
+    if i in full_attn_layers:
+      heads = req("num_attention_heads")
+      q_lora, kv_lora = req("q_lora_rank"), req("kv_lora_rank")
+      nope, rope, v_dim = req("qk_nope_head_dim"), req("qk_rope_head_dim"), req("v_head_dim")
+      mapping.update(
+          {
+              f"{a}.q_a_proj.weight": [q_lora, hidden],
+              f"{a}.q_a_layernorm.weight": [q_lora],
+              f"{a}.q_b_proj.weight": [heads * (nope + rope), q_lora],
+              f"{a}.kv_a_proj_with_mqa.weight": [kv_lora + rope, hidden],
+              f"{a}.kv_a_layernorm.weight": [kv_lora],
+              f"{a}.kv_b_proj.weight": [heads * (nope + v_dim), kv_lora],
+              f"{a}.g_proj.weight": [heads * v_dim, hidden],
+              f"{a}.o_proj.weight": [hidden, heads * v_dim],
+          }
+      )
+    else:
+      kda_heads = int(_kimi_k3_hf_require(linear_cfg, "num_heads"))
+      head_dim = int(_kimi_k3_hf_require(linear_cfg, "head_dim"))
+      conv = int(_kimi_k3_hf_require(linear_cfg, "short_conv_kernel_size"))
+      proj = kda_heads * head_dim
+      mapping.update(
+          {
+              f"{a}.q_proj.weight": [proj, hidden],
+              f"{a}.k_proj.weight": [proj, hidden],
+              f"{a}.v_proj.weight": [proj, hidden],
+              f"{a}.q_conv1d.weight": [proj, 1, conv],
+              f"{a}.k_conv1d.weight": [proj, 1, conv],
+              f"{a}.v_conv1d.weight": [proj, 1, conv],
+              # The release stores A_log as [head_dim]: num_heads log-decays then zero padding.
+              f"{a}.A_log": [max(head_dim, kda_heads)],
+              f"{a}.f_a_proj.weight": [head_dim, hidden],
+              f"{a}.f_b_proj.weight": [proj, head_dim],
+              f"{a}.dt_bias": [proj],
+              f"{a}.b_proj.weight": [kda_heads, hidden],
+              f"{a}.g_proj.weight": [proj, hidden],
+              f"{a}.o_norm.weight": [head_dim],
+              f"{a}.o_proj.weight": [hidden, proj],
+          }
+      )
+
+    if i < first_dense:
+      inter = req("intermediate_size")
+      mapping.update(
+          {
+              f"{p}.mlp.gate_proj.weight": [inter, hidden],
+              f"{p}.mlp.up_proj.weight": [inter, hidden],
+              f"{p}.mlp.down_proj.weight": [hidden, inter],
+          }
+      )
+    else:
+      num_experts = req("num_experts")
+      moe_inter = req("moe_intermediate_size")
+      moe_hidden = req("routed_expert_hidden_size")
+      shared_inter = moe_inter * req("num_shared_experts")
+      m = f"{p}.block_sparse_moe"
+      mapping.update(
+          {
+              f"{m}.gate.weight": [num_experts, hidden],
+              f"{m}.gate.e_score_correction_bias": [num_experts],
+              f"{m}.routed_expert_down_proj.weight": [moe_hidden, hidden],
+              f"{m}.routed_expert_norm.weight": [moe_hidden],
+              f"{m}.routed_expert_up_proj.weight": [hidden, moe_hidden],
+              f"{m}.shared_experts.gate_proj.weight": [shared_inter, hidden],
+              f"{m}.shared_experts.up_proj.weight": [shared_inter, hidden],
+              f"{m}.shared_experts.down_proj.weight": [hidden, shared_inter],
+          }
+      )
+      for e in range(num_experts):
+        mapping[f"{m}.experts.{e}.w1.weight"] = [moe_inter, moe_hidden]
+        mapping[f"{m}.experts.{e}.w3.weight"] = [moe_inter, moe_hidden]
+        mapping[f"{m}.experts.{e}.w2.weight"] = [moe_hidden, moe_inter]
+
   return mapping
 
 
@@ -1703,6 +1936,9 @@ HF_SHAPE = {
     "deepseek4-284b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
     "deepseek4-1600b": DEEPSEEKV4_HF_WEIGHTS_TO_SHAPE,
     "hy4-preview": HY4_HF_WEIGHTS_TO_SHAPE,
+    "kimi-k3": KIMI_K3_HF_WEIGHTS_TO_SHAPE,
+    "glm5.1-744b": GLM5_1_HF_WEIGHTS_TO_SHAPE,
+    "glm5.2-744b": GLM5_2_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-20b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "gpt-oss-120b": GPT_OSS_HF_WEIGHTS_TO_SHAPE,
     "mixtral-8x7b": MIXTRAL_HF_WEIGHTS_TO_SHAPE,

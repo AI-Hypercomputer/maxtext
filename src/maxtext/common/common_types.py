@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Common types."""
+
 import enum
 import fnmatch
 from typing import Any, Sequence
@@ -28,6 +29,15 @@ Array = jnp.ndarray
 PRNGKey = jnp.ndarray
 DType = jnp.dtype
 Shape = Sequence[int]
+
+# `quantization` modes that do not support gradient accumulation (`gradient_accumulation_steps > 1`). Shared by the
+# config validation and the elastic HBM fallback, which must agree on when the accumulation steps may not change.
+FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION = ("fp8", "nanoo_fp8", "fp8_gpu", "te_fp8_delayedscaling")
+
+# Models that use DeepSeek-V3-style routing: sigmoid scores plus a correction bias that only steers top-k
+# selection, with the routing weights gathered from the pre-bias scores. `layers/moe.py` routes on it and
+# `configs/types.py` validates against it.
+DEEPSEEK_V3_ROUTING_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4", "kimi-k3")
 
 
 def is_fp8_dtype(dtype: Any) -> bool:
@@ -63,6 +73,27 @@ def get_quant(config: Config, module_name: str, quant: Any) -> Any:
   if is_module_unquantized(config, module_name):
     return None
   return quant
+
+
+def moe_qwag_flag(config: Config, require_tokamax: bool = True) -> str | None:
+  """Returns the flag whose routed-expert weights get the fp8 weight all-gather (QWAG), or None.
+
+  QWAG runs in the tokamax sparse-matmul gmm (TPU only) under the Qwix fp8_full rule, the only one that covers the
+  gmm, with fixed or exactly absmax weight calibration.
+  """
+  if not (config.shard_embed_moe_on_fsdp or config.shard_exp_on_fsdp):
+    return None
+  method = config.weight_quantization_calibration_method.lower()
+  if not (
+      config.quantization == "fp8_full"
+      and config.use_qwix_quantization
+      and config.sparse_matmul
+      and config.hardware == "tpu"
+      and (config.use_tokamax_gmm or not require_tokamax)
+      and (method.startswith("fixed") or method == "absmax")
+  ):
+    return None
+  return "shard_embed_moe_on_fsdp" if config.shard_embed_moe_on_fsdp else "shard_exp_on_fsdp"
 
 
 AxisNames = tuple[str, ...]
@@ -113,6 +144,11 @@ DECODING_ACTIVE_SEQUENCE_INDICATOR = 1
 # softmax function assigns an extremely low probability to the masked positions.
 DEFAULT_MASK_VALUE = -0.7 * float(np.finfo(np.dtype("float32")).max)
 
+# Checkpoint name of an attention layer's load-balance-ordered positions and segment ids
+# (Attention._to_load_balanced_order); remat_policy=custom saves it under
+# context_parallel_attention_load_balance_hoist_ids.
+ATTENTION_LB_IDS = "attention_lb_ids"
+
 
 @struct.dataclass
 class MultimodalInput:
@@ -158,6 +194,8 @@ class DecoderBlockType(enum.Enum):
   WEAVER = "weaver"
   MING = "ming"
   HY4 = "hy4"
+  KIMI_LINEAR = "kimi_linear"
+  GLM5 = "glm5"
 
 
 class VisionEncoderBlockType(enum.Enum):
@@ -172,13 +210,20 @@ class VisionEncoderBlockType(enum.Enum):
   QWEN3_VL = "qwen3_vl"
 
 
+class AudioDecoderBlockType(enum.Enum):
+  """Audio decoder (speech generation head) block types."""
+
+  NONE = "none"
+  MING_TALKER = "ming_talker"
+
+
 class AttentionType(enum.Enum):
   GLOBAL = "global"  # default, with causality
   LOCAL_SLIDING = "local_sliding"
   CHUNK = "chunk"
   MLA = "mla"
   COMPRESSED = "compressed"
-  FULL = "full"
+  FULL = "full"  # non-causal, bidirectional full attention
   BLOCK_DIFFUSION = "block_diffusion"
 
 
@@ -209,6 +254,8 @@ class CustomRule(enum.Enum):
   DEFAULT = ""
   PURE_FSDP = "pure-fsdp"
   CP_AS_EP = "cp-as-ep"  # Support CP and EP together
+  CP_AS_EP_DENSE_NO_CP = "cp-as-ep-dense-no-cp"  # cp-as-ep with the dense weights on fsdp x expert, not context
+  CP_AS_EP_DENSE_FSDP = "cp-as-ep-dense-fsdp"  # cp-as-ep with the dense weights on fsdp only
   EP_AS_CP = "ep-as-cp"  # Support EP only
   PIPELINE_LARGE_MOE = "pipeline-large-moe"
   FSDP_2D = "2d-fsdp"

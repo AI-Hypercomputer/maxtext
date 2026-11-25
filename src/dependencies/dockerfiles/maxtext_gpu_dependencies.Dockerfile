@@ -16,7 +16,8 @@ RUN mkdir -p /airlock-apt-methods /airlock-ssl-certs && \
         cp /etc/ssl/certs/ca-certificates.crt /airlock-ssl-certs/; \
     fi
 
-FROM $BASEIMAGE
+# Stage 1: Install system and Python dependencies
+FROM $BASEIMAGE AS dependencies
 
 ARG USE_AIRLOCK=false
 ARG TARGETARCH
@@ -113,11 +114,6 @@ ENV ENV_TF=$TF
 ARG PACKAGE_DIR
 ENV PACKAGE_DIR=$PACKAGE_DIR
 
-ENV MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets
-ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
-ENV MAXTEXT_PKG_DIR=/deps/src/maxtext
-ENV MAXTEXT_REPO_ROOT=/deps
-
 # Set the working directory in the container
 WORKDIR /deps
 
@@ -128,12 +124,12 @@ COPY ${PACKAGE_DIR}/dependencies/scripts/ src/dependencies/scripts/
 COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 
 # Install dependencies (including CUDA and JAX wheels from Airlock when USE_AIRLOCK=true)
-RUN echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE} TF=${ENV_TF}"
 RUN --mount=type=cache,id=uv-${TARGETARCH},target=/root/.cache/uv \
     --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
     --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
     (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do sleep 60 & SLEEP_PID=$!; wait $SLEEP_PID || break; echo "[build keepalive] $(date -u +%H:%M:%S)"; done) & \
     KEEPALIVE_PID=$!; trap 'kill $KEEPALIVE_PID 2>/dev/null || true; wait $KEEPALIVE_PID 2>/dev/null || true' EXIT; \
+    echo "Running command: bash setup.sh MODE=$ENV_MODE JAX_VERSION=$ENV_JAX_VERSION DEVICE=${ENV_DEVICE} TF=${ENV_TF}" && \
     if [ "$USE_AIRLOCK" = "true" ]; then \
         if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
         if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
@@ -163,7 +159,8 @@ RUN --mount=type=cache,id=uv-${TARGETARCH},target=/root/.cache/uv \
     fi && \
     rm -f /usr/lib/apt/methods/ar+https && \
     find /usr/local/lib -type d -path "*/nvidia/*/lib" ! -path "*/nvidia/nccl/lib" > /etc/ld.so.conf.d/nvidia-wheels.conf && \
-    ldconfig
+    ldconfig && \
+    rm -rf /deps/src/maxtext
 
 # Install CUDA 12-pinned libnccl2 and libnccl-dev and configure NCCL plugin path for multi-node GKE communication
 ARG NCCL_DEB_VERSION=2.32.3-1+cuda12.9
@@ -183,14 +180,22 @@ RUN (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do
     rm -rf /var/lib/apt/lists/*
 
 ENV NCCL_PLUGIN_PATH="/usr/local/gib/lib64:/usr/local/nvidia/lib64"
+ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"
 
-# Now copy the remaining code (source files that may change frequently)
+# Stage 2: Add MaxText source code, tests, and optional test assets
+FROM dependencies AS maxtext
+
+ENV MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets
+ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
+ENV MAXTEXT_PKG_DIR=/deps/src/maxtext
+ENV MAXTEXT_REPO_ROOT=/deps
+
+# Copy MaxText source files that may change frequently
 COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
-# Now copy resource needed for pytest:
+# Copy resource needed for pytest
 COPY tests*/ tests/
 COPY pytest.ini* pytest.ini
 COPY benchmarks*/ benchmarks/
-
 
 # Download test assets from GCS if building image with test assets
 ARG INCLUDE_TEST_ASSETS=false
@@ -202,5 +207,3 @@ RUN (trap 'kill $SLEEP_PID 2>/dev/null || true; exit 0' TERM INT; while true; do
         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
         fi; \
     fi
-
-ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"

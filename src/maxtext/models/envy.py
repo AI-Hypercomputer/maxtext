@@ -217,7 +217,9 @@ class EnvyDecoderLayer(nnx.Module):
 
     load_balance_loss = None
     if self.is_moe_layer:
-      mlp_lnx, load_balance_loss, _ = self.moe_block(hidden_states)
+      mlp_lnx, load_balance_loss, _ = self.moe_block(
+          hidden_states, token_mask=moe.routing_token_mask(cfg, decoder_segment_ids, model_mode)
+      )
     else:
       mlp_lnx = self.mlp(hidden_states, deterministic=deterministic)
     if self.config.use_post_ffw_norm:

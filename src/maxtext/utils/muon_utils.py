@@ -86,6 +86,14 @@ ATTENTION_QKV_NAMES = (
 
 ATTENTION_OUT_NAMES = ("out",)
 
+# Output-gate projections. Head-expanded (3D unscanned / 4D scanned) in MLA, e.g. Kimi-K3
+# `[emb_dim, num_heads, v_head_dim]`; flat 2D in linear-attention blocks (KDA), which keep the
+# standard mapping.
+ATTENTION_GATE_NAMES = ("g_proj",)
+
+# Path entries of scanned decoder stacks (the scanned layer axis sits at `param_scan_axis`).
+SCANNED_LAYER_NAMES = ("layers", "scanned_blocks", "dense_layers", "moe_layers")
+
 MOE_BLOCK_NAMES = (
     "MoeBlock_0",
     "moe_block",
@@ -97,6 +105,27 @@ MOE_BLOCK_NAMES = (
 # Logical axis name of the inner scan of a nested block scan (gemma4, qwen3-next). Its layers are stacked on the axis
 # right after the outer block scan's `param_scan_axis`.
 NESTED_SCAN_AXIS_NAME = "local_layers"
+
+
+def _is_excluded_path(path: Tuple[str, ...]) -> bool:
+  """Returns True if `path` matches Muon's parameter exclusion rules."""
+  return any(
+      segment in EXCLUDED_EXACT_SEGMENTS
+      or (segment.endswith("bias") and segment != "position_bias")
+      or any(x in segment for x in EXCLUDED_SUBSTRINGS)
+      for segment in path
+  )
+
+
+def is_prefused_moe_wi_path(path: Tuple[str, ...], shape: Optional[Tuple[int, ...]] = None) -> bool:
+  """Returns True if `path` identifies a routed MoE pre-fused `wi = [wi_0 | wi_1]` tensor."""
+  if shape is not None and len(shape) < 2:
+    return False
+  if not path or path[-1] != "wi" or _is_excluded_path(path):
+    return False
+  return _is_path_contain_any(MOE_BLOCK_NAMES, path) and not _is_path_contain_any(
+      ("shared_experts", "shared_expert"), path
+  )
 
 
 def transform_logic(
@@ -135,7 +164,7 @@ def transform_logic(
        maps to reduction axis (-2,) and output axis (-1,).
     4. Head-expanded Attention: QKV and Output projections with 3D/4D shapes
        map to head-aware reduction and output axes:
-       - QKV: reduction (0,), output (-2, -1)
+       - QKV and MLA output gate (g_proj): reduction (0,), output (-2, -1)
        - Out (unflattened): reduction (0, -2), output (-1,)
     5. Standard Weights: Default 2D matrix mapping (0,) and (-1,) for MLPs,
        GDN, shared experts, MHC alpha projections, and dense projections.
@@ -155,12 +184,7 @@ def transform_logic(
     return None
 
   # Exclude non-matrix parameters, embeddings, biases, and normalization
-  if any(
-      segment in EXCLUDED_EXACT_SEGMENTS
-      or (segment.endswith("bias") and segment != "position_bias")
-      or any(x in segment for x in EXCLUDED_SUBSTRINGS)
-      for segment in path
-  ):
+  if _is_excluded_path(path):
     return None
 
   # MoE routed expert weights: [num_experts, (num_layers), in_features, out_features]
@@ -181,11 +205,24 @@ def transform_logic(
     if _is_path_contain_any(ATTENTION_QKV_NAMES, path):
       # [in_features, (num_layers), num_heads, head_dim] -> reduce (0,), output (-2, -1)
       return mdn((0,), (-2, -1))
+    if (
+        shape is not None
+        and _is_path_contain_any(ATTENTION_GATE_NAMES, path)
+        and (len(shape) == 4 or (len(shape) == 3 and not _is_path_contain_any(SCANNED_LAYER_NAMES, path)))
+    ):
+      # Head-expanded MLA output gate: [in_features, (num_layers), num_heads, head_dim] -> reduce (0,), output
+      # (-2, -1). A 3D gate under a scanned stack is a flat 2D projection with a layer axis (e.g. KDA `g_proj`,
+      # Ming), which falls through to the standard mapping so layers are orthogonalized independently.
+      return mdn((0,), (-2, -1))
     if _is_path_contain_any(ATTENTION_OUT_NAMES, path):
       # Standard attention out projection: [num_heads, (num_layers), head_dim, out_features] -> reduce (0, -2), output (-1,)
       # Note: Qwen3-Next flattens heads into a 2D projection (in_features = num_heads * head_dim),
       # so its out projection is a standard 2D matrix [in_features, (num_layers), out_features] -> reduce (0,), output (-1,)
-      if _is_path_contain_any(("self_attention", "GptOssAttention"), path) or (shape is not None and len(shape) == 4):
+      # Kimi-K3's scanned KDA `out` is a flat [in_features, num_layers, out_features] projection: standard mapping.
+      is_scanned_flat_3d = shape is not None and len(shape) == 3 and "scanned_blocks" in path
+      if not is_scanned_flat_3d and (
+          _is_path_contain_any(("self_attention", "GptOssAttention"), path) or (shape is not None and len(shape) == 4)
+      ):
         return mdn((0, -2), (-1,))
 
   # Standard 2D matrix weights (dense MLPs, shared experts, GDN, MHC alpha, dense projections, router weights)
@@ -270,6 +307,29 @@ def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
   if verbose:
     _print_structure_debug(abstract_param, muon_weight_dimension_numbers)
   return muon_weight_dimension_numbers
+
+
+def is_prefuse_moe_weights_enabled(config) -> bool:
+  """Returns True iff `config.prefuse_moe_weights` is an explicit boolean `True`."""
+  val = getattr(config, "prefuse_moe_weights", False)
+  return isinstance(val, bool) and val
+
+
+def get_prefused_moe_wi_mask(model, config=None):
+  """Returns an `nnx.State` boolean mask marking pre-fused routed MoE `wi` leaves, or `None` if unused."""
+  if not is_prefuse_moe_weights_enabled(config) or not isinstance(model, nnx.Module):
+    return None
+  _, abstract_param, _ = nnx.split(model, nnx.Param, ...)
+
+  def is_prefused_leaf(path: Tuple[jax.tree_util.KeyEntry, ...], variable):
+    path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
+    val_shape = getattr(variable.get_value(), "shape", None)
+    return is_prefused_moe_wi_path(path_strings, shape=val_shape)
+
+  mask = jax.tree.map_with_path(is_prefused_leaf, abstract_param, is_leaf=lambda x: isinstance(x, nnx.Variable))
+  if not any(jax.tree.leaves(mask)):
+    return None
+  return mask
 
 
 def _print_structure_debug(abstract_param, muon_weight_dimension_numbers):

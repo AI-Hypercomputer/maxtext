@@ -25,14 +25,22 @@ from jax.sharding import Mesh
 import numpy as np
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
-from maxtext.integration.vllm.convert_utils import DEFAULT_TPU_NUM_LANES, compute_padded_moe_mlp_dim
+from maxtext.integration.vllm.convert_utils import (
+    DEFAULT_TPU_NUM_LANES,
+    compute_padded_moe_mlp_dim,
+    get_moe_intermediate_size,
+)
 from maxtext.integration.vllm.hybrid_cache_utils import (
     build_qwen_gdn_cache_layout,
     call_with_supported_kwargs,
     gather_layer_kv_caches,
+    get_hf_text_config,
+    maybe_install_tpu_hybrid_coordinator,
     normalize_vllm_input_positions,
+    register_maxtext_hybrid_model_config,
     resolve_layer_kv_cache_indices,
     scatter_layer_kv_caches,
+    validate_hybrid_detection,
 )
 from maxtext.utils import lora_utils
 from maxtext.utils import max_logging
@@ -127,7 +135,7 @@ def generate_maxtext_config(vllm_config: VllmConfig) -> pyconfig.HyperParameters
       if hasattr(vllm_config.model_config.hf_config, "text_config")
       else vllm_config.model_config.hf_config
   )
-  hidden_size = getattr(hf_config, "moe_intermediate_size", None)
+  hidden_size = get_moe_intermediate_size(hf_config)
   try:
     num_lanes = pltpu.get_tpu_info().num_lanes
   except Exception:  # pylint: disable=broad-exception-caught
@@ -229,6 +237,7 @@ class MaxTextForCausalLM(nnx.Module):
     self.vllm_config = vllm_config
     self.cfg = vllm_config.model_config
     self.maxtext_config = generate_maxtext_config(vllm_config)
+    validate_hybrid_detection(self.maxtext_config.decoder_block, get_hf_text_config(self.cfg))
     self.multimodal_handler = get_multimodal_handler(self.maxtext_config.model_name)
 
     # Model configuration
@@ -623,6 +632,7 @@ def patch_kv_cache_manager():
           num_mamba_layers=num_mamba,
           group_size=group_size,
       )
+      maybe_install_tpu_hybrid_coordinator(getattr(self.runner, "vllm_config", None))
 
     kv_cache_spec = original_get_kv_cache_spec(self)
 
@@ -650,6 +660,40 @@ def patch_kv_cache_manager():
 
   KVCacheManager.get_kv_cache_spec = patched_get_kv_cache_spec
   max_logging.log("Successfully applied KVCacheManager patch for hybrid GDN models.")
+
+
+def patch_vllm_hybrid_model_config():
+  """Registers a MaxTextForCausalLM verifier in vLLM's MODELS_CONFIG_MAP.
+
+  The verifier applies vLLM's generic HybridAttentionMambaModelConfig to any
+  MaxText model whose HF config mixes attention with recurrent layers, so
+  vLLM >= 0.33 derives mamba_cache_mode / mamba_block_size for it. See
+  `register_maxtext_hybrid_model_config`.
+
+  TODO: Replace with a tpu-inference platform hook for JAX hybrid models.
+  """
+  # pylint: disable=import-outside-toplevel,g-import-not-at-top
+  try:
+    from vllm.model_executor.models import config as vllm_models_config
+  except ImportError as e:
+    max_logging.log(f"Skipping vLLM hybrid model config registration: {e}")
+    return
+
+  hybrid_config_cls = getattr(vllm_models_config, "HybridAttentionMambaModelConfig", None)
+  models_config_map = getattr(vllm_models_config, "MODELS_CONFIG_MAP", None)
+  if hybrid_config_cls is None or models_config_map is None:
+    max_logging.log(
+        "Skipping vLLM hybrid model config registration: installed vLLM has no "
+        "MODELS_CONFIG_MAP / HybridAttentionMambaModelConfig."
+    )
+    return
+
+  if register_maxtext_hybrid_model_config(
+      models_config_map,
+      vllm_models_config.VerifyAndUpdateConfig,
+      hybrid_config_cls,
+  ):
+    max_logging.log("Registered MaxTextForCausalLM hybrid model config in vLLM MODELS_CONFIG_MAP.")
 
 
 def patch_pallas_tpu_reciprocal():

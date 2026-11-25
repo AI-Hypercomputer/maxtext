@@ -259,14 +259,17 @@ def restore_jax_remove_size_one_mesh_axis_from_type():
 
 @contextlib.contextmanager
 def _restore_jax_prng_and_libtpu_env():
-  """Saves and restores global JAX PRNG config and LIBTPU_INIT_ARGS across a scope."""
+  """Saves and restores global JAX PRNG/Shardy config and LIBTPU_INIT_ARGS across a scope."""
   previous_prng = getattr(jax.config, "jax_default_prng_impl", None)
+  previous_shardy = getattr(jax.config, "jax_use_shardy_partitioner", None)
   previous_libtpu = os.environ.get("LIBTPU_INIT_ARGS")
   try:
     yield
   finally:
     if previous_prng is not None and getattr(jax.config, "jax_default_prng_impl", None) != previous_prng:
       jax.config.update("jax_default_prng_impl", previous_prng)
+    if previous_shardy is not None and getattr(jax.config, "jax_use_shardy_partitioner", None) != previous_shardy:
+      jax.config.update("jax_use_shardy_partitioner", previous_shardy)
     if previous_libtpu is None:
       os.environ.pop("LIBTPU_INIT_ARGS", None)
     else:

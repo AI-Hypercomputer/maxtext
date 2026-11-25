@@ -23,6 +23,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+from maxtext.m3.core.sharding import create_mesh
 from maxtext.m3.infra import scan
 from maxtext.m3.infra.named_scopes import add_named_scopes, scope_of
 from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3MLP, create_qwen3_model
@@ -53,12 +54,10 @@ def tiny_config(scan_layers=False):
   )
 
 
-TOKENS = jnp.array([[1, 2, 3, 4], [4, 3, 2, 1]])
-POSITIONS = jnp.array([[0, 1, 2, 3], [0, 1, 2, 3]])
-
-
 def forward(model):
-  return model(TOKENS, POSITIONS)
+  tokens = jnp.array([[1, 2, 3, 4], [4, 3, 2, 1]])
+  positions = jnp.array([[0, 1, 2, 3], [0, 1, 2, 3]])
+  return model(tokens, positions)
 
 
 def loss(model):
@@ -97,6 +96,15 @@ def instructions_modulo_names(hlo_text):
 
 class NamedScopesTest(parameterized.TestCase):
 
+  def setUp(self):
+    super().setUp()
+    # Other tests on the same xdist worker enable JAX's persistent compilation cache, whose
+    # default key strips MLIR debuginfo (`op_name`) and would return an unscoped executable.
+    prev_include_meta = jax.config.jax_compilation_cache_include_metadata_in_key
+    jax.config.update("jax_compilation_cache_include_metadata_in_key", True)
+    self.addCleanup(jax.config.update, "jax_compilation_cache_include_metadata_in_key", prev_include_meta)
+    self.enter_context(jax.set_mesh(create_mesh(devices=jax.devices()[:1])))
+
   @parameterized.named_parameters(("unrolled", False), ("scanned", True))
   def test_scopes_name_modules_by_attribute_path(self, scan_layers):
     model = add_named_scopes(build(scan_layers))
@@ -113,8 +121,8 @@ class NamedScopesTest(parameterized.TestCase):
         f"{layer}pre_self_attention_layer_norm/",
     ):
       self.assertTrue(any(prefix in n and scope in n for n in names), msg=f"no op under {prefix}...{scope}")
-    # The attention scores are inline code of the attention module; they land in its scope.
-    self.assertTrue(any(f"{layer}self_attention/" in n and "->bkgts" in n for n in names))
+    # Attention softmax ops issued inline by the attention module land in every layer's scope.
+    self.assertTrue(any(prefix in n and f"{layer}self_attention/" in n and "/exp" in n for n in names))
     self.assertTrue(any("decoder/apply_output_head/decoder_norm/" in n for n in names))
     self.assertTrue(any("decoder/token_embedder/" in n for n in names))
 

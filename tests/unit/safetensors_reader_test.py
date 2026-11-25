@@ -29,6 +29,7 @@ from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
+from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import safetensors_reader
 import numpy as np
 from orbax.checkpoint import v1 as ocp_v1
@@ -112,14 +113,12 @@ class SafetensorsReaderTest(parameterized.TestCase):
           np.testing.assert_array_equal(np.asarray(shard.data), np.asarray(want)[shard.index])
 
   def test_matches_orbax(self):
-    """Bit for bit equal to Orbax's SafeTensors loader, with each tensor split by whole rows."""
-
-    def by_rows(shape):
-      # Split dim 0 over all 4 chips where it divides, else a full copy on every chip.
-      return P(("x", "y")) if shape and shape[0] % 4 == 0 else P()
-
+    """Bit for bit equal to Orbax's SafeTensors loader, with the shardings the streaming loader uses."""
+    devices = list(self.mesh.devices.flat)
     request = {
-        name: jax.ShapeDtypeStruct(a.shape, a.dtype, sharding=NamedSharding(self.mesh, by_rows(a.shape)))
+        name: jax.ShapeDtypeStruct(
+            a.shape, a.dtype, sharding=hf_streaming_load.choose_load_sharding(a.shape, a.dtype, devices, 0)
+        )
         for name, (a, _) in self.cases.items()
     }
     with safetensors_reader.SafetensorsReader(self.dir) as reader:
@@ -166,6 +165,27 @@ class SafetensorsReaderTest(parameterized.TestCase):
     with safetensors_reader.SafetensorsReader(directory) as reader:
       got = reader.read({"empty": jax.ShapeDtypeStruct((0, 4), jnp.float32, sharding=sharding)})
     self.assertEqual(got["empty"].shape, (0, 4))
+
+  @parameterized.named_parameters(
+      ("last_piece_all_padding", "f32_gcd_rows", 8),  # 6 rows -> 4 pieces of 2: the last is only zeros.
+      ("piece_partly_padding", "i32_full_copy", 8),  # 7 rows -> the last piece has 1 real row.
+      ("many_pad_rows", "bf16_rows", 16),
+  )
+  def test_reads_rows_padded_with_zeros(self, name, rows):
+    want = np.asarray(self.cases[name][0])
+    padded = np.concatenate([want, np.zeros((rows - want.shape[0],) + want.shape[1:], want.dtype)])
+    sharding = NamedSharding(self.mesh, P(("x", "y")))
+    with safetensors_reader.SafetensorsReader(self.dir) as reader:
+      got = reader.read({name: jax.ShapeDtypeStruct(padded.shape, want.dtype, sharding=sharding)})[name]
+    self.assertEqual(got.shape, padded.shape)
+    self.assertEqual(got.sharding, sharding)
+    np.testing.assert_array_equal(np.asarray(got), padded)
+
+  def test_fewer_rows_than_the_file_raises(self):
+    sharding = NamedSharding(self.mesh, P())
+    with safetensors_reader.SafetensorsReader(self.dir) as reader:
+      with self.assertRaisesRegex(ValueError, "Requested f32_gcd_rows"):
+        reader.read({"f32_gcd_rows": jax.ShapeDtypeStruct((4, 5), jnp.float32, sharding=sharding)})
 
   def test_missing_tensor_raises(self):
     sharding = NamedSharding(self.mesh, P())
@@ -249,6 +269,110 @@ class SafetensorsReaderTest(parameterized.TestCase):
       with self.assertRaisesRegex(ValueError, "Tensor x is in both"):
         safetensors_reader.SafetensorsReader(directory)
     mock_shutdown.assert_called_once()
+
+
+class StackedReadTest(parameterized.TestCase):
+  """Groups of same-shape tensors with tiny per-chip pieces are read whole, then rearranged."""
+
+  def setUp(self):
+    """Writes same-shape tensors whose per-chip pieces are small enough to be read whole."""
+    super().setUp()
+    if len(jax.devices()) < 4:
+      self.skipTest("Needs 4 devices.")
+    self.mesh = _mesh()
+    self.dir = self.create_tempdir().full_path
+    rng = np.random.default_rng(1)
+    self.tensors = {f"expert_{i}": jnp.asarray(rng.standard_normal((8, 6), dtype=np.float32)) for i in range(7)}
+    self.tensors.update({f"norm_{i}": jnp.asarray(rng.standard_normal((5,), dtype=np.float32)) for i in range(4)})
+    self.tensors["other"] = jnp.asarray(rng.standard_normal((4, 4), dtype=np.float32))
+    _write(self.dir, self.tensors)
+
+  def _request(self, names, spec):
+    sharding = NamedSharding(self.mesh, spec)
+    return {n: jax.ShapeDtypeStruct(self.tensors[n].shape, self.tensors[n].dtype, sharding=sharding) for n in names}
+
+  def _check(self, got, request):
+    self.assertEqual(list(got), list(request))
+    for name in request:
+      with self.subTest(name):
+        self.assertEqual(got[name].sharding, request[name].sharding)
+        np.testing.assert_array_equal(np.asarray(got[name]), np.asarray(self.tensors[name]))
+        for shard in got[name].addressable_shards:
+          np.testing.assert_array_equal(np.asarray(shard.data), np.asarray(self.tensors[name])[shard.index])
+
+  @parameterized.named_parameters(
+      ("split_rows", P(("x", "y")), 256),
+      ("split_rows_and_cols", P("x", "y"), 256),
+      ("full_copy", P(), 256),
+      ("split_in_chunks", P(("x", "y")), 3),  # 7 tensors: chunks of 3, 3 and 1.
+  )
+  def test_matches_saved_tensors(self, spec, split_chunk):
+    names = [f"expert_{i}" for i in range(7)]
+    request = self._request(reversed(names), spec)  # Not file order: the result keeps request order.
+    with (
+        mock.patch.object(safetensors_reader, "_SPLIT_CHUNK", split_chunk),
+        safetensors_reader.SafetensorsReader(self.dir, min_piece_bytes=1 << 30) as reader,
+    ):
+      fetched = reader.fetch(request)
+      self.assertLen(fetched.stacks, 1)
+      self.assertEqual(fetched.arrays, {})
+      got = reader.unpack(fetched)
+    self._check(got, request)
+
+  def test_stack_layout(self):
+    """7 tensors on 4 chips: padded to 8, 2 consecutive whole tensors per chip."""
+    request = self._request([f"expert_{i}" for i in range(7)], P(("x", "y")))
+    with safetensors_reader.SafetensorsReader(self.dir, min_piece_bytes=1 << 30) as reader:
+      (stack,) = reader.fetch(request).stacks
+    self.assertEqual(stack.num_padded, 1)
+    self.assertEqual(stack.array.shape, (8, 8, 6))
+    for shard in stack.array.addressable_shards:
+      self.assertEqual(shard.data.shape, (2, 8, 6))
+    want = np.stack([np.asarray(self.tensors[n]) for n in stack.names] + [np.zeros((8, 6), np.float32)])
+    np.testing.assert_array_equal(np.asarray(stack.array), want)
+
+  def test_reads_whole_tensors(self):
+    """Each tensor is read from storage once, in full, rather than once per piece."""
+    request = self._request([f"expert_{i}" for i in range(7)], P(("x", "y")))
+    pieces = []
+    real = safetensors_reader.SafetensorsReader._whole  # pylint: disable=protected-access
+
+    def spy(reader, name, devices):
+      piece = real(reader, name, devices)
+      pieces.append(piece)
+      return piece
+
+    with mock.patch.object(safetensors_reader.SafetensorsReader, "_whole", autospec=True, side_effect=spy):
+      with safetensors_reader.SafetensorsReader(self.dir, min_piece_bytes=1 << 30) as reader:
+        reader.read(request)
+    self.assertCountEqual([p.name for p in pieces], list(request))
+    for piece in pieces:
+      self.assertEqual(piece.end - piece.start, 8 * 6 * 4)
+      self.assertLen(piece.devices, 1)
+
+  def test_mixed_request(self):
+    """Stacked groups, a group of copies, and a lone tensor read by rows, in one request."""
+    request = self._request([f"expert_{i}" for i in range(7)], P(("x", "y")))
+    request.update(self._request([f"norm_{i}" for i in range(4)], P()))
+    request.update(self._request(["other"], P("x")))
+    with safetensors_reader.SafetensorsReader(self.dir, min_piece_bytes=1 << 30) as reader:
+      fetched = reader.fetch(request)
+      self.assertLen(fetched.stacks, 2)
+      self.assertEqual(list(fetched.arrays), ["other"])
+      got = reader.unpack(fetched)
+    self._check(got, request)
+
+  @parameterized.named_parameters(
+      ("group_too_small", 1, 1 << 30),  # 1 tensor on 4 chips would mostly be padding.
+      ("pieces_big_enough", 7, 0),
+  )
+  def test_reads_by_rows(self, num, min_piece_bytes):
+    request = self._request([f"expert_{i}" for i in range(num)], P(("x", "y")))
+    with safetensors_reader.SafetensorsReader(self.dir, min_piece_bytes=min_piece_bytes) as reader:
+      fetched = reader.fetch(request)
+      self.assertEqual(fetched.stacks, [])
+      got = reader.unpack(fetched)
+    self._check(got, request)
 
 
 if __name__ == "__main__":

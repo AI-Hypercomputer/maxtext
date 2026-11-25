@@ -15,6 +15,7 @@
 """Unit tests for the line-range test-change detector in ``newly_added_detection``."""
 
 import importlib.util
+import json
 import os
 import pathlib
 import subprocess
@@ -462,23 +463,20 @@ def test_is_changed_item_matches_pytest_parametrize_items_by_originalname():
 
 # --- analyze_code_changes.sh -------------------------------------------------
 
-# emit_deps_tags hashes these to name the prebuilt dependency images.
-_DEPS_IMAGE_INPUTS = {
-    "src/dependencies/requirements/generated_requirements/tpu-requirements.txt": "jax>=0.1\nlibtpu>=0.2\n",
-    "src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt": "jax>=0.1\nvllm>=0.3\n",
-    "src/dependencies/requirements/generated_requirements/cuda12-requirements.txt": "jax>=0.1\nnvidia-cublas-cu12>=0.4\n",
-    "src/dependencies/extra_deps/pre_train_github_deps.txt": "mlperf-logging @ https://example.invalid/pre.zip\n",
-    "src/dependencies/extra_deps/post_train_github_deps.txt": "vllm @ https://example.invalid/post.zip\n",
-    "src/dependencies/scripts/install_pre_train_extra_deps.py": "",
-    "src/dependencies/scripts/install_post_train_extra_deps.py": "",
-    "src/dependencies/dockerfiles/test_deps_env.Dockerfile": "FROM scratch\n",
-    ".github/workflows/build_deps_image.yml": "name: build\n",
-}
 
-
-def _run_analyze_script(tmp_path, env=None, detector_rc=0, detector_stdout="", change=None):
-  """Run analyze_code_changes.sh on a PR, with a fake ``python3`` as the detector."""
-  repo = _make_pr_repo(tmp_path, {"README.md": "base\n", **_DEPS_IMAGE_INPUTS}, change or {"README.md": "changed\n"})
+def _run_analyze_script(
+    tmp_path,
+    env=None,
+    detector_rc=0,
+    detector_stdout="",
+    change=None,
+    gh_pr=None,
+    gh_events=None,
+    gh_rc=0,
+    expect_rc=0,
+):
+  """Run analyze_code_changes.sh on a PR, with a fake ``python3`` as the detector and optional fake ``gh``."""
+  repo = _make_pr_repo(tmp_path, {"README.md": "base\n"}, change or {"README.md": "changed\n"})
   fake = tmp_path / "bin" / "python3"
   fake.parent.mkdir()
   (tmp_path / "stdout").write_text(detector_stdout, encoding="utf-8")
@@ -486,18 +484,43 @@ def _run_analyze_script(tmp_path, env=None, detector_rc=0, detector_stdout="", c
       f"#!/bin/sh\necho \"$@\" >> '{tmp_path}/calls'\ncat '{tmp_path}/stdout'\nexit {detector_rc}\n", encoding="utf-8"
   )
   fake.chmod(0o755)
+  if gh_pr is not None or gh_rc != 0:
+    (tmp_path / "pr.json").write_text(json.dumps(gh_pr or {}), encoding="utf-8")
+    (tmp_path / "events.json").write_text(json.dumps(gh_events or []), encoding="utf-8")
+    fake_gh = fake.parent / "gh"
+    fake_gh.write_text(
+        "#!/bin/sh\n"
+        f"if [ {gh_rc} -ne 0 ]; then exit {gh_rc}; fi\n"
+        f"src='{tmp_path}/pr.json'\n"
+        'for arg in "$@"; do\n'
+        '  case "$arg" in\n'
+        "    */files) exit 1 ;;\n"
+        f"    */events*) src='{tmp_path}/events.json' ;;\n"
+        "  esac\n"
+        "done\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  if [ "$1" = "--jq" ]; then exec jq -r "$2" < "$src"; fi\n'
+        "  shift\n"
+        "done\n",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
   output = tmp_path / "github_output"
   output.touch()
   # Drop the values that the CI job running these tests has for the variables that the script reads.
   read_by_script = ("PR_NUMBER", "GITHUB_REPOSITORY", "FORCE_ALL_TESTS", "RUN_TPU7X", "EVENT_ACTION", "IS_DRAFT")
-  run_env = {
-      k: v for k, v in os.environ.items() if k not in read_by_script + ("HAS_SKIP_CI_TESTS_LABEL", "IS_COPYBARA_PR")
-  }
-  run_env.update(PATH=f"{fake.parent}{os.pathsep}{os.environ['PATH']}", EVENT_NAME="pull_request", GITHUB_BASE_REF="main")
+  extra_vars = ("HAS_SKIP_CI_TESTS_LABEL", "HAS_PULL_READY_LABEL", "IS_COPYBARA_PR", "GITHUB_RUN_ATTEMPT")
+  run_env = {k: v for k, v in os.environ.items() if k not in read_by_script + extra_vars}
+  run_env.update(
+      PATH=f"{fake.parent}{os.pathsep}{os.environ['PATH']}",
+      EVENT_NAME="pull_request",
+      GITHUB_BASE_REF="main",
+      API_RETRY_SLEEP_SECONDS="0",
+  )
   run_env.update(GITHUB_OUTPUT=str(output), **(env or {}))
   script = REPO_ROOT / ".github/scripts/analyze_code_changes.sh"
   result = subprocess.run(["bash", str(script)], cwd=repo, env=run_env, capture_output=True, text=True, check=False)
-  assert result.returncode == 0, result.stdout + result.stderr
+  assert result.returncode == expect_rc, result.stdout + result.stderr
   writes = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines() if "=" in line)
   calls = tmp_path / "calls"
   return writes, calls.read_text(encoding="utf-8").splitlines() if calls.exists() else []
@@ -522,36 +545,18 @@ def test_analyze_code_changes_maps_the_detector_output_to_the_tpu7x_outputs(
   assert writes.get("tpu7x_flavors") == tpu7x_flavors
 
 
-_DEPS_IMAGE_TAGS = ("tpu_pre_train_deps_tag", "tpu_post_train_deps_tag", "gpu_pre_train_deps_tag")
-_DEPS_IMAGE_DOCKERFILE = "src/dependencies/dockerfiles/test_deps_env.Dockerfile"
-
-
 @pytest.mark.parametrize(
-    "env",
+    "env, is_scheduled, newly_added",
     [
-        pytest.param({}, id="pull-request"),
-        pytest.param({"FORCE_ALL_TESTS": "true"}, id="scheduled-only-label"),
-        pytest.param({"EVENT_NAME": "schedule"}, id="scheduled-run"),
+        pytest.param({}, "false", "true", id="pull-request"),
+        pytest.param({"FORCE_ALL_TESTS": "true"}, "true", "false", id="scheduled-only-label"),
+        pytest.param({"EVENT_NAME": "schedule"}, "true", "false", id="scheduled-run"),
     ],
 )
-def test_analyze_code_changes_names_every_dependency_image_on_every_path(tmp_path, env):
-  """An empty tag silently costs every test job a full dependency install, so no exit path may skip naming."""
+def test_analyze_code_changes_sets_schedule_flags_on_every_path(tmp_path, env, is_scheduled, newly_added):
+  """Every exit path in analyze_code_changes.sh must emit consistent scheduling flags."""
   writes, _ = _run_analyze_script(tmp_path, env=env)
-  tags = [writes.get(key, "") for key in _DEPS_IMAGE_TAGS]
-  assert all(tag.startswith("deps-") for tag in tags), writes
-  # Each image hashes only its own inputs, so a change to one must not rename the others.
-  assert len(set(tags)) == len(tags), tags
-
-
-def test_analyze_code_changes_dockerfile_change_rebuilds_every_image(tmp_path):
-  """The Dockerfile feeds every image, so changing it has to move all three tags or the stale ones get reused."""
-  unchanged_dir, changed_dir = tmp_path / "unchanged", tmp_path / "changed"
-  unchanged_dir.mkdir()
-  changed_dir.mkdir()
-  unchanged, _ = _run_analyze_script(unchanged_dir)
-  writes, _ = _run_analyze_script(changed_dir, change={_DEPS_IMAGE_DOCKERFILE: "FROM scratch\nRUN true\n"})
-  for key in _DEPS_IMAGE_TAGS:
-    assert writes[key] != unchanged[key], key
+  assert writes["is_scheduled_run"] == is_scheduled and writes["newly_added_only"] == newly_added
 
 
 def test_analyze_code_changes_run_tpu7x_selects_every_flavor_and_waits_for_skip_ci_tests(tmp_path):
@@ -561,67 +566,63 @@ def test_analyze_code_changes_run_tpu7x_selects_every_flavor_and_waits_for_skip_
   writes, calls = _run_analyze_script(tmp_path, env=env)
   assert not calls
   assert writes["run_tpu7x_tests"] == "true" and "tpu7x_flavors" not in writes
-  assert writes["run_tests"] == "true"
+  assert writes["run_tests"] == "true" and writes["newly_added_only"] == "false"
   assert writes["run_heavy_tests"] == "false" and writes["heavy_tests_gated"] == "true"
 
 
+def test_analyze_code_changes_live_pr_metadata_overrides_stale_env_and_fails_closed(tmp_path):
+  """Re-runs reuse the original webhook payload, so live PR draft/labels must win and API failures must fail closed."""
+  ok_dir, fail_dir = tmp_path / "ok", tmp_path / "fail"
+  ok_dir.mkdir()
+  fail_dir.mkdir()
+  pr_env = {"GITHUB_REPOSITORY": "AI-Hypercomputer/maxtext", "PR_NUMBER": "42", "IS_DRAFT": "true"}
+  writes, _ = _run_analyze_script(
+      ok_dir,
+      env={**pr_env, "HAS_SKIP_CI_TESTS_LABEL": "true"},
+      gh_pr={"draft": False, "labels": [{"name": "run-tpu7x"}]},
+      change={"src/maxtext/train.py": "# changed\n"},
+  )
+  assert writes["run_heavy_tests"] == "true" and writes["heavy_tests_gated"] == "false"
+  assert writes["run_tpu7x_tests"] == "true" and writes["newly_added_only"] == "false"
+
+  failed_writes, _ = _run_analyze_script(fail_dir, env=pr_env, gh_rc=1, expect_rc=1)
+  assert "run_heavy_tests" not in failed_writes and "heavy_tests_gated" not in failed_writes
+
+
 @pytest.mark.parametrize(
-    "changed_file, moves",
+    "attempt, copybara, labels, events, run_heavy, gated",
     [
+        pytest.param("1", "false", [], [], "false", "true", id="new-pr-before-labeler"),
+        pytest.param("2", "false", [{"name": "run-tpu7x"}], [], "false", "true", id="initial-label-race-attempt-2"),
+        pytest.param("1", "true", [], [], "true", "false", id="copybara-exempt"),
+        pytest.param("1", "false", [{"name": "pull ready"}], [], "true", "false", id="fork-approved-after-pull-ready"),
         pytest.param(
-            "src/dependencies/requirements/generated_requirements/tpu-requirements.txt",
-            {"tpu_pre_train_deps_tag"},
-            id="tpu-requirements",
+            "1",
+            "false",
+            [],
+            [{"id": 9, "event": "unlabeled", "label": {"name": "skip-ci-tests"}}],
+            "true",
+            "false",
+            id="unlabeled-skip-ci-tests",
         ),
-        pytest.param(
-            "src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt",
-            {"tpu_post_train_deps_tag"},
-            id="tpu-post-train-requirements",
-        ),
-        pytest.param(
-            "src/dependencies/requirements/generated_requirements/cuda12-requirements.txt",
-            {"gpu_pre_train_deps_tag"},
-            id="cuda12-requirements",
-        ),
-        pytest.param(
-            "src/dependencies/extra_deps/pre_train_github_deps.txt",
-            {"tpu_pre_train_deps_tag", "gpu_pre_train_deps_tag"},
-            id="pre-train-github-deps",
-        ),
-        pytest.param(
-            "src/dependencies/scripts/install_post_train_extra_deps.py",
-            {"tpu_post_train_deps_tag"},
-            id="post-train-installer",
-        ),
+        pytest.param("2", "false", [{"name": "skip-ci-tests"}], [], "false", "true", id="rerun-with-skip-present"),
     ],
 )
-def test_analyze_code_changes_tags_move_only_for_the_images_that_use_the_file(tmp_path, changed_file, moves):
-  """Each image hashes only its own inputs, so a bump must rename those images and leave the rest alone."""
-  unchanged_dir, changed_dir = tmp_path / "unchanged", tmp_path / "changed"
-  unchanged_dir.mkdir()
-  changed_dir.mkdir()
-  unchanged, _ = _run_analyze_script(unchanged_dir)
-  writes, _ = _run_analyze_script(changed_dir, change={changed_file: "# changed\n"})
-  for key in _DEPS_IMAGE_TAGS:
-    if key in moves:
-      assert writes[key] != unchanged[key], f"{key} should have moved for {changed_file}"
-    else:
-      assert writes[key] == unchanged[key], f"{key} should not have moved for {changed_file}"
-
-
-def test_dependency_image_extras_match_the_generated_requirement_files():
-  """test_deps_env.Dockerfile installs the requirement file instead of the wheel's extra, so the two must agree.
-
-  The image installs `-r <extra>-requirements.txt` and the test job then installs the wheel with --no-deps. That is
-  only equivalent while maxtext declares no base dependencies and each extra is exactly one generated file; add a
-  base dependency and CI would silently run without it.
-  """
-  pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-  assert "\ndependencies = []\n" in pyproject, "maxtext gained base dependencies; --no-deps would now skip them"
-  generated = "src/dependencies/requirements/generated_requirements"
-  for extra, filename in [
-      ("tpu", "tpu-requirements.txt"),
-      ("tpu-post-train", "tpu-post-train-requirements.txt"),
-      ("cuda12", "cuda12-requirements.txt"),
-  ]:
-    assert f'{extra} = ["{generated}/{filename}"]' in pyproject, f"extra '{extra}' no longer maps to {filename}"
+def test_analyze_code_changes_opened_gates_until_skip_label_removed(
+    tmp_path, attempt, copybara, labels, events, run_heavy, gated
+):
+  """Rule 4 gates `opened` until `skip-ci-tests` has been removed or `pull ready` added, regardless of attempt number."""
+  writes, _ = _run_analyze_script(
+      tmp_path,
+      env={
+          "GITHUB_REPOSITORY": "AI-Hypercomputer/maxtext",
+          "PR_NUMBER": "42",
+          "EVENT_ACTION": "opened",
+          "GITHUB_RUN_ATTEMPT": attempt,
+          "IS_COPYBARA_PR": copybara,
+      },
+      gh_pr={"draft": False, "labels": labels},
+      gh_events=events,
+      change={"src/maxtext/train.py": "# changed\n"},
+  )
+  assert writes["run_heavy_tests"] == run_heavy and writes["heavy_tests_gated"] == gated

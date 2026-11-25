@@ -1,89 +1,66 @@
-# E2E Logits Validation & Autoregressive Decode Verification
+# Mini-Model-Verification & Multi-Token Masked Prefill
 
-This guide covers Phase 4 of the MaxText model bring-up workflow: validating logits, running autoregressive decode checks, and iteratively resolving discrepancies using the fast mini safetensors subset before full model verification.
+This guide covers Phase 4 of the MaxText model bring-up workflow: running [mini-model-verification](mini_verification.md), validating full-model **Multi-Token Masked Prefill** on both `scanned` and `unscanned` checkpoints, and iteratively resolving discrepancies.
 
-## 1. Fast Mini-Subset Verification Workflow
+## 1. Fast Mini-Model-Verification Workflow
 
-Always verify the minimal layer subset ($N$ layers) first using real weights from `/dev/shm/hf_mini/{model_name}_xlayers` and `/dev/shm/$USER/checkpoints/{model_name}_mini_orbax`.
-
-This fast loop consists of two dual validations:
-1. **Forward Pass Logits Check**: Verifies prefix prompt logits and probabilities.
-2. **Autoregressive Decode Check**: Verifies step-by-step KV-cached generation (16 tokens).
+Always verify a representative trimmed/sliced subset ($N$ layers) first using `/dev/shm/hf_mini/{model_name}_xlayers` and `/dev/shm/$USER/checkpoints/{model_name}_mini_orbax` before running full checkpoints. See [mini_verification.md](mini_verification.md) for the full `mini-model-verification` checklist.
 
 ---
 
-## 2. Generate Golden Mini Logits & Golden Decode
-Generate standard reference golden logits and golden 16-token autoregressive decode using the local mini PyTorch HuggingFace model in `/dev/shm/hf_mini/{model_name}_xlayers`:
+## 2. Generate Golden Multi-Token Masked Prefill
 
-```python
-import json
-import os
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-user = os.environ.get("USER", "user")
-mini_model_path = "/dev/shm/hf_mini/{model_name}_xlayers"
-tokenizer = AutoTokenizer.from_pretrained(mini_model_path, trust_remote_code=True)
-model = AutoModelForCausalLM.from_pretrained(mini_model_path, torch_dtype=torch.float32, trust_remote_code=True)
-model.eval()
-
-prompt = "I love to"
-inputs = tokenizer(prompt, return_tensors="pt")
-
-# 1. Golden Forward Pass Logits
-with torch.no_grad():
-  outputs = model(**inputs)
-  golden_logits = outputs.logits[0].detach().cpu().numpy().tolist()
-
-# Save to golden_mini_logits.jsonl for forward_pass_logit_checker
-os.makedirs(f"/dev/shm/{user}", exist_ok=True)
-with open(f"/dev/shm/{user}/golden_mini_logits.jsonl", "w") as f:
-  f.write(json.dumps({"prompt": prompt, "tokens": inputs.input_ids[0].tolist(), "logits": golden_logits}) + "\n")
-
-# 2. Golden 16-Token Autoregressive Decode (Greedy)
-with torch.no_grad():
-  gen_tokens = model.generate(**inputs, max_new_tokens=16, do_sample=False)
-  golden_decoded_text = tokenizer.decode(gen_tokens[0])
-  print("HF Golden 16-Token Output:", repr(golden_decoded_text))
-  print("HF Golden Token IDs:", gen_tokens[0].tolist())
-```
+Use `tests/utils/zero_gen_logits_checker.py` (`tokenize_golden_batch` over `GOLDEN_BATCH_SECTIONS` or evaluation prompts such as TinyMMLU) to build padded multi-token batches with `decoder_segment_ids` and a completion `target_mask`, then save HuggingFace reference `tokens`, `logits`, `target_mask`, and optional `routing_indices` / `indexer_selected_blocks` via `save_golden_npz` (or generate `.jsonl`/`.pkl` goldens via `tests.assets.logits_generation.generate_hf_golden_logits`).
 
 ---
 
-## 3. Run MaxText Forward Pass Logits Checker on TPU VM
-Execute the logits checker script directly from the MaxText root directory on your TPU VM:
+## 3. Run Full-Model Multi-Token Masked Prefill (`scanned` & `unscanned`)
+
+Convert the full checkpoint with `to_maxtext` for both `scan_layers=true` (`scanned`) and `scan_layers=false` (`unscanned`), keeping strict `fp32` modules (such as MoE routers/biases and residual gates) in `float32` when saving `bfloat16`. Execute from the MaxText root directory on both checkpoints:
 
 ```bash
 export HF_HOME=/dev/shm/$USER
 
-python3 -m tests.utils.forward_pass_logit_checker   --model_name={model_name}   --maxtext_model_path=/dev/shm/$USER/checkpoints/{model_name}_mini_orbax   --golden_logits_path=/dev/shm/$USER/golden_mini_logits.jsonl   --base_num_decoder_layers={N}
+# 1. Masked prefill parity: routing/indexer + masked target logits (repeat with scan_layers=false)
+python3 -m tests.utils.zero_gen_logits_checker \
+  --mode=prefill_logits \
+  --golden_tensor_path=/tmp/golden_fp32.npz \
+  src/maxtext/configs/base.yml \
+  model_name={model_name} \
+  load_parameters_path={orbax_ckpt_path} \
+  scan_layers=true \
+  dtype=float32 weight_dtype=float32 matmul_precision=highest
+
+# 2. Masked CE / TinyMMLU loss delta in nats
+python3 -m tests.utils.zero_gen_logits_checker \
+  --mode=tinymmlu \
+  --golden_tensor_path=/tmp/golden_fp32.npz \
+  --tol_nats=0.01 \
+  src/maxtext/configs/base.yml \
+  model_name={model_name} \
+  load_parameters_path={orbax_ckpt_path} \
+  scan_layers=true \
+  dtype=bfloat16 weight_dtype=bfloat16
 ```
 
 ### Key Evaluation Metrics:
-1. **Average KL Divergence per token** ($D_{KL}(P_{golden} \\parallel Q_{model})$): Expected range $< 10^{-3}$.
-2. **Maximum KL Divergence**: Target $\\le 10^{-2}$.
-3. **Top-K Token Overlap & Jaccard Similarity**: Confirms top token distributions align.
+1. **Standard / `fp32` Masked Prefill**: Per-token cosine similarity $\ge 0.9999$, KL divergence $\le 10^{-4}$, max abs error $\le 10^{-2}$ (scaled by $\sqrt{\text{seq\_len}/512}$ on masked tokens), `zero_norm_token_count == 0`, and multi-row vs single-row `mean_batch_diff <= 1e-4`.
+2. **Deep `bf16` MoE Models**: Run both:
+   - **Router Replay (`forced_routed_experts`)** vs `fp32` golden: min cosine sim $\ge 0.999$, mean KL $\le 0.005$, max abs $\le 1.0$, $\Delta\text{CE} \le 0.01\text{ nats}$.
+   - **Unforced End-to-End**: `fp32` matches `fp32` golden; `bf16` achieves mean cosine sim $\ge 0.999$, mean KL $\le 0.005$, and TinyMMLU / masked $\Delta\text{CE} \le 0.01\text{ nats}$.
 
 ---
 
-## 4. Run MaxText Autoregressive Decode Check (16 Tokens)
-Run greedy decoding on MaxText using the mini converted checkpoint to generate 16 additional tokens:
+## 4. Training & SFT Correctness Smoke Check (If Applicable)
 
-```bash
-export HF_HOME=/dev/shm/$USER
-
-python3 -m maxtext.inference.decode   src/maxtext/configs/base.yml   model_name={model_name}   load_parameters_path=/dev/shm/$USER/checkpoints/{model_name}_mini_orbax   base_num_decoder_layers={N}   prompt="I love to"   max_target_length=20   temperature=0.0
-```
-
-### Success Criteria for Decode:
-- **Gibberish Match**: Because the model only has $N$ layers (an incomplete model), the output text will naturally be gibberish.
-- **The verification passes if MaxText and HuggingFace generate the exact same token IDs and identical gibberish string**.
-- This strictly verifies that KV cache management, positional index updates, causal attention masking, and autoregressive step execution in the JAX decoder are bug-free.
+Verify multi-step training stability (`remat_policy=full`) on both `scanned` and `unscanned` full checkpoints (if TPU HBM is insufficient on your TPU VM or cluster, apply the HBM-saving ladder in [wiki/hbm_verification.md](wiki/hbm_verification.md)):
+1. **Pre-training**: Run 5–10 steps of `maxtext.trainers.pre_train.train` on C4 (from converted checkpoint and/or random init) and confirm finite, matching `scanned` / `unscanned` loss trajectories.
+2. **SFT**: Run 5–10 steps of `maxtext.trainers.post_train.sft.train_sft_native` with assistant-only completion masking (and optional `--mode=holdout_ce` check).
 
 ---
 
 ## 5. Iterative Debugging Loop (Closing the Gap)
-If KL divergence is high or decode diverges from token 1:
+If KL divergence is high or masked prefill metrics fail:
 
 > [!IMPORTANT]
 > **Free Shared Memory Space**:
@@ -91,14 +68,14 @@ If KL divergence is high or decode diverges from token 1:
 
 ### Step-by-Step Debugging Guide:
 1. **Is it off from token 0 / layer 0?**
-   - Check token embedder weights, transposition, and input ID mapping.
-2. **Is it off in attention / decode step?**
-   - Check if RMSNorm epsilon matches HF `config.json`.
-   - Verify query/key/value projection transpositions and head dimension layout.
-   - Rotary Embeddings (RoPE): Check if RoPE frequency theta matches, and verify whether `permute_to_match_maxtext_rope` is needed.
-   - KV Cache: Check if single-step decode attention mask or cache update indexing is misaligned.
+   - Check token embedder weights, normalization/scaling, transposition, and input ID mapping.
+2. **Is it off in attention?**
+   - Check if RMSNorm epsilon (and `1 + w` vs standard RMSNorm) matches HF `config.json`.
+   - Verify query/key/value projection transpositions, QK-norm/output gating, and head dimension layout.
+   - Rotary Embeddings (RoPE): Check if RoPE frequency theta or `partial_rotary_factor` matches, and verify whether `permute_to_match_maxtext_rope` is needed.
+   - Check `sliding_window_size` vs global attention layer cycle indexing and `decoder_segment_ids` padding masks.
 3. **MLP & MoE routing**:
-   - Check expert gate weights and top-k gating probability normalization (`norm_topk_prob`).
+   - Check expert gate weights, `fp32` router precision, top-k gating probability normalization (`norm_topk_prob`), and compare Router Replay vs Unforced to separate `bf16` router boundary tie-flips from weight/math bugs.
 
 ### Deep Verification via Intermediate Activations Mapping:
 If discrepancies persist:
@@ -115,10 +92,6 @@ If discrepancies persist:
 ---
 
 ## 6. Final Session Wrap-up & Handover Document
-Once the mini subset passes and the full model checkpoint is validated:
-1. Finalize `{model_name}_handover.md` in the MaxText root directory.
-2. Record:
-   - Final status of all 4 phases (`DONE`).
-   - Summary of all bugs found during bring-up and their fixes.
-   - Complete list of pitfalls and model-specific nuances.
-   - Full executable CLI commands for slicing, converting, checking logits, and decoding.
+Once `mini-model-verification` passes and the full model checkpoints (`scanned` & `unscanned`) are validated:
+1. Finalize `{model_name}_handover.md` in the MaxText root directory using the template in [roadmap.md](roadmap.md).
+2. Ensure every completed stage pairs its **quantitative result table**, **exact reproduction command**, and **log/checkpoint/golden artifact paths** alongside the HF architectural findings and resolved pitfalls so all evidence is easy to audit.

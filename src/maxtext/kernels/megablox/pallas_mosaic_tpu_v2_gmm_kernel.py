@@ -254,6 +254,21 @@ class GmmConfigs:
   # Output is stored as [size_m, out_size_n // 128, 128] (one contiguous slab
   # per row); tiles are relayouted from [tile_m, tile_n] inside VMEM.
   out_is_3d: bool = False
+  # Set by make_gmm_configs when gmm_v2's tail_chunks is on and the config
+  # supports it: a tile with few valid rows runs as consecutive tail_chunk_m-row
+  # tiles (inner_kernel).
+  tail_chunks: bool = False
+
+  @property
+  def tail_chunk_m(self) -> int:
+    # On TPU7x, with tile_n of at least two MXU columns, Mosaic rounds a matmul
+    # of this many rows as a tile_m-row matmul rounds those rows.
+    return 256 if self.transpose_rhs else 128
+
+  @property
+  def max_tail_chunks(self) -> int:
+    # Most chunks a tile runs as; tiles with more valid rows take the tile_m matmul.
+    return self.tiles.tile_m // (2 * self.tail_chunk_m)
 
   @property
   def lhs_is_3d(self) -> bool:
@@ -430,9 +445,12 @@ def generate_block_specs(
         _ordered(index_map.lhs_index_map),
     )
   else:
+    # tail_chunks: triple-buffer the 2D lhs and out blocks too, so the shorter
+    # steps' DMAs overlap the full tiles' matmuls.
     lhs_value_spec = pl.BlockSpec(
         (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_k),
         _ordered(index_map.lhs_index_map),
+        pipeline_mode=pl.Buffered(3) if cfgs.tail_chunks else None,
     )
   lhs_scale_spec = None
   if cfgs.lhs_cfgs.has_scale:
@@ -495,6 +513,7 @@ def generate_block_specs(
     out_block_spec = pl.BlockSpec(
         (bounded_slice_gm, cfgs.dims.size_lhs_sublane, cfgs.tiles.tile_n),
         _ordered(index_map.out_index_map),
+        pipeline_mode=pl.Buffered(3) if cfgs.tail_chunks else None,
     )
 
   return (lhs_block_spec, rhs_block_spec, ps_block_spec), out_block_spec
@@ -546,7 +565,16 @@ def inner_kernel(
     num_k: Total number of K tiles along grid axis 2.
   """
 
-  def _matmul(is_first_k_step: bool, is_last_k_step: bool):
+  # The refs, cfgs and row range default to the whole tile; tail_chunks
+  # passes one chunk of the tile's rows as if it were a tile (see below).
+  def _matmul(
+      is_first_k_step: bool,
+      is_last_k_step: bool,
+      tiled_lhs_ref: LhsRef = tiled_lhs_ref,
+      tiled_out_ref: Any = tiled_out_ref,
+      cfgs: GmmConfigs = cfgs,
+      m_range: tuple[jax.Array, jax.Array] | None = None,
+  ):
     tpu_info = pltpu.get_tpu_info()
     mxu_size = tpu_info.mxu_column_size
 
@@ -793,8 +821,11 @@ def inner_kernel(
       gm_id = step.index[cfgs.gm_axis]
 
       # Mask out rows that does not belong to the current group.
-      m_start = metadata_ref.gm_id_to_m_offset[gm_id]
-      m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+      if m_range is None:
+        m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+        m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+      else:
+        m_start, m_end = m_range
       m_offset = m_start - m_start % cfgs.dims.size_lhs_sublane
 
       m_start_local = m_start - m_offset
@@ -874,6 +905,46 @@ def inner_kernel(
   def matmul_last():
     _matmul(is_first_k_step=False, is_last_k_step=True)
 
+  if cfgs.tail_chunks:
+    # Single K step. A tile whose valid rows (counted from its first sublane
+    # row) fit in at most max_tail_chunks chunks of tail_chunk_m rows runs
+    # _matmul once per chunk, on views of the chunk's lhs and out rows, as if the
+    # chunk were a tile; out rows past the last chunk are not written back (the
+    # block is bounded to the tile's rows). Bit-identical: on TPU7x, Mosaic
+    # rounds a tail_chunk_m-row matmul as the tile_m matmul rounds those rows,
+    # and the fori_loop compiles the chunk's matmul once, on its own. With tile_n
+    # of one MXU column and an odd number of 256-wide K slices, Mosaic splits the
+    # K sum between the two MXUs differently for the chunk than for the tile, so
+    # make_gmm_configs requires tile_n of at least two columns.
+    sub = cfgs.dims.size_lhs_sublane
+    chunk_m = cfgs.tail_chunk_m
+    gm_id = step.index[cfgs.gm_axis]
+    m_start = metadata_ref.gm_id_to_m_offset[gm_id]
+    m_end = metadata_ref.gm_id_to_m_offset[gm_id + 1]
+    m_offset = m_start - m_start % sub
+    chunk_cfgs = dataclasses.replace(cfgs, tiles=dataclasses.replace(cfgs.tiles, tile_m=chunk_m))
+
+    @jax.named_scope("matmul_tail_chunk")
+    def matmul_chunk(i, carry):
+      rows = pl.ds(pl.multiple_of(i * (chunk_m // sub), chunk_m // sub), chunk_m // sub)
+      _matmul(
+          is_first_k_step=True,
+          is_last_k_step=True,
+          tiled_lhs_ref=dataclasses.replace(tiled_lhs_ref, value=tiled_lhs_ref.value.at[rows]),
+          tiled_out_ref=tiled_out_ref.at[rows],
+          cfgs=chunk_cfgs,
+          m_range=(jnp.maximum(m_start, m_offset + i * chunk_m), jnp.minimum(m_end, m_offset + (i + 1) * chunk_m)),
+      )
+      return carry
+
+    num_chunks = pl.cdiv(m_end - m_offset, chunk_m)
+    lax.cond(
+        num_chunks <= cfgs.max_tail_chunks,
+        lambda: lax.fori_loop(0, num_chunks, matmul_chunk, None),
+        matmul_first_last,
+    )
+    return
+
   # Select and execute matmul function based on the current step.
   k_id = step.index[2]
 
@@ -919,7 +990,23 @@ def fill_metadata(
   Returns:
       The number of gm tiles to process lhs with given group offset.
   """
+  num_gm, _ = _fill_metadata(lhs_group_sizes_ref, group_offset_ref, metadata_ref, cfgs=cfgs, short_tile_rows=0)
+  return num_gm
 
+
+def _fill_metadata(
+    lhs_group_sizes_ref: jax.Array,
+    group_offset_ref: jax.Array,
+    metadata_ref: MetadataRef,
+    *,
+    cfgs: GmmConfigs,
+    short_tile_rows: int,
+) -> tuple[jax.Array, jax.Array]:
+  """fill_metadata that also counts the gm tiles of at most short_tile_rows rows (0: does not count).
+
+  A tile's rows are counted from its first sublane row, as inner_kernel counts
+  them for tail chunks.
+  """
   group_offset = group_offset_ref[0]
   max_num_group = group_offset + cfgs.dims.size_group
   metadata_ref.gm_id_to_m_offset[0] = 0
@@ -939,7 +1026,7 @@ def fill_metadata(
 
   @jax.named_scope("outer_group_loop")
   def outer_group_loop(lhs_group_id, carry):
-    num_gm, start_m_offset = carry
+    num_gm, start_m_offset = carry[:2]
 
     group_id = lhs_group_id - group_offset
     group_size = lhs_group_sizes_ref[lhs_group_id]
@@ -977,10 +1064,18 @@ def fill_metadata(
     )
     lax.fori_loop(num_gm, next_num_gm, tm_loop_fn, start_m_offset)
 
-    return next_num_gm, end_m_offset
+    if not short_tile_rows:
+      return next_num_gm, end_m_offset
+    # Only a group's last tile can hold fewer than tile_m rows.
+    last_tile_rows = aligned_group_size - (curr_num_gm - 1) * cfgs.tiles.tile_m
+    is_short = jnp.logical_and(should_process, last_tile_rows <= short_tile_rows)
+    return next_num_gm, end_m_offset, carry[2] + is_short.astype(jnp.int32)
 
-  num_gm, _ = lax.fori_loop(0, max_num_group, outer_group_loop, (0, 0))
-  return num_gm
+  if not short_tile_rows:
+    num_gm, _ = lax.fori_loop(0, max_num_group, outer_group_loop, (0, 0))
+    return num_gm, jnp.int32(0)
+  num_gm, _, num_short = lax.fori_loop(0, max_num_group, outer_group_loop, (0, 0, 0))
+  return num_gm, num_short
 
 
 def zero_out_start(
@@ -1130,11 +1225,13 @@ def kernel_main(
     rhs_ref = dataclasses.replace(rhs_ref, weight=rhs_weight)
 
   # Fill metadata buffer and return number of group & m iterations.
-  num_gm = fill_metadata(
+  # With tail chunks, also count the tiles that would run as chunks.
+  num_gm, num_short = _fill_metadata(
       lhs_group_sizes_ref,
       group_offset_ref,
       metadata_ref,
       cfgs=cfgs,
+      short_tile_rows=cfgs.max_tail_chunks * cfgs.tail_chunk_m if cfgs.tail_chunks else 0,
   )
 
   if cfgs.zero_init:
@@ -1147,8 +1244,6 @@ def kernel_main(
         dims=cfgs.dims,
     )
 
-  (lhs_spec, rhs_spec, ps_spec), out_spec = generate_block_specs(metadata_ref, cfgs, num_gm)
-
   if cfgs.fuse_act is not None:
     if cfgs.transpose_rhs:
       rhs_up_weight = rhs_ref.weight.at[:, cfgs.out_size_n :, :]
@@ -1159,19 +1254,18 @@ def kernel_main(
     rhs_up_ref = WeightsRef(weight=rhs_up_weight, scale=rhs_up_scale, bias=rhs_up_bias)
     rhs_ref = FusedWeightsRef(gate=rhs_ref, up=rhs_up_ref)  # pyrefly: ignore[bad-assignment]
 
-    rhs_spec = FusedWeightsRef(
-        gate=rhs_spec,
-        up=rhs_spec,
+  def make_pipeline(cfgs: GmmConfigs):
+    (lhs_spec, rhs_spec, ps_spec), out_spec = generate_block_specs(metadata_ref, cfgs, num_gm)
+    if cfgs.fuse_act is not None:
+      rhs_spec = FusedWeightsRef(gate=rhs_spec, up=rhs_spec)
+    # Execute the inner kernel.
+    return pltpu.emit_pipeline(
+        functools.partial(inner_kernel, cfgs=cfgs, num_k=num_k),
+        grid=(num_gm, num_n, num_k) if cfgs.out_window else (num_n, num_gm, num_k),
+        in_specs=(lhs_spec, rhs_spec, ps_spec),
+        out_specs=out_spec,
+        _explicit_indices=True,
     )
-
-  # Execute the inner kernel.
-  pipeline_fn = pltpu.emit_pipeline(
-      functools.partial(inner_kernel, cfgs=cfgs, num_k=num_k),
-      grid=(num_gm, num_n, num_k) if cfgs.out_window else (num_n, num_gm, num_k),
-      in_specs=(lhs_spec, rhs_spec, ps_spec),
-      out_specs=out_spec,
-      _explicit_indices=True,
-  )
 
   # Bounded slice requires second last dim to be aligned to the sublane size.
   # rhs_ref uses static tiling thus reshape is not needed. The lhs quant scale
@@ -1189,7 +1283,18 @@ def kernel_main(
   # Works for both [size_m, size_n] and the 3D [size_m, D0, 128] output.
   out_in = out_ref.reshape(-1, cfgs.dims.size_lhs_sublane, *out_ref.shape[1:])
   scratches = [partial_out_ref, acc_ref, metadata_ref]
-  pipeline_fn(lhs_in, rhs_ref, ps_in, out_in, scratches=scratches)
+  if cfgs.tail_chunks:
+    # The deeper pipeline costs a little on every step, so the chunks pay off
+    # only when enough tiles run them; otherwise run the kernel without them.
+    lax.cond(
+        _TAIL_CHUNKS_MIN_TILE_FRACTION * num_short >= num_gm,
+        lambda: make_pipeline(cfgs)(lhs_in, rhs_ref, ps_in, out_in, scratches=scratches),
+        lambda: make_pipeline(dataclasses.replace(cfgs, tail_chunks=False))(
+            lhs_in, rhs_ref, ps_in, out_in, scratches=scratches
+        ),
+    )
+  else:
+    make_pipeline(cfgs)(lhs_in, rhs_ref, ps_in, out_in, scratches=scratches)
 
   if cfgs.zero_init:
     zero_out_end(out_ref, semaphore_ref, zero_size, dims=cfgs.dims)  # pyrefly: ignore[bad-argument-type, unbound-name]
@@ -1432,6 +1537,31 @@ def get_scope_name(cfgs: GmmConfigs) -> str:
   return scope_name
 
 
+# tail_chunks runs only when at least 1 / this many of a call's tiles run as chunks.
+_TAIL_CHUNKS_MIN_TILE_FRACTION = 16
+# The VMEM buffer that gmm_v2's zero_initialize copies zeros from.
+_ZERO_REF_BYTES = 2 * 1024 * 1024
+# tail_chunks triple-buffers the out block. JAX 0.11.x rejects more than two output buffers ("Buffer count >2 not
+# supported for output buffered refs"); the releases that accept them have BufferedRef.out_buffer_count.
+_DEEP_OUT_BUFFERS = hasattr(getattr(pltpu, "BufferedRef", None), "out_buffer_count")
+
+
+def _tail_chunks_vmem_bytes(cfgs: GmmConfigs) -> int:
+  """VMEM of the tail_chunks pipeline: triple-buffered lhs, rhs and out, f32 acc, partial out, zero-init buffer, and
+  512 KiB of headroom for Mosaic's internal scratch (72 KiB by default on TPU7x)."""
+  tm, tk, tn = cfgs.tiles.tile_m, cfgs.tiles.tile_k, cfgs.tiles.tile_n
+  lhs_bytes = jnp.dtype(cfgs.lhs_cfgs.dtype).itemsize
+  rhs_bytes = jnp.dtype(cfgs.rhs_cfgs.dtype).itemsize
+  out_bytes = jnp.dtype(cfgs.out_dtype).itemsize
+  return (
+      3 * (tm * tk * lhs_bytes + tk * tn * rhs_bytes + tm * tn * out_bytes)
+      + tm * tn * jnp.dtype(cfgs.acc_dtype).itemsize
+      + cfgs.dims.size_lhs_sublane * tn * out_bytes
+      + (_ZERO_REF_BYTES if cfgs.zero_init else 0)
+      + 512 * 1024
+  )
+
+
 def make_gmm_configs(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -1451,6 +1581,7 @@ def make_gmm_configs(
     lhs_scale: jax.Array | None = None,
     transpose_rhs: bool = False,
     out_is_3d: bool = False,
+    tail_chunks: bool = False,
 ):
   """Fills the GMM config for the GMM kernel."""
 
@@ -1578,7 +1709,7 @@ def make_gmm_configs(
   elif partial_sum is not None and partial_sum.ndim == 3:
     raise ValueError("A 3D partial_sum requires out_is_3d=True.")
 
-  return GmmConfigs(
+  cfgs = GmmConfigs(
       dims=dims,
       tiles=tiles,
       lhs_cfgs=lhs_cfgs,
@@ -1591,6 +1722,30 @@ def make_gmm_configs(
       transpose_rhs=transpose_rhs,
       out_is_3d=out_is_3d,
   )
+  # Tail chunks, if asked for, only where they were checked bit-identical:
+  # TPU7x, bf16 2D unquantized inputs and output without bias, an f32
+  # accumulator, a single K step, tile_m 256/512/1024, and tile_n of at least
+  # two whole MXU columns (see inner_kernel); and only if the deeper pipeline
+  # fits VMEM and JAX supports it. kernel_main runs them only when enough tiles
+  # are short.
+  mxu_column_size = pltpu.get_tpu_info().mxu_column_size
+  if (
+      tail_chunks
+      and _DEEP_OUT_BUFFERS
+      and pltpu.get_tpu_info().chip_version == pltpu.ChipVersion.TPU_7X
+      and lhs_cfgs.dtype == rhs_cfgs.dtype == cfgs.out_dtype == jnp.bfloat16
+      and cfgs.acc_dtype == jnp.float32
+      and not (lhs_cfgs.is_3d or out_is_3d or lhs_cfgs.quant_dtype is not None or has_lhs_scale)
+      and not (rhs_cfgs.has_scale or rhs_cfgs.has_bias or partial_sum is not None or fuse_act is not None)
+      and pl.cdiv(dims.size_k, tiles.tile_k) == 1
+      and tiles.tile_m in (256, 512, 1024)
+      and tiles.tile_n % mxu_column_size == 0
+      and tiles.tile_n >= 2 * mxu_column_size
+      and tiles.tile_m >= 2 * cfgs.tail_chunk_m
+      and _tail_chunks_vmem_bytes(cfgs) <= (vmem_limit_bytes or 0)
+  ):
+    cfgs = dataclasses.replace(cfgs, tail_chunks=True)
+  return cfgs
 
 
 def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
@@ -1616,6 +1771,7 @@ def get_metadata(cfgs: GmmConfigs) -> dict[str, str | int | float]:
         "fuse_act",
         "transpose_rhs",
         "out_is_3d",
+        "tail_chunks",
     ]
 )
 def gmm_v2(
@@ -1638,6 +1794,7 @@ def gmm_v2(
     fuse_act: str | None = None,
     transpose_rhs: bool = False,
     out_is_3d: bool = False,
+    tail_chunks: bool = False,
 ) -> jax.Array:
   """GMM kernel implemented with emit_pipeline.
 
@@ -1676,6 +1833,10 @@ def gmm_v2(
       Both require tile_k / tile_n to be a multiple of 128 that divides the
       dim. Tiles whose D0 (tile // 128) is not a multiple of 8 use full-D0
       blocks and relayout the tile window in VMEM.
+    tail_chunks: On TPU7x, compute a tile whose valid rows fit in half of it
+      in 128-row chunks (256-row with transpose_rhs) instead of one tile_m-row
+      matmul, when at least 1/16 of the tiles are that short. Bit-identical;
+      only for the configs make_gmm_configs allows, others ignore it.
 
   Returns:
     Output of shape [size_m, size_n] (or [size_m, size_n // 128, 128]).
@@ -1710,6 +1871,7 @@ def gmm_v2(
       lhs_scale=lhs_scale,
       transpose_rhs=transpose_rhs,
       out_is_3d=out_is_3d,
+      tail_chunks=tail_chunks,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
@@ -1755,7 +1917,7 @@ def gmm_v2(
 
   if cfgs.zero_init:
     # TODO: Create better heuristics for determining this value.
-    target_zero_ref_bytes = 2 * 1024 * 1024
+    target_zero_ref_bytes = _ZERO_REF_BYTES
 
     # Zero initialization is done by tiling size_m dim where each tile invokes
     # zero initializing DMA for up-to tile_zero_m rows. This means larger

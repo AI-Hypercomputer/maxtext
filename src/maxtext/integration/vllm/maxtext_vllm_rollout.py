@@ -37,7 +37,7 @@ from flax import nnx
 from flax.traverse_util import flatten_dict, unflatten_dict
 import jax
 import jax.numpy as jnp
-from maxtext.integration.vllm.convert_utils import MOE_MLP_WEIGHTS, _sharding_summary
+from maxtext.integration.vllm.convert_utils import MOE_MLP_WEIGHTS, _sharding_summary, uses_maxtext_vllm_adapter
 from maxtext.integration.vllm.torchax_converter.gemma4_moe import Gemma4MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen35_moe import Qwen35MaxTextToVLLMConverter
 from maxtext.integration.vllm.torchax_converter.qwen3_moe import Qwen3MaxTextToVLLMConverter
@@ -177,19 +177,6 @@ def _as_dict(value: Any) -> dict:
   return {}
 
 
-def uses_maxtext_vllm_adapter(config: Any) -> bool:
-  """Returns whether vLLM is configured to instantiate MaxTextForCausalLM."""
-  overrides = getattr(config, "vllm_hf_overrides", None)
-  if isinstance(overrides, str):
-    return "MaxTextForCausalLM" in overrides
-  if isinstance(overrides, dict):
-    architectures = overrides.get("architectures", ())
-    if isinstance(architectures, str):
-      architectures = (architectures,)
-    return "MaxTextForCausalLM" in architectures
-  return False
-
-
 def requires_maxtext_scanned_weight_unroll(config: Any) -> bool:
   """Returns whether direct MaxText-to-MaxText sync needs a custom unroll."""
   return bool(getattr(config, "scan_layers", False) and uses_maxtext_vllm_adapter(config))
@@ -315,12 +302,12 @@ def validate_direct_sync_layer_coverage(source, target) -> int:
   return len(target_layer_keys)
 
 
-_QWEN_NESTED_LOCAL = "local_layers"
-_QWEN_NESTED_GLOBAL = "global_layer"
+_NESTED_LOCAL = "local_layers"
+_NESTED_GLOBAL = "global_layer"
 
 
-class _QwenScannedRef(NamedTuple):
-  """Where a scanned Qwen parameter sits, and how it maps onto cycle slots."""
+class _NestedScanRef(NamedTuple):
+  """Where a nested block scan parameter sits, and how it maps onto cycle slots."""
 
   container_idx: int
   slot_idx: Optional[int]
@@ -329,33 +316,35 @@ class _QwenScannedRef(NamedTuple):
   trailing: bool
 
 
-_NO_QWEN_SCAN = _QwenScannedRef(-1, -1, 0, False, False)
+_NO_NESTED_SCAN = _NestedScanRef(-1, -1, 0, False, False)
 
 
-def _find_qwen_scanned_layer_idx(key_tuple) -> _QwenScannedRef:
-  """Finds a Qwen scanned block path like `layers.local_layers` or `layers.layer_0`."""
+def _find_nested_scanned_layer_idx(key_tuple) -> _NestedScanRef:
+  """Finds a scanned block path like `layers.local_layers`, `layers.layer_0` or `scanned_blocks.global_layer`."""
   for i in range(len(key_tuple) - 1):
-    if key_tuple[i] != "layers" or not isinstance(key_tuple[i + 1], str):
+    if key_tuple[i] not in ("layers", "scanned_blocks") or not isinstance(key_tuple[i + 1], str):
       continue
     name = key_tuple[i + 1]
-    if name.startswith("layers_"):
+    if name == _NESTED_LOCAL:
+      return _NestedScanRef(i, None, 2, True, False)
+    if name == _NESTED_GLOBAL:
+      return _NestedScanRef(i, None, 2, False, True)
+    # Under `scanned_blocks`, only Gemma 4's nested local/global scan is this layout.
+    if key_tuple[i] != "layers" or name.startswith("layers_"):
       continue
-    if name == _QWEN_NESTED_LOCAL:
-      return _QwenScannedRef(i, None, 2, True, False)
-    if name == _QWEN_NESTED_GLOBAL:
-      return _QwenScannedRef(i, None, 2, False, True)
     match = re.fullmatch(r"layer_(\d+)", name)
     if match:
-      return _QwenScannedRef(i, int(match.group(1)), 2, False, False)
-    return _QwenScannedRef(i, 0, 1, False, False)
-  return _NO_QWEN_SCAN
+      return _NestedScanRef(i, int(match.group(1)), 2, False, False)
+    return _NestedScanRef(i, 0, 1, False, False)
+  return _NO_NESTED_SCAN
 
 
-def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Optional[int] = None):
-  """Unroll Qwen's heterogeneous or homogeneous scanned blocks for an unscanned MaxText target.
+def unroll_nested_block_scan(weights, scan_axis: int = 1, pattern_length: Optional[int] = None):
+  """Unroll nested (Qwen 3 Next/3.5, Gemma 4) or homogeneous (Qwen 3) scanned blocks for an unscanned MaxText target.
 
   Qwen 3 Next/3.5 training nests two scans: `decoder.layers.local_layers` holds the cycle's linear-attention
   layers with the slot on `scan_axis + 1`, and `decoder.layers.global_layer` holds the trailing full-attention layer.
+  Gemma 4 nests the same two scans (sliding-window layers, then the global layer) under `decoder.scanned_blocks`.
   Qwen 3 base training stores homogeneous layers as `decoder.layers.*` stacked on `scan_axis`.
   The inference model stores every layer as a direct decoder attribute named
   `layers_{global_index}`. Tunix's generic direct-sync mapper cannot bridge
@@ -388,15 +377,15 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
     if "layers_remainder" in key and "dropout" not in key and "rngs" not in key:
       # Like MaxTextToMaxTextConverter and raiden_unscan, which reject such a layer count up front.
       raise ValueError(
-          f"Qwen scanned parameter {'.'.join(map(str, key))} is in `layers_remainder`: unrolling the layers past "
+          f"Nested block scan parameter {'.'.join(map(str, key))} is in `layers_remainder`: unrolling the layers past "
           "the last whole cycle is not supported, so num_decoder_layers must be a multiple of the cycle."
       )
-    ref = _find_qwen_scanned_layer_idx(key)
+    ref = _find_nested_scanned_layer_idx(key)
     if ref.container_idx == -1 or "dropout" in key or "rngs" in key:
       continue
     min_ndim = scan_axis + 2 if ref.nested else scan_axis + 1
     if not hasattr(value, "shape") or len(value.shape) < min_ndim:
-      raise ValueError(f"Qwen scanned parameter {'.'.join(map(str, key))} has no scan axis {scan_axis}: {value!r}")
+      raise ValueError(f"Nested block scan parameter {'.'.join(map(str, key))} has no scan axis {scan_axis}: {value!r}")
     scanned_keys.append((key, value, ref))
     scan_lengths.add(value.shape[scan_axis])
     if ref.nested:
@@ -411,13 +400,13 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
     return weights
 
   if len(local_widths) > 1:
-    raise ValueError(f"Qwen nested `local_layers` parameters disagree on cycle width: {sorted(local_widths)}")
+    raise ValueError(f"Nested `local_layers` parameters disagree on cycle width: {sorted(local_widths)}")
   if pattern_length is None:
     trailing_slot = (max(slot_indices) + 1) if slot_indices else 0
   else:
     if local_widths and local_widths != {pattern_length - 1}:
       raise ValueError(
-          f"Qwen nested `local_layers` hold {local_widths.pop()} cycle slots, but pattern_length {pattern_length} "
+          f"Nested `local_layers` hold {local_widths.pop()} cycle slots, but pattern_length {pattern_length} "
           f"leaves {pattern_length - 1} before the global layer"
       )
     trailing_slot = pattern_length - 1
@@ -428,13 +417,13 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
     expected_slots = set(range(max(slot_indices) + 1))
     if slot_indices != expected_slots:
       raise ValueError(
-          f"Qwen scanned layer slots must be contiguous when pattern_length is omitted; found {sorted(slot_indices)}"
+          f"Scanned layer slots must be contiguous when pattern_length is omitted; found {sorted(slot_indices)}"
       )
     pattern_length = len(slot_indices)
   elif pattern_length <= max(slot_indices):
-    raise ValueError(f"Qwen scanned layer slot {max(slot_indices)} is outside configured pattern length {pattern_length}")
+    raise ValueError(f"Scanned layer slot {max(slot_indices)} is outside configured pattern length {pattern_length}")
   if len(scan_lengths) != 1:
-    raise ValueError(f"Qwen scanned parameters disagree on scan length: {sorted(scan_lengths)}")
+    raise ValueError(f"Nested block scan parameters disagree on scan length: {sorted(scan_lengths)}")
 
   scan_length = scan_lengths.pop()
   scanned_key_paths = {key for key, _, _ in scanned_keys}
@@ -458,15 +447,15 @@ def unroll_qwen_scanned_weights(weights, scan_axis: int = 1, pattern_length: Opt
         )
 
   logging.info(
-      "MaxTextVllmSampler: unrolled %d Qwen tensor components across %d layers for direct MaxText weight sync.",
+      "MaxTextVllmSampler: unrolled %d nested block scan components across %d layers for direct MaxText weight sync.",
       len(scanned_key_paths),
       scan_length * pattern_length,
   )
   return unflatten_dict(new_flat_w)
 
 
-def unroll_gemma_scanned_weights(weights):
-  """Workaround for tunix unstacking bug with Gemma 3/4 scanned blocks.
+def unroll_layers_n_blocks(weights):
+  """Unrolls block scans whose layers are named `layers_N` (Gemma 3, OLMo 3, GPT-OSS, Llama 4).
 
   tunix fails to map nested layers like `layers.layers_0` to `layers_X`
   if the target expects integer keys (as in nnx.List).
@@ -486,13 +475,13 @@ def unroll_gemma_scanned_weights(weights):
 
   logging.debug("MaxTextVllmSampler: First 5 keys in flat_w: %s", list(flat_w.keys())[:5])
 
-  # Check if this is actually a scanned Gemma 3/4 checkpoint
+  # Check if this is actually a scanned `layers_N` block structure
   is_gemma_scanned = any(_find_scanned_layer_idx(k)[0] != -1 for k in flat_w)
 
   if not is_gemma_scanned:
     return weights
 
-  logging.info("MaxTextVllmSampler: Detected Gemma scanned weights structure. Unrolling along axis 1...")
+  logging.info("MaxTextVllmSampler: Detected scanned `layers_N` blocks. Unrolling along axis 1...")
 
   # Determine attention pattern length and scan length
   pattern_keys = set()
@@ -502,14 +491,15 @@ def unroll_gemma_scanned_weights(weights):
     if container_idx != -1 and name != "layers_remainder":
       layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
       pattern_keys.add(layer_sub_idx)
-      if hasattr(v, "shape") and len(v.shape) >= 2:
-        if "mlp" in k and "wi_0" in k:
-          scan_length = max(scan_length, v.shape[1])
+      # Every parameter of a scanned block is stacked on axis 1. Read the scan length from all of them: MoE blocks
+      # have no `mlp.wi_0` (GPT-OSS names its MLP `GptOssMlp`, Llama 4 `Llama4MoEBlock_0`).
+      if hasattr(v, "shape") and len(v.shape) >= 2 and "dropout" not in k and "rngs" not in k:
+        scan_length = max(scan_length, v.shape[1])
 
   pattern_length = max(pattern_keys) + 1 if pattern_keys else 0
   logging.info("MaxTextVllmSampler: Discovered scan_length=%d, pattern_length=%d", scan_length, pattern_length)
 
-  unrolled_count = 0
+  unrolled_keys = []
   for k, v in flat_w.items():
     if "dropout" in k or "rngs" in k:
       continue
@@ -531,7 +521,7 @@ def unroll_gemma_scanned_weights(weights):
         global_idx = i * pattern_length + layer_sub_idx
         new_k = prefix + (f"layers_{global_idx}",) + suffix
         new_flat_w[new_k] = unstacked[i]
-        unrolled_count += 1
+        unrolled_keys.append(new_k)
 
     elif container_idx != -1 and container_name == "layers_remainder":
       layer_sub_idx = int(k[container_idx + 1].split("layers_")[1])
@@ -541,18 +531,52 @@ def unroll_gemma_scanned_weights(weights):
       global_idx = scan_length * pattern_length + layer_sub_idx
       new_k = prefix + (f"layers_{global_idx}",) + suffix
       new_flat_w[new_k] = v
-      unrolled_count += 1
+      unrolled_keys.append(new_k)
     else:
       new_flat_w[k] = v
 
-  if unrolled_count <= 0:
+  if not unrolled_keys:
     raise ValueError("MaxTextVllmSampler: Detected scanned structure, but failed to unroll any layers!")
+  # Some decoders (Ming, HY4) keep unscanned `layers_N` before their scanned blocks. Numbering the blocks from layer 0
+  # would overwrite those layers with the wrong weights.
+  # TODO: Offset the block numbering by the number of unscanned prefix layers instead of rejecting these decoders.
+  clashes = [k for k in unrolled_keys if k in flat_w]
+  if clashes:
+    raise ValueError(
+        "MaxTextVllmSampler: unrolling the scanned blocks would overwrite unscanned layers, e.g. "
+        f"{'.'.join(map(str, clashes[0]))}. Scanned blocks after unscanned layers are not supported."
+    )
 
   logging.info(
       "MaxTextVllmSampler: Successfully unrolled %d scanned tensor components into vLLM-compatible nnx.List format.",
-      unrolled_count,
+      len(unrolled_keys),
   )
   return unflatten_dict(new_flat_w)
+
+
+def unroll_scanned_block_weights(weights):
+  """Unrolls scanned decoder blocks for an unscanned MaxText target, picking the unroll from the tree structure.
+
+  The model name does not tell how a decoder is scanned: OLMo 3, GPT-OSS and Llama 4 scan the same `layers.layers_N`
+  blocks as Gemma 3, and Gemma 4 nests the same local/global scan as Qwen 3.5. A homogeneous `layers` stack (Llama 3,
+  Mixtral) is returned unchanged, since Tunix's `transfer_state_directly` slices it itself.
+  """
+  if hasattr(weights, "to_pure_dict"):
+    pure_dict = weights.to_pure_dict()
+  elif hasattr(weights, "to_dict"):
+    pure_dict = weights.to_dict()
+  elif isinstance(weights, dict):
+    pure_dict = weights
+  else:
+    return weights
+
+  keys = flatten_dict(pure_dict)
+  # A `local_layers`, `global_layer` or `layer_N` level consumes two path components; a homogeneous stack only one.
+  if any(_find_nested_scanned_layer_idx(key).consumed == 2 for key in keys):
+    return unroll_nested_block_scan(weights)
+  if any(_find_scanned_layer_idx(key)[0] != -1 for key in keys):
+    return unroll_layers_n_blocks(weights)
+  return weights
 
 
 def _accepts_kwarg(cls: Any, name: str) -> bool:
@@ -594,7 +618,6 @@ class MaxTextVllmSampler(VllmSampler):
     self._direct_maxtext_sync = direct_maxtext_sync
     engine_kwargs = getattr(config, "engine_kwargs", {}) or {}
     self._model_name = model_name or getattr(config, "model", "") or engine_kwargs.get("model", "") or ""
-    self._is_gemma = "gemma" in str(self._model_name).lower()
     self._is_qwen = "qwen" in str(self._model_name).lower()
 
   def _vllm_config(self, config: VllmConfig):
@@ -622,10 +645,11 @@ class MaxTextVllmSampler(VllmSampler):
         updated_weights = converter.convert(updated_weights, target_state=self.transformer_state)
         while isinstance(updated_weights, dict) and "model" in updated_weights:
           updated_weights = updated_weights["model"]
-      elif self._is_gemma:
-        updated_weights = unroll_gemma_scanned_weights(updated_weights)
       elif self._is_qwen:
-        updated_weights = unroll_qwen_scanned_weights(updated_weights)
+        # Qwen also unrolls its homogeneous Qwen 3 stack here, which other models leave to Tunix.
+        updated_weights = unroll_nested_block_scan(updated_weights)
+      else:
+        updated_weights = unroll_scanned_block_weights(updated_weights)
       validate_direct_sync_layer_coverage(updated_weights, self.transformer_state)
     try:
       return super().update_params(updated_weights, filter_types)

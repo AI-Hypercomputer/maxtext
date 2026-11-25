@@ -284,6 +284,49 @@ class TestTransformLogic(unittest.TestCase):
         mdn((0,), (-1,)),
     )
 
+  def test_self_attention_mla_output_gate(self):
+    # Head-expanded MLA g_proj (Kimi-K3): [emb, heads, v_head_dim] (unscanned) / [emb, layers, heads, v_head_dim]
+    # (scanned) orthogonalizes [emb, heads * v_head_dim] like wq_b / wkv_b.
+    for shape in ((256, 4, 32), (256, 2, 4, 32)):
+      self.assertEqual(
+          muon_utils.transform_logic(("decoder", "layers_3", "self_attention", "g_proj", "kernel"), shape=shape),
+          mdn((0,), (-2, -1)),
+      )
+    # Flat 2D g_proj (e.g. KDA) keeps the standard mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "layers_0", "self_attention", "g_proj", "kernel"), shape=(256, 128)),
+        mdn((0,), (-1,)),
+    )
+    # A flat g_proj under a scanned stack is 3D [emb, layers, out]: the layer axis stays a batch axis.
+    for path in (
+        ("decoder", "scanned_blocks", "layers_0", "self_attention", "g_proj", "kernel"),  # Kimi-K3 scanned KDA
+        ("decoder", "layers", "self_attention", "g_proj", "kernel"),  # e.g. Ming scanned KDA / MLA
+    ):
+      self.assertEqual(muon_utils.transform_logic(path, shape=(256, 22, 128)), mdn((0,), (-1,)))
+    # The scanned head-expanded MLA gate is 4D and keeps the head-aware mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(
+            ("decoder", "scanned_blocks", "layers_3", "self_attention", "g_proj", "kernel"), shape=(256, 22, 4, 32)
+        ),
+        mdn((0,), (-2, -1)),
+    )
+
+  def test_kimi_k3_scanned_kda_out_is_standard(self):
+    # Kimi-K3 scanned KDA `out` is a flat [in, layers, out] projection, not a head-expanded [heads, head_dim, out].
+    self.assertEqual(
+        muon_utils.transform_logic(
+            ("decoder", "scanned_blocks", "layers_0", "self_attention", "out", "kernel"), shape=(384, 22, 256)
+        ),
+        mdn((0,), (-1,)),
+    )
+    # Scanned MLA `out` is 4D [heads, layers, head_dim, out] and keeps the head-aware mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(
+            ("decoder", "scanned_blocks", "layers_3", "self_attention", "out", "kernel"), shape=(4, 22, 32, 256)
+        ),
+        mdn((0, -2), (-1,)),
+    )
+
   # --- 3. Standard ---
   def test_standard_weight(self):
     self.assertEqual(
@@ -740,7 +783,7 @@ class TestScannedLayoutDimensionNumbers(parameterized.TestCase):
   """Muon reduces over the same feature axes of a real model whatever its param_scan_axis."""
 
   @parameterized.product(
-      model_name=("llama2-7b", "qwen3-30b-a3b", "qwen3-next-80b-a3b", "deepseek3-test"), sharded=(False, True)
+      model_name=("llama3.1-8b", "qwen3-30b-a3b", "qwen3-next-80b-a3b", "deepseek3-test"), sharded=(False, True)
   )
   def test_feature_axes_match_across_scan_axes(self, model_name, sharded):
     layer_major = _dimension_numbers_by_path(model_name, param_scan_axis=0, sharded=sharded)
@@ -773,6 +816,63 @@ class TestScannedLayoutDimensionNumbers(parameterized.TestCase):
         remapped += (dim.reduction_axis, dim.output_axis) != (reference_dim.reduction_axis, reference_dim.output_axis)
     # The scanned parameters' dimension numbers do move with the layer axis.
     self.assertGreater(remapped, 0)
+
+
+class _PrefusedMoeNNXModel(nnx.Module):
+  """NNX model containing a pre-fused routed MoE `wi` parameter and non-prefused leaves."""
+
+  def __init__(self):
+    self.MoeBlock_0 = nnx.Module()  # pylint: disable=invalid-name
+    self.MoeBlock_0.gate = nnx.Module()
+    self.MoeBlock_0.gate.kernel = nnx.Param(jnp.ones((4, 8)))
+    self.MoeBlock_0.wi = nnx.Param(jnp.ones((8, 4, 16)))
+    self.MoeBlock_0.wo = nnx.Param(jnp.ones((8, 8, 4)))
+    self.shared_experts = nnx.Module()
+    self.shared_experts.wi = nnx.Param(jnp.ones((4, 16)))
+    self.scale = nnx.Param(jnp.ones((4,)))
+
+
+class TestPrefusedMoeWiHelpers(unittest.TestCase):
+  """Tests for is_prefused_moe_wi_path and get_prefused_moe_wi_mask."""
+
+  def test_is_prefused_moe_wi_path(self):
+    self.assertTrue(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi"), shape=(8, 4, 16)))
+    self.assertTrue(muon_utils.is_prefused_moe_wi_path(("decoder", "routed_experts", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi_0")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wo")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi_scale")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi_bias")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "DeepSeekMoeBlock_0", "shared_experts", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "moe_block", "shared_experts", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "moe_block", "shared_expert", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "mlp", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi"), shape=(8,)))
+
+  def test_get_prefused_moe_wi_mask_returns_none_when_disabled_or_absent(self):
+    model = _PrefusedMoeNNXModel()
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(model, config=None))
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(model, config=mock.MagicMock()))
+    cfg_false = mock.MagicMock()
+    cfg_false.prefuse_moe_weights = False
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(model, config=cfg_false))
+
+    cfg_true = mock.MagicMock()
+    cfg_true.prefuse_moe_weights = True
+    dense_model = _MoeLikeNNXModel(rngs=nnx.Rngs(0))
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(dense_model, config=cfg_true))
+
+  def test_get_prefused_moe_wi_mask_marks_only_routed_wi(self):
+    model = _PrefusedMoeNNXModel()
+    cfg_true = mock.MagicMock()
+    cfg_true.prefuse_moe_weights = True
+    mask = muon_utils.get_prefused_moe_wi_mask(model, config=cfg_true)
+    self.assertIsNotNone(mask)
+    pure_mask = nnx.to_pure_dict(mask)
+    self.assertTrue(pure_mask["MoeBlock_0"]["wi"])
+    self.assertFalse(pure_mask["MoeBlock_0"]["wo"])
+    self.assertFalse(pure_mask["MoeBlock_0"]["gate"]["kernel"])
+    self.assertFalse(pure_mask["shared_experts"]["wi"])
+    self.assertFalse(pure_mask["scale"])
 
 
 if __name__ == "__main__":

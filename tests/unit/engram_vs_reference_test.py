@@ -25,9 +25,12 @@ To run the test:
 """
 
 
-from typing import List
+from __future__ import annotations
+
 from dataclasses import dataclass, field
+import importlib.util
 import math
+from typing import List
 import unittest
 from absl.testing import parameterized
 
@@ -36,8 +39,16 @@ from sympy import isprime
 
 from tokenizers import normalizers, Regex
 from transformers import AutoTokenizer
-import torch
-from torch import nn
+
+HAS_TORCH = importlib.util.find_spec("torch") is not None
+if HAS_TORCH:
+  import torch
+  from torch import nn
+else:
+  torch = None  # type: ignore[assignment]
+  nn = None  # type: ignore[assignment]
+
+_TorchModule = nn.Module if HAS_TORCH else object
 
 from flax import nnx
 import jax
@@ -52,14 +63,6 @@ from maxtext.layers.engram import ShortConv as ShortConvJAX
 from maxtext.layers.engram import Engram as EngramJAX
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
-
-
-def setUpModule():
-  """
-  Enable 64-bit precision for JAX in test. Set before JAX operations
-  to prevent downcasting from int64 to int32 for correctness comparison.
-  """
-  jax.config.update("jax_enable_x64", True)
 
 
 # -----------------------------------------------------------------------------
@@ -188,7 +191,7 @@ class CompressedTokenizer:
     return self._compress(input_ids)
 
 
-class ShortConv(nn.Module):
+class ShortConv(_TorchModule):
 
   def __init__(
       self,
@@ -278,8 +281,8 @@ class NgramHashMapping:
     if self.pad_id is not None:
       self.pad_id = int(self.compressed_tokenizer.lookup_table[self.pad_id])
 
-    max_long = np.iinfo(np.int64).max
-    M_max = int(max_long // self.tokenizer_vocab_size)
+    max_int = np.iinfo(np.int64).max
+    M_max = int(max_int // self.tokenizer_vocab_size)
     half_bound = max(1, M_max // 2)
     PRIME_1 = 10007
 
@@ -362,7 +365,7 @@ class NgramHashMapping:
     return hash_ids_for_all_layers
 
 
-class MultiHeadEmbedding(nn.Module):
+class MultiHeadEmbedding(_TorchModule):
 
   def __init__(self, list_of_N: List[int], D: int):
     super().__init__()
@@ -385,7 +388,7 @@ class MultiHeadEmbedding(nn.Module):
     return output
 
 
-class Engram(nn.Module):
+class Engram(_TorchModule):
 
   # added argument: engram_cfg, backbone_config
   def __init__(self, layer_id, backbone_config, engram_cfg):
@@ -548,10 +551,31 @@ class NgramHashMappingTest(parameterized.TestCase):
         seed=self.config.engram_seed,
     )
     jax_out = jax_hash_mapping(input_ids)
-    # 3. Compare
+    # 3. Compare under default jax_enable_x64=False
+    self.assertFalse(jax.config.jax_enable_x64)
     # keys are layer_ids
     self.assertDictEqual(jax_hash_mapping.vocab_size_across_layers, pt_hash_mapping.vocab_size_across_layers)
     np.testing.assert_equal(pt_out, jax_out)
+
+    # 4. Negative control: computing (x * jnp.asarray(multipliers, dtype=jnp.int32)) % mod in int32
+    # diverges on > 99% of positions when multipliers are 64-bit.
+    compressed_ids = jnp.asarray(jax_hash_mapping.compressed_tokenizer(input_ids), dtype=jnp.int32)
+    b_sz, _ = compressed_ids.shape
+    shifted_inputs = [compressed_ids]
+    for k in range(1, self.config.engram_max_ngram_size):
+      padding = jnp.full((b_sz, k), jax_hash_mapping.pad_id, dtype=jnp.int32)
+      shifted_inputs.append(jnp.concatenate([padding, compressed_ids[:, :-k]], axis=1))
+    for layer_id in self.config.engram_layers:
+      mult_i32 = jnp.asarray(jax_hash_mapping.layer_multipliers[layer_id].astype(np.int32), dtype=jnp.int32)
+      naive_hash = shifted_inputs[0] * mult_i32[0]
+      naive_heads = []
+      for n in range(2, self.config.engram_max_ngram_size + 1):
+        naive_hash = jnp.bitwise_xor(naive_hash, shifted_inputs[n - 1] * mult_i32[n - 1])
+        mods_i32 = jnp.asarray(jax_hash_mapping.vocab_size_across_layers[layer_id][n - 2], dtype=jnp.int32)
+        naive_heads.append(naive_hash[..., None] % mods_i32)
+      naive_out = np.asarray(jnp.concatenate(naive_heads, axis=2))
+      mismatch_ratio = float(np.mean(naive_out != pt_out[layer_id]))
+      self.assertGreater(mismatch_ratio, 0.99)
 
 
 # -----------------------------------------------------------------------------
@@ -566,6 +590,7 @@ def to_jax_mhe(pt_layer):
   return {"embedding": {"embedding": to_jax(pt_layer.embedding.weight)}}
 
 
+@unittest.skipIf(not HAS_TORCH, "PyTorch is required for reference module tests.")
 class MultiHeadEmbeddingTest(parameterized.TestCase):
 
   def setUp(self):
@@ -650,6 +675,7 @@ def to_jax_shortconv(pt_layer):
   }
 
 
+@unittest.skipIf(not HAS_TORCH, "PyTorch is required for reference module tests.")
 class ShortConvTest(parameterized.TestCase):
 
   def setUp(self):
@@ -722,6 +748,7 @@ def to_jax_engram(pt_engram) -> dict:
   }
 
 
+@unittest.skipIf(not HAS_TORCH, "PyTorch is required for reference module tests.")
 class EngramTest(parameterized.TestCase):
   """Verifies JAX Engram implementation matches PyTorch reference."""
 

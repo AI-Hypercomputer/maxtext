@@ -152,6 +152,27 @@ class TestBuildContext(unittest.TestCase):
     ctx = checkpoint_context.build_context(checkpoint_storage_device_host_concurrent_gb=16)
     self.assertEqual(ctx.memory.transfer_concurrent_bytes, 16 * _GB)
 
+  def test_only_colocated_python_with_a_transfer_budget_deprioritizes_transfers(self):
+    default_callback = ocp_v1.Context().memory.serialization_status_callback
+    for kwargs in (
+        {"checkpoint_storage_device_host_concurrent_gb": 16},
+        {"colocated_python_checkpointing": True},
+        {"enable_pathways_persistence": True, "checkpoint_storage_device_host_concurrent_gb": 16},
+    ):
+      with self.subTest(kwargs=kwargs):
+        ctx = checkpoint_context.build_context(**kwargs)
+        self.assertIs(ctx.memory.serialization_status_callback, default_callback)
+
+    ctx = checkpoint_context.build_context(
+        colocated_python_checkpointing=True,
+        checkpoint_storage_device_host_concurrent_gb=16,
+    )
+    self.assertEqual(ctx.memory.transfer_concurrent_bytes, 16 * _GB)
+    self.assertEqual(
+        ctx.memory.serialization_status_callback.key_priority(("model_params", "layer_0")).name,
+        "ASYNCHRONOUS_DEPRIORITIZED",
+    )
+
   def test_checkpoint_layout(self):
     ctx = checkpoint_context.build_context(checkpoint_layout=ocp_v1.options.CheckpointLayout.SAFETENSORS)
     self.assertEqual(ctx.checkpoint_layout, ocp_v1.options.CheckpointLayout.SAFETENSORS)

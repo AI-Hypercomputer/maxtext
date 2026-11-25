@@ -15,12 +15,14 @@
 """Utility functions for Elastic Training."""
 
 from collections import Counter
+from collections.abc import Callable
 import dataclasses
 import functools
 from types import SimpleNamespace
-from typing import Any, Callable
+from typing import Any
 
 import jax
+from maxtext.common.common_types import FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 import pathwaysutils
@@ -217,6 +219,254 @@ def get_local_batch_size(config) -> int:
   return config.per_device_batch_size * get_devices_per_host(config)
 
 
+class HbmBudgetExceededError(Exception):
+  """The train step compiled for a resize needs more HBM than `elastic_hbm_budget_fraction` allows.
+
+  Signals that the resize raised `per_device_batch_size` above its nominal value and the resulting step does not fit,
+  so the attempt can be restarted with the per-device batch bounded to that value and the gradient accumulation steps
+  grown instead (see `plan_constant_global_batch` and `hbm_budget_override`).
+
+  Attributes:
+    nominal_per_device_batch_size: The per-device batch the resize raised above; the restarted attempt is bounded to it.
+    required_bytes: Per-device HBM the compiled step needs, or 0 when the compile itself ran out of HBM.
+    budget_bytes: Per-device HBM budget (`elastic_hbm_budget_fraction` of the device capacity), or 0 when the device
+      capacity is unknown.
+  """
+
+  def __init__(self, nominal_per_device_batch_size: int, required_bytes: int, budget_bytes: int):
+    """Initializes the instance.
+
+    Args:
+      nominal_per_device_batch_size: The per-device batch the resize raised above.
+      required_bytes: Per-device HBM the compiled step needs, or 0 when unknown.
+      budget_bytes: Per-device HBM budget, or 0 when unknown.
+    """
+    super().__init__(
+        f"The compiled train step needs {required_bytes / 2**30:.2f} GiB of HBM per device but the elastic budget is"
+        f" {budget_bytes / 2**30:.2f} GiB; restarting the attempt with"
+        f" elastic_max_per_device_batch_size={nominal_per_device_batch_size}."
+    )
+    self.nominal_per_device_batch_size = nominal_per_device_batch_size
+    self.required_bytes = required_bytes
+    self.budget_bytes = budget_bytes
+
+
+def hbm_budget_override(nominal_per_device_batch_size: int) -> str:
+  """The config override that bounds the per-device batch after an `HbmBudgetExceededError`."""
+  return f"elastic_max_per_device_batch_size={nominal_per_device_batch_size}"
+
+
+def compiled_hbm_bytes(compiled_stats: Any) -> int:
+  """Per-device HBM the compiled step needs: its arguments, outputs, temporaries and code, minus the aliased bytes.
+
+  Donated arguments (the train state) are counted both as arguments and as outputs; `alias_size_in_bytes` is that
+  overlap and is subtracted, as in `max_utils.print_compiled_memory_stats`.
+
+  Args:
+    compiled_stats: `compiled.memory_analysis()` of the step; missing fields count as 0.
+
+  Returns:
+    The required per-device HBM in bytes.
+  """
+  return int(
+      getattr(compiled_stats, "argument_size_in_bytes", 0)
+      + getattr(compiled_stats, "output_size_in_bytes", 0)
+      + getattr(compiled_stats, "temp_size_in_bytes", 0)
+      + getattr(compiled_stats, "generated_code_size_in_bytes", 0)
+      - getattr(compiled_stats, "alias_size_in_bytes", 0)
+  )
+
+
+def device_hbm_limit_bytes(config: Any = None) -> int | None:
+  """Returns the HBM capacity of a live device.
+
+  On Pathways single-controller `jax.local_devices()` lists every device of the job with slice 0 first, so its first
+  device belongs to a dead slice whenever slice 0 is down. A device of a live slice that this process can address is
+  therefore queried first; `jax.local_devices()[0]` is only the fallback (without `config`, or when the live device
+  does not report its capacity).
+
+  Args:
+    config: Config of the attempt, used to find the live slices. None queries `jax.local_devices()[0]` only.
+
+  Returns:
+    The device's `bytes_limit`, or None when no queried device reports it (e.g. some Pathways proxies), in which case
+    the HBM budget check is skipped.
+  """
+  # pylint: disable=broad-exception-caught
+  candidates = []
+  if config is not None:
+    try:
+      process_index = jax.process_index()
+      addressable = (d for d in live_devices(config) if getattr(d, "process_index", process_index) == process_index)
+      live_device = next(addressable, None)
+      if live_device is not None:
+        candidates.append(live_device)
+    except Exception as e:
+      max_logging.log(f"Elastic utils: could not list the live devices ({e}); querying the first local device.")
+  error = None
+  try:
+    candidates.extend([d for d in jax.local_devices()[:1] if d not in candidates])
+  except Exception as e:
+    error = e
+  for device in candidates:
+    try:
+      stats = device.memory_stats()
+    except Exception as e:
+      error = e
+      continue
+    limit = stats.get("bytes_limit") if stats else None
+    if limit:
+      return int(limit)
+  reason = f" ({error})" if error is not None else ""
+  max_logging.log(f"Elastic utils: device memory stats unavailable{reason}; skipping the HBM budget check.")
+  return None
+
+
+def hbm_preflight_nominal_batch(config: Any) -> int | None:
+  """The nominal per-device batch a `constant_padded` resize raised above, or None when the pre-flight does not apply.
+
+  Only the advanced `constant_padded` path (the legacy `-1` bound, or a bound above `per_device_batch_size`) can raise
+  the per-device batch, so only it records `elastic_nominal_per_device_batch_size`. `constant_grad_accum` keeps the
+  per-device batch fixed by construction and is excluded explicitly, so the pre-flight is a no-op for it even if a
+  nominal value were ever recorded.
+
+  Args:
+    config: Config of the attempt.
+
+  Returns:
+    `config.elastic_nominal_per_device_batch_size`, or None when the resize did not raise the per-device batch (no
+    nominal value recorded) or the mode is `constant_grad_accum`.
+  """
+  if config.elastic_global_batch_size_mode == "constant_grad_accum":
+    return None
+  return config.elastic_nominal_per_device_batch_size
+
+
+def check_constant_padded_hbm_budget(config: Any, compiled_stats: Any) -> None:
+  """Raises `HbmBudgetExceededError` if a resize raised the per-device batch and the compiled step won't fit in HBM.
+
+  Only `constant_padded` attempts whose planner raised `per_device_batch_size` above its nominal value are checked:
+  for them a smaller factoring exists (keep the nominal per-device batch, grow the accumulation steps). When the
+  per-device batch is unchanged (including every `constant_grad_accum` attempt) there is nothing to fall back to, and
+  the attempt proceeds as it would without elasticity. The same holds when the accumulation steps may not change
+  (Tunix gradient accumulation or FP8 quantization, see `_no_grad_accum_fallback_reason`): the budget is a soft limit
+  and `.compile()` already fit the step in HBM, so an over-budget step only logs a warning and the attempt proceeds.
+
+  Args:
+    config: Config of the attempt.
+    compiled_stats: `compiled.memory_analysis()` of the train step, or None.
+  """
+  nominal = hbm_preflight_nominal_batch(config)
+  fraction = config.elastic_hbm_budget_fraction
+  if not elastic_enabled(config) or nominal is None or fraction <= 0 or compiled_stats is None:
+    return
+  limit = device_hbm_limit_bytes(config)
+  if limit is None:
+    return
+  required = compiled_hbm_bytes(compiled_stats)
+  budget = int(limit * fraction)
+  max_logging.log(
+      f"Elastic utils: HBM budget check for per_device_batch_size={config.per_device_batch_size}"
+      f" (nominal {nominal}): compiled step needs {required / 2**30:.2f} GiB of {budget / 2**30:.2f} GiB budget"
+      f" ({fraction:.0%} of {limit / 2**30:.2f} GiB)."
+  )
+  if required <= budget:
+    return
+  no_fallback_reason = _no_grad_accum_fallback_reason(config)
+  if no_fallback_reason is not None:
+    max_logging.warning(
+        f"Elastic utils: the compiled train step for per_device_batch_size={config.per_device_batch_size}"
+        f" needs {required / 2**30:.2f} GiB of HBM per device, above the elastic budget of {budget / 2**30:.2f} GiB,"
+        f" but {no_fallback_reason} leaves no gradient-accumulation fallback; proceeding since it compiled."
+    )
+    return
+  raise HbmBudgetExceededError(nominal, required, budget)
+
+
+def _no_grad_accum_fallback_reason(config: Any) -> str | None:
+  """Why the attempt cannot fall back to growing gradient accumulation, or None when it can.
+
+  The fallback restarts the attempt with `elastic_max_per_device_batch_size=<nominal>`, which may change
+  `gradient_accumulation_steps`. The config rejects that with Tunix gradient accumulation and with the FP8
+  quantization modes that do not support gradient accumulation (see `MaxTextConfig` in `types.py`), so the restart
+  would only fail config validation.
+
+  Args:
+    config: Config of the attempt.
+
+  Returns:
+    A description of the setting that rules out the fallback, or None when the fallback is available.
+  """
+  if config.use_tunix_gradient_accumulation:
+    return "use_tunix_gradient_accumulation=True"
+  if config.quantization in FP8_QUANTIZATIONS_WITHOUT_GRADIENT_ACCUMULATION:
+    return f"FP8 quantization (quantization='{config.quantization}')"
+  return None
+
+
+def compile_within_hbm_budget(config: Any, compile_fn: Callable[[], Any]) -> Any:
+  """Runs `compile_fn` and turns an out-of-memory compile of a `constant_padded` resize into `HbmBudgetExceededError`.
+
+  XLA assigns HBM buffers during `.compile()`, so a per-device batch that does not fit at all fails there with a
+  `JaxRuntimeError` (`RESOURCE_EXHAUSTED` / `Ran out of memory`) before `memory_analysis()` can be checked by
+  `check_constant_padded_hbm_budget`. When the resize raised the per-device batch above its nominal value, that failure
+  is mapped to `HbmBudgetExceededError` so the attempt is restarted with the per-device batch bounded instead of
+  crashing; any other error, or an OOM at the nominal per-device batch (always the case with `constant_grad_accum`),
+  is re-raised. When the accumulation steps may not change (see `_no_grad_accum_fallback_reason`) there is no restart
+  to map the OOM to, so a `ValueError` naming the reason and the remedy is raised instead.
+
+  Args:
+    config: Config of the attempt.
+    compile_fn: Zero-argument callable that lowers and compiles the train step and returns the compiled step.
+
+  Returns:
+    Whatever `compile_fn` returns.
+  """
+  try:
+    return compile_fn()
+  except jax.errors.JaxRuntimeError as e:
+    nominal = hbm_preflight_nominal_batch(config)
+    message = str(e)
+    if nominal is None or not ("RESOURCE_EXHAUSTED" in message or "Ran out of memory" in message):
+      raise
+    limit = device_hbm_limit_bytes(config)
+    fraction = config.elastic_hbm_budget_fraction
+    budget = int(limit * fraction) if limit is not None and fraction > 0 else 0
+    first_line = message.splitlines()[0] if message else repr(e)
+    max_logging.log(
+        f"Elastic utils: compiling the train step for per_device_batch_size={config.per_device_batch_size}"
+        f" (nominal {nominal}) ran out of HBM: {first_line}"
+    )
+    no_fallback_reason = _no_grad_accum_fallback_reason(config)
+    if no_fallback_reason is not None:
+      raise ValueError(
+          f"Compiling the train step for per_device_batch_size={config.per_device_batch_size} (raised from"
+          f" {nominal} by the elastic resize) ran out of HBM, and {no_fallback_reason} leaves no"
+          " gradient-accumulation fallback (the per-device batch cannot be bounded because the gradient accumulation"
+          " steps may not change). Use elastic_global_batch_size_mode='scaled', or a configuration that supports"
+          " gradient accumulation (disable Tunix gradient accumulation / use a quantization mode other than FP8)."
+      ) from e
+    raise HbmBudgetExceededError(nominal, required_bytes=0, budget_bytes=budget) from e
+
+
+def compile_and_check_hbm_budget(config: Any, compile_fn: Callable[[], Any]) -> Any:
+  """Compiles a train step with `compile_within_hbm_budget`, then checks it with `check_constant_padded_hbm_budget`.
+
+  Every train program compiled ahead of time for the attempt (the main step and, e.g., the dropless and first-phase
+  variants) runs with the same per-device batch, so each one goes through this pre-flight.
+
+  Args:
+    config: Config of the attempt.
+    compile_fn: Zero-argument callable that lowers and compiles the train step and returns the compiled step.
+
+  Returns:
+    Whatever `compile_fn` returns.
+  """
+  compiled = compile_within_hbm_budget(config, compile_fn)
+  check_constant_padded_hbm_budget(config, compiled.memory_analysis())
+  return compiled
+
+
 def live_devices(config=None):
   """Returns the list of live devices."""
   # If pathways is not used or elastic_manager is not initialized, return all devices
@@ -261,6 +511,17 @@ def chain_callbacks(*funcs):
   return wrapper
 
 
+def cleanup_iterators() -> None:
+  """Closes the data iterators of the current attempt, so the next attempt can rebuild them."""
+  # pylint: disable=import-outside-toplevel, broad-exception-caught
+  try:
+    from maxtext.input_pipeline.multihost_dataloading import cleanup_all_iterators
+
+    cleanup_all_iterators()
+  except Exception as e:
+    max_logging.log(f"Failed to cleanup iterators between elastic attempts: {e}")
+
+
 class RetryCache:
   """Setup objects that a retry on the same slices can reuse, e.g. the config, mesh and compiled steps.
 
@@ -287,6 +548,10 @@ class RetryCache:
     # Host-memory snapshots of the train state for `elastic_backup_kind: snapshot`. `reset` and
     # `clear_if_slices_changed` never touch it; the elastic event callback resets it on slice-down.
     self.snapshotter: Any = None
+    # Extra `key=value` config arguments appended to `argv` when an attempt rebuilds its config, e.g. the per-device
+    # batch bound after an `HbmBudgetExceededError`. Like `snapshotter` they outlive attempts and slice changes; they
+    # are emptied with `reset`, i.e. once per elastic run.
+    self.config_overrides: list[str] = []
 
   @property
   def enabled(self) -> bool:
@@ -297,6 +562,22 @@ class RetryCache:
     self._enabled = enabled
     self._slices = None
     self._values.clear()
+    self.config_overrides = []
+
+  def add_config_override(self, override: str) -> bool:
+    """Records a config override for later attempts and drops the cached setup, which was built without it.
+
+    Args:
+      override: A `key=value` config argument.
+
+    Returns:
+      False if the same override was already recorded (so the caller can avoid looping on it), True otherwise.
+    """
+    if override in self.config_overrides:
+      return False
+    self.config_overrides.append(override)
+    self._values.clear()
+    return True
 
   def clear_if_slices_changed(self, active_slices: frozenset[int]) -> None:
     """Empties the cache if this attempt runs on different slices than the previous one.
@@ -436,13 +717,7 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
   assert elastic_manager is not None
 
   def cleanup_iterators_and_checkpoints():
-    # pylint: disable=import-outside-toplevel, broad-exception-caught
-    try:
-      from maxtext.input_pipeline.multihost_dataloading import cleanup_all_iterators
-
-      cleanup_all_iterators()
-    except Exception as e:
-      max_logging.log(f"Failed to cleanup iterators during elastic scale up: {e}")
+    cleanup_iterators()
     # MaxText only saves checkpoints to `checkpoint_dir` with `enable_checkpointing`, or as the persistent tier of the
     # emergency checkpoint manager. Without either there is nothing to clean up, e.g. in snapshot-only runs.
     if config.enable_checkpointing or config.enable_emergency_checkpoint:
@@ -493,7 +768,7 @@ def elastic_retry(config, callback_fn=None, pre_callback_fn=None, retry_cache=No
     )
 
   pathways_retry = elastic_manager.elastic_retry(
-      max_retries=config.elastic_max_retries,
+      retry_policy=manager.ElasticRetryLimit(config.elastic_max_retries),
       timeout=config.elastic_timeout_seconds,
       minimum_slice_count=minimum_slice_count,
       pre_callback=effective_pre_callback,

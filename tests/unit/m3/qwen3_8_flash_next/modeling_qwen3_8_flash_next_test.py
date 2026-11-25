@@ -794,7 +794,8 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
     jax_out, jax_blocks = jax_attn(jnp.array(x), position_ids=jnp.array(pos), return_selected_blocks=True)
 
     pt_tok_mask = pt_attn.indexer(torch.from_numpy(x), (pt_cos, pt_sin), pt_float_mask, None)
-    pt_tok_mask_np = pt_tok_mask.detach().cpu().numpy() == 0.0
+    pt_tok_mask_arr = pt_tok_mask.detach().cpu().numpy()
+    pt_tok_mask_np = pt_tok_mask_arr if pt_tok_mask_arr.dtype == np.bool_ else (pt_tok_mask_arr == 0.0)
     for q_idx in range(s):
       n_complete = (q_idx + 1) // 4
       if n_complete > 0:
@@ -835,7 +836,8 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
 
       pt_out, _ = pt_attn(torch.from_numpy(x), (pt_cos, pt_sin), attention_mask=pt_float_mask)
       pt_tok_mask = pt_attn.indexer(torch.from_numpy(x), (pt_cos, pt_sin), pt_float_mask, None)
-      pt_tok_mask_np = pt_tok_mask.detach().cpu().numpy() == 0.0
+      pt_tok_mask_arr = pt_tok_mask.detach().cpu().numpy()
+      pt_tok_mask_np = pt_tok_mask_arr if pt_tok_mask_arr.dtype == np.bool_ else (pt_tok_mask_arr == 0.0)
 
     jax_out, jax_blocks = jax_attn(
         jnp.array(x), position_ids=jnp.array(pos), segment_ids=jnp.array(seg_ids), return_selected_blocks=True

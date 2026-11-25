@@ -184,7 +184,10 @@ class MixtralDecoderLayer(nnx.Module):
     # The `name` represents the weight name in JAX/checkpoints and so the class name
     # is just for readability.
     mlp_lnx, load_balance_loss, _ = self.MoeBlock_0(
-        hidden_states, out_sharding=self.out_sharding, forced_routed_experts=forced_routed_experts
+        hidden_states,
+        out_sharding=self.out_sharding,
+        forced_routed_experts=forced_routed_experts,
+        token_mask=moe.routing_token_mask(self.config, decoder_segment_ids, model_mode),
     )
     mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 

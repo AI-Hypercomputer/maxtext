@@ -1305,13 +1305,14 @@ class TrainTests(unittest.TestCase):
         "tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
         "expert": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
     }
-    # Under tensor parallelism the two modes are bit-for-bit on a four-way axis, but once
-    # the axis fully shards the eight heads (tpu7x-8) the backward reductions reassociate
-    # and the loss drifts ~4e-6 by step 2. Under expert parallelism pinning the
-    # activations reassociates the reductions inside the MoE block, so the loss drifts by
-    # a few ULPs by the third step. The drift is ~5e-7 at this size but grows with the
-    # expert dimensions, so leave the bound loose.
-    rtol = {"tensor": 1e-5, "expert": 1e-4}
+    # Under tensor parallelism on tpu7x-8 (8-way TP across the 8 heads) and
+    # 8-device CPU, forward and backward reductions across tensor shards
+    # reassociate and loss drifts up to ~1.14e-5 on tpu7x-8 at step 1
+    # (~2.5e-5 on CPU), exceeding 1e-5; match the 1e-4 bound of sibling
+    # models. Under expert parallelism pinning activations reassociates MoE
+    # reductions, so loss drifts by a few ULPs by step 3 (~5e-7 at this size,
+    # growing with expert dimensions), so leave the bound loose.
+    rtol = {"tensor": 1e-4, "expert": 1e-4}
     for name, parallelism_args in parallelism.items():
       with self.subTest(parallelism=name):
         auto_losses = self._losses(f"llama4_{name}_auto", self._llama4_overrides, parallelism_args + ["shard_mode=auto"])

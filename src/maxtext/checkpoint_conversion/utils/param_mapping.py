@@ -51,12 +51,18 @@ The main conversion script uses these mappings to systematically transform each
 parameter from the source checkpoint and build the target checkpoint.
 """
 
+import re
+from typing import Optional
 import warnings
 import numpy as np
 
 import jax
 import jax.numpy as jnp
 from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
+
+from maxtext.checkpoint_conversion.utils import hf_shape
+from maxtext.models.kimi_k3_layout import KimiScanLayout, kimi_scan_layout_from_spec
+from maxtext.utils import index_share_utils
 
 
 def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
@@ -2029,6 +2035,118 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 def DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN():
   """Creates parameter transformation functions for Deepseek."""
   return {}
+
+
+_GLM_INDEXER_KEY_MAP = {
+    "self_attention-indexer-k_norm-bias": "self_attn.indexer.k_norm.bias",
+    "self_attention-indexer-k_norm-scale": "self_attn.indexer.k_norm.weight",
+    "self_attention-indexer-weights_proj-kernel": "self_attn.indexer.weights_proj.weight",
+    "self_attention-indexer-wk-kernel": "self_attn.indexer.wk.weight",
+    "self_attention-indexer-wq_b-kernel": "self_attn.indexer.wq_b.weight",
+}
+
+
+def _resolve_glm_index_share_pattern(cfg: dict, maxtext_config, num_main_layers: int) -> tuple[str, ...] | None:
+  """Returns the ('F'/'S', ...) IndexShare pattern tuple when IndexShare is active, or None for full-indexer GLM-5.1."""
+  mt_use_index_share = getattr(maxtext_config, "use_index_share", None)
+  if isinstance(mt_use_index_share, bool):
+    if not mt_use_index_share:
+      return None
+    mt_pattern = getattr(maxtext_config, "index_share_pattern", None)
+    if isinstance(mt_pattern, str) and mt_pattern:
+      return index_share_utils.parse_index_share_pattern(mt_pattern, num_main_layers)
+
+  indexer_types = cfg.get("indexer_types")
+  if isinstance(indexer_types, (list, tuple)) and "shared" in indexer_types[:num_main_layers]:
+    if len(indexer_types) < num_main_layers:
+      raise ValueError(
+          f"indexer_types length ({len(indexer_types)}) is smaller than num_main_layers ({num_main_layers})."
+      )
+    pattern_str = "".join("S" if t == "shared" else "F" for t in indexer_types[:num_main_layers])
+    return index_share_utils.parse_index_share_pattern(pattern_str, num_main_layers)
+
+  cfg_pattern = cfg.get("index_share_pattern")
+  if isinstance(cfg_pattern, str) and cfg_pattern:
+    return index_share_utils.parse_index_share_pattern(cfg_pattern, num_main_layers)
+
+  if mt_use_index_share is True:
+    raise ValueError("use_index_share=True requires a non-empty index_share_pattern or HF indexer_types.")
+  return None
+
+
+def GLM_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Generates parameter mapping between MaxText GLM-5.1/5.2 and HuggingFace GlmMoeDsa weight paths."""
+  cfg = hf_shape.normalize_glm_hf_config(config)
+  mapping = DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(cfg, maxtext_config, scan_layers=scan_layers)
+
+  mt_num_layers = getattr(maxtext_config, "num_decoder_layers", None)
+  num_main_layers = (
+      mt_num_layers
+      if isinstance(mt_num_layers, int) and not isinstance(mt_num_layers, bool)
+      else int(cfg["num_hidden_layers"])
+  )
+  mt_first_dense = getattr(maxtext_config, "first_num_dense_layers", None)
+  first_num_dense_layers = (
+      mt_first_dense
+      if isinstance(mt_first_dense, int) and not isinstance(mt_first_dense, bool)
+      else int(cfg["first_k_dense_replace"])
+  )
+
+  pattern_tuple = _resolve_glm_index_share_pattern(cfg, maxtext_config, num_main_layers)
+  if pattern_tuple is None:
+    return mapping
+
+  mt_prune = getattr(maxtext_config, "prune_shared_indexers", None)
+  prune_shared = mt_prune if isinstance(mt_prune, bool) else (not scan_layers)
+
+  if scan_layers:
+    for group_name, layer_range in (
+        ("dense_layers", range(first_num_dense_layers)),
+        ("moe_layers", range(first_num_dense_layers, num_main_layers)),
+    ):
+      for subkey, hf_suffix in _GLM_INDEXER_KEY_MAP.items():
+        mt_key = f"params-decoder-{group_name}-{subkey}"
+        if mt_key not in mapping:
+          continue
+        if saving_to_hf:
+          full_targets = [
+              f"model.layers.{i}.{hf_suffix}"
+              for i in layer_range
+              if not index_share_utils.is_shared_layer(i, pattern_tuple)
+          ]
+          mapping[mt_key] = full_targets if full_targets else None  # pyrefly: ignore[bad-assignment]
+        else:
+          mapping[mt_key] = [  # pyrefly: ignore[bad-assignment]
+              f"model.layers.{index_share_utils.get_donor_layer_idx(i, pattern_tuple)}.{hf_suffix}" for i in layer_range
+          ]
+  else:
+    for i in range(num_main_layers):
+      if not index_share_utils.is_shared_layer(i, pattern_tuple):
+        continue
+      layer_prefix = (
+          f"params-decoder-dense_layers_{i}"
+          if i < first_num_dense_layers
+          else f"params-decoder-moe_layers_{i - first_num_dense_layers}"
+      )
+      donor_idx = index_share_utils.get_donor_layer_idx(i, pattern_tuple)
+      for subkey, hf_suffix in _GLM_INDEXER_KEY_MAP.items():
+        mt_key = f"{layer_prefix}-{subkey}"
+        if saving_to_hf:
+          mapping[mt_key] = None  # pyrefly: ignore[bad-assignment]
+        elif prune_shared:
+          mapping.pop(mt_key, None)
+        else:
+          mapping[mt_key] = f"model.layers.{donor_idx}.{hf_suffix}"
+
+  return mapping
+
+
+def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation hooks for GLM-5.1 & GLM-5.2 by reusing DeepSeek hooks."""
+  cfg = hf_shape.normalize_glm_hf_config(config)
+  hooks = DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(cfg, maxtext_config, scan_layers=scan_layers, saving_to_hf=saving_to_hf)
+  param_map = GLM_MAXTEXT_TO_HF_PARAM_MAPPING(cfg, maxtext_config, scan_layers=scan_layers, saving_to_hf=saving_to_hf)
+  return {k: fn for k, fn in hooks.items() if param_map.get(k) is not None}
 
 
 def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
@@ -4382,6 +4500,81 @@ def MING_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
   return hooks
 
 
+def MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText Ming talker keys to the HF `talker/model.safetensors` + `talker/vae/model.safetensors` keys.
+
+  The talker LLM is a Qwen2 decoder (`model.*`, reusing the Qwen mapping; embeddings are tied so there is
+  no `lm_head`). The heads live under `params-audio_decoder-MingTalker_0-*` (`MingTalker` in `maxtext.models.ming`). Only the
+  AudioVAE decoder is mapped (`decoder.*`); the VAE encoder is used for voice cloning only.
+  """
+  mapping = QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
+  mapping.pop("params-decoder-logits_dense-kernel", None)
+
+  def dense(mt_prefix, hf_prefix, bias=True):
+    mapping[f"{mt_prefix}-kernel"] = f"{hf_prefix}.weight"
+    if bias:
+      mapping[f"{mt_prefix}-bias"] = f"{hf_prefix}.bias"
+
+  def dit_blocks(mt_prefix, hf_prefix, num_layers):
+    for i in range(num_layers):
+      mt, hf = f"{mt_prefix}-blocks_{i}", f"{hf_prefix}.blocks.{i}"
+      mapping[f"{mt}-norm1-scale"] = f"{hf}.norm1.weight"
+      mapping[f"{mt}-norm2-scale"] = f"{hf}.norm2.weight"
+      for name in ("to_q", "to_k", "to_v"):
+        dense(f"{mt}-attn-{name}", f"{hf}.attn.{name}")
+      dense(f"{mt}-attn-to_out", f"{hf}.attn.to_out.0")
+      dense(f"{mt}-mlp_in", f"{hf}.mlp.ff.0.0")
+      dense(f"{mt}-mlp_out", f"{hf}.mlp.ff.2")
+    mapping[f"{mt_prefix}-final_norm-scale"] = f"{hf_prefix}.final_layer.norm_final.weight"
+    dense(f"{mt_prefix}-final_linear", f"{hf_prefix}.final_layer.linear")
+
+  cfm, hf_cfm = "params-audio_decoder-MingTalker_0-cfm", "cfm.model"
+  dense(f"{cfm}-x_embedder", f"{hf_cfm}.x_embedder")
+  dense(f"{cfm}-c_embedder", f"{hf_cfm}.c_embedder.cond_embedder")
+  dense(f"{cfm}-time_fc1", f"{hf_cfm}.t_embedder.time_mlp.0")
+  dense(f"{cfm}-time_fc2", f"{hf_cfm}.t_embedder.time_mlp.2")
+  dit_blocks(cfm, hf_cfm, maxtext_config.ming_talker_dit_num_layers)
+
+  agg = "params-audio_decoder-MingTalker_0-aggregator"
+  mapping[f"{agg}-word_embedder"] = "aggregator.word_embedder.weight"
+  dense(f"{agg}-x_embedder", "aggregator.x_embedder")
+  dit_blocks(agg, "aggregator", maxtext_config.ming_talker_aggregator_num_layers)
+
+  dense("params-audio_decoder-MingTalker_0-stop_head", "stop_head")
+  dense("params-audio_decoder-MingTalker_0-spk_head", "spk_head")
+
+  vae, hf_vae = "params-audio_decoder-MingTalker_0-audio_vae", "decoder"
+  dense(f"{vae}-fc1", f"{hf_vae}.fc1")
+  for i in range(maxtext_config.ming_vae_num_layers):
+    mt, hf = f"{vae}-layers_{i}", f"{hf_vae}.decoder.layers.{i}"
+    mapping[f"{mt}-input_layernorm-scale"] = f"{hf}.input_layernorm.weight"
+    mapping[f"{mt}-post_attention_layernorm-scale"] = f"{hf}.post_attention_layernorm.weight"
+    for name in ("q_proj", "k_proj", "v_proj"):
+      dense(f"{mt}-{name}", f"{hf}.self_attn.{name}")
+    dense(f"{mt}-o_proj", f"{hf}.self_attn.o_proj", bias=False)
+    for name in ("gate_proj", "up_proj", "down_proj"):
+      dense(f"{mt}-{name}", f"{hf}.mlp.{name}", bias=False)
+  mapping[f"{vae}-norm-scale"] = f"{hf_vae}.decoder.norm.weight"
+  dense(f"{vae}-head_out", f"{hf_vae}.head.out")
+  return mapping
+
+
+def MING_TALKER_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Qwen hooks for the talker LLM plus transposed `[in, out]` <-> `[out, in]` kernels for the heads."""
+  hooks = QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers, saving_to_hf)
+  hooks.pop("params-decoder-logits_dense-kernel", None)
+
+  def linear(x, target_shape):
+    if saving_to_hf:
+      return x.reshape(np.flip(np.array(target_shape))).T
+    return x.T.reshape(target_shape)
+
+  for mt_key in MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers):
+    if mt_key.startswith("params-audio_decoder-") and mt_key.endswith("-kernel"):
+      hooks[mt_key] = linear
+  return hooks
+
+
 # {maxtext model name: {maxtext weight name: hf weight name}}
 
 
@@ -4878,22 +5071,35 @@ class WAN2_1_HF_TO_MAXTEXT:
           add(f"{mt}-{name}-gamma", f"{hf}.{name}.gamma", reshape)
 
       levels, num_res_blocks = len(hf_config["dim_mult"]), hf_config["num_res_blocks"]
-      # Encoder: flat `down_blocks` list of resnets, each level but the last ends in a downsampler.
-      idx = 0
-      for level in range(levels):
-        for _ in range(num_res_blocks):
-          resnet(f"encoder-down_blocks-{idx}", f"encoder.down_blocks.{idx}")
-          idx += 1
-        if level < levels - 1:
-          conv_layer(f"encoder-down_blocks-{idx}-resample-conv", f"encoder.down_blocks.{idx}.resample.1")
-          conv_layer(f"encoder-down_blocks-{idx}-time_conv-conv", f"encoder.down_blocks.{idx}.time_conv")
-          idx += 1
+      is_residual = hf_config.get("is_residual", False)
+      if is_residual:
+        for level in range(levels):
+          for j in range(num_res_blocks):
+            resnet(f"encoder-down_blocks-{level}-resnets-{j}", f"encoder.down_blocks.{level}.resnets.{j}")
+          if level < levels - 1:
+            down_mt, down_hf = f"encoder-down_blocks-{level}-downsampler", f"encoder.down_blocks.{level}.downsampler"
+            conv_layer(f"{down_mt}-resample-conv", f"{down_hf}.resample.1")
+            conv_layer(f"{down_mt}-time_conv-conv", f"{down_hf}.time_conv")
+      else:
+        # Encoder: flat `down_blocks` list of resnets, each level but the last ends in a downsampler.
+        idx = 0
+        for level in range(levels):
+          for _ in range(num_res_blocks):
+            resnet(f"encoder-down_blocks-{idx}", f"encoder.down_blocks.{idx}")
+            idx += 1
+          if level < levels - 1:
+            conv_layer(f"encoder-down_blocks-{idx}-resample-conv", f"encoder.down_blocks.{idx}.resample.1")
+            conv_layer(f"encoder-down_blocks-{idx}-time_conv-conv", f"encoder.down_blocks.{idx}.time_conv")
+            idx += 1
       # Decoder: `num_res_blocks + 1` resnets per level, each level but the last ends in an upsampler.
       for level in range(levels):
         for j in range(num_res_blocks + 1):
           resnet(f"decoder-up_blocks-{level}-resnets-{j}", f"decoder.up_blocks.{level}.resnets.{j}")
         if level < levels - 1:
-          up_mt, up_hf = f"decoder-up_blocks-{level}-upsamplers-0", f"decoder.up_blocks.{level}.upsamplers.0"
+          if is_residual:
+            up_mt, up_hf = f"decoder-up_blocks-{level}-upsampler", f"decoder.up_blocks.{level}.upsampler"
+          else:
+            up_mt, up_hf = f"decoder-up_blocks-{level}-upsamplers-0", f"decoder.up_blocks.{level}.upsamplers.0"
           conv_layer(f"{up_mt}-resample-layers-1", f"{up_hf}.resample.1")
           conv_layer(f"{up_mt}-time_conv-conv", f"{up_hf}.time_conv")
       for coder in ("encoder", "decoder"):
@@ -5098,6 +5304,298 @@ def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_
         mapping[f"{mtp_layer_prefix}-{mt_sub}"] = f"mtp.layers.{m}.{hf_sub}"
 
   return mapping
+
+
+def _kimi_k3_text_config(config) -> dict:
+  """Returns the Kimi-K3 language-model HF config as a plain dict.
+
+  Accepts a dict or a `PretrainedConfig` (normalized with `.to_dict()`, which also turns
+  nested configs into dicts). The released moonshotai/Kimi-K3 `config.json`
+  (`KimiK3ForConditionalGeneration`) nests every language-model field under `text_config`,
+  so that is unwrapped when present; `hf_model_configs.kimi_k3_dict` is the already-flat
+  `text_config`. All Kimi-K3 mapping/hook/shape functions go through this helper.
+  """
+  if hasattr(config, "to_dict"):
+    config = config.to_dict()
+  if not isinstance(config, dict):
+    raise TypeError(f"kimi-k3 expects the HF config as a dict or PretrainedConfig, got {type(config).__name__}")
+  text_config = config.get("text_config")
+  if text_config is not None:
+    config = text_config.to_dict() if hasattr(text_config, "to_dict") else dict(text_config)
+  return config
+
+
+def _kimi_k3_require(config: dict, key: str):
+  """Returns `config[key]`, raising instead of falling back to a production default."""
+  if config.get(key) is None:
+    raise ValueError(f"kimi-k3 checkpoint conversion requires `{key}` in the HF (text) config")
+  return config[key]
+
+
+def _resolve_kimi_k3_full_attn_layers(config) -> set[int]:
+  """Returns the 0-indexed set of full-attention (MLA) layer indices.
+
+  Two sources are accepted, with an explicit index base for each rather than sniffing:
+    * `config["linear_attn_config"]["full_attn_layers"]` -- the Hugging Face field. It is
+      1-indexed by definition (`KimiLinearConfig.is_kda_layer` tests `layer_idx + 1`) and
+      is authoritative when present.
+    * `config["full_attn_layers"]` at the top level -- the MaxText convention used by
+      `kimi-k3.yml` and by test configs, 0-indexed.
+  There is no default layout: a config with neither field (or without `num_hidden_layers`)
+  raises, so a reduced config cannot silently pick up the production KDA/MLA split.
+  """
+  config = _kimi_k3_text_config(config)
+  if config.get("num_hidden_layers") is None:
+    raise ValueError("kimi-k3 param mapping requires `num_hidden_layers` in the HF config")
+  num_layers = int(config["num_hidden_layers"])
+  linear_cfg = config.get("linear_attn_config") or {}
+  if linear_cfg.get("full_attn_layers") is not None:
+    full_attn_layers = {int(x) - 1 for x in linear_cfg["full_attn_layers"]}
+  elif config.get("full_attn_layers") is not None:
+    full_attn_layers = {int(x) for x in config["full_attn_layers"]}
+  else:
+    raise ValueError(
+        "kimi-k3 param mapping requires `linear_attn_config.full_attn_layers` (HF, 1-indexed) "
+        "or a top-level `full_attn_layers` (0-indexed)"
+    )
+  bad = sorted(i for i in full_attn_layers if not 0 <= i < num_layers)
+  if bad:
+    raise ValueError(f"kimi-k3 full_attn_layers resolved to out-of-range 0-indexed layers {bad} for {num_layers} layers")
+  return full_attn_layers
+
+
+def _kimi_k3_scan_layout(config, maxtext_config, scan_layers) -> Optional[KimiScanLayout]:
+  """Returns the scanned layer layout for `scan_layers=True`, or None for the unscanned layout.
+
+  The split comes from the same helper as the model (`kimi_k3_layout.kimi_scan_layout_from_spec`):
+  the layer schedule from the HF config, the cycle length from the MaxText config
+  (`inhomogeneous_layer_cycle_interval`, which HF has no equivalent of). Where the MaxText
+  config also carries the schedule, it must agree with the HF config.
+  """
+  if not scan_layers:
+    return None
+  if maxtext_config is None:
+    raise ValueError("kimi-k3 scan_layers=True checkpoint conversion needs the MaxText config (for the scan layout)")
+  config = _kimi_k3_text_config(config)
+  num_layers = int(_kimi_k3_require(config, "num_hidden_layers"))
+  first_num_dense_layers = int(_kimi_k3_require(config, "first_k_dense_replace"))
+  full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
+  for mt_name, hf_name, hf_value in (
+      ("num_decoder_layers", "num_hidden_layers", num_layers),
+      ("first_num_dense_layers", "first_k_dense_replace", first_num_dense_layers),
+  ):
+    mt_value = getattr(maxtext_config, mt_name, None)
+    if mt_value is not None and int(mt_value) != hf_value:
+      raise ValueError(f"kimi-k3: MaxText {mt_name}={mt_value} does not match HF {hf_name}={hf_value}")
+  mt_full_attn_layers = getattr(maxtext_config, "full_attn_layers", None)
+  if mt_full_attn_layers is not None and {int(x) for x in mt_full_attn_layers} != full_attn_layers:
+    raise ValueError(
+        f"kimi-k3: MaxText full_attn_layers={sorted(int(x) for x in mt_full_attn_layers)} does not match the HF "
+        f"config's (0-indexed) {sorted(full_attn_layers)}"
+    )
+  cycle = getattr(maxtext_config, "inhomogeneous_layer_cycle_interval", None)
+  if cycle is None:
+    raise ValueError("kimi-k3 scan_layers=True needs inhomogeneous_layer_cycle_interval in the MaxText config")
+  layout = kimi_scan_layout_from_spec(num_layers, sorted(full_attn_layers), first_num_dense_layers, int(cycle))
+  param_scan_axis = int(getattr(maxtext_config, "param_scan_axis", 1))
+  if layout.num_blocks and param_scan_axis != 1:
+    # Routed experts are stacked (experts, blocks, ...) on the two leading axes, which is
+    # where `create_scanned_layers` puts the scan axis only for param_scan_axis=1.
+    raise NotImplementedError(f"kimi-k3 scanned checkpoint conversion needs param_scan_axis=1, got {param_scan_axis}")
+  return layout
+
+
+_KIMI_K3_LAYER_KEY = re.compile(r"^(params|MoEBiasVar)-decoder-layers_(\d+)-(.+)$")
+
+
+def _kimi_k3_restack_scanned(per_layer: dict, layout: Optional[KimiScanLayout], merge_fn) -> dict:
+  """Turns an unscanned (`layers_{i}`) Kimi-K3 mapping into the scanned layout.
+
+  Unrolled prefix/suffix layers keep their `layers_{i}` keys. A layer in the scanned region
+  at (block b, sub-layer j) moves to `scanned_blocks-layers_{j}`, and `merge_fn` combines the
+  per-block values (ordered by b) into one entry.
+  """
+  if layout is None:
+    return per_layer
+  out, groups = {}, {}
+  for key, value in per_layer.items():
+    match = _KIMI_K3_LAYER_KEY.match(key) if isinstance(key, str) else None
+    position = layout.scanned_position(int(match.group(2))) if match else None
+    if position is None:
+      out[key] = value
+      continue
+    block, sub_layer = position
+    scanned_key = f"{match.group(1)}-decoder-scanned_blocks-layers_{sub_layer}-{match.group(3)}"
+    groups.setdefault(scanned_key, {})[block] = value
+  for scanned_key, by_block in groups.items():
+    if sorted(by_block) != list(range(layout.num_blocks)):
+      raise ValueError(f"kimi-k3: {scanned_key} is missing scanned blocks: has {sorted(by_block)}")
+    out[scanned_key] = merge_fn(scanned_key, [by_block[b] for b in range(layout.num_blocks)])
+  return out
+
+
+def _kimi_k3_stack_hf_keys(scanned_key, per_block):
+  """Per-block HF keys -> a list over blocks, or for expert lists a nested [expert][block] list.
+
+  The nesting order (experts outer, blocks inner) matches the scanned MaxText tensor, whose two
+  leading axes are (experts, blocks) with param_scan_axis=1 (see `stacked_axes`).
+  """
+  if not isinstance(per_block[0], list):
+    return list(per_block)
+  num_experts = len(per_block[0])
+  if any(len(keys) != num_experts for keys in per_block):
+    raise ValueError(f"kimi-k3: {scanned_key} has a different expert count per scanned block")
+  return [[keys[e] for keys in per_block] for e in range(num_experts)]
+
+
+def _kimi_k3_same_hook(scanned_key, per_block):
+  """Hooks act on one layer's slice, so every stacked layer must share the same hook."""
+  if any(hook is not per_block[0] for hook in per_block):
+    raise ValueError(f"kimi-k3: {scanned_key} stacks layers with different conversion hooks")
+  return per_block[0]
+
+
+def KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Generates parameter mapping from MaxText to Hugging Face for Kimi-K3.
+
+  Unscanned: one `params-decoder-layers_{i}-...` key per layer. With `scan_layers=True`
+  (see `kimi_k3_layout.kimi_scan_layout_from_spec`) the unrolled prefix/suffix layers keep
+  those keys, and each scanned sub-layer `params-decoder-scanned_blocks-layers_{j}-...` maps
+  to the list of HF keys of layers `num_prefix + cycle * b + j` over blocks b (routed experts:
+  a nested [expert][block] list).
+  """
+  layout = _kimi_k3_scan_layout(config, maxtext_config, scan_layers)
+  config = _kimi_k3_text_config(config)
+  full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
+  num_main_layers = int(_kimi_k3_require(config, "num_hidden_layers"))
+  first_num_dense_layers = int(_kimi_k3_require(config, "first_k_dense_replace"))
+  # Only MoE layers need the expert count.
+  num_experts = int(_kimi_k3_require(config, "num_experts")) if first_num_dense_layers < num_main_layers else 0
+
+  mapping = {}
+
+  # =========================================================================
+  # Embeddings, Final Norm, LM Head & Output AttnRes
+  # =========================================================================
+  mapping.update(
+      {
+          "params-token_embedder-embedding": "language_model.model.embed_tokens.weight",
+          "params-decoder-decoder_norm-scale": "language_model.model.norm.weight",
+          "params-decoder-logits_dense-kernel": "language_model.lm_head.weight",
+          "params-decoder-output_attn_res_norm-scale": "language_model.model.output_attn_res_norm.weight",
+          "params-decoder-output_attn_res_proj-kernel": "language_model.model.output_attn_res_proj.weight",
+      }
+  )
+
+  # =========================================================================
+  # Per-layer mappings (unscanned)
+  # =========================================================================
+  for i in range(num_main_layers):
+    prefix = f"params-decoder-layers_{i}"
+    is_full_attn = i in full_attn_layers
+
+    # --- Pre/Post Norms & AttnRes ---
+    mapping.update(
+        {
+            f"{prefix}-pre_self_attention_layer_norm-scale": f"language_model.model.layers.{i}.input_layernorm.weight",
+            f"{prefix}-post_self_attention_layer_norm-scale": (
+                f"language_model.model.layers.{i}.post_attention_layernorm.weight"
+            ),
+            f"{prefix}-self_attention_res_norm-scale": f"language_model.model.layers.{i}.self_attention_res_norm.weight",
+            f"{prefix}-self_attention_res_proj-kernel": f"language_model.model.layers.{i}.self_attention_res_proj.weight",
+            f"{prefix}-mlp_res_norm-scale": f"language_model.model.layers.{i}.mlp_res_norm.weight",
+            f"{prefix}-mlp_res_proj-kernel": f"language_model.model.layers.{i}.mlp_res_proj.weight",
+        }
+    )
+
+    # --- Self-Attention (KDA vs MLA) ---
+    if is_full_attn:
+      # Gated MLA
+      mapping.update(
+          {
+              f"{prefix}-self_attention-wq_a-kernel": f"language_model.model.layers.{i}.self_attn.q_a_proj.weight",
+              f"{prefix}-self_attention-q_norm-scale": f"language_model.model.layers.{i}.self_attn.q_a_layernorm.weight",
+              f"{prefix}-self_attention-wq_b-kernel": f"language_model.model.layers.{i}.self_attn.q_b_proj.weight",
+              f"{prefix}-self_attention-wkv_a-kernel": (
+                  f"language_model.model.layers.{i}.self_attn.kv_a_proj_with_mqa.weight"
+              ),
+              f"{prefix}-self_attention-kv_norm-scale": f"language_model.model.layers.{i}.self_attn.kv_a_layernorm.weight",
+              f"{prefix}-self_attention-wkv_b-kernel": f"language_model.model.layers.{i}.self_attn.kv_b_proj.weight",
+              f"{prefix}-self_attention-g_proj-kernel": f"language_model.model.layers.{i}.self_attn.g_proj.weight",
+              f"{prefix}-self_attention-out-kernel": f"language_model.model.layers.{i}.self_attn.o_proj.weight",
+          }
+      )
+    else:
+      # KDA (Linear Attention)
+      mapping.update(
+          {
+              f"{prefix}-self_attention-q_proj-kernel": f"language_model.model.layers.{i}.self_attn.q_proj.weight",
+              f"{prefix}-self_attention-q_conv1d-kernel": f"language_model.model.layers.{i}.self_attn.q_conv1d.weight",
+              f"{prefix}-self_attention-k_proj-kernel": f"language_model.model.layers.{i}.self_attn.k_proj.weight",
+              f"{prefix}-self_attention-k_conv1d-kernel": f"language_model.model.layers.{i}.self_attn.k_conv1d.weight",
+              f"{prefix}-self_attention-v_proj-kernel": f"language_model.model.layers.{i}.self_attn.v_proj.weight",
+              f"{prefix}-self_attention-v_conv1d-kernel": f"language_model.model.layers.{i}.self_attn.v_conv1d.weight",
+              f"{prefix}-self_attention-f_a_proj-kernel": f"language_model.model.layers.{i}.self_attn.f_a_proj.weight",
+              f"{prefix}-self_attention-f_b_proj-kernel": f"language_model.model.layers.{i}.self_attn.f_b_proj.weight",
+              f"{prefix}-self_attention-A_log": f"language_model.model.layers.{i}.self_attn.A_log",
+              f"{prefix}-self_attention-dt_bias": f"language_model.model.layers.{i}.self_attn.dt_bias",
+              f"{prefix}-self_attention-b_proj-kernel": f"language_model.model.layers.{i}.self_attn.b_proj.weight",
+              f"{prefix}-self_attention-g_proj-kernel": f"language_model.model.layers.{i}.self_attn.g_proj.weight",
+              f"{prefix}-self_attention-o_norm-scale": f"language_model.model.layers.{i}.self_attn.o_norm.weight",
+              f"{prefix}-self_attention-out-kernel": f"language_model.model.layers.{i}.self_attn.o_proj.weight",
+          }
+      )
+
+    # --- FFN (Dense MLP for the first layers, Latent MoE for the rest) ---
+    if i < first_num_dense_layers:
+      # Layer 0 Dense MLP
+      mapping.update(
+          {
+              f"{prefix}-mlp-wi_0-kernel": f"language_model.model.layers.{i}.mlp.gate_proj.weight",
+              f"{prefix}-mlp-wi_1-kernel": f"language_model.model.layers.{i}.mlp.up_proj.weight",
+              f"{prefix}-mlp-wo-kernel": f"language_model.model.layers.{i}.mlp.down_proj.weight",
+          }
+      )
+    else:
+      # Layers 1..92 Latent MoE
+      mapping.update(
+          {
+              f"{prefix}-mlp-routed_experts-gate-kernel": f"language_model.model.layers.{i}.block_sparse_moe.gate.weight",
+              # The router bias is `gate/bias`; for kimi-k3 it is a `moe.MoEBiasVar`, so (as for
+              # DeepSeek) it lives in the `MoEBiasVar` collection.
+              f"{prefix.replace('params-', 'MoEBiasVar-')}-mlp-routed_experts-gate-bias": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.gate.e_score_correction_bias"
+              ),
+              f"{prefix}-mlp-routed_expert_down_proj-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.routed_expert_down_proj.weight"
+              ),
+              f"{prefix}-mlp-routed_expert_norm-scale": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.routed_expert_norm.weight"
+              ),
+              f"{prefix}-mlp-routed_expert_up_proj-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.routed_expert_up_proj.weight"
+              ),
+              f"{prefix}-mlp-shared_expert-wi_0-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.shared_experts.gate_proj.weight"
+              ),
+              f"{prefix}-mlp-shared_expert-wi_1-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.shared_experts.up_proj.weight"
+              ),
+              f"{prefix}-mlp-shared_expert-wo-kernel": (
+                  f"language_model.model.layers.{i}.block_sparse_moe.shared_experts.down_proj.weight"
+              ),
+          }
+      )
+      # Routed experts: dense `.weight` kernels.
+      expert_suffixes = (("", ".weight"),)
+      for mt_name, hf_name in (("wi_0", "w1"), ("wi_1", "w3"), ("wo", "w2")):
+        for mt_suffix, hf_suffix in expert_suffixes:
+          mapping[f"{prefix}-mlp-routed_experts-{mt_name}{mt_suffix}"] = [
+              f"language_model.model.layers.{i}.block_sparse_moe.experts.{e}.{hf_name}{hf_suffix}"
+              for e in range(num_experts)
+          ]
+
+  return _kimi_k3_restack_scanned(mapping, layout, _kimi_k3_stack_hf_keys)
 
 
 def QWEN3_8_FLASH_NEXT_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
@@ -5434,7 +5932,162 @@ def HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, s
   return hooks
 
 
+def KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Transformation hooks for Kimi-K3 parameters.
+
+  Hooks act on a single layer's (and expert's) slice; with `scan_layers=True` a scanned
+  sub-layer key gets the (shared) hook of the layers it stacks.
+  """
+  layout = _kimi_k3_scan_layout(config, maxtext_config, scan_layers)
+  config = _kimi_k3_text_config(config)
+
+  # The MLA head dims below are only needed when a hook is called without a target shape
+  # (`to_maxtext` always passes one), so they are looked up lazily and raise if absent
+  # rather than silently defaulting to the production sizes.
+  def _dim(key):
+    return int(_kimi_k3_require(config, key))
+
+  def _kda_num_heads():
+    linear_cfg = config.get("linear_attn_config") or {}
+    if linear_cfg.get("num_heads") is not None:
+      return int(linear_cfg["num_heads"])
+    return _dim("num_attention_heads")
+
+  def transpose(input_tensor, target_shape=None):
+    if input_tensor.ndim == 3:
+      return np.transpose(input_tensor, (0, 2, 1))
+    if target_shape is not None and input_tensor.T.shape != tuple(target_shape):
+      if saving_to_hf:
+        return input_tensor.reshape((input_tensor.shape[0] if len(input_tensor.shape) <= 2 else -1, -1)).T
+      return input_tensor.T.reshape(target_shape)
+    return input_tensor.T
+
+  def reshape_transpose_wq_b(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.reshape((input_tensor.shape[0], -1)).T
+    if target_shape is None:
+      target_shape = (
+          _dim("q_lora_rank"),
+          _dim("num_attention_heads"),
+          _dim("qk_nope_head_dim") + _dim("qk_rope_head_dim"),
+      )
+    return input_tensor.T.reshape(target_shape)
+
+  def reshape_transpose_wkv_b(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.reshape((input_tensor.shape[0], -1)).T
+    if target_shape is None:
+      target_shape = (_dim("kv_lora_rank"), _dim("num_attention_heads"), _dim("qk_nope_head_dim") + _dim("v_head_dim"))
+    return input_tensor.T.reshape(target_shape)
+
+  def reshape_transpose_g_proj(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.reshape((input_tensor.shape[0], -1)).T
+    if target_shape is None:
+      target_shape = (_dim("hidden_size"), _dim("num_attention_heads"), _dim("v_head_dim"))
+    return input_tensor.T.reshape(target_shape)
+
+  def reshape_transpose_out(input_tensor, target_shape=None):
+    if saving_to_hf:
+      return input_tensor.reshape((-1, input_tensor.shape[-1])).T
+    if target_shape is None:
+      target_shape = (_dim("num_attention_heads"), _dim("v_head_dim"), _dim("hidden_size"))
+    return input_tensor.T.reshape(target_shape)
+
+  def permute_conv(input_tensor, target_shape=None):
+    # MaxText 1D conv: [K, 1, C] <-> PyTorch/HF 1D conv: [C, 1, K]
+    return input_tensor.transpose(2, 1, 0)
+
+  def slice_a_log(input_tensor, target_shape=None):
+    """Drops (HF -> MaxText) or restores (MaxText -> HF) the zero padding on the released KDA `A_log`.
+
+    `modeling_kimi_linear.py` declares `A_log` as `[num_heads]` (96), but the moonshotai/Kimi-K3
+    safetensors store it as `[head_dim]` (128): the 96 per-head log-decays followed by 32 exact
+    zeros. HF -> MaxText slices to the MaxText shape (`target_shape`, or the KDA `num_heads` when
+    no shape is given) and refuses to silently drop anything that is not padding. MaxText -> HF
+    zero-pads back to `target_shape` (the release layout from `HF_SHAPE["kimi-k3"]`).
+    """
+    if saving_to_hf:
+      if target_shape is None or input_tensor.shape[0] == int(target_shape[0]):
+        return input_tensor
+      n = int(target_shape[0])
+      if input_tensor.shape[0] > n:
+        raise ValueError(f"A_log has {input_tensor.shape[0]} entries, more than the HF shape {n}")
+      pad = jnp.pad if isinstance(input_tensor, jax.Array) else np.pad
+      return pad(input_tensor, (0, n - input_tensor.shape[0]))
+    n = int(target_shape[0]) if target_shape is not None else _kda_num_heads()
+    if input_tensor.shape[0] == n:
+      return input_tensor
+    if input_tensor.shape[0] < n:
+      raise ValueError(f"A_log has {input_tensor.shape[0]} entries, fewer than num_heads={n}")
+    tail = np.asarray(input_tensor[n:])
+    if np.any(tail != 0):
+      raise ValueError(f"A_log has {input_tensor.shape[0]} entries but only {n} heads and the extra entries are not zero")
+    return input_tensor[:n]
+
+  hooks = {
+      "params-decoder-logits_dense-kernel": transpose,
+      "params-decoder-output_attn_res_proj-kernel": transpose,
+  }
+
+  num_main_layers = int(_kimi_k3_require(config, "num_hidden_layers"))
+  first_num_dense_layers = int(_kimi_k3_require(config, "first_k_dense_replace"))
+  full_attn_layers = _resolve_kimi_k3_full_attn_layers(config)
+
+  for i in range(num_main_layers):
+    prefix = f"params-decoder-layers_{i}"
+    is_full_attn = i in full_attn_layers
+
+    # --- Pre/Post Norms & AttnRes ---
+    hooks[f"{prefix}-self_attention_res_proj-kernel"] = transpose
+    hooks[f"{prefix}-mlp_res_proj-kernel"] = transpose
+
+    # --- Self-Attention (KDA vs MLA) ---
+    if is_full_attn:
+      # Gated MLA
+      hooks[f"{prefix}-self_attention-wq_a-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-wq_b-kernel"] = reshape_transpose_wq_b
+      hooks[f"{prefix}-self_attention-wkv_a-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-wkv_b-kernel"] = reshape_transpose_wkv_b
+      hooks[f"{prefix}-self_attention-g_proj-kernel"] = reshape_transpose_g_proj
+      hooks[f"{prefix}-self_attention-out-kernel"] = reshape_transpose_out
+    else:
+      # KDA (Linear Attention)
+      hooks[f"{prefix}-self_attention-q_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-q_conv1d-kernel"] = permute_conv
+      hooks[f"{prefix}-self_attention-k_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-k_conv1d-kernel"] = permute_conv
+      hooks[f"{prefix}-self_attention-v_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-v_conv1d-kernel"] = permute_conv
+      hooks[f"{prefix}-self_attention-f_a_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-f_b_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-b_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-g_proj-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-out-kernel"] = transpose
+      hooks[f"{prefix}-self_attention-A_log"] = slice_a_log
+
+    # --- FFN (Dense MLP for the first layers, Latent MoE for the rest) ---
+    if i < first_num_dense_layers:
+      hooks[f"{prefix}-mlp-wi_0-kernel"] = transpose
+      hooks[f"{prefix}-mlp-wi_1-kernel"] = transpose
+      hooks[f"{prefix}-mlp-wo-kernel"] = transpose
+    else:
+      hooks[f"{prefix}-mlp-routed_experts-gate-kernel"] = transpose
+      hooks[f"{prefix}-mlp-routed_expert_down_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-routed_expert_up_proj-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_expert-wi_0-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_expert-wi_1-kernel"] = transpose
+      hooks[f"{prefix}-mlp-shared_expert-wo-kernel"] = transpose
+      for mt_name in ("wi_0", "wi_1", "wo"):
+        # HF [out, in] (dense) -> MaxText [in.., out].
+        for mt_suffix in ("",):
+          hooks[f"{prefix}-mlp-routed_experts-{mt_name}{mt_suffix}"] = transpose
+
+  return _kimi_k3_restack_scanned(hooks, layout, _kimi_k3_same_hook)
+
+
 PARAM_MAPPING = {
+    "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -5477,6 +6130,8 @@ PARAM_MAPPING = {
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-1600b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.1-744b": GLM_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.2-744b": GLM_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -5497,11 +6152,13 @@ PARAM_MAPPING = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "ming-3.0-audio-tiny-talker": MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
 # {maxtext model name: {maxtext weight name: bi-directional transform}}
 HOOK_FNS = {
+    "kimi-k3": KIMI_K3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-2b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-9b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gemma2-27b": GEMMA2_MAXTEXT_TO_HF_PARAM_HOOK_FN,
@@ -5545,6 +6202,8 @@ HOOK_FNS = {
     "deepseek4-tiny": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-1600b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.1-744b": GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.2-744b": GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
@@ -5565,6 +6224,7 @@ HOOK_FNS = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "ming-3.0-audio-tiny-talker": MING_TALKER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
@@ -5578,4 +6238,5 @@ VLLM_HOOK_FNS = {
 # Diffusers models (multi-component checkpoints), keyed by `model_name`; used by to_maxtext_diffusers.py.
 DIFFUSERS_PARAM_MAPPING = {
     "wan2.1": WAN2_1_HF_TO_MAXTEXT,
+    "wan2.2": WAN2_1_HF_TO_MAXTEXT,
 }

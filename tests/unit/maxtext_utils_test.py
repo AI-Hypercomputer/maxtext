@@ -1447,6 +1447,22 @@ class TestCalculatePrefillTflops(unittest.TestCase):
     # Attention scales quadratically with prefill length
     self.assertGreater(attn_long, attn_short * 3)
 
+  def test_full_attention_doubles_prefill_attention_tflops(self):
+    causal_cfg = self._make_cfg()
+    causal_cfg.attention_type = "global"
+    full_cfg = self._make_cfg()
+    full_cfg.attention_type = "full"
+    total_c, lw_c, attn_c = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_parameters=1_000_000, prefill_length=128, config=causal_cfg, log=False
+    )
+    total_f, lw_f, attn_f = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_parameters=1_000_000, prefill_length=128, config=full_cfg, log=False
+    )
+    self.assertAlmostEqual(lw_f, lw_c, places=10)
+    self.assertAlmostEqual(attn_f, 2.0 * attn_c, places=10)
+    self.assertAlmostEqual(total_f, lw_f + attn_f, places=10)
+    self.assertGreater(total_f, total_c)
+
 
 class TestSetupTrainingState(unittest.TestCase):
   """Tests for setup_training_state (thin wrapper over setup_initial_state)."""
@@ -1512,6 +1528,52 @@ class TestAddConfigToSummaryWriter(unittest.TestCase):
       # Should have been called once per config key (process_index==0 in tests)
       if jax.process_index() == 0:
         self.assertEqual(mock_add.call_count, 2)
+
+  def test_skips_secret_keys_for_hyperparameters(self):
+    secret = "hf_test_secret_token_123"
+    cfg = pyconfig.initialize(
+        ["", get_test_config_path()],
+        run_name="redaction_test",
+        base_output_directory="/tmp/maxtext_redaction_test",
+        enable_checkpointing=False,
+        skip_jax_distributed_system=True,
+        log_config=False,
+        hf_access_token=secret,
+    )
+    self.assertEqual(cfg.hf_access_token, secret)
+
+    mock_writer = MagicMock()
+    with patch("jax.process_index", return_value=0):
+      maxtext_utils.add_config_to_summary_writer(cfg, mock_writer)
+
+    entries = {call.args[0]: call.args[1] for call in mock_writer.add_text.call_args_list}
+    self.assertEqual(entries.get("run_name"), "redaction_test")
+    self.assertNotIn("hf_access_token", entries)
+    for value in entries.values():
+      self.assertNotIn(secret, value)
+
+  def test_skips_secret_keys_for_pydantic_and_dict(self):
+    secret = "hf_pydantic_secret_789"
+    pydantic_cfg = pyconfig.initialize_pydantic(
+        ["", get_test_config_path()],
+        run_name="pydantic_redaction_test",
+        base_output_directory="/tmp/maxtext_redaction_test",
+        enable_checkpointing=False,
+        skip_jax_distributed_system=True,
+        log_config=False,
+        hf_access_token=secret,
+    )
+
+    for cfg in (pydantic_cfg, {"steps": 42, "hf_access_token": secret}):
+      mock_writer = MagicMock()
+      with patch("jax.process_index", return_value=0):
+        maxtext_utils.add_config_to_summary_writer(cfg, mock_writer)
+
+      entries = {call.args[0]: call.args[1] for call in mock_writer.add_text.call_args_list}
+      self.assertTrue(entries)
+      self.assertNotIn("hf_access_token", entries)
+      for value in entries.values():
+        self.assertNotIn(secret, value)
 
 
 class TestMaybeDumpJaxpr(unittest.TestCase):

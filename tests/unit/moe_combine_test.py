@@ -44,22 +44,46 @@ def _routing(rng, num_tokens, k, num_experts):
   return np.stack([rng.permutation(num_experts)[:k] for _ in range(num_tokens)]).astype(np.int32)
 
 
-def _fake_moe(k, float32_weight_sum=False, decoder_block=ctypes.DecoderBlockType.DEEPSEEK):
+def _fake_moe(
+    k,
+    float32_weight_sum=False,
+    decoder_block=ctypes.DecoderBlockType.DEEPSEEK,
+    prefetch_fsdp_weights=False,
+    ep_size=1,
+):
   """The attributes `RoutedMoE.unpermute` reads on its generic (no ragged sort / TC routing) branch."""
   config = types.SimpleNamespace(
       use_ragged_sort=False,
       use_ring_of_experts=False,
+      prefetch_fsdp_weights=prefetch_fsdp_weights,
+      moe_use_direct_token_gather=False,
       matmul_precision="highest",
       decoder_block=decoder_block,
       float32_weight_sum=float32_weight_sum,
   )
-  return types.SimpleNamespace(config=config, num_experts_per_tok=k, dtype=jnp.float32)
+  return types.SimpleNamespace(
+      config=config,
+      num_experts_per_tok=k,
+      dtype=jnp.float32,
+      get_expert_parallelism_size=lambda: ep_size,
+  )
 
 
 class UnpermuteReferenceTest(unittest.TestCase):
   """`RoutedMoE.unpermute` matches out[t] = sum_k w[t, k] * expert_out[sorted position of (t, k)]."""
 
-  def _check(self, batch, seq, k, num_experts, emb, use_custom_sort_vjp, float32_weight_sum=False):
+  def _check(
+      self,
+      batch,
+      seq,
+      k,
+      num_experts,
+      emb,
+      use_custom_sort_vjp,
+      float32_weight_sum=False,
+      prefetch_fsdp_weights=False,
+      ep_size=1,
+  ):
     """Checks forward and backward parity of `RoutedMoE.unpermute` against a NumPy reference."""
     rng = np.random.default_rng(0)
     num_tokens = batch * seq
@@ -68,7 +92,12 @@ class UnpermuteReferenceTest(unittest.TestCase):
     sort_idx = np.argsort(selected.reshape(-1), kind="stable").astype(np.int32)
     intermediate = rng.standard_normal((num_tokens * k, emb)).astype(np.float32)
     weights = rng.standard_normal((batch, seq, k)).astype(np.float32)
-    fake = _fake_moe(k, float32_weight_sum=float32_weight_sum)
+    fake = _fake_moe(
+        k,
+        float32_weight_sum=float32_weight_sum,
+        prefetch_fsdp_weights=prefetch_fsdp_weights,
+        ep_size=ep_size,
+    )
 
     def f(inter, w):
       return moe.RoutedMoE.unpermute(
@@ -95,10 +124,32 @@ class UnpermuteReferenceTest(unittest.TestCase):
       np.testing.assert_allclose(np.asarray(g), np.asarray(w), rtol=1e-5, atol=1e-5)
 
   def test_custom_sort_vjp(self):
-    self._check(batch=2, seq=8, k=4, num_experts=16, emb=8, use_custom_sort_vjp=True)
+    for prefetch, ep_size in ((False, 1), (True, 1), (False, 4)):
+      with self.subTest(prefetch_fsdp_weights=prefetch, ep_size=ep_size):
+        self._check(
+            batch=2,
+            seq=8,
+            k=4,
+            num_experts=16,
+            emb=8,
+            use_custom_sort_vjp=True,
+            prefetch_fsdp_weights=prefetch,
+            ep_size=ep_size,
+        )
 
   def test_default_vjp(self):
-    self._check(batch=2, seq=8, k=4, num_experts=16, emb=8, use_custom_sort_vjp=False)
+    for prefetch, ep_size in ((False, 1), (True, 1), (False, 4)):
+      with self.subTest(prefetch_fsdp_weights=prefetch, ep_size=ep_size):
+        self._check(
+            batch=2,
+            seq=8,
+            k=4,
+            num_experts=16,
+            emb=8,
+            use_custom_sort_vjp=False,
+            prefetch_fsdp_weights=prefetch,
+            ep_size=ep_size,
+        )
 
   def test_k1_and_k8(self):
     for k in (1, 8):

@@ -34,10 +34,10 @@ on:
         required: true
         type: string
       repository_name:
-        description: 'Artifact Registry repository name'
+        description: 'Artifact Registry repository name (defaults to maxtext-test-images for CI deps images, else maxtext-images)'
         required: false
         type: string
-        default: 'maxtext-images'
+        default: ''
       base_image:
         description: 'The docker image to run tests against'
         required: true

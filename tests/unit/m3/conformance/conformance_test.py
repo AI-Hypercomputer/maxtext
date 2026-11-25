@@ -20,6 +20,7 @@ import importlib
 import os
 import pkgutil
 import tempfile
+import types
 from typing import Any, cast
 from unittest import mock
 
@@ -85,7 +86,7 @@ class _ToyModule(nnx.Module):
     if m == "rng_good_aux":
       self.unhashable_meta = {"mode": m}
     if m in ("dead_param", "nan_param"):
-      fill = jnp.nan if m == "nan_param" else 1.0
+      fill = jnp.nan if m == "nan_param" else 0.0
       self.unused = nnx.Param(jnp.full((4,), fill, jnp.float32))
     elif m == "raw_array_weight":
       self.raw_w = jnp.ones((8,), dtype=jnp.float32)
@@ -110,10 +111,11 @@ class _ToyModule(nnx.Module):
       h = step_fn(step_fn(x, w0)[0], w1)[0]
     if m == "value_drift" and is_var:
       h = h * 1.1
-    f_scores = h @ self.frozen_proj[...].astype(h.dtype)
-    frz_zero = 0.0 * jax.lax.stop_gradient(f_scores)
-    f_term = f_scores if m == "unfrozen" else frz_zero
-    h = h + jnp.mean(f_term, axis=-1, keepdims=True)
+    if m != "unused_frozen":
+      f_scores = h @ self.frozen_proj[...].astype(h.dtype)
+      frz_zero = 0.0 * jax.lax.stop_gradient(f_scores)
+      f_term = f_scores if m == "unfrozen" else frz_zero
+      h = h + jnp.mean(f_term, axis=-1, keepdims=True)
     if m in ("leaky_non_param", "raw_array_weight"):
       leak = self.bias_buf[...] + 1.0 if m == "leaky_non_param" else self.raw_w
       h = h + leak
@@ -196,16 +198,20 @@ _SCANNED_EXPERT_ALL_GATHER_MODES = (
 
 
 class _ShardedExpertSubmodule(nnx.Module):
-  """Synthetic MoE expert submodule for multi-device Checks 5-8."""
+  """Synthetic MoE expert submodule for multi-device Checks 5-12."""
 
   def __init__(
       self,
-      mesh: jax.sharding.Mesh,
+      mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
       key: jax.Array,
       mode: str,
       stacked_blocks: int | None,
+      col_axis: str = "tensor",
   ):
-    self.mesh = jax.sharding.Mesh(np.flip(mesh.devices), mesh.axis_names) if mode == "private_sub_mesh" else mesh
+    if mode == "private_sub_mesh" and isinstance(mesh, jax.sharding.Mesh):
+      self.mesh: Any = jax.sharding.Mesh(np.flip(mesh.devices), mesh.axis_names)
+    else:
+      self.mesh = mesh
     k_gu, k_dn = jax.random.split(key)
     is_4d = mode in (
         "4d_experts",
@@ -213,78 +219,90 @@ class _ShardedExpertSubmodule(nnx.Module):
         "scanned_4d_expert_all_gather",
         "scanned_4d_s3_expert_all_gather",
     )
+    exp_ax = "expert" if (mesh.shape.get("expert", 1) > 1 and mode != "no_expert_axis") else None
+    tp_ax = "tensor" if mesh.shape.get("tensor", 1) > 1 else None
     if stacked_blocks is not None:
       if is_4d:
         gu_shape: tuple[int, ...] = (stacked_blocks, 4, 16, 2, 10)
-        gu_spec = jax.sharding.PartitionSpec(None, None, "fsdp", None, "tensor")
+        gu_spec = jax.sharding.PartitionSpec(None, exp_ax, "fsdp", None, col_axis)
       else:
         gu_shape = (stacked_blocks, 4, 16, 20)
-        gu_spec = jax.sharding.PartitionSpec(None, None, "fsdp", "tensor")
+        gu_spec = jax.sharding.PartitionSpec(None, exp_ax, "fsdp", col_axis)
       dn_shape: tuple[int, ...] = (stacked_blocks, 4, 20, 16)
-      dn_spec = jax.sharding.PartitionSpec(None, None, "tensor", "fsdp")
+      dn_spec = jax.sharding.PartitionSpec(None, exp_ax, col_axis, "fsdp")
     else:
       if is_4d:
         gu_shape = (4, 16, 2, 10)
-        gu_spec = jax.sharding.PartitionSpec(None, "fsdp", None, "tensor")
+        gu_spec = jax.sharding.PartitionSpec(exp_ax, "fsdp", None, tp_ax)
       elif mode == "unsharded_expert":
         gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec()
       elif mode == "no_tensor_axis":
-        gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec(None, "fsdp", None)
+        gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec(exp_ax, "fsdp", None)
       else:
-        gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec(None, "fsdp", "tensor")
+        gu_shape, gu_spec = (4, 16, 20), jax.sharding.PartitionSpec(exp_ax, "fsdp", tp_ax)
       dn_shape = (4, 20, 16)
       dn_spec = (
-          jax.sharding.PartitionSpec(None, None, "fsdp")
+          jax.sharding.PartitionSpec(exp_ax, None, "fsdp")
           if mode == "no_tensor_axis"
-          else jax.sharding.PartitionSpec(None, "tensor", "fsdp")
+          else jax.sharding.PartitionSpec(exp_ax, tp_ax, "fsdp")
       )
     self.gate_up = nnx.Param(jax.random.normal(k_gu, gu_shape) * 0.1, out_sharding=gu_spec)
     self.down = nnx.Param(jax.random.normal(k_dn, dn_shape) * 0.1, out_sharding=dn_spec)
 
 
 class _ShardedToyModule(nnx.Module):
-  """Synthetic 4-device sharded scanned MoE module (`prefix + 2 scanned blocks + suffix MoE`)."""
+  """Synthetic multi-device sharded scanned MoE module (`prefix + 2 scanned blocks + suffix MoE`)."""
 
   def __init__(
       self,
-      mesh: jax.sharding.Mesh,
+      mesh: jax.sharding.Mesh | jax.sharding.AbstractMesh,
       rngs: nnx.Rngs,
       scan: bool,
       remat: str,
       mode: str,
+      *,
+      dtype: Any = jnp.float32,
+      full_scale: bool = False,
+      use_input_ids: bool = False,
   ):
     if rngs is None:
       raise ValueError("rngs must be provided")
-    self.scan, self.remat, self.mode = scan, remat, mode
-    if mode == "private_root_mesh":
-      self.mesh = jax.sharding.Mesh(np.flip(mesh.devices), mesh.axis_names)
+    self.scan, self.remat, self.mode, self.dtype = scan, remat, mode, dtype
+    self.use_input_ids = use_input_ids
+    if mode == "private_root_mesh" and isinstance(mesh, jax.sharding.Mesh):
+      self.mesh: Any = jax.sharding.Mesh(np.flip(mesh.devices), mesh.axis_names)
     elif mode != "no_root_mesh":
       self.mesh = mesh
+    col_ax = "expert" if (mesh.shape.get("expert", 1) > 1 and mesh.shape.get("tensor", 1) == 1) else "tensor"
+    self.col_axis = col_ax
     self.state_buf = _NonParamVar(
         jnp.zeros((8,), jnp.float32),
         out_sharding=jax.sharding.PartitionSpec(None),
     )
-    self.cache_none = _NonParamVar("active" if mode == "rng_and_str_state" else None)
+    if not full_scale:
+      self.cache_none = _NonParamVar("active" if mode == "rng_and_str_state" else None)
     if mode == "rng_and_str_state":
       self.rngs = rngs
       self.unhashable_meta = {"mode": mode}
     k0, k1, k2, k3, k4 = jax.random.split(rngs.params(), 5)
-    p_init = jax.random.normal(k0, (16, 32)) * 0.1
-    if mode == "unsharded_non_named":
+    h_dim = 64 if full_scale else 16
+    p_cols = 150 if (full_scale and mode == "indivisible_256_wq_a") else (128 if full_scale else 32)
+    p_init = jax.random.normal(k0, (h_dim, p_cols)) * 0.1
+    if mode == "unsharded_non_named" and isinstance(mesh, jax.sharding.Mesh):
       self.prefix_proj = nnx.Param(jax.device_put(p_init, jax.devices()[0]), eager_sharding=False)
-    elif mode == "param_wrong_mesh":
-      alt_mesh = jax.sharding.Mesh(np.array(mesh.devices).reshape(2, 2), ("data", "stage"))
+    elif mode == "param_wrong_mesh" and isinstance(mesh, jax.sharding.Mesh):
+      alt_mesh = jax.sharding.Mesh(np.array(mesh.devices[:4]).reshape(2, 2), ("data", "stage"))
       alt_shd = jax.sharding.NamedSharding(alt_mesh, jax.sharding.PartitionSpec("data", "stage"))
       self.prefix_proj = nnx.Param(jax.device_put(p_init, alt_shd))
-    elif mode == "bad_meta_axis":
-      ok_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", "tensor"))
+    elif mode == "bad_meta_axis" and isinstance(mesh, jax.sharding.Mesh):
+      ok_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", col_ax))
       self.prefix_proj = nnx.Param(
           jax.device_put(p_init, ok_shd),
-          out_sharding=jax.sharding.PartitionSpec("stage", "tensor"),
+          out_sharding=jax.sharding.PartitionSpec("fake_axis", col_ax),
           eager_sharding=False,
       )
-    elif mode == "unconstrained_spec":
-      ok_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", "tensor"))
+    elif mode == "unconstrained_spec" and isinstance(mesh, jax.sharding.Mesh):
+      ok_shd = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", col_ax))
       unc = jax.sharding.PartitionSpec(jax.sharding.PartitionSpec.UNCONSTRAINED, None)
       self.prefix_proj = nnx.Param(jax.device_put(p_init, ok_shd), out_sharding=unc, eager_sharding=False)
     else:
@@ -293,35 +311,46 @@ class _ShardedToyModule(nnx.Module):
           "size1_axis_only": jax.sharding.PartitionSpec("data", None),
           "no_tensor_axis": jax.sharding.PartitionSpec("fsdp", None),
       }
-      p_spec = p_map[mode] if mode in p_map else jax.sharding.PartitionSpec("fsdp", "tensor")
+      p_spec = p_map[mode] if mode in p_map else jax.sharding.PartitionSpec("fsdp", col_ax)
       self.prefix_proj = nnx.Param(p_init, out_sharding=p_spec)
-    b_axes = (None, "fsdp", None) if mode == "no_tensor_axis" else (None, "fsdp", "tensor")
+    b_axes = (None, "fsdp", None) if mode == "no_tensor_axis" else (None, "fsdp", col_ax)
     self.blocks_w = nnx.Param(
-        jax.random.normal(k1, (2, 16, 16)) * 0.1,
+        jax.random.normal(k1, (2, h_dim, h_dim)) * 0.1,
         out_sharding=jax.sharding.PartitionSpec(*b_axes),
     )
     self.blocks_scale = nnx.Param(
-        jnp.ones((2, 16), jnp.float32),
+        jnp.ones((2, h_dim), jnp.float32),
         out_sharding=jax.sharding.PartitionSpec(None, None),
     )
     self.router = nnx.Param(
-        jax.random.normal(k2, (16, 4)) * 0.2,
+        jax.random.normal(k2, (h_dim, 4)) * 0.2,
         out_sharding=jax.sharding.PartitionSpec("fsdp", None),
     )
-    if mode in _SCANNED_EXPERT_ALL_GATHER_MODES:
-      k3_blocks, k3_suffix = jax.random.split(k3)
-      self.blocks_experts = _ShardedExpertSubmodule(mesh, k3_blocks, mode, stacked_blocks=2)
-      self.experts = _ShardedExpertSubmodule(mesh, k3_suffix, "", stacked_blocks=None)
-    else:
-      self.experts = _ShardedExpertSubmodule(mesh, k3, mode, stacked_blocks=None)
-    h_axes = ("fsdp", None) if mode == "no_tensor_axis" else ("fsdp", "tensor")
+    if not full_scale:
+      if mode in _SCANNED_EXPERT_ALL_GATHER_MODES:
+        k3_blocks, k3_suffix = jax.random.split(k3)
+        self.blocks_experts = _ShardedExpertSubmodule(mesh, k3_blocks, mode, stacked_blocks=2, col_axis=col_ax)
+        self.experts = _ShardedExpertSubmodule(mesh, k3_suffix, "", stacked_blocks=None, col_axis=col_ax)
+      else:
+        self.experts = _ShardedExpertSubmodule(mesh, k3, mode, stacked_blocks=None, col_axis=col_ax)
+    h_axes = ("fsdp", None) if mode == "no_tensor_axis" else ("fsdp", col_ax)
+    if use_input_ids:
+      self.token_embedder = nnx.Param(
+          jax.random.normal(k4, (64, h_dim)) * 0.1,
+          out_sharding=jax.sharding.PartitionSpec(*h_axes),
+      )
     self.head = nnx.Param(
-        jax.random.normal(k4, (16, 32)) * 0.1,
+        jax.random.normal(k4, (h_dim, 2 * h_dim)) * 0.1,
         out_sharding=jax.sharding.PartitionSpec(*h_axes),
     )
 
-  def __call__(self, x: jax.Array) -> spec.ForwardOutput:
-    ft_spec = jax.sharding.PartitionSpec("fsdp", "tensor")
+  def __call__(
+      self,
+      x: jax.Array,
+      segment_ids: jax.Array | None = None,
+  ) -> spec.ForwardOutput:
+    col_ax = getattr(self, "col_axis", "tensor")
+    ft_spec = jax.sharding.PartitionSpec("fsdp", col_ax)
     act_spec = jax.sharding.PartitionSpec("fsdp", None, None)
     rep_spec = jax.sharding.PartitionSpec()
 
@@ -395,14 +424,42 @@ class _ShardedToyModule(nnx.Module):
         return state[0] + jnp.int32(1), p_w
 
       _, p_w = jax.lax.while_loop(_wcond_check, _wbody_step, (jnp.int32(0), jnp.zeros_like(p_w)))
-    h = jax.lax.with_sharding_constraint(jnp.tanh(x @ p_w[:, :16] + x @ p_w[:, 16:]), act_spec)
+    compute_dt = jnp.float32 if self.mode == "no_bf16_ops" else self.dtype
+    if getattr(self, "use_input_ids", False):
+      x_in = self.token_embedder[...][x].astype(compute_dt)
+    else:
+      x_in = x.astype(compute_dt)
+    p_w_dt = p_w.astype(compute_dt)
+    h = jax.lax.with_sharding_constraint(jnp.tanh(x_in @ p_w_dt[:, :16] + x_in @ p_w_dt[:, 16:]), act_spec)
+    if segment_ids is not None:
+      s_len = x.shape[1]
+      pos = jnp.arange(s_len)
+      causal = pos[None, None, :] <= pos[None, :, None]
+      if self.mode == "cross_doc_leak":
+        attn_mask = jnp.broadcast_to(causal, (x.shape[0], s_len, s_len))
+      elif self.mode == "zero_eq_zero_pad_leak":
+        attn_mask = causal & (segment_ids[:, :, None] == segment_ids[:, None, :])
+      else:
+        same_seg = (segment_ids[:, :, None] == segment_ids[:, None, :]) & (segment_ids[:, :, None] != 0)
+        attn_mask = causal & same_seg
+      denom = jnp.maximum(jnp.sum(attn_mask.astype(compute_dt), axis=-1, keepdims=True), 1.0)
+      h = jnp.einsum("bts,bsh->bth", attn_mask.astype(compute_dt) / denom, h)
+      if self.mode != "zero_eq_zero_pad_leak":
+        h = jnp.where((segment_ids != 0)[..., None], h, jnp.zeros_like(h))
+      if self.mode == "cross_doc_bwd_grad_leak":
+        d1_sum = jnp.sum(x_in * (segment_ids == 1)[..., None].astype(compute_dt))
+        h = h + (d1_sum - jax.lax.stop_gradient(d1_sum))
+      elif self.mode == "pad_bwd_grad_leak":
+        pad_sum = jnp.sum(x_in * (segment_ids == 0)[..., None].astype(compute_dt))
+        h = h + (pad_sum - jax.lax.stop_gradient(pad_sum))
 
     def _block_step(h_in: jax.Array, w_b: jax.Array, s_b: jax.Array) -> jax.Array:
       if self.mode == "constrain_in_scan":
         w_b = jax.lax.with_sharding_constraint(w_b, ft_spec)
-      return h_in + jnp.tanh((h_in * s_b) @ w_b)
+      return h_in + jnp.tanh((h_in * s_b.astype(h_in.dtype)) @ w_b.astype(h_in.dtype))
 
-    run_blk = jax.checkpoint(_block_step) if self.remat == "full" else _block_step
+    use_remat = self.remat == "full" and self.mode != "no_remat_reduction"
+    run_blk = jax.checkpoint(_block_step, policy=jax.checkpoint_policies.nothing_saveable) if use_remat else _block_step
     if self.mode == "constrain_in_scan_carry":
 
       def _carry_scan_body(
@@ -468,43 +525,121 @@ class _ShardedToyModule(nnx.Module):
     else:
       for b_idx in range(2):
         h = run_blk(h, self.blocks_w[...][b_idx], self.blocks_scale[...][b_idx])
-    probs = jax.nn.softmax(h @ self.router[...], axis=-1)
-    aux_lb = jnp.mean(probs**2)
-    gu = self.experts.gate_up[...]
-    gu_3d = gu.reshape(4, 16, 20) if gu.ndim == 4 else gu
-    dn = self.experts.down[...]
-    if self.mode in ("expert_all_gather", "4d_expert_all_gather"):
-      moe_out = _replicated_moe(h, probs, gu_3d, dn)
+    probs = jax.nn.softmax(h.astype(jnp.float32) @ self.router[...].astype(jnp.float32), axis=-1)
+    if segment_ids is not None and self.mode != "pad_aux_leak":
+      valid_m = (segment_ids != 0).astype(jnp.float32)[..., None]
+      aux_lb = jnp.sum((probs**2) * valid_m) / (jnp.maximum(jnp.sum(valid_m), 1.0) * probs.shape[-1])
+    elif segment_ids is not None and self.mode == "pad_aux_leak":
+      raw_pad = jnp.mean(x_in.astype(jnp.float32) ** 2)
+      aux_lb = jnp.mean(probs**2) + 0.1 * raw_pad
     else:
+      aux_lb = jnp.mean(probs**2)
+    gu = self.experts.gate_up[...].astype(compute_dt)
+    gu_3d = gu.reshape(4, 16, 20) if gu.ndim == 4 else gu
+    dn = self.experts.down[...].astype(compute_dt)
+    probs_dt = probs.astype(compute_dt)
+    if self.mode in ("expert_all_gather", "4d_expert_all_gather"):
+      moe_out = _replicated_moe(h, probs_dt, gu_3d, dn)
+    else:
+      exp_ax = "expert" if (self.mesh.shape.get("expert", 1) > 1 and self.mode != "no_expert_axis") else None
+      tp_ax = "tensor" if self.mesh.shape.get("tensor", 1) > 1 else None
       mid = jax.nn.silu(jnp.einsum("bsh,ehm->bsem", h, gu_3d))
-      mid = jax.lax.with_sharding_constraint(mid, jax.sharding.PartitionSpec("fsdp", None, None, "tensor"))
-      moe_out = jax.lax.with_sharding_constraint(jnp.einsum("bsem,bse,emh->bsh", mid, probs, dn), act_spec)
-    logits = (h + moe_out) @ self.head[...]
+      mid = jax.lax.with_sharding_constraint(mid, jax.sharding.PartitionSpec("fsdp", None, exp_ax, tp_ax))
+      moe_out = jax.lax.with_sharding_constraint(jnp.einsum("bsem,bse,emh->bsh", mid, probs_dt, dn), act_spec)
+    logits = (h + moe_out) @ self.head[...].astype(compute_dt)
+    if segment_ids is not None and self.mode != "zero_eq_zero_pad_leak":
+      logits = jnp.where((segment_ids != 0)[..., None], logits, jnp.zeros_like(logits))
+    if self.mode == "bf16_drift" and compute_dt == jnp.bfloat16:
+      logits = logits + jnp.asarray(5.0, dtype=logits.dtype)
+    if self.mode == "ep_drift" and self.mesh.shape.get("expert", 1) > 1:
+      logits = logits + jnp.asarray(1.0, dtype=logits.dtype)
     if self.mode == "rng_and_str_state":
       logits = logits + 1e-3 * jax.random.normal(self.rngs(), ())
     return spec.ForwardOutput(primary=logits, aux_losses={"moe_lb": aux_lb})
 
 
-def _sharded_toy_spec(mode: str = "", **overrides: Any) -> spec.ConformanceSpec:
-  """Constructs a 4-device sharded scanned MoE `ConformanceSpec` for Checks 1-8."""
+def _sharded_toy_spec(
+    mode: str = "",
+    *,
+    use_input_ids: bool = False,
+    **overrides: Any,
+) -> spec.ConformanceSpec:
+  """Constructs a multi-device sharded scanned MoE `ConformanceSpec` for Checks 1-12."""
 
   def _build_model(m_arg: jax.sharding.Mesh, rngs: nnx.Rngs, scan_flag: bool, remat_pol: str) -> nnx.Module:
-    return _ShardedToyModule(m_arg, rngs, scan_flag, remat_pol, mode)
+    return _ShardedToyModule(m_arg, rngs, scan_flag, remat_pol, mode, use_input_ids=use_input_ids)
+
+  def _build_bf16(m_arg: jax.sharding.Mesh, rngs: nnx.Rngs, scan_flag: bool, remat_pol: str) -> nnx.Module:
+    return _ShardedToyModule(
+        m_arg,
+        rngs,
+        scan_flag,
+        remat_pol,
+        mode,
+        dtype=jnp.bfloat16,
+        use_input_ids=use_input_ids,
+    )
+
+  def _build_full_scale(
+      m_arg: jax.sharding.Mesh | jax.sharding.AbstractMesh,
+      scan_flag: bool,
+      remat_pol: str,
+  ) -> nnx.Module:
+    return nnx.eval_shape(
+        lambda: _ShardedToyModule(
+            m_arg,
+            nnx.Rngs(0),
+            scan_flag,
+            remat_pol,
+            mode,
+            full_scale=True,
+            use_input_ids=use_input_ids,
+        )
+    )
 
   def _build_batch(b_key: jax.Array, m_arg: jax.sharding.Mesh) -> Mapping[str, jax.Array]:
+    seg_shd = jax.sharding.NamedSharding(m_arg, jax.sharding.PartitionSpec("fsdp", None))
+    seg_ids = jnp.ones((2, 8), dtype=jnp.int32)
+    if use_input_ids:
+      raw_ids = jax.random.randint(b_key, (2, 8), 1, 32, dtype=jnp.int32)
+      return {
+          "input_ids": jax.device_put(raw_ids, seg_shd),
+          "segment_ids": jax.device_put(seg_ids, seg_shd),
+      }
     raw_x = jax.random.normal(b_key, (2, 8, 16), dtype=jnp.float32)
     x_shd = jax.sharding.NamedSharding(m_arg, jax.sharding.PartitionSpec("fsdp", None, None))
-    return {"x": jax.device_put(raw_x, x_shd)}
+    return {
+        "x": jax.device_put(raw_x, x_shd),
+        "segment_ids": jax.device_put(seg_ids, seg_shd),
+    }
+
+  fwd_calls = [0]
 
   def _forward(mod: Any, batch: Mapping[str, jax.Array]) -> spec.ForwardOutput:
-    return mod(batch["x"])
+    inp = batch["input_ids"] if "input_ids" in batch else batch["x"]
+    out = mod(inp, segment_ids=batch.get("segment_ids"))
+    if mode == "corrupt_reload_drift":
+      fwd_calls[0] += 1
+      if fwd_calls[0] >= 2:
+        out = spec.ForwardOutput(
+            primary=out.primary + 1.0,
+            aux_losses=out.aux_losses,
+        )
+    elif mode == "non_jax_first_ref_out":
+      fwd_calls[0] += 1
+      if fwd_calls[0] == 1:
+        out = spec.ForwardOutput(
+            primary=cast(Any, np.asarray(out.primary)),
+            aux_losses=out.aux_losses,
+        )
+    return out
 
   def _loss(
       out: spec.ForwardOutput,
       unused_b: Mapping[str, jax.Array],
       weights: Mapping[str, float],
   ) -> jax.Array:
-    return jnp.mean(out.primary**2) + weights["moe_lb"] * out.aux_losses["moe_lb"]
+    return jnp.mean(out.primary.astype(jnp.float32) ** 2) + weights["moe_lb"] * out.aux_losses["moe_lb"]
 
   base = spec.ConformanceSpec(
       model_name="synthetic_sharded_moe",
@@ -518,17 +653,19 @@ def _sharded_toy_spec(mode: str = "", **overrides: Any) -> spec.ConformanceSpec:
       num_scanned_blocks=2,
       min_sharded_param_elements=256,
       expert_weight_param_patterns=(r"^experts\.(gate_up|down)$",),
+      build_bf16_model=_build_bf16,
+      build_full_scale_abstract_model=_build_full_scale,
   )
   return dataclasses.replace(base, **overrides) if overrides else base
 
 
 class ConformanceTest(parameterized.TestCase):
-  """Tests `spec` registry, `SkipDeclaration` guards, and Checks 1-8."""
+  """Tests `spec` registry, `SkipDeclaration` guards, and Checks 1-12."""
 
   def setUp(self):
     super().setUp()
     self.enter_context(nnx.use_eager_sharding(True))
-    self.mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]), ("data",))
+    self.mesh = m3_sharding.create_mesh(devices=jax.devices()[:1])
 
   def test_spec_registry_idempotence_and_validation(self):
     """Verifies `spec` registry idempotence and invariant rejections."""
@@ -580,6 +717,34 @@ class ConformanceTest(parameterized.TestCase):
           (
               dataclasses.replace(s, min_sharded_param_elements=0),
               "min_sharded_param_elements must be int >= 1",
+          ),
+          (
+              dataclasses.replace(s, full_scale_topologies=()),
+              "full_scale_topologies must be non-empty tuple",
+          ),
+          (
+              dataclasses.replace(s, full_scale_topologies=(cast(Any, ("only_name",)),)),
+              "invalid full_scale_topologies entry",
+          ),
+          (
+              dataclasses.replace(s, full_scale_topologies=((" ", {"fsdp": 2}),)),
+              "invalid full_scale_topologies entry",
+          ),
+          (
+              dataclasses.replace(s, full_scale_topologies=(("tpu7x-64", {}),)),
+              "invalid full_scale_topologies entry",
+          ),
+          (
+              dataclasses.replace(s, full_scale_topologies=(("tpu7x-64", cast(Any, {1: 2})),)),
+              "invalid full_scale_topologies axis",
+          ),
+          (
+              dataclasses.replace(s, full_scale_topologies=(("tpu7x-64", {"fsdp": True}),)),
+              "invalid full_scale_topologies axis",
+          ),
+          (
+              dataclasses.replace(s, full_scale_topologies=(("tpu7x-64", {"fsdp": 0}),)),
+              "invalid full_scale_topologies axis",
           ),
       ):
         reg[:] = [bad_spec]
@@ -650,6 +815,7 @@ class ConformanceTest(parameterized.TestCase):
         ("nan_param", "nan_param:unused"),
         ("nan_grad", "non_finite:kernel_0"),
         ("unfrozen", "unfrozen:frozen_proj"),
+        ("unused_frozen", "unused_frozen:frozen_proj"),
         ("leaky_non_param", "leaky_non_param:bias_buf"),
         ("raw_array_weight", "leaky_non_param:raw_w"),
         ("rank2", r"OutputKind\.LOGITS \(2, 8\)"),
@@ -709,7 +875,16 @@ class ConformanceTest(parameterized.TestCase):
     self.assertEqual(driver_mesh.axis_names, m3_sharding.MESH_AXIS_NAMES)
     self.assertEqual(
         {**driver_mesh.shape},
-        {"data": 1, "fsdp": 2, "tensor": 2, "expert": 1},
+        {
+            "data": 1,
+            "stage": 1,
+            "fsdp": 2,
+            "fsdp_transpose": 1,
+            "context": 1,
+            "tensor": 2,
+            "tensor_sequence": 1,
+            "expert": 1,
+        },
     )
     with mock.patch.object(jax, "devices", return_value=jax.devices()[:2]):
       with self.assertRaisesRegex(AssertionError, "require >= 4 JAX devices"):
@@ -750,7 +925,7 @@ class ConformanceTest(parameterized.TestCase):
         ("param_wrong_mesh", r"prefix_proj sharding\.mesh is not driver_mesh"),
         (
             "bad_meta_axis",
-            r"prefix_proj\.out_sharding: non-m3 mesh axes \['stage'\]",
+            r"prefix_proj\.out_sharding: non-m3 mesh axes \['fake_axis'\]",
         ),
         (
             "unconstrained_spec",
@@ -876,6 +1051,263 @@ class ConformanceTest(parameterized.TestCase):
       with self.assertRaisesRegex(AssertionError, pattern):
         checks.check_no_expert_weight_all_gather(bad_spec)
 
+  def test_check_9a_bf16_forward_parity_negative_detection(self):
+    """Verifies Check 9a catches missing `build_bf16_model`, missing bf16 ops, and bf16 vs fp32 drift."""
+    checks.check_bf16_forward_parity(_sharded_toy_spec(), self.mesh)
+    for bad_spec, pattern in (
+        (
+            _sharded_toy_spec(build_bf16_model=None),
+            r"build_bf16_model is None",
+        ),
+        (
+            _sharded_toy_spec("no_bf16_ops"),
+            r"contains no bfloat16 operations",
+        ),
+        (
+            _sharded_toy_spec("bf16_drift"),
+            r"bf16 vs fp32 primary drift.*exceeds",
+        ),
+    ):
+      with self.assertRaisesRegex(AssertionError, pattern):
+        checks.check_bf16_forward_parity(bad_spec, self.mesh)
+
+  def test_check_9b_packing_and_padding_isolation_negative_detection(self):
+    """Verifies Check 9b catches cross-doc packing leaks, 0==0 pad leaks, and bwd grad leaks (both x and input_ids)."""
+    checks.check_packing_and_padding_isolation(_sharded_toy_spec(), self.mesh)
+    checks.check_packing_and_padding_isolation(_sharded_toy_spec(use_input_ids=True), self.mesh)
+    for bad_spec, pattern in (
+        (
+            _sharded_toy_spec("cross_doc_leak"),
+            r"cross-document forward leak into doc 2",
+        ),
+        (
+            _sharded_toy_spec("zero_eq_zero_pad_leak"),
+            r"padding forward leak \(0 == 0 segment_ids",
+        ),
+        (
+            _sharded_toy_spec("pad_aux_leak"),
+            r"padding tokens leaked into aux_loss",
+        ),
+        (
+            _sharded_toy_spec("cross_doc_bwd_grad_leak"),
+            r"non-zero cross-document gradient d\(loss_doc2\)/d\(doc1\)",
+        ),
+        (
+            _sharded_toy_spec("pad_bwd_grad_leak"),
+            r"non-zero padding gradient d\(loss_doc2\)/d\(pad\)",
+        ),
+        (
+            _sharded_toy_spec("pad_bwd_grad_leak", use_input_ids=True),
+            r"non-zero padding gradient d\(loss_doc2\)/d\(pad\)",
+        ),
+    ):
+      with self.assertRaisesRegex(AssertionError, pattern):
+        checks.check_packing_and_padding_isolation(bad_spec, self.mesh)
+
+  def test_check_9c_expert_parallel_parity_negative_detection(self):
+    """Verifies Check 9c catches unsharded/non-expert MoE weights and EP vs driver_mesh output drift."""
+    checks.check_expert_parallel_parity(_sharded_toy_spec())
+    ep_mesh = checks.create_conformance_ep_mesh()
+    expected_tensor = 2 if len(jax.devices()) >= 8 else 1
+    self.assertEqual(
+        dict(ep_mesh.shape),
+        {
+            "data": 1,
+            "stage": 1,
+            "fsdp": 2,
+            "fsdp_transpose": 1,
+            "context": 1,
+            "tensor": expected_tensor,
+            "tensor_sequence": 1,
+            "expert": 2,
+        },
+    )
+    for bad_spec, pattern in (
+        (
+            _sharded_toy_spec(expert_weight_param_patterns=()),
+            r"expert_weight_param_patterns is empty",
+        ),
+        (
+            _sharded_toy_spec("no_expert_axis"),
+            r"does not shard across 'expert' on ep_mesh",
+        ),
+        (
+            _sharded_toy_spec("ep_drift"),
+            r"Elementwise mismatch at synthetic_sharded_moe\.ep\.primary",
+        ),
+    ):
+      with self.assertRaisesRegex(AssertionError, pattern):
+        checks.check_expert_parallel_parity(bad_spec)
+
+  def test_check_10_negative_detection(self):
+    """Verifies Check 10 catches unmasked AdamW weight decay on grad==0 frozen weights and dead trainable params."""
+    checks.check_optimizer_step_and_frozen_weight_decay(_toy_spec(), self.mesh)
+    checks.check_param_and_grad_health(_toy_spec("unmasked_weight_decay"), self.mesh)
+    for bad_spec, pattern in (
+        (
+            _toy_spec("unmasked_weight_decay"),
+            r"frozen param frozen_proj mutated after 2 AdamW\(wd=0\.1\) steps",
+        ),
+        (
+            _toy_spec("dead_param"),
+            r"trainable param unused did not update after 2 AdamW steps",
+        ),
+        (
+            dataclasses.replace(_toy_spec(), frozen_param_patterns=(r"^missing_frozen$",)),
+            r"unmatched frozen_param_patterns entry",
+        ),
+    ):
+      with self.assertRaisesRegex(AssertionError, pattern):
+        checks.check_optimizer_step_and_frozen_weight_decay(bad_spec, self.mesh)
+    with mock.patch.dict(m3_models.MODEL_REGISTRY, {"synthetic_toy": lambda *a, **kw: None}):
+      with self.assertRaisesRegex(
+          AssertionError,
+          r"frozen param frozen_proj mutated after 2 AdamW\(wd=0\.1\) steps",
+      ):
+        checks.check_optimizer_step_and_frozen_weight_decay(_toy_spec(), self.mesh)
+
+  def test_check_11_negative_detection(self):
+    """Verifies Check 11 catches bad ref_out, stacked patterns, and slice bugs."""
+    checks.check_sharded_checkpoint_slice_load(_sharded_toy_spec())
+    for bad_spec, pattern in (
+        (
+            _sharded_toy_spec("non_jax_first_ref_out"),
+            r"out\.primary must be jax\.Array, got ndarray",
+        ),
+        (
+            _sharded_toy_spec(stacked_param_path_patterns=(r"^missing_",)),
+            r"unmatched stacked pattern",
+        ),
+        (
+            _sharded_toy_spec(num_scanned_blocks=1),
+            r"requires num_scanned_blocks > 1",
+        ),
+        (
+            _sharded_toy_spec("unsharded_2d"),
+            r"eligible sharded param prefix_proj .* read full tensor",
+        ),
+        (
+            _sharded_toy_spec("corrupt_reload_drift"),
+            r"reloaded checkpoint forward primary output is not bit-exact",
+        ),
+    ):
+      with self.assertRaisesRegex(AssertionError, pattern):
+        checks.check_sharded_checkpoint_slice_load(bad_spec)
+
+  def test_check_12_negative_detection(self):
+    """Verifies Check 12 catches 256-chip IndivisibleError and missing VJP remat residual reduction."""
+    good_spec = _sharded_toy_spec()
+    checks.check_full_scale_topology_aot_and_remat_hbm(good_spec)
+    for bad_spec, pattern in (
+        (
+            _sharded_toy_spec(build_full_scale_abstract_model=None),
+            r"build_full_scale_abstract_model is None",
+        ),
+        (
+            _sharded_toy_spec("indivisible_256_wq_a"),
+            (r"IndivisibleError on topology tpu7x-256.*param prefix_proj" r" shape \(64, 150\) dim 1 \(150\)"),
+        ),
+        (
+            _sharded_toy_spec("no_tensor_axis"),
+            r"tpu7x-64.*missing required active sharding axes \['tensor'\]",
+        ),
+        (
+            _sharded_toy_spec("no_remat_reduction"),
+            (r"remat='full' did not reduce saved backward VJP residuals vs" r" remat='none'"),
+        ),
+    ):
+      with self.assertRaisesRegex(AssertionError, pattern):
+        checks.check_full_scale_topology_aot_and_remat_hbm(bad_spec)
+
+  def test_extract_param_partition_spec_branches(self):
+    """Verifies `_extract_param_partition_spec` resolves attr, metadata, and raw."""
+    # pylint: disable-next=protected-access
+    extract_pspec = checks._extract_param_partition_spec
+    pspec = jax.sharding.PartitionSpec("fsdp", None)
+    named_shd = jax.sharding.NamedSharding(self.mesh, pspec)
+    raw_np = np.zeros((4, 4), dtype=np.float32)
+    with nnx.use_eager_sharding(False):
+      param_pspec = nnx.Param(raw_np, out_sharding=pspec)
+      unsharded_param = nnx.Param(raw_np)
+      raw_named_node = nnx.Param(types.SimpleNamespace(sharding=named_shd))
+      raw_pspec_node = nnx.Param(types.SimpleNamespace(sharding=pspec))
+    meta_named_node = types.SimpleNamespace(
+        value=raw_np,
+        get_metadata=lambda: {"sharding": named_shd},
+    )
+    tuple_attr_node = types.SimpleNamespace(
+        value=raw_np,
+        out_sharding=("fsdp", None),
+    )
+    for node in (
+        param_pspec,
+        meta_named_node,
+        tuple_attr_node,
+        raw_named_node,
+        raw_pspec_node,
+    ):
+      self.assertEqual(extract_pspec(node, "ctx"), pspec)
+    with self.assertRaisesRegex(
+        AssertionError,
+        r"ctx: missing PartitionSpec/NamedSharding metadata",
+    ):
+      extract_pspec(unsharded_param, "ctx")
+
+  def test_registered_model_conformance_spec_loss_fn_value(self):
+    """Verifies registered `LOGITS` specs compute exact masked cross-entropy."""
+    discover_model_conformance_specs()
+    specs = spec.get_registered_conformance_specs()
+    driver_mesh = checks.create_conformance_driver_mesh()
+    logits_specs = [s for s in specs if s.output_kind == spec.OutputKind.LOGITS]
+    self.assertNotEmpty(logits_specs)
+    f32 = jnp.float32
+    with jax.sharding.set_mesh(driver_mesh):
+      for s in logits_specs:
+        with self.subTest(model=s.model_name):
+          raw_batch = s.build_batch(jax.random.PRNGKey(0), driver_mesh)
+          padded_seg = raw_batch["segment_ids"].at[-1, -2:].set(0)
+          batch = {**raw_batch, "segment_ids": padded_seg}
+          vocab = int(jnp.max(batch["input_ids"])) + 8
+          logits = jax.random.normal(
+              jax.random.PRNGKey(1),
+              (*batch["input_ids"].shape, vocab),
+              dtype=f32,
+          )
+          aux_vals = {k: jnp.array(2.0, dtype=f32) for k in s.aux_losses}
+          out = spec.ForwardOutput(primary=logits, aux_losses=aux_vals)
+          targets = jnp.roll(batch["input_ids"], shift=-1, axis=-1)
+          mask = (batch["segment_ids"] != 0).astype(jnp.float32)
+          log_probs = jax.nn.log_softmax(logits, axis=-1)
+          nll = -jnp.take_along_axis(
+              log_probs,
+              targets[..., None],
+              axis=-1,
+          ).squeeze(-1)
+          expected = jnp.sum(nll * mask) / jnp.maximum(jnp.sum(mask), 1.0)
+          zero_weights = {k: 0.0 for k in s.aux_losses}
+          actual = s.loss_fn(out, batch, zero_weights)
+          np.testing.assert_allclose(
+              np.asarray(actual, dtype=np.float32),
+              np.asarray(expected, dtype=np.float32),
+              atol=1e-6,
+              rtol=1e-6,
+          )
+          all_pad = {**batch, "segment_ids": jnp.zeros_like(padded_seg)}
+          np.testing.assert_allclose(
+              np.asarray(s.loss_fn(out, all_pad, zero_weights)),
+              0.0,
+              atol=1e-7,
+          )
+          if s.aux_losses:
+            weighted = s.loss_fn(out, batch, {k: 1.5 for k in s.aux_losses})
+            expected_weighted = expected + 3.0 * len(s.aux_losses)
+            np.testing.assert_allclose(
+                np.asarray(weighted, dtype=np.float32),
+                np.asarray(expected_weighted, dtype=np.float32),
+                atol=1e-6,
+                rtol=1e-6,
+            )
+
   def test_registered_model_conformance_specs_discovery(self):
     """Verifies dynamic discovery and idempotence (`m3/README.md` Invariants (1)-(7)) on registered models."""
     loaded_modules = discover_model_conformance_specs()
@@ -887,7 +1319,7 @@ class ConformanceTest(parameterized.TestCase):
       self.assertIn(s.model_name, m3_models.MODEL_REGISTRY)
     self.assertEqual(discover_model_conformance_specs(), loaded_modules)
     self.assertEqual(spec.get_registered_conformance_specs(), specs)
-    self.assertTrue(any(not s.skips for s in specs))
+    self.assertTrue(any(spec.CheckId.SCAN_REMAT_EQUIVALENCE not in s.skips for s in specs))
     with tempfile.TemporaryDirectory() as tmp_dir:
       broken_pkg_dir = os.path.join(tmp_dir, "synthetic_uninstalled_dep_pkg")
       os.makedirs(broken_pkg_dir)

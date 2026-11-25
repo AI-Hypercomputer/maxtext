@@ -64,25 +64,15 @@ _SUPPORTED = [
     pytest.param("mixtral-8x7b", id="mixtral-8x7b"),  # stacked scan with MoE
     pytest.param("qwen3-30b-a3b", id="qwen3-30b-a3b"),  # Qwen unroll; MoE wi/wo zero-padded to 1024
     pytest.param("qwen3.5-35b-a3b", id="qwen3.5-35b-a3b"),  # nested local/global block scan; KV heads repeated
-    pytest.param("gemma3-4b", id="gemma3-4b"),  # Gemma block unroll
+    pytest.param("gemma3-4b", id="gemma3-4b"),  # `layers.layers_N` block unroll
+    pytest.param("gemma4-26b", id="gemma4-26b"),  # nested local/global block scan under `scanned_blocks`
+    pytest.param("gpt-oss-20b", id="gpt-oss-20b"),  # `layers.layers_N` block unroll of MoE layers without `mlp.wi_0`
     pytest.param("llama3.1-70b", id="llama3.1-70b", marks=pytest.mark.scheduled_only),
     pytest.param("qwen3-4b", id="qwen3-4b", marks=pytest.mark.scheduled_only),
     pytest.param("qwen2.5-7b", id="qwen2.5-7b", marks=pytest.mark.scheduled_only),
     pytest.param("gemma2-2b", id="gemma2-2b", marks=pytest.mark.scheduled_only),
     pytest.param("mistral-7b", id="mistral-7b", marks=pytest.mark.scheduled_only),
-]
-
-# Scanned training with direct sync does not work for these models yet: the sync would leave every
-# rollout layer at its random initialization, so `validate_direct_sync_layer_coverage` raises at the
-# first sync. Move a model to `_SUPPORTED` once its test below starts failing.
-_KNOWN_GAPS = [
-    # b/584148367: `unroll_gemma_scanned_weights` does not handle the `scanned_blocks.global_layer` /
-    # `scanned_blocks.local_layers` block scan, so nothing is unrolled.
-    pytest.param("gemma4-26b", id="gemma4-26b"),
-    # b/584148367: The `layers.layers_N` block scan is only unrolled for model names that contain "gemma".
     pytest.param("olmo3-7b", id="olmo3-7b", marks=pytest.mark.scheduled_only),
-    # b/584148200: Neither unroll handles these block scans. The GPT-OSS E2E RL test uses the HF-mapping sync.
-    pytest.param("gpt-oss-20b", id="gpt-oss-20b", marks=pytest.mark.scheduled_only),
     pytest.param("llama4-17b-16e", id="llama4-17b-16e", marks=pytest.mark.scheduled_only),
 ]
 
@@ -227,13 +217,3 @@ def test_direct_sync_covers_and_aligns_every_rollout_param(model_name):
 
   assert not unmatched, f"{len(unmatched)} rollout params have no sync source and keep random weights: {unmatched[:5]}"
   assert not misaligned, f"{len(misaligned)} rollout params cannot be aligned by Tunix: {misaligned[:3]}"
-
-
-@pytest.mark.cpu_only
-@pytest.mark.parametrize("model_name", _KNOWN_GAPS)
-def test_known_direct_sync_gaps_still_fail(model_name):
-  """Fails once the sync works for `model_name`; then move the model to `_SUPPORTED`."""
-  trainer_config = _trainer_config(model_name)
-  target = _abstract_params(_rollout_config(trainer_config), model_mode=MODEL_MODE_AUTOREGRESSIVE)
-  with pytest.raises(ValueError, match="random initialization|failed to unroll"):
-    _synced_source(model_name, _abstract_params(trainer_config), target)

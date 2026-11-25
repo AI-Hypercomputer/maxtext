@@ -227,9 +227,22 @@ Weight QAG is triggered when an MoE FSDP sharding strategy is combined with quan
 
 Requirements:
 
-- Either `shard_embed_moe_on_fsdp=True` or `shard_exp_on_fsdp=True`. See [MoE Configuration](moe_configuration.md).
-- `quantization` must be specified (e.g. `fp8_full`).
-- Static weight calibration: `weight_quantization_calibration_method` starting with `fixed` (ensures uniform scale factors across shards without collective synchronization).
+- Either `shard_embed_moe_on_fsdp=True` (gathers `embed_moe`: dim 1 of `wi`, dim 2 of `wo`) or `shard_exp_on_fsdp=True` (gathers the expert dim 0). See [MoE Configuration](moe_configuration.md).
+- `quantization=fp8_full` with `use_qwix_quantization=True` and `sparse_matmul=True`.
+- `use_tokamax_gmm=True`; otherwise it falls back to the XLA all-gather.
+- `prefetch_fsdp_weights=False`.
+- Weight calibration that gives every shard the same scale, via `weight_quantization_calibration_method`:
+  - Static: starting with `fixed`. Always one per-tensor scale.
+
+  - Dynamic: exactly `absmax`, taken over the whole weight (before the layer scan for scanned DeepSeek layers, per layer otherwise). `moe_weight_quantization_granularity` (used only with `absmax`) sets its shape for an `[E, K, N]` weight:
+
+    - `per_channel` (default): `[1, 1, N]` over all experts. The non-QWAG GMM also uses `[1, 1, N]`, but per expert-parallel shard.
+    - `per_tensor`: `[1, 1, 1]`.
+    - `per_expert_channel`: `[E, 1, N]`. Requires `use_gmm_v2=True`; not supported with `moe_flat_fsdp_weights` or `use_ring_of_experts`.
+
+    `use_batch_split_schedule`, `num_moe_emb_chunks > 0` and `moe_use_fused_gmm3d` are not supported. Since `absmax` is the default, `shard_exp_on_fsdp` with `fp8_full` and `use_tokamax_gmm=True` now uses dynamic QWAG instead of the XLA all-gather unless a `fixed` calibration is set.
+
+  - Other methods (`absmax,<scale>`, `rms`, `minmax`) are not supported for Weight QAG: `shard_embed_moe_on_fsdp` rejects them, and `shard_exp_on_fsdp` falls back to an XLA all-gather of the unquantized weights.
 
 ## Token Quantized All-Gather Pipeline for MoE Ring of Experts
 
@@ -258,3 +271,33 @@ Requirements:
 - `use_ring_of_experts=True`: Inherent architectural requirements.
 - `use_gmm_v2=True`: Tokamax GMM v2 grouped GEMM backend.
 - Static or dynamic per-token calibration for activations: e.g. `act_quantization_calibration_method="fixed,-224,224"` or `act_quantization_calibration_method="absmax"`.
+
+## Quantized Ragged All-to-All for MoE Expert Parallelism
+
+With standard Expert Parallelism (`use_ring_of_experts=False`), each MoE layer executes four `ragged_all_to_all` collectives across the EP mesh axis: Token Dispatch and Token Combine in both forward and backward passes. MaxText allows each collective to be quantized to FP8 independently, halving the collective value payload from BF16 to FP8 and dequantizing back to model dtype immediately after receive.
+
+### Collective Legs & Flags
+
+```text
+Forward:   x ───(1) Token Dispatch fwd ──► gmm ───(2) Token Combine fwd ──► y
+Backward: dx ◄──(4) Token Dispatch bwd ─── gmm ◄──(3) Token Combine bwd ─── dy
+```
+
+All four flags default to `""` (unquantized BF16):
+
+- **Token Dispatch forward (leg 1)**: `moe_quantize_dispatch_fwd_method` (default FP8 format: `e4m3`)
+- **Token Combine forward (leg 2)**: `moe_quantize_combine_fwd_method` (default FP8 format: `e4m3`)
+- **Token Combine backward (leg 3)**: `moe_quantize_combine_bwd_method` (default FP8 format: `e5m2`; also supports Ring of Experts backward all-gather when `use_ring_of_experts=True`)
+- **Token Dispatch backward (leg 4)**: `moe_quantize_dispatch_bwd_method` (default FP8 format: `e5m2`)
+
+### Scaling Modes
+
+Each flag accepts `"<scaling>[@e4m3|@e5m2]"`:
+
+- `rowwise`: Dynamic per-token f32 `absmax` scaling. Sends two `ragged_all_to_all` collectives on the same routing offsets—FP8 values (`[rows, H]`) and per-token f32 scales (`[rows]`).
+- `fixed,<bound>`: Static scaling (`scale = bound / qmax`, clipping inputs to `[-bound, bound]`). Sends a single FP8 `ragged_all_to_all` (`[rows, H]`) with no dynamic reduction and no scale collective. Bounds must be positive finite floats tuned per leg. Backward-leg bounds (legs 3 and 4, and the Ring of Experts combine backward) are absolute cotangent magnitudes that depend on loss normalization (global batch size, sequence length and `gradient_accumulation_steps`; manual gradient accumulation differentiates the unnormalized `xent_sum`, scaling cotangents by the token count per step), so retune them when those change. With E5M2 (about 30 binades of normal range), generous backward bounds lose almost no precision while avoiding silent clipping.
+
+### Requirements
+
+- `use_ring_of_experts=False` (except `moe_quantize_combine_bwd_method`, which also supports `rowwise` and `fixed,<bound>`, with the same optional `@<format>`, under `use_ring_of_experts=True`).
+- `sparse_matmul=True` and `te_moe_block=False`.

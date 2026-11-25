@@ -54,6 +54,8 @@ There is no `layers/` directory: NNX *is* the layer library.
    logical axis names only (`"embed"`, `"heads"`, `"mlp"`). Model code never names physical mesh
    axes or devices. Models are constructed inside `jax.sharding.set_mesh(mesh)`, on one device as
    on many: Flax places parameters from their metadata at construction and raises without a mesh.
+   Top-level models also store `self.mesh = mesh` for drivers such as legacy `train.py` whose
+   `loss_fn` reads `model.mesh`.
 4. **Infrastructure stays out of model code.** No `maybe_remat`, no `dot_general` injection, no
    `model_mode` conditionals. Only zero-cost annotations belong in `__call__`: sharding specs and
    `checkpoint_name` tags.
@@ -73,7 +75,7 @@ moments, bfloat16 compute, float32 loss — and each concern lives in exactly on
 | Compute dtype | `dtype=` on every NNX layer at construction | `dtype` |
 | Float32 islands (softmax, logits, routing, MoE combine) | the model's own arithmetic | — |
 | Matmul precision for float32 operands | `jax.default_matmul_precision` around setup and the step (`train/loop.py`) | `matmul_precision` |
-| int8 / fp8 matmuls | `infra.quantization.maybe_quantize`, after construction | `quantization` |
+| Quantized (int4 / int8 / fp4 / fp8) matmuls | `infra.quantization.maybe_quantize`, after construction | `quantization` |
 
 `matmul_precision` matters only when matmul operands are float32: on TPU `default` runs them as
 one bfloat16 pass, `highest` as full float32. With bfloat16 compute it changes nothing, as in
@@ -92,14 +94,17 @@ Qwen3-VL, whose language-model attention still uses a hand-rolled `DenseGeneral`
 
 | `quantization=` | weights, activations | gradients |
 | :---- | :---- | :---- |
+| `int4` | int4 | int4 |
 | `int8` | int8 | int8 |
+| `fp4` | float4_e2m1fn | float4_e2m1fn |
 | `fp8`, `fp8_e4m3` | float8_e4m3fn | float8_e4m3fn |
 | `fp8_e5m2` | float8_e5m2 | float8_e5m2 |
 | `fp8_full` | float8_e4m3fn | float8_e5m2 |
 
 The names mean what they mean in legacy's qwix path. Quantization requires
 `use_qwix_quantization=true`: with it false, legacy trains the same config with AQT, which m3
-doesn't have, so m3 refuses rather than switching recipe.
+doesn't have, so m3 refuses rather than switching recipe. On TPU7x, XLA compiles the `int4`
+matmuls with float8_e4m3fn operands, which hold every int4 value exactly.
 
 Scales are dynamic, calibration absmax. `quantization` and `quantize_router_proj` are the legacy
 quantization fields m3 reads. A config that turns on a legacy knob m3 does not implement — `quantize_logits_proj`,
@@ -110,8 +115,55 @@ traces one forward pass of the training shape and requires one matmul in the rec
 planned projection; a model with no projections under `decoder/layers` is refused, not trained
 unquantized. Not yet: MoE grouped matmuls (they will join the plan through `ragged_dot`; the
 Pallas executors need in-kernel quantization), fp8 attention (a kernel feature, not a qwix rule),
-int4 / fp4, static scales, and weight-only quantization for serving. The legacy drivers
+OCP MX (`jax_mxfp8` / `jax_mxfp4`), static scales, and weight-only quantization for serving. The legacy drivers
 (`model_creation_utils.create_model`) do not apply m3 transforms yet.
+
+## Sharding
+
+Rule 3 end to end. A model declares sharding once, in logical axis names, at construction; a
+`Sharding` strategy resolves them; the mesh decides which axes are live. Nothing is decided by
+path regexes or heuristics, and nothing re-shards a parameter after it is created.
+
+| Concern | Where | Config |
+| :---- | :---- | :---- |
+| Which logical axis each tensor dimension carries | the model, as `*_metadata={"out_sharding": s(name, axes)}` on every parameter and `s.constrain(x, name, axes)` on key activations | — |
+| Which mesh axis a logical axis lands on | one strategy class per parallelism scheme: `core.sharding.DefaultSharding` (`fsdp` × `fsdp_transpose` × `context` × `expert` over `embed`, where `fsdp_transpose` is an extra FSDP factor; `tensor` and `tensor_sequence` over `heads`, `kv_heads`, `mlp`, `vocab`; `context` over `length`; `context` and `tensor_sequence` over `norm_length`, using `tensor_sequence` instead of `tensor` for Megatron SP; batch over `data` × `fsdp` × `fsdp_transpose` × `expert`) | — |
+| Mesh shape | `core.sharding.mesh_from_config` → `create_mesh` | `ici_{data,fsdp,fsdp_transpose,context,tensor,tensor_sequence,expert}_parallelism`, `dcn_*`, `custom_mesh` (`hybrid_ring_64x4`, `hybrid_ring_32x8`), `allow_split_physical_axes`, `optimize_mesh_for_tpu_v6e` |
+| Auto vs explicit sharding | `create_mesh(explicit=)`; `constrain` and `out_sharding` dispatch on the mesh in scope | `shard_mode` (`auto`, the default, or `explicit` on models that wire `out_sharding` — `qwen3` today) |
+| Input batch layout | the driver asks the strategy (`train/loop.py::batch_spec`) | — |
+
+Parameters are placed by Flax from their metadata the moment they are created, under whatever mesh
+is in scope, so single-device tests and an 8-chip run construct the same way. That placement is
+declared per parameter (`core.sharding.param_metadata` sets `eager_sharding=True` next to
+`out_sharding`) rather than left to Flax's process-global switch, which legacy MaxText turns off at
+import (`layers/nnx_wrappers.py`) and which would otherwise leave every m3 parameter replicated
+without a word. The flag is for construction only: `models.create_model` turns it off once the
+model is built, because Flax rebuilds variables from their metadata (`nnx.Optimizer`'s moments, for
+one) and would otherwise re-run placement, which fails with no mesh in scope. Both drivers (the m3
+loop and the training engine) read placement off the arrays. The loop logs the fraction of
+parameters each device holds; `100%` means replicated, which is what an unannotated model gets.
+
+`shard_mode=explicit` builds an Explicit-typed mesh, passes explicit `out_sharding` specs to NNX
+embedding gathers and linear/einsum projections, and lowers the scalar loss reduction via
+`jax.sharding.auto_axes`, enabling `MaxTextTrainingEngine` ZeRO-1 optimizer state sharding on
+models that implement `out_sharding` (`qwen3` today; other registered models refuse
+`shard_mode=explicit` with a named error, `quantization` requires `shard_mode=auto` until upstream
+`qwix` forwards `out_sharding`, and pure-DP deferred gradient reductions remain disabled on m3
+because stock `nnx.RMSNorm` does not accept `reduced`-tagged scale operands).
+
+A model with a novel axis subclasses `DefaultSharding` and delegates the rest; a driver that wants
+another scheme passes `sharding=` to `create_model` (or `sharding_from_config(config)`). m3 does not
+read `logical_axis_rules`: the strategy class is the rule table, typed and conflict-checked. Legacy
+parallelism settings m3 does not implement (`pipeline`, `sequence`, `context_usp_ulysses`,
+`context_autoregressive`, `autoregressive`, `diloco`, `custom_mesh_and_rule*`, non-`all_gather`
+`context_parallel_strategy`, and `context_parallel_load_balance=True` when `context > 1`) and mesh
+axes a selected model's `Sharding` does not partition are refused with the field named rather than
+ignored.
+
+Today `qwen3` is fully annotated; Qwen3-VL inherits the decoder, MLP and embedding annotations but
+its hand-rolled attention and vision tower are not yet sharded; GLM-5.3-Flash and Wan carry their
+own `Sharding` subclasses and mesh construction, which should converge on `DefaultSharding` and
+`mesh_from_config`.
 
 ## Invariants for the training-engine and RL path
 

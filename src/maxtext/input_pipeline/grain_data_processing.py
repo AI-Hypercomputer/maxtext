@@ -41,6 +41,7 @@ from maxtext.input_pipeline import grain_tokenizer
 from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import multihost_dataloading
 from maxtext.input_pipeline._mmap_datasource import MMapDatasetConfig, get_mmap_dataset, get_mmap_npy_dataset
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
 
@@ -124,14 +125,19 @@ def _parse_arrayrecord_patterns(data_file_pattern, mixture_config_path=None):
     names = list(mixture_config.keys())
     patterns = [component["path"] for component in mixture_config.values()]
     weights = [float(component["weight"]) for component in mixture_config.values()]
-    return names, patterns, weights
-  if data_file_pattern and ";" in data_file_pattern:
+  elif data_file_pattern and ";" in data_file_pattern:
     entries = [entry.split(",") for entry in data_file_pattern.split(";")]
     if any(len(entry) != 2 for entry in entries):
       raise ValueError(f"Expected pattern and weight pairs separated by commas, got: {data_file_pattern}")
     patterns, raw_weights = zip(*entries, strict=True)
-    return None, list(patterns), [float(weight) for weight in raw_weights]
-  return None, [data_file_pattern] if data_file_pattern else [], None
+    names = None
+    weights = [float(weight) for weight in raw_weights]
+  else:
+    return None, [data_file_pattern] if data_file_pattern else [], None
+
+  if not weights or any(w <= 0 for w in weights):
+    raise ValueError(f"All ArrayRecord mixture weights must be > 0, got: {weights}")
+  return names, patterns, weights
 
 
 _ARRAYRECORD_RECORD_COUNTS: dict[str, int] = {}
@@ -259,6 +265,53 @@ def _apply_mapdataset_transforms(
   return dataset
 
 
+def _mix_iter_datasets(
+    dataset_list,
+    weights,
+    names,
+    shuffle,
+    shuffle_seed,
+    num_epoch,
+    dataloading_host_index,
+    dataloading_host_count,
+    grain_num_threads,
+    grain_prefetch_buffer_size,
+):
+  """Transforms and mixes component MapDatasets with ``IterDataset.mix`` using budgeted ReadOptions.
+
+  ``grain_num_threads`` and ``grain_prefetch_buffer_size`` are partitioned across mixture components by normalized
+  weight (using ``math.ceil`` so positive budgets allocate at least one reader thread and prefetch slot per component,
+  capping ``num_threads`` at ``prefetch_buffer_size``, and preserving ``0`` when prefetching is disabled).
+  """
+  total_weight = sum(weights)
+  normalized_weights = [weight / total_weight for weight in weights]
+
+  transformed = []
+  for ds, w in zip(dataset_list, normalized_weights):
+    comp_buffer = math.ceil(grain_prefetch_buffer_size * w)
+    comp_threads = min(math.ceil(grain_num_threads * w), comp_buffer)
+    transformed.append(
+        _apply_mapdataset_transforms(
+            ds,
+            shuffle,
+            shuffle_seed,
+            num_epoch,
+            dataloading_host_index,
+            dataloading_host_count,
+            comp_threads,
+            comp_buffer,
+        )
+    )
+
+  # Use IterDataset.mix instead of MapDataset.mix in order to have per-mixture component checkpoints
+  # for supporting changing the mixture after checkpointing.
+  if names is not None:
+    datasets_dict = dict(zip(names, transformed))
+    weights_dict = dict(zip(names, normalized_weights))
+    return grain.IterDataset.mix(datasets_dict, weights_dict)
+  return grain.IterDataset.mix(transformed, normalized_weights)
+
+
 def _build_dataset_config(config, num_samples=None, seed=1234, split_ratio=None, split_index=0, batch_size=None):
   """Build the configuration used by the Megatron-compatible data sources.
 
@@ -328,57 +381,25 @@ def get_datasets(
       return grain.MapDataset.source(source)
 
     names, patterns, weights = _parse_arrayrecord_patterns(data_file_pattern, mixture_config_path)
-    # Handle mixture config with named datasets, allows flexibility in recovering checkpoints
-    if names is not None and weights is not None:
-      executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
-      dataset_list = list(executor.map(create_dataset_from_pattern, patterns))
-      executor.shutdown(wait=True)
+    # Handle weighted mixtures (named via mixture_config_path or unnamed ';'-separated patterns)
+    if weights is not None:
+      # Parallelize file finding (globbing), data source creation, and dataset wrapping.
+      # File finding and source creation are I/O-bound operations that release the GIL.
+      with futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers) as executor:
+        dataset_list = list(executor.map(create_dataset_from_pattern, patterns))
 
-      datasets_dict = dict(zip(names, dataset_list))
-
-      for name, ds in datasets_dict.items():
-        datasets_dict[name] = _apply_mapdataset_transforms(
-            ds,
-            shuffle,
-            shuffle_seed,
-            num_epoch,
-            dataloading_host_index,
-            dataloading_host_count,
-            grain_num_threads,
-            grain_prefetch_buffer_size,
-        )
-
-      # Normalize weights
-      total_weight = sum(weights)
-      weights_dict = {name: weight / total_weight for name, weight in zip(names, weights)}
-
-      dataset = grain.IterDataset.mix(datasets_dict, weights_dict)
-      return dataset
-    elif weights is not None:
-      weights = [round(weight / sum(weights), 4) for weight in weights]
-
-      # Parallelize file finding (globbing), data source creation, and dataset wrapping
-      # File finding and source creation are I/O-bound operations that release the GIL
-      executor = futures.ThreadPoolExecutor(max_workers=grain_data_source_max_workers)
-      dataset_list = list(executor.map(create_dataset_from_pattern, patterns))
-      executor.shutdown(wait=True)
-
-      # Apply shuffle, repeat, sharding, and conversion to IterDataset to each dataset before mixing
-      for d, _ in enumerate(dataset_list):
-        dataset_list[d] = _apply_mapdataset_transforms(
-            dataset_list[d],
-            shuffle,
-            shuffle_seed,
-            num_epoch,
-            dataloading_host_index,
-            dataloading_host_count,
-            grain_num_threads,
-            grain_prefetch_buffer_size,
-        )
-      # Use IterDataset.mix instead of MapDataset.mix in order to have per-mixture component checkpoints
-      # for supporting changing the mixture after checkpointing
-      dataset = grain.IterDataset.mix(dataset_list, weights)
-      return dataset
+      return _mix_iter_datasets(
+          dataset_list,
+          weights,
+          names,
+          shuffle,
+          shuffle_seed,
+          num_epoch,
+          dataloading_host_index,
+          dataloading_host_count,
+          grain_num_threads,
+          grain_prefetch_buffer_size,
+      )
     else:
       # Single pattern case - no need for parallelization
       dataset = create_dataset_from_pattern(patterns[0] if patterns else data_file_pattern)
@@ -817,6 +838,16 @@ def vision_sft_preprocessing_pipeline(
 
   if tokenize:
     dataset = dataset.map(grain_tokenizer.TokenizeAndTrim(text_columns, config.max_target_length, tokenizer_model))
+
+  # Formats that leave BOS to the token ids (Gemma 3) need it added back to the prompt.
+  if mm_processor.reformatted_prompt_needs_bos(config.model_name):
+    dataset = dataset.map(
+        functools.partial(
+            input_pipeline_utils.prepend_bos,
+            column_name=text_columns[0],
+            bos_id=tokenizer_model.bos_id,
+        )
+    )
 
   dataset = dataset.map(
       functools.partial(

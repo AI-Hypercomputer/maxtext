@@ -88,6 +88,7 @@ def get_topology_mesh(config):
           num_slices=config.compile_topology_num_slices,
           wrap=target_hardware.wrap,
       ).devices
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   jax.config.update(
       "jax_remove_size_one_mesh_axis_from_type",
       config.remove_size_one_mesh_axis_from_type,
@@ -303,6 +304,7 @@ def main(argv: Sequence[str]) -> None:
   # Parse and validate configuration
   config = pyconfig.initialize(argv)
   jax.config.update("jax_default_prng_impl", config.prng_impl)
+  jax.config.update("jax_use_shardy_partitioner", config.shardy)
   validate_config(config)
 
   # Create target mesh

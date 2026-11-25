@@ -881,5 +881,56 @@ class TestResolveReorderStrategy(unittest.TestCase):
     )
 
 
+class TestCheckNoLoadBalancedContextParallelism(unittest.TestCase):
+  """Tests for check_no_load_balanced_context_parallelism in max_utils.py."""
+
+  def _cfg(self, **overrides):
+    defaults = {
+        "context_parallel_load_balance": True,
+        "ici_context_parallelism": 1,
+        "dcn_context_parallelism": 1,
+        "context_sharding": "context",
+    }
+    return SimpleNamespace(**{**defaults, **overrides})
+
+  def test_allows_cp_one_or_disabled_load_balance(self):
+    max_utils.check_no_load_balanced_context_parallelism(self._cfg(), "train_dpo")
+    max_utils.check_no_load_balanced_context_parallelism(
+        self._cfg(), "train_dpo", mesh=SimpleNamespace(shape={"context": 1})
+    )
+    max_utils.check_no_load_balanced_context_parallelism(
+        self._cfg(context_parallel_load_balance=False, ici_context_parallelism=4),
+        "train_dpo",
+        mesh=SimpleNamespace(shape={"context": 4}),
+    )
+
+  def test_rejects_pre_mesh_cp_gt_one_when_load_balance_enabled(self):
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      max_utils.check_no_load_balanced_context_parallelism(
+          self._cfg(ici_context_parallelism=4),
+          "train_dpo",
+      )
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      max_utils.check_no_load_balanced_context_parallelism(
+          self._cfg(dcn_context_parallelism=2),
+          "train_dpo",
+      )
+
+  def test_auto_cp_minus_one_checked_against_resolved_mesh(self):
+    cfg = self._cfg(ici_context_parallelism=-1)
+    # Pre-mesh: -1 may resolve to 1, so do not reject eagerly.
+    max_utils.check_no_load_balanced_context_parallelism(cfg, "train_rl")
+    # Post-mesh with size 1 is allowed; size > 1 or custom axis > 1 raises.
+    max_utils.check_no_load_balanced_context_parallelism(cfg, "train_rl", mesh=SimpleNamespace(shape={"context": 1}))
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      max_utils.check_no_load_balanced_context_parallelism(cfg, "train_rl", mesh=SimpleNamespace(shape={"context": 4}))
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      max_utils.check_no_load_balanced_context_parallelism(
+          self._cfg(ici_context_parallelism=-1, context_sharding="cp_custom"),
+          "train_rl",
+          mesh=SimpleNamespace(shape={"cp_custom": 2}),
+      )
+
+
 if __name__ == "__main__":
   unittest.main()

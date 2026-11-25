@@ -19,11 +19,13 @@ jaxtyping
 jsonlines
 math-verify
 ml-collections
+# JAX nightly requires ml-dtypes>=0.7.0, which exceeds the current JAX seed
+# locks (0.6.0 / 0.5.4); the >=0.7.0 floor is enforced in extra_deps/*_overrides.txt.
 ml-goodput-measurement
 numpy
 omegaconf
 optax
-# MaxText needs orbax-checkpoint>=0.12.10, which requires etils>=1.15.0 and
+# MaxText needs orbax-checkpoint>=0.12.11, which requires etils>=1.15.0 and
 # therefore cannot be resolved against the JAX seed lock (etils==1.14.0). The
 # real floor is enforced through extra_deps/*_overrides.txt.
 orbax-checkpoint>=0.12.8

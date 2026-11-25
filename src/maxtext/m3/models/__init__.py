@@ -26,10 +26,16 @@ model-name branching.
 """
 
 from collections.abc import Callable
+
+from flax import nnx
+import jax
+from maxtext.m3.core import kernels as m3_kernels
+from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.models.qwen3.modeling_qwen3 import create_qwen3_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next.modeling_qwen3_8_flash_next import create_qwen3_8_flash_next_model  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import create_qwen3_vl_model  # pylint: disable=no-name-in-module
+from maxtext.m3.models.qwen3 import qwen3_flops  # pylint: disable=no-name-in-module
 
 
 def create_glm5_3_flash_model(config, mesh=None, *, rngs, **kwargs):
@@ -64,15 +70,92 @@ MODEL_REGISTRY: dict[str, Callable] = {
     "qwen3.8-flash-next-mini": create_qwen3_8_flash_next_model,
 }
 
+_FOUR_AXIS_MESH = ("data", "fsdp", "tensor", "expert")
+MODEL_SUPPORTED_MESH_AXES: dict[str, tuple[str, ...]] = {
+    "glm5.3-flash": _FOUR_AXIS_MESH,
+    "granite-3.0-1b-a400m": _FOUR_AXIS_MESH,
+    "granitemoe": _FOUR_AXIS_MESH,
+    "qwen3-0.6b": m3_sharding.DEFAULT_SHARDING_AXES,
+    "qwen3-vl-2b": _FOUR_AXIS_MESH,
+    "qwen3.8-flash-next": ("data", "fsdp", "fsdp_transpose", "tensor", "expert"),
+    "qwen3.8-flash-next-mini": ("data", "fsdp", "fsdp_transpose", "tensor", "expert"),
+}
+MODEL_EXPLICIT_SHARDING_SUPPORT: frozenset[str] = frozenset({"qwen3-0.6b"})
+
+
+def _unsupported_model_mesh_settings(config) -> dict[str, object]:
+  """Flags sharding modes or parallelism axes that `config.model_name` does not implement."""
+  model_name = getattr(config, "model_name", None)
+  if model_name not in MODEL_SUPPORTED_MESH_AXES:
+    return {}
+  unsupported: dict[str, object] = {}
+  allowed = set(MODEL_SUPPORTED_MESH_AXES[model_name])
+  for network in ("ici", "dcn"):
+    for axis in m3_sharding.DEFAULT_SHARDING_AXES:
+      if axis in allowed:
+        continue
+      field = f"{network}_{axis}_parallelism"
+      val = getattr(config, field, 1)
+      if val != 1:
+        unsupported[field] = val
+  shard_mode = m3_sharding.get_enum(config, "shard_mode", m3_sharding.ShardMode.AUTO)
+  if shard_mode != m3_sharding.ShardMode.AUTO and model_name not in MODEL_EXPLICIT_SHARDING_SUPPORT:
+    unsupported["shard_mode"] = shard_mode.value
+  return unsupported
+
+
+m3_sharding.register_model_mesh_validator(_unsupported_model_mesh_settings)
+ambient_mesh_is_explicit = m3_sharding.ambient_mesh_is_explicit
+end_eager_placement = m3_sharding.end_eager_placement
+enter_mesh_scope = m3_sharding.enter_mesh_scope
+validate_attention_config = m3_kernels.validate_attention_config
+_end_eager_placement = end_eager_placement
+
 
 def create_model(config, mesh, **kwargs):
-  """Dispatches to a registered m3 constructor using driver configuration."""
+  """Dispatches to a registered m3 constructor using driver configuration.
+
+  Parameters are placed from their sharding metadata as they are created,
+  which needs a mesh in scope (README rule 3). If none is in scope, the mesh
+  passed is entered for construction. If one is, it must be the one passed: a
+  strategy resolved against another mesh is silently replaced by full
+  replication downstream, so that case is an error here. Placement ends with
+  construction (`_end_eager_placement`), so what is built from the model
+  afterwards does not need the mesh.
+  """
   if config.model_name not in MODEL_REGISTRY:
     raise ValueError(
         f"Model {config.model_name!r} does not support the m3 backend (use_m3_model=True). "
         f"Registered models: {', '.join(sorted(MODEL_REGISTRY))}."
     )
-  return MODEL_REGISTRY[config.model_name](config, mesh, **kwargs)
+  shard_mode = m3_sharding.get_enum(config, "shard_mode", m3_sharding.ShardMode.AUTO)
+  if mesh is not None:
+    if kwargs.get("sharding") is None:
+      m3_sharding.check_mesh(mesh, MODEL_SUPPORTED_MESH_AXES[config.model_name])
+    axis_types = tuple(getattr(mesh, "axis_types", ()))
+    is_explicit_mesh = (
+        axis_types
+        and any(t == jax.sharding.AxisType.Explicit for t in axis_types)
+        and not (isinstance(mesh, jax.sharding.AbstractMesh) and shard_mode == m3_sharding.ShardMode.AUTO)
+    )
+    if is_explicit_mesh and config.model_name not in MODEL_EXPLICIT_SHARDING_SUPPORT:
+      raise ValueError(
+          f"Model {config.model_name!r} does not implement shard_mode='explicit' yet "
+          f"(supported models: {sorted(MODEL_EXPLICIT_SHARDING_SUPPORT)}). Use shard_mode='auto'."
+      )
+    if dict(mesh.shape).get("context", 1) > 1:
+      cp_strategy = getattr(config, "context_parallel_strategy", "all_gather") or "all_gather"
+      if str(cp_strategy).lower() != "all_gather":
+        raise ValueError(
+            f"m3 context parallelism only implements context_parallel_strategy='all_gather', got {cp_strategy!r}."
+        )
+      if bool(getattr(config, "context_parallel_load_balance", False)):
+        raise ValueError(
+            "m3 context parallelism requires context_parallel_load_balance=False (natural contiguous token order)."
+        )
+  constructor = MODEL_REGISTRY[config.model_name]
+  with enter_mesh_scope(mesh, shard_mode=shard_mode):
+    return end_eager_placement(constructor(config, mesh, **kwargs))
 
 
 def calculate_glm5_3_flash_tflops_per_device(config, log: bool = True):
@@ -97,6 +180,8 @@ MODEL_FLOPS_REGISTRY: dict[str, Callable] = {
     "granitemoe": calculate_granitemoe_tflops_per_device,
     "qwen3.8-flash-next": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
     "qwen3.8-flash-next-mini": qwen3_8_flops.calculate_qwen3_8_flash_next_tflops_per_device,
+    "qwen3-0.6b": qwen3_flops.calculate_qwen3_tflops_per_device,
+    "qwen3-vl-2b": qwen3_flops.calculate_qwen3_tflops_per_device,
 }
 
 

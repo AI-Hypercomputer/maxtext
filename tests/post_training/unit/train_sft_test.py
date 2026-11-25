@@ -15,12 +15,24 @@
 """Unit tests for train_sft.py."""
 
 import inspect
+import os
+import tempfile
 import unittest
 from unittest import mock
 from types import SimpleNamespace
+from absl.testing import absltest
+import jax
+from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
+import numpy as np
 import pytest
+from tunix.sft import sharding_utils as tunix_sharding_utils
 
+from maxtext.common.data_loader import DataLoader
+from maxtext.configs import pyconfig
 from maxtext.trainers.post_train.sft import train_sft
+from maxtext.utils import sharding
+from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 
 pytestmark = [pytest.mark.post_training]
 
@@ -163,6 +175,61 @@ class TrainSFTTest(unittest.TestCase):
         cache_nnx_graph=False,
     )
 
+  def test_get_tunix_config_uses_input_data_sharding_spec(self):
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      mt_config = pyconfig.initialize(
+          ["", os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
+          per_device_batch_size=1,
+          run_name="test",
+          base_output_directory=tmp_dir,
+          tensorboard_dir=tmp_dir,
+          skip_jax_distributed_system=True,
+      )
+      mesh = Mesh(np.array(jax.devices()[:1]), ("context",))
+      tunix_cfg = train_sft.get_tunix_config(mt_config, mesh=mesh)
+      self.assertEqual(tunix_cfg.data_sharding_axis, tuple(sharding.get_input_data_sharding(mt_config, mesh).spec))
+
+      if jax.device_count() >= 4:
+        cp_config = pyconfig.initialize(
+            ["", os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
+            per_device_batch_size=1,
+            ici_fsdp_parallelism=2,
+            ici_context_parallelism=2,
+            run_name="test",
+            base_output_directory=tmp_dir,
+            tensorboard_dir=tmp_dir,
+            skip_jax_distributed_system=True,
+        )
+        cp_mesh = Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "context"))
+        cp_tunix_cfg = train_sft.get_tunix_config(cp_config, mesh=cp_mesh)
+        self.assertEqual(cp_tunix_cfg.data_sharding_axis, ("fsdp", "context"))
+
+  def test_tunix_shard_input_preserves_dataloader_2d_sharding_on_single_host_cp(self):
+    if jax.device_count() < 4:
+      self.skipTest("Requires at least 4 host devices to build a (fsdp=2, context=2) mesh.")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      cp_config = pyconfig.initialize(
+          ["", os.path.join(MAXTEXT_CONFIGS_DIR, "post_train", "sft.yml")],
+          per_device_batch_size=1,
+          ici_fsdp_parallelism=2,
+          ici_context_parallelism=2,
+          run_name="test",
+          base_output_directory=tmp_dir,
+          tensorboard_dir=tmp_dir,
+          skip_jax_distributed_system=True,
+      )
+      cp_mesh = Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "context"))
+      tunix_cfg = train_sft.get_tunix_config(cp_config, mesh=cp_mesh)
+      raw_batch = {"inputs": np.arange(2 * 8, dtype=np.int32).reshape(2, 8)}
+      loader = DataLoader(cp_config, cp_mesh, iter([raw_batch]), goodput_recorder=None)
+      loaded_batch = loader.load_next_batch()
+      self.assertEqual(loaded_batch["inputs"].sharding.spec, P("fsdp", "context"))
+
+      with jax.set_mesh(cp_mesh):
+        sharded = tunix_sharding_utils.shard_input(loaded_batch, tunix_cfg.data_sharding_axis)
+      self.assertIs(sharded, loaded_batch)
+      self.assertEqual(sharded["inputs"].sharding.spec, P("fsdp", "context"))
+
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

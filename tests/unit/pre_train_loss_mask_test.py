@@ -168,6 +168,13 @@ class PreTrainLossMaskTest(unittest.TestCase):
     with self.assertRaisesRegex(ValueError, "would leak"):
       pre_train.loss_fn(model, self.config, _make_data(), None, None, is_train=True)
 
+  def test_causal_loss_rejects_full_bidirectional_attention(self):
+    self.config.attention_type = "full"
+    model = _UniformNnxDecoder(self.config.vocab_size)
+
+    with self.assertRaisesRegex(ValueError, "bidirectional.*would leak"):
+      pre_train.loss_fn(model, self.config, _make_data(), None, None, is_train=True)
+
   def test_block_diffusion_requires_all_explicit_masks(self):
     self._use_block_diffusion()
     model = _UniformNnxDecoder(self.config.vocab_size)

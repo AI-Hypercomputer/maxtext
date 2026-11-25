@@ -203,3 +203,7 @@ def test_batch_adapter_preserves_completion_only_alignment_after_cp_reorder():
       reordered_adapted.loss_weights,
       max_utils.reorder_sequence(contiguous_adapted.loss_weights, cp_size=2),
   )
+
+
+if __name__ == "__main__":
+  raise SystemExit(pytest.main([__file__, "-v"]))

@@ -14,6 +14,7 @@
 
 """Multimodal data preprocessor router."""
 
+from maxtext.common.common_types import AudioDecoderBlockType
 from maxtext.multimodal import utils as mm_utils
 
 # model_name -> (vision_encoder_block, decoder_block) mapping
@@ -229,6 +230,18 @@ def reformat_prompt(
     return prompt
 
 
+def reformatted_prompt_needs_bos(model_name):
+  """Whether the BOS token id has to be prepended to the tokens of a `reformat_prompt` output.
+
+  The chat formats written by `reformat_prompt` either spell out their BOS token (Gemma 4's `<bos>`, Llama 4's
+  `<|begin_of_text|>`) or have none (Qwen3). Gemma 3's format starts with `<bos>` as well, but it is left to the token
+  ids because the Gemma 3 SentencePiece tokenizer does not parse `<bos>` written in text. Callers that skip the
+  tokenizer's own BOS (decoding with a chat-template tokenizer, multimodal SFT) must add it back: without BOS, Gemma 3
+  output is unreliable, e.g. an immediate `<end_of_turn>` (an empty answer).
+  """
+  return _get_vision_block(model_name) is not None and _get_decoder_block(model_name) == "gemma3"
+
+
 def reformat_response(response, model_name):
   """Reformat response for different models."""
   vision_block = _get_vision_block(model_name)
@@ -408,3 +421,37 @@ def downsample_video_mask_to_tokens(video_mask, config):
 
     return downsample_qwen3_video_mask(video_mask, config)
   raise ValueError(f"Model {config.model_name} does not support padded video-mask reduction.")
+
+
+# --------------------------------------------------------------------------
+# Speech generation (text -> speech) frontends, routed by `config.audio_decoder_block`.
+# --------------------------------------------------------------------------
+
+
+def split_tts_text(config) -> list[str]:
+  """Splits `config.prompt` into the text fragments the audio decoder synthesizes one at a time."""
+  if config.audio_decoder_block == AudioDecoderBlockType.MING_TALKER:
+    from maxtext.multimodal.processor_ming import split_text  # pylint: disable=import-outside-toplevel
+
+    return split_text(config.prompt, config.ming_talker_max_fragment_length)
+  raise ValueError(f"audio_decoder_block={config.audio_decoder_block} does not support speech generation.")
+
+
+def get_tts_input_ids(config, tokenizer, text: str):
+  """Decoder prompt token ids `[L]` that make the audio decoder speak `text`."""
+  if config.audio_decoder_block == AudioDecoderBlockType.MING_TALKER:
+    from maxtext.multimodal import processor_ming  # pylint: disable=import-outside-toplevel
+
+    prompt = processor_ming.build_tts_prompt(config.ming_talker_language)
+    instruction = processor_ming.build_ip_instruction(config.ming_talker_ip_name)
+    return processor_ming.talker_input_ids(tokenizer, text, prompt, instruction)
+  raise ValueError(f"audio_decoder_block={config.audio_decoder_block} does not support speech generation.")
+
+
+def postprocess_tts_waveform(config, waveform, sample_rate: int):
+  """Model-specific cleanup of one fragment's waveform `[T]` (e.g. trailing-silence trimming)."""
+  if config.audio_decoder_block == AudioDecoderBlockType.MING_TALKER:
+    from maxtext.multimodal.processor_ming import trim_trailing_silence  # pylint: disable=import-outside-toplevel
+
+    return trim_trailing_silence(waveform, sample_rate)
+  return waveform

@@ -15,6 +15,8 @@
 """Unit tests for Pallas Mosaic TPU v2 kernels."""
 
 import collections
+import contextlib
+import functools
 from unittest import mock
 
 import pytest
@@ -30,6 +32,7 @@ from maxtext.kernels.megablox import common
 from maxtext.kernels.megablox import ops as megablox_ops
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_backend
+import numpy as np
 
 
 def poison_tpu_memory():
@@ -313,6 +316,490 @@ class GmmDispatchTest(parameterized.TestCase):
     expected = jax.jit(jax.value_and_grad(reference_loss, argnums=(0, 1, 2)))(lhs, rhs, partial_sum)
     chex.assert_trees_all_close(actual, expected, atol=1e-4, rtol=1e-5)
     self.assertEqual(gmm_mock.call_args.kwargs["transpose_rhs"], bool(use_dlhs_transpose_rhs))
+
+
+# gmm_v2's tail chunks (`gmm_v2(tail_chunks=True)`; MaxText's moe_gmm_v2_tail_chunks). On TPU7x, a gmm_v2 tile whose
+# valid rows fit in half the tile runs the unchanged matmul once per 128-row chunk (256-row with transposed rhs), and
+# the lhs and out blocks are triple-buffered. make_gmm_configs allows this only for configs where it was checked
+# bit-identical; every other call, and every call without the flag, traces the kernel without it. The kernel then
+# counts the call's short tiles and runs the chunks only if at least 1/16 of its tiles are short, else the kernel
+# without them. The CPU tests below check that the flag reaches gmm_v2, pin the gate, check that count and lower the
+# kernel outside the gate; they mock the kernels, target an abstract TPU device or run in Pallas interpret mode, so
+# they need no TPU. GmmV2TailChunksTpuTest checks on TPU7x that the chunks change no output bit.
+
+# (k, n, (tile_m, tile_k, tile_n)) of gmm_v2 calls inside the gate. The gemma4-26b calls (embed 2816, expert mlp 704)
+# use its v7x recipe tiles for the forward and input gradient of wi and wo; the input gradients read the weights with
+# transposed rhs, so they run 256-row chunks.
+_TAIL_CHUNK_CALLS = {
+    "gemma4_wi_fwd": {"k": 2816, "n": 704, "tiles": (1024, 2816, 768)},
+    "gemma4_wi_dlhs": {"k": 704, "n": 2816, "tiles": (1024, 768, 2816), "transpose_rhs": True},
+    "gemma4_wo_fwd": {"k": 704, "n": 2816, "tiles": (1024, 768, 2816)},
+    "gemma4_wo_dlhs": {"k": 2816, "n": 704, "tiles": (1024, 2816, 768), "transpose_rhs": True},
+    "tile_m_512": {"k": 704, "n": 2816, "tiles": (512, 768, 2816)},
+    "tile_m_256": {"k": 2048, "n": 1024, "tiles": (256, 2048, 1024)},
+    "several_n_tiles": {"k": 1024, "n": 1408, "tiles": (1024, 1024, 768)},  # Two N tiles; the second is partial.
+    "tile_k_of_11_lanes": {"k": 1408, "n": 768, "tiles": (1024, 1408, 768)},
+    # base.yml's default input-gradient tiles (512/1024/1024) for a Qwen3-30B-A3B-like wi: one 256-row chunk.
+    "transposed_tile_m_512": {"k": 768, "n": 2048, "tiles": (512, 1024, 1024), "transpose_rhs": True},
+    # The narrowest tile_n the gate allows, with an odd number of 256-wide K slices (3).
+    "tile_n_512": {"k": 768, "n": 512, "tiles": (512, 768, 512)},
+}
+
+# Group sizes at and around sublane (16), chunk (128, 256), half-tile and tile boundaries, and empty groups. They
+# also move later groups' first rows off the sublane grid.
+_EDGE_SIZES = (0, 1, 15, 16, 17, 127, 128, 129, 255, 256, 257, 383, 384, 385, 511, 512, 513, 1000, 1023, 1024, 1025)
+_EDGE_SIZES += (1536, 2048, 2049, 3, 700, 64)
+
+
+def _short_tiles(sizes, group_offset, num_groups, tile_m, short_rows):
+  """(tiles, short tiles) of a routing, where a short tile has at most `short_rows` rows.
+
+  Each group is tiled from its first sublane row, so only its last tile can be short.
+  """
+  start, tiles, short = 0, 0, 0
+  for group, size in enumerate(sizes):
+    size = int(size)
+    if size > 0 and group_offset <= group < group_offset + num_groups:
+      rows = start % 16 + size
+      group_tiles = -(-rows // tile_m)
+      tiles += group_tiles
+      short += rows - (group_tiles - 1) * tile_m <= short_rows
+    start += size
+  return tiles, short
+
+
+@contextlib.contextmanager
+def _on_chip(device_kind: str):
+  """Makes `pltpu.get_tpu_info()` describe `device_kind`, an abstract device (no TPU needed)."""
+  device = jax.sharding.AbstractDevice(device_kind=device_kind, num_cores=1, platform="tpu")
+  with jax.sharding.use_abstract_mesh(jax.sharding.AbstractMesh((), (), abstract_device=device)):
+    yield
+
+
+def _operand_shapes(*, k, n, groups, rows_per_group, local_groups=None, transpose_rhs=False, dtype=jnp.bfloat16):
+  """lhs, rhs, group_sizes and group_offset of a gmm_v2 call, as shapes."""
+  local_groups = local_groups or groups
+  lhs = jax.ShapeDtypeStruct((groups * rows_per_group, k), dtype)
+  rhs = jax.ShapeDtypeStruct((local_groups, n, k) if transpose_rhs else (local_groups, k, n), dtype)
+  return lhs, rhs, jax.ShapeDtypeStruct((groups,), jnp.int32), jax.ShapeDtypeStruct((1,), jnp.int32)
+
+
+def _gmm_configs(
+    *,
+    k,
+    n,
+    tiles,
+    transpose_rhs=False,
+    groups=128,
+    rows_per_group=1024,
+    local_groups=None,
+    dtype=jnp.bfloat16,
+    out_dtype=None,
+    rhs_dtype=None,
+    rhs_scale=False,
+    rhs_bias=False,
+    partial_sum=False,
+    acc_dtype=None,
+    fuse_act=None,
+    device_kind="TPU7x",
+    vmem_limit_bytes=None,
+    tail_chunks=True,
+) -> gmm_backend.GmmConfigs:
+  """make_gmm_configs for one call, with tail_chunks on and gmm_v2's default VMEM limit unless given."""
+  lhs, rhs, group_sizes, group_offset = _operand_shapes(
+      k=k,
+      n=n,
+      groups=groups,
+      rows_per_group=rows_per_group,
+      local_groups=local_groups,
+      transpose_rhs=transpose_rhs,
+      dtype=dtype,
+  )
+  if rhs_dtype is not None:
+    rhs = jax.ShapeDtypeStruct(rhs.shape, rhs_dtype)
+  scale = jax.ShapeDtypeStruct((rhs.shape[0], 1, 1, n), jnp.float32) if rhs_scale else None
+  bias = jax.ShapeDtypeStruct((rhs.shape[0], 1, n), jnp.float32) if rhs_bias else None
+  ps = jax.ShapeDtypeStruct((lhs.shape[0], n), dtype) if partial_sum else None
+  with _on_chip(device_kind):
+    if vmem_limit_bytes is None:
+      vmem_limit_bytes = int(pltpu.get_tpu_info().vmem_capacity_bytes * 0.9)
+    return gmm_backend.make_gmm_configs(
+        lhs,
+        rhs,
+        scale,
+        bias,
+        ps,
+        group_sizes,
+        group_offset,
+        tile_info=gmm_backend.TileSizes(*tiles),
+        vmem_limit_bytes=vmem_limit_bytes,
+        out_dtype=out_dtype,
+        acc_dtype=acc_dtype,
+        maybe_quantize_lhs=True,
+        zero_initialize=True,
+        fuse_act=fuse_act,
+        transpose_rhs=transpose_rhs,
+        tail_chunks=tail_chunks,
+    )
+
+
+class _AbstractTpuTestCase(parameterized.TestCase):
+  """Base of the tail-chunks tests that target an abstract TPU device from the CPU."""
+
+  def setUp(self):
+    super().setUp()
+    if not hasattr(jax.sharding, "AbstractDevice"):
+      self.skipTest("Needs jax.sharding.AbstractDevice to target TPU7x without a TPU.")
+
+
+class _TailChunksTestCase(_AbstractTpuTestCase):
+  """Base of the tests that need tail chunks, and so a JAX whose Pallas pipelines take more than two out buffers."""
+
+  def setUp(self):
+    super().setUp()
+    if not gmm_backend._DEEP_OUT_BUFFERS:  # pylint: disable=protected-access
+      self.skipTest("Tail chunks need Pallas pipelines that take more than two output buffers (not JAX 0.11.x).")
+
+
+class TailChunksGateTest(_TailChunksTestCase):
+  """Which gmm_v2 calls make_gmm_configs gives tail chunks to."""
+
+  @parameterized.named_parameters(
+      *_TAIL_CHUNK_CALLS.items(),
+      ("gemma4_short_groups", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "rows_per_group": 128}),
+      ("gemma4_local_groups", {**_TAIL_CHUNK_CALLS["gemma4_wo_fwd"], "groups": 40, "local_groups": 36}),
+      # Long mean groups too (gemma4-26b at 12288 tokens per device): the kernel counts the actual short tiles.
+      ("long_tails", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "rows_per_group": 768}),
+  )
+  def test_on(self, call):
+    self.assertTrue(_gmm_configs(**call).tail_chunks)
+
+  @parameterized.named_parameters(
+      # Without the flag (MaxText's default).
+      ("flag_off", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "tail_chunks": False}),
+      # Not checked bit-identical: other chips, other dtypes, and the paths below.
+      ("tpu7", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "device_kind": "TPU7"}),
+      ("tpu_v6e", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "device_kind": "TPU v6 lite"}),
+      ("tpu_v5p", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "device_kind": "TPU v5"}),
+      ("fp8_inputs", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "dtype": jnp.float8_e4m3fn}),
+      ("f32_inputs", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "dtype": jnp.float32}),
+      ("f32_output", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "out_dtype": jnp.float32}),
+      ("int8_weights", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "rhs_dtype": jnp.int8, "rhs_scale": True}),
+      ("partial_sum", {**_TAIL_CHUNK_CALLS["gemma4_wo_fwd"], "partial_sum": True}),
+      ("rhs_bias", {**_TAIL_CHUNK_CALLS["gemma4_wo_fwd"], "rhs_bias": True}),
+      ("bf16_accumulator", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "acc_dtype": jnp.bfloat16}),
+      ("fused_activation", {"k": 2816, "n": 1536, "tiles": (1024, 2816, 768), "fuse_act": "silu"}),
+      ("two_k_steps", {"k": 2816, "n": 704, "tiles": (1024, 1408, 768)}),
+      # Outputs differed in the last bit with these tile sizes. At tile_n 256 (one MXU column) they differ when the
+      # number of 256-wide K slices is odd.
+      ("tile_n_256", {"k": 768, "n": 512, "tiles": (512, 768, 256)}),
+      ("transposed_tile_n_256", {"k": 2816, "n": 512, "tiles": (1024, 2816, 256), "transpose_rhs": True}),
+      ("tile_n_896", {"k": 4096, "n": 896, "tiles": (1024, 4096, 896)}),
+      ("tile_m_2048", {"k": 704, "n": 2816, "tiles": (2048, 768, 1536)}),
+      # Too short a tile for two chunks.
+      ("tile_m_128", {"k": 2816, "n": 704, "tiles": (128, 2816, 768)}),
+      ("transposed_tile_m_256", {"k": 2048, "n": 1024, "tiles": (256, 2048, 1024), "transpose_rhs": True}),
+      # The triple-buffered pipeline (49.2 MB here) does not fit the VMEM limit.
+      ("vmem_limit", {**_TAIL_CHUNK_CALLS["gemma4_wo_fwd"], "vmem_limit_bytes": 32 * 1024 * 1024}),
+      # Its buffers (48.6 MB) fit, but not with the partial out and the headroom for Mosaic's internal scratch.
+      ("vmem_headroom", {**_TAIL_CHUNK_CALLS["gemma4_wo_fwd"], "vmem_limit_bytes": 49_000_000}),
+  )
+  def test_off(self, call):
+    self.assertFalse(_gmm_configs(**call).tail_chunks)
+
+  def test_off_without_deep_output_buffers(self):
+    """JAX 0.11.x rejects more than two output buffers, so make_gmm_configs leaves tail chunks off there."""
+    with mock.patch.object(gmm_backend, "_DEEP_OUT_BUFFERS", False):
+      self.assertFalse(_gmm_configs(**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"]).tail_chunks)
+
+  @parameterized.named_parameters(
+      ("plain_tile_m_1024", _TAIL_CHUNK_CALLS["gemma4_wi_fwd"], 128, 4),
+      ("transposed_tile_m_1024", _TAIL_CHUNK_CALLS["gemma4_wo_dlhs"], 256, 2),
+      ("plain_tile_m_512", _TAIL_CHUNK_CALLS["tile_m_512"], 128, 2),
+      ("transposed_tile_m_512", _TAIL_CHUNK_CALLS["transposed_tile_m_512"], 256, 1),
+      ("plain_tile_m_256", _TAIL_CHUNK_CALLS["tile_m_256"], 128, 1),
+  )
+  def test_chunk_sizes(self, call, chunk_m, max_chunks):
+    cfgs = _gmm_configs(**call)
+    self.assertEqual((cfgs.tail_chunk_m, cfgs.max_tail_chunks), (chunk_m, max_chunks))
+
+
+class TailChunksShortTileCountTest(_TailChunksTestCase):
+  """The kernel's count of the tiles that run as chunks (kernel_main runs the chunks if at least 1/16 are short)."""
+
+  @parameterized.named_parameters(
+      ("edge_sizes", _EDGE_SIZES, 0, 0, _TAIL_CHUNK_CALLS["gemma4_wo_fwd"]),
+      ("local_groups", _EDGE_SIZES, 2, 4, _TAIL_CHUNK_CALLS["gemma4_wo_fwd"]),
+      ("tile_m_512", _EDGE_SIZES, 0, 0, _TAIL_CHUNK_CALLS["tile_m_512"]),
+      ("transposed", _EDGE_SIZES, 0, 0, _TAIL_CHUNK_CALLS["gemma4_wo_dlhs"]),
+      ("transposed_tile_m_512", _EDGE_SIZES, 0, 0, _TAIL_CHUNK_CALLS["transposed_tile_m_512"]),
+      ("long_groups", (768,) * 32, 0, 0, _TAIL_CHUNK_CALLS["gemma4_wo_fwd"]),
+  )
+  def test_counts_short_tiles(self, sizes, group_offset, other_shards_groups, call):
+    groups = len(sizes)
+    rows_per_group = -(-sum(sizes) // (16 * groups)) * 16
+    cfgs = _gmm_configs(**call, groups=groups, rows_per_group=rows_per_group, local_groups=groups - other_shards_groups)
+    self.assertTrue(cfgs.tail_chunks)
+    short_rows = cfgs.max_tail_chunks * cfgs.tail_chunk_m
+    max_num_gm = cfgs.dims.size_group + pl.cdiv(cfgs.dims.size_m, cfgs.tiles.tile_m) - 1
+
+    def kernel(group_sizes_ref, group_offset_ref, out_ref, gm_id_to_group_id, gm_id_to_m_offset):
+      metadata = gmm_backend.MetadataRef(gm_id_to_group_id=gm_id_to_group_id, gm_id_to_m_offset=gm_id_to_m_offset)
+      out_ref[0], out_ref[1] = gmm_backend._fill_metadata(  # pylint: disable=protected-access
+          group_sizes_ref, group_offset_ref, metadata, cfgs=cfgs, short_tile_rows=short_rows
+      )
+
+    smem = pl.BlockSpec(memory_space=pltpu.SMEM)
+    counts = pl.pallas_call(
+        kernel,
+        out_shape=jax.ShapeDtypeStruct((2,), jnp.int32),
+        in_specs=[smem, smem],
+        out_specs=smem,
+        scratch_shapes=[pltpu.SMEM((max_num_gm,), jnp.int32), pltpu.SMEM((max_num_gm + 1,), jnp.int32)],
+        interpret=True,
+    )(jnp.asarray(sizes, jnp.int32), jnp.asarray([group_offset], jnp.int32))
+    expected = _short_tiles(sizes, group_offset, cfgs.dims.size_group, cfgs.tiles.tile_m, short_rows)
+    self.assertEqual(tuple(np.asarray(counts)), expected)
+
+
+class TailChunksLoweringTest(_AbstractTpuTestCase):
+  """Calls outside the gate trace and lower to the kernel without tail chunks, also with the flag on."""
+
+  @parameterized.named_parameters(
+      # Outside the gate kernel_main builds only the pipeline without tail chunks. With a fused activation, that
+      # pipeline pairs the gate and up weights' block specs.
+      ("fused_activation", {"k": 2816, "n": 1536, "tiles": (1024, 2816, 768), "fuse_act": "silu"}),
+      ("tpu_v6e", {**_TAIL_CHUNK_CALLS["gemma4_wi_fwd"], "device_kind": "TPU v6 lite"}),
+  )
+  def test_lowers_without_tail_chunks(self, call):
+    call = {**call, "groups": 8}
+    self.assertFalse(_gmm_configs(**call).tail_chunks)
+    lhs, rhs, group_sizes, _ = _operand_shapes(k=call["k"], n=call["n"], groups=8, rows_per_group=1024)
+    with _on_chip(call.get("device_kind", "TPU7x")):
+      lowered = gmm_backend.gmm_v2.trace(
+          lhs,
+          rhs,
+          group_sizes,
+          tile_info=gmm_backend.TileSizes(*call["tiles"]),
+          preferred_element_type=jnp.bfloat16,
+          fuse_act=call.get("fuse_act"),
+          tail_chunks=True,
+      ).lower(lowering_platforms=("tpu",))
+    self.assertIn("tpu_custom_call", lowered.as_text())
+
+
+class TailChunksDispatchTest(parameterized.TestCase):
+  """MaxText's gmm passes gmm_v2_tail_chunks to the gmm_v2 forward and input-gradient calls; the kernels are mocked."""
+
+  @parameterized.named_parameters(("default", None), ("off", False), ("on", True))
+  def test_flag_through_custom_vjp(self, tail_chunks):
+    num_groups, batch_size, in_size, out_size = 2, 8, 16, 32
+    lhs = jnp.linspace(-1.0, 1.0, batch_size * in_size).reshape(batch_size, in_size)
+    rhs = jnp.linspace(-0.5, 0.5, num_groups * in_size * out_size).reshape(num_groups, in_size, out_size)
+    group_sizes = jnp.array([batch_size // num_groups] * num_groups, dtype=jnp.int32)
+
+    def mock_gmm(lhs, rhs, transpose_rhs=False, **kwargs):
+      del kwargs
+      if transpose_rhs:
+        rhs = rhs.swapaxes(1, 2)
+      return jnp.einsum("gmk,gkn->gmn", lhs.reshape(num_groups, -1, lhs.shape[-1]), rhs).reshape(batch_size, -1)
+
+    def mock_tgmm(lhs, rhs, **kwargs):
+      del kwargs
+      lhs, rhs = lhs.reshape(num_groups, -1, lhs.shape[-1]), rhs.reshape(num_groups, -1, rhs.shape[-1])
+      return jnp.einsum("gmk,gmn->gkn", lhs, rhs)
+
+    def loss(lhs, rhs):
+      kwargs = {} if tail_chunks is None else {"gmm_v2_tail_chunks": tail_chunks}
+      out = megablox_ops.gmm(lhs, rhs, group_sizes, use_tokamax_backend=True, use_gmm_v2=True, **kwargs)
+      return jnp.sum(out**2)
+
+    with mock.patch.object(megablox_ops.gmm_v2, "gmm_v2", side_effect=mock_gmm) as gmm_mock:
+      with mock.patch.object(megablox_ops.tgmm_v2, "tgmm_v2", side_effect=mock_tgmm):
+        jax.jit(jax.grad(loss, argnums=(0, 1)))(lhs, rhs)
+    # The forward and the input gradient.
+    calls = gmm_mock.call_args_list
+    self.assertGreaterEqual(len(calls), 2)
+    self.assertEqual({c.kwargs["tail_chunks"] for c in calls}, {bool(tail_chunks)})
+
+
+# MaxText's gmm tiling (forward, input gradient, weight gradient; each tile_m, tile_k, tile_n) at gemma4-26b's v7x
+# recipe tiles.
+_TAIL_CHUNK_MAXTEXT_GMMS = {
+    "wi": (2816, 704, (1024, 2816, 768, 1024, 768, 2816, 512, 2816, 768)),
+    "wo": (704, 2816, (1024, 768, 2816, 1024, 2816, 768, 512, 704, 2816)),
+}
+
+_ROUTING_PATTERNS = ("uniform", "short", "skewed", "edge", "padded", "local_groups", "long")
+_BF16 = jnp.dtype(jnp.bfloat16)
+
+
+def _routing(pattern: str) -> tuple[np.ndarray, int, int, int]:
+  """Returns (group_sizes, rows, group_offset, local groups) of a routing pattern.
+
+  The mean group sizes keep every call of GmmV2TailChunksTpuTest inside the gate.
+
+  Args:
+    pattern: One of _ROUTING_PATTERNS.
+  """
+  rng = np.random.default_rng(0)
+  groups, offset, extra_rows = 128, 0, 0
+  if pattern == "uniform":  # ~1024 rows per group: gemma4-26b at 16384 tokens per device, 32 of its experts.
+    groups = 32
+    sizes = np.bincount(rng.integers(0, groups, groups * 1024), minlength=groups)
+  elif pattern == "short":  # ~120 rows per group: gemma4-26b at about 2048 tokens per device.
+    sizes = np.bincount(rng.integers(0, groups, groups * 120), minlength=groups)
+  elif pattern == "skewed":  # Zipf-like sizes off the tile grid; six groups empty.
+    weights = 1.0 / np.arange(1, groups + 1) ** 0.8
+    weights[rng.choice(groups, 6, replace=False)] = 0.0
+    sizes = np.floor(weights / weights.sum() * groups * 256).astype(np.int64)
+    sizes[np.argmax(sizes)] += groups * 256 - sizes.sum()
+    sizes = rng.permutation(sizes)
+  elif pattern in ("edge", "padded"):  # The boundary sizes, the other groups empty; "padded" adds unrouted rows.
+    sizes = rng.permutation(np.pad(np.array(_EDGE_SIZES), (0, groups - len(_EDGE_SIZES))))
+    extra_rows = 333 if pattern == "padded" else 0
+  elif pattern == "local_groups":  # Expert sharding: groups 0-1 and 38-39 are another shard's.
+    groups, offset = 40, 2
+    sizes = np.bincount(rng.integers(0, groups, groups * 1024), minlength=groups)
+  elif pattern == "long":  # 768 rows per group: no tile of 1024 rows is short, so the kernel runs without the chunks.
+    groups = 32
+    sizes = np.full(groups, 768)
+  else:
+    raise ValueError(f"Unknown pattern {pattern!r}.")
+  local_groups = groups - 4 if pattern == "local_groups" else groups
+  # gmm_v2 zero-fills unrouted rows in whole 16-row sublanes (MaxText pads the rows to a tile multiple).
+  rows = -(-(int(sizes.sum()) + extra_rows) // 16) * 16
+  return sizes.astype(np.int32), rows, offset, local_groups
+
+
+def _runs_tail_chunks(sizes, group_offset, local_groups, tile_m, transpose_rhs) -> bool:
+  """Whether the kernel runs tail chunks for this routing: at least 1/16 of its tiles fit in half a tile of chunks."""
+  chunk_m = 256 if transpose_rhs else 128
+  tiles, short = _short_tiles(sizes, group_offset, local_groups, tile_m, tile_m // (2 * chunk_m) * chunk_m)
+  return 16 * short >= tiles
+
+
+def _random_operands(m: int, k: int, n: int, groups: int, transpose_rhs: bool) -> tuple[jax.Array, jax.Array]:
+  """bf16 lhs of shape (m, k) and rhs of shape (groups, k, n), or (groups, n, k) with transpose_rhs."""
+  key_lhs, key_rhs = jax.random.split(jax.random.key(0))
+  lhs = jax.random.normal(key_lhs, (m, k), jnp.float32).astype(jnp.bfloat16)
+  shape = (groups, n, k) if transpose_rhs else (groups, k, n)
+  rhs = (jax.random.normal(key_rhs, shape, jnp.float32) * k**-0.5).astype(jnp.bfloat16)
+  return lhs, rhs
+
+
+def _run_recording_configs(fn, *args):
+  """Runs jit(fn)(*args). Returns the outputs as numpy arrays and the GmmConfigs of each gmm_v2 call."""
+  jax.clear_caches()  # gmm_v2 is jitted: retrace it, so that make_gmm_configs runs again.
+  configs = []
+  make_gmm_configs = gmm_backend.make_gmm_configs
+
+  def recording_make_gmm_configs(*args, **kwargs):
+    configs.append(make_gmm_configs(*args, **kwargs))  # pylint: disable=missing-kwoa
+    return configs[-1]
+
+  with mock.patch.object(gmm_backend, "make_gmm_configs", side_effect=recording_make_gmm_configs):
+    out = jax.block_until_ready(jax.jit(fn)(*args))
+  return jax.tree.map(np.asarray, out), configs
+
+
+# Every call with every pattern for one call per chunk size; the other calls with two patterns.
+_GMM_V2_TAIL_CHUNK_CASES = [
+    (f"{call}_{pattern}", call, pattern)
+    for call in _TAIL_CHUNK_CALLS
+    for pattern in (_ROUTING_PATTERNS if call in ("gemma4_wi_fwd", "gemma4_wo_dlhs") else ("uniform", "edge"))
+]
+
+
+@pytest.mark.tpu_only
+class GmmV2TailChunksTpuTest(parameterized.TestCase):
+  """On TPU7x, tail chunks must not change any output bit.
+
+  Each test runs a call twice: with tail_chunks on, checking that every gmm_v2 call passed the gate and that the
+  routing makes the kernel run the chunks (except for the "long" routing, which has no short tile), and with it off
+  (the default). It then requires the same bits.
+  """
+
+  def setUp(self):
+    super().setUp()
+    # Tail chunks run only on TPU7x. On another chip both runs would be the kernel without them.
+    if jax.devices()[0].device_kind != "TPU7x":
+      self.skipTest("Tail chunks run only on TPU7x.")
+    if not gmm_backend._DEEP_OUT_BUFFERS:  # pylint: disable=protected-access
+      self.skipTest("Tail chunks need Pallas pipelines that take more than two output buffers (not JAX 0.11.x).")
+
+  def _assert_same_bits(self, actual: np.ndarray, expected: np.ndarray, name: str):
+    self.assertEqual((actual.shape, actual.dtype), (expected.shape, expected.dtype), name)
+    reference = expected.astype(np.float32)
+    self.assertTrue(np.isfinite(reference).all(), name)
+    self.assertGreater(np.abs(reference).max(), 0.0, name)
+    bits = np.dtype(f"uint{8 * actual.dtype.itemsize}")
+    differ = actual.view(bits) != expected.view(bits)
+    if differ.any():
+      self.fail(f"{name}: {differ.sum()} of {differ.size} elements differ, the first at {np.argwhere(differ)[0]}.")
+
+  @parameterized.named_parameters(*_GMM_V2_TAIL_CHUNK_CASES)
+  def test_gmm_v2_bits_match_without_tail_chunks(self, call, pattern):
+    k, n, tiles = (_TAIL_CHUNK_CALLS[call][key] for key in ("k", "n", "tiles"))
+    transpose_rhs = _TAIL_CHUNK_CALLS[call].get("transpose_rhs", False)
+    sizes, m, offset, local_groups = _routing(pattern)
+    lhs, rhs = _random_operands(m, k, n, local_groups, transpose_rhs)
+
+    def gmm(lhs, rhs, group_sizes, group_offset, tail_chunks):
+      return gmm_backend.gmm_v2(
+          lhs,
+          rhs,
+          group_sizes,
+          group_offset=group_offset,
+          tile_info=gmm_backend.TileSizes(*tiles),
+          preferred_element_type=_BF16,
+          transpose_rhs=transpose_rhs,
+          tail_chunks=tail_chunks,
+      )
+
+    args = (lhs, rhs, jnp.asarray(sizes), jnp.asarray([offset], jnp.int32))
+    on, on_configs = _run_recording_configs(functools.partial(gmm, tail_chunks=True), *args)
+    off, off_configs = _run_recording_configs(functools.partial(gmm, tail_chunks=False), *args)
+    self.assertEqual([c.tail_chunks for c in on_configs], [True])
+    self.assertEqual([c.tail_chunks for c in off_configs], [False])
+    self.assertEqual(_runs_tail_chunks(sizes, offset, local_groups, tiles[0], transpose_rhs), pattern != "long")
+    self._assert_same_bits(on, off, f"{call} {pattern}")
+
+  @parameterized.product(which=("wi", "wo"), pattern=("uniform", "skewed"))
+  def test_maxtext_gmm_fwd_bwd_bits_match_without_tail_chunks(self, which, pattern):
+    """MaxText's entry point (megablox gmm on the tokamax gmm_v2 backend), forward and backward."""
+    k, n, tiling = _TAIL_CHUNK_MAXTEXT_GMMS[which]
+    sizes, m, _, groups = _routing(pattern)
+    lhs, rhs = _random_operands(m, k, n, groups, transpose_rhs=False)
+    dout = jax.random.normal(jax.random.key(1), (m, n), jnp.float32).astype(jnp.bfloat16)
+
+    def fwd_bwd(lhs, rhs, dout, group_sizes, tail_chunks):
+      def gmm(lhs, rhs):
+        return megablox_ops.gmm(
+            lhs,
+            rhs,
+            group_sizes,
+            preferred_element_type=_BF16,
+            tiling=tiling,
+            use_tokamax_backend=True,
+            use_gmm_v2=True,
+            use_dlhs_transpose_rhs=True,
+            interpret=False,
+            gmm_v2_tail_chunks=tail_chunks,
+        )
+
+      out, vjp = jax.vjp(gmm, lhs, rhs)
+      return (out, *vjp(dout))
+
+    args = (lhs, rhs, dout, jnp.asarray(sizes))
+    on, on_configs = _run_recording_configs(functools.partial(fwd_bwd, tail_chunks=True), *args)
+    off, off_configs = _run_recording_configs(functools.partial(fwd_bwd, tail_chunks=False), *args)
+    # gmm_v2 runs the forward and the input gradient. tgmm_v2 runs the weight gradient; tail chunks leave it alone.
+    self.assertEqual([c.tail_chunks for c in on_configs], [True, True])
+    self.assertEqual([c.tail_chunks for c in off_configs], [False, False])
+    self.assertTrue(all(_runs_tail_chunks(sizes, 0, groups, 1024, transpose) for transpose in (False, True)))
+    for name, actual, expected in zip(("out", "dlhs", "drhs"), on, off):
+      self._assert_same_bits(actual, expected, f"{which} {pattern} {name}")
 
 
 class GmmTest(parameterized.TestCase):

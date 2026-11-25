@@ -49,6 +49,7 @@ from maxtext.common.common_types import (
     KV_HEAD_DIM,
     KV_BATCH,
     ATTN_EMBED,
+    ATTENTION_LB_IDS,
     MODEL_MODE_AUTOREGRESSIVE,
     MODEL_MODE_TRAIN,
     MODEL_MODE_PREFILL,
@@ -83,7 +84,12 @@ from maxtext.layers.normalizations import (
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.inference import kvcache
 from maxtext.inference.kvcache import KVQuant
-from maxtext.utils.sharding import maybe_shard_with_logical, create_sharding, logical_to_mesh_axes
+from maxtext.utils.sharding import (
+    create_sharding,
+    logical_to_mesh_axes,
+    maybe_shard_with_logical,
+    pin_row_major_with_cotangent,
+)
 
 # pylint: disable=line-too-long, g-doc-args, g-doc-return-or-yield, bad-continuation, g-inconsistent-quotes
 # pytype: disable=attribute-error
@@ -300,6 +306,7 @@ class Attention(nnx.Module):
     self.reshape_q = reshape_q
     self.is_nope_layer = is_nope_layer
     self.is_vision = is_vision
+    self.name = name
     self.model_mode = model_mode
     self.use_mrope = use_mrope
     self.mrope_section = mrope_section
@@ -475,10 +482,14 @@ class Attention(nnx.Module):
 
     Ulysses context parallelism shards the KV heads a second time, over the
     context axis, using a runtime all-to-all rather than the weight's logical
-    axes, so that axis is folded in explicitly.  `types.py` separately requires
-    `num_kv_heads` to be divisible by the context-parallel size on its own;
-    checking the product here is what catches a head count that clears each
-    factor individually but not both together.
+    axes, so that axis is folded in explicitly.  `types.py` separately checks
+    `num_kv_heads` against the context-parallel size on its own; checking the
+    product here is what catches a head count that clears each factor
+    individually but not both together.  The one exception is a context axis
+    that is a multiple of the KV heads left on each device by the other axes:
+    Ulysses then repeats each KV head across the context ranks whose query heads
+    use it (`ulysses_attention.repeat_kv_heads_for_ulysses`) instead of splitting
+    the KV heads, so the context axis places no constraint on them.
 
     Without this check an over-sharded mesh fails much later, either with an
     opaque XLA divisibility error or by silently leaving the projection
@@ -506,17 +517,22 @@ class Attention(nnx.Module):
       kv_head_axes = (kv_head_axes,)
     kv_head_axes = list(kv_head_axes)
 
+    def shards(axes):
+      return math.prod(self.mesh.shape.get(axis, 1) for axis in axes)
+
     # Ulysses exchanges sequence ownership for head ownership through an
     # all-to-all, so the context axis shards KV heads too even though no
-    # logical rule says so.
+    # logical rule says so -- unless it is a multiple of the KV heads left per
+    # device, in which case those heads are repeated rather than split.
     if resolve_context_parallel_strategy(self.config, self.attention_type) == "ulysses":
       ulysses_axis = self.config.context_sharding
       if ulysses_axis not in kv_head_axes:
-        kv_head_axes.append(ulysses_axis)
+        local_kv_heads, remainder = divmod(self.num_kv_heads, shards(kv_head_axes))
+        replicated = remainder == 0 and self.mesh.shape.get(ulysses_axis, 1) % local_kv_heads == 0
+        if not replicated:
+          kv_head_axes.append(ulysses_axis)
 
-    kv_parallelism = 1
-    for axis in kv_head_axes:
-      kv_parallelism *= self.mesh.shape.get(axis, 1)
+    kv_parallelism = shards(kv_head_axes)
 
     if self.num_kv_heads % kv_parallelism != 0:
       raise ValueError(
@@ -572,6 +588,23 @@ class Attention(nnx.Module):
       out_features = (self.num_query_heads, self.head_dim * 2)
 
     block_size = getattr(self.config, "weight_block_size", None)
+    # query_proj_kernel_gather_once: the backward's remat replay gathers the kernel once and the input gradient reuses
+    # it (DenseGeneral gathered_kernel_axes: the embed dimension gathered, the others as they are). Scanned/remat'd
+    # decoder training only: forward-only models, mesh-less modules, and unrematerialized vision/audio encoders skip it.
+    full_attn = (AttentionType.FULL, AttentionType.FULL.value)
+    is_multimodal_encoder = (
+        self.is_vision
+        or self.name == "self_attention_audio"
+        or (self.attention_type in full_attn and self.config.attention_type not in full_attn)
+    )
+    gathered_kernel_axes = None
+    if (
+        getattr(self.config, "query_proj_kernel_gather_once", False)
+        and self.model_mode == MODEL_MODE_TRAIN
+        and self.mesh is not None
+        and not is_multimodal_encoder
+    ):
+      gathered_kernel_axes = tuple(None if axis == "embed_attn" else axis for axis in kernel_axes)
     return DenseGeneral(
         in_features_shape=in_features,
         out_features_shape=out_features,
@@ -585,14 +618,18 @@ class Attention(nnx.Module):
         use_bias=self.use_bias_in_projections,
         shard_mode=self.config.shard_mode,
         weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
+        mesh=self.mesh if gathered_kernel_axes else None,
         block_size=block_size,
+        gathered_kernel_axes=gathered_kernel_axes,
         rngs=self.rngs,
     )
 
-  def query_projection(self, inputs_q: Array, out_sharding: NamedSharding | None = None) -> Array:
+  def query_projection(
+      self, inputs_q: Array, out_sharding: NamedSharding | None = None, model_mode: str = MODEL_MODE_TRAIN
+  ) -> Array:
     """Query projection."""
 
-    return self.query(inputs_q, out_sharding=out_sharding)
+    return self.query(inputs_q, out_sharding=out_sharding, use_gathered_kernel=model_mode == MODEL_MODE_TRAIN)
 
   def init_kv_w(self, inputs_kv_shape: Tuple) -> nnx.Module:
     """Initializes the key or value projection.
@@ -860,6 +897,7 @@ class Attention(nnx.Module):
         extra_w_psum_axes=(),
         ctx_dtype=out.dtype,
         wo_dtype=wo.dtype,
+        early_dw_rs=bool(getattr(self.config, "fused_out_early_dw_rs", False)),
     )
 
     @quantizations.without_qwix_interception
@@ -1591,16 +1629,53 @@ class Attention(nnx.Module):
     else:
       input_axis_names = self.decode_input_axis_names
 
-    is_self_attn = inputs_q is inputs_kv
-    inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
-    inputs_kv = inputs_q if is_self_attn else self._maybe_shard_with_logical(inputs_kv, input_axis_names)
-    qkv_sharding = create_sharding(self.mesh, input_axis_names)
-
     use_shared_kv = shared_key is not None and shared_value is not None
     if self.share_kv_layer and not use_shared_kv:
       raise ValueError("share_kv_layer=True requires both shared_key and shared_value to be provided.")
     if use_shared_kv and self.config.fused_qkv:
       raise ValueError("shared_key / shared_value are incompatible with fused_qkv.")
+
+    # Under Ulysses, the attention backward prefers tokens-minor layout for the [B, S, H, D] -> [B, H, S, D]
+    # transpose ahead of the inverse all-to-all; pinning the block's input and output (and their cotangents) to
+    # row-major keeps XLA from propagating tokens-minor through the residual stream into adjacent MoE layers.
+    pin_mode = getattr(self.config, "ulysses_pin_row_major_layout", "auto")
+    if pin_mode == "always":
+      enable_layout_pin = True
+    elif pin_mode == "never":
+      enable_layout_pin = False
+    elif pin_mode == "auto":
+      enable_layout_pin = getattr(self.config, "num_experts", 1) > 1
+    else:
+      raise ValueError(f"ulysses_pin_row_major_layout must be 'auto', 'always', or 'never', got {pin_mode!r}.")
+    pin_layout = (
+        enable_layout_pin
+        and model_mode == MODEL_MODE_TRAIN
+        and resolve_context_parallel_strategy(self.config, self.attention_type) == "ulysses"
+        and not use_shared_kv
+    )
+    if pin_layout:
+      same_kv = inputs_kv is inputs_q
+      inputs_q = pin_row_major_with_cotangent(inputs_q)
+      inputs_kv = inputs_q if same_kv else pin_row_major_with_cotangent(inputs_kv)
+
+    # context_parallel_attention_load_balance: run this layer in DUAL_CHUNK_SWAP token order so every
+    # context rank does the same share of the causal work, and restore natural order on the output.
+    # Everything between here and the output reorder acts token by token, except attention, which gets
+    # the load-balanced mask. Other layers (e.g. GatedDeltaNet) never see the permuted tokens.
+    sequence_load_balanced = self._attention_load_balance_size(model_mode, rope_kwargs, bidirectional_mask) > 1
+    if sequence_load_balanced:
+      inputs_q, inputs_kv, inputs_positions, decoder_segment_ids = self._to_load_balanced_order(
+          inputs_q,
+          inputs_kv,
+          inputs_positions,
+          decoder_segment_ids,
+          use_shared_kv=use_shared_kv,
+      )
+
+    is_self_attn = inputs_q is inputs_kv
+    inputs_q = self._maybe_shard_with_logical(inputs_q, input_axis_names)
+    inputs_kv = inputs_q if is_self_attn else self._maybe_shard_with_logical(inputs_kv, input_axis_names)
+    qkv_sharding = create_sharding(self.mesh, input_axis_names)
 
     gate = None
     fused_qkv_out = self._try_fused_qkv_kernel(
@@ -1614,10 +1689,10 @@ class Attention(nnx.Module):
         query, key, value = self.qkv_projection(inputs_q, proj_name="qkv_proj")
       elif use_shared_kv:
         # Donor layer already produced rotated, normed K/V — use them directly.
-        query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
+        query = self.query_projection(inputs_q, out_sharding=qkv_sharding, model_mode=model_mode)
         key, value = shared_key, shared_value
       else:
-        query = self.query_projection(inputs_q, out_sharding=qkv_sharding)
+        query = self.query_projection(inputs_q, out_sharding=qkv_sharding, model_mode=model_mode)
         key = self.kv_projection(inputs_kv, proj_name="key", out_sharding=qkv_sharding)
         if self.share_kv_projections:
           value = key
@@ -1716,7 +1791,11 @@ class Attention(nnx.Module):
     key = checkpoint_name(key, "key_proj")
     value = checkpoint_name(value, "value_proj")
 
-    assert not self.config.quantize_kvcache or self.kv_quant
+    if self.config.quantize_kvcache and self.kv_quant is None:
+      raise ValueError(
+          "quantize_kvcache=True requires the Attention layer to be constructed with"
+          " kv_quant=quantizations.configure_kv_quant(config)."
+      )
 
     if self.config.attention in ("vllm_rpa", "vllm_batched_rpa") and model_mode != MODEL_MODE_TRAIN:
       batch, seq_len, num_heads, head_dim = query.shape
@@ -1741,6 +1820,7 @@ class Attention(nnx.Module):
           previous_chunk,
           bidirectional_mask,
           self.sinks,
+          sequence_load_balanced=sequence_load_balanced,
       )
     out = jax.ad_checkpoint.checkpoint_name(out, "attention_out")
     if model_mode == MODEL_MODE_PREFILL:
@@ -1753,7 +1833,70 @@ class Attention(nnx.Module):
       out = out.reshape(batch_size, seq_len, self.config.num_query_heads * self.config.head_dim)
       out = out * jax.nn.sigmoid(gate)
     out = self.out_projection(out, out_sharding=out_sharding, model_mode=model_mode)
+    if sequence_load_balanced:
+      out = self.attention_op.reorder_for_attention_load_balance(out, to_natural=True)
     if getattr(self.config, "distill_beta", 0.0) > 0.0:
       self.sow(nnx.Intermediate, "out_projection_activations", out)
+    if pin_layout:
+      out = pin_row_major_with_cotangent(out)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache
+
+  def _attention_load_balance_size(self, model_mode: str, rope_kwargs: dict | None, bidirectional_mask: Any) -> int:
+    """How many context shards this call load-balances over; 1 means it keeps natural token order.
+
+    See `AttentionOp.attention_load_balance_context_size`. Only the tokens, positions and segment ids are
+    permuted, so a call whose rotary angles come from `rope_kwargs` (e.g. a vision grid) or that applies a
+    `bidirectional_mask`, both laid out in natural token order, keeps natural order.
+    """
+    if (
+        not self.config.context_parallel_attention_load_balance
+        or rope_kwargs is not None
+        or bidirectional_mask is not None
+    ):
+      return 1
+    return self.attention_op.attention_load_balance_context_size(model_mode)
+
+  def _to_load_balanced_order(
+      self,
+      inputs_q: Array,
+      inputs_kv: Array,
+      inputs_positions: Array | None,
+      decoder_segment_ids: Array | None,
+      *,
+      use_shared_kv: bool,
+  ) -> tuple[Array, Array, Array, Array | None]:
+    """Permutes the layer inputs into DUAL_CHUNK_SWAP order for attention-local load balancing.
+
+    Positions travel with their tokens so RoPE (and the dot-product causal mask) see each token's
+    original position; segment ids travel with them so packing boundaries still hold. Missing positions
+    are materialized first, since the default RoPE positions are the natural-order iota.
+
+    With `context_parallel_attention_load_balance_hoist_ids`, the reordered positions and segment ids are
+    named `ATTENTION_LB_IDS`, which `remat_policy=custom` then saves.
+    """
+    if use_shared_kv:
+      raise ValueError(
+          "context_parallel_attention_load_balance does not support shared_key / shared_value: the donor "
+          "layer's K/V would be in a different token order."
+      )
+    if inputs_kv is not inputs_q and inputs_kv.shape[:2] != inputs_q.shape[:2]:
+      raise ValueError(
+          "context_parallel_attention_load_balance needs self-attention inputs with matching batch and "
+          f"sequence dims, got inputs_q {inputs_q.shape} and inputs_kv {inputs_kv.shape}."
+      )
+    if inputs_positions is None:
+      inputs_positions = jnp.broadcast_to(jnp.arange(inputs_q.shape[1], dtype=jnp.int32), inputs_q.shape[:2])
+    reorder = self.attention_op.reorder_for_attention_load_balance
+    reordered_q = reorder(inputs_q)
+    reordered_kv = reordered_q if inputs_kv is inputs_q else reorder(inputs_kv)
+    reordered_positions = reorder(inputs_positions)
+    reordered_segment_ids = reorder(decoder_segment_ids)
+    if self.config.context_parallel_attention_load_balance_hoist_ids:
+      # Both depend only on the batch, so the saved value is a loop invariant of the layer scan, which
+      # jax.lax.scan hoists out of the loop: the backward replay of every attention layer then reads the
+      # forward's copy instead of reordering the positions and segment ids again. Same values.
+      reordered_positions = checkpoint_name(reordered_positions, ATTENTION_LB_IDS)
+      if reordered_segment_ids is not None:
+        reordered_segment_ids = checkpoint_name(reordered_segment_ids, ATTENTION_LB_IDS)
+    return reordered_q, reordered_kv, reordered_positions, reordered_segment_ids

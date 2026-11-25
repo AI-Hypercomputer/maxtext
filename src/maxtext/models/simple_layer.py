@@ -111,7 +111,7 @@ class SimpleMlpDecoderLayer(nnx.Module):
     self.activation_sharding = (
         create_sharding(mesh, activation_axes_names) if config.shard_mode == ShardMode.EXPLICIT else None
     )
-    mlp_axes_names = ("activation_batch", "activation_norm_length", "activation_mlp")
+    mlp_axes_names = ("activation_batch", "activation_length", "activation_mlp")
     self.mlp_sharding = create_sharding(mesh, mlp_axes_names) if config.shard_mode == ShardMode.EXPLICIT else None
 
   def __call__(

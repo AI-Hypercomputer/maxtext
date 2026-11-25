@@ -28,6 +28,7 @@ import yaml
 import jax
 
 from maxtext.utils import max_logging
+from maxtext.utils.globals import KEYS_NO_LOGGING
 from maxtext.common.gcloud_stub import is_decoupled, gcs_storage
 
 storage = gcs_storage()
@@ -52,6 +53,8 @@ def write_config_raw_keys_for_gcs(raw_keys):
   max_logging.log("Writing config to GCS...")
 
   raw_keys_dict = dict(raw_keys)
+  for key in KEYS_NO_LOGGING:
+    raw_keys_dict.pop(key, None)
   filename = "config.yml"
   with open(filename, "wt", encoding="utf8") as config_for_gcs:
     yaml.dump(raw_keys_dict, config_for_gcs)

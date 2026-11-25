@@ -98,6 +98,8 @@ class DiffusionPipelineConfig(BaseModel):
   pretrained_model_name_or_path: str = ""
   model_name: str = ""
   model_type: str = "T2V"
+  # `model_type`s this model config implements; empty means no restriction.
+  supported_types: list[str] = Field(default_factory=list)
   prompt: str = ""
   prompt_2: str = ""
   negative_prompt: str = ""

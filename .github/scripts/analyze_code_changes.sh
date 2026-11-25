@@ -20,6 +20,9 @@
 # based on the specific files modified.
 #
 # Behavior & Logic Flow:
+#   0a. Live PR Metadata: On pull requests (when PR_NUMBER and GITHUB_REPOSITORY are set),
+#       reads live draft state and CI labels (`scheduled-only`, `run-tpu7x`, `skip-ci-tests`)
+#       from the GitHub REST API so workflow re-runs see current labels.
 #   0. FORCE_ALL_TESTS=true: Bypasses all rules and enables every test suite and
 #      notebook (used by the `scheduled-only` PR label).
 #   1. Non-PR Events: If not a pull request, enables all test suites and notebooks.
@@ -42,9 +45,10 @@
 #      from the unmatched file list.
 #   7. Fallback Check: If any truly unmatched files remain, triggers a general fallback
 #      enabling all core test suites (excluding notebooks).
-#   8. Heavy-Test Gate: Every successful run ends by writing run_heavy_tests,
-#      heavy_tests_gated and heavy_tests_gate_message, which skip the heavy TPU/GPU
-#      suites on drafts and while a PR has `skip-ci-tests` (see gate_heavy_tests).
+#   8. Heavy-Test Gate & Scheduling Flags: Every successful run ends by writing
+#      is_scheduled_run, newly_added_only, run_heavy_tests, heavy_tests_gated and
+#      heavy_tests_gate_message, which skip the heavy TPU/GPU suites on drafts and
+#      while a PR has `skip-ci-tests` (see gate_heavy_tests).
 
 set -e
 
@@ -95,38 +99,6 @@ enable_flags() {
   done
 }
 
-# Name each prebuilt CI dependency image for this commit
-emit_deps_tags() {
-  local reqs='src/dependencies/requirements/generated_requirements'
-  local extra='src/dependencies/extra_deps'
-  local scripts='src/dependencies/scripts'
-  local dockerfile='src/dependencies/dockerfiles/test_deps_env.Dockerfile'
-  local build_workflow='.github/workflows/build_deps_image.yml'
-  local image inputs input
-
-  for image in tpu_pre_train tpu_post_train gpu_pre_train; do
-    case "$image" in
-      tpu_pre_train)
-        inputs=("${reqs}/tpu-requirements.txt" "${extra}/pre_train_github_deps.txt" "${scripts}/install_pre_train_extra_deps.py")
-        ;;
-      tpu_post_train)
-        inputs=("${reqs}/tpu-post-train-requirements.txt" "${extra}/post_train_github_deps.txt" "${scripts}/install_post_train_extra_deps.py")
-        ;;
-      gpu_pre_train)
-        inputs=("${reqs}/cuda12-requirements.txt" "${extra}/pre_train_github_deps.txt" "${scripts}/install_pre_train_extra_deps.py")
-        ;;
-    esac
-    inputs+=("$dockerfile" "$build_workflow")
-    for input in "${inputs[@]}"; do
-      if [[ ! -e "$input" ]]; then
-        echo "::error::Dependency image input missing: ${input}"
-        exit 1
-      fi
-    done
-    emit_flag "${image}_deps_tag" "deps-$(sha256sum "${inputs[@]}" | sha256sum | cut -c1-16)"
-  done
-}
-
 # Helper to check if a changed file matches a specific domain pattern
 matches_pattern() {
   local changed_file="$1"
@@ -141,15 +113,42 @@ matches_pattern() {
 #   2. `scheduled-only` (FORCE_ALL_TESTS) runs them: it asks for the full scheduled pipeline.
 #   3. `skip-ci-tests` skips them. add_skip_ci_tests_label.yml adds it to new PRs; auto_label_pr.yml
 #      removes it when the PR gets the "pull ready" label, and the author can remove it sooner.
-#   4. The first run of a new PR (`opened`) skips them: the labeler adds the label in parallel, so
-#      this run's payload doesn't have it yet. The labeler skips the PRs that Copybara exports
-#      (Copybara merges them itself, without approvals here), so they run every suite.
+#   4. A new PR (`opened`) before `skip-ci-tests` has been added and removed skips them: the labeler adds
+#      the label in parallel, so the PR may not have it yet. Once `pull ready` is added or `skip-ci-tests`
+#      is removed, heavy suites run even on `opened` runs (e.g. first-time fork PRs approved later).
+#      The labeler skips the PRs that Copybara exports (Copybara merges them itself, without approvals here),
+#      so they run every suite.
 #   5. Otherwise they run.
+was_skip_ci_tests_removed() {
+  if [[ "${HAS_PULL_READY_LABEL:-}" == "true" ]]; then
+    return 0
+  fi
+  if [[ -z "${PR_NUMBER:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
+    [[ "${GITHUB_RUN_ATTEMPT:-1}" != "1" ]]
+    return
+  fi
+  local events="" attempt
+  for attempt in 1 2 3; do
+    if events=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/events?per_page=100" \
+      --jq '.[] | select(.event == "unlabeled" and .label.name == "skip-ci-tests") | .id'); then
+      [[ -n "$events" ]]
+      return
+    fi
+    if (( attempt < 3 )); then
+      sleep "${API_RETRY_SLEEP_SECONDS:-5}"
+    fi
+  done
+  echo "::error::Could not read label events for PR #${PR_NUMBER} from GitHub API."
+  exit 1
+}
+
 gate_heavy_tests() {
   local run_heavy_tests=true heavy_tests_gated=false message="" gets_label_now=false
   local needs_heavy_tests=false flag
   if [[ "$EVENT_NAME" == "pull_request" ]]; then
-    if [[ "${EVENT_ACTION:-}" == "opened" && "${IS_COPYBARA_PR:-}" != "true" ]]; then
+    if [[ "${EVENT_ACTION:-}" == "opened" && "${IS_COPYBARA_PR:-}" != "true" &&
+      "${FORCE_ALL_TESTS:-}" != "true" && "${HAS_SKIP_CI_TESTS_LABEL:-}" != "true" ]] &&
+      ! was_skip_ci_tests_removed; then
       gets_label_now=true
     fi
     if [[ "${IS_DRAFT:-}" == "true" ]]; then
@@ -203,8 +202,42 @@ gate_heavy_tests() {
 # Every successful run ends here, so the gate outputs come last. If the script fails earlier, they
 # stay missing and All Required Tests Passed fails, instead of the heavy suites running ungated.
 finish() {
+  local is_scheduled_run=false newly_added_only=false
+  if [[ "$EVENT_NAME" == "schedule" || "$FORCE_ALL_TESTS" == "true" ]]; then
+    is_scheduled_run=true
+  fi
+  if [[ "$EVENT_NAME" == "pull_request" && "${RUN_TPU7X:-}" != "true" && "$FORCE_ALL_TESTS" != "true" ]]; then
+    newly_added_only=true
+  fi
+  emit_flag "is_scheduled_run" "$is_scheduled_run"
+  emit_flag "newly_added_only" "$newly_added_only"
   gate_heavy_tests
   exit 0
+}
+
+# Reads the PR's current draft state and CI-controlling labels from the GitHub API so workflow
+# re-runs (`POST /actions/runs/{id}/rerun`), which reuse the original webhook payload, see live labels.
+# When PR_NUMBER and GITHUB_REPOSITORY are set, fails closed if the API cannot be read after retries.
+fetch_pr_metadata_via_api() {
+  if [[ "$EVENT_NAME" != "pull_request" || -z "${PR_NUMBER:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
+    return 0
+  fi
+  local pr_meta="" attempt meta_re=$'^(true|false)\t(true|false)\t(true|false)\t(true|false)\t(true|false)$'
+  for attempt in 1 2 3; do
+    if pr_meta=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+      --jq '[.draft == true, any(.labels[]; .name == "scheduled-only"), any(.labels[]; .name == "run-tpu7x"), any(.labels[]; .name == "skip-ci-tests"), any(.labels[]; .name == "pull ready")] | @tsv') &&
+      [[ "$pr_meta" =~ $meta_re ]]; then
+      IFS=$'\t' read -r IS_DRAFT FORCE_ALL_TESTS RUN_TPU7X HAS_SKIP_CI_TESTS_LABEL HAS_PULL_READY_LABEL <<< "$pr_meta"
+      echo "Live PR #${PR_NUMBER} state: draft=${IS_DRAFT}, scheduled-only=${FORCE_ALL_TESTS}, run-tpu7x=${RUN_TPU7X}, skip-ci-tests=${HAS_SKIP_CI_TESTS_LABEL}, pull-ready=${HAS_PULL_READY_LABEL}"
+      return 0
+    fi
+    if (( attempt < 3 )); then
+      echo "Warning: attempt ${attempt} to read PR #${PR_NUMBER} metadata failed; retrying."
+      sleep "${API_RETRY_SLEEP_SECONDS:-5}"
+    fi
+  done
+  echo "::error::Could not read live metadata for PR #${PR_NUMBER} from GitHub API."
+  exit 1
 }
 
 EVENT_NAME="${EVENT_NAME:-${GITHUB_EVENT_NAME:-pull_request}}"
@@ -215,7 +248,7 @@ BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS:-false}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS,,}"
 
-emit_deps_tags
+fetch_pr_metadata_via_api
 
 if [[ "$FORCE_ALL_TESTS" == "true" ]]; then
   echo "FORCE_ALL_TESTS is set, running all tests and notebooks"

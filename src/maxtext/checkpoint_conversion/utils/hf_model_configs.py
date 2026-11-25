@@ -1274,6 +1274,112 @@ deepseek4_1600b_dict = {
 deepseek4_1600b_config = DeepseekV4Config(**deepseek4_1600b_dict)
 
 
+# from https://huggingface.co/moonshotai/Kimi-K3/blob/main/config.json (`text_config`, flattened).
+# The release stores routed experts as compressed-tensors `mxfp4-pack-quantized`.
+# `linear_attn_config.full_attn_layers` / `kda_layers` are 1-indexed, as in the HF config;
+# `param_mapping._resolve_kimi_k3_full_attn_layers` converts them to MaxText's 0-index.
+# `architectures` / `model_type` are the `text_config`'s own values: they name the inner
+# language model (`KimiLinearForCausalLM`, state_dict keys `model.*` / `lm_head.*`). The released
+# checkpoint is saved from the outer `KimiK3ForConditionalGeneration` wrapper (top-level
+# `config.json`), which holds that model as `.language_model`, so its weight names are
+# `language_model.model.*` / `language_model.lm_head.*`; `param_mapping` and `hf_shape` use
+# those released names.
+kimi_k3_dict = {
+    "architectures": ["KimiLinearForCausalLM"],
+    "activation_situ_beta": 4.0,
+    "activation_situ_linear_beta": 25.0,
+    "attn_res_block_size": 12,
+    "bos_token_id": 163584,
+    "dtype": "bfloat16",
+    "eos_token_id": 163586,
+    "first_k_dense_replace": 1,
+    "hidden_act": "situ",
+    "hidden_size": 7168,
+    "initializer_range": 0.02,
+    "intermediate_size": 33792,
+    "kv_lora_rank": 512,
+    "latent_moe_use_norm": True,
+    "linear_attn_config": {
+        "full_attn_layers": [
+            4,
+            8,
+            12,
+            16,
+            20,
+            24,
+            28,
+            32,
+            36,
+            40,
+            44,
+            48,
+            52,
+            56,
+            60,
+            64,
+            68,
+            72,
+            76,
+            80,
+            84,
+            88,
+            92,
+            93,
+        ],
+        "gate_lower_bound": -5.0,
+        "head_dim": 128,
+        "kda_layers": [i for i in range(1, 94) if i % 4 != 0 and i != 93],
+        "num_heads": 96,
+        "short_conv_kernel_size": 4,
+        "use_full_rank_gate": True,
+    },
+    "max_position_embeddings": 1048576,
+    "mla_use_nope": True,
+    "mla_use_output_gate": True,
+    "model_type": "kimi_linear",
+    "moe_intermediate_size": 3072,
+    "moe_layer_freq": 1,
+    "moe_renormalize": True,
+    "moe_router_activation_func": "sigmoid",
+    "num_attention_heads": 96,
+    "num_expert_group": 1,
+    "num_experts": 896,
+    "num_experts_per_token": 16,
+    "num_hidden_layers": 93,
+    "num_key_value_heads": 96,
+    "num_nextn_predict_layers": 0,
+    "num_shared_experts": 2,
+    "pad_token_id": 163839,
+    "q_lora_rank": 1536,
+    "qk_nope_head_dim": 128,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-05,
+    "routed_expert_hidden_size": 3584,
+    "routed_scaling_factor": 1.0,
+    "tie_word_embeddings": False,
+    "topk_group": 1,
+    "topk_method": "noaux_tc",
+    "transformers_version": "4.56.2",
+    "use_cache": True,
+    "use_grouped_topk": True,
+    "v_head_dim": 128,
+    "vocab_size": 163840,
+}
+
+
+class KimiK3Config(PTConfig):  # pyrefly: ignore[invalid-inheritance]
+  """Minimal stand-in for `configuration_kimi_k3.KimiLinearConfig` (not in transformers)."""
+
+  model_type = "kimi_linear"
+
+  def __init__(self, **kwargs):
+    kwargs.setdefault("max_position_embeddings", 1048576)
+    super().__init__(**kwargs)
+
+
+kimi_k3_config = KimiK3Config(**kimi_k3_dict)
+
+
 # from https://huggingface.co/openai/gpt-oss-20b/blob/main/config.json
 # remove mxfp4 quantization_config, since we are using bf16
 gpt_oss_20b_dict = {
@@ -2544,6 +2650,23 @@ ming_3_0_audio_tiny_dict = {
 }
 ming_3_0_audio_tiny_config = PTConfig(**ming_3_0_audio_tiny_dict)
 
+# Ming-3.0-audio-tiny talker LLM (`talker/llm/config.json`); the talker heads have no HF config class.
+ming_3_0_audio_tiny_talker_config = transformers.Qwen2Config(
+    vocab_size=151936,
+    hidden_size=896,
+    intermediate_size=4864,
+    num_hidden_layers=24,
+    num_attention_heads=14,
+    num_key_value_heads=2,
+    hidden_act="silu",
+    max_position_embeddings=32768,
+    rms_norm_eps=1e-06,
+    rope_theta=1000000.0,
+    tie_word_embeddings=True,
+    torch_dtype="bfloat16",
+    attention_bias=True,
+)
+
 granite_3_0_1b_a400m_dict = {
     "architectures": ["GraniteMoeForCausalLM"],
     "attention_bias": False,
@@ -2578,8 +2701,119 @@ granite_3_0_1b_a400m_dict = {
 }
 granite_3_0_1b_a400m_config = PTConfig(**granite_3_0_1b_a400m_dict)
 
+glm5_1_744b_dict = {
+    "architectures": ["GlmMoeDsaForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "dtype": "bfloat16",
+    "eos_token_id": [154820, 154827, 154829],
+    "first_k_dense_replace": 3,
+    "hidden_act": "silu",
+    "hidden_size": 6144,
+    "index_head_dim": 128,
+    "index_n_heads": 32,
+    "index_topk": 2048,
+    "index_topk_freq": 1,
+    "indexer_rope_interleave": True,
+    "indexer_types": ["full"] * 78,
+    "initializer_range": 0.02,
+    "intermediate_size": 12288,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 202752,
+    "mlp_layer_types": ["dense"] * 3 + ["sparse"] * 75,
+    "model_type": "glm_moe_dsa",
+    "moe_intermediate_size": 2048,
+    "n_group": 1,
+    "n_routed_experts": 256,
+    "n_shared_experts": 1,
+    "norm_topk_prob": True,
+    "num_attention_heads": 64,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 78,
+    "num_key_value_heads": 64,
+    "pad_token_id": 154820,
+    "q_lora_rank": 2048,
+    "qk_nope_head_dim": 192,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-05,
+    "rope_interleave": True,
+    "rope_parameters": {
+        "rope_theta": 1000000.0,
+        "rope_type": "default",
+    },
+    "routed_scaling_factor": 2.5,
+    "scoring_func": "sigmoid",
+    "tie_word_embeddings": False,
+    "topk_group": 1,
+    "use_cache": True,
+    "v_head_dim": 256,
+    "vocab_size": 154880,
+}
+try:
+  # pyrefly: ignore[missing-attribute]
+  glm5_1_744b_config = transformers.GlmMoeDsaConfig(**glm5_1_744b_dict)
+except AttributeError:
+  glm5_1_744b_config = PTConfig(**glm5_1_744b_dict)  # pytype: disable=wrong-arg-types
+
+glm5_2_744b_dict = {
+    "architectures": ["GlmMoeDsaForCausalLM"],
+    "attention_bias": False,
+    "attention_dropout": 0.0,
+    "dtype": "bfloat16",
+    "eos_token_id": [154820, 154827, 154829],
+    "first_k_dense_replace": 3,
+    "hidden_act": "silu",
+    "hidden_size": 6144,
+    "index_head_dim": 128,
+    "index_n_heads": 32,
+    "index_skip_topk_offset": 3,
+    "index_topk": 2048,
+    "index_topk_freq": 4,
+    "indexer_rope_interleave": True,
+    "indexer_types": ["full", "full", "full"] + ["full" if (i - 2) % 4 == 0 else "shared" for i in range(3, 78)],
+    "initializer_range": 0.02,
+    "intermediate_size": 12288,
+    "kv_lora_rank": 512,
+    "max_position_embeddings": 1048576,
+    "mlp_layer_types": ["dense"] * 3 + ["sparse"] * 75,
+    "model_type": "glm_moe_dsa",
+    "moe_intermediate_size": 2048,
+    "n_group": 1,
+    "n_routed_experts": 256,
+    "n_shared_experts": 1,
+    "norm_topk_prob": True,
+    "num_attention_heads": 64,
+    "num_experts_per_tok": 8,
+    "num_hidden_layers": 78,
+    "num_key_value_heads": 64,
+    "pad_token_id": 154820,
+    "q_lora_rank": 2048,
+    "qk_nope_head_dim": 192,
+    "qk_rope_head_dim": 64,
+    "rms_norm_eps": 1e-05,
+    "rope_interleave": True,
+    "rope_parameters": {
+        "rope_theta": 8000000.0,
+        "rope_type": "default",
+    },
+    "routed_scaling_factor": 2.5,
+    "scoring_func": "sigmoid",
+    "tie_word_embeddings": False,
+    "topk_group": 1,
+    "use_cache": True,
+    "v_head_dim": 256,
+    "vocab_size": 154880,
+}
+try:
+  # pyrefly: ignore[missing-attribute]
+  glm5_2_744b_config = transformers.GlmMoeDsaConfig(**glm5_2_744b_dict)
+except AttributeError:
+  glm5_2_744b_config = PTConfig(**glm5_2_744b_dict)  # pytype: disable=wrong-arg-types
+
 # {maxtext model name: hf model config}
 HF_MODEL_CONFIGS = {
+    "glm5.1-744b": glm5_1_744b_config,
+    "glm5.2-744b": glm5_2_744b_config,
     "gemma2-2b": gemma2_2b_config,
     "gemma2-9b": gemma2_9b_config,
     "gemma2-27b": gemma2_27b_config,
@@ -2624,6 +2858,7 @@ HF_MODEL_CONFIGS = {
     "deepseek4-284b": deepseek4_284b_config,
     "deepseek4-1600b": deepseek4_1600b_config,
     "hy4-preview": hy4_preview_config,
+    "kimi-k3": kimi_k3_config,
     "gpt-oss-20b": gpt_oss_20b_config,
     "gpt-oss-120b": gpt_oss_120b_config,
     "qwen3-omni-30b-a3b": qwen3_omni_30b_a3b_config,
@@ -2642,5 +2877,6 @@ HF_MODEL_CONFIGS = {
     "olmo3-7b-pt": olmo3_7b_config,
     "olmo3-32b": olmo3_32b_config,
     "ming-3.0-audio-tiny": ming_3_0_audio_tiny_config,
+    "ming-3.0-audio-tiny-talker": ming_3_0_audio_tiny_talker_config,
     "granite-3.0-1b-a400m": granite_3_0_1b_a400m_config,
 }

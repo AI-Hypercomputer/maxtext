@@ -18,6 +18,8 @@
 pretrained_model_name_or_path: 'Wan-AI/Wan2.1-T2V-14B-Diffusers'
 model_name: wan2.1
 model_type: 'T2V'
+# `model_type`s the pipeline implements for this model; others fail fast in sample.py.
+supported_types: ['T2V', 'I2V']
 wan_transformer_pretrained_model_name_or_path: ${pretrained_model_name_or_path}
 
 # Modules (import paths) and their architecture. A converted checkpoint's `<component>_config` takes precedence;

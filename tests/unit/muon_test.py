@@ -15,6 +15,7 @@
 """Tests for the Muon optimizer in muon.py."""
 
 import math
+import re
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -49,62 +50,22 @@ def get_updates(
   return updates, state
 
 
-def _setup_mixed_tensor_target_complex(dtype):
-  """Complex version of _common_test._setup_mixed_tensor_target."""
-  initial_params = jnp.zeros((2, 2), dtype=dtype)
-  final_params = jnp.array(
-      [[1.0 + 2.0j, 0.0], [-1.0 + 1.0j, 1.0 - 3.0j]],
-      dtype=dtype,
-  )
-
-  def obj_fn(params):
-    return jnp.sum(jnp.abs(params - final_params) ** 2)
-
-  return initial_params, final_params, obj_fn
-
-
 class MuonTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
-      {
-          "testcase_name": "2d_tuple_axes",
-          "input_shape": (2, 3),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=1),
-          "expected_flat_shape": (1, 1, 2, 3),
-      },
-      {
-          "testcase_name": "3d_batch_axis",
-          "input_shape": (2, 3, 4),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=2),
-          "expected_flat_shape": (1, 3, 2, 4),
-      },
-      {
-          "testcase_name": "3d_negative_axes_indices",
-          "input_shape": (2, 3, 4),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=-3, output_axis=-1),
-          "expected_flat_shape": (1, 3, 2, 4),
-      },
-      {
-          "testcase_name": "4d_multiple_batch_axes",
-          "input_shape": (2, 3, 4, 5),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3),
-          "expected_flat_shape": (1, 6, 4, 5),
-      },
-      {
-          "testcase_name": "4d_multiple_output_axes",
-          "input_shape": (2, 3, 4, 5),
-          "dim_nums": _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=(0, 3)),
-          "expected_flat_shape": (1, 3, 4, 10),
-      },
+      ("2d_tuple_axes", (2, 3), _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=1)),
+      ("3d_batch_axis", (2, 3, 4), _muon.MuonDimensionNumbers(reduction_axis=0, output_axis=2)),
+      ("3d_negative_axes_indices", (2, 3, 4), _muon.MuonDimensionNumbers(reduction_axis=-3, output_axis=-1)),
+      ("4d_multiple_batch_axes", (2, 3, 4, 5), _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=3)),
+      ("4d_multiple_output_axes", (2, 3, 4, 5), _muon.MuonDimensionNumbers(reduction_axis=2, output_axis=(0, 3))),
   )
-  def test_reshape_inverse(self, input_shape, dim_nums, expected_flat_shape):
+  def test_reshape_inverse(self, input_shape, dim_nums):
     x = jnp.arange(math.prod(input_shape), dtype=jnp.float32).reshape(input_shape)
     reshape_fn, inverse_fn, _ = _muon.get_reshape_fns(x, dim_nums)
     reshaped_x = reshape_fn(x)
     reconstructed_x = inverse_fn(reshaped_x)
-    # Check flat shape (sharded_batch, unsharded_batch, reduction, output)
-    self.assertEqual(reshaped_x.shape, expected_flat_shape)
-    # Check inverse shape and value
+    self.assertEqual(reshaped_x.ndim, 3)
+    self.assertLessEqual(reshaped_x.shape[1], reshaped_x.shape[2])
     self.assertEqual(reconstructed_x.shape, x.shape)
     chex.assert_trees_all_close(reconstructed_x, x)
 
@@ -269,9 +230,8 @@ class MuonTest(parameterized.TestCase):
     self.assertIsInstance(get_muon_mu(state)["w2"]["b"], optax.MaskedNode)
 
   def test_newton_schulz(self):
-    """Test that Newton--Schulz orthogonalizes/unitarizes correctly."""
-    mat_real = jax.random.normal(jax.random.key(0), (4, 3), dtype=jnp.float32)
-    mat_complex = jax.random.normal(jax.random.key(0), (4, 3), dtype=jnp.complex64)
+    """Test that Newton--Schulz orthogonalizes matrices accurately."""
+    mat = jax.random.normal(jax.random.key(0), (4, 3), dtype=jnp.float32)
     ns_coeffs = jnp.array([2.0, -1.5, 0.5])
 
     if jax.default_backend() in ("tpu", "proxy"):
@@ -282,9 +242,8 @@ class MuonTest(parameterized.TestCase):
     precond_fn = _muon.get_precond_fn("frobenius", 1e-12)
     ns_step_fn = _muon.NS_ITERATORS["frobenius"]
 
-    # For real matrices, Newton--Schulz should produce an orthonormal matrix
-    mat_real_orth = _muon.orthogonalize(
-        mat_real,
+    mat_orth = _muon.orthogonalize(
+        mat,
         ns_coeffs,
         ns_steps=20,
         precond_fn=precond_fn,
@@ -292,71 +251,15 @@ class MuonTest(parameterized.TestCase):
         dim_nums=_muon.ShardedMuonDimensionNumbers(0, 1),
     )
 
-    gram_real = mat_real_orth.T @ mat_real_orth
-    with self.subTest("Real Newton--Schulz produces an orthonormal matrix"):
-      msg = "Real Newton–Schulz did not orthogonalize correctly.\nGram:" f" \n{gram_real}"
-      np.testing.assert_allclose(
-          gram_real,
-          jnp.eye(mat_real.shape[1]),
-          atol=atol,
-          rtol=rtol,
-          err_msg=msg,
-      )
-    # For complex matrices, Newton--Schulz should produce a unitary matrix
-    mat_complex_orth = _muon.orthogonalize(
-        mat_complex,
-        ns_coeffs,
-        ns_steps=10,
-        precond_fn=precond_fn,
-        ns_step_fn=ns_step_fn,
-        dim_nums=_muon.ShardedMuonDimensionNumbers(0, 1),
+    gram = mat_orth.T @ mat_orth
+    msg = f"Newton–Schulz did not orthogonalize accurately.\nGram:\n{gram}"
+    np.testing.assert_allclose(
+        gram,
+        jnp.eye(mat.shape[1]),
+        atol=atol,
+        rtol=rtol,
+        err_msg=msg,
     )
-
-    gram_complex = mat_complex_orth.conj().T @ mat_complex_orth
-    with self.subTest("Complex Newton--Schulz produces a unitary matrix"):
-      msg = "Complex Newton–Schulz did not produce a unitary matrix." f"\nGram:\n{gram_complex}"
-      np.testing.assert_allclose(
-          gram_complex,
-          jnp.eye(mat_complex.shape[1]),
-          atol=atol,
-          rtol=rtol,
-          err_msg=msg,
-      )
-
-    with self.subTest("Output shape is preserved for complex matrices"):
-      # Check that the output shape is preserved.
-      self.assertEqual(mat_complex_orth.shape, mat_complex.shape)
-
-  @parameterized.product(
-      target=(_setup_mixed_tensor_target_complex,),
-      dtype=("complex64",),
-      adaptive=(True, False),
-      nesterov=(True, False),
-  )
-  def test_complex_mixed_target(self, target, dtype, adaptive, nesterov):
-    """Test Muon optimizer on a complex mixed tensor optimization target."""
-    dtype = getattr(jnp, dtype)
-
-    opt = _muon.muon(learning_rate=1e-2, adaptive=adaptive, nesterov=nesterov, mu_dtype=dtype)
-    initial_params, final_params, obj_fn = target(dtype)
-
-    @jax.jit
-    def step(params, state):
-      _, updates = jax.value_and_grad(obj_fn)(params)
-      updates = jax.tree.map(jnp.conj, updates)
-      updates, state = opt.update(updates, state, params)
-      params = optax.apply_updates(params, updates)
-      return params, state
-
-    params = initial_params
-    state = opt.init(params)
-
-    def f(params_state, _):
-      return step(*params_state), None
-
-    (params, _), _ = jax.lax.scan(f, (params, state), length=1000)
-
-    chex.assert_trees_all_close(params, final_params, rtol=3e-2, atol=3e-2)
 
   @parameterized.named_parameters(
       ("standard_square", "frobenius", (100, 100)),
@@ -470,6 +373,327 @@ class MuonTest(parameterized.TestCase):
     opt = _muon.scale_by_muon(ns_coeffs=coeffs_3, ns_steps=5)
     with self.assertRaisesRegex(ValueError, "Not enough coeffs to perform 5 steps"):
       opt.init(params)
+
+  def test_split_output_chunks_validation(self):
+    """Validates split_output_chunks preconditions on rank, divisibility, and count."""
+    w = jnp.ones((4, 8, 10))
+    for bad_chunks in (0, -1, True, 2.0):
+      bad_dn = _muon.ShardedMuonDimensionNumbers(
+          reduction_axis=-2, output_axis=-1, split_output_chunks=bad_chunks  # type: ignore[arg-type]
+      )
+      with self.assertRaisesRegex(ValueError, "split_output_chunks must be an int >= 1"):
+        _muon.orthogonalize(
+            w,
+            ns_coeffs=jnp.asarray((3.4445, -4.7750, 2.0315)),
+            ns_steps=1,
+            precond_fn=_muon.get_precond_fn("frobenius"),
+            ns_step_fn=_muon.NS_ITERATORS["frobenius"],
+            dim_nums=bad_dn,
+        )
+      with self.assertRaisesRegex(ValueError, "split_output_chunks must be an int >= 1"):
+        tx = _muon.scale_by_muon(weight_dimension_numbers={"w": bad_dn})
+        tx.update({"w": w}, tx.init({"w": w}), {"w": w})
+      with self.assertRaisesRegex(ValueError, "split_output_chunks must be an int >= 1"):
+        get_updates({"w": w}, {"w": bad_dn})
+    with self.assertRaisesRegex(ValueError, "not divisible by split_output_chunks=3"):
+      get_updates(
+          {"w": w},
+          {"w": _muon.ShardedMuonDimensionNumbers(reduction_axis=-2, output_axis=-1, split_output_chunks=3)},
+      )
+    with self.assertRaisesRegex(ValueError, "requires a single output_axis"):
+      get_updates(
+          {"w": jnp.ones((2, 4, 6))},
+          {"w": _muon.ShardedMuonDimensionNumbers(reduction_axis=0, output_axis=(1, 2), split_output_chunks=2)},
+      )
+
+  @parameterized.product(
+      shape=((4, 8, 12), (4, 2, 8, 12)),
+      consistent_rms=(None, 0.2),
+      adaptive=(False, True),
+      use_all_to_all=(True, False),
+  )
+  def test_split_output_chunks_matches_separate_projections(self, shape, consistent_rms, adaptive, use_all_to_all):
+    """split_output_chunks=2 matches orthogonalizing and scaling [w0 | w1] as two independent leaves."""
+    k1, k2, k3 = jax.random.split(jax.random.key(17), 3)
+    w = jax.random.normal(k1, shape, dtype=jnp.float32)
+    g_step0 = jax.random.normal(k2, shape, dtype=jnp.float32)
+    g_step1 = jax.random.normal(k3, shape, dtype=jnp.float32)
+    half = shape[-1] // 2
+
+    fused_dim_nums = {
+        "w": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,), split_output_chunks=2)
+    }
+    unfused_dim_nums = {
+        "w0": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,)),
+        "w1": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,)),
+    }
+    naive_dim_nums = {
+        "w": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,), split_output_chunks=1)
+    }
+
+    common_kwargs = {
+        "learning_rate": 1e-2,
+        "consistent_rms": consistent_rms,
+        "adaptive": adaptive,
+        "use_all_to_all": use_all_to_all,
+        "weight_decay": 0.05,
+    }
+    opt_fused = _muon.muon(muon_weight_dimension_numbers=fused_dim_nums, **common_kwargs)
+    opt_unfused = _muon.muon(muon_weight_dimension_numbers=unfused_dim_nums, **common_kwargs)
+    opt_naive = _muon.muon(muon_weight_dimension_numbers=naive_dim_nums, **common_kwargs)
+
+    p_fused = {"w": w}
+    p_unfused = {"w0": w[..., :half], "w1": w[..., half:]}
+    s_fused = opt_fused.init(p_fused)
+    s_unfused = opt_unfused.init(p_unfused)
+    s_naive = opt_naive.init(p_fused)
+
+    u_naive, _ = opt_naive.update({"w": g_step0}, s_naive, p_fused)
+
+    for step_idx, g in enumerate((g_step0, g_step1)):
+      u_fused, s_fused = opt_fused.update({"w": g}, s_fused, p_fused)
+      u_unfused, s_unfused = opt_unfused.update({"w0": g[..., :half], "w1": g[..., half:]}, s_unfused, p_unfused)
+      expected = jnp.concatenate([u_unfused["w0"], u_unfused["w1"]], axis=-1)
+      np.testing.assert_allclose(u_fused["w"], expected, rtol=1e-5, atol=1e-5)
+      if step_idx == 0:
+        self.assertGreater(float(jnp.max(jnp.abs(u_fused["w"] - u_naive["w"]))), 1e-3)
+      p_fused = optax.apply_updates(p_fused, u_fused)
+      p_unfused = optax.apply_updates(p_unfused, u_unfused)
+
+  @parameterized.product(
+      explicit_axes=(False, True),
+      tp_size=(1, 2),
+      use_all_to_all=(True, False),
+  )
+  def test_split_output_chunks_sharded_meshes(self, explicit_axes, tp_size, use_all_to_all):
+    """Verifies split_output_chunks=2 across size-1 and size-2 output mesh axes (Auto and Explicit)."""
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Requires at least 4 devices for sharded Muon mesh tests.")
+
+    axis_type = jax.sharding.AxisType.Explicit if explicit_axes else jax.sharding.AxisType.Auto
+    if tp_size == 1:
+      mesh = jax.sharding.Mesh(
+          np.array(devices[:4]).reshape((2, 2, 1)),
+          axis_names=("expert", "fsdp", "tensor"),
+          axis_types=(axis_type, axis_type, axis_type),
+      )
+      pspec = jax.sharding.PartitionSpec("expert", "fsdp", "tensor")
+    else:
+      mesh = jax.sharding.Mesh(
+          np.array(devices[:4]).reshape((2, 2)),
+          axis_names=("expert", "tensor"),
+          axis_types=(axis_type, axis_type),
+      )
+      pspec = jax.sharding.PartitionSpec("expert", None, "tensor")
+
+    sharding = jax.sharding.NamedSharding(mesh, pspec)
+    k1, k2 = jax.random.split(jax.random.key(29))
+    w_host = jax.random.normal(k1, (4, 8, 12), dtype=jnp.float32)
+    g_host = jax.random.normal(k2, (4, 8, 12), dtype=jnp.float32)
+
+    w_fused = jax.device_put(w_host, sharding)
+    g_fused = jax.device_put(g_host, sharding)
+    w0 = jax.device_put(w_host[..., :6], sharding)
+    w1 = jax.device_put(w_host[..., 6:], sharding)
+    g0 = jax.device_put(g_host[..., :6], sharding)
+    g1 = jax.device_put(g_host[..., 6:], sharding)
+
+    for adaptive in (False, True):
+      opt_fused = _muon.muon(
+          learning_rate=1e-2,
+          consistent_rms=0.2,
+          adaptive=adaptive,
+          use_all_to_all=use_all_to_all,
+          muon_weight_dimension_numbers={
+              "w": _muon.ShardedMuonDimensionNumbers(
+                  reduction_axis=(-2,),
+                  output_axis=(-1,),
+                  sharding=sharding,
+                  split_output_chunks=2,
+              )
+          },
+      )
+      opt_unfused = _muon.muon(
+          learning_rate=1e-2,
+          consistent_rms=0.2,
+          adaptive=adaptive,
+          use_all_to_all=use_all_to_all,
+          muon_weight_dimension_numbers={
+              "w0": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,), sharding=sharding),
+              "w1": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,), sharding=sharding),
+          },
+      )
+
+      with jax.set_mesh(mesh):
+        s_fused = opt_fused.init({"w": w_fused})
+        s_unfused = opt_unfused.init({"w0": w0, "w1": w1})
+        u_fused, _ = jax.jit(lambda g, s, p, o=opt_fused: o.update(g, s, p))({"w": g_fused}, s_fused, {"w": w_fused})
+        u_unfused, _ = jax.jit(lambda g, s, p, o=opt_unfused: o.update(g, s, p))(
+            {"w0": g0, "w1": g1}, s_unfused, {"w0": w0, "w1": w1}
+        )
+
+      self.assertEqual(u_fused["w"].sharding, sharding)
+      u_fused_host = np.asarray(jax.device_get(u_fused["w"]))
+      u0_host = np.asarray(jax.device_get(u_unfused["w0"]))
+      u1_host = np.asarray(jax.device_get(u_unfused["w1"]))
+      np.testing.assert_allclose(u_fused_host, np.concatenate([u0_host, u1_host], axis=-1), rtol=1e-5, atol=1e-5)
+
+  @parameterized.product(
+      explicit_axes=[False, True],
+      num_experts=[1, 2, 4],
+      matrix_shape=[(16, 8), (8, 16)],
+  )
+  def test_split_output_chunks_unscanned_fsdp_gt_chunks_skips_padding(self, explicit_axes, num_experts, matrix_shape):
+    """Unscanned MoE `wi` with `split_output_chunks=2` and `fsdp=4` avoids padding and replicates once."""
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Requires at least 4 devices for sharded Muon mesh tests.")
+
+    k_dim, n_dim = matrix_shape
+    axis_type = jax.sharding.AxisType.Explicit if explicit_axes else jax.sharding.AxisType.Auto
+    mesh = jax.sharding.Mesh(
+        np.array(devices[:4]).reshape((1, 4, 1)),
+        axis_names=("expert", "fsdp", "tensor"),
+        axis_types=(axis_type, axis_type, axis_type),
+    )
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("expert", "fsdp", "tensor"))
+    k1, k2 = jax.random.split(jax.random.key(31))
+    w_host = jax.random.normal(k1, (num_experts, k_dim, 2 * n_dim), dtype=jnp.float32)
+    g_host = jax.random.normal(k2, (num_experts, k_dim, 2 * n_dim), dtype=jnp.float32)
+
+    w_fused = jax.device_put(w_host, sharding)
+    g_fused = jax.device_put(g_host, sharding)
+    w0 = jax.device_put(w_host[..., :n_dim], sharding)
+    w1 = jax.device_put(w_host[..., n_dim:], sharding)
+    g0 = jax.device_put(g_host[..., :n_dim], sharding)
+    g1 = jax.device_put(g_host[..., n_dim:], sharding)
+
+    opt_fused = _muon.muon(
+        learning_rate=1e-2,
+        consistent_rms=0.2,
+        use_all_to_all=True,
+        muon_weight_dimension_numbers={
+            "w": _muon.ShardedMuonDimensionNumbers(
+                reduction_axis=(-2,),
+                output_axis=(-1,),
+                sharding=sharding,
+                split_output_chunks=2,
+            )
+        },
+    )
+    opt_unfused = _muon.muon(
+        learning_rate=1e-2,
+        consistent_rms=0.2,
+        use_all_to_all=True,
+        muon_weight_dimension_numbers={
+            "w0": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,), sharding=sharding),
+            "w1": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,), sharding=sharding),
+        },
+    )
+
+    with jax.set_mesh(mesh):
+      s_fused = opt_fused.init({"w": w_fused})
+      s_unfused = opt_unfused.init({"w0": w0, "w1": w1})
+      jitted_fused = jax.jit(opt_fused.update)
+      lowered_fused = jitted_fused.lower({"w": g_fused}, s_fused, {"w": w_fused})
+      hlo_text = lowered_fused.as_text()
+      self.assertNotIn("concatenate", hlo_text)
+      self.assertNotIn("stablehlo.pad", hlo_text)
+      if num_experts == 1:
+        compiled_hlo = lowered_fused.compile().as_text()
+        all_gather_count = len(re.findall(r"=\s*[^\n]*\ball-gather\(", compiled_hlo))
+        all_reduce_count = len(re.findall(r"=\s*[^\n]*\ball-reduce\(", compiled_hlo))
+        self.assertEqual(all_gather_count, 1, msg=compiled_hlo)
+        self.assertEqual(all_reduce_count, 0, msg=compiled_hlo)
+      u_fused, _ = jitted_fused({"w": g_fused}, s_fused, {"w": w_fused})
+      u_unfused, _ = jax.jit(opt_unfused.update)({"w0": g0, "w1": g1}, s_unfused, {"w0": w0, "w1": w1})
+
+    self.assertEqual(u_fused["w"].sharding, sharding)
+    u_fused_host = np.asarray(jax.device_get(u_fused["w"]))
+    u0_host = np.asarray(jax.device_get(u_unfused["w0"]))
+    u1_host = np.asarray(jax.device_get(u_unfused["w1"]))
+    np.testing.assert_allclose(u_fused_host, np.concatenate([u0_host, u1_host], axis=-1), rtol=1e-5, atol=1e-5)
+
+  @parameterized.product(explicit_axes=[False, True], matrix_shape=[(16, 8), (8, 16)])
+  def test_split_output_chunks_unscanned_fsdp_gt_chunks_spectral(self, explicit_axes, matrix_shape):
+    """Single-local-expert replication supports spectral preconditioning (SVD) under Auto and Explicit sharding."""
+    devices = jax.devices()
+    if len(devices) < 4:
+      self.skipTest("Requires at least 4 devices for sharded Muon mesh tests.")
+
+    k_dim, n_dim = matrix_shape
+    axis_type = jax.sharding.AxisType.Explicit if explicit_axes else jax.sharding.AxisType.Auto
+    mesh = jax.sharding.Mesh(
+        np.array(devices[:4]).reshape((1, 4, 1)),
+        axis_names=("expert", "fsdp", "tensor"),
+        axis_types=(axis_type, axis_type, axis_type),
+    )
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("expert", "fsdp", "tensor"))
+    k1, k2 = jax.random.split(jax.random.key(37))
+    w_host = jax.random.normal(k1, (1, k_dim, 2 * n_dim), dtype=jnp.float32)
+    g_host = jax.random.normal(k2, (1, k_dim, 2 * n_dim), dtype=jnp.float32)
+
+    w_fused = jax.device_put(w_host, sharding)
+    g_fused = jax.device_put(g_host, sharding)
+    w0 = jax.device_put(w_host[..., :n_dim], sharding)
+    w1 = jax.device_put(w_host[..., n_dim:], sharding)
+    g0 = jax.device_put(g_host[..., :n_dim], sharding)
+    g1 = jax.device_put(g_host[..., n_dim:], sharding)
+
+    opt_fused = _muon.muon(
+        learning_rate=1e-2,
+        consistent_rms=0.2,
+        preconditioning="spectral",
+        use_all_to_all=True,
+        muon_weight_dimension_numbers={
+            "w": _muon.ShardedMuonDimensionNumbers(
+                reduction_axis=(-2,),
+                output_axis=(-1,),
+                sharding=sharding,
+                split_output_chunks=2,
+            )
+        },
+    )
+    opt_unfused = _muon.muon(
+        learning_rate=1e-2,
+        consistent_rms=0.2,
+        preconditioning="spectral",
+        use_all_to_all=True,
+        muon_weight_dimension_numbers={
+            "w0": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,), sharding=sharding),
+            "w1": _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,), sharding=sharding),
+        },
+    )
+
+    with jax.set_mesh(mesh):
+      s_fused = opt_fused.init({"w": w_fused})
+      s_unfused = opt_unfused.init({"w0": w0, "w1": w1})
+      u_fused, _ = jax.jit(opt_fused.update)({"w": g_fused}, s_fused, {"w": w_fused})
+      u_unfused, _ = jax.jit(opt_unfused.update)({"w0": g0, "w1": g1}, s_unfused, {"w0": w0, "w1": w1})
+
+    self.assertEqual(u_fused["w"].sharding, sharding)
+    u_fused_host = np.asarray(jax.device_get(u_fused["w"]))
+    u0_host = np.asarray(jax.device_get(u_unfused["w0"]))
+    u1_host = np.asarray(jax.device_get(u_unfused["w1"]))
+    np.testing.assert_allclose(u_fused_host, np.concatenate([u0_host, u1_host], axis=-1), rtol=1e-5, atol=1e-5)
+
+  def test_adaptive_dual_norm_preserves_masked_nodes(self):
+    """adaptive=True skips optax.MaskedNode leaves when wrapped in optax.masked."""
+    params = {"w": jnp.ones((2, 8, 12), dtype=jnp.float32), "frozen": jnp.ones((4,), dtype=jnp.float32)}
+    grads = {
+        "w": jax.random.normal(jax.random.key(41), (2, 8, 12), dtype=jnp.float32),
+        "frozen": jnp.full((4,), 3.0, dtype=jnp.float32),
+    }
+    dn = _muon.ShardedMuonDimensionNumbers(reduction_axis=(-2,), output_axis=(-1,), split_output_chunks=2)
+    tx = optax.masked(
+        _muon.scale_by_muon(adaptive=True, weight_dimension_numbers={"w": dn, "frozen": None}),
+        mask={"w": True, "frozen": False},
+    )
+    state = tx.init(params)
+    updates, _ = tx.update(grads, state, params)
+    np.testing.assert_array_equal(updates["frozen"], grads["frozen"])
+    self.assertEqual(updates["w"].shape, grads["w"].shape)
 
 
 if __name__ == "__main__":

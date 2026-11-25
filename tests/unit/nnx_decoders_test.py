@@ -40,6 +40,7 @@ import numpy as np
 from flax import linen as nn
 from flax import nnx
 from flax import traverse_util
+from flax.linen import partitioning as nn_partitioning
 from jax.sharding import AbstractMesh, AxisType, Mesh, NamedSharding, PartitionSpec
 
 from maxtext.common.common_types import (
@@ -379,7 +380,7 @@ class TestNNXDecoderGetDecoderLayers(unittest.TestCase):
 
   def test_llama2_decoder_block(self):
 
-    decoder = self._make_decoder(model_name="llama2-7b")
+    decoder = self._make_decoder(model_name="llama3.1-8b")
     layers = decoder.get_decoder_layers()
     self.assertEqual(layers, [LlamaDecoderLayer])
 
@@ -415,7 +416,7 @@ class TestNNXDecoderGetNormLayer(unittest.TestCase):
 
   def test_gpt3_returns_gpt3_layer_norm(self):
 
-    cfg = _make_config(model_name="gpt3-52k")
+    cfg = _make_config(decoder_block=DecoderBlockType.GPT3)
     mesh = _make_mesh(cfg)
     decoder = NNXDecoder(config=cfg, mesh=mesh, rngs=nnx.Rngs(params=0, dropout=1))
     self.assertIsInstance(decoder.decoder_norm, Gpt3LayerNorm)
@@ -1726,6 +1727,90 @@ class TestNNXDecoderQwen3_5(TestNNXDecoderQwen3Next):
     )
 
 
+_GPT_OSS_CONFIG = {
+    "run_name": "gpt_oss_nnx_decoder_test",
+    "model_name": "gpt-oss-20b",
+    "max_target_length": 8,
+    "base_emb_dim": 64,
+    # A cycle of 2 over 4 layers gives two scanned blocks, the fewest that can mix up caches across blocks.
+    "base_num_decoder_layers": 4,
+    "base_num_query_heads": 4,
+    "base_num_kv_heads": 2,
+    "head_dim": 16,
+    "base_mlp_dim": 64,
+    "base_moe_mlp_dim": 64,
+    "num_experts": 4,
+    "num_experts_per_tok": 2,
+    "vocab_size": 32,
+    # With the TPU kernels off the sparse path lowers to ragged_dot, which runs on CPU.
+    "sparse_matmul": True,
+    "megablox": False,
+    "use_tokamax_gmm": False,
+    "dtype": "float32",
+    "weight_dtype": "float32",
+}
+
+
+class TestNNXDecoderGptOssKvCaches(unittest.TestCase):
+  """Every GPT-OSS decoder layer must get its own vLLM KV cache and hand back its update.
+
+  vLLM serves the model with one externally-managed KV cache per decoder layer and keeps the caches the decoder
+  returns. Scanned, one scan iteration runs a block of two layers, so passing the flat list straight through gave
+  block i only ``kv_caches[i]``: the block's second layer attended without a cache, the layers dropped their updates
+  under scan_layers, and decoding a scanned checkpoint with vLLM produced gibberish.
+  """
+
+  def _forward_with_kv_caches(self, scan_layers):
+    """Runs one forward pass with a distinct cache per layer; returns the config and the caches handed back."""
+    cfg = _make_config(**{**_GPT_OSS_CONFIG, "scan_layers": scan_layers})
+    mesh = _make_mesh(cfg)
+    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    shared_embedding = Embed(
+        num_embeddings=cfg.vocab_size,
+        num_features=cfg.emb_dim,
+        dtype=cfg.dtype,
+        config=cfg,
+        mesh=mesh,
+        rngs=nnx.Rngs(params=0),
+    )
+    batch = cfg.global_batch_size_to_train_on
+    seq = cfg.max_target_length
+    ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq), 0, cfg.vocab_size)
+    segment_ids = jnp.full((batch, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
+    positions = jnp.broadcast_to(jnp.arange(seq)[None], (batch, seq))
+    kv_caches = [jnp.full((2,), 10.0 * i) for i in range(cfg.num_decoder_layers)]
+    original_call = Attention.__call__
+
+    def bump_returned_kv_cache(attention, *args, **kwargs):
+      # Outside vLLM serving the attention passes its cache through; the bump stands in for vLLM's update.
+      out, kv_cache = original_call(attention, *args, **kwargs)
+      return out, None if kv_cache is None else kv_cache + 1
+
+    with mock.patch.object(Attention, "__call__", bump_returned_kv_cache):
+      decoder(
+          shared_embedding,
+          ids,
+          decoder_positions=positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          kv_caches=kv_caches,
+      )
+    return cfg, kv_caches
+
+  def test_each_layer_updates_its_own_kv_cache(self):
+    for scan_layers in (False, True):
+      with self.subTest(scan_layers=scan_layers):
+        cfg, kv_caches = self._forward_with_kv_caches(scan_layers)
+
+        self.assertEqual(cfg.inhomogeneous_layer_cycle_interval, 2)
+        self.assertEqual(len(kv_caches), cfg.num_decoder_layers)
+        for i, kv_cache in enumerate(kv_caches):
+          self.assertIsNotNone(kv_cache, f"layer {i}'s KV cache update was dropped")
+          # Bumped exactly once, by its own layer.
+          np.testing.assert_array_equal(np.asarray(kv_cache), np.full((2,), 10.0 * i + 1), err_msg=f"layer {i}")
+
+
 class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
   """Tests for Deepseek and Gemma4 specific decoder logic."""
 
@@ -2000,6 +2085,212 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         self.assertIsNotNone(small_layer.out_sharding)
         self.assertIsNotNone(small_layer.mlp_intermediate_sharding)
         self.assertIsNotNone(small_layer.ple_sharding)
+
+  def test_deepseek_unscanned_engram_layers(self):
+    """Unscanned DeepSeek passes global layer_idx so engram_layers are enabled and match scanned output."""
+
+    class _TinyEngramTokenizer:
+      """Minimal deterministic tokenizer stub for fast Engram unit tests."""
+
+      pad_token_id = 0
+
+      def __init__(self, vocab_size: int = 128):
+        self._vocab_size = vocab_size
+
+      def __len__(self) -> int:
+        return self._vocab_size
+
+      def batch_decode(self, token_lists, skip_special_tokens: bool = False):
+        """Decodes token ID lists into deterministic distinct strings."""
+        del skip_special_tokens
+        return [f"tok_{ids[0]}" for ids in token_lists]
+
+      def convert_ids_to_tokens(self, tid: int) -> str:
+        """Maps a single token ID back to its string token."""
+        return f"tok_{tid}"
+
+    def _copy_scanned_to_unscanned(dec_scanned: NNXDecoder, dec_unscanned: NNXDecoder, cfg) -> None:
+      """Copies weights from an interleaved-Engram scanned DeepSeek decoder to an unscanned decoder."""
+      dec_unscanned.decoder_norm.scale.set_value(dec_scanned.decoder_norm.scale.get_value())
+      if hasattr(dec_scanned, "logits_dense"):
+        dec_unscanned.logits_dense.kernel.set_value(dec_scanned.logits_dense.kernel.get_value())
+
+      scan_axis = cfg.param_scan_axis
+      engram_set = set(cfg.engram_layers)
+
+      def _copy_single(src_mod: nnx.Module, dst_mod: nnx.Module) -> None:
+        """Copies all nnx.Param leaves between two unscanned layer modules."""
+        src_params = dict(nnx.to_flat_state(nnx.state(src_mod, nnx.Param)))
+        dst_params = dict(nnx.to_flat_state(nnx.state(dst_mod, nnx.Param)))
+        self.assertEqual(set(src_params.keys()), set(dst_params.keys()))
+        for path, src_var in src_params.items():
+          dst_params[path].set_value(src_var.get_value())
+
+      def _copy_slice(src_chunk: nnx.Module, local_idx: int, dst_mod: nnx.Module) -> None:
+        """Slices local_idx along param_scan_axis from a scanned chunk into dst_mod."""
+        src_params = dict(nnx.to_flat_state(nnx.state(src_chunk, nnx.Param)))
+        dst_params = dict(nnx.to_flat_state(nnx.state(dst_mod, nnx.Param)))
+        self.assertEqual(set(src_params.keys()), set(dst_params.keys()))
+        for path, src_var in src_params.items():
+          dst_params[path].set_value(jnp.take(src_var.get_value(), local_idx, axis=scan_axis))
+
+      def _sync_region(prefix: str, start_idx: int, end_idx: int, unscanned_offset: int) -> None:
+        """Syncs either dense_layers or moe_layers across Engram and non-Engram chunks."""
+        cur = start_idx
+        while cur < end_idx:
+          if cur in engram_set:
+            src_layer = getattr(dec_scanned, f"{prefix}_engram_{cur}")
+            dst_layer = getattr(dec_unscanned, f"{prefix}_{cur - unscanned_offset}")
+            _copy_single(src_layer, dst_layer)
+            cur += 1
+          else:
+            next_engrams = [idx for idx in engram_set if idx > cur]
+            next_boundary = min(end_idx, *next_engrams) if next_engrams else end_idx
+            src_chunk = getattr(dec_scanned, f"{prefix}_{cur}_{next_boundary - 1}")
+            for global_idx in range(cur, next_boundary):
+              dst_layer = getattr(dec_unscanned, f"{prefix}_{global_idx - unscanned_offset}")
+              _copy_slice(src_chunk, global_idx - cur, dst_layer)
+            cur = next_boundary
+
+      _sync_region("dense_layers", 0, cfg.first_num_dense_layers, 0)
+      _sync_region("moe_layers", cfg.first_num_dense_layers, cfg.num_decoder_layers, cfg.first_num_dense_layers)
+
+    common_overrides = {
+        "run_name": "deepseek_unscanned_engram_test",
+        "model_name": "deepseek-custom",
+        "decoder_block": "deepseek",
+        "use_indexer": False,
+        "first_num_dense_layers": 2,
+        "base_num_decoder_layers": 4,
+        "num_decoder_layers": 4,
+        "base_emb_dim": 16,
+        "base_mlp_dim": 32,
+        "base_moe_mlp_dim": 16,
+        "base_num_query_heads": 2,
+        "base_num_kv_heads": 2,
+        "head_dim": 8,
+        "q_lora_rank": 8,
+        "kv_lora_rank": 8,
+        "qk_nope_head_dim": 4,
+        "qk_rope_head_dim": 4,
+        "v_head_dim": 8,
+        "vocab_size": 128,
+        "mhc_expansion_rate": 2,
+        "attention": "dot_product",
+        "per_device_batch_size": 1.0,
+        "max_target_length": 8,
+        "max_prefill_predict_length": 4,
+        "engram_layers": [1, 2],
+        "engram_num_heads": 2,
+        "engram_head_dim": 4,
+        "engram_vocab_bases": [64, 64],
+        "engram_max_ngram_size": 3,
+        "engram_kernel_size": 2,
+        "num_experts": 4,
+        "num_experts_per_tok": 2,
+        "shared_experts": 1,
+        "sparse_matmul": False,
+        "capacity_factor": -1.0,
+        "megablox": False,
+        "dtype": "float32",
+        "weight_dtype": "float32",
+        "matmul_precision": "highest",
+        "remat_policy": "none",
+        "tokenizer_path": "dummy",
+        "hf_access_token": "dummy",
+    }
+
+    with patch("transformers.AutoTokenizer.from_pretrained", return_value=_TinyEngramTokenizer(128)):
+      cfg_unscanned = _make_config(scan_layers=False, **common_overrides)
+      cfg_scanned = _make_config(scan_layers=True, **common_overrides)
+      mesh = _make_mesh(cfg_unscanned)
+
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_unscanned.logical_axis_rules):
+        dec_unscanned = NNXDecoder(
+            config=cfg_unscanned,
+            mesh=mesh,
+            model_mode=MODEL_MODE_TRAIN,
+            rngs=nnx.Rngs(params=0, dropout=1),
+        )
+        dec_scanned = NNXDecoder(
+            config=cfg_scanned,
+            mesh=mesh,
+            model_mode=MODEL_MODE_TRAIN,
+            rngs=nnx.Rngs(params=0, dropout=1),
+        )
+        shared_embedding = Embed(
+            num_embeddings=cfg_unscanned.vocab_size,
+            num_features=cfg_unscanned.emb_dim,
+            dtype=cfg_unscanned.dtype,
+            embedding_init=nn.initializers.normal(stddev=1.0),
+            config=cfg_unscanned,
+            mesh=mesh,
+            rngs=nnx.Rngs(params=2),
+        )
+
+        # 1) Exactly layers 1 (dense) and 2 (MoE) have Engram enabled; 0 and 3 have it disabled.
+        expected_engram = {0: False, 1: True, 2: True, 3: False}
+        for global_idx in range(cfg_unscanned.num_decoder_layers):
+          if global_idx < cfg_unscanned.first_num_dense_layers:
+            layer = getattr(dec_unscanned, f"dense_layers_{global_idx}")
+          else:
+            layer = getattr(dec_unscanned, f"moe_layers_{global_idx - cfg_unscanned.first_num_dense_layers}")
+          self.assertEqual(layer.layer_idx, global_idx)
+          self.assertEqual(bool(layer.is_engram_enabled), expected_engram[global_idx])
+          if expected_engram[global_idx]:
+            self.assertIsNotNone(layer.engram)
+          else:
+            self.assertIsNone(layer.engram)
+
+        # Populate non-zero ShortConv kernels before syncing weights so temporal conv is exercised too.
+        for seed_offset, attr in ((1, "dense_layers_engram_1"), (2, "moe_layers_engram_2")):
+          conv_kernel = getattr(dec_scanned, attr).engram.short_conv.conv.kernel
+          conv_kernel.set_value(
+              jax.random.normal(jax.random.PRNGKey(100 + seed_offset), conv_kernel.get_value().shape, jnp.float32)
+          )
+        _copy_scanned_to_unscanned(dec_scanned, dec_unscanned, cfg_scanned)
+
+        ids, segment_ids, positions = self._make_token_inputs(cfg_unscanned)
+
+        def _forward(decoder_mod, token_ids, input_embeddings=None):
+          """Runs a jitted train-mode forward pass on decoder_mod."""
+          graphdef, state = nnx.split((decoder_mod, shared_embedding))
+
+          @jax.jit
+          def _run_pure(st, toks, in_emb):
+            dec, emb = nnx.merge(graphdef, st)
+            logits_out, hidden_out, _ = dec(
+                emb,
+                toks,
+                positions,
+                decoder_segment_ids=segment_ids,
+                deterministic=True,
+                model_mode=MODEL_MODE_TRAIN,
+                decoder_input_embeddings=in_emb,
+            )
+            return logits_out, hidden_out
+
+          return _run_pure(state, token_ids, input_embeddings)
+
+        # 2) Train-mode forward pass with decoder_input_tokens runs and produces finite outputs.
+        logits_unscanned, hidden_unscanned = _forward(dec_unscanned, ids)
+        batch = cfg_unscanned.global_batch_size_to_train_on
+        seq_len = cfg_unscanned.max_target_length
+        self.assertEqual(logits_unscanned.shape, (batch, seq_len, cfg_unscanned.vocab_size))
+        self.assertEqual(hidden_unscanned.shape, (batch, seq_len, cfg_unscanned.emb_dim))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(logits_unscanned))))
+        self.assertTrue(bool(jnp.all(jnp.isfinite(hidden_unscanned))))
+
+        # Confirm decoder_input_tokens reaches unscanned Engram layers when input embeddings are held fixed.
+        fixed_embeddings = shared_embedding(ids, model_mode=MODEL_MODE_TRAIN)
+        alt_ids = (ids + 7) % cfg_unscanned.vocab_size
+        logits_alt_tokens, _ = _forward(dec_unscanned, alt_ids, input_embeddings=fixed_embeddings)
+        self.assertFalse(np.allclose(np.asarray(logits_unscanned), np.asarray(logits_alt_tokens)))
+
+        # 3) Output matches the scan_layers=True model with identical weights.
+        logits_scanned, hidden_scanned = _forward(dec_scanned, ids)
+        np.testing.assert_allclose(np.asarray(logits_unscanned), np.asarray(logits_scanned), rtol=1e-5, atol=1e-5)
+        np.testing.assert_allclose(np.asarray(hidden_unscanned), np.asarray(hidden_scanned), rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.tpu_only
@@ -2983,6 +3274,104 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
   def test_grad_parity_param_scan_axis_zero(self):
     self._assert_parity(num_layers=4, param_scan_axis=0)
 
+  def _assert_context_parallel_parity(self, num_layers, **overrides):
+    """Parity on a 2 x 2 FSDP x context mesh: weights co-sharded over ('fsdp', 'context'), sequence over 'context'."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    cp_overrides = {"ici_fsdp_parallelism": 2, "ici_context_parallelism": 2, "context_parallel_load_balance": False}
+    self._assert_parity(num_layers=num_layers, **{**cp_overrides, **overrides})
+
+  def test_grad_parity_context_parallelism(self):
+    self._assert_context_parallel_parity(num_layers=4)
+
+  def test_grad_parity_context_parallelism_load_balanced(self):
+    self._assert_context_parallel_parity(num_layers=5, context_parallel_load_balance=True)
+
+  def test_grad_parity_context_parallelism_deepseek(self):
+    # MLA attention and MoE layers, as in the DeepSeek-V3 recipes. `routed_bias` is off because this
+    # harness cannot trace the routed-bias variable in the plain scan, with or without context parallelism.
+    self._assert_context_parallel_parity(
+        num_layers=4,
+        model_name="deepseek3-tiny",
+        first_num_dense_layers=1,
+        base_emb_dim=64,
+        base_num_query_heads=4,
+        base_num_kv_heads=4,
+        base_mlp_dim=64,
+        base_moe_mlp_dim=64,
+        num_experts=4,
+        num_experts_per_tok=2,
+        routed_bias=False,
+        vocab_size=128,
+        sparse_matmul=False,
+        megablox=False,
+    )
+
+  def test_mlp_intermediate_sharding_preserves_context_parallelism(self):
+    # Under context parallelism, MLP intermediate shardings must pair `activation_length` / `prefill_activation_length`
+    # (not `*_activation_norm_length`) with `activation_mlp` so `tensor_sequence` does not conflict and drop `context`.
+    cases = (
+        ("deepseek", {"model_name": "deepseek3-tiny", "first_num_dense_layers": 1}),
+        ("qwen3", {}),
+        ("qwen2", {}),
+        ("mistral", {}),
+        ("simple_mlp", {}),
+        ("gemma4", {}),
+        (
+            "gemma4_small",
+            {"model_name": "gemma4-e2b", "hidden_size_per_layer_input": 64, "vocab_size_per_layer_input": 128},
+        ),
+        ("llama4", {"inhomogeneous_layer_cycle_interval": 2, "num_experts_per_tok": 1}),
+        ("hy4", {"model_name": "hy4-preview", "inhomogeneous_layer_cycle_interval": 2, "shard_mode": "auto"}),
+        ("ming", {"model_name": "ming-3.0-audio-tiny", "inhomogeneous_layer_cycle_interval": 2, "shard_mode": "auto"}),
+    )
+    for model_mode in (MODEL_MODE_TRAIN, MODEL_MODE_PREFILL):
+      for decoder_block, extra in cases:
+        with self.subTest(model_mode=model_mode, decoder_block=decoder_block):
+          overrides = {
+              "decoder_block": decoder_block,
+              "shard_mode": "explicit",
+              "ici_fsdp_parallelism": 2,
+              "ici_context_parallelism": 2,
+              "max_prefill_predict_length": 64,
+              "max_target_length": 128,
+              "base_emb_dim": 64,
+              "base_num_query_heads": 4,
+              "base_num_kv_heads": 4,
+              "base_mlp_dim": 64,
+              "base_moe_mlp_dim": 64,
+              "base_num_decoder_layers": 2,
+              "num_decoder_layers": 2,
+              "num_experts": 4,
+              "num_experts_per_tok": 2,
+              "vocab_size": 128,
+              **extra,
+          }
+          cfg = _make_config(**overrides)
+          mesh_cases = (
+              ({"fsdp": 2, "context": 2}, PartitionSpec("fsdp", "context", None)),
+              ({"fsdp": 2, "tensor_sequence": 2}, PartitionSpec("fsdp", None, "tensor_sequence")),
+              ({"fsdp": 2, "context": 2, "tensor_sequence": 2}, PartitionSpec("fsdp", "context", "tensor_sequence")),
+          )
+          for mesh_overrides, expected_spec in mesh_cases:
+            axis_sizes = {a: 1 for a in cfg.mesh_axes} | mesh_overrides
+            mesh = AbstractMesh(
+                tuple(axis_sizes.values()), tuple(axis_sizes), axis_types=(AxisType.Explicit,) * len(axis_sizes)
+            )
+            with jax.sharding.use_abstract_mesh(mesh), nn.logical_axis_rules(cfg.logical_axis_rules):
+              decoder = nnx.eval_shape(
+                  lambda cfg=cfg, mesh=mesh, mode=model_mode: NNXDecoder(
+                      config=cfg, mesh=mesh, model_mode=mode, rngs=nnx.Rngs(0)
+                  )
+              )
+            checked = 0
+            for _, mod in nnx.iter_modules(decoder):
+              mlp_sharding = getattr(mod, "mlp_intermediate_sharding", None) or getattr(mod, "mlp_sharding", None)
+              if mlp_sharding is not None:
+                self.assertEqual(mlp_sharding.spec, expected_spec, type(mod).__name__)
+                checked += 1
+            self.assertGreater(checked, 0)
+
   def _assert_parity_saved_residuals(self, num_layers, **overrides):
     """Asserts parity and returns how many residuals per layer the prefetch remat policy saves."""
     with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
@@ -3158,6 +3547,14 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
     if jax.device_count() < 4:
       self.skipTest("Needs 4 devices for an fsdp=2 x expert=2 mesh.")
     self._assert_qwen3_5_parity(num_blocks=2, ici_fsdp_parallelism=2, ici_expert_parallelism=2)
+
+  def test_qwen3_5_context_parallelism(self):
+    """Per-sub-layer prefetching matches the plain scanned stack on an fsdp=2 x context=2 mesh."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices for an fsdp=2 x context=2 mesh.")
+    self._assert_qwen3_5_parity(
+        num_blocks=2, ici_fsdp_parallelism=2, ici_context_parallelism=2, context_parallel_load_balance=False
+    )
 
   def test_qwen3_5_sub_layer_gathers_under_expert_parallelism(self):
     """Under EP, each sub-layer weight is gathered over the FSDP axes `sharding.fsdp_axes_for_dim` picks.

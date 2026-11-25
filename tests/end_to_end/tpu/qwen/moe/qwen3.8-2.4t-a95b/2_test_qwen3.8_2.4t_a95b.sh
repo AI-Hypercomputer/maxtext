@@ -24,7 +24,7 @@ export TOKENIZER_PATH='Qwen/Qwen3.8-2.4T-A95B'
 # Installing torch for checkpoint conversion and forward_pass_logit_checker.py
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
-if [ -z "${HF_TOKEN}" ]; then
+if [ -z "${HF_TOKEN:+set}" ]; then
   echo "Error: HF_TOKEN environment variable is not set. Please export your Hugging Face token."
   echo "Example: export HF_TOKEN=hf_..."
   exit 1
@@ -68,4 +68,4 @@ python3 -m maxtext.trainers.pre_train.train ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REP
 
 # Run decoding
 # Note decode requires the access token for huggingface tokenizer even if the model is not gated
-python3 -m maxtext.inference.decode ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=decode model_name=${MODEL_NAME} tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} hf_access_token=${HF_TOKEN} load_parameters_path=${UNSCANNED_CKPT_PATH} scan_layers=False attention=dot_product sparse_matmul=True megablox=True dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=1 max_prefill_predict_length=64 max_target_length=128 ici_fsdp_parallelism=1 ici_tensor_parallelism=1 ici_expert_parallelism=-1 prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is "
+python3 -m maxtext.inference.decode ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}/base.yml base_output_directory=${BASE_OUTPUT_PATH} run_name=decode model_name=${MODEL_NAME} tokenizer_type=huggingface tokenizer_path=${TOKENIZER_PATH} load_parameters_path=${UNSCANNED_CKPT_PATH} scan_layers=False attention=dot_product sparse_matmul=True megablox=True dtype=bfloat16 weight_dtype=bfloat16 per_device_batch_size=1 max_prefill_predict_length=64 max_target_length=128 ici_fsdp_parallelism=1 ici_tensor_parallelism=1 ici_expert_parallelism=-1 prompt="An attention function can be described as mapping a query and a set of key-value pairs to an output, where the query, keys, values, and outputs are all vectors. The output is "

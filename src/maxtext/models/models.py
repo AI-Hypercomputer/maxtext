@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Transformer models."""
+
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -26,12 +27,12 @@ from flax.core import FrozenDict
 from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 from flax import nnx
 
-from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput, VisionEncoderBlockType
+from maxtext.common.common_types import AudioDecoderBlockType, Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput, VisionEncoderBlockType
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.embeddings import Embed
-from maxtext.layers.encoders import AudioEncoder, VisionEncoder
+from maxtext.layers.encoders import AudioDecoder, AudioEncoder, VisionEncoder
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.multimodal import processor as mm_processor
@@ -148,6 +149,10 @@ class Transformer(nnx.Module):
     )
     self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_audio", False) else None
     self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
+    # Speech generation head driven by the decoder's hidden states (text -> speech), see `audio_decode.py`.
+    self.audio_decoder = (
+        AudioDecoder(config=cfg, mesh=mesh, rngs=rngs) if cfg.audio_decoder_block != AudioDecoderBlockType.NONE else None
+    )
 
     # If MTP is enabled via config, set up the MTP block.
     if getattr(self.config, "mtp_num_layers", 0) > 0:

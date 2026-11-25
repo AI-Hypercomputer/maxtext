@@ -98,6 +98,20 @@ class ParamSaveDtypeTest(unittest.TestCase):
     self.assertEqual(_param_save_dtype("MoEBiasVar-x", "float8_e4m3fn"), "float8_e4m3fn")
     self.assertEqual(_param_save_dtype("Tid2EidVar-x", "float32"), "float32")
 
+  def test_kimi_k3_kda_f32_tensors_saved_as_float32(self):
+    """Kimi-K3 KDA tensors the release stores in F32 stay float32 under --save_dtype=bfloat16."""
+    prefix = "params-decoder-layers_1-self_attention-"
+    for name in ("A_log", "dt_bias", "q_conv1d-kernel", "k_conv1d-kernel", "v_conv1d-kernel", "o_norm-scale"):
+      self.assertEqual(_param_save_dtype(prefix + name, "bfloat16", "kimi-k3"), "float32", name)
+    for name in ("q_proj-kernel", "out-kernel", "g_proj-kernel", "b_proj-kernel"):
+      self.assertEqual(_param_save_dtype(prefix + name, "bfloat16", "kimi-k3"), "bfloat16", name)
+    self.assertEqual(_param_save_dtype(prefix + "A_log", "float8_e4m3fn", "kimi-k3"), "float8_e4m3fn")
+
+  def test_kimi_k3_suffixes_do_not_affect_other_models(self):
+    key = "params-decoder-layers_1-self_attention-A_log"
+    self.assertEqual(_param_save_dtype(key, "bfloat16"), "bfloat16")
+    self.assertEqual(_param_save_dtype(key, "bfloat16", "qwen3-next-80b-a3b"), "bfloat16")
+
   def test_float32_path_is_exact(self):
     if torch is None:
       self.skipTest("torch not available")
