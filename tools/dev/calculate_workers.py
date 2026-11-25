@@ -22,7 +22,9 @@ import sys
 
 
 # Maximum worker limits by hardware flavor
-MAX_CPU_WORKERS = 4
+# cpu-unit (pre-training unit tests) gets more shards than the other CPU flavors to cut its wall time.
+MAX_CPU_UNIT_WORKERS = 5
+MAX_CPU_WORKERS = 2
 MAX_TPU_WORKERS = 3
 MAX_GPU_WORKERS = 3
 DEFAULT_WORKERS = 1
@@ -37,6 +39,8 @@ CPU_XDIST_PARALLELISM = 8
 
 def get_max_workers_for_flavor(flavor: str) -> int:
   """Returns the maximum worker safety cap for a given test flavor."""
+  if flavor == "cpu-unit":
+    return MAX_CPU_UNIT_WORKERS
   if flavor.startswith("cpu-"):
     return MAX_CPU_WORKERS
   if flavor.startswith("tpu-") or flavor.startswith("tpu7x-"):
