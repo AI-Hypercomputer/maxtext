@@ -27,6 +27,8 @@ import yaml
 
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.configs import pyconfig
+from maxtext.configs import types
+from maxtext.utils import max_utils
 from maxtext.configs.pyconfig import (
     _CONFIG_FILE_MAPPING,
     _module_from_path,
@@ -1547,6 +1549,50 @@ assert train._TF_AVAILABLE is False
               routed_bias_update_rate=1e-3,
               tokenizer_path=tok_path,
           )
+
+
+class WithFieldDefaultsTest(unittest.TestCase):
+  """`_with_field_defaults` fills the pre-validation dict so pre-validation code can index any field."""
+
+  # The keys `post_train/rl.yml` spells out among those `maybe_initialize_jax_distributed_system` reads.
+  RL_YAML_KEYS = {"skip_jax_distributed_system": False, "enable_checkpointing": True}
+
+  def test_fills_absent_fields_from_rl_config_defaults(self):
+    filled = pyconfig._with_field_defaults(dict(self.RL_YAML_KEYS), types.RLConfig)  # pylint: disable=protected-access
+    self.assertFalse(filled["skip_jax_distributed_system"])
+    self.assertTrue(filled["enable_checkpointing"])
+    self.assertFalse(filled["enable_single_controller"])
+    self.assertFalse(filled["inference_benchmark_test"])
+    self.assertEqual(filled["compile_topology"], "")
+    self.assertEqual(filled["compile_topology_num_slices"], -1)
+    self.assertEqual(filled["hardware"], "tpu")
+    self.assertFalse(filled["enable_emergency_checkpoint"])
+    self.assertFalse(filled["enable_multi_tier_checkpointing"])
+    self.assertEqual(filled["jax_distributed_initialization_timeout"], 300)
+
+  def test_explicit_keys_win_over_defaults(self):
+    filled = pyconfig._with_field_defaults(  # pylint: disable=protected-access
+        {"hardware": "gpu", "jax_distributed_initialization_timeout": 7}, types.RLConfig
+    )
+    self.assertEqual(filled["hardware"], "gpu")
+    self.assertEqual(filled["jax_distributed_initialization_timeout"], 7)
+
+  @mock.patch("jax.distributed.is_initialized", return_value=False)
+  @mock.patch("jax.distributed.initialize")
+  def test_rl_yaml_keys_initialize_jax_distributed_on_tpu(self, mock_init, _is_init):
+    """Multi-controller RL: only the RL YAML keys are present and the distributed system must still initialize."""
+    with self.assertRaises(KeyError):
+      max_utils.maybe_initialize_jax_distributed_system(dict(self.RL_YAML_KEYS))
+    max_utils.maybe_initialize_jax_distributed_system(
+        pyconfig._with_field_defaults(dict(self.RL_YAML_KEYS), types.RLConfig)  # pylint: disable=protected-access
+    )
+    mock_init.assert_called_once_with(initialization_timeout=300)
+
+  @mock.patch("jax.distributed.initialize")
+  def test_rl_yaml_default_skips_jax_distributed(self, mock_init):
+    keys = pyconfig._with_field_defaults({**self.RL_YAML_KEYS, "skip_jax_distributed_system": True}, types.RLConfig)  # pylint: disable=protected-access
+    max_utils.maybe_initialize_jax_distributed_system(keys)
+    mock_init.assert_not_called()
 
 
 if __name__ == "__main__":

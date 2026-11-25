@@ -284,6 +284,25 @@ def _check_for_invalid_keys(key: str, valid_fields: set[str]) -> bool:
   return False
 
 
+def _with_field_defaults(pydantic_kwargs: dict[str, Any], config_class: type[Any]) -> dict[str, Any]:
+  """Returns a copy of `pydantic_kwargs` with every absent field filled from the config class default.
+
+  `pydantic_kwargs` only holds the keys spelled out in the YAML files and on the command line, so code
+  that must run before validation (such as `max_utils.maybe_initialize_jax_distributed_system`) cannot
+  index it by every field name. `base.yml` lists every `MaxTextConfig` field, but `post_train/rl.yml`
+  does not list every `RLConfig` field, so without the defaults the RL path raises `KeyError` on
+  `enable_single_controller` as soon as `skip_jax_distributed_system=False`.
+  """
+  filled = {}
+  for name, field in config_class.model_fields.items():
+    if field.default_factory is not None:
+      filled[name] = field.default_factory()
+    elif not field.is_required():
+      filled[name] = field.default
+  filled.update(pydantic_kwargs)
+  return filled
+
+
 def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = types.MaxTextConfig) -> dict[str, Any]:
   """Prepares the raw dictionary for Pydantic model instantiation."""
   pydantic_kwargs = {}
@@ -669,7 +688,7 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
     jax.config.update("jax_debug_log_modules", pydantic_kwargs["jax_debug_log_modules"])
   # Do not initialize jax distributed system during pytest runs.
   if "pytest" not in sys.modules:
-    max_utils.maybe_initialize_jax_distributed_system(pydantic_kwargs)
+    max_utils.maybe_initialize_jax_distributed_system(_with_field_defaults(pydantic_kwargs, config_class))
   if pydantic_kwargs.get("jax_cache_dir"):
     if pydantic_kwargs.get("dump_hlo"):
       max_logging.warning(
