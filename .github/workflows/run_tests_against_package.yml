@@ -329,9 +329,17 @@ jobs:
             # limit (~125 GiB on linux-x86-n4-32) is shared by every worker. A single TrainCompile AOT
             # compile peaks at 10-16 GB and the worker keeps 6-8 GB afterwards, so -n auto (32 workers)
             # overcommits the pod: scheduled shards died at 94-99 % progress with no traceback (container
-            # or runner lost, #6052), consistent with hitting that limit. 8 workers leave ~16 GB each.
-            # Keep CPU_XDIST_PARALLELISM in tools/dev/calculate_workers.py in sync.
-            CPU_XDIST_WORKERS=8
+            # or runner lost, #6052), consistent with hitting that limit. So give each worker ~14 GiB of the
+            # container's memory limit, capped at 8: 8 workers on linux-x86-n4-32/n2-32, 4 on n4-16/n2-16.
+            # Keep CPU_XDIST_PARALLELISM in tools/dev/calculate_workers.py in sync with the cap.
+            MEM_TOTAL_BYTES=$(awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo)
+            MEM_LIMIT_BYTES=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)
+            # "max" (cgroup v2) or a huge value (cgroup v1) means no container limit; use the VM's memory.
+            if ! [[ "${MEM_LIMIT_BYTES}" =~ ^[0-9]+$ ]] || [ "${MEM_LIMIT_BYTES}" -gt "${MEM_TOTAL_BYTES}" ]; then
+              MEM_LIMIT_BYTES="${MEM_TOTAL_BYTES}"
+            fi
+            CPU_XDIST_WORKERS=$(( MEM_LIMIT_BYTES / (14 * 1024 * 1024 * 1024) ))
+            CPU_XDIST_WORKERS=$(( CPU_XDIST_WORKERS > 8 ? 8 : (CPU_XDIST_WORKERS < 1 ? 1 : CPU_XDIST_WORKERS) ))
             # glibc otherwise creates up to 8*ncores malloc arenas per process, inflating RSS.
             export MALLOC_ARENA_MAX=2
             # Log the actual memory and /tmp budget so a killed shard or a full disk can be diagnosed from

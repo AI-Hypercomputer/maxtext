@@ -116,6 +116,14 @@ def test_calculate_workers_lightweight_suite():
   assert calculate_workers("cpu-post-training-unit", baseline_cpu) == (2, [1, 2])
 
 
+def test_calculate_workers_xdist_parallelism():
+  """Tests that fewer xdist workers per shard (smaller runners) lead to more shards."""
+  # 20 CPU tests taking 120s each = 40 CPU-mins: 5 eff mins at -n 8 -> 1 worker; 10 eff mins at -n 4 -> 2 workers.
+  baseline = {f"cpu-post-training-unit::test_{i}": 120.0 for i in range(20)}
+  assert calculate_workers("cpu-post-training-unit", baseline) == (1, [1])
+  assert calculate_workers("cpu-post-training-unit", baseline, xdist_parallelism=4) == (2, [1, 2])
+
+
 def test_calculate_workers_fewer_tests_than_max_workers():
   """Tests that worker count never exceeds the number of tests."""
   # 2 tests taking 1000s each = 16.67m max single test -> max_workers is 5, but only 2 tests!
@@ -149,6 +157,29 @@ def test_main_cli(tmp_path):
 
   res = subprocess.run(cmd, capture_output=True, text=True, check=True)
   assert res.returncode == 0
+  lines = res.stdout.strip().splitlines()
+  assert "total_workers=2" in lines
+  assert "worker_groups=[1, 2]" in lines
+
+
+def test_main_cli_xdist_parallelism(tmp_path):
+  """Tests that the CLI passes --xdist-parallelism through."""
+  baseline_file = tmp_path / "baseline.json"
+  baseline_file.write_text(json.dumps({f"cpu-post-training-unit::test_{i}": 120.0 for i in range(20)}), encoding="utf-8")
+
+  cmd = [
+      sys.executable,
+      "-m",
+      "tools.dev.calculate_workers",
+      "--flavor",
+      "cpu-post-training-unit",
+      "--baseline",
+      str(baseline_file),
+      "--xdist-parallelism",
+      "4",
+  ]
+
+  res = subprocess.run(cmd, capture_output=True, text=True, check=True)
   lines = res.stdout.strip().splitlines()
   assert "total_workers=2" in lines
   assert "worker_groups=[1, 2]" in lines
