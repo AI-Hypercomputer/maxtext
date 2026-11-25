@@ -16,7 +16,6 @@
 
 import re
 from typing import NamedTuple
-import unittest
 from unittest.mock import MagicMock, patch
 
 from absl.testing import absltest, parameterized
@@ -26,15 +25,14 @@ import jax.numpy as jnp
 from maxtext.configs import pyconfig
 from maxtext.optimizers import optimizers
 from maxtext.optimizers.muon import ShardedMuonDimensionNumbers as smdn
-from maxtext.utils import maxtext_utils, muon_utils
+from maxtext.utils import maxtext_utils, model_creation_utils, muon_utils
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 import pytest
 
-# deepseek2, specific: q_lora_rank=0
-# applicable: deepseek2-16, but not deepseek2-236b (q_lora_rank=1536)
+# MLA without Q-LoRA (q_lora_rank=0, e.g. deepseek3-test with q_lora_rank=0 override)
 _DEEPSEEK2_ATTENTION = {
     "self_attention": {
         "kv_norm": {"scale": None},
@@ -582,17 +580,18 @@ class MuonDimensionTest(parameterized.TestCase):
   """Unit tests for Muon dimension number generation.
 
   This suite verifies that the automatically generated Muon dimension numbers
-  for various models match their hardcoded reference values.
+  for various models match their hardcoded reference values, written for the
+  `param_scan_axis=1` layout where they coincide with `transform_logic`'s
+  feature-axis view (see `muon_utils_test.TestScannedLayoutDimensionNumbers`
+  for other scan axes).
   """
 
   @parameterized.named_parameters(
-      ("deepseek2-16b", "deepseek2-16b", DEEPSEEK2_DIMENSION_NUMBER),
+      ("deepseek3-test", "deepseek3-test", DEEPSEEK3_DIMENSION_NUMBER),
       ("deepseek3-671b", "deepseek3-671b", DEEPSEEK3_DIMENSION_NUMBER),
       ("deepseek4-284b", "deepseek4-284b", DEEPSEEK4_DIMENSION_NUMBER),
       ("deepseek4-1600b", "deepseek4-1600b", DEEPSEEK4_1600B_DIMENSION_NUMBER),
       ("kimi-k2-1t", "kimi-k2-1t", DEEPSEEK3_DIMENSION_NUMBER),
-      ("llama2-7b", "llama2-7b", LLAMA2_DIMENSION_NUMBER),
-      ("llama3-8b", "llama3-8b", LLAMA2_DIMENSION_NUMBER),
       ("llama3.1-8b", "llama3.1-8b", LLAMA2_DIMENSION_NUMBER),
       ("llama3.3-70b", "llama3.3-70b", LLAMA2_DIMENSION_NUMBER),
       ("gemma3-4b", "gemma3-4b", GEMMA3_DIMENSION_NUMBER),
@@ -608,8 +607,29 @@ class MuonDimensionTest(parameterized.TestCase):
     Initializes the specified MaxText model and asserts that the generated
     Muon dimension numbers match the hardcoded reference.
     """
-    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True)
+    actual_output = muon_utils.get_model_mdn(model_name, scan_layers=True, param_scan_axis=1)
     self.assertEqual(actual_output, expected_output)
+
+  def test_deepseek_no_q_lora_mdn(self):
+    """Verifies Muon dimension numbers on the MLA q_lora_rank=0 (direct query projection) path."""
+    cfg = pyconfig.initialize(
+        [
+            None,
+            get_test_config_path(),
+            "model_name=deepseek3-test",
+            "override_model_config=True",
+            "q_lora_rank=0",
+            "scan_layers=True",
+            "param_scan_axis=1",
+            "attention=dot_product",
+            "skip_jax_distributed_system=True",
+        ]
+    )
+    devices_array = maxtext_utils.create_device_mesh(cfg)
+    mesh = jax.sharding.Mesh(devices_array, cfg.mesh_axes)
+    _, model = model_creation_utils.create_nnx_abstract_model(cfg, mesh)
+    mdn_tree = muon_utils.get_muon_weight_dimension_numbers(model, cfg)
+    self.assertEqual({"params": nnx.to_pure_dict(mdn_tree)}, DEEPSEEK2_DIMENSION_NUMBER)
 
 
 class AdamWMaskTest(parameterized.TestCase):
@@ -833,6 +853,68 @@ class TrainableParametersMaskTest(parameterized.TestCase):
     # When no trainable mask is provided, nothing is frozen by this mechanism
     self.assertFalse(jax.numpy.all(updates["layer1"]["kernel"] == 0))
 
+  def test_get_optimizer_with_trainable_mask_and_skip_step_on_spikes(self):
+    """get_optimizer keeps opt_state['is_skipped'] at top level when masking parameters."""
+    argv = [
+        "",
+        get_test_config_path(),
+        "run_name=test_mask_and_skip",
+        "trainable_parameters_mask=['.*indexer.*']",
+        "skip_step_on_spikes=True",
+        "skip_step_interval=4",
+        "skip_step_scaling_factor=1.0",
+    ]
+    config = pyconfig.initialize(argv)
+    opt = optimizers.get_optimizer(config, lambda _: 1.0)
+
+    params = {"indexer": jnp.ones((2, 2)), "kernel": jnp.ones((2, 2))}
+    grads = {"indexer": jnp.ones((2, 2)) * 0.5, "kernel": jnp.ones((2, 2)) * 0.5}
+    opt_state = opt.init(params)
+
+    self.assertIsInstance(opt_state, dict)
+    self.assertIn("is_skipped", opt_state)
+    self.assertIsInstance(opt_state["inner_state"], optax.PartitionState)
+    inner_states = opt_state["inner_state"].inner_states
+    self.assertIsInstance(inner_states["frozen"], optax.MaskedState)
+    self.assertIsInstance(inner_states["frozen"].inner_state, optax.EmptyState)
+    self.assertIsInstance(inner_states["trainable"], optax.MaskedState)
+    self.assertIsInstance(inner_states["trainable"].inner_state[0].mu["kernel"], optax.MaskedNode)
+
+    normal_kwargs = {"loss": jnp.array(1.0), "grad_norm": jnp.array(1.0)}
+    for _ in range(2):
+      updates, opt_state = opt.update(grads, opt_state, params, **normal_kwargs)
+      self.assertFalse(bool(opt_state["is_skipped"]))
+      self.assertFalse(bool(jnp.all(updates["indexer"] == 0)))
+      self.assertTrue(bool(jnp.all(updates["kernel"] == 0)))
+
+    spike_kwargs = {"loss": jnp.array(100.0), "grad_norm": jnp.array(1.0)}
+    updates, opt_state = opt.update(grads, opt_state, params, **spike_kwargs)
+    self.assertTrue(bool(opt_state["is_skipped"]))
+    self.assertTrue(bool(jnp.all(updates["indexer"] == 0)))
+    self.assertTrue(bool(jnp.all(updates["kernel"] == 0)))
+
+  def test_apply_trainable_parameters_mask_warns_on_empty_or_full_freeze(self):
+    """apply_trainable_parameters_mask logs warnings at WARNING level when 0 or all params freeze."""
+    params = {"indexer": jnp.ones((2, 2)), "kernel": jnp.ones((2, 2))}
+
+    cfg_none_frozen = pyconfig.initialize(
+        ["", get_test_config_path(), "run_name=test_warn_none", "trainable_parameters_mask=['.*']"]
+    )
+    opt_none_frozen = optimizers.apply_trainable_parameters_mask(optax.sgd(0.1), cfg_none_frozen)
+    with patch.object(optimizers.max_logging, "warning") as mock_warning:
+      opt_none_frozen.init(params)
+      mock_warning.assert_called_once()
+      self.assertIn("froze nothing", mock_warning.call_args[0][0])
+
+    cfg_all_frozen = pyconfig.initialize(
+        ["", get_test_config_path(), "run_name=test_warn_all", "trainable_parameters_mask=['nonexistent']"]
+    )
+    opt_all_frozen = optimizers.apply_trainable_parameters_mask(optax.sgd(0.1), cfg_all_frozen)
+    with patch.object(optimizers.max_logging, "warning") as mock_warning:
+      opt_all_frozen.init(params)
+      mock_warning.assert_called_once()
+      self.assertIn("froze EVERY parameter", mock_warning.call_args[0][0])
+
 
 class SkipStepOnSpikesTest(parameterized.TestCase):
   """Tests for the skip_step_on_spikes optimizer wrapper."""
@@ -886,8 +968,67 @@ class SkipStepOnSpikesTest(parameterized.TestCase):
     # Count shouldn't have incremented
     self.assertEqual(opt_state["count"], 0)
 
+  def test_skip_step_on_nan_loss_warmup(self):
+    inner_opt = optax.sgd(0.1)
+    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+    params = {"x": jnp.array([1.0])}
+    opt_state = opt.init(params)
 
-class TestMuonLogic(unittest.TestCase):
+    # Step 0 with NaN loss during warmup must be skipped
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, loss=jnp.nan, grad_norm=jnp.float32(1.0))
+    self.assertTrue(jnp.all(updates["x"] == 0.0))
+    self.assertTrue(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 0)
+    self.assertFalse(jnp.any(jnp.isnan(opt_state["losses"])))
+
+  def test_skip_step_on_nan_grad_norm_warmup(self):
+    inner_opt = optax.sgd(0.1)
+    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+    params = {"x": jnp.array([1.0])}
+    opt_state = opt.init(params)
+
+    # Step 0 with NaN grad_norm during warmup must be skipped
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(1.0), grad_norm=jnp.nan)
+    self.assertTrue(jnp.all(updates["x"] == 0.0))
+    self.assertTrue(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 0)
+    self.assertFalse(jnp.any(jnp.isnan(opt_state["grad_norms"])))
+
+  def test_nan_does_not_poison_rolling_buffer(self):
+    inner_opt = optax.sgd(0.1)
+    opt = optimizers.skip_step_on_spikes(inner_opt, interval=4, scaling_factor=1.0)
+    params = {"x": jnp.array([1.0])}
+    opt_state = opt.init(params)
+
+    # Step 0: NaN occurs
+    updates, opt_state = opt.update({"x": jnp.array([1.0])}, opt_state, params, loss=jnp.nan, grad_norm=jnp.nan)
+    self.assertTrue(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 0)
+
+    # Step 1: Normal step succeeds
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(1.0), grad_norm=jnp.float32(1.0)
+    )
+    self.assertFalse(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 1)
+    self.assertFalse(jnp.all(updates["x"] == 0.0))
+
+    # Step 2: Normal step succeeds
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(1.0), grad_norm=jnp.float32(1.0)
+    )
+    self.assertFalse(opt_state["is_skipped"])
+    self.assertEqual(opt_state["count"], 2)
+
+    # Step 3: Spike is properly detected because rolling stats are finite
+    updates, opt_state = opt.update(
+        {"x": jnp.array([1.0])}, opt_state, params, loss=jnp.float32(100.0), grad_norm=jnp.float32(1.0)
+    )
+    self.assertTrue(opt_state["is_skipped"])
+    self.assertTrue(jnp.all(updates["x"] == 0.0))
+
+
+class TestMuonLogic(parameterized.TestCase):
   """Tests the granular path transformation functions."""
 
   def test_is_path_contain_any(self):
@@ -1048,7 +1189,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=maxtext_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
         "muon_use_all_to_all=False",
     ]
     config_no_a2a = pyconfig.initialize(argv_no_a2a)
@@ -1073,7 +1214,7 @@ class TestMuonLogic(unittest.TestCase):
         get_test_config_path(),
         "run_name=test",
         "opt_type=muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config_default = pyconfig.initialize(argv_default)
 
@@ -1098,7 +1239,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=optax_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config_optax = pyconfig.initialize(argv_optax)
 
@@ -1123,7 +1264,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=optax_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
         "muon_use_all_to_all=True",
     ]
     config_optax_a2a = pyconfig.initialize(argv_optax_a2a)
@@ -1137,7 +1278,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=invalid_type",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config_invalid = pyconfig.initialize(argv_invalid)
     with self.assertRaises(ValueError):
@@ -1166,7 +1307,7 @@ class TestMuonLogic(unittest.TestCase):
         "run_name=test",
         "opt_type=muon",
         "muon_type=maxtext_muon",
-        "model_name=llama2-7b",
+        "model_name=llama3.1-8b",
     ]
     config = pyconfig.initialize(argv)
 
@@ -1186,6 +1327,109 @@ class TestMuonLogic(unittest.TestCase):
       self.assertIsInstance(kernel_spec.sharding, jax.sharding.NamedSharding)
       self.assertEqual(kernel_spec.sharding.mesh, mesh)
       self.assertEqual(kernel_spec.sharding.spec, jax.sharding.PartitionSpec("data", "model"))
+
+  @parameterized.named_parameters(
+      ("optax_muon", "optax_muon"),
+      ("maxtext_muon", "maxtext_muon"),
+  )
+  def test_prefuse_moe_weights_muon_matches_unfused(self, muon_type):
+    """Pre-fused MoE `wi = [wi_0 | wi_1]` produces identical Muon updates to separate `wi_0, wi_1`."""
+
+    class UnfusedMoeModel(nnx.Module):
+
+      def __init__(self, w0, w1, wo, gate_k, scale):
+        self.MoeBlock_0 = nnx.Module()  # pylint: disable=invalid-name
+        self.MoeBlock_0.wi_0 = nnx.Param(w0)
+        self.MoeBlock_0.wi_1 = nnx.Param(w1)
+        self.MoeBlock_0.wo = nnx.Param(wo)
+        self.MoeBlock_0.gate = nnx.Module()
+        self.MoeBlock_0.gate.kernel = nnx.Param(gate_k)
+        self.scale = nnx.Param(scale)
+
+    class PrefusedMoeModel(nnx.Module):
+
+      def __init__(self, w0, w1, wo, gate_k, scale):
+        self.MoeBlock_0 = nnx.Module()  # pylint: disable=invalid-name
+        self.MoeBlock_0.wi = nnx.Param(jnp.concatenate([w0, w1], axis=-1))
+        self.MoeBlock_0.wo = nnx.Param(wo)
+        self.MoeBlock_0.gate = nnx.Module()
+        self.MoeBlock_0.gate.kernel = nnx.Param(gate_k)
+        self.scale = nnx.Param(scale)
+
+    keys = jax.random.split(jax.random.key(41), 10)
+    w0 = jax.random.normal(keys[0], (4, 8, 6), dtype=jnp.float32)
+    w1 = jax.random.normal(keys[1], (4, 8, 6), dtype=jnp.float32)
+    wo = jax.random.normal(keys[2], (4, 6, 8), dtype=jnp.float32)
+    gate_k = jax.random.normal(keys[3], (8, 4), dtype=jnp.float32)
+    scale = jnp.ones((8,), dtype=jnp.float32)
+
+    model_unfused = UnfusedMoeModel(w0, w1, wo, gate_k, scale)
+    model_prefused = PrefusedMoeModel(w0, w1, wo, gate_k, scale)
+    mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape((1, 1)), ("data", "model"))
+
+    base_args = [
+        "",
+        get_test_config_path(),
+        "run_name=test_prefuse_muon",
+        "opt_type=muon",
+        f"muon_type={muon_type}",
+        "muon_consistent_rms=0.2",
+        "adam_weight_decay=0.1",
+    ]
+    cfg_unfused = pyconfig.initialize(base_args + ["prefuse_moe_weights=False"])
+    cfg_prefused = pyconfig.initialize(base_args + ["prefuse_moe_weights=True"])
+
+    tx_unfused = optimizers.get_optimizer(cfg_unfused, lambda _: 1e-2, model=model_unfused, mesh=mesh)
+    tx_prefused = optimizers.get_optimizer(cfg_prefused, lambda _: 1e-2, model=model_prefused, mesh=mesh)
+    nnx_opt_unfused = nnx.Optimizer(model_unfused, tx_unfused, wrt=nnx.Param)
+    nnx_opt_prefused = nnx.Optimizer(model_prefused, tx_prefused, wrt=nnx.Param)
+
+    # Verify optimizer state stores pre-fused `wi` momentum as a single (4, 8, 12) leaf.
+    prefused_state_leaves = [
+        x.shape for x in jax.tree.leaves(nnx.as_pure(nnx.state(nnx_opt_prefused))) if hasattr(x, "shape")
+    ]
+    self.assertIn((4, 8, 12), prefused_state_leaves)
+    self.assertNotIn((4, 8, 6), prefused_state_leaves)
+
+    g_w0 = jax.random.normal(keys[4], w0.shape, dtype=jnp.float32)
+    g_w1 = jax.random.normal(keys[5], w1.shape, dtype=jnp.float32)
+    g_wo = jax.random.normal(keys[6], wo.shape, dtype=jnp.float32)
+    g_gate = jax.random.normal(keys[7], gate_k.shape, dtype=jnp.float32)
+    g_scale = jax.random.normal(keys[8], scale.shape, dtype=jnp.float32)
+
+    grads_unfused = nnx.clone(nnx.state(model_unfused, nnx.Param))
+    grads_unfused["MoeBlock_0"]["wi_0"].set_value(g_w0)
+    grads_unfused["MoeBlock_0"]["wi_1"].set_value(g_w1)
+    grads_unfused["MoeBlock_0"]["wo"].set_value(g_wo)
+    grads_unfused["MoeBlock_0"]["gate"]["kernel"].set_value(g_gate)
+    grads_unfused["scale"].set_value(g_scale)
+
+    grads_prefused = nnx.clone(nnx.state(model_prefused, nnx.Param))
+    grads_prefused["MoeBlock_0"]["wi"].set_value(jnp.concatenate([g_w0, g_w1], axis=-1))
+    grads_prefused["MoeBlock_0"]["wo"].set_value(g_wo)
+    grads_prefused["MoeBlock_0"]["gate"]["kernel"].set_value(g_gate)
+    grads_prefused["scale"].set_value(g_scale)
+
+    nnx_opt_unfused.update(model_unfused, grads_unfused)
+    nnx_opt_prefused.update(model_prefused, grads_prefused)
+
+    expected_wi = jnp.concatenate(
+        [model_unfused.MoeBlock_0.wi_0.get_value(), model_unfused.MoeBlock_0.wi_1.get_value()],
+        axis=-1,
+    )
+    np.testing.assert_allclose(model_prefused.MoeBlock_0.wi.get_value(), expected_wi, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        model_prefused.MoeBlock_0.wo.get_value(),
+        model_unfused.MoeBlock_0.wo.get_value(),
+        rtol=1e-6,
+        atol=1e-6,
+    )
+    np.testing.assert_allclose(
+        model_prefused.scale.get_value(),
+        model_unfused.scale.get_value(),
+        rtol=1e-6,
+        atol=1e-6,
+    )
 
 
 if __name__ == "__main__":

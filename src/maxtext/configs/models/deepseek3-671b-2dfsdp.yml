@@ -66,6 +66,7 @@ logical_axis_rules: [
     ['activation_kv_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert', 'context']],
     ['activation_embed_and_logits_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
     ['activation_norm_length', ['context']],
+    ['activation_norm_length_routed', ['context']],
     ['activation_norm_length_moe', ['context']],
     ['activation_heads', []],
     ['activation_stage', 'stage'],

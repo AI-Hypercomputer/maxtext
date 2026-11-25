@@ -27,7 +27,7 @@ export TOKENIZER_PATH='Qwen/Qwen3-Next-80B-A3B-Instruct'
 python3 -m pip install torch --index-url https://download.pytorch.org/whl/cpu
 
 # Ensure HF_TOKEN is set
-if [ -z "${HF_TOKEN}" ]; then
+if [ -z "${HF_TOKEN:+set}" ]; then
   echo "Error: HF_TOKEN environment variable is not set. Please export your Hugging Face token."
   echo "Example: export HF_TOKEN=hf_..."
   exit 1
@@ -46,7 +46,6 @@ echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
     model_name=qwen3-next-80b-a3b \
     base_output_directory=${BASE_OUTPUT_PATH}/scanned \
-    hf_access_token=${HF_TOKEN} \
     scan_layers=true \
     use_multimodal=false
 
@@ -54,7 +53,6 @@ JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtex
 JAX_PLATFORMS=cpu python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml \
     model_name=qwen3-next-80b-a3b \
     base_output_directory=${BASE_OUTPUT_PATH}/unscanned \
-    hf_access_token=${HF_TOKEN} \
     scan_layers=false \
     use_multimodal=false
     

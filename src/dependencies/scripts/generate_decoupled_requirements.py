@@ -64,6 +64,13 @@ EXCLUDED_GCLOUD_PACKAGES = (
 # clients without holding the hardware locks back. Drop this once tokamax no longer requires xprof,
 # or once xprof is safe to install here.
 PINNED_PACKAGES = {"tokamax": "tokamax==0.0.12"}
+# orbax-checkpoint>=0.12.9 declares etils[epath-gcs], which pulls gcsfs and google-cloud-storage
+# into this environment even though orbax never imports them (and uv resolves the extra regardless of
+# the filtering above). 0.12.8 is the last release without that extra; Multi-Tier Checkpointing, the
+# only MaxText feature that needs a newer orbax, requires Google Cloud Storage and so is never
+# exercised in decoupled mode. Drop this once orbax stops requiring etils[epath-gcs], or once gcsfs
+# is safe to install here.
+PINNED_PACKAGES["orbax-checkpoint"] = "orbax-checkpoint==0.12.8"
 # google-pasta is a tensorflow dependency that only provides `pasta`; it has no Cloud surface.
 KEPT_GCLOUD_PACKAGES = ("google-pasta",)
 

@@ -57,6 +57,13 @@ except ImportError:
   modeling_qwen4_exp = None
   _HAS_QWEN4_EXP = False
 
+# Tolerances for fp32 JAX-vs-PyTorch parity of the chunked gated delta rule. The two
+# implementations accumulate the recurrence in different orders, so isolated elements
+# can drift slightly past 1e-5 depending on the CPU backend (observed: 1 / 32768
+# elements off by 1.17e-5). Real kernel bugs are orders of magnitude larger.
+_GDN_PT_PARITY_RTOL = 1e-4
+_GDN_PT_PARITY_ATOL = 5e-5
+
 
 def _assert_allclose_to_scale(actual: Any, desired: Any, rtol: float = 1e-4, atol_scale: float = 1e-5) -> None:
   """Like assert_allclose, with atol relative to max|desired| (gradients here reach O(100s))."""
@@ -381,8 +388,12 @@ class Qwen3_8GDNTest(absltest.TestCase):
     if jax_state is None or pt_state is None:
       self.fail("jax_state and pt_state must not be None")
     self.assertEqual(jax_state.dtype, jnp.float32)
-    np.testing.assert_allclose(np.array(jax_out), pt_out.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(np.array(jax_state), pt_state.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        np.array(jax_out), pt_out.detach().cpu().numpy(), rtol=_GDN_PT_PARITY_RTOL, atol=_GDN_PT_PARITY_ATOL
+    )
+    np.testing.assert_allclose(
+        np.array(jax_state), pt_state.detach().cpu().numpy(), rtol=_GDN_PT_PARITY_RTOL, atol=_GDN_PT_PARITY_ATOL
+    )
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
   def test_qwen3_8_gdn_layer_pytorch_weight_copy_parity(self):
@@ -430,7 +441,7 @@ class Qwen3_8GDNTest(absltest.TestCase):
     x = rng.standard_normal((2, seq_len, emb_dim)).astype(np.float32)
     pt_out = pt_gdn(torch.from_numpy(x)).detach().cpu().numpy()
     jax_out = np.array(jax_gdn(jnp.array(x)))
-    np.testing.assert_allclose(jax_out, pt_out, rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(jax_out, pt_out, rtol=_GDN_PT_PARITY_RTOL, atol=_GDN_PT_PARITY_ATOL)
 
   def test_block_doubling_unit_lower_inverse_parity_and_validation(self):
     """Verifies the block-doubling unit-lower inverse matches solve_triangular / fp64 in kernel and layer."""
@@ -551,8 +562,12 @@ class Qwen3_8GDNNumericsTest(absltest.TestCase):
     self.assertIsNotNone(pt_state)
     if jax_state is None or pt_state is None:
       self.fail("jax_state and pt_state must not be None")
-    np.testing.assert_allclose(np.array(jax_out), pt_out.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(np.array(jax_state), pt_state.detach().cpu().numpy(), rtol=1e-5, atol=1e-5)
+    np.testing.assert_allclose(
+        np.array(jax_out), pt_out.detach().cpu().numpy(), rtol=_GDN_PT_PARITY_RTOL, atol=_GDN_PT_PARITY_ATOL
+    )
+    np.testing.assert_allclose(
+        np.array(jax_state), pt_state.detach().cpu().numpy(), rtol=_GDN_PT_PARITY_RTOL, atol=_GDN_PT_PARITY_ATOL
+    )
 
   def test_chunk_gated_delta_rule_backward_grad_finite_large_decay(self):
     """Checks backward grad through chunked scan is finite under large decay."""
@@ -779,7 +794,8 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
     jax_out, jax_blocks = jax_attn(jnp.array(x), position_ids=jnp.array(pos), return_selected_blocks=True)
 
     pt_tok_mask = pt_attn.indexer(torch.from_numpy(x), (pt_cos, pt_sin), pt_float_mask, None)
-    pt_tok_mask_np = pt_tok_mask.detach().cpu().numpy() == 0.0
+    pt_tok_mask_arr = pt_tok_mask.detach().cpu().numpy()
+    pt_tok_mask_np = pt_tok_mask_arr if pt_tok_mask_arr.dtype == np.bool_ else (pt_tok_mask_arr == 0.0)
     for q_idx in range(s):
       n_complete = (q_idx + 1) // 4
       if n_complete > 0:
@@ -820,7 +836,8 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
 
       pt_out, _ = pt_attn(torch.from_numpy(x), (pt_cos, pt_sin), attention_mask=pt_float_mask)
       pt_tok_mask = pt_attn.indexer(torch.from_numpy(x), (pt_cos, pt_sin), pt_float_mask, None)
-      pt_tok_mask_np = pt_tok_mask.detach().cpu().numpy() == 0.0
+      pt_tok_mask_arr = pt_tok_mask.detach().cpu().numpy()
+      pt_tok_mask_np = pt_tok_mask_arr if pt_tok_mask_arr.dtype == np.bool_ else (pt_tok_mask_arr == 0.0)
 
     jax_out, jax_blocks = jax_attn(
         jnp.array(x), position_ids=jnp.array(pos), segment_ids=jnp.array(seg_ids), return_selected_blocks=True
@@ -1761,7 +1778,17 @@ class Qwen3_8BackboneTest(absltest.TestCase):
     self.assertEqual(out_s.dtype, jnp.bfloat16)
     self.assertTrue(jnp.all(jnp.isfinite(out_u)))
     self.assertTrue(jnp.all(jnp.isfinite(out_s)))
-    np.testing.assert_allclose(out_u, out_s, atol=1e-1, rtol=1e-1)
+    # Scanned and unscanned paths compile to different XLA programs, so bf16
+    # rounding diverges across 4 layers and a handful of elements drift by up to
+    # ~0.2. Exact cross-path logic is covered by the fp32 parity test above; here
+    # bound the element-wise and mean error so gross bf16 regressions still fail
+    # without depending on exact fusion decisions.
+    # TODO(chengnuojin): Follow up with the XLA team on the bf16 drift introduced by the
+    # ReshapeMover change that keeps data-reordering rearranges before widening converts,
+    # and tighten these bounds again if it is resolved.
+    out_u32, out_s32 = np.asarray(out_u, np.float32), np.asarray(out_s, np.float32)
+    np.testing.assert_allclose(out_u32, out_s32, atol=2.5e-1, rtol=1e-1)
+    self.assertLess(float(np.mean(np.abs(out_u32 - out_s32))), 5e-2)
 
   def test_scanned_cycles_fail_fast_validation(self):
     """Verifies fail-fast validation in scanned cycle construction."""

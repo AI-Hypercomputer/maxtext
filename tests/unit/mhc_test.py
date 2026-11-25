@@ -96,6 +96,12 @@ class TestSinkhorn(unittest.TestCase):
 class TestMHC(parameterized.TestCase):
   """Test for MHC module"""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_cached_moe_layer"):
+      delattr(cls, "_cached_moe_layer")
+    super().tearDownClass()
+
   def _setup_mhc(
       self,
       rate,
@@ -183,18 +189,21 @@ class TestMHC(parameterized.TestCase):
 
     with nn_partitioning.axis_rules(self.config.logical_axis_rules):
       module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
-      layer = moe.RoutedMoE(
-          config=self.config,
-          num_experts=self.config.num_experts,
-          num_experts_per_tok=self.config.num_experts_per_tok,
-          mesh=self.mesh,
-          kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
-          kernel_axes=("embed", "mlp"),
-          intermediate_dim=self.config.base_mlp_dim,
-          dtype=self.config.dtype,
-          weight_dtype=self.config.weight_dtype,
-          rngs=self.rngs,
-      )
+      layer = getattr(self.__class__, "_cached_moe_layer", None)
+      if layer is None:
+        layer = moe.RoutedMoE(
+            config=self.config,
+            num_experts=self.config.num_experts,
+            num_experts_per_tok=self.config.num_experts_per_tok,
+            mesh=self.mesh,
+            kernel_init=nd_dense_init(1.0, "fan_in", "truncated_normal"),
+            kernel_axes=("embed", "mlp"),
+            intermediate_dim=self.config.base_mlp_dim,
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            rngs=self.rngs,
+        )
+        setattr(self.__class__, "_cached_moe_layer", layer)
 
       b, s, k, d = self.x.shape
       output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_MOE)

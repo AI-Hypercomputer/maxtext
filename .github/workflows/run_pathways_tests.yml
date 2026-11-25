@@ -112,9 +112,6 @@ jobs:
       - name: Start Pathways Daemons
         shell: bash
         env:
-          RUN_ID: ${{ github.run_id }}
-          RUN_ATTEMPT: ${{ github.run_attempt }}
-          WORKER_GROUP: ${{ inputs.worker_group }}
           PATHWAYS_UNSAFE_UNSAFE_OVERRIDE_GRPC_CREDENTIALS: "grpc_insecure_override"
           IFRT_PROXY_USE_INSECURE_GRPC_CREDENTIALS: "true"
         run: |
@@ -138,8 +135,8 @@ jobs:
           # mutable. All nine jax_* tags for a given date resolve to the same digest.
           # TODO: restore ":latest" once the compiler regression is fixed upstream.
           PATHWAYS_IMAGES = {
-              "cloud-tpu-v2-images/pathways/server": "sha256:6fb1399d265fc4532805bfb04d6f44a596b3111e30c7f2e4d9fafe98adf7456b",
-              "cloud-tpu-v2-images/pathways/proxy_server": "sha256:57781f09427eb2f1863672c04b239ed5fce41e05e598da4c071880ce3eef51d5",
+              "cloud-tpu-v2-images/pathways/server": "sha256:b7a1b9566d869e6f797910c87f9bf769cfe29969a28f2f6f2468f2b15db1ae71",
+              "cloud-tpu-v2-images/pathways/proxy_server": "sha256:afda1e6f321ab31c0fd9c9f319f7cbb8a8f88d75be245a652fef34945154c87c",
           }
 
           def extract_image_layers(repo):
@@ -216,28 +213,27 @@ jobs:
           python3 /tmp/extract_pathways.py
           chmod +x /usr/pathways/run/* 2>/dev/null || true
 
+          # Omit --scratch_location / --gcs_scratch_location so Pathways uses its in-memory
+          # compilation cache instead of synchronous GCS cache RPCs on a cold per-run path.
           echo "Starting Pathways Resource Manager..."
           TPU_SKIP_MDS_QUERY=true /usr/pathways/run/cloud_pathways_server_sanitized \
             --server_port=29001 \
             --node_type=resource_manager \
             --enforce_kernel_ipv6_support=false \
             --instance_count=1 \
-            --instance_type=tpuv6e:2x2 \
-            --gcs_scratch_location="gs://cloud-pathways-staging/maxtext-ci/${RUN_ID}_${RUN_ATTEMPT}_${WORKER_GROUP}" > /tmp/pathways_rm.log 2>&1 &
+            --instance_type=tpuv6e:2x2 > /tmp/pathways_rm.log 2>&1 &
 
           echo "Starting Pathways Worker..."
           /usr/pathways/run/cloud_pathways_server_sanitized \
             --server_port=29005 \
             --resource_manager_address=127.0.0.1:29001 \
-            --enforce_kernel_ipv6_support=false \
-            --gcs_scratch_location="gs://cloud-pathways-staging/maxtext-ci/${RUN_ID}_${RUN_ATTEMPT}_${WORKER_GROUP}" > /tmp/pathways_worker.log 2>&1 &
+            --enforce_kernel_ipv6_support=false > /tmp/pathways_worker.log 2>&1 &
 
           echo "Starting Pathways Proxy..."
           XLA_FLAGS="--xla_dump_to=/tmp/aot_test_dump --xla_dump_hlo_as_text --xla_dump_hlo_module_re=jit_train_step" \
           /usr/pathways/run/cloud_proxy_server_sanitized \
             --server_port=29000 \
             --resource_manager_address=127.0.0.1:29001 \
-            --gcs_scratch_location="gs://cloud-pathways-staging/maxtext-ci/${RUN_ID}_${RUN_ATTEMPT}_${WORKER_GROUP}" \
             --xla_tpu_scoped_vmem_limit_kib=65536 \
             --xla_tpu_spmd_rng_bit_generator_unsafe=true > /tmp/pathways_proxy.log 2>&1 &
       - name: Wait for Pathways Proxy Readiness
@@ -282,6 +278,12 @@ jobs:
           trap cleanup_tpu_locks TERM INT
 
           if [ "${TOTAL_WORKERS}" -gt 1 ]; then
+            # Pathways jobs upload no test results, so balance on the durations of the matching non-Pathways flavor.
+            if [[ "${PYTEST_MARKER}" == *"not integration_test"* ]]; then
+              DURATIONS_FLAVOR="tpu-unit"
+            else
+              DURATIONS_FLAVOR="tpu-integration"
+            fi
             CANDIDATE_URLS=(
               "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/gh-pages/dev/bench/per_test_baseline.json"
             )
@@ -290,11 +292,25 @@ jobs:
             fi
             for URL in "${CANDIDATE_URLS[@]}"; do
               if curl -sSf -H "User-Agent: github-actions" "${URL}" -o per_test_baseline.json; then
-                .venv/bin/python3 tools/dev/convert_durations.py per_test_baseline.json .test_durations --flavor tpu-unit
+                .venv/bin/python3 tools/dev/convert_durations.py per_test_baseline.json .test_durations --flavor "${DURATIONS_FLAVOR}"
                 break
               fi
             done
-            SPLIT_ARGS="--class-splits=${TOTAL_WORKERS} --class-group=${WORKER_GROUP}"
+            if [ "${DURATIONS_FLAVOR}" = "tpu-unit" ]; then
+              # Whole test classes stay on one shard (tests/utils/class_split.py), as in the non-Pathways tpu-unit flavor.
+              SPLIT_ARGS="--class-splits=${TOTAL_WORKERS} --class-group=${WORKER_GROUP}"
+            else
+              # Integration tests split per test, as in the non-Pathways tpu-integration flavor: TrainTests alone
+              # takes longer than an even shard share, so a class-level split could not balance the shards.
+              .venv/bin/python3 -m pip install --quiet pytest-split
+              if [ -f .test_durations ]; then
+                SPLIT_ALGO="--splitting-algorithm least_duration"
+              else
+                echo "Warning: .test_durations not found. Falling back to default split."
+                SPLIT_ALGO=""
+              fi
+              SPLIT_ARGS="--splits ${TOTAL_WORKERS} --group ${WORKER_GROUP} ${SPLIT_ALGO}"
+            fi
           else
             SPLIT_ARGS=""
           fi

@@ -2,7 +2,7 @@
 
 Two approaches are here:
 
-1. Run a model recipe with a single CLI command. Great to replicate performance results previously measured. See https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/training/trillium for examples.
+1. Run a model recipe with a single CLI command. Great to replicate performance results previously measured. See https://github.com/AI-Hypercomputer/tpu-recipes/tree/main/training/trillium for examples, and [`deepseek3_671b_tpu7x/`](deepseek3_671b_tpu7x/README.md) for DeepSeek-V3 671B FP8 recipes on TPU7x (Ironwood).
 2. Run several experiments pythonically across a sweep of parameters (cluster configuration, maxtext parameters) with Cluster Toolkit workloads.
 
 For new GKE runs, submit each benchmark as a Cluster Toolkit JobSet. Authenticate
@@ -65,8 +65,8 @@ python3 -m benchmarks.benchmark_runner ctk --project ${PROJECT?} --location ${LO
 ```shell
 # Pathways with Cluster Toolkit (ctk)
 export RUNNER=us-docker.pkg.dev/path/to/maxtext_runner
-export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server
-export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server
+export PROXY_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server
+export SERVER_IMAGE=us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server
 
 python3 -m benchmarks.benchmark_runner ctk --use_pathways=true --pathways_server_image="${SERVER_IMAGE?}" --pathways_proxy_server_image="${PROXY_IMAGE?}" --pathways_runner_image="${RUNNER?}" --project ${PROJECT?} --location ${LOCATION?} --cluster_name ${CLUSTER?} --device_type v6e-256 --base_output_directory gs://maxtext-experiments-tpem/ --num_steps=5
 ```

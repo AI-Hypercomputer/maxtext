@@ -18,9 +18,8 @@ import dataclasses
 import functools
 from functools import partial
 import math
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, NamedTuple, Optional, Tuple
 
-from flax import linen as nn
 from flax import nnx
 import jax
 from jax import lax
@@ -32,6 +31,7 @@ import jax.numpy as jnp
 from jax.sharding import Mesh
 from maxtext.common.common_types import (
     Array,
+    ATTN_EMBED,
     AttentionType,
     AxisIdxes,
     AxisNames,
@@ -62,7 +62,7 @@ from maxtext.common.common_types import (
     PREFILL_LENGTH,
     Q_LENGTH,
 )
-from maxtext.inference.kvcache import KVQuant, KVTensor
+from maxtext.inference.kvcache import KVQuant
 from maxtext.kernels.attention import jax_flash_attention
 from maxtext.kernels.attention import tokamax_ring_attention
 from maxtext.kernels.attention import ulysses_attention
@@ -71,11 +71,19 @@ from maxtext.kernels.attention.ragged_attention import ragged_gqa
 from maxtext.kernels.attention.ragged_attention import ragged_mha
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.layers.quantizations import without_qwix_interception
 from maxtext.utils import max_utils
-from maxtext.utils.sharding import get_logical_axis_rules, logical_to_mesh_axes, logical_to_spec, maybe_shard_with_pspec, with_logical_constraint
+from maxtext.utils.sharding import (
+    get_logical_axis_rules,
+    logical_to_mesh_axes,
+    logical_to_spec,
+    maybe_shard_with_pspec,
+    mesh_axes_for_dim,
+    with_logical_constraint,
+)
 import numpy as np
+import qwix
 from tokamax._src.ops.attention import base as tokamax_attention_base
-from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
 
 try:  # pragma: no cover
   from tokamax._src.ops.splash_attention import splash_attention_kernel as tokamax_splash_kernel
@@ -101,14 +109,83 @@ dynamic_vector_slice_in_dim = jax.vmap(lax.dynamic_slice_in_dim, in_axes=(None, 
 _COMPRESSED_DQ_REDUCTION_STEPS = 3
 
 
+class _SplashBlocks(NamedTuple):
+  """Splash attention block sizes and Q/K/V layouts for one pass."""
+
+  block_q: int
+  block_kv: int
+  block_kv_compute: int
+  block_q_dkv: int
+  block_kv_dkv: int
+  block_kv_dkv_compute: int
+  block_q_dq: int
+  block_kv_dq: int
+  q_layout: str
+  k_layout: str
+  v_layout: str
+
+
 def _resolve_attention_type(config: Config, attention_type: AttentionType | str | None) -> AttentionType:
+  """Resolves effective layer `AttentionType` from `config.attention_type`."""
   configured_attention_type = AttentionType(getattr(config, "attention_type", AttentionType.GLOBAL.value))
   if attention_type is None:
     return configured_attention_type
   resolved_attention_type = AttentionType(attention_type)
-  if configured_attention_type == AttentionType.BLOCK_DIFFUSION and resolved_attention_type == AttentionType.GLOBAL:
+  if (
+      configured_attention_type in (AttentionType.BLOCK_DIFFUSION, AttentionType.FULL)
+      and resolved_attention_type == AttentionType.GLOBAL
+  ):
     return configured_attention_type
   return resolved_attention_type
+
+
+def resolve_context_parallel_strategy(config: Config, attention_type: AttentionType) -> str:
+  """Returns the effective context-parallel strategy for a layer.
+
+  `LOCAL_SLIDING` layers use `config.local_context_parallel_strategy` when it is
+  non-empty, and otherwise fall back to `config.context_parallel_strategy`. All
+  other attention types always use `config.context_parallel_strategy`.
+
+  Args:
+    config: Model configuration containing context-parallel strategy settings.
+    attention_type: The layer's attention type.
+
+  Returns:
+    Lowercase context-parallel strategy name (e.g., `"halo"`, `"ring"`).
+  """
+  if attention_type == AttentionType.LOCAL_SLIDING and config.local_context_parallel_strategy:
+    return config.local_context_parallel_strategy.lower()
+  return config.context_parallel_strategy.lower()
+
+
+def _halo_tails(k: Array, v: Array, seg: Array, halo: int) -> tuple[Array, Array, Array]:
+  """Slices the trailing `halo` KV tokens and segment IDs from a sequence chunk."""
+  return k[:, :, -halo:, :], v[:, :, -halo:, :], seg[:, -halo:]
+
+
+def _recv_halo(
+    k: Array,
+    v: Array,
+    seg: Array,
+    *,
+    halo: int,
+    context_axis: str,
+    perm: list[tuple[int, int]],
+    is_edge_rank: Array,
+    edge: tuple[Array, Array, Array] | None = None,
+) -> tuple[Array, Array, Array]:
+  """Receives the trailing `halo` KV tokens from the neighbour selected by `perm`.
+
+  On `is_edge_rank`, the neighbour does not precede this chunk in the global
+  sequence, so `edge` is used instead; `None` means nothing precedes it and
+  masks the halo out with segment ID `-2`.
+  """
+  k_halo, v_halo, seg_halo = (
+      jax.lax.ppermute(x, axis_name=context_axis, perm=perm) for x in _halo_tails(k, v, seg, halo)
+  )
+  if edge is None:
+    edge = (jnp.zeros_like(k_halo), jnp.zeros_like(v_halo), jnp.full_like(seg_halo, -2))
+  return tuple(jnp.where(is_edge_rank, e, h) for e, h in zip(edge, (k_halo, v_halo, seg_halo), strict=True))
 
 
 def validate_compute_axis_order(s: AxisIdxes) -> None:
@@ -149,6 +226,44 @@ def apply_mask_to_logits(logits: Array, mask: Array):
   return jnp.where((mask >= DEFAULT_MASK_VALUE * 0.5), logits, DEFAULT_MASK_VALUE)
 
 
+# Disable model-wide Qwix interception so `use_qwix_quantization=True` does not also
+# quantize Q or the attention weights inside KV-cache einsums.
+_qwix_einsum = without_qwix_interception(qwix.einsum)
+
+
+def kv_einsum(subscripts: str, lhs: Array, rhs: Array | qwix.QArray, precision) -> Array:
+  """Runs `einsum` for QK^T or PV, using `qwix.einsum` when K or V is a quantized `QArray`.
+
+  `qwix.einsum` keeps cached K and V in their quantized dtype during the matmul instead of
+  dequantizing the full cache in HBM: QK^T applies K's scale to the output logits, and PV
+  multiplies V's per-token scale into the attention weights before the matmul.
+  """
+  if isinstance(rhs, qwix.QArray):
+    return _qwix_einsum(subscripts, lhs, rhs, precision=precision)
+  return jnp.einsum(subscripts, lhs, rhs, precision=precision)
+
+
+def _dequantize_if_quantized(x: Array | qwix.QArray) -> Array:
+  return qwix.dequantize(x) if isinstance(x, qwix.QArray) else x
+
+
+def _constrain_kv(x: Array | qwix.QArray, logical_axis_names) -> Array | qwix.QArray:
+  """Applies logical sharding constraints to K/V (`qvalue` only when quantized)."""
+  if isinstance(x, qwix.QArray):
+    # `scale` has size 1 along quantized axes (`d_kv`, and `heads` for `heads_and_dkv`),
+    # so applying K/V's sharding spec to `scale` would fail on sharded axes.
+    return dataclasses.replace(x, qvalue=with_logical_constraint(x.qvalue, logical_axis_names))
+  return with_logical_constraint(x, logical_axis_names)
+
+
+def _raise_if_quantized_kv_for_ragged(key: Array | qwix.QArray, value: Array | qwix.QArray) -> None:
+  if isinstance(key, qwix.QArray) or isinstance(value, qwix.QArray):
+    raise NotImplementedError(
+        "Ragged attention kernels do not support a quantized KV cache; disable use_ragged_attention or"
+        " quantize_kvcache."
+    )
+
+
 def validate_gpu_flash_attention(
     sinks: Array | None,
     record_max_logits: bool,
@@ -162,6 +277,21 @@ def validate_gpu_flash_attention(
     )
   if record_max_logits:
     raise NotImplementedError("record_max_logits (QK-Clip) is not supported for GPU flash attention kernels yet.")
+
+
+def _tokamax_gpu_flash_attention():
+  """Returns the Tokamax FlashAttention op for GPU."""
+  # Imported lazily, since the jax-triton kernel needs Triton, which only ships
+  # with tokamax[cuda].
+  # pylint: disable=g-import-not-at-top,import-outside-toplevel
+  try:
+    from tokamax._src.ops.attention import triton as tokamax_triton
+  except ImportError:  # pragma: no cover
+    # TODO(b/532554266): Remove the fallback once the MaxText GPU environment uses tokamax>=0.0.18.
+    from tokamax._src.ops.attention import pallas_triton as tokamax_pallas_triton
+
+    return tokamax_pallas_triton.PallasTritonFlashAttention()
+  return tokamax_triton.TritonFlashAttention()
 
 
 def _sinks_to_te_softmax_offset(sinks: Array, num_query_heads: int) -> Array:
@@ -720,7 +850,7 @@ class AttentionOp(nnx.Module):
     # Only the cudnn_flash_te bridge draws from these, and only with attention dropout
     # on; holding them otherwise leaves dead RNG state in the model.
     self.rngs = rngs if dropout_rate > 0.0 else None
-    if self.attention_kernel == "flash" and tokamax_ring_attention.is_context_parallel_ring_requested(self.config):
+    if self.attention_kernel == "flash" and self.context_parallel_strategy == "ring":
       target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
       if target_hardware == "tpu":
         if not self.config.use_tokamax_splash:
@@ -766,7 +896,7 @@ class AttentionOp(nnx.Module):
             dkv_dim_q=3,
             dkv_dim_kv=3,
         )
-    if self.attention_kernel == "flash" and ulysses_attention.is_context_parallel_ulysses_requested(self.config):
+    if self.attention_kernel == "flash" and self.context_parallel_strategy == "ulysses":
       target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
       if target_hardware != "tpu":
         raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
@@ -774,8 +904,8 @@ class AttentionOp(nnx.Module):
         raise ValueError("TPU Ulysses attention requires use_tokamax_splash=True.")
       if self.config.use_jax_splash:
         raise ValueError("TPU Ulysses attention requires use_jax_splash=False.")
-      if self.attention_type != AttentionType.GLOBAL:
-        raise ValueError("TPU Ulysses attention is initially supported only for global causal attention.")
+      if self.attention_type not in (AttentionType.GLOBAL, AttentionType.FULL):
+        raise ValueError("TPU Ulysses attention supports only global causal or full attention.")
       if self.config.enable_dropout and self.dropout_rate > 0.0:
         raise ValueError("TPU Ulysses attention does not support dropout yet.")
       if self.use_ragged_attention:
@@ -809,6 +939,7 @@ class AttentionOp(nnx.Module):
           head_dim_kv=1,
           ulysses_size=self.mesh.shape[context_axis],
           attention_label="TPU Ulysses attention",
+          allow_kv_head_replication=True,
       )
       ulysses_attention.validate_dkv_sharding(
           axis_names_q=axis_names_q,
@@ -817,7 +948,7 @@ class AttentionOp(nnx.Module):
           dkv_dim_kv=3,
           attention_label="TPU Ulysses attention",
       )
-    if self.attention_kernel == "flash" and usp_attention.is_context_parallel_usp_requested(self.config):
+    if self.attention_kernel == "flash" and self.context_parallel_strategy == "usp":
       target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
       if target_hardware != "tpu":
         raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
@@ -874,70 +1005,13 @@ class AttentionOp(nnx.Module):
           attention_label="TPU USP attention",
       )
 
-    def maybe_create_nnx(einsum, *args):
-      if isinstance(einsum, nn.Module):
-        return nnx_wrappers.ToNNX(einsum, rngs=rngs).lazy_init(*args)
-      return einsum
-
-    # qk_product
-    if self.kv_quant:
-      # Dummy inputs for lazy initialization
-      b = 1
-      t_prefill = self.max_prefill_predict_length
-      t_ar = 1  # Autoregressive mode has a query length of 1
-      n = self.num_query_heads
-      n_kv = self.num_kv_heads
-      d = self.config.head_dim
-      g = n // n_kv
-      s_prefill = self.max_prefill_predict_length
-      s_ar = self.max_target_length
-
-      # Dummy query/key/value shapes as before...
-      dummy_query_prefill = jnp.zeros((b, t_prefill, n_kv, g, d), dtype=self.dtype)
-      dummy_key_prefill = jnp.zeros((b, s_prefill, n_kv, d), dtype=self.dtype)
-      dummy_query_ar = jnp.zeros((b, t_ar, n_kv, g, d), dtype=self.dtype)
-      dummy_key_ar = jnp.zeros((b, s_ar, n_kv, d), dtype=self.dtype)
-
-      dummy_attn_weights_prefill = jnp.zeros((b, n_kv, g, t_prefill, s_prefill), dtype=jnp.float32)
-      dummy_value_prefill = jnp.zeros((b, s_prefill, n_kv, d), dtype=self.dtype)
-      dummy_attn_weights_ar = jnp.zeros((b, n_kv, g, t_ar, s_ar), dtype=jnp.float32)
-      dummy_value_ar = jnp.zeros((b, s_ar, n_kv, d), dtype=self.dtype)
-
-      # Prefill AqtEinsum instances
-      self.AqtEinsum_0 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts",
-          dummy_query_prefill,
-          dummy_key_prefill,
-      )
-      self.AqtEinsum_1 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd",
-          dummy_attn_weights_prefill,
-          dummy_value_prefill,
-      )
-      # Autoregressive AqtEinsum instances
-      self.AqtEinsum_2 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor(),
-          "btkgd,bskd->bkgts",
-          dummy_query_ar,
-          dummy_key_ar,
-      )
-      self.AqtEinsum_3 = maybe_create_nnx(
-          self.kv_quant.einsum_fn_with_rhs_qtensor_and_dequant(),
-          "bkgts,bskd->btkgd",
-          dummy_attn_weights_ar,
-          dummy_value_ar,
-      )
-    else:
-      self.AqtEinsum_0 = jnp.einsum
-      self.AqtEinsum_1 = jnp.einsum
-      self.AqtEinsum_2 = jnp.einsum
-      self.AqtEinsum_3 = jnp.einsum
-
   def _logical_to_mesh_axes(self, logical_name):
     logical_rules = get_logical_axis_rules()
     return logical_to_mesh_axes(logical_name, mesh=self.mesh, rules=logical_rules)
+
+  @property
+  def context_parallel_strategy(self) -> str:
+    return resolve_context_parallel_strategy(self.config, self.attention_type)
 
   def _context_parallel_size(self) -> int:
     """Number of ways the query sequence is actually sharded, per the active rules.
@@ -966,10 +1040,15 @@ class AttentionOp(nnx.Module):
         if axis is not None and axis != self.config.ulysses_context_sharding and axis in self.mesh.shape
     )
 
-  def _load_balanced_context_parallel(self) -> bool:
+  def _load_balanced_context_parallel(self, sequence_load_balanced: bool = False) -> bool:
     """Whether the load-balanced CP path is valid for this call.
 
-    `context_parallel_load_balance` on its own is not enough. The load-balanced
+    `sequence_load_balanced=True` means the caller (`Attention.__call__` under
+    `context_parallel_attention_load_balance`) has itself permuted Q/K/V, positions and
+    segment ids into DUAL_CHUNK_SWAP order for exactly `_context_parallel_size()` shards
+    (see `attention_load_balance_context_size`), so the load-balanced path applies.
+
+    Otherwise `context_parallel_load_balance` on its own is not enough. The load-balanced
     path assumes the batch arrives in DUAL_CHUNK_SWAP order: the mask bakes that
     permutation into a static `q_sequence`, and `wrap_flash_attention` restores
     K/V to contiguous order. The input pipeline applies that order once, for one
@@ -982,9 +1061,54 @@ class AttentionOp(nnx.Module):
     back to the plain causal path, which is correct at any shard count.
     """
     cp_size = self._context_parallel_size()
+    if sequence_load_balanced:
+      return cp_size > 1
     return cp_size > 1 and max_utils.reordered_cp_size(self.config, self.mesh) == cp_size
 
-  def check_attention_inputs(self, query: Array, key: Array | KVTensor, value: Array | KVTensor) -> None:
+  def attention_load_balance_context_size(self, model_mode: str) -> int:
+    """How many context shards `Attention.__call__` should load-balance over; 1 means off.
+
+    Under `context_parallel_attention_load_balance` the attention layer permutes its own
+    input into DUAL_CHUNK_SWAP order and undoes it on the output, so the batch and every
+    other layer stay in natural order. That needs the query sequence to be sharded over
+    exactly the `context_sharding` axis under the ambient rules. When it is not (e.g. an
+    eval rule without context parallelism) or outside training, this returns 1 and the
+    layer runs the plain causal path, which is correct at any shard count.
+
+    Only plain causal layers (`AttentionType.GLOBAL`) are balanced. Other layers keep
+    natural order: a FULL (bidirectional) layer such as a vision encoder has no causal
+    imbalance to fix, and may take its rotary angles from the natural token order rather
+    than from the positions that travel with the permuted tokens.
+    """
+    if not self.config.context_parallel_attention_load_balance or model_mode != MODEL_MODE_TRAIN or self.mesh is None:
+      return 1
+    if self.attention_type != AttentionType.GLOBAL:
+      return 1
+    context_axis = self.config.context_sharding
+    q_seq_axes = mesh_axes_for_dim(self._logical_to_mesh_axes((Q_LENGTH,))[0])
+    if q_seq_axes != (context_axis,):
+      return 1
+    cp_size = self.mesh.shape[context_axis]
+    return cp_size if cp_size % 2 == 0 else 1
+
+  def reorder_for_attention_load_balance(self, x: Array | None, *, to_natural: bool = False) -> Array | None:
+    """Moves a `[batch, seq, ...]` activation between natural and DUAL_CHUNK_SWAP order.
+
+    The sequence dim is sharded over `context_sharding`, the batch dim as the attention
+    batch (`BATCH_ATTN`) and the embed dim of a `[batch, seq, embed]` activation as `ATTN_EMBED`
+    under the ambient rules. See `tokamax_ring_attention.reorder_for_load_balance`.
+    """
+    return tokamax_ring_attention.reorder_for_load_balance(
+        x,
+        mesh=self.mesh,
+        axis_name=self.config.context_sharding,
+        batch_axes=self._logical_to_mesh_axes((BATCH_ATTN,))[0],
+        to_natural=to_natural,
+        order=self.config.context_parallel_attention_load_balance_order,
+        embed_axes=self._logical_to_mesh_axes((ATTN_EMBED,))[0],
+    )
+
+  def check_attention_inputs(self, query: Array, key: Array | qwix.QArray, value: Array | qwix.QArray) -> None:
     """Check attention inputs."""
 
     assert key.ndim == value.ndim, f"k (dim {key.ndim}), v (dim {value.ndim}) must have same rank."
@@ -1043,6 +1167,7 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Optional[Array] = None,
       attention_type: AttentionType | None = None,
       kv_cache_part: str | None = None,
+      sequence_load_balanced: bool = False,
   ) -> Array | None:
     """Generates a combined attention mask for Transformer models.
 
@@ -1122,6 +1247,9 @@ class AttentionOp(nnx.Module):
         "prefill" or "ar". With `segment_positions`, the sliding window is then
         measured between true query and key positions. None keeps the
         slot-index approximation.
+      sequence_load_balanced: Whether the caller permuted the query/key tokens
+        into DUAL_CHUNK_SWAP order itself (`context_parallel_attention_load_balance`).
+        Causality is then taken from `segment_positions`, which must be set.
 
     Returns:
       An `Array` representing the attention mask, with shape
@@ -1141,6 +1269,8 @@ class AttentionOp(nnx.Module):
           Chunked Prefills - ArXiv:2308.16369 (https://arxiv.org/abs/2308.16369)
     """
     attention_type = self.attention_type if attention_type is None else attention_type
+    if sequence_load_balanced and segment_positions is None:
+      raise ValueError("A load-balanced (DUAL_CHUNK_SWAP) token order needs segment_positions to build the causal mask.")
     mask = None
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and decoder_segment_ids is not None:
       mask = decoder_segment_ids[:, None, None, None, :] == DECODING_ACTIVE_SEQUENCE_INDICATOR
@@ -1167,7 +1297,7 @@ class AttentionOp(nnx.Module):
       next_pos = kv_seq_len - 1
     use_segment_positions = (
         segment_positions is not None
-        and self._load_balanced_context_parallel()
+        and self._load_balanced_context_parallel(sequence_load_balanced)
         and previous_chunk is None
         and model_mode != MODEL_MODE_AUTOREGRESSIVE
     )
@@ -1625,11 +1755,152 @@ class AttentionOp(nnx.Module):
         record_max_logits=record_max_logits,
     )
 
+  def _validate_tpu_halo_runtime(
+      self,
+      *,
+      model_mode: str,
+      previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
+      indexer_mask: Array | None = None,
+      use_ragged_attention: bool = False,
+  ) -> None:
+    """Validates runtime constraints for the halo sliding-window CP path."""
+    if self.attention_type != AttentionType.LOCAL_SLIDING:
+      raise ValueError("Halo context parallelism is only supported for AttentionType.LOCAL_SLIDING.")
+    if not self.config.use_tokamax_splash:
+      raise ValueError("Halo context parallelism requires use_tokamax_splash=True.")
+    if self.sliding_window_size is None or self.sliding_window_size <= 0:
+      raise ValueError("Halo context parallelism requires sliding_window_size > 0.")
+    if model_mode != MODEL_MODE_TRAIN:
+      raise ValueError("Halo context parallelism is supported only for train mode.")
+    if use_ragged_attention:
+      raise ValueError("Halo context parallelism does not support ragged attention.")
+    if previous_chunk is not None:
+      raise ValueError("Halo context parallelism does not support chunked prefill.")
+    if indexer_mask is not None:
+      raise ValueError("Halo context parallelism does not support indexer masks.")
+    if bidirectional_mask is not None:
+      raise ValueError("Halo context parallelism does not support bidirectional masks.")
+
+  def _splash_blocks(self) -> _SplashBlocks:
+    """Returns the forward and backward Splash block sizes and layouts."""
+    if max_utils.is_eval(self.config):
+      return _SplashBlocks(
+          block_q=self.eval_block_q,
+          block_kv=self.eval_block_kv,
+          block_kv_compute=self.eval_block_kv_compute,
+          block_q_dkv=self.eval_block_q,
+          block_kv_dkv=self.eval_block_kv,
+          block_kv_dkv_compute=self.eval_block_kv_compute,
+          block_q_dq=self.eval_block_q,
+          block_kv_dq=self.eval_block_kv,
+          q_layout=self.eval_q_layout,
+          k_layout=self.eval_k_layout,
+          v_layout=self.eval_v_layout,
+      )
+    return _SplashBlocks(
+        block_q=self.block_q,
+        block_kv=self.block_kv,
+        block_kv_compute=self.block_kv_compute,
+        block_q_dkv=self.block_q_dkv,
+        block_kv_dkv=self.block_kv_dkv,
+        block_kv_dkv_compute=self.block_kv_dkv_compute,
+        block_q_dq=self.block_q_dq,
+        block_kv_dq=self.block_kv_dq,
+        q_layout=self.q_layout,
+        k_layout=self.k_layout,
+        v_layout=self.v_layout,
+    )
+
+  def _create_sa_config(
+      self,
+      blocks: _SplashBlocks,
+      q_len: int,
+      kv_len: int,
+      attn_logits_soft_cap: float | None,
+      *,
+      sequence_load_balanced: bool = False,
+  ) -> tokamax_splash_kernel.SplashConfig | splash_attention_kernel.BlockSizes:
+    """Builds the Splash kernel config, clamped to `q_len` and `kv_len`."""
+    config = self.config
+    if config.use_tokamax_splash:
+      # Tokamax only allows diagonal sub-tile skipping with a pure `CausalMask`, which
+      # GLOBAL/MLA get unless load-balanced context parallelism permutes the sequence.
+      use_diag_skip = (
+          self.attention_type in (AttentionType.GLOBAL, AttentionType.MLA)
+          and q_len == kv_len
+          and not (self._context_parallel_size() > 1 and self._load_balanced_context_parallel(sequence_load_balanced))
+      )
+      diag_skip_kwargs = {}
+      if use_diag_skip and (self.qk_diag_skip or self.sv_diag_skip):
+        # Only passed when enabled so older Tokamax releases (< 0.0.15) keep working by default.
+        diag_skip_kwargs = {
+            "qk_diag_skip": self.qk_diag_skip,
+            "sv_diag_skip": self.sv_diag_skip,
+            "qk_diag_grid": config.sa_qk_diag_grid,
+        }
+      return tokamax_splash_kernel.SplashConfig(
+          block_q=min(blocks.block_q, q_len),
+          block_kv=min(blocks.block_kv, kv_len),
+          block_kv_compute=min(blocks.block_kv_compute, kv_len),
+          block_q_dkv=min(blocks.block_q_dkv, q_len),
+          block_kv_dkv=min(blocks.block_kv_dkv, kv_len),
+          block_kv_dkv_compute=min(blocks.block_kv_dkv_compute, kv_len),
+          use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
+          q_layout=tokamax_splash_kernel.QKVLayout[blocks.q_layout],
+          k_layout=tokamax_splash_kernel.QKVLayout[blocks.k_layout],
+          v_layout=tokamax_splash_kernel.QKVLayout[blocks.v_layout],
+          attn_logits_soft_cap=attn_logits_soft_cap,
+          fuse_reciprocal=self.fuse_reciprocal,
+          use_base2_exp=self.use_base2_exp,
+          dkv_reuse_scaled_q=getattr(config, "sa_dkv_reuse_scaled_q", False),
+          q_prescaled_log2e=getattr(config, "sa_q_prescaled_log2e", False),
+          residual_checkpoint_name="context",
+          fwd_cost_estimate=pl.CostEstimate(
+              flops=config.cost_estimate_flops_fwd,
+              transcendentals=0,
+              bytes_accessed=0,
+          )
+          if config.cost_estimate_flops_fwd >= 0
+          else None,
+          bwd_cost_estimate=pl.CostEstimate(
+              flops=config.cost_estimate_flops_bwd,
+              transcendentals=0,
+              bytes_accessed=0,
+          )
+          if config.cost_estimate_flops_bwd >= 0
+          else None,
+          # `dq_reduction_steps` of 0 means "unset" (see configs/base.yml); the Tokamax
+          # backward kernel accepts only 3 or None, so COMPRESSED opts into the ring buffer
+          # while every other attention type leaves the reduction unconstrained.
+          dq_reduction_steps=(
+              config.dq_reduction_steps
+              if config.dq_reduction_steps > 0
+              else (_COMPRESSED_DQ_REDUCTION_STEPS if self.attention_type == AttentionType.COMPRESSED else None)
+          ),
+          use_experimental_scheduler=self.use_splash_scheduler,
+          **diag_skip_kwargs,
+      )
+    return splash_attention_kernel.BlockSizes(
+        block_q=min(blocks.block_q, q_len),
+        block_kv=min(blocks.block_kv, kv_len),
+        block_kv_compute=min(blocks.block_kv_compute, kv_len),
+        block_q_dkv=min(blocks.block_q_dkv, q_len),
+        block_kv_dkv=min(blocks.block_kv_dkv, kv_len),
+        block_kv_dkv_compute=min(blocks.block_kv_dkv_compute, kv_len),
+        block_q_dq=None if self.use_fused_bwd_kernel else min(blocks.block_q_dq, q_len),
+        block_kv_dq=None if self.use_fused_bwd_kernel else min(blocks.block_kv_dq, kv_len),
+        use_fused_bwd_kernel=self.use_fused_bwd_kernel,
+        q_layout=splash_attention_kernel.QKVLayout[blocks.q_layout],
+        k_layout=splash_attention_kernel.QKVLayout[blocks.k_layout],
+        v_layout=splash_attention_kernel.QKVLayout[blocks.v_layout],
+    )
+
   def apply_attention(
       self,
       query: Array,
-      key: Array | KVTensor,
-      value: Array | KVTensor,
+      key: Array | qwix.QArray,
+      value: Array | qwix.QArray,
       decoder_segment_ids: Array | None,
       segment_positions: Array | None,
       lengths: Array | None,
@@ -1645,41 +1916,51 @@ class AttentionOp(nnx.Module):
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
       kv_cache_part: str | None = None,
-      *,
-      qk_product_einsum: Callable[..., Array],
-      wv_product_einsum: Callable[..., Array],
+      sequence_load_balanced: bool = False,
   ):
     """Apply attention"""
     if self.attention_kernel == "cudnn_flash_jax":
+      if self.attention_type == AttentionType.FULL:
+        raise ValueError(
+            "AttentionType.FULL (bidirectional non-causal attention) is not supported with "
+            "attention_kernel='cudnn_flash_jax', which applies a causal mask. "
+            "Use attention='dot_product' or attention='flash' (or attention_type='global' for causal attention)."
+        )
       validate_gpu_flash_attention(sinks, record_max_logits)
-      if isinstance(key, KVTensor):
-        key = key.dequant()
-      if isinstance(value, KVTensor):
-        value = value.dequant()
+      key = _dequantize_if_quantized(key)
+      value = _dequantize_if_quantized(value)
       query, key, value = self._align_qkv_for_cudnn_flash(query, key, value)
 
     self.check_attention_inputs(query, key, value)
     length = query.shape[-3]
     target_hardware = self.mesh.devices[(0,) * self.mesh.devices.ndim].platform
     cp_size = self._context_parallel_size()
+    if sequence_load_balanced and not (
+        self.attention_kernel == "dot_product" or (self.attention_kernel == "flash" and target_hardware == "tpu")
+    ):
+      # Only these kernels take causality from the DUAL_CHUNK_SWAP permutation (TPU Splash / ring masks)
+      # or from positions (dot product); the others would apply a plain causal mask to permuted tokens.
+      raise ValueError(
+          "A load-balanced (DUAL_CHUNK_SWAP) token order is supported only by attention='dot_product' and by "
+          f"attention='flash' on TPU, got attention={self.attention_kernel!r} on {target_hardware!r}."
+      )
     if self.attention_type == AttentionType.COMPRESSED and cp_size > 1:
       raise ValueError(f"Context parallelism (cp_size={cp_size}) is not supported with AttentionType.COMPRESSED.")
-    if (
-        target_hardware == "tpu"
-        and tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
-        and self.attention_kernel != "flash"
-    ):
+    if target_hardware == "tpu" and self.context_parallel_strategy == "ring" and self.attention_kernel != "flash":
       raise ValueError("TPU Tokamax ring attention requires attention_kernel='flash'.")
-    if ulysses_attention.is_context_parallel_ulysses_requested(self.config):
+    if self.context_parallel_strategy == "ulysses":
       if target_hardware != "tpu":
         raise ValueError("Ulysses context parallelism (context_parallel_strategy='ulysses') is only supported on TPU.")
       if self.attention_kernel != "flash":
         raise ValueError("TPU Ulysses attention requires attention_kernel='flash'.")
-    if usp_attention.is_context_parallel_usp_requested(self.config):
+    if self.context_parallel_strategy == "usp":
       if target_hardware != "tpu":
         raise ValueError("USP context parallelism (context_parallel_strategy='usp') is only supported on TPU.")
       if self.attention_kernel != "flash":
         raise ValueError("TPU USP attention requires attention_kernel='flash'.")
+    if self.context_parallel_strategy == "halo" and cp_size > 1:
+      if self.attention_kernel not in ("flash", "autoselected"):
+        raise ValueError("Halo context parallelism (local_context_parallel_strategy='halo') requires flash attention.")
 
     if use_ragged_attention and model_mode == MODEL_MODE_AUTOREGRESSIVE:
       if lengths is None:
@@ -1722,15 +2003,12 @@ class AttentionOp(nnx.Module):
           record_max_logits=record_max_logits,
           decoder_segment_ids_kv=decoder_segment_ids_kv,
           kv_cache_part=kv_cache_part,
-          qk_product_einsum=qk_product_einsum,
-          wv_product_einsum=wv_product_einsum,
+          sequence_load_balanced=sequence_load_balanced,
       )
     elif self.attention_kernel in ("flash", "autoselected"):
       if target_hardware == "tpu":
-        if isinstance(key, KVTensor):
-          key = key.dequant()
-        if isinstance(value, KVTensor):
-          value = value.dequant()
+        key = _dequantize_if_quantized(key)
+        value = _dequantize_if_quantized(value)
 
         if model_mode == MODEL_MODE_AUTOREGRESSIVE:
           raise ValueError(
@@ -1754,6 +2032,7 @@ class AttentionOp(nnx.Module):
             decoder_segment_ids_kv=decoder_segment_ids_kv,
             pad_kv_total=pad_kv_total,
             compress_ratio=compress_ratio,
+            sequence_load_balanced=sequence_load_balanced,
         )
         if max_logits is not None:
           self.max_logits = nnx.Intermediate(max_logits)
@@ -1775,24 +2054,48 @@ class AttentionOp(nnx.Module):
               model_mode,
               bidirectional_mask=bidirectional_mask,
               record_max_logits=record_max_logits,
-              qk_product_einsum=qk_product_einsum,
-              wv_product_einsum=wv_product_einsum,
           )
         else:
           validate_gpu_flash_attention(sinks, record_max_logits, attention_kernel=self.attention_kernel)
-          mask = tokamax_attention_base.Mask(is_causal=True)
+          is_causal = self.attention_type != AttentionType.FULL
+          k_start = None
+          if self.attention_type == AttentionType.LOCAL_SLIDING:
+            if self.sliding_window_size is None or self.sliding_window_size <= 0:
+              raise ValueError(f"LOCAL_SLIDING requires sliding_window_size > 0, got {self.sliding_window_size}.")
+            k_start = jnp.maximum(
+                0,
+                jnp.arange(query.shape[1], dtype=jnp.int32) - (self.sliding_window_size - 1),
+            )
+          mask = tokamax_attention_base.Mask(is_causal=is_causal, k_start=k_start)
           if decoder_segment_ids is not None:
-            seg_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids[:, None, :]
+            decoder_segment_ids_kv_in = (
+                decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+            )
+            seg_mask = decoder_segment_ids[:, :, None] == decoder_segment_ids_kv_in[:, None, :]
             mask = mask & tokamax_attention_base.Mask(seg_mask[:, None, :, :])
-          gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
-          out = gpu_flash_attn(query, key, value, logits_scale=1.0, mask=mask)
+          gpu_flash_attn = _tokamax_gpu_flash_attention()
+          out = gpu_flash_attn(
+              query,
+              key,
+              value,
+              logits_scale=1.0,
+              # NOTE: Tokamax's Triton VJP does not support logits_soft_cap yet, so
+              # gradients raise NotImplementedError when soft-cap is set. Use
+              # attention='dot_product' to train with soft-capping.
+              logits_soft_cap=self.attn_logits_soft_cap,
+              mask=mask,
+          )
           return out, None, None
     elif self.attention_kernel == "cudnn_flash_te":
+      if self.attention_type == AttentionType.FULL:
+        raise ValueError(
+            "AttentionType.FULL (bidirectional non-causal attention) is not supported with "
+            "attention_kernel='cudnn_flash_te', which applies a causal mask. "
+            "Use attention='dot_product' or attention='flash' (or attention_type='global' for causal attention)."
+        )
       validate_gpu_flash_attention(sinks, record_max_logits, attention_kernel=self.attention_kernel)
-      if isinstance(key, KVTensor):
-        key = key.dequant()
-      if isinstance(value, KVTensor):
-        value = value.dequant()
+      key = _dequantize_if_quantized(key)
+      value = _dequantize_if_quantized(value)
       if model_mode == MODEL_MODE_AUTOREGRESSIVE:
         raise ValueError(
             """Decode not supported with flash attention.
@@ -1822,12 +2125,13 @@ class AttentionOp(nnx.Module):
   def gpu_ragged_attention(
       self,
       q: Array,
-      k: Array | KVTensor,
-      v: Array | KVTensor,
+      k: Array | qwix.QArray,
+      v: Array | qwix.QArray,
       lengths: Array,
       block_size: int,
   ):
     """gpu ragged attention"""
+    _raise_if_quantized_kv_for_ragged(k, v)
     batch_size, q_length, q_heads, head_dim = q.shape
 
     # Define logical axis names - clearer and avoids repeated calls.
@@ -1860,12 +2164,13 @@ class AttentionOp(nnx.Module):
       mask = tokamax_attention_base.Mask(
           k_end=lengths[..., None],
       )
-      gpu_flash_attn = tokamax_pallas_triton.PallasTritonFlashAttention()
+      gpu_flash_attn = _tokamax_gpu_flash_attention()
       local_out, (local_max, local_sum) = gpu_flash_attn(
           q,
           k,
           v,
           logits_scale=1.0,
+          logits_soft_cap=self.attn_logits_soft_cap,
           mask=mask,
           return_residuals=True,
           normalize_output=False,
@@ -1883,14 +2188,13 @@ class AttentionOp(nnx.Module):
   def tpu_ragged_attention(
       self,
       query: Array,
-      key: Array | KVTensor,
-      value: Array | KVTensor,
+      key: Array | qwix.QArray,
+      value: Array | qwix.QArray,
       lengths: Array,
       block_size: int,
   ) -> tuple[Array, Array, Array]:
     """Ragged Attention."""
-    if isinstance(query, KVTensor):
-      raise TypeError("Ragged attention does not currently support quantized tensors.")
+    _raise_if_quantized_kv_for_ragged(key, value)
     b = self._logical_to_mesh_axes(self.ragged_lengths_names)
     bsnd = self._logical_to_mesh_axes(self.cache_logical_axis_names)
 
@@ -1932,14 +2236,31 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Array | None = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
-  ) -> tuple[Array, Array]:
+      sequence_load_balanced: bool = False,
+  ) -> tuple[Array, Array | None]:
     """TPU Flash Attention."""
 
-    use_tokamax_ring = tokamax_ring_attention.is_context_parallel_ring_requested(self.config)
-    use_ulysses = ulysses_attention.is_context_parallel_ulysses_requested(self.config)
-    use_usp = usp_attention.is_context_parallel_usp_requested(self.config)
+    use_tokamax_ring = self.context_parallel_strategy == "ring"
+    use_ulysses = self.context_parallel_strategy == "ulysses"
+    use_usp = self.context_parallel_strategy == "usp"
     cp_size = self._context_parallel_size()
-    load_balanced_context_parallel = self._load_balanced_context_parallel()
+    if self.context_parallel_strategy == "halo" and cp_size > 1:
+      return self.tpu_halo_flash_attention(
+          query,
+          key,
+          value,
+          decoder_segment_ids,
+          attn_logits_soft_cap=attn_logits_soft_cap,
+          sinks=sinks,
+          indexer_mask=indexer_mask,
+          model_mode=model_mode,
+          previous_chunk=previous_chunk,
+          bidirectional_mask=bidirectional_mask,
+          use_ragged_attention=use_ragged_attention,
+          record_max_logits=record_max_logits,
+          decoder_segment_ids_kv=decoder_segment_ids_kv,
+      )
+    load_balanced_context_parallel = self._load_balanced_context_parallel(sequence_load_balanced)
     if use_tokamax_ring:
       self._validate_tpu_tokamax_ring_runtime(
           model_mode=model_mode,
@@ -1986,30 +2307,8 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids = None
       decoder_segment_ids_kv_in = None
 
-    if max_utils.is_eval(self.config):
-      block_q = self.eval_block_q
-      block_kv = self.eval_block_kv
-      block_kv_compute = self.eval_block_kv_compute
-      block_q_dkv = block_q
-      block_kv_dkv = block_kv
-      block_kv_dkv_compute = block_kv_compute
-      block_q_dq = block_q
-      block_kv_dq = block_kv
-      q_layout = self.eval_q_layout
-      k_layout = self.eval_k_layout
-      v_layout = self.eval_v_layout
-    else:
-      block_q = self.block_q
-      block_kv = self.block_kv
-      block_kv_compute = self.block_kv_compute
-      block_q_dkv = self.block_q_dkv
-      block_kv_dkv = self.block_kv_dkv
-      block_kv_dkv_compute = self.block_kv_dkv_compute
-      block_q_dq = self.block_q_dq
-      block_kv_dq = self.block_kv_dq
-      q_layout = self.q_layout
-      k_layout = self.k_layout
-      v_layout = self.v_layout
+    blocks = self._splash_blocks()
+    block_q, block_kv = blocks.block_q, blocks.block_kv
 
     # Pad sequences to block-sized boundaries upfront for AttentionType.COMPRESSED
     if self.attention_type == AttentionType.COMPRESSED:
@@ -2088,102 +2387,31 @@ class AttentionOp(nnx.Module):
         f" got {query.shape[0]=}/{devices_in_data_fsdp=}"
     )
 
-    # create_splash_attention config
-    def create_sa_config(config, query, key, attn_logits_soft_cap):
-      if config.use_tokamax_splash:
-        # Tokamax only allows diagonal sub-tile skipping with a pure `CausalMask`, which
-        # GLOBAL/MLA get unless load-balanced context parallelism permutes the sequence.
-        use_diag_skip = (
-            self.attention_type in (AttentionType.GLOBAL, AttentionType.MLA)
-            and query.shape[2] == key.shape[2]
-            and not (cp_size > 1 and load_balanced_context_parallel)
-        )
-        diag_skip_kwargs = {}
-        if use_diag_skip and (self.qk_diag_skip or self.sv_diag_skip):
-          # Only passed when enabled so older Tokamax releases (< 0.0.15) keep working by default.
-          diag_skip_kwargs = {
-              "qk_diag_skip": self.qk_diag_skip,
-              "sv_diag_skip": self.sv_diag_skip,
-              "qk_diag_grid": config.sa_qk_diag_grid,
-          }
-        sa_config = tokamax_splash_kernel.SplashConfig(
-            block_q=min(block_q, query.shape[2]),
-            block_kv=min(block_kv, key.shape[2]),
-            block_kv_compute=min(block_kv_compute, key.shape[2]),
-            block_q_dkv=min(block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(block_kv_dkv_compute, key.shape[2]),
-            use_fused_bwd_kernel=True,  # tokamax only supports fused bwd kernel
-            q_layout=tokamax_splash_kernel.QKVLayout[q_layout],
-            k_layout=tokamax_splash_kernel.QKVLayout[k_layout],
-            v_layout=tokamax_splash_kernel.QKVLayout[v_layout],
-            attn_logits_soft_cap=attn_logits_soft_cap,
-            fuse_reciprocal=self.fuse_reciprocal,
-            use_base2_exp=self.use_base2_exp,
-            dkv_reuse_scaled_q=getattr(config, "sa_dkv_reuse_scaled_q", False),
-            q_prescaled_log2e=getattr(config, "sa_q_prescaled_log2e", False),
-            residual_checkpoint_name="context",
-            fwd_cost_estimate=pl.CostEstimate(
-                flops=config.cost_estimate_flops_fwd,
-                transcendentals=0,
-                bytes_accessed=0,
-            )
-            if config.cost_estimate_flops_fwd >= 0
-            else None,
-            bwd_cost_estimate=pl.CostEstimate(
-                flops=config.cost_estimate_flops_bwd,
-                transcendentals=0,
-                bytes_accessed=0,
-            )
-            if config.cost_estimate_flops_bwd >= 0
-            else None,
-            # `dq_reduction_steps` of 0 means "unset" (see configs/base.yml); the Tokamax
-            # backward kernel accepts only 3 or None, so COMPRESSED opts into the ring buffer
-            # while every other attention type leaves the reduction unconstrained.
-            dq_reduction_steps=(
-                config.dq_reduction_steps
-                if config.dq_reduction_steps > 0
-                else (_COMPRESSED_DQ_REDUCTION_STEPS if self.attention_type == AttentionType.COMPRESSED else None)
-            ),
-            use_experimental_scheduler=self.use_splash_scheduler,
-            **diag_skip_kwargs,
-        )
-      else:
-        sa_config = splash_attention_kernel.BlockSizes(
-            block_q=min(block_q, query.shape[2]),
-            block_kv=min(block_kv, key.shape[2]),
-            block_kv_compute=min(block_kv_compute, key.shape[2]),
-            block_q_dkv=min(block_q_dkv, query.shape[2]),
-            block_kv_dkv=min(block_kv_dkv, key.shape[2]),
-            block_kv_dkv_compute=min(block_kv_dkv_compute, key.shape[2]),
-            block_q_dq=None if self.use_fused_bwd_kernel else min(block_q_dq, query.shape[2]),
-            block_kv_dq=None if self.use_fused_bwd_kernel else min(block_kv_dq, key.shape[2]),
-            use_fused_bwd_kernel=self.use_fused_bwd_kernel,
-            q_layout=splash_attention_kernel.QKVLayout[q_layout],
-            k_layout=splash_attention_kernel.QKVLayout[k_layout],
-            v_layout=splash_attention_kernel.QKVLayout[v_layout],
-        )
-      return sa_config
-
     if use_tokamax_ring or use_usp:
-      sa_config, splash_kernel, segment_axis_names_splash_kernel = (
-          tokamax_ring_attention.make_sharded_ring_attention_kernel(
-              self.config,
-              query=query,
-              key=key,
-              context_parallel_size=cp_size,
-              ring_axis=self.config.context_sharding,
-              attn_logits_soft_cap=attn_logits_soft_cap,
-              maybe_shard_with_pspec=self._maybe_shard_with_pspec,
-              mask=None,
-          )
+      (
+          sa_config,
+          splash_kernel,
+          segment_axis_names_splash_kernel,
+      ) = tokamax_ring_attention.make_sharded_ring_attention_kernel(
+          self.config,
+          query=query,
+          key=key,
+          context_parallel_size=cp_size,
+          ring_axis=self.config.context_sharding,
+          attn_logits_soft_cap=attn_logits_soft_cap,
+          maybe_shard_with_pspec=self._maybe_shard_with_pspec,
+          load_balanced=load_balanced_context_parallel,
+          mask=None,
       )
     elif use_ulysses:
-      sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
+      sa_config = self._create_sa_config(blocks, query.shape[2], key.shape[2], attn_logits_soft_cap)
       if self.config.use_max_logit_estimate > 0:
         sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
       mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
-      mask = tokamax_splash_mask.CausalMask(shape=mask_shape)
+      if self.attention_type == AttentionType.FULL:
+        mask = tokamax_splash_mask.FullMask(mask_shape)
+      else:
+        mask = tokamax_splash_mask.CausalMask(shape=mask_shape)
 
       @partial(
           jax.jit,
@@ -2206,7 +2434,13 @@ class AttentionOp(nnx.Module):
       segment_axis_names_splash_kernel = jax.sharding.PartitionSpec(None)
       splash_kernel = self._maybe_shard_with_pspec(splash_kernel, segment_axis_names_splash_kernel)
     else:
-      sa_config = create_sa_config(self.config, query, key, attn_logits_soft_cap)
+      sa_config = self._create_sa_config(
+          blocks,
+          query.shape[2],
+          key.shape[2],
+          attn_logits_soft_cap,
+          sequence_load_balanced=sequence_load_balanced,
+      )
       mask_shape = (query.shape[2], key.shape[2])  # (q_seq_len, kv_seq_len)
 
       splash_q_seq_shards = cp_size
@@ -2435,9 +2669,19 @@ class AttentionOp(nnx.Module):
         return attention_output, None
 
       if use_ulysses:
-        query = ulysses_attention.ulysses_all_to_all(query, context_axis)
-        key = ulysses_attention.ulysses_all_to_all(key, context_axis)
-        value = ulysses_attention.ulysses_all_to_all(value, context_axis)
+        # With fewer local KV heads than context ranks (e.g. 2 KV heads at context 4), repeat each KV head so
+        # that every rank receives the one its block of query heads uses.
+        kv_replication = ulysses_attention.kv_head_replication(key.shape[1], self.mesh.shape[context_axis])
+        key = ulysses_attention.repeat_kv_heads_for_ulysses(key, kv_replication)
+        value = ulysses_attention.repeat_kv_heads_for_ulysses(value, kv_replication)
+        query, key, value = ulysses_attention.ulysses_all_to_all_qkv(
+            query, key, value, context_axis, self.mesh.shape[context_axis]
+        )
+        # Saving the exchanged Q/K/V (`ulysses_qkv=device|offload` under remat_policy=custom) keeps the backward
+        # from replaying the all-to-all to rebuild them for the Splash backward.
+        query = checkpoint_name(query, "ulysses_qkv")
+        key = checkpoint_name(key, "ulysses_qkv")
+        value = checkpoint_name(value, "ulysses_qkv")
         if decoder_segment_ids_q is not None:
           # Q and KV segment IDs are the same tensor in this train-only
           # self-attention path, so one gather serves both kernel operands.
@@ -2523,39 +2767,20 @@ class AttentionOp(nnx.Module):
           # divide the sequence lengths the kernel sees exactly.
           block_q = math.gcd(sa_config.block_q, query.shape[2])
           block_kv = math.gcd(sa_config.block_kv, key.shape[2])
-          if record_max_logits:
-            attention_output, stats = jax_flash_attention.flash_attention_block_masked(
-                query,
-                key,
-                value,
-                decoder_segment_ids_tuple,
-                block_kv=block_kv,
-                block_q=block_q,
-                mask=indexer_mask,
-                mask_value=DEFAULT_MASK_VALUE,
-                cap=attn_logits_soft_cap,
-                save_residuals=True,
-                logits_dtype=query.dtype,
-                loop_unroll=False,
-                fuse_logits=False,
-            )
-            return attention_output, stats["max_logits"]
-
-          attention_output = jax_flash_attention.flash_attention_block_masked(
+          # The custom VJP recomputes attention tiles in the backward pass so
+          # autodiff does not save every block-loop intermediate.
+          attention_output, stats = jax_flash_attention.flash_attention_block_masked_custom_vjp(
               query,
               key,
               value,
               decoder_segment_ids_tuple,
-              block_kv=block_kv,
-              block_q=block_q,
-              mask=indexer_mask,
-              mask_value=DEFAULT_MASK_VALUE,
-              cap=attn_logits_soft_cap,
-              logits_dtype=query.dtype,
-              loop_unroll=False,
-              fuse_logits=False,
+              indexer_mask,
+              block_q,
+              block_kv,
+              DEFAULT_MASK_VALUE,
+              attn_logits_soft_cap,
           )
-          return attention_output, None
+          return attention_output, (stats["max_logits"] if record_max_logits else None)
 
         if indexer_mask is not None:
           # Convert additive float mask (0.0=attend, negative=masked) to boolean mask for Tokamax splash kernel
@@ -2701,6 +2926,230 @@ class AttentionOp(nnx.Module):
 
     return x, None
 
+  def tpu_halo_flash_attention(
+      self,
+      query: Array,
+      key: Array,
+      value: Array,
+      decoder_segment_ids: Array | None,
+      attn_logits_soft_cap: float | None = None,
+      sinks: Array | None = None,
+      indexer_mask: Array | None = None,
+      model_mode: str = MODEL_MODE_TRAIN,
+      previous_chunk: Any = None,
+      bidirectional_mask: Any = None,
+      use_ragged_attention: bool = False,
+      record_max_logits: bool = False,
+      decoder_segment_ids_kv: Array | None = None,
+  ) -> tuple[Array, Array | None]:
+    """Runs TPU Flash Attention with halo KV exchange for sliding-window CP.
+
+    Every context-parallel rank keeps its own sequence shard of Q/K/V. A
+    sliding window of `sliding_window_size` can only see that many tokens
+    before the shard boundary, so instead of all-gathering K/V each rank
+    receives just the trailing `halo` KV tokens of the preceding chunk via
+    `ppermute` and runs the Tokamax Splash kernel on `[halo | local chunk]`.
+    With load-balanced CP each rank owns two chunks and the same exchange
+    happens per chunk.
+
+    Args:
+      query: Query tensor of shape `(batch, q_len, num_heads, head_dim)`.
+      key: Key tensor of shape `(batch, kv_len, num_kv_heads, head_dim)`.
+      value: Value tensor of shape `(batch, kv_len, num_kv_heads, head_dim)`.
+      decoder_segment_ids: Optional query segment IDs of shape `(batch, q_len)`.
+      attn_logits_soft_cap: Optional soft cap for attention logits.
+      sinks: Optional attention sink logits of shape `(num_heads,)`.
+      indexer_mask: Unsupported on the halo CP path; must be `None`.
+      model_mode: Execution mode; only `MODEL_MODE_TRAIN` is supported.
+      previous_chunk: Unsupported on the halo CP path; must be `None`.
+      bidirectional_mask: Unsupported on the halo CP path; must be `None`.
+      use_ragged_attention: Unsupported on the halo CP path; must be `False`.
+      record_max_logits: Whether to return per-head maximum attention logits.
+      decoder_segment_ids_kv: Optional KV segment IDs of shape `(batch, kv_len)`.
+
+    Returns:
+      A tuple `(output, max_logits)` where `output` has shape
+      `(batch, q_len, num_heads, head_dim)` and `max_logits` is the per-head
+      maximum logits tensor when `record_max_logits=True`, or `None` otherwise.
+
+    Raises:
+      ValueError: If runtime configuration or input sequence shapes violate
+        halo context parallelism constraints.
+    """
+    self._validate_tpu_halo_runtime(
+        model_mode=model_mode,
+        previous_chunk=previous_chunk,
+        bidirectional_mask=bidirectional_mask,
+        indexer_mask=indexer_mask,
+        use_ragged_attention=use_ragged_attention,
+    )
+    cp_size = self._context_parallel_size()
+    load_balanced = self._load_balanced_context_parallel()
+    chunks_per_rank = 2 if load_balanced else 1
+    context_axis = self.config.context_sharding
+
+    # Transpose to ('batch', 'heads', 'length', 'kv')
+    query = jnp.transpose(query, axes=(0, 2, 1, 3))
+    key = jnp.transpose(key, axes=(0, 2, 1, 3))
+    value = jnp.transpose(value, axes=(0, 2, 1, 3))
+    decoder_segment_ids_kv_in = decoder_segment_ids_kv if decoder_segment_ids_kv is not None else decoder_segment_ids
+
+    # Per-chunk geometry. The halo is rounded up to the KV block size so the kernel's block
+    # grid lines up with the [halo | chunk] layout.
+    seq_len = query.shape[2]
+    total_chunks = chunks_per_rank * cp_size
+    if key.shape[2] != seq_len or seq_len % total_chunks != 0:
+      raise ValueError(
+          f"Halo context parallelism requires equal query/key sequence lengths divisible by {total_chunks} "
+          f"(cp_size={cp_size}, load_balanced={load_balanced}), got {query.shape[2]=} and {key.shape[2]=}."
+      )
+    blocks = self._splash_blocks()
+    chunk_q_len = seq_len // total_chunks
+    kv_block_align = math.lcm(min(blocks.block_kv, chunk_q_len), min(blocks.block_kv_dkv, chunk_q_len))
+    halo = ((self.sliding_window_size + kv_block_align - 1) // kv_block_align) * kv_block_align
+    if chunk_q_len < halo or chunk_q_len % kv_block_align != 0:
+      raise ValueError(
+          f"Halo context parallelism requires per-chunk sequence length {chunk_q_len} to be a multiple of "
+          f"{kv_block_align} and at least the block-aligned sliding window {halo} "
+          f"(sliding_window_size={self.sliding_window_size}, cp_size={cp_size}, load_balanced={load_balanced})."
+      )
+    chunk_kv_len = halo + chunk_q_len
+    local_q_len = chunks_per_rank * chunk_q_len
+    local_kv_len = chunks_per_rank * chunk_kv_len
+
+    sa_config = self._create_sa_config(blocks, chunk_q_len, chunk_kv_len, attn_logits_soft_cap)
+    if self.config.use_max_logit_estimate > 0:
+      sa_config = dataclasses.replace(sa_config, max_logit_const=self.config.use_max_logit_estimate)
+
+    # Mask over the local [halo | chunk] layout: queries start `halo` columns into the KV
+    # axis. With load balancing the second chunk's queries are shifted by one more halo.
+    mask_shape = (local_q_len, local_kv_len)
+    window = (self.sliding_window_size - 1, self.sliding_window_size)
+    causal_mask = tokamax_splash_mask.CausalMask(shape=mask_shape, offset=halo)
+    local_mask = tokamax_splash_mask.LocalMask(shape=mask_shape, window_size=window, offset=halo)
+    if load_balanced:
+      q_seq = np.arange(local_q_len, dtype=np.int32)
+      q_seq[chunk_q_len:] += halo
+      causal_mask.q_sequence = q_seq
+      local_mask.q_sequence = q_seq
+
+    @functools.partial(jax.jit, static_argnames=["single_head_mask"])
+    def wrap_splash_kernel(single_head_mask):
+      return tokamax_splash_kernel.make_splash_mha(mask=single_head_mask, config=sa_config, q_seq_shards=1)
+
+    # Every rank runs the kernel over its own full local sequence, so the kernel's mask
+    # metadata is replicated rather than sequence-sharded.
+    segment_axis_names_splash_kernel = jax.sharding.PartitionSpec(None)
+    splash_kernel = self._maybe_shard_with_pspec(
+        wrap_splash_kernel(causal_mask & local_mask), segment_axis_names_splash_kernel
+    )
+
+    # Q, K, V and segment IDs are all sequence-sharded over the context axis.
+    axis_names_q = tokamax_ring_attention.with_sequence_axis(
+        self._logical_to_mesh_axes(self.flash_axis_names_q), context_axis, sequence_dim=2
+    )
+    axis_names_kv = tokamax_ring_attention.with_sequence_axis(
+        self._logical_to_mesh_axes(self.flash_axis_names_kv), context_axis, sequence_dim=2
+    )
+    segment_axis_names_q = segment_axis_names_kv = None
+    if decoder_segment_ids is not None:
+      segment_axis_names_q = tokamax_ring_attention.with_sequence_axis(
+          self._logical_to_mesh_axes((BATCH_ATTN, Q_LENGTH)), context_axis, sequence_dim=1
+      )
+      segment_axis_names_kv = tokamax_ring_attention.with_sequence_axis(
+          self._logical_to_mesh_axes((BATCH_ATTN, KV_LENGTH)), context_axis, sequence_dim=1
+      )
+    sink_axis_names = self._logical_to_mesh_axes((HEAD,))
+    # max_logits share the query sharding minus the head_dim axis.
+    max_logits_spec = jax.sharding.PartitionSpec(*axis_names_q[:-1]) if record_max_logits else None
+
+    perm_fwd = [(i, (i + 1) % cp_size) for i in range(cp_size)]
+    perm_bwd = [(i, (i - 1) % cp_size) for i in range(cp_size)]
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=self.mesh,
+        in_specs=(
+            axis_names_q,
+            axis_names_kv,
+            axis_names_kv,
+            segment_axis_names_q,
+            segment_axis_names_kv,
+            segment_axis_names_splash_kernel,
+            sink_axis_names,
+        ),
+        out_specs=(axis_names_q, max_logits_spec),
+        check_vma=False,
+    )
+    def wrap_halo_flash_attention(query, key, value, seg_q, seg_kv, splash_kernel, sinks):
+      b_loc, _, s_local, _ = query.shape
+      rank = jax.lax.axis_index(context_axis)
+      if seg_q is None:
+        seg_q = jnp.zeros((b_loc, s_local), dtype=jnp.int32)
+      if seg_kv is None:
+        seg_kv = jnp.zeros((b_loc, s_local), dtype=jnp.int32)
+
+      if load_balanced:
+        # Rank r owns global chunks r and 2*cp_size-1-r. Chunk 0 follows chunk 0 of rank r-1;
+        # chunk 1 follows chunk 1 of rank r+1, except on the last rank where it directly
+        # follows that rank's own chunk 0.
+        k0, k1 = jnp.split(key, 2, axis=2)
+        v0, v1 = jnp.split(value, 2, axis=2)
+        seg0, seg1 = jnp.split(seg_kv, 2, axis=1)
+        k0_halo, v0_halo, seg0_halo = _recv_halo(
+            k0, v0, seg0, halo=halo, context_axis=context_axis, perm=perm_fwd, is_edge_rank=rank == 0
+        )
+        k1_halo, v1_halo, seg1_halo = _recv_halo(
+            k1,
+            v1,
+            seg1,
+            halo=halo,
+            context_axis=context_axis,
+            perm=perm_bwd,
+            is_edge_rank=rank == cp_size - 1,
+            edge=_halo_tails(k0, v0, seg0, halo),
+        )
+        key = jnp.concatenate([k0_halo, k0, k1_halo, k1], axis=2)
+        value = jnp.concatenate([v0_halo, v0, v1_halo, v1], axis=2)
+        seg_kv = jnp.concatenate([seg0_halo, seg0, seg1_halo, seg1], axis=1)
+      else:
+        k_halo, v_halo, seg_halo = _recv_halo(
+            key, value, seg_kv, halo=halo, context_axis=context_axis, perm=perm_fwd, is_edge_rank=rank == 0
+        )
+        key = jnp.concatenate([k_halo, key], axis=2)
+        value = jnp.concatenate([v_halo, value], axis=2)
+        seg_kv = jnp.concatenate([seg_halo, seg_kv], axis=1)
+
+      segment_ids = tokamax_splash_kernel.SegmentIds(seg_q, seg_kv)
+      if record_max_logits:
+
+        def kernel_with_stats(q, k, v, seg_ids, sink_logits):
+          out, stats = splash_kernel(q, k, v, seg_ids, sinks=sink_logits, save_residuals=True)
+          return out, stats["max_logits"]
+
+        return jax.vmap(kernel_with_stats, in_axes=(0, 0, 0, 0, None))(query, key, value, segment_ids, sinks)
+
+      def kernel_fn(q, k, v, seg_ids, sink_logits):
+        return splash_kernel(q, k, v, seg_ids, sinks=sink_logits)
+
+      out = jax.vmap(kernel_fn, in_axes=(0, 0, 0, 0, None))(query, key, value, segment_ids, sinks)
+      return out, None
+
+    x, max_logits = wrap_halo_flash_attention(
+        self._maybe_shard_with_pspec(query, axis_names_q),
+        self._maybe_shard_with_pspec(key, axis_names_kv),
+        self._maybe_shard_with_pspec(value, axis_names_kv),
+        self._maybe_shard_with_pspec(decoder_segment_ids, segment_axis_names_q),
+        self._maybe_shard_with_pspec(decoder_segment_ids_kv_in, segment_axis_names_kv),
+        splash_kernel,
+        self._maybe_shard_with_pspec(sinks, sink_axis_names),
+    )
+    x = jnp.transpose(x, axes=(0, 2, 1, 3))
+    if record_max_logits:
+      # q_len is sharded; reduce locally first, output is (batch, heads).
+      return x, jnp.max(max_logits, axis=2)
+    return x, None
+
   def cudnn_flash_attention(
       self,
       query: Array,
@@ -2735,6 +3184,8 @@ class AttentionOp(nnx.Module):
       raise ValueError("Chunk attention is not supported with CUDNN context parallelism.")
 
     # Initialize default attention configuration
+    # NOTE: This path currently always applies a causal mask ('padding_causal'/'causal').
+    # Bidirectional AttentionType.FULL is rejected at config validation and in __call__ dispatch.
     sliding_window_size = None
     mask_type = "padding_causal"
     qkv_layout = "BSHD_BSHD_BSHD"  # Non-packed format: 'BS3HD', 'BSHD_BS2HD' or 'BSHD_BSHD_BSHD'
@@ -2906,6 +3357,11 @@ class AttentionOp(nnx.Module):
       model_mode: str = MODEL_MODE_TRAIN,
   ) -> tuple[Array, Array]:
     """CUDNN Flash Attention with JAX SDPA API."""
+    if model_mode != MODEL_MODE_AUTOREGRESSIVE and self.attention_type == AttentionType.FULL:
+      raise ValueError(
+          "AttentionType.FULL (bidirectional non-causal attention) is not supported with "
+          "cudnn_jax_flash_attention, which applies MaskType.CAUSAL."
+      )
     # These imports are only meant to work in a GPU build.
     # pylint: disable=import-outside-toplevel
     from jax._src.cudnn.fused_attention_stablehlo import (
@@ -2950,10 +3406,9 @@ class AttentionOp(nnx.Module):
   def compute_local_attention(
       self,
       attn_weights: Array,
-      value: Array | KVTensor,
+      value: Array | qwix.QArray,
       q_seq_len: int,
       model_mode: str,
-      wv_product_einsum: Callable[..., Array],
       sinks: Array | None = None,
   ) -> tuple[Array, Array, Array]:
     """Computes the attention of a local subset of the kv cache.
@@ -2964,8 +3419,7 @@ class AttentionOp(nnx.Module):
 
     Args:
         attn_weights (Array): Product of query and key
-        value (Array): Current value
-        aqt_rng (PRNGKey | None): Optional rng
+        value (Array | qwix.QArray): Current value, possibly a quantized KV cache
 
     Returns:
         (local_out, local_max,): where
@@ -2995,7 +3449,7 @@ class AttentionOp(nnx.Module):
     local_max = jnp.transpose(local_max, (0, 2, 1, 3))  # (b, t, n_q, 1)
     local_sum = jnp.transpose(local_sum, (0, 2, 1, 3))  # (b, t, n_q, 1)
 
-    local_out = self.wv_product(local_exps, value, model_mode, wv_product_einsum)
+    local_out = self.wv_product(local_exps, value, model_mode)
     if model_mode == MODEL_MODE_AUTOREGRESSIVE and self.is_partition_in_decode(q_seq_len):
       local_out = with_logical_constraint(local_out, (DECODE_BATCH, DECODE_LENGTH, HEAD, D_KV))
     elif model_mode == MODEL_MODE_PREFILL:
@@ -3019,8 +3473,8 @@ class AttentionOp(nnx.Module):
   def apply_attention_dot(
       self,
       query: Array,
-      key: Array | KVTensor,
-      value: Array | KVTensor,
+      key: Array | qwix.QArray,
+      value: Array | qwix.QArray,
       decoder_segment_ids: Array | None,
       model_mode: str = MODEL_MODE_TRAIN,
       previous_chunk: Any = None,
@@ -3032,17 +3486,14 @@ class AttentionOp(nnx.Module):
       record_max_logits: bool = False,
       decoder_segment_ids_kv: Optional[Array] = None,
       kv_cache_part: str | None = None,
-      *,
-      qk_product_einsum: Callable[..., Array],
-      wv_product_einsum: Callable[..., Array],
+      sequence_load_balanced: bool = False,
   ):
     """Apply Attention."""
     validate_compute_axis_order(self.compute_axis_order)
     # Casting qk_product and softmaxt computation for float32 for model stability.
     if self.float32_qk_product:
-      if isinstance(key, KVTensor):
-        key = key.dequant()
       query = query.astype(jnp.float32)
+      # On a QArray, `.astype()` casts only `scale`, keeping `qvalue` quantized.
       key = key.astype(jnp.float32)
 
     # special sharding for decode
@@ -3064,24 +3515,14 @@ class AttentionOp(nnx.Module):
 
     if self.is_partition_in_decode(q_seq_len):
       query = with_logical_constraint(query, decode_q_sharding)
-      # avoid sharding scale tensor when using kv cache quantization
-      if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = with_logical_constraint(key.qvalue, decode_kv_sharding)
-        value.qvalue = with_logical_constraint(value.qvalue, decode_kv_sharding)
-      else:
-        key = with_logical_constraint(key, decode_kv_sharding)
-        value = with_logical_constraint(value, decode_kv_sharding)
+      key = _constrain_kv(key, decode_kv_sharding)
+      value = _constrain_kv(value, decode_kv_sharding)
     elif model_mode == MODEL_MODE_PREFILL:
       query = with_logical_constraint(query, prefill_q_sharding)
-      # avoid sharding scale tensor when using kv cache quantization
-      if self.kv_quant and isinstance(key, KVTensor) and isinstance(value, KVTensor):
-        key.qvalue = with_logical_constraint(key.qvalue, prefill_kv_sharding)
-        value.qvalue = with_logical_constraint(value.qvalue, prefill_kv_sharding)
-      else:
-        key = with_logical_constraint(key, prefill_kv_sharding)
-        value = with_logical_constraint(value, prefill_kv_sharding)
+      key = _constrain_kv(key, prefill_kv_sharding)
+      value = _constrain_kv(value, prefill_kv_sharding)
 
-    attn_weights = self.qk_product(query, key, q_seq_len, model_mode, qk_product_einsum)
+    attn_weights = self.qk_product(query, key, q_seq_len, model_mode)
     if self.is_partition_in_decode(q_seq_len):
       attn_weights = with_logical_constraint(attn_weights, weights_decode_shd)
     elif model_mode == MODEL_MODE_PREFILL:
@@ -3106,9 +3547,12 @@ class AttentionOp(nnx.Module):
         segment_positions=segment_positions,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
         kv_cache_part=kv_cache_part,
+        sequence_load_balanced=sequence_load_balanced,
     )
 
     if self.config.moba:
+      if isinstance(key, qwix.QArray):
+        raise NotImplementedError("MoBA is not supported with quantize_kvcache=True.")
       kv_seq_len = key.shape[1]
       # This logic for `next_pos` is duplicated from `generate_attention_mask`.
       # It determines the starting position of the query sequence.
@@ -3151,21 +3595,20 @@ class AttentionOp(nnx.Module):
       max_logits = max_logits_per_group.reshape(b, n_kv * g)
       self.max_logits = nnx.Intermediate(max_logits)
 
-    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode, wv_product_einsum, sinks)
+    return self.compute_local_attention(attn_weights, value, q_seq_len, model_mode, sinks)
 
   def qk_product(
       self,
       query: Array,
-      key: Array | KVTensor,
+      key: Array | qwix.QArray,
       q_seq_len: int,
       model_mode: str,
-      einsum: Callable[..., Array],
   ) -> Array:
     """Query-Key product.
 
     Args:
       query: Query projection, in shape of [b, t, n, d]
-      key: Key projection in shape of [b, s, n_kv, d]
+      key: Key projection in shape of [b, s, n_kv, d], possibly a quantized KV cache (qwix.QArray)
 
     Returns:
       results in shape [b, n_kv, n // n_kv, t, s].
@@ -3182,7 +3625,6 @@ class AttentionOp(nnx.Module):
     b, t, n, d = query.shape
     n_kv = key.shape[-2]
     assert n_kv == self.num_kv_heads and n % n_kv == 0
-    precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
     if model_mode == MODEL_MODE_TRAIN or self.compute_axis_order == (
         0,
         1,
@@ -3192,14 +3634,14 @@ class AttentionOp(nnx.Module):
       query = jnp.reshape(query, (b, t, n_kv, n // n_kv, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, 2, n_kv, n // n_kv, d))
-      result = einsum("btkgd,bskd->bkgts", query, key, **precision_kwargs)
+      result = kv_einsum("btkgd,bskd->bkgts", query, key, self.config.matmul_precision)
     elif self.compute_axis_order == (0, 2, 1, 3):
       query = jnp.transpose(query, axes=self.compute_axis_order)
       key = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), key)
       query = jnp.reshape(query, (b, n_kv, n // n_kv, t, d))
       if self.reshape_q and q_seq_len == 1:
         query = jnp.broadcast_to(query, (b, n_kv, n // n_kv, 2, d))
-      result = einsum("bkgtd,bksd->bkgts", query, key, **precision_kwargs)
+      result = kv_einsum("bkgtd,bksd->bkgts", query, key, self.config.matmul_precision)
     else:
       raise NotImplementedError(self.compute_axis_order)
     return result
@@ -3207,16 +3649,15 @@ class AttentionOp(nnx.Module):
   def wv_product(
       self,
       attn_weights: Array,
-      value: Array | KVTensor,
+      value: Array | qwix.QArray,
       model_mode: str,
-      einsum: Callable[..., Array],
   ) -> Array:
     """weighted value product.
 
     Args:
       attn_weights: Computed results of qk_einsum, in shape [b, n_kv, n // n_kv,
         t, s]
-      value: Value projection, in shape of [b, s, n_kv, d]
+      value: Value projection, in shape of [b, s, n_kv, d], possibly a quantized KV cache (qwix.QArray)
 
     Returns:
       result in shape [b, t, n, d]
@@ -3231,23 +3672,18 @@ class AttentionOp(nnx.Module):
       n // n_kv: number of group for query, sometimes annotated with g
     """
 
-    precision_kwargs = {"precision": self.config.matmul_precision} if einsum is jnp.einsum else {}
-    if self.kv_quant:
-      # manually cast to bf16 to avoid the fp32 XLA ops for speedup
-      if isinstance(value, KVTensor) and self.kv_quant.dtype == jnp.float8_e4m3fn:
-        value.qvalue = value.qvalue.astype(jnp.bfloat16)
     if model_mode == MODEL_MODE_TRAIN or self.compute_axis_order == (
         0,
         1,
         2,
         3,
     ):
-      out = einsum("bkgts,bskd->btkgd", attn_weights, value, **precision_kwargs)
+      out = kv_einsum("bkgts,bskd->btkgd", attn_weights, value, self.config.matmul_precision)
       b, t, n_kv, g, d = out.shape
       result = jnp.reshape(out, (b, t, n_kv * g, d))
     elif self.compute_axis_order == (0, 2, 1, 3):
       value = jax.tree.map(lambda x: jnp.transpose(x, axes=self.compute_axis_order), value)
-      out = einsum("bkgts,bksd->bkgtd", attn_weights, value, **precision_kwargs)
+      out = kv_einsum("bkgts,bksd->bkgtd", attn_weights, value, self.config.matmul_precision)
       b, n_kv, g, t, d = out.shape
       result = jnp.reshape(out, (b, n_kv * g, t, d))
       result = self.reverse_transepose(result, self.compute_axis_order)
@@ -3325,7 +3761,17 @@ class AttentionOp(nnx.Module):
       decoder_segment_ids_kv: Optional[Array] = None,
       pad_kv_total: int = 0,
       compress_ratio: int = 0,
+      sequence_load_balanced: bool = False,
   ):
+    """Applies attention.
+
+    `sequence_load_balanced=True` declares that the caller permuted query, key, value,
+    `inputs_positions` and `decoder_segment_ids` into DUAL_CHUNK_SWAP order over the
+    context axis (`attention_load_balance_context_size`) and will undo it on the output.
+    It is valid only in training.
+    """
+    if sequence_load_balanced and model_mode != MODEL_MODE_TRAIN:
+      raise ValueError("A load-balanced (DUAL_CHUNK_SWAP) token order is supported only in training.")
     if cached_values is None:
       prefill_kv_cache, ar_kv_cache = None, None
     else:
@@ -3354,7 +3800,11 @@ class AttentionOp(nnx.Module):
         if ar_kv_cache is not None:
           indexer_mask_ar = indexer_mask[:, :, prefill_len:]
 
-    prefill_unnormalized_output, prefill_exponentials_max, prefill_exponentials_sum = self.apply_attention(
+    (
+        prefill_unnormalized_output,
+        prefill_exponentials_max,
+        prefill_exponentials_sum,
+    ) = self.apply_attention(
         query=query,
         key=k_prefill,
         value=v_prefill,
@@ -3369,12 +3819,11 @@ class AttentionOp(nnx.Module):
         indexer_mask=indexer_mask_prefill,
         compressed_mask=compressed_mask if pass_comp_to_prefill else None,
         record_max_logits=record_max_logits,
-        qk_product_einsum=self.AqtEinsum_0,
-        wv_product_einsum=self.AqtEinsum_1,
         decoder_segment_ids_kv=decoder_segment_ids_kv,
         pad_kv_total=pad_kv_total,
         compress_ratio=compress_ratio,
         kv_cache_part="prefill" if model_mode == MODEL_MODE_AUTOREGRESSIVE else None,
+        sequence_load_balanced=sequence_load_balanced,
     )
 
     if ar_kv_cache is None:
@@ -3385,6 +3834,8 @@ class AttentionOp(nnx.Module):
     key_ar, value_ar, decoder_segment_ids_ar, lengths = ar_kv_cache
 
     if compressed_kv is not None:
+      if isinstance(key_ar, qwix.QArray) or isinstance(value_ar, qwix.QArray):
+        raise NotImplementedError("Compressed attention is not supported with quantize_kvcache=True.")
       key_ar = jnp.concatenate([key_ar, compressed_kv], axis=1)
       value_ar = jnp.concatenate([value_ar, compressed_kv], axis=1)
 
@@ -3401,8 +3852,6 @@ class AttentionOp(nnx.Module):
         indexer_mask=indexer_mask_ar,
         compressed_mask=compressed_mask,
         kv_cache_part="ar",
-        qk_product_einsum=self.AqtEinsum_2,
-        wv_product_einsum=self.AqtEinsum_3,
     )
 
     if ar_unnormalized_output is not None:

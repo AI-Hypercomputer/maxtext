@@ -14,10 +14,12 @@ RUN mkdir -p /airlock-apt-methods && \
         cp -a /usr/lib/apt/methods/ar+https /airlock-apt-methods/; \
     fi
 
-FROM $BASEIMAGE
+# Stage 1: Install system and Python dependencies
+FROM $BASEIMAGE AS dependencies
 ARG USE_AIRLOCK=false
 
-# Install system dependencies including C++20 compiler for vLLM (uses Airlock apt repo when USE_AIRLOCK=true)
+# Install system dependencies (including C++20 compiler for vLLM) and Google Cloud SDK
+# (uses Airlock apt repo when USE_AIRLOCK=true)
 RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
     --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
     if [ "$USE_AIRLOCK" = "true" ]; then \
@@ -29,22 +31,11 @@ RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=
     fi && \
     apt-get update && DEBIAN_FRONTEND=noninteractive apt-get upgrade -y && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build curl gnupg && \
-    rm -rf /var/lib/apt/lists/* && rm -f /usr/lib/apt/methods/ar+https
-
-# Add the Google Cloud SDK package repository
-RUN curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-key.gpg && \
+    curl -fsSL https://packages.cloud.google.com/apt/doc/apt-key.gpg > /tmp/apt-key.gpg && \
     gpg --dearmor --yes -o /usr/share/keyrings/cloud.google.gpg /tmp/apt-key.gpg && \
-    rm /tmp/apt-key.gpg && \
-    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" | tee /etc/apt/sources.list.d/google-cloud-sdk.list
-
-# Install the Google Cloud SDK
-RUN --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
-    --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
-    if [ "$USE_AIRLOCK" = "true" ]; then \
-        if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
-        if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi; \
-    fi && \
-    apt-get update && apt-get install -y google-cloud-cli && \
+    rm -f /tmp/apt-key.gpg && \
+    echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list && \
+    apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y google-cloud-cli && \
     rm -f /usr/bin/gcloud-crc32c /usr/lib/google-cloud-sdk/bin/gcloud-crc32c && \
     rm -rf /usr/lib/google-cloud-sdk/platform/bundledpythonunix/lib/python*/site-packages/*.dist-info && \
     rm -rf /var/lib/apt/lists/* && rm -f /usr/lib/apt/methods/ar+https
@@ -86,11 +77,6 @@ ENV ENV_TF=$TF
 ARG PACKAGE_DIR
 ENV PACKAGE_DIR=$PACKAGE_DIR
 
-ENV MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets
-ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
-ENV MAXTEXT_PKG_DIR=/deps/src/maxtext
-ENV MAXTEXT_REPO_ROOT=/deps
-
 # Set the working directory in the container
 WORKDIR /deps
 
@@ -104,10 +90,10 @@ COPY ${PACKAGE_DIR}/maxtext/integration/vllm/ src/maxtext/integration/vllm/
 COPY libtpu.so* /root/custom_libtpu/
 
 # Install dependencies - these steps are cached unless the copied files change
-RUN echo "Running command: bash setup.sh MODE=$ENV_MODE WORKFLOW=$ENV_WORKFLOW JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE} TF=${ENV_TF}"
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,from=airlock-bootstrap,source=/airlock-apt-methods,target=/tmp/airlock-apt-methods \
     --mount=type=secret,id=credentials,target=/tmp/airlock_credentials.json,required=false \
+    echo "Running command: bash setup.sh MODE=$ENV_MODE WORKFLOW=$ENV_WORKFLOW JAX_VERSION=$ENV_JAX_VERSION LIBTPU_VERSION=$ENV_LIBTPU_VERSION DEVICE=${ENV_DEVICE} TF=${ENV_TF}" && \
     if [ "$USE_AIRLOCK" = "true" ]; then \
         if [ -f /tmp/airlock-apt-methods/ar+https ]; then cp -a /tmp/airlock-apt-methods/ar+https /usr/lib/apt/methods/ar+https; fi && \
         if [ -s /tmp/airlock_credentials.json ]; then export GOOGLE_APPLICATION_CREDENTIALS=/tmp/airlock_credentials.json; fi && \
@@ -124,11 +110,22 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         CODENAME=$(. /etc/os-release && echo "${VERSION_CODENAME:-trixie}") && \
         echo "deb http://deb.debian.org/debian ${CODENAME} main" > /etc/apt/sources.list; \
     fi && \
-    rm -f /usr/lib/apt/methods/ar+https
+    rm -f /usr/lib/apt/methods/ar+https && \
+    rm -rf /deps/src/maxtext
 
-# Now copy the remaining code (source files that may change frequently)
+ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"
+
+# Stage 2: Add MaxText source code, tests, and optional test assets
+FROM dependencies AS maxtext
+
+ENV MAXTEXT_ASSETS_ROOT=/deps/src/maxtext/assets
+ENV MAXTEXT_TEST_ASSETS_ROOT=/deps/tests/assets
+ENV MAXTEXT_PKG_DIR=/deps/src/maxtext
+ENV MAXTEXT_REPO_ROOT=/deps
+
+# Copy MaxText source files that may change frequently
 COPY ${PACKAGE_DIR}/maxtext/ src/maxtext/
-# Now copy resource needed for pytest:
+# Copy resource needed for pytest
 COPY tests*/ tests/
 COPY pytest.ini* pytest.ini
 COPY benchmarks*/ benchmarks/
@@ -141,5 +138,3 @@ RUN if [ "$INCLUDE_TEST_ASSETS" = "true" ]; then \
         echo "WARNING: Failed to download test assets from GCS. These files are only used for end-to-end tests; you may not have access to the bucket."; \
         fi; \
     fi
-
-ENV PYTHONPATH="/deps/src${PYTHONPATH:+:${PYTHONPATH}}"

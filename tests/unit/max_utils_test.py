@@ -16,6 +16,7 @@
 import os
 import sys
 import time
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 from flax import linen as nn
@@ -197,6 +198,13 @@ class UnscanTest(unittest.TestCase):
         "enable_checkpointing": False,
         "dataset_type": "synthetic",
         "model_name": "llama3.1-8b",
+        "override_model_config": True,
+        "base_emb_dim": 128,
+        "base_mlp_dim": 256,
+        "base_num_query_heads": 4,
+        "base_num_kv_heads": 2,
+        "base_num_decoder_layers": 6,
+        "vocab_size": 256,
     } | kwargs
     config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -645,6 +653,19 @@ class TestMaybeInitializeJaxDistributedSystem(unittest.TestCase):
     max_utils.maybe_initialize_jax_distributed_system(raw_keys)
     mock_init.assert_not_called()
 
+  def test_tpu_checkpoint_load_without_checkpointing_calls_jax_init(self):
+    # Loading a checkpoint on multi-host needs the distributed system even when saving is off.
+    for load_keys in (
+        {"load_parameters_path": "gs://bucket/ckpt/0/items"},
+        {"load_full_state_path": "gs://bucket/ckpt/0/items"},
+        {"source_checkpoint_layout": "safetensors_dynamic"},
+    ):
+      with self.subTest(**load_keys), mock.patch("jax.distributed.initialize") as mock_init:
+        max_utils.maybe_initialize_jax_distributed_system(self._base_keys(enable_checkpointing=False, **load_keys))
+        mock_init.assert_called_once_with(
+            initialization_timeout=self._base_keys()["jax_distributed_initialization_timeout"]
+        )
+
 
 class TestReorderSequence(unittest.TestCase):
   """Tests for reorder_sequence optimization in max_utils.py"""
@@ -810,10 +831,12 @@ class TestReorderSequence(unittest.TestCase):
     self.assertTrue(jnp.allclose(x, restored, rtol=1e-5, atol=1e-6))
 
   def test_block_diffusion_masks_are_reordered_with_tokens(self):
+    completion_mask = jnp.arange(16, dtype=jnp.int32).reshape(1, 16) + 50
     corruption_mask = jnp.arange(16, dtype=jnp.int32).reshape(1, 16)
     targets_loss_mask = corruption_mask + 100
     batch = {
         "inputs": corruption_mask + 200,
+        "completion_mask": completion_mask,
         "corruption_mask": corruption_mask,
         "targets_loss_mask": targets_loss_mask,
     }
@@ -825,11 +848,88 @@ class TestReorderSequence(unittest.TestCase):
         hardware="cpu",
     )
 
+    np.testing.assert_array_equal(reordered["completion_mask"], max_utils.reorder_sequence(completion_mask, 2))
     np.testing.assert_array_equal(reordered["corruption_mask"], max_utils.reorder_sequence(corruption_mask, 2))
     np.testing.assert_array_equal(
         reordered["targets_loss_mask"],
         max_utils.reorder_sequence(targets_loss_mask, 2),
     )
+
+
+class TestResolveReorderStrategy(unittest.TestCase):
+  """Tests for resolve_reorder_strategy in max_utils.py"""
+
+  def test_resolve_reorder_strategy(self):
+    def config(**overrides):
+      defaults = {
+          "context_parallel_reorder_strategy": ReorderStrategy.AUTO,
+          "packing": True,
+          "context_parallel_strategy": "ring",
+          "hardware": "gpu",
+      }
+      return SimpleNamespace(**{**defaults, **overrides})
+
+    resolve = max_utils.resolve_reorder_strategy
+    # AUTO means STRIPED only for packed ring attention on GPU, and DUAL_CHUNK_SWAP otherwise.
+    self.assertEqual(resolve(config()), ReorderStrategy.STRIPED)
+    self.assertEqual(resolve(config(hardware="tpu")), ReorderStrategy.DUAL_CHUNK_SWAP)
+    self.assertEqual(resolve(config(packing=False)), ReorderStrategy.DUAL_CHUNK_SWAP)
+    # An explicit strategy is returned as is.
+    self.assertEqual(
+        resolve(config(context_parallel_reorder_strategy=ReorderStrategy.DUAL_CHUNK_SWAP)),
+        ReorderStrategy.DUAL_CHUNK_SWAP,
+    )
+
+
+class TestCheckNoLoadBalancedContextParallelism(unittest.TestCase):
+  """Tests for check_no_load_balanced_context_parallelism in max_utils.py."""
+
+  def _cfg(self, **overrides):
+    defaults = {
+        "context_parallel_load_balance": True,
+        "ici_context_parallelism": 1,
+        "dcn_context_parallelism": 1,
+        "context_sharding": "context",
+    }
+    return SimpleNamespace(**{**defaults, **overrides})
+
+  def test_allows_cp_one_or_disabled_load_balance(self):
+    max_utils.check_no_load_balanced_context_parallelism(self._cfg(), "train_dpo")
+    max_utils.check_no_load_balanced_context_parallelism(
+        self._cfg(), "train_dpo", mesh=SimpleNamespace(shape={"context": 1})
+    )
+    max_utils.check_no_load_balanced_context_parallelism(
+        self._cfg(context_parallel_load_balance=False, ici_context_parallelism=4),
+        "train_dpo",
+        mesh=SimpleNamespace(shape={"context": 4}),
+    )
+
+  def test_rejects_pre_mesh_cp_gt_one_when_load_balance_enabled(self):
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      max_utils.check_no_load_balanced_context_parallelism(
+          self._cfg(ici_context_parallelism=4),
+          "train_dpo",
+      )
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      max_utils.check_no_load_balanced_context_parallelism(
+          self._cfg(dcn_context_parallelism=2),
+          "train_dpo",
+      )
+
+  def test_auto_cp_minus_one_checked_against_resolved_mesh(self):
+    cfg = self._cfg(ici_context_parallelism=-1)
+    # Pre-mesh: -1 may resolve to 1, so do not reject eagerly.
+    max_utils.check_no_load_balanced_context_parallelism(cfg, "train_rl")
+    # Post-mesh with size 1 is allowed; size > 1 or custom axis > 1 raises.
+    max_utils.check_no_load_balanced_context_parallelism(cfg, "train_rl", mesh=SimpleNamespace(shape={"context": 1}))
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      max_utils.check_no_load_balanced_context_parallelism(cfg, "train_rl", mesh=SimpleNamespace(shape={"context": 4}))
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      max_utils.check_no_load_balanced_context_parallelism(
+          self._cfg(ici_context_parallelism=-1, context_sharding="cp_custom"),
+          "train_rl",
+          mesh=SimpleNamespace(shape={"cp_custom": 2}),
+      )
 
 
 if __name__ == "__main__":

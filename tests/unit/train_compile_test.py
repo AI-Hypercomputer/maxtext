@@ -30,6 +30,8 @@ import pytest
 from tempfile import gettempdir, NamedTemporaryFile
 
 
+from maxtext.configs import pyconfig
+from maxtext.trainers.pre_train.train_compile import get_topology_mesh
 from maxtext.trainers.pre_train.train_compile import main as train_compile_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path
@@ -45,6 +47,40 @@ except Exception:  # pylint: disable=broad-exception-caught
 @pytest.mark.tpu_backend
 class TrainCompile(parameterized.TestCase):
   """Tests for the Ahead of Time Compilation functionality, train_compile.py"""
+
+  # Directories the tests below write their `compiled_trainstep_file` into (literal "/tmp/test_*" or gettempdir()).
+  _TMP_DIRS = tuple(sorted({"/tmp", gettempdir()}))
+
+  @staticmethod
+  def _tmp_test_files():
+    files = set()
+    for d in filter(os.path.isdir, TrainCompile._TMP_DIRS):
+      files.update(e.path for e in os.scandir(d) if e.name.startswith("test_") and e.is_file(follow_symlinks=False))
+    return files
+
+  def setUp(self):
+    """Registers a cleanup that removes the compiled-trainstep files this test writes to the temp dirs.
+
+    Every AOT test here serializes its executable to a literal `/tmp/test_*` or `gettempdir()/test_*` path
+    (tens to hundreds of MB each) and never reads it back or deletes it; a CI shard runs ~18 of them on a runner
+    whose /tmp lives on the same ~98 GB disk as the checkout, wheel build and pip/JAX caches. Snapshot the temp dirs
+    now and, after the whole test (addCleanup, so a failing test is cleaned too), remove any `test_*` regular file
+    that appeared. Only this module writes `test_*` into the temp dirs. Under pytest-xdist each worker keeps its own
+    snapshot, so a worker may unlink a sibling's file while it is still being written; that is harmless because
+    nothing here opens the file after `save_compiled` returns. Files that pre-existed (or were already removed by a
+    sibling) are left alone.
+    """
+    super().setUp()
+    before = self._tmp_test_files()
+
+    def _remove_new_tmp_files():
+      for path in self._tmp_test_files() - before:
+        try:
+          os.remove(path)
+        except FileNotFoundError:
+          pass
+
+    self.addCleanup(_remove_new_tmp_files)
 
   def test_save_compiled_v4(self):
     temp_dir = gettempdir()
@@ -127,6 +163,7 @@ class TrainCompile(parameterized.TestCase):
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=2",
+            "per_device_batch_size=1",
             "base_emb_dim=256",
             "base_mlp_dim=256",
             "base_num_decoder_layers=2",
@@ -286,6 +323,7 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "ici_context_parallelism=4",
             "global_parameter_scale=32",
+            "base_num_decoder_layers=2",
             "per_device_batch_size=0.25",
             "max_target_length=65536",
             "allow_split_physical_axes=true",
@@ -327,6 +365,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology_num_slices=1",
             "ici_expert_parallelism=8",
             "model_name=mixtral-8x7b",
+            "override_model_config=true",
+            "base_num_decoder_layers=2",
             "megablox=False",
             "sparse_matmul=False",
             "capacity_factor=1",
@@ -416,6 +456,9 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
             "megablox=True",
@@ -441,6 +484,9 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=true",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
             "megablox=True",
@@ -624,6 +670,36 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  def test_moe_deepseek_prefetch_fsdp_weights_context_parallelism(self):
+    """AOT test for FSDP weight prefetching with context parallelism and moe_flat_fsdp_weights."""
+    temp_dir = gettempdir()
+    compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_prefetch_fsdp_weights_cp.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-8",
+            "use_iota_embed=False",
+            "compile_topology_num_slices=1",
+            "model_name=deepseek3-tiny",
+            "ici_fsdp_parallelism=2",
+            "ici_context_parallelism=2",
+            "context_parallel_strategy=all_gather",
+            "shard_mode=explicit",
+            "moe_flat_fsdp_weights=True",
+            "sparse_matmul=True",
+            "megablox=True",
+            "per_device_batch_size=1",
+            "max_target_length=1024",
+            "attention=flash",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            "scan_layers=True",
+            "prefetch_fsdp_weights=True",
+        )
+    )
+
   def test_moe_emb_chunking(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_emb_chunking.pickle")
@@ -636,6 +712,9 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
             "megablox=False",
@@ -664,6 +743,9 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "ici_expert_parallelism=4",
             "sparse_matmul=True",
             "megablox=False",
@@ -681,6 +763,7 @@ class TrainCompile(parameterized.TestCase):
         )
     )
 
+  @pytest.mark.integration_test
   def test_moe_deepseek_unscanned_bf16(self):
     temp_dir = gettempdir()
     compiled_trainstep_file = os.path.join(temp_dir, "test_moe_deepseek_unscanned_bf16.pickle")
@@ -693,6 +776,9 @@ class TrainCompile(parameterized.TestCase):
             "use_iota_embed=true",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-test",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "sparse_matmul=True",
             "megablox=False",
             "per_device_batch_size=1",
@@ -800,6 +886,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
             "model_name=gpt-oss-20b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "dtype=bfloat16",
@@ -821,6 +909,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
             "model_name=gpt-oss-20b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "dtype=bfloat16",
@@ -847,6 +937,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-16",
             "compile_topology_num_slices=1",
             "model_name=gpt-oss-20b",
+            "override_model_config=True",
+            "base_num_decoder_layers=4",
             "per_device_batch_size=1",
             "max_target_length=1024",
             "dtype=bfloat16",
@@ -871,6 +963,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=gpt3-6b",
+            "override_model_config=true",
+            "base_num_decoder_layers=2",
             "per_device_batch_size=1",
         )
     )
@@ -890,6 +984,7 @@ class TrainCompile(parameterized.TestCase):
             "per_device_batch_size=1",
             "shard_mode=explicit",
             "override_model_config=true",
+            "base_num_decoder_layers=2",
             f"fused_qkv={fused_qkv}",
             "ici_fsdp_parallelism=1",
             "ici_tensor_parallelism=4",
@@ -922,6 +1017,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-64",
             "compile_topology_num_slices=1",
             "model_name=qwen3-next-80b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
             "per_device_batch_size=1",
             "max_target_length=1024",
         )
@@ -997,6 +1094,7 @@ class TrainCompile(parameterized.TestCase):
             "weight_dtype=bfloat16",
             "routed_bias=False",
             "override_model_config=True",
+            "base_num_decoder_layers=5",
         )
     )
 
@@ -1011,13 +1109,14 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek-custom",
-            "per_device_batch_size=4",
+            "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
             "attention=flash",
             "use_tokamax_splash=True",
             # override
             "override_model_config=True",
+            "base_num_decoder_layers=2",
             "engram_layers=[]",
             # dense warmup
             "indexer_sparse_training=False",
@@ -1037,13 +1136,14 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek-custom",
-            "per_device_batch_size=4",
+            "per_device_batch_size=1",
             "scan_layers=True",
             "max_target_length=1024",
             "attention=flash",
             "use_tokamax_splash=True",
             # override
             "override_model_config=True",
+            "base_num_decoder_layers=2",
             "engram_layers=[]",
             # sparse training
             "indexer_sparse_training=True",
@@ -1079,13 +1179,14 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek-custom",
-            "per_device_batch_size=4",
+            "per_device_batch_size=1",
             "scan_layers=True",
             "attention=flash",
             "use_tokamax_splash=True",
             "max_target_length=1024",
             # override
             "override_model_config=True",
+            "base_num_decoder_layers=2",
             "mhc_expansion_rate=4",
             "engram_layers=[]",
         )
@@ -1110,6 +1211,9 @@ class TrainCompile(parameterized.TestCase):
             "tokenizer_type=huggingface",
             "tokenizer_path=deepseek-ai/DeepSeek-V3.2",
             "hf_access_token=fake",
+            "override_model_config=True",
+            "base_num_decoder_layers=3",
+            "engram_layers=[1]",
         )
     )
 
@@ -1154,6 +1258,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-tiny",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "scan_layers=True",
             "sparse_matmul=True",
             "megablox=True",
@@ -1186,6 +1293,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
             "model_name=deepseek3-tiny",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "scan_layers=True",
             "sparse_matmul=True",
             "megablox=True",
@@ -1215,6 +1325,8 @@ class TrainCompile(parameterized.TestCase):
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
+            "base_emb_dim=256",
+            "base_mlp_dim=256",
             "base_num_decoder_layers=2",
             "per_device_batch_size=2",
             "max_target_length=1024",
@@ -1234,6 +1346,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-512",
             "compile_topology_num_slices=1",
             "model_name=qwen3.5-397b-a17b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
             "per_device_batch_size=1.0",
             "max_target_length=1024",
             "sparse_matmul=True",
@@ -1287,6 +1401,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-512",
             "compile_topology_num_slices=1",
             "model_name=qwen3-next-80b-a3b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
             "per_device_batch_size=1.0",
             "max_target_length=1024",
             "ici_fsdp_parallelism=32",
@@ -1321,7 +1437,7 @@ class TrainCompile(parameterized.TestCase):
             "shard_mode=explicit",
             "ici_data_parallelism=-1",
             "ici_fsdp_parallelism=1",
-            "gradient_accumulation_steps=4",
+            "gradient_accumulation_steps=2",
             "shard_optimizer_over_data=True",
         )
     )
@@ -1344,6 +1460,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-512",
             "compile_topology_num_slices=1",
             "model_name=qwen3.5-397b-a17b",
+            "override_model_config=True",
+            "base_num_decoder_layers=8",
             "per_device_batch_size=1.0",
             "max_target_length=1024",
             "ici_fsdp_parallelism=32",
@@ -1392,7 +1510,7 @@ class TrainCompile(parameterized.TestCase):
             "shard_mode=explicit",
             "ici_data_parallelism=-1",
             "ici_fsdp_parallelism=1",
-            "gradient_accumulation_steps=4",
+            "gradient_accumulation_steps=2",
             "shard_optimizer_over_data=True",
             "tokenizer_type=tiktoken",
             (f"tokenizer_path={os.path.join(MAXTEXT_ASSETS_ROOT, 'tokenizers', 'tokenizer.llama2')}"),
@@ -1506,6 +1624,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-256",
             "compile_topology_num_slices=1",
             "model_name=gemma4-31b",
+            "override_model_config=True",
+            "base_num_decoder_layers=6",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=32",
@@ -1532,6 +1652,8 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-512",
             "compile_topology_num_slices=1",
             "model_name=gemma4-26b",
+            "override_model_config=True",
+            "base_num_decoder_layers=6",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=32",
@@ -1561,6 +1683,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-64",
             "compile_topology_num_slices=1",
             "model_name=gemma4-e4b",
+            "override_model_config=True",
+            "base_num_decoder_layers=12",
+            "num_kv_shared_layers=6",
             "per_device_batch_size=1",
             "max_target_length=4096",
             # E4B has two KV heads, which is as far as the tensor axis can split them,
@@ -1591,6 +1716,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-1024",
             "compile_topology_num_slices=1",
             "model_name=kimi-k2-1t",
+            "override_model_config=True",
+            "base_num_decoder_layers=2",
+            "first_num_dense_layers=1",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=64",
@@ -1661,8 +1789,9 @@ class TrainCompile(parameterized.TestCase):
             "compile_topology=v5p-1024",
             "compile_topology_num_slices=1",
             "model_name=llama4-17b-128e",
-            # Only needed so the tokenizer below can replace the model config's default.
+            # Needed so base_num_decoder_layers and the tokenizer below can override the model config.
             "override_model_config=True",
+            "base_num_decoder_layers=4",
             "per_device_batch_size=1",
             "max_target_length=4096",
             "ici_fsdp_parallelism=64",
@@ -1687,6 +1816,8 @@ class TrainCompile(parameterized.TestCase):
             f"compiled_trainstep_file={compiled_trainstep_file}",
             "compile_topology=v5p-8",
             "compile_topology_num_slices=1",
+            "base_emb_dim=256",
+            "base_mlp_dim=256",
             "base_num_decoder_layers=2",
             "per_device_batch_size=2",
             "max_target_length=1024",
@@ -1718,5 +1849,77 @@ class TrainCompile(parameterized.TestCase):
             "dtype=bfloat16",
             "weight_dtype=bfloat16",
             "override_model_config=True",
+        )
+    )
+
+  def test_get_topology_mesh_updates_shardy_partitioner(self):
+    """Verifies get_topology_mesh updates jax_use_shardy_partitioner from config.shardy."""
+    prev_shardy = getattr(jax.config, "jax_use_shardy_partitioner", True)
+    self.addCleanup(jax.config.update, "jax_use_shardy_partitioner", prev_shardy)
+    jax.config.update("jax_use_shardy_partitioner", False)
+    config = pyconfig.initialize(
+        (
+            "",
+            get_test_config_path(),
+            "compile_topology=v6e-4",
+            "compile_topology_num_slices=1",
+            "shardy=True",
+        )
+    )
+    get_topology_mesh(config)
+    self.assertTrue(jax.config.jax_use_shardy_partitioner)
+
+  @parameterized.named_parameters(
+      {
+          "testcase_name": "glm5_1_scanned",
+          "model_name": "glm5.1-744b",
+          "scan_layers": "true",
+          "extra_args": (),
+      },
+      {
+          "testcase_name": "glm5_2_scanned",
+          "model_name": "glm5.2-744b",
+          "scan_layers": "true",
+          "extra_args": (),
+      },
+      {
+          "testcase_name": "glm5_2_unscanned_pruned",
+          "model_name": "glm5.2-744b",
+          "scan_layers": "false",
+          "extra_args": (
+              "base_num_decoder_layers=6",
+              "first_num_dense_layers=2",
+              "index_share_pattern=FFSSFS",
+          ),
+      },
+  )
+  @pytest.mark.cpu_only
+  def test_glm5_compile(self, model_name, scan_layers, extra_args):
+    """AOT compilation test for GLM-5.1 and GLM-5.2 (scanned and unscanned pruned IndexShare)."""
+    compiled_trainstep_file = os.path.join(gettempdir(), f"test_{model_name}_{scan_layers}.pickle")
+    train_compile_main(
+        (
+            "",
+            get_test_config_path(),
+            f"compiled_trainstep_file={compiled_trainstep_file}",
+            "compile_topology=v5p-1024",
+            "compile_topology_num_slices=1",
+            "use_iota_embed=true",
+            f"model_name={model_name}",
+            "override_model_config=true",
+            "per_device_batch_size=1",
+            "max_target_length=4096",
+            "ici_fsdp_parallelism=64",
+            "ici_expert_parallelism=8",
+            "sparse_matmul=true",
+            "megablox=true",
+            f"scan_layers={scan_layers}",
+            "attention=dot_product",
+            "indexer_sparse_training=true",
+            "indexer_loss_scaling_factor=0.1",
+            "routed_bias_update_rate=0.001",
+            "dtype=bfloat16",
+            "weight_dtype=bfloat16",
+            *extra_args,
         )
     )

@@ -12,7 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Backward-compatible re-export shim for benchmarks.maxtext_ctk_runner."""
+"""Deprecated backward-compatible re-export shim for benchmarks.maxtext_ctk_runner.
+
+XPK is deprecated. MaxText benchmarks now run on Cluster Toolkit (gcluster);
+import from `benchmarks.maxtext_ctk_runner` instead. This module only re-exports
+those symbols for existing callers and may be removed in a future release.
+"""
+
+import warnings
 
 # pylint: disable=unused-import,wildcard-import,unused-wildcard-import,protected-access
 from benchmarks.maxtext_ctk_runner import *  # noqa: F401,F403
@@ -47,6 +54,13 @@ from benchmarks.maxtext_ctk_runner import (
     wait_for_xpk_workload_completion,
     wait_for_xpk_workloads_completion_async,
     xpk_benchmark_runner,
+)
+
+warnings.warn(
+    "benchmarks.maxtext_xpk_runner is deprecated because XPK is deprecated; "
+    "use benchmarks.maxtext_ctk_runner (Cluster Toolkit) instead.",
+    DeprecationWarning,
+    stacklevel=2,
 )
 
 if __name__ == "__main__":

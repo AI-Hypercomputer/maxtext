@@ -16,15 +16,21 @@
 
 Modules:
   * `scan.py` — layer stacking via `jax.lax.scan` + `maybe_apply_scan`.
+  * `quantization.py` — `maybe_quantize`: qwix int4 / int8 / fp4 / fp8 by interception, over
+    the projection layers of the decoder stack.
+  * `named_scopes.py` — `jax.named_scope` per submodule, so profiles and HLO
+    dumps read `decoder/layers/3/mlp/wi_0`.
 
 Planned modules:
   * `remat.py` — path-transparent remat wrapper + `maybe_apply_remat`.
-  * `quantization.py` — qwix int8/fp8 rules + `maybe_quantize`.
   * `offload.py` — `to_host` for optimizer/parameter offloading.
 
-Planned composition order:
-`construct -> remat -> scan -> quantize -> optimizer -> host offload`.
+Composition order is fixed, and `maxtext.m3.train.loop.setup_model` is the
+reference for it:
+`construct -> remat -> scan -> quantize -> named scopes -> optimizer -> host offload`.
 
-Model files contain only zero-cost annotations (`checkpoint_name` tags and
-sharding specs); they must never import from this package.
+None of these wrap the model in another module, and quantization leaves the
+variable tree untouched (asserted). Model files contain only zero-cost
+annotations (`checkpoint_name` tags and sharding specs); they must never
+import from this package.
 """

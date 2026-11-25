@@ -29,27 +29,41 @@ REL_REGRESSION_OTHER_RATIO = 1.20
 ABS_INCREASE_UNIT_SEC = 15.0
 ABS_INCREASE_INTEGRATION_SEC = 30.0
 
-# TODO: Remove a module from this list once a few nightly runs with the class-level shard split
-# (tests/utils/class_split.py, TPU unit flavors) show no more PER-TEST REGRESSION ALERT warnings for it.
-# Modules excluded from per-test regression enforcement.
-# These modules have heavy XLA compilation costs that are shared across tests within the same
-# CI shard. Before the class-level split (tests/utils/class_split.py), pytest-split dealt single
-# tests, and its deal changed whenever the set of selected tests or their recorded durations
-# changed (PR runs deselect scheduled_only tests, so a PR's shards never matched the nightly's).
-# The first test in each shard pays a cold-compile penalty (~30-130s) while subsequent tests reuse
-# the cache (~4-25s), which created massive false-positive duration swings (e.g. 5s -> 130s)
-# depending on shard position, not code changes. Per-test regressions in these modules are logged
-# as warnings for visibility but do not fail the CI run.
-# See: https://github.com/AI-Hypercomputer/maxtext/pull/5308
+# Modules excluded from per-test regression enforcement: their per-test regressions are logged as warnings for
+# visibility but do not fail the CI run.
+# Before the class-level split (tests/utils/class_split.py), pytest-split dealt single tests, and its deal changed
+# whenever the set of selected tests or their recorded durations changed (PR runs deselect scheduled_only tests, so
+# a PR's shards never matched the nightly's). The first test in each shard paid a cold-compile penalty (~30-130s)
+# while later tests reused the cache (~4-25s), which created false duration swings (e.g. 5s -> 130s) that depended
+# on shard position, not code changes. See: https://github.com/AI-Hypercomputer/maxtext/pull/5308
+# The class split keeps a class's tests together on TPU unit flavors, which ended those swings for
+# megablox_gmm_3d_test, megablox_relayout_test, m3.qwen3_vl_comparison_test and tiling_test (no alert for them in a
+# week of runs; their largest increase in 28 PR runs was about 2s), so they are enforced again. What stays:
+# - tests.unit.moe_test: MoePinSparseCoreAllGathersTest is a one-test class that reuses a compile of another class
+#   when both land on the same shard (~0.5s) and pays it otherwise (~95s), as the deal follows recorded durations.
+# - tests.unit.attention_test: MLATest reuses compiles of AttentionTest and CompressedAttentionTest when they share a
+#   shard, so tests such as test_tpu_dot_product_context_parallel_with_indexer_lb_cp4_smallk take ~38s or ~50s
+#   depending on the deal, just under the 15s limit today.
+# - tests.integration.pipeline_parallelism_test: integration flavors still use pytest-split.
+# TODO: Drop moe_test and attention_test once their classes no longer depend on another class's compile (e.g. by
+# keeping the classes of a module on one shard; tests/conftest.py clears the JAX caches after each module anyway).
 EXCLUDED_MODULES_PER_TEST = {
     "tests.unit.moe_test",
     "tests.unit.attention_test",
-    "tests.unit.megablox_gmm_3d_test",
-    "tests.unit.megablox_relayout_test",
-    "tests.unit.m3.qwen3_vl_comparison_test",
-    "tests.unit.tiling_test",
     "tests.integration.pipeline_parallelism_test",
 }
+
+# Suite-level check of new-test cost, per flavor: enforced on PR runs; other runs only warn (--warn-only).
+# A flavor fails when its passed tests, new ones included, take more than SUITE_RATIO_LIMIT times the baseline time of
+# the same existing tests AND more than SUITE_FLOOR_SEC longer. Using the same existing tests on both sides keeps the
+# difference in test selection between PR and scheduled runs out of the ratio. A normal PR run stays within a few
+# percent of its baseline, so the limit only trips on real growth; the floor keeps small flavors from failing over
+# a single quick test. Known limit: a renamed, moved or re-parametrized test has a new baseline key, so it counts as
+# new and its old entry gives no credit; a large rename can trip the check on the renaming PR and on PRs that run
+# before the next scheduled run records the new names. Track is not a required check, so such a failure can be ignored.
+SUITE_RATIO_LIMIT = 1.20
+SUITE_FLOOR_SEC = 300.0
+SUITE_TOP_NEW_TESTS = 10
 
 
 def extract_job_name(xml_file):
@@ -111,76 +125,122 @@ def find_missing_shards(xml_files):
   return missing
 
 
-def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
-  """Processes a single testcase and checks for limit violations or regressions."""
-  failed = False
-
-  # 1. Skip processing for skipped tests to avoid corrupting the baseline with ~0s durations
-  if testcase.find("skipped") is not None:
-    return False
-
-  # 2. Skip processing for failed/errored tests to prevent capturing abnormally short durations
-  if testcase.find("failure") is not None or testcase.find("error") is not None:
-    return False
-
-  time_val = float(testcase.get("time", 0.0))
-  name = testcase.get("name", "unknown")
-  classname = testcase.get("classname", "unknown")
-  full_name = f"{classname}.{name}"
-
-  # Parse custom properties to extract markers
+def testcase_markers(testcase):
+  """Returns the pytest markers that tests/conftest.py records as 'marker' properties of a JUnit testcase."""
   markers = set()
   properties_elem = testcase.find("properties")
   if properties_elem is not None:
     for prop in properties_elem.findall("property"):
       if prop.get("name") == "marker":
         markers.add(prop.get("value"))
+  return markers
 
-  is_integration = "integration_test" in markers
-  is_cpu = "cpu" in os.path.basename(xml_file).lower() or "cpu" in job_name.lower()
 
-  if is_integration:
-    abs_noise_threshold = ABS_INCREASE_INTEGRATION_SEC
-    rel_regression_ratio = REL_REGRESSION_OTHER_RATIO
-    test_type = "Integration Test"
-  else:
-    abs_noise_threshold = ABS_INCREASE_UNIT_SEC
-    rel_regression_ratio = REL_REGRESSION_OTHER_RATIO
-    test_type = "Unit Test"
+def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data, suite_stats=None):
+  """Processes a passed testcase: updates `new_baseline_data` and `suite_stats`, then checks for a per-test regression.
+
+  Returns True when the test regressed and its module is not in EXCLUDED_MODULES_PER_TEST.
+  `suite_stats[job_name]` holds the flavor's totals for check_suite_growth(): "base" (baseline seconds of the tests
+  that have a baseline entry), "now" (seconds of the same tests plus the new ones), "new_tests" ((seconds, name) of the
+  tests with no entry) and "increases" ((seconds over baseline, name) of the tests with one).
+  """
+  # Skip skipped, failed, or errored tests to avoid capturing ~0s or truncated durations.
+  if testcase.find("skipped") is not None or testcase.find("failure") is not None or testcase.find("error") is not None:
+    return False
+
+  time_val = float(testcase.get("time", 0.0))
+  classname = testcase.get("classname", "unknown")
+  full_name = f"{classname}.{testcase.get('name', 'unknown')}"
+  markers = testcase_markers(testcase)
 
   baseline_key = f"{job_name}::{full_name}"
+  base_time = baseline_data.get(baseline_key)
   new_baseline_data[baseline_key] = time_val
 
-  # Skip regression checking for CPU tests due to shared CPU multi-tenancy noise
-  skip_regression = is_cpu
+  if suite_stats is not None:
+    stats = suite_stats.setdefault(job_name, {"base": 0.0, "now": 0.0, "new_tests": [], "increases": []})
+    if base_time is not None:
+      stats["base"] += base_time
+      stats["now"] += time_val
+      stats["increases"].append((time_val - base_time, full_name))
+    elif "scheduled_only" not in markers:
+      # A new scheduled_only test runs here only because the PR adds or changes it (newly_added), and later PR runs
+      # skip it, so it is left out.
+      stats["now"] += time_val
+      stats["new_tests"].append((time_val, full_name))
 
-  # Check relative regression if baseline exists
-  if not skip_regression and baseline_key in baseline_data:
-    base_time = baseline_data[baseline_key]
-    if isinstance(base_time, (int, float)) and base_time > 0:
-      ratio = time_val / base_time
-      increase = time_val - base_time
-      if ratio >= rel_regression_ratio and increase > abs_noise_threshold:
-        # classname is "<module>.<Class>" for a test method and "<module>" for a test function.
-        is_excluded = any(classname == m or classname.startswith(m + ".") for m in EXCLUDED_MODULES_PER_TEST)
-        if is_excluded:
-          print(
-              f"::warning::[PER-TEST REGRESSION ALERT] {test_type} significantly degraded"
-              + " (Warn-only: module excluded due to shard-position noise)."
-          )
-        else:
-          print(f"::error::[REGRESSION ALERT] {test_type} significantly degraded!")
-          failed = True
-        print(f"  Test: {full_name}")
-        print(f"  Flavor: {job_name}")
-        print(f"  File: {os.path.basename(xml_file)}")
-        print(f"  Previous Duration: {base_time:.2f}s")
-        print(f"  New Duration: {time_val:.2f}s")
-        print(f"  Increase: +{increase:.2f}s ({(ratio - 1) * 100:.1f}%)")
-        print(f"  Thresholds: >{(rel_regression_ratio - 1) * 100:.0f}% AND >{abs_noise_threshold}s")
-        print("-" * 50)
+  # Skip per-test regression checking for CPU tests due to shared CPU multi-tenancy noise, and for tests without a
+  # baseline above 0 (the ratio needs one).
+  is_cpu = "cpu" in os.path.basename(xml_file).lower() or "cpu" in job_name.lower()
+  if is_cpu or base_time is None or base_time <= 0:
+    return False
+
+  is_integration = "integration_test" in markers
+  abs_noise_threshold = ABS_INCREASE_INTEGRATION_SEC if is_integration else ABS_INCREASE_UNIT_SEC
+  test_type = "Integration Test" if is_integration else "Unit Test"
+
+  ratio = time_val / base_time
+  increase = time_val - base_time
+  failed = False
+  if ratio >= REL_REGRESSION_OTHER_RATIO and increase > abs_noise_threshold:
+    # classname is "<module>.<Class>" for a test method and "<module>" for a test function.
+    is_excluded = any(classname == m or classname.startswith(m + ".") for m in EXCLUDED_MODULES_PER_TEST)
+    if is_excluded:
+      print(
+          f"::warning::[PER-TEST REGRESSION ALERT] {test_type} significantly degraded"
+          " (Warn-only: module excluded due to shard-position noise)."
+      )
+    else:
+      print(f"::error::[REGRESSION ALERT] {test_type} significantly degraded!")
+      failed = True
+    print(f"  Test: {full_name}")
+    print(f"  Flavor: {job_name}")
+    print(f"  File: {os.path.basename(xml_file)}")
+    print(f"  Previous Duration: {base_time:.2f}s")
+    print(f"  New Duration: {time_val:.2f}s")
+    print(f"  Increase: +{increase:.2f}s ({(ratio - 1) * 100:.1f}%)")
+    print(f"  Thresholds: >{(REL_REGRESSION_OTHER_RATIO - 1) * 100:.0f}% AND >{abs_noise_threshold}s")
+    print("-" * 50)
 
   return failed
+
+
+def check_suite_growth(suite_stats, skip_jobs):
+  """Prints each checked flavor's suite growth and returns the flavors over both suite limits.
+
+  CPU and decoupled flavors (runner noise), flavors in `skip_jobs` (a missing or unreadable shard result file) and
+  flavors with no baseline time are not checked.
+  """
+  over_limit = []
+  for job_name, stats in sorted(suite_stats.items()):
+    if job_name == "unknown" or "cpu" in job_name.lower() or "decoupled" in job_name.lower() or job_name in skip_jobs:
+      continue
+    base, now, new_tests = stats["base"], stats["now"], stats["new_tests"]
+    if base <= 0:
+      continue
+    ratio = now / base
+    increase = now - base
+    new_time = sum(t for t, _ in new_tests)
+    print(
+        f"[SUITE] Flavor {job_name}: {now:.0f}s vs {base:.0f}s baseline for the same existing tests "
+        f"({ratio:.2f}x, {increase:+.0f}s); {len(new_tests)} new test(s) took {new_time:.0f}s."
+    )
+    if ratio > SUITE_RATIO_LIMIT and increase > SUITE_FLOOR_SEC:
+      over_limit.append(job_name)
+      print(f"::error::[SUITE REGRESSION] Flavor {job_name} takes {ratio:.2f}x its baseline time (+{increase:.0f}s).")
+      print(f"  Thresholds: >{SUITE_RATIO_LIMIT:.2f}x AND >{SUITE_FLOOR_SEC:.0f}s")
+      if new_tests:
+        print("  Costliest new tests (mark long sweeps scheduled_only to keep them off PR runs):")
+        for t, name in sorted(new_tests, reverse=True)[:SUITE_TOP_NEW_TESTS]:
+          print(f"    {t:8.1f}s  {name}")
+        print("  A renamed or moved test counts as new: if these were only renamed, this can be ignored (not required).")
+      slower = [(d, name) for d, name in sorted(stats["increases"], reverse=True) if d > 0][:SUITE_TOP_NEW_TESTS]
+      if slower:
+        print("  Existing tests that got slower the most:")
+        for d, name in slower:
+          print(f"    {d:+8.1f}s  {name}")
+      print("-" * 50)
+  return over_limit
 
 
 def main():
@@ -218,14 +278,19 @@ def main():
   if args.baseline and os.path.exists(args.baseline):
     try:
       with open(args.baseline, "r", encoding="utf-8") as f:
-        baseline_data = json.load(f)
+        loaded = json.load(f)
+      # Keep the '<flavor>::<test>' entries that hold a duration (a number >= 0). Old keys without the flavor separator
+      # '::' (or with '::MODULE::') and any other value are dropped here, once, for the checks and the saved baseline.
+      baseline_data = {
+          k: v
+          for k, v in loaded.items()
+          if "::" in k and "::MODULE::" not in k and isinstance(v, (int, float)) and v >= 0
+      }
     except Exception as e:  # pylint: disable=broad-exception-caught
       print(f"Error loading baseline {args.baseline}: {e}")
 
-  # Initialize with existing baseline data, filtering out old legacy keys without flavor separator '::'
-  new_baseline_data = {
-      k: v for k, v in baseline_data.items() if "::" in k and "::MODULE::" not in k and isinstance(v, (int, float))
-  }
+  # Initialize with existing baseline data, so flavors and tests that do not run in this invocation keep their entries.
+  new_baseline_data = dict(baseline_data)
   has_regression = False
   has_errors = False
 
@@ -233,6 +298,7 @@ def main():
   total_tests_by_job = {}
   active_keys_by_job = {}
   corrupt_jobs = set()
+  suite_stats = {}
 
   # A shard that was cancelled or timed out leaves no result file. Its tests keep their previous baseline
   # entries and the tests that ran are recorded as usual, but the flavor's totals would be short, so they
@@ -265,8 +331,9 @@ def main():
           classname = testcase.get("classname", "unknown")
           active_keys_by_job.setdefault(job_name, set()).add(f"{job_name}::{classname}.{name}")
 
-        # Micro-level regression check (enforced for non-excluded modules, warn-only for excluded)
-        if process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data):
+        # Micro-level regression check (enforced for non-excluded modules, warn-only for excluded); also adds the
+        # test to its flavor's suite totals.
+        if process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_data, suite_stats):
           has_regression = True
 
       if job_name != "unknown" or job_count > 0:
@@ -277,6 +344,9 @@ def main():
       print(f"Error parsing or processing {xml_file}: {e}")
       corrupt_jobs.add(job_name)
       has_errors = True
+
+  # Suite-level check of new-test cost (like-for-like time per flavor, new tests included).
+  has_suite_regression = bool(check_suite_growth(suite_stats, set(missing_shards) | corrupt_jobs))
 
   # Prune stale baseline entries (deleted, renamed, moved, or skipped tests) for flavors that ran all shards.
   # Flavors that did not run in this invocation or have missing/corrupt shards keep their previous baseline entries.
@@ -358,8 +428,11 @@ def main():
   if has_errors:
     print("\nOne or more critical errors occurred during execution.")
     sys.exit(1)
-  elif has_regression:
-    print("\nOne or more tests regressed significantly.")
+  elif has_regression or has_suite_regression:
+    if has_regression:
+      print("\nOne or more tests regressed significantly.")
+    if has_suite_regression:
+      print("\nOne or more flavors grew past the suite limits (see [SUITE REGRESSION] above).")
     if args.warn_only:
       print("Non-blocking mode active: exiting with code 0.")
       sys.exit(0)

@@ -94,8 +94,6 @@ torch_vision_config = Qwen3OmniMoeVisionEncoderConfig(
     attn_implementation="eager",
 )
 
-torch.set_grad_enabled(False)
-
 
 def create_torch_vision_encoder():
   """Create and configure PyTorch Qwen3-VL vision encoder model."""
@@ -134,8 +132,12 @@ class TestQwen3VLVisionEncoderEndToEnd(unittest.TestCase):
   """End-to-end equivalence test for Qwen3-VL Vision Encoder + Projector JAX subclasses."""
 
   def setUp(self):
+    super().setUp()
     np.random.seed(42)
-    torch.manual_seed(42)
+    if HAS_TORCH:
+      self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+      torch.set_grad_enabled(False)
+      torch.manual_seed(42)
     devices = jax.devices()
     self.mesh = Mesh(np.array(devices[:1]), axis_names=("data",))
 

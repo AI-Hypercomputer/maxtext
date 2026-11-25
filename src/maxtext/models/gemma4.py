@@ -84,7 +84,7 @@ class Gemma4MoE(nnx.Module):
 
     self.pre_forward_scale_2 = nnx.Param(
         jnp.ones((self.config.emb_dim,), dtype=self.config.weight_dtype),
-        sharding=("embed",),
+        sharding=("norm",),
     )
     self.pre_feedforward_layernorm_2 = RMSNorm(
         num_features=self.config.emb_dim,
@@ -128,6 +128,7 @@ class Gemma4MoE(nnx.Module):
       intermediate_sharding: jax.sharding.NamedSharding | None = None,
       out_sharding: jax.sharding.NamedSharding | None = None,
       forced_routed_experts: jax.Array | None = None,
+      token_mask: jax.Array | None = None,
   ) -> tuple[jax.Array, Optional[jax.Array], Optional[jax.Array]]:
     shared_experts = self.moe_block.shared_experts(
         inputs, intermediate_sharding=intermediate_sharding, out_sharding=out_sharding
@@ -144,8 +145,8 @@ class Gemma4MoE(nnx.Module):
     root_size = self.config.emb_dim**-0.5
     router_scale = jnp.asarray(self.pre_forward_scale_2.value, gate_dtype)
     if self.config.shard_mode == ShardMode.EXPLICIT:
-      # The router scale is declared "embed" but multiplies an activation whose last axis is
-      # "activation_embed", two different mesh axes under the default rules.
+      # The router scale ("norm") and the activation's last axis ("activation_embed") can be on different
+      # mesh axes, depending on the logical axis rules.
       router_scale = align_scale_with_normalized_axis(router_scale, unscaled_norm)
     gate_inputs = unscaled_norm * root_size * router_scale
 
@@ -155,6 +156,7 @@ class Gemma4MoE(nnx.Module):
         gate_inputs=gate_inputs,
         out_sharding=out_sharding,
         forced_routed_experts=forced_routed_experts,
+        token_mask=token_mask,
     )
     routed_experts = self.post_feedforward_layernorm_2(routed_experts, out_sharding=out_sharding)
 
@@ -200,7 +202,8 @@ class Gemma4DecoderLayer(nnx.Module):
       self.activation_axis_names = ("activation_batch", "prefill_activation_norm_length", "activation_embed")
     else:
       self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-    self.mlp_activation_axis_names = self.activation_axis_names[:-1] + ("activation_mlp",)
+    mlp_length_name = "prefill_activation_length" if model_mode == MODEL_MODE_PREFILL else "activation_length"
+    self.mlp_activation_axis_names = ("activation_batch", mlp_length_name, "activation_mlp")
 
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
     # ShardMode.AUTO these are set to None so callees do not pin physical out_sharding
@@ -411,6 +414,7 @@ class Gemma4DecoderLayer(nnx.Module):
           intermediate_sharding=self.mlp_intermediate_sharding,
           out_sharding=self.out_sharding,
           forced_routed_experts=forced_routed_experts,
+          token_mask=moe.routing_token_mask(cfg, decoder_segment_ids, model_mode),
       )
       if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:
         self.sow(nnx.Intermediate, "moe_lb_loss", load_balance_loss)
@@ -574,11 +578,18 @@ class Gemma4ScannableBlock(nnx.Module):
     is ``None`` for both ``"none"`` and ``"full"``, so it
     cannot distinguish "no remat" from "full remat" on its own.
     """
-    return self.apply_internal_remat and bool(self.config.remat_policy) and self.config.remat_policy != "none"
+    override = getattr(self, "remat_policy_override", None)
+    remat_policy = self.config.remat_policy if override is None else override
+    return self.apply_internal_remat and bool(remat_policy) and remat_policy != "none"
 
   def _scan_local_layers(self, y, layer_kwargs):
     """Runs the local (sliding-window) layers via a per-layer rematerialized ``jax.lax.scan``."""
     remat = self._remat_enabled
+    override = getattr(self, "remat_policy_override", None)
+    if override is None:
+      local_remat_policy = self.remat_policy_fn
+    else:
+      local_remat_policy = getattr(self, "remat_policy_fn_override", None)
     return nnx_scan.apply_scanned_layers(
         self.local_layers,
         y,
@@ -586,7 +597,7 @@ class Gemma4ScannableBlock(nnx.Module):
         param_scan_axis=self.config.param_scan_axis,
         apply_fn=lambda layer, carry: self._run_layer(layer, carry, layer_kwargs)[0],
         remat=remat,
-        remat_policy=self.remat_policy_fn if remat else None,
+        remat_policy=local_remat_policy if remat else None,
         # prevent_cse is only consulted by jax.checkpoint, i.e. when remat=True;
         # its value is irrelevant otherwise.
         prevent_cse=maxtext_utils.should_prevent_cse_in_remat(self.config) if remat else True,
@@ -625,11 +636,15 @@ class Gemma4ScannableBlock(nnx.Module):
     # Offloaded (pinned-host) residuals can't cross the trip-count-one boundary,
     # so save would-be-offloaded tensors on device for the global layer instead;
     # the local-layer scan (a real multi-iteration scan) still offloads.
-    global_remat_policy = self.remat_policy_fn
-    offload_names = maxtext_utils.get_save_and_offload_names(cfg)
-    if offload_names[0] or offload_names[1]:
-      save_names, offload_to_device = offload_names
-      global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
+    override = getattr(self, "remat_policy_override", None)
+    if override is not None:
+      global_remat_policy = getattr(self, "scan_safe_remat_policy_fn_override", None)
+    else:
+      global_remat_policy = self.remat_policy_fn
+      offload_names = maxtext_utils.get_save_and_offload_names(cfg)
+      if offload_names[0] or offload_names[1]:
+        save_names, offload_to_device = offload_names
+        global_remat_policy = jax.checkpoint_policies.save_only_these_names(*(save_names + offload_to_device))
 
     if self._remat_enabled:
       prevent_cse = maxtext_utils.should_prevent_cse_in_remat(self.config)

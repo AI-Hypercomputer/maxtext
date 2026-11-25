@@ -63,7 +63,10 @@ from typing import Any
 from jax._src.lib import hlo as _hlo
 import jax.extend.xla as jex_xla
 
-from tensorflow.compiler.xla.service import hlo_pb2  # pylint: disable=g-direct-tensorflow-import
+try:
+  from tensorflow.compiler.xla.service import hlo_pb2  # pylint: disable=g-direct-tensorflow-import
+except ImportError:
+  hlo_pb2 = None
 
 _DEFAULT_TRANSFORM_NAME = "max_async_overlap_transform"
 
@@ -1710,6 +1713,8 @@ def restamp_send_recv_aggregation(serialized_hlo: bytes, computation_names: Iter
   Raises:
     ScheduleTransformError: If a DEFER would be left with no ISSUE after it.
   """
+  if hlo_pb2 is None or _AGGREGATED_SEND_RECV_CONFIG.encode() not in serialized_hlo:
+    return serialized_hlo
   names = frozenset(computation_names)
   proto = hlo_pb2.HloModuleProto.FromString(serialized_hlo)
   for computation in proto.computations:
@@ -1869,9 +1874,15 @@ def register_transform(
     name: Registration name passed to XLA.
     platforms: Target platform name(s), or None for all platforms.
   """
+
+  def _transform_if_applicable(serialized_hlo: bytes) -> bytes | None:
+    if b"fsdp_prefetch" not in serialized_hlo and b"lineage" not in serialized_hlo:
+      return None
+    return max_async_overlap_transform(serialized_hlo)
+
   unregister_transform(name=name, platforms=platforms)
   jex_xla.register_hlo_module_transformation(
-      max_async_overlap_transform,
+      _transform_if_applicable,
       name=name,
       stage=jex_xla.PipelineStage.POST_SCHEDULER,
       platforms=platforms,

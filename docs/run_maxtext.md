@@ -53,6 +53,14 @@ Run tests and local development without Google Cloud dependencies (no `gcloud`, 
 
 Demonstrate fault-tolerant training with Pathways on GKE: lose a TPU slice mid-run and recover in-process from the last checkpoint, no job restart.
 :::
+
+:::{grid-item-card} 📸 In-memory snapshotting (GKE)
+:link: run_maxtext/run_maxtext_snapshotting
+:link-type: doc
+
+Run elastic training with in-memory snapshotting on GKE across pause/resume,
+replica resize, constant global batch size, and colocated Python data input.
+:::
 ::::
 
 ```{toctree}
@@ -67,4 +75,5 @@ run_maxtext/run_maxtext_via_xpk.md
 run_maxtext/run_maxtext_via_pathways.md
 run_maxtext/decoupled_mode.md
 run_maxtext/run_maxtext_elastic_training.md
+run_maxtext/run_maxtext_snapshotting.md
 ```

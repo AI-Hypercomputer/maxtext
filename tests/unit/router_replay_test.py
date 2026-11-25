@@ -72,14 +72,21 @@ def _tiny_qwen35_kwargs(seq_len, batch_size, num_experts, top_k, **overrides):
       "model_name": "qwen3.5-35b-a3b",
       "num_experts": num_experts,
       "num_experts_per_tok": top_k,
-      "base_emb_dim": 256,
+      "base_emb_dim": 64,
       "base_num_query_heads": 2,
       "base_num_kv_heads": 2,
-      "head_dim": 256,
+      "head_dim": 32,
       "partial_rotary_factor": 0.25,
-      "base_mlp_dim": 256,
-      "base_moe_mlp_dim": 256,
-      "vocab_size": 1000,
+      "base_mlp_dim": 64,
+      "base_moe_mlp_dim": 64,
+      "gdn_key_head_dim": 16,
+      "gdn_value_head_dim": 16,
+      "gdn_num_key_heads": 2,
+      "gdn_num_value_heads": 2,
+      "gdn_chunk_size": 4,
+      "use_mrope": False,
+      "remat_policy": "none",
+      "vocab_size": 128,
       "max_target_length": seq_len,
       "max_prefill_predict_length": seq_len,
       "per_device_batch_size": float(batch_size),
@@ -159,7 +166,7 @@ class DummyRoutedMoE:
     self.is_hash_routing = False
     self.per_expert_scale = None if per_expert_scale is None else nnx.Param(jnp.asarray(per_expert_scale))
 
-  def _maybe_shard_with_logical(self, x, spec):
+  def _maybe_shard_with_logical(self, x, spec):  # pylint: disable=unused-argument
     return x
 
   def deepseek_scale_weights(self, weights):
@@ -550,9 +557,10 @@ class TrainerRouterReplayTest(unittest.TestCase):
     train.loss_fn down to RoutedMoE.get_topk, because the model just routes
     normally. This is the assertion that actually pins the plumbing.
     """
-    loss_a = self._loss_for_routing(cfg, seq_len, forced_a)
-    loss_b = self._loss_for_routing(cfg, seq_len, forced_b)
-    loss_none = self._loss_for_routing(cfg, seq_len, None)
+    model = self._build_model(cfg)
+    loss_a = self._loss_for_routing(cfg, seq_len, forced_a, model=model)
+    loss_b = self._loss_for_routing(cfg, seq_len, forced_b, model=model)
+    loss_none = self._loss_for_routing(cfg, seq_len, None, model=model)
     print(f"\n[Router Replay][{label}] a={loss_a} b={loss_b} unforced={loss_none}")
     self.assertNotAlmostEqual(
         loss_a,
@@ -840,7 +848,9 @@ class TrainerRouterReplayTest(unittest.TestCase):
         override_model_config=True,
         base_num_decoder_layers=num_layers,
         num_decoder_layers=num_layers,
-        model_name="mixtral-8x7b",
+        model_name="qwen3-30b-a3b",
+        decoder_block="mixtral",
+        norm_topk_prob=False,
         num_experts=num_experts,
         num_experts_per_tok=top_k,
         base_emb_dim=256,
@@ -1031,7 +1041,7 @@ class PaddingExcludedFromSoftmaxTest(unittest.TestCase):
       decoder_block=ctypes.DecoderBlockType.MIXTRAL,
   ):
     """Computes top-k routing weights with forced routed experts."""
-    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=decoder_block)
+    config = DummyConfig(model_name="qwen3-30b-a3b", decoder_block=decoder_block)
     config.norm_topk_prob = norm_topk_prob
     config.routed_scaling_factor = 1.0
     # Expert 2 has a large logit; it is the one -1 wraps onto.
@@ -1073,7 +1083,7 @@ class ForcedRoutingGradientTest(unittest.TestCase):
   """
 
   def test_gate_logits_receive_gradient_under_forced_routing(self):
-    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
+    config = DummyConfig(model_name="qwen3-30b-a3b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
     config.routed_scaling_factor = 1.0
     model = DummyRoutedMoE(config)
     forced = jnp.array([[[1, -1], [0, 2]]])
@@ -1087,7 +1097,7 @@ class ForcedRoutingGradientTest(unittest.TestCase):
     self.assertGreater(float(jnp.max(jnp.abs(grads))), 0.0)
 
   def test_fully_padded_token_has_zero_gradient(self):
-    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
+    config = DummyConfig(model_name="qwen3-30b-a3b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
     config.routed_scaling_factor = 1.0
     model = DummyRoutedMoE(config)
 
@@ -1113,7 +1123,7 @@ class OutOfRangeExpertIdTest(unittest.TestCase):
   """
 
   def _model(self):
-    config = DummyConfig(model_name="mixtral-8x7b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
+    config = DummyConfig(model_name="qwen3-30b-a3b", decoder_block=ctypes.DecoderBlockType.MIXTRAL)
     config.routed_scaling_factor = 1.0
     model = DummyRoutedMoE(config)
     model.num_experts = 4
@@ -1193,6 +1203,7 @@ class GetTopkForcedRoutingParityTest(unittest.TestCase):
     self._assert_parity(DummyConfig(decoder_block=ctypes.DecoderBlockType.GEMMA4))
 
 
+# pylint: disable=attribute-defined-outside-init
 class RaggedSortGuardTest(unittest.TestCase):
   """permute's standard (non-ragged) branch under forced routing.
 
@@ -1303,18 +1314,21 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
         enable_checkpointing=False,
         log_config=False,
         skip_jax_distributed_system=True,
-        model_name="mixtral-8x7b",
+        model_name="qwen3-30b-a3b",
+        num_experts=8,
+        num_experts_per_tok=2,
+        norm_topk_prob=False,
         override_model_config=True,
-        base_emb_dim=7168,  # multiple of 1024 so the kernel is fully used
+        base_emb_dim=2048,  # >= 2048 so SparseCore ragged_gather_reduce satisfies num_row_partitions <= 8
         base_mlp_dim=256,
         base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=4,
+        per_device_batch_size=2,
         ici_expert_parallelism=2,
         use_ring_of_experts=True,
-        max_target_length=128,
+        max_target_length=64,
         float32_gate_logits=True,
         use_ragged_sort=use_ragged_sort,
         ragged_buffer_factor=-1.0,
@@ -1367,10 +1381,8 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
               hidden_states,
               forced_routed_experts=forced,
           )
-        out, _, _ = model.apply(
-            {"params": variables["params"]},
-            hidden_states,
-            forced_routed_experts=forced,
+        out, _, _ = jax.jit(lambda params, x, f: model.apply({"params": params}, x, forced_routed_experts=f))(
+            variables["params"], hidden_states, forced
         )
       return out, variables
 

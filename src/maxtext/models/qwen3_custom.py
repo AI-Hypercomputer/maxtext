@@ -238,7 +238,11 @@ class Qwen3CustomMoeDecoderLayer(AttentionWithNorm):
     )
 
     attention_lnx = self.latent_norm(attention_lnx, out_sharding=self.out_sharding)
-    mlp_lnx, load_balance_loss, _ = self.moe_block(attention_lnx, out_sharding=self.out_sharding)
+    mlp_lnx, load_balance_loss, _ = self.moe_block(
+        attention_lnx,
+        out_sharding=self.out_sharding,
+        token_mask=moe.routing_token_mask(self.config, decoder_segment_ids, model_mode),
+    )
     mlp_lnx = self._maybe_shard_with_logical(mlp_lnx, self.activation_axis_names)
 
     if self.config.load_balance_loss_weight > 0.0 and load_balance_loss is not None:

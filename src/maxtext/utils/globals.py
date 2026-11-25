@@ -34,7 +34,10 @@ MAXTEXT_REPO_ROOT = os.environ.get(
 MAXTEXT_CONFIGS_DIR = os.environ.get("MAXTEXT_CONFIGS_DIR", os.path.join(MAXTEXT_PKG_DIR, "configs"))
 
 # This is the assets root: with "tokenizers/"; &etc.
-MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_REPO_ROOT, "src", "maxtext", "assets"))
+MAXTEXT_ASSETS_ROOT = os.environ.get("MAXTEXT_ASSETS_ROOT", os.path.join(MAXTEXT_PKG_DIR, "assets"))
+
+# Relative default tokenizer path so controller-local paths are not baked into configs before remote/sidecar execution.
+DEFAULT_TOKENIZER_PATH = os.path.join("assets", "tokenizers", "tokenizer.llama2")
 
 # This is the test assets root: with "golden_logits"; &etc.
 MAXTEXT_TEST_ASSETS_ROOT = os.environ.get("MAXTEXT_TEST_ASSETS_ROOT", os.path.join(MAXTEXT_REPO_ROOT, "tests", "assets"))
@@ -58,10 +61,15 @@ HF_IDS = {
     "qwen2.5-7b": "Qwen/Qwen2.5-7B-Instruct",
     "qwen2.5-14b": "Qwen/Qwen2.5-14B-Instruct",
     "qwen3-0.6b": "Qwen/Qwen3-0.6B",
+    "qwen3-1.7b": "Qwen/Qwen3-1.7B",
+    "qwen3-1.7b-base": "Qwen/Qwen3-1.7B-Base",
     "qwen3-4b": "Qwen/Qwen3-4B",
+    "qwen3-4b-base": "Qwen/Qwen3-4B-Base",
     "qwen3-4b-thinking-2507": "Qwen/Qwen3-4B-Thinking-2507",
     "qwen3-8b": "Qwen/Qwen3-8B",
+    "qwen3-8b-base": "Qwen/Qwen3-8B-Base",
     "qwen3-14b": "Qwen/Qwen3-14B",
+    "qwen3-14b-base": "Qwen/Qwen3-14B-Base",
     "qwen3-32b": "Qwen/Qwen3-32B",
     "qwen3-vl-2b": "Qwen/Qwen3-VL-2B-Instruct",
     "qwen3-vl-4b": "Qwen/Qwen3-VL-4B-Instruct",
@@ -80,6 +88,7 @@ HF_IDS = {
     "deepseek3.2-671b": "deepseek-ai/DeepSeek-V3.2",
     "deepseek4-284b": "deepseek-ai/DeepSeek-V4-Flash",
     "deepseek4-1600b": "deepseek-ai/DeepSeek-V4-Pro",
+    "kimi-k3": "moonshotai/Kimi-K3",
     "gpt-oss-20b": "unsloth/gpt-oss-20b-BF16",
     "gpt-oss-120b": "unsloth/gpt-oss-120b-BF16",
     "qwen3-omni-30b-a3b": "Qwen/Qwen3-Omni-30B-A3B-Instruct",
@@ -101,20 +110,29 @@ HF_IDS = {
     "olmo3-32b": "allenai/Olmo-3-32B-Think",
     "weaver-mini": "Qwen/Qwen3-VL-4B-Instruct",
     "weaver-max": "Qwen/Qwen3-VL-8B-Instruct",
+    "glm5.1-744b": "zai-org/GLM-5.1",
+    "glm5.2-744b": "zai-org/GLM-5.2",
     "glm5.3-flash": "zai-org/GLM-5.3-Flash",
+    "granite-3.0-1b-a400m": "ibm-granite/granite-3.0-1b-a400m-instruct",
     "ming-3.0-audio-tiny": "inclusionAI/Ming-3.0-audio-tiny",
+    "ming-3.0-audio-tiny-talker": "inclusionAI/Ming-3.0-audio-tiny",  # convert with --hf_model_path=<snapshot>/talker
     "hy4-preview": "tencent/Hy4-preview",
     # "default" is not HF model, but adding to to avoid confusing warning about tokenizer_path
-    "default": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2"),
+    "default": DEFAULT_TOKENIZER_PATH,
 }
+
+# Config keys holding secrets; excluded from logs, TensorBoard, and config.yml.
+KEYS_NO_LOGGING = ("hf_access_token",)
 
 __all__ = [
     "DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE",
+    "DEFAULT_TOKENIZER_PATH",
     "EPS",
+    "HF_IDS",
+    "KEYS_NO_LOGGING",
     "MAXTEXT_ASSETS_ROOT",
     "MAXTEXT_CONFIGS_DIR",
     "MAXTEXT_PKG_DIR",
     "MAXTEXT_REPO_ROOT",
     "MAXTEXT_TEST_ASSETS_ROOT",
-    "HF_IDS",
 ]

@@ -79,7 +79,9 @@ logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_length', ['context', 'context_usp_ulysses']],
                       ['activation_norm_length', ['tensor_sequence', 'context', 'context_usp_ulysses']],
+                      ['activation_norm_length_routed', ['tensor_sequence', 'context', 'context_usp_ulysses']],
                       ['activation_embed', ['tensor']],
+                      ['activation_embed_routed', ['tensor']],
                       ['activation_stage', 'stage'],
                       # General Weights
                       ['mlp', ['fsdp_transpose', 'tensor', 'tensor_sequence', 'autoregressive']],

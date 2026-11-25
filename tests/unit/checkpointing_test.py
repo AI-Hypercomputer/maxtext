@@ -14,6 +14,7 @@
 
 """Unit tests for the checkpointing components."""
 
+import json
 import os
 from typing import Any
 from unittest import mock
@@ -28,8 +29,10 @@ import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import orbax.checkpoint as ocp
 from maxtext.checkpoint_conversion.utils import load_dynamic
+from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.checkpoint_conversion.utils.tensor_handling import (
     _binary_chunked_stack,
+    _gather_in_slices,
     get_hf_loading_function,
 )
 from maxtext.common import checkpointing
@@ -110,6 +113,43 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[0], tensors["layer_0.weight"])
     np.testing.assert_allclose(result[1], tensors["layer_1.weight"])
 
+  @parameterized.named_parameters(
+      ("unscanned_moe_layer", "params-decoder-layers_0-mlp-MoeBlock_0-wi_0", (3, 4, 6), 0),
+      ("tid2eid_collection", "Tid2EidVar-decoder-scanned_blocks-layers_0-mlp-MoeBlock_0-tid2eid", (3, 4, 6), 0),
+      ("scanned_layers", "params-decoder-layers-mlp-wi_0", (4, 3, 6), 1),
+  )
+  def test_single_axis_stack_axis_follows_mt_key(self, mt_key, target_shape, axis):
+    # With scan_layers, MoE layers outside the scanned stack (e.g. DeepSeek-V4 prefix layers) still stack
+    # experts along axis 0, as in to_maxtext.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    tensors = {f"w{i}": np.full((4, 6), i, dtype=np.float32) for i in range(3)}
+    target_leaf = jax.ShapeDtypeStruct(
+        shape=target_shape, dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec(None, None, None))
+    )
+
+    result = get_hf_loading_function(list(tensors), tensors.__getitem__, None, target_leaf, MockConfig(), mt_key)()
+
+    self.assertEqual(result.shape, target_shape)
+    np.testing.assert_array_equal(np.take(np.asarray(result), 2, axis=axis), tensors["w2"])
+
+  @parameterized.named_parameters(
+      ("not_scanned", False, "params-decoder-layers_0-mlp-wi_0", (4, 3, 6), 0),
+      ("scanned_layers", True, "params-decoder-layers-mlp-wi_0", (4, 3, 6), 1),
+      ("per_layer_scale", True, "params-decoder-layers-mlp-wi_0-kernel_scale", (4,), 0),
+      ("unscanned_moe_layer", True, "params-decoder-layers_0-mlp-MoeBlock_0-wi_0", (3, 4, 6), 0),
+      ("moe_bias_collection", True, "MoEBiasVar-decoder-layers-mlp-MoeBlock_0-gate-bias", (4, 3), 0),
+      ("composite_key", True, ("params-decoder-layers-mlp-wi_0", "params-decoder-layers-mlp-wi_1"), (4, 3, 6), 1),
+  )
+  def test_single_stack_axis(self, scan_layers, mt_key, target_shape, axis):
+    # One rule for the dynamic loader, to_maxtext and the conversion back to HF.
+    config = mock.Mock(scan_layers=scan_layers, param_scan_axis=1)
+    self.assertEqual(tensor_handling.single_stack_axis(mt_key, config, target_shape), axis)
+
   def test_get_hf_loading_function_case_4_multi_axis(self):
     # Tests Case 4, line 190, 73, and gets loader for multi-axis stacked
     class MockConfig:
@@ -153,6 +193,314 @@ class TensorHandlingTest(parameterized.TestCase):
     np.testing.assert_allclose(result[1, 0], tensors["expert_1.layer_0.weight"])
     np.testing.assert_allclose(result[1, 1], tensors["expert_1.layer_1.weight"])
 
+  @parameterized.product(
+      layout=["single_axis", "expert_stack", "nested_scan"],
+      spec=[(), ("x",)],
+  )
+  def test_get_hf_loading_function_accepts_short_spec(self, layout, spec):
+    # A PartitionSpec may have fewer entries than the array rank; the rest are replicated.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    tensors = {f"w{i}": np.full((4, 4), i, dtype=np.float32) for i in range(4)}
+    mt_key = ""
+    if layout == "single_axis":
+      hf_keys = ["w0", "w1"]
+      expected = np.stack([tensors["w0"], tensors["w1"]], axis=1)
+    else:
+      hf_keys = [["w0", "w1"], ["w2", "w3"]]
+      expected = np.stack([np.stack([tensors[k] for k in row]) for row in hf_keys])
+      if layout == "nested_scan":
+        mt_key = "params-decoder-layers-local_layers-mlp-kernel"
+        expected = np.moveaxis(expected, (0, 1), (1, 2))
+    sharding = NamedSharding(self.mesh, PartitionSpec(*spec))
+    target_leaf = jax.ShapeDtypeStruct(shape=expected.shape, dtype=np.float32, sharding=sharding)
+
+    result = get_hf_loading_function(hf_keys, tensors.__getitem__, None, target_leaf, MockConfig(), mt_key)()
+
+    np.testing.assert_array_equal(result, expected)
+    self.assertEqual(result.sharding, sharding)
+
+  @parameterized.named_parameters(
+      ("single_key", ("a", "b"), (4, 8)),
+      ("stacked", [("a", "b"), ("c", "d")], (4, 2, 8)),
+  )
+  def test_get_hf_loading_function_accepts_composite_hf_key(self, hf_keys, target_shape):
+    # A tuple of HF keys is fetched together and fused into one leaf by the hook.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    tensors = {k: np.full((4, 4), i, dtype=np.float32) for i, k in enumerate("abcd")}
+
+    def concat(weights, target_shape):
+      del target_shape
+      return np.concatenate(weights, axis=-1)
+
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    target_leaf = jax.ShapeDtypeStruct(shape=target_shape, dtype=np.float32, sharding=sharding)
+
+    result = get_hf_loading_function(hf_keys, tensors.__getitem__, concat, target_leaf, MockConfig())()
+
+    self.assertEqual(result.shape, target_shape)
+    np.testing.assert_array_equal(result[..., :4] if len(target_shape) == 2 else result[:, 0, :4], tensors["a"])
+    np.testing.assert_array_equal(result[..., 4:] if len(target_shape) == 2 else result[:, 0, 4:], tensors["b"])
+
+  def test_hook_gathers_weight_spanning_other_hosts(self):
+    # A NumPy hook cannot read a weight with shards on other hosts; the loader gathers it and retries.
+    def numpy_only_hook(weight, target_shape):
+      del target_shape
+      if isinstance(weight, jax.Array):
+        raise RuntimeError("Fetching value for `jax.Array` that spans non-addressable devices is not possible.")
+      return weight * 2
+
+    weight = jnp.ones((4, 4), dtype=jnp.float32)
+    target_leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec()))
+    with (
+        mock.patch.object(tensor_handling, "_spans_other_hosts", return_value=True),
+        mock.patch.object(tensor_handling, "_gather_to_host", side_effect=np.asarray) as gather,
+    ):
+      result = get_hf_loading_function("w", {"w": weight}.__getitem__, numpy_only_hook, target_leaf, None)()
+
+    gather.assert_called_once()
+    np.testing.assert_array_equal(result, np.full((4, 4), 2, dtype=np.float32))
+
+  def test_other_hook_error_on_weight_spanning_other_hosts_is_not_retried(self):
+    # Only the non-addressable error starts the all-gather; any other error may come from one host alone.
+    def out_of_memory_on_device(weight, target_shape):
+      del target_shape
+      if isinstance(weight, jax.Array):
+        raise RuntimeError("RESOURCE_EXHAUSTED: Out of memory")
+      return weight
+
+    weight = jnp.ones((4, 4), dtype=jnp.float32)
+    target_leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec()))
+    load_fn = get_hf_loading_function("w", {"w": weight}.__getitem__, out_of_memory_on_device, target_leaf, None)
+    with (
+        mock.patch.object(tensor_handling, "_spans_other_hosts", return_value=True),
+        mock.patch.object(tensor_handling, "_gather_to_host", side_effect=np.asarray) as gather,
+        self.assertRaisesRegex(RuntimeError, "RESOURCE_EXHAUSTED"),
+    ):
+      load_fn()
+
+    gather.assert_not_called()
+
+  def test_host_array_is_placed_per_shard_on_multi_host(self):
+    # A host result (e.g. after the gather fallback) must not go through jax.device_put, which all-gathers it
+    # across hosts on device to compare the copies.
+    host_array = np.arange(16, dtype=np.float32).reshape(4, 4)
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    with (
+        mock.patch.object(type(sharding), "is_fully_addressable", new_callable=mock.PropertyMock, return_value=False),
+        mock.patch.object(
+            tensor_handling.jax, "make_array_from_callback", wraps=jax.make_array_from_callback
+        ) as per_shard,
+        mock.patch.object(tensor_handling.jax, "device_put", wraps=jax.device_put) as device_put,
+    ):
+      result = tensor_handling._device_put(host_array, sharding)  # pylint: disable=protected-access
+
+    per_shard.assert_called_once()
+    device_put.assert_not_called()
+    np.testing.assert_array_equal(result, host_array)
+
+  def test_hook_error_on_local_weight_is_raised(self):
+    def failing_hook(weight, target_shape):
+      raise RuntimeError("hook bug")
+
+    target_leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec()))
+    load_fn = get_hf_loading_function("w", {"w": jnp.ones((4, 4))}.__getitem__, failing_hook, target_leaf, None)
+    with self.assertRaisesRegex(RuntimeError, "hook bug"):
+      load_fn()
+
+  def test_transform_reuses_hf_tensor_for_several_leaves(self):
+    # gemma4 maps one HF tensor to two MaxText leaves, each hook taking one half.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = False
+
+    hf_state = {"gate_up": np.arange(32, dtype=np.float32).reshape(4, 8)}
+    expected = hf_state["gate_up"].copy()
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    leaf = jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=sharding)
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(
+        hf_state,
+        {"wi_0": leaf, "wi_1": leaf},
+        {"params-wi_0": "gate_up", "params-wi_1": "gate_up"},
+        {"params-wi_0": lambda x, shape: x[:, :4], "params-wi_1": lambda x, shape: x[:, 4:]},
+        MockConfig(),
+    )["params"]
+
+    np.testing.assert_array_equal(restored["wi_0"], expected[:, :4])
+    np.testing.assert_array_equal(restored["wi_1"], expected[:, 4:])
+    self.assertEmpty(hf_state)
+
+  def test_transform_loads_variable_collections(self):
+    # DeepSeek maps the MoE gate bias and the hash-routing table into the MoEBiasVar and Tid2EidVar
+    # collections, whose leaves the weights state holds without the collection name. DeepSeek-V3 also
+    # maps the gate bias as a weight; the collection key is used, and stacks the layers along axis 0.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    biases = [np.full((4,), i, dtype=np.float32) for i in range(3)]
+    tid2eid = np.arange(6, dtype=np.int32).reshape(2, 3)
+    hf_state = {f"layers.{i}.gate.bias": b for i, b in enumerate(biases)}
+    hf_state["layers.0.gate.tid2eid"] = tid2eid
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    target = {
+        "decoder": {
+            "layers": {"gate": {"bias": jax.ShapeDtypeStruct((3, 4), np.float32, sharding=sharding)}},
+            "layers_0": {"tid2eid": jax.ShapeDtypeStruct((2, 3), np.int32, sharding=sharding)},
+        }
+    }
+    bias_keys = [f"layers.{i}.gate.bias" for i in range(3)]
+    mapping = {
+        "params-decoder-layers-gate-bias": bias_keys,
+        "MoEBiasVar-decoder-layers-gate-bias": bias_keys,
+        "Tid2EidVar-decoder-layers_0-tid2eid": "layers.0.gate.tid2eid",
+    }
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(hf_state, target, mapping, {}, MockConfig())["params"]
+
+    np.testing.assert_array_equal(restored["decoder"]["layers"]["gate"]["bias"], np.stack(biases))
+    np.testing.assert_array_equal(restored["decoder"]["layers_0"]["tid2eid"], tid2eid)
+    self.assertEmpty(hf_state)
+
+  @parameterized.named_parameters(
+      ("single_key", "gate_up", (4, 8)),
+      ("stacked", ["gate_up_0", "gate_up_1"], (4, 2, 8)),
+  )
+  def test_transform_splits_composite_mt_key(self, hf_source, leaf_shape):
+    # A tuple of MaxText keys gets one HF tensor that the hook splits along a new last axis.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    hf_keys = [hf_source] if isinstance(hf_source, str) else hf_source
+    hf_state = {k: np.arange(64, dtype=np.float32).reshape(4, 16) + 100 * i for i, k in enumerate(hf_keys)}
+    expected = {k: v.copy() for k, v in hf_state.items()}
+
+    def split(weight, target_shape):
+      self.assertEqual(target_shape, [leaf_shape[:1] + leaf_shape[-1:]] * 2)
+      return np.stack([weight[:, :8], weight[:, 8:]], axis=-1)
+
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    leaf = jax.ShapeDtypeStruct(shape=leaf_shape, dtype=np.float32, sharding=sharding)
+    target_tree = {"mlp": {"wi_0": leaf, "wi_1": leaf}}
+    mt_key = ("params-mlp-wi_0", "params-mlp-wi_1")
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(
+        hf_state, target_tree, {mt_key: hf_source}, {mt_key: split}, MockConfig()
+    )["params"]["mlp"]
+
+    for i, k in enumerate(hf_keys):
+      index = (Ellipsis,) if isinstance(hf_source, str) else (slice(None), i)
+      np.testing.assert_array_equal(restored["wi_0"][index], expected[k][:, :8])
+      np.testing.assert_array_equal(restored["wi_1"][index], expected[k][:, 8:])
+    self.assertEqual(restored["wi_0"].sharding, sharding)
+
+  @parameterized.named_parameters(
+      # Tensors split over all devices: one reshard of the whole stack. Host tensors: one per tensor, per inner
+      # stack and of the whole.
+      ("single_axis_on_device", ["w0", "w1"], True, 1),
+      ("single_axis_on_host", ["w0", "w1"], False, 3),
+      ("multi_axis_on_device", [["w0", "w1"], ["w2", "w3"]], True, 1),
+      ("multi_axis_on_host", [["w0", "w1"], ["w2", "w3"]], False, 7),
+  )
+  def test_tensors_split_over_all_devices_are_resharded_once(self, hf_keys, on_device, num_device_puts):
+    # A tensor split over all devices is stacked as read, inner stacks included, and only the whole stack is
+    # resharded. A host tensor is still placed one by one.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 0
+
+    devices = jax.devices()
+    tensors = {f"w{i}": np.full((len(devices), 4), i, dtype=np.float32) for i in range(4)}
+    expected = np.array([[tensors[k] for k in row] if isinstance(row, list) else tensors[row] for row in hf_keys])
+    if on_device:
+      read_sharding = NamedSharding(Mesh(np.array(devices), ("d",)), PartitionSpec("d"))
+      tensors = {k: jax.device_put(v, read_sharding) for k, v in tensors.items()}
+    target_sharding = NamedSharding(self.mesh, PartitionSpec(*[None] * expected.ndim))
+    target_leaf = jax.ShapeDtypeStruct(expected.shape, np.float32, sharding=target_sharding)
+
+    with mock.patch.object(jax, "device_put", wraps=jax.device_put) as device_put:
+      result = get_hf_loading_function(hf_keys, tensors.__getitem__, None, target_leaf, MockConfig())()
+
+    np.testing.assert_array_equal(result, expected)
+    self.assertEqual(device_put.call_count, num_device_puts)
+
+  def test_expert_stacks_are_not_copied_across_the_expert_axis(self):
+    # MoE weights stack (experts, layers, ...) from tensors split over all devices. The inner stack of each expert
+    # stays as read: placed with the target's sharding of its own axes only, it would be copied on every device of
+    # the expert axis (16 times its final size per device with ici_expert_parallelism=16).
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for an fsdp x expert mesh.")
+
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    n = jax.device_count()
+    devices = np.array(jax.devices())
+    read_sharding = NamedSharding(Mesh(devices, ("d",)), PartitionSpec("d"))
+    num_experts, num_layers, embed = n // 2, 2, 4
+    rng = np.random.RandomState(0)
+    host = {f"e{e}.l{l}": rng.randn(n, embed).astype(np.float32) for e in range(num_experts) for l in range(num_layers)}
+    hf_keys = [[f"e{e}.l{l}" for l in range(num_layers)] for e in range(num_experts)]
+    expected = np.stack([np.stack([host[k].T for k in row]) for row in hf_keys])
+    tensors = {k: jax.device_put(v, read_sharding) for k, v in host.items()}
+    mesh = Mesh(devices.reshape(2, n // 2), ("fsdp", "expert"))
+    target_leaf = jax.ShapeDtypeStruct(
+        expected.shape, np.float32, sharding=NamedSharding(mesh, PartitionSpec("expert", None, "fsdp", None))
+    )
+
+    def transpose(weight, target_shape):
+      del target_shape
+      return weight.T
+
+    with mock.patch.object(jax, "device_put", wraps=jax.device_put) as device_put:
+      result = get_hf_loading_function(hf_keys, tensors.__getitem__, transpose, target_leaf, MockConfig())()
+
+    np.testing.assert_array_equal(result, expected)
+    self.assertEqual(result.sharding, target_leaf.sharding)
+    self.assertEqual(device_put.call_count, 1)
+
+  @parameterized.named_parameters(
+      # (8, 4) float32 is 128 bytes: with a 64-byte limit it moves in 2 slices along the axis the target leaves whole.
+      ("split_axis_0", PartitionSpec("x", None), 64, 2),
+      ("replicated", PartitionSpec(None, None), 64, 2),
+      ("small", PartitionSpec("x", None), 1 << 30, 1),
+  )
+  def test_large_array_is_resharded_in_slices(self, spec, limit, num_device_puts):
+    # Between two device orders, XLA can reshard by gathering the whole array on every device; slices bound that copy.
+    array = jax.device_put(np.arange(32, dtype=np.float32).reshape(8, 4))
+    sharding = NamedSharding(self.mesh, spec)
+
+    with (
+        mock.patch.object(tensor_handling, "_MAX_RESHARD_BYTES", limit),
+        mock.patch.object(jax, "device_put", wraps=jax.device_put) as device_put,
+    ):
+      result = tensor_handling._reshard(array, sharding)  # pylint: disable=protected-access
+
+    np.testing.assert_array_equal(result, np.arange(32, dtype=np.float32).reshape(8, 4))
+    self.assertEqual(result.sharding, sharding)
+    self.assertEqual(device_put.call_count, num_device_puts)
+
   @parameterized.named_parameters(
       ("single_key", "w0", (4, 4)),
       ("single_axis_stack", ["w0", "w1"], (2, 4, 4)),
@@ -182,9 +530,119 @@ class TensorHandlingTest(parameterized.TestCase):
     first_slice = result[(0,) * (len(target_shape) - 2)]
     np.testing.assert_array_equal(first_slice, tensors["w0"].astype(np.float32))
 
+  @parameterized.named_parameters(
+      ("sliced", 40, 4),  # 10 rows of 12 bytes, 3 rows per slice: slices of 3, 3, 3 and 1 rows.
+      ("whole", 1000, 1),
+  )
+  def test_gather_in_slices_bounds_each_gather(self, max_bytes, num_gathers):
+    weight = jnp.arange(30, dtype=jnp.float32).reshape(10, 3)
+    gathered = []
+
+    def gather_fn(piece):
+      gathered.append(piece.nbytes)
+      return np.asarray(piece)
+
+    result = _gather_in_slices(weight, gather_fn, max_bytes=max_bytes)
+
+    np.testing.assert_array_equal(result, np.asarray(weight))
+    self.assertLen(gathered, num_gathers)
+    self.assertLessEqual(max(gathered), max(max_bytes, 12))
+
+  def test_get_hf_loading_function_without_hf_key_uses_hook(self):
+    # A leaf with no HF tensor (None key, e.g. DeepSeek-V4 mHC norm scales) is built by its hook alone.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 0
+
+    def getter(key):
+      raise AssertionError(f"No HF tensor should be read, got {key}.")
+
+    target_leaf = jax.ShapeDtypeStruct(
+        shape=(4,), dtype=np.float32, sharding=NamedSharding(self.mesh, PartitionSpec(None))
+    )
+
+    def ones_hook(weight, target_shape):
+      del weight
+      return np.ones(target_shape, dtype=np.float32)
+
+    result = get_hf_loading_function(None, getter, ones_hook, target_leaf, MockConfig())()
+
+    np.testing.assert_array_equal(result, np.ones(4, dtype=np.float32))
+    self.assertEqual(result.sharding, target_leaf.sharding)
+
+
+class CheckpointQuantizationConfigTest(parameterized.TestCase):
+  """safetensors_dynamic takes `quantization_config` from the checkpoint's own config.json."""
+
+  def _write(self, config):
+    directory = self.create_tempdir().full_path
+    with open(os.path.join(directory, "config.json"), "w", encoding="utf-8") as f:
+      f.write(config if isinstance(config, str) else json.dumps(config))
+    return directory
+
+  @parameterized.named_parameters(
+      ("top_level", {"quantization_config": {"weight_block_size": [128, 128]}}, {"weight_block_size": [128, 128]}),
+      ("in_text_config", {"text_config": {"quantization_config": {"fmt": "e4m3"}}}, {"fmt": "e4m3"}),
+      ("explicit_empty", {"quantization_config": {}}, {}),
+      ("none", {"hidden_size": 8}, "not quantized"),
+      ("null", {"quantization_config": None}, "not quantized"),
+      ("null_text_config", {"text_config": None}, "not quantized"),
+  )
+  def test_reads_config_json(self, config, want):
+    got = load_dynamic._checkpoint_quantization_config(self._write(config))  # pylint: disable=protected-access
+    self.assertEqual(got, want)
+
+  def test_no_config_json_is_unknown(self):
+    self.assertIsNone(load_dynamic._checkpoint_quantization_config(self.create_tempdir().full_path))  # pylint: disable=protected-access
+
+  def test_unreadable_config_json_raises(self):
+    """A host must not quietly fall back to the stock config while the others read the checkpoint's."""
+    with self.assertRaises(json.JSONDecodeError):
+      load_dynamic._checkpoint_quantization_config(self._write("{not json"))  # pylint: disable=protected-access
+
+  def test_unquantized_checkpoint_drops_the_stock_config(self):
+    """Hooks read `config.get("quantization_config", {})`, so the key must go, not become None."""
+    seen = {}
+
+    def mapping(hf_config, maxtext_config, scan_layers=False):
+      del maxtext_config, scan_layers
+      seen["config"] = hf_config
+      return {}
+
+    def hooks(hf_config, maxtext_config, scan_layers=False, saving_to_hf=False):
+      del maxtext_config, scan_layers, saving_to_hf
+      block = hf_config.get("quantization_config", {}).get("weight_block_size", 128)
+      text_block = hf_config["text_config"].get("quantization_config", {}).get("weight_block_size", 128)
+      return {"block": block, "text_block": text_block}
+
+    stock = {"quantization_config": {"weight_block_size": [64, 64]}, "text_config": {"quantization_config": {}}}
+    model = "fake-model-for-quantization-config-test"
+    with (
+        mock.patch.dict(load_dynamic.HF_MODEL_CONFIGS, {model: mock.Mock(to_dict=lambda: json.loads(json.dumps(stock)))}),
+        mock.patch.dict(load_dynamic.param_mapping.PARAM_MAPPING, {model: mapping}),
+        mock.patch.dict(load_dynamic.param_mapping.HOOK_FNS, {model: hooks}),
+    ):
+      config = mock.Mock(model_name=model, scan_layers=True)
+      _, got = load_dynamic.get_hf_config_and_mappings(config, self._write({"hidden_size": 8}))
+      self.assertEqual(got, {"block": 128, "text_block": 128})
+      self.assertNotIn("quantization_config", seen["config"])
+      _, got = load_dynamic.get_hf_config_and_mappings(config, self.create_tempdir().full_path)
+      self.assertEqual(got["block"], [64, 64])  # No config.json: the stock config stays.
+
 
 class LoadDynamicTest(parameterized.TestCase):
   """Tests for cache downloads and dynamic loading of safetensors."""
+
+  @parameterized.parameters(True, False)
+  def test_hub_cache_copies_config_json(self, has_config):
+    fs = mock.Mock()
+    fs.glob.return_value = ["org/model/model-1.safetensors", "org/model/model-2.safetensors"]
+    fs.exists.return_value = has_config
+    files = load_dynamic._hub_files_to_cache(fs, "org/model")  # pylint: disable=protected-access
+    want = ["org/model/model-1.safetensors", "org/model/model-2.safetensors"]
+    self.assertEqual(files, want + (["org/model/config.json"] if has_config else []))
 
   @mock.patch("huggingface_hub.HfFileSystem")
   @mock.patch.object(load_dynamic.storage, "Client")
@@ -229,16 +687,20 @@ class LoadDynamicTest(parameterized.TestCase):
       with self.assertRaises(Exception):
         load_dynamic.build_gcs_cache_worker("some_repo/model.safetensors", "gs://my-bucket/cache", "token")
 
+  @parameterized.named_parameters(("default", False), ("streaming", True))
   @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
   @mock.patch.object(load_dynamic.storage, "Client")
   @mock.patch.object(load_dynamic, "load_sharded_hf_state")
   @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state")
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming", return_value={"params": {}})
   @mock.patch("jax.process_index", return_value=0)
   @mock.patch("jax.experimental.multihost_utils.sync_global_devices")
   def test_load_safetensors_dynamic_from_hf_hub(
       self,
+      streaming,
       mock_sync,
       mock_process_index,
+      mock_load_streaming,
       mock_transform,
       mock_load_sharded,
       mock_storage_client,
@@ -246,11 +708,13 @@ class LoadDynamicTest(parameterized.TestCase):
   ):
     mock_fs_instance = mock_hf_fs.return_value
     mock_fs_instance.glob.return_value = ["repo/meta-llama/model.safetensors"]
+    mock_fs_instance.exists.return_value = True  # The repo has a config.json, already in the cache.
 
     mock_client_instance = mock_storage_client.return_value
-    mock_blob = mock.MagicMock()
-    mock_blob.name = "hf_cache/repo_meta-llama/model.safetensors"
-    mock_client_instance.list_blobs.return_value = [mock_blob]
+    blobs = [mock.MagicMock(), mock.MagicMock()]
+    blobs[0].name = "hf_cache/repo_meta-llama/model.safetensors"
+    blobs[1].name = "hf_cache/repo_meta-llama/config.json"
+    mock_client_instance.list_blobs.return_value = blobs
 
     mock_load_sharded.return_value = {}
     mock_transform.return_value = {"params": {}}
@@ -263,16 +727,79 @@ class LoadDynamicTest(parameterized.TestCase):
         self.scan_layers = True
         self.param_scan_axis = 0
         self.hf_access_token = "dummy_token"
+        self.safetensors_dynamic_streaming = streaming
 
     config = MockConfig()
 
     path = "repo/meta-llama"
-    dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
+    # The cached config.json is in a GCS bucket that doesn't exist; it has no quantization_config.
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None) as mock_qc:
+      dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
+    # Only the streaming loader copies config.json to the cache and reads its quantization_config.
+    cache_dir = "gs://dummy-bucket/hf_cache/repo_meta-llama"
+    mock_qc.assert_called_once_with(cache_dir if streaming else None)
+    self.assertEqual(mock_fs_instance.exists.called, streaming)
+    (mock_load_streaming if streaming else mock_load_sharded).assert_called_once()
+    self.assertEqual((mock_load_streaming if streaming else mock_load_sharded).call_args.args[0], cache_dir)
 
     self.assertIsNone(dummy_ret_val)
     self.assertEqual(loaded_vars, {"params": {}})
     mock_hf_fs.assert_called_once_with(token="dummy_token")
     mock_sync.assert_called_once_with("dynamic_hf_download_complete")
+
+  @mock.patch.object(load_dynamic.huggingface_hub, "HfFileSystem")
+  @mock.patch.object(load_dynamic, "load_sharded_hf_state", return_value={})
+  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state", return_value={"params": {}})
+  @mock.patch("jax.process_index", return_value=1)
+  @mock.patch("jax.experimental.multihost_utils.sync_global_devices")
+  def test_load_from_hf_hub_on_other_hosts_skips_hf_api(
+      self, mock_sync, mock_process_index, mock_transform, mock_load_sharded, mock_hf_fs
+  ):
+    # Only host 0 lists and downloads the repo; the other hosts wait for it and read the GCS cache.
+    config = mock.Mock(
+        model_name="llama3.1-8b",
+        hf_access_token=None,
+        base_output_directory="gs://dummy-bucket",
+        safetensors_dynamic_streaming=False,
+    )
+
+    # The cached config.json is in a GCS bucket that doesn't exist; it has no quantization_config.
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None):
+      load_dynamic.load_safetensors_dynamic_state("hf://repo/meta-llama", {}, config)
+
+    mock_hf_fs.assert_not_called()
+    mock_sync.assert_called_once_with("dynamic_hf_download_complete")
+    mock_load_sharded.assert_called_once_with("gs://dummy-bucket/hf_cache/repo_meta-llama")
+
+  @parameterized.named_parameters(("default", False, None), ("streaming", True, "gs://bucket/ckpt"))
+  @mock.patch.object(load_dynamic, "load_sharded_hf_state", return_value={})
+  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state", return_value={"params": {}})
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming", return_value={"params": {}})
+  @mock.patch.object(load_dynamic, "get_hf_config_and_mappings", return_value=({}, {}))
+  def test_only_streaming_reads_checkpoint_config_json(
+      self, streaming, want_path, mock_mappings, mock_streaming, mock_transform, mock_sharded
+  ):
+    # The default loader keeps the stock HF config; only streaming takes the checkpoint's quantization_config.
+    config = mock.Mock(model_name="llama3.1-8b", safetensors_dynamic_streaming=streaming)
+
+    load_dynamic.load_safetensors_dynamic_state("gs://bucket/ckpt", {}, config)
+
+    self.assertEqual(mock_mappings.call_args.args, (config, want_path))
+
+  @mock.patch.object(load_dynamic, "load_sharded_hf_state")
+  @mock.patch.object(load_dynamic, "transform_hf_state_to_mt_state")
+  @mock.patch.object(load_dynamic.hf_streaming_load, "load_hf_params_streaming", return_value={"params": {}})
+  def test_streaming_flag_selects_streaming_loader(self, mock_load_streaming, mock_transform, mock_load_sharded):
+    # safetensors_dynamic_streaming=True streams the checkpoint instead of reading all of it first.
+    config = mock.Mock(model_name="llama3.1-8b", safetensors_dynamic_streaming=True)
+
+    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None):
+      _, loaded_vars = load_dynamic.load_safetensors_dynamic_state("gs://bucket/ckpt", {}, config)
+
+    self.assertEqual(loaded_vars, {"params": {}})
+    self.assertEqual(mock_load_streaming.call_args.args[0], "gs://bucket/ckpt")
+    mock_load_sharded.assert_not_called()
+    mock_transform.assert_not_called()
 
   @parameterized.named_parameters(
       ("base", "llama3.1-8b"),
@@ -314,7 +841,41 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     self.safetensors_ckpt_dir.mkdir(parents=True, exist_ok=True)
     self.safetensors_ckpt_path = self.safetensors_ckpt_dir / "model.safetensors"
 
-  def test_load_safetensors_dynamic_single_key(self):
+  def test_rename_legacy_hf_keys(self):
+    # google/gemma-3-*-it stores the text model under `language_model.model.`; the mapping uses the names
+    # transformers gives after loading.
+    hf_state = {
+        "language_model.model.embed_tokens.weight": 0,
+        "language_model.lm_head.weight": 1,
+        "vision_tower.vision_model.post_layernorm.weight": 2,
+        "multi_modal_projector.mm_soft_emb_norm.weight": 3,
+        "model.norm.weight": 4,
+        "vision_tower.unmapped.weight": 5,
+    }
+    mapping = {
+        "params-a": "model.language_model.embed_tokens.weight",
+        "params-b": ["lm_head.weight"],
+        "params-c": "model.vision_tower.vision_model.post_layernorm.weight",
+        "params-d": ("model.multi_modal_projector.mm_soft_emb_norm.weight",),
+        "params-e": "model.norm.weight",
+    }
+
+    renamed = load_dynamic.rename_legacy_hf_keys(hf_state, mapping)
+
+    self.assertEqual(
+        renamed,
+        {
+            "model.language_model.embed_tokens.weight": 0,
+            "lm_head.weight": 1,
+            "model.vision_tower.vision_model.post_layernorm.weight": 2,
+            "model.multi_modal_projector.mm_soft_emb_norm.weight": 3,
+            "model.norm.weight": 4,
+            "vision_tower.unmapped.weight": 5,
+        },
+    )
+
+  @parameterized.named_parameters(("default", False), ("streaming", True))
+  def test_load_safetensors_dynamic_single_key(self, streaming):
     if os.getenv("JAX_PLATFORMS") == "proxy":
       self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
     # Save a single key (embedding weight) to a safetensors file
@@ -330,6 +891,7 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
         self.scan_layers = True
         self.param_scan_axis = 0
         self.hf_access_token = None
+        self.safetensors_dynamic_streaming = streaming
 
     config = MockConfig()
 
@@ -363,6 +925,66 @@ class SourceCheckpointLoadingTest(parameterized.TestCase):
     # Assert values match
     loaded_weight = loaded_vars["params"]["token_embedder"]["embedding"]
     np.testing.assert_allclose(loaded_weight, dummy_weight)
+
+
+class LeadingAxisShardingTest(parameterized.TestCase):
+  """On several processes, each HF tensor is split along its leading axis only and loads unchanged."""
+
+  def test_leading_axis_read_matches_values(self):
+    if os.getenv("JAX_PLATFORMS") == "proxy":
+      self.skipTest("SafetensorsLayout is not supported on Pathways backend.")
+    if jax.device_count() < 4 or jax.device_count() % 2:
+      self.skipTest("Needs an even number (>= 4) of devices for two device groups.")
+    ckpt_dir = epath.Path(self.create_tempdir().full_path)
+    rng = np.random.RandomState(0)
+    n = jax.device_count()
+    # Leading axes divisible by all devices, by the number of groups only, and by neither.
+    tensors = {
+        "model.embed_tokens.weight": rng.randn(2 * n, 6).astype(np.float32),
+        "model.layers.0.mlp.gate.weight": rng.randn(2, 5).astype(np.float16),
+        "model.norm.weight": np.array([-0.0, 0.0, 1.5], dtype=np.float32),
+        "model.position_ids": np.arange(7, dtype=np.int32),
+    }
+    safetensors.numpy.save_file(tensors, str(ckpt_dir / "model.safetensors"))
+
+    loaded = load_dynamic.load_sharded_hf_state(str(ckpt_dir), num_groups=2)
+
+    self.assertEqual(set(loaded), set(tensors))
+    for name, value in tensors.items():
+      spec = loaded[name].sharding.spec
+      self.assertTrue(all(axis is None for axis in spec[1:]), f"{name} is split along an inner axis: {spec}")
+      self.assertEqual(loaded[name].dtype, value.dtype)
+      np.testing.assert_array_equal(np.asarray(loaded[name]).view(np.uint8), value.view(np.uint8), err_msg=name)
+    self.assertEqual(loaded["model.embed_tokens.weight"].sharding.spec, PartitionSpec(("process", "local")))
+    self.assertEqual(loaded["model.layers.0.mlp.gate.weight"].sharding.spec, PartitionSpec("process"))
+    self.assertEqual(loaded["model.norm.weight"].sharding.spec, PartitionSpec())
+
+  def test_unequal_device_groups_raise(self):
+    abstract_state = {"w": jax.ShapeDtypeStruct((4,), np.float32)}
+    with self.assertRaisesRegex(ValueError, "groups of equal size"):
+      load_dynamic._leading_axis_shardings(  # pylint: disable=protected-access
+          abstract_state, jax.devices(), num_groups=jax.device_count() + 1
+      )
+
+  def test_read_without_gcs_read_ahead(self):
+    # gcsfs reads 5 MiB past each byte range by default, while each host reads one small range per tensor.
+    gcsfs = pytest.importorskip("gcsfs")
+    ckpt_dir = epath.Path(self.create_tempdir().full_path)
+    safetensors.numpy.save_file({"w": np.ones((4, 2), dtype=np.float32)}, str(ckpt_dir / "model.safetensors"))
+    block_size = gcsfs.GCSFileSystem.default_block_size
+    block_sizes_in_read = []
+
+    def load_pytree(*args, **kwargs):
+      block_sizes_in_read.append(gcsfs.GCSFileSystem.default_block_size)
+      return load_pytree.original(*args, **kwargs)
+
+    load_pytree.original = load_dynamic.ocp_v1.load_pytree
+    with mock.patch.object(load_dynamic.ocp_v1, "load_pytree", side_effect=load_pytree):
+      loaded = load_dynamic.load_sharded_hf_state(str(ckpt_dir))
+
+    self.assertEqual(block_sizes_in_read, [0])
+    self.assertEqual(gcsfs.GCSFileSystem.default_block_size, block_size)
+    np.testing.assert_array_equal(loaded["w"], np.ones((4, 2), dtype=np.float32))
 
 
 class CheckpointMetadataTest(parameterized.TestCase):
@@ -446,6 +1068,54 @@ class SaveCheckpointStepExistsTest(parameterized.TestCase):
     saved = checkpointing.save_checkpoint(manager, 5, {"w": 1})
 
     self.assertFalse(saved)
+
+
+class SaveCheckpointBackupTest(parameterized.TestCase):
+  """save_checkpoint(backup=True) asks Multi-Tier Checkpointing to back up the step."""
+
+  def test_backup_forwarded_to_multi_tier_checkpointing_manager(self):
+    manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
+    manager.save.return_value = True
+
+    saved = checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
+
+    self.assertTrue(saved)
+    manager.save.assert_called_once()
+    _, kwargs = manager.save.call_args
+    self.assertTrue(kwargs["backup"])
+    self.assertTrue(kwargs["force"])  # a step to back up is always saved locally
+
+  def test_backup_for_already_saved_step_surfaces_orbax_error(self):
+    # save_checkpoint is expected at most once per step; a second call with backup=True is not
+    # intercepted, so Orbax's StepAlreadyExistsError reaches the caller instead of being skipped.
+    manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
+    manager.save.side_effect = ocp.checkpoint_manager.StepAlreadyExistsError("step 5 already exists")
+
+    with self.assertRaises(ocp.checkpoint_manager.StepAlreadyExistsError):
+      checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
+    self.assertTrue(manager.save.call_args.kwargs["backup"])
+
+  def test_no_backup_keeps_multi_tier_checkpointing_save_call_unchanged(self):
+    manager = mock.Mock(spec=checkpointing.EmergencyReplicatorCheckpointManager)
+    manager.save.return_value = True
+
+    checkpointing.save_checkpoint(manager, 5, {"w": 1}, force=True)
+
+    _, kwargs = manager.save.call_args
+    self.assertNotIn("backup", kwargs)
+    self.assertTrue(kwargs["force"])
+
+  @parameterized.named_parameters(
+      ("standard_checkpointer", None),
+      ("single_tier_emergency_manager", checkpointing.EmergencyCheckpointManager),
+  )
+  def test_backup_rejected_without_multi_tier_checkpointing(self, manager_spec):
+    manager = mock.Mock(spec=manager_spec) if manager_spec else mock.Mock()
+    manager.use_async = False
+
+    with self.assertRaisesRegex(ValueError, "backup=True requires Multi-Tier Checkpointing"):
+      checkpointing.save_checkpoint(manager, 5, {"w": 1}, backup=True)
+    self.assertEqual(manager.mock_calls, [])  # rejected before touching the manager
 
 
 class SaveCheckpointAsyncTest(parameterized.TestCase):

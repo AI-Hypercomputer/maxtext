@@ -14,6 +14,9 @@
 
 """Unit tests for RL result parsing and reward scoring (CPU-only)."""
 
+import random
+import re
+import time
 import unittest
 import pytest
 from types import SimpleNamespace
@@ -152,6 +155,46 @@ class TestMatchFormatApproximatelyScores(unittest.TestCase):
         utils_rl.match_format_exactly(None, [completion], self.config)[0],
         self.config.reward_exact_format_match,
     )
+
+
+class TestMatchFormatRegexBacktracking(unittest.TestCase):
+  """get_match_format_regex must stay linear-ish on degenerate completions."""
+
+  def setUp(self):
+    self.config = SimpleNamespace(
+        reasoning_start_token="<start_working_out>",
+        reasoning_end_token="<end_working_out>",
+        solution_start_token="<SOLUTION>",
+        solution_end_token="</SOLUTION>",
+        debug=False,
+    )
+
+  @pytest.mark.cpu_only
+  def test_matches_the_backtracking_pattern_exactly(self):
+    c = self.config
+    reference = re.compile(
+        rf"{re.escape(c.reasoning_start_token)}.*?{re.escape(c.reasoning_end_token)}.*?"
+        rf"{re.escape(c.solution_start_token)}(.+?){re.escape(c.solution_end_token)}",
+        flags=re.MULTILINE | re.DOTALL,
+    )
+    pattern = utils_rl.get_match_format_regex(c)
+    tokens = [c.reasoning_start_token, c.reasoning_end_token, c.solution_start_token, c.solution_end_token, "a", "\n"]
+    rng = random.Random(0)
+    for _ in range(5000):
+      text = "".join(rng.choice(tokens) for _ in range(rng.randint(0, 12)))
+      want, got = reference.search(text), pattern.search(text)
+      self.assertEqual(want is None, got is None, text)
+      if want is not None:
+        self.assertEqual((want.span(), want.group(1)), (got.span(), got.group(1)), text)
+
+  @pytest.mark.cpu_only
+  def test_repeated_unclosed_tags_do_not_backtrack_catastrophically(self):
+    c = self.config
+    # Echo-style output: many complete reasoning/solution openings, never closed.
+    text = (c.reasoning_start_token + "z" * 20 + c.reasoning_end_token + c.solution_start_token + "w" * 10) * 1000
+    start = time.monotonic()
+    self.assertIsNone(utils_rl.get_match_format_regex(c).search(text))
+    self.assertLess(time.monotonic() - start, 10.0)
 
 
 class TestCheckNumbers(unittest.TestCase):

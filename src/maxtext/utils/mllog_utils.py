@@ -235,6 +235,12 @@ def _lowest_precision(*precisions: str) -> str:
   return min(precisions, key=lambda p: _PRECISION_BITS.get(p, 0))
 
 
+def _global_batch_size_to_train_on(config) -> int:
+  """Returns the logical training batch size (excluding elastic constant-batch padding rows)."""
+  logical_batch = getattr(config, "logical_global_batch_size_to_train_on", None)
+  return logical_batch if isinstance(logical_batch, int) else config.global_batch_size_to_train_on
+
+
 def init_print(config):
   """Logs the static submission and hyperparameter events for compliance checking."""
   setup_mllog(config)
@@ -251,7 +257,7 @@ def init_print(config):
   mllogger.event(mllog.constants.SUBMISSION_BENCHMARK, mllog.constants.DEEPSEEKV3_671B)
   mllogger.event(mllog.constants.SEED, config.data_shuffle_seed)
   mllogger.event(mllog.constants.MAX_STEPS, config.steps)
-  mllogger.event(mllog.constants.GLOBAL_BATCH_SIZE, config.global_batch_size_to_train_on)
+  mllogger.event(mllog.constants.GLOBAL_BATCH_SIZE, _global_batch_size_to_train_on(config))
   mllogger.event(mllog.constants.GRADIENT_ACCUMULATION_STEPS, config.gradient_accumulation_steps)
   mllogger.event(mllog.constants.MAX_SEQUENCE_LENGTH, config.max_target_length)
   # The eval set has 1024 sequences; larger eval batches only repeat them.
@@ -349,7 +355,7 @@ def block_start(config, step=0):
   if not _should_log():
     return
   _open_block = {
-      "samples_count": config.global_batch_size_to_train_on,
+      "samples_count": _global_batch_size_to_train_on(config),
       "step": step,
   }
   mllogger.start(mllog.constants.BLOCK_START, metadata=dict(_open_block))
@@ -385,7 +391,7 @@ def eval_start(config, step, start_step=0):
   mllogger.start(
       mllog.constants.EVAL_START,
       metadata={
-          "samples_count": (step - start_step) * config.global_batch_size_to_train_on,
+          "samples_count": (step - start_step) * _global_batch_size_to_train_on(config),
           "step": step,
       },
   )
@@ -395,7 +401,7 @@ def eval_stop(config, step, eval_loss, start_step=0):
   """Logs EVAL_ACCURACY and EVAL_STOP, then opens the next block or stops the run."""
   if not _should_log():
     return
-  samples_count = (step - start_step) * config.global_batch_size_to_train_on
+  samples_count = (step - start_step) * _global_batch_size_to_train_on(config)
 
   mllogger.event(
       mllog.constants.EVAL_ACCURACY,
@@ -443,7 +449,7 @@ def tracked_stats(config, step, step_time, loss, start_step=0):
     value["train_step_time"] = step_time
   mllogger.event(
       key="tracked_stats",
-      metadata={mllog.constants.SAMPLES_COUNT: (step - start_step) * config.global_batch_size_to_train_on},
+      metadata={mllog.constants.SAMPLES_COUNT: (step - start_step) * _global_batch_size_to_train_on(config)},
       value=value,
   )
   sync_log()

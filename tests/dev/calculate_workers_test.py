@@ -20,6 +20,7 @@ import sys
 from tools.dev.calculate_workers import CPU_XDIST_PARALLELISM
 from tools.dev.calculate_workers import DEFAULT_WORKERS
 from tools.dev.calculate_workers import LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD
+from tools.dev.calculate_workers import MAX_CPU_UNIT_WORKERS
 from tools.dev.calculate_workers import MAX_CPU_WORKERS
 from tools.dev.calculate_workers import MAX_GPU_WORKERS
 from tools.dev.calculate_workers import MAX_TPU_WORKERS
@@ -30,20 +31,22 @@ from tools.dev.calculate_workers import get_max_workers_for_flavor
 
 def test_constants():
   """Tests that module constants have expected defaults."""
-  assert MAX_CPU_WORKERS == 4
+  assert MAX_CPU_UNIT_WORKERS == 5
+  assert MAX_CPU_WORKERS == 2
   assert MAX_TPU_WORKERS == 3
   assert MAX_GPU_WORKERS == 3
   assert DEFAULT_WORKERS == 1
   assert LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD == 16.0
   assert TARGET_MINUTES_PER_WORKER == 8.0
-  assert CPU_XDIST_PARALLELISM == 16
+  assert CPU_XDIST_PARALLELISM == 8
 
 
 def test_get_max_workers_for_flavor():
   """Tests device-specific maximum worker safety caps."""
-  assert get_max_workers_for_flavor("cpu-unit") == 4
-  assert get_max_workers_for_flavor("cpu-integration") == 4
-  assert get_max_workers_for_flavor("cpu-post-training-unit") == 4
+  assert get_max_workers_for_flavor("cpu-unit") == 5
+  assert get_max_workers_for_flavor("cpu-integration") == 2
+  assert get_max_workers_for_flavor("cpu-post-training-unit") == 2
+  assert get_max_workers_for_flavor("cpu-post-training-integration") == 2
   assert get_max_workers_for_flavor("tpu-unit") == 3
   assert get_max_workers_for_flavor("tpu-integration") == 3
   assert get_max_workers_for_flavor("tpu7x-unit") == 3
@@ -55,8 +58,8 @@ def test_get_max_workers_for_flavor():
 def test_calculate_workers_no_baseline():
   """Tests fallback behavior when baseline data is not provided."""
   workers, groups = calculate_workers("cpu-unit", None)
-  assert workers == 4
-  assert groups == [1, 2, 3, 4]
+  assert workers == 5
+  assert groups == [1, 2, 3, 4, 5]
 
   workers, groups = calculate_workers("tpu-unit", None)
   assert workers == 3
@@ -79,10 +82,14 @@ def test_calculate_workers_zero_matching_tests():
 
 def test_calculate_workers_heavy_suite():
   """Tests worker allocation for heavy suites (>= 16 effective mins)."""
-  baseline = {f"cpu-unit::test_{i}": 600.0 for i in range(30)}  # 300 CPU-mins -> 18.75 eff mins
+  baseline = {f"cpu-unit::test_{i}": 600.0 for i in range(30)}  # 300 CPU-mins -> 37.5 eff mins
   workers, groups = calculate_workers("cpu-unit", baseline)
-  assert workers == 4
-  assert groups == [1, 2, 3, 4]
+  assert workers == 5
+  assert groups == [1, 2, 3, 4, 5]
+
+  # The other CPU flavors are capped at 2 workers even for heavy suites.
+  baseline_integration = {f"cpu-integration::test_{i}": 600.0 for i in range(30)}
+  assert calculate_workers("cpu-integration", baseline_integration) == (2, [1, 2])
 
   baseline_tpu = {f"tpu-unit::test_{i}": 60.0 for i in range(20)}  # 20 mins total
   workers, groups = calculate_workers("tpu-unit", baseline_tpu)
@@ -100,7 +107,7 @@ def test_calculate_workers_lightweight_suite():
   baseline_medium = {f"gpu-integration::test_{i}": 100.0 for i in range(6)}
   assert calculate_workers("gpu-integration", baseline_medium) == (2, [1, 2])
 
-  # 20 CPU tests taking 60s each = 20.0 CPU-mins -> 1.25 eff mins under xdist -> 1 worker
+  # 20 CPU tests taking 60s each = 20.0 CPU-mins -> 2.5 eff mins under xdist -> 1 worker
   baseline_cpu = {f"cpu-post-training-unit::test_{i}": 60.0 for i in range(20)}
   assert calculate_workers("cpu-post-training-unit", baseline_cpu) == (1, [1])
 
@@ -109,9 +116,17 @@ def test_calculate_workers_lightweight_suite():
   assert calculate_workers("cpu-post-training-unit", baseline_cpu) == (2, [1, 2])
 
 
+def test_calculate_workers_xdist_parallelism():
+  """Tests that fewer xdist workers per shard (smaller runners) lead to more shards."""
+  # 20 CPU tests taking 120s each = 40 CPU-mins: 5 eff mins at -n 8 -> 1 worker; 10 eff mins at -n 4 -> 2 workers.
+  baseline = {f"cpu-post-training-unit::test_{i}": 120.0 for i in range(20)}
+  assert calculate_workers("cpu-post-training-unit", baseline) == (1, [1])
+  assert calculate_workers("cpu-post-training-unit", baseline, xdist_parallelism=4) == (2, [1, 2])
+
+
 def test_calculate_workers_fewer_tests_than_max_workers():
   """Tests that worker count never exceeds the number of tests."""
-  # 2 tests taking 1000s each = 16.67m max single test -> max_workers is 4, but only 2 tests!
+  # 2 tests taking 1000s each = 16.67m max single test -> max_workers is 5, but only 2 tests!
   baseline = {
       "cpu-unit::test_heavy_1": 1000.0,
       "cpu-unit::test_heavy_2": 1000.0,
@@ -142,6 +157,29 @@ def test_main_cli(tmp_path):
 
   res = subprocess.run(cmd, capture_output=True, text=True, check=True)
   assert res.returncode == 0
+  lines = res.stdout.strip().splitlines()
+  assert "total_workers=2" in lines
+  assert "worker_groups=[1, 2]" in lines
+
+
+def test_main_cli_xdist_parallelism(tmp_path):
+  """Tests that the CLI passes --xdist-parallelism through."""
+  baseline_file = tmp_path / "baseline.json"
+  baseline_file.write_text(json.dumps({f"cpu-post-training-unit::test_{i}": 120.0 for i in range(20)}), encoding="utf-8")
+
+  cmd = [
+      sys.executable,
+      "-m",
+      "tools.dev.calculate_workers",
+      "--flavor",
+      "cpu-post-training-unit",
+      "--baseline",
+      str(baseline_file),
+      "--xdist-parallelism",
+      "4",
+  ]
+
+  res = subprocess.run(cmd, capture_output=True, text=True, check=True)
   lines = res.stdout.strip().splitlines()
   assert "total_workers=2" in lines
   assert "worker_groups=[1, 2]" in lines

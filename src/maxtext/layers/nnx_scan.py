@@ -72,7 +72,7 @@ def create_scanned_layers(
           if value is not None:
             if isinstance(value, str):
               value = (value,)
-            if isinstance(value, tuple):
+            if isinstance(value, (tuple, list)):
               logical_axes = list(value)
               if metadata_axis_name not in logical_axes:
                 logical_axes.insert(min(axis, len(logical_axes)), metadata_axis_name)

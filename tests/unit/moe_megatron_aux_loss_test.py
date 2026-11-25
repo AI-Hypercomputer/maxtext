@@ -438,16 +438,23 @@ class RingOfExpertsIntegrationTest(unittest.TestCase):
         "inputs_segmentation": seg,
         "targets_segmentation": seg,
     }
-    _, params1, _ = nnx.split(model1, nnx.Param, ...)
+    graphdef1, params1, rest1 = nnx.split(model1, nnx.Param, ...)
+    graphdef2, params2, rest2 = nnx.split(model2, nnx.Param, ...)
     pshardings = jax.tree.map(lambda v: NamedSharding(mesh, PartitionSpec()), params1)
 
+    @jax.jit
+    def run_ga1(p1, r1, batch):
+      m1 = nnx.merge(graphdef1, p1, r1)
+      return nnx.value_and_grad(train.loss_fn, argnums=0, has_aux=True)(m1, cfg1, dict(batch), None, None, is_train=True)
+
+    @jax.jit
+    def run_ga2(p2, r2, batch):
+      m2 = nnx.merge(graphdef2, p2, r2)
+      return gradient_accumulation_loss_and_grad(train.loss_fn, cfg2, m2, None, pshardings, dict(batch), None)
+
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg1.logical_axis_rules):
-      (loss1, aux1), grads1 = nnx.value_and_grad(train.loss_fn, argnums=0, has_aux=True)(
-          model1, cfg1, dict(data), None, None, is_train=True
-      )
-      loss2, aux2, grads2 = gradient_accumulation_loss_and_grad(
-          train.loss_fn, cfg2, model2, None, pshardings, dict(data), None
-      )
+      (loss1, aux1), grads1 = run_ga1(params1, rest1, data)
+      loss2, aux2, grads2 = run_ga2(params2, rest2, data)
 
     np.testing.assert_allclose(loss2, loss1, rtol=1e-5)
     np.testing.assert_allclose(aux2["moe_lb_loss"], aux1["moe_lb_loss"], rtol=1e-5)
@@ -586,6 +593,16 @@ class SqrtSoftplusSeqAuxLossTest(unittest.TestCase):
         cls.logits, cls.cfg.load_balance_loss_weight, cls.cfg.num_experts_per_tok
     )
     cls.ref_gate_grad = np.einsum("bse,bsx->ex", inputs, dl_du)
+
+  @classmethod
+  def tearDownClass(cls):
+    cls.cfg = None
+    cls.lb_loss = None
+    cls.gate_grad = None
+    cls.logits = None
+    cls.ref_loss = None
+    cls.ref_gate_grad = None
+    super().tearDownClass()
 
   def test_config_matches_spec(self):
     self.assertEqual(self.cfg.routed_score_func, "sqrtsoftplus")

@@ -17,15 +17,19 @@
 import glob
 import math
 import os
+import re
 from unittest import mock
 
 from absl.testing import absltest
 from flax import nnx
 import jax
+import jax.extend as jex
+import jax.numpy as jnp
 import numpy as np
 
 from maxtext.configs import pyconfig
-from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.core.sharding import DefaultSharding, create_mesh
+from maxtext.m3.infra import quantization
 from maxtext.m3.train import loop
 from tests.utils.test_helpers import get_test_config_path
 
@@ -74,7 +78,7 @@ class TrainLoopTest(absltest.TestCase):
 
   def test_synthetic_batch_targets_are_shifted_inputs(self):
     config = _tiny_config(self.output_dir)
-    batch = loop.make_synthetic_batch(config, create_mesh(), jax.random.key(0))
+    batch = loop.make_synthetic_batch(config, create_mesh(), loop.batch_spec(DefaultSharding()), jax.random.key(0))
     inputs, targets = np.asarray(batch["inputs"]), np.asarray(batch["targets"])
     self.assertEqual(inputs.shape, (config.global_batch_size_to_train_on, config.max_target_length))
     np.testing.assert_array_equal(inputs[:, 1:], targets[:, :-1])
@@ -88,6 +92,24 @@ class TrainLoopTest(absltest.TestCase):
     loop.train_loop(config)
     traces = glob.glob(os.path.join(config.tensorboard_dir, "**", "*.xplane.pb"), recursive=True)
     self.assertNotEmpty(traces, f"no .xplane.pb under {config.tensorboard_dir}")
+
+  def test_train_step_ops_carry_named_scopes(self):
+    for overrides in ({}, {"quantization": "int8", "use_qwix_quantization": "true"}):
+      with self.subTest(**overrides):
+        config = _tiny_config(self.output_dir, **overrides)
+        mesh = create_mesh()
+        with jax.set_mesh(mesh):
+          model, optimizer = loop.setup_model(config, mesh)
+          batch = loop.make_synthetic_batch(config, mesh, loop.batch_spec(DefaultSharding()), jax.random.key(0))
+          hlo = loop.train_step.lower(model, optimizer, batch).compile().as_text()
+          if overrides:
+            # Scopes go on after qwix; its matmuls must stay quantized.
+            example = quantization.example_inputs(config)
+            self.assertGreater(quantization.quantized_matmuls(model, jnp.int8, *example), 0)
+        # Scopes entered under `value_and_grad` read `jvp(decoder)/...`; drop the transform wrappers.
+        names = {re.sub(r"\w+\(|\)", "", n) for n in re.findall(r'op_name="([^"]*)"', hlo)}
+        for scope in ("decoder/layers/0/mlp/wi_0/", "cross_entropy/", "optimizer/"):
+          self.assertTrue(any(scope in n for n in names), f"no op under {scope}")
 
   def test_train_loop_avoids_per_step_graph_traversal(self):
     with (
@@ -104,6 +126,44 @@ class TrainLoopTest(absltest.TestCase):
 
     self.assertEqual(state_calls_2, state_calls_5)
     self.assertEqual(flatten_calls_2, flatten_calls_5)
+
+  def test_matmul_precision_reaches_the_step(self):
+    """`matmul_precision` is baked into every `dot_general` of the step at trace time."""
+    seen = {}
+    original = nnx.cached_partial
+
+    def precisions(jaxpr):
+      for eqn in jaxpr.eqns:
+        if eqn.primitive.name == "dot_general":
+          yield str(eqn.params["precision"])
+        for value in eqn.params.values():
+          if isinstance(value, jex.core.ClosedJaxpr):
+            yield from precisions(value.jaxpr)
+
+    def spy(fn, model, optimizer):
+      # Trace the forward pass functionally (the cached step mutates state in place, which a bare
+      # `make_jaxpr` rejects); it runs inside the loop's `default_matmul_precision` like the step does.
+      graphdef, state = nnx.split(model)
+      step_fn = original(fn, model, optimizer)
+
+      def forward(state, batch):
+        return loop.loss_fn(nnx.merge(graphdef, state), batch)
+
+      def traced(batch):
+        seen["precisions"] = set(precisions(jax.make_jaxpr(forward)(state, batch).jaxpr))
+        return step_fn(batch)
+
+      return traced
+
+    for setting, expected in (("highest", "HIGHEST"), ("default", "DEFAULT")):
+      with mock.patch.object(nnx, "cached_partial", spy):
+        loop.train_loop(_tiny_config(self.output_dir, dtype="float32", matmul_precision=setting, steps=1))
+      self.assertNotEmpty(seen["precisions"])
+      self.assertTrue(all(expected in p for p in seen["precisions"]), (setting, seen["precisions"]))
+
+  def test_rejects_grad_dtype_other_than_float32(self):
+    with self.assertRaisesRegex(ValueError, "grad_dtype=bfloat16"):
+      loop.train_loop(_tiny_config(self.output_dir, grad_dtype="bfloat16"))
 
   def test_rejects_gradient_accumulation(self):
     with self.assertRaisesRegex(ValueError, "gradient_accumulation_steps=2"):

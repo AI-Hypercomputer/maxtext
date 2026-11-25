@@ -273,6 +273,7 @@ def make_tgmm_configs(
     lhs_quant_dtype: jnp.dtype | None = None,
     rhs_quant_scale: jax.Array | None = None,
     rhs_quant_dtype: jnp.dtype | None = None,
+    size_n_override: int | None = None,
 ):
   """Fills the GMM config for the TGMM kernel."""
   assert out_dtype, "out_dtype cannot be None"
@@ -281,7 +282,8 @@ def make_tgmm_configs(
   )
   size_m = lhs.shape[0]
   size_k = _operand_size(lhs, "lhs")
-  size_n = _operand_size(rhs, "rhs")
+  full_size_n = _operand_size(rhs, "rhs")
+  size_n = full_size_n if size_n_override is None else size_n_override
   if rhs_scale is not None:
     # rhs_scale.shape[0] is the number of quant blocks along the m (reduction)
     # dimension. tgmm_v2 only implements per-N (per-output-channel) scaling,
@@ -373,11 +375,12 @@ def make_tgmm_configs(
   if rhs_cfgs.is_3d:
     if tiles.tile_n % num_lanes != 0:
       raise ValueError(f"3D rhs requires tile_n % {num_lanes} == 0; got {tiles.tile_n=}.")
-    relayout.check_tile_d0(
-        tiles.tile_n // num_lanes,
-        full_d0=dims.size_n // num_lanes,
-        pack=relayout.packing(rhs.dtype),
-    )
+    if size_n_override is None:
+      relayout.check_tile_d0(
+          tiles.tile_n // num_lanes,
+          full_d0=full_size_n // num_lanes,
+          pack=relayout.packing(rhs.dtype),
+      )
 
   return gmm_v2.GmmConfigs(
       dims=dims,
@@ -396,6 +399,7 @@ def make_tgmm_configs(
 
 
 def tgmm_inner_kernel(
+    step: pltpu.PipelineStep,
     tiled_lhs_ref: OperandRef,
     # .value: [tile_m // size_lhs_sublane, size_lhs_sublane, tile_k]
     # .scale: [1, 1] (static quantization scale) or None
@@ -409,6 +413,7 @@ def tgmm_inner_kernel(
     acc_in_sem: jax.Array | None = None,
     *,
     cfgs: gmm_v2.GmmConfigs,
+    num_gm: jax.Array,
 ):
   """Inner kernel for TGMM computation.
 
@@ -417,6 +422,7 @@ def tgmm_inner_kernel(
   and accumulation across different group-major tiles.
 
   Args:
+    step: PipelineStep containing current iteration indices.
     tiled_lhs_ref: OperandRef bundling the tiled LHS data ('.value') and its
       optional per-tensor static quantization scale ('.scale').
     tiled_rhs_ref: OperandRef bundling the tiled RHS data ('.value') and its
@@ -430,6 +436,7 @@ def tgmm_inner_kernel(
       needs no VMEM of its own.
     acc_in_sem: DMA semaphore for the `acc_in_ref` copies.
     cfgs: GmmConfigs object containing kernel configurations.
+    num_gm: Total number of group-major tiles along grid axis 2.
   """
   # NB: grid=(num_n, num_k, num_gm)
   tiled_rhs_scale_ref = tiled_rhs_ref.scale
@@ -451,7 +458,7 @@ def tgmm_inner_kernel(
       return relayout.load_3d_as_2d(tiled_rhs_value_ref, bucket_m, tile_n // num_lanes)
     return tiled_rhs_value_ref.reshape(-1, tile_n)[:bucket_m]
 
-  gm_id = pl.program_id(2)
+  gm_id = step.index[2]
 
   # Mask out invalid rows in the LHS/RHS tiles.
   # The DMA loads tiles aligned to sublane boundaries, but the actual group
@@ -466,13 +473,13 @@ def tgmm_inner_kernel(
     # The acc tile of this step's output block; the last N block may be
     # partial, like in the pipeline's own output DMA.
     assert acc_in_ref is not None and acc_in_sem is not None
-    n_start = pl.program_id(0) * tile_n
+    n_start = step.index[0] * tile_n
     size_n = jnp.minimum(tile_n, acc_in_ref.shape[2] - n_start)
     size_n = pl.multiple_of(size_n, num_lanes)
     return pltpu.make_async_copy(
         acc_in_ref.at[
             cur_group_id,
-            pl.ds(pl.program_id(1) * tile_k, tile_k),
+            pl.ds(step.index[1] * tile_k, tile_k),
             pl.ds(n_start, size_n),
         ],
         tiled_out_ref.at[:, pl.ds(0, size_n)],
@@ -573,7 +580,7 @@ def tgmm_inner_kernel(
   group_id_changed = metadata_ref.gm_id_to_group_id[gm_id] != metadata_ref.gm_id_to_group_id[prev_gm_id]
   new_group = jnp.logical_or(is_first_gm, group_id_changed)
 
-  is_last_gm = gm_id == (pl.num_programs(2) - 1)
+  is_last_gm = gm_id == (num_gm - 1)
   next_gm_id = jnp.where(is_last_gm, gm_id, gm_id + 1)
   next_group_id = metadata_ref.gm_id_to_group_id[next_gm_id]
   cur_group_id = metadata_ref.gm_id_to_group_id[gm_id]
@@ -640,9 +647,10 @@ def tgmm_inner_kernel(
 class TgmmIndexMaps:
   """Index maps for TGMM kernel."""
 
-  def __init__(self, metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs):
+  def __init__(self, metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs, rhs_tile_offset: int = 0):
     self.metadata_ref = metadata_ref
     self.cfgs = cfgs
+    self.rhs_tile_offset = rhs_tile_offset
 
   def _rows(self, gm_id: jax.Array):
     m_start = self.metadata_ref.gm_id_to_m_offset[gm_id]
@@ -662,9 +670,10 @@ class TgmmIndexMaps:
 
   def rhs_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
     del k_id
+    rhs_n_id = n_id + self.rhs_tile_offset
     if self.cfgs.rhs_cfgs.is_3d:
-      return (self._rows(gm_id), 0, n_id, 0)
-    return (self._rows(gm_id), 0, n_id)
+      return (self._rows(gm_id), 0, rhs_n_id, 0)
+    return (self._rows(gm_id), 0, rhs_n_id)
 
   def rhs_scale_index_map(self, n_id: jax.Array, k_id: jax.Array, gm_id: jax.Array):
     del k_id, gm_id
@@ -676,10 +685,10 @@ class TgmmIndexMaps:
 
 
 def generate_tgmm_block_specs(
-    metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs
+    metadata_ref: gmm_v2.MetadataRef, cfgs: gmm_v2.GmmConfigs, rhs_tile_offset: int = 0
 ) -> Tuple[Tuple[OperandRef, OperandRef], pl.BlockSpec]:
   """Generates block specs for the given lhs, rhs, and out refs."""
-  index_map = TgmmIndexMaps(metadata_ref, cfgs)
+  index_map = TgmmIndexMaps(metadata_ref, cfgs, rhs_tile_offset=rhs_tile_offset)
   num_lanes = pltpu.get_tpu_info().num_lanes
   # NB: in tgmm, LHS is reshaped from (M, K) to (-1, size_lhs_sublane, K) so
   # that DMA transfers are aligned to sublane boundaries. The first dimension
@@ -808,6 +817,7 @@ def tgmm_kernel_main(
     *,
     cfgs,
     acc_in_ref: jax.Array | None = None,  # [num_actual_groups * k, n]
+    rhs_tile_offset: int = 0,
 ):
   """Main kernel function for TGMM computation.
 
@@ -830,6 +840,7 @@ def tgmm_kernel_main(
       to the output, and groups without rows keep it instead of being zeroed.
       Each output tile is read here once before it is written once, so the
       aliasing is safe.
+    rhs_tile_offset: Tile offset into `rhs` along the N dimension.
   """
   # Splitting the flat row dim is free, like the lhs/rhs reshapes below.
   out_ref = out_ref.reshape(cfgs.dims.size_group, -1, out_ref.shape[-1])
@@ -854,7 +865,7 @@ def tgmm_kernel_main(
       cfgs=cfgs,
   )
 
-  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs)
+  in_specs, out_specs = generate_tgmm_block_specs(metadata_ref, cfgs, rhs_tile_offset=rhs_tile_offset)
   # Partition output tiles across TCs in MegaCore mode over both N and K
   # dimensions.
   # TODO(b/549337409): Revert temporary fallback to unblock vmap on older JAX.
@@ -863,12 +874,13 @@ def tgmm_kernel_main(
   core_axis_name = None if cfgs.disable_multi_core_mode else "core"
   dimension_semantics = None if cfgs.disable_multi_core_mode else (pltpu.PARALLEL, pltpu.PARALLEL, pltpu.ARBITRARY)
   pipeline_fn = pltpu.emit_pipeline(
-      functools.partial(tgmm_inner_kernel, cfgs=cfgs),
+      functools.partial(tgmm_inner_kernel, cfgs=cfgs, num_gm=num_gm),
       grid=(num_n, num_k, num_gm),
       in_specs=in_specs,
       out_specs=out_specs,
       core_axis_name=core_axis_name,
       dimension_semantics=dimension_semantics,
+      _explicit_indices=True,
   )
   # [M, S] -> [M // sub, sub, S]; [M, D0, 128] -> [.., sub, D0, 128].
   sublane = cfgs.dims.size_lhs_sublane
@@ -902,6 +914,7 @@ def _tgmm_kernel_main_into_acc(
     out_ref: jax.Array,
     *scratch_refs,
     cfgs: gmm_v2.GmmConfigs,
+    rhs_tile_offset: int = 0,
 ):
   """`tgmm_kernel_main` accumulating into `acc_in_ref`, aliased with `out_ref`."""
   tgmm_kernel_main(
@@ -913,6 +926,7 @@ def _tgmm_kernel_main_into_acc(
       *scratch_refs,
       cfgs=cfgs,
       acc_in_ref=acc_in_ref,
+      rhs_tile_offset=rhs_tile_offset,
   )
 
 
@@ -955,6 +969,8 @@ def validate_tgmm_inputs(
         "disable_multi_core_mode",
         "lhs_quant_dtype",
         "rhs_quant_dtype",
+        "rhs_col_offset",
+        "rhs_num_cols",
     ],
 )
 def tgmm_v2(
@@ -977,6 +993,8 @@ def tgmm_v2(
     rhs_quant_scale: jax.Array | None = None,  # [1, 1] (per-tensor)
     rhs_quant_dtype: jnp.dtype | None = None,
     out_scale: jax.Array | None = None,  # [1, 1] (per-tensor)
+    rhs_col_offset: int = 0,
+    rhs_num_cols: int | None = None,
 ):
   """Computes a transposed grouped matrix multiplication.
 
@@ -1018,6 +1036,10 @@ def tgmm_v2(
     rhs_quant_dtype: The fp8 dtype for `rhs_quant_scale`.
     out_scale: Optional f32 per-tensor scale `[1, 1]` that the accumulator is
       multiplied by (with `rhs_scale`, if any), before `acc` is added.
+    rhs_col_offset: Optional column offset into `rhs` (zero-copy when aligned
+      to `tile_n`).
+    rhs_num_cols: Optional number of N columns to read starting at
+      `rhs_col_offset`.
 
   Returns:
     The result of the transposed grouped matrix multiplication, with shape
@@ -1028,6 +1050,20 @@ def tgmm_v2(
     preferred_element_type = lhs.dtype
   if acc is not None and not disable_multi_core_mode:
     raise ValueError("`acc` requires disable_multi_core_mode=True.")
+
+  full_rhs_cols = _operand_size(rhs, "rhs")
+  eff_size_n = (full_rhs_cols - rhs_col_offset) if rhs_num_cols is None else rhs_num_cols
+  if rhs_col_offset < 0 or eff_size_n <= 0 or rhs_col_offset + eff_size_n > full_rhs_cols:
+    raise ValueError(
+        f"Invalid rhs slice [{rhs_col_offset}:{rhs_col_offset + eff_size_n}] for rhs with {full_rhs_cols} cols."
+    )
+  if (
+      rhs_scale is not None
+      and rhs_scale.ndim == 3
+      and rhs_scale.shape[2] == full_rhs_cols
+      and eff_size_n != full_rhs_cols
+  ):
+    rhs_scale = rhs_scale[:, :, rhs_col_offset : rhs_col_offset + eff_size_n]
 
   # The kernel reshapes lhs/rhs by their sublane block, so pad the rows up to
   # it. The extra rows sit past every group, so they add no work.
@@ -1062,8 +1098,7 @@ def tgmm_v2(
     if out_scale.shape != (1, 1):
       raise ValueError(f"out_scale must be [1, 1]; got {out_scale.shape}.")
     # Applied through the per-N rhs scale, which multiplies the f32 acc.
-    size_n = _operand_size(rhs, "rhs")
-    out_scale = jnp.broadcast_to(out_scale.astype(jnp.float32).reshape(1, 1, 1), (1, 1, size_n))
+    out_scale = jnp.broadcast_to(out_scale.astype(jnp.float32).reshape(1, 1, 1), (1, 1, eff_size_n))
     rhs_scale = out_scale if rhs_scale is None else rhs_scale * out_scale
 
   cfgs = make_tgmm_configs(
@@ -1084,12 +1119,34 @@ def tgmm_v2(
       lhs_quant_dtype=lhs_quant_dtype,
       rhs_quant_scale=rhs_quant_scale,
       rhs_quant_dtype=rhs_quant_dtype,
+      size_n_override=eff_size_n,
   )
   dims = cfgs.dims
   tiles = cfgs.tiles
 
   num_lanes = pltpu.get_tpu_info().num_lanes
   aligned_n = gmm_v2.align_to(dims.size_n, num_lanes)
+  rhs_tile_offset = 0
+  if rhs_col_offset != 0 or eff_size_n != full_rhs_cols:
+    zero_copy_3d_ok = not cfgs.rhs_cfgs.is_3d or (tiles.tile_n // num_lanes) % 8 == 0 or tiles.tile_n == full_rhs_cols
+    if (
+        zero_copy_3d_ok
+        and rhs_col_offset % tiles.tile_n == 0
+        and rhs_col_offset + gmm_v2.align_to(eff_size_n, tiles.tile_n) <= full_rhs_cols
+    ):
+      rhs_tile_offset = rhs_col_offset // tiles.tile_n
+    elif rhs.ndim == 2:
+      rhs = rhs[:, rhs_col_offset : rhs_col_offset + eff_size_n]
+    else:
+      if rhs_col_offset % num_lanes != 0 or eff_size_n % num_lanes != 0:
+        raise ValueError(f"3D rhs slice [{rhs_col_offset}:{rhs_col_offset + eff_size_n}] must be {num_lanes}-aligned.")
+      rhs = rhs[:, rhs_col_offset // num_lanes : (rhs_col_offset + eff_size_n) // num_lanes, :]
+  if cfgs.rhs_cfgs.is_3d:
+    relayout.check_tile_d0(
+        tiles.tile_n // num_lanes,
+        full_d0=rhs.shape[1],
+        pack=relayout.packing(rhs.dtype),
+    )
   # Pad K up to a tile_k multiple so (a) every k-tile written by the matmul
   # stays in-bounds, and (b) the zero-init path can slice in sublane-aligned
   # chunks. tile_k is num_lanes-aligned, which is also sublane-tile-aligned.
@@ -1158,7 +1215,7 @@ def tgmm_v2(
     scalars = (group_sizes, group_offset)
     inputs = (lhs, rhs, acc)
     out = pl.pallas_call(
-        functools.partial(_tgmm_kernel_main_into_acc, cfgs=cfgs),
+        functools.partial(_tgmm_kernel_main_into_acc, cfgs=cfgs, rhs_tile_offset=rhs_tile_offset),
         out_shape=jax.ShapeDtypeStruct(
             acc.shape,
             acc.dtype,
@@ -1200,7 +1257,7 @@ def tgmm_v2(
         jax.tree.map(lambda _: hbm_spec, rhs),  # rhs
     ]
     out = pl.pallas_call(
-        functools.partial(tgmm_kernel_main, cfgs=cfgs),
+        functools.partial(tgmm_kernel_main, cfgs=cfgs, rhs_tile_offset=rhs_tile_offset),
         out_shape=out_init,
         grid_spec=pltpu.PrefetchScalarGridSpec(
             num_scalar_prefetch=2,
@@ -1227,7 +1284,7 @@ def tgmm_v2(
 
   # Configure per-core execution over TensorCore mesh for MegaCore scaling.
   out = pl.kernel(
-      functools.partial(tgmm_kernel_main, cfgs=cfgs),
+      functools.partial(tgmm_kernel_main, cfgs=cfgs, rhs_tile_offset=rhs_tile_offset),
       out_type=out_init,
       mesh=pltpu.TensorCoreMesh(axis_name="core"),
       # pyrefly: ignore[bad-argument-type]

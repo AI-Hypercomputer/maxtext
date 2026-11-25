@@ -1,0 +1,346 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# =============================================================================
+# CI Pulse - publish the dashboard data
+# =============================================================================
+#
+# Copies the CI Pulse dashboard files from Google Cloud Storage to gh-pages,
+# where https://ai-hypercomputer.github.io/maxtext/dev/bench/#ci reads them.
+#
+# The data is collected outside this repository: a Cloud Run job reads the
+# GitHub API every 4 hours (at 01:20, 05:20, ... UTC) and writes the dashboard
+# files (views/*.json) to a GCS bucket. This workflow only copies those JSON
+# files, in two jobs:
+#   1. download - runs on a MaxText self-hosted runner, which is already signed
+#      in to Google Cloud as the runner's service account. So no key, no secret
+#      and no Workload Identity Federation are needed. This job gets no GitHub
+#      token permissions; it hands the files to the next job as an artifact.
+#   2. publish - runs on a GitHub-hosted runner. It checks the files (only the
+#      dashboard's JSON files, all valid JSON, newer than what is live, no tab
+#      emptied, no big shrink) and pushes them to gh-pages. Only this job can
+#      write to the repository, and it never talks to Google Cloud.
+# No collector code runs here.
+#
+# Settings - repository variables (Settings > Secrets and variables > Actions):
+#   CI_PULSE_BUCKET        the bucket that holds the views, e.g. ci-pulse-views
+#   CI_PULSE_VIEWS_PREFIX  the folder inside the bucket (default: views)
+#   CI_PULSE_PUBLISH       set to "off" to pause the schedule. Manual runs
+#                          still work: use dry_run to check the files without
+#                          publishing. Disable the workflow for a hard stop.
+# The workflow is skipped until CI_PULSE_BUCKET is set.
+#
+# Google Cloud setup: the runner's service account needs read access to the
+# views (roles/storage.objectViewer) and nothing more, for example on a bucket
+# that holds only the collector's files:
+#   gcloud storage buckets add-iam-policy-binding gs://BUCKET \
+#     --member=serviceAccount:RUNNER_SERVICE_ACCOUNT \
+#     --role=roles/storage.objectViewer
+# The download job prints the name of the account it is signed in as.
+#
+# First run: set CI_PULSE_PUBLISH=off, set the variables above, run this
+# workflow by hand with dry_run, then remove CI_PULSE_PUBLISH.
+# =============================================================================
+
+name: CI Pulse publish
+
+on:
+  schedule:
+    # Every 4 hours at :40 (01:40, 05:40, ... UTC), twenty minutes after the collector's run.
+    - cron: '40 1-23/4 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Download and check the files, but do not publish them.'
+        type: boolean
+        required: false
+        default: false
+      allow_shrink:
+        description: 'Publish even if the new data has less than half the rows of the live data.'
+        type: boolean
+        required: false
+        default: false
+
+# One publisher at a time; a slow run queues the next one instead of racing it.
+concurrency:
+  group: ci-pulse-publish
+  cancel-in-progress: false
+
+# No permissions by default. Each job asks only for what it needs.
+permissions: {}
+
+jobs:
+  download:
+    name: Download dashboard data
+    if: >-
+      github.repository == 'AI-Hypercomputer/maxtext' &&
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' || vars.CI_PULSE_PUBLISH != 'off') &&
+      vars.CI_PULSE_BUCKET != ''
+    # A MaxText self-hosted runner, already signed in to Google Cloud as its own
+    # service account. The same runner and image as the other gcloud jobs here.
+    runs-on: linux-x86-n4-16-buildkit
+    container: us-docker.pkg.dev/artifact-foundry-prod/docker-3p-trusted/google/cloud-sdk:528.0.0
+    timeout-minutes: 10
+
+    # Reads from Google Cloud only: no GitHub token permissions.
+    permissions: {}
+
+    env:
+      GCS_VIEWS: gs://${{ vars.CI_PULSE_BUCKET }}/${{ vars.CI_PULSE_VIEWS_PREFIX || 'views' }}
+      NEW_DIR: ci-pulse-views
+
+    steps:
+      - name: Download the dashboard files
+        shell: bash
+        run: |
+          set -euo pipefail
+          account="$(gcloud auth list --filter=status:ACTIVE --format='value(account)' 2>/dev/null || true)"
+          # These logs are public: print only the account's name, not its full address.
+          name="${account%%@*}"
+          echo "Signed in to Google Cloud as: ${name:-(no account listed)}"
+          # Start from an empty folder, so only what is in the bucket now is handed over.
+          rm -rf "${NEW_DIR}"
+          mkdir -p "${NEW_DIR}"
+          gcloud storage rsync --recursive "${GCS_VIEWS}" "${NEW_DIR}"
+
+      - name: Hand the files to the publish job
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ci-pulse-views
+          path: ${{ env.NEW_DIR }}
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true # A re-run replaces the files of the earlier attempt.
+
+  publish:
+    name: Publish dashboard data
+    # Runs only after the download job succeeded; it is skipped when that job is.
+    needs: download
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    permissions:
+      contents: write # Push the dashboard files to gh-pages.
+
+    env:
+      PAGES_BRANCH: gh-pages
+      PAGES_VIEWS_DIR: dev/bench/ci-pulse/views
+
+    steps:
+      - name: Check out gh-pages
+        # Only the dashboard folder, one commit deep. The push step adds the token itself.
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: gh-pages
+          path: pages
+          fetch-depth: 1
+          sparse-checkout: dev/bench/ci-pulse
+          persist-credentials: false
+
+      - name: Get the downloaded files
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ci-pulse-views
+          path: ${{ runner.temp }}/views
+
+      - name: Check the files
+        id: check
+        # The page loads every file at once, and one broken file blanks the whole page.
+        # So everything is checked here, before anything is published.
+        shell: python
+        env:
+          NEW_DIR: ${{ runner.temp }}/views
+          OLD_DIR: pages/dev/bench/ci-pulse/views
+          ALLOW_SHRINK: ${{ inputs.allow_shrink }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          import datetime
+          import json
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          GROUPS = ("runs", "suites", "flaky", "queue", "workflows")
+          TOP_NAME = re.compile(r"^(meta|(%s)-\d{4}-(0[1-9]|1[0-2]))\.json$" % "|".join(GROUPS))
+          PR_NAME = re.compile(r"^\d{1,7}\.json$")
+          MAX_FILE_BYTES = 25 * 1024 * 1024
+          MAX_TOTAL_BYTES = 150 * 1024 * 1024
+          MAX_FILES = 5000
+
+          new_dir = Path(os.environ["NEW_DIR"])
+          old_dir = Path(os.environ["OLD_DIR"])
+          allow_shrink = os.environ.get("ALLOW_SHRINK", "").lower() == "true"
+          dry_run = os.environ.get("DRY_RUN", "").lower() == "true"
+
+
+          def fail(message):
+            print(f"::error::{message}")
+            sys.exit(1)
+
+
+          def read_json(path, label):
+            def refuse_constant(name):
+              raise ValueError(f"{name} is not valid JSON")
+            try:
+              doc = json.loads(path.read_text(encoding="utf-8"), parse_constant=refuse_constant)
+            except (OSError, UnicodeDecodeError, ValueError) as error:
+              fail(f"{label} is not valid JSON: {error}")
+            if not isinstance(doc, dict):
+              fail(f"{label} must hold a JSON object")
+            return doc
+
+
+          def generated_at(meta, label):
+            value = str(meta.get("generated_at"))
+            try:
+              return datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+              fail(f"{label}: generated_at {value!r} is not a UTC time like 2026-10-19T05:27:14Z")
+
+
+          def row_count(meta):
+            totals = meta.get("totals") if isinstance(meta.get("totals"), dict) else {}
+            return sum(v for v in totals.values() if isinstance(v, int) and not isinstance(v, bool))
+
+
+          if not (new_dir / "meta.json").is_file():
+            fail(f"no meta.json among the downloaded files in {new_dir}")
+
+          # Only the dashboard's own JSON files may reach the website.
+          files, total_bytes = [], 0
+          for path in sorted(new_dir.rglob("*")):
+            rel = path.relative_to(new_dir)
+            if path.is_symlink():
+              fail(f"{str(rel)!r} is a symlink")
+            if path.is_dir():
+              if rel.as_posix() != "pr":
+                fail(f"unexpected folder {str(rel)!r}")
+              continue
+            top = len(rel.parts) == 1 and TOP_NAME.match(rel.name)
+            pull = len(rel.parts) == 2 and rel.parts[0] == "pr" and PR_NAME.match(rel.name)
+            if not (top or pull):
+              fail(f"unexpected file {str(rel)!r}: only the dashboard's JSON files may be published")
+            size = path.stat().st_size
+            if size > MAX_FILE_BYTES:
+              fail(f"{rel} is {size:,} bytes; the limit is {MAX_FILE_BYTES:,}")
+            total_bytes += size
+            files.append(path)
+          if len(files) > MAX_FILES:
+            fail(f"{len(files)} files; the limit is {MAX_FILES}")
+          if total_bytes > MAX_TOTAL_BYTES:
+            fail(f"{total_bytes:,} bytes in total; the limit is {MAX_TOTAL_BYTES:,}")
+          for path in files:
+            read_json(path, path.relative_to(new_dir).as_posix())
+
+          # Every month file that meta.json lists must be there: the page asks for each one.
+          meta = read_json(new_dir / "meta.json", "meta.json")
+          new_time = generated_at(meta, "meta.json")
+          groups = meta.get("groups")
+          if not isinstance(groups, dict) or not groups:
+            fail("meta.json lists no view groups")
+          for group, info in groups.items():
+            months = info.get("months") if isinstance(info, dict) else None
+            if not isinstance(months, list):
+              fail(f"meta.json: group {group!r} has no list of months")
+            for month in months:
+              if not (new_dir / f"{group}-{month}.json").is_file():
+                fail(f"meta.json lists {group}-{month}.json, but that file is missing")
+
+          # Never replace newer data with older data, and never wipe most of the dashboard.
+          publish = True
+          new_rows = row_count(meta)
+          try:
+            live = json.loads((old_dir / "meta.json").read_text(encoding="utf-8"))
+          except (OSError, ValueError):
+            live = None
+          if isinstance(live, dict):
+            try:
+              live_time = datetime.datetime.strptime(str(live.get("generated_at")), "%Y-%m-%dT%H:%M:%SZ")
+            except ValueError:
+              live_time = None
+            if live_time is not None and new_time <= live_time:
+              print(f"::notice::The live data ({live['generated_at']}) is not older than the downloaded data "
+                    f"({meta['generated_at']}); nothing to publish.")
+              publish = False
+            live_rows = row_count(live)
+            if publish and live_rows and new_rows < live_rows / 2 and not allow_shrink:
+              fail(f"refusing to shrink the dashboard from {live_rows:,} to {new_rows:,} rows. If that is "
+                   "expected, run this workflow by hand with allow_shrink.")
+            # A whole tab going empty is a big shrink too, even when the other tabs hide it in the sum.
+            live_totals = live.get("totals") if isinstance(live.get("totals"), dict) else {}
+            new_totals = meta.get("totals") if isinstance(meta.get("totals"), dict) else {}
+            emptied = sorted(group for group, count in live_totals.items()
+                             if isinstance(count, int) and not isinstance(count, bool) and count > 0
+                             and not new_totals.get(group))
+            if publish and emptied and not allow_shrink:
+              fail(f"refusing to empty {', '.join(emptied)}: the live data has rows there. If that is "
+                   "expected, run this workflow by hand with allow_shrink.")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as out:
+            out.write(f"publish={'true' if publish else 'false'}\n")
+            out.write(f"generated_at={meta['generated_at']}\n")
+          # A dry run stops before the publish step, so it must not say it publishes.
+          if not publish:
+            outcome = "Already live."
+          elif dry_run:
+            outcome = "Would publish it (dry run)."
+          else:
+            outcome = "Publishing it."
+          line = (f"CI Pulse data generated at {meta['generated_at']}: {len(files)} files, "
+                  f"{total_bytes:,} bytes, {new_rows:,} rows. {outcome}")
+          print(line)
+          if os.environ.get("GITHUB_STEP_SUMMARY"):
+            with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as summary:
+              summary.write(line + "\n")
+
+      - name: Publish to gh-pages
+        if: steps.check.outputs.publish == 'true' && inputs.dry_run != true
+        shell: bash
+        working-directory: pages
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NEW_DIR: ${{ runner.temp }}/views
+          GENERATED_AT: ${{ steps.check.outputs.generated_at }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          # The checkout keeps no token on disk; add it only for this push.
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          for attempt in 1 2 3; do
+            # Start from the newest gh-pages every time, so that a push made in between
+            # (the Benchmarks robot pushes here too) is never undone.
+            git fetch --quiet --depth=1 origin "${PAGES_BRANCH}"
+            git reset --quiet --hard FETCH_HEAD
+            # Replace the folder whole, so files the collector deleted leave the site too.
+            rm -rf "${PAGES_VIEWS_DIR}"
+            mkdir -p "$(dirname "${PAGES_VIEWS_DIR}")"
+            cp -R "${NEW_DIR}" "${PAGES_VIEWS_DIR}"
+            git add --all -- "${PAGES_VIEWS_DIR}"
+            if git diff --cached --quiet; then
+              echo "The published files are already up to date."
+              exit 0
+            fi
+            git commit --quiet -m "ci-pulse: publish dashboard data (${GENERATED_AT}) [skip ci]"
+            if git push --quiet origin "HEAD:${PAGES_BRANCH}"; then
+              echo "Published the data generated at ${GENERATED_AT} on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push rejected on attempt ${attempt}; retrying on top of the newest ${PAGES_BRANCH}."
+          done
+          echo "Could not push to ${PAGES_BRANCH} after 3 attempts." >&2
+          exit 1

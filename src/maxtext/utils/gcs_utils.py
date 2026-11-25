@@ -16,6 +16,7 @@
 import shutil
 import json
 import os
+import re
 import socket
 from pathlib import Path
 from etils import epath
@@ -27,6 +28,7 @@ import yaml
 import jax
 
 from maxtext.utils import max_logging
+from maxtext.utils.globals import KEYS_NO_LOGGING
 from maxtext.common.gcloud_stub import is_decoupled, gcs_storage
 
 storage = gcs_storage()
@@ -51,6 +53,8 @@ def write_config_raw_keys_for_gcs(raw_keys):
   max_logging.log("Writing config to GCS...")
 
   raw_keys_dict = dict(raw_keys)
+  for key in KEYS_NO_LOGGING:
+    raw_keys_dict.pop(key, None)
   filename = "config.yml"
   with open(filename, "wt", encoding="utf8") as config_for_gcs:
     yaml.dump(raw_keys_dict, config_for_gcs)
@@ -204,7 +208,9 @@ def gcs_glob_pattern(pattern):
   """
   storage_client = storage.Client()
   bucket_name, glob_pattern = parse_gcs_bucket_and_prefix(pattern)
-  blobs = storage_client.list_blobs(bucket_name, match_glob=glob_pattern)
+  # Without a prefix, GCS scans the whole bucket to evaluate `match_glob`, which can take hours on a large bucket.
+  literal_prefix = re.split(r"[*?\[{\\]", glob_pattern, maxsplit=1)[0]
+  blobs = storage_client.list_blobs(bucket_name, prefix=literal_prefix or None, match_glob=glob_pattern)
   data_files = [f"gs://{bucket_name}/{blob.name}" for blob in blobs]
   return data_files
 

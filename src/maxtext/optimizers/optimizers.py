@@ -16,6 +16,8 @@
 """Utils that are only interesting to MaxText."""
 
 import re
+from typing import Any
+from flax import nnx
 import jax
 import jax.numpy as jnp
 
@@ -23,11 +25,13 @@ import optax
 from optax.contrib._muon import muon as optax_muon
 from maxtext.common.common_types import DecoderBlockType
 from maxtext.optimizers.muon import muon as maxtext_muon
+from maxtext.utils import max_logging
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
+from maxtext.utils.muon_utils import get_prefused_moe_wi_mask
 from maxtext.utils.maxtext_muon_utils import get_maxtext_muon_weight_dimension_numbers
 
 
-def _get_path_mask_fn(patterns, match_returns_true=True):
+def get_path_mask_fn(patterns, match_returns_true=True):
   """Helper to create a mask function from a list of regex patterns."""
   if not patterns:
     return None
@@ -48,7 +52,7 @@ def _get_path_mask_fn(patterns, match_returns_true=True):
 
 def get_adamw_mask(config):
   """Create a mask function for AdamW optimizer to exclude certain parameters from weight decay."""
-  return _get_path_mask_fn(getattr(config, "adamw_mask", None), match_returns_true=False)
+  return get_path_mask_fn(config.adamw_mask, match_returns_true=False)
 
 
 def _compute_rolling_stats(arr: jax.Array, count: jax.Array, interval: int):
@@ -120,6 +124,11 @@ def skip_step_on_spikes(
     losses = state["losses"]
     grad_norms = state["grad_norms"]
 
+    # Ensure non-finite metrics are never treated as valid
+    is_finite = jnp.isfinite(loss)
+    if grad_norm is not None:
+      is_finite = jnp.logical_and(is_finite, jnp.isfinite(grad_norm))
+
     # Compute rolling stats
     loss_mean, loss_std = _compute_rolling_stats(losses, count, interval)
     grad_norm_mean, grad_norm_std = _compute_rolling_stats(grad_norms, count, interval)
@@ -132,10 +141,11 @@ def skip_step_on_spikes(
     else:
       is_ok = is_loss_ok
 
-    # Only enforce skip if we have at least half the interval filled (or 2 elements minimum)
+    # Only enforce skip if we have at least half the interval filled (or 2 elements minimum).
+    # Warmup permits normal variations before statistics stabilize, but never non-finite values.
     min_history = max(2, interval // 2)
     is_warmup = (count + 1) < min_history
-    is_ok = jnp.logical_or(is_warmup, is_ok)
+    is_ok = jnp.logical_and(is_finite, jnp.logical_or(is_warmup, is_ok))
 
     # Conditionally execute the inner optimizer to prevent momentum poisoning
     def do_update():
@@ -148,24 +158,163 @@ def skip_step_on_spikes(
 
     inner_updates, new_inner_state = jax.lax.cond(is_ok, do_update, skip_update)
 
-    # Update rolling buffers (append even if skipped so spikes can become the new baseline)
+    # Update rolling buffers (append only finite values so spikes become the new baseline without NaN poisoning)
     idx = count % interval
-    new_losses = losses.at[idx].set(loss)
+    new_losses = jnp.where(is_finite, losses.at[idx].set(loss), losses)
 
     new_grad_norms = grad_norms
     if grad_norm is not None:
-      new_grad_norms = grad_norms.at[idx].set(grad_norm)
+      new_grad_norms = jnp.where(is_finite, grad_norms.at[idx].set(grad_norm), grad_norms)
+
+    new_count = jnp.where(is_finite, count + 1, count)
 
     new_state = {
         "inner_state": new_inner_state,
         "losses": new_losses,
         "grad_norms": new_grad_norms,
-        "count": count + 1,
+        "count": new_count,
         "is_skipped": jnp.logical_not(is_ok),
     }
     return inner_updates, new_state
 
   return optax.GradientTransformationExtraArgs(init_fn, update_fn)
+
+
+def _resolve_mask_container(mask, tree):
+  """Matches `mask` container type (`nnx.State` vs `dict`) to `tree`."""
+  if isinstance(mask, nnx.State) and not isinstance(tree, nnx.State):
+    return nnx.to_pure_dict(mask)
+  return mask
+
+
+def _is_split_axis_leaf(x) -> bool:
+  return x is None or (isinstance(x, int) and not isinstance(x, bool))
+
+
+def _extract_split_axis_tree(mask, dim_nums):
+  """Maps each masked `wi` leaf to its single `output_axis` int from `dim_nums`, or `None` otherwise."""
+  resolved_mask = _resolve_mask_container(mask, dim_nums)
+
+  def _extract_axis(should_split: bool, dim_num):
+    if not should_split or dim_num is None:
+      return None
+    out_ax = dim_num.output_axis
+    if isinstance(out_ax, int):
+      return out_ax
+    out_axes = tuple(out_ax)
+    if len(out_axes) != 1:
+      raise ValueError(f"Pre-fused MoE `wi` splitting requires a single output_axis, got {out_axes}")
+    return out_axes[0]
+
+  return jax.tree.map(
+      _extract_axis,
+      resolved_mask,
+      dim_nums,
+      is_leaf=lambda m: isinstance(m, bool),
+  )
+
+
+def _normalize_split_axis(axis: int, shape: tuple[int, ...]) -> int:
+  ndim = len(shape)
+  if not -ndim <= axis < ndim:
+    raise ValueError(f"Pre-fused MoE `wi` output axis {axis} out of range for shape {shape}.")
+  return axis % ndim
+
+
+def _split_wi_tree(split_axes, tree):
+  """Splits pre-fused MoE `wi` leaves into `{'0': wi_0, '1': wi_1}` along each leaf's `output_axis`."""
+  if tree is None:
+    return None
+  resolved_axes = _resolve_mask_container(split_axes, tree)
+
+  def _split_leaf(split_axis: int | None, leaf):
+    if split_axis is None or leaf is None:
+      return leaf
+    arr_leaves = jax.tree.leaves(leaf)
+    if not arr_leaves:
+      return {"0": leaf, "1": leaf}
+
+    def _slice_half(a, second_half: bool):
+      norm_ax = _normalize_split_axis(split_axis, a.shape)
+      size = a.shape[norm_ax]
+      if size % 2 != 0:
+        raise ValueError(
+            f"Pre-fused MoE `wi` output axis {norm_ax} of size {size} is not divisible by 2 for shape {a.shape}."
+        )
+      half = size // 2
+      return jax.lax.slice_in_dim(a, half if second_half else 0, size if second_half else half, axis=norm_ax)
+
+    return {
+        "0": jax.tree.map(lambda a: _slice_half(a, False), leaf),
+        "1": jax.tree.map(lambda a: _slice_half(a, True), leaf),
+    }
+
+  return jax.tree.map(_split_leaf, resolved_axes, tree, is_leaf=_is_split_axis_leaf)
+
+
+def _merge_wi_tree(split_axes, tree):
+  """Concatenates split `{'0': wi_0, '1': wi_1}` subtrees back along each leaf's `output_axis`."""
+  if tree is None:
+    return None
+  resolved_axes = _resolve_mask_container(split_axes, tree)
+
+  def _merge_leaf(split_axis: int | None, subtree):
+    if split_axis is None or subtree is None:
+      return subtree
+    v0, v1 = subtree["0"], subtree["1"]
+    return jax.tree.map(
+        lambda a, b: jnp.concatenate([a, b], axis=_normalize_split_axis(split_axis, a.shape)),
+        v0,
+        v1,
+    )
+
+  return jax.tree.map(_merge_leaf, resolved_axes, tree, is_leaf=_is_split_axis_leaf)
+
+
+def _map_opt_state_trees(fn, state):
+  """Applies `fn` to every parameter-shaped tree (`mu`, `nu`) inside an Optax Muon `PartitionState`."""
+  if isinstance(state, dict):
+    return type(state)((k, _map_opt_state_trees(fn, v)) for k, v in state.items())
+  if isinstance(state, tuple) and hasattr(state, "_fields"):
+    replacements = {
+        f: fn(getattr(state, f)) if f in ("mu", "nu") else _map_opt_state_trees(fn, getattr(state, f))
+        for f in state._fields
+    }
+    return state._replace(**replacements)
+  if isinstance(state, tuple):
+    return tuple(_map_opt_state_trees(fn, s) for s in state)
+  return state
+
+
+def _build_prefused_wi_optax_muon(muon_kwargs: dict[str, Any], split_wi_mask) -> optax.GradientTransformation:
+  """Wraps `optax_muon` so pre-fused `wi = [wi_0 | wi_1]` is orthogonalized per projection while keeping stacked state."""
+  dim_nums = muon_kwargs["muon_weight_dimension_numbers"]
+  split_axes = _extract_split_axis_tree(split_wi_mask, dim_nums)
+  static_split_dim_nums = jax.tree.map(
+      lambda m, d: {"0": d, "1": d} if (m and d is not None) else d,
+      _resolve_mask_container(split_wi_mask, dim_nums),
+      dim_nums,
+      is_leaf=lambda m: isinstance(m, bool),
+  )
+  inner_kwargs = dict(muon_kwargs)
+  inner_kwargs["muon_weight_dimension_numbers"] = lambda p: _resolve_mask_container(static_split_dim_nums, p)
+  inner_opt = optax_muon(**inner_kwargs)  # pyrefly: ignore[bad-argument-type]
+
+  def init_fn(params):
+    split_state = inner_opt.init(_split_wi_tree(split_axes, params))
+    return _map_opt_state_trees(lambda t: _merge_wi_tree(split_axes, t), split_state)
+
+  def update_fn(updates, state, params=None):
+    split_updates = _split_wi_tree(split_axes, updates)
+    split_state = _map_opt_state_trees(lambda t: _split_wi_tree(split_axes, t), state)
+    split_params = _split_wi_tree(split_axes, params)
+    new_updates, new_state = inner_opt.update(split_updates, split_state, split_params)
+    return (
+        _merge_wi_tree(split_axes, new_updates),
+        _map_opt_state_trees(lambda t: _merge_wi_tree(split_axes, t), new_state),
+    )
+
+  return optax.GradientTransformation(init_fn, update_fn)
 
 
 def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
@@ -230,7 +379,11 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
       else:
         raise ValueError("Please specify model to extract muon dimension number.")
       muon_kwargs = muon_kwargs | {"muon_weight_dimension_numbers": muon_weight_dimension_numbers}
-      base_opt = optax_muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
+      split_wi_mask = get_prefused_moe_wi_mask(model, config)
+      if split_wi_mask is not None:
+        base_opt = _build_prefused_wi_optax_muon(muon_kwargs, split_wi_mask)
+      else:
+        base_opt = optax_muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
     elif muon_type in ("maxtext", "maxtext_muon"):
       if model is not None:
         muon_weight_dimension_numbers = get_maxtext_muon_weight_dimension_numbers(model, config, mesh=mesh)
@@ -250,28 +403,80 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   else:
     raise ValueError(f"{config.opt_type=} is not a supported.")
 
-  if getattr(config, "skip_step_on_spikes", False):
+  # Apply `trainable_parameters_mask` before `skip_step_on_spikes` so `skip_step_on_spikes`
+  # stays the outermost transformation: callers expect `opt_state` to be a top-level dict
+  # exposing `opt_state["is_skipped"]` (whereas `optax.multi_transform` wraps state in
+  # `PartitionState`), while `multi_transform` still forwards extra_args (`loss`, `grad_norm`)
+  # and avoids allocating optimizer state for frozen parameters (`MaskedNode` placeholders in
+  # the trainable branch's state and a single `EmptyState` for the frozen branch).
+  base_opt = apply_trainable_parameters_mask(base_opt, config)
+
+  if config.skip_step_on_spikes:
     base_opt = skip_step_on_spikes(
         base_opt,
         interval=config.skip_step_interval,
         scaling_factor=config.skip_step_scaling_factor,
     )
 
-  # If a whitelist of trainable parameters is provided, freeze everything else.
-  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
-  trainable_patterns = getattr(config, "trainable_parameters_mask", None)
-  freeze_mask_fn = _get_path_mask_fn(trainable_patterns, match_returns_true=False)
-  if freeze_mask_fn is not None:
-    # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
-    # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
-    # massive states (momentum, variance) for the entire model before zeroing the updates.
-    # By using multi_transform, only the trainable parameters get states allocated.
-    return optax.multi_transform(
-        {"trainable": base_opt, "frozen": optax.set_to_zero()},
-        lambda params: jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params)),
-    )
-
   return base_opt
+
+
+def apply_trainable_parameters_mask(base_opt, config):
+  """Freeze every parameter not matched by `config.trainable_parameters_mask`.
+
+  Returns `base_opt` unchanged when the mask is empty, so callers can apply this
+  unconditionally. Wrap only the optimizer itself, not a chain that includes
+  gradient clipping: in the `pre_train` loop, clipping sees the whole gradient
+  tree before updates are zeroed, whereas `MaxTextTrainingEngine` also stops
+  gradients on frozen parameters inside its forward-backward kernel so frozen
+  parameters are excluded from both gradient computation and `grad_norm`.
+  """
+  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
+  trainable_patterns = config.trainable_parameters_mask
+  freeze_mask_fn = get_path_mask_fn(trainable_patterns, match_returns_true=False)
+  if freeze_mask_fn is None:
+    return base_opt
+
+  has_logged = False
+
+  def _label_params(params):
+    """Labels every parameter array, and reports what the mask actually did.
+
+    `trainable_parameters_mask` is a whitelist, so expressing "freeze only X"
+    needs a negative pattern -- and a pattern that matches nothing freezes the
+    whole model. In the `pre_train` loop that failure is otherwise silent
+    (gradients are still computed and `grad_norm` looks normal, only the updates
+    are zeroed), while `MaxTextTrainingEngine` stops gradients on frozen leaves
+    up front. Log the counts once so the intent is checkable against the run log.
+    """
+    nonlocal has_logged
+    labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params))
+    if not has_logged:
+      has_logged = True
+      leaves = jax.tree_util.tree_flatten_with_path(labels)[0]
+      frozen = [p for p, v in leaves if v == "frozen"]
+      max_logging.log(
+          f"trainable_parameters_mask={trainable_patterns}: freezing {len(frozen)}" f" of {len(leaves)} parameter arrays"
+      )
+      if not frozen:
+        max_logging.warning("trainable_parameters_mask froze nothing -- did the pattern match everything?")
+      elif len(frozen) == len(leaves):
+        max_logging.warning("trainable_parameters_mask froze EVERY parameter -- training is a no-op")
+      max_display = 50
+      for path in frozen[:max_display]:
+        max_logging.log(f"  frozen: {jax.tree_util.keystr(path, simple=True, separator='/')}")
+      if len(frozen) > max_display:
+        max_logging.log(f"  ... and {len(frozen) - max_display} more frozen parameter arrays")
+    return labels
+
+  # Use optax.multi_transform to explicitly map frozen parameters to a stateless set_to_zero() optimizer.
+  # If we simply wrapped base_opt in optax.masked() or chained it, Optax would still allocate
+  # massive states (momentum, variance) for the entire model before zeroing the updates.
+  # By using multi_transform, only the trainable parameters get states allocated.
+  return optax.multi_transform(
+      {"trainable": base_opt, "frozen": optax.set_to_zero()},
+      _label_params,
+  )
 
 
 def adam_pax(

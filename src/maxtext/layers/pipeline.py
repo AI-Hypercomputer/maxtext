@@ -14,6 +14,7 @@
 
 """Pipeline layer wrapping a decoder layer(s). Supports circular pipelining."""
 
+import functools
 from typing import Any
 
 import numpy as np
@@ -39,6 +40,7 @@ from maxtext.utils.sharding import (
     logical_to_mesh,
     get_logical_axis_rules,
 )
+from maxtext.utils import jax_reduced_compat
 from maxtext.utils import pipeline_utils
 
 
@@ -59,6 +61,8 @@ class PipelineBase(nnx.Module):
     self.batch_axis_name = "activation_batch"
     self.seq_len_axis_name = "activation_length"
     self.spmd_axis_name = "stage" if self.config.shard_mode == ShardMode.AUTO else None
+    # The mesh the stage layers are built with and run under (see pipeline_utils.pipeline_stage_mesh).
+    self.stage_mesh = pipeline_utils.pipeline_stage_mesh(self.mesh, self.config.shard_mode)
 
     self.stages_in_logical = ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed")
     self.stages_in_spec = logical_to_mesh_axes(self.stages_in_logical, self.mesh, rules=get_logical_axis_rules())
@@ -71,24 +75,35 @@ class PipelineBase(nnx.Module):
     self.state_io_sharding = (
         NamedSharding(self.mesh, self.state_io_spec) if self.config.shard_mode == ShardMode.EXPLICIT else None
     )
+    # [microbatches, micro_size, length, embed], the microbatches split over the stages as in state_io, so reshaping
+    # into state_io is local; leaving them unsharded would all-gather the whole batch over 'stage'.
     self.input_sharding = (
         create_sharding(
             self.mesh,
-            (None, self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
+            ("activation_stage", self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
             rules=get_logical_axis_rules(),
         )
         if self.config.shard_mode == ShardMode.EXPLICIT
         else None
     )
+    # The output stays split over 'stage', as data parallelism for the final norm and the logits (which shard their
+    # batch over it too); the batch sharding without 'stage' would all-gather the whole output over 'stage'.
     self.output_sharding = (
         create_sharding(
             self.mesh,
-            (self.batch_axis_name, self.seq_len_axis_name, "activation_embed"),
+            ("activation_embed_and_logits_batch", self.seq_len_axis_name, "activation_embed"),
             rules=get_logical_axis_rules(),
         )
         if self.config.shard_mode == ShardMode.EXPLICIT
         else None
     )
+    # pipeline_unreduced_weight_grads: the token axes the gathered stage weights are tagged `reduced` over, so their
+    # per-microbatch gradients stay partial sums until the transpose of the weight prefetch (see
+    # pipeline_utils.tag_weight_grad_reduced).
+    self.weight_grad_reduced_axes = frozenset()
+    if self.config.shard_mode == ShardMode.EXPLICIT and self.config.pipeline_unreduced_weight_grads:
+      jax_reduced_compat.apply()
+      self.weight_grad_reduced_axes = pipeline_utils.weight_grad_reduced_axes(self.mesh, get_logical_axis_rules())
 
   def need_circ_storage(self):
     return (
@@ -283,9 +298,15 @@ class PipelineBase(nnx.Module):
   def shard_dim_by_stages(self, x, dim: int, physical_partition_spec: P | None, is_stage_weight: bool = False):
     """Shards x using the provided partition_spec, but adds the "stage" mesh axis to the existing sharding at
     the specified dimension."""
-    placeholder = None if self.config.shard_mode == ShardMode.EXPLICIT else P.UNCONSTRAINED
+    explicit = self.config.shard_mode == ShardMode.EXPLICIT
+    placeholder = None if explicit else P.UNCONSTRAINED
     if physical_partition_spec is None:
-      dims_mapping = [placeholder] * x.ndim
+      if explicit:
+        # The EXPLICIT analog of P.UNCONSTRAINED: keep how the other dims are sharded. Replicating them would e.g.
+        # all-gather the FSDP-sharded weights of every repeat on each iteration.
+        dims_mapping = [pipeline_utils.remove_mesh_axis(p, "stage") for p in pipeline_utils.spec_partitions(x)]
+      else:
+        dims_mapping = [placeholder] * x.ndim
     else:
       physical_partition_spec = self._remove_fsdp_from_physical_partition_spec(physical_partition_spec)
       dims_mapping = list(physical_partition_spec)
@@ -293,16 +314,30 @@ class PipelineBase(nnx.Module):
       if not is_stage_weight:
         dims_mapping = [placeholder] * (dim + 1) + dims_mapping[dim:]  # inflat one dimension for num_repeats
     dims_mapping[dim] = "stage"
-    dims_mapping = tuple(dims_mapping)
-    # We add reduced rule only when pspec is given for a stage weight
-    if physical_partition_spec and is_stage_weight and self.config.shard_mode == ShardMode.EXPLICIT:
-      batch_mesh_axis = ["data", "fsdp"]
-      reduced_mark = [mesh_axis for mesh_axis in batch_mesh_axis if self.mesh.shape[mesh_axis] > 1]
-      pspec = P(*dims_mapping, reduced=set(reduced_mark))
-    else:
-      pspec = P(*dims_mapping)
-    sharding = jax.sharding.NamedSharding(self.mesh, pspec)
+    # No `reduced` mark on the gathered stage weights in EXPLICIT mode: they feed the stage vmap, and vmap reads the
+    # mapped dim's spec with an index that rejects a PartitionSpec carrying reduced/unreduced axes.
+    sharding = jax.sharding.NamedSharding(self.mesh, P(*dims_mapping))
     return self._maybe_shard_with_name(x, sharding)
+
+  def shard_mutables_by_stage(self, mutables):
+    """In EXPLICIT mode, shards the per-layer mutables (RNG state) by stage, the layout each iteration writes back.
+
+    The initial RNG state carries no partition metadata (replicated), and a scan carry's type includes its sharding.
+    """
+    if self.config.shard_mode != ShardMode.EXPLICIT:
+      return mutables
+    stage_dim = 1 if self.config.num_pipeline_repeats > 1 else 0
+    return jax.tree.map(lambda x: self.shard_dim_by_stages(x, stage_dim, physical_partition_spec=None), mutables)
+
+  def restore_mutables_sharding(self, mutables, like):
+    """Undoes shard_mutables_by_stage: lays `mutables` out like `like`, the mutables the pipeline was called with.
+
+    The module's state then keeps its type across the call, as e.g. the gradient-accumulation scan that carries it
+    requires.
+    """
+    if self.config.shard_mode != ShardMode.EXPLICIT:
+      return mutables
+    return jax.tree.map(lambda x, ref: jax.sharding.reshard(x, jax.typeof(ref).sharding.spec), mutables, like)
 
   def vmap_parallel_gather(
       self, weights, physical_partition_spec, repeat_ids, repeat_dim_in_weights, stages_dim_in_weights
@@ -353,15 +388,27 @@ class PipelineBase(nnx.Module):
     """
     xs = jnp.asarray(xs)
     ndim = xs.ndim
+    ids = self.shard_dim_by_stages(ids, 0, physical_partition_spec=None)
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      return self._explicit_stage_gather(xs, ids, ids_dim)
 
     def _gather_one(x, i):
       idx = tuple(i if d == ids_dim else slice(None) for d in range(ndim))
       replicated_sharding = NamedSharding(self.mesh, P())
       return x.at[idx].get(out_sharding=replicated_sharding)
 
-    ids = self.shard_dim_by_stages(ids, 0, physical_partition_spec=None)
     outs = jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
     return self.shard_dim_by_stages(outs, 0, physical_partition_spec=None)
+
+  def _explicit_stage_gather(self, xs, ids, ids_dim):
+    """Gathers `xs[..., ids, ...]` along `ids_dim` for stage-sharded `ids`, the result sharded by stage on `ids_dim`.
+
+    Under explicit sharding a vmapped gather from an operand that is not batched (in_axes=None) has no output sharding
+    JAX can resolve, so index with the stage-sharded ids directly and name the output sharding.
+    """
+    idx = tuple(ids if d == ids_dim else slice(None) for d in range(xs.ndim))
+    out_spec = P(*("stage" if d == ids_dim else None for d in range(xs.ndim)))
+    return xs.at[idx].get(out_sharding=NamedSharding(self.mesh, out_spec))
 
   def get_new_loop_state(self, output, loop_state):
     """
@@ -552,17 +599,29 @@ class PipelineBase(nnx.Module):
     # that produces 6.3x more compile-time temp memory. nnx.vmap adds extra
     # dynamic-slice/dynamic-update-slice ops for State management that inflate
     # gradient buffers. jax.vmap produces identical HLO to nn.vmap.
-    #
-    # spmd_axis_name is handled manually: in EXPLICIT mode, sharding is applied
-    # by with_sharding_constraint calls in the pipeline. In AUTO mode, we apply
-    # the axis name via jax.vmap's spmd_axis_name if available (JAX 0.4.31+).
-    vmap_kwargs = {
-        "in_axes": (None, 0, 0, 0, 0, None, None),
-        "out_axes": (0, 0),
-    }
-    if self.spmd_axis_name is not None:
-      vmap_kwargs["spmd_axis_name"] = self.spmd_axis_name
-    return jax.vmap(func_to_vmap, **vmap_kwargs)
+    return self._vmap_over_stages(func_to_vmap, out_axes=(0, 0))
+
+  def _vmap_over_stages(self, func_to_vmap, out_axes):
+    """vmaps `func_to_vmap(graph, state, inputs, segment_ids, positions, deterministic, model_mode)` over stages.
+
+    The stage axis is named by spmd_axis_name. Under EXPLICIT sharding the stages run with 'stage' an Auto mesh axis
+    (pipeline_utils.pipeline_stage_mesh), so the vmap partitions the stages exactly as under AUTO while the layers keep
+    every other axis Explicit.
+    """
+
+    def vmap_func(graph, state, stages_inputs, stages_segment_ids, stages_positions, deterministic, model_mode):
+      vmapped = jax.vmap(
+          functools.partial(func_to_vmap, deterministic=deterministic, model_mode=model_mode),
+          in_axes=(None, 0, 0, 0, 0),
+          out_axes=out_axes,
+          spmd_axis_name="stage",
+      )
+      args = (graph, state, stages_inputs, stages_segment_ids, stages_positions)
+      if self.config.shard_mode == ShardMode.EXPLICIT:
+        return pipeline_utils.call_with_stage_axis_auto(vmapped, self.stage_mesh, *args)
+      return vmapped(*args)
+
+    return vmap_func
 
   @staticmethod
   def _stamp_at_current_trace(weights):
@@ -878,6 +937,7 @@ class NNXPipeline(PipelineBase):
     real_iterations = self.config.num_pipeline_microbatches * self.config.num_pipeline_repeats
     total_iterations = real_iterations + bubble_iterations
 
+    full_logical_partition_spec = logical_partition_spec
     logical_partition_spec = self.get_logical_spec_repeats_removed(logical_partition_spec)
 
     layers_graph, layers_state = nnx.split(self.layers)
@@ -918,7 +978,10 @@ class NNXPipeline(PipelineBase):
     )
 
     if self.config.pipeline_fsdp_ag_once:
-      layers_params = self.all_gather_over_fsdp(layers_params, logical_partition_spec)
+      # The params still have the repeat dim: gather them with the spec that has it, or every dim shifts by one.
+      layers_params = self.all_gather_over_fsdp(layers_params, full_logical_partition_spec)
+    input_mutables = layers_mutables
+    layers_mutables = self.shard_mutables_by_stage(layers_mutables)
 
     def scan_body(carry, _):
       current_loop_state, current_layer_mutables = carry
@@ -979,6 +1042,7 @@ class NNXPipeline(PipelineBase):
           per_layer_arrays, metric_treedef, metric_is_var, metric_var_types, metric_meta
       )
 
+    final_layer_mutables = self.restore_mutables_sharding(final_layer_mutables, input_mutables)
     final_layer_state = nnx.State.merge(layers_params, stacked_metrics, final_layer_mutables)
     nnx.update(self.layers, final_layer_state)
 
@@ -1013,13 +1077,7 @@ class NNXCircularPipeline(PipelineBase):
       _, _, updated_metrics, updated_mutables = nnx.split(module, pipeline_utils.is_static_param, nnx.Intermediate, ...)
       return out, (updated_metrics, updated_mutables)
 
-    vmap_kwargs = {
-        "in_axes": (None, 0, 0, 0, 0, None, None),
-        "out_axes": (0, (0, 0)),
-    }
-    if self.spmd_axis_name is not None:
-      vmap_kwargs["spmd_axis_name"] = self.spmd_axis_name
-    return jax.vmap(func_to_vmap, **vmap_kwargs)
+    return self._vmap_over_stages(func_to_vmap, out_axes=(0, (0, 0)))
 
   def gather_microbatch_inputs_vmap(self, xs, ids, ids_dim):
     """Slices out the specific sequence inputs (e.g., positions, segments) for the current microbatch."""
@@ -1029,15 +1087,12 @@ class NNXCircularPipeline(PipelineBase):
 
     xs = jnp.asarray(xs)
     ndim = xs.ndim
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      return self._explicit_stage_gather(xs, ids, ids_dim)
 
     def _gather_one(x, i):
       idx = tuple(i if d == ids_dim else slice(None) for d in range(ndim))
-      positions_sharding = (
-          create_sharding(self.mesh, (None, "layers", "activation_length"))
-          if self.config.shard_mode == ShardMode.EXPLICIT
-          else None
-      )
-      return x.at[idx].get(out_sharding=positions_sharding)
+      return x.at[idx].get()
 
     return jax.vmap(_gather_one, in_axes=(None, 0), out_axes=ids_dim)(xs, ids)
 
@@ -1154,6 +1209,7 @@ class NNXCircularPipeline(PipelineBase):
         )
 
       spec_leaves = jax.tree_util.tree_leaves(bsw_partition_specs, is_leaf=pipeline_utils.is_spec_leaf)
+      spec_leaves = self._tag_bsw_specs(spec_leaves, repeat_weights)
       spec_iter = iter(spec_leaves)
       return jax.tree.map(lambda w: _apply_sharding_hint(w, next(spec_iter)), repeat_weights)
 
@@ -1163,6 +1219,23 @@ class NNXCircularPipeline(PipelineBase):
     if use_shardmap:
       return _from_repeat_weights_to_bsw_shardmap(repeat_weights, physical_partition_spec, axes_to_gather=axes_to_gather)
     return _from_repeat_weights_to_bsw_hint(repeat_weights)
+
+  def _tag_bsw_specs(self, spec_leaves, repeat_weights):
+    """With pipeline_unreduced_weight_grads, tags the BSW specs of the differentiable weights `reduced`.
+
+    Only float nnx.Param leaves are tagged: the non-differentiated state staged alongside them (MoEBiasVar routing
+    bias, FP8 amax history) mixes with activations in ways a reduced operand may not.
+    """
+    if not self.weight_grad_reduced_axes:
+      return spec_leaves
+    variables = jax.tree.leaves(repeat_weights, is_leaf=lambda x: isinstance(x, nnx.Variable))
+    assert len(variables) == len(spec_leaves), (len(variables), len(spec_leaves))
+    return [
+        pipeline_utils.tag_weight_grad_reduced(pspec, self.weight_grad_reduced_axes)
+        if isinstance(v, nnx.Param) and jnp.issubdtype(v.get_value().dtype, jnp.floating)
+        else pspec
+        for pspec, v in zip(spec_leaves, variables)
+    ]
 
   def cast_bsw_params(self, weights):
     """With `pipeline_bsw_in_compute_dtype`, returns `weights` with float nnx.Param leaves cast to `config.dtype`.
@@ -1229,7 +1302,11 @@ class NNXCircularPipeline(PipelineBase):
     _, repeat_ids = self.get_microbatch_and_repeat_ids(loop_iteration)
     stage0_repeat_id = jnp.maximum(loop_iteration, 0) // self.config.num_pipeline_microbatches
 
-    if bsw_partition_specs is not None:
+    # With pipeline_unreduced_weight_grads the slots are tagged `reduced`, and the transpose of a select inside a
+    # check_vma shard_map pairs the `unreduced` cotangent with untagged zeros, which JAX rejects; the plain vmapped
+    # select below differentiates cleanly. Under explicit sharding it is just as local: both slots and the output
+    # share one explicit sharding.
+    if bsw_partition_specs is not None and not self.weight_grad_reduced_axes:
       bsw_treedef = jax.tree.structure(bsw[0])
 
       partition_spec_treedef = jax.tree.structure(bsw_partition_specs, is_leaf=pipeline_utils.is_spec_leaf)
@@ -1245,20 +1322,21 @@ class NNXCircularPipeline(PipelineBase):
       raw_bsw_0 = partition_spec_treedef.unflatten(bsw0_leaves)
       raw_bsw_1 = partition_spec_treedef.unflatten(bsw1_leaves)
 
+      # stage0_repeat_id is an argument, not a closure: shard_map cannot close over explicitly sharded values.
       @jax.shard_map(
           mesh=self.mesh,
-          in_specs=((bsw_partition_specs, bsw_partition_specs), P("stage")),
+          in_specs=((bsw_partition_specs, bsw_partition_specs), P(), P("stage")),
           out_specs=bsw_partition_specs,
           check_vma=True,
       )
-      def select_weights_from_bsw(bsw_inner, repeat_id):
+      def select_weights_from_bsw(bsw_inner, stage0_repeat, repeat_id):
         return jax.tree.map(
-            lambda first_slot, second_slot: jax.lax.select(repeat_id[0] == stage0_repeat_id, second_slot, first_slot),
+            lambda first_slot, second_slot: jax.lax.select(repeat_id[0] == stage0_repeat, second_slot, first_slot),
             bsw_inner[0],
             bsw_inner[1],
         )
 
-      raw_weights = select_weights_from_bsw((raw_bsw_0, raw_bsw_1), repeat_ids)
+      raw_weights = select_weights_from_bsw((raw_bsw_0, raw_bsw_1), stage0_repeat_id, repeat_ids)
       weights = bsw_treedef.unflatten(jax.tree.leaves(raw_weights))
     else:
 
@@ -1452,6 +1530,8 @@ class NNXCircularPipeline(PipelineBase):
         "Non-RngState variable found in layers_mutables catch-all partition. "
         "Only RngState variables (RngKey/RngCount) should be present."
     )
+    input_mutables = layers_mutables
+    layers_mutables = self.shard_mutables_by_stage(layers_mutables)
 
     # Pre-capture Python config values needed inside the stage function.
     scan_pipeline_iterations_enabled = self.config.scan_pipeline_iterations
@@ -2018,7 +2098,13 @@ class NNXCircularPipeline(PipelineBase):
       # Initial repeat-scan carry (slot 0 is never selected in repeat 0); dtype
       # must match from_repeat_weights_to_bsw.
       zero_params = jax.tree.map(lambda x: jnp.zeros(x.shape[1:], dtype=x.dtype), layers_params)
-      initial_w_curr = None if bsw_no_carry else self.cast_bsw_params(zero_params)
+      if bsw_no_carry:
+        initial_w_curr = None
+      elif self.config.shard_mode == ShardMode.EXPLICIT:
+        # The carry's type includes its sharding: lay the zeros out like the gathered slot.
+        initial_w_curr = self.from_repeat_weights_to_bsw(zero_params, physical_partition_spec_full)
+      else:
+        initial_w_curr = self.cast_bsw_params(zero_params)
 
     # Prepare initial Linen variables
     init_mutables_arrays, _, _, _, _ = pipeline_utils.flatten_nnx_state(layers_mutables)
@@ -2109,6 +2195,7 @@ class NNXCircularPipeline(PipelineBase):
         per_layer_arrays, sown_treedef, sown_is_var, sown_var_types, sown_meta
     )
 
+    final_layer_mutables = self.restore_mutables_sharding(final_layer_mutables, input_mutables)
     final_layer_state = nnx.State.merge(layers_params, stacked_metrics, final_layer_mutables)
     nnx.update(self.layers, final_layer_state)
 

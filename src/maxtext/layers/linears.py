@@ -15,6 +15,7 @@
 """Linear Layers."""
 
 import functools
+import math
 import operator
 from typing import Any, Callable, Iterable, Sequence
 
@@ -36,12 +37,68 @@ from maxtext.layers.initializers import NdInitializer, nd_dense_init, default_bi
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
+from maxtext.utils.sharding import create_sharding
 from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.utils.sharding import maybe_shard_with_name
 from maxtext.utils.sharding import maybe_shard_with_pspec
 from maxtext.utils.sharding import get_physical_spec_without_axes
 from maxtext.utils.sharding import FSDP_MESH_AXES
 from maxtext.utils.sharding import truncate_out_sharding
+from maxtext.utils.sharding import get_logical_axis_rules
+from maxtext.utils.sharding import logical_to_mesh_axes
+from maxtext.utils.sharding import mesh_axes_for_dim
+
+# SiTU betas used by Kimi-K3; they come from the HF config keys `activation_situ_beta`
+# and `activation_situ_linear_beta` (HF `SituAndMul`) and are not configurable here.
+# They are the explicit Kimi-K3 preset used as defaults below and by the registered
+# `"situ_gate"` / `"situ_linear"` activation names (HF `KimiLinearConfig` itself defaults
+# to `beta=1.0, linear_beta=None`, which is not what Kimi-K3 ships with).
+KIMI_K3_SITU_BETA = 4.0
+KIMI_K3_SITU_LINEAR_BETA = 25.0
+
+
+def _check_situ_beta(name: str, beta: float) -> None:
+  """Rejects non-positive SiTU betas (`beta=0` would otherwise produce `0 / 0 = NaN`)."""
+  if not beta > 0:
+    raise ValueError(f"SiTU {name} must be > 0, got {beta}.")
+
+
+def situ_gate(x: Array, beta: float = KIMI_K3_SITU_BETA) -> Array:
+  """SiTU gate activation: beta * tanh(x / beta) * sigmoid(x), computed in fp32."""
+  _check_situ_beta("beta", beta)
+  x32 = x.astype(jnp.float32)
+  return (beta * jnp.tanh(x32 / beta) * jax.nn.sigmoid(x32)).astype(x.dtype)
+
+
+def situ_linear(x: Array, beta: float = KIMI_K3_SITU_LINEAR_BETA) -> Array:
+  """SiTU soft-capped linear (up-branch) activation: beta * tanh(x / beta), computed in fp32."""
+  _check_situ_beta("linear_beta", beta)
+  x32 = x.astype(jnp.float32)
+  return (beta * jnp.tanh(x32 / beta)).astype(x.dtype)
+
+
+def situ_and_mul(
+    gate: Array,
+    up: Array,
+    *,
+    gate_beta: float = KIMI_K3_SITU_BETA,
+    linear_beta: float | None = KIMI_K3_SITU_LINEAR_BETA,
+    dtype: DType | None = None,
+) -> Array:
+  """Fused SiTU GLU: situ_gate(gate) * situ_linear(up), matching HF `SituAndMul`.
+
+  Both branches and their product are computed in fp32 and cast to `dtype` (default:
+  `gate.dtype`) once at the end, so bf16 callers round once instead of three times.
+  `linear_beta=None` leaves `up` untransformed, as in HF.
+  """
+  _check_situ_beta("beta", gate_beta)
+  g32 = gate.astype(jnp.float32)
+  u32 = up.astype(jnp.float32)
+  situ_a = gate_beta * jnp.tanh(g32 / gate_beta) * jax.nn.sigmoid(g32)
+  if linear_beta is not None:
+    _check_situ_beta("linear_beta", linear_beta)
+    u32 = linear_beta * jnp.tanh(u32 / linear_beta)
+  return (situ_a * u32).astype(gate.dtype if dtype is None else dtype)
 
 
 def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> Callable[..., Any]:
@@ -51,6 +108,11 @@ def _convert_to_activation_function(fn_or_string: str | Callable[..., Any]) -> C
   elif fn_or_string == "sqrtsoftplus":
     # Custom activation function used by DeepSeek V4 Top-K MoE router
     return lambda x: jnp.sqrt(jax.nn.softplus(x))
+  # SiTU activations used by the Kimi-K3 MLP/experts (gate and up branches)
+  elif fn_or_string == "situ_gate":
+    return situ_gate
+  elif fn_or_string == "situ_linear":
+    return situ_linear
   elif isinstance(fn_or_string, str):
     return getattr(jax.nn, fn_or_string)
   elif callable(fn_or_string):
@@ -146,6 +208,101 @@ def _align_bias_with_output(bias: Array, output: Array, shard_mode: ShardMode, d
   )
 
 
+# Logical axis a custom rule set maps to every mesh axis the tokens are sharded over when it keeps the dense weights
+# off some of them (cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp); see `route_dense_weight_grad`.
+DENSE_GRAD_AXIS = "embed_grad"
+_DENSE_EMBED_AXES = ("embed", "embed_attn", "q_lora", "kv_lora")
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+def _reshard_cotangent(x, via, to):
+  """Identity whose cotangent is constrained to the PartitionSpec `via` and then to `to`."""
+  del via, to
+  return x
+
+
+def _reshard_cotangent_fwd(x, via, to):
+  del via, to
+  return x, None
+
+
+def _reshard_cotangent_bwd(via, to, _, cotangent):
+  # Without the barrier, XLA folds the reduce-scatter into `via` and the all-gather into `to` back into the
+  # unrouted reduction (which XLA:TPU further combines into a full-weight all-reduce across all token axes).
+  cotangent = jax.lax.optimization_barrier(jax.lax.with_sharding_constraint(cotangent, via))
+  return (jax.lax.with_sharding_constraint(cotangent, to),)
+
+
+_reshard_cotangent.defvjp(_reshard_cotangent_fwd, _reshard_cotangent_bwd)
+
+
+def _spec_divides_shape(spec: PartitionSpec | None, shape: tuple[int, ...], mesh) -> bool:
+  """True when `spec` fits `shape` and every sharded dimension is divisible by its mesh shard count."""
+  if spec is None or len(spec) > len(shape):
+    return False
+  for dim_len, entry in zip(shape, spec):
+    shards = math.prod(mesh.shape.get(ax, 1) for ax in mesh_axes_for_dim(entry))
+    if dim_len % shards != 0:
+      return False
+  return True
+
+
+def route_dense_weight_grad(kernel: Array, kernel_axes: tuple[None | str, ...]) -> Array:
+  """Reduce-scatters a dense weight's gradient over every token axis before resharding it to the weight's sharding.
+
+  A weight's gradient is a partial sum over every mesh axis the tokens are sharded on. When the weight is sharded
+  over only some of them (cp-as-ep-dense-no-cp and cp-as-ep-dense-fsdp replicate the dense weights over context),
+  GSPMD partitions the unrouted gradient as a reduction+slice over the weight's sharded axes plus an all-reduce of
+  the shard over the replicated token axes, which XLA:TPU backend passes fold into a combined full-weight all-reduce
+  across all token axes followed by a local slice. Under a rule set that maps `embed_grad` to the token axes, the
+  backward of every kernel with an `embed`, `embed_attn`, `q_lora`, or `kv_lora` dimension instead constrains the
+  gradient to the kernel's axes with that dimension on `embed_grad` (one reduce-scatter over all of the token axes'
+  devices), and then, across an optimization barrier, to the kernel's own sharding (an all-gather of that shard over
+  the axes the weight is replicated on). When no abstract mesh is active (e.g. `with mesh:` in MaxEngine or vLLM),
+  under rules that do not map `embed_grad`, or when the tensor dimension is not divisible by the `embed_grad` shard
+  count, the kernel is returned unchanged.
+
+  Args:
+    kernel: The kernel, as the dot product consumes it.
+    kernel_axes: Its logical axes.
+
+  Returns:
+    The kernel.
+  """
+  if not isinstance(kernel, jax.Array) or not jnp.issubdtype(kernel.dtype, jnp.floating):
+    return kernel
+  if len(kernel_axes) != kernel.ndim:
+    return kernel
+  rules = get_logical_axis_rules()
+  if not rules or not any(rule and rule[0] == DENSE_GRAD_AXIS for rule in rules):
+    return kernel
+  if not any(isinstance(axis, str) and axis in _DENSE_EMBED_AXES for axis in kernel_axes):
+    return kernel
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or any(t == jax.sharding.AxisType.Explicit for t in getattr(mesh, "axis_types", ())):
+    return kernel
+  str_axes = [a for a in kernel_axes if isinstance(a, str)]
+  if len(set(str_axes)) != len(str_axes):
+    return kernel
+  to = logical_to_mesh_axes(tuple(kernel_axes), mesh, rules=rules)
+  if to is None:
+    return kernel
+  routed_dims = [
+      i for i, a in enumerate(kernel_axes) if isinstance(a, str) and a in _DENSE_EMBED_AXES and mesh_axes_for_dim(to[i])
+  ]
+  if len(routed_dims) != 1:
+    return kernel
+  sharded_idx = routed_dims[0]
+  via_axes = tuple(
+      DENSE_GRAD_AXIS if i == sharded_idx else (None if not mesh_axes_for_dim(to[i]) else a)
+      for i, a in enumerate(kernel_axes)
+  )
+  via = logical_to_mesh_axes(via_axes, mesh, rules=rules)
+  if via == to or not _spec_divides_shape(via, kernel.shape, mesh) or not _spec_divides_shape(to, kernel.shape, mesh):
+    return kernel
+  return _reshard_cotangent(kernel, via, to)
+
+
 def _compute_dot_general_nnx(
     inputs,
     kernel,
@@ -216,6 +373,53 @@ def _compute_dot_general_nnx(
   )
 
 
+def _gathered_kernel_dot_fwd(inputs, kernel, dimension_numbers, precision, gathered_sharding):
+  """Gathers `kernel` to `gathered_sharding`, contracts it with `inputs` and keeps the gathered kernel."""
+  gathered_kernel = jax.lax.with_sharding_constraint(kernel, gathered_sharding)
+  out = lax.dot_general(inputs, gathered_kernel, dimension_numbers, precision=precision)
+  return out, (inputs, gathered_kernel)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(2, 3, 4))
+def _dot_general_reusing_gathered_kernel(inputs, kernel, dimension_numbers, precision, gathered_sharding):
+  """`lax.dot_general(inputs, kernel)` whose input gradient reuses the forward's gathered kernel.
+
+  The forward gathers the kernel with one explicit sharding constraint and keeps the gathered value as the
+  residual; the backward computes the input gradient from that residual instead of letting the partitioner insert
+  a second all-gather of the same kernel. Under remat the residual is recomputed in the backward together with the
+  rest of the replayed forward, so the replay's gathered kernel is the one the input gradient uses: one all-gather
+  per backward instead of two. The kernel gradient is the stock dot_general transpose with no sharding constraint,
+  so it is reduce-scattered to the kernel's sharding exactly as before (transposing a sharding constraint would
+  instead constrain the kernel gradient to the gathered sharding, i.e. all-reduce it).
+
+  Args:
+    inputs: the left-hand side.
+    kernel: the right-hand side.
+    dimension_numbers: `lax.dot_general` dimension numbers without batch dimensions.
+    precision: `lax.dot_general` precision.
+    gathered_sharding: the sharding the kernel is gathered to: its own with the gathered mesh axes removed.
+
+  Returns:
+    The dot_general output.
+  """
+  return _gathered_kernel_dot_fwd(inputs, kernel, dimension_numbers, precision, gathered_sharding)[0]
+
+
+def _gathered_kernel_dot_bwd(dimension_numbers, precision, gathered_sharding, residuals, out_grad):
+  del gathered_sharding
+  inputs, gathered_kernel = residuals
+
+  def dot(lhs, rhs):
+    return lax.dot_general(lhs, rhs, dimension_numbers, precision=precision)
+
+  (inputs_grad,) = jax.linear_transpose(lambda lhs: dot(lhs, gathered_kernel), inputs)(out_grad)
+  (kernel_grad,) = jax.linear_transpose(lambda rhs: dot(inputs, rhs), gathered_kernel)(out_grad)
+  return inputs_grad, kernel_grad
+
+
+_dot_general_reusing_gathered_kernel.defvjp(_gathered_kernel_dot_fwd, _gathered_kernel_dot_bwd)
+
+
 class DenseGeneral(nnx.Module):
   """A linear transformation with flexible axes."""
 
@@ -245,6 +449,7 @@ class DenseGeneral(nnx.Module):
       weight_quant: quantizations.WeightQuantConfig | None = None,
       weight_grad_in_kernel_order: bool = False,
       *,  # Following arguments are keyword-only
+      gathered_kernel_axes: tuple[None | str, ...] | None = None,
       rngs: nnx.Rngs = None,
   ):
     """Initializes the DenseGeneral module.
@@ -285,6 +490,13 @@ class DenseGeneral(nnx.Module):
         stored kernel, its initialization and the arithmetic are all untouched,
         so gradients are bit-identical to the default rule. Only takes effect
         under `shard_mode: explicit`; ignored when the layer is quantized.
+      gathered_kernel_axes: if set, the logical axes of the kernel as the dot reads it
+        (the kernel's axes with the gathered ones replaced by None). The kernel is
+        gathered to them by one explicit sharding constraint and the backward
+        computes the input gradient from that gathered kernel instead of gathering
+        the kernel a second time; under remat the backward's replay gathers it
+        once (see `_dot_general_reusing_gathered_kernel`). The kernel gradient is
+        unchanged. Needs `mesh`; unquantized kernels in auto shard mode only.
       rngs: RNG state for initialization in nnx.
     """
     if weight_quant is not None:
@@ -315,6 +527,7 @@ class DenseGeneral(nnx.Module):
     self.block_size = block_size
     self.weight_quant = weight_quant
     self.weight_grad_in_kernel_order = weight_grad_in_kernel_order
+    self.gathered_kernel_axes = gathered_kernel_axes
 
     # Parameter initialization
     kernel_shape = self.in_features_shape + self.out_features_shape
@@ -454,12 +667,40 @@ class DenseGeneral(nnx.Module):
     kernel = shard(kernel, stage2)
     return kernel
 
+  def _dot_general_gathering_kernel_once(self, inputs, kernel, kernel_scale, norm_axis, contract_ind, slice_bounds):
+    """The dot_general of `gathered_kernel_axes` (see `_dot_general_reusing_gathered_kernel`)."""
+    if (
+        self.quant is not None
+        or kernel_scale is not None
+        or is_fp8_dtype(getattr(kernel, "dtype", None))
+        or slice_bounds is not None
+        or self.use_two_stage_all_gather
+        or self.shard_mode == ShardMode.EXPLICIT
+        or self.mesh is None
+    ):
+      raise ValueError(
+          "gathered_kernel_axes supports only an unquantized, unsliced kernel in auto shard mode without the"
+          " two-stage all-gather, and needs the mesh."
+      )
+    gathered_sharding = create_sharding(self.mesh, self.gathered_kernel_axes)
+    dimension_numbers = ((norm_axis, contract_ind), ((), ()))
+    return _dot_general_reusing_gathered_kernel(
+        inputs,
+        kernel,
+        dimension_numbers,
+        lax.Precision(self.matmul_precision),
+        gathered_sharding,
+    )
+
   def __call__(
       self,
       inputs: Array,
       _initializing: bool = False,
       out_sharding: NamedSharding | None = None,
       slice_bounds: tuple[int, int] | None = None,
+      kernel_all_gather_fn: Callable[[Array], Array] | None = None,
+      *,
+      use_gathered_kernel: bool = True,
   ) -> Array:
     """Applies a linear transformation to the inputs along multiple dimensions.
 
@@ -469,6 +710,13 @@ class DenseGeneral(nnx.Module):
       out_sharding: Optional sharding for the output.
       slice_bounds: Optional tuple (begin, end) to slice the kernel and bias on
         the last (output-feature) axis before contraction. Unquantized only.
+      kernel_all_gather_fn: Optional callable applied to `kernel` before contraction.
+        Used by `fsdp_prefetch` (`explicit_fsdp_weight`) on `logits_dense` (which sits
+        outside the scanned decoder loop) so its backward weight gradient uses an
+        explicit SparseCore `reduce-scatter`.
+      use_gathered_kernel: Whether to use `gathered_kernel_axes` on this call when
+        configured. Callers pass `False` on forward-only inference/prefill calls so
+        a train-initialized module falls back to the standard projection path.
 
     Returns:
       The transformed input.
@@ -529,6 +777,10 @@ class DenseGeneral(nnx.Module):
       kernel = kernel[..., begin:end]
 
     kernel = self._maybe_two_stage_all_gather(kernel)
+    if kernel_all_gather_fn is not None:
+      kernel = kernel_all_gather_fn(kernel)
+    elif not _initializing and self.shard_mode != ShardMode.EXPLICIT:
+      kernel = route_dense_weight_grad(kernel, self.kernel_axes)
 
     # out_sharding should be None for auto mesh axis
     if self.shard_mode != ShardMode.EXPLICIT:
@@ -536,35 +788,40 @@ class DenseGeneral(nnx.Module):
 
     contract_ind = tuple(range(0, len(self.axis)))
     native_fp8_compute = isinstance(self.quant, quantizations.ServeFp8WeightQuantization)
-    quant_dot_general = self.quant_dot_general if slice_bounds is None else None
-    # The auto-axes region only buys anything where XLA refuses to fold the
-    # transpose away, and it has to own the whole dot to do it -- so it is off
-    # under auto sharding and under any quantized path. `self.quant` only covers
-    # AQT; weight-only fp8 leaves it None and is identified by the scale instead.
-    weight_grad_in_kernel_order = (
-        self.weight_grad_in_kernel_order
-        and self.shard_mode == ShardMode.EXPLICIT
-        and self.quant is None
-        and quant_dot_general is None
-        and kernel_scale is None
-        and not is_fp8_dtype(getattr(kernel, "dtype", None))
-    )
-    output = _compute_dot_general_nnx(
-        inputs,
-        kernel,
-        norm_axis,
-        contract_ind,
-        self.matmul_precision,
-        quant_dot_general,
-        _initializing,
-        out_sharding,
-        kernel_scale=kernel_scale,
-        compute_dtype=self.dtype,
-        native_fp8_compute=native_fp8_compute,
-        scale_block_size=self.block_size,
-        act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
-        weight_grad_in_kernel_order=weight_grad_in_kernel_order,
-    )
+    if self.gathered_kernel_axes is not None and use_gathered_kernel:
+      output = self._dot_general_gathering_kernel_once(
+          inputs, kernel, kernel_scale, norm_axis, contract_ind, slice_bounds
+      )
+    else:
+      quant_dot_general = self.quant_dot_general if slice_bounds is None else None
+      # The auto-axes region only buys anything where XLA refuses to fold the
+      # transpose away, and it has to own the whole dot to do it -- so it is off
+      # under auto sharding and under any quantized path. `self.quant` only covers
+      # AQT; weight-only fp8 leaves it None and is identified by the scale instead.
+      weight_grad_in_kernel_order = (
+          self.weight_grad_in_kernel_order
+          and self.shard_mode == ShardMode.EXPLICIT
+          and self.quant is None
+          and quant_dot_general is None
+          and kernel_scale is None
+          and not is_fp8_dtype(getattr(kernel, "dtype", None))
+      )
+      output = _compute_dot_general_nnx(
+          inputs,
+          kernel,
+          norm_axis,
+          contract_ind,
+          self.matmul_precision,
+          quant_dot_general,
+          _initializing,
+          out_sharding,
+          kernel_scale=kernel_scale,
+          compute_dtype=self.dtype,
+          native_fp8_compute=native_fp8_compute,
+          scale_block_size=self.block_size,
+          act_calibration_method=self.quant.act_calibration_method if native_fp8_compute else "absmax",
+          weight_grad_in_kernel_order=weight_grad_in_kernel_order,
+      )
 
     if self.bias is not None:
       bias = jnp.asarray(self.bias[...], self.dtype)
@@ -771,6 +1028,7 @@ class MlpBlock(nnx.Module):
         DecoderBlockType.GEMMA3,
         DecoderBlockType.QWEN3,
         DecoderBlockType.DEEPSEEK,
+        DecoderBlockType.GLM5,
         DecoderBlockType.LLAMA4,
         DecoderBlockType.OLMO3,
         DecoderBlockType.ENVY,
@@ -809,6 +1067,7 @@ class MlpBlock(nnx.Module):
     # Iterate over specified MLP input activation functions.
     # e.g. ('relu',) or ('gelu', 'linear') for gated-gelu.
     activations = []
+    is_situ_glu = tuple(self.activations) == ("situ_gate", "situ_linear")
     if cfg.fused_mlp:
       x = self.wi(inputs, out_sharding=intermediate_sharding)
 
@@ -818,8 +1077,8 @@ class MlpBlock(nnx.Module):
 
       x = checkpoint_name(x, "mlpwi")
       for idx, act_fn in enumerate(self.activations):
-        y = _convert_to_activation_function(act_fn)(self._clip_glu_input(idx, x[:, :, idx, ...]))
-        activations.append(y)
+        y = self._clip_glu_input(idx, x[:, :, idx, ...])
+        activations.append(y if is_situ_glu else _convert_to_activation_function(act_fn)(y))
     else:
       for idx, act_fn in enumerate(self.activations):
         dense_name = "wi" if len(self.activations) == 1 else f"wi_{idx}"
@@ -828,11 +1087,15 @@ class MlpBlock(nnx.Module):
         x = checkpoint_name(x, "mlp" + dense_name)
         if cfg.activations_in_float32:
           x = x.astype(jnp.float32)
-        x = _convert_to_activation_function(act_fn)(self._clip_glu_input(idx, x))
-        activations.append(x)
+        x = self._clip_glu_input(idx, x)
+        activations.append(x if is_situ_glu else _convert_to_activation_function(act_fn)(x))
 
-    # Take elementwise product of above intermediate activations.
-    x = functools.reduce(operator.mul, activations).astype(self.dtype)
+    if is_situ_glu:
+      # SiTU GLU: compute gate * up in fp32 and round once, matching HF `SituAndMul`.
+      x = situ_and_mul(activations[0], activations[1], dtype=self.dtype)
+    else:
+      # Take elementwise product of above intermediate activations.
+      x = functools.reduce(operator.mul, activations).astype(self.dtype)
     # Apply dropout and final dense output projection.
     x = self.dropout(x, deterministic=deterministic)  # Broadcast along length.
     x = self._maybe_shard_with_logical(x, self.intermediate_logical)

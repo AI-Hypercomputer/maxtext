@@ -47,13 +47,13 @@ def add_pathways_arguments(parser: argparse.ArgumentParser):
   parser.add_argument(
       "--pathways_server_image",
       type=str,
-      default=("us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"),
+      default=("us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server"),
       help="version of pathways server image to be benchmarked command.",
   )
   parser.add_argument(
       "--pathways_proxy_server_image",
       type=str,
-      default="us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server",
+      default="us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server",
       help="version of pathways proxy image to be benchmarked command.",
   )
   parser.add_argument(

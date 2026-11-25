@@ -119,6 +119,18 @@ def get_first_step(model, state):
 
 def _one_hot_targets(targets, config, mesh):
   """Expand integer targets into the one-hot matrix cross entropy multiplies with the logits."""
+  if (
+      bool(getattr(config, "use_m3_model", False))
+      and getattr(config, "shard_mode", None) in (sharding.ShardMode.EXPLICIT, sharding.ShardMode.EXPLICIT.value)
+      and mesh is not None
+  ):
+    return sharding.vocab_parallel_one_hot(
+        targets,
+        config.vocab_size,
+        mesh,
+        ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
+        sharding.ShardMode.EXPLICIT,
+    )
   if not getattr(config, "lm_head_fsdp_as_vocab_tp", False):
     return jax.nn.one_hot(targets, config.vocab_size)
   # A vocab-parallel head leaves the logits sharded on vocab rather than on batch, so the
@@ -154,10 +166,17 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   """
   del dropout_rng, params, sparsity_state  # unused for NNX (kept for signature parity)
   is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
-  if getattr(config, "attention_type", "global") == "block_diffusion" and not is_block_diffusion:
+  attention_type = getattr(config, "attention_type", "global")
+  if attention_type == "block_diffusion" and not is_block_diffusion:
     raise ValueError(
         "Block-diffusion attention requires target-aligned block-diffusion losses; "
         "causal next-token labels would leak within a bidirectional block."
+    )
+  if attention_type == "full":
+    raise ValueError(
+        "attention_type='full' is bidirectional (non-causal) full attention; "
+        "causal next-token labels would leak in pre-training loss_fn. "
+        "Use attention_type='global' for global causal attention."
     )
   if is_block_diffusion:
     required_masks = {"corruption_mask", "targets_loss_mask"}
@@ -284,7 +303,18 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         debug_sharding=config.debug_sharding,
     )
 
-    if is_block_diffusion:
+    is_explicit = config.shard_mode in (sharding.ShardMode.EXPLICIT, sharding.ShardMode.EXPLICIT.value)
+    if is_explicit and model.mesh is not None:
+      loss_mask = sharding.maybe_shard_with_logical(
+          targets_loss_mask if is_block_diffusion else (data["targets_segmentation"] != 0),
+          ("activation_embed_and_logits_batch", "activation_length"),
+          model.mesh,
+          sharding.ShardMode.EXPLICIT,
+          debug_sharding=config.debug_sharding,
+      )
+      xent = xent * loss_mask
+      z_loss = z_loss * loss_mask
+    elif is_block_diffusion:
       xent = xent * targets_loss_mask
       z_loss = z_loss * targets_loss_mask
     else:
@@ -506,40 +536,65 @@ def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
 def _decode_moe_bias_update(update, config):
   """Returns the value to add to a routed gate bias from a sown `moe_bias_updates`.
 
-  Under pipeline parallelism the MoE layers sow per-expert token counts instead of the +-rate step (see
-  `calculate_load_balance_updates(return_counts=True)`): the pipeline sums them over microbatches, so the step
-  below is taken on the load of the whole global batch, exactly like the non-pipelined model.
+  Under pipeline parallelism or gradient accumulation, MoE layers sow per-expert token counts instead of the
+  +-rate step (see `calculate_load_balance_updates(return_counts=True)`): counts are summed over microbatches,
+  so the step below is taken on the load of the whole global batch, exactly like the single-microbatch model.
   """
   update = jnp.asarray(update[0] if isinstance(update, (tuple, list)) else update)
-  if not getattr(config, "using_pipeline_parallelism", False):
+  if not getattr(config, "using_pipeline_parallelism", False) and not jnp.issubdtype(update.dtype, jnp.integer):
     return update
   counts = update.astype(jnp.float32)
   return jnp.sign(jnp.mean(counts, axis=-1, keepdims=True) - counts) * config.routed_bias_update_rate
 
 
-def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, config) -> None:
+def _apply_moe_bias_updates_by_path(
+    root: nnx.Module,
+    intermediates: dict,
+    config,
+    *,
+    diag_bias_values: list | None = None,
+    diag_bias_updates: list | None = None,
+    bias_metrics: dict | None = None,
+) -> None:
   """Adds every sown `moe_bias_updates` to the gate bias of the module that sowed it.
 
   Needed under pipeline parallelism, where the decoder's MoE layers live in two stacks with different
-  gate-bias layouts: `moe_layers_outside_pipeline` ([layers, experts]) and the pipeline stage module
-  `pipeline_module.layers` ([repeats, stages, experts]). Each stack sows an update shaped like its bias.
+  gate-bias layouts (`moe_layers_outside_pipeline` and `pipeline_module.layers`), and when `scan_layers=False`,
+  where the decoder holds unscanned per-layer modules (`moe_layers_0`, `moe_layers_1`, ...).
   """
   for path, update in traverse_util.flatten_dict(intermediates).items():
     if path[-1] != "moe_bias_updates":
       continue
     target = root
     for key in path[:-1]:
-      target = getattr(target, key)
+      if hasattr(target, key):
+        target = getattr(target, key)
+      elif isinstance(target, dict) and key in target:
+        target = target[key]
+      else:
+        target = None
+        break
     bias = _find_gate_bias(target)
     if bias is None:
       continue
     update = _decode_moe_bias_update(update, config)
-    if update.shape != bias.value.shape:
+    bias_val = bias.get_value()
+    if update.shape != bias_val.shape:
       raise ValueError(
           f"moe_bias_updates at {'/'.join(map(str, path))} has shape {update.shape}, "
-          f"but the gate bias it updates has shape {bias.value.shape}."
+          f"but the gate bias it updates has shape {bias_val.shape}."
       )
-    bias.value = bias.value + update.astype(bias.value.dtype)
+    name_prefix = "-".join(("decoder", *map(str, path[:-1])))
+    if bias_metrics is not None and getattr(config, "log_moe_bias_norms", False):
+      bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(bias_val)
+    updated_bias = bias_val + update.astype(bias_val.dtype)
+    bias.set_value(updated_bias)
+    if diag_bias_values is not None:
+      diag_bias_values.append(updated_bias)
+    if diag_bias_updates is not None:
+      diag_bias_updates.append(update)
+    if bias_metrics is not None and getattr(config, "log_moe_bias_norms", False):
+      bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(update)
 
 
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
@@ -727,9 +782,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
     else:
-      if getattr(config, "using_pipeline_parallelism", False):
-        # 1. Update the decoder MoE layers outside and inside the pipeline (two stacks, two bias layouts).
-        _apply_moe_bias_updates_by_path(new_state.model.decoder, intermediate_outputs.get("decoder", {}), config)
+      if getattr(config, "using_pipeline_parallelism", False) or not getattr(config, "scan_layers", True):
+        # 1. Update the decoder MoE layers by path (pipeline-parallel stacks or unscanned moe_layers_0..N).
+        _apply_moe_bias_updates_by_path(
+            new_state.model.decoder,
+            intermediate_outputs.get("decoder", {}),
+            config,
+            diag_bias_values=diag_bias_values,
+            diag_bias_updates=diag_bias_updates,
+            bias_metrics=bias_metrics,
+        )
       else:
         # 1. Update main decoder scanned MoE layers.
         # The update from the scan is (num_moe_layers, num_experts) and must be transposed.
@@ -1130,11 +1192,9 @@ def build_first_phase_graphdef(config, jit_model, state):
   return jit_model_first_phase
 
 
-def aot_compile_step(p_step, lower_args, compiler_options, prefix):
+def aot_compile_step(p_step, lower_args, compiler_options=None, prefix=""):
   """Lowers and compiles p_step ahead of time (warms the executable cache) and prints its memory stats."""
-  compiled = p_step.lower(*lower_args).compile(compiler_options=compiler_options)
-  max_utils.print_compiled_memory_stats(compiled.memory_analysis(), prefix=prefix)
-  return compiled
+  return train_utils.aot_compile_step(p_step, lower_args, compiler_options=compiler_options, prefix=prefix)
 
 
 def make_synthetic_batch(config, shaped_batch, seed=0):
@@ -1379,15 +1439,32 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
       # compile would only add a third full compilation on top of the profiling
       # compile and the FDO recompile; skip it and its memory stats.
       compiler_options = max_utils.parse_libtpu_flags_to_dict(config.compile_xla_flags)
-      compiled = p_train_step.lower(*lower_args).compile(compiler_options=compiler_options)
-      compiled_stats = compiled.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_stats, prefix="train")
+      # A `constant_padded` resize that raised the per-device batch must fit in HBM; otherwise the attempt is
+      # restarted with the per-device batch bounded (see `get_train_func`). XLA may already run out of HBM inside
+      # the compile, so the compile itself is part of the check. The dropless and first-phase programs run with the
+      # same raised per-device batch (and the dropless one has larger MoE buffers), so they are checked too.
+      elastic_utils.compile_and_check_hbm_budget(
+          config, lambda: aot_compile_step(p_train_step, lower_args, compiler_options, prefix="train")
+      )
       precompiled_train = True
       if p_train_step_dropless is not None:
         # Precompile the dropless retry program here so no compile happens inside the timed loop.
-        aot_compile_step(p_train_step_dropless, lower_args, compiler_options, prefix="train_dropless")
+        elastic_utils.compile_and_check_hbm_budget(
+            config,
+            lambda: aot_compile_step(p_train_step_dropless, lower_args, compiler_options, prefix="train_dropless"),
+        )
       if p_train_step_first_phase is not None:
-        aot_compile_step(p_train_step_first_phase, lower_args, compiler_options, prefix="train_first_phase")
+        elastic_utils.compile_and_check_hbm_budget(
+            config,
+            lambda: aot_compile_step(p_train_step_first_phase, lower_args, compiler_options, prefix="train_first_phase"),
+        )
+    elif jax.config.jax_enable_pgle and elastic_utils.hbm_preflight_nominal_batch(config) is not None:
+      max_logging.log(
+          "Elastic utils: skipping the HBM pre-flight check of the raised per_device_batch_size"
+          f" {config.per_device_batch_size} (nominal {config.elastic_nominal_per_device_batch_size}) because AutoPGLE"
+          " skips the ahead-of-time compile; an out-of-memory step will fail at the first train step. Set"
+          " elastic_max_per_device_batch_size to a per-device batch known to fit in HBM to avoid this."
+      )
 
   if p_eval_step is not None:
     # Also used by warm_eval_input_reshard_before_run_start, which applies with a pre-compiled train step too.
@@ -1404,9 +1481,7 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
         eval_lower_args = (state, shaped_eval_batch, init_rng)
       else:
         eval_lower_args = (state, shaped_eval_batch)
-      compiled_eval = p_eval_step.lower(*eval_lower_args).compile(compiler_options=compiler_options)
-      compiled_eval_stats = compiled_eval.memory_analysis()
-      max_utils.print_compiled_memory_stats(compiled_eval_stats, prefix="eval")
+      aot_compile_step(p_eval_step, eval_lower_args, compiler_options, prefix="eval")
       precompiled_eval = True
       if p_eval_step_dropless is not None:
         aot_compile_step(p_eval_step_dropless, eval_lower_args, compiler_options, prefix="eval_dropless")
@@ -1605,7 +1680,8 @@ def train_loop(config, recorder, state=None, elastic_retry_cache=None):
     metric_logger_instance.flush_metrics_and_cleanup()
     if _job_completed_gracefully:
       record_goodput(recorder, RECORD_JOB_END_TIME)
-      samples_count = (python_vars["step"] - immutable_data["start_step"]) * config.global_batch_size_to_train_on
+      train_batch_size = config.logical_global_batch_size_to_train_on or config.global_batch_size_to_train_on
+      samples_count = (python_vars["step"] - immutable_data["start_step"]) * train_batch_size
       # Only reached when eval never hit target_eval_loss; a converged run already
       # logged RUN_STOP with status "success" from eval_stop.
       mllog_utils.run_stop(status="aborted", current_epoch_num=samples_count, step=python_vars["step"])
@@ -1687,16 +1763,30 @@ def get_train_func(config, recorder, argv):
 
     def elastic_train_wrapper(argv: Sequence[str]) -> None:
       """Wrapper for elastic training initializes variables and runs the train loop."""
-      # Reuse the config and goodput recorder from the previous attempt if it ran on the same slices. After a
-      # replica resize `initialize` runs again so the config picks up the new slice count.
-      elastic_config, elastic_recorder = elastic_utils.get_or_build(
-          elastic_retry_cache, "initialize", functools.partial(initialize, argv)
-      )
-      run(
-          elastic_config,
-          elastic_recorder,
-          elastic_retry_cache=elastic_retry_cache,
-      )
+      while True:
+        # Reuse the config and goodput recorder from the previous attempt if it ran on the same slices. After a
+        # replica resize `initialize` runs again so the config picks up the new slice count, plus any overrides
+        # recorded by earlier attempts (e.g. the per-device batch bound below).
+        attempt_argv = [*argv, *elastic_retry_cache.config_overrides]
+        elastic_config, elastic_recorder = elastic_utils.get_or_build(
+            elastic_retry_cache, "initialize", functools.partial(initialize, attempt_argv)
+        )
+        try:
+          run(
+              elastic_config,
+              elastic_recorder,
+              elastic_retry_cache=elastic_retry_cache,
+          )
+          return
+        except elastic_utils.HbmBudgetExceededError as e:
+          # The resize raised the per-device batch beyond what fits in HBM. Rebuild the attempt on the same slices
+          # with the per-device batch bounded to its nominal value, so only the accumulation steps grow. This is not
+          # an elastic event: no retry is consumed and the slices don't change.
+          override = elastic_utils.hbm_budget_override(e.nominal_per_device_batch_size)
+          if not elastic_retry_cache.add_config_override(override):
+            raise
+          max_logging.log(f"Elastic utils: {e}")
+          elastic_utils.cleanup_iterators()
 
     # Every attempt goes through `elastic_train_wrapper`; the cache decides how much of it is skipped.
     train_func = elastic_utils.elastic_retry(

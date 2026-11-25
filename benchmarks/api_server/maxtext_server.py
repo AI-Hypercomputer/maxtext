@@ -331,12 +331,14 @@ def _prepare_batch_for_broadcast(batched_items):
   }
 
   all_prompts = []
+  all_is_chat = []  # Per prompt: formatted with the chat template, so it gets no BOS from the tokenizer.
   request_info_map = []
   for req_id, req in batched_items:
     is_chat = isinstance(req, ChatCompletionRequest)
     try:
       prompts_for_req = server_utils.get_prompts_for_request(req, LLM)
       all_prompts.extend(prompts_for_req)
+      all_is_chat.extend([is_chat] * len(prompts_for_req))
       request_info_map.append((req_id, req, is_chat, len(prompts_for_req)))
     except ValueError as e:
       logger.error("Failed to parse request %s: %s", req_id, e)
@@ -346,7 +348,7 @@ def _prepare_batch_for_broadcast(batched_items):
   if not all_prompts:
     return 0, b"", []  # Signal other ranks to skip if all requests failed
 
-  broadcast_payload = {"prompts": all_prompts, "params": params}
+  broadcast_payload = {"prompts": all_prompts, "is_chat": all_is_chat, "params": params}
   payload_bytes = json.dumps(broadcast_payload).encode("utf-8")
   payload_len = len(payload_bytes)
 
@@ -404,7 +406,7 @@ def main_loop():
             "Starting batched generation for %d prompts with params: %s", len(payload["prompts"]), payload["params"]
         )
 
-      completions = LLM.generate_batch(prompts=payload["prompts"], **payload["params"])
+      completions = LLM.generate_batch(prompts=payload["prompts"], is_chat=payload["is_chat"], **payload["params"])
 
       if jax.process_index() == 0:
         _process_results(completions, request_info_map, payload)

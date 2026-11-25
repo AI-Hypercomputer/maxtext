@@ -18,6 +18,7 @@ import unittest
 from unittest import mock
 import os
 import tempfile
+import yaml
 
 # Module to be tested
 from maxtext.utils import gcs_utils
@@ -184,3 +185,82 @@ class GcsUtilsTest(unittest.TestCase):
 
     with self.assertRaises(PermissionError):
       gcs_utils.mkdir_and_check_permissions("gs://valid_bucket/some/dir")
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  def test_gcs_glob_pattern_lists_only_under_literal_prefix(self, mock_storage_client):
+    """Tests that the listing starts at the text before the first glob character."""
+    mock_list_blobs = mock_storage_client.return_value.list_blobs
+    expected_prefixes = {
+        "ckpt/20/commit_success*": "ckpt/20/commit_success",
+        "ckpt/20/commit_succes?": "ckpt/20/commit_succes",
+        "ckpt/20/commit_succes[s]": "ckpt/20/commit_succes",
+        "ckpt/20/{commit_success,other}": "ckpt/20/",
+        "ckpt/20/commit\\*success": "ckpt/20/commit",
+        "ckpt/*/commit_success*": "ckpt/",
+        "ckpt/20/commit_success.txt": "ckpt/20/commit_success.txt",
+    }
+
+    for glob_pattern, expected_prefix in expected_prefixes.items():
+      with self.subTest(glob_pattern=glob_pattern):
+        gcs_utils.gcs_glob_pattern(f"gs://bucket/{glob_pattern}")
+
+        mock_list_blobs.assert_called_with("bucket", prefix=expected_prefix, match_glob=glob_pattern)
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  def test_gcs_glob_pattern_without_literal_prefix(self, mock_storage_client):
+    """Tests that a pattern starting with a glob character lists the whole bucket."""
+    mock_list_blobs = mock_storage_client.return_value.list_blobs
+
+    gcs_utils.gcs_glob_pattern("gs://bucket/*.array_record")
+
+    mock_list_blobs.assert_called_once_with("bucket", prefix=None, match_glob="*.array_record")
+
+  @mock.patch("maxtext.utils.gcs_utils.storage.Client")
+  def test_gcs_glob_pattern_returns_full_gcs_paths(self, mock_storage_client):
+    """Tests that the matches are returned as full `gs://` paths."""
+    blob = mock.MagicMock()
+    blob.name = "ckpt/20/commit_success.txt"
+    mock_storage_client.return_value.list_blobs.return_value = [blob]
+
+    data_files = gcs_utils.gcs_glob_pattern("gs://bucket/ckpt/20/commit_success*")
+
+    self.assertEqual(data_files, ["gs://bucket/ckpt/20/commit_success.txt"])
+
+  def test_write_config_raw_keys_for_gcs_skips_secret_keys(self):
+    """Tests that secret keys in KEYS_NO_LOGGING are omitted from config.yml."""
+    secret = "hf_gcs_secret_456"
+    raw_keys = {
+        "save_config_to_gcs": True,
+        "base_output_directory": "gs://bucket/out",
+        "run_name": "run",
+        "steps": 100,
+        "hf_access_token": secret,
+    }
+    uploaded_contents = []
+
+    def _capture_upload(dest_gcs_name, source_file_name):
+      del dest_gcs_name
+      with open(source_file_name, "rt", encoding="utf8") as f:
+        uploaded_contents.append(f.read())
+
+    with (
+        tempfile.TemporaryDirectory() as tmp_dir,
+        mock.patch("jax.process_index", return_value=0),
+        mock.patch.object(gcs_utils, "_gcs_guard", return_value=True),
+        mock.patch.object(gcs_utils, "upload_blob", side_effect=_capture_upload) as mock_upload_blob,
+    ):
+      prev_cwd = os.getcwd()
+      os.chdir(tmp_dir)
+      try:
+        gcs_utils.write_config_raw_keys_for_gcs(raw_keys)
+      finally:
+        os.chdir(prev_cwd)
+
+    mock_upload_blob.assert_called_once_with("gs://bucket/out/run/config.yml", "config.yml")
+    self.assertEqual(len(uploaded_contents), 1)
+    written = uploaded_contents[0]
+    parsed = yaml.safe_load(written)
+    self.assertEqual(parsed["steps"], 100)
+    self.assertNotIn("hf_access_token", parsed)
+    self.assertNotIn("hf_access_token", written)
+    self.assertNotIn(secret, written)

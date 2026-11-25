@@ -16,6 +16,7 @@
 
 import dataclasses
 import sys
+import types
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -35,6 +36,9 @@ from maxtext.utils.model_creation_utils import (
     _align_checkpoint_to_model_shapes,
     _fix_restore_args_for_shape_mismatch,
     _fuse_moe_weights,
+    _fuse_moe_halves_concatenated,
+    _fused_moe_kernel_uses_ep,
+    _logical_partition_specs,
     _stored_shape_evenly_shardable,
     _zero_pad_axis,
 )
@@ -320,11 +324,15 @@ class TestFuseMoeWeights(unittest.TestCase):
   Otherwise zeros land between wi_0's data and wi_1's data, corrupting the boundary.
   """
 
+  def setUp(self):
+    super().setUp()
+    self.config = unittest.mock.MagicMock(attention="dot_product")
+
   def test_no_op_when_model_has_unfused_wi(self):
     """If model has wi_0/wi_1 (not fused), the helper returns the ckpt tree unchanged."""
     ckpt = {"wi_0": np.ones((2, 4, 3), dtype=np.float32), "wi_1": 2 * np.ones((2, 4, 3), dtype=np.float32)}
     model = {"wi_0": np.zeros((2, 4, 3), dtype=np.float32), "wi_1": np.zeros((2, 4, 3), dtype=np.float32)}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertIn("wi_0", out)
     self.assertIn("wi_1", out)
     self.assertNotIn("wi", out)
@@ -336,7 +344,7 @@ class TestFuseMoeWeights(unittest.TestCase):
     ckpt = {"wi_0": wi_0, "wi_1": wi_1}
     # Model has fused wi of last-dim 6 = 2 * 3 (no MLP padding).
     model = {"wi": np.zeros((2, 4, 6), dtype=np.float32)}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertEqual(out["wi"].shape, (2, 4, 6))
     np.testing.assert_array_equal(out["wi"][..., :3], wi_0)
     np.testing.assert_array_equal(out["wi"][..., 3:], wi_1)
@@ -352,7 +360,7 @@ class TestFuseMoeWeights(unittest.TestCase):
     ckpt = {"wi_0": wi_0, "wi_1": wi_1}
     # Model has fused wi of last-dim 8 = 2 * 4 (each half padded from 3 → 4).
     model = {"wi": np.zeros((2, 4, 8), dtype=np.float32)}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertEqual(out["wi"].shape, (2, 4, 8))
     # First half: wi_0_data (3 cols) then 1 col of zeros.
     np.testing.assert_array_equal(out["wi"][..., :3], wi_0)
@@ -368,9 +376,98 @@ class TestFuseMoeWeights(unittest.TestCase):
     other = np.full((2, 4), 7.0, dtype=np.float32)
     ckpt = {"layers": {"0": {"moe": {"wi_0": wi_0, "wi_1": wi_1}, "other": other}}}
     model = {"layers": {"0": {"moe": {"wi": np.zeros((2, 4, 6), dtype=np.float32)}, "other": other}}}
-    out = _fuse_moe_weights(ckpt, model)
+    out = _fuse_moe_weights(ckpt, model, self.config)
     self.assertEqual(out["layers"]["0"]["moe"]["wi"].shape, (2, 4, 6))
     np.testing.assert_array_equal(out["layers"]["0"]["other"], other)
+
+
+class TestFusedMoeKernelUsesEp(unittest.TestCase):
+  """_fused_moe_kernel_uses_ep must match `use_ep` in `RoutedMoE.fused_moe_matmul`."""
+
+  def _uses_ep(self, attention, mesh_shape):
+    return _fused_moe_kernel_uses_ep(types.SimpleNamespace(attention=attention), types.SimpleNamespace(shape=mesh_shape))
+
+  def test_tensor_parallel_only(self):
+    self.assertFalse(self._uses_ep("vllm_rpa", {"data": 1, "model": 4, "expert": 1}))
+
+  def test_expert_parallel_axes(self):
+    self.assertTrue(self._uses_ep("vllm_rpa", {"model": 2, "expert": 2}))
+    self.assertTrue(self._uses_ep("vllm_batched_rpa", {"model": 2, "attn_dp_expert": 2}))
+    self.assertTrue(self._uses_ep("vllm_rpa", {"model": 2, "dcp": 2}))
+
+  def test_non_vllm_attention(self):
+    self.assertFalse(self._uses_ep("dot_product", {"model": 2, "expert": 2}))
+
+  def test_missing_config_or_mesh(self):
+    self.assertFalse(_fused_moe_kernel_uses_ep(None, types.SimpleNamespace(shape={"expert": 2})))
+    self.assertFalse(_fused_moe_kernel_uses_ep(types.SimpleNamespace(attention="vllm_rpa"), None))
+
+
+class TestFuseMoeWeightsFusedKernelLayout(unittest.TestCase):
+  """The prefused wi layout must match how tpu-inference's fused MoE kernel splits it into gate/up.
+
+  The TP kernel splits each shard of the fused axis, so each shard holds [gate_i | up_i]. The
+  expert-parallel kernel splits the whole fused axis in half, so it needs [gate | up], with each
+  half keeping the per-shard MLP-dim padding that `wo` gets.
+  """
+
+  # Checkpoint halves are (experts, embed, mlp) = (2, 3, 8); the model pads mlp to 16 per half.
+  _E, _D, _H, _PADDED_H = 2, 3, 8, 16
+
+  def _make_mesh(self, expert, model):
+    num_devices = expert * model
+    if jax.device_count() < num_devices:
+      self.skipTest(f"Requires >= {num_devices} devices.")
+    devices = np.array(jax.devices()[:num_devices]).reshape(expert, model)
+    return Mesh(devices, ("expert", "model"))
+
+  def _fuse(self, mesh, padded_h):
+    wi_0 = np.arange(1, self._E * self._D * self._H + 1, dtype=np.float32).reshape(self._E, self._D, self._H)
+    wi_1 = -wi_0
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("expert", None, "model"))
+    model = {"wi": jax.device_put(jnp.zeros((self._E, self._D, 2 * padded_h), dtype=jnp.float32), sharding)}
+    config = types.SimpleNamespace(attention="vllm_rpa")
+    out = _fuse_moe_weights({"wi_0": wi_0, "wi_1": wi_1}, model, config)
+    return wi_0, wi_1, np.asarray(out["wi"])
+
+  @staticmethod
+  def _pad_each_shard(arr, n_shards, padded_size):
+    """Splits the last axis into n_shards chunks and zero-pads each chunk at its tail."""
+    pad = (padded_size - arr.shape[-1]) // n_shards
+    pad_width = [(0, 0)] * (arr.ndim - 1) + [(0, pad)]
+    return [np.pad(chunk, pad_width) for chunk in np.split(arr, n_shards, axis=-1)]
+
+  def test_tensor_parallel_interleaves_gate_and_up_per_shard(self):
+    mesh = self._make_mesh(expert=1, model=4)
+    wi_0, wi_1, out = self._fuse(mesh, self._PADDED_H)
+    gate = self._pad_each_shard(wi_0, 4, self._PADDED_H)
+    up = self._pad_each_shard(wi_1, 4, self._PADDED_H)
+    expected = np.concatenate([chunk for pair in zip(gate, up) for chunk in pair], axis=-1)
+    np.testing.assert_array_equal(out, expected)
+
+  def test_expert_parallel_concatenates_gate_and_up(self):
+    mesh = self._make_mesh(expert=2, model=2)
+    wi_0, wi_1, out = self._fuse(mesh, self._PADDED_H)
+    gate = self._pad_each_shard(wi_0, 2, self._PADDED_H)
+    up = self._pad_each_shard(wi_1, 2, self._PADDED_H)
+    np.testing.assert_array_equal(out, np.concatenate(gate + up, axis=-1))
+
+  def test_expert_parallel_without_padding_is_plain_concat(self):
+    mesh = self._make_mesh(expert=2, model=2)
+    wi_0, wi_1, out = self._fuse(mesh, self._H)
+    np.testing.assert_array_equal(out, np.concatenate([wi_0, wi_1], axis=-1))
+
+  def test_expert_parallel_embed_slices_match_single_pass(self):
+    """Building [gate | up] in uneven embed slices gives the same array and sharding as one pass."""
+    mesh = self._make_mesh(expert=2, model=2)
+    sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("expert", None, "model"))
+    wi_0 = np.arange(2 * 5 * 8, dtype=np.float32).reshape(2, 5, 8)
+    wi_1 = -wi_0
+    wi_model = jax.device_put(jnp.zeros((2, 5, 32), dtype=jnp.float32), sharding)
+    single_pass = _fuse_moe_halves_concatenated(wi_0, wi_1, wi_model, n_shards=2, num_slices=1)
+    sliced = _fuse_moe_halves_concatenated(wi_0, wi_1, wi_model, n_shards=2, num_slices=2)  # 3 + 2 rows
+    self.assertTrue(sliced.sharding.is_equivalent_to(sharding, sliced.ndim))
+    np.testing.assert_array_equal(np.asarray(sliced), np.asarray(single_pass))
 
 
 @pytest.mark.tpu_only
@@ -481,7 +578,7 @@ class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
     _, abstract_state = nnx.split(module)
     specs = nnx.get_partition_spec(abstract_state)
 
-    # Mirror the unwrap done in from_pretrained.
+    # Mirror the unwrap done in _logical_partition_specs.
     logical_axes_tree = jax.tree.map(
         lambda v: v.get_value(),
         specs,
@@ -502,6 +599,101 @@ class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
     self.assertEqual(out_np.shape, (2, 6, 4))
     np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
     np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 2, 4), dtype=np.float32))
+
+
+class TestLogicalSpecsIgnoreAmbientRules(unittest.TestCase):
+  """``_logical_partition_specs`` must return logical names even under a caller's active rules.
+
+  ``nnx.get_partition_spec`` rewrites ``out_sharding`` through the ambient
+  ``flax.core.spmd`` rules. Callers of ``from_pretrained`` that hold rules open
+  (the vLLM adapter, Tunix) would turn ``"mlp_moe"`` into mesh axes, and the
+  zero-pad dispatch in ``_align_checkpoint_to_model_shapes`` would fall back
+  to divisibility-based repeat (silent k-fold duplication) or raise.
+  """
+
+  _TRAINER_RULES = (("exp", None), ("mlp_moe", "x"), ("embed_moe", None))
+
+  def setUp(self):
+    super().setUp()
+
+    class _TinyMoE(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.wo = nnx.Param(
+            jax.random.normal(rngs.params(), (2, 4, 4), dtype=jnp.float32),
+            sharding=("exp", "mlp_moe", "embed_moe"),
+        )
+
+    devices = jax.local_devices()[:1]
+    self.mesh = jax.sharding.Mesh(devices, ("x",), axis_types=(jax.sharding.AxisType.Explicit,))
+    with jax.sharding.set_mesh(self.mesh), nn.logical_axis_rules(self._TRAINER_RULES):
+      module = nnx.eval_shape(lambda: _TinyMoE(nnx.Rngs(params=0)))
+    _, self.abstract_state = nnx.split(module)
+
+  def _specs_under_trainer_rules(self):
+    with jax.sharding.set_mesh(self.mesh), nn.logical_axis_rules(self._TRAINER_RULES):
+      return _logical_partition_specs(self.abstract_state)
+
+  def test_specs_are_logical_under_trainer_rules(self):
+    # Negative control: the raw flax call rewrites mlp_moe into the mesh axis.
+    with jax.sharding.set_mesh(self.mesh), nn.logical_axis_rules(self._TRAINER_RULES):
+      raw = nnx.get_partition_spec(self.abstract_state)["wo"].get_value()
+    self.assertEqual(tuple(raw), (None, "x", None))
+
+    specs = self._specs_under_trainer_rules()
+    wo_axes = specs["wo"]
+    self.assertIsInstance(wo_axes, jax.sharding.PartitionSpec)
+    self.assertNotIsInstance(wo_axes, nnx.Variable)
+    self.assertEqual(tuple(wo_axes), ("exp", "mlp_moe", "embed_moe"))
+
+  def test_specs_match_no_rules_path(self):
+    with jax.sharding.set_mesh(self.mesh):
+      baseline = _logical_partition_specs(self.abstract_state)
+    self.assertEqual(tuple(self._specs_under_trainer_rules()["wo"]), tuple(baseline["wo"]))
+
+  def test_specs_ignore_per_variable_sharding_rules(self):
+    # flax also honours Variable-local rules even when no ambient rules are active.
+    local_rules = self._TRAINER_RULES
+
+    class _LocalRulesMoE(nnx.Module):
+
+      def __init__(self, rngs: nnx.Rngs):
+        self.wo = nnx.Param(
+            jax.random.normal(rngs.params(), (2, 4, 4), dtype=jnp.float32),
+            sharding=("exp", "mlp_moe", "embed_moe"),
+            sharding_rules=local_rules,
+        )
+
+    with jax.sharding.set_mesh(self.mesh):
+      module = nnx.eval_shape(lambda: _LocalRulesMoE(nnx.Rngs(params=0)))
+      _, state = nnx.split(module)
+      self.assertEqual(tuple(nnx.get_partition_spec(state)["wo"].get_value()), (None, "x", None))
+      self.assertEqual(tuple(_logical_partition_specs(state)["wo"]), ("exp", "mlp_moe", "embed_moe"))
+
+  def test_exact_multiple_zero_pads_instead_of_repeating_under_rules(self):
+    # 4 -> 8 is the silent case: a repeat would also produce the right shape.
+    wo_axes = self._specs_under_trainer_rules()["wo"]
+    ckpt = jnp.ones((2, 4, 4), dtype=jnp.float32)
+    model = jnp.zeros((2, 8, 4), dtype=jnp.float32)
+    out_np = np.asarray(_align_checkpoint_to_model_shapes(ckpt, model, wo_axes))
+    self.assertEqual(out_np.shape, (2, 8, 4))
+    np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 4, 4), dtype=np.float32))
+
+  def test_non_multiple_zero_pads_instead_of_raising_under_rules(self):
+    wo_axes = self._specs_under_trainer_rules()["wo"]
+    ckpt = jnp.ones((2, 4, 4), dtype=jnp.float32)
+    model = jnp.zeros((2, 6, 4), dtype=jnp.float32)
+    out_np = np.asarray(_align_checkpoint_to_model_shapes(ckpt, model, wo_axes))
+    np.testing.assert_array_equal(out_np[:, :4, :], np.ones((2, 4, 4), dtype=np.float32))
+    np.testing.assert_array_equal(out_np[:, 4:, :], np.zeros((2, 2, 4), dtype=np.float32))
+
+  def test_physical_mesh_tuple_is_not_a_registered_axis(self):
+    # Physical mesh tuples are not logical names and must hit the unregistered-axis error.
+    ckpt = jnp.ones((3,), dtype=jnp.float32)
+    model = jnp.zeros((4,), dtype=jnp.float32)
+    with self.assertRaisesRegex(ValueError, "not registered in _VLLM_REPEAT_AXES"):
+      _align_checkpoint_to_model_shapes(ckpt, model, (("attn_dp", "model"),))
 
 
 class TestGetTransformerModel(unittest.TestCase):
@@ -567,6 +759,23 @@ class TestCreateModel(unittest.TestCase):
     config = _make_config(use_m3_model=True)
     with self.assertRaisesRegex(ValueError, "Model 'default' does not support the m3 backend"):
       model_creation_utils.create_model(config, self.mesh)
+
+  def test_m3_model_carries_named_scopes(self):
+    from maxtext.m3.infra.named_scopes import scope_of  # pylint: disable=import-outside-toplevel
+
+    config = _make_config(
+        model_name="qwen3-0.6b",
+        use_m3_model=True,
+        override_model_config=True,
+        base_mlp_dim=64,
+        head_dim=16,
+        vocab_size=256,
+        scan_layers=False,
+    )
+    model = nnx.eval_shape(lambda: model_creation_utils.create_model(config, self.mesh, rngs=nnx.Rngs(0)))
+    self.assertIsNone(scope_of(model))
+    self.assertEqual(scope_of(model.decoder), "decoder")
+    self.assertEqual(scope_of(model.decoder.layers.layers[0].mlp.wi_0), "wi_0")
 
 
 class TestFromConfig(unittest.TestCase):
@@ -704,6 +913,79 @@ class TestCreateNnxModel(unittest.TestCase):
     cfg = _make_config(debug_sharding=True)
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_state_if_possible")
+  def test_load_safetensors_dynamic(self, mock_load):
+    """source_checkpoint_layout=safetensors_dynamic loads through the training loader, not Orbax."""
+
+    def fake_load(*args, **kwargs):
+      abstract_state = args[5]
+      return None, jax.tree.map(lambda x: jax.device_put(jnp.full(x.shape, 0.5, x.dtype), x.sharding), abstract_state)
+
+    mock_load.side_effect = fake_load
+    cfg = _make_config(load_parameters_path="/fake/hf_repo", source_checkpoint_layout="safetensors_dynamic")
+    model = model_creation_utils.from_pretrained(cfg, self.mesh)
+
+    self.assertEqual(mock_load.call_args.kwargs["source_checkpoint_layout"], "safetensors_dynamic")
+    self.assertEqual(mock_load.call_args.args[2], "/fake/hf_repo")
+    for leaf in jax.tree.leaves(nnx.state(model, nnx.Param)):
+      np.testing.assert_array_equal(leaf, np.full(leaf.shape, 0.5, leaf.dtype))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_state_if_possible")
+  def test_load_safetensors_dynamic_frees_initial_weights(self, mock_load):
+    """The model's initial weights are deleted before the loader places its copy."""
+    model = model_creation_utils.from_pretrained(_make_config(), self.mesh)
+    initial = jax.tree.leaves(nnx.state(model, nnx.Param))
+    deleted_before_load = []
+
+    def fake_load(*args, **kwargs):
+      deleted_before_load.extend(leaf.is_deleted() for leaf in initial)
+      abstract_state = args[5]
+      return None, jax.tree.map(lambda x: jax.device_put(jnp.zeros(x.shape, x.dtype), x.sharding), abstract_state)
+
+    mock_load.side_effect = fake_load
+    cfg = _make_config(load_parameters_path="/fake/hf_repo", source_checkpoint_layout="safetensors_dynamic")
+    model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), cfg)  # pylint: disable=protected-access
+
+    self.assertTrue(initial)
+    self.assertTrue(all(deleted_before_load))
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_state_if_possible")
+  def test_load_safetensors_dynamic_keeps_custom_vision_projector(self, mock_load):
+    """A custom vision projector, which has no HF weights, keeps its random init."""
+    projector = {
+        "use_multimodal": True,
+        "model_name": "qwen3-vl-2b",
+        "override_model_config": True,
+        "scan_layers": False,
+        "vision_projector_type": "customized_vision_projector",
+        "vision_connector_num_layers": 2,
+        "vision_connector_activation": "gelu",
+        "vision_connector_use_bias": True,
+    }
+    model = model_creation_utils.from_pretrained(_make_config(**projector), self.mesh)
+
+    def is_custom(path):
+      return "custom_linear" in jax.tree_util.keystr(path)
+
+    params = jax.tree_util.tree_flatten_with_path(nnx.state(model, nnx.Param))[0]
+    custom_init = {jax.tree_util.keystr(path): np.asarray(leaf) for path, leaf in params if is_custom(path)}
+
+    def fake_load(*args, **kwargs):
+      # As the loader does, return the weights it has no HF tensors for unmaterialized.
+      return None, jax.tree_util.tree_map_with_path(
+          lambda path, x: x if is_custom(path) else jax.device_put(jnp.full(x.shape, 0.5, x.dtype), x.sharding),
+          args[5],
+      )
+
+    mock_load.side_effect = fake_load
+    cfg = _make_config(load_parameters_path="/fake/hf_repo", source_checkpoint_layout="safetensors_dynamic", **projector)
+    model_creation_utils._load_safetensors_dynamic(model, nnx.state(model), cfg)  # pylint: disable=protected-access
+
+    self.assertTrue(custom_init)
+    for path, leaf in jax.tree_util.tree_flatten_with_path(nnx.state(model, nnx.Param))[0]:
+      expected = custom_init[jax.tree_util.keystr(path)] if is_custom(path) else np.full(leaf.shape, 0.5, leaf.dtype)
+      np.testing.assert_array_equal(leaf, expected)
 
   # ---- checkpoint loading: mocked paths ----
 
@@ -1201,6 +1483,20 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     self.assertIn("Configuration mismatch", str(context.exception))
 
   @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
+  def test_safetensors_dynamic_skips_metadata(self, mock_load_meta):
+    """A safetensors_dynamic source has no Orbax metadata to read."""
+    cfg = _make_config(
+        enable_checkpointing=True,
+        load_parameters_path="hf://org/repo",
+        source_checkpoint_layout="safetensors_dynamic",
+    )
+
+    synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
+
+    mock_load_meta.assert_not_called()
+    self.assertIs(synced_cfg, cfg)
+
+  @patch("maxtext.utils.model_creation_utils.checkpointing.load_checkpoint_metadata")
   @patch("maxtext.utils.model_creation_utils.max_logging.log")
   def test_sync_log_and_early_return(self, mock_log, mock_load_meta):
     """Test that we log only when auto-resolution actually changes scan_layers, and early return otherwise."""
@@ -1328,6 +1624,225 @@ class TestFromPretrainedAuth(unittest.TestCase):
       model_creation_utils.from_pretrained(config, mesh)
 
     mock_run.assert_not_called()
+
+
+class TestFromPretrainedPathwaysZarr2(unittest.TestCase):
+  """Tests for Pathways Zarr v2 handler registration in from_pretrained."""
+
+  def setUp(self):
+    super().setUp()
+    metadata_patcher = patch.object(
+        model_creation_utils.checkpointing,
+        "load_checkpoint_metadata",
+        return_value={},
+    )
+    metadata_patcher.start()
+    self.addCleanup(metadata_patcher.stop)
+
+  def _make_nnx_metadata_mock(self):
+    metadata = MagicMock()
+    metadata.item_metadata.tree.keys.return_value = ["decoder"]
+    metadata.item_metadata.tree.get.return_value = {}
+    return metadata
+
+  def _build_registry(self, config):
+    # pylint: disable-next=protected-access
+    return model_creation_utils._create_pathways_zarr2_registry(config)
+
+  def _snapshot_global_handlers(self):
+    handlers = {}
+    for handler_type in ocp.type_handlers.supported_types():
+      handlers[handler_type] = ocp.type_handlers.get_type_handler(
+          handler_type,
+      )
+    return handlers
+
+  def test_from_pretrained_uses_scoped_registry_on_pathways_zarr2(self):
+    config = _make_config(
+        load_parameters_path="gs://fake_bucket/fake_ckpt",
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+    )
+    mesh = _make_mesh(config)
+    original_handlers = self._snapshot_global_handlers()
+    array_typestr = original_handlers[jax.Array].typestr()
+    fake_pathways_handler = MagicMock(spec=ocp.type_handlers.ArrayHandler)
+    fake_pathways_handler.typestr.return_value = array_typestr
+    pathways_client = types.SimpleNamespace(runtime_type="pathways")
+    pathways_device = types.SimpleNamespace(client=pathways_client)
+    call_order = []
+
+    def _fake_register(**_):
+      call_order.append("register")
+      ocp.type_handlers.register_type_handler(
+          jax.Array,
+          fake_pathways_handler,
+          override=True,
+      )
+
+    mock_checkpointer = MagicMock()
+    mock_checkpointer.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_checkpointer.restore.side_effect = _restore_as_zeros
+
+    def _fake_pytree_handler(**kwargs):
+      call_order.append("pytree_handler")
+      return kwargs
+
+    with (
+        patch.object(jax, "devices", return_value=[pathways_device]),
+        patch.object(
+            ocp.pathways,
+            "register_type_handlers",
+            side_effect=_fake_register,
+        ) as mock_register,
+        patch.object(
+            ocp,
+            "PyTreeCheckpointHandler",
+            side_effect=_fake_pytree_handler,
+        ) as mock_handler,
+        patch.object(ocp, "Checkpointer", return_value=mock_checkpointer),
+        patch.object(
+            ocp.checkpoint_utils,
+            "construct_restore_args",
+            return_value={},
+        ),
+    ):
+      model = model_creation_utils.from_pretrained(config, mesh)
+
+    self.assertIsInstance(model, models.Transformer)
+    mock_register.assert_called_once()
+    mock_handler.assert_called_once()
+    self.assertEqual(call_order, ["register", "pytree_handler"])
+    scoped_registry = mock_handler.call_args.kwargs["type_handler_registry"]
+    self.assertIs(scoped_registry.get(jax.Array), fake_pathways_handler)
+    self.assertEqual(self._snapshot_global_handlers(), original_handlers)
+
+  def test_pathways_client_attr_and_colocated_options(self):
+    config = _make_config(
+        load_parameters_path="gs://fake_bucket/fake_ckpt",
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+        enable_single_controller=True,
+        colocated_python_checkpointing=True,
+        enable_single_replica_ckpt_restoring=True,
+    )
+    mesh = _make_mesh(config)
+    original_handlers = self._snapshot_global_handlers()
+    pathways_client = types.SimpleNamespace(pathways=object())
+    pathways_device = types.SimpleNamespace(client=pathways_client)
+    mock_checkpointer = MagicMock()
+    mock_checkpointer.metadata.return_value = self._make_nnx_metadata_mock()
+    mock_checkpointer.restore.side_effect = _restore_as_zeros
+
+    with (
+        patch.object(jax, "devices", return_value=[pathways_device]),
+        patch.object(
+            ocp.pathways,
+            "register_type_handlers",
+            wraps=ocp.pathways.register_type_handlers,
+        ) as mock_register,
+        patch.object(
+            ocp,
+            "PyTreeCheckpointHandler",
+            wraps=ocp.PyTreeCheckpointHandler,
+        ) as mock_handler,
+        patch.object(ocp, "Checkpointer", return_value=mock_checkpointer),
+        patch.object(
+            ocp.checkpoint_utils,
+            "construct_restore_args",
+            return_value={},
+        ),
+    ):
+      model = model_creation_utils.from_pretrained(config, mesh)
+
+    self.assertIsInstance(model, models.Transformer)
+    expected_impl = ocp.pathways.CheckpointingImpl.from_options(
+        use_colocated_python=True,
+        use_persistence_array_handler=True,
+    )
+    mock_register.assert_called_once_with(
+        use_single_replica_array_handler=False,
+        checkpointing_impl=expected_impl,
+    )
+    scoped_registry = mock_handler.call_args.kwargs["type_handler_registry"]
+    array_handler = scoped_registry.get(jax.Array)
+    self.assertIsInstance(array_handler, ocp.type_handlers.ArrayHandler)
+    self.assertNotIsInstance(
+        array_handler,
+        ocp.type_handlers.SingleReplicaArrayHandler,
+    )
+    self.assertEqual(self._snapshot_global_handlers(), original_handlers)
+
+  def test_skips_registration_for_ocdbt_zarr3_or_non_pathways(self):
+    pathways_client = types.SimpleNamespace(runtime_type="pathways")
+    pathways_device = types.SimpleNamespace(client=pathways_client)
+    cpu_device = types.SimpleNamespace(
+        client=types.SimpleNamespace(runtime_type="tfrt"),
+    )
+    cases = [
+        ("ocdbt", [pathways_device], True, False),
+        ("zarr3", [pathways_device], False, True),
+        ("non_pathways", [cpu_device], False, False),
+    ]
+    for name, devices, use_ocdbt, use_zarr3 in cases:
+      with self.subTest(case=name):
+        config = _make_config(
+            load_parameters_path="gs://fake_bucket/fake_ckpt",
+            checkpoint_storage_use_ocdbt=use_ocdbt,
+            checkpoint_storage_use_zarr3=use_zarr3,
+        )
+        with (
+            patch.object(jax, "devices", return_value=devices),
+            patch.object(
+                ocp.pathways,
+                "register_type_handlers",
+            ) as mock_register,
+        ):
+          registry = self._build_registry(config)
+        self.assertIsNone(registry)
+        mock_register.assert_not_called()
+
+  def test_fallback_on_registration_error_restores_global_registry(self):
+    config = _make_config(
+        load_parameters_path="gs://fake_bucket/fake_ckpt",
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+    )
+    original_handlers = self._snapshot_global_handlers()
+    pathways_client = types.SimpleNamespace(runtime_type="pathways")
+    pathways_device = types.SimpleNamespace(client=pathways_client)
+    fake_scalar_handler = MagicMock(spec=ocp.type_handlers.ScalarHandler)
+    fake_scalar_handler.typestr.return_value = original_handlers[int].typestr()
+    numpy_typestr = original_handlers[np.ndarray].typestr()
+    fake_numpy_handler = MagicMock(spec=ocp.type_handlers.NumpyHandler)
+    fake_numpy_handler.typestr.return_value = numpy_typestr
+    errors = (ImportError("missing dep"), NotImplementedError("oss"))
+    for error in errors:
+
+      def _partial_register_then_fail(*_, exc=error, **__):
+        ocp.type_handlers.register_type_handler(
+            int,
+            fake_scalar_handler,
+            override=True,
+        )
+        ocp.type_handlers.register_type_handler(
+            np.ndarray,
+            fake_numpy_handler,
+            override=True,
+        )
+        raise exc
+
+      with (
+          patch.object(jax, "devices", return_value=[pathways_device]),
+          patch.object(
+              ocp.pathways,
+              "register_type_handlers",
+              side_effect=_partial_register_then_fail,
+          ),
+      ):
+        registry = self._build_registry(config)
+      self.assertIsNone(registry)
+      self.assertEqual(self._snapshot_global_handlers(), original_handlers)
 
 
 if __name__ == "__main__":

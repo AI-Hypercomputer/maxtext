@@ -23,6 +23,15 @@ on:
         type: 'string'
         description: 'Any additional context from the request'
         required: false
+      mode:
+        type: 'string'
+        description: >-
+          'full' always runs a full review (explicit requests). 'auto' (automatic
+          triggers) skips the review when the PR diff is unchanged since the
+          bot's last review or the per-PR limit is reached, and otherwise runs
+          an incremental review of what changed since the last review.
+        required: false
+        default: 'full'
     secrets:
       APP_PRIVATE_KEY:
         required: false
@@ -32,9 +41,14 @@ on:
         required: false
 
 concurrency:
-  # any single pull request, only one review runs at a time
-  group: '${{ github.workflow }}-review-${{ github.event_name }}-${{ github.event.pull_request.number || github.event.issue.number }}'
-  cancel-in-progress: true
+  # Any single pull request, only one review runs at a time, whatever the
+  # trigger (push, label, or comment), so two runs never follow up on the same
+  # earlier threads concurrently. An explicit request cancels a running review;
+  # an automatic review waits for the running one instead of cancelling it.
+  # A cancelled review can leave a pending review behind; the next run's
+  # prepare step deletes it before the model runs.
+  group: '${{ github.workflow }}-review-${{ github.event.pull_request.number || github.event.issue.number }}'
+  cancel-in-progress: ${{ inputs.mode != 'auto' }}
 
 defaults:
   run:
@@ -43,13 +57,19 @@ defaults:
 jobs:
   review:
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 30
+    # Room for two model attempts (each capped below) plus the wait between them.
+    timeout-minutes: 45
     permissions:
       contents: 'read'
       id-token: 'write'
       issues: 'write'
       pull-requests: 'write'
     steps:
+      - name: 'Record start time'
+        id: 'start'
+        run: |-
+          echo "started_at=$(date +%s)" >> "${GITHUB_OUTPUT}"
+
       - name: 'Mint identity token'
         id: 'mint_identity_token'
         if: |-
@@ -63,6 +83,7 @@ jobs:
           permission-pull-requests: 'write'
 
       - name: 'Checkout repository'
+        id: 'checkout'
         # Downloads the repository for the review prompt and context.
         # SECURITY: for `pull_request_target` runs (automatic review of fork
         # PRs, which run with secrets), always check out the base commit, never
@@ -87,11 +108,35 @@ jobs:
           PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
           ADDITIONAL_CONTEXT: '${{ inputs.additional_context }}'
 
+      - name: 'Decide review mode and gather earlier review state'
+        # Writes .gemini/review_mode.json, review_delta.md,
+        # previous_threads.json, and other_findings.json for the prompt.
+        # Reads the PR only through the GitHub API; the script comes from the
+        # checked-out base for `pull_request_target` runs. If the GitHub API
+        # fails, explicit requests fall back to a full review and automatic
+        # reviews are skipped; the step itself does not fail.
+        id: 'prepare'
+        env:
+          GH_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          BOT_LOGIN: '${{ steps.mint_identity_token.outputs.app-slug && format(''{0}[bot]'', steps.mint_identity_token.outputs.app-slug) || ''github-actions[bot]'' }}'
+          MAX_AUTO_REVIEWS: '${{ vars.GEMINI_MAX_AUTO_REVIEWS || 5 }}'
+          MODE: '${{ inputs.mode == ''auto'' && ''auto'' || ''full'' }}'
+        run: |-
+          python3 .github/scripts/gemini_review_state.py prepare --mode "${MODE}"
+
       - name: 'Run Gemini pull request review'
         # reviews code with detailed set of instructions for the Gemini
+        if: |-
+          ${{ steps.prepare.outputs.mode != 'skip' }}
         uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
         id: 'gemini_pr_review'
-        env:
+        # A failure is classified below and retried once if transient; the
+        # last step fails the job if the review still failed.
+        continue-on-error: true
+        timeout-minutes: 20
+        env: &gemini_env
           GEMINI_CLI_TRUST_WORKSPACE: 'true'
           GITHUB_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
           ISSUE_TITLE: '${{ github.event.pull_request.title || github.event.issue.title }}'
@@ -99,7 +144,7 @@ jobs:
           PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
           REPOSITORY: '${{ github.repository }}'
           ADDITIONAL_CONTEXT: '${{ inputs.additional_context }}'
-        with:
+        with: &gemini_with
           gcp_location: '${{ vars.GOOGLE_CLOUD_LOCATION }}'
           gcp_project_id: '${{ vars.GOOGLE_CLOUD_PROJECT }}'
           gcp_service_account: '${{ vars.SERVICE_ACCOUNT_EMAIL }}'
@@ -163,3 +208,111 @@ jobs:
           # including gemini-review.toml, into .gemini/commands/ and would
           # overwrite ours.
           prompt: '/maxtext-review'
+
+      - name: 'Classify review failure'
+        # Only HTTP 429 (rate limited) and 503 (unavailable) are retried, once.
+        id: 'classify'
+        if: |-
+          ${{ steps.gemini_pr_review.outcome == 'failure' }}
+        env:
+          REPOSITORY: '${{ github.repository }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+        run: |-
+          # Reads gemini-artifacts/stderr.log, written by run-gemini-cli.
+          python3 .github/scripts/gemini_review_state.py classify
+
+      - name: 'Prepare review retry'
+        # Waits, then skips the retry if the failed attempt already posted its
+        # review (already_posted=true) or the reviews cannot be read
+        # (already_posted=unknown, which still fails the job below), and
+        # otherwise deletes the attempt's pending review.
+        id: 'before_retry'
+        if: |-
+          ${{ steps.classify.outputs.retryable == 'true' }}
+        env:
+          GH_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          BOT_LOGIN: '${{ steps.mint_identity_token.outputs.app-slug && format(''{0}[bot]'', steps.mint_identity_token.outputs.app-slug) || ''github-actions[bot]'' }}'
+          HEAD_SHA: '${{ steps.prepare.outputs.head_sha }}'
+          STARTED_AT: '${{ steps.start.outputs.started_at }}'
+        run: |-
+          sleep 60
+          python3 .github/scripts/gemini_review_state.py before-retry --head-sha "${HEAD_SHA}" --since "${STARTED_AT}"
+
+      - name: 'Retry Gemini pull request review'
+        # Same inputs as the first attempt (YAML aliases).
+        if: |-
+          ${{ steps.before_retry.outputs.already_posted == 'false' }}
+        uses: google-github-actions/run-gemini-cli@f77273f4c914e4bf38440cf36a0369cb64a37489 # v0.1.22
+        id: 'gemini_pr_review_retry'
+        continue-on-error: true
+        timeout-minutes: 20
+        env: *gemini_env
+        with: *gemini_with
+
+      - name: 'Follow up on earlier review threads'
+        id: 'apply'
+        # Replies to, and resolves, the bot's own earlier threads based on the
+        # verdicts at the end of the model's response. The script only touches
+        # threads listed in previous_threads.json (the bot's own, unresolved).
+        if: |-
+          ${{ steps.prepare.outputs.mode != 'skip' && steps.prepare.outputs.previous_thread_count != '0' && (steps.gemini_pr_review.outcome == 'success' || steps.gemini_pr_review_retry.outcome == 'success') }}
+        env:
+          GH_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          BOT_LOGIN: '${{ steps.mint_identity_token.outputs.app-slug && format(''{0}[bot]'', steps.mint_identity_token.outputs.app-slug) || ''github-actions[bot]'' }}'
+          GEMINI_RESPONSE: '${{ steps.gemini_pr_review_retry.outputs.summary || steps.gemini_pr_review.outputs.summary }}'
+          HEAD_SHA: '${{ steps.prepare.outputs.head_sha }}'
+        run: |-
+          python3 .github/scripts/gemini_review_state.py apply --head-sha "${HEAD_SHA}"
+
+      - name: 'Record review telemetry'
+        # One record per run: counts and status values only (public repo).
+        # Shown in the job summary and uploaded as an artifact. Never fails
+        # the run.
+        id: 'telemetry'
+        if: |-
+          ${{ always() && steps.checkout.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          GH_TOKEN: '${{ steps.mint_identity_token.outputs.token || secrets.GITHUB_TOKEN || github.token }}'
+          REPOSITORY: '${{ github.repository }}'
+          PULL_REQUEST_NUMBER: '${{ github.event.pull_request.number || github.event.issue.number }}'
+          BOT_LOGIN: '${{ steps.mint_identity_token.outputs.app-slug && format(''{0}[bot]'', steps.mint_identity_token.outputs.app-slug) || ''github-actions[bot]'' }}'
+          RUN_ID: '${{ github.run_id }}'
+          RUN_ATTEMPT: '${{ github.run_attempt }}'
+          TRIGGER: '${{ github.event_name }}.${{ github.event.action }}'
+          REQUESTED_MODE: '${{ inputs.mode }}'
+          STARTED_AT: '${{ steps.start.outputs.started_at }}'
+          PREPARED_AT: '${{ steps.prepare.outputs.prepared_at }}'
+          FIRST_OUTCOME: '${{ steps.gemini_pr_review.outcome }}'
+          FIRST_FAILURE_TYPE: '${{ steps.classify.outputs.failure_type }}'
+          ALREADY_POSTED: '${{ steps.before_retry.outputs.already_posted }}'
+          RETRY_OUTCOME: '${{ steps.gemini_pr_review_retry.outcome }}'
+          JOB_STATUS: '${{ job.status }}'
+        run: |-
+          python3 .github/scripts/gemini_review_state.py telemetry --output "${RUNNER_TEMP}/gemini-review-telemetry.json"
+
+      - name: 'Upload review telemetry'
+        if: |-
+          ${{ always() && steps.telemetry.outcome == 'success' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: 'gemini-review-telemetry-${{ github.event.pull_request.number || github.event.issue.number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/gemini-review-telemetry.json'
+          retention-days: 90
+          if-no-files-found: 'ignore'
+
+      - name: 'Fail if the review failed'
+        # The model steps continue on error so that the retry and telemetry
+        # run; fail the job here so the dispatcher still reports the failure.
+        if: |-
+          ${{ steps.gemini_pr_review.outcome == 'failure' && steps.gemini_pr_review_retry.outcome != 'success' && steps.before_retry.outputs.already_posted != 'true' }}
+        env:
+          FAILURE_TYPE: '${{ steps.classify.outputs.failure_type }}'
+        run: |-
+          echo "::error::The Gemini review failed (${FAILURE_TYPE:-unknown})."
+          exit 1

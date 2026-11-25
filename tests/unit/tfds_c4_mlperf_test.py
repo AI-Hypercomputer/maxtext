@@ -16,7 +16,6 @@
 
 import os
 import tempfile
-import threading
 import time
 import types
 import unittest
@@ -491,8 +490,8 @@ def _make_eval_dataset(num_examples: int, seq_len: int) -> "tf.data.Dataset":
   return tf.data.Dataset.from_generator(gen, output_signature=signature)
 
 
-_NUM_HOSTS = 128
-_NUM_FILES = 2048
+_NUM_HOSTS = 32
+_NUM_FILES = 96
 _SEQ_LEN = 8
 _LOCAL_ROWS = 8
 _TOKENS_PER_EXAMPLE = _LOCAL_ROWS * _SEQ_LEN
@@ -515,31 +514,40 @@ def _write_one_example_per_file_eval(data_dir):
   features = tfds.features.FeaturesDict({"ids": tfds.features.Tensor(shape=(_TOKENS_PER_EXAMPLE,), dtype=np.int32)})
   version_dir = os.path.join(data_dir, _EVAL_DATASET, "1.0.0")
   os.makedirs(version_dir)
+  num_bytes = 0
   for key in range(_NUM_FILES):
     path = os.path.join(version_dir, f"{_EVAL_DATASET}-validation.tfrecord-{key:05d}-of-{_NUM_FILES:05d}")
+    serialized = features.serialize_example({"ids": _example_tokens(key)})
+    num_bytes += len(serialized)
     with tf.io.TFRecordWriter(path) as writer:
-      writer.write(features.serialize_example({"ids": _example_tokens(key)}))
-  tfds.folder_dataset.write_metadata(data_dir=version_dir, features=features, check_data=False)
+      writer.write(serialized)
+  # Pass explicit split_infos so TFDS does not re-scan every tfrecord in a ThreadPoolExecutor.
+  split_infos = [tfds.core.SplitInfo(name="validation", shard_lengths=[1] * _NUM_FILES, num_bytes=num_bytes)]
+  tfds.folder_dataset.write_metadata(data_dir=version_dir, features=features, split_infos=split_infos, check_data=False)
 
 
 class _FileReadCounter:
   """Records the tfrecord files the tfds reader pulls examples from (one example per file)."""
 
-  def __init__(self):
-    self.files = []
-    self._lock = threading.Lock()
+  def __init__(self, log_path):
+    self._log_path = log_path
     self._orig = tfds_reader._get_dataset_from_filename  # pylint: disable=protected-access
 
-  def _record(self, filename):
-    with self._lock:
-      self.files.append(filename.numpy().decode())
-    return np.int64(0)
+  @property
+  def files(self):
+    if not os.path.exists(self._log_path):
+      return []
+    with open(self._log_path, encoding="utf-8") as log_file:
+      return log_file.read().splitlines()
 
   def dataset_from_filename(self, instruction, *args, **kwargs):
+    """Wraps a shard dataset to log each read filename via tf.print."""
     ds = self._orig(instruction, *args, **kwargs)
 
     def _tag(example):
-      done = tf.py_function(self._record, [instruction.filename], tf.int64)
+      # Use pure C++ tf.print (PrintV2) rather than tf.py_function so tf.data background
+      # worker threads never contend on the Python GIL during read or iterator teardown.
+      done = tf.print(instruction.filename, output_stream=f"file://{self._log_path}")
       with tf.control_dependencies([done]):
         return tf.identity(example)
 
@@ -547,7 +555,7 @@ class _FileReadCounter:
 
 
 class EvalReadsOwnFilesOnceTest(unittest.TestCase):
-  """Host i of 128 reads only its own eval file, once, and gets the same eval batch as before.
+  """Host i reads only its own eval file, once, and gets the same eval batch as before.
 
   Before the change, the eval shard was taken after reading (host i reads files 0..i to find
   its first example) and the cache never completed (the loop reads one batch out of a longer
@@ -566,7 +574,7 @@ class EvalReadsOwnFilesOnceTest(unittest.TestCase):
     cls.files = [os.path.basename(f.filename) for f in instructions]
     assert len(cls.files) == _NUM_FILES and all(f.take == 1 for f in instructions)
     # Read order of the whole split: host i's single example sits in file i.
-    cls.examples = [x["ids"] for x in tfds.as_numpy(builder.as_dataset(split="validation", shuffle_files=False))]
+    cls.examples = [_example_tokens(key) for key in range(_NUM_FILES)]
 
   @classmethod
   def tearDownClass(cls):
@@ -595,24 +603,45 @@ class EvalReadsOwnFilesOnceTest(unittest.TestCase):
     Returns the eval batches, the files read in each eval, and whether the last eval's
     iterator ended after its num_batches (= 1) batches.
     """
-    counter = _FileReadCounter()
-    with (
-        mock.patch.object(tfds_reader, "_get_dataset_from_filename", counter.dataset_from_filename),
-        mock.patch.object(c4_mlperf.jax, "process_count", return_value=_NUM_HOSTS),
-    ):
-      ds = self._build(host, shard_in_read)
-      batches, reads = [], []
-      for _ in range(num_evals):
-        start = len(counter.files)
-        it = ds.as_numpy_iterator()  # the eval iterator reset before each eval
-        # The eval loop stops after num_batches (= 1) batches without draining the iterator.
-        batches.append(next(it))
-        # The train step before the next eval. The prefetch completes the truncated cache in the
-        # background meanwhile; before the change the cache was discarded at the next reset.
-        time.sleep(_TRAIN_STEP_S)
-        reads.append(counter.files[start:])
-      # Whether one eval is exactly num_batches batches long.
-      ended = next(it, None) is None
+    orig_read_config = c4_mlperf.tfds.ReadConfig
+
+    def _read_config(*args, **kwargs):
+      # Disable TFDS autocache (this small fixture is < 250 MiB, unlike c4/en:3.0.9) so reads
+      # exercise preprocess_eval_dataset's own `cache()`, and keep file interleaving synchronous
+      # to avoid spinning up parallel interleave worker pools inside xdist unit test workers.
+      kwargs.setdefault("try_autocache", False)
+      kwargs.setdefault("interleave_cycle_length", 1)
+      kwargs.setdefault("num_parallel_calls_for_interleave_files", None)
+      return orig_read_config(*args, **kwargs)
+
+    with tempfile.TemporaryDirectory() as log_dir:
+      counter = _FileReadCounter(os.path.join(log_dir, "reads.log"))
+      with (
+          mock.patch.object(tfds_reader, "_get_dataset_from_filename", counter.dataset_from_filename),
+          mock.patch.object(c4_mlperf.tfds, "ReadConfig", _read_config),
+          mock.patch.object(c4_mlperf.jax, "process_count", return_value=_NUM_HOSTS),
+      ):
+        ds = None
+        it = None
+        batches, reads = [], []
+        try:
+          ds = self._build(host, shard_in_read)
+          for _ in range(num_evals):
+            start = len(counter.files)
+            it = ds.as_numpy_iterator()  # the eval iterator reset before each eval
+            # The eval loop stops after num_batches (= 1) batches without draining the iterator.
+            batches.append(next(it))
+            # The train step before the next eval. The prefetch completes the truncated cache in the
+            # background meanwhile; before the change the cache was discarded at the next reset.
+            time.sleep(_TRAIN_STEP_S)
+            reads.append(counter.files[start:])
+          # Whether one eval is exactly num_batches batches long.
+          ended = next(it, None) is None
+        finally:
+          # Drop the iterator before tearing down `log_dir` so background tf.data threads
+          # stop appending to `reads.log` while the temporary directory still exists.
+          del it
+          del ds
     return batches, reads, ended
 
   def test_files_hold_one_example_each(self):
@@ -621,7 +650,7 @@ class EvalReadsOwnFilesOnceTest(unittest.TestCase):
     self.assertFalse(_files_hold_one_example_each(self.name, "validation", self.data_dir, 2 * _NUM_FILES))
 
   def test_same_batch_own_files_and_no_reread(self):
-    for host in (0, 5, 64, 127):
+    for host in (0, 5, 16, 31):
       with self.subTest(host=host):
         before, before_reads, _ = self._evals(host, shard_in_read=False, num_evals=1)
         after, after_reads, after_ended = self._evals(host, shard_in_read=True)

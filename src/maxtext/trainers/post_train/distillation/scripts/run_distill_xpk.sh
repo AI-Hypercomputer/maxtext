@@ -18,6 +18,10 @@
 # Treat this as a starting template — copy it, adapt the env vars and
 # `--command` body for your cluster + run, and submit from CI / a tmux / screen.
 #
+# DEPRECATED: XPK is deprecated. Use the Cluster Toolkit (gcluster) launcher
+# run_distill_ctk.sh instead. This script is kept only for existing XPK
+# environments and may be removed in a future release.
+#
 # The script expects a base image at $XPK_BASE_IMAGE. `prep_image` (below)
 # builds the MaxText TPU post-training Docker image as described in
 # https://maxtext.readthedocs.io/page/tutorials/build_maxtext.html#tpu-post-training-docker-image
@@ -114,6 +118,8 @@
 #   restarts, so the trainer auto-restores from the latest checkpoint each time.
 
 set -euo pipefail
+
+echo "WARNING: XPK is deprecated. Use run_distill_ctk.sh (Cluster Toolkit) instead." >&2
 MODE="${1:-submit}"
 
 # -------------------------- required env --------------------------

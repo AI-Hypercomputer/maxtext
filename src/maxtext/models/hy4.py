@@ -347,6 +347,10 @@ class Hy4Indexer(attention_mla.Indexer):
 
     topk_values, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)
     del topk_values
+    # Tag `topk_indices` under `"indexer_cutoff_threshold"` so `indexer_cutoff_threshold=device|offload`
+    # saves the discrete top-k selection across remat boundaries (preventing backward mask flips and
+    # allowing JAX DCE to eliminate backward Indexer recomputation).
+    topk_indices = checkpoint_name(topk_indices, "indexer_cutoff_threshold")
     # Match HYV4Attention: scatter False at topk_indices (unmasked=0.0, masked=DEFAULT_MASK_VALUE)
     selected = (
         jnp.zeros_like(indexer_score, dtype=jnp.bool_)
@@ -566,8 +570,9 @@ class Hy4DecoderLayer(nnx.Module):
     self.activation_axis_names = ("activation_batch", length_name, "activation_embed")
     self.stream_axis_names = ("activation_batch", length_name, None, "activation_embed")
     self.out_sharding = create_sharding(mesh, self.activation_axis_names, rules=get_logical_axis_rules())
+    mlp_length_name = "prefill_activation_length" if model_mode == MODEL_MODE_PREFILL else "activation_length"
     self.mlp_intermediate_sharding = create_sharding(
-        mesh, ("activation_batch", length_name, "activation_mlp"), rules=get_logical_axis_rules()
+        mesh, ("activation_batch", mlp_length_name, "activation_mlp"), rules=get_logical_axis_rules()
     )
 
     norm = functools.partial(
@@ -704,7 +709,10 @@ class Hy4DecoderLayer(nnx.Module):
     moe_bias_updates = None
     if self.is_moe:
       mlp_out, load_balance_loss, moe_bias_updates = self.moe_block(
-          hx, intermediate_sharding=self.mlp_intermediate_sharding, out_sharding=self.out_sharding
+          hx,
+          intermediate_sharding=self.mlp_intermediate_sharding,
+          out_sharding=self.out_sharding,
+          token_mask=moe.routing_token_mask(self.config, decoder_segment_ids, model_mode),
       )
     else:
       mlp_out = self.mlp(

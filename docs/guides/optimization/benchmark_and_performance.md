@@ -245,3 +245,38 @@ This can be set via `LIBTPU_INIT_ARGS`, range can be 0 through hardware limit. F
 ```
 LIBTPU_INIT_ARGS="---xla_tpu_scoped_vmem_limit_kib=65536"
 ```
+
+## Fixed random routing for TE MoE benchmarks
+
+For synthetic performance measurements, `use_random_routing=true` with `te_moe_block=true`
+replaces learned router logits with standard-normal samples before scoring and
+top-k selection. It is disabled by default and is not intended for convergence
+experiments. Add these overrides to an existing TE MoE benchmark:
+
+```text
+use_random_routing=true
+load_balance_loss_weight=0.0
+routed_bias_update_rate=0.0
+routed_bias=false
+```
+
+This requires a TransformerEngine version exposing `moe.RoutingMapInfo`.
+Hash routing and forced expert indices cannot be combined with this TE mode.
+Native JAX random routing is unchanged: it samples expert IDs directly (which
+may contain duplicates) and gathers their learned routing weights. TE instead
+uses random logits and normal top-k selection with distinct expert IDs per token.
+The logits use a straight-through gradient, inspired by
+[Megatron's RandomSTE](https://github.com/NVIDIA/Megatron-LM/blob/ad0c9714f304560f190a5466dbaa3f2e26e6bb7d/megatron/core/transformer/moe/moe_utils.py#L1433).
+The corresponding option is also exposed by
+[NeMo/Megatron Bridge](https://docs.nvidia.com/nemo/megatron-bridge/0.7.0/apidocs/bridge/bridge.models.model_provider.html).
+
+Unlike Megatron's advancing RNG stream, this benchmark uses a fixed key per
+layer, derived without advancing the parameter initialization RNG. For fixed
+input shapes, each layer repeats its routing across microbatches and training
+steps, including backward rematerialization. Only keys are stored; random
+logits are generated in the layer computation. This mode changes the routing
+implementation as well as the expert load distribution.
+
+Balance is statistical, not exact. Keep receive-capacity checks enabled and
+size `ragged_buffer_factor` for observed padded demand. An overflowed run is
+not evidence of successful dropless training.

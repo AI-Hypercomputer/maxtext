@@ -15,15 +15,24 @@
 """Tests for pyconfig."""
 
 import os.path
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
+import warnings
 import jax.numpy as jnp
 import yaml
 
+from maxtext.common.common_types import DecoderBlockType
 from maxtext.configs import pyconfig
-from maxtext.configs.pyconfig import resolve_config_path, _CONFIG_FILE_MAPPING, _module_from_path
+from maxtext.configs.pyconfig import (
+    _CONFIG_FILE_MAPPING,
+    _module_from_path,
+    resolve_config_path,
+    resolve_model_config_path,
+)
 from maxtext.configs.types import _normalize_axes, _resolved_fsdp_size, infer_cp_axes, infer_ep_axes
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_PKG_DIR
@@ -50,12 +59,79 @@ class PyconfigTest(unittest.TestCase):
           use_gmm_v2=False,
       )
 
+  def test_moe_tc_combine_requires_sparse_matmul(self):
+    with self.assertRaisesRegex(ValueError, "`moe_tc_combine=True` requires `sparse_matmul=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine=True,
+          sparse_matmul=False,
+      )
+
+  def test_moe_tc_combine_rejects_ring_of_experts(self):
+    with self.assertRaisesRegex(ValueError, "requires `use_ring_of_experts=False`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine=True,
+          sparse_matmul=True,
+          use_ring_of_experts=True,
+          use_ragged_sort=True,
+          ici_expert_parallelism=2,
+      )
+
+  def test_moe_tc_permute_requires_direct_token_gather(self):
+    with self.assertRaisesRegex(ValueError, "`moe_tc_permute=True` requires `moe_use_direct_token_gather=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_permute=True,
+          moe_use_direct_token_gather=False,
+      )
+
+  def test_moe_tc_permute_requires_sparse_matmul(self):
+    with self.assertRaisesRegex(ValueError, "`moe_tc_permute=True` requires `sparse_matmul=True`"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_permute=True,
+          moe_use_direct_token_gather=True,
+          sparse_matmul=False,
+      )
+
+  def test_moe_tc_kernels_require_tpu(self):
+    with self.assertRaisesRegex(ValueError, "only supported on TPU"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine=True,
+          sparse_matmul=True,
+          hardware="gpu",
+      )
+
+  def test_moe_tc_block_tokens_and_chunks_validation(self):
+    with self.assertRaisesRegex(ValueError, "`moe_tc_combine_block_tokens` must be a power of two >= 128"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine_block_tokens=64,
+      )
+    with self.assertRaisesRegex(ValueError, "`moe_tc_permute_block_tokens` must be a power of two >= 128"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_permute_block_tokens=192,
+      )
+    with self.assertRaisesRegex(ValueError, "`moe_tc_combine_col_chunks` must be >= 1"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_combine_col_chunks=0,
+      )
+    with self.assertRaisesRegex(ValueError, "`moe_tc_permute_expert_chunks` must be >= 1"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          moe_tc_permute_expert_chunks=0,
+      )
+
   def test_step_dropless_fallback_rejects_unreplayable_combinations(self):
     def initialize(**kwargs):
       return pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
           skip_jax_distributed_system=True,
-          model_name="mixtral-8x7b",
+          model_name="qwen3-30b-a3b",
           megablox=True,
           sparse_matmul=True,
           use_ring_of_experts=True,
@@ -75,6 +151,60 @@ class PyconfigTest(unittest.TestCase):
     ):
       with self.subTest(**overrides), self.assertRaisesRegex(ValueError, message):
         initialize(**overrides)
+
+  def test_replace_returns_updated_copy(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()], skip_jax_distributed_system=True
+    )
+    original_batch = config.global_batch_size_to_train_on
+    replaced = config.replace(run_name="replaced", global_batch_size_to_train_on=3)
+    self.assertEqual(replaced.run_name, "replaced")
+    self.assertEqual(replaced.global_batch_size_to_train_on, 3)
+    self.assertNotEqual(config.run_name, "replaced")
+    self.assertEqual(config.global_batch_size_to_train_on, original_batch)
+    self.assertEqual(replaced.logical_axis_rules, config.logical_axis_rules)
+
+  def test_replace_rejects_unknown_fields(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()], skip_jax_distributed_system=True
+    )
+    with self.assertRaisesRegex(ValueError, "data_replica_indx"):
+      config.replace(data_replica_indx=1)
+
+  def test_replace_checks_data_replica_fields(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()], skip_jax_distributed_system=True
+    )
+    self.assertEqual(config.replace(num_data_replicas_per_process=2, data_replica_index=1).data_replica_index, 1)
+    with self.assertRaisesRegex(ValueError, "data_replica_index"):
+      config.replace(num_data_replicas_per_process=2, data_replica_index=2)
+    for updates in ({"colocated_python_data_input": True}, {"dataset_type": "c4_mlperf"}, {"dataset_type": "olmo_grain"}):
+      with self.subTest(**updates), self.assertRaisesRegex(ValueError, "num_data_replicas_per_process > 1"):
+        config.replace(num_data_replicas_per_process=2, **updates)
+
+  def test_data_replica_index_must_be_below_replica_count(self):
+    with self.assertRaisesRegex(ValueError, "data_replica_index"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          num_data_replicas_per_process=2,
+          data_replica_index=2,
+      )
+
+  def test_data_replica_fields_boundaries(self):
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        num_data_replicas_per_process=3,
+        data_replica_index=2,
+    )
+    self.assertEqual(config.data_replica_index, 2)
+    with self.assertRaisesRegex(ValueError, "num_data_replicas_per_process"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          num_data_replicas_per_process=0,
+      )
 
   def test_gdn_context_parallelism_rejects_load_balance(self):
     """The reorder composes the GatedDeltaNet recurrence out of order.
@@ -292,13 +422,13 @@ class PyconfigTest(unittest.TestCase):
     config = pyconfig.initialize(
         [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
         skip_jax_distributed_system=True,
-        model_name="gemma-7b",
+        model_name="gemma3-4b",
         override_model_config=True,
-        base_emb_dim=1024,  # Defined as 3072 in gemma-7b
+        base_emb_dim=1024,  # Defined as 2560 in gemma3-4b
     )
 
     self.assertEqual(config.base_emb_dim, 1024)  # override
-    self.assertEqual(config.base_mlp_dim, 24576)  # unchanged
+    self.assertEqual(config.base_mlp_dim, 10240)  # unchanged
 
   def test_overriding_model_raises_error(self):
     """Test that overriding a model config with override_model_config=False raises an error."""
@@ -306,9 +436,9 @@ class PyconfigTest(unittest.TestCase):
       pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
           skip_jax_distributed_system=True,
-          model_name="gemma-7b",
+          model_name="gemma3-4b",
           override_model_config=False,
-          base_emb_dim=1024,  # Defined as 3072 in gemma-7b
+          base_emb_dim=1024,  # Defined as 2560 in gemma3-4b
       )
 
   def test_overriding_model_in_sft(self):
@@ -874,6 +1004,14 @@ assert train._TF_AVAILABLE is False
     # CP still inferred from activation_length
     self.assertEqual(infer_cp_axes(cp_as_ep_rules), ("context",))
 
+  def test_tp_as_ep_infer_axes(self):
+    """tp-as-ep: exp -> ['expert', 'tensor'], so ici_tensor_parallelism contributes to EP rank."""
+    tp_as_ep_rules = [
+        ["exp", ["expert", "tensor"]],
+        ["activation_length", ["context"]],
+    ]
+    self.assertEqual(infer_ep_axes(tp_as_ep_rules), ("expert", "tensor"))
+
   def test_ep_as_cp_infer_axes(self):
     """ep-as-cp: activation_length -> ['expert'], exp -> 'expert'. Expert axis serves both CP and EP."""
     ep_as_cp_rules = [
@@ -883,9 +1021,8 @@ assert train._TF_AVAILABLE is False
     self.assertEqual(infer_cp_axes(ep_as_cp_rules), ("expert",))
     self.assertEqual(infer_ep_axes(ep_as_cp_rules), ("expert",))
 
-  def test_shard_embed_moe_on_fsdp_requires_quantization(self):
-    """Verifies that a ValueError is raised when shard_embed_moe_on_fsdp
-    is used without fixed weight quantization calibration."""
+  def test_moe_fsdp_qwag_sharding_validation(self):
+    """Tests validation of the QWAG flags."""
     with self.assertRaises(ValueError):
       pyconfig.initialize(
           [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
@@ -900,17 +1037,80 @@ assert train._TF_AVAILABLE is False
           skip_jax_distributed_system=True,
           shard_embed_moe_on_fsdp=True,
           quantization="int8",
+          weight_quantization_calibration_method="rms,2.0",
+      )
+
+    # These should not raise: fixed (static) and absmax (dynamic QWAG) weight calibration.
+    for method in ("fixed,-1,1", "absmax"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_embed_moe_on_fsdp=True,
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          use_tokamax_gmm=True,
+          weight_quantization_calibration_method=method,
+      )
+
+    # shard_exp_on_fsdp: unquantized (XLA all-gather fallback) and dynamic QWAG should not raise.
+    for quantization in ("", "fp8_full"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_exp_on_fsdp=True,
+          quantization=quantization,
+          use_qwix_quantization=True,
+          use_tokamax_gmm=True,
           weight_quantization_calibration_method="absmax",
       )
 
-    # This should not raise
-    pyconfig.initialize(
-        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
-        skip_jax_distributed_system=True,
-        shard_embed_moe_on_fsdp=True,
-        quantization="int8",
-        weight_quantization_calibration_method="fixed,-1,1",
-    )
+    # Without tokamax: warns and falls back to the XLA all-gather.
+    with mock.patch.object(pyconfig.types.max_logging, "warning") as mock_warning:
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_exp_on_fsdp=True,
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          use_tokamax_gmm=False,
+          weight_quantization_calibration_method="absmax",
+      )
+    mock_warning.assert_any_call("shard_exp_on_fsdp QWAG needs use_tokamax_gmm=True; using the XLA all-gather.")
+
+    with self.assertRaisesRegex(ValueError, "shard_embed_moe_on_fsdp QWAG .*does not support prefetch_fsdp_weights"):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_embed_moe_on_fsdp=True,
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          use_tokamax_gmm=True,
+          weight_quantization_calibration_method="fixed,-224,224",
+          prefetch_fsdp_weights=True,
+      )
+
+    # One config hitting every dynamic-QWAG rejection.
+    with self.assertRaisesRegex(
+        ValueError,
+        "shard_exp_on_fsdp with absmax weight calibration does not support use_batch_split_schedule, "
+        "num_moe_emb_chunks > 0, moe_use_fused_gmm3d, per_expert_channel with moe_flat_fsdp_weights, "
+        "per_expert_channel with use_gmm_v2=False, per_expert_channel with use_ring_of_experts",
+    ):
+      pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+          shard_exp_on_fsdp=True,
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          use_tokamax_gmm=True,
+          weight_quantization_calibration_method="absmax",
+          moe_weight_quantization_granularity="per_expert_channel",
+          use_batch_split_schedule=True,
+          num_moe_emb_chunks=1,
+          moe_use_fused_gmm3d=True,
+          moe_flat_fsdp_weights=True,
+          use_ring_of_experts=True,
+      )
 
   def test_base_yml_types_parity(self):
     """Verifies that types.MaxTextConfig() defaults match MaxTextConfig(**base_yaml)."""
@@ -989,6 +1189,431 @@ assert train._TF_AVAILABLE is False
     )
     self.assertEqual(cfg_override.weight_dtype, jnp.float32)
     self.assertEqual(cfg_override.rollout_weight_dtype, jnp.bfloat16)
+
+  def test_goodput_disabled_by_default_in_test_runners_with_explicit_overrides(self):
+    """Verifies Goodput defaults to True in production and False inside test runners unless overridden."""
+    # 1. Production default (outside test runners): enabled by default from base.yml,
+    # even when `unittest` is transitively imported in sys.modules (e.g. via unittest.mock).
+    with mock.patch.object(pyconfig, "_is_running_in_test", return_value=False):
+      cfg_prod = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
+          skip_jax_distributed_system=True,
+      )
+      self.assertTrue(cfg_prod.enable_goodput_recording)
+      self.assertTrue(cfg_prod.monitor_goodput)
+
+    # 2. Default inside test runner: disabled even when loading base.yml directly.
+    cfg_default = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")],
+        skip_jax_distributed_system=True,
+    )
+    self.assertFalse(cfg_default.enable_goodput_recording)
+    self.assertFalse(cfg_default.monitor_goodput)
+
+    # 3. Explicit kwargs override enables Goodput inside test runner.
+    cfg_kwargs = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        enable_goodput_recording=True,
+        monitor_goodput=True,
+    )
+    self.assertTrue(cfg_kwargs.enable_goodput_recording)
+    self.assertTrue(cfg_kwargs.monitor_goodput)
+
+    # 4. Explicit CLI override enables Goodput inside test runner.
+    cfg_cli = pyconfig.initialize(
+        [
+            os.path.join(MAXTEXT_PKG_DIR, "train.py"),
+            get_test_config_path(),
+            "enable_goodput_recording=True",
+            "monitor_goodput=True",
+        ],
+        skip_jax_distributed_system=True,
+    )
+    self.assertTrue(cfg_cli.enable_goodput_recording)
+    self.assertTrue(cfg_cli.monitor_goodput)
+
+    # 5. Explicit M_* environment variable override enables Goodput inside test runner.
+    orig_rec = os.environ.get("M_ENABLE_GOODPUT_RECORDING")
+    orig_mon = os.environ.get("M_MONITOR_GOODPUT")
+    try:
+      os.environ["M_ENABLE_GOODPUT_RECORDING"] = "true"
+      os.environ["M_MONITOR_GOODPUT"] = "true"
+      cfg_env = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+          skip_jax_distributed_system=True,
+      )
+      self.assertTrue(cfg_env.enable_goodput_recording)
+      self.assertTrue(cfg_env.monitor_goodput)
+    finally:
+      if orig_rec is None:
+        os.environ.pop("M_ENABLE_GOODPUT_RECORDING", None)
+      else:
+        os.environ["M_ENABLE_GOODPUT_RECORDING"] = orig_rec
+      if orig_mon is None:
+        os.environ.pop("M_MONITOR_GOODPUT", None)
+      else:
+        os.environ["M_MONITOR_GOODPUT"] = orig_mon
+
+    # 6. Explicit child YAML override preserves Goodput settings inside test runner.
+    with tempfile.NamedTemporaryFile("w", suffix=".yml", delete=False) as tmp_yml:
+      base_yml_path = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+      tmp_yml.write(f"base_config: {base_yml_path}\nenable_goodput_recording: true\nmonitor_goodput: true\n")
+      tmp_yml_path = tmp_yml.name
+    try:
+      cfg_yaml = pyconfig.initialize(
+          [os.path.join(MAXTEXT_PKG_DIR, "train.py"), tmp_yml_path],
+          skip_jax_distributed_system=True,
+      )
+      self.assertTrue(cfg_yaml.enable_goodput_recording)
+      self.assertTrue(cfg_yaml.monitor_goodput)
+    finally:
+      os.remove(tmp_yml_path)
+
+  def test_resolve_model_config_path_priority_and_fallback(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      pkg_dir = os.path.join(tmpdir, "pkg_configs")
+      parent_dir = os.path.join(tmpdir, "custom_configs")
+      sub_dir = os.path.join(parent_dir, "post_train")
+      config_path = os.path.join(sub_dir, "sft.yml")
+      os.makedirs(sub_dir, exist_ok=True)
+
+      # 1. Missing everywhere -> returns default package active path with is_deprecated=False.
+      resolved, is_deprecated = resolve_model_config_path(config_path, "gemma-2b", configs_dir=pkg_dir)
+      self.assertEqual(resolved, os.path.join(pkg_dir, "models", "gemma-2b.yml"))
+      self.assertFalse(is_deprecated)
+
+      # 2. Package deprecated fallback.
+      pkg_deprecated = os.path.join(pkg_dir, "models", "deprecated", "gemma-2b.yml")
+      os.makedirs(os.path.dirname(pkg_deprecated), exist_ok=True)
+      with open(pkg_deprecated, "w", encoding="utf-8") as f:
+        f.write("base_emb_dim: 2048\n")
+      resolved, is_deprecated = resolve_model_config_path(config_path, "gemma-2b", configs_dir=pkg_dir)
+      self.assertEqual(resolved, pkg_deprecated)
+      self.assertTrue(is_deprecated)
+
+      # 3. Parent deprecated takes precedence over package deprecated.
+      parent_deprecated = os.path.join(parent_dir, "models", "deprecated", "gemma-2b.yml")
+      os.makedirs(os.path.dirname(parent_deprecated), exist_ok=True)
+      with open(parent_deprecated, "w", encoding="utf-8") as f:
+        f.write("base_emb_dim: 2048\n")
+      resolved, is_deprecated = resolve_model_config_path(config_path, "gemma-2b", configs_dir=pkg_dir)
+      self.assertEqual(resolved, parent_deprecated)
+      self.assertTrue(is_deprecated)
+
+      # 4. Active package model always takes precedence over any deprecated path.
+      pkg_active = os.path.join(pkg_dir, "models", "gemma-2b.yml")
+      with open(pkg_active, "w", encoding="utf-8") as f:
+        f.write("base_emb_dim: 2048\n")
+      resolved, is_deprecated = resolve_model_config_path(config_path, "gemma-2b", configs_dir=pkg_dir)
+      self.assertEqual(resolved, pkg_active)
+      self.assertFalse(is_deprecated)
+
+  def test_deprecated_model_config_fallback_and_active_precedence(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      for cfg_filename in ("base.yml", "decoupled_base_test.yml"):
+        shutil.copyfile(
+            os.path.join(MAXTEXT_CONFIGS_DIR, cfg_filename),
+            os.path.join(tmpdir, cfg_filename),
+        )
+
+      test_cfg_basename = os.path.basename(get_test_config_path())
+      tmp_test_cfg = os.path.join(tmpdir, test_cfg_basename)
+      nested_dir = os.path.join(tmpdir, "post_train")
+      os.makedirs(nested_dir, exist_ok=True)
+      nested_cfg = os.path.join(nested_dir, "nested_test.yml")
+      with open(nested_cfg, "w", encoding="utf-8") as f:
+        f.write(f"base_config: ../{test_cfg_basename}\n")
+
+      active_models_dir = os.path.join(tmpdir, "models")
+      deprecated_models_dir = os.path.join(active_models_dir, "deprecated")
+      os.makedirs(deprecated_models_dir, exist_ok=True)
+
+      # Place gemma-2b ONLY in models/deprecated/.
+      shutil.copyfile(
+          os.path.join(MAXTEXT_CONFIGS_DIR, "models", "gemma-2b.yml"),
+          os.path.join(deprecated_models_dir, "gemma-2b.yml"),
+      )
+
+      # Place qwen3-0.6b in BOTH active models/ and models/deprecated/ (with sentinel dim).
+      shutil.copyfile(
+          os.path.join(MAXTEXT_CONFIGS_DIR, "models", "qwen3-0.6b.yml"),
+          os.path.join(active_models_dir, "qwen3-0.6b.yml"),
+      )
+      with open(os.path.join(deprecated_models_dir, "qwen3-0.6b.yml"), "w", encoding="utf-8") as f:
+        f.write("base_emb_dim: 99999\n")
+
+      with mock.patch.object(pyconfig, "_DEFAULT_CONFIGS_DIR", tmpdir):
+        with warnings.catch_warnings(record=True) as caught:
+          warnings.simplefilter("always", DeprecationWarning)
+          cfg_deprecated = pyconfig.initialize(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), tmp_test_cfg],
+              skip_jax_distributed_system=True,
+              model_name="gemma-2b",
+          )
+        self.assertEqual(cfg_deprecated.base_emb_dim, 2048)
+        dep_warnings = [w for w in caught if issubclass(w.category, DeprecationWarning) and "gemma-2b" in str(w.message)]
+        self.assertEqual(len(dep_warnings), 1)
+        self.assertIn("MaxText Model Lifecycle Policy", str(dep_warnings[0].message))
+        self.assertEqual(os.path.realpath(dep_warnings[0].filename), os.path.realpath(__file__))
+
+        with warnings.catch_warnings(record=True) as caught_nested:
+          warnings.simplefilter("always", DeprecationWarning)
+          cfg_nested = pyconfig.initialize_pydantic(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), nested_cfg],
+              skip_jax_distributed_system=True,
+              model_name="gemma-2b",
+          )
+        self.assertEqual(cfg_nested.base_emb_dim, 2048)
+        nested_dep_warnings = [
+            w for w in caught_nested if issubclass(w.category, DeprecationWarning) and "gemma-2b" in str(w.message)
+        ]
+        self.assertEqual(len(nested_dep_warnings), 1)
+        self.assertEqual(os.path.realpath(nested_dep_warnings[0].filename), os.path.realpath(__file__))
+
+        with warnings.catch_warnings(record=True) as caught_active:
+          warnings.simplefilter("always", DeprecationWarning)
+          cfg_active = pyconfig.initialize(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), tmp_test_cfg],
+              skip_jax_distributed_system=True,
+              model_name="qwen3-0.6b",
+          )
+        self.assertEqual(cfg_active.base_emb_dim, 1024)
+        active_dep_warnings = [
+            w for w in caught_active if issubclass(w.category, DeprecationWarning) and "qwen3-0.6b" in str(w.message)
+        ]
+        self.assertEqual(len(active_dep_warnings), 0)
+
+  def test_glm5_configs_and_prune_shared_indexers_resolution(self):
+    """Verifies GLM-5.1 and GLM-5.2 config loading and tri-state prune_shared_indexers resolution."""
+    base_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()]
+
+    cfg_51_scan = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.1-744b",
+        override_model_config=True,
+        scan_layers=True,
+        routed_bias_update_rate=1e-3,
+    )
+    self.assertEqual(cfg_51_scan.decoder_block, DecoderBlockType.GLM5)
+    self.assertFalse(cfg_51_scan.use_index_share)
+    self.assertFalse(cfg_51_scan.prune_shared_indexers)
+    self.assertTrue(cfg_51_scan.use_indexer)
+    self.assertTrue(cfg_51_scan.indexer_rope_interleave)
+    self.assertTrue(cfg_51_scan.float32_gate_logits)
+    self.assertTrue(cfg_51_scan.rope_direct_position_freqs)
+    self.assertEqual(cfg_51_scan.num_decoder_layers, 78)
+    self.assertEqual(cfg_51_scan.first_num_dense_layers, 3)
+
+    cfg_51_unscan = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.1-744b",
+        override_model_config=True,
+        scan_layers=False,
+    )
+    self.assertFalse(cfg_51_unscan.prune_shared_indexers)
+
+    cfg_52_scan = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.2-744b",
+        override_model_config=True,
+        scan_layers=True,
+    )
+    self.assertEqual(cfg_52_scan.decoder_block, DecoderBlockType.GLM5)
+    self.assertTrue(cfg_52_scan.use_index_share)
+    self.assertFalse(cfg_52_scan.prune_shared_indexers)
+    self.assertEqual(len(cfg_52_scan.index_share_pattern), 78)
+
+    cfg_52_unscan = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.2-744b",
+        override_model_config=True,
+        scan_layers=False,
+    )
+    self.assertTrue(cfg_52_unscan.prune_shared_indexers)
+
+    cfg_52_unscan_keep = pyconfig.initialize(
+        base_args,
+        skip_jax_distributed_system=True,
+        model_name="glm5.2-744b",
+        override_model_config=True,
+        scan_layers=False,
+        prune_shared_indexers=False,
+    )
+    self.assertFalse(cfg_52_unscan_keep.prune_shared_indexers)
+
+  def test_glm5_index_share_fast_fail_validations(self):
+    """Verifies every fast-fail ValueError invariant for GLM-5 and IndexShare."""
+    base_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()]
+
+    def init_glm52(**overrides):
+      return pyconfig.initialize(
+          base_args,
+          skip_jax_distributed_system=True,
+          model_name="glm5.2-744b",
+          override_model_config=True,
+          **overrides,
+      )
+
+    with self.assertRaisesRegex(ValueError, "prune_shared_indexers=True` is incompatible with `scan_layers=True`"):
+      init_glm52(scan_layers=True, prune_shared_indexers=True)
+
+    stack_err_regex = (
+        r"prune_shared_indexers=True` is incompatible with `stack_prefill_result_cache=True`"
+        r".*IndexerKVCache_0.*prune_shared_indexers=False"
+    )
+    # Explicit prune_shared_indexers=True + stack_prefill_result_cache=True must fail fast.
+    with self.assertRaisesRegex(ValueError, stack_err_regex):
+      init_glm52(scan_layers=False, prune_shared_indexers=True, stack_prefill_result_cache=True)
+
+    # Default prune_shared_indexers=None resolves to True when use_index_share=True and scan_layers=False.
+    with self.assertRaisesRegex(ValueError, stack_err_regex):
+      init_glm52(scan_layers=False, stack_prefill_result_cache=True)
+
+    # Retaining Shared-layer indexers (prune_shared_indexers=False) allows stacking prefill caches cleanly.
+    cfg_unscan_stacked = init_glm52(
+        scan_layers=False,
+        prune_shared_indexers=False,
+        stack_prefill_result_cache=True,
+    )
+    self.assertTrue(cfg_unscan_stacked.use_index_share)
+    self.assertFalse(cfg_unscan_stacked.scan_layers)
+    self.assertFalse(cfg_unscan_stacked.prune_shared_indexers)
+    self.assertTrue(cfg_unscan_stacked.stack_prefill_result_cache)
+
+    # Scanned layers resolve prune_shared_indexers=False by default and also allow stack_prefill_result_cache=True.
+    cfg_scan_stacked = init_glm52(scan_layers=True, stack_prefill_result_cache=True)
+    self.assertFalse(cfg_scan_stacked.prune_shared_indexers)
+    self.assertTrue(cfg_scan_stacked.stack_prefill_result_cache)
+
+    with self.assertRaisesRegex(ValueError, "mhc_expansion_rate > 1"):
+      pyconfig.initialize(
+          base_args,
+          skip_jax_distributed_system=True,
+          model_name="glm5.1-744b",
+          override_model_config=True,
+          mhc_expansion_rate=2,
+      )
+
+    with self.assertRaisesRegex(ValueError, "mhc_expansion_rate > 1"):
+      init_glm52(mhc_expansion_rate=2)
+
+    with self.assertRaisesRegex(ValueError, "requires `use_indexer=True`"):
+      init_glm52(use_indexer=False)
+
+    with self.assertRaisesRegex(ValueError, "requires `decoder_block='glm5'`"):
+      init_glm52(decoder_block="deepseek")
+
+    with self.assertRaisesRegex(ValueError, "requires `attention_type='mla'`"):
+      init_glm52(attention_type="global")
+
+    with self.assertRaisesRegex(ValueError, "requires `indexer_topk > 0`"):
+      init_glm52(indexer_topk=0)
+
+    for bad_attn in ("vllm_rpa", "vllm_batched_rpa"):
+      with self.subTest(attention=bad_attn):
+        with self.assertRaisesRegex(ValueError, "not supported with `attention="):
+          init_glm52(attention=bad_attn)
+
+    with self.assertRaisesRegex(ValueError, "not supported with pipeline parallelism"):
+      init_glm52(ici_pipeline_parallelism=2)
+
+    with self.assertRaisesRegex(ValueError, "not supported with pipeline parallelism"):
+      init_glm52(dcn_pipeline_parallelism=2)
+
+    with self.assertRaisesRegex(ValueError, "not supported with `engram_layers`"):
+      init_glm52(engram_layers=[0])
+
+    with self.assertRaisesRegex(ValueError, "not supported with `use_batch_split_schedule=True`"):
+      init_glm52(use_batch_split_schedule=True)
+
+    with self.assertRaisesRegex(ValueError, "must evenly divide"):
+      init_glm52(index_share_pattern="FSSS")
+
+    with self.assertRaisesRegex(ValueError, "First layer \\(Layer 0\\) must always be 'F'"):
+      init_glm52(base_num_decoder_layers=4, first_num_dense_layers=1, index_share_pattern="SFFF")
+
+  def test_glm5_explicit_sharding_fast_fail(self):
+    """Verifies `shard_mode='explicit'` fails fast for GLM-5 and IndexShare across MaxTextConfig and RLConfig."""
+    base_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()]
+    rl_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_CONFIGS_DIR, "post_train/rl.yml")]
+
+    for model_name in ("glm5.1-744b", "glm5.2-744b"):
+      with self.subTest(config_class="MaxTextConfig", model_name=model_name):
+        with self.assertRaisesRegex(ValueError, "shard_mode='explicit'` is not supported"):
+          pyconfig.initialize(
+              base_args,
+              skip_jax_distributed_system=True,
+              model_name=model_name,
+              override_model_config=True,
+              shard_mode="explicit",
+          )
+
+      with self.subTest(config_class="RLConfig", model_name=model_name):
+        with self.assertRaisesRegex(ValueError, "shard_mode='explicit'` is not supported"):
+          pyconfig.initialize(
+              rl_args,
+              config_class=pyconfig.types.RLConfig,
+              skip_jax_distributed_system=True,
+              model_name=model_name,
+              override_model_config=True,
+              shard_mode="explicit",
+              tokenizer_path="tests/assets/tokenizers/tokenizer.llama2",
+          )
+
+  def test_rl_config_routed_bias_update_rate_validation(self):
+    """Verifies RLConfig allows loss-free load balancing for DeepSeek/GLM5 and rejects unsupported decoder blocks."""
+    rl_args = [os.path.join(MAXTEXT_PKG_DIR, "train.py"), os.path.join(MAXTEXT_CONFIGS_DIR, "post_train/rl.yml")]
+    tok_path = "tests/assets/tokenizers/tokenizer.llama2"
+
+    for model_name in ("glm5.2-744b", "glm5.1-744b", "deepseek3-671b", "deepseek4-284b"):
+      with self.subTest(supported_model=model_name):
+        cfg = pyconfig.initialize_pydantic(
+            rl_args,
+            config_class=pyconfig.types.RLConfig,
+            skip_jax_distributed_system=True,
+            model_name=model_name,
+            override_model_config=True,
+            routed_bias=True,
+            routed_bias_update_rate=1e-3,
+            tokenizer_path=tok_path,
+        )
+        self.assertTrue(cfg.routed_bias)
+        self.assertEqual(cfg.routed_bias_update_rate, 1e-3)
+
+    # Static routed_bias=True with routed_bias_update_rate=0.0 remains allowed on non-DeepSeek/GLM models.
+    cfg_static = pyconfig.initialize_pydantic(
+        rl_args,
+        config_class=pyconfig.types.RLConfig,
+        skip_jax_distributed_system=True,
+        model_name="gpt-oss-20b",
+        override_model_config=True,
+        routed_bias=True,
+        routed_bias_update_rate=0.0,
+        tokenizer_path=tok_path,
+    )
+    self.assertTrue(cfg_static.routed_bias)
+    self.assertEqual(cfg_static.routed_bias_update_rate, 0.0)
+
+    for unsupported_model in ("mixtral-8x7b", "qwen3-30b-a3b"):
+      with self.subTest(unsupported_model=unsupported_model):
+        with self.assertRaisesRegex(
+            ValueError, "Loss-free load balancing is only supported for the DeepSeek/GLM decoder block."
+        ):
+          pyconfig.initialize_pydantic(
+              rl_args,
+              config_class=pyconfig.types.RLConfig,
+              skip_jax_distributed_system=True,
+              model_name=unsupported_model,
+              override_model_config=True,
+              routed_bias=True,
+              routed_bias_update_rate=1e-3,
+              tokenizer_path=tok_path,
+          )
 
 
 if __name__ == "__main__":

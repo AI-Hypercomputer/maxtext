@@ -173,10 +173,17 @@ def get_match_format_regex(tmvp_config: Any) -> re.Pattern[str]:
       if getattr(tmvp_config, "reasoning_start_token_in_prompt", False)
       else re.escape(tmvp_config.reasoning_start_token)
   )
+  # The two skip segments are atomic groups: `(?>.*?X)` stops at the first X and
+  # never backtracks to a later one. That is equivalent for this pattern (if the
+  # rest fails after the first X it also fails after any later X), but it bounds
+  # the search on completions that repeat the tag literals without closing them.
+  # With plain `.*?` such outputs (e.g. ~60k-char echoes from small models)
+  # backtrack catastrophically and a single completion can stall the reward or
+  # eval step for minutes.
   match_format = re.compile(
       (
-          rf"{reasoning_start}.*?{re.escape(tmvp_config.reasoning_end_token)}.*?"
-          rf"{re.escape(tmvp_config.solution_start_token)}(.+?){re.escape(tmvp_config.solution_end_token)}"
+          rf"{reasoning_start}(?>.*?{re.escape(tmvp_config.reasoning_end_token)})"
+          rf"(?>.*?{re.escape(tmvp_config.solution_start_token)})(.+?){re.escape(tmvp_config.solution_end_token)}"
       ),
       flags=re.MULTILINE | re.DOTALL,
   )

@@ -18,6 +18,7 @@ Modules:
   * `rope.py` — rotary positional embedding (base implementation).
   * `checkpoint.py` — legacy decoder layer-name translation.
   * `sharding.py` — `Sharding` ABC, `DefaultSharding` rules, mesh creation.
+  * `kernels.py` — `AttentionKernel` and `SplashConfig` attention kernel dispatch.
 
 Planned modules:
   * `interfaces.py` — shared ABCs and `CausalLMOutput`.

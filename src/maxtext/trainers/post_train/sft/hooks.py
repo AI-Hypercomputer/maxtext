@@ -42,3 +42,6 @@ class SFTTrainingHooks(BaseTrainingHooks):
 
 class SFTDataHooks(BaseDataHooks):
   """Data hooks for SFT."""
+
+  def __init__(self, config, mesh, goodput_recorder):
+    super().__init__(config, mesh, goodput_recorder, reorder_batches=True)

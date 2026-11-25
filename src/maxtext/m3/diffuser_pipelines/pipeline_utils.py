@@ -1,0 +1,271 @@
+# Copyright 2023–2025 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Model-agnostic diffusion pipeline utilities and base classes."""
+
+from abc import abstractmethod
+import os
+from typing import List, Tuple, Union
+
+from diffusers.utils import BaseOutput
+import flax
+import jax
+import numpy as np
+from PIL import Image
+from tqdm.auto import tqdm
+
+from maxtext.multimodal.processor_vae import VaeImageProcessor
+from maxtext.utils import max_logging
+
+INDEX_FILE = "diffusion_flax_model.bin"
+
+
+# --- Profiler ---
+def profiler_enabled(config):
+  return bool(getattr(config, "enable_profiler", False)) and jax.process_index() == 0
+
+
+class Profiler:
+  """Starts/stops a JAX profiler trace and uploads it to GCS when configured."""
+
+  def __init__(self, config, session_name=None):
+    self.config = config
+    self.session_name = session_name
+    self._active = None
+
+  def start(self):
+    """Start a JAX trace if profiling is enabled on this process."""
+    if not profiler_enabled(self.config):
+      return
+    log_dir = getattr(self.config, "tensorboard_dir", "")
+    if not log_dir or log_dir.startswith("gs://"):
+      run_name = getattr(self.config, "run_name", "run")
+      log_dir = os.path.join("/tmp/profiler_traces", run_name)
+    if self.session_name:
+      log_dir = os.path.join(log_dir, self.session_name)
+    os.makedirs(log_dir, exist_ok=True)
+    max_logging.log(f"Starting profiler trace in: {log_dir}")
+    jax.profiler.start_trace(log_dir)
+    self._active = "jax"
+
+  def stop(self):
+    """Stop the active trace and upload it to GCS if tensorboard_dir is a gs:// path."""
+    if self._active == "jax":  # pylint: disable=too-many-nested-blocks
+      jax.profiler.stop_trace()
+      trace_dir = getattr(self.config, "tensorboard_dir", "")
+      if trace_dir.startswith("gs://"):
+        run_name = getattr(self.config, "run_name", "run")
+        local_dir = os.path.join("/tmp/profiler_traces", run_name)
+        if os.path.exists(local_dir):
+          try:
+            # Optional dependency, only needed when uploading traces.
+            from google.cloud import storage  # pylint: disable=import-outside-toplevel
+
+            path_without_scheme = trace_dir.removeprefix("gs://")
+            parts = path_without_scheme.split("/", 1)
+            bucket_name = parts[0]
+            prefix = parts[1] if len(parts) > 1 else ""
+            client = storage.Client()
+            bucket = client.bucket(bucket_name)
+            for root, _, files in os.walk(local_dir):
+              for file in files:
+                local_file = os.path.join(root, file)
+                rel_path = os.path.relpath(local_file, local_dir)
+                blob_name = os.path.join(prefix, rel_path)
+                blob = bucket.blob(blob_name)
+                blob.upload_from_filename(local_file)
+                max_logging.log(f"Uploaded {local_file} to gs://{bucket_name}/{blob_name}")
+          except Exception as e:  # pylint: disable=broad-exception-caught
+            # Best-effort upload: never fail the run because of trace upload.
+            max_logging.log(f"Failed to upload profiler traces: {e}")
+    self._active = None
+
+
+@flax.struct.dataclass
+class ImagePipelineOutput(BaseOutput):
+  """
+  Output class for image pipelines.
+
+  Args:
+      images (`List[PIL.Image.Image]` or `np.ndarray`)
+          List of denoised PIL images of length `batch_size` or NumPy array of shape `(batch_size, height, width,
+          num_channels)`.
+  """
+
+  images: Union[List[Image.Image], np.ndarray]
+
+
+def _restored_component(restored_checkpoint, component: str, model_cls):
+  """Returns (state, model_config) of a diffusers component from a restored checkpoint.
+
+  Checkpoints from to_maxtext_diffusers.py store `<component>_state` / `<component>_config` items
+  (e.g. `transformer_state`, `vae_state`). Older checkpoints only have a transformer, stored as
+  `wan_state` / `model_state` (WAN 2.1) or `high_noise_transformer_state` (diffusers `transformer`) and
+  `low_noise_transformer_state` (diffusers `transformer_2`) for WAN 2.2. The config is filtered to
+  `model_cls.__init__` arguments, since older checkpoints stored the raw HF config.
+  """
+  from maxtext.checkpoint_conversion.to_maxtext_diffusers import model_init_config  # pylint: disable=import-outside-toplevel
+
+  keys = set(restored_checkpoint.keys())
+  legacy_states = {
+      "transformer": ("wan_state", "model_state", "high_noise_transformer_state"),
+      "transformer_2": ("low_noise_transformer_state",),
+  }
+  state_key = next(
+      (k for k in (f"{component}_state", *legacy_states.get(component, ())) if k in keys),
+      None,
+  )
+  if state_key is None:
+    raise ValueError(
+        f"Checkpoint has no `{component}_state` (items: {sorted(keys)}). Re-run"
+        " checkpoint_conversion/to_maxtext_diffusers.py to convert all components."
+    )
+  config_key = next(
+      (k for k in (f"{component}_config", "wan_config", "model_config") if k in keys),
+      None,
+  )
+  model_config = dict(restored_checkpoint[config_key]) if config_key else {}
+  return restored_checkpoint[state_key], model_init_config(model_cls, model_config)
+
+
+def _to_int_path(path: tuple) -> tuple:
+  """Restored checkpoints key NNX list indices as strings ("0"); NNX state uses ints."""
+  return tuple(int(p) if isinstance(p, str) and p.isdigit() else p for p in path)
+
+
+class DiffusionPipeline:
+  r"""Base class for diffusion pipelines: checkpoint loading and shared helpers."""
+
+  # Pipeline attributes holding the transformer(s) that `_load_and_init` returns after the pipeline object.
+  _transformer_keys = ["transformer"]
+
+  @staticmethod
+  def numpy_to_pil(images):
+    """
+    Convert a NumPy image or a batch of images to a PIL image.
+    """
+    return VaeImageProcessor.numpy_to_pil(images)
+
+  # TODO: make it compatible with jax.lax
+  def progress_bar(self, iterable):
+    if not hasattr(self, "_progress_bar_config"):
+      self._progress_bar_config = {}
+    elif not isinstance(self._progress_bar_config, dict):
+      raise ValueError(f"`self._progress_bar_config` should be of type `dict`, but is {type(self._progress_bar_config)}.")
+
+    return tqdm(iterable, **self._progress_bar_config)
+
+  def set_progress_bar_config(self, **kwargs):
+    self._progress_bar_config = kwargs
+
+  @classmethod
+  @abstractmethod
+  def _load_and_init(
+      cls,
+      config,
+      restored_checkpoint=None,
+      load_vae=True,
+      load_text_encoder=True,
+      load_transformer=True,
+      load_scheduler=True,
+  ):
+    """Loads and initializes the pipeline components; returns `(pipeline, *transformers)`."""
+    raise NotImplementedError
+
+  @classmethod
+  def _resolve_and_validate_load_flags(
+      cls,
+      vae_only=False,
+      load_vae=None,
+      load_text_encoder=None,
+      load_transformer=None,
+      load_scheduler=None,
+  ) -> Tuple[bool, bool, bool, bool]:
+    """Resolve (load_vae, load_text_encoder, load_transformer, load_scheduler), rejecting conflicts."""
+    if vae_only:
+      if load_vae is False:
+        raise ValueError("Conflict: vae_only=True but load_vae=False")
+      if load_text_encoder is True:
+        raise ValueError("Conflict: vae_only=True but load_text_encoder=True")
+      if load_transformer is True:
+        raise ValueError("Conflict: vae_only=True but load_transformer=True")
+      if load_scheduler is True:
+        raise ValueError("Conflict: vae_only=True but load_scheduler=True")
+      return True, False, False, False
+
+    return (
+        True if load_vae is None else load_vae,
+        True if load_text_encoder is None else load_text_encoder,
+        True if load_transformer is None else load_transformer,
+        True if load_scheduler is None else load_scheduler,
+    )
+
+  @classmethod
+  def from_checkpoint(
+      cls,
+      config,
+      checkpoint_dir=None,
+      restored_checkpoint=None,
+      vae_only=False,
+      load_vae=None,
+      load_text_encoder=None,
+      load_transformer=None,
+      load_scheduler=None,
+  ):
+    """Build the pipeline from a converted Orbax checkpoint (restored here if not given).
+
+    The checkpoint comes from `checkpoint_conversion/to_maxtext_diffusers.py`. The subclass's `_load_and_init`
+    builds the components and returns the pipeline and its transformers.
+    """
+    if restored_checkpoint is None:
+      if checkpoint_dir is None:
+        checkpoint_dir = getattr(config, "checkpoint_directory", None) or getattr(config, "checkpoint_dir", None)
+      if not checkpoint_dir:
+        raise ValueError(
+            "checkpoint_directory is required: convert the model first with"
+            " checkpoint_conversion/to_maxtext_diffusers.py."
+        )
+      from maxtext.checkpoint_conversion.to_maxtext_diffusers import restore_diffusers_checkpoint  # pylint: disable=import-outside-toplevel
+
+      restored_checkpoint = restore_diffusers_checkpoint(checkpoint_dir)
+      if restored_checkpoint is None:
+        raise FileNotFoundError(f"Could not restore Orbax checkpoint from {checkpoint_dir}")
+
+    (
+        load_vae,
+        load_text_encoder,
+        load_transformer,
+        load_scheduler,
+    ) = cls._resolve_and_validate_load_flags(
+        vae_only=vae_only,
+        load_vae=load_vae,
+        load_text_encoder=load_text_encoder,
+        load_transformer=load_transformer,
+        load_scheduler=load_scheduler,
+    )
+    outputs = cls._load_and_init(
+        config,
+        restored_checkpoint=restored_checkpoint,
+        load_vae=load_vae,
+        load_text_encoder=load_text_encoder,
+        load_transformer=load_transformer,
+        load_scheduler=load_scheduler,
+    )
+    pipeline = outputs[0]
+    loaded_transformers = outputs[1:]
+
+    for key, transformer in zip(cls._transformer_keys, loaded_transformers):
+      setattr(pipeline, key, transformer)
+
+    return pipeline

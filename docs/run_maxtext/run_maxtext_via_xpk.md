@@ -19,7 +19,9 @@
 # At scale with XPK
 
 ```{warning}
-This guide is kept for legacy compatibility only. The recommended path for new GKE deployments is [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). XPK is deprecated and should not be used for new cluster provisioning or workload orchestration.
+**XPK is deprecated.** Use Cluster Toolkit (`gcluster`) for all new MaxText workloads on GKE.
+
+This guide is kept for legacy compatibility only and is no longer updated with new MaxText features; it may be removed in a future release. The recommended path for new GKE deployments is [Running MaxText with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md).
 
 For a direct Cluster Toolkit command reference, see [At scale with Cluster Toolkit](run_maxtext_via_cluster_toolkit.md). The XPK commands below are retained only for existing deployments.
 ```

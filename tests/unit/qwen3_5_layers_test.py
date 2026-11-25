@@ -69,8 +69,6 @@ torch_vision_config = Qwen3_5MoeVisionConfig(
     attn_implementation="eager",
 )
 
-torch.set_grad_enabled(False)
-
 
 def create_torch_vision_encoder():
   """Create and configure PyTorch Qwen3.5 vision model."""
@@ -109,6 +107,9 @@ class TestQwen3_5MoeVisionEncoderEndToEnd(unittest.TestCase):
   """End-to-end equivalence test for Qwen3.5 Moe Vision Encoder + Projector JAX subclasses."""
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     np.random.seed(42)
     torch.manual_seed(42)
     devices = jax.devices()

@@ -1,0 +1,304 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1520 490" width="100%" height="100%" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif">
+
+  <defs>
+    <marker id="red-arrow" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M 0.5 1.5 L 9 5 L 0.5 8.5 z" fill="#dc2626"/>
+    </marker>
+  </defs>
+
+  <rect x="0" y="0" width="1520" height="490" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <rect x="10" y="16" width="1500" height="44" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="20" y="43" font-size="12.5" font-weight="700" fill="#334155">TPU Timeline (No Prefetch)</text>
+  <rect x="10" y="68" width="1500" height="128" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="68" width="200" height="128" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="68" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="90" font-size="13.5" font-weight="700" fill="#0f172a">▾ TensorCore</text>
+  <text x="34" y="108" font-size="11" font-weight="500" fill="#475569">/device:TPU:0</text>
+  <text x="34" y="144" font-size="11.5" font-weight="600" fill="#334155">▸ XLA Ops</text>
+  <rect x="10" y="216" width="1500" height="128" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="216" width="200" height="128" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="216" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="238" font-size="13.5" font-weight="700" fill="#0f172a">▾ SparseCore 0</text>
+  <text x="34" y="256" font-size="11" font-weight="500" fill="#475569">/device:TPU:0 SparseCore 0</text>
+  <text x="34" y="292" font-size="11.5" font-weight="600" fill="#334155">▸ Sparse Core Ops</text>
+  <rect x="10" y="358" width="1500" height="114" rx="6" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <rect x="10" y="358" width="200" height="114" rx="6" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1"/>
+  <rect x="210" y="358" width="1300" height="22" fill="#e2e8f0" opacity="0.65"/>
+  <text x="22" y="380" font-size="13.5" font-weight="700" fill="#0f172a">▾ SparseCore 1</text>
+  <text x="34" y="398" font-size="11" font-weight="500" fill="#475569">/device:TPU:0 SparseCore 1</text>
+  <text x="34" y="434" font-size="11.5" font-weight="600" fill="#334155">▸ Sparse Core Ops</text>
+  <text x="34" y="328" font-size="11" font-weight="500" fill="#475569">SC Offload Type</text>
+  <text x="34" y="457" font-size="11" font-weight="500" fill="#475569">SC Offload Type</text>
+  <text x="420.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i</text>
+  <rect x="216" y="92" width="408" height="14" rx="2" fill="#bfdbfe" opacity="0.85"/>
+  <text x="420.0" y="102" font-size="9" font-weight="600" fill="#1e3a8a" text-anchor="middle">while.body (layer i: AG_i → recompute + vjp → RS_i)</text>
+  <rect x="218.0" y="128" width="20.0" height="32" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="1"/>
+  <text x="228.0" y="148" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">all</text>
+  <rect x="240.0" y="128" width="20.0" height="32" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="250.0" y="148" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">al</text>
+  <rect x="262.0" y="128" width="20.0" height="32" rx="2" fill="#fdba74" stroke="#f97316" stroke-width="1"/>
+  <text x="272.0" y="148" font-size="7.5" font-weight="700" fill="#7c2d12" text-anchor="middle">a...</text>
+  <rect x="216" y="126" width="68" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="250.0" y="177" font-size="12.5" font-weight="700" fill="#dc2626" text-anchor="middle">EXPOSED</text>
+  <rect x="218.0" y="274" width="20.0" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="228.0" y="295" font-size="7.2" font-weight="700" fill="#14532d" text-anchor="middle">all</text>
+  <rect x="240.0" y="274" width="20.0" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
+  <text x="250.0" y="295" font-size="7.2" font-weight="700" fill="#1e3a8a" text-anchor="middle">al...</text>
+  <rect x="262.0" y="274" width="20.0" height="34" rx="2" fill="#fdba74" stroke="#f97316" stroke-width="1"/>
+  <text x="272.0" y="295" font-size="7.2" font-weight="700" fill="#7c2d12" text-anchor="middle">al...</text>
+  <rect x="216" y="271" width="68" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="250.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i</text>
+  <rect x="288" y="128" width="18" height="32" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.9"/>
+  <text x="297" y="148" font-size="7" font-weight="600" fill="#831843" text-anchor="middle">c...</text>
+  <rect x="308" y="128" width="36" height="32" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="0.9"/>
+  <text x="326" y="148" font-size="8" font-weight="600" fill="#881337" text-anchor="middle">s...</text>
+  <rect x="346" y="128" width="10" height="32" rx="1.5" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="358" y="128" width="10" height="32" rx="1.5" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.8"/>
+  <rect x="370" y="128" width="10" height="32" rx="1.5" fill="#fdba74" stroke="#f97316" stroke-width="0.8"/>
+  <rect x="286" y="126" width="98" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="335.0" y="121" font-size="13" font-weight="700" fill="#dc2626" text-anchor="middle">recompute_i</text>
+  <rect x="388" y="128" width="6.5" height="32" rx="1" fill="#a7f3d0" stroke="#10b981" stroke-width="0.7"/>
+  <rect x="396" y="128" width="6.5" height="32" rx="1" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.7"/>
+  <rect x="404" y="128" width="6.5" height="32" rx="1" fill="#bae6fd" stroke="#0284c7" stroke-width="0.7"/>
+  <rect x="413" y="128" width="16" height="32" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="0.9"/>
+  <text x="421" y="148" font-size="7.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">tg</text>
+  <rect x="431" y="128" width="16" height="32" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.9"/>
+  <text x="439" y="148" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">tg</text>
+  <rect x="449" y="128" width="16" height="32" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="0.9"/>
+  <text x="457" y="148" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">co</text>
+  <rect x="467" y="128" width="24" height="32" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.9"/>
+  <text x="479" y="148" font-size="7.5" font-weight="600" fill="#831843" text-anchor="middle">s...</text>
+  <rect x="493" y="128" width="22" height="32" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="0.9"/>
+  <text x="504" y="148" font-size="7.5" font-weight="600" fill="#881337" text-anchor="middle">s...</text>
+  <rect x="517" y="128" width="9" height="32" rx="1.5" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="386" y="126" width="142" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="457.0" y="121" font-size="13" font-weight="700" fill="#dc2626" text-anchor="middle">vjp_i</text>
+  <rect x="532" y="128" width="34" height="32" rx="2" fill="#bbf7d0" stroke="#22c55e" stroke-width="1"/>
+  <text x="549" y="148" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">red...</text>
+  <rect x="568" y="128" width="54" height="32" rx="2" fill="#fca5a5" stroke="#ef4444" stroke-width="1"/>
+  <text x="595" y="148" font-size="7.5" font-weight="700" fill="#7f1d1d" text-anchor="middle">reduce-s...</text>
+  <rect x="530" y="126" width="94" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="577.0" y="177" font-size="12.5" font-weight="700" fill="#dc2626" text-anchor="middle">EXPOSED</text>
+  <rect x="410" y="274" width="11" height="34" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <text x="415.5" y="295" font-size="7" font-weight="700" fill="#14532d" text-anchor="middle">c</text>
+  <rect x="423" y="274" width="11" height="34" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="428.5" y="295" font-size="7" font-weight="700" fill="#831843" text-anchor="middle">c</text>
+  <rect x="440" y="274" width="56" height="34" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="468" y="295" font-size="7.5" font-weight="700" fill="#881337" text-anchor="middle">reduce...</text>
+  <rect x="498" y="274" width="10" height="34" rx="1.5" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="510" y="274" width="54" height="34" rx="2" fill="#bae6fd" stroke="#38bdf8" stroke-width="1"/>
+  <text x="537" y="295" font-size="7.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">reduce...</text>
+  <rect x="566" y="274" width="56" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="594" y="295" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">reduce...</text>
+  <rect x="438" y="271" width="186" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="523.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">RS_i</text>
+  <rect x="218" y="240" width="404" height="12" rx="2" fill="#fecaca" opacity="0.75"/>
+  <rect x="218" y="316" width="64" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="250.0" y="329" font-size="7.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OF OF OF</text>
+  <rect x="286" y="316" width="64" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="318" y="329" font-size="7.5" font-weight="700" fill="#365314" text-anchor="middle">OFF...</text>
+  <rect x="354" y="316" width="82" height="18" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="395" y="329" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">OFF OF OF</text>
+  <rect x="440" y="316" width="182" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="531.0" y="329" font-size="8.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="218" y="384" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="420.0" y="395" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (layer i offload)</text>
+  <rect x="286" y="406" width="11" height="26" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="410" y="406" width="11" height="26" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="424" y="406" width="11" height="26" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="498" y="406" width="11" height="26" rx="1.5" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="218" y="444" width="132" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="284" y="457" font-size="8" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="354" y="444" width="82" height="18" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="395" y="457" font-size="8" font-weight="700" fill="#831843" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="440" y="444" width="182" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="531" y="457" font-size="8" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <line x1="242.0" y1="253.0" x2="242.0" y2="181.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <line x1="276.0" y1="255.0" x2="331.0" y2="167.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <line x1="442.0" y1="166.0" x2="517.0" y2="253.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <line x1="585.0" y1="265.0" x2="585.0" y2="181.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <text x="840.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i-1</text>
+  <rect x="636" y="92" width="408" height="14" rx="2" fill="#bfdbfe" opacity="0.85"/>
+  <text x="840.0" y="102" font-size="9" font-weight="600" fill="#1e3a8a" text-anchor="middle">while.body (layer i-1: AG_i-1 → recompute + vjp → RS_i-1)</text>
+  <rect x="638.0" y="128" width="20.0" height="32" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="1"/>
+  <text x="648.0" y="148" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">all</text>
+  <rect x="660.0" y="128" width="20.0" height="32" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="670.0" y="148" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">al</text>
+  <rect x="682.0" y="128" width="20.0" height="32" rx="2" fill="#fdba74" stroke="#f97316" stroke-width="1"/>
+  <text x="692.0" y="148" font-size="7.5" font-weight="700" fill="#7c2d12" text-anchor="middle">a...</text>
+  <rect x="636" y="126" width="68" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="670.0" y="177" font-size="12.5" font-weight="700" fill="#dc2626" text-anchor="middle">EXPOSED</text>
+  <rect x="638.0" y="274" width="20.0" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="648.0" y="295" font-size="7.2" font-weight="700" fill="#14532d" text-anchor="middle">all</text>
+  <rect x="660.0" y="274" width="20.0" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
+  <text x="670.0" y="295" font-size="7.2" font-weight="700" fill="#1e3a8a" text-anchor="middle">al...</text>
+  <rect x="682.0" y="274" width="20.0" height="34" rx="2" fill="#fdba74" stroke="#f97316" stroke-width="1"/>
+  <text x="692.0" y="295" font-size="7.2" font-weight="700" fill="#7c2d12" text-anchor="middle">al...</text>
+  <rect x="636" y="271" width="68" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="670.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i-1</text>
+  <rect x="708" y="128" width="18" height="32" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.9"/>
+  <text x="717" y="148" font-size="7" font-weight="600" fill="#831843" text-anchor="middle">c...</text>
+  <rect x="728" y="128" width="36" height="32" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="0.9"/>
+  <text x="746" y="148" font-size="8" font-weight="600" fill="#881337" text-anchor="middle">s...</text>
+  <rect x="766" y="128" width="10" height="32" rx="1.5" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="778" y="128" width="10" height="32" rx="1.5" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.8"/>
+  <rect x="790" y="128" width="10" height="32" rx="1.5" fill="#fdba74" stroke="#f97316" stroke-width="0.8"/>
+  <rect x="706" y="126" width="98" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="755.0" y="121" font-size="13" font-weight="700" fill="#dc2626" text-anchor="middle">recompute_i-1</text>
+  <rect x="808" y="128" width="6.5" height="32" rx="1" fill="#a7f3d0" stroke="#10b981" stroke-width="0.7"/>
+  <rect x="816" y="128" width="6.5" height="32" rx="1" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.7"/>
+  <rect x="824" y="128" width="6.5" height="32" rx="1" fill="#bae6fd" stroke="#0284c7" stroke-width="0.7"/>
+  <rect x="833" y="128" width="16" height="32" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="0.9"/>
+  <text x="841" y="148" font-size="7.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">tg</text>
+  <rect x="851" y="128" width="16" height="32" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.9"/>
+  <text x="859" y="148" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">tg</text>
+  <rect x="869" y="128" width="16" height="32" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="0.9"/>
+  <text x="877" y="148" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">co</text>
+  <rect x="887" y="128" width="24" height="32" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.9"/>
+  <text x="899" y="148" font-size="7.5" font-weight="600" fill="#831843" text-anchor="middle">s...</text>
+  <rect x="913" y="128" width="22" height="32" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="0.9"/>
+  <text x="924" y="148" font-size="7.5" font-weight="600" fill="#881337" text-anchor="middle">s...</text>
+  <rect x="937" y="128" width="9" height="32" rx="1.5" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="806" y="126" width="142" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="877.0" y="121" font-size="13" font-weight="700" fill="#dc2626" text-anchor="middle">vjp_i-1</text>
+  <rect x="952" y="128" width="34" height="32" rx="2" fill="#bbf7d0" stroke="#22c55e" stroke-width="1"/>
+  <text x="969" y="148" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">red...</text>
+  <rect x="988" y="128" width="54" height="32" rx="2" fill="#fca5a5" stroke="#ef4444" stroke-width="1"/>
+  <text x="1015" y="148" font-size="7.5" font-weight="700" fill="#7f1d1d" text-anchor="middle">reduce-s...</text>
+  <rect x="950" y="126" width="94" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="997.0" y="177" font-size="12.5" font-weight="700" fill="#dc2626" text-anchor="middle">EXPOSED</text>
+  <rect x="830" y="274" width="11" height="34" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <text x="835.5" y="295" font-size="7" font-weight="700" fill="#14532d" text-anchor="middle">c</text>
+  <rect x="843" y="274" width="11" height="34" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="848.5" y="295" font-size="7" font-weight="700" fill="#831843" text-anchor="middle">c</text>
+  <rect x="860" y="274" width="56" height="34" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="888" y="295" font-size="7.5" font-weight="700" fill="#881337" text-anchor="middle">reduce...</text>
+  <rect x="918" y="274" width="10" height="34" rx="1.5" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="930" y="274" width="54" height="34" rx="2" fill="#bae6fd" stroke="#38bdf8" stroke-width="1"/>
+  <text x="957" y="295" font-size="7.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">reduce...</text>
+  <rect x="986" y="274" width="56" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="1014" y="295" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">reduce...</text>
+  <rect x="858" y="271" width="186" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="943.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">RS_i-1</text>
+  <rect x="638" y="240" width="404" height="12" rx="2" fill="#fecaca" opacity="0.75"/>
+  <rect x="638" y="316" width="64" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="670.0" y="329" font-size="7.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OF OF OF</text>
+  <rect x="706" y="316" width="64" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="738" y="329" font-size="7.5" font-weight="700" fill="#365314" text-anchor="middle">OFF...</text>
+  <rect x="774" y="316" width="82" height="18" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="815" y="329" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">OFF OF OF</text>
+  <rect x="860" y="316" width="182" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="951.0" y="329" font-size="8.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="638" y="384" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="840.0" y="395" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (layer i-1 offload)</text>
+  <rect x="706" y="406" width="11" height="26" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="830" y="406" width="11" height="26" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="844" y="406" width="11" height="26" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="918" y="406" width="11" height="26" rx="1.5" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="638" y="444" width="132" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="704" y="457" font-size="8" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="774" y="444" width="82" height="18" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="815" y="457" font-size="8" font-weight="700" fill="#831843" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="860" y="444" width="182" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="951" y="457" font-size="8" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <line x1="662.0" y1="253.0" x2="662.0" y2="181.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <line x1="696.0" y1="255.0" x2="751.0" y2="167.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <line x1="862.0" y1="166.0" x2="937.0" y2="253.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <line x1="1005.0" y1="265.0" x2="1005.0" y2="181.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <text x="1260.0" y="44" font-size="16" font-weight="700" fill="#dc2626" text-anchor="middle">layer i-2</text>
+  <rect x="1056" y="92" width="408" height="14" rx="2" fill="#bfdbfe" opacity="0.85"/>
+  <text x="1260.0" y="102" font-size="9" font-weight="600" fill="#1e3a8a" text-anchor="middle">while.body (layer i-2: AG_i-2 → recompute + vjp → RS_i-2)</text>
+  <rect x="1058.0" y="128" width="20.0" height="32" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="1"/>
+  <text x="1068.0" y="148" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">all</text>
+  <rect x="1080.0" y="128" width="20.0" height="32" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="1090.0" y="148" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">al</text>
+  <rect x="1102.0" y="128" width="20.0" height="32" rx="2" fill="#fdba74" stroke="#f97316" stroke-width="1"/>
+  <text x="1112.0" y="148" font-size="7.5" font-weight="700" fill="#7c2d12" text-anchor="middle">a...</text>
+  <rect x="1056" y="126" width="68" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="1090.0" y="177" font-size="12.5" font-weight="700" fill="#dc2626" text-anchor="middle">EXPOSED</text>
+  <rect x="1058.0" y="274" width="20.0" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="1068.0" y="295" font-size="7.2" font-weight="700" fill="#14532d" text-anchor="middle">all</text>
+  <rect x="1080.0" y="274" width="20.0" height="34" rx="2" fill="#93c5fd" stroke="#3b82f6" stroke-width="1"/>
+  <text x="1090.0" y="295" font-size="7.2" font-weight="700" fill="#1e3a8a" text-anchor="middle">al...</text>
+  <rect x="1102.0" y="274" width="20.0" height="34" rx="2" fill="#fdba74" stroke="#f97316" stroke-width="1"/>
+  <text x="1112.0" y="295" font-size="7.2" font-weight="700" fill="#7c2d12" text-anchor="middle">al...</text>
+  <rect x="1056" y="271" width="68" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="1090.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">AG_i-2</text>
+  <rect x="1128" y="128" width="18" height="32" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.9"/>
+  <text x="1137" y="148" font-size="7" font-weight="600" fill="#831843" text-anchor="middle">c...</text>
+  <rect x="1148" y="128" width="36" height="32" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="0.9"/>
+  <text x="1166" y="148" font-size="8" font-weight="600" fill="#881337" text-anchor="middle">s...</text>
+  <rect x="1186" y="128" width="10" height="32" rx="1.5" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="1198" y="128" width="10" height="32" rx="1.5" fill="#93c5fd" stroke="#3b82f6" stroke-width="0.8"/>
+  <rect x="1210" y="128" width="10" height="32" rx="1.5" fill="#fdba74" stroke="#f97316" stroke-width="0.8"/>
+  <rect x="1126" y="126" width="98" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="1175.0" y="121" font-size="13" font-weight="700" fill="#dc2626" text-anchor="middle">recompute_i-2</text>
+  <rect x="1228" y="128" width="6.5" height="32" rx="1" fill="#a7f3d0" stroke="#10b981" stroke-width="0.7"/>
+  <rect x="1236" y="128" width="6.5" height="32" rx="1" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.7"/>
+  <rect x="1244" y="128" width="6.5" height="32" rx="1" fill="#bae6fd" stroke="#0284c7" stroke-width="0.7"/>
+  <rect x="1253" y="128" width="16" height="32" rx="2" fill="#bae6fd" stroke="#0284c7" stroke-width="0.9"/>
+  <text x="1261" y="148" font-size="7.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">tg</text>
+  <rect x="1271" y="128" width="16" height="32" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.9"/>
+  <text x="1279" y="148" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">tg</text>
+  <rect x="1289" y="128" width="16" height="32" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="0.9"/>
+  <text x="1297" y="148" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">co</text>
+  <rect x="1307" y="128" width="24" height="32" rx="2" fill="#fbcfe8" stroke="#ec4899" stroke-width="0.9"/>
+  <text x="1319" y="148" font-size="7.5" font-weight="600" fill="#831843" text-anchor="middle">s...</text>
+  <rect x="1333" y="128" width="22" height="32" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="0.9"/>
+  <text x="1344" y="148" font-size="7.5" font-weight="600" fill="#881337" text-anchor="middle">s...</text>
+  <rect x="1357" y="128" width="9" height="32" rx="1.5" fill="#6ee7b7" stroke="#10b981" stroke-width="0.8"/>
+  <rect x="1226" y="126" width="142" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="1297.0" y="121" font-size="13" font-weight="700" fill="#dc2626" text-anchor="middle">vjp_i-2</text>
+  <rect x="1372" y="128" width="34" height="32" rx="2" fill="#bbf7d0" stroke="#22c55e" stroke-width="1"/>
+  <text x="1389" y="148" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">red...</text>
+  <rect x="1408" y="128" width="54" height="32" rx="2" fill="#fca5a5" stroke="#ef4444" stroke-width="1"/>
+  <text x="1435" y="148" font-size="7.5" font-weight="700" fill="#7f1d1d" text-anchor="middle">reduce-s...</text>
+  <rect x="1370" y="126" width="94" height="36" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="1417.0" y="177" font-size="12.5" font-weight="700" fill="#dc2626" text-anchor="middle">EXPOSED</text>
+  <rect x="1250" y="274" width="11" height="34" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <text x="1255.5" y="295" font-size="7" font-weight="700" fill="#14532d" text-anchor="middle">c</text>
+  <rect x="1263" y="274" width="11" height="34" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="1268.5" y="295" font-size="7" font-weight="700" fill="#831843" text-anchor="middle">c</text>
+  <rect x="1280" y="274" width="56" height="34" rx="2" fill="#fecdd3" stroke="#fb7185" stroke-width="1"/>
+  <text x="1308" y="295" font-size="7.5" font-weight="700" fill="#881337" text-anchor="middle">reduce...</text>
+  <rect x="1338" y="274" width="10" height="34" rx="1.5" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="1350" y="274" width="54" height="34" rx="2" fill="#bae6fd" stroke="#38bdf8" stroke-width="1"/>
+  <text x="1377" y="295" font-size="7.5" font-weight="700" fill="#0c4a6e" text-anchor="middle">reduce...</text>
+  <rect x="1406" y="274" width="56" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="1434" y="295" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">reduce...</text>
+  <rect x="1278" y="271" width="186" height="40" rx="2" fill="none" stroke="#dc2626" stroke-width="2.3"/>
+  <text x="1363.0" y="266" font-size="13.5" font-weight="700" fill="#dc2626" text-anchor="middle">RS_i-2</text>
+  <rect x="1058" y="240" width="404" height="12" rx="2" fill="#fecaca" opacity="0.75"/>
+  <rect x="1058" y="316" width="64" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="1090.0" y="329" font-size="7.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OF OF OF</text>
+  <rect x="1126" y="316" width="64" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="1158" y="329" font-size="7.5" font-weight="700" fill="#365314" text-anchor="middle">OFF...</text>
+  <rect x="1194" y="316" width="82" height="18" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="1235" y="329" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">OFF OF OF</text>
+  <rect x="1280" y="316" width="182" height="18" rx="2" fill="#93c5fd" stroke="#60a5fa" stroke-width="0.8"/>
+  <text x="1371.0" y="329" font-size="8.5" font-weight="700" fill="#1e3a8a" text-anchor="middle">OFFLOAD_COLLECTIVE</text>
+  <rect x="1058" y="384" width="404" height="14" rx="2" fill="#fecaca" opacity="0.85"/>
+  <text x="1260.0" y="395" font-size="9" font-weight="600" fill="#7f1d1d" text-anchor="middle">jit_train_step (layer i-2 offload)</text>
+  <rect x="1126" y="406" width="11" height="26" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1250" y="406" width="11" height="26" rx="1.5" fill="#bbf7d0" stroke="#4ade80" stroke-width="0.8"/>
+  <rect x="1264" y="406" width="11" height="26" rx="1.5" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <rect x="1338" y="406" width="11" height="26" rx="1.5" fill="#86efac" stroke="#22c55e" stroke-width="0.8"/>
+  <rect x="1058" y="444" width="132" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="1124" y="457" font-size="8" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FMT</text>
+  <rect x="1194" y="444" width="82" height="18" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="0.8"/>
+  <text x="1235" y="457" font-size="8" font-weight="700" fill="#831843" text-anchor="middle">OFFLOAD_GATHER</text>
+  <rect x="1280" y="444" width="182" height="18" rx="2" fill="#d9f99d" stroke="#84cc16" stroke-width="0.8"/>
+  <text x="1371" y="457" font-size="8" font-weight="700" fill="#365314" text-anchor="middle">OFFLOAD_DATA_FORMATTING</text>
+  <line x1="1082.0" y1="253.0" x2="1082.0" y2="181.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <line x1="1116.0" y1="255.0" x2="1171.0" y2="167.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <line x1="1282.0" y1="166.0" x2="1357.0" y2="253.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <line x1="1425.0" y1="265.0" x2="1425.0" y2="181.0" stroke="#dc2626" stroke-width="2.5" marker-end="url(#red-arrow)"/>
+  <rect x="1476" y="128" width="36" height="32" rx="2" fill="#f9a8d4" stroke="#ec4899" stroke-width="1"/>
+  <text x="1494" y="148" font-size="7.5" font-weight="700" fill="#831843" text-anchor="middle">all al</text>
+  <rect x="1476" y="274" width="36" height="34" rx="2" fill="#86efac" stroke="#22c55e" stroke-width="1"/>
+  <text x="1494" y="295" font-size="7.5" font-weight="700" fill="#14532d" text-anchor="middle">all al</text>
+  <line x1="210" y1="16" x2="210" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="630" y1="16" x2="630" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="1050" y1="16" x2="1050" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+  <line x1="1470" y1="16" x2="1470" y2="472" stroke="#dc2626" stroke-width="2.2"/>
+</svg>

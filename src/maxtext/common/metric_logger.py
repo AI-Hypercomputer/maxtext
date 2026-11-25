@@ -83,6 +83,51 @@ def _prepare_metrics_for_json(metrics, step, run_name):
   return metrics_dict
 
 
+def _is_concrete_jax_array(val):
+  return isinstance(val, jax.Array) and not isinstance(val, jax.core.Tracer)
+
+
+def _materialize_metric_scalars(metrics):
+  """Transfers device-resident JAX metric scalars to host in a single batch.
+
+  On Pathways and multi-host setups, reading individual metric keys via float()
+  or .item() triggers sequential device-to-host RPC round trips. Batching all
+  concrete JAX array leaves into one jax.device_get() call issues the transfers
+  concurrently so their latencies overlap while preserving dtypes and .item()
+  compatibility.
+
+  Args:
+    metrics: Metric dictionary containing optional "scalar" and "scalars" dicts.
+  """
+  if not metrics:
+    return
+  scalar_targets = []
+  jax_values = []
+
+  scalar_dict = metrics.get("scalar")
+  if isinstance(scalar_dict, dict):
+    for key, val in scalar_dict.items():
+      if _is_concrete_jax_array(val):
+        scalar_targets.append((scalar_dict, key))
+        jax_values.append(val)
+
+  scalars_dict = metrics.get("scalars")
+  if isinstance(scalars_dict, dict):
+    for group_val in scalars_dict.values():
+      if isinstance(group_val, dict):
+        for subkey, subval in group_val.items():
+          if _is_concrete_jax_array(subval):
+            scalar_targets.append((group_val, subkey))
+            jax_values.append(subval)
+
+  if not jax_values:
+    return
+
+  host_values = jax.device_get(jax_values)
+  for (target_dict, key), host_val in zip(scalar_targets, host_values):
+    target_dict[key] = host_val
+
+
 def record_activation_metrics(output_metrics, intermediate_outputs, config):
   """Adds the activation metrics to the metrics dict.
 
@@ -108,10 +153,17 @@ class MetadataKey(enum.Enum):
   PER_DEVICE_TOKENS = "per_device_tokens"
 
 
+_UNSET = object()
+
+
 class MetricLogger:
   """
   Logger for saving metrics to a local file, GCS and TensorBoard.
   """
+
+  # Lazily resolved local CPU device for host-side LR schedule evaluation
+  # (_UNSET: not yet queried; None: unavailable or disabled after fallback).
+  _host_cpu_device = _UNSET
 
   def __init__(self, config, learning_rate_schedule, start_step=0):
     self.writer = max_utils.initialize_summary_writer(config.tensorboard_dir, config.run_name, config.enable_tensorboard)
@@ -157,6 +209,7 @@ class MetricLogger:
   def write_metrics(self, metrics, step, metric_type="train"):
     """Entry point for all metrics writing. metric_type is one of 'train', 'eval', 'running_eval'."""
     if metrics:
+      _materialize_metric_scalars(metrics)
       self.log_metrics(metrics, step, metric_type)
 
       if self.config.enable_tensorboard and metric_type != "running_eval":
@@ -449,20 +502,21 @@ class MetricLogger:
     return performance_metric_queue
 
   def buffer_and_write_metrics(self, metrics, step, step_time_delta=None, is_training=True):
-    """
-    Per-step entry point for both train and eval metrics. Flushes the single deferred entry from
-    the previous call, then queues this step's metrics. The buffer is a queue of length 1: a new
-    call means the previous dispatch is already submitted, so its result is safe to materialize.
+    """Per-step entry point for both train and eval metrics.
 
-    For train, record_train_metrics runs eagerly on the current step so the tiny JAX op it
-    enqueues for self.learning_rate_schedule(step) lands on the device queue BEFORE the next
-    iteration dispatches p_train_step. If we deferred it to flush time, lr_schedule(step) would
-    be queued behind the just-dispatched next training step and materializing
-    learning/current_learning_rate at the next flush would have to wait for that next step to
-    finish, doubling the host-side block per iteration and starving the device.
+    Flushes the single deferred entry from the previous call, then queues this
+    step's metrics. The buffer is a queue of length 1: a new call means the
+    previous dispatch is already submitted, so its result is safe to
+    materialize in a single batched jax.device_get() transfer.
 
-    For eval, _accumulate_eval_metrics (which calls float() on JAX arrays) stays deferred to
-    _flush_one_buffered_entry so the eval dispatch loop is not serialized.
+    For train, record_train_metrics runs eagerly on the current step and
+    evaluates self.learning_rate_schedule(step) on a local host CPU device when
+    available so no accelerator op is enqueued behind p_train_step (avoiding
+    device-queue stalls and extra Pathways proxy round trips).
+
+    For eval, _accumulate_eval_metrics stays deferred to
+    _flush_one_buffered_entry and batches device-to-host scalar transfers so
+    the eval dispatch loop is not serialized.
     """
     if self.buffered_metrics:
       self._flush_one_buffered_entry(self.buffered_metrics.pop(0))
@@ -518,7 +572,8 @@ class MetricLogger:
       self.write_metrics(snapshot, eval_step, metric_type="running_eval")
 
   def _accumulate_eval_metrics(self, metrics):
-    """Accumulates one eval step's raw metrics into cumulative_eval_metrics (eager float())."""
+    """Accumulates one eval step's raw metrics into cumulative_eval_metrics."""
+    _materialize_metric_scalars(metrics)
     scalar = metrics.get("scalar", {})
     self.cumulative_eval_metrics["scalar"]["eval/total_loss"] += float(scalar.get("evaluation/total_loss", 0.0))
     self.cumulative_eval_metrics["scalar"]["eval/total_weights"] += float(scalar.get("evaluation/total_weights", 0.0))
@@ -534,10 +589,59 @@ class MetricLogger:
           scalar["evaluation/moe_dropless_fallback_layers"]
       )
 
+  def _evaluate_learning_rate_on_host(self, step):
+    """Evaluates learning_rate_schedule on local host CPU when available.
+
+    Requires a registered local CPU JAX backend (for example,
+    `JAX_PLATFORMS=proxy,cpu` or `pathways,cpu` under Pathways). The CPU
+    device lookup is cached per logger instance; if no CPU backend is
+    available or host-CPU evaluation raises a device/runtime error, this logs
+    once, falls back to direct evaluation, and disables further host-CPU
+    attempts for this logger.
+
+    Args:
+      step: Current integer training step.
+
+    Returns:
+      The learning rate value as a host NumPy scalar/array when produced on
+      CPU, or the schedule's native return value otherwise.
+    """
+    if self._host_cpu_device is _UNSET:
+      try:
+        cpu_devices = jax.local_devices(backend="cpu")
+        self._host_cpu_device = cpu_devices[0] if cpu_devices else None
+      except RuntimeError:
+        self._host_cpu_device = None
+      if self._host_cpu_device is None:
+        max_logging.log(
+            "No local CPU JAX backend available; learning_rate_schedule will"
+            " run on the default device. Add `cpu` to JAX_PLATFORMS (e.g."
+            " `proxy,cpu`) to evaluate it on the host."
+        )
+
+    if self._host_cpu_device is not None:
+      try:
+        with jax.default_device(self._host_cpu_device):
+          lr = self.learning_rate_schedule(step)
+      except (RuntimeError, ValueError) as err:
+        prefix = "Host-CPU learning_rate_schedule evaluation failed"
+        max_logging.log(f"{prefix} ({err}); falling back to default device.")
+        self._host_cpu_device = None
+      else:
+        if _is_concrete_jax_array(lr):
+          sharding = getattr(lr, "sharding", None)
+          devices = getattr(sharding, "device_set", None)
+          if devices and all(d.platform == "cpu" for d in devices):
+            return np.asarray(lr)
+        return lr
+
+    return self.learning_rate_schedule(step)
+
   def record_train_metrics(self, metrics, step, step_time):
     """Records training metrics for the current step."""
     metrics["scalar"].update({"perf/step_time_seconds": step_time})
-    metrics["scalar"].update({"learning/current_learning_rate": self.learning_rate_schedule(step)})
+    lr = self._evaluate_learning_rate_on_host(step)
+    metrics["scalar"].update({"learning/current_learning_rate": lr})
     if step >= self.config.rampup_end_step:
       metrics["scalar"].update({"perf/per_device_tflops": self.metadata[MetadataKey.PER_DEVICE_TFLOPS]})
       metrics["scalar"].update(

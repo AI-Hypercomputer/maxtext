@@ -23,6 +23,7 @@ pytestmark = [pytest.mark.tpu_only, pytest.mark.post_training]
 
 import shutil
 import tempfile
+from types import SimpleNamespace
 import unittest
 from typing import Literal
 from unittest import mock
@@ -33,11 +34,13 @@ import numpy as np
 import optax
 import orbax.checkpoint as ocp
 from absl.testing import absltest
+from jax.sharding import Mesh
 
 # Import the module under test
 from maxtext.trainers.post_train.distillation import train_distill
 from maxtext.trainers.post_train.distillation import distillation_utils
 from maxtext.configs import pyconfig
+from maxtext.utils import sharding
 from tests.utils.test_helpers import get_test_config_path
 
 
@@ -389,19 +392,22 @@ class TrainDistillTest(unittest.TestCase):
 
   def test_optimizer_factory(self):
     """Verifies the optimizer factory injects hyperparams and handles configs."""
-    # Mock config
-    config = mock.Mock(spec=pyconfig.HyperParameters)
-    config.learning_rate = 1e-3
-    config.opt_type = "adamw"
-    config.adam_b1 = 0.9
-    config.adam_b2 = 0.99
-    config.adam_eps = 1e-8
-    config.adam_eps_root = 0.0
-    config.adam_weight_decay = 0.0
-    config.mu_dtype = "float32"
-    config.gradient_clipping_threshold = 1.0
-    config.warmup_steps_fraction = 0.1
-    config.learning_rate_final_fraction = 0.1
+    config = pyconfig.initialize(
+        ["", get_test_config_path()],
+        base_output_directory=self.test_dir,
+        run_name="optimizer_factory_test",
+        learning_rate=1e-3,
+        opt_type="adamw",
+        adam_b1=0.9,
+        adam_b2=0.99,
+        adam_eps=1e-8,
+        adam_eps_root=0.0,
+        adam_weight_decay=0.0,
+        mu_dtype="float32",
+        gradient_clipping_threshold=1.0,
+        warmup_steps_fraction=0.1,
+        learning_rate_final_fraction=0.1,
+    )
 
     # 1. Test Valid Creation
     opt = train_distill.get_distillation_optimizer(config, max_train_steps=100)
@@ -419,9 +425,14 @@ class TrainDistillTest(unittest.TestCase):
     self.assertIn("learning_rate", state.hyperparams)
 
     # 2. Test Muon Rejection
-    config.opt_type = "muon"
+    muon_config = pyconfig.initialize(
+        ["", get_test_config_path()],
+        base_output_directory=self.test_dir,
+        run_name="optimizer_factory_muon_test",
+        opt_type="muon",
+    )
     with self.assertRaisesRegex(ValueError, "Muon optimizer is not currently supported"):
-      train_distill.get_distillation_optimizer(config, max_train_steps=100)
+      train_distill.get_distillation_optimizer(muon_config, max_train_steps=100)
 
   def test_monitored_strategy(self):
     self._test_monitored_strategy(sft_mode=False, feature_loss_type="cosine")
@@ -1507,6 +1518,92 @@ class TrainDistillTest(unittest.TestCase):
     """Verifies train_distill with enable_goodput_recording=False performs zero recorder calls."""
     mock_recorder = self._run_train_distill_with_goodput(enable_goodput_recording=False)
     self.assertEqual(len(mock_recorder.method_calls), 0)
+
+  def test_validate_config_rejects_load_balanced_cp(self):
+
+    def _cfg(**overrides):
+      defaults = {
+          "context_parallel_load_balance": True,
+          "ici_context_parallelism": 1,
+          "dcn_context_parallelism": 1,
+          "context_sharding": "context",
+      }
+      return SimpleNamespace(**{**defaults, **overrides})
+
+    train_distill.validate_config(_cfg(), _cfg(), is_offline=False)
+    train_distill.validate_config(
+        _cfg(context_parallel_load_balance=False, ici_context_parallelism=2),
+        _cfg(context_parallel_load_balance=False, ici_context_parallelism=2),
+        is_offline=False,
+    )
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      train_distill.validate_config(_cfg(ici_context_parallelism=2), _cfg(), is_offline=False)
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      train_distill.validate_config(_cfg(), _cfg(ici_context_parallelism=2), is_offline=False)
+    # Offline mode skips teacher validation.
+    train_distill.validate_config(_cfg(), _cfg(ici_context_parallelism=2), is_offline=True)
+    # Post-mesh auto CP (-1) > 1 raises.
+    with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+      train_distill.validate_config(
+          _cfg(ici_context_parallelism=-1),
+          _cfg(),
+          is_offline=True,
+          mesh=SimpleNamespace(shape={"context": 2}),
+      )
+
+    # End-to-end: train_distill fails after mesh setup before loading any models.
+    student_cfg = _cfg(
+        vocab_size=32000,
+        enable_goodput_recording=False,
+        monitor_goodput=False,
+        mesh_axes=("context",),
+        ici_context_parallelism=2,
+    )
+    teacher_cfg = _cfg(vocab_size=32000)
+    fake_devices = [mock.Mock(), mock.Mock()]
+    with (
+        mock.patch.object(train_distill.jax, "devices", return_value=fake_devices),
+        mock.patch.object(train_distill.maxtext_utils, "create_device_mesh", return_value=np.array(fake_devices)),
+        mock.patch.object(train_distill.jax.sharding, "Mesh", return_value=SimpleNamespace(shape={"context": 2})),
+        mock.patch.object(train_distill, "get_maxtext_model") as mock_get_model,
+    ):
+      with self.assertRaisesRegex(ValueError, "context_parallel_load_balance=False"):
+        train_distill.train_distill(student_cfg, teacher_cfg, is_offline=False)
+      mock_get_model.assert_not_called()
+
+  def test_build_training_components_uses_2d_input_data_sharding(self):
+    config_path = get_test_config_path("post_train/distillation.yml")
+    with tempfile.TemporaryDirectory() as tmp_dir:
+      student_cfg = pyconfig.initialize(
+          [
+              "train_distill.py",
+              config_path,
+              f"base_output_directory={tmp_dir}",
+              "run_name=test_sharding",
+              "skip_jax_distributed_system=True",
+              "steps=10",
+          ]
+      )
+      teacher_cfg = pyconfig.initialize(
+          [
+              "train_distill.py",
+              config_path,
+              f"base_output_directory={tmp_dir}",
+              "run_name=test_sharding",
+              "skip_jax_distributed_system=True",
+              "steps=10",
+          ]
+      )
+      if jax.device_count() >= 4:
+        mesh = Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "context"))
+        expected_spec = ("fsdp", "context")
+      else:
+        mesh = Mesh(np.array(jax.devices()[:1]), ("data",))
+        expected_spec = tuple(sharding.get_input_data_sharding(student_cfg, mesh).spec)
+
+      with mock.patch.object(train_distill.tokenizer, "build_tokenizer", return_value=mock.Mock(pad_id=0)):
+        _, _, train_cfg = train_distill.build_training_components(student_cfg, teacher_cfg, mesh=mesh)
+      self.assertEqual(train_cfg.data_sharding_axis, expected_spec)
 
 
 if __name__ == "__main__":

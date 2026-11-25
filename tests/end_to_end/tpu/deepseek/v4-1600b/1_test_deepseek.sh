@@ -74,7 +74,6 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml
   scan_layers=true \
   attention=dot_product \
   base_output_directory="${BASE_OUTPUT_PATH}/scanned" \
-  hf_access_token="${HF_TOKEN:-}" \
   hardware=cpu \
   skip_jax_distributed_system=True \
   async_checkpointing=False \
@@ -90,7 +89,6 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext src/maxtext/configs/base.yml
   scan_layers=false \
   attention=dot_product \
   base_output_directory="${BASE_OUTPUT_PATH}/unscanned" \
-  hf_access_token="${HF_TOKEN:-}" \
   hardware=cpu \
   skip_jax_distributed_system=True \
   async_checkpointing=False \

@@ -38,6 +38,8 @@ PYTHONPATH="${PYTHONPATH:-.}:$(pwd)"
 export PYTHONPATH
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='qwen3-30b-a3b-base'
+# test_qwen3_to_mt.sh converts the post-trained checkpoint.
+TOKENIZER_PATH='Qwen/Qwen3-30B-A3B'
 
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
@@ -46,20 +48,22 @@ SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 # Step 1: Run inference on the pre-converted checkpoint
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
+    tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.8 \
+    hbm_utilization_vllm=0.5 \
     prompt='Suggest some famous landmarks in London.' \
     max_target_length=256 \
     max_num_batched_tokens=256 \
     ici_tensor_parallelism=4 \
     ici_expert_parallelism=2 \
-    ici_data_parallelism=2 \
+    ici_data_parallelism=8 \
     allow_split_physical_axes=True \
     prefuse_moe_weights=True \
     use_chat_template=True \
     scan_layers=True \
-    enable_single_controller=True
+    enable_single_controller=True \
+    weight_dtype=bfloat16
 
 # Step 2: Run RL starting from the pre-converted checkpoint
 python3 -m maxtext.trainers.post_train.rl.train_rl \
@@ -73,6 +77,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     train_micro_batch_size=1 \
     num_test_batches=2 \
     model_name=${MODEL_NAME} \
+    tokenizer_path=${TOKENIZER_PATH} \
     enable_single_controller=True \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
@@ -80,7 +85,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     vllm_additional_config='{"maxtext_config": {"model_name": "'${MODEL_NAME}'", "log_config": false, "allow_split_physical_axes": true, "prefuse_moe_weights": true}}' \
     remat_policy=full \
-    hbm_utilization_vllm=0.55 \
+    hbm_utilization_vllm=0.65 \
     use_pathways=True \
     chips_per_vm=4 \
     max_target_length=512 \
@@ -90,22 +95,28 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     enable_tunix_perf_metrics=True \
     rl.num_generations=16 \
     debug=False \
-    rl.reshard_chunk_size=1 
+    rl.reshard_chunk_size=1 \
+    ici_expert_parallelism=8 \
+    ici_fsdp_parallelism=2 \
+    ici_tensor_parallelism=2 \
+    allow_split_physical_axes=True
 
 # Step 3: Run inference on the checkpoint produced by the RL run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
+    tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
-    hbm_utilization_vllm=0.8 \
+    hbm_utilization_vllm=0.5 \
     prompt='Suggest some famous landmarks in London.' \
     max_target_length=256 \
     max_num_batched_tokens=256 \
     ici_tensor_parallelism=4 \
     ici_expert_parallelism=2 \
-    ici_data_parallelism=2 \
+    ici_data_parallelism=8 \
     allow_split_physical_axes=True \
     prefuse_moe_weights=True \
     use_chat_template=True \
     scan_layers=True \
-    enable_single_controller=True
+    enable_single_controller=True \
+    weight_dtype=bfloat16

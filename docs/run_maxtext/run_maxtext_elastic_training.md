@@ -35,7 +35,7 @@ Elastic training keeps the training process alive instead. Three components make
 Because the controller process never exits, the expensive XLA recompile is skipped and recovery is fast.
 
 ```{note}
-This demo shows recovery via *checkpoint restore* on a fixed mesh: when a slice is lost, Pathways waits for a replacement, then all slices restore from the last committed checkpoint. It does **not** show elastic *degradation* (continuing on fewer slices at reduced throughput), which requires dynamic mesh resize and is not covered here.
+This demo shows recovery via *checkpoint restore* on a fixed mesh: when a slice is lost, Pathways waits for a replacement, then all slices restore from the last committed checkpoint. It does **not** show elastic *degradation* (continuing on fewer slices at reduced throughput), which requires dynamic mesh resize; see [Replica resize](#replica-resize-continuing-on-fewer-slices) below for the flags that enable it.
 ```
 
 ## 1. Prerequisites
@@ -206,12 +206,67 @@ normal GKE cluster administration workflow.
 
 ## Going further
 
-- **The elastic flags** are documented in `src/maxtext/configs/base.yml`: `elastic_enabled`, `elastic_timeout_seconds`, `elastic_max_retries`, plus `enable_single_controller` (runs training through Pathways) and `checkpoint_period`.
+### Replica resize: continuing on fewer slices
+
+The demo above waits for every slice to come back (`elastic_min_slice_count: -1`). Setting `elastic_min_slice_count` below the number of slices in the job lets training continue on the surviving slices instead (*replica resize*). The mesh is rebuilt and the train step recompiled for the live slices, and the data iterator must be grain's `ElasticIterator` (`grain_use_elastic_iterator=true`) or synthetic data, whose state is a single global position that can be restored onto a different number of hosts.
+
+#### Keeping the global batch size constant
+
+By default (`elastic_global_batch_size_mode: "scaled"`) `per_device_batch_size` stays fixed, so the global batch size shrinks with the live slice count: a 4 → 3 slice event cuts it by 25%, which changes the tokens per step (and hence where a step-indexed learning-rate schedule is in token space) and the gradient noise the optimizer was tuned for.
+
+Two modes keep the global batch of the full job instead. The surviving slices process a *physical* batch of
+
+```
+physical = per_device_batch_size' × live_devices × gradient_accumulation_steps' ≥ logical global batch
+```
+
+and the extra rows are padding with `segmentation = 0`, which contributes nothing to the loss, the gradient or the token count. Each step therefore trains on exactly the same real tokens as on the full allocation, so the learning-rate schedule and the optimizer hyperparameters need no change. The modes differ in how the physical batch is factored:
+
+| `elastic_global_batch_size_mode`          | Behaviour                                                                                                            | Activation memory | Padding                                               |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------- | ----------------------------------------------------- |
+| `"scaled"` (default)                      | keep `per_device_batch_size` and `gradient_accumulation_steps`; the global batch shrinks with the live slices        | unchanged         | none                                                  |
+| `"constant_grad_accum"` (**recommended**) | keep `per_device_batch_size`, grow `gradient_accumulation_steps` to `ceil(GBS / (N_live × B))`; no other flag needed | unchanged         | fewer than one microbatch (e.g. 2048 → 2112 rows, 3%) |
+| `"constant_padded"` (advanced)            | factor the batch as chosen by `elastic_max_per_device_batch_size`, see below                                         | up to the bound   | depends on the bound                                  |
+
+Use `constant_grad_accum` whenever the recipe fills HBM at the nominal batch: the per-device batch, the activation memory and the compiled microbatch shapes are the same before and after a resize. `constant_padded` is for recipes with HBM headroom, where raising the per-device batch can pad less than growing the accumulation steps. Its bound chooses the factoring:
+
+| `elastic_max_per_device_batch_size` (`constant_padded`) | Behaviour                                                                                                                                                                                    | Activation memory        | Padding                                                                                          |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ------------------------------------------------------------------------------------------------ |
+| `-1` (default)                                          | keep `gradient_accumulation_steps`, round `per_device_batch_size` up to `ceil(B × N_job / N_live)`                                                                                           | grows by the same factor | up to a full microbatch per accumulation step; 33% at `per_device_batch_size=1` for 4 → 3 slices |
+| `= per_device_batch_size`                               | same as `constant_grad_accum`                                                                                                                                                                | unchanged                | fewer than one microbatch                                                                        |
+| larger                                                  | search the per-device batches in `[per_device_batch_size, bound]` (never below `per_device_batch_size`) and pick the factoring with the least padding (ties to the smaller per-device batch) | up to the bound          | least of the above, e.g. GBS 1024 on 96 chips: B'=11, K'=1 pads 3% where B'=8, K'=2 pads 33%     |
+
+Set the bound to the largest `per_device_batch_size` you have verified fits in HBM. As a safety net, whenever a `constant_padded` resize raises the per-device batch above its nominal value (never the case with `constant_grad_accum`) the compiled train step is checked against `elastic_hbm_budget_fraction` (default 90%) of device HBM; if it does not fit (or the compile itself runs out of HBM), the attempt restarts on the same slices with `elastic_max_per_device_batch_size` set to the nominal per-device batch, so only the accumulation steps grow. The check runs on the ahead-of-time compile of the train step, which AutoPGLE (`jax_enable_pgle`) skips: with PGLE the pre-flight is skipped (a log line says so) and an over-sized per-device batch only fails at the first train step, so set `elastic_max_per_device_batch_size` explicitly in PGLE runs. With `use_tunix_gradient_accumulation: true` or an FP8 `quantization` (`fp8`, `nanoo_fp8`, `fp8_gpu`, `te_fp8_delayedscaling`) there is no fallback, because the accumulation steps may not change: a step that compiles but is over the budget only logs a warning and runs, and a compile that runs out of HBM fails with an error that suggests `elastic_global_batch_size_mode: scaled`. Every attempt logs the chosen factoring, for example `per_device_batch_size 1 -> 1, gradient_accumulation_steps 16 -> 22, physical batch 2112 for logical batch 2048 (64 padded rows)`.
+
+Both constant modes currently require an integer `per_device_batch_size`, synthetic data or grain's `ElasticIterator`, and are not supported with DPO, QK-clip, DiLoCo, rampup batch size or, when the accumulation steps may change (`constant_grad_accum`, or `constant_padded` with a bound), `use_tunix_gradient_accumulation` and FP8 quantization (padded rows would take part in pairing or batch statistics).
+
+**MoE.** The padded rows are kept out of the mixture-of-experts layers: every `RoutedMoE` call receives a `token_mask` (`decoder_segment_ids != 0`), and a padded token is given no expert (id `-1`) and zero routing weight *after* the router has run, so the real tokens' routing is untouched. Padded tokens therefore take no expert capacity (`capacity_factor`), are not counted in the load-balance loss (whose per-sequence means and batch mean cover the real tokens and rows only, so it does not scale with the amount of padding; on the sparse path the batch mean is reduced across the batch shards, so it stays a global mean when the padding sits at the tail of the batch and some devices hold only padded rows) or in the loss-free-balancing routed-bias update, and produce a zero output. This holds for the dense and the sparse (megablox / ragged-dot / ring-of-experts / ragged all-to-all) paths and every router type. Two caveats:
+
+- On the sparse path a padded token still occupies a (zero-weight) row of the expert GMM. Under a capped ragged buffer (`ragged_buffer_factor > 0`) those rows are spread round-robin over the experts and count toward the buffer, which is itself sized by the physical batch, so the buffer is never fuller than on the unpadded batch but the exact set of dropped tokens can differ; with `use_ring_of_experts` and `use_ragged_sort` padded tokens are instead sorted past the last expert and ignored.
+- MoE implementations that bypass `RoutedMoE`'s routing take no mask and are rejected by the config validation: `te_moe_block=True` (TransformerEngine), `use_batch_split_schedule=True`, `use_lineage=True`, `use_m3_model=True` and `decoder_block=kimi_linear` (Kimi-K3, whose latent MoE block does not pass the mask on).
+
+#### Choosing a batch size that needs no padding
+
+With `constant_grad_accum`, or `constant_padded` with a bound (the planner can always fall back to the nominal `per_device_batch_size`), padding is zero whenever the logical global batch divides by `live_devices × per_device_batch_size` for every slice count you intend to tolerate, i.e. when `global_batch / per_device_batch_size` is a multiple of the least common multiple of those device counts. In general the global batch must therefore be a multiple of `per_device_batch_size × lcm(device counts)`: with `per_device_batch_size=2`, 4 → 3 slices of 32 chips needs a multiple of 768, not 384. For 32-chip slices and `per_device_batch_size=1`:
+
+| Slices tolerated | Global batch must be a multiple of (`per_device_batch_size=1`) |
+| ---------------- | -------------------------------------------------------------- |
+| 4 → 3 (or 2)     | 384                                                            |
+| 8 → 7            | 1,792                                                          |
+| 8 → 7, 6, 5      | 26,880                                                         |
+| 16 → 15          | 7,680                                                          |
+
+A power-of-2 global batch is never such a multiple when losing one slice leaves a factor of 3, 5 or 7, which is why the constant modes pad instead.
+
+This rule does not apply to the default `constant_padded` (`elastic_max_per_device_batch_size=-1`): it keeps `gradient_accumulation_steps` and rounds the per-device batch up to `ceil(per_device_batch_size × job_devices / live_devices)`, so it pads unless `per_device_batch_size × job_devices` divides by `live_devices`, whatever the global batch. For example, `per_device_batch_size=1`, `gradient_accumulation_steps=3` and global batch 384 on 4 → 3 slices of 32 chips gives `per_device_batch_size=2`, `gradient_accumulation_steps=3`, a physical batch of 576 rows (33% padding), even though 384 is in the table above.
+
+- **The elastic flags** are documented in `src/maxtext/configs/base.yml`: `elastic_enabled`, `elastic_timeout_seconds`, `elastic_max_retries`, `elastic_min_slice_count`, `elastic_global_batch_size_mode`, `elastic_max_per_device_batch_size`, plus `enable_single_controller` (runs training through Pathways) and `checkpoint_period`.
 - **A larger model** changes the checkpoint size that streams through Pathways during recovery; size the controller and adjust `checkpoint_period` accordingly.
 - **Custom Pathways server args** must be provided through the Pathways-aware
   JobSet or workload template submitted through Cluster Toolkit.
 
 ## More information
 
+- [In-memory snapshotting on GKE with Pathways](run_maxtext_snapshotting.md)
 - [Running MaxText via Pathways](run_maxtext_via_pathways.md)
 - [Pathways on Cloud documentation](https://cloud.google.com/ai-hypercomputer/docs/workloads/pathways-on-cloud/pathways-intro)

@@ -34,15 +34,20 @@ on:
         required: true
         type: string
       repository_name:
-        description: 'Artifact Registry repository name'
+        description: 'Artifact Registry repository name (defaults to maxtext-test-images for CI deps images, else maxtext-images)'
         required: false
         type: string
-        default: 'maxtext-images'
+        default: ''
       base_image:
         description: 'The docker image to run tests against'
         required: true
         type: string
       is_scheduled_run:
+        required: false
+        type: boolean
+        default: false
+      newly_added_only:
+        description: 'Run only the tests that the pull request added or modified, on one worker'
         required: false
         type: boolean
         default: false
@@ -70,6 +75,8 @@ jobs:
     outputs:
       worker_groups: ${{ steps.set-params.outputs.worker_groups }}
       total_workers: ${{ steps.set-params.outputs.total_workers }}
+      test_durations_uploaded: ${{ steps.upload-durations.outputs.artifact-id != '' }}
+      cloud_runner: ${{ steps.set-params.outputs.cloud_runner }}
     steps:
       - name: Checkout MaxText
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -105,25 +112,67 @@ jobs:
         env:
           FLAVOR: ${{ inputs.flavor }}
           BASELINE_DOWNLOADED: ${{ steps.download-baseline.outputs.downloaded }}
+          NEWLY_ADDED_ONLY: ${{ inputs.newly_added_only }}
+          # Runner pool for each flavor. A job can target only one pool, so CPU flavors are spread over pools
+          # statically. Setting the repository variable MAXTEXT_CPU_RUNNER_SPLIT to 'true' moves the lighter
+          # CPU flavors off the busy linux-x86-n4-32 pool: cpu-integration to linux-x86-n2-32 (same 128 GB,
+          # older CPUs) and the post-training flavors to linux-x86-n4-16 (64 GB, so fewer xdist workers).
+          CLOUD_RUNNER: >-
+            ${{ vars.MAXTEXT_CPU_RUNNER_SPLIT == 'true' && fromJSON('{
+              "cpu-integration": "linux-x86-n2-32",
+              "cpu-post-training-unit": "linux-x86-n4-16",
+              "cpu-post-training-integration": "linux-x86-n4-16"
+            }')[inputs.flavor] || fromJSON('{
+              "tpu-unit": "linux-x86-ct6e-180-4tpu",
+              "tpu-integration": "linux-x86-ct6e-180-4tpu",
+              "tpu-post-training-unit": "linux-x86-ct6e-180-4tpu",
+              "tpu-post-training-integration": "linux-x86-ct6e-180-4tpu",
+              "tpu7x-unit": "linux-x86-tpu7x-224-4tpu",
+              "tpu7x-integration": "linux-x86-tpu7x-224-4tpu",
+              "tpu7x-post-training-unit": "linux-x86-tpu7x-224-4tpu",
+              "tpu7x-post-training-integration": "linux-x86-tpu7x-224-4tpu",
+              "gpu-unit": "linux-x86-a2-48-a100-4gpu",
+              "gpu-integration": "linux-x86-a2-48-a100-4gpu",
+              "cpu-unit": "linux-x86-n4-32",
+              "cpu-integration": "linux-x86-n4-32",
+              "cpu-post-training-unit": "linux-x86-n4-32",
+              "cpu-post-training-integration": "linux-x86-n4-32"
+            }')[inputs.flavor] }}
         run: |
+          echo "cloud_runner=${CLOUD_RUNNER}" >> "$GITHUB_OUTPUT"
+          # Expected pytest-xdist workers per CPU shard, used only to size the shard count. Each shard derives
+          # its actual worker count from its memory limit (run_tests_against_package.yml).
+          case "${CLOUD_RUNNER}" in
+            linux-x86-n4-16|linux-x86-n2-16) XDIST_PARALLELISM=4 ;;
+            *) XDIST_PARALLELISM=8 ;;
+          esac
+          if [ "${NEWLY_ADDED_ONLY}" = "true" ]; then
+            # Only the few tests that the PR touched run, so more workers would only hold scarce runners.
+            echo "total_workers=1" >> "$GITHUB_OUTPUT"
+            echo "worker_groups=[1]" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           if [ "${BASELINE_DOWNLOADED}" = "true" ]; then
-            CALC_OUTPUT=$(python3 tools/dev/calculate_workers.py --flavor "$FLAVOR" --baseline per_test_baseline.json)
+            CALC_OUTPUT=$(python3 tools/dev/calculate_workers.py --flavor "$FLAVOR" --baseline per_test_baseline.json \
+              --xdist-parallelism "${XDIST_PARALLELISM}")
             python3 tools/dev/convert_durations.py per_test_baseline.json .test_durations --flavor "$FLAVOR"
           else
-            CALC_OUTPUT=$(python3 tools/dev/calculate_workers.py --flavor "$FLAVOR")
+            CALC_OUTPUT=$(python3 tools/dev/calculate_workers.py --flavor "$FLAVOR" --xdist-parallelism "${XDIST_PARALLELISM}")
           fi
 
           echo "${CALC_OUTPUT}"
           echo "${CALC_OUTPUT}" | grep -E '^(total_workers|worker_groups)=' >> "$GITHUB_OUTPUT"
 
       - name: Upload Converted Test Durations
+        id: upload-durations
         if: steps.download-baseline.outputs.downloaded == 'true'
         uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
         with:
           name: test-durations-${{ github.run_id }}-${{ inputs.flavor }}
           path: .test_durations
           if-no-files-found: ignore
-          retention-days: 1
+          # A re-run of a failed shard downloads it again, and GitHub allows re-runs for 30 days.
+          retention-days: 30
 
   execute-test-package:
     name: Execute Tests
@@ -173,23 +222,7 @@ jobs:
           "cpu-post-training-integration": "X64"
         }')[inputs.flavor] }}
 
-      cloud_runner: >-
-        ${{ fromJSON('{
-          "tpu-unit": "linux-x86-ct6e-180-4tpu",
-          "tpu-integration": "linux-x86-ct6e-180-4tpu",
-          "tpu-post-training-unit": "linux-x86-ct6e-180-4tpu",
-          "tpu-post-training-integration": "linux-x86-ct6e-180-4tpu",
-          "tpu7x-unit": "linux-x86-tpu7x-224-4tpu",
-          "tpu7x-integration": "linux-x86-tpu7x-224-4tpu",
-          "tpu7x-post-training-unit": "linux-x86-tpu7x-224-4tpu",
-          "tpu7x-post-training-integration": "linux-x86-tpu7x-224-4tpu",
-          "gpu-unit": "linux-x86-a2-48-a100-4gpu",
-          "gpu-integration": "linux-x86-a2-48-a100-4gpu",
-          "cpu-unit": "linux-x86-n4-32",
-          "cpu-integration": "linux-x86-n4-32",
-          "cpu-post-training-unit": "linux-x86-n4-32",
-          "cpu-post-training-integration": "linux-x86-n4-32"
-        }')[inputs.flavor] }}
+      cloud_runner: ${{ needs.setup-parameters.outputs.cloud_runner }}
       # Pytest Marker Mapping
       pytest_marker: >-
         ${{ fromJSON('{
@@ -258,9 +291,11 @@ jobs:
       repository_name: ${{ inputs.repository_name }}
       base_image: ${{ inputs.base_image }}
       is_scheduled_run: ${{ inputs.is_scheduled_run }}
+      newly_added_only: ${{ inputs.newly_added_only }}
       maxtext_installed: ${{ inputs.maxtext_installed }}
       worker_group: ${{ matrix.worker_group }}
       total_workers: ${{ fromJSON(needs.setup-parameters.outputs.total_workers) }}
+      test_durations_uploaded: ${{ needs.setup-parameters.outputs.test_durations_uploaded == 'true' }}
       maxtext_sha: ${{ inputs.maxtext_sha }}
       is_update_hlo: ${{ inputs.is_update_hlo }}
-      install_torch_cpu: ${{ inputs.flavor == 'cpu-unit' && inputs.is_scheduled_run }}
+      install_torch_cpu: ${{ (inputs.flavor == 'cpu-unit' || inputs.flavor == 'cpu-integration') && inputs.is_scheduled_run }}

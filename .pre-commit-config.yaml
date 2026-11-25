@@ -76,7 +76,7 @@ repos:
         types: [yaml]
 
   - repo: https://github.com/Mateusz-Grzelinski/actionlint-py
-    rev: v1.7.7.23
+    rev: v1.7.12.25
     hooks:
       - id: actionlint
         args:

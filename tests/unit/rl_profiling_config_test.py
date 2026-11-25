@@ -39,10 +39,10 @@ _MODEL_OVERRIDES = {
     "base_num_kv_heads": 2,
     "base_mlp_dim": 256,
     "max_prefill_predict_length": 4,
-    "model_name": "llama2-7b",
+    "model_name": "llama3.1-8b",
     "override_model_config": True,
     "weight_dtype": "bfloat16",
-    "tokenizer_path": "meta-llama/Llama-2-7b",
+    "tokenizer_path": "meta-llama/Llama-3.1-8B",
 }
 
 # Step-window profiling flags from the `Profiling` mixin that `RLConfig`
@@ -125,7 +125,7 @@ class RLProfilingConfigTest(parameterized.TestCase):
   )
   def test_invocation_window_bounds(self, **bad):
     with self.assertRaises(pydantic.ValidationError):
-      types.RLConfig(model_name="llama2-7b", tokenizer_path="meta-llama/Llama-2-7b", **bad)
+      types.RLConfig(model_name="llama3.1-8b", tokenizer_path="meta-llama/Llama-3.1-8B", **bad)
 
   @parameterized.parameters(*_LEGACY_PROFILING_FLAGS)
   def test_legacy_step_profiling_flags_are_accepted_by_rl_config(self, flag):
@@ -243,6 +243,89 @@ class RLProfilingConfigTest(parameterized.TestCase):
         managed_mldiagnostics=False,
     )
     self.assertEqual(cfg.managed_mldiagnostics_dir, "/tmp/local/run1/managed-mldiagnostics")
+
+  def test_remat_policy_none_rejects_prefetch_fsdp_weights_and_pipeline_parallelism(self):
+    cfg = _rl_config("remat_policy=none", run_name="rl_remat_test")
+    self.assertIsNone(cfg.remat_policy)
+
+    for extra_flag, error_regex in (
+        ("prefetch_fsdp_weights=true", "remat_policy='none' is not supported with prefetch_fsdp_weights=True"),
+        ("ici_pipeline_parallelism=2", "remat_policy='none' is not supported with pipeline parallelism"),
+        ("dcn_pipeline_parallelism=2", "remat_policy='none' is not supported with pipeline parallelism"),
+    ):
+      with self.subTest(extra_flag=extra_flag):
+        with self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex):
+          _rl_config("remat_policy=none", extra_flag, run_name="rl_remat_test")
+
+    for bad_kwargs, error_regex in (
+        ({"prefetch_fsdp_weights": True}, "prefetch_fsdp_weights=True"),
+        ({"ici_pipeline_parallelism": 2}, "pipeline parallelism"),
+        ({"dcn_pipeline_parallelism": 2}, "pipeline parallelism"),
+    ):
+      with self.subTest(bad_kwargs=bad_kwargs):
+        with self.assertRaisesRegex(pydantic.ValidationError, error_regex):
+          types.RLConfig(
+              model_name="llama3.1-8b",
+              tokenizer_path="meta-llama/Llama-3.1-8B",
+              remat_policy="none",
+              **bad_kwargs,
+          )
+
+
+class RLDerivedStepsConfigTest(absltest.TestCase):
+  """`train_steps` is a declared, derived field on `RLConfig` (not an attribute injected by the validator)."""
+
+  def test_train_steps_is_a_declared_field(self):
+    self.assertIn("train_steps", types.RLConfig.model_fields)
+    self.assertNotIn("train_steps", types.MaxTextConfig.model_fields)
+
+  def test_train_steps_is_derived_and_drives_steps_and_lr_schedule(self):
+    cfg = _rl_config(run_name="rl_steps_test", num_batches=50, num_epoch=2)
+    expected = int(cfg.dataset.num_batches * cfg.rl.num_iterations * cfg.dataset.train_fraction * cfg.num_epoch)
+    self.assertEqual(cfg.train_steps, 100)
+    self.assertEqual(cfg.train_steps, expected)
+    self.assertEqual(cfg.steps, cfg.train_steps)
+    # learning_rate_schedule_steps == -1 (the default) is promoted to train_steps.
+    self.assertEqual(cfg.learning_rate_schedule_steps, cfg.train_steps)
+
+  def test_explicit_learning_rate_schedule_steps_is_preserved(self):
+    cfg = _rl_config(run_name="rl_steps_test", num_batches=50, learning_rate_schedule_steps=500)
+    self.assertEqual(cfg.train_steps, 50)
+    self.assertEqual(cfg.learning_rate_schedule_steps, 500)
+
+  def test_user_supplied_train_steps_is_overwritten_by_derived_value(self):
+    cfg = _rl_config(run_name="rl_steps_test", num_batches=50, train_steps=7)
+    self.assertEqual(cfg.train_steps, 50)
+
+  def test_train_steps_survives_model_dump_round_trip(self):
+    cfg = _rl_config(run_name="rl_steps_test", num_batches=50)
+    dumped = cfg.model_dump()
+    self.assertIn("train_steps", dumped)
+    self.assertEqual(dumped["train_steps"], 50)
+    self.assertEqual(types.RLConfig(**dumped).train_steps, 50)
+
+
+class RLContextParallelConfigTest(absltest.TestCase):
+  """Tests for load-balanced context parallelism validation on `RLConfig`."""
+
+  def test_rejects_load_balanced_cp_when_cp_gt_one(self):
+    for flag in ("ici_context_parallelism=2", "dcn_context_parallelism=2"):
+      with self.subTest(flag=flag):
+        with self.assertRaisesRegex((ValueError, pydantic.ValidationError), "context_parallel_load_balance=False"):
+          _rl_config(flag, run_name="rl_cp_test")
+
+  def test_allows_cp_when_load_balance_disabled(self):
+    cfg = _rl_config("ici_context_parallelism=2", "context_parallel_load_balance=false", run_name="rl_cp_test")
+    self.assertEqual(cfg.ici_context_parallelism, 2)
+    self.assertFalse(cfg.context_parallel_load_balance)
+
+  def test_direct_rl_config_rejects_load_balanced_cp(self):
+    with self.assertRaisesRegex(pydantic.ValidationError, "context_parallel_load_balance=False"):
+      types.RLConfig(
+          model_name="llama2-7b",
+          tokenizer_path="meta-llama/Llama-2-7b",
+          ici_context_parallelism=2,
+      )
 
 
 if __name__ == "__main__":

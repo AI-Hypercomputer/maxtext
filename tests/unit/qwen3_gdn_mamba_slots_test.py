@@ -247,6 +247,70 @@ class Qwen3GdnAlignCallTest(unittest.TestCase):
     np.testing.assert_array_equal(np.asarray(self.captured["state_indices"]), [3])
     np.testing.assert_array_equal(np.asarray(self.captured["read_state_indices"]), [3])
 
+  def _call_with_metadata(self, cfg, metadata):
+    mesh = Mesh(np.array(jax.devices()[:1]).reshape([1] * len(cfg.mesh_axes)), cfg.mesh_axes)
+    layer = qwen3.Qwen3NextGatedDeltaNet(config=cfg, mesh=mesh, rngs=nnx.Rngs(0), inputs_shape=(1, 8, cfg.emb_dim))
+    kv_cache = (
+        jnp.zeros((16, cfg.gdn_conv_kernel_dim - 1, 3 * 32), dtype=jnp.float32),
+        jnp.zeros((16, cfg.gdn_num_value_heads, 32, 32), dtype=jnp.float32),
+    )
+    layer(
+        jnp.ones((1, 8, cfg.emb_dim), dtype=cfg.dtype),
+        kv_cache=kv_cache,
+        attention_metadata=metadata,
+        model_mode=MODEL_MODE_AUTOREGRESSIVE,
+    )
+
+  def test_resident_slot_mode_reads_nested_mamba_metadata(self):
+    # Newer tpu_inference nests the slot ids under `attention_metadata.mamba`
+    # (MambaMetadata) instead of a top-level `mamba_state_indices`.
+    metadata = types.SimpleNamespace(
+        seq_lens=jnp.asarray([9], dtype=jnp.int32),
+        query_start_loc=jnp.asarray([0, 4], dtype=jnp.int32),
+        block_tables=jnp.asarray([[10, 11, 12, 13]], dtype=jnp.int32),
+        request_distribution=jnp.asarray([0, 0, 1], dtype=jnp.int32),
+        padded_num_reqs=1,
+        mamba=types.SimpleNamespace(state_indices=jnp.asarray([5], dtype=jnp.int32)),
+    )
+    self._call_with_metadata(_gdn_config(gdn_mamba_block_size=0), metadata)
+
+    self.assertIn("state_indices", self.captured, "paged path was not taken")
+    np.testing.assert_array_equal(np.asarray(self.captured["state_indices"]), [5])
+    np.testing.assert_array_equal(np.asarray(self.captured["read_state_indices"]), [5])
+
+  def test_align_mode_with_nested_none_state_indices_uses_block_table(self):
+    metadata = types.SimpleNamespace(
+        seq_lens=jnp.asarray([9], dtype=jnp.int32),
+        query_start_loc=jnp.asarray([0, 4], dtype=jnp.int32),
+        block_tables=jnp.asarray([[10, 11, 12, 13]], dtype=jnp.int32),
+        request_distribution=jnp.asarray([0, 0, 1], dtype=jnp.int32),
+        padded_num_reqs=1,
+        mamba=types.SimpleNamespace(state_indices=None),
+    )
+    self._call_with_metadata(_gdn_config(gdn_mamba_block_size=4), metadata)
+
+    self.assertIn("state_indices", self.captured, "paged path was not taken")
+    np.testing.assert_array_equal(np.asarray(self.captured["state_indices"]), [12])
+    np.testing.assert_array_equal(np.asarray(self.captured["read_state_indices"]), [11])
+
+
+class ResolveMambaStateIndicesTest(unittest.TestCase):
+  """`resolve_mamba_state_indices` edge cases not covered by the `__call__` tests above."""
+
+  def test_top_level_wins_over_nested(self):
+    top = jnp.asarray([1], dtype=jnp.int32)
+    metadata = types.SimpleNamespace(
+        mamba_state_indices=top,
+        mamba=types.SimpleNamespace(state_indices=jnp.asarray([2], dtype=jnp.int32)),
+    )
+    self.assertIs(qwen3.resolve_mamba_state_indices(metadata), top)
+
+  def test_missing_or_none(self):
+    self.assertIsNone(qwen3.resolve_mamba_state_indices(None))
+    self.assertIsNone(qwen3.resolve_mamba_state_indices(types.SimpleNamespace()))
+    metadata = types.SimpleNamespace(mamba_state_indices=None, mamba=types.SimpleNamespace(state_indices=None))
+    self.assertIsNone(qwen3.resolve_mamba_state_indices(metadata))
+
 
 if __name__ == "__main__":
   unittest.main()

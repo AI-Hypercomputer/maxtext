@@ -37,6 +37,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 from typing import Any, Callable, overload
 from etils import epath
 from flax import nnx
@@ -143,12 +144,12 @@ def _checkpoint_uses_value_wrapper(meta_tree: Any, param_state: Any) -> bool:
 
 # Logical axis names whose padding semantics are "replicate the existing values"
 # (e.g. KV-head replication for GQA with TP > num_kv_heads).
-_VLLM_REPEAT_AXES = frozenset({"kv_heads", ("expert", "model")})
+_VLLM_REPEAT_AXES = frozenset({"kv_heads"})
 
 # Logical axis names whose padding semantics are "append zeros at the end"
 # (e.g. MoE MLP-dim padding to satisfy the GMM_v2 kernel's per-shard size
 # constraint, set in src/maxtext/integration/vllm/maxtext_vllm_adapter/adapter.py).
-_VLLM_ZERO_PAD_AXES = frozenset({"mlp_moe", "activation_mlp", ("attn_dp", "model")})
+_VLLM_ZERO_PAD_AXES = frozenset({"mlp_moe", "mlp_moe_out", "activation_mlp"})
 
 
 def _normalize_logical_axes(axes):
@@ -166,6 +167,23 @@ def _normalize_logical_axes(axes):
   if isinstance(axes, (tuple, list)):
     return tuple(axes)
   return None
+
+
+def _logical_partition_specs(abstract_state):
+  """Returns a nested dict of logical-name PartitionSpecs, one per Variable in ``abstract_state``.
+
+  ``nnx.get_partition_spec`` rewrites each Variable's ``out_sharding`` through the ambient
+  ``flax.core.spmd`` rules and any per-Variable ``sharding_rules``. Callers of
+  ``from_pretrained`` (the vLLM adapter, Tunix) hold their rules open, which would turn
+  ``"mlp_moe"`` into mesh axes and defeat the zero-pad dispatch in
+  ``_align_checkpoint_to_model_shapes``. Reading ``out_sharding`` directly is immune to both.
+  """
+
+  def _spec(v):
+    axes = v.get_metadata().get("out_sharding")
+    return jax.sharding.PartitionSpec(*axes) if axes else None
+
+  return nnx.to_pure_dict(abstract_state, extract_fn=_spec)
 
 
 def _zero_pad_axis(arr, axis, extra):
@@ -303,14 +321,102 @@ def _intersect_with_metadata(target, meta_tree):
   return out
 
 
-def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
+# Attention types whose MoE layers run through tpu-inference's fused MoE kernel
+# (`RoutedMoE.fused_moe_matmul`).
+_VLLM_FUSED_MOE_ATTENTION = ("vllm_rpa", "vllm_batched_rpa")
+# Mesh axes that `RoutedMoE` multiplies into its expert parallelism size on that path. It adds "dcp" only when
+# its size is > 1, which a product over the axis sizes already accounts for.
+_VLLM_EXPERT_PARALLELISM_AXES = ("attn_dp_expert", "expert", "dcp")
+
+
+def _fused_moe_kernel_uses_ep(config, mesh) -> bool:
+  """Whether tpu-inference's fused MoE kernel runs expert-parallel for this config and mesh.
+
+  Mirrors `use_ep = self.get_expert_parallelism_size() > 1` in `RoutedMoE.fused_moe_matmul`.
+  """
+  if config is None or mesh is None or getattr(config, "attention", None) not in _VLLM_FUSED_MOE_ATTENTION:
+    return False
+  return math.prod(mesh.shape.get(axis, 1) for axis in _VLLM_EXPERT_PARALLELISM_AXES) > 1
+
+
+# `_fuse_moe_halves_concatenated` builds the fused wi in this many slices of the embed axis.
+_FUSE_MOE_NUM_EMBED_SLICES = 8
+
+
+@partial(jax.jit, static_argnames=("shape", "dtype", "out_sharding"))
+def _sharded_zeros(shape, dtype, out_sharding):
+  return jax.lax.with_sharding_constraint(jnp.zeros(shape, dtype), out_sharding)
+
+
+@partial(jax.jit, donate_argnums=0)
+def _write_embed_slice(fused, part, start):
+  """Writes `part` into `fused` at `start` along the embed (second-to-last) axis, reusing `fused`'s buffer."""
+  return jax.lax.dynamic_update_slice_in_dim(fused, part, start, axis=fused.ndim - 2)
+
+
+@partial(jax.jit, static_argnames=("n_shards", "half_dim", "out_sharding"))
+def _concat_halves_padded_per_shard(wi_0, wi_1, n_shards, half_dim, out_sharding):
+  """Returns [wi_0 | wi_1] along the last axis, each half zero-padded to `half_dim` at the tail of each shard."""
+
+  def _pad(arr):
+    chunk = arr.shape[-1] // n_shards
+    arr = arr.reshape(*arr.shape[:-1], n_shards, chunk)
+    arr = jnp.pad(arr, [(0, 0)] * (arr.ndim - 1) + [(0, half_dim // n_shards - chunk)])
+    return arr.reshape(*arr.shape[:-2], half_dim)
+
+  return jax.lax.with_sharding_constraint(jnp.concatenate([_pad(wi_0), _pad(wi_1)], axis=-1), out_sharding)
+
+
+def _fuse_moe_halves_concatenated(wi_0, wi_1, wi_model, n_shards, num_slices=_FUSE_MOE_NUM_EMBED_SLICES):
+  """Fuses wi_0/wi_1 into a [gate | up] wi with `wi_model`'s shape and NamedSharding.
+
+  Each half keeps the per-shard padding of the interleaved layout, but the halves now land on other shards of
+  the fused axis than they come from. That data movement needs temporary buffers, so the result is built in
+  slices of the embed axis, each written into the result buffer in place, to bound the extra memory.
+  """
+  wi_sharding = wi_model.sharding
+  embed_axis = wi_model.ndim - 2
+  embed_dim = wi_model.shape[embed_axis]
+  if embed_axis < len(wi_sharding.spec) and wi_sharding.spec[embed_axis] is not None:
+    num_slices = 1  # Slices of a sharded embed axis would not match `wi_sharding`.
+  fused = _sharded_zeros(wi_model.shape, jnp.dtype(wi_0.dtype), wi_sharding)
+  step = -(-embed_dim // num_slices)
+  for start in range(0, embed_dim, step):
+    stop = min(start + step, embed_dim)
+    part = _concat_halves_padded_per_shard(
+        jax.lax.slice_in_dim(wi_0, start, stop, axis=embed_axis),
+        jax.lax.slice_in_dim(wi_1, start, stop, axis=embed_axis),
+        n_shards=n_shards,
+        half_dim=wi_model.shape[-1] // 2,
+        out_sharding=wi_sharding,
+    )
+    fused = _write_embed_slice(fused, part, start)
+  return fused
+
+
+def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
   """Fuse separate wi_0/wi_1 checkpoint entries into a single wi when model uses fused layout.
 
   This properly interleaves the gate and up projections based on the target tensor
   parallelism (TP) sharding, ensuring that each device receives its respective
   slice of both wi_0 and wi_1. It also applies any necessary MLP-dim padding
   on a per-shard basis to satisfy kernel constraints.
+
+  The per-shard interleave is the layout tpu-inference's TP fused MoE kernel
+  expects: it shards the fused axis and splits each shard into gate/up. When
+  that kernel runs expert-parallel instead (vLLM attention with an expert
+  parallelism size > 1), it does not shard the fused axis and splits the whole
+  axis in half (`gate = wi[..., :H]`, `up = wi[..., H:]`), so the gate and up
+  halves are concatenated rather than interleaved. Each half still keeps the
+  per-shard padding, which matches how `wo` is padded along the MLP dim.
+
+  Args:
+    ckpt_tree: Restored checkpoint tree, possibly holding wi_0/wi_1 pairs.
+    model_arrays_tree: Model arrays tree; a fused model holds `wi` instead.
+    config: Model config, used to detect the expert-parallel fused MoE kernel.
+      When None, the per-shard interleaved layout is used.
   """
+  is_vllm_rpa = config is None or config.attention in _VLLM_FUSED_MOE_ATTENTION
 
   def _is_fusion_site(node):
     """A ckpt-side dict that holds wi_0/wi_1 leaf siblings — the parent of a fusion."""
@@ -353,11 +459,13 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
 
     # Determine the number of shards (TP degree) along the concatenated axis
     n_shards = 1
+    use_ep = False
     wi_sharding = getattr(wi_model, "sharding", None)
-    if isinstance(wi_sharding, jax.sharding.NamedSharding):
+    if is_vllm_rpa and isinstance(wi_sharding, jax.sharding.NamedSharding):
       spec = wi_sharding.spec
       partition = spec[axis] if axis < len(spec) else None
       n_shards = _partition_size(partition, wi_sharding.mesh)
+      use_ep = _fused_moe_kernel_uses_ep(config, wi_sharding.mesh)
 
     # Target size for a single half (wi_0 or wi_1) AFTER padding
     target_half_dim = wi_model.shape[-1] // 2
@@ -382,6 +490,12 @@ def _fuse_moe_weights(ckpt_tree, model_arrays_tree):
         arr_reshaped = jnp.pad(arr_reshaped, pad_widths)
 
       return arr_reshaped
+
+    # Expert-parallel kernel: [gate | up] instead of the per-shard interleave below.
+    if use_ep:
+      new_node = {k: v for k, v in ckpt_node.items() if k not in ("wi_0", "wi_1")}
+      new_node["wi"] = _fuse_moe_halves_concatenated(ckpt_node["wi_0"], ckpt_node["wi_1"], wi_model, n_shards)
+      return new_node
 
     # Apply per-shard padding and chunking
     padded_chunked_wi_0 = _pad_and_chunk(ckpt_node["wi_0"], target_half_dim)
@@ -623,9 +737,22 @@ def create_model(
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.infra.named_scopes import add_named_scopes  # pylint: disable=import-outside-toplevel
 
-    model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
-    model = m3_scan.maybe_apply_scan(model, config)
+    m3_models.validate_attention_config(config, mesh=mesh)
+    with m3_models.enter_mesh_scope(
+        mesh if jax.sharding.get_abstract_mesh().empty else None,
+        shard_mode=getattr(config, "shard_mode", "auto"),
+    ):
+      model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+      model = m3_scan.maybe_apply_scan(model, config)
+      if getattr(config, "quantization", "") and m3_models.ambient_mesh_is_explicit():
+        raise ValueError(
+            "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized "
+            "matmuls. Use shard_mode='auto'."
+        )
+      model = quantizations.maybe_quantize_model(model, config)
+      model = add_named_scopes(model)
     return model
 
   # Model definition
@@ -646,60 +773,7 @@ def get_nnx_create_model_fn(
   return _create_model
 
 
-def _apply_m3_default_named_sharding(
-    abs_var_state: Any,
-    named_sharding_state: Any,
-    mesh: Any,
-) -> Any:
-  """Assigns 1D NamedSharding across fsdp/fsdp_transpose for unpartitioned M3 variables.
-
-  Falls back to the largest non-data/non-stage mesh axis when
-  fsdp/fsdp_transpose are absent.
-  """
-  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
-  if not shard_axes:
-    fallback_axes = [
-        (a, int(mesh.shape[a])) for a in mesh.axis_names if a not in ("data", "stage") and int(mesh.shape[a]) > 1
-    ]
-    if not fallback_axes:
-      max_logging.log(
-          "WARNING: M3 default sharding found no fsdp/fsdp_transpose or"
-          " non-data axis with size > 1; keeping weights replicated."
-      )
-      return named_sharding_state
-    shard_axes = (max(fallback_axes, key=lambda x: x[1])[0],)
-  axis_size = math.prod(int(mesh.shape[a]) for a in shard_axes)
-  spec_axis = shard_axes[0] if len(shard_axes) == 1 else shard_axes
-
-  def _shard_leaf(path, a_var, s_var):
-    cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
-    is_unsharded = (
-        not hasattr(cur_sharding, "spec")
-        or cur_sharding.spec == jax.sharding.PartitionSpec()
-        or all(s is None for s in cur_sharding.spec)
-    )
-    if not is_unsharded:
-      return s_var
-    inner_a = a_var.get_value() if hasattr(a_var, "get_value") else a_var
-    if not hasattr(inner_a, "shape"):
-      return s_var
-    shape = inner_a.shape
-    path_strs = tuple(str(getattr(k, "key", getattr(k, "attr", k))) for k in path)
-    # Scanned `decoder.cycles.{gdn_0,gdn_1,gdn_2,qsa_3}` params carry a leading cycle axis; never shard it.
-    start_d = 1 if "cycles" in path_strs else 0
-    for d in range(start_d, len(shape)):
-      if shape[d] % axis_size == 0:
-        new_spec = jax.sharding.PartitionSpec(*(spec_axis if i == d else None for i in range(len(shape))))
-        new_sharding = jax.sharding.NamedSharding(mesh, new_spec)
-        return s_var.replace(new_sharding) if hasattr(s_var, "replace") else new_sharding
-    return s_var
-
-  return jax.tree_util.tree_map_with_path(
-      _shard_leaf,
-      abs_var_state,
-      named_sharding_state,
-      is_leaf=lambda n: isinstance(n, nnx.Variable),
-  )
+_apply_m3_default_named_sharding = sharding.apply_m3_default_named_sharding
 
 
 def create_nnx_abstract_model(
@@ -717,6 +791,10 @@ def create_nnx_abstract_model(
   """
 
   with logical_axis_rules(config.logical_axis_rules):
+    # Resolve `mesh` up front when none was passed so `m3.models.create_model`
+    # has a mesh to enter for parameter placement during `nnx.eval_shape`.
+    if getattr(config, "use_m3_model", False) and mesh is None:
+      mesh = maxtext_utils.get_mesh_from_config(config, devices)
     _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
     # Use nnx.eval_shape + our scan-axis-aware sharding helper instead of
     # nnx.get_abstract_model, which uses get_var_pspec internally and ignores
@@ -724,8 +802,10 @@ def create_nnx_abstract_model(
     # causing the stacked layers axis to be missing from the PartitionSpec.
     # Wrapping in `jax.set_mesh(mesh)` trips Flax 0.12.6's `_to_variable` for
     # serve-mode AQT variables (NamedSharding with `spec=None` rejected under
-    # AbstractMesh). Sharding is resolved afterwards via the helper, so the
-    # wrap is unnecessary here.
+    # AbstractMesh), and wrapping in `use_abstract_mesh` runs post-construction
+    # Qwix forward-pass tracing under `AbstractMesh`'s default `Explicit` axes.
+    # `m3_models.create_model` enters `mesh.abstract_mesh` for construction
+    # alone, and sharding is resolved afterwards via the helper below.
     abs_model = nnx.eval_shape(_create_model)
     if mesh is None:
       mesh = abs_model.mesh
@@ -950,7 +1030,9 @@ def create_models_and_meshes(trainer_config, sampler_config, trainer_devices, sa
 
 def verify_and_sync_scan_layers(config):
   """Verify and sync scan_layers based on checkpoint metadata."""
-  if not config.load_parameters_path:
+  # A safetensors_dynamic source has no Orbax metadata, and reading it from an hf:// path would call the
+  # HF API from every host.
+  if not config.load_parameters_path or config.source_checkpoint_layout == "safetensors_dynamic":
     return config
 
   custom_metadata = checkpointing.load_checkpoint_metadata(config.load_parameters_path)
@@ -987,6 +1069,129 @@ def verify_and_sync_scan_layers(config):
   return config
 
 
+def _free_device_memory(sharded_state):
+  """Frees the device memory of the model's initial weights, to make room for the loaded ones.
+
+  Skips transient runtime variables (RngState, Cache, Intermediate, BatchStat), which hold runtime state that
+  is not in the checkpoint and must stay valid after the load. Also skips custom layers (`custom_linear`, e.g.
+  a newly attached vision projector), which no checkpoint holds and which keep their random init.
+  """
+
+  def _free(path, node):
+    is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
+    if (
+        isinstance(node, nnx.Variable)
+        and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+        and not is_custom
+    ):
+      inner = node.get_value() if hasattr(node, "get_value") else node[...]
+      # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
+      # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
+      # arrays too; the single-leaf case is a 1-element tree.
+      for leaf in jax.tree_util.tree_leaves(inner):
+        if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+          leaf.delete()
+    elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
+      node.delete()
+
+    return node
+
+  jax.tree_util.tree_map_with_path(_free, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+
+
+def _load_safetensors_dynamic(model, sharded_state, config):
+  """Loads HF safetensors into `model` with the on-the-fly converter (`source_checkpoint_layout=safetensors_dynamic`).
+
+  Uses the same loader as training (`checkpointing.load_state_if_possible`). The model's initial weights are
+  freed first, as the Orbax path does, so only the loaded copy is held on device.
+  """
+  param_state = sharded_state.filter(
+      lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+  )
+  abstract_state = jax.tree.map(lambda x: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=x.sharding), param_state)
+  _free_device_memory(sharded_state)
+  _, restored_state = checkpointing.load_state_if_possible(
+      None,
+      None,
+      config.load_parameters_path,
+      "",
+      config.checkpoint_storage_concurrent_gb,
+      abstract_state,
+      source_checkpoint_layout="safetensors_dynamic",
+      maxtext_config=config,
+  )
+  # The loader returns the leaves it has no HF weights for (a custom vision projector) unmaterialized. The
+  # model keeps their initial values.
+  nnx.update(model, restored_state.filter(lambda path, var: not isinstance(var.get_value(), jax.ShapeDtypeStruct)))
+
+
+_PATHWAYS_REGISTRY_LOCK = threading.Lock()
+
+
+def _snapshot_global_type_handlers() -> list[tuple[Any, Any]]:
+  """Returns a snapshot of all handlers in Orbax's global type registry."""
+  handlers = []
+  for handler_type in ocp.type_handlers.supported_types():
+    handlers.append(
+        (handler_type, ocp.type_handlers.get_type_handler(handler_type)),
+    )
+  return handlers
+
+
+def _create_pathways_zarr2_registry(
+    config: Any,
+) -> ocp.type_handlers.TypeHandlerRegistry | None:
+  """Builds a scoped Pathways TypeHandlerRegistry for Zarr v2 restores.
+
+  Args:
+    config: MaxText configuration containing checkpoint storage flags.
+
+  Returns:
+    A checkpointer-scoped ``TypeHandlerRegistry`` configured with Pathways
+    handlers for plain Zarr v2 checkpoints, or ``None`` when OCDBT or Zarr3 is
+    enabled, when no Pathways client/runtime is active, or when Pathways
+    handler registration fails.
+  """
+  if config.checkpoint_storage_use_ocdbt:
+    return None
+  if config.checkpoint_storage_use_zarr3:
+    return None
+  clients = [getattr(device, "client", None) for device in jax.devices()]
+  has_pathways_client = any(hasattr(client, "pathways") for client in clients)
+  runtimes = [getattr(client, "runtime_type", None) for client in clients]
+  if not has_pathways_client and "pathways" not in runtimes:
+    return None
+  use_colocated = getattr(config, "colocated_python_checkpointing", False)
+  with _PATHWAYS_REGISTRY_LOCK:
+    previous_handlers = _snapshot_global_type_handlers()
+    try:
+      checkpointing_impl = ocp.pathways.CheckpointingImpl.from_options(
+          use_colocated_python=use_colocated,
+          use_persistence_array_handler=True,
+      )
+      # Keep `use_single_replica_array_handler=False`: `from_pretrained` builds
+      # `ArrayRestoreArgs` via `construct_restore_args`, whereas
+      # `SingleReplicaArrayHandler` requires `SingleReplicaArrayRestoreArgs`.
+      ocp.pathways.register_type_handlers(
+          use_single_replica_array_handler=False,
+          checkpointing_impl=checkpointing_impl,
+      )
+      pathways_handlers = _snapshot_global_type_handlers()
+      return ocp.type_handlers.create_type_handler_registry(*pathways_handlers)
+    except (ImportError, NotImplementedError, ValueError, RuntimeError) as exc:
+      max_logging.log(
+          f"Falling back to default Orbax array handler on Pathways: {exc}",
+      )
+      return None
+    finally:
+      for handler_type, handler in previous_handlers:
+        ocp.type_handlers.register_type_handler(
+            handler_type,
+            handler,
+            override=True,
+        )
+
+
 # pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
@@ -1006,7 +1211,8 @@ def from_pretrained(
   scale factors instead of full-precision kernels.
   """
   original_mesh = mesh
-  if config.convert_checkpoint_if_possible and not config.load_parameters_path:
+  loads_safetensors_dynamic = config.source_checkpoint_layout == "safetensors_dynamic"
+  if config.convert_checkpoint_if_possible and not config.load_parameters_path and not loads_safetensors_dynamic:
     if not (epath.Path(config.base_output_directory) / "0" / "items").exists():
       # Try to convert checkpoint on the fly
       hf_access_token = config.hf_access_token or get_token()
@@ -1077,9 +1283,10 @@ def from_pretrained(
       config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str
   )
   _, _abs_state_for_specs = nnx.split(abstract_model)
-  specs = nnx.get_partition_spec(_abs_state_for_specs)
+  specs = _logical_partition_specs(_abs_state_for_specs)
 
-  model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
+  with logical_axis_rules(config.logical_axis_rules):
+    model = maxtext_utils_nnx.create_nnx_sharded_model(abstract_model, _create_model, mesh=mesh)
   # TODO: print debug_sharding info
 
   sharded_state = nnx.state(model)
@@ -1088,13 +1295,26 @@ def from_pretrained(
     mesh = model.mesh  # pyrefly: ignore[missing-attribute]
 
   with mesh:
-    if config.load_parameters_path:
+    if loads_safetensors_dynamic:
+      _load_safetensors_dynamic(model, sharded_state, config)
+    elif config.load_parameters_path:
+      # Orbax v0 PyTreeCheckpointHandler does not auto-register Pathways array
+      # handlers; without one, the single CPU controller reads every shard into
+      # host RAM and stages them over gRPC. Build a scoped Pathways persistence
+      # registry for plain Zarr v2 (both OCDBT and Zarr3 off, since
+      # PathwaysPersistenceArrayHandler hardcodes `driver: 'zarr'`) without
+      # mutating GLOBAL_TYPE_HANDLER_REGISTRY for subsequent checkpoints.
+      handler_kwargs: dict[str, Any] = {}
+      pathways_registry = _create_pathways_zarr2_registry(config)
+      if pathways_registry is not None:
+        handler_kwargs["type_handler_registry"] = pathways_registry
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
               save_concurrent_gb=config.checkpoint_storage_concurrent_gb,
               use_ocdbt=config.checkpoint_storage_use_ocdbt,
               use_zarr3=config.checkpoint_storage_use_zarr3,
+              **handler_kwargs,
           )
       )
 
@@ -1268,32 +1488,7 @@ def from_pretrained(
         )
         restore_args = {"base": restore_args} if has_base_key else restore_args
 
-      # Free memory used by initial sharded_state before restore, to make room for the incoming checkpoint arrays.
-      # Skip transient runtime variables (RngState, Cache, Intermediate, BatchStat) — they hold runtime state
-      # that is not present in the checkpoint and must remain valid after the restore.
-      def _free_device_memory(path, node):
-        # Check if the path contains any name containing 'custom' which indicates a customized layer.
-        # If yes, skip freeing device memory for this node and its children so they can be
-        # initialized with random values.
-        is_custom = any("custom_linear" in str(getattr(p, "key", p)) for p in path)
-        if (
-            isinstance(node, nnx.Variable)
-            and not isinstance(node, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
-            and not is_custom
-        ):
-          inner = node.get_value() if hasattr(node, "get_value") else node[...]
-          # AQT serve-mode `qrhs.frozen` wraps a QTensor (composite pytree) rather
-          # than a single jax.Array. Walking via tree_leaves frees the qvalue/scale
-          # arrays too; the single-leaf case is a 1-element tree.
-          for leaf in jax.tree_util.tree_leaves(inner):
-            if isinstance(leaf, jax.Array) and not leaf.is_deleted():
-              leaf.delete()
-        elif isinstance(node, jax.Array) and not node.is_deleted() and not is_custom:
-          node.delete()
-
-        return node
-
-      jax.tree_util.tree_map_with_path(_free_device_memory, sharded_state, is_leaf=lambda n: isinstance(n, nnx.Variable))
+      _free_device_memory(sharded_state)
 
       restored = ckptr.restore(
           epath.Path(config.load_parameters_path),
@@ -1312,6 +1507,9 @@ def from_pretrained(
           )
         else:
           checkpoint = restored_root
+        # Drop this reference to the restored tree. Otherwise it keeps the arrays restored at their stored
+        # shapes alive after they are padded, expanded or fused below, for as long as this frame lives.
+        del restored_root
       else:
         checkpoint = restored["params"]["params"]
         for col, col_tree in restored["params"].items():
@@ -1333,18 +1531,6 @@ def from_pretrained(
             sharded_state,
             is_leaf=lambda n: isinstance(n, nnx.Variable),
         )
-        # ``specs`` (nnx.get_partition_spec(abstract_state) at the top of from_pretrained)
-        # is the source of truth for logical axis names — it's the input to
-        # the logical-to-mesh sharding conversion.  Each leaf is a PartitionSpec whose entries are
-        # logical axis names (or None / nested tuples).  Reuse it for repeat/zero-pad
-        # dispatch in _align_checkpoint_to_model_shapes.
-        # nnx.get_partition_spec returns Variables wrapping PartitionSpecs at the leaves;
-        # unwrap to raw PartitionSpecs so _normalize_logical_axes can read them.
-        logical_axes_tree = jax.tree.map(
-            lambda v: v.get_value(),
-            specs,
-            is_leaf=lambda n: isinstance(n, nnx.Variable),
-        )
 
         def to_dict(tree):
           if hasattr(tree, "items"):
@@ -1353,9 +1539,8 @@ def from_pretrained(
 
         model_arrays = to_dict(model_arrays)
         checkpoint = to_dict(checkpoint)
-        logical_axes_tree = to_dict(logical_axes_tree)
 
-        checkpoint = _fuse_moe_weights(checkpoint, model_arrays)
+        checkpoint = _fuse_moe_weights(checkpoint, model_arrays, config)
         # Release the raw restored buffers now that wi_0/wi_1 have been fused (if needed).
         # This prevents the replicated intermediate copies from persisting until function return.
         del restored
@@ -1386,7 +1571,7 @@ def from_pretrained(
             return ckpt
           return _align_checkpoint_to_model_shapes(ckpt, model_arr, axes)
 
-        checkpoint = _walk_align(checkpoint, model_arrays, logical_axes_tree)
+        checkpoint = _walk_align(checkpoint, model_arrays, specs)
         nnx.update(model, checkpoint)
         unrestored = [
             jax.tree_util.keystr(path)
@@ -1407,19 +1592,24 @@ def from_pretrained(
         )
 
     if wrap_with_tunix_adapter:
-      with mesh:
-        use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
-        model = TunixMaxTextAdapter(
-            base_model=model,  # pyrefly: ignore[bad-argument-type]
-            use_no_op_mappings=use_no_op_mappings,
-            pad_id=tokenizer_pad_id,
-        )
-        model.config = None  # pyrefly: ignore[missing-attribute]
+      model = apply_tunix_adapter(model, config, tokenizer_pad_id)
 
     if original_mesh:
       return model
     else:
       return model, mesh
+
+
+def apply_tunix_adapter(model, config, pad_id):
+  """Wraps `model` in `TunixMaxTextAdapter`."""
+  use_no_op_mappings = "maxtext_config" in config.vllm_additional_config
+  wrapped = TunixMaxTextAdapter(
+      base_model=model,  # pyrefly: ignore[bad-argument-type]
+      use_no_op_mappings=use_no_op_mappings,
+      pad_id=pad_id,
+  )
+  wrapped.config = None  # pyrefly: ignore[missing-attribute]
+  return wrapped
 
 
 def setup_decode_state_from_nnx(model, config, rng, mesh):

@@ -49,7 +49,6 @@ python3 -m maxtext.checkpoint_conversion.to_maxtext \
     model_name=${MODEL_NAME} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_NAME}/${CHECKPOINT_TYPE}/${idx} \
     scan_layers=false \
-    hf_access_token=${HF_TOKEN} \
     weight_dtype=bfloat16 \
     hardware=cpu \
     skip_jax_distributed_system=True \
@@ -115,7 +114,6 @@ fi
 python3 -m maxtext.checkpoint_conversion.to_huggingface \
     "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
     model_name=${MODEL_NAME} \
-    hf_access_token=${HF_TOKEN} \
     load_parameters_path=${CKPT_PATH} \
     base_output_directory=${LOCAL_PATH} \
     use_multimodal=${USE_MULTIMODAL} \

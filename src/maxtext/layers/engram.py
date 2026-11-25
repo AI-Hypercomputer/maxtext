@@ -24,6 +24,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from jax.sharding import PartitionSpec as P
 from maxtext.common.common_types import Array, Config, MODEL_MODE_TRAIN
 from maxtext.input_pipeline.tokenizer import HFTokenizer
 from maxtext.layers.embeddings import Embed
@@ -31,6 +32,7 @@ from maxtext.layers.initializers import NdInitializer, nd_dense_init
 from maxtext.layers.linears import DenseGeneral
 from maxtext.layers.normalizations import RMSNorm
 from maxtext.layers.quantizations import AqtQuantization as Quant
+from maxtext.utils import max_utils
 import numpy as np
 import sympy
 import tokenizers
@@ -53,7 +55,12 @@ class CompressedTokenizer:
   def __init__(self, tokenizer: HFTokenizer):
     normalizer = self._build_normalizer()
     self.lookup_table_np, self.num_new_token = self._build_lookup_table(tokenizer, normalizer)
-    self.lookup_table = jnp.array(self.lookup_table_np, dtype=jnp.int32)
+
+  @property
+  def lookup_table(self) -> Array:
+    # Converted on use, not stored: the model can be constructed under a JAX trace (e.g. the jitted
+    # `initialize_state`), where a stored jax array would be a tracer that leaks into later traces.
+    return jnp.asarray(self.lookup_table_np, dtype=jnp.int32)
 
   def __len__(self) -> int:
     return self.num_new_token
@@ -136,6 +143,15 @@ class CompressedTokenizer:
     return output_ids
 
 
+def _mulmod_u32(a: Array, b: Array, p: Array) -> Array:
+  """Computes (a * b) % p for uint32 a, b < p < 2**24 without overflowing uint32."""
+  b2, b1, b0 = b >> 16, (b >> 8) & 0xFF, b & 0xFF
+  acc = (a * b2) % p
+  acc = ((acc << 8) % p + (a * b1) % p) % p
+  acc = ((acc << 8) % p + (a * b0) % p) % p
+  return acc
+
+
 class NgramHashMapping:
   """
   Deterministically maps token indices to n-gram hash indices for embedding lookups.
@@ -185,14 +201,29 @@ class NgramHashMapping:
     self.pad_id = int(self.compressed_tokenizer.lookup_table_np[pad_id])
 
     # Pre-calculate odd multipliers for hashing: {layer_id: multipliers}
-    # Store as JAX arrays
+    # Store as numpy arrays, not JAX arrays (see `CompressedTokenizer.lookup_table`)
     self.layer_multipliers = {
-        k: jnp.array(v, dtype=jnp.int32) for k, v in self._calculate_multipliers_across_layers(seed).items()
+        k: np.asarray(v, dtype=np.int64) for k, v in self._calculate_multipliers_across_layers(seed).items()
     }
 
     # Pre-calculate unique prime vocab sizes for every head
     # Structure: {layer_id: [[2gram_head1, ..., 2gram_headH], ..., [Ngram_head1, ..., Ngram_headH]]}
     self.vocab_size_across_layers = self._calculate_vocab_size_across_layers()
+
+    # Pre-compute (prod_hi, prod_lo) uint32 limbs of (token_id * multiplier) and (2**32 % prime)
+    # on host as NumPy arrays so 64-bit multiplicative-XOR hashing stays exact under jax_enable_x64=False.
+    ids = np.arange(self.tokenizer_vocab_size, dtype=np.uint64)
+    self.layer_prod_hi = {}
+    self.layer_prod_lo = {}
+    self.layer_pow32_mod_p = {}
+    for layer_id in self.layer_ids:
+      products = ids[None, :] * self.layer_multipliers[layer_id].astype(np.uint64)[:, None]
+      self.layer_prod_hi[layer_id] = (products >> np.uint64(32)).astype(np.uint32)
+      self.layer_prod_lo[layer_id] = (products & np.uint64(0xFFFFFFFF)).astype(np.uint32)
+      self.layer_pow32_mod_p[layer_id] = [
+          (np.int64(2**32) % np.asarray(ngram_primes, dtype=np.int64)).astype(np.uint32)
+          for ngram_primes in self.vocab_size_across_layers[layer_id]
+      ]
 
   def _calculate_multipliers_across_layers(self, seed: int) -> dict[int, np.ndarray]:
     """
@@ -201,8 +232,8 @@ class NgramHashMapping:
     Returns:
       A dictionary mapping layer_id to a list of `max_ngram_size` multipliers.
     """
-    # Pre-calculate bounds for random generation using int32 to avoid overflow
-    max_int = np.iinfo(np.int32).max
+    # Pre-calculate bounds for random generation using int64 to match reference
+    max_int = np.iinfo(np.int64).max
     m_max = int(max_int // self.tokenizer_vocab_size)
     half_bound = max(1, m_max // 2)
     # Hard-code prime number to align with reference
@@ -214,7 +245,7 @@ class NgramHashMapping:
       layer_seed = int(seed + LAYER_PRIME_OFFSET * int(layer_id))
       np_rng = np.random.default_rng(layer_seed)
       # Generate random odd integers
-      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int32)
+      random_value = np_rng.integers(low=0, high=half_bound, size=(self.max_ngram_size,), dtype=np.int64)
       multipliers = random_value * 2 + 1
       layer_multipliers[layer_id] = multipliers
     return layer_multipliers
@@ -289,42 +320,66 @@ class NgramHashMapping:
         shifted_x = jnp.concatenate([padding, x[:, :-k]], axis=1)
         shifted_inputs.append(shifted_x)
 
-    # 2. Retrieve layer-specific hash multipliers
-    multipliers = self.layer_multipliers[layer_id]
+    # 2. Retrieve layer-specific (prod_hi, prod_lo) uint32 limbs and prime moduli
+    prod_hi = jnp.asarray(self.layer_prod_hi[layer_id])
+    prod_lo = jnp.asarray(self.layer_prod_lo[layer_id])
+    vocab_sizes = self.vocab_size_across_layers[layer_id]
+    pow32_mod_p = self.layer_pow32_mod_p[layer_id]
 
-    # 3. Compute Hashes: multiplicative bitwise XOR
+    # 3. Compute Hashes: multiplicative bitwise XOR via (hi, lo) uint32 limbs
     # Implements hash: H_n = (shift_0 * m_0) ^ ... ^ (shift_k * m_k)
     # e.g., (The * m_0) ^ (PAD * m_1) ^ (PAD * m_2)
     #       (cat * m_0) ^ (The * m_1) ^ (PAD * m_2)
     #       (sat * m_0) ^ (cat * m_1) ^ (The * m_2)
     all_hashes = []
     # Initialize with unigrams, shape: [B, S]
-    ngram_hash = shifted_inputs[0] * multipliers[0]
-    # Pre-fetch vocab sizes for modulo
-    vocab_sizes = self.vocab_size_across_layers[layer_id]
+    ngram_hash_hi = prod_hi[0][shifted_inputs[0]]
+    ngram_hash_lo = prod_lo[0][shifted_inputs[0]]
 
     for n in range(2, self.max_ngram_size + 1):
       # Update hash with next history token
-      ngram_hash = jnp.bitwise_xor(ngram_hash, shifted_inputs[n - 1] * multipliers[n - 1])
+      ngram_hash_hi = jnp.bitwise_xor(ngram_hash_hi, prod_hi[n - 1][shifted_inputs[n - 1]])
+      ngram_hash_lo = jnp.bitwise_xor(ngram_hash_lo, prod_lo[n - 1][shifted_inputs[n - 1]])
 
       # Retrieve prime vocab sizes for all heads of this n-gram order
-      vocab_sizes_for_this_gram = vocab_sizes[n - 2]
-      mods = jnp.array(vocab_sizes_for_this_gram, dtype=jnp.int32)
+      mods = jnp.asarray(vocab_sizes[n - 2], dtype=jnp.uint32)
+      pow32_mods = jnp.asarray(pow32_mod_p[n - 2], dtype=jnp.uint32)
 
-      # Broadcast Modulo: Map hash to valid table indices
+      # Limb-wise Modulo: ((hi % p) * (2**32 % p) + (lo % p)) % p
       # [B, S, 1] % [H] -> [B, S, H]
-      head_hashes = ngram_hash[..., None] % mods
+      r_hi = ngram_hash_hi[..., None] % mods
+      r_lo = ngram_hash_lo[..., None] % mods
+      head_hashes = ((_mulmod_u32(r_hi, pow32_mods, mods) + r_lo) % mods).astype(jnp.int32)
       all_hashes.append(head_hashes)
 
     # Concatenate all heads: [B, S, H_total] where H_total = H * num_ngram_orders
     return jnp.concatenate(all_hashes, axis=2)
 
-  def __call__(self, input_ids) -> dict[int, Array]:
+  def __call__(self, input_ids, load_balanced_cp_size: int = 1) -> dict[int, Array]:
+    """
+    Computes the n-gram hash indices of every Engram layer.
+
+    Args:
+      input_ids: [B, S] token ids from the standard tokenizer.
+      load_balanced_cp_size: Context-parallel size the input pipeline permuted the sequence with
+        (DUAL_CHUNK_SWAP, see `max_utils.reorder_sequence`), i.e. `max_utils.reordered_cp_size`.
+        1 means `input_ids` are in natural token order.
+
+    Returns:
+      {layer_id: [B, S, H_total]} hash indices, in the same token order as `input_ids`.
+    """
     # input_ids from standard tokenizer
     compressed_ids = self.compressed_tokenizer(input_ids)
+    if load_balanced_cp_size > 1:
+      # The n-gram windows take each token's predecessors by array index (`x[:, :-k]`), which
+      # is only its history when the sequence is in natural order. Token ids are small
+      # (int32, [B, S]), so undo the permutation here and re-apply it to the hashes below.
+      compressed_ids = max_utils.reorder_sequence(compressed_ids, cp_size=load_balanced_cp_size, to_contiguous=True)
     hash_ids_for_all_layers = {}
     for layer_id in self.layer_ids:
       hash_ids = self._get_ngram_hashes(compressed_ids, layer_id=layer_id)
+      if load_balanced_cp_size > 1:
+        hash_ids = max_utils.reorder_sequence(hash_ids, cp_size=load_balanced_cp_size)
       hash_ids_for_all_layers[layer_id] = hash_ids
     return hash_ids_for_all_layers
 
@@ -404,6 +459,7 @@ class ShortConv(nnx.Module):
       dilation: int,
       mhc_expansion_rate: int,
       rngs: nnx.Rngs = None,
+      mesh: Optional[Mesh] = None,
   ):
     """
     Args:
@@ -413,8 +469,16 @@ class ShortConv(nnx.Module):
       dilation: Dilation rate for the convolution.
       mhc_expansion_rate (G): Number of branches.
       rngs: RNG state for initialization.
+      mesh: Device mesh. Only needed to convolve sequences that the input pipeline permuted for
+        context-parallel load balancing (see `__call__`).
     """
     self.mhc_expansion_rate = mhc_expansion_rate
+    self.mesh = mesh
+    # Mesh axis the sequence is sharded over under context parallelism.
+    self.context_axis = config.context_sharding
+    self.dilation = dilation
+    # Tokens of history an output depends on, i.e. the "CAUSAL" left padding of `self.conv`.
+    self.halo_size = (kernel_size - 1) * dilation
 
     # Norms
     # Vectorized Init: Independent weights per branch
@@ -456,12 +520,15 @@ class ShortConv(nnx.Module):
         rngs=rngs,
     )
 
-  def __call__(self, x: Array) -> Array:
+  def __call__(self, x: Array, load_balanced_cp_size: int = 1) -> Array:
     """
     Compute y^i = SiLU(Conv1D(RMSNorm^i(x^i))) for each branch i.
 
     Args:
       x: Input tensor of shape [B, S, G, D]
+      load_balanced_cp_size: Context-parallel size the input pipeline permuted the sequence with
+        (DUAL_CHUNK_SWAP, see `max_utils.reorder_sequence`), i.e. `max_utils.reordered_cp_size`.
+        1 means `x` is in natural token order.
     Returns:
       Output tensor of shape [B, S, G, D]
 
@@ -487,10 +554,93 @@ class ShortConv(nnx.Module):
     # Flatten branches into channel: [B, S, G, D] -> [B, S, G * D]
     x_flat = x.reshape(B, S, G * D)
     # Depthwise Convolution to mix temporal dimension S only. [B, S, G * D] shape stays
-    y = self.conv(x_flat)
+    # A width-1 kernel (halo_size 0) reads no history, so the token order does not matter to it.
+    if load_balanced_cp_size > 1 and self.halo_size > 0:
+      y = self._load_balanced_conv(x_flat, load_balanced_cp_size)
+    else:
+      y = self.conv(x_flat)
     y = jax.nn.silu(y)
     # Restore branch: [B, S, G * D] -> [B, S, G, D]
     return y.reshape(B, S, G, D)
+
+  def _load_balanced_conv(self, x_flat: Array, cp_size: int) -> Array:
+    """
+    Causal depthwise convolution of a sequence stored in DUAL_CHUNK_SWAP order.
+
+    With `context_parallel_load_balance` the input pipeline permutes every sequence with
+    `max_utils.reorder_sequence`: the sequence is cut into 2 * cp_size chunks and context-parallel
+    rank r holds natural chunks r and 2 * cp_size - 1 - r. `self.conv` takes each token's history
+    from whatever precedes it in memory, which at every chunk seam is the wrong chunk - for the
+    second local chunk even a later one.
+
+    `nnx.Conv` implements "CAUSAL" as a left pad of `halo_size` zeros followed by a "VALID"
+    convolution. Here each local chunk is left-padded with the last `halo_size` tokens of its natural
+    predecessor instead (zeros only for chunk 0), fetched from the rank that holds it with
+    `lax.ppermute`, and then put through the same "VALID" convolution. The output is identical to
+    convolving the sequence in natural order, and the exchange moves 2 * halo_size tokens per rank
+    regardless of the sequence length.
+
+    Args:
+      x_flat: [B, S, C] in DUAL_CHUNK_SWAP order, S sharded over `self.context_axis`.
+      cp_size: Size of the context axis the sequence was permuted for.
+    Returns:
+      [B, S, C] in the same order as `x_flat`.
+    """
+    seq_len = x_flat.shape[1]
+    halo = self.halo_size
+    axis = self.context_axis
+    conv = self.conv
+    if seq_len % (2 * cp_size) != 0 or seq_len // (2 * cp_size) < halo:
+      raise ValueError(
+          f"Engram ShortConv under context_parallel_load_balance needs a sequence length that is a multiple of"
+          f" 2 * cp_size with chunks of at least {halo} tokens, got sequence length {seq_len} for cp_size {cp_size}."
+      )
+
+    def local_conv(x, kernel):
+      # x: [B, 2 * L, C], the two chunks of this rank: natural chunks r and 2 * cp_size - 1 - r.
+      x, kernel = conv.promote_dtype((x, kernel), dtype=conv.dtype)
+      chunk = x.shape[1] // 2
+      first, second = x[:, :chunk], x[:, chunk:]
+      rank = jax.lax.axis_index(axis)
+      # Chunk r - 1 is the first chunk of rank r - 1. Rank 0 receives nothing and `ppermute` fills in
+      # zeros, which is exactly the causal padding at the start of the sequence.
+      halo_first = jax.lax.ppermute(first[:, -halo:], axis, perm=[(r, r + 1) for r in range(cp_size - 1)])
+      # Chunk 2 * cp_size - 2 - r is the second chunk of rank r + 1 ...
+      halo_second = jax.lax.ppermute(second[:, -halo:], axis, perm=[(r, r - 1) for r in range(1, cp_size)])
+      # ... except on the last rank, whose two chunks (cp_size - 1 and cp_size) are adjacent.
+      halo_second = jnp.where(rank == cp_size - 1, first[:, -halo:], halo_second)
+
+      def valid_conv(seq):
+        # What `self.conv` runs after its "CAUSAL" padding.
+        return jax.lax.conv_general_dilated(
+            seq,
+            kernel,
+            window_strides=(1,),
+            padding="VALID",
+            rhs_dilation=(self.dilation,),
+            dimension_numbers=("NWC", "WIO", "NWC"),
+            feature_group_count=conv.feature_group_count,
+            precision=conv.precision,
+        )
+
+      return jnp.concatenate(
+          [
+              valid_conv(jnp.concatenate([halo_first, first], axis=1)),
+              valid_conv(jnp.concatenate([halo_second, second], axis=1)),
+          ],
+          axis=1,
+      )
+
+    # Manual only over the context axis: batch and channels keep whatever sharding the surrounding
+    # program gives them, so no other mesh axis names are assumed here.
+    return jax.shard_map(
+        local_conv,
+        mesh=self.mesh,
+        in_specs=(P(None, axis, None), P()),
+        out_specs=P(None, axis, None),
+        axis_names={axis},
+        check_vma=True,
+    )(x_flat, conv.kernel[...])
 
 
 class Engram(nnx.Module):
@@ -616,9 +766,10 @@ class Engram(nnx.Module):
         dilation=self.max_ngram_size,
         mhc_expansion_rate=mhc_expansion_rate,
         rngs=rngs,
+        mesh=mesh,
     )
 
-  def __call__(self, hidden_states: Array, hash_input_ids: Array) -> Array:
+  def __call__(self, hidden_states: Array, hash_input_ids: Array, load_balanced_cp_size: int = 1) -> Array:
     """
     Computes the Engram output by retrieving, gating, and smoothing n-gram memory.
 
@@ -626,6 +777,10 @@ class Engram(nnx.Module):
       hidden_states: current transformer state. Shape: [B, S, G, D].
       hash_input_ids: Hashed token IDs. Shape: [B, S, H_total].
         Produced by `hash_mapping.hash(input_ids)[layer_id]`.
+      load_balanced_cp_size: Context-parallel size the input pipeline permuted the sequence with
+        (DUAL_CHUNK_SWAP, see `max_utils.reorder_sequence`), i.e. `max_utils.reordered_cp_size`.
+        1 means the inputs are in natural token order. Everything here except `short_conv` is
+        pointwise along S, so only the convolution has to know.
 
     Returns:
       Shape: [B, S, G, D]
@@ -687,7 +842,7 @@ class Engram(nnx.Module):
     # 8. ShortConv as Temporal Smoothing
     # [B, S, G, D] shape stays
     # Apply depthwise conv to mix S
-    conv_output = self.short_conv(gated_value)
+    conv_output = self.short_conv(gated_value, load_balanced_cp_size=load_balanced_cp_size)
     # residual connection for conv component
     output = gated_value + conv_output
 

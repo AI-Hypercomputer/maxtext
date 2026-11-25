@@ -56,13 +56,15 @@ from maxtext.utils import max_logging
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
+from maxtext.utils import sharding
 
 
-def get_tunix_config(mt_config: MaxTextConfig) -> DPOTrainingConfig:
+def get_tunix_config(mt_config: MaxTextConfig, mesh: jax.sharding.Mesh | None = None) -> DPOTrainingConfig:
   """Gets the Tunix training configurations from the MaxText config.
 
   Args:
     mt_config: MaxText config.
+    mesh: Optional JAX device mesh used to resolve 2D input data sharding.
 
   Returns:
     A Tunix `DPOTrainingConfig` object.
@@ -92,6 +94,12 @@ def get_tunix_config(mt_config: MaxTextConfig) -> DPOTrainingConfig:
         enable_continuous_profiling=mt_config.enable_continuous_profiling,
     )
 
+  # Tunix re-shards batches to `data_sharding_axis`; without a mesh its default is kept.
+  data_sharding_kwargs = {}
+  data_sharding_axis = sharding.get_tunix_data_sharding_axis(mt_config, mesh)
+  if data_sharding_axis is not None:
+    data_sharding_kwargs["data_sharding_axis"] = data_sharding_axis
+
   return DPOTrainingConfig(
       eval_every_n_steps=mt_config.eval_interval,
       max_steps=mt_config.steps,
@@ -106,14 +114,16 @@ def get_tunix_config(mt_config: MaxTextConfig) -> DPOTrainingConfig:
       label_smoothing=mt_config.dpo.dpo_label_smoothing,
       max_prompt_length=mt_config.dpo.max_prompt_length,
       max_response_length=mt_config.max_target_length - mt_config.dpo.max_prompt_length,
+      **data_sharding_kwargs,
   )
 
 
 def setup_trainer_state(mt_config, goodput_recorder=None, test_only_training_hooks_class=None):
   """Set up prerequisites for training loop."""
-  tunix_config = get_tunix_config(mt_config)
-
   with maybe_record_goodput(goodput_recorder, GoodputEvent.TPU_INIT):
+    mesh = maxtext_utils.get_mesh_from_config(mt_config)
+    max_utils.check_no_load_balanced_context_parallelism(mt_config, "train_dpo", mesh=mesh)
+    tunix_config = get_tunix_config(mt_config, mesh=mesh)
     # We need pad_id to correctly initialize the MaxTextTunixAdapter in the from_pretrained call below.
     # To do that we instantiate a separate copy of the tokenizer here, which is somewhat redundant.
     # However, there is no clean way to get the pad_id from the tokenizer in the datapipiline here.
@@ -123,9 +133,11 @@ def setup_trainer_state(mt_config, goodput_recorder=None, test_only_training_hoo
         False,
         False,
         mt_config.hf_access_token,
+        trust_remote_code=getattr(mt_config, "tokenizer_trust_remote_code", False),
     )
-    model, mesh = model_creation_utils.from_pretrained(
+    model = model_creation_utils.from_pretrained(
         mt_config,
+        mesh=mesh,
         wrap_with_tunix_adapter=True,
         tokenizer_pad_id=tok.pad_id,
     )
@@ -199,6 +211,8 @@ def validate_config(config):
         f"Vocab Tiling is not supported with DPO. "
         f"num_vocab_tiling was configured to {config.num_vocab_tiling}, but it must be 1 when running train_dpo."
     )
+
+  max_utils.check_no_load_balanced_context_parallelism(config, "train_dpo")
 
 
 def main(argv: list[str]) -> None:

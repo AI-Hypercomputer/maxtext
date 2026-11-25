@@ -156,13 +156,16 @@ llama4_maverick_dropless_v5p_256 = _add_to_model_dictionary(
         tuning_params={
             "per_device_batch_size": 4,
             "max_target_length": 8192,
-            "ici_fsdp_parallelism": 32,
-            "ici_tensor_parallelism": 4,
+            "ici_fsdp_parallelism": 8,
+            "ici_expert_parallelism": 16,
+            "ragged_buffer_factor": 2.0,
+            "moe_dropless_fallback": "layer",
             "enable_checkpointing": False,
             "dtype": "bfloat16",
             "weight_dtype": "float32",
             "megablox": True,
             "sparse_matmul": True,
+            "use_ragged_sort": True,
             "dataset_type": "synthetic",
             "opt_type": "adamw",
             "skip_first_n_steps_for_profiler": 5,
@@ -175,19 +178,40 @@ llama4_maverick_dropless_v5p_256 = _add_to_model_dictionary(
             "key_proj": "offload",
             "value_proj": "offload",
             "reuse_example_batch": 1,
+            "use_tokamax_splash": True,
             "sa_block_q": 2048,
             "sa_block_kv": 2048,
-            "sa_block_kv_compute": 2048,
-            "sa_block_q_dkv": 2048,
+            "sa_block_kv_compute": 256,
+            "sa_block_q_dkv": 1024,
             "sa_block_kv_dkv": 2048,
             "sa_block_kv_dkv_compute": 2048,
             "sa_block_q_dq": 2048,
             "sa_block_kv_dq": 2048,
+            # Megablox GMM tiles tuned on v5p for the per-chip EP16 shapes.
+            "wi_tile_fwd_batch_seq": 128,
+            "wi_tile_fwd_embed_dim": 5120,
+            "wi_tile_fwd_mlp_dim": 2048,
+            "wi_tile_dlhs_batch_seq": 128,
+            "wi_tile_dlhs_mlp_dim": 8192,
+            "wi_tile_dlhs_embed_dim": 1280,
+            "wi_tile_drhs_batch_seq": 128,
+            "wi_tile_drhs_embed_dim": 5120,
+            "wi_tile_drhs_mlp_dim": 1024,
+            "wo_tile_fwd_batch_seq": 256,
+            "wo_tile_fwd_mlp_dim": 8192,
+            "wo_tile_fwd_embed_dim": 1280,
+            "wo_tile_dlhs_batch_seq": 128,
+            "wo_tile_dlhs_embed_dim": 5120,
+            "wo_tile_dlhs_mlp_dim": 2048,
+            "wo_tile_drhs_batch_seq": 256,
+            "wo_tile_drhs_mlp_dim": 4096,
+            "wo_tile_drhs_embed_dim": 1280,
             "tokenizer_path": "meta-llama/Llama-4-Maverick-17B-128E",
         },
         xla_flags=(
             xla_flags_library.MOE_VMEM_LIMIT_FLAG
-            + xla_flags_library.CF_FOR_ALL_GATHER
+            + xla_flags_library.ASYNC_ALL_GATHER_OVERLAP
+            + xla_flags_library.ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR
             + xla_flags_library.DATA_PARALLEL_OVERLAP
             + xla_flags_library.LAYOUT_FOR_ALL_REDUCE_SCATTER
             + xla_flags_library.HOST_OFFLOAD_FLAGS

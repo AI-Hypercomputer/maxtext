@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Transformer models."""
+
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -26,12 +27,12 @@ from flax.core import FrozenDict
 from flax.core.spmd import logical_axis_rules as flax_logical_axis_rules
 from flax import nnx
 
-from maxtext.common.common_types import Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput, VisionEncoderBlockType
+from maxtext.common.common_types import AudioDecoderBlockType, Config, DECODING_ACTIVE_SEQUENCE_INDICATOR, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, MultimodalInput, VisionEncoderBlockType
 from maxtext.layers.nnx_decoders import NNXDecoder
 from maxtext.layers import initializers
 from maxtext.layers import nnx_wrappers
 from maxtext.layers.embeddings import Embed
-from maxtext.layers.encoders import AudioEncoder, VisionEncoder
+from maxtext.layers.encoders import AudioDecoder, AudioEncoder, VisionEncoder
 from maxtext.layers.multi_token_prediction import MultiTokenPredictionBlock
 from maxtext.layers.quantizations import AqtQuantization as Quant
 from maxtext.multimodal import processor as mm_processor
@@ -148,6 +149,10 @@ class Transformer(nnx.Module):
     )
     self.audio_encoder = AudioEncoder(config=cfg, mesh=mesh, rngs=rngs) if getattr(cfg, "use_audio", False) else None
     self.decoder = NNXDecoder(config=cfg, mesh=mesh, quant=self.quant, model_mode=self.model_mode, rngs=rngs)
+    # Speech generation head driven by the decoder's hidden states (text -> speech), see `audio_decode.py`.
+    self.audio_decoder = (
+        AudioDecoder(config=cfg, mesh=mesh, rngs=rngs) if cfg.audio_decoder_block != AudioDecoderBlockType.NONE else None
+    )
 
     # If MTP is enabled via config, set up the MTP block.
     if getattr(self.config, "mtp_num_layers", 0) > 0:
@@ -156,13 +161,16 @@ class Transformer(nnx.Module):
       # For MTP, we use the DecoderLayer blueprint to ensure architectural consistency.
       # By convention, this is the last layer in the list.
       mtp_layer = layer_types[-1]
-      self.mtp_block = MultiTokenPredictionBlock(
-          config=self.config,
-          mesh=self.mesh,
-          transformer_layer_module=mtp_layer,
-          decoder=self.decoder,
-          rngs=rngs,
-      )
+      # With pipeline parallelism the MTP block runs under the PP-as-DP rules (see __call__), so under explicit sharding
+      # it is built under them too. Without pipeline parallelism, or under auto, this context is a no-op.
+      with sharding.pp_act_as_dp_construction_rules(self.config):
+        self.mtp_block = MultiTokenPredictionBlock(
+            config=self.config,
+            mesh=self.mesh,
+            transformer_layer_module=mtp_layer,
+            decoder=self.decoder,
+            rngs=rngs,
+        )
 
   def no_op(self, *args, **kwargs):
     """A no-op method to allow the model to be used in a lazy context."""
@@ -213,6 +221,7 @@ class Transformer(nnx.Module):
       attention_metadata: dict[str, Any] | None = None,
       forced_routed_experts: jnp.ndarray | None = None,
       decoder_input_embeddings: jax.Array | None = None,
+      skip_lm_head: bool = False,
   ):
     """Applies the Zero-1 FSDP wrapped Transformer model.
 
@@ -319,6 +328,7 @@ class Transformer(nnx.Module):
         attention_metadata=attention_metadata,
         deepstack_visual_embeds=deepstack_visual_embeds,
         forced_routed_experts=forced_routed_experts,
+        skip_lm_head=skip_lm_head,
     )  # pytype: disable=wrong-keyword-args
     if isinstance(res, tuple) and len(res) == 4:
       logits, hidden_state, kv_caches, expert_indices = res
@@ -370,5 +380,8 @@ class Transformer(nnx.Module):
       if expert_indices is not None:
         return hidden_state, kv_caches, expert_indices
       return hidden_state, kv_caches
+
+    if skip_lm_head:
+      return hidden_state
 
     return logits

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
   import tensorflow as tf
 
 import grain.python as grain
+import jax
 import numpy as np
 from grain._src.python.dataset.sources.tfrecord_dataset import _TFRecordReader, _TFRecordDatasetIterator  # pylint: disable=protected-access
 from grain.experimental import TFRecordIterDataset
@@ -47,9 +48,11 @@ def normalize_features(x, column_name):
   return {"inputs": x[column_name], "targets": x[column_name]}
 
 
-def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None):
+def get_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token=None, trust_remote_code=False):
   # Load tokenizer
-  tokenizer_model = tokenizer.build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token)
+  tokenizer_model = tokenizer.build_tokenizer(
+      tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, trust_remote_code=trust_remote_code
+  )
   return tokenizer_model
 
 
@@ -172,6 +175,22 @@ def pre_process_image_sft(example, image_column, config):
     return image
 
   example[image_column] = _process_image_fn(example[image_column])
+  return example
+
+
+def prepend_bos(example, column_name, bos_id):
+  """Prepends `bos_id` to the token ids in `example[column_name]` unless they already start with it.
+
+  Multimodal SFT tokenizes without BOS because `reformat_prompt` writes the chat format, so prompts whose format
+  leaves BOS to the token ids (see `mm_processor.reformatted_prompt_needs_bos`) get it here.
+  """
+  tokens = example[column_name]
+  if len(tokens) == 0 or tokens[0] != bos_id:
+    if isinstance(tokens, np.ndarray):
+      tokens = np.concatenate([np.asarray([bos_id], dtype=tokens.dtype), tokens])
+    else:
+      tokens = [bos_id, *tokens]
+  example[column_name] = tokens
   return example
 
 
@@ -1707,3 +1726,44 @@ class ComputeQwen3OmniPositions(grain.MapTransform):
       element.pop("second_per_grids", None)
 
     return element
+
+
+def get_data_replica(config) -> tuple[int, int]:
+  """Returns `(data_replica_index, num_data_replicas_per_process)` of the data replica `config` loads for.
+
+  Configs without these fields (e.g. duck-typed test configs) load for a single replica.
+
+  Raises:
+    ValueError: If the index is not in `[0, num_data_replicas_per_process)`.
+  """
+  num_replicas = getattr(config, "num_data_replicas_per_process", 1)
+  replica_index = getattr(config, "data_replica_index", 0)
+  if num_replicas < 1 or not 0 <= replica_index < num_replicas:
+    raise ValueError(
+        f"data_replica_index ({replica_index}) must be in [0, num_data_replicas_per_process ({num_replicas}))."
+    )
+  return replica_index, num_replicas
+
+
+def get_all_replicas_batch_size(config, batch_size: int) -> int:
+  """Returns the per-step batch of all `num_data_replicas_per_process` replicas, given one replica's `batch_size`.
+
+  A config's global batch sizes (e.g. `global_batch_size_to_load`) are those of its own replica, but the shards of
+  `get_dataloading_shard` cover all replicas. Anything sized for the whole shard set, such as ElasticIterator's
+  global batch or the mmap_npy sample budget, must use this total.
+  """
+  return batch_size * get_data_replica(config)[1]
+
+
+def get_dataloading_shard(config, process_indices: list[int], shard_offset: int = 0, shards_per_host: int = 1):
+  """Returns `(shard_index, shard_count)` of the data this process and data replica should load.
+
+  Loading host `h` (its position in `process_indices`) owns shards `shard_offset * num_hosts + h` for
+  `shard_offset < shards_per_host`; each of those is further split among the process's
+  `num_data_replicas_per_process` replicas. Consumers that size batches or sample budgets for all
+  `shard_count` shards must scale the replica's batch with `get_all_replicas_batch_size`.
+  """
+  replica_index, num_replicas = get_data_replica(config)
+  num_hosts = len(process_indices)
+  host_shard = shard_offset * num_hosts + process_indices.index(jax.process_index())
+  return host_shard * num_replicas + replica_index, num_hosts * shards_per_host * num_replicas

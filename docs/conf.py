@@ -53,6 +53,22 @@ with open(version_path, "r", encoding="utf-8") as f:
   else:
     raise RuntimeError("Unable to find version string.")
 
+
+def _get_docker_tag(default_version: str) -> str:
+  """Resolves the pre-built Docker image tag from Read the Docs environment variables."""
+  rtd_version_slug = os.environ.get("READTHEDOCS_VERSION", "")
+  rtd_version_type = os.environ.get("READTHEDOCS_VERSION_TYPE", "")
+  rtd_version_name = os.environ.get("READTHEDOCS_VERSION_NAME", "")
+
+  if rtd_version_slug == "latest":
+    return "latest"
+  if rtd_version_type == "tag" and rtd_version_name and rtd_version_name != "stable":
+    return rtd_version_name.removeprefix("maxtext-v").removeprefix("v")
+  return default_version
+
+
+docker_tag = _get_docker_tag(version)
+
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
 
@@ -262,6 +278,7 @@ class FilterSphinxWarnings(logging.Filter):
 def substitute_placeholders(app, docname, source):
   result = source[0]
   result = result.replace("{{version}}", version)
+  result = result.replace("{{docker_tag}}", docker_tag)
   source[0] = result
 
 

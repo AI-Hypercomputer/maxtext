@@ -65,7 +65,9 @@ logical_axis_rules: [
                       ['activation_batch', ['data', 'fsdp', 'fsdp_transpose', 'expert']],
                       ['activation_length', ['context']],
                       ['activation_norm_length', ['context']],
+                      ['activation_norm_length_routed', ['context']],
                       ['activation_embed', []],
+                      ['activation_embed_routed', []],
                       ['activation_stage', 'stage'],
                       # General Weights
                       ['mlp', ['fsdp_transpose']],

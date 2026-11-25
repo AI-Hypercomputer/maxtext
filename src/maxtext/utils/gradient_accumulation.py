@@ -114,7 +114,9 @@ def gradient_accumulation_loss_and_grad(
   # token capacity, so the cotangents carry the GA=1 magnitude, and fold S back into the final division below.
   # The accumulated gradient is mathematically unchanged: sum_i grad(L_i) / W.
   use_tunix_ga = getattr(config, "use_tunix_gradient_accumulation", False)
-  token_capacity = getattr(config, "global_batch_size_to_train_on", 0) * getattr(config, "max_target_length", 0)
+  logical_batch = getattr(config, "logical_global_batch_size_to_train_on", None)
+  batch_size = logical_batch if isinstance(logical_batch, int) else getattr(config, "global_batch_size_to_train_on", 0)
+  token_capacity = batch_size * getattr(config, "max_target_length", 0)
   loss_scale = 1.0 / float(token_capacity) if (token_capacity > 0 and not use_tunix_ga) else 1.0
 
   # functools.wraps keeps _loss_fn's signature visible, which nnx.value_and_grad needs to resolve is_train=.

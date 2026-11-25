@@ -19,11 +19,12 @@ import unittest
 from absl.testing import parameterized
 from flax import nnx
 import jax
-from jax.sharding import PartitionSpec as P
+from jax.sharding import AxisType, Mesh, PartitionSpec as P
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from maxtext.common.common_types import ShardMode
 from maxtext.utils import pipeline_utils
 
 pytestmark = pytest.mark.cpu_only
@@ -450,6 +451,57 @@ class GradientAccumulationScanTest(unittest.TestCase):
     jitted = jax.jit(grad_fn)(self.loop_state, self.bsw)
 
     jax.tree.map(lambda got, want: np.testing.assert_allclose(got, want, rtol=1e-5, atol=1e-5), jitted, eager)
+
+
+def _one_device_mesh(axis_types):
+  return Mesh(np.asarray(jax.devices()[:1]).reshape((1, 1, 1)), ("data", "stage", "fsdp"), axis_types=axis_types)
+
+
+class PipelineStageMeshTest(unittest.TestCase):
+  """pipeline_stage_mesh and the PartitionSpec helpers the pipeline uses under shard_mode=explicit."""
+
+  def test_only_stage_becomes_auto_under_explicit(self):
+    mesh = _one_device_mesh((AxisType.Explicit,) * 3)
+    stage_mesh = pipeline_utils.pipeline_stage_mesh(mesh, ShardMode.EXPLICIT)
+    self.assertEqual(stage_mesh.axis_types, (AxisType.Explicit, AxisType.Auto, AxisType.Explicit))
+    self.assertEqual(stage_mesh.axis_names, mesh.axis_names)
+    self.assertTrue((stage_mesh.devices == mesh.devices).all())
+
+  def test_unchanged_under_auto(self):
+    mesh = _one_device_mesh((AxisType.Auto,) * 3)
+    self.assertIs(pipeline_utils.pipeline_stage_mesh(mesh, ShardMode.AUTO), mesh)
+
+  def test_remove_mesh_axis(self):
+    self.assertIsNone(pipeline_utils.remove_mesh_axis(None, "stage"))
+    self.assertIsNone(pipeline_utils.remove_mesh_axis("stage", "stage"))
+    self.assertEqual(pipeline_utils.remove_mesh_axis("fsdp", "stage"), "fsdp")
+    self.assertEqual(pipeline_utils.remove_mesh_axis(("stage", "fsdp"), "stage"), ("fsdp",))
+    self.assertIsNone(pipeline_utils.remove_mesh_axis(("stage",), "stage"))
+
+  def test_remove_mesh_axis_from_spec_keeps_reduced(self):
+    spec = P("stage", ("stage", "fsdp"), None, reduced={"data"})
+    self.assertEqual(pipeline_utils.remove_mesh_axis_from_spec(spec, "stage"), P(None, ("fsdp",), None, reduced={"data"}))
+
+
+class TagWeightGradReducedTest(unittest.TestCase):
+  """tag_weight_grad_reduced, which pipeline_unreduced_weight_grads applies to the gathered BSW stage weights."""
+
+  def test_skips_axes_the_weight_is_sharded_on(self):
+    token_axes = frozenset({"fsdp", "expert"})
+    self.assertEqual(
+        pipeline_utils.tag_weight_grad_reduced(P("stage", None, None), token_axes),
+        P("stage", None, None, reduced={"fsdp", "expert"}),
+    )
+    # An expert weight is sharded over 'expert'; its gradient is only partial over the remaining token axes.
+    self.assertEqual(
+        pipeline_utils.tag_weight_grad_reduced(P("stage", "expert", None), token_axes),
+        P("stage", "expert", None, reduced={"fsdp"}),
+    )
+    self.assertEqual(
+        pipeline_utils.tag_weight_grad_reduced(P("stage", ("fsdp", "expert")), token_axes), P("stage", ("fsdp", "expert"))
+    )
+    self.assertIsNone(pipeline_utils.tag_weight_grad_reduced(None, token_axes))
+    self.assertEqual(pipeline_utils.tag_weight_grad_reduced(P("stage"), frozenset()), P("stage"))
 
 
 if __name__ == "__main__":

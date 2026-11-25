@@ -99,12 +99,15 @@ _V4_SMALL = {
 }
 
 
-def _vec(x):
-  return np.asarray(jax.device_get(x), dtype=np.float64).reshape(-1)
-
-
 class DeepseekV4PaddedPrefillDecodeTest(unittest.TestCase):
   """Per-step decode logits must equal the forward-pass logits at the same position."""
+
+  _rels_cache = {}
+
+  @classmethod
+  def tearDownClass(cls):
+    cls._rels_cache.clear()
+    super().tearDownClass()
 
   def test_decode_logits_match_forward_after_padded_prefill(self):
     self._check_decode_matches_forward(_V4_SMALL, STEPS)
@@ -119,8 +122,14 @@ class DeepseekV4PaddedPrefillDecodeTest(unittest.TestCase):
     # continues to position 34, so the AR region must hold all of them.
     self._check_decode_matches_forward(_V4_SMALL, 30)
 
-  def _check_decode_matches_forward(self, overrides, steps):
-    """Greedy-decodes `steps` tokens after a padded prefill and compares each step with the forward pass."""
+  @classmethod
+  def _compute_decode_rels(cls, overrides, max_steps):
+    """Runs `max_steps` greedy decode steps and returns per-step relative max-abs diffs vs forward pass."""
+    cache_key = tuple(sorted((k, tuple(v) if isinstance(v, list) else v) for k, v in overrides.items()))
+    cached = cls._rels_cache.get(cache_key)
+    if cached is not None and len(cached) >= max_steps + 1:
+      return cached
+
     cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], **overrides)
     mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
@@ -133,35 +142,51 @@ class DeepseekV4PaddedPrefillDecodeTest(unittest.TestCase):
     params = engine.load_params(params=params_state)
     padded = jnp.asarray(PROMPT + [0] * (cfg.max_prefill_predict_length - len(PROMPT)), dtype=jnp.int32)
     prefix, first_token = engine.prefill(params=params, padded_tokens=padded, true_length=len(PROMPT))
-    tokens = list(PROMPT) + [int(first_token.data[0, 0])]
-    decode_logits = [_vec(prefix["logits"])[-cfg.vocab_size :]]
+    decode_logits_dev = [jnp.reshape(prefix["logits"], (-1,))[-cfg.vocab_size :]]
+    step_tokens_dev = [first_token.data[0, 0]]
     decode_state = engine.init_decode_state()
     decode_state = engine.insert(prefix, decode_state, slot=0)
-    for _ in range(steps):
+    for _ in range(max_steps):
       decode_state, result = engine.generate(params, decode_state)
-      decode_logits.append(_vec(decode_state["logits"][0])[-cfg.vocab_size :])
-      tokens.append(int(result.data[0, 0]))
+      decode_logits_dev.append(jnp.reshape(decode_state["logits"][0], (-1,))[-cfg.vocab_size :])
+      step_tokens_dev.append(result.data[0, 0])
+
+    decode_logits_np, step_tokens_np = jax.device_get((jnp.stack(decode_logits_dev), jnp.stack(step_tokens_dev)))
+    decode_logits = [np.asarray(row, dtype=np.float64) for row in decode_logits_np]
+    tokens = list(PROMPT) + [int(t) for t in step_tokens_np]
 
     with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
       train_model = model_creation_utils.create_model(
           cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=0)
       )
     nnx.update(train_model, params_state)
+    train_graphdef, train_state = nnx.split(train_model)
     seq = cfg.max_target_length
     batch = cfg.micro_batch_size_to_train_on
     ids = jnp.tile(jnp.asarray([tokens + [0] * (seq - len(tokens))], dtype=jnp.int32), (batch, 1))
     positions = jnp.tile(jnp.arange(seq, dtype=jnp.int32)[None], (batch, 1))
     segment_ids = jnp.tile(jnp.asarray([[1] * len(tokens) + [0] * (seq - len(tokens))], dtype=jnp.int32), (batch, 1))
+
+    @jax.jit
+    def _forward_jit(state, ids_in, pos_in, seg_in):
+      m = nnx.merge(train_graphdef, state)
+      return m(ids_in, pos_in, decoder_segment_ids=seg_in, enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
+
     with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
-      ref = train_model(
-          ids, positions, decoder_segment_ids=segment_ids, enable_dropout=False, model_mode=MODEL_MODE_TRAIN
-      )
+      ref = _forward_jit(train_state, ids, positions, segment_ids)
     ref = np.asarray(jax.device_get(ref[0]), dtype=np.float64)
 
     rels = []
     for k, dec in enumerate(decode_logits):
       row = ref[len(PROMPT) - 1 + k]
       rels.append(float(np.max(np.abs(dec - row)) / np.max(np.abs(row))))
+    cls._rels_cache[cache_key] = rels
+    return rels
+
+  def _check_decode_matches_forward(self, overrides, steps):
+    """Greedy-decodes `steps` tokens after a padded prefill and compares each step with the forward pass."""
+    max_steps = max(steps, 30) if overrides == _V4_SMALL else steps
+    rels = self._compute_decode_rels(overrides, max_steps)[: steps + 1]
     worst = int(np.argmax(rels))
     self.assertLessEqual(
         rels[worst],

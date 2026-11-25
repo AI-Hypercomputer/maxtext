@@ -18,16 +18,21 @@
 
 import contextlib
 import io
+import os
 import unittest
 from unittest import mock
 
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 from flax import linen as nn
 from flax import nnx
 from optax.contrib._muon import MuonDimensionNumbers as mdn
 
-from maxtext.utils import muon_utils
+from maxtext.configs import pyconfig
+from maxtext.layers import nnx_scan
+from maxtext.utils import maxtext_muon_utils, maxtext_utils, model_creation_utils, muon_utils
+from maxtext.utils.globals import MAXTEXT_PKG_DIR
 
 
 class TestIsPathContainAny(unittest.TestCase):
@@ -277,6 +282,49 @@ class TestTransformLogic(unittest.TestCase):
     self.assertEqual(
         muon_utils.transform_logic(("decoder", "self_attention", "wkv_a")),
         mdn((0,), (-1,)),
+    )
+
+  def test_self_attention_mla_output_gate(self):
+    # Head-expanded MLA g_proj (Kimi-K3): [emb, heads, v_head_dim] (unscanned) / [emb, layers, heads, v_head_dim]
+    # (scanned) orthogonalizes [emb, heads * v_head_dim] like wq_b / wkv_b.
+    for shape in ((256, 4, 32), (256, 2, 4, 32)):
+      self.assertEqual(
+          muon_utils.transform_logic(("decoder", "layers_3", "self_attention", "g_proj", "kernel"), shape=shape),
+          mdn((0,), (-2, -1)),
+      )
+    # Flat 2D g_proj (e.g. KDA) keeps the standard mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(("decoder", "layers_0", "self_attention", "g_proj", "kernel"), shape=(256, 128)),
+        mdn((0,), (-1,)),
+    )
+    # A flat g_proj under a scanned stack is 3D [emb, layers, out]: the layer axis stays a batch axis.
+    for path in (
+        ("decoder", "scanned_blocks", "layers_0", "self_attention", "g_proj", "kernel"),  # Kimi-K3 scanned KDA
+        ("decoder", "layers", "self_attention", "g_proj", "kernel"),  # e.g. Ming scanned KDA / MLA
+    ):
+      self.assertEqual(muon_utils.transform_logic(path, shape=(256, 22, 128)), mdn((0,), (-1,)))
+    # The scanned head-expanded MLA gate is 4D and keeps the head-aware mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(
+            ("decoder", "scanned_blocks", "layers_3", "self_attention", "g_proj", "kernel"), shape=(256, 22, 4, 32)
+        ),
+        mdn((0,), (-2, -1)),
+    )
+
+  def test_kimi_k3_scanned_kda_out_is_standard(self):
+    # Kimi-K3 scanned KDA `out` is a flat [in, layers, out] projection, not a head-expanded [heads, head_dim, out].
+    self.assertEqual(
+        muon_utils.transform_logic(
+            ("decoder", "scanned_blocks", "layers_0", "self_attention", "out", "kernel"), shape=(384, 22, 256)
+        ),
+        mdn((0,), (-1,)),
+    )
+    # Scanned MLA `out` is 4D [heads, layers, head_dim, out] and keeps the head-aware mapping.
+    self.assertEqual(
+        muon_utils.transform_logic(
+            ("decoder", "scanned_blocks", "layers_3", "self_attention", "out", "kernel"), shape=(4, 22, 32, 256)
+        ),
+        mdn((0, -2), (-1,)),
     )
 
   # --- 3. Standard ---
@@ -592,6 +640,239 @@ class TestLayerScanInvariance(unittest.TestCase):
     )
     self.assertEqual(out_unscanned_shape[out_mdn.output_axis[0]], 512)
     self.assertEqual(out_scanned_shape[out_mdn.output_axis[0]], 512)
+
+
+def _scanned_param(shape, scan_axis, logical_axes, partition_name="layers"):
+  """An nnx.Param carrying the scan metadata `nnx_scan.create_scanned_layers` attaches."""
+  return nnx.Param(
+      jnp.zeros(shape),
+      sharding_names=logical_axes,
+      **{nnx.PARTITION_NAME: partition_name, "param_scan_axis": scan_axis},
+  )
+
+
+class TestScanAxes(unittest.TestCase):
+  """get_scan_axes reads the layer axes of a scanned parameter from its metadata."""
+
+  def test_unscanned_param_has_no_scan_axes(self):
+    self.assertEqual(muon_utils.get_scan_axes(nnx.Param(jnp.zeros((4, 8)))), ())
+
+  def test_scan_axis_comes_from_metadata(self):
+    self.assertEqual(muon_utils.get_scan_axes(_scanned_param((3, 4, 8), 0, ("layers", "embed", "mlp"))), (0,))
+    self.assertEqual(muon_utils.get_scan_axes(_scanned_param((4, 3, 8), 1, ("embed", "layers", "mlp"))), (1,))
+
+  def test_nested_block_scan_adds_the_local_layers_axis(self):
+    param = _scanned_param((2, 3, 4, 8), 0, ("layers", "local_layers", "embed", "mlp"))
+    self.assertEqual(muon_utils.get_scan_axes(param), (0, 1))
+    param = _scanned_param((4, 2, 3, 8), 1, ("embed", "layers", "local_layers", "mlp"))
+    self.assertEqual(muon_utils.get_scan_axes(param), (1, 2))
+
+  def test_list_logical_axes(self):
+    param = _scanned_param((4, 2, 3, 8), 1, ["embed", "layers", "local_layers", "mlp"])
+    self.assertEqual(muon_utils.get_scan_axes(param), (1, 2))
+
+  def test_nested_scan_of_list_named_layers(self):
+    # create_scanned_layers normalizes list logical axes, so a nested stack still records its local_layers axis.
+    class Layer(nnx.Module):
+
+      def __init__(self, rngs):
+        del rngs  # Unused.
+        self.kernel = nnx.Param(jnp.zeros((4, 8)), sharding_names=["embed", "mlp"])
+
+    class Block(nnx.Module):
+
+      def __init__(self, rngs):
+        self.local_layers = nnx_scan.create_scanned_layers(
+            Layer, length=3, param_scan_axis=1, metadata_axis_name="local_layers", rngs=rngs
+        )
+
+    blocks = nnx_scan.create_scanned_layers(
+        Block, length=2, param_scan_axis=1, metadata_axis_name="layers", rngs=nnx.Rngs(0)
+    )
+    self.assertEqual(blocks.local_layers.kernel.get_value().shape, (4, 2, 3, 8))
+    self.assertEqual(muon_utils.get_scan_axes(blocks.local_layers.kernel), (1, 2))
+
+  def test_inner_scan_alone_is_a_single_axis(self):
+    param = _scanned_param((3, 4, 8), 0, ("local_layers", "embed", "mlp"), partition_name="local_layers")
+    self.assertEqual(muon_utils.get_scan_axes(param), (0,))
+
+  def test_stack_too_low_rank_for_the_scan_axis_keeps_it_in_front(self):
+    self.assertEqual(muon_utils.get_scan_axes(_scanned_param((3,), 1, ("layers",))), (0,))
+
+
+class TestToStackedLayout(unittest.TestCase):
+  """to_stacked_layout maps feature-axis dimension numbers onto the stacked layout."""
+
+  def test_identity_without_scan_axes_or_numbers(self):
+    self.assertEqual(muon_utils.to_stacked_layout(mdn((0,), (-1,)), 2, ()), mdn((0,), (-1,)))
+    self.assertIsNone(muon_utils.to_stacked_layout(None, 3, (0,)))
+
+  def test_scan_axis_1_leaves_the_numbers_unchanged(self):
+    self.assertEqual(muon_utils.to_stacked_layout(mdn((0,), (-1,)), 3, (1,)), mdn((0,), (-1,)))
+    self.assertEqual(muon_utils.to_stacked_layout(mdn((0, -2), (-1,)), 4, (1,)), mdn((0, -2), (-1,)))
+
+  def test_scan_axis_0_shifts_the_leading_feature_axes(self):
+    # [layers, in, out]: reduce over `in`, not over the layers.
+    self.assertEqual(muon_utils.to_stacked_layout(mdn((0,), (-1,)), 3, (0,)), mdn((1,), (-1,)))
+    # [layers, heads, head_dim, out]
+    self.assertEqual(muon_utils.to_stacked_layout(mdn((0, -2), (-1,)), 4, (0,)), mdn((1, -2), (-1,)))
+    # [layers, experts, in, out]
+    self.assertEqual(muon_utils.to_stacked_layout(mdn((-2,), (-1,)), 4, (0,)), mdn((-2,), (-1,)))
+
+  def test_stacked_vectors_are_left_alone(self):
+    # [layers, features]: one feature axis, so reduction and output cannot both be feature axes.
+    self.assertEqual(muon_utils.to_stacked_layout(mdn((0,), (-1,)), 2, (0,)), mdn((0,), (-1,)))
+
+  def test_nested_scan_axes(self):
+    # [blocks, local, in, out] and [in, blocks, local, out]
+    self.assertEqual(muon_utils.to_stacked_layout(mdn((0,), (-1,)), 4, (0, 1)), mdn((2,), (-1,)))
+    self.assertEqual(muon_utils.to_stacked_layout(mdn((0,), (-1,)), 4, (1, 2)), mdn((0,), (-1,)))
+
+
+class _ScannedNNXModel(nnx.Module):
+  """Layers stacked on axis 0, as `param_scan_axis=0` lays them out."""
+
+  def __init__(self):
+    self.layers = nnx.Module()
+    self.layers.mlp = _scanned_param((3, 4, 8), 0, ("layers", "embed", "mlp"))
+    self.layers.self_attention = nnx.Module()
+    self.layers.self_attention.out = _scanned_param((3, 2, 4, 8), 0, ("layers", "heads", "kv", "embed"))
+
+
+class TestScannedNNXModel(unittest.TestCase):
+  """get_muon_weight_dimension_numbers never reduces over a scanned parameter's layer axis."""
+
+  def test_layer_axis_is_skipped(self):
+    result = muon_utils.get_muon_weight_dimension_numbers(_ScannedNNXModel(), config=None)
+    self.assertEqual(result["layers"]["mlp"], mdn((1,), (-1,)))
+    self.assertEqual(result["layers"]["self_attention"]["out"], mdn((1, -2), (-1,)))
+
+
+def _dimension_numbers_by_path(model_name, param_scan_axis, sharded=False):
+  """Returns {path: (shape, scan axes, Muon dimension numbers)} for every parameter of `model_name`.
+
+  `sharded` selects MaxText's Muon (`ShardedMuonDimensionNumbers`) over Optax's (`MuonDimensionNumbers`).
+  """
+  config = pyconfig.initialize(
+      [
+          None,
+          os.path.join(MAXTEXT_PKG_DIR, "configs", "base.yml"),
+          f"model_name={model_name}",
+          f"param_scan_axis={param_scan_axis}",
+          "attention=dot_product",
+          "skip_jax_distributed_system=True",
+          # A layer count unlike any feature dim, so that indexing a layer axis cannot pass for a feature axis.
+          "override_model_config=True",
+          "base_num_decoder_layers=20",
+      ]
+  )
+  mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(config), config.mesh_axes)
+  _, model = model_creation_utils.create_nnx_abstract_model(config, mesh)
+  _, params, _ = nnx.split(model, nnx.Param, ...)
+  if sharded:
+    dimension_numbers = maxtext_muon_utils.get_maxtext_muon_weight_dimension_numbers(model, config, mesh=mesh)
+  else:
+    dimension_numbers = muon_utils.get_muon_weight_dimension_numbers(model, config)
+  return {
+      tuple(path): (variable.get_value().shape, muon_utils.get_scan_axes(variable), dim)
+      for (path, variable), (_, dim) in zip(nnx.to_flat_state(params), nnx.to_flat_state(dimension_numbers), strict=True)
+  }
+
+
+class TestScannedLayoutDimensionNumbers(parameterized.TestCase):
+  """Muon reduces over the same feature axes of a real model whatever its param_scan_axis."""
+
+  @parameterized.product(
+      model_name=("llama3.1-8b", "qwen3-30b-a3b", "qwen3-next-80b-a3b", "deepseek3-test"), sharded=(False, True)
+  )
+  def test_feature_axes_match_across_scan_axes(self, model_name, sharded):
+    layer_major = _dimension_numbers_by_path(model_name, param_scan_axis=0, sharded=sharded)
+    feature_major = _dimension_numbers_by_path(model_name, param_scan_axis=1, sharded=sharded)
+    self.assertEqual(layer_major.keys(), feature_major.keys())
+
+    def sizes(shape, axes):
+      return tuple(shape[axis] for axis in axes)
+
+    def feature_spec(shape, scan_axes, sharding):
+      # The partitioning of each feature axis, with the layer-scan axes dropped.
+      self.assertLessEqual(len(sharding.spec), len(shape))
+      spec = tuple(sharding.spec) + (None,) * (len(shape) - len(sharding.spec))
+      return tuple(entry for axis, entry in enumerate(spec) if axis not in scan_axes)
+
+    remapped = 0
+    for path, (shape, scan_axes, dim) in layer_major.items():
+      reference_shape, reference_scan_axes, reference_dim = feature_major[path]
+      with self.subTest(path=path):
+        self.assertEqual(dim is None, reference_dim is None)
+        if dim is None:
+          continue
+        self.assertEqual(sizes(shape, dim.reduction_axis), sizes(reference_shape, reference_dim.reduction_axis))
+        self.assertEqual(sizes(shape, dim.output_axis), sizes(reference_shape, reference_dim.output_axis))
+        if sharded:
+          self.assertEqual(
+              feature_spec(shape, scan_axes, dim.sharding),
+              feature_spec(reference_shape, reference_scan_axes, reference_dim.sharding),
+          )
+        remapped += (dim.reduction_axis, dim.output_axis) != (reference_dim.reduction_axis, reference_dim.output_axis)
+    # The scanned parameters' dimension numbers do move with the layer axis.
+    self.assertGreater(remapped, 0)
+
+
+class _PrefusedMoeNNXModel(nnx.Module):
+  """NNX model containing a pre-fused routed MoE `wi` parameter and non-prefused leaves."""
+
+  def __init__(self):
+    self.MoeBlock_0 = nnx.Module()  # pylint: disable=invalid-name
+    self.MoeBlock_0.gate = nnx.Module()
+    self.MoeBlock_0.gate.kernel = nnx.Param(jnp.ones((4, 8)))
+    self.MoeBlock_0.wi = nnx.Param(jnp.ones((8, 4, 16)))
+    self.MoeBlock_0.wo = nnx.Param(jnp.ones((8, 8, 4)))
+    self.shared_experts = nnx.Module()
+    self.shared_experts.wi = nnx.Param(jnp.ones((4, 16)))
+    self.scale = nnx.Param(jnp.ones((4,)))
+
+
+class TestPrefusedMoeWiHelpers(unittest.TestCase):
+  """Tests for is_prefused_moe_wi_path and get_prefused_moe_wi_mask."""
+
+  def test_is_prefused_moe_wi_path(self):
+    self.assertTrue(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi"), shape=(8, 4, 16)))
+    self.assertTrue(muon_utils.is_prefused_moe_wi_path(("decoder", "routed_experts", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi_0")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wo")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi_scale")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi_bias")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "DeepSeekMoeBlock_0", "shared_experts", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "moe_block", "shared_experts", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "moe_block", "shared_expert", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "mlp", "wi")))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("decoder", "MoeBlock_0", "wi"), shape=(8,)))
+
+  def test_get_prefused_moe_wi_mask_returns_none_when_disabled_or_absent(self):
+    model = _PrefusedMoeNNXModel()
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(model, config=None))
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(model, config=mock.MagicMock()))
+    cfg_false = mock.MagicMock()
+    cfg_false.prefuse_moe_weights = False
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(model, config=cfg_false))
+
+    cfg_true = mock.MagicMock()
+    cfg_true.prefuse_moe_weights = True
+    dense_model = _MoeLikeNNXModel(rngs=nnx.Rngs(0))
+    self.assertIsNone(muon_utils.get_prefused_moe_wi_mask(dense_model, config=cfg_true))
+
+  def test_get_prefused_moe_wi_mask_marks_only_routed_wi(self):
+    model = _PrefusedMoeNNXModel()
+    cfg_true = mock.MagicMock()
+    cfg_true.prefuse_moe_weights = True
+    mask = muon_utils.get_prefused_moe_wi_mask(model, config=cfg_true)
+    self.assertIsNotNone(mask)
+    pure_mask = nnx.to_pure_dict(mask)
+    self.assertTrue(pure_mask["MoeBlock_0"]["wi"])
+    self.assertFalse(pure_mask["MoeBlock_0"]["wo"])
+    self.assertFalse(pure_mask["MoeBlock_0"]["gate"]["kernel"])
+    self.assertFalse(pure_mask["shared_experts"]["wi"])
+    self.assertFalse(pure_mask["scale"])
 
 
 if __name__ == "__main__":

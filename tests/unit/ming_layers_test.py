@@ -413,13 +413,16 @@ class MingTextLayersTest(unittest.TestCase):
           f"Cannot load Ming HF reference from {HF_PATH!r}: {exc}. "
           "Install the missing reference dependencies or set MING_HF_PATH to a local HF model directory."
       ) from exc
-    torch.set_grad_enabled(False)
     cls.hf_cfg = make_hf_text_config()
     cls.config = make_config()
     cls.mesh = make_mesh(cls.config)
-    cls.rope = TEXT_MOD.BailingMoeV3RotaryEmbedding(cls.hf_cfg)
+    with torch.no_grad():
+      cls.rope = TEXT_MOD.BailingMoeV3RotaryEmbedding(cls.hf_cfg)
 
   def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
     np.random.seed(0)
     torch.manual_seed(0)
 
@@ -640,7 +643,6 @@ class MingAudioTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    torch.set_grad_enabled(False)
     pytest.importorskip("whisper")
     pytest.importorskip("torchaudio")
     global TEXT_MOD, AUDIO_MOD  # pylint: disable=global-statement
@@ -655,6 +657,11 @@ class MingAudioTest(unittest.TestCase):
     text_module.fused_recurrent_kda = _torch_kda
     cls.config = make_config()
     cls.mesh = make_mesh(cls.config)
+
+  def setUp(self):
+    super().setUp()
+    self.addCleanup(torch.set_grad_enabled, torch.is_grad_enabled())
+    torch.set_grad_enabled(False)
 
   def _hf_audio_model(self, seed=0):
     """A small BailingMoeV3AudioForConditionalGeneration (only audio parts are exercised)."""
@@ -793,6 +800,119 @@ class MingScanTest(unittest.TestCase):
       with mesh, nn_partitioning.axis_rules(c.logical_axis_rules):
         outs.append(m(decoder_input_tokens=ids, decoder_positions=pos, decoder_segment_ids=seg, enable_dropout=False))
     np.testing.assert_allclose(np.asarray(outs[1]), np.asarray(outs[0]), atol=1e-4, rtol=1e-4)
+
+
+# -----------------------------------------------------------------------------
+# Talker (text -> speech)
+# -----------------------------------------------------------------------------
+#
+# Dependency-free checks of the talker frontend and of the AudioVAE attention/bucketing. Numerical parity of
+# the talker heads with the publisher's `talker/` modules is verified end to end outside of the unit tests.
+
+
+def make_talker_config(**kwargs):
+  """Small Ming talker config (CPU, float32)."""
+  overrides = dict(  # pylint: disable=use-dict-literal
+      model_name="ming-3.0-audio-tiny-talker",
+      override_model_config=True,
+      base_emb_dim=32,
+      base_num_query_heads=4,
+      base_num_kv_heads=2,
+      head_dim=8,
+      base_mlp_dim=64,
+      base_num_decoder_layers=1,
+      vocab_size=128,
+      ming_talker_latent_dim=8,
+      ming_vae_hidden_size=64,
+      ming_vae_num_layers=2,
+      ming_vae_num_heads=4,
+      ming_vae_num_kv_heads=2,
+      ming_vae_mlp_dim=128,
+      ming_vae_sliding_window=8,
+      ming_vae_hop_length=16,
+      per_device_batch_size=1,
+      max_target_length=32,
+      max_prefill_predict_length=16,
+      scan_layers=False,
+      matmul_precision="highest",
+      dtype="float32",
+      weight_dtype="float32",
+      skip_jax_distributed_system=True,
+      hardware="cpu",
+  )
+  overrides.update(kwargs)
+  return pyconfig.initialize(["", BASE_CONFIG], **overrides)
+
+
+class MingTalkerTest(unittest.TestCase):
+  """Talker frontend, sliding-window attention and vocoder bucketing (no reference code needed)."""
+
+  def test_prompt(self):
+    self.assertEqual(
+        processor_ming.build_ip_instruction("灵小柔"),
+        '{"audio_sequence": [{"序号": 1, "说话人": "speaker_1", "方言": null, "风格": null, "语速": null, "基频": null,'
+        ' "音量": null, "情感": null, "BGM": {"Genre": null, "Mood": null, "Instrument": null, "Theme": null,'
+        ' "ENV": null, "SNR": null}, "IP": "灵小柔"}]}',
+    )
+    self.assertEqual(processor_ming.build_tts_prompt("en"), processor_ming.TALKER_TTS_PROMPT)
+    self.assertEqual(
+        processor_ming.build_tts_prompt("ja"), processor_ming.TALKER_TTS_PROMPT + "Target language: Japanese.\n"
+    )
+
+  def test_split_text(self):
+    cases = [
+        ("Hello world", 50, ["Hello world."]),
+        # Sentences are packed up to max_length.
+        (
+            "Hello, this is MaxText speaking. The talker turns text into speech on a TPU.",
+            50,
+            ["Hello, this is MaxText speaking.", "The talker turns text into speech on a TPU."],
+        ),
+        # Decimals, initials/abbreviations and ellipses do not end a sentence.
+        ("It costs 3.14 dollars. Version 2.0 is out!", 25, ["It costs 3.14 dollars.", "Version 2.0 is out!"]),
+        (
+            "The U.S.A. is big. Dr. Smith agrees, e.g. today.",
+            25,
+            ["The U.S.A. is big.", "Dr. Smith agrees,", "e.g. today."],
+        ),
+        ("Wait... what? Okay.", 10, ["Wait...", "what?", "Okay."]),
+        # Over-long sentences fall back to clause punctuation, then words, then characters.
+        (
+            "First clause here, second clause here, third clause here.",
+            20,
+            ["First clause here,", "second clause here,", "third clause here."],
+        ),
+        ("one two three four five six seven", 12, ["one two", "three four", "five six", "seven."]),
+        ("我们" * 8, 6, ["我们我们我们", "我们我们我们", "我们我们。"]),
+        ("今天天气很好。我们去公园玩吧！", 8, ["今天天气很好。", "我们去公园玩吧！"]),
+    ]
+    for text, max_length, expected in cases:
+      with self.subTest(text=text):
+        self.assertEqual(processor_ming.split_text(text, max_length), expected)
+
+  def test_sliding_window_attention_matches_dense(self):
+    """Block-local sliding-window attention == dense attention with the sliding-window mask (GQA, ragged T)."""
+    window = 8
+    for t in (5, 21):
+      q, k, v = (
+          jnp.asarray(np.random.default_rng(i).standard_normal((2, t, heads, 16)), jnp.float32)
+          for i, heads in enumerate((4, 2, 2))
+      )
+      pos = np.arange(t)
+      mask = (pos[None, :] <= pos[:, None]) & (pos[:, None] - pos[None, :] < window)
+      dense = ming._talker_attention(q, k, v, jnp.asarray(mask)[None, None])  # pylint: disable=protected-access
+      banded = ming._talker_sliding_window_attention(q, k, v, window)  # pylint: disable=protected-access
+      np.testing.assert_allclose(np.asarray(banded), np.asarray(dense), atol=1e-5, rtol=1e-5, err_msg=f"T={t}")
+
+  def test_vae_bucketing_is_exact(self):
+    """Edge-padding the latents (shape bucketing in audio_decode) leaves the real samples unchanged."""
+    vae = ming.MingAudioVAEDecoder(make_talker_config(), rngs=nnx.Rngs(0))
+    # 6 latents -> 24 frames > sliding window 8.
+    latents = jnp.asarray(np.random.default_rng(0).standard_normal((1, 6, 8)), jnp.float32)
+    out = vae(latents)
+    self.assertEqual(out.shape, (1, 6 * 4 * 16))
+    padded_out = vae(jnp.pad(latents, ((0, 0), (0, 5), (0, 0)), mode="edge"), jnp.int32(6))
+    np.testing.assert_allclose(np.asarray(padded_out[:, : out.shape[1]]), np.asarray(out), atol=1e-5, rtol=1e-5)
 
 
 if __name__ == "__main__":

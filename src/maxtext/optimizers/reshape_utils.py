@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 
 ReshapeFn = Callable[[jax.Array], jax.Array]
+NamedSharding = jax.sharding.NamedSharding
 
 
 def get_dim_mesh_axes(
@@ -71,18 +72,26 @@ def get_flat_mesh_axes(
   return tuple(axes)
 
 
-def get_reshape_fns(
+def _reshape(
     x: jax.Array,
+    shape: tuple[int, ...],
+    sharding: NamedSharding,
+    *,
+    explicit_axes: bool,
+) -> jax.Array:
+  """Reshapes `x`, passing `out_sharding` when `sharding` uses Explicit axes."""
+  if explicit_axes:
+    return jnp.reshape(x, shape, out_sharding=sharding)
+  return jnp.reshape(x, shape)
+
+
+def _get_3d_flatten_fns(
+    shape: tuple[int, ...],
     reduction_axes: tuple[int, ...],
     output_axes: tuple[int, ...],
-    sharding: jax.sharding.NamedSharding | None = None,
-    use_all_to_all: bool = True,
-) -> tuple[ReshapeFn, ReshapeFn, jax.sharding.NamedSharding | None]:
-  """Computes reshape functions and flat sharding for a given tensor."""
-  if sharding is not None:
-    is_explicit_axes(sharding)
-
-  shape = x.shape
+    sharding: NamedSharding | None,
+) -> tuple[ReshapeFn, ReshapeFn, tuple[int, int, int], NamedSharding | None]:
+  """Builds local transpose/reshape functions between `shape` and 3D `[batch, row, col]`."""
   ndim = len(shape)
   reduction_axes = tuple(ax % ndim for ax in reduction_axes)
   output_axes = tuple(ax % ndim for ax in output_axes)
@@ -91,102 +100,135 @@ def get_reshape_fns(
   reduction_size = math.prod(shape[ax] for ax in reduction_axes)
   output_size = math.prod(shape[ax] for ax in output_axes)
 
+  # Ensure row_size <= col_size so X @ X.T in Newton-Schulz has the smaller
+  # [batch, row_size, row_size] shape, exploiting f(X^T)^T = f(X).
   if output_size > reduction_size:
     row_axes, col_axes = reduction_axes, output_axes
-    row_size, column_size = reduction_size, output_size
+    row_size, col_size = reduction_size, output_size
   else:
     row_axes, col_axes = output_axes, reduction_axes
-    row_size, column_size = output_size, reduction_size
+    row_size, col_size = output_size, reduction_size
 
+  # Place sharded batch axes before unsharded batch axes so flattening batch
+  # dims is a purely local reshape when at most one batch axis is sharded (or
+  # leading sharded batch axes have local size 1).
   sharded_batch_axes = tuple(ax for ax in batch_axes if get_dim_mesh_axes(sharding, ax))
   unsharded_batch_axes = tuple(ax for ax in batch_axes if not get_dim_mesh_axes(sharding, ax))
-  matrix_mesh_axes = get_flat_mesh_axes(sharding, row_axes + col_axes)
-
-  # Only use all-to-all when there is at least one unsharded batch axis and
-  # at least one matrix axis is sharded. This explicitly excludes 2D tensors.
-  # This is especially useful to transfer sharding to a layer stacking axis,
-  # enabling parallelization across layers with all-to-all operations.
-  # TODO(zachcharles): Determine if we can extend all-to-all to settings where
-  # all batch axes are sharded.
-  use_all_to_all = bool(use_all_to_all and unsharded_batch_axes and matrix_mesh_axes)
-
-  sharded_batch_size = math.prod(shape[ax] for ax in sharded_batch_axes)
-  unsharded_batch_size = math.prod(shape[ax] for ax in unsharded_batch_axes)
 
   perm = sharded_batch_axes + unsharded_batch_axes + row_axes + col_axes
   permuted_shape = tuple(shape[ax] for ax in perm)
+  inv_perm = [perm.index(i) for i in range(ndim)]
 
-  inv_perm = [0] * ndim
-  for i, p in enumerate(perm):
-    inv_perm[p] = i
-
-  padding = 0
-  if use_all_to_all and sharding is not None:
-    mesh_shape = getattr(sharding.mesh, "shape", {})
-    shards = math.prod(mesh_shape[s] for s in matrix_mesh_axes if s in mesh_shape)
-    if shards > 1:
-      padding = -unsharded_batch_size % shards
-
-  flat_sharding = None
-  sharded_batch_mesh_axes = None
-  if sharding is not None:
-    sharded_batch_mesh_axes = get_flat_mesh_axes(sharding, sharded_batch_axes) or None
-
-    orig_row_mesh_axes = get_flat_mesh_axes(sharding, row_axes) or None
-    orig_col_mesh_axes = get_flat_mesh_axes(sharding, col_axes) or None
-
-    if use_all_to_all:
-      unsharded_batch_mesh_axes = matrix_mesh_axes or None
-      row_mesh_axes = None
-      col_mesh_axes = None
-    else:
-      unsharded_batch_mesh_axes = None
-      row_mesh_axes = orig_row_mesh_axes
-      col_mesh_axes = orig_col_mesh_axes
-
-    flat_spec = jax.sharding.PartitionSpec(
-        sharded_batch_mesh_axes,
-        unsharded_batch_mesh_axes,
-        row_mesh_axes,
-        col_mesh_axes,
+  shape_3d = (math.prod(shape[ax] for ax in batch_axes), row_size, col_size)
+  if sharding is None:
+    return (
+        lambda y: jnp.transpose(y, perm).reshape(shape_3d),
+        lambda y_3d: jnp.reshape(y_3d, permuted_shape).transpose(inv_perm),
+        shape_3d,
+        None,
     )
-    flat_sharding = jax.sharding.NamedSharding(sharding.mesh, flat_spec)
 
-  def reshape_fn(x: jax.Array) -> jax.Array:
-    x_flat = jnp.transpose(x, perm).reshape((sharded_batch_size, unsharded_batch_size, row_size, column_size))
-    if padding > 0:
-      pad_shape = (sharded_batch_size, padding, row_size, column_size)
-      zeros = jnp.zeros(pad_shape, dtype=x_flat.dtype)
-      x_flat = jnp.concatenate([x_flat, zeros], axis=1)
-    if flat_sharding is not None:
-      x_flat = reshard_or_constrain(x_flat, flat_sharding)
-    return x_flat
+  explicit_axes = is_explicit_axes(sharding)
+  mesh = sharding.mesh
+  permuted_sharding = NamedSharding(
+      mesh,
+      jax.P(*(get_dim_mesh_axes(sharding, ax) for ax in perm)),
+  )
+  sharding_3d = NamedSharding(
+      mesh,
+      jax.P(
+          get_flat_mesh_axes(sharding, sharded_batch_axes),
+          get_flat_mesh_axes(sharding, row_axes),
+          get_flat_mesh_axes(sharding, col_axes),
+      ),
+  )
 
-  def unreshape_fn(x_flat: jax.Array) -> jax.Array:
-    if use_all_to_all:
-      if padding > 0:
-        pre_all_to_all_spec = jax.sharding.PartitionSpec(
-            sharded_batch_mesh_axes,
-            None,
-            orig_row_mesh_axes,
-            orig_col_mesh_axes,
-        )
-        pre_all_to_all_sharding = (
-            jax.sharding.NamedSharding(sharding.mesh, pre_all_to_all_spec) if sharding is not None else None
-        )
-        if pre_all_to_all_sharding is not None:
-          x_flat = reshard_or_constrain(x_flat, pre_all_to_all_sharding)
-        x_flat = jax.lax.slice(
-            x_flat,
-            (0, 0, 0, 0),
-            (sharded_batch_size, unsharded_batch_size, row_size, column_size),
-        )
-    x_unreshaped = jnp.reshape(x_flat, permuted_shape).transpose(inv_perm)
-    if sharding is not None:
-      x_unreshaped = reshard_or_constrain(x_unreshaped, sharding)
-    return x_unreshaped
+  def to_3d(y: jax.Array) -> jax.Array:
+    y_3d = _reshape(jnp.transpose(y, perm), shape_3d, sharding_3d, explicit_axes=explicit_axes)
+    return y_3d if explicit_axes else jax.lax.with_sharding_constraint(y_3d, sharding_3d)
 
-  return reshape_fn, unreshape_fn, flat_sharding
+  def from_3d(y_3d: jax.Array) -> jax.Array:
+    y_unreshaped = _reshape(y_3d, permuted_shape, permuted_sharding, explicit_axes=explicit_axes).transpose(inv_perm)
+    return reshard_or_constrain(y_unreshaped, sharding)
+
+  return to_3d, from_3d, shape_3d, sharding_3d
+
+
+def _get_3d_unshard_fns(
+    shape_3d: tuple[int, int, int],
+    sharding_3d: NamedSharding,
+) -> tuple[ReshapeFn, ReshapeFn, NamedSharding]:
+  """Unshards matrix dims of a 3D `[batch, row, col]` tensor via replication or all-to-all."""
+  mesh = sharding_3d.mesh
+  batch_mesh = get_dim_mesh_axes(sharding_3d, 0)
+  matrix_mesh = get_flat_mesh_axes(sharding_3d, (1, 2))
+  matrix_shards = math.prod(mesh.shape[s] for s in matrix_mesh)
+  if matrix_shards <= 1:
+    return lambda y_3d: y_3d, lambda y_flat: y_flat, sharding_3d
+
+  batch_size, row_size, col_size = shape_3d
+  batch_shards = math.prod(mesh.shape[s] for s in batch_mesh)
+  local_batch_size = batch_size // batch_shards
+
+  # Keep batch_mesh before matrix_mesh so each batch shard stays on its existing
+  # devices and all-to-all only spans matrix_mesh; when local_batch_size == 1,
+  # drop matrix_mesh to replicate across matrix shards instead.
+  flat_batch_axes = batch_mesh if local_batch_size == 1 else batch_mesh + matrix_mesh
+  flat_sharding = NamedSharding(mesh, jax.P(flat_batch_axes, None, None))
+
+  local_padding = -local_batch_size % matrix_shards if local_batch_size > 1 else 0
+  if local_padding == 0:
+    return (
+        lambda y_3d: reshard_or_constrain(y_3d, flat_sharding),
+        lambda y_flat: reshard_or_constrain(y_flat, sharding_3d),
+        flat_sharding,
+    )
+
+  # Pad axis 1 of (batch_shards, local_batch_size, ...) so each batch shard is
+  # padded locally rather than shifting data across batch_mesh.
+  explicit_axes = is_explicit_axes(sharding_3d)
+  padded_local_batch = local_batch_size + local_padding
+  padded_shape_3d = (batch_shards * padded_local_batch, row_size, col_size)
+  local_4d_sharding = NamedSharding(
+      mesh,
+      jax.P(sharding_3d.spec[0], None, sharding_3d.spec[1], sharding_3d.spec[2]),
+  )
+
+  def to_flat(y_3d: jax.Array) -> jax.Array:
+    y_4d = _reshape(
+        y_3d, (batch_shards, local_batch_size, row_size, col_size), local_4d_sharding, explicit_axes=explicit_axes
+    )
+    y_4d = jnp.pad(y_4d, ((0, 0), (0, local_padding), (0, 0), (0, 0)))
+    y_padded = _reshape(y_4d, padded_shape_3d, sharding_3d, explicit_axes=explicit_axes)
+    return reshard_or_constrain(y_padded, flat_sharding)
+
+  def from_flat(y_flat: jax.Array) -> jax.Array:
+    y_padded = reshard_or_constrain(y_flat, sharding_3d)
+    y_4d = _reshape(
+        y_padded, (batch_shards, padded_local_batch, row_size, col_size), local_4d_sharding, explicit_axes=explicit_axes
+    )
+    return _reshape(y_4d[:, :local_batch_size], shape_3d, sharding_3d, explicit_axes=explicit_axes)
+
+  return to_flat, from_flat, flat_sharding
+
+
+def get_reshape_fns(
+    x: jax.Array,
+    reduction_axes: tuple[int, ...],
+    output_axes: tuple[int, ...],
+    sharding: NamedSharding | None = None,
+    use_all_to_all: bool = True,
+) -> tuple[ReshapeFn, ReshapeFn, NamedSharding | None]:
+  """Computes reshape functions and flat 3D `[batch, row, col]` sharding."""
+  to_3d, from_3d, shape_3d, sharding_3d = _get_3d_flatten_fns(x.shape, reduction_axes, output_axes, sharding)
+  if sharding_3d is None or not use_all_to_all:
+    return to_3d, from_3d, sharding_3d
+  to_flat, from_flat, flat_sharding = _get_3d_unshard_fns(shape_3d, sharding_3d)
+  return (
+      lambda y: to_flat(to_3d(y)),
+      lambda y_flat: from_3d(from_flat(y_flat)),
+      flat_sharding,
+  )
 
 
 def is_explicit_axes(

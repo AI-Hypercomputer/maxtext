@@ -739,6 +739,50 @@ class TrainTests(unittest.TestCase):
     )
 
   @pytest.mark.integration_test
+  @pytest.mark.gpu_only
+  def test_gpu_te_moe_block_deepseek4_hash_and_routed_bias(self):
+    """Runs real TE MoE kernels for DSv4 hash routing and top-k routed-bias updates."""
+    gpu_device = jax.devices("gpu")[0]
+    compute_capability = getattr(gpu_device, "compute_capability", None)
+    try:
+      if float(compute_capability) < 10.0:
+        pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
+    except Exception:  # pylint: disable=broad-exception-caught
+      pytest.skip("TransformerEngine MoEBlock is only supported on sm100+!")
+
+    train_main(
+        TrainTests.CONFIGS["synthetic"]
+        + [
+            "model_name=deepseek4-tiny",
+            "override_model_config=True",
+            "base_num_decoder_layers=3",
+            "first_num_hash_layers=1",
+            "compress_ratios=[0,4,128]",
+            "attention=dot_product",
+            "quantization=te_no_quant",
+            "base_emb_dim=32",
+            "base_num_kv_heads=1",
+            "head_dim=32",
+            "num_experts=4",
+            "num_experts_per_tok=2",
+            "shared_experts=1",
+            "base_moe_mlp_dim=32",
+            "routed_bias=True",
+            "routed_bias_update_rate=0.125",
+            "load_balance_loss_weight=0.0",
+            "sparse_matmul=True",
+            "megablox=False",
+            "prefuse_moe_weights=True",
+            "te_moe_block=True",
+            "te_gmm_quantization=te_no_quant",
+            "hardware=gpu_multiprocess",
+            "ici_fsdp_parallelism=1",
+            "ici_expert_parallelism=-1",
+            "enable_tensorboard=False",
+        ]
+    )
+
+  @pytest.mark.integration_test
   @pytest.mark.tpu_only
   def test_tpu_dropout(self):
     train_main(TrainTests.CONFIGS["dropout"])
@@ -1245,8 +1289,8 @@ class TrainTests(unittest.TestCase):
     print(f"[kimi-k2] auto losses: {auto_losses}", flush=True)
     print(f"[kimi-k2] explicit losses: {explicit_losses}", flush=True)
     self.assertTrue(auto_losses, "auto run produced no metrics")
-    # Expert parallelism does not reassociate any reduction, so the two runs are bit-for-bit.
-    np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-6, atol=0.0)
+    # Expert parallelism can reassociate reductions in the MoE block, drifting by a few ULPs by step 2.
+    np.testing.assert_allclose(explicit_losses, auto_losses, rtol=1e-4, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only
@@ -1261,13 +1305,14 @@ class TrainTests(unittest.TestCase):
         "tensor": ["ici_fsdp_parallelism=1", "ici_tensor_parallelism=-1"],
         "expert": ["ici_fsdp_parallelism=1", "ici_expert_parallelism=-1"],
     }
-    # Under tensor parallelism the two modes are bit-for-bit on a four-way axis, but once
-    # the axis fully shards the eight heads (tpu7x-8) the backward reductions reassociate
-    # and the loss drifts ~4e-6 by step 2. Under expert parallelism pinning the
-    # activations reassociates the reductions inside the MoE block, so the loss drifts by
-    # a few ULPs by the third step. The drift is ~5e-7 at this size but grows with the
-    # expert dimensions, so leave the bound loose.
-    rtol = {"tensor": 1e-5, "expert": 1e-4}
+    # Under tensor parallelism on tpu7x-8 (8-way TP across the 8 heads) and
+    # 8-device CPU, forward and backward reductions across tensor shards
+    # reassociate and loss drifts up to ~1.14e-5 on tpu7x-8 at step 1
+    # (~2.5e-5 on CPU), exceeding 1e-5; match the 1e-4 bound of sibling
+    # models. Under expert parallelism pinning activations reassociates MoE
+    # reductions, so loss drifts by a few ULPs by step 3 (~5e-7 at this size,
+    # growing with expert dimensions), so leave the bound loose.
+    rtol = {"tensor": 1e-4, "expert": 1e-4}
     for name, parallelism_args in parallelism.items():
       with self.subTest(parallelism=name):
         auto_losses = self._losses(f"llama4_{name}_auto", self._llama4_overrides, parallelism_args + ["shard_mode=auto"])
@@ -1563,7 +1608,7 @@ class TrainTests(unittest.TestCase):
         # blocks reach about 7e-4 on v4-8, and gemma4_moe reaches 1.1e-3 under Pathways on
         # v6e-4. A genuinely wrong sharding does not land here: it either fails the shape
         # check outright or moves the loss by percent.
-        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=2e-3, atol=0.0)
+        np.testing.assert_allclose(explicit_losses, auto_losses, rtol=3e-3, atol=0.0)
 
   @pytest.mark.integration_test
   @pytest.mark.tpu_only

@@ -31,8 +31,8 @@ from benchmarks.recipes import parser_utils
 from benchmarks.recipes import user_configs
 from benchmarks.ctk_configs import ClusterConfig
 
-PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/proxy_server"
-SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/pathways/server"
+PROXY_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server"
+SERVER_IMAGE = "us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server"
 RUNNER = "us-docker.pkg.dev/path/to/maxtext_runner"
 
 # Cluster Params
@@ -74,6 +74,7 @@ def _get_workload_commands(
     cluster_config,
     pathways_config,
     num_steps=BENCHMARK_STEPS,
+    extra_tuning_params=None,
 ):
   """Generates Cluster Toolkit (gcluster) commands for the given models and configurations.
 
@@ -82,6 +83,7 @@ def _get_workload_commands(
     cluster_config: The cluster configuration.
     pathways_config: The pathways configuration.
     num_steps: Number of steps for the workload.
+    extra_tuning_params: MaxText overrides from the recipe flags (UserConfig.tuning_param_overrides()), or None.
 
   Returns:
     A list of tuples, where each tuple contains the workload name, the
@@ -126,6 +128,7 @@ def _get_workload_commands(
             num_steps=workload_num_steps,
             priority="medium",
             run_name=run_name,
+            extra_tuning_params=extra_tuning_params,
         )
         command, name = mcr.generate_workload_cmd(cluster_config=config, wl_config=wl_config, workload_name=run_name)
 
@@ -234,6 +237,7 @@ def main() -> int:
       cluster_config,
       pathways_config,
       num_steps=BENCHMARK_STEPS,
+      extra_tuning_params=user_config.tuning_param_overrides() or None,
   )
 
   completed_initial_workloads = {}

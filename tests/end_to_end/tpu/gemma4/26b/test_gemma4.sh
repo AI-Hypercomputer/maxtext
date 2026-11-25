@@ -30,6 +30,7 @@ USE_MULTIMODAL=false
 # Non-Googlers please remember to point `BASE_OUTPUT_DIRECTORY` to the GCS paths where you have the scanned and unscanned checkpoints stored
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
+SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 
 # Non-Googlers please remember to point `DATASET_PATH` to the GCS bucket where you have your training data
 DATASET_PATH=gs://maxtext-dataset
@@ -61,11 +62,13 @@ python3 -m maxtext.trainers.pre_train.train \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/train \
     dataset_type=grain grain_file_type=tfrecord \
     dataset_path=${DATASET_PATH} tokenizer_type="huggingface" \
-    load_parameters_path=${UNSCANNED_CKPT_PATH} \
+    load_parameters_path=${SCANNED_CKPT_PATH} \
     per_device_batch_size=1 run_name=${run_id} \
     max_target_length=8192 steps=2 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
-    model_name=${MODEL_NAME} scan_layers=false use_multimodal=${USE_MULTIMODAL}
+    model_name=${MODEL_NAME} scan_layers=true use_multimodal=${USE_MULTIMODAL} \
+    ici_expert_parallelism=8 \
+    weight_dtype=bfloat16
 
 # Step 3: Run inference on the checkpoint generated from the previous run
 if [ ${USE_MULTIMODAL} == true ]; then
@@ -74,7 +77,7 @@ if [ ${USE_MULTIMODAL} == true ]; then
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/train/${run_id}/checkpoints/1/items \
     per_device_batch_size=1 run_name=${run_id} \
     max_prefill_predict_length=272 max_target_length=300 steps=1 async_checkpointing=false \
-    scan_layers=false use_multimodal=true \
+    scan_layers=true use_multimodal=true \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     prompt=\'Describe\ image\ \<start_of_image\>\' image_path=\'tests/assets/test_image.jpg\' attention=\'dot_product\'
 else
@@ -84,5 +87,5 @@ else
     per_device_batch_size=1 run_name=${run_id} \
     max_prefill_predict_length=8 max_target_length=16 steps=1 async_checkpointing=false \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
-    scan_layers=false prompt='I love to' attention=\'dot_product\'
+    scan_layers=true prompt='I love to' attention=\'dot_product\'
 fi

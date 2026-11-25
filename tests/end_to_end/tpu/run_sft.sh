@@ -51,7 +51,6 @@ if [ -z "${PRE_TRAINED_MODEL_CKPT_PATH}" ]; then
   CONVERTED_CKPT_DIR=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL}/${RUN_NAME}/maxtext-checkpoint
   python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
       model_name=${PRE_TRAINED_MODEL} \
-      hf_access_token=${HF_TOKEN} \
       base_output_directory=${CONVERTED_CKPT_DIR} \
       scan_layers=True
   export PRE_TRAINED_MODEL_CKPT_PATH=${CONVERTED_CKPT_DIR}/0/items
@@ -62,7 +61,7 @@ echo "Running fine-tuning on checkpoint: ${PRE_TRAINED_MODEL_CKPT_PATH}"
 python3 -m maxtext.trainers.post_train.sft.train_sft_native "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs/post_train}"//sft.yml \
     run_name=${RUN_NAME} base_output_directory=${BASE_OUTPUT_DIRECTORY}/${PRE_TRAINED_MODEL} \
     model_name=${PRE_TRAINED_MODEL} load_parameters_path=${PRE_TRAINED_MODEL_CKPT_PATH} \
-    hf_access_token=$HF_TOKEN tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
+    tokenizer_path=${PRE_TRAINED_MODEL_TOKENIZER} \
     per_device_batch_size=${PER_DEVICE_BATCH_SIZE} steps=${STEPS}
 
 # Get the latest fine-tuned model checkpoint
@@ -84,7 +83,6 @@ echo "Fine-tuned model checkpoint: ${FINE_TUNED_MODEL_CKPT_PATH}"
 export LOCAL_PATH=./tmp/hf/${PRE_TRAINED_MODEL}/${RUN_NAME}
 python3 -m maxtext.checkpoint_conversion.to_huggingface "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${PRE_TRAINED_MODEL} \
-    hf_access_token=${HF_TOKEN} \
     load_parameters_path=${FINE_TUNED_MODEL_CKPT_PATH} \
     base_output_directory=${LOCAL_PATH} \
     scan_layers=False

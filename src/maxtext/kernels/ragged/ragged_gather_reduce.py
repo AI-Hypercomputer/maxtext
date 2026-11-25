@@ -139,9 +139,10 @@ def main_kernel(
       grid=(num_cores,),
       core_axis_name=(core_axis_name, subcore_axis_name),
       dimension_semantics=(pltpu.PARALLEL,),
+      _explicit_indices=True,
   )
-  def inner_kernel():
-    core_id = pl.program_id(0)
+  def inner_kernel(step: pltpu.PipelineStep):
+    core_id = step.index[0]
     row_partition_size = in_hbm_ref.shape[0] // num_row_partitions
     row_partition_id = core_id // num_column_partitions
     col_partition_id = core_id % num_column_partitions
@@ -355,7 +356,7 @@ def main_kernel(
               send_sem,
           ).wait()
 
-  inner_kernel()
+  inner_kernel()  # pylint: disable=no-value-for-parameter
 
 
 def _preprocess(

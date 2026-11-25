@@ -14,8 +14,9 @@
 
 """Unit tests for Elastic Training utility functions."""
 
+from types import SimpleNamespace
 import unittest
-from unittest.mock import Mock, create_autospec
+from unittest.mock import Mock, call, create_autospec
 from absl.testing import parameterized
 from maxtext.common import checkpointing
 from maxtext.utils import elastic_utils
@@ -28,13 +29,19 @@ class MockJaxRuntimeError(Exception):
   """Fake JAX Runtime Error class for unit tests."""
 
 
+class WrappedLoadError(Exception):
+  """Stands in for a library exception that wraps the original error, e.g. Orbax's `NoEntryError`."""
+
+
 class FakeDevice:
   """Fake Device object."""
 
-  def __init__(self, slice_index=0, process_index=0, task_id=0):
+  def __init__(self, slice_index=0, process_index=0, task_id=0, client=None):
     self.slice_index = slice_index
     self.process_index = process_index
     self.task_id = task_id
+    # A client without attributes, unless given.
+    self.client = client if client is not None else SimpleNamespace()
 
 
 class FakeConfig:
@@ -53,6 +60,11 @@ class FakeConfig:
     self.elastic_backup_kind = "checkpoint"
     self.dataset_type = "grain"
     self.grain_use_elastic_iterator = True
+    self.elastic_global_batch_size_mode = "scaled"
+    self.elastic_nominal_per_device_batch_size = None
+    self.elastic_hbm_budget_fraction = 0.9
+    self.use_tunix_gradient_accumulation = False
+    self.quantization = ""
 
 
 class ElasticUtilsTest(parameterized.TestCase):
@@ -88,6 +100,7 @@ class ElasticUtilsTest(parameterized.TestCase):
         0: [FakeDevice()],
         1: [FakeDevice()],
     }
+    self.fake_jax.devices.return_value = [FakeDevice()]
     self.fake_jax.process_index.return_value = 0
 
     # Inject fakes into elastic_utils namespace
@@ -147,6 +160,45 @@ class ElasticUtilsTest(parameterized.TestCase):
     config.elastic_enabled = True
     self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
     self.assertFalse(elastic_utils.elastic_enabled(config))
+
+  def test_elastic_enabled_with_client_supports_elastic(self):
+    """The client's `supports_elastic` attribute enables elastic training without the Pathways check."""
+    config = FakeConfig()
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
+    self.fake_jax.devices.return_value = [FakeDevice(client=SimpleNamespace(supports_elastic=True))]
+    self.assertTrue(elastic_utils.elastic_enabled(config))
+
+    config.elastic_enabled = False
+    self.assertFalse(elastic_utils.elastic_enabled(config))
+
+    config.elastic_enabled = True
+    self.fake_jax.devices.return_value = [FakeDevice(client=SimpleNamespace(supports_elastic=False))]
+    self.assertFalse(elastic_utils.elastic_enabled(config))
+
+  def test_elastic_enabled_without_devices_or_client(self):
+    config = FakeConfig()
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
+
+    self.fake_jax.devices.return_value = []
+    self.assertFalse(elastic_utils.elastic_enabled(config))
+
+    self.fake_jax.devices.return_value = [SimpleNamespace()]
+    self.assertFalse(elastic_utils.elastic_enabled(config))
+
+  def test_record_slice_state_with_client_supports_elastic(self):
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {0, 1}
+    self.fake_elastic.get_active_slice_indices.return_value = {0, 1}
+    self.fake_pathwaysutils.is_pathways_backend_used.return_value = False
+    fake_recorder = Mock()
+
+    # Neither Pathways nor a client with `supports_elastic`: nothing is recorded.
+    elastic_utils.record_slice_state(fake_recorder)
+    fake_recorder.record_elastic_slice_counts.assert_not_called()
+
+    self.fake_jax.devices.return_value = [FakeDevice(client=SimpleNamespace(supports_elastic=True))]
+    elastic_utils.record_slice_state(fake_recorder)
+    fake_recorder.record_elastic_slice_counts.assert_called_once_with(available_slices=2, active_slices=2, total_slices=2)
 
   def test_clean_up_checkpoints_no_checkpoints(self):
     self.fake_gcs_utils.gcs_list_directories.return_value = []
@@ -217,9 +269,9 @@ class ElasticUtilsTest(parameterized.TestCase):
     config = FakeConfig()
     config.elastic_enabled = False
     msg = (
-        "Elastic training requires the Pathways backend, and elastic_enabled"
-        " must be set to True: current config.elastic_enabled: False, pathways"
-        " backend used: True"
+        "Elastic training requires a backend that supports it, and"
+        " elastic_enabled must be set to True: current config.elastic_enabled:"
+        " False, backend supports_elastic: True"
     )
     with self.assertRaisesRegex(ValueError, msg):
       elastic_utils.elastic_retry(config)
@@ -229,9 +281,9 @@ class ElasticUtilsTest(parameterized.TestCase):
     config = FakeConfig()
     config.elastic_enabled = True
     msg = (
-        "Elastic training requires the Pathways backend, and elastic_enabled"
-        " must be set to True: current config.elastic_enabled: True, pathways"
-        " backend used: False"
+        "Elastic training requires a backend that supports it, and"
+        " elastic_enabled must be set to True: current config.elastic_enabled:"
+        " True, backend supports_elastic: False"
     )
     with self.assertRaisesRegex(ValueError, msg):
       elastic_utils.elastic_retry(config)
@@ -387,6 +439,19 @@ class ElasticUtilsTest(parameterized.TestCase):
     kwargs = self.fake_manager.elastic_retry.call_args.kwargs
     self.assertIsNone(kwargs["minimum_slice_count"])
 
+  def test_elastic_retry_passes_retry_policy(self):
+    """Tests that elastic_retry limits attempts with a retry_policy instead of max_retries."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+
+    elastic_utils.elastic_retry(config)
+
+    kwargs = self.fake_manager.elastic_retry.call_args.kwargs
+    self.assertNotIn("max_retries", kwargs)
+    retry_policy = kwargs["retry_policy"]
+    self.assertIsInstance(retry_policy, pathwaysutils.elastic.manager.ElasticRetryLimit)
+    self.assertEqual(retry_policy.max_attempts, config.elastic_max_retries)
+
   def test_elastic_retry_pre_callback_without_pre_callback_fn(self):
     """pre_callback still works when pre_callback_fn is not supplied."""
     config = FakeConfig()
@@ -535,6 +600,103 @@ class ElasticUtilsTest(parameterized.TestCase):
 
     train_func()  # Slice-down, then success.
 
+    callback_fn.assert_called_once_with(scale_up=False)
+
+  def test_elastic_retry_makes_live_device_the_default_of_every_thread(self):
+    """Each attempt sets the default device of the process, not just of the thread that runs the attempt."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {1}
+    self.fake_manager.default_device = FakeDevice(slice_index=1)
+
+    elastic_utils.elastic_retry(config)
+    self.fake_manager.elastic_retry.call_args.kwargs["pre_callback"]()
+
+    self.fake_jax.config.update.assert_called_once_with("jax_default_device", self.fake_manager.default_device)
+
+  @parameterized.named_parameters(("success", None), ("failure", WrappedLoadError))
+  def test_elastic_retry_restores_default_device_after_run(self, error_cls):
+    """The default device of the process is put back when the elastic run ends, whether or not it failed."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.active_slice_indices = {1}
+    self.fake_manager.default_device = FakeDevice(slice_index=1)
+    self.fake_jax.config.jax_default_device = None
+
+    def fake_pathways_retry(**kwargs):
+      def decorator(func):
+        def run():
+          kwargs["pre_callback"]()
+          return func()
+
+        return run
+
+      return decorator
+
+    self.fake_manager.elastic_retry.side_effect = fake_pathways_retry
+
+    def train():
+      if error_cls is not None:
+        raise error_cls()
+
+    train_func = elastic_utils.elastic_retry(config)(train)
+    if error_cls is None:
+      train_func()
+    else:
+      with self.assertRaises(error_cls):
+        train_func()
+
+    self.assertEqual(
+        self.fake_jax.config.update.call_args_list,
+        [call("jax_default_device", self.fake_manager.default_device), call("jax_default_device", None)],
+    )
+
+  @parameterized.named_parameters(
+      ("wrapped_slice_down", True, True, MockJaxRuntimeError),
+      ("wrapped_other_jax_error", True, False, WrappedLoadError),
+      ("wrapped_non_jax_error", False, False, WrappedLoadError),
+  )
+  def test_elastic_retry_unwraps_slice_down_error(self, jax_cause, slice_down, expected_error):
+    """A slice-down error that a library re-raised as its own exception type reaches pathwaysutils as itself."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_manager.elastic_retry.side_effect = lambda **kwargs: lambda func: func
+    self.fake_elastic.is_error_due_to_slice_down.return_value = slice_down
+    cause = MockJaxRuntimeError("DATA_LOSS: Full data loss while copying to devices") if jax_cause else KeyError("x")
+
+    def train():
+      try:
+        raise cause
+      except (MockJaxRuntimeError, KeyError) as e:
+        raise WrappedLoadError("Failed to load checkpointable") from e
+
+    with self.assertRaises(expected_error) as raised:
+      elastic_utils.elastic_retry(config)(train)()
+
+    if expected_error is MockJaxRuntimeError:
+      self.assertEqual(str(raised.exception), str(cause))
+      self.assertIsInstance(raised.exception.__cause__, WrappedLoadError)
+    else:
+      self.assertIs(raised.exception.__cause__, cause)
+
+  def test_elastic_retry_retries_wrapped_slice_down_error(self):
+    """The attempt after a wrapped slice-down error runs, and the event is reported as a slice-down."""
+    config = FakeConfig()
+    elastic_utils.elastic_manager = self.fake_manager
+    self.fake_elastic.is_error_due_to_slice_down.return_value = True
+    callback_fn = Mock()
+    attempts = []
+
+    def train():
+      attempts.append(len(attempts))
+      if len(attempts) == 1:
+        raise WrappedLoadError("Failed to load checkpointable") from MockJaxRuntimeError("DATA_LOSS")
+
+    self._fake_pathways_retry_with_one_retry()
+
+    elastic_utils.elastic_retry(config, callback_fn=callback_fn)(train)()
+
+    self.assertLen(attempts, 2)
     callback_fn.assert_called_once_with(scale_up=False)
 
   def test_retry_cache_class(self):
@@ -876,6 +1038,273 @@ class ElasticUtilsTest(parameterized.TestCase):
       raise ValueError("Save failed")
 
     self.assertTrue(handler_called)
+
+  def _hbm_config(self, nominal=1, fraction=0.9, per_device_batch_size=2):
+    config = FakeConfig()
+    config.elastic_nominal_per_device_batch_size = nominal
+    config.elastic_hbm_budget_fraction = fraction
+    config.per_device_batch_size = per_device_batch_size
+    return config
+
+  def _fake_device_limit(self, limit_bytes):
+    device = Mock()
+    device.memory_stats.return_value = {"bytes_limit": limit_bytes, "bytes_in_use": 0}
+    self.fake_jax.local_devices.return_value = [device]
+
+  def _hbm_stats(self, argument=40, output=0, temp=55, code=0, alias=0):
+    return Mock(
+        argument_size_in_bytes=argument,
+        output_size_in_bytes=output,
+        temp_size_in_bytes=temp,
+        generated_code_size_in_bytes=code,
+        alias_size_in_bytes=alias,
+    )
+
+  def test_compiled_hbm_bytes_counts_arguments_outputs_temporaries_and_code(self):
+    """Donated arguments show up as arguments and outputs; the aliased bytes are subtracted."""
+    stats = self._hbm_stats(argument=10, output=20, temp=30, code=5, alias=8)
+    self.assertEqual(elastic_utils.compiled_hbm_bytes(stats), 10 + 20 + 30 + 5 - 8)
+
+  def test_check_constant_padded_hbm_budget_raises_when_over_budget(self):
+    """A resize that raised the per-device batch beyond 90% of HBM asks for the nominal per-device batch."""
+    self._fake_device_limit(100)
+    with self.assertRaises(elastic_utils.HbmBudgetExceededError) as ctx:
+      elastic_utils.check_constant_padded_hbm_budget(self._hbm_config(nominal=1), self._hbm_stats(temp=55))
+    self.assertEqual(
+        (ctx.exception.nominal_per_device_batch_size, ctx.exception.required_bytes, ctx.exception.budget_bytes),
+        (1, 95, 90),
+    )
+    self.assertEqual(elastic_utils.hbm_budget_override(1), "elastic_max_per_device_batch_size=1")
+
+  def _no_fallback_config(self, setting):
+    """An HBM pre-flight config whose accumulation steps may not change, so there is no fallback to restart with."""
+    config = self._hbm_config(nominal=1)
+    if setting == "tunix":
+      config.use_tunix_gradient_accumulation = True
+    else:
+      config.quantization = setting
+    return config
+
+  @parameterized.named_parameters(
+      ("tunix", "tunix", "use_tunix_gradient_accumulation=True"),
+      ("fp8", "fp8", "FP8 quantization \\(quantization='fp8'\\)"),
+      ("nanoo_fp8", "nanoo_fp8", "FP8 quantization \\(quantization='nanoo_fp8'\\)"),
+      ("fp8_gpu", "fp8_gpu", "FP8 quantization \\(quantization='fp8_gpu'\\)"),
+      ("te_fp8_delayedscaling", "te_fp8_delayedscaling", "FP8 quantization \\(quantization='te_fp8_delayedscaling'\\)"),
+  )
+  def test_check_constant_padded_hbm_budget_warns_without_fallback(self, setting, reason):
+    """Without a fallback the soft budget only warns: `.compile()` already fit the step, so the attempt proceeds."""
+    self._fake_device_limit(100)
+    config = self._no_fallback_config(setting)
+    elastic_utils.check_constant_padded_hbm_budget(config, self._hbm_stats(temp=55))  # 95 > 90: no raise.
+    self.fake_logging.warning.assert_called_once()
+    self.assertRegex(
+        self.fake_logging.warning.call_args.args[0], f"{reason} leaves no gradient-accumulation fallback; proceeding"
+    )
+    # A step within budget does not warn.
+    self.fake_logging.warning.reset_mock()
+    elastic_utils.check_constant_padded_hbm_budget(config, self._hbm_stats(temp=50))
+    self.fake_logging.warning.assert_not_called()
+
+  def test_check_constant_padded_hbm_budget_falls_back_with_other_quantization(self):
+    """Quantization modes that support gradient accumulation (e.g. int8) keep the fallback."""
+    self._fake_device_limit(100)
+    config = self._hbm_config(nominal=1)
+    config.quantization = "int8"
+    with self.assertRaises(elastic_utils.HbmBudgetExceededError):
+      elastic_utils.check_constant_padded_hbm_budget(config, self._hbm_stats(temp=55))
+
+  def test_check_constant_padded_hbm_budget_passes_within_budget(self):
+    self._fake_device_limit(100)
+    elastic_utils.check_constant_padded_hbm_budget(self._hbm_config(nominal=1), self._hbm_stats(temp=50))  # 90 <= 90
+
+  def test_check_constant_padded_hbm_budget_skips_when_not_applicable(self):
+    """No nominal batch (per-device batch unchanged), a zero fraction, no stats or no device limit: nothing to do."""
+    self._fake_device_limit(100)
+    huge = self._hbm_stats(argument=10**12, temp=0)
+    elastic_utils.check_constant_padded_hbm_budget(self._hbm_config(nominal=None), huge)
+    elastic_utils.check_constant_padded_hbm_budget(self._hbm_config(fraction=0), huge)
+    elastic_utils.check_constant_padded_hbm_budget(self._hbm_config(), None)
+    disabled = self._hbm_config()
+    disabled.elastic_enabled = False
+    elastic_utils.check_constant_padded_hbm_budget(disabled, huge)
+    # Backends without memory stats (some Pathways proxies) skip the check rather than fail the attempt.
+    device = Mock()
+    device.memory_stats.side_effect = RuntimeError("unavailable")
+    self.fake_jax.local_devices.return_value = [device]
+    elastic_utils.check_constant_padded_hbm_budget(self._hbm_config(), huge)
+    device.memory_stats.side_effect = None
+    device.memory_stats.return_value = None
+    elastic_utils.check_constant_padded_hbm_budget(self._hbm_config(), huge)
+
+  def test_hbm_preflight_is_a_noop_in_constant_grad_accum_mode(self):
+    """`constant_grad_accum` never raises the per-device batch, so the pre-flight and the OOM fallback do not apply."""
+    self._fake_device_limit(100)
+    config = self._hbm_config(nominal=None)
+    config.elastic_global_batch_size_mode = "constant_grad_accum"
+    self.assertIsNone(elastic_utils.hbm_preflight_nominal_batch(config))
+    elastic_utils.check_constant_padded_hbm_budget(config, self._hbm_stats(argument=10**12, temp=0))
+    # Even if a nominal value were recorded, the mode wins: an OOM is not mapped to a restart with a bound.
+    config.elastic_nominal_per_device_batch_size = 1
+    self.assertIsNone(elastic_utils.hbm_preflight_nominal_batch(config))
+    elastic_utils.check_constant_padded_hbm_budget(config, self._hbm_stats(argument=10**12, temp=0))
+
+    def oom():
+      raise MockJaxRuntimeError("RESOURCE_EXHAUSTED: Ran out of memory in memory space hbm")
+
+    with self.assertRaisesRegex(MockJaxRuntimeError, "RESOURCE_EXHAUSTED"):
+      elastic_utils.compile_within_hbm_budget(config, oom)
+    # The advanced `constant_padded` bound still is checked.
+    config.elastic_global_batch_size_mode = "constant_padded"
+    self.assertEqual(elastic_utils.hbm_preflight_nominal_batch(config), 1)
+    with self.assertRaisesRegex(elastic_utils.HbmBudgetExceededError, "elastic_max_per_device_batch_size=1"):
+      elastic_utils.compile_within_hbm_budget(config, oom)
+
+  def test_retry_cache_config_overrides(self):
+    """Overrides drop the cached setup, survive slice changes, are not recorded twice and are emptied by reset."""
+    cache = elastic_utils.RetryCache()
+    cache.reset(enabled=True)
+    cache.clear_if_slices_changed(frozenset({0, 1}))
+    cache.put("initialize", "config_without_override")
+    self.assertTrue(cache.add_config_override("elastic_max_per_device_batch_size=1"))
+    self.assertFalse(cache.contains("initialize"))
+    self.assertEqual(cache.config_overrides, ["elastic_max_per_device_batch_size=1"])
+    self.assertFalse(cache.add_config_override("elastic_max_per_device_batch_size=1"))
+    cache.clear_if_slices_changed(frozenset({0}))
+    self.assertEqual(cache.config_overrides, ["elastic_max_per_device_batch_size=1"])
+    cache.reset(enabled=False)
+    self.assertEqual(cache.config_overrides, [])
+
+  def test_compile_within_hbm_budget_returns_compiled_step(self):
+    compiled = object()
+    self.assertIs(elastic_utils.compile_within_hbm_budget(self._hbm_config(nominal=1), lambda: compiled), compiled)
+
+  def test_compile_within_hbm_budget_maps_compile_oom_to_budget_error(self):
+    """An out-of-memory compile of a raised per-device batch asks for the nominal per-device batch."""
+    self._fake_device_limit(100)
+
+    def compile_fn():
+      raise MockJaxRuntimeError("RESOURCE_EXHAUSTED: Compilation failure: Ran out of memory in memory space hbm")
+
+    with self.assertRaises(elastic_utils.HbmBudgetExceededError) as ctx:
+      elastic_utils.compile_within_hbm_budget(self._hbm_config(nominal=1), compile_fn)
+    self.assertEqual(
+        (ctx.exception.nominal_per_device_batch_size, ctx.exception.required_bytes, ctx.exception.budget_bytes),
+        (1, 0, 90),
+    )
+    self.assertIsInstance(ctx.exception.__cause__, MockJaxRuntimeError)
+    # Without a device limit the budget is reported as 0; the fallback still applies.
+    device = Mock()
+    device.memory_stats.return_value = None
+    self.fake_jax.local_devices.return_value = [device]
+    with self.assertRaises(elastic_utils.HbmBudgetExceededError) as ctx:
+      elastic_utils.compile_within_hbm_budget(self._hbm_config(nominal=1), compile_fn)
+    self.assertEqual(ctx.exception.budget_bytes, 0)
+
+  def test_compile_within_hbm_budget_reraises_other_errors(self):
+    """Only an OOM of a raised per-device batch is mapped; other errors and an OOM at the nominal batch propagate."""
+    self._fake_device_limit(100)
+
+    def oom():
+      raise MockJaxRuntimeError("RESOURCE_EXHAUSTED: Ran out of memory in memory space hbm")
+
+    def other():
+      raise MockJaxRuntimeError("INVALID_ARGUMENT: bad sharding")
+
+    def value_error():
+      raise ValueError("not a runtime error")
+
+    with self.assertRaisesRegex(MockJaxRuntimeError, "RESOURCE_EXHAUSTED"):
+      elastic_utils.compile_within_hbm_budget(self._hbm_config(nominal=None), oom)
+    with self.assertRaisesRegex(MockJaxRuntimeError, "INVALID_ARGUMENT"):
+      elastic_utils.compile_within_hbm_budget(self._hbm_config(nominal=1), other)
+    with self.assertRaisesRegex(ValueError, "not a runtime error"):
+      elastic_utils.compile_within_hbm_budget(self._hbm_config(nominal=1), value_error)
+
+  def test_device_hbm_limit_bytes_queries_a_live_device_when_slice_0_is_down(self):
+    """On Pathways the first local device is on slice 0; when slice 0 is down a live slice's device is queried."""
+    dead = FakeDevice(slice_index=0)
+    dead.memory_stats = Mock(side_effect=RuntimeError("slice 0 is not placed"))
+    live = FakeDevice(slice_index=1)
+    live.memory_stats = Mock(return_value={"bytes_limit": 100})
+    self.fake_jax.local_devices.return_value = [dead, live]
+    self.fake_jax.devices.return_value = [dead, live]
+    self.fake_manager.active_slice_indices = {1}
+    config = self._hbm_config(nominal=1)
+    self.assertEqual(elastic_utils.device_hbm_limit_bytes(config), 100)
+    dead.memory_stats.assert_not_called()
+    # So the budget check still runs instead of being skipped.
+    with self.assertRaisesRegex(elastic_utils.HbmBudgetExceededError, "elastic_max_per_device_batch_size=1"):
+      elastic_utils.check_constant_padded_hbm_budget(config, self._hbm_stats(temp=55))
+    # A live device of another process is not addressable here; the first local device is the fallback.
+    live.process_index = 1
+    self.assertIsNone(elastic_utils.device_hbm_limit_bytes(config))
+    live.process_index = 0
+    # Without a config only the first local device is queried.
+    self.assertIsNone(elastic_utils.device_hbm_limit_bytes())
+
+  def test_device_hbm_limit_bytes_falls_back_to_the_first_local_device(self):
+    """When the live devices cannot be listed or do not report a limit, the first local device is used."""
+    self._fake_device_limit(100)
+    live = FakeDevice(slice_index=1)
+    live.memory_stats = Mock(return_value={})
+    self.fake_jax.devices.return_value = [live]
+    self.fake_manager.active_slice_indices = {1}
+    config = self._hbm_config(nominal=1)
+    self.assertEqual(elastic_utils.device_hbm_limit_bytes(config), 100)
+    live.memory_stats.assert_called_once()
+    self.fake_jax.devices.side_effect = RuntimeError("no devices")
+    self.assertEqual(elastic_utils.device_hbm_limit_bytes(config), 100)
+    # A live device that is also the first local device is queried once.
+    self.fake_jax.devices.side_effect = None
+    self.fake_jax.local_devices.return_value = [live]
+    live.memory_stats.reset_mock()
+    self.assertIsNone(elastic_utils.device_hbm_limit_bytes(config))
+    live.memory_stats.assert_called_once()
+
+  def test_compile_and_check_hbm_budget(self):
+    """Each compiled program is checked: an OOM compile and an over-budget compiled step both ask for the bound."""
+    self._fake_device_limit(100)
+    config = self._hbm_config(nominal=1)
+    fits = Mock()
+    fits.memory_analysis.return_value = self._hbm_stats(temp=50)
+    self.assertIs(elastic_utils.compile_and_check_hbm_budget(config, lambda: fits), fits)
+    over_budget = Mock()
+    over_budget.memory_analysis.return_value = self._hbm_stats(temp=55)
+    with self.assertRaisesRegex(elastic_utils.HbmBudgetExceededError, "elastic_max_per_device_batch_size=1"):
+      elastic_utils.compile_and_check_hbm_budget(config, lambda: over_budget)
+
+    def oom():
+      raise MockJaxRuntimeError("RESOURCE_EXHAUSTED: Ran out of memory in memory space hbm")
+
+    with self.assertRaisesRegex(elastic_utils.HbmBudgetExceededError, "elastic_max_per_device_batch_size=1"):
+      elastic_utils.compile_and_check_hbm_budget(config, oom)
+
+  @parameterized.named_parameters(
+      ("tunix", "tunix", "use_tunix_gradient_accumulation=True"),
+      ("fp8", "fp8", "FP8 quantization \\(quantization='fp8'\\)"),
+      ("te_fp8_delayedscaling", "te_fp8_delayedscaling", "FP8 quantization \\(quantization='te_fp8_delayedscaling'\\)"),
+  )
+  def test_compile_within_hbm_budget_raises_value_error_without_fallback(self, setting, reason):
+    """Without a fallback an OOM compile cannot be restarted with a bound, so it fails fast with the remedy."""
+    self._fake_device_limit(100)
+    config = self._no_fallback_config(setting)
+
+    def oom():
+      raise MockJaxRuntimeError("RESOURCE_EXHAUSTED: Ran out of memory in memory space hbm")
+
+    with self.assertRaisesRegex(ValueError, f"ran out of HBM, and {reason} leaves no gradient-accumulation") as ctx:
+      elastic_utils.compile_within_hbm_budget(config, oom)
+    self.assertNotIsInstance(ctx.exception, elastic_utils.HbmBudgetExceededError)
+    self.assertIn("elastic_global_batch_size_mode='scaled'", str(ctx.exception))
+    self.assertIsInstance(ctx.exception.__cause__, MockJaxRuntimeError)
+    # The pre-flight after a successful compile only warns (see the soft-budget test), so the full pre-flight
+    # raises only for the OOM compile.
+    over_budget = Mock()
+    over_budget.memory_analysis.return_value = self._hbm_stats(temp=55)
+    self.assertIs(elastic_utils.compile_and_check_hbm_budget(config, lambda: over_budget), over_budget)
+    with self.assertRaises(ValueError):
+      elastic_utils.compile_and_check_hbm_budget(config, oom)
 
 
 if __name__ == "__main__":

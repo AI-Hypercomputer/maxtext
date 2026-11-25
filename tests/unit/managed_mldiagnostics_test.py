@@ -227,6 +227,37 @@ class ManagedMLDiagnosticsTest(absltest.TestCase):
       ManagedMLDiagnostics(mock_config, sampler_config=mock_sampler_config)
       self.assertEqual(mock_run.call_args.kwargs["configs"], {"a": 1, "sampler.d": 2})
 
+  def test_rl_orchestrator_label_forwarded(self):
+    """`train_rl.py` passes rl_orchestrator="TUNIX" so the run is labelled `rl_orchestrator=tunix`."""
+    mock_config = mock.MagicMock()
+    mock_config.managed_mldiagnostics = True
+    mock_config.managed_mldiagnostics_region = ""
+    mock_config.run_name = "test_run"
+    mock_config.managed_mldiagnostics_run_group = ""
+    mock_config.managed_mldiagnostics_dir = "gs://test_dir"
+    mock_config.managed_mldiagnostics_on_demand_profiling = False
+    mock_config.get_keys.return_value = {}
+
+    with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
+      ManagedMLDiagnostics(mock_config, rl_orchestrator="TUNIX")
+      self.assertEqual(mock_run.call_args.kwargs["rl_orchestrator"], "TUNIX")
+      self.assertEqual(mock_run.call_args.kwargs["application_framework"], "MAXTEXT")
+
+  def test_rl_orchestrator_omitted_when_not_set(self):
+    """Non-RL entrypoints pass no extra kwargs, so the SDK default (NONE) applies and no label is added."""
+    mock_config = mock.MagicMock()
+    mock_config.managed_mldiagnostics = True
+    mock_config.managed_mldiagnostics_region = ""
+    mock_config.run_name = "test_run"
+    mock_config.managed_mldiagnostics_run_group = ""
+    mock_config.managed_mldiagnostics_dir = "gs://test_dir"
+    mock_config.managed_mldiagnostics_on_demand_profiling = False
+    mock_config.get_keys.return_value = {}
+
+    with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
+      ManagedMLDiagnostics(mock_config)
+      self.assertNotIn("rl_orchestrator", mock_run.call_args.kwargs)
+
   def test_config_with_get_keys(self):
     class PydanticConfigMock:
       """Mock config class with get_keys method."""
@@ -259,8 +290,8 @@ class ManagedMLDiagnosticsTest(absltest.TestCase):
   def test_pydantic_rl_config_without_get_keys(self):
     """The RL trainer passes pydantic `RLConfig` objects (initialize_pydantic), which have no get_keys()."""
     trainer = types.RLConfig(
-        model_name="llama2-7b",
-        tokenizer_path="meta-llama/Llama-2-7b",
+        model_name="llama3.1-8b",
+        tokenizer_path="meta-llama/Llama-3.1-8B",
         run_name="rl_run",
         base_output_directory="gs://bucket/out",
         managed_mldiagnostics=True,
@@ -269,17 +300,18 @@ class ManagedMLDiagnosticsTest(absltest.TestCase):
     )
     sampler = trainer.model_copy(update={"debug": not trainer.debug})
     with mock.patch.object(mldiag, "machinelearning_run") as mock_run:
-      ManagedMLDiagnostics(trainer, sampler_config=sampler)
+      ManagedMLDiagnostics(trainer, sampler_config=sampler, rl_orchestrator="TUNIX")
     kwargs = mock_run.call_args.kwargs
     self.assertEqual(kwargs["name"], "rl_run")
     self.assertEqual(kwargs["gcs_path"], "gs://bucket/out/rl_run/managed-mldiagnostics")
     self.assertEqual(kwargs["region"], "us-central1")
     self.assertFalse(kwargs["on_demand_xprof"])
-    self.assertEqual(kwargs["configs"]["model_name"], "llama2-7b")
+    self.assertEqual(kwargs["configs"]["model_name"], "llama3.1-8b")
     self.assertEqual(kwargs["configs"]["sampler.debug"], sampler.debug)
     self.assertNotIn("sampler.model_name", kwargs["configs"])
     self.assertFalse(kwargs["metric_only_run"])
     self.assertEqual(kwargs["application_framework"], "MAXTEXT")
+    self.assertEqual(kwargs["rl_orchestrator"], "TUNIX")
     json.dumps(kwargs["configs"], allow_nan=False)  # everything uploaded is JSON-serializable
 
 

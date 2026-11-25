@@ -20,6 +20,9 @@
 # based on the specific files modified.
 #
 # Behavior & Logic Flow:
+#   0a. Live PR Metadata: On pull requests (when PR_NUMBER and GITHUB_REPOSITORY are set),
+#       reads live draft state and CI labels (`scheduled-only`, `run-tpu7x`, `skip-ci-tests`)
+#       from the GitHub REST API so workflow re-runs see current labels.
 #   0. FORCE_ALL_TESTS=true: Bypasses all rules and enables every test suite and
 #      notebook (used by the `scheduled-only` PR label).
 #   1. Non-PR Events: If not a pull request, enables all test suites and notebooks.
@@ -27,6 +30,9 @@
 #      PR_NUMBER, GITHUB_REPOSITORY and the gh CLI are available; falls back to
 #      `git diff origin/<base>...HEAD` if the API is unavailable, fails, returns no
 #      files, or hits its 3000-file cap.
+#   2a. TPU7X Test Selection: Lists the tpu7x-tests flavors that run a test the PR touched
+#      (run_tpu7x_tests, tpu7x_flavors). The `run-tpu7x` label (RUN_TPU7X=true) or a failed
+#      detection selects every flavor.
 #   3. Empty Diff / Error: If no files are detected or diff fails, runs all core
 #      test suites (excluding expensive notebook tests) as a fail-safe.
 #   4. Default State: All individual test and notebook flags are initialized to 'false'.
@@ -39,14 +45,24 @@
 #      from the unmatched file list.
 #   7. Fallback Check: If any truly unmatched files remain, triggers a general fallback
 #      enabling all core test suites (excluding notebooks).
-#   8. Heavy-Test Gate: Every successful run ends by writing run_heavy_tests,
-#      heavy_tests_gated and heavy_tests_gate_message, which skip the heavy TPU/GPU
-#      suites on drafts and while a PR has `skip-ci-tests` (see gate_heavy_tests).
+#   8. Heavy-Test Gate & Scheduling Flags: Every successful run ends by writing
+#      is_scheduled_run, newly_added_only, run_heavy_tests, heavy_tests_gated and
+#      heavy_tests_gate_message, which skip the heavy TPU/GPU suites on drafts and
+#      while a PR has `skip-ci-tests` (see gate_heavy_tests).
 
 set -e
 
 # The latest value of each flag, for the heavy-test gate (GITHUB_OUTPUT keeps the last value written).
 declare -A FLAG_VALUES=()
+
+CORE_TEST_FLAGS=(
+  run_tests
+  run_pretrain_tests
+  run_posttrain_tests
+  run_pathways_tests
+  run_gpu_tests
+)
+TEST_FLAGS=("${CORE_TEST_FLAGS[@]}" run_notebooks)
 
 # Helper to output a key-value flag to GITHUB_OUTPUT (if set) and stdout
 emit_flag() {
@@ -67,7 +83,7 @@ emit_flag() {
 set_test_flags() {
   local enable_tests="$1"
   local enable_notebooks="$2"
-  for flag in run_tests run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests; do
+  for flag in "${CORE_TEST_FLAGS[@]}"; do
     emit_flag "$flag" "$enable_tests"
   done
   emit_flag "run_notebooks" "$enable_notebooks"
@@ -76,7 +92,7 @@ set_test_flags() {
 # Helper to enable specific flags and set all others to 'false'
 enable_flags() {
   local enabled=" $* "
-  for flag in run_tests run_notebooks run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests; do
+  for flag in "${TEST_FLAGS[@]}"; do
     if [[ "$enabled" == *" $flag "* ]]; then
       emit_flag "$flag" "true"
     fi
@@ -97,15 +113,42 @@ matches_pattern() {
 #   2. `scheduled-only` (FORCE_ALL_TESTS) runs them: it asks for the full scheduled pipeline.
 #   3. `skip-ci-tests` skips them. add_skip_ci_tests_label.yml adds it to new PRs; auto_label_pr.yml
 #      removes it when the PR gets the "pull ready" label, and the author can remove it sooner.
-#   4. The first run of a new PR (`opened`) skips them: the labeler adds the label in parallel, so
-#      this run's payload doesn't have it yet. The labeler skips the PRs that Copybara exports
-#      (Copybara merges them itself, without approvals here), so they run every suite.
+#   4. A new PR (`opened`) before `skip-ci-tests` has been added and removed skips them: the labeler adds
+#      the label in parallel, so the PR may not have it yet. Once `pull ready` is added or `skip-ci-tests`
+#      is removed, heavy suites run even on `opened` runs (e.g. first-time fork PRs approved later).
+#      The labeler skips the PRs that Copybara exports (Copybara merges them itself, without approvals here),
+#      so they run every suite.
 #   5. Otherwise they run.
+was_skip_ci_tests_removed() {
+  if [[ "${HAS_PULL_READY_LABEL:-}" == "true" ]]; then
+    return 0
+  fi
+  if [[ -z "${PR_NUMBER:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
+    [[ "${GITHUB_RUN_ATTEMPT:-1}" != "1" ]]
+    return
+  fi
+  local events="" attempt
+  for attempt in 1 2 3; do
+    if events=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/events?per_page=100" \
+      --jq '.[] | select(.event == "unlabeled" and .label.name == "skip-ci-tests") | .id'); then
+      [[ -n "$events" ]]
+      return
+    fi
+    if (( attempt < 3 )); then
+      sleep "${API_RETRY_SLEEP_SECONDS:-5}"
+    fi
+  done
+  echo "::error::Could not read label events for PR #${PR_NUMBER} from GitHub API."
+  exit 1
+}
+
 gate_heavy_tests() {
   local run_heavy_tests=true heavy_tests_gated=false message="" gets_label_now=false
   local needs_heavy_tests=false flag
   if [[ "$EVENT_NAME" == "pull_request" ]]; then
-    if [[ "${EVENT_ACTION:-}" == "opened" && "${IS_COPYBARA_PR:-}" != "true" ]]; then
+    if [[ "${EVENT_ACTION:-}" == "opened" && "${IS_COPYBARA_PR:-}" != "true" &&
+      "${FORCE_ALL_TESTS:-}" != "true" && "${HAS_SKIP_CI_TESTS_LABEL:-}" != "true" ]] &&
+      ! was_skip_ci_tests_removed; then
       gets_label_now=true
     fi
     if [[ "${IS_DRAFT:-}" == "true" ]]; then
@@ -132,7 +175,7 @@ gate_heavy_tests() {
     if [[ "${FLAG_VALUES[run_notebooks]:-}" == "true" ]]; then
       needs_heavy_tests=true
     elif [[ "${FLAG_VALUES[run_tests]:-}" == "true" ]]; then
-      for flag in run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests; do
+      for flag in run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests run_tpu7x_tests; do
         if [[ "${FLAG_VALUES[$flag]:-}" == "true" ]]; then
           needs_heavy_tests=true
         fi
@@ -159,8 +202,42 @@ gate_heavy_tests() {
 # Every successful run ends here, so the gate outputs come last. If the script fails earlier, they
 # stay missing and All Required Tests Passed fails, instead of the heavy suites running ungated.
 finish() {
+  local is_scheduled_run=false newly_added_only=false
+  if [[ "$EVENT_NAME" == "schedule" || "$FORCE_ALL_TESTS" == "true" ]]; then
+    is_scheduled_run=true
+  fi
+  if [[ "$EVENT_NAME" == "pull_request" && "${RUN_TPU7X:-}" != "true" && "$FORCE_ALL_TESTS" != "true" ]]; then
+    newly_added_only=true
+  fi
+  emit_flag "is_scheduled_run" "$is_scheduled_run"
+  emit_flag "newly_added_only" "$newly_added_only"
   gate_heavy_tests
   exit 0
+}
+
+# Reads the PR's current draft state and CI-controlling labels from the GitHub API so workflow
+# re-runs (`POST /actions/runs/{id}/rerun`), which reuse the original webhook payload, see live labels.
+# When PR_NUMBER and GITHUB_REPOSITORY are set, fails closed if the API cannot be read after retries.
+fetch_pr_metadata_via_api() {
+  if [[ "$EVENT_NAME" != "pull_request" || -z "${PR_NUMBER:-}" || -z "${GITHUB_REPOSITORY:-}" ]]; then
+    return 0
+  fi
+  local pr_meta="" attempt meta_re=$'^(true|false)\t(true|false)\t(true|false)\t(true|false)\t(true|false)$'
+  for attempt in 1 2 3; do
+    if pr_meta=$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}" \
+      --jq '[.draft == true, any(.labels[]; .name == "scheduled-only"), any(.labels[]; .name == "run-tpu7x"), any(.labels[]; .name == "skip-ci-tests"), any(.labels[]; .name == "pull ready")] | @tsv') &&
+      [[ "$pr_meta" =~ $meta_re ]]; then
+      IFS=$'\t' read -r IS_DRAFT FORCE_ALL_TESTS RUN_TPU7X HAS_SKIP_CI_TESTS_LABEL HAS_PULL_READY_LABEL <<< "$pr_meta"
+      echo "Live PR #${PR_NUMBER} state: draft=${IS_DRAFT}, scheduled-only=${FORCE_ALL_TESTS}, run-tpu7x=${RUN_TPU7X}, skip-ci-tests=${HAS_SKIP_CI_TESTS_LABEL}, pull-ready=${HAS_PULL_READY_LABEL}"
+      return 0
+    fi
+    if (( attempt < 3 )); then
+      echo "Warning: attempt ${attempt} to read PR #${PR_NUMBER} metadata failed; retrying."
+      sleep "${API_RETRY_SLEEP_SECONDS:-5}"
+    fi
+  done
+  echo "::error::Could not read live metadata for PR #${PR_NUMBER} from GitHub API."
+  exit 1
 }
 
 EVENT_NAME="${EVENT_NAME:-${GITHUB_EVENT_NAME:-pull_request}}"
@@ -170,6 +247,8 @@ BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 # Lowercased so that values such as "True" from manual runs are also honored.
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS:-false}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS,,}"
+
+fetch_pr_metadata_via_api
 
 if [[ "$FORCE_ALL_TESTS" == "true" ]]; then
   echo "FORCE_ALL_TESTS is set, running all tests and notebooks"
@@ -270,6 +349,26 @@ fi
 echo "Changed files (source: ${DIFF_SOURCE}):"
 echo "$CHANGED_FILES"
 
+# TPU7X test selection for tpu7x-tests in ci_pipeline.yml. The detector prints a compact JSON array of the
+# flavors that run a test this PR touched, such as ["tpu7x-unit"] or []. It runs as a script because importing
+# tests.utils runs tests/utils/__init__.py, whose imports are not installed here. With the run-tpu7x label, or
+# if detection fails, tpu7x_flavors stays unset and tpu7x-tests runs every flavor.
+TPU7X_FLAVORS_RE='^\[("tpu7x-[a-z0-9-]+"(,"tpu7x-[a-z0-9-]+")*)?\]$'
+RUN_TPU7X_TESTS=true
+if [[ "${RUN_TPU7X:-}" == "true" ]]; then
+  echo "RUN_TPU7X is set, enabling every TPU7X flavor."
+elif ! TPU7X_FLAVORS=$(python3 tests/utils/newly_added_detection.py --base "$BASE_REF" --eligible-flavors) ||
+  [[ ! "$TPU7X_FLAVORS" =~ $TPU7X_FLAVORS_RE ]]; then
+  echo "Warning: TPU7X test detection failed (output: '${TPU7X_FLAVORS:-}'); enabling every TPU7X flavor as a fail-safe."
+elif [[ "$TPU7X_FLAVORS" == "[]" ]]; then
+  echo "No TPU7X flavor runs a test this PR touched."
+  RUN_TPU7X_TESTS=false
+else
+  echo "TPU7X flavors that run a test this PR touched: ${TPU7X_FLAVORS}"
+  emit_flag "tpu7x_flavors" "$TPU7X_FLAVORS"
+fi
+emit_flag "run_tpu7x_tests" "$RUN_TPU7X_TESTS"
+
 if [ -z "$CHANGED_FILES" ]; then
   echo "No files detected or diff failed. Running core test suites (excluding notebooks) as a fail-safe."
   set_test_flags "true" "false"
@@ -287,6 +386,7 @@ EXCLUDED_FILES=(
   '^\.agents/'
   '^\.gemini/'
   '\.github/workflows/update_changelog.yml$'
+  '^\.github/workflows/ci_pulse_publish\.yml$'
   '^\.github/scripts/'
   '^tools/'
   '^tests/dev/'
@@ -315,21 +415,21 @@ while IFS= read -r file; do
   fi
 
   # TPU pre-training dependencies changes
-  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/tpu-requirements.txt$"; then
+  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/tpu-requirements.txt$|src/dependencies/extra_deps/pre_train_github_deps\.txt$|src/dependencies/scripts/install_pre_train_extra_deps\.py$"; then
     echo "TPU pre-training dependencies changed, enabling TPU pre-training tests."
     enable_flags run_tests run_pretrain_tests run_pathways_tests
     matched=true
   fi
 
   # TPU post-training dependencies changes
-  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt$"; then
+  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/tpu-post-train-requirements.txt$|src/dependencies/extra_deps/post_train_github_deps\.txt$|src/dependencies/scripts/install_post_train_extra_deps\.py$"; then
     echo "TPU post-training dependencies changed, enabling TPU post-training tests."
     enable_flags run_tests run_posttrain_tests run_pathways_tests
     matched=true
   fi
 
   # GPU dependencies changes
-  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/cuda12-requirements.txt$"; then
+  if matches_pattern "$file" "src/dependencies/requirements/generated_requirements/cuda12-requirements.txt$|src/dependencies/extra_deps/pre_train_github_deps\.txt$|src/dependencies/scripts/install_pre_train_extra_deps\.py$"; then
     echo "GPU dependencies changed, enabling GPU tests."
     enable_flags run_tests run_gpu_tests
     matched=true
@@ -343,7 +443,7 @@ while IFS= read -r file; do
   fi
 
   # Post-training source/test changes
-  if matches_pattern "$file" "src/maxtext/trainers/post_train/|tests/post_training/"; then
+  if matches_pattern "$file" "src/maxtext/trainers/post_train/|src/maxtext/training_engine/|src/maxtext/experimental/maxtext_engine/|tests/post_training/"; then
     echo "Post-training files changed, enabling TPU post-training tests."
     enable_flags run_tests run_posttrain_tests
     matched=true
@@ -390,7 +490,12 @@ if [ ${#FINAL_UNMATCHED_FILES[@]} -gt 0 ]; then
   echo "The following changed files did not match any specific domain rules:"
   printf '  - %s\n' "${FINAL_UNMATCHED_FILES[@]}"
   echo "Enabling all test suites except notebook tests as a fallback."
-  enable_flags run_tests run_pretrain_tests run_posttrain_tests run_pathways_tests run_gpu_tests
+  enable_flags "${CORE_TEST_FLAGS[@]}"
+fi
+
+if [[ "${RUN_TPU7X:-}" == "true" ]]; then
+  echo "RUN_TPU7X is set, enabling run_tests so that tpu7x-tests can run."
+  enable_flags run_tests
 fi
 
 finish

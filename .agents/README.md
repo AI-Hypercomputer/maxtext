@@ -1,14 +1,20 @@
 # MaxText agent skills
 
-This directory contains reusable workflows for AI coding assistants working with
-MaxText. Skills use the [Agent Skills format](https://agentskills.io/specification)
-and are maintained in `.agents/skills/`.
+This directory contains reusable skills and review checklists for AI coding and
+review agents working with MaxText (alongside the repository-wide coding and
+testing rules in root `AGENTS.md`; `.gemini/` holds only GitHub
+Gemini Code Assist and Gemini CLI workflow wrappers). Skills use the
+[Agent Skills format](https://agentskills.io/specification) and are maintained
+in `.agents/skills/`.
 
 ## Layout
 
 ```text
 .agents/
 ├── README.md
+├── review/
+│   ├── protocol.md
+│   └── <domain>.md
 └── skills/
     └── <skill-name>/
         └── SKILL.md

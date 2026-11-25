@@ -263,7 +263,17 @@ install_maxtext_with_deps() {
         dep_name='src/dependencies/requirements/generated_requirements/tpu-requirements.txt'
     fi
     echo "Installing requirements from $dep_name"
-    python3 -m uv pip install --resolution=lowest -r "$dep_name"
+    local build_constraint_args=()
+    local constraints_file=""
+    if [[ "$DEVICE" == "gpu" && "$MODE" == "stable" ]]; then
+        constraints_file=$(mktemp /tmp/gpu-build-constraints.XXXXXX.txt)
+        grep -E '^jax(lib|-cuda12-pjrt|-cuda12-plugin)?>=' "$dep_name" | sed 's/>=/==/' > "$constraints_file"
+        build_constraint_args=(--build-constraints "$constraints_file")
+    fi
+    python3 -m uv pip install --resolution=lowest "${build_constraint_args[@]}" -r "$dep_name"
+    if [[ -n "$constraints_file" ]]; then
+        rm -f "$constraints_file"
+    fi
     if [[ "$TF" == "true" ]]; then
         python3 -m src.dependencies.scripts.install_pre_train_extra_deps --with-tf
     else
@@ -353,10 +363,12 @@ if [[ $MODE == "nightly" ]]; then
     if [[ $DEVICE == "tpu" ]]; then
         if [[ -n "$JAX_VERSION" ]]; then
             echo -e "\nInstalling jax-nightly, jaxlib-nightly ${JAX_VERSION}"
-            python3 -m uv pip install -U --pre --no-deps jax==${JAX_VERSION} jaxlib==${JAX_VERSION} -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m uv pip install --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} \
+                --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --index-strategy unsafe-best-match
         else
             echo -e "\nInstalling the latest jax-nightly, jaxlib-nightly"
-            python3 -m uv pip install --pre -U --no-deps jax jaxlib -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m uv pip install --pre --upgrade-package jax --upgrade-package jaxlib jax jaxlib \
+                --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --index-strategy unsafe-best-match
         fi
         if [[ -n "$LIBTPU_GCS_PATH" ]]; then
             install_custom_libtpu
@@ -371,12 +383,15 @@ if [[ $MODE == "nightly" ]]; then
     elif [[ $DEVICE == "gpu" ]]; then
         if [[ -n "$JAX_VERSION" ]]; then
             echo -e "\nInstalling jax-nightly, jaxlib-nightly ${JAX_VERSION}"
-            python3 -m uv pip install -U --pre --no-deps jax==${JAX_VERSION} jaxlib==${JAX_VERSION} \
-                jax-cuda12-plugin[with-cuda]==${JAX_VERSION} jax-cuda12-pjrt==${JAX_VERSION} -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m uv pip install --pre jax==${JAX_VERSION} jaxlib==${JAX_VERSION} \
+                jax-cuda12-plugin[with-cuda]==${JAX_VERSION} jax-cuda12-pjrt==${JAX_VERSION} \
+                --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --index-strategy unsafe-best-match
         else
             echo -e "\nInstalling the latest jax-nightly, jaxlib-nightly"
-            python3 -m uv pip install -U --pre --no-deps jax jaxlib \
-                jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt -i https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/
+            python3 -m uv pip install --pre --upgrade-package jax --upgrade-package jaxlib \
+                --upgrade-package jax-cuda12-plugin --upgrade-package jax-cuda12-pjrt \
+                jax jaxlib jax-cuda12-plugin[with-cuda] jax-cuda12-pjrt \
+                --extra-index-url https://us-python.pkg.dev/ml-oss-artifacts-published/jax/simple/ --index-strategy unsafe-best-match
         fi
     fi
     exit 0

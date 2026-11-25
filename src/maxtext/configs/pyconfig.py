@@ -15,11 +15,12 @@
 # pytype: skip-file
 """Pydantic-based configuration management for MaxText."""
 import ast
+import copy
 import logging
 import os
 import sys
 from typing import Any
-import copy
+import warnings
 
 # Disable dill to avoid conflict with gfile (dill requires buffering=0, which gfile forbids)
 os.environ["HF_DATASETS_DISABLE_DILL"] = "1"
@@ -30,21 +31,25 @@ import jax.numpy as jnp
 import omegaconf
 
 from maxtext.configs import pyconfig_deprecated
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, HF_IDS, MAXTEXT_PKG_DIR
+from maxtext.utils.globals import DEFAULT_TOKENIZER_PATH, MAXTEXT_CONFIGS_DIR, HF_IDS, MAXTEXT_PKG_DIR
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.configs import types
 from maxtext.inference.inference_utils import str2bool
+from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import max_utils
 from maxtext.utils import max_logging
 
 logger = logging.getLogger(__name__)
 
 _BASE_CONFIG_ATTR = "base_config"
+_CONFIGS_MODULE_DIR = os.path.dirname(os.path.realpath(__file__))
+_DEFAULT_CONFIGS_DIR = _CONFIGS_MODULE_DIR
+_SKIP_WARNING_PREFIXES = tuple(dict.fromkeys((os.path.dirname(os.path.abspath(__file__)), _CONFIGS_MODULE_DIR)))
 _MAX_PREFIX = "M_"
 _yaml_types_to_parser = {str: str, int: int, float: float, bool: str2bool}
 
 # Don't log the following keys.
-KEYS_NO_LOGGING = ("hf_access_token",)
+KEYS_NO_LOGGING = maxtext_globals.KEYS_NO_LOGGING
 
 # Module paths to their default config file (relative to MAXTEXT_CONFIGS_DIR).
 _CONFIG_FILE_MAPPING: dict[str, str] = {
@@ -203,6 +208,34 @@ def _load_config(config_name: str) -> omegaconf.DictConfig:
   return cfg
 
 
+def _get_child_yaml_keys(config_name: str) -> set[str]:
+  """Returns keys explicitly defined in child/custom YAML files (excluding root base.yml)."""
+  if os.path.realpath(config_name) == os.path.realpath(os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")):
+    return set()
+  cfg = omegaconf.OmegaConf.load(config_name)
+  keys = set(cfg.keys()) - {_BASE_CONFIG_ATTR}
+  if _BASE_CONFIG_ATTR in cfg:
+    base_path = cfg[_BASE_CONFIG_ATTR]
+    if not os.path.isabs(base_path):
+      loaded_parent = os.path.join(os.path.dirname(config_name), base_path)
+      if not os.path.isfile(loaded_parent):
+        loaded_parent = os.path.join(MAXTEXT_CONFIGS_DIR, base_path)
+    else:
+      loaded_parent = base_path
+    keys |= _get_child_yaml_keys(loaded_parent)
+  return keys
+
+
+def _is_running_in_test() -> bool:
+  """Returns True when running inside a test runner or when MAXTEXT_TEST_DISABLE_GOODPUT=1 is set."""
+  if "pytest" in sys.modules or "unittest.__main__" in sys.modules:
+    return True
+  if os.environ.get("MAXTEXT_TEST_DISABLE_GOODPUT") == "1":
+    return True
+  main_file = getattr(sys.modules.get("__main__"), "__file__", None) or (sys.argv[0] if sys.argv else "")
+  return os.path.basename(main_file).endswith(("_test.py", "_tests.py"))
+
+
 def _tuples_to_lists(l: list | tuple | Any) -> list | Any:
   """Recursively converts nested tuples to lists for Pydantic compatibility."""
   return [_tuples_to_lists(x) for x in l] if isinstance(l, (list, tuple)) else l
@@ -315,7 +348,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
         if model_name != "default":
           pydantic_kwargs["_auto_hf_tokenizer"] = True
       except KeyError:
-        new_value = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2")
+        new_value = DEFAULT_TOKENIZER_PATH
         max_logging.warning(
             "tokenizer_path not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
           Using the default src/maxtext/assets/tokenizers/tokenizer.llama2 instead. \
@@ -387,6 +420,25 @@ class HyperParameters:
     """Returns the configuration as a flat dictionary for backward compatibility."""
     return self._flat_config
 
+  def replace(self, **updates: Any) -> "HyperParameters":
+    """Returns a copy with `updates` applied verbatim.
+
+    Validation and derived fields are not recomputed, so callers must pass consistent values for every field they
+    change (e.g. both a batch size and the global batch sizes derived from it). In particular, changing `run_name`
+    keeps the paths derived from the old one: `checkpoint_dir`, `metrics_dir`, `tensorboard_dir`,
+    `managed_mldiagnostics_dir`, `mllog_file`, `dump_hlo_gcs_dir` and `dump_jaxpr_gcs_dir`. Only the data-replica
+    checks (`DatasetGeneral.validate_data_replica_index`) are re-run.
+
+    Raises:
+      ValueError: If a key is not a config field, or the data-replica fields are inconsistent.
+    """
+    unknown = sorted(set(updates) - set(type(self._pydantic_config).model_fields))
+    if unknown:
+      raise ValueError(f"Unknown config fields: {unknown}.")
+    pydantic_config = self._pydantic_config.model_copy(update=updates, deep=True)
+    pydantic_config.validate_data_replica_index()
+    return HyperParameters(pydantic_config)
+
 
 def _handle_config_exception(e: Exception):
   """Handles configuration exceptions, prints to stderr, writes log, and exits or raises."""
@@ -439,6 +491,40 @@ def initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] =
     raise e
 
 
+def resolve_model_config_path(config_path: str, model_name: str, configs_dir: str | None = None) -> tuple[str, bool]:
+  """Resolves `<model_name>.yml` across active `models/` and fallback `models/deprecated/`.
+
+  Returns:
+    A `(resolved_path, is_deprecated)` tuple. Active `models/` directories take
+    precedence over `models/deprecated/` directories. When no file exists on
+    disk, returns the default package `models/<model_name>.yml` path with
+    `is_deprecated=False`.
+  """
+  pkg_configs_dir = configs_dir if configs_dir is not None else _DEFAULT_CONFIGS_DIR
+  config_dir = os.path.dirname(config_path)
+  parent_config_dir = os.path.dirname(config_dir)
+
+  active_candidates = (
+      os.path.join(config_dir, "models", f"{model_name}.yml"),
+      os.path.join(parent_config_dir, "models", f"{model_name}.yml"),
+      os.path.join(pkg_configs_dir, "models", f"{model_name}.yml"),
+  )
+  for candidate in active_candidates:
+    if os.path.isfile(candidate):
+      return candidate, False
+
+  deprecated_candidates = (
+      os.path.join(config_dir, "models", "deprecated", f"{model_name}.yml"),
+      os.path.join(parent_config_dir, "models", "deprecated", f"{model_name}.yml"),
+      os.path.join(pkg_configs_dir, "models", "deprecated", f"{model_name}.yml"),
+  )
+  for candidate in deprecated_candidates:
+    if os.path.isfile(candidate):
+      return candidate, True
+
+  return active_candidates[-1], False
+
+
 def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] = types.MaxTextConfig, **kwargs) -> Any:
   """Initializes the configuration by loading YAML files, and applying CLI, env, and kwarg overrides.
   Returns pydantic config class whereas `initialize` returns the og `HyperParameters`
@@ -472,22 +558,21 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
   model_name = model_name.replace("-Instruct", "") if "-Instruct" in model_name else model_name
   model_cfg = {}
   if model_name != "default":
-    # First try relative to base config path
-    model_config_path = os.path.join(os.path.dirname(config_path), "models", f"{model_name}.yml")
-    # Try looking for "models" under "src/maxtext/configs/"
-    if not os.path.isfile(model_config_path):
-      model_config_path = os.path.join(
-          os.path.dirname(os.path.dirname(config_path)),
-          "models",
-          f"{model_name}.yml",
-      )
-
-    if not os.path.isfile(model_config_path):
-      # Fallback to the default location within package
-      dir_path = os.path.dirname(os.path.realpath(__file__))
-      model_config_path = os.path.join(dir_path, "models", f"{model_name}.yml")
+    model_config_path, is_deprecated_model = resolve_model_config_path(config_path, model_name)
 
     if os.path.exists(model_config_path):
+      if is_deprecated_model:
+        warnings.warn(
+            f"Model config '{model_name}' is deprecated under the MaxText Model Lifecycle Policy and will be removed"
+            " in a future release. Pin a prior release tag if you rely on this model.",
+            DeprecationWarning,
+            skip_file_prefixes=_SKIP_WARNING_PREFIXES,
+        )
+        logger.warning(
+            "Model config '%s' is loaded from deprecated/ (%s) and will be removed in a future release.",
+            model_name,
+            model_config_path,
+        )
       model_loaded_cfg = omegaconf.OmegaConf.load(model_config_path)
       # if override_model_config=True, only apply model configs for keys not present in overrides.
       if temp_cfg.get("override_model_config"):
@@ -563,6 +648,16 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
         raw_keys_dict[k] = parser(new_proposal)
       except (ValueError, KeyError) as e:
         raise ValueError(f"Couldn't parse value from ENV '{new_proposal}' for key '{k}'") from e
+
+  # Disable Goodput recording and monitoring by default inside test runners
+  # unless explicitly overridden via child/model YAML, CLI, kwargs, or M_* env vars.
+  if _is_running_in_test():
+    explicit_overrides = (
+        cli_keys | kwargs_keys | env_keys | _get_child_yaml_keys(config_path) | frozenset(model_cfg.keys())
+    )
+    for goodput_key in ("enable_goodput_recording", "monitor_goodput"):
+      if goodput_key not in explicit_overrides:
+        raw_keys_dict[goodput_key] = False
 
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict, config_class=config_class)
 

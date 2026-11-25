@@ -50,7 +50,8 @@ from transformers import AutoModelForCausalLM
 from flax.training import train_state
 from maxtext.common import checkpointing
 from maxtext.common.gcloud_stub import gcs_storage
-from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, stacked_axes
+from maxtext.checkpoint_conversion.utils.tensor_handling import nesting_depth, single_stack_axis, stacked_axes
+from maxtext.utils import checkpoint_dtype_utils
 from maxtext.utils import max_logging
 import orbax.checkpoint as ocp
 
@@ -258,6 +259,9 @@ def process_maxtext_param(
 
   # If maxtext_param_key is not in hook_fn_map, current_hook_fns is None, indicating identity (no transformation)
   current_hook_fns = hook_fn_map.get(maxtext_param_key)
+  save_dtype = checkpoint_dtype_utils.param_save_dtype(
+      maxtext_param_key, maxtext_config.weight_dtype, model_name=getattr(maxtext_config, "model_name", None)
+  )
 
   # This list will store tuples of (hf_path, hf_weight)
   output_weights = []
@@ -272,7 +276,7 @@ def process_maxtext_param(
         output_weights,
         current_hook_fns,
         hf_shape_map,
-        save_dtype=maxtext_config.weight_dtype,
+        save_dtype=save_dtype,
     )
     return output_weights
 
@@ -286,22 +290,9 @@ def process_maxtext_param(
     # Case 2 or 3: The source tensor is stacked on a single axis.
     if maxtext_config.scan_layers:
       max_logging.log("\tscan")
-      # Case 2: Standard scanned layer. Stacked on layer axis (param_scan_axis) for multidimensional
-      # weights or 2D block scales, or axis 0 for 1D tensors (e.g. per-layer scalar scales like
-      # Llama 3.1 FP8 `kernel_scale` with shape (num_layers,)) and non-Param variable collections
-      # (`MoEBiasVar`, `Tid2EidVar`) or unscanned MoE prefix layers.
-      key_str = maxtext_param_key[0] if isinstance(maxtext_param_key, tuple) else maxtext_param_key
-      is_var_collection = "MoEBiasVar" in key_str or "Tid2EidVar" in key_str
-      is_unscanned_moe = "MoeBlock" in key_str and not any(
-          s in key_str for s in ("scanned_blocks", "moe_layers-", "decoder-layers-")
-      )
+      # Case 2: Standard scanned layer, stacked as `single_stack_axis` says.
       weight_sample = maxtext_param_weight[0] if isinstance(maxtext_param_weight, list) else maxtext_param_weight
-      if is_var_collection or is_unscanned_moe:
-        axis_to_slice = 0
-      else:
-        axis_to_slice = (
-            maxtext_config.param_scan_axis if getattr(weight_sample, "ndim", 0) > maxtext_config.param_scan_axis else 0
-        )
+      axis_to_slice = single_stack_axis(maxtext_param_key, maxtext_config, getattr(weight_sample, "shape", ()))
     else:
       max_logging.log("\tunscan moe")
       # Case 3: Unscanned MoE layer. Stacked ONLY on the expert axis. Assuming expert is axis 0.
@@ -321,7 +312,7 @@ def process_maxtext_param(
           output_weights,
           current_hook_fns,
           hf_shape_map,
-          save_dtype=maxtext_config.weight_dtype,
+          save_dtype=save_dtype,
       )
 
     return output_weights
@@ -345,7 +336,7 @@ def process_maxtext_param(
           output_weights,
           current_hook_fns,
           hf_shape_map,
-          save_dtype=maxtext_config.weight_dtype,
+          save_dtype=save_dtype,
       )
       return
     axis_to_slice = axes[level] - level
@@ -874,6 +865,32 @@ def _recursive_update(d: dict, u: dict) -> dict:
   return d
 
 
+def _param_key_from_checkpoint_tree_path(checkpoint_tree: Any, path_tuple: tuple[Any, ...]) -> str:
+  """Derives the `-`-delimited MaxText parameter key for a leaf path in an Orbax `checkpoint_tree`."""
+  raw_keys = [getattr(e, "key", getattr(e, "idx", getattr(e, "name", e))) for e in path_tuple]
+  if isinstance(checkpoint_tree, dict) and "params" in checkpoint_tree and raw_keys and raw_keys[0] == "params":
+    actual = checkpoint_tree["params"]
+    if isinstance(actual, dict) and "params" in actual and len(path_tuple) >= 2:
+      prefix = f"{raw_keys[1]}-"
+      sub_path = path_tuple[2:]
+    else:
+      prefix = "params-"
+      sub_path = path_tuple[1:]
+  elif (
+      isinstance(checkpoint_tree, dict)
+      and "base" in checkpoint_tree
+      and isinstance(checkpoint_tree["base"], dict)
+      and raw_keys
+      and raw_keys[0] == "base"
+  ):
+    prefix = "params-"
+    sub_path = path_tuple[1:]
+  else:
+    prefix = "params-"
+    sub_path = path_tuple
+  return prefix + "-".join(param_key_parts_from_path(sub_path))
+
+
 def load_orbax_checkpoint(config) -> dict:
   """Loads Orbax checkpoints from Base and/or LoRA paths in config.
 
@@ -896,15 +913,20 @@ def load_orbax_checkpoint(config) -> dict:
   devices = np.array(jax.devices()).reshape((-1,))
   single_device_mesh = jax.sharding.Mesh(devices, ("x",))
 
-  def create_restore_args(tree_metadata):
-    """Create restore args for unsharded restoration."""
+  def create_restore_args(tree_root, path_tuple, tree_metadata):
+    """Create restore args for unsharded restoration, preserving fp32 state when weight_dtype is bfloat16."""
     if hasattr(tree_metadata, "shape"):
       restore_dtype = None
       if hasattr(tree_metadata, "dtype") and tree_metadata.dtype is not None:
         try:
           orig_dtype = jnp.dtype(tree_metadata.dtype)
-          if jnp.issubdtype(orig_dtype, jnp.floating) and getattr(config, "weight_dtype", None) is not None:
-            restore_dtype = jnp.dtype(config.weight_dtype)
+          weight_dtype = getattr(config, "weight_dtype", None)
+          if jnp.issubdtype(orig_dtype, jnp.floating) and weight_dtype is not None:
+            mt_key = _param_key_from_checkpoint_tree_path(tree_root, path_tuple)
+            target_dtype = checkpoint_dtype_utils.param_save_dtype(
+                mt_key, weight_dtype, model_name=getattr(config, "model_name", None)
+            )
+            restore_dtype = jnp.dtype(getattr(target_dtype, "value", target_dtype))
           else:
             restore_dtype = orig_dtype
         except (TypeError, ValueError):
@@ -913,10 +935,7 @@ def load_orbax_checkpoint(config) -> dict:
           sharding=jax.sharding.NamedSharding(single_device_mesh, jax.sharding.PartitionSpec()),
           dtype=restore_dtype,
       )
-    elif isinstance(tree_metadata, dict):
-      return {k: create_restore_args(v) for k, v in tree_metadata.items()}
-    else:
-      return None
+    return None
 
   lora_path = config.lora.lora_restore_path
   paths = [p for p in [config.load_parameters_path, lora_path] if p]
@@ -936,8 +955,10 @@ def load_orbax_checkpoint(config) -> dict:
           checkpoint_tree = filtered_tree
           max_logging.log(f"Filtering checkpoint to exclude optimizer keys from {path}")
 
-    restore_args = jax.tree_util.tree_map(
-        lambda x: create_restore_args(x) if hasattr(x, "shape") else None,
+    restore_args = jax.tree_util.tree_map_with_path(
+        lambda path_tuple, x, tree_root=checkpoint_tree: (
+            create_restore_args(tree_root, path_tuple, x) if hasattr(x, "shape") else None
+        ),
         checkpoint_tree,
         is_leaf=lambda x: hasattr(x, "shape"),
     )

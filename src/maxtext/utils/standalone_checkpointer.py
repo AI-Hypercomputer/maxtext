@@ -206,6 +206,8 @@ def add_entropy_to_checkpoint(state):
 def main(argv: Sequence[str]) -> None:
   os.environ["TF_CPP_MIN_LOG_LEVEL"] = "0"
   config = pyconfig.initialize(argv)
+  # Match train.py: checkpoints store NNX RNG keys, whose shape depends on the PRNG impl.
+  jax.config.update("jax_default_prng_impl", config.prng_impl)
   train_utils.validate_train_config(config)
   print(f"Found {jax.device_count()} devices.")
   print(f"Found {jax.process_count()} processes.")

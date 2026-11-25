@@ -18,8 +18,10 @@ import functools
 
 import jax
 import jax.numpy as jnp
-from jax.sharding import PartitionSpec as P
+from jax.sharding import AxisType, PartitionSpec as P, reshard
 from flax import nnx
+
+from maxtext.common.common_types import ShardMode
 
 
 def get_mesh_axis_dim_indices(physical_partition_spec, axis_name="fsdp"):
@@ -136,6 +138,88 @@ def remove_gathered_mesh_axes(pps, is_moe_block_0, axes_to_remove):
     return P(*new_spec)
 
   return pps
+
+
+def pipeline_stage_mesh(mesh, shard_mode):
+  """Returns the mesh the pipeline stage layers are built with: `mesh`, with 'stage' an Auto axis under EXPLICIT.
+
+  The stage function is vmapped over the stages. Under explicit sharding a vmap over an Explicit mesh axis replicates
+  the vmapped dim inside any shard_map in the layers (the MoE's, e.g., which then all-gathers every stage's tokens and
+  weights) and cannot batch a gather from an unbatched operand. So the stages run with 'stage' Auto and named by
+  spmd_axis_name, as under shard_mode=auto, while every other axis stays Explicit (see `call_with_stage_axis_auto`).
+  The layers resolve their shardings against their mesh, which must match the one in context when they run.
+  """
+  if shard_mode != ShardMode.EXPLICIT or "stage" not in mesh.axis_names:
+    return mesh
+  return mesh.update(
+      axis_types=tuple(AxisType.Auto if name == "stage" else t for name, t in zip(mesh.axis_names, mesh.axis_types))
+  )
+
+
+def call_with_stage_axis_auto(fn, stage_mesh, *args):
+  """Calls `fn(*args)` under `stage_mesh` ('stage' Auto) and returns its outputs explicitly sharded by stage on dim 0.
+
+  Like `jax.sharding.auto_axes(fn, axes="stage")`, except that the outputs keep the shardings `fn` gave them on the
+  other (Explicit) axes, which are only known once it has been traced.
+  """
+  with jax.sharding.use_abstract_mesh(stage_mesh.abstract_mesh):
+    args = jax.tree.map(lambda a: reshard(a, remove_mesh_axis_from_spec(jax.typeof(a).sharding.spec, "stage")), args)
+    out = fn(*args)
+    out_specs = jax.tree.map(lambda o: jax.typeof(o).sharding.spec, out)
+  return jax.tree.map(lambda o, spec: reshard(o, P("stage", *spec.partitions[1:])), out, out_specs)
+
+
+def remove_mesh_axis_from_spec(spec, axis_name):
+  """Drops `axis_name` from every dimension of a PartitionSpec, keeping its reduced/unreduced axes."""
+  return P(*(remove_mesh_axis(p, axis_name) for p in spec.partitions), unreduced=spec.unreduced, reduced=spec.reduced)
+
+
+def weight_grad_reduced_axes(mesh, rules):
+  """Mesh axes (of size > 1, other than 'stage') that a stage's activation tokens are sharded over.
+
+  A stage weight's gradient sums over the tokens, so on each device it is a partial sum over exactly these axes.
+  """
+  from maxtext.utils.sharding import logical_to_mesh_axes, mesh_axes_for_dim  # pylint: disable=import-outside-toplevel
+
+  axes = set()
+  for logical_axis in ("activation_batch", "activation_length"):
+    spec = logical_to_mesh_axes((logical_axis,), mesh, rules=rules)
+    if spec is not None and spec.partitions:
+      axes.update(axis for axis in mesh_axes_for_dim(spec.partitions[0]) if mesh.shape.get(axis, 1) > 1)
+  axes.discard("stage")
+  return frozenset(axes)
+
+
+def tag_weight_grad_reduced(spec, reduced_axes):
+  """Tags a gathered stage weight's spec `reduced` over the token axes it is not itself sharded on.
+
+  The weight's cotangent then comes out `unreduced` over them (each device's partial sum over the tokens it saw),
+  so accumulating it over microbatches needs no communication; the reduction runs where the tag was applied.
+  """
+  if not isinstance(spec, P) or not reduced_axes:
+    return spec
+  used = set()
+  for dim_axes in spec.partitions:
+    if dim_axes is not None and dim_axes is not P.UNCONSTRAINED:
+      used.update(dim_axes if isinstance(dim_axes, tuple) else (dim_axes,))
+  reduced = frozenset(reduced_axes) - used
+  return spec.update(reduced=spec.reduced | reduced) if reduced else spec
+
+
+def spec_partitions(x):
+  """Returns the per-dimension mesh axes of `x`'s (explicit) sharding, padded with None to `x.ndim`."""
+  partitions = list(jax.typeof(x).sharding.spec.partitions)
+  return partitions + [None] * (x.ndim - len(partitions))
+
+
+def remove_mesh_axis(dim_axes, axis_name):
+  """Drops `axis_name` from one PartitionSpec entry (None, a mesh axis name or a tuple of them)."""
+  if dim_axes is None or dim_axes == axis_name:
+    return None
+  if isinstance(dim_axes, str):
+    return dim_axes
+  remaining = tuple(a for a in dim_axes if a != axis_name)
+  return remaining or None
 
 
 def strip_pipeline_repeat_logical_axis(full_logical_spec):
@@ -394,7 +478,11 @@ def reduce_sown_metrics_per_layer(
   def _reduce(name, stacked_leaf):
     if name in UNSUPPORTED_SOWN_METRICS:
       raise ValueError(f"Sown value '{name}' cannot be reduced over pipeline microbatches; unsupported with PP.")
-    per_microbatch = stacked_leaf[valid_iteration, stage_index]  # (num_repeats, num_microbatches, num_stages, ...)
+    # Under explicit sharding the gather's output sharding is ambiguous: keep the leaf's stage (and later) dims'.
+    partitions = spec_partitions(stacked_leaf)
+    out_sharding = P(None, None, *partitions[1:]) if any(p is not None for p in partitions) else None
+    # (num_repeats, num_microbatches, num_stages, ...)
+    per_microbatch = stacked_leaf.at[valid_iteration, stage_index].get(out_sharding=out_sharding)
     reduction = SOWN_MICROBATCH_REDUCTIONS.get(name)
     if reduction is None:
       if per_microbatch.dtype == jnp.bool_:

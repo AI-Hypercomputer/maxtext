@@ -17,7 +17,7 @@ All the functions include MaxText modules, such as Pyconfig, should be moved to 
 """
 
 import collections
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import functools
 from functools import partial
 import os
@@ -48,7 +48,7 @@ from maxtext.utils import elastic_utils
 from maxtext.common.gcloud_stub import is_decoupled
 from maxtext.common.gcloud_stub import writer, _TENSORBOARDX_AVAILABLE, StubSummaryWriter
 from maxtext.utils import max_logging
-from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN
+from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRESSIVE, MODEL_MODE_TRAIN, ReorderStrategy
 
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
@@ -233,6 +233,16 @@ def add_text_to_summary_writer(key, value, summary_writer):
     summary_writer.add_text(key, value)
 
 
+def _uses_checkpoints(raw_keys):
+  """Returns True if the run saves or loads checkpoints, which needs the distributed system on multi-host."""
+  return bool(
+      raw_keys["enable_checkpointing"]
+      or raw_keys.get("load_parameters_path")
+      or raw_keys.get("load_full_state_path")
+      or raw_keys.get("source_checkpoint_layout") == "safetensors_dynamic"
+  )
+
+
 def maybe_initialize_jax_distributed_system(raw_keys):
   """The best recipe to initialize the Jax Distributed System has varied over time. We keep a layer of
   indirection in MaxText to avoid breaking the call sites unnecessarily.
@@ -311,7 +321,7 @@ def maybe_initialize_jax_distributed_system(raw_keys):
         num_slices=raw_keys["num_slices"],
     )
     max_logging.log("Jax distributed system initialized on TPUs for multi-tier checkpointing!")
-  elif raw_keys["enable_checkpointing"] and raw_keys["compile_topology_num_slices"] == -1:
+  elif _uses_checkpoints(raw_keys) and raw_keys["compile_topology_num_slices"] == -1:
     if not raw_keys["enable_emergency_checkpoint"]:
       jax.distributed.initialize(initialization_timeout=raw_keys["jax_distributed_initialization_timeout"])
     else:
@@ -998,8 +1008,6 @@ def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu
   See: https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/jax/attention.py
   """
   # pylint: disable=import-outside-toplevel
-  from maxtext.common.common_types import ReorderStrategy
-
   _reorder_keys = {
       "inputs",
       "targets",
@@ -1007,6 +1015,7 @@ def reorder_causal_load_balanced(batch, cp_size, reorder_strategy, hardware="tpu
       "targets_position",
       "inputs_segmentation",
       "targets_segmentation",
+      "completion_mask",
       "corruption_mask",
       "targets_loss_mask",
   }
@@ -1067,6 +1076,62 @@ def reordered_cp_size(config, mesh) -> int:
   if mesh is None or not getattr(config, "context_parallel_load_balance", False):
     return 1
   return mesh.shape.get(config.context_sharding, 1)
+
+
+def check_no_load_balanced_context_parallelism(config, entrypoint_name: str, mesh=None) -> None:
+  """Raises ValueError if load-balanced CP is active on an entrypoint whose input pipeline does not reorder batches."""
+  load_balance = getattr(config, "context_parallel_load_balance", False)
+  if not isinstance(load_balance, bool) or not load_balance:
+    return
+
+  if mesh is not None and isinstance(getattr(mesh, "shape", None), Mapping):
+    cp_size = reordered_cp_size(config, mesh)
+    if isinstance(cp_size, int) and not isinstance(cp_size, bool) and cp_size > 1:
+      raise ValueError(
+          f"{entrypoint_name} does not reorder batches for load-balanced context parallelism "
+          f"(mesh axis {getattr(config, 'context_sharding', 'context')!r} has size {cp_size} with "
+          "context_parallel_load_balance=True). Set context_parallel_load_balance=False."
+      )
+    return
+
+  ici_cp = getattr(config, "ici_context_parallelism", 1)
+  dcn_cp = getattr(config, "dcn_context_parallelism", 1)
+  if (
+      isinstance(ici_cp, int)
+      and not isinstance(ici_cp, bool)
+      and isinstance(dcn_cp, int)
+      and not isinstance(dcn_cp, bool)
+      and (ici_cp > 1 or dcn_cp > 1)
+  ):
+    raise ValueError(
+        f"{entrypoint_name} does not reorder batches for load-balanced context parallelism "
+        f"(ici_context_parallelism={ici_cp}, dcn_context_parallelism={dcn_cp} with "
+        "context_parallel_load_balance=True). Set context_parallel_load_balance=False."
+    )
+
+
+def resolve_reorder_strategy(config):
+  """The permutation the input pipeline applies when `reordered_cp_size(config, mesh) > 1`.
+
+  Resolves `context_parallel_reorder_strategy=AUTO` the way `setup_train_loop` does: STRIPED
+  (a Transformer Engine feature) for packed ring attention on GPU, DUAL_CHUNK_SWAP otherwise.
+
+  Returns:
+    A `ReorderStrategy` other than AUTO.
+  """
+  strategy = getattr(config, "context_parallel_reorder_strategy", None)
+  if strategy is None:
+    # Configs that predate the field only have the DUAL_CHUNK_SWAP permutation.
+    return ReorderStrategy.DUAL_CHUNK_SWAP
+  if strategy != ReorderStrategy.AUTO:
+    return strategy
+  if (
+      config.packing
+      and config.context_parallel_strategy.lower() == "ring"
+      and config.hardware in ("gpu", "gpu_multiprocess")
+  ):
+    return ReorderStrategy.STRIPED
+  return ReorderStrategy.DUAL_CHUNK_SWAP
 
 
 @staticmethod

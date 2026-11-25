@@ -64,6 +64,13 @@ def _reference_sort_unsort(x, topk_indices, w, f, *, num_experts, topk, shard_id
 class RaggedSortTcTest(parameterized.TestCase):
   """TC ragged sort vs a pure-JAX reference, per expert-parallel shard."""
 
+  @classmethod
+  def tearDownClass(cls):
+    for attr in ("_ref_cache", "_run_cache"):
+      if hasattr(cls, attr):
+        delattr(cls, attr)
+    super().tearDownClass()
+
   def setUp(self):
     super().setUp()
     if not any(d.platform == "tpu" for d in jax.devices()):
@@ -93,6 +100,27 @@ class RaggedSortTcTest(parameterized.TestCase):
     Returns:
       (counts, cap, TC outputs dict of buf, group_sizes, y, count, dh, dx and dw).
     """
+    run_key = (
+        num_tokens,
+        hidden,
+        num_experts,
+        topk,
+        buffer_factor,
+        jnp.dtype(dtype),
+        gather_block_size,
+        reduce_block_size,
+        mask_padding,
+        flatten_block_size,
+        skewed,
+        prescaled,
+        keep_3d,
+        tokens_3d,
+        window_routing,
+    )
+    run_cache = getattr(self.__class__, "_run_cache", {})
+    if run_key in run_cache:
+      return run_cache[run_key]
+
     devices = jax.devices()
     ep_size = max(d for d in (8, 4, 2, 1) if len(devices) % d == 0 and num_experts % d == 0)
     mesh = Mesh(np.asarray(devices[:ep_size]), ("expert",))
@@ -116,7 +144,7 @@ class RaggedSortTcTest(parameterized.TestCase):
       # Row-wise nonlinearity standing in for the expert MLP (works for 2D and 3D-layout buffers).
       return jnp.tanh(buf.astype(jnp.float32) * m.reshape(buf.shape[1:])).astype(buf.dtype)
 
-    def tc_shard(x, topk_indices, w, with_dh=True):
+    def tc_shard(x, topk_indices, w, dh_zero):
       if tokens_3d:
         # moe_tc_ragged_3d_dispatch: tokens arrive (and the combine leaves) in the (N, hidden // 128, 128) layout.
         x = x.reshape(x.shape[0], -1, 128)
@@ -141,35 +169,27 @@ class RaggedSortTcTest(parameterized.TestCase):
         w_rows = ragged_sort_tc.tc_buffer_row_weights(routing, w.reshape(-1), buf.shape[0])
         h = (h.astype(jnp.float32) * w_rows.reshape(-1, *([1] * (h.ndim - 1)))).astype(h.dtype)
 
-      def unsort(h):
-        return ragged_sort_tc.ring_ragged_unsort_tc(
-            h,
-            routing,
-            topk,
-            w.reshape(-1),
-            gather_block_size=gather_block_size,
-            mask_padding=mask_padding,
-            flatten_block_size=flatten_block_size,
-            prescaled=prescaled,
-            out_3d=tokens_3d,
-        )
-
-      if not with_dh:
-        y = unsort(h)
-        return y.reshape(y.shape[0], -1)[None]
-      y, unsort_vjp = jax.vjp(unsort, h)
+      h = h + dh_zero[0].reshape(h.shape)
+      y = ragged_sort_tc.ring_ragged_unsort_tc(
+          h,
+          routing,
+          topk,
+          w.reshape(-1),
+          gather_block_size=gather_block_size,
+          mask_padding=mask_padding,
+          flatten_block_size=flatten_block_size,
+          prescaled=prescaled,
+          out_3d=tokens_3d,
+      )
       if tokens_3d:
         assert y.ndim == 3, y.shape
-      # Cotangent of the unsort input (the expert output buffer), produced by the TC gather.
-      (dh,) = unsort_vjp(ct[jax.lax.axis_index("expert")].reshape(y.shape).astype(y.dtype))
       y = y.reshape(y.shape[0], -1)
       count = routing.count
       return (
+          y[None],
           buf.reshape(buf.shape[0], -1)[None],
           group_sizes[None],
-          y[None],
           count[None],
-          dh.reshape(dh.shape[0], -1)[None],
       )
 
     def ref_shard(x, topk_indices, w):
@@ -189,27 +209,34 @@ class RaggedSortTcTest(parameterized.TestCase):
 
     rep = P()
     shard = P("expert")
-    tc_fn = jax.shard_map(tc_shard, mesh=mesh, in_specs=(rep, rep, rep), out_specs=(shard,) * 5, check_vma=False)
-    tc_y_fn = jax.shard_map(
-        functools.partial(tc_shard, with_dh=False), mesh=mesh, in_specs=(rep, rep, rep), out_specs=shard, check_vma=False
-    )
+    tc_fn = jax.shard_map(tc_shard, mesh=mesh, in_specs=(rep, rep, rep, shard), out_specs=(shard,) * 4, check_vma=False)
     ref_fn = jax.shard_map(
         ref_shard, mesh=mesh, in_specs=(rep, rep, rep), out_specs=(shard, shard, shard), check_vma=False
     )
 
-    def tc_loss(x, w):
-      y = tc_y_fn(x, topk_indices, w)
-      return jnp.sum(y.astype(jnp.float32) * ct)
+    def tc_loss(x, w, dh_zero):
+      y, buf, group_sizes, count = tc_fn(x, topk_indices, w, dh_zero)
+      return jnp.sum(y.astype(jnp.float32) * ct), (buf, group_sizes, y, count)
 
     def ref_loss(x, w):
-      _, _, y = ref_fn(x, topk_indices, w)
-      return jnp.sum(y.astype(jnp.float32) * ct)
+      buf, group_sizes, y = ref_fn(x, topk_indices, w)
+      return jnp.sum(y.astype(jnp.float32) * ct), (buf, group_sizes, y)
+
+    ref_key = (ep_size, num_tokens, hidden, num_experts, topk, buffer_factor, jnp.dtype(dtype), skewed)
+    ref_cache = getattr(self.__class__, "_ref_cache", {})
 
     with jax.set_mesh(mesh):
-      buf_tc, gs_tc, y_tc, count_tc, dh_tc = jax.jit(tc_fn)(x, topk_indices, w)
-      buf_ref, gs_ref, y_ref = jax.jit(ref_fn)(x, topk_indices, w)
-      loss_tc, (dx_tc, dw_tc) = jax.jit(jax.value_and_grad(tc_loss, argnums=(0, 1)))(x, w)
-      loss_ref, (dx_ref, dw_ref) = jax.jit(jax.value_and_grad(ref_loss, argnums=(0, 1)))(x, w)
+      dh_zero = jnp.zeros((ep_size, buffer_size, hidden), dtype=dtype)
+      (loss_tc, (buf_tc, gs_tc, y_tc, count_tc)), (dx_tc, dw_tc, dh_tc) = jax.jit(
+          jax.value_and_grad(tc_loss, argnums=(0, 1, 2), has_aux=True)
+      )(x, w, dh_zero)
+      if ref_key not in ref_cache:
+        (loss_ref, (buf_ref, gs_ref, y_ref)), (dx_ref, dw_ref) = jax.jit(
+            jax.value_and_grad(ref_loss, argnums=(0, 1), has_aux=True)
+        )(x, w)
+        ref_cache[ref_key] = jax.device_get((buf_ref, gs_ref, y_ref, loss_ref, dx_ref, dw_ref))
+        setattr(self.__class__, "_ref_cache", ref_cache)
+      buf_ref, gs_ref, y_ref, loss_ref, dx_ref, dw_ref = ref_cache[ref_key]
 
     np.testing.assert_array_equal(np.asarray(gs_tc), np.asarray(gs_ref))
     # The gather is an exact copy; rows past count are zero with mask_padding (also with keep_3d), otherwise
@@ -230,7 +257,10 @@ class RaggedSortTcTest(parameterized.TestCase):
       atol = tol["atol"] * max(1.0, float(np.max(np.abs(g_ref))))
       np.testing.assert_allclose(np.asarray(g_tc, np.float32), g_ref, rtol=tol["rtol"], atol=atol)
     outputs = {"buf": buf_tc, "group_sizes": gs_tc, "y": y_tc, "count": count_tc, "dh": dh_tc, "dx": dx_tc, "dw": dw_tc}
-    return np.asarray(count_tc), buffer_size, jax.tree.map(np.asarray, outputs)
+    result = (np.asarray(count_tc), buffer_size, jax.tree.map(np.asarray, outputs))
+    run_cache[run_key] = result
+    setattr(self.__class__, "_run_cache", run_cache)
+    return result
 
   @pytest.mark.tpu_only
   @parameterized.named_parameters(

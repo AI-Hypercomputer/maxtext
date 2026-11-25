@@ -84,8 +84,9 @@ bash src/maxtext/trainers/pre_train/scripts/olmo/run_olmo3_7b_stage1.sh
 
 ## Legacy quick start (multi-host TPU via XPK)
 
-For new deployments, use the Cluster Toolkit version above. The XPK wrapper
-section is retained for existing environments.
+> **Note:** XPK is deprecated. Use the [Cluster Toolkit quick start](#quick-start-multi-host-tpu-via-cluster-toolkit)
+> above for all new deployments. The XPK wrapper (`xpk_olmo3_7b_stage1.sh`) is kept only for
+> existing XPK environments and may be removed in a future release.
 
 ```bash
 source ~/.hf_token.sh

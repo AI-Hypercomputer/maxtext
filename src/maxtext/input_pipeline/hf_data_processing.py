@@ -24,11 +24,13 @@ import transformers
 
 import grain.python as grain
 
+from maxtext.configs.types import resolve_tokenizer_path
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import instruction_data_processing
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import elastic_utils
 
 
@@ -205,12 +207,13 @@ def vision_sft_preprocessing_pipeline(
   )
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
-      config.tokenizer_path,
+      resolve_tokenizer_path(config.tokenizer_path),
       add_bos_token=False,
       add_eos_token=False,
       legacy=False,
       token=config.hf_access_token,
       extra_special_tokens={},
+      trust_remote_code=getattr(config, "tokenizer_trust_remote_code", False),
   )
   pad_id = _get_pad_id(tokenizer)
 
@@ -225,6 +228,12 @@ def vision_sft_preprocessing_pipeline(
           "column_names": text_columns,
       },
   )
+  # Formats that leave BOS to the token ids (Gemma 3) need it added back to the prompt.
+  if mm_processor.reformatted_prompt_needs_bos(config.model_name):
+    dataset = dataset.map(
+        input_pipeline_utils.prepend_bos,
+        fn_kwargs={"column_name": text_columns[0], "bos_id": tokenizer.bos_token_id},
+    )
   dataset = dataset.map(
       input_pipeline_utils.prepare_text_for_image_fusion,
       fn_kwargs={"column_name": text_columns[0], "config": config},
@@ -355,12 +364,13 @@ def preprocessing_pipeline(
     dataset = dataset.repeat(num_epoch)
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
-      tokenizer_path,
+      resolve_tokenizer_path(tokenizer_path),
       add_bos_token=add_bos if not use_sft else False,
       add_eos_token=add_eos if not use_sft else False,
       legacy=False,
       token=hf_access_token,
       extra_special_tokens={},
+      trust_remote_code=getattr(config, "tokenizer_trust_remote_code", False),
   )
 
   dataset = dataset.select_columns(data_column_names)
@@ -524,12 +534,15 @@ def make_hf_train_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
+  dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
+      config, process_indices_train
+  )
   if config.use_sft and config.use_multimodal:
     train_iter = vision_sft_preprocessing_pipeline(
         dataset=train_ds,
         config=config,
-        dataloading_host_index=process_indices_train.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_train),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
         global_mesh=global_mesh,
         text_columns=config.train_data_columns,
         image_column=config.train_image_column,
@@ -537,8 +550,8 @@ def make_hf_train_iterator(
     )
   else:
     train_iter = preprocessing_pipeline(
-        dataloading_host_index=process_indices_train.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_train),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
         global_mesh=global_mesh,
         dataset=train_ds,
         config=config,
@@ -587,12 +600,15 @@ def make_hf_eval_iterator(
       streaming=True,
       token=config.hf_access_token,
   )
+  dataloading_host_index, dataloading_host_count = input_pipeline_utils.get_dataloading_shard(
+      config, process_indices_eval
+  )
   if config.use_sft and config.use_multimodal:
     eval_iter = vision_sft_preprocessing_pipeline(
         dataset=eval_ds,
         config=config,
-        dataloading_host_index=process_indices_eval.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_eval),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
         global_mesh=global_mesh,
         text_columns=config.eval_data_columns,
         image_column=config.eval_image_column,
@@ -600,8 +616,8 @@ def make_hf_eval_iterator(
     )
   else:
     eval_iter = preprocessing_pipeline(
-        dataloading_host_index=process_indices_eval.index(jax.process_index()),
-        dataloading_host_count=len(process_indices_eval),
+        dataloading_host_index=dataloading_host_index,
+        dataloading_host_count=dataloading_host_count,
         global_mesh=global_mesh,
         dataset=eval_ds,
         config=config,

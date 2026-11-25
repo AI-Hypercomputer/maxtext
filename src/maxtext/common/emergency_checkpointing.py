@@ -71,6 +71,22 @@ def create_emergency_checkpoint_manager(
   if isinstance(abstract_state, nnx.State):
     abstract_state = train_state_nnx.to_checkpoint_dict(abstract_state)
 
+  # Orbax counts replicas along `replica_axis_index` (default 0) and, if there is only one, writes no local
+  # checkpoints. MaxText's mesh puts `diloco` (size 1 unless DiLoCo is enabled) before `data`, so use `data`.
+  axis_names = global_mesh.axis_names
+  replica_axis = axis_names.index("data") if "data" in axis_names else 0
+  replica_count = global_mesh.devices.shape[replica_axis]
+  max_logging.log(
+      f"Emergency checkpointing replica axis: '{axis_names[replica_axis]}' "
+      f"(index {replica_axis}, {replica_count} replica(s))"
+  )
+  if replica_count < 2:
+    max_logging.warning(
+        "Emergency checkpointing needs at least 2 data-parallel replicas; Orbax will only write "
+        f"persistent checkpoints to {persistent_checkpoint_dir} and no local checkpoints to "
+        f"{local_checkpoint_dir}."
+    )
+
   manager = CheckpointManager(
       local_checkpoint_dir,
       persistent_p,
@@ -79,6 +95,7 @@ def create_emergency_checkpoint_manager(
       options=emergency_checkpoint_manager.CheckpointManagerOptions(
           local=LocalCheckpointOptions(save_interval_steps=local_save_interval_steps),
           persistent=PersistentCheckpointOptions(save_interval_steps=persistent_save_interval_steps),
+          replica_axis_index=replica_axis,
       ),
       logger=orbax_logger,
   )
@@ -110,8 +127,12 @@ def create_replicator_checkpoint_manager(
   return manager
 
 
-def save(checkpoint_manager, step, state, config, force):
-  """v0 emergency save: writes the state under the ``state`` checkpointable."""
+def save(checkpoint_manager, step, state, config, force, backup=False):
+  """v0 emergency save: writes the state under the ``state`` checkpointable.
+
+  With ``backup=True`` Multi-Tier Checkpointing is asked to back up this step to persistent storage
+  regardless of its backup interval; such a step is always saved locally (``force`` is implied).
+  """
   chunk_byte_size = (
       config.checkpoint_storage_target_data_file_size_bytes if config else DEFAULT_OCDBT_TARGET_DATA_FILE_SIZE
   )
@@ -121,7 +142,11 @@ def save(checkpoint_manager, step, state, config, force):
       ocdbt_target_data_file_size=chunk_byte_size,
   )
   replicator_error_handler(config)
-  return checkpoint_manager.save(step, args=ocp.args.Composite(state=checkpoint_args), force=force)
+  if not backup:
+    return checkpoint_manager.save(step, args=ocp.args.Composite(state=checkpoint_args), force=force)
+  if not isinstance(checkpoint_manager, ReplicatorCheckpointManager):
+    raise ValueError("backup=True requires Multi-Tier Checkpointing (`enable_multi_tier_checkpointing=True`).")
+  return checkpoint_manager.save(step, args=ocp.args.Composite(state=checkpoint_args), force=True, backup=True)
 
 
 def restore(checkpoint_manager, step, abstract_unboxed_pre_state):
@@ -138,7 +163,7 @@ def restore(checkpoint_manager, step, abstract_unboxed_pre_state):
 
 def replicator_error_handler(config: Any):
   """Replicator error handler to handle errors in replicator service."""
-  if config.enable_multi_tier_checkpointing:
+  if config and config.enable_multi_tier_checkpointing:
     local_dir = config.local_checkpoint_directory
     replicator_errors_file = f"{local_dir}/replicator.errors"
     replicator_failed_file = f"{local_dir}/replicator.failed"

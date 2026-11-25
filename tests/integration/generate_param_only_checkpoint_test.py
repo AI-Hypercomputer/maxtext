@@ -18,14 +18,13 @@ and then running decode with it.
 """
 from datetime import datetime
 import os
+import jax
 import pytest
 
 from maxtext.inference.decode import main as decode_main
 from maxtext.common.gcloud_stub import is_decoupled, jetstream
 
 config_lib, _, _, _, _ = jetstream()
-if getattr(config_lib, "_IS_STUB", False):
-  pytest.skip("JetStream is not installed (stubbed)", allow_module_level=True)
 from maxtext.trainers.pre_train.train import main as train_main
 from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.utils.generate_param_only_checkpoint import main as generate_param_only_ckpt_main
@@ -52,9 +51,14 @@ def run_e2e_test_flow(
     state_path=None,
     train_attention_type=None,
     decode_config_extra=None,
+    base_output_directory=None,
+    run_decode=True,
 ):
   """Helper function to run training, generate parameter-only checkpoint, and decode."""
-  base_output_directory = get_test_base_output_directory()
+  if run_decode and getattr(config_lib, "_IS_STUB", False):
+    pytest.skip("JetStream is not installed (stubbed)")
+  if base_output_directory is None:
+    base_output_directory = get_test_base_output_directory()
   dataset_path = get_test_dataset_path()
   run_date = datetime.now().strftime("%Y-%m-%d-%H-%M-%S")
   train_attention = train_attention_type if train_attention_type is not None else attention_type
@@ -65,6 +69,7 @@ def run_e2e_test_flow(
       f"base_output_directory={base_output_directory}",
       "async_checkpointing=False",
       "enable_checkpointing=True",
+      "enable_tensorboard=False",
       f"hardware={hardware}",
       "max_target_length=128",
       "per_device_batch_size=1",
@@ -85,7 +90,9 @@ def run_e2e_test_flow(
             attention_type=train_attention,
             dataset_type="synthetic",
             dataset_path=dataset_path,
+            base_output_directory=base_output_directory,
         )
+        + ["enable_tensorboard=False"]
     )
     state_path = f"{base_output_directory}/runner_{run_date}/checkpoints/0/items"
 
@@ -99,7 +106,14 @@ def run_e2e_test_flow(
       ]
       + pathways_command
   )
+  # The end-to-end scripts run this step as its own process, which starts on JAX's default
+  # threefry impl rather than the unsafe_rbg that train_main left behind in this process.
+  # Reset it so the restore target is built the way it is in production (b/576849994).
+  jax.config.update("jax_default_prng_impl", "threefry2x32")
   generate_param_only_ckpt_main(generate_param_only_ckpt_config)
+
+  if not run_decode:
+    return
 
   # Run inference on parameter-only checkpoint
   decode_config = (
@@ -221,3 +235,17 @@ def test_param_ckpt_generation_with_pre_generated_ckpt(capsys):
   captured = capsys.readouterr()
   expected_output = "Input `I love to`"
   assert expected_output in captured.out
+
+
+@pytest.mark.integration_test
+@pytest.mark.cpu_only
+def test_param_ckpt_generation_with_dot_product_cpu(tmp_path):
+  """Tests the parameter-only checkpoint generation flow on CPU with dot product attention."""
+  run_e2e_test_flow(
+      hardware="cpu",
+      attention_type="dot_product",
+      model_config=get_model_params(""),
+      base_output_directory=str(tmp_path),
+      run_decode=False,
+  )
+  assert any(tmp_path.glob("generate_param_*/checkpoints/0/items"))

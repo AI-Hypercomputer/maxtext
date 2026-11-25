@@ -169,7 +169,7 @@ class MaxTextTrainingEngineE2ETest(absltest.TestCase):
     mock_create_opt.return_value = (lambda step: jnp.array(0.001), optax.sgd(0.01))
 
     mock_ckpt_mgr_inst = mock.MagicMock()
-    mock_ckpt_mgr_inst.restore_checkpoint.return_value = (None, None, None)
+    mock_ckpt_mgr_inst.restore_checkpoint.return_value = (None, None)
     mock_ckpt_mgr.return_value = mock_ckpt_mgr_inst
 
     trainer_instance = maxtext_engine.MaxTextTrainingEngine(mock_config)

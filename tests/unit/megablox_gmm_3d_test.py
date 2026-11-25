@@ -75,9 +75,10 @@ class Gmm3dTest(parameterized.TestCase):
   def test_gmm_3d_lhs(self, lhs_dtype, tile_k):
     """wi fwd (fp8 tokens x fp8 weight) / wo dlhs: 3D lhs, 2D out."""
     lhs_dtype = jnp.dtype(lhs_dtype)
+    d_k = 2048 if tile_k == 1024 else D
     k0, k1, k2 = jax.random.split(jax.random.key(0), 3)
-    lhs = _rand(k0, (M, D), lhs_dtype, 4.0)
-    rhs = _rand(k1, (E, D, F), FP8 if lhs_dtype == FP8 else jnp.bfloat16, 4.0)
+    lhs = _rand(k0, (M, d_k), lhs_dtype, 4.0)
+    rhs = _rand(k1, (E, d_k, F), FP8 if lhs_dtype == FP8 else jnp.bfloat16, 4.0)
     rhs_scale = None
     if lhs_dtype == FP8:
       rhs_scale = jnp.abs(_rand(k2, (E, 1, 1, F), jnp.float32)) * 0.01
@@ -114,14 +115,15 @@ class Gmm3dTest(parameterized.TestCase):
 
   def test_gmm_3d_lhs_and_out(self):
     """dx = dgate @ W^T with 3D in and 3D out (both D-sized)."""
+    d_1024 = 2048
     k0, k1 = jax.random.split(jax.random.key(2))
-    lhs = _rand(k0, (M, D), jnp.bfloat16)
-    rhs = _rand(k1, (E, D, D), jnp.bfloat16, 0.05)
+    lhs = _rand(k0, (M, d_1024), jnp.bfloat16)
+    rhs = _rand(k1, (E, d_1024, d_1024), jnp.bfloat16, 0.05)
     tiles = gmm_v2.TileSizes(tile_m=256, tile_k=1024, tile_n=1024)
     f = functools.partial(gmm_v2.gmm_v2, tile_info=tiles, preferred_element_type=jnp.bfloat16)
     want = jax.jit(f)(lhs, rhs, self.gs)
     got = jax.jit(functools.partial(f, out_is_3d=True))(_to3d(lhs), rhs, self.gs)
-    np.testing.assert_array_equal(_f32(got.reshape(M, D)), _f32(want))
+    np.testing.assert_array_equal(_f32(got.reshape(M, d_1024)), _f32(want))
 
   def test_gmm_3d_lhs_full_k_wi_fwd(self):
     """wi fwd tiles 512 / 7168 / 2048 (fp8): the 3D lhs K tile is relayouted in chunks."""
@@ -163,10 +165,11 @@ class Gmm3dTest(parameterized.TestCase):
   def test_gmm_3d_lhs_transpose_rhs(self, lhs_dtype, tile_k):
     """wo dlhs with native transpose_rhs: 3D lhs (the 3D grad), rhs [g, n, k] contracted on its last dim."""
     lhs_dtype = jnp.dtype(lhs_dtype)
+    d_k = 2048 if tile_k == 1024 else D
     k0, k1 = jax.random.split(jax.random.key(8))
-    lhs = _rand(k0, (M, D), lhs_dtype, 4.0)
+    lhs = _rand(k0, (M, d_k), lhs_dtype, 4.0)
     # wo [g, mlp, emb]: dlhs = grad @ wo^T (fp8 grad x fp8 weight, or bf16 x bf16).
-    rhs_t = _rand(k1, (E, F, D), FP8 if lhs_dtype == FP8 else jnp.bfloat16, 0.05 if lhs_dtype != FP8 else 4.0)
+    rhs_t = _rand(k1, (E, F, d_k), FP8 if lhs_dtype == FP8 else jnp.bfloat16, 0.05 if lhs_dtype != FP8 else 4.0)
     tiles = gmm_v2.TileSizes(tile_m=512, tile_k=tile_k, tile_n=F)
     f = functools.partial(gmm_v2.gmm_v2, tile_info=tiles, preferred_element_type=jnp.bfloat16, maybe_quantize_lhs=False)
     want = jax.jit(f)(lhs, rhs_t.swapaxes(1, 2), self.gs)

@@ -122,7 +122,7 @@ class TrainingConfig:
 
 
 class AbstractTrainingEngine(abc.ABC):
-  """Core trainer interface executing model updates and Multi-Tier Checkpointing.
+  """Core trainer interface executing model updates and checkpointing.
 
   The Trainer owns the model weights in accelerator HBM and executes forward/
   backward passes, weight updates, evaluation steps, and checkpoint saving/
@@ -172,13 +172,16 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: TrainerPayload) -> None:
+  def fwd_bwd(self, payload: TrainerPayload) -> jax.Array:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
 
     Args:
       payload: Packed micro-batch payload for training.
+
+    Returns:
+      An un-donated scalar on-device array tracking completion of this pass.
     """
 
   @abc.abstractmethod
@@ -198,21 +201,41 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def fwd_only(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-    """Read-only.
-
-    Runs a forward pass with the trainer model and caller-supplied function.
-
-    The engine owns model access and shards `args`/`kwargs` on its data axis;
-    `fn` owns the computation and must not mutate the model.
+  def with_fwd_only_fn(self, fn: Callable[..., Any]) -> "AbstractTrainingEngine":
+    """Sets the read-only callback `fwd_only` runs; the forward-only counterpart of `with_loss_fn`.
 
     Args:
-      fn: Called as `fn(model, *args, **kwargs)`.
-      *args: Positional arguments forwarded to `fn` after sharding.
-      **kwargs: Keyword arguments forwarded to `fn` after sharding.
+      fn: Called as `fn(model, payload)` under `jax.jit`, where `model` is a
+        read-only copy of the trainer model on which `model.eval()` has been
+        called (setting `nnx.Dropout.deterministic=True` unless overridden by
+        the model's call-time flags) and `payload` is the input payload with
+        host `metadata` stripped and array leaves sharded on the engine's data
+        axis. Must return a pytree of arrays.
 
     Returns:
-      Whatever `fn` returns.
+      self, for chaining.
+    """
+
+  @abc.abstractmethod
+  def fwd_only(self, payload: TrainerPayload) -> Any:
+    """Read-only.
+
+    Runs the registered `with_fwd_only_fn` callback on a read-only `eval()`-mode
+    model copy and sharded `payload`.
+
+    The engine owns model access, JIT compilation/caching, and sharding on its
+    data axis; `fn` owns the computation and must not mutate trainer state.
+    Committed `jax.Array` leaves in `payload` whose sharding differs from the
+    engine's data sharding raise `ValueError` at the `jax.jit` boundary.
+
+    Args:
+      payload: The input payload to prepare and shard.
+
+    Returns:
+      The pytree of arrays returned by `fn`.
+
+    Raises:
+      ValueError: If `with_fwd_only_fn` has not been called.
     """
 
   @abc.abstractmethod
@@ -241,13 +264,15 @@ class AbstractTrainingEngine(abc.ABC):
 
   @abc.abstractmethod
   def get_metrics(self, clear_cache: bool = True) -> MetricsBuffer:
-    """Returns cached metrics and optionally clears the metrics cache.
+    """Returns cached metrics on host and optionally clears the metrics cache.
 
     Args:
       clear_cache: Whether to reset cached metrics after retrieval.
 
     Returns:
-      The accumulated on-device MetricsBuffer.
+      The accumulated MetricsBuffer materialized on the host (NumPy arrays and
+      a plain `str` mode) so RPC/wire callers do not need framework-specific
+      device-to-host transfers.
     """
 
   @abc.abstractmethod

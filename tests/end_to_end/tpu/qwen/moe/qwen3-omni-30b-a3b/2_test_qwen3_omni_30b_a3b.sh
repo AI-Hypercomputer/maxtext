@@ -31,7 +31,7 @@ fi
 BASE_OUTPUT_PATH=${BASE_OUTPUT_PATH%/}
 echo using BASE_OUTPUT_PATH = ${BASE_OUTPUT_PATH}
 
-if [ -z "${HF_TOKEN}" ]; then
+if [ -z "${HF_TOKEN:+set}" ]; then
   echo "Error: HF_TOKEN environment variable is not set. Please export your Hugging Face token."
   echo "Example: export HF_TOKEN=hf_..."
   exit 1
@@ -49,7 +49,6 @@ python3 -m maxtext.inference.decode ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-
     tokenizer_path=${TOKENIZER_PATH} \
     tokenizer_type=huggingface \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
-    hf_access_token=${HF_TOKEN} \
     per_device_batch_size=1 \
     run_name=qwen3_omni_decode_image \
     steps=1 \
@@ -74,7 +73,6 @@ python3 -m maxtext.inference.decode ${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-
     tokenizer_path=${TOKENIZER_PATH} \
     tokenizer_type=huggingface \
     load_parameters_path=${UNSCANNED_CKPT_PATH} \
-    hf_access_token=${HF_TOKEN} \
     per_device_batch_size=1 \
     run_name=qwen3_omni_decode_video \
     steps=1 \

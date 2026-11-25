@@ -97,7 +97,7 @@ bash src/dependencies/scripts/generate_requirements.sh \
 --base-requirements src/dependencies/requirements/base_requirements/tpu-requirements.txt \
 --generated-requirements tpu-requirements.txt \
 --override-requirements src/dependencies/extra_deps/tpu_overrides.txt \
---seed-commit ab4c9b943c70bcb42baf4d379036a19c8aa2689d
+--seed-commit 74605ad12c1e8ddc718d7719512b1c43dec52472
 
 # Copy generated requirements to src/dependencies/requirements/generated_requirements
 mv generated_artifacts/python3_12/tpu-requirements.txt \
@@ -133,7 +133,7 @@ If you have made changes to the GPU pre-training dependencies in `src/dependenci
 bash src/dependencies/scripts/generate_requirements.sh \
 --base-requirements src/dependencies/requirements/base_requirements/cuda12-requirements.txt \
 --generated-requirements cuda12-requirements.txt \
---seed-commit ab4c9b943c70bcb42baf4d379036a19c8aa2689d \
+--seed-commit 74605ad12c1e8ddc718d7719512b1c43dec52472 \
 --override-requirements src/dependencies/extra_deps/cuda12_overrides.txt \
 --hardware cuda12
 

@@ -136,7 +136,20 @@ def main(argv: Sequence[str]) -> None:
     has_chat_template = getattr(tokenizer_model.tokenizer, "chat_template", False)
   except AttributeError as _:
     has_chat_template = False
-  is_bos = config.add_bos and not has_chat_template
+  if config.use_multimodal:
+    # Multimodal prompts come from `reformat_prompt`, which writes BOS into the text for models such as Gemma 4 and
+    # Llama 4.
+    is_bos = config.add_bos and not has_chat_template
+    if mm_processor.reformatted_prompt_needs_bos(config.model_name):
+      # `text` comes from `reformat_prompt`, not from the tokenizer's chat template (only applied with
+      # `use_chat_template`), so having a chat template doesn't mean BOS is already there.
+      is_bos = config.add_bos
+  else:
+    # Text prompts start with BOS, as training data does, unless the chat template is applied (the template then
+    # decides how the prompt starts) or the tokenizer has no BOS token (e.g. Qwen3).
+    is_bos = (
+        config.add_bos and not (config.use_chat_template and has_chat_template) and tokenizer_model.bos_id is not None
+    )
   tokens, true_length = tokenizer_model.encode(text, is_bos=is_bos, prefill_lengths=[prefill_length])
 
   position_ids = None
