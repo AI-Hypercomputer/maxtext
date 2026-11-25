@@ -26,11 +26,11 @@ from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next as 
 from tests.unit.m3.conformance import spec
 
 _BATCH_SIZE = 4
-_SEQ_LEN = 16
-_ROW1_VALID_LEN = 12
+_SEQ_LEN = 8
+_ROW1_VALID_LEN = 7
 _VOCAB_SIZE = 256
 _NUM_EXPERTS = 4
-_NUM_CYCLES = 2
+_NUM_CYCLES = 3
 _PLE_LAYER_ID = 1
 # Covers every 2D+ weight of the mini model down to the `(64, 1)` shared-expert gate.
 _MIN_SHARDED_PARAM_ELEMENTS = 64
@@ -46,7 +46,7 @@ _QWEN3_8_MINI_CFG: dict[str, Any] = {
     "normalization_layer_epsilon": 1e-2,
     "dtype": "float32",
     "weight_dtype": "float32",
-    "hc_count": 4,
+    "hc_count": 2,
     "hc_lowrank": 8,
     "gdn_num_key_heads": 2,
     "gdn_num_value_heads": 2,
@@ -132,10 +132,9 @@ _QWEN3_8_FULL_SCALE_CFG: dict[str, Any] = {
 }
 
 
-def _randomize_ple_conv_kernel(model: qwen3_8.Qwen3_8FlashNextModel, scan_layers: bool) -> None:
+def _randomize_ple_conv_kernel(model: qwen3_8.Qwen3_8FlashNextModel) -> None:
   """Replaces the zero-initialized PLE conv kernel so `norm_conv`, which only feeds it, receives gradient."""
-  decoder = model.decoder
-  ple = decoder.ple if scan_layers else getattr(decoder, f"layers_{_PLE_LAYER_ID}").ple
+  ple = getattr(model.decoder.first_cycle, f"gdn_{_PLE_LAYER_ID}").ple
   kernel = ple.conv1d.kernel
   value = kernel.get_value()
   noise = 0.02 * jax.random.normal(jax.random.key(0), value.shape, value.dtype)
@@ -149,7 +148,7 @@ def _build_qwen3_8_with_cfg(
     scan_layers: bool,
     remat_policy: str,
 ) -> nnx.Module:
-  """Builds a 2-cycle mini `Qwen3_8FlashNextModel` on `mesh` (`m3/README.md` Invariants (1)-(7))."""
+  """Builds a 3-cycle (`first_cycle` + 2 stacked `cycles`) mini `Qwen3_8FlashNextModel` on `mesh`."""
   if rngs is None:
     raise ValueError("rngs must be provided as a non-None nnx.Rngs instance.")
   if not isinstance(scan_layers, bool):
@@ -159,7 +158,7 @@ def _build_qwen3_8_with_cfg(
   cfg = types.SimpleNamespace(**base_cfg, scan_layers=scan_layers, remat_policy=remat_policy)
   with jax.sharding.set_mesh(mesh):
     model = qwen3_8.Qwen3_8FlashNextModel(cfg, mesh, rngs=rngs)
-    _randomize_ple_conv_kernel(model, scan_layers)
+    _randomize_ple_conv_kernel(model)
     if remat_policy == "full":
       model.decoder.set_remat(jax.checkpoint_policies.nothing_saveable)
       if model.mtp is not None:
@@ -173,7 +172,7 @@ def _build_qwen3_8_model(
     scan_layers: bool,
     remat_policy: str,
 ) -> nnx.Module:
-  """Builds a 2-cycle mini `fp32` `Qwen3_8FlashNextModel` on `mesh`."""
+  """Builds a 3-cycle mini `fp32` `Qwen3_8FlashNextModel` on `mesh`."""
   return _build_qwen3_8_with_cfg(_QWEN3_8_MINI_CFG, mesh, rngs, scan_layers, remat_policy)
 
 
@@ -183,7 +182,7 @@ def _build_qwen3_8_bf16_model(
     scan_layers: bool,
     remat_policy: str,
 ) -> nnx.Module:
-  """Builds a 2-cycle mini `bfloat16` `Qwen3_8FlashNextModel` on `mesh` for Check 9a."""
+  """Builds a 3-cycle mini `bfloat16` `Qwen3_8FlashNextModel` on `mesh` for Check 9a."""
   bf16_cfg = {**_QWEN3_8_MINI_CFG, "dtype": "bfloat16"}
   return _build_qwen3_8_with_cfg(bf16_cfg, mesh, rngs, scan_layers, remat_policy)
 
@@ -222,7 +221,7 @@ def _build_qwen3_8_batch(
     key: jax.Array,
     mesh: jax.sharding.Mesh,
 ) -> Mapping[str, jax.Array]:
-  """Builds batch-sharded `(4, 16)` tokens and segment IDs with padded rows."""
+  """Builds batch-sharded `(4, 8)` tokens and segment IDs with padded rows."""
   raw_tokens = jax.random.randint(key, (_BATCH_SIZE, _SEQ_LEN), 4, _VOCAB_SIZE, dtype=jnp.int32)
   row_lengths = jnp.array([_SEQ_LEN, _ROW1_VALID_LEN, _SEQ_LEN, _ROW1_VALID_LEN], dtype=jnp.int32)[:, None]
   segment_ids = (jnp.arange(_SEQ_LEN, dtype=jnp.int32)[None, :] < row_lengths).astype(jnp.int32)
@@ -249,6 +248,7 @@ def _forward_qwen3_8(
   else:
     logits, aux = model(tokens, None, segment_ids, return_aux=True, return_mtp=True)
   targets = jnp.roll(tokens, shift=-1, axis=-1)
+  # The draft head at position `t` predicts token `t + 2`, within the same document.
   mtp_mask = ((segment_ids[:, :-1] == segment_ids[:, 1:]) & (segment_ids[:, :-1] != 0)).astype(jnp.float32)
   mtp_loss = qwen3_8.cross_entropy_loss(aux["mtp_logits"][:, :-1, :], targets[:, 1:], mask=mtp_mask)
   lb_loss = qwen3_8.router_load_balancing_loss(
@@ -279,14 +279,22 @@ def make_qwen3_8_flash_next_conformance_spec() -> spec.ConformanceSpec:
       build_batch=_build_qwen3_8_batch,
       forward_fn=_forward_qwen3_8,
       loss_fn=_loss_qwen3_8,
-      scan_remat_variants=((False, "none"), (False, "full")),
+      # Both `scan_layers=False` and `scan_layers=True` share the always-stacked (`first_cycle` + `cycles`)
+      # parameter tree (`m3/README.md` Invariant (3)), so all 4 `(scan_layers, remat_policy)` variants are checked.
+      scan_remat_variants=(
+          (False, "none"),
+          (True, "none"),
+          (False, "full"),
+          (True, "full"),
+      ),
+      # The indexer picks blocks through a non-differentiable top-k and has no training loss of its own.
       frozen_param_patterns=(r"\.self_attn\.indexer\.",),
       aux_losses={
           "moe_lb_loss": (r"\.mlp\.gate\.linear\.kernel$",),
           "mtp_loss": (r"^mtp\.(?!.*\.indexer\.)",),
       },
       stacked_param_path_patterns=(r"^decoder\.cycles\.",),
-      num_scanned_blocks=_NUM_CYCLES,
+      num_scanned_blocks=_NUM_CYCLES - 1,
       min_sharded_param_elements=_MIN_SHARDED_PARAM_ELEMENTS,
       expert_weight_param_patterns=(r"\.mlp\.experts\.(gate_up_proj|down_proj)$",),
       build_bf16_model=_build_qwen3_8_bf16_model,

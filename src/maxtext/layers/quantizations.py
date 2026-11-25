@@ -1374,10 +1374,10 @@ class MultipassQtProvider(qwix.QtProvider):
 
 
 # Matches decoder layer stacks: legacy (`decoder/.*layers.*`), m3 unscanned
-# (`decoder/layers_<i>/...` or `decoder/layers/<i>/...`), and m3 cycle-scanned decoders
-# (`decoder/cycles/.*` plus top-level `decoder/ple/.*`). `MultipassQtProvider` skips
+# (`decoder/layers_<i>/...` or `decoder/layers/<i>/...`), and m3 cycle-stacked decoders
+# (`decoder/first_cycle/.*` and `decoder/cycles/.*`). `MultipassQtProvider` skips
 # activation-only `dot_general` calls inside matched modules. `model.mtp` is not matched.
-_DECODER_LAYER_MODULE_PATH = r"decoder/(.*layers.*|cycles/.*|ple/.*)"
+_DECODER_LAYER_MODULE_PATH = r"decoder/(.*layers.*|first_cycle/.*|cycles/.*)"
 
 
 def _get_router_proj_unquantized_rule() -> qwix.QtRule:
@@ -1400,13 +1400,28 @@ def _get_router_proj_unquantized_rule() -> qwix.QtRule:
   )
 
 
+def _get_model_skip_submodules_rule(model: Any) -> qwix.QtRule | None:
+  """Builds an unquantized Qwix rule for model-declared `_m3_quantization_skip_submodules`."""
+  skip = tuple(sorted(getattr(model, "_m3_quantization_skip_submodules", ()))) if model is not None else ()
+  if not skip:
+    return None
+  joined = "|".join(re.escape(name) for name in skip)
+  return qwix.QtRule(
+      module_path=rf".*/({joined})(/.*)?$",
+      weight_qtype=None,
+      act_qtype=None,
+      bwd_qtype=None,
+      op_names=("dot_general", "einsum", "gmm", "ragged_dot"),
+  )
+
+
 def _drhs_grad_calibration_override(config: Config) -> dict:
   """Qwix DotGeneralQtConfig override for the weight-gradient arm's cotangent calibration (see types.py)."""
   m = getattr(config, "drhs_grad_quantization_calibration_method", None)
   return {"drhs_grad_calibration_method": m} if m else {}
 
 
-def get_fp8_full_qwix_rule_w_sparsity(config: Config):
+def get_fp8_full_qwix_rule_w_sparsity(config: Config, model: Any = None):
   """Returns Qwix quantization rules for fp8_full with optional weight sparsity."""
   sparsity_rule = None
   if config.weight_sparsity_n and config.weight_sparsity_m:
@@ -1418,6 +1433,9 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
     )
 
   rules = []
+  skip_rule = _get_model_skip_submodules_rule(model)
+  if skip_rule is not None:
+    rules.append(skip_rule)
   if not config.quantize_router_proj:
     rules.append(_get_router_proj_unquantized_rule())
 
@@ -1486,11 +1504,14 @@ def get_fp8_full_qwix_rule_w_sparsity(config: Config):
   return rules
 
 
-def get_quantization_rule(config: Config):
+def get_quantization_rule(config: Config, model: Any = None):
   """Returns a list of qwix.QtRule from `dtype`."""
 
   def make_qt_rule(dtype, tile_size=None, additional_qt_config=None, op_names=("dot_general",)) -> list[qwix.QtRule]:
     rules = []
+    skip_rule = _get_model_skip_submodules_rule(model)
+    if skip_rule is not None:
+      rules.append(skip_rule)
     if not config.quantize_router_proj:
       rules.append(_get_router_proj_unquantized_rule())
     rules.append(
@@ -1527,7 +1548,7 @@ def get_quantization_rule(config: Config):
       return make_qt_rule(jnp.float8_e4m3fn)
 
     case "fp8_full":
-      return get_fp8_full_qwix_rule_w_sparsity(config)
+      return get_fp8_full_qwix_rule_w_sparsity(config, model=model)
     case "fp8_gpu":
       return make_qt_rule(jnp.float8_e4m3fn)
 
@@ -1553,17 +1574,17 @@ def get_quantization_rule(config: Config):
       return None
 
 
-def get_qt_provider(config):
+def get_qt_provider(config, model: Any = None):
   """Get quantization rules based on the config."""
   match config.quantization:
     case "int4" | "int8" | "fp4" | "fp4_e2m1" | "fp8" | "fp8_e5m2" | "fp8_e4m3" | "fp8_full":
-      return qwix.QtProvider(get_quantization_rule(config))
+      return qwix.QtProvider(get_quantization_rule(config, model=model))
     case "multipass":
-      return MultipassQtProvider(get_quantization_rule(config))
+      return MultipassQtProvider(get_quantization_rule(config, model=model))
     case "fp8_gpu":
-      return NvidaFp8Provider(get_quantization_rule(config))
+      return NvidaFp8Provider(get_quantization_rule(config, model=model))
     case "fp8_nanoo":
-      return NANOOFp8Provider(get_quantization_rule(config))
+      return NANOOFp8Provider(get_quantization_rule(config, model=model))
   return None
 
 
@@ -1571,8 +1592,12 @@ def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
   # Batch split is not using Qwix's interception feature but manual plumbing
   if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
-    quantization_provider = get_qt_provider(config)
+    quantization_provider = get_qt_provider(config, model=model)
     if quantization_provider:
+      if hasattr(model, "_m3_quantization_skip_submodules"):
+        for _, mod in nnx.iter_modules(model):
+          if isinstance(mod, nnx.Linear) and not getattr(mod, "_allow_qwix_unquantized_fusion", False):
+            object.__setattr__(mod, "_disable_linear_fusion", True)
       input_shape = (config.micro_batch_size_to_train_on, config.max_target_length)
       dummy_tokens = jnp.ones(input_shape, dtype=jnp.int32)
       dummy_positions = jnp.ones(input_shape, dtype=jnp.int32)

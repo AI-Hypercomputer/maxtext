@@ -166,6 +166,145 @@ def shard_batch(x: jax.Array, sharding: Sharding | None = None, tensor_name: str
 # =================================================================================================
 
 
+def _is_host_resident_array(value: jax.Array, param: nnx.Variable | None = None) -> bool:
+  """Returns True when `value` (or its `nnx.Variable` metadata) resides in host memory."""
+  if isinstance(value, jax.core.Tracer):
+    space = getattr(getattr(value, "aval", None), "memory_space", None)
+    if space is not None:
+      return space == jax.memory.Space.Host
+  kind = getattr(getattr(value, "sharding", None), "memory_kind", None)
+  if kind in ("pinned_host", "unpinned_host"):
+    return True
+  if param is not None:
+    return param.get_metadata("memory_kind", default=None) in ("pinned_host", "unpinned_host")
+  return False
+
+
+def _last_axis_unsharded(x: jax.Array) -> bool:
+  """Returns False only when an `Explicit` mesh shards `x`'s trailing dimension."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or not any(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types):
+    return True
+  spec = getattr(getattr(jax.typeof(x), "sharding", None), "spec", None)
+  return spec is None or len(spec) < x.ndim or spec[-1] is None
+
+
+def _is_plain_linear(module: Any) -> bool:
+  """Returns True for an unquantized `nnx.Linear` (including `add_named_scopes` wrappers)."""
+  cls = type(module)
+  while "_m3_named_scope" in vars(cls):
+    cls = cls.__bases__[0]
+  return (
+      cls is nnx.Linear
+      and (not hasattr(module, "qwix_path") or bool(getattr(module, "_allow_qwix_unquantized_fusion", False)))
+      and not bool(getattr(module, "_disable_linear_fusion", False))
+  )
+
+
+def _can_fuse_linears(*mods: nnx.Linear | None) -> bool:
+  """Returns True when sibling `nnx.Linear` projections can share one concatenated weight matmul + FSDP gather."""
+  if len(mods) < 2 or any(m is None or not _is_plain_linear(m) for m in mods):
+    return False
+  typed_mods = [m for m in mods if m is not None]
+  m0 = typed_mods[0]
+  w0 = m0.kernel[...]
+  mesh = jax.sharding.get_abstract_mesh()
+
+  def _axis_info(m: nnx.Linear) -> tuple[tuple[str, ...], bool] | None:
+    w = m.kernel[...]
+    if w.ndim != 2 or _is_host_resident_array(w, m.kernel):
+      return None
+    meta_spec = m.kernel.get_metadata("out_sharding", default=None)
+    aval_spec = getattr(getattr(jax.typeof(w), "sharding", None), "spec", None)
+    for sp in (meta_spec, aval_spec):
+      if sp is None or len(sp) < 2:
+        continue
+      if mesh.empty:
+        if aval_spec is not None and len(aval_spec) >= 2 and aval_spec[1] is not None:
+          return None
+      else:
+        if math.prod(int(mesh.shape.get(ax, 1)) for ax in _mesh_axis_names(sp[1])) > 1:
+          return None
+    primary = meta_spec if (meta_spec is not None and len(meta_spec) > 0) else aval_spec
+    ax0_entry = primary[0] if (primary is not None and len(primary) > 0) else None
+    if mesh.empty:
+      return (), True
+    active_ax0 = tuple(ax for ax in _mesh_axis_names(ax0_entry) if int(mesh.shape.get(ax, 1)) > 1)
+    return active_ax0, True
+
+  info0 = _axis_info(m0)
+  if info0 is None:
+    return False
+  for m in typed_mods:
+    has_bias_val = m.bias[...] is not None if isinstance(m.bias, nnx.Variable) else m.bias is not None
+    if m.use_bias or has_bias_val:
+      return False
+    if (
+        m.in_features != m0.in_features
+        or m.dtype != m0.dtype
+        or m.precision != m0.precision
+        or m.dot_general != m0.dot_general
+        or m.promote_dtype != m0.promote_dtype
+        or m.preferred_element_type != m0.preferred_element_type
+        or m.kernel[...].dtype != w0.dtype
+    ):
+      return False
+    if _axis_info(m) != info0:
+      return False
+  return True
+
+
+def _apply_fused_linears(x: jax.Array, *mods: nnx.Linear) -> tuple[jax.Array, ...]:
+  """Executes fused sibling `nnx.Linear`s via one `jnp.concatenate` + `dot_general` + slice."""
+  if not _last_axis_unsharded(x):
+    return tuple(m(x) for m in mods)
+  m0 = mods[0]
+  mesh = jax.sharding.get_abstract_mesh()
+  is_explicit = not mesh.empty and all(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types)
+
+  x_prom = x
+  w_proms: list[jax.Array] = []
+  for m in mods:
+    x_prom, w_i, _ = m0.promote_dtype((x, m.kernel[...], None), dtype=m0.dtype)
+    w_proms.append(w_i)
+
+  if is_explicit:
+    sp0 = jax.typeof(w_proms[0]).sharding.spec
+    ax0 = m3_kernels.resolve_mesh_axes(mesh, sp0[0] if len(sp0) > 0 else None)
+    target_w_spec = jax.sharding.PartitionSpec(ax0, None)
+    resharded: list[jax.Array] = []
+    for w_i in w_proms:
+      w_r = m3_kernels.ensure_explicit_spec(w_i, target_w_spec, mesh)
+      assert w_r is not None
+      resharded.append(w_r)
+    w_proms = resharded
+    x_spec = jax.typeof(x_prom).sharding.spec
+    lead_specs = [x_spec[i] if i < len(x_spec) else None for i in range(x_prom.ndim - 1)]
+    dot_out_sharding: jax.sharding.PartitionSpec | None = jax.sharding.PartitionSpec(*lead_specs, None)
+  else:
+    dot_out_sharding = None
+
+  w_cat = jnp.concatenate(w_proms, axis=-1)
+  dot_kwargs: dict[str, Any] = {}
+  if m0.preferred_element_type is not None:
+    dot_kwargs["preferred_element_type"] = m0.preferred_element_type
+  y_cat = m0.dot_general(
+      x_prom,
+      w_cat,
+      (((x_prom.ndim - 1,), (0,)), ((), ())),
+      precision=m0.precision,
+      out_sharding=dot_out_sharding,
+      **dot_kwargs,
+  )
+  outputs: list[jax.Array] = []
+  offset = 0
+  for m in mods:
+    next_offset = offset + m.out_features
+    outputs.append(y_cat[..., offset:next_offset])
+    offset = next_offset
+  return tuple(outputs)
+
+
 class Qwen3_8RMSNorm(nnx.Module):
   """RMSNorm with zero-centered scale (1.0 + scale) and optional group size."""
 
@@ -195,6 +334,22 @@ class Qwen3_8RMSNorm(nnx.Module):
     return x * jax.lax.rsqrt(jnp.mean(jnp.square(x), axis=-1, keepdims=True) + self.eps)
 
   def __call__(self, x: jax.Array) -> jax.Array:
+    if (
+        self.group_size is not None
+        and self.group_size % 128 == 0
+        and (self.dim // self.group_size) <= 8
+        and _last_axis_unsharded(x)
+    ):
+      g = self.group_size
+      num_groups = self.dim // g
+      scale_f32 = 1.0 + self.scale[...].astype(jnp.float32)
+      chunks = []
+      for i in range(num_groups):
+        x_i = x[..., i * g : (i + 1) * g].astype(jnp.float32)
+        var_i = jnp.mean(jnp.square(x_i), axis=-1, keepdims=True)
+        s_i = scale_f32[i * g : (i + 1) * g]
+        chunks.append((x_i * jax.lax.rsqrt(var_i + self.eps) * s_i).astype(x.dtype))
+      return jnp.concatenate(chunks, axis=-1)
     x_f32 = x.astype(jnp.float32)
     scale_f32 = 1.0 + self.scale[...].astype(jnp.float32)
     return (self._norm(x_f32) * scale_f32).astype(x.dtype)
@@ -279,14 +434,29 @@ class Qwen3_8GatedResidual(nnx.Module):
     self.block_inject_weight = (
         _linear(hc_dim, hc_count, sharding, "block_inject_weight", ("embed", None), **kw) if use_combine else None
     )
+    object.__setattr__(self.input_mix_weight_down, "_allow_qwix_unquantized_fusion", True)
+    object.__setattr__(self.input_mix_weight_up, "_allow_qwix_unquantized_fusion", True)
+    if self.block_inject_weight is not None:
+      object.__setattr__(self.block_inject_weight, "_allow_qwix_unquantized_fusion", True)
 
-  def _mix(self, normed: jax.Array, out_dtype: Any) -> jax.Array:
-    w_down = jax.nn.silu(self.input_mix_weight_down(normed) / self.hc_count)
+  def _mix_from_down(self, normed: jax.Array, raw_down: jax.Array, out_dtype: Any) -> jax.Array:
+    """Computes weighted average across residual streams from precomputed `raw_down`."""
+    w_down = jax.nn.silu(raw_down / self.hc_count)
     w_up = jax.nn.sigmoid(self.input_mix_weight_up(w_down))
+    if self.emb_dim % 128 == 0 and self.hc_count <= 8 and _last_axis_unsharded(w_up) and _last_axis_unsharded(normed):
+      d = self.emb_dim
+      prod = w_up * normed
+      acc = prod[..., 0:d].astype(jnp.float32)
+      for i in range(1, self.hc_count):
+        acc = acc + prod[..., i * d : (i + 1) * d].astype(jnp.float32)
+      return (acc / self.hc_count).astype(out_dtype)
     shape = w_up.shape[:-1]
     w_up_streams = w_up.reshape(*shape, self.hc_count, self.emb_dim)
     normed_streams = normed.reshape(*shape, self.hc_count, self.emb_dim)
     return jnp.mean(w_up_streams * normed_streams, axis=-2).astype(out_dtype)
+
+  def _mix(self, normed: jax.Array, out_dtype: Any) -> jax.Array:
+    return self._mix_from_down(normed, self.input_mix_weight_down(normed), out_dtype)
 
   def mix_input(self, hyper_input: jax.Array) -> jax.Array:
     """Mixes multiple residual streams into a single representation."""
@@ -301,8 +471,13 @@ class Qwen3_8GatedResidual(nnx.Module):
     if self.block_inject_weight is None:
       raise ValueError("block_inject_weight is None (use_combine=False).")
     normed = self.hc_norm(hyper_input)
-    inject = (2.0 * jax.nn.sigmoid(self.block_inject_weight(normed) / self.hc_count)).astype(hyper_input.dtype)
-    return self._mix(normed, hyper_input.dtype), inject
+    if _can_fuse_linears(self.input_mix_weight_down, self.block_inject_weight):
+      raw_down, raw_inject = _apply_fused_linears(normed, self.input_mix_weight_down, self.block_inject_weight)
+    else:
+      raw_down = self.input_mix_weight_down(normed)
+      raw_inject = self.block_inject_weight(normed)
+    inject = (2.0 * jax.nn.sigmoid(raw_inject / self.hc_count)).astype(hyper_input.dtype)
+    return self._mix_from_down(normed, raw_down, hyper_input.dtype), inject
 
   def combine(
       self,
@@ -311,6 +486,19 @@ class Qwen3_8GatedResidual(nnx.Module):
       injection_weights: jax.Array,
   ) -> jax.Array:
     """Injects block output into hyper-connection residual streams."""
+    if (
+        self.emb_dim % 128 == 0
+        and self.hc_count <= 8
+        and _last_axis_unsharded(hyper_input)
+        and _last_axis_unsharded(block_output)
+        and _last_axis_unsharded(injection_weights)
+    ):
+      d = self.emb_dim
+      streams = [
+          hyper_input[..., i * d : (i + 1) * d] + block_output * injection_weights[..., i : i + 1]
+          for i in range(self.hc_count)
+      ]
+      return jnp.concatenate(streams, axis=-1).astype(hyper_input.dtype)
     inj = jnp.expand_dims(block_output, axis=-2) * jnp.expand_dims(injection_weights, axis=-1)
     return (hyper_input + inj.reshape(*hyper_input.shape)).astype(hyper_input.dtype)
 
@@ -1767,6 +1955,8 @@ class Qwen3_8SparseAttention(nnx.Module):
       attention_mask: jax.Array | None = None,
       segment_ids: jax.Array | None = None,
       return_selected_blocks: bool = False,
+      *,
+      position_embeddings: tuple[jax.Array, jax.Array] | None = None,
   ) -> jax.Array | tuple[jax.Array, jax.Array]:
     """Forward pass computing sparse attention with document boundary support.
 
@@ -1777,15 +1967,22 @@ class Qwen3_8SparseAttention(nnx.Module):
       segment_ids: Optional (B, S) 1-indexed document IDs (0 = padding); when both are given, padding from
         attention_mask is folded into segment_ids.
       return_selected_blocks: Whether to return selected block indices.
+      position_embeddings: Optional precomputed `(cos, sin)` tables hoisted outside decoder scan.
 
     Returns:
       Attention output tensor, or tuple of (output, selected_block_indices) if return_selected_blocks is True.
     """
     b, s, _ = hidden_states.shape
-    if position_ids is None:
-      position_ids = jnp.broadcast_to(jnp.arange(s)[None, :], (b, s))
-
-    cos, sin = self.rotary_emb(hidden_states, position_ids)
+    if position_embeddings is not None:
+      cos, sin = position_embeddings
+      if cos.dtype != hidden_states.dtype:
+        cos = cos.astype(hidden_states.dtype)
+      if sin.dtype != hidden_states.dtype:
+        sin = sin.astype(hidden_states.dtype)
+    else:
+      if position_ids is None:
+        position_ids = jnp.broadcast_to(jnp.arange(s)[None, :], (b, s))
+      cos, sin = self.rotary_emb(hidden_states, position_ids)
     shared_doc_start: jax.Array | None = None
     if self.attention_kernel == "flash" and (segment_ids is not None or attention_mask is not None):
       if s > self.indexer.token_budget or return_selected_blocks:
@@ -1818,17 +2015,17 @@ class Qwen3_8SparseAttention(nnx.Module):
           doc_start=shared_doc_start,
       )
 
-    q_and_gate = checkpoint_name(self.q_proj(hidden_states), "query_proj").reshape(
-        b, s, self.num_query_heads, 2 * self.head_dim
-    )
+    if _can_fuse_linears(self.q_proj, self.k_proj, self.v_proj):
+      q_raw, k_raw, v_raw = _apply_fused_linears(hidden_states, self.q_proj, self.k_proj, self.v_proj)
+    else:
+      q_raw = self.q_proj(hidden_states)
+      k_raw = self.k_proj(hidden_states)
+      v_raw = self.v_proj(hidden_states)
+    q_and_gate = checkpoint_name(q_raw, "query_proj").reshape(b, s, self.num_query_heads, 2 * self.head_dim)
     query_states = self.q_norm(q_and_gate[..., : self.head_dim])
     gate = q_and_gate[..., self.head_dim :].reshape(b, s, self.num_query_heads * self.head_dim)
-    key_states = self.k_norm(
-        checkpoint_name(self.k_proj(hidden_states), "key_proj").reshape(b, s, self.num_kv_heads, self.head_dim)
-    )
-    value_states = checkpoint_name(self.v_proj(hidden_states), "value_proj").reshape(
-        b, s, self.num_kv_heads, self.head_dim
-    )
+    key_states = self.k_norm(checkpoint_name(k_raw, "key_proj").reshape(b, s, self.num_kv_heads, self.head_dim))
+    value_states = checkpoint_name(v_raw, "value_proj").reshape(b, s, self.num_kv_heads, self.head_dim)
 
     res = apply_rotary_pos_emb(query_states, key_states, cos=cos, sin=sin, unsqueeze_dim=2)
     assert isinstance(res, tuple)
@@ -1897,8 +2094,13 @@ class Qwen3_8MLP(nnx.Module):
 
   def __call__(self, x: jax.Array) -> jax.Array:
     """Forward pass computing down_proj(silu(gate_proj(x)) * up_proj(x))."""
-    gate = jax.nn.silu(checkpoint_name(self.gate_proj(x), "mlpwi_0"))
-    up = checkpoint_name(self.up_proj(x), "mlpwi_1")
+    if _can_fuse_linears(self.gate_proj, self.up_proj):
+      gate_raw, up_raw = _apply_fused_linears(x, self.gate_proj, self.up_proj)
+    else:
+      gate_raw = self.gate_proj(x)
+      up_raw = self.up_proj(x)
+    gate = jax.nn.silu(checkpoint_name(gate_raw, "mlpwi_0"))
+    up = checkpoint_name(up_raw, "mlpwi_1")
     return checkpoint_name(self.down_proj(gate * up), "mlpwo")
 
 
@@ -2047,6 +2249,71 @@ class Qwen3_8Experts(nnx.Module):
     return out
 
 
+def _top_k_dense_vjp(probs: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
+  """`jax.lax.top_k(probs, k)` with a dense compare-select-accumulate VJP avoiding TPU scatter-add."""
+  if k <= 0:
+    raise ValueError(f"Expected k > 0 for top-k routing, got {k}.")
+  num_experts = probs.shape[-1]
+  probs_dtype = probs.dtype
+  raw_vals, raw_ids = jax.lax.top_k(jax.lax.stop_gradient(probs), k)
+  topk_ids = raw_ids.astype(jnp.int32)
+
+  @jax.custom_vjp
+  def _attach_grad(p: jax.Array, v_sg: jax.Array, ids: jax.Array) -> jax.Array:
+    del p, ids
+    return v_sg
+
+  def _attach_grad_fwd(p: jax.Array, v_sg: jax.Array, ids: jax.Array) -> tuple[jax.Array, jax.Array]:
+    del p
+    return v_sg, ids
+
+  def _attach_grad_bwd(ids: jax.Array, g_w: jax.Array) -> tuple[jax.Array, None, None]:
+    g_w = g_w.astype(probs_dtype)
+    iota_e = jax.lax.broadcasted_iota(ids.dtype, (1,) * (ids.ndim - 1) + (num_experts,), ids.ndim - 1)
+    zero = jnp.zeros((), dtype=probs_dtype)
+    # Initialize from slot 0 so `acc` inherits `ids`/`g_w`'s exact sharding under `ShardMode.EXPLICIT`.
+    acc = jnp.where(iota_e == ids[..., 0:1], g_w[..., 0:1], zero)
+    for j in range(1, k):
+      acc = acc + jnp.where(iota_e == ids[..., j : j + 1], g_w[..., j : j + 1], zero)
+    return acc, None, None
+
+  _attach_grad.defvjp(_attach_grad_fwd, _attach_grad_bwd)
+  return _attach_grad(probs, raw_vals, topk_ids), topk_ids
+
+
+def _compute_compact_router_aux_stats(
+    router_probs: jax.Array,
+    router_indices: jax.Array,
+    mask: jax.Array | None = None,
+) -> dict[str, jax.Array]:
+  """Reduces per-layer router tensors into `[E]` load-balancing sums without 4D `one_hot`."""
+  probs = router_probs.astype(jnp.float32)
+  ids_sg = jax.lax.stop_gradient(router_indices)
+  num_experts = probs.shape[-1]
+  top_k = ids_sg.shape[-1]
+  reduce_axes = tuple(range(probs.ndim - 1))
+  iota_e = jax.lax.broadcasted_iota(ids_sg.dtype, (1,) * (ids_sg.ndim - 1) + (num_experts,), ids_sg.ndim - 1)
+  if mask is not None:
+    m = jax.lax.stop_gradient((mask != 0).astype(jnp.float32))
+    m_exp = jnp.expand_dims(m, -1)
+    prob_sum = jnp.sum(probs * m_exp, axis=reduce_axes)
+    total_rows = jnp.sum(m).astype(jnp.float32)
+    weight = m_exp
+  else:
+    prob_sum = jnp.sum(probs, axis=reduce_axes)
+    total_rows = jnp.array(float(probs.size // num_experts), dtype=jnp.float32)
+    weight = jnp.ones((), dtype=jnp.float32)
+  zero = jnp.zeros((), dtype=jnp.float32)
+  counts = jnp.sum(jnp.where(ids_sg[..., 0:1] == iota_e, weight, zero), axis=reduce_axes)
+  for j in range(1, top_k):
+    counts = counts + jnp.sum(jnp.where(ids_sg[..., j : j + 1] == iota_e, weight, zero), axis=reduce_axes)
+  return {
+      "tokens_per_expert_sum": jax.lax.stop_gradient(counts),
+      "router_prob_sum": prob_sum,
+      "total_rows": jax.lax.stop_gradient(total_rows),
+  }
+
+
 class Qwen3_8TopKRouter(nnx.Module):
   """Top-k router computing routing weights, expert indices, and full probabilities."""
 
@@ -2077,7 +2344,7 @@ class Qwen3_8TopKRouter(nnx.Module):
     """Computes routing weights, selected experts, and full float32 router probabilities."""
     router_logits = self.linear(hidden_states)
     router_probs = jax.nn.softmax(router_logits.astype(jnp.float32), axis=-1)
-    router_top_value, router_indices = jax.lax.top_k(router_probs, self.num_experts_per_tok)
+    router_top_value, router_indices = _top_k_dense_vjp(router_probs, self.num_experts_per_tok)
     if self.norm_topk_prob:
       router_top_value = router_top_value / jnp.sum(router_top_value, axis=-1, keepdims=True)
     routing_weights = (router_top_value * self.routed_scaling_factor).astype(router_logits.dtype)
@@ -2459,13 +2726,25 @@ class Qwen3_8PLELayer(nnx.Module):
     padded = jnp.pad(hidden_states, ((0, 0), (self.short_conv_state_len, 0), (0, 0)))
     return jax.nn.silu(self.conv1d(padded))
 
-  def __call__(self, hidden_states: jax.Array, input_ids: jax.Array, conv_mask: jax.Array | None = None) -> jax.Array:
+  def __call__(
+      self,
+      hidden_states: jax.Array,
+      input_ids: jax.Array | None = None,
+      conv_mask: jax.Array | None = None,
+      *,
+      precomputed_embeds: jax.Array | None = None,
+  ) -> jax.Array:
     """Forward pass injecting hashed n-gram features into hidden streams."""
     is_4d = hidden_states.ndim == 4
     b, s = hidden_states.shape[:2]
     hidden_flat = hidden_states.reshape(b, s, self.hc_hidden_size) if is_4d else hidden_states
 
-    embeds = self.ple_embedding(input_ids)
+    if precomputed_embeds is not None:
+      embeds = precomputed_embeds
+    elif input_ids is not None:
+      embeds = self.ple_embedding(input_ids)
+    else:
+      raise ValueError("Qwen3_8PLELayer requires either `input_ids` or `precomputed_embeds`.")
     key_normed = self.norm_key(self.key_proj(embeds)).reshape(b, s, self.hc_count, self.emb_dim)
     value = self.value_proj(embeds)
     query_normed = self.norm_query(hidden_flat).reshape(b, s, self.hc_count, self.emb_dim)
@@ -2605,53 +2884,71 @@ class Qwen3_8DecoderLayer(nnx.Module):
       hidden_states: jax.Array,
       *,
       positions: jax.Array | None = None,
+      position_embeddings: tuple[jax.Array, jax.Array] | None = None,
       conv_mask: jax.Array | None = None,
       ple_input_ids: jax.Array | None = None,
+      ple_embeds: jax.Array | None = None,
       segment_ids: jax.Array | None = None,
       return_aux: bool = False,
+      compact_router_aux: bool = False,
+      router_aux_mask: jax.Array | None = None,
   ) -> Any:
     """Executes single decoder layer forward pass."""
     hidden_states = checkpoint_name(hidden_states, "decoder_layer_input")
-    if self.ple is not None and ple_input_ids is not None:
-      hidden_states = hidden_states + self.ple(hidden_states, ple_input_ids, conv_mask=conv_mask)
+    if self.ple is not None and (ple_embeds is not None or ple_input_ids is not None):
+      hidden_states = hidden_states + self.ple(
+          hidden_states, ple_input_ids, conv_mask=conv_mask, precomputed_embeds=ple_embeds
+      )
     mixed, inject = self.attn_hyper_connection.before_block(hidden_states)
     if self.layer_type == "linear_attention":
       attn_out, s_idx = self.linear_attn(mixed, attention_mask=conv_mask), None
     else:
-      if return_aux or self.self_attn.attention_kernel == "dense":
-        attn_out, s_idx = self.self_attn(
-            mixed, position_ids=positions, attention_mask=conv_mask, segment_ids=segment_ids, return_selected_blocks=True
-        )
-      else:
-        attn_out = self.self_attn(
-            mixed,
-            position_ids=positions,
-            attention_mask=conv_mask,
-            segment_ids=segment_ids,
-            return_selected_blocks=False,
-        )
-        s_idx = None
+      need_selected_blocks = (return_aux and not compact_router_aux) or self.self_attn.attention_kernel == "dense"
+      qsa_out = self.self_attn(
+          mixed,
+          position_ids=positions,
+          attention_mask=conv_mask,
+          segment_ids=segment_ids,
+          return_selected_blocks=need_selected_blocks,
+          position_embeddings=position_embeddings,
+      )
+      attn_out, s_idx = qsa_out if need_selected_blocks else (qsa_out, None)
     hidden_states = shard_batch(self.attn_hyper_connection.combine(hidden_states, attn_out, inject), self.sharding)
     mixed, inject = self.mlp_hyper_connection.before_block(hidden_states)
     mlp_out, r_w, r_idx, r_probs = self.mlp(mixed, return_router_topk=True)
     hidden_states = shard_batch(self.mlp_hyper_connection.combine(hidden_states, mlp_out, inject), self.sharding)
-    aux = {
-        "router_indices": r_idx,
-        "routing_weights": r_w,
-        "router_probs": r_probs,
-        **({"selected_block_indices": s_idx} if s_idx is not None else {}),
-    }
-    return (hidden_states, aux) if return_aux else hidden_states
+    if not return_aux:
+      return hidden_states
+    if compact_router_aux:
+      eff_mask = (
+          router_aux_mask if router_aux_mask is not None else ((segment_ids != 0) if segment_ids is not None else None)
+      )
+      aux = _compute_compact_router_aux_stats(r_probs, r_idx, mask=eff_mask)
+    else:
+      aux = {
+          "router_indices": r_idx,
+          "routing_weights": r_w,
+          "router_probs": r_probs,
+          **({"selected_block_indices": s_idx} if s_idx is not None else {}),
+      }
+    return hidden_states, aux
 
 
 class Qwen3_8CycleBlock(nnx.Module):
   """4-layer cycle block composed of 3 GDN layers and 1 QSA layer."""
 
-  def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
+  def __init__(
+      self,
+      config: Any,
+      *,
+      include_ple: bool = False,
+      sharding: Sharding | None = None,
+      rngs: nnx.Rngs,
+  ):
     sharding_obj = sharding or sharding_from_config(config)
     self.sharding = sharding_obj
     self.gdn_0, self.gdn_1, self.gdn_2, self.qsa_3 = (
-        Qwen3_8DecoderLayer(config, i, include_ple=False, sharding=sharding_obj, rngs=rngs) for i in range(4)
+        Qwen3_8DecoderLayer(config, i, include_ple=include_ple, sharding=sharding_obj, rngs=rngs) for i in range(4)
     )
 
 
@@ -2681,9 +2978,29 @@ def _strip_cycle_axis(var: Any) -> Any:
   """Drops the leading `None` scan axis from `out_sharding` metadata inside `apply_scanned_cycles`."""
   if isinstance(var, nnx.Variable):
     spec = var.get_metadata().get("out_sharding")
-    if isinstance(spec, jax.sharding.PartitionSpec) and len(spec) > 0:
+    if isinstance(spec, jax.sharding.PartitionSpec) and len(spec) == var.get_value().ndim + 1:
       return var.replace(out_sharding=jax.sharding.PartitionSpec(*spec[1:]))
   return var
+
+
+def _slice_cycle_var(var: Any, cycle_idx: int) -> Any:
+  """Slices cycle `cycle_idx` along axis 0 while dropping the leading `None` from `out_sharding`."""
+  if not isinstance(var, nnx.Variable):
+    return var[cycle_idx]
+  val = var.get_value()[cycle_idx]
+  spec = var.get_metadata().get("out_sharding")
+  if isinstance(spec, jax.sharding.PartitionSpec) and len(spec) == var.get_value().ndim:
+    return var.replace(
+        val,
+        out_sharding=jax.sharding.PartitionSpec(*spec[1:]),
+        eager_sharding=bool(var.get_metadata().get("eager_sharding", False)),
+    )
+  return var.replace(val)
+
+
+def _slice_cycle_state(tree: Any, cycle_idx: int) -> Any:
+  """Slices an NNX state tree along axis 0 for unrolled cycle execution (`scan_layers=False`)."""
+  return jax.tree.map(lambda v: _slice_cycle_var(v, cycle_idx), tree, is_leaf=_is_nnx_var)
 
 
 def create_scanned_cycles(
@@ -2701,8 +3018,6 @@ def create_scanned_cycles(
     )
   if int(config.num_decoder_layers) % 4 != 0:
     raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {config.num_decoder_layers}.")
-  if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
-    raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
   sharding_obj = sharding or sharding_from_config(config)
   sp = [nnx.split(Qwen3_8CycleBlock(config, sharding=sharding_obj, rngs=rngs), nnx.Param, ...) for _ in range(num_cycles)]
   stacked_trees = [jax.tree.map(_stack_cycle_vars, *(s[i] for s in sp), is_leaf=_is_nnx_var) for i in (1, 2)]
@@ -2739,29 +3054,45 @@ def _run_qwen3_8_sublayer(
     *,
     eff_policy: Callable[..., Any] | None,
     return_aux: bool,
+    compact_router_aux: bool = False,
     positions: jax.Array | None = None,
+    position_embeddings: tuple[jax.Array, jax.Array] | None = None,
     conv_mask: jax.Array | None = None,
     ple_input_ids: jax.Array | None = None,
     segment_ids: jax.Array | None = None,
+    router_aux_mask: jax.Array | None = None,
 ) -> Any:
   """Executes one unscanned `Qwen3_8DecoderLayer`, wrapping in `jax.checkpoint(..., prevent_cse=True)` if active."""
+  # Hoist the single-layer PLE n-gram table lookup outside `jax.checkpoint(..., prevent_cse=True)`:
+  # it depends only on `ple_input_ids` and `ngram_embedding`, returns a batch+length-sharded
+  # `(B, S, ple_embed_dim)` tensor, and otherwise forces `prevent_cse=True` to recompute the
+  # SparseCore n-gram gather during Layer 1's backward pass.
+  ple = getattr(layer, "ple", None)
+  ple_embeds = (
+      ple.ple_embedding(ple_input_ids)
+      if (eff_policy is not None and ple is not None and ple_input_ids is not None)
+      else None
+  )
   dyn_kw = {
       k: v
       for k, v in (
           ("positions", positions),
+          ("position_embeddings", position_embeddings),
           ("conv_mask", conv_mask),
-          ("ple_input_ids", ple_input_ids),
+          ("ple_input_ids", None if ple_embeds is not None else ple_input_ids),
+          ("ple_embeds", ple_embeds),
           ("segment_ids", segment_ids),
+          ("router_aux_mask", router_aux_mask),
       )
       if v is not None
   }
   if eff_policy is None:
-    return layer(hidden_states, return_aux=return_aux, **dyn_kw)
+    return layer(hidden_states, return_aux=return_aux, compact_router_aux=compact_router_aux, **dyn_kw)
   gd, lp, lr = nnx.split(layer, nnx.Param, ...)
 
   def _eval_layer(h_in, p_in, r_in, kw_in):
     mod = nnx.merge(gd, p_in, r_in)
-    out = mod(h_in, return_aux=return_aux, **kw_in)
+    out = mod(h_in, return_aux=return_aux, compact_router_aux=compact_router_aux, **kw_in)
     _, _, updated_r = nnx.split(mod, nnx.Param, ...)
     return out, updated_r
 
@@ -2771,62 +3102,72 @@ def _run_qwen3_8_sublayer(
   return out
 
 
-def apply_scanned_cycles(
-    cycles: Qwen3_8CycleBlock,
-    ple_layer: Qwen3_8PLELayer | None,
+def run_single_cycle(
+    cycle: Qwen3_8CycleBlock,
     hidden_states: jax.Array,
     *,
-    num_cycles: int,
+    eff_policy: Callable[..., Any] | None = None,
+    return_aux: bool = False,
+    compact_router_aux: bool = False,
     positions: jax.Array | None = None,
+    position_embeddings: tuple[jax.Array, jax.Array] | None = None,
     conv_mask: jax.Array | None = None,
     ple_input_ids: jax.Array | None = None,
     segment_ids: jax.Array | None = None,
+    router_aux_mask: jax.Array | None = None,
+    sharding: Sharding | None = None,
+) -> Any:
+  """Executes one unstacked 4-layer `Qwen3_8CycleBlock` (`first_cycle`)."""
+  h = shard_batch(hidden_states, sharding)
+  aux_list = []
+  for name in ("gdn_0", "gdn_1", "gdn_2", "qsa_3"):
+    out = _run_qwen3_8_sublayer(
+        getattr(cycle, name),
+        h,
+        eff_policy=eff_policy,
+        return_aux=return_aux,
+        compact_router_aux=compact_router_aux,
+        positions=positions,
+        position_embeddings=position_embeddings,
+        conv_mask=conv_mask,
+        ple_input_ids=ple_input_ids,
+        segment_ids=segment_ids,
+        router_aux_mask=router_aux_mask,
+    )
+    if return_aux:
+      h, a = out
+      aux_list.append(a)
+      h = shard_batch(h, sharding)
+    else:
+      h = shard_batch(out, sharding)
+  return (h, aux_list) if return_aux else h
+
+
+def apply_scanned_cycles(
+    cycles: Qwen3_8CycleBlock,
+    hidden_states: jax.Array,
+    *,
+    num_cycles: int,
+    scan_layers: bool = True,
+    positions: jax.Array | None = None,
+    position_embeddings: tuple[jax.Array, jax.Array] | None = None,
+    conv_mask: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    router_aux_mask: jax.Array | None = None,
     return_aux: bool = False,
+    compact_router_aux: bool = False,
     remat: bool = False,
     remat_policy: Any = None,
     sharding: Sharding | None = None,
 ) -> Any:
-  """Executes scan over stacked cycle weights with per-sublayer checkpoint barriers."""
+  """Executes `jax.lax.scan` (or unrolled Python loop when `scan_layers=False`) over stacked homogeneous cycles."""
   eff_policy = _coerce_remat_callable(remat_policy)
   if eff_policy is None and remat:
     eff_policy = _with_qsa_packed_mask_saved(cp.nothing_saveable)
-  if num_cycles == 1 and eff_policy is not None:
+  if scan_layers and num_cycles == 1 and eff_policy is not None:
     eff_policy = _with_qsa_packed_mask_saved(m3_core_remat.scan_safe_policy(eff_policy))
   use_remat = eff_policy is not None
-  cyc_sharding = getattr(cycles, "sharding", None)
-  if not use_remat:
-    c_def, c_params, c_rest = nnx.split(cycles, nnx.Param, ...)
-    p_def, p_state = nnx.split(ple_layer) if ple_layer is not None else (None, None)
-
-    def ple_step(h, cyc_idx):
-      if p_def is not None and ple_input_ids is not None:
-        return jax.lax.cond(
-            cyc_idx == 0,
-            lambda x: x + nnx.merge(p_def, p_state)(x, ple_input_ids, conv_mask=conv_mask),
-            lambda x: x,
-            h,
-        )
-      return h
-
-    def _unremat_scan_fn(carry, xs):
-      carry = shard_batch(carry, cyc_sharding)
-      p_slice = jax.tree.map(_strip_cycle_axis, xs[0], is_leaf=_is_nnx_var)
-      r_slice = jax.tree.map(_strip_cycle_axis, xs[1], is_leaf=_is_nnx_var)
-      blk = nnx.merge(c_def, p_slice, r_slice)
-      kw = {"positions": positions, "conv_mask": conv_mask, "segment_ids": segment_ids}
-      if return_aux:
-        h, a0 = blk.gdn_0(carry, return_aux=True, **kw)
-        h, a1 = blk.gdn_1(ple_step(h, xs[2]), return_aux=True, **kw)
-        h, a2 = blk.gdn_2(h, return_aux=True, **kw)
-        h, a3 = blk.qsa_3(h, return_aux=True, **kw)
-        return shard_batch(h, cyc_sharding), (a0, a1, a2, a3)
-      h = ple_step(blk.gdn_0(carry, **kw), xs[2])
-      return shard_batch(blk.qsa_3(blk.gdn_2(blk.gdn_1(h, **kw), **kw), **kw), cyc_sharding), None
-
-    res = jax.lax.scan(_unremat_scan_fn, hidden_states, (c_params, c_rest, jnp.arange(num_cycles)))
-    if return_aux:
-      return res[0], [jax.tree.map(lambda x, c=c: x[c], res[1][k]) for c in range(num_cycles) for k in range(4)]
-    return res[0]
+  cyc_sharding = sharding if sharding is not None else getattr(cycles, "sharding", None)
 
   sub_names = ("gdn_0", "gdn_1", "gdn_2", "qsa_3")
   sub_defs: dict[str, Any] = {}
@@ -2838,43 +3179,28 @@ def apply_scanned_cycles(
     sub_params[name] = lp
     sub_rests[name] = lr
 
-  p_def, p_params, p_rest = nnx.split(ple_layer, nnx.Param, ...) if ple_layer is not None else (None, None, None)
   dyn_kw = {
-      k: v for k, v in (("positions", positions), ("conv_mask", conv_mask), ("segment_ids", segment_ids)) if v is not None
+      k: v
+      for k, v in (
+          ("positions", positions),
+          ("position_embeddings", position_embeddings),
+          ("conv_mask", conv_mask),
+          ("segment_ids", segment_ids),
+          ("router_aux_mask", router_aux_mask),
+      )
+      if v is not None
   }
-  ple_kw = {"conv_mask": conv_mask} if conv_mask is not None else {}
 
-  def _run_slot(name: str, h_in: jax.Array, p_slice: Any, r_slice: Any, cyc_idx: jax.Array) -> Any:
+  def _run_slot(name: str, h_in: jax.Array, p_slice: Any, r_slice: Any) -> Any:
     gd = sub_defs[name]
     lp = jax.tree.map(_strip_cycle_axis, p_slice, is_leaf=_is_nnx_var)
     lr = jax.tree.map(_strip_cycle_axis, r_slice, is_leaf=_is_nnx_var)
-    # Keep `jax.lax.cond` inside `gdn_1`'s outer `jax.checkpoint` (matching unscanned `layers_1`) so
-    # `cond` linearization never pads the false branch with `p_params`-shaped residuals across cycles.
-    with_ple = name == "gdn_1" and p_def is not None and ple_input_ids is not None
 
-    def _eval_slot(x_in, p_in, r_in, kw_in, cyc_in, pp_in, pr_in, pids_in, pkw_in):
-      if with_ple:
-        x_in = jax.lax.cond(
-            cyc_in == 0,
-            lambda z: z + nnx.merge(p_def, pp_in, pr_in)(z, pids_in, **pkw_in),
-            lambda z: z,
-            x_in,
-        )
-        x_in = shard_batch(x_in, cyc_sharding)
+    def _eval_slot(x_in, p_in, r_in, kw_in):
       lyr = nnx.merge(gd, p_in, r_in)
-      return lyr(x_in, return_aux=return_aux, **kw_in)
+      return lyr(x_in, return_aux=return_aux, compact_router_aux=compact_router_aux, **kw_in)
 
-    args = (
-        h_in,
-        lp,
-        lr,
-        dyn_kw,
-        cyc_idx if with_ple else None,
-        p_params if with_ple else None,
-        p_rest if with_ple else None,
-        ple_input_ids if with_ple else None,
-        ple_kw if with_ple else None,
-    )
+    args = (h_in, lp, lr, dyn_kw)
     if use_remat:
       # Unlike `ScannedLayers` (`prevent_cse=False`, one layer per scan step), each cycle chains
       # four heterogeneous sublayers (`3x GDN + 1x QSA`); the outer scan boundary only blocks
@@ -2884,31 +3210,42 @@ def apply_scanned_cycles(
     return _eval_slot(*args)
 
   def scan_fn(carry, xs):
-    p_slices, r_slices, cyc_idx = xs
+    p_slices, r_slices = xs
     h = shard_batch(carry, cyc_sharding)
     if return_aux:
-      h, a0 = _run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"], cyc_idx)
-      h, a1 = _run_slot("gdn_1", shard_batch(h, cyc_sharding), p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx)
-      h, a2 = _run_slot("gdn_2", shard_batch(h, cyc_sharding), p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx)
-      h, a3 = _run_slot("qsa_3", shard_batch(h, cyc_sharding), p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx)
+      h, a0 = _run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"])
+      h, a1 = _run_slot("gdn_1", shard_batch(h, cyc_sharding), p_slices["gdn_1"], r_slices["gdn_1"])
+      h, a2 = _run_slot("gdn_2", shard_batch(h, cyc_sharding), p_slices["gdn_2"], r_slices["gdn_2"])
+      h, a3 = _run_slot("qsa_3", shard_batch(h, cyc_sharding), p_slices["qsa_3"], r_slices["qsa_3"])
       return shard_batch(h, cyc_sharding), (a0, a1, a2, a3)
-    h = shard_batch(_run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"], cyc_idx), cyc_sharding)
-    h = shard_batch(_run_slot("gdn_1", h, p_slices["gdn_1"], r_slices["gdn_1"], cyc_idx), cyc_sharding)
-    h = shard_batch(_run_slot("gdn_2", h, p_slices["gdn_2"], r_slices["gdn_2"], cyc_idx), cyc_sharding)
-    h = shard_batch(_run_slot("qsa_3", h, p_slices["qsa_3"], r_slices["qsa_3"], cyc_idx), cyc_sharding)
+    h = shard_batch(_run_slot("gdn_0", h, p_slices["gdn_0"], r_slices["gdn_0"]), cyc_sharding)
+    h = shard_batch(_run_slot("gdn_1", h, p_slices["gdn_1"], r_slices["gdn_1"]), cyc_sharding)
+    h = shard_batch(_run_slot("gdn_2", h, p_slices["gdn_2"], r_slices["gdn_2"]), cyc_sharding)
+    h = shard_batch(_run_slot("qsa_3", h, p_slices["qsa_3"], r_slices["qsa_3"]), cyc_sharding)
     return h, None
+
+  if not scan_layers:
+    h = hidden_states
+    aux_out = []
+    for c in range(num_cycles):
+      p_c = _slice_cycle_state(sub_params, c)
+      r_c = _slice_cycle_state(sub_rests, c)
+      h, a_c = scan_fn(h, (p_c, r_c))
+      if return_aux:
+        aux_out.extend(a_c)
+    return (h, aux_out) if return_aux else h
 
   # Retain the trip-count-1 while loop as a memory barrier when `num_cycles == 1` so XLA does not
   # inline the single cycle and overlap activation temporaries across the remat boundary.
   with m3_core_remat.trip_count_one_scan_barrier(num_cycles == 1):
-    res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests, jnp.arange(num_cycles)))
+    res = jax.lax.scan(scan_fn, hidden_states, (sub_params, sub_rests))
   if return_aux:
     return res[0], [jax.tree.map(lambda x, c=c: x[c], res[1][k]) for c in range(num_cycles) for k in range(4)]
   return res[0]
 
 
 def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> None:
-  """Copies and stacks weights from unscanned decoder layers into scanned cycles."""
+  """Copies weights from an unscanned (`scan_layers=False`) model/decoder into a scanned (`scan_layers=True`) one."""
   u, s = getattr(unscanned_decoder, "decoder", unscanned_decoder), getattr(scanned_decoder, "decoder", scanned_decoder)
   if u.scan_layers or not s.scan_layers:
     raise ValueError(f"Expected an unscanned and a scanned decoder, got scan_layers={u.scan_layers}, {s.scan_layers}.")
@@ -2923,18 +3260,7 @@ def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> N
     raise ValueError(f"MTP presence mismatch: unscanned={u_mtp is not None}, scanned={s_mtp is not None}.")
   if u_mtp is not None:
     nnx.update(s_mtp, nnx.state(u_mtp))
-
-  def get_sub(l, a):
-    return (l.attn_hyper_connection, getattr(l, a), l.mlp_hyper_connection, l.mlp)
-
-  for k, name in enumerate(["gdn_0", "gdn_1", "gdn_2", "qsa_3"]):
-    a = "linear_attn" if k < 3 else "self_attn"
-    st = [nnx.state(get_sub(getattr(u, f"layers_{4 * c + k}"), a)) for c in range(s.num_cycles)]
-    nnx.update(get_sub(getattr(s.cycles, name), a), jax.tree.map(_stack_cycle_vars, *st, is_leaf=_is_nnx_var))
-  for m in ("token_embedder", "hyper_connection_mixer"):
-    nnx.update(getattr(s, m), nnx.state(getattr(u, m)))
-  if u.ple_layer_id is not None:
-    nnx.update(s.ple, nnx.state(getattr(u, f"layers_{u.ple_layer_id}").ple))
+  nnx.update(s, nnx.state(u))
 
 
 # =================================================================================================
@@ -2978,9 +3304,12 @@ class Qwen3_8MTPBlock(nnx.Module):
       next_token_embeds: jax.Array,
       *,
       positions: jax.Array | None = None,
+      position_embeddings: tuple[jax.Array, jax.Array] | None = None,
       conv_mask: jax.Array | None = None,
       segment_ids: jax.Array | None = None,
       return_aux: bool = False,
+      compact_router_aux: bool = False,
+      router_aux_mask: jax.Array | None = None,
   ) -> jax.Array | tuple[jax.Array, dict[str, Any]]:
     """Forward pass fusing next-token embeddings with HC hidden states."""
     expected_dim = self.hc_count * self.emb_dim
@@ -3007,9 +3336,12 @@ class Qwen3_8MTPBlock(nnx.Module):
         h_mtp_in,
         eff_policy=eff_policy,
         return_aux=return_aux,
+        compact_router_aux=compact_router_aux,
         positions=positions,
+        position_embeddings=position_embeddings,
         conv_mask=conv_mask,
         segment_ids=segment_ids,
+        router_aux_mask=router_aux_mask,
     )
     h_layer, aux = out if return_aux else (out, None)
     h_out = self.hyper_connection_mixer.mix_input(h_layer)
@@ -3077,28 +3409,33 @@ def router_load_balancing_loss(
   if not layer_items:
     raise ValueError("aux_list contains no layers.")
   for i, (layer_aux, _) in enumerate(layer_items):
-    if not isinstance(layer_aux, dict) or "router_probs" not in layer_aux or "router_indices" not in layer_aux:
-      raise ValueError(f"Layer {i} aux must be a dict with 'router_probs' and 'router_indices'.")
+    is_compact = (
+        isinstance(layer_aux, dict)
+        and "tokens_per_expert_sum" in layer_aux
+        and "router_prob_sum" in layer_aux
+        and "total_rows" in layer_aux
+    )
+    is_legacy = isinstance(layer_aux, dict) and "router_probs" in layer_aux and "router_indices" in layer_aux
+    if not (is_compact or is_legacy):
+      raise ValueError(
+          f"Layer {i} aux must be a dict with either ('router_probs', 'router_indices') or "
+          "('tokens_per_expert_sum', 'router_prob_sum', 'total_rows')."
+      )
 
   tokens_per_expert_sum = jnp.zeros(num_experts, dtype=jnp.float32)
   router_prob_sum = jnp.zeros(num_experts, dtype=jnp.float32)
   total_rows = jnp.array(0.0, dtype=jnp.float32)
 
   for layer_aux, layer_mask in layer_items:
-    r_probs = layer_aux["router_probs"].astype(jnp.float32)
-    r_idx = layer_aux["router_indices"]
-    oh = jax.nn.one_hot(r_idx, num_experts, dtype=jnp.float32)
-    oh_reduce_axes = tuple(range(oh.ndim - 1))
-    prob_reduce_axes = tuple(range(r_probs.ndim - 1))
-    if layer_mask is not None:
-      m = (layer_mask != 0).astype(jnp.float32)
-      tokens_per_expert_sum = tokens_per_expert_sum + jnp.sum(oh * jnp.expand_dims(m, (-1, -2)), axis=oh_reduce_axes)
-      router_prob_sum = router_prob_sum + jnp.sum(r_probs * jnp.expand_dims(m, -1), axis=prob_reduce_axes)
-      total_rows = total_rows + jnp.sum(m)
+    if "tokens_per_expert_sum" in layer_aux:
+      tokens_per_expert_sum = tokens_per_expert_sum + layer_aux["tokens_per_expert_sum"].astype(jnp.float32)
+      router_prob_sum = router_prob_sum + layer_aux["router_prob_sum"].astype(jnp.float32)
+      total_rows = total_rows + layer_aux["total_rows"].astype(jnp.float32)
     else:
-      tokens_per_expert_sum = tokens_per_expert_sum + jnp.sum(oh, axis=oh_reduce_axes)
-      router_prob_sum = router_prob_sum + jnp.sum(r_probs, axis=prob_reduce_axes)
-      total_rows = total_rows + float(r_probs.size // num_experts)
+      stats = _compute_compact_router_aux_stats(layer_aux["router_probs"], layer_aux["router_indices"], mask=layer_mask)
+      tokens_per_expert_sum = tokens_per_expert_sum + stats["tokens_per_expert_sum"]
+      router_prob_sum = router_prob_sum + stats["router_prob_sum"]
+      total_rows = total_rows + stats["total_rows"]
 
   denom = jnp.maximum(total_rows, 1.0)
   tokens_per_expert = tokens_per_expert_sum / denom
@@ -3127,40 +3464,57 @@ def compute_total_loss(
   router_aux_coeff = float(router_aux_coeff)
 
   run_mtp, need_aux = use_mtp and (model.mtp is not None), router_aux_coeff > 0.0
+
+  eff_target_mask = target_mask
+  if segment_ids is not None:
+    seg_valid = (segment_ids != 0).astype(jnp.float32)
+    eff_target_mask = seg_valid if eff_target_mask is None else (eff_target_mask.astype(jnp.float32) * seg_valid)
+
+  mtp_m: jax.Array | None = None
+  mtp_aux_mask: jax.Array | None = None
+  if run_mtp:
+    if target_tokens.shape[1] <= 1:
+      mtp_aux_mask = jnp.zeros_like(target_tokens, dtype=jnp.float32)
+    else:
+      mtp_m = (
+          target_mask[:, 1:].astype(jnp.float32)
+          if target_mask is not None
+          else jnp.ones_like(target_tokens[:, 1:], dtype=jnp.float32)
+      )
+      if segment_ids is not None:
+        mtp_m = mtp_m * ((segment_ids[:, :-1] == segment_ids[:, 1:]) & (segment_ids[:, :-1] != 0)).astype(jnp.float32)
+      mtp_aux_mask = jnp.pad(mtp_m, ((0, 0), (0, 1)))
+
+  compact_kw: dict[str, Any] = {}
+  if need_aux and isinstance(model, Qwen3_8FlashNextModel):
+    compact_kw = {
+        "compact_router_aux": True,
+        "router_aux_mask": eff_target_mask,
+        "mtp_router_aux_mask": mtp_aux_mask,
+    }
+  call_kwargs = {**compact_kw, **kwargs}
   out = model(
       input_tokens,
       positions,
       segment_ids,
       return_aux=need_aux,
       return_mtp=run_mtp,
-      **kwargs,
+      **call_kwargs,
   )
   primary_out = out[0] if (run_mtp or need_aux) else out
   aux = out[1] if (run_mtp or need_aux) else None
   mtp_out = aux["mtp_logits"] if (run_mtp and need_aux) else (out[1] if run_mtp else None)
 
-  eff_target_mask = target_mask
-  if segment_ids is not None:
-    seg_valid = (segment_ids != 0).astype(jnp.float32)
-    eff_target_mask = seg_valid if eff_target_mask is None else (eff_target_mask.astype(jnp.float32) * seg_valid)
   primary_loss = cross_entropy_loss(primary_out, target_tokens, mask=eff_target_mask)
 
-  mtp_aux_mask = None
   mtp_loss = None
   if run_mtp and mtp_out is not None:
     if mtp_out.shape[1] <= 1:
       mtp_loss = jnp.array(0.0, dtype=jnp.float32)
       mtp_aux_mask = jnp.zeros_like(target_tokens, dtype=jnp.float32)
     else:
-      m = (
-          target_mask[:, 1:].astype(jnp.float32)
-          if target_mask is not None
-          else jnp.ones_like(target_tokens[:, 1:], dtype=jnp.float32)
-      )
-      if segment_ids is not None:
-        m = m * ((segment_ids[:, :-1] == segment_ids[:, 1:]) & (segment_ids[:, :-1] != 0)).astype(jnp.float32)
-      mtp_aux_mask = jnp.pad(m, ((0, 0), (0, 1)))
-      mtp_loss = cross_entropy_loss(mtp_out[:, :-1, :], target_tokens[:, 1:], mask=m)
+      assert mtp_m is not None and mtp_aux_mask is not None
+      mtp_loss = cross_entropy_loss(mtp_out[:, :-1, :], target_tokens[:, 1:], mask=mtp_m)
 
   router_loss = (
       router_load_balancing_loss(
@@ -3214,7 +3568,6 @@ class Qwen3_8Decoder(nnx.Module):
 
   def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
     c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
-    self.sharding = sharding or DefaultSharding()
     self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
     self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
     self.remat_policy: Callable[..., Any] | None = None
@@ -3230,22 +3583,23 @@ class Qwen3_8Decoder(nnx.Module):
         rngs=rngs,
     )
     self.ple_layer_id = int(c.ple_layer_id) if bool(c.use_ple_layer) else None
-    if self.scan_layers:
-      if int(config.inhomogeneous_layer_cycle_interval) != 4:
-        raise ValueError(
-            f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
-            f"{config.inhomogeneous_layer_cycle_interval}."
-        )
-      if self.num_layers % 4 != 0:
-        raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {self.num_layers}.")
-      if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
-        raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
-      self.num_cycles = self.num_layers // 4
-      self.cycles = create_scanned_cycles(config, self.num_cycles, sharding=self.sharding, rngs=rngs)
-      self.ple = build_ple_layer(config, sharding=self.sharding, rngs=rngs)
-    else:
-      for i in range(self.num_layers):
-        setattr(self, f"layers_{i}", Qwen3_8DecoderLayer(config, i, include_ple=True, sharding=self.sharding, rngs=rngs))
+    if int(config.inhomogeneous_layer_cycle_interval) != 4:
+      raise ValueError(
+          f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
+          f"{config.inhomogeneous_layer_cycle_interval}."
+      )
+    if self.num_layers < 4 or self.num_layers % 4 != 0:
+      raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {self.num_layers}.")
+    if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
+      raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
+    self.num_cycles = self.num_layers // 4
+    self.num_stacked_cycles = self.num_cycles - 1
+    self.first_cycle = Qwen3_8CycleBlock(config, include_ple=True, sharding=self.sharding, rngs=rngs)
+    self.cycles = (
+        create_scanned_cycles(config, self.num_stacked_cycles, sharding=self.sharding, rngs=rngs)
+        if self.num_stacked_cycles > 0
+        else None
+    )
     self.hyper_connection_mixer = Qwen3_8GatedResidual(
         emb_dim=self.emb_dim,
         hc_count=self.hc_count,
@@ -3266,6 +3620,9 @@ class Qwen3_8Decoder(nnx.Module):
       *,
       return_aux: bool = False,
       return_pre_mixer: bool = False,
+      compact_router_aux: bool = False,
+      router_aux_mask: jax.Array | None = None,
+      position_embeddings: tuple[jax.Array, jax.Array] | None = None,
   ) -> Any:
     """Forward pass computing full decoder representations."""
     tok = decoder_input_tokens
@@ -3276,38 +3633,54 @@ class Qwen3_8Decoder(nnx.Module):
         init_hyper_connection_streams(tok_emb, hc_count=self.hc_count, sharding=self.sharding),
         [],
     )
+    pos_emb = position_embeddings
+    if pos_emb is None:
+      qsa_layer = getattr(self.first_cycle, "qsa_3", None)
+      qsa_attn = getattr(qsa_layer, "self_attn", None)
+      if qsa_attn is not None and hasattr(qsa_attn, "rotary_emb"):
+        pos_emb = qsa_attn.rotary_emb(h, pos)
     eff_policy = self.remat_policy if self.remat else None
     if self.remat and eff_policy is None:
       eff_policy = _with_qsa_packed_mask_saved(cp.nothing_saveable)
-    if self.scan_layers:
-      res = apply_scanned_cycles(
-          self.cycles,
-          self.ple,
+    with jax.named_scope("first_cycle"):
+      first_out = run_single_cycle(
+          self.first_cycle,
           h,
-          num_cycles=self.num_cycles,
+          eff_policy=eff_policy,
+          return_aux=return_aux,
+          compact_router_aux=compact_router_aux,
           positions=pos,
+          position_embeddings=pos_emb,
           conv_mask=cmask,
           ple_input_ids=pids,
           segment_ids=decoder_segment_ids,
-          return_aux=return_aux,
-          remat=self.remat,
-          remat_policy=eff_policy,
+          router_aux_mask=router_aux_mask,
           sharding=self.sharding,
       )
-      h, aux_list = res if return_aux else (res, [])
-    else:
-      for i in range(self.num_layers):
-        out = _run_qwen3_8_sublayer(
-            getattr(self, f"layers_{i}"),
+    h, aux_list = first_out if return_aux else (first_out, [])
+    if self.cycles is not None:
+      with jax.named_scope("cycles"):
+        res = apply_scanned_cycles(
+            self.cycles,
             h,
-            eff_policy=eff_policy,
-            return_aux=return_aux,
+            num_cycles=self.num_stacked_cycles,
+            scan_layers=self.scan_layers,
             positions=pos,
+            position_embeddings=pos_emb,
             conv_mask=cmask,
-            ple_input_ids=pids,
             segment_ids=decoder_segment_ids,
+            router_aux_mask=router_aux_mask,
+            return_aux=return_aux,
+            compact_router_aux=compact_router_aux,
+            remat=self.remat,
+            remat_policy=eff_policy,
+            sharding=self.sharding,
         )
-        h, _ = (out[0], aux_list.append(out[1])) if return_aux else (out, None)
+      if return_aux:
+        h, cycle_aux = res
+        aux_list = aux_list + cycle_aux
+      else:
+        h = res
     h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h), self.sharding, "mixed_streams")
     if return_pre_mixer:
       return (h_mixed, h_4stream, aux_list) if return_aux else (h_mixed, h_4stream)
@@ -3321,6 +3694,18 @@ class Qwen3_8Decoder(nnx.Module):
 
 class Qwen3_8FlashNextModel(nnx.Module):
   """Top-level Qwen3.8-Flash-Next model with decoder and lm_head."""
+
+  _m3_quantization_skip_submodules = frozenset(
+      {
+          "attn_hyper_connection",
+          "mlp_hyper_connection",
+          "hyper_connection_mixer",
+          "indexer",
+          "ple",
+          "conv1d",
+          "experts",
+      }
+  )
 
   def __init__(
       self,
@@ -3350,6 +3735,11 @@ class Qwen3_8FlashNextModel(nnx.Module):
       if mtp_layers not in (0, 1):
         raise ValueError(f"mtp_num_layers must be 0 or 1, got {mtp_layers}.")
       self.mtp = Qwen3_8MTPBlock(config, sharding=self.sharding, rngs=rngs) if mtp_layers > 0 else None
+    quant_val = getattr(config, "quantization", "") if config is not None else ""
+    if getattr(quant_val, "value", quant_val):
+      for _, mod in nnx.iter_modules(self):
+        if isinstance(mod, nnx.Linear) and not getattr(mod, "_allow_qwix_unquantized_fusion", False):
+          object.__setattr__(mod, "_disable_linear_fusion", True)
     if entered_mesh:
       end_eager_placement(self)
 
@@ -3365,6 +3755,9 @@ class Qwen3_8FlashNextModel(nnx.Module):
       return_mtp: bool = False,
       next_tokens: jax.Array | None = None,
       compute_logits: bool = True,
+      compact_router_aux: bool = False,
+      router_aux_mask: jax.Array | None = None,
+      mtp_router_aux_mask: jax.Array | None = None,
       **kwargs: Any,
   ) -> Any:
     """Forward pass computing language model logits and optional aux outputs."""
@@ -3375,8 +3768,21 @@ class Qwen3_8FlashNextModel(nnx.Module):
     if return_mtp:
       if self.mtp is None:
         raise ValueError("MTP module not initialized.")
+      pos, cmask = _positions_and_conv_mask(decoder_input_tokens, decoder_positions, decoder_segment_ids)
+      pos_emb: tuple[jax.Array, jax.Array] | None = None
+      qsa_layer = getattr(self.decoder.first_cycle, "qsa_3", None)
+      qsa_attn = getattr(qsa_layer, "self_attn", None)
+      if qsa_attn is not None and hasattr(qsa_attn, "rotary_emb"):
+        pos_emb = qsa_attn.rotary_emb(jnp.zeros((), dtype=self.decoder.dtype), pos)
       dec_out = self.decoder(
-          decoder_input_tokens, decoder_positions, decoder_segment_ids, return_aux=return_aux, return_pre_mixer=True
+          decoder_input_tokens,
+          decoder_positions,
+          decoder_segment_ids,
+          return_aux=return_aux,
+          return_pre_mixer=True,
+          compact_router_aux=compact_router_aux,
+          router_aux_mask=router_aux_mask,
+          position_embeddings=pos_emb,
       )
       h_mixed, h_4stream = dec_out[0], dec_out[1]
       aux_list = dec_out[2] if return_aux else []
@@ -3389,14 +3795,16 @@ class Qwen3_8FlashNextModel(nnx.Module):
               decoder_segment_ids == jnp.pad(decoder_segment_ids[:, 1:], ((0, 0), (0, 1)))
           )
           next_tok = jnp.where(same_seg, next_tok, 0)
-      pos, cmask = _positions_and_conv_mask(decoder_input_tokens, decoder_positions, decoder_segment_ids)
       mtp_out = self.mtp(
           h_4stream,
           shard_batch(self.decoder.token_embedder(next_tok), self.sharding, "next_token_embeds"),
           positions=pos,
+          position_embeddings=pos_emb,
           conv_mask=cmask,
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
+          compact_router_aux=compact_router_aux,
+          router_aux_mask=mtp_router_aux_mask if mtp_router_aux_mask is not None else router_aux_mask,
       )
       mtp_h, mtp_aux = mtp_out if return_aux else (mtp_out, None)
       mtp_logits = shard_batch(self.lm_head(mtp_h), self.sharding, "mtp_logits") if compute_logits else mtp_h
@@ -3412,6 +3820,8 @@ class Qwen3_8FlashNextModel(nnx.Module):
         decoder_segment_ids,
         return_aux=return_aux,
         return_pre_mixer=return_hidden_states,
+        compact_router_aux=compact_router_aux,
+        router_aux_mask=router_aux_mask,
     )
     if return_hidden_states or return_aux:
       first = shard_batch(self.lm_head(out[0]), self.sharding, "logits") if compute_logits else out[0]
