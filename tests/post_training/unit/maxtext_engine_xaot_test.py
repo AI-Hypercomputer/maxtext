@@ -1670,7 +1670,7 @@ class GrpoCompileTest(parameterized.TestCase):
 
     self.assertEqual(
         (
-            cfg.max_seq_token_per_tpu,
+            cfg.max_seq_tokens_per_device,
             cfg.max_segments_per_packed_row,
             cfg.router_replay,
         ),
@@ -1691,7 +1691,7 @@ _FSDP_BY_EXPERT = AbstractMesh((2, 2), ("fsdp", "expert"))
 
 
 class GrpoPackingCompileTest(parameterized.TestCase):
-  """`max_seq_token_per_tpu`: the micro-batch Tunix's `SequencePackedBatchAssembler` builds."""
+  """`max_seq_tokens_per_device`: the micro-batch Tunix's `SequencePackedBatchAssembler` builds."""
 
   @parameterized.named_parameters(
       # Two 32-token rollouts fill a 64-token row, under the cap of three. `GRPOConfig`'s defaults, so the
@@ -1716,7 +1716,7 @@ class GrpoPackingCompileTest(parameterized.TestCase):
     mesh; the two sequences `per_device_batch_size` gives do not decide it.
     """
     cfg = _grpo_config(
-        f"max_seq_token_per_tpu={tokens}",
+        f"max_seq_tokens_per_device={tokens}",
         f"max_segments_per_packed_row={segments}",
     )
     algo_cfg = _grpo_config_obj(temperature=1.0, **grpo_config)
@@ -1767,7 +1767,7 @@ class GrpoPackingCompileTest(parameterized.TestCase):
   )
   def test_packed_rows_follow_the_mesh(self, sizes, names, rows):
     """A packed micro-batch has a row per device of the axes the batch is split over, not a set number of sequences."""
-    cfg = _grpo_config("max_seq_token_per_tpu=32")
+    cfg = _grpo_config("max_seq_tokens_per_device=32")
     algo_cfg = _grpo_config_obj(temperature=1.0)
 
     micro_batch = grpo_engine_compile.get_shaped_rl_micro_batch(cfg, algo_cfg, AbstractMesh(sizes, names))
@@ -1783,7 +1783,7 @@ class GrpoPackingCompileTest(parameterized.TestCase):
     is 7, a count no other dimension of this model has.
     """
     packing_overrides = (
-        "max_seq_token_per_tpu=64",
+        "max_seq_tokens_per_device=64",
         "max_segments_per_packed_row=6",
     )
     output, engine, micro_batch, compiled = _run_main_and_capture(self, *_grpo_overrides(*packing_overrides))
@@ -1816,7 +1816,7 @@ class GrpoPackingCompileTest(parameterized.TestCase):
 
   def test_micro_batch_follows_the_compiled_mesh(self):
     """The packed micro-batch `main` compiles for has a row per device of the mesh it compiles for, not of this host."""
-    cfg = _grpo_config("max_seq_token_per_tpu=32")
+    cfg = _grpo_config("max_seq_tokens_per_device=32")
 
     with mock.patch.object(maxtext_engine_compile, "AbstractMaxTextEngine"):
       _, micro_batch = maxtext_engine_compile._engine_and_micro_batch(cfg, _FSDP_BY_EXPERT)
@@ -1825,12 +1825,12 @@ class GrpoPackingCompileTest(parameterized.TestCase):
 
   def test_rejects_a_row_shorter_than_a_rollout(self):
     """Tunix's own check: 31 tokens cannot hold a 32-token rollout."""
-    cfg = _grpo_config("max_seq_token_per_tpu=31")
+    cfg = _grpo_config("max_seq_tokens_per_device=31")
     algo_cfg = _grpo_config_obj(temperature=1.0)
 
     with self.assertRaisesRegex(
         ValueError,
-        r"max_seq_token_per_tpu=31 is smaller than the longest possible" r" sequence",
+        r"=31 is smaller than the longest possible sequence",
     ):
       grpo_engine_compile.get_rl_micro_batch(cfg, algo_cfg, _FSDP_BY_EXPERT)
 
@@ -1838,19 +1838,19 @@ class GrpoPackingCompileTest(parameterized.TestCase):
     for option, value in (
         ("grpo_config", "{beta: 0.0}"),
         ("logps_chunk_size", 4),
-        ("max_seq_token_per_tpu", 64),
+        ("max_seq_tokens_per_device", 64),
         ("router_replay", True),
     ):
       with self.subTest(option=option):
         with self.assertRaisesRegex(ValueError, rf"so {option} would be ignored"):
           _config(f"{option}={value}", data_parallelism=1)
-    with self.assertRaisesRegex(ValueError, r"so it needs max_seq_token_per_tpu"):
+    with self.assertRaisesRegex(ValueError, r"so it needs max_seq_tokens_per_device"):
       _grpo_config("max_segments_per_packed_row=4")
     with self.assertRaisesRegex(
         ValueError,
-        r"max_seq_token_per_tpu\s+Input should be greater than" r" or equal to 0",
+        r"max_seq_tokens_per_device\s+Input should be greater than" r" or equal to 0",
     ):
-      _grpo_config("max_seq_token_per_tpu=-1")
+      _grpo_config("max_seq_tokens_per_device=-1")
 
 
 class GrpoRouterReplayCompileTest(parameterized.TestCase):
@@ -1887,7 +1887,7 @@ class GrpoRouterReplayCompileTest(parameterized.TestCase):
     cfg = _grpo_config(
         *_QWEN35_OVERRIDES,
         "router_replay=True",
-        "max_seq_token_per_tpu=64",
+        "max_seq_tokens_per_device=64",
     )
     algo_cfg = _grpo_config_obj(temperature=1.0)
     assembler = batch_assembly.SequencePackedBatchAssembler(
@@ -1926,8 +1926,8 @@ class GrpoRouterReplayCompileTest(parameterized.TestCase):
 
   def test_main_compiles_packed_micro_batch_without_replay(self):
     """When the packed micro-batch has no routing, router replay leaves the program as it is, and the report says why."""
-    packed = _grpo_overrides(*_QWEN35_OVERRIDES, "max_seq_token_per_tpu=64")
-    probe_cfg = _grpo_config(*_QWEN35_OVERRIDES, "router_replay=True", "max_seq_token_per_tpu=64")
+    packed = _grpo_overrides(*_QWEN35_OVERRIDES, "max_seq_tokens_per_device=64")
+    probe_cfg = _grpo_config(*_QWEN35_OVERRIDES, "router_replay=True", "max_seq_tokens_per_device=64")
     probe_algo = _grpo_config_obj(temperature=1.0)
     if (
         grpo_engine_compile.get_rl_micro_batch(

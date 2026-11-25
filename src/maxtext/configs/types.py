@@ -5101,13 +5101,13 @@ class RLDataset(BaseModel):
   train_fraction: float = Field(1.0, gt=0.0, le=1.0, description="Fraction of the dataset to be used for training.")
   train_micro_batch_size: int = Field(-1, description="Micro batch size for training.")
   rollout_micro_batch_size: int = Field(-1, description="Micro batch size for rollout.")
-  max_seq_token_per_tpu: int = Field(
+  max_seq_tokens_per_device: int = Field(
       0,
       ge=0,
       description=(
-          "Token budget per packed training row (Tunix `max_seq_token_per_tpu`). When > 0, rollout sequences are packed "
-          "into rows of this many tokens for the actor/reference passes instead of one padded row per sequence; a maximal "
-          "sequence (max_prefill_predict_length + generation length) must fit in one row. 0 disables packing."
+          "Token budget per packed training row (Tunix `max_seq_tokens_per_device`). When > 0, rollout sequences are "
+          "packed into rows of this many tokens for the actor/reference passes instead of one padded row per sequence; "
+          "a maximal sequence (max_prefill_predict_length + generation length) must fit in one row. 0 disables packing."
       ),
   )
   dataset_processor_path: str = Field(
@@ -9605,15 +9605,15 @@ class RLConfig(
     # cap = max_target_length) must fit in one packed row. Tunix checks this
     # too, but only in the learner, after the models are already on the
     # accelerators; fail here, before any of that work.
-    if 0 < self.max_seq_token_per_tpu < self.max_target_length:
+    if 0 < self.max_seq_tokens_per_device < self.max_target_length:
       raise ValueError(
-          f"max_seq_token_per_tpu ({self.max_seq_token_per_tpu}) must be at least "
+          f"max_seq_tokens_per_device ({self.max_seq_tokens_per_device}) must be at least "
           f"max_target_length ({self.max_target_length}) when sequence packing is enabled."
       )
     if self.decoder_block in (DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5):
-      if not self.packing and self.max_seq_token_per_tpu > 0:
+      if not self.packing and self.max_seq_tokens_per_device > 0:
         raise ValueError(
-            f"GatedDeltaNet ({self.decoder_block.value}) with max_seq_token_per_tpu > 0 requires packing=True: "
+            f"GatedDeltaNet ({self.decoder_block.value}) with max_seq_tokens_per_device > 0 requires packing=True: "
             "packed rows hold several sequences, and with packing=False GatedDeltaNet ignores their segment IDs "
             "in training."
         )

@@ -42,7 +42,7 @@ kernel is written to its own file, suffixed with the kernel name.
 By default (`loss=maxtext`), the kernels are compiled with MaxText's pre-training cross-entropy
 loss. Passing `loss=grpo` wraps the model with `TunixMaxTextAdapter` and compiles Tunix's GRPO
 loss against a synthetic `RLTrainerPayload` micro-batch (configurable via `grpo_config`,
-`logps_chunk_size`, `max_seq_token_per_tpu`, `max_segments_per_packed_row`, and `router_replay`;
+`logps_chunk_size`, `max_seq_tokens_per_device`, `max_segments_per_packed_row`, and `router_replay`;
 see `maxtext_engine_types.CompileConfig`).
 
 In addition to each kernel's raw `memory_analysis()`, `main` prints a per-device memory summary

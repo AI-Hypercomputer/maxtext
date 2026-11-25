@@ -427,9 +427,9 @@ def aot_env(
   prompt_len = int(rollout["max_prompt_length"])
   resp_len = int(rollout["total_generation_steps"])
   budget = rl_train["max_seq_tokens_per_device"]
-  seq_tpu = int(budget) if budget else 0
-  target_len = max(prompt_len + resp_len, seq_tpu)
-  seq_token_per_tpu = seq_tpu if seq_tpu > 0 else target_len
+  seq_tokens = int(budget) if budget else 0
+  target_len = max(prompt_len + resp_len, seq_tokens)
+  seq_tokens_per_device = seq_tokens if seq_tokens > 0 else target_len
   segments = rl_train["max_segments_per_packed_row"]
   # 16: the AOT check's segment cap when the config sets none, as before.
   max_segments = 16 if segments is None else int(segments)
@@ -446,7 +446,7 @@ def aot_env(
       f"export MODEL_NAME=${{MODEL_NAME:-{shlex.quote(model_name)}}}",
       f"export MAX_PREFILL_PREDICT_LENGTH=${{MAX_PREFILL_PREDICT_LENGTH:-{prompt_len}}}",
       f"export MAX_TARGET_LENGTH=${{MAX_TARGET_LENGTH:-{target_len}}}",
-      f"export MAX_SEQ_TOKEN_PER_TPU=${{MAX_SEQ_TOKEN_PER_TPU:-{seq_token_per_tpu}}}",
+      f"export MAX_SEQ_TOKENS_PER_DEVICE=${{MAX_SEQ_TOKENS_PER_DEVICE:-{seq_tokens_per_device}}}",
       f"export MAX_SEGMENTS_PER_PACKED_ROW=${{MAX_SEGMENTS_PER_PACKED_ROW:-{max_segments}}}",
       f"export GLOBAL_BATCH=${{GLOBAL_BATCH:-{global_batch}}}",
       f"export TRAIN_MICRO_BATCH_SIZE=${{TRAIN_MICRO_BATCH_SIZE:-{micro_batch}}}",

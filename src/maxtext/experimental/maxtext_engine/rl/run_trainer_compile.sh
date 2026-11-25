@@ -80,7 +80,7 @@ fi
   float32_gate_logits=True float32_logits=True ${_extra_flags[@]+"${_extra_flags[@]}"} \
   "compile_topology=$COMPILE_TOPOLOGY" compile_topology_num_slices=1 loss=grpo \
   "grpo_config=$_grpo" "logps_chunk_size=${LOGPS_CHUNK_SIZE:-512}" \
-  "max_seq_token_per_tpu=$MAX_SEQ_TOKEN_PER_TPU" \
+  "max_seq_tokens_per_device=$MAX_SEQ_TOKENS_PER_DEVICE" \
   "max_segments_per_packed_row=$MAX_SEGMENTS_PER_PACKED_ROW" \
   "router_replay=$ROUTER_REPLAY" \
   "max_prefill_predict_length=$MAX_PREFILL_PREDICT_LENGTH" \

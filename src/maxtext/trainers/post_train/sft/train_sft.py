@@ -103,7 +103,8 @@ class MaxTextPeftTrainer(peft_trainer.PeftTrainer):
     nnx.pop(self.model, nnx.Intermediate)
     graphdef, _, _ = nnx.split(self.model, wrt, ...)
     _uses_gradient_accumulation = not (
-        self.config.get_with_default("gradient_accumulation_steps", 1) == 1 and self.config.max_seq_token_per_tpu is None
+        self.config.get_with_default("gradient_accumulation_steps", 1) == 1
+        and self.config.max_seq_tokens_per_device is None
     )
 
     def train_step(

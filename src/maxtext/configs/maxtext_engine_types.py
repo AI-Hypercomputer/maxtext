@@ -60,12 +60,12 @@ class CompileConfig(pydantic_types.MaxTextConfig):
           " chunking and materialize full-sequence logits at once."
       ),
   )
-  max_seq_token_per_tpu: int = pydantic.Field(
+  max_seq_tokens_per_device: int = pydantic.Field(
       0,
       ge=0,
       description=(
           "Maximum number of tokens per packed row (Tunix's"
-          " max_seq_token_per_tpu) when loss='grpo'. When 0,"
+          " max_seq_tokens_per_device) when loss='grpo'. When 0,"
           " compiles against a padded micro-batch of"
           " micro_batch_size_to_train_on sequences built by Tunix's"
           " PaddedBatchAssembler. When positive, compiles against a"
@@ -81,7 +81,7 @@ class CompileConfig(pydantic_types.MaxTextConfig):
       description=(
           "Maximum number of rollout sequences that can be packed into a single"
           " row (Tunix's max_segments_per_packed_row) when"
-          " max_seq_token_per_tpu > 0. Determines the static"
+          " max_seq_tokens_per_device > 0. Determines the static"
           " segment-reduction dimension (num_segments) compiled into the GRPO"
           " loss. Set to 0 to leave the per-row sequence cap unset, allowing as"
           " many sequences as fit within the row's token budget."
@@ -105,7 +105,7 @@ class CompileConfig(pydantic_types.MaxTextConfig):
     rl_options = (
         "grpo_config",
         "logps_chunk_size",
-        "max_seq_token_per_tpu",
+        "max_seq_tokens_per_device",
         "max_segments_per_packed_row",
         "router_replay",
     )
@@ -115,9 +115,9 @@ class CompileConfig(pydantic_types.MaxTextConfig):
           f"loss={self.loss} does not compile Tunix's GRPO loss, so"
           f" {', '.join(set_options)} would be ignored: set loss=grpo."
       )
-    if self.max_segments_per_packed_row and not self.max_seq_token_per_tpu:
+    if self.max_segments_per_packed_row and not self.max_seq_tokens_per_device:
       raise ValueError(
           "max_segments_per_packed_row limits the sequences in a packed row, so"
-          " it needs max_seq_token_per_tpu, which turns packing on."
+          " it needs max_seq_tokens_per_device, which turns packing on."
       )
     return self
