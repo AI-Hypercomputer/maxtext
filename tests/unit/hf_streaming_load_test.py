@@ -605,6 +605,14 @@ class StreamingLoadTest(parameterized.TestCase):
     with self.assertRaisesRegex(ValueError, "no HF tensor for params-decoder-decoder_norm-scale"):
       self._load("llama", scan_layers=True, edit_maps=no_hf_norm)
 
+  def test_tuple_hf_key_without_hook_raises(self):
+    def tuple_without_hook(param_map, hook_map):
+      param_map["params-decoder-logits_dense-kernel"] = ("model.embed_tokens.weight", "lm_head.weight")
+      hook_map.pop("params-decoder-logits_dense-kernel", None)
+
+    with self.assertRaisesRegex(ValueError, "tuple of HF tensors for params-decoder-logits_dense-kernel"):
+      self._load("llama", scan_layers=True, edit_maps=tuple_without_hook)
+
 
 class Float8SourceTest(parameterized.TestCase):
   """An FP8 HF tensor must not be cast into a wider MaxText weight without its scales."""
@@ -631,13 +639,16 @@ class Float8SourceTest(parameterized.TestCase):
     self.assertEqual(got["params"]["w"].dtype, jnp.float8_e4m3fn)
 
   def test_e8m0_scales_cast_into_wider_weights(self):
-    """E8M0 holds power-of-two scales, which cast to a wider dtype exactly."""
+    """E8M0 holds power-of-two scales, which cast to a wider dtype exactly in both streaming and transform."""
     ckpt_dir = self.create_tempdir().full_path
     scales = jnp.asarray([[0.5, 1.0, 2.0, 4.0]], jnp.float32).astype(jnp.float8_e8m0fnu)
     safetensors.flax.save_file({"s": scales}, os.path.join(ckpt_dir, "model.safetensors"))
     target = {"s": jax.ShapeDtypeStruct((1, 4), jnp.float32, sharding=NamedSharding(_mesh(), PartitionSpec()))}
-    got = hf_streaming_load.load_hf_params_streaming(ckpt_dir, target, {"params-s": "s"}, {}, _config(True))
-    np.testing.assert_array_equal(np.asarray(got["params"]["s"]), [[0.5, 1.0, 2.0, 4.0]])
+    cfg = _config(True)
+    got_stream = hf_streaming_load.load_hf_params_streaming(ckpt_dir, target, {"params-s": "s"}, {}, cfg)
+    got_dyn = load_dynamic.transform_hf_state_to_mt_state({"s": scales}, target, {"params-s": "s"}, {}, cfg)
+    for got in (got_stream, got_dyn):
+      np.testing.assert_array_equal(np.asarray(got["params"]["s"]), [[0.5, 1.0, 2.0, 4.0]])
 
   def test_fp8_tensor_with_its_scale_loads(self):
     def dequantize(x, target_shape):
@@ -711,15 +722,19 @@ class DeepSeekV4LayoutTest(parameterized.TestCase):
     restored = hf_streaming_load.load_hf_params_streaming(
         ckpt_dir, target_tree, param_map, hook_map, _config(scan_layers=True), min_bytes_to_split=0
     )
-    self.assertEqual(set(restored), {"params", "MoEBiasVar"})
-    np.testing.assert_array_equal(
-        np.asarray(restored["MoEBiasVar"]["decoder"]["layers"]["MoeBlock_0"]["gate"]["bias"]),
-        np.stack([hf[f"layers.{i}.ffn.gate.bias"] for i in range(_LAYERS)]),
+    transformed = load_dynamic.transform_hf_state_to_mt_state(
+        dict(hf), target_tree, param_map, hook_map, _config(scan_layers=True)
     )
-    np.testing.assert_array_equal(
-        np.asarray(restored["params"]["decoder"]["layers_0"]["MoeBlock_0"]["wi_0"]),
-        np.stack([hf[f"layers.0.ffn.experts.{e}.w1.weight"].T for e in range(_EXPERTS)]),
-    )
+    for got in (restored, transformed):
+      self.assertEqual(set(got), {"params", "MoEBiasVar"})
+      np.testing.assert_array_equal(
+          np.asarray(got["MoEBiasVar"]["decoder"]["layers"]["MoeBlock_0"]["gate"]["bias"]),
+          np.stack([hf[f"layers.{i}.ffn.gate.bias"] for i in range(_LAYERS)]),
+      )
+      np.testing.assert_array_equal(
+          np.asarray(got["params"]["decoder"]["layers_0"]["MoeBlock_0"]["wi_0"]),
+          np.stack([hf[f"layers.0.ffn.experts.{e}.w1.weight"].T for e in range(_EXPERTS)]),
+      )
 
 
 def _pad_rows(x, target_shape):

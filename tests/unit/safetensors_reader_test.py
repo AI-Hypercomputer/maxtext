@@ -22,6 +22,9 @@ if "xla_force_host_platform_device_count" not in os.environ.get("XLA_FLAGS", "")
   os.environ["XLA_FLAGS"] = os.environ.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=4"
 
 # pylint: disable=wrong-import-position
+import json
+import sys
+import types
 from unittest import mock
 
 from absl.testing import absltest
@@ -157,6 +160,55 @@ class SafetensorsReaderTest(parameterized.TestCase):
   def test_empty_request(self):
     with safetensors_reader.SafetensorsReader(self.dir) as reader:
       self.assertEqual(reader.read({}), {})
+
+  def test_f8_e8m0_dtype(self):
+    """Reads `F8_E8M0` block-scale tensors (used by DeepSeek-V4 SafeTensors) as `jnp.float8_e8m0fnu`."""
+    directory = self.create_tempdir().full_path
+    raw_bytes = bytes([125, 126, 127, 128, 129, 130, 124, 127])
+    header = json.dumps({"w.scale": {"dtype": "F8_E8M0", "shape": [4, 2], "data_offsets": [0, 8]}}).encode("utf-8")
+    with open(os.path.join(directory, "model.safetensors"), "wb") as f:
+      f.write(len(header).to_bytes(8, "little") + header + raw_bytes)
+    sharding = NamedSharding(self.mesh, P(("x", "y")))
+    with safetensors_reader.SafetensorsReader(directory) as reader:
+      self.assertEqual(reader.metadata["w.scale"].shape, (4, 2))
+      self.assertEqual(reader.metadata["w.scale"].dtype, np.dtype(jnp.float8_e8m0fnu))
+      got = reader.read({"w.scale": jax.ShapeDtypeStruct((4, 2), jnp.float8_e8m0fnu, sharding=sharding)})["w.scale"]
+    self.assertEqual(got.dtype, jnp.float8_e8m0fnu)
+    self.assertEqual(got.sharding, sharding)
+    want_f32 = np.exp2(np.frombuffer(raw_bytes, dtype=np.uint8).astype(np.float32).reshape(4, 2) - 127.0)
+    np.testing.assert_array_equal(np.asarray(got.astype(jnp.float32)), want_f32)
+
+  def test_no_gcs_read_ahead_suppresses_and_restores_block_size(self):
+    """`SafetensorsReader` disables gcsfs 5 MiB read-ahead during header/range reads and restores it on exit."""
+    fake_fs = type("GCSFileSystem", (), {"default_block_size": 5 << 20})
+    fake_gcsfs = types.SimpleNamespace(GCSFileSystem=fake_fs)
+    seen_block_sizes = []
+    real_read_header = safetensors_reader._read_header  # pylint: disable=protected-access
+    real_read_range = safetensors_reader.SafetensorsReader._read_range  # pylint: disable=protected-access
+
+    def spy_header(path):
+      seen_block_sizes.append(fake_fs.default_block_size)
+      return real_read_header(path)
+
+    def spy_range(reader, block, offset, length):
+      seen_block_sizes.append(fake_fs.default_block_size)
+      return real_read_range(reader, block, offset, length)
+
+    name, (arr, spec) = next(iter(self.cases.items()))
+    sharding = NamedSharding(self.mesh, spec)
+    with (
+        mock.patch.dict(sys.modules, {"gcsfs": fake_gcsfs}),
+        mock.patch.object(safetensors_reader, "_read_header", side_effect=spy_header),
+        mock.patch.object(safetensors_reader.SafetensorsReader, "_read_range", autospec=True, side_effect=spy_range),
+    ):
+      with safetensors_reader.no_gcs_read_ahead():
+        self.assertEqual(fake_fs.default_block_size, 0)
+        with safetensors_reader.SafetensorsReader(self.dir) as reader:
+          reader.read({name: jax.ShapeDtypeStruct(arr.shape, arr.dtype, sharding=sharding)})
+        self.assertEqual(fake_fs.default_block_size, 0)
+      self.assertEqual(fake_fs.default_block_size, 5 << 20)
+    self.assertTrue(seen_block_sizes)
+    self.assertEqual(set(seen_block_sizes), {0})
 
   def test_zero_size_tensor(self):
     directory = self.create_tempdir().full_path
