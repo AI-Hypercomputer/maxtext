@@ -2623,6 +2623,14 @@ class Qwen3_8FlashNext(BaseModel):
           " the pure-JAX chunked GDN path."
       ),
   )
+  use_hc_pallas: bool = Field(
+      False,
+      description="Enable VMEM-fused Pallas Mosaic TPU 4-stream HyperConnection kernels in m3 Qwen3.8.",
+  )
+  use_gdn_conv_pallas: bool = Field(
+      False,
+      description="Enable VMEM-fused Pallas Mosaic TPU 4-tap causal Conv1D + SiLU + Q/K L2Norm in m3 Qwen3.8 GDN.",
+  )
   qsa_indexer_mask: Literal["gather", "reshape"] = Field(
       "gather",
       description=(

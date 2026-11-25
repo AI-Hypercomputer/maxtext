@@ -268,6 +268,8 @@ class TransformerConfig(BaseModel):
   moe_row_scale_placement: str = "tc"
   moe_tc_3d_gmm: bool = False
   moe_fused_bwd_quant: bool = False
+  use_hc_pallas: bool = False
+  use_gdn_conv_pallas: bool = False
 
 
 # ----------------------------------------------------------------------------

@@ -56,6 +56,8 @@ _QWEN3_8_MINI_CFG: dict[str, Any] = {
     "gdn_chunk_size": 8,
     "gdn_output_gate_activation": "sigmoid",
     "gdn_chunk_inverse": "block_doubling",
+    "use_hc_pallas": False,
+    "use_gdn_conv_pallas": False,
     "num_query_heads": 4,
     "num_kv_heads": 2,
     "head_dim": 16,
