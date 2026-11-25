@@ -28,6 +28,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import orbax.checkpoint as ocp
+from maxtext.checkpoint_conversion.utils import hf_streaming_load
 from maxtext.checkpoint_conversion.utils import load_dynamic
 from maxtext.checkpoint_conversion.utils import tensor_handling
 from maxtext.checkpoint_conversion.utils.tensor_handling import (
@@ -409,6 +410,346 @@ class TensorHandlingTest(parameterized.TestCase):
       np.testing.assert_array_equal(restored["wi_0"][index], expected[k][:, :8])
       np.testing.assert_array_equal(restored["wi_1"][index], expected[k][:, 8:])
     self.assertEqual(restored["wi_0"].sharding, sharding)
+
+  @parameterized.named_parameters(
+      ("single_axis", ["gate_up_0", "gate_up_1", "gate_up_2"], (4, 3, 8)),
+      ("multi_axis", [["gate_up_0", "gate_up_1"], ["gate_up_2", "gate_up_3"]], (2, 2, 4, 8)),
+  )
+  def test_stacked_composite_leaves_are_stacked_separately(self, hf_source, leaf_shape):
+    # A stacked composite key is split slice by slice and each leaf is stacked on its own: no stacked tensor with
+    # the composite's last axis is ever built, and the leaves match splitting the stacked composite.
+    class MockConfig:
+
+      def __init__(self):
+        self.scan_layers = True
+        self.param_scan_axis = 1
+
+    flat_keys = [k for row in hf_source for k in (row if isinstance(row, list) else [row])]
+    hf_state = {
+        k: jax.device_put(np.arange(64, dtype=np.float32).reshape(4, 16) + 100 * i) for i, k in enumerate(flat_keys)
+    }
+    hf_arrays = list(hf_state.values())
+    expected = {k: np.asarray(v) for k, v in hf_state.items()}
+    composite_shapes = []
+
+    def split(weight, target_shape):
+      del target_shape
+      out = jnp.stack([weight[:, :8], weight[:, 8:]], axis=-1)
+      composite_shapes.append(out.shape)
+      return out
+
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    wi_1_mesh = Mesh(np.array(jax.devices()[: min(2, jax.device_count())]), axis_names=("x",))
+    wi_1_sharding = NamedSharding(wi_1_mesh, PartitionSpec("x"))
+    target_tree = {
+        "mlp": {
+            "wi_0": jax.ShapeDtypeStruct(shape=leaf_shape, dtype=np.float32, sharding=sharding),
+            "wi_1": jax.ShapeDtypeStruct(shape=leaf_shape, dtype=np.float32, sharding=wi_1_sharding),
+        }
+    }
+    mt_key = ("params-mlp-wi_0", "params-mlp-wi_1")
+
+    with mock.patch.object(
+        tensor_handling,
+        "_binary_chunked_stack",
+        wraps=tensor_handling._binary_chunked_stack,  # pylint: disable=protected-access
+    ) as stack:
+      restored = load_dynamic.transform_hf_state_to_mt_state(
+          hf_state, target_tree, {mt_key: hf_source}, {mt_key: split}, MockConfig()
+      )["params"]["mlp"]
+
+    # The hook still sees one HF slice at a time (4 x 8 leaves stacked on a last axis of 2) ...
+    self.assertEqual(set(composite_shapes), {(4, 8, 2)})
+    # ... but nothing stacks tensors that still have that axis.
+    for call in stack.call_args_list:
+      self.assertTrue(all(t.shape[-1] != 2 for t in call.args[0]))
+    for i, k in enumerate(flat_keys):
+      # Multi-axis: (outer, inner) leading axes; single-axis: the scan axis 1.
+      index = divmod(i, leaf_shape[1]) if len(leaf_shape) == 4 else (slice(None), i)
+      np.testing.assert_array_equal(restored["wi_0"][index], expected[k][:, :8])
+      np.testing.assert_array_equal(restored["wi_1"][index], expected[k][:, 8:])
+    self.assertEqual(restored["wi_0"].sharding, sharding)
+    self.assertEqual(restored["wi_1"].sharding, wi_1_sharding)
+    self.assertEmpty(hf_state)
+    self.assertTrue(all(a.is_deleted() for a in hf_arrays))
+
+  @parameterized.named_parameters(
+      ("unscanned", False, "gate_up.weight", (4, 8)),
+      ("scanned_single_axis", True, ["gate_up_0", "gate_up_1", "gate_up_2"], (4, 3, 8)),
+      ("scanned_multi_axis", True, [["gate_up_0", "gate_up_1"], ["gate_up_2", "gate_up_3"]], (2, 2, 4, 8)),
+  )
+  def test_unscanned_composite_and_streaming_parity(self, scan_layers, hf_source, leaf_shape):
+    # Unscanned composites keep the load-then-split path (composite_target_leaf), and transform_hf_state_to_mt_state
+    # matches hf_streaming_load bit-for-bit across unscanned and scanned composite mappings.
+    config = mock.Mock(scan_layers=scan_layers, param_scan_axis=1)
+    if isinstance(hf_source, str):
+      flat_keys = [hf_source]
+    else:
+      flat_keys = [k for row in hf_source for k in (row if isinstance(row, list) else [row])]
+    np_tensors = {k: np.arange(64, dtype=np.float32).reshape(4, 16) + 100 * i for i, k in enumerate(flat_keys)}
+    hf_state = {k: jax.device_put(v) for k, v in np_tensors.items()}
+    hf_arrays = list(hf_state.values())
+
+    def split(weight, target_shape):
+      self.assertEqual(target_shape, [(4, 8), (4, 8)])
+      return jnp.stack([weight[:, :8], weight[:, 8:]], axis=-1)
+
+    sharding = NamedSharding(self.mesh, PartitionSpec())
+    wi_1_mesh = Mesh(np.array(jax.devices()[: min(2, jax.device_count())]), axis_names=("x",))
+    wi_1_sharding = NamedSharding(wi_1_mesh, PartitionSpec("x"))
+    target_tree = {
+        "mlp": {
+            "wi_0": jax.ShapeDtypeStruct(shape=leaf_shape, dtype=np.float32, sharding=sharding),
+            "wi_1": jax.ShapeDtypeStruct(shape=leaf_shape, dtype=np.float32, sharding=wi_1_sharding),
+        }
+    }
+    mt_key = ("params-mlp-wi_0", "params-mlp-wi_1")
+    param_map = {mt_key: hf_source}
+    hook_map = {mt_key: split}
+
+    with mock.patch.object(
+        tensor_handling, "composite_target_leaf", wraps=tensor_handling.composite_target_leaf
+    ) as composite_leaf:
+      restored = load_dynamic.transform_hf_state_to_mt_state(hf_state, target_tree, param_map, hook_map, config)[
+          "params"
+      ]["mlp"]
+
+    self.assertEqual(composite_leaf.call_count, 0 if scan_layers else 1)
+    self.assertEmpty(hf_state)
+    self.assertTrue(all(a.is_deleted() for a in hf_arrays))
+    self.assertFalse(restored["wi_0"].is_deleted())
+    self.assertFalse(restored["wi_1"].is_deleted())
+    self.assertEqual(restored["wi_0"].sharding, sharding)
+    self.assertEqual(restored["wi_1"].sharding, wi_1_sharding)
+    if isinstance(hf_source, str):
+      np.testing.assert_array_equal(restored["wi_0"], np_tensors[hf_source][:, :8])
+      np.testing.assert_array_equal(restored["wi_1"], np_tensors[hf_source][:, 8:])
+
+    ckpt_dir = self.create_tempdir().full_path
+    safetensors.numpy.save_file(np_tensors, os.path.join(ckpt_dir, "model.safetensors"))
+    streamed = hf_streaming_load.load_hf_params_streaming(
+        ckpt_dir, target_tree, param_map, hook_map, config, min_bytes_to_split=0
+    )["params"]["mlp"]
+
+    for leaf_name in ("wi_0", "wi_1"):
+      self.assertEqual(streamed[leaf_name].sharding, restored[leaf_name].sharding)
+      np.testing.assert_array_equal(np.asarray(streamed[leaf_name]), np.asarray(restored[leaf_name]))
+
+  def test_transform_hf_state_keeps_shared_buffer(self):
+    # A zero-copy jax.device_put of an HF tensor already in the target sharding returns an array on the same buffer;
+    # freeing popped HF tensors must not delete the restored weight.
+    sharding = NamedSharding(self.mesh, PartitionSpec("x"))
+    expected = np.arange(16, dtype=np.float32).reshape(4, 4)
+    hf_tensor = jax.device_put(expected, sharding)
+    src_pointers = tensor_handling._buffer_pointers(hf_tensor)  # pylint: disable=protected-access
+    hf_state = {"w": hf_tensor}
+    target_tree = {"w": jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=sharding)}
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(
+        hf_state, target_tree, {"params-w": "w"}, {}, mock.Mock(scan_layers=False)
+    )["params"]["w"]
+
+    self.assertEmpty(hf_state)
+    self.assertFalse(restored.is_deleted())
+    self.assertEqual(tensor_handling._buffer_pointers(restored), src_pointers)  # pylint: disable=protected-access
+    self.assertEqual(restored.sharding, sharding)
+    np.testing.assert_array_equal(restored, expected)
+
+  @parameterized.named_parameters(
+      ("no_hook_composite_first", False, True),
+      ("no_hook_leaf_first", False, False),
+      ("identity_hook_composite_first", True, True),
+      ("identity_hook_leaf_first", True, False),
+  )
+  def test_unscanned_composite_preserves_retained_and_frees_consumed_buffer(self, use_identity_hook, composite_first):
+    # Placing an unhooked/identity-hooked HF tensor onto a distinct Mesh with the same shard layout wraps the same
+    # device buffer in a new jax.Array (`loaded is not hf_tensor`). Splitting an unscanned composite must keep that
+    # buffer alive when another MaxText leaf still shares the HF key, and free `loaded` when it was the sole consumer.
+    read_mesh = Mesh(np.array(jax.devices()[:1]), axis_names=("process",))
+    read_sharding = NamedSharding(read_mesh, PartitionSpec("process", None, None))
+    leaf_sharding = NamedSharding(self.mesh, PartitionSpec("x", None))
+    other_sharding = NamedSharding(self.mesh, PartitionSpec("x", None, None))
+    expected = np.arange(32, dtype=np.float32).reshape(4, 4, 2)
+    mt_key = ("params-wi_0", "params-wi_1")
+    hook_map = {mt_key: lambda w, shape: w} if use_identity_hook else {}
+    config = mock.Mock(scan_layers=False)
+
+    hf_shared = jax.device_put(expected, read_sharding)
+    hf_state = {"w": hf_shared}
+    param_map = {mt_key: "w", "params-other": "w"} if composite_first else {"params-other": "w", mt_key: "w"}
+    target_tree = {
+        "wi_0": jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=leaf_sharding),
+        "wi_1": jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=leaf_sharding),
+        "other": jax.ShapeDtypeStruct(shape=(4, 4, 2), dtype=np.float32, sharding=other_sharding),
+    }
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(hf_state, target_tree, param_map, hook_map, config)["params"]
+
+    self.assertEmpty(hf_state)
+    self.assertFalse(restored["wi_0"].is_deleted())
+    self.assertFalse(restored["wi_1"].is_deleted())
+    self.assertFalse(restored["other"].is_deleted())
+    np.testing.assert_array_equal(restored["wi_0"], expected[..., 0])
+    np.testing.assert_array_equal(restored["wi_1"], expected[..., 1])
+    np.testing.assert_array_equal(restored["other"], expected)
+
+    if not composite_first:
+      return
+
+    hf_single = jax.device_put(expected, read_sharding)
+    hf_state_single = {"w": hf_single}
+    seen_loaded = []
+    real_split_parts = tensor_handling._split_parts  # pylint: disable=protected-access
+
+    def spy_split_parts(tensor, num_parts, keep=()):
+      seen_loaded.append(tensor)
+      return real_split_parts(tensor, num_parts, keep)
+
+    with mock.patch.object(tensor_handling, "_split_parts", side_effect=spy_split_parts):
+      restored_single = load_dynamic.transform_hf_state_to_mt_state(
+          hf_state_single,
+          {"wi_0": target_tree["wi_0"], "wi_1": target_tree["wi_1"]},
+          {mt_key: "w"},
+          hook_map,
+          config,
+      )["params"]
+
+    self.assertEmpty(hf_state_single)
+    self.assertLen(seen_loaded, 1)
+    self.assertIsNot(seen_loaded[0], hf_single)
+    self.assertTrue(seen_loaded[0].is_deleted())
+    self.assertTrue(hf_single.is_deleted())
+    np.testing.assert_array_equal(restored_single["wi_0"], expected[..., 0])
+    np.testing.assert_array_equal(restored_single["wi_1"], expected[..., 1])
+
+  @parameterized.named_parameters(
+      ("single_axis", ["w0", "w1", "w2"], (4, 3, 4)),
+      ("multi_axis", [["w0", "w1"], ["w2", "w3"]], (2, 2, 4, 4)),
+  )
+  def test_stacked_same_shape_reshape_hook_preserves_slices_until_stacked(self, hf_source, target_shape):
+    # A same-shape `w.reshape(shape)` hook (e.g. gemma4 scanned norm scales) returns `w` without copying; slice 1's
+    # hook must not delete slice 0's buffer before stacking, and all popped slices (even with an unmatched mapping
+    # entry sharing `w0`) must be freed once the stacked weight is built.
+    config = mock.Mock(scan_layers=True, param_scan_axis=1)
+    flat_keys = [k for row in hf_source for k in (row if isinstance(row, list) else [row])]
+    np_tensors = {k: np.arange(16, dtype=np.float32).reshape(4, 4) + 10 * i for i, k in enumerate(flat_keys)}
+    read_sharding = NamedSharding(Mesh(np.array(jax.devices()[:1]), axis_names=("process",)), PartitionSpec("process"))
+    hf_state = {k: jax.device_put(v, read_sharding) for k, v in np_tensors.items()}
+    hf_arrays = list(hf_state.values())
+    sharding = NamedSharding(self.mesh, PartitionSpec(*([None] * len(target_shape))))
+    target_tree = {"scale": jax.ShapeDtypeStruct(shape=target_shape, dtype=np.float32, sharding=sharding)}
+    param_map = {"params-scale": hf_source, "params-unmatched": flat_keys[0]}
+    hook_map = {"params-scale": lambda w, shape: w.reshape(shape)}
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(hf_state, target_tree, param_map, hook_map, config)["params"][
+        "scale"
+    ]
+
+    self.assertEmpty(hf_state)
+    self.assertTrue(all(a.is_deleted() for a in hf_arrays))
+    self.assertFalse(restored.is_deleted())
+    for i, k in enumerate(flat_keys):
+      index = divmod(i, target_shape[1]) if len(target_shape) == 4 else (slice(None), i)
+      np.testing.assert_array_equal(restored[index], np_tensors[k])
+
+  @parameterized.named_parameters(("tuple_first", True), ("leaf_first", False))
+  def test_tuple_hf_source_preserves_shared_buffer(self, tuple_first):
+    # A tuple HF source `("w", "scale")` whose hook returns a zero-copy view of `"w"` shares `"w"`'s buffer with any
+    # other leaf reading `"w"`, while `"scale"` is freed once consumed.
+    read_sharding = NamedSharding(Mesh(np.array(jax.devices()[:1]), axis_names=("process",)), PartitionSpec("process"))
+    dst_sharding = NamedSharding(self.mesh, PartitionSpec("x"))
+    expected = np.arange(16, dtype=np.float32).reshape(4, 4)
+    hf_w = jax.device_put(expected, read_sharding)
+    hf_scale = jax.device_put(np.ones((4, 1), dtype=np.float32), read_sharding)
+    hf_state = {"w": hf_w, "scale": hf_scale}
+    entries = [("params-a", ("w", "scale")), ("params-b", "w")]
+    param_map = dict(entries if tuple_first else reversed(entries))
+    hook_map = {"params-a": lambda raw, shape: jax.device_put(raw[0], dst_sharding), "params-b": lambda w, shape: w * 2}
+    target_tree = {
+        "a": jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=dst_sharding),
+        "b": jax.ShapeDtypeStruct(shape=(4, 4), dtype=np.float32, sharding=dst_sharding),
+    }
+
+    restored = load_dynamic.transform_hf_state_to_mt_state(
+        hf_state, target_tree, param_map, hook_map, mock.Mock(scan_layers=False)
+    )["params"]
+
+    self.assertEmpty(hf_state)
+    self.assertTrue(hf_scale.is_deleted())
+    self.assertFalse(restored["a"].is_deleted())
+    self.assertFalse(restored["b"].is_deleted())
+    np.testing.assert_array_equal(restored["a"], expected)
+    np.testing.assert_array_equal(restored["b"], expected * 2)
+
+  def test_delete_inputs_ignores_deleted_results(self):
+    # Already-deleted arrays in `results` (e.g. a popped HF tensor passed in `keep`) must be skipped before
+    # `jax.block_until_ready`, while live results still protect shared buffers and non-aliasing inputs are freed.
+    read_sharding = NamedSharding(Mesh(np.array(jax.devices()[:1]), axis_names=("d",)), PartitionSpec("d"))
+    dst_sharding = NamedSharding(self.mesh, PartitionSpec("x"))
+    deleted_result = jax.device_put(np.ones((4,), dtype=np.float32), dst_sharding)
+    deleted_result.delete()
+    live_result = jax.device_put(np.arange(4, dtype=np.float32), dst_sharding)
+    shared_input = jax.device_put(live_result, read_sharding)
+    copied_input = jax.device_put(np.zeros((4,), dtype=np.float32), dst_sharding)
+
+    tensor_handling._delete_inputs([deleted_result, live_result], [copied_input, shared_input])  # pylint: disable=protected-access
+
+    self.assertTrue(copied_input.is_deleted())
+    self.assertFalse(shared_input.is_deleted())
+    self.assertFalse(live_result.is_deleted())
+
+  @parameterized.named_parameters(("small", 1 << 30), ("no_unsharded_axis", 0))
+  def test_reshard_early_return_deletes_copied_input(self, limit):
+    if jax.device_count() < 2:
+      self.skipTest("Needs 2 devices (e.g. XLA_FLAGS=--xla_force_host_platform_device_count=2).")
+    expected = np.arange(8, dtype=np.float32)
+    src = jax.device_put(expected, NamedSharding(self.mesh, PartitionSpec()))
+    dst_sharding = NamedSharding(Mesh(np.array(jax.devices()[:2]), axis_names=("x",)), PartitionSpec("x"))
+
+    with mock.patch.object(tensor_handling, "_MAX_RESHARD_BYTES", limit):
+      result = tensor_handling._reshard(src, dst_sharding, delete_input=True)  # pylint: disable=protected-access
+
+    self.assertTrue(src.is_deleted())
+    self.assertFalse(result.is_deleted())
+    self.assertEqual(result.sharding, dst_sharding)
+    np.testing.assert_array_equal(result, expected)
+
+  @parameterized.named_parameters(("one", 1), ("two", 2), ("three", 3), ("seven", 7), ("eight", 8))
+  def test_pieces_are_concatenated_in_pairs(self, num_pieces):
+    # One jitted concatenate of many pieces can take several times its result in XLA temporaries, so the pieces of a
+    # reshard are joined two at a time and each pair's inputs (and intermediate pair outputs) are eagerly freed.
+    sharding = NamedSharding(self.mesh, PartitionSpec(None, "x"))
+    pieces = [jax.device_put(np.full((2, 4), i, dtype=np.float32), sharding) for i in range(num_pieces)]
+    expected = np.concatenate([np.asarray(p) for p in pieces], axis=0)
+    real_fn = tensor_handling._concatenate_fn  # pylint: disable=protected-access
+    arities = []
+    pair_outputs = []
+
+    def counting_fn(axis, shard):
+      fn = real_fn(axis, shard)
+
+      def wrapped(*args):
+        arities.append(len(args))
+        out = fn(*args)
+        pair_outputs.append(out)
+        return out
+
+      return wrapped
+
+    with mock.patch.object(tensor_handling, "_concatenate_fn", side_effect=counting_fn):
+      result = tensor_handling._concatenate_pieces(pieces, 0, sharding)  # pylint: disable=protected-access
+
+    np.testing.assert_array_equal(result, expected)
+    self.assertEqual(result.sharding, sharding)
+    self.assertLen(arities, num_pieces - 1)
+    self.assertTrue(all(a == 2 for a in arities))
+    self.assertFalse(result.is_deleted())
+    if num_pieces == 1:
+      self.assertFalse(pieces[0].is_deleted())
+    else:
+      self.assertTrue(all(p.is_deleted() for p in pieces))
+      self.assertIs(pair_outputs[-1], result)
+      self.assertTrue(all(out.is_deleted() for out in pair_outputs[:-1]))
 
   @parameterized.named_parameters(
       # Tensors split over all devices: one reshard of the whole stack. Host tensors: one per tensor, per inner
