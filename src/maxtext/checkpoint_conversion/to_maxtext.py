@@ -192,6 +192,7 @@ def _resolve_shared_indexer_tensor(key: str, getter_fn: Callable[[str], Any], co
     ) from exc
 
 
+
 class LazyHFLoader:
   """
   Loads Hugging Face weights on-demand to minimize RAM usage.
@@ -500,7 +501,9 @@ def _build_multi_axis_stacked_tensor(
   axes = stacked_axes(mt_key, config, depth)
   # The hook function needs the shape of an individual slice: target_shape with
   # the stacked axes removed.
-  mt_slice_shape = slice_shape(target_shape, axes)
+  mt_slice_shape = (
+      [slice_shape(s, axes) for s in target_shape] if isinstance(target_shape, list) else slice_shape(target_shape, axes)
+  )
 
   def gather(keys, level):
     if level == depth:
@@ -542,14 +545,16 @@ def _build_single_axis_stacked_tensor(
       The final, assembled NumPy array for the MaxText parameter.
   """
   tensors_to_stack = []
+  sample_shape = target_shape[0] if isinstance(target_shape, list) else target_shape
 
-  axis_to_stack = single_stack_axis(mt_key, config, target_shape)
+  axis_to_stack = single_stack_axis(mt_key, config, sample_shape)
 
   # The hook function needs the shape of an individual slice, not the full stacked tensor.
   # We calculate it by removing the stacking dimension from the final target shape.
-  mt_slice_shape_list = list(target_shape)
-  del mt_slice_shape_list[axis_to_stack]
-  mt_slice_shape = tuple(mt_slice_shape_list)
+  if isinstance(target_shape, list):
+    mt_slice_shape = [s[:axis_to_stack] + s[axis_to_stack + 1 :] for s in target_shape]
+  else:
+    mt_slice_shape = target_shape[:axis_to_stack] + target_shape[axis_to_stack + 1 :]
 
   for hf_key_single in hf_source_keys:
     if isinstance(hf_key_single, (list, tuple)):

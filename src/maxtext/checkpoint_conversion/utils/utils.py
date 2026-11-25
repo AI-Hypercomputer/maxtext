@@ -1156,11 +1156,12 @@ def load_hf_dict_from_transformers(model_id: str, token: str, revision: str | No
     model_classes = [Qwen3OmniMoeForConditionalGeneration]
   # 2. For all other models, use AutoModel cascade logic
   else:
-    from transformers import AutoModel  # pylint: disable=import-outside-toplevel
+    from transformers import AutoModel, AutoModelForImageTextToText  # pylint: disable=import-outside-toplevel
     # Fallback cascade:
     # 1. AutoModelForCausalLM (Standard text-only LLMs)
-    # 2. Base AutoModel (Final fallback)
-    model_classes = [AutoModelForCausalLM, AutoModel]
+    # 2. AutoModelForImageTextToText (Multimodal VLMs with LM head, e.g. Muse-Spark)
+    # 3. Base AutoModel (Final fallback)
+    model_classes = [AutoModelForCausalLM, AutoModelForImageTextToText, AutoModel]
 
   # Note: transformers deprecates `torch_dtype` in favor of standard `dtype` in model loading
   last_exception = None

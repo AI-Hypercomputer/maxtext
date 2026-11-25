@@ -1034,40 +1034,64 @@ class BlockCausalMaskTest(unittest.TestCase):
       sa_qk_diag_skip=False,
       sa_sv_diag_skip=False,
       sa_qk_diag_grid=2,
+      sa_num_stacked_q_heads=1,
   ):
     """Builds a minimal flash-attention operator for dispatch tests."""
     config = types.SimpleNamespace(
         causal_block_size=4,
         context_parallel_strategy="all_gather",
+        local_context_parallel_strategy="",
         context_parallel_load_balance=context_parallel_load_balance,
         context_sharding="context",
         ulysses_context_sharding="ulysses",
         sa_block_q=4,
         sa_block_kv=4,
         sa_block_kv_compute=4,
+        local_sa_block_q=4,
+        local_sa_block_kv=4,
+        local_sa_block_kv_compute=4,
         # `eval_sa_*` mirrors base.yml: it defaults to the training values and
         # only differs when a test asks for evaluation-specific blocks.
         eval_sa_block_q=eval_block_size,
         eval_sa_block_kv=eval_block_size,
         eval_sa_block_kv_compute=eval_block_size,
+        eval_local_sa_block_q=eval_block_size,
+        eval_local_sa_block_kv=eval_block_size,
+        eval_local_sa_block_kv_compute=eval_block_size,
         sa_block_q_dkv=4,
         sa_block_kv_dkv=4,
         sa_block_kv_dkv_compute=4,
+        local_sa_block_q_dkv=4,
+        local_sa_block_kv_dkv=4,
+        local_sa_block_kv_dkv_compute=4,
         sa_block_q_dq=4,
         sa_block_kv_dq=4,
+        local_sa_block_q_dq=4,
+        local_sa_block_kv_dq=4,
         sa_use_fused_bwd_kernel=True,
+        local_sa_use_fused_bwd_kernel=True,
         sa_q_layout="HEAD_DIM_MINOR",
         sa_k_layout="HEAD_DIM_MINOR",
         sa_v_layout="HEAD_DIM_MINOR",
+        local_sa_q_layout="HEAD_DIM_MINOR",
+        local_sa_k_layout="HEAD_DIM_MINOR",
+        local_sa_v_layout="HEAD_DIM_MINOR",
         eval_sa_q_layout=eval_qkv_layout,
         eval_sa_k_layout=eval_qkv_layout,
         eval_sa_v_layout=eval_qkv_layout,
+        eval_local_sa_q_layout=eval_qkv_layout,
+        eval_local_sa_k_layout=eval_qkv_layout,
+        eval_local_sa_v_layout=eval_qkv_layout,
         use_splash_scheduler=False,
+        local_use_splash_scheduler=False,
         sa_fuse_reciprocal=False,
+        local_sa_fuse_reciprocal=False,
         sa_use_base2_exp=False,
+        local_sa_use_base2_exp=False,
         sa_qk_diag_skip=sa_qk_diag_skip,
         sa_sv_diag_skip=sa_sv_diag_skip,
         sa_qk_diag_grid=sa_qk_diag_grid,
+        sa_num_stacked_q_heads=sa_num_stacked_q_heads,
         use_tokamax_splash=use_tokamax_splash,
         use_jax_splash=False,
         cost_estimate_flops_fwd=-1,
@@ -1088,6 +1112,7 @@ class BlockCausalMaskTest(unittest.TestCase):
         mesh=mesh,
         attention_kernel="flash",
         attention_type=attention_type,
+        sliding_window_size=4 if attention_type == AttentionType.LOCAL_SLIDING else None,
     )
 
   def test_dense_and_splash_masks_match(self):
@@ -1360,6 +1385,17 @@ class BlockCausalMaskTest(unittest.TestCase):
         else:
           self.assertNotIn("qk_diag_skip", kw)
           self.assertNotIn("sv_diag_skip", kw)
+        self.assertNotIn("num_stacked_q_heads", kw)
+
+    for attention_type in (AttentionType.GLOBAL, AttentionType.LOCAL_SLIDING):
+      with self.subTest(attention_type=attention_type, stacked_q_heads=8):
+        op_stacked = self._make_flash_op(
+            attention_type=attention_type,
+            use_tokamax_splash=True,
+            sa_num_stacked_q_heads=8,
+        )
+        kw_stacked = capture_splash_config(op_stacked, query, query)
+        self.assertEqual(kw_stacked["num_stacked_q_heads"], 8)
 
   def _capture_splash_mask(self, op, query, q_axis="context"):
     """Runs `tpu_flash_attention` far enough to see which mask it built."""

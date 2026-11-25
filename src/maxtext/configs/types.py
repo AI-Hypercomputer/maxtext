@@ -360,6 +360,7 @@ ModelName = Literal[
     "ming-3.0-audio-tiny",
     "ming-3.0-audio-tiny-talker",
     "hy4-preview",
+    "muse-spark-816b-a42b",
 ]
 
 
@@ -2575,6 +2576,43 @@ class Ming(BaseModel):
   ming_vae_sample_rate: int = Field(44100, description="Output waveform sample rate.")
 
 
+class MuseSpark(BaseModel):
+  """Configuration specific to Meta Muse-Spark models."""
+
+  muse_spark_post_norm_eps: float = Field(
+      1.0e-8,
+      description="Epsilon for Muse-Spark post-attention, post-expert, and post-feedforward RMSNorm layers.",
+  )
+  muse_spark_qk_scale_factor: float = Field(
+      5.4730064863875,
+      description="Multiplicative scale factor applied to query after scaleless QK RMSNorm.",
+  )
+  muse_spark_output_multiplier: float = Field(
+      0.17677669529663687,
+      description="Multiplicative scale factor applied to MoE router logits and final output head logits.",
+  )
+  muse_spark_residual_gate_temperature: float = Field(
+      0.3,
+      description="Temperature scaling factor for learnable Muse-Spark residual gates.",
+  )
+  muse_spark_moe_num_token_chunks: PositiveInt = Field(
+      1,
+      description=(
+          "With expert parallelism, split each device's tokens into this many sequential chunks so the expert-parallel"
+          " collectives of one chunk overlap the grouped matmuls of the previous one. Must divide the per-device token"
+          " count. 1 disables chunking."
+      ),
+  )
+  muse_spark_moe_dropless_overflow: bool = Field(
+      True,
+      description=(
+          "With expert parallelism and ragged_buffer_factor > 0, process local expert slots exceeding the per-shard"
+          " buffer in extra window passes so zero tokens are dropped. Set to False to drop excess slots beyond"
+          " ragged_buffer_factor and avoid dynamic while_loop overflow passes during pre-training."
+      ),
+  )
+
+
 class Qwen3Next(BaseModel):
   """Configuration specific to Qwen3-Next models with Gated Delta Net."""
 
@@ -3026,7 +3064,9 @@ class HardwareAndMesh(BaseModel):
       ReorderStrategy.AUTO,
       description="Reorder strategy for load-balanced context parallelism.",
   )
-  custom_mesh: str = Field("", description="Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']")
+  custom_mesh: str = Field(
+      "", description="Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8', 'ep8_z_fsdp64_xycore']"
+  )
   custom_mesh_and_rule: CustomRule = Field(
       CustomRule.DEFAULT,
       description="Customized mesh and logical rules for granularity.",
@@ -3428,6 +3468,13 @@ class RematAndOffload(BaseModel):
           " `unsort_output_and_ra2a` paths are still recomputed."
       ),
   )
+  moe_combined: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the combined MoE output before post_expert_proj. 'device' saves the [B, S, D] tensor so the"
+          " backward pass does not recompute the expert combine."
+      ),
+  )
   # TODO: Update to moe_tc_routing_weights.
   moe_tc_routing_checkpoint: RematLocation = Field(
       RematLocation.REMAT,
@@ -3484,6 +3531,10 @@ class RematAndOffload(BaseModel):
   attention_out: RematLocation = Field(
       RematLocation.REMAT,
       description="Remat policy for the attention output.",
+  )
+  pre_expert_norm: RematLocation = Field(
+      RematLocation.REMAT,
+      description="Remat policy for the input of the pre-expert norm (the pre_expert_proj output).",
   )
   engram: RematLocation = Field(RematLocation.REMAT, description="Remat policy for the engram output.")
   gdn: RematLocation = Field(
@@ -5532,6 +5583,7 @@ FORCED_ROUTING_SUPPORTED_DECODER_BLOCKS = (
     DecoderBlockType.QWEN3_5,
     DecoderBlockType.MIXTRAL,
     DecoderBlockType.GEMMA4,
+    DecoderBlockType.MUSE_SPARK,
 )
 
 
@@ -5962,6 +6014,7 @@ class MaxTextConfig(
     Qwen3_8FlashNext,
     Ming,
     KimiK3,
+    MuseSpark,
     # Parallelism and Layout
     HardwareAndMesh,
     LayoutAndSharding,
@@ -7831,6 +7884,7 @@ class MaxTextConfig(
           "moe_x_sorted",
           "moe_routing_maps",
           "moe_packed_routing_maps",
+          "moe_combined",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
@@ -7852,6 +7906,7 @@ class MaxTextConfig(
           "gdn",
           "gdn_states",
           "gdn_cp_state",
+          "pre_expert_norm",
       ]
       if self.gdn in ("device", "offload") and self.gdn_states in ("device", "offload") and self.gdn != self.gdn_states:
         raise ValueError(
@@ -7908,6 +7963,8 @@ class MaxTextConfig(
     _resolve_prune_shared_indexers(self)
     _validate_index_share(self)
     if self.using_pipeline_parallelism:
+      if self.decoder_block == DecoderBlockType.MUSE_SPARK:
+        raise ValueError("muse_spark does not support pipeline parallelism; do not enable pipeline parallelism.")
       num_stages = int(self.ici_pipeline_parallelism * self.dcn_pipeline_parallelism)
       if self.num_pipeline_repeats == -1:
         num_pipeline_repeats, remainder = divmod(
@@ -8123,6 +8180,10 @@ class MaxTextConfig(
           (
               self.num_experts > 1 and self.decoder_block == DecoderBlockType.KIMI_LINEAR,
               "is not supported with MoE and `decoder_block=kimi_linear` (its latent MoE block takes no `token_mask`)",
+          ),
+          (
+              self.num_experts > 1 and self.decoder_block == DecoderBlockType.MUSE_SPARK,
+              "is not supported with MoE and `decoder_block=muse_spark` (its custom MoE block takes no `token_mask`)",
           ),
           (self.indexer_loss_scaling_factor > 0.0, "is not supported with `indexer_loss_scaling_factor > 0`"),
           (self.use_qk_clip, "is not supported with QK-Clip (`use_qk_clip=True`)"),
@@ -9149,6 +9210,7 @@ class MaxTextConfig(
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
+        DecoderBlockType.MUSE_SPARK,
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
@@ -9628,6 +9690,7 @@ class RLConfig(
     Qwen3Next,
     Qwen3_8FlashNext,
     Ming,
+    MuseSpark,
     MultimodalGeneral,
     Muon,
     FineTuning,
@@ -9893,6 +9956,13 @@ class RLConfig(
             "decoder_block ('qwen3_next' or 'qwen3_5')."
         )
 
+    if self.decoder_block == DecoderBlockType.MUSE_SPARK:
+      if self.ici_pipeline_parallelism > 1 or self.dcn_pipeline_parallelism > 1:
+        raise ValueError("muse_spark does not support pipeline parallelism; do not enable pipeline parallelism.")
+      rl_shard_mode = ShardMode(self.shard_mode.lower()) if isinstance(self.shard_mode, str) else self.shard_mode
+      if rl_shard_mode == ShardMode.EXPLICIT:
+        raise ValueError("Decoder 'muse_spark' is not supported with 'explicit' sharding.")
+
     # Set tokenizer_path based on model_name if not explicitly provided.
     tokenizer_path = getattr(self, "tokenizer_path", None)
     if tokenizer_path is None:
@@ -10039,6 +10109,7 @@ class RLConfig(
           "moe_x_sorted",
           "moe_routing_maps",
           "moe_packed_routing_maps",
+          "moe_combined",
           "moe_tc_routing_checkpoint",
           "moe_mlpwi_1",
           "moe_mlpwo",
@@ -10059,6 +10130,7 @@ class RLConfig(
           "gdn",
           "gdn_states",
           "gdn_cp_state",
+          "pre_expert_norm",
       ]
       if self.gdn in ("device", "offload") and self.gdn_states in ("device", "offload") and self.gdn != self.gdn_states:
         raise ValueError(
@@ -10079,6 +10151,15 @@ class RLConfig(
       if "context_offload" not in self.tensors_to_offload:
         self.tensors_to_offload.append("context_offload")
     _validate_moe_packed_routing_maps(self)
+    if self.sa_num_stacked_q_heads < 1:
+      raise ValueError(f"sa_num_stacked_q_heads must be >= 1, got {self.sa_num_stacked_q_heads}.")
+    if self.sa_num_stacked_q_heads > 1 and self.num_kv_heads > 0:
+      gqa_group = self.num_query_heads // self.num_kv_heads
+      if gqa_group % self.sa_num_stacked_q_heads != 0:
+        raise ValueError(
+            f"sa_num_stacked_q_heads ({self.sa_num_stacked_q_heads}) must divide"
+            f" num_query_heads // num_kv_heads ({gqa_group})."
+        )
 
     _validate_remat_policy(
         self.remat_policy,

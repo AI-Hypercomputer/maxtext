@@ -1831,14 +1831,16 @@ class AttentionOp(nnx.Module):
           and q_len == kv_len
           and not (self._context_parallel_size() > 1 and self._load_balanced_context_parallel(sequence_load_balanced))
       )
-      diag_skip_kwargs = {}
+      extra_splash_kwargs: dict[str, Any] = {}
       if use_diag_skip and (self.qk_diag_skip or self.sv_diag_skip):
         # Only passed when enabled so older Tokamax releases (< 0.0.15) keep working by default.
-        diag_skip_kwargs = {
+        extra_splash_kwargs.update({
             "qk_diag_skip": self.qk_diag_skip,
             "sv_diag_skip": self.sv_diag_skip,
             "qk_diag_grid": config.sa_qk_diag_grid,
-        }
+        })
+      if config.sa_num_stacked_q_heads > 1:
+        extra_splash_kwargs["num_stacked_q_heads"] = config.sa_num_stacked_q_heads
       return tokamax_splash_kernel.SplashConfig(
           block_q=min(blocks.block_q, q_len),
           block_kv=min(blocks.block_kv, kv_len),
@@ -1879,7 +1881,7 @@ class AttentionOp(nnx.Module):
               else (_COMPRESSED_DQ_REDUCTION_STEPS if self.attention_type == AttentionType.COMPRESSED else None)
           ),
           use_experimental_scheduler=self.use_splash_scheduler,
-          **diag_skip_kwargs,
+          **extra_splash_kwargs,
       )
     return splash_attention_kernel.BlockSizes(
         block_q=min(blocks.block_q, q_len),
