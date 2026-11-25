@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795570560632,
+  "lastUpdate": 1795581791512,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -76780,6 +76780,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3511.3689999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 450,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Tianshu Bao",
+            "username": "tianshub",
+            "email": "tsbao@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "ed9be083096738520d27e0534e113915efc1d2fc",
+          "message": "Training engine: materialize `get_metrics()` buffer on host\n\n# Description\n\n`MaxTextTrainingEngine.get_metrics()` previously returned an on-device `MetricsBuffer` with `jax.Array` leaves, requiring downstream RPC/worker layers (such as Tunix's `TrainerWorker`) to import JAX and call `jax.device_get(...)` before sending metrics over the wire.\n\n`MaxTextTrainingEngine.get_metrics()` now materializes `weighted_metrics` and `scalar_metrics` to host NumPy arrays via a single batched `jax.device_get(...)` and normalizes `mode` to a plain `str`, matching Tunix's `PeftTrainer.get_metrics()` contract while keeping `MetricsRecorder.get_metrics_history()` unchanged for callers that want on-device history.\n\n# Tests\n\n```bash\npython -m pytest tests/post_training/unit/maxtext_engine_test.py -k test_record_and_get_metrics -q\n```\n\nPiperOrigin-RevId: 1029545561",
+          "timestamp": "2026-11-25T04:09:24Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/ed9be083096738520d27e0534e113915efc1d2fc"
+        },
+        "date": 1795581790393,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 229.42899999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 54.946999999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2249.706,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 176.24499999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 14,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 330.85999999999996,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3311.6860000000006,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 450,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1832.79,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 352.9599999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3520.879,
             "unit": "sec"
           },
           {
