@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795555129029,
+  "lastUpdate": 1795570560632,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -76673,6 +76673,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Count",
             "value": 446,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "94f791f6033a599402de2e504f0080b3ab770a15",
+          "message": "Gate RoutedMoE.unpermute combine transpose on EP and FSDP prefetch.\n\nPR #6091 switched `RoutedMoE.unpermute` to transpose routing weights and indices into `(k, tokens)` order before the combine einsum. That layout avoids 3D activation reshapes under expert parallelism, `prefetch_fsdp_weights`, or `moe_use_direct_token_gather`, but adds extra transpose and gather work on pure-FSDP (`EP=1`) runs where `permute` keeps `(tokens, k)` slot order. Gate the `(k, tokens)` combine on `ep_size > 1`, `prefetch_fsdp_weights`, or `moe_use_direct_token_gather`, and restore direct `(tokens, k)` unsort with `\"BKE,BK -> BE\"` contraction otherwise.\n\nOn 11-20 TPU7x A/B benchmarks, DeepSeek-V3 671B 2D-FSDP on 4x8x8 improves from 25.785s to 25.536s (-0.97%) with +2.7 GB compile HBM (83.8 GB to 86.5 GB). Qwen3-30B-A3B BF16 FSDP on 4x4x4 improves by -0.32% (4.563s to 4.548s) on libtpu 0.0.53.1 and -1.84% (4.599s to 4.514s) on libtpu 0.0.51, with unchanged 90.7 GB compile HBM and identical training loss.\n\nPiperOrigin-RevId: 1029455261",
+          "timestamp": "2026-11-25T01:13:36Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/94f791f6033a599402de2e504f0080b3ab770a15"
+        },
+        "date": 1795570559636,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 222.2899999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 55.662000000000006,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2189.9610000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 178.2989999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 14,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 329.29100000000005,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3326.2670000000007,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 450,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1866.5309999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 357.017,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3511.3689999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 450,
             "unit": "count"
           }
         ]
