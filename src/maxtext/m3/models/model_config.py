@@ -14,10 +14,15 @@
 
 """Base `ModelConfig` for m3 Model Garden families."""
 
-from typing import Any
+import copy
+import enum
+from typing import Any, ClassVar
 
 from maxtext.configs.components import DType
 from pydantic import BaseModel, ConfigDict, Field
+
+# `MaxTextConfig` keys that use a value (not None) to mean "off"; m3 fields use None.
+PYCONFIG_NONE_VALUES: dict[str, Any] = {"final_logits_soft_cap": 0.0}
 
 
 class ModelConfig(BaseModel):
@@ -28,6 +33,11 @@ class ModelConfig(BaseModel):
   """
 
   model_config = ConfigDict(extra="forbid", frozen=True)
+
+  # `MaxTextConfig` mapping (transitional, used by `to_pyconfig_dict()` and the `from_pyconfig` bridge):
+  # `{pyconfig_key: field}` for values read from this config, and fixed `{pyconfig_key: value}` settings.
+  PYCONFIG_KEYS: ClassVar[dict[str, str]] = {}
+  PYCONFIG_CONSTANTS: ClassVar[dict[str, Any]] = {}
 
   model_type: str = Field(..., description="HuggingFace architecture family identifier.")
   vocab_size: int = Field(..., gt=0, description="Vocabulary size.")
@@ -59,12 +69,24 @@ class ModelConfig(BaseModel):
     return {}
 
   def to_pyconfig_dict(self) -> dict[str, Any] | None:
-    """Returns a `MaxTextConfig`-compatible override dict for `pyconfig.py` YAML-free fallback.
+    """Returns `MaxTextConfig` field values built from `PYCONFIG_KEYS` / `PYCONFIG_CONSTANTS`, or None if unmapped.
 
     Transitional: remove together with the `pyconfig.py` registry fallback once pre-training no longer reads
     `base.yml`.
     """
-    return None
+    if not self.PYCONFIG_KEYS and not self.PYCONFIG_CONSTANTS:
+      return None
+    out = copy.deepcopy(self.PYCONFIG_CONSTANTS)
+    for key, field in self.PYCONFIG_KEYS.items():
+      value = getattr(self, field)
+      if value is None:
+        value = PYCONFIG_NONE_VALUES.get(key)
+      elif isinstance(value, enum.Enum):
+        value = value.value
+      elif isinstance(value, tuple):
+        value = list(value)
+      out[key] = value
+    return out
 
   @classmethod
   def from_model_name(cls, model_name: str, **overrides: Any) -> "ModelConfig":
