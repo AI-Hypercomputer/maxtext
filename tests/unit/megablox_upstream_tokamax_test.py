@@ -49,8 +49,8 @@ def _q_fp8(x: jax.Array, axes: list[int]):
   return qpl.quantize(x, jnp.float8_e4m3fn, channelwise_axes=axes, calibration_method="fixed,-224,224")
 
 
-def _route_ctx(use_upstream: bool):
-  return contextlib.nullcontext() if use_upstream else mock.patch.object(ops, "gmm_fuser", None)
+def _route_ctx(use_upstream: bool, attr: str = "gmm_fuser"):
+  return contextlib.nullcontext() if use_upstream else mock.patch.object(ops, attr, None)
 
 
 def _assert_distinct_hlo(runner, *args):
@@ -185,6 +185,99 @@ class UpstreamTokamaxDispatchTest(parameterized.TestCase):
     else:
       fork.assert_called_once()
 
+  @parameterized.named_parameters(
+      {"testcase_name": "3d_lhs_fuser", "args": (3, 2, False, _TILES), "want": "fuser"},
+      {"testcase_name": "3d_rhs_fuser", "args": (2, 3, False, _TILES), "n_dim": 256, "want": "fuser"},
+      {"testcase_name": "3d_rhs_window", "args": (2, 3, False, _TILES), "n_dim": 7168, "want": "upstream"},
+      {"testcase_name": "3d_lhs_ps", "args": (3, 2, True, _TILES), "want": "upstream"},
+      {"testcase_name": "3d_window_1792", "args": (3, 2, False, _W1792), "k_dim": 7168, "want": "upstream"},
+      {
+          "testcase_name": "3d_lhs_nondiv_1536",
+          "args": (3, 2, False, _TILES),
+          "k_dim": 1536,
+          "want": "upstream",
+      },
+      {
+          "testcase_name": "3d_lhs_nondiv_2048",
+          "args": (3, 2, False, forked_gmm_v2.TileSizes(256, 2048, 256)),
+          "k_dim": 7168,
+          "want": "upstream",
+      },
+      {
+          "testcase_name": "3d_rhs_oversized_512",
+          "args": (2, 3, False, forked_gmm_v2.TileSizes(256, 1024, 1024)),
+          "n_dim": 512,
+          "want": "upstream",
+      },
+      {
+          "testcase_name": "3d_rhs_nondiv_1536",
+          "args": (2, 3, False, forked_gmm_v2.TileSizes(256, 1024, 1024)),
+          "n_dim": 1536,
+          "want": "upstream",
+      },
+      {"testcase_name": "3d_heuristic", "args": (3, 2, False, _HEUR), "want": "fork"},
+      {"testcase_name": "3d_ps_heuristic", "args": (3, 2, True, _HEUR), "want": "fork"},
+      {"testcase_name": "2d_only", "args": (2, 2, False, _TILES), "want": "fork"},
+      {"testcase_name": "2d_only_2d_ps", "args": (2, 2, True, _TILES), "want": "fork"},
+  )
+  def test_tgmm_route(self, args, want: str, k_dim: int | None = None, n_dim: int | None = None):
+    self.assertEqual(ops._tgmm_route(*args, k_dim=k_dim, n_dim=n_dim), want)  # pylint: disable=protected-access
+
+  @parameterized.named_parameters(
+      {"testcase_name": "fuser", "lhs_3d": True, "want": "fuser"},
+      {"testcase_name": "upstream", "lhs_3d": True, "has_ps": True, "want": "upstream"},
+      {"testcase_name": "heuristic", "lhs_3d": True, "heuristic": True, "want": "fork"},
+      {"testcase_name": "fork_2d", "want": "fork"},
+      {"testcase_name": "hide_fuser", "lhs_3d": True, "hide_fuser": True, "want": "fork"},
+  )
+  def test_call_tgmm_v2_wiring(
+      self, want: str, lhs_3d: bool = False, has_ps: bool = False, hide_fuser: bool = False, heuristic: bool = False
+  ):
+    lhs = jnp.ones((512, 8, 128) if lhs_3d else (512, 1024), jnp.bfloat16)
+    rhs = jnp.ones((512, 256), jnp.bfloat16)
+    gs, tiling = jnp.array([256, 256], jnp.int32), (256, 1024, 256) * 3
+    ps = jnp.ones((2, 1024, 256), jnp.bfloat16) if has_ps else None
+    zero_out = jnp.zeros((2, 1024, 256), jnp.bfloat16)
+    # Stand-in Tokamax modules, as in test_call_gmm_v2_wiring: routing and argument wiring on any tokamax version.
+    fuser = mock.Mock(tgmm_v2_fusible=mock.Mock(return_value=zero_out))
+    up_gmm, up_tgmm = mock.Mock(), mock.Mock(tgmm_v2=mock.Mock(return_value=zero_out))
+    fusion = mock.Mock(fuse=lambda f: f)
+    if hide_fuser:
+      fuser = up_gmm = up_tgmm = fusion = None
+    with (
+        mock.patch.object(ops.pltpu, "get_tpu_info", autospec=True, return_value=mock.Mock(vmem_capacity_bytes=64)),
+        mock.patch.object(ops, "gmm_fuser", fuser),
+        mock.patch.object(ops, "tokamax_gmm_v2", up_gmm),
+        mock.patch.object(ops, "tokamax_tgmm_v2", up_tgmm),
+        mock.patch.object(ops, "op_fusion", fusion),
+        mock.patch.object(
+            ops.tgmm_v2, "tgmm_v2", autospec=True, return_value=jnp.ones((2, 1024, 256), jnp.bfloat16)
+        ) as fork,
+    ):
+      out = ops._call_tgmm_v2(  # pylint: disable=protected-access
+          lhs=lhs,
+          rhs=rhs,
+          group_sizes=gs,
+          num_actual_groups=2,
+          rhs_scale=None,
+          group_offset=None,
+          partial_sum=ps,
+          preferred_element_type=jnp.bfloat16,
+          tiling=tiling,
+          use_gmm_v2_heuristic_tiling=heuristic,
+      )
+    self.assertEqual(out.shape, (2, 1024, 256))
+    if want == "fuser":
+      fuser.tgmm_v2_fusible.assert_called_once()
+      up_tgmm.tgmm_v2.assert_not_called()
+      fork.assert_not_called()
+    elif want == "upstream":
+      up_tgmm.tgmm_v2.assert_called_once()
+      self.assertEqual(up_tgmm.tgmm_v2.call_args.kwargs["lhs"].shape, (512, 1024))
+      fork.assert_not_called()
+    else:
+      fork.assert_called_once()
+
 
 @pytest.mark.tpu_only
 class UpstreamTokamaxTpuParityTest(parameterized.TestCase):
@@ -194,7 +287,7 @@ class UpstreamTokamaxTpuParityTest(parameterized.TestCase):
     super().setUp()
     if jax.default_backend() != "tpu":
       self.skipTest("TPU only")
-    if ops.gmm_fuser is None or ops.op_fusion is None:
+    if ops.gmm_fuser is None or ops.op_fusion is None or ops.tokamax_tgmm_v2 is None:
       self.skipTest("needs tokamax >= 0.0.18")
 
   @parameterized.product(path=("3d_lhs_fuser", "3d_lhs_window", "3d_out", "3d_partial_sum"), dtype=("bf16", "fp8"))
@@ -330,6 +423,101 @@ class UpstreamTokamaxTpuParityTest(parameterized.TestCase):
     out_new, grads_new = runner(True, xq3, w0, w1, wo)
     out_fork, grads_fork = runner(False, xq3, w0, w1, wo)
     np.testing.assert_array_equal(out_new.astype(jnp.float32), out_fork.astype(jnp.float32))
+    if use_qwix:
+      dx_n = grads_new[0].qvalue.astype(jnp.float32) * grads_new[0].scale
+      dx_f = grads_fork[0].qvalue.astype(jnp.float32) * grads_fork[0].scale
+      np.testing.assert_allclose(dx_n, dx_f, rtol=1e-2, atol=1e-2)
+      for g_n, g_f in zip(grads_new[1:], grads_fork[1:]):
+        np.testing.assert_allclose(g_n.astype(jnp.float32), g_f.astype(jnp.float32), rtol=1e-2, atol=1e-2)
+    else:
+      for g_n, g_f in zip(grads_new, grads_fork):
+        np.testing.assert_array_equal(g_n.astype(jnp.float32), g_f.astype(jnp.float32))
+
+  @parameterized.product(has_ps=(False, True), dtype=("bf16", "fp8"))
+  def test_tgmm_parity_vs_forked(self, has_ps: bool, dtype: str):
+    m, d, f, g = 2048, 2048, 1024, 4
+    gs, tiling = jnp.array([300, 0, 517, 700], jnp.int32), (512, 1024, 1024) * 3
+    k0, k1, k2 = jax.random.split(jax.random.key(41), 3)
+    dout_raw, lhs_raw = _rand(k0, (m, f), jnp.bfloat16), _rand(k1, (m, d), jnp.bfloat16)
+    if dtype == "fp8":
+      dq, xq = _q_fp8(dout_raw, []), _q_fp8(lhs_raw, [])
+      dout_in = qpl.QArray(qvalue=dq.qvalue, scale=dq.scale, zero_point=None, qtype=dq.qtype)
+      lhs3_in = _to3d(xq.qvalue)
+    else:
+      dout_in, lhs3_in = dout_raw, _to3d(lhs_raw)
+    ps_in = _rand(k2, (g, d, f), jnp.float32, 0.1) if has_ps else None
+
+    @functools.partial(jax.jit, static_argnames=("use_upstream",))
+    def runner(use_upstream: bool, c, a, p):
+      with _route_ctx(use_upstream, "tokamax_tgmm_v2"):
+        return ops._drhs_run_tokamax_v2(  # pylint: disable=protected-access
+            c, a, gs, None, g, jnp.float32, tiling, False, partial_sum=p
+        )
+
+    _assert_distinct_hlo(runner, dout_in, lhs3_in, ps_in)
+    y_new, y_fork = runner(True, dout_in, lhs3_in, ps_in), runner(False, dout_in, lhs3_in, ps_in)
+    if dtype == "bf16":
+      np.testing.assert_array_equal(y_new, y_fork)
+    else:
+      np.testing.assert_allclose(y_new, y_fork, rtol=2e-2, atol=2e-2 * float(np.max(np.abs(y_fork))))
+
+  @parameterized.parameters("bf16", "fp8_accum_chunk")
+  def test_ops_gmm_tgmm_vjp_matches_forked(self, mode: str):
+    m, d, f, g = 2048, 2048, 1024, 4
+    gs = jnp.array([300, 0, 517, 700], jnp.int32)
+    k0, k1, k2, k3 = jax.random.split(jax.random.key(45), 4)
+    x = _rand(k0, (m, d), jnp.bfloat16)
+    wi, wo = _rand(k1, (g, d, f), jnp.bfloat16, 0.05), _rand(k2, (g, f, d), jnp.bfloat16, 0.05)
+    douts = [_rand(k, (m, d), jnp.bfloat16, 1e-2) for k in jax.random.split(k3, 2)]
+    tiling, use_qwix = (512, 1024, 1024) * 3, mode == "fp8_accum_chunk"
+    rule = None
+    xq3 = _to3d(x)
+    if use_qwix:
+      rule = qwix.QtRule(
+          weight_qtype=jnp.float8_e4m3fn,
+          act_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e4m3fn,
+          weight_calibration_method="fixed,-224,224",
+          act_calibration_method="fixed,-224,224",
+          bwd_calibration_method="fixed,0.00125",
+          disable_channelwise_axes=True,
+      )
+      xq = _q_fp8(x, [])
+      xq3 = qpl.QArray(qvalue=_to3d(xq.qvalue), scale=xq.scale, zero_point=None, qtype=xq.qtype)
+    common = {
+        "preferred_element_type": jnp.bfloat16,
+        "use_qwix_quantization": use_qwix,
+        "qwix_rule": rule,
+        "use_gmm_v2": True,
+        "use_tokamax_backend": True,
+        "use_dlhs_transpose_rhs": True,
+        "fuse_dlhs_scale": True,
+        "fuse_3d_dlhs_ps": True,
+    }
+
+    @functools.partial(jax.jit, static_argnames=("use_upstream",))
+    def runner(use_upstream: bool, x_in, wi_in, wo_in):
+      def chunk(a, bi, bo, ret_rhs):
+        res0 = ops.gmm(a, bi, gs, tiling=tiling, return_rhs=ret_rhs, **common)
+        h0, wi_out = res0 if ret_rhs else (res0, bi)
+        act = jax.nn.silu(h0.astype(jnp.float32)).astype(jnp.bfloat16)
+        res1 = ops.gmm(act, bo, gs, tiling=tiling, return_rhs=ret_rhs, out_is_3d=True, **common)
+        out, wo_out = res1 if ret_rhs else (res1, bo)
+        return out, (wi_out, wo_out)
+
+      def fwd(a, bi, bo):
+        out_a, (wi_q, wo_q) = chunk(a, bi, bo, True)
+        return out_a, chunk(a, wi_q, wo_q, False)[0]
+
+      with _route_ctx(use_upstream, "tokamax_tgmm_v2"):
+        outs, vjp = jax.vjp(fwd, x_in, wi_in, wo_in)
+        return outs, vjp(tuple(_to3d(c) for c in douts))
+
+    _assert_distinct_hlo(runner, xq3, wi, wo)
+    outs_new, grads_new = runner(True, xq3, wi, wo)
+    outs_fork, grads_fork = runner(False, xq3, wi, wo)
+    for o_n, o_f in zip(outs_new, outs_fork):
+      np.testing.assert_array_equal(o_n.astype(jnp.float32), o_f.astype(jnp.float32))
     if use_qwix:
       dx_n = grads_new[0].qvalue.astype(jnp.float32) * grads_new[0].scale
       dx_f = grads_fork[0].qvalue.astype(jnp.float32) * grads_fork[0].scale
