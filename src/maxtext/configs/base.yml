@@ -1826,6 +1826,8 @@ gdn_chunk_size: 64
 use_qk_norm_in_gdn: true
 # Context parallelism mode for Gated Delta Net ('auto', 'head', or 'seq')
 gdn_cp_mode: 'auto'
+# Whether to use the Tokamax Gated Delta Net kernel for GDN layers
+use_tokamax_gdn: false
 # The ratio of dimension to apply ROPE on
 partial_rotary_factor: 1.0
 
