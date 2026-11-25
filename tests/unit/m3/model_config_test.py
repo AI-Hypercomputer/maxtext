@@ -195,10 +195,6 @@ class ModelConfigTest(absltest.TestCase):
     cases = [
         ("qwen3-0.6b", "qwen3-0.6b.yml"),
         ("qwen3-vl-2b", "qwen3-vl-2b.yml"),
-        ("glm5.3-flash", "glm5.3-flash.yml"),
-        ("granite-3.0-1b-a400m", "granite-3.0-1b-a400m.yml"),
-        ("granitemoe", "granite-3.0-1b-a400m.yml"),
-        ("qwen3.8-flash-next", "qwen3.8-flash-next.yml"),
     ]
     with open(_MODEL_YAML_DIR.parent / "base.yml", encoding="utf-8") as f:
       base_yml = yaml.safe_load(f)
@@ -213,6 +209,13 @@ class ModelConfigTest(absltest.TestCase):
         for key in actual.keys() - expected.keys():
           default = base_yml[key] if key in base_yml else MaxTextConfig.model_fields[key].default
           self.assertEqual(actual[key], default, f"{model_name}.{key} differs from the base.yml default")
+
+    # m3-only families have no model YAML; `pyconfig` reads their presets through the registry.
+    for model_name in ("glm5.3-flash", "granite-3.0-1b-a400m", "qwen3.8-flash-next"):
+      with self.subTest(yaml_free_model=model_name):
+        self.assertFalse((_MODEL_YAML_DIR / f"{model_name}.yml").exists())
+        self.assertTrue(get_pyconfig_model_dict(model_name)["use_m3_model"])
+    self.assertEqual(get_pyconfig_model_dict("granitemoe"), get_pyconfig_model_dict("granite-3.0-1b-a400m"))
 
   def test_glm5_dataclass_and_hf_json_parity(self):
     full_cfg = Glm5ModelConfig.glm5_3_flash()

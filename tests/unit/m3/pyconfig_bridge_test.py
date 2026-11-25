@@ -12,8 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the `from_pyconfig` bridge."""
+"""Unit tests for the `from_pyconfig` bridge and the `pyconfig` registry fallback."""
 
+import os
 import pathlib
 import types as pytypes
 from unittest import mock
@@ -33,7 +34,7 @@ _BASE_YML = str(pathlib.Path(__file__).resolve().parents[3] / "src" / "maxtext" 
 
 
 class PyconfigBridgeTest(absltest.TestCase):
-  """Tests `from_pyconfig` translation and fail-fast checks."""
+  """Tests `from_pyconfig` translation, fail-fast checks, and the `pyconfig` registry fallback."""
 
   def setUp(self):
     super().setUp()
@@ -73,6 +74,44 @@ class PyconfigBridgeTest(absltest.TestCase):
         self.assertIsNone(train_cfg.eval_interval)
         self.assertIsNone(train_cfg.eval_steps)
         self.assertEqual(train_cfg.mesh.shard_mode, "auto")
+
+  def test_pyconfig_falls_back_to_registry_without_model_yaml(self):
+    orig_exists = os.path.exists
+
+    def _hide_model_yamls(path: str) -> bool:
+      if str(path).endswith(".yml") and f"{os.sep}models{os.sep}" in str(path):
+        return False
+      return orig_exists(path)
+
+    # Models that still have a YAML load identically from the registry when it is hidden.
+    for model_name, extra in (("qwen3-0.6b", ()), ("qwen3-vl-2b", ("scan_layers=false",))):
+      with self.subTest(model=model_name):
+        yml_cfg = self._init_cfg(f"model_name={model_name}", *extra)
+        with mock.patch("maxtext.configs.pyconfig.os.path.exists", side_effect=_hide_model_yamls):
+          fallback_cfg = self._init_cfg(f"model_name={model_name}", *extra)
+        yml_dump = yml_cfg._pydantic_config.model_dump()  # pylint: disable=protected-access
+        fb_dump = fallback_cfg._pydantic_config.model_dump()  # pylint: disable=protected-access
+        # `dump_hlo_xla_flags` reads process env lazily inside MaxTextConfig validation.
+        yml_dump.pop("dump_hlo_xla_flags", None)
+        fb_dump.pop("dump_hlo_xla_flags", None)
+        self.assertEqual(fb_dump, yml_dump)
+
+    # m3-only models have no YAML and load through the registry.
+    for model_name in ("glm5.3-flash", "granite-3.0-1b-a400m", "qwen3.8-flash-next"):
+      with self.subTest(yaml_free_model=model_name):
+        cfg = self._init_cfg(f"model_name={model_name}")
+        self.assertEqual(cfg.model_name, model_name)
+        self.assertTrue(cfg.use_m3_model)
+
+    # Models with neither a YAML nor a preset still warn.
+    with mock.patch("maxtext.configs.pyconfig.os.path.exists", side_effect=_hide_model_yamls):
+      with self.assertLogs("maxtext.configs.pyconfig", level="WARNING") as logs:
+        self._init_cfg("model_name=llama3-8b")
+    self.assertTrue(any("llama3-8b" in msg for msg in logs.output))
+
+    # The double-override guard still applies to registry presets when `override_model_config=false`.
+    with self.assertRaisesRegex(ValueError, "vocab_size"):
+      self._init_cfg("model_name=glm5.3-flash", "vocab_size=256")
 
   def test_architecture_overrides_across_model_families(self):
     q3_cfg = self._init_cfg(
