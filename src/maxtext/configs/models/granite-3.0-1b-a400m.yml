@@ -39,3 +39,6 @@ logits_via_embedding: true
 load_balance_loss_weight: 0.0  # HF: router_aux_loss_coef=0.0
 enable_dropout: false
 tokenizer_type: "huggingface"
+megablox: false
+use_tokamax_gmm: false
+use_gmm_v2: false

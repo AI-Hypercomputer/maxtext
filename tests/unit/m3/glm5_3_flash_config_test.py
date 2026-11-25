@@ -372,6 +372,18 @@ class Glm5ConfigTest(absltest.TestCase):
     }
     s_ctx_1 = Glm5Sharding.from_mesh(mesh_ctx_1)
     self.assertEqual(s_ctx_1.ep_size, 1)
+    self.assertFalse(s_ctx_1.ep_in_batch)
+
+    mesh_ep4 = mock.create_autospec(jax.sharding.Mesh, instance=True)
+    mesh_ep4.axis_names = ("data", "fsdp", "tensor", "expert")
+    mesh_ep4.shape = {"data": 1, "fsdp": 2, "tensor": 1, "expert": 4}
+    s_ep4 = Glm5Sharding.from_mesh(mesh_ep4)
+    self.assertEqual(s_ep4.ep_size, 4)
+    self.assertTrue(s_ep4.ep_in_batch)
+    self.assertEqual(
+        s_ep4("kda_head_act", ("heads", "batch", None, None), m3_sharding.TensorType.ACTIVATION),
+        P(None, ("data", "fsdp", "expert"), None, None),
+    )
 
     mesh_ctx_2 = mock.create_autospec(jax.sharding.Mesh, instance=True)
     mesh_ctx_2.axis_names = ("data", "fsdp", "tensor", "expert", "context")
@@ -459,6 +471,88 @@ class Glm5ConfigTest(absltest.TestCase):
     cfg_no_m3 = mock.MagicMock(use_m3_model=False)
     with self.assertRaisesRegex(ValueError, "requires use_m3_model=True"):
       Glm5Config.from_maxtext_config(cfg_no_m3)
+
+  def test_sparse_matmul_validation_and_sharding_axes(self):
+    self.assertTrue(Glm5Config().sparse_matmul)
+    self.assertFalse(Glm5Config(sparse_matmul=False).sparse_matmul)
+    base_cfg = pyconfig.initialize(["", "src/maxtext/configs/base.yml", "model_name=glm5.3-flash"])
+    self.assertTrue(Glm5Config.from_maxtext_config(base_cfg).sparse_matmul)
+    self.assertFalse(Glm5Config.from_maxtext_config(base_cfg, sparse_matmul=False).sparse_matmul)
+    self.assertFalse(Glm5Config.from_maxtext_config(Glm5Config(sparse_matmul=True), sparse_matmul=False).sparse_matmul)
+
+    for bad_bool in ("false", "true", 1, 0, None):
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        Glm5Config(sparse_matmul=cast(Any, bad_bool))
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        Glm5Config.from_maxtext_config(base_cfg, sparse_matmul=bad_bool)
+      with self.assertRaisesRegex(ValueError, "sparse_matmul must be a bool"):
+        Glm5Config.from_maxtext_config(Glm5Config(), sparse_matmul=bad_bool)
+
+    shd_ep1 = Glm5Sharding(use_tp=True)
+    self.assertEqual(
+        shd_ep1("moe_tokens", ("batch", "length", "embed"), m3_sharding.TensorType.ACTIVATION),
+        P(("data", "fsdp"), None, None),
+    )
+    self.assertEqual(shd_ep1("lm_head", ("embed", "vocab")), P("fsdp", "tensor"))
+
+    shd_ep2 = Glm5Sharding(use_tp=True, ep_size=2)
+    self.assertEqual(shd_ep2("gate_up_proj", ("experts", "expert_embed", "expert_mlp")), P("expert", "fsdp", "tensor"))
+    self.assertEqual(shd_ep2("lm_head", ("embed", "vocab")), P(("fsdp", "expert"), "tensor"))
+    self.assertEqual(
+        shd_ep2("moe_tokens", ("batch", "length", "embed"), m3_sharding.TensorType.ACTIVATION),
+        P(("data", "fsdp", "expert"), None, None),
+    )
+
+  def test_from_maxtext_config_forwards_moe_executor_flags(self):
+    import os  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.core import moe as m3_moe  # pylint: disable=import-outside-toplevel
+    from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR  # pylint: disable=import-outside-toplevel
+
+    base_yml = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
+    raw = pyconfig.initialize(
+        [
+            "",
+            base_yml,
+            "model_name=glm5.3-flash",
+            "override_model_config=true",
+            "hardware=cpu",
+            "per_device_batch_size=1",
+            "ici_expert_parallelism=2",
+            "use_tokamax_gmm=true",
+            "use_gmm_v2=false",
+            "megablox=false",
+            "capacity_factor=1.25",
+            "ragged_buffer_factor=1.5",
+            "use_ragged_sort=true",
+        ]
+    )
+    c = Glm5Config.from_maxtext_config(raw)
+    self.assertTrue(c.use_tokamax_gmm)
+    self.assertFalse(c.use_gmm_v2)
+    self.assertFalse(c.megablox)
+    self.assertEqual(c.capacity_factor, 1.25)
+    self.assertEqual(c.ragged_buffer_factor, 1.5)
+    self.assertTrue(c.use_ragged_sort)
+    exec_tok = m3_moe.moe_from_config(c, Glm5Sharding(ep_size=2))
+    self.assertEqual(exec_tok.kind, "tokamax")
+    self.assertEqual(exec_tok.capacity_factor, 1.25)
+    self.assertEqual(exec_tok.ragged_buffer_factor, 1.5)
+    self.assertTrue(exec_tok.use_ragged_sort)
+
+    raw_cpu = pyconfig.initialize(
+        [
+            "",
+            base_yml,
+            "model_name=glm5.3-flash",
+            "hardware=cpu",
+            "per_device_batch_size=1",
+            "ici_expert_parallelism=2",
+        ]
+    )
+    c_cpu = Glm5Config.from_maxtext_config(raw_cpu)
+    self.assertEqual(c_cpu.hardware, "cpu")
+    self.assertFalse(c_cpu.megablox)
+    self.assertEqual(m3_moe.moe_from_config(c_cpu, Glm5Sharding(ep_size=2)).kind, "gmm_v2")
 
 
 if __name__ == "__main__":

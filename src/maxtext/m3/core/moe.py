@@ -90,14 +90,14 @@ def _matmul_precision(dtype: Any) -> jax.lax.Precision:
   return jax.lax.Precision.HIGHEST
 
 
-def _pallas_matmul_precision_context(dtype: Any) -> contextlib.AbstractContextManager[Any]:
-  """Enables `float32` MXU passes inside Pallas `gmm_v2`/`tgmm_v2` on `float32` inputs."""
-  if jnp.dtype(dtype) == jnp.dtype(jnp.float32):
+def _pallas_matmul_precision_context(dtype: Any, *, force_fp32: bool = False) -> contextlib.AbstractContextManager[Any]:
+  """Enables `float32` MXU passes inside Pallas `gmm_v2`/`tgmm_v2` on `float32` inputs or `HIGHEST` precision."""
+  if force_fp32 or jnp.dtype(dtype) == jnp.dtype(jnp.float32):
     return jax.default_matmul_precision("float32")
   return contextlib.nullcontext()
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5, 6))
 def _pallas_grouped_matmul(
     lhs: jax.Array,
     rhs: jax.Array,
@@ -105,8 +105,10 @@ def _pallas_grouped_matmul(
     backend_kind: str,
     is_tpu: bool,
     out_dtype: Any,
+    precision: jax.lax.Precision | None = None,
 ) -> jax.Array:
   """Runs grouped matmul `lhs @ rhs[g]` on the TPU `gmm_v2` backend."""
+  eff_prec = _matmul_precision(lhs.dtype) if precision is None else precision
   group_sizes_i32 = group_sizes.astype(jnp.int32)
   valid_count = jnp.sum(group_sizes_i32)
   valid_rows = (jnp.arange(lhs.shape[0], dtype=jnp.int32) < valid_count)[:, None]
@@ -118,7 +120,7 @@ def _pallas_grouped_matmul(
           lhs_safe,
           rhs,
           group_sizes_i32,
-          precision=_matmul_precision(lhs.dtype),
+          precision=eff_prec,
           preferred_element_type=jnp.float32,
       ).astype(out_dtype)
       return jnp.where(valid_rows, out, jnp.zeros((), dtype=out_dtype))
@@ -132,7 +134,7 @@ def _pallas_grouped_matmul(
     n_pad = _align_up(n, _TOKAMAX_KN_ALIGN)
     lhs_pad = jnp.pad(lhs_safe, ((0, m_pad - m), (0, k_pad - k)))
     rhs_pad = jnp.pad(rhs, ((0, 0), (0, k_pad - k), (0, n_pad - n)))
-    with _pallas_matmul_precision_context(lhs.dtype):
+    with _pallas_matmul_precision_context(lhs.dtype, force_fp32=eff_prec == jax.lax.Precision.HIGHEST):
       out_pad = gmm_v2.gmm_v2(
           lhs=lhs_pad,
           rhs=rhs_pad,
@@ -155,8 +157,10 @@ def _pallas_grouped_matmul_fwd(
     backend_kind: str,
     is_tpu: bool,
     out_dtype: Any,
+    precision: jax.lax.Precision | None,
 ) -> tuple[jax.Array, tuple[jax.Array, jax.Array, jax.Array]]:
-  out = _pallas_grouped_matmul(lhs, rhs, group_sizes, backend_kind, is_tpu, out_dtype)
+  """Forward pass for `_pallas_grouped_matmul` custom VJP."""
+  out = _pallas_grouped_matmul(lhs, rhs, group_sizes, backend_kind, is_tpu, out_dtype, precision)
   return out, (lhs, rhs, group_sizes.astype(jnp.int32))
 
 
@@ -164,11 +168,13 @@ def _pallas_grouped_matmul_bwd(
     backend_kind: str,
     is_tpu: bool,
     out_dtype: Any,
+    precision: jax.lax.Precision | None,
     residuals: tuple[jax.Array, jax.Array, jax.Array],
     grad: jax.Array,
 ) -> tuple[jax.Array, jax.Array, None]:
   """Backward pass for the TPU `gmm_v2` / `tgmm_v2` grouped matmuls."""
   lhs, rhs, group_sizes = residuals
+  eff_prec = _matmul_precision(lhs.dtype) if precision is None else precision
   m, k = lhs.shape
   num_groups, _, n = rhs.shape
   valid_count = jnp.sum(group_sizes)
@@ -177,7 +183,7 @@ def _pallas_grouped_matmul_bwd(
 
   if backend_kind == "gmm_v2":
     if not is_tpu:
-      prec = _matmul_precision(lhs.dtype)
+      prec = eff_prec
       _, vjp_fn = jax.vjp(
           lambda l, r: jax.lax.ragged_dot(
               l,
@@ -206,7 +212,7 @@ def _pallas_grouped_matmul_bwd(
     grad_pad = jnp.pad(grad_safe, ((0, m_pad - m), (0, n_pad - n)))
     kernel_transpose_rhs = jax.dtypes.itemsize_bits(rhs_pad.dtype) >= 8
     dlhs_rhs = rhs_pad if kernel_transpose_rhs else rhs_pad.swapaxes(1, 2)
-    with _pallas_matmul_precision_context(lhs.dtype):
+    with _pallas_matmul_precision_context(lhs.dtype, force_fp32=eff_prec == jax.lax.Precision.HIGHEST):
       dlhs_pad = gmm_v2.gmm_v2(
           lhs=grad_pad,
           rhs=dlhs_rhs,
@@ -223,7 +229,7 @@ def _pallas_grouped_matmul_bwd(
           group_sizes=group_sizes,
           num_actual_groups=num_groups,
           rhs_scale=None,
-          precision=jax.lax.Precision.DEFAULT,
+          precision=eff_prec,
           preferred_element_type=rhs_pad.dtype,
           tile_info=tgmm_v2.calculate_tgmm_tiling,
       )
@@ -244,11 +250,13 @@ def grouped_matmul(
     backend: str = "ragged_dot",
     is_tpu: bool = False,
     preferred_element_type: Any = None,
+    precision: jax.lax.Precision | None = None,
 ) -> jax.Array:
   """Grouped matmul dispatcher across `ragged_dot`, `gmm_v2`, and `tokamax`."""
   if backend not in ("ragged_dot", "gmm_v2", "tokamax"):
     raise ValueError(f"Unknown grouped matmul backend {backend!r}; expected 'ragged_dot', 'gmm_v2', or 'tokamax'.")
 
+  eff_prec = _matmul_precision(lhs.dtype) if precision is None else precision
   out_dtype = jnp.dtype(lhs.dtype if preferred_element_type is None else preferred_element_type)
   group_sizes_i32 = group_sizes.astype(jnp.int32)
   valid_rows = (jnp.arange(lhs.shape[0], dtype=jnp.int32) < jnp.sum(group_sizes_i32))[:, None]
@@ -259,7 +267,7 @@ def grouped_matmul(
         lhs_safe,
         rhs,
         group_sizes_i32,
-        precision=_matmul_precision(lhs.dtype),
+        precision=eff_prec,
         preferred_element_type=jnp.float32,
     ).astype(out_dtype)
     return jnp.where(valid_rows, out, jnp.zeros((), dtype=out_dtype))
@@ -279,13 +287,13 @@ def grouped_matmul(
         rhs=rhs_pad,
         group_sizes=tokamax.RaggedDotGroupSizes(group_sizes_i32, m_pad),
         preferred_element_type=out_dtype,
-        precision=_matmul_precision(lhs.dtype),
+        precision=eff_prec,
         implementation="mosaic",
     )
     out = out_pad[:m, :n].astype(out_dtype)
     return jnp.where(valid_rows, out, jnp.zeros((), dtype=out_dtype))
 
-  return _pallas_grouped_matmul(lhs, rhs, group_sizes_i32, backend, is_tpu, out_dtype)
+  return _pallas_grouped_matmul(lhs, rhs, group_sizes_i32, backend, is_tpu, out_dtype, eff_prec)
 
 
 # ==============================================================================
@@ -665,13 +673,18 @@ def _require_sharded_gmm_for_ep_or_tp(
     )
 
 
-def _validate_executor_backend_config(config: Any, *, mesh: Any = None) -> ExecutorKind:
+def _validate_executor_backend_config(
+    config: Any,
+    *,
+    mesh: Any = None,
+    allow_sharded_ragged_dot: bool = False,
+) -> ExecutorKind:
   """Validates resolved MoE backend flags against `use_ragged_sort` and EP/TP."""
   use_ragged_sort = bool(getattr(config, "use_ragged_sort", False))
   kind = _resolve_executor_kind(config)
   if use_ragged_sort and kind not in SHARDED_EXECUTOR_KINDS:
     raise ValueError("use_ragged_sort=True requires sparse_matmul=True with a sharded GMM backend (gmm_v2 or tokamax).")
-  if kind == "ragged_dot":
+  if kind == "ragged_dot" and not allow_sharded_ragged_dot:
     _require_sharded_gmm_for_ep_or_tp(config, mesh=mesh)
   return kind
 
@@ -682,6 +695,7 @@ def validate_moe_config(
     check_executor_backend: bool = True,
     require_moe: bool = False,
     mesh: Any = None,
+    allow_sharded_ragged_dot: bool = False,
 ) -> None:
   """Validates m3 MoE configuration fields, failing closed on unsupported modes."""
   num_experts = int(getattr(config, "num_experts", 1) or 1)
@@ -722,13 +736,18 @@ def validate_moe_config(
       )
     return
 
-  _validate_executor_backend_config(config, mesh=mesh)
+  _validate_executor_backend_config(config, mesh=mesh, allow_sharded_ragged_dot=allow_sharded_ragged_dot)
 
 
-def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecutor:
+def moe_from_config(
+    config: Any,
+    sharding: Sharding | None = None,
+    *,
+    allow_sharded_ragged_dot: bool = False,
+) -> MoEExecutor:
   """Resolves a static `MoEExecutor` from `config` and `sharding`."""
   active_mesh = _active_mesh_or_none()
-  validate_moe_config(config, require_moe=True, mesh=active_mesh)
+  validate_moe_config(config, require_moe=True, mesh=active_mesh, allow_sharded_ragged_dot=allow_sharded_ragged_dot)
   sharding = sharding or DefaultSharding()
 
   capacity_factor = float(getattr(config, "capacity_factor", -1.0))
@@ -747,7 +766,8 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
     )
 
   if kind == "ragged_dot":
-    _require_sharded_gmm_for_ep_or_tp(config, mesh=active_mesh, sharding=sharding)
+    if not allow_sharded_ragged_dot:
+      _require_sharded_gmm_for_ep_or_tp(config, mesh=active_mesh, sharding=sharding)
     return MoEExecutor(
         kind="ragged_dot",
         capacity_factor=cap,
@@ -890,6 +910,10 @@ def _truncate_slots_by_buffer(
   order = jnp.argsort(sort_key, stable=True)
   keep_sorted = slot_valid[order] & (jnp.arange(num_slots, dtype=jnp.int32) < int(buf_cap))
   return keep_sorted[jnp.argsort(order)]
+
+
+truncate_slots_by_capacity = _truncate_slots_by_capacity  # public-api
+truncate_slots_by_buffer = _truncate_slots_by_buffer  # public-api
 
 
 def _ep_ragged_exchange(
@@ -1088,6 +1112,8 @@ def _grouped_unsharded(
     activation: Callable[[jax.Array], jax.Array],
     swiglu_limit: float | None,
     executor: MoEExecutor,
+    backend: str = "ragged_dot",
+    is_tpu: bool = False,
 ) -> jax.Array:
   """Portable `ragged_dot` grouped execution without `shard_map`."""
   if fused and projections[0].ndim == 4:
@@ -1122,10 +1148,10 @@ def _grouped_unsharded(
 
   slot_token_ids = jnp.repeat(jnp.arange(num_tokens, dtype=jnp.int32), top_k)
   slot_rows = jnp.reshape(x, (num_tokens, embed))[slot_token_ids]
-  sorted_x = _permute_rows(slot_rows, perm)
+  sorted_x = permute_ragged_rows(slot_rows, perm, valid_count, use_ragged_sort=executor.use_ragged_sort, is_tpu=is_tpu)
   sorted_x = jnp.where((jnp.arange(num_slots, dtype=jnp.int32) < valid_count)[:, None], sorted_x, 0)
 
-  matmul_fn = functools.partial(grouped_matmul, backend="ragged_dot", is_tpu=False)
+  matmul_fn = functools.partial(grouped_matmul, backend=backend, is_tpu=is_tpu)
   expert_out = _run_local_expert_mlp(
       sorted_x,
       projections,
@@ -1136,7 +1162,9 @@ def _grouped_unsharded(
       swiglu_limit=swiglu_limit,
       out_dtype=_COMBINE_DTYPE,
   )
-  unsorted_out = _permute_rows(expert_out, inv_perm)
+  unsorted_out = unpermute_ragged_rows(
+      expert_out, inv_perm, num_slots, use_ragged_sort=executor.use_ragged_sort, is_tpu=is_tpu
+  )
   eff_w = jnp.where(slot_valid, flat_w, 0).astype(_COMBINE_DTYPE)
   safe_out = jnp.where(slot_valid[:, None], unsorted_out.astype(_COMBINE_DTYPE), 0.0)
   weighted = safe_out * eff_w[:, None]
@@ -1181,6 +1209,40 @@ def _can_use_sparsecore_ragged_sort(num_rows: int, hidden_size: int, dtype: Any)
       break
     num_col_parts = next_col_parts
   return (num_cores // num_col_parts) <= num_simd_lanes
+
+
+def permute_ragged_rows(  # public-api
+    rows: jax.Array,
+    perm: jax.Array,
+    valid_count: jax.Array | int,
+    *,
+    use_ragged_sort: bool = False,
+    is_tpu: bool = False,
+) -> jax.Array:
+  """Permutes `[num_rows, dim]` by `perm`, dispatching to SparseCore `a2a_ragged_sort` when eligible."""
+  num_rows, d_dim = rows.shape
+  if use_ragged_sort and is_tpu and _can_use_sparsecore_ragged_sort(num_rows, d_dim, rows.dtype):
+    from maxtext.kernels.ragged import ragged_sort  # pylint: disable=import-outside-toplevel
+
+    return ragged_sort.a2a_ragged_sort(rows, perm, valid_count)
+  return _permute_rows(rows, perm)
+
+
+def unpermute_ragged_rows(  # public-api
+    rows: jax.Array,
+    inv_perm: jax.Array,
+    valid_end: jax.Array | int,
+    *,
+    use_ragged_sort: bool = False,
+    is_tpu: bool = False,
+) -> jax.Array:
+  """Unpermutes `[num_rows, dim]` by `inv_perm`, dispatching to SparseCore `a2a_ragged_unsort` when eligible."""
+  num_rows, d_dim = rows.shape
+  if use_ragged_sort and is_tpu and _can_use_sparsecore_ragged_sort(num_rows, d_dim, rows.dtype):
+    from maxtext.kernels.ragged import ragged_sort  # pylint: disable=import-outside-toplevel
+
+    return ragged_sort.a2a_ragged_unsort(rows, inv_perm, valid_end)
+  return _permute_rows(rows, inv_perm)
 
 
 def _sharded_grouped(
@@ -1541,6 +1603,112 @@ def routed_experts(
     case other:
       raise ValueError(f"Unknown MoE executor kind {other!r}; expected 'dense', 'ragged_dot', 'gmm_v2', or 'tokamax'.")
   return checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+
+def _device_is_tpu(dev: Any) -> bool:
+  """Returns True when `dev` is a TPU device."""
+  return getattr(dev, "platform", None) == "tpu"
+
+
+def grouped_unsharded_fused(
+    x: jax.Array,
+    weights: jax.Array,
+    indices: jax.Array,
+    gate_up_proj: jax.Array,
+    down_proj: jax.Array,
+    *,
+    executor: MoEExecutor = RAGGED_DOT,
+    activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
+    swiglu_limit: float | None = None,
+    is_tpu: bool = False,
+) -> jax.Array:
+  """Executes fused routed experts on a single device when no `Mesh` is in scope."""
+  if gate_up_proj.ndim not in (3, 4) or down_proj.ndim != 3:
+    raise ValueError(
+        f"Expected 3D or 4D gate_up_proj and 3D down_proj; got gate_up_proj={gate_up_proj.shape}, "
+        f"down_proj={down_proj.shape}."
+    )
+  if gate_up_proj.ndim == 3 and gate_up_proj.shape[2] % 2 != 0:
+    raise ValueError(f"3D gate_up_proj last dim must be even (2 * mlp_dim); got {gate_up_proj.shape}.")
+  if gate_up_proj.ndim == 4 and gate_up_proj.shape[2] != 2:
+    raise ValueError(f"4D gate_up_proj axis 2 must have size 2 (gate, up); got {gate_up_proj.shape}.")
+  mlp_dim = gate_up_proj.shape[2] // 2 if gate_up_proj.ndim == 3 else gate_up_proj.shape[3]
+  num_experts = gate_up_proj.shape[0]
+  _validate_routed_inputs(x, weights, indices, num_experts)
+  if gate_up_proj.shape[1] != x.shape[2] or down_proj.shape != (num_experts, mlp_dim, x.shape[2]):
+    raise ValueError(
+        f"Incompatible fused expert weight shapes for x={x.shape}: "
+        f"gate_up_proj={gate_up_proj.shape}, down_proj={down_proj.shape}."
+    )
+  eff_weights = weights.astype(_COMBINE_DTYPE)
+  projections = (gate_up_proj.astype(x.dtype), down_proj.astype(x.dtype))
+  if executor.kind == "dense":
+    out = _dense_fused(
+        x,
+        eff_weights,
+        indices,
+        *projections,
+        num_experts=num_experts,
+        activation=activation,
+        swiglu_limit=swiglu_limit,
+        capacity_factor=executor.capacity_factor,
+    )
+    return jax.ad_checkpoint.checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+  devs_1d: list[Any] = []
+  for arr in (x, gate_up_proj):
+    arr_shd = jax.typeof(arr).sharding
+    if isinstance(arr_shd, jax.sharding.SingleDeviceSharding):
+      devs_1d = list(arr_shd.device_set)[:1]
+      break
+    if (
+        isinstance(arr_shd, jax.sharding.NamedSharding)
+        and isinstance(arr_shd.mesh, jax.sharding.Mesh)
+        and not arr_shd.mesh.empty
+    ):
+      devs_1d = list(arr_shd.mesh.devices.flat)[:1]
+      break
+  if not devs_1d:
+    devs_1d = list(jax.local_devices()[:1] or jax.devices()[:1])
+  tpu_1d = bool(is_tpu and devs_1d and _device_is_tpu(devs_1d[0]))
+  if tpu_1d and executor.kind in SHARDED_EXECUTOR_KINDS:
+    mesh_1d = jax.sharding.Mesh(devs_1d, ("_moe_1d",))
+    out = jax.shard_map(
+        lambda x_l, w_l, idx_l, gu_l, dn_l: _grouped_unsharded(
+            x_l,
+            w_l,
+            idx_l,
+            (gu_l, dn_l),
+            fused=True,
+            num_experts=num_experts,
+            activation=activation,
+            swiglu_limit=swiglu_limit,
+            executor=executor,
+            backend=executor.kind,
+            is_tpu=True,
+        ).astype(x_l.dtype),
+        mesh=mesh_1d,
+        in_specs=(P(), P(), P(), P(), P()),
+        out_specs=P(),
+        check_vma=False,
+    )(x, eff_weights, indices, projections[0], projections[1])
+    return jax.ad_checkpoint.checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+  backend = "ragged_dot"
+  out = _grouped_unsharded(
+      x,
+      eff_weights,
+      indices,
+      projections,
+      fused=True,
+      num_experts=num_experts,
+      activation=activation,
+      swiglu_limit=swiglu_limit,
+      executor=executor,
+      backend=backend,
+      is_tpu=tpu_1d,
+  )
+  return jax.ad_checkpoint.checkpoint_name(out.astype(x.dtype), "moe_routed_output")
 
 
 def routed_experts_fused(
