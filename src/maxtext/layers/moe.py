@@ -198,6 +198,8 @@ class RouteOutput:
   tc_routing: Optional[Any] = None
   # Optional [num_slots, 1] float32 routing weights already permuted by TensorCore sort.
   sorted_weights: Optional[jax.Array] = None
+  # Optional [num_experts] int32 local logical-expert counts for lagged (t-1) replication planning.
+  replica_counts: Optional[jax.Array] = None
 
 
 # Checkpoint name (and remat-location config field) of the routing state saved by `moe_packed_routing_maps`.
@@ -979,6 +981,10 @@ MOE_BIAS_VAR_MODEL_PREFIXES = ("deepseek3", "deepseek4", "kimi-k2", "ming", "hy4
 
 class MoEBiasVar(nnx.Variable):
   """Custom NNX Variable for Auxiliary-Loss-Free MoE Routing Bias (DSV4)."""
+
+
+class MoEReplicaPlanCache(nnx.Cache):
+  """Ephemeral non-checkpointed NNX Cache holding per-layer t-1 hot-expert replica plans."""
 
 
 # Separate routing randomness from weight initialization without advancing its RNG.
@@ -1932,6 +1938,29 @@ class RoutedMoE(nnx.Module):
       self._expert_parallelism_name = ("expert", "tensor")
     else:
       self._expert_parallelism_name = "expert"
+
+    # Unit-test config stubs (e.g. SimpleNamespace in native_fp8_dot_general_test) may omit MoEGeneral fields.
+    if getattr(self.config, "expert_replicas_per_device", 0) > 0 and getattr(
+        self.config, "expert_replica_lagged_plan", False
+    ):
+      ep_size_init = max(self.get_expert_parallelism_size(), 1)
+      init_plan = moe_replica_planner.identity_plan(
+          ep_size_init,
+          self.num_experts,
+          self.config.expert_replicas_per_device,
+          self.config.expert_replica_max_send,
+      )
+      self.rep_route_table = MoEReplicaPlanCache(init_plan.route_table, out_sharding=(None, None))
+      self.rep_home = MoEReplicaPlanCache(init_plan.rep_home, out_sharding=(None, None))
+      self.rep_slot = MoEReplicaPlanCache(init_plan.rep_slot, out_sharding=(None, None))
+      self.rep_send_slots = MoEReplicaPlanCache(init_plan.send_slots, out_sharding=(None, None))
+      self.rep_send_peer_index = MoEReplicaPlanCache(init_plan.send_peer_index, out_sharding=(None, None))
+    else:
+      self.rep_route_table = None
+      self.rep_home = None
+      self.rep_slot = None
+      self.rep_send_slots = None
+      self.rep_send_peer_index = None
 
     # TE v1 grouped GEMM stream-syncs a D2H copy inside shard_map, which deadlocks with several local devices.
     if self.config.use_te_grouped_gemm and self.mesh is not None and len(self.mesh.local_devices) > 1:
@@ -4388,6 +4417,7 @@ class RoutedMoE(nnx.Module):
       has_overflow = False
       required_rbf = None
       replica_plan = None
+      local_replica_counts = None
       local_tokens = math.prod(x.shape[:-1])
       num_replicas = self.config.expert_replicas_per_device
       use_replication = num_replicas > 0
@@ -4407,6 +4437,10 @@ class RoutedMoE(nnx.Module):
 
         local_num_home_experts = self.config.num_experts // num_ep
         non_ep_axes = roe_bias_axis_names if (self.config.shard_embed_moe_on_fsdp and weight_gather) else ()
+        capture_counts = (
+            getattr(self.config, "expert_replica_lagged_plan", False)
+            and getattr(self, "rep_route_table", None) is not None
+        )
 
         def _physical_route_fn(flat_logical, valid_mask=None):
           # Build (or reuse precomputed) replica plan inside permute() once flattened top-k expert IDs are
@@ -4414,12 +4448,17 @@ class RoutedMoE(nnx.Module):
           # When has_invalid_slots is True (forced_routed_experts or token_mask), permute() has already replaced
           # -1 slots with round-robin dummy indices in [0, num_experts); mask them out of the planner's [EP, E]
           # counts and keep them in home slots [0, L) (never replicas).
-          nonlocal replica_plan
-          if precomputed_plan is not None:
-            replica_plan = precomputed_plan
-          else:
+          nonlocal replica_plan, local_replica_counts
+          local_counts = None
+          if capture_counts or precomputed_plan is None:
             local_counts = self._local_expert_counts(flat_logical, valid_mask)
-            replica_plan = self._build_replica_plan(local_counts, num_ep, non_ep_axes)
+            if capture_counts:
+              local_replica_counts = local_counts
+          replica_plan = (
+              precomputed_plan
+              if precomputed_plan is not None
+              else self._build_replica_plan(local_counts, num_ep, non_ep_axes)
+          )
           phys = replica_plan.route_table[expert_shard_id][flat_logical]
           if valid_mask is not None:
             home_phys = (
@@ -4556,6 +4595,7 @@ class RoutedMoE(nnx.Module):
               has_overflow=has_overflow,
               required_rbf=required_rbf,
               sorted_weights=sorted_weights,
+              replica_counts=local_replica_counts,
           ),
           RouteMetadata(
               expert_shard_id=expert_shard_id,
@@ -5247,6 +5287,7 @@ class RoutedMoE(nnx.Module):
               routing.required_rbf,
               routing.max_load_ratio,
               (w0, w1, wo),
+              routing.replica_counts,
           )
         mask = local_rows_mask(x, routing, route_metadata)
 
@@ -5428,6 +5469,7 @@ class RoutedMoE(nnx.Module):
             routing.required_rbf,
             routing.max_load_ratio,
             (w0, w1, wo),
+            routing.replica_counts,
         )
 
       if self.get_expert_parallelism_size() > 1:
@@ -5473,12 +5515,30 @@ class RoutedMoE(nnx.Module):
           routing.required_rbf,
           routing.max_load_ratio,
           (w0, w1, wo),
+          routing.replica_counts,
       )
 
     # Gemma 4's per-expert router scale is consumed by get_topk, deep inside the
     # shard_map below. A shard_map cannot close over an array that lives on explicit
     # mesh axes, so it is threaded down as an argument instead of read off the module.
     per_expert_scale = None if self.per_expert_scale is None else self.per_expert_scale[...]
+    # Unit-test stubs (e.g. fake_moe in moe_test) call sparse_matmul without MoEGeneral or cache attributes.
+    use_lagged_replication = (
+        getattr(self.config, "expert_replicas_per_device", 0) > 0
+        and getattr(self.config, "expert_replica_lagged_plan", False)
+        and getattr(self, "rep_route_table", None) is not None
+    )
+    lagged_plan_arrays = (
+        (
+            self.rep_route_table[...],
+            self.rep_home[...],
+            self.rep_slot[...],
+            self.rep_send_slots[...],
+            self.rep_send_peer_index[...],
+        )
+        if use_lagged_replication
+        else None
+    )
 
     def keep_reduced(pspec, w):
       # Weights all-gathered by fsdp_prefetch arrive typed `reduced` over the FSDP axes; shard_map requires
@@ -5519,6 +5579,8 @@ class RoutedMoE(nnx.Module):
     }
     overflow_mesh_axes = tuple(axis for axis in self.mesh.axis_names if axis in input_mesh_axes)
     in_specs += (qwag_amax_pspecs,)
+    if lagged_plan_arrays is not None:
+      in_specs += ((P(),) * len(lagged_plan_arrays),)
 
     @functools.partial(
         jax.shard_map,
@@ -5535,7 +5597,9 @@ class RoutedMoE(nnx.Module):
             P(),  # required_rbf (probe): replicated scalar max-reduced across entire mesh, or None
         )
         # max_load_ratio (moe_log_max_load_ratio only): replicated scalar, max-reduced across the mesh.
-        + ((P(),) if log_max_load_ratio else ()),
+        + ((P(),) if log_max_load_ratio else ())
+        # replica_counts (expert_replica_lagged_plan only): local (1, 1, E) counts reduced once per step outside scan_layers.
+        + ((P(roe_bias_axis_names, self._expert_parallelism_name, None),) if use_lagged_replication else ()),
         check_vma=self.config.check_vma,
     )
     def sparse_matmul_route_and_compute(
@@ -5554,7 +5618,22 @@ class RoutedMoE(nnx.Module):
         per_expert_scale=None,
         token_mask=None,
         moe_qwag_weight_amax=None,
+        lagged_plan_arrays=None,
     ):
+      lagged_plan = None
+      if lagged_plan_arrays is not None:
+        l_rt, l_rh, l_rs, l_ss, l_spi = lagged_plan_arrays
+        ep_sz = self.get_expert_parallelism_size()
+        r_sl = self.config.expert_replicas_per_device
+        lagged_plan = moe_replica_planner.ReplicaPlan(
+            route_table=l_rt,
+            rep_home=l_rh,
+            rep_slot=l_rs,
+            send_slots=l_ss,
+            send_peer_index=l_spi,
+            num_slots=self.config.num_experts // ep_sz + r_sl,
+            num_replicas=r_sl,
+        )
       # The expert weights (w0/w1/wo) are all-gathered over FSDP once at this
       # shard_map entry (implicitly, via the `embed_tensor_transpose` pspec which
       # drops fsdp -> GSPMD inserts the boundary all-gather) and reused across all
@@ -5574,7 +5653,7 @@ class RoutedMoE(nnx.Module):
       def _route_and_compute(force_dropless, n_chunks=n_chunks, barrier_enabled=barrier_enabled, precomputed_plans=None):
         """Runs route+compute once; force_dropless=True redoes all n_chunks, not just the overflowing one(s)."""
         if n_chunks <= 1:
-          out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, _ = _moe_body(
+          out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, _, rep_counts = _moe_body(
               x,
               logits,
               pre_bias_logits,
@@ -5595,7 +5674,7 @@ class RoutedMoE(nnx.Module):
           )
           if not defer_small_ars:
             bias_updates = finalize_bias_updates(bias_updates)
-          return out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio
+          return out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, rep_counts
 
         # Chunked MoE pipeline: split the per-shard tokens along the sequence dim
         # into `n_chunks` data-independent chunks. Each chunk runs the full
@@ -5611,7 +5690,15 @@ class RoutedMoE(nnx.Module):
         # averaged across chunks.
         seq_len = x.shape[1]
         chunk = seq_len // n_chunks
-        outs, lb_losses, bias_updates_list, has_overflows, required_rbfs, max_load_ratios = [], [], [], [], [], []
+        outs, lb_losses, bias_updates_list, has_overflows, required_rbfs, max_load_ratios, rep_counts_list = (
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+            [],
+        )
         _prev = None
         # With moe_accumulate_chunk_wgrad, each chunk's GMMs return the (gathered, possibly quantized)
         # weights they consumed and the next chunk reuses them. The weights are then gathered and
@@ -5628,7 +5715,7 @@ class RoutedMoE(nnx.Module):
           # loss stays bit-exact.
           if barrier_enabled and _prev is not None:
             x_c, _prev = jax.lax.optimization_barrier((x_c, _prev))
-          out_c, lb_c, bu_c, ov_c, req_c, ratio_c, chunk_weights = _moe_body(
+          out_c, lb_c, bu_c, ov_c, req_c, ratio_c, chunk_weights, rep_c = _moe_body(
               x_c,
               logits[:, sl, :],
               None if pre_bias_logits is None else pre_bias_logits[:, sl, :],
@@ -5659,6 +5746,7 @@ class RoutedMoE(nnx.Module):
           has_overflows.append(ov_c)
           required_rbfs.append(req_c)
           max_load_ratios.append(ratio_c)
+          rep_counts_list.append(rep_c)
         output = jnp.concatenate(outs, axis=1)
         lb_loss = None if lb_losses[0] is None else sum(lb_losses) / n_chunks
         if bias_updates_list[0] is None:
@@ -5672,26 +5760,37 @@ class RoutedMoE(nnx.Module):
         # Each chunk has its own buffer, so the step needs the largest per-chunk factor.
         required_rbf = None if required_rbfs[0] is None else jnp.max(jnp.stack(required_rbfs))
         max_load_ratio = None if max_load_ratios[0] is None else jnp.max(jnp.stack(max_load_ratios))
-        return output, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio
+        rep_counts = None if rep_counts_list[0] is None else sum(rep_counts_list)
+        return output, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, rep_counts
 
       force_dropless = getattr(self, "force_dropless", False)
 
       def _per_device_flag(has_overflow):
         return jnp.reshape(jnp.asarray(has_overflow, dtype=jnp.bool_), (1,))
 
+      def _pack_outputs(out, lb_loss, bias_updates, has_overflow, took_fb, required_rbf, max_load_ratio, rep_counts):
+        extra = ()
+        if log_max_load_ratio:
+          extra += (max_load_ratio,)
+        if use_lagged_replication:
+          extra += (rep_counts[None, None, :],)
+        return (out, lb_loss, bias_updates, has_overflow, took_fb, required_rbf) + extra
+
       fallback_chunks = None
       if self.config.moe_dropless_fallback == "layer":
         fallback_chunks = self.get_dropless_fallback_num_chunks(x.shape[1], n_chunks)
       if fallback_chunks is None:
-        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _route_and_compute(force_dropless)
+        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, rep_counts = _route_and_compute(
+            force_dropless, precomputed_plans=None if lagged_plan is None else (lagged_plan,) * n_chunks
+        )
         has_overflow = _per_device_flag(has_overflow)
         if defer_small_ars and bias_updates is not None:
           if bias_updates.ndim == 1:  # unchunked path: one chunk
             bias_updates = bias_updates[None, :]
           bias_updates = bias_updates[None]  # (1, n_chunks, E): this shard's partial counts
-        if log_max_load_ratio:
-          return out, lb_loss, bias_updates, has_overflow, jnp.bool_(False), required_rbf, max_load_ratio
-        return out, lb_loss, bias_updates, has_overflow, jnp.bool_(False), required_rbf
+        return _pack_outputs(
+            out, lb_loss, bias_updates, has_overflow, jnp.bool_(False), required_rbf, max_load_ratio, rep_counts
+        )
 
       # In-layer dropless fallback: calculate the overflow, then run either the
       # normal capped path or a chunked dropless path for this layer only (no step replay).
@@ -5705,16 +5804,25 @@ class RoutedMoE(nnx.Module):
           per_expert_scale,
           token_mask=token_mask,
           non_ep_batch_axes=roe_bias_axis_names if (self.config.shard_embed_moe_on_fsdp and weight_gather) else (),
+          precomputed_plan=lagged_plan,
       )
 
       # Both branches return required_rbf with the same structure: None when the
       # log_required_ragged_buffer_factor probe is off, a float32 scalar otherwise. The dropless
       # branch returns the probe value of its own (fallback_chunks) chunking.
       def _capped_branch():
-        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = _route_and_compute(
+        out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, rep_counts = _route_and_compute(
             False, precomputed_plans=precomputed_plans
         )
-        return out, lb_loss, bias_updates, jnp.asarray(has_overflow, dtype=jnp.bool_), required_rbf, max_load_ratio
+        return (
+            out,
+            lb_loss,
+            bias_updates,
+            jnp.asarray(has_overflow, dtype=jnp.bool_),
+            required_rbf,
+            max_load_ratio,
+            rep_counts,
+        )
 
       def _dropless_chunks(n_chunks):
         """Dropless MoE (ring of experts or ragged all-to-all) over n_chunks sequence chunks, run as a lax.scan.
@@ -5736,7 +5844,7 @@ class RoutedMoE(nnx.Module):
 
         def body(carry, xs):
           x_c, logits_c, pre_bias_logits_c, input_ids_c, forced_c, token_mask_c = xs
-          out_c, lb_c, bu_c, _, req_c, ratio_c, _ = _moe_body(
+          out_c, lb_c, bu_c, _, req_c, ratio_c, _, rep_c = _moe_body(
               x_c,
               logits_c,
               pre_bias_logits_c,
@@ -5752,18 +5860,20 @@ class RoutedMoE(nnx.Module):
               force_dropless=True,
               per_expert_scale=per_expert_scale,
               token_mask=token_mask_c,
+              precomputed_plan=lagged_plan,
           )
-          return carry, (out_c, lb_c, bu_c, req_c, ratio_c)
+          return carry, (out_c, lb_c, bu_c, req_c, ratio_c, rep_c)
 
         xs = tuple(split(a) for a in (x, logits, pre_bias_logits, sharded_input_ids, forced_routed_experts, token_mask))
         body = jax.checkpoint(body, policy=jax.checkpoint_policies.nothing_saveable)
-        _, (outs, lb_losses, bias_updates, required_rbfs, max_load_ratios) = jax.lax.scan(body, None, xs)
+        _, (outs, lb_losses, bias_updates, required_rbfs, max_load_ratios, rep_counts_all) = jax.lax.scan(body, None, xs)
         output = jnp.moveaxis(outs, 0, 1).reshape((batch, seq_len) + outs.shape[3:])
         lb_loss = None if lb_losses is None else jnp.mean(lb_losses, axis=0)
         bias_updates = None if bias_updates is None else finalize_bias_updates(jnp.sum(bias_updates, axis=0))
         required_rbf = None if required_rbfs is None else jnp.max(required_rbfs)
         max_load_ratio = None if max_load_ratios is None else jnp.max(max_load_ratios)
-        return output, lb_loss, bias_updates, jnp.bool_(False), required_rbf, max_load_ratio
+        rep_counts = None if rep_counts_all is None else jnp.sum(rep_counts_all, axis=0)
+        return output, lb_loss, bias_updates, jnp.bool_(False), required_rbf, max_load_ratio, rep_counts
 
       # Save nothing from the rare dropless branch: lax.cond gives both branches the union of
       # their residuals, so the (larger) dropless residuals would otherwise be held every step.
@@ -5771,13 +5881,13 @@ class RoutedMoE(nnx.Module):
       def _dropless_branch():
         return _dropless_chunks(fallback_chunks)
 
-      out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio = jax.lax.cond(
+      out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, rep_counts = jax.lax.cond(
           took_fallback, _dropless_branch, _capped_branch
       )
       has_overflow = _per_device_flag(has_overflow)
-      if log_max_load_ratio:
-        return out, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf, max_load_ratio
-      return out, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf
+      return _pack_outputs(
+          out, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf, max_load_ratio, rep_counts
+      )
 
     # Note: SparseCore pinning (`moe_pin_sparse_core_all_gathers`) is currently not supported
     # with `moe_fsdp_use_two_stage_all_gather` (enforced via validation in types.py).
@@ -5897,7 +6007,7 @@ class RoutedMoE(nnx.Module):
       # `in_specs`, and the scale is declared "exp" -> the expert axis.
       per_expert_scale = self._maybe_shard_with_pspec(per_expert_scale, P())
 
-    route_and_compute_outputs = sparse_matmul_route_and_compute(
+    route_call_args = (
         inputs,
         gate_logits,
         pre_bias_logits,
@@ -5914,8 +6024,18 @@ class RoutedMoE(nnx.Module):
         token_mask,
         moe_qwag_weight_amax,
     )
+    if lagged_plan_arrays is not None:
+      route_call_args += (lagged_plan_arrays,)
+    route_and_compute_outputs = sparse_matmul_route_and_compute(*route_call_args)
     output, lb_loss, bias_updates, has_overflow, took_fallback, required_rbf = route_and_compute_outputs[:6]
-    max_load_ratio = route_and_compute_outputs[6] if log_max_load_ratio else None
+    extra_idx = 6
+    max_load_ratio = None
+    if log_max_load_ratio:
+      max_load_ratio = route_and_compute_outputs[extra_idx]
+      extra_idx += 1
+    replica_counts = None
+    if use_lagged_replication:
+      replica_counts = route_and_compute_outputs[extra_idx]
     if use_megatron_seq_aux_loss:
       # Global (batch, sequence) arrays: one loss per full sequence (not per token chunk), averaged
       # over the global batch.
@@ -5932,6 +6052,8 @@ class RoutedMoE(nnx.Module):
       self.sow(nnx.Intermediate, "moe_required_rbf", required_rbf)
     if max_load_ratio is not None:
       self.sow(nnx.Intermediate, "moe_max_load_ratio", max_load_ratio)
+    if replica_counts is not None:
+      self.sow(nnx.Intermediate, "moe_replica_counts", replica_counts)
     return output, lb_loss, bias_updates
 
   def reshape_and_update_weights(self, weights, indices, safe_updates=False):

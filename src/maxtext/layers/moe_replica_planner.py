@@ -73,6 +73,20 @@ def identity_route_table(num_ep, num_experts, num_replicas):
   return jnp.broadcast_to(phys[None, :], (num_ep, num_experts))
 
 
+def identity_plan(num_ep, num_experts, num_replicas, max_send):
+  """Returns a no-op `ReplicaPlan` (`rep_home = -1`, home-only `route_table`) for step-0 cache initialization."""
+  local = num_experts // num_ep
+  return ReplicaPlan(
+      route_table=identity_route_table(num_ep, num_experts, num_replicas),
+      rep_home=jnp.full((num_ep, num_replicas), -1, dtype=jnp.int32),
+      rep_slot=jnp.zeros((num_ep, num_replicas), dtype=jnp.int32),
+      send_slots=jnp.zeros((num_ep, max_send), dtype=jnp.int32),
+      send_peer_index=jnp.full((num_ep, num_ep), -1, dtype=jnp.int32),
+      num_slots=local + num_replicas,
+      num_replicas=num_replicas,
+  )
+
+
 def _finalize_plan(rep_e, rep_mask, num_ep, num_experts, r_slots, max_send):
   """Builds the physical route table and per-device send metadata from `(rep_e, rep_mask)`."""
   local = num_experts // num_ep

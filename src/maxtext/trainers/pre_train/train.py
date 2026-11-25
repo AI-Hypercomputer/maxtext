@@ -565,6 +565,70 @@ def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, confi
     bias.value = bias.value + update.astype(bias.value.dtype)
 
 
+def _update_moe_replica_plans(root: nnx.Module, intermediates: dict, config) -> None:
+  """Updates per-layer `MoEReplicaPlanCache` from sown `moe_replica_counts` once per step outside `scan_layers`."""
+  # Unit-test config stubs (e.g. _Cfg in train_nnx_test) may omit MoEGeneral fields.
+  if (
+      getattr(config, "expert_replicas_per_device", 0) <= 0
+      or not getattr(config, "expert_replica_lagged_plan", False)
+      or not intermediates
+  ):
+    return
+  grouped_counts: dict[tuple, list[jax.Array]] = {}
+  for path, val in jax.tree_util.tree_leaves_with_path(intermediates):
+    keys = [k.key for k in path if hasattr(k, "key")]
+    if keys and isinstance(keys[-1], int) and len(keys) >= 2 and keys[-2] == "moe_replica_counts":
+      keys = keys[:-1]
+    if not keys or keys[-1] != "moe_replica_counts":
+      continue
+    prefix = tuple(keys[1:-1] if keys[0] == "intermediates" else keys[:-1])
+    grouped_counts.setdefault(prefix, []).append(jnp.asarray(val))
+  for prefix, vals in grouped_counts.items():
+    target = root
+    for key in prefix:
+      if hasattr(target, key):
+        target = getattr(target, key)
+      elif isinstance(target, dict) and key in target:
+        target = target[key]
+      else:
+        target = None
+        break
+    if target is None:
+      continue
+    sown = vals[0] if len(vals) == 1 else sum(vals[1:], vals[0])
+    # `sown` has shape (..., num_non_ep_shards, num_ep, num_experts); summing axis -3 yields (..., num_ep, num_experts).
+    counts_src = jnp.sum(sown, axis=-3)
+    num_ep = counts_src.shape[-2]
+    plan_fn = functools.partial(
+        moe.moe_replica_planner.compute_plan_iter,
+        num_ep=num_ep,
+        num_replicas=config.expert_replicas_per_device,
+        max_send=config.expert_replica_max_send,
+    )
+    for _ in range(counts_src.ndim - 2):
+      plan_fn = jax.vmap(plan_fn)
+    new_plan = plan_fn(counts_src)
+    candidates = (
+        [target]
+        if isinstance(target, moe.RoutedMoE)
+        else [node for _, node in nnx.iter_graph(target) if isinstance(node, moe.RoutedMoE)]
+    )
+    for node in candidates:
+      if (
+          node.rep_route_table is not None
+          and node.rep_home is not None
+          and node.rep_slot is not None
+          and node.rep_send_slots is not None
+          and node.rep_send_peer_index is not None
+      ):
+        node.rep_route_table.set_value(new_plan.route_table)
+        node.rep_home.set_value(new_plan.rep_home)
+        node.rep_slot.set_value(new_plan.rep_slot)
+        node.rep_send_slots.set_value(new_plan.send_slots)
+        node.rep_send_peer_index.set_value(new_plan.send_peer_index)
+        break
+
+
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
   """Training step for the NNX model.
 
@@ -842,6 +906,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     metrics["moe_required_rbf"] = aux["moe_required_rbf"]
   if getattr(config, "record_internal_nn_metrics", False):
     record_activation_metrics(metrics, intermediate_outputs, config)
+
+  _update_moe_replica_plans(new_state.model, intermediate_outputs, config)
 
   # Drop Intermediates (e.g. sowed max_logits for QK-Clip) and the MTP sown
   # vars (mtp_losses/mtp_acceptance) before returning. They're absent from
