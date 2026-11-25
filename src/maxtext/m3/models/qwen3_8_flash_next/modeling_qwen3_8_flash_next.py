@@ -716,11 +716,13 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
     else:
       conv_out = self.conv1d(qkv)
     mixed_qkv = jax.nn.silu(conv_out)
-    z = self.in_proj_z(hidden_states).reshape(b, s, self.num_v_heads, self.head_v_dim)
+    z = checkpoint_name(self.in_proj_z(hidden_states), "qkv_proj").reshape(b, s, self.num_v_heads, self.head_v_dim)
 
-    beta = jax.nn.sigmoid(self.in_proj_b(hidden_states))
+    b_proj = checkpoint_name(self.in_proj_b(hidden_states), "qkv_proj")
+    a_proj = checkpoint_name(self.in_proj_a(hidden_states), "qkv_proj")
+    beta = jax.nn.sigmoid(b_proj)
     g = -jnp.exp(self.A_log[...].astype(jnp.float32)) * jax.nn.softplus(
-        self.in_proj_a(hidden_states).astype(jnp.float32) + self.dt_bias[...].astype(jnp.float32)
+        a_proj.astype(jnp.float32) + self.dt_bias[...].astype(jnp.float32)
     )
 
     kd = self.key_dim
@@ -778,6 +780,7 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
           use_qk_l2norm_in_kernel=True,
           chunk_inverse=self.chunk_inverse,
       )
+    core_attn_out = checkpoint_name(core_attn_out, "context")
     core_normed = self.norm(core_attn_out, z).reshape(b, s, self.value_dim)
     out = checkpoint_name(self.out_proj(core_normed), "out_proj")
     return (out, last_state) if output_final_state else out
@@ -1279,6 +1282,7 @@ class Qwen3_8SparseAttention(nnx.Module):
         block_kv_dq=block_size,
         fuse_reciprocal=True,
         use_base2_exp=True,
+        residual_checkpoint_name="context",
         interpret=(not m3_kernels.is_tpu_mesh(mesh)),
     )
     mesh = jax.sharding.get_abstract_mesh()
@@ -2256,7 +2260,8 @@ def _top_k_dense_vjp(probs: jax.Array, k: int) -> tuple[jax.Array, jax.Array]:
   num_experts = probs.shape[-1]
   probs_dtype = probs.dtype
   raw_vals, raw_ids = jax.lax.top_k(jax.lax.stop_gradient(probs), k)
-  topk_ids = raw_ids.astype(jnp.int32)
+  raw_vals = checkpoint_name(raw_vals, "moe_routing")
+  topk_ids = checkpoint_name(raw_ids.astype(jnp.int32), "moe_routing")
 
   @jax.custom_vjp
   def _attach_grad(p: jax.Array, v_sg: jax.Array, ids: jax.Array) -> jax.Array:
@@ -2347,7 +2352,10 @@ class Qwen3_8TopKRouter(nnx.Module):
     router_top_value, router_indices = _top_k_dense_vjp(router_probs, self.num_experts_per_tok)
     if self.norm_topk_prob:
       router_top_value = router_top_value / jnp.sum(router_top_value, axis=-1, keepdims=True)
-    routing_weights = (router_top_value * self.routed_scaling_factor).astype(router_logits.dtype)
+    routing_weights = checkpoint_name(
+        (router_top_value * self.routed_scaling_factor).astype(router_logits.dtype),
+        "moe_routing",
+    )
     return routing_weights, router_indices, router_probs
 
 
@@ -2863,6 +2871,12 @@ class Qwen3_8DecoderLayer(nnx.Module):
       )
     self.mlp_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
     moe_executor = m3_moe.moe_from_config(c, sharding_obj)
+    if layer_idx % 4 == 0:
+      moe_executor = dataclasses.replace(
+          moe_executor, disp_ep_tags=("moe_disp_ep", "moe_disp_ep_half", "moe_disp_ep_qtr")
+      )
+    elif layer_idx % 2 == 0:
+      moe_executor = dataclasses.replace(moe_executor, disp_ep_tags=("moe_disp_ep", "moe_disp_ep_half"))
     self.mlp = Qwen3_8SparseMoeBlock(
         emb_dim=emb,
         shared_expert_intermediate_size=int(c.mlp_dim),
@@ -2894,7 +2908,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
       router_aux_mask: jax.Array | None = None,
   ) -> Any:
     """Executes single decoder layer forward pass."""
-    hidden_states = checkpoint_name(hidden_states, "decoder_layer_input")
+    hidden_states = checkpoint_name(checkpoint_name(hidden_states, "decoder_layer_input"), "hidden_states")
     if self.ple is not None and (ple_embeds is not None or ple_input_ids is not None):
       hidden_states = hidden_states + self.ple(
           hidden_states, ple_input_ids, conv_mask=conv_mask, precomputed_embeds=ple_embeds
@@ -2913,6 +2927,7 @@ class Qwen3_8DecoderLayer(nnx.Module):
           position_embeddings=position_embeddings,
       )
       attn_out, s_idx = qsa_out if need_selected_blocks else (qsa_out, None)
+    attn_out = checkpoint_name(attn_out, "self_attn")
     hidden_states = shard_batch(self.attn_hyper_connection.combine(hidden_states, attn_out, inject), self.sharding)
     mixed, inject = self.mlp_hyper_connection.before_block(hidden_states)
     mlp_out, r_w, r_idx, r_probs = self.mlp(mixed, return_router_topk=True)

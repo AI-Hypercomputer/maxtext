@@ -2172,6 +2172,7 @@ def context_parallel_chunk_gated_delta_rule(
         return jnp.where(i < shard_id, nxt, state), None
 
       state_in, _ = jax.lax.scan(_fold, jnp.zeros(state_shape, jnp.float32), (a_all, b_all, jnp.arange(num_shards)))
+    state_in = checkpoint_name(state_in, "context")
     _, core_out = gdn_chunk_scan(xs, state_in)
     return jnp.swapaxes(core_out, 1, 2).astype(init_dtype)
 
@@ -2227,7 +2228,7 @@ def context_parallel_causal_conv1d(
         for ax in length_axes:
           shard_id = shard_id * int(mesh.shape[ax]) + jax.lax.axis_index(ax)
         recv_halo = all_tails[jnp.maximum(shard_id - 1, 0)]
-      left_halo = jnp.where(shard_id == 0, jnp.zeros_like(recv_halo), recv_halo)
+      left_halo = checkpoint_name(jnp.where(shard_id == 0, jnp.zeros_like(recv_halo), recv_halo), "context")
       x_padded = jnp.concatenate([left_halo, x_l], axis=1)
     else:
       x_padded = x_l

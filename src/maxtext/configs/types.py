@@ -7668,8 +7668,10 @@ class MaxTextConfig(
             f"(got gdn={self.gdn!r}, gdn_states={self.gdn_states!r}) because both include "
             "['gdn_core_attn_out', 'gdn_t_inv', 'gdn_chunk_states']."
         )
-      self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
-      self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+      if getattr(self, "tensors_on_device", None) is None:
+        self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
+      if getattr(self, "tensors_to_offload", None) is None:
+        self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
     if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8 or self.sa_context_device_fp8:
       if self.remat_policy != "custom":
         raise ValueError(
@@ -9869,8 +9871,10 @@ class RLConfig(
             f"(got gdn={self.gdn!r}, gdn_states={self.gdn_states!r}) because both include "
             "['gdn_core_attn_out', 'gdn_t_inv', 'gdn_chunk_states']."
         )
-      self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
-      self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
+      if getattr(self, "tensors_on_device", None) is None:
+        self.tensors_on_device = [t for t in tensors if getattr(self, t) == "device"]
+      if getattr(self, "tensors_to_offload", None) is None:
+        self.tensors_to_offload = [t for t in tensors if getattr(self, t) == "offload"]
     if self.sa_context_split_device_heads > 0 or self.sa_context_offload_fp8 or self.sa_context_device_fp8:
       if self.remat_policy != "custom":
         raise ValueError(

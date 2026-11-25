@@ -385,12 +385,18 @@ class RematPolicyAndContainerTest(parameterized.TestCase):
     self.assertIs(m3_remat.scan_safe_policy, m3_core_remat.scan_safe_policy)
     self.assertIs(m3_remat.trip_count_one_scan_barrier, m3_core_remat.trip_count_one_scan_barrier)
 
+    infra_pkg = m3_remat.__package__ or "maxtext.m3.infra"
+    m3_pkg = infra_pkg.rsplit(".", 1)[0]
+    infra_targets = ("maxtext.m3.infra", infra_pkg)
+    infra_prefixes = ("maxtext.m3.infra.", f"{infra_pkg}.")
+    m3_targets = ("maxtext.m3", m3_pkg)
+
     def _find_infra_imports(source: str, pkg: str) -> list[str]:
       hits: list[str] = []
       for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.Import):
           for alias in node.names:
-            if alias.name == "maxtext.m3.infra" or alias.name.startswith("maxtext.m3.infra."):
+            if alias.name in infra_targets or alias.name.startswith(infra_prefixes):
               hits.append(f"L{node.lineno}: import {alias.name}")
         elif isinstance(node, ast.ImportFrom):
           mod = node.module or ""
@@ -400,9 +406,9 @@ class RematPolicyAndContainerTest(parameterized.TestCase):
             resolved = f"{base}.{mod}".strip(".")
           else:
             resolved = mod
-          if resolved == "maxtext.m3.infra" or resolved.startswith("maxtext.m3.infra."):
+          if resolved in infra_targets or resolved.startswith(infra_prefixes):
             hits.append(f"L{node.lineno}: from {resolved} import ...")
-          elif resolved == "maxtext.m3" and any(a.name == "infra" for a in node.names):
+          elif resolved in m3_targets and any(a.name == "infra" for a in node.names):
             hits.append(f"L{node.lineno}: from maxtext.m3 import infra")
       return hits
 
@@ -737,8 +743,16 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
       )
       m_scan = model_creation_utils.create_model(cfg_scan, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
       found_tags = m3_remat.check_tags(m_scan, cfg_scan, toks)
-      self.assertTrue(
+      expected_tags = frozenset(
           {
+              "decoder_layer_input",
+              "hidden_states",
+              "self_attn",
+              "moe_routing",
+              "moe_disp_ep",
+              "moe_disp_ep_half",
+              "moe_disp_ep_qtr",
+              "moe_gate_up",
               "moe_routed_output",
               "qkv_proj",
               "query_proj",
@@ -749,9 +763,18 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
               "mlpwi_0",
               "mlpwi_1",
               "mlpwo",
-          }.issubset(found_tags),
-          f"Missing Qwen3.8 savepoint tags: {found_tags}",
+          }
       )
+      self.assertEqual(
+          found_tags - {"qsa_packed_mask", "qsa_local_pos"},
+          expected_tags,
+          f"Unexpected Qwen3.8 savepoint tags: {found_tags}",
+      )
+      gdn_tags = m3_remat.checkpoint_names(
+          m_scan.decoder.first_cycle.gdn_0.linear_attn,
+          jnp.ones((1, 8, cfg_scan.emb_dim), dtype=jnp.float32),
+      )
+      self.assertEqual(gdn_tags, frozenset({"qkv_proj", "context", "out_proj"}))
 
       gd, st = nnx.split(m_scan.decoder)
       dec_jaxpr = jax.make_jaxpr(lambda s, t: nnx.merge(gd, s)(t)[0])(st, toks).jaxpr
@@ -895,6 +918,47 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
       g_save = jax.jit(g_save_fn)(x_d, wi0_d, wi1_d, wo_d)
       for gf, gs in zip(g_full, g_save):
         np.testing.assert_allclose(np.asarray(gs), np.asarray(gf), atol=1e-5, rtol=1e-5)
+
+      w_gu_d = jax.device_put(
+          jnp.concatenate([wi_0, wi_1], axis=-1),
+          NamedSharding(mesh, P("expert", None, None)),
+      )
+      pol_routed = m3_remat.remat_policy("custom", names_which_can_be_saved=["moe_routing", "moe_routed_output"])
+      pol_all_moe = m3_remat.remat_policy(
+          "custom",
+          names_which_can_be_saved=["moe_routing", "moe_disp_ep", "moe_gate_up", "moe_routed_output"],
+      )
+
+      def make_diff_router_grad(pol):
+        def block(x_in, w_in, gu, w_out):
+          h = jnp.tanh(x_in)
+          routed = executor.fused(h, w_in, idx_d, gu, w_out)
+          routed_normed = routed * jax.lax.rsqrt(jnp.mean(routed * routed, axis=-1, keepdims=True) + 1e-6)
+          return h + routed_normed
+
+        ckpt = jax.checkpoint(block, policy=pol, prevent_cse=True)
+        return jax.grad(lambda x_in, w_in, gu, w_out: jnp.sum(ckpt(x_in, w_in, gu, w_out) * cot_d), argnums=(0, 1, 2, 3))
+
+      dr_full_fn = make_diff_router_grad(cp.nothing_saveable)
+      dr_routed_fn = make_diff_router_grad(pol_routed)
+      dr_all_fn = make_diff_router_grad(pol_all_moe)
+
+      j_dr_full = jax.make_jaxpr(dr_full_fn)(x_d, w_d, w_gu_d, wo_d).jaxpr
+      j_dr_routed = jax.make_jaxpr(dr_routed_fn)(x_d, w_d, w_gu_d, wo_d).jaxpr
+      j_dr_all = jax.make_jaxpr(dr_all_fn)(x_d, w_d, w_gu_d, wo_d).jaxpr
+
+      self.assertLess(_count_primitives(j_dr_routed, dot_prims), _count_primitives(j_dr_full, dot_prims))
+      self.assertLess(_count_primitives(j_dr_all, dot_prims), _count_primitives(j_dr_routed, dot_prims))
+      self.assertLess(_count_primitives(j_dr_routed, {"all_to_all"}), _count_primitives(j_dr_full, {"all_to_all"}))
+      self.assertLess(_count_primitives(j_dr_all, {"all_to_all"}), _count_primitives(j_dr_routed, {"all_to_all"}))
+      self.assertLess(_count_primitives(j_dr_routed, {"sort"}), _count_primitives(j_dr_full, {"sort"}))
+
+      dr_full = jax.jit(dr_full_fn)(x_d, w_d, w_gu_d, wo_d)
+      dr_routed = jax.jit(dr_routed_fn)(x_d, w_d, w_gu_d, wo_d)
+      dr_all = jax.jit(dr_all_fn)(x_d, w_d, w_gu_d, wo_d)
+      for gf, gr, ga in zip(dr_full, dr_routed, dr_all):
+        np.testing.assert_allclose(np.asarray(gr), np.asarray(gf), atol=1e-5, rtol=1e-5)
+        np.testing.assert_allclose(np.asarray(ga), np.asarray(gf), atol=1e-5, rtol=1e-5)
 
   @parameterized.parameters(False, True)
   def test_qwen3_numerical_grad_parity_and_negative_control(self, scan_layers: bool):
@@ -1247,7 +1311,15 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
         *extra_argv,
     ]
     cfg = pyconfig.initialize(argv)
-    topo_mesh = train_compile.get_topology_mesh(cfg)
+    try:
+      topo_mesh = train_compile.get_topology_mesh(cfg)
+    except TypeError as exc:
+      if "chip_config_name" not in str(exc):
+        raise
+      cfg = pyconfig.initialize(
+          [*argv, "internal_compile=true", "internal_compile_num_devices=8", "compile_topology=tpu7x:2x2x1"]
+      )
+      topo_mesh = train_compile.get_topology_mesh(cfg)
     shaped_args, shaped_kw, state_sh, _, model = train_compile.get_shaped_inputs(topo_mesh, cfg)
     p_sh, state_sh = maxtext_sharding.maybe_update_params_sharding_with_opt(cfg, state_sh)
     in_state_sh = maxtext_sharding.build_zero1_input_state_mesh_shardings(cfg, state_sh, p_sh)
@@ -1280,7 +1352,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
         "head_dim=32",
         "base_mlp_dim=256",
         "vocab_size=512",
-        "max_target_length=512",
+        "max_target_length=256",
         "per_device_batch_size=1",
         "ici_fsdp_parallelism=8",
         "scan_layers=true",
@@ -1302,7 +1374,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     """Verifies unscanned Qwen3.8 `remat_policy=full` (`prevent_cse=True`) cuts virtual `tpu7x-8` peak HBM vs `none`."""
     q38_common = (
         "model_name=qwen3.8-flash-next-mini",
-        "max_target_length=1024",
+        "max_target_length=256",
         "per_device_batch_size=2",
         "ici_fsdp_parallelism=2",
         "ici_expert_parallelism=4",
@@ -1319,7 +1391,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
         "override_model_config=true",
         "base_num_decoder_layers=8",
         "scan_layers=true",
-        "max_target_length=1024",
+        "max_target_length=256",
         "per_device_batch_size=2",
         "ici_fsdp_parallelism=2",
         "ici_expert_parallelism=4",
@@ -1342,7 +1414,7 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
     """Verifies 1-cycle and 2-cycle scanned Qwen3.8 `minimal_offloaded` host residual placement on `tpu7x-8`."""
     q38_common = (
         "model_name=qwen3.8-flash-next-mini",
-        "max_target_length=1024",
+        "max_target_length=256",
         "per_device_batch_size=2",
         "ici_fsdp_parallelism=2",
         "ici_expert_parallelism=4",
@@ -1375,6 +1447,8 @@ class HybridCycleAndMoESavepointTest(parameterized.TestCase):
           remat_policy="full",
           quantization="int8",
           use_qwix_quantization="true",
+          per_device_batch_size=1.0,
+          max_target_length=32,
       )
       with jax.set_mesh(mesh):
         model = model_creation_utils.create_model(cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))

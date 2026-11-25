@@ -31,6 +31,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 from maxtext.configs import pyconfig  # pylint: disable=no-name-in-module
 from maxtext.m3 import models as m3_models  # pylint: disable=no-name-in-module
+from maxtext.m3.infra import remat as m3_remat  # pylint: disable=no-name-in-module
 from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=no-name-in-module
 from maxtext.m3.core import kernels as m3_kernels  # pylint: disable=no-name-in-module
 from maxtext.m3.core.sharding import create_mesh, DefaultSharding, EPasCP, TensorType  # pylint: disable=no-name-in-module
@@ -651,6 +652,130 @@ class SequenceShardingTest(absltest.TestCase):
       )
       drv_arr = maxtext_utils.create_device_mesh(cfg_mock, devices=mock_devs)
       self.assertEqual([d.id for d in drv_arr.ravel()], [d.id for d in dev_arr.ravel()])
+
+  def test_checkpoint_names_emitted_and_gdn_context_tag(self):
+    """Both GDN and QSA sublayers emit savepoint tags including `moe_disp_ep_qtr`/`moe_disp_ep_half`."""
+    cfg = _mini_config(scan_layers=True, base_num_decoder_layers=8)
+    mesh = create_mesh(devices=jax.devices()[:1])
+    tokens = jnp.ones((1, 8), dtype=jnp.int32)
+    with jax.set_mesh(mesh):
+      model = m3_models.create_model(cfg, mesh, rngs=nnx.Rngs(0))
+      emitted = m3_remat.checkpoint_names(model, tokens)
+      expected = frozenset(
+          {
+              "decoder_layer_input",
+              "hidden_states",
+              "self_attn",
+              "moe_routing",
+              "moe_disp_ep",
+              "moe_disp_ep_half",
+              "moe_disp_ep_qtr",
+              "moe_gate_up",
+              "moe_routed_output",
+              "qkv_proj",
+              "query_proj",
+              "key_proj",
+              "value_proj",
+              "context",
+              "out_proj",
+              "mlpwi_0",
+              "mlpwi_1",
+              "mlpwo",
+          }
+      )
+      self.assertEqual(emitted - {"qsa_packed_mask", "qsa_local_pos"}, expected)
+      gdn_emitted = m3_remat.checkpoint_names(
+          model.decoder.first_cycle.gdn_0.linear_attn,
+          jnp.ones((1, 8, cfg.emb_dim), dtype=jnp.float32),
+      )
+      self.assertEqual(gdn_emitted, frozenset({"qkv_proj", "context", "out_proj"}))
+      # Verify selective-layer tags on individual cycle sublayers (`0 -> qtr+half`, `2 -> half`, `1,3 -> base`).
+      x_sub = jnp.ones((1, 8, cfg.emb_dim * cfg.hc_count), dtype=jnp.float32)
+      self.assertIn("moe_disp_ep_qtr", m3_remat.checkpoint_names(model.decoder.first_cycle.gdn_0, x_sub))
+      self.assertNotIn("moe_disp_ep_half", m3_remat.checkpoint_names(model.decoder.first_cycle.gdn_1, x_sub))
+      self.assertIn("moe_disp_ep_half", m3_remat.checkpoint_names(model.decoder.first_cycle.gdn_2, x_sub))
+      self.assertNotIn("moe_disp_ep_qtr", m3_remat.checkpoint_names(model.decoder.first_cycle.gdn_2, x_sub))
+      self.assertNotIn("moe_disp_ep_half", m3_remat.checkpoint_names(model.decoder.first_cycle.qsa_3, x_sub))
+
+  def test_check_tags_all_remat_policies(self):
+    """`m3.infra.remat.check_tags` succeeds for every policy in `REMAT_POLICIES` and preserves explicit lists."""
+    cfg = _mini_config(scan_layers=True, base_num_decoder_layers=8)
+    mesh = create_mesh(devices=jax.devices()[:1])
+    tokens = jnp.ones((1, 8), dtype=jnp.int32)
+    with jax.set_mesh(mesh):
+      model = m3_models.create_model(cfg, mesh, rngs=nnx.Rngs(0))
+      for policy_name in m3_remat.REMAT_POLICIES:
+        policy_cfg = _mini_config(
+            scan_layers=True,
+            base_num_decoder_layers=8,
+            remat_policy=policy_name,
+            tensors_on_device=["qkv_proj", "moe_disp_ep_qtr"] if policy_name == "custom" else None,
+            tensors_to_offload=["hidden_states"] if policy_name == "custom" else None,
+        )
+        if policy_name == "custom":
+          self.assertEqual(list(policy_cfg.tensors_on_device), ["qkv_proj", "moe_disp_ep_qtr"])
+          self.assertEqual(list(policy_cfg.tensors_to_offload), ["hidden_states"])
+        found = m3_remat.check_tags(model, policy_cfg, tokens)
+        resolved = m3_remat.resolve_policy(policy_cfg)
+        if resolved is not None and resolved.names is not None:
+          self.assertTrue(bool(found & set(resolved.names)), msg=f"No matching tags for {policy_name}")
+
+  def test_remat_policies_grad_parity_and_param_path_invariance(self):
+    """Remat policies preserve `nnx.Param` paths and match `remat_policy='none'` loss and gradients on a 4-device mesh."""
+    # `fsdp=2, expert=2` shards batch across all 4 CPU devices (avoiding JAX 0.11.1's CPU SPMD
+    # replicated-axis depthwise conv backward bug; see `test_sharded_model_matches_single_device`)
+    # and exercises real EP `shard_map` `moe_disp_ep_qtr` savepoints.
+    mesh = create_mesh(ici={"fsdp": 2, "expert": 2}, devices=self.devices)
+    tokens = jnp.arange(32, dtype=jnp.int32).reshape((4, 8)) % 64
+    targets = jnp.roll(tokens, shift=-1, axis=-1)
+
+    with jax.set_mesh(mesh):
+      base_cfg = _mini_config(
+          scan_layers=True, base_num_decoder_layers=4, use_ple_layer=False, mtp_num_layers=0, remat_policy="none"
+      )
+      base_model = m3_models.create_model(base_cfg, mesh, rngs=nnx.Rngs(0))
+      base_param_sig = [(k, v.shape, v.dtype) for k, v in _params(base_model).items()]
+      base_state = nnx.state(base_model)
+
+      def _loss_fn(mod):
+        loss, _ = modeling_qwen3_8_flash_next.compute_total_loss(
+            mod, tokens, targets, router_aux_coeff=0.01, use_mtp=False
+        )
+        return loss
+
+      ref_loss, ref_grads = _grads(_loss_fn, base_model)
+      cases = [
+          ("full", None, None),
+          ("custom", ["hidden_states", "self_attn", "moe_routed_output", "moe_disp_ep_qtr"], []),
+      ]
+      if jax.default_backend() == "tpu":
+        cases.extend(
+            [
+                ("hidden_state_with_offload", None, None),
+                ("custom", ["qkv_proj"], ["hidden_states"]),
+            ]
+        )
+
+      for pol, saved, offloaded in cases:
+        label = f"{pol}:{saved}:{offloaded}"
+        cfg_p = _mini_config(
+            scan_layers=True,
+            base_num_decoder_layers=4,
+            use_ple_layer=False,
+            mtp_num_layers=0,
+            remat_policy=pol,
+            tensors_on_device=saved,
+            tensors_to_offload=offloaded,
+        )
+        m_p = m3_models.create_model(cfg_p, mesh, rngs=nnx.Rngs(1))
+        nnx.update(m_p, base_state)
+        m3_remat.maybe_apply_remat(m_p, cfg_p, model_mode="train")
+        self.assertTrue(m_p.decoder.remat)
+        self.assertEqual([(k, v.shape, v.dtype) for k, v in _params(m_p).items()], base_param_sig)
+        loss_p, grads_p = _grads(_loss_fn, m_p)
+        np.testing.assert_allclose(loss_p, ref_loss, atol=1e-4, rtol=1e-4, err_msg=label)
+        for name, ref_g in ref_grads.items():
+          np.testing.assert_allclose(grads_p[name], ref_g, atol=1e-4, rtol=1e-4, err_msg=f"{label}:{name}")
 
 
 if __name__ == "__main__":
