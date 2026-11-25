@@ -73,6 +73,7 @@ DEFAULT_SHARDING_AXES = ("data", "fsdp", "fsdp_transpose", "context", "tensor", 
 
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
+TPU7X_TORUS_YX_ZCORE = "tpu7x_torus_yx_zcore"
 
 
 # A logical axis maps to one mesh axis, several (their product shards the
@@ -477,7 +478,12 @@ class DefaultSharding(Sharding):
   routed-expert weights shard `experts` over `"expert"`, `expert_embed` over
   `("fsdp", "fsdp_transpose", "context")`, and `expert_mlp` over
   `("tensor", "tensor_sequence")`; `heads`, `kv_heads`, `mlp`, and `vocab` shard
-  over `("tensor", "tensor_sequence")`; `norm` and `head_dim` stay replicated.
+  over `("tensor", "tensor_sequence")`; `norm` and `head_dim` stay replicated. Two axes cover dense weights that have
+  no `embed` dimension to carry FSDP: `ngram_vocab` (the row dimension of a
+  hashed n-gram embedding table, which can be the largest single weight of a
+  model) shards over `("fsdp", "fsdp_transpose", "context", "expert")` too, and
+  `conv_channels` (the channel dimension of a depthwise convolution kernel)
+  shards over `("fsdp", "fsdp_transpose", "expert")` (staying off `context`).
 
   Activations shard `batch` over `("data", "fsdp", "fsdp_transpose", "expert")`,
   `length` over `context` (all-gather K/V in natural token order), and
@@ -504,6 +510,14 @@ class DefaultSharding(Sharding):
         return ("fsdp", "fsdp_transpose", "context", "expert")
       case "embed", TensorType.ACTIVATION:
         return None
+      case "conv_channels", TensorType.WEIGHT:
+        # A convolution runs along the sequence. With its kernel on a mesh axis that carries the sequence, the
+        # partitioner gathers the sequence instead of exchanging the few tokens at the shard boundaries.
+        return ("fsdp", "fsdp_transpose", "expert")
+      case "ngram_vocab", TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose", "context", "expert")
+      case ("conv_channels" | "ngram_vocab"), TensorType.ACTIVATION:
+        return None
       case "experts", _:
         return "expert"
       case "expert_embed", TensorType.WEIGHT:
@@ -526,9 +540,59 @@ class DefaultSharding(Sharding):
         raise KeyError(f"No sharding rule for logical axis {axis!r} ({tensor_type.value}) on tensor {tensor_name!r}.")
 
 
+@dataclasses.dataclass(frozen=True)
+class EPasCP(DefaultSharding):
+  """Expert axis acts as Context Parallelism outside core MoE (`ep_as_cp`).
+
+  Sequence activations (`length`, `norm_length`) shard over `("context", "expert")`
+  (plus `"tensor_sequence"` on `norm_length`) while `batch` shards over
+  `("data", "fsdp", "fsdp_transpose")`, so the global batch only needs to divide
+  the data and FSDP shards on long-sequence runs. Weight rules are unchanged except
+  `conv_channels`, which shards over `("fsdp", "fsdp_transpose")` so depthwise
+  sequence convolutions stay off the sequence-carrying `expert` axis.
+  """
+
+  def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
+    match axis, tensor_type:
+      case "batch", TensorType.ACTIVATION:
+        return ("data", "fsdp", "fsdp_transpose")
+      case "conv_channels", TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose")
+      case "length", TensorType.ACTIVATION:
+        return ("context", "expert")
+      case "norm_length", TensorType.ACTIVATION:
+        return ("context", "expert", "tensor_sequence")
+    return super().map_axis(axis, tensor_name, tensor_type)
+
+
+SHARDING_PRESETS: dict[str, type[DefaultSharding]] = {
+    "default": DefaultSharding,
+    "ep_as_cp": EPasCP,
+}
+
+
+def sharding_preset_from_name(name: str | DefaultSharding | None = None) -> DefaultSharding:
+  """Resolves a `DefaultSharding` strategy preset by name or instance."""
+  if isinstance(name, DefaultSharding):
+    return name
+  raw = getattr(name, "value", name)
+  if raw is None:
+    return DefaultSharding()
+  if not isinstance(raw, str):
+    raise TypeError(f"Expected str or None for sharding preset name, got {type(name).__name__}.")
+  key = raw.strip().lower().replace("-", "_")
+  if not key or key in ("default", "default_sharding"):
+    return DefaultSharding()
+  if key in ("ep_as_cp", "epascp"):
+    return EPasCP()
+  raise ValueError(f"Unknown m3 sharding preset {name!r}; expected one of {sorted(SHARDING_PRESETS)}.")
+
+
 def sharding_from_config(config: Any) -> DefaultSharding:
-  """Builds `DefaultSharding` from `config`."""
-  del config
+  """Builds `DefaultSharding` (or the configured `sharding_preset` subclass) from `config`."""
+  preset_name = config.sharding_preset if hasattr(config, "sharding_preset") else None
+  if preset_name is not None and preset_name != "":
+    return sharding_preset_from_name(preset_name)
   return DefaultSharding()
 
 
@@ -635,16 +699,200 @@ def _reshape_mesh_to_rings(slice_mesh_16x16: Any, strategy: str) -> Any:
   raise ValueError(f"Unknown custom_mesh strategy {strategy!r}; expected {HYBRID_RING_64X4!r} or {HYBRID_RING_32X8!r}.")
 
 
+def verify_tpu7x_torus_rings(
+    ring_2d: Any,
+    grid_dims: tuple[int, int, int],
+    min_coords: tuple[int, int, int] = (0, 0, 0),
+) -> dict[str, Any]:
+  """Computes 3D torus L1 hop statistics across every cyclic edge of a 2D `(outer, inner)` Dual-TC mesh."""
+  outer_sz, inner_sz = ring_2d.shape
+
+  def _edge_hops(d0: Any, d1: Any) -> tuple[int, bool]:
+    c0 = tuple(int(d0.coords[i]) - min_coords[i] for i in range(3))
+    c1 = tuple(int(d1.coords[i]) - min_coords[i] for i in range(3))
+    hops = 0
+    for idx, dim_sz in enumerate(grid_dims):
+      raw = abs(c0[idx] - c1[idx])
+      hops += min(raw, dim_sz - raw) if dim_sz >= 4 else raw
+    same_core = int(getattr(d0, "core_on_chip", 0)) == int(getattr(d1, "core_on_chip", 0))
+    # Valid 0-jump step: either intra-chip D2D (`hops == 0` and `!same_core`) or 1-hop ICI (`hops == 1` and `same_core`).
+    is_diag = not ((hops == 0 and not same_core) or (hops == 1 and same_core))
+    return hops, is_diag
+
+  outer_hops = []
+  outer_diag = 0
+  if outer_sz > 1:
+    for i in range(outer_sz):
+      for j in range(inner_sz):
+        h, diag = _edge_hops(ring_2d[i, j], ring_2d[(i + 1) % outer_sz, j])
+        outer_hops.append(h)
+        outer_diag += int(diag)
+
+  inner_hops = []
+  inner_diag = 0
+  if inner_sz > 1:
+    for i in range(outer_sz):
+      for j in range(inner_sz):
+        h, diag = _edge_hops(ring_2d[i, j], ring_2d[i, (j + 1) % inner_sz])
+        inner_hops.append(h)
+        inner_diag += int(diag)
+
+  return {
+      "grid": grid_dims,
+      "ring_shape": (outer_sz, inner_sz),
+      "outer_max_hops": max(outer_hops, default=0),
+      "inner_max_hops": max(inner_hops, default=0),
+      "outer_diag_jumps": outer_diag,
+      "inner_diag_jumps": inner_diag,
+  }
+
+
+def _build_single_slice_tpu7x_torus_rings(
+    granule: Sequence[Any],
+    outer_sz: int,
+    inner_sz: int,
+) -> tuple[Any, dict[str, Any]]:
+  """Arranges one Dual-TC 3D torus slice `(X, Y, Z) x 2` into boustrophedon snake `(outer_sz, inner_sz)` rings."""
+  import numpy as np  # pylint: disable=import-outside-toplevel
+
+  if not granule or not all(hasattr(d, "coords") and len(d.coords) == 3 for d in granule):
+    raise ValueError(f"custom_mesh={TPU7X_TORUS_YX_ZCORE!r} requires 3D `coords` on every device; got {granule[:1]!r}.")
+  min_c = (
+      min(int(d.coords[0]) for d in granule),
+      min(int(d.coords[1]) for d in granule),
+      min(int(d.coords[2]) for d in granule),
+  )
+  dim_x = max(int(d.coords[0]) for d in granule) - min_c[0] + 1
+  dim_y = max(int(d.coords[1]) for d in granule) - min_c[1] + 1
+  dim_z = max(int(d.coords[2]) for d in granule) - min_c[2] + 1
+  if dim_x * dim_y * dim_z * 2 != len(granule):
+    raise ValueError(
+        f"custom_mesh={TPU7X_TORUS_YX_ZCORE!r} requires Dual-TensorCore 3D grid `X*Y*Z*2 == {len(granule)}`; "
+        f"got grid=({dim_x}, {dim_y}, {dim_z}) for {len(granule)} devices."
+    )
+
+  grid = np.empty((dim_x, dim_y, dim_z, 2), dtype=object)
+  for dev in granule:
+    cx = int(dev.coords[0]) - min_c[0]
+    cy = int(dev.coords[1]) - min_c[1]
+    cz = int(dev.coords[2]) - min_c[2]
+    raw_core = getattr(dev, "core_on_chip", None)
+    core = (0 if grid[cx, cy, cz, 0] is None else 1) if raw_core is None else int(raw_core)
+    if core not in (0, 1) or grid[cx, cy, cz, core] is not None:
+      raise ValueError(f"Duplicate or invalid Dual-TC coordinate ({cx}, {cy}, {cz}, core={core}) for device {dev!r}.")
+    grid[cx, cy, cz, core] = dev
+
+  if outer_sz == dim_y * dim_x and inner_sz == 2 * dim_z and dim_y % 2 == 0:
+    # Case A (e.g. `(16, 8)` on `4x4x4`): snake `(Y, X)` on outer FSDP ring + snake `(core, Z)` on inner EP ring.
+    arr = grid.transpose(1, 0, 3, 2).copy()
+    arr[1::2, :, :, :] = arr[1::2, ::-1, :, :]
+    arr[:, :, 1, :] = arr[:, :, 1, ::-1]
+    ring_2d = arr.reshape((outer_sz, inner_sz))
+  elif outer_sz == dim_y and inner_sz == dim_x * dim_z * 2:
+    # Case B1 (e.g. `(4, 32)` on `4x4x4`): 1-hop `Y` ring + snake `(X, Z)` reversed across `core=0/1` via D2D.
+    xz = grid.transpose(1, 0, 2, 3).copy()
+    xz[:, 1::2, :, :] = xz[:, 1::2, ::-1, :]
+    path_c = xz.reshape((dim_y, dim_x * dim_z, 2)).transpose(0, 2, 1).copy()
+    path_c[:, 1, :] = path_c[:, 1, ::-1]
+    ring_2d = path_c.reshape((outer_sz, inner_sz))
+  elif dim_x == 4 and dim_y % 2 == 0 and outer_sz == 2 * dim_y and inner_sz == 4 * dim_z:
+    # Case B2 (e.g. `(8, 16)` on `4x4x4`): mirror-paired `(Y, 2)` 1-hop cycles (`0<->3` torus wrap, `1<->2` link)
+    # on outer FSDP ring + snake `(2, Z)` reversed across `core=0/1` via D2D on inner EP ring.
+    left = grid[0:2, :, :, :].transpose(1, 0, 2, 3).copy()
+    left[1::2, :, :, :] = left[1::2, ::-1, :, :]
+    right = grid[2:4, :, :, :][::-1, :, :, :].transpose(1, 0, 2, 3).copy()
+    right[1::2, :, :, :] = right[1::2, ::-1, :, :]
+    paired = np.stack([left.reshape((2 * dim_y, dim_z, 2)), right.reshape((2 * dim_y, dim_z, 2))], axis=1)
+    paired[:, 1, :, :] = paired[:, 1, ::-1, :]
+    path_c = paired.reshape((2 * dim_y, 2 * dim_z, 2)).transpose(0, 2, 1).copy()
+    path_c[:, 1, :] = path_c[:, 1, ::-1]
+    ring_2d = path_c.reshape((outer_sz, inner_sz))
+  else:
+    raise ValueError(
+        f"custom_mesh={TPU7X_TORUS_YX_ZCORE!r} does not support non-unit ICI shape ({outer_sz}, {inner_sz}) "
+        f"on grid=({dim_x}, {dim_y}, {dim_z}) x 2."
+    )
+
+  stats = verify_tpu7x_torus_rings(ring_2d, (dim_x, dim_y, dim_z), min_c)
+  return ring_2d, stats
+
+
+def build_tpu7x_torus_device_mesh(
+    ici_shape: Sequence[int],
+    dcn_shape: Sequence[int] | None,
+    devices: Sequence[Any],
+) -> tuple[Any, dict[str, Any]]:
+  """Builds single- or multi-slice `tpu7x_torus_yx_zcore` device array and returns `(device_array, ring_stats)`.
+
+  Expects standard MaxText/M3 `mesh_axes` ordering where the outer non-unit ICI axis is `fsdp` (or `data`/`fsdp`)
+  and the inner non-unit ICI axis is `expert` (or `context`).
+  """
+  non_unit = [int(dim) for dim in ici_shape if int(dim) != 1]
+  if len(non_unit) != 2:
+    raise ValueError(
+        f"custom_mesh={TPU7X_TORUS_YX_ZCORE!r} requires exactly 2 non-unit ICI mesh axes, got ici_shape={tuple(ici_shape)}."
+    )
+  outer_sz, inner_sz = non_unit
+  dcn_tuple = tuple(int(d) for d in dcn_shape) if dcn_shape is not None else (1,) * len(ici_shape)
+  num_dcn = math.prod(dcn_tuple)
+  if num_dcn > 1 and any(not hasattr(d, "slice_index") for d in devices):
+    raise ValueError(f"Device {devices[0]!r} is missing `slice_index` required for multi-slice custom_mesh.")
+
+  granule_dict: dict[int, list[jax.Device]] = collections.defaultdict(list)
+  for dev in devices:
+    granule_dict[int(getattr(dev, "slice_index", 0))].append(dev)
+  granules = [granule_dict[k] for k in sorted(granule_dict)] if num_dcn > 1 else [list(devices)]
+  if num_dcn != len(granules):
+    raise ValueError(f"Number of slices ({len(granules)}) must equal product of dcn_shape {dcn_tuple}.")
+
+  import numpy as np  # pylint: disable=import-outside-toplevel
+
+  per_granule: list[Any] = []
+  agg_stats: dict[str, Any] = {}
+  for granule in granules:
+    ring_2d, s = _build_single_slice_tpu7x_torus_rings(granule, outer_sz, inner_sz)
+    per_granule.append(ring_2d.reshape(tuple(ici_shape)))
+    if not agg_stats:
+      agg_stats = dict(s)
+    else:
+      agg_stats["outer_max_hops"] = max(agg_stats["outer_max_hops"], s["outer_max_hops"])
+      agg_stats["inner_max_hops"] = max(agg_stats["inner_max_hops"], s["inner_max_hops"])
+      agg_stats["outer_diag_jumps"] += s["outer_diag_jumps"]
+      agg_stats["inner_diag_jumps"] += s["inner_diag_jumps"]
+
+  if len(per_granule) == 1:
+    return per_granule[0], agg_stats
+
+  ndim = len(ici_shape)
+  stacked = np.stack(per_granule, axis=0)
+  interleaved = np.transpose(
+      stacked.reshape((*dcn_tuple, *ici_shape)),
+      tuple(val for i in range(ndim) for val in (i, i + ndim)),
+  )
+  return interleaved.reshape(tuple(d * m for d, m in zip(dcn_tuple, ici_shape))), agg_stats
+
+
 def _is_valid_custom_mesh(ici_shape: Sequence[int], custom_mesh: str) -> bool:
   """Validates `custom_mesh` against the ordered non-unit dimensions of `ici_shape`."""
   if not custom_mesh:
     return False
+  if custom_mesh == TPU7X_TORUS_YX_ZCORE:
+    non_unit = [dim for dim in ici_shape if dim != 1]
+    if len(non_unit) != 2:
+      raise ValueError(
+          f"Invalid custom_mesh={custom_mesh!r} for ICI mesh shape {tuple(ici_shape)}; "
+          f"expected exactly 2 non-unit axes, got {tuple(non_unit)}."
+      )
+    return True
   expected_non_unit = {
       HYBRID_RING_64X4: [64, 4],
       HYBRID_RING_32X8: [32, 8],
   }
   if custom_mesh not in expected_non_unit:
-    raise ValueError(f"Invalid custom_mesh={custom_mesh!r}; supported strategies are {sorted(expected_non_unit)}.")
+    raise ValueError(
+        f"Invalid custom_mesh={custom_mesh!r}; supported strategies are "
+        f"{sorted([*expected_non_unit, TPU7X_TORUS_YX_ZCORE])}."
+    )
   non_unit = [dim for dim in ici_shape if dim != 1]
   if non_unit != expected_non_unit[custom_mesh]:
     raise ValueError(
@@ -660,7 +908,10 @@ def _create_custom_device_mesh(
     devices: Sequence[jax.Device],
     custom_mesh: str,
 ) -> Any:
-  """Builds a single- or multi-slice custom ring device mesh (`64x4` or `32x8` per 256-chip slice)."""
+  """Builds a single- or multi-slice custom ring device mesh (`64x4`, `32x8`, or `tpu7x_torus_yx_zcore`)."""
+  if custom_mesh == TPU7X_TORUS_YX_ZCORE:
+    device_mesh, _ = build_tpu7x_torus_device_mesh(ici_shape, dcn_shape, devices)
+    return device_mesh
   if len(devices) % 256 != 0:
     raise ValueError(f"custom_mesh={custom_mesh!r} requires a multiple of 256 devices, got {len(devices)}.")
   if math.prod(dcn_shape) > 1 and any(not hasattr(d, "slice_index") for d in devices):

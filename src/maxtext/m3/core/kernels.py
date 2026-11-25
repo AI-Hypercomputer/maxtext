@@ -1990,3 +1990,261 @@ def dot_product_attention(
         max_logit_value=max_logit_value,
     )
   raise ValueError(f"Unsupported attention backend: {resolved_backend!r}.")
+
+
+# ==============================================================================
+# Pure-JAX Chunked Gated DeltaNet & Context-Parallel Sequence Recurrence / Conv1D
+# ==============================================================================
+
+
+def _l2norm_f32(x: jax.Array, dim: int = -1, eps: float = 1e-6) -> jax.Array:
+  """L2 normalization computed in float32, preserving input dtype."""
+  x_f32 = x.astype(jnp.float32)
+  inv_norm = jax.lax.rsqrt(jnp.sum(x_f32 * x_f32, axis=dim, keepdims=True) + eps)
+  return (x_f32 * inv_norm).astype(x.dtype)
+
+
+def block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax.Array:
+  """Computes the exact inverse of `(I + s_mat)` for strictly lower-triangular `s_mat` via MXU matmuls.
+
+  Bottom-up block doubling: starting from `1x1` blocks (`inverse = I`), each level merges adjacent
+  `b x b` diagonal blocks whose inverses `A11^-1` and `A22^-1` are already known, using
+  `[[A11, 0], [A21, A22]]^-1 = [[A11^-1, 0], [-A22^-1 A21 A11^-1, A22^-1]]`.
+  """
+  prec = jax.lax.Precision.HIGHEST
+  ar = jnp.arange(chunk_size)
+  inv = jnp.broadcast_to(jnp.eye(chunk_size, dtype=jnp.float32), s_mat.shape)
+  b = 1
+  while b < chunk_size:
+    cross = ((ar[:, None] // (2 * b)) == (ar[None, :] // (2 * b))) & ((ar[:, None] // b) == (ar[None, :] // b) + 1)
+    off = jnp.matmul(jnp.matmul(inv, jnp.where(cross, s_mat, 0.0), precision=prec), inv, precision=prec)
+    inv = inv - jnp.where(cross, off, 0.0)
+    b *= 2
+  return inv
+
+
+def gdn_chunk_inputs(
+    query: jax.Array,
+    key: jax.Array,
+    value: jax.Array,
+    g: jax.Array,
+    beta: jax.Array,
+    chunk_size: int,
+    use_qk_l2norm_in_kernel: bool,
+    chunk_inverse: str,
+) -> tuple[tuple[jax.Array, ...], tuple[int, int, int, int]]:
+  """Per-chunk terms of the chunked delta rule, chunk axis leading, and the `(B, H, D_k, D_v)` state shape."""
+  if chunk_inverse not in ("solve", "block_doubling"):
+    raise ValueError(f"Expected chunk_inverse in ('solve', 'block_doubling'), got {chunk_inverse!r}.")
+  if use_qk_l2norm_in_kernel:
+    query, key = _l2norm_f32(query, dim=-1, eps=1e-6), _l2norm_f32(key, dim=-1, eps=1e-6)
+
+  query, key, value, beta, g = (jnp.swapaxes(x.astype(jnp.float32), 1, 2) for x in (query, key, value, beta, g))
+  b, h, s, d_k = key.shape
+  d_v = value.shape[-1]
+  pad_size = (chunk_size - s % chunk_size) % chunk_size
+  if pad_size > 0:
+    query, key, value = (jnp.pad(x, ((0, 0), (0, 0), (0, pad_size), (0, 0))) for x in (query, key, value))
+    beta, g = (jnp.pad(x, ((0, 0), (0, 0), (0, pad_size))) for x in (beta, g))
+
+  total_s = s + pad_size
+  num_chunks = total_s // chunk_size
+  beta_c = jnp.expand_dims(beta.reshape(b, h, num_chunks, chunk_size), -1)
+  query = (query * (1.0 / jnp.sqrt(d_k))).reshape(b, h, num_chunks, chunk_size, d_k)
+  key = key.reshape(b, h, num_chunks, chunk_size, d_k)
+  k_beta, v_beta = key * beta_c, value.reshape(b, h, num_chunks, chunk_size, d_v) * beta_c
+  g = g.reshape(b, h, num_chunks, chunk_size)
+
+  prec = jax.lax.Precision.HIGHEST
+  g_cumsum = jnp.cumsum(g, axis=-1)
+  decay_mask = jnp.tril(jnp.exp(jnp.tril(jnp.expand_dims(g_cumsum, -1) - jnp.expand_dims(g_cumsum, -2))))
+  s_mat = (jnp.matmul(k_beta, jnp.swapaxes(key, -1, -2), precision=prec)) * jnp.tril(decay_mask, k=-1)
+  rhs = jnp.concatenate([v_beta, k_beta * jnp.expand_dims(jnp.exp(g_cumsum), -1)], axis=-1)
+  if chunk_inverse == "block_doubling":
+    solved = jnp.matmul(block_doubling_unit_lower_inverse(s_mat, chunk_size), rhs, precision=prec)
+  else:
+    i_plus_s = jnp.eye(chunk_size, dtype=jnp.float32) + s_mat
+    solved = jax.scipy.linalg.solve_triangular(i_plus_s, rhs, lower=True, unit_diagonal=True)
+  v_inv, k_cumdecay = jnp.split(solved, [d_v], axis=-1)
+  xs = tuple(jnp.moveaxis(x, 2, 0) for x in (query, key, v_inv, k_cumdecay, decay_mask, g_cumsum))
+  return xs, (b, h, d_k, d_v)
+
+
+def gdn_chunk_scan(xs: tuple[jax.Array, ...], init_state: jax.Array) -> tuple[jax.Array, jax.Array]:
+  """Carries the recurrent state over chunks; returns the final state and the `(B, H, S_padded, D_v)` output."""
+  prec = jax.lax.Precision.HIGHEST
+
+  def _chunk_step(carry, step_xs):
+    q_i, k_i, v_i, k_cd_i, dm_i, g_i = step_xs
+    v_new = v_i - jnp.matmul(k_cd_i, carry, precision=prec)
+    attn_inter = jnp.matmul(q_i * jnp.expand_dims(jnp.exp(g_i), -1), carry, precision=prec)
+    core_out = attn_inter + jnp.matmul(
+        (jnp.matmul(q_i, jnp.swapaxes(k_i, -1, -2), precision=prec)) * dm_i, v_new, precision=prec
+    )
+    decay_last = jnp.expand_dims(jnp.exp(g_i[..., -1:]), -1)
+    k_decay = k_i * jnp.expand_dims(jnp.exp(g_i[..., -1:] - g_i), -1)
+    return carry * decay_last + jnp.matmul(jnp.swapaxes(k_decay, -1, -2), v_new, precision=prec), core_out
+
+  final_state, core_chunks = jax.lax.scan(_chunk_step, init_state, xs)
+  core_out = jnp.moveaxis(core_chunks, 0, 2)
+  b, h, num_chunks, chunk_size, d_v = core_out.shape
+  return final_state, core_out.reshape(b, h, num_chunks * chunk_size, d_v)
+
+
+@functools.partial(jax.checkpoint, static_argnums=(1,))
+def _gdn_chunk_transfer(xs: tuple[jax.Array, ...], state_shape: tuple[int, int, int, int]) -> tuple[jax.Array, jax.Array]:
+  """Computes the affine map `S_out = A @ S_in + B` that a shard's chunks apply to the recurrent state."""
+  _, k_all, v_all, k_cd_all, _, g_all = xs
+  b, h, d_k, d_v = state_shape
+  prec = jax.lax.Precision.HIGHEST
+
+  def _step(carry, step_xs):
+    k_i, v_i, k_cd_i, g_i = step_xs
+    v_ext = jnp.concatenate([jnp.zeros((*v_i.shape[:-1], d_k), v_i.dtype), v_i], axis=-1)
+    v_new = v_ext - jnp.matmul(k_cd_i, carry, precision=prec)
+    decay_last = jnp.expand_dims(jnp.exp(g_i[..., -1:]), -1)
+    k_decay = k_i * jnp.expand_dims(jnp.exp(g_i[..., -1:] - g_i), -1)
+    return carry * decay_last + jnp.matmul(jnp.swapaxes(k_decay, -1, -2), v_new, precision=prec), None
+
+  eye = jnp.broadcast_to(jnp.eye(d_k, dtype=jnp.float32), (b, h, d_k, d_k))
+  init = jnp.concatenate([eye, jnp.zeros((b, h, d_k, d_v), jnp.float32)], axis=-1)
+  final, _ = jax.lax.scan(_step, init, (k_all, v_all, k_cd_all, g_all))
+  return final[..., :d_k], final[..., d_k:]
+
+
+def context_parallel_chunk_gated_delta_rule(
+    query: jax.Array,
+    key: jax.Array,
+    value: jax.Array,
+    g: jax.Array,
+    beta: jax.Array,
+    *,
+    batch_axes: tuple[str, ...],
+    length_axes: tuple[str, ...],
+    chunk_size: int = 64,
+    use_qk_l2norm_in_kernel: bool = True,
+    chunk_inverse: str = "block_doubling",
+) -> jax.Array:
+  """Chunked Gated DeltaNet over a sequence sharded along `length_axes` (zero initial state)."""
+  mesh = jax.sharding.get_abstract_mesh()
+  init_dtype = value.dtype
+  num_shards = math.prod(int(mesh.shape[ax]) for ax in length_axes)
+  if key.shape[1] % (num_shards * chunk_size) != 0:
+    raise ValueError(
+        f"Sequence length {key.shape[1]} must be a multiple of {num_shards} sequence shards x chunk_size {chunk_size}."
+    )
+  batch_entry = batch_axes if batch_axes else None
+  spec4 = P(batch_entry, length_axes, None, None)
+  spec3 = P(batch_entry, length_axes, None)
+  prec = jax.lax.Precision.HIGHEST
+
+  def _per_shard(q_l, k_l, v_l, g_l, beta_l):
+    xs, state_shape = gdn_chunk_inputs(q_l, k_l, v_l, g_l, beta_l, chunk_size, use_qk_l2norm_in_kernel, chunk_inverse)
+    a_loc, b_loc = _gdn_chunk_transfer(xs, state_shape)
+    if len(length_axes) == 1:
+      cp_ax = length_axes[0]
+      shard_id = jax.lax.axis_index(cp_ax)
+      a_run, b_run = a_loc, b_loc
+      step = 1
+      while step < num_shards:
+        fwd = [(i, (i + step) % num_shards) for i in range(num_shards)]
+        a_recv = jax.lax.ppermute(a_run, cp_ax, fwd)
+        b_recv = jax.lax.ppermute(b_run, cp_ax, fwd)
+        a_cmp = jnp.matmul(a_run, a_recv, precision=prec)
+        b_cmp = jnp.matmul(a_run, b_recv, precision=prec) + b_run
+        live = shard_id >= step
+        a_run = jnp.where(live, a_cmp, a_run)
+        b_run = jnp.where(live, b_cmp, b_run)
+        step *= 2
+      shift1 = [(i, (i + 1) % num_shards) for i in range(num_shards)]
+      b_ex = jax.lax.ppermute(b_run, cp_ax, shift1)
+      state_in = jnp.where(shard_id == 0, jnp.zeros(state_shape, jnp.float32), b_ex)
+    else:
+      a_all = jax.lax.all_gather(a_loc, length_axes, axis=0, tiled=False)
+      b_all = jax.lax.all_gather(b_loc, length_axes, axis=0, tiled=False)
+      shard_id = 0
+      for ax in length_axes:
+        shard_id = shard_id * int(mesh.shape[ax]) + jax.lax.axis_index(ax)
+
+      def _fold(state, step_xs):
+        a_i, b_i, i = step_xs
+        nxt = jnp.matmul(a_i, state, precision=prec) + b_i
+        return jnp.where(i < shard_id, nxt, state), None
+
+      state_in, _ = jax.lax.scan(_fold, jnp.zeros(state_shape, jnp.float32), (a_all, b_all, jnp.arange(num_shards)))
+    _, core_out = gdn_chunk_scan(xs, state_in)
+    return jnp.swapaxes(core_out, 1, 2).astype(init_dtype)
+
+  return jax.shard_map(
+      _per_shard,
+      mesh=mesh,
+      in_specs=(spec4, spec4, spec4, spec3, spec3),
+      out_specs=spec4,
+      check_vma=False,
+  )(query, key, value, g, beta)
+
+
+def context_parallel_causal_conv1d(
+    x: jax.Array,
+    kernel: jax.Array,
+    *,
+    batch_axes: tuple[str, ...],
+    length_axes: tuple[str, ...],
+    sharding: Sharding | None = None,
+    dtype: Any = jnp.bfloat16,
+) -> jax.Array:
+  """Causal depthwise 1D convolution over a sequence sharded along `length_axes` via `ppermute` halo exchange."""
+  mesh = jax.sharding.get_abstract_mesh()
+  num_shards = math.prod(int(mesh.shape[ax]) for ax in length_axes)
+  kernel_size = kernel.shape[0]
+  halo_len = kernel_size - 1
+  chan_spec = (sharding or DefaultSharding())("conv1d", (None, None, "conv_channels"), TensorType.WEIGHT)
+  channel_axes = tuple(
+      ax
+      for ax in mesh_axis_names(chan_spec[2])
+      if mesh.shape.get(ax, 1) > 1 and ax not in batch_axes and ax not in length_axes
+  )
+  if channel_axes and x.shape[-1] % math.prod(int(mesh.shape[ax]) for ax in channel_axes) != 0:
+    channel_axes = ()
+  batch_entry = batch_axes if batch_axes else None
+  chan_entry = channel_axes if channel_axes else None
+  x_spec = P(batch_entry, length_axes, chan_entry)
+  k_spec = P(None, None, chan_entry)
+
+  def _per_shard(x_l: jax.Array, k_l: jax.Array) -> jax.Array:
+    x_l = x_l.astype(dtype)
+    k_l = k_l.astype(dtype)
+    if halo_len > 0:
+      tail = x_l[:, -halo_len:, :]
+      if len(length_axes) == 1:
+        cp_ax = length_axes[0]
+        perm = [(i, (i + 1) % num_shards) for i in range(num_shards)]
+        recv_halo = jax.lax.ppermute(tail, cp_ax, perm)
+        shard_id = jax.lax.axis_index(cp_ax)
+      else:
+        all_tails = jax.lax.all_gather(tail, length_axes, axis=0, tiled=False)
+        shard_id = 0
+        for ax in length_axes:
+          shard_id = shard_id * int(mesh.shape[ax]) + jax.lax.axis_index(ax)
+        recv_halo = all_tails[jnp.maximum(shard_id - 1, 0)]
+      left_halo = jnp.where(shard_id == 0, jnp.zeros_like(recv_halo), recv_halo)
+      x_padded = jnp.concatenate([left_halo, x_l], axis=1)
+    else:
+      x_padded = x_l
+    c_loc = x_l.shape[-1]
+    return jax.lax.conv_general_dilated(
+        lhs=x_padded,
+        rhs=k_l,
+        window_strides=(1,),
+        padding="VALID",
+        dimension_numbers=("NWC", "WIO", "NWC"),
+        feature_group_count=c_loc,
+    )
+
+  return jax.shard_map(
+      _per_shard,
+      mesh=mesh,
+      in_specs=(x_spec, k_spec),
+      out_specs=x_spec,
+      check_vma=False,
+  )(x, kernel)

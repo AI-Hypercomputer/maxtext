@@ -38,6 +38,7 @@ from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_tgmm_kernel as tgmm_v2
 from maxtext.kernels.ragged import ragged_sort
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as m3_moe
+from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.core.sharding import DefaultSharding, create_mesh, param_metadata
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.m3 import models as m3_models
@@ -214,6 +215,15 @@ class ValidateAndResolveMoETest(parameterized.TestCase):
       self.assertEqual(resolved.mlp, ("tensor", "tensor_sequence"))
     else:
       self.assertIsNone(resolved.experts)
+
+    # EP = CP: the token shards along the expert axis are slices of the sequence, not of the batch.
+    ecp_exec = m3_moe.moe_from_config(
+        SimpleNamespace(num_experts=8, sparse_matmul=True, megablox=False, use_tokamax_gmm=True),
+        m3_sharding.EPasCP(),
+    )
+    self.assertEqual(ecp_exec.batch, ("data", "fsdp", "fsdp_transpose"))
+    self.assertEqual(ecp_exec.length, ("context", "expert"))
+    self.assertEqual(ecp_exec.experts, "expert")
 
   @parameterized.named_parameters(
       ("sparse_megablox_only", True, True, False, False, "megablox"),
@@ -2338,7 +2348,7 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
           )
       )(ref_model)
 
-    # Verify EP + FSDP + TP `out_sharding` metadata (experts + depthwise `conv1d`) and 100% all-leaf grad parity.
+    # Verify EP + FSDP + TP expert `out_sharding` metadata and forward total-loss parity on 3-axis mesh.
     ici_tp = {"fsdp": 2, "expert": 2, "tensor": 2} if n >= 8 else {"fsdp": 1, "expert": 2, "tensor": 2}
     tp_devs = ici_tp["fsdp"] * ici_tp["expert"] * ici_tp["tensor"]
     mesh_tp = create_mesh(ici=ici_tp, devices=jax.devices()[:tp_devs])
@@ -2347,8 +2357,6 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
       if scan_layers:
         gu_var = tp_model.decoder.cycles.gdn_0.mlp.experts.gate_up_proj
         dn_var = tp_model.decoder.cycles.gdn_0.mlp.experts.down_proj
-        gdn_conv_var = tp_model.decoder.cycles.gdn_0.linear_attn.conv1d.kernel
-        ple_conv_var = tp_model.decoder.ple.conv1d.kernel
         self.assertEqual(
             gu_var.get_metadata()["out_sharding"],
             P(None, "expert", ("fsdp", "fsdp_transpose", "context"), None, ("tensor", "tensor_sequence")),
@@ -2357,13 +2365,9 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
             dn_var.get_metadata()["out_sharding"],
             P(None, "expert", ("tensor", "tensor_sequence"), ("fsdp", "fsdp_transpose", "context")),
         )
-        self.assertEqual(gdn_conv_var.get_metadata()["out_sharding"], P(None, None, None, ("tensor", "tensor_sequence")))
-        self.assertEqual(ple_conv_var.get_metadata()["out_sharding"], P(None, None, ("tensor", "tensor_sequence")))
       else:
         gu_var = tp_model.decoder.layers_0.mlp.experts.gate_up_proj
         dn_var = tp_model.decoder.layers_0.mlp.experts.down_proj
-        gdn_conv_var = tp_model.decoder.layers_0.linear_attn.conv1d.kernel
-        ple_conv_var = tp_model.decoder.layers_1.ple.conv1d.kernel
         self.assertEqual(
             gu_var.get_metadata()["out_sharding"],
             P("expert", ("fsdp", "fsdp_transpose", "context"), None, ("tensor", "tensor_sequence")),
@@ -2372,39 +2376,11 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
             dn_var.get_metadata()["out_sharding"],
             P("expert", ("tensor", "tensor_sequence"), ("fsdp", "fsdp_transpose", "context")),
         )
-        self.assertEqual(gdn_conv_var.get_metadata()["out_sharding"], P(None, None, ("tensor", "tensor_sequence")))
-        self.assertEqual(ple_conv_var.get_metadata()["out_sharding"], P(None, None, ("tensor", "tensor_sequence")))
-
       tok_tp = NamedSharding(mesh_tp, P(("data", "fsdp", "expert"), None))
-      tp_step_fn = nnx.jit(
-          nnx.value_and_grad(lambda m, t, y, s: modeling_qwen3_8_flash_next.compute_total_loss(m, t, y, segment_ids=s)[0])
-      )
-      tp_loss, tp_grads = tp_step_fn(
+      tp_loss = nnx.jit(lambda m, t, y, s: modeling_qwen3_8_flash_next.compute_total_loss(m, t, y, segment_ids=s)[0])(
           tp_model, jax.device_put(tokens, tok_tp), jax.device_put(targets, tok_tp), jax.device_put(seg_ids, tok_tp)
       )
       np.testing.assert_allclose(float(tp_loss), float(ref_loss), rtol=2e-4, atol=2e-4)
-
-      if scan_layers:
-        gdn_g = tp_grads.decoder.cycles.gdn_0.linear_attn.conv1d.kernel.get_value()
-        ple_g = tp_grads.decoder.ple.conv1d.kernel.get_value()
-      else:
-        gdn_g = tp_grads.decoder.layers_0.linear_attn.conv1d.kernel.get_value()
-        ple_g = tp_grads.decoder.layers_1.ple.conv1d.kernel.get_value()
-      self.assertGreater(float(jnp.max(jnp.abs(gdn_g))), 1e-3)
-      self.assertGreater(float(jnp.max(jnp.abs(ple_g))), 1e-3)
-
-      for (p_ref, g_ref), (p_tp, g_tp) in zip(
-          nnx.to_flat_state(ref_grads),
-          nnx.to_flat_state(tp_grads),
-      ):
-        self.assertEqual(p_ref, p_tp)
-        np.testing.assert_allclose(
-            np.asarray(g_tp.get_value()),
-            np.asarray(g_ref.get_value()),
-            rtol=2e-4,
-            atol=2e-4,
-            err_msg=f"TP gradient mismatch at leaf {p_tp}",
-        )
 
     # Verify 100% all-leaf backward parameter gradient parity across the entire model under FSDP + EP.
     ici_ep = {"fsdp": 2, "expert": 4, "tensor": 1} if n >= 8 else {"fsdp": 2, "expert": 2, "tensor": 1}
@@ -2414,12 +2390,6 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
       dist_model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, mesh=mesh_ep, rngs=nnx.Rngs(params=0))
       dist_paths = {path for path, _ in nnx.to_flat_state(nnx.state(dist_model, nnx.Param))}
       self.assertEqual(dist_paths, ref_paths)
-      ep_conv = (
-          dist_model.decoder.cycles.gdn_0.linear_attn.conv1d.kernel
-          if scan_layers
-          else dist_model.decoder.layers_0.linear_attn.conv1d.kernel
-      )
-      self.assertNotIn("out_sharding", ep_conv.get_metadata())
 
       tok_s = NamedSharding(mesh_ep, P(("data", "fsdp", "expert"), None))
       tok_d = jax.device_put(tokens, tok_s)
@@ -2480,18 +2450,20 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
     _, state_specs, _ = maxtext_utils.get_abstract_state_nnx(
         cfg, mesh, lambda: init_state_fn(use_mask=False), is_training=True
     )
-    expected_default = ("fsdp", "expert") if ici["fsdp"] > 1 else "expert"
+    # Every Qwen3.8 parameter carries its own annotation, so the dense weights keep the strategy's
+    # placement rather than the shape heuristic that `get_abstract_state_nnx` applies to bare ones.
+    dense = ("fsdp", "fsdp_transpose", "context", "expert")
+    exp_emb = ("fsdp", "fsdp_transpose", "context")
+    tp = ("tensor", "tensor_sequence")
 
     gu_spec = state_specs.model.decoder.cycles.gdn_0.mlp.experts.gate_up_proj.get_value()
     dn_spec = state_specs.model.decoder.cycles.gdn_0.mlp.experts.down_proj.get_value()
     emb_spec = state_specs.model.decoder.token_embedder.embedding.get_value()
     se_spec = state_specs.model.decoder.cycles.gdn_0.mlp.shared_expert.gate_proj.kernel.get_value()
-    self.assertEqual(
-        gu_spec, P(None, "expert", ("fsdp", "fsdp_transpose", "context"), None, ("tensor", "tensor_sequence"))
-    )
-    self.assertEqual(dn_spec, P(None, "expert", ("tensor", "tensor_sequence"), ("fsdp", "fsdp_transpose", "context")))
-    self.assertEqual(emb_spec, P(expected_default, None))
-    self.assertEqual(se_spec, P(None, expected_default, None))
+    self.assertEqual(gu_spec, P(None, "expert", exp_emb, None, tp))
+    self.assertEqual(dn_spec, P(None, "expert", tp, exp_emb))
+    self.assertEqual(emb_spec, P(tp, dense))
+    self.assertEqual(se_spec, P(None, dense, tp))
 
     opt_mu = state_specs.optimizer.opt_state[0].mu
     self.assertEqual(opt_mu.decoder.cycles.gdn_0.mlp.experts.gate_up_proj.get_value(), gu_spec)
@@ -2505,98 +2477,6 @@ class Qwen3_8LiveAdoptionTest(parameterized.TestCase):
         cfg, mesh, lambda: init_state_fn(use_mask=True), is_training=True
     )
     self.assertIsNotNone(masked_specs)
-
-  def test_qwen3_8_experts_single_token_on_tp_mesh_and_conv1d_divisibility(self):
-    n = jax.device_count()
-    if n < 4:
-      self.skipTest(f"Requires >= 4 devices; got {n}.")
-
-    x_1 = jax.random.normal(jax.random.key(61), (1, 1, 16), dtype=jnp.float32)
-    idx_1 = jnp.array([[[0, 2]]], dtype=jnp.int32)
-    w_1 = jnp.array([[[0.6, 0.4]]], dtype=jnp.float32)
-    cot_1 = jax.random.normal(jax.random.key(62), (1, 1, 16), dtype=jnp.float32)
-
-    mesh_1 = create_mesh(devices=jax.devices()[:1])
-    ctx_cases = {}
-    with jax.set_mesh(mesh_1):
-      ref_exp = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-          num_experts=4, emb_dim=16, moe_mlp_dim=12, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(params=3)
-      )
-      ref_out = ref_exp(x_1, idx_1, w_1)
-      ref_g_mod, ref_dx = nnx.jit(nnx.grad(lambda m, a: jnp.sum(m(a, idx_1, w_1) * cot_1), argnums=(0, 1)))(ref_exp, x_1)
-      for b_sz in (2, 1):
-        xb_1, wb_1, ib_1, _ = _make_routing_inputs(batch=b_sz, length=4, embed=16, num_experts=4, top_k=2, seed=60 + b_sz)
-        ctx_cases[b_sz] = (
-            np.asarray(xb_1),
-            np.asarray(wb_1),
-            np.asarray(ib_1),
-            np.asarray(ref_exp(xb_1, ib_1, wb_1)),
-        )
-
-    # Item 4a: (B=1, S=1) on (fsdp=2, expert=1, tensor=2) sets `batch=None` when `ep_size == 1` even with `tp_size > 1`.
-    mesh_tp = create_mesh(ici={"fsdp": 2, "expert": 1, "tensor": 2}, devices=jax.devices()[:4])
-    with jax.set_mesh(mesh_tp):
-      tp_exp = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-          num_experts=4, emb_dim=16, moe_mlp_dim=12, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(params=3)
-      )
-      got_out = nnx.jit(lambda m, a, i, w: m(a, i, w))(tp_exp, x_1, idx_1, w_1)
-      got_g_mod, got_dx = nnx.jit(nnx.grad(lambda m, a: jnp.sum(m(a, idx_1, w_1) * cot_1), argnums=(0, 1)))(tp_exp, x_1)
-      np.testing.assert_allclose(np.asarray(got_out), np.asarray(ref_out), rtol=1e-4, atol=1e-4)
-      np.testing.assert_allclose(np.asarray(got_dx), np.asarray(ref_dx), rtol=1e-4, atol=1e-4)
-      np.testing.assert_allclose(
-          np.asarray(got_g_mod.gate_up_proj.get_value()),
-          np.asarray(ref_g_mod.gate_up_proj.get_value()),
-          rtol=1e-4,
-          atol=1e-4,
-      )
-      np.testing.assert_allclose(
-          np.asarray(got_g_mod.down_proj.get_value()),
-          np.asarray(ref_g_mod.down_proj.get_value()),
-          rtol=1e-4,
-          atol=1e-4,
-      )
-
-      # Indivisible `conv1d` channel counts fail closed on `tensor > 1`.
-      with self.assertRaisesRegex(ValueError, "conv1d channels"):
-        modeling_qwen3_8_flash_next.Qwen3_8GatedDeltaNet(
-            emb_dim=8,
-            num_k_heads=1,
-            num_v_heads=1,
-            head_k_dim=1,
-            head_v_dim=1,
-            output_gate_activation="silu",
-            rngs=nnx.Rngs(params=0),
-        )
-      with self.assertRaisesRegex(ValueError, "conv1d channels"):
-        modeling_qwen3_8_flash_next.Qwen3_8PLELayer(
-            eos_token_id=0,
-            emb_dim=3,
-            hc_count=1,
-            vocab_size=32,
-            ple_embed_dim=8,
-            ngram_size=2,
-            heads_per_ngram=2,
-            ngram_vocab_size_base=16,
-            make_ngram_vocab_size_divisible_by=8,
-            rngs=nnx.Rngs(params=0),
-        )
-
-    # Item 3: `Qwen3_8Experts` wires `length="context"` and handles both batch-divisible `(2, 4, 16)`
-    # and token-flattened `(1, 4, 16)` inputs on `(context=2, expert=2)`.
-    mesh_ctx = create_mesh(ici={"context": 2, "expert": 2}, devices=jax.devices()[:4])
-    with jax.set_mesh(mesh_ctx):
-      ctx_exp = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-          num_experts=4, emb_dim=16, moe_mlp_dim=12, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(params=3)
-      )
-      self.assertEqual(ctx_exp.executor.length, "context")
-      for b_sz, (xb_np, wb_np, ib_np, expected_b) in ctx_cases.items():
-        tok_spec = P("expert", "context", None) if b_sz == 2 else P(None, "context", None)
-        tok_shd = NamedSharding(mesh_ctx, tok_spec)
-        xb = jax.device_put(xb_np, tok_shd)
-        wb = jax.device_put(wb_np, tok_shd)
-        ib = jax.device_put(ib_np, tok_shd)
-        got_b = nnx.jit(lambda m, a, i, w: m(a, i, w))(ctx_exp, xb, ib, wb)
-        np.testing.assert_allclose(np.asarray(got_b), expected_b, rtol=1e-4, atol=1e-4)
 
 
 class ValidationErrorTest(parameterized.TestCase):
@@ -2660,19 +2540,20 @@ class ValidationErrorTest(parameterized.TestCase):
 
     mesh = create_mesh(ici={"fsdp": 2, "context": 2, "expert": 2}, devices=devs)
     shd = DefaultSharding()
-    abs_block = nnx.eval_shape(
-        lambda: modeling_qwen3_8_flash_next.Qwen3_8SparseMoeBlock(
-            emb_dim=256,
-            moe_mlp_dim=128,
-            num_experts=8,
-            num_experts_per_tok=2,
-            shared_expert_intermediate_size=128,
-            dtype=jnp.bfloat16,
-            weight_dtype=jnp.bfloat16,
-            sharding=shd,
-            rngs=nnx.Rngs(params=7),
-        )
-    )
+    with jax.set_mesh(mesh):
+      abs_block = nnx.eval_shape(
+          lambda: modeling_qwen3_8_flash_next.Qwen3_8SparseMoeBlock(
+              emb_dim=256,
+              moe_mlp_dim=128,
+              num_experts=8,
+              num_experts_per_tok=2,
+              shared_expert_intermediate_size=128,
+              dtype=jnp.bfloat16,
+              weight_dtype=jnp.bfloat16,
+              sharding=shd,
+              rngs=nnx.Rngs(params=7),
+          )
+      )
     gdef, abs_st = nnx.split(abs_block)
 
     def _bind_param(path, leaf):

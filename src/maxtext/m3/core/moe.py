@@ -46,7 +46,7 @@ import jax.numpy as jnp
 from jax.sharding import PartitionSpec as P
 
 from maxtext.m3.core import kernels
-from maxtext.m3.core.sharding import DefaultSharding, MeshAxes, Sharding, TensorType
+from maxtext.m3.core.sharding import MeshAxes, Sharding, TensorType, sharding_from_config
 
 ExecutorKind = Literal["dense", "ragged_dot", "gmm_v2", "tokamax"]
 SHARDED_EXECUTOR_KINDS: tuple[str, ...] = ("gmm_v2", "tokamax")
@@ -729,7 +729,7 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
   """Resolves a static `MoEExecutor` from `config` and `sharding`."""
   active_mesh = _active_mesh_or_none()
   validate_moe_config(config, require_moe=True, mesh=active_mesh)
-  sharding = sharding or DefaultSharding()
+  sharding = sharding or sharding_from_config(config)
 
   capacity_factor = float(getattr(config, "capacity_factor", -1.0))
   ragged_buffer_factor = float(getattr(config, "ragged_buffer_factor", -1.0))
@@ -1248,7 +1248,8 @@ def _sharded_grouped(
     raise ValueError(f"Expert MLP dim ({mlp_dim}) must be divisible by tensor parallelism size ({tp_size}).")
 
   raw_length_ax = kernels.resolve_mesh_axes(mesh, executor.length)
-  claimed_axes = set(kernels.mesh_axis_names(batch_ax)) | set(ep_axes) | set(tp_axes)
+  # Tokens stay on the sequence shard that holds them under EP=CP; exclude only batch_ax (already on dim 0).
+  claimed_axes = set(kernels.mesh_axis_names(batch_ax))
   cand_length_axes = [
       ax for ax in kernels.mesh_axis_names(raw_length_ax) if ax not in claimed_axes and int(mesh.shape[ax]) > 1
   ]

@@ -22,7 +22,7 @@ from typing import Any, Optional, Sequence, Union
 import jax
 import jax.numpy as jnp
 from maxtext.utils import max_logging
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 import yaml
 
 
@@ -95,6 +95,17 @@ class DeviceConfig(BaseModel):
       ]
   )
   shard_mode: str = "auto"
+  sharding_preset: str = ""
+
+  @model_validator(mode="after")
+  def _validate_sharding_preset(self) -> "DeviceConfig":
+    """Validates `sharding_preset` names."""
+    valid_presets = {"", "default", "default_sharding", "ep_as_cp", "epascp"}
+    raw_preset = "" if self.sharding_preset is None else str(self.sharding_preset).strip().lower().replace("-", "_")
+    if raw_preset not in valid_presets:
+      raise ValueError(f"Unknown m3 sharding preset {self.sharding_preset!r}.")
+    return self
+
   custom_mesh: str = ""
   optimize_mesh_for_tpu_v6e: bool = False
   logical_axis_rules: tuple = ()

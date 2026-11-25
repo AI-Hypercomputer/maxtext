@@ -2330,6 +2330,19 @@ def create_device_mesh(config, devices=None):
         dcn_parallelism=dcn_parallelism,
         allow_split_physical_axes=allow_split_physical_axes,
     )
+  elif getattr(config, "custom_mesh", "") == max_utils.TPU7X_TORUS_YX_ZCORE:
+    from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=import-outside-toplevel
+
+    dcn_parallelism = (
+        max_utils.fill_unspecified_mesh_axes(config.dcn_parallelism.copy(), num_slices, "DCN") if num_slices > 1 else None
+    )
+    mesh, torus_stats = m3_sharding.build_tpu7x_torus_device_mesh(ici_parallelism, dcn_parallelism, devices)
+    max_logging.log(
+        f"Built {max_utils.TPU7X_TORUS_YX_ZCORE} mesh: grid={torus_stats['grid']}, "
+        f"rings={torus_stats['ring_shape']}, outer_max_hops={torus_stats['outer_max_hops']} "
+        f"(diag_jumps={torus_stats['outer_diag_jumps']}), inner_max_hops={torus_stats['inner_max_hops']} "
+        f"(diag_jumps={torus_stats['inner_diag_jumps']})"
+    )
   elif num_slices > 1:
     dcn_parallelism = config.dcn_parallelism.copy()
     dcn_parallelism = max_utils.fill_unspecified_mesh_axes(dcn_parallelism, num_slices, "DCN")

@@ -227,10 +227,38 @@ def configure_granitemoe_engine(engine):
   return utils_granitemoe.configure_granitemoe_engine(engine)
 
 
+def _qwen3_8_param_label(path: tuple[object, ...], unused_var: object) -> str:
+  """Labels Qwen3.8's stop-gradient QSA indexer parameters `'frozen'` so AdamW weight decay skips them."""
+  del unused_var
+  path_str = jax.tree_util.keystr(path, simple=True, separator=".")
+  return "frozen" if ".self_attn.indexer." in f".{path_str}" else "train"
+
+
+def configure_qwen3_8_flash_next_engine(engine):
+  """Masks AdamW weight decay on Qwen3.8's stop-gradient QSA indexer parameters."""
+  # pylint: disable=g-import-not-at-top,import-outside-toplevel,protected-access
+  import optax
+
+  base_tx = engine._optimizer.tx
+  masked_tx = optax.multi_transform(
+      {"train": base_tx, "frozen": optax.set_to_zero()},
+      param_labels=lambda params: jax.tree_util.tree_map_with_path(
+          _qwen3_8_param_label,
+          params,
+          is_leaf=lambda x: isinstance(x, (nnx.Variable, jax.Array)),
+      ),
+  )
+  engine._optimizer = engine._build_optimizer(masked_tx)
+  engine._tx = masked_tx
+  return engine
+
+
 MODEL_ENGINE_CONFIG_REGISTRY: dict[str, Callable] = {
     "glm5.3-flash": configure_glm5_3_flash_engine,
     "granite-3.0-1b-a400m": configure_granitemoe_engine,
     "granitemoe": configure_granitemoe_engine,
+    "qwen3.8-flash-next": configure_qwen3_8_flash_next_engine,
+    "qwen3.8-flash-next-mini": configure_qwen3_8_flash_next_engine,
 }
 
 

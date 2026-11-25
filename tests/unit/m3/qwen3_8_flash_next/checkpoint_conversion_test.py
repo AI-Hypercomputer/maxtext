@@ -38,6 +38,7 @@ from maxtext.checkpoint_conversion.utils import tensor_handling  # pylint: disab
 from maxtext.checkpoint_conversion.utils import utils as conversion_utils  # pylint: disable=no-name-in-module
 from maxtext.configs import pyconfig  # pylint: disable=no-name-in-module
 from maxtext.m3 import models as m3_models  # pylint: disable=no-name-in-module
+from maxtext.m3.core.sharding import create_mesh  # pylint: disable=no-name-in-module
 from maxtext.utils import globals as maxtext_globals  # pylint: disable=no-name-in-module
 import numpy as np
 import pytest
@@ -87,7 +88,9 @@ def _model_param_shapes(config) -> dict[str, tuple[int, ...]]:
       mock.patch.object(nnx.Rngs, "__call__", lambda self: None),
       mock.patch.object(nnx.Rngs, "__getattr__", lambda self, _name: (lambda: None)),
   ):
-    model = nnx.eval_shape(lambda: m3_models.create_model(config, mesh=None))
+    mesh = create_mesh(devices=jax.devices()[:1])
+    with jax.set_mesh(mesh):
+      model = nnx.eval_shape(lambda: m3_models.create_model(config, mesh=mesh))
   shapes = {}
   for path, variable in nnx.to_flat_state(nnx.state(model)):
     if isinstance(variable, nnx.RngState):

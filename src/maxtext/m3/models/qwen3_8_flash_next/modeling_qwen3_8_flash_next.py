@@ -48,7 +48,118 @@ from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as to
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as m3_moe
 from maxtext.m3.core import remat as m3_core_remat
-from maxtext.m3.core.sharding import DefaultSharding, Sharding, TensorType, param_metadata
+from maxtext.m3.core.sharding import (
+    DefaultSharding,
+    Sharding,
+    TensorType,
+    end_eager_placement,
+    enter_mesh_scope,
+    param_metadata,
+    sharding_from_config,
+)
+
+
+# =================================================================================================
+# Sharding helpers
+# =================================================================================================
+
+
+def _mesh_axis_names(entry: Any) -> tuple[str, ...]:
+  """Mesh axis names carried by one `PartitionSpec` entry."""
+  if entry is None:
+    return ()
+  return (entry,) if isinstance(entry, str) else tuple(entry)
+
+
+def _linear(
+    in_features: int,
+    out_features: int,
+    sharding: Sharding | None,
+    tensor_name: str,
+    axes: tuple[str | None, str | None],
+    **kwargs: Any,
+) -> nnx.Linear:
+  """Builds a bias-free `nnx.Linear` whose `(in_features, out_features)` kernel carries logical `axes`."""
+  meta = param_metadata(sharding or DefaultSharding(), tensor_name, axes)
+  return nnx.Linear(in_features, out_features, use_bias=False, kernel_metadata=meta, **kwargs)
+
+
+def _depthwise_conv1d(
+    features: int,
+    kernel_size: int,
+    sharding: Sharding | None,
+    tensor_name: str,
+    **kwargs: Any,
+) -> nnx.Conv:
+  """Builds a bias-free depthwise 1D `nnx.Conv` whose `(kernel_size, 1, features)` kernel shards over its channels."""
+  meta = param_metadata(sharding or DefaultSharding(), tensor_name, (None, None, "conv_channels"))
+  return nnx.Conv(
+      in_features=features,
+      out_features=features,
+      kernel_size=(kernel_size,),
+      feature_group_count=features,
+      use_bias=False,
+      kernel_metadata=meta,
+      **kwargs,
+  )
+
+
+def get_batch_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
+  """Returns the active mesh axes `sharding` maps the `batch` axis onto when a multi-device mesh is set."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or mesh.size <= 1:
+    return ()
+  spec = (sharding or DefaultSharding())("batch", ("batch",), TensorType.ACTIVATION)
+  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
+
+
+def get_length_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
+  """Returns the active mesh axes `sharding` maps the `length` axis onto when a multi-device mesh is set."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or mesh.size <= 1:
+    return ()
+  spec = (sharding or DefaultSharding())("length", ("length",), TensorType.ACTIVATION)
+  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
+
+
+def get_norm_length_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
+  """Returns the active mesh axes `sharding` maps the `norm_length` axis onto when a multi-device mesh is set."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or mesh.size <= 1:
+    return ()
+  spec = (sharding or DefaultSharding())("norm_length", ("norm_length",), TensorType.ACTIVATION)
+  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
+
+
+def get_heads_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
+  """Returns the active mesh axes `sharding` maps the `heads` axis onto when a multi-device mesh is set."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or mesh.size <= 1:
+    return ()
+  spec = (sharding or DefaultSharding())("q", ("heads",), TensorType.ACTIVATION)
+  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
+
+
+def shard_batch(x: jax.Array, sharding: Sharding | None = None, tensor_name: str = "hidden_states") -> jax.Array:
+  """Constrains `(batch, norm_length, ...)` activations to the `batch` and `norm_length` axes of `sharding`."""
+  if x.ndim == 0:
+    return x
+  mesh = jax.sharding.get_abstract_mesh()
+  batch_axes = get_batch_mesh_axes(sharding)
+  norm_axes = get_norm_length_mesh_axes(sharding) if x.ndim >= 2 else ()
+  len_logical = "norm_length" if norm_axes else "length"
+  length_axes = norm_axes if norm_axes else (get_length_mesh_axes(sharding) if x.ndim >= 2 else ())
+  if batch_axes and x.shape[0] % math.prod(mesh.shape[ax] for ax in batch_axes) != 0:
+    batch_axes = ()
+  if length_axes and x.shape[1] % math.prod(mesh.shape[ax] for ax in length_axes) != 0:
+    length_axes = ()
+  if not batch_axes and not length_axes:
+    return x
+  axes = ["batch" if batch_axes else None, *([None] * (x.ndim - 1))]
+  if length_axes:
+    axes[1] = len_logical
+  return (sharding or DefaultSharding()).constrain(x, tensor_name, tuple(axes))
+
 
 # =================================================================================================
 # Normalization layers and 4-stream gated residual (hyper-connection)
@@ -64,13 +175,16 @@ class Qwen3_8RMSNorm(nnx.Module):
       group_size: int | None = None,
       eps: float = 1e-6,
       *,
+      sharding: Sharding | None = None,
       rngs: nnx.Rngs | None = None,
   ):
     del rngs
     self.dim, self.group_size, self.eps = dim, group_size, eps
     if group_size is not None and dim % group_size != 0:
       raise ValueError(f"dim ({dim}) not divisible by group_size ({group_size}).")
-    self.scale = nnx.Param(jnp.zeros((dim,), dtype=jnp.float32))
+    self.scale = nnx.Param(
+        jnp.zeros((dim,), dtype=jnp.float32), **param_metadata(sharding or DefaultSharding(), "scale", ("norm",))
+    )
 
   def _norm(self, x: jax.Array) -> jax.Array:
     if self.group_size is not None:
@@ -95,6 +209,7 @@ class Qwen3_8RMSNormGated(nnx.Module):
       eps: float = 1e-6,
       activation: str = "silu",
       *,
+      sharding: Sharding | None = None,
       rngs: nnx.Rngs | None = None,
   ):
     del rngs
@@ -106,7 +221,9 @@ class Qwen3_8RMSNormGated(nnx.Module):
       self._act_fn = jax.nn.sigmoid
     else:
       raise ValueError(f"Unsupported activation: {activation}. Expected 'silu' or 'sigmoid'.")
-    self.scale = nnx.Param(jnp.ones((dim,), dtype=jnp.float32))
+    self.scale = nnx.Param(
+        jnp.ones((dim,), dtype=jnp.float32), **param_metadata(sharding or DefaultSharding(), "scale", ("norm",))
+    )
 
   def __call__(self, x: jax.Array, gate: jax.Array) -> jax.Array:
     orig_dtype = x.dtype
@@ -124,69 +241,13 @@ def l2norm(x: jax.Array, dim: int = -1, eps: float = 1e-6) -> jax.Array:
   return (x_f32 * jax.lax.rsqrt(jnp.sum(jnp.square(x_f32), axis=dim, keepdims=True) + eps)).astype(x.dtype)
 
 
-def _mesh_axis_names(entry: Any) -> tuple[str, ...]:
-  """Mesh axis names carried by one `PartitionSpec` entry."""
-  if entry is None:
-    return ()
-  return (entry,) if isinstance(entry, str) else tuple(entry)
-
-
-def get_batch_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
-  """Returns the active mesh axes `sharding` maps the `batch` axis onto when a multi-device mesh is set."""
-  mesh = jax.sharding.get_abstract_mesh()
-  if mesh.empty or mesh.size <= 1:
-    return ()
-  spec = (sharding or DefaultSharding())("batch", ("batch",), TensorType.ACTIVATION)
-  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
-
-
-def get_length_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
-  """Returns the active mesh axes `sharding` maps the `length` axis onto when a multi-device mesh is set."""
-  mesh = jax.sharding.get_abstract_mesh()
-  if mesh.empty or mesh.size <= 1:
-    return ()
-  spec = (sharding or DefaultSharding())("length", ("length",), TensorType.ACTIVATION)
-  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
-
-
-def get_heads_mesh_axes(sharding: Sharding | None = None) -> tuple[str, ...]:
-  """Returns the active mesh axes `sharding` maps the `heads` axis onto when a multi-device mesh is set."""
-  mesh = jax.sharding.get_abstract_mesh()
-  if mesh.empty or mesh.size <= 1:
-    return ()
-  spec = (sharding or DefaultSharding())("q", ("heads",), TensorType.ACTIVATION)
-  return tuple(ax for ax in _mesh_axis_names(spec[0]) if mesh.shape.get(ax, 1) > 1)
-
-
-def shard_batch(x: jax.Array, sharding: Sharding | None = None) -> jax.Array:
-  """Constrains batch (and sequence length when active) of `x` on multi-device AUTO meshes.
-
-  Dimensions that don't divide evenly over their active mesh axes (e.g. batch-1 decode) are left unconstrained,
-  matching the unsharded fallback in `Qwen3_8Experts`.
-  """
-  if x.ndim == 0:
-    return x
-  mesh = jax.sharding.get_abstract_mesh()
-  if mesh.empty or mesh.size <= 1 or any(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types):
-    return x
-  batch_axes = get_batch_mesh_axes(sharding)
-  b_spec = batch_axes if (batch_axes and x.shape[0] % math.prod(mesh.shape[ax] for ax in batch_axes) == 0) else None
-  length_axes = get_length_mesh_axes(sharding) if x.ndim >= 2 else ()
-  l_spec = length_axes if (length_axes and x.shape[1] % math.prod(mesh.shape[ax] for ax in length_axes) == 0) else None
-  if b_spec is None and l_spec is None:
-    return x
-  if x.ndim == 1:
-    spec = jax.sharding.PartitionSpec(b_spec)
-  else:
-    spec = jax.sharding.PartitionSpec(b_spec, l_spec, *([None] * (x.ndim - 2)))
-  return jax.lax.with_sharding_constraint(x, spec)
-
-
 def init_hyper_connection_streams(
-    token_embeddings: jax.Array, hc_count: int = 4, *, sharding: Sharding | None = None
+    token_embeddings: jax.Array,
+    hc_count: int = 4,
+    sharding: Sharding | None = None,
 ) -> jax.Array:
   """Initializes residual stream by replicating token embeddings across streams."""
-  return shard_batch(jnp.concatenate([token_embeddings] * hc_count, axis=-1), sharding)
+  return shard_batch(jnp.concatenate([token_embeddings] * hc_count, axis=-1), sharding, "hyper_connection_streams")
 
 
 class Qwen3_8GatedResidual(nnx.Module):
@@ -202,18 +263,22 @@ class Qwen3_8GatedResidual(nnx.Module):
       eps: float = 1e-6,
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
+      sharding: Sharding | None = None,
       rngs: nnx.Rngs,
   ):
     self.emb_dim, self.hc_count = emb_dim, hc_count
     self.hc_lowrank, self.use_combine = hc_lowrank, use_combine
     self.dtype, self.weight_dtype = dtype, weight_dtype
 
+    # The concatenated `hc_count * emb_dim` stream dimension is the model dimension of these weights.
     hc_dim = hc_count * emb_dim
-    self.hc_norm = Qwen3_8RMSNorm(hc_dim, group_size=emb_dim, eps=eps, rngs=rngs)
-    kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
-    self.input_mix_weight_down = nnx.Linear(hc_dim, hc_lowrank, **kw)
-    self.input_mix_weight_up = nnx.Linear(hc_lowrank, hc_dim, **kw)
-    self.block_inject_weight = nnx.Linear(hc_dim, hc_count, **kw) if use_combine else None
+    self.hc_norm = Qwen3_8RMSNorm(hc_dim, group_size=emb_dim, eps=eps, sharding=sharding, rngs=rngs)
+    kw = {"dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
+    self.input_mix_weight_down = _linear(hc_dim, hc_lowrank, sharding, "input_mix_weight_down", ("embed", None), **kw)
+    self.input_mix_weight_up = _linear(hc_lowrank, hc_dim, sharding, "input_mix_weight_up", (None, "embed"), **kw)
+    self.block_inject_weight = (
+        _linear(hc_dim, hc_count, sharding, "block_inject_weight", ("embed", None), **kw) if use_combine else None
+    )
 
   def _mix(self, normed: jax.Array, out_dtype: Any) -> jax.Array:
     w_down = jax.nn.silu(self.input_mix_weight_down(normed) / self.hc_count)
@@ -282,28 +347,7 @@ def _init_state(shape: tuple[int, ...], state: jax.Array | None) -> jax.Array:
   return jnp.zeros(shape, jnp.float32) if state is None else state.astype(jnp.float32)
 
 
-def _block_doubling_unit_lower_inverse(s_mat: jax.Array, chunk_size: int) -> jax.Array:
-  """Computes the exact inverse of (I + s_mat) for strictly lower-triangular s_mat with MXU-friendly matmuls.
-
-  Bottom-up block doubling: starting from 1x1 blocks (inverse = I), each level merges adjacent b x b diagonal
-  blocks whose inverses A11^-1 and A22^-1 are already known, using
-  [[A11, 0], [A21, A22]]^-1 = [[A11^-1, 0], [-A22^-1 A21 A11^-1, A22^-1]].
-  Every intermediate is a block of the true inverse, so unlike the Neumann product (I+N)(I+N^2)(I+N^4)... it
-  does not suffer catastrophic cancellation in float32 when keys within a chunk are correlated and decay is weak
-  (N^(2^j) can reach 1e7+ while the inverse stays O(1)). Costs 2 * ceil(log2(chunk_size)) matmuls per chunk and
-  works for non-power-of-two chunk sizes.
-  """
-  prec = jax.lax.Precision.HIGHEST
-  ar = jnp.arange(chunk_size)
-  inv = jnp.broadcast_to(jnp.eye(chunk_size, dtype=jnp.float32), s_mat.shape)
-  b = 1
-  while b < chunk_size:
-    # Lower-left b x b sub-block of each 2b x 2b diagonal block: the only part of s_mat not yet folded into inv.
-    cross = ((ar[:, None] // (2 * b)) == (ar[None, :] // (2 * b))) & ((ar[:, None] // b) == (ar[None, :] // b) + 1)
-    off = jnp.matmul(jnp.matmul(inv, jnp.where(cross, s_mat, 0.0), precision=prec), inv, precision=prec)
-    inv = inv - jnp.where(cross, off, 0.0)
-    b *= 2
-  return inv
+_block_doubling_unit_lower_inverse = m3_kernels.block_doubling_unit_lower_inverse
 
 
 def jax_chunk_gated_delta_rule(
@@ -319,56 +363,12 @@ def jax_chunk_gated_delta_rule(
     chunk_inverse: str = "block_doubling",
 ) -> tuple[jax.Array, jax.Array | None]:
   """Chunked Gated DeltaNet forward pass in float32."""
-  if chunk_inverse not in ("solve", "block_doubling"):
-    raise ValueError(f"Expected chunk_inverse in ('solve', 'block_doubling'), got {chunk_inverse!r}.")
   init_dtype = value.dtype
-  if use_qk_l2norm_in_kernel:
-    query, key = l2norm(query, dim=-1, eps=1e-6), l2norm(key, dim=-1, eps=1e-6)
-
-  query, key, value, beta, g = (jnp.swapaxes(x.astype(jnp.float32), 1, 2) for x in (query, key, value, beta, g))
-  b, h, s, d_k = key.shape
-  d_v = value.shape[-1]
-  pad_size = (chunk_size - s % chunk_size) % chunk_size
-  if pad_size > 0:
-    query, key, value = (jnp.pad(x, ((0, 0), (0, 0), (0, pad_size), (0, 0))) for x in (query, key, value))
-    beta, g = (jnp.pad(x, ((0, 0), (0, 0), (0, pad_size))) for x in (beta, g))
-
-  total_s = s + pad_size
-  num_chunks = total_s // chunk_size
-  beta_c = jnp.expand_dims(beta.reshape(b, h, num_chunks, chunk_size), -1)
-  query = (query * (1.0 / jnp.sqrt(d_k))).reshape(b, h, num_chunks, chunk_size, d_k)
-  key = key.reshape(b, h, num_chunks, chunk_size, d_k)
-  k_beta, v_beta = key * beta_c, value.reshape(b, h, num_chunks, chunk_size, d_v) * beta_c
-  g = g.reshape(b, h, num_chunks, chunk_size)
-
-  prec = jax.lax.Precision.HIGHEST
-  g_cumsum = jnp.cumsum(g, axis=-1)
-  decay_mask = jnp.tril(jnp.exp(jnp.tril(jnp.expand_dims(g_cumsum, -1) - jnp.expand_dims(g_cumsum, -2))))
-  s_mat = (jnp.matmul(k_beta, jnp.swapaxes(key, -1, -2), precision=prec)) * jnp.tril(decay_mask, k=-1)
-  rhs = jnp.concatenate([v_beta, k_beta * jnp.expand_dims(jnp.exp(g_cumsum), -1)], axis=-1)
-  if chunk_inverse == "block_doubling":
-    solved = jnp.matmul(_block_doubling_unit_lower_inverse(s_mat, chunk_size), rhs, precision=prec)
-  else:
-    i_plus_s = jnp.eye(chunk_size, dtype=jnp.float32) + s_mat
-    solved = jax.scipy.linalg.solve_triangular(i_plus_s, rhs, lower=True, unit_diagonal=True)
-  v_inv, k_cumdecay = jnp.split(solved, [d_v], axis=-1)
-
-  init_state = _init_state((b, h, d_k, d_v), initial_state)
-
-  def _chunk_step(carry, xs):
-    q_i, k_i, v_i, k_cd_i, dm_i, g_i = xs
-    v_new = v_i - jnp.matmul(k_cd_i, carry, precision=prec)
-    attn_inter = jnp.matmul(q_i * jnp.expand_dims(jnp.exp(g_i), -1), carry, precision=prec)
-    core_out = attn_inter + jnp.matmul(
-        (jnp.matmul(q_i, jnp.swapaxes(k_i, -1, -2), precision=prec)) * dm_i, v_new, precision=prec
-    )
-    decay_last = jnp.expand_dims(jnp.exp(g_i[..., -1:]), -1)
-    k_decay = k_i * jnp.expand_dims(jnp.exp(g_i[..., -1:] - g_i), -1)
-    return carry * decay_last + jnp.matmul(jnp.swapaxes(k_decay, -1, -2), v_new, precision=prec), core_out
-
-  xs = tuple(jnp.moveaxis(x, 2, 0) for x in (query, key, v_inv, k_cumdecay, decay_mask, g_cumsum))
-  final_state, core_chunks = jax.lax.scan(_chunk_step, init_state, xs)
-  core_out = jnp.moveaxis(core_chunks, 0, 2).reshape(b, h, total_s, d_v)
+  s = key.shape[1]
+  xs, state_shape = m3_kernels.gdn_chunk_inputs(
+      query, key, value, g, beta, chunk_size, use_qk_l2norm_in_kernel, chunk_inverse
+  )
+  final_state, core_out = m3_kernels.gdn_chunk_scan(xs, _init_state(state_shape, initial_state))
   core_out = jnp.swapaxes(core_out[:, :, :s, :], 1, 2).astype(init_dtype)
   return core_out, (final_state if output_final_state else None)
 
@@ -418,23 +418,6 @@ def jax_recurrent_gated_delta_rule(
 # pylint: disable=no-name-in-module,too-many-positional-arguments
 
 
-def _conv1d_kernel_metadata(sharding_obj: Sharding, channels: int) -> dict[str, Any]:
-  """Returns `nnx.Conv` `kernel_metadata` sharding `channels` across TP when `tp_size > 1`."""
-  amb_mesh = jax.sharding.get_abstract_mesh()
-  if amb_mesh.empty:
-    return {}
-  conv_spec = sharding_obj("conv1d", (None, None, "mlp"))
-  tp_axes = m3_kernels.resolve_mesh_axes(amb_mesh, conv_spec[2])
-  tp_size = m3_kernels.mesh_axis_size(amb_mesh, tp_axes)
-  if tp_size <= 1:
-    return {}
-  if channels % tp_size != 0:
-    raise ValueError(
-        f"conv1d channels ({channels}) must be divisible by tensor parallelism size ({tp_size}) on {tp_axes!r}."
-    )
-  return {"kernel_metadata": param_metadata(sharding_obj, "conv1d", (None, None, "mlp"))}
-
-
 class Qwen3_8GatedDeltaNet(nnx.Module):
   """Gated DeltaNet (GDN) linear attention layer for Qwen3.8-Flash-Next."""
 
@@ -456,7 +439,6 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
       chunk_inverse: str = "block_doubling",
       rngs: nnx.Rngs,
   ):
-    sharding_obj = sharding or DefaultSharding()
     if chunk_inverse not in ("solve", "block_doubling"):
       raise ValueError(f"Expected chunk_inverse in ('solve', 'block_doubling'), got {chunk_inverse!r}.")
     self.emb_dim, self.chunk_size, self.chunk_inverse = emb_dim, chunk_size, chunk_inverse
@@ -466,34 +448,51 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
     self.head_k_dim, self.head_v_dim = head_k_dim, head_v_dim
     self.output_gate_activation = output_gate_activation
     self.dtype = dtype
+    self.sharding = sharding
 
     self.key_dim = num_k_heads * head_k_dim
     self.value_dim = num_v_heads * head_v_dim
     conv_dim = self.key_dim * 2 + self.value_dim
 
-    kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
-    self.in_proj_qkv = nnx.Linear(emb_dim, conv_dim, **kw)
-    self.in_proj_z = nnx.Linear(emb_dim, self.value_dim, **kw)
-    self.in_proj_b = nnx.Linear(emb_dim, num_v_heads, **kw)
-    self.in_proj_a = nnx.Linear(emb_dim, num_v_heads, **kw)
+    # `in_proj_qkv` emits the query, key, and value head groups one after another, so a contiguous split of its
+    # features is not a split over heads: only the model dimension is sharded (no tensor parallelism).
+    kw = {"dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
+    self.in_proj_qkv = _linear(emb_dim, conv_dim, sharding, "in_proj_qkv", ("embed", None), **kw)
+    self.in_proj_z = _linear(emb_dim, self.value_dim, sharding, "in_proj_z", ("embed", None), **kw)
+    self.in_proj_b = _linear(emb_dim, num_v_heads, sharding, "in_proj_b", ("embed", None), **kw)
+    self.in_proj_a = _linear(emb_dim, num_v_heads, sharding, "in_proj_a", ("embed", None), **kw)
 
-    self.conv1d = nnx.Conv(
-        in_features=conv_dim,
-        out_features=conv_dim,
-        kernel_size=(conv_kernel_size,),
-        feature_group_count=conv_dim,
-        padding="CAUSAL",
-        use_bias=False,
-        dtype=dtype,
-        param_dtype=weight_dtype,
-        rngs=rngs,
-        **_conv1d_kernel_metadata(sharding_obj, conv_dim),
-    )
+    self.conv1d = _depthwise_conv1d(conv_dim, conv_kernel_size, sharding, "conv1d", padding="CAUSAL", **kw)
     u = jax.random.uniform(rngs.params(), (num_v_heads,), minval=0.01, maxval=16.0)
-    self.A_log = nnx.Param(jnp.log(u.astype(jnp.float32)))  # pylint: disable=invalid-name
-    self.dt_bias = nnx.Param(jnp.ones((num_v_heads,), dtype=jnp.float32))
-    self.norm = Qwen3_8RMSNormGated(head_v_dim, eps=eps, activation=output_gate_activation, rngs=rngs)
-    self.out_proj = nnx.Linear(self.value_dim, emb_dim, **kw)
+    head_meta = param_metadata(sharding or DefaultSharding(), "A_log", (None,))
+    self.A_log = nnx.Param(jnp.log(u.astype(jnp.float32)), **head_meta)  # pylint: disable=invalid-name
+    self.dt_bias = nnx.Param(
+        jnp.ones((num_v_heads,), dtype=jnp.float32), **param_metadata(sharding or DefaultSharding(), "dt_bias", (None,))
+    )
+    self.norm = Qwen3_8RMSNormGated(head_v_dim, eps=eps, activation=output_gate_activation, sharding=sharding, rngs=rngs)
+    self.out_proj = _linear(self.value_dim, emb_dim, sharding, "out_proj", (None, "embed"), **kw)
+
+  def _context_parallel_axes(
+      self,
+      seq_len: int,
+      initial_state: jax.Array | None,
+      output_final_state: bool,
+  ) -> tuple[str, ...]:
+    """Mesh axes to keep the sequence sharded on through the recurrence, or `()` for the unsharded rule.
+
+    The context-parallel rule covers training: no carried-in state, no state returned, and a per-shard sequence that
+    is a whole number of chunks. Everything else (decode, ragged lengths) runs the unsharded rule, where the
+    partitioner gathers the sequence.
+    """
+    if self.sharding is None or initial_state is not None or output_final_state:
+      return ()
+    length_axes = get_length_mesh_axes(self.sharding)
+    if not length_axes:
+      return ()
+    mesh = jax.sharding.get_abstract_mesh()
+    if seq_len % (math.prod(mesh.shape[ax] for ax in length_axes) * self.chunk_size) != 0:
+      return ()
+    return length_axes
 
   def __call__(
       self,
@@ -507,7 +506,28 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
 
     b, s, _ = hidden_states.shape
     qkv = checkpoint_name(self.in_proj_qkv(hidden_states), "qkv_proj")
-    mixed_qkv = jax.nn.silu(self.conv1d(qkv))
+    length_axes = self._context_parallel_axes(s, initial_state, output_final_state)
+    batch_axes = ()
+    if length_axes:
+      batch_axes = get_batch_mesh_axes(self.sharding)
+      mesh = jax.sharding.get_abstract_mesh()
+      if b % math.prod(mesh.shape[ax] for ax in batch_axes) != 0:
+        batch_axes = ()
+      s_local = s // math.prod(mesh.shape[ax] for ax in length_axes)
+      if s_local >= self.conv1d.kernel[...].shape[0] - 1:
+        conv_out = m3_kernels.context_parallel_causal_conv1d(
+            qkv,
+            self.conv1d.kernel[...],
+            batch_axes=batch_axes,
+            length_axes=length_axes,
+            sharding=self.sharding,
+            dtype=self.dtype,
+        )
+      else:
+        conv_out = self.conv1d(qkv)
+    else:
+      conv_out = self.conv1d(qkv)
+    mixed_qkv = jax.nn.silu(conv_out)
     z = self.in_proj_z(hidden_states).reshape(b, s, self.num_v_heads, self.head_v_dim)
 
     beta = jax.nn.sigmoid(self.in_proj_b(hidden_states))
@@ -540,6 +560,22 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
           initial_state=initial_state,
           output_final_state=output_final_state,
           use_qk_l2norm_in_kernel=True,
+      )
+    elif length_axes:
+      core_attn_out, last_state = (
+          m3_kernels.context_parallel_chunk_gated_delta_rule(
+              query,
+              key,
+              value,
+              g=g,
+              beta=beta,
+              batch_axes=batch_axes,
+              length_axes=length_axes,
+              chunk_size=self.chunk_size,
+              use_qk_l2norm_in_kernel=True,
+              chunk_inverse=self.chunk_inverse,
+          ),
+          None,
       )
     else:
       core_attn_out, last_state = jax_chunk_gated_delta_rule(
@@ -686,10 +722,12 @@ class Qwen3_8QSAIndexer(nnx.Module):
     self.compress_ratio, self.block_topk = compress_ratio, token_budget // compress_ratio
     self.mask_mode = mask_mode
 
-    kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
-    self.index_qk_proj = nnx.Linear(emb_dim, (index_n_heads + index_kv_heads) * index_head_dim, **kw)
-    self.q_layernorm = Qwen3_8RMSNorm(index_head_dim, eps=eps, rngs=rngs)
-    self.k_layernorm = Qwen3_8RMSNorm(index_head_dim, eps=eps, rngs=rngs)
+    # Query heads and the single key head share the output dimension, so only the model dimension is sharded.
+    kw = {"dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
+    index_dim = (index_n_heads + index_kv_heads) * index_head_dim
+    self.index_qk_proj = _linear(emb_dim, index_dim, sharding, "index_qk_proj", ("embed", None), **kw)
+    self.q_layernorm = Qwen3_8RMSNorm(index_head_dim, eps=eps, sharding=sharding, rngs=rngs)
+    self.k_layernorm = Qwen3_8RMSNorm(index_head_dim, eps=eps, sharding=sharding, rngs=rngs)
 
   def __call__(
       self,
@@ -979,14 +1017,16 @@ class Qwen3_8SparseAttention(nnx.Module):
     self.head_dim, self.num_query_heads, self.num_kv_heads = head_dim, num_query_heads, num_kv_heads
     self.attention_kernel = attention_kernel
 
-    kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
-    self.q_proj = nnx.Linear(emb_dim, num_query_heads * head_dim * 2, **kw)
-    self.k_proj = nnx.Linear(emb_dim, num_kv_heads * head_dim, **kw)
-    self.v_proj = nnx.Linear(emb_dim, num_kv_heads * head_dim, **kw)
-    self.o_proj = nnx.Linear(num_query_heads * head_dim, emb_dim, **kw)
+    # Projection features are head-major (`q_proj` packs each head's query and gate together), so a contiguous split
+    # of the flattened feature dimension is a split over heads.
+    kw = {"dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
+    self.q_proj = _linear(emb_dim, num_query_heads * head_dim * 2, sharding, "q_proj", ("embed", "heads"), **kw)
+    self.k_proj = _linear(emb_dim, num_kv_heads * head_dim, sharding, "k_proj", ("embed", "kv_heads"), **kw)
+    self.v_proj = _linear(emb_dim, num_kv_heads * head_dim, sharding, "v_proj", ("embed", "kv_heads"), **kw)
+    self.o_proj = _linear(num_query_heads * head_dim, emb_dim, sharding, "o_proj", ("heads", "embed"), **kw)
 
-    self.q_norm = Qwen3_8RMSNorm(head_dim, eps=eps, rngs=rngs)
-    self.k_norm = Qwen3_8RMSNorm(head_dim, eps=eps, rngs=rngs)
+    self.q_norm = Qwen3_8RMSNorm(head_dim, eps=eps, sharding=sharding, rngs=rngs)
+    self.k_norm = Qwen3_8RMSNorm(head_dim, eps=eps, sharding=sharding, rngs=rngs)
 
     self.rotary_emb = Qwen3_8RotaryEmbedding(head_dim, partial_rotary_factor, rope_theta, mrope_section)
     self.indexer = Qwen3_8QSAIndexer(
@@ -1053,28 +1093,8 @@ class Qwen3_8SparseAttention(nnx.Module):
         use_base2_exp=True,
         interpret=(not m3_kernels.is_tpu_mesh(mesh)),
     )
-    causal_mask = tokamax_splash_mask.CausalMask(shape=(padded_s, padded_s))
-
-    def _run_batch(
-        q_b: jax.Array,
-        k_b: jax.Array,
-        v_b: jax.Array,
-        sq_b: jax.Array | None,
-        skv_b: jax.Array | None,
-    ) -> jax.Array:
-      kernel = tokamax_splash_kernel.make_splash_mha_single_device(causal_mask, config=sa_config)
-      if sq_b is None:
-        return jax.vmap(kernel)(q_b, k_b, v_b)
-      return jax.vmap(
-          lambda q_i, k_i, v_i, sq_i, skv_i: kernel(
-              q_i, k_i, v_i, segment_ids=tokamax_splash_kernel.SegmentIds(q=sq_i, kv=skv_i)
-          )
-      )(q_b, k_b, v_b, sq_b, skv_b)
-
+    mesh = jax.sharding.get_abstract_mesh()
     use_shmap = not mesh.empty and mesh.size > 1 and not any(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types)
-    batch_axes = get_batch_mesh_axes(self.sharding) if use_shmap else ()
-    batch_shards = math.prod(mesh.shape[ax] for ax in batch_axes) if batch_axes else 1
-    b_spec: tuple[str, ...] | None = batch_axes if (batch_axes and b % batch_shards == 0) else None
     concrete_mesh: jax.sharding.Mesh | None = None
     if use_shmap:
       try:
@@ -1086,16 +1106,74 @@ class Qwen3_8SparseAttention(nnx.Module):
       if concrete_mesh is None and isinstance(getattr(q, "sharding", None), jax.sharding.SingleDeviceSharding):
         use_shmap = False
     shmap_mesh = concrete_mesh if concrete_mesh is not None else mesh
+
+    # Queries stay on the sequence shard that holds them; keys and values are gathered along the sequence, which a
+    # causal query needs anyway. The kernel's block tables are split the same way as the queries.
+    length_axes = get_length_mesh_axes(self.sharding) if use_shmap else ()
+    q_shards = math.prod(mesh.shape[ax] for ax in length_axes) if length_axes else 1
+    # `CausalMask(..., shard_count=q_shards)` requires `padded_s % (q_shards * q_shards) == 0`.
+    if padded_s % (q_shards * block_size) != 0 or padded_s % (q_shards * q_shards) != 0:
+      length_axes, q_shards = (), 1
+    causal_mask = tokamax_splash_mask.CausalMask(shape=(padded_s, padded_s), shard_count=q_shards)
+
+    def _run_batch(
+        q_b: jax.Array,
+        k_b: jax.Array,
+        v_b: jax.Array,
+        sq_b: jax.Array | None,
+        skv_b: jax.Array | None,
+        kernel: Any = None,
+    ) -> jax.Array:
+      if kernel is None:
+        kernel = tokamax_splash_kernel.make_splash_mha_single_device(causal_mask, config=sa_config)
+      if sq_b is None:
+        return jax.vmap(kernel)(q_b, k_b, v_b)
+      return jax.vmap(
+          lambda q_i, k_i, v_i, sq_i, skv_i: kernel(
+              q_i, k_i, v_i, segment_ids=tokamax_splash_kernel.SegmentIds(q=sq_i, kv=skv_i)
+          )
+      )(q_b, k_b, v_b, sq_b, skv_b)
+
     if use_shmap:
-      qkv_spec = jax.sharding.PartitionSpec(b_spec, None, None, None)
-      seg_spec = jax.sharding.PartitionSpec(b_spec, None) if seg_q is not None else None
-      out = jax.shard_map(
-          _run_batch,
-          mesh=shmap_mesh,
-          in_specs=(qkv_spec, qkv_spec, qkv_spec, seg_spec, seg_spec),
-          out_specs=qkv_spec,
-          check_vma=False,
-      )(q, k, v, seg_q, seg_kv)
+      batch_axes = get_batch_mesh_axes(self.sharding)
+      batch_shards = math.prod(mesh.shape[ax] for ax in batch_axes) if batch_axes else 1
+      batch_entry = batch_axes if batch_axes and b % batch_shards == 0 else None
+      head_axes = get_heads_mesh_axes(self.sharding)
+      head_shards = math.prod(mesh.shape[ax] for ax in head_axes) if head_axes else 1
+      head_entry = None
+      if head_axes and q.shape[1] % head_shards == 0:
+        if k.shape[1] % head_shards == 0:
+          head_entry = head_axes
+        elif head_shards % k.shape[1] == 0:
+          rep = head_shards // k.shape[1]
+          k, v = jnp.repeat(k, rep, axis=1), jnp.repeat(v, rep, axis=1)
+          head_entry = head_axes
+      if length_axes:
+        q_spec = jax.sharding.PartitionSpec(batch_entry, head_entry, length_axes, None)
+        kv_spec = jax.sharding.PartitionSpec(batch_entry, head_entry, None, None)
+        seg_q_spec = jax.sharding.PartitionSpec(batch_entry, length_axes) if seg_q is not None else None
+        seg_kv_spec = jax.sharding.PartitionSpec(batch_entry, None) if seg_q is not None else None
+        kernel = tokamax_splash_kernel.make_splash_mha(mask=causal_mask, config=sa_config, q_seq_shards=q_shards)
+        kernel_spec = kernel.manual_sharding_spec(
+            jax.sharding.NamedSharding(shmap_mesh, jax.sharding.PartitionSpec(length_axes))
+        )
+        out = jax.shard_map(
+            _run_batch,
+            mesh=shmap_mesh,
+            in_specs=(q_spec, kv_spec, kv_spec, seg_q_spec, seg_kv_spec, kernel_spec),
+            out_specs=q_spec,
+            check_vma=False,
+        )(q, k, v, seg_q, seg_kv, kernel)
+      else:
+        qkv_spec = jax.sharding.PartitionSpec(batch_entry, head_entry, None, None)
+        seg_spec = jax.sharding.PartitionSpec(batch_entry, None) if seg_q is not None else None
+        out = jax.shard_map(
+            _run_batch,
+            mesh=shmap_mesh,
+            in_specs=(qkv_spec, qkv_spec, qkv_spec, seg_spec, seg_spec),
+            out_specs=qkv_spec,
+            check_vma=False,
+        )(q, k, v, seg_q, seg_kv)
     else:
       out = _run_batch(q, k, v, seg_q, seg_kv)
 
@@ -1809,12 +1887,13 @@ class Qwen3_8MLP(nnx.Module):
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
       *,
+      sharding: Sharding | None = None,
       rngs: nnx.Rngs,
   ):
-    kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
-    self.gate_proj = nnx.Linear(emb_dim, intermediate_dim, **kw)
-    self.up_proj = nnx.Linear(emb_dim, intermediate_dim, **kw)
-    self.down_proj = nnx.Linear(intermediate_dim, emb_dim, **kw)
+    kw = {"dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
+    self.gate_proj = _linear(emb_dim, intermediate_dim, sharding, "gate_proj", ("embed", "mlp"), **kw)
+    self.up_proj = _linear(emb_dim, intermediate_dim, sharding, "up_proj", ("embed", "mlp"), **kw)
+    self.down_proj = _linear(intermediate_dim, emb_dim, sharding, "down_proj", ("mlp", "embed"), **kw)
 
   def __call__(self, x: jax.Array) -> jax.Array:
     """Forward pass computing down_proj(silu(gate_proj(x)) * up_proj(x))."""
@@ -1861,26 +1940,22 @@ class Qwen3_8Experts(nnx.Module):
       self.executor = m3_moe.MoEExecutor(
           kind="gmm_v2",
           batch=tok_spec[0],
+          length=tok_spec[1],
           experts=wi_spec[0],
           mlp=wi_spec[2],
-          length=tok_spec[1],
       )
     else:
       self.executor = m3_moe.RAGGED_DOT
 
     gu_shape = (num_experts, emb_dim, 2, moe_mlp_dim)
     dn_shape = (num_experts, moe_mlp_dim, emb_dim)
-    gu_meta = (
-        param_metadata(sharding_obj, "gate_up_proj", ("experts", "expert_embed", None, "expert_mlp")) if use_meta else {}
-    )
-    dn_meta = param_metadata(sharding_obj, "down_proj", ("experts", "expert_mlp", "expert_embed")) if use_meta else {}
     self.gate_up_proj = nnx.Param(
         nnx.initializers.lecun_normal(in_axis=1, out_axis=3, batch_axis=(0, 2))(rngs.params(), gu_shape, weight_dtype),
-        **gu_meta,
+        **param_metadata(sharding_obj, "gate_up_proj", ("experts", "expert_embed", None, "expert_mlp")),
     )
     self.down_proj = nnx.Param(
         nnx.initializers.lecun_normal(in_axis=1, out_axis=2, batch_axis=(0,))(rngs.params(), dn_shape, weight_dtype),
-        **dn_meta,
+        **param_metadata(sharding_obj, "down_proj", ("experts", "expert_mlp", "expert_embed")),
     )
 
   def __call__(
@@ -1914,12 +1989,16 @@ class Qwen3_8Experts(nnx.Module):
         batch_ax = m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.batch)
         batch_shards = m3_kernels.mesh_axis_size(active_mesh, batch_ax)
         ep_size = m3_kernels.mesh_axis_size(active_mesh, m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.experts))
+        length_ax = m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.length)
+        if x_in.shape[1] % m3_kernels.mesh_axis_size(active_mesh, length_ax) != 0:
+          exec_cfg = dataclasses.replace(exec_cfg, length=None)
         if x_in.shape[0] % batch_shards != 0:
           total_tokens = x_in.shape[0] * x_in.shape[1]
           if total_tokens % batch_shards == 0:
             x_in = x_in.reshape(total_tokens, 1, x_in.shape[2])
             w_in = w_in.reshape(total_tokens, 1, w_in.shape[2])
             idx_in = idx_in.reshape(total_tokens, 1, idx_in.shape[2])
+            exec_cfg = dataclasses.replace(exec_cfg, length=None)
             reshaped_to_tokens = True
           elif ep_size == 1:
             exec_cfg = dataclasses.replace(exec_cfg, batch=None)
@@ -1981,6 +2060,7 @@ class Qwen3_8TopKRouter(nnx.Module):
       dtype: Any = jnp.bfloat16,
       weight_dtype: Any = jnp.bfloat16,
       *,
+      sharding: Sharding | None = None,
       rngs: nnx.Rngs,
   ):
     self.num_experts = num_experts
@@ -1988,13 +2068,9 @@ class Qwen3_8TopKRouter(nnx.Module):
     self.norm_topk_prob = norm_topk_prob
     self.routed_scaling_factor = routed_scaling_factor
     self.dtype = dtype
-    self.linear = nnx.Linear(
-        emb_dim,
-        num_experts,
-        use_bias=False,
-        dtype=dtype,
-        param_dtype=weight_dtype,
-        rngs=rngs,
+    # The expert dimension stays replicated: `embed` and `experts` both land on the `expert` mesh axis.
+    self.linear = _linear(
+        emb_dim, num_experts, sharding, "router", ("embed", None), dtype=dtype, param_dtype=weight_dtype, rngs=rngs
     )
 
   def __call__(self, hidden_states: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -2046,6 +2122,7 @@ class Qwen3_8SparseMoeBlock(nnx.Module):
         routed_scaling_factor=routed_scaling_factor,
         dtype=dtype,
         weight_dtype=weight_dtype,
+        sharding=sharding,
         rngs=rngs,
     )
     self.experts = Qwen3_8Experts(
@@ -2063,10 +2140,11 @@ class Qwen3_8SparseMoeBlock(nnx.Module):
         intermediate_dim=shared_expert_intermediate_size,
         dtype=dtype,
         weight_dtype=weight_dtype,
+        sharding=sharding,
         rngs=rngs,
     )
-    kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
-    self.shared_expert_gate = nnx.Linear(emb_dim, 1, **kw)
+    kw = {"dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
+    self.shared_expert_gate = _linear(emb_dim, 1, sharding, "shared_expert_gate", ("embed", None), **kw)
 
   def __call__(
       self,
@@ -2247,8 +2325,15 @@ class Qwen3_8NGramEmbedding(nnx.Module):
 
     self._mult_bytes_tuple = tuple(tuple((m >> (8 * b)) & 0xFF for b in range(8)) for m in self.layer_multipliers)
 
+    # At full size the table is the largest single weight in the model, and its feature dimension is too small to
+    # divide over a large mesh, so it is the rows that are sharded.
+    table_shape = (self.padded_vocab_size, head_dim_per_ngram)
     self.ngram_embedding = nnx.Embed(
-        self.padded_vocab_size, head_dim_per_ngram, dtype=dtype, param_dtype=weight_dtype, rngs=rngs
+        *table_shape,
+        dtype=dtype,
+        param_dtype=weight_dtype,
+        embedding_metadata=param_metadata(sharding or DefaultSharding(), "ngram_embedding", ("ngram_vocab", None)),
+        rngs=rngs,
     )
 
   @property
@@ -2299,8 +2384,8 @@ class Qwen3_8NGramEmbedding(nnx.Module):
     ngram_ids = self.compute_ngram_ids(input_ids)
     mesh = jax.sharding.get_abstract_mesh()
     if not mesh.empty and mesh.size > 1:
-      ngram_ids = jax.lax.with_sharding_constraint(ngram_ids, jax.sharding.PartitionSpec())
-    embeds = shard_batch(self.ngram_embedding(ngram_ids), self.sharding)
+      ngram_ids = self.sharding.constrain(ngram_ids, "ngram_ids", (None,) * ngram_ids.ndim)
+    embeds = shard_batch(self.ngram_embedding(ngram_ids), self.sharding, "ngram_embeds")
     return embeds.reshape(input_ids.shape[0], -1, self.ple_embed_dim)
 
 
@@ -2328,7 +2413,6 @@ class Qwen3_8PLELayer(nnx.Module):
       *,
       rngs: nnx.Rngs,
   ):
-    sharding_obj = sharding or DefaultSharding()
     super().__init__()
     self.emb_dim, self.hc_count = emb_dim, hc_count
     self.hc_hidden_size = emb_dim * hc_count
@@ -2347,32 +2431,28 @@ class Qwen3_8PLELayer(nnx.Module):
         ple_layer_index,
         dtype,
         weight_dtype,
-        sharding=sharding_obj,
+        sharding=sharding,
         rngs=rngs,
     )
 
-    kw = {"use_bias": False, "dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
-    self.key_proj = nnx.Linear(ple_embed_dim, self.hc_hidden_size, **kw)
-    self.value_proj = nnx.Linear(ple_embed_dim, emb_dim, **kw)
+    kw = {"dtype": dtype, "param_dtype": weight_dtype, "rngs": rngs}
+    self.key_proj = _linear(ple_embed_dim, self.hc_hidden_size, sharding, "key_proj", ("embed", None), **kw)
+    self.value_proj = _linear(ple_embed_dim, emb_dim, sharding, "value_proj", ("embed", None), **kw)
 
-    norm_kw = {"group_size": emb_dim, "eps": eps, "rngs": rngs}
+    norm_kw = {"group_size": emb_dim, "eps": eps, "sharding": sharding, "rngs": rngs}
     self.norm_key = Qwen3_8RMSNorm(self.hc_hidden_size, **norm_kw)
     self.norm_query = Qwen3_8RMSNorm(self.hc_hidden_size, **norm_kw)
     self.norm_conv = Qwen3_8RMSNorm(self.hc_hidden_size, **norm_kw)
 
-    self.conv1d = nnx.Conv(
-        in_features=self.hc_hidden_size,
-        out_features=self.hc_hidden_size,
-        kernel_size=(ple_conv_kernel_size,),
-        feature_group_count=self.hc_hidden_size,
+    self.conv1d = _depthwise_conv1d(
+        self.hc_hidden_size,
+        ple_conv_kernel_size,
+        sharding,
+        "conv1d",
         kernel_dilation=(ngram_size,),
         padding="VALID",
-        use_bias=False,
         kernel_init=nnx.initializers.zeros_init(),
-        dtype=dtype,
-        param_dtype=weight_dtype,
-        rngs=rngs,
-        **_conv1d_kernel_metadata(sharding_obj, self.hc_hidden_size),
+        **kw,
     )
 
   def _short_conv(self, hidden_states: jax.Array) -> jax.Array:
@@ -2458,9 +2538,16 @@ class Qwen3_8DecoderLayer(nnx.Module):
       rngs: nnx.Rngs,
   ):
     c, emb, dt, wdt = config, int(config.emb_dim), jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
-    ckw = {"eps": float(c.normalization_layer_epsilon), "dtype": dt, "weight_dtype": wdt, "rngs": rngs}
+    sharding_obj = sharding or sharding_from_config(config)
+    self.sharding = sharding_obj
+    ckw = {
+        "eps": float(c.normalization_layer_epsilon),
+        "dtype": dt,
+        "weight_dtype": wdt,
+        "sharding": sharding_obj,
+        "rngs": rngs,
+    }
     hc_kw = {"emb_dim": emb, "hc_count": int(c.hc_count), "hc_lowrank": int(c.hc_lowrank), **ckw}
-    sharding_obj = sharding or DefaultSharding()
     cyc = int(c.inhomogeneous_layer_cycle_interval)
     self.layer_type = "linear_attention" if (layer_idx % cyc) != (cyc - 1) else "full_attention"
     self.attn_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
@@ -2470,7 +2557,6 @@ class Qwen3_8DecoderLayer(nnx.Module):
           num_k_heads=int(c.gdn_num_key_heads),
           num_v_heads=int(c.gdn_num_value_heads),
           **ckw,
-          sharding=sharding_obj,
           head_k_dim=int(c.gdn_key_head_dim),
           head_v_dim=int(c.gdn_value_head_dim),
           chunk_size=int(c.gdn_chunk_size),
@@ -2495,7 +2581,6 @@ class Qwen3_8DecoderLayer(nnx.Module):
           compress_ratio=int(c.index_select_block_size),
           indexer_mask_mode=str(c.qsa_indexer_mask),
           attention_kernel=str(c.qsa_attention_kernel),
-          sharding=sharding or DefaultSharding(),
       )
     self.mlp_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
     moe_executor = m3_moe.moe_from_config(c, sharding_obj)
@@ -2546,10 +2631,10 @@ class Qwen3_8DecoderLayer(nnx.Module):
             return_selected_blocks=False,
         )
         s_idx = None
-    hidden_states = self.attn_hyper_connection.combine(hidden_states, attn_out, inject)
+    hidden_states = shard_batch(self.attn_hyper_connection.combine(hidden_states, attn_out, inject), self.sharding)
     mixed, inject = self.mlp_hyper_connection.before_block(hidden_states)
     mlp_out, r_w, r_idx, r_probs = self.mlp(mixed, return_router_topk=True)
-    hidden_states = self.mlp_hyper_connection.combine(hidden_states, mlp_out, inject)
+    hidden_states = shard_batch(self.mlp_hyper_connection.combine(hidden_states, mlp_out, inject), self.sharding)
     aux = {
         "router_indices": r_idx,
         "routing_weights": r_w,
@@ -2563,9 +2648,10 @@ class Qwen3_8CycleBlock(nnx.Module):
   """4-layer cycle block composed of 3 GDN layers and 1 QSA layer."""
 
   def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
-    self.sharding = sharding or DefaultSharding()
+    sharding_obj = sharding or sharding_from_config(config)
+    self.sharding = sharding_obj
     self.gdn_0, self.gdn_1, self.gdn_2, self.qsa_3 = (
-        Qwen3_8DecoderLayer(config, i, include_ple=False, sharding=sharding, rngs=rngs) for i in range(4)
+        Qwen3_8DecoderLayer(config, i, include_ple=False, sharding=sharding_obj, rngs=rngs) for i in range(4)
     )
 
 
@@ -2617,7 +2703,8 @@ def create_scanned_cycles(
     raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {config.num_decoder_layers}.")
   if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
     raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
-  sp = [nnx.split(Qwen3_8CycleBlock(config, sharding=sharding, rngs=rngs), nnx.Param, ...) for _ in range(num_cycles)]
+  sharding_obj = sharding or sharding_from_config(config)
+  sp = [nnx.split(Qwen3_8CycleBlock(config, sharding=sharding_obj, rngs=rngs), nnx.Param, ...) for _ in range(num_cycles)]
   stacked_trees = [jax.tree.map(_stack_cycle_vars, *(s[i] for s in sp), is_leaf=_is_nnx_var) for i in (1, 2)]
   return nnx.merge(sp[0][0], *stacked_trees)
 
@@ -2697,6 +2784,7 @@ def apply_scanned_cycles(
     return_aux: bool = False,
     remat: bool = False,
     remat_policy: Any = None,
+    sharding: Sharding | None = None,
 ) -> Any:
   """Executes scan over stacked cycle weights with per-sublayer checkpoint barriers."""
   eff_policy = _coerce_remat_callable(remat_policy)
@@ -2862,14 +2950,16 @@ class Qwen3_8MTPBlock(nnx.Module):
     self.hc_count, self.hc_lowrank = int(config.hc_count), int(config.hc_lowrank)
     self.remat_policy: Callable[..., Any] | None = None
     self.remat = False
+    sharding_obj = sharding or sharding_from_config(config)
+    self.sharding = sharding_obj
     dt, wdt, eps = jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype), float(config.normalization_layer_epsilon)
-    self.pre_fc_norm_embedding = Qwen3_8RMSNorm(self.emb_dim, eps=eps, rngs=rngs)
-    self.pre_fc_norm_hidden = Qwen3_8RMSNorm(self.hc_count * self.emb_dim, eps=eps, rngs=rngs)
-    l_kw = {"use_bias": False, "dtype": dt, "param_dtype": wdt, "rngs": rngs}
-    self.fc_embedding = nnx.Linear(self.emb_dim, self.emb_dim, **l_kw)
-    self.fc_hidden = nnx.Linear(self.emb_dim, self.emb_dim, **l_kw)
+    self.pre_fc_norm_embedding = Qwen3_8RMSNorm(self.emb_dim, eps=eps, sharding=sharding_obj, rngs=rngs)
+    self.pre_fc_norm_hidden = Qwen3_8RMSNorm(self.hc_count * self.emb_dim, eps=eps, sharding=sharding_obj, rngs=rngs)
+    l_kw = {"dtype": dt, "param_dtype": wdt, "rngs": rngs}
+    self.fc_embedding = _linear(self.emb_dim, self.emb_dim, sharding_obj, "fc_embedding", ("embed", None), **l_kw)
+    self.fc_hidden = _linear(self.emb_dim, self.emb_dim, sharding_obj, "fc_hidden", ("embed", None), **l_kw)
     cyc = int(config.inhomogeneous_layer_cycle_interval)
-    self.layers_0 = Qwen3_8DecoderLayer(config, layer_idx=cyc - 1, include_ple=False, sharding=sharding, rngs=rngs)
+    self.layers_0 = Qwen3_8DecoderLayer(config, layer_idx=cyc - 1, include_ple=False, sharding=sharding_obj, rngs=rngs)
     self.hyper_connection_mixer = Qwen3_8GatedResidual(
         emb_dim=self.emb_dim,
         hc_count=self.hc_count,
@@ -2878,6 +2968,7 @@ class Qwen3_8MTPBlock(nnx.Module):
         eps=eps,
         dtype=dt,
         weight_dtype=wdt,
+        sharding=sharding_obj,
         rngs=rngs,
     )
 
@@ -2903,7 +2994,10 @@ class Qwen3_8MTPBlock(nnx.Module):
       raise ValueError(f"next_token_embeds shape {next_token_embeds.shape} must match {expected_embed_shape}.")
     e_proj = self.fc_embedding(self.pre_fc_norm_embedding(next_token_embeds))
     h_norm = self.pre_fc_norm_hidden(hc_hidden_states).reshape(*hc_hidden_states.shape[:-1], self.hc_count, self.emb_dim)
-    h_proj = self.fc_hidden(h_norm)
+    # Applied with the streams folded into the sequence, `[B, S * hc_count, E]`: on the 4-D form the partitioner
+    # returns a wrong `fc_hidden` kernel gradient when the batch and the sequence are sharded on different mesh axes
+    # (`fsdp` x `context`; seen with JAX 0.11.1 and 0.12.1).
+    h_proj = self.fc_hidden(h_norm.reshape(h_norm.shape[0], -1, self.emb_dim)).reshape(h_norm.shape)
     h_mtp_in = (h_proj + jnp.expand_dims(e_proj, axis=-2)).reshape(hc_hidden_states.shape)
     eff_policy = self.remat_policy if self.remat else None
     if self.remat and eff_policy is None:
@@ -3033,21 +3127,28 @@ def compute_total_loss(
   router_aux_coeff = float(router_aux_coeff)
 
   run_mtp, need_aux = use_mtp and (model.mtp is not None), router_aux_coeff > 0.0
-  out = model(input_tokens, positions, segment_ids, return_aux=need_aux, return_mtp=run_mtp, **kwargs)
-  logits = out[0] if (run_mtp or need_aux) else out
+  out = model(
+      input_tokens,
+      positions,
+      segment_ids,
+      return_aux=need_aux,
+      return_mtp=run_mtp,
+      **kwargs,
+  )
+  primary_out = out[0] if (run_mtp or need_aux) else out
   aux = out[1] if (run_mtp or need_aux) else None
-  mtp_logits = aux["mtp_logits"] if (run_mtp and need_aux) else (out[1] if run_mtp else None)
+  mtp_out = aux["mtp_logits"] if (run_mtp and need_aux) else (out[1] if run_mtp else None)
 
   eff_target_mask = target_mask
   if segment_ids is not None:
     seg_valid = (segment_ids != 0).astype(jnp.float32)
     eff_target_mask = seg_valid if eff_target_mask is None else (eff_target_mask.astype(jnp.float32) * seg_valid)
-  primary_loss = cross_entropy_loss(logits, target_tokens, mask=eff_target_mask)
+  primary_loss = cross_entropy_loss(primary_out, target_tokens, mask=eff_target_mask)
 
   mtp_aux_mask = None
   mtp_loss = None
-  if run_mtp and mtp_logits is not None:
-    if mtp_logits.shape[1] <= 1:
+  if run_mtp and mtp_out is not None:
+    if mtp_out.shape[1] <= 1:
       mtp_loss = jnp.array(0.0, dtype=jnp.float32)
       mtp_aux_mask = jnp.zeros_like(target_tokens, dtype=jnp.float32)
     else:
@@ -3058,8 +3159,8 @@ def compute_total_loss(
       )
       if segment_ids is not None:
         m = m * ((segment_ids[:, :-1] == segment_ids[:, 1:]) & (segment_ids[:, :-1] != 0)).astype(jnp.float32)
-      mtp_loss = cross_entropy_loss(mtp_logits[:, :-1, :], target_tokens[:, 1:], mask=m)
       mtp_aux_mask = jnp.pad(m, ((0, 0), (0, 1)))
+      mtp_loss = cross_entropy_loss(mtp_out[:, :-1, :], target_tokens[:, 1:], mask=m)
 
   router_loss = (
       router_load_balancing_loss(
@@ -3119,7 +3220,15 @@ class Qwen3_8Decoder(nnx.Module):
     self.remat_policy: Callable[..., Any] | None = None
     self.remat = False
     self.dtype, self.weight_dtype = dt, wdt
-    self.token_embedder = nnx.Embed(self.vocab_size, self.emb_dim, dtype=dt, param_dtype=wdt, rngs=rngs)
+    self.sharding = sharding or sharding_from_config(config)
+    table_shape = (self.vocab_size, self.emb_dim)
+    self.token_embedder = nnx.Embed(
+        *table_shape,
+        dtype=dt,
+        param_dtype=wdt,
+        embedding_metadata=param_metadata(self.sharding, "token_embedder", ("vocab", "embed")),
+        rngs=rngs,
+    )
     self.ple_layer_id = int(c.ple_layer_id) if bool(c.use_ple_layer) else None
     if self.scan_layers:
       if int(config.inhomogeneous_layer_cycle_interval) != 4:
@@ -3132,11 +3241,11 @@ class Qwen3_8Decoder(nnx.Module):
       if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
         raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
       self.num_cycles = self.num_layers // 4
-      self.cycles = create_scanned_cycles(config, self.num_cycles, sharding=sharding, rngs=rngs)
-      self.ple = build_ple_layer(config, sharding=sharding, rngs=rngs)
+      self.cycles = create_scanned_cycles(config, self.num_cycles, sharding=self.sharding, rngs=rngs)
+      self.ple = build_ple_layer(config, sharding=self.sharding, rngs=rngs)
     else:
       for i in range(self.num_layers):
-        setattr(self, f"layers_{i}", Qwen3_8DecoderLayer(config, i, include_ple=True, sharding=sharding, rngs=rngs))
+        setattr(self, f"layers_{i}", Qwen3_8DecoderLayer(config, i, include_ple=True, sharding=self.sharding, rngs=rngs))
     self.hyper_connection_mixer = Qwen3_8GatedResidual(
         emb_dim=self.emb_dim,
         hc_count=self.hc_count,
@@ -3145,6 +3254,7 @@ class Qwen3_8Decoder(nnx.Module):
         eps=float(config.normalization_layer_epsilon),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
+        sharding=self.sharding,
         rngs=rngs,
     )
 
@@ -3161,7 +3271,7 @@ class Qwen3_8Decoder(nnx.Module):
     tok = decoder_input_tokens
     pos, cmask = _positions_and_conv_mask(tok, decoder_positions, decoder_segment_ids)
     pids = tok if cmask is None else jnp.where(cmask.astype(jnp.bool_), tok, self.eos_token_id)
-    tok_emb = shard_batch(self.token_embedder(tok), self.sharding)
+    tok_emb = shard_batch(self.token_embedder(tok), self.sharding, "token_embeds")
     h, aux_list = (
         init_hyper_connection_streams(tok_emb, hc_count=self.hc_count, sharding=self.sharding),
         [],
@@ -3182,6 +3292,7 @@ class Qwen3_8Decoder(nnx.Module):
           return_aux=return_aux,
           remat=self.remat,
           remat_policy=eff_policy,
+          sharding=self.sharding,
       )
       h, aux_list = res if return_aux else (res, [])
     else:
@@ -3197,7 +3308,7 @@ class Qwen3_8Decoder(nnx.Module):
             segment_ids=decoder_segment_ids,
         )
         h, _ = (out[0], aux_list.append(out[1])) if return_aux else (out, None)
-    h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h), self.sharding)
+    h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h), self.sharding, "mixed_streams")
     if return_pre_mixer:
       return (h_mixed, h_4stream, aux_list) if return_aux else (h_mixed, h_4stream)
     return (h_mixed, aux_list) if return_aux else h_mixed
@@ -3220,21 +3331,27 @@ class Qwen3_8FlashNextModel(nnx.Module):
       sharding: Sharding | None = None,
       rngs: nnx.Rngs,
   ):
-    self.config, self.mesh, self.quant_mode = config, mesh, quant_mode
-    self.sharding = sharding or DefaultSharding()
-    self.decoder = Qwen3_8Decoder(config, sharding=sharding, rngs=rngs)
-    self.lm_head = nnx.Linear(
-        self.decoder.emb_dim,
-        self.decoder.vocab_size,
-        use_bias=False,
-        dtype=self.decoder.dtype,
-        param_dtype=self.decoder.weight_dtype,
-        rngs=rngs,
-    )
-    mtp_layers = int(getattr(config, "mtp_num_layers", 0))
-    if mtp_layers not in (0, 1):
-      raise ValueError(f"mtp_num_layers must be 0 or 1, got {mtp_layers}.")
-    self.mtp = Qwen3_8MTPBlock(config, sharding=sharding, rngs=rngs) if mtp_layers > 0 else None
+    entered_mesh = mesh is not None and jax.sharding.get_abstract_mesh().empty
+    with enter_mesh_scope(mesh, shard_mode=getattr(config, "shard_mode", "auto")):
+      self.config, self.mesh, self.quant_mode = config, mesh, quant_mode
+      self.sharding = sharding or sharding_from_config(config)
+      self.decoder = Qwen3_8Decoder(config, sharding=self.sharding, rngs=rngs)
+      self.lm_head = _linear(
+          self.decoder.emb_dim,
+          self.decoder.vocab_size,
+          self.sharding,
+          "lm_head",
+          ("embed", "vocab"),
+          dtype=self.decoder.dtype,
+          param_dtype=self.decoder.weight_dtype,
+          rngs=rngs,
+      )
+      mtp_layers = int(getattr(config, "mtp_num_layers", 0))
+      if mtp_layers not in (0, 1):
+        raise ValueError(f"mtp_num_layers must be 0 or 1, got {mtp_layers}.")
+      self.mtp = Qwen3_8MTPBlock(config, sharding=self.sharding, rngs=rngs) if mtp_layers > 0 else None
+    if entered_mesh:
+      end_eager_placement(self)
 
   def __call__(
       self,
@@ -3247,10 +3364,12 @@ class Qwen3_8FlashNextModel(nnx.Module):
       return_aux: bool = False,
       return_mtp: bool = False,
       next_tokens: jax.Array | None = None,
+      compute_logits: bool = True,
       **kwargs: Any,
   ) -> Any:
     """Forward pass computing language model logits and optional aux outputs."""
-    del enable_dropout, kwargs
+    del enable_dropout
+    del kwargs
     if return_mtp and return_hidden_states:
       raise ValueError("Simultaneous return_mtp=True and return_hidden_states=True is not supported.")
     if return_mtp:
@@ -3273,15 +3392,15 @@ class Qwen3_8FlashNextModel(nnx.Module):
       pos, cmask = _positions_and_conv_mask(decoder_input_tokens, decoder_positions, decoder_segment_ids)
       mtp_out = self.mtp(
           h_4stream,
-          shard_batch(self.decoder.token_embedder(next_tok), self.sharding),
+          shard_batch(self.decoder.token_embedder(next_tok), self.sharding, "next_token_embeds"),
           positions=pos,
           conv_mask=cmask,
           segment_ids=decoder_segment_ids,
           return_aux=return_aux,
       )
       mtp_h, mtp_aux = mtp_out if return_aux else (mtp_out, None)
-      mtp_logits = shard_batch(self.lm_head(mtp_h), self.sharding)
-      logits = shard_batch(self.lm_head(h_mixed), self.sharding)
+      mtp_logits = shard_batch(self.lm_head(mtp_h), self.sharding, "mtp_logits") if compute_logits else mtp_h
+      logits = shard_batch(self.lm_head(h_mixed), self.sharding, "logits") if compute_logits else h_mixed
       if return_aux:
         aux_dict = {"layer_aux": aux_list, "mtp_aux": mtp_aux, "mtp_logits": mtp_logits}
         return (logits, aux_dict)
@@ -3295,8 +3414,9 @@ class Qwen3_8FlashNextModel(nnx.Module):
         return_pre_mixer=return_hidden_states,
     )
     if return_hidden_states or return_aux:
-      return (shard_batch(self.lm_head(out[0]), self.sharding), *out[1:])
-    return shard_batch(self.lm_head(out), self.sharding)
+      first = shard_batch(self.lm_head(out[0]), self.sharding, "logits") if compute_logits else out[0]
+      return (first, *out[1:])
+    return shard_batch(self.lm_head(out), self.sharding, "logits") if compute_logits else out
 
 
 def create_qwen3_8_flash_next_model(
@@ -3313,6 +3433,6 @@ def create_qwen3_8_flash_next_model(
       config=config,
       mesh=mesh,
       quant_mode=quant_mode_str,
-      sharding=sharding,
+      sharding=sharding or sharding_from_config(config),
       rngs=rngs or nnx.Rngs(params=0),
   )

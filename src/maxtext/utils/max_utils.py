@@ -53,6 +53,7 @@ from maxtext.common.common_types import MODEL_MODE_PREFILL, MODEL_MODE_AUTOREGRE
 initialize_multi_tier_checkpointing = initialization.initialize_multi_tier_checkpointing
 HYBRID_RING_64X4 = "hybrid_ring_64x4"
 HYBRID_RING_32X8 = "hybrid_ring_32x8"
+TPU7X_TORUS_YX_ZCORE = "tpu7x_torus_yx_zcore"
 
 # pylint: disable=too-many-positional-arguments
 

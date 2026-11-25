@@ -870,6 +870,7 @@ compile_xla_flags: "" # Compiler options e.g. compile_xla_flags="--xla_tpu_num_s
 
 # Parallelism
 shard_mode: "auto" # can be either auto or explicit
+sharding_preset: "" # Optional m3 sharding preset name (e.g. ep_as_cp)
 custom_mesh_and_rule: "" # replace default mesh and logical rule by specifying yml name under config/mesh_and_rule/.
 # Gradients of the dense weights a custom_mesh_and_rule replicates over context (rules that map 'embed_grad':
 # cp-as-ep-dense-no-cp, cp-as-ep-dense-fsdp): "reduce_scatter" = reduce-scatter over every token axis, then all-gather over
@@ -1579,7 +1580,7 @@ enable_checkpoint_cloud_logger: false
 # Single-controller
 enable_single_controller: false
 
-custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8']
+custom_mesh: "" # Available options: ['hybrid_ring_64x4', 'hybrid_ring_32x8', 'tpu7x_torus_yx_zcore']
 # Split physical axes for https://jax.readthedocs.io/en/latest/_autosummary/jax.experimental.mesh_utils.create_device_mesh.html
 allow_split_physical_axes: false
 # Apply transformations to the mesh to optimize for TPU v6e

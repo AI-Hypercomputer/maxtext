@@ -23,8 +23,10 @@ from typing import Any
 
 from absl.testing import absltest
 from flax import nnx
+import jax
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
+from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next
 from maxtext.m3.models.qwen3_8_flash_next import qwen3_8_flops
 from maxtext.utils import maxtext_utils
@@ -54,9 +56,11 @@ def _count_active_params(cfg) -> int:
   PLE ngram_embedding -- gathers, 0 dense FLOPs), and counts routed-expert tensors at the activated
   fraction num_experts_per_tok / num_experts. Norm scales, A_log, dt_bias are included (negligible).
   """
-  model = nnx.eval_shape(
-      lambda: modeling_qwen3_8_flash_next.create_qwen3_8_flash_next_model(cfg, rngs=nnx.Rngs(params=0))
-  )
+  mesh = m3_sharding.create_mesh(devices=jax.devices()[:1])
+  with jax.set_mesh(mesh):
+    model = nnx.eval_shape(
+        lambda: modeling_qwen3_8_flash_next.create_qwen3_8_flash_next_model(cfg, mesh=mesh, rngs=nnx.Rngs(params=0))
+    )
   dense, routed = 0, 0
   for path, leaf in nnx.state(model, nnx.Param).flat_state():
     keys = tuple(str(getattr(k, "key", k)) for k in path)
