@@ -1,5 +1,7 @@
 # MaxText Checkpoint Load-Time Benchmark Suite (`to_maxtext` vs. `safetensors_dynamic`)
 
+> **Turnkey Team Reproduction (`REPRODUCE.md`):** To reproduce the Benchmark `v2` harness and integrated upstream PRs (**PR #6398** DeepSeek `FP8`/`MXFP4` on-the-fly dequantization, **PR #6353** composite HBM peak fix, and **PR #6354** `to_maxtext` Orbax write-buffer cap) across local CPU (`~3–4 min`), real GCS shards (`~1 min`), or live GKE TPUs (`~15–25 min`), start with **[`REPRODUCE.md`](REPRODUCE.md)** and `checkpoint_load_benchmark/scripts/repro/`.
+
 > **Benchmark v2 (`100%` Completed Across TPU v5e, v6e & v7x):** All **352 planned `v2` configurations** (`136 / 136` TPU queue tasks, `0` `ERROR`, `0` `TIMEOUT`) plus **54 / 54 cold regional Step 1 downloads** across **21 HuggingFace models (`0.6B` to `1600B`)** are complete and validated in Google Sheet v2 [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) and summarized in [`reports/benchmark_v2_summary.md`](reports/benchmark_v2_summary.md) (design & runbook: [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md), [`handoff.md`](handoff.md), [`PROGRESS_LOG.md`](PROGRESS_LOG.md)). Every pod runs a single committed tarball built from `HEAD` via [`scripts/build_code_tarball.py`](scripts/build_code_tarball.py) with `CODE_VERSION.json` provenance.
 
 A self-contained, reproducible benchmark suite for comparing end-to-end and warm checkpoint load times, sub-phase breakdowns, and peak Host RAM / TPU HBM utilization between MaxText's offline Orbax conversion pipeline (**`to_maxtext`**) and on-the-fly distributed SafeTensors loading (**`safetensors_dynamic`**) across:
@@ -22,6 +24,7 @@ A self-contained, reproducible benchmark suite for comparing end-to-end and warm
 ```text
 checkpoint_load_benchmark/
 ├── README.md                                        # Complete documentation & reproduction guide
+├── REPRODUCE.md                                     # Turnkey 4-tier team reproduction guide (CPU, GCS, GKE TPU, v2 rows)
 ├── handoff.md                                       # Quick-pickup guide (v2 tasks & status) + legacy tpu7x archive
 ├── plans/
 │   └── benchmark_v2_plan.md                         # v2 design & Phases 0–5 task backlog across v5e, v6e, and v7x

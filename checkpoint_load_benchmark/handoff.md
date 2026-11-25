@@ -1,5 +1,7 @@
 # Handoff: Checkpoint Load-Time Benchmark (`v2` 4-Platform Suite: `v7x`, `v6e`, `v5p`, `v5e` + `tpu7x` Legacy Archive)
 
+> **Turnkey Team Reproduction (`REPRODUCE.md`):** For copy-paste commands to reproduce the local CPU test suite (`bash checkpoint_load_benchmark/scripts/repro/run_cpu_repro.sh`), real GCS DeepSeek shard streaming checks, live GKE TPU parity JobSets, and Benchmark `v2` + **PR #6398 / #6353 / #6354** runs, see **[`REPRODUCE.md`](REPRODUCE.md)**.
+
 > **Snapshot:** 2026-11-17 09:08 UTC · **Branch:** `docs/checkpoint-load-benchmark` · **Executive Summary:** [`reports/benchmark_v2_summary.md`](reports/benchmark_v2_summary.md) · **Customer & Buganizer Reports:** [`reports/deepseek_chat_message_short.md`](reports/deepseek_chat_message_short.md), [`reports/deepseek_bug_followup_message.md`](reports/deepseek_bug_followup_message.md) & [`reports/b586746548_deepseek_dequant_issue.md`](reports/b586746548_deepseek_dequant_issue.md) · **Live Progress Log:** [`PROGRESS_LOG.md`](PROGRESS_LOG.md) · **Design Plan:** [`plans/benchmark_v2_plan.md`](plans/benchmark_v2_plan.md) · **Live Google Sheet v2:** [`1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I`](https://docs.google.com/spreadsheets/d/1dOUCtUNgbmJMBf4Jc1AcwF71_6THB3Zt9mYUVQrGP9I/edit) · **Pre-Edit Full Backup Sheet (Never Touch):** `1xZ0ifZW5yD0gPT8CpcsxQ1Q8ndYKnJosJRgVCJ_rh0M`
 
 ---
