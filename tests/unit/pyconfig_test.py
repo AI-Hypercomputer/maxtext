@@ -554,6 +554,16 @@ class PyconfigTest(unittest.TestCase):
     )
     self.assertEqual(config.decoder_block.value, "qwen2")
 
+  def test_explicit_sharding_hy4_decoder_support(self):
+    """The Hy4 decoder is accepted under explicit sharding."""
+    config = pyconfig.initialize(
+        [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+        skip_jax_distributed_system=True,
+        shard_mode="explicit",
+        model_name="hy4-preview",
+    )
+    self.assertEqual(config.decoder_block.value, "hy4")
+
   def test_explicit_sharding_llama4_decoder_support(self):
     """The Llama4 decoder is accepted by explicit sharding, but its vision encoder is not."""
     config = pyconfig.initialize(

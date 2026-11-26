@@ -40,6 +40,8 @@ import jax
 from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec
 
 from maxtext.common.common_types import (
     Array,
@@ -53,6 +55,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     PREFILL_KV_BATCH,
     PREFILL_LENGTH,
+    ShardMode,
 )
 from maxtext.layers import attention_mla
 from maxtext.layers import initializers
@@ -105,6 +108,49 @@ def scan_layout(config: Config) -> tuple[int, int, int]:
 # -----------------------------------------
 
 
+def _padded_partitions(x: Array, ndim: int) -> tuple[Any, tuple[Any, ...]]:
+  """Returns `(mesh, spec.partitions)` padded with `None` to `ndim`."""
+  sharding = getattr(jax.typeof(x), "sharding", None)
+  if isinstance(sharding, NamedSharding) and sharding.spec is not None:
+    parts = sharding.spec.partitions
+    return sharding.mesh, parts + (None,) * max(0, ndim - len(parts))
+  return None, (None,) * ndim
+
+
+def _project_hyper_streams(
+    streams: Array,
+    weight: Array,
+    *,
+    rms_norm_eps: float,
+    matmul_precision: str,
+    mesh: Mesh,
+    shard_mode: ShardMode,
+) -> Array:
+  """Flattens `[B, S, K, D]`, RMS-normalizes, and projects by `weight`."""
+  b, s, k, d = streams.shape
+  if shard_mode == ShardMode.EXPLICIT:
+    stream_mesh, parts = _padded_partitions(streams, 4)
+    target_mesh = stream_mesh if stream_mesh is not None else mesh
+    flat_sharding = NamedSharding(target_mesh, PartitionSpec(parts[0], parts[1], parts[3]))
+    mixes_sharding = NamedSharding(target_mesh, PartitionSpec(parts[0], parts[1], None))
+    flat = jax.lax.reshape(streams, (b, s, k * d), out_sharding=flat_sharding).astype(jnp.float32)
+  else:
+    flat = jnp.reshape(streams, (b, s, k * d)).astype(jnp.float32)
+    mixes_sharding = None
+  inv_rms = jax.lax.rsqrt(jnp.mean(jnp.square(flat), axis=-1, keepdims=True) + rms_norm_eps)
+  einsum_kwargs = {"out_sharding": mixes_sharding} if mixes_sharding is not None else {}
+  return (
+      jnp.einsum(
+          "bsm,mn->bsn",
+          flat,
+          weight,
+          precision=jax.lax.Precision(matmul_precision),
+          **einsum_kwargs,
+      )
+      * inv_rms
+  )
+
+
 class Hy4HyperConnection(nnx.Module):
   """HYV4 Identity Hyper-Connection (`HYV4HyperConnection`) wrapping an attention or FFN branch."""
 
@@ -148,17 +194,20 @@ class Hy4HyperConnection(nnx.Module):
 
   def compute_pre_post(self, hidden_streams: Array) -> tuple[Array, Array]:
     """Computes `(branch_input [B, S, D], post [B, S, K])` from `hidden_streams [B, S, K, D]`."""
-    b, s, k, d = hidden_streams.shape
+    _, _, k, d = hidden_streams.shape
     assert k == self.k and d == self.emb_dim
-
-    flat = jnp.reshape(hidden_streams, (b, s, k * d)).astype(jnp.float32)
-    inv_rms = jax.lax.rsqrt(jnp.mean(jnp.square(flat), axis=-1, keepdims=True) + self.rms_norm_eps)
 
     fn = jnp.asarray(self.fn[...], jnp.float32)
     base = jnp.asarray(self.base[...], jnp.float32)
     scale = jnp.asarray(self.scale[...], jnp.float32)
-
-    mixes = jnp.einsum("bsm,mn->bsn", flat, fn, precision=jax.lax.Precision(self.config.matmul_precision)) * inv_rms
+    mixes = _project_hyper_streams(
+        hidden_streams,
+        fn,
+        rms_norm_eps=self.rms_norm_eps,
+        matmul_precision=self.config.matmul_precision,
+        mesh=self.mesh,
+        shard_mode=self.config.shard_mode,
+    )
     pre_b, post_b = jnp.split(base, 2, axis=-1)
     scale_flat = scale.reshape(2)
     pre_scale = scale_flat[0]
@@ -219,19 +268,20 @@ class Hy4HyperHead(nnx.Module):
     )
 
   def __call__(self, x: Array) -> Array:
-    b, s, k, d = x.shape
+    _, _, k, d = x.shape
     assert k == self.mhc_expansion_rate
     assert d == self.emb_dim
-
-    flat_f32 = jnp.reshape(x, (b, s, k * d)).astype(jnp.float32)
-    inv_rms = jax.lax.rsqrt(jnp.mean(jnp.square(flat_f32), axis=-1, keepdims=True) + self.rms_norm_eps)
 
     hc_fn = jnp.asarray(self.hc_fn[...], jnp.float32)
     hc_base = jnp.asarray(self.hc_base[...], jnp.float32)
     hc_scale = jnp.asarray(self.hc_scale[...], jnp.float32)
-
-    mixes = (
-        jnp.einsum("bsm,mk->bsk", flat_f32, hc_fn, precision=jax.lax.Precision(self.config.matmul_precision)) * inv_rms
+    mixes = _project_hyper_streams(
+        x,
+        hc_fn,
+        rms_norm_eps=self.rms_norm_eps,
+        matmul_precision=self.config.matmul_precision,
+        mesh=self.mesh,
+        shard_mode=self.config.shard_mode,
     )
     pre = jax.nn.sigmoid(mixes * hc_scale[None, None, :] + hc_base[None, None, :]) + self.hc_eps
 
@@ -305,10 +355,20 @@ class Hy4Indexer(attention_mla.Indexer):
     low_rank_q = jax.lax.stop_gradient(low_rank_q)
     inputs_kv = jax.lax.stop_gradient(inputs_kv)
 
+    q_out_sharding = None
+    kv_out_sharding = None
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      iq_mesh, iq_parts = _padded_partitions(inputs_q, 3)
+      if iq_mesh is not None:
+        q_out_sharding = NamedSharding(iq_mesh, PartitionSpec(iq_parts[0], iq_parts[1], None))
+      ikv_mesh, ikv_parts = _padded_partitions(inputs_kv, 3)
+      if ikv_mesh is not None:
+        kv_out_sharding = NamedSharding(ikv_mesh, PartitionSpec(ikv_parts[0], ikv_parts[1], None))
+
     q = self.wq_b(low_rank_q).reshape(bsz, seqlen, self.n_heads, self.head_dim)
     q = self.apply_partial_rope(q, inputs_positions=inputs_positions)
 
-    k = self.wk(inputs_kv)
+    k = self.wk(inputs_kv, out_sharding=kv_out_sharding)
     k = self.k_norm(k.astype(jnp.float32)).astype(inputs_kv.dtype)
     k = k[:, :, None, :]
     k = self.apply_partial_rope(k, inputs_positions=inputs_positions)
@@ -322,7 +382,16 @@ class Hy4Indexer(attention_mla.Indexer):
     if k.shape[1] <= self.indexer_topk:
       return None, None, None
 
-    weights = self.weights_proj(inputs_q).astype(jnp.float32) * (self.n_heads**-0.5) * self.softmax_scale
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      k_mesh, k_parts = _padded_partitions(k, 3)
+      if k_mesh is not None and k_parts[1] is not None:
+        k = jax.sharding.reshard(k, NamedSharding(k_mesh, PartitionSpec(k_parts[0], None, None)))
+
+    weights = (
+        self.weights_proj(inputs_q, out_sharding=q_out_sharding).astype(jnp.float32)
+        * (self.n_heads**-0.5)
+        * self.softmax_scale
+    )
     logits = jnp.einsum(
         "bthd,bsd->btsh",
         q.astype(jnp.float32),
@@ -330,11 +399,17 @@ class Hy4Indexer(attention_mla.Indexer):
         precision=jax.lax.Precision.HIGHEST,
     )
     logits = jax.nn.relu(logits)
+    score_einsum_kwargs = {}
+    if self.config.shard_mode == ShardMode.EXPLICIT:
+      logits_mesh, logits_parts = _padded_partitions(logits, 4)
+      if logits_mesh is not None:
+        score_einsum_kwargs["out_sharding"] = NamedSharding(logits_mesh, PartitionSpec(*logits_parts[:3]))
     indexer_score = jnp.einsum(
         "btsh,bth->bts",
         logits,
         weights,
         precision=jax.lax.Precision.HIGHEST,
+        **score_einsum_kwargs,
     )
 
     internal_padding_mask = None
@@ -343,6 +418,15 @@ class Hy4Indexer(attention_mla.Indexer):
       indexer_score = indexer_score + internal_padding_mask[:, None, :]
 
     if attention_mask is not None:
+      if self.config.shard_mode == ShardMode.EXPLICIT:
+        score_mesh, score_parts = _padded_partitions(indexer_score, 3)
+        if score_mesh is not None:
+          mask_spec = PartitionSpec(
+              score_parts[0] if attention_mask.shape[0] > 1 else None,
+              score_parts[1] if attention_mask.shape[1] > 1 else None,
+              None,
+          )
+          attention_mask = jax.sharding.reshard(attention_mask, NamedSharding(score_mesh, mask_spec))
       indexer_score = indexer_score + attention_mask
 
     topk_values, topk_indices = jax.lax.top_k(indexer_score, k=self.indexer_topk)
@@ -352,6 +436,7 @@ class Hy4Indexer(attention_mla.Indexer):
     # allowing JAX DCE to eliminate backward Indexer recomputation).
     topk_indices = checkpoint_name(topk_indices, "indexer_cutoff_threshold")
     # Match HYV4Attention: scatter False at topk_indices (unmasked=0.0, masked=DEFAULT_MASK_VALUE)
+    scatter_out_sharding = jax.typeof(indexer_score).sharding if self.config.shard_mode == ShardMode.EXPLICIT else None
     selected = (
         jnp.zeros_like(indexer_score, dtype=jnp.bool_)
         .at[
@@ -359,7 +444,7 @@ class Hy4Indexer(attention_mla.Indexer):
             jnp.arange(seqlen)[None, :, None],
             topk_indices,
         ]
-        .set(True)
+        .set(True, out_sharding=scatter_out_sharding)
     )
     indexer_mask = jnp.where(
         selected,
@@ -390,6 +475,7 @@ class Hy4Attention(attention_mla.MLA):
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         epsilon=HY4_MLA_LORA_NORM_EPS,
+        shard_mode=self.config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -398,6 +484,7 @@ class Hy4Attention(attention_mla.MLA):
         dtype=self.config.dtype,
         weight_dtype=self.config.weight_dtype,
         epsilon=HY4_MLA_LORA_NORM_EPS,
+        shard_mode=self.config.shard_mode,
         kernel_axes=("norm",),
         rngs=self.rngs,
     )
@@ -414,6 +501,7 @@ class Hy4Attention(attention_mla.MLA):
         quant=self.quant,
         matmul_precision=self.config.matmul_precision,
         shard_mode=self.config.shard_mode,
+        weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order,
         rngs=self.rngs,
     )
 
@@ -521,14 +609,15 @@ class Hy4Attention(attention_mla.MLA):
     if self.use_absorbed_mqa:
       out = self.absorb_output(out)
 
+    out_sharding = create_sharding(self.mesh, out_logical_name)
     # Apply elementwise sigmoid gate (`gate_proj`) before `out_projection` (`o_proj`)
-    gate_states = self.gate_proj(inputs_q)  # [B, S, H, v_head_dim]
+    # [B, S, H, v_head_dim]
+    gate_states = self.gate_proj(inputs_q, out_sharding=out_sharding)
     out = out.astype(self.dtype) * jax.nn.sigmoid(gate_states)
 
-    out = self._maybe_shard_with_logical(out, self.out_axis_names)
+    out = self._maybe_shard_with_logical(out, out_logical_name)
     out = checkpoint_name(out, "attention_out")
 
-    out_sharding = create_sharding(self.mesh, out_logical_name)
     out = self.out_projection(out, out_sharding=out_sharding)
     out = checkpoint_name(out, "out_proj")
     return out, kv_cache, indexer_mask
@@ -581,6 +670,7 @@ class Hy4DecoderLayer(nnx.Module):
         epsilon=cfg.normalization_layer_epsilon,
         dtype=cfg.dtype,
         weight_dtype=cfg.weight_dtype,
+        shard_mode=cfg.shard_mode,
         kernel_axes=("norm",),
         rngs=rngs,
     )

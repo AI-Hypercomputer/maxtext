@@ -61,6 +61,7 @@ from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
     PREFILL_LENGTH,
     Q_LENGTH,
+    ShardMode,
 )
 from maxtext.inference.kvcache import KVQuant
 from maxtext.kernels.attention import jax_flash_attention
@@ -3436,6 +3437,11 @@ class AttentionOp(nnx.Module):
       sinks_param = sinks.astype(attn_weights.dtype)  # (n_q,)
       sinks_logits = sinks_param[jnp.newaxis, :, jnp.newaxis, jnp.newaxis]  # (1, n_q, 1, 1)
       sinks_logits = jnp.broadcast_to(sinks_logits, (b, n_q, t, 1))
+      if self.config.shard_mode == ShardMode.EXPLICIT:
+        logits_sharding = getattr(jax.typeof(logits), "sharding", None)
+        if isinstance(logits_sharding, jax.sharding.NamedSharding) and logits_sharding.spec is not None:
+          sinks_spec = jax.sharding.PartitionSpec(*logits_sharding.spec.partitions[:3], None)
+          sinks_logits = self._maybe_shard_with_pspec(sinks_logits, sinks_spec)
       logits = jnp.concatenate([logits, sinks_logits], axis=-1)
 
     # softmax

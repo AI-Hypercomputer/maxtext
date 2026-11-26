@@ -8754,6 +8754,7 @@ class MaxTextConfig(
           "gemma3",
           "gemma4",
           "gemma4_small",
+          "hy4",
       }
       if self.decoder_block.value not in supported_decoders:
         raise ValueError(

@@ -25,8 +25,11 @@ Tests cover:
 
 # pylint: disable=unbalanced-tuple-unpacking
 import collections.abc
+import os
 import re
+import shutil
 import sys
+import tempfile
 from types import SimpleNamespace
 import unittest
 from unittest import mock
@@ -72,6 +75,8 @@ from maxtext.models.gpt3 import Gpt3LayerNorm
 from maxtext.models.llama2 import LlamaDecoderLayer
 from maxtext.trainers.pre_train import train
 from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils, sharding
+from maxtext.utils import train_utils
+from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from tests.utils.test_helpers import get_test_config_path
 
 # ---------------------------------------------------------------------------
@@ -3391,7 +3396,7 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
             {"model_name": "gemma4-e2b", "hidden_size_per_layer_input": 64, "vocab_size_per_layer_input": 128},
         ),
         ("llama4", {"inhomogeneous_layer_cycle_interval": 2, "num_experts_per_tok": 1}),
-        ("hy4", {"model_name": "hy4-preview", "inhomogeneous_layer_cycle_interval": 2, "shard_mode": "auto"}),
+        ("hy4", {"model_name": "hy4-preview", "inhomogeneous_layer_cycle_interval": 2}),
         ("ming", {"model_name": "ming-3.0-audio-tiny", "inhomogeneous_layer_cycle_interval": 2, "shard_mode": "auto"}),
     )
     for model_mode in (MODEL_MODE_TRAIN, MODEL_MODE_PREFILL):
@@ -3986,6 +3991,168 @@ class TestDeferredNormGradAllreduce(unittest.TestCase):
     for layer in (dec_scanned.layers, dec_unscanned.layers_0, standalone):
       self.assertFalse(layer.pre_self_attention_layer_norm.defer_scale_grad_allreduce)
       self.assertFalse(layer.self_attention.defer_qk_norm_grad_allreduce)
+
+
+@pytest.mark.skip_on_tpu7x  # OSS CI libtpu 0.0.51 hits SparseCore all-gather ComputeEmitter UNIMPLEMENTED.
+@pytest.mark.tpu_only
+class TestHy4ExplicitPrefetchTpuParity(unittest.TestCase):
+  """Verifies 2-step `train.train_step` loss parity on TPU for `hy4-preview` with explicit sharding + FSDP prefetch."""
+
+  _KEEP_LEAF = object()
+
+  def _make_hy4_train_config(self, *, shard_mode: str, prefetch: bool, defer_rs: bool, output_dir: str):
+    return pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        run_name=f"hy4_tpu_parity_{shard_mode}",
+        base_output_directory=output_dir,
+        model_name="hy4-preview",
+        override_model_config=True,
+        hardware="tpu",
+        dataset_type="synthetic",
+        tokenizer_type="sentencepiece",
+        tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.llama2"),
+        enable_checkpointing=False,
+        enable_goodput_recording=False,
+        enable_checkpoint_cloud_logger=False,
+        monitor_goodput=False,
+        enable_tensorboard=False,
+        record_internal_nn_metrics=0,
+        skip_jax_distributed_system=True,
+        log_config=False,
+        profiler_steps=0,
+        eval_interval=0,
+        steps=2,
+        init_weights_seed=0,
+        opt_type="adamw",
+        learning_rate=1e-3,
+        warmup_steps_fraction=0.0,
+        shard_mode=shard_mode,
+        ici_fsdp_parallelism=-1,
+        scan_layers=True,
+        remat_policy="full",
+        use_indexer=True,
+        attention_sink=True,
+        attention="dot_product",
+        first_num_dense_layers=1,
+        inhomogeneous_layer_cycle_interval=2,
+        base_num_decoder_layers=5,
+        base_emb_dim=128,
+        base_mlp_dim=256,
+        base_moe_mlp_dim=128,
+        base_num_query_heads=8,
+        base_num_kv_heads=8,
+        head_dim=128,
+        q_lora_rank=64,
+        kv_lora_rank=32,
+        qk_nope_head_dim=64,
+        qk_rope_head_dim=64,
+        v_head_dim=128,
+        indexer_n_heads=8,
+        indexer_head_dim=64,
+        indexer_topk=32,
+        num_experts=8,
+        num_experts_per_tok=2,
+        shared_experts=1,
+        mhc_expansion_rate=4,
+        vocab_size=256,
+        per_device_batch_size=1.0,
+        max_target_length=128,
+        max_position_embeddings=256,
+        original_max_position_embeddings=256,
+        sparse_matmul=True,
+        megablox=False,
+        use_tokamax_gmm=False,
+        capacity_factor=-1,
+        moe_flat_fsdp_weights=False,
+        dtype="bfloat16",
+        weight_dtype="float32",
+        float32_logits=True,
+        float32_qk_product=True,
+        dropout_rate=0.0,
+        prefetch_fsdp_weights=prefetch,
+        prefetch_fsdp_defer_grad_reduce_scatter=defer_rs,
+    )
+
+  def _run_two_step_losses(self, cfg, init_host_state=None):
+    """Runs 2 jitted `train.train_step` iterations and returns `(losses, init_host_state)`."""
+    (
+        _,
+        _,
+        state_mesh_shardings,
+        _,
+        mesh,
+        _,
+        _,
+        _,
+        _,
+        _,
+        train_state,
+    ) = train_utils.setup_train_loop(cfg, recorder=None)
+    jit_model, state = nnx.split(train_state)
+    params_shardings, state_mesh_shardings = sharding.maybe_update_params_sharding_with_opt(cfg, state_mesh_shardings)
+
+    def _is_numeric_array(x):
+      return isinstance(x, jax.Array) and not jax.dtypes.issubdtype(x.dtype, jax.dtypes.prng_key)
+
+    if init_host_state is None:
+      init_host_state = jax.tree.map(
+          lambda x: np.asarray(jax.device_get(x)) if _is_numeric_array(x) else self._KEEP_LEAF,
+          state,
+      )
+    else:
+      state = jax.tree.map(
+          lambda cur, arr, sh: jax.device_put(jnp.asarray(arr), sh) if isinstance(arr, np.ndarray) else cur,
+          state,
+          init_host_state,
+          state_mesh_shardings,
+      )
+
+    p_train_step, _ = train_utils.jit_train_and_eval_step(
+        cfg,
+        jit_model,
+        mesh,
+        state,
+        state_mesh_shardings,
+        train.train_step,
+        params_shardings=params_shardings,
+    )
+    data_sharding = sharding.get_input_data_sharding(cfg, mesh, rules=cfg.logical_axis_rules)
+    rows = int(cfg.global_batch_size_to_train_on)
+    seq = int(cfg.max_target_length)
+    vocab = int(cfg.vocab_size)
+    losses = []
+    for step in range(cfg.steps):
+      rng = np.random.RandomState(step)
+      tokens = rng.randint(1, vocab, size=(rows, seq)).astype(np.int32)
+      seg = np.ones((rows, seq), dtype=np.int32)
+      pos = np.tile(np.arange(seq, dtype=np.int32), (rows, 1))
+      host_batch = {
+          "inputs": tokens,
+          "targets": np.roll(tokens, -1, axis=-1),
+          "inputs_position": pos,
+          "inputs_segmentation": seg,
+          "targets_segmentation": seg,
+      }
+      batch = jax.device_put(host_batch, data_sharding)
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        state, metrics = p_train_step(state, batch)
+      losses.append(float(metrics["scalar"]["learning/loss"]))
+    return losses, init_host_state
+
+  def test_hy4_explicit_prefetch_tpu_two_step_loss_parity(self):
+    if os.getenv("JAX_PLATFORMS") == "proxy":
+      self.skipTest("FSDP prefetch PJRT HLO overlap transform is not supported on Pathways proxy backend.")
+    output_dir = tempfile.mkdtemp(prefix="hy4_tpu_parity_")
+    self.addCleanup(shutil.rmtree, output_dir, ignore_errors=True)
+    ref_cfg = self._make_hy4_train_config(shard_mode="auto", prefetch=False, defer_rs=False, output_dir=output_dir)
+    exp_cfg = self._make_hy4_train_config(shard_mode="explicit", prefetch=True, defer_rs=True, output_dir=output_dir)
+
+    ref_losses, init_host_state = self._run_two_step_losses(ref_cfg)
+    exp_losses, _ = self._run_two_step_losses(exp_cfg, init_host_state=init_host_state)
+
+    self.assertTrue(np.all(np.isfinite(ref_losses)), f"Non-finite ref losses: {ref_losses}")
+    self.assertTrue(np.all(np.isfinite(exp_losses)), f"Non-finite explicit losses: {exp_losses}")
+    np.testing.assert_allclose(exp_losses, ref_losses, rtol=1e-2, atol=1e-2)
 
 
 if __name__ == "__main__":
