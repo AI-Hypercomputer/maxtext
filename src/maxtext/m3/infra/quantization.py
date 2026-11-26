@@ -49,8 +49,8 @@ from maxtext.m3.infra import scan as m3_scan
 
 # NNX layers that do exactly one weight matmul.
 _PROJECTIONS = (nnx.Linear, nnx.LinearGeneral, nnx.Einsum)
-# The decoder stack (`layers/<i>`, `layers_<i>`, or `layers` when scanned) and everything under it.
-_LAYER_STACK = re.compile(r"decoder/layers(_\d+)?(/|$)")
+# The decoder stack (`layers/<i>`, `layers_<i>`, `layers` when scanned, or `first_cycle` / `cycles`) and everything under it.
+_LAYER_STACK = re.compile(r"decoder/(layers(_\d+)?|first_cycle|cycles)(/|$)")
 # MoE router attribute names (HF and legacy both use `gate`).
 _ROUTERS = frozenset({"gate"})
 # `jax.lax.ragged_dot` binds `ragged_dot_general`.
@@ -138,9 +138,12 @@ def plan(model: nnx.Module, quantize_routers: bool = True) -> Plan:
   """
   modules = [("/".join(map(str, path)), path, module) for path, module in nnx.iter_modules(model)]
   scanned = tuple(name + "/" for name, _, module in modules if isinstance(module, m3_scan.ScannedLayers))
+  skip_submodules = frozenset(getattr(model, "_m3_quantization_skip_submodules", ()))
   quantized, routers, uncovered = [], [], []
   for name, path, module in modules:
     if not _LAYER_STACK.match(name):
+      continue
+    if skip_submodules and skip_submodules.intersection(map(str, path)):
       continue
     if not quantize_routers and _ROUTERS.intersection(map(str, path)):
       if path[-1] in _ROUTERS:
@@ -148,7 +151,15 @@ def plan(model: nnx.Module, quantize_routers: bool = True) -> Plan:
       continue  # A router, or a layer inside one (e.g. `gate/linear`).
     if isinstance(module, _PROJECTIONS):
       quantized.append(name)
-    elif _owns_weights(module, layer_axes=int(isinstance(module, m3_scan.ScannedLayers) or name.startswith(scanned))):
+    elif _owns_weights(
+        module,
+        layer_axes=int(
+            isinstance(module, m3_scan.ScannedLayers)
+            or name.startswith(scanned)
+            or name == "decoder/cycles"
+            or name.startswith("decoder/cycles/")
+        ),
+    ):
       uncovered.append(name)
   return Plan(tuple(quantized), tuple(routers), tuple(uncovered))
 
@@ -303,6 +314,10 @@ def maybe_quantize(model: nnx.Module, config, *example_args: Any, **example_kwar
     )
   if not the_plan.quantized:
     raise ValueError(f"quantization={name!r}: {type(model).__name__} has no projections under decoder/layers.")
+  planned_set = set(the_plan.quantized)
+  for path, mod in nnx.iter_modules(model):
+    if "/".join(map(str, path)) in planned_set and isinstance(mod, nnx.Linear):
+      object.__setattr__(mod, "_disable_linear_fusion", True)
   provider = qwix.QtProvider(rules(the_plan, the_recipe))
   before = _variable_paths(model)
   # Dynamic scales have no state, so skip qwix's eager init pass (a full forward step).

@@ -31,6 +31,7 @@ import importlib.util
 import os
 import re
 import types
+from types import SimpleNamespace
 from typing import Any
 import unittest
 from unittest import mock
@@ -41,7 +42,9 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig  # pylint: disable=no-name-in-module
-from maxtext.m3 import models as m3_models  # pylint: disable=no-name-in-module
+from maxtext.m3 import models as m3_models
+from maxtext.m3.infra import named_scopes as m3_named_scopes
+from maxtext.m3.infra import quantization as m3_quantization  # pylint: disable=no-name-in-module
 from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next  # pylint: disable=no-name-in-module
 from maxtext.utils import globals as maxtext_globals  # pylint: disable=no-name-in-module
@@ -2483,12 +2486,11 @@ def _copy_hf_weights_to_jax(hf_model, jax_model):
     for k in keys:
       getattr(getattr(dst, k), attr)[...] = to_j(getattr(src, k).weight, tr)
 
-  d.token_embedder.embedding[...] = to_j(pm.embed_tokens.weight)
-  jax_model.lm_head.kernel[...] = to_j(hf_model.lm_head.weight, True)
-  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "input_mix_weight_down", "input_mix_weight_up")
-  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "hc_norm", tr=False, attr="scale")
-  for i in range(d.num_layers):
-    jl, pl = getattr(d, f"layers_{i}"), pm.layers[i]
+  def cp_stacked(dst, srcs, *keys, tr=True, attr="kernel"):
+    for k in keys:
+      getattr(getattr(dst, k), attr)[...] = jnp.stack([to_j(getattr(s, k).weight, tr) for s in srcs], axis=0)
+
+  def copy_layer(jl, pl):
     for jh, ph in (
         (jl.attn_hyper_connection, pl.attn_hyper_connection),
         (jl.mlp_hyper_connection, pl.mlp_hyper_connection),
@@ -2520,6 +2522,55 @@ def _copy_hf_weights_to_jax(hf_model, jax_model):
         jl.mlp.experts.gate_up_proj.shape
     )
     cp(jl.mlp.shared_expert, pl.mlp.shared_expert, "gate_proj", "up_proj", "down_proj")
+
+  def copy_stacked_slot(jl, pls):
+    for jh_name in ("attn_hyper_connection", "mlp_hyper_connection"):
+      jh = getattr(jl, jh_name)
+      phs = [getattr(pl, jh_name) for pl in pls]
+      cp_stacked(jh, phs, "input_mix_weight_down", "input_mix_weight_up", "block_inject_weight")
+      cp_stacked(jh, phs, "hc_norm", tr=False, attr="scale")
+    if jl.layer_type == "linear_attention":
+      pls_la = [pl.linear_attn for pl in pls]
+      cp_stacked(jl.linear_attn, pls_la, "in_proj_qkv", "in_proj_z", "in_proj_b", "in_proj_a", "out_proj")
+      jl.linear_attn.A_log[...] = jnp.stack([to_j(p.A_log) for p in pls_la], axis=0)
+      jl.linear_attn.dt_bias[...] = jnp.stack([to_j(p.dt_bias) for p in pls_la], axis=0)
+      cp_stacked(jl.linear_attn, pls_la, "norm", tr=False, attr="scale")
+      jl.linear_attn.conv1d.kernel[...] = jnp.stack(
+          [jnp.array(p.conv1d.weight.detach().cpu().permute(2, 1, 0).numpy()) for p in pls_la], axis=0
+      )
+    else:
+      pls_sa = [pl.self_attn for pl in pls]
+      cp_stacked(jl.self_attn, pls_sa, "q_proj", "k_proj", "v_proj", "o_proj")
+      cp_stacked(jl.self_attn, pls_sa, "q_norm", "k_norm", tr=False, attr="scale")
+      pls_idx = [p.indexer for p in pls_sa]
+      cp_stacked(jl.self_attn.indexer, pls_idx, "q_layernorm", "k_layernorm", tr=False, attr="scale")
+      cp_stacked(jl.self_attn.indexer, pls_idx, "index_qk_proj")
+    jl.mlp.gate.linear.kernel[...] = jnp.stack([to_j(pl.mlp.gate.weight, True) for pl in pls], axis=0)
+    jl.mlp.shared_expert_gate.kernel[...] = jnp.stack(
+        [to_j(pl.mlp.shared_expert_gate.weight, True) for pl in pls], axis=0
+    )
+    jl.mlp.experts.down_proj[...] = jnp.stack(
+        [jnp.swapaxes(to_j(pl.mlp.experts.down_proj), -1, -2) for pl in pls], axis=0
+    )
+    jl.mlp.experts.gate_up_proj[...] = jnp.stack(
+        [
+            jnp.swapaxes(to_j(pl.mlp.experts.gate_up_proj), -1, -2).reshape(jl.mlp.experts.gate_up_proj.shape[1:])
+            for pl in pls
+        ],
+        axis=0,
+    )
+    cp_stacked(jl.mlp.shared_expert, [pl.mlp.shared_expert for pl in pls], "gate_proj", "up_proj", "down_proj")
+
+  d.token_embedder.embedding[...] = to_j(pm.embed_tokens.weight)
+  jax_model.lm_head.kernel[...] = to_j(hf_model.lm_head.weight, True)
+  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "input_mix_weight_down", "input_mix_weight_up")
+  cp(d.hyper_connection_mixer, pm.hyper_connection_mixer, "hc_norm", tr=False, attr="scale")
+  slot_names = ("gdn_0", "gdn_1", "gdn_2", "qsa_3")
+  for k, name in enumerate(slot_names):
+    copy_layer(getattr(d.first_cycle, name), pm.layers[k])
+  if d.cycles is not None:
+    for k, name in enumerate(slot_names):
+      copy_stacked_slot(getattr(d.cycles, name), [pm.layers[4 * c + k] for c in range(1, d.num_cycles)])
 
 
 def _make_matching_hf_config(c) -> Any:
@@ -2661,7 +2712,7 @@ class Qwen3_8BackboneTest(_SingleDeviceMeshTestCase):
     ms = m3_models.create_model(_get_mini_config(scan_layers=True, base_num_decoder_layers=4), mesh=None)
     for cu in (
         _get_mini_config(scan_layers=False, base_num_decoder_layers=8),
-        _get_mini_config(scan_layers=False, base_num_decoder_layers=4, ple_layer_id=2),
+        _get_mini_config(scan_layers=False, base_num_decoder_layers=4, use_ple_layer=False),
     ):
       with self.assertRaises(ValueError):
         modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(m3_models.create_model(cu, mesh=None), ms)
@@ -3174,8 +3225,8 @@ class Qwen3_8MTPLossTest(_SingleDeviceMeshTestCase):
     self.assertTrue({"total_loss", "primary_loss", "router_loss", "mtp_loss"}.issubset(metrics))
     self.assertGreater(jnp.sum(jnp.abs(grads.lm_head.kernel[...])), 0.0)
     self.assertGreater(jnp.sum(jnp.abs(grads.mtp.fc_embedding.kernel[...])), 0.0)
-    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.layers_0.mlp.experts.gate_up_proj[...])), 0.0)
-    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.layers_0.mlp.gate.linear.kernel[...])), 0.0)
+    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.first_cycle.gdn_0.mlp.experts.gate_up_proj[...])), 0.0)
+    self.assertGreater(jnp.sum(jnp.abs(grads.decoder.first_cycle.gdn_0.mlp.gate.linear.kernel[...])), 0.0)
     self.assertGreater(jnp.sum(jnp.abs(grads.mtp.layers_0.mlp.gate.linear.kernel[...])), 0.0)
 
   def test_compute_total_loss_single_token(self):
@@ -3273,6 +3324,249 @@ class Qwen3_8MTPLossTest(_SingleDeviceMeshTestCase):
     dn_std = float(jnp.std(experts.down_proj[...]))
     np.testing.assert_allclose(gu_std, 1.0 / np.sqrt(emb_dim), rtol=0.1)
     np.testing.assert_allclose(dn_std, 1.0 / np.sqrt(moe_mlp_dim), rtol=0.1)
+
+  def test_top_k_dense_vjp_matches_lax_top_k(self):
+    logits = jax.random.normal(jax.random.PRNGKey(17), (2, 8, 16), dtype=jnp.float32)
+    probs = jax.nn.softmax(logits, axis=-1)
+    cotangent = jax.random.normal(jax.random.PRNGKey(18), (2, 8, 4), dtype=jnp.float32)
+
+    def _ref(p):
+      vals, _ = jax.lax.top_k(p, 4)
+      return jnp.sum(vals * cotangent)
+
+    def _dense(p):
+      vals, _ = modeling_qwen3_8_flash_next._top_k_dense_vjp(p, 4)  # pylint: disable=protected-access
+      return jnp.sum(vals * cotangent)
+
+    ref_vals, ref_ids = jax.lax.top_k(probs, 4)
+    dense_vals, dense_ids = modeling_qwen3_8_flash_next._top_k_dense_vjp(probs, 4)  # pylint: disable=protected-access
+    np.testing.assert_array_equal(np.asarray(dense_ids), np.asarray(ref_ids))
+    np.testing.assert_allclose(np.asarray(dense_vals), np.asarray(ref_vals), rtol=0.0, atol=0.0)
+
+    grad_ref = jax.grad(_ref)(probs)
+    grad_dense = jax.grad(_dense)(probs)
+    np.testing.assert_allclose(np.asarray(grad_dense), np.asarray(grad_ref), rtol=1e-6, atol=1e-6)
+
+  def test_compact_router_aux_matches_legacy_loss_and_grads(self):
+    def _check_variant(scan_layers: bool, use_mtp: bool) -> None:
+      cfg = _create_mini_config(num_layers=8, scan_layers=scan_layers, dtype="float32", weight_dtype="float32")
+      model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+      inp = jax.random.randint(jax.random.PRNGKey(21), (2, 8), 1, 128, dtype=jnp.int32)
+      tgt = jax.random.randint(jax.random.PRNGKey(22), (2, 8), 1, 128, dtype=jnp.int32)
+      seg_ids = jnp.array([[1, 1, 1, 2, 2, 2, 2, 0], [1, 1, 1, 1, 1, 0, 0, 0]], dtype=jnp.int32)
+      tgt_mask = jnp.array([[1, 1, 0, 1, 1, 1, 1, 1], [1, 1, 1, 1, 0, 1, 0, 0]], dtype=jnp.float32)
+
+      eff_mask = tgt_mask * (seg_ids != 0).astype(jnp.float32)
+      mtp_m = tgt_mask[:, 1:] * ((seg_ids[:, :-1] == seg_ids[:, 1:]) & (seg_ids[:, :-1] != 0)).astype(jnp.float32)
+      mtp_aux_mask = jnp.pad(mtp_m, ((0, 0), (0, 1)))
+      _, compact_aux = model(
+          inp,
+          None,
+          seg_ids,
+          return_aux=True,
+          return_mtp=use_mtp,
+          compact_router_aux=True,
+          router_aux_mask=eff_mask,
+          mtp_router_aux_mask=mtp_aux_mask if use_mtp else None,
+      )
+      compact_layers = compact_aux["layer_aux"] if use_mtp else compact_aux
+      self.assertLen(compact_layers, 8)
+      for layer_stat in compact_layers:
+        self.assertIn("tokens_per_expert_sum", layer_stat)
+        self.assertIn("router_prob_sum", layer_stat)
+        self.assertIn("total_rows", layer_stat)
+        self.assertNotIn("router_probs", layer_stat)
+        self.assertNotIn("router_indices", layer_stat)
+        self.assertEqual(layer_stat["router_prob_sum"].shape, (cfg.num_experts,))
+
+      def _legacy_loss(m):
+        out = m(inp, None, seg_ids, return_aux=True, return_mtp=use_mtp, compact_router_aux=False)
+        logits, aux = out[0], out[1]
+        p_loss = modeling_qwen3_8_flash_next.cross_entropy_loss(logits, tgt, mask=eff_mask)
+        r_loss = modeling_qwen3_8_flash_next.router_load_balancing_loss(
+            aux, cfg.num_experts, mask=tgt_mask, mtp_mask=mtp_aux_mask if use_mtp else None, segment_ids=seg_ids
+        )
+        tot = p_loss + 0.01 * r_loss
+        if use_mtp:
+          tot = tot + 0.1 * modeling_qwen3_8_flash_next.cross_entropy_loss(
+              aux["mtp_logits"][:, :-1, :], tgt[:, 1:], mask=mtp_m
+          )
+        return tot, r_loss
+
+      def _compact_loss(m):
+        return modeling_qwen3_8_flash_next.compute_total_loss(
+            m, inp, tgt, target_mask=tgt_mask, segment_ids=seg_ids, router_aux_coeff=0.01, use_mtp=use_mtp
+        )
+
+      (compact_tot, compact_mets), compact_grads = nnx.value_and_grad(_compact_loss, has_aux=True)(model)
+      (legacy_tot, legacy_rloss), legacy_grads = nnx.value_and_grad(_legacy_loss, has_aux=True)(model)
+
+      np.testing.assert_allclose(float(compact_mets["router_loss"]), float(legacy_rloss), rtol=1e-6, atol=1e-6)
+      np.testing.assert_allclose(float(compact_tot), float(legacy_tot), rtol=1e-6, atol=1e-6)
+      for (path, g_c), (path_l, g_l) in zip(
+          jax.tree_util.tree_leaves_with_path(compact_grads),
+          jax.tree_util.tree_leaves_with_path(legacy_grads),
+          strict=True,
+      ):
+        self.assertEqual(path, path_l)
+        np.testing.assert_allclose(
+            np.asarray(g_c), np.asarray(g_l), rtol=1e-5, atol=1e-5, err_msg=f"Grad mismatch at {path}"
+        )
+
+    for scan_layers in (False, True):
+      for use_mtp in (False, True):
+        _check_variant(scan_layers, use_mtp)
+
+  def test_hoisted_rope_matches_per_layer_rope(self):
+    cfg = _create_mini_config(num_layers=8, scan_layers=True, dtype="float32", weight_dtype="float32")
+    model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+    qsa = model.decoder.first_cycle.qsa_3.self_attn
+    x = jax.random.normal(jax.random.PRNGKey(31), (2, 8, cfg.emb_dim), dtype=jnp.float32)
+    for pos in (
+        jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32)[None, :], (2, 8)),
+        jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32)[None, None, :], (3, 2, 8)),
+    ):
+      cos_sin = qsa.rotary_emb(x, pos)
+      out_inline = qsa(x, position_ids=pos)
+      out_hoisted = qsa(x, position_ids=pos, position_embeddings=cos_sin)
+      np.testing.assert_allclose(np.asarray(out_hoisted), np.asarray(out_inline), rtol=1e-6, atol=1e-6)
+
+  def test_hc_and_fused_linears_stage_c_parity_explicit_tp_and_qwix(self):
+    rng = np.random.default_rng(3803)
+    b, s, emb_dim, hc_count, hc_lowrank = 2, 8, 256, 4, 32
+    hc_dim = emb_dim * hc_count
+    x_hc = jnp.asarray(rng.standard_normal((b, s, hc_dim)).astype(np.float32) * 0.25)
+    blk_out = jnp.asarray(rng.standard_normal((b, s, emb_dim)).astype(np.float32) * 0.25)
+    cot_hc = jnp.asarray(rng.standard_normal((b, s, hc_dim)).astype(np.float32))
+    cot_mix = jnp.asarray(rng.standard_normal((b, s, emb_dim)).astype(np.float32))
+
+    hc_mod = modeling_qwen3_8_flash_next.Qwen3_8GatedResidual(
+        emb_dim=emb_dim,
+        hc_count=hc_count,
+        hc_lowrank=hc_lowrank,
+        dtype=jnp.float32,
+        weight_dtype=jnp.float32,
+        rngs=nnx.Rngs(303),
+    )
+    hc_mod.hc_norm.scale[...] = jnp.asarray(rng.standard_normal((hc_dim,)).astype(np.float32) * 0.1)
+    gdef_hc, params_hc, rest_hc = nnx.split(hc_mod, nnx.Param, ...)
+
+    def _hc_fast_loss(pp, xx, bo):
+      m = nnx.merge(gdef_hc, pp, rest_hc)
+      mixed, inj = m.before_block(xx)
+      comb = m.combine(xx, bo, inj)
+      return jnp.sum(mixed * cot_mix) + jnp.sum(comb * cot_hc)
+
+    def _hc_ref_loss(pp, xx, bo):
+      m = nnx.merge(gdef_hc, pp, rest_hc)
+      assert m.block_inject_weight is not None
+      scale_f32 = 1.0 + m.hc_norm.scale[...].astype(jnp.float32)
+      normed = (m.hc_norm._norm(xx.astype(jnp.float32)) * scale_f32).astype(xx.dtype)  # pylint: disable=protected-access
+      raw_down = m.input_mix_weight_down(normed)
+      raw_inj = m.block_inject_weight(normed)
+      inj = (2.0 * jax.nn.sigmoid(raw_inj / hc_count)).astype(xx.dtype)
+      w_down = jax.nn.silu(raw_down / hc_count)
+      w_up = jax.nn.sigmoid(m.input_mix_weight_up(w_down))
+      mixed = jnp.mean(
+          w_up.reshape(b, s, hc_count, emb_dim) * normed.reshape(b, s, hc_count, emb_dim),
+          axis=-2,
+      ).astype(xx.dtype)
+      comb = (xx + (bo[..., None, :] * inj[..., :, None]).reshape(b, s, hc_dim)).astype(xx.dtype)
+      return jnp.sum(mixed * cot_mix) + jnp.sum(comb * cot_hc)
+
+    v_fast, g_fast = jax.jit(jax.value_and_grad(_hc_fast_loss, argnums=(0, 1, 2)))(params_hc, x_hc, blk_out)
+    v_ref, g_ref = jax.jit(jax.value_and_grad(_hc_ref_loss, argnums=(0, 1, 2)))(params_hc, x_hc, blk_out)
+    np.testing.assert_allclose(float(v_fast), float(v_ref), rtol=1e-5, atol=1e-5)
+    for (kp, ga), (_, gr) in zip(
+        jax.tree_util.tree_leaves_with_path(g_fast),
+        jax.tree_util.tree_leaves_with_path(g_ref),
+        strict=True,
+    ):
+      np.testing.assert_allclose(np.asarray(ga), np.asarray(gr), rtol=1e-5, atol=1e-5, err_msg=f"HC grad mismatch {kp}")
+
+    if len(jax.devices()) < 4:
+      return
+
+    pspec = jax.sharding.PartitionSpec
+    sharding_ep = m3_sharding.EPasCP()
+    x_mlp = jnp.asarray(rng.standard_normal((b, s, emb_dim)).astype(np.float32) * 0.25)
+    cot_g = jnp.asarray(rng.standard_normal((b, s, 64)).astype(np.float32))
+    cot_u = jnp.asarray(rng.standard_normal((b, s, 64)).astype(np.float32))
+
+    for explicit in (False, True):
+      ax_types = (jax.sharding.AxisType.Explicit,) * 3 if explicit else None
+      mesh_tp1 = jax.sharding.Mesh(
+          np.array(jax.devices()[:4]).reshape((2, 2, 1)),
+          ("fsdp", "expert", "tensor"),
+          axis_types=ax_types,
+      )
+      with jax.set_mesh(mesh_tp1), nnx.use_eager_sharding(True):
+        mlp = modeling_qwen3_8_flash_next.Qwen3_8MLP(
+            emb_dim=emb_dim,
+            intermediate_dim=64,
+            dtype=jnp.float32,
+            weight_dtype=jnp.float32,
+            sharding=sharding_ep,
+            rngs=nnx.Rngs(404),
+        )
+        m3_named_scopes.add_named_scopes(mlp)
+        self.assertTrue(
+            modeling_qwen3_8_flash_next._can_fuse_linears(mlp.gate_proj, mlp.up_proj)  # pylint: disable=protected-access
+        )
+        xs = jax.device_put(x_mlp, jax.sharding.NamedSharding(mesh_tp1, pspec("fsdp", "expert", None)))
+        cgs = jax.device_put(cot_g, jax.sharding.NamedSharding(mesh_tp1, pspec("fsdp", "expert", None)))
+        cus = jax.device_put(cot_u, jax.sharding.NamedSharding(mesh_tp1, pspec("fsdp", "expert", None)))
+        gd_m, pm_m, rs_m = nnx.split(mlp, nnx.Param, ...)
+        out_shd = pspec("fsdp", "expert", None) if explicit else None
+
+        def _fused_proj(pp, xx, gd=gd_m, rs=rs_m, cg=cgs, cu=cus):
+          mod = nnx.merge(gd, pp, rs)
+          g_out, u_out = modeling_qwen3_8_flash_next._apply_fused_linears(  # pylint: disable=protected-access
+              xx, mod.gate_proj, mod.up_proj
+          )
+          return jnp.sum(g_out * cg) + jnp.sum(u_out * cu)
+
+        def _unfused_proj(pp, xx, gd=gd_m, rs=rs_m, cg=cgs, cu=cus, out_spec=out_shd):
+          mod = nnx.merge(gd, pp, rs)
+          g_out = mod.gate_proj(xx, out_sharding=out_spec)
+          u_out = mod.up_proj(xx, out_sharding=out_spec)
+          return jnp.sum(g_out * cg) + jnp.sum(u_out * cu)
+
+        vf, gf = jax.jit(jax.value_and_grad(_fused_proj, argnums=(0, 1)))(pm_m, xs)
+        vu, gu = jax.jit(jax.value_and_grad(_unfused_proj, argnums=(0, 1)))(pm_m, xs)
+        np.testing.assert_allclose(float(vf), float(vu), rtol=1e-5, atol=1e-5)
+        for (kp, ga), (_, gr) in zip(
+            jax.tree_util.tree_leaves_with_path(gf),
+            jax.tree_util.tree_leaves_with_path(gu),
+            strict=True,
+        ):
+          np.testing.assert_allclose(
+              np.asarray(ga), np.asarray(gr), rtol=1e-5, atol=1e-5, err_msg=f"Fused linear grad mismatch {kp}"
+          )
+
+        object.__setattr__(mlp.gate_proj, "qwix_path", ("gate_proj",))
+        self.assertFalse(
+            modeling_qwen3_8_flash_next._can_fuse_linears(mlp.gate_proj, mlp.up_proj)  # pylint: disable=protected-access
+        )
+
+  def test_maybe_quantize_fp8_on_mini_qwen3_8(self):
+    mesh_1 = m3_sharding.create_mesh(devices=jax.devices()[:1])
+    with jax.set_mesh(mesh_1):
+      for scan_layers in (False, True):
+        cfg = _create_mini_config(num_layers=8, scan_layers=scan_layers, dtype="bfloat16", weight_dtype="bfloat16")
+        model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+        qcfg = SimpleNamespace(
+            quantization="fp8",
+            use_qwix_quantization=True,
+            quantize_router_proj=False,
+            micro_batch_size_to_train_on=1,
+            max_target_length=16,
+        )
+        ex_args = m3_quantization.example_inputs(qcfg)
+        qmodel = m3_quantization.maybe_quantize(model, qcfg, *ex_args)
+        toks = jnp.ones((1, 16), dtype=jnp.int32)
+        logits = qmodel(toks)
+        self.assertEqual(logits.shape, (1, 16, cfg.vocab_size))
 
 
 if __name__ == "__main__":
