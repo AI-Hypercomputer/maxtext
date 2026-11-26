@@ -20,15 +20,17 @@ projection and in its input gradient, and the compiler may gather it twice. With
 custom VJP (layers/linears.py _dot_general_reusing_gathered_kernel) whose residual is the explicitly gathered kernel,
 so the backward gathers it once.
 
-  - Programs and values, in a child process with 8 CPU devices (see main): a stack of Qwen3NextFullAttention layers
-    scanned under jax.checkpoint with the decoder's own remat policy, as nnx_decoders scans them, each followed by
+  - Programs and values, with 8 CPU devices (in a child process per check unless the test process has them; see
+    _PHASES): a stack of Qwen3NextFullAttention layers scanned under jax.checkpoint with the decoder's own remat
+    policy, as nnx_decoders scans them, each followed by
     an RMS norm of the residual stream as in the decoder layer, on the 397B trainer's cp-as-ep rules (embed on fsdp x
     context x expert) and on the default rules. With the option: every dot that reads the query kernel (forward,
     replay, input gradient) reads the explicitly gathered kernel; the loss and every gradient are bit-identical to the
     option off; the backward loop body has exactly one all-gather of the query kernel; the output kernel's gathers are
     untouched; and no other collective changes (so the kernel gradient is still reduce-scattered, not all-reduced).
-    The same program checks run for a TPU target (tpu7x-8, compiled on this host) when libtpu is installed; there the
-    backward gathers the query kernel twice without the option, as in the 397B trainer step, and once with it.
+    The same program checks run for a TPU target (tpu7x-8, compiled on this host) in scheduled CI when libtpu is
+    installed; there the backward gathers the query kernel twice without the option, as in the 397B trainer step, and
+    once with it.
   - In this process: the custom VJP gives the same bits as lax.dot_general; the attention layer passes the gathered
     axes to the query projection, for training only; DenseGeneral rejects what it cannot serve; the config validator
     rejects the option wherever it would not remove an all-gather, in MaxTextConfig and RLConfig.
@@ -40,9 +42,9 @@ import importlib.util
 import inspect
 import os
 import re
-import subprocess
 import sys
 import types
+import unittest
 
 from absl.testing import absltest
 from absl.testing import parameterized
@@ -67,9 +69,9 @@ from maxtext.models import qwen3
 from maxtext.utils import accelerator_to_spec_map
 from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
+from tests.utils import cpu_mesh_child
 from tests.utils.test_helpers import get_test_config_path
 
-_PASS_TOKEN = "QUERY_PROJ_KERNEL_GATHER_ONCE_CHECKS_PASSED"
 _QUERY_KEY = "query_proj_kernel_gather_once"
 _NUM_DEVICES = 8
 _LAYERS = 3
@@ -1043,54 +1045,8 @@ class GatherScannedKernelsOnceTest(absltest.TestCase):
     self.assertEqual(outer_ag_count(MODEL_MODE_TRAIN, MODEL_MODE_TRAIN), 5)
 
 
-def _child_env(targets):
-  """The environment of a `main` child process compiling for `targets` (comma-separated: cpu, tpu7x-8)."""
-  env = os.environ.copy()
-  env["XLA_FLAGS"] = f"{env.get('XLA_FLAGS', '')} --xla_force_host_platform_device_count={_NUM_DEVICES}".strip()
-  # A TPU target needs the TPU plugin registered (and skipped as a backend, as there is no TPU here), possibly while
-  # this process also has libtpu loaded.
-  env["JAX_PLATFORMS"] = "cpu" if targets == "cpu" else ""
-  if targets != "cpu":
-    env["ALLOW_MULTIPLE_LIBTPU_LOAD"] = "1"
-  env["QPGO_TARGETS"] = targets
-  repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-  paths = [os.path.join(repo_root, "src"), repo_root] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])
-  env["PYTHONPATH"] = os.pathsep.join(paths)
-  return env
-
-
-def _run_child(targets):
-  """Executes this test module as a child process compiling for `targets` and asserts it passes."""
-  result = subprocess.run(
-      [sys.executable, __file__],
-      env=_child_env(targets),
-      capture_output=True,
-      text=True,
-      check=False,
-  )
-  print(result.stdout)
-  assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert _PASS_TOKEN in result.stdout, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-
-
-@pytest.mark.cpu_only
-def test_programs_in_a_child_process():
-  """Runs `main` below in a fresh process with 8 CPU devices: values and the CPU compiler's programs."""
-  _run_child("cpu")
-
-
-@pytest.mark.cpu_only
-@pytest.mark.skipif(
-    importlib.util.find_spec("libtpu") is None,
-    reason="needs libtpu to compile for a TPU target",
-)
-def test_tpu_programs_in_a_child_process():
-  """The same program checks, compiled for a tpu7x-8 target on this host (no TPU used)."""
-  _run_child("tpu7x-8")
-
-
 # ----------------------------------------------------------------------------------------------------------------------
-# Program checks (main).
+# Program checks (_PHASES).
 
 _COMPUTATION_RE = re.compile(r"^(?:ENTRY )?%?([^\s(]+) .*\{\s*$")
 _CALLEE_RE = re.compile(
@@ -1175,7 +1131,7 @@ def _collectives(lines):
 def _target_devices(target):
   """The devices to compile for: this process's CPU devices, or a TPU topology (compiled for, not run, on this host).
 
-  A TPU topology must be built before anything initializes the local backends (main builds them first).
+  A TPU topology must be built before anything initializes the local backends (each phase builds its target's first).
   """
   if target == "cpu":
     return jax.devices("cpu")
@@ -1257,8 +1213,10 @@ def _run(mesh_name, options, target):
       (param_shardings, x_sharding),
   )
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(rules):
-    jaxpr = jax.make_jaxpr(jax.value_and_grad(loss_fn, argnums=(0, 1)))(*abstract).jaxpr
-    compiled = step.lower(*abstract).compile()
+    # One trace serves both the jaxpr checks and the compile.
+    traced = step.trace(*abstract)
+    jaxpr = traced.jaxpr.jaxpr
+    compiled = traced.lower().compile()
   values = None
   if target == "cpu":
     loss, (grads, x_grad) = compiled(jax.device_put(stacked, param_shardings), jax.device_put(x, x_sharding))
@@ -1464,134 +1422,178 @@ def _check_mesh(mesh_name, target):
   return ok
 
 
-def _check_gather_scanned_kernels_once(target):
-  """Verifies gather_scanned_kernels_once HLO on 8-device `target` across (fsdp=8) and (fsdp=4, tensor=2)."""
+# label -> (fsdp, tensor) of the 8-device mesh of _check_gather_scanned_kernels_once.
+_GATHER_ONCE_MESHES = {"fsdp8": (8, 1), "fsdp4_tp2": (4, 2)}
+
+
+def _check_gather_scanned_kernels_once(target, label):
+  """Verifies gather_scanned_kernels_once HLO on 8-device `target` on the `label` mesh of _GATHER_ONCE_MESHES."""
   # pylint: disable=import-outside-toplevel,protected-access
   from maxtext.utils import model_creation_utils
 
   ok = True
-  for label, fsdp, tp in (("fsdp8", 8, 1), ("fsdp4_tp2", 4, 2)):
-    cfg = _cfg(
-        decoder_block="qwen3_moe",
-        base_emb_dim=256,
-        base_num_query_heads=8,
-        base_num_kv_heads=4,
-        head_dim=32,
-        base_mlp_dim=256,
-        base_moe_mlp_dim=256,
-        num_experts=8,
-        num_experts_per_tok=2,
-        base_num_decoder_layers=2,
-        vocab_size=256,
-        max_target_length=64,
-        per_device_batch_size=1.0,
-        ici_fsdp_parallelism=fsdp,
-        ici_tensor_parallelism=tp,
-        attention="dot_product",
-        dtype="bfloat16",
-        weight_dtype="float32",
-        scan_layers=True,
-        remat_policy="full",
-        gather_scanned_kernels_once=True,
+  fsdp, tp = _GATHER_ONCE_MESHES[label]
+  cfg = _cfg(
+      decoder_block="qwen3_moe",
+      base_emb_dim=256,
+      base_num_query_heads=8,
+      base_num_kv_heads=4,
+      head_dim=32,
+      base_mlp_dim=256,
+      base_moe_mlp_dim=256,
+      num_experts=8,
+      num_experts_per_tok=2,
+      base_num_decoder_layers=2,
+      vocab_size=256,
+      max_target_length=64,
+      per_device_batch_size=1.0,
+      ici_fsdp_parallelism=fsdp,
+      ici_tensor_parallelism=tp,
+      attention="dot_product",
+      dtype="bfloat16",
+      weight_dtype="float32",
+      scan_layers=True,
+      remat_policy="full",
+      gather_scanned_kernels_once=True,
+  )
+  mesh = Mesh(maxtext_utils.create_device_mesh(cfg, _target_devices(target)), cfg.mesh_axes)
+  rules = cfg.logical_axis_rules
+  with nn_partitioning.axis_rules(rules):
+    _, abstract_model = model_creation_utils.create_nnx_abstract_model(
+        cfg, mesh, model_mode=MODEL_MODE_TRAIN, rng_key=jax.random.PRNGKey(0)
     )
-    mesh = Mesh(maxtext_utils.create_device_mesh(cfg, _target_devices(target)), cfg.mesh_axes)
-    rules = cfg.logical_axis_rules
-    with nn_partitioning.axis_rules(rules):
-      _, abstract_model = model_creation_utils.create_nnx_abstract_model(
-          cfg, mesh, model_mode=MODEL_MODE_TRAIN, rng_key=jax.random.PRNGKey(0)
-      )
-      decoder = abstract_model.decoder
-      param_shardings = sharding.nnx_construct_named_sharding(nnx.state(decoder.layers, nnx.Param), mesh)
-    graphdef, abs_params, abs_rest = nnx.split(decoder.layers, nnx.Param, ...)
-    abs_params_sharded = jax.tree.map(
-        lambda v, s: v.replace(jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=s.get_value())),
-        abs_params,
-        param_shardings,
-        is_leaf=lambda v: isinstance(v, nnx.Variable),
-    )
-    rest_concrete = jax.tree.map(lambda v: jnp.zeros(v.shape, v.dtype) if hasattr(v, "shape") else v, abs_rest)
-    batch = _NUM_DEVICES
-    x_sharding = sharding.create_sharding(mesh, ("activation_batch", "activation_length", "activation_embed"), rules)
-    abs_x = jax.ShapeDtypeStruct((batch, 64, 256), jnp.bfloat16, sharding=x_sharding)
+    decoder = abstract_model.decoder
+    param_shardings = sharding.nnx_construct_named_sharding(nnx.state(decoder.layers, nnx.Param), mesh)
+  graphdef, abs_params, abs_rest = nnx.split(decoder.layers, nnx.Param, ...)
+  abs_params_sharded = jax.tree.map(
+      lambda v, s: v.replace(jax.ShapeDtypeStruct(v.shape, v.dtype, sharding=s.get_value())),
+      abs_params,
+      param_shardings,
+      is_leaf=lambda v: isinstance(v, nnx.Variable),
+  )
+  rest_concrete = jax.tree.map(lambda v: jnp.zeros(v.shape, v.dtype) if hasattr(v, "shape") else v, abs_rest)
+  batch = _NUM_DEVICES
+  x_sharding = sharding.create_sharding(mesh, ("activation_batch", "activation_length", "activation_embed"), rules)
+  abs_x = jax.ShapeDtypeStruct((batch, 64, 256), jnp.bfloat16, sharding=x_sharding)
 
-    def loss_fn(layer_params, hidden, decoder=decoder, graphdef=graphdef, rest_concrete=rest_concrete, batch=batch):
-      pos = jnp.broadcast_to(jnp.arange(64, dtype=jnp.int32), (batch, 64))
-      seg = jnp.ones((batch, 64), dtype=jnp.int32)
-      scanned = nnx.merge(graphdef, layer_params, rest_concrete)
-      y = decoder._apply_layers_sequentially(scanned, hidden, seg, pos, True, MODEL_MODE_TRAIN, length=2)[0]
-      return jnp.mean(jnp.square(y.astype(jnp.float32)))
+  def loss_fn(layer_params, hidden, decoder=decoder, graphdef=graphdef, rest_concrete=rest_concrete, batch=batch):
+    pos = jnp.broadcast_to(jnp.arange(64, dtype=jnp.int32), (batch, 64))
+    seg = jnp.ones((batch, 64), dtype=jnp.int32)
+    scanned = nnx.merge(graphdef, layer_params, rest_concrete)
+    y = decoder._apply_layers_sequentially(scanned, hidden, seg, pos, True, MODEL_MODE_TRAIN, length=2)[0]
+    return jnp.mean(jnp.square(y.astype(jnp.float32)))
 
-    step = jax.jit(
-        jax.value_and_grad(loss_fn, argnums=(0, 1)),
-        in_shardings=(param_shardings, x_sharding),
-        out_shardings=(NamedSharding(mesh, P()), (param_shardings, x_sharding)),
-    )
-    with jax.set_mesh(mesh), nn_partitioning.axis_rules(rules):
-      hlo = step.lower(abs_params_sharded, abs_x).compile().as_text()
+  step = jax.jit(
+      jax.value_and_grad(loss_fn, argnums=(0, 1)),
+      in_shardings=(param_shardings, x_sharding),
+      out_shardings=(NamedSharding(mesh, P()), (param_shardings, x_sharding)),
+  )
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(rules):
+    hlo = step.lower(abs_params_sharded, abs_x).compile().as_text()
 
-    comps = _computations(hlo)
-    bodies = _while_bodies(comps)
-    body_set = {c for reach in bodies.values() for c in reach}
-    outer_lines = [line for c, lines in comps.items() if c not in body_set for line in lines]
-    body_lines = [line for c in body_set for line in comps[c]]
-    outer_ags = {k: n for k, n in _collectives(outer_lines).items() if k[0] == "all-gather"}
-    body_ags = {k: n for k, n in _collectives(body_lines).items() if k[0] == "all-gather"}
-    # Hoisted kernels: CPU gathers before moveaxis ([d0, 2, ...]); TPU gathers after moveaxis ([2, d0, ...]).
-    # In both cases there are EXACTLY 5 group=fsdp hoists (1 per kernel in forward, 0 post-backward gradient gathers)
-    # and 0 group=8 (full-mesh) gathers when tensor parallelism is active.
-    q_h, kv_h = 8 // tp, 4 // tp
-    if target == "cpu":
-      want_fsdp_hoists = {
-          ("all-gather", (f"256,2,{q_h},32",), fsdp): 1,
-          ("all-gather", (f"256,2,{kv_h},32",), fsdp): 2,
-          ("all-gather", (f"{q_h},2,32,256",), fsdp): 1,
-          ("all-gather", ("256,2,8",), fsdp): 1,
-      }
-    else:
-      want_fsdp_hoists = {
-          ("all-gather", (f"2,256,{q_h},32",), fsdp): 1,
-          ("all-gather", (f"2,256,{kv_h},32",), fsdp): 2,
-          ("all-gather", (f"2,{q_h},32,256",), fsdp): 1,
-          ("all-gather", ("2,256,8",), fsdp): 1,
-      }
-    got_fsdp_hoists = {k: n for k, n in outer_ags.items() if k[2] == fsdp}
-    got_full_mesh_ags = {k: n for k, n in outer_ags.items() if tp > 1 and k[2] == fsdp * tp}
-    ok &= _check(
-        f"{target} {label} gather_scanned_kernels_once: exact 5 FSDP-only outer hoists (group={fsdp}) and 0 bwd stack"
-        " all-gathers",
-        got_fsdp_hoists == want_fsdp_hoists and not got_full_mesh_ags,
-        f"got_fsdp {got_fsdp_hoists}, full_mesh {got_full_mesh_ags}, want {want_fsdp_hoists}",
-    )
-    in_loop_hoisted = sum(
-        n
-        for (op, dims, _), n in body_ags.items()
-        if any(_is_gather_of(op, dims, s) for s in (f"256,{q_h},32", f"256,{kv_h},32", f"{q_h},32,256", "256,8"))
-    )
-    ok &= _check(
-        f"{target} {label} gather_scanned_kernels_once: 0 remaining in-loop gathers of hoisted kernels",
-        in_loop_hoisted == 0,
-        f"body_ags {body_ags}",
-    )
+  comps = _computations(hlo)
+  bodies = _while_bodies(comps)
+  body_set = {c for reach in bodies.values() for c in reach}
+  outer_lines = [line for c, lines in comps.items() if c not in body_set for line in lines]
+  body_lines = [line for c in body_set for line in comps[c]]
+  outer_ags = {k: n for k, n in _collectives(outer_lines).items() if k[0] == "all-gather"}
+  body_ags = {k: n for k, n in _collectives(body_lines).items() if k[0] == "all-gather"}
+  # Hoisted kernels: CPU gathers before moveaxis ([d0, 2, ...]); TPU gathers after moveaxis ([2, d0, ...]).
+  # In both cases there are EXACTLY 5 group=fsdp hoists (1 per kernel in forward, 0 post-backward gradient gathers)
+  # and 0 group=8 (full-mesh) gathers when tensor parallelism is active.
+  q_h, kv_h = 8 // tp, 4 // tp
+  if target == "cpu":
+    want_fsdp_hoists = {
+        ("all-gather", (f"256,2,{q_h},32",), fsdp): 1,
+        ("all-gather", (f"256,2,{kv_h},32",), fsdp): 2,
+        ("all-gather", (f"{q_h},2,32,256",), fsdp): 1,
+        ("all-gather", ("256,2,8",), fsdp): 1,
+    }
+  else:
+    want_fsdp_hoists = {
+        ("all-gather", (f"2,256,{q_h},32",), fsdp): 1,
+        ("all-gather", (f"2,256,{kv_h},32",), fsdp): 2,
+        ("all-gather", (f"2,{q_h},32,256",), fsdp): 1,
+        ("all-gather", ("2,256,8",), fsdp): 1,
+    }
+  got_fsdp_hoists = {k: n for k, n in outer_ags.items() if k[2] == fsdp}
+  got_full_mesh_ags = {k: n for k, n in outer_ags.items() if tp > 1 and k[2] == fsdp * tp}
+  ok &= _check(
+      f"{target} {label} gather_scanned_kernels_once: exact 5 FSDP-only outer hoists (group={fsdp}) and 0 bwd stack"
+      " all-gathers",
+      got_fsdp_hoists == want_fsdp_hoists and not got_full_mesh_ags,
+      f"got_fsdp {got_fsdp_hoists}, full_mesh {got_full_mesh_ags}, want {want_fsdp_hoists}",
+  )
+  in_loop_hoisted = sum(
+      n
+      for (op, dims, _), n in body_ags.items()
+      if any(_is_gather_of(op, dims, s) for s in (f"256,{q_h},32", f"256,{kv_h},32", f"{q_h},32,256", "256,8"))
+  )
+  ok &= _check(
+      f"{target} {label} gather_scanned_kernels_once: 0 remaining in-loop gathers of hoisted kernels",
+      in_loop_hoisted == 0,
+      f"body_ags {body_ags}",
+  )
   return ok
 
 
-def main():
-  targets = os.environ.get("QPGO_TARGETS", "cpu").split(",")
-  # TPU topologies first: building one after the local backends are initialized fails.
-  for target in sorted(targets, key=lambda t: t == "cpu"):
-    assert len(_target_devices(target)) == _NUM_DEVICES, (
-        target,
-        _target_devices(target),
+# target -> its phase-name prefix (phase names are test-case names).
+_TARGETS = {"cpu": "cpu", "tpu7x-8": "tpu"}
+
+
+def _phase(target, check):
+  """One program check for one target, as a test phase: it fails if any of its checks fails."""
+
+  def run():
+    # A TPU topology must be built before anything initializes the local backends.
+    assert len(_target_devices(target)) == _NUM_DEVICES, (target, _target_devices(target))
+    ok = check()
+    assert ok, f"{target}: a check failed (see FAIL above)"
+
+  return run
+
+
+# One phase (and one child process) per (target, check), so the checks can run in parallel.
+_PHASES = {
+    f"{prefix}_{name}": _phase(target, check)
+    for target, prefix in _TARGETS.items()
+    for name, check in (
+        *((mesh_name, functools.partial(_check_mesh, mesh_name, target)) for mesh_name in _MESHES),
+        *(
+            (f"gather_once_{label}", functools.partial(_check_gather_scanned_kernels_once, target, label))
+            for label in _GATHER_ONCE_MESHES
+        ),
     )
-  ok = True
-  for target in targets:
-    for mesh_name in _MESHES:
-      ok &= _check_mesh(mesh_name, target)
-    ok &= _check_gather_scanned_kernels_once(target)
-  if not ok:
-    sys.exit(1)
-  print(_PASS_TOKEN, flush=True)
+}
+
+
+@pytest.mark.cpu_only
+class ProgramsCpuMeshTest(parameterized.TestCase):
+  """The program checks above, one test case per (target, check)."""
+
+  @parameterized.named_parameters(*((phase, phase) for phase in _PHASES if phase.startswith("cpu_")))
+  def test_programs(self, phase):
+    """Values and the CPU compiler's programs on 8 CPU devices: here if this process has them, else in a child."""
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=_NUM_DEVICES)
+
+  # The cpu_ phases of test_programs run the same checks on every PR; this adds the TPU compiler's program (the
+  # 397B trainer's double gather without the option). It runs in scheduled CI and on PRs that change this file.
+  @parameterized.named_parameters(*((phase, phase) for phase in _PHASES if phase.startswith("tpu_")))
+  @unittest.skipIf(importlib.util.find_spec("libtpu") is None, "needs libtpu to compile for a TPU target")
+  @pytest.mark.scheduled_only
+  def test_tpu_programs(self, phase):
+    """The same program checks, compiled for a tpu7x-8 target on this host (no TPU used), always in a child."""
+    cpu_mesh_child.run_phase(
+        __file__,
+        phase,
+        _PHASES,
+        num_devices=_NUM_DEVICES,
+        in_process=False,
+        # A TPU target needs the TPU plugin registered (and skipped as a backend, as there is no TPU here), possibly
+        # while this process also has libtpu loaded.
+        extra_env={"JAX_PLATFORMS": "", "ALLOW_MULTIPLE_LIBTPU_LOAD": "1"},
+    )
 
 
 if __name__ == "__main__":
-  main()
+  cpu_mesh_child.main(_PHASES)

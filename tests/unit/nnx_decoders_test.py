@@ -89,10 +89,13 @@ _BASE_CONFIG = {
     "base_num_decoder_layers": 2,
     "attention": "dot_product",
     "max_target_length": 16,
-    "base_emb_dim": 256,
+    # Kept tiny: the tests check wiring and parity, not capacity. vocab_size is pinned so the output
+    # projection does not inherit base.yml's 32000.
+    "base_emb_dim": 64,
     "base_num_query_heads": 2,
     "base_num_kv_heads": 2,
-    "base_mlp_dim": 512,
+    "base_mlp_dim": 128,
+    "vocab_size": 128,
     "max_prefill_predict_length": 4,
     "scan_layers": False,
 }
@@ -546,7 +549,8 @@ class TestNNXDecoderRematPolicy(unittest.TestCase):
             moe_ring_pipeline_mode="combine_per_chunk",
             num_experts=4,
             num_experts_per_tok=2,
-            base_moe_mlp_dim=512,
+            # A fully MoE model needs base_moe_mlp_dim == base_mlp_dim.
+            base_moe_mlp_dim=_BASE_CONFIG["base_mlp_dim"],
             sparse_matmul=True,
             megablox=False,
         )
@@ -960,19 +964,26 @@ class TestNNXDecoderRematNone(unittest.TestCase):
   def _count_checkpoints(self, scan_layers, remat_policy, remat_policy_override=None, **overrides):
     cfg = _make_config(**{"scan_layers": scan_layers, "remat_policy": remat_policy, **overrides})
     mesh = _make_mesh(cfg)
-    rngs = nnx.Rngs(params=0, dropout=1)
-    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+
+    def build():
+      """Constructs the decoder and shared embedding for abstract shape evaluation."""
+      rngs = nnx.Rngs(params=0, dropout=1)
+      decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+      shared_embedding = Embed(
+          num_embeddings=cfg.vocab_size,
+          num_features=cfg.emb_dim,
+          dtype=cfg.dtype,
+          embedding_init=nn.initializers.normal(stddev=1.0),
+          config=cfg,
+          mesh=mesh,
+          rngs=rngs,
+      )
+      return decoder, shared_embedding
+
+    # Only the jaxpr's structure is inspected, so the weights are built abstractly rather than initialized.
+    decoder, shared_embedding = nnx.eval_shape(build)
     if remat_policy_override is not None:
       decoder.remat_policy_override = remat_policy_override
-    shared_embedding = Embed(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        embedding_init=nn.initializers.normal(stddev=1.0),
-        config=cfg,
-        mesh=mesh,
-        rngs=rngs,
-    )
     batch = cfg.global_batch_size_to_train_on
     seq_len = cfg.max_target_length
     ids = jnp.zeros((batch, seq_len), jnp.int32)
@@ -1025,7 +1036,8 @@ class TestNNXDecoderRematNone(unittest.TestCase):
     overrides = {
         **_QWEN3_NEXT_CONFIG,
         "scan_layers": True,
-        "base_num_decoder_layers": 5,
+        # One scanned cycle-2 block plus a one-layer remainder block: the fewest layers that keep both.
+        "base_num_decoder_layers": 3,
         "inhomogeneous_layer_cycle_interval": 2,
         "load_balance_loss_weight": 0.1,
         "enable_dropout": True,
@@ -1038,8 +1050,13 @@ class TestNNXDecoderRematNone(unittest.TestCase):
     cfg_none = _make_config(remat_policy="none", **overrides)
     mesh = _make_mesh(cfg_full)
 
-    model_full = models.Transformer(config=cfg_full, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
-    model_none = models.Transformer(config=cfg_none, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_full.logical_axis_rules):
+      model_full = nnx.jit(
+          lambda: models.Transformer(config=cfg_full, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+      )()
+      model_none = nnx.jit(
+          lambda: models.Transformer(config=cfg_none, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+      )()
     nnx.update(model_none, nnx.state(model_full))
 
     batch = int(cfg_full.global_batch_size_to_train_on)
@@ -1086,7 +1103,10 @@ class TestNNXDecoderRematNone(unittest.TestCase):
     # Verify `nnx.Intermediate` (`moe_lb_loss`) from `layers_remainder` is preserved and contributes
     # non-zero router gate gradients rather than being stripped before `train.loss_fn` collects it.
     cfg_no_lb = _make_config(remat_policy="none", **{**overrides, "load_balance_loss_weight": 0.0})
-    model_no_lb = models.Transformer(config=cfg_no_lb, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_no_lb.logical_axis_rules):
+      model_no_lb = nnx.jit(
+          lambda: models.Transformer(config=cfg_no_lb, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+      )()
     nnx.update(model_no_lb, nnx.state(model_full))
     _, lb_no_lb, grads_no_lb, _ = run_step(model_no_lb, cfg_no_lb)
     self.assertEqual(float(lb_no_lb), 0.0)
@@ -1102,14 +1122,16 @@ class TestNNXDecoderRematNone(unittest.TestCase):
       self.assertFalse(np.allclose(g_lb, g_no_lb), f"Expected non-zero moe_lb_loss grad on {p1}")
 
     # Also verify closing over non-Param `other` state (without copy=True) when dropout is off
-    # does not raise TraceContextError inside `_apply_remainder_block`.
+    # does not raise TraceContextError inside `_apply_remainder_block`. The error is raised while
+    # tracing, so abstract model shapes and tracing the gradient are enough; no XLA compile is needed.
     cfg_det = _make_config(remat_policy="none", **{**overrides, "enable_dropout": False})
-    model_det = models.Transformer(config=cfg_det, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+    model_det = nnx.eval_shape(
+        lambda: models.Transformer(config=cfg_det, mesh=mesh, quant=None, rngs=nnx.Rngs(params=0, dropout=1))
+    )
     gdef_det, params_det, other_det = nnx.split(model_det, nnx.Param, ...)
-    det_loss, _ = jax.jit(
+    jax.make_jaxpr(
         jax.value_and_grad(lambda p: train.loss_fn(nnx.merge(gdef_det, p, other_det), cfg_det, data, None, None)[0])
     )(params_det)
-    self.assertTrue(jnp.isfinite(det_loss))
 
   def test_scanned_gemma3_with_remainder(self):
     """The scanned Gemma3 remainder layer follows `remat_policy`."""
@@ -1143,17 +1165,24 @@ class TestNNXDecoderRematNone(unittest.TestCase):
     overrides = {**_QWEN3_NEXT_CONFIG, "base_num_decoder_layers": 5, "inhomogeneous_layer_cycle_interval": 2}
     cfg = _make_config(scan_layers=True, remat_policy="none", **overrides)
     mesh = _make_mesh(cfg)
-    rngs = nnx.Rngs(params=0, dropout=1)
-    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
-    shared_embedding = Embed(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        embedding_init=nn.initializers.normal(stddev=1.0),
-        config=cfg,
-        mesh=mesh,
-        rngs=rngs,
-    )
+
+    def build():
+      """Constructs the decoder and shared embedding."""
+      rngs = nnx.Rngs(params=0, dropout=1)
+      dec = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=rngs)
+      emb = Embed(
+          num_embeddings=cfg.vocab_size,
+          num_features=cfg.emb_dim,
+          dtype=cfg.dtype,
+          embedding_init=nn.initializers.normal(stddev=1.0),
+          config=cfg,
+          mesh=mesh,
+          rngs=rngs,
+      )
+      return dec, emb
+
+    # Only jaxpr checkpoint policies and override sync are inspected, so build abstractly with no eager execution.
+    decoder, shared_embedding = nnx.eval_shape(build)
     batch = cfg.global_batch_size_to_train_on
     seq_len = cfg.max_target_length
     ids = jnp.zeros((batch, seq_len), jnp.int32)
@@ -1161,9 +1190,13 @@ class TestNNXDecoderRematNone(unittest.TestCase):
     positions = jnp.broadcast_to(jnp.arange(seq_len)[None], (batch, seq_len))
 
     def trace_policies():
+      """Traces the forward pass abstractly and propagates child-block override mutations back onto `decoder`."""
+      nonlocal decoder, shared_embedding
       graphdef, state = nnx.split((decoder, shared_embedding))
+      updated_graphdef = None
 
       def forward(state_in):
+        nonlocal updated_graphdef
         merged_decoder, merged_embedding = nnx.merge(graphdef, state_in)
         logits, _, _ = merged_decoder(
             merged_embedding,
@@ -1173,27 +1206,24 @@ class TestNNXDecoderRematNone(unittest.TestCase):
             deterministic=True,
             model_mode=MODEL_MODE_TRAIN,
         )
+        updated_graphdef = nnx.graphdef((merged_decoder, merged_embedding))
         return logits
 
-      return _collect_checkpoint_policies(jax.make_jaxpr(forward)(state).jaxpr)
+      policies = _collect_checkpoint_policies(jax.make_jaxpr(forward)(state).jaxpr)
+      decoder, shared_embedding = nnx.merge(updated_graphdef, state)
+      return policies
 
-    # Run eagerly once with `remat_policy_override="full"` so child blocks receive the override on `decoder`.
+    # Trace once with `remat_policy_override="full"` on `decoder` so child blocks receive the override before reset.
     decoder.remat_policy_override = "full"
-    decoder(
-        shared_embedding,
-        ids,
-        positions,
-        decoder_segment_ids=segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
     full_policies = trace_policies()
+    self.assertEqual(decoder.layers_remainder.remat_policy_override, "full")
     self.assertGreater(len(full_policies), 1)
     self.assertTrue(all(p is None for p in full_policies))
 
     # Resetting `remat_policy_override = None` on the same `decoder` must clear child-block overrides.
     decoder.remat_policy_override = None
     self.assertEqual(trace_policies(), [])
+    self.assertIsNone(decoder.layers_remainder.remat_policy_override)
 
     # Overriding with a selective policy must propagate that policy callable rather than `None` (full remat).
     decoder.remat_policy_override = "save_qkv_proj"
@@ -1566,7 +1596,8 @@ class TestQwen3NextScannableBlock(unittest.TestCase):
     local-scan-then-global would silently reorder the model, so it is rejected.
     """
     with self.assertRaisesRegex(ValueError, "full-attention layer last"):
-      self._build(layer_idx_offset=1)
+      # Only construction has to raise, so build abstractly instead of initializing every weight.
+      nnx.eval_shape(lambda: self._build(layer_idx_offset=1)[1])
 
   def test_rejects_forced_routing_that_does_not_cover_every_sub_layer(self):
     """Router replay is sliced per sub-layer, so a mismatched leading axis must not be broadcast."""
@@ -1597,36 +1628,57 @@ class TestNNXDecoderQwen3Next(unittest.TestCase):
         **{**self.MODEL_CONFIG, "base_num_decoder_layers": num_decoder_layers, "scan_layers": True, **overrides}
     )
     mesh = _make_mesh(cfg)
-    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
-    shared_embedding = Embed(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        config=cfg,
-        mesh=mesh,
-        rngs=nnx.Rngs(params=0),
-    )
+
+    def _init():
+      """Initializes the decoder and shared embedding."""
+      dec = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+      emb = Embed(
+          num_embeddings=cfg.vocab_size,
+          num_features=cfg.emb_dim,
+          dtype=cfg.dtype,
+          config=cfg,
+          mesh=mesh,
+          rngs=nnx.Rngs(params=0),
+      )
+      return dec, emb
+
+    # Jit construction so multi-layer weight init does not dispatch op by op on CPU.
+    decoder, shared_embedding = nnx.jit(_init)()
     return cfg, decoder, shared_embedding
 
   def _run(self, cfg, decoder, shared_embedding, kv_caches=None, attention_metadata=None):
-    """Runs one TRAIN-mode forward pass and returns the logits."""
+    """Runs one TRAIN-mode forward pass under nnx.jit and returns the logits."""
     batch = cfg.global_batch_size_to_train_on
     seq = cfg.max_target_length
     ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq), 0, cfg.vocab_size)
     segment_ids = jnp.full((batch, seq), DECODING_ACTIVE_SEQUENCE_INDICATOR)
     positions = jnp.broadcast_to(jnp.arange(seq)[None], (batch, seq))
-    logits, _, _ = decoder(
-        shared_embedding,
-        ids,
-        decoder_positions=positions,
-        decoder_segment_ids=segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-        kv_caches=kv_caches,
-        attention_metadata=attention_metadata,
-    )
+
+    # Jitted so the decoder is not dispatched op by op. `attention_metadata` holds Python sentinels
+    # so it stays closed over; `kv_caches` is returned so in-place write-backs propagate out of the trace.
+    @nnx.jit
+    def _forward(dec, emb, caches):
+      """Runs the decoder forward pass and returns logits and updated caches."""
+      logits_out, _, _ = dec(
+          emb,
+          ids,
+          decoder_positions=positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          kv_caches=caches,
+          attention_metadata=attention_metadata,
+      )
+      return logits_out, caches
+
+    logits, out_caches = _forward(decoder, shared_embedding, kv_caches)
+    if kv_caches is not None and out_caches is not None:
+      kv_caches[:] = out_caches
     return logits
 
+  # Scheduled only: test_decoder_routes_per_layer_attention_metadata_by_global_layer runs on every PR and also
+  # checks that a flat per-layer cache list is regrouped per scanned block and written back in order.
+  @pytest.mark.scheduled_only
   def test_decoder_regroups_flat_kv_caches_per_block(self):
     """A flat per-layer kv cache list must be regrouped per block and written back in order.
 
@@ -1739,6 +1791,11 @@ class TestQwen3_5ScannableBlock(TestQwen3NextScannableBlock):
   MODEL_CONFIG = _QWEN3_5_CONFIG
   BLOCK_CLS = qwen3_5.Qwen3_5ScannableBlock
 
+  # Qwen3_5ScannableBlock only overrides `_make_decoder_layer`; the layer-ordering check and `_run_layer`'s
+  # param write-back are inherited unchanged, so these Qwen3-Next tests already guard them.
+  test_params_created_inside_the_global_layer_are_kept = None
+  test_rejects_block_whose_global_layer_is_not_last = None
+
   def test_block_uses_qwen3_5_layers(self):
     """The block must build Qwen3.5 decoder layers, not Qwen3-Next ones."""
     self.assertIsInstance(self.block.global_layer, qwen3_5.Qwen3_5DecoderLayer)
@@ -1749,6 +1806,16 @@ class TestNNXDecoderQwen3_5(TestNNXDecoderQwen3Next):
 
   MODEL_CONFIG = _QWEN3_5_CONFIG
 
+  # NNXDecoder sends Qwen3-Next and Qwen3.5 through the same `_apply_qwen3_hybrid_scanned_blocks` path
+  # (`is_qwen3_hybrid`), so the kv-cache regrouping and metadata routing tests are not repeated here.
+  # `test_decoder_keeps_layers_past_the_last_whole_block` stays as the Qwen3.5 wiring smoke test.
+  test_decoder_regroups_flat_kv_caches_per_block = None
+  test_decoder_routes_per_layer_attention_metadata_by_global_layer = None
+  test_decoder_rejects_per_layer_attention_metadata_without_kv_caches = None
+
+  # Scheduled only: raiden_unscan_test.test_nested_block_layout_unscans_correctly covers the nested-block
+  # mapping on every PR, and test_decoder_keeps_layers_past_the_last_whole_block stays as the Qwen3.5 smoke test.
+  @pytest.mark.scheduled_only
   def test_raiden_unscan_reproduces_the_unscanned_decoder(self):
     """Raiden's unscan of the nested block state must load into an unscanned decoder unchanged.
 
@@ -1859,7 +1926,11 @@ class TestNNXDecoderGptOssKvCaches(unittest.TestCase):
       out, kv_cache = original_call(attention, *args, **kwargs)
       return out, None if kv_cache is None else kv_cache + 1
 
-    with mock.patch.object(Attention, "__call__", bump_returned_kv_cache):
+    # Jitted so the decoder is not dispatched op by op. The decoder writes each layer's update back into the
+    # list it is handed, so returning that list carries the write-backs (or their absence) out of the trace.
+    @nnx.jit
+    def forward(decoder, shared_embedding, kv_caches):
+      """Runs one jitted decoder forward pass and returns the updated KV caches."""
       decoder(
           shared_embedding,
           ids,
@@ -1869,6 +1940,10 @@ class TestNNXDecoderGptOssKvCaches(unittest.TestCase):
           model_mode=MODEL_MODE_TRAIN,
           kv_caches=kv_caches,
       )
+      return kv_caches
+
+    with mock.patch.object(Attention, "__call__", bump_returned_kv_cache):
+      kv_caches = forward(decoder, shared_embedding, kv_caches)
     return cfg, kv_caches
 
   def test_each_layer_updates_its_own_kv_cache(self):
@@ -1951,25 +2026,23 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
     bidirectional_mask = jax.random.normal(self.rng, (batch, seq_len)) > 0
     mm_input = MultimodalInput(bidirectional_mask=bidirectional_mask)
 
-    logits_scanned, _, _ = decoder_scanned(
-        shared_embedding,
-        ids,
-        positions,
-        decoder_segment_ids=segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-        multimodal_input=mm_input,
-    )
+    # Jitted to avoid op-by-op dispatch; `mm_input` is a pytree, so the mask is traced like the other inputs.
+    @nnx.jit
+    def forward(decoder, emb, ids, positions, segment_ids, mm_input):
+      """Runs one jitted decoder forward pass with multimodal inputs."""
+      logits, _, _ = decoder(
+          emb,
+          ids,
+          positions,
+          decoder_segment_ids=segment_ids,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+          multimodal_input=mm_input,
+      )
+      return logits
 
-    logits_unscanned, _, _ = decoder_unscanned(
-        shared_embedding,
-        ids,
-        positions,
-        decoder_segment_ids=segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-        multimodal_input=mm_input,
-    )
+    logits_scanned = forward(decoder_scanned, shared_embedding, ids, positions, segment_ids, mm_input)
+    logits_unscanned = forward(decoder_unscanned, shared_embedding, ids, positions, segment_ids, mm_input)
 
     np.testing.assert_allclose(logits_scanned, logits_unscanned, atol=1e-4, rtol=1e-4)
 
@@ -2105,13 +2178,17 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         "model_mode": MODEL_MODE_TRAIN,
     }
 
+    # Jitted rather than eager so neither loop mechanism is dispatched op by op; both paths still compile
+    # separately, so a slice/re-stack bug in the static unroll still shows up as a mismatch.
     # Scanned path (kv_cache=None); scan_layers=True => returns (y, None).
-    y_scanned, _ = make_block()(inputs, **call_kwargs)
+    y_scanned, _ = nnx.jit(lambda block, x: block(x, **call_kwargs))(make_block(), inputs)
 
     # External-kv path: one cache per layer, ordered local[0..4] then global.
     num_layers = len(gemma4.GEMMA4_ATTENTION_PATTERN)
     external_kv = tuple(jnp.zeros((batch, seq), dtype=cfg.dtype) for _ in range(num_layers))
-    y_external, updated_kvs = make_block()(inputs, **call_kwargs, kv_cache=external_kv)
+    y_external, updated_kvs = nnx.jit(lambda block, x, kv: block(x, **call_kwargs, kv_cache=kv))(
+        make_block(), inputs, external_kv
+    )
 
     self.assertEqual(y_external.shape, inputs.shape)
     self.assertEqual(len(updated_kvs), num_layers)
@@ -3281,16 +3358,23 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
     cfg_kwargs.update(overrides)
     cfg = _make_config(**cfg_kwargs)
     mesh = _make_mesh(cfg)
-    decoder = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
-    shared_emb = Embed(
-        num_embeddings=cfg.vocab_size,
-        num_features=cfg.emb_dim,
-        dtype=cfg.dtype,
-        embedding_init=nn.initializers.normal(stddev=1.0),
-        config=cfg,
-        mesh=mesh,
-        rngs=nnx.Rngs(params=1),
-    )
+
+    def _init():
+      """Initializes the decoder and shared embedding."""
+      dec = NNXDecoder(config=cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+      emb = Embed(
+          num_embeddings=cfg.vocab_size,
+          num_features=cfg.emb_dim,
+          dtype=cfg.dtype,
+          embedding_init=nn.initializers.normal(stddev=1.0),
+          config=cfg,
+          mesh=mesh,
+          rngs=nnx.Rngs(params=1),
+      )
+      return dec, emb
+
+    # Jit construction so multi-layer weight init does not dispatch op by op on CPU.
+    decoder, shared_emb = nnx.jit(_init)()
     batch, seq_len = cfg.global_batch_size_to_train_on, cfg.max_target_length
     ids = jax.random.randint(jax.random.PRNGKey(0), (batch, seq_len), 0, cfg.vocab_size)
     segment_ids = jnp.full((batch, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR)
@@ -3332,11 +3416,15 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
   def test_grad_parity_two_layers(self):
     self._assert_parity(num_layers=2)
 
-  def test_grad_parity_four_layers(self):
-    self._assert_parity(num_layers=4)
+  # Four layers on the default scan axis is not repeated: test_grad_parity_param_scan_axis_zero and
+  # test_grad_parity_context_parallelism run the same 4-layer trip structure.
 
   def test_grad_parity_five_layers(self):
-    self._assert_parity(num_layers=5)
+    # Also the default `remat_policy="full"` case: it saves only the layer inputs, so the pipeline must skip
+    # tracing the policy's residuals altogether.
+    with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
+      self._assert_parity(num_layers=5)
+    self.assertFalse(any("remat policy saves" in str(c) for c in log_info.call_args_list))
 
   def test_grad_parity_seven_layers(self):
     # Two or more layer pairs per loop in both passes, so the loops order their second prefetch.
@@ -3479,11 +3567,6 @@ class TestNNXDecoderPrefetchGradParity(unittest.TestCase):
     saved = self._assert_parity_saved_residuals(num_layers=4, remat_policy="custom", decoder_layer_input="device")
     self.assertEqual(saved, 0)
 
-  def test_full_remat_skips_residual_tracing(self):
-    with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
-      self._assert_parity(num_layers=3, remat_policy="full")
-    self.assertFalse(any("remat policy saves" in str(c) for c in log_info.call_args_list))
-
   def test_grad_parity_remat_custom_offload(self):
     # Offloaded residuals live in pinned host memory; they must survive the custom_vjp boundary and the
     # forward scan stacking, and be brought back for the backward pass.
@@ -3606,9 +3689,11 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
   def test_qwen3_5_one_block(self):
     self._assert_qwen3_5_parity(num_blocks=1)
 
-  def test_qwen3_5_two_blocks(self):
-    self._assert_qwen3_5_parity(num_blocks=2)
+  # Two blocks with the default cycle and policy: see test_qwen3_5_same_group_scans_unroll_by_two, which runs
+  # that exact parity and also checks the unroll.
 
+  # Scheduled only: one_block, same_group_scans_unroll_by_two (2 blocks) and four_blocks cover the block counts on PRs.
+  @pytest.mark.scheduled_only
   def test_qwen3_5_three_blocks(self):
     self._assert_qwen3_5_parity(num_blocks=3)
 
@@ -3622,6 +3707,9 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
       self.skipTest("Needs 4 devices for an fsdp=2 x expert=2 mesh.")
     self._assert_qwen3_5_parity(num_blocks=2, ici_fsdp_parallelism=2, ici_expert_parallelism=2)
 
+  # Scheduled only: fsdp_prefetch_test's FsdpPrefetchInhomogeneousContextParallelTest covers per-sub-layer
+  # prefetch under CP on PRs, and TestNNXDecoderPrefetchGradParity's CP tests cover the decoder wiring.
+  @pytest.mark.scheduled_only
   def test_qwen3_5_context_parallelism(self):
     """Per-sub-layer prefetching matches the plain scanned stack on an fsdp=2 x context=2 mesh."""
     if jax.device_count() < 4:
@@ -3768,18 +3856,19 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
     # wi_0, wi_1 and wo of each of the 4 sub-layers.
     self.assertEqual(checked, 12)
 
-  def test_qwen3_5_remat_minimal(self):
+  def test_qwen3_5_remat_minimal_param_scan_axis_zero(self):
+    # Both variations on one compile pair: each is orthogonal to the other and to the 2-block structure.
     with unittest.mock.patch.object(fsdp_prefetch.max_logging, "info") as log_info:
-      self._assert_qwen3_5_parity(num_blocks=2, remat_policy="minimal")
+      self._assert_qwen3_5_parity(num_blocks=2, remat_policy="minimal", param_scan_axis=0)
     self.assertTrue(any("remat policy saves" in str(c) for c in log_info.call_args_list))
-
-  def test_qwen3_5_param_scan_axis_zero(self):
-    self._assert_qwen3_5_parity(num_blocks=2, param_scan_axis=0)
 
   def test_qwen3_5_moe_flat_fsdp_weights(self):
     """Flat 2D routed-expert weights ([E * rows, cols]) prefetch one sub-layer at a time like 3D ones."""
     self._assert_qwen3_5_flat_weights_parity(num_blocks=2)
 
+  # Scheduled only: runs megablox in Pallas interpret mode; test_qwen3_5_moe_flat_fsdp_weights and
+  # test_qwen3_5_remat_minimal_param_scan_axis_zero cover the flat weights and param_scan_axis=0 on PRs.
+  @pytest.mark.scheduled_only
   def test_qwen3_5_moe_flat_fsdp_weights_param_scan_axis_zero(self):
     self._assert_qwen3_5_flat_weights_parity(num_blocks=2, param_scan_axis=0)
 
@@ -3819,10 +3908,15 @@ class TestNNXDecoderPrefetchInhomogeneous(unittest.TestCase):
     # A single Gated DeltaNet sub-layer per block: no same-group scan, two trip-count-one loops.
     self._assert_qwen3_5_parity(num_blocks=2, cycle=2)
 
+  # Cycle sweep: one_local_layer_per_block, the default cycle of 4 (same_group_scans_unroll_by_two) and
+  # four_local_layers_per_block (the only odd-remainder case of `_sublayer_scan`) run on PRs. The single-step
+  # and two-trip same-group scans also run on PRs in fsdp_prefetch_test's test_group_sizes (num_a=2 and 5).
+  @pytest.mark.scheduled_only
   def test_qwen3_5_two_local_layers_per_block(self):
     # The same-group scan of the Gated DeltaNet sub-layers has a single trip.
     self._assert_qwen3_5_parity(num_blocks=2, cycle=3)
 
+  @pytest.mark.scheduled_only
   def test_qwen3_5_five_local_layers_per_block(self):
     self._assert_qwen3_5_parity(num_blocks=2, cycle=6)
 

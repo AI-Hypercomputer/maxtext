@@ -115,6 +115,8 @@ Each focus area below states which paths it applies to. Apply a focus area only 
 
 !{cat .agents/review/performance.md}
 
+!{cat .agents/review/testing.md}
+
 -----
 
 ## Step 3: Submit the Review on GitHub

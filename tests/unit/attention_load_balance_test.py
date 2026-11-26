@@ -14,8 +14,9 @@
 """Checks attention-local causal load balancing (`context_parallel_attention_load_balance`) on a CPU mesh.
 
 The switch runs each attention layer in DUAL_CHUNK_SWAP token order and restores natural order on its
-output, so GatedDeltaNet layers keep the natural order their recurrence needs. The CPU checks run in a
-subprocess so the forced device count takes effect before JAX initializes:
+output, so GatedDeltaNet layers keep the natural order their recurrence needs. The CPU checks need 8 CPU devices;
+unless the test process has them they run in a child process per phase (tests/utils/cpu_mesh_child.py), so the
+forced device count takes effect before JAX initializes:
 
   - Reorder. The two-`ppermute` reorder equals `max_utils.reorder_sequence` bit for bit, inverts
     exactly, transposes to the inverse in the backward, and lowers to exactly two collective-permutes.
@@ -45,12 +46,12 @@ import dataclasses
 import functools
 import os
 import re
-import subprocess
 import sys
 import types
 import unittest.mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
@@ -63,13 +64,14 @@ from maxtext.configs import types as config_types
 from maxtext.kernels.attention import tokamax_ring_attention
 from maxtext.utils import max_utils
 from maxtext.utils import globals as maxtext_globals
+from tests.utils import cpu_mesh_child
 
 _BASE_CONFIG_PATH = os.path.join(maxtext_globals.MAXTEXT_CONFIGS_DIR, "base.yml")
 # Reduction-order gate: normalized max error in float32.
 _TOLERANCE = 1e-5
 # The same gate for the dense model, which has no GatedDeltaNet layers to amplify float32 rounding.
 _DENSE_TOLERANCE = 1e-6
-_CHILD_MARKER = "ATTENTION_LOAD_BALANCE_CHECKS_PASSED"
+_NUM_DEVICES = 8
 
 
 def _normalized_max_error(actual, expected) -> float:
@@ -244,7 +246,10 @@ def _dense_causal_attention(q, k, v, segment_ids):
 def _run_ring_kernel_checks(mesh, seq: int, block: int, expect_staged_dq: bool):
   """Balanced ring (reorder -> load-balanced mask -> inverse) == plain ring == dense, forward and backward."""
   cp = mesh.shape["context"]
-  batch, q_heads, kv_heads, head_dim = 2, 4, 2, 128
+  # The Pallas TPU interpreter simulates every grid step, so its cost scales with the heads: two query heads on one
+  # KV head is the smallest GQA case (group 2, so dK/dV still accumulate across revisited grid steps). head_dim
+  # stays at the 128-lane width.
+  batch, q_heads, kv_heads, head_dim = 2, 2, 1, 128
   rng = np.random.default_rng(1)
   q = rng.standard_normal((batch, q_heads, seq, head_dim)).astype(np.float32) / np.sqrt(head_dim)
   k = rng.standard_normal((batch, kv_heads, seq, head_dim)).astype(np.float32)
@@ -274,19 +279,22 @@ def _run_ring_kernel_checks(mesh, seq: int, block: int, expect_staged_dq: bool):
   def plain(q, k, v):
     return plain_ring(q, k, v, segment_ids)
 
-  def balanced(q, k, v, *, inverse_off_by_one_chunk=False, ring=balanced_ring):
+  def balanced(q, k, v, *, ring=balanced_ring):
     r = functools.partial(reorder, seq_dim=2)
     out = ring(r(q), r(k), r(v), reorder(jnp.asarray(segment_ids)))
-    out = r(out, to_natural=True)
-    return _roll_one_chunk(out, cp, 2) if inverse_off_by_one_chunk else out
+    return r(out, to_natural=True)
 
   def value_and_grads(fn, with_grads=True):
-    def loss(q, k, v):
-      return jnp.sum(fn(q, k, v) * jnp.asarray(w))
+    """The output and, with grads, the gradients of <fn(q, k, v), w>: one program, one interpreted forward."""
+
+    def out_and_grads(q, k, v):
+      if not with_grads:
+        return fn(q, k, v), ()
+      out, vjp = jax.vjp(fn, q, k, v)
+      return out, vjp(jnp.asarray(w))
 
     with jax.set_mesh(mesh):
-      out = jax.jit(fn)(q, k, v)
-      grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2)))(q, k, v) if with_grads else ()
+      out, grads = jax.jit(out_and_grads)(q, k, v)
     return (np.asarray(out), *(np.asarray(g) for g in grads))
 
   reference = value_and_grads(dense)
@@ -306,14 +314,12 @@ def _run_ring_kernel_checks(mesh, seq: int, block: int, expect_staged_dq: bool):
     assert max(values) <= _TOLERANCE, f"{name}: {values}"
 
   # Positive controls, forward only, each must fail the same gate:
-  #  (a) the output restored with an inverse permutation that is off by one chunk;
+  #  (a) the output restored with an inverse permutation that is off by one chunk: that is the balanced output
+  #      rolled by one chunk along the sequence, so it is derived from it rather than run through the interpreter again;
   #  (b) load-balanced tokens run under the plain (natural-order) causal mask.
   control_errors = {
       "off_by_one_chunk_inverse": _normalized_max_error(
-          value_and_grads(
-              functools.partial(balanced, inverse_off_by_one_chunk=True),
-              with_grads=False,
-          )[0],
+          np.roll(balanced_result[0], seq // (2 * cp), axis=2),
           plain_result[0],
       ),
       "balanced_tokens_plain_mask": _normalized_max_error(
@@ -385,6 +391,34 @@ def _tiny_qwen3_5_config(attention_load_balance: bool, seq: int):
   return pyconfig.initialize(argv)
 
 
+def _initial_model(cfg):
+  """The mesh and the split (graphdef, params, rest) of the model `cfg` builds, built once per config object.
+
+  The positive controls patch only what runs at trace time, never construction, so they reuse the model of the
+  config they perturb instead of initializing it again.
+  """
+  # pylint: disable=import-outside-toplevel
+  from flax import nnx
+  from flax.linen import partitioning as nn_partitioning
+  from maxtext.common.common_types import MODEL_MODE_TRAIN
+  from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils
+
+  cached = _MODEL_CACHE.get(id(cfg))
+  if cached is not None and cached[0] is cfg:
+    return cached[1:]
+  mesh = maxtext_utils.get_mesh_from_config(cfg)
+  with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=jax.random.PRNGKey(0))
+    model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
+  graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+  _MODEL_CACHE[id(cfg)] = (cfg, mesh, graphdef, params, rest)
+  return mesh, graphdef, params, rest
+
+
+# id(cfg) -> (cfg, mesh, graphdef, params, rest); the cfg is kept so that a reused id cannot alias another config.
+_MODEL_CACHE = {}
+
+
 def _model_outputs_and_grads(cfg, data, cotangent, patch=None):
   """Logits, the parameter gradients of <logits, cotangent>, and the compiled HLO of one tiny model.
 
@@ -394,14 +428,8 @@ def _model_outputs_and_grads(cfg, data, cotangent, patch=None):
   # pylint: disable=import-outside-toplevel
   from flax import nnx
   from flax.linen import partitioning as nn_partitioning
-  from maxtext.common.common_types import MODEL_MODE_TRAIN
-  from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils
 
-  mesh = maxtext_utils.get_mesh_from_config(cfg)
-  with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-    rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=jax.random.PRNGKey(0))
-    model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
-  graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+  mesh, graphdef, params, rest = _initial_model(cfg)
 
   def logits_of(params):
     merged = nnx.merge(graphdef, params, rest, copy=True)
@@ -811,34 +839,56 @@ def _run_vision_layer_checks():
   assert bad_error > 1e-2, f"positive control: reordering the vision layer changed its output by only {bad_error:.3e}"
 
 
-def _run_child_checks():
-  """Every check that needs 8 CPU devices; run in the child process."""
-  devices = np.array(jax.devices()[:8])
+def _devices():
+  return np.array(jax.devices()[:_NUM_DEVICES])
+
+
+def _run_all_reorder_checks():
+  devices = _devices()
   _run_reorder_checks(Mesh(devices.reshape(2, 4), ("fsdp", "context")), "fsdp")
   _run_reorder_checks(Mesh(devices.reshape(4, 2), ("fsdp", "context")), "fsdp")
   _run_reorder_checks(Mesh(devices.reshape(1, 8), ("fsdp", "context")), None)
-  _run_vision_layer_checks()
-  _run_dense_model_checks(seq=256)
-  ring_mesh = Mesh(devices.reshape(2, 4), ("fsdp", "context"))
-  # Blocks aligned to the DUAL_CHUNK_SWAP chunks, with the staged dq reduction, and
-  # blocks that straddle two chunks, so the in-kernel mask reads a non-monotone q_sequence.
-  _run_ring_kernel_checks(ring_mesh, seq=2048, block=128, expect_staged_dq=True)
-  _run_ring_kernel_checks(ring_mesh, seq=1024, block=256, expect_staged_dq=False)
-  _run_model_checks(seq=256)
-  print(_CHILD_MARKER, flush=True)
+
+
+def _ring_mesh():
+  return Mesh(_devices().reshape(2, 4), ("fsdp", "context"))
+
+
+# The checks that need 8 CPU devices, one test case (and one child process) per phase, so they can run in parallel.
+_PHASES = {
+    "reorder": _run_all_reorder_checks,
+    "vision_layer": _run_vision_layer_checks,
+    "dense_model": functools.partial(_run_dense_model_checks, seq=256),
+    # Blocks inside the DUAL_CHUNK_SWAP chunks (128 = half a chunk of 2048 / 8), with the staged dq reduction
+    # (512-token shards of four kv blocks).
+    "ring_kernel_staged_dq": lambda: _run_ring_kernel_checks(_ring_mesh(), seq=2048, block=128, expect_staged_dq=True),
+    # Blocks that straddle two chunks (128 = two chunks of 512 / 8), so the in-kernel mask reads a non-monotone
+    # q_sequence; one block per shard, so no staged dq reduction. 128 is the smallest load-balanced sa_block_q_dkv.
+    "ring_kernel_straddling_blocks": lambda: _run_ring_kernel_checks(
+        _ring_mesh(), seq=512, block=128, expect_staged_dq=False
+    ),
+    # The only check that the load-balanced hybrid model (GatedDeltaNet layers in natural order) matches natural
+    # order: the order and hoist_ids tests compare two load-balanced programs with each other. So it runs on PRs.
+    "hybrid_model": functools.partial(_run_model_checks, seq=256),
+}
+_SCHEDULED_PHASES = ("ring_kernel_staged_dq",)
+_PR_PHASES = tuple(phase for phase in _PHASES if phase not in _SCHEDULED_PHASES)
 
 
 @pytest.mark.cpu_only
-def test_attention_load_balance_matches_natural_order_on_cpu_mesh():
-  if len(jax.devices()) >= 8 and jax.devices()[0].platform == "cpu":
-    _run_child_checks()
-    return
-  env = os.environ.copy()
-  env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8"
-  env["JAX_PLATFORMS"] = "cpu"
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
-  assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert _CHILD_MARKER in result.stdout
+class AttentionLoadBalanceCpuMeshTest(parameterized.TestCase):
+  """The checks above on 8 CPU devices: in this process if it has them, else in a child process per phase."""
+
+  @parameterized.named_parameters(*((phase, phase) for phase in _PR_PHASES))
+  def test_matches_natural_order_on_cpu_mesh(self, phase):
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=_NUM_DEVICES)
+
+  # ring_kernel_straddling_blocks checks the load-balanced ring kernel's numerics on every PR; ring_kernel_staged_dq
+  # adds the staged dq reduction (multi-block kv shards). It runs in scheduled CI and on PRs that change this file.
+  @parameterized.named_parameters(*((phase, phase) for phase in _SCHEDULED_PHASES))
+  @pytest.mark.scheduled_only
+  def test_matches_natural_order_on_cpu_mesh_scheduled(self, phase):
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=_NUM_DEVICES)
 
 
 class LoadBalancePermutationTest(absltest.TestCase):
@@ -1037,7 +1087,4 @@ class AttentionLoadBalanceConfigTest(absltest.TestCase):
 
 
 if __name__ == "__main__":
-  if len(sys.argv) == 1:
-    _run_child_checks()
-  else:
-    absltest.main()
+  cpu_mesh_child.main(_PHASES)

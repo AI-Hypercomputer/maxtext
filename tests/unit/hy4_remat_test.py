@@ -121,6 +121,24 @@ def _count_primitive(jaxpr, prim_name: str, **param_filters) -> int:
   return count
 
 
+def _backward_jaxpr(fn, *primals):
+  """Jaxpr of the VJP (backward pass only) of scalar `fn` at `primals`, obtained by tracing alone.
+
+  `jax.vjp` is traced under `jax.make_jaxpr` instead of being run eagerly, so the forward pass is never
+  executed. The inner `make_jaxpr` traces only the pullback; the residuals it reads are lifted in as
+  constants, so its jaxpr holds exactly the backward computation (including any remat recompute).
+  """
+  captured = []
+
+  def trace(*xs):
+    _, vjp_fn = jax.vjp(fn, *xs)
+    captured.append(jax.make_jaxpr(vjp_fn)(jnp.ones((), dtype=jnp.float32)))
+    return ()
+
+  jax.make_jaxpr(trace)(*primals)
+  return captured[0]
+
+
 class Hy4RematTest(absltest.TestCase):
   """Verifies Hy4Indexer topk_indices checkpoint tagging and backward VJP DCE."""
 
@@ -184,13 +202,11 @@ class Hy4RematTest(absltest.TestCase):
 
       # 2. Verify backward VJP jaxpr eliminates the entire `Hy4Indexer` subgraph (`top_k` and `relu`)
       # when `"indexer_cutoff_threshold"` is saved, whereas `nothing_saveable` recomputes both.
-      _, vjp_full = jax.vjp(ckpt_full_fn, params, xj)
-      bwd_jaxpr_full = jax.make_jaxpr(vjp_full)(jnp.ones((), dtype=jnp.float32))
+      bwd_jaxpr_full = _backward_jaxpr(ckpt_full_fn, params, xj)
       self.assertEqual(_count_primitive(bwd_jaxpr_full.jaxpr, "top_k"), 1)
       self.assertEqual(_count_primitive(bwd_jaxpr_full.jaxpr, "relu"), 1)
 
-      _, vjp_saved = jax.vjp(ckpt_save_fn, params, xj)
-      bwd_jaxpr_saved = jax.make_jaxpr(vjp_saved)(jnp.ones((), dtype=jnp.float32))
+      bwd_jaxpr_saved = _backward_jaxpr(ckpt_save_fn, params, xj)
       self.assertEqual(_count_primitive(bwd_jaxpr_saved.jaxpr, "top_k"), 0)
       self.assertEqual(_count_primitive(bwd_jaxpr_saved.jaxpr, "relu"), 0)
 
@@ -258,14 +274,12 @@ class Hy4RematTest(absltest.TestCase):
 
       # 2. `nothing_saveable` recomputes `layers_0`'s Hy4Indexer (`top_k(k=IDX_TOPK)` and `relu`) plus 2 MoE router
       # `top_k(k=TOPK)` calls; saving `"indexer_cutoff_threshold"` eliminates Hy4Indexer from the backward VJP.
-      _, vjp_full = jax.vjp(ckpt_full_fn, params, xj)
-      bwd_jaxpr_full = jax.make_jaxpr(vjp_full)(jnp.ones((), dtype=jnp.float32))
+      bwd_jaxpr_full = _backward_jaxpr(ckpt_full_fn, params, xj)
       self.assertEqual(_count_primitive(bwd_jaxpr_full.jaxpr, "top_k", k=IDX_TOPK), 1)
       self.assertEqual(_count_primitive(bwd_jaxpr_full.jaxpr, "top_k", k=TOPK), 2)
       self.assertEqual(_count_primitive(bwd_jaxpr_full.jaxpr, "relu"), 1)
 
-      _, vjp_saved = jax.vjp(ckpt_save_fn, params, xj)
-      bwd_jaxpr_saved = jax.make_jaxpr(vjp_saved)(jnp.ones((), dtype=jnp.float32))
+      bwd_jaxpr_saved = _backward_jaxpr(ckpt_save_fn, params, xj)
       self.assertEqual(_count_primitive(bwd_jaxpr_saved.jaxpr, "top_k", k=IDX_TOPK), 0)
       self.assertEqual(_count_primitive(bwd_jaxpr_saved.jaxpr, "top_k", k=TOPK), 2)
       self.assertEqual(_count_primitive(bwd_jaxpr_saved.jaxpr, "relu"), 0)

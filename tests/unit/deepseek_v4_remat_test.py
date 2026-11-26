@@ -62,16 +62,18 @@ _V4_SMALL = {
 
 
 @functools.lru_cache(maxsize=None)
-def _train_step(remat_policy, dropout=False):
-  """Compiles one train-mode loss/grad step.
-
-  Returns (loss, intermediates, grads, compiled FLOPs, RNG state after the step).
-  """
+def _lowered_step(remat_policy, dropout=False):
+  """Lowers one train-mode loss/grad step. Returns (cfg, mesh, lowered step, model state)."""
   overrides = {**_V4_SMALL, "enable_dropout": True, "dropout_rate": 0.3} if dropout else _V4_SMALL
   cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], remat_policy=remat_policy, **overrides)
   mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
   with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
-    model = model_creation_utils.create_model(cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+    # Initialize under one jit: eager init dispatches every parameter op separately on CPU.
+    model = nnx.jit(
+        lambda: model_creation_utils.create_model(
+            cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1)
+        )
+    )()
   batch, seq = cfg.micro_batch_size_to_train_on, cfg.max_target_length
   ids = jax.random.randint(jax.random.PRNGKey(1), (batch, seq), 1, cfg.vocab_size)
   positions = jnp.tile(jnp.arange(seq)[None], (batch, 1))
@@ -91,26 +93,46 @@ def _train_step(remat_policy, dropout=False):
     return loss, inter, nnx.state(grads, nnx.Param), nnx.state(m, nnx.RngState)
 
   with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
-    compiled = jax.jit(step).lower(state).compile()
+    lowered = jax.jit(step).lower(state)
+  return cfg, mesh, lowered, state
+
+
+def _cost_flops(cost):
+  return float((cost[0] if isinstance(cost, (list, tuple)) else cost)["flops"])
+
+
+@functools.lru_cache(maxsize=None)
+def _train_step(remat_policy, dropout=False):
+  """Compiles and runs one train-mode loss/grad step.
+
+  Returns (loss, intermediates, grads, RNG state after the step, compiled FLOPs).
+  """
+  cfg, mesh, lowered, state = _lowered_step(remat_policy, dropout)
+  with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
+    compiled = lowered.compile()
     loss, inter, grads, rng_state = compiled(state)
-  cost = compiled.cost_analysis()
-  flops = float((cost[0] if isinstance(cost, (list, tuple)) else cost)["flops"])
   return (
       float(loss),
       [np.asarray(x) for x in jax.tree.leaves(inter)],
       [np.asarray(g) for g in jax.tree.leaves(grads)],
-      flops,
       [np.asarray(x) for x in jax.tree.leaves(rng_state) if jnp.issubdtype(x.dtype, jnp.integer)],
+      _cost_flops(compiled.cost_analysis()),
   )
 
 
+# Keep the class on one xdist worker: the lowered and compiled programs are cached and shared across tests.
+@pytest.mark.xdist_group("DeepSeekV4RematTest")
 class DeepSeekV4RematTest(unittest.TestCase):
 
   @classmethod
   def tearDownClass(cls):
     _train_step.cache_clear()
+    _lowered_step.cache_clear()
     super().tearDownClass()
 
+  # Slow (two extra compiled programs). On every PR, test_remat_advances_dropout_rngs checks the same loss, sown aux
+  # losses and gradients (with dropout on) plus the RNG counters.
+  @pytest.mark.scheduled_only
   def test_remat_preserves_loss_aux_and_grads(self):
     """remat_policy=full and none give the same loss, sown aux losses and gradients."""
     loss_full, inter_full, grads_full, _, _ = _train_step("full")
@@ -125,10 +147,15 @@ class DeepSeekV4RematTest(unittest.TestCase):
       np.testing.assert_allclose(g_full, g_none, rtol=1e-5, atol=1e-6)
 
   def test_remat_advances_dropout_rngs(self):
-    """With dropout on, remat matches no remat in loss, gradients and the RNG counters it writes back."""
-    loss_full, _, grads_full, _, rngs_full = _train_step("full", dropout=True)
-    loss_none, _, grads_none, _, rngs_none = _train_step("none", dropout=True)
+    """With dropout on, remat matches no remat in loss, aux, grads, RNG counters, and recomputes forward once."""
+    loss_full, inter_full, grads_full, rngs_full, flops_full = _train_step("full", dropout=True)
+    loss_none, inter_none, grads_none, rngs_none, flops_none = _train_step("none", dropout=True)
     np.testing.assert_allclose(loss_full, loss_none, rtol=1e-6)
+    self.assertGreater(len(inter_none), 0)
+    self.assertEqual(len(inter_full), len(inter_none))
+    for a, b in zip(inter_full, inter_none):
+      np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-7)
+    self.assertEqual(len(grads_full), len(grads_none))
     for g_full, g_none in zip(grads_full, grads_none):
       np.testing.assert_allclose(g_full, g_none, rtol=1e-5, atol=1e-6)
     # Dropout consumed keys, so the next step must not reuse the same masks.
@@ -136,18 +163,19 @@ class DeepSeekV4RematTest(unittest.TestCase):
     self.assertEqual(len(rngs_full), len(rngs_none))
     for c_full, c_none in zip(rngs_full, rngs_none):
       np.testing.assert_array_equal(c_full, c_none)
-
-  def test_full_remat_recomputes_the_forward_once(self):
-    """Full remat adds one forward recompute: more FLOPs than no remat, fewer than two recomputes."""
-    flops_none = _train_step("none")[3]
-    flops_full = _train_step("full")[3]
+    # Compiled FLOPs, so the check also fails if XLA CSEs the recompute away (remat silently a no-op).
+    # Checked here on the same compiled pair so shard-level splitting cannot recompile both programs twice.
     # Forward ~ 1/3 of a train step, so one recompute adds at most ~1/3 and two add ~2/3.
-    self.assertGreater(flops_full, 1.05 * flops_none)
-    self.assertLess(flops_full, 1.45 * flops_none)
+    ratio = flops_full / flops_none
+    self.assertGreater(ratio, 1.05, f"full={flops_full} none={flops_none}")
+    self.assertLess(ratio, 1.45, f"full={flops_full} none={flops_none}")
 
   def test_remat_policy_is_honored(self):
     """A policy that saves named dots recomputes less than full remat."""
-    self.assertLess(_train_step("minimal")[3], _train_step("full")[3])
+    # Lowered (pre-XLA) FLOPs: which residuals the policy saves is decided before XLA, so no compile is needed.
+    flops_minimal = _cost_flops(_lowered_step("minimal", dropout=True)[2].cost_analysis())
+    flops_full = _cost_flops(_lowered_step("full", dropout=True)[2].cost_analysis())
+    self.assertLess(flops_minimal, flops_full)
 
 
 if __name__ == "__main__":

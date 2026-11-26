@@ -103,12 +103,28 @@ def _make_config(**kwargs):
       "base_num_query_heads": 2,
       "base_num_kv_heads": 2,
       "max_prefill_predict_length": 4,
+      # base.yml defaults (vocab 32000, mlp 7168) dwarf the 32-wide model and only slow init/compile.
+      "vocab_size": 256,
+      "base_mlp_dim": 64,
   }
   defaults.update(kwargs)
   return pyconfig.initialize(
       [sys.argv[0], get_test_config_path()],
       **defaults,
   )
+
+
+# qwen3-vl-2b's ViT (24 layers, hidden 1024, ffn 4096) would otherwise be fully materialized. The projector tests
+# only check which params a custom vision projector keeps, so a 1-layer, 32-wide ViT (with one deepstack merger)
+# exercises the same pytree structure. hidden/heads gives a head_dim of 16.
+_TINY_QWEN3_VL_VIT = {
+    "num_hidden_layers_for_vit": 1,
+    "hidden_size_for_vit": 32,
+    "intermediate_size_for_vit": 64,
+    "num_attention_heads_for_vit": 2,
+    "out_hidden_size_for_vit": 32,
+    "deepstack_visual_indexes_for_vit": [0],
+}
 
 
 def _make_mesh(config):
@@ -962,6 +978,7 @@ class TestCreateNnxModel(unittest.TestCase):
         "vision_connector_num_layers": 2,
         "vision_connector_activation": "gelu",
         "vision_connector_use_bias": True,
+        **_TINY_QWEN3_VL_VIT,
     }
     model = model_creation_utils.from_pretrained(_make_config(**projector), self.mesh)
 
@@ -1292,6 +1309,7 @@ class TestCreateNnxModel(unittest.TestCase):
         vision_connector_num_layers=2,
         vision_connector_activation="gelu",
         vision_connector_use_bias=True,
+        **_TINY_QWEN3_VL_VIT,
     )
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)

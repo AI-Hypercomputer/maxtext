@@ -116,6 +116,11 @@ def _build_model(cfg):
   return model_creation_utils.from_config(cfg, devices=jax.devices(), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
 
 
+def _abstract_model(cfg):
+  """Shape-only model (no weights) for tests that only inspect the module structure."""
+  return nnx.eval_shape(lambda: _build_model(cfg))
+
+
 @nnx.jit
 def _forward(model, tokens, positions):
   # Jitted: eager op-by-op dispatch of the KDA/MoE stack is several times slower on CPU.
@@ -261,14 +266,14 @@ class KimiK3DecoderGuardTest(unittest.TestCase):
       )
 
 
-class KimiK3DecoderTest(unittest.TestCase):
-  """Forward/backward smoke tests for the composed Kimi-K3 decoder (one shared toy model)."""
+class KimiK3DecoderStructureTest(unittest.TestCase):
+  """Module structure of the composed Kimi-K3 decoder, on a shape-only model (no weights are initialized)."""
 
   @classmethod
   def setUpClass(cls):
     super().setUpClass()
     cls.cfg = _toy_config()
-    cls.model = _build_model(cls.cfg)
+    cls.model = _abstract_model(cls.cfg)
 
   def test_decoder_composes_expected_layer_types(self):
     """Each layer index must get the right attention and MLP variant."""
@@ -294,76 +299,52 @@ class KimiK3DecoderTest(unittest.TestCase):
       self.assertEqual(layer.self_attention.kv_norm.epsilon, 1e-6)
 
     mla_layer = getattr(self.model.decoder, f"layers_{min(_EXPECTED_MLA_LAYERS)}").self_attention
-    default_mla = attention_mla.MLA(
-        config=self.cfg,
-        num_query_heads=self.cfg.num_query_heads,
-        num_kv_heads=self.cfg.num_kv_heads,
-        head_dim=self.cfg.head_dim,
-        max_target_length=self.cfg.max_target_length,
-        max_prefill_predict_length=self.cfg.max_prefill_predict_length,
-        attention_kernel=self.cfg.attention,
-        attention_type=AttentionType(self.cfg.attention_type),
-        inputs_q_shape=(1, _SEQ_LEN, _EMB_DIM),
-        inputs_kv_shape=(1, _SEQ_LEN, _EMB_DIM),
-        mesh=mla_layer.mesh,
-        dtype=self.cfg.dtype,
-        weight_dtype=self.cfg.weight_dtype,
-        q_lora_rank=self.cfg.q_lora_rank,
-        kv_lora_rank=self.cfg.kv_lora_rank,
-        qk_nope_head_dim=self.cfg.qk_nope_head_dim,
-        qk_rope_head_dim=self.cfg.qk_rope_head_dim,
-        v_head_dim=self.cfg.v_head_dim,
-        is_nope_layer=True,
-        mla_use_output_gate=True,
-        rngs=nnx.Rngs(0),
+    # Shape-only: only the norms' (static) epsilon is inspected.
+    default_mla = nnx.eval_shape(
+        lambda: attention_mla.MLA(
+            config=self.cfg,
+            num_query_heads=self.cfg.num_query_heads,
+            num_kv_heads=self.cfg.num_kv_heads,
+            head_dim=self.cfg.head_dim,
+            max_target_length=self.cfg.max_target_length,
+            max_prefill_predict_length=self.cfg.max_prefill_predict_length,
+            attention_kernel=self.cfg.attention,
+            attention_type=AttentionType(self.cfg.attention_type),
+            inputs_q_shape=(1, _SEQ_LEN, _EMB_DIM),
+            inputs_kv_shape=(1, _SEQ_LEN, _EMB_DIM),
+            mesh=mla_layer.mesh,
+            dtype=self.cfg.dtype,
+            weight_dtype=self.cfg.weight_dtype,
+            q_lora_rank=self.cfg.q_lora_rank,
+            kv_lora_rank=self.cfg.kv_lora_rank,
+            qk_nope_head_dim=self.cfg.qk_nope_head_dim,
+            qk_rope_head_dim=self.cfg.qk_rope_head_dim,
+            v_head_dim=self.cfg.v_head_dim,
+            is_nope_layer=True,
+            mla_use_output_gate=True,
+            rngs=nnx.Rngs(0),
+        )
     )
     self.assertEqual(default_mla.q_norm.epsilon, 1e-5)
     self.assertEqual(default_mla.kv_norm.epsilon, 1e-5)
-
-  def test_forward_pass_produces_finite_logits(self):
-    """One full forward pass through the AttnRes highway."""
-    tokens, positions = _toy_inputs()
-    logits = _forward(self.model, tokens, positions)
-    self.assertEqual(logits.shape, (1, _SEQ_LEN, self.cfg.vocab_size))
-    self.assertTrue(bool(jnp.all(jnp.isfinite(logits))), "logits contain NaN/Inf")
-
-  def test_remat_does_not_change_forward(self):
-    """remat_policy='full' (default) and 'none' take different code paths; outputs must match."""
-    self.assertEqual(self.cfg.remat_policy, "full")
-    no_remat = _build_model(_toy_config(remat_policy="none"))
-    nnx.update(no_remat, nnx.state(self.model, nnx.Param))
-    tokens, positions = _toy_inputs()
-    ref = _forward(self.model, tokens, positions)
-    out = _forward(no_remat, tokens, positions)
-    np.testing.assert_allclose(np.asarray(out), np.asarray(ref), rtol=1e-5, atol=1e-5)
-
-  def test_gradients_are_finite(self):
-    """A backward pass through the remat'd stack yields finite, non-trivial gradients."""
-    tokens, positions = _toy_inputs()
-
-    def loss_fn(model):
-      logits = model(tokens, positions, model_mode=MODEL_MODE_TRAIN, enable_dropout=False)
-      return jnp.mean(jax.nn.log_softmax(logits.astype(jnp.float32))[..., 0])
-
-    grads = nnx.jit(nnx.grad(loss_fn))(self.model)
-    leaves = jax.tree_util.tree_leaves(grads)
-    self.assertGreater(len(leaves), 0)
-    for leaf in leaves:
-      self.assertTrue(bool(jnp.all(jnp.isfinite(leaf))), "non-finite gradient")
-    self.assertGreater(sum(float(jnp.sum(jnp.abs(leaf))) for leaf in leaves), 0.0)
 
   def test_autoregressive_decode_is_rejected_for_kda(self):
     """KDA state is not cached between decode steps yet, so decode must raise."""
     layer = self.model.decoder.layers_1
     self.assertTrue(layer.is_linear_attn)
     x = jnp.zeros((1, 1, _EMB_DIM), jnp.float32)
-    with self.assertRaises(NotImplementedError):
-      layer(
+    with self.assertRaisesRegex(NotImplementedError, "autoregressive decode is not supported"):
+      # Traced on the shape-only layer: the guard raises while building the decode program.
+      nnx.eval_shape(
+          lambda layer, x: layer(
+              x,
+              jnp.ones((1, 1), jnp.int32),
+              jnp.zeros((1, 1), jnp.int32),
+              deterministic=True,
+              model_mode=MODEL_MODE_AUTOREGRESSIVE,
+          ),
+          layer,
           x,
-          jnp.ones((1, 1), jnp.int32),
-          jnp.zeros((1, 1), jnp.int32),
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
       )
 
   def test_param_tree_matches_param_mapping_contract(self):
@@ -405,6 +386,48 @@ class KimiK3DecoderTest(unittest.TestCase):
     # Decoder-level output AttnRes.
     _assert_param("decoder-output_attn_res_norm-scale")
     _assert_param("decoder-output_attn_res_proj-kernel")
+
+
+class KimiK3DecoderTest(unittest.TestCase):
+  """Forward/backward smoke tests for the composed Kimi-K3 decoder (one shared toy model)."""
+
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls.cfg = _toy_config()
+    cls.model = _build_model(cls.cfg)
+
+  def test_forward_pass_produces_finite_logits(self):
+    """One full forward pass through the AttnRes highway."""
+    tokens, positions = _toy_inputs()
+    logits = _forward(self.model, tokens, positions)
+    self.assertEqual(logits.shape, (1, _SEQ_LEN, self.cfg.vocab_size))
+    self.assertTrue(bool(jnp.all(jnp.isfinite(logits))), "logits contain NaN/Inf")
+
+  def test_remat_does_not_change_forward(self):
+    """remat_policy='full' (default) and 'none' take different code paths; outputs must match."""
+    self.assertEqual(self.cfg.remat_policy, "full")
+    no_remat = _build_model(_toy_config(remat_policy="none"))
+    nnx.update(no_remat, nnx.state(self.model, nnx.Param))
+    tokens, positions = _toy_inputs()
+    ref = _forward(self.model, tokens, positions)
+    out = _forward(no_remat, tokens, positions)
+    np.testing.assert_allclose(np.asarray(out), np.asarray(ref), rtol=1e-5, atol=1e-5)
+
+  def test_gradients_are_finite(self):
+    """A backward pass through the remat'd stack yields finite, non-trivial gradients."""
+    tokens, positions = _toy_inputs()
+
+    def loss_fn(model):
+      logits = model(tokens, positions, model_mode=MODEL_MODE_TRAIN, enable_dropout=False)
+      return jnp.mean(jax.nn.log_softmax(logits.astype(jnp.float32))[..., 0])
+
+    grads = nnx.jit(nnx.grad(loss_fn))(self.model)
+    leaves = jax.tree_util.tree_leaves(grads)
+    self.assertGreater(len(leaves), 0)
+    for leaf in leaves:
+      self.assertTrue(bool(jnp.all(jnp.isfinite(leaf))), "non-finite gradient")
+    self.assertGreater(sum(float(jnp.sum(jnp.abs(leaf))) for leaf in leaves), 0.0)
 
 
 if __name__ == "__main__":

@@ -15,8 +15,8 @@
 
 `dual_chunk_swap_local_self` keeps the DUAL_CHUNK_SWAP reorder of `context_parallel_attention_load_balance`
 but drops the (r, r) pairs from its two collective-permutes; the rank that keeps its own half takes it with
-a select. The device checks run in a subprocess, so the forced CPU device count takes effect before JAX
-initializes (as in attention_load_balance_test.py):
+a select. The device checks need 8 CPU devices; unless the test process has them they run in a child process per
+phase (tests/utils/cpu_mesh_child.py), so the forced CPU device count takes effect before JAX initializes:
 
   - Reorder. At context 2, 4 and 8, both directions and their VJPs are bit-identical to the
     dual_chunk_swap order, for float32, bfloat16 and int32 inputs.
@@ -35,11 +35,10 @@ import contextlib
 import functools
 import os
 import re
-import subprocess
-import sys
 import unittest.mock
 
 from absl.testing import absltest
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 from jax import lax
@@ -51,18 +50,25 @@ import pytest
 from maxtext.configs import pyconfig
 from maxtext.kernels.attention import tokamax_ring_attention
 from maxtext.utils import globals as maxtext_globals
+from tests.utils import cpu_mesh_child
 
 _BASE_CONFIG_PATH = os.path.join(maxtext_globals.MAXTEXT_CONFIGS_DIR, "base.yml")
 _KEY = "context_parallel_attention_load_balance_order"
 _DCS = tokamax_ring_attention.LOAD_BALANCE_ORDER_DUAL_CHUNK_SWAP
 _LOCAL_SELF = tokamax_ring_attention.LOAD_BALANCE_ORDER_DUAL_CHUNK_SWAP_LOCAL_SELF
-_CHILD_MARKER = "ATTENTION_LOAD_BALANCE_ORDER_CHECKS_PASSED"
+_NUM_DEVICES = 8
 
 
 def _bits(x) -> tuple:
   """Shape, dtype and raw bytes of an array: equal tuples mean bit-identical arrays."""
   x = np.ascontiguousarray(np.asarray(x))
   return x.shape, str(x.dtype), x.tobytes()
+
+
+def _from_bits(bits: tuple) -> np.ndarray:
+  """The array whose `_bits` are `bits`."""
+  shape, dtype, raw = bits
+  return np.frombuffer(raw, dtype=dtype).reshape(shape)
 
 
 def _permute_pairs(hlo_text: str) -> list[list[tuple[int, int]]]:
@@ -110,17 +116,24 @@ def _reorder_fn(mesh, batch_axes, order, to_natural=False):
 
 
 def _reorder_outputs(mesh, batch_axes, order, cases, cotangent):
-  """Both directions of the reorder and both VJPs, for every input."""
-  out = {}
-  with jax.set_mesh(mesh):
-    for name, x in cases.items():
-      for to_natural in (False, True):
-        out[(name, to_natural)] = _bits(jax.jit(_reorder_fn(mesh, batch_axes, order, to_natural))(x))
+  """Both directions of the reorder and both VJPs, for every input.
+
+  One program computes all of them: each output is a pure permutation of its input, so batching the cases into one
+  jit changes no bit and saves a compile per (case, direction).
+  """
+
+  def all_outputs(cases, cotangent):
+    out = {}
     for to_natural in (False, True):
       fn = _reorder_fn(mesh, batch_axes, order, to_natural)
-      grad = jax.jit(jax.grad(lambda x, fn=fn: jnp.sum(jnp.asarray(cotangent) * fn(x))))(cases["float32"])
-      out[("vjp", to_natural)] = _bits(grad)
-  return out
+      for name, x in cases.items():
+        out[f"{name}/{to_natural}"] = fn(x)
+      out[f"vjp/{to_natural}"] = jax.grad(lambda x, fn=fn: jnp.sum(cotangent * fn(x)))(cases["float32"])
+    return out
+
+  with jax.set_mesh(mesh):
+    out = jax.jit(all_outputs)(cases, cotangent)
+  return {key: _bits(value) for key, value in out.items()}
 
 
 def _run_reorder_checks(mesh, batch_axes):
@@ -230,19 +243,34 @@ def _tiny_qwen3_5_config(order: str, seq: int):
   return pyconfig.initialize(argv)
 
 
-def _model_outputs_and_grads(cfg, data, cotangent, patch=None):
-  """Logits, the parameter gradients of <logits, cotangent>, and the compiled HLO of one tiny model."""
+@functools.cache
+def _initial_model(order: str, seq: int):
+  """The config, mesh and split (graphdef, params, rest) of the tiny model, built once per (order, seq).
+
+  The positive control patches only what runs at trace time, so it reuses the model instead of initializing it again.
+  """
   # pylint: disable=import-outside-toplevel
   from flax import nnx
   from flax.linen import partitioning as nn_partitioning
   from maxtext.common.common_types import MODEL_MODE_TRAIN
   from maxtext.utils import maxtext_utils, maxtext_utils_nnx, model_creation_utils
 
+  cfg = _tiny_qwen3_5_config(order, seq)
   mesh = maxtext_utils.get_mesh_from_config(cfg)
   with nn_partitioning.axis_rules(cfg.logical_axis_rules):
     rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=jax.random.PRNGKey(0))
     model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=MODEL_MODE_TRAIN)
   graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+  return cfg, mesh, graphdef, params, rest
+
+
+def _model_outputs_and_grads(order, seq, data, cotangent, patch=None, with_grads=True):
+  """Logits, the parameter gradients of <logits, cotangent> ({} without grads), and the compiled HLO of the model."""
+  # pylint: disable=import-outside-toplevel
+  from flax import nnx
+  from flax.linen import partitioning as nn_partitioning
+
+  cfg, mesh, graphdef, params, rest = _initial_model(order, seq)
 
   def logits_of(params):
     merged = nnx.merge(graphdef, params, rest, copy=True)
@@ -257,6 +285,8 @@ def _model_outputs_and_grads(cfg, data, cotangent, patch=None):
     return logits.astype(jnp.float32)
 
   def value_and_grads(params):
+    if not with_grads:
+      return logits_of(params), {}
     logits, vjp = jax.vjp(logits_of, params)
     return logits, vjp(cotangent)[0]
 
@@ -273,8 +303,8 @@ def _model_outputs_and_grads(cfg, data, cotangent, patch=None):
 
 def _run_model_checks(seq: int):
   """Tiny hybrid Qwen3.5: local_self == dual_chunk_swap bit for bit in the logits and every gradient."""
-  dcs_cfg = _tiny_qwen3_5_config(_DCS, seq)
-  ls_cfg = _tiny_qwen3_5_config(_LOCAL_SELF, seq)
+  dcs_cfg = _initial_model(_DCS, seq)[0]
+  ls_cfg = _initial_model(_LOCAL_SELF, seq)[0]
   assert getattr(ls_cfg, _KEY) == _LOCAL_SELF and getattr(dcs_cfg, _KEY) == _DCS
   batch = dcs_cfg.micro_batch_size_to_train_on
   tokens = jax.random.randint(jax.random.PRNGKey(7), (batch, seq + 1), 0, dcs_cfg.vocab_size)
@@ -290,8 +320,8 @@ def _run_model_checks(seq: int):
       "targets_segmentation": jnp.broadcast_to(segmentation, (batch, seq)),
   }
   cotangent = jax.random.normal(jax.random.PRNGKey(3), (batch, seq, dcs_cfg.vocab_size), jnp.float32)
-  dcs_logits, dcs_grads, dcs_hlo = _model_outputs_and_grads(dcs_cfg, data, cotangent)
-  ls_logits, ls_grads, ls_hlo = _model_outputs_and_grads(ls_cfg, data, cotangent)
+  dcs_logits, dcs_grads, dcs_hlo = _model_outputs_and_grads(_DCS, seq, data, cotangent)
+  ls_logits, ls_grads, ls_hlo = _model_outputs_and_grads(_LOCAL_SELF, seq, data, cotangent)
 
   # The key must reach the reorder: the local_self program has fewer self pairs.
   dcs_self, ls_self = (_self_pairs(_permute_pairs(h)) for h in (dcs_hlo, ls_hlo))
@@ -306,10 +336,16 @@ def _run_model_checks(seq: int):
       flush=True,
   )
 
-  # Positive control: the self rank keeping the zeros it receives must change the logits.
-  bad_logits, _, _ = _model_outputs_and_grads(ls_cfg, data, cotangent, patch=_self_rank_keeps_zeros())
-  assert bad_logits != dcs_logits, "positive control: a self rank keeping zeros went undetected"
-  print("model positive control detected", flush=True)
+  # Positive control: the self rank keeping the zeros it receives must change the logits. Only the logits are
+  # compared, so the control runs the forward alone; a forward-only program may round differently from the forward
+  # of the VJP program, so the control must move the logits far beyond rounding, not merely change their bits.
+  bad_logits, _, _ = _model_outputs_and_grads(
+      _LOCAL_SELF, seq, data, cotangent, patch=_self_rank_keeps_zeros(), with_grads=False
+  )
+  bad, ref = _from_bits(bad_logits).astype(np.float64), _from_bits(dcs_logits).astype(np.float64)
+  bad_error = float(np.max(np.abs(bad - ref)) / np.max(np.abs(ref)))
+  assert bad_error > 1e-3, f"positive control: a self rank keeping zeros moved the logits by only {bad_error:.3e}"
+  print(f"model positive control detected: normalized max logit error {bad_error:.3e}", flush=True)
 
 
 def _run_embed_sharding_checks(devices):
@@ -342,28 +378,28 @@ def _run_embed_sharding_checks(devices):
   print("embed sharding: kept on 'tensor' with no all-gather, values bit-identical", flush=True)
 
 
-def _run_child_checks():
-  """Every check that needs 8 CPU devices; run in the child process."""
-  devices = np.array(jax.devices()[:8])
+def _run_all_reorder_checks():
+  devices = np.array(jax.devices()[:_NUM_DEVICES])
   _run_embed_sharding_checks(devices)
   _run_reorder_checks(Mesh(devices.reshape(4, 2), ("fsdp", "context")), "fsdp")
   _run_reorder_checks(Mesh(devices.reshape(2, 4), ("fsdp", "context")), "fsdp")
   _run_reorder_checks(Mesh(devices.reshape(1, 8), ("fsdp", "context")), None)
-  _run_model_checks(seq=128)
-  print(_CHILD_MARKER, flush=True)
+
+
+# The checks that need 8 CPU devices, one test case (and one child process) per phase, so they can run in parallel.
+_PHASES = {
+    "reorder": _run_all_reorder_checks,
+    "model": functools.partial(_run_model_checks, seq=128),
+}
 
 
 @pytest.mark.cpu_only
-def test_load_balance_order_is_bit_identical_on_cpu_mesh():
-  if len(jax.devices()) >= 8 and jax.devices()[0].platform == "cpu":
-    _run_child_checks()
-    return
-  env = os.environ.copy()
-  env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8"
-  env["JAX_PLATFORMS"] = "cpu"
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
-  assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert _CHILD_MARKER in result.stdout
+class LoadBalanceOrderCpuMeshTest(parameterized.TestCase):
+  """The checks above on 8 CPU devices: in this process if it has them, else in a child process per phase."""
+
+  @parameterized.named_parameters(*((phase, phase) for phase in _PHASES))
+  def test_is_bit_identical_on_cpu_mesh(self, phase):
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=_NUM_DEVICES)
 
 
 class LoadBalanceSelfRanksTest(absltest.TestCase):
@@ -445,7 +481,4 @@ class LoadBalanceOrderConfigTest(absltest.TestCase):
 
 
 if __name__ == "__main__":
-  if len(sys.argv) == 1:
-    _run_child_checks()
-  else:
-    absltest.main()
+  cpu_mesh_child.main(_PHASES)

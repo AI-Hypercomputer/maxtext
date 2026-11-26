@@ -14,6 +14,7 @@
 
 """HF GlmMoeDsaForCausalLM reference parity and pure-JAX IndexShare / DS-3.2 invariance tests."""
 
+import functools
 import os
 import tempfile
 import unittest
@@ -35,6 +36,7 @@ from maxtext.utils import index_share_utils
 from maxtext.utils import maxtext_utils
 import numpy as np
 import optax
+import pytest
 from tests.utils.test_helpers import get_test_config_path
 import transformers
 
@@ -108,6 +110,9 @@ def _common_glm_cli_args(
       f"max_target_length={seq_len}",
       f"mla_naive_kvcache={mla_naive_kvcache}",
       "per_device_batch_size=1",
+      # Off TPU, megablox runs its Pallas GMM kernels in interpret mode, which dominates these tests' runtime. None of
+      # them target the GMM kernel; sparse_matmul keeps the dropless routed path via jax.lax.ragged_dot.
+      "megablox=False",
   ]
   if model_name == "glm5.2-744b":
     args.append("index_share_pattern=FFSSFS")
@@ -119,6 +124,28 @@ def _common_glm_cli_args(
 def _create_mesh(cfg):
   devices = maxtext_utils.create_device_mesh(cfg)
   return jax.sharding.Mesh(devices, cfg.mesh_axes)
+
+
+def _build_transformer(cfg, mesh, params_seed: int, dropout_seed: int, model_mode: str):
+  """Builds a `models.Transformer` under `nnx.jit` so multi-layer weight init avoids eager CPU dispatch."""
+  return nnx.jit(
+      lambda: models.Transformer(
+          cfg,
+          mesh=mesh,
+          quant=quantizations.configure_quantization(cfg),
+          rngs=nnx.Rngs(params=params_seed, dropout=dropout_seed),
+          model_mode=model_mode,
+      )
+  )()
+
+
+@functools.partial(nnx.jit, static_argnames=("model_mode",))
+def _jit_model_call(model, tokens, positions, segment_ids, model_mode):
+  """Compiled Transformer call; nnx.jit writes mutated state (KV caches, sown losses) back to `model`.
+
+  Eager calls run the whole model op by op. Must be called inside the mesh / axis_rules context.
+  """
+  return model(tokens, positions, decoder_segment_ids=segment_ids, enable_dropout=False, model_mode=model_mode)
 
 
 def _copy_hf_weights_to_maxtext(hf_model, mt_model, cfg) -> None:
@@ -484,24 +511,8 @@ class Glm5HfReferenceParityTest(parameterized.TestCase):
         pos = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32), (batch_size, seq_len))
         seg = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
 
-        logits_scan = np.asarray(
-            mt_scan(
-                toks_jax,
-                pos,
-                decoder_segment_ids=seg,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_TRAIN,
-            )
-        )
-        logits_unscan = np.asarray(
-            mt_unscan(
-                toks_jax,
-                pos,
-                decoder_segment_ids=seg,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_TRAIN,
-            )
-        )
+        logits_scan = np.asarray(_jit_model_call(mt_scan, toks_jax, pos, seg, common_types.MODEL_MODE_TRAIN))
+        logits_unscan = np.asarray(_jit_model_call(mt_unscan, toks_jax, pos, seg, common_types.MODEL_MODE_TRAIN))
 
       np.testing.assert_allclose(logits_scan, logits_unscan, rtol=1e-5, atol=1e-5)
       np.testing.assert_allclose(logits_scan, hf_logits, rtol=1e-4, atol=1e-4)
@@ -511,11 +522,19 @@ class Glm5HfReferenceParityTest(parameterized.TestCase):
 class Glm5IndexSharePureJaxTest(parameterized.TestCase):
   """Unconditional pure-JAX tests for GLM-5.2 IndexShare, MoEBiasVar, and DeepSeek-3.2 invariance."""
 
-  @parameterized.named_parameters(
-      {"testcase_name": "seq_le_topk", "seq_len": 4, "indexer_topk": 6},
-      {"testcase_name": "seq_gt_topk", "seq_len": 10, "indexer_topk": 4},
-  )
-  def test_scanned_vs_unscanned_forward_and_backward_parity(self, seq_len: int, indexer_topk: int):
+  def test_scanned_vs_unscanned_forward_and_backward_parity_seq_gt_topk(self):
+    """Sparse regime (seq_len > indexer_topk): also checks non-zero Full-layer indexer gradients."""
+    self._check_scanned_vs_unscanned_forward_and_backward_parity(seq_len=10, indexer_topk=4)
+
+  # Slow (~4 min on CI CPU). On every PR, the seq_gt_topk case above keeps the scanned/unscanned (pruned) parity,
+  # and the Indexer's k <= indexer_topk branches under IndexShare run in glm5_model_test. The HF parity test's dense
+  # cases need torch, which CI installs only on scheduled runs, so dense-regime scan parity runs only on the schedule.
+  @pytest.mark.scheduled_only
+  def test_scanned_vs_unscanned_forward_and_backward_parity_seq_le_topk(self):
+    """Dense regime (seq_len <= indexer_topk)."""
+    self._check_scanned_vs_unscanned_forward_and_backward_parity(seq_len=4, indexer_topk=6)
+
+  def _check_scanned_vs_unscanned_forward_and_backward_parity(self, seq_len: int, indexer_topk: int):
     """Verifies scanned vs unscanned (pruned) forward loss/logits and backward Param gradients."""
     with tempfile.TemporaryDirectory() as tmpdir:
       is_sparse = seq_len > indexer_topk
@@ -551,24 +570,12 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
       targets_np = rng_np.integers(0, 64, size=(batch_size, seq_len), dtype=np.int32)
 
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_scan.logical_axis_rules):
-        mt_scan = models.Transformer(
-            cfg_scan,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_scan),
-            rngs=nnx.Rngs(params=11, dropout=12),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
+        mt_scan = _build_transformer(cfg_scan, mesh, 11, 12, common_types.MODEL_MODE_TRAIN)
         # Set non-zero e_score_correction_bias on the 4 MoE layers to exercise MoEBiasVar routing.
         bias_init = jnp.asarray(rng_np.uniform(-0.2, 0.2, size=(4, 6)).astype(np.float32))
         mt_scan.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias.set_value(bias_init)
 
-        mt_unscan = models.Transformer(
-            cfg_unscan,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_unscan),
-            rngs=nnx.Rngs(params=99, dropout=98),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
+        mt_unscan = _build_transformer(cfg_unscan, mesh, 99, 98, common_types.MODEL_MODE_TRAIN)
         # Pruned unscanned Shared layers {2, 3, 5} must have self_attention.indexer is None.
         for s_idx in (2, 3, 5):
           self.assertIsNone(getattr(mt_unscan.decoder, f"moe_layers_{s_idx - 2}").self_attention.indexer)
@@ -589,24 +596,8 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
             "targets_segmentation": seg,
         }
 
-        logits_s = np.asarray(
-            mt_scan(
-                batch["inputs"],
-                pos,
-                decoder_segment_ids=seg,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_TRAIN,
-            )
-        )
-        logits_u = np.asarray(
-            mt_unscan(
-                batch["inputs"],
-                pos,
-                decoder_segment_ids=seg,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_TRAIN,
-            )
-        )
+        logits_s = np.asarray(_jit_model_call(mt_scan, batch["inputs"], pos, seg, common_types.MODEL_MODE_TRAIN))
+        logits_u = np.asarray(_jit_model_call(mt_unscan, batch["inputs"], pos, seg, common_types.MODEL_MODE_TRAIN))
         np.testing.assert_allclose(logits_s, logits_u, rtol=1e-5, atol=1e-5)
 
         def _loss_and_grads(model_obj, cfg_obj):
@@ -620,7 +611,7 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
             idx_l = aux.get("indexer_loss")
             return loss_val, (jnp.float32(0.0) if idx_l is None else idx_l)
 
-          return jax.value_and_grad(_fn, has_aux=True)(params)
+          return jax.jit(jax.value_and_grad(_fn, has_aux=True))(params)
 
         (loss_s, idx_loss_s), grads_s = _loss_and_grads(mt_scan, cfg_scan)
         (loss_u, idx_loss_u), grads_u = _loss_and_grads(mt_unscan, cfg_unscan)
@@ -704,8 +695,60 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
           # Shared layers {2, 3, 5} never execute their own indexer in scan mode -> exact zero gradient.
           np.testing.assert_array_equal(g_moe_idx_s, np.zeros_like(g_moe_idx_s))
 
+  def test_unscanned_shared_layer_without_donor_state_fast_fails(self):
+    """Calling an unscanned Shared layer with cached_indexer_state=None raises ValueError instead of running."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      cfg = pyconfig.initialize(
+          _common_glm_cli_args(
+              tmpdir,
+              model_name="glm5.2-744b",
+              scan_layers=False,
+              prune_shared_indexers=True,
+              seq_len=10,
+              indexer_topk=4,
+              indexer_n_heads=8,
+              max_prefill_predict_length=4,
+              mla_naive_kvcache=False,
+          )
+      )
+      mesh = _create_mesh(cfg)
+      batch_size = cfg.global_batch_size_to_train_on
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        # The guard raises while tracing, before any compute, so abstract (eval_shape) params are enough.
+        model = nnx.eval_shape(
+            lambda: models.Transformer(
+                cfg,
+                mesh=mesh,
+                quant=quantizations.configure_quantization(cfg),
+                rngs=nnx.Rngs(params=5, dropout=6),
+                model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+            )
+        )
+        dummy_h = jnp.ones((batch_size, 4, cfg.base_emb_dim), dtype=jnp.float32)
+        dummy_pos = jnp.broadcast_to(jnp.arange(4, dtype=jnp.int32), (batch_size, 4))
+        dummy_seg = jnp.ones((batch_size, 4), dtype=jnp.int32)
+        with self.assertRaisesRegex(
+            ValueError, "Shared DSA layers require top-k indices from a previous full indexer layer"
+        ):
+          nnx.eval_shape(
+              lambda layer: layer(
+                  dummy_h,
+                  dummy_seg,
+                  dummy_pos,
+                  True,
+                  common_types.MODEL_MODE_TRAIN,
+                  cached_indexer_state=None,
+              ),
+              model.decoder.moe_layers_0,
+          )
+
+  # Slow (~5 min on CI CPU, four full models). On every PR, scanned prefill + AR decode past indexer_topk runs in
+  # test_scanned_shared_layer_indexer_cache_nan_poison_invariance and the missing-donor fast-fail in
+  # test_unscanned_shared_layer_without_donor_state_fast_fails. Decode vs teacher-forced parity and unscanned decode
+  # parity run only here.
+  @pytest.mark.scheduled_only
   def test_prefill_and_greedy_ar_decode_parity_and_cache_isolation(self):
-    """Verifies prefill + greedy AR decode vs teacher-forced forward, cache isolation, and missing-donor fast-fail."""
+    """Verifies prefill + greedy AR decode vs teacher-forced forward and IndexerKVCache_0 isolation."""
     with tempfile.TemporaryDirectory() as tmpdir:
       common_kw = {
           "model_name": "glm5.2-744b",
@@ -729,34 +772,10 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
       prompt_np = np.arange(batch_size * 4, dtype=np.int32).reshape(batch_size, 4) % 64
 
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_scan.logical_axis_rules):
-        m_scan_ar = models.Transformer(
-            cfg_scan,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_scan),
-            rngs=nnx.Rngs(params=3, dropout=4),
-            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-        )
-        m_unscan_pruned_ar = models.Transformer(
-            cfg_unscan_pruned,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_unscan_pruned),
-            rngs=nnx.Rngs(params=5, dropout=6),
-            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-        )
-        m_unscan_retained_ar = models.Transformer(
-            cfg_unscan_retained,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_unscan_retained),
-            rngs=nnx.Rngs(params=7, dropout=8),
-            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-        )
-        m_train_tf = models.Transformer(
-            cfg_scan,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_scan),
-            rngs=nnx.Rngs(params=9, dropout=10),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
+        m_scan_ar = _build_transformer(cfg_scan, mesh, 3, 4, common_types.MODEL_MODE_AUTOREGRESSIVE)
+        m_unscan_pruned_ar = _build_transformer(cfg_unscan_pruned, mesh, 5, 6, common_types.MODEL_MODE_AUTOREGRESSIVE)
+        m_unscan_retained_ar = _build_transformer(cfg_unscan_retained, mesh, 7, 8, common_types.MODEL_MODE_AUTOREGRESSIVE)
+        m_train_tf = _build_transformer(cfg_scan, mesh, 9, 10, common_types.MODEL_MODE_TRAIN)
 
         _copy_scanned_to_unscanned_jax(m_scan_ar, m_unscan_pruned_ar, cfg_scan)
         _copy_scanned_to_unscanned_jax(m_scan_ar, m_unscan_retained_ar, cfg_scan)
@@ -765,47 +784,18 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
             m_scan_ar.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias.get_value()
         )
 
-        # Fast-fail check: calling an unscanned Shared layer with cached_indexer_state=None raises ValueError.
-        shared_layer = m_unscan_pruned_ar.decoder.moe_layers_0
-        dummy_h = jnp.ones((batch_size, 4, cfg_scan.base_emb_dim), dtype=jnp.float32)
-        dummy_pos = jnp.broadcast_to(jnp.arange(4, dtype=jnp.int32), (batch_size, 4))
-        dummy_seg = jnp.ones((batch_size, 4), dtype=jnp.int32)
-        with self.assertRaisesRegex(
-            ValueError, "Shared DSA layers require top-k indices from a previous full indexer layer"
-        ):
-          shared_layer(
-              dummy_h,
-              dummy_seg,
-              dummy_pos,
-              True,
-              common_types.MODEL_MODE_TRAIN,
-              cached_indexer_state=None,
-          )
-
         def _rollout_ar(model_ar):
           prompt = jnp.asarray(prompt_np)
           p_pos = jnp.broadcast_to(jnp.arange(4, dtype=jnp.int32), (batch_size, 4))
           p_seg = jnp.ones((batch_size, 4), dtype=jnp.int32)
-          prefill_logits = model_ar(
-              prompt,
-              p_pos,
-              decoder_segment_ids=p_seg,
-              enable_dropout=False,
-              model_mode=common_types.MODEL_MODE_PREFILL,
-          )
+          prefill_logits = _jit_model_call(model_ar, prompt, p_pos, p_seg, common_types.MODEL_MODE_PREFILL)
           next_tok = jnp.argmax(prefill_logits[:, -1:, :], axis=-1).astype(jnp.int32)
           chunks = [prompt, next_tok]
           pred_logits = [prefill_logits[:, -1, :]]
           # Steps 4, 5 cross from kv_len=4 (<= indexer_topk) into kv_len=5, 6 (> indexer_topk).
           for step_pos in range(4, 6):
             s_pos = jnp.full((batch_size, 1), step_pos, dtype=jnp.int32)
-            ar_logits = model_ar(
-                next_tok,
-                s_pos,
-                decoder_segment_ids=None,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-            )
+            ar_logits = _jit_model_call(model_ar, next_tok, s_pos, None, common_types.MODEL_MODE_AUTOREGRESSIVE)
             pred_logits.append(ar_logits[:, 0, :])
             next_tok = jnp.argmax(ar_logits[:, -1:, :], axis=-1).astype(jnp.int32)
             chunks.append(next_tok)
@@ -820,15 +810,7 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
         tf_input = jnp.asarray(tokens_scan[:, :6])
         tf_pos = jnp.broadcast_to(jnp.arange(6, dtype=jnp.int32), (batch_size, 6))
         tf_seg = jnp.ones((batch_size, 6), dtype=jnp.int32)
-        tf_all_logits = np.asarray(
-            m_train_tf(
-                tf_input,
-                tf_pos,
-                decoder_segment_ids=tf_seg,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_TRAIN,
-            )
-        )
+        tf_all_logits = np.asarray(_jit_model_call(m_train_tf, tf_input, tf_pos, tf_seg, common_types.MODEL_MODE_TRAIN))
         tf_pred_logits = tf_all_logits[:, 3:6, :]
         tf_greedy_tokens = np.argmax(tf_pred_logits, axis=-1).astype(np.int32)
 
@@ -935,8 +917,9 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
           )
           return mla_mod.indexer_loss.get_value()
 
-        loss_g1, grads_g1 = nnx.value_and_grad(_sum_loss)(mla_g1)
-        loss_g3, grads_g3 = nnx.value_and_grad(_sum_loss)(mla_g3)
+        sum_loss_and_grad = nnx.jit(nnx.value_and_grad(_sum_loss))
+        loss_g1, grads_g1 = sum_loss_and_grad(mla_g1)
+        loss_g3, grads_g3 = sum_loss_and_grad(mla_g3)
 
         self.assertTrue(np.isfinite(float(loss_g1)))
         self.assertGreater(float(loss_g1), 0.0)
@@ -959,29 +942,22 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
         # Also verify in the 6-layer unscanned Transformer (`FFSSFS`) that multi-layer group-normalized
         # distillation sows finite positive indexer_loss on every served layer while routing non-zero
         # gradients exclusively into the Full donor layers {0, 1, 4}.
-        mt_unscan = models.Transformer(
-            cfg,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg),
-            rngs=nnx.Rngs(params=41, dropout=42),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
+        mt_unscan = _build_transformer(cfg, mesh, 41, 42, common_types.MODEL_MODE_TRAIN)
         toks = jnp.asarray(np.arange(batch_size * seq_len, dtype=np.int32).reshape(batch_size, seq_len) % 64)
 
         def _layer_mod(m, idx):
           return getattr(m.decoder, f"dense_layers_{idx}" if idx < 2 else f"moe_layers_{idx - 2}")
 
-        def _total_indexer_loss(m):
+        def _weighted_indexer_loss(m, layer_weights):
           _ = m(toks, pos, decoder_segment_ids=seg, enable_dropout=False, model_mode=common_types.MODEL_MODE_TRAIN)
-          losses = [_layer_mod(m, i).self_attention.indexer_loss.get_value() for i in range(6)]
-          return sum(losses)
+          losses = jnp.stack([_layer_mod(m, i).self_attention.indexer_loss.get_value() for i in range(6)])
+          return jnp.dot(layer_weights, losses)
 
-        def _layer1_only_indexer_loss(m):
-          _ = m(toks, pos, decoder_segment_ids=seg, enable_dropout=False, model_mode=common_types.MODEL_MODE_TRAIN)
-          return _layer_mod(m, 1).self_attention.indexer_loss.get_value()
-
-        total_idx_loss, full_grads = nnx.value_and_grad(_total_indexer_loss)(mt_unscan)
-        _, l1_only_grads = nnx.value_and_grad(_layer1_only_indexer_loss)(mt_unscan)
+        # The target layers are a traced weight vector so one compile serves both gradients: all-ones is the total
+        # loss, one-hot(1) is layer 1's loss alone (the zero-weighted layers contribute exactly zero gradient).
+        weighted_loss_and_grad = nnx.jit(nnx.value_and_grad(_weighted_indexer_loss))
+        total_idx_loss, full_grads = weighted_loss_and_grad(mt_unscan, jnp.ones((6,), jnp.float32))
+        _, l1_only_grads = weighted_loss_and_grad(mt_unscan, jax.nn.one_hot(1, 6, dtype=jnp.float32))
         self.assertTrue(np.isfinite(float(total_idx_loss)))
         self.assertGreater(float(total_idx_loss), 0.0)
 
@@ -1059,13 +1035,7 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
       targets_np = rng_np.integers(0, 64, size=(batch_size, seq_len), dtype=np.int32)
 
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_zero.logical_axis_rules):
-        mt_zero = models.Transformer(
-            cfg_zero,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_zero),
-            rngs=nnx.Rngs(params=51, dropout=52),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
+        mt_zero = _build_transformer(cfg_zero, mesh, 51, 52, common_types.MODEL_MODE_TRAIN)
         gate_var = mt_zero.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate
         self.assertIsInstance(gate_var.bias, moe.MoEBiasVar)
         # L_moe=4 != num_experts=6 guarantees axis-0 scan stacking [4, 6] is verified unambiguously.
@@ -1088,7 +1058,10 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
             "targets_position": pos,
             "targets_segmentation": seg,
         }
-        new_zero_state, _ = pre_train.train_step(ts_zero_gdef, cfg_zero, None, None, ts_zero_state, batch)
+        # Jitted: an eager train_step runs forward, backward and the optimizer op by op.
+        new_zero_state, _ = jax.jit(functools.partial(pre_train.train_step, ts_zero_gdef, cfg_zero, None, None))(
+            ts_zero_state, batch
+        )
         updated_zero = nnx.merge(ts_zero_gdef, new_zero_state)
         after_zero_bias = np.asarray(
             updated_zero.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias.get_value()
@@ -1113,18 +1086,14 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
           )
       )
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_pos.logical_axis_rules):
-        mt_pos = models.Transformer(
-            cfg_pos,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_pos),
-            rngs=nnx.Rngs(params=51, dropout=52),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
+        mt_pos = _build_transformer(cfg_pos, mesh, 51, 52, common_types.MODEL_MODE_TRAIN)
         mt_pos.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias.set_value(jnp.asarray(init_bias))
         opt_pos = nnx.Optimizer(mt_pos, optax.adamw(learning_rate=1e-2, weight_decay=0.1), wrt=nnx.Param)
         ts_pos = train_state_nnx.TrainStateNNX(mt_pos, opt_pos)
         ts_pos_gdef, ts_pos_state = nnx.split(ts_pos)
-        new_pos_state, _ = pre_train.train_step(ts_pos_gdef, cfg_pos, None, None, ts_pos_state, batch)
+        new_pos_state, _ = jax.jit(functools.partial(pre_train.train_step, ts_pos_gdef, cfg_pos, None, None))(
+            ts_pos_state, batch
+        )
         updated_pos = nnx.merge(ts_pos_gdef, new_pos_state)
         after_pos_bias = np.asarray(
             updated_pos.model.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias.get_value()
@@ -1291,46 +1260,14 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
       first_dense = cfg_scan.first_num_dense_layers
 
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_scan.logical_axis_rules):
-        m_clean = models.Transformer(
-            cfg_scan,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_scan),
-            rngs=nnx.Rngs(params=3, dropout=4),
-            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-        )
-        m_poisoned = models.Transformer(
-            cfg_scan,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_scan),
-            rngs=nnx.Rngs(params=13, dropout=14),
-            model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-        )
-        nnx.update(m_poisoned, nnx.state(m_clean, nnx.Param))
-        m_poisoned.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias.set_value(
-            m_clean.decoder.moe_layers.DeepSeekMoeBlock_0.MoeBlock_0.gate.bias.get_value()
-        )
+        m_clean = _build_transformer(cfg_scan, mesh, 3, 4, common_types.MODEL_MODE_AUTOREGRESSIVE)
+        m_poisoned = nnx.clone(m_clean)
 
         prompt = jnp.asarray(prompt_np)
         p_pos = jnp.broadcast_to(jnp.arange(4, dtype=jnp.int32), (batch_size, 4))
         p_seg = jnp.ones((batch_size, 4), dtype=jnp.int32)
-        prefill_clean = np.asarray(
-            m_clean(
-                prompt,
-                p_pos,
-                decoder_segment_ids=p_seg,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_PREFILL,
-            )
-        )
-        prefill_poisoned = np.asarray(
-            m_poisoned(
-                prompt,
-                p_pos,
-                decoder_segment_ids=p_seg,
-                enable_dropout=False,
-                model_mode=common_types.MODEL_MODE_PREFILL,
-            )
-        )
+        prefill_clean = np.asarray(_jit_model_call(m_clean, prompt, p_pos, p_seg, common_types.MODEL_MODE_PREFILL))
+        prefill_poisoned = np.asarray(_jit_model_call(m_poisoned, prompt, p_pos, p_seg, common_types.MODEL_MODE_PREFILL))
         self.assertTrue(np.all(np.isfinite(prefill_poisoned)))
         np.testing.assert_allclose(prefill_poisoned, prefill_clean, rtol=0.0, atol=0.0)
 
@@ -1361,19 +1298,9 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
         # Steps 4, 5, 6 cross into kv_len=5, 6, 7 (> indexer_topk=4), where Full layers read IndexerKVCache_0.
         for step_pos in range(4, 7):
           s_pos = jnp.full((batch_size, 1), step_pos, dtype=jnp.int32)
-          step_clean = m_clean(
-              next_tok_clean,
-              s_pos,
-              decoder_segment_ids=None,
-              enable_dropout=False,
-              model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
-          )
-          step_poisoned = m_poisoned(
-              next_tok_poisoned,
-              s_pos,
-              decoder_segment_ids=None,
-              enable_dropout=False,
-              model_mode=common_types.MODEL_MODE_AUTOREGRESSIVE,
+          step_clean = _jit_model_call(m_clean, next_tok_clean, s_pos, None, common_types.MODEL_MODE_AUTOREGRESSIVE)
+          step_poisoned = _jit_model_call(
+              m_poisoned, next_tok_poisoned, s_pos, None, common_types.MODEL_MODE_AUTOREGRESSIVE
           )
           ar_logits_clean.append(np.asarray(step_clean[:, 0, :]))
           ar_logits_poisoned.append(np.asarray(step_poisoned[:, 0, :]))
@@ -1392,6 +1319,11 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
       np.testing.assert_allclose(stacked_poisoned, stacked_clean, rtol=0.0, atol=0.0)
       np.testing.assert_array_equal(np.concatenate(ar_tokens_poisoned, axis=1), np.concatenate(ar_tokens_clean, axis=1))
 
+  # Slow (~3-7 min on CI CPU). Donor-gradient routing stays on every PR via
+  # test_group_normalized_indexer_loss_and_gradients (unscanned) and the scanned-vs-unscanned seq_gt_topk parity
+  # test (scanned indexer grads, zero Shared-layer indexer grads). The scanned remat_policy=full parity check runs
+  # only here.
+  @pytest.mark.scheduled_only
   def test_shared_layer_indexer_loss_and_donor_gradient_routing(self):
     """Verifies S-layer KL loss positivity, donor-only grad routing (scanned & unscanned), and CPU remat compile."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -1426,34 +1358,10 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
       targets_np = rng_np.integers(0, 64, size=(batch_size, seq_len), dtype=np.int32)
 
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_scan.logical_axis_rules):
-        mt_scan = models.Transformer(
-            cfg_scan,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_scan),
-            rngs=nnx.Rngs(params=61, dropout=62),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
-        mt_scan_remat = models.Transformer(
-            cfg_scan_remat,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_scan_remat),
-            rngs=nnx.Rngs(params=63, dropout=64),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
-        mt_unscan_pruned = models.Transformer(
-            cfg_unscan_pruned,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_unscan_pruned),
-            rngs=nnx.Rngs(params=65, dropout=66),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
-        mt_unscan_retained = models.Transformer(
-            cfg_unscan_retained,
-            mesh=mesh,
-            quant=quantizations.configure_quantization(cfg_unscan_retained),
-            rngs=nnx.Rngs(params=67, dropout=68),
-            model_mode=common_types.MODEL_MODE_TRAIN,
-        )
+        mt_scan = _build_transformer(cfg_scan, mesh, 61, 62, common_types.MODEL_MODE_TRAIN)
+        mt_scan_remat = _build_transformer(cfg_scan_remat, mesh, 63, 64, common_types.MODEL_MODE_TRAIN)
+        mt_unscan_pruned = _build_transformer(cfg_unscan_pruned, mesh, 65, 66, common_types.MODEL_MODE_TRAIN)
+        mt_unscan_retained = _build_transformer(cfg_unscan_retained, mesh, 67, 68, common_types.MODEL_MODE_TRAIN)
 
         nnx.update(mt_scan_remat, nnx.state(mt_scan, nnx.Param))
         _copy_scanned_to_unscanned_jax(mt_scan, mt_unscan_pruned, cfg_scan)
@@ -1474,20 +1382,54 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
         def _unscan_layer(m, idx: int):
           return getattr(m.decoder, f"dense_layers_{idx}" if idx < 2 else f"moe_layers_{idx - 2}")
 
+        def _scan_layer_losses(m):
+          """Returns (all 6 per-layer losses, per-scan-group stacked losses)."""
+          groups = (
+              m.decoder.dense_layers.self_attention.indexer_loss.get_value(),
+              m.decoder.moe_layers.self_attention.indexer_loss.get_value(),
+          )
+          return jnp.concatenate(groups, axis=0), groups
+
+        def _unscan_layer_losses(m):
+          return jnp.stack([_unscan_layer(m, i).self_attention.indexer_loss.get_value() for i in range(6)]), None
+
+        def _single_layer_loss_and_grad_fn(model_obj, layer_losses_fn):
+          """Returns a jitted `target_idx -> ((loss[target_idx], all per-layer losses), grads)`.
+
+          `target_idx` is traced, so each model compiles once for every target layer instead of differentiating
+          eagerly per target. Indexing gives the other layers exactly zero cotangent, so the gradient is that of
+          the target layer's sown loss alone.
+          """
+          nnx.pop(model_obj, nnx.Intermediate)
+          nnx.pop(model_obj, attention_mla.indexer_losses)
+          gdef, params, rest = nnx.split(model_obj, nnx.Param, ...)
+
+          def _fn(p, target_idx):
+            m = nnx.merge(gdef, p, rest, copy=True)
+            _ = m(toks, pos, decoder_segment_ids=seg, enable_dropout=False, model_mode=common_types.MODEL_MODE_TRAIN)
+            layer_losses, groups = layer_losses_fn(m)
+            return layer_losses[target_idx], (layer_losses, groups)
+
+          grad_fn = jax.jit(jax.value_and_grad(_fn, has_aux=True))
+          return lambda target_idx: grad_fn(params, jnp.int32(target_idx))
+
+        loss_and_grad_sc = _single_layer_loss_and_grad_fn(mt_scan, _scan_layer_losses)
+        loss_and_grad_up = _single_layer_loss_and_grad_fn(mt_unscan_pruned, _unscan_layer_losses)
+        loss_and_grad_ur = _single_layer_loss_and_grad_fn(mt_unscan_retained, _unscan_layer_losses)
+        first_s_idx = 3
+        first_results = {
+            "sc": loss_and_grad_sc(first_s_idx),
+            "up": loss_and_grad_up(first_s_idx),
+            "ur": loss_and_grad_ur(first_s_idx),
+        }
+
         # 1. Verify scanned `indexer_losses` stacks per-layer scalars along axis 0 and every S layer has loss > 0.
-        _ = mt_scan(toks, pos, decoder_segment_ids=seg, enable_dropout=False, model_mode=common_types.MODEL_MODE_TRAIN)
-        _ = mt_unscan_pruned(
-            toks, pos, decoder_segment_ids=seg, enable_dropout=False, model_mode=common_types.MODEL_MODE_TRAIN
-        )
-        dense_losses_scan = np.asarray(mt_scan.decoder.dense_layers.self_attention.indexer_loss.get_value())
-        moe_losses_scan = np.asarray(mt_scan.decoder.moe_layers.self_attention.indexer_loss.get_value())
+        # The per-layer losses come from the forward pass inside the first gradient call.
+        all_losses_scan = np.asarray(first_results["sc"][0][1][0])
+        dense_losses_scan, moe_losses_scan = first_results["sc"][0][1][1]
+        all_losses_unscan = np.asarray(first_results["up"][0][1][0], dtype=np.float32)
         self.assertEqual(dense_losses_scan.shape, (2,))
         self.assertEqual(moe_losses_scan.shape, (4,))
-        all_losses_scan = np.concatenate([dense_losses_scan, moe_losses_scan], axis=0)
-        all_losses_unscan = np.asarray(
-            [float(_unscan_layer(mt_unscan_pruned, i).self_attention.indexer_loss.get_value()) for i in range(6)],
-            dtype=np.float32,
-        )
         np.testing.assert_allclose(all_losses_scan, all_losses_unscan, rtol=1e-5, atol=1e-6)
         for s_idx in (2, 3, 5):
           self.assertTrue(np.isfinite(float(all_losses_scan[s_idx])))
@@ -1495,32 +1437,6 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
           self.assertGreater(float(all_losses_unscan[s_idx]), 0.0)
 
         # 2. Differentiate ONE Shared layer's sown loss alone on both scanned and unscanned paths.
-        def _single_layer_loss_and_grad_scan(model_obj, target_idx: int):
-          nnx.pop(model_obj, nnx.Intermediate)
-          nnx.pop(model_obj, attention_mla.indexer_losses)
-          gdef, params, rest = nnx.split(model_obj, nnx.Param, ...)
-
-          def _fn(p):
-            m = nnx.merge(gdef, p, rest, copy=True)
-            _ = m(toks, pos, decoder_segment_ids=seg, enable_dropout=False, model_mode=common_types.MODEL_MODE_TRAIN)
-            if target_idx < 2:
-              return m.decoder.dense_layers.self_attention.indexer_loss.get_value()[target_idx]
-            return m.decoder.moe_layers.self_attention.indexer_loss.get_value()[target_idx - 2]
-
-          return jax.value_and_grad(_fn)(params)
-
-        def _single_layer_loss_and_grad_unscan(model_obj, target_idx: int):
-          nnx.pop(model_obj, nnx.Intermediate)
-          nnx.pop(model_obj, attention_mla.indexer_losses)
-          gdef, params, rest = nnx.split(model_obj, nnx.Param, ...)
-
-          def _fn(p):
-            m = nnx.merge(gdef, p, rest, copy=True)
-            _ = m(toks, pos, decoder_segment_ids=seg, enable_dropout=False, model_mode=common_types.MODEL_MODE_TRAIN)
-            return _unscan_layer(m, target_idx).self_attention.indexer_loss.get_value()
-
-          return jax.value_and_grad(_fn)(params)
-
         def _scan_indexer_grads(grads_tree, layer_idx: int) -> dict[str, np.ndarray]:
           grp = "dense_layers" if layer_idx < 2 else "moe_layers"
           local_i = layer_idx if layer_idx < 2 else layer_idx - 2
@@ -1548,10 +1464,14 @@ class Glm5IndexSharePureJaxTest(parameterized.TestCase):
           }
 
         # Test both cross-scan-group (S layer 3 -> Dense donor 1) and intra-scan-group (S layer 5 -> MoE donor 4).
-        for s_idx, donor_idx in ((3, 1), (5, 4)):
-          s_loss_sc, grads_sc = _single_layer_loss_and_grad_scan(mt_scan, s_idx)
-          s_loss_up, grads_up = _single_layer_loss_and_grad_unscan(mt_unscan_pruned, s_idx)
-          s_loss_ur, grads_ur = _single_layer_loss_and_grad_unscan(mt_unscan_retained, s_idx)
+        for s_idx, donor_idx in ((first_s_idx, 1), (5, 4)):
+          if s_idx == first_s_idx:
+            results = first_results
+          else:
+            results = {"sc": loss_and_grad_sc(s_idx), "up": loss_and_grad_up(s_idx), "ur": loss_and_grad_ur(s_idx)}
+          (s_loss_sc, _), grads_sc = results["sc"]
+          (s_loss_up, _), grads_up = results["up"]
+          (s_loss_ur, _), grads_ur = results["ur"]
 
           self.assertGreater(float(s_loss_sc), 0.0)
           self.assertGreater(float(s_loss_up), 0.0)

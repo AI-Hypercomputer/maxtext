@@ -49,6 +49,7 @@ from maxtext.m3.models.granitemoe import modeling_granitemoe
 from maxtext.m3.models.granitemoe import utils_granitemoe
 import numpy as np
 import optax
+import pytest
 
 try:
   import torch
@@ -298,11 +299,15 @@ class GraniteMoeConformanceTest(absltest.TestCase):
 
     nnx.update(model_unroll, nnx.clone(nnx.state(model_scan)))
     tokens = jax.random.randint(jax.random.PRNGKey(7), (2, 12), 0, cfg_scan.vocab_size)
+    # Jitted forwards: eager dispatch of the unrolled layers is much slower than one compile per variant.
+    fwd = nnx.jit(lambda m, t: m(t))
+    fwd_aux = nnx.jit(lambda m, t: m(t, return_aux=True))
+    fwd_train = nnx.jit(lambda m, t, r: m(t, deterministic=False, dropout_rng=r))
     with jax.sharding.set_mesh(mesh):
-      default_logits = model_scan(tokens)
+      default_logits = fwd(model_scan, tokens)
       self.assertIsInstance(default_logits, jax.Array)
-      logits_scan, aux_scan = model_scan(tokens, return_aux=True)
-      logits_unroll, aux_unroll = model_unroll(tokens, return_aux=True)
+      logits_scan, aux_scan = fwd_aux(model_scan, tokens)
+      logits_unroll, aux_unroll = fwd_aux(model_unroll, tokens)
 
     np.testing.assert_allclose(np.asarray(logits_scan), np.asarray(logits_unroll), rtol=1e-5, atol=1e-5)
     np.testing.assert_allclose(
@@ -319,9 +324,9 @@ class GraniteMoeConformanceTest(absltest.TestCase):
     nnx.update(drop_scan, nnx.clone(nnx.state(model_scan)))
     nnx.update(drop_unroll, nnx.clone(nnx.state(model_scan)))
     with jax.sharding.set_mesh(mesh):
-      det_out = drop_scan(tokens, deterministic=True)
-      train_scan = drop_scan(tokens, deterministic=False, dropout_rng=jax.random.PRNGKey(77))
-      train_unroll = drop_unroll(tokens, deterministic=False, dropout_rng=jax.random.PRNGKey(77))
+      det_out = fwd(drop_scan, tokens)
+      train_scan = fwd_train(drop_scan, tokens, jax.random.PRNGKey(77))
+      train_unroll = fwd_train(drop_unroll, tokens, jax.random.PRNGKey(77))
     np.testing.assert_allclose(np.asarray(det_out), np.asarray(logits_scan), rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(np.asarray(train_scan), np.asarray(train_unroll), rtol=1e-5, atol=1e-5)
     self.assertGreater(float(np.max(np.abs(np.asarray(train_scan) - np.asarray(det_out)))), 1e-4)
@@ -341,11 +346,13 @@ class GraniteMoeConformanceTest(absltest.TestCase):
     mask = jnp.ones((4, 16), dtype=jnp.int32)
 
     with jax.sharding.set_mesh(mesh):
-      (loss, aux), grads = nnx.value_and_grad(
-          lambda m: modeling_granitemoe.compute_granitemoe_loss(
-              m, tokens=tokens, decoder_target_tokens=targets, decoder_target_mask=mask
-          ),
-          has_aux=True,
+      (loss, aux), grads = nnx.jit(
+          nnx.value_and_grad(
+              lambda m: modeling_granitemoe.compute_granitemoe_loss(
+                  m, tokens=tokens, decoder_target_tokens=targets, decoder_target_mask=mask
+              ),
+              has_aux=True,
+          )
       )(model)
 
     self.assertTrue(bool(np.isfinite(np.asarray(loss))))
@@ -377,6 +384,8 @@ class GraniteMoeConformanceTest(absltest.TestCase):
     targets = jax.random.randint(jax.random.PRNGKey(22), (2, 10), 0, 256)
     mask = jnp.ones((2, 10), dtype=jnp.int32)
 
+    # Jitted: one compile per (scan, remat) variant instead of eager op-by-op value_and_grad.
+    @nnx.jit
     def _eval_loss_and_grads(mod: modeling_granitemoe.GraniteMoeModel):
       return nnx.value_and_grad(
           lambda m: modeling_granitemoe.compute_granitemoe_loss(
@@ -430,11 +439,13 @@ class GraniteMoeConformanceTest(absltest.TestCase):
     tokens_b = jnp.array([[1, 2, 3, 4, 99, 100, 101, 102]], dtype=jnp.int32)
     pad_mask = jnp.array([[1, 1, 1, 1, 0, 0, 0, 0]], dtype=jnp.int32)
 
+    # Jitted forwards/losses: eager op-by-op dispatch dominated this test's runtime.
+    fwd_aux = nnx.jit(lambda m, t, am: m(t, attention_mask=am, return_aux=True))
     with jax.sharding.set_mesh(mesh):
-      _, aux_a = model(tokens_a, attention_mask=pad_mask, return_aux=True)
-      _, aux_b = model(tokens_b, attention_mask=pad_mask, return_aux=True)
-      _, aux_unmasked_a = model(tokens_a, return_aux=True)
-      _, aux_unmasked = model(tokens_b, return_aux=True)
+      _, aux_a = fwd_aux(model, tokens_a, pad_mask)
+      _, aux_b = fwd_aux(model, tokens_b, pad_mask)
+      _, aux_unmasked_a = fwd_aux(model, tokens_a, None)
+      _, aux_unmasked = fwd_aux(model, tokens_b, None)
 
     self.assertEqual(set(aux_a.keys()), {"moe_lb_loss"})
     self.assertGreater(float(aux_a["moe_lb_loss"]), 0.0)
@@ -446,13 +457,14 @@ class GraniteMoeConformanceTest(absltest.TestCase):
     # `decoder_segment_ids=None`) masks ONLY CE loss without altering `moe_lb_loss` or blinding response to prompt!
     sft_target_mask = jnp.array([[0, 0, 0, 0, 1, 1, 1, 1]], dtype=jnp.int32)
     tokens_alt_prompt = jnp.array([[91, 92, 93, 94, 5, 6, 7, 8]], dtype=jnp.int32)
+    sft_loss = nnx.jit(
+        lambda m, t: modeling_granitemoe.compute_granitemoe_loss(
+            m, tokens=t, decoder_target_tokens=tokens_b, decoder_target_mask=sft_target_mask
+        )
+    )
     with jax.sharding.set_mesh(mesh):
-      _, sft_aux_1 = modeling_granitemoe.compute_granitemoe_loss(
-          model, tokens=tokens_a, decoder_target_tokens=tokens_b, decoder_target_mask=sft_target_mask
-      )
-      _, sft_aux_2 = modeling_granitemoe.compute_granitemoe_loss(
-          model, tokens=tokens_alt_prompt, decoder_target_tokens=tokens_b, decoder_target_mask=sft_target_mask
-      )
+      _, sft_aux_1 = sft_loss(model, tokens_a)
+      _, sft_aux_2 = sft_loss(model, tokens_alt_prompt)
     self.assertAlmostEqual(float(sft_aux_1["total_weights"]), 4.0, places=6)
     np.testing.assert_allclose(
         np.asarray(sft_aux_1["moe_lb_loss"]), np.asarray(aux_unmasked_a["moe_lb_loss"]), rtol=1e-6, atol=1e-6
@@ -498,8 +510,8 @@ class GraniteMoeConformanceTest(absltest.TestCase):
       return wm.unreduced_sum / jnp.maximum(wm.denominator, 1.0), aux_d
 
     with jax.sharding.set_mesh(mesh):
-      (_, aux_z), grads_z = nnx.value_and_grad(lambda m: _engine_scalar_loss(m, cfg_zero), has_aux=True)(model)
-      (_, aux_p), grads_p = nnx.value_and_grad(lambda m: _engine_scalar_loss(m, cfg_pos), has_aux=True)(model)
+      (_, aux_z), grads_z = nnx.jit(nnx.value_and_grad(lambda m: _engine_scalar_loss(m, cfg_zero), has_aux=True))(model)
+      (_, aux_p), grads_p = nnx.jit(nnx.value_and_grad(lambda m: _engine_scalar_loss(m, cfg_pos), has_aux=True))(model)
 
     self.assertGreater(float(aux_z["moe_lb_loss"]), 0.0)
     self.assertGreater(float(aux_p["moe_lb_loss"]), 0.0)
@@ -616,82 +628,103 @@ class GraniteMoeConformanceTest(absltest.TestCase):
     self.assertIn("tensor", seen_axes)
 
   def test_gate9_kv_cache_prefill_decode_and_segment_mask_equivalence(self):
-    # Verify on a 4-device sharded mesh with B=1 to also exercise the small-T decode fallback!
+    # `forward_with_details` slices and restacks the KV cache separately in its scan and unrolled branches, so both
+    # run the prefill/decode equivalence on PRs. Mask and segment handling is shared per-layer attention code; the
+    # unscanned re-run of those checks is nightly-only.
+    self._run_gate9_kv_cache_equivalence(scan_layers=True, mask_and_segment_checks=True)
+    self._run_gate9_kv_cache_equivalence(scan_layers=False, mask_and_segment_checks=False)
+
+  @pytest.mark.scheduled_only
+  def test_gate9_kv_cache_prefill_decode_and_segment_mask_equivalence_unscanned(self):
+    self._run_gate9_kv_cache_equivalence(scan_layers=False, mask_and_segment_checks=True)
+
+  def _run_gate9_kv_cache_equivalence(self, scan_layers: bool, mask_and_segment_checks: bool):
+    """Gate 9 on a 4-device sharded mesh with B=1, so the small-T decode fallback is exercised too."""
     mesh = m3_sharding.create_mesh(ici={"fsdp": 2, "tensor": 2}, devices=_get_devices(4))
-    for scan_layers in (True, False):
-      cfg = _make_mini_config(scan_layers=scan_layers)
-      model = modeling_granitemoe.create_granitemoe_model(cfg, mesh=mesh, rngs=nnx.Rngs(17))
-      seq = jax.random.randint(jax.random.PRNGKey(31), (1, 8), 0, cfg.vocab_size)
 
-      with jax.sharding.set_mesh(mesh):
-        full_logits = model(seq)
-        kv_cache = modeling_granitemoe.init_kv_cache(
-            cfg, batch_size=1, max_seq_len=8, mesh=mesh, sharding=model.sharding  # type: ignore[arg-type]
-        )
-        prefill_out = model.forward_with_details(seq[:, :5], kv_cache=kv_cache, cache_position=0)
+    # Jit every forward: eager execution dispatches each op separately on the sharded mesh (minutes per mode).
+    # `cache_position` is a traced int32 scalar, so all decode steps (same (1, 1) token shape) share one compile.
+    @nnx.jit
+    def _forward(mdl, toks, segment_ids):
+      return mdl(toks, segment_ids=segment_ids)
+
+    @nnx.jit
+    def _forward_cached(mdl, toks, kv, cache_position, attention_mask, segment_ids):
+      out = mdl.forward_with_details(
+          toks, attention_mask=attention_mask, segment_ids=segment_ids, kv_cache=kv, cache_position=cache_position
+      )
+      return out.logits, out.kv_cache
+
+    def _pos(p: int) -> jax.Array:
+      return jnp.asarray(p, dtype=jnp.int32)
+
+    cfg = _make_mini_config(scan_layers=scan_layers)
+    model = modeling_granitemoe.create_granitemoe_model(cfg, mesh=mesh, rngs=nnx.Rngs(17))
+    seq = jax.random.randint(jax.random.PRNGKey(31), (1, 8), 0, cfg.vocab_size)
+
+    with jax.sharding.set_mesh(mesh):
+      full_logits = _forward(model, seq, None)
+      kv_cache = modeling_granitemoe.init_kv_cache(
+          cfg, batch_size=1, max_seq_len=8, mesh=mesh, sharding=model.sharding  # type: ignore[arg-type]
+      )
+      prefill_logits, prefill_kv = _forward_cached(model, seq[:, :5], kv_cache, _pos(0), None, None)
+      if mask_and_segment_checks:
         # Verify prefix-length `attention_mask` (cur_len=5 < max_seq_len=8) right-pads cleanly without broadcast error.
-        prefill_masked = model.forward_with_details(
-            seq[:, :5],
-            attention_mask=jnp.ones((1, 5), dtype=jnp.int32),
-            kv_cache=kv_cache,
-            cache_position=0,
+        prefill_masked_logits, _ = _forward_cached(
+            model, seq[:, :5], kv_cache, _pos(0), jnp.ones((1, 5), dtype=jnp.int32), None
         )
-        np.testing.assert_allclose(
-            np.asarray(prefill_masked.logits), np.asarray(prefill_out.logits), rtol=1e-6, atol=1e-6
-        )
-        kv_cache = prefill_out.kv_cache
-        step_logits = [prefill_out.logits]
-        for pos in range(5, 8):
-          dec_out = model.forward_with_details(seq[:, pos : pos + 1], kv_cache=kv_cache, cache_position=pos)
-          kv_cache = dec_out.kv_cache
-          step_logits.append(dec_out.logits)
-        cached_logits = jnp.concatenate(step_logits, axis=1)
+        np.testing.assert_allclose(np.asarray(prefill_masked_logits), np.asarray(prefill_logits), rtol=1e-6, atol=1e-6)
+      kv_cache = prefill_kv
+      step_logits = [prefill_logits]
+      for pos in range(5, 8):
+        dec_logits, kv_cache = _forward_cached(model, seq[:, pos : pos + 1], kv_cache, _pos(pos), None, None)
+        step_logits.append(dec_logits)
+      cached_logits = jnp.concatenate(step_logits, axis=1)
 
+    np.testing.assert_allclose(
+        np.asarray(cached_logits),
+        np.asarray(full_logits),
+        rtol=1e-5,
+        atol=1e-5,
+        err_msg=f"KV-cache decode mismatch for scan_layers={scan_layers}",
+    )
+
+    if not mask_and_segment_checks:
+      return
+
+    # Verify `segment_ids` handling in both non-cached and KV-cache modes:
+    # 1. Packed segments `[1,1,1,0,2,2,2,0]` never attend across segments OR to `segment_ids == 0` padding keys.
+    # 2. Mutating a padding token (`idx 3`, `segment_ids == 0`) does NOT change any valid token (`segment != 0`) OR
+    #    any later padding token (`idx 7`, `segment_ids == 0`) because `segment 0` keys are masked out.
+    packed_seg = jnp.array([[1, 1, 1, 0, 2, 2, 2, 0]], dtype=jnp.int32)
+    seq_pad_mut = seq.at[:, 3].set((seq[:, 3] + 17) % cfg.vocab_size)
+    with jax.sharding.set_mesh(mesh):
+      packed_full = _forward(model, seq, packed_seg)
+      packed_mut = _forward(model, seq_pad_mut, packed_seg)
       np.testing.assert_allclose(
-          np.asarray(cached_logits),
-          np.asarray(full_logits),
+          np.asarray(packed_full[:, [0, 1, 2, 4, 5, 6, 7]]),
+          np.asarray(packed_mut[:, [0, 1, 2, 4, 5, 6, 7]]),
           rtol=1e-5,
           atol=1e-5,
-          err_msg=f"KV-cache decode mismatch for scan_layers={scan_layers}",
       )
 
-      # Verify `segment_ids` handling in both non-cached and KV-cache modes:
-      # 1. Packed segments `[1,1,1,0,2,2,2,0]` never attend across segments OR to `segment_ids == 0` padding keys.
-      # 2. Mutating a padding token (`idx 3`, `segment_ids == 0`) does NOT change any valid token (`segment != 0`) OR
-      #    any later padding token (`idx 7`, `segment_ids == 0`) because `segment 0` keys are masked out.
-      packed_seg = jnp.array([[1, 1, 1, 0, 2, 2, 2, 0]], dtype=jnp.int32)
-      seq_pad_mut = seq.at[:, 3].set((seq[:, 3] + 17) % cfg.vocab_size)
-      with jax.sharding.set_mesh(mesh):
-        packed_full = model(seq, segment_ids=packed_seg)
-        packed_mut = model(seq_pad_mut, segment_ids=packed_seg)
-        np.testing.assert_allclose(
-            np.asarray(packed_full[:, [0, 1, 2, 4, 5, 6, 7]]),
-            np.asarray(packed_mut[:, [0, 1, 2, 4, 5, 6, 7]]),
-            rtol=1e-5,
-            atol=1e-5,
-        )
-
-        kv_seg = modeling_granitemoe.init_kv_cache(
-            cfg, batch_size=1, max_seq_len=8, mesh=mesh, sharding=model.sharding  # type: ignore[arg-type]
-        )
-        pf_seg = model.forward_with_details(seq[:, :5], segment_ids=packed_seg, kv_cache=kv_seg, cache_position=0)
-        kv_seg = pf_seg.kv_cache
-        seg_steps = [pf_seg.logits]
-        for pos in range(5, 8):
-          d_seg = model.forward_with_details(
-              seq[:, pos : pos + 1], segment_ids=packed_seg, kv_cache=kv_seg, cache_position=pos
-          )
-          kv_seg = d_seg.kv_cache
-          seg_steps.append(d_seg.logits)
-        cached_seg_logits = jnp.concatenate(seg_steps, axis=1)
-
-      np.testing.assert_allclose(
-          np.asarray(cached_seg_logits),
-          np.asarray(packed_full),
-          rtol=1e-5,
-          atol=1e-5,
-          err_msg=f"KV-cache segment_ids mismatch for scan_layers={scan_layers}",
+      kv_seg = modeling_granitemoe.init_kv_cache(
+          cfg, batch_size=1, max_seq_len=8, mesh=mesh, sharding=model.sharding  # type: ignore[arg-type]
       )
+      pf_seg_logits, kv_seg = _forward_cached(model, seq[:, :5], kv_seg, _pos(0), None, packed_seg)
+      seg_steps = [pf_seg_logits]
+      for pos in range(5, 8):
+        d_seg_logits, kv_seg = _forward_cached(model, seq[:, pos : pos + 1], kv_seg, _pos(pos), None, packed_seg)
+        seg_steps.append(d_seg_logits)
+      cached_seg_logits = jnp.concatenate(seg_steps, axis=1)
+
+    np.testing.assert_allclose(
+        np.asarray(cached_seg_logits),
+        np.asarray(packed_full),
+        rtol=1e-5,
+        atol=1e-5,
+        err_msg=f"KV-cache segment_ids mismatch for scan_layers={scan_layers}",
+    )
 
   def test_gate10_centralized_checkpoint_mappings_and_roundtrip_completeness(self):
     # 1. Verify centralized registry wiring (`PARAM_MAPPING`, `HOOK_FNS`, `HF_SHAPE`) against
@@ -827,7 +860,29 @@ class GraniteMoeConformanceTest(absltest.TestCase):
         with self.assertRaises(KeyError):
           checkpoint_mappings_granitemoe.hf_weights_to_m3_pure_dict(bad_missing, cfg)
 
-  def test_check8_multi_mesh_zero_expert_all_gather_and_8dev_compound_parity(self):
+  def test_check8_multi_mesh_zero_expert_all_gather_and_grad_parity(self):
+    # PR-time meshes: fsdp2_tp2 (the driver mesh) and tp2_ep2 together cover the fsdp, tensor and expert axes.
+    self._run_check8_multi_mesh(
+        [
+            ("fsdp2_tp2", {"fsdp": 2, "tensor": 2}, 4),
+            ("tp2_ep2", {"tensor": 2, "expert": 2}, 4),
+        ]
+    )
+
+  @pytest.mark.scheduled_only
+  def test_check8_remaining_meshes_and_8dev_compound_parity(self):
+    # Remaining meshes, including the 8-device compound mesh that re-runs this test in a subprocess.
+    self._run_check8_multi_mesh(
+        [
+            ("fsdp2_ep2", {"fsdp": 2, "expert": 2}, 4),
+            ("fsdp4", {"fsdp": 4}, 4),
+            ("dp2_fsdp2", {"data": 2, "fsdp": 2}, 4),
+            ("compound_fsdp2_tp2_ep2", {"fsdp": 2, "tensor": 2, "expert": 2}, 8),
+        ]
+    )
+
+  def _run_check8_multi_mesh(self, mesh_specs: list[tuple[str, dict[str, int], int]]):
+    """Check 8 on each `(name, mesh axes, device count)` in `mesh_specs` against a single-device reference."""
     # Reference single-device forward + backward values in fp32 (Precision.HIGHEST).
     cfg = _make_mini_config(scan_layers=True, router_aux_loss_coef=0.05)
     tokens_np = np.random.default_rng(7).integers(0, cfg.vocab_size, size=(8, 4), dtype=np.int32)
@@ -868,17 +923,8 @@ class GraniteMoeConformanceTest(absltest.TestCase):
         ref_grad_pure = jax.tree.map(np.asarray, ref_grads)
       ref_grad_flat = checkpoint_mappings_granitemoe._flatten_pure_dict(ref_grad_pure)  # pylint: disable=protected-access
 
-    mesh_specs: list[tuple[str, dict[str, int], int]] = [
-        ("fsdp2_tp2", {"fsdp": 2, "tensor": 2}, 4),
-        ("fsdp2_ep2", {"fsdp": 2, "expert": 2}, 4),
-        ("tp2_ep2", {"tensor": 2, "expert": 2}, 4),
-        ("fsdp4", {"fsdp": 4}, 4),
-        ("dp2_fsdp2", {"data": 2, "fsdp": 2}, 4),
-        ("compound_fsdp2_tp2_ep2", {"fsdp": 2, "tensor": 2, "expert": 2}, 8),
-    ]
-
     if only_8dev:
-      mesh_specs = [("compound_fsdp2_tp2_ep2", {"fsdp": 2, "tensor": 2, "expert": 2}, 8)]
+      mesh_specs = [ms for ms in mesh_specs if ms[2] > 4]
 
     avail_devs = max(len(jax.devices()), len(jax.devices("cpu")))
     for tag, ici, ndev in mesh_specs:
@@ -899,7 +945,7 @@ class GraniteMoeConformanceTest(absltest.TestCase):
               [
                   sys.executable,
                   os.path.abspath(__file__),
-                  "GraniteMoeConformanceTest.test_check8_multi_mesh_zero_expert_all_gather_and_8dev_compound_parity",
+                  f"GraniteMoeConformanceTest.{self._testMethodName}",
               ],
               env=child_env,
               capture_output=True,

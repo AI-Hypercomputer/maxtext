@@ -34,6 +34,25 @@ def _base_config_path() -> str:
   return os.path.join(os.path.dirname(pyconfig.__file__), "base.yml")
 
 
+# Jitted entry points: run eagerly, every op of the chunked recurrence is dispatched (and compiled) separately.
+_jit_delta_rule = jax.jit(
+    qwen3.jax_chunk_gated_delta_rule,
+    static_argnames=(
+        "chunk_size",
+        "use_qk_norm_in_gdn",
+        "cp_axis",
+        "compute_dtype",
+        "has_initial_state",
+        "chunk_inverse",
+    ),
+)
+
+
+@functools.partial(nnx.jit, static_argnames="model_mode")
+def _call_layer(layer, x, segment_ids, model_mode=MODEL_MODE_TRAIN):
+  return layer(x, model_mode=model_mode, decoder_segment_ids=segment_ids)
+
+
 class GdnPureJaxPackingTest(unittest.TestCase):
   """Verifies block-doubling inverse, segmented Conv1D, packed recurrence, and packing=False guards."""
 
@@ -45,8 +64,10 @@ class GdnPureJaxPackingTest(unittest.TestCase):
       s_mat = jnp.where(mask, raw, 0.0)
       eye = jnp.broadcast_to(jnp.eye(chunk_size, dtype=jnp.float32), s_mat.shape)
 
-      got = gdn_packing.block_doubling_unit_lower_inverse(s_mat, chunk_size)
-      ref = jax.scipy.linalg.solve_triangular(eye + s_mat, eye, lower=True, unit_diagonal=True)
+      got = jax.jit(gdn_packing.block_doubling_unit_lower_inverse, static_argnums=1)(s_mat, chunk_size)
+      ref = jax.jit(functools.partial(jax.scipy.linalg.solve_triangular, lower=True, unit_diagonal=True))(
+          eye + s_mat, eye
+      )
       np.testing.assert_allclose(got, ref, rtol=1e-5, atol=1e-5)
 
       prod = jnp.matmul(eye + s_mat, got, precision=jax.lax.Precision.HIGHEST)
@@ -76,7 +97,7 @@ class GdnPureJaxPackingTest(unittest.TestCase):
         )
         return jnp.sum(out**2), out
 
-      (_, out), grads = jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3, 4), has_aux=True)(q, k, v, g, beta)
+      (_, out), grads = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1, 2, 3, 4), has_aux=True))(q, k, v, g, beta)
       return out, grads
 
     out_bd, grads_bd = run("block_doubling")
@@ -250,7 +271,7 @@ class GdnPureJaxPackingTest(unittest.TestCase):
         dtype=jnp.int32,
     )
 
-    out_packed, final_packed = qwen3.jax_chunk_gated_delta_rule(
+    out_packed, final_packed = _jit_delta_rule(
         q_pack,
         k_pack,
         v_pack,
@@ -264,21 +285,21 @@ class GdnPureJaxPackingTest(unittest.TestCase):
         has_initial_state=True,
     )
 
-    out0, _ = qwen3.jax_chunk_gated_delta_rule(
+    out0, _ = _jit_delta_rule(
         *docs[0],
         chunk_size=chunk_size,
         initial_state=init_h,
         use_qk_norm_in_gdn=True,
         compute_dtype=jnp.float32,
     )
-    out1, _ = qwen3.jax_chunk_gated_delta_rule(
+    out1, _ = _jit_delta_rule(
         *docs[1],
         chunk_size=chunk_size,
         initial_state=None,
         use_qk_norm_in_gdn=True,
         compute_dtype=jnp.float32,
     )
-    out2, final2 = qwen3.jax_chunk_gated_delta_rule(
+    out2, final2 = _jit_delta_rule(
         *docs[2],
         chunk_size=chunk_size,
         initial_state=jnp.zeros_like(init_h),
@@ -330,33 +351,37 @@ class GdnPureJaxPackingTest(unittest.TestCase):
             has_initial_state=True,
         )
 
-      out_cp, final_cp = cp_fn(q_pack, k_pack, v_pack, g_pack, b_pack, init_h, seg_ids)
+      out_cp, final_cp = jax.jit(cp_fn)(q_pack, k_pack, v_pack, g_pack, b_pack, init_h, seg_ids)
       np.testing.assert_allclose(out_cp, out_packed, rtol=1e-5, atol=1e-5)
       np.testing.assert_allclose(final_cp, final_packed, rtol=1e-5, atol=1e-5)
 
       weights = jax.random.normal(jax.random.PRNGKey(99), out_packed.shape, dtype=jnp.float32)
-      grads_ref = jax.grad(
-          lambda q_, k_, v_, g_, b_, h0_: jnp.sum(
-              qwen3.jax_chunk_gated_delta_rule(
-                  q_,
-                  k_,
-                  v_,
-                  g_,
-                  b_,
-                  chunk_size=chunk_size,
-                  initial_state=h0_,
-                  use_qk_norm_in_gdn=True,
-                  compute_dtype=jnp.float32,
-                  segment_ids=seg_ids,
-                  has_initial_state=True,
-              )[0]
-              * weights
-          ),
-          argnums=(0, 1, 2, 3, 4, 5),
+      grads_ref = jax.jit(
+          jax.grad(
+              lambda q_, k_, v_, g_, b_, h0_: jnp.sum(
+                  qwen3.jax_chunk_gated_delta_rule(
+                      q_,
+                      k_,
+                      v_,
+                      g_,
+                      b_,
+                      chunk_size=chunk_size,
+                      initial_state=h0_,
+                      use_qk_norm_in_gdn=True,
+                      compute_dtype=jnp.float32,
+                      segment_ids=seg_ids,
+                      has_initial_state=True,
+                  )[0]
+                  * weights
+              ),
+              argnums=(0, 1, 2, 3, 4, 5),
+          )
       )(q_pack, k_pack, v_pack, g_pack, b_pack, init_h)
-      grads_cp = jax.grad(
-          lambda q_, k_, v_, g_, b_, h0_: jnp.sum(cp_fn(q_, k_, v_, g_, b_, h0_, seg_ids)[0] * weights),
-          argnums=(0, 1, 2, 3, 4, 5),
+      grads_cp = jax.jit(
+          jax.grad(
+              lambda q_, k_, v_, g_, b_, h0_: jnp.sum(cp_fn(q_, k_, v_, g_, b_, h0_, seg_ids)[0] * weights),
+              argnums=(0, 1, 2, 3, 4, 5),
+          )
       )(q_pack, k_pack, v_pack, g_pack, b_pack, init_h)
       for g_got, g_exp in zip(grads_cp, grads_ref):
         np.testing.assert_allclose(g_got, g_exp, rtol=1e-4, atol=1e-4)
@@ -398,17 +423,9 @@ class GdnPureJaxPackingTest(unittest.TestCase):
     packed_seg = jnp.array([[0, 0] + [1] * 9 + [0, 0] + [2] * 11 + [0] * 4], dtype=jnp.int32)
 
     with jax.set_mesh(mesh):
-      out_packed, _ = layer(packed_x, model_mode=MODEL_MODE_TRAIN, decoder_segment_ids=packed_seg)
-      out_doc1, _ = layer(
-          doc1,
-          model_mode=MODEL_MODE_TRAIN,
-          decoder_segment_ids=jnp.ones((1, 9), dtype=jnp.int32),
-      )
-      out_doc2, _ = layer(
-          doc2,
-          model_mode=MODEL_MODE_TRAIN,
-          decoder_segment_ids=jnp.ones((1, 11), dtype=jnp.int32),
-      )
+      out_packed, _ = _call_layer(layer, packed_x, packed_seg)
+      out_doc1, _ = _call_layer(layer, doc1, jnp.ones((1, 9), dtype=jnp.int32))
+      out_doc2, _ = _call_layer(layer, doc2, jnp.ones((1, 11), dtype=jnp.int32))
 
       np.testing.assert_allclose(out_packed[:, 2:11], out_doc1, rtol=1e-5, atol=1e-5)
       np.testing.assert_allclose(out_packed[:, 13:24], out_doc2, rtol=1e-5, atol=1e-5)
@@ -431,8 +448,8 @@ class GdnPureJaxPackingTest(unittest.TestCase):
           rngs=nnx.Rngs(params=0),
       )
       nnx.update(layer_unpacked, nnx.state(layer))
-      out_single_packed, _ = layer(single_x, model_mode=MODEL_MODE_TRAIN, decoder_segment_ids=single_seg)
-      out_single_unpacked, _ = layer_unpacked(single_x, model_mode=MODEL_MODE_TRAIN, decoder_segment_ids=single_seg)
+      out_single_packed, _ = _call_layer(layer, single_x, single_seg)
+      out_single_unpacked, _ = _call_layer(layer_unpacked, single_x, single_seg)
       np.testing.assert_array_equal(out_single_unpacked[:, :2], 0.0)
       np.testing.assert_allclose(out_single_unpacked[:, 2:11], out_single_packed[:, 2:11], rtol=1e-5, atol=1e-5)
 
@@ -445,7 +462,7 @@ class GdnPureJaxPackingTest(unittest.TestCase):
           inputs_shape=single_x.shape,
       )
       nnx.update(layer_prefill, nnx.state(layer, nnx.Param))
-      out_prefill, cache = layer_prefill(single_x, model_mode=MODEL_MODE_PREFILL, decoder_segment_ids=single_seg)
+      out_prefill, cache = _call_layer(layer_prefill, single_x, single_seg, model_mode=MODEL_MODE_PREFILL)
       self.assertIsNotNone(cache)
       np.testing.assert_allclose(out_prefill[:, 2:11], out_doc1, rtol=1e-5, atol=1e-5)
 

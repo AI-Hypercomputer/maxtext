@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+import pytest
 from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
@@ -350,6 +351,12 @@ class PossiblyUnrollLoraParamsNNXTest(unittest.TestCase):
       )
 
 
+@nnx.jit
+def _jit_forward(model, ids, positions, segment_ids):
+  """Runs one deterministic forward pass under nnx.jit so CPU tests avoid op-by-op dispatch."""
+  return model(ids, positions, segment_ids, enable_dropout=False)
+
+
 class GLM5UnrollAndSaveNNXTest(unittest.TestCase):
   """Tests GLM-5 / GLM-5.2 unrolling, MoEBiasVar axis-0 slicing, IndexShare pruning, and decode restore."""
 
@@ -508,6 +515,11 @@ class GLM5UnrollAndSaveNNXTest(unittest.TestCase):
     self.assertEqual(full_moe_attn["indexer"]["weights_proj"]["kernel"]["value"].dtype, jnp.float32)
     self.assertNotIn("indexer", saved_dec["moe_layers_0"]["self_attention"])
 
+  # Slow (~2 min on CI CPU). On every PR, GLM-5 unroll + IndexShare pruning is covered by
+  # test_glm5_moebiasvar_axis0_and_alternating_index_share_pruning, the end-to-end save + from_pretrained restore
+  # by DeepSeekV32UnrollAndSaveNNXTest, and scanned vs pruned-unscanned GLM-5.2 logits parity by
+  # glm5_vs_reference_test. Restoring a pruned checkpoint into a pruned model runs only here.
+  @pytest.mark.scheduled_only
   def test_glm52_roundtrip_unroll_save_and_from_pretrained_restore(self):
     """End-to-end scanned GLM-5.2 -> unroll + prune + save -> unscanned pruned from_pretrained parity."""
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -542,6 +554,9 @@ class GLM5UnrollAndSaveNNXTest(unittest.TestCase):
           "activations_in_float32=true",
           "matmul_precision=highest",
           "async_checkpointing=false",
+          # Off TPU, megablox runs its Pallas GMM kernels in interpret mode; this test checks checkpoint
+          # unroll/restore, not the GMM kernel, and sparse_matmul keeps the routed path via jax.lax.ragged_dot.
+          "megablox=false",
       ]
       cfg_scanned = pyconfig.initialize(
           [
@@ -556,8 +571,10 @@ class GLM5UnrollAndSaveNNXTest(unittest.TestCase):
       )
       devices_array = maxtext_utils.create_device_mesh(cfg_scanned)
       mesh = Mesh(devices_array, cfg_scanned.mesh_axes)
-      rngs = nnx.Rngs(params=0, dropout=1, aqt=2)
-      scanned_model = model_creation_utils.from_config(cfg_scanned, mesh=mesh, rngs=rngs)
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_scanned.logical_axis_rules):
+        scanned_model = nnx.jit(
+            lambda: model_creation_utils.from_config(cfg_scanned, mesh=mesh, rngs=nnx.Rngs(params=0, dropout=1, aqt=2))
+        )()
 
       # Set distinct per-layer float32 routing biases so axis-0 slicing is verified end-to-end.
       expected_bias = jnp.asarray(
@@ -576,7 +593,7 @@ class GLM5UnrollAndSaveNNXTest(unittest.TestCase):
       segment_ids = jnp.full((batch_size, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR, dtype=jnp.int32)
 
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_scanned.logical_axis_rules):
-        scanned_logits = np.asarray(scanned_model(ids, positions, segment_ids, enable_dropout=False))
+        scanned_logits = np.asarray(_jit_forward(scanned_model, ids, positions, segment_ids))
 
       optimizer = nnx.Optimizer(scanned_model, optax.sgd(1e-3), wrt=nnx.Param)
       ts_state = train_state_nnx.TrainStateNNX(scanned_model, optimizer)
@@ -628,7 +645,7 @@ class GLM5UnrollAndSaveNNXTest(unittest.TestCase):
       )
 
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_unscanned.logical_axis_rules):
-        restored_logits = np.asarray(restored_model(ids, positions, segment_ids, enable_dropout=False))
+        restored_logits = np.asarray(_jit_forward(restored_model, ids, positions, segment_ids))
 
       np.testing.assert_allclose(restored_logits, scanned_logits, rtol=1e-4, atol=1e-4)
 
@@ -674,6 +691,9 @@ class DeepSeekV32UnrollAndSaveNNXTest(unittest.TestCase):
           "activations_in_float32=true",
           "matmul_precision=highest",
           "async_checkpointing=false",
+          # Off TPU, megablox runs its Pallas GMM kernels in interpret mode; this test checks checkpoint
+          # unroll/restore, not the GMM kernel, and sparse_matmul keeps the routed path via jax.lax.ragged_dot.
+          "megablox=false",
       ]
       cfg_scanned = pyconfig.initialize(
           [
@@ -688,8 +708,10 @@ class DeepSeekV32UnrollAndSaveNNXTest(unittest.TestCase):
       )
       devices_array = maxtext_utils.create_device_mesh(cfg_scanned)
       mesh = Mesh(devices_array, cfg_scanned.mesh_axes)
-      rngs = nnx.Rngs(params=0, dropout=1, aqt=2)
-      scanned_model = model_creation_utils.from_config(cfg_scanned, mesh=mesh, rngs=rngs)
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_scanned.logical_axis_rules):
+        scanned_model = nnx.jit(
+            lambda: model_creation_utils.from_config(cfg_scanned, mesh=mesh, rngs=nnx.Rngs(params=0, dropout=1, aqt=2))
+        )()
 
       expected_bias = jnp.asarray(
           [[34.62297 + 2.0 * l + 0.1 * e for e in range(4)] for l in range(3)],
@@ -704,7 +726,7 @@ class DeepSeekV32UnrollAndSaveNNXTest(unittest.TestCase):
       segment_ids = jnp.full((batch_size, seq_len), DECODING_ACTIVE_SEQUENCE_INDICATOR, dtype=jnp.int32)
 
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_scanned.logical_axis_rules):
-        scanned_logits = np.asarray(scanned_model(ids, positions, segment_ids, enable_dropout=False))
+        scanned_logits = np.asarray(_jit_forward(scanned_model, ids, positions, segment_ids))
 
       optimizer = nnx.Optimizer(scanned_model, optax.sgd(1e-3), wrt=nnx.Param)
       ts_state = train_state_nnx.TrainStateNNX(scanned_model, optimizer)
@@ -798,7 +820,7 @@ class DeepSeekV32UnrollAndSaveNNXTest(unittest.TestCase):
         self.assertEqual(restored_idx.weights_proj.kernel[...].dtype, jnp.float32)
 
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_unscanned.logical_axis_rules):
-        restored_logits = np.asarray(restored_model(ids, positions, segment_ids, enable_dropout=False))
+        restored_logits = np.asarray(_jit_forward(restored_model, ids, positions, segment_ids))
 
       np.testing.assert_allclose(restored_logits, scanned_logits, rtol=1e-4, atol=1e-4)
 

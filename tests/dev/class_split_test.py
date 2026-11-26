@@ -170,9 +170,9 @@ class DealGroupsTest(unittest.TestCase):
       deal_groups(["tests/a_test.py::A::t"], {}, 0)
 
 
-def _fake_config(splits, group, deselected):
+def _fake_config(splits, group, deselected, split_by="class"):
   """A stand-in for pytest's Config: options, a deselection hook that records, and no terminal reporter."""
-  options = {"class_splits": splits, "class_group": group}
+  options = {"class_splits": splits, "class_group": group, "class_split_by": split_by}
   return types.SimpleNamespace(
       getoption=options.get,
       hook=types.SimpleNamespace(
@@ -182,8 +182,13 @@ def _fake_config(splits, group, deselected):
   )
 
 
-def _fake_item(nodeid):
-  return types.SimpleNamespace(nodeid=nodeid)
+def _fake_item(nodeid, xdist_group=None):
+  def _get_closest_marker(name):
+    if name == "xdist_group" and xdist_group is not None:
+      return types.SimpleNamespace(args=(xdist_group,), kwargs={})
+    return None
+
+  return types.SimpleNamespace(nodeid=nodeid, get_closest_marker=_get_closest_marker)
 
 
 class ClassSplitPluginTest(unittest.TestCase):
@@ -272,6 +277,47 @@ class ClassSplitPluginTest(unittest.TestCase):
     self.assertEqual(len(lines), 2)
     self.assertIn("[class-split] warning: durations file", lines[0])
     self.assertEqual(lines[1], "[class-split] Running group 1/1: 1 tests in 1 classes, 0 with a recorded duration")
+
+  def test_xdist_group_mode_keeps_grouped_items_together_and_splits_ungrouped_class(self):
+    items = [
+        _fake_item("tests/a_test.py::Grouped::test_1", xdist_group="G"),
+        _fake_item("tests/a_test.py::Grouped::test_2", xdist_group="G"),
+        _fake_item("tests/b_test.py::Stateless::test_1"),
+        _fake_item("tests/b_test.py::Stateless::test_2"),
+        _fake_item("tests/b_test.py::Stateless::test_3"),
+    ]
+    durations = {
+        "tests/a_test.py::Grouped::test_1": 6.0,
+        "tests/a_test.py::Grouped::test_2": 6.0,
+        "tests/b_test.py::Stateless::test_1": 11.0,
+        "tests/b_test.py::Stateless::test_2": 10.0,
+        "tests/b_test.py::Stateless::test_3": 9.0,
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+      durations_path = os.path.join(tmpdir, ".test_durations")
+      with open(durations_path, "w", encoding="utf-8") as f:
+        json.dump(durations, f)
+      shard_items = []
+      for group_idx in (1, 2):
+        copy = list(items)
+        config = _fake_config(2, group_idx, [], split_by="xdist_group")
+        ClassSplitPlugin(config, durations_path=durations_path).pytest_collection_modifyitems(config, copy)
+        shard_items.append([i.nodeid for i in copy])
+
+    # Grouped (12 s total) stays together on shard 1; Stateless splits across both shards
+    # (test_1=11 s and test_2=10 s on shard 2, test_3=9 s on shard 1).
+    self.assertEqual(
+        shard_items[0],
+        [
+            "tests/a_test.py::Grouped::test_1",
+            "tests/a_test.py::Grouped::test_2",
+            "tests/b_test.py::Stateless::test_3",
+        ],
+    )
+    self.assertEqual(
+        shard_items[1],
+        ["tests/b_test.py::Stateless::test_1", "tests/b_test.py::Stateless::test_2"],
+    )
 
 
 # With no .test_durations file every test weighs 1. Once `-m "not integration_test"` has removed TestHeavy, TestA
@@ -365,6 +411,31 @@ class ClassSplitEndToEndTest(unittest.TestCase):
     for line in lines:
       self.assertTrue(line.startswith("[class-split]"), line)
     self.assertEqual(lines[1], "[class-split] Running group 1/2: 2 tests in 1 classes, 0 with a recorded duration")
+
+  def test_xdist_group_mode_end_to_end_splits_ungrouped_and_keeps_grouped_together(self):
+    sample = """
+import pytest
+
+@pytest.mark.xdist_group("Grouped")
+class TestGrouped:
+  def test_1(self): pass
+  def test_2(self): pass
+
+class TestStateless:
+  def test_1(self): pass
+  def test_2(self): pass
+"""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      workdir = pathlib.Path(tmpdir).resolve()
+      (workdir / "sample_test.py").write_text(sample, encoding="utf-8")
+      unsplit = self._collect(workdir)
+      first = self._collect(workdir, "--class-splits=2", "--class-group=1", "--class-split-by=xdist_group")
+      second = self._collect(workdir, "--class-splits=2", "--class-group=2", "--class-split-by=xdist_group")
+
+    self.assertCountEqual(first + second, unsplit)
+    # TestGrouped (weight 2) lands together on group 1; TestStateless's two tests (weight 1 each) land on group 2.
+    self.assertEqual(first, ["sample_test.py::TestGrouped::test_1", "sample_test.py::TestGrouped::test_2"])
+    self.assertEqual(second, ["sample_test.py::TestStateless::test_1", "sample_test.py::TestStateless::test_2"])
 
 
 if __name__ == "__main__":

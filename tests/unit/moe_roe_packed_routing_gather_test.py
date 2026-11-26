@@ -70,7 +70,9 @@ def _cfg(**overrides):
       "weight_dtype": "float32",
       "matmul_precision": "highest",
       "float32_gate_logits": True,
-      "megablox": True,
+      # Off TPU, megablox runs its Pallas GMM kernel in interpret mode; sparse_matmul=True keeps the routed
+      # Ring-of-Experts path via jax.lax.ragged_dot.
+      "megablox": False,
       "sparse_matmul": True,
       "use_tokamax_gmm": False,
       "use_gmm_v2": False,
@@ -315,9 +317,11 @@ class PackedRoutingGatherParityAndRematTest(parameterized.TestCase):
         return loss, (out, bias_upd)
 
       seq_per_cp = _SEQ // cfg.ici_context_parallelism
-      structure = _structure(jax.make_jaxpr(loss_fn)(params, x).jaxpr, seq_per_cp)
+      structure = _structure(jax.jit(loss_fn).trace(params, x).jaxpr.jaxpr, seq_per_cp)
       grad_raw = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)
-      grad_eqns = list(_eqns(jax.make_jaxpr(grad_raw)(params, x).jaxpr))
+      grad_fn = jax.jit(grad_raw)
+      grad_traced = grad_fn.trace(params, x)
+      grad_eqns = list(_eqns(grad_traced.jaxpr.jaxpr))
       structure["grad_packed_gathers"] = sum(
           len(v.aval.shape) == 3 and v.aval.shape[1:] == (seq_per_cp, 2 * _TOP_K)
           for e in grad_eqns
@@ -354,14 +358,15 @@ class PackedRoutingGatherParityAndRematTest(parameterized.TestCase):
           for e in grad_eqns
           if e.primitive.name == "device_put"
       )
-      grad_fn = jax.jit(grad_raw)
+      # Compile once from the traced grad_fn and reuse the executable for both HLO inspection and execution.
+      compiled = grad_traced.lower().compile()
       if not (use_remat and cfg.moe_routing_maps == "offload"):
-        compiled_hlo = grad_fn.lower(params, x).compile().as_text() or ""
+        compiled_hlo = compiled.as_text() or ""
         structure["compiled_bool_all_gathers"] = sum(
             bool(re.search(r"=\s*(?:pred\[\S*|\([^)]*\bpred\[[^)]*\))\s+all-gather(?:-start)?\(", line))
             for line in compiled_hlo.splitlines()
         )
-      (loss, (out, bias_upd)), grads = grad_fn(params, x)
+      (loss, (out, bias_upd)), grads = compiled(params, x)
     return jax.device_get((loss, out, bias_upd, grads)), structure
 
   def _assert_case(self, overrides, mode="real", compare="bitwise", use_remat=False, control=None):
@@ -511,13 +516,13 @@ class PackedRoutingGatherParityAndRematTest(parameterized.TestCase):
         return None
       return lambda t: t if t.dtype == jnp.bool_ else fn(t)
 
-    _, s_untagged = self._assert_case(
-        {**aux_kw, "moe_routing_maps": "device"},
-        mode="padmask",
-        compare="reduction_order",
-        use_remat=True,
-        control=mock.patch.object(moe, "routing_tag_fn", skip_bool_tag),
-    )
+    cfg_untagged = _cfg(**aux_kw, moe_routing_maps="device", moe_roe_packed_routing_gather=True)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg_untagged), cfg_untagged.mesh_axes)
+    x, forced, token_mask = _inputs(cfg_untagged, "padmask")
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_untagged.logical_axis_rules):
+      _, params, _ = nnx.split(_build(cfg_untagged, mesh), nnx.Param, ...)
+    with mock.patch.object(moe, "routing_tag_fn", skip_bool_tag):
+      _, s_untagged = self._run(cfg_untagged, mesh, params, x, forced, token_mask, use_remat=True)
     self.assertEqual(s_untagged["mask_tags"], [])
     self.assertEqual(s_untagged["grad_mask_gathers"], 2)
     self.assertEqual(s_untagged["compiled_bool_all_gathers"], 2)

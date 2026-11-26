@@ -23,6 +23,7 @@ compute_routing_scores_for_aux_loss, switch_load_balancing_loss_func and
 get_updated_expert_bias) for a single rank without padding.
 """
 
+import functools
 from types import SimpleNamespace
 import unittest
 
@@ -32,6 +33,7 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh, NamedSharding, PartitionSpec
 import numpy as np
+import pytest
 
 from maxtext.configs import pyconfig
 from maxtext.layers import moe
@@ -247,12 +249,14 @@ class MaxLoadRatioTest(unittest.TestCase):
     self.assertTrue(cfg.moe_log_max_load_ratio)
 
 
-def _run_routed_moe(cfg, params=None):
-  """Runs RoutedMoE forward and backward on fixed random inputs.
+def _run_routed_moe(cfg, params=None, forward_only=False):
+  """Runs RoutedMoE forward (and backward unless `forward_only`) on fixed random inputs.
 
   Args:
     cfg: The config to build the RoutedMoE block and its mesh from.
     params: Optional parameters; freshly initialized when None.
+    forward_only: Skip the backward pass (grads is None). Callers that only read forward outputs use this, since on
+      CPU the backward pass doubles the cost of the (interpreted) megablox kernels.
 
   Returns:
     ((output, lb_loss, bias_updates, intermediates), grads, params, inputs).
@@ -276,13 +280,17 @@ def _run_routed_moe(cfg, params=None):
   )
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
     if params is None:
-      params = model.init({"params": rng_model, "dropout": rng_model}, inputs)["params"]
+      # Jitted init: an eager linen init runs the whole forward op by op.
+      params = jax.jit(model.init)({"params": rng_model, "dropout": rng_model}, inputs)["params"]
 
     def loss_fn(params):
       (out, lb_loss, bias_updates), mutated = model.apply({"params": params}, inputs, mutable=["intermediates"])
       return jnp.mean(out**2) + lb_loss, (out, lb_loss, bias_updates, mutated)
 
-    (_, aux), grads = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(params)
+    if forward_only:
+      (_, aux), grads = jax.jit(loss_fn)(params), None
+    else:
+      (_, aux), grads = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))(params)
   return aux, grads, params, inputs
 
 
@@ -298,8 +306,10 @@ class RoutedMoeLossTest(unittest.TestCase):
 
   def test_sparse_and_dense_losses_match_megatron_reference(self):
     sparse_cfg = _tiny_deepseek_config("loss_sparse")
-    (_, lb_sparse, _, _), _, params, inputs = _run_routed_moe(sparse_cfg)
-    (_, lb_dense, _, _), _, _, _ = _run_routed_moe(_tiny_deepseek_config("loss_dense", sparse_matmul=False), params)
+    (_, lb_sparse, _, _), _, params, inputs = _run_routed_moe(sparse_cfg, forward_only=True)
+    (_, lb_dense, _, _), _, _, _ = _run_routed_moe(
+        _tiny_deepseek_config("loss_dense", sparse_matmul=False), params, forward_only=True
+    )
     reference = _reference_loss(sparse_cfg, params, inputs)
     np.testing.assert_allclose(lb_sparse, reference, rtol=1e-5)
     np.testing.assert_allclose(lb_dense, lb_sparse, rtol=1e-6)
@@ -307,14 +317,14 @@ class RoutedMoeLossTest(unittest.TestCase):
   def test_softmax_router_keeps_switch_loss(self):
     """Non-sigmoid routers are unchanged: the Switch-style loss of the dispatch top-k."""
     cfg = _tiny_deepseek_config("loss_softmax", routed_score_func="softmax")
-    (_, lb_loss, _, _), _, params, inputs = _run_routed_moe(cfg)
+    (_, lb_loss, _, _), _, params, inputs = _run_routed_moe(cfg, forward_only=True)
     self.assertFalse(moe.uses_megatron_seq_aux_loss(cfg))
     self.assertFalse(np.allclose(lb_loss, _reference_loss(cfg, params, inputs), rtol=1e-3))
 
   def test_sigmoid_router_can_disable_megatron_seq_aux_loss(self):
     """Setting moe_use_megatron_seq_aux_loss=False falls back to the Switch-style loss."""
     cfg = _tiny_deepseek_config("loss_sigmoid_switch", moe_use_megatron_seq_aux_loss=False)
-    (_, lb_loss, _, _), _, params, inputs = _run_routed_moe(cfg)
+    (_, lb_loss, _, _), _, params, inputs = _run_routed_moe(cfg, forward_only=True)
     self.assertFalse(moe.uses_megatron_seq_aux_loss(cfg))
     self.assertFalse(np.allclose(lb_loss, _reference_loss(cfg, params, inputs), rtol=1e-3))
 
@@ -380,14 +390,14 @@ class RingOfExpertsIntegrationTest(unittest.TestCase):
     if jax.device_count() < 2 or jax.device_count() % 2:
       self.skipTest("Needs an even number (>= 2) of devices for expert parallelism 2.")
 
-  def _run(self, params=None, **overrides):
+  def _run(self, params=None, forward_only=False, **overrides):
     cfg = _tiny_deepseek_config(
         "roe_" + "_".join(f"{k}{v}" for k, v in sorted(overrides.items())),
         ici_expert_parallelism=2,
         use_ring_of_experts=True,
         **overrides,
     )
-    return cfg, _run_routed_moe(cfg, params)
+    return cfg, _run_routed_moe(cfg, params, forward_only=forward_only)
 
   def test_loss_and_bias_update_are_chunk_invariant(self):
     cfg, ((out1, lb1, bias1, _), grads1, params, inputs) = self._run(num_moe_token_chunks=1)
@@ -474,19 +484,24 @@ class RingOfExpertsIntegrationTest(unittest.TestCase):
         "moe_log_max_load_ratio": True,
     }
 
-    def ratio_and_overflow(ragged_buffer_factor):
-      _, ((_, _, _, mutated), _, _, _) = self._run(ragged_buffer_factor=ragged_buffer_factor, **ragged)
+    def ratio_and_overflow(ragged_buffer_factor, params=None):
+      # Only sown forward intermediates are read, so skip the backward pass.
+      _, ((_, _, _, mutated), _, params, _) = self._run(
+          params, forward_only=True, ragged_buffer_factor=ragged_buffer_factor, **ragged
+      )
       ratios = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_max_load_ratio")
       overflow = maxtext_utils.collect_intermediates_by_suffix(mutated, "moe_has_overflow")
       self.assertTrue(ratios, "Expected a moe_max_load_ratio intermediate to be sown.")
-      return float(jnp.max(jnp.concatenate(ratios))), bool(jnp.any(jnp.concatenate(overflow)))
+      return float(jnp.max(jnp.concatenate(ratios))), bool(jnp.any(jnp.concatenate(overflow))), params
 
-    ratio, overflow = ratio_and_overflow(-1.0)  # dropless: no truncated buffer
+    ratio, overflow, params = ratio_and_overflow(-1.0)  # dropless: no truncated buffer
     self.assertFalse(overflow)
     self.assertGreater(ratio, 1.0)
-    # The routing does not depend on the buffer, so the ratio is the same and decides the overflow.
-    ratio_small, overflow_small = ratio_and_overflow(0.97 * ratio)
-    ratio_large, overflow_large = ratio_and_overflow(1.03 * ratio)
+    # The routing does not depend on the buffer, so the ratio is the same and decides the overflow. The buffer factor
+    # does not change parameter shapes and init is seeded identically, so reusing the first run's params is equivalent
+    # to re-initializing.
+    ratio_small, overflow_small, _ = ratio_and_overflow(0.97 * ratio, params)
+    ratio_large, overflow_large, _ = ratio_and_overflow(1.03 * ratio, params)
     self.assertAlmostEqual(ratio_small, ratio, places=6)
     self.assertAlmostEqual(ratio_large, ratio, places=6)
     self.assertTrue(overflow_small)
@@ -530,8 +545,10 @@ def _tiny_v4_config(run_name, **overrides):
       "weight_dtype": "float32",
       "matmul_precision": "highest",
       "float32_gate_logits": True,
-      # megablox runs its Pallas kernels in interpret mode off-TPU.
-      "megablox": True,
+      # The seq aux loss is a function of the gate logits only, so the expert GMM backend is irrelevant here. On CPU
+      # megablox would run its Pallas kernels in interpret mode (very slow); sparse_matmul keeps the dropless
+      # sparse path via jax.lax.ragged_dot instead.
+      "megablox": False,
       "sparse_matmul": True,
       "per_device_batch_size": 2,
       "max_target_length": 16,
@@ -560,7 +577,8 @@ def _run_routed_moe_lb_loss(cfg):
       rng_inputs, (cfg.per_device_batch_size * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim)
   )
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-    params = model.init({"params": rng_model, "dropout": rng_model}, inputs)["params"]
+    # Jitted init: an eager linen init runs the whole forward op by op.
+    params = jax.jit(model.init)({"params": rng_model, "dropout": rng_model}, inputs)["params"]
 
     def loss_fn(params):
       (_, lb_loss, _), _ = model.apply({"params": params}, inputs, mutable=["intermediates"])
@@ -572,6 +590,25 @@ def _run_routed_moe_lb_loss(cfg):
   return float(lb_loss), gate_grad, gate_kernel, np.asarray(inputs, np.float64)
 
 
+@functools.lru_cache(maxsize=None)
+def _sqrtsoftplus_fixture():
+  """MaxText seq aux loss/gradient for deepseek4-tiny and its float64 reference, computed once per process."""
+  cfg = _tiny_v4_config("ds4_aux_spec")
+  lb_loss, gate_grad, gate_kernel, inputs = _run_routed_moe_lb_loss(cfg)
+  logits = np.einsum("bse,ex->bsx", inputs, gate_kernel)
+  ref_loss, dl_du = reference_sqrtsoftplus_seq_aux_loss(logits, cfg.load_balance_loss_weight, cfg.num_experts_per_tok)
+  return SimpleNamespace(
+      cfg=cfg,
+      lb_loss=lb_loss,
+      gate_grad=gate_grad,
+      logits=logits,
+      ref_loss=ref_loss,
+      ref_gate_grad=np.einsum("bse,bsx->ex", inputs, dl_du),
+  )
+
+
+# Keeps the class on one xdist worker so the cached fixture is computed once.
+@pytest.mark.xdist_group("SqrtSoftplusSeqAuxLossTest")
 class SqrtSoftplusSeqAuxLossTest(unittest.TestCase):
   """deepseek4-tiny RoutedMoE seq aux loss with Sqrt(Softplus) scores vs a float64 reference.
 
@@ -583,55 +620,35 @@ class SqrtSoftplusSeqAuxLossTest(unittest.TestCase):
   The reference is float64 numpy written from the paper, independent of MaxText.
   """
 
-  @classmethod
-  def setUpClass(cls):
-    super().setUpClass()
-    cls.cfg = _tiny_v4_config("ds4_aux_spec")
-    cls.lb_loss, cls.gate_grad, gate_kernel, inputs = _run_routed_moe_lb_loss(cls.cfg)
-    cls.logits = np.einsum("bse,ex->bsx", inputs, gate_kernel)
-    cls.ref_loss, dl_du = reference_sqrtsoftplus_seq_aux_loss(
-        cls.logits, cls.cfg.load_balance_loss_weight, cls.cfg.num_experts_per_tok
-    )
-    cls.ref_gate_grad = np.einsum("bse,bsx->ex", inputs, dl_du)
-
-  @classmethod
-  def tearDownClass(cls):
-    cls.cfg = None
-    cls.lb_loss = None
-    cls.gate_grad = None
-    cls.logits = None
-    cls.ref_loss = None
-    cls.ref_gate_grad = None
-    super().tearDownClass()
-
   def test_config_matches_spec(self):
-    self.assertEqual(self.cfg.routed_score_func, "sqrtsoftplus")
-    self.assertAlmostEqual(self.cfg.load_balance_loss_weight, 1e-4)
-    self.assertTrue(moe.uses_megatron_seq_aux_loss(self.cfg))
+    # Config-only check: build the config directly instead of paying for the model fixture.
+    cfg = _tiny_v4_config("ds4_aux_spec")
+    self.assertEqual(cfg.routed_score_func, "sqrtsoftplus")
+    self.assertAlmostEqual(cfg.load_balance_loss_weight, 1e-4)
+    self.assertTrue(moe.uses_megatron_seq_aux_loss(cfg))
 
   def test_loss_value_matches_spec(self):
-    rel = abs(self.lb_loss - self.ref_loss) / abs(self.ref_loss)
-    self.assertLessEqual(rel, 1e-5, f"maxtext={self.lb_loss!r} spec={self.ref_loss!r}")
+    fx = _sqrtsoftplus_fixture()
+    rel = abs(fx.lb_loss - fx.ref_loss) / abs(fx.ref_loss)
+    self.assertLessEqual(rel, 1e-5, f"maxtext={fx.lb_loss!r} spec={fx.ref_loss!r}")
 
   def test_router_gradient_matches_spec(self):
-    rel_l2 = np.linalg.norm(self.gate_grad - self.ref_gate_grad) / np.linalg.norm(self.ref_gate_grad)
-    cosine = np.sum(self.gate_grad * self.ref_gate_grad) / (
-        np.linalg.norm(self.gate_grad) * np.linalg.norm(self.ref_gate_grad)
-    )
+    fx = _sqrtsoftplus_fixture()
+    rel_l2 = np.linalg.norm(fx.gate_grad - fx.ref_gate_grad) / np.linalg.norm(fx.ref_gate_grad)
+    cosine = np.sum(fx.gate_grad * fx.ref_gate_grad) / (np.linalg.norm(fx.gate_grad) * np.linalg.norm(fx.ref_gate_grad))
     self.assertLessEqual(rel_l2, 1e-4)
     self.assertGreaterEqual(cosine, 0.99999)
 
   def test_score_gradient_matches_spec(self):
     """Gradient w.r.t. the pre-bias router logits of the loss on Sqrt(Softplus) scores."""
-    router = _RouterStub(self.cfg.num_experts, self.cfg.num_experts_per_tok, self.cfg.load_balance_loss_weight)
+    fx = _sqrtsoftplus_fixture()
+    router = _RouterStub(fx.cfg.num_experts, fx.cfg.num_experts_per_tok, fx.cfg.load_balance_loss_weight)
 
     def loss(u):
       return router.megatron_seq_aux_loss(jnp.sqrt(jax.nn.softplus(u)))
 
-    got = np.asarray(jax.grad(loss)(jnp.asarray(self.logits, jnp.float32)), np.float64)
-    _, want = reference_sqrtsoftplus_seq_aux_loss(
-        self.logits, self.cfg.load_balance_loss_weight, self.cfg.num_experts_per_tok
-    )
+    got = np.asarray(jax.grad(loss)(jnp.asarray(fx.logits, jnp.float32)), np.float64)
+    _, want = reference_sqrtsoftplus_seq_aux_loss(fx.logits, fx.cfg.load_balance_loss_weight, fx.cfg.num_experts_per_tok)
     rel_l2 = np.linalg.norm(got - want) / np.linalg.norm(want)
     cosine = np.sum(got * want) / (np.linalg.norm(got) * np.linalg.norm(want))
     self.assertLessEqual(rel_l2, 1e-4)

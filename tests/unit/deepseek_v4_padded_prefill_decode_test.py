@@ -66,7 +66,6 @@ if "_jetstream_stubs" in getattr(maxengine.engine_api.ResultTokens, "__qualname_
     pass
 
 PROMPT = [3, 17, 42, 5, 9]
-STEPS = 24
 REL_TOL = 1e-3
 
 _V4_SMALL = {
@@ -102,40 +101,29 @@ _V4_SMALL = {
 class DeepseekV4PaddedPrefillDecodeTest(unittest.TestCase):
   """Per-step decode logits must equal the forward-pass logits at the same position."""
 
-  _rels_cache = {}
-
-  @classmethod
-  def tearDownClass(cls):
-    cls._rels_cache.clear()
-    super().tearDownClass()
-
-  def test_decode_logits_match_forward_after_padded_prefill(self):
-    self._check_decode_matches_forward(_V4_SMALL, STEPS)
-
   def test_decode_logits_match_forward_past_sliding_window(self):
     # AR cache (64 - 16 = 48 slots) longer than the window, and decode runs past
     # prompt + window, so both cache parts need true-position windowing.
     self._check_decode_matches_forward({**_V4_SMALL, "sliding_window_size": 8, "max_target_length": 64}, 30)
 
   def test_decode_logits_match_forward_when_compressor_cache_fills(self):
-    # The HCA (ratio 8) emits decode blocks at positions 7, 15, 23 and 31; decode
-    # continues to position 34, so the AR region must hold all of them.
+    # Every step is checked, so this also covers the first decode steps right after the padded
+    # prefill (the first compressed blocks). The HCA (ratio 8) emits decode blocks at positions
+    # 7, 15, 23 and 31; decode continues to position 34, so the AR region must hold all of them.
     self._check_decode_matches_forward(_V4_SMALL, 30)
 
-  @classmethod
-  def _compute_decode_rels(cls, overrides, max_steps):
+  @staticmethod
+  def _compute_decode_rels(overrides, max_steps):
     """Runs `max_steps` greedy decode steps and returns per-step relative max-abs diffs vs forward pass."""
-    cache_key = tuple(sorted((k, tuple(v) if isinstance(v, list) else v) for k, v in overrides.items()))
-    cached = cls._rels_cache.get(cache_key)
-    if cached is not None and len(cached) >= max_steps + 1:
-      return cached
-
     cfg = pyconfig.initialize([sys.argv[0], get_test_config_path()], **overrides)
     mesh = jax.sharding.Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
-      model = model_creation_utils.create_model(
-          cfg, mesh, model_mode=MODEL_MODE_PREFILL, rngs=nnx.Rngs(params=0, dropout=0)
-      )
+      # Initialize under one jit: eager init dispatches every parameter op separately on CPU.
+      model = nnx.jit(
+          lambda: model_creation_utils.create_model(
+              cfg, mesh, model_mode=MODEL_MODE_PREFILL, rngs=nnx.Rngs(params=0, dropout=0)
+          )
+      )()
     _, params_state, _ = nnx.split(model, nnx.Param, ...)
 
     engine = maxengine.MaxEngine(cfg, jax.devices())
@@ -155,12 +143,6 @@ class DeepseekV4PaddedPrefillDecodeTest(unittest.TestCase):
     decode_logits = [np.asarray(row, dtype=np.float64) for row in decode_logits_np]
     tokens = list(PROMPT) + [int(t) for t in step_tokens_np]
 
-    with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
-      train_model = model_creation_utils.create_model(
-          cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=0)
-      )
-    nnx.update(train_model, params_state)
-    train_graphdef, train_state = nnx.split(train_model)
     seq = cfg.max_target_length
     batch = cfg.micro_batch_size_to_train_on
     ids = jnp.tile(jnp.asarray([tokens + [0] * (seq - len(tokens))], dtype=jnp.int32), (batch, 1))
@@ -168,25 +150,26 @@ class DeepseekV4PaddedPrefillDecodeTest(unittest.TestCase):
     segment_ids = jnp.tile(jnp.asarray([[1] * len(tokens) + [0] * (seq - len(tokens))], dtype=jnp.int32), (batch, 1))
 
     @jax.jit
-    def _forward_jit(state, ids_in, pos_in, seg_in):
-      m = nnx.merge(train_graphdef, state)
+    def _forward_jit(params, ids_in, pos_in, seg_in):
+      # The train model is built inside the jit: its own random init is dead code once the
+      # prefill model's params are loaded, so no separate (eager) model build is needed.
+      m = model_creation_utils.create_model(cfg, mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=0))
+      nnx.update(m, params)
       return m(ids_in, pos_in, decoder_segment_ids=seg_in, enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
 
     with nn_partitioning.axis_rules(cfg.logical_axis_rules), mesh:
-      ref = _forward_jit(train_state, ids, positions, segment_ids)
+      ref = _forward_jit(params_state, ids, positions, segment_ids)
     ref = np.asarray(jax.device_get(ref[0]), dtype=np.float64)
 
     rels = []
     for k, dec in enumerate(decode_logits):
       row = ref[len(PROMPT) - 1 + k]
       rels.append(float(np.max(np.abs(dec - row)) / np.max(np.abs(row))))
-    cls._rels_cache[cache_key] = rels
     return rels
 
   def _check_decode_matches_forward(self, overrides, steps):
     """Greedy-decodes `steps` tokens after a padded prefill and compares each step with the forward pass."""
-    max_steps = max(steps, 30) if overrides == _V4_SMALL else steps
-    rels = self._compute_decode_rels(overrides, max_steps)[: steps + 1]
+    rels = self._compute_decode_rels(overrides, steps)
     worst = int(np.argmax(rels))
     self.assertLessEqual(
         rels[worst],

@@ -417,17 +417,20 @@ class KimiK3LatentMoETest(unittest.TestCase):
         ref_params = _latent_moe_params(block)
         graphdef, params, rest = nnx.split(block, nnx.Param, ...)
 
-        def loss(params, x, graphdef=graphdef, rest=rest):
-          return jnp.sum(nnx.merge(graphdef, params, rest)(x) * cot)
+        def loss_and_out(params, x, graphdef=graphdef, rest=rest):
+          y_out = nnx.merge(graphdef, params, rest)(x)
+          return jnp.sum(y_out * cot), y_out
 
-        def loss_ref(p, x):
-          return jnp.sum(oracle(p, x) * cot)
+        def loss_and_out_ref(p, x):
+          y_out = oracle(p, x)
+          return jnp.sum(y_out * cot), y_out
 
         with mesh, jax.default_matmul_precision("highest"):
-          y = block(x)
-          y_ref = oracle(ref_params, x)
-          g_params, g_x = jax.grad(loss, argnums=(0, 1))(params, x)
-          r_params, r_x = jax.grad(loss_ref, argnums=(0, 1))(ref_params, x)
+          # Jit forward + backward together so RoutedMoE is not dispatched op by op on CPU.
+          (_, y), (g_params, g_x) = jax.jit(jax.value_and_grad(loss_and_out, argnums=(0, 1), has_aux=True))(params, x)
+          (_, y_ref), (r_params, r_x) = jax.jit(jax.value_and_grad(loss_and_out_ref, argnums=(0, 1), has_aux=True))(
+              ref_params, x
+          )
         np.testing.assert_allclose(y, y_ref, rtol=1e-4, atol=1e-4)
         np.testing.assert_allclose(g_x, r_x, rtol=1e-4, atol=1e-4)
         got = {

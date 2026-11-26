@@ -21,8 +21,9 @@ Only the sharding changes, so the model must compute the same function.
 The model is a tiny hybrid Qwen3.5 (GatedDeltaNet kernel path, gated full attention, routed and shared-expert MoE) on
 16 CPU devices, fsdp2 x context4 x expert2, with sequence-sharded GatedDeltaNet context parallelism and ring of experts
 over the expert-parallel group context x expert, as in the Qwen3.5-397B configuration. Every arm runs with the same
-parameter values (the cp-as-ep initialization, placed on each rule's shardings). The checks run in a subprocess so the
-forced device count takes effect before JAX initializes, with JAX's persistent compilation cache off.
+parameter values (the cp-as-ep initialization, placed on each rule's shardings). The checks run in phases, each in a
+child process (unless the test process already has the 16 devices) so the forced device count takes effect before JAX
+initializes, with JAX's persistent compilation cache off.
 
   - Shardings: exactly the parameters whose embed dimension is 'embed', 'embed_attn', 'q_lora', or 'kv_lora' move
     (attention, MLA latent up-projections, shared-expert projections, the shared-expert gate, and routers that use
@@ -45,15 +46,15 @@ forced device count takes effect before JAX initializes, with JAX's persistent c
 # pylint: disable=protected-access
 
 import collections
+from collections.abc import Callable
 import contextlib
 import dataclasses
 import functools
 import os
 import re
-import subprocess
-import sys
 from unittest import mock
 
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -63,6 +64,7 @@ from maxtext.configs import pyconfig
 from maxtext.layers import moe
 from maxtext.utils import maxtext_utils
 from maxtext.utils import globals as maxtext_globals
+from tests.utils import cpu_mesh_child
 
 _BASE_CONFIG_PATH = os.path.join(maxtext_globals.MAXTEXT_CONFIGS_DIR, "base.yml")
 _FSDP, _CONTEXT, _EXPERT = 2, 4, 2
@@ -80,7 +82,6 @@ _F32_DENSE = {"num_experts": 1, "num_experts_per_tok": 1, "dtype": "float32"}
 _REFERENCE_RULE = "cp-as-ep"
 # rule -> the mesh axes of the dense weights' embed dimension.
 _RULES = {"cp-as-ep-dense-no-cp": ("fsdp", "expert"), "cp-as-ep-dense-fsdp": ("fsdp",)}
-_PASS_TOKEN = "CP_AS_EP_DENSE_NO_CP_CHECKS_PASSED"
 
 
 @pytest.mark.cpu_only
@@ -140,17 +141,6 @@ def test_routed_moe_wo_kernel_axes():
     )
 
 
-@pytest.mark.cpu_only
-def test_cp_as_ep_dense_no_cp_on_cpu_mesh():
-  """Runs `main` below in a child process with 16 CPU devices."""
-  env = os.environ.copy()
-  env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + f" --xla_force_host_platform_device_count={_NUM_DEVICES}"
-  env["JAX_PLATFORMS"] = "cpu"
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
-  assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert _PASS_TOKEN in result.stdout, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-
-
 def _config(rule, **overrides):
   """The tiny hybrid Qwen3.5 on the fsdp2 x context4 x expert2 mesh under `rule`, with `overrides` applied."""
   argv = [
@@ -205,7 +195,8 @@ def _config(rule, **overrides):
       "gdn_num_value_heads=4",
       "vocab_size=384",
       f"max_target_length={_SEQ}",
-      "per_device_batch_size=0.5",
+      # Global batch 4: one row per fsdp x expert batch shard.
+      "per_device_batch_size=0.25",
       "use_multimodal=false",
       "skip_jax_distributed_system=True",
       "enable_tensorboard=False",
@@ -235,15 +226,20 @@ def _inputs(cfg):
 
 @dataclasses.dataclass
 class _Result:
-  loss: np.ndarray
+  loss: np.ndarray | None  # None when the program was compiled but not run
   grads: dict[str, np.ndarray]
   specs: dict[str, tuple]  # parameter -> the PartitionSpec of its sharding
   values: dict[str, np.ndarray]  # parameter -> its value
   hlo: str
+  # Runs the same compiled program on other parameter values (same keys as `values`), without compiling it again.
+  rerun: Callable[[dict[str, np.ndarray]], "_Result"] | None = dataclasses.field(repr=False, compare=False, default=None)
 
 
-def _run(cfg, data, cotangent, values=None, control=None) -> _Result:
-  """Loss <logits, cotangent> and its parameter gradients; `values` replaces the initial parameter values."""
+def _run(cfg, data, cotangent, values=None, control=None, execute=True) -> _Result:
+  """Loss <logits, cotangent> and its parameter gradients; `values` replaces the initial parameter values.
+
+  With execute=False the program is only compiled (for checks that read the program, not the values).
+  """
   # pylint: disable=import-outside-toplevel
   from flax import nnx
   from flax.linen import partitioning as nn_partitioning
@@ -264,12 +260,16 @@ def _run(cfg, data, cotangent, values=None, control=None) -> _Result:
     graphdef, params, rest = nnx.split(model, nnx.Param, ...)
     keyed = jax.tree_util.tree_leaves_with_path(params)
     specs = {jax.tree_util.keystr(path): tuple(leaf.sharding.spec) for path, leaf in keyed}
-    if values is not None:
+
+    def placed(values):
       assert values.keys() == specs.keys()
-      params = jax.tree_util.tree_map_with_path(
+      return jax.tree_util.tree_map_with_path(
           lambda path, leaf: jax.device_put(values[jax.tree_util.keystr(path)].astype(leaf.dtype), leaf.sharding),
           params,
       )
+
+    if values is not None:
+      params = placed(values)
 
     def loss_fn(params):
       merged = nnx.merge(graphdef, params, rest, copy=True)
@@ -285,12 +285,23 @@ def _run(cfg, data, cotangent, values=None, control=None) -> _Result:
 
     with nn_partitioning.axis_rules(cfg.logical_axis_rules), jax.set_mesh(mesh):
       compiled = jax.jit(jax.value_and_grad(loss_fn)).lower(params).compile()
-      loss, grads = compiled(params)
 
   def as_np(tree):
     return {jax.tree_util.keystr(p): np.asarray(x) for p, x in jax.tree_util.tree_leaves_with_path(tree)}
 
-  return _Result(np.asarray(loss), as_np(grads), specs, as_np(params), compiled.as_text())
+  hlo = compiled.as_text()
+
+  def result(params):
+    with jax.set_mesh(mesh):
+      loss, grads = compiled(params)
+    return _Result(np.asarray(loss), as_np(grads), specs, as_np(params), hlo, rerun)
+
+  def rerun(values):
+    return result(placed(values))
+
+  if not execute:
+    return _Result(None, {}, specs, as_np(params), hlo, rerun)
+  return result(params)
 
 
 # ---------------------------------------------------------------------------
@@ -716,7 +727,8 @@ def _check_vocab_tiling_spec(reference_cfg) -> bool:
   return True
 
 
-def main():
+def _reference():
+  """The cp-as-ep reference config, inputs and run that every phase compares against."""
   assert jax.device_count() == _NUM_DEVICES, jax.devices()
   jax.config.update("jax_enable_compilation_cache", False)
   reference_cfg = _config(_REFERENCE_RULE)
@@ -726,7 +738,32 @@ def main():
       f"{_REFERENCE_RULE}: collectives {sorted(_collectives(reference.hlo).items())}",
       flush=True,
   )
+  return reference_cfg, data, cotangent, reference
+
+
+def _report(checks, controls=None):
+  """Prints every check and positive control and fails the phase if a check failed or a control went undetected."""
+  controls = controls or {}
+  for name, ok in {
+      **checks,
+      **{f"positive control caught: {k}": v for k, v in controls.items()},
+  }.items():
+    print(f"  [{'ok' if ok else 'FAIL'}] {name}", flush=True)
+  failed = [name for name, ok in checks.items() if not ok]
+  undetected = [name for name, caught in controls.items() if not caught]
+  assert not (
+      failed or undetected
+  ), f"checks that failed: {failed}; positive controls that were NOT detected: {undetected}"
+
+
+def _run_rule_checks():
+  """Both rules against cp-as-ep in bfloat16 (shardings, collectives, numerics), and the positive controls."""
+  reference_cfg, data, cotangent, reference = _reference()
   checks, results = {}, {}
+  # Config only (no compile), so it runs here, on every PR, rather than in the scheduled moe_wo phase.
+  checks["cp-as-ep*: activation_embed_and_logits_batch_sequence shards across context for vocab tiling"] = (
+      _check_vocab_tiling_spec(reference_cfg)
+  )
   for rule, dense_axes in _RULES.items():
     result = results[rule] = _run(_config(rule), data, cotangent, values=reference.values)
     gathers = _collectives(result.hlo)
@@ -742,26 +779,6 @@ def main():
         and gathers[("all-gather", -1)] <= ref_gathers[("all-gather", -1)]
     )
     checks[f"{rule}: numerics"] = _numerics(rule, result, reference)
-
-  # The bfloat16 differences are reduction order: with float32 activations they shrink to float32 roundings.
-  reference32 = _run(_config(_REFERENCE_RULE, **_F32_DENSE), data, cotangent)
-  result32 = _run(
-      _config("cp-as-ep-dense-no-cp", **_F32_DENSE),
-      data,
-      cotangent,
-      values=reference32.values,
-  )
-  checks["float32 dense variant: cp-as-ep-dense-no-cp numerics"] = _numerics(
-      "float32 dense cp-as-ep-dense-no-cp", result32, reference32, tol=_F32_TOL
-  )
-
-  # Regression checks for moe_wo_fsdp_on_mlp, shard_embed_moe_on_fsdp wo_pspec, and cp-as-ep vocab tiling.
-  checks["cp-as-ep: base_moe_mlp_dim=42 on fsdp=4xcontext=2xexpert=2 builds by default & rejects moe_wo_fsdp_on_mlp"] = (
-      _check_wo_divisibility_and_shard_embed_moe(data, cotangent, reference)
-  )
-  checks["cp-as-ep*: activation_embed_and_logits_batch_sequence shards across context for vocab tiling"] = (
-      _check_vocab_tiling_spec(reference_cfg)
-  )
 
   # Positive controls. Each must fail the numerics gate (or fail to run); `controls` records whether it was caught.
   controls = {}
@@ -783,24 +800,71 @@ def main():
     controls["the rule without its RoutedMoE change"] = True
   query = next(name for name in reference.values if re.search(r"\['query'\].*\['kernel'\]", name))
   perturbed = dict(reference.values, **{query: reference.values[query] * np.float32(1 + 1e-3)})
-  wrong = _run(_config(rule), data, cotangent, values=perturbed)
+  # The rule's program from above, on the perturbed values.
+  wrong = results[rule].rerun(perturbed)
   controls[f"{query} scaled by 1 + 1e-3"] = not _numerics("control: perturbed query", wrong, reference)
+  _report(checks, controls)
 
-  for name, ok in {
-      **checks,
-      **{f"positive control caught: {k}": v for k, v in controls.items()},
-  }.items():
-    print(f"  [{'ok' if ok else 'FAIL'}] {name}", flush=True)
-  failed = [name for name, ok in checks.items() if not ok]
-  undetected = [name for name, caught in controls.items() if not caught]
-  if failed or undetected:
-    print(
-        f"checks that failed: {failed}; positive controls that were NOT detected: {undetected}",
-        flush=True,
-    )
-    sys.exit(1)
-  print(_PASS_TOKEN, flush=True)
+
+def _run_float32_checks():
+  """The bfloat16 differences are reduction order: with float32 activations they shrink to float32 roundings."""
+  assert jax.device_count() == _NUM_DEVICES, jax.devices()
+  jax.config.update("jax_enable_compilation_cache", False)
+  data, cotangent = _inputs(_config(_REFERENCE_RULE))
+  reference32 = _run(_config(_REFERENCE_RULE, **_F32_DENSE), data, cotangent)
+  result32 = _run(
+      _config("cp-as-ep-dense-no-cp", **_F32_DENSE),
+      data,
+      cotangent,
+      values=reference32.values,
+  )
+  _report(
+      {
+          "float32 dense variant: cp-as-ep-dense-no-cp numerics": _numerics(
+              "float32 dense cp-as-ep-dense-no-cp", result32, reference32, tol=_F32_TOL
+          )
+      }
+  )
+
+
+def _run_moe_wo_checks():
+  """Regression checks for moe_wo_fsdp_on_mlp and shard_embed_moe_on_fsdp wo_pspec (vocab tiling: rules_bfloat16)."""
+  _, data, cotangent, reference = _reference()
+  checks = {}
+  checks["cp-as-ep: base_moe_mlp_dim=42 on fsdp=4xcontext=2xexpert=2 builds by default & rejects moe_wo_fsdp_on_mlp"] = (
+      _check_wo_divisibility_and_shard_embed_moe(data, cotangent, reference)
+  )
+  _report(checks)
+
+
+# The checks that need 16 CPU devices, one test case (and one child process) per phase, so they can run in parallel.
+_PHASES = {
+    "rules_bfloat16": _run_rule_checks,
+    "float32_dense": _run_float32_checks,
+    "moe_wo": _run_moe_wo_checks,
+}
+_SCHEDULED_PHASES = ("float32_dense", "moe_wo")
+_PR_PHASES = tuple(phase for phase in _PHASES if phase not in _SCHEDULED_PHASES)
+
+
+@pytest.mark.cpu_only
+class CpAsEpDenseNoCpCpuMeshTest(parameterized.TestCase):
+  """`_PHASES` on 16 CPU devices: in this process if it has them, else in a child process per phase."""
+
+  @parameterized.named_parameters(*((phase, phase) for phase in _PR_PHASES))
+  def test_on_cpu_mesh(self, phase):
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=_NUM_DEVICES)
+
+  # float32_dense repeats the rules_bfloat16 numerics gate for cp-as-ep-dense-no-cp on a dense-MLP variant at a
+  # float32 tolerance. moe_wo checks the default wo sharding at base_moe_mlp_dim=42, the opt-in moe_wo_fsdp_on_mlp's
+  # numerics and its divisibility refusal once ici_fsdp_parallelism=-1 resolves, and the QAG wo_pspec; on every PR
+  # test_routed_moe_wo_kernel_axes checks the option's kernel axes and config refusals, and moe_test's TPU unit tests
+  # the QAG path under shard_embed_moe_on_fsdp. They run in scheduled CI and on PRs that change this file.
+  @parameterized.named_parameters(*((phase, phase) for phase in _SCHEDULED_PHASES))
+  @pytest.mark.scheduled_only
+  def test_on_cpu_mesh_scheduled(self, phase):
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=_NUM_DEVICES)
 
 
 if __name__ == "__main__":
-  main()
+  cpu_mesh_child.main(_PHASES)

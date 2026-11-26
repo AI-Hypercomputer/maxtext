@@ -1721,6 +1721,15 @@ def _make_matching_hf_config(c) -> Any:
   )
 
 
+def _jit_forward(**call_kwargs):
+  """Returns `nnx.jit((model, tokens, positions, segment_ids) -> model(...))` with static `call_kwargs`.
+
+  The backbone tests run 4-8 layer GDN + MoE + QSA models; eager calls dispatch every op separately (minutes per
+  forward on CPU), while a jitted forward compiles once per model graph.
+  """
+  return nnx.jit(lambda m, t, p, s: m(t, decoder_positions=p, decoder_segment_ids=s, **call_kwargs))
+
+
 @pytest.mark.cpu_only
 class Qwen3_8BackboneTest(absltest.TestCase):
   """Backbone tests for scanned/unscanned parity and PyTorch reference match."""
@@ -1734,14 +1743,15 @@ class Qwen3_8BackboneTest(absltest.TestCase):
     modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(mu, ms)
     toks = jnp.array([[3, 17, 42, 88, 3, 50, 61, 99]], dtype=jnp.int32)
     pos, cmask = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (1, 8)), jnp.ones((1, 8), dtype=jnp.int32)
-    (lu, au), (ls, as_) = (m(toks, decoder_positions=pos, decoder_segment_ids=cmask, return_aux=True) for m in (mu, ms))
+    fwd_aux, fwd = _jit_forward(return_aux=True), _jit_forward()
+    (lu, au), (ls, as_) = (fwd_aux(m, toks, pos, cmask) for m in (mu, ms))
     # 8 fp32 layers of GDN + MoE + QSA accumulate rounding near 1e-5, so cross-path checks use atol=5e-5.
     np.testing.assert_allclose(lu, ls, atol=5e-5, rtol=1e-5)
     jax.tree.map(lambda u, s: np.testing.assert_allclose(u, s, atol=5e-5, rtol=1e-5), au, as_)
     s2 = cmask.at[:, 4:].set(2)
-    np.testing.assert_allclose(mu(toks, decoder_segment_ids=s2), ms(toks, decoder_segment_ids=s2), atol=5e-5, rtol=1e-5)
+    np.testing.assert_allclose(fwd(mu, toks, None, s2), fwd(ms, toks, None, s2), atol=5e-5, rtol=1e-5)
 
-    logits_hs, pre_mixer = mu(toks, decoder_positions=pos, decoder_segment_ids=cmask, return_hidden_states=True)
+    logits_hs, pre_mixer = _jit_forward(return_hidden_states=True)(mu, toks, pos, cmask)
     self.assertEqual(pre_mixer.shape, (1, 8, int(cu.hc_count) * int(cu.emb_dim)))
     np.testing.assert_allclose(
         mu.lm_head(mu.decoder.hyper_connection_mixer.mix_input(pre_mixer)), logits_hs, atol=1e-5, rtol=1e-5
@@ -1772,8 +1782,9 @@ class Qwen3_8BackboneTest(absltest.TestCase):
     modeling_qwen3_8_flash_next.copy_unscanned_to_scanned(mu, ms)
     toks = jnp.array([[3, 17, 42, 88]], dtype=jnp.int32)
     pos, cmask = jnp.broadcast_to(jnp.arange(4, dtype=jnp.int32), (1, 4)), jnp.ones((1, 4), dtype=jnp.int32)
-    out_u = mu(toks, decoder_positions=pos, decoder_segment_ids=cmask)
-    out_s = ms(toks, decoder_positions=pos, decoder_segment_ids=cmask)
+    fwd = _jit_forward()
+    out_u = fwd(mu, toks, pos, cmask)
+    out_s = fwd(ms, toks, pos, cmask)
     self.assertEqual(out_u.dtype, jnp.bfloat16)
     self.assertEqual(out_s.dtype, jnp.bfloat16)
     self.assertTrue(jnp.all(jnp.isfinite(out_u)))
@@ -1833,7 +1844,8 @@ class Qwen3_8BackboneTest(absltest.TestCase):
 
     def loss_and_grad(model, expect_remat):
       with mock.patch.object(jax, "checkpoint", wraps=jax.checkpoint) as checkpoint:
-        out = nnx.value_and_grad(loss_fn)(model)
+        # A fresh nnx.jit per call so tracing (where jax.checkpoint is applied) happens inside this patch.
+        out = nnx.jit(nnx.value_and_grad(loss_fn))(model)
       # The scan body is the only jax.checkpoint in the model, so only the remat path may wrap it.
       self.assertEqual(checkpoint.called, expect_remat)
       return out
@@ -1879,7 +1891,8 @@ class Qwen3_8BackboneTest(absltest.TestCase):
           lambda _, __, o, i=idx: hf_masks.__setitem__(i, o)
       )
     pt_out = hf_model(torch.from_numpy(input_ids), output_router_logits=True)
-    (lu, au), (ls, as_) = (m(jnp.array(input_ids, dtype=jnp.int32), return_aux=True) for m in (mu, ms))
+    fwd_aux = _jit_forward(return_aux=True)
+    (lu, au), (ls, as_) = (fwd_aux(m, jnp.array(input_ids, dtype=jnp.int32), None, None) for m in (mu, ms))
     for out in (lu, ls):
       np.testing.assert_allclose(np.array(out), pt_out.logits.detach().cpu().numpy(), atol=5e-5, rtol=1e-5)
     for i, topk in enumerate(
@@ -1932,8 +1945,9 @@ class Qwen3_8BackboneTest(absltest.TestCase):
     pos = jnp.broadcast_to(jnp.arange(8, dtype=jnp.int32), (1, 8))
     seg = jnp.array([[1, 1, 1, 1, 2, 2, 2, 2]], dtype=jnp.int32)
 
-    (logits_base, aux_base) = mod_base(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
-    (logits_opt, aux_opt) = mod_opt(toks, decoder_positions=pos, decoder_segment_ids=seg, return_aux=True)
+    fwd_aux = _jit_forward(return_aux=True)
+    logits_base, aux_base = fwd_aux(mod_base, toks, pos, seg)
+    logits_opt, aux_opt = fwd_aux(mod_opt, toks, pos, seg)
     np.testing.assert_allclose(np.array(logits_opt), np.array(logits_base), rtol=1e-4, atol=1e-4)
     jax.tree.map(
         lambda b, o: np.testing.assert_allclose(np.array(o), np.array(b), rtol=1e-4, atol=1e-4), aux_base, aux_opt

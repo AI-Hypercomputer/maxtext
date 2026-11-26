@@ -65,12 +65,18 @@ reviewing MaxText changes.
   collectives in HLO regexes (e.g.,
   `r"\b(all-gather|all-reduce)(?:-start)?\("`).
 
+* **CPU Test Efficiency:** Keep CPU unit tests fast by using minimal model
+  dimensions/topologies, jitting model init and execution (`nnx.jit`/`jax.jit`),
+  using `eval_shape` for HLO/jaxpr-only checks, setting `hardware="cpu"` (or
+  `megablox=False`) in non-kernel MoE tests, and splitting `>4`-device CPU-mesh
+  subprocesses via `tests/utils/cpu_mesh_child.py` (see `.agents/review/testing.md`).
+
 ## 4. Formatting, Domain Guides, and Workflows
 
 * **Style & License:** Include the Apache 2.0 license header on `.py` files and
   use 2-space indentation with max line length 122 (`pyink`, `pylintrc`).
 * **Domain Guides, Skills & Self-Review:** Follow matching checklists in
   `.agents/review/` (`workflows.md`, `config-checkpoint.md`, `kernels.md`,
-  `performance.md`), check `.agents/skills/` for task workflows (see
+  `performance.md`, `testing.md`), check `.agents/skills/` for task workflows (see
   `.agents/README.md`), and run a read-only self-review against
   `.agents/review/protocol.md` before requesting review.

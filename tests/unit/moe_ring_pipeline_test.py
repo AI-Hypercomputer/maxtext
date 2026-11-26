@@ -18,12 +18,9 @@ import collections
 import functools
 import os
 import re
-import subprocess
-import sys
 import types
 from unittest import mock
 
-from absl import app
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
@@ -46,6 +43,7 @@ from maxtext.models import qwen3_5
 from maxtext.utils import max_utils
 from maxtext.utils import maxtext_utils
 from maxtext.utils.globals import MAXTEXT_PKG_DIR
+from tests.utils import cpu_mesh_child
 from tests.utils.test_helpers import get_post_train_test_config_path, get_test_config_path
 
 _NUM_EXPERTS = 8
@@ -53,8 +51,6 @@ _TOP_K = 2
 _EMB = 128
 _MLP = 128
 _SEQ = 32
-_SUBPROC_PASS_TOKEN = "MOE_RING_PIPELINE_8DEV_BIT_EXACT_PASSED"
-_SUBPROC_ENV = "_MOE_RING_PIPELINE_8DEV_SUBPROC"
 _BARRIER_TIE = moe.barrier_tie
 _COLLECTIVES = ("all-gather", "all-reduce", "reduce-scatter", "all-to-all", "collective-permute")
 
@@ -224,7 +220,14 @@ def _moe_cfg(run_suffix: str, num_devices: int = 4, **overrides):
   )
 
 
-def _build_moe(cfg, mesh: Mesh, force_mode: str | None = None):
+def _build_moe(
+    cfg,
+    mesh: Mesh,
+    force_mode: str | None = None,
+    *,
+    force_dropless: bool = False,
+    moe_chunk_barrier: bool | None = None,
+):
   """Builds a `RoutedMoE` instance on `mesh`."""
   model = moe.RoutedMoE(
       config=cfg,
@@ -240,6 +243,10 @@ def _build_moe(cfg, mesh: Mesh, force_mode: str | None = None):
   )
   if force_mode is not None:
     model.moe_ring_pipeline_mode = force_mode
+  if force_dropless:
+    model.force_dropless = True
+  if moe_chunk_barrier is not None:
+    model.moe_chunk_barrier = moe_chunk_barrier
   return model
 
 
@@ -259,10 +266,28 @@ def _make_inputs(cfg, num_devices: int, *, forced_mode: bool = False):
   return x, upstream, ids.astype(jnp.int32)
 
 
-def _run_layer_and_grads(cfg, mesh: Mesh, x, upstream, forced=None, shared_params=None, force_mode: str | None = None):
+def _run_layer_and_grads(
+    cfg,
+    mesh: Mesh,
+    x,
+    upstream,
+    forced=None,
+    shared_params=None,
+    force_mode: str | None = None,
+    *,
+    fwd_hlo_only: bool = False,
+    force_dropless: bool = False,
+    moe_chunk_barrier: bool | None = None,
+):
   """Runs forward + backward wrt `params` (`gate`, `wi_0`, `wi_1`, `wo`) and `x`, returning host values and diagnostics."""
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-    model = _build_moe(cfg, mesh, force_mode=force_mode)
+    model = _build_moe(
+        cfg,
+        mesh,
+        force_mode=force_mode,
+        force_dropless=force_dropless,
+        moe_chunk_barrier=moe_chunk_barrier,
+    )
     graphdef, init_params, rest = nnx.split(model, nnx.Param, ...)
     params = init_params if shared_params is None else shared_params
 
@@ -274,19 +299,33 @@ def _run_layer_and_grads(cfg, mesh: Mesh, x, upstream, forced=None, shared_param
         loss = loss + lb_loss.astype(jnp.float32)
       return loss, (out, lb_loss, bias_updates)
 
-    grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)
-    fwd_jaxpr = jax.make_jaxpr(loss_fn)(params, x).jaxpr
-    grad_jaxpr = jax.make_jaxpr(grad_fn)(params, x).jaxpr
-    fwd_hlo = jax.jit(loss_fn).lower(params, x).as_text("hlo")
-    grad_hlo = jax.jit(grad_fn).lower(params, x).as_text("hlo")
-    (loss, aux), (param_grads, x_grad) = jax.jit(grad_fn)(params, x)
+    # Trace forward once and reuse it for both jaxpr inspection and HLO lowering.
+    fwd_traced = jax.jit(loss_fn).trace(params, x)
+    fwd_hlo = fwd_traced.lower().as_text("hlo")
+    fwd_barriers = _count_hlo_opt_barriers(fwd_hlo)
+    if fwd_hlo_only:
+      return None, {"fwd_hlo_opt_barriers": fwd_barriers, "fwd_hlo": fwd_hlo}, params
 
-    # Isolate pure VJP pullback HLO to prove zero opt-barrier in backward pass.
-    _, vjp_fn = jax.vjp(lambda p, act: loss_fn(p, act)[0], params, x)
-    bwd_only_hlo = jax.jit(vjp_fn).lower(jnp.ones((), dtype=jnp.float32)).as_text("hlo")
+    fwd_jaxpr = fwd_traced.jaxpr.jaxpr
+    grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)
+    # Trace and lower grad_fn once, then compile and run that lowered executable.
+    grad_traced = jax.jit(grad_fn).trace(params, x)
+    grad_jaxpr = grad_traced.jaxpr.jaxpr
+    grad_lowered = grad_traced.lower()
+    grad_hlo = grad_lowered.as_text("hlo")
+    (loss, aux), (param_grads, x_grad) = grad_lowered.compile()(params, x)
+
+    # Isolate pure VJP pullback HLO abstractly via eval_shape (avoiding an eager forward pass) to prove zero
+    # opt-barrier in the backward pass.
+    _, abs_vjp_fn = jax.eval_shape(lambda p, act: jax.vjp(lambda p_, a_: loss_fn(p_, a_)[0], p, act), params, x)
+    abs_res, vjp_treedef = jax.tree_util.tree_flatten(abs_vjp_fn)
+    bwd_only_hlo = (
+        jax.jit(lambda res, ct: jax.tree_util.tree_unflatten(vjp_treedef, res)(ct))
+        .lower(abs_res, jax.ShapeDtypeStruct((), jnp.float32))
+        .as_text("hlo")
+    )
 
   layouts = _layouts(fwd_jaxpr)
-  fwd_barriers = _count_hlo_opt_barriers(fwd_hlo)
   grad_total_barriers = _count_hlo_opt_barriers(grad_hlo)
   bwd_only_barriers = _count_hlo_opt_barriers(bwd_only_hlo)
   diag = {
@@ -596,17 +635,30 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
     if len(jax.devices()) < 4:
       self.skipTest(f"Requires >= 4 devices, found {len(jax.devices())}.")
 
-  def _assert_parity_against_baseline(
-      self, num_devices: int, common_overrides: dict, test_overrides: dict, rtol: float = 2e-3, atol: float = 2e-3
-  ):
-    """Asserts forward output, loss, and all input/weight gradients match the baseline `'none'` mode."""
+  def _run_baseline(self, num_devices: int, common_overrides: dict):
+    """Builds and runs the baseline `'none'` mode once so multi-mode tests can reuse it."""
     cfg_ref = _moe_cfg("ref", num_devices=num_devices, **common_overrides)
-    cfg_new = _moe_cfg("new", num_devices=num_devices, **{**common_overrides, **test_overrides})
     mesh = _make_mesh(cfg_ref, num_devices)
     forced_mode = bool(common_overrides.get("_forced_mode", False))
     x, upstream, forced = _make_inputs(cfg_ref, num_devices, forced_mode=forced_mode)
-
     ref_vals, ref_diag, shared_params = _run_layer_and_grads(cfg_ref, mesh, x, upstream, forced=forced)
+    return cfg_ref, mesh, x, upstream, forced, ref_vals, ref_diag, shared_params
+
+  def _assert_parity_against_baseline(
+      self,
+      num_devices: int,
+      common_overrides: dict,
+      test_overrides: dict,
+      rtol: float = 2e-3,
+      atol: float = 2e-3,
+      *,
+      baseline=None,
+  ):
+    """Asserts forward output, loss, and all input/weight gradients match the baseline `'none'` mode."""
+    if baseline is None:
+      baseline = self._run_baseline(num_devices, common_overrides)
+    _, mesh, x, upstream, forced, ref_vals, ref_diag, shared_params = baseline
+    cfg_new = _moe_cfg("new", num_devices=num_devices, **{**common_overrides, **test_overrides})
     new_vals, new_diag, _ = _run_layer_and_grads(cfg_new, mesh, x, upstream, forced=forced, shared_params=shared_params)
 
     loss_ref, out_ref, lb_ref, bu_ref, pgrads_ref, xgrad_ref = ref_vals
@@ -843,6 +895,7 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
         "use_ragged_sort": False,
         "ragged_buffer_factor": -1.0,
     }
+    baseline = self._run_baseline(4, common)
     for mode in ("software_pipeline", "combine_per_chunk"):
       ref_diag, new_diag = self._assert_parity_against_baseline(
           4,
@@ -850,6 +903,7 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
           {"moe_ring_pipeline_mode": mode, "ring_of_experts_row_major_reduce_scatter": True},
           rtol=1e-5,
           atol=1e-5,
+          baseline=baseline,
       )
       self.assertEqual(ref_diag["fwd_hlo_opt_barriers"], 0)
       self.assertEqual(new_diag["vjp_pullback_opt_barriers"], 0)
@@ -959,36 +1013,43 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
     def _qwen_rs_count(cfg, override=None):
       mesh = _make_mesh(cfg, 4)
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-        dec = nnx_decoders.NNXDecoder(cfg, mesh, model_mode=ctypes.MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
-        blk = qwen3_5.Qwen3_5ScannableBlock(
-            config=cfg,
-            mesh=mesh,
-            model_mode=ctypes.MODEL_MODE_TRAIN,
-            quant=None,
-            rngs=nnx.Rngs(params=0, dropout=1),
-            remat_policy_fn=dec.get_remat_policy(),
-            apply_internal_remat=True,
-        )
-        if override is not None:
-          dec.remat_policy_override = override
-          dec._sync_remat_policy_override(blk)  # pylint: disable=protected-access
-        graphdef, params, rest = nnx.split(blk, nnx.Param, ...)
-        y = jnp.ones((4, _SEQ, _EMB), dtype=jnp.bfloat16)
-        pos = jnp.broadcast_to(jnp.arange(_SEQ, dtype=jnp.int32), (4, _SEQ))
-        seg = jnp.ones((4, _SEQ), dtype=jnp.int32)
+        # Jit block construction so multi-layer weight init does not dispatch op by op on CPU,
+        # then lower with abstract ShapeDtypeStruct inputs since only HLO text is inspected.
+        def _build():
+          """Constructs the decoder and scannable block under jit for HLO inspection."""
+          dec = nnx_decoders.NNXDecoder(cfg, mesh, model_mode=ctypes.MODEL_MODE_TRAIN, rngs=nnx.Rngs(params=0, dropout=1))
+          blk = qwen3_5.Qwen3_5ScannableBlock(
+              config=cfg,
+              mesh=mesh,
+              model_mode=ctypes.MODEL_MODE_TRAIN,
+              quant=None,
+              rngs=nnx.Rngs(params=0, dropout=1),
+              remat_policy_fn=dec.get_remat_policy(),
+              apply_internal_remat=True,
+          )
+          if override is not None:
+            dec.remat_policy_override = override
+            dec._sync_remat_policy_override(blk)  # pylint: disable=protected-access
+          return blk
 
-        def nnx_loss(b, act_in):
-          out = b(act_in, seg, pos, True, ctypes.MODEL_MODE_TRAIN)
+        blk = nnx.jit(_build)()
+        graphdef, params, rest = nnx.split(blk, nnx.Param, ...)
+        y = jax.ShapeDtypeStruct((4, _SEQ, _EMB), jnp.bfloat16)
+        pos = jax.ShapeDtypeStruct((4, _SEQ), jnp.int32)
+        seg = jax.ShapeDtypeStruct((4, _SEQ), jnp.int32)
+
+        def nnx_loss(b, act_in, seg_in, pos_in):
+          out = b(act_in, seg_in, pos_in, True, ctypes.MODEL_MODE_TRAIN)
           if isinstance(out, tuple):
             out = out[0]
           return jnp.sum(out.astype(jnp.float32) ** 2)
 
         grad_fn = nnx.value_and_grad(nnx_loss, argnums=nnx.DiffState(0, nnx.Param))
 
-        def jitted(p, r, act):
-          return grad_fn(nnx.merge(graphdef, p, r), act)
+        def jitted(p, r, act, seg_in, pos_in):
+          return grad_fn(nnx.merge(graphdef, p, r), act, seg_in, pos_in)
 
-        hlo = jax.jit(jitted).lower(params, rest, y).as_text("hlo")
+        hlo = jax.jit(jitted).lower(params, rest, y, seg, pos).as_text("hlo")
         return sum(v for (op, _), v in _collectives(hlo).items() if op == "reduce-scatter")
 
     for pol_name in ("minimal_offloaded", "qkv_proj_offloaded"):
@@ -1052,6 +1113,8 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
           "num_moe_token_chunks": n_chunks,
           "base_emb_dim": _EMB * (n_chunks // 2),
       }
+      baseline = self._run_baseline(4, common)
+      cfg_ref, mesh, x, upstream, _, _, _, shared_params = baseline
       for mode in ("combine_per_chunk", "software_pipeline"):
         _, new_diag = self._assert_parity_against_baseline(
             4,
@@ -1059,6 +1122,7 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
             {"moe_ring_pipeline_mode": mode, "ring_of_experts_row_major_reduce_scatter": True},
             rtol=1e-5,
             atol=1e-5,
+            baseline=baseline,
         )
         self.assertEqual(new_diag["vjp_pullback_opt_barriers"], 0)
         self.assertEqual(new_diag["unread_barriers"], [])
@@ -1078,17 +1142,12 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
               self.assertGreaterEqual(len(downstream), 1, msg=f"Dead barrier output {gte_line}")
         else:
           self.assertEqual(new_diag["combine_order_names"], n_chunks - 1)
-          cfg_ref = _moe_cfg(f"l4_ref_{n_chunks}", num_devices=4, **common)
           cfg_comb = _moe_cfg(
               f"l4_comb_{n_chunks}",
               num_devices=4,
               **common,
               moe_ring_pipeline_mode="combine_per_chunk",
           )
-          mesh = _make_mesh(cfg_ref, 4)
-          x, upstream, _ = _make_inputs(cfg_ref, 4)
-          with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
-            _, shared_params, _ = nnx.split(_build_moe(cfg_ref, mesh), nnx.Param, ...)
           ref_rs_users = _compiled_rs_user_counts(cfg_ref, mesh, shared_params, x, upstream)
           comb_rs_users = _compiled_rs_user_counts(cfg_comb, mesh, shared_params, x, upstream)
           self.assertEqual(ref_rs_users, [1] * n_chunks)
@@ -1115,8 +1174,12 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
         def loss_fn(p, inp):
           return jnp.sum(ckpt_fn(p, inp).astype(jnp.float32) * upstream)
 
-        _, vjp_fn = jax.vjp(ckpt_fn, shared_params, x)
-        res_shapes = [tuple(leaf.shape) for leaf in jax.tree_util.tree_leaves(vjp_fn) if isinstance(leaf, jax.Array)]
+        _, abs_vjp_fn = jax.eval_shape(lambda p, inp: jax.vjp(ckpt_fn, p, inp), shared_params, x)
+        res_shapes = [
+            tuple(leaf.shape)
+            for leaf in jax.tree_util.tree_leaves(abs_vjp_fn)
+            if isinstance(leaf, (jax.Array, jax.ShapeDtypeStruct))
+        ]
         grad_hlo = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1))).lower(shared_params, x).compile().as_text() or ""
         return _collectives(grad_hlo), res_shapes
 
@@ -1156,7 +1219,7 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
           mock.patch.dict(os.environ, {"LIBTPU_INIT_ARGS": env_flags, "XLA_FLAGS": ""}),
           mock.patch.object(moe.max_logging, "warning") as mock_warn,
       ):
-        _, diag, _ = _run_layer_and_grads(cfg, mesh, x, upstream)
+        _, diag, _ = _run_layer_and_grads(cfg, mesh, x, upstream, fwd_hlo_only=True)
       expected = 4 * (cfg.num_moe_token_chunks - 1) if should_pipeline else 0
       self.assertEqual(diag["fwd_hlo_opt_barriers"], expected)
       warned = any("moe_ring_pipeline_mode='software_pipeline' is skipped" in str(c) for c in mock_warn.call_args_list)
@@ -1263,35 +1326,23 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
       )
       mesh = _make_mesh(cfg, num_devices)
       x, upstream, _ = _make_inputs(cfg, num_devices)
-      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-        model = _build_moe(cfg, mesh)
-        # Mirror `train.build_dropless_graphdef` runtime overrides on step retry.
-        model.force_dropless = True
-        model.moe_chunk_barrier = True
-        graphdef, init_params, rest = nnx.split(model, nnx.Param, ...)
-        params = init_params if shared_params is None else shared_params
-
-        def loss_fn(p, act):
-          m = nnx.merge(graphdef, p, rest)
-          out, lb_loss, bias_updates = m(act)
-          loss = jnp.mean(out.astype(jnp.float32) * upstream)
-          if lb_loss is not None:
-            loss = loss + lb_loss.astype(jnp.float32)
-          return loss, (out, lb_loss, bias_updates)
-
-        grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)
-        fwd_jaxpr = jax.make_jaxpr(loss_fn)(params, x).jaxpr
-        fwd_hlo = jax.jit(loss_fn).lower(params, x).as_text("hlo")
-        (_, (out, _, _)), (param_grads, x_grad) = jax.jit(grad_fn)(params, x)
-        _, vjp_fn = jax.vjp(lambda p, act: loss_fn(p, act)[0], params, x)
-        bwd_only_hlo = jax.jit(vjp_fn).lower(jnp.ones((), dtype=jnp.float32)).as_text("hlo")
-
+      # Mirror `train.build_dropless_graphdef` runtime overrides on step retry.
+      host_vals, full_diag, params = _run_layer_and_grads(
+          cfg,
+          mesh,
+          x,
+          upstream,
+          shared_params=shared_params,
+          force_dropless=True,
+          moe_chunk_barrier=True,
+      )
+      _, out, _, _, param_grads, x_grad = host_vals
       diag = {
-          "fwd_hlo_opt_barriers": _count_hlo_opt_barriers(fwd_hlo),
-          "vjp_pullback_opt_barriers": _count_hlo_opt_barriers(bwd_only_hlo),
-          "combine_order_names": _count_checkpoint_name(fwd_jaxpr, "moe_combine_order"),
+          "fwd_hlo_opt_barriers": full_diag["fwd_hlo_opt_barriers"],
+          "vjp_pullback_opt_barriers": full_diag["vjp_pullback_opt_barriers"],
+          "combine_order_names": full_diag["combine_order_names"],
       }
-      return jax.device_get((out, param_grads, x_grad)), diag, params
+      return (out, param_grads, x_grad), diag, params
 
     ref_vals, ref_diag, shared_params = run_with_dropless_barrier("none")
     self.assertEqual(ref_diag["fwd_hlo_opt_barriers"], n_chunks - 1)
@@ -1313,45 +1364,33 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
             np.asarray(got_vals[2], np.float32), np.asarray(ref_vals[2], np.float32), rtol=1e-5, atol=1e-6
         )
 
-  @pytest.mark.cpu_only
-  def test_8_device_cpu_mesh_bfloat16_bit_exact(self):
-    """Runs an 8-device CPU child process with `--xla_allow_excess_precision=false` for bit-identical bf16 checks."""
-    # Test runners' XML / sharding outputs belong to the parent, so the child must not write them.
-    env = {
-        k: v
-        for k, v in os.environ.items()
-        if k not in ("XML_OUTPUT_FILE", "TEST_SHARD_INDEX", "TEST_TOTAL_SHARDS", "TEST_SHARD_STATUS_FILE")
-    }
-    env["XLA_FLAGS"] = (
-        env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8 --xla_allow_excess_precision=false"
-    )
-    env["JAX_PLATFORMS"] = "cpu"
-    env[_SUBPROC_ENV] = "1"
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-    py_paths = [repo_root] + [p for p in sys.path if p]
-    if env.get("PYTHONPATH"):
-      py_paths.append(env["PYTHONPATH"])
-    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(py_paths))
-    # Hermetic test binaries may have no `sys.executable`; re-run the binary itself in that case.
-    cmd = [sys.executable, os.path.abspath(__file__)] if sys.executable else [sys.argv[0]]
-    result = subprocess.run(
-        cmd,
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    self.assertEqual(result.returncode, 0, msg=f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}")
-    self.assertIn(_SUBPROC_PASS_TOKEN, result.stdout)
-
-
-def _run_8dev_bit_exact_main():
-  """Child-process entry point verifying bit-identical bf16 forward outputs across 8 CPU devices (`ep=8` & `fsdp=2,ep=4`)."""
-  assert len(jax.devices()) == 8, f"Expected 8 CPU devices, got {len(jax.devices())}"
-  topologies = (
-      ("ep8", {"ici_fsdp_parallelism": 1, "ici_expert_parallelism": 8, "per_device_batch_size": 1.0}),
-      ("fsdp2_ep4", {"ici_fsdp_parallelism": 2, "ici_expert_parallelism": 4, "per_device_batch_size": 1.0}),
+  @parameterized.named_parameters(
+      ("ep8", "ep8"),
+      ("fsdp2_ep4", "fsdp2_ep4"),
   )
+  @pytest.mark.cpu_only
+  def test_8_device_cpu_mesh_bfloat16_bit_exact(self, topology):
+    """Runs an 8-device CPU child process with `--xla_allow_excess_precision=false` for bit-identical bf16 checks."""
+    # Always run in a child so `--xla_allow_excess_precision=false` and the 8-device count take effect before JAX init.
+    cpu_mesh_child.run_phase(
+        os.path.abspath(__file__),
+        topology,
+        _8DEV_PHASES,
+        num_devices=8,
+        in_process=False,
+        extra_xla_flags="--xla_allow_excess_precision=false",
+    )
+
+
+_8DEV_TOPOLOGIES = {
+    "ep8": {"ici_fsdp_parallelism": 1, "ici_expert_parallelism": 8, "per_device_batch_size": 1.0},
+    "fsdp2_ep4": {"ici_fsdp_parallelism": 2, "ici_expert_parallelism": 4, "per_device_batch_size": 1.0},
+}
+
+
+def _run_8dev_bit_exact_topology(topo_name: str):
+  """Verifies bit-identical bf16 forward outputs across 8 CPU devices for one topology (`ep8` or `fsdp2_ep4`)."""
+  assert len(jax.devices()) == 8, f"Expected 8 CPU devices, got {len(jax.devices())}"
   modes = (
       ("combine_per_chunk", False),
       ("combine_per_chunk", True),
@@ -1359,38 +1398,34 @@ def _run_8dev_bit_exact_main():
       ("software_pipeline", True),
       ("none", True),
   )
-  for topo_name, topo_kw in topologies:
-    common = {"dtype": "bfloat16", "use_random_routing": True, **topo_kw}
-    cfg_ref = _moe_cfg(f"sub_ref_{topo_name}", num_devices=8, **common)
-    mesh = _make_mesh(cfg_ref, 8)
-    x, upstream, _ = _make_inputs(cfg_ref, 8)
-    ref_vals, _, shared_params = _run_layer_and_grads(cfg_ref, mesh, x, upstream)
-    for mode, row_major in modes:
-      cfg_new = _moe_cfg(
-          f"sub_{topo_name}_{mode}_{row_major}",
-          num_devices=8,
-          **common,
-          moe_ring_pipeline_mode=mode,
-          ring_of_experts_row_major_reduce_scatter=row_major,
-      )
-      new_vals, diag, _ = _run_layer_and_grads(cfg_new, mesh, x, upstream, shared_params=shared_params)
-      assert np.array_equal(
-          np.asarray(new_vals[1]), np.asarray(ref_vals[1])
-      ), f"{topo_name} {mode} {row_major} output mismatch"
-      assert diag["vjp_pullback_opt_barriers"] == 0, f"{topo_name} {mode} backward barriers != 0"
-      assert not diag["unread_barriers"], f"{topo_name} {mode} unread barriers: {diag['unread_barriers']}"
-      for g_ref, g_new in zip(
-          jax.tree_util.tree_leaves(ref_vals[4]), jax.tree_util.tree_leaves(new_vals[4]), strict=True
-      ):
-        np.testing.assert_allclose(np.asarray(g_new, np.float32), np.asarray(g_ref, np.float32), rtol=1e-5, atol=1e-6)
-      np.testing.assert_allclose(
-          np.asarray(new_vals[5], np.float32), np.asarray(ref_vals[5], np.float32), rtol=1e-5, atol=1e-6
-      )
-  print(_SUBPROC_PASS_TOKEN, flush=True)
+  common = {"dtype": "bfloat16", "use_random_routing": True, **_8DEV_TOPOLOGIES[topo_name]}
+  cfg_ref = _moe_cfg(f"sub_ref_{topo_name}", num_devices=8, **common)
+  mesh = _make_mesh(cfg_ref, 8)
+  x, upstream, _ = _make_inputs(cfg_ref, 8)
+  ref_vals, _, shared_params = _run_layer_and_grads(cfg_ref, mesh, x, upstream)
+  for mode, row_major in modes:
+    cfg_new = _moe_cfg(
+        f"sub_{topo_name}_{mode}_{row_major}",
+        num_devices=8,
+        **common,
+        moe_ring_pipeline_mode=mode,
+        ring_of_experts_row_major_reduce_scatter=row_major,
+    )
+    new_vals, diag, _ = _run_layer_and_grads(cfg_new, mesh, x, upstream, shared_params=shared_params)
+    assert np.array_equal(
+        np.asarray(new_vals[1]), np.asarray(ref_vals[1])
+    ), f"{topo_name} {mode} {row_major} output mismatch"
+    assert diag["vjp_pullback_opt_barriers"] == 0, f"{topo_name} {mode} backward barriers != 0"
+    assert not diag["unread_barriers"], f"{topo_name} {mode} unread barriers: {diag['unread_barriers']}"
+    for g_ref, g_new in zip(jax.tree_util.tree_leaves(ref_vals[4]), jax.tree_util.tree_leaves(new_vals[4]), strict=True):
+      np.testing.assert_allclose(np.asarray(g_new, np.float32), np.asarray(g_ref, np.float32), rtol=1e-5, atol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(new_vals[5], np.float32), np.asarray(ref_vals[5], np.float32), rtol=1e-5, atol=1e-6
+    )
+
+
+_8DEV_PHASES = {name: functools.partial(_run_8dev_bit_exact_topology, name) for name in _8DEV_TOPOLOGIES}
 
 
 if __name__ == "__main__":
-  if os.environ.get(_SUBPROC_ENV) == "1":
-    app.run(lambda _: _run_8dev_bit_exact_main())
-  else:
-    absltest.main()
+  cpu_mesh_child.main(_8DEV_PHASES)

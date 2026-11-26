@@ -14,6 +14,7 @@
 
 """Tests for the Wan 2.1 3D causal VAE (`autoencoder_kl_wan.py`)."""
 
+import functools
 import unittest
 
 import pytest
@@ -68,13 +69,41 @@ _RESIDUAL_CONFIG = {
 _BATCH, _FRAMES, _HEIGHT, _WIDTH = 1, 5, 16, 16
 
 
+# Eager VAE init and 3D-conv calls dispatch every op separately on CPU, so jit init and encode/decode and build each
+# VAE lazily at most once per process: half of the tests below need no VAE, and only one needs the residual VAE.
+@functools.cache
+def _vae() -> AutoencoderKLWan:
+  return nnx.jit(lambda: AutoencoderKLWan(rngs=nnx.Rngs(0), **_CONFIG))()
+
+
+@functools.cache
+def _residual_vae() -> AutoencoderKLWan:
+  return nnx.jit(lambda: AutoencoderKLWan(rngs=nnx.Rngs(0), **_RESIDUAL_CONFIG))()
+
+
+@nnx.jit
+def _encode_mode(vae: AutoencoderKLWan, video: jax.Array) -> jax.Array:
+  """Jitted encode returning posterior mode latents."""
+  return vae.encode(video, AutoencoderKLWanCache(vae)).latent_dist.mode()
+
+
+@nnx.jit
+def _decode_sample(vae: AutoencoderKLWan, latents: jax.Array) -> jax.Array:
+  """Jitted decode returning reconstructed video frames."""
+  return vae.decode(latents, AutoencoderKLWanCache(vae)).sample
+
+
+# Keep this class on one xdist worker so the cached VAEs are built once, not once per worker.
+@pytest.mark.xdist_group("AutoencoderKLWanTest")
 class AutoencoderKLWanTest(unittest.TestCase):
 
-  @classmethod
-  def setUpClass(cls):
-    super().setUpClass()
-    cls.vae = AutoencoderKLWan(rngs=nnx.Rngs(0), **_CONFIG)
-    cls.residual_vae = AutoencoderKLWan(rngs=nnx.Rngs(0), **_RESIDUAL_CONFIG)
+  @property
+  def vae(self) -> AutoencoderKLWan:
+    return _vae()
+
+  @property
+  def residual_vae(self) -> AutoencoderKLWan:
+    return _residual_vae()
 
   def test_latent_shape(self):
     self.assertEqual(AutoencoderKLWan.latent_shape(_CONFIG, 2, 81, 480, 832), (2, 4, 21, 60, 104))
@@ -83,29 +112,27 @@ class AutoencoderKLWanTest(unittest.TestCase):
 
   def test_encode_decode_shapes(self):
     video = jax.random.uniform(jax.random.key(0), (_BATCH, 3, _FRAMES, _HEIGHT, _WIDTH), minval=-1.0, maxval=1.0)
-    posterior = self.vae.encode(video, AutoencoderKLWanCache(self.vae)).latent_dist
-    latents = posterior.mode()  # channels-last (B, F, H, W, z_dim)
+    latents = _encode_mode(self.vae, video)  # channels-last (B, F, H, W, z_dim)
     b, z, f, h, w = AutoencoderKLWan.latent_shape(_CONFIG, _BATCH, _FRAMES, _HEIGHT, _WIDTH)
     self.assertEqual(latents.shape, (b, f, h, w, z))
 
-    decoded = self.vae.decode(latents, AutoencoderKLWanCache(self.vae)).sample  # channels-last (B, F, H, W, 3)
+    decoded = _decode_sample(self.vae, latents)  # channels-last (B, F, H, W, 3)
     self.assertEqual(decoded.shape, (_BATCH, _FRAMES, _HEIGHT, _WIDTH, 3))
     self.assertTrue(np.all(np.isfinite(np.asarray(decoded))))
 
   def test_decode_accepts_channels_first_latents(self):
     latents = jax.random.normal(jax.random.key(1), AutoencoderKLWan.latent_shape(_CONFIG, _BATCH, _FRAMES, 16, 16))
-    decoded = self.vae.decode(latents, AutoencoderKLWanCache(self.vae)).sample
+    decoded = _decode_sample(self.vae, latents)
     self.assertEqual(decoded.shape, (_BATCH, _FRAMES, 16, 16, 3))
 
   def test_residual_vae_encode_decode_shapes(self):
     height, width = 32, 32
     video = jax.random.uniform(jax.random.key(2), (_BATCH, 3, _FRAMES, height, width), minval=-1.0, maxval=1.0)
-    posterior = self.residual_vae.encode(video, AutoencoderKLWanCache(self.residual_vae)).latent_dist
-    latents = posterior.mode()
+    latents = _encode_mode(self.residual_vae, video)
     b, z, f, h, w = AutoencoderKLWan.latent_shape(_RESIDUAL_CONFIG, _BATCH, _FRAMES, height, width)
     self.assertEqual(latents.shape, (b, f, h, w, z))
 
-    decoded = self.residual_vae.decode(latents, AutoencoderKLWanCache(self.residual_vae)).sample
+    decoded = _decode_sample(self.residual_vae, latents)
     self.assertEqual(decoded.shape, (_BATCH, _FRAMES, height, width, 3))
     self.assertTrue(np.all(np.isfinite(np.asarray(decoded))))
 

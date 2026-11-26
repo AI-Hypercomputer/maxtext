@@ -171,14 +171,12 @@ class TikTokenTest(unittest.TestCase):
 
   @classmethod
   def setUpClass(cls):
-    grain_train_files = "gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet"
     cls.source_tokenizer = input_pipeline_utils.get_tokenizer(
         os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer_llama3.tiktoken"),
         "tiktoken",
         add_bos=False,
         add_eos=False,
     )
-    cls.dataset = train_tokenizer.build_grain_iterator(grain_train_files, "parquet")
 
   def test_tokenize(self):
     text = "This is a test"

@@ -91,9 +91,64 @@ def _tiny_qwen35_kwargs(seq_len, batch_size, num_experts, top_k, **overrides):
       "max_prefill_predict_length": seq_len,
       "per_device_batch_size": float(batch_size),
       "weight_dtype": "bfloat16",
+      # Off TPU, megablox runs its Pallas GMM kernels in interpret mode, which dominates these tests' runtime. Router
+      # replay does not depend on the GMM backend; sparse_matmul still covers the dropless permute path via
+      # jax.lax.ragged_dot.
+      "megablox": False,
   }
   kwargs.update(overrides)
   return kwargs
+
+
+def _tiny_moe_dims(seq_len, batch_size, num_experts, top_k):
+  """Shrunk-down MoE dims shared by the gemma4 and mixtral forced-routing configs."""
+  return {
+      "override_model_config": True,
+      "num_experts": num_experts,
+      "num_experts_per_tok": top_k,
+      "base_emb_dim": 64,
+      "base_num_query_heads": 2,
+      "base_num_kv_heads": 2,
+      "head_dim": 32,
+      "base_mlp_dim": 64,
+      "base_moe_mlp_dim": 64,
+      "vocab_size": 128,
+      "max_target_length": seq_len,
+      "max_prefill_predict_length": seq_len,
+      "per_device_batch_size": float(batch_size),
+      "weight_dtype": "bfloat16",
+      # See _tiny_qwen35_kwargs: avoid interpreted megablox on CPU.
+      "megablox": False,
+  }
+
+
+def _jit_loss_fn(model, cfg):
+  """Returns `batch -> train.loss_fn(model, ...)[0]`, compiled once for `model`.
+
+  Calling train.loss_fn directly runs the whole model op by op; splitting the model and jitting a merge + loss keeps
+  the parameters fixed (so losses compare across routings) and reuses one executable per batch structure.
+  """
+  graphdef, state = nnx.split(model)
+
+  @jax.jit
+  def _loss(state, data_batch):
+    """Evaluates train.loss_fn for fixed merged model state on one batch."""
+    loss, _ = train.loss_fn(
+        nnx.merge(graphdef, state),
+        cfg,
+        data_batch,
+        dropout_rng=None,
+        params=None,
+        is_train=True,
+    )
+    return loss
+
+  def _call(data_batch):
+    # axis_rules is read while tracing, which happens inside the first call.
+    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
+      return _loss(state, data_batch)
+
+  return _call
 
 
 def _batch_rows(cfg):
@@ -335,21 +390,8 @@ class UnsupportedConfigGuardTest(unittest.TestCase):
   def test_gemma4_scanned_rejects_forced_routing(self):
     cfg = _init_test_cfg(
         extra_args=["attention=dot_product"],
-        override_model_config=True,
         model_name="gemma4-26b",
-        num_experts=4,
-        num_experts_per_tok=self.top_k,
-        base_emb_dim=256,
-        base_num_query_heads=2,
-        base_num_kv_heads=2,
-        head_dim=128,
-        base_mlp_dim=256,
-        base_moe_mlp_dim=256,
-        vocab_size=1000,
-        max_target_length=self.seq_len,
-        max_prefill_predict_length=self.seq_len,
-        per_device_batch_size=float(self.batch_size),
-        weight_dtype="bfloat16",
+        **_tiny_moe_dims(self.seq_len, self.batch_size, 4, self.top_k),
         run_name="test_router_replay_guard_gemma4_scan",
         base_num_decoder_layers=2,
         num_decoder_layers=2,
@@ -361,21 +403,28 @@ class UnsupportedConfigGuardTest(unittest.TestCase):
     segmentation = jnp.ones((self.batch_size, self.seq_len), dtype=jnp.int32)
     forced = jnp.zeros((self.batch_size, self.seq_len, self.top_k), dtype=jnp.int32)
     model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
-    params = model.init(
-        {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)},
-        ids,
-        positions,
-        segmentation,
-        enable_dropout=False,
+    # The guard raises while tracing the decoder, before any layer runs, so shapes are enough: eval_shape traces init
+    # and apply without executing them.
+    params = jax.eval_shape(
+        lambda: model.init(
+            {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)},
+            ids,
+            positions,
+            segmentation,
+            enable_dropout=False,
+        )
     )
     with self.assertRaisesRegex(NotImplementedError, "GEMMA4"):
-      model.apply(
+      jax.eval_shape(
+          lambda p: model.apply(
+              p,
+              ids,
+              positions,
+              segmentation,
+              enable_dropout=False,
+              forced_routed_experts=forced,
+          ),
           params,
-          ids,
-          positions,
-          segmentation,
-          enable_dropout=False,
-          forced_routed_experts=forced,
       )
 
 
@@ -470,7 +519,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
   def _assert_forced_routing_loss_finite(self, cfg, seq_len, forced_experts, label):
     """Builds a real model for `cfg`, runs train.loss_fn with a batch carrying
 
-    `forced_experts`, and asserts the resulting loss is finite.
+    `forced_experts`, and asserts the resulting loss is not NaN.
     """
     devices_array = maxtext_utils.create_device_mesh(cfg)
     mesh = Mesh(devices_array, cfg.mesh_axes)
@@ -498,19 +547,12 @@ class TrainerRouterReplayTest(unittest.TestCase):
     rngs = maxtext_utils_nnx.create_nnx_rngs(cfg, rng_key=rng)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       model = model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
-      loss, aux = train.loss_fn(
-          model,
-          cfg,
-          data_batch,
-          dropout_rng=None,
-          params=None,
-          is_train=True,
-      )
+    loss = _jit_loss_fn(model, cfg)(data_batch)
 
     self.assertIsNotNone(loss)
     self.assertFalse(jnp.isnan(loss), "Loss must not be NaN")
     print(f"\n[Trainer Router Replay][{label}] Computed loss with forced routing" f" + padding: {loss}")
-    return loss, aux
+    return loss
 
   def _build_model(self, cfg):
     """Builds the model for `cfg` from a fixed seed."""
@@ -519,8 +561,8 @@ class TrainerRouterReplayTest(unittest.TestCase):
     with nn_partitioning.axis_rules(cfg.logical_axis_rules):
       return model_creation_utils.from_config(cfg, mesh=mesh, rngs=rngs, model_mode=ctypes.MODEL_MODE_TRAIN)
 
-  def _loss_for_routing(self, cfg, seq_len, forced_experts, model=None):
-    """train.loss_fn for one routing, reusing fixed params so losses compare."""
+  def _loss_for_routing(self, cfg, seq_len, forced_experts, loss_fn):
+    """train.loss_fn for one routing via `loss_fn` (from _jit_loss_fn), whose fixed params make losses compare."""
     batch_rows = _batch_rows(cfg)
     tokens = jnp.array(([10, 20, 30, 40] * ((seq_len // 4) + 1))[:seq_len], dtype=jnp.int32)
     inputs = jnp.tile(jnp.expand_dims(tokens, axis=0), (batch_rows, 1))
@@ -539,18 +581,7 @@ class TrainerRouterReplayTest(unittest.TestCase):
     }
     if forced_experts is not None:
       data_batch["forced_routed_experts"] = forced_experts
-    if model is None:
-      model = self._build_model(cfg)
-    with nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      loss, _ = train.loss_fn(
-          model,
-          cfg,
-          data_batch,
-          dropout_rng=None,
-          params=None,
-          is_train=True,
-      )
-    return float(loss)
+    return float(loss_fn(data_batch))
 
   def _assert_routing_is_load_bearing(self, cfg, seq_len, forced_a, forced_b, label):
     """Two different replays must give two different losses.
@@ -560,10 +591,10 @@ class TrainerRouterReplayTest(unittest.TestCase):
     train.loss_fn down to RoutedMoE.get_topk, because the model just routes
     normally. This is the assertion that actually pins the plumbing.
     """
-    model = self._build_model(cfg)
-    loss_a = self._loss_for_routing(cfg, seq_len, forced_a, model=model)
-    loss_b = self._loss_for_routing(cfg, seq_len, forced_b, model=model)
-    loss_none = self._loss_for_routing(cfg, seq_len, None, model=model)
+    loss_fn = _jit_loss_fn(self._build_model(cfg), cfg)
+    loss_a = self._loss_for_routing(cfg, seq_len, forced_a, loss_fn)
+    loss_b = self._loss_for_routing(cfg, seq_len, forced_b, loss_fn)
+    loss_none = self._loss_for_routing(cfg, seq_len, None, loss_fn)
     print(f"\n[Router Replay][{label}] a={loss_a} b={loss_b} unforced={loss_none}")
     self.assertNotAlmostEqual(
         loss_a,
@@ -716,6 +747,10 @@ class TrainerRouterReplayTest(unittest.TestCase):
     b = shared.at[:, :, -1, :].set(3)
     self._assert_routing_is_load_bearing(cfg, seq_len, a, b, "qwen3.5 scan remainder")
 
+  # Slow (~5-10 min on CI CPU: two 8-layer models). On every PR, scanned per-layer routing and the remainder block run
+  # in test_per_layer_routing_is_not_broadcast_scanned and test_per_layer_routing_reaches_the_scan_remainder_block,
+  # and the layer -> scan-slot mapping is pinned by test_4d_input_preserves_per_layer_values_in_scan_order.
+  @pytest.mark.scheduled_only
   def test_scanned_routing_matches_unscanned_with_several_local_layers_and_a_remainder(self):
     """Each sub-layer of a scanned block must replay its own layer's routing.
 
@@ -752,14 +787,15 @@ class TrainerRouterReplayTest(unittest.TestCase):
     layer_ids = jnp.arange(layers, dtype=jnp.int32)
     pairs = jnp.stack([layer_ids % num_experts, (layer_ids + 1) % num_experts], axis=-1)
     routing = jnp.broadcast_to(pairs[None, None], (_batch_rows(scanned_cfg), seq_len, layers, top_k))
-    unscanned_loss = self._loss_for_routing(unscanned_cfg, seq_len, routing, model=unscanned_model)
-    scanned_loss = self._loss_for_routing(scanned_cfg, seq_len, routing, model=scanned_model)
+    unscanned_loss_fn = _jit_loss_fn(unscanned_model, unscanned_cfg)
+    unscanned_loss = self._loss_for_routing(unscanned_cfg, seq_len, routing, unscanned_loss_fn)
+    scanned_loss = self._loss_for_routing(scanned_cfg, seq_len, routing, _jit_loss_fn(scanned_model, scanned_cfg))
     self.assertAlmostEqual(scanned_loss, unscanned_loss, places=4)
 
     # The comparison can only catch a mix-up if swapping two local layers' routing moves the loss.
     swapped = routing.at[:, :, [0, 1], :].set(routing[:, :, [1, 0], :])
     self.assertNotAlmostEqual(
-        self._loss_for_routing(unscanned_cfg, seq_len, swapped, model=unscanned_model), unscanned_loss, places=4
+        self._loss_for_routing(unscanned_cfg, seq_len, swapped, unscanned_loss_fn), unscanned_loss, places=4
     )
 
   def test_loss_fn_with_forced_routed_experts_gemma4(self):
@@ -771,21 +807,8 @@ class TrainerRouterReplayTest(unittest.TestCase):
     seq_len, batch_size, top_k, num_experts = 16, 2, 2, 4
     cfg = _init_test_cfg(
         extra_args=["attention=dot_product"],
-        override_model_config=True,
         model_name="gemma4-26b",
-        num_experts=num_experts,
-        num_experts_per_tok=top_k,
-        base_emb_dim=256,
-        base_num_query_heads=2,
-        base_num_kv_heads=2,
-        head_dim=128,
-        base_mlp_dim=256,
-        base_moe_mlp_dim=256,
-        vocab_size=1000,
-        max_target_length=seq_len,
-        max_prefill_predict_length=seq_len,
-        per_device_batch_size=float(batch_size),
-        weight_dtype="bfloat16",
+        **_tiny_moe_dims(seq_len, batch_size, num_experts, top_k),
         run_name="test_trainer_router_replay_gemma4",
         base_num_decoder_layers=1,
         num_decoder_layers=1,
@@ -848,25 +871,12 @@ class TrainerRouterReplayTest(unittest.TestCase):
     cfg = _init_test_cfg(
         extra_args=["attention=dot_product"],
         run_name="test_trainer_router_replay_scanned_mixtral",
-        override_model_config=True,
         base_num_decoder_layers=num_layers,
         num_decoder_layers=num_layers,
         model_name="qwen3-30b-a3b",
         decoder_block="mixtral",
         norm_topk_prob=False,
-        num_experts=num_experts,
-        num_experts_per_tok=top_k,
-        base_emb_dim=256,
-        base_num_query_heads=2,
-        base_num_kv_heads=2,
-        head_dim=256,
-        base_mlp_dim=256,
-        base_moe_mlp_dim=256,
-        vocab_size=1000,
-        max_target_length=seq_len,
-        max_prefill_predict_length=seq_len,
-        per_device_batch_size=float(batch_size),
-        weight_dtype="bfloat16",
+        **_tiny_moe_dims(seq_len, batch_size, num_experts, top_k),
     )
 
     # One distinct forced routing per layer: [batch, seq_len, num_layers, top_k].
@@ -926,15 +936,13 @@ class TrainerRouterReplayTest(unittest.TestCase):
 
     model = models.transformer_as_linen(config=cfg, mesh=mesh, quant=None, model_mode="train")
     init_params_rng, init_dropout_rng = jax.random.split(jax.random.PRNGKey(0))
-    params = model.init(
-        {"params": init_params_rng, "dropout": init_dropout_rng},
-        inputs,
-        positions,
-        segmentation,
-        enable_dropout=False,
+    # Jitted: an eager linen init/apply runs the whole model op by op.
+    params = jax.jit(lambda rngs: model.init(rngs, inputs, positions, segmentation, enable_dropout=False))(
+        {"params": init_params_rng, "dropout": init_dropout_rng}
     )
 
-    def logits_for(forced):
+    @jax.jit
+    def _logits(params, forced):
       return model.apply(
           params,
           inputs,
@@ -943,6 +951,9 @@ class TrainerRouterReplayTest(unittest.TestCase):
           enable_dropout=False,
           forced_routed_experts=forced,
       )
+
+    def logits_for(forced):
+      return _logits(params, forced)
 
     all_experts = jnp.broadcast_to(
         jnp.arange(num_experts, dtype=jnp.int32)[None, None, :],

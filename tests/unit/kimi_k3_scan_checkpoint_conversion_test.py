@@ -38,6 +38,7 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from maxtext.checkpoint_conversion import to_maxtext
 from maxtext.checkpoint_conversion.utils import utils as conversion_utils
@@ -171,6 +172,12 @@ def _scan_axis(mt_key: str, ndim: int, config) -> int:
   return config.param_scan_axis if ndim > config.param_scan_axis else 0
 
 
+@nnx.jit
+def _forward(model, tokens, positions):
+  # Jitted: eager op-by-op dispatch of the 13-layer KDA/MoE stack is several times slower on CPU.
+  return model(tokens, positions, model_mode=MODEL_MODE_TRAIN, enable_dropout=False)
+
+
 class KimiK3ScannedConversionTest(parameterized.TestCase):
   """Scanned-layout `PARAM_MAPPING` / `HOOK_FNS` against the scanned model and the unscanned conversion."""
 
@@ -274,6 +281,10 @@ class KimiK3ScannedConversionTest(parameterized.TestCase):
     for hf_key, want in self.hf_state.items():
       np.testing.assert_array_equal(np.asarray(exported[hf_key], np.float32), want, err_msg=hf_key)
 
+  # Slow (~4 min on CI CPU). On every PR, test_scanned_conversion_equals_restacked_unscanned and
+  # test_mapping_keys_match_model check the converted params, and kimi_k3_scan_test's logits parity checks the
+  # scanned model.
+  @pytest.mark.scheduled_only
   def test_scanned_model_logits_match_unscanned(self):
     """Scanned model on the scanned conversion == unscanned model on the unscanned conversion."""
     tokens = (jnp.arange(_SEQ_LEN, dtype=jnp.int32)[None] * 5 % 97 + 1).astype(jnp.int32)
@@ -286,7 +297,7 @@ class KimiK3ScannedConversionTest(parameterized.TestCase):
       loaded = load_checkpoint_params_into_nnx(model, self._convert(scan_layers))
       self.assertLen(loaded, len(self.shapes[scan_layers]))
       self.assertEqual(hasattr(model.decoder, "scanned_blocks"), scan_layers)
-      logits[scan_layers] = np.asarray(model(tokens, positions, model_mode=MODEL_MODE_TRAIN, enable_dropout=False))
+      logits[scan_layers] = np.asarray(_forward(model, tokens, positions))
       self.assertTrue(np.isfinite(logits[scan_layers]).all())
     np.testing.assert_allclose(logits[True], logits[False], rtol=2e-5, atol=2e-5)
 

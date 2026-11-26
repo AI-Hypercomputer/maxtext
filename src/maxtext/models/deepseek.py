@@ -17,7 +17,12 @@
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
+import collections
 import functools
+import hashlib
+import hmac
+import os
+import threading
 from typing import Optional
 
 from flax import nnx
@@ -51,6 +56,72 @@ from maxtext.utils.sharding import maybe_shard_with_logical
 from maxtext.utils.sharding import get_logical_axis_rules
 
 import transformers
+
+
+_NGRAM_HASH_CACHE_MAXSIZE = 8
+_NGRAM_HASH_CACHE_SALT = os.urandom(32)
+_NGRAM_HASH_CACHE_LOCK = threading.Lock()
+_NGRAM_HASH_CACHE: collections.OrderedDict[tuple[object, ...], NgramHashMapping] = collections.OrderedDict()
+
+
+def _token_cache_digest(hf_access_token: Optional[str]) -> Optional[bytes]:
+  """Returns a per-process salted HMAC digest so cache keys do not retain plaintext tokens."""
+  if hf_access_token is None:
+    return None
+  return hmac.new(_NGRAM_HASH_CACHE_SALT, str(hf_access_token).encode("utf-8"), hashlib.sha256).digest()
+
+
+def _get_ngram_hash_mapping(
+    tokenizer_path: str,
+    hf_access_token: Optional[str],
+    engram_vocab_bases: tuple[int, ...],
+    max_ngram_size: int,
+    engram_num_heads: int,
+    layer_ids: tuple[int, ...],
+    seed: int,
+) -> NgramHashMapping:
+  """Returns the n-gram hash tables shared by every engram layer, built once per distinct config.
+
+  Building them loads the tokenizer and decodes and normalizes its whole vocabulary in Python, which takes tens of
+  seconds; uncached, that repeats for every engram layer on every model construction (one AOT compile alone builds the
+  model three times). `NgramHashMapping` only holds host NumPy tables that it never mutates after `__init__` (see
+  `CompressedTokenizer.lookup_table`), so one instance can be shared across layers and model builds.
+  """
+  cache_key = (
+      tokenizer_path,
+      _token_cache_digest(hf_access_token),
+      engram_vocab_bases,
+      max_ngram_size,
+      engram_num_heads,
+      layer_ids,
+      seed,
+  )
+  with _NGRAM_HASH_CACHE_LOCK:
+    cached = _NGRAM_HASH_CACHE.get(cache_key)
+    if cached is not None:
+      _NGRAM_HASH_CACHE.move_to_end(cache_key)
+      return cached
+
+  tokenizer = transformers.AutoTokenizer.from_pretrained(tokenizer_path, token=hf_access_token)
+  mapping = NgramHashMapping(
+      engram_vocab_bases=list(engram_vocab_bases),
+      max_ngram_size=max_ngram_size,
+      engram_num_heads=engram_num_heads,
+      layer_ids=list(layer_ids),
+      tokenizer=tokenizer,
+      pad_id=tokenizer.pad_token_id,
+      seed=seed,
+  )
+  with _NGRAM_HASH_CACHE_LOCK:
+    existing = _NGRAM_HASH_CACHE.get(cache_key)
+    if existing is not None:
+      _NGRAM_HASH_CACHE.move_to_end(cache_key)
+      return existing
+    _NGRAM_HASH_CACHE[cache_key] = mapping
+    if len(_NGRAM_HASH_CACHE) > _NGRAM_HASH_CACHE_MAXSIZE:
+      _NGRAM_HASH_CACHE.popitem(last=False)
+  return mapping
+
 
 # -----------------------------------------
 # The Decoder Layer for DeepSeek v3
@@ -117,16 +188,13 @@ class DeepSeekGenericLayer(nnx.Module):
           epsilon=self.config.normalization_layer_epsilon,
           rngs=rngs,
       )
-      tokenizer = transformers.AutoTokenizer.from_pretrained(config.tokenizer_path, token=config.hf_access_token)
-      # TODO(ranran): Refactor NgramHashMapping to initialize once globally or at the model level.
-      # Moving this to decoders.py currently causes JAX initialization errors.
-      self.ngram_hash_mapping = NgramHashMapping(
-          engram_vocab_bases=config.engram_vocab_bases,
+      self.ngram_hash_mapping = _get_ngram_hash_mapping(
+          tokenizer_path=config.tokenizer_path,
+          hf_access_token=config.hf_access_token,
+          engram_vocab_bases=tuple(config.engram_vocab_bases),
           max_ngram_size=config.engram_max_ngram_size,
           engram_num_heads=config.engram_num_heads,
-          layer_ids=config.engram_layers,
-          tokenizer=tokenizer,
-          pad_id=tokenizer.pad_token_id,
+          layer_ids=tuple(config.engram_layers),
           seed=config.engram_seed,
       )
       self.engram = Engram(

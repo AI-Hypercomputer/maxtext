@@ -20,9 +20,10 @@ forward's permutes once, outside the layer scan, but the remat replay in the bac
 attention layer. With the key the layer names the permuted arrays and remat_policy=custom saves the name; the saved
 value is a loop invariant, which the scan hoists, and the replay reads it.
 
-On a CPU mesh of 8 devices, in a child process (see main), for a tiny hybrid Qwen3.5 (GatedDeltaNet, gated full
-attention and MoE on a context 4 x expert 2 cp-as-ep mesh) with two packed segments per row and without segment ids,
-and for a tiny dense decoder on an fsdp 2 x context 4 mesh, all with remat_policy=custom and scan_layers:
+On a CPU mesh of 8 devices (in a child process per case unless the test process has them; see _PHASES), for a tiny
+hybrid Qwen3.5 (GatedDeltaNet, gated full attention and MoE on a context 4 x expert 2 cp-as-ep mesh) with two packed
+segments per row and without segment ids, and for a tiny dense decoder on an fsdp 2 x context 4 mesh, all with
+remat_policy=custom and scan_layers:
   - Values: the logits and every parameter gradient of <logits, cotangent> are bit-identical with the key on and off.
   - Program: in the jaxpr of that VJP, the backward (reverse) layer scan of the key-off program carries the int32
     ppermutes of the positions and segment ids, two per array, and that of the key-on program carries none. Outside
@@ -39,8 +40,6 @@ import collections
 import contextlib
 import os
 import re
-import subprocess
-import sys
 import types
 import unittest.mock
 
@@ -56,9 +55,10 @@ from maxtext.configs import pyconfig
 from maxtext.configs import types as config_types
 from maxtext.utils import globals as maxtext_globals
 from maxtext.utils import maxtext_utils
+from tests.utils import cpu_mesh_child
 
 _KEY = "context_parallel_attention_load_balance_hoist_ids"
-_PASS_TOKEN = "CONTEXT_PARALLEL_ATTENTION_LOAD_BALANCE_HOIST_IDS_CHECKS_PASSED"
+_NUM_DEVICES = 8
 _BASE_CONFIG_PATH = os.path.join(maxtext_globals.MAXTEXT_CONFIGS_DIR, "base.yml")
 _SEQ = 256
 
@@ -88,7 +88,9 @@ def _hybrid_argv(hoist: bool, **overrides):
       "enable_checkpointing": "false",
       "enable_dropout": "false",
       "dataset_type": "synthetic",
-      "base_num_decoder_layers": "8",  # two blocks of [3 GatedDeltaNet + 1 full attention]
+      # One block of [3 GatedDeltaNet + 1 full attention]: the program checks count jaxpr equations, which do not
+      # depend on the scan length, and the dense case below keeps a layer scan of length 2.
+      "base_num_decoder_layers": "4",
       "base_emb_dim": "64",
       "base_num_query_heads": "4",
       "base_num_kv_heads": "2",
@@ -371,22 +373,8 @@ class ValidatorTest(parameterized.TestCase):
     self.assertFalse(getattr(config_types.HardwareAndMesh(), _KEY))
 
 
-@pytest.mark.cpu_only
-def test_values_and_program_in_a_child_process():
-  """Runs `main` below in a fresh process with 8 CPU devices."""
-  env = os.environ.copy()
-  env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8"
-  env["JAX_PLATFORMS"] = "cpu"
-  repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-  env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else repo_root
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
-  print(result.stdout)
-  assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert _PASS_TOKEN in result.stdout, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-
-
 # ----------------------------------------------------------------------------------------------------------------------
-# Child process (main): values and program of the VJP on 8 CPU devices.
+# The device phases (_PHASES): values and program of the VJP on 8 CPU devices.
 
 
 def _ppermute_census(closed_jaxpr) -> dict[str, int]:
@@ -437,8 +425,11 @@ def _batch(cfg, segments: bool):
   return data, cotangent
 
 
-def _vjp(cfg, data, cotangent, patch=None):
-  """Logits, parameter gradients of <logits, cotangent>, and the jaxpr of one tiny model's jitted VJP."""
+def _vjp(cfg, data, cotangent, patch=None, run=True):
+  """Logits, parameter gradients of <logits, cotangent>, and the jaxpr of one tiny model's jitted VJP.
+
+  With run=False the VJP is only traced: (None, None, jaxpr).
+  """
   # pylint: disable=import-outside-toplevel
   from flax import nnx
   from flax.linen import partitioning as nn_partitioning
@@ -473,6 +464,8 @@ def _vjp(cfg, data, cotangent, patch=None):
       jax.set_mesh(mesh),
   ):
     traced = jax.jit(value_and_grads).trace(params)
+    if not run:
+      return None, None, traced.jaxpr
     logits, grads = traced.lower().compile()(params)
   leaves = {jax.tree_util.keystr(path): np.asarray(leaf) for path, leaf in jax.tree_util.tree_leaves_with_path(grads)}
   return np.asarray(logits), leaves, traced.jaxpr
@@ -587,7 +580,7 @@ def _run_case(name, argv_fn, segments, permuted_int_arrays, controls=False):
       f"{len(bad)} arrays differ",
   )
 
-  # Positive control 2: a policy that never saves the name must fail the program check.
+  # Positive control 2: a policy that never saves the name must fail the program check, which reads only the jaxpr.
   real_names = maxtext_utils.get_save_and_offload_names
 
   def drop_name(config):
@@ -595,32 +588,48 @@ def _run_case(name, argv_fn, segments, permuted_int_arrays, controls=False):
     return [n for n in save if n != maxtext_utils.ATTENTION_LB_IDS], offload
 
   patch = unittest.mock.patch.object(maxtext_utils, "get_save_and_offload_names", drop_name)
-  _, _, dropped_jaxpr = _vjp(on_cfg, data, cotangent, patch=patch)
+  _, _, dropped_jaxpr = _vjp(on_cfg, data, cotangent, patch=patch, run=False)
   dropped = _program_failures(off_census, _ppermute_census(dropped_jaxpr), permuted_int_arrays)
   ok &= _check(f"{name} control policy without the name", bool(dropped), f"{dropped}")
   return ok
 
 
-def main():
-  assert len(jax.devices()) >= 8 and jax.devices()[0].platform == "cpu", jax.devices()
-  ok = True
-  # Packed: positions and segment ids are permuted (2 int32 arrays); unpacked: positions only.
-  ok &= _run_case(
-      "hybrid packed",
-      _hybrid_argv,
-      segments=True,
-      permuted_int_arrays=2,
-      controls=True,
-  )
-  ok &= _run_case("hybrid unpacked", _hybrid_argv, segments=False, permuted_int_arrays=1)
-  ok &= _run_case("dense packed", _dense_argv, segments=True, permuted_int_arrays=2)
-  if not ok:
-    sys.exit(1)
-  print(_PASS_TOKEN, flush=True)
+def _phase(name, argv_fn, segments, permuted_int_arrays, controls=False):
+  """One `_run_case` as a test phase on 8 CPU devices: it fails if any of its checks fails."""
+
+  def run():
+    assert len(jax.devices()) >= _NUM_DEVICES and jax.devices()[0].platform == "cpu", jax.devices()
+    assert _run_case(name, argv_fn, segments, permuted_int_arrays, controls), f"{name}: a check failed (see FAIL above)"
+
+  return run
+
+
+# Packed: positions and segment ids are permuted (2 int32 arrays); unpacked: positions only.
+_PHASES = {
+    "hybrid_packed": _phase("hybrid packed", _hybrid_argv, segments=True, permuted_int_arrays=2, controls=True),
+    "hybrid_unpacked": _phase("hybrid unpacked", _hybrid_argv, segments=False, permuted_int_arrays=1),
+    "dense_packed": _phase("dense packed", _dense_argv, segments=True, permuted_int_arrays=2),
+}
+_SCHEDULED_PHASES = ("hybrid_unpacked",)
+_PR_PHASES = tuple(phase for phase in _PHASES if phase not in _SCHEDULED_PHASES)
+
+
+@pytest.mark.cpu_only
+class ValuesAndProgramCpuMeshTest(parameterized.TestCase):
+  """`_PHASES` on 8 CPU devices: in this process if it has them, else in a child process per case."""
+
+  @parameterized.named_parameters(*((phase, phase) for phase in _PR_PHASES))
+  def test_values_and_program(self, phase):
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=_NUM_DEVICES)
+
+  # The hybrid model without segment ids: the same model, checks and hoist as hybrid_packed (which also runs the
+  # positive controls), with one permuted int32 array (positions) instead of two. It runs in scheduled CI and on PRs
+  # that change this file.
+  @parameterized.named_parameters(*((phase, phase) for phase in _SCHEDULED_PHASES))
+  @pytest.mark.scheduled_only
+  def test_values_and_program_scheduled(self, phase):
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=_NUM_DEVICES)
 
 
 if __name__ == "__main__":
-  if len(sys.argv) == 1:
-    main()
-  else:
-    absltest.main()
+  cpu_mesh_child.main(_PHASES)

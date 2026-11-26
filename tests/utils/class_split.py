@@ -84,7 +84,24 @@ def load_durations(path):
   return durations, ""
 
 
-def _weights_and_members(nodeids, durations):
+def xdist_group_key(item):
+  """Returns the shard-split key for `item` in `xdist_group` mode.
+
+  Items carrying an `xdist_group` marker (either explicit or auto-applied by `tests/conftest.py`
+  for classes with `setUpClass` / class-scoped fixtures) share a key so they stay on the same CI
+  shard and xdist worker. Ungrouped items use their own nodeid so stateless classes (such as
+  `TrainCompile`) balance individually across all shards and workers.
+  """
+  marker = item.get_closest_marker("xdist_group") if hasattr(item, "get_closest_marker") else None
+  if marker is None:
+    return item.nodeid
+  name = marker.kwargs.get("name")
+  if not name and marker.args:
+    name = marker.args[0]
+  return f"xdist_group:{name}" if name else group_key(item.nodeid)
+
+
+def _weights_and_members(nodeids, durations, key_fn=group_key):
   """Returns `(weight per group key, members per group key as (collection index, nodeid))`.
 
   An item with no recorded duration is charged the mean of the durations recorded for the items
@@ -96,13 +113,13 @@ def _weights_and_members(nodeids, durations):
   weights = {}
   members = {}
   for index, nodeid in enumerate(nodeids):
-    key = group_key(nodeid)
+    key = key_fn(nodeid)
     weights[key] = weights.get(key, 0.0) + durations.get(nodeid, fallback)
     members.setdefault(key, []).append((index, nodeid))
   return weights, members
 
 
-def deal_groups(nodeids, durations, splits):
+def deal_groups(nodeids, durations, splits, key_fn=group_key):
   """Deals whole group keys into `splits` shards, heaviest key first.
 
   Deterministic: keys are ordered by (-weight, key), each key goes to the currently lightest shard
@@ -111,7 +128,7 @@ def deal_groups(nodeids, durations, splits):
   """
   if splits < 1:
     raise ValueError(f"splits must be >= 1, got {splits}")
-  weights, members = _weights_and_members(nodeids, durations)
+  weights, members = _weights_and_members(nodeids, durations, key_fn=key_fn)
   totals = [0.0] * splits
   shards = [[] for _ in range(splits)]
   for key in sorted(weights, key=lambda k: (-weights[k], k)):
@@ -122,11 +139,12 @@ def deal_groups(nodeids, durations, splits):
 
 
 class ClassSplitPlugin:
-  """Keeps only the classes dealt to this shard. Registered by tests/conftest.py."""
+  """Keeps only the groups dealt to this shard. Registered by tests/conftest.py."""
 
   def __init__(self, config, durations_path=DURATIONS_FILE):
     self.splits = config.getoption("class_splits")
     self.group = config.getoption("class_group")
+    self.split_by = config.getoption("class_split_by") or "class"
     self.durations_path = durations_path
     if self.splits is None or self.group is None:
       raise pytest.UsageError("--class-splits and --class-group must be given together")
@@ -134,6 +152,8 @@ class ClassSplitPlugin:
       raise pytest.UsageError(f"--class-splits must be >= 1, got {self.splits}")
     if not 1 <= self.group <= self.splits:
       raise pytest.UsageError(f"--class-group must be between 1 and {self.splits}, got {self.group}")
+    if self.split_by not in ("class", "xdist_group"):
+      raise pytest.UsageError(f"--class-split-by must be 'class' or 'xdist_group', got {self.split_by!r}")
     self._report_lines = []
 
   def _report(self, config, text):
@@ -157,36 +177,49 @@ class ClassSplitPlugin:
     durations, warning = load_durations(self.durations_path)
     if warning:
       self._report(config, f"[class-split] warning: {warning}")
-    shards = deal_groups([item.nodeid for item in items], durations, self.splits)
+    if self.split_by == "xdist_group":
+      nodeid_to_key = {item.nodeid: xdist_group_key(item) for item in items}
+      key_fn = nodeid_to_key.__getitem__
+      unit_label = "groups"
+    else:
+      key_fn = group_key
+      unit_label = "classes"
+    shards = deal_groups([item.nodeid for item in items], durations, self.splits, key_fn=key_fn)
     keep = set(shards[self.group - 1])
     kept = [item for item in items if item.nodeid in keep]
     dropped = [item for item in items if item.nodeid not in keep]
     items[:] = kept
     if dropped:
       config.hook.pytest_deselected(items=dropped)
-    classes = len({group_key(item.nodeid) for item in kept})
+    units = len({key_fn(item.nodeid) for item in kept})
     recorded = sum(1 for item in kept if item.nodeid in durations)
     self._report(
         config,
-        f"[class-split] Running group {self.group}/{self.splits}: {len(kept)} tests in {classes} classes, "
+        f"[class-split] Running group {self.group}/{self.splits}: {len(kept)} tests in {units} {unit_label}, "
         f"{recorded} with a recorded duration",
     )
 
 
 def pytest_addoption(parser):
   """Registers the class-level shard split options; pass them as --opt=value."""
-  group = parser.getgroup("class-split", "deal whole test classes to CI shards")
+  group = parser.getgroup("class-split", "deal whole test classes or xdist groups to CI shards")
   group.addoption(
       "--class-splits",
       type=int,
       default=None,
-      help="Number of shards the collected tests are dealt into, whole classes only.",
+      help="Number of shards the collected tests are dealt into.",
   )
   group.addoption(
       "--class-group",
       type=int,
       default=None,
       help="1-based index of the shard to run; requires --class-splits.",
+  )
+  group.addoption(
+      "--class-split-by",
+      choices=("class", "xdist_group"),
+      default="class",
+      help="Grouping unit: 'class' keeps whole classes together; 'xdist_group' keeps only xdist_group items together.",
   )
 
 

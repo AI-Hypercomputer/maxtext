@@ -57,12 +57,15 @@ class _PadEqualsEosTokenizer:
 
 class HfDataProcessingTest(unittest.TestCase):
 
-  def setUp(self):
-    super().setUp()
+  @classmethod
+  def setUpClass(cls):
+    """Initializes the HF dataset config and mesh once per test class."""
+    # Built once per class: the train iterator below is cached on the class, so per-test rebuilds were overhead.
+    super().setUpClass()
     decoupled = is_decoupled()
     # Note: this test uses gs://max-experiments/ (not gs://runner-maxtext-logs)
     base_output_directory = get_test_base_output_directory(cloud_path="gs://max-experiments/")
-    self.config = pyconfig.initialize(
+    cls.config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
@@ -88,15 +91,19 @@ class HfDataProcessingTest(unittest.TestCase):
         ),
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "qwen3-tokenizer"),
         enable_checkpointing=False,
+        # Without this the test inherits max_target_length=2048; the tests only check shapes and determinism.
+        # grain_worker_count keeps the base.yml default (1): HFDataSource is stateful, so only a worker
+        # subprocess (which gets a fresh copy of it) lets reset() rewind for test_for_loop_repeatable.
+        max_target_length=128,
     )
-    self.mesh_shape_1d = (len(jax.devices()),)
-    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
-    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
-        self.config.global_batch_size_to_load,
-        self.config.global_batch_size_to_train_on,
-        self.config.max_target_length,
-        self.mesh,
+    cls.mesh_shape_1d = (len(jax.devices()),)
+    cls.mesh = Mesh(mesh_utils.create_device_mesh(cls.mesh_shape_1d), cls.config.mesh_axes)
+    cls.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        cls.config.data_sharding,
+        cls.config.global_batch_size_to_load,
+        cls.config.global_batch_size_to_train_on,
+        cls.config.max_target_length,
+        cls.mesh,
     )
 
   @property

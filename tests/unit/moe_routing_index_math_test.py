@@ -37,11 +37,12 @@ In-process checks:
     `ragged_gather_reduce`, leave outputs bit-identical to "sort", and add no `select_n` under "sort".
   - The config validator rejects "count" off the ring-of-experts ragged sort, one case per requirement.
 
-The layer check runs as a subprocess, so the forced device count takes effect before JAX initializes: the shrunk
-Qwen3.5 routed MoE of `moe_roe_local_routing_test.py` (16 experts, top 4, 8 CPU devices under cp-as-ep, ragged sort,
-local routing, two token chunks, megablox in interpret mode). Pre-registered: the forward output, the loss and every
-gradient bit-identical to "sort", in each case: the plain and the pipelined chunk loop, forced ids with a buffer that
-drops tokens (asserted to overflow), a dropless buffer, saved routing maps, and a bfloat16 router. Two-sided:
+The layer check runs as subprocesses (one per phase of cases, see `_PHASES`), so the forced device count takes effect
+before JAX initializes: the shrunk Qwen3.5 routed MoE of `moe_roe_local_routing_test.py` (16 experts, top 4, 8 CPU
+devices under cp-as-ep, ragged sort, local routing, two token chunks, the GMM as jax.lax.ragged_dot via hardware=cpu).
+Pre-registered: the forward output, the loss and every gradient bit-identical to "sort", in each case: the plain and
+the pipelined chunk loop, forced ids with a buffer that drops tokens (asserted to overflow), a dropless buffer, saved
+routing maps, and a bfloat16 router. Two-sided:
   - Structure: "count" must trace fewer `sort` equations than "sort" in the gradient and no argsort at all (a sort
     of more than one operand: jnp.argsort sorts its keys with an iota), while "sort" traces argsorts; and when
     routing is unforced no `top_k`. So a switch that silently fell back, completely or for one map, cannot pass.
@@ -330,6 +331,14 @@ class FullBufferMaskedIndicesTest(parameterized.TestCase):
         **_FULL_BUFFER_GATHER_REDUCE_KWARGS,
         "packed_preprocess": index_math == "count",
     }
+    # One spy and one executable for every seed and shard (they differ only in the arguments); the spy's callback is
+    # traced in once, so its record is cleared before each call.
+    spy = _GatherReduceBoundsSpy()
+    combine = jax.jit(
+        lambda x, r, w, s, e: ragged_sort._ring_unsort_combine(  # pylint: disable=protected-access
+            x, r, w, s, e, topk, gr_kwargs
+        )
+    )
     for seed in range(3):
       ids, w, key = _full_buffer_routing(seed, tokens, experts, topk)
       x = jax.random.normal(key, (n, _FULL_BUFFER_HIDDEN), jnp.float32).astype(jnp.bfloat16)
@@ -337,13 +346,9 @@ class FullBufferMaskedIndicesTest(parameterized.TestCase):
         start, end, revert = _full_buffer_maps(ids, experts, ep, shard, index_math)
         if index_math == "count":
           self.assertGreater(int(jnp.sum(revert < 0)), 0)
-        spy = _GatherReduceBoundsSpy()
+        spy.calls.clear()
         with mock.patch.object(ragged_sort, "ragged_gather_reduce", spy):
-          out = jax.jit(
-              lambda x, r, w, s, e: ragged_sort._ring_unsort_combine(  # pylint: disable=protected-access
-                  x, r, w, s, e, topk, gr_kwargs
-              )
-          )(x, revert, w, start, end)
+          out = combine(x, revert, w, start, end)
           out.block_until_ready()
         jax.effects_barrier()
         self.assertLen(spy.calls, 1)
@@ -485,9 +490,11 @@ def _cfg(**overrides):
       "dtype": "bfloat16",
       "weight_dtype": "float32",
       "float32_gate_logits": True,
-      "megablox": True,
+      # Both settings share whichever GMM runs, and only the routing index math is under test: hardware=cpu runs it as
+      # jax.lax.ragged_dot instead of the megablox Pallas kernel in interpret mode (much slower). Tokamax gmm v2 is
+      # TPU-only.
+      "hardware": "cpu",
       "sparse_matmul": True,
-      # Tokamax gmm v2 is TPU-only; both settings share whichever GMM runs, so CPU uses megablox.
       "use_tokamax_gmm": False,
       "use_gmm_v2": False,
       "use_ring_of_experts": True,
@@ -505,18 +512,24 @@ def _cfg(**overrides):
   return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
 
 
+# The layer cases of `main`, split into phases that run in separate child processes so pytest-xdist can run them in
+# parallel. The positive control runs in the "plain" phase, so it reuses that phase's "plain_loop" "sort" run.
+_PHASES = ("plain", "variants")
+
+
 @pytest.mark.cpu_only
-def test_count_matches_sort_on_cpu_mesh():
-  """Runs `main` below in a child process with 8 CPU devices."""
+@pytest.mark.parametrize("phase", _PHASES)
+def test_count_matches_sort_on_cpu_mesh(phase):
+  """Runs `main(phase)` below in a child process with 8 CPU devices."""
   env = os.environ.copy()
   env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + f" {_XLA_FLAGS}"
   env["JAX_PLATFORMS"] = "cpu"
   repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
   env["PYTHONPATH"] = os.pathsep.join([repo_root, env["PYTHONPATH"]]) if env.get("PYTHONPATH") else repo_root
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
+  result = subprocess.run([sys.executable, __file__, phase], env=env, capture_output=True, text=True, check=False)
   print(result.stdout)
   assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert _PASS_TOKEN in result.stdout, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+  assert f"{_PASS_TOKEN} {phase}" in result.stdout, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
 
 
 def _build(cfg, mesh):
@@ -609,8 +622,10 @@ def _run(cfg, mesh, params, x, forced):
       return loss, (out, jnp.any(jnp.concatenate([jnp.ravel(f) for f in flags])))
 
     grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)
-    jaxpr = jax.make_jaxpr(grad_fn)(params, x).jaxpr
-    (loss, (out, overflow)), grads = jax.jit(grad_fn)(params, x)
+    # One trace for both the equation counts and the executable (make_jaxpr followed by jit would trace twice).
+    traced = jax.jit(grad_fn).trace(params, x)
+    jaxpr = traced.jaxpr.jaxpr
+    (loss, (out, overflow)), grads = traced.lower().compile()(params, x)
   counts = {
       "sort": _count(jaxpr, "sort"),
       "argsort": _count_argsorts(jaxpr),
@@ -641,6 +656,11 @@ def _bit_identical(label, old, new):
   return passed
 
 
+# "sort" runs by (overrides, mode): the positive control repeats "plain_loop"'s "sort" run, on the same parameters
+# (`_build` seeds them) and inputs, so it reuses that run instead of compiling and running it again.
+_SORT_RUNS = {}
+
+
 def _case(label, overrides, mode="real", control=None, expect_overflow=False):
   """Runs "sort" and "count" on the same parameters; `control` is applied to the "count" run only."""
   cfg_sort = _cfg(**overrides)
@@ -649,7 +669,10 @@ def _case(label, overrides, mode="real", control=None, expect_overflow=False):
   x, forced = _inputs(cfg_sort, mode)
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_sort.logical_axis_rules):
     _, params, _ = nnx.split(_build(cfg_sort, mesh), nnx.Param, ...)
-  old, overflow_old, counts_old = _run(cfg_sort, mesh, params, x, forced)
+  sort_key = (tuple(sorted(overrides.items())), mode)
+  if sort_key not in _SORT_RUNS:
+    _SORT_RUNS[sort_key] = _run(cfg_sort, mesh, params, x, forced)
+  old, overflow_old, counts_old = _SORT_RUNS[sort_key]
   with control if control is not None else contextlib.nullcontext():
     new, overflow_new, counts_new = _run(cfg_count, mesh, params, x, forced)
   structure = counts_new["sort"] < counts_old["sort"]
@@ -729,25 +752,33 @@ _BENCH_FLAGS = {
 }
 
 
-def main():
+def main(phase):
   assert jax.device_count() == _NUM_DEVICES, jax.devices()
-  results = {
-      "plain_loop": _case("plain_loop", {}),
-      "forced_dropping": _case(
-          "forced_dropping",
-          {"ragged_buffer_factor": 1.0},
-          mode="forced",
-          expect_overflow=True,
-      ),
-      "dropless": _case("dropless", {"ragged_buffer_factor": -1.0}, mode="forced"),
-      "saved_routing_maps": _case("saved_routing_maps", {"moe_routing_maps": "device"}),
-      "bf16_router": _case("bf16_router", {"float32_gate_logits": False}),
-      "bench_flags": _case("bench_flags", _BENCH_FLAGS),
-      "guard": _count_needs_forward_permutation(),
-  }
-  controls = {
-      "control_shifted_local_positions": _case("control_shifted_local_positions", {}, control=_shifted_local_positions()),
-  }
+  if phase == "plain":
+    results = {
+        "plain_loop": _case("plain_loop", {}),
+        "saved_routing_maps": _case("saved_routing_maps", {"moe_routing_maps": "device"}),
+        "bf16_router": _case("bf16_router", {"float32_gate_logits": False}),
+        "guard": _count_needs_forward_permutation(),
+    }
+    controls = {
+        "control_shifted_local_positions": _case(
+            "control_shifted_local_positions", {}, control=_shifted_local_positions()
+        ),
+    }
+  else:
+    assert phase == "variants", phase
+    results = {
+        "forced_dropping": _case(
+            "forced_dropping",
+            {"ragged_buffer_factor": 1.0},
+            mode="forced",
+            expect_overflow=True,
+        ),
+        "dropless": _case("dropless", {"ragged_buffer_factor": -1.0}, mode="forced"),
+        "bench_flags": _case("bench_flags", _BENCH_FLAGS),
+    }
+    controls = {}
   print("SUMMARY", {**results, **controls}, flush=True)
   failed = [k for k, v in results.items() if not v]
   undetected = [k for k, v in controls.items() if v]
@@ -757,8 +788,8 @@ def main():
         flush=True,
     )
     sys.exit(1)
-  print(_PASS_TOKEN, flush=True)
+  print(f"{_PASS_TOKEN} {phase}", flush=True)
 
 
 if __name__ == "__main__":
-  main()
+  main(sys.argv[1])

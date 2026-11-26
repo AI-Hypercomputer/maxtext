@@ -17,6 +17,7 @@
 import functools
 import os
 import pickle
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -46,6 +47,13 @@ from maxtext.utils.globals import MAXTEXT_ASSETS_ROOT
 from maxtext.common.gcloud_stub import is_decoupled
 from tests.utils.test_helpers import get_test_base_output_directory, get_test_config_path, get_test_dataset_path
 from tests.utils.test_helpers import get_test_local_output_directory
+
+
+# Every grain worker is a subprocess that re-imports the whole stack, so the setup mixins load in-process by
+# default; GrainArrayRecordMultiprocessingTest keeps explicit worker-subprocess coverage.
+_TEST_GRAIN_WORKER_COUNT = 0
+# Tests only check batch shapes/determinism; shorter sequences pack (and tokenize) fewer documents per batch.
+_TEST_MAX_TARGET_LENGTH = 64
 
 
 class TestTfdsTfrecordPathFallback:
@@ -310,9 +318,14 @@ class _GrainArrayRecordSetup:
   optionally GrainDeterminismMixin) to compose the desired test surface.
   """
 
-  def setUp(self):
-    """Common setup for ArrayRecrd format"""
-    super().setUp()
+  @classmethod
+  def setUpClass(cls):
+    """Common setup for ArrayRecord format
+
+    Runs once per class: the cached train iterator in GrainBaseProcessingTest is class-level, so per-test config/mesh
+    rebuilds were pure overhead.
+    """
+    super().setUpClass()
     temp_dir = tempfile.gettempdir()
     decoupled = is_decoupled()
 
@@ -339,7 +352,7 @@ class _GrainArrayRecordSetup:
       base_output_directory = "gs://max-experiments/"
 
     config_file = get_test_config_path()
-    self.config = pyconfig.initialize(
+    cls.config = pyconfig.initialize(
         [sys.argv[0], config_file],
         per_device_batch_size=1,
         run_name="test",
@@ -349,21 +362,23 @@ class _GrainArrayRecordSetup:
         base_output_directory=base_output_directory,
         dataset_type="grain",
         grain_train_files=grain_train_files,
+        grain_worker_count=_TEST_GRAIN_WORKER_COUNT,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
-        max_target_length=128,
+        max_target_length=_TEST_MAX_TARGET_LENGTH,
     )
-    self.mesh_shape_1d = (len(jax.devices()),)
-    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
-    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
-        self.config.global_batch_size_to_load,
-        self.config.global_batch_size_to_train_on,
-        self.config.max_target_length,
-        self.mesh,
+    cls.mesh_shape_1d = (len(jax.devices()),)
+    cls.mesh = Mesh(mesh_utils.create_device_mesh(cls.mesh_shape_1d), cls.config.mesh_axes)
+    cls.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        cls.config.data_sharding,
+        cls.config.global_batch_size_to_load,
+        cls.config.global_batch_size_to_train_on,
+        cls.config.max_target_length,
+        cls.mesh,
     )
 
-  def _make_config(self, **overrides):
+  @classmethod
+  def _make_config(cls, **overrides):
     """Re-initialize config with base params, applying any overrides."""
     kwargs = {
         "per_device_batch_size": 1,
@@ -371,12 +386,13 @@ class _GrainArrayRecordSetup:
         "mesh_axes": ["data"],
         "logical_axis_rules": [["batch", "data"]],
         "data_sharding": ["data"],
-        "base_output_directory": self.config.base_output_directory,
+        "base_output_directory": cls.config.base_output_directory,
         "dataset_type": "grain",
-        "grain_train_files": self.config.grain_train_files,
+        "grain_train_files": cls.config.grain_train_files,
+        "grain_worker_count": _TEST_GRAIN_WORKER_COUNT,
         "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         "enable_checkpointing": False,
-        "max_target_length": 128,
+        "max_target_length": _TEST_MAX_TARGET_LENGTH,
         **overrides,
     }
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
@@ -800,29 +816,41 @@ class GrainArrayRecordProcessingTest(
   directly to get only test_train_ds.
   """
 
-  @classmethod
-  def setUpClass(cls):
-    super().setUpClass()
-
   @pytest.mark.external_serving  # Skipped in decoupled mode due to rocBLAS scratch buffer TF issues on GPU
   def test_batch_determinism(self):
     super().test_batch_determinism()
+
+
+class GrainArrayRecordMultiprocessingTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
+  """Keeps grain worker-subprocess coverage now that the setup mixins load in-process (grain_worker_count=0)."""
+
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls.config = cls._make_config(grain_worker_count=1, grain_per_worker_buffer_size=1)
+
+  @pytest.mark.external_serving  # Same decoupled-GPU caveat as GrainArrayRecordProcessingTest.test_batch_determinism.
+  def test_batch_determinism(self):
+    GrainDeterminismMixin.test_batch_determinism(self)
 
 
 class GrainArrayRecordProcessingWithMultiSourceBlendingTest(
     _GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase
 ):
 
-  def setUp(self):
-    super().setUp()
-    train_files_weighted = ";".join([f"{self.config.grain_train_files},0.3", f"{self.config.grain_train_files},0.7"])
-    self.config = self._make_config(grain_train_files=train_files_weighted)
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    train_files_weighted = ";".join([f"{cls.config.grain_train_files},0.3", f"{cls.config.grain_train_files},0.7"])
+    cls.config = cls._make_config(grain_train_files=train_files_weighted)
 
 
 class GrainArrayRecordProcessingWithMixtureConfigTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
 
-  def setUp(self):
-    super().setUp()
+  @classmethod
+  def setUpClass(cls):
+    """Builds a temporary mixture config JSON and initializes the test config."""
+    super().setUpClass()
     temp_dir = tempfile.gettempdir()
     decoupled = is_decoupled()
 
@@ -861,11 +889,13 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(_GrainArrayRecordSetup, Gr
               "weight": 0.7,
           },
       }
-    self.mixture_config_path = os.path.join(temp_dir, "mixture_config.json")
-    with open(self.mixture_config_path, "w", encoding="utf-8") as f:
+    cls._mixture_temp_dir = tempfile.mkdtemp(prefix="grain_mixture_")
+    cls.addClassCleanup(shutil.rmtree, cls._mixture_temp_dir, ignore_errors=True)
+    cls.mixture_config_path = os.path.join(cls._mixture_temp_dir, "mixture_config.json")
+    with open(cls.mixture_config_path, "w", encoding="utf-8") as f:
       json.dump(mixture_config, f)
 
-    self.config = self._make_config(grain_train_mixture_config_path=self.mixture_config_path)
+    cls.config = cls._make_config(grain_train_mixture_config_path=cls.mixture_config_path)
 
 
 # TODO(aireenmei): Migrate this test to XLML
@@ -873,17 +903,19 @@ class GrainArrayRecordProcessingWithMixtureConfigTest(_GrainArrayRecordSetup, Gr
 class GrainArrayRecordAutoTuneTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with auto-tuning enabled (grain_worker_count=-1)."""
 
-  def setUp(self):
-    super().setUp()
-    self.config = self._make_config(grain_ram_budget_mb=512, grain_worker_count=-1)  # Enable auto-tuning
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls.config = cls._make_config(grain_ram_budget_mb=512, grain_worker_count=-1)  # Enable auto-tuning
 
 
 class GrainArrayRecordTiktokenTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with tiktoken tokenizer."""
 
-  def setUp(self):
-    super().setUp()
-    self.config = self._make_config(
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls.config = cls._make_config(
         tokenizer_type="tiktoken",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer_llama3.tiktoken"),
     )
@@ -892,9 +924,10 @@ class GrainArrayRecordTiktokenTest(_GrainArrayRecordSetup, GrainBaseProcessingTe
 class GrainArrayRecordHFTokenizerTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with HuggingFace tokenizer."""
 
-  def setUp(self):
-    super().setUp()
-    self.config = self._make_config(
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls.config = cls._make_config(
         tokenizer_type="huggingface",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "qwen3-tokenizer"),
     )
@@ -903,9 +936,10 @@ class GrainArrayRecordHFTokenizerTest(_GrainArrayRecordSetup, GrainBaseProcessin
 class GrainArrayRecordBestFitPackingTest(_GrainArrayRecordSetup, GrainBaseProcessingTest, unittest.TestCase):
   """Test grain data processing with best_fit packing strategy."""
 
-  def setUp(self):
-    super().setUp()
-    self.config = self._make_config(grain_packing_type="best_fit")
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
+    cls.config = cls._make_config(grain_packing_type="best_fit")
 
 
 class _GrainParquetSetup:
@@ -915,9 +949,14 @@ class _GrainParquetSetup:
   optionally GrainDeterminismMixin) to compose the desired test surface.
   """
 
-  def setUp(self):
-    """Common setup for Parquet format."""
-    super().setUp()
+  @classmethod
+  def setUpClass(cls):
+    """Common setup for Parquet format.
+
+    Runs once per class: the cached train iterator in GrainBaseProcessingTest is class-level, so per-test config/mesh
+    rebuilds were pure overhead.
+    """
+    super().setUpClass()
     temp_dir = tempfile.gettempdir()
     decoupled = is_decoupled()
 
@@ -940,7 +979,7 @@ class _GrainParquetSetup:
       )
       base_output_directory = "gs://max-experiments/"
 
-    self.config = pyconfig.initialize(
+    cls.config = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
         per_device_batch_size=1,
         run_name="test",
@@ -951,23 +990,24 @@ class _GrainParquetSetup:
         dataset_type="grain",
         grain_file_type="parquet",
         grain_train_files=grain_train_file,
-        grain_worker_count=1,
+        grain_worker_count=_TEST_GRAIN_WORKER_COUNT,
         grain_per_worker_buffer_size=1,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
-        max_target_length=128,
+        max_target_length=_TEST_MAX_TARGET_LENGTH,
     )
-    self.mesh_shape_1d = (len(jax.devices()),)
-    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
-    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
-        self.config.global_batch_size_to_load,
-        self.config.global_batch_size_to_train_on,
-        self.config.max_target_length,
-        self.mesh,
+    cls.mesh_shape_1d = (len(jax.devices()),)
+    cls.mesh = Mesh(mesh_utils.create_device_mesh(cls.mesh_shape_1d), cls.config.mesh_axes)
+    cls.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        cls.config.data_sharding,
+        cls.config.global_batch_size_to_load,
+        cls.config.global_batch_size_to_train_on,
+        cls.config.max_target_length,
+        cls.mesh,
     )
 
-  def _make_config(self, **overrides):
+  @classmethod
+  def _make_config(cls, **overrides):
     """Re-initialize config with base params, applying any overrides."""
     kwargs = {
         "per_device_batch_size": 1,
@@ -975,15 +1015,15 @@ class _GrainParquetSetup:
         "mesh_axes": ["data"],
         "logical_axis_rules": [["batch", "data"]],
         "data_sharding": ["data"],
-        "base_output_directory": self.config.base_output_directory,
+        "base_output_directory": cls.config.base_output_directory,
         "dataset_type": "grain",
         "grain_file_type": "parquet",
-        "grain_train_files": self.config.grain_train_files,
-        "grain_worker_count": 1,
+        "grain_train_files": cls.config.grain_train_files,
+        "grain_worker_count": _TEST_GRAIN_WORKER_COUNT,
         "grain_per_worker_buffer_size": 1,
         "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         "enable_checkpointing": False,
-        "max_target_length": 128,
+        "max_target_length": _TEST_MAX_TARGET_LENGTH,
         **overrides,
     }
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
@@ -998,18 +1038,16 @@ class GrainParquetProcessingTest(_GrainParquetSetup, GrainDeterminismMixin, Grai
   directly to get only test_train_ds.
   """
 
-  @classmethod
-  def setUpClass(cls):
-    super().setUpClass()
-
 
 @pytest.mark.external_training
 class GrainSFTParquetProcessingTest(_GrainParquetSetup, unittest.TestCase):
   """Tests the SFT pipeline end-to-end using the real ultrachat_200k parquet dataset."""
 
-  def setUp(self):
-    super().setUp()
-    self.config = self._make_config(
+  @classmethod
+  def setUpClass(cls):
+    """Initializes the SFT Parquet config and class-level train iterator."""
+    super().setUpClass()
+    cls.config = cls._make_config(
         grain_train_files="gs://maxtext-dataset/hf/ultrachat_200k/train_sft-*.parquet",
         base_output_directory="gs://max-experiments/",
         use_sft=True,
@@ -1018,8 +1056,10 @@ class GrainSFTParquetProcessingTest(_GrainParquetSetup, unittest.TestCase):
         tokenizer_type="huggingface",
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "qwen3-tokenizer"),
         packing=True,
+        # Keep the pre-existing length: chat prompts are trimmed to this length before prompt masking is checked.
+        max_target_length=128,
     )
-    self.train_iter = grain_data_processing.make_grain_train_iterator(self.config, self.mesh, self.process_indices)
+    cls.train_iter = grain_data_processing.make_grain_train_iterator(cls.config, cls.mesh, cls.process_indices)
 
   def test_train_ds(self):
     expected_shape = [jax.device_count(), self.config.max_target_length]
@@ -1050,9 +1090,14 @@ class _GrainTFRecordSetup:
   optionally GrainDeterminismMixin) to compose the desired test surface.
   """
 
-  def setUp(self):
-    """Common setup for TFRecord format"""
-    super().setUp()
+  @classmethod
+  def setUpClass(cls):
+    """Common setup for TFRecord format
+
+    Runs once per class: the cached train iterator in GrainBaseProcessingTest is class-level, so per-test config/mesh
+    rebuilds were pure overhead.
+    """
+    super().setUpClass()
     temp_dir = tempfile.gettempdir()
     decoupled = is_decoupled()
 
@@ -1078,7 +1123,7 @@ class _GrainTFRecordSetup:
       base_output_directory = "gs://max-experiments/"
 
     config_file = get_test_config_path()
-    self.config = pyconfig.initialize(
+    cls.config = pyconfig.initialize(
         [sys.argv[0], config_file],
         per_device_batch_size=1,
         run_name="test",
@@ -1089,23 +1134,24 @@ class _GrainTFRecordSetup:
         dataset_type="grain",
         grain_file_type="tfrecord",
         grain_train_files=grain_train_file,
-        grain_worker_count=1,
+        grain_worker_count=_TEST_GRAIN_WORKER_COUNT,
         grain_per_worker_buffer_size=1,
         tokenizer_path=os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         enable_checkpointing=False,
-        max_target_length=128,
+        max_target_length=_TEST_MAX_TARGET_LENGTH,
     )
-    self.mesh_shape_1d = (len(jax.devices()),)
-    self.mesh = Mesh(mesh_utils.create_device_mesh(self.mesh_shape_1d), self.config.mesh_axes)
-    self.process_indices = input_pipeline_interface.get_process_loading_real_data(
-        self.config.data_sharding,
-        self.config.global_batch_size_to_load,
-        self.config.global_batch_size_to_train_on,
-        self.config.max_target_length,
-        self.mesh,
+    cls.mesh_shape_1d = (len(jax.devices()),)
+    cls.mesh = Mesh(mesh_utils.create_device_mesh(cls.mesh_shape_1d), cls.config.mesh_axes)
+    cls.process_indices = input_pipeline_interface.get_process_loading_real_data(
+        cls.config.data_sharding,
+        cls.config.global_batch_size_to_load,
+        cls.config.global_batch_size_to_train_on,
+        cls.config.max_target_length,
+        cls.mesh,
     )
 
-  def _make_config(self, **overrides):
+  @classmethod
+  def _make_config(cls, **overrides):
     """Re-initialize config with base params, applying any overrides."""
     kwargs = {
         "per_device_batch_size": 1,
@@ -1113,15 +1159,15 @@ class _GrainTFRecordSetup:
         "mesh_axes": ["data"],
         "logical_axis_rules": [["batch", "data"]],
         "data_sharding": ["data"],
-        "base_output_directory": self.config.base_output_directory,
+        "base_output_directory": cls.config.base_output_directory,
         "dataset_type": "grain",
         "grain_file_type": "tfrecord",
-        "grain_train_files": self.config.grain_train_files,
-        "grain_worker_count": 1,
+        "grain_train_files": cls.config.grain_train_files,
+        "grain_worker_count": _TEST_GRAIN_WORKER_COUNT,
         "grain_per_worker_buffer_size": 1,
         "tokenizer_path": os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         "enable_checkpointing": False,
-        "max_target_length": 128,
+        "max_target_length": _TEST_MAX_TARGET_LENGTH,
         **overrides,
     }
     return pyconfig.initialize([sys.argv[0], get_test_config_path()], **kwargs)
@@ -1135,10 +1181,6 @@ class GrainTFRecordProcessingTest(_GrainTFRecordSetup, GrainDeterminismMixin, Gr
   Variant subclasses should inherit _GrainTFRecordSetup + GrainBaseProcessingTest
   directly to get only test_train_ds.
   """
-
-  @classmethod
-  def setUpClass(cls):
-    super().setUpClass()
 
   def test_config_accepts_tfds_tfrecord_fallback(self):
     config = self._make_config(
@@ -1158,11 +1200,13 @@ class GrainTFRecordPreTokenizedProcessingTest(_GrainTFRecordSetup, GrainBaseProc
   in an 'ids' int64 column rather than raw text.
   """
 
-  def setUp(self):
-    super().setUp()
+  @classmethod
+  def setUpClass(cls):
+    """Initializes the pre-tokenized TFRecord config."""
+    super().setUpClass()
     base = get_test_dataset_path() if is_decoupled() else os.path.join(tempfile.gettempdir(), "gcsfuse")
     grain_train_file = os.path.join(base, "c4", "en", "3.0.5", "c4-validation_tokenized_5662seqs.tfrecord-00000-of-00001")
-    self.config = self._make_config(
+    cls.config = cls._make_config(
         grain_train_files=grain_train_file,
         tokenize_train_data=False,
         train_data_columns=["ids"],
@@ -1179,11 +1223,12 @@ class GrainFewerFilesThanHostsTest(_GrainTFRecordSetup, GrainBaseProcessingTest,
   then validates the full batch shape through this code path.
   """
 
-  def setUp(self):
-    super().setUp()
+  @classmethod
+  def setUpClass(cls):
+    super().setUpClass()
     # Simulate 2 dataloading hosts with only 1 file to trigger the
     # fewer-files-than-hosts path in get_datasets via make_grain_train_iterator.
-    self.process_indices = [0, 1]
+    cls.process_indices = [0, 1]
 
   def test_raises_when_grain_worker_count_exceeds_files_per_host(self):
     # 1 file, 2 hosts (via process_indices=[0,1]) → files_per_host=1;
@@ -1191,6 +1236,25 @@ class GrainFewerFilesThanHostsTest(_GrainTFRecordSetup, GrainBaseProcessingTest,
     config = self._make_config(grain_worker_count=2)
     with self.assertRaises(ValueError):
       grain_data_processing.make_grain_train_iterator(config, self.mesh, self.process_indices)
+
+  def test_allows_grain_worker_count_equal_to_files_per_host(self):
+    # Positive control for the raise above (the class setup loads with 0 workers, so it cannot serve as one): 1 worker
+    # for 1 file per host is the largest allowed count. get_datasets only builds the lazy dataset, so no worker
+    # subprocess is started.
+    grain_data_processing.get_datasets(
+        self.config.grain_train_files,
+        "tfrecord",
+        shuffle=False,
+        shuffle_seed=0,
+        shuffle_buffer_size=1,
+        num_epoch=1,
+        dataloading_host_index=0,
+        dataloading_host_count=len(self.process_indices),
+        grain_worker_count=1,
+        grain_num_threads=1,
+        grain_prefetch_buffer_size=1,
+        grain_data_source_max_workers=1,
+    )
 
 
 class _PadEqualsEosTokenizer:

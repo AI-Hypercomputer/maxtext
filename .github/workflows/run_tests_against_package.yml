@@ -115,7 +115,17 @@ jobs:
         # never enters an axis_rules context, passes for the wrong reason; 4 virtual devices make the
         # sharding real so those bugs surface here instead of on accelerator runners. Also lets the
         # tests that self-skip below 2 devices actually run.
-        XLA_FLAGS: ${{ inputs.flavor == 'cpu-unit' && '--xla_force_host_platform_device_count=4' || '' }}
+        # For all CPU test flavors, the LLVM backend flags skip post-HLO CPU codegen optimizations
+        # and 32-way parallel codegen splitting (which oversubscribes cores under xdist) without
+        # changing HLO passes, collectives, sharding, or TPU AOT compilation.
+        XLA_FLAGS: >-
+          ${{
+            inputs.flavor == 'cpu-unit'
+            && '--xla_force_host_platform_device_count=4 --xla_backend_optimization_level=0 --xla_llvm_disable_expensive_passes=true --xla_cpu_parallel_codegen_split_count=1'
+            || (inputs.device_type == 'cpu'
+                && '--xla_backend_optimization_level=0 --xla_llvm_disable_expensive_passes=true --xla_cpu_parallel_codegen_split_count=1'
+                || '')
+          }}
         VLLM_TARGET_DEVICE: "tpu"
         UV_TORCH_BACKEND: "cpu"
         MAXTEXT_PACKAGE_EXTRA: >-
@@ -363,6 +373,17 @@ jobs:
               echo "Warning: .test_durations not found. The class-level split uses equal weights."
             fi
             SPLIT_ARGS="--class-splits=${INPUTS_TOTAL_WORKERS} --class-group=${INPUTS_WORKER_GROUP}"
+          elif [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ] && [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
+            $PYTHON_EXE -m pip install --quiet pytest-xdist
+            if [ -f .test_durations ]; then
+              echo "Using downloaded .test_durations with xdist_group shard splitting."
+            else
+              echo "Warning: .test_durations not found. Falling back to equal-weight xdist_group shard splitting."
+            fi
+            # Keep tests sharing an xdist_group (auto-applied to setUpClass/class-fixture classes by
+            # tests/conftest.py, plus explicit @pytest.mark.xdist_group marks) on one shard AND one
+            # xdist worker; ungrouped tests still split individually across all shards and workers.
+            SPLIT_ARGS="--class-splits=${INPUTS_TOTAL_WORKERS} --class-group=${INPUTS_WORKER_GROUP} --class-split-by=xdist_group -n ${CPU_XDIST_WORKERS} --dist loadgroup"
           elif [ "${INPUTS_TOTAL_WORKERS}" -gt 1 ]; then
             $PYTHON_EXE -m pip install --quiet pytest-split
             if [ -f .test_durations ]; then
@@ -372,15 +393,10 @@ jobs:
               echo "Warning: .test_durations not found. Falling back to default split."
               SPLIT_ALGO=""
             fi
-            if [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
-              $PYTHON_EXE -m pip install --quiet pytest-xdist
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} -n ${CPU_XDIST_WORKERS} ${SPLIT_ALGO}"
-            else
-              SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
-            fi
+            SPLIT_ARGS="--splits ${INPUTS_TOTAL_WORKERS} --group ${INPUTS_WORKER_GROUP} ${SPLIT_ALGO}"
           elif [ "${INPUTS_DEVICE_TYPE}" = "cpu" ]; then
             $PYTHON_EXE -m pip install --quiet pytest-xdist
-            SPLIT_ARGS="-n ${CPU_XDIST_WORKERS}"
+            SPLIT_ARGS="-n ${CPU_XDIST_WORKERS} --dist loadgroup"
           else
             SPLIT_ARGS=""
           fi

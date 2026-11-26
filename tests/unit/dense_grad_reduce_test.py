@@ -19,8 +19,8 @@ optimization barrier. dense_grad_reduce='all_reduce' drops the 'embed_grad' rule
 its own all-reduces. Only the reduction changes, so the model must compute the same function.
 
 The model, mesh and inputs are those of cp_as_ep_dense_no_cp_test.py (the tiny hybrid Qwen3.5 on 16 CPU devices,
-fsdp2 x context4 x expert2), whose helpers are reused. The checks run in a subprocess so the forced device count takes
-effect before JAX initializes.
+fsdp2 x context4 x expert2), whose helpers are reused. The checks run in phases, each in a child process (unless the
+test process already has the 16 devices) so the forced device count takes effect before JAX initializes.
 
   - Config: the all_reduce rules are the reduce_scatter rules minus exactly the 'embed_grad' rule (train and eval).
   - Shardings: every parameter keeps its sharding.
@@ -43,18 +43,19 @@ import collections
 import contextlib
 import os
 import re
-import subprocess
 import sys
 from unittest import mock
 
+from absl.testing import parameterized
 import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
 
+from tests.utils import cpu_mesh_child
+
 _RULE = "cp-as-ep-dense-no-cp"
 _EMBED_GRAD_RULE = ["embed_grad", ["fsdp", "expert", "context"]]
-_PASS_TOKEN = "DENSE_GRAD_REDUCE_CHECKS_PASSED"
 _DENSE_NAMES = (
     "['query']",
     "['key']",
@@ -172,17 +173,6 @@ def test_inference_with_physical_mesh_context():
       assert y_gate.shape == (2, 4, 8)
 
 
-@pytest.mark.cpu_only
-def test_dense_grad_reduce_on_cpu_mesh():
-  """Runs `main` below in a child process with 16 CPU devices."""
-  env = os.environ.copy()
-  env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=16"
-  env["JAX_PLATFORMS"] = "cpu"
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
-  assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert _PASS_TOKEN in result.stdout, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-
-
 def _rules_differ_by_embed_grad(rs_rules, ar_rules) -> bool:
   """ar_rules == rs_rules with exactly the 'embed_grad' rule removed, order kept."""
 
@@ -193,7 +183,7 @@ def _rules_differ_by_embed_grad(rs_rules, ar_rules) -> bool:
   return rs.count(_EMBED_GRAD_RULE) == 1 and [r for r in rs if r != _EMBED_GRAD_RULE] == ar
 
 
-def _run(base, cfg, data, cotangent, values=None, control=None):
+def _run(base, cfg, data, cotangent, values=None, control=None, execute=True):
   """base._run, also returning the lowered (pre-optimization) text of the program it compiles (its last Lowered.compile)."""
   lowered_texts = []
   real_compile = jax.stages.Lowered.compile
@@ -203,7 +193,7 @@ def _run(base, cfg, data, cotangent, values=None, control=None):
     return real_compile(self, *args, **kwargs)
 
   with mock.patch.object(jax.stages.Lowered, "compile", compile_and_keep_text):
-    result = base._run(cfg, data, cotangent, values=values, control=control)
+    result = base._run(cfg, data, cotangent, values=values, control=control, execute=execute)
   assert lowered_texts, "no Lowered.compile call"
   return result, lowered_texts[-1]
 
@@ -410,26 +400,24 @@ def _check_no_collective_permute_and_mla_lora(cfg_rs):
   return perm_absent, perm_ctrl_present, mla_ok
 
 
-def main():
+def _base():
+  """cp_as_ep_dense_no_cp_test.py, whose model, mesh, inputs and gates this test reuses."""
   sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
   import cp_as_ep_dense_no_cp_test as base  # pylint: disable=import-outside-toplevel,import-error
-  from maxtext.configs import types  # pylint: disable=import-outside-toplevel
 
   assert jax.device_count() == base._NUM_DEVICES, jax.devices()
   jax.config.update("jax_enable_compilation_cache", False)
-  checks, controls = {}, {}
+  return base
 
+
+def _run_bfloat16_checks():
+  """reduce_scatter vs all_reduce on the bfloat16 model (shardings, program, numerics) and the positive controls."""
+  base = _base()
+  from maxtext.configs import types  # pylint: disable=import-outside-toplevel
+
+  checks, controls = {}, {}
   cfg_rs = base._config(_RULE)
   cfg_ar = base._config(_RULE, dense_grad_reduce="all_reduce")
-  print(
-      f"dense_grad_reduce: {cfg_rs.dense_grad_reduce!r} (default) / {cfg_ar.dense_grad_reduce!r}",
-      flush=True,
-  )
-  checks["config: all_reduce rules = reduce_scatter rules minus the embed_grad rule (train and eval)"] = (
-      _rules_differ_by_embed_grad(cfg_rs.logical_axis_rules, cfg_ar.logical_axis_rules)
-      and _rules_differ_by_embed_grad(cfg_rs.logical_axis_rules_for_eval, cfg_ar.logical_axis_rules_for_eval)
-  )
-
   data, cotangent = base._inputs(cfg_rs)
   rs_run = _run(base, cfg_rs, data, cotangent)
   rs = rs_run[0]
@@ -446,32 +434,12 @@ def main():
       flush=True,
   )
 
-  rs32 = base._run(base._config(_RULE, **base._F32_DENSE), data, cotangent)
-  ar32 = base._run(
-      base._config(_RULE, dense_grad_reduce="all_reduce", **base._F32_DENSE),
-      data,
-      cotangent,
-      values=rs32.values,
-  )
-  checks["numerics: float32 dense variant"] = base._numerics(
-      "float32 dense all_reduce vs reduce_scatter", ar32, rs32, tol=base._F32_TOL
-  )
-  d32_same, d32_tot, o32_same, o32_tot = _bit_identical_by_class(rs32, ar32)
-  print(
-      f"float32 bit-identical gradient leaves (dense, of; other, of): {d32_same} of {d32_tot}; {o32_same} of {o32_tot}",
-      flush=True,
-  )
-
-  perm_absent, perm_ctrl_present, mla_ok = _check_no_collective_permute_and_mla_lora(cfg_rs)
-  checks["fsdp2xcontext2xexpert2: ['fsdp','expert','context'] emits zero collective-permute"] = perm_absent
-  controls["old ['fsdp','context','expert'] order emits collective-permute"] = perm_ctrl_present
-  checks["MLA q_lora/kv_lora: routes divisible kernels and skips indivisible kv_lora_rank cleanly"] = mla_ok
-
   # Positive controls.
   inert = staticmethod(lambda cfg, *, require_rule: None)
   with mock.patch.object(types.MaxTextConfig, "_apply_dense_grad_reduce", inert):
     cfg_inert = base._config(_RULE, dense_grad_reduce="all_reduce")
-  wrong_run = _run(base, cfg_inert, data, cotangent, values=rs.values)
+  # The program check reads only the lowered and compiled program, so this control is compiled but not run.
+  wrong_run = _run(base, cfg_inert, data, cotangent, values=rs.values, execute=False)
   controls["the key set with its rule edit disabled"] = not _program_changes(
       base, "control: rule edit disabled", rs_run, wrong_run
   )
@@ -481,28 +449,89 @@ def main():
   )
   query = next(name for name in rs.values if re.search(r"\['query'\].*\['kernel'\]", name))
   perturbed = dict(rs.values, **{query: rs.values[query] * np.float32(1 + 1e-3)})
-  wrong = base._run(cfg_ar, data, cotangent, values=perturbed)
+  # The all_reduce program from above, on the perturbed values.
+  wrong = ar.rerun(perturbed)
   controls[f"{query} scaled by 1 + 1e-3"] = not base._numerics("control: perturbed query", wrong, rs)
+  base._report(checks, controls)
+
+
+def _run_float32_checks():
+  """reduce_scatter vs all_reduce on the float32 dense variant."""
+  base = _base()
+  cfg_rs32 = base._config(_RULE, **base._F32_DENSE)
+  data, cotangent = base._inputs(cfg_rs32)
+  rs32 = base._run(cfg_rs32, data, cotangent)
+  ar32 = base._run(
+      base._config(_RULE, dense_grad_reduce="all_reduce", **base._F32_DENSE),
+      data,
+      cotangent,
+      values=rs32.values,
+  )
+  checks = {
+      "numerics: float32 dense variant": base._numerics(
+          "float32 dense all_reduce vs reduce_scatter", ar32, rs32, tol=base._F32_TOL
+      )
+  }
+  d32_same, d32_tot, o32_same, o32_tot = _bit_identical_by_class(rs32, ar32)
+  print(
+      f"float32 bit-identical gradient leaves (dense, of; other, of): {d32_same} of {d32_tot}; {o32_same} of {o32_tot}",
+      flush=True,
+  )
+  base._report(checks)
+
+
+def _run_config_and_probe_checks():
+  """The config's rule edit and refusals, and the small collective-permute / MLA routing probes."""
+  base = _base()
+  checks, controls = {}, {}
+  cfg_rs = base._config(_RULE)
+  cfg_ar = base._config(_RULE, dense_grad_reduce="all_reduce")
+  print(
+      f"dense_grad_reduce: {cfg_rs.dense_grad_reduce!r} (default) / {cfg_ar.dense_grad_reduce!r}",
+      flush=True,
+  )
+  checks["config: all_reduce rules = reduce_scatter rules minus the embed_grad rule (train and eval)"] = (
+      _rules_differ_by_embed_grad(cfg_rs.logical_axis_rules, cfg_ar.logical_axis_rules)
+      and _rules_differ_by_embed_grad(cfg_rs.logical_axis_rules_for_eval, cfg_ar.logical_axis_rules_for_eval)
+  )
+  perm_absent, perm_ctrl_present, mla_ok = _check_no_collective_permute_and_mla_lora(cfg_rs)
+  checks["fsdp2xcontext2xexpert2: ['fsdp','expert','context'] emits zero collective-permute"] = perm_absent
+  controls["old ['fsdp','context','expert'] order emits collective-permute"] = perm_ctrl_present
+  checks["MLA q_lora/kv_lora: routes divisible kernels and skips indivisible kv_lora_rank cleanly"] = mla_ok
   controls["all_reduce under cp-as-ep (no embed_grad rule)"] = _refused(
       base, "control: cp-as-ep", "cp-as-ep", dense_grad_reduce="all_reduce"
   )
   controls["a misspelled value"] = _refused(base, "control: misspelled value", _RULE, dense_grad_reduce="allreduce")
+  base._report(checks, controls)
 
-  for name, ok in {
-      **checks,
-      **{f"positive control caught: {k}": v for k, v in controls.items()},
-  }.items():
-    print(f"  [{'ok' if ok else 'FAIL'}] {name}", flush=True)
-  failed = [name for name, ok in checks.items() if not ok]
-  undetected = [name for name, caught in controls.items() if not caught]
-  if failed or undetected:
-    print(
-        f"checks that failed: {failed}; positive controls that were NOT detected: {undetected}",
-        flush=True,
-    )
-    sys.exit(1)
-  print(_PASS_TOKEN, flush=True)
+
+# The checks that need 16 CPU devices, one test case (and one child process) per phase, so they can run in parallel.
+_PHASES = {
+    "bfloat16": _run_bfloat16_checks,
+    "float32_dense": _run_float32_checks,
+    "config_and_probes": _run_config_and_probe_checks,
+}
+_SCHEDULED_PHASES = ("bfloat16", "float32_dense")
+_PR_PHASES = tuple(phase for phase in _PHASES if phase not in _SCHEDULED_PHASES)
+
+
+@pytest.mark.cpu_only
+class DenseGradReduceCpuMeshTest(parameterized.TestCase):
+  """`_PHASES` on 16 CPU devices: in this process if it has them, else in a child process per phase."""
+
+  @parameterized.named_parameters(*((phase, phase) for phase in _PR_PHASES))
+  def test_on_cpu_mesh(self, phase):
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=16)
+
+  # The two full-model compiles of the non-default dense_grad_reduce='all_reduce'. On every PR, config_and_probes
+  # checks that the option's rules are exactly the default's minus 'embed_grad' (plus the refusals and probes), and
+  # cp_as_ep_dense_no_cp_test's rules_bfloat16 phase checks the default reduce-scatter route's numerics on the same
+  # model. They run in scheduled CI and on PRs that change this file.
+  @parameterized.named_parameters(*((phase, phase) for phase in _SCHEDULED_PHASES))
+  @pytest.mark.scheduled_only
+  def test_on_cpu_mesh_scheduled(self, phase):
+    cpu_mesh_child.run_phase(__file__, phase, _PHASES, num_devices=16)
 
 
 if __name__ == "__main__":
-  main()
+  cpu_mesh_child.main(_PHASES)

@@ -103,7 +103,9 @@ def _run_collective_checks(mesh, batch_axis):
         ulysses_attention.ulysses_all_to_all(tensor, ulysses_axis), ulysses_axis
     )
 
-  np.testing.assert_array_equal(jax.device_get(round_trip(query)), jax.device_get(query))
+  # Everything below runs under jax.jit: an eager shard_map dispatches every primitive as its own SPMD computation,
+  # which dominates the runtime on a forced multi-device CPU mesh.
+  np.testing.assert_array_equal(jax.device_get(jax.jit(round_trip)(query)), jax.device_get(query))
 
   # The forward exchange produces each rank's head subset over the full sequence.
   @partial(
@@ -116,7 +118,7 @@ def _run_collective_checks(mesh, batch_axis):
   def exchange(tensor):
     return ulysses_attention.ulysses_all_to_all(tensor, ulysses_axis)
 
-  np.testing.assert_array_equal(jax.device_get(exchange(query)), jax.device_get(query))
+  np.testing.assert_array_equal(jax.device_get(jax.jit(exchange)(query)), jax.device_get(query))
 
   for causal in (True, False):
 
@@ -143,12 +145,12 @@ def _run_collective_checks(mesh, batch_axis):
       output = attn_fn(query, key, value, segment_ids)
       return jnp.sum(output * jnp.cos(output))
 
-    dense_output = _dense_reference_attention(query, key, value, segment_ids, causal=causal)
-    ulysses_output = ulysses_attention_fn(query, key, value, segment_ids)
+    dense_output = jax.jit(partial(_dense_reference_attention, causal=causal))(query, key, value, segment_ids)
+    ulysses_output = jax.jit(ulysses_attention_fn)(query, key, value, segment_ids)
     np.testing.assert_allclose(jax.device_get(ulysses_output), jax.device_get(dense_output), atol=1e-5)
 
-    dense_grads = jax.grad(dense_loss, argnums=(0, 1, 2))(query, key, value)
-    ulysses_grads = jax.grad(ulysses_loss, argnums=(0, 1, 2))(query, key, value)
+    dense_grads = jax.jit(jax.grad(dense_loss, argnums=(0, 1, 2)))(query, key, value)
+    ulysses_grads = jax.jit(jax.grad(ulysses_loss, argnums=(0, 1, 2)))(query, key, value)
     for name, dense_grad, ulysses_grad in zip(("dQ", "dK", "dV"), dense_grads, ulysses_grads):
       np.testing.assert_allclose(
           jax.device_get(ulysses_grad),

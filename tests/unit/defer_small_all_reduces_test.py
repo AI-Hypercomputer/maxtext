@@ -255,8 +255,9 @@ class DeferredMeshTest(unittest.TestCase):
       )
       return tree["moe_bias_updates"][0], jnp.any(flags), jnp.any(flags, axis=tuple(range(1, flags.ndim)))
 
-    jaxpr = jax.make_jaxpr(model)(self.indices, self.local_overflow)
-    return jax.jit(model)(self.indices, self.local_overflow), jaxpr
+    # One trace for both the jaxpr and the executable (make_jaxpr followed by jit would trace twice).
+    traced = jax.jit(model).trace(self.indices, self.local_overflow)
+    return traced.lower().compile()(self.indices, self.local_overflow), traced.jaxpr
 
   def test_deferred_equals_per_layer(self):
     cfg = _cfg(rate=self.rate)
@@ -290,6 +291,8 @@ class DeferredMeshTest(unittest.TestCase):
     from maxtext.layers.initializers import nd_dense_init
     from maxtext.utils import maxtext_utils
 
+    params = {}
+
     def run(defer, chunks, rbf):
       cfg = pyconfig.initialize(
           [None, get_test_config_path()],
@@ -304,9 +307,11 @@ class DeferredMeshTest(unittest.TestCase):
           base_moe_mlp_dim=128,
           dtype="float32",
           weight_dtype="float32",
-          megablox=True,
+          # jax.lax.ragged_dot instead of the megablox Pallas kernel in interpret mode (much slower on CPU): the flag
+          # changes only where the expert counts are reduced, and both runs share whichever GMM runs.
+          hardware="cpu",
           sparse_matmul=True,
-          per_device_batch_size=2,
+          per_device_batch_size=1,
           ici_expert_parallelism=2,
           use_ring_of_experts=True,
           max_target_length=64,
@@ -332,11 +337,14 @@ class DeferredMeshTest(unittest.TestCase):
           intermediate_dim=cfg.mlp_dim,
           dtype=cfg.dtype,
       )
-      batch = int(cfg.per_device_batch_size) * jax.device_count()
+      batch = int(cfg.per_device_batch_size * jax.device_count())
       x = jax.random.normal(jax.random.PRNGKey(1), (batch, cfg.max_target_length, cfg.base_emb_dim), jnp.float32)
       rng = jax.random.PRNGKey(0)
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-        variables = jax.jit(lambda h: model.init({"params": rng, "dropout": rng}, h))(x)
+        # The parameters do not depend on the flag, the chunk count or the buffer factor: initialize them once and
+        # share them by every run (so the off and on runs compare on the very same parameters).
+        if "params" not in params:
+          params["params"] = jax.jit(lambda h: model.init({"params": rng, "dropout": rng}, h))(x)["params"]
 
         def f(p, h):
           (out, _, bias), inter = model.apply({"params": p}, h, mutable=["intermediates"])
@@ -344,7 +352,7 @@ class DeferredMeshTest(unittest.TestCase):
           flags = maxtext_utils.collect_intermediates_by_suffix(inter, "moe_has_overflow")
           return out, bias, jnp.any(jnp.stack([jnp.any(v) for v in flags]))
 
-        return jax.jit(f)(variables["params"], x)
+        return jax.jit(f)(params["params"], x)
 
     for chunks in (1, 2):
       for rbf in (0.3, -1.0):

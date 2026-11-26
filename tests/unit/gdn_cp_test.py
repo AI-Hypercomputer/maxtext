@@ -13,9 +13,9 @@
 # limitations under the License.
 """Checks the GatedDeltaNet cross-device state composition on a CPU mesh.
 
-Runs as a subprocess so the forced device count takes effect before JAX
-initializes; the parent pytest process has already initialized JAX with the
-default device count.
+Runs as subprocesses (one per phase of checks, see `_PHASES`) so the forced
+device count takes effect before JAX initializes; the parent pytest process has
+already initialized JAX with the default device count.
 
 The child checks three things, each on a 1-D context mesh and a 2-D fsdp x
 context mesh, and the first also with a tuple axis name, which is what
@@ -50,14 +50,19 @@ import pytest
 from maxtext.kernels.attention import gdn_cp
 
 
+# The child's checks, split into phases that run in separate child processes so pytest-xdist can run them in parallel.
+_PHASES = ("primitives", "layer_unpacked", "layer_packed")
+
+
 @pytest.mark.cpu_only
-def test_gdn_cp_prefix_scan_matches_sequential_reference_on_cpu_mesh():
+@pytest.mark.parametrize("phase", _PHASES)
+def test_gdn_cp_prefix_scan_matches_sequential_reference_on_cpu_mesh(phase):
   env = os.environ.copy()
   env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=8"
   env["JAX_PLATFORMS"] = "cpu"
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
+  result = subprocess.run([sys.executable, __file__, phase], env=env, capture_output=True, text=True, check=False)
   assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert "GDN_CP_CHECKS_PASSED" in result.stdout
+  assert f"GDN_CP_CHECKS_PASSED {phase}" in result.stdout
 
 
 def _chunk_inputs(num_chunks, lead, chunk_len, k_dim, v_dim):
@@ -94,10 +99,12 @@ def test_compose_local_folds_the_chunks_into_one_affine_map():
 
   affine_a, affine_b = jax.jit(gdn_cp.compose_local)(w, u, k, g)
   folded = jnp.matmul(affine_a, h_init) + affine_b
-  np.testing.assert_allclose(jax.device_get(folded), jax.device_get(_direct_recurrence(w, u, k, g, h_init)), atol=1e-5)
+  # The reference is a Python loop of small ops; jit it rather than dispatch every op eagerly.
+  direct_recurrence = jax.jit(_direct_recurrence)
+  np.testing.assert_allclose(jax.device_get(folded), jax.device_get(direct_recurrence(w, u, k, g, h_init)), atol=1e-5)
 
   # Negative control: reversing the chunks changes the answer, so the test sees order.
-  reversed_chunks = _direct_recurrence(w[::-1], u[::-1], k[::-1], g[::-1], h_init)
+  reversed_chunks = direct_recurrence(w[::-1], u[::-1], k[::-1], g[::-1], h_init)
   assert float(jnp.max(jnp.abs(folded - reversed_chunks))) > 1e-4
 
 
@@ -157,7 +164,7 @@ def _run_composition_checks(mesh, cp_axis):
     )
     return jax.jit(mapped(lambda a, b, h: fn(a[0], b[0], h, cp_axis)))(affine_a, affine_b, h_init)
 
-  reference_incoming, reference_final = _sequential_reference(affine_a, affine_b, h_init)
+  reference_incoming, reference_final = jax.jit(_sequential_reference)(affine_a, affine_b, h_init)
   # shard_map concatenates each shard's (batch, heads, k_dim, v_dim) along the
   # batch axis, so at batch 1 the leading axis of the result is the shard index.
   incoming, final = sharded(gdn_cp.incoming_state)
@@ -316,8 +323,8 @@ def _run_conv_halo_checks(mesh, cp_axis):
     np.testing.assert_allclose(jax.device_get(actual_g), jax.device_get(expected_g), atol=1e-5, rtol=1e-5)
 
 
-def _run_qwen3_gdn_layer_cp_checks(devices):
-  """Verifies `Qwen3NextGatedDeltaNet` forward + backward across cp=1, seq-CP, and head-CP."""
+def _run_qwen3_gdn_layer_cp_checks(devices, packing):
+  """Verifies `Qwen3NextGatedDeltaNet` forward + backward across cp=1, seq-CP, and head-CP, packed or not."""
   # pylint: disable=import-outside-toplevel
   from flax import nnx
   from flax.linen import partitioning as nn_partitioning
@@ -394,45 +401,45 @@ def _run_qwen3_gdn_layer_cp_checks(devices):
       (_, out), (grad_state, grad_x) = jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))(state, x)
       return jax.device_get(out), jax.tree_util.tree_map(jax.device_get, grad_state), jax.device_get(grad_x)
 
-  for packing, seg_ids in ((False, unpacked_seg), (True, packed_seg)):
-    cfg_ref = pyconfig.initialize([None, base_yml], packing=packing, **common_overrides)
-    ref_out, ref_g_state, ref_g_x = _eval_layer(cfg_ref, None, seg_ids)
+  seg_ids = packed_seg if packing else unpacked_seg
+  cfg_ref = pyconfig.initialize([None, base_yml], packing=packing, **common_overrides)
+  ref_out, ref_g_state, ref_g_x = _eval_layer(cfg_ref, None, seg_ids)
 
-    # 1D 4-device context mesh: both seq-CP and head-CP.
-    mesh_cp4 = Mesh(devices[:4], ("context",))
-    for cp_mode in ("seq", "head"):
-      cfg_cp4 = pyconfig.initialize(
-          [None, base_yml],
-          packing=packing,
-          ici_context_parallelism=4,
-          gdn_cp_mode=cp_mode,
-          remat_policy="custom",
-          gdn_states="device",
-          gdn_cp_state="device",
-          **common_overrides,
-      )
-      out, g_state, g_x = _eval_layer(cfg_cp4, mesh_cp4, seg_ids, use_custom_remat=cp_mode == "seq")
-      np.testing.assert_allclose(out, ref_out, atol=3e-4, rtol=2e-3)
-      np.testing.assert_allclose(g_x, ref_g_x, atol=5e-4, rtol=3e-3)
-      for g_actual, g_expected in zip(jax.tree_util.tree_leaves(g_state), jax.tree_util.tree_leaves(ref_g_state)):
-        np.testing.assert_allclose(g_actual, g_expected, atol=5e-4, rtol=3e-3)
+  # 1D 4-device context mesh: both seq-CP and head-CP.
+  mesh_cp4 = Mesh(devices[:4], ("context",))
+  for cp_mode in ("seq", "head"):
+    cfg_cp4 = pyconfig.initialize(
+        [None, base_yml],
+        packing=packing,
+        ici_context_parallelism=4,
+        gdn_cp_mode=cp_mode,
+        remat_policy="custom",
+        gdn_states="device",
+        gdn_cp_state="device",
+        **common_overrides,
+    )
+    out, g_state, g_x = _eval_layer(cfg_cp4, mesh_cp4, seg_ids, use_custom_remat=cp_mode == "seq")
+    np.testing.assert_allclose(out, ref_out, atol=3e-4, rtol=2e-3)
+    np.testing.assert_allclose(g_x, ref_g_x, atol=5e-4, rtol=3e-3)
+    for g_actual, g_expected in zip(jax.tree_util.tree_leaves(g_state), jax.tree_util.tree_leaves(ref_g_state)):
+      np.testing.assert_allclose(g_actual, g_expected, atol=5e-4, rtol=3e-3)
 
-    # 2D (tensor=2, context=2) mesh: both seq-CP and head-CP.
-    mesh_tp2_cp2 = Mesh(devices[:4].reshape(2, 2), ("tensor", "context"))
-    for cp_mode in ("seq", "head"):
-      cfg_tp_cp = pyconfig.initialize(
-          [None, base_yml],
-          packing=packing,
-          ici_tensor_parallelism=2,
-          ici_context_parallelism=2,
-          gdn_cp_mode=cp_mode,
-          **common_overrides,
-      )
-      out, g_state, g_x = _eval_layer(cfg_tp_cp, mesh_tp2_cp2, seg_ids)
-      np.testing.assert_allclose(out, ref_out, atol=3e-4, rtol=2e-3)
-      np.testing.assert_allclose(g_x, ref_g_x, atol=5e-4, rtol=3e-3)
-      for g_actual, g_expected in zip(jax.tree_util.tree_leaves(g_state), jax.tree_util.tree_leaves(ref_g_state)):
-        np.testing.assert_allclose(g_actual, g_expected, atol=5e-4, rtol=3e-3)
+  # 2D (tensor=2, context=2) mesh: both seq-CP and head-CP.
+  mesh_tp2_cp2 = Mesh(devices[:4].reshape(2, 2), ("tensor", "context"))
+  for cp_mode in ("seq", "head"):
+    cfg_tp_cp = pyconfig.initialize(
+        [None, base_yml],
+        packing=packing,
+        ici_tensor_parallelism=2,
+        ici_context_parallelism=2,
+        gdn_cp_mode=cp_mode,
+        **common_overrides,
+    )
+    out, g_state, g_x = _eval_layer(cfg_tp_cp, mesh_tp2_cp2, seg_ids)
+    np.testing.assert_allclose(out, ref_out, atol=3e-4, rtol=2e-3)
+    np.testing.assert_allclose(g_x, ref_g_x, atol=5e-4, rtol=3e-3)
+    for g_actual, g_expected in zip(jax.tree_util.tree_leaves(g_state), jax.tree_util.tree_leaves(ref_g_state)):
+      np.testing.assert_allclose(g_actual, g_expected, atol=5e-4, rtol=3e-3)
 
 
 def test_gdn_cp_config_and_custom_remat_validation():
@@ -520,20 +527,29 @@ def test_gdn_cp_config_and_custom_remat_validation():
   assert callable(policy)
 
 
+def _run_primitive_checks(devices):
+  """The gdn_cp composition, its backward, the chunked delta rule and the conv halo, on several meshes."""
+  _run_composition_checks(Mesh(devices, ("context",)), "context")
+  _run_composition_checks(Mesh(devices.reshape(2, 4), ("fsdp", "context")), "context")
+  # qwen3.py builds cp_axis as a tuple, so both context knobs can be live at once.
+  _run_composition_checks(
+      Mesh(devices.reshape(2, 4), ("context", "context_usp_ulysses")),
+      ("context", "context_usp_ulysses"),
+  )
+  _run_gradient_checks(Mesh(devices, ("context",)), "context")
+  _run_gradient_checks(Mesh(devices.reshape(2, 4), ("fsdp", "context")), "context")
+  _run_end_to_end_checks(Mesh(devices, ("context",)), "context")
+  _run_conv_halo_checks(Mesh(devices[:4], ("context",)), "context")
+  _run_conv_halo_checks(Mesh(devices.reshape(2, 4), ("tensor", "context")), "context")
+
+
 if __name__ == "__main__":
   _devices = np.array(jax.devices())
   assert len(_devices) == 8, jax.devices()
-  _run_composition_checks(Mesh(_devices, ("context",)), "context")
-  _run_composition_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
-  # qwen3.py builds cp_axis as a tuple, so both context knobs can be live at once.
-  _run_composition_checks(
-      Mesh(_devices.reshape(2, 4), ("context", "context_usp_ulysses")),
-      ("context", "context_usp_ulysses"),
-  )
-  _run_gradient_checks(Mesh(_devices, ("context",)), "context")
-  _run_gradient_checks(Mesh(_devices.reshape(2, 4), ("fsdp", "context")), "context")
-  _run_end_to_end_checks(Mesh(_devices, ("context",)), "context")
-  _run_conv_halo_checks(Mesh(_devices[:4], ("context",)), "context")
-  _run_conv_halo_checks(Mesh(_devices.reshape(2, 4), ("tensor", "context")), "context")
-  _run_qwen3_gdn_layer_cp_checks(_devices)
-  print("GDN_CP_CHECKS_PASSED")
+  _phase = sys.argv[1]
+  {
+      "primitives": _run_primitive_checks,
+      "layer_unpacked": partial(_run_qwen3_gdn_layer_cp_checks, packing=False),
+      "layer_packed": partial(_run_qwen3_gdn_layer_cp_checks, packing=True),
+  }[_phase](_devices)
+  print(f"GDN_CP_CHECKS_PASSED {_phase}")

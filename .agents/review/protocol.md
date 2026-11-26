@@ -28,7 +28,7 @@ never be sarcastic or condescending.
 **Baseline standards:** Evaluate all changed code and tests against root
 `AGENTS.md` (read it first if it is not already in context) and every matching
 domain guide in `.agents/review/` (`workflows.md`, `config-checkpoint.md`,
-`kernels.md`, `performance.md`). Do **not** comment on CI-enforced style nits
+`kernels.md`, `performance.md`, `testing.md`). Do **not** comment on CI-enforced style nits
 (`pyink` indentation/line length) or license headers from `AGENTS.md`.
 
 ## Review Constraints

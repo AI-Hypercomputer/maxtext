@@ -14,8 +14,8 @@
 """Checks Ulysses attention with fewer KV heads than context ranks on a forced 4-device CPU mesh.
 
 With 2 KV heads at context 4, each KV head is repeated twice before the all-to-all so that every rank receives
-the KV head its contiguous block of query heads uses. The checks run in a subprocess so the forced device count
-takes effect before JAX initializes:
+the KV head its contiguous block of query heads uses. The checks run in a subprocess per KV head count (1 and 2) so the
+forced device count takes effect before JAX initializes:
 
   - Collectives. The real repeat and all-to-all helpers around a dense GQA kernel match a dense single-device
     reference in the output and in dQ/dK/dV, on 8 query heads and on 32 (the Qwen3.5 head count).
@@ -54,13 +54,21 @@ _NUM_DEVICES = 4
 
 
 @pytest.mark.cpu_only
-def test_ulysses_kv_head_replication_on_cpu_mesh():
+@pytest.mark.parametrize("kv_heads", [1, 2])
+def test_ulysses_kv_head_replication_on_cpu_mesh(kv_heads):
+  """Runs in-process on 4 CPU devices, else spawns one child process per KV head count."""
+  devices = jax.devices()
+  if len(devices) == _NUM_DEVICES and devices[0].platform == "cpu":
+    _run_collective_checks(num_query_heads=8, num_kv_heads=kv_heads)
+    _run_collective_checks(num_query_heads=32, num_kv_heads=kv_heads)
+    _run_attention_op_checks(num_kv_heads=kv_heads)
+    return
   env = os.environ.copy()
   env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + f" --xla_force_host_platform_device_count={_NUM_DEVICES}"
   env["JAX_PLATFORMS"] = "cpu"
-  result = subprocess.run([sys.executable, __file__], env=env, capture_output=True, text=True, check=False)
+  result = subprocess.run([sys.executable, __file__, str(kv_heads)], env=env, capture_output=True, text=True, check=False)
   assert result.returncode == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-  assert _CHILD_MARKER in result.stdout
+  assert f"{_CHILD_MARKER} kv_heads={kv_heads}" in result.stdout
 
 
 def _normalized_max_error(actual, expected) -> float:
@@ -154,12 +162,19 @@ def _dense_attention(query, key, value, segment_ids):
   return jnp.einsum("bhqk,bhkd->bhqd", probs, value, precision="highest")
 
 
-def _value_and_grads(fn, args, cotangent, mesh, with_grads=True):
+def _value_and_grads(fn, args, cotangent, mesh, with_grads=True, forward_hlo=None):
+  """[out, dq, dk, dv] (only [out] without grads); `forward_hlo`, a list, receives the forward's compiled HLO text."""
+
   def loss(*xs):
     return jnp.sum(fn(*xs).astype(jnp.float32) * cotangent)
 
   with jax.set_mesh(mesh):
-    out = jax.jit(fn)(*args)
+    # AOT compile and call the compiled forward, so a caller that inspects the HLO does not compile it a second time
+    # (an AOT `.compile()` does not fill the jit call cache).
+    compiled = jax.jit(fn).lower(*args).compile()
+    if forward_hlo is not None:
+      forward_hlo.append(compiled.as_text())
+    out = compiled(*args)
     grads = jax.jit(jax.grad(loss, argnums=(0, 1, 2)))(*args) if with_grads else ()
   return [np.asarray(out, np.float32)] + [np.asarray(g, np.float32) for g in grads]
 
@@ -312,7 +327,8 @@ def _run_attention_op_checks(num_kv_heads: int = 2):
   args = (query, key, value)
   reference = _value_and_grads(dense, args, cotangent, mesh)
   all_gather = _value_and_grads(flash("all_gather"), args, cotangent, mesh)
-  result = _value_and_grads(flash("ulysses"), args, cotangent, mesh)
+  ulysses_hlo = []
+  result = _value_and_grads(flash("ulysses"), args, cotangent, mesh, forward_hlo=ulysses_hlo)
   no_sum = _value_and_grads(flash("ulysses", _repeat_without_group_sum), args, cotangent, mesh)
   controls = [
       ("no group sum (dk)", no_sum, 2),
@@ -324,8 +340,9 @@ def _run_attention_op_checks(num_kv_heads: int = 2):
   _check(f"attention op {num_kv_heads}kv, ulysses vs all_gather", result, all_gather, controls)
   _check(f"attention op {num_kv_heads}kv, ulysses vs dense", result, reference, controls)
 
-  with nn_partitioning.axis_rules(cfg.logical_axis_rules), jax.set_mesh(mesh):
-    hlo = jax.jit(flash("ulysses")).lower(*args).compile().as_text()
+  # The forward program of `result` above (flash() sets the same axis rules inside, so no outer rules are needed).
+  assert len(ulysses_hlo) == 1, len(ulysses_hlo)
+  hlo = ulysses_hlo[0]
   # q, k, v in as one packed exchange and the output back; no K/V all-gather (the one all-gather is the int32
   # segment IDs).
   assert hlo.count(" all-to-all(") == 2, hlo.count(" all-to-all(")
@@ -370,10 +387,10 @@ def _run_attention_op_checks(num_kv_heads: int = 2):
         return jnp.sum(final_q.astype(jnp.float32) * cotangent)
 
       with nn_partitioning.axis_rules(cfg.logical_axis_rules), jax.set_mesh(mesh):
-        grad_fn = jax.jit(jax.grad(loss_with_remat, argnums=(0, 1, 2)))
-        grad_hlo = grad_fn.lower(*args).compile().as_text()
-        remat_a2a[loc] = grad_hlo.count(" all-to-all(")
-        remat_grads[loc] = grad_fn(*args)
+        # Call the AOT-compiled program itself: calling `grad_fn` would compile it again.
+        compiled = jax.jit(jax.grad(loss_with_remat, argnums=(0, 1, 2))).lower(*args).compile()
+        remat_a2a[loc] = compiled.as_text().count(" all-to-all(")
+        remat_grads[loc] = compiled(*args)
     print(f"custom remat all-to-all counts: {remat_a2a}", flush=True)
     # Scanned remat loop: 2 fwd + 3 bwd (with replay) = 5 under 'remat',
     # dropping to 2 fwd + 2 bwd = 4 under 'device' and 'offload'.
@@ -387,8 +404,8 @@ def _run_attention_op_checks(num_kv_heads: int = 2):
 
 if __name__ == "__main__":
   assert len(jax.devices()) == _NUM_DEVICES, jax.devices()
-  for kv_heads in (1, 2):
-    _run_collective_checks(num_query_heads=8, num_kv_heads=kv_heads)
-    _run_collective_checks(num_query_heads=32, num_kv_heads=kv_heads)
-    _run_attention_op_checks(num_kv_heads=kv_heads)
-  print(_CHILD_MARKER)
+  _kv_heads = int(sys.argv[1])
+  _run_collective_checks(num_query_heads=8, num_kv_heads=_kv_heads)
+  _run_collective_checks(num_query_heads=32, num_kv_heads=_kv_heads)
+  _run_attention_op_checks(num_kv_heads=_kv_heads)
+  print(f"{_CHILD_MARKER} kv_heads={_kv_heads}")

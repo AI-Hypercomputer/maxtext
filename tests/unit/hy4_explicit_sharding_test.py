@@ -648,22 +648,29 @@ class Hy4ExplicitShardingTest(parameterized.TestCase):
     )
     mesh = maxtext_utils.get_mesh_from_config(cfg)
     with nn_partitioning.axis_rules(cfg.logical_axis_rules), jax.set_mesh(mesh):
-      rngs = nnx.Rngs(params=0, dropout=0)
-      shared_emb = embeddings.Embed(
-          num_embeddings=cfg.vocab_size,
-          num_features=cfg.emb_dim,
-          dtype=cfg.dtype,
-          embedding_init=nn.initializers.normal(stddev=1.0),
-          config=cfg,
-          mesh=mesh,
-          rngs=rngs,
-      )
-      decoder = nnx_decoders.NNXDecoder(
-          config=cfg,
-          mesh=mesh,
-          model_mode=MODEL_MODE_TRAIN,
-          rngs=rngs,
-      )
+
+      def _init_models():
+        """Initializes the shared embedding and HY4 decoder."""
+        rngs = nnx.Rngs(params=0, dropout=0)
+        emb = embeddings.Embed(
+            num_embeddings=cfg.vocab_size,
+            num_features=cfg.emb_dim,
+            dtype=cfg.dtype,
+            embedding_init=nn.initializers.normal(stddev=1.0),
+            config=cfg,
+            mesh=mesh,
+            rngs=rngs,
+        )
+        dec = nnx_decoders.NNXDecoder(
+            config=cfg,
+            mesh=mesh,
+            model_mode=MODEL_MODE_TRAIN,
+            rngs=rngs,
+        )
+        return emb, dec
+
+      # Jit initialization so parameter creation does not dispatch op by op on CPU.
+      shared_emb, decoder = nnx.jit(_init_models)()
       nnx.pop(shared_emb, nnx.RngState, nnx.RngCount)
       nnx.pop(decoder, nnx.RngState, nnx.RngCount)
       emb_graphdef, emb_params, emb_state = nnx.split(shared_emb, nnx.Param, ...)

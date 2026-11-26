@@ -16,6 +16,7 @@
 
 from collections.abc import Mapping
 import dataclasses
+import functools
 
 from flax import nnx
 import jax
@@ -149,13 +150,21 @@ def _build_glm5_full_scale_abstract_model(
     remat_policy: str,
 ) -> nnx.Module:
   """Evaluates abstract shapes and `PartitionSpec`s for full-scale 45-layer `Glm5Model` (0 HBM)."""
+  return _cached_glm5_full_scale_abstract_model(mesh.shape.get("tensor", 1) > 1, scan_layers, remat_policy)
+
+
+# The abstract model depends on the mesh only through `use_tp`, and tracing the 45-layer model is slow, so Check 12's
+# 4 topologies share 2 builds. Callers only read the returned (shape-only) module, so sharing one instance is safe.
+@functools.lru_cache(maxsize=None)
+def _cached_glm5_full_scale_abstract_model(use_tp: bool, scan_layers: bool, remat_policy: str) -> nnx.Module:
+  """Memoized `nnx.eval_shape` of the full-scale `Glm5Model` keyed on `(use_tp, scan_layers, remat_policy)`."""
   cfg = dataclasses.replace(
       _GLM5_FULL_SCALE_CFG,
       scan_layers=scan_layers,
       remat_policy=remat_policy,
   )
   sharding = glm5_3_flash.Glm5Sharding(
-      use_tp=mesh.shape.get("tensor", 1) > 1,
+      use_tp=use_tp,
       ep_size=1,
   )
   return nnx.eval_shape(

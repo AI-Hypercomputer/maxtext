@@ -325,6 +325,10 @@ class GdnLayerLayoutsTest(unittest.TestCase):
     self.assertEqual(layer_embed_gdn.in_proj_ba.kernel_axes, ("embed_gdn", "gdn_head"))
     self.assertEqual(layer_embed_gdn.out_proj.kernel_axes, ("gdn_head", "embed_gdn"))
 
+    devices = jax.devices()
+    if len(devices) == 4 and devices[0].platform == "cpu":
+      _run_multidevice_child()
+      return
     env = os.environ.copy()
     env["XLA_FLAGS"] = env.get("XLA_FLAGS", "") + " --xla_force_host_platform_device_count=4"
     env["JAX_PLATFORMS"] = "cpu"

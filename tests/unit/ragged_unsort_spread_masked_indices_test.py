@@ -228,13 +228,15 @@ def _fan_out_args(ids, w, key, shard, index_math):
 def _fan_out_cases(index_math, buffer, garbage=False, **kw):
   """(case, key off, key on) for 3 seeds x every shard; `kw` goes to the key-on run only."""
   skew, buffer_size = _BUFFERS[buffer]
+  # Built once per call (so under the caller's patches) and shared by every seed and shard: the routing and the shard
+  # are arguments, so they share one executable instead of compiling one each.
+  fn_off = jax.jit(_fan_out_fn(buffer_size, index_math, garbage))
+  fn_on = jax.jit(_fan_out_fn(buffer_size, index_math, garbage, **_SPREAD, **kw))
   for seed in range(3):
     ids, w, key = _routing(seed, skew)
     for shard in range(_EP):
       args = _fan_out_args(ids, w, key, shard, index_math)
-      off = jax.jit(_fan_out_fn(buffer_size, index_math, garbage))(*args)
-      on = jax.jit(_fan_out_fn(buffer_size, index_math, garbage, **_SPREAD, **kw))(*args)
-      yield f"seed{seed} shard{shard}", off, on
+      yield f"seed{seed} shard{shard}", fn_off(*args), fn_on(*args)
 
 
 _CASES = [(m, b) for m in ("count", "sort") for b in ("packed", "dropping", "full")]
@@ -392,19 +394,16 @@ def _expert_operands(gs, buffer_rows, num_slots, local):
   return (gs, None, shard * local)
 
 
-def _op_run(buffer_size, index_math, seed=0, ep=4, experts=8, topk=2, tokens=64, **kw):
-  """ring_ragged_sort -> (wi, silu, wo) -> ring_ragged_unsort, forward and VJP, on an `ep`-device expert-parallel mesh."""
-  k = jax.random.split(jax.random.PRNGKey(seed), 6)
-  x = jax.random.normal(k[0], (tokens, _D), jnp.float32)
-  ids = jnp.stack([jax.random.permutation(kk, experts)[:topk] for kk in jax.random.split(k[1], tokens)]).astype(jnp.int32)
-  w = jax.nn.softmax(jax.random.normal(k[2], (tokens, topk)), axis=-1).reshape(-1)
-  wi = (jax.random.normal(k[3], (experts, _D, _F)) * 0.1).reshape(ep, experts // ep, _D, _F).astype(jnp.bfloat16)
-  wo = (jax.random.normal(k[4], (experts, _F, _D)) * 0.1).reshape(ep, experts // ep, _F, _D).astype(jnp.bfloat16)
-  cot = jax.random.normal(k[5], (tokens, _D), jnp.float32)
+def _op_fn(buffer_size, index_math, ep, experts, topk, tokens, **kw):
+  """The jitted shard_map of ring_ragged_sort -> (wi, silu, wo) -> ring_ragged_unsort, forward and VJP.
+
+  The routing `ids` is an argument, not a closed-over constant, so the seeds of one configuration share an executable.
+  """
   local = experts // ep
   mesh = Mesh(np.array(jax.devices()[:ep]), ("ep",))
 
-  def body(x, w, wi, wo, cot):
+  def body(x, ids, w, wi, wo, cot):
+    """Per-shard forward and VJP body for ring ragged sort/matmul/unsort."""
     wi, wo = wi[0], wo[0]
 
     def f(x, w, wi, wo):
@@ -442,18 +441,45 @@ def _op_run(buffer_size, index_math, seed=0, ep=4, experts=8, topk=2, tokens=64,
   sm = jax.shard_map(
       body,
       mesh=mesh,
-      in_specs=(P(), P(), P("ep"), P("ep"), P()),
+      in_specs=(P(), P(), P(), P("ep"), P("ep"), P()),
       out_specs=(P("ep"),) * 5,
       check_vma=False,
   )
-  return [np.asarray(a) for a in jax.jit(sm)(x.astype(jnp.bfloat16), w, wi, wo, cot)]
+  return jax.jit(sm)
+
+
+# Executables of `_op_fn` keyed by its arguments, for runs without a patched (control) trace.
+_OP_FNS = {}
+
+
+def _op_run(buffer_size, index_math, seed=0, ep=4, experts=8, topk=2, tokens=64, fresh=False, **kw):
+  """`_op_fn` on `seed`'s inputs, on an `ep`-device expert-parallel mesh.
+
+  `fresh` builds (and traces) a new function instead of reusing the cached one, for runs under a control's patch.
+  """
+  k = jax.random.split(jax.random.PRNGKey(seed), 6)
+  x = jax.random.normal(k[0], (tokens, _D), jnp.float32)
+  ids = jax.vmap(lambda kk: jax.random.permutation(kk, experts)[:topk])(jax.random.split(k[1], tokens)).astype(jnp.int32)
+  w = jax.nn.softmax(jax.random.normal(k[2], (tokens, topk)), axis=-1).reshape(-1)
+  wi = (jax.random.normal(k[3], (experts, _D, _F)) * 0.1).reshape(ep, experts // ep, _D, _F).astype(jnp.bfloat16)
+  wo = (jax.random.normal(k[4], (experts, _F, _D)) * 0.1).reshape(ep, experts // ep, _F, _D).astype(jnp.bfloat16)
+  cot = jax.random.normal(k[5], (tokens, _D), jnp.float32)
+  fn_args = (buffer_size, index_math, ep, experts, topk, tokens)
+  if fresh:
+    fn = _op_fn(*fn_args, **kw)
+  else:
+    cache_key = (fn_args, tuple(sorted(kw.items())))
+    if cache_key not in _OP_FNS:
+      _OP_FNS[cache_key] = _op_fn(*fn_args, **kw)
+    fn = _OP_FNS[cache_key]
+  return [np.asarray(a) for a in fn(x.astype(jnp.bfloat16), ids, w, wi, wo, cot)]
 
 
 def _op_case(label, buffer_size, index_math, seed, control=None, **cfg):
-  """Compares `_op_run` with `spread_masked_indices=False` vs `True`."""
+  """Compares `_op_run` with `spread_masked_indices=False` vs `True`; `control` patches the key-on run's trace."""
   off = _op_run(buffer_size, index_math, seed, **cfg)
   with control if control is not None else contextlib.nullcontext():
-    on = _op_run(buffer_size, index_math, seed, **cfg, **_SPREAD)
+    on = _op_run(buffer_size, index_math, seed, fresh=control is not None, **cfg, **_SPREAD)
   bad = [n for n, a, b in zip(_OP_NAMES, off, on) if not _bits_equal(a, b)]
   print(f"{label}: {'identical' if not bad else f'DIFFERENT in {bad}'}", flush=True)
   return not bad
@@ -521,7 +547,7 @@ def _op_checks():
 
 # ------------------------------------------------------------------------------------------------ the layer (child)
 _NUM_EXPERTS, _TOP_K, _EMB, _SEQ = 16, 4, 256, 64
-# The benchmark's MoE settings and every MoE key that composes with them on the megablox path the CPU runs,
+# The benchmark's MoE settings and every MoE key that composes with them on the GMM path the CPU runs,
 # with "count".
 _BENCH = {
     "moe_routing_maps": "device",
@@ -559,7 +585,9 @@ def _layer_cfg(**overrides):
       "dtype": "bfloat16",
       "weight_dtype": "float32",
       "float32_gate_logits": True,
-      "megablox": True,
+      # hardware=cpu runs the GMM as jax.lax.ragged_dot instead of the megablox Pallas kernel in interpret mode (much
+      # slower). The key changes only the unsort's index math, and both runs share whichever GMM runs.
+      "hardware": "cpu",
       "sparse_matmul": True,
       "use_tokamax_gmm": False,
       "use_gmm_v2": False,

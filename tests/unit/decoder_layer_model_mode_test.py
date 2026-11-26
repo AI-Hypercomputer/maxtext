@@ -143,6 +143,8 @@ _QWEN3_NEXT_TP = {
     "gdn_num_value_heads": 4,
     "gdn_key_head_dim": 16,
     "gdn_value_head_dim": 16,
+    # Smaller than the default 64, which would pad the 16-token sequence to a whole chunk.
+    "gdn_chunk_size": 8,
     "sparse_matmul": True,
     "megablox": False,
     "use_tokamax_gmm": False,
@@ -326,7 +328,11 @@ class DecoderLayerShardModeTest(parameterized.TestCase):
       segment_ids = jnp.ones((batch, length), dtype=jnp.int32)
       # Gemma3ScannableBlock returns the bare activations outside the scan path, while
       # the single-layer classes always return an (output, kv_cache) pair.
-      output = layer(inputs, segment_ids, positions, True, MODEL_MODE_TRAIN)
+      # Jitted so the layer is not dispatched op by op across the mesh; explicit-mode
+      # sharding type errors are raised while tracing, so they still surface here.
+      output = nnx.jit(lambda lyr, x, seg, pos: lyr(x, seg, pos, True, MODEL_MODE_TRAIN))(
+          layer, inputs, segment_ids, positions
+      )
       if isinstance(output, tuple):
         output = output[0]
 

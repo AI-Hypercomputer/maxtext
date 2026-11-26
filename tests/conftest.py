@@ -22,9 +22,26 @@ are not marked.
 
 import contextlib
 import gc
-import pytest
+import os
 import sys
+import unittest
 import warnings
+import pytest
+
+# For explicit CPU-only test runs (e.g., local `JAX_PLATFORMS=cpu pytest ...`), skip post-HLO
+# LLVM backend optimization passes and 32-way parallel codegen splitting unless the caller already
+# configured those flags. Never applied when JAX_PLATFORMS is unset or targets TPU/GPU, and only
+# active inside pytest (never production runs).
+_CPU_TEST_XLA_DEFAULTS = (
+    ("--xla_backend_optimization_level", "0"),
+    ("--xla_llvm_disable_expensive_passes", "true"),
+    ("--xla_cpu_parallel_codegen_split_count", "1"),
+)
+if os.getenv("JAX_PLATFORMS", "").lower() == "cpu":
+  _existing_xla_flags = os.environ.get("XLA_FLAGS", "")
+  _missing_xla_flags = [f"{flag}={value}" for flag, value in _CPU_TEST_XLA_DEFAULTS if flag not in _existing_xla_flags]
+  if _missing_xla_flags:
+    os.environ["XLA_FLAGS"] = f"{_existing_xla_flags} {' '.join(_missing_xla_flags)}".strip()
 
 warnings.filterwarnings(
     "ignore", message="builtin type swigvarlink has no __module__ attribute", category=DeprecationWarning
@@ -44,7 +61,6 @@ if not _absl_flags.FLAGS.is_parsed():
   _absl_flags.FLAGS(sys.argv[:1])
 
 import jax
-import os
 import importlib.util
 
 # Force early JAX initialization on GPU to prevent CUDA context conflicts with TensorFlow/PyTorch.
@@ -148,6 +164,30 @@ def _has_tpu_backend_support() -> bool:
     return False
 
 
+def _has_shared_class_fixture(item) -> bool:
+  """Returns whether `item` belongs to a class with a custom setUpClass or class-scoped fixture.
+
+  Excludes autouse class-scoped fixtures defined in this conftest (such as
+  `restore_jax_prng_and_libtpu_env_for_class`), so stateless test classes like
+  `TrainCompile` remain ungrouped and fan out freely across workers and shards.
+  """
+  cls = getattr(item, "cls", None)
+  if cls is None:
+    return False
+  if issubclass(cls, unittest.TestCase):
+    if getattr(cls.setUpClass, "__func__", None) is not unittest.TestCase.setUpClass.__func__:
+      return True
+  elif callable(getattr(cls, "setup_class", None)):
+    return True
+  fixtureinfo = getattr(item, "_fixtureinfo", None)
+  name2fixturedefs = getattr(fixtureinfo, "name2fixturedefs", None) or {}
+  for fixturedefs in name2fixturedefs.values():
+    for fd in fixturedefs:
+      if fd.scope == "class" and getattr(fd.func, "__module__", None) != __name__:
+        return True
+  return False
+
+
 def pytest_collection_modifyitems(config, items):
   """Customize pytest collection behavior.
 
@@ -155,6 +195,7 @@ def pytest_collection_modifyitems(config, items):
   - Deselect tests marked as external_serving/training in decoupled mode.
   - Mark remaining tests with the `decoupled` marker when running decoupled.
   - Mark tests without explicit hardware markers as `cpu_only`.
+  - Auto-assign `xdist_group` to classes with `setUpClass` or test-defined class fixtures.
   """
 
   changed_tests = get_changed_tests()  # set[(file_path, test_name)]
@@ -202,11 +243,14 @@ def pytest_collection_modifyitems(config, items):
     for item in remaining:
       item.add_marker(pytest.mark.decoupled)
 
-  # Auto-mark remaining tests as cpu_only unless explicitly marked with hardware target markers.
+  # Auto-mark remaining tests as cpu_only unless explicitly marked with hardware target markers,
+  # and keep classes with custom setUpClass / class-scoped fixtures on one xdist worker and shard.
   for item in remaining:
     cur_test_markers = {m.name for m in item.iter_markers()}
     if cur_test_markers.isdisjoint(HARDWARE_MARKERS):
       item.add_marker(pytest.mark.cpu_only)
+    if "xdist_group" not in cur_test_markers and _has_shared_class_fixture(item):
+      item.add_marker(pytest.mark.xdist_group(f"{item.cls.__module__}.{item.cls.__qualname__}"))
 
 
 def pytest_addoption(parser):
@@ -226,6 +270,7 @@ def pytest_configure(config):
       "decoupled: marked on tests that are not skipped due to GCP deps, when DECOUPLE_GCLOUD=TRUE",
       "skip_on_tpu7x: skip test if running on TPU7x platform",
       "newly_added: newly introduced or modified tests in PRs, executed even if scheduled_only",
+      "xdist_group: keep tests sharing class/module fixtures on one xdist worker and CI shard",
   ]:
     config.addinivalue_line("markers", m)
   class_split.pytest_configure(config)

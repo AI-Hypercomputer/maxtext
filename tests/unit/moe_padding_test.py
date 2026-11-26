@@ -129,7 +129,10 @@ class _Harness:
     self.real_rows = 2 * jax.device_count()
     self.inputs = jax.random.normal(rng_inputs, (self.real_rows, _SEQ_LEN, cfg.base_emb_dim), jnp.float32)
     with self._scope():
-      self.params = self.model.init({"params": rng_model, "dropout": rng_model}, self.inputs)["params"]
+      # Under jax.jit: an eager init runs the whole RoutedMoE forward op by op (the sparse path's interpreted megablox
+      # kernel included).
+      init = jax.jit(lambda x: self.model.init({"params": rng_model, "dropout": rng_model}, x))
+      self.params = init(self.inputs)["params"]
 
   def _build(self, cfg):
     return linen_wrappers.to_linen(
@@ -463,12 +466,32 @@ class TailPaddingTpuTest(TailPaddingTest):
   """The tail-padding checks on the TPU's devices (unmarked tests are auto-marked cpu_only and skipped on TPU)."""
 
 
+# TailPaddingTest's cases split over two child processes, so that pytest-xdist can run them in parallel;
+# test_groups_cover_every_case keeps every case in exactly one group.
+_TAIL_PADDING_GROUPS = {
+    "_sparse_dropless_and_deepseek": ("test_sparse_dropless_tail", "test_deepseek_sparse_megatron_loss_and_bias_tail"),
+    "_sparse_gather_dense_and_loss": (
+        "test_sparse_direct_token_gather_tail",
+        "test_dense_tail",
+        "test_load_balance_loss_reduces_over_the_batch_shards",
+    ),
+}
+
+
 @pytest.mark.cpu_only
-class TailPaddingCpuMeshTest(unittest.TestCase):
+class TailPaddingCpuMeshTest(parameterized.TestCase):
   """TailPaddingTest on a multi-device CPU mesh."""
 
-  def test_tail_padding_on_cpu_mesh(self):
-    """Runs TailPaddingTest in a subprocess with `_TAIL_PADDING_DEVICES` forced CPU devices."""
+  def test_groups_cover_every_case(self):
+    grouped = [name for names in _TAIL_PADDING_GROUPS.values() for name in names]
+    self.assertCountEqual(grouped, unittest.defaultTestLoader.getTestCaseNames(TailPaddingTest))
+
+  @parameterized.named_parameters(*_TAIL_PADDING_GROUPS.items())
+  def test_tail_padding_on_cpu_mesh(self, tests):
+    """Runs `tests` of TailPaddingTest in a subprocess with `_TAIL_PADDING_DEVICES` forced CPU devices."""
+    devices = jax.devices()
+    if len(devices) >= _TAIL_PADDING_DEVICES and devices[0].platform == "cpu":
+      self.skipTest(f"Already covered in-process by TailPaddingTest on {len(devices)} CPU devices.")
     env = os.environ.copy()
     xla_flags = env.get("XLA_FLAGS", "")
     env["XLA_FLAGS"] = f"{xla_flags} --xla_force_host_platform_device_count={_TAIL_PADDING_DEVICES}".strip()
@@ -476,11 +499,19 @@ class TailPaddingCpuMeshTest(unittest.TestCase):
     repo_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     env["PYTHONPATH"] = repo_root + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     result = subprocess.run(
-        [sys.executable, __file__, "TailPaddingTest"], env=env, capture_output=True, text=True, check=False
+        [sys.executable, __file__, *(f"TailPaddingTest.{name}" for name in tests)],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
     )
     output = f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
     self.assertEqual(result.returncode, 0, output)
     self.assertIn(_TAIL_PADDING_MARKER, result.stdout, output)
+    # Every requested case ran (unittest reports "Ran N tests" on stderr), so a renamed case cannot silently drop out.
+    self.assertIn(f"Ran {len(tests)} test", result.stderr, output)
+    # TailPaddingTest skips itself below 2 devices; a skipped case would otherwise pass here without checking anything.
+    self.assertNotIn("skipped=", result.stderr, output)
 
 
 class MaskedLossFunctionsTest(unittest.TestCase):
@@ -612,8 +643,8 @@ class RoutingTokenMaskTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  # `python moe_padding_test.py [TestClass ...]`: TailPaddingCpuMeshTest reruns TailPaddingTest this way with
-  # several forced CPU devices and looks for the marker.
+  # `python moe_padding_test.py [TestClass[.test_name] ...]`: TailPaddingCpuMeshTest reruns TailPaddingTest's cases
+  # this way with several forced CPU devices and looks for the marker.
   _result = unittest.main(exit=False).result
   if _result.wasSuccessful():
     print(_TAIL_PADDING_MARKER)

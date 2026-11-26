@@ -34,6 +34,7 @@ from maxtext.m3.core import sharding as m3_sharding
 from tests.unit.m3.conformance import checks
 from tests.unit.m3.conformance import spec
 import numpy as np
+import pytest
 
 
 def discover_model_conformance_specs() -> tuple[str, ...]:
@@ -659,6 +660,23 @@ def _sharded_toy_spec(
   return dataclasses.replace(base, **overrides) if overrides else base
 
 
+# Checks 1-4, 9a, 9b and 10 run on a 1-device mesh; every other check runs on the multi-device driver mesh or inspects
+# parameter shardings (new checks default to the latter, so `test_all_8_checks_and_dispatcher` covers them).
+_SINGLE_DEVICE_CHECK_IDS = (
+    spec.CheckId.SCAN_REMAT_EQUIVALENCE,
+    spec.CheckId.PARAM_AND_GRAD_HEALTH,
+    spec.CheckId.NON_PARAM_STATE_STABILITY,
+    spec.CheckId.AUX_LOSS_GRAD_COUPLING,
+    spec.CheckId.BF16_FORWARD_PARITY,
+    spec.CheckId.PACKING_AND_PADDING_ISOLATION,
+    spec.CheckId.OPTIMIZER_STEP_AND_FROZEN_WEIGHT_DECAY,
+)
+_SHARDING_SENSITIVE_CHECK_IDS = tuple(c for c in spec.CheckId if c not in _SINGLE_DEVICE_CHECK_IDS)
+
+
+# One xdist group so the per-check tests of a registered spec reuse the content-keyed jit cache of
+# `checks._cached_pure_value_and_grad` (several single-device checks trace the same model graph) within one worker.
+@pytest.mark.xdist_group("ConformanceTest")
 class ConformanceTest(parameterized.TestCase):
   """Tests `spec` registry, `SkipDeclaration` guards, and Checks 1-12."""
 
@@ -892,8 +910,11 @@ class ConformanceTest(parameterized.TestCase):
     good_spec = _sharded_toy_spec()
     for check_id in spec.CheckId:
       self.assertTrue(checks.run_conformance_check(good_spec, check_id))
+    # Every check forces `nnx.use_eager_sharding(True)` internally; re-run the driver-mesh / sharding checks under an
+    # ambient `False` to guard that override. The single-device checks (1-4, 9a, 9b, 10) run on a 1-device mesh where
+    # eager sharding has no observable effect, so re-running them here only repeats the pass above.
     with nnx.use_eager_sharding(False):
-      for check_id in spec.CheckId:
+      for check_id in _SHARDING_SENSITIVE_CHECK_IDS:
         self.assertTrue(checks.run_conformance_check(good_spec, check_id))
     rng_sharded_spec = _sharded_toy_spec("rng_and_str_state")
     with jax.sharding.set_mesh(driver_mesh):

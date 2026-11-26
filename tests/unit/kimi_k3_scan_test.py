@@ -32,12 +32,14 @@ from flax import nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from maxtext.common.common_types import MODEL_MODE_TRAIN
 from maxtext.configs import pyconfig
 from maxtext.layers import attn_res
 from maxtext.layers import moe
 from maxtext.models import kimi_k3
+from maxtext.utils import maxtext_utils
 from maxtext.utils import model_creation_utils
 from tests.utils.test_helpers import get_test_config_path
 
@@ -92,7 +94,20 @@ def _toy_config(**overrides):
 
 
 def _build_model(cfg):
-  return model_creation_utils.from_config(cfg, devices=jax.devices(), model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+  mesh = maxtext_utils.get_mesh_from_config(cfg, jax.devices())
+  # Jit construction so multi-layer weight init does not dispatch op by op on CPU.
+  with jax.set_mesh(mesh):
+    return nnx.jit(
+        lambda: model_creation_utils.from_config(cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+    )()
+
+
+def _abstract_model(cfg):
+  """Shape-only model (no weights) for tests that only inspect the module structure."""
+  mesh = maxtext_utils.get_mesh_from_config(cfg, jax.devices())
+  return nnx.eval_shape(
+      lambda: model_creation_utils.from_config(cfg, mesh=mesh, model_mode=MODEL_MODE_TRAIN, rngs=nnx.Rngs(0))
+  )
 
 
 def _inputs(batch):
@@ -279,14 +294,25 @@ class KimiK3ScannedParityTest(parameterized.TestCase):
     return model
 
   @parameterized.named_parameters(
-      # Commits at 0 and 12: prefix and suffix only.
-      ("commits_outside_scan", 12, "full"),
-      # Commits at 0, 5, 10: two inside the scanned cycles, at different sub-layer positions.
+      # Commits at 0, 5, 10: two inside the scanned cycles, at different sub-layer positions (pending-slot path).
       ("commits_inside_scan", 5, "full"),
-      # Commit every other layer, no remat.
+      # Commit every other layer, no remat: several commits per cycle take the per-sub-layer buffer path
+      # (block_size < cycle length), and remat=none takes the scan's non-remat branch.
       ("every_other_layer_no_remat", 2, "none"),
   )
   def test_logits_parity(self, block_size, remat_policy):
+    self._check_logits_parity(block_size, remat_policy)
+
+  # Slow (~2.5 min on CI CPU: builds its own model pair). It traces the same scanned program as
+  # test_logits_parity_commits_inside_scan (pending-slot path, remat=full), which runs on every PR; only the
+  # runtime commit position differs (no commit inside the cycles).
+  @pytest.mark.scheduled_only
+  def test_logits_parity_commits_outside_scan(self):
+    # Commits at 0 and 12: prefix and suffix only.
+    self._check_logits_parity(12, "full")
+
+  def _check_logits_parity(self, block_size, remat_policy):
+    """Checks scanned vs unscanned logits for one attn_res_block_size and remat policy."""
     unscanned = self._unscanned_model(block_size, remat_policy)
     scanned = self._scanned_model(block_size, remat_policy)
     self.assertTrue(hasattr(scanned.decoder, "scanned_blocks"))
@@ -300,9 +326,10 @@ class KimiK3ScannedParityTest(parameterized.TestCase):
 
   def test_get_layers_order(self):
     """get_layers() returns prefix, scanned cycles and the unrolled suffix in forward order."""
+    # get_layers() only reads module attributes, so shape-only models suffice.
     block_size = 5
-    unscanned = self._unscanned_model(block_size, "full")
-    scanned = self._scanned_model(block_size, "full")
+    unscanned = _abstract_model(_toy_config(scan_layers=False, attn_res_block_size=block_size))
+    scanned = _abstract_model(_toy_config(scan_layers=True, attn_res_block_size=block_size))
     decoder = scanned.decoder
     num_prefix, _, suffix_start, _ = kimi_k3.kimi_scan_layout(decoder.config)
     expected = [getattr(decoder, f"layers_{i}") for i in range(num_prefix)] + [decoder.scanned_blocks]
@@ -314,6 +341,22 @@ class KimiK3ScannedParityTest(parameterized.TestCase):
     # Unscanned: all layers, in order.
     self.assertEqual([m.layer_idx for m in unscanned.decoder.get_layers()], list(range(_NUM_LAYERS)))
 
+  def test_grad_traces_through_scanned_stack(self):
+    """The backward pass through the scanned cycles traces and yields one gradient per param, shape for shape."""
+    # Shape-only (no weights, no compile), so it stays on every PR; test_grad_parity checks the values.
+    scanned = _abstract_model(_toy_config(scan_layers=True, attn_res_block_size=5))
+    tokens, positions = _inputs(batch=4)
+    grads = nnx.eval_shape(nnx.grad(_loss), scanned, tokens, positions)
+    params = {p: v.get_value() for p, v in nnx.to_flat_state(nnx.state(scanned, nnx.Param))}
+    got = {p: v.get_value() for p, v in nnx.to_flat_state(grads)}
+    self.assertTrue(any("scanned_blocks" in p for p in got))
+    self.assertEqual(set(got), set(params))
+    for path, want in params.items():
+      self.assertEqual((got[path].shape, got[path].dtype), (want.shape, want.dtype), path)
+
+  # Slow (~5 min on CI CPU). The same scanned layout (block_size=5, remat=full) keeps forward parity on every PR via
+  # test_logits_parity_commits_inside_scan, and its backward pass is traced by test_grad_traces_through_scanned_stack.
+  @pytest.mark.scheduled_only
   def test_grad_parity(self):
     block_size = 5
     unscanned = self._unscanned_model(block_size, "full")

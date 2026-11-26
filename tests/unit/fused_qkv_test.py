@@ -30,6 +30,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.kernels import fused_qkv
 import numpy as np
+import pytest
 
 
 @dataclasses.dataclass(frozen=True)
@@ -457,8 +458,17 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
 
   def test_attention_fp8_fsdp_parity(self):
     self._run_attention_pair("bfloat16", quantized=True, tol_y=1.5e-2, tol_grad=2.5e-2)
+
+  # The absmax-calibration variant rebuilds and differentiates both Attention modules again (~17s CI);
+  # `test_attention_fp8_fsdp_parity` keeps the fp8 module-level parity and the `bf16_fp8_absmax` case of
+  # `test_pallas_remat_and_bwd_post_parity` keeps absmax backward calibration on every PR.
+  @pytest.mark.scheduled_only
+  def test_attention_fp8_absmax_fsdp_parity(self):
     # e5m2 has 2 mantissa bits (~0.072 RMS per-ULP shift between pow2 per-tensor and Qwix per-channel absmax).
     self._run_attention_pair("bfloat16", quantized=True, tol_y=1.5e-2, tol_grad=9e-2, bwd_calib="absmax")
+
+  def test_attention_fp8_data_fsdp_mesh_parity(self):
+    # The only parity check with a batch axis besides fsdp: stays on PRs.
     # 2D (data=2, fsdp=2) mesh exercises extra_w_psum_axes without double-psum!
     self._run_attention_pair(
         "bfloat16",
