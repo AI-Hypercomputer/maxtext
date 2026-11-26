@@ -181,6 +181,23 @@ class LoraUtilsTest(unittest.TestCase):
         "(self_attention/(query|key|value|out)|mlp/.*(wi_0|wi_1|wo))",
     )
 
+    for dense_qwen35 in ("qwen3.5-27b", "qwen3.5-9b"):
+      mock_config.model_name = dense_qwen35
+      path = lora_utils._get_lora_module_path(mock_config)
+      self.assertEqual(
+          path,
+          "decoder/layers(?:_[0-9]+|/[0-9]+)?/.*"
+          "(attention/(attention/(query|key|value|out)|in_proj_qkvz|out_proj)|mlp/(wi_0|wi_1|wo))",
+      )
+
+    for other_qwen in ("qwen3.5-35b-a3b", "qwen3-8b"):
+      mock_config.model_name = other_qwen
+      path = lora_utils._get_lora_module_path(mock_config)
+      self.assertEqual(
+          path,
+          "decoder/layers(?:_[0-9]+|/[0-9]+)?/.*(self_attention/(query|key|value|out)|mlp/(wi_0|wi_1|wo))",
+      )
+
     mock_config.model_name = "unknown_model"
     # Ensure lora.lora_module_path is still empty string to trigger fallback
     mock_config.lora.lora_module_path = ""
@@ -429,6 +446,38 @@ class LoraUtilsTest(unittest.TestCase):
   def test_apply_qlora_multihost_mock(self):
     """Test applying QLoRA with a dummy mesh to verify QArray is untouched on multi-host."""
     self._run_apply_lora_test(scan_layers=False, weight_qtype="int8", tile_size=32, mock_multihost=True)
+
+  def test_to_replicated_on_mesh_non_addressable(self):
+    """Test _to_replicated_on_mesh reshards real arrays, uses device_put on same device_set, and rejects mismatches."""
+    devices = jax.devices()
+    mesh = Mesh(devices, ("data",))
+    replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    source_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("data"))
+
+    real_arr = jax.device_put(jnp.arange(16, dtype=jnp.float32).reshape(4, 4), source_sharding)
+    real_out = lora_utils._to_replicated_on_mesh(real_arr, replicated_sharding)
+    self.assertEqual(real_out.sharding, replicated_sharding)
+    self.assertTrue(jnp.array_equal(real_out, real_arr))
+
+    mock_arr = mock.MagicMock(spec=jax.Array)
+    mock_arr.shape = (4, 4)
+    mock_arr.sharding = source_sharding
+    mock_arr.is_fully_addressable = False
+
+    sentinel = object()
+    with mock.patch.object(lora_utils.jax, "device_put", return_value=sentinel) as mock_device_put:
+      out = lora_utils._to_replicated_on_mesh(mock_arr, replicated_sharding)
+      self.assertIs(out, sentinel)
+      mock_device_put.assert_called_once_with(mock_arr, replicated_sharding)
+
+    other_sharding = mock.MagicMock(spec=jax.sharding.NamedSharding)
+    other_sharding.device_set = {object()}
+    mock_arr.sharding = other_sharding
+    with self.assertRaisesRegex(
+        ValueError,
+        "Cannot reshard non-fully-addressable array across different device sets",
+    ):
+      lora_utils._to_replicated_on_mesh(mock_arr, replicated_sharding)
 
   def test_restore_lora_from_path(self):
     """Test restoration of LoRA parameters from a path."""
