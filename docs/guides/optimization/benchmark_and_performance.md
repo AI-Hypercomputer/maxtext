@@ -220,7 +220,7 @@ There are two methods for asynchronous collective offloading:
 
 1. Offload Collectives to Sparse Core:
 
-   This method is recommended for v7x. To enable it, set the following flags from [link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L70):
+   This method is recommended for TPU platforms with SparseCore (v5p, v6e, and v7x; enabled by default on v7x). To enable it, set the following flags from [link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L70):
 
 - `ENABLE_SPARSECORE_OFFLOADING_FOR_RS_AG_AR`
 - `ENABLE_SPARSECORE_OFFLOADING_FOR_REDUCE_SCATTER`
@@ -229,7 +229,7 @@ There are two methods for asynchronous collective offloading:
 
 2. Overlap Collective Using Continuation Fusion:
 
-   This method is recommended for v5p and v6e. To enable it, set the following flags ([link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L39)):
+   This method is only supported on v5e. To enable it, set the following flags ([link](https://github.com/AI-Hypercomputer/maxtext/blob/main/benchmarks/xla_flags_library.py#L39)):
 
 - `CF_FOR_ALL_GATHER`
 - `CF_FOR_ALL_REDUCE`
