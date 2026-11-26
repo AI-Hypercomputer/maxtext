@@ -131,6 +131,10 @@ def sampling(logits, rng, algorithm, topk=0, nucleus_topp=0, temperature=1.0):
   nucleus_topp: restricting to p probability mass before sampling
   temperature: temperature parameter for scaling probability
   """
+  # Temperature 0 would divide the logits by zero: every positive logit becomes +inf and
+  # categorical sampling picks the first of them instead of the argmax. Clamp it like the
+  # composite sampler does, so temperature 0 behaves like greedy decoding.
+  temperature = jnp.maximum(temperature, 1e-6)
   if algorithm == "greedy":
     return jnp.argmax(logits, axis=-1)
   elif algorithm == "weighted":
