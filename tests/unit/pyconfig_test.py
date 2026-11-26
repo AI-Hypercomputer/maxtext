@@ -147,7 +147,11 @@ class PyconfigTest(unittest.TestCase):
         ({"enable_diloco": True, "dcn_diloco_parallelism": 2}, "not supported with enable_diloco"),
         ({"compiled_trainstep_file": "/tmp/train_step.pickle"}, "not supported with compiled_trainstep_file"),
         ({"optimizer_memory_host_offload": True}, "not supported with optimizer_memory_host_offload"),
-        ({"parameter_memory_host_offload": True}, "or parameter_memory_host_offload"),
+        ({"parameter_memory_host_offload": True}, "not supported with .*parameter_memory_host_offload"),
+        (
+            {"selective_host_offload": True, "host_offload_param_patterns": ["(?:^|/)embedding$"]},
+            "not supported with .*or selective_host_offload",
+        ),
     ):
       with self.subTest(**overrides), self.assertRaisesRegex(ValueError, message):
         initialize(**overrides)

@@ -108,7 +108,21 @@ def get_functional_train_with_signature(
 
 def get_functional_eval_with_signature(eval_step, data_sharding, state_mesh_shardings, model, config):
   """Get the shardings (both state and data) for `eval_step`."""
-  functional_eval = functools.partial(eval_step, model, config)
+  eval_param_shardings = (
+      getattr(state_mesh_shardings, "model", None) or getattr(state_mesh_shardings, "params", None)
+      if bool(getattr(config, "selective_host_offload", False))
+      else None
+  )
+  if eval_param_shardings is not None:
+    from maxtext.m3.infra import offload as m3_offload  # pylint: disable=import-outside-toplevel
+
+    def _wrapped_eval(*args, **kwargs):
+      with m3_offload.active_param_shardings(eval_param_shardings):
+        return eval_step(model, config, *args, **kwargs)
+
+    functional_eval = _wrapped_eval
+  else:
+    functional_eval = functools.partial(eval_step, model, config)
   functional_eval.__name__ = "eval_step"  # pyrefly: ignore[missing-attribute]
   in_shardings = (state_mesh_shardings, data_sharding)  # State, batch
   out_shardings = None  # metrics
@@ -1974,7 +1988,12 @@ def setup_initial_state(
     # Always build the concrete init state, then overlay whatever we loaded. Anything the
     # checkpoint didn't carry (or a params-only load didn't touch) keeps its real init
     # value, so restore doesn't depend on knowing exactly what was saved.
-    if is_training and config.optimizer_memory_host_offload and not config.parameter_memory_host_offload:
+    if (
+        is_training
+        and config.optimizer_memory_host_offload
+        and not config.parameter_memory_host_offload
+        and not bool(getattr(config, "selective_host_offload", False))  # jmp-waiver: SILENT_CONFIG_FALLBACK
+    ):
       # Initialize on device first, then move host-offloaded optimizer leaves to pinned_host in a
       # separate jit; a single jit with mixed memory kinds lets XLA CSE differently sharded zero
       # broadcasts in pinned_host.
@@ -2194,15 +2213,27 @@ def get_abstract_state_nnx(config, mesh, nnx_init_trainstate_fn, is_training=Tru
 
   state_mesh_shardings = maxtext_utils_nnx.nnx_extract_named_sharding(abstract_state)
 
+  selective_offload = is_training and bool(getattr(config, "selective_host_offload", False))
+  if selective_offload:
+    from maxtext.m3.infra import offload as m3_offload  # pylint: disable=import-outside-toplevel
+
+    state_mesh_shardings = m3_offload.apply_selective_memory_kind_to_shardings(abs_var_state, state_mesh_shardings)
+
   if is_training and config.shard_optimizer_over_data:
-    # Add data to sharding for optimizer state
+    # Add data to sharding for optimizer state while keeping selectively host-offloaded
+    # (`pinned_host`) leaves aligned with their unsharded-over-data parameters.
+    def _maybe_add_data_to_opt_sharding(path, opt_aval, opt_sharding):
+      if selective_offload and getattr(opt_sharding, "memory_kind", None) in ("pinned_host", "unpinned_host"):
+        return opt_sharding
+      return sharding.add_data_to_sharding(mesh, path, opt_aval, opt_sharding)
+
     optimizer_sharding = jax.tree_util.tree_map_with_path(
-        functools.partial(sharding.add_data_to_sharding, mesh),
+        _maybe_add_data_to_opt_sharding,
         abstract_state.optimizer,
         state_mesh_shardings.optimizer,
     )
     state_mesh_shardings.optimizer = optimizer_sharding
-  if is_training and config.optimizer_memory_host_offload:
+  if is_training and config.optimizer_memory_host_offload and not selective_offload:
     optimizer_sharding = jax.tree_util.tree_map_with_path(
         maxtext_utils_nnx.move_memory_to_host,
         state_mesh_shardings.optimizer,

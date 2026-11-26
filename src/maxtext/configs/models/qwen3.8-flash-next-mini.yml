@@ -78,6 +78,9 @@ make_ngram_vocab_size_divisible_by: 4  # Mini-twin (HF: make_ngram_vocab_size_di
 split_ngram_parts: 4  # Mini-twin (HF: split_ngram_parts=128)
 ple_seed: 1234  # HF: seed=1234
 ple_eos_token_id: 3  # In-range EOS token (< vocab_size=1024)
+# Pattern used only when selective_host_offload=true (default false); host_compute adds ~1.5-1.9 s/step
+# synchronous host-CPU AdamW scan on v5p-8 at 2.5M x 160 rows/chip (~24 -> 632 ms/step on v5p-8 mini).
+host_offload_param_patterns: ["(?:^|/)ple_embedding/ngram_embedding/embedding$"]
 
 # Multi-Token Prediction (MTP) Parameters
 mtp_num_layers: 1
