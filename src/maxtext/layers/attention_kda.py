@@ -42,6 +42,7 @@ from typing import Optional, Tuple
 from flax import nnx
 import jax
 from jax import lax
+from jax.ad_checkpoint import checkpoint_name
 import jax.numpy as jnp
 from jax.sharding import Mesh
 
@@ -146,7 +147,15 @@ class ShortConvolution(nnx.Module):
     else:
       x_cat = jnp.pad(x, ((0, 0), (k - 1, 0), (0, 0)))
 
-    # Compute depthwise 1D convolution
+    # Compute depthwise 1D convolution. Under `ShardMode.EXPLICIT`, `conv_general_dilated` with
+    # sharded channels (`feature_group_count=c`) requires an explicit `out_sharding` matching `x`.
+    x_sharding = getattr(jax.typeof(x), "sharding", None)
+    conv_kwargs = {}
+    if (
+        isinstance(x_sharding, jax.sharding.NamedSharding)
+        and jax.sharding.AxisType.Explicit in x_sharding.mesh.axis_types
+    ):
+      conv_kwargs["out_sharding"] = x_sharding
     out = lax.conv_general_dilated(
         lhs=x_cat,
         rhs=kernel,
@@ -154,6 +163,7 @@ class ShortConvolution(nnx.Module):
         padding="VALID",
         dimension_numbers=("NWC", "WIO", "NWC"),
         feature_group_count=c,
+        **conv_kwargs,
     )
 
     if self.activation == "silu":
@@ -251,6 +261,55 @@ def jax_chunk_kimi_delta_rule(
   Returns:
     Tuple of (attn_output, final_recurrent_state); the state is float32.
   """
+  q_sharding = getattr(jax.typeof(query), "sharding", None)
+  if isinstance(q_sharding, jax.sharding.NamedSharding) and jax.sharding.AxisType.Explicit in q_sharding.mesh.axis_types:
+    # KDA heads and batch items are independent; running the chunked WY scan under `shard_map`
+    # keeps `solve_triangular` and the local triangular masks on local shards under `ShardMode.EXPLICIT`.
+    batch_ax, head_ax = q_sharding.spec.partitions[0], q_sharding.spec.partitions[2]
+    act_spec = jax.sharding.PartitionSpec(batch_ax, None, head_ax, None)
+    beta_spec = jax.sharding.PartitionSpec(batch_ax, None, head_ax)
+    state_spec = jax.sharding.PartitionSpec(batch_ax, head_ax, None, None)
+    if initial_state is None:
+      # Materialize zero initial state with `state_spec` before entering `shard_map` so the
+      # `lax.scan` carry inherits the exact varying manual axes (`V:{batch, head}`) of `h_new`.
+      initial_state = jnp.zeros(
+          (query.shape[0], query.shape[2], key.shape[-1], value.shape[-1]),
+          dtype=jnp.float32,
+          out_sharding=jax.sharding.NamedSharding(q_sharding.mesh, state_spec),
+      )
+    operands = (query, key, value, g, beta, initial_state)
+    in_specs = (act_spec, act_spec, act_spec, act_spec, beta_spec, state_spec)
+    operands = tuple(jax.sharding.reshard(x, s) for x, s in zip(operands, in_specs))
+
+    @functools.partial(
+        jax.shard_map,
+        mesh=q_sharding.mesh,
+        in_specs=in_specs,
+        out_specs=(act_spec, state_spec),
+    )
+    def sharded_core(q_, k_, v_, g_, b_, h0_):
+      return _jax_chunk_kimi_delta_rule_impl(
+          q_, k_, v_, g_, b_, chunk_size=chunk_size, initial_state=h0_, compute_dtype=compute_dtype
+      )
+
+    return sharded_core(*operands)
+
+  return _jax_chunk_kimi_delta_rule_impl(
+      query, key, value, g, beta, chunk_size=chunk_size, initial_state=initial_state, compute_dtype=compute_dtype
+  )
+
+
+def _jax_chunk_kimi_delta_rule_impl(
+    query: Array,
+    key: Array,
+    value: Array,
+    g: Array,
+    beta: Array,
+    chunk_size: int = 64,
+    initial_state: Optional[Array] = None,
+    compute_dtype: DType = jnp.float32,
+) -> Tuple[Array, Optional[Array]]:
+  """Local-shard implementation of `jax_chunk_kimi_delta_rule`."""
   initial_dtype = query.dtype
   b, seq_len, h, d = key.shape
   v_dim = value.shape[-1]
@@ -933,6 +992,7 @@ class KimiDeltaAttention(nnx.Module):
       output_final_state: bool = False,
       *,
       decoder_segment_ids: Optional[Array] = None,
+      out_sharding: Optional[jax.sharding.NamedSharding] = None,
   ) -> Tuple[Array, Optional[Tuple[Array, Array, Array]], Optional[Array]]:
     """Forward pass for KDA Linear Attention.
 
@@ -948,6 +1008,7 @@ class KimiDeltaAttention(nnx.Module):
         their decay `g` and step size `beta` are 0); padding must be trailing and non-zero ids are
         not separated. The tokamax kernel additionally resets state per packed document in
         training when `kda_max_num_segments > 0`.
+      out_sharding: Optional output sharding passed to `self.out` under `ShardMode.EXPLICIT`.
 
     Returns:
       Tuple of (layer_output, next_conv_state, next_recurrent_state).
@@ -1055,7 +1116,7 @@ class KimiDeltaAttention(nnx.Module):
             initial_state=recurrent_state,
             compute_dtype=self.compute_dtype,
         )
-    o = o.astype(v.dtype)
+    o = checkpoint_name(o.astype(v.dtype), "attention_out")
 
     # 7. Output Gated RMSNorm & Projection
     g_out = self.g_proj(hidden_states).reshape(b, seq_len, self.num_heads, self.head_dim)
@@ -1064,7 +1125,7 @@ class KimiDeltaAttention(nnx.Module):
 
     # Flatten heads and project to hidden_size
     o_flat = o_gated.reshape(b, seq_len, self.projection_size)
-    output = self.out(o_flat)
+    output = checkpoint_name(self.out(o_flat, out_sharding=out_sharding), "out_proj")
 
     next_recurrent_state = next_rec_state if output_final_state else None
     return output, next_conv_state, next_recurrent_state

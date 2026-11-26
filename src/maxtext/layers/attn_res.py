@@ -75,7 +75,8 @@ def attn_res_num_buffer_slots(num_decoder_layers: int, attn_res_block_size: int)
 def init_attn_res_buffer(prefix_sum: jnp.ndarray, num_slots: int) -> AttnResBuffer:
   """Returns an empty buffer ([..., num_slots, D] zeros, count 0) shaped like `prefix_sum`."""
   shape = prefix_sum.shape[:-1] + (num_slots, prefix_sum.shape[-1])
-  return AttnResBuffer(blocks=jnp.zeros(shape, prefix_sum.dtype), count=jnp.zeros((), jnp.int32))
+  blocks = jnp.zeros_like(jnp.broadcast_to(prefix_sum[..., None, :], shape))
+  return AttnResBuffer(blocks=blocks, count=jnp.zeros((), jnp.int32))
 
 
 def commit_attn_res_block(buffer: AttnResBuffer, prefix_sum: jnp.ndarray, is_commit) -> AttnResBuffer:
@@ -118,6 +119,18 @@ def _check_attn_res_shapes(prefix_sum, block_residual, proj_weight, norm_weight)
 
 def _pool(v: jnp.ndarray, proj_weight, norm_weight, epsilon, valid=None) -> jnp.ndarray:
   """Softmax pooling over axis -2 of `v` [..., K, D] in fp32; `valid` [K] masks out slots."""
+  # Under `ShardMode.EXPLICIT`, `proj_weight` (`embed`, or `reduced` under `prefetch_fsdp_weights`)
+  # and `norm_weight` (`norm`) can carry different shardings than `v`'s feature axis; align both
+  # to `v`'s last axis before multiplying so the score contraction stays sharding-consistent.
+  v_sharding = getattr(jax.typeof(v), "sharding", None)
+  if isinstance(v_sharding, jax.sharding.NamedSharding) and jax.sharding.AxisType.Explicit in v_sharding.mesh.axis_types:
+    d_axis = v_sharding.spec.partitions[-1]
+    proj_spec = jax.sharding.PartitionSpec(d_axis, None)
+    norm_spec = jax.sharding.PartitionSpec(d_axis)
+    if jax.typeof(proj_weight).sharding.spec != proj_spec:
+      proj_weight = jax.sharding.reshard(proj_weight, proj_spec)
+    if jax.typeof(norm_weight).sharding.spec != norm_spec:
+      norm_weight = jax.sharding.reshard(norm_weight, norm_spec)
   # fp32 materialization of V is deliberate, to match the HF reference numerics.
   v_float = v.astype(jnp.float32)
   k = v_float * lax.rsqrt(jnp.mean(jnp.square(v_float), axis=-1, keepdims=True) + epsilon)

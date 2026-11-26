@@ -716,32 +716,35 @@ def _is_passthrough(eqn):
 
 def _vjp_residual_layout(f, y, w, layer_state, consts):
   """Traces `jax.vjp(f, y, w)` abstractly and classifies its residual leaves (see `_ResidualLayout`)."""
+  y_leaves, y_treedef = jax.tree_util.tree_flatten(y)
   w_leaves = jax.tree_util.tree_leaves(w)
   s_leaves = jax.tree_util.tree_leaves(layer_state)
   c_leaves = jax.tree_util.tree_leaves(consts)
   treedef_box = []
 
-  def residual_leaves(y, w_leaves, s_leaves, c_leaves):
+  def residual_leaves(y_leaves, w_leaves, s_leaves, c_leaves):
+    y_ = jax.tree_util.tree_unflatten(y_treedef, y_leaves)
     w_ = jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(w), w_leaves)
     s_ = jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(layer_state), s_leaves)
     c_ = jax.tree_util.tree_unflatten(jax.tree_util.tree_structure(consts), c_leaves)
-    _, vjp_fn = jax.vjp(lambda y_, w2: f(y_, w2, s_, c_), y, w_)
+    _, vjp_fn = jax.vjp(lambda y2, w2: f(y2, w2, s_, c_), y_, w_)
     leaves, treedef = jax.tree_util.tree_flatten(vjp_fn)
     treedef_box.append(treedef)
     return leaves
 
-  closed = jax.make_jaxpr(residual_leaves)(y, w_leaves, s_leaves, c_leaves)
+  closed = jax.make_jaxpr(residual_leaves)(y_leaves, w_leaves, s_leaves, c_leaves)
   jaxpr = closed.jaxpr
   origin = {}
+  ny, nw, ns = len(y_leaves), len(w_leaves), len(s_leaves)
   for i, v in enumerate(jaxpr.invars):
-    if i == 0:
-      origin[v] = ("y",)
-    elif i <= len(w_leaves):
-      origin[v] = ("w", i - 1)
-    elif i <= len(w_leaves) + len(s_leaves):
-      origin[v] = ("s", i - 1 - len(w_leaves))
+    if i < ny:
+      origin[v] = ("y", i)
+    elif i < ny + nw:
+      origin[v] = ("w", i - ny)
+    elif i < ny + nw + ns:
+      origin[v] = ("s", i - ny - nw)
     else:
-      origin[v] = ("c", i - 1 - len(w_leaves) - len(s_leaves))
+      origin[v] = ("c", i - ny - nw - ns)
   for eqn in jaxpr.eqns:
     if _is_passthrough(eqn):
       src_var, out_var = eqn.invars[0], eqn.outvars[0]
@@ -772,7 +775,7 @@ def _split_residuals(vjp_fn, layout):
 def _rebuild_vjp(layout, saved, y, w, layer_state, consts):
   """Reassembles the vjp function from the saved residuals and the inputs available in the backward."""
   groups = {
-      "y": [y],
+      "y": jax.tree_util.tree_leaves(y),
       "w": jax.tree_util.tree_leaves(w),
       "s": jax.tree_util.tree_leaves(layer_state),
       "c": jax.tree_util.tree_leaves(consts),
@@ -1003,19 +1006,36 @@ def _host_stack_buffer(y, n):
   Writing each offloaded input into it with a `dynamic_update_slice` (rather than stacking the inputs
   as scan outputs, which `unroll=2` builds by concatenating pairs of inputs) is the pattern XLA's host
   offloader lowers to an async device-to-host copy into a slice of the buffer, instead of host compute.
+  Supports PyTree carries (e.g. Kimi-K3's `(y, AttnResBuffer, layer_idx)`), keeping scalar leaves on device.
   """
-  return _with_memory_kind(jnp.zeros_like(jnp.broadcast_to(y[None], (n,) + y.shape)), "pinned_host")
+
+  def _buf(x):
+    arr = jnp.zeros_like(jnp.broadcast_to(x[None], (n,) + x.shape))
+    return _with_memory_kind(arr, "pinned_host") if x.ndim > 0 else arr
+
+  return jax.tree.map(_buf, y)
 
 
 def _host_stack_write(buf, y, idx):
   """Writes `y` into slot `idx` of host buffer `buf`, expanding axis 0 on device before the host copy."""
-  return jax.lax.dynamic_update_slice(buf, _with_memory_kind(y[None], "pinned_host"), (idx,) + (0,) * y.ndim)
+
+  def _write(b, x):
+    val = _with_memory_kind(x[None], "pinned_host") if x.ndim > 0 else x[None]
+    return jax.lax.dynamic_update_slice(b, val, (idx,) + (0,) * x.ndim)
+
+  return jax.tree.map(_write, buf, y)
 
 
 def _host_stack_read(buf, idx):
   """Reads slot `idx` from host buffer `buf` to device, squeezing axis 0 on device after the host copy."""
-  s = jax.lax.dynamic_slice(buf, (idx,) + (0,) * (buf.ndim - 1), (1,) + buf.shape[1:])
-  return jnp.squeeze(_with_memory_kind(s, "device"), axis=0)
+
+  def _read(b):
+    s = jax.lax.dynamic_slice(b, (idx,) + (0,) * (b.ndim - 1), (1,) + b.shape[1:])
+    if b.ndim > 1:
+      s = _with_memory_kind(s, "device")
+    return jnp.squeeze(s, axis=0)
+
+  return jax.tree.map(_read, buf)
 
 
 @functools.partial(jax.custom_vjp, nondiff_argnums=(0, 6, 7))
@@ -1050,6 +1070,10 @@ def _custom_vjp_prefetch_pipeline_fwd(
   params, state, gather_fn, _, layout_fn, fwd_layer, _ = _prefetch_setup(
       graphdef, params_leaves, state_leaves, diff_args_leaves, diff_kwargs_leaves, ctx
   )
+  # Layer 0 is peeled outside `jax.lax.scan`, so constant scalar carry leaves (e.g. a layer index or
+  # AttnRes block count) would constant-fold in `fwd_layer(x_in, ...)` and drop VJP residuals compared
+  # to `_vjp_residual_layout`, which traces them abstractly. Keep scalar leaves opaque to layer 0.
+  x_in = jax.tree.map(lambda a: jax.lax.optimization_barrier(a) if a.ndim == 0 else a, x_in)
   w_0 = gather_fn(_slice_at(params, 0))
   layout = layout_fn(x_in, w_0, _slice_at(state, 0))
   w_curr = gather_fn(_slice_at(params, 1)) if length > 1 else None  # AG(1) || fwd(0).
