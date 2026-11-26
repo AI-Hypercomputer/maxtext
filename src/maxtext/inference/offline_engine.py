@@ -667,7 +667,7 @@ class InferenceWorker:
             prompt_logp_np = np.array(prompt_logp)[:, :true_length]
 
             # Emit token directly
-            should_terminate = self.emit_token(prompt_id, int(first_token), log_prob, prompt_logp=prompt_logp_np)
+            should_terminate = self.emit_token(prompt_id, first_token.item(), log_prob, prompt_logp=prompt_logp_np)
             if should_terminate:
               newly_empty.append(slot)
 
