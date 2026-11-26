@@ -1,0 +1,23 @@
+# XLA_FLAGS of ds_ep_multihost.sh on GPU (PLATFORM=gpu; one flag a line; '#' lines are comments).
+# The latency-hiding scheduler overlaps the async NCCL collectives (EP all-gathers / reduce-scatters, the folded
+# FSDP collectives) with compute; collectives combine up to these sizes; GEMMs stay on cuBLAS (Triton GEMM
+# fusions off).  Command buffers (CUDA graphs) for fusions, cuBLAS, custom calls (tokamax's, cuDNN's) and control
+# flow, not collectives: the Qwen3.5-family Gated DeltaNet's chunk scan launches ~10^6 small kernels a step
+# (8.3% shorter steps on a GB200 at Qwen3.8's per-layer dims), and they stay on under the profiler, so a profiled
+# step runs as an unprofiled one does.  No custom (Triton one-shot) collective kernels: XLA picks them for a small
+# all-reduce whose devices share an NVLink domain, and their compile fails at 64 ranks over the 16 hosts of a GB200
+# NVL72 rack ("size mismatch when packing elements for LLVM struct", jax 0.12.0.1) -- a one-stage (data-parallel)
+# layout's loss psum, the global norm's sum -- so every collective stays NCCL's.
+--xla_gpu_experimental_use_collective_kernels=
+--xla_gpu_enable_latency_hiding_scheduler=true
+--xla_gpu_enable_triton_gemm=false
+--xla_gpu_enable_command_buffer=FUSION,CUBLAS,CUBLASLT,CUSTOM_CALL,WHILE,CONDITIONAL
+--xla_enable_command_buffers_during_profiling=true
+--xla_gpu_all_reduce_combine_threshold_bytes=134217728
+--xla_gpu_all_gather_combine_threshold_bytes=134217728
+--xla_gpu_reduce_scatter_combine_threshold_bytes=67108864
+--xla_gpu_enable_pipelined_all_gather=true
+--xla_gpu_enable_pipelined_reduce_scatter=true
+--xla_gpu_enable_pipelined_all_reduce=true
+--xla_gpu_enable_while_loop_double_buffering=true
+--xla_disable_hlo_passes=rematerialization

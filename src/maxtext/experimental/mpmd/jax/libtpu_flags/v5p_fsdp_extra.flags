@@ -1,0 +1,14 @@
+# libtpu flags added to v5p.flags for MaxText's pure-FSDP baseline on a v5p-128, and given to MPMD too.
+# The recipe offloads 1D all-gathers to SparseCore and turns off TensorCore async collective fusion for all-gathers. An
+# FSDP=64 gather over a v5p-128's 4x4x4 torus spans all three dimensions, so neither path applies, and MaxText's 52
+# FSDP weight all-gathers ran synchronously on the TensorCore: 165 ms a step. With these two flags they become async
+# SparseCore computations (in the AOT compile's HLO), and MaxText's step went from 10640 to 10514 ms
+# (2026-10). libtpu 0.0.46 has both; MaxText's benchmarks/xla_flags_library.py uses neither, but its
+# DeepSeek3-671B tpu7x-512 example (docs/guides/optimization/benchmark_and_performance.md) sets both.
+# One flag per line; '#' lines are comments.  It adds to v5p: give it through EXTRA_LIBTPU_INIT_ARGS
+# (MPMD_FLAG_SET=v5p_fsdp_extra alone would run these two flags without the recipe's), e.g.
+#   F=src/maxtext/experimental/mpmd/jax/libtpu_flags/v5p_fsdp_extra.flags
+#   MPMD_FLAG_SET=v5p EXTRA_LIBTPU_INIT_ARGS="$(grep -v '^#' $F | tr '\n' ' ')" \
+#     bash src/maxtext/experimental/mpmd/jax/ds_ep_multihost.sh [pipeline flags...]
+--xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true
+--xla_tpu_enable_sparse_core_collective_offload_2d_all_gather=true
