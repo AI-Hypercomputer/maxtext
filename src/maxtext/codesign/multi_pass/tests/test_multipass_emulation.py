@@ -19,6 +19,21 @@ from __future__ import annotations
 
 import unittest
 
+try:
+  import numpy as np
+except ImportError:  # pragma: no cover
+  np = None  # type: ignore
+
+try:
+  import jax
+  import jax.numpy as jnp
+
+  HAS_JAX = True
+except ImportError:
+  jax = None  # type: ignore
+  jnp = np  # type: ignore
+  HAS_JAX = False
+
 from maxtext.codesign.emulation_base import (
     EmulationFeature,
     get_registered_emulation_features,
@@ -34,6 +49,12 @@ from maxtext.codesign.multi_pass.multipass_config import (
     OperandMultipassSpec,
     TARGET_PRESETS,
     resolve_cross_term_pairs,
+)
+from maxtext.codesign.multi_pass.multipass_kernel import (
+    decompose_tensor_into_passes,
+    multipass_dot_general,
+    quantize_to_dtype_spec,
+    reconstruct_multipass_tensor,
 )
 
 
@@ -370,6 +391,180 @@ class MultipassEmulationTest(unittest.TestCase):
               "test_custom_clip": {"enabled": True, "clip_val": -1.0},
           }
       )
+
+
+  # ---------------------------------------------------------------------------
+  # 7. Modular Unit Tests for Elementary Quantization, Scaling & Kernel Ops
+  # ---------------------------------------------------------------------------
+
+  @unittest.skipIf(np is None, "NumPy is required for array quantization tests")
+  def test_quantize_to_dtype_spec_rounding_and_subnormals(self):
+    """Tests `quantize_to_dtype_spec` for RNE, RTZ, stochastic rounding, and subnormal flushing."""
+    x = jnp.asarray([0.0, 1.25, -3.75, 500.0, 1e-4], dtype=np.float32)
+    q_rne = quantize_to_dtype_spec(x, "fp8_e4m3", rounding_mode="rne", subnormals=True)
+    q_rtz = quantize_to_dtype_spec(x, "fp8_e4m3", rounding_mode="rtz", subnormals=True)
+    self.assertAlmostEqual(float(np.asarray(q_rne)[3]), 448.0)
+    self.assertLessEqual(abs(float(np.asarray(q_rtz)[2])), abs(float(np.asarray(q_rne)[2])))
+
+    sub_val = jnp.asarray([0.00390625], dtype=np.float32)
+    q_sub_kept = quantize_to_dtype_spec(sub_val, "fp8_e4m3", subnormals=True)
+    q_sub_flushed = quantize_to_dtype_spec(sub_val, "fp8_e4m3", subnormals=False)
+    self.assertAlmostEqual(float(np.asarray(q_sub_kept)[0]), 0.00390625)
+    self.assertAlmostEqual(float(np.asarray(q_sub_flushed)[0]), 0.0)
+
+  @unittest.skipIf(np is None, "NumPy is required for array decomposition tests")
+  def test_decompose_and_reconstruct_scaling_modes(self):
+    """Tests `decompose_tensor_into_passes` across unit, per_tensor, per_channel, and per_block_pow2 scaling."""
+    rng = np.random.default_rng(17)
+    x = jnp.asarray(rng.standard_normal((8, 32), dtype=np.float32))
+    for scale_mode in ("unit", "per_tensor_amax", "per_channel_amax", "per_block_amax", "per_block_pow2"):
+      spec = OperandMultipassSpec.from_any(
+          {
+              "src_dtype": "fp32",
+              "num_passes": 2,
+              "pass_dtypes": ["fp8_e5m2", "fp8_e4m3"],
+              "scale_mode": scale_mode,
+              "block_size": 16,
+          }
+      )
+      slices = decompose_tensor_into_passes(x, spec, contracting_axes=(1,))
+      self.assertEqual(len(slices), 2)
+      recon = reconstruct_multipass_tensor(x, spec, contracting_axes=(1,))
+      self.assertEqual(recon.shape, x.shape)
+      rel_err = float(np.linalg.norm(np.asarray(recon - x)) / np.linalg.norm(np.asarray(x)))
+      self.assertLess(rel_err, 5e-2, f"Failed error bound for scale_mode={scale_mode}")
+
+  @unittest.skipIf(np is None, "NumPy is required for array tests")
+  def test_int8_bit_shift_and_karatsuba_exactness(self):
+    """Tests exact `int8 -> [int4, uint4]` decomposition and 3-GEMM Karatsuba vs 4-GEMM full product."""
+    rng = np.random.default_rng(7)
+    a_int8 = jnp.asarray(rng.integers(-128, 127, size=(16, 32)), dtype=jnp.float32)
+    b_int8 = jnp.asarray(rng.integers(-128, 127, size=(32, 16)), dtype=jnp.float32)
+    exact_prod = np.matmul(
+        np.asarray(a_int8, dtype=np.float32),
+        np.asarray(b_int8, dtype=np.float32),
+    )
+
+    spec_int = OperandMultipassSpec.from_any("int8->[int4,uint4]@scale=bit_shift")
+    slices_a = decompose_tensor_into_passes(a_int8, spec_int)
+    self.assertEqual(len(slices_a), 2)
+    recon_a = slices_a[0].dequantized + slices_a[1].dequantized
+    np.testing.assert_allclose(np.asarray(recon_a), np.asarray(a_int8), atol=0.0)
+
+    cfg_x4_unscaled = MultipassEmulationConfig.from_dict(
+        {"enabled": True, "preset": "INT8_INT8_INT32_X4", "src_scale_mode": "none"}
+    )
+    cfg_x3_unscaled = MultipassEmulationConfig.from_dict(
+        {"enabled": True, "preset": "INT8_INT8_INT32_X3", "src_scale_mode": "none"}
+    )
+    dnums = (((1,), (0,)), ((), ()))
+    out_x4_int = multipass_dot_general(a_int8, b_int8, dnums, cfg_x4_unscaled.rules[0])
+    out_x3_int = multipass_dot_general(a_int8, b_int8, dnums, cfg_x3_unscaled.rules[0])
+    np.testing.assert_allclose(np.asarray(out_x4_int), np.asarray(exact_prod), atol=0.0)
+    np.testing.assert_allclose(np.asarray(out_x3_int), np.asarray(exact_prod), atol=0.0)
+
+    # Test INT8_* presets on small-magnitude neural network float tensors (e.g. N(0, 0.05^2))
+    a_flt = jnp.asarray(rng.standard_normal((16, 32), dtype=np.float32) * 0.05)
+    b_flt = jnp.asarray(rng.standard_normal((32, 16), dtype=np.float32) * 0.05)
+    ref_flt = np.matmul(np.asarray(a_flt), np.asarray(b_flt))
+    cfg_x4 = MultipassEmulationConfig.from_dict({"enabled": True, "preset": "INT8_INT8_INT32_X4"})
+    cfg_x3 = MultipassEmulationConfig.from_dict({"enabled": True, "preset": "INT8_INT8_INT32_X3"})
+    cfg_x2 = MultipassEmulationConfig.from_dict({"enabled": True, "preset": "INT8_INT4_INT32_X2"})
+    out_x4_flt = np.asarray(multipass_dot_general(a_flt, b_flt, dnums, cfg_x4.rules[0]))
+    out_x3_flt = np.asarray(multipass_dot_general(a_flt, b_flt, dnums, cfg_x3.rules[0]))
+    out_x2_flt = np.asarray(multipass_dot_general(a_flt, b_flt, dnums, cfg_x2.rules[0]))
+    np.testing.assert_allclose(out_x4_flt, out_x3_flt, rtol=1e-5, atol=1e-6)
+    rel_err_x4 = float(np.linalg.norm(out_x4_flt - ref_flt) / np.linalg.norm(ref_flt))
+    rel_err_x2 = float(np.linalg.norm(out_x2_flt - ref_flt) / np.linalg.norm(ref_flt))
+    self.assertLess(rel_err_x4, 0.03)
+    self.assertLess(rel_err_x2, 0.25)
+
+  @unittest.skipIf(np is None, "NumPy is required for array tests")
+  def test_cross_term_modes_x1_x2_x3_x4_and_custom(self):
+    """Tests GEMM error progression across X1, X2, X3, X4 and custom cross-term pairs."""
+    rng = np.random.default_rng(99)
+    a = jnp.asarray(rng.standard_normal((16, 32), dtype=np.float32))
+    b = jnp.asarray(rng.standard_normal((32, 16), dtype=np.float32))
+    a_bf16 = quantize_to_dtype_spec(a, "bf16")
+    b_bf16 = quantize_to_dtype_spec(b, "bf16")
+    ref = np.matmul(np.asarray(a_bf16), np.asarray(b_bf16))
+    dnums = (((1,), (0,)), ((), ()))
+
+    cfg_x1 = MultipassEmulationConfig.from_dict({"enabled": True, "preset": "F8E4M3_F8E4M3_F32_X1"})
+    cfg_x2 = MultipassEmulationConfig.from_dict({"enabled": True, "preset": "F8E4M3_F8E4M3_F32_X2"})
+    cfg_x3 = MultipassEmulationConfig.from_dict({"enabled": True, "preset": "F8E4M3_F8E4M3_F32_X3"})
+    cfg_x4 = MultipassEmulationConfig.from_dict({"enabled": True, "preset": "F8E4M3_F8E4M3_F32_X4"})
+
+    out_x1 = np.asarray(multipass_dot_general(a, b, dnums, cfg_x1.rules[0]))
+    out_x2 = np.asarray(multipass_dot_general(a, b, dnums, cfg_x2.rules[0]))
+    out_x3 = np.asarray(multipass_dot_general(a, b, dnums, cfg_x3.rules[0]))
+    out_x4 = np.asarray(multipass_dot_general(a, b, dnums, cfg_x4.rules[0]))
+
+    err_x1 = float(np.linalg.norm(out_x1 - ref) / np.linalg.norm(ref))
+    err_x2 = float(np.linalg.norm(out_x2 - ref) / np.linalg.norm(ref))
+    err_x3 = float(np.linalg.norm(out_x3 - ref) / np.linalg.norm(ref))
+    err_x4 = float(np.linalg.norm(out_x4 - ref) / np.linalg.norm(ref))
+
+    self.assertLess(err_x2, err_x1)
+    self.assertLess(err_x3, err_x2)
+    self.assertLessEqual(err_x4, err_x3)
+    self.assertGreater(float(np.max(np.abs(out_x3 - out_x4))), 0.0)
+
+    cfg_custom = MultipassEmulationConfig.from_dict(
+        {
+            "enabled": True,
+            "src_dtype": "bf16",
+            "num_passes": 2,
+            "pass_dtypes": ["fp8_e4m3", "fp8_e4m3"],
+            "scale_mode": "per_tensor_pow2",
+            "cross_term_mode": "custom",
+            "active_passes": "0:0,0:1,1:0",
+        }
+    )
+    out_custom = np.asarray(multipass_dot_general(a, b, dnums, cfg_custom.rules[0]))
+    np.testing.assert_allclose(out_custom, out_x3, atol=1e-6)
+
+  @unittest.skipUnless(HAS_JAX, "JAX is required for custom_vjp gradient tests")
+  def test_custom_vjp_backward_modes(self):
+    """Tests `jax.grad` through `multipass_dot_general` for `multipass_bwd` vs `ste`."""
+    rng = np.random.default_rng(42)
+    a = jnp.asarray(rng.standard_normal((8, 16), dtype=np.float32))
+    b = jnp.asarray(rng.standard_normal((16, 8), dtype=np.float32))
+    dnums = (((1,), (0,)), ((), ()))
+
+    cfg_bwd = MultipassEmulationConfig.from_dict(
+        {
+            "enabled": True,
+            "preset": "F8E4M3_F8E4M3_F32_X3",
+            "bwd_mode": "multipass_bwd",
+            "emulate_dlhs": True,
+            "emulate_drhs": True,
+        }
+    )
+    cfg_ste = MultipassEmulationConfig.from_dict(
+        {
+            "enabled": True,
+            "preset": "F8E4M3_F8E4M3_F32_X3",
+            "bwd_mode": "ste",
+        }
+    )
+
+    def loss_bwd(x, w):
+      y = multipass_dot_general(x, w, dnums, cfg_bwd.rules[0])
+      return jnp.sum(y**2)
+
+    def loss_ste(x, w):
+      y = multipass_dot_general(x, w, dnums, cfg_ste.rules[0])
+      return jnp.sum(y**2)
+
+    da_bwd, db_bwd = jax.grad(loss_bwd, argnums=(0, 1))(a, b)
+    da_ste, db_ste = jax.grad(loss_ste, argnums=(0, 1))(a, b)
+
+    self.assertEqual(da_bwd.shape, a.shape)
+    self.assertEqual(db_bwd.shape, b.shape)
+    self.assertGreater(float(jnp.max(jnp.abs(da_bwd - da_ste))), 0.0)
+    self.assertGreater(float(jnp.max(jnp.abs(db_bwd - db_ste))), 0.0)
+    np.testing.assert_allclose(np.asarray(da_bwd), np.asarray(da_ste), rtol=5e-2, atol=1e-1)
 
 
 if __name__ == "__main__":
