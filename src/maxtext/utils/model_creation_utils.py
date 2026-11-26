@@ -736,6 +736,7 @@ def create_model(
   """Instantiates and returns the model object, sharded across the mesh."""
   if config.use_m3_model:
     from maxtext.m3 import models as m3_models  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.infra import offload as m3_offload  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import remat as m3_remat  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra.named_scopes import add_named_scopes  # pylint: disable=import-outside-toplevel
@@ -758,6 +759,8 @@ def create_model(
         )
       model = quantizations.maybe_quantize_model(model, config)
       model = add_named_scopes(model)
+      if model_mode == MODEL_MODE_TRAIN:
+        model = m3_offload.maybe_offload_parameters(model, config)
     return model
 
   # Model definition

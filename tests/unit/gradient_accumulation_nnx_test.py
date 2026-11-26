@@ -37,6 +37,7 @@ class _Cfg:
   gradient_accumulation_steps: int = 2
   use_tunix_gradient_accumulation: bool = False
   shard_optimizer_over_data: bool = False
+  parameter_memory_host_offload: bool = False
   shard_mode: int = ShardMode.AUTO
   ici_data_parallelism: int = 1
   debug_sharding: bool = False

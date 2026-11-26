@@ -264,6 +264,23 @@ class ApplyRopeLegacyParityTest(parameterized.TestCase):
         np.asarray(legacy(x, positions)),
     )
 
+  def test_opt_in_fp64_timescale_matches_fp64_reference_at_high_theta(self):
+    """Opt-in `use_fp64_timescale=True` avoids float32 power drift while default stays legacy-identical."""
+    head_dim = 64
+    theta = 10_000_000.0
+    x = jax.random.normal(jax.random.key(7), (1, 2, 1, head_dim), dtype=jnp.float32)
+    positions = jnp.asarray([[2047, 8191]], dtype=jnp.int32)
+
+    out_fp64_ts = np.asarray(apply_rope(x, positions, max_timescale=theta, use_fp64_timescale=True), dtype=np.float64)
+    half = head_dim // 2
+    inv_freq64 = 1.0 / (np.float64(theta) ** (2.0 * np.arange(half, dtype=np.float64) / np.float64(head_dim)))
+    angles = np.asarray(positions, dtype=np.float32)[:, :, None, None] * inv_freq64.astype(np.float32)
+    cos, sin = np.cos(angles), np.sin(angles)
+    x_np = np.asarray(x, dtype=np.float32)
+    x1, x2 = x_np[..., :half], x_np[..., half:]
+    expected = np.concatenate([x1 * cos - x2 * sin, x2 * cos + x1 * sin], axis=-1)
+    np.testing.assert_allclose(out_fp64_ts, expected, rtol=1e-6, atol=1e-6)
+
 
 class ApplyRopeValidationTest(parameterized.TestCase):
   """Bad arguments must fail loudly rather than broadcast silently."""

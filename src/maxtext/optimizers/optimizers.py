@@ -431,11 +431,23 @@ def apply_trainable_parameters_mask(base_opt, config):
   gradients on frozen parameters inside its forward-backward kernel so frozen
   parameters are excluded from both gradient computation and `grad_norm`.
   """
-  # When trainable_parameters_mask is empty, freeze_mask_fn is None and all parameters are trained.
+  # When trainable_parameters_mask is empty and multimodal vision-encoder freezing is inactive,
+  # freeze_mask_fn is None and all parameters are trained without wrapping opt_state.
   trainable_patterns = config.trainable_parameters_mask
   freeze_mask_fn = get_path_mask_fn(trainable_patterns, match_returns_true=False)
-  if freeze_mask_fn is None:
+  freeze_vision_encoder = bool(
+      getattr(config, "use_multimodal", False)
+      and getattr(config, "freeze_vision_encoder_params", False)  # jmp-waiver: SILENT_CONFIG_FALLBACK
+  )
+  if freeze_mask_fn is None and not freeze_vision_encoder:
     return base_opt
+
+  def _is_vision_encoder_path(path):
+    for key in path:
+      seg = str(getattr(key, "key", getattr(key, "name", key)))
+      if "VisionEncoder" in seg or "VisionModel" in seg:
+        return True
+    return False
 
   has_logged = False
 
@@ -450,7 +462,20 @@ def apply_trainable_parameters_mask(base_opt, config):
     up front. Log the counts once so the intent is checkable against the run log.
     """
     nonlocal has_logged
-    labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", freeze_mask_fn(params))
+    if freeze_mask_fn is not None:
+      base_frozen = freeze_mask_fn(params)
+      if freeze_vision_encoder:
+        labels = jax.tree_util.tree_map_with_path(
+            lambda p, is_frz: "frozen" if (is_frz or _is_vision_encoder_path(p)) else "trainable",
+            base_frozen,
+        )
+      else:
+        labels = jax.tree_util.tree_map(lambda x: "frozen" if x else "trainable", base_frozen)
+    else:
+      labels = jax.tree_util.tree_map_with_path(
+          lambda p, _: "frozen" if _is_vision_encoder_path(p) else "trainable",
+          params,
+      )
     if not has_logged:
       has_logged = True
       leaves = jax.tree_util.tree_flatten_with_path(labels)[0]
