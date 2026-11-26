@@ -22,7 +22,7 @@ python3 .agents/skills/update-changelog/scripts/gather_changes.py --mode collect
 
 The script automatically:
 - Walks `--first-parent` on `main` and resolves GitHub Merge PR numbers (`#XXXX`) to their initial feature/fix commit on the PR branch (ignoring follow-up review feedback or comment cleanup commits).
-- Excludes any changes in `tests/`, `.github/`, `.gemini/`, `.agents/`, `src/maxtext/training_engine/`, `src/maxtext/experimental/` (`experimental/`), `src/dependencies/dockerfiles/`, `src/dependencies/scripts/`, `tools/`, `pytest.ini`, `README.md`, `AGENTS.md`, `docs/conf.py`, `src/maxtext/version.py`, `*Dockerfile`, and `docs/release_notes.md`. Keep this list in sync with `EXCLUDED_PATH_PREFIXES` / `EXCLUDED_FILES` in the script.
+- Excludes any changes in `tests/`, `.github/`, `.gemini/`, `.agents/`, `docs/development/`, `src/maxtext/training_engine/`, `src/maxtext/experimental/` (`experimental/`), `src/dependencies/dockerfiles/`, `src/dependencies/scripts/`, `tools/`, `pytest.ini`, `README.md`, `AGENTS.md`, `docs/conf.py`, `src/maxtext/version.py`, `*Dockerfile`, and `docs/release_notes.md`. Keep this list in sync with `EXCLUDED_PATH_PREFIXES` / `EXCLUDED_FILES` in the script.
 - Excludes container/Docker image vulnerability fixes, Docker registry migrations (e.g., Artifact Registry), Gemini/agent skill updates, `pytest-split` / test runner splitting, `Latest News` announcements, `"No public description"` commits, release preparation / version bumps (`Prepare for vX.Y.Z release`), broken link / `toctree` / Sphinx / ReadTheDocs doc-build or dynamic version-tag plumbing fixes, pre-commit/lint-only fixes, and test-only fixes.
 - Drops a commit together with the revert that undoes it (`Reverts <hash>` / `This reverts commit <hash>` in the subject or body) when both land in the window, and prefixes reverts of older commits with `Revert of: `.
 - Strips Copybara/Piper internal metadata (`PiperOrigin-RevId`).
@@ -38,6 +38,8 @@ Read `raw_commits.txt` and categorize + rewrite the entries into a polished, syn
 > - Every `[ref:...]` ID present in `raw_commits.txt` **must** appear in `new_notes.md`.
 > - When combining multiple related commits/PRs into a single cohesive bullet, include all of their IDs on that bullet (e.g., `[ref:#5051, #5052, #5053]`).
 > - Step 3 runs a deterministic reconciliation check that compares all `[ref:...]` IDs in `raw_commits.txt` against `new_notes.md` and fails if any ID is missing, before automatically stripping the temporary `[ref:...]` tags upon injection.
+>
+> **Do Not Add Entries Outside `raw_commits.txt`**: Every bullet must be backed by at least one `[ref:...]` ID from `raw_commits.txt`. Do not write bullets from your own `git log` / `git show` exploration, and never announce internal-only changes such as CI / GitHub workflows, release or PyPI publishing pipelines, Docker image pipelines, or agent skills and developer tooling, even if a candidate commit mentions them alongside user-facing changes.
 
 **Semantic Categorization by Gemini**:
 - Inspect each entry's summary in `raw_commits.txt` (and run `git show <hash>` if needed) to place it into the appropriate section (`#### Changes`, `#### Bug Fixes`, or `#### Deprecations`) and category.
