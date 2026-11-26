@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 import dataclasses
+import functools
 import json
 import os
 from typing import Any, NamedTuple
@@ -588,6 +589,77 @@ class GraniteMoeAttention(nnx.Module):
 # ==============================================================================
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
+def _gather_repeat_tokens(
+    x: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+    top_k: int,
+) -> jax.Array:
+  """Gathers token rows into expert-sorted `(num_tokens * top_k, ...)` order with scatter-free VJP."""
+  del inv_perm
+  return x[perm // top_k]
+
+
+def _gather_repeat_tokens_fwd(
+    x: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+    top_k: int,
+) -> tuple[jax.Array, tuple[jax.Array, int]]:
+  """Forward rule saving `inv_perm` and `num_tokens` for scatter-free backward."""
+  return x[perm // top_k], (inv_perm, x.shape[0])
+
+
+def _gather_repeat_tokens_bwd(
+    top_k: int,
+    res: tuple[jax.Array, int],
+    g: jax.Array,
+) -> tuple[jax.Array, None, None]:
+  """Backward rule unpermuting slot cotangents via `inv_perm` and summing across `top_k`."""
+  inv_perm, num_tokens = res
+  unpermuted = g[inv_perm].reshape((num_tokens, top_k, *g.shape[1:]))
+  if jnp.issubdtype(g.dtype, jnp.floating) and jnp.finfo(g.dtype).bits < 32:
+    dx = jnp.sum(unpermuted, axis=1, dtype=jnp.float32).astype(g.dtype)
+  else:
+    dx = jnp.sum(unpermuted, axis=1)
+  return dx, None, None
+
+
+_gather_repeat_tokens.defvjp(_gather_repeat_tokens_fwd, _gather_repeat_tokens_bwd)
+
+
+@jax.custom_vjp
+def _unsort_tokens(
+    sorted_out: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+) -> jax.Array:
+  """Restores expert-sorted rows to `(token, top_k)` slot order with scatter-free VJP."""
+  del perm
+  return sorted_out[inv_perm]
+
+
+def _unsort_tokens_fwd(
+    sorted_out: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+  """Forward rule saving `perm` for scatter-free backward."""
+  return sorted_out[inv_perm], perm
+
+
+def _unsort_tokens_bwd(
+    perm: jax.Array,
+    g: jax.Array,
+) -> tuple[jax.Array, None, None]:
+  """Backward rule gathering slot cotangents back into expert-sorted order via `perm`."""
+  return g[perm], None, None
+
+
+_unsort_tokens.defvjp(_unsort_tokens_fwd, _unsort_tokens_bwd)
+
+
 def _local_ragged_swiglu(
     x_tokens: jax.Array,
     top_k_indices: jax.Array,
@@ -616,11 +688,10 @@ def _local_ragged_swiglu(
   perm = jnp.argsort(bucket, stable=True)
   inv_perm = jnp.argsort(perm)
   sorted_valid = is_local[perm][:, None]
-  token_positions = perm // top_k
   # Explicitly zero non-local tail rows [sum(group_sizes):total_slots] on both inputs and outputs of
   # `jax.lax.ragged_dot`: on TPU XLA, `ragged-dot` lhs VJP does not zero rows past `sum(group_sizes)`.
   zero_scalar = jnp.zeros((), dtype=dt)
-  sorted_x = jnp.where(sorted_valid, x_tokens[token_positions], zero_scalar)
+  sorted_x = jnp.where(sorted_valid, _gather_repeat_tokens(x_tokens, perm, inv_perm, top_k), zero_scalar)
   group_sizes = jnp.bincount(bucket, length=num_local_experts + 1)[:num_local_experts]
 
   gu = gu_w.astype(dt)
@@ -647,7 +718,7 @@ def _local_ragged_swiglu(
       precision=precision,
   )
   sorted_out = jnp.where(sorted_valid, sorted_out, zero_scalar)
-  unsorted_out = sorted_out[inv_perm] * masked_w[:, None]
+  unsorted_out = _unsort_tokens(sorted_out, perm, inv_perm) * masked_w[:, None]
   return jnp.sum(unsorted_out.reshape(num_tokens, top_k, hidden_size), axis=1)
 
 

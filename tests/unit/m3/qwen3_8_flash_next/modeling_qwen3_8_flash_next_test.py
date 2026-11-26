@@ -1221,6 +1221,91 @@ class Qwen3_8MoETest(absltest.TestCase):
         np.asarray(actual_grads.down_proj.value), np.asarray(ref_grads.down_proj.value), rtol=1e-5, atol=1e-5
     )
 
+  def test_experts_scatter_free_routing_vjp_and_bf16_grads(self):
+    """Verifies scatter-free routing custom VJPs match reference grads and emit no float scatter."""
+
+    def _has_float_scatter_jaxpr(closed_jaxpr) -> bool:
+      for eqn in closed_jaxpr.eqns:
+        if eqn.primitive.name == "scatter-add":
+          out_dt = eqn.outvars[0].aval.dtype
+          if jnp.issubdtype(out_dt, jnp.floating):
+            return True
+        for val in eqn.params.values():
+          if hasattr(val, "eqns") and _has_float_scatter_jaxpr(val):
+            return True
+      return False
+
+    def _check_case(x_dtype, compute_dtype, tol):
+      n, d, m, e, k = 16, 32, 16, 8, 2
+      experts = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+          num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=compute_dtype, weight_dtype=jnp.float32, rngs=nnx.Rngs(5)
+      )
+      x = jax.random.normal(jax.random.key(6), (n, d), dtype=x_dtype)
+      top_k_idx = jax.random.randint(jax.random.key(7), (n, k), 0, e, dtype=jnp.int32)
+      top_k_w = jax.nn.softmax(jax.random.normal(jax.random.key(8), (n, k), dtype=jnp.float32), axis=-1).astype(x_dtype)
+      cot = jax.random.normal(jax.random.key(9), (n, d), dtype=x_dtype)
+
+      def loss_actual(mod, inp, w):
+        return jnp.sum(mod(inp, top_k_idx, w).astype(jnp.float32) * cot.astype(jnp.float32))
+
+      def loss_ref(mod, inp, w):
+        return jnp.sum(mod.reference_forward(inp, top_k_idx, w).astype(jnp.float32) * cot.astype(jnp.float32))
+
+      vg_actual = jax.jit(nnx.value_and_grad(loss_actual, argnums=(0, 1, 2)))
+      vg_ref = jax.jit(nnx.value_and_grad(loss_ref, argnums=(0, 1, 2)))
+      val_a, (grads_a, dx_a, dw_a) = vg_actual(experts, x, top_k_w)
+      val_r, (grads_r, dx_r, dw_r) = vg_ref(experts, x, top_k_w)
+
+      self.assertEqual(dx_a.dtype, x_dtype)
+      self.assertEqual(dw_a.dtype, x_dtype)
+      np.testing.assert_allclose(np.asarray(val_a), np.asarray(val_r), rtol=tol, atol=tol)
+      np.testing.assert_allclose(np.asarray(dx_a, np.float32), np.asarray(dx_r, np.float32), rtol=tol, atol=tol)
+      np.testing.assert_allclose(np.asarray(dw_a, np.float32), np.asarray(dw_r, np.float32), rtol=tol, atol=tol)
+      np.testing.assert_allclose(
+          np.asarray(grads_a.gate_up_proj[...], np.float32),
+          np.asarray(grads_r.gate_up_proj[...], np.float32),
+          rtol=tol,
+          atol=tol,
+      )
+      np.testing.assert_allclose(
+          np.asarray(grads_a.down_proj[...], np.float32),
+          np.asarray(grads_r.down_proj[...], np.float32),
+          rtol=tol,
+          atol=tol,
+      )
+
+      # Positive control: naive token gather grad emits float scatter-add; actual routing does not.
+      naive_jaxpr = jax.make_jaxpr(jax.grad(lambda z: jnp.sum(z[top_k_idx.reshape(-1)].astype(jnp.float32))))(x)
+      self.assertTrue(_has_float_scatter_jaxpr(naive_jaxpr))
+      actual_jaxpr = jax.make_jaxpr(nnx.value_and_grad(loss_actual, argnums=(0, 1, 2)))(experts, x, top_k_w)
+      self.assertFalse(_has_float_scatter_jaxpr(actual_jaxpr))
+
+      hlo = vg_actual.lower(experts, x, top_k_w).compile().as_text()
+      for line in hlo.splitlines():
+        if " scatter(" in line:
+          rhs = line.split("=", 1)[1]
+          for prefix in ("bf16[", "f16[", "f32[", "f64["):
+            self.assertNotIn(prefix, rhs)
+
+    for x_dt, c_dt, tol in (
+        (jnp.float32, jnp.float32, 1e-5),
+        (jnp.bfloat16, jnp.bfloat16, 2e-2),
+        (jnp.float32, jnp.bfloat16, 2e-2),
+    ):
+      with jax.default_matmul_precision("float32" if c_dt == jnp.float32 else "default"):
+        _check_case(x_dt, c_dt, tol)
+
+    # Zero-token edge case (n == 0).
+    empty_exp = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+        num_experts=4, emb_dim=16, moe_mlp_dim=8, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(0)
+    )
+    x0 = jnp.zeros((0, 16), dtype=jnp.float32)
+    idx0 = jnp.zeros((0, 2), dtype=jnp.int32)
+    w0 = jnp.zeros((0, 2), dtype=jnp.float32)
+    out0, dx0 = jax.value_and_grad(lambda z: jnp.sum(empty_exp(z, idx0, w0)))(x0)
+    self.assertEqual(dx0.shape, (0, 16))
+    self.assertEqual(float(out0), 0.0)
+
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
   def test_pytorch_moe_weight_copy_parity(self):
     if torch is None or modeling_qwen4_exp is None or configuration_qwen4_exp is None:

@@ -33,6 +33,7 @@ Sections (in dependency order):
 
 from collections.abc import Callable
 from collections.abc import Sequence
+import functools
 import math
 from typing import Any
 
@@ -977,6 +978,77 @@ class Qwen3_8MLP(nnx.Module):
     return self.down_proj(jax.nn.silu(self.gate_proj(x)) * self.up_proj(x))
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3,))
+def _gather_repeat_tokens(
+    x: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+    top_k: int,
+) -> jax.Array:
+  """Gathers token rows into expert-sorted `(num_tokens * top_k, ...)` order with scatter-free VJP."""
+  del inv_perm
+  return x[perm // top_k]
+
+
+def _gather_repeat_tokens_fwd(
+    x: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+    top_k: int,
+) -> tuple[jax.Array, tuple[jax.Array, int]]:
+  """Forward rule saving `inv_perm` and `num_tokens` for scatter-free backward."""
+  return x[perm // top_k], (inv_perm, x.shape[0])
+
+
+def _gather_repeat_tokens_bwd(
+    top_k: int,
+    res: tuple[jax.Array, int],
+    g: jax.Array,
+) -> tuple[jax.Array, None, None]:
+  """Backward rule unpermuting slot cotangents via `inv_perm` and summing across `top_k`."""
+  inv_perm, num_tokens = res
+  unpermuted = g[inv_perm].reshape((num_tokens, top_k, *g.shape[1:]))
+  if jnp.issubdtype(g.dtype, jnp.floating) and jnp.finfo(g.dtype).bits < 32:
+    dx = jnp.sum(unpermuted, axis=1, dtype=jnp.float32).astype(g.dtype)
+  else:
+    dx = jnp.sum(unpermuted, axis=1)
+  return dx, None, None
+
+
+_gather_repeat_tokens.defvjp(_gather_repeat_tokens_fwd, _gather_repeat_tokens_bwd)
+
+
+@jax.custom_vjp
+def _unsort_tokens(
+    sorted_out: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+) -> jax.Array:
+  """Restores expert-sorted rows to `(token, top_k)` slot order with scatter-free VJP."""
+  del perm
+  return sorted_out[inv_perm]
+
+
+def _unsort_tokens_fwd(
+    sorted_out: jax.Array,
+    perm: jax.Array,
+    inv_perm: jax.Array,
+) -> tuple[jax.Array, jax.Array]:
+  """Forward rule saving `perm` for scatter-free backward."""
+  return sorted_out[inv_perm], perm
+
+
+def _unsort_tokens_bwd(
+    perm: jax.Array,
+    g: jax.Array,
+) -> tuple[jax.Array, None, None]:
+  """Backward rule gathering slot cotangents back into expert-sorted order via `perm`."""
+  return g[perm], None, None
+
+
+_unsort_tokens.defvjp(_unsort_tokens_fwd, _unsort_tokens_bwd)
+
+
 class Qwen3_8Experts(nnx.Module):
   """Collection of routed expert weights stored as 3D tensors.
 
@@ -1052,17 +1124,16 @@ class Qwen3_8Experts(nnx.Module):
       num_tokens, top_k = idx_2d.shape
       flat_expert_ids = idx_2d.reshape(-1)
       perm = jnp.argsort(flat_expert_ids)
+      inv_perm = jnp.argsort(perm)
       group_sizes = jnp.bincount(flat_expert_ids, length=self.num_experts).astype(jnp.int32)
-      flat_token_ids = jnp.repeat(jnp.arange(num_tokens, dtype=jnp.int32), top_k)
-      sorted_x = x_2d[flat_token_ids[perm]]
+      sorted_x = _gather_repeat_tokens(x_2d, perm, inv_perm, top_k)
 
       gate_up = self._ragged_dot(sorted_x.astype(self.dtype), w_gu, group_sizes)
       gate, up = jnp.split(gate_up, 2, axis=-1)
       act = jax.nn.silu(gate) * up
       sorted_out = self._ragged_dot(act, w_dn, group_sizes)
 
-      inv_perm = jnp.argsort(perm)
-      expert_outs = sorted_out[inv_perm].reshape(num_tokens, top_k, self.emb_dim)
+      expert_outs = _unsort_tokens(sorted_out, perm, inv_perm).reshape(num_tokens, top_k, self.emb_dim)
       out_2d = jnp.sum(expert_outs * w_2d[:, :, None].astype(expert_outs.dtype), axis=1)
       return out_2d.astype(x_2d.dtype)
 
