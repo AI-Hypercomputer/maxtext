@@ -17,6 +17,8 @@
 import dataclasses
 import itertools
 import math
+import subprocess
+import sys
 import unittest
 from unittest import mock
 from absl.testing import absltest
@@ -926,6 +928,19 @@ class TestMhcCostEstimates(unittest.TestCase):
     self.assertEqual(self.dims.post_apply_fwd_cost().transcendentals, 0)
     self.assertEqual(self.dims.pre_apply_bwd_cost().transcendentals, 0)
     self.assertEqual(self.dims.post_apply_bwd_cost().transcendentals, 0)
+
+  def test_import_train_after_tensorflow_succeeds(self):
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "try:\n  import tensorflow\nexcept ImportError:\n  pass\n" "from maxtext.trainers.pre_train import train",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    self.assertEqual(proc.returncode, 0, msg=proc.stderr)
 
 
 if __name__ == "__main__":
