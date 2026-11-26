@@ -75,7 +75,7 @@ moments, bfloat16 compute, float32 loss — and each concern lives in exactly on
 | Compute dtype | `dtype=` on every NNX layer at construction | `dtype` |
 | Float32 islands (softmax, logits, routing, MoE combine) | the model's own arithmetic | — |
 | Matmul precision for float32 operands | `jax.default_matmul_precision` around setup and the step (`train/loop.py`) | `matmul_precision` |
-| Quantized (int4 / int8 / fp4 / fp8) matmuls | `infra.quantization.maybe_quantize`, after construction | `quantization` |
+| Quantized (int4 / int8 / fp4 / fp8 / MX) matmuls | `infra.quantization.maybe_quantize`, after construction | `quantization` |
 
 `matmul_precision` matters only when matmul operands are float32: on TPU `default` runs them as
 one bfloat16 pass, `highest` as full float32. With bfloat16 compute it changes nothing, as in
@@ -92,22 +92,33 @@ stack. The converse is checked too: a module under the stack that holds a weight
 of those layers is refused by name rather than left in full precision silently. Today that is
 Qwen3-VL, whose language-model attention still uses a hand-rolled `DenseGeneral` (rule 1).
 
-| `quantization=` | weights, activations | gradients |
-| :---- | :---- | :---- |
-| `int4` | int4 | int4 |
-| `int8` | int8 | int8 |
-| `fp4` | float4_e2m1fn | float4_e2m1fn |
-| `fp8`, `fp8_e4m3` | float8_e4m3fn | float8_e4m3fn |
-| `fp8_e5m2` | float8_e5m2 | float8_e5m2 |
-| `fp8_full` | float8_e4m3fn | float8_e5m2 |
+| `quantization=` | weights, activations | gradients | backend |
+| :---- | :---- | :---- | :---- |
+| `int4` | int4 | int4 | qwix |
+| `int8` | int8 | int8 | qwix |
+| `fp4` | float4_e2m1fn | float4_e2m1fn | qwix |
+| `fp8`, `fp8_e4m3` | float8_e4m3fn | float8_e4m3fn | qwix |
+| `fp8_e5m2` | float8_e5m2 | float8_e5m2 | qwix |
+| `fp8_full` | float8_e4m3fn | float8_e5m2 | qwix |
+| `jax_mxfp8` | float8_e4m3fn (E8M0, block 32) | same, or `jax_mx_gradient_mode` | `jax.nn.scaled_dot_general` |
+| `jax_mxfp4` | float4_e2m1fn (E8M0, block 32) | same, or `jax_mx_gradient_mode` | `jax.nn.scaled_dot_general` |
 
-The names mean what they mean in legacy's qwix path. Quantization requires
-`use_qwix_quantization=true`: with it false, legacy trains the same config with AQT, which m3
-doesn't have, so m3 refuses rather than switching recipe. On TPU7x, XLA compiles the `int4`
+The names mean what they mean in legacy MaxText. The qwix recipes (`int4` / `int8` / `fp4` / `fp8*`)
+require `use_qwix_quantization=true`: with it false, legacy trains the same config with AQT, which
+m3 doesn't have, so m3 refuses rather than switching recipe. On TPU7x, XLA compiles the `int4`
 matmuls with float8_e4m3fn operands, which hold every int4 value exactly.
 
-Scales are dynamic, calibration absmax. `quantization` and `quantize_router_proj` are the legacy
-quantization fields m3 reads. A config that turns on a legacy knob m3 does not implement — `quantize_logits_proj`,
+`jax_mxfp8` and `jax_mxfp4` (`mxfp4` needs JAX >= 0.12) use qwix's interception machinery to route
+the same planned projections to `jax.nn.scaled_dot_general`, with `use_qwix_quantization=false`
+(the default, matching legacy `pyconfig`). Set `jax_mx_gradient_mode=mxfp8` or `mxfp4` to override
+the gradient format; every contracting dimension across forward, input-gradient, and weight-gradient
+GEMMs must be a multiple of the block size (32). On GPU JAX lowers `scaled_dot_general` to native
+block-scaled GEMMs (cuDNN on Blackwell CUDA, `lax.scaled_dot` on ROCm); on CPU and single-chip TPU
+it dequantizes before the GEMM. Multi-chip TPU is refused because `scaled_dot_general` uses JAX
+`custom_partitioning`, which `libtpu` does not support (`jax-ml/jax#38196`).
+
+Scales are dynamic (absmax for qwix, per-block E8M0 for MX). `quantization`, `quantize_router_proj`,
+and `jax_mx_gradient_mode` are the legacy quantization fields m3 reads. A config that turns on a legacy knob m3 does not implement — `quantize_logits_proj`,
 `quantize_mtp`, `sa_qproj_bwd_bf16`, a non-absmax calibration method, weight-gradient tiling,
 block-scaled weights (`weight_block_size`), `unquantized_modules`, sparsity, batch-split — is refused rather than trained with a recipe other than the one it names;
 so is `grad_dtype` other than float32 in the loop. Rather than run qwix's eager initialization pass, the transform
@@ -115,7 +126,7 @@ traces one forward pass of the training shape and requires one matmul in the rec
 planned projection; a model with no projections under `decoder/layers` is refused, not trained
 unquantized. Not yet: MoE grouped matmuls (they will join the plan through `ragged_dot`; the
 Pallas executors need in-kernel quantization), fp8 attention (a kernel feature, not a qwix rule),
-OCP MX (`jax_mxfp8` / `jax_mxfp4`), static scales, and weight-only quantization for serving. The legacy drivers
+static scales, and weight-only quantization for serving. The legacy drivers
 (`model_creation_utils.create_model`) do not apply m3 transforms yet.
 
 ## Sharding
