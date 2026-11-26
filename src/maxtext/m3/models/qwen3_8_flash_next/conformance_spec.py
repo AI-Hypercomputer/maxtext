@@ -76,6 +76,7 @@ _QWEN3_8_MINI_CFG: dict[str, Any] = {
     "qsa_indexer_approx_topk": False,
     "sa_ignore_segment_ids": False,
     "logical_global_batch_size_to_load": None,
+    "compound_fsdp_ep": False,
     "mlp_dim": 32,
     "moe_mlp_dim": 16,
     "num_experts": _NUM_EXPERTS,
@@ -198,7 +199,8 @@ class _ProjectedSharding(m3_sharding.DefaultSharding):
   """Projects parameter `PartitionSpec`s onto a 4-axis topology `AbstractMesh` during 0-HBM `nnx.eval_shape`."""
 
   def __init__(self, target_mesh: jax.sharding.AbstractMesh):
-    self._target_mesh = target_mesh
+    super().__init__()
+    object.__setattr__(self, "_target_mesh", target_mesh)
 
   def __call__(
       self,

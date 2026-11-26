@@ -502,6 +502,8 @@ class DefaultSharding(Sharding):
   activations along sequence).
   """
 
+  compound_fsdp_ep: bool = False
+
   def map_axis(self, axis: str, tensor_name: str, tensor_type: TensorType) -> MeshAxes:
     match axis, tensor_type:
       case "batch", TensorType.ACTIVATION:
@@ -518,10 +520,12 @@ class DefaultSharding(Sharding):
         return ("fsdp", "fsdp_transpose", "context", "expert")
       case ("conv_channels" | "ngram_vocab"), TensorType.ACTIVATION:
         return None
-      case "experts", _:
+      case "experts", TensorType.WEIGHT:
+        return ("fsdp", "fsdp_transpose", "context", "expert") if self.compound_fsdp_ep else "expert"
+      case "experts", TensorType.ACTIVATION:
         return "expert"
       case "expert_embed", TensorType.WEIGHT:
-        return ("fsdp", "fsdp_transpose", "context")
+        return None if self.compound_fsdp_ep else ("fsdp", "fsdp_transpose", "context")
       case "expert_embed", TensorType.ACTIVATION:
         return None
       case ("heads" | "kv_heads" | "mlp" | "expert_mlp" | "vocab"), _:
@@ -571,29 +575,36 @@ SHARDING_PRESETS: dict[str, type[DefaultSharding]] = {
 }
 
 
-def sharding_preset_from_name(name: str | DefaultSharding | None = None) -> DefaultSharding:
+def sharding_preset_from_name(
+    name: str | DefaultSharding | None = None,
+    *,
+    compound_fsdp_ep: bool = False,
+) -> DefaultSharding:
   """Resolves a `DefaultSharding` strategy preset by name or instance."""
   if isinstance(name, DefaultSharding):
+    if compound_fsdp_ep and not name.compound_fsdp_ep:
+      return dataclasses.replace(name, compound_fsdp_ep=True)
     return name
   raw = getattr(name, "value", name)
   if raw is None:
-    return DefaultSharding()
+    return DefaultSharding(compound_fsdp_ep=compound_fsdp_ep)
   if not isinstance(raw, str):
     raise TypeError(f"Expected str or None for sharding preset name, got {type(name).__name__}.")
   key = raw.strip().lower().replace("-", "_")
   if not key or key in ("default", "default_sharding"):
-    return DefaultSharding()
+    return DefaultSharding(compound_fsdp_ep=compound_fsdp_ep)
   if key in ("ep_as_cp", "epascp"):
-    return EPasCP()
+    return EPasCP(compound_fsdp_ep=compound_fsdp_ep)
   raise ValueError(f"Unknown m3 sharding preset {name!r}; expected one of {sorted(SHARDING_PRESETS)}.")
 
 
 def sharding_from_config(config: Any) -> DefaultSharding:
   """Builds `DefaultSharding` (or the configured `sharding_preset` subclass) from `config`."""
   preset_name = config.sharding_preset if hasattr(config, "sharding_preset") else None
+  compound = bool(config.compound_fsdp_ep) if hasattr(config, "compound_fsdp_ep") else False
   if preset_name is not None and preset_name != "":
-    return sharding_preset_from_name(preset_name)
-  return DefaultSharding()
+    return sharding_preset_from_name(preset_name, compound_fsdp_ep=compound)
+  return DefaultSharding(compound_fsdp_ep=compound)
 
 
 def _resolve_axis_sizes(
