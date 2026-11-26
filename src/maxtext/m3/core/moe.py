@@ -32,6 +32,8 @@ attribute across `nnx.split`, `nnx.merge`, `jax.jit`, and layer scan transforms.
 """
 
 from collections.abc import Callable
+import contextlib
+import contextvars
 import dataclasses
 import functools
 import math
@@ -54,11 +56,38 @@ SHARDED_EXECUTOR_KINDS: tuple[str, ...] = ("gmm_v2", "tokamax")
 
 _COMBINE_DTYPE = jnp.float32
 _TOKAMAX_M_ALIGN = 256
+_SC_PINNING_ENABLED: contextvars.ContextVar[bool] = contextvars.ContextVar("_m3_moe_sc_pinning", default=False)
 _DRHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
     dot_dimension_numbers=(((0,), (0,)), ((), ())),
     lhs_ragged_dimensions=(0,),
     rhs_group_dimensions=(),
 )
+
+
+@contextlib.contextmanager
+def use_sparsecore_pinning(enabled: bool = True):
+  """Context manager enabling Dual-SparseCore collective pinning (`SC0` for EP, `SC1` for FSDP)."""
+  token = _SC_PINNING_ENABLED.set(bool(enabled))
+  try:
+    yield
+  finally:
+    _SC_PINNING_ENABLED.reset(token)
+
+
+def on_sparse_core(fn: Callable[..., Any], core_id: int | None, x: jax.Array | None = None) -> Callable[..., Any]:
+  """Wraps `fn` in a TPU SparseCore `compute_on` region pinned to `core_id` (`0` or `1`) when eligible."""
+  if core_id is None or core_id < 0:
+    return fn
+  if x is not None and (x.ndim < 2 or x.shape[-1] < 128):
+    return fn
+  from jax.experimental.compute_on import compute_on  # pylint: disable=import-outside-toplevel
+
+  return compute_on(
+      fn,
+      compute_type="tpu_sparsecore",
+      out_memory_spaces=jax.memory.Space.Device,
+      compiler_options={"sparse_core_config": {"core_ids": [int(core_id)]}},
+  )
 
 
 def _align_up(value: int, multiple: int) -> int:
@@ -320,13 +349,15 @@ def _ep_all_gather_aligned128(arr: jax.Array, ep_axis: str, *, is_tpu: bool = Fa
   return on_tensor_core(_impl, is_tpu)(arr)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3))
 def _ep_all_gather_weights_aligned128(
     arr: jax.Array,
     ep_axis: str,
     is_tpu: bool = False,
+    sc_core: int | None = None,
 ) -> jax.Array:
-  """All-gathers routing weights on TensorCore in forward; `psum_scatter`s cotangents in 128-lane tiles in backward."""
+  """All-gathers routing weights on TensorCore in forward; `psum_scatter`s cotangents on SparseCore in backward."""
+  del sc_core
   return _ep_all_gather_aligned128(arr, ep_axis, is_tpu=is_tpu)
 
 
@@ -334,14 +365,19 @@ def _ep_all_gather_weights_aligned128_fwd(
     arr: jax.Array,
     ep_axis: str,
     is_tpu: bool = False,
+    sc_core: int | None = None,
 ) -> tuple[jax.Array, tuple[tuple[int, ...], jax.Array]]:
   """Forward rule for `_ep_all_gather_weights_aligned128`."""
-  return _ep_all_gather_weights_aligned128(arr, ep_axis, is_tpu), (arr.shape, jnp.zeros((), dtype=arr.dtype))
+  return _ep_all_gather_weights_aligned128(arr, ep_axis, is_tpu, sc_core), (
+      arr.shape,
+      jnp.zeros((), dtype=arr.dtype),
+  )
 
 
 def _ep_all_gather_weights_aligned128_bwd(
     ep_axis: str,
     is_tpu: bool,
+    sc_core: int | None,
     res: tuple[tuple[int, ...], jax.Array],
     g_ag: jax.Array,
 ) -> tuple[jax.Array]:
@@ -358,7 +394,11 @@ def _ep_all_gather_weights_aligned128_bwd(
   g_2d = jnp.reshape(g_ag.astype(rs_dtype), (ep_count, n_loc))
   g_pad = jnp.pad(g_2d, ((0, 0), (0, n_pad - n_loc))) if n_pad > n_loc else g_2d
   g_aligned = jnp.reshape(g_pad, (ep_count * (n_pad // 128), 128))
-  g_loc_2d = jax.lax.psum_scatter(g_aligned, ep_axis, scatter_dimension=0, tiled=True)
+
+  def _rs_fn(x: jax.Array) -> jax.Array:
+    return jax.lax.psum_scatter(x, ep_axis, scatter_dimension=0, tiled=True)
+
+  g_loc_2d = on_sparse_core(_rs_fn, sc_core, g_aligned)(g_aligned)
   g_loc_flat = jnp.reshape(g_loc_2d, (n_pad,))[:n_loc]
   return (jnp.reshape(g_loc_flat, orig_shape).astype(orig_dtype),)
 
@@ -369,11 +409,12 @@ _ep_all_gather_weights_aligned128.defvjp(
 )
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4))
 def _ep_gather_tokens(
     x_loc: jax.Array,
     ep_axis: str,
     bwd_dtype: Any,
+    sc_core: int | None = None,
     bwd_on_tc: bool = False,
     after: Any = None,
 ) -> jax.Array:
@@ -381,23 +422,29 @@ def _ep_gather_tokens(
   del bwd_dtype, bwd_on_tc
   if after is not None:
     x_loc, _ = jax.lax.optimization_barrier((x_loc, jax.lax.stop_gradient(after)))
-  return jax.lax.all_gather(x_loc, ep_axis, axis=0, tiled=True)
+
+  def _ag_fn(arr: jax.Array) -> jax.Array:
+    return jax.lax.all_gather(arr, ep_axis, axis=0, tiled=True)
+
+  return on_sparse_core(_ag_fn, sc_core, x_loc)(x_loc)
 
 
 def _ep_gather_tokens_fwd(
     x_loc: jax.Array,
     ep_axis: str,
     bwd_dtype: Any,
+    sc_core: int | None = None,
     bwd_on_tc: bool = False,
     after: Any = None,
 ) -> tuple[jax.Array, None]:
   """Forward rule for `_ep_gather_tokens`."""
-  return _ep_gather_tokens(x_loc, ep_axis, bwd_dtype, bwd_on_tc, after), None
+  return _ep_gather_tokens(x_loc, ep_axis, bwd_dtype, sc_core, bwd_on_tc, after), None
 
 
 def _ep_gather_tokens_bwd(
     ep_axis: str,
     bwd_dtype: Any,
+    sc_core: int | None,
     bwd_on_tc: bool,
     _: None,
     g_ag: jax.Array,
@@ -410,17 +457,18 @@ def _ep_gather_tokens_bwd(
 
   if bwd_on_tc:
     return on_tensor_core(_rs_fn, True)(g_cast), None
-  return _rs_fn(g_cast), None
+  return on_sparse_core(_rs_fn, sc_core, g_cast)(g_cast), None
 
 
 _ep_gather_tokens.defvjp(_ep_gather_tokens_fwd, _ep_gather_tokens_bwd)
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4))
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1, 2, 3, 4, 5))
 def _ep_combine_tokens(
     y_ag: jax.Array,
     ep_axis: str,
     use_fp8_bwd: bool,
+    sc_core: int | None = None,
     is_tpu: bool = False,
     fwd_on_tc: bool = False,
 ) -> jax.Array:
@@ -432,23 +480,25 @@ def _ep_combine_tokens(
 
   if fwd_on_tc and is_tpu:
     return on_tensor_core(_rs_fn, True)(y_ag)
-  return _rs_fn(y_ag)
+  return on_sparse_core(_rs_fn, sc_core, y_ag)(y_ag)
 
 
 def _ep_combine_tokens_fwd(
     y_ag: jax.Array,
     ep_axis: str,
     use_fp8_bwd: bool,
+    sc_core: int | None = None,
     is_tpu: bool = False,
     fwd_on_tc: bool = False,
 ) -> tuple[jax.Array, None]:
   """Forward rule for `_ep_combine_tokens`."""
-  return _ep_combine_tokens(y_ag, ep_axis, use_fp8_bwd, is_tpu, fwd_on_tc), None
+  return _ep_combine_tokens(y_ag, ep_axis, use_fp8_bwd, sc_core, is_tpu, fwd_on_tc), None
 
 
 def _ep_combine_tokens_bwd(
     ep_axis: str,
     use_fp8_bwd: bool,
+    sc_core: int | None,
     is_tpu: bool,
     fwd_on_tc: bool,
     _: None,
@@ -456,15 +506,19 @@ def _ep_combine_tokens_bwd(
 ) -> tuple[jax.Array]:
   """Backward rule all-gathering combined token cotangents in FP8 `e5m2` or BF16."""
   del fwd_on_tc
+
+  def _ag_fn(arr: jax.Array) -> jax.Array:
+    return jax.lax.all_gather(arr, ep_axis, axis=0, tiled=True)
+
   if not use_fp8_bwd:
-    return (jax.lax.all_gather(g_loc, ep_axis, axis=0, tiled=True),)
+    return (on_sparse_core(_ag_fn, sc_core, g_loc)(g_loc),)
   g_qa = qpl.quantize(
       g_loc.astype(jnp.float32),
       qtype=jnp.float8_e5m2,
       channelwise_axes=(0,),
       calibration_method="absmax",
   )
-  qval_ag = jax.lax.all_gather(g_qa.qvalue, ep_axis, axis=0, tiled=True)
+  qval_ag = on_sparse_core(_ag_fn, sc_core, g_qa.qvalue)(g_qa.qvalue)
   scale_ag_1d = _ep_all_gather_aligned128(jnp.reshape(g_qa.scale, (-1,)), ep_axis, is_tpu=is_tpu)
   scale_ag = jnp.reshape(scale_ag_1d, (qval_ag.shape[0],) + (1,) * (qval_ag.ndim - 1))
   return ((qval_ag.astype(jnp.float32) * scale_ag).astype(g_loc.dtype),)
@@ -733,6 +787,7 @@ class MoEExecutor:
   ep_combine_mode: str = "auto"
   row_scale_placement: str = "tc"
   tc_3d_gmm: bool = False
+  sc_pinning: bool = False
   fused_bwd_quant: bool = False
   tc_ragged_flatten_block_size: int = 0
 
@@ -777,6 +832,35 @@ class MoEExecutor:
         x,
         weights,
         indices,
+        gate_up_proj,
+        down_proj,
+        executor=self,
+        activation=activation,
+        swiglu_limit=swiglu_limit,
+    )
+
+  def fused_dual(
+      self,
+      x0: jax.Array,
+      weights0: jax.Array,
+      indices0: jax.Array,
+      x1: jax.Array,
+      weights1: jax.Array,
+      indices1: jax.Array,
+      gate_up_proj: jax.Array,
+      down_proj: jax.Array,
+      *,
+      activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
+      swiglu_limit: float | None = None,
+  ) -> tuple[jax.Array, jax.Array]:
+    """Executes two staggered microbatches sharing a single routed-weight gather/QAG and backward reduce-scatter."""
+    return routed_experts_fused_dual(
+        x0,
+        weights0,
+        indices0,
+        x1,
+        weights1,
+        indices1,
         gate_up_proj,
         down_proj,
         executor=self,
@@ -1203,6 +1287,7 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
   bwd_wgrad_overlap = bool(getattr(config, "moe_bwd_wgrad_overlap", False))
   ep_allgather_tc = bool(getattr(config, "moe_ep_allgather_tc", False))
   moe_fp8 = bool(getattr(config, "moe_fp8", False))
+  sc_pinning = bool(getattr(config, "moe_sparsecore_pinning", False))
   ep_combine_mode = str(getattr(config, "moe_ep_combine_mode", "auto") or "auto")
   row_scale_placement = str(getattr(config, "moe_row_scale_placement", "tc") or "tc")
   tc_3d_gmm = bool(getattr(config, "moe_tc_3d_gmm", False))
@@ -1243,6 +1328,7 @@ def moe_from_config(config: Any, sharding: Sharding | None = None) -> MoEExecuto
       bwd_wgrad_overlap=bwd_wgrad_overlap,
       ep_allgather_tc=ep_allgather_tc,
       moe_fp8=moe_fp8,
+      sc_pinning=sc_pinning,
       ep_combine_mode=ep_combine_mode,
       row_scale_placement=row_scale_placement,
       tc_3d_gmm=tc_3d_gmm,
@@ -1689,7 +1775,8 @@ def _sharded_grouped(
     activation: Callable[[jax.Array], jax.Array],
     swiglu_limit: float | None,
     executor: MoEExecutor,
-) -> jax.Array:
+    second_batch: tuple[jax.Array, jax.Array, jax.Array] | None = None,
+) -> Any:
   """Distributed `shard_map` execution supporting `EP >= 1`, `TP >= 1`, and `FSDP >= 1`."""
   mesh = kernels.mesh_in_scope()
   is_tpu = kernels.is_tpu_mesh(mesh)
@@ -1820,12 +1907,32 @@ def _sharded_grouped(
       return tuple(_ste_quantize_routed_weight(p) for p in out_projs)
     return out_projs
 
-  def per_device(x_sh: jax.Array, weights_sh: jax.Array, indices_sh: jax.Array, *proj_sh: jax.Array) -> jax.Array:
-    proj_tuple: tuple[jax.Array, ...] = tuple(proj_sh)
-    if executor.bwd_wgrad_overlap:
-      x_sh, proj_tuple = _backward_wgrad_tie(x_sh, proj_tuple)
-    local_projs = _slice_local_projections(proj_tuple)
+  pin_sc = (executor.sc_pinning or _SC_PINNING_ENABLED.get()) and is_tpu
+  sc0_id = 0 if pin_sc else None
+  sc1_id = 1 if pin_sc else None
 
+  def _finish_ep_combine(
+      combined_ag: jax.Array,
+      ep_axis_tc: str,
+      b_loc: int,
+      seq_len: int,
+      d_dim: int,
+  ) -> jax.Array:
+    if ep_size > 1:
+      tc_combine = is_tpu and executor.ep_combine_mode == "tensorcore"
+      combined_loc = _ep_combine_tokens(combined_ag, ep_axis_tc, executor.moe_fp8, sc0_id, is_tpu, tc_combine)
+    else:
+      combined_loc = combined_ag
+    return jnp.reshape(combined_loc, (b_loc, seq_len, d_dim))
+
+  def _run_tokens_on_local_projs(
+      x_sh: jax.Array,
+      weights_sh: jax.Array,
+      indices_sh: jax.Array,
+      local_projs: tuple[Any, ...],
+      *,
+      defer_ep_combine: bool = False,
+  ) -> Any:
     b_loc, seq_len, d_dim = x_sh.shape
     top_k = indices_sh.shape[-1]
     num_tokens = b_loc * seq_len
@@ -1914,11 +2021,12 @@ def _sharded_grouped(
                   (ep_size, num_tokens + num_slots),
               )
           )
-          route_w_ag = _ep_all_gather_weights_aligned128(route_w_loc, ep_axis_tc, is_tpu)
+          route_w_ag = _ep_all_gather_weights_aligned128(route_w_loc, ep_axis_tc, is_tpu, sc1_id)
           qval_ag = _ep_gather_tokens(
               qa_loc.qvalue,
               ep_axis_tc,
               x_sh.dtype,
+              sc0_id,
               tc_combine_bwd,
               after=(jax.lax.bitcast_convert_type(packed_meta_ag, jnp.float32), route_w_ag),
           )
@@ -1938,11 +2046,12 @@ def _sharded_grouped(
         if ep_size > 1:
           ep_axis_tc = ep_axes[0]
           route_idx_ag = jax.lax.stop_gradient(_ep_all_gather_aligned128(route_idx_loc, ep_axis_tc, is_tpu=is_tpu))
-          route_w_ag = _ep_all_gather_weights_aligned128(route_w_loc, ep_axis_tc, is_tpu)
+          route_w_ag = _ep_all_gather_weights_aligned128(route_w_loc, ep_axis_tc, is_tpu, sc1_id)
           qval_ag = _ep_gather_tokens(
               x_tok,
               ep_axis_tc,
               x_sh.dtype,
+              sc0_id,
               tc_combine_bwd,
               after=(jax.lax.bitcast_convert_type(route_idx_ag, jnp.float32), route_w_ag),
           )
@@ -2100,12 +2209,9 @@ def _sharded_grouped(
             jnp.zeros((total_ag_tokens, d_dim), dtype=_COMBINE_DTYPE).at[safe_tok_out].add(valid_out).astype(x_sh.dtype)
         )
 
-      if ep_size > 1:
-        tc_combine = is_tpu and executor.ep_combine_mode == "tensorcore"
-        combined_loc = _ep_combine_tokens(combined_ag, ep_axis_tc, executor.moe_fp8, is_tpu, tc_combine)
-      else:
-        combined_loc = combined_ag
-      return jnp.reshape(combined_loc, (b_loc, seq_len, d_dim))
+      if defer_ep_combine:
+        return combined_ag, ep_axis_tc
+      return _finish_ep_combine(combined_ag, ep_axis_tc, b_loc, seq_len, d_dim)
 
     if ep_size == 1:
       if executor.ragged_buffer_factor > 0.0:
@@ -2311,6 +2417,56 @@ def _sharded_grouped(
       combined = jax.lax.psum(combined, tp_axes)
     return jnp.reshape(combined, (b_loc, seq_len, d_dim))
 
+  def per_device(x_sh: jax.Array, weights_sh: jax.Array, indices_sh: jax.Array, *proj_sh: jax.Array) -> jax.Array:
+    proj_tuple: tuple[jax.Array, ...] = tuple(proj_sh)
+    if executor.bwd_wgrad_overlap:
+      x_sh, proj_tuple = _backward_wgrad_tie(x_sh, proj_tuple)
+    local_projs = _slice_local_projections(proj_tuple)
+    return _run_tokens_on_local_projs(x_sh, weights_sh, indices_sh, local_projs)
+
+  proj_in = tuple(kernels.ensure_explicit_spec(p, spec, mesh) for p, spec in zip(projections, proj_specs))
+  if second_batch is not None:
+    x1, weights1, indices1 = second_batch
+
+    def per_device_dual(
+        x0_sh: jax.Array,
+        w0_sh: jax.Array,
+        idx0_sh: jax.Array,
+        x1_sh: jax.Array,
+        w1_sh: jax.Array,
+        idx1_sh: jax.Array,
+        *proj_sh: jax.Array,
+    ) -> tuple[jax.Array, jax.Array]:
+      proj_tuple: tuple[jax.Array, ...] = tuple(proj_sh)
+      if executor.bwd_wgrad_overlap:
+        x0_sh, proj_tuple = _backward_wgrad_tie(x0_sh, proj_tuple)
+      local_projs = _slice_local_projections(proj_tuple)
+      if executor.ep_allgather_tc:
+        comb_ag_0, ep_ax_0 = _run_tokens_on_local_projs(x0_sh, w0_sh, idx0_sh, local_projs, defer_ep_combine=True)
+        comb_ag_0, x1_sh = jax.lax.optimization_barrier((comb_ag_0, x1_sh))
+        out0 = _finish_ep_combine(comb_ag_0, ep_ax_0, x0_sh.shape[0], x0_sh.shape[1], x0_sh.shape[2])
+        out1 = _run_tokens_on_local_projs(x1_sh, w1_sh, idx1_sh, local_projs, defer_ep_combine=False)
+        return out0, out1
+      out0 = _run_tokens_on_local_projs(x0_sh, w0_sh, idx0_sh, local_projs)
+      out0, x1_sh = jax.lax.optimization_barrier((out0, x1_sh))
+      out1 = _run_tokens_on_local_projs(x1_sh, w1_sh, idx1_sh, local_projs)
+      return out0, out1
+
+    sharded_dual_fn = jax.shard_map(
+        per_device_dual,
+        mesh=mesh,
+        in_specs=(tokens_spec, tokens_spec, tokens_spec, tokens_spec, tokens_spec, tokens_spec, *proj_specs),
+        out_specs=(tokens_spec, tokens_spec),
+        check_vma=False,
+    )
+    x0_in = kernels.ensure_explicit_spec(x, tokens_spec, mesh)
+    w0_in = kernels.ensure_explicit_spec(weights, tokens_spec, mesh)
+    idx0_in = kernels.ensure_explicit_spec(indices, tokens_spec, mesh)
+    x1_in = kernels.ensure_explicit_spec(x1, tokens_spec, mesh)
+    w1_in = kernels.ensure_explicit_spec(weights1, tokens_spec, mesh)
+    idx1_in = kernels.ensure_explicit_spec(indices1, tokens_spec, mesh)
+    return sharded_dual_fn(x0_in, w0_in, idx0_in, x1_in, w1_in, idx1_in, *proj_in)
+
   sharded_fn = jax.shard_map(
       per_device,
       mesh=mesh,
@@ -2321,7 +2477,6 @@ def _sharded_grouped(
   x_in = kernels.ensure_explicit_spec(x, tokens_spec, mesh)
   weights_in = kernels.ensure_explicit_spec(weights, tokens_spec, mesh)
   indices_in = kernels.ensure_explicit_spec(indices, tokens_spec, mesh)
-  proj_in = tuple(kernels.ensure_explicit_spec(p, spec, mesh) for p, spec in zip(projections, proj_specs))
   return sharded_fn(x_in, weights_in, indices_in, *proj_in)
 
 
@@ -2482,3 +2637,51 @@ def routed_experts_fused(
     case other:
       raise ValueError(f"Unknown MoE executor kind {other!r}; expected 'dense', 'ragged_dot', 'gmm_v2', or 'tokamax'.")
   return checkpoint_name(out.astype(x.dtype), "moe_routed_output")
+
+
+def routed_experts_fused_dual(
+    x0: jax.Array,
+    weights0: jax.Array,
+    indices0: jax.Array,
+    x1: jax.Array,
+    weights1: jax.Array,
+    indices1: jax.Array,
+    gate_up_proj: jax.Array,
+    down_proj: jax.Array,
+    *,
+    executor: MoEExecutor = DENSE,
+    activation: Callable[[jax.Array], jax.Array] = jax.nn.silu,
+    swiglu_limit: float | None = None,
+) -> tuple[jax.Array, jax.Array]:
+  """Executes two staggered microbatches sharing a single routed-weight gather/QAG and backward reduce-scatter."""
+  num_experts = gate_up_proj.shape[0]
+  _validate_routed_inputs(x0, weights0, indices0, num_experts)
+  _validate_routed_inputs(x1, weights1, indices1, num_experts)
+  if x0.shape != x1.shape or weights0.shape != weights1.shape or indices0.shape != indices1.shape:
+    raise ValueError(f"Dual microbatches must have matching shapes; got {x0.shape} vs {x1.shape}.")
+  if executor.kind in SHARDED_EXECUTOR_KINDS:
+    projections = (gate_up_proj.astype(x0.dtype), down_proj.astype(x0.dtype))
+    out0, out1 = _sharded_grouped(
+        x0,
+        weights0,
+        indices0,
+        projections,
+        fused=True,
+        num_experts=num_experts,
+        activation=activation,
+        swiglu_limit=swiglu_limit,
+        executor=executor,
+        second_batch=(x1, weights1, indices1),
+    )
+    return (
+        checkpoint_name(out0.astype(x0.dtype), "moe_routed_output"),
+        checkpoint_name(out1.astype(x1.dtype), "moe_routed_output"),
+    )
+  out0 = routed_experts_fused(
+      x0, weights0, indices0, gate_up_proj, down_proj, executor=executor, activation=activation, swiglu_limit=swiglu_limit
+  )
+  out0, x1 = jax.lax.optimization_barrier((out0, x1))
+  out1 = routed_experts_fused(
+      x1, weights1, indices1, gate_up_proj, down_proj, executor=executor, activation=activation, swiglu_limit=swiglu_limit
+  )
+  return out0, out1

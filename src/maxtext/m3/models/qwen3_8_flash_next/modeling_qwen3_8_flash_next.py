@@ -48,6 +48,7 @@ import numpy as np
 from maxtext.m3.core import kernels as m3_kernels
 from maxtext.m3.core import moe as m3_moe
 from maxtext.m3.core import remat as m3_core_remat
+from maxtext.m3.infra import batch_split as m3_batch_split
 from maxtext.m3.core.sharding import (
     DefaultSharding,
     Sharding,
@@ -2319,6 +2320,79 @@ class Qwen3_8Experts(nnx.Module):
 
     return out_3d.reshape(orig_shape).astype(orig_dtype)
 
+  def call_dual(
+      self,
+      hidden_states_0: jax.Array,
+      top_k_index_0: jax.Array,
+      top_k_weights_0: jax.Array,
+      hidden_states_1: jax.Array,
+      top_k_index_1: jax.Array,
+      top_k_weights_1: jax.Array,
+  ) -> tuple[jax.Array, jax.Array]:
+    """Dispatches two staggered microbatches sharing a single routed-weight gather/QAG and backward reduce-scatter."""
+    orig_dtype = hidden_states_0.dtype
+    orig_shape = hidden_states_0.shape
+    if hidden_states_0.shape != hidden_states_1.shape:
+      raise ValueError(
+          f"call_dual requires matching microbatch shapes; got {hidden_states_0.shape} vs {hidden_states_1.shape}."
+      )
+
+    def _to_3d(h_in: jax.Array, w_in: jax.Array, idx_in: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
+      if h_in.ndim == 2:
+        return h_in[:, None, :].astype(self.dtype), w_in[:, None, :].astype(self.dtype), idx_in[:, None, :]
+      if h_in.ndim == 3:
+        return h_in.astype(self.dtype), w_in.astype(self.dtype), idx_in
+      raise ValueError(f"Expected 2D or 3D hidden_states; got {h_in.shape}.")
+
+    x0_3d, w0_3d, idx0_3d = _to_3d(hidden_states_0, top_k_weights_0, top_k_index_0)
+    x1_3d, w1_3d, idx1_3d = _to_3d(hidden_states_1, top_k_weights_1, top_k_index_1)
+    w_gate_up = jnp.asarray(self.gate_up_proj[...], dtype=self.dtype)
+    w_down = jnp.asarray(self.down_proj[...], dtype=self.dtype)
+
+    def _run_dual_with_mesh(active_mesh: Any) -> tuple[jax.Array, jax.Array]:
+      exec_cfg = self.executor
+      x0_in, w0_in, idx0_in = x0_3d, w0_3d, idx0_3d
+      x1_in, w1_in, idx1_in = x1_3d, w1_3d, idx1_3d
+      reshaped_to_tokens = False
+      if exec_cfg.kind in m3_moe.SHARDED_EXECUTOR_KINDS:
+        batch_ax = m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.batch)
+        batch_shards = m3_kernels.mesh_axis_size(active_mesh, batch_ax)
+        ep_size = m3_kernels.mesh_axis_size(active_mesh, m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.experts))
+        tp_size = m3_kernels.mesh_axis_size(active_mesh, m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.mlp))
+        length_ax = m3_kernels.resolve_mesh_axes(active_mesh, exec_cfg.length)
+        if x0_in.shape[1] % m3_kernels.mesh_axis_size(active_mesh, length_ax) != 0:
+          exec_cfg = dataclasses.replace(exec_cfg, length=None)
+        if x0_in.shape[0] % batch_shards != 0:
+          total_tokens = x0_in.shape[0] * x0_in.shape[1]
+          if total_tokens % batch_shards == 0:
+            x0_in = x0_in.reshape(total_tokens, 1, x0_in.shape[2])
+            w0_in = w0_in.reshape(total_tokens, 1, w0_in.shape[2])
+            idx0_in = idx0_in.reshape(total_tokens, 1, idx0_in.shape[2])
+            x1_in = x1_in.reshape(total_tokens, 1, x1_in.shape[2])
+            w1_in = w1_in.reshape(total_tokens, 1, w1_in.shape[2])
+            idx1_in = idx1_in.reshape(total_tokens, 1, idx1_in.shape[2])
+            exec_cfg = dataclasses.replace(exec_cfg, length=None)
+            reshaped_to_tokens = True
+          elif ep_size == 1 and tp_size == 1:
+            exec_cfg = dataclasses.replace(exec_cfg, batch=None)
+      y0, y1 = exec_cfg.fused_dual(x0_in, w0_in, idx0_in, x1_in, w1_in, idx1_in, w_gate_up, w_down)
+      if reshaped_to_tokens:
+        y0 = y0.reshape(x0_3d.shape)
+        y1 = y1.reshape(x1_3d.shape)
+      return y0, y1
+
+    amb_mesh = jax.sharding.get_abstract_mesh()
+    if amb_mesh.empty:
+      fallback_exec = (
+          dataclasses.replace(self.executor, kind="ragged_dot")
+          if self.executor.kind in m3_moe.SHARDED_EXECUTOR_KINDS
+          else self.executor
+      )
+      out0, out1 = fallback_exec.fused_dual(x0_3d, w0_3d, idx0_3d, x1_3d, w1_3d, idx1_3d, w_gate_up, w_down)
+    else:
+      out0, out1 = _run_dual_with_mesh(amb_mesh)
+    return out0.reshape(orig_shape).astype(orig_dtype), out1.reshape(orig_shape).astype(orig_dtype)
+
   def reference_forward(
       self,
       hidden_states: jax.Array,
@@ -3355,6 +3429,242 @@ def apply_scanned_cycles(
   return res[0]
 
 
+def _run_dual_qwen3_8_sublayer(
+    layer: Qwen3_8DecoderLayer,
+    h0: jax.Array,
+    h1: jax.Array,
+    *,
+    eff_policy: Callable[..., Any] | None,
+    return_aux: bool,
+    compact_router_aux: bool = False,
+    positions: jax.Array | None = None,
+    position_embeddings: tuple[jax.Array, jax.Array] | None = None,
+    conv_mask: jax.Array | None = None,
+    ple_input_ids: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    router_aux_mask: jax.Array | None = None,
+    group_base: int = 100,
+) -> tuple[tuple[jax.Array, jax.Array], dict[str, Any] | None]:
+  """Executes one unscanned sublayer on `(h0, h1)` with Dual-SparseCore overlap and single-checkpoint remat."""
+  ple = getattr(layer, "ple", None)
+  ple_embeds = (
+      ple.ple_embedding(ple_input_ids)
+      if (eff_policy is not None and ple is not None and ple_input_ids is not None)
+      else None
+  )
+  dyn_kw = {
+      k: v
+      for k, v in (
+          ("positions", positions),
+          ("position_embeddings", position_embeddings),
+          ("conv_mask", conv_mask),
+          ("ple_input_ids", None if ple_embeds is not None else ple_input_ids),
+          ("ple_embeds", ple_embeds),
+          ("segment_ids", segment_ids),
+          ("router_aux_mask", router_aux_mask),
+      )
+      if v is not None
+  }
+  kw0, kw1 = m3_batch_split.split_sublayer_kwargs(dyn_kw)
+  if eff_policy is None:
+    return m3_batch_split.run_dual_decoder_layer_core(
+        layer,
+        h0,
+        h1,
+        kw0,
+        kw1,
+        return_aux=return_aux,
+        compact_router_aux=compact_router_aux,
+        shard_batch_fn=shard_batch,
+        compact_aux_fn=_compute_compact_router_aux_stats,
+        group_base=group_base,
+    )
+  gd, lp, lr = nnx.split(layer, nnx.Param, ...)
+
+  def _eval_dual(h0_in, h1_in, p_in, r_in, kw0_in, kw1_in):
+    mod = nnx.merge(gd, p_in, r_in)
+    out_pair = m3_batch_split.run_dual_decoder_layer_core(
+        mod,
+        h0_in,
+        h1_in,
+        kw0_in,
+        kw1_in,
+        return_aux=return_aux,
+        compact_router_aux=compact_router_aux,
+        shard_batch_fn=shard_batch,
+        compact_aux_fn=_compute_compact_router_aux_stats,
+        group_base=group_base,
+    )
+    _, _, updated_r = nnx.split(mod, nnx.Param, ...)
+    return out_pair, updated_r
+
+  out_pair, new_lr = jax.checkpoint(_eval_dual, policy=eff_policy, prevent_cse=True)(h0, h1, lp, lr, kw0, kw1)
+  if jax.tree.leaves(new_lr):
+    nnx.update(layer, new_lr)
+  return out_pair
+
+
+def run_dual_single_cycle(
+    cycle: Qwen3_8CycleBlock,
+    h0: jax.Array,
+    h1: jax.Array,
+    *,
+    eff_policy: Callable[..., Any] | None = None,
+    return_aux: bool = False,
+    compact_router_aux: bool = False,
+    positions: jax.Array | None = None,
+    position_embeddings: tuple[jax.Array, jax.Array] | None = None,
+    conv_mask: jax.Array | None = None,
+    ple_input_ids: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    router_aux_mask: jax.Array | None = None,
+    sharding: Sharding | None = None,
+) -> Any:
+  """Executes one unstacked 4-layer `Qwen3_8CycleBlock` (`first_cycle`) on microbatches `(h0, h1)`."""
+  cyc_sharding = sharding or cycle.gdn_0.sharding
+  h0 = shard_batch(h0, cyc_sharding)
+  h1 = shard_batch(h1, cyc_sharding)
+  aux_list = []
+  for idx, name in enumerate(("gdn_0", "gdn_1", "gdn_2", "qsa_3")):
+    with jax.named_scope(name):
+      (h0_next, h1_next), a = _run_dual_qwen3_8_sublayer(
+          getattr(cycle, name),
+          h0,
+          h1,
+          eff_policy=eff_policy,
+          return_aux=return_aux,
+          compact_router_aux=compact_router_aux,
+          positions=positions,
+          position_embeddings=position_embeddings,
+          conv_mask=conv_mask,
+          ple_input_ids=ple_input_ids,
+          segment_ids=segment_ids,
+          router_aux_mask=router_aux_mask,
+          group_base=100 + 10 * idx,
+      )
+    h0 = shard_batch(h0_next, cyc_sharding)
+    h1 = shard_batch(h1_next, cyc_sharding)
+    if return_aux:
+      aux_list.append(a)
+  return ((h0, h1), aux_list) if return_aux else (h0, h1)
+
+
+def apply_dual_scanned_cycles(
+    cycles: Qwen3_8CycleBlock,
+    h0: jax.Array,
+    h1: jax.Array,
+    *,
+    num_cycles: int,
+    scan_layers: bool = True,
+    positions: jax.Array | None = None,
+    position_embeddings: tuple[jax.Array, jax.Array] | None = None,
+    conv_mask: jax.Array | None = None,
+    segment_ids: jax.Array | None = None,
+    router_aux_mask: jax.Array | None = None,
+    return_aux: bool = False,
+    compact_router_aux: bool = False,
+    remat: bool = False,
+    remat_policy: Any = None,
+    sharding: Sharding | None = None,
+) -> Any:
+  """Executes `jax.lax.scan` over stacked homogeneous cycles on microbatches `(h0, h1)` with Dual-SC overlap."""
+  cyc_sharding = sharding or cycles.gdn_0.sharding
+  eff_policy = _coerce_remat_callable(remat_policy)
+  if eff_policy is None and remat:
+    eff_policy = _with_qsa_packed_mask_saved(cp.nothing_saveable)
+  if scan_layers and num_cycles == 1 and eff_policy is not None:
+    eff_policy = m3_core_remat.scan_safe_policy(eff_policy)
+  use_remat = eff_policy is not None
+
+  sub_names = ("gdn_0", "gdn_1", "gdn_2", "qsa_3")
+  sub_defs: dict[str, Any] = {}
+  sub_params: dict[str, Any] = {}
+  sub_rests: dict[str, Any] = {}
+  for name in sub_names:
+    gd, lp, lr = nnx.split(getattr(cycles, name), nnx.Param, ...)
+    sub_defs[name] = gd
+    sub_params[name] = lp
+    sub_rests[name] = lr
+
+  dyn_kw = {
+      k: v
+      for k, v in (
+          ("positions", positions),
+          ("position_embeddings", position_embeddings),
+          ("conv_mask", conv_mask),
+          ("segment_ids", segment_ids),
+          ("router_aux_mask", router_aux_mask),
+      )
+      if v is not None
+  }
+  kw0, kw1 = m3_batch_split.split_sublayer_kwargs(dyn_kw)
+
+  def _run_dual_slot(
+      slot_idx: int,
+      name: str,
+      h0_in: jax.Array,
+      h1_in: jax.Array,
+      p_slice: Any,
+      r_slice: Any,
+  ) -> tuple[tuple[jax.Array, jax.Array], dict[str, Any] | None]:
+    gd = sub_defs[name]
+    lp = jax.tree.map(_strip_cycle_axis, p_slice, is_leaf=_is_nnx_var)
+    lr = jax.tree.map(_strip_cycle_axis, r_slice, is_leaf=_is_nnx_var)
+
+    def _eval_dual_slot(x0_in, x1_in, p_in, r_in, kw0_in, kw1_in):
+      lyr = nnx.merge(gd, p_in, r_in)
+      with jax.named_scope(name):
+        return m3_batch_split.run_dual_decoder_layer_core(
+            lyr,
+            x0_in,
+            x1_in,
+            kw0_in,
+            kw1_in,
+            return_aux=return_aux,
+            compact_router_aux=compact_router_aux,
+            shard_batch_fn=shard_batch,
+            compact_aux_fn=_compute_compact_router_aux_stats,
+            group_base=200 + 10 * slot_idx,
+        )
+
+    args = (h0_in, h1_in, lp, lr, kw0, kw1)
+    if use_remat:
+      return jax.checkpoint(_eval_dual_slot, policy=eff_policy, prevent_cse=True)(*args)
+    return _eval_dual_slot(*args)
+
+  def scan_fn(carry, xs):
+    p_slices, r_slices = xs
+    c0, c1 = carry
+    c0 = shard_batch(c0, cyc_sharding)
+    c1 = shard_batch(c1, cyc_sharding)
+    slot_aux = []
+    for slot_idx, name in enumerate(sub_names):
+      (c0_next, c1_next), a_k = _run_dual_slot(slot_idx, name, c0, c1, p_slices[name], r_slices[name])
+      c0 = shard_batch(c0_next, cyc_sharding)
+      c1 = shard_batch(c1_next, cyc_sharding)
+      if return_aux:
+        slot_aux.append(a_k)
+    return (c0, c1), tuple(slot_aux) if return_aux else None
+
+  init_carry = (shard_batch(h0, cyc_sharding), shard_batch(h1, cyc_sharding))
+  if not scan_layers:
+    c_pair = init_carry
+    aux_out = []
+    for c in range(num_cycles):
+      p_c = _slice_cycle_state(sub_params, c)
+      r_c = _slice_cycle_state(sub_rests, c)
+      c_pair, a_c = scan_fn(c_pair, (p_c, r_c))
+      if return_aux and a_c is not None:
+        aux_out.extend(a_c)
+    return (c_pair, aux_out) if return_aux else c_pair
+
+  with m3_core_remat.trip_count_one_scan_barrier(num_cycles == 1):
+    res = jax.lax.scan(scan_fn, init_carry, (sub_params, sub_rests))
+  if return_aux:
+    return res[0], [jax.tree.map(lambda x, c=c: x[c], res[1][k]) for c in range(num_cycles) for k in range(4)]
+  return res[0]
+
+
 def copy_unscanned_to_scanned(unscanned_decoder: Any, scanned_decoder: Any) -> None:
   """Copies weights from an unscanned (`scan_layers=False`) model/decoder into a scanned (`scan_layers=True`) one."""
   u, s = getattr(unscanned_decoder, "decoder", unscanned_decoder), getattr(scanned_decoder, "decoder", scanned_decoder)
@@ -3707,6 +4017,10 @@ class Qwen3_8Decoder(nnx.Module):
       c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
       self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
       self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
+      self.use_m3_batch_split = bool(getattr(c, "use_m3_batch_split", False))
+      self._cfg_train_batch = int(
+          getattr(c, "micro_batch_size_to_train_on", 0) or getattr(c, "global_batch_size_to_train_on", 0) or 0
+      )
       self.remat_policy: Callable[..., Any] | None = None
       self.remat = False
       self.dtype, self.weight_dtype = dt, wdt
@@ -3779,45 +4093,109 @@ class Qwen3_8Decoder(nnx.Module):
     eff_policy = self.remat_policy if self.remat else None
     if self.remat and eff_policy is None:
       eff_policy = _with_qsa_packed_mask_saved(cp.nothing_saveable)
-    with jax.named_scope("first_cycle"):
-      first_out = run_single_cycle(
-          self.first_cycle,
-          h,
-          eff_policy=eff_policy,
-          return_aux=return_aux,
-          compact_router_aux=compact_router_aux,
-          positions=pos,
-          position_embeddings=pos_emb,
-          conv_mask=cmask,
-          ple_input_ids=pids,
-          segment_ids=decoder_segment_ids,
-          router_aux_mask=router_aux_mask,
-          sharding=self.sharding,
+    mesh = jax.sharding.get_abstract_mesh()
+    batch_axes = get_batch_mesh_axes(self.sharding)
+    batch_shards = math.prod(int(mesh.shape[ax]) for ax in batch_axes) if batch_axes else 1
+    if self.use_m3_batch_split and not m3_batch_split.can_batch_split(h, batch_shards):
+      if h.shape[0] > batch_shards or (self._cfg_train_batch > 0 and h.shape[0] == self._cfg_train_batch):
+        raise ValueError(
+            f"use_m3_batch_split=True requires global batch ({h.shape[0]}) to be an even multiple >= 2 * batch_shards "
+            f"({2 * batch_shards}, batch_axes={batch_axes}); set sharding_preset='ep_as_cp' or increase batch."
+        )
+      m3_kernels.log_kernel_dispatch(
+          f"qwen3_8_batch_split_probe_{h.shape[0]}_{batch_shards}",
+          f"Qwen3_8Decoder: use_m3_batch_split=True skipping split on single-shard/probe batch={h.shape[0]} "
+          f"(batch_shards={batch_shards}, batch_axes={batch_axes}).",
       )
-    h, aux_list = first_out if return_aux else (first_out, [])
-    if self.cycles is not None:
-      with jax.named_scope("cycles"):
-        res = apply_scanned_cycles(
-            self.cycles,
-            h,
-            num_cycles=self.num_stacked_cycles,
-            scan_layers=self.scan_layers,
+    if self.use_m3_batch_split and m3_batch_split.can_batch_split(h, batch_shards):
+      m3_kernels.log_kernel_dispatch(
+          f"qwen3_8_batch_split_active_{h.shape[0]}_{batch_shards}",
+          f"Qwen3_8Decoder: running Dual-SC 2-microbatch batch_split (global_batch={h.shape[0]}, "
+          f"microbatch={h.shape[0] // 2}, batch_shards={batch_shards}, batch_axes={batch_axes}).",
+      )
+      h0, h1 = m3_batch_split.split_microbatches(h, batch_axis=0)
+      with jax.named_scope("first_cycle"):
+        first_dual_out = run_dual_single_cycle(
+            self.first_cycle,
+            h0,
+            h1,
+            eff_policy=eff_policy,
+            return_aux=return_aux,
+            compact_router_aux=compact_router_aux,
             positions=pos,
             position_embeddings=pos_emb,
             conv_mask=cmask,
+            ple_input_ids=pids,
             segment_ids=decoder_segment_ids,
             router_aux_mask=router_aux_mask,
-            return_aux=return_aux,
-            compact_router_aux=compact_router_aux,
-            remat=self.remat,
-            remat_policy=eff_policy,
             sharding=self.sharding,
         )
-      if return_aux:
-        h, cycle_aux = res
-        aux_list = aux_list + cycle_aux
-      else:
-        h = res
+      (h0, h1), aux_list = first_dual_out if return_aux else (first_dual_out, [])
+      if self.cycles is not None:
+        with jax.named_scope("cycles"):
+          dual_res = apply_dual_scanned_cycles(
+              self.cycles,
+              h0,
+              h1,
+              num_cycles=self.num_stacked_cycles,
+              scan_layers=self.scan_layers,
+              positions=pos,
+              position_embeddings=pos_emb,
+              conv_mask=cmask,
+              segment_ids=decoder_segment_ids,
+              router_aux_mask=router_aux_mask,
+              return_aux=return_aux,
+              compact_router_aux=compact_router_aux,
+              remat=self.remat,
+              remat_policy=eff_policy,
+              sharding=self.sharding,
+          )
+        if return_aux:
+          (h0, h1), cycle_aux = dual_res
+          aux_list = aux_list + cycle_aux
+        else:
+          h0, h1 = dual_res
+      h = shard_batch(m3_batch_split.merge_microbatches(h0, h1, batch_axis=0), self.sharding)
+    else:
+      with jax.named_scope("first_cycle"):
+        first_out = run_single_cycle(
+            self.first_cycle,
+            h,
+            eff_policy=eff_policy,
+            return_aux=return_aux,
+            compact_router_aux=compact_router_aux,
+            positions=pos,
+            position_embeddings=pos_emb,
+            conv_mask=cmask,
+            ple_input_ids=pids,
+            segment_ids=decoder_segment_ids,
+            router_aux_mask=router_aux_mask,
+            sharding=self.sharding,
+        )
+      h, aux_list = first_out if return_aux else (first_out, [])
+      if self.cycles is not None:
+        with jax.named_scope("cycles"):
+          res = apply_scanned_cycles(
+              self.cycles,
+              h,
+              num_cycles=self.num_stacked_cycles,
+              scan_layers=self.scan_layers,
+              positions=pos,
+              position_embeddings=pos_emb,
+              conv_mask=cmask,
+              segment_ids=decoder_segment_ids,
+              router_aux_mask=router_aux_mask,
+              return_aux=return_aux,
+              compact_router_aux=compact_router_aux,
+              remat=self.remat,
+              remat_policy=eff_policy,
+              sharding=self.sharding,
+          )
+        if return_aux:
+          h, cycle_aux = res
+          aux_list = aux_list + cycle_aux
+        else:
+          h = res
     h_4stream, h_mixed = h, shard_batch(self.hyper_connection_mixer.mix_input(h), self.sharding, "mixed_streams")
     if return_pre_mixer:
       return (h_mixed, h_4stream, aux_list) if return_aux else (h_mixed, h_4stream)

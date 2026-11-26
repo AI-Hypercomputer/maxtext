@@ -3685,6 +3685,142 @@ class Qwen3_8MTPLossTest(_SingleDeviceMeshTestCase):
       for path, cnt in fp8_counts.items():
         self.assertEqual(cnt, 0, msg=f"Expected 0 FP8 matmuls on {path}, got {cnt}")
 
+  def test_archive_dual_sc_batch_split_f32_and_fp8_parity(self):
+    """Verifies archived 2-microbatch Dual-SparseCore `use_m3_batch_split` + `moe_sparsecore_pinning` parity."""
+    from maxtext.m3.infra import batch_split as m3_batch_split  # pylint: disable=import-outside-toplevel
+    from maxtext.m3.infra import remat as m3_remat  # pylint: disable=import-outside-toplevel
+
+    # 1. Interleaved zero-reshard microbatch split/merge round-trip (batch_axis=0 and 3D mRoPE batch_axis=1).
+    arr_4d = jnp.arange(4 * 8 * 2 * 4, dtype=jnp.float32).reshape(4, 8, 2, 4)
+    mb0, mb1 = m3_batch_split.split_microbatches(arr_4d, batch_axis=0)
+    np.testing.assert_array_equal(np.asarray(mb0), np.asarray(arr_4d[0::2]))
+    np.testing.assert_array_equal(np.asarray(mb1), np.asarray(arr_4d[1::2]))
+    np.testing.assert_array_equal(
+        np.asarray(m3_batch_split.merge_microbatches(mb0, mb1, batch_axis=0)),
+        np.asarray(arr_4d),
+    )
+    pos_3d = jnp.arange(3 * 4 * 8, dtype=jnp.int32).reshape(3, 4, 8)
+    p0, p1 = m3_batch_split.split_microbatches(pos_3d, batch_axis=1)
+    np.testing.assert_array_equal(
+        np.asarray(m3_batch_split.merge_microbatches(p0, p1, batch_axis=1)),
+        np.asarray(pos_3d),
+    )
+    self.assertTrue(m3_batch_split.can_batch_split(arr_4d, batch_shards=2))
+    self.assertFalse(m3_batch_split.can_batch_split(arr_4d[:2], batch_shards=2))
+
+    if len(jax.devices()) < 4:
+      self.skipTest("Requires 4 CPU devices for sharded FSDP=2 x EP=2 batch_split parity.")
+
+    saved_tags = [
+        "moe_routing",
+        "moe_disp_ep",
+        "moe_gate_up",
+        "moe_routed_output",
+        "qkv_proj",
+        "query_proj",
+        "key_proj",
+        "value_proj",
+        "context",
+        "out_proj",
+        "mlpwi_0",
+        "mlpwi_1",
+        "mlpwo",
+    ]
+    mesh = jax.sharding.Mesh(
+        np.array(jax.devices()[:4]).reshape((1, 2, 1, 2)),
+        ("data", "fsdp", "tensor", "expert"),
+    )
+    shd = m3_sharding.EPasCP()
+    pspec = jax.sharding.PartitionSpec
+
+    rng = np.random.default_rng(8803)
+    b, s = 4, 32
+    tok_np = rng.integers(1, 50, size=(b, s), dtype=np.int32)
+    tgt_np = rng.integers(1, 50, size=(b, s), dtype=np.int32)
+    seg_np = np.ones((b, s), dtype=np.int32)
+    seg_np[:, -4:] = 0
+
+    common_kw: dict[str, Any] = {
+        "scan_layers": True,
+        "base_num_decoder_layers": 8,
+        "dtype": "float32",
+        "weight_dtype": "float32",
+        "per_device_batch_size": 1.0,
+        "max_target_length": s,
+        "ici_fsdp_parallelism": 2,
+        "ici_expert_parallelism": 2,
+        "sharding_preset": "ep_as_cp",
+        "moe_ep_allgather_tc": True,
+        "moe_fp8": False,
+        "moe_sparsecore_pinning": True,
+        "ragged_buffer_factor": 1.5,
+        "remat_policy": "custom",
+        "tensors_on_device": saved_tags,
+    }
+    cfg_single = _get_mini_config(**common_kw, use_m3_batch_split=False)
+    cfg_split = _get_mini_config(**common_kw, use_m3_batch_split=True)
+
+    with jax.set_mesh(mesh):
+      tok_sh = jax.device_put(jnp.asarray(tok_np), jax.sharding.NamedSharding(mesh, pspec("fsdp", "expert")))
+      tgt_sh = jax.device_put(jnp.asarray(tgt_np), jax.sharding.NamedSharding(mesh, pspec("fsdp", "expert")))
+      seg_sh = jax.device_put(jnp.asarray(seg_np), jax.sharding.NamedSharding(mesh, pspec("fsdp", "expert")))
+
+      m_single = m3_remat.maybe_apply_remat(
+          modeling_qwen3_8_flash_next.create_qwen3_8_flash_next_model(
+              cfg_single, mesh=mesh, sharding=shd, rngs=nnx.Rngs(params=303)
+          ),
+          cfg_single,
+      )
+      m_split = m3_remat.maybe_apply_remat(
+          modeling_qwen3_8_flash_next.create_qwen3_8_flash_next_model(
+              cfg_split, mesh=mesh, sharding=shd, rngs=nnx.Rngs(params=303)
+          ),
+          cfg_split,
+      )
+
+      logits_ref, aux_ref = m_single(tok_sh, decoder_segment_ids=seg_sh, return_aux=True, compact_router_aux=False)
+      logits_bs, aux_bs = m_split(tok_sh, decoder_segment_ids=seg_sh, return_aux=True, compact_router_aux=False)
+      np.testing.assert_allclose(np.asarray(logits_bs), np.asarray(logits_ref), rtol=1e-4, atol=1e-4)
+      self.assertLen(aux_bs, 8)
+      for a_bs, a_ref in zip(aux_bs, aux_ref, strict=True):
+        np.testing.assert_array_equal(np.asarray(a_bs["router_indices"]), np.asarray(a_ref["router_indices"]))
+        np.testing.assert_allclose(
+            np.asarray(a_bs["router_probs"]), np.asarray(a_ref["router_probs"]), rtol=1e-4, atol=1e-4
+        )
+
+      gd_s, p_s, r_s = nnx.split(m_single, nnx.Param, ...)
+      gd_b, p_b, r_b = nnx.split(m_split, nnx.Param, ...)
+
+      def _step_loss(gd, p, r):
+        mod = nnx.merge(gd, p, r)
+        return modeling_qwen3_8_flash_next.compute_total_loss(
+            mod, tok_sh, tgt_sh, segment_ids=seg_sh, router_aux_coeff=0.01, use_mtp=False
+        )
+
+      (loss_ref, met_ref), grads_ref = jax.jit(jax.value_and_grad(lambda p: _step_loss(gd_s, p, r_s), has_aux=True))(p_s)
+      (loss_bs, met_bs), grads_bs = jax.jit(jax.value_and_grad(lambda p: _step_loss(gd_b, p, r_b), has_aux=True))(p_b)
+      np.testing.assert_allclose(float(loss_bs), float(loss_ref), rtol=1e-4, atol=1e-4)
+      for k_met in ("primary_loss", "router_loss", "total_loss"):
+        np.testing.assert_allclose(float(met_bs[k_met]), float(met_ref[k_met]), rtol=1e-4, atol=1e-4)
+
+      flat_g_ref = {
+          "/".join(str(k) for k in path): np.asarray(v) for path, v in jax.tree_util.tree_leaves_with_path(grads_ref)
+      }
+      flat_g_bs = {
+          "/".join(str(k) for k in path): np.asarray(v) for path, v in jax.tree_util.tree_leaves_with_path(grads_bs)
+      }
+      self.assertEqual(set(flat_g_bs.keys()), set(flat_g_ref.keys()))
+      for k_p in sorted(flat_g_ref.keys()):
+        np.testing.assert_allclose(
+            flat_g_bs[k_p], flat_g_ref[k_p], rtol=1e-4, atol=1e-4, err_msg=f"Grad mismatch on {k_p}"
+        )
+
+      odd_tok = jax.device_put(
+          jnp.ones((6, s), dtype=jnp.int32), jax.sharding.NamedSharding(mesh, pspec("fsdp", "expert"))
+      )
+      with self.assertRaisesRegex(ValueError, "sharding_preset='ep_as_cp'"):
+        _ = m_split(odd_tok)
+
 
 if __name__ == "__main__":
   absltest.main()
