@@ -29,6 +29,7 @@ from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as forked_g
 import numpy as np
 import pytest
 import qwix
+from qwix._src import interception as qwix_interception
 import qwix.pallas as qpl
 
 _TILES = forked_gmm_v2.TileSizes(256, 1024, 256)
@@ -277,6 +278,87 @@ class UpstreamTokamaxDispatchTest(parameterized.TestCase):
       fork.assert_not_called()
     else:
       fork.assert_called_once()
+
+  def test_call_gmm_and_tgmm_jit_fuser_and_disable_qwix_interception(self):
+    """Verifies CPU-side that fuser calls are wrapped in jax.jit and Qwix interception is disabled."""
+    lhs_3d = jnp.ones((64, 8, 128), jnp.bfloat16)
+    rhs_gmm = jnp.ones((2, 1024, 256), jnp.bfloat16)
+    rhs_tgmm = jnp.ones((64, 256), jnp.bfloat16)
+    gs = jnp.array([32, 32], jnp.int32)
+    tiling = (256, 1024, 256) * 3
+
+    def _dot_gmm(**kwargs):
+      # Triggers lax.dot_general inside the kernel stand-in; fails if Qwix interception leaked in.
+      return jax.lax.dot_general(kwargs["lhs"], kwargs["rhs"][0], (((1,), (0,)), ((), ())))
+
+    def _dot_tgmm(**kwargs):
+      prod = jax.lax.dot_general(kwargs["lhs"], kwargs["rhs"], (((0,), (0,)), ((), ())))
+      return jnp.broadcast_to(prod[None], (2, 1024, 256))
+
+    fuser = mock.Mock(
+        gmm_v2_fusible=mock.Mock(side_effect=_dot_gmm),
+        tgmm_v2_fusible=mock.Mock(side_effect=_dot_tgmm),
+    )
+    up_gmm = mock.Mock(gmm_v2=mock.Mock(side_effect=_dot_gmm))
+    up_tgmm = mock.Mock(tgmm_v2=mock.Mock(side_effect=_dot_tgmm))
+    fusion = mock.Mock(fuse=lambda f: f)
+
+    def _forbid_intercept(*args, **kwargs):
+      del args, kwargs
+      raise AssertionError("Qwix intercepted dot_general inside _call_gmm_v2 / _call_tgmm_v2")
+
+    def _run():
+      y_fuser = ops._call_gmm_v2(  # pylint: disable=protected-access
+          lhs=lhs_3d,
+          rhs=rhs_gmm,
+          group_sizes=gs,
+          tile_info=_TILES,
+          preferred_element_type=jnp.bfloat16,
+      )
+      y_up = ops._call_gmm_v2(  # pylint: disable=protected-access
+          lhs=lhs_3d,
+          rhs=rhs_gmm,
+          group_sizes=gs,
+          partial_sum=jnp.zeros((64, 256), jnp.bfloat16),
+          tile_info=_TILES,
+          preferred_element_type=jnp.bfloat16,
+      )
+      dw_fuser = ops._call_tgmm_v2(  # pylint: disable=protected-access
+          lhs=lhs_3d,
+          rhs=rhs_tgmm,
+          group_sizes=gs,
+          num_actual_groups=2,
+          rhs_scale=None,
+          group_offset=None,
+          partial_sum=None,
+          preferred_element_type=jnp.bfloat16,
+          tiling=tiling,
+          use_gmm_v2_heuristic_tiling=False,
+      )
+      return y_fuser, y_up, dw_fuser
+
+    intercepted = qwix_interception.wrap_func_intercepted(
+        _run,
+        lambda: qwix_interception.Interceptor(
+            mapping={"jax.lax.dot_general": _forbid_intercept},
+            id="forbid_qwix_in_tokamax",
+        ),
+        disable_jit=False,
+    )
+    with (
+        mock.patch.object(ops.pltpu, "get_tpu_info", autospec=True, return_value=mock.Mock(vmem_capacity_bytes=64)),
+        mock.patch.object(ops, "gmm_fuser", fuser),
+        mock.patch.object(ops, "tokamax_gmm_v2", up_gmm),
+        mock.patch.object(ops, "tokamax_tgmm_v2", up_tgmm),
+        mock.patch.object(ops, "op_fusion", fusion),
+        mock.patch.object(ops.jax, "jit", wraps=jax.jit) as jit_spy,
+    ):
+      y_fuser, y_up, dw_fuser = intercepted()
+
+    self.assertEqual(y_fuser.shape, (64, 256))
+    self.assertEqual(y_up.shape, (64, 256))
+    self.assertEqual(dw_fuser.shape, (2, 1024, 256))
+    self.assertEqual(jit_spy.call_count, 2)
 
 
 @pytest.mark.tpu_only
@@ -527,6 +609,95 @@ class UpstreamTokamaxTpuParityTest(parameterized.TestCase):
     else:
       for g_n, g_f in zip(grads_new, grads_fork):
         np.testing.assert_array_equal(g_n.astype(jnp.float32), g_f.astype(jnp.float32))
+
+  def test_eager_shard_map_fuser_does_not_leak_smem(self):
+    m, d, f, g = 256, 2048, 512, 4
+    gs = jnp.array([64, 64, 64, 64], jnp.int32)
+    k0, k1 = jax.random.split(jax.random.key(51), 2)
+    x = _rand(k0, (m, d), jnp.bfloat16)
+    w = _rand(k1, (g, d, f), jnp.bfloat16, 0.05)
+    tiling = (256, 512, 256) * 3
+    mesh = jax.sharding.Mesh(np.array(jax.devices()), ("ep",))
+
+    def step(a, b):
+      def fn(a_in, b_in):
+        return ops.gmm(
+            _to3d(a_in),
+            b_in,
+            gs,
+            tiling=tiling,
+            preferred_element_type=jnp.bfloat16,
+            use_gmm_v2=True,
+            use_tokamax_backend=True,
+        )
+
+      y, vjp = jax.vjp(fn, a, b)
+      return y, vjp(jnp.ones_like(y))
+
+    shmap = jax.shard_map(
+        step,
+        mesh=mesh,
+        in_specs=(jax.sharding.PartitionSpec(), jax.sharding.PartitionSpec()),
+        out_specs=(jax.sharding.PartitionSpec(), (jax.sharding.PartitionSpec(), jax.sharding.PartitionSpec())),
+        check_vma=False,
+    )
+    y_out, (dx_out, dw_out) = shmap(x, w)
+    self.assertEqual(y_out.shape, (m, f))
+    self.assertEqual(dx_out.shape, (m, d))
+    self.assertEqual(dw_out.shape, (g, d, f))
+
+  def test_qwix_interception_disabled_inside_tokamax_v2(self):
+    """Qwix must not intercept dot_general/matmul inside Tokamax pl.kernel GMM/TGMM."""
+    m, d, f, g = 256, 2048, 512, 4
+    gs = jnp.array([64, 64, 64, 64], jnp.int32)
+    k0, k1 = jax.random.split(jax.random.key(61), 2)
+    x = _rand(k0, (m, d), jnp.bfloat16)
+    w = _rand(k1, (g, d, f), jnp.bfloat16, 0.05)
+    tiling = (256, 2048, 512) * 3
+    rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.float8_e4m3fn,
+        act_qtype=jnp.float8_e4m3fn,
+        bwd_qtype=jnp.float8_e5m2,
+        weight_calibration_method="absmax",
+        act_calibration_method="absmax",
+        bwd_calibration_method="absmax",
+        op_names=("dot_general", "gmm"),
+    )
+
+    def bad_dot_general(*args, **kwargs):
+      del args, kwargs
+      raise AssertionError("Qwix intercepted dot_general/matmul inside Tokamax pl.kernel!")
+
+    def loss_fn(a, b):
+      y = ops.gmm(
+          _to3d(a),
+          b,
+          gs,
+          tiling=tiling,
+          preferred_element_type=jnp.bfloat16,
+          use_qwix_quantization=True,
+          qwix_rule=rule,
+          use_gmm_v2=True,
+          use_tokamax_backend=True,
+      )
+      return jnp.sum(y.astype(jnp.float32))
+
+    wrapped = qwix_interception.wrap_func_intercepted(
+        jax.jit(jax.value_and_grad(loss_fn, argnums=(0, 1))),
+        lambda: qwix_interception.Interceptor(
+            mapping={
+                "jax.lax.dot_general": bad_dot_general,
+                "jax.numpy.matmul": bad_dot_general,
+            },
+            id="bad_qwix_dot",
+        ),
+        disable_jit=False,
+    )
+    val, (dx, dw) = wrapped(x, w)
+    self.assertTrue(np.isfinite(float(val)))
+    self.assertEqual(dx.shape, (m, d))
+    self.assertEqual(dw.shape, (g, d, f))
 
 
 if __name__ == "__main__":

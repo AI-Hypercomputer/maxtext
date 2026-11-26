@@ -632,6 +632,7 @@ def _gmm_route(
   return "fork"
 
 
+@quantizations.without_qwix_interception
 def _call_gmm_v2(
     *,
     lhs: jnp.ndarray,
@@ -681,7 +682,7 @@ def _call_gmm_v2(
             transpose_rhs=transpose_rhs,
         )
 
-      out = fusion.fuse(_fused_gmm)(lhs, rhs, group_sizes, rhs_scale, offset_1d, lhs_scale)
+      out = jax.jit(fusion.fuse(_fused_gmm))(lhs, rhs, group_sizes, rhs_scale, offset_1d, lhs_scale)
       return out.reshape(out.shape[0], out.shape[1] // 128, 128) if out_is_3d else out
     if route == "upstream":
       assert not callable(tile_info)
@@ -1531,6 +1532,7 @@ def _tgmm_route(
   return "upstream"
 
 
+@quantizations.without_qwix_interception
 def _call_tgmm_v2(
     *,
     lhs: jnp.ndarray,
@@ -1580,7 +1582,7 @@ def _call_tgmm_v2(
             preferred_element_type=out_dtype,
         )
 
-      return fusion.fuse(_fused_tgmm)(lhs, rhs, group_sizes, rhs_scale, offset_1d)
+      return jax.jit(fusion.fuse(_fused_tgmm))(lhs, rhs, group_sizes, rhs_scale, offset_1d)
     if route == "upstream":
       return up_tgmm.tgmm_v2(
           lhs=_to_2d(lhs),
