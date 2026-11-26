@@ -14,7 +14,9 @@
 
 """Unit and multi-device parity tests for `maxtext.m3.core.kernels`."""
 
+import sys
 import types
+from unittest import mock
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -878,9 +880,247 @@ def test_dot_product_attention_eager_grad_under_abstract_mesh_single_device_inpu
   assert dq.shape == q.shape and dk.shape == k.shape and dv.shape == v.shape
 
 
+def test_upstream_splash_resolution_and_block_divisibility():
+  """Upstream Tokamax Splash is preferred when available, filters SplashConfig fields, and picks divisible tiles."""
+  assert kernels.splash_available()
+  splash_mod, _ = kernels.splash_modules()
+  if kernels.splash_is_upstream():
+    assert splash_mod.__name__.startswith("tokamax._src.ops.splash_attention.")
+  else:
+    assert splash_mod.__name__.startswith("maxtext.kernels.tokamax_splash_attention.")
+
+  cfg = kernels.SplashConfig(bwd_dkv_megacore=False)
+  resolved = cfg.resolve(512, 512, attn_logits_soft_cap=None, interpret=True)
+  assert resolved.block_q == 512
+  assert resolved.block_kv == 512
+
+  if kernels.splash_is_upstream():
+    with pytest.raises(ValueError, match="bwd_dkv_megacore"):
+      kernels.SplashConfig(bwd_dkv_megacore=True).resolve(512, 512, attn_logits_soft_cap=None, interpret=True)
+  else:
+    # Verify non-default unsupported field is still rejected when upstream SplashConfig lacks it.
+    import dataclasses  # pylint: disable=import-outside-toplevel
+
+    @dataclasses.dataclass(frozen=True)
+    class _SlimSplashConfig:
+      block_q: int = 512
+      block_kv: int = 512
+
+    fake_splash = types.SimpleNamespace(
+        __name__="tokamax._src.ops.splash_attention.fake",
+        SplashConfig=_SlimSplashConfig,
+        QKVLayout=splash_mod.QKVLayout,
+    )
+    with mock.patch.object(kernels, "_import_splash", return_value=(fake_splash, object(), object)):
+      with pytest.raises(ValueError, match="bwd_dkv_megacore"):
+        kernels.SplashConfig(bwd_dkv_megacore=True).resolve(512, 512, attn_logits_soft_cap=None, interpret=True)
+
+  assert kernels.largest_splash_block(1024, 512) == 512
+  assert kernels.largest_splash_block(768, 512) == 384
+  assert kernels.largest_splash_block(640, 512) == 128
+  assert kernels.largest_splash_block(256, 512) == 256
+  assert kernels.largest_splash_block(128, 512) == 128
+
+
+def test_gated_delta_net_cpu_fallback_and_mocked_tpu_cp_contract():
+  """`gated_delta_net` returns None on CPU under 'auto', fails closed on 'tokamax', and head-folds under CP."""
+  key = jax.random.key(0)
+  q = jax.random.normal(key, (4, 128, 4, 128), dtype=jnp.float32)
+  k = jax.random.normal(jax.random.key(1), (4, 128, 4, 128), dtype=jnp.float32)
+  v = jax.random.normal(jax.random.key(2), (4, 128, 4, 128), dtype=jnp.float32)
+  g = -jax.nn.softplus(jax.random.normal(jax.random.key(3), (4, 128, 4), dtype=jnp.float32))
+  beta = jax.nn.sigmoid(jax.random.normal(jax.random.key(4), (4, 128, 4), dtype=jnp.float32))
+
+  assert kernels.gated_delta_net(q, k, v, g, beta, backend="auto") is None
+  assert kernels.gated_delta_net(q, k, v, g, beta, backend="jax") is None
+  with pytest.raises(ValueError, match="TPU gen >= 6"):
+    kernels.gated_delta_net(q, k, v, g, beta, backend="tokamax")
+
+  # Multi-device mocked TPU CP contract: mesh=(fsdp=2, expert=2), B=4 -> B_local=2, S=128 -> S_local=64, H=4.
+  # Head-fold should pass [H*B_local=8, 1, 64, 128] with scalar gate [8, 1, 64, 1] into _tokamax_gdn_cp_scalar_gate.
+  if jax.device_count() < 4:
+    pytest.skip("Requires >= 4 devices for 2x2 FSDP+CP mesh test.")
+  mesh = create_mesh(ici={"fsdp": 2, "expert": 2}, devices=jax.devices()[:4])
+  seen_calls: list[dict[str, object]] = []
+
+  def _fake_cp_scalar_gdn(q_in, k_in, v_in, g_in, beta_in, **kwargs):
+    seen_calls.append(
+        {
+            "q_shape": q_in.shape,
+            "k_shape": k_in.shape,
+            "v_shape": v_in.shape,
+            "g_shape": g_in.shape,
+            "beta_shape": beta_in.shape,
+            "kwargs": kwargs,
+        }
+    )
+    return v_in
+
+  with (
+      mock.patch.object(kernels, "_tpu_gdn_supported", return_value=True),
+      mock.patch.object(kernels, "tokamax_gdn_available", return_value=True),
+      mock.patch.object(kernels, "_tokamax_gdn_cp_adapter_available", return_value=True),
+      mock.patch.object(kernels, "_tokamax_gdn_cp_scalar_gate", side_effect=_fake_cp_scalar_gdn),
+      jax.set_mesh(mesh),
+  ):
+    out = kernels.gated_delta_net(
+        q,
+        k,
+        v,
+        g,
+        beta,
+        chunk_size=64,
+        batch_axes=("fsdp",),
+        length_axes=("expert",),
+        backend="tokamax",
+        mesh=mesh,
+    )
+    assert out is not None
+    assert out.shape == v.shape
+    np.testing.assert_allclose(np.asarray(out), np.asarray(v), rtol=0, atol=0)
+
+  assert len(seen_calls) == 1
+  call = seen_calls[0]
+  assert call["q_shape"] == (8, 1, 64, 128)
+  assert call["g_shape"] == (8, 1, 64, 1)
+  assert call["beta_shape"] == (8, 1, 64)
+  kw = call["kwargs"]
+  assert isinstance(kw, dict)
+  assert kw["chunk_size"] == 64
+  assert kw["use_qk_l2norm"] is True
+  assert kw["cp_axis_name"] == "expert"
+  assert kw["cp_size"] == 2
+
+  # Non-CP path routes directly to public tokamax.ops.kimi_delta_attention(per_channel_gate=False).
+  non_cp_calls: list[dict[str, object]] = []
+
+  def _fake_kda(q_in, k_in, v_in, g_in, beta_in, **kwargs):
+    non_cp_calls.append({"q_shape": q_in.shape, "g_shape": g_in.shape, "kwargs": kwargs})
+    return v_in, None
+
+  fake_tk = types.SimpleNamespace(ops=types.SimpleNamespace(kimi_delta_attention=_fake_kda))
+
+  with (
+      mock.patch.object(kernels, "_tpu_gdn_supported", return_value=True),
+      mock.patch.object(kernels, "tokamax_gdn_available", return_value=True),
+      mock.patch.object(kernels, "_import_tokamax", return_value=fake_tk),
+      jax.set_mesh(mesh),
+  ):
+    out_nc = kernels.gated_delta_net(
+        q, k, v, g, beta, chunk_size=64, batch_axes=("fsdp",), length_axes=(), backend="tokamax", mesh=mesh
+    )
+    assert out_nc is not None
+    np.testing.assert_allclose(np.asarray(out_nc), np.asarray(v), rtol=0, atol=0)
+  assert len(non_cp_calls) == 1
+  assert non_cp_calls[0]["q_shape"] == (4, 2, 128, 128)
+  assert non_cp_calls[0]["g_shape"] == (4, 2, 128, 1)
+  assert non_cp_calls[0]["kwargs"]["per_channel_gate"] is False
+  assert non_cp_calls[0]["kwargs"]["implementation"] == "mosaic"
+
+  # PyPI `tokamax==0.0.17` exposes per-channel KDA without `per_channel_gate` or `chunk_size`;
+  # `tokamax_gdn_available()` must return False so `auto` falls back cleanly and `tokamax` fails closed.
+  def _legacy_kda_0_0_17(query, key, value, gate, beta, *, use_qk_l2norm=False, implementation=None):
+    del key, gate, beta, use_qk_l2norm, implementation
+    return value + 0.0 * query, None
+
+  legacy_tk = types.SimpleNamespace(ops=types.SimpleNamespace(kimi_delta_attention=_legacy_kda_0_0_17))
+  with mock.patch.object(kernels, "_import_tokamax", return_value=legacy_tk):
+    assert kernels.tokamax_gdn_available() is False
+    assert (
+        kernels.gated_delta_net(q, k, v, g, beta, chunk_size=64, backend="auto", _implementation="xla", mesh=mesh) is None
+    )
+    with pytest.raises(ImportError, match="kimi_delta_attention"):
+      kernels.gated_delta_net(q, k, v, g, beta, chunk_size=64, backend="tokamax", _implementation="xla", mesh=mesh)
+
+
+def test_linear_cross_entropy_fsdp_shard_map_grad_parity_and_guards():
+  """`linear_cross_entropy` matches dense CE in fwd + (dx, dw) under multi-axis FSDP sharding and OOB masks."""
+  if jax.device_count() < 4:
+    pytest.skip("Requires >= 4 devices for 2x2 FSDP+expert mesh test.")
+  mesh = create_mesh(ici={"fsdp": 2, "expert": 2}, devices=jax.devices()[:4])
+  sharding = DefaultSharding()
+
+  b, s, h_dim, v_dim = 4, 8, 128, 256
+  h = jax.random.normal(jax.random.key(10), (b, s, h_dim), dtype=jnp.float32) * 0.2
+  w = jax.random.normal(jax.random.key(11), (h_dim, v_dim), dtype=jnp.float32) * 0.2
+  targets = jax.random.randint(jax.random.key(12), (b, s), 0, v_dim, dtype=jnp.int32)
+  mask = jnp.ones((b, s), dtype=jnp.float32).at[:, -2:].set(0.0)
+  # Inject out-of-bounds sentinel targets at masked positions to verify safe sanitization.
+  targets_oob = jnp.where(mask != 0, targets, -1)
+
+  for reduction in ("mean", "sum"):
+    ref_val, (ref_dh, ref_dw) = jax.value_and_grad(
+        lambda x_in, w_in, red=reduction: kernels.linear_cross_entropy(
+            x_in, targets_oob, w_in, mask=mask, reduction=red, backend="jax"
+        ),
+        argnums=(0, 1),
+    )(h, w)
+
+    with jax.set_mesh(mesh):
+      got_val, (got_dh, got_dw) = jax.value_and_grad(
+          lambda x_in, w_in, red=reduction: kernels.linear_cross_entropy(
+              x_in,
+              targets_oob,
+              w_in,
+              mask=mask,
+              sharding=sharding,
+              mesh=mesh,
+              reduction=red,
+              backend="tokamax",
+              _implementation="xla",
+          ),
+          argnums=(0, 1),
+      )(h, w)
+
+    np.testing.assert_allclose(np.asarray(got_val), np.asarray(ref_val), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(got_dh), np.asarray(ref_dh), rtol=1e-4, atol=1e-4)
+    np.testing.assert_allclose(np.asarray(got_dw), np.asarray(ref_dw), rtol=1e-4, atol=1e-4)
+
+  # Guard tests: CPU mesh rejected; mocked TPU mesh checks H/V alignment, z_loss, offload, and defer support.
+  assert not kernels.can_use_tokamax_linear_ce(
+      (2560, 248320), dtype=jnp.bfloat16, weight_dtype=jnp.bfloat16, sharding=sharding, mesh=mesh
+  )
+  with mock.patch.object(kernels, "_tokamax_tpu_op_supported", return_value=True):
+    assert kernels.can_use_tokamax_linear_ce(
+        (2560, 248320), dtype=jnp.bfloat16, weight_dtype=jnp.bfloat16, sharding=sharding, mesh=mesh
+    )
+    assert not kernels.can_use_tokamax_linear_ce(
+        (2560, 248320),
+        dtype=jnp.bfloat16,
+        weight_dtype=jnp.bfloat16,
+        sharding=sharding,
+        mesh=mesh,
+        z_loss_multiplier=1e-4,
+    )
+    assert not kernels.can_use_tokamax_linear_ce(
+        (64, 256), dtype=jnp.bfloat16, weight_dtype=jnp.bfloat16, sharding=sharding, mesh=mesh
+    )
+
+    dummy_model = types.SimpleNamespace(
+        lm_head=types.SimpleNamespace(kernel=jnp.zeros((128, 256), dtype=jnp.bfloat16), bias=None),
+        sharding=sharding,
+        mesh=mesh,
+    )
+    dummy_cfg = types.SimpleNamespace(
+        use_tokamax_linear_ce=True,
+        num_vocab_tiling=1,
+        z_loss_multiplier=0.0,
+        final_logits_soft_cap=None,
+        parameter_memory_host_offload=False,
+        dtype=jnp.bfloat16,
+        weight_dtype=jnp.bfloat16,
+    )
+    assert kernels.model_supports_tokamax_linear_ce(dummy_model, dummy_cfg, require_defer_lm_head=False)
+    assert not kernels.model_supports_tokamax_linear_ce(dummy_model, dummy_cfg, require_defer_lm_head=True)
+    dummy_model.SUPPORTS_DEFER_LM_HEAD_TO_LOSS = True
+    assert kernels.model_supports_tokamax_linear_ce(dummy_model, dummy_cfg, require_defer_lm_head=True)
+    dummy_cfg.parameter_memory_host_offload = True
+    assert not kernels.model_supports_tokamax_linear_ce(dummy_model, dummy_cfg, require_defer_lm_head=True)
+  assert sys.modules  # keep sys import used
+
+
 if __name__ == "__main__":
   import os  # pylint: disable=import-outside-toplevel
-  import sys  # pylint: disable=import-outside-toplevel
   from absl import app  # pylint: disable=import-outside-toplevel
 
   class _BazelShardPlugin:

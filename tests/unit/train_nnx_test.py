@@ -61,6 +61,7 @@ class _Cfg:
   indexer_sparse_training: bool = False
   indexer_loss_scaling_factor: float = 0.0
   num_vocab_tiling: int = 1
+  use_tokamax_linear_ce: bool = False
   num_experts: int = 1
   moe_dropless_fallback: str | None = None
   routed_bias: bool = False

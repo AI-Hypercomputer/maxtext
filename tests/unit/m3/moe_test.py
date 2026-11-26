@@ -1668,7 +1668,7 @@ class MockedTPULoweringContractTest(parameterized.TestCase):
       gs_t = jnp.array([4, 4], dtype=jnp.int32)
       got_tok = m3_moe.grouped_matmul(lhs_t, rhs_t, gs_t, backend="tokamax", is_tpu=True)
     self.assertEqual(got_tok.shape, (8, 16))
-    self.assertEqual(tok_calls, ["mosaic"])
+    self.assertIn(tok_calls[0], ("mosaic", "mosaic_tpu_v2"))
 
   def test_tpu_f32_matmul_precision_and_ep1_tp_f32_down_combine(self):
     if jax.device_count() < 2:
@@ -1743,6 +1743,7 @@ class MockedTPULoweringContractTest(parameterized.TestCase):
     fgmm_ok, ftgmm_ok = _make_fakes(honor_default_prec=True)
     with (
         mock.patch.object(m3_kernels, "is_tpu_mesh", return_value=True),
+        mock.patch.object(m3_kernels, "tokamax_gmm_v2_available", return_value=False),
         mock.patch.object(gmm_v2, "gmm_v2", side_effect=fgmm_ok),
         mock.patch.object(tgmm_v2, "tgmm_v2", side_effect=ftgmm_ok),
         jax.set_mesh(mesh),
@@ -1776,6 +1777,7 @@ class MockedTPULoweringContractTest(parameterized.TestCase):
     fgmm_bad, ftgmm_bad = _make_fakes(honor_default_prec=False)
     with (
         mock.patch.object(m3_kernels, "is_tpu_mesh", return_value=True),
+        mock.patch.object(m3_kernels, "tokamax_gmm_v2_available", return_value=False),
         mock.patch.object(gmm_v2, "gmm_v2", side_effect=fgmm_bad),
         mock.patch.object(tgmm_v2, "tgmm_v2", side_effect=ftgmm_bad),
         jax.set_mesh(mesh),
@@ -1793,6 +1795,7 @@ class MockedTPULoweringContractTest(parameterized.TestCase):
     gu_bf = jnp.stack([wi0_bf, wi1_bf], axis=2)
     with (
         mock.patch.object(m3_kernels, "is_tpu_mesh", return_value=True),
+        mock.patch.object(m3_kernels, "tokamax_gmm_v2_available", return_value=False),
         mock.patch.object(gmm_v2, "gmm_v2", side_effect=fgmm_ok),
         mock.patch.object(tgmm_v2, "tgmm_v2", side_effect=ftgmm_ok),
         jax.set_mesh(mesh),
@@ -1978,6 +1981,7 @@ class MockedTPULoweringContractTest(parameterized.TestCase):
             mock.patch.object(m3_kernels, "is_tpu_mesh", return_value=True),
             mock.patch.object(pltpu, "is_tpu_device", return_value=True),
             mock.patch.object(pltpu, "get_tpu_info", return_value=SimpleNamespace(num_lanes=128, sparse_core=None)),
+            mock.patch.object(m3_kernels, "tokamax_gmm_v2_available", return_value=False),
             mock.patch.object(gmm_v2, "gmm_v2", side_effect=fake_gmm_f),
             mock.patch.object(tgmm_v2, "tgmm_v2", side_effect=fake_tgmm_f),
             mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=fake_ra2a_f),
@@ -2098,6 +2102,45 @@ class TPUExecutionParityTest(parameterized.TestCase):
           float(np.max(np.abs(np.asarray(g_pert, dtype=np.float32) - np.asarray(g_ref, dtype=np.float32)))),
           tol,
       )
+
+  @parameterized.parameters("tokamax", "gmm_v2")
+  def test_tpu_public_tokamax_mosaic_v2_dispatch_contract(self, kind: str):
+    """On live TPU (or tokamax_cross_compile), both 'tokamax' and 'gmm_v2' call public `tokamax.ragged_dot` v2."""
+    import tokamax  # pylint: disable=import-outside-toplevel
+
+    lhs = jax.random.normal(jax.random.key(61), (16, 32), dtype=jnp.bfloat16)
+    rhs = jax.random.normal(jax.random.key(62), (4, 32, 24), dtype=jnp.bfloat16)
+    group_sizes = jnp.array([4, 3, 5, 4], dtype=jnp.int32)
+    ref_out, (ref_dlhs, ref_drhs) = jax.value_and_grad(
+        lambda l, r: jnp.sum(m3_moe.grouped_matmul(l, r, group_sizes, backend="ragged_dot", is_tpu=False)),
+        argnums=(0, 1),
+    )(lhs, rhs)
+
+    seen_impls: list[str] = []
+
+    def fake_ragged_dot(*, lhs, rhs, group_sizes, preferred_element_type, precision, implementation):
+      del precision
+      seen_impls.append(implementation)
+      self.assertEqual(lhs.shape[0] % 256, 0)
+      self.assertEqual(lhs.shape[1] % 128, 0)
+      self.assertEqual(rhs.shape[2] % 128, 0)
+      gs = jnp.asarray(group_sizes, dtype=jnp.int32)
+      return jax.lax.ragged_dot(lhs, rhs, gs, preferred_element_type=jnp.float32).astype(preferred_element_type)
+
+    with (
+        mock.patch.object(m3_kernels, "_tokamax_cross_compile_enabled", return_value=True),
+        mock.patch.object(m3_kernels, "tokamax_gmm_v2_available", return_value=True),
+        mock.patch.object(tokamax, "ragged_dot", side_effect=fake_ragged_dot),
+    ):
+      got_out, (got_dlhs, got_drhs) = jax.value_and_grad(
+          lambda l, r: jnp.sum(m3_moe.grouped_matmul(l, r, group_sizes, backend=kind, is_tpu=True)),
+          argnums=(0, 1),
+      )(lhs, rhs)
+
+    self.assertEqual(seen_impls, ["mosaic_tpu_v2"])
+    np.testing.assert_allclose(np.asarray(got_out), np.asarray(ref_out), rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(np.asarray(got_dlhs), np.asarray(ref_dlhs), rtol=1e-2, atol=1e-2)
+    np.testing.assert_allclose(np.asarray(got_drhs), np.asarray(ref_drhs), rtol=1e-2, atol=1e-2)
 
 
 class LoadBalanceLossMaskingTest(parameterized.TestCase):
