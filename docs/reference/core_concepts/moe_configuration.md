@@ -122,6 +122,8 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 `eval_ragged_buffer_factor`: Evaluation override for `ragged_buffer_factor`.
 
+`moe_exclude_padding_from_routing` (default `False`): In training, keeps padding tokens (`decoder_segment_ids == 0`) out of MoE routing. They take no expert capacity or ragged buffer slot, add nothing to the load-balance loss or the routed-bias update, and get a zero routed output. Use it with packed batches whose padding would otherwise be routed, such as Tunix RL micro-batches. Not supported with `te_moe_block`, `use_batch_split_schedule`, `use_lineage`, `use_m3_model` or `decoder_block=kimi_linear`.
+
 `moe_dropless_fallback`: What to do when `ragged_buffer_factor > 0` and the ragged buffer would drop tokens. This allows training with a smaller tuned buffer for speed/memory efficiency while guaranteeing no token dropping. Requires `use_ring_of_experts=True` and `use_ragged_sort=True`.
 
 - `None` (default): tokens that overflow the buffer are dropped.
@@ -135,6 +137,10 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 `mlp_bias`: If enabled, add learnable bias terms for MLP matmul. Originally implemented to support the GPT-OSS model architecture.
 
 `prefuse_moe_weights`: If enabled alongside `sparse_matmul=True`, fuses the two FFN1 grouped GEMMs (wi_0 and wi_1) into a single grouped GEMM call. Expert weights are stored in a concatenated `(num_experts, embed_dim, 2 * mlp_dim)` shape, so input activations are loaded from HBM once per forward pass instead of twice. Backend-agnostic (works with Megablox, JAX Ragged Dot, and Tokamax). When used with `attention=vllm_rpa`, the fused weight tensor is passed directly to the vLLM-TPU serving kernel without splitting.
+
+`moe_tc_combine` (experimental, default: `False`): On TPU, runs the MoE combine (unpermute + Top-K weighted sum, or unweighted sum for Llama4) in an experimental fused TensorCore Pallas kernel (`kernels/moe_combine_tc.py`) with f32 accumulation and no `[tokens * top_k, emb]` unsorted copy in HBM. Requires `sparse_matmul=True`, `use_ring_of_experts=False`, `use_ragged_sort=False`, `moe_use_fused_gmm3d=False`, bfloat16 activations, expert parallelism = 1 and tensor parallelism = 1; raises `ValueError` if preconditions or VMEM limits are not met. The routed rows per shard (tokens * top_k) must be a multiple of the chip's bf16 row tiling (8 on v6e, 16 on TPU7x). Not used when `model_call_mode=inference`; other call paths (e.g. eval or decode with a training config) use the kernel and raise if their shapes do not meet these requirements.
+
+`moe_tc_permute` (experimental, default: `False`): On TPU, runs the MoE token permute (gather into expert-sorted order) in an experimental fused TensorCore Pallas kernel (`kernels/moe_combine_tc.py`). Requires `sparse_matmul=True`, `moe_use_direct_token_gather=True`, `use_ring_of_experts=False`, `use_ragged_sort=False`, `moe_use_fused_gmm3d=False`, unquantized bfloat16 activations, expert parallelism = 1 and tensor parallelism = 1; raises `ValueError` if preconditions or VMEM limits are not met. The routed rows per shard (tokens * top_k) must be a multiple of the chip's bf16 row tiling (8 on v6e, 16 on TPU7x). Not used when `model_call_mode=inference`; other call paths (e.g. eval or decode with a training config) use the kernel and raise if their shapes do not meet these requirements.
 
 `use_batch_split_schedule` (experimental): If enabled, split batch into micro-batches to hide communications that yields performance benefits.
 
@@ -161,9 +167,9 @@ MaxText implements an exact, paper-aligned version of DeepSeek V4's load balanci
 
 **MoE FSDP Sharding Strategies** (Note: At most one of the following three flags can be enabled at a time):
 
-- `shard_exp_on_fsdp`: If enabled, shard the expert dimension of the MLP weights on the FSDP axis. Works for both unquantized and quantized. When `quantization` and `weight_quantization_calibration_method` are fixed, it performs quantized weight all gather over fsdp before gmm. This is recommended only when `num_experts` is a multiple of `fsdp_parallelism`.
+- `shard_exp_on_fsdp`: If enabled, shard the expert dimension of the MLP weights on the FSDP axis. Works for both unquantized and quantized. With `quantization=fp8_full` (Qwix), `sparse_matmul` and `weight_quantization_calibration_method` fixed or `absmax`, it performs quantized weight all gather over fsdp (on the expert dim) before gmm with `use_tokamax_gmm=True`; otherwise XLA all-gathers the unquantized weights. This is recommended only when `num_experts` is a multiple of `fsdp_parallelism`.
 - `use_2d_fsdp_sharding`: If enabled, use fsdp and fsdp_transpose axes for sharding the MoE weights.
-- `shard_embed_moe_on_fsdp`: If enabled, keep embed_moe sharded so we can manually QAG (Quantize-All-Gather) it over FSDP. Requires `quantization` to be specified and `weight_quantization_calibration_method` to be fixed.
+- `shard_embed_moe_on_fsdp`: If enabled, keep embed_moe sharded so we can manually QAG (Quantize-All-Gather) it over FSDP. Requires `quantization` to be specified and `weight_quantization_calibration_method` to be fixed or `absmax`; without `use_tokamax_gmm=True`, it falls back to the XLA all-gather. See [Quantization](quantization.md) (Weight QAG).
 
 ## 3. Performance Tuning
 

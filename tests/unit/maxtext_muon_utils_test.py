@@ -19,6 +19,7 @@
 import collections.abc
 import contextlib
 import io
+import types
 import unittest
 from unittest import mock
 
@@ -238,6 +239,75 @@ class TestPrintStructureDebug(unittest.TestCase):
       maxtext_muon_utils._print_structure_debug(tree, muon_weight_dimension_numbers={"kernel": smdn((0,), (-1,))})
     out = buf.getvalue()
     self.assertIn("(16, 32)", out)
+
+
+class _PrefusedRoutedMoeNNXModel(nnx.Module):
+  """NNX model with pre-fused routed MoE `wi = [wi_0 | wi_1]` and shared experts."""
+
+  def __init__(self):
+    self.DeepSeekMoeBlock_0 = nnx.Module()  # pylint: disable=invalid-name
+    self.DeepSeekMoeBlock_0.MoeBlock_0 = nnx.Module()
+    self.DeepSeekMoeBlock_0.MoeBlock_0.gate = nnx.Module()
+    self.DeepSeekMoeBlock_0.MoeBlock_0.gate.kernel = nnx.Param(jnp.ones((4, 8)))
+    self.DeepSeekMoeBlock_0.MoeBlock_0.wi = nnx.Param(jnp.ones((8, 4, 16)))
+    self.DeepSeekMoeBlock_0.MoeBlock_0.wo = nnx.Param(jnp.ones((8, 8, 4)))
+    self.DeepSeekMoeBlock_0.shared_experts = nnx.Module()
+    self.DeepSeekMoeBlock_0.shared_experts.wi = nnx.Param(jnp.ones((4, 16)))
+    self.moe_block = nnx.Module()
+    self.moe_block.shared_experts = nnx.Module()
+    self.moe_block.shared_experts.wi = nnx.Param(jnp.ones((4, 16)))
+    self.moe_block.shared_expert = nnx.Module()
+    self.moe_block.shared_expert.wi = nnx.Param(jnp.ones((4, 16)))
+
+
+class TestPrefusedMoeWiShardedDimensionNumbers(unittest.TestCase):
+  """get_maxtext_muon_weight_dimension_numbers sets split_output_chunks=2 only on routed pre-fused `wi`."""
+
+  def setUp(self):
+    super().setUp()
+    self.model = _PrefusedRoutedMoeNNXModel()
+    self.mesh = jax.sharding.Mesh(np.array(jax.devices()[:1]).reshape((1, 1)), ("data", "model"))
+
+  def test_sets_split_output_chunks_when_prefuse_moe_weights_true(self):
+    config = mock.MagicMock()
+    config.logical_axis_rules = ()
+    config.muon_include_routers = True
+    config.prefuse_moe_weights = True
+    result = maxtext_muon_utils.get_maxtext_muon_weight_dimension_numbers(self.model, config=config, mesh=self.mesh)
+    moe_block = result["DeepSeekMoeBlock_0"]["MoeBlock_0"]
+    self.assertEqual(moe_block["wi"].split_output_chunks, 2)
+    self.assertEqual(moe_block["wi"].reduction_axis, (-2,))
+    self.assertEqual(moe_block["wi"].output_axis, (-1,))
+    self.assertEqual(moe_block["wo"].split_output_chunks, 1)
+    self.assertEqual(moe_block["gate"]["kernel"].split_output_chunks, 1)
+    self.assertEqual(result["DeepSeekMoeBlock_0"]["shared_experts"]["wi"].split_output_chunks, 1)
+    self.assertEqual(result["moe_block"]["shared_experts"]["wi"].split_output_chunks, 1)
+    self.assertEqual(result["moe_block"]["shared_expert"]["wi"].split_output_chunks, 1)
+
+  def test_leaves_split_output_chunks_at_one_when_prefuse_disabled_or_mock(self):
+    for prefuse in (False, mock.MagicMock()):
+      config = mock.MagicMock()
+      config.logical_axis_rules = ()
+      config.muon_include_routers = True
+      if isinstance(prefuse, bool):
+        config.prefuse_moe_weights = prefuse
+      result = maxtext_muon_utils.get_maxtext_muon_weight_dimension_numbers(self.model, config=config, mesh=self.mesh)
+      self.assertEqual(result["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi"].split_output_chunks, 1)
+
+    no_attr_config = types.SimpleNamespace(logical_axis_rules=(), muon_include_routers=True)
+    for cfg in (None, no_attr_config):
+      result = maxtext_muon_utils.get_maxtext_muon_weight_dimension_numbers(self.model, config=cfg, mesh=self.mesh)
+      self.assertEqual(result["DeepSeekMoeBlock_0"]["MoeBlock_0"]["wi"].split_output_chunks, 1)
+    self.assertFalse(muon_utils.is_prefuse_moe_weights_enabled(no_attr_config))
+
+  def test_is_prefused_moe_wi_path_exclusions_and_rank(self):
+    self.assertTrue(muon_utils.is_prefused_moe_wi_path(("MoeBlock_0", "wi"), shape=(4, 8, 16)))
+    self.assertTrue(muon_utils.is_prefused_moe_wi_path(("MoeBlock_0", "position_bias", "wi"), shape=(4, 8, 16)))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("MoeBlock_0", "wi"), shape=(8,)))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("MoeBlock_0", "bias", "wi"), shape=(4, 8, 16)))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("MoeBlock_0", "proj_bias", "wi"), shape=(4, 8, 16)))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("MoeBlock_0", "scale", "wi"), shape=(4, 8, 16)))
+    self.assertFalse(muon_utils.is_prefused_moe_wi_path(("MoeBlock_0", "embedding", "wi"), shape=(4, 8, 16)))
 
 
 if __name__ == "__main__":

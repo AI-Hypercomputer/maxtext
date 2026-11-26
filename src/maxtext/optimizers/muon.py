@@ -230,11 +230,15 @@ class ShardedMuonDimensionNumbers(NamedTuple):
     reduction_axis: Axes to contract over.
     output_axis: Output axes of the matrix projection.
     sharding: Optional NamedSharding specification for this leaf tensor.
+    split_output_chunks: Number of independent equal-sized matrices concatenated
+      along `output_axis` (e.g. `2` for pre-fused MoE `wi = [wi_0 | wi_1]`).
+      When `> 1`, each chunk is orthogonalized and shape-scaled independently.
   """
 
   reduction_axis: Sequence[int] | int = 0
   output_axis: Sequence[int] | int = 1
   sharding: jax.sharding.NamedSharding | None = None
+  split_output_chunks: int = 1
 
 
 MuonDimensionNumbers = ShardedMuonDimensionNumbers
@@ -255,6 +259,43 @@ def _normalize_axes(x: jax.Array, dim_nums: ShardedMuonDimensionNumbers) -> tupl
         f"Reduction and output axes must be disjoint, got {reduction_axes} " f"and {output_axes} for {x.ndim=}"
     )
 
+  return reduction_axes, output_axes
+
+
+def _drop_axes_sharding(
+    sharding: jax.sharding.NamedSharding,
+    ndim: int,
+    axes: Sequence[int],
+) -> jax.sharding.NamedSharding:
+  """Returns a `NamedSharding` identical to `sharding` with `axes` set to `None`."""
+  padded_spec = list(sharding.spec) + [None] * max(0, ndim - len(sharding.spec))
+  drop = set(axes)
+  spec = [None if ax in drop else padded_spec[ax] for ax in range(ndim)]
+  return jax.sharding.NamedSharding(sharding.mesh, jax.sharding.PartitionSpec(*spec))
+
+
+def _validate_split_chunk_count(k: int) -> None:
+  """Ensures `split_output_chunks` is a positive non-bool integer."""
+  if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+    raise ValueError(f"split_output_chunks must be an int >= 1, got {k!r}")
+
+
+def _validate_split_output_chunks(
+    x: jax.Array,
+    dim_nums: ShardedMuonDimensionNumbers,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+  """Validates `split_output_chunks` and returns normalized `(reduction_axes, output_axes)`."""
+  k = dim_nums.split_output_chunks
+  _validate_split_chunk_count(k)
+  reduction_axes, output_axes = _normalize_axes(x, dim_nums)
+  if k > 1:
+    if len(output_axes) != 1:
+      raise ValueError(f"split_output_chunks > 1 requires a single output_axis, got {output_axes}")
+    out_ax = output_axes[0]
+    if x.shape[out_ax] % k != 0:
+      raise ValueError(
+          f"Output axis {out_ax} of size {x.shape[out_ax]} is not divisible by split_output_chunks={k} for {x.shape=}"
+      )
   return reduction_axes, output_axes
 
 
@@ -382,10 +423,29 @@ def scale_by_muon(
     if adaptive:
       # Scale the orthogonalized updates by the dual norm of the original
       # updates. See https://arxiv.org/abs/2409.20325 for the derivation.
-      def scale_by_dual_norm(x: jax.Array, y: jax.Array) -> jax.Array:
+      def scale_by_dual_norm(x, y, dim_nums):
+        if isinstance(x, optax.MaskedNode) or isinstance(y, optax.MaskedNode) or isinstance(dim_nums, optax.MaskedNode):
+          return optax.MaskedNode()
+        if dim_nums is not None and dim_nums.split_output_chunks > 1:
+          _, output_axes = _validate_split_output_chunks(x, dim_nums)
+          out_ax = output_axes[0]
+          sharding = dim_nums.sharding
+          if (
+              sharding is not None
+              and reshape_utils.is_explicit_axes(sharding)
+              and reshape_utils.get_dim_mesh_axes(sharding, out_ax)
+          ):
+            unsharded_out = _drop_axes_sharding(sharding, x.ndim, (out_ax,))
+            x = jax.reshard(x, unsharded_out)
+            y = jax.reshard(y, unsharded_out)
+          x_chunks = jnp.split(x, dim_nums.split_output_chunks, axis=out_ax)
+          y_chunks = jnp.split(y, dim_nums.split_output_chunks, axis=out_ax)
+          scaled = [jnp.sum(xc * yc) * yc for xc, yc in zip(x_chunks, y_chunks)]
+          res = jnp.concatenate(scaled, axis=out_ax)
+          return reshape_utils.reshard_or_constrain(res, sharding) if sharding is not None else res
         return jnp.sum(x * y) * y
 
-      updates = jax.tree.map(scale_by_dual_norm, mu_hat, updates)
+      updates = jax.tree.map(scale_by_dual_norm, mu_hat, updates, resolved_dim_nums, is_leaf=is_leaf)
 
     # Downcast mu to the desired dtype
     mu = jax.tree.map(lambda x: x.astype(mu_dtype), mu)
@@ -428,6 +488,113 @@ def orthogonalize(
     use_all_to_all: bool = True,
 ) -> jax.Array:
   """Apply Newton-Schulz iterations to a single leaf tensor."""
+  reduction_axes, output_axes = _validate_split_output_chunks(x, dim_nums)
+  if dim_nums.split_output_chunks > 1:
+    out_ax = output_axes[0]
+    k = dim_nums.split_output_chunks
+    sharding = dim_nums.sharding
+    out_mesh_axes = reshape_utils.get_dim_mesh_axes(sharding, out_ax)
+    is_out_actively_sharded = bool(
+        sharding is not None and any(sharding.mesh.shape.get(axis, 1) > 1 for axis in out_mesh_axes)
+    )
+    if not is_out_actively_sharded:
+      # Fast batched path (TP=1 or unsharded): fold the `k` concatenated output matrices into an
+      # unsharded batch axis and run a single batched Newton-Schulz orthogonalization.
+      # Under 3D flattening in reshape_utils, local_batch_size == 1 replicates instead of padding to
+      # matrix_shards. Folding k chunks raises local_batch_size from 1 to k; when k < matrix_shards,
+      # replicate reduction_axes once up front to mirror that path (zero pad, 1 all-gather instead of
+      # repeated all-reduces across NS steps, and spectral preconditioning SVD under Explicit sharding).
+      # When orig_local_batch_size > 1, ceil(k * b / M) <= k * ceil(b / M), so all-to-all never increases padding.
+      replicate_matrix = False
+      if use_all_to_all and sharding is not None:
+        orig_batch_axes = tuple(ax for ax in range(x.ndim) if ax not in reduction_axes and ax != out_ax)
+        orig_batch_size = math.prod(x.shape[ax] for ax in orig_batch_axes)
+        orig_batch_mesh = reshape_utils.get_flat_mesh_axes(sharding, orig_batch_axes)
+        orig_batch_shards = math.prod(sharding.mesh.shape.get(ax, 1) for ax in orig_batch_mesh)
+        orig_local_batch_size = orig_batch_size // orig_batch_shards
+        matrix_mesh_axes = reshape_utils.get_flat_mesh_axes(sharding, reduction_axes)
+        matrix_shards = math.prod(sharding.mesh.shape.get(ax, 1) for ax in matrix_mesh_axes)
+        replicate_matrix = matrix_shards > 1 and orig_local_batch_size == 1 and k < matrix_shards
+      x_work = x
+      work_sharding = sharding
+      split_sharding = None
+      if sharding is not None:
+        if replicate_matrix:
+          work_sharding = _drop_axes_sharding(sharding, x.ndim, (out_ax, *reduction_axes))
+          x_work = reshape_utils.reshard_or_constrain(x_work, work_sharding)
+        elif out_mesh_axes:
+          # Strip size-1 mesh axes on `out_ax` before reshaping (metadata-only under Explicit sharding).
+          work_sharding = _drop_axes_sharding(sharding, x.ndim, (out_ax,))
+          x_work = reshape_utils.reshard_or_constrain(x_work, work_sharding)
+        else:
+          work_sharding = _drop_axes_sharding(sharding, x.ndim, ())
+        work_spec = list(work_sharding.spec)
+        split_spec = jax.sharding.PartitionSpec(*(work_spec[:out_ax] + [None, None] + work_spec[out_ax + 1 :]))
+        split_sharding = jax.sharding.NamedSharding(sharding.mesh, split_spec)
+      explicit_axes = reshape_utils.is_explicit_axes(sharding)
+      split_shape = (*x.shape[:out_ax], k, x.shape[out_ax] // k, *x.shape[out_ax + 1 :])
+      shifted_red = tuple(ax + 1 if ax >= out_ax else ax for ax in reduction_axes)
+      split_dim_nums = ShardedMuonDimensionNumbers(
+          reduction_axis=shifted_red,
+          output_axis=(out_ax + 1,),
+          sharding=split_sharding,
+          split_output_chunks=1,
+      )
+      x_split = (
+          jnp.reshape(x_work, split_shape, out_sharding=split_sharding)
+          if explicit_axes and split_sharding is not None
+          else jnp.reshape(x_work, split_shape)
+      )
+      y_split = orthogonalize(
+          x_split,
+          ns_coeffs=ns_coeffs,
+          ns_steps=ns_steps,
+          precond_fn=precond_fn,
+          ns_step_fn=ns_step_fn,
+          dim_nums=split_dim_nums,
+          use_all_to_all=use_all_to_all and not replicate_matrix,
+      )
+      y = (
+          jnp.reshape(y_split, x.shape, out_sharding=work_sharding)
+          if explicit_axes and work_sharding is not None
+          else jnp.reshape(y_split, x.shape)
+      )
+      if sharding is not None:
+        y = reshape_utils.reshard_or_constrain(y, sharding)
+      return y
+
+    # Actively sharded output axis (e.g. TP > 1): split into `k` independent matrices along `out_ax`,
+    # reshard each chunk across the full output mesh axis, orthogonalize independently, and re-concatenate.
+    assert sharding is not None
+    explicit_mesh = reshape_utils.is_explicit_axes(sharding)
+    unsharded_out = None
+    x_to_split = x
+    if explicit_mesh:
+      unsharded_out = _drop_axes_sharding(sharding, x.ndim, (out_ax,))
+      x_to_split = jax.reshard(x, unsharded_out)
+    sub_dim_nums = ShardedMuonDimensionNumbers(
+        reduction_axis=reduction_axes,
+        output_axis=(out_ax,),
+        sharding=sharding,
+        split_output_chunks=1,
+    )
+    orth_chunks = []
+    for chunk in jnp.split(x_to_split, k, axis=out_ax):
+      chunk = reshape_utils.reshard_or_constrain(chunk, sharding)
+      orth_chunk = orthogonalize(
+          chunk,
+          ns_coeffs=ns_coeffs,
+          ns_steps=ns_steps,
+          precond_fn=precond_fn,
+          ns_step_fn=ns_step_fn,
+          dim_nums=sub_dim_nums,
+          use_all_to_all=use_all_to_all,
+      )
+      if explicit_mesh and unsharded_out is not None:
+        orth_chunk = jax.reshard(orth_chunk, unsharded_out)
+      orth_chunks.append(orth_chunk)
+    return reshape_utils.reshard_or_constrain(jnp.concatenate(orth_chunks, axis=out_ax), sharding)
+
   # We apply the following strategy:
   # 1. We reshape and reshard the input tensor.
   # 2. We apply preconditioning.
@@ -476,9 +643,9 @@ def orthogonalize(
 
 
 def _get_shape_products(x: jax.Array, dim_nums: ShardedMuonDimensionNumbers) -> tuple[float, float]:
-  reduction_axes, output_axes = _normalize_axes(x, dim_nums)
+  reduction_axes, output_axes = _validate_split_output_chunks(x, dim_nums)
   fan_in = math.prod(x.shape[ax] for ax in reduction_axes)
-  fan_out = math.prod(x.shape[ax] for ax in output_axes)
+  fan_out = math.prod(x.shape[ax] for ax in output_axes) // dim_nums.split_output_chunks
   return fan_in, fan_out
 
 

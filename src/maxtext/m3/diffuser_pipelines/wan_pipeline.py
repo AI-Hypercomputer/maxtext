@@ -455,14 +455,36 @@ class WanPipeline(DiffusionPipeline):
 
     self.vae_mesh = kwargs.get("vae_mesh", mesh)
 
-    self.vae_scale_factor_temporal = 2 ** sum(self.vae.temperal_downsample) if getattr(self, "vae", None) else 4
-    self.vae_scale_factor_spatial = 2 ** len(self.vae.temperal_downsample) if getattr(self, "vae", None) else 8
+    if getattr(self, "vae", None) is not None:
+      self.vae_scale_factor_temporal = self.vae.scale_factor_temporal
+      self.vae_scale_factor_spatial = self.vae.scale_factor_spatial
+    else:
+      self.vae_scale_factor_temporal = 4
+      self.vae_scale_factor_spatial = 8
     self.video_processor = VaeVideoProcessor(vae_scale_factor=self.vae_scale_factor_spatial)  # For i2v tasks to be added.
 
     self.p_run_inference = None
     # encode_prompt result cache: same-prompt calls (warmup + real run,
     # repeated serving requests) skip the text encoder.
     self._prompt_embeds_cache = {}
+
+  def _align_video_size(self, height: int, width: int) -> Tuple[int, int]:
+    """Rounds `height` / `width` down to multiples of `vae_scale_factor_spatial * transformer patch size`.
+
+    The latent grid must split evenly into transformer patches: 16 px for Wan 2.1 (8 x 2), 32 px for Wan 2.2 5B
+    (16 x 2), so 720p is generated as 704 x 1280 there. Call it before `check_inputs` so validation sees the size
+    that is actually generated.
+    """
+    transformer = getattr(self, "transformer", None)
+    patch_h, patch_w = (transformer.patch_size[1], transformer.patch_size[2]) if transformer is not None else (2, 2)
+    mod_h, mod_w = self.vae_scale_factor_spatial * patch_h, self.vae_scale_factor_spatial * patch_w
+    new_height, new_width = (height // mod_h) * mod_h, (width // mod_w) * mod_w
+    if (new_height, new_width) != (height, width):
+      max_logging.log(
+          f"Requested {height}x{width} (HxW) is not divisible by {mod_h}x{mod_w}; generating {new_height}x{new_width}"
+          " instead, so the output video size differs from the request."
+      )
+    return new_height, new_width
 
   def check_inputs(
       self,
@@ -490,7 +512,7 @@ class WanPipeline(DiffusionPipeline):
     mesh = getattr(self, "vae_mesh", getattr(self, "mesh", None))
     if mesh is not None and hasattr(mesh, "shape"):
       vae_spatial = mesh.shape.get("vae_spatial", 1)
-      if vae_spatial > 1 and (width // 8) % vae_spatial != 0:
+      if vae_spatial > 1 and (width // self.vae_scale_factor_spatial) % vae_spatial != 0:
         max_logging.log(
             "Warning: Latent width is not divisible by vae_spatial mesh axis"
             f" ({vae_spatial}). VAE spatial sharding will be partially"
@@ -831,6 +853,7 @@ class WanPipeline(DiffusionPipeline):
         latent_condition: The VAE encoded latents of the image(s).
         video_condition: The input to the VAE.
     """
+    # TODO(i2v): not wired to an entry point yet; the I2V caller must resize `image` to `_align_video_size(...)`.
     height, width = image.shape[-2:]
     image = image[:, :, jnp.newaxis, :, :]  # [B, C, 1, H, W]
 
@@ -1096,6 +1119,7 @@ class WanPipeline(DiffusionPipeline):
       negative_prompt_embeds: jax.Array = None,
   ):
     """Encode prompts, prepare initial latents and scheduler state for T2V."""
+    height, width = self._align_video_size(height, width)
     self.check_inputs(
         prompt=prompt,
         negative_prompt=negative_prompt,

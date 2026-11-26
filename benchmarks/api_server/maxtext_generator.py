@@ -194,6 +194,7 @@ class MaxTextGenerator:
       seed: Optional[int] = None,
       top_k: Optional[int] = None,
       top_p: Optional[float] = None,
+      is_chat: Optional[List[bool]] = None,
   ) -> List[Completion]:
     """
     Generates text for a batch of prompts, handling chunking automatically.
@@ -209,6 +210,8 @@ class MaxTextGenerator:
         seed: An optional seed for deterministic sampling.
         top_k: An optional integer for top-k sampling.
         top_p: An optional float for nucleus sampling.
+        is_chat: An optional list of flags, one for each prompt: whether the prompt was formatted with the chat
+          template (a chat completion request), in which case no BOS is added to it.
 
     Returns:
         A list of generated Completion, corresponding to the input prompts.
@@ -217,18 +220,23 @@ class MaxTextGenerator:
       image_paths = [None] * len(prompts)
     if len(prompts) != len(image_paths):
       raise ValueError("The number of prompts must equal the number of image paths.")
+    if is_chat is None:
+      is_chat = [False] * len(prompts)
+    if len(prompts) != len(is_chat):
+      raise ValueError("The number of prompts must equal the number of is_chat flags.")
 
     all_results = []
     num_prompts = len(prompts)
     for i in range(0, num_prompts, self.batch_size):
       prompt_chunk = prompts[i : i + self.batch_size]
       image_chunk = image_paths[i : i + self.batch_size]
+      is_chat_chunk = is_chat[i : i + self.batch_size]
 
       # chunk_count = (i // self.batch_size) + 1
       # total_chunks = (num_prompts + self.batch_size - 1) // self.batch_size
 
       chunk_results = self._process_chunk(
-          prompt_chunk, image_chunk, max_tokens, logprobs, echo, stop, temperature, seed, top_k, top_p
+          prompt_chunk, image_chunk, max_tokens, logprobs, echo, stop, temperature, seed, top_k, top_p, is_chat_chunk
       )
       all_results.extend(chunk_results)
 
@@ -246,6 +254,7 @@ class MaxTextGenerator:
       seed: Optional[int] = None,
       top_k: Optional[int] = None,
       top_p: Optional[float] = None,
+      is_chat: Optional[List[bool]] = None,
   ) -> List[Completion]:
     """Orchestrates the generation process for a single chunk of prompts."""
     start_time = time.time()
@@ -256,7 +265,7 @@ class MaxTextGenerator:
     initialize_start_time = time.time()
     # Reset the state to handle the new batch while reusing memory.
     self.decode_state = self._jitted_reset_state(self.decode_state)
-    streams, rng = self._initialize_streams_and_state(prompts, image_paths, seed)
+    streams, rng = self._initialize_streams_and_state(prompts, image_paths, seed, is_chat)
     initialize_end_time = time.time()
     self.logger.info(
         "Initialization complete in %.2f seconds. Max batch size: %d",
@@ -291,12 +300,14 @@ class MaxTextGenerator:
     self.logger.info("Processed %d prompts in %.2fs.", len(prompts), end_time - start_time)
     return completions
 
-  def _initialize_streams_and_state(self, prompts, image_paths, seed):
+  def _initialize_streams_and_state(self, prompts, image_paths, seed, is_chat=None):
     """Tokenizes inputs, sets up stream objects, and initializes the decode state."""
     prefill_length = getattr(self.config, "max_prefill_predict_length", 1024)
+    if is_chat is None:
+      is_chat = [False] * len(prompts)
     streams = []
-    for prompt, image_path in zip(prompts, image_paths):
-      toks, tlen, imgs = self._preprocess_inputs(prompt, prefill_length, image_path)
+    for prompt, image_path, prompt_is_chat in zip(prompts, image_paths, is_chat):
+      toks, tlen, imgs = self._preprocess_inputs(prompt, prefill_length, image_path, is_chat=prompt_is_chat)
       assert tlen <= prefill_length, f"Input token length {tlen} is > {prefill_length}"
       streams.append(GenerationStream(tokens=toks, true_length=tlen, image=imgs))
 
@@ -494,8 +505,11 @@ class MaxTextGenerator:
       )
     return completions
 
-  def _preprocess_inputs(self, text, prefill_length, image_path):
-    """Helper to preprocess a single text and optional image input."""
+  def _preprocess_inputs(self, text, prefill_length, image_path, is_chat=False):
+    """Helper to preprocess a single text and optional image input.
+
+    `is_chat` says whether `text` was formatted with the chat template (a chat completion request).
+    """
     processor_output = mm_utils.PreprocessorOutput()
     images = None
     if self.config.use_multimodal and image_path:
@@ -509,11 +523,24 @@ class MaxTextGenerator:
       prefill_length -= mm_processor.get_image_offsets(config=self.config, processor_output=processor_output)
       images = processor_output.pixel_values
 
-    is_bos = not self.has_chat_template
-    if self.config.use_multimodal and image_path and mm_processor.reformatted_prompt_needs_bos(self.config.model_name):
-      # Same as decode.py: `text` comes from `reformat_prompt`, which leaves Gemma 3's BOS to the token ids, so having a
-      # chat template doesn't mean BOS is already there.
-      is_bos = self.config.add_bos
+    if self.config.use_multimodal and image_path:
+      # Same rule as decode.py for multimodal prompts.
+      is_bos = self.config.add_bos and not self.has_chat_template
+      if mm_processor.reformatted_prompt_needs_bos(self.config.model_name):
+        # Same as decode.py: `text` comes from `reformat_prompt`, which leaves Gemma 3's BOS to the token ids, so
+        # having a chat template doesn't mean BOS is already there.
+        is_bos = self.config.add_bos
+    elif is_chat:
+      # The chat template the prompt was formatted with decides how it starts.
+      is_bos = False
+    else:
+      # Same rule as decode.py for text prompts: they start with BOS, as training data does, unless the tokenizer
+      # applies the chat template itself (`use_chat_template`) or has no BOS token (e.g. Qwen3).
+      is_bos = (
+          self.config.add_bos
+          and not (self.config.use_chat_template and self.has_chat_template)
+          and getattr(self.tokenizer, "bos_id", None) is not None
+      )
     tokens, true_length = self.tokenizer.encode(text, is_bos=is_bos, prefill_lengths=[prefill_length])
     if self.config.use_multimodal and image_path:
       tokens = mm_processor.prepare_text_for_image_fusion(tokens, config=self.config, processor_output=processor_output)

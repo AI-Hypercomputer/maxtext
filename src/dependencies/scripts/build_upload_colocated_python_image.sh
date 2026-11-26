@@ -26,6 +26,15 @@
 #   IMAGE_LOCATION: The full URL for the final image in the registry.
 #                   Defaults to gcr.io/${PROJECT}/${USER}_${LOCAL_IMAGE_NAME}:latest.
 #                   Setting this variable fully overrides PROJECT and LOCAL_IMAGE_NAME.
+#   JAX_VERSION: JAX version of the base image. Defaults to the version in REQUIREMENTS_FILE.
+#                The base image pins jax and jaxlib, so it must match the JAX version of the trainer image.
+#   BASE_IMAGE_REPO: Repository of the sidecar base image. It must belong to the same image family as the
+#                    Pathways server the job runs, or the server fails to connect to the sidecar (UNIMPLEMENTED):
+#                      .../pathways/server       -> .../pathways-colocated-python/sidecar (default)
+#                      .../cloud-pathways/server -> .../cloud-pathways/colocated_python_sidecar
+#   REQUIREMENTS_FILE: Requirements to install in the image, as a path from the repository root.
+#                      Defaults to the pre-training TPU requirements. If they conflict with the base image's
+#                      pins, pass a file listing only what the sidecar runs (for checkpointing, orbax-checkpoint).
 
 # Example 1: Provide PROJECT
 # bash src/dependencies/scripts/build_upload_colocated_python_image.sh PROJECT=my-tpu-dev
@@ -38,6 +47,13 @@
 
 # Example 4: Specify a custom JAX version
 # bash src/dependencies/scripts/build_upload_colocated_python_image.sh PROJECT=my-tpu-dev JAX_VERSION=0.10.0
+
+# Example 5: Build for a cloud-pathways server
+# bash src/dependencies/scripts/build_upload_colocated_python_image.sh PROJECT=my-tpu-dev \
+#   BASE_IMAGE_REPO=us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/colocated_python_sidecar
+
+# Stop at the first failing command, so a failed docker build is not reported as a success.
+set -e
 
 for ARGUMENT in "$@"; do
     if [[ "$ARGUMENT" == *"="* ]]; then
@@ -52,6 +68,8 @@ done
 
 # Set default values using parameter expansion.
 : "${LOCAL_IMAGE_NAME:=maxtext-colocated-python}"
+: "${BASE_IMAGE_REPO:=us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar}"
+: "${REQUIREMENTS_FILE:=src/dependencies/requirements/generated_requirements/tpu-requirements.txt}"
 if [[ -z "${IMAGE_LOCATION}" ]]; then
   # IMAGE_LOCATION was not provided, so PROJECT is required for the default.
   if [[ -z "${PROJECT}" ]]; then
@@ -70,34 +88,28 @@ echo "$(date): Building and pushing MaxText Colocated Python image..."
 echo "  PROJECT: ${PROJECT}"
 echo "  LOCAL_IMAGE_NAME: ${LOCAL_IMAGE_NAME}"
 echo "  IMAGE_LOCATION: ${IMAGE_LOCATION}"
+echo "  BASE_IMAGE_REPO: ${BASE_IMAGE_REPO}"
+echo "  REQUIREMENTS_FILE: ${REQUIREMENTS_FILE}"
 echo "  Dockerfile Template: ${DOCKERFILE_TEMPLATE}"
 echo "  Build Context: ${CONTEXT}"
 
 # --- Step 1: Handle JAX Version ---
-REQ_FILE="src/dependencies/requirements/generated_requirements/tpu-requirements.txt"
+if [[ ! -f "${REQUIREMENTS_FILE}" ]]; then
+  echo "Error: Requirements file not found: ${REQUIREMENTS_FILE}" >&2
+  exit 1
+fi
 if [[ -z "${JAX_VERSION}" ]]; then
     echo "$(date): Extracting JAX version from requirements..."
-    if [[ ! -f "${REQ_FILE}" ]]; then
-      echo "Error: Requirements file not found: ${REQ_FILE}" >&2
-      exit 1
-    fi
     # Extracts version like "0.10.0" from lines like "jax>=0.10.0" or "jax==0.10.0"
-    JAX_VERSION=$(grep -E "^jax(>=|==)" "${REQ_FILE}" | head -1 | sed -E 's/^jax(>=|==)([0-9.]+).*/\2/')
+    JAX_VERSION=$(grep -E "^jax(>=|==)" "${REQUIREMENTS_FILE}" | head -1 | sed -E 's/^jax(>=|==)([0-9.]+).*/\2/')
     if [[ -z "${JAX_VERSION}" ]]; then
-      echo "Error: Could not extract jax version from ${REQ_FILE}. Ensure it's in the format 'jax>=X.Y.Z' or 'jax==X.Y.Z'." >&2
+      echo "Error: Could not extract jax version from ${REQUIREMENTS_FILE}. Add a 'jax>=X.Y.Z' or 'jax==X.Y.Z' line, or pass JAX_VERSION." >&2
       exit 1
     fi
     echo "  Detected required JAX version: ${JAX_VERSION}"
-else
-    TEMP_REQ_FILE=$(mktemp)
-    echo "$(date): Generating temporary requirements file: ${TEMP_REQ_FILE} for custom JAX version ${JAX_VERSION}"
-    trap 'rm -f "${TEMP_REQ_FILE}"' EXIT
-    sed "s/^jax\(>=\|==\).*$/jax==${JAX_VERSION}/" "${REQ_FILE}" > "${TEMP_REQ_FILE}"
-    REQ_FILE="${TEMP_REQ_FILE}"
 fi
 
 # --- Step 2: Find the Latest Compatible Base Image Tag ---
-BASE_IMAGE_REPO="us-docker.pkg.dev/cloud-tpu-v2-images/pathways-colocated-python/sidecar"
 TARGET_JAX_TAG_PART="jax_${JAX_VERSION}"
 echo "$(date): Searching for base image tag in '${BASE_IMAGE_REPO}' containing '${TARGET_JAX_TAG_PART}'..."
 
@@ -125,10 +137,11 @@ FULL_BASE_IMAGE="${BASE_IMAGE_REPO}:${BASE_IMAGE_TAG}"
 echo "  Found latest compatible base image: ${FULL_BASE_IMAGE}"
 
 # --- Step 3: Build the Docker image using --build-arg ---
-echo "$(date): Running docker build with local tag '${LOCAL_IMAGE_NAME}' using ${TMP_DOCKERFILE}..."
+echo "$(date): Running docker build with local tag '${LOCAL_IMAGE_NAME}' using ${DOCKERFILE_TEMPLATE}..."
 docker build --no-cache \
   -f ${DOCKERFILE_TEMPLATE} \
   --build-arg BASE_IMAGE="${FULL_BASE_IMAGE}" \
+  --build-arg REQUIREMENTS_FILE="${REQUIREMENTS_FILE}" \
   -t "${LOCAL_IMAGE_NAME}" \
   .
 

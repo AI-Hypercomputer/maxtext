@@ -23,6 +23,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import contextlib
 import dataclasses
+import enum
 import functools
 import gc
 import time
@@ -247,7 +248,8 @@ def _deferred_all_reduce_shardings(config: Any, mesh: Any, params_shardings: Any
   - the batch dimension is not sharded over "data" after all, leaving no cross-replica
     partial to defer and nothing for the tag to describe.
   """
-  if config.shard_mode != common_types.ShardMode.EXPLICIT:
+  if config.shard_mode != common_types.ShardMode.EXPLICIT or bool(getattr(config, "use_m3_model", False)):
+    # Stock `flax.nnx.RMSNorm` in m3 rejects `reduced={'data'}` scale operands on pure-DP explicit meshes.
     return None, None
   if mesh is None or mesh.shape.get(_DATA_AXIS, 1) <= 1:
     return None, None
@@ -2177,11 +2179,14 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     return treedef.unflatten([next(cast) if is_uncast else g for g, is_uncast in zip(leaves, uncast)])
 
   @_profiled_step("fwd_bwd", control_profile=True)
-  def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> None:
+  def fwd_bwd(self, payload: abstract_engine.TrainerPayload) -> jax.Array:
     """Executes a micro-batch forward-backward pass and accumulates gradients.
 
     Args:
       payload: Packed micro-batch training input.
+
+    Returns:
+      An un-donated scalar on-device array tracking completion of this pass.
     """
     batch = self._prepare_batch(payload)
 
@@ -2254,6 +2259,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._accumulated_denominator = acc_denom
     self._micro_step_count += 1
     self._total_micro_steps += 1
+    return loss.unreduced_sum if isinstance(loss, abstract_engine.WeightedMetric) else loss
 
   @_profiled_step("update")
   def update(self) -> int:
@@ -2641,7 +2647,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         )
 
   def get_metrics(self, clear_cache: bool = True) -> abstract_engine.MetricsBuffer:
-    """Returns the most recent step's metrics as an on-device MetricsBuffer.
+    """Returns the most recent step's metrics materialized on host.
 
     One buffer accumulates per train step. Both this engine's own abstract interface and
     Tunix's `AbstractTrainer` declare a single buffer, so callers that want every step
@@ -2651,11 +2657,12 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       clear_cache: Whether to reset cached metrics after retrieval.
 
     Returns:
-      The newest on-device MetricsBuffer. When nothing has been recorded this is an empty
-      buffer with `id` set to EMPTY_METRICS_BUFFER_ID, not None, matching Tunix's
-      `PeftTrainer.get_metrics`. Callers detect that case with
-      `buffer.id == EMPTY_METRICS_BUFFER_ID`; a real buffer's id is its train step, which
-      is never negative.
+      The newest MetricsBuffer materialized to host NumPy arrays (via a single
+      batched `jax.device_get`) with a plain `str` mode. When nothing has been
+      recorded this is an empty buffer with `id` set to EMPTY_METRICS_BUFFER_ID,
+      not None, matching Tunix's `PeftTrainer.get_metrics`. Callers detect that
+      case with `buffer.id == EMPTY_METRICS_BUFFER_ID`; a real buffer's id is
+      its train step, which is never negative.
     """
     history = self._metrics_recorder.get_metrics_history(clear_cache=clear_cache)
     if not history:
@@ -2670,7 +2677,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           history[-1].id,
           len(history) - 1,
       )
-    return history[-1]
+    buf = history[-1]
+    weighted_host, scalar_host = jax.device_get((dict(buf.weighted_metrics), dict(buf.scalar_metrics)))
+    mode = str(buf.mode.value) if isinstance(buf.mode, enum.Enum) else str(buf.mode)
+    return abstract_engine.MetricsBuffer(
+        id=buf.id,
+        weighted_metrics=weighted_host,
+        scalar_metrics=scalar_host,
+        aggregation_fns=dict(buf.aggregation_fns),
+        mode=mode,
+    )
 
   def _get_trainable_params_state(self) -> Any:
     """Extracts pure parameter weights from the model, excluding optimizer and RNG state."""

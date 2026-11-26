@@ -24,14 +24,14 @@ model constructors take today. The fields read here are `steps`,
 `per_device_batch_size`, `max_target_length`, `learning_rate`, the optimizer
 fields consumed by `maxtext.optimizers.optimizers.get_optimizer`,
 `gradient_clipping_threshold`, `init_weights_seed`, the precision fields
-`matmul_precision` and `quantization`, the mesh fields consumed by
-`maxtext.m3.core.sharding.mesh_from_config` (`ici_*_parallelism`,
-`dcn_*_parallelism`, `shard_mode`), and the profiler fields consumed by
-`maxtext.common.profiler.Profiler` (`profiler`,
-`skip_first_n_steps_for_profiler`, `profiler_steps`, ...). The trace is
-written under `config.tensorboard_dir`. `gradient_accumulation_steps > 1`,
-`grad_dtype` other than float32, and batch sizes that do not split over the
-mesh are rejected rather than emulated.
+`matmul_precision` and `quantization`, the mesh and sharding fields consumed
+by `maxtext.m3.core.sharding.mesh_from_config` and `sharding_from_config`
+(`ici_*_parallelism`, `dcn_*_parallelism`, `shard_mode`),
+and the profiler fields consumed by `maxtext.common.profiler.Profiler`
+(`profiler`, `skip_first_n_steps_for_profiler`, `profiler_steps`, ...). The
+trace is written under `config.tensorboard_dir`. `gradient_accumulation_steps > 1`,
+`grad_dtype` other than float32, and batch or sequence sizes that do not split
+over the mesh are rejected rather than emulated.
 
 `setup_model` is where infrastructure is composed, in the order every m3
 driver follows:
@@ -50,11 +50,12 @@ step under `jax.default_matmul_precision`. It only affects float32 matmul
 operands -- on TPU, `default` is one bfloat16 pass and `highest` is full
 float32 -- so with bfloat16 compute it is a no-op, as in legacy.
 
-Parameters are sharded by the model at construction, from its own `Sharding`
-strategy (Qwen3's is `DefaultSharding`: FSDP over the model dimension, tensor
-parallelism over heads and MLP width, batch over the data axes). The loop asks
-`DefaultSharding` how to lay out the input batch and logs the fraction of
-parameters each device holds, so replication is visible.
+Parameters are sharded by the model at construction from its own `Sharding`
+strategy (`DefaultSharding` for Qwen3: FSDP over the model dimension, tensor
+parallelism over heads and MLP width, optional sequence parallelism over norms
+and residuals, and batch over the data axes). `train_loop` resolves
+`sharding_from_config(config)` to lay out the input batch and logs the fraction
+of parameters each device holds, so replication is visible.
 
 Example (CPU or TPU)::
 
@@ -66,9 +67,10 @@ Example (CPU or TPU)::
       enable_checkpointing=false
 """
 
-import functools
-import time
 from collections.abc import Sequence
+import functools
+import math
+import time
 
 from absl import app
 from flax import nnx
@@ -81,14 +83,21 @@ import optax
 from maxtext.common import profiler
 from maxtext.configs import pyconfig
 from maxtext.m3 import models as m3_models
-from maxtext.m3.core.sharding import DefaultSharding, Sharding, TensorType, mesh_from_config
+from maxtext.m3.core import kernels as m3_kernels
+from maxtext.m3.core.sharding import (
+    Sharding,
+    TensorType,
+    ambient_mesh_is_explicit,
+    mesh_from_config,
+    project_spec_to_mesh,
+    sharding_from_config,
+)
 from maxtext.m3.infra import quantization
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.m3.infra.named_scopes import add_named_scopes
 from maxtext.optimizers import optimizers
 from maxtext.utils import max_logging
 from maxtext.utils import max_utils
-from maxtext.utils import sharding as maxtext_sharding
 
 
 def make_optimizer(config) -> optax.GradientTransformation:
@@ -99,20 +108,25 @@ def make_optimizer(config) -> optax.GradientTransformation:
   return tx
 
 
-def setup_model(config, mesh: Mesh) -> tuple[nnx.Module, nnx.Optimizer]:
+def setup_model(config, mesh: Mesh, sharding: Sharding | None = None) -> tuple[nnx.Module, nnx.Optimizer]:
   """Builds the model and optimizer with every transform applied, in the fixed order.
 
   Must run inside `jax.set_mesh(mesh)`. The model places its parameters from
-  its own `Sharding` strategy as it is constructed; constructors do not share
-  one signature for it (GLM brings its own and rejects unknown keywords), so
-  none is passed. Scan comes before quantization, which records module paths
-  and so must see the final structure; quantization traces one forward pass of
-  the training shape. Named scopes come after both: they only label ops, and
-  scan needs identical layer classes. The optimizer comes last, as it must see
-  the final model.
+  `sharding` (or its own default strategy when `sharding` is `None`) as it is
+  constructed. Scan comes before quantization, which records module paths and
+  so must see the final structure; quantization traces one forward pass of the
+  training shape. Named scopes come after both: they only label ops, and scan
+  needs identical layer classes. The optimizer comes last, as it must see the
+  final model.
   """
-  model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed))
+  create_kw = {"sharding": sharding} if sharding is not None else {}
+  model = m3_models.create_model(config, mesh, rngs=nnx.Rngs(config.init_weights_seed), **create_kw)
   model = m3_scan.maybe_apply_scan(model, config)
+  if getattr(config, "quantization", "") and ambient_mesh_is_explicit():
+    raise ValueError(
+        "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized matmuls. "
+        "Use shard_mode='auto'."
+    )
   model = quantization.maybe_quantize(model, config, *quantization.example_inputs(config))
   model = add_named_scopes(model)
   optimizer = nnx.Optimizer(model, make_optimizer(config), wrt=nnx.Param)
@@ -124,9 +138,17 @@ def batch_spec(sharding: Sharding) -> P:
   return sharding("input_tokens", ("batch", "length"), TensorType.ACTIVATION)
 
 
+def _axis_shards(mesh: Mesh, spec: P, dim: int) -> int:
+  """Number of ways `spec` splits dimension `dim` on `mesh`."""
+  projected = project_spec_to_mesh(spec, mesh)
+  axes = projected[dim] if len(projected) > dim else None
+  axes = () if axes is None else ((axes,) if isinstance(axes, str) else tuple(axes))
+  return math.prod(mesh.shape[axis] for axis in axes)
+
+
 def _batch_shards(mesh: Mesh, spec: P) -> int:
   """Number of ways `spec` splits the batch dimension on `mesh`."""
-  return maxtext_sharding.mesh_axes_size(mesh, maxtext_sharding.mesh_axes_for_dim(spec[0]), label="batch")
+  return _axis_shards(mesh, spec, 0)
 
 
 def params_held_per_device(model: nnx.Module) -> float:
@@ -152,16 +174,19 @@ def _synthetic_batch_fn(batch_size: int, seq_len: int, vocab_size: int, mesh: Me
     positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32), (batch_size, seq_len))
     return {"inputs": tokens[:, :-1], "targets": tokens[:, 1:], "positions": positions}
 
-  return jax.jit(body, out_shardings=NamedSharding(mesh, spec))
+  return jax.jit(body, out_shardings=NamedSharding(mesh, project_spec_to_mesh(spec, mesh)))
 
 
-def make_synthetic_batch(config, mesh: Mesh, spec: P, key: jax.Array) -> dict[str, jax.Array]:
+def make_synthetic_batch(config, mesh: Mesh, spec: P | Sharding, key: jax.Array) -> dict[str, jax.Array]:
   """Random token batch, laid out as `spec` (`batch_spec` of the strategy).
 
   Targets are the inputs shifted left by one, so the loss is ordinary
   next-token prediction rather than a constant.
   """
-  fn = _synthetic_batch_fn(config.global_batch_size_to_train_on, config.max_target_length, config.vocab_size, mesh, spec)
+  spec_p = batch_spec(spec) if isinstance(spec, Sharding) else spec
+  fn = _synthetic_batch_fn(
+      config.global_batch_size_to_train_on, config.max_target_length, config.vocab_size, mesh, spec_p
+  )
   return fn(key)
 
 
@@ -169,7 +194,16 @@ def loss_fn(model: nnx.Module, batch: dict[str, jax.Array]) -> jax.Array:
   """Mean next-token cross entropy, computed in float32."""
   logits = model(batch["inputs"], batch["positions"])
   with jax.named_scope("cross_entropy"):
-    losses = optax.softmax_cross_entropy_with_integer_labels(logits.astype(jnp.float32), batch["targets"])
+    logits_fp32 = logits.astype(jnp.float32)
+    if not jax.sharding.get_abstract_mesh().empty and ambient_mesh_is_explicit():
+      target_sharding = jax.typeof(batch["targets"]).sharding
+      target_spec = target_sharding.spec if hasattr(target_sharding, "spec") else P()
+      losses = jax.sharding.auto_axes(
+          optax.softmax_cross_entropy_with_integer_labels,
+          out_sharding=target_spec,
+      )(logits_fp32, batch["targets"])
+    else:
+      losses = optax.softmax_cross_entropy_with_integer_labels(logits_fp32, batch["targets"])
     return jnp.mean(losses)
 
 
@@ -194,12 +228,14 @@ def _log_step(step: int, loss: jax.Array, last_done: float, tokens_per_step: int
 def train_loop(config) -> float:
   """Builds the model and optimizer, runs `config.steps` steps, and returns the last loss."""
   mesh = mesh_from_config(config)
-  # Lays out the input batch. The model places its parameters from its own
-  # strategy, which for Qwen3 is this same `DefaultSharding`.
-  sharding = DefaultSharding()
+  m3_kernels.validate_attention_config(config, mesh=mesh)
+  # Lays out the input batch; `setup_model` lets the model resolve its own
+  # parameter strategy from `config`.
+  sharding = sharding_from_config(config)
+  explicit = all(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types)
   max_logging.log(
       f"m3 loop: mesh {dict(mesh.shape)} over {len(jax.devices())} device(s), "
-      f"{'explicit' if mesh.are_all_axes_explicit else 'auto'} sharding"
+      f"{'explicit' if explicit else 'auto'} sharding"
   )
 
   # `global_batch_size_to_train_on` already includes gradient accumulation, and
@@ -220,6 +256,13 @@ def train_loop(config) -> float:
     raise ValueError(
         f"per_device_batch_size={config.per_device_batch_size} gives a global batch of {batch_size}, which does not "
         f"split over the {batch_shards} shards of {spec}."
+    )
+  norm_seq_spec = sharding("decoder_layer_input", ("batch", "norm_length", "embed"), TensorType.ACTIVATION)
+  seq_shards = _axis_shards(mesh, norm_seq_spec, 1)
+  if config.max_target_length % seq_shards:
+    raise ValueError(
+        f"max_target_length={config.max_target_length} is not divisible by the {seq_shards} sequence shards of "
+        f"{norm_seq_spec}."
     )
 
   # Same strings as legacy (`default` / `high` / `highest`); pyconfig hands over a `str` Enum.

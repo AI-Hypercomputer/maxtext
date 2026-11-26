@@ -2189,6 +2189,15 @@ class CompressedAttention(Attention):
 
       init_probs = jnp.zeros((batch, q_len, compressed_len), dtype=jnp.float32)
       target_probs, _ = jax.lax.scan(scan_body_heads, init_probs, {"q": q_h})
+    elif getattr(self.config, "csa_teacher_two_pass", False):
+      # Two passes over bf16 [b, t, h, w] scores: no 4-D f32 tensor and no 4-D constant broadcast in the layer loop.
+      scores = jnp.einsum("bthd, bwd -> bthw", query, k_vec, precision=self.config.matmul_precision)
+      lse = jax.nn.logsumexp(scores.astype(jnp.float32) + teacher_mask[:, :, None, :], axis=-1, keepdims=True)
+      # Pass 2 must re-read the bf16 scores, not an f32 copy materialized by pass 1.
+      scores, lse = jax.lax.optimization_barrier((scores, lse))
+      target_probs = jnp.sum(jnp.exp(scores.astype(jnp.float32) - lse), axis=2)
+      # Mask once after the head sum (masked or fully-masked rows may be inf here).
+      target_probs = jnp.where(is_invalid_block, 0.0, target_probs)
     else:
       attention_scores = jnp.einsum("bthd, bwd -> bhtw", query, k_vec, precision=self.config.matmul_precision)
       attention_scores = attention_scores + c_mask

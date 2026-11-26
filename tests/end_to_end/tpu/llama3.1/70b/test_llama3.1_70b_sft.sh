@@ -10,7 +10,7 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_llama3.1_70b_to_mt.sh $RUN_ID
+# bash tests/end_to_end/cpu/llama3.1/70b/test_llama3.1_70b_to_mt.sh $RUN_ID
 # bash test_llama3.1_70b_sft.sh $RUN_ID
 
 
@@ -39,7 +39,8 @@ python3 -m maxtext.inference.vllm_decode \
     ici_data_parallelism=4 \
     weight_dtype=bfloat16
 
-# Step 2: Run SFT on the converted checkpoint
+# Step 2: Run SFT on the converted checkpoint. Use SGD: two AdamW steps change
+# the 70B model enough that the decode in step 3 repeats itself.
 python3 -m maxtext.trainers.post_train.sft.train_sft \
     base_output_directory=${BASE_OUTPUT_DIRECTORY}/sft \
     load_parameters_path=${SCANNED_CKPT_PATH} \
@@ -48,6 +49,7 @@ python3 -m maxtext.trainers.post_train.sft.train_sft \
     model_name=${MODEL_NAME} tokenizer_path='meta-llama/Llama-3.1-70B-Instruct' \
     enable_single_controller=${use_pathways} \
     remat_policy=full \
+    opt_type=sgd \
     checkpoint_storage_use_zarr3=False checkpoint_storage_use_ocdbt=False \
     weight_dtype=bfloat16
 

@@ -22,7 +22,9 @@ import sys
 
 
 # Maximum worker limits by hardware flavor
-MAX_CPU_WORKERS = 4
+# cpu-unit (pre-training unit tests) gets more shards than the other CPU flavors to cut its wall time.
+MAX_CPU_UNIT_WORKERS = 5
+MAX_CPU_WORKERS = 2
 MAX_TPU_WORKERS = 3
 MAX_GPU_WORKERS = 3
 DEFAULT_WORKERS = 1
@@ -30,13 +32,15 @@ DEFAULT_WORKERS = 1
 # Right-sizing parameters for fast test suites
 LIGHTWEIGHT_SUITE_MINUTES_THRESHOLD = 16.0
 TARGET_MINUTES_PER_WORKER = 8.0
-# Must match CPU_XDIST_WORKERS (the pytest-xdist -n value for CPU flavors) in
-# .github/workflows/run_tests_against_package.yml.
+# Default pytest-xdist workers per CPU shard: the cap on CPU_XDIST_WORKERS in
+# .github/workflows/run_tests_against_package.yml, reached on 128 GB runners.
 CPU_XDIST_PARALLELISM = 8
 
 
 def get_max_workers_for_flavor(flavor: str) -> int:
   """Returns the maximum worker safety cap for a given test flavor."""
+  if flavor == "cpu-unit":
+    return MAX_CPU_UNIT_WORKERS
   if flavor.startswith("cpu-"):
     return MAX_CPU_WORKERS
   if flavor.startswith("tpu-") or flavor.startswith("tpu7x-"):
@@ -46,12 +50,17 @@ def get_max_workers_for_flavor(flavor: str) -> int:
   return DEFAULT_WORKERS
 
 
-def calculate_workers(flavor: str, baseline_data: dict[str, float] | None = None) -> tuple[int, list[int]]:
+def calculate_workers(
+    flavor: str,
+    baseline_data: dict[str, float] | None = None,
+    xdist_parallelism: int = CPU_XDIST_PARALLELISM,
+) -> tuple[int, list[int]]:
   """Calculates total workers and worker groups based on baseline data.
 
   Args:
     flavor: The test flavor name (e.g. 'cpu-unit', 'tpu-unit').
     baseline_data: Optional dictionary mapping baseline keys to durations (sec).
+    xdist_parallelism: pytest-xdist workers per shard for CPU flavors (depends on the runner's memory).
 
   Returns:
     A tuple of (total_workers, worker_groups).
@@ -70,10 +79,10 @@ def calculate_workers(flavor: str, baseline_data: dict[str, float] | None = None
   if test_count == 0:
     return DEFAULT_WORKERS, [DEFAULT_WORKERS]
 
-  # CPU flavors run under pytest-xdist (-n 8, bounded by the runner's memory rather than its vCPUs, see #6052),
+  # CPU flavors run under pytest-xdist (-n bounded by the runner's memory rather than its vCPUs, see #6052),
   # so summed per-test durations reflect CPU-minutes across workers rather than single-VM wall-minutes.
   if flavor.startswith("cpu-"):
-    effective_minutes = max(max(matching) / 60.0, total_minutes / CPU_XDIST_PARALLELISM)
+    effective_minutes = max(max(matching) / 60.0, total_minutes / xdist_parallelism)
   else:
     effective_minutes = total_minutes
 
@@ -103,6 +112,12 @@ def main() -> int:
       default=None,
       help="Path to per_test_baseline.json",
   )
+  parser.add_argument(
+      "--xdist-parallelism",
+      type=int,
+      default=CPU_XDIST_PARALLELISM,
+      help="pytest-xdist workers per shard for CPU flavors",
+  )
 
   args = parser.parse_args()
 
@@ -117,7 +132,7 @@ def main() -> int:
           file=sys.stderr,
       )
 
-  total_workers, worker_groups = calculate_workers(args.flavor, baseline_data)
+  total_workers, worker_groups = calculate_workers(args.flavor, baseline_data, args.xdist_parallelism)
   worker_groups_json = json.dumps(worker_groups)
 
   print(f"total_workers={total_workers}")

@@ -50,10 +50,16 @@ jobs:
       run: . "$GITHUB_WORKSPACE"/venv/bin/activate && uv pip install pre-commit
 
     - name: Cache pre-commit environments
-      uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+      uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
       with:
          path: ~/.cache/pre-commit
          key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
+
+    - name: Test Gemini review state script
+      # Unit tests for .github/scripts/gemini_review_state.py (used by
+      # gemini_review.yml). Standard library only, so no install is needed.
+      # They live outside tests/, so pytest-based CI does not collect them.
+      run: python3 .github/scripts/gemini_review_state_test.py
 
     - name: Run code quality checks
       run: |

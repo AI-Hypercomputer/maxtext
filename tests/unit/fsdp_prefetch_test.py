@@ -96,6 +96,13 @@ class FsdpPrefetchHelpersTest(unittest.TestCase):
     self.assertFalse(fsdp_prefetch.mesh_uses_fsdp(_abstract_mesh((1, 8), ("fsdp", "tensor"))))
     self.assertFalse(fsdp_prefetch.mesh_uses_fsdp(_abstract_mesh((8,), ("data",))))
 
+  def test_mesh_uses_fsdp_with_context_parallelism(self):
+    # Context parallelism co-shards weights with FSDP, so an FSDP x context mesh is prefetched.
+    self.assertTrue(fsdp_prefetch.mesh_uses_fsdp(_abstract_mesh((2, 2), ("fsdp", "context"))))
+    # Without an FSDP axis of size > 1 there is nothing to prefetch: a pure context-parallel mesh keeps
+    # the regular scan, where XLA gathers the weights sharded over `context` inside each layer.
+    self.assertFalse(fsdp_prefetch.mesh_uses_fsdp(_abstract_mesh((1, 4), ("fsdp", "context"))))
+
   def test_per_layer_sharding_drops_layer_axis(self):
     # Multi-device abstract mesh (matches the mesh_uses_fsdp=True regime; independent of size-one axis removal).
     abstract_mesh = _abstract_mesh((4, 2), ("fsdp", "tensor"))
@@ -225,6 +232,189 @@ class FsdpPrefetchSparseCoreTest(unittest.TestCase):
       self.assertIn("dimension = 0", hlo)
       self.assertNotIn("dimension = 1", hlo)
       self.assertNotIn("dimension = 2", hlo)
+
+  def test_pinned_minor_dim_and_narrow_collectives_stay_on_sparse_core(self):
+    mesh = _abstract_mesh((2, 64), ("data", "fsdp"))
+
+    def gather(x, spec, out_spec, reduced=True):
+      return fsdp_prefetch._explicit_fsdp_all_gather(  # pylint: disable=protected-access
+          x, mesh, spec, out_spec, reduced=reduced, sparse_core_id=1
+      )
+
+    def scatter(x, spec, out_spec):
+      return fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+          x, mesh, spec, out_spec, sparse_core_id=1
+      )
+
+    # 3D weight FSDP-sharded on minor dim (local shard [128, 128, 112], shape[-1] < 128).
+    w_3d = jax.ShapeDtypeStruct(
+        (128, 128, 7168), jnp.bfloat16, sharding=NamedSharding(mesh, PartitionSpec(None, None, "fsdp"))
+    )
+    # 2D weight FSDP-sharded on minor dim (local shard [2048, 112], shape[-1] < 128).
+    w_2d = jax.ShapeDtypeStruct((2048, 7168), jnp.bfloat16, sharding=NamedSharding(mesh, PartitionSpec(None, "fsdp")))
+    # Narrow 2D weight with both local dims < 128 (local shard [112, 32], e.g. MoE router gate).
+    w_narrow = jax.ShapeDtypeStruct((7168, 32), jnp.bfloat16, sharding=NamedSharding(mesh, PartitionSpec("fsdp", None)))
+
+    g_3d = jax.ShapeDtypeStruct(
+        (128, 128, 7168),
+        jnp.bfloat16,
+        sharding=NamedSharding(mesh, PartitionSpec(None, None, None, unreduced=frozenset({"data", "fsdp"}))),
+    )
+    g_narrow = jax.ShapeDtypeStruct(
+        (7168, 32),
+        jnp.bfloat16,
+        sharding=NamedSharding(mesh, PartitionSpec(None, None, unreduced=frozenset({"data", "fsdp"}))),
+    )
+
+    with jax.sharding.use_abstract_mesh(mesh):
+      for w, spec, out_spec, expected_shape in [
+          (w_3d, PartitionSpec(None, None, "fsdp"), PartitionSpec(None, None, None), (128, 128, 7168)),
+          (w_2d, PartitionSpec(None, "fsdp"), PartitionSpec(None, None), (2048, 7168)),
+          (w_narrow, PartitionSpec("fsdp", None), PartitionSpec(None, None), (7168, 32)),
+      ]:
+        out = jax.eval_shape(lambda x, s=spec, o=out_spec: gather(x, s, o, reduced=True), w)
+        self.assertEqual(out.shape, expected_shape)
+        self.assertEqual(frozenset(out.sharding.spec.reduced), frozenset({"data", "fsdp"}))
+        hlo = (
+            jax.jit(lambda x, s=spec, o=out_spec: gather(x, s, o, reduced=True))
+            .trace(w)
+            .lower(lowering_platforms=("tpu",))
+            .as_text()
+        )
+        self.assertIn('_xla_compute_type = "sparseoffload"', hlo)
+        self.assertRegex(hlo, r"core_ids.{0,8}\[1\]")
+        self.assertIn("all_gather_dim = 0", hlo)
+
+      # Non-reduced (auto mode) path also keeps narrow minor-dim gathers on SC1.
+      hlo_auto = (
+          jax.jit(lambda x: gather(x, PartitionSpec("fsdp", None), PartitionSpec(None, None), reduced=False))
+          .trace(w_narrow)
+          .lower(lowering_platforms=("tpu",))
+          .as_text()
+      )
+      self.assertIn('_xla_compute_type = "sparseoffload"', hlo_auto)
+      self.assertRegex(hlo_auto, r"core_ids.{0,8}\[1\]")
+      self.assertIn("all_gather_dim = 0", hlo_auto)
+
+      # 3D dim-2 and narrow 2D reduce-scatters both stay on SC1 with scatter_dimension = 0.
+      for g, spec, out_spec, expected_shape in [
+          (g_3d, PartitionSpec(None, None, "fsdp"), PartitionSpec(None, None, None), (128, 128, 7168)),
+          (g_narrow, PartitionSpec("fsdp", None), PartitionSpec(None, None), (7168, 32)),
+      ]:
+        out = jax.eval_shape(lambda x, s=spec, o=out_spec: scatter(x, s, o), g)
+        self.assertEqual(out.shape, expected_shape)
+        self.assertEqual(tuple(out.sharding.spec), tuple(spec))
+        hlo = (
+            jax.jit(lambda x, s=spec, o=out_spec: scatter(x, s, o)).trace(g).lower(lowering_platforms=("tpu",)).as_text()
+        )
+        self.assertIn('_xla_compute_type = "sparseoffload"', hlo)
+        self.assertRegex(hlo, r"core_ids.{0,8}\[1\]")
+        self.assertIn("dimension = 0", hlo)
+
+  def test_cross_slice_fsdp_axes_skip_sparse_core_pinning_and_two_stage_dcn_lowers_cleanly(self):
+    # 1. `_dcn_mesh_axes` detects cross-slice axes from device `slice_index` and config parallelism.
+    devs = np.array(
+        [[types.SimpleNamespace(slice_index=s) for _ in range(4)] for s in range(2)],
+        dtype=object,
+    )
+    fake_dcn_dp = types.SimpleNamespace(axis_names=("data", "fsdp"), devices=devs, shape={"data": 2, "fsdp": 4})
+    self.assertEqual(fsdp_prefetch._dcn_mesh_axes(fake_dcn_dp), frozenset({"data"}))  # pylint: disable=protected-access
+    fake_1slice = types.SimpleNamespace(
+        axis_names=("data", "fsdp"),
+        devices=np.array([[types.SimpleNamespace(slice_index=0) for _ in range(4)] for _ in range(2)], dtype=object),
+        shape={"data": 2, "fsdp": 4},
+    )
+    self.assertEqual(fsdp_prefetch._dcn_mesh_axes(fake_1slice), frozenset())  # pylint: disable=protected-access
+    cfg = types.SimpleNamespace(dcn_fsdp_parallelism=2)
+    self.assertEqual(fsdp_prefetch._dcn_mesh_axes(fake_1slice, cfg), frozenset({"fsdp"}))  # pylint: disable=protected-access
+
+    # 2. When `'fsdp'` spans slices (`dcn_axes={"fsdp"}`), SC1 `compute_on` is skipped for `'fsdp'`.
+    mesh_fsdp_dcn = _abstract_mesh((128,), ("fsdp",))
+    w = jax.ShapeDtypeStruct(
+        (7168, 256), jnp.bfloat16, sharding=NamedSharding(mesh_fsdp_dcn, PartitionSpec("fsdp", None))
+    )
+    g = jax.ShapeDtypeStruct(
+        (7168, 256),
+        jnp.bfloat16,
+        sharding=NamedSharding(mesh_fsdp_dcn, PartitionSpec(None, None, unreduced=frozenset({"fsdp"}))),
+    )
+    with jax.sharding.use_abstract_mesh(mesh_fsdp_dcn):
+      hlo_ag_dcn = (
+          jax.jit(
+              lambda x: fsdp_prefetch._explicit_fsdp_all_gather(  # pylint: disable=protected-access
+                  x,
+                  mesh_fsdp_dcn,
+                  PartitionSpec("fsdp", None),
+                  PartitionSpec(None, None),
+                  reduced=True,
+                  sparse_core_id=1,
+                  dcn_axes=frozenset({"fsdp"}),
+              )
+          )
+          .trace(w)
+          .lower(lowering_platforms=("tpu",))
+          .as_text()
+      )
+      hlo_rs_dcn = (
+          jax.jit(
+              lambda x: fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+                  x,
+                  mesh_fsdp_dcn,
+                  PartitionSpec("fsdp", None),
+                  PartitionSpec(None, None),
+                  sparse_core_id=1,
+                  dcn_axes=frozenset({"fsdp"}),
+              )
+          )
+          .trace(g)
+          .lower(lowering_platforms=("tpu",))
+          .as_text()
+      )
+    self.assertNotIn("sparseoffload", hlo_ag_dcn)
+    self.assertNotIn("sparseoffload", hlo_rs_dcn)
+
+    # 3. 2-stage DCN reduction on `(data=2, expert=2, fsdp=64)` (`dcn_axes={"data"}`):
+    #    Stage 1 reduces `fsdp` on SC1 and `expert` on ICI while preserving `unreduced={"data"}`,
+    #    and Stage 2 emits a single `all_reduce` over `"data"` without `replicated_to_unreduced`.
+    mesh_3d = _abstract_mesh((2, 2, 64), ("data", "expert", "fsdp"))
+    g_3d_mesh = jax.ShapeDtypeStruct(
+        (7168, 256),
+        jnp.bfloat16,
+        sharding=NamedSharding(mesh_3d, PartitionSpec(None, None, unreduced=frozenset({"data", "expert", "fsdp"}))),
+    )
+    with jax.sharding.use_abstract_mesh(mesh_3d):
+
+      def stage1_fn(x):
+        return fsdp_prefetch._explicit_fsdp_reduce_scatter(  # pylint: disable=protected-access
+            x,
+            mesh_3d,
+            PartitionSpec("fsdp", None),
+            PartitionSpec(None, None),
+            sparse_core_id=1,
+            dcn_axes=frozenset({"data"}),
+            defer_dcn_all_reduce=True,
+        )
+
+      stage1_aval = jax.eval_shape(stage1_fn, g_3d_mesh)
+      self.assertEqual(stage1_aval.shape, (7168, 256))
+      self.assertEqual(tuple(stage1_aval.sharding.spec.partitions), ("fsdp", None))
+      self.assertEqual(frozenset(stage1_aval.sharding.spec.unreduced), frozenset({"data"}))
+      hlo_stage1 = jax.jit(stage1_fn).trace(g_3d_mesh).lower(lowering_platforms=("tpu",)).as_text()
+      self.assertIn('_xla_compute_type = "sparseoffload"', hlo_stage1)
+      self.assertRegex(hlo_stage1, r"core_ids.{0,8}\[1\]")
+      self.assertNotIn("replicated_to_unreduced", hlo_stage1)
+
+      def stage2_fn(x):
+        return fsdp_prefetch._explicit_fsdp_dcn_all_reduce(  # pylint: disable=protected-access
+            x, mesh_3d, PartitionSpec("fsdp", None)
+        )
+
+      stage2_aval = jax.eval_shape(stage2_fn, stage1_aval)
+      self.assertEqual(tuple(stage2_aval.sharding.spec.partitions), ("fsdp", None))
+      self.assertEqual(frozenset(stage2_aval.sharding.spec.unreduced), frozenset())
+      hlo_stage2 = jax.jit(stage2_fn).trace(stage1_aval).lower(lowering_platforms=("tpu",)).as_text()
+      self.assertEqual(hlo_stage2.count("all_reduce"), 1)
+      self.assertNotIn("replicated_to_unreduced", hlo_stage2)
 
   def test_overlap_transform_registered_on_tpu_mesh_only(self):
     def fake_mesh(platform):
@@ -602,6 +792,81 @@ class FsdpPrefetchSparseCoreTest(unittest.TestCase):
     self.assertGreater(pos["ag_done"], pos["chunk_while"])
     self.assertLess(pos["ag_done"], pos["next_dot"])
 
+  def test_only_queued_async_work_fences_nested_loops(self):
+    sparse_core_start = (
+        '%call-start.1 = ((), ()) async-start(), async_execution_thread="sparsecore", calls=%c, '
+        'backend_config={"sparse_core_config":{"core_ids":["1"]}}'
+    )
+    ring_permute_start = "%collective-permute-start = (bf16[8], bf16[8]) collective-permute-start(%x), channel_id=1"
+    self.assertTrue(fsdp_prefetch_overlap_transform.issues_queued_async_work("kAsyncStart", sparse_core_start))
+    self.assertFalse(
+        fsdp_prefetch_overlap_transform.issues_queued_async_work("kCollectivePermuteStart", ring_permute_start)
+    )
+
+    def _inst(opcode, text):
+      return types.SimpleNamespace(opcode=types.SimpleNamespace(name=opcode), to_string=lambda t=text: t)
+
+    def _comp(name, insts):
+      return types.SimpleNamespace(name=name, instructions=lambda items=insts: items)
+
+    fake_module = types.SimpleNamespace(
+        make_nonfusion_computations=lambda: [
+            _comp(
+                "outer",
+                [
+                    _inst("kWhile", "%w1 = () while(%p), body=%sc_body"),
+                    _inst("kWhile", "%w2 = () while(%p), body=%ring_body"),
+                ],
+            ),
+            _comp("sc_body", [_inst("kAsyncStart", sparse_core_start)]),
+            _comp("ring_body", [_inst("kCollectivePermuteStart", ring_permute_start)]),
+        ]
+    )
+    while_bodies, async_bodies = fsdp_prefetch_overlap_transform._while_and_async_body_names(  # pylint: disable=protected-access
+        fake_module
+    )
+    self.assertEqual(while_bodies, {"sc_body", "ring_body"})
+    self.assertEqual(async_bodies, {"sc_body"})
+
+  def test_unfenced_nested_loop_lets_reduce_scatter_overlap_it(self):
+    # A layer body whose attention runs in a nested loop (ring attention). The deferred gradient
+    # reduce-scatter is independent of the loop, so it should start before and finish after it unless
+    # the loop is a fence.
+    order = ("param", "pre", "rs_start", "rs_done", "ring_loop", "post", "root")
+    opcodes = {
+        "param": "kParameter",
+        "pre": "kDot",
+        "rs_start": "kAsyncStart",
+        "rs_done": "kAsyncDone",
+        "ring_loop": "kWhile",
+        "post": "kDot",
+        "root": "kTuple",
+    }
+    operands = {
+        "param": (),
+        "pre": ("param",),
+        "rs_start": ("param",),
+        "rs_done": ("rs_start",),
+        "ring_loop": ("pre",),
+        "post": ("ring_loop",),
+        "root": ("post", "rs_done"),
+    }
+    queues = {"rs_start": "sparsecore:1"}
+
+    def schedule(fences):
+      graph = fsdp_prefetch_overlap_transform.make_schedule_graph(
+          order=order, opcodes=opcodes, operands=operands, queues=queues, fences=fences
+      )
+      rescheduled = fsdp_prefetch_overlap_transform.reschedule(graph)
+      fsdp_prefetch_overlap_transform.validate_order(graph, rescheduled)
+      return {name: i for i, name in enumerate(rescheduled)}
+
+    pos = schedule(fences=())
+    self.assertLess(pos["rs_start"], pos["ring_loop"])
+    self.assertGreater(pos["rs_done"], pos["post"])
+    fenced = schedule(fences=("ring_loop",))
+    self.assertLess(fenced["rs_done"], fenced["ring_loop"])
+
 
 class FsdpPrefetchAllGatherTest(unittest.TestCase):
   """Lowers the FSDP weight all-gather against abstract multi-device meshes (no devices needed)."""
@@ -681,6 +946,33 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
     self.assertNotIn('name = "expert"', gathers[0])
     self.assertIn("(tensor<2x6xf32>) -> tensor<8x6xf32>", gathers[0])
 
+  def test_explicit_mode_gathers_co_sharded_context_axis_with_fsdp(self):
+    mesh = _abstract_mesh((4, 2), ("fsdp", "context"))
+    # Under context parallelism, `embed`-like weight dimensions are sharded over ('fsdp', 'context').
+    out, gathers = self._lower_gather(mesh, PartitionSpec(("fsdp", "context"), None), (16, 6))
+    self.assertEqual(out.shape, (16, 6))
+    self.assertEqual(tuple(out.sharding.spec.partitions), (None, None))
+    self.assertEqual(out.sharding.spec.reduced, frozenset({"fsdp", "context"}))
+    self.assertEqual(len(gathers), 1)
+    self.assertIn("all_gather_dim = 0", gathers[0])
+    self.assertIn('name = "fsdp"', gathers[0])
+    self.assertIn('name = "context"', gathers[0])
+    self.assertIn("(tensor<2x6xf32>) -> tensor<16x6xf32>", gathers[0])
+
+  def test_explicit_mode_preserves_routed_expert_axis_with_context(self):
+    mesh = _abstract_mesh((2, 2, 2), ("fsdp", "context", "expert"))
+    # Routed expert weights under context parallelism: 'expert' on dim 0, ('fsdp', 'context') on dim 1.
+    out, gathers = self._lower_gather(mesh, PartitionSpec("expert", ("fsdp", "context"), None), (4, 16, 6))
+    self.assertEqual(out.shape, (4, 16, 6))
+    self.assertEqual(tuple(out.sharding.spec.partitions), ("expert", None, None))
+    self.assertEqual(out.sharding.spec.reduced, frozenset({"fsdp", "context"}))
+    self.assertEqual(len(gathers), 1)
+    self.assertIn("all_gather_dim = 1", gathers[0])
+    self.assertIn('name = "fsdp"', gathers[0])
+    self.assertIn('name = "context"', gathers[0])
+    self.assertNotIn('name = "expert"', gathers[0])
+    self.assertIn("(tensor<2x4x6xf32>) -> tensor<2x16x6xf32>", gathers[0])
+
   def test_non_minor_fsdp_axis_falls_back_to_resharding(self):
     mesh = _abstract_mesh((2, 4), ("tensor", "fsdp"))
     # 'fsdp' is not the minor-most axis of dim 0, so a tiled gather would not give the target layout.
@@ -700,14 +992,16 @@ class FsdpPrefetchAllGatherTest(unittest.TestCase):
 class FsdpPrefetchReduceScatterTest(unittest.TestCase):
   """Lowers the tagged dW reduce-scatter against abstract multi-device meshes (no devices needed)."""
 
-  def _lower_scatter(self, mesh, src_spec, shape, unreduced=True):
+  def _lower_scatter(self, mesh, src_spec, shape, unreduced=True, unreduced_axes=None):
     """Returns (output ShapeDtypeStruct, reduce_scatter StableHLO lines) for a gradient of a `src_spec` weight.
 
-    With `unreduced`, the gradient is typed as the partial sums of a `reduced` gathered weight.
+    With `unreduced`, the gradient is typed as the partial sums of a `reduced` gathered weight, over
+    `unreduced_axes` (default: the FSDP axes of size > 1).
     """
     gathered = sharding.remove_fsdp_from_sharding(NamedSharding(mesh, src_spec)).spec
-    fsdp_axes = frozenset(a for a in mesh.axis_names if a.startswith("fsdp") and mesh.shape[a] > 1)
-    g_spec = PartitionSpec(*gathered, unreduced=fsdp_axes) if unreduced else gathered
+    if unreduced_axes is None:
+      unreduced_axes = (a for a in mesh.axis_names if a.startswith("fsdp") and mesh.shape[a] > 1)
+    g_spec = PartitionSpec(*gathered, unreduced=frozenset(unreduced_axes)) if unreduced else gathered
     g = jax.ShapeDtypeStruct(shape, jnp.float32, sharding=NamedSharding(mesh, g_spec))
 
     def scatter(x):
@@ -743,6 +1037,19 @@ class FsdpPrefetchReduceScatterTest(unittest.TestCase):
     self.assertEqual(len(scatters), 1)
     self.assertIn("scatter_dimension = 0", scatters[0])
     self.assertIn("(tensor<8x6xf32>) -> tensor<2x6xf32>", scatters[0])
+
+  def test_scatters_co_sharded_context_axis_with_fsdp(self):
+    mesh = _abstract_mesh((4, 2), ("fsdp", "context"))
+    # The gradient of a weight gathered over ('fsdp', 'context') holds partial sums over both axes (the
+    # batch over 'fsdp', the sequence over 'context') and is reduce-scattered over both at once.
+    out, scatters = self._lower_scatter(
+        mesh, PartitionSpec(("fsdp", "context"), None), (16, 6), unreduced_axes={"fsdp", "context"}
+    )
+    self.assertEqual(tuple(out.sharding.spec.partitions), (("fsdp", "context"), None))
+    self.assertEqual(out.sharding.spec.unreduced, frozenset())
+    self.assertEqual(len(scatters), 1)
+    self.assertIn("scatter_dimension = 0", scatters[0])
+    self.assertIn("(tensor<16x6xf32>) -> tensor<2x6xf32>", scatters[0])
 
   def test_already_reduced_gradient_falls_back_to_resharding(self):
     """A summed (not unreduced) gradient must not be reduce-scattered again: that would scale it by the FSDP size."""
@@ -929,6 +1236,116 @@ class FsdpPrefetchReducedGradTest(unittest.TestCase):
     self.assertIn("768xf32", hlo)
 
 
+class FsdpPrefetchContextParallelGradTest(unittest.TestCase):
+  """Gather -> layer -> reduce-scatter on an FSDP x context mesh, with sequence-sharded activations."""
+
+  def _grads(self, src):
+    """(gradient, reference gradient, StableHLO, traced types) of a weight sharded `src` on (fsdp, context)."""
+    mesh = jax.make_mesh((2, 2), ("fsdp", "context"), axis_types=(AxisType.Explicit,) * 2, devices=jax.devices()[:4])
+    act = PartitionSpec("fsdp", "context", None)  # [batch, seq, dim]: batch over 'fsdp', sequence over 'context'.
+    gathered = sharding.remove_fsdp_from_sharding(NamedSharding(mesh, src)).spec
+    rng = np.random.default_rng(0)
+    x_np = rng.standard_normal((4, 8, 8)).astype(np.float32)
+    w_np = rng.standard_normal((8, 6)).astype(np.float32)
+    seen = {}
+
+    def grads(x, w):
+      wg = fsdp_prefetch._apply_sharding_hint(w, mesh, ShardMode.EXPLICIT)  # pylint: disable=protected-access
+      seen["reduced"] = jax.typeof(wg).sharding.spec.reduced
+      _, vjp = jax.vjp(lambda w_: jnp.sin(jnp.einsum("bsd,df->bsf", x, w_, out_sharding=act)).sum(), wg)
+      (g,) = vjp(jnp.ones((), jnp.float32))
+      seen["unreduced"] = jax.typeof(g).sharding.spec.unreduced
+      out = fsdp_prefetch._explicit_fsdp_reduce_scatter(g, mesh, src, gathered)  # pylint: disable=protected-access
+      seen["explicit_reduce_scatter"] = out is not None
+      return out if out is not None else jax.sharding.reshard(g, NamedSharding(mesh, src))
+
+    with jax.set_mesh(mesh):
+      x = jax.device_put(x_np, act)
+      w = jax.device_put(w_np, src)
+      f = jax.jit(grads)
+      got = f(x, w)
+      hlo = f.lower(x, w).as_text()
+    want = jax.grad(lambda w_: jnp.sin(jnp.einsum("bsd,df->bsf", x_np, w_)).sum())(w_np)
+    return got, want, hlo, seen
+
+  def test_co_sharded_weight_gradient_is_reduce_scattered_once(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    src = PartitionSpec(("fsdp", "context"), None)
+    got, want, hlo, seen = self._grads(src)
+    np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+    self.assertEqual(tuple(got.sharding.spec.partitions), (("fsdp", "context"), None))
+    # Gathered `reduced` over both axes, so the gradient comes back `unreduced` over both and one
+    # reduce-scatter sums it over the batch ('fsdp') and the sequence ('context') at once.
+    self.assertEqual(seen["reduced"], frozenset({"fsdp", "context"}))
+    self.assertEqual(seen["unreduced"], frozenset({"fsdp", "context"}))
+    self.assertTrue(seen["explicit_reduce_scatter"])
+    self.assertEqual(hlo.count("stablehlo.reduce_scatter"), 1)
+    self.assertNotIn("all_reduce", hlo)
+
+  def test_weight_replicated_over_context_gradient_matches_reference(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    # A weight sharded over FSDP only (not co-sharded over context) still contracts over the
+    # sequence-sharded context axis in backward: it is typed `reduced` over both axes, and its
+    # unreduced gradient is reduce-scattered over `fsdp` and summed over `context`.
+    src = PartitionSpec("fsdp", None)
+    got, want, hlo, seen = self._grads(src)
+    np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+    self.assertEqual(tuple(got.sharding.spec.partitions), ("fsdp", None))
+    self.assertEqual(seen["reduced"], frozenset({"fsdp", "context"}))
+    self.assertEqual(seen["unreduced"], frozenset({"fsdp", "context"}))
+    self.assertTrue(seen["explicit_reduce_scatter"])
+    self.assertEqual(hlo.count("stablehlo.reduce_scatter"), 1)
+    self.assertEqual(hlo.count("stablehlo.all_reduce"), 1)
+
+  def test_explicit_fsdp_embed_lookup_fallbacks_on_abstract_mesh(self):
+    # When the embedding dimension itself is sharded (`out_spec[-1] is not None`), fall back to `.at[ids].get`.
+    mesh = _abstract_mesh((2, 2), ("fsdp", "tensor"))
+    w_embed = jax.ShapeDtypeStruct((64, 8), jnp.float32, sharding=NamedSharding(mesh, PartitionSpec("fsdp", None)))
+    ids = jax.ShapeDtypeStruct((4, 8), jnp.int32, sharding=NamedSharding(mesh, PartitionSpec("fsdp", None)))
+    out_sharding = NamedSharding(mesh, PartitionSpec("fsdp", None, "tensor"))
+    with jax.sharding.use_abstract_mesh(mesh):
+      out = jax.eval_shape(
+          lambda we, i: fsdp_prefetch.explicit_fsdp_embed_lookup(we, i, out_sharding, mesh), w_embed, ids
+      )
+    self.assertEqual(tuple(out.sharding.spec.partitions), ("fsdp", None, "tensor"))
+
+  def test_explicit_fsdp_embed_lookup_with_context_parallelism(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    # Include a size-1 `data` axis on batch so `batch_axes` filters size-1 axes while keeping `fsdp` and `context`.
+    mesh = jax.make_mesh(
+        (1, 2, 2), ("data", "fsdp", "context"), axis_types=(AxisType.Explicit,) * 3, devices=jax.devices()[:4]
+    )
+    rng = np.random.default_rng(2)
+    w_embed_np = rng.standard_normal((512, 8)).astype(np.float32)
+    ids_np = rng.integers(0, 512, size=(4, 8), dtype=np.int32)
+    out_sharding = NamedSharding(mesh, PartitionSpec(("data", "fsdp"), "context", None))
+
+    def loss(w_embed, ids):
+      emb = fsdp_prefetch.explicit_fsdp_embed_lookup(w_embed, ids, out_sharding, mesh)
+      return (emb * emb).sum()
+
+    want = jax.grad(lambda we: (we[ids_np] * we[ids_np]).sum())(w_embed_np)
+    for emb_spec, ids_spec, expected_all_reduces in (
+        (PartitionSpec(None, ("fsdp", "context")), PartitionSpec(("data", "fsdp"), "context"), 0),
+        (PartitionSpec(None, ("fsdp", "context")), PartitionSpec("fsdp", None), 0),
+        (PartitionSpec(None, "fsdp"), PartitionSpec(("data", "fsdp"), "context"), 1),
+    ):
+      with self.subTest(emb_spec=emb_spec, ids_spec=ids_spec):
+        with jax.set_mesh(mesh):
+          we_dev = jax.device_put(w_embed_np, emb_spec)
+          ids_dev = jax.device_put(ids_np, ids_spec)
+          grad_fn = jax.jit(jax.grad(loss))
+          got = grad_fn(we_dev, ids_dev)
+          hlo = grad_fn.lower(we_dev, ids_dev).as_text()
+        np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+        self.assertEqual(tuple(got.sharding.spec.partitions), tuple(emb_spec))
+        self.assertEqual(hlo.count("stablehlo.reduce_scatter"), 1)
+        self.assertEqual(hlo.count("stablehlo.all_reduce"), expected_all_reduces)
+
+
 class _ToyLayer(nnx.Module):
   """tanh(tanh(x @ kernel)), naming its input `decoder_layer_input` and its hidden activation `mlpwi`."""
 
@@ -1015,6 +1432,82 @@ class FsdpPrefetchLayerInputOffloadTest(unittest.TestCase):
     self.assertNotRegex(jaxpr, r"= device_put\b")
 
 
+class FsdpPrefetchContextParallelPipelineTest(unittest.TestCase):
+  """The prefetch pipeline on an FSDP x context mesh (sequence-sharded activations) matches a plain loop."""
+
+  def _grads(self, length, shard_mode, defer=False, remat_policy=None, decoder_layer_input="device"):
+    """(pipeline gradients, reference gradients) for a stack of `length` toy layers on a 2 x 2 mesh."""
+    axis_type = AxisType.Explicit if shard_mode == ShardMode.EXPLICIT else AxisType.Auto
+    mesh = jax.make_mesh((2, 2), ("fsdp", "context"), axis_types=(axis_type,) * 2, devices=jax.devices()[:4])
+    dim, batch, seq = 8, 4, 8
+    layers = [_ToyLayer(dim, nnx.Rngs(params=i)) for i in range(length)]
+    graphdef = nnx.graphdef(layers[0])
+    params = jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(l, nnx.Param) for l in layers])
+    x_np = np.random.default_rng(0).standard_normal((batch, seq, dim)).astype(np.float32)
+    config = types.SimpleNamespace(
+        param_scan_axis=0,
+        shard_mode=shard_mode,
+        debug_sharding=False,
+        prefetch_fsdp_defer_grad_reduce_scatter=defer,
+        decoder_layer_input=decoder_layer_input,
+    )
+
+    def loss(p, x):
+      y, _, _ = fsdp_prefetch.apply_layers_with_fsdp_prefetch(
+          nnx.merge(graphdef, p), x, length=length, mesh=mesh, config=config, remat_policy=remat_policy
+      )
+      return (y * y).sum()
+
+    def ref_loss(p, x):
+      for i in range(length):
+        x, _ = nnx.merge(graphdef, jax.tree.map(lambda v, i=i: v[i], p))(x)
+      return (x * x).sum()
+
+    with jax.set_mesh(mesh):
+      # Weights co-sharded over ('fsdp', 'context') as under context parallelism; the batch is
+      # sharded over 'fsdp' and the sequence over 'context'.
+      w_sharding = NamedSharding(mesh, PartitionSpec(None, ("fsdp", "context"), None))
+      p_sharded = jax.tree.map(lambda v: jax.device_put(v, w_sharding), params)
+      x = jax.device_put(x_np, NamedSharding(mesh, PartitionSpec("fsdp", "context", None)))
+      grads = jax.jit(jax.grad(loss))(p_sharded, x)
+    return grads, jax.grad(ref_loss)(params, x_np)
+
+  def _assert_parity(self, length, shard_mode, **kwargs):
+    got, ref = self._grads(length, shard_mode, **kwargs)
+    for g, r in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+      np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+      if shard_mode == ShardMode.EXPLICIT:
+        # The reduce-scattered gradient keeps the weight's ('fsdp', 'context') sharding.
+        self.assertEqual(tuple(g.sharding.spec.partitions), (None, ("fsdp", "context"), None))
+
+  def test_matches_reference_across_layer_counts_and_shard_modes(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    # 1 layer: no loop; 3 layers: single-trip loops; 6 layers: two-trip unroll=2 loops in both passes.
+    for length in (1, 3, 6):
+      for shard_mode, defer in ((ShardMode.EXPLICIT, False), (ShardMode.EXPLICIT, True), (ShardMode.AUTO, False)):
+        with self.subTest(length=length, shard_mode=shard_mode, defer=defer):
+          self._assert_parity(length, shard_mode, defer=defer)
+
+  def test_matches_reference_with_saved_residuals(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    # The remat policy saves the sequence-sharded hidden activation of every layer.
+    policy = jax.checkpoint_policies.save_only_these_names("mlpwi")
+    self._assert_parity(6, ShardMode.EXPLICIT, defer=True, remat_policy=policy)
+
+  def test_matches_reference_with_offloaded_layer_inputs(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+        names_which_can_be_saved=["mlpwi"],
+        names_which_can_be_offloaded=["decoder_layer_input"],
+        offload_src="device",
+        offload_dst="pinned_host",
+    )
+    self._assert_parity(6, ShardMode.EXPLICIT, defer=True, remat_policy=policy, decoder_layer_input="offload")
+
+
 class _ToySubLayer(nnx.Module):
   """tanh(x @ kernel) (+ bias): a sub-layer of `_ToyBlock`."""
 
@@ -1050,9 +1543,20 @@ class _ToyBlock(nnx.Module):
 class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
   """Per-sub-layer prefetch of inhomogeneous blocks with deferred dW reduce-scatters on CPU devices."""
 
-  def _grads(self, num_blocks, num_a, defer, decoder_layer_input="device"):
-    """(gradients of the prefetch pipeline, reference gradients, lowered HLO) for a toy block stack."""
-    mesh = jax.make_mesh((4,), ("fsdp",), axis_types=(AxisType.Explicit,), devices=jax.devices()[:4])
+  def _grads(self, num_blocks, num_a, defer, decoder_layer_input="device", dcn_dp=None, two_stage_dcn=True):
+    """(gradients of the prefetch pipeline, reference gradients, lowered HLO) for a toy block stack.
+
+    With `dcn_dp`, runs on a (data=2, fsdp=2) mesh whose `data` axis is treated as spanning slices
+    (DCN) when `dcn_dp` > 1, which switches the deferred reduction to two stages.
+    """
+    if dcn_dp is None:
+      mesh = jax.make_mesh((4,), ("fsdp",), axis_types=(AxisType.Explicit,), devices=jax.devices()[:4])
+      batch_spec = PartitionSpec("fsdp", None)
+    else:
+      mesh = jax.make_mesh(
+          (2, 2), ("data", "fsdp"), axis_types=(AxisType.Explicit, AxisType.Explicit), devices=jax.devices()[:4]
+      )
+      batch_spec = PartitionSpec(("data", "fsdp"), None)
     dim, batch = 8, 8
     blocks = [_ToyBlock(num_a, dim, nnx.Rngs(params=b)) for b in range(num_blocks)]
     graphdef = nnx.graphdef(blocks[0])
@@ -1064,6 +1568,8 @@ class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
         debug_sharding=False,
         prefetch_fsdp_defer_grad_reduce_scatter=defer,
         decoder_layer_input=decoder_layer_input,
+        dcn_data_parallelism=dcn_dp or 1,
+        prefetch_fsdp_two_stage_dcn=two_stage_dcn,
     )
     offload = decoder_layer_input == "offload"
     policy = jax.checkpoint_policies.save_and_offload_only_these_names(
@@ -1091,7 +1597,7 @@ class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
       p_sharded = jax.tree.map(
           lambda v: jax.device_put(v, PartitionSpec(None, "fsdp", None) if v.ndim == 3 else PartitionSpec()), params
       )
-      x = jax.device_put(x_np, PartitionSpec("fsdp", None))
+      x = jax.device_put(x_np, batch_spec)
       f = jax.jit(jax.grad(loss))
       grads = f(p_sharded, x)
       hlo = f.lower(p_sharded, x).as_text()
@@ -1136,6 +1642,183 @@ class FsdpPrefetchInhomogeneousDeferredTest(unittest.TestCase):
         on_device, _, _ = self._grads(num_blocks=2, num_a=3, defer=defer, decoder_layer_input="device")
         for g, d in zip(jax.tree.leaves(got), jax.tree.leaves(on_device)):
           np.testing.assert_allclose(np.asarray(g), np.asarray(d), rtol=1e-6, atol=1e-6)
+
+  def test_two_stage_dcn_matches_reference(self):
+    """2-stage DCN reduction (`RS_ICI(j+1)` + `AR_DCN(j+2)`) across group and block boundaries."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    # (blocks, num_a): one block, group sizes 1 / 2 (no same-group scan), 3 (only the peeled step),
+    # 5 (peeled step + unrolled same-group scan), and three blocks.
+    for num_blocks, num_a in ((1, 3), (2, 1), (2, 2), (2, 3), (2, 5), (3, 3)):
+      with self.subTest(num_blocks=num_blocks, num_a=num_a):
+        got, ref, hlo = self._grads(num_blocks, num_a, defer=True, dcn_dp=2)
+        for g, r in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+          np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+        # The DCN stage is a separate all-reduce over `data` after the ICI reduce-scatter.
+        self.assertIn("stablehlo.reduce_scatter", hlo)
+        self.assertIn("stablehlo.all_reduce", hlo)
+        one_stage, _, _ = self._grads(num_blocks, num_a, defer=True, dcn_dp=1)
+        for g, o in zip(jax.tree.leaves(got), jax.tree.leaves(one_stage)):
+          np.testing.assert_allclose(np.asarray(g), np.asarray(o), rtol=1e-6, atol=1e-6)
+    got, ref, _ = self._grads(2, 3, defer=True, decoder_layer_input="offload", dcn_dp=2)
+    for g, r in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+      np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+
+  def test_two_stage_dcn_opt_out_flag_and_single_slice_hlo_parity(self):
+    """Single-slice HLO is unchanged, and `prefetch_fsdp_two_stage_dcn=False` falls back to 1-stage."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    _, _, hlo_dcn1_on = self._grads(2, 5, defer=True, dcn_dp=1, two_stage_dcn=True)
+    _, _, hlo_dcn1_off = self._grads(2, 5, defer=True, dcn_dp=1, two_stage_dcn=False)
+    self.assertEqual(hlo_dcn1_on, hlo_dcn1_off)
+
+    with mock.patch.object(
+        fsdp_prefetch, "_explicit_fsdp_dcn_all_reduce", wraps=fsdp_prefetch._explicit_fsdp_dcn_all_reduce  # pylint: disable=protected-access
+    ) as dcn_ar_on:
+      self._grads(2, 3, defer=True, dcn_dp=2, two_stage_dcn=True)
+    self.assertGreater(dcn_ar_on.call_count, 0)
+
+    with mock.patch.object(
+        fsdp_prefetch, "_explicit_fsdp_dcn_all_reduce", wraps=fsdp_prefetch._explicit_fsdp_dcn_all_reduce  # pylint: disable=protected-access
+    ) as dcn_ar_off:
+      got_opt_out, ref, hlo_opt_out = self._grads(2, 5, defer=True, dcn_dp=2, two_stage_dcn=False)
+    self.assertEqual(dcn_ar_off.call_count, 0)
+    self.assertEqual(hlo_opt_out, hlo_dcn1_off)
+    for g, r in zip(jax.tree.leaves(got_opt_out), jax.tree.leaves(ref)):
+      np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+
+
+class FsdpPrefetchInhomogeneousContextParallelTest(unittest.TestCase):
+  """Per-sub-layer prefetch of inhomogeneous blocks on an FSDP x context mesh matches a plain loop."""
+
+  def _grads(self, kernel_spec, defer):
+    """(pipeline gradients, reference gradients) for 2 toy blocks with sequence-sharded activations."""
+    mesh = jax.make_mesh((2, 2), ("fsdp", "context"), axis_types=(AxisType.Explicit,) * 2, devices=jax.devices()[:4])
+    num_blocks, num_a, dim, batch, seq = 2, 3, 8, 4, 8
+    blocks = [_ToyBlock(num_a, dim, nnx.Rngs(params=b)) for b in range(num_blocks)]
+    graphdef = nnx.graphdef(blocks[0])
+    params = jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(b, nnx.Param) for b in blocks])
+    x_np = np.random.default_rng(0).standard_normal((batch, seq, dim)).astype(np.float32)
+    config = types.SimpleNamespace(
+        param_scan_axis=0,
+        shard_mode=ShardMode.EXPLICIT,
+        debug_sharding=False,
+        prefetch_fsdp_defer_grad_reduce_scatter=defer,
+        decoder_layer_input="device",
+    )
+    policy = jax.checkpoint_policies.save_only_these_names("mlpwi", "decoder_layer_input")
+
+    def loss(p, x):
+      layers = nnx.merge(graphdef, p)
+      stages = fsdp_prefetch_inhomogeneous.sublayer_stages(layers)
+      y, _, _ = fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
+          layers, stages, x, length=num_blocks, mesh=mesh, config=config, remat_policy=policy
+      )
+      return (y * y).sum()
+
+    def ref_loss(p, x):
+      for b in range(num_blocks):
+        x, _ = nnx.merge(graphdef, jax.tree.map(lambda v, b=b: v[b], p))(x)
+      return (x * x).sum()
+
+    with jax.set_mesh(mesh):
+      # Batch over 'fsdp' and sequence over 'context'; kernels sharded on their input dimension.
+      p_sharded = jax.tree.map(lambda v: jax.device_put(v, kernel_spec if v.ndim == 3 else PartitionSpec()), params)
+      x = jax.device_put(x_np, PartitionSpec("fsdp", "context", None))
+      grads = jax.jit(jax.grad(loss))(p_sharded, x)
+    return grads, jax.grad(ref_loss)(params, x_np)
+
+  def test_matches_reference(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    # Kernels co-sharded over ('fsdp', 'context'), and sharded over 'fsdp' only (gradients are then
+    # reduce-scattered over 'fsdp' and summed over 'context').
+    for kernel_spec in (PartitionSpec(None, ("fsdp", "context"), None), PartitionSpec(None, "fsdp", None)):
+      for defer in (False, True):
+        with self.subTest(kernel_spec=kernel_spec, defer=defer):
+          got, ref = self._grads(kernel_spec, defer)
+          for g, r in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+            np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+
+  def test_two_stage_dcn_with_context_parallelism(self):
+    """2-stage DCN pipelining works alongside intra-slice context parallelism (`data x fsdp x context`)."""
+    num_blocks, num_a, dim, batch, seq = 2, 3, 8, 8, 8
+    blocks = [_ToyBlock(num_a, dim, nnx.Rngs(params=b)) for b in range(num_blocks)]
+    graphdef = nnx.graphdef(blocks[0])
+    params = jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(b, nnx.Param) for b in blocks])
+    config = types.SimpleNamespace(
+        param_scan_axis=0,
+        shard_mode=ShardMode.EXPLICIT,
+        debug_sharding=False,
+        prefetch_fsdp_defer_grad_reduce_scatter=True,
+        prefetch_fsdp_two_stage_dcn=True,
+        dcn_data_parallelism=2,
+        decoder_layer_input="device",
+    )
+    policy = jax.checkpoint_policies.save_only_these_names("mlpwi", "decoder_layer_input")
+    abstract_mesh = _abstract_mesh((2, 2, 2), ("data", "fsdp", "context"))
+
+    for kernel_spec in (PartitionSpec(None, ("fsdp", "context"), None), PartitionSpec(None, "fsdp", None)):
+      with self.subTest(kernel_spec=kernel_spec):
+        p_aval = jax.tree.map(
+            lambda v, ks=kernel_spec: jax.ShapeDtypeStruct(
+                v.shape, v.dtype, sharding=NamedSharding(abstract_mesh, ks if v.ndim == 3 else PartitionSpec())
+            ),
+            params,
+        )
+        x_aval = jax.ShapeDtypeStruct(
+            (batch, seq, dim),
+            jnp.float32,
+            sharding=NamedSharding(abstract_mesh, PartitionSpec(("data", "fsdp"), "context", None)),
+        )
+
+        def loss_fn(p, x):
+          layers = nnx.merge(graphdef, p)
+          stages = fsdp_prefetch_inhomogeneous.sublayer_stages(layers)
+          y, _, _ = fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
+              layers, stages, x, length=num_blocks, mesh=abstract_mesh, config=config, remat_policy=policy
+          )
+          return (y * y).sum()
+
+        with (
+            jax.sharding.use_abstract_mesh(abstract_mesh),
+            mock.patch.object(
+                fsdp_prefetch, "_explicit_fsdp_dcn_all_reduce", wraps=fsdp_prefetch._explicit_fsdp_dcn_all_reduce  # pylint: disable=protected-access
+            ) as dcn_ar,
+        ):
+          hlo = jax.jit(jax.grad(loss_fn)).trace(p_aval, x_aval).lower(lowering_platforms=("cpu",)).as_text()
+        self.assertGreater(dcn_ar.call_count, 0)
+        self.assertIn("stablehlo.reduce_scatter", hlo)
+        self.assertIn("stablehlo.all_reduce", hlo)
+
+        if jax.device_count() >= 8:
+          phys_mesh = jax.make_mesh(
+              (2, 2, 2), ("data", "fsdp", "context"), axis_types=(AxisType.Explicit,) * 3, devices=jax.devices()[:8]
+          )
+          x_np = np.random.default_rng(7).standard_normal((batch, seq, dim)).astype(np.float32)
+
+          def phys_loss(p, x, m=phys_mesh):
+            layers = nnx.merge(graphdef, p)
+            stages = fsdp_prefetch_inhomogeneous.sublayer_stages(layers)
+            y, _, _ = fsdp_prefetch_inhomogeneous.apply_layers_with_fsdp_prefetch(
+                layers, stages, x, length=num_blocks, mesh=m, config=config, remat_policy=policy
+            )
+            return (y * y).sum()
+
+          def ref_loss(p, x):
+            for b in range(num_blocks):
+              x, _ = nnx.merge(graphdef, jax.tree.map(lambda v, b=b: v[b], p))(x)
+            return (x * x).sum()
+
+          with jax.set_mesh(phys_mesh):
+            p_sharded = jax.tree.map(
+                lambda v, ks=kernel_spec: jax.device_put(v, ks if v.ndim == 3 else PartitionSpec()), params
+            )
+            x_sharded = jax.device_put(x_np, PartitionSpec(("data", "fsdp"), "context", None))
+            got = jax.jit(jax.grad(phys_loss))(p_sharded, x_sharded)
+          ref = jax.grad(ref_loss)(params, x_np)
+          for g, r in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+            np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
 
 
 class _ToyQuantLayer(nnx.Module):
@@ -1280,6 +1963,113 @@ class FsdpPrefetchQwixQuantizationTest(unittest.TestCase):
         self.assertIn("float8_e5m2", grad_jaxpr)
         for got, want in zip(jax.tree.leaves(grads), jax.tree.leaves(ref_grads)):
           np.testing.assert_allclose(np.asarray(got), np.asarray(want), rtol=1e-5, atol=1e-5)
+
+
+class FsdpPrefetchTwoStageDcnPipelineTest(unittest.TestCase):
+  """End-to-end gradient parity for 2-stage DCN backward reduction (`RS_ICI(k+1)` + `AR_DCN(k+2)`)."""
+
+  def _run_pipeline(self, length, dcn_dp=2, decoder_layer_input="device", with_hlo=False, two_stage_dcn=True):
+    """Runs the prefetched stack and unpipelined reference for `length` layers."""
+    mesh = jax.make_mesh(
+        (2, 2), ("data", "fsdp"), axis_types=(AxisType.Explicit, AxisType.Explicit), devices=jax.devices()[:4]
+    )
+    dim, batch = 8, 8
+    # `_ToySubLayer(bias=True)` exercises both a tagged FSDP-sharded kernel and an untagged replicated bias.
+    layers = [_ToySubLayer(dim, nnx.Rngs(params=i), bias=True) for i in range(length)]
+    graphdef = nnx.graphdef(layers[0])
+    params = jax.tree.map(lambda *xs: jnp.stack(xs), *[nnx.state(l, nnx.Param) for l in layers])
+    x_np = np.random.default_rng(42).standard_normal((batch, dim)).astype(np.float32)
+    config = types.SimpleNamespace(
+        param_scan_axis=0,
+        shard_mode=ShardMode.EXPLICIT,
+        debug_sharding=False,
+        prefetch_fsdp_defer_grad_reduce_scatter=True,
+        decoder_layer_input=decoder_layer_input,
+        dcn_data_parallelism=dcn_dp,
+        prefetch_fsdp_two_stage_dcn=two_stage_dcn,
+    )
+    offload = decoder_layer_input == "offload"
+    policy = jax.checkpoint_policies.save_and_offload_only_these_names(
+        names_which_can_be_saved=["mlpwi"] + ([] if offload else ["decoder_layer_input"]),
+        names_which_can_be_offloaded=["decoder_layer_input"] if offload else [],
+        offload_src="device",
+        offload_dst="pinned_host",
+    )
+
+    def loss(p, x):
+      y, _, _ = fsdp_prefetch.apply_layers_with_fsdp_prefetch(
+          nnx.merge(graphdef, p), x, length=length, mesh=mesh, config=config, remat_policy=policy
+      )
+      return (y * y).sum()
+
+    def ref_loss(p, x):
+      for i in range(length):
+        x, _ = nnx.merge(graphdef, jax.tree.map(lambda v, i=i: v[i], p))(x)
+      return (x * x).sum()
+
+    with jax.set_mesh(mesh):
+      p_sharded = jax.tree.map(
+          lambda v: jax.device_put(v, PartitionSpec(None, "fsdp", None) if v.ndim == 3 else PartitionSpec()), params
+      )
+      x = jax.device_put(x_np, PartitionSpec(("data", "fsdp"), None))
+      f = jax.jit(jax.grad(loss))
+      grads = f(p_sharded, x)
+      hlo = f.lower(p_sharded, x).as_text() if with_hlo else ""
+    return grads, jax.grad(ref_loss)(params, x_np), hlo
+
+  def test_two_stage_dcn_gradients_match_reference_across_layer_counts(self):
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    # Covers peeled-only (1, 2, 3), 1-step scan (4), host-offload boundary (6), and multi-trip ordered scan (7).
+    for length in (1, 2, 3, 4, 6, 7):
+      with self.subTest(length=length):
+        got, ref, hlo = self._run_pipeline(length, dcn_dp=2, with_hlo=length == 7)
+        for g, r in zip(jax.tree.leaves(got), jax.tree.leaves(ref)):
+          np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+        if length == 7:
+          one_stage, _, _ = self._run_pipeline(length, dcn_dp=1)
+          for g, s in zip(jax.tree.leaves(got), jax.tree.leaves(one_stage)):
+            np.testing.assert_allclose(np.asarray(g), np.asarray(s), rtol=1e-6, atol=1e-6)
+          self.assertIn("stablehlo.while", hlo)
+          self.assertIn("reduce_scatter", hlo)
+          self.assertIn("all_reduce", hlo)
+
+    # Also verify `length=6` with `decoder_layer_input="offload"` (where forward has 2 trips and backward has 1).
+    got_offload, ref_offload, _ = self._run_pipeline(6, dcn_dp=2, decoder_layer_input="offload")
+    for g, r in zip(jax.tree.leaves(got_offload), jax.tree.leaves(ref_offload)):
+      np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
+
+  def test_two_stage_dcn_opt_out_flag_and_single_slice_hlo_parity(self):
+    """Single-slice HLO is unchanged, and `prefetch_fsdp_two_stage_dcn=False` falls back to 1-stage."""
+    from maxtext.configs import pyconfig  # pylint: disable=import-outside-toplevel
+
+    cfg_default = pyconfig.initialize(["", "base_output_directory=gs://unused", "run_name=test"])
+    self.assertTrue(cfg_default.prefetch_fsdp_two_stage_dcn)
+    cfg_off = pyconfig.initialize(
+        ["", "base_output_directory=gs://unused", "run_name=test", "prefetch_fsdp_two_stage_dcn=False"]
+    )
+    self.assertFalse(cfg_off.prefetch_fsdp_two_stage_dcn)
+
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices.")
+    _, _, hlo_dcn1_on = self._run_pipeline(7, dcn_dp=1, with_hlo=True, two_stage_dcn=True)
+    _, _, hlo_dcn1_off = self._run_pipeline(7, dcn_dp=1, with_hlo=True, two_stage_dcn=False)
+    self.assertEqual(hlo_dcn1_on, hlo_dcn1_off)
+
+    with mock.patch.object(
+        fsdp_prefetch, "_explicit_fsdp_dcn_all_reduce", wraps=fsdp_prefetch._explicit_fsdp_dcn_all_reduce  # pylint: disable=protected-access
+    ) as dcn_ar_on:
+      self._run_pipeline(4, dcn_dp=2, two_stage_dcn=True)
+    self.assertGreater(dcn_ar_on.call_count, 0)
+
+    with mock.patch.object(
+        fsdp_prefetch, "_explicit_fsdp_dcn_all_reduce", wraps=fsdp_prefetch._explicit_fsdp_dcn_all_reduce  # pylint: disable=protected-access
+    ) as dcn_ar_off:
+      got_opt_out, ref, hlo_opt_out = self._run_pipeline(7, dcn_dp=2, with_hlo=True, two_stage_dcn=False)
+    self.assertEqual(dcn_ar_off.call_count, 0)
+    self.assertEqual(hlo_opt_out, hlo_dcn1_off)
+    for g, r in zip(jax.tree.leaves(got_opt_out), jax.tree.leaves(ref)):
+      np.testing.assert_allclose(np.asarray(g), np.asarray(r), rtol=1e-5, atol=1e-5)
 
 
 if __name__ == "__main__":

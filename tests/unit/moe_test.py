@@ -32,7 +32,7 @@ import numpy as np
 import qwix
 import qwix.pallas as qpl
 from jax.sharding import Mesh, PartitionSpec as P
-from maxtext.common.common_types import Config, DType
+from maxtext.common.common_types import Config, DType, DecoderBlockType
 from maxtext.configs import pyconfig
 from maxtext.configs import types as maxtext_types
 from maxtext.kernels.megablox import ops as mblx_ops
@@ -984,9 +984,11 @@ def test_sparse_matmul_repairs_batch_specs_only_without_expert_parallelism(exper
           use_2d_fsdp_sharding=False,
           shard_embed_moe_on_fsdp=False,
           model_name="qwen3.5-35b-a3b",
+          decoder_block=DecoderBlockType.QWEN3_5,
           check_vma=False,
           moe_fsdp_use_two_stage_all_gather=False,
           moe_pin_sparse_core_all_gathers=False,
+          moe_pin_sparse_core_ep_all_gathers=False,
           moe_flat_fsdp_weights=False,
           moe_dropless_fallback=None,
           load_balance_loss_weight=0.0,
@@ -1065,9 +1067,11 @@ def test_sparse_matmul_pins_expert_kernel_all_gather_when_the_upcast_is_an_ident
           use_2d_fsdp_sharding=False,
           shard_embed_moe_on_fsdp=False,
           model_name="qwen3.5-35b-a3b",
+          decoder_block=DecoderBlockType.QWEN3_5,
           check_vma=False,
           moe_fsdp_use_two_stage_all_gather=False,
           moe_pin_sparse_core_all_gathers=False,
+          moe_pin_sparse_core_ep_all_gathers=False,
           moe_flat_fsdp_weights=False,
           moe_dropless_fallback=None,
           load_balance_loss_weight=0.0,
@@ -2968,8 +2972,13 @@ class RoutedMoeTest(parameterized.TestCase):
       actual_output, _, _ = self.get_moe_output(variables, hidden_states, cfg, mesh)
       assert_moe_close(actual_output, expected_output, cfg.dtype)
 
+  @parameterized.named_parameters(
+      ("embed_fixed", {"shard_embed_moe_on_fsdp": True}, "fixed,-224,224"),
+      ("embed_absmax", {"shard_embed_moe_on_fsdp": True}, "absmax"),
+      ("exp_absmax", {"shard_exp_on_fsdp": True}, "absmax"),
+  )
   @pytest.mark.tpu_only
-  def test_shard_embed_moe_on_fsdp(self):
+  def test_shard_embed_moe_on_fsdp(self, shard_flag, weight_calibration_method):
     if jax.device_count() != 4:
       self.skipTest("shard_embed_moe_on_fsdp test requires exactly 4 devices")
 
@@ -2991,13 +3000,13 @@ class RoutedMoeTest(parameterized.TestCase):
         use_gmm_v2=True,
         per_device_batch_size=4,
         ici_fsdp_parallelism=4,
-        shard_embed_moe_on_fsdp=True,
+        **shard_flag,
         max_target_length=32,
         float32_gate_logits=True,
         quantize_router_proj=False,
         quantization="fp8_full",
         use_qwix_quantization=True,
-        weight_quantization_calibration_method="fixed,-224,224",
+        weight_quantization_calibration_method=weight_calibration_method,
         act_quantization_calibration_method="fixed,-224,224",
         bwd_quantization_calibration_method="absmax",
         **_GMM_V2_SMALL_MLP_TILES,
@@ -4166,13 +4175,16 @@ class QuantizedMoeTest(parameterized.TestCase):
 
   @parameterized.named_parameters(
       {
-          "testcase_name": f"{base_name}_ep{ici_expert_parallelism}" + ("_qag" if shard_embed_moe_on_fsdp else ""),
+          "testcase_name": f"{base_name}_ep{ici_expert_parallelism}"
+          + ("_qag" if shard_embed_moe_on_fsdp else "")
+          + (f"_{qwag_granularity}" if qwag_granularity else ""),
           "quantization": quantization,
           "use_tokamax_gmm": use_tokamax_gmm,
           "use_gmm_v2": use_gmm_v2,
           "wa_static": wa_static,
           "ici_expert_parallelism": ici_expert_parallelism,
           "shard_embed_moe_on_fsdp": shard_embed_moe_on_fsdp,
+          "moe_weight_quantization_granularity": qwag_granularity or "per_channel",
       }
       for (
           base_name,
@@ -4182,13 +4194,17 @@ class QuantizedMoeTest(parameterized.TestCase):
           wa_static,
           ici_expert_parallelism,
           shard_embed_moe_on_fsdp,
+          qwag_granularity,
       ) in [
-          ("megablox_bf16", "", False, False, False, 1, False),
-          ("megablox_fp8_dynamic", "fp8_full", False, False, False, 1, False),
-          ("tokamax_v1_fp8_static", "fp8_full", True, False, True, 1, False),
-          ("tokamax_v2_bf16", "", True, True, False, 1, False),
-          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 4, False),
-          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, True),
+          ("megablox_bf16", "", False, False, False, 1, False, None),
+          ("megablox_fp8_dynamic", "fp8_full", False, False, False, 1, False, None),
+          ("tokamax_v1_fp8_static", "fp8_full", True, False, True, 1, False, None),
+          ("tokamax_v2_bf16", "", True, True, False, 1, False, None),
+          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 4, False, None),
+          ("tokamax_v2_fp8_static", "fp8_full", True, True, True, 1, True, None),
+          # Dynamic (absmax) QWAG.
+          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 1, True, "per_channel"),
+          ("tokamax_v2_fp8_dynamic", "fp8_full", True, True, False, 1, True, "per_tensor"),
       ]
   )
   @pytest.mark.skip_on_tpu7x  # TODO(b/543017989): Investigate correctness failures
@@ -4201,6 +4217,7 @@ class QuantizedMoeTest(parameterized.TestCase):
       wa_static: bool,
       ici_expert_parallelism: int,
       shard_embed_moe_on_fsdp: bool = False,
+      moe_weight_quantization_granularity: str = "per_channel",
       **kwargs,
   ):
     calibration_method = "fixed,-224,224" if wa_static else "absmax"
@@ -4218,6 +4235,7 @@ class QuantizedMoeTest(parameterized.TestCase):
       return pyconfig.initialize(
           [None, get_test_config_path()],
           run_name="gmm_grad_equivalence_test",
+          moe_weight_quantization_granularity=moe_weight_quantization_granularity,
           enable_checkpointing=False,
           model_name="qwen3-30b-a3b",
           num_experts=8,
@@ -4255,8 +4273,8 @@ class QuantizedMoeTest(parameterized.TestCase):
       )
 
     # Reference run: dense matmul, no quantization, EP=1, no weight all-gather sharding.
-    # shard_embed_moe_on_fsdp stays False here: it requires static weight quantization,
-    # which the unquantized reference does not have.
+    # shard_embed_moe_on_fsdp stays False here: it requires quantization with fixed or absmax weight
+    # calibration, which the unquantized reference does not have.
     cfg_ref = _build_cfg(
         sparse_matmul=False,
         quantization="",
@@ -6794,8 +6812,6 @@ class RoutedMoeRouterInputAndUpActivationTest(parameterized.TestCase):
 
   def test_up_activation_defaults_to_linear_and_unsupported_paths_reject_it(self):
     """A one-element `mlp_activations` means linear; paths that ignore `mlp_activations[1]` reject it."""
-    from maxtext.common.common_types import DecoderBlockType  # pylint: disable=import-outside-toplevel
-
     block, _ = self._block(self._cfg(mlp_activations=["silu"]))
     self.assertEqual(block.up_activation_name, "linear")
 

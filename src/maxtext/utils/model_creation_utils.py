@@ -37,6 +37,7 @@ import math
 import os
 import subprocess
 import sys
+import threading
 from typing import Any, Callable, overload
 from etils import epath
 from flax import nnx
@@ -148,7 +149,7 @@ _VLLM_REPEAT_AXES = frozenset({"kv_heads"})
 # Logical axis names whose padding semantics are "append zeros at the end"
 # (e.g. MoE MLP-dim padding to satisfy the GMM_v2 kernel's per-shard size
 # constraint, set in src/maxtext/integration/vllm/maxtext_vllm_adapter/adapter.py).
-_VLLM_ZERO_PAD_AXES = frozenset({"mlp_moe", "activation_mlp"})
+_VLLM_ZERO_PAD_AXES = frozenset({"mlp_moe", "mlp_moe_out", "activation_mlp"})
 
 
 def _normalize_logical_axes(axes):
@@ -738,10 +739,20 @@ def create_model(
     from maxtext.m3.infra import scan as m3_scan  # pylint: disable=import-outside-toplevel
     from maxtext.m3.infra.named_scopes import add_named_scopes  # pylint: disable=import-outside-toplevel
 
-    model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
-    model = m3_scan.maybe_apply_scan(model, config)
-    model = quantizations.maybe_quantize_model(model, config)
-    model = add_named_scopes(model)
+    m3_models.validate_attention_config(config, mesh=mesh)
+    with m3_models.enter_mesh_scope(
+        mesh if jax.sharding.get_abstract_mesh().empty else None,
+        shard_mode=getattr(config, "shard_mode", "auto"),
+    ):
+      model = m3_models.create_model(config, mesh, rngs=rngs, quant_mode_str=quant_mode_str)
+      model = m3_scan.maybe_apply_scan(model, config)
+      if getattr(config, "quantization", "") and m3_models.ambient_mesh_is_explicit():
+        raise ValueError(
+            "quantization is not supported with shard_mode='explicit' yet: qwix drops out_sharding on quantized "
+            "matmuls. Use shard_mode='auto'."
+        )
+      model = quantizations.maybe_quantize_model(model, config)
+      model = add_named_scopes(model)
     return model
 
   # Model definition
@@ -780,8 +791,8 @@ def create_nnx_abstract_model(
   """
 
   with logical_axis_rules(config.logical_axis_rules):
-    # m3 models do not store `self.mesh`, so resolve `mesh` up front when none
-    # was passed rather than reading `abs_model.mesh` below.
+    # Resolve `mesh` up front when none was passed so `m3.models.create_model`
+    # has a mesh to enter for parameter placement during `nnx.eval_shape`.
     if getattr(config, "use_m3_model", False) and mesh is None:
       mesh = maxtext_utils.get_mesh_from_config(config, devices)
     _create_model = get_nnx_create_model_fn(config, mesh, devices, model_mode, rng_key, quant_mode_str=quant_mode_str)
@@ -1114,6 +1125,73 @@ def _load_safetensors_dynamic(model, sharded_state, config):
   nnx.update(model, restored_state.filter(lambda path, var: not isinstance(var.get_value(), jax.ShapeDtypeStruct)))
 
 
+_PATHWAYS_REGISTRY_LOCK = threading.Lock()
+
+
+def _snapshot_global_type_handlers() -> list[tuple[Any, Any]]:
+  """Returns a snapshot of all handlers in Orbax's global type registry."""
+  handlers = []
+  for handler_type in ocp.type_handlers.supported_types():
+    handlers.append(
+        (handler_type, ocp.type_handlers.get_type_handler(handler_type)),
+    )
+  return handlers
+
+
+def _create_pathways_zarr2_registry(
+    config: Any,
+) -> ocp.type_handlers.TypeHandlerRegistry | None:
+  """Builds a scoped Pathways TypeHandlerRegistry for Zarr v2 restores.
+
+  Args:
+    config: MaxText configuration containing checkpoint storage flags.
+
+  Returns:
+    A checkpointer-scoped ``TypeHandlerRegistry`` configured with Pathways
+    handlers for plain Zarr v2 checkpoints, or ``None`` when OCDBT or Zarr3 is
+    enabled, when no Pathways client/runtime is active, or when Pathways
+    handler registration fails.
+  """
+  if config.checkpoint_storage_use_ocdbt:
+    return None
+  if config.checkpoint_storage_use_zarr3:
+    return None
+  clients = [getattr(device, "client", None) for device in jax.devices()]
+  has_pathways_client = any(hasattr(client, "pathways") for client in clients)
+  runtimes = [getattr(client, "runtime_type", None) for client in clients]
+  if not has_pathways_client and "pathways" not in runtimes:
+    return None
+  use_colocated = getattr(config, "colocated_python_checkpointing", False)
+  with _PATHWAYS_REGISTRY_LOCK:
+    previous_handlers = _snapshot_global_type_handlers()
+    try:
+      checkpointing_impl = ocp.pathways.CheckpointingImpl.from_options(
+          use_colocated_python=use_colocated,
+          use_persistence_array_handler=True,
+      )
+      # Keep `use_single_replica_array_handler=False`: `from_pretrained` builds
+      # `ArrayRestoreArgs` via `construct_restore_args`, whereas
+      # `SingleReplicaArrayHandler` requires `SingleReplicaArrayRestoreArgs`.
+      ocp.pathways.register_type_handlers(
+          use_single_replica_array_handler=False,
+          checkpointing_impl=checkpointing_impl,
+      )
+      pathways_handlers = _snapshot_global_type_handlers()
+      return ocp.type_handlers.create_type_handler_registry(*pathways_handlers)
+    except (ImportError, NotImplementedError, ValueError, RuntimeError) as exc:
+      max_logging.log(
+          f"Falling back to default Orbax array handler on Pathways: {exc}",
+      )
+      return None
+    finally:
+      for handler_type, handler in previous_handlers:
+        ocp.type_handlers.register_type_handler(
+            handler_type,
+            handler,
+            override=True,
+        )
+
+
 # pylint: disable=too-many-positional-arguments
 def from_pretrained(
     config,
@@ -1220,12 +1298,23 @@ def from_pretrained(
     if loads_safetensors_dynamic:
       _load_safetensors_dynamic(model, sharded_state, config)
     elif config.load_parameters_path:
+      # Orbax v0 PyTreeCheckpointHandler does not auto-register Pathways array
+      # handlers; without one, the single CPU controller reads every shard into
+      # host RAM and stages them over gRPC. Build a scoped Pathways persistence
+      # registry for plain Zarr v2 (both OCDBT and Zarr3 off, since
+      # PathwaysPersistenceArrayHandler hardcodes `driver: 'zarr'`) without
+      # mutating GLOBAL_TYPE_HANDLER_REGISTRY for subsequent checkpoints.
+      handler_kwargs: dict[str, Any] = {}
+      pathways_registry = _create_pathways_zarr2_registry(config)
+      if pathways_registry is not None:
+        handler_kwargs["type_handler_registry"] = pathways_registry
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
               save_concurrent_gb=config.checkpoint_storage_concurrent_gb,
               use_ocdbt=config.checkpoint_storage_use_ocdbt,
               use_zarr3=config.checkpoint_storage_use_zarr3,
+              **handler_kwargs,
           )
       )
 

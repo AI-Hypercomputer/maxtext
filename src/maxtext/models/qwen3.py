@@ -50,6 +50,7 @@ from maxtext.inference import kvcache
 from maxtext.kernels.attention import gdn_cp
 from maxtext.kernels.attention import gdn_fp8_projections
 from maxtext.kernels.attention import gdn_packing
+from maxtext.kernels.attention import tokamax_gdn
 from maxtext.layers import attentions
 from maxtext.layers import initializers as max_initializers
 from maxtext.layers import moe
@@ -71,6 +72,8 @@ from maxtext.utils.sharding import (
     logical_to_mesh_axes,
     maybe_shard_with_logical,
     maybe_shard_with_name,
+    pin_row_major_layout,
+    pin_row_major_with_cotangent,
     remove_incompatible_mesh_axes_from_partition_spec,
 )
 
@@ -123,12 +126,16 @@ def resolve_gdn_cp_mode(
 ) -> tuple[bool, bool]:
   """Resolves `(use_head_sharded_cp, use_seq_sharded_cp)` and validates CP constraints."""
   gdn_cp_mode = getattr(cfg, "gdn_cp_mode", "auto")
+  if gdn_cp_mode not in ("auto", "seq", "head"):
+    raise ValueError(f"Invalid gdn_cp_mode={gdn_cp_mode!r}; must be one of ('auto', 'seq', 'head').")
+
   if gdn_cp_mode == "head":
     if cp_size > 1 and (cp_size > num_k_heads or num_k_heads % cp_size != 0):
       raise ValueError(
           f"GDN head-sharded CP requires num_k_heads ({num_k_heads}) to be divisible by cp_size ({cp_size})."
       )
     use_head_sharded_cp = cp_size > 1 and model_mode != MODEL_MODE_AUTOREGRESSIVE
+    use_seq_sharded_cp = False
   elif gdn_cp_mode == "auto":
     use_head_sharded_cp = (
         prefer_head_cp
@@ -136,12 +143,11 @@ def resolve_gdn_cp_mode(
         and (num_k_heads % cp_size == 0)
         and model_mode != MODEL_MODE_AUTOREGRESSIVE
     )
-  elif gdn_cp_mode == "seq":
-    use_head_sharded_cp = False
+    use_seq_sharded_cp = cp_size > 1 and model_mode != MODEL_MODE_AUTOREGRESSIVE and not use_head_sharded_cp
   else:
-    raise ValueError(f"Invalid gdn_cp_mode={gdn_cp_mode!r}; must be one of ('auto', 'seq', 'head').")
+    use_head_sharded_cp = False
+    use_seq_sharded_cp = cp_size > 1 and model_mode != MODEL_MODE_AUTOREGRESSIVE
 
-  use_seq_sharded_cp = cp_size > 1 and model_mode != MODEL_MODE_AUTOREGRESSIVE and not use_head_sharded_cp
   if (use_head_sharded_cp or use_seq_sharded_cp) and getattr(cfg, "context_parallel_load_balance", False):
     raise ValueError("GDN does not support context_parallel_load_balance.")
   return use_head_sharded_cp, use_seq_sharded_cp
@@ -150,61 +156,6 @@ def resolve_gdn_cp_mode(
 _GDN_FP8_LOGGED: set[str] = set()
 _GDN_GATED_NORM_LAYOUT_LOGGED: set[str] = set()
 _GDN_IN_PROJ_KERNEL_ORDER_LOGGED: set[str] = set()
-
-
-def _with_layout_constraint(x: Array, major_to_minor: tuple[int, ...]) -> Array:
-  """Applies an XLA `major_to_minor` layout constraint when `x` is a JAX tracer."""
-  try:
-    from jax.experimental.layout import Layout, with_layout_constraint  # pylint: disable=import-outside-toplevel
-  except ImportError:
-    return x
-  if not isinstance(x, jax.core.Tracer):
-    return x
-  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor))
-
-
-def _pin_row_major_layout(x: Array) -> Array:
-  """Constrains `x` to its default row-major XLA layout under `jit`."""
-  return _with_layout_constraint(x, tuple(range(x.ndim)))
-
-
-@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
-def _forward_layout_constraint(x: Array, major_to_minor: tuple[int, ...]) -> Array:
-  """Constrains `x` to `major_to_minor` in the forward pass only, leaving its backward cotangent unconstrained."""
-  return _with_layout_constraint(x, major_to_minor)
-
-
-def _forward_layout_constraint_fwd(x: Array, major_to_minor: tuple[int, ...]):
-  return _with_layout_constraint(x, major_to_minor), None
-
-
-def _forward_layout_constraint_bwd(_major_to_minor, _res, cotangent):
-  return (cotangent,)
-
-
-_forward_layout_constraint.defvjp(_forward_layout_constraint_fwd, _forward_layout_constraint_bwd)
-
-
-def _forward_row_major(x: Array) -> Array:
-  """Constrains `x` to row-major layout in the forward pass only."""
-  return _forward_layout_constraint(x, tuple(range(x.ndim)))
-
-
-@jax.custom_vjp
-def _pin_row_major_fwd_and_bwd(x: Array) -> Array:
-  """Constrains `x` to row-major layout in both the forward pass and on its cotangent in the backward pass."""
-  return _pin_row_major_layout(x)
-
-
-def _pin_row_major_fwd_and_bwd_fwd(x: Array):
-  return _pin_row_major_layout(x), None
-
-
-def _pin_row_major_fwd_and_bwd_bwd(_res, cotangent: Array):
-  return (_pin_row_major_layout(cotangent),)
-
-
-_pin_row_major_fwd_and_bwd.defvjp(_pin_row_major_fwd_and_bwd_fwd, _pin_row_major_fwd_and_bwd_bwd)
 
 
 def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
@@ -218,11 +169,11 @@ def _pin_gdn_gated_norm_layout(x: Array, mode: str) -> Array:
       msg = f"GDN gated-norm output pinned row-major {where}"
     max_logging.log(f"[gdn_gated_norm_layout] mode={mode}: {msg}")
   if mode == "token_minor":
-    return _forward_layout_constraint(x, (0, 2, 3, 1))
+    return max_utils.forward_layout_constraint(x, (0, 2, 3, 1))
   if mode == "natural":
-    return _forward_row_major(x)
+    return max_utils.forward_row_major(x)
   if mode == "natural_fwd_bwd":
-    return _pin_row_major_fwd_and_bwd(x)
+    return pin_row_major_with_cotangent(x)
   raise ValueError(f"gdn_gated_norm_layout must be 'auto', 'natural', 'natural_fwd_bwd' or 'token_minor', got {mode!r}.")
 
 
@@ -1292,7 +1243,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       else:
         qkvz = self.in_proj_qkvz(hidden_states, out_sharding=flat_sharding)
       if use_paged_state and getattr(cfg, "gdn_pin_in_proj_output_layout", True):
-        qkvz = _pin_row_major_layout(qkvz)
+        qkvz = pin_row_major_layout(qkvz)
       qkvz = checkpoint_name(qkvz, "qkv_proj")
 
       # =========================================================================
@@ -1658,8 +1609,42 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
       head_spec = jax.sharding.PartitionSpec(jax.typeof(a).sharding.spec[-1])
       A_log = jax.sharding.reshard(A_log, head_spec)
       dt_bias = jax.sharding.reshard(dt_bias, head_spec)
+    is_ar_decode = seq_len == 1 and model_mode == MODEL_MODE_AUTOREGRESSIVE
+    use_tokamax = False
+    if cfg.use_tokamax_gdn and model_mode != MODEL_MODE_AUTOREGRESSIVE:
+      if model_mode == MODEL_MODE_TRAIN:
+        use_tokamax = True
+      else:
+        if self.mesh is not None:
+          _, prefill_cp_axes, _, _ = get_gdn_cp_sharding_info(cfg, self.mesh)
+          prefill_cp_size = math.prod(self.mesh.shape[ax] for ax in prefill_cp_axes) if prefill_cp_axes else 1
+          prefill_head_cp, prefill_seq_cp = resolve_gdn_cp_mode(
+              cfg, prefill_cp_size, self.num_k_heads, model_mode, prefer_head_cp=True
+          )
+        else:
+          prefill_cp_axes = ()
+          prefill_cp_size = 1
+          prefill_head_cp = False
+          prefill_seq_cp = False
+        allowed_prefill_chunks = (
+            tokamax_gdn.TOKAMAX_GDN_PACKED_OR_SEQ_CP_CHUNK_SIZES
+            if (packed_segment_ids is not None or prefill_seq_cp)
+            else tokamax_gdn.TOKAMAX_GDN_UNPACKED_CHUNK_SIZES
+        )
+        local_prefill_seq_len = seq_len // prefill_cp_size if prefill_seq_cp else seq_len
+        use_tokamax = (
+            cfg.gdn_chunk_size in allowed_prefill_chunks
+            and (not prefill_seq_cp or seq_len % prefill_cp_size == 0)
+            and local_prefill_seq_len > 0
+            and local_prefill_seq_len % cfg.gdn_chunk_size == 0
+            and (
+                prefill_cp_size == 1
+                or prefill_head_cp
+                or (recurrent_state is None and active_cache is None and len(prefill_cp_axes) == 1)
+            )
+        )
     # beta shape: (B, S, H_v)
-    beta = jax.nn.sigmoid(b)
+    beta = None if use_tokamax else jax.nn.sigmoid(b)
     # g shape: (B, S, H_v), computed in float32 to preserve precision for g_cumsum and A_log/dt_bias gradients
     g = -jnp.exp(A_log) * jax.nn.softplus(a.astype(jnp.float32) + dt_bias)
 
@@ -1674,7 +1659,8 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # `jax_chunk_gated_delta_rule` and `jax_ar_gated_delta_rule` so L2 norm,
     # query scaling, and intra-chunk K @ K^T / Q @ K^T matmuls run at H_k heads.
     chunk_inverse = getattr(cfg, "gdn_chunk_inverse", "block_doubling")
-    if seq_len == 1 and model_mode == MODEL_MODE_AUTOREGRESSIVE:
+    if is_ar_decode:
+      assert beta is not None
       core_attn_out, next_recurrent_state = jax_ar_gated_delta_rule(
           query,
           key,
@@ -1688,21 +1674,24 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     elif self.mesh is not None:
       logical_rules, cp_axes_active, cp_axis_for_pspec, cp_len = get_gdn_cp_sharding_info(cfg, self.mesh)
       cp_size = math.prod(self.mesh.shape[ax] for ax in cp_axes_active) if cp_axes_active else 1
-      use_head_cp, _ = resolve_gdn_cp_mode(cfg, cp_size, self.num_k_heads, model_mode, prefer_head_cp=False)
+      use_head_cp, _ = resolve_gdn_cp_mode(cfg, cp_size, self.num_k_heads, model_mode, prefer_head_cp=use_tokamax)
       if use_head_cp and seq_len % cp_size != 0:
         raise ValueError(
             f"GDN head-sharded CP requires sequence length ({seq_len}) to be divisible by cp_size ({cp_size})."
         )
       has_initial_state = recurrent_state is not None
-      recurrent_state_arg = (
-          recurrent_state
-          if recurrent_state is not None
-          else jnp.zeros(
-              (batch, self.num_v_heads, self.head_k_dim, self.head_v_dim),
-              dtype=cfg.dtype,
-              out_sharding=state_sharding,
-          )
-      )
+      if use_tokamax:
+        recurrent_state_arg = recurrent_state
+      else:
+        recurrent_state_arg = (
+            recurrent_state
+            if recurrent_state is not None
+            else jnp.zeros(
+                (batch, self.num_v_heads, self.head_k_dim, self.head_v_dim),
+                dtype=cfg.dtype,
+                out_sharding=state_sharding,
+            )
+        )
       if use_head_cp:
         base_qkv_pspec = logical_to_mesh_axes((KV_BATCH, None, gdn_head_axis, None), mesh=self.mesh, rules=logical_rules)
         mesh_batch = base_qkv_pspec[0]
@@ -1766,13 +1755,14 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
           dims=(0,),
           allow_remove_axes=True,
       )
-      state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
-          state_pspec,
-          recurrent_state_arg.shape,
-          self.mesh,
-          dims=(0,),
-          allow_remove_axes=True,
-      )
+      if recurrent_state_arg is not None:
+        state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+            state_pspec,
+            recurrent_state_arg.shape,
+            self.mesh,
+            dims=(0,),
+            allow_remove_axes=True,
+        )
       if use_head_cp:
         out_qkv_pspec = remove_incompatible_mesh_axes_from_partition_spec(
             out_qkv_pspec,
@@ -1781,86 +1771,213 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
             dims=(0,),
             allow_remove_axes=True,
         )
-        out_state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
-            out_state_pspec,
-            recurrent_state_arg.shape,
-            self.mesh,
-            dims=(0,),
-            allow_remove_axes=True,
-        )
+        if recurrent_state_arg is not None:
+          out_state_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+              out_state_pspec,
+              recurrent_state_arg.shape,
+              self.mesh,
+              dims=(0,),
+              allow_remove_axes=True,
+          )
       else:
         out_qkv_pspec = qkv_pspec
         out_state_pspec = state_pspec
-      if packed_segment_ids is not None:
-        seg_pspec = remove_incompatible_mesh_axes_from_partition_spec(
-            jax.sharding.PartitionSpec(qkv_pspec[0], qkv_pspec[1]),
-            packed_segment_ids.shape,
-            self.mesh,
-            dims=(0,),
-            allow_remove_axes=True,
+
+      if use_tokamax:
+        b_sharded = b
+        # `g_beta_pspec` already stripped incompatible batch axes for `g.shape[0] == packed_segment_ids.shape[0]`.
+        seg_pspec = (
+            jax.sharding.PartitionSpec(g_beta_pspec[0], g_beta_pspec[1])
+            if packed_segment_ids is not None
+            else jax.sharding.PartitionSpec()
         )
+
+        if cfg.shard_mode == ShardMode.EXPLICIT:
+          query = jax.sharding.reshard(query, qkv_pspec)
+          key = jax.sharding.reshard(key, qkv_pspec)
+          value = jax.sharding.reshard(value, qkv_pspec)
+          g = jax.sharding.reshard(g, g_beta_pspec)
+          b_sharded = jax.sharding.reshard(b, g_beta_pspec)
+          if recurrent_state_arg is not None:
+            recurrent_state_arg = jax.sharding.reshard(recurrent_state_arg, state_pspec)
+          if packed_segment_ids is not None:
+            packed_segment_ids = jax.sharding.reshard(packed_segment_ids, seg_pspec)
+
+        if not has_initial_state:
+
+          @functools.partial(
+              jax.shard_map,
+              mesh=self.mesh,
+              in_specs=(
+                  qkv_pspec,  # query
+                  qkv_pspec,  # key
+                  qkv_pspec,  # value
+                  g_beta_pspec,  # g
+                  g_beta_pspec,  # b
+                  seg_pspec,  # segment_ids
+              ),
+              out_specs=out_qkv_pspec,
+              check_vma=False,
+          )
+          def shard_mapped_tokamax_delta_rule(q, k, v, g_val, b_val, seg_val):
+            out, _ = tokamax_gdn.tokamax_chunk_gated_delta_rule(
+                query=q,
+                key=k,
+                value=v,
+                g=g_val,
+                b=b_val,
+                chunk_size=cfg.gdn_chunk_size,
+                initial_state=None,
+                output_final_state=False,
+                use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+                compute_dtype=cfg.dtype,
+                two_pass_bf16=cfg.gdn_two_pass_bf16,
+                mesh=self.mesh,
+                cp_axis=cp_axes_for_scan,
+                segment_ids=seg_val,
+            )
+            if use_head_cp:
+              out = jax.lax.all_to_all(out, axis_name=cp_axis_for_pspec, split_axis=1, concat_axis=2, tiled=True)
+            return out
+
+          core_attn_out = shard_mapped_tokamax_delta_rule(query, key, value, g, b_sharded, packed_segment_ids)
+          next_recurrent_state = None
+        else:
+          assert recurrent_state_arg is not None
+
+          @functools.partial(
+              jax.shard_map,
+              mesh=self.mesh,
+              in_specs=(
+                  qkv_pspec,  # query
+                  qkv_pspec,  # key
+                  qkv_pspec,  # value
+                  g_beta_pspec,  # g
+                  g_beta_pspec,  # b
+                  state_pspec,  # initial_state
+                  seg_pspec,  # segment_ids
+              ),
+              out_specs=(
+                  out_qkv_pspec,  # core_attn_out
+                  out_state_pspec,  # final_state
+              ),
+              check_vma=False,
+          )
+          def shard_mapped_tokamax_delta_rule_with_state(q, k, v, g_val, b_val, init_h, seg_val):
+            out, next_state = tokamax_gdn.tokamax_chunk_gated_delta_rule(
+                query=q,
+                key=k,
+                value=v,
+                g=g_val,
+                b=b_val,
+                chunk_size=cfg.gdn_chunk_size,
+                initial_state=init_h,
+                output_final_state=True,
+                use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+                compute_dtype=cfg.dtype,
+                two_pass_bf16=cfg.gdn_two_pass_bf16,
+                mesh=self.mesh,
+                cp_axis=cp_axes_for_scan,
+                segment_ids=seg_val,
+            )
+            if use_head_cp:
+              out = jax.lax.all_to_all(out, axis_name=cp_axis_for_pspec, split_axis=1, concat_axis=2, tiled=True)
+              if next_state is not None:
+                next_state = jax.lax.all_gather(next_state, axis_name=cp_axis_for_pspec, axis=1, tiled=True)
+            return out, next_state
+
+          core_attn_out, next_recurrent_state = shard_mapped_tokamax_delta_rule_with_state(
+              query, key, value, g, b_sharded, recurrent_state_arg, packed_segment_ids
+          )
       else:
-        seg_pspec = jax.sharding.PartitionSpec()
-
-      if cfg.shard_mode == ShardMode.EXPLICIT:
-        # shard_map manualises the mesh axes it is given and will not insert a reshard
-        # for an operand whose layout differs from `in_specs`, so hand it arrays that
-        # already match.
-        query = jax.sharding.reshard(query, qkv_pspec)
-        key = jax.sharding.reshard(key, qkv_pspec)
-        value = jax.sharding.reshard(value, qkv_pspec)
-        g = jax.sharding.reshard(g, g_beta_pspec)
-        beta = jax.sharding.reshard(beta, g_beta_pspec)
-        recurrent_state_arg = jax.sharding.reshard(recurrent_state_arg, state_pspec)
+        assert beta is not None
+        assert recurrent_state_arg is not None
         if packed_segment_ids is not None:
-          packed_segment_ids = jax.sharding.reshard(packed_segment_ids, seg_pspec)
+          seg_pspec = remove_incompatible_mesh_axes_from_partition_spec(
+              jax.sharding.PartitionSpec(qkv_pspec[0], qkv_pspec[1]),
+              packed_segment_ids.shape,
+              self.mesh,
+              dims=(0,),
+              allow_remove_axes=True,
+          )
+        else:
+          seg_pspec = jax.sharding.PartitionSpec()
 
-      @functools.partial(
-          jax.shard_map,
-          mesh=self.mesh,
-          in_specs=(
-              qkv_pspec,  # query
-              qkv_pspec,  # key
-              qkv_pspec,  # value
-              g_beta_pspec,  # g
-              g_beta_pspec,  # beta
-              state_pspec,  # initial_state
-              seg_pspec,  # segment_ids
-          ),
-          out_specs=(
-              out_qkv_pspec,  # core_attn_out
-              out_state_pspec,  # final_state
-          ),
-          check_vma=False,
-      )
-      def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h, seg_val):
-        out, next_state = jax_chunk_gated_delta_rule(
-            query=q,
-            key=k,
-            value=v,
-            g=g_val,
-            beta=beta_val,
-            chunk_size=cfg.gdn_chunk_size,
-            initial_state=init_h,
-            use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
-            compute_dtype=cfg.dtype,
-            cp_axis=cp_axes_for_scan,
-            segment_ids=seg_val,
-            has_initial_state=has_initial_state,
-            chunk_inverse=chunk_inverse,
+        if cfg.shard_mode == ShardMode.EXPLICIT:
+          # shard_map manualises the mesh axes it is given and will not insert a reshard
+          # for an operand whose layout differs from `in_specs`, so hand it arrays that
+          # already match.
+          query = jax.sharding.reshard(query, qkv_pspec)
+          key = jax.sharding.reshard(key, qkv_pspec)
+          value = jax.sharding.reshard(value, qkv_pspec)
+          g = jax.sharding.reshard(g, g_beta_pspec)
+          beta = jax.sharding.reshard(beta, g_beta_pspec)
+          recurrent_state_arg = jax.sharding.reshard(recurrent_state_arg, state_pspec)
+          if packed_segment_ids is not None:
+            packed_segment_ids = jax.sharding.reshard(packed_segment_ids, seg_pspec)
+
+        @functools.partial(
+            jax.shard_map,
+            mesh=self.mesh,
+            in_specs=(
+                qkv_pspec,  # query
+                qkv_pspec,  # key
+                qkv_pspec,  # value
+                g_beta_pspec,  # g
+                g_beta_pspec,  # beta
+                state_pspec,  # initial_state
+                seg_pspec,  # segment_ids
+            ),
+            out_specs=(
+                out_qkv_pspec,  # core_attn_out
+                out_state_pspec,  # final_state
+            ),
+            check_vma=False,
         )
-        if use_head_cp:
-          out = jax.lax.all_to_all(out, axis_name=cp_axis_for_pspec, split_axis=1, concat_axis=2, tiled=True)
-          if has_initial_state and next_state is not None:
-            next_state = jax.lax.all_gather(next_state, axis_name=cp_axis_for_pspec, axis=1, tiled=True)
-        return out, next_state
+        def shard_mapped_delta_rule(q, k, v, g_val, beta_val, init_h, seg_val):
+          out, next_state = jax_chunk_gated_delta_rule(
+              query=q,
+              key=k,
+              value=v,
+              g=g_val,
+              beta=beta_val,
+              chunk_size=cfg.gdn_chunk_size,
+              initial_state=init_h,
+              use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+              compute_dtype=cfg.dtype,
+              cp_axis=cp_axes_for_scan,
+              segment_ids=seg_val,
+              has_initial_state=has_initial_state,
+              chunk_inverse=chunk_inverse,
+          )
+          if use_head_cp:
+            out = jax.lax.all_to_all(out, axis_name=cp_axis_for_pspec, split_axis=1, concat_axis=2, tiled=True)
+            if has_initial_state and next_state is not None:
+              next_state = jax.lax.all_gather(next_state, axis_name=cp_axis_for_pspec, axis=1, tiled=True)
+          return out, next_state
 
-      core_attn_out, next_recurrent_state = shard_mapped_delta_rule(
-          query, key, value, g, beta, recurrent_state_arg, packed_segment_ids
-      )
+        core_attn_out, next_recurrent_state = shard_mapped_delta_rule(
+            query, key, value, g, beta, recurrent_state_arg, packed_segment_ids
+        )
       if cfg.shard_mode == ShardMode.EXPLICIT and head_sharding is not None:
         core_attn_out = jax.sharding.reshard(core_attn_out, head_sharding)
+    elif use_tokamax:
+      core_attn_out, next_recurrent_state = tokamax_gdn.tokamax_chunk_gated_delta_rule(
+          query,
+          key,
+          value,
+          g,
+          b,
+          chunk_size=cfg.gdn_chunk_size,
+          initial_state=recurrent_state,
+          output_final_state=recurrent_state is not None,
+          use_qk_norm_in_gdn=cfg.use_qk_norm_in_gdn,
+          compute_dtype=cfg.dtype,
+          two_pass_bf16=cfg.gdn_two_pass_bf16,
+          segment_ids=packed_segment_ids,
+      )
     else:
+      assert beta is not None
       core_attn_out, next_recurrent_state = jax_chunk_gated_delta_rule(
           query,
           key,
@@ -1922,7 +2039,7 @@ class Qwen3NextGatedDeltaNet(nnx.Module):
     # Shape from (B, S, H_v, D_v) -> (B, S, value_dim)
     gated_output = jnp.reshape(gated_output_reshaped, (batch, seq_len, -1), out_sharding=flat_sharding)
     if out_proj_token_minor:
-      gated_output = _forward_layout_constraint(gated_output, (0, 2, 1))
+      gated_output = max_utils.forward_layout_constraint(gated_output, (0, 2, 1))
 
     # Final output shape: (B, S, E)
     if use_fp8_projections:
@@ -2597,7 +2714,7 @@ class Qwen3NextDecoderLayer(nnx.Module):
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
     self.mlp_activation_axis_names = (
         "activation_batch",
-        "activation_norm_length",
+        "activation_length",
         "activation_mlp",
     )
 
@@ -2804,7 +2921,7 @@ class AttentionWithNorm(nnx.Module):
     batch_size, seq_len = max_utils.get_batch_seq_len_for_mode(config, model_mode)
     dummy_inputs_shape = (batch_size, seq_len, config.emb_dim)
     self.activation_axis_names = ("activation_batch", "activation_norm_length", "activation_embed")
-    self.mlp_activation_axis_names = ("activation_batch", "activation_norm_length", "activation_mlp")
+    self.mlp_activation_axis_names = ("activation_batch", "activation_length", "activation_mlp")
 
     # Physical shardings used to pin sublayer outputs under ShardMode.EXPLICIT. In
     # ShardMode.AUTO the callees ignore these and let GSPMD infer the layout.
@@ -2891,6 +3008,8 @@ class AttentionWithNorm(nnx.Module):
     """Applies self-attention with pre and post-layer normalization."""
     inputs = self._maybe_shard_with_logical(inputs, self.activation_axis_names)
     inputs = checkpoint_name(inputs, "decoder_layer_input")
+    if getattr(self.config, "decoder_layer_input_unalias", False) and model_mode == MODEL_MODE_TRAIN:
+      inputs = _unalias_decoder_layer_input(inputs)
     # Pre attention norm
     lnx = self.pre_self_attention_layer_norm(inputs, out_sharding=self.out_sharding)
     lnx = self._maybe_shard_with_logical(lnx, self.activation_axis_names)
@@ -2913,6 +3032,24 @@ class AttentionWithNorm(nnx.Module):
     hidden_states = self.post_self_attention_layer_norm(intermediate_inputs, out_sharding=self.out_sharding)
     hidden_states = self._maybe_shard_with_logical(hidden_states, self.activation_axis_names)
     return hidden_states, intermediate_inputs, kv_cache
+
+
+@jax.custom_vjp
+def _unalias_decoder_layer_input(x: jnp.ndarray) -> jnp.ndarray:
+  """Materializes a distinct HBM buffer after `decoder_layer_input` prefetch."""
+  one = jax.lax.optimization_barrier(jnp.ones((), dtype=x.dtype))
+  return jax.lax.optimization_barrier(x * one)
+
+
+def _unalias_decoder_layer_input_fwd(x: jnp.ndarray):
+  return _unalias_decoder_layer_input(x), None
+
+
+def _unalias_decoder_layer_input_bwd(_, g: jnp.ndarray):
+  return (g,)
+
+
+_unalias_decoder_layer_input.defvjp(_unalias_decoder_layer_input_fwd, _unalias_decoder_layer_input_bwd)
 
 
 # -----------------------------------------

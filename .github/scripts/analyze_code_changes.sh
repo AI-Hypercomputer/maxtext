@@ -99,38 +99,6 @@ enable_flags() {
   done
 }
 
-# Name each prebuilt CI dependency image for this commit
-emit_deps_tags() {
-  local reqs='src/dependencies/requirements/generated_requirements'
-  local extra='src/dependencies/extra_deps'
-  local scripts='src/dependencies/scripts'
-  local dockerfile='src/dependencies/dockerfiles/test_deps_env.Dockerfile'
-  local build_workflow='.github/workflows/build_deps_image.yml'
-  local image inputs input
-
-  for image in tpu_pre_train tpu_post_train gpu_pre_train; do
-    case "$image" in
-      tpu_pre_train)
-        inputs=("${reqs}/tpu-requirements.txt" "${extra}/pre_train_github_deps.txt" "${scripts}/install_pre_train_extra_deps.py")
-        ;;
-      tpu_post_train)
-        inputs=("${reqs}/tpu-post-train-requirements.txt" "${extra}/post_train_github_deps.txt" "${scripts}/install_post_train_extra_deps.py")
-        ;;
-      gpu_pre_train)
-        inputs=("${reqs}/cuda12-requirements.txt" "${extra}/pre_train_github_deps.txt" "${scripts}/install_pre_train_extra_deps.py")
-        ;;
-    esac
-    inputs+=("$dockerfile" "$build_workflow")
-    for input in "${inputs[@]}"; do
-      if [[ ! -e "$input" ]]; then
-        echo "::error::Dependency image input missing: ${input}"
-        exit 1
-      fi
-    done
-    emit_flag "${image}_deps_tag" "deps-$(sha256sum "${inputs[@]}" | sha256sum | cut -c1-16)"
-  done
-}
-
 # Helper to check if a changed file matches a specific domain pattern
 matches_pattern() {
   local changed_file="$1"
@@ -280,7 +248,6 @@ BASE_REF="${1:-${GITHUB_BASE_REF:-main}}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS:-false}"
 FORCE_ALL_TESTS="${FORCE_ALL_TESTS,,}"
 
-emit_deps_tags
 fetch_pr_metadata_via_api
 
 if [[ "$FORCE_ALL_TESTS" == "true" ]]; then

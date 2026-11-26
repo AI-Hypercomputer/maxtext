@@ -16,6 +16,8 @@
 """Utils that are only interesting to MaxText."""
 
 import re
+from typing import Any
+from flax import nnx
 import jax
 import jax.numpy as jnp
 
@@ -25,6 +27,7 @@ from maxtext.common.common_types import DecoderBlockType
 from maxtext.optimizers.muon import muon as maxtext_muon
 from maxtext.utils import max_logging
 from maxtext.utils.muon_utils import get_muon_weight_dimension_numbers
+from maxtext.utils.muon_utils import get_prefused_moe_wi_mask
 from maxtext.utils.maxtext_muon_utils import get_maxtext_muon_weight_dimension_numbers
 
 
@@ -177,6 +180,143 @@ def skip_step_on_spikes(
   return optax.GradientTransformationExtraArgs(init_fn, update_fn)
 
 
+def _resolve_mask_container(mask, tree):
+  """Matches `mask` container type (`nnx.State` vs `dict`) to `tree`."""
+  if isinstance(mask, nnx.State) and not isinstance(tree, nnx.State):
+    return nnx.to_pure_dict(mask)
+  return mask
+
+
+def _is_split_axis_leaf(x) -> bool:
+  return x is None or (isinstance(x, int) and not isinstance(x, bool))
+
+
+def _extract_split_axis_tree(mask, dim_nums):
+  """Maps each masked `wi` leaf to its single `output_axis` int from `dim_nums`, or `None` otherwise."""
+  resolved_mask = _resolve_mask_container(mask, dim_nums)
+
+  def _extract_axis(should_split: bool, dim_num):
+    if not should_split or dim_num is None:
+      return None
+    out_ax = dim_num.output_axis
+    if isinstance(out_ax, int):
+      return out_ax
+    out_axes = tuple(out_ax)
+    if len(out_axes) != 1:
+      raise ValueError(f"Pre-fused MoE `wi` splitting requires a single output_axis, got {out_axes}")
+    return out_axes[0]
+
+  return jax.tree.map(
+      _extract_axis,
+      resolved_mask,
+      dim_nums,
+      is_leaf=lambda m: isinstance(m, bool),
+  )
+
+
+def _normalize_split_axis(axis: int, shape: tuple[int, ...]) -> int:
+  ndim = len(shape)
+  if not -ndim <= axis < ndim:
+    raise ValueError(f"Pre-fused MoE `wi` output axis {axis} out of range for shape {shape}.")
+  return axis % ndim
+
+
+def _split_wi_tree(split_axes, tree):
+  """Splits pre-fused MoE `wi` leaves into `{'0': wi_0, '1': wi_1}` along each leaf's `output_axis`."""
+  if tree is None:
+    return None
+  resolved_axes = _resolve_mask_container(split_axes, tree)
+
+  def _split_leaf(split_axis: int | None, leaf):
+    if split_axis is None or leaf is None:
+      return leaf
+    arr_leaves = jax.tree.leaves(leaf)
+    if not arr_leaves:
+      return {"0": leaf, "1": leaf}
+
+    def _slice_half(a, second_half: bool):
+      norm_ax = _normalize_split_axis(split_axis, a.shape)
+      size = a.shape[norm_ax]
+      if size % 2 != 0:
+        raise ValueError(
+            f"Pre-fused MoE `wi` output axis {norm_ax} of size {size} is not divisible by 2 for shape {a.shape}."
+        )
+      half = size // 2
+      return jax.lax.slice_in_dim(a, half if second_half else 0, size if second_half else half, axis=norm_ax)
+
+    return {
+        "0": jax.tree.map(lambda a: _slice_half(a, False), leaf),
+        "1": jax.tree.map(lambda a: _slice_half(a, True), leaf),
+    }
+
+  return jax.tree.map(_split_leaf, resolved_axes, tree, is_leaf=_is_split_axis_leaf)
+
+
+def _merge_wi_tree(split_axes, tree):
+  """Concatenates split `{'0': wi_0, '1': wi_1}` subtrees back along each leaf's `output_axis`."""
+  if tree is None:
+    return None
+  resolved_axes = _resolve_mask_container(split_axes, tree)
+
+  def _merge_leaf(split_axis: int | None, subtree):
+    if split_axis is None or subtree is None:
+      return subtree
+    v0, v1 = subtree["0"], subtree["1"]
+    return jax.tree.map(
+        lambda a, b: jnp.concatenate([a, b], axis=_normalize_split_axis(split_axis, a.shape)),
+        v0,
+        v1,
+    )
+
+  return jax.tree.map(_merge_leaf, resolved_axes, tree, is_leaf=_is_split_axis_leaf)
+
+
+def _map_opt_state_trees(fn, state):
+  """Applies `fn` to every parameter-shaped tree (`mu`, `nu`) inside an Optax Muon `PartitionState`."""
+  if isinstance(state, dict):
+    return type(state)((k, _map_opt_state_trees(fn, v)) for k, v in state.items())
+  if isinstance(state, tuple) and hasattr(state, "_fields"):
+    replacements = {
+        f: fn(getattr(state, f)) if f in ("mu", "nu") else _map_opt_state_trees(fn, getattr(state, f))
+        for f in state._fields
+    }
+    return state._replace(**replacements)
+  if isinstance(state, tuple):
+    return tuple(_map_opt_state_trees(fn, s) for s in state)
+  return state
+
+
+def _build_prefused_wi_optax_muon(muon_kwargs: dict[str, Any], split_wi_mask) -> optax.GradientTransformation:
+  """Wraps `optax_muon` so pre-fused `wi = [wi_0 | wi_1]` is orthogonalized per projection while keeping stacked state."""
+  dim_nums = muon_kwargs["muon_weight_dimension_numbers"]
+  split_axes = _extract_split_axis_tree(split_wi_mask, dim_nums)
+  static_split_dim_nums = jax.tree.map(
+      lambda m, d: {"0": d, "1": d} if (m and d is not None) else d,
+      _resolve_mask_container(split_wi_mask, dim_nums),
+      dim_nums,
+      is_leaf=lambda m: isinstance(m, bool),
+  )
+  inner_kwargs = dict(muon_kwargs)
+  inner_kwargs["muon_weight_dimension_numbers"] = lambda p: _resolve_mask_container(static_split_dim_nums, p)
+  inner_opt = optax_muon(**inner_kwargs)  # pyrefly: ignore[bad-argument-type]
+
+  def init_fn(params):
+    split_state = inner_opt.init(_split_wi_tree(split_axes, params))
+    return _map_opt_state_trees(lambda t: _merge_wi_tree(split_axes, t), split_state)
+
+  def update_fn(updates, state, params=None):
+    split_updates = _split_wi_tree(split_axes, updates)
+    split_state = _map_opt_state_trees(lambda t: _split_wi_tree(split_axes, t), state)
+    split_params = _split_wi_tree(split_axes, params)
+    new_updates, new_state = inner_opt.update(split_updates, split_state, split_params)
+    return (
+        _merge_wi_tree(split_axes, new_updates),
+        _map_opt_state_trees(lambda t: _merge_wi_tree(split_axes, t), new_state),
+    )
+
+  return optax.GradientTransformation(init_fn, update_fn)
+
+
 def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
   """Create optimizer."""
   if config.opt_type == "adamw":
@@ -239,7 +379,11 @@ def get_optimizer(config, learning_rate_schedule, model=None, mesh=None):
       else:
         raise ValueError("Please specify model to extract muon dimension number.")
       muon_kwargs = muon_kwargs | {"muon_weight_dimension_numbers": muon_weight_dimension_numbers}
-      base_opt = optax_muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
+      split_wi_mask = get_prefused_moe_wi_mask(model, config)
+      if split_wi_mask is not None:
+        base_opt = _build_prefused_wi_optax_muon(muon_kwargs, split_wi_mask)
+      else:
+        base_opt = optax_muon(**muon_kwargs)  # pyrefly: ignore[bad-argument-type]
     elif muon_type in ("maxtext", "maxtext_muon"):
       if model is not None:
         muon_weight_dimension_numbers = get_maxtext_muon_weight_dimension_numbers(model, config, mesh=mesh)

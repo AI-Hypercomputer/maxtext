@@ -10,7 +10,7 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_qwen3_to_mt.sh $RUN_ID
+# bash tests/end_to_end/cpu/qwen3/30b/test_qwen3_to_mt.sh $RUN_ID
 # bash test_qwen3_rl.sh $RUN_ID
 
 set -ex
@@ -38,6 +38,8 @@ PYTHONPATH="${PYTHONPATH:-.}:$(pwd)"
 export PYTHONPATH
 run_id=${1:-$(date +%Y-%m-%d-%H-%M-%S)}
 MODEL_NAME='qwen3-30b-a3b-base'
+# test_qwen3_to_mt.sh converts the post-trained checkpoint.
+TOKENIZER_PATH='Qwen/Qwen3-30B-A3B'
 
 BASE_OUTPUT_DIRECTORY=gs://runner-maxtext-logs/${MODEL_NAME}
 UNSCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/unscanned/${run_id}/0/items
@@ -46,6 +48,7 @@ SCANNED_CKPT_PATH=${BASE_OUTPUT_DIRECTORY}/to_maxtext/scanned/${run_id}/0/items
 # Step 1: Run inference on the pre-converted checkpoint
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
+    tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path=${SCANNED_CKPT_PATH} \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.5 \
@@ -74,6 +77,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
     train_micro_batch_size=1 \
     num_test_batches=2 \
     model_name=${MODEL_NAME} \
+    tokenizer_path=${TOKENIZER_PATH} \
     enable_single_controller=True \
     checkpoint_storage_use_zarr3=False \
     checkpoint_storage_use_ocdbt=False \
@@ -100,6 +104,7 @@ python3 -m maxtext.trainers.post_train.rl.train_rl \
 # Step 3: Run inference on the checkpoint produced by the RL run
 python3 -m maxtext.inference.vllm_decode \
     model_name=${MODEL_NAME} \
+    tokenizer_path=${TOKENIZER_PATH} \
     load_parameters_path=${BASE_OUTPUT_DIRECTORY}/rl/${run_id}/checkpoints/actor/2/model_params \
     vllm_hf_overrides='{architectures: ["MaxTextForCausalLM"]}' \
     hbm_utilization_vllm=0.5 \

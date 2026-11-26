@@ -1447,6 +1447,22 @@ class TestCalculatePrefillTflops(unittest.TestCase):
     # Attention scales quadratically with prefill length
     self.assertGreater(attn_long, attn_short * 3)
 
+  def test_full_attention_doubles_prefill_attention_tflops(self):
+    causal_cfg = self._make_cfg()
+    causal_cfg.attention_type = "global"
+    full_cfg = self._make_cfg()
+    full_cfg.attention_type = "full"
+    total_c, lw_c, attn_c = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_parameters=1_000_000, prefill_length=128, config=causal_cfg, log=False
+    )
+    total_f, lw_f, attn_f = maxtext_utils.calculate_prefill_tflops_per_device(
+        num_model_parameters=1_000_000, prefill_length=128, config=full_cfg, log=False
+    )
+    self.assertAlmostEqual(lw_f, lw_c, places=10)
+    self.assertAlmostEqual(attn_f, 2.0 * attn_c, places=10)
+    self.assertAlmostEqual(total_f, lw_f + attn_f, places=10)
+    self.assertGreater(total_f, total_c)
+
 
 class TestSetupTrainingState(unittest.TestCase):
   """Tests for setup_training_state (thin wrapper over setup_initial_state)."""
@@ -1784,11 +1800,12 @@ class TestGetSaveAndOffloadNames(unittest.TestCase):
   """Tests for maxtext_utils.get_save_and_offload_names (pure config logic, no device needed)."""
 
   @staticmethod
-  def _cfg(remat_policy, tensors_on_device=None, tensors_to_offload=None):
+  def _cfg(remat_policy, tensors_on_device=None, tensors_to_offload=None, moe_ring_pipeline_mode="none"):
     return SimpleNamespace(
         remat_policy=remat_policy,
         tensors_on_device=tensors_on_device,
         tensors_to_offload=tensors_to_offload,
+        moe_ring_pipeline_mode=moe_ring_pipeline_mode,
     )
 
   def test_named_preset_matches_equivalent_custom(self):
@@ -1828,6 +1845,45 @@ class TestGetSaveAndOffloadNames(unittest.TestCase):
     """Policies that don't use the save/offload split contribute no names to it."""
     for policy in ("full", "minimal", "save_out_proj", "save_qkv_proj", "none"):
       self.assertEqual(maxtext_utils.get_save_and_offload_names(self._cfg(policy)), ([], []))
+
+  def test_combine_per_chunk_adds_moe_combine_order_without_mutating_config(self):
+    """moe_ring_pipeline_mode='combine_per_chunk' injects 'moe_combine_order' via get_save_and_offload_names only."""
+    for preset in ("qkv_proj_offloaded", "minimal_offloaded"):
+      save, offload = maxtext_utils.get_save_and_offload_names(
+          self._cfg(preset, moe_ring_pipeline_mode="combine_per_chunk")
+      )
+      self.assertEqual(save, ["moe_combine_order"])
+      self.assertTrue(offload)
+
+    on_device = ["context"]
+    save_custom, offload_custom = maxtext_utils.get_save_and_offload_names(
+        self._cfg(
+            "custom",
+            tensors_on_device=on_device,
+            tensors_to_offload=["out_proj"],
+            moe_ring_pipeline_mode="combine_per_chunk",
+        )
+    )
+    self.assertEqual(save_custom, ["context", "moe_combine_order"])
+    self.assertEqual(offload_custom, ["out_proj"])
+    self.assertEqual(on_device, ["context"])
+
+    save_explicit_offload, offload_explicit = maxtext_utils.get_save_and_offload_names(
+        self._cfg(
+            "custom",
+            tensors_on_device=["context"],
+            tensors_to_offload=["moe_combine_order"],
+            moe_ring_pipeline_mode="combine_per_chunk",
+        )
+    )
+    self.assertEqual(save_explicit_offload, ["context"])
+    self.assertEqual(offload_explicit, ["moe_combine_order"])
+
+    for policy in ("full", "minimal", "save_out_proj", "save_qkv_proj", "none"):
+      self.assertEqual(
+          maxtext_utils.get_save_and_offload_names(self._cfg(policy, moe_ring_pipeline_mode="combine_per_chunk")),
+          ([], []),
+      )
 
 
 if __name__ == "__main__":

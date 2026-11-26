@@ -31,7 +31,7 @@ import jax.numpy as jnp
 import omegaconf
 
 from maxtext.configs import pyconfig_deprecated
-from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR, MAXTEXT_ASSETS_ROOT, HF_IDS, MAXTEXT_PKG_DIR
+from maxtext.utils.globals import DEFAULT_TOKENIZER_PATH, MAXTEXT_CONFIGS_DIR, HF_IDS, MAXTEXT_PKG_DIR
 from maxtext.common.common_types import DecoderBlockType, ShardMode
 from maxtext.configs import types
 from maxtext.inference.inference_utils import str2bool
@@ -208,6 +208,34 @@ def _load_config(config_name: str) -> omegaconf.DictConfig:
   return cfg
 
 
+def _get_child_yaml_keys(config_name: str) -> set[str]:
+  """Returns keys explicitly defined in child/custom YAML files (excluding root base.yml)."""
+  if os.path.realpath(config_name) == os.path.realpath(os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")):
+    return set()
+  cfg = omegaconf.OmegaConf.load(config_name)
+  keys = set(cfg.keys()) - {_BASE_CONFIG_ATTR}
+  if _BASE_CONFIG_ATTR in cfg:
+    base_path = cfg[_BASE_CONFIG_ATTR]
+    if not os.path.isabs(base_path):
+      loaded_parent = os.path.join(os.path.dirname(config_name), base_path)
+      if not os.path.isfile(loaded_parent):
+        loaded_parent = os.path.join(MAXTEXT_CONFIGS_DIR, base_path)
+    else:
+      loaded_parent = base_path
+    keys |= _get_child_yaml_keys(loaded_parent)
+  return keys
+
+
+def _is_running_in_test() -> bool:
+  """Returns True when running inside a test runner or when MAXTEXT_TEST_DISABLE_GOODPUT=1 is set."""
+  if "pytest" in sys.modules or "unittest.__main__" in sys.modules:
+    return True
+  if os.environ.get("MAXTEXT_TEST_DISABLE_GOODPUT") == "1":
+    return True
+  main_file = getattr(sys.modules.get("__main__"), "__file__", None) or (sys.argv[0] if sys.argv else "")
+  return os.path.basename(main_file).endswith(("_test.py", "_tests.py"))
+
+
 def _tuples_to_lists(l: list | tuple | Any) -> list | Any:
   """Recursively converts nested tuples to lists for Pydantic compatibility."""
   return [_tuples_to_lists(x) for x in l] if isinstance(l, (list, tuple)) else l
@@ -320,7 +348,7 @@ def _prepare_for_pydantic(raw_keys: dict[str, Any], config_class: type[Any] = ty
         if model_name != "default":
           pydantic_kwargs["_auto_hf_tokenizer"] = True
       except KeyError:
-        new_value = os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers/tokenizer.llama2")
+        new_value = DEFAULT_TOKENIZER_PATH
         max_logging.warning(
             "tokenizer_path not found in HF_IDS in maxtext/src/maxtext/utils/globals.py. \
           Using the default src/maxtext/assets/tokenizers/tokenizer.llama2 instead. \
@@ -620,6 +648,16 @@ def _initialize_pydantic(argv: list[str] | None = None, config_class: type[Any] 
         raw_keys_dict[k] = parser(new_proposal)
       except (ValueError, KeyError) as e:
         raise ValueError(f"Couldn't parse value from ENV '{new_proposal}' for key '{k}'") from e
+
+  # Disable Goodput recording and monitoring by default inside test runners
+  # unless explicitly overridden via child/model YAML, CLI, kwargs, or M_* env vars.
+  if _is_running_in_test():
+    explicit_overrides = (
+        cli_keys | kwargs_keys | env_keys | _get_child_yaml_keys(config_path) | frozenset(model_cfg.keys())
+    )
+    for goodput_key in ("enable_goodput_recording", "monitor_goodput"):
+      if goodput_key not in explicit_overrides:
+        raw_keys_dict[goodput_key] = False
 
   pydantic_kwargs = _prepare_for_pydantic(raw_keys_dict, config_class=config_class)
 

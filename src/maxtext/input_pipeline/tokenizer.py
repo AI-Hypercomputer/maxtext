@@ -16,6 +16,7 @@
 
 from typing import Literal, Sequence, Collection
 from pathlib import Path
+from maxtext.configs.types import resolve_tokenizer_path
 from maxtext.utils import max_logging
 import transformers
 import tiktoken
@@ -251,6 +252,7 @@ class HFTokenizer:
 
 def build_tokenizer(tokenizer_path, tokenizer_type, add_bos, add_eos, hf_access_token, trust_remote_code=False):
   """Loads the tokenizer at `tokenizer_path`. `trust_remote_code` applies to the huggingface type only."""
+  tokenizer_path = resolve_tokenizer_path(tokenizer_path)
   max_logging.log(f"Tokenizer path: {tokenizer_path}")
   if tokenizer_type == "tiktoken":
     assert "tiktoken" in tokenizer_path, f"Invalid tokenizer type: {tokenizer_type} chosen for {tokenizer_path}"

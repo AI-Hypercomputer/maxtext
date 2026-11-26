@@ -247,7 +247,7 @@ class ManifoldConstrainedHyperConnections(nnx.Module):
     """Calls the wrapped branch according to `mhc_type`, returning `(layer_out, metadata)`."""
     metadata = {}
     if mhc_type == HyperConnectionType.ATTENTION:
-      layer_out, _ = branch_fn(inputs_q=layer_input, inputs_kv=layer_input, **kwargs)
+      layer_out, *_ = branch_fn(inputs_q=layer_input, inputs_kv=layer_input, **kwargs)
     elif mhc_type == HyperConnectionType.MLP_DENSE:
       layer_out = branch_fn(inputs=layer_input, **kwargs)
     elif mhc_type == HyperConnectionType.MLP_MOE:

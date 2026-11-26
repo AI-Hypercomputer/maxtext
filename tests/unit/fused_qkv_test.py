@@ -324,6 +324,7 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
       tol_grad: float,
       fused_out_flag: bool = False,
       bwd_calib: str = "fixed,-224,224",
+      early_dw_rs: bool = False,
       data_par: int = 1,
       fsdp_par: int = 4,
   ):
@@ -362,6 +363,7 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
           "matmul_precision": "highest",
           "use_fused_qkv_kernel": fused_qkv_flag,
           "use_fused_out_kernel": (fused_qkv_flag and fused_out_flag),
+          "fused_out_early_dw_rs": (fused_qkv_flag and fused_out_flag and early_dw_rs),
           "sa_q_layout": "SEQ_MINOR",
           "sa_k_layout": "SEQ_MINOR",
       }
@@ -464,6 +466,7 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
         tol_y=1.5e-2,
         tol_grad=2.5e-2,
         fused_out_flag=True,
+        early_dw_rs=True,
         data_par=2,
         fsdp_par=2,
     )
@@ -1109,6 +1112,65 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
     self.assertRegex(hlo1, r"f32\[2,512\]\{1,0\}.*all-reduce\(")
     self.assertRegex(hlo1, r"f32\[2,128\]\{1,0\}.*all-reduce\(")
 
+  def test_fused_out_early_dw_rs_parity(self):
+    """Verifies `early_dw_rs` 3D `(emb, nq, hd)` `axis=0` AG/RS preserves bit-exact fwd+bwd parity."""
+    devices = jax.devices()
+    mesh = jax.sharding.Mesh(np.array(devices), ("fsdp",))
+    n_dev = len(devices)
+    batch, seq_len, nq, hd = n_dev, 64, 8, 128
+    emb = nq * hd
+    k0, k1, k2 = jax.random.split(jax.random.PRNGKey(1801), 3)
+    ctx = jax.random.normal(k0, (batch, seq_len, nq, hd), jnp.bfloat16)
+    wo = jax.random.normal(k1, (nq, hd, emb), jnp.float32) * 0.05
+    cot = jax.random.normal(k2, (batch, seq_len, emb), jnp.bfloat16)
+
+    def run_variant(early_dw: bool):
+      p = fused_qkv.FusedOutTrainParams(
+          compute_dtype=jnp.bfloat16,
+          act_qtype=jnp.float8_e4m3fn,
+          weight_qtype=jnp.float8_e4m3fn,
+          bwd_qtype=jnp.float8_e5m2,
+          act_scale=0.5,
+          weight_scale=0.5,
+          bwd_scale=224.0 / 57344.0,
+          weight_gather_axes=("fsdp",),
+          ctx_dtype=jnp.bfloat16,
+          wo_dtype=jnp.float32,
+          early_dw_rs=early_dw,
+      )
+      ctx_spec = jax.sharding.PartitionSpec("fsdp", None, None, None)
+      wo_spec = jax.sharding.PartitionSpec(None, None, "fsdp")
+
+      @functools.partial(
+          jax.shard_map,
+          mesh=mesh,
+          in_specs=(ctx_spec, wo_spec, jax.sharding.PartitionSpec("fsdp", None, None)),
+          out_specs=(jax.sharding.PartitionSpec("fsdp", None, None), ctx_spec, wo_spec),
+          check_vma=False,
+      )
+      def step(c_l, w_l, cot_l):
+        y_l, vjp_fn = jax.vjp(lambda c_, w_: fused_qkv.fused_out_local(p, c_, w_), c_l, w_l)
+        dc_l, dw_l = vjp_fn(cot_l)
+        return y_l, dc_l, dw_l
+
+      jitted = jax.jit(step)
+      ctx_s = jax.device_put(ctx, jax.sharding.NamedSharding(mesh, ctx_spec))
+      wo_s = jax.device_put(wo, jax.sharding.NamedSharding(mesh, wo_spec))
+      cot_s = jax.device_put(cot, jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec("fsdp", None, None)))
+      hlo = jitted.lower(ctx_s, wo_s, cot_s).as_text()
+      y, dc, dw = jitted(ctx_s, wo_s, cot_s)
+      return np.asarray(y, np.float32), np.asarray(dc, np.float32), np.asarray(dw, np.float32), hlo
+
+    y0, dc0, dw0, hlo0 = run_variant(False)
+    y1, dc1, dw1, hlo1 = run_variant(True)
+    np.testing.assert_array_equal(y1, y0)
+    np.testing.assert_array_equal(dc1, dc0)
+    np.testing.assert_array_equal(dw1, dw0)
+    self.assertIn("all_gather_dim = 2", hlo0)
+    self.assertIn("all_gather_dim = 0", hlo1)
+    self.assertIn("scatter_dimension = 2", hlo0)
+    self.assertIn("scatter_dimension = 0", hlo1)
+
   @parameterized.named_parameters(("unfused_qkv", False), ("fused_qkv", True))
   def test_nnx_decoder_defer_norm_grad_allreduce_parity(self, use_fused_qkv: bool):
     """`defer_norm_grad_allreduce` on vs. off through a scanned `NNXDecoder`: same output and gradients.
@@ -1241,7 +1303,7 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
       )
 
   def test_attention_fp8_qk_log2e_and_config_guards(self):
-    """Verifies `experimental_sa_quant_q/k_fp8`, `sa_q_prescaled_log2e`, and TP guard."""
+    """Verifies `experimental_sa_quant_q/k_fp8`, `sa_q_prescaled_log2e`, `sa_context_device_fp8`, and TP guard."""
     from flax import nnx  # pylint: disable=import-outside-toplevel
     from flax.linen import partitioning as nn_partitioning  # pylint: disable=import-outside-toplevel
     from jax.sharding import Mesh  # pylint: disable=import-outside-toplevel
@@ -1272,6 +1334,24 @@ class FusedQkvAttentionModuleTest(parameterized.TestCase):
           dtype="bfloat16",
           weight_dtype="float32",
           **extra,
+      )
+
+    # 1. `sa_context_device_fp8` requires `remat_policy='custom'` and registers `context_device` on device.
+    cfg_sa_dev_only = init_cfg(
+        attention="flash",
+        use_tokamax_splash=True,
+        ici_fsdp_parallelism=4,
+        remat_policy="custom",
+        sa_context_device_fp8=True,
+    )
+    self.assertIn("context_device", cfg_sa_dev_only.tensors_on_device)
+    with self.assertRaisesRegex(ValueError, "require remat_policy='custom'"):
+      init_cfg(
+          attention="flash",
+          use_tokamax_splash=True,
+          ici_fsdp_parallelism=4,
+          remat_policy="full",
+          sa_context_device_fp8=True,
       )
 
     # 2. `use_fused_qkv_kernel=True` with `ici_tensor_parallelism > 1` raises `NotImplementedError`.

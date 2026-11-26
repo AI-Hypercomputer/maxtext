@@ -156,6 +156,6 @@ For a complete list of collected metrics, see the [Tunix Metrics Documentation](
 
 ## Convert Checkpoint to Hugging Face Format
 
-Refer to [MaxText to Hugging Face](maxtext-to-hf) to convert a MaxText checkpoint back to Hugging Face format. You can find an example script to convert the `gemma4-26b` model to Hugging Face format [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/tpu/gemma4/26b/test_gemma4_to_hf.sh).
+Refer to [MaxText to Hugging Face](maxtext-to-hf) to convert a MaxText checkpoint back to Hugging Face format. You can find an example script to convert the `gemma4-26b` model to Hugging Face format [here](https://github.com/AI-Hypercomputer/maxtext/blob/main/tests/end_to_end/cpu/gemma4/26b/test_gemma4_to_hf.sh).
 
 > **Note (Gemma 4 26B specifics):** Because this recipe fine-tunes the **base** model, pass `--hf_model_path=google/gemma-4-26B-A4B` to `to_huggingface` so the exported checkpoint bundles the base tokenizer. Without it, `to_huggingface` sources the tokenizer from `HF_IDS[gemma4-26b]` = `google/gemma-4-26b-a4b-it` (the instruction-tuned model). Also keep `scan_layers=False`, matching the RL run that produced the checkpoint.

@@ -60,7 +60,9 @@ import jax
 import jax.numpy as jnp
 from maxtext.m3.models.granitemoe import checkpoint_mappings_granitemoe
 
+from maxtext.checkpoint_conversion.utils import hf_shape
 from maxtext.models.kimi_k3_layout import KimiScanLayout, kimi_scan_layout_from_spec
+from maxtext.utils import index_share_utils
 
 
 def GEMMA3_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
@@ -2033,6 +2035,118 @@ def DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=Fal
 def DEEPSEEK_NNX_TO_VLLM_PARAM_HOOK_FN():
   """Creates parameter transformation functions for Deepseek."""
   return {}
+
+
+_GLM_INDEXER_KEY_MAP = {
+    "self_attention-indexer-k_norm-bias": "self_attn.indexer.k_norm.bias",
+    "self_attention-indexer-k_norm-scale": "self_attn.indexer.k_norm.weight",
+    "self_attention-indexer-weights_proj-kernel": "self_attn.indexer.weights_proj.weight",
+    "self_attention-indexer-wk-kernel": "self_attn.indexer.wk.weight",
+    "self_attention-indexer-wq_b-kernel": "self_attn.indexer.wq_b.weight",
+}
+
+
+def _resolve_glm_index_share_pattern(cfg: dict, maxtext_config, num_main_layers: int) -> tuple[str, ...] | None:
+  """Returns the ('F'/'S', ...) IndexShare pattern tuple when IndexShare is active, or None for full-indexer GLM-5.1."""
+  mt_use_index_share = getattr(maxtext_config, "use_index_share", None)
+  if isinstance(mt_use_index_share, bool):
+    if not mt_use_index_share:
+      return None
+    mt_pattern = getattr(maxtext_config, "index_share_pattern", None)
+    if isinstance(mt_pattern, str) and mt_pattern:
+      return index_share_utils.parse_index_share_pattern(mt_pattern, num_main_layers)
+
+  indexer_types = cfg.get("indexer_types")
+  if isinstance(indexer_types, (list, tuple)) and "shared" in indexer_types[:num_main_layers]:
+    if len(indexer_types) < num_main_layers:
+      raise ValueError(
+          f"indexer_types length ({len(indexer_types)}) is smaller than num_main_layers ({num_main_layers})."
+      )
+    pattern_str = "".join("S" if t == "shared" else "F" for t in indexer_types[:num_main_layers])
+    return index_share_utils.parse_index_share_pattern(pattern_str, num_main_layers)
+
+  cfg_pattern = cfg.get("index_share_pattern")
+  if isinstance(cfg_pattern, str) and cfg_pattern:
+    return index_share_utils.parse_index_share_pattern(cfg_pattern, num_main_layers)
+
+  if mt_use_index_share is True:
+    raise ValueError("use_index_share=True requires a non-empty index_share_pattern or HF indexer_types.")
+  return None
+
+
+def GLM_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Generates parameter mapping between MaxText GLM-5.1/5.2 and HuggingFace GlmMoeDsa weight paths."""
+  cfg = hf_shape.normalize_glm_hf_config(config)
+  mapping = DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING(cfg, maxtext_config, scan_layers=scan_layers)
+
+  mt_num_layers = getattr(maxtext_config, "num_decoder_layers", None)
+  num_main_layers = (
+      mt_num_layers
+      if isinstance(mt_num_layers, int) and not isinstance(mt_num_layers, bool)
+      else int(cfg["num_hidden_layers"])
+  )
+  mt_first_dense = getattr(maxtext_config, "first_num_dense_layers", None)
+  first_num_dense_layers = (
+      mt_first_dense
+      if isinstance(mt_first_dense, int) and not isinstance(mt_first_dense, bool)
+      else int(cfg["first_k_dense_replace"])
+  )
+
+  pattern_tuple = _resolve_glm_index_share_pattern(cfg, maxtext_config, num_main_layers)
+  if pattern_tuple is None:
+    return mapping
+
+  mt_prune = getattr(maxtext_config, "prune_shared_indexers", None)
+  prune_shared = mt_prune if isinstance(mt_prune, bool) else (not scan_layers)
+
+  if scan_layers:
+    for group_name, layer_range in (
+        ("dense_layers", range(first_num_dense_layers)),
+        ("moe_layers", range(first_num_dense_layers, num_main_layers)),
+    ):
+      for subkey, hf_suffix in _GLM_INDEXER_KEY_MAP.items():
+        mt_key = f"params-decoder-{group_name}-{subkey}"
+        if mt_key not in mapping:
+          continue
+        if saving_to_hf:
+          full_targets = [
+              f"model.layers.{i}.{hf_suffix}"
+              for i in layer_range
+              if not index_share_utils.is_shared_layer(i, pattern_tuple)
+          ]
+          mapping[mt_key] = full_targets if full_targets else None  # pyrefly: ignore[bad-assignment]
+        else:
+          mapping[mt_key] = [  # pyrefly: ignore[bad-assignment]
+              f"model.layers.{index_share_utils.get_donor_layer_idx(i, pattern_tuple)}.{hf_suffix}" for i in layer_range
+          ]
+  else:
+    for i in range(num_main_layers):
+      if not index_share_utils.is_shared_layer(i, pattern_tuple):
+        continue
+      layer_prefix = (
+          f"params-decoder-dense_layers_{i}"
+          if i < first_num_dense_layers
+          else f"params-decoder-moe_layers_{i - first_num_dense_layers}"
+      )
+      donor_idx = index_share_utils.get_donor_layer_idx(i, pattern_tuple)
+      for subkey, hf_suffix in _GLM_INDEXER_KEY_MAP.items():
+        mt_key = f"{layer_prefix}-{subkey}"
+        if saving_to_hf:
+          mapping[mt_key] = None  # pyrefly: ignore[bad-assignment]
+        elif prune_shared:
+          mapping.pop(mt_key, None)
+        else:
+          mapping[mt_key] = f"model.layers.{donor_idx}.{hf_suffix}"
+
+  return mapping
+
+
+def GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Creates parameter transformation hooks for GLM-5.1 & GLM-5.2 by reusing DeepSeek hooks."""
+  cfg = hf_shape.normalize_glm_hf_config(config)
+  hooks = DEEPSEEK_MAXTEXT_TO_HF_PARAM_HOOK_FN(cfg, maxtext_config, scan_layers=scan_layers, saving_to_hf=saving_to_hf)
+  param_map = GLM_MAXTEXT_TO_HF_PARAM_MAPPING(cfg, maxtext_config, scan_layers=scan_layers, saving_to_hf=saving_to_hf)
+  return {k: fn for k, fn in hooks.items() if param_map.get(k) is not None}
 
 
 def GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
@@ -4386,6 +4500,81 @@ def MING_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, 
   return hooks
 
 
+def MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers=False):
+  """Maps MaxText Ming talker keys to the HF `talker/model.safetensors` + `talker/vae/model.safetensors` keys.
+
+  The talker LLM is a Qwen2 decoder (`model.*`, reusing the Qwen mapping; embeddings are tied so there is
+  no `lm_head`). The heads live under `params-audio_decoder-MingTalker_0-*` (`MingTalker` in `maxtext.models.ming`). Only the
+  AudioVAE decoder is mapped (`decoder.*`); the VAE encoder is used for voice cloning only.
+  """
+  mapping = QWEN_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers)
+  mapping.pop("params-decoder-logits_dense-kernel", None)
+
+  def dense(mt_prefix, hf_prefix, bias=True):
+    mapping[f"{mt_prefix}-kernel"] = f"{hf_prefix}.weight"
+    if bias:
+      mapping[f"{mt_prefix}-bias"] = f"{hf_prefix}.bias"
+
+  def dit_blocks(mt_prefix, hf_prefix, num_layers):
+    for i in range(num_layers):
+      mt, hf = f"{mt_prefix}-blocks_{i}", f"{hf_prefix}.blocks.{i}"
+      mapping[f"{mt}-norm1-scale"] = f"{hf}.norm1.weight"
+      mapping[f"{mt}-norm2-scale"] = f"{hf}.norm2.weight"
+      for name in ("to_q", "to_k", "to_v"):
+        dense(f"{mt}-attn-{name}", f"{hf}.attn.{name}")
+      dense(f"{mt}-attn-to_out", f"{hf}.attn.to_out.0")
+      dense(f"{mt}-mlp_in", f"{hf}.mlp.ff.0.0")
+      dense(f"{mt}-mlp_out", f"{hf}.mlp.ff.2")
+    mapping[f"{mt_prefix}-final_norm-scale"] = f"{hf_prefix}.final_layer.norm_final.weight"
+    dense(f"{mt_prefix}-final_linear", f"{hf_prefix}.final_layer.linear")
+
+  cfm, hf_cfm = "params-audio_decoder-MingTalker_0-cfm", "cfm.model"
+  dense(f"{cfm}-x_embedder", f"{hf_cfm}.x_embedder")
+  dense(f"{cfm}-c_embedder", f"{hf_cfm}.c_embedder.cond_embedder")
+  dense(f"{cfm}-time_fc1", f"{hf_cfm}.t_embedder.time_mlp.0")
+  dense(f"{cfm}-time_fc2", f"{hf_cfm}.t_embedder.time_mlp.2")
+  dit_blocks(cfm, hf_cfm, maxtext_config.ming_talker_dit_num_layers)
+
+  agg = "params-audio_decoder-MingTalker_0-aggregator"
+  mapping[f"{agg}-word_embedder"] = "aggregator.word_embedder.weight"
+  dense(f"{agg}-x_embedder", "aggregator.x_embedder")
+  dit_blocks(agg, "aggregator", maxtext_config.ming_talker_aggregator_num_layers)
+
+  dense("params-audio_decoder-MingTalker_0-stop_head", "stop_head")
+  dense("params-audio_decoder-MingTalker_0-spk_head", "spk_head")
+
+  vae, hf_vae = "params-audio_decoder-MingTalker_0-audio_vae", "decoder"
+  dense(f"{vae}-fc1", f"{hf_vae}.fc1")
+  for i in range(maxtext_config.ming_vae_num_layers):
+    mt, hf = f"{vae}-layers_{i}", f"{hf_vae}.decoder.layers.{i}"
+    mapping[f"{mt}-input_layernorm-scale"] = f"{hf}.input_layernorm.weight"
+    mapping[f"{mt}-post_attention_layernorm-scale"] = f"{hf}.post_attention_layernorm.weight"
+    for name in ("q_proj", "k_proj", "v_proj"):
+      dense(f"{mt}-{name}", f"{hf}.self_attn.{name}")
+    dense(f"{mt}-o_proj", f"{hf}.self_attn.o_proj", bias=False)
+    for name in ("gate_proj", "up_proj", "down_proj"):
+      dense(f"{mt}-{name}", f"{hf}.mlp.{name}", bias=False)
+  mapping[f"{vae}-norm-scale"] = f"{hf_vae}.decoder.norm.weight"
+  dense(f"{vae}-head_out", f"{hf_vae}.head.out")
+  return mapping
+
+
+def MING_TALKER_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers=False, saving_to_hf=False):
+  """Qwen hooks for the talker LLM plus transposed `[in, out]` <-> `[out, in]` kernels for the heads."""
+  hooks = QWEN_MAXTEXT_TO_HF_PARAM_HOOK_FN(config, maxtext_config, scan_layers, saving_to_hf)
+  hooks.pop("params-decoder-logits_dense-kernel", None)
+
+  def linear(x, target_shape):
+    if saving_to_hf:
+      return x.reshape(np.flip(np.array(target_shape))).T
+    return x.T.reshape(target_shape)
+
+  for mt_key in MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING(config, maxtext_config, scan_layers):
+    if mt_key.startswith("params-audio_decoder-") and mt_key.endswith("-kernel"):
+      hooks[mt_key] = linear
+  return hooks
+
+
 # {maxtext model name: {maxtext weight name: hf weight name}}
 
 
@@ -4882,22 +5071,35 @@ class WAN2_1_HF_TO_MAXTEXT:
           add(f"{mt}-{name}-gamma", f"{hf}.{name}.gamma", reshape)
 
       levels, num_res_blocks = len(hf_config["dim_mult"]), hf_config["num_res_blocks"]
-      # Encoder: flat `down_blocks` list of resnets, each level but the last ends in a downsampler.
-      idx = 0
-      for level in range(levels):
-        for _ in range(num_res_blocks):
-          resnet(f"encoder-down_blocks-{idx}", f"encoder.down_blocks.{idx}")
-          idx += 1
-        if level < levels - 1:
-          conv_layer(f"encoder-down_blocks-{idx}-resample-conv", f"encoder.down_blocks.{idx}.resample.1")
-          conv_layer(f"encoder-down_blocks-{idx}-time_conv-conv", f"encoder.down_blocks.{idx}.time_conv")
-          idx += 1
+      is_residual = hf_config.get("is_residual", False)
+      if is_residual:
+        for level in range(levels):
+          for j in range(num_res_blocks):
+            resnet(f"encoder-down_blocks-{level}-resnets-{j}", f"encoder.down_blocks.{level}.resnets.{j}")
+          if level < levels - 1:
+            down_mt, down_hf = f"encoder-down_blocks-{level}-downsampler", f"encoder.down_blocks.{level}.downsampler"
+            conv_layer(f"{down_mt}-resample-conv", f"{down_hf}.resample.1")
+            conv_layer(f"{down_mt}-time_conv-conv", f"{down_hf}.time_conv")
+      else:
+        # Encoder: flat `down_blocks` list of resnets, each level but the last ends in a downsampler.
+        idx = 0
+        for level in range(levels):
+          for _ in range(num_res_blocks):
+            resnet(f"encoder-down_blocks-{idx}", f"encoder.down_blocks.{idx}")
+            idx += 1
+          if level < levels - 1:
+            conv_layer(f"encoder-down_blocks-{idx}-resample-conv", f"encoder.down_blocks.{idx}.resample.1")
+            conv_layer(f"encoder-down_blocks-{idx}-time_conv-conv", f"encoder.down_blocks.{idx}.time_conv")
+            idx += 1
       # Decoder: `num_res_blocks + 1` resnets per level, each level but the last ends in an upsampler.
       for level in range(levels):
         for j in range(num_res_blocks + 1):
           resnet(f"decoder-up_blocks-{level}-resnets-{j}", f"decoder.up_blocks.{level}.resnets.{j}")
         if level < levels - 1:
-          up_mt, up_hf = f"decoder-up_blocks-{level}-upsamplers-0", f"decoder.up_blocks.{level}.upsamplers.0"
+          if is_residual:
+            up_mt, up_hf = f"decoder-up_blocks-{level}-upsampler", f"decoder.up_blocks.{level}.upsampler"
+          else:
+            up_mt, up_hf = f"decoder-up_blocks-{level}-upsamplers-0", f"decoder.up_blocks.{level}.upsamplers.0"
           conv_layer(f"{up_mt}-resample-layers-1", f"{up_hf}.resample.1")
           conv_layer(f"{up_mt}-time_conv-conv", f"{up_hf}.time_conv")
       for coder in ("encoder", "decoder"):
@@ -5928,6 +6130,8 @@ PARAM_MAPPING = {
     "deepseek3.2-671b": DEEPSEEK_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "deepseek4-1600b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.1-744b": GLM_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "glm5.2-744b": GLM_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-20b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "gpt-oss-120b": GPT_OSS_MAXTEXT_TO_HF_PARAM_MAPPING,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_MAPPING,
@@ -5948,6 +6152,7 @@ PARAM_MAPPING = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_MAPPING,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_MAPPING,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_MAPPING,
+    "ming-3.0-audio-tiny-talker": MING_TALKER_MAXTEXT_TO_HF_PARAM_MAPPING,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_MAPPING,
 }
 
@@ -5997,6 +6202,8 @@ HOOK_FNS = {
     "deepseek4-tiny": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-284b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "deepseek4-1600b": DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.1-744b": GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "glm5.2-744b": GLM_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-20b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "gpt-oss-120b": GPT_OSS_TO_HF_PARAM_HOOK_FN,
     "qwen3-omni-30b-a3b": QWEN3_OMNI_MOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
@@ -6017,6 +6224,7 @@ HOOK_FNS = {
     "olmo3-32b": OLMO3_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "hy4-preview": HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "ming-3.0-audio-tiny": MING_MAXTEXT_TO_HF_PARAM_HOOK_FN,
+    "ming-3.0-audio-tiny-talker": MING_TALKER_MAXTEXT_TO_HF_PARAM_HOOK_FN,
     "granite-3.0-1b-a400m": checkpoint_mappings_granitemoe.GRANITEMOE_MAXTEXT_TO_HF_PARAM_HOOK_FN,
 }
 
@@ -6030,4 +6238,5 @@ VLLM_HOOK_FNS = {
 # Diffusers models (multi-component checkpoints), keyed by `model_name`; used by to_maxtext_diffusers.py.
 DIFFUSERS_PARAM_MAPPING = {
     "wan2.1": WAN2_1_HF_TO_MAXTEXT,
+    "wan2.2": WAN2_1_HF_TO_MAXTEXT,
 }

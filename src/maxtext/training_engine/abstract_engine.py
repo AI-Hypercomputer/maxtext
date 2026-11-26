@@ -172,13 +172,16 @@ class AbstractTrainingEngine(abc.ABC):
     """
 
   @abc.abstractmethod
-  def fwd_bwd(self, payload: TrainerPayload) -> None:
+  def fwd_bwd(self, payload: TrainerPayload) -> jax.Array:
     """Executes forward and backward passes.
 
     Metrics are cached to overlap train steps.
 
     Args:
       payload: Packed micro-batch payload for training.
+
+    Returns:
+      An un-donated scalar on-device array tracking completion of this pass.
     """
 
   @abc.abstractmethod
@@ -261,13 +264,15 @@ class AbstractTrainingEngine(abc.ABC):
 
   @abc.abstractmethod
   def get_metrics(self, clear_cache: bool = True) -> MetricsBuffer:
-    """Returns cached metrics and optionally clears the metrics cache.
+    """Returns cached metrics on host and optionally clears the metrics cache.
 
     Args:
       clear_cache: Whether to reset cached metrics after retrieval.
 
     Returns:
-      The accumulated on-device MetricsBuffer.
+      The accumulated MetricsBuffer materialized on the host (NumPy arrays and
+      a plain `str` mode) so RPC/wire callers do not need framework-specific
+      device-to-host transfers.
     """
 
   @abc.abstractmethod

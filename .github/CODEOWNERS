@@ -9,6 +9,7 @@ src/maxtext/models @parambole @shuningjin @RissyRan @jiangjy1982 @gobbleturk @bv
 
 # m3
 src/maxtext/m3/ @bvandermoon @hengtaoguo
+src/maxtext/m3/diffuser_pipelines/ @liyinn
 
 # Features
 src/maxtext/experimental/rl @A9isha @khatwanimohit @gagika @shralex @darisoy @shuwenf @igorts-git

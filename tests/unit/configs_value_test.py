@@ -677,6 +677,38 @@ class ConfigTest(absltest.TestCase):
     self.assertEqual(config.ici_context_parallelism, 4)
     self.assertFalse(config.context_parallel_load_balance)
 
+  def test_tpu_ulysses_config_validation_accepts_fewer_kv_heads_than_context_ranks(
+      self,
+  ):
+    """1 (MQA) or 2 KV heads at context 4 or 8 are repeated across the context ranks."""
+    for base_num_kv_heads in (1, 2):
+      for ici_context_parallelism in (4, 8):
+        with self.subTest(
+            base_num_kv_heads=base_num_kv_heads,
+            ici_context_parallelism=ici_context_parallelism,
+        ):
+          argv = [
+              "",
+              _BASE_CONFIG_PATH,
+              "run_name=test",
+              "attention=flash",
+              "use_tokamax_splash=True",
+              "use_jax_splash=False",
+              "context_parallel_strategy=ulysses",
+              "context_parallel_load_balance=False",
+              f"ici_context_parallelism={ici_context_parallelism}",
+              "base_num_query_heads=32",
+              f"base_num_kv_heads={base_num_kv_heads}",
+              "hardware=tpu",
+              "packing=True",
+              "skip_jax_distributed_system=True",
+          ]
+          mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+          with unittest.mock.patch("jax.devices", return_value=mock_devices):
+            config = pyconfig.initialize(argv)
+          self.assertEqual(config.num_kv_heads, base_num_kv_heads)
+          self.assertEqual(config.context_parallel_strategy, "ulysses")
+
   def test_tpu_ulysses_config_validation_accepts_packing(self):
     argv = [
         "",
@@ -696,6 +728,29 @@ class ConfigTest(absltest.TestCase):
     with unittest.mock.patch("jax.devices", return_value=mock_devices):
       config = pyconfig.initialize(argv)
 
+    self.assertTrue(config.packing)
+
+  def test_tpu_ulysses_config_validation_accepts_full_attention(self):
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "attention=flash",
+        "attention_type=full",
+        "use_tokamax_splash=True",
+        "use_jax_splash=False",
+        "context_parallel_strategy=ulysses",
+        "context_parallel_load_balance=False",
+        "ici_context_parallelism=4",
+        "hardware=tpu",
+        "packing=True",
+        "skip_jax_distributed_system=True",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+
+    self.assertEqual(config.attention_type, "full")
     self.assertTrue(config.packing)
 
   def test_context_parallel_strategy_is_normalized(self):
@@ -738,14 +793,17 @@ class ConfigTest(absltest.TestCase):
     ]
     cases = [
         (["context_parallel_load_balance=True"], ["context_parallel_load_balance=False"], "load_balance"),
-        (["base_num_kv_heads=1"], [], "MQA"),
         (["base_num_query_heads=18"], [], "requires num_query_heads"),
         (["base_num_kv_heads=10"], [], "requires num_kv_heads"),
-        (["attention_type=mla"], [], "global causal attention"),
-        (["attention_type=local_sliding", "sliding_window_size=128"], [], "global causal attention"),
-        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "global causal attention"),
-        (["attention_type=full"], [], "global causal attention"),
-        (["attention_type=compressed"], [], "global causal attention"),
+        (
+            ["base_num_query_heads=24", "base_num_kv_heads=6"],
+            [],
+            r"requires num_kv_heads \(6\).*or to divide it",
+        ),
+        (["attention_type=mla"], [], "global causal or full attention"),
+        (["attention_type=local_sliding", "sliding_window_size=128"], [], "global causal or full attention"),
+        (["attention_type=chunk", "chunk_attn_window_size=128"], [], "global causal or full attention"),
+        (["attention_type=compressed"], [], "global causal or full attention"),
         (["use_qk_clip=True"], [], "QK-Clip"),
         (["dq_reduction_steps=2"], [], "dq_reduction_steps"),
         (["attention=dot_product"], ["attention=flash"], "attention=flash"),
@@ -1021,6 +1079,22 @@ class ConfigTest(absltest.TestCase):
         values = base_overrides | overrides
         argv = ["", _BASE_CONFIG_PATH, *(f"{key}={value}" for key, value in values.items())]
         with self.assertRaises((ValueError, pydantic.ValidationError)):
+          pyconfig.initialize(argv)
+
+  def test_full_attention_rejects_cudnn_flash_kernels(self):
+    for kernel in ("cudnn_flash_te", "cudnn_flash_jax"):
+      with self.subTest(attention=kernel):
+        argv = [
+            "",
+            _BASE_CONFIG_PATH,
+            "run_name=test",
+            "steps=1",
+            "attention_type=full",
+            f"attention={kernel}",
+            "hardware=gpu",
+            "skip_jax_distributed_system=True",
+        ]
+        with self.assertRaisesRegex(pydantic.ValidationError, f"attention={kernel!r}"):
           pyconfig.initialize(argv)
 
   def test_default_attention_remains_global(self):
@@ -1695,6 +1769,19 @@ class ConfigTest(absltest.TestCase):
       cfg = self._elastic_config(*keep, *extra.split())
       self.assertEqual((cfg.logical_global_batch_size_to_load, cfg.global_batch_size_to_load), (100, 112))
 
+  def test_moe_exclude_padding_from_routing_rejects_unsupported_configs(self):
+    """The flag needs routed experts and an MoE implementation that takes RoutedMoE's token_mask."""
+    argv = ["", _BASE_CONFIG_PATH, "run_name=test", "enable_checkpointing=false", "moe_exclude_padding_from_routing=true"]
+    moe = ["num_experts=4", "num_experts_per_tok=2", "base_moe_mlp_dim=256", "base_mlp_dim=256"]
+    for extra, error_regex in (
+        (["num_experts=1"], "requires num_experts > 1"),
+        (moe + ["decoder_block=kimi_linear", "packing=false"], "not supported with decoder_block=kimi_linear"),
+        (moe + ["use_m3_model=true"], "not supported with use_m3_model=True"),
+    ):
+      with self.subTest(extra=extra), self.assertRaisesRegex((ValueError, pydantic.ValidationError), error_regex):
+        pyconfig.initialize(argv + extra)
+    self.assertTrue(pyconfig.initialize(argv + moe).moe_exclude_padding_from_routing)
+
   def test_remat_policy_none_rejects_prefetch_fsdp_weights_and_pipeline_parallelism(self):
     """Tests that remat_policy=none is rejected with prefetch_fsdp_weights=True and pipeline parallelism."""
     base_argv = [
@@ -2083,11 +2170,23 @@ class Qwen3StackConfigValidationTest(absltest.TestCase):
     self.assertTrue(config.qwix_disable_channelwise_axes)
 
   def test_moe_fused_gmm3d_wgrad_schedule_mode_bounds(self):
-    for mode in (-1, 17):
+    for mode in (-1, 18):
       with self.subTest(mode=mode):
         with self.assertRaises(pydantic.ValidationError):
           self._initialize(f"moe_fused_gmm3d_wgrad_schedule_mode={mode}")
-    self.assertEqual(self._initialize("moe_fused_gmm3d_wgrad_schedule_mode=16").moe_fused_gmm3d_wgrad_schedule_mode, 16)
+    self.assertEqual(self._initialize("moe_fused_gmm3d_wgrad_schedule_mode=17").moe_fused_gmm3d_wgrad_schedule_mode, 17)
+
+  def test_moe_tc_routing_offload_free_prerequisites(self):
+    with self.assertRaisesRegex(self._ERRORS, "requires moe_packed_routing_sort=True"):
+      self._initialize("moe_tc_routing_offload_free=true")
+    config = self._initialize("moe_packed_routing_sort=true", "moe_tc_routing_offload_free=true")
+    self.assertTrue(config.moe_tc_routing_offload_free)
+    # The ring-of-experts ragged sort needs expert parallelism > 1, so check that rule on the validator directly.
+    ring_config = unittest.mock.Mock(
+        moe_tc_routing_offload_free=True, moe_packed_routing_sort=True, use_ring_of_experts=True, use_ragged_sort=True
+    )
+    with self.assertRaisesRegex(ValueError, "does not support use_ring_of_experts=True"):
+      types.MaxTextConfig.validate_moe_tc_routing_offload_free(ring_config)
 
   def test_moe_use_fused_gmm3d_prerequisites(self):
     # A fully-MoE model: base_moe_mlp_dim must match base_mlp_dim (7168 in base.yml).
@@ -2151,6 +2250,20 @@ class Qwen3StackConfigValidationTest(absltest.TestCase):
     config = rl_config("remat_policy=custom", "sa_context_split_device_heads=2")
     self.assertIn("context_device", config.tensors_on_device)
     self.assertIn("context_offload", config.tensors_to_offload)
+
+    config_qkv_dev = rl_config("remat_policy=custom", "ulysses_qkv=device")
+    self.assertIn("ulysses_qkv", config_qkv_dev.tensors_on_device)
+    self.assertNotIn("ulysses_qkv", config_qkv_dev.tensors_to_offload)
+
+    config_qkv_off = rl_config("remat_policy=custom", "ulysses_qkv=offload")
+    self.assertNotIn("ulysses_qkv", config_qkv_off.tensors_on_device)
+    self.assertIn("ulysses_qkv", config_qkv_off.tensors_to_offload)
+
+    self.assertEqual(rl_config().ulysses_pin_row_major_layout, "auto")
+    for mode in ("auto", "always", "never"):
+      self.assertEqual(rl_config(f"ulysses_pin_row_major_layout={mode}").ulysses_pin_row_major_layout, mode)
+    with self.assertRaises(pydantic.ValidationError):
+      rl_config("ulysses_pin_row_major_layout=invalid")
 
 
 class MMapDatasetConfigTest(absltest.TestCase):

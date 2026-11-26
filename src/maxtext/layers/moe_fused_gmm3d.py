@@ -52,6 +52,7 @@ the saturating clip in the activation quantization, while the unfused backward p
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import functools
 import math
@@ -59,9 +60,13 @@ from typing import Any, Sequence
 
 from absl import logging
 import jax
+from jax.experimental import xla_metadata
 import jax.numpy as jnp
 
 LANES = 128
+# Checkpoint name (and remat-location config field) of the routing state of the top-k router and the packed
+# routing sort, saved across remat with `moe_packed_routing_maps=device`.
+MOE_PACKED_ROUTING_MAPS = "moe_packed_routing_maps"
 _SUBLANE_FP8 = 32
 
 
@@ -130,6 +135,8 @@ class FusedGmm3dParams:
   fused_quant_relayout: bool = False
   overlap_dcoeffs_scatter: bool = False
   wgrad_schedule_mode: int = 0
+  wi_ag_latency_ns: int = 0
+  save_reduce_meta: bool = False
   use_reference: bool = False
 
   @property
@@ -142,8 +149,8 @@ class FusedGmm3dParams:
       raise ValueError(f"emb_dim ({self.emb_dim}) and mlp_dim ({self.mlp_dim}) must be multiples of {LANES}.")
     if self.quantized and self.weight_qtype is None:
       raise ValueError("weight_qtype must not be None when act_qtype is set.")
-    if self.wgrad_schedule_mode not in range(17):
-      raise ValueError(f"wgrad_schedule_mode ({self.wgrad_schedule_mode}) must be in 0..16.")
+    if self.wgrad_schedule_mode not in range(18):
+      raise ValueError(f"wgrad_schedule_mode ({self.wgrad_schedule_mode}) must be in 0..17.")
     if not self.use_reference:
       if not self.quantized or self.weight_qtype is None or self.bwd_qtype is None:
         raise ValueError("The fused gmm3d kernels require fp8 act / weight / bwd quantization.")
@@ -211,12 +218,23 @@ def _reduce_scatter_rows(x: jax.Array, axes: Sequence[str]) -> jax.Array:
   return x
 
 
+@contextlib.contextmanager
+def _ag_latency_scope(latency_ns: int):
+  if latency_ns <= 0:
+    yield
+    return
+  with xla_metadata.set_xla_metadata(latency_metadata=str(int(latency_ns))):
+    yield
+
+
 def quantize_and_gather_weight(
     w_local: jax.Array,
     qtype: Any,
     scale: float,
     gather_axes: Sequence[str],
     gathered_shape: tuple[int, int, int],
+    *,
+    latency_ns: int = 0,
 ) -> jax.Array:
   """Quantizes a flat ``[rows_local, cols]`` weight shard and all-gathers it (QAG).
 
@@ -226,7 +244,9 @@ def quantize_and_gather_weight(
   """
   if qtype is not None:
     w_local = static_quantize(w_local, qtype, scale)
-  return _all_gather_rows(w_local, gather_axes).reshape(gathered_shape)
+  with _ag_latency_scope(latency_ns):
+    gathered = _all_gather_rows(w_local, gather_axes)
+  return gathered.reshape(gathered_shape)
 
 
 def reduce_scatter_weight_grad(dw_full: jax.Array, gather_axes: Sequence[str], w_local: jax.Array) -> jax.Array:
@@ -476,6 +496,7 @@ def _kernel_fwd(
     *,
     need_bank: bool = True,
     sort_indices: jax.Array | None = None,
+    precomputed_reduce_meta: jax.Array | None = None,
 ):
   """gather_gate_gmm + (linear_gmm_fp8 + ragged_gather_reduce_tc | linear_combine_fwd).
 
@@ -548,8 +569,10 @@ def _kernel_fwd(
               out_2d=p.exact_topk_out_2d,
           )
       ):
-        if p.inv_perm_combine and sort_indices is not None:
-          reduce_meta: Any = _inv_perm_src_rows(sort_indices)
+        if precomputed_reduce_meta is not None:
+          reduce_meta: Any = precomputed_reduce_meta
+        elif p.inv_perm_combine and sort_indices is not None:
+          reduce_meta = _inv_perm_src_rows(sort_indices)
         else:
           reduce_meta = lineage_ops.exact_topk_gather_reduce_tc_src_rows(token_indices)
         y3d = lineage_ops.exact_topk_gather_reduce_tc(
@@ -721,14 +744,18 @@ def _kernel_bwd(
         dwo_ = reduce_scatter_weight_grad(dwo_raw_, p.wo_gather_axes, wo_local) if wo_local is not None else dwo_raw_
         return dwo_raw_, dwo_
 
-    if (p.early_dwo_rs and p.wgrad_schedule_mode < 15) or (1 <= p.wgrad_schedule_mode <= 14):
+    if (
+        (p.early_dwo_rs and p.wgrad_schedule_mode < 15)
+        or (1 <= p.wgrad_schedule_mode <= 14)
+        or p.wgrad_schedule_mode == 17
+    ):
       dwo_raw, dwo = _compute_dwo()
     else:
       dwo_raw, dwo = None, None
     fmax = _finfo_max(p.bwd_qtype)
     exp = jnp.ceil(jnp.log2(jnp.maximum(dgrad.grad_gate_amax / fmax, 1e-30)))
     dgate_scale = jnp.where(dgrad.grad_gate_amax > 0, jnp.exp2(exp), 1.0).astype(jnp.float32)
-    if 1 <= p.wgrad_schedule_mode <= 14 and dwo_raw is not None:
+    if (1 <= p.wgrad_schedule_mode <= 14 or p.wgrad_schedule_mode == 17) and dwo_raw is not None:
       dgate_scale = _guard_array_with_tensors(dgate_scale, (dwo_raw,))
     # The [C, 1] coefficient gradient; schedule modes 13/14 hang zero-copy reduce-scatter guards on it.
     grad_coeffs = dgrad.grad_coeffs
@@ -876,7 +903,7 @@ def _kernel_bwd(
               dwi_1 if not isinstance(dw_gate, jax.Array) else None,
           ),
       )
-    elif p.wgrad_schedule_mode in (10, 11, 12, 13, 14):
+    elif p.wgrad_schedule_mode in (10, 11, 12, 13, 14, 17):
       # Scalar-only guard schedule (ZERO copy on 512 MB dx3d!):
       #   linear_bwd_dgrad -> linear_bwd_wgrad -> tgmm_v2 dw_0 -> tgmm_v2 dw_1 -> gate_dx -> combine_dx -> Attn bwd.
       # Hides sc_routed_gather behind linear_bwd_dgrad + linear_bwd_wgrad (~14.4 ms), dwo RS behind dw_0,
@@ -886,6 +913,10 @@ def _kernel_bwd(
       #       XLA starts that RS right after dw_1 and it overlaps gate_dx + combine_dx rather than the next layer.
       #   14: mode 10 + all three RSs (dwo, dwi_0, dwi_1) guarded on grad_coeffs only (none forced before
       #       gate_dx), letting XLA spread them across dw_0 + dw_1 + gate_dx + combine_dx (~20 ms of TC work).
+      #   17: mode 10 + all three RSs guarded on the combined dx3d instead of grad_coeffs: grad_coeffs feeds the
+      #       SparseCore dcoeffs scatter, which the scheduler issues early and thereby pulls the RS dones before
+      #       gate_dx; dx3d is consumed only by the attention backward, so the RSs may finish anywhere during
+      #       gate_dx + combine_dx (the dx3d select costs one 512 MiB pass).
       routed = _ensure_routed(routed)
       dw_gate, dw_0, dw_1, dwi_0, dwi_1 = _run_gate_wgrad(routed, dgate_scale, chain_halves=True)
       last_dw = dw_1 if dw_1 is not None else dw_0
@@ -903,6 +934,9 @@ def _kernel_bwd(
         grad_coeffs = _guard_array_with_tensors(grad_coeffs, (post_rs_1,))
       elif p.wgrad_schedule_mode == 14:
         grad_coeffs = _guard_array_with_tensors(grad_coeffs, (dwo, post_rs_0, post_rs_1))
+      elif p.wgrad_schedule_mode == 17:
+        wi_rs = (dw_gate,) if (dwi_0 is None and isinstance(dw_gate, jax.Array)) else (post_rs_0, post_rs_1)
+        dx3d = _guard_array_with_tensors(dx3d, (dwo, *wi_rs))
     elif p.wgrad_schedule_mode in (15, 16):
       # Un-delayed gate_dx + combine_dx (Attention bwd runs immediately), while forcing
       # linear_bwd_wgrad (dwo_raw, pre-RS, does NOT need `routed` and frees 2.75 GiB act_q + dy3d)
@@ -1038,7 +1072,6 @@ def _kernel_bwd(
 # -----------------------------------------------------------------------------
 
 
-@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
 def fused_moe_experts(
     p: FusedGmm3dParams,
     x2d: jax.Array,  # [N, D] compute dtype
@@ -1054,8 +1087,44 @@ def fused_moe_experts(
   ``silu(x @ wi[:, :F]) * (x @ wi[:, F:]) * coeff`` per expert, ``@ wo`` per expert
   and sum each token's top_k rows, with fp8 per-tensor quantization of the
   tokens, weights and activations and e5m2 output gradients in the backward.
+
+  With ``p.save_reduce_meta`` the exact-top_k combine ``src_rows`` are computed
+  outside the custom VJP and checkpointed on HBM (``moe_packed_routing_maps``), so the
+  backward pass reuses them instead of re-sorting the routing under remat.
   """
-  return _primal_fwd(p, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes)
+  pre_meta: jax.Array | None = None
+  if (
+      p.save_reduce_meta
+      and not p.use_reference
+      and p.use_gmm_linear_combine
+      and p.exact_topk_combine
+      and not p.inv_perm_combine
+      and sort_indices.shape[0] == x2d.shape[0] * p.top_k
+  ):
+    lineage_ops = _lineage()[0]
+    if lineage_ops.can_use_exact_topk_gather_reduce_tc(
+        x2d.shape[0], p.top_k, p.emb_dim // LANES, LANES, jnp.bfloat16, out_2d=p.exact_topk_out_2d
+    ):
+      token_indices = (sort_indices // p.top_k).astype(jnp.int32)
+      pre_meta = jax.ad_checkpoint.checkpoint_name(
+          lineage_ops.exact_topk_gather_reduce_tc_src_rows(token_indices), MOE_PACKED_ROUTING_MAPS
+      )
+  return _fused_moe_experts_vjp(p, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes, pre_meta)
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
+def _fused_moe_experts_vjp(
+    p: FusedGmm3dParams,
+    x2d: jax.Array,
+    wi_local: jax.Array,
+    wo_local: jax.Array,
+    sorted_coeffs: jax.Array,
+    sort_indices: jax.Array,
+    group_sizes: jax.Array,
+    precomputed_reduce_meta: jax.Array | None = None,
+) -> jax.Array:
+  """Custom-VJP core of `fused_moe_experts`; `precomputed_reduce_meta` is an optional saved combine `src_rows`."""
+  return _primal_fwd(p, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes, precomputed_reduce_meta)
 
 
 def _prepare(
@@ -1087,9 +1156,21 @@ def _prepare(
   else:
     x_q = x2d.astype(p.compute_dtype)
   w_gate_q = quantize_and_gather_weight(
-      wi_local, p.weight_qtype, p.weight_scale, p.wi_gather_axes, (size_e, size_d, 2 * size_f)
+      wi_local,
+      p.weight_qtype,
+      p.weight_scale,
+      p.wi_gather_axes,
+      (size_e, size_d, 2 * size_f),
+      latency_ns=p.wi_ag_latency_ns,
   )
-  wo_q = quantize_and_gather_weight(wo_local, p.weight_qtype, p.weight_scale, p.wo_gather_axes, (size_e, size_f, size_d))
+  wo_q = quantize_and_gather_weight(
+      wo_local,
+      p.weight_qtype,
+      p.weight_scale,
+      p.wo_gather_axes,
+      (size_e, size_f, size_d),
+      latency_ns=p.wi_ag_latency_ns // 2,
+  )
   token_indices = (sort_indices // p.top_k).astype(jnp.int32)
   coeffs_in = sorted_coeffs.reshape(size_c, 1).astype(jnp.float32)
   coeffs = (
@@ -1100,7 +1181,16 @@ def _prepare(
   return x_q, w_gate_q, wo_q, coeffs, token_indices
 
 
-def _primal_fwd(p: FusedGmm3dParams, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes):
+def _primal_fwd(
+    p: FusedGmm3dParams,
+    x2d,
+    wi_local,
+    wo_local,
+    sorted_coeffs,
+    sort_indices,
+    group_sizes,
+    precomputed_reduce_meta=None,
+):
   """Forward of the fused MoE experts without residuals (the primal of the custom VJP)."""
   group_sizes = group_sizes.astype(jnp.int32)
   x_q, w_gate_q, wo_q, coeffs, token_indices = _prepare(
@@ -1110,12 +1200,30 @@ def _primal_fwd(p: FusedGmm3dParams, x2d, wi_local, wo_local, sorted_coeffs, sor
     y2d, _, _ = _ref_fwd(p, x_q, w_gate_q, wo_q, coeffs, token_indices, group_sizes)
   else:
     y2d, _, _ = _kernel_fwd(
-        p, x_q, w_gate_q, wo_q, coeffs, token_indices, group_sizes, need_bank=False, sort_indices=sort_indices
+        p,
+        x_q,
+        w_gate_q,
+        wo_q,
+        coeffs,
+        token_indices,
+        group_sizes,
+        need_bank=False,
+        sort_indices=sort_indices,
+        precomputed_reduce_meta=precomputed_reduce_meta,
     )
   return y2d.astype(x2d.dtype)
 
 
-def _fused_fwd(p: FusedGmm3dParams, x2d, wi_local, wo_local, sorted_coeffs, sort_indices, group_sizes):
+def _fused_fwd(
+    p: FusedGmm3dParams,
+    x2d,
+    wi_local,
+    wo_local,
+    sorted_coeffs,
+    sort_indices,
+    group_sizes,
+    precomputed_reduce_meta=None,
+):
   """Custom-VJP forward of the fused MoE experts; returns the output and the backward residuals."""
   group_sizes = group_sizes.astype(jnp.int32)
   # Keep x_q 2D when SparseCore gathers routed rows (`sc_routed_gather`) so gather_offload + tgmm_v2 stay 2D.
@@ -1128,7 +1236,16 @@ def _fused_fwd(p: FusedGmm3dParams, x2d, wi_local, wo_local, sorted_coeffs, sort
     reduce_meta = None
   else:
     y2d, bank, reduce_meta = _kernel_fwd(
-        p, x_q, w_gate_q, wo_q, coeffs, token_indices, group_sizes, need_bank=True, sort_indices=sort_indices
+        p,
+        x_q,
+        w_gate_q,
+        wo_q,
+        coeffs,
+        token_indices,
+        group_sizes,
+        need_bank=True,
+        sort_indices=sort_indices,
+        precomputed_reduce_meta=precomputed_reduce_meta,
     )
   # The local weight shards are only kept for the shape / dtype of their gradients (they are inputs, so
   # saving them costs nothing); the gathered fp8 weights are recomputed under remat like the gmm_v2 path.
@@ -1211,7 +1328,8 @@ def _fused_bwd(p: FusedGmm3dParams, residuals, dy2d):
       dcoeffs_out,
       None,
       None,
+      None,
   )
 
 
-fused_moe_experts.defvjp(_fused_fwd, _fused_bwd, optimize_remat=True)
+_fused_moe_experts_vjp.defvjp(_fused_fwd, _fused_bwd, optimize_remat=True)

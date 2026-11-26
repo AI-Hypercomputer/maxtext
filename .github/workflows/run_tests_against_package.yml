@@ -29,10 +29,10 @@ on:
         required: true
         type: string
       repository_name:
-        description: 'Artifact Registry repository name'
+        description: 'Artifact Registry repository name (defaults to maxtext-test-images for *_deps_ci images, else maxtext-images)'
         required: false
         type: string
-        default: 'maxtext-images'
+        default: ''
       base_image:
         required: true
         type: string
@@ -105,7 +105,7 @@ jobs:
     runs-on: ${{ inputs.cloud_runner != '' && inputs.cloud_runner || fromJson(format('["self-hosted", "{0}", "{1}"]', inputs.device_type, inputs.device_name)) }}
     timeout-minutes: 90
     container:
-      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.repository_name || 'maxtext-images' }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
+      image: us-docker.pkg.dev/${{ vars.PROJECT_NAME || 'tpu-prod-env-multipod' }}/${{ inputs.repository_name || ((contains(inputs.base_image, '_deps_ci:') || contains(inputs.base_image, '_deps_ci@')) && 'maxtext-test-images' || 'maxtext-images') }}/${{ inputs.base_image }} # zizmor: ignore[unpinned-images]
       env:
         XLA_PYTHON_CLIENT_MEM_FRACTION: ${{ inputs.xla_python_client_mem_fraction }}
         TF_FORCE_GPU_ALLOW_GROWTH: ${{ inputs.tf_force_gpu_allow_growth }}
@@ -135,7 +135,7 @@ jobs:
           persist-credentials: false
       - name: Download the maxtext wheel
         if: ${{ !inputs.maxtext_installed }}
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: maxtext-wheel
       - name: Configure install mode and uv cache
@@ -149,8 +149,8 @@ jobs:
           INPUTS_WORKER_GROUP: ${{ inputs.worker_group }}
         run: |
           case "${BASE_IMAGE}" in
-            maxtext-deps-*) deps_preinstalled=true;  install_mode=wheelonly ;;
-            *)              deps_preinstalled=false; install_mode=full ;;
+            maxtext_*_deps:*|maxtext_*_deps@*|maxtext_*_deps_ci:*|maxtext_*_deps_ci@*) deps_preinstalled=true;  install_mode=wheelonly ;;
+            *)                                                                         deps_preinstalled=false; install_mode=full ;;
           esac
 
           echo "DEPS_PREINSTALLED=${deps_preinstalled}" >> "$GITHUB_ENV"
@@ -159,7 +159,7 @@ jobs:
           if [ "${install_mode}" = "full" ]; then
             slug="${BASE_IMAGE//[^a-zA-Z0-9]/-}"
           else
-            slug="${BASE_IMAGE%%:*}"
+            slug="${BASE_IMAGE%%[:@]*}"
           fi
           prefix="uv-${slug}-${MAXTEXT_PACKAGE_EXTRA}-${install_mode}-lowest-"
           echo "key=${prefix}${REQS_HASH}" >> "$GITHUB_OUTPUT"
@@ -174,7 +174,7 @@ jobs:
           fi
       - name: Cache uv downloads
         if: ${{ !inputs.maxtext_installed && steps.uv_cache.outputs.use_cache == 'true' }}
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: ${{ runner.temp }}/uv-cache
           key: ${{ steps.uv_cache.outputs.key }}
@@ -186,34 +186,32 @@ jobs:
           maxtext_wheel=$(ls maxtext-*-py3-none-any.whl 2>/dev/null)
           echo "Installing ${maxtext_wheel} for ${MAXTEXT_PACKAGE_EXTRA}..."
 
-          # A maxtext-deps-* image already has every dependency in a venv.
           if [ "${DEPS_PREINSTALLED}" == "true" ]; then
-            rm -rf .venv
-            ln -s /opt/maxtext-venv .venv
+            # Prebuilt maxtext_*_deps[_ci] images install all dependencies into system Python.
+            python3 -m uv pip install --system --no-deps "${maxtext_wheel}"
+            if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
+              # Refresh only the local vLLM adapter from this commit without recompiling vLLM.
+              python3 -m uv pip install --system --no-deps src/maxtext/integration/vllm
+            fi
           else
             python3 -m uv venv --seed
-          fi
-          source .venv/bin/activate
-
-          if [ "${DEPS_PREINSTALLED}" == "true" ]; then
-            uv pip install --no-deps "${maxtext_wheel}"
-          else
+            source .venv/bin/activate
             uv pip install "${maxtext_wheel}[${MAXTEXT_PACKAGE_EXTRA}]" --resolution=lowest
-          fi
 
-          if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
-            if ! command -v gcc-12 &> /dev/null && command -v apt-get &> /dev/null; then
-              echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
-              if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
-                echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
-                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build)
-              else
-                (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build)
+            if [ "${MAXTEXT_PACKAGE_EXTRA}" == "tpu-post-train" ]; then
+              if ! command -v gcc-12 &> /dev/null && command -v apt-get &> /dev/null; then
+                echo "Installing GCC 12 for vLLM C++20 compilation in CI runner..."
+                if [ -f /etc/os-release ] && grep -q "bullseye" /etc/os-release; then
+                  echo "deb http://deb.debian.org/debian bookworm main" | (sudo tee /etc/apt/sources.list.d/bookworm.list 2>/dev/null || tee /etc/apt/sources.list.d/bookworm.list)
+                  (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends -t bookworm gcc-12 g++-12 build-essential cmake ninja-build)
+                else
+                  (sudo apt-get update -y && sudo apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build) || (apt-get update -y && apt-get install -y --no-install-recommends gcc-12 g++-12 build-essential cmake ninja-build)
+                fi
               fi
+              install_tpu_post_train_extra_deps
+            else
+              install_tpu_pre_train_extra_deps
             fi
-            install_tpu_post_train_extra_deps
-          else
-            install_tpu_pre_train_extra_deps
           fi
           if [ "${INPUTS_INSTALL_TORCH_CPU}" == "true" ]; then
             python3 -m pip install --quiet torch==2.11.0 --index-url https://download.pytorch.org/whl/cpu --no-deps
@@ -230,7 +228,7 @@ jobs:
         # Every shard must split the tests with the same durations, or the shards overlap and some tests run nowhere.
         # So when the coordinator uploaded them, a failed download fails this shard instead of using another split.
         if: inputs.total_workers > 1 && inputs.test_durations_uploaded
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
           name: test-durations-${{ github.run_id }}-${{ inputs.flavor }}
           path: ${{ inputs.maxtext_installed && '/deps' || '.' }}
@@ -258,6 +256,12 @@ jobs:
             PYTHON_EXE="python3"
             # Disable coverage flags when testing against a pre-installed package
             PYTEST_COV_ARGS=""
+          elif [ "${DEPS_PREINSTALLED}" == "true" ]; then
+            # Prebuilt maxtext_*_deps[_ci] images install into system Python (no .venv).
+            PYTHON_EXE="python3"
+            # Ensure pytest-cov is available and enable coverage flags
+            python3 -m uv pip install --system pytest-cov
+            PYTEST_COV_ARGS="--cov=maxtext --cov-report=xml --cov-report=term"
           else
             source .venv/bin/activate
             # Use the local virtual environment created in Step 3
@@ -305,9 +309,9 @@ jobs:
           else
             # For cuda12, explicitly point to the pip-installed CUDA libraries
             # to avoid conflicts with system-level installations on the runner.
-            # Dynamically discover the 'nvidia' folder and prepend all its sub-library
-            # directories (including nccl, cublas, cudnn) to LD_LIBRARY_PATH to prevent
-            # JAX from partially loading incompatible system-level CUDA libraries.
+            # Prebuilt maxtext_gpu_pre_train_deps[_ci] images register those
+            # libraries via /etc/ld.so.conf.d/nvidia-wheels.conf + ldconfig and
+            # have no .venv directory, so this loop runs only on the .venv fallback.
             if [ -d ".venv/lib" ]; then
               NVIDIA_DIR=$(find .venv/lib/ -maxdepth 3 -name "nvidia" -type d 2>/dev/null | head -n 1)
               if [ -n "${NVIDIA_DIR}" ]; then
@@ -325,9 +329,17 @@ jobs:
             # limit (~125 GiB on linux-x86-n4-32) is shared by every worker. A single TrainCompile AOT
             # compile peaks at 10-16 GB and the worker keeps 6-8 GB afterwards, so -n auto (32 workers)
             # overcommits the pod: scheduled shards died at 94-99 % progress with no traceback (container
-            # or runner lost, #6052), consistent with hitting that limit. 8 workers leave ~16 GB each.
-            # Keep CPU_XDIST_PARALLELISM in tools/dev/calculate_workers.py in sync.
-            CPU_XDIST_WORKERS=8
+            # or runner lost, #6052), consistent with hitting that limit. So give each worker ~14 GiB of the
+            # container's memory limit, capped at 8: 8 workers on linux-x86-n4-32/n2-32, 4 on n4-16/n2-16.
+            # Keep CPU_XDIST_PARALLELISM in tools/dev/calculate_workers.py in sync with the cap.
+            MEM_TOTAL_BYTES=$(awk '/^MemTotal:/ {print $2 * 1024}' /proc/meminfo)
+            MEM_LIMIT_BYTES=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo max)
+            # "max" (cgroup v2) or a huge value (cgroup v1) means no container limit; use the VM's memory.
+            if ! [[ "${MEM_LIMIT_BYTES}" =~ ^[0-9]+$ ]] || [ "${MEM_LIMIT_BYTES}" -gt "${MEM_TOTAL_BYTES}" ]; then
+              MEM_LIMIT_BYTES="${MEM_TOTAL_BYTES}"
+            fi
+            CPU_XDIST_WORKERS=$(( MEM_LIMIT_BYTES / (14 * 1024 * 1024 * 1024) ))
+            CPU_XDIST_WORKERS=$(( CPU_XDIST_WORKERS > 8 ? 8 : (CPU_XDIST_WORKERS < 1 ? 1 : CPU_XDIST_WORKERS) ))
             # glibc otherwise creates up to 8*ncores malloc arenas per process, inflating RSS.
             export MALLOC_ARENA_MAX=2
             # Log the actual memory and /tmp budget so a killed shard or a full disk can be diagnosed from
@@ -501,14 +513,14 @@ jobs:
             --junitxml=test-results-decoupled-targeted.xml
       - name: Upload Reference HLO
         if: ${{ inputs.is_update_hlo }}
-        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: reference-hlo
           path: ${{ inputs.maxtext_installed && '/deps/tests/utils/reference_hlo_*.txt' || 'tests/utils/reference_hlo_*.txt' }}
           if-no-files-found: ignore
       - name: Upload results to Codecov
         if: ${{ !inputs.maxtext_installed }} # Skip code coverage upload for maxtext image testing
-        uses: codecov/codecov-action@0fb7174895f61a3b6b78fc075e0cd60383518dac # v5
+        uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v6.0.2
         continue-on-error: true
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
@@ -519,8 +531,8 @@ jobs:
       - name: Upload Test Results XML
         # Not for a run of only the touched tests: their timings include XLA compiles that a full run shares
         # across a test class, which track_performance.yml would report as regressions against its baseline.
-        if: ${{ always() && !inputs.newly_added_only }}
-        uses: actions/upload-artifact@5d5d22a31266ced268874388b861e4b58bb5c2f3 # v4.3.1
+        if: ${{ !cancelled() && !inputs.newly_added_only }}
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
         with:
           name: test-results-${{ inputs.flavor }}-${{ inputs.worker_group }}-${{ github.run_id }}
           path: ${{ inputs.maxtext_installed && '/deps/test-results-*.xml' || 'test-results-*.xml' }}

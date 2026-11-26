@@ -21,7 +21,6 @@ export HF_MODEL='path/to/your/hf/gemma-4-31b-it'
 # To get converted ckpt:
 python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"/base.yml \
     model_name=${MODEL_NAME} \
-    hf_access_token=${HF_TOKEN} \
     --hf_model_path=${HF_MODEL} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/converted/${idx} \
     use_multimodal=${USE_MULTIMODAL} \

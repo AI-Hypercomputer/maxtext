@@ -23,7 +23,7 @@ selectors, tolerations, reservations, Kueue labels and annotations) except:
   * names: JobSet name, namespace, gang-id label; failurePolicy.maxRestarts=0
     (a failed bench should not rerun the compile);
   * the client command: the same inline env prefix (LIBTPU_INIT_ARGS and the
-    other `cluster_config.role_env.trainer` variables, ...) in front of
+    other `cluster_config.roles.trainer.env` variables, ...) in front of
     run_trainer.py instead of the Tunix runtime main, with the e2e config
     arguments in CONFIG_ARGV; the Tunix fail-fast wrapper and the gRPC port
     are dropped;
@@ -79,7 +79,7 @@ MAX_NAME_LEN = 30
 TOPOLOGY_ANNOTATION = "cloud.google.com/gke-tpu-slice-topology"
 NODE_SELECTOR_TOPOLOGY = "cloud.google.com/gke-tpu-topology"
 MAXTEXT_EXTRA_CONFIG_KEY = "dist_training_config.maxtext_extra_config"
-TRAINER_LIBTPU_KEY = "cluster_config.role_env.trainer.LIBTPU_INIT_ARGS"
+TRAINER_LIBTPU_KEY = "cluster_config.roles.trainer.env.LIBTPU_INIT_ARGS"
 
 
 class _LiteralDumper(yaml.SafeDumper):

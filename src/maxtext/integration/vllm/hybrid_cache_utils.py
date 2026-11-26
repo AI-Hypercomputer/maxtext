@@ -14,6 +14,7 @@
 
 """Model-specific helpers shared by MaxText's vLLM adapter."""
 
+import importlib
 import inspect
 import math
 from typing import Any
@@ -371,4 +372,40 @@ def register_maxtext_hybrid_model_config(
         hybrid_config_cls.verify_and_update_config(vllm_config)
 
   models_config_map[MAXTEXT_VLLM_ARCHITECTURE] = MaxTextForCausalLMConfig
+  return True
+
+
+def maybe_install_tpu_hybrid_coordinator(
+    vllm_config: Any,
+    import_module_fn: Any = importlib.import_module,
+) -> bool:
+  """Installs tpu-inference's dual-pool hybrid KV cache coordinator hooks.
+
+  When ``AsyncLLMEngine`` spawns an ``EngineCore`` subprocess on a single host
+  (``UniProcExecutor`` with ``enable_dp_attention=False``), ``TPUPlatform``'s
+  ``check_and_update_config`` ran only in the parent process and neither
+  ``UniProcExecutor`` nor vLLM's default ``Scheduler`` re-installs
+  ``TPUHybridKVCacheCoordinator`` in ``EngineCore``. Calling this during
+  ``get_kv_cache_spec`` (after ``_mamba_num_blocks`` is populated and before
+  ``EngineCore`` constructs ``Scheduler``) activates the dual attention/Mamba
+  block pools in ``EngineCore`` instead of falling back to upstream vLLM's
+  single-pool ``HybridKVCacheCoordinator``.
+
+  Args:
+    vllm_config: Active vLLM configuration passed to the hook installer.
+    import_module_fn: Module importer callable (injectable for unit tests).
+
+  Returns:
+    True if the hook installer was invoked, False if unavailable or skipped.
+  """
+  if vllm_config is None:
+    return False
+  try:
+    hybrid_coord_mod = import_module_fn("tpu_inference.core.hybrid_coordinator")
+    install_fn = hybrid_coord_mod.maybe_install_hybrid_coordinator_hooks
+  except (ImportError, AttributeError) as e:
+    max_logging.log(f"Skipping TPUHybridKVCacheCoordinator hook installation: {e}")
+    return False
+
+  install_fn(vllm_config)
   return True

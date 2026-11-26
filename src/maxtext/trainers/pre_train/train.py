@@ -119,6 +119,18 @@ def get_first_step(model, state):
 
 def _one_hot_targets(targets, config, mesh):
   """Expand integer targets into the one-hot matrix cross entropy multiplies with the logits."""
+  if (
+      bool(getattr(config, "use_m3_model", False))
+      and getattr(config, "shard_mode", None) in (sharding.ShardMode.EXPLICIT, sharding.ShardMode.EXPLICIT.value)
+      and mesh is not None
+  ):
+    return sharding.vocab_parallel_one_hot(
+        targets,
+        config.vocab_size,
+        mesh,
+        ("activation_embed_and_logits_batch", "activation_length", "activation_vocab"),
+        sharding.ShardMode.EXPLICIT,
+    )
   if not getattr(config, "lm_head_fsdp_as_vocab_tp", False):
     return jax.nn.one_hot(targets, config.vocab_size)
   # A vocab-parallel head leaves the logits sharded on vocab rather than on batch, so the
@@ -154,10 +166,17 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   """
   del dropout_rng, params, sparsity_state  # unused for NNX (kept for signature parity)
   is_block_diffusion = getattr(config, "training_objective", "causal_lm") == "block_diffusion"
-  if getattr(config, "attention_type", "global") == "block_diffusion" and not is_block_diffusion:
+  attention_type = getattr(config, "attention_type", "global")
+  if attention_type == "block_diffusion" and not is_block_diffusion:
     raise ValueError(
         "Block-diffusion attention requires target-aligned block-diffusion losses; "
         "causal next-token labels would leak within a bidirectional block."
+    )
+  if attention_type == "full":
+    raise ValueError(
+        "attention_type='full' is bidirectional (non-causal) full attention; "
+        "causal next-token labels would leak in pre-training loss_fn. "
+        "Use attention_type='global' for global causal attention."
     )
   if is_block_diffusion:
     required_masks = {"corruption_mask", "targets_loss_mask"}
@@ -284,7 +303,18 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         debug_sharding=config.debug_sharding,
     )
 
-    if is_block_diffusion:
+    is_explicit = config.shard_mode in (sharding.ShardMode.EXPLICIT, sharding.ShardMode.EXPLICIT.value)
+    if is_explicit and model.mesh is not None:
+      loss_mask = sharding.maybe_shard_with_logical(
+          targets_loss_mask if is_block_diffusion else (data["targets_segmentation"] != 0),
+          ("activation_embed_and_logits_batch", "activation_length"),
+          model.mesh,
+          sharding.ShardMode.EXPLICIT,
+          debug_sharding=config.debug_sharding,
+      )
+      xent = xent * loss_mask
+      z_loss = z_loss * loss_mask
+    elif is_block_diffusion:
       xent = xent * targets_loss_mask
       z_loss = z_loss * targets_loss_mask
     else:
@@ -506,40 +536,65 @@ def _find_gate_bias(module: nnx.Module | None) -> nnx.Variable | None:
 def _decode_moe_bias_update(update, config):
   """Returns the value to add to a routed gate bias from a sown `moe_bias_updates`.
 
-  Under pipeline parallelism the MoE layers sow per-expert token counts instead of the +-rate step (see
-  `calculate_load_balance_updates(return_counts=True)`): the pipeline sums them over microbatches, so the step
-  below is taken on the load of the whole global batch, exactly like the non-pipelined model.
+  Under pipeline parallelism or gradient accumulation, MoE layers sow per-expert token counts instead of the
+  +-rate step (see `calculate_load_balance_updates(return_counts=True)`): counts are summed over microbatches,
+  so the step below is taken on the load of the whole global batch, exactly like the single-microbatch model.
   """
   update = jnp.asarray(update[0] if isinstance(update, (tuple, list)) else update)
-  if not getattr(config, "using_pipeline_parallelism", False):
+  if not getattr(config, "using_pipeline_parallelism", False) and not jnp.issubdtype(update.dtype, jnp.integer):
     return update
   counts = update.astype(jnp.float32)
   return jnp.sign(jnp.mean(counts, axis=-1, keepdims=True) - counts) * config.routed_bias_update_rate
 
 
-def _apply_moe_bias_updates_by_path(root: nnx.Module, intermediates: dict, config) -> None:
+def _apply_moe_bias_updates_by_path(
+    root: nnx.Module,
+    intermediates: dict,
+    config,
+    *,
+    diag_bias_values: list | None = None,
+    diag_bias_updates: list | None = None,
+    bias_metrics: dict | None = None,
+) -> None:
   """Adds every sown `moe_bias_updates` to the gate bias of the module that sowed it.
 
   Needed under pipeline parallelism, where the decoder's MoE layers live in two stacks with different
-  gate-bias layouts: `moe_layers_outside_pipeline` ([layers, experts]) and the pipeline stage module
-  `pipeline_module.layers` ([repeats, stages, experts]). Each stack sows an update shaped like its bias.
+  gate-bias layouts (`moe_layers_outside_pipeline` and `pipeline_module.layers`), and when `scan_layers=False`,
+  where the decoder holds unscanned per-layer modules (`moe_layers_0`, `moe_layers_1`, ...).
   """
   for path, update in traverse_util.flatten_dict(intermediates).items():
     if path[-1] != "moe_bias_updates":
       continue
     target = root
     for key in path[:-1]:
-      target = getattr(target, key)
+      if hasattr(target, key):
+        target = getattr(target, key)
+      elif isinstance(target, dict) and key in target:
+        target = target[key]
+      else:
+        target = None
+        break
     bias = _find_gate_bias(target)
     if bias is None:
       continue
     update = _decode_moe_bias_update(update, config)
-    if update.shape != bias.value.shape:
+    bias_val = bias.get_value()
+    if update.shape != bias_val.shape:
       raise ValueError(
           f"moe_bias_updates at {'/'.join(map(str, path))} has shape {update.shape}, "
-          f"but the gate bias it updates has shape {bias.value.shape}."
+          f"but the gate bias it updates has shape {bias_val.shape}."
       )
-    bias.value = bias.value + update.astype(bias.value.dtype)
+    name_prefix = "-".join(("decoder", *map(str, path[:-1])))
+    if bias_metrics is not None and getattr(config, "log_moe_bias_norms", False):
+      bias_metrics[f"learning/moe_bias_before_norm_{name_prefix}"] = jnp.linalg.norm(bias_val)
+    updated_bias = bias_val + update.astype(bias_val.dtype)
+    bias.set_value(updated_bias)
+    if diag_bias_values is not None:
+      diag_bias_values.append(updated_bias)
+    if diag_bias_updates is not None:
+      diag_bias_updates.append(update)
+    if bias_metrics is not None and getattr(config, "log_moe_bias_norms", False):
+      bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(update)
 
 
 def train_step(model, config, state_mesh_shardings, params_shardings, state, data, dropout_rng=None):
@@ -727,9 +782,16 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
             if getattr(config, "log_moe_bias_norms", False):
               bias_metrics[f"learning/moe_bias_update_norm_{name_prefix}"] = jnp.linalg.norm(jnp.array(update_val))
     else:
-      if getattr(config, "using_pipeline_parallelism", False):
-        # 1. Update the decoder MoE layers outside and inside the pipeline (two stacks, two bias layouts).
-        _apply_moe_bias_updates_by_path(new_state.model.decoder, intermediate_outputs.get("decoder", {}), config)
+      if getattr(config, "using_pipeline_parallelism", False) or not getattr(config, "scan_layers", True):
+        # 1. Update the decoder MoE layers by path (pipeline-parallel stacks or unscanned moe_layers_0..N).
+        _apply_moe_bias_updates_by_path(
+            new_state.model.decoder,
+            intermediate_outputs.get("decoder", {}),
+            config,
+            diag_bias_values=diag_bias_values,
+            diag_bias_updates=diag_bias_updates,
+            bias_metrics=bias_metrics,
+        )
       else:
         # 1. Update main decoder scanned MoE layers.
         # The update from the scan is (num_moe_layers, num_experts) and must be transposed.

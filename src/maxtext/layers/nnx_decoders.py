@@ -13,6 +13,7 @@
 # limitations under the License.
 
 """Module for decoder layers"""
+
 # pylint: disable=arguments-differ
 # pylint: disable=no-name-in-module
 
@@ -38,9 +39,11 @@ from maxtext.common.common_types import (
     MultimodalInput,
     ShardMode,
     get_weight_dtype,
+    is_fp8_dtype,
+    moe_qwag_flag,
 )
 from maxtext.configs.types import check_forced_routing_support
-from maxtext.layers import linears, mhc, moe, normalizations, quantizations
+from maxtext.layers import attention_mla, linears, mhc, moe, normalizations, quantizations
 from maxtext.layers import fsdp_prefetch, fsdp_prefetch_inhomogeneous, nnx_scan
 from maxtext.layers.attn_res import _apply_attn_res, attn_res_num_buffer_slots, init_attn_res_buffer
 from maxtext.layers.attentions import Attention
@@ -59,6 +62,7 @@ from maxtext.models import (
     gemma3,
     gemma4,
     gemma4_small,
+    glm5,
     gpt3,
     gpt_oss,
     hy4,
@@ -78,7 +82,7 @@ from maxtext.models import (
 )
 
 from maxtext.multimodal import utils as mm_utils
-from maxtext.utils import max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, pipeline_utils, sharding
+from maxtext.utils import index_share_utils, max_logging, max_utils, maxtext_utils, maxtext_utils_nnx, pipeline_utils, sharding
 from maxtext.utils.sharding import create_sharding
 
 # ------------------------------------------------------------------------------
@@ -105,10 +109,20 @@ def _drop_fsdp_mesh_axes(entry):
   return rest[0] if len(rest) == 1 else rest
 
 
+def _extend_remat_policy_with_name(policy, name):
+  """Extends a remat `policy` so residuals tagged with `name` are saved on device."""
+  keep = jax.checkpoint_policies.save_only_these_names(name)
+  return keep if policy is None else jax.checkpoint_policies.save_from_both_policies(policy, keep)
+
+
 def save_gathered_fsdp_weights_policy(policy):
   """Extend a remat policy so the hoisted FSDP weight gathers survive as residuals."""
-  keep = jax.checkpoint_policies.save_only_these_names(_GATHERED_FSDP_WEIGHT)
-  return keep if policy is None else jax.checkpoint_policies.save_from_both_policies(policy, keep)
+  return _extend_remat_policy_with_name(policy, _GATHERED_FSDP_WEIGHT)
+
+
+def _save_moe_combine_order_policy(policy):
+  """Extends boolean/full remat `policy` so `moe_combine_order` is saved on device."""
+  return _extend_remat_policy_with_name(policy, "moe_combine_order")
 
 
 def hoist_fsdp_weight_gather(params, mesh, config):
@@ -660,7 +674,7 @@ class NNXDecoder(nnx.Module):
       )
 
     self.scanned_layers = None
-    self.is_deepseek = self.config.decoder_block == DecoderBlockType.DEEPSEEK
+    self.is_deepseek = self.config.decoder_block in (DecoderBlockType.DEEPSEEK, DecoderBlockType.GLM5)
     self.is_deepseek4 = self.config.decoder_block == DecoderBlockType.DEEPSEEK4
     self.is_gemma3 = self.config.decoder_block == DecoderBlockType.GEMMA3
     self.is_gemma4 = self.config.decoder_block == DecoderBlockType.GEMMA4
@@ -867,7 +881,10 @@ class NNXDecoder(nnx.Module):
 
   def _get_deepseek4_remat_policy_and_cse(self):
     """Returns the scan-safe per-layer remat policy and prevent_cse flag for DeepSeek-V4."""
-    return self._get_scan_safe_remat_policy(), maxtext_utils.should_prevent_cse_in_remat(self.config)
+    return (
+        self._get_scan_safe_remat_policy(),
+        maxtext_utils.should_prevent_cse_in_remat(self.config),
+    )
 
   def _init_scanned_deepseek(self, decoder_block_classes, rngs):
     """Initializes scanned DeepSeek layers with optional Engram support."""
@@ -1172,9 +1189,10 @@ class NNXDecoder(nnx.Module):
     config = self.config
     dense_cls, moe_cls = decoder_block_classes
     for i in range(config.first_num_dense_layers):
-      self._create_and_register_layer(dense_cls, rngs, "dense_layers", i)
+      self._create_and_register_layer(dense_cls, rngs, "dense_layers", i, layer_idx=i)
     for i in range(config.num_decoder_layers - config.first_num_dense_layers):
-      self._create_and_register_layer(moe_cls, rngs, "moe_layers", i)
+      global_idx = config.first_num_dense_layers + i
+      self._create_and_register_layer(moe_cls, rngs, "moe_layers", i, layer_idx=global_idx)
 
   def _init_sequential_generic(self, decoder_block_classes, rngs):
     """Initializes sequential generic decoder layers with per-architecture layer_kwargs."""
@@ -1338,9 +1356,10 @@ class NNXDecoder(nnx.Module):
       metadata_axis_name: str = "layers",
       forced_routed_experts_scanned=None,
       per_iteration_kwargs=None,
+      qwag_amax_fn=None,
       **kwargs,
   ):
-    """Runs the layer stack using nnx.scan.
+    """Runs the layer stack using nnx.scan and returns a uniform 3-tuple.
 
     This is the fuller of the two NNX scan appliers: it also threads external
     (vLLM) KV caches via a static unroll and re-applies scan-axis metadata.
@@ -1376,17 +1395,55 @@ class NNXDecoder(nnx.Module):
         its static unroll calls each iteration separately. The values are passed
         as call arguments rather than closed over, so they stay correct when the
         body is wrapped in jax.checkpoint.
+      qwag_amax_fn: Optional fn from the stacked params to the per-layer
+        (wi_0, wi_1, wo) QWAG amax, passed to each layer as moe_qwag_weight_amax.
       **kwargs: Keyword args forwarded to the layer (filtered by the layer
         signature).
 
     Returns:
-      (final_carry, updated_layers) when kv_caches_stacked is None.
-      (final_carry, updated_layers, returned_kv_stacked) otherwise.
+      (final_carry, updated_layers, returned_kv_stacked).
 
     Raises:
       ValueError: If `per_iteration_kwargs` is given without
         `kv_caches_stacked`, or does not hold one entry per iteration.
     """
+    final_carry, out_layers, returned_kv, _ = self._run_layers_sequentially(
+        layers,
+        x_in,
+        *args,
+        length=length,
+        kv_caches_stacked=kv_caches_stacked,
+        skip_block_remat=skip_block_remat,
+        unroll=unroll,
+        metadata_axis_name=metadata_axis_name,
+        forced_routed_experts_scanned=forced_routed_experts_scanned,
+        per_iteration_kwargs=per_iteration_kwargs,
+        qwag_amax_fn=qwag_amax_fn,
+        track_indexer_state=False,
+        **kwargs,
+    )
+    return final_carry, out_layers, returned_kv
+
+  def _run_layers_sequentially(
+      self,
+      layers,
+      x_in,
+      *args,
+      length: int,
+      kv_caches_stacked=None,
+      skip_block_remat: bool = False,
+      unroll: int = 1,
+      metadata_axis_name: str = "layers",
+      forced_routed_experts_scanned=None,
+      per_iteration_kwargs=None,
+      qwag_amax_fn=None,
+      track_indexer_state: bool = False,
+      start_layer_idx: int = 0,
+      cached_indexer_state=None,
+      scan_model_mode: str | None = None,
+      **kwargs,
+  ):
+    """Internal implementation shared by `_apply_layers_sequentially` and IndexShare scan."""
     if per_iteration_kwargs is not None:
       if kv_caches_stacked is None:
         raise ValueError(
@@ -1400,20 +1457,23 @@ class NNXDecoder(nnx.Module):
     if self.config.prefetch_fsdp_weights and not fsdp_prefetch.mesh_uses_fsdp(self.mesh):
       max_logging.info("prefetch_fsdp_weights: no FSDP mesh axis spans more than one device; using the regular scan.")
     elif (
-        self.config.prefetch_fsdp_weights
+        not track_indexer_state
+        and self.config.prefetch_fsdp_weights
         and kv_caches_stacked is None
         and forced_routed_experts_scanned is None
         and not self.config.parameter_memory_host_offload
         and not getattr(self, "disable_quant_stats_update", False)
     ):
-      return self._apply_layers_sequentially_prefetch(
+      prefetch_carry, prefetch_layers, prefetch_kv = self._apply_layers_sequentially_prefetch(
           layers, x_in, *args, length=length, skip_block_remat=skip_block_remat, **kwargs
       )
+      return prefetch_carry, prefetch_layers, prefetch_kv, None
     if length == 0:
       return (
           x_in,
           layers,
           kv_caches_stacked if kv_caches_stacked is not None else None,
+          cached_indexer_state,
       )
     policy = self.get_remat_policy()
     if self.config.save_fsdp_gathered_weights:
@@ -1424,6 +1484,30 @@ class NNXDecoder(nnx.Module):
     scan_axis = self.config.param_scan_axis
     if scan_axis != 0:
       params = jax.tree.map(lambda x: jnp.moveaxis(x, scan_axis, 0) if x.ndim > scan_axis else x, params)
+
+    dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
+    updated_graphdef = [graphdef]
+
+    use_kv = kv_caches_stacked is not None
+    use_forced_routing = forced_routed_experts_scanned is not None
+    # The call-time model_mode (layer_args[3]), like Attention._try_fused_qkv_kernel, not the construction-time one.
+    call_model_mode = args[3] if len(args) > 3 else kwargs.get("model_mode", self.model_mode)
+
+    gathered_grad_shardings = {}
+    if (
+        self.config.gather_scanned_kernels_once
+        and call_model_mode == MODEL_MODE_TRAIN
+        and not use_kv
+        and not dynamic_graph_init
+        and not self.config.parameter_memory_host_offload
+        and not self.config.prefetch_fsdp_weights
+    ):
+      params = moe.gather_scanned_kernels_once(
+          layers, params, self.mesh, self.config.logical_axis_rules, metadata_axis_name=metadata_axis_name
+      )
+      gathered_grad_shardings = moe.gathered_kernel_grad_shardings(
+          layers, self.mesh, self.config.logical_axis_rules, metadata_axis_name=metadata_axis_name
+      )
 
     layer_cls = layers.__class__
     sig = inspect.signature(layer_cls.__call__)
@@ -1436,23 +1520,53 @@ class NNXDecoder(nnx.Module):
         return {k: _extract_matching_state(v, full[k]) for k, v in template.items()}
       return full
 
-    dynamic_graph_init = bool(getattr(self, "disable_quant_stats_update", False))
-    updated_graphdef = [graphdef]
-
-    use_kv = kv_caches_stacked is not None
-    use_forced_routing = forced_routed_experts_scanned is not None
-    # The call-time model_mode (layer_args[3]), like Attention._try_fused_qkv_kernel, not the construction-time one.
-    call_model_mode = args[3] if len(args) > 3 else kwargs.get("model_mode", self.model_mode)
     defer_psum_axes = (
         normalizations.get_deferred_norm_psum_axes(self.config, self.mesh)
         if not use_kv and not dynamic_graph_init and call_model_mode == MODEL_MODE_TRAIN
         else ()
     )
     use_deferred_norm_grad = bool(defer_psum_axes)
+    use_qwag_amax = qwag_amax_fn is not None and not use_kv
+
+    if track_indexer_state:
+      if cached_indexer_state is None:
+        pattern = index_share_utils.parse_index_share_pattern(
+            self.config.index_share_pattern, self.config.num_decoder_layers
+        )
+        if index_share_utils.is_shared_layer(start_layer_idx, pattern):
+          raise ValueError("Shared DSA layers require top-k indices from a previous full indexer layer.")
+        indexer_model_mode = scan_model_mode if scan_model_mode is not None else kwargs.get("model_mode", self.model_mode)
+        if indexer_model_mode == MODEL_MODE_TRAIN or self.config.attention == "paged":
+          kv_len = x_in.shape[1]
+        elif indexer_model_mode == MODEL_MODE_PREFILL:
+          kv_len = self.config.max_prefill_predict_length
+        else:
+          kv_len = self.config.max_target_length
+        effective_k = min(self.config.indexer_topk, kv_len)
+        need_score = self.config.indexer_loss_scaling_factor > 0.0 and indexer_model_mode == MODEL_MODE_TRAIN
+        # The carry is `(x, IndexerShareState(topk_indices int32 [B, S, min(topk, kv_len)], indexer_score), layer_idx)`.
+        # `indexer_score` is `None` at inference and when `indexer_loss_scaling_factor == 0`; with the loss on in
+        # training it is the donor's f32 `[B, S, kv_len]` score, which S layers need for their KL term, and the scan
+        # retains one copy per layer for the backward pass (`num_layers * B * S * kv_len * 4` bytes).
+        init_indices = jnp.zeros((x_in.shape[0], x_in.shape[1], effective_k), dtype=jnp.int32)
+        init_score = jnp.zeros((x_in.shape[0], x_in.shape[1], kv_len), dtype=jnp.float32) if need_score else None
+        cached_indexer_state = attention_mla.IndexerShareState(
+            topk_indices=init_indices,
+            indexer_score=init_score,
+        )
+      init_scan_carry = (x_in, cached_indexer_state, jnp.asarray(start_layer_idx, dtype=jnp.int32))
+    else:
+      init_scan_carry = x_in
 
     def layer_fn(carry, scanned_vars):
       # Ensure metadata rank matches the sliced values
       scanned_vars = maxtext_utils_nnx.nnx_remove_scan_axis(scanned_vars, "layers")
+
+      # The QWAG amax, when present, is the last scanned input.
+      moe_qwag_weight_amax = None
+      if use_qwag_amax:
+        *scanned_vars, moe_qwag_weight_amax = scanned_vars
+        scanned_vars = tuple(scanned_vars)
 
       # Unpack the sliced variables for THIS layer
       if use_kv:
@@ -1467,6 +1581,9 @@ class NNXDecoder(nnx.Module):
         kv_cache_layer = None
         forced_routed_experts_layer = None
         iteration_kwargs = None
+
+      if gathered_grad_shardings:
+        current_params = moe.reduce_scatter_gathered_grads(current_params, gathered_grad_shardings)
 
       if self.config.parameter_memory_host_offload:
         current_params = jax.tree.map(
@@ -1495,15 +1612,31 @@ class NNXDecoder(nnx.Module):
         call_kwargs["forced_routed_experts"] = forced_routed_experts_layer
       if iteration_kwargs:
         call_kwargs.update(iteration_kwargs)
+      if use_qwag_amax:
+        call_kwargs["moe_qwag_weight_amax"] = moe_qwag_weight_amax
 
-      layer_out = layer(carry, *args, **call_kwargs)
+      if track_indexer_state:
+        y_in, current_cached_indexer, lyr_idx = carry
+        call_kwargs["cached_indexer_state"] = current_cached_indexer
+        call_kwargs["layer_idx"] = lyr_idx
+      else:
+        y_in = carry
+
+      layer_out = layer(y_in, *args, **call_kwargs)
 
       if isinstance(layer_out, tuple):
-        new_carry = layer_out[0]
+        new_carry_y = layer_out[0]
         updated_kv = layer_out[1] if len(layer_out) > 1 else None
+        new_indexer_state = layer_out[2] if len(layer_out) > 2 else None
       else:
-        new_carry = layer_out
+        new_carry_y = layer_out
         updated_kv = None
+        new_indexer_state = None
+
+      if track_indexer_state:
+        new_carry = (new_carry_y, new_indexer_state, lyr_idx + 1)
+      else:
+        new_carry = new_carry_y
 
       # Extract the updated state to return it
       if dynamic_graph_init:
@@ -1537,7 +1670,7 @@ class NNXDecoder(nnx.Module):
 
       # kv_caches_stacked is actually the original kv_caches list in this new flow
       kv_caches_list = kv_caches_stacked
-      current_carry = x_in
+      current_carry = init_scan_carry
 
       for i in range(length):
         # Statically slice the parameters and state for this layer
@@ -1553,9 +1686,15 @@ class NNXDecoder(nnx.Module):
         # Update the list in-place (mutates the list passed by reference)
         kv_caches_list[i] = updated_kv
 
+      if track_indexer_state:
+        final_carry, out_indexer_state, _ = current_carry
+      else:
+        final_carry = current_carry
+        out_indexer_state = None
+
       # We don't need to rebuild scanned_state or return it because during
       # inference with vLLM, parameters do not change and we don't need intermediates.
-      return current_carry, layers, None
+      return final_carry, layers, None, out_indexer_state
     else:
       params = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(params, length)
       state = maxtext_utils_nnx.nnx_ensure_scan_leading_axis(state, length)
@@ -1574,14 +1713,20 @@ class NNXDecoder(nnx.Module):
         scan_xs = (params, state, forced_routed_experts_scanned)
       else:
         scan_xs = (params, state)
-      final_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, x_in, scan_xs, unroll=unroll)
+      if use_qwag_amax:
+        scan_xs = scan_xs + (qwag_amax_fn(params),)
+      scan_res_carry, scanned_state = jax.lax.scan(layer_fn_wrapped, init_scan_carry, scan_xs, unroll=unroll)
       returned_kv_stacked = None
+
+      if track_indexer_state:
+        final_carry, out_indexer_state, _ = scan_res_carry
+      else:
+        final_carry = scan_res_carry
+        out_indexer_state = None
 
       # Move the scan axis to each variable's param_scan_axis and restore its name
       # in the sharding metadata. jax.lax.scan emits it at position 0.
       scanned_state = maxtext_utils_nnx.nnx_add_and_sync_scan_axis(scanned_state, metadata_axis_name)
-
-      returned_kv_stacked = None
 
     if dynamic_graph_init:
       # If graph changed, we need to merge with the new graphdef.
@@ -1593,7 +1738,7 @@ class NNXDecoder(nnx.Module):
       nnx.update(layers, clean_state)
       out_layers = layers
 
-    return final_carry, out_layers, returned_kv_stacked if use_kv else None
+    return final_carry, out_layers, returned_kv_stacked if use_kv else None, out_indexer_state
 
   def _apply_layers_sequentially_prefetch(
       self, layers, x_in, *args, length: int, skip_block_remat: bool = False, **kwargs
@@ -1618,6 +1763,29 @@ class NNXDecoder(nnx.Module):
       )
     return fsdp_prefetch.apply_layers_with_fsdp_prefetch(
         layers, x_in, *args, skip_block_remat=skip_block_remat, **prefetch_kwargs, **kwargs
+    )
+
+  def _deepseek_moe_qwag_amax_fn(self):
+    """With dynamic QWAG, returns the per-layer (wi_0, wi_1, wo) amax fn for the DeepSeek MoE stack, else None."""
+    cfg = self.config
+    if moe_qwag_flag(cfg) is None or not quantizations.is_dynamic_qwag_calibration(
+        cfg.weight_quantization_calibration_method
+    ):
+      return None
+    # The precompute reads the stored params. Fall back to RoutedMoE's per-layer amax when it transforms the weights
+    # first (fp8 storage, fake quant, sparsity), when the MoE call does not take the amax (mHC), or when the params
+    # are on the host (the scan moves them to the device one layer at a time).
+    if (
+        cfg.fp8_moe
+        or is_fp8_dtype(get_weight_dtype(cfg, "routed_experts"))
+        or cfg.fp8_moe_fake_quant
+        or (cfg.weight_sparsity_n and cfg.weight_sparsity_m)
+        or cfg.mhc_expansion_rate > 1
+        or cfg.parameter_memory_host_offload
+    ):
+      return None
+    return lambda params: moe.scanned_qwag_weight_amax(
+        params["DeepSeekMoeBlock_0"]["MoeBlock_0"], cfg.dtype, cfg.moe_weight_quantization_granularity
     )
 
   def get_decoder_layers(self):
@@ -1648,6 +1816,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.SIMPLE: [simple_layer.SimpleDecoderLayer],
         DecoderBlockType.SIMPLE_MLP: [simple_layer.SimpleMlpDecoderLayer],
         DecoderBlockType.DEEPSEEK: get_deepseek(),
+        DecoderBlockType.GLM5: [glm5.GLMDenseLayer, glm5.GLMMoELayer],
         DecoderBlockType.DEEPSEEK4: get_scannable(deepseek4.DeepSeek4DecoderLayer, deepseek4.DeepSeek4ScannableBlock),
         DecoderBlockType.GPT_OSS: get_scannable(gpt_oss.GptOssDecoderLayer, gpt_oss.GptOssScannableBlock),
         DecoderBlockType.QWEN3_NEXT: get_scannable(qwen3.Qwen3NextDecoderLayer, qwen3.Qwen3NextScannableBlock),
@@ -1706,13 +1875,15 @@ class NNXDecoder(nnx.Module):
   def _get_scan_safe_remat_policy(self):
     """Returns a remat policy keeping offloaded residuals on device across trip-count-one scans."""
     remat_policy = self._effective_remat_policy()
-    if not remat_policy or remat_policy in ("none", "full"):
+    if not remat_policy or remat_policy == "none":
       return None
     # Offloaded residuals cannot cross the trip-count-one boundary, so keep them on device.
     policy_cfg = types.SimpleNamespace(
+        moe_ring_pipeline_mode=self.config.moe_ring_pipeline_mode,
         remat_policy=remat_policy,
         tensors_on_device=self.config.tensors_on_device,
         tensors_to_offload=self.config.tensors_to_offload,
+        context_parallel_attention_load_balance_hoist_ids=self.config.context_parallel_attention_load_balance_hoist_ids,
     )
     save_names, offload_names = maxtext_utils.get_save_and_offload_names(policy_cfg)
     if save_names or offload_names:
@@ -1797,37 +1968,7 @@ class NNXDecoder(nnx.Module):
             "kv_proj",
             "qkv_proj",
         )
-      elif remat_policy == "qkv_proj_offloaded":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=[
-                "query_proj",
-                "value_proj",
-                "key_proj",
-                "kv_proj",
-            ],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif remat_policy == "minimal_offloaded":
-        policy = jax.checkpoint_policies.save_and_offload_only_these_names(
-            names_which_can_be_saved=[],
-            names_which_can_be_offloaded=[
-                "query_proj",
-                "value_proj",
-                "key_proj",
-                "kv_proj",
-                "qkv_proj",
-                "out_proj",
-                "mlpwi_0",
-                "mlpwi_1",
-                "mlpwi",
-                "mlpwo",
-            ],
-            offload_src="device",
-            offload_dst="pinned_host",
-        )
-      elif remat_policy == "custom":
+      elif remat_policy in {"qkv_proj_offloaded", "minimal_offloaded", "custom"}:
         save_names, offload_names = maxtext_utils.get_save_and_offload_names(cfg)
         policy = jax.checkpoint_policies.save_and_offload_only_these_names(
             names_which_can_be_saved=save_names,
@@ -1840,6 +1981,12 @@ class NNXDecoder(nnx.Module):
       else:
         assert remat_policy == "full", "Remat policy needs to be on list of remat policies"
         policy = None
+      if cfg.moe_ring_pipeline_mode == "combine_per_chunk" and remat_policy not in {
+          "qkv_proj_offloaded",
+          "minimal_offloaded",
+          "custom",
+      }:
+        policy = _save_moe_combine_order_policy(policy)
     return policy
 
   def get_norm_layer(self, num_features: int, rngs: nnx.Rngs):
@@ -1851,6 +1998,7 @@ class NNXDecoder(nnx.Module):
         DecoderBlockType.MIXTRAL,
         DecoderBlockType.DEEPSEEK,
         DecoderBlockType.DEEPSEEK4,
+        DecoderBlockType.GLM5,
         DecoderBlockType.GEMMA,
         DecoderBlockType.GEMMA2,
         DecoderBlockType.GEMMA3,
@@ -2536,6 +2684,33 @@ class NNXDecoder(nnx.Module):
                 *layer_args,
                 **common_kwargs,
             )
+          elif cfg.use_index_share:
+            y, self.dense_layers, _, cached_indexer_state = self._run_layers_sequentially(
+                self.dense_layers,
+                y,
+                *layer_args,
+                length=cfg.first_num_dense_layers,
+                track_indexer_state=True,
+                start_layer_idx=0,
+                cached_indexer_state=None,
+                scan_model_mode=model_mode,
+                **layer_kwargs,
+            )
+
+            num_moe = cfg.num_decoder_layers - cfg.first_num_dense_layers
+
+            y, self.moe_layers, _, _ = self._run_layers_sequentially(
+                self.moe_layers,
+                y,
+                *layer_args,
+                length=num_moe,
+                qwag_amax_fn=self._deepseek_moe_qwag_amax_fn(),
+                track_indexer_state=True,
+                start_layer_idx=cfg.first_num_dense_layers,
+                cached_indexer_state=cached_indexer_state,
+                scan_model_mode=model_mode,
+                **layer_kwargs,
+            )
           else:
             y, self.dense_layers, _ = self._apply_layers_sequentially(
                 self.dense_layers,
@@ -2579,6 +2754,7 @@ class NNXDecoder(nnx.Module):
                   y,
                   *layer_args,
                   length=num_moe,
+                  qwag_amax_fn=self._deepseek_moe_qwag_amax_fn(),
                   **layer_kwargs,
               )
 
@@ -2709,17 +2885,17 @@ class NNXDecoder(nnx.Module):
           merged_layer = nnx.merge(graphdef_in, state_in)
           layer_out = merged_layer(y_in, *layer_args, kv_cache=kv_in, **valid_kwargs)
           out_y, out_kv = layer_out[:2]
-          out_indexer_mask = layer_out[2] if len(layer_out) > 2 else None
+          out_layer_aux = layer_out[2] if len(layer_out) > 2 else None
           state_out = nnx.state(merged_layer)
 
           if dynamic_graph_init:
             new_graphdef, _, _ = nnx.split(merged_layer, nnx.Param, ...)
-            return out_y, out_kv, out_indexer_mask, state_out, new_graphdef
+            return out_y, out_kv, out_layer_aux, state_out, new_graphdef
           else:
-            return out_y, out_kv, out_indexer_mask, state_out, graphdef_in
+            return out_y, out_kv, out_layer_aux, state_out, graphdef_in
 
         checkpointed_fn = jax.checkpoint(pure_layer_fn, policy=policy, prevent_cse=prevent_cse)
-        prev_indexer_mask = None
+        prev_layer_aux = None
 
         for lyr in range(cfg.num_decoder_layers):
           if self.is_deepseek:
@@ -2796,14 +2972,16 @@ class NNXDecoder(nnx.Module):
             )
 
           if self.is_hy4:
-            current_kwargs["prev_indexer_mask"] = prev_indexer_mask
+            current_kwargs["prev_indexer_mask"] = prev_layer_aux
+          elif cfg.use_index_share:
+            current_kwargs["cached_indexer_state"] = prev_layer_aux
 
           if self._remat_enabled():
-            y, kv_cache, prev_indexer_mask, new_state, new_graphdef = checkpointed_fn(
+            y, kv_cache, prev_layer_aux, new_state, new_graphdef = checkpointed_fn(
                 graphdef, state, y, kv_cache, current_kwargs
             )
           else:
-            y, kv_cache, prev_indexer_mask, new_state, new_graphdef = pure_layer_fn(
+            y, kv_cache, prev_layer_aux, new_state, new_graphdef = pure_layer_fn(
                 graphdef, state, y, kv_cache, current_kwargs
             )
 

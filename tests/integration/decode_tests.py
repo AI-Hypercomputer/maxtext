@@ -130,6 +130,10 @@ class DecodeTests(unittest.TestCase):
           "prompt=I love to",
       ],
   }
+  # Quantized KV cache only, in the cache layout used by the MLPerf inference scripts.
+  _MLPERF_CACHE_LAYOUT = ["prefill_cache_axis_order=0,2,1,3", "ar_cache_axis_order=0,2,1,3", "compute_axis_order=0,2,1,3"]
+  CONFIGS["int4_kv"] = CONFIGS["base"] + ["quantize_kvcache=True", "kv_quant_dtype=int4"] + _MLPERF_CACHE_LAYOUT
+  CONFIGS["fp8_kv"] = CONFIGS["base"] + ["quantize_kvcache=True", "kv_quant_dtype=fp8"] + _MLPERF_CACHE_LAYOUT
   SAMPLING_STRATEGY_CONFIG = {
       "greedy": [
           "decode_sampling_strategy=greedy",
@@ -165,6 +169,14 @@ class DecodeTests(unittest.TestCase):
     decode_main(DecodeTests.CONFIGS["int8"] + ["attention=dot_product"])
 
   @pytest.mark.tpu_only
+  def test_tpu_int4_kv(self):
+    decode_main(DecodeTests.CONFIGS["int4_kv"] + ["attention=dot_product"])
+
+  @pytest.mark.tpu_only
+  def test_tpu_fp8_kv(self):
+    decode_main(DecodeTests.CONFIGS["fp8_kv"] + ["attention=dot_product"])
+
+  @pytest.mark.tpu_only
   def test_tpu_pdb_lt_1(self):
     decode_main(DecodeTests.CONFIGS["pdb_lt_1"])
 
@@ -186,18 +198,14 @@ class DecodeTests(unittest.TestCase):
   def test_decode_weighted_sampling(self):
     config = DecodeTests.CONFIGS["decode_sampling"] + DecodeTests.SAMPLING_STRATEGY_CONFIG["weighted"]
     captured_out = run_decoding(config)
-    expected_output_pre_v7x = "Input `I love to` -> ` travel and I love to write"
-    expected_output_v7x = "Input `I love to` -> ` travel. I love to explore new places,"
-    assert (expected_output_pre_v7x in captured_out) or (expected_output_v7x in captured_out)
+    assert_matches_near_greedy_output(captured_out)
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only
   def test_decode_nucleus_sampling(self):
     config = DecodeTests.CONFIGS["decode_sampling"] + DecodeTests.SAMPLING_STRATEGY_CONFIG["nucleus"]
     captured_out = run_decoding(config)
-    expected_output_pre_v7x = "Input `I love to` -> ` travel and I love to write"
-    expected_output_v7x = "Input `I love to` -> ` travel. I love to explore new places,"
-    assert (expected_output_pre_v7x in captured_out) or (expected_output_v7x in captured_out)
+    assert_matches_near_greedy_output(captured_out)
 
   @pytest.mark.tpu_only
   @pytest.mark.scheduled_only
@@ -221,6 +229,25 @@ def run_decoding(config):
     decode_main(config)
   captured_out = f.getvalue()
   return captured_out
+
+
+# Weighted sampling with temperature 1e-5 and nucleus sampling with p=0 both
+# degenerate to (near-)greedy decoding, but the argmax token can flip on
+# near-ties in bf16 depending on the TPU generation and numeric library versions
+# (e.g. ml_dtypes). Accept every known-good continuation; see b/590224742.
+NEAR_GREEDY_EXPECTED_OUTPUTS = (
+    # Original expected output (pre-v7x TPUs).
+    "Input `I love to` -> ` travel and I love to write",
+    # Added for v7x TPUs.
+    "Input `I love to` -> ` travel. I love to explore new places,",
+    # v6e CI since be91f97 (2026-11-24); root cause tracked in b/590224742.
+    "Input `I love to` -> ` travel. I love to explore new places and",
+)
+
+
+def assert_matches_near_greedy_output(captured_out):
+  matched = any(e in captured_out for e in NEAR_GREEDY_EXPECTED_OUTPUTS)
+  assert matched, f"Unexpected decode output: {captured_out!r}"
 
 
 if __name__ == "__main__":

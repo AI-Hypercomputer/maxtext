@@ -36,7 +36,6 @@ export MODEL_BUCKET=gs://maxtext-gemma/unified/gemma2
 # To get unscanned ckpt:
 python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
-    hf_access_token=${HF_TOKEN} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx} \
     scan_layers=false
 
@@ -45,7 +44,6 @@ export UNSCANNED_CKPT_PATH=${MODEL_BUCKET}/${MODEL_VARIATION}/unscanned/${idx}/0
 # To get scanned ckpt, flip the scan_layers:
 python3 -m maxtext.checkpoint_conversion.to_maxtext "${MAXTEXT_CONFIGS_DIR:-${MAXTEXT_REPO_ROOT:-$PWD}/src/maxtext/configs}"//base.yml \
     model_name=${MODEL_NAME} \
-    hf_access_token=${HF_TOKEN} \
     base_output_directory=${MODEL_BUCKET}/${MODEL_VARIATION}/scanned/${idx} \
     scan_layers=true
 

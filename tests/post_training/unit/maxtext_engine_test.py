@@ -530,6 +530,55 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     mock_get_array_handler.assert_not_called()
 
   @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  @mock.patch(_GET_ARRAY_HANDLER, return_value=type("CloudPathwaysArrayHandler", (), {})())
+  def test_pathways_persistence_accepts_only_a_fuse_mounted_local_dir(self, _, mock_checkpointer):
+    cfg = self.setup_config(
+        enable_checkpointing=True,
+        checkpoint_storage_use_ocdbt=False,
+        checkpoint_storage_use_zarr3=False,
+    )
+    mounts = self.create_tempfile(
+        content=(
+            "overlay / overlay rw,relatime 0 0\n"
+            "fusectl /sys/fs/fuse/connections fusectl rw 0 0\n"
+            "my-rapid-bucket /gcs/ckpt fuse.gcsfuse rw,nosuid,nodev 0 0\n"
+            "tmpfs /gcs/ckpt/scratch tmpfs rw 0 0\n"
+            "bucket-b /gcs/my\\040ckpt fuse.gcsfuse rw 0 0\n"
+            "bucket-c /gcs/hidden fuse.gcsfuse rw 0 0\n"
+            "tmpfs /gcs/hidden tmpfs rw 0 0\n"
+            "tmpfs /gcs/remounted tmpfs rw 0 0\n"
+            "bucket-d /gcs/remounted fuse.gcsfuse rw 0 0\n"
+        )
+    ).full_path
+    with mock.patch.object(checkpointing, "_MOUNTS_FILE", mounts):
+      # A sibling of the mount point, a non-FUSE mount nested in it, fusectl, the rootfs, and a
+      # FUSE mount hidden by a later tmpfs mount over the same mount point.
+      for rejected in (
+          "/gcs/ckptx/run",
+          "/gcs/ckpt/scratch/run",
+          "/sys/fs/fuse/connections/run",
+          "/var/run",
+          "/gcs/hidden/run",
+      ):
+        with self.subTest(rejected=rejected):
+          with self.assertRaisesRegex(ValueError, "gs:// URI or a path on a FUSE mount"):
+            checkpointing.CheckpointManager(rejected, cfg)
+      mock_checkpointer.assert_not_called()
+
+      # A plain FUSE mount, one whose mount point has a space, and one mounted over a tmpfs.
+      accepted = ("/gcs/ckpt/run/checkpoints/", "/gcs/my ckpt/run/", "/gcs/remounted/run/")
+      for path in accepted:
+        with self.subTest(accepted=path):
+          checkpointing.CheckpointManager(path, cfg)
+          self.assertEqual(mock_checkpointer.call_args.args[0], path)
+    self.assertEqual(mock_checkpointer.call_count, len(accepted))
+
+    with mock.patch.object(checkpointing, "_MOUNTS_FILE", "/nonexistent/mounts"):
+      with self.assertRaisesRegex(ValueError, "FUSE mount"):
+        checkpointing.CheckpointManager("/gcs/ckpt/run/checkpoints/", cfg)
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
   @mock.patch(_GET_ARRAY_HANDLER)
   def test_pathways_persistence_rejects_ocdbt_and_zarr3(self, mock_get_array_handler):
     for use_ocdbt, use_zarr3 in ((True, True), (True, False), (False, True)):
@@ -566,6 +615,76 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
         mock_checkpointer.call_args.kwargs["context"].pathways.checkpointing_impl,
         ocp_pathways.CheckpointingImpl.PERSISTENCE,
     )
+
+  def _colocated_checkpoint_config(self, **overrides):
+    fields = {
+        "async_checkpointing": True,
+        "colocated_python_checkpointing": True,
+        "enable_single_controller": True,
+        "checkpoint_storage_device_host_concurrent_gb": 8,
+    }
+    fields.update(overrides)
+    return self.setup_config(enable_checkpointing=True, **fields)
+
+  def _fuse_mounts_file(self) -> str:
+    return self.create_tempfile(content="my-rapid-bucket /gcs/ckpt fuse.gcsfuse rw 0 0\n").full_path
+
+  @mock.patch.dict("os.environ", {"ENABLE_PATHWAYS_PERSISTENCE": "1"})
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  def test_colocated_python_takes_precedence_over_pathways_persistence(self, mock_checkpointer):
+    """Colocated Python allows OCDBT and Zarr3, and still needs shared storage."""
+    cfg = self._colocated_checkpoint_config(
+        checkpoint_storage_use_ocdbt=True,
+        checkpoint_storage_use_zarr3=True,
+        checkpoint_storage_device_host_concurrent_gb=16,
+    )
+    fake_handler = type("_FakeColocatedHandler", (), {"has_dispatcher": lambda self: True})()
+    with mock.patch.object(checkpointing, "_MOUNTS_FILE", self._fuse_mounts_file()):
+      with mock.patch(_GET_ARRAY_HANDLER, return_value=fake_handler) as mock_get_array_handler:
+        with self.assertRaisesRegex(ValueError, "colocated_python_checkpointing=True writes.*FUSE mount"):
+          checkpointing.CheckpointManager("/var/checkpoints", cfg)
+        mock_checkpointer.assert_not_called()
+        mock_get_array_handler.assert_not_called()
+
+        with self.assertLogs(level="WARNING") as logs:
+          manager = checkpointing.CheckpointManager("/gcs/ckpt/run/checkpoints", cfg)
+
+    mock_get_array_handler.assert_called_once()
+    mock_checkpointer.assert_called_once()
+    # Restore reads this to keep host-offloaded optimizer state in host memory.
+    self.assertTrue(manager._uses_colocated_python)
+    # The transfer budget defers the device-to-host copies, so the save may not outlive the call.
+    self.assertFalse(manager._use_async)
+    self.assertRegex("\n".join(logs.output), "saves synchronously; async_checkpointing is ignored")
+    self.assertEqual(mock_checkpointer.call_args.args[0], "/gcs/ckpt/run/checkpoints")
+    ctx = mock_checkpointer.call_args.kwargs["context"]
+    self.assertEqual(ctx.pathways.checkpointing_impl, ocp_pathways.CheckpointingImpl.COLOCATED_PYTHON)
+    self.assertEqual(ctx.memory.transfer_concurrent_bytes, 16 * 10**9)
+    self.assertEqual(
+        ctx.memory.serialization_status_callback.key_priority(("model_params",)).name,
+        "ASYNCHRONOUS_DEPRIORITIZED",
+    )
+
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  def test_colocated_python_saves_stay_async_without_a_transfer_budget(self, _):
+    cfg = self._colocated_checkpoint_config(checkpoint_storage_device_host_concurrent_gb=None)
+    fake_handler = type("_FakeColocatedHandler", (), {"has_dispatcher": lambda self: True})()
+    with mock.patch(_GET_ARRAY_HANDLER, return_value=fake_handler):
+      manager = checkpointing.CheckpointManager("gs://bucket/checkpoints", cfg)
+    self.assertTrue(manager._use_async)
+
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  def test_colocated_python_without_a_dispatcher_fails_when_the_manager_is_built(self, mock_checkpointer):
+    """The controller-side fallback handler fails at construction, before any save."""
+    cfg = self._colocated_checkpoint_config()
+    controller_handler = type("ArrayHandler", (), {"has_dispatcher": lambda self: False})()
+    with mock.patch(_GET_ARRAY_HANDLER, return_value=controller_handler):
+      with self.assertRaisesRegex(checkpointing.PathwaysCheckpointingUnavailableError, "ArrayHandler without one"):
+        checkpointing.CheckpointManager("gs://bucket/checkpoints", cfg)
+    with mock.patch(_GET_ARRAY_HANDLER, side_effect=ImportError("pathwaysutils missing")):
+      with self.assertRaisesRegex(checkpointing.PathwaysCheckpointingUnavailableError, "pathwaysutils missing"):
+        checkpointing.CheckpointManager("gs://bucket/checkpoints", cfg)
+    mock_checkpointer.assert_not_called()
 
   def test_checkpoint_dir_derived_unless_set(self):
     cfg = pyconfig.initialize(
@@ -1033,9 +1152,14 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     mock_orbax_mgr.checkpointables_metadata.assert_not_called()
     mock_orbax_mgr.load_checkpointables.assert_not_called()
 
-  def test_restore_targets_device_memory_for_host_offloaded_optimizer_state(self):
-    """A `pinned_host` optimizer leaf is restored into device memory with the same sharding otherwise."""
+  @parameterized.named_parameters(
+      ("pathways_persistence", False, "device"),
+      ("colocated_python", True, "pinned_host"),
+  )
+  def test_restore_memory_kind_for_host_offloaded_optimizer_state(self, colocated_python, expected_memory_kind):
+    """A `pinned_host` optimizer leaf is restored into device memory, or host memory under colocated Python."""
     t = maxtext_engine.MaxTextTrainingEngine(self.setup_config(enable_checkpointing=True))
+    t._checkpoint_manager._uses_colocated_python = colocated_python
     mock_orbax_mgr = self._mock_orbax_manager(t, latest_step=7)
     self._mock_saved_checkpoint(mock_orbax_mgr)
 
@@ -1066,8 +1190,7 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     self.assertNotEmpty(targets)
     for target, source in zip(targets, jax.tree.leaves(offloaded)):
       if getattr(source.sharding, "memory_kind", None) == "pinned_host":
-        self.assertIsInstance(target, jax.ShapeDtypeStruct)
-        self.assertEqual(target.sharding.memory_kind, "device")
+        self.assertEqual(target.sharding.memory_kind, expected_memory_kind)
         self.assertEqual((target.shape, target.dtype), (source.shape, source.dtype))
 
   def test_step_boundary_checkpoint_round_trips_through_real_orbax(self):
@@ -1207,7 +1330,10 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
 
     step0_metrics: Any = t.get_metrics(clear_cache=True)
     self.assertIsInstance(step0_metrics, abstract_engine.MetricsBuffer)
+    self.assertIs(type(step0_metrics.mode), str)
     self.assertIn("loss", step0_metrics.weighted_metrics)
+    self.assertIsInstance(step0_metrics.weighted_metrics["loss"].unreduced_sum, np.ndarray)
+    self.assertIsInstance(step0_metrics.weighted_metrics["loss"].denominator, np.ndarray)
     np.testing.assert_array_equal(
         step0_metrics.weighted_metrics["loss"].unreduced_sum,
         jnp.array([20.0, 30.0]),
@@ -1217,6 +1343,7 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
         jnp.array([4.0, 6.0]),
     )
     self.assertIn("lr", step0_metrics.scalar_metrics)
+    self.assertIsInstance(step0_metrics.scalar_metrics["lr"], np.ndarray)
     np.testing.assert_array_equal(step0_metrics.scalar_metrics["lr"], jnp.array([0.002]))
     self.assertIn("lr", step0_metrics.aggregation_fns)
     self.assertEqual(step0_metrics.aggregation_fns["lr"](jnp.array([0.002])), 0.002)
@@ -3891,7 +4018,8 @@ class MaxTextMoeRoutedExpertsPrecompileE2ETest(parameterized.TestCase):
     params_before = jax.tree.map(np.asarray, nnx.state(engine.model, nnx.Param))
 
     with mock.patch.object(engine, "_compile_for_batch", wraps=engine._compile_for_batch) as mock_compile:
-      engine.fwd_bwd(real_payload)
+      tok = engine.fwd_bwd(real_payload)
+      self.assertIsInstance(tok, jax.Array)
       step = engine.update()
       mock_compile.assert_not_called()
 

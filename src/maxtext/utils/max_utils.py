@@ -17,7 +17,7 @@ All the functions include MaxText modules, such as Pyconfig, should be moved to 
 """
 
 import collections
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 import functools
 from functools import partial
 import os
@@ -33,6 +33,7 @@ from etils import epath
 import flax
 from flax.core.spmd import get_logical_axis_rules
 import jax
+from jax.core import Tracer
 from pathlib import Path
 from contextlib import contextmanager, nullcontext
 from jax.experimental import mesh_utils
@@ -92,6 +93,58 @@ def parse_libtpu_flags_to_dict(flags_str: str) -> dict:
     options_dict[key] = value
 
   return options_dict
+
+
+def xla_strips_optimization_barriers(compile_xla_flags: str = "") -> bool:
+  """Returns whether --xla_tpu_aggressive_opt_barrier_removal is set to a value that strips barriers in the compile.
+
+  libtpu removes optimization barriers before scheduling when the flag is true or ENABLED; false, DISABLED and the
+  default keep them. Values are compared case-insensitively, and 1 counts as true. `compile_xla_flags` reaches the
+  compiler as per-compile options, which override LIBTPU_INIT_ARGS and XLA_FLAGS, so the environment is read only
+  when `compile_xla_flags` does not set the flag. The environment may repeat a flag, which
+  `parse_libtpu_flags_to_dict` rejects, so it is scanned token by token and its last setting wins. Flags set only on
+  a remote compile server, such as Pathways workers, are not visible here.
+  """
+  flag = "xla_tpu_aggressive_opt_barrier_removal"
+  value = parse_libtpu_flags_to_dict(compile_xla_flags).get(flag)
+  if value is None:
+    env_flags = f"{os.environ.get('LIBTPU_INIT_ARGS', '')} {os.environ.get('XLA_FLAGS', '')}".split()
+    env_values = [token.split("=", 1)[1] for token in env_flags if token.startswith(f"--{flag}=")]
+    value = env_values[-1] if env_values else None
+  return value is not None and value.lower() in ("true", "1", "enabled")
+
+
+def _apply_layout_constraint(x: jax.Array, major_to_minor: tuple[int, ...]) -> jax.Array:
+  """Applies an XLA `major_to_minor` layout constraint when `x` is a JAX tracer."""
+  try:
+    from jax.experimental.layout import Layout, with_layout_constraint  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    return x
+  if not isinstance(x, Tracer):
+    return x
+  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor))
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
+def forward_layout_constraint(x: jax.Array, major_to_minor: tuple[int, ...]) -> jax.Array:
+  """Constrains `x` to `major_to_minor` in the forward pass only, leaving its backward cotangent unconstrained."""
+  return _apply_layout_constraint(x, major_to_minor)
+
+
+def _forward_layout_constraint_fwd(x: jax.Array, major_to_minor: tuple[int, ...]):
+  return _apply_layout_constraint(x, major_to_minor), None
+
+
+def _forward_layout_constraint_bwd(_major_to_minor, _res, cotangent):
+  return (cotangent,)
+
+
+forward_layout_constraint.defvjp(_forward_layout_constraint_fwd, _forward_layout_constraint_bwd)
+
+
+def forward_row_major(x: jax.Array) -> jax.Array:
+  """Returns `x` unchanged, constrained to row-major layout in memory in the forward pass only."""
+  return forward_layout_constraint(x, tuple(range(x.ndim)))
 
 
 def with_memory_kind(t, memory_kind):
@@ -1076,6 +1129,38 @@ def reordered_cp_size(config, mesh) -> int:
   if mesh is None or not getattr(config, "context_parallel_load_balance", False):
     return 1
   return mesh.shape.get(config.context_sharding, 1)
+
+
+def check_no_load_balanced_context_parallelism(config, entrypoint_name: str, mesh=None) -> None:
+  """Raises ValueError if load-balanced CP is active on an entrypoint whose input pipeline does not reorder batches."""
+  load_balance = getattr(config, "context_parallel_load_balance", False)
+  if not isinstance(load_balance, bool) or not load_balance:
+    return
+
+  if mesh is not None and isinstance(getattr(mesh, "shape", None), Mapping):
+    cp_size = reordered_cp_size(config, mesh)
+    if isinstance(cp_size, int) and not isinstance(cp_size, bool) and cp_size > 1:
+      raise ValueError(
+          f"{entrypoint_name} does not reorder batches for load-balanced context parallelism "
+          f"(mesh axis {getattr(config, 'context_sharding', 'context')!r} has size {cp_size} with "
+          "context_parallel_load_balance=True). Set context_parallel_load_balance=False."
+      )
+    return
+
+  ici_cp = getattr(config, "ici_context_parallelism", 1)
+  dcn_cp = getattr(config, "dcn_context_parallelism", 1)
+  if (
+      isinstance(ici_cp, int)
+      and not isinstance(ici_cp, bool)
+      and isinstance(dcn_cp, int)
+      and not isinstance(dcn_cp, bool)
+      and (ici_cp > 1 or dcn_cp > 1)
+  ):
+    raise ValueError(
+        f"{entrypoint_name} does not reorder batches for load-balanced context parallelism "
+        f"(ici_context_parallelism={ici_cp}, dcn_context_parallelism={dcn_cp} with "
+        "context_parallel_load_balance=True). Set context_parallel_load_balance=False."
+    )
 
 
 def resolve_reorder_strategy(config):

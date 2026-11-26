@@ -205,7 +205,7 @@ class ExpertReplicationConfigTest(parameterized.TestCase):
               "ici_fsdp_parallelism": 2,
               "ici_expert_parallelism": 2,
           },
-          "weight_quantization_calibration_method to be fixed",
+          "absmax weight calibration does not support expert_replicas_per_device > 0",
       ),
       ("fp8_moe", {"fp8_moe": True, "weight_dtype": "float8_e4m3fn"}, "fp8_moe=True"),
       ("te_gmm_quantization", {"te_gmm_quantization": "te_mxfp8"}, "te_gmm_quantization"),

@@ -31,11 +31,15 @@ import numpy as np
 from jax.sharding import Mesh
 
 from maxtext.common.common_types import Config, MultimodalInput
-from maxtext.m3.core.sharding import DefaultSharding, Sharding, param_metadata
+from maxtext.m3.core.sharding import (
+    DefaultSharding,
+    Sharding,
+    check_mesh,
+    param_metadata,
+)
 from maxtext.m3.models.qwen3.modeling_qwen3 import (
-    Qwen3MLP,
     Qwen3Decoder,
-    check_construction_mesh,
+    Qwen3MLP,
     norm_kwargs,
 )
 
@@ -975,6 +979,15 @@ def merge_multimodal_embeddings(
   return jax.vmap(_merge_single, in_axes=(0, 0, 0))(text_embeddings, flat_mm, mask)
 
 
+def check_construction_mesh() -> None:
+  """Refuses a mesh in scope that `Qwen3VLModel` cannot use (`core.sharding.check_mesh`)."""
+  mesh = jax.sharding.get_abstract_mesh()
+  if not mesh.empty:
+    check_mesh(mesh, ("data", "fsdp", "tensor", "expert"))
+    if any(t == jax.sharding.AxisType.Explicit for t in mesh.axis_types):
+      raise ValueError("m3 Qwen3-VL does not implement shard_mode='explicit' yet. Use shard_mode='auto'.")
+
+
 class Qwen3VLModel(nnx.Module):
   """Top-level self-contained Qwen3-VL multimodal model in m3 format."""
 
@@ -992,6 +1005,7 @@ class Qwen3VLModel(nnx.Module):
       raise ValueError("m3 Qwen3-VL does not support layer scanning. Set scan_layers=false.")
     check_construction_mesh()
     self.config = config
+    self.mesh = mesh
     self.sharding = sharding or DefaultSharding()
 
     # 1. Vision Tower matching checkpoint parameter hierarchy

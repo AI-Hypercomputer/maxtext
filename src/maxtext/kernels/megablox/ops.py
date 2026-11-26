@@ -16,10 +16,12 @@
 
 # pylint: disable=too-many-positional-arguments
 
+from collections.abc import Callable
 import dataclasses
 import functools
-from typing import List, Literal, NamedTuple, Tuple
+from typing import Any, List, Literal, NamedTuple, Tuple
 import jax
+from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 from maxtext.kernels.megablox import backend
 from maxtext.kernels.megablox import pallas_mosaic_tpu_v2_gmm_kernel as gmm_v2
@@ -29,6 +31,16 @@ from maxtext.layers import quantizations
 import qwix
 import qwix.pallas as qpl
 import tokamax
+
+# Upstream routes activate only on tokamax >= 0.0.18 (first release with gmm_fuser / op_fusion);
+# older versions (e.g. decoupled-requirements.txt pinning tokamax==0.0.12) fall back to the fork.
+try:
+  from tokamax._src.ops.gmm_v2 import gmm_fuser  # pylint: disable=g-import-not-at-top
+  from tokamax._src.ops.gmm_v2 import gmm_v2 as tokamax_gmm_v2  # pylint: disable=g-import-not-at-top
+  from tokamax._src.ops.gmm_v2 import tgmm_v2 as tokamax_tgmm_v2  # pylint: disable=g-import-not-at-top
+  from tokamax.ops import op_fusion  # pylint: disable=g-import-not-at-top
+except ImportError:
+  gmm_fuser, tokamax_gmm_v2, tokamax_tgmm_v2, op_fusion = None, None, None, None
 
 
 DLHS_RAGGED_DOT_DIM_NUMS = jax.lax.RaggedDotDimensionNumbers(
@@ -101,6 +113,9 @@ def gmm(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    rhs_amax: jnp.ndarray | None = None,
+    rhs_scale_kept_axes: tuple[int, ...] = (),
+    gmm_v2_tail_chunks: bool = False,
 ):
   """Grouped matrix multiplication operation.
 
@@ -110,6 +125,11 @@ def gmm(
   consumes / produces the matching 3D cotangents without relayout copies. With
   `out_is_3d`, a forward `partial_sum` must also be 3D; with `return_lhs`, the
   cotangent of the returned (3D) lhs is accumulated into the 3D dlhs in place.
+
+  `rhs_amax`: this shard's slice of the whole-weight amax for dynamic QWAG ([1, 1, 1], [1, 1, N] or [E, 1, N]).
+  `rhs_scale_kept_axes`: the rhs axes that amax kept; the weight all-gather gathers the scale only along these.
+  `gmm_v2_tail_chunks` passes tail_chunks to the gmm_v2 forward and DLHS
+  kernels (see pallas_mosaic_tpu_v2_gmm_kernel.gmm_v2).
   """
   lhs_ndim = (lhs.qvalue if isinstance(lhs, qpl.QArray) else lhs).ndim
   if (lhs_ndim == 3 or out_is_3d) and not (use_tokamax_backend and use_gmm_v2):
@@ -158,7 +178,7 @@ def gmm(
   gmm_fwd_bwd = lambda *args: _gmm_fwd(*args)[0]  # pylint: disable=C3001
   gmm_fwd_bwd = jax.custom_vjp(
       gmm_fwd_bwd,
-      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25),
+      nondiff_argnums=(3, 4, 7, 8, 9, 10, 11, 12, 13, 14, 15, 17, 18, 19, 20, 21, 22, 23, 25, 27, 28),
   )
   gmm_fwd_bwd.defvjp(_gmm_fwd, functools.partial(_gmm_bwd, lhs_dtype, rhs_dtype))
   out, lhs_out, rhs_out = gmm_fwd_bwd(
@@ -188,6 +208,9 @@ def gmm(
       fuse_3d_dlhs_ps,
       tc_routing,
       tc_unsort_cfg,
+      rhs_amax,
+      rhs_scale_kept_axes,
+      gmm_v2_tail_chunks,
   )
   if return_lhs and return_rhs:
     return out, lhs_out, rhs_out
@@ -250,6 +273,9 @@ def _gmm_fwd(
     fuse_3d_dlhs_ps: bool = False,
     tc_routing: object = None,
     tc_unsort_cfg: TcUnsortCfg | None = None,
+    rhs_amax: jnp.ndarray | None = None,
+    rhs_scale_kept_axes: tuple[int, ...] = (),
+    gmm_v2_tail_chunks: bool = False,
 ) -> tuple[
     tuple[jnp.ndarray, jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray],
     tuple[
@@ -279,18 +305,32 @@ def _gmm_fwd(
   # or gathered weights) to return matching cotangent containers in backward pass.
   lhs_is_qarray = isinstance(lhs, qpl.QArray)
   rhs_is_qarray = isinstance(rhs, qpl.QArray)
+  if rhs_amax is not None and quantization_rule is not None and quantization_rule.disable_channelwise_axes:
+    raise ValueError("rhs_amax (dynamic QWAG) is not supported with disable_channelwise_axes.")
+  # Dynamic QWAG: every shard must be quantized with the whole-weight amax.
+  if (
+      rhs_amax is None
+      and not rhs_is_qarray
+      and weight_gather_axes
+      and use_tokamax_backend
+      and quantization_rule
+      and quantization_rule.bwd_qtype
+      and quantization_rule.weight_qtype
+      and quantizations.is_dynamic_qwag_calibration(quantization_rule.weight_calibration_method)
+  ):
+    raise ValueError("Dynamic (absmax) QWAG needs rhs_amax.")
+  qag_weight_calibration_ok = quantization_rule is not None and (
+      quantizations.is_static_calibration(quantization_rule.weight_calibration_method) or rhs_amax is not None
+  )
   if flat_fsdp_shard is not None:
     if rhs_is_qarray or rhs.ndim != 2 or not weight_gather_axes:
       raise NotImplementedError("flat_fsdp_shard needs a plain 2D rhs block and weight_gather_axes.")
     if any(axis_idx != 0 for _, axis_idx in weight_gather_axes):
       raise ValueError("flat_fsdp_shard: the flat rhs is gathered on dim 0 only.")
-    if not (
-        use_tokamax_backend
-        and quantization_rule
-        and quantization_rule.bwd_qtype
-        and quantization_rule.weight_calibration_method.startswith("fixed")
-    ):
-      raise NotImplementedError("flat_fsdp_shard requires the tokamax QAG path (fixed weight calibration, bwd_qtype).")
+    if not (use_tokamax_backend and quantization_rule and quantization_rule.bwd_qtype and qag_weight_calibration_ok):
+      raise NotImplementedError(
+          "flat_fsdp_shard requires the tokamax QAG path (fixed or dynamic absmax weight calibration, bwd_qtype)."
+      )
 
   # Quantize activation and weight
   if quantization_rule:
@@ -302,6 +342,7 @@ def _gmm_fwd(
         use_gmm_v2,
         use_manual_quantization,
         rhs_is_flat2d=flat_fsdp_shard is not None,
+        rhs_amax=rhs_amax,
     )
 
   # Quantization All-Gather (QAG) for weight: only supported for following conditions
@@ -309,12 +350,12 @@ def _gmm_fwd(
       use_tokamax_backend
       and quantization_rule
       and quantization_rule.bwd_qtype
-      and quantization_rule.weight_calibration_method.startswith("fixed")
+      and qag_weight_calibration_ok
       and isinstance(rhs, qpl.QArray)
       and weight_gather_axes
   ):
     # pyrefly: ignore[bad-assignment]
-    rhs = _fwd_gather_weight(rhs, weight_gather_axes, gathered_shape=flat_fsdp_shard)
+    rhs = _fwd_gather_weight(rhs, weight_gather_axes, gathered_shape=flat_fsdp_shard, scale_kept_axes=rhs_scale_kept_axes)
 
   # Backend Execution Routing
   if use_tokamax_backend and not use_gmm_v2:
@@ -331,6 +372,7 @@ def _gmm_fwd(
         partial_sum,
         quantization_rule,
         out_is_3d=out_is_3d,
+        tail_chunks=gmm_v2_tail_chunks,
     )
   else:
     out = _fwd_run_megablox(
@@ -377,6 +419,7 @@ def _fwd_quantize_activation_and_weight(
     use_gmm_v2: bool,
     use_manual_quantization: bool,
     rhs_is_flat2d: bool = False,
+    rhs_amax: jnp.ndarray | None = None,
 ) -> tuple[jnp.ndarray | qpl.QArray, jnp.ndarray | qpl.QArray]:
   """Handles act and weight quantization for GMM forward inputs."""
   if quantization_rule.act_qtype and not isinstance(lhs, qpl.QArray) and not use_gmm_v2:
@@ -389,7 +432,10 @@ def _fwd_quantize_activation_and_weight(
     )
 
   if quantization_rule.weight_qtype and not isinstance(rhs, qpl.QArray):
-    if not use_manual_quantization:
+    if rhs_amax is not None:
+      # Dynamic QWAG: same scale on every shard.
+      rhs = quantizations.quantize_with_amax(rhs, quantization_rule.weight_qtype, rhs_amax)
+    elif not use_manual_quantization:
       rhs = qpl.quantize(
           rhs,
           quantization_rule.weight_qtype,
@@ -416,22 +462,30 @@ def _fwd_gather_weight(
     rhs: qpl.QArray,
     weight_gather_axes: List[Tuple[str, int]],
     gathered_shape: tuple[int, ...] | None = None,
+    scale_kept_axes: tuple[int, ...] = (),
 ) -> qpl.QArray:
   """Applies QAG (Quantization All-Gather) to RHS weights during forward pass.
+
+  The scale (and zero_point) is gathered too along the gathered axes in `scale_kept_axes` (the axes a dynamic-QWAG
+  amax kept); by default it is per-tensor and not gathered.
 
   With `gathered_shape` (moe_flat_fsdp_weights) the gathered 2D [G * rows, cols]
   qvalue is bitcast to (G, rows, cols) and a per-channel [1, cols] scale to [1, 1, cols].
   """
-  if gathered_shape is None:
-    for axis_name, axis_idx in weight_gather_axes:
-      rhs_qvalue = jax.lax.all_gather(rhs.qvalue, axis_name, axis=axis_idx, tiled=True)
-      # replace the qvalue with the gathered qvalue in the QArray
-      rhs = dataclasses.replace(rhs, qvalue=rhs_qvalue)
-    return rhs
 
-  qvalue = rhs.qvalue
+  def _gather_scale(s, axis_name, axis_idx):
+    if s is None or axis_idx not in scale_kept_axes:
+      return s
+    return jax.lax.all_gather(s, axis_name, axis=axis_idx, tiled=True)
+
+  qvalue, scale, zero_point = rhs.qvalue, rhs.scale, rhs.zero_point
   for axis_name, axis_idx in weight_gather_axes:
+    scale = _gather_scale(scale, axis_name, axis_idx)
+    zero_point = _gather_scale(zero_point, axis_name, axis_idx)
     qvalue = jax.lax.all_gather(qvalue, axis_name, axis=axis_idx, tiled=True)
+  if gathered_shape is None:
+    return dataclasses.replace(rhs, qvalue=qvalue, scale=scale, zero_point=zero_point)
+
   qvalue = qvalue.reshape(gathered_shape)
 
   def _expand(s):
@@ -439,7 +493,7 @@ def _fwd_gather_weight(
       return s
     return s.reshape((1,) * (len(gathered_shape) - s.ndim) + tuple(s.shape))
 
-  return dataclasses.replace(rhs, qvalue=qvalue, scale=_expand(rhs.scale), zero_point=_expand(rhs.zero_point))
+  return dataclasses.replace(rhs, qvalue=qvalue, scale=_expand(scale), zero_point=_expand(zero_point))
 
 
 def _fwd_run_tokamax_v1(
@@ -516,6 +570,158 @@ def _fwd_prepare_lhs_scale(quantization_rule: qwix.QtRule | None) -> jax.Array |
   return jnp.full((1, 1), scale_val, jnp.float32)
 
 
+def _to_2d(x: jnp.ndarray) -> jnp.ndarray:
+  return x.reshape(x.shape[0], -1) if x.ndim == 3 else x
+
+
+def _group_offset_1d(group_offset: jnp.ndarray | None) -> jnp.ndarray | None:
+  return jnp.atleast_1d(jnp.asarray(group_offset, dtype=jnp.int32)) if group_offset is not None else None
+
+
+def _tpu_vmem_limit_bytes() -> int | None:
+  try:
+    # Exceeds Tokamax's 0.90 default: upstream gmm_v2 triple-buffers rhs (~59 MiB total for
+    # FP8 512x7168x2048 vs 57.6 MiB at 0.90 on 64 MiB TPU7x).
+    return int(0.96 * pltpu.get_tpu_info().vmem_capacity_bytes)
+  except ValueError:
+    # CPU unit tests without an abstract TPU mesh cannot query TPU VMEM capacity.
+    return None
+
+
+def _is_fuser_aligned_tile(tile_size: int, full_dim: int | None = None, num_lanes: int = 128) -> bool:
+  """Returns whether Mosaic accepts fused 3D HBM slices on (M, D0, 128) for `tile_size`."""
+  if tile_size <= 0 or (full_dim is not None and full_dim <= 0):
+    return False
+  return tile_size == full_dim or (tile_size % (8 * num_lanes) == 0 and (full_dim is None or full_dim % tile_size == 0))
+
+
+def _upstream_tiles(tile_info: gmm_v2.TileSizes, up_gmm: Any):
+  return up_gmm.TileSizes(
+      tile_m=tile_info.tile_m,
+      tile_k=tile_info.tile_k,
+      tile_n=tile_info.tile_n,
+      bucket_base=tile_info.tile_m,
+  )
+
+
+def _gmm_route(
+    lhs_ndim: int,
+    out_is_3d: bool,
+    has_partial_sum: bool,
+    tile_info: gmm_v2.TileSizes | Callable[..., gmm_v2.TileSizes],
+    tail_chunks: bool,
+    *,
+    k_dim: int | None = None,
+) -> Literal["fuser", "upstream", "fork"]:
+  """Selects the GMM v2 execution backend route.
+
+  | Condition                                                        | Route      |
+  |------------------------------------------------------------------|------------|
+  | tail_chunks=True or heuristic (callable) tile_info               | "fork"     |
+  | 3D lhs, not partial_sum, explicit full_dim or aligned divisor    | "fuser"    |
+  | Remaining 3D calls (out_is_3d, 3D partial_sum, unaligned tile_k) | "upstream" |
+  | Plain 2D calls (lhs_ndim == 2, not out_is_3d, incl. 2D ps)       | "fork"     |
+  """
+  if tail_chunks or callable(tile_info):
+    return "fork"
+  if lhs_ndim == 3 and not has_partial_sum and _is_fuser_aligned_tile(tile_info.tile_k, k_dim):
+    return "fuser"
+  if lhs_ndim == 3 or out_is_3d:
+    return "upstream"
+  # Plain 2D calls (including 2D partial_sum) stay on the fork until the forked kernels are removed (b/560195193).
+  return "fork"
+
+
+def _call_gmm_v2(
+    *,
+    lhs: jnp.ndarray,
+    rhs: Any,
+    group_sizes: jnp.ndarray,
+    rhs_scale: jnp.ndarray | None = None,
+    group_offset: jnp.ndarray | None = None,
+    lhs_scale: jnp.ndarray | None = None,
+    partial_sum: jnp.ndarray | None = None,
+    tile_info: gmm_v2.TileSizes | Callable[..., gmm_v2.TileSizes],
+    preferred_element_type: jax.typing.DTypeLike,
+    maybe_quantize_lhs: bool = True,
+    zero_initialize: bool = True,
+    transpose_rhs: bool = False,
+    out_is_3d: bool = False,
+    tail_chunks: bool = False,
+) -> jnp.ndarray:
+  """Routes 3D GMM paths through upstream Tokamax gmm_fuser / gmm_v2 when available."""
+  if (fuser := gmm_fuser) is not None and (up_gmm := tokamax_gmm_v2) is not None and (fusion := op_fusion) is not None:
+    route = _gmm_route(
+        lhs.ndim,
+        out_is_3d,
+        partial_sum is not None,
+        tile_info,
+        tail_chunks,
+        k_dim=lhs.shape[1] * lhs.shape[2] if lhs.ndim == 3 else None,
+    )
+    if route == "fuser":
+      assert not callable(tile_info)
+      vmem_limit_bytes = _tpu_vmem_limit_bytes()
+      fuser_tiles = _upstream_tiles(tile_info, up_gmm)
+      offset_1d = _group_offset_1d(group_offset)
+
+      def _fused_gmm(lhs_arr, rhs_arr, gs, r_scale, g_offset, l_scale):
+        return fuser.gmm_v2_fusible(
+            lhs=lhs_arr.reshape(lhs_arr.shape[0], -1),
+            rhs=rhs_arr,
+            group_sizes=gs,
+            rhs_scale=r_scale,
+            group_offset=g_offset,
+            lhs_scale=l_scale,
+            tile_info=fuser_tiles,
+            vmem_limit_bytes=vmem_limit_bytes,
+            preferred_element_type=preferred_element_type,
+            maybe_quantize_lhs=maybe_quantize_lhs,
+            zero_initialize=zero_initialize,
+            transpose_rhs=transpose_rhs,
+        )
+
+      out = fusion.fuse(_fused_gmm)(lhs, rhs, group_sizes, rhs_scale, offset_1d, lhs_scale)
+      return out.reshape(out.shape[0], out.shape[1] // 128, 128) if out_is_3d else out
+    if route == "upstream":
+      assert not callable(tile_info)
+      ps_2d = _to_2d(partial_sum) if partial_sum is not None else None
+      out = up_gmm.gmm_v2(
+          lhs=_to_2d(lhs),
+          rhs=rhs,
+          group_sizes=group_sizes,
+          rhs_scale=rhs_scale,
+          partial_sum=ps_2d,
+          tile_info=_upstream_tiles(tile_info, up_gmm),
+          vmem_limit_bytes=_tpu_vmem_limit_bytes(),
+          preferred_element_type=jnp.dtype(preferred_element_type),
+          group_offset=_group_offset_1d(group_offset),
+          lhs_scale=lhs_scale,
+          maybe_quantize_lhs=maybe_quantize_lhs,
+          zero_initialize=zero_initialize,
+          transpose_rhs=transpose_rhs,
+      )
+      return out.reshape(out.shape[0], out.shape[1] // 128, 128) if out_is_3d else out
+
+  fallback_tiles = gmm_v2.calculate_tiling if callable(tile_info) else tile_info
+  return gmm_v2.gmm_v2(
+      lhs=lhs,
+      rhs=rhs,
+      group_sizes=group_sizes,
+      rhs_scale=rhs_scale,
+      partial_sum=partial_sum,
+      tile_info=fallback_tiles,
+      preferred_element_type=preferred_element_type,
+      group_offset=group_offset,
+      lhs_scale=lhs_scale,
+      maybe_quantize_lhs=maybe_quantize_lhs,
+      zero_initialize=zero_initialize,
+      transpose_rhs=transpose_rhs,
+      out_is_3d=out_is_3d,
+      tail_chunks=tail_chunks,
+  )
+
+
 def _fwd_run_tokamax_v2(
     lhs: jnp.ndarray | qpl.QArray,
     rhs: jnp.ndarray | qpl.QArray,
@@ -527,6 +733,7 @@ def _fwd_run_tokamax_v2(
     partial_sum: jnp.ndarray | None,
     quantization_rule: qwix.QtRule | None = None,
     out_is_3d: bool = False,
+    tail_chunks: bool = False,
 ) -> jnp.ndarray:
   """Executes the Tokamax GMM V2 backend for forward pass OUT = LHS @ RHS."""
   rhs_operand = rhs
@@ -557,7 +764,7 @@ def _fwd_run_tokamax_v2(
   else:
     fwd_tiling = gmm_v2.TileSizes(tile_m=tiling[0], tile_k=tiling[1], tile_n=tiling[2])
 
-  out = gmm_v2.gmm_v2(
+  out = _call_gmm_v2(
       lhs=lhs_operand,
       rhs=rhs_operand,
       group_sizes=group_sizes,
@@ -569,6 +776,7 @@ def _fwd_run_tokamax_v2(
       lhs_scale=lhs_scale,
       maybe_quantize_lhs=maybe_quantize_lhs,
       out_is_3d=out_is_3d,
+      tail_chunks=tail_chunks,
   )
 
   # gmm_v2 only rescales output when it quantizes lhs internally; for pre-quantized QArray
@@ -633,6 +841,8 @@ def _gmm_bwd(
     out_is_3d: bool,
     fuse_3d_dlhs_ps: bool,
     tc_unsort_cfg: TcUnsortCfg | None,
+    rhs_scale_kept_axes: tuple[int, ...],
+    gmm_v2_tail_chunks: bool,
     residual: tuple[
         jnp.ndarray | qpl.QArray,
         jnp.ndarray | qpl.QArray,
@@ -652,8 +862,10 @@ def _gmm_bwd(
     jnp.ndarray | None,
     jnp.ndarray | None,
     None,
+    None,
 ]:
   """Backward function for throughput GMM VJP."""
+  del rhs_scale_kept_axes  # Only used by the forward weight all-gather.
   (
       residual_lhs,
       residual_rhs,
@@ -755,6 +967,7 @@ def _gmm_bwd(
       use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
       dlhs_is_3d=lhs_is_3d,
       fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
+      tail_chunks=gmm_v2_tail_chunks,
   )
 
   # 4. DRHS Gradient Execution
@@ -804,7 +1017,7 @@ def _gmm_bwd(
         qtype=residual_rhs.qtype,
     )
 
-  return dlhs, drhs, None, None, d_existing_out, dpartial_sum, None
+  return dlhs, drhs, None, None, d_existing_out, dpartial_sum, None, None
 
 
 def _check_tc_unsort_bwd_supported(
@@ -978,6 +1191,7 @@ def _compute_dlhs(
     use_dlhs_transpose_rhs: bool = False,
     dlhs_is_3d: bool = False,
     fuse_3d_dlhs_ps: bool = False,
+    tail_chunks: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Routes execution of DLHS based on backend choices.
 
@@ -1008,6 +1222,7 @@ def _compute_dlhs(
         use_dlhs_transpose_rhs=use_dlhs_transpose_rhs,
         out_is_3d=dlhs_is_3d,
         fuse_3d_dlhs_ps=fuse_3d_dlhs_ps,
+        tail_chunks=tail_chunks,
     )
   else:
     dlhs = _dlhs_run_megablox(dlhs_dout, rhs, group_sizes, group_offset, lhs_dtype, tiling, interpret, lhs_vma_axes)
@@ -1086,6 +1301,7 @@ def _dlhs_run_tokamax_v2(
     use_dlhs_transpose_rhs: bool = False,
     out_is_3d: bool = False,
     fuse_3d_dlhs_ps: bool = False,
+    tail_chunks: bool = False,
 ) -> tuple[jnp.ndarray, bool]:
   """Executes Tokamax GMM V2 backend for DLHS = DLHS_dout @ RHS^T."""
   is_qarray_dout = isinstance(dlhs_dout, qpl.QArray)
@@ -1116,7 +1332,7 @@ def _dlhs_run_tokamax_v2(
     lhs_scale_applied = lhs_scale is not None
     kernel_partial_sum = partial_sum
 
-  dlhs = gmm_v2.gmm_v2(
+  dlhs = _call_gmm_v2(
       lhs=dlhs_lhs,
       rhs=dlhs_rhs,
       group_sizes=group_sizes,
@@ -1133,6 +1349,7 @@ def _dlhs_run_tokamax_v2(
       maybe_quantize_lhs=not is_qarray_dout and kernel_lhs_scale is None,
       zero_initialize=not (fuse_3d_dlhs_ps and out_is_3d and kernel_partial_sum is not None),
       out_is_3d=out_is_3d,
+      tail_chunks=tail_chunks,
   )
 
   if not can_fuse_scale:
@@ -1286,6 +1503,112 @@ def _drhs_prepare_bwd_scale(drhs_dout: qpl.QArray) -> jnp.ndarray:
   return rhs_scale
 
 
+def _tgmm_route(
+    lhs_ndim: int,
+    rhs_ndim: int,
+    has_partial_sum: bool,
+    tile_info: gmm_v2.TileSizes | Callable[..., Any],
+    *,
+    k_dim: int | None = None,
+    n_dim: int | None = None,
+) -> Literal["fuser", "upstream", "fork"]:
+  """Selects the TGMM v2 execution backend route.
+
+  | Condition                                                        | Route      |
+  |------------------------------------------------------------------|------------|
+  | heuristic (callable) tile_info, or 2D lhs & 2D rhs               | "fork"     |
+  | 3D lhs or rhs, not partial_sum, explicit aligned tiles           | "fuser"    |
+  | 3D lhs or rhs with explicit tiles + partial_sum / unaligned      | "upstream" |
+  """
+  if callable(tile_info) or (lhs_ndim != 3 and rhs_ndim != 3):
+    # Plain 2D and heuristic calls stay on the fork until the forked kernels are removed (b/560195193).
+    return "fork"
+  if not has_partial_sum:
+    lhs_ok = lhs_ndim != 3 or _is_fuser_aligned_tile(tile_info.tile_k, k_dim)
+    rhs_ok = rhs_ndim != 3 or _is_fuser_aligned_tile(tile_info.tile_n, n_dim)
+    if lhs_ok and rhs_ok:
+      return "fuser"
+  return "upstream"
+
+
+def _call_tgmm_v2(
+    *,
+    lhs: jnp.ndarray,
+    rhs: jnp.ndarray,
+    group_sizes: jnp.ndarray,
+    num_actual_groups: int,
+    rhs_scale: jnp.ndarray | None,
+    group_offset: jnp.ndarray | None,
+    partial_sum: jnp.ndarray | None,
+    preferred_element_type: jax.typing.DTypeLike,
+    tiling: tuple,
+    use_gmm_v2_heuristic_tiling: bool,
+) -> jnp.ndarray:
+  """Routes 3D DRHS TGMM through upstream Tokamax gmm_fuser / tgmm_v2 when available."""
+  explicit_tiles = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
+  tile_info = tgmm_v2.calculate_tgmm_tiling if use_gmm_v2_heuristic_tiling else explicit_tiles
+  if (
+      (fuser := gmm_fuser) is not None
+      and (up_gmm := tokamax_gmm_v2) is not None
+      and (up_tgmm := tokamax_tgmm_v2) is not None
+      and (fusion := op_fusion) is not None
+  ):
+    route = _tgmm_route(
+        lhs.ndim,
+        rhs.ndim,
+        partial_sum is not None,
+        tile_info,
+        k_dim=lhs.shape[1] * lhs.shape[2] if lhs.ndim == 3 else None,
+        n_dim=rhs.shape[1] * rhs.shape[2] if rhs.ndim == 3 else None,
+    )
+    if route == "fuser":
+      vmem_limit_bytes = _tpu_vmem_limit_bytes()
+      fuser_tiles = _upstream_tiles(explicit_tiles, up_gmm)
+      offset_1d = _group_offset_1d(group_offset)
+      out_dtype = jnp.dtype(preferred_element_type)
+
+      def _fused_tgmm(lhs_arr, rhs_arr, gs, r_scale, g_offset):
+        return fuser.tgmm_v2_fusible(
+            lhs=_to_2d(lhs_arr),
+            rhs=_to_2d(rhs_arr),
+            group_sizes=gs,
+            num_actual_groups=num_actual_groups,
+            rhs_scale=r_scale,
+            group_offset=g_offset,
+            tile_info=fuser_tiles,
+            vmem_limit_bytes=vmem_limit_bytes,
+            preferred_element_type=out_dtype,
+        )
+
+      return fusion.fuse(_fused_tgmm)(lhs, rhs, group_sizes, rhs_scale, offset_1d)
+    if route == "upstream":
+      return up_tgmm.tgmm_v2(
+          lhs=_to_2d(lhs),
+          rhs=_to_2d(rhs),
+          group_sizes=group_sizes,
+          num_actual_groups=num_actual_groups,
+          rhs_scale=rhs_scale,
+          partial_sum=partial_sum,
+          preferred_element_type=jnp.dtype(preferred_element_type),
+          group_offset=_group_offset_1d(group_offset),
+          tile_info=_upstream_tiles(explicit_tiles, up_gmm),
+          vmem_limit_bytes=_tpu_vmem_limit_bytes(),
+      )
+
+  return tgmm_v2.tgmm_v2(
+      lhs=lhs,
+      rhs=rhs,
+      group_sizes=group_sizes,
+      num_actual_groups=num_actual_groups,
+      rhs_scale=rhs_scale,
+      partial_sum=partial_sum,
+      precision=jax.lax.Precision.DEFAULT,
+      preferred_element_type=preferred_element_type,
+      group_offset=group_offset,
+      tile_info=tile_info,
+  )
+
+
 def _drhs_run_tokamax_v2(
     drhs_dout: jnp.ndarray | qpl.QArray,
     lhs: jnp.ndarray,
@@ -1305,22 +1628,17 @@ def _drhs_run_tokamax_v2(
   if isinstance(drhs_dout, qpl.QArray):
     rhs_scale = _drhs_prepare_bwd_scale(drhs_dout)
 
-  if use_gmm_v2_heuristic_tiling:
-    drhs_tiling = tgmm_v2.calculate_tgmm_tiling
-  else:
-    drhs_tiling = gmm_v2.TileSizes(tile_m=tiling[6], tile_k=tiling[7], tile_n=tiling[8])
-
-  return tgmm_v2.tgmm_v2(
+  return _call_tgmm_v2(
       lhs=drhs_lhs,
       rhs=drhs_rhs,
       group_sizes=group_sizes,
       num_actual_groups=num_actual_groups,
       rhs_scale=rhs_scale,
-      partial_sum=partial_sum,
-      precision=jax.lax.Precision.DEFAULT,
-      preferred_element_type=rhs_dtype,
       group_offset=group_offset,
-      tile_info=drhs_tiling,
+      partial_sum=partial_sum,
+      preferred_element_type=rhs_dtype,
+      tiling=tiling,
+      use_gmm_v2_heuristic_tiling=use_gmm_v2_heuristic_tiling,
   )
 
 

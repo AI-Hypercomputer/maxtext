@@ -24,6 +24,7 @@ import transformers
 
 import grain.python as grain
 
+from maxtext.configs.types import resolve_tokenizer_path
 from maxtext.input_pipeline import data_processing_utils
 from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import input_pipeline_utils
@@ -206,7 +207,7 @@ def vision_sft_preprocessing_pipeline(
   )
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
-      config.tokenizer_path,
+      resolve_tokenizer_path(config.tokenizer_path),
       add_bos_token=False,
       add_eos_token=False,
       legacy=False,
@@ -363,7 +364,7 @@ def preprocessing_pipeline(
     dataset = dataset.repeat(num_epoch)
 
   tokenizer = transformers.AutoTokenizer.from_pretrained(
-      tokenizer_path,
+      resolve_tokenizer_path(tokenizer_path),
       add_bos_token=add_bos if not use_sft else False,
       add_eos_token=add_eos if not use_sft else False,
       legacy=False,

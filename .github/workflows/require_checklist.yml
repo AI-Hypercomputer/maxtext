@@ -21,6 +21,9 @@ on:
 jobs:
   check_pr_body:
     name: Require PR Checklist
+    # PRs opened by copybara-service[bot] mirror changes made outside GitHub and have no checklist. Skip them: a
+    # failed check makes the bot push the PR again before merging it, which re-runs the whole CI.
+    if: github.event.pull_request.user.login != 'copybara-service[bot]'
     runs-on: ubuntu-latest
     permissions:
       pull-requests: read

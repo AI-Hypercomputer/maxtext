@@ -32,6 +32,13 @@ Optimize storage costs and performance with multi-tier usage.
 
 Convenient tools to convert between Hugging Face and MaxText checkpoint.
 :::
+
+:::{grid-item-card} ⚡ Dynamic SafeTensors loading
+:link: checkpointing_solutions/safetensors_dynamic
+:link-type: doc
+
+Load Hugging Face `.safetensors` directly into MaxText without offline conversion.
+:::
 ::::
 
 ```{toctree}
@@ -43,4 +50,5 @@ checkpointing_solutions/gcs_checkpointing.md
 checkpointing_solutions/emergency_checkpointing.md
 checkpointing_solutions/multi_tier_checkpointing.md
 checkpointing_solutions/convert_checkpoint.md
+checkpointing_solutions/safetensors_dynamic.md
 ```

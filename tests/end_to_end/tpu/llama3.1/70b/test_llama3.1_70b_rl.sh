@@ -10,7 +10,7 @@
 # Usage:
 # export HF_TOKEN=<your Hugging Face access token>
 # export RUN_ID=$(date +%Y-%m-%d-%H-%M-%S)
-# bash test_llama3.1_70b_to_mt.sh $RUN_ID
+# bash tests/end_to_end/cpu/llama3.1/70b/test_llama3.1_70b_to_mt.sh $RUN_ID
 # bash test_llama3.1_70b_rl.sh $RUN_ID
 
 

@@ -18,220 +18,96 @@
 
 This page is for MaxText maintainers and contributors with write access to the
 `AI-Hypercomputer/maxtext` repository. It explains when the CI builds Docker
-images, and how to re-run the image-based tests without paying for a full
-rebuild. To build images on your own machine, see
+images, how stable builds reuse cached dependencies-only images, and how to
+re-run image-based tests without paying for a full dependency rebuild. To build
+images on your own machine, see
 [Build and upload MaxText Docker images](../tutorials/build_maxtext.md).
 
 ## When are Docker images built?
 
-Exactly one workflow builds images: `.github/workflows/build_and_push_docker_image.yml`.
-It is a reusable workflow (`workflow_call`), so it never starts on its own. Three
-workflows call it, and these are the only events that build an image:
+Exactly one workflow builds release/nightly images:
+`.github/workflows/build_and_push_docker_image.yml`. It is a reusable workflow
+(`workflow_call`), so it never starts on its own. Three workflows call it, and
+these are the only events that build an image:
 
 | Caller                                                        | Trigger                                                       | Images                                                                                                                                 |
 | ------------------------------------------------------------- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | TPU Docker Images Pipeline (`tpu_docker_images_pipeline.yml`) | Daily at 19:00 Pacific, or manual **Run workflow**            | `maxtext_jax_stable`, `maxtext_jax_nightly`, `maxtext_post_training_stable`, `maxtext_post_training_nightly`                           |
-| GPU Docker Images Pipeline (`gpu_docker_images_pipeline.yml`) | Nightly at 00:00 UTC, or manual **Run workflow**              | `maxtext_gpu_jax_stable`, `maxtext_gpu_jax_nightly`                                                                                    |
+| GPU Docker Images Pipeline (`gpu_docker_images_pipeline.yml`) | Nightly at 00:00 UTC, or manual **Run workflow**              | `maxtext_gpu_jax_stable`, `maxtext_gpu_jax_nightly` (each for `amd64` and `arm64`)                                                     |
 | Release Candidate Pipeline (`rc_release.yml`)                 | Weekly on Sunday at 19:00 Pacific, or manual **Run workflow** | `tpu_pre_training`, `tpu_post_training`. Always a full build (`release_pipeline.yml` verifies and promotes these certified RC images). |
 
-Nothing else builds an image:
-
-- A `git push` or a pull request never builds an image. The PR pipeline
-  (`ci_pipeline.yml`) builds a wheel from your commit (about 35 seconds), starts a
-  container from the prebuilt `maxtext-unit-test-tpu` / `maxtext-unit-test-cuda12`
-  base image, installs the wheel into a fresh virtual environment (about 20 seconds)
-  and runs the tests. Pushing a fix re-runs everything in roughly 1.5 minutes plus
-  test time, and a push cancels the previous in-progress run for the same PR.
-- The `maxtext-unit-test-*` base images contain only system packages, Python, pip
-  and uv. They are built by hand from `src/dependencies/dockerfiles/clean_py_env*.Dockerfile`
-  and pushed rarely.
+A `git push` or pull request never triggers the nightly release pipelines. PR CI
+(`ci_pipeline.yml`) maintains its own separate cached dependency images in
+`maxtext-test-images/maxtext_*_deps_ci` via `build_deps_image.yml`, rebuilt
+only when dependencies change.
 
 Every image pipeline run pushes
 `us-docker.pkg.dev/<project>/<repository>/<image>:<run_id>` **before** the tests
 run, then runs the CI test suite against that tag and, on success, adds the tag
-`verified-ci-<run_id>`. A failed test run does not delete the image, so it can be
-reused by the modes below.
+`verified-ci-<run_id>`. A failed test run does not delete the image, so GitHub's
+**Re-run failed jobs** reuses the already-built `<image>:<run_id>` without
+rebuilding.
 
-## Re-running tests without rebuilding images (fast-rebuild)
+## Cached dependencies-only images
 
-When an image pipeline run fails because of a flaky test or a code bug, you often
-want to re-run the tests with the **exact same dependencies** but updated code,
-without waiting for a full image rebuild.
+For **stable** TPU and GPU builds, `build_and_push_docker_image.yml` separates
+dependency installation from MaxText source code so unchanged dependencies are
+never rebuilt. The dependencies-only images (`maxtext_tpu_pre_train_deps`,
+`maxtext_tpu_post_train_deps`, `maxtext_gpu_pre_train_deps`) are internal build
+caches: they live only in the build repository (`maxtext-images-staging` for
+scheduled runs) and are never promoted to `maxtext-images`.
 
-### Three execution modes
+1. **Multi-stage dependency Dockerfiles** (`maxtext_tpu_dependencies.Dockerfile`
+   and `maxtext_gpu_dependencies.Dockerfile`) define:
 
-The TPU and GPU Docker Image Pipelines support three modes:
+   - **Stage 1 (`dependencies`):** installs OS packages, `gcloud`, Python
+     packages via `setup.sh`, strips `/deps/src/maxtext`, and sets `PYTHONPATH`.
+     It omits `MAXTEXT_*` path env vars so users mounting code at `/app`
+     auto-resolve paths from `src/maxtext/utils/globals.py`.
+   - **Stage 2 (`maxtext`):** inherits from `dependencies`, sets `ENV MAXTEXT_*`,
+     copies MaxText source code, tests, benchmarks, and downloads optional test
+     assets.
 
-| Mode                                   | What it does                                 | When to use                                                   |
-| -------------------------------------- | -------------------------------------------- | ------------------------------------------------------------- |
-| **build-all** (default)                | Full image build from scratch                | Nightly schedule, first build on a branch, dependency changes |
-| **fast-rebuild**                       | Overlay new code on a previous run's image   | Flaky test rerun with a fix, code-only iteration              |
-| **Re-run failed jobs** (GitHub native) | Re-run only failed jobs using the same image | Same code, same image, just retry                             |
+2. **Content-hash lookup (`src/dependencies/scripts/compute_deps_tag.sh`):**
+   computes a deterministic tag `[<platform>-]deps-<16hex>-b<12hex>` from the
+   relevant Dockerfile, `setup.sh`, pinned requirement/extra-dep files, and the
+   resolved Airlock base image digest, and looks it up in the build repository.
 
-How to choose:
+3. **Cache hit vs. cache miss:**
 
-- Flaky test, code unchanged: open the failed run and click **Re-run failed jobs**.
-  The run keeps its `run_id`, so it reuses the `<image>:<run_id>` already in the
-  registry. No build at all.
-  Needs the run's commit to still be on a branch. After a squash or force-push the
-  re-run fails at startup; dispatch a fast-rebuild from that run instead.
-- Code fix, dependency files unchanged: **fast-rebuild** with `source_run_id` set to
-  the failed run (or to the latest nightly run on `main`).
-- Anything under `src/dependencies/`, `pyproject.toml` or `.dockerignore` changed:
-  **build-all**.
+   - **Nightly / RC (`deps_image_name` empty):** skips cache lookup, calls
+     `build_deps_image.yml` (`--target dependencies`, `TF=true`, Airlock) to
+     push an intermediate staging tag (`:[<platform>-]deps-<run_id>`), and
+     overlays code with `maxtext_code_overlay.Dockerfile`.
+   - **Cache miss** (first run, dependency pin change, Dockerfile change, or
+     Airlock base image security update): calls `build_deps_image.yml`
+     (`--target dependencies`, `TF=true`, Airlock) to push
+     `maxtext_*_deps:<deps_tag>` to the build repository, then overlays code
+     onto that just-built digest via `maxtext_code_overlay.Dockerfile`.
+   - **Cache hit:** skips dependency installation completely and runs the same
+     `maxtext_code_overlay.Dockerfile` step on top of the cached
+     `maxtext_*_deps@sha256:<digest>` image:
+     - `overlay-pre-training`: `COPY --link` and `ENV` only (no `RUN`), so
+       BuildKit never pulls the cached base layers (finishes in seconds, even
+       for `arm64` GPU builds). Test assets are downloaded on the host runner
+       beforehand and included via `COPY --link`.
+     - `overlay-post-training`: inherits `overlay-pre-training` and runs a
+       `--no-deps` reinstall of `/deps/src/maxtext/integration/vllm` so the
+       adapter package metadata matches the overlaid code.
 
-### Using fast-rebuild
+   In every case only the full image is SBOM-scanned, promoted through the MOSS
+   Exit Gate, and tagged in `maxtext-images`. Its SBOM covers all layers,
+   including the dependencies-only base.
 
-From the GitHub UI (Actions tab):
+### Re-running after a failure
 
-1. Go to **Actions** → **TPU Docker Images Pipeline** (or GPU).
-2. Click **"Run workflow"** and pick your branch.
-3. Set **mode** to `fast-rebuild`.
-4. Optionally enter **source_run_id**: the run ID of the previous pipeline run whose
-   image you want to reuse. It is the last number in the run's URL, for example
-   `https://github.com/.../actions/runs/34793910551` → `34793910551`. Leave it empty
-   to auto-detect from branch history or `main`'s nightly.
-5. Click **"Run workflow"**.
-
-From the command line with the [GitHub CLI](https://cli.github.com/):
-
-```bash
-# Find the run ID of the source image (the run whose dependencies you want to reuse)
-gh run list --workflow=tpu_docker_images_pipeline.yml --limit 5
-
-# Rebuild the images with the code on <branch> on top of that run's dependency layers
-gh workflow run tpu_docker_images_pipeline.yml --ref <branch> \
-  -f mode=fast-rebuild -f source_run_id=<run_id>
-
-# Or omit source_run_id to auto-detect from branch history or main's nightly:
-gh workflow run tpu_docker_images_pipeline.yml --ref <branch> -f mode=fast-rebuild
-```
-
-Use `gpu_docker_images_pipeline.yml` for the GPU images. The new run appears in the
-Actions list as **Fast-rebuild from run \<run_id>**.
-
-If `source_run_id` is left empty, the pipeline auto-detects the source run:
-
-1. **Current branch**: the most recent run on this branch where all image builds succeeded.
-2. **`main` fallback**: if no valid run exists on the branch, the most recent successful nightly on `main`.
-3. **Explicit input always wins**: a provided `source_run_id` is used as-is, skipping auto-detection.
-
-The drift guard still runs after resolution, so a `main` fallback with different
-dependencies is caught and refused before any build runner starts.
-
-Other dispatch inputs:
-
-- `repository_name`: the Artifact Registry repository the images are pushed to
-  (`maxtext-images` for the nightly images). A failure issue is only opened for
-  `maxtext-images`. In fast-rebuild mode the source run must have pushed to the
-  same repository.
-- `allow_dependency_drift`: overrides the dependency drift guard. Not recommended,
-  see below.
-- `run_e2e_tests`: also runs the Airflow end-to-end tests after the build.
-
-The pipeline will:
-
-- Build a new wheel from your current code
-- Run the dependency drift guard as a lightweight pre-flight job, so a bad request
-  fails before a build runner starts
-- Verify the source image exists in the registry
-- Build a new image that uses the source image's dependency layers with your new
-  code overlaid
-- Run the full CI test suite against the new image
-
-### Typical workflow on a feature branch
-
-1. First run on the branch, or after changing dependency files: dispatch with
-   `mode=build-all`.
-2. Tests fail. Fix the code and push. Dispatch again with `mode=fast-rebuild` and
-   `source_run_id` set to the run from step 1. Only the code layers are rebuilt; the
-   dependencies are the same bytes as in step 1.
-3. A test flaked and the code did not change: **Re-run failed jobs** on that run.
-4. Another fix after step 2: dispatch `mode=fast-rebuild` again with `source_run_id`
-   set to the step 2 run. A fast-rebuild run can be the source of the next one, so
-   one full build carries a branch through many fixes.
-
-If your branch does not touch dependency files, skip step 1 and run
-`mode=fast-rebuild` without a `source_run_id`. The pipeline picks the latest
-nightly run on `main` automatically. The drift guard verifies that the two commits
-have identical dependency files before anything is built.
-
-### How it works
-
-Fast-rebuild starts from the source run's image by digest
-(`FROM <source_image>@sha256:<digest>`), so the OS packages, Python dependencies and
-JAX/XLA layers are reused byte-for-byte. Only the code directories (`src/maxtext/`,
-`tests/`, `benchmarks/`, `pytest.ini`) come from your commit. There are two overlay
-Dockerfiles under `src/dependencies/dockerfiles/`, and the drift guard picks one:
-
-- **Fast** (`maxtext_code_overlay_fast.Dockerfile`): `COPY --link` only, no `RUN`.
-  BuildKit never pulls the source image's layers and only uploads the new code
-  layers. Used whenever no code file was deleted or renamed since the source commit
-  and, for post-training images, `src/maxtext/integration/vllm/` is unchanged.
-- **Clean** (`maxtext_code_overlay.Dockerfile`): removes the old code directories
-  first, re-downloads the test assets and re-installs the vLLM adapter for
-  post-training images. Exact even when files were removed, but the `RUN` steps
-  force BuildKit to pull the 3 GB source image into the builder, so it costs about
-  as much as a full build.
-
-The build log prints the choice ("Overlay variant selected by the drift guard: fast")
-and the reason appears in the pre-flight job.
-
-Measured on the TPU pipeline (pre-training stable image, September 2026):
-
-| Build                    | Docker build step | Whole build job                           |
-| ------------------------ | ----------------- | ----------------------------------------- |
-| Full build (`build-all`) | about 200 s       | about 5 min                               |
-| Fast overlay             | about 10 s        | about 1 min (2 min if the runner is cold) |
-| Clean overlay            | about 200 s       | about 5 min                               |
-
-The remaining time in a fast job is the job's own container start-up, checkout and
-wheel install, not the image build. The CI tests that follow take the same time as
-in any other run.
-
-This guarantees that when you are debugging a test failure, the dependencies are
-**provably identical** to the source run, not just "probably cached".
-
-### Dependency drift guard
-
-If any dependency-related file changed between the source commit and your current
-commit, the fast-rebuild fails with an error listing the changed files. This
-prevents silently using stale dependencies.
-
-This includes changes you did not make yourself: after a rebase or merge from `main`
-that brought in new dependency files, the guard refuses every source run from before
-that point. Run `build-all` once on the new base and continue from that run.
-
-The guard runs from the workflow's own checkout and only reads the two commits as
-git data; it never executes code from the commit being built.
-
-Files checked:
-
-- `src/dependencies/` (requirements, scripts, dockerfiles, extra_deps)
-- `pyproject.toml`
-- `.dockerignore`
-
-To override (not recommended): set `allow_dependency_drift` to `true` in the
-workflow dispatch form. The resulting image may then have different dependencies
-than the source image.
-
-### Limitations
-
-- Fast-rebuild requires the source image to still exist in the registry. Images may
-  be garbage-collected after some time. If the lookup fails, the build log lists the
-  most recent tags of that image.
-- The source run's commit must still be fetchable from GitHub. A commit that was
-  rewritten by a squash or force-push stays fetchable until GitHub garbage-collects
-  it. If the pre-flight step fails with `Could not fetch commit`, run `build-all`
-  once and continue from that run.
-- **Re-run failed jobs** needs the run's commit to still be on a branch. After a
-  squash or force-push, GitHub fails the re-run at startup ("This run likely failed
-  because of a workflow file issue"). A fast-rebuild from that run still works,
-  because the pre-flight fetches the source commit by SHA.
-- The source run must have pushed to the same `repository_name`.
-- Each fast-rebuild adds a code layer of a few tens of MB on top of the source
-  image. The nightly `build-all` runs reset this.
-- The fast overlay never deletes files. The guard therefore switches to the clean
-  overlay when a code file was removed or renamed, which is slow but exact.
-- Fast-rebuild is manual by design. Nightly and release candidate builds always use
-  `build-all`.
+- **Flaky test, code unchanged:** click **Re-run failed jobs** on the failed
+  GitHub Actions run. It reuses `<image>:<run_id>` with no build at all.
+- **Code fix on a branch:** click **Run workflow** on **TPU Docker Images
+  Pipeline** or **GPU Docker Images Pipeline** in GitHub Actions and select your
+  branch. Manual runs default to `maxtext-test-images`; once the cached `maxtext_*_deps`
+  image exists in that repository, stable builds skip dependency installation
+  and overlay only your branch's code.
+- **Dependency change:** click **Run workflow** on your branch as usual — the
+  content hash changes automatically, triggering a clean rebuild of
+  `maxtext_*_deps` before building the full image.

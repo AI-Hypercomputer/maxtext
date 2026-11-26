@@ -16,7 +16,7 @@
 """Utils that are only interesting to MaxText and sharding related."""
 
 import collections
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 import contextlib
 import inspect  # for debugging only
 import math
@@ -54,6 +54,22 @@ def get_input_data_sharding(config, mesh, rules=None):
   else:
     data_sharding = create_sharding(mesh, config.input_data_sharding_logical_axes, rules=rules)
   return data_sharding
+
+
+def get_tunix_data_sharding_axis(config, mesh) -> tuple | None:
+  """Returns the input data sharding spec in the form of Tunix's `TrainingConfig.data_sharding_axis`.
+
+  Tunix re-shards fully addressable batches to `data_sharding_axis`, so it has to match the sharding the MaxText
+  data loader already applied. Returns None when that sharding cannot be resolved from `config` and `mesh`; callers
+  then keep their previous value.
+  """
+  if (
+      mesh is not None
+      and isinstance(getattr(mesh, "shape", None), Mapping)
+      and isinstance(getattr(config, "input_data_sharding_logical_axes", None), (list, tuple))
+  ):
+    return tuple(get_input_data_sharding(config, mesh).spec)
+  return None
 
 
 def get_logical_axis_rules():
@@ -449,7 +465,7 @@ def apply_m3_default_named_sharding(
   Falls back to the largest non-data/non-stage mesh axis when
   fsdp/fsdp_transpose are absent.
   """
-  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
+  shard_axes = tuple(a for a in ("fsdp", "fsdp_transpose", "context") if a in mesh.axis_names and int(mesh.shape[a]) > 1)
   if not shard_axes:
     fallback_axes = [
         (a, int(mesh.shape[a])) for a in mesh.axis_names if a not in ("data", "stage") and int(mesh.shape[a]) > 1
@@ -469,9 +485,12 @@ def apply_m3_default_named_sharding(
     # is replicated on purpose; leave it. Larger leaves with an all-`None` spec still get the
     # fallback: `Glm5Sharding` with tensor parallelism off resolves some of its kernels to
     # all-`None` and relies on it for FSDP. Sharded specs are kept by `is_unsharded` below.
+    path_strs = tuple(str(getattr(k, "key", getattr(k, "attr", k))) for k in path)
     metadata = a_var.get_metadata() if hasattr(a_var, "get_metadata") else {}
+    scan_axis = metadata.get("param_scan_axis")
     rank = len(getattr(a_var.get_value() if hasattr(a_var, "get_value") else a_var, "shape", ()))
-    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec) and rank == 1:
+    unstacked_rank = rank - (1 if scan_axis is not None and rank >= 1 else 0)
+    if isinstance(metadata.get("out_sharding"), jax.sharding.PartitionSpec) and unstacked_rank == 1:
       return s_var
     cur_sharding = s_var.get_value() if hasattr(s_var, "get_value") else s_var
     is_unsharded = (
@@ -485,20 +504,25 @@ def apply_m3_default_named_sharding(
     if not hasattr(inner_a, "shape"):
       return s_var
     shape = inner_a.shape
-    path_strs = tuple(str(getattr(k, "key", getattr(k, "attr", k))) for k in path)
     # Scanned `decoder.cycles.*` / `super_block.*` and axis-0 `vmap` stacks that prepend a leading `None`
     # (`P(None, None)` on stacked 1D norms) carry a leading layer axis at `d = 0`; never shard it.
-    # (`ScannedLayers` under `decoder.layers.*` stacks at `param_scan_axis=1`, where `d = 0` is `emb_dim`.)
-    has_leading_scan_none = (
-        hasattr(cur_sharding, "spec")
-        and isinstance(cur_sharding.spec, jax.sharding.PartitionSpec)
-        and len(cur_sharding.spec) == len(shape)
-        and len(shape) >= 2
-        and cur_sharding.spec[0] is None
-    )
-    start_d = 1 if ("cycles" in path_strs or "super_block" in path_strs or has_leading_scan_none) else 0
-    for d in range(start_d, len(shape)):
-      if shape[d] % axis_size == 0:
+    # (`ScannedLayers` under `decoder.layers.*` records `param_scan_axis` directly in metadata.)
+    if scan_axis is None and (
+        "cycles" in path_strs
+        or "super_block" in path_strs
+        or (
+            hasattr(cur_sharding, "spec")
+            and isinstance(cur_sharding.spec, jax.sharding.PartitionSpec)
+            and len(cur_sharding.spec) == len(shape)
+            and len(shape) >= 2
+            and cur_sharding.spec[0] is None
+        )
+    ):
+      scan_axis = 0
+    for d, dim_size in enumerate(shape):
+      if d == scan_axis:
+        continue
+      if dim_size % axis_size == 0:
         new_spec = jax.sharding.PartitionSpec(*(spec_axis if i == d else None for i in range(len(shape))))
         new_sharding = jax.sharding.NamedSharding(mesh, new_spec)
         return s_var.replace(new_sharding) if hasattr(s_var, "replace") else new_sharding
@@ -1551,3 +1575,36 @@ def all_gather_over_fsdp(variables, sharding_info, mesh, logical_axis_rules, sha
   # Apply the constraint to the model's current variables. This tells JAX to
   # gather the weights into this layout.
   return maybe_shard_with_name(variables, physical_constraint_no_fsdp, shard_mode=shard_mode)
+
+
+def apply_layout_constraint(x, major_to_minor: tuple[int, ...]):
+  """Applies an XLA `major_to_minor` layout constraint when `x` is a JAX tracer."""
+  try:
+    from jax.experimental.layout import Layout, with_layout_constraint  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    return x
+  if not isinstance(x, Tracer):
+    return x
+  return with_layout_constraint(x, Layout(major_to_minor=major_to_minor))
+
+
+def pin_row_major_layout(x):
+  """Constrains `x` to its default row-major XLA layout under `jit`."""
+  return apply_layout_constraint(x, tuple(range(x.ndim)))
+
+
+@jax.custom_vjp
+def pin_row_major_with_cotangent(x):
+  """Constrains `x` and its backward cotangent to default row-major XLA layout."""
+  return pin_row_major_layout(x)
+
+
+def _pin_row_major_with_cotangent_fwd(x):
+  return pin_row_major_layout(x), None
+
+
+def _pin_row_major_with_cotangent_bwd(_, cotangent):
+  return (pin_row_major_layout(cotangent),)
+
+
+pin_row_major_with_cotangent.defvjp(_pin_row_major_with_cotangent_fwd, _pin_row_major_with_cotangent_bwd)

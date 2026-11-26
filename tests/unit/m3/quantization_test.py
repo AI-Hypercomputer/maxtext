@@ -25,22 +25,27 @@ and look at the compiled program.
 import re
 from types import SimpleNamespace
 
+from unittest import mock
+
 from absl.testing import absltest
 from absl.testing import parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from jax.sharding import PartitionSpec as P
 import numpy as np
 import pytest
 
 from maxtext.m3 import models as m3_models
-from maxtext.m3.core.sharding import create_mesh
+from maxtext.m3.core.sharding import create_mesh, sharding_from_config
 from maxtext.m3.infra import quantization
 from maxtext.m3.infra import scan as m3_scan
 from maxtext.m3.train import loop
 from tests.utils import m3_test_utils
 
 _E4M3, _E5M2 = jnp.dtype(jnp.float8_e4m3fn), jnp.dtype(jnp.float8_e5m2)
+_INT4, _E2M1 = jnp.dtype(jnp.int4), jnp.dtype(jnp.float4_e2m1fn)
+_E8M0 = jnp.dtype(jnp.float8_e8m0fnu)
 
 
 class _HandRolled(nnx.Module):
@@ -150,6 +155,26 @@ class _Ragged(nnx.Module):
     return jax.lax.ragged_dot(x, self.kernel[...], group_sizes)
 
 
+class _MxStack(nnx.Module):
+  """Minimal decoder stack with one Linear or Einsum projection for MX shape and parity checks."""
+
+  def __init__(self, in_features, out_features, rngs, *, use_einsum=False, dtype=jnp.bfloat16):
+    if use_einsum:
+      proj = nnx.Einsum("...i,io->...o", (in_features, out_features), dtype=dtype, rngs=rngs)
+    else:
+      proj = nnx.Linear(in_features, out_features, use_bias=False, dtype=dtype, rngs=rngs)
+    block = nnx.Module()
+    block.proj = proj
+    self.decoder = nnx.Module()
+    self.decoder.layers = nnx.List([block])
+
+  def __call__(self, x, *, out_sharding=None):
+    proj = self.decoder.layers[0].proj
+    if out_sharding is not None:
+      return proj(x, out_sharding=out_sharding)
+    return proj(x)
+
+
 class QuantizationTest(parameterized.TestCase):
 
   def setUp(self):
@@ -158,7 +183,7 @@ class QuantizationTest(parameterized.TestCase):
     self.enter_context(jax.set_mesh(self.mesh))
 
   def _model(self, **overrides):
-    if "quantization" in overrides:
+    if "quantization" in overrides and not str(overrides["quantization"]).startswith("jax_mx"):
       overrides.setdefault("use_qwix_quantization", "true")
     config = m3_test_utils.tiny_config("qwen3-0.6b", **overrides)
     return config, m3_models.create_model(config, self.mesh, rngs=nnx.Rngs(0))
@@ -278,7 +303,9 @@ class QuantizationTest(parameterized.TestCase):
     self.assertTrue(all(np.all(np.isfinite(g)) for g in m3_test_utils.flat_params(grads).values()))
 
   @parameterized.parameters(
+      ("int4", _INT4, _INT4),
       ("int8", jnp.dtype(jnp.int8), jnp.dtype(jnp.int8)),
+      ("fp4", _E2M1, _E2M1),
       ("fp8", _E4M3, _E4M3),
       ("fp8_full", _E4M3, _E5M2),
       ("fp8_e4m3", _E4M3, _E4M3),
@@ -300,7 +327,7 @@ class QuantizationTest(parameterized.TestCase):
     # The grad trace repeats the forward matmuls; each projection then adds two with the gradient dtype.
     with_gradient = sum(n for pair, n in pairs.items() if gradient in pair)
     self.assertEqual(with_gradient - (planned if gradient == forward else 0), 2 * planned, pairs)
-    for unused in {_E4M3, _E5M2} - {forward, gradient}:
+    for unused in {_E4M3, _E5M2, _INT4, _E2M1} - {forward, gradient}:
       self.assertNotIn(unused, {d for pair in pairs for d in pair})
 
   @parameterized.parameters(
@@ -378,6 +405,181 @@ class QuantizationTest(parameterized.TestCase):
     self.assertEqual(quantization.quantized_matmuls(quantized, jnp.int8, *example), per_layer)
     self.assertEqual(list(m3_test_utils.flat_params(quantized)), list(m3_test_utils.flat_params(scanned)))
 
+  @parameterized.parameters(
+      ("jax_mxfp8", "", _E4M3, _E4M3, "mxfp8", "mxfp8"),
+      ("jax_mxfp4", "", _E2M1, _E2M1, "mxfp4", "mxfp4"),
+      ("jax_mxfp4", "mxfp8", _E2M1, _E4M3, "mxfp4", "mxfp8"),
+      ("jax_mxfp8", "mxfp4", _E4M3, _E2M1, "mxfp8", "mxfp4"),
+  )
+  def test_mx_recipe_resolves_modes_and_dtypes(self, name, gradient_mode, fwd, grad, mx_mode, mx_grad_mode):
+    r = quantization.recipe(name, gradient_mode=gradient_mode)
+    self.assertEqual((r.forward, r.gradient, r.mx_mode, r.mx_gradient_mode), (fwd, grad, mx_mode, mx_grad_mode))
+
+  def test_mx_gradient_mode_rejected_for_non_mx_or_unknown(self):
+    with self.assertRaisesRegex(ValueError, "applies only to jax_mxfp8 / jax_mxfp4"):
+      quantization.recipe("fp8", gradient_mode="mxfp8")
+    with self.assertRaisesRegex(ValueError, "jax_mx_gradient_mode must be in"):
+      quantization.recipe("jax_mxfp8", gradient_mode="int8")
+    model = _MxStack(64, 64, nnx.Rngs(0))
+    x = jax.ShapeDtypeStruct((1, 32, 64), jnp.bfloat16)
+    with self.assertRaisesRegex(ValueError, "applies only to jax_mxfp8 / jax_mxfp4"):
+      quantization.maybe_quantize(model, SimpleNamespace(quantization="", jax_mx_gradient_mode="mxfp8"), x)
+
+  def test_mx_refuses_use_qwix_quantization_true(self):
+    model = _MxStack(64, 64, nnx.Rngs(0))
+    x = jax.ShapeDtypeStruct((1, 32, 64), jnp.bfloat16)
+    with self.assertRaisesRegex(ValueError, "does not support use_qwix_quantization=true"):
+      quantization.maybe_quantize(model, SimpleNamespace(quantization="jax_mxfp8", use_qwix_quantization=True), x)
+
+  def test_mx_refuses_multi_chip_tpu(self):
+    model = _MxStack(64, 64, nnx.Rngs(0))
+    x = jax.ShapeDtypeStruct((1, 32, 64), jnp.bfloat16)
+    fake_mesh = jax.sharding.AbstractMesh((2,), ("fsdp",))
+    with (
+        mock.patch.object(jax.sharding, "get_abstract_mesh", return_value=fake_mesh),
+        mock.patch.object(quantization.m3_kernels, "is_tpu_mesh", return_value=True),
+    ):
+      with self.assertRaisesRegex(ValueError, "multi-chip TPU"):
+        quantization.maybe_quantize(model, SimpleNamespace(quantization="jax_mxfp8"), x)
+
+  def test_mx_unsupported_jax_mode_raises_clear_error(self):
+    model = _MxStack(64, 64, nnx.Rngs(0))
+    x = jax.ShapeDtypeStruct((1, 32, 64), jnp.bfloat16)
+    with mock.patch.object(jax.nn, "get_scaled_dot_general_config", side_effect=ValueError("Unsupported mode")):
+      with self.assertRaisesRegex(ValueError, r"scaled_dot_general mode 'mxfp4'.*jax>=0\.12\.0"):
+        quantization.maybe_quantize(model, SimpleNamespace(quantization="jax_mxfp4"), x)
+
+  @parameterized.parameters(
+      ("jax_mxfp8", "", _E4M3, _E4M3),
+      ("jax_mxfp4", "", _E2M1, _E2M1),
+      ("jax_mxfp4", "mxfp8", _E2M1, _E4M3),
+  )
+  def test_jax_mx_quantizes_each_planned_projection_forward_and_backward(self, name, gradient_mode, forward, gradient):
+    overrides = {"quantization": name}
+    if gradient_mode:
+      overrides["jax_mx_gradient_mode"] = gradient_mode
+    config, model = self._model(**overrides)
+    example = quantization.example_inputs(config)
+    the_plan = quantization.plan(model)
+    bf16_before = quantization.quantized_matmuls(model, jnp.bfloat16, *example)
+    params_before = list(m3_test_utils.flat_params(model))
+
+    quantized = quantization.maybe_quantize(model, config, *example)
+
+    planned = len(the_plan.quantized)
+    self.assertEqual(quantization.quantized_matmuls(quantized, forward, *example), planned)
+    self.assertEqual(quantization.quantized_matmuls(quantized, jnp.bfloat16, *example), bf16_before - planned)
+    self.assertEqual(list(m3_test_utils.flat_params(quantized)), params_before)
+    self.assertEqual({type(v).__name__ for _, v in nnx.to_flat_state(nnx.state(quantized))}, {"Param"})
+
+    # Verify every quantized op is a block-scaled MX matmul with E8M0 scales.
+    fwd_jaxpr = quantization._forward_jaxpr(quantized, example, {})  # pylint: disable=protected-access
+    mx_eqns = [e for e in quantization._eqns(fwd_jaxpr) if e.primitive.name == "scaled_matmul_wrapper"]  # pylint: disable=protected-access
+    self.assertLen(mx_eqns, planned)
+    for eqn in mx_eqns:
+      self.assertEqual(eqn.invars[0].aval.dtype, forward)
+      self.assertEqual(eqn.invars[1].aval.dtype, forward)
+      self.assertEqual(eqn.invars[2].aval.dtype, _E8M0)
+      self.assertEqual(eqn.invars[3].aval.dtype, _E8M0)
+
+    graphdef, state = nnx.split(quantized)
+
+    def loss(s, tokens, positions):
+      return jnp.sum(nnx.merge(graphdef, s)(tokens, positions).astype(jnp.float32))
+
+    pairs = quantization.matmul_dtypes(jax.grad(loss), state, *example)
+    with_gradient = sum(n for pair, n in pairs.items() if gradient in pair)
+    self.assertEqual(with_gradient - (planned if gradient == forward else 0), 2 * planned, pairs)
+
+  def test_jax_mx_scanned_stack_and_einsum(self):
+    config, model = self._model(quantization="jax_mxfp8", scan_layers="true")
+    per_layer = len(quantization.plan(model).quantized) // config.num_decoder_layers
+    example = quantization.example_inputs(config)
+    scanned = m3_scan.maybe_apply_scan(model, config)
+    quantized = quantization.maybe_quantize(scanned, config, *example)
+    self.assertEqual(quantization.quantized_matmuls(quantized, _E4M3, *example), per_layer)
+    self.assertEqual(list(m3_test_utils.flat_params(quantized)), list(m3_test_utils.flat_params(scanned)))
+
+    einsum_model = _MxStack(64, 128, nnx.Rngs(0), use_einsum=True)
+    x = jax.ShapeDtypeStruct((1, 32, 64), jnp.bfloat16)
+    quantized_einsum = quantization.maybe_quantize(einsum_model, SimpleNamespace(quantization="jax_mxfp8"), x)
+    self.assertEqual(quantization.quantized_matmuls(quantized_einsum, _E4M3, x), 1)
+
+  def test_jax_mx_unquantized_einsum_forwards_kwargs(self):
+    """Unquantized `jnp.einsum` calls under an MX-quantized model must forward extra kwargs like `optimize`."""
+
+    class _WithExtraEinsum(_MxStack):
+
+      def __call__(self, x, *, out_sharding=None):
+        y = super().__call__(x, out_sharding=out_sharding)
+        return jnp.einsum("btd,bsd->bts", y, y, optimize="greedy")
+
+    model = _WithExtraEinsum(64, 64, nnx.Rngs(0))
+    x = jax.ShapeDtypeStruct((1, 32, 64), jnp.bfloat16)
+    quantized = quantization.maybe_quantize(model, SimpleNamespace(quantization="jax_mxfp8"), x)
+    self.assertEqual(quantization.quantized_matmuls(quantized, _E4M3, x), 1)
+    self.assertEqual(quantization.quantized_matmuls(quantized, jnp.bfloat16, x), 1)
+
+  @parameterized.named_parameters(
+      ("forward_linear", "forward", 48, 64, (2, 32), False),
+      ("dx_linear", "input gradient", 64, 48, (2, 32), False),
+      ("dw_linear", "weight gradient", 64, 64, (2, 24), False),
+      ("forward_einsum", "forward", 48, 64, (2, 32), True),
+  )
+  def test_jax_mx_contracting_dims_checked_per_gemm(self, gemm, in_features, out_features, tokens, use_einsum):
+    model = _MxStack(in_features, out_features, nnx.Rngs(0), use_einsum=use_einsum)
+    x = jax.ShapeDtypeStruct((*tokens, in_features), jnp.bfloat16)
+    with self.assertRaisesRegex(ValueError, rf"the {gemm} \(.*\) GEMM contracts over 48 elements"):
+      quantization.maybe_quantize(model, SimpleNamespace(quantization="jax_mxfp8"), x)
+
+  @parameterized.parameters(False, True)
+  def test_jax_mx_refuses_explicit_out_sharding(self, use_einsum):
+    model = _MxStack(64, 64, nnx.Rngs(0), use_einsum=use_einsum)
+    x = jax.ShapeDtypeStruct((1, 32, 64), jnp.bfloat16)
+    quantized = quantization.maybe_quantize(model, SimpleNamespace(quantization="jax_mxfp8"), x)
+    with self.assertRaisesRegex(ValueError, "does not support explicit out_sharding"):
+      jax.make_jaxpr(lambda t: quantized(t, out_sharding=P(None, None, None)))(x)
+
+  @parameterized.parameters(
+      ("jax_mxfp8", "", False),
+      ("jax_mxfp8", "", True),
+      ("jax_mxfp4", "", False),
+      ("jax_mxfp4", "mxfp8", False),
+  )
+  def test_jax_mx_matches_scaled_dot_general(self, name, gradient_mode, use_einsum):
+    mode = name.removeprefix("jax_")
+    grad_mode = gradient_mode or mode
+    model = _MxStack(64, 128, nnx.Rngs(0), use_einsum=use_einsum)
+    x = jax.random.normal(jax.random.key(1), (2, 32, 64), jnp.float32).astype(jnp.bfloat16)
+    cfg = SimpleNamespace(quantization=name, jax_mx_gradient_mode=gradient_mode)
+    quantized = quantization.maybe_quantize(model, cfg, jax.ShapeDtypeStruct(x.shape, x.dtype))
+
+    kernel = model.decoder.layers[0].proj.kernel[...].astype(jnp.bfloat16)
+    fwd_cfg = jax.nn.get_scaled_dot_general_config(mode)
+    bwd_cfg = jax.nn.get_scaled_dot_general_config(grad_mode)
+
+    def reference(lhs, rhs=kernel):
+      return jax.nn.scaled_dot_general(
+          lhs,
+          rhs,
+          (((2,), (0,)), ((), ())),
+          preferred_element_type=jnp.bfloat16,
+          configs=[fwd_cfg, fwd_cfg, bwd_cfg],
+      )
+
+    def loss(fn, lhs):
+      return (fn(lhs).astype(jnp.float32) ** 2).sum()
+
+    y = quantized(x)
+    self.assertEqual(y.dtype, jnp.bfloat16)
+    np.testing.assert_array_equal(np.asarray(y, np.float32), np.asarray(reference(x), np.float32))
+    dx = jax.grad(loss, argnums=1)(quantized, x)
+    dx_ref = jax.grad(loss, argnums=1)(reference, x)
+    np.testing.assert_array_equal(np.asarray(dx, np.float32), np.asarray(dx_ref, np.float32))
+    dk = nnx.grad(lambda m: loss(m, x))(quantized)["decoder"]["layers"][0]["proj"]["kernel"][...]
+    dk_ref = jax.grad(lambda w: loss(lambda lhs: reference(lhs, w), x))(kernel)
+    np.testing.assert_array_equal(np.asarray(dk, np.float32), np.asarray(dk_ref, np.float32))
+
 
 class QuantizedLoopTest(parameterized.TestCase):
   """`setup_model` composes scan and the transform; the step must compile and run on the quantized model."""
@@ -395,14 +597,36 @@ class QuantizedLoopTest(parameterized.TestCase):
     )
     self.assertTrue(np.isfinite(loop.train_loop(config)))
 
+  @parameterized.parameters(
+      ("jax_mxfp8", False),
+      ("jax_mxfp8", True),
+      ("jax_mxfp4", False),
+  )
+  def test_train_loop_runs_with_jax_mx(self, name, scan_layers):
+    config = m3_test_utils.tiny_config(
+        "qwen3-0.6b",
+        quantization=name,
+        scan_layers=scan_layers,
+        steps=2,
+        base_output_directory=self.create_tempdir().full_path,
+        run_name=f"m3_quantization_{name}",
+    )
+    self.assertTrue(np.isfinite(loop.train_loop(config)))
+
 
 @pytest.mark.tpu_only
 class QuantizedTrainingTpuTest(parameterized.TestCase):
-  """int8 and fp8 matmuls have to survive compilation; CPU traces cannot show that."""
+  """Quantized matmuls have to survive compilation; CPU traces cannot show that."""
 
-  @parameterized.parameters(("int8", "s8"), ("fp8", "f8e4m3fn"), ("fp8_e5m2", "f8e5m2"))
+  @parameterized.parameters(
+      ("int4", "s4"), ("int8", "s8"), ("fp4", "f4e2m1fn"), ("fp8", "f8e4m3fn"), ("fp8_e5m2", "f8e5m2")
+  )
   def test_compiled_matmuls_take_quantized_operands(self, name, hlo_type):
-    mesh = create_mesh(devices=jax.devices()[:1])
+    device = jax.devices()[0]
+    # TPU7x compiles int4 dots as e4m3 (exact for int4 values); v6e keeps them s4.
+    if hlo_type == "s4" and device.device_kind == "TPU7x":
+      hlo_type = "f8e4m3fn"
+    mesh = create_mesh(devices=[device])
     with jax.set_mesh(mesh):
       config = m3_test_utils.tiny_config("qwen3-0.6b", quantization=name, use_qwix_quantization="true")
       example = quantization.example_inputs(config)
@@ -421,7 +645,7 @@ class QuantizedTrainingTpuTest(parameterized.TestCase):
         quantized += bool(operands) and all(types.get(o) == hlo_type for o in operands)
     self.assertEqual(quantized, planned)
 
-  @parameterized.parameters("int8", "fp8")
+  @parameterized.parameters("int4", "int8", "fp4", "fp8")
   def test_train_loop_runs(self, name):
     config = m3_test_utils.tiny_config(
         "qwen3-0.6b",
@@ -432,6 +656,34 @@ class QuantizedTrainingTpuTest(parameterized.TestCase):
         run_name=f"m3_quantization_{name}",
     )
     self.assertTrue(np.isfinite(loop.train_loop(config)))
+
+  @parameterized.parameters("jax_mxfp8", "jax_mxfp4")
+  def test_jax_mx_train_step_runs_single_chip(self, name):
+    """Single-chip TPU lowers `scaled_dot_general` via the dequantize fallback."""
+    mesh = create_mesh(devices=[jax.devices()[0]])
+    with jax.set_mesh(mesh):
+      config = m3_test_utils.tiny_config("qwen3-0.6b", quantization=name)
+      model, optimizer = loop.setup_model(config, mesh)
+      spec = sharding_from_config(config)
+      for step in range(2):
+        batch = loop.make_synthetic_batch(config, mesh, spec, jax.random.key(step))
+        loss = loop.train_step(model, optimizer, batch)
+        self.assertTrue(np.isfinite(float(loss)))
+
+  @parameterized.parameters("jax_mxfp8", "jax_mxfp4")
+  def test_jax_mx_refuses_multi_chip_tpu(self, name):
+    """Multi-chip TPU fails fast instead of hitting missing `CustomSPMDPartitioning` emitter."""
+    if len(jax.devices()) < 2:
+      self.skipTest("requires at least 2 TPU devices")
+    config = m3_test_utils.tiny_config(
+        "qwen3-0.6b",
+        quantization=name,
+        steps=1,
+        base_output_directory=self.create_tempdir().full_path,
+        run_name=f"m3_quantization_{name}_multi_chip",
+    )
+    with self.assertRaisesRegex(ValueError, "multi-chip TPU"):
+      loop.train_loop(config)
 
 
 if __name__ == "__main__":

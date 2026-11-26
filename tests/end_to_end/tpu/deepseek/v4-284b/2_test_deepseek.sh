@@ -161,7 +161,6 @@ if [ "${RUN_DECODE:-true}" = "true" ]; then
     model_name="${MODEL_NAME}" \
     tokenizer_type=huggingface \
     tokenizer_path="${TOKENIZER_PATH}" \
-    hf_access_token="${HF_TOKEN:-}" \
     load_parameters_path="${UNSCANNED_CKPT_PATH}" \
     scan_layers=False \
     attention=dot_product \
