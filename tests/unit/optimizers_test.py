@@ -22,8 +22,10 @@ from absl.testing import absltest, parameterized
 from flax import nnx
 import jax
 import jax.numpy as jnp
+from jax.sharding import Mesh
 from maxtext.common.common_types import UntrainableParam
 from maxtext.configs import pyconfig
+from maxtext.layers import encoders
 from maxtext.optimizers import optimizers
 from maxtext.optimizers.muon import ShardedMuonDimensionNumbers as smdn
 from maxtext.utils import maxtext_utils, model_creation_utils, muon_utils
@@ -1046,14 +1048,34 @@ class FreezeEncodersTest(parameterized.TestCase):
     def moved(module):
       return not jnp.array_equal(module.kernel[...], jnp.ones((2, 2)))
 
-    encoders = {"vision_encoder": freeze_vision, "audio_encoder": freeze_audio}
-    for name, freeze in encoders.items():
+    frozen = {"vision_encoder": freeze_vision, "audio_encoder": freeze_audio}
+    for name, freeze in frozen.items():
       self.assertEqual(moved(getattr(getattr(model, name), "Tower_0")), not freeze)
       self.assertTrue(moved(getattr(getattr(model, name), "Projector_0")))
     self.assertTrue(moved(model.decoder))
     prefix = "base/" if wrapped else ""
-    expected = {f"{prefix}{name}/Tower_0/kernel" for name, freeze in encoders.items() if freeze}
+    expected = {f"{prefix}{name}/Tower_0/kernel" for name, freeze in frozen.items() if freeze}
     self.assertEqual(optimizers.frozen_param_paths(root, config), expected)
+    slots = [jax.tree_util.keystr(path) for path, _ in jax.tree_util.tree_leaves_with_path(nnx.state(optimizer))]
+    for name, freeze in frozen.items():
+      self.assertEqual(not freeze, bool([s for s in slots if f"['{name}']['Tower_0']" in s]), slots)
+      self.assertTrue([s for s in slots if f"['{name}']['Projector_0']" in s], slots)
+
+  @parameterized.named_parameters(
+      ("vision", "vision_encoder", encoders.VisionEncoder, "Qwen3OmniMoeVisionEncoder_0", "freeze_vision_encoder_params"),
+      ("audio", "audio_encoder", encoders.AudioEncoder, "Qwen3OmniAudioEncoder_0", "freeze_audio_encoder_params"),
+  )
+  def test_freezes_only_the_tower_of_a_real_encoder(self, name, encoder_cls, tower_name, flag):
+    argv = ["", get_test_config_path(), "run_name=test_freeze_real_encoder", "model_name=qwen3-omni-30b-a3b"]
+    config = pyconfig.initialize(argv + [f"{flag}=true"])
+    mesh = Mesh(np.array(jax.devices()[:1]), ("data",))
+    model = nnx.eval_shape(lambda: nnx.Dict(**{name: encoder_cls(config, mesh, rngs=nnx.Rngs(0))}))
+
+    params = {"/".join(map(str, path)) for path, _ in nnx.to_flat_state(nnx.state(model, nnx.Param))}
+    tower = {path for path in params if path.startswith(f"{name}/{tower_name}/")}
+    self.assertTrue(tower)
+    self.assertTrue(params - tower)
+    self.assertEqual(optimizers.frozen_param_paths(model, config), tower)
 
 
 class SkipStepOnSpikesTest(parameterized.TestCase):
