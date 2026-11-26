@@ -550,6 +550,7 @@ def validate_and_assign_remat_tensors(keys):
       "moe_mlpwi_0",
       "moe_mlpwi_1",
       "moe_mlpwo",
+      "moe_routed_output",
       "te_moe_dispatch_remat_location",
       "query_proj",
       "key_proj",
