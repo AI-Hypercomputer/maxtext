@@ -93,6 +93,21 @@ class ExpertReplicationConfigTest(parameterized.TestCase):
           },
       ),
       (
+          "fp8_full_static_fsdp_ep",
+          {
+              "quantization": "fp8_full",
+              "use_qwix_quantization": True,
+              "use_tokamax_gmm": True,
+              "use_gmm_v2": True,
+              "weight_quantization_calibration_method": "fixed,-224,224",
+              "act_quantization_calibration_method": "fixed,-224,224",
+              "bwd_quantization_calibration_method": "fixed,0.00125",
+              "shard_embed_moe_on_fsdp": False,
+              "ici_fsdp_parallelism": 2,
+              "ici_expert_parallelism": 2,
+          },
+      ),
+      (
           "fp8_full_static_fsdp_qag",
           {
               "quantization": "fp8_full",
@@ -190,20 +205,7 @@ class ExpertReplicationConfigTest(parameterized.TestCase):
               "ici_fsdp_parallelism": 2,
               "ici_expert_parallelism": 2,
           },
-          "requires expert weights without FSDP gathers",
-      ),
-      (
-          "fp8_full_dynamic_auto_fsdp_gather",
-          {
-              "quantization": "fp8_full",
-              "use_qwix_quantization": True,
-              "use_tokamax_gmm": True,
-              "use_gmm_v2": True,
-              "shard_embed_moe_on_fsdp": True,
-              "ici_fsdp_parallelism": -1,
-              "ici_expert_parallelism": 2,
-          },
-          "requires expert weights without FSDP gathers",
+          "weight_quantization_calibration_method to be fixed",
       ),
       ("fp8_moe", {"fp8_moe": True, "weight_dtype": "float8_e4m3fn"}, "fp8_moe=True"),
       ("te_gmm_quantization", {"te_gmm_quantization": "te_mxfp8"}, "te_gmm_quantization"),

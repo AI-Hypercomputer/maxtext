@@ -56,12 +56,24 @@ def _pure_jax_gmm(lhs, rhs, group_sizes, preferred_element_type=jnp.float32, exi
   return out
 
 
-def _spec_axes(spec, mesh_sizes):
-  """Returns active sharding axis names on dim 0 of `spec` whose size > 1."""
-  if not spec or not (parts := spec.partitions if isinstance(spec, P) else tuple(spec)) or parts[0] is None:
+def _spec_dim_axes(spec, mesh_sizes):
+  """Returns per-dimension active sharding axes `((ax, ...), ...)` for `spec`."""
+  if not spec:
     return ()
-  dim0 = parts[0] if isinstance(parts[0], tuple) else (parts[0],)
-  return tuple(ax for ax in dim0 if mesh_sizes.get(ax, 1) > 1)
+  parts = spec.partitions if isinstance(spec, P) else tuple(spec)
+  out = []
+  for entry in parts:
+    items = entry if isinstance(entry, tuple) else ((entry,) if entry else ())
+    out.append(tuple(ax for ax in items if mesh_sizes.get(ax, 1) > 1))
+  return tuple(out)
+
+
+def _spec_axes(spec, mesh_sizes, mesh_axes):
+  """Returns active sharding axis names anywhere in `spec`, ordered by `mesh_axes`."""
+  present = set()
+  for dim_axes in _spec_dim_axes(spec, mesh_sizes):
+    present.update(dim_axes)
+  return tuple(ax for ax in mesh_axes if ax in present)
 
 
 def _init_moe_cfg(run_name, **overrides):
@@ -149,28 +161,58 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
   def _cpu_ep_runtime(
       self, layer, *, num_ep=2, cotangent=None, captured=None, wrap_shard_fn=None, gmm_impl=None, num_fsdp=1
   ):
-    """Emulates multi-shard EP (and optional FSDP) execution + SPMD VJP on 1 CPU device."""
+    """Emulates multi-shard EP (and optional FSDP, including multi-dim QAG weight sharding) + SPMD VJP on CPU."""
     orig_hardware = layer.config.hardware
+    orig_mesh = layer.mesh
     shard_gs_box = []
     mesh_axes = ("fsdp", "expert") if num_fsdp > 1 else ("expert",)
     mesh_sizes = {"fsdp": num_fsdp, "expert": num_ep}
 
     def _split(a, spec):
-      axes = _spec_axes(spec, mesh_sizes) if a is not None else ()
-      return (
-          jnp.reshape(
-              a, (*[mesh_sizes[ax] for ax in axes], a.shape[0] // math.prod(mesh_sizes[ax] for ax in axes), *a.shape[1:])
-          )
-          if axes
-          else a
-      )
+      kept = _spec_axes(spec, mesh_sizes, mesh_axes) if a is not None else ()
+      if not kept:
+        return a
+      dim_axes = _spec_dim_axes(spec, mesh_sizes)
+      shape, axis_pos, tensor_pos = [], {}, []
+      for d in range(a.ndim):
+        axs = dim_axes[d] if d < len(dim_axes) else ()
+        shard_prod = math.prod(mesh_sizes[ax] for ax in axs)
+        for ax in axs:
+          axis_pos[ax] = len(shape)
+          shape.append(mesh_sizes[ax])
+        tensor_pos.append(len(shape))
+        shape.append(a.shape[d] // shard_prod)
+      return jnp.transpose(jnp.reshape(a, shape), [axis_pos[ax] for ax in kept] + tensor_pos)
+
+    def _unsplit(val, spec, *, sum_replicated):
+      if val is None:
+        return None
+      kept = _spec_axes(spec, mesh_sizes, mesh_axes)
+      unkept = tuple(i for i, ax in enumerate(mesh_axes) if ax not in kept)
+      if sum_replicated and unkept:
+        val = jnp.sum(val, axis=unkept)
+      elif not sum_replicated:
+        for i in reversed(unkept):
+          val = jnp.take(val, 0, axis=i)
+      if not kept:
+        return val
+      dim_axes = _spec_dim_axes(spec, mesh_sizes)
+      kept_pos = {ax: i for i, ax in enumerate(kept)}
+      base = len(kept)
+      perm, merged = [], []
+      for d in range(val.ndim - base):
+        axs = dim_axes[d] if d < len(dim_axes) else ()
+        perm.extend(kept_pos[ax] for ax in axs)
+        perm.append(base + d)
+        merged.append(val.shape[base + d] * math.prod(mesh_sizes[ax] for ax in axs))
+      return jnp.reshape(jnp.transpose(val, perm), merged)
 
     def _vmap_axes(fn, specs):
       for ax in reversed(mesh_axes):
         fn = jax.vmap(
             fn,
             axis_name=ax,
-            in_axes=tuple(0 if ax in _spec_axes(s, mesh_sizes) else None for s in specs),
+            in_axes=tuple(0 if ax in _spec_axes(s, mesh_sizes, mesh_axes) else None for s in specs),
             axis_size=mesh_sizes[ax],
         )
       return fn
@@ -202,30 +244,13 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
               *split_args, cot_shards
           )
           if captured is not None:
-
-            def _unsplit_grad(g, spec):
-              kept = _spec_axes(spec, mesh_sizes)
-              if sum_ax := tuple(i for i, ax in enumerate(mesh_axes) if ax not in kept):
-                g = jnp.sum(g, axis=sum_ax)
-              return jnp.reshape(g, (math.prod(g.shape[: len(kept) + 1]), *g.shape[len(kept) + 1 :])) if kept else g
-
             grad_specs = (in_specs[0], in_specs[1], in_specs[3], in_specs[4], in_specs[5])
-            captured["grads"] = tuple(_unsplit_grad(g, s) for g, s in zip(shard_grads, grad_specs))
+            captured["grads"] = tuple(_unsplit(g, s, sum_replicated=True) for g, s in zip(shard_grads, grad_specs))
         else:
           raw_outs, local_gs = _vmap_axes(lambda *s_args: run_shard(s_args), in_specs)(*split_args)
         if captured is not None:
           captured["local_group_sizes"] = local_gs
-        n_m = len(mesh_axes)
-        return tuple(
-            None
-            if v is None
-            else (
-                jnp.reshape(v, (math.prod(v.shape[: n_m + 1]), *v.shape[n_m + 1 :]))
-                if _spec_axes(s, mesh_sizes)
-                else v[(0,) * n_m]
-            )
-            for v, s in zip(raw_outs, out_specs)
-        )
+        return tuple(_unsplit(v, s, sum_replicated=False) for v, s in zip(raw_outs, out_specs))
 
       return wrapped
 
@@ -238,6 +263,14 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
 
     try:
       object.__setattr__(layer.config, "hardware", "tpu")
+      if num_fsdp > 1:
+        layer.mesh = types.SimpleNamespace(
+            axis_names=("fsdp", "expert"),
+            shape={"fsdp": num_fsdp, "expert": num_ep},
+            devices=orig_mesh.devices,
+            local_devices=orig_mesh.local_devices,
+            empty=False,
+        )
       with (
           mock.patch.object(jax, "shard_map", side_effect=fake_shard_map),
           mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=moe_replica_test_utils.emulated_ragged_all_to_all),
@@ -246,6 +279,7 @@ class RoutedMoEReplicationWiringTest(parameterized.TestCase):
         yield
     finally:
       object.__setattr__(layer.config, "hardware", orig_hardware)
+      layer.mesh = orig_mesh
 
   def _sample_tensors(self, seed, num_experts=4, batch=4, expert0_mult=1.0):
     k_in, k_log, k_w0, k_w1, k_wo, k_cot = jax.random.split(jax.random.PRNGKey(seed), 6)
@@ -890,13 +924,6 @@ class RoutedMoEReplicationFp8Test(parameterized.TestCase):
         ici_expert_parallelism=2,
         ici_fsdp_parallelism=2,
     )
-    layer.mesh = types.SimpleNamespace(
-        axis_names=("fsdp", "expert"),
-        shape={"fsdp": 2, "expert": 2},
-        devices=layer.mesh.devices,
-        local_devices=layer.mesh.local_devices,
-        empty=False,
-    )
     layer._logical_to_mesh_axes = lambda axes: P(  # pylint: disable=protected-access
         *(
             ("fsdp", "expert")
@@ -916,8 +943,66 @@ class RoutedMoEReplicationFp8Test(parameterized.TestCase):
         mock.patch.object(qpl, "get_current_rule", lambda op: rule if op == "gmm" else None),
         self._cpu_ep_runtime(layer, num_ep=2, num_fsdp=2, gmm_impl=mblx_ops.gmm),
     ):
-      with self.assertRaisesRegex(NotImplementedError, "requires expert weights without FSDP gathers"):
+      with self.assertRaisesRegex(NotImplementedError, "requires fixed weight calibration and bwd_qtype"):
         layer.sparse_matmul(inputs, logits, None, w0, w1, wo, None, None, None, forced_routed_experts=forced)
+
+  @parameterized.named_parameters(
+      ("no_qag_distinct_plans", False, "antisym", 16),
+      ("qag_active_synced_replica", True, "asym_active", 10),
+      ("qag_antisymmetric_batches", True, "antisym", 0),
+  )
+  def test_fp8_full_2d_fsdp_ep_distinct_batches_match_r0(self, shard_embed_fsdp, pattern, expected_rep_tokens):
+    """Verifies 2D FSDP x EP parity when FSDP slices have distinct token routing (with and without QAG)."""
+    tensors = self._sample_tensors(seed=37, batch=8, expert0_mult=4.0)
+    if pattern == "antisym":
+      f0 = jnp.broadcast_to(jnp.array([[0, 1], [0, 1], [0, 1], [0, 2]], jnp.int32)[None], (4, 4, 2))
+      f1 = jnp.broadcast_to(jnp.array([[2, 3], [2, 3], [2, 3], [2, 0]], jnp.int32)[None], (4, 4, 2))
+    else:
+      # Without cross-FSDP count sync, f0 replicates expert 0 (13 vs 11) while f1 replicates expert 1 (15 vs 9)
+      # into the same ep=1 replica slot; synced counts [22, 26, 6, 10] replicate expert 1 on both slices (3 + 7 = 10).
+      f0_ep0 = jnp.broadcast_to(jnp.array([[0, 1]], jnp.int32), (2, 4, 2))
+      f0_ep1 = jnp.array(
+          [[[0, 2], [0, 2], [0, 2], [0, 2]], [[0, 2], [1, 3], [1, 3], [1, 3]]],
+          dtype=jnp.int32,
+      )
+      f1_ep0 = jnp.broadcast_to(jnp.array([[0, 1]], jnp.int32), (2, 4, 2))
+      f1_ep1 = jnp.array(
+          [[[0, 2], [1, 3], [1, 3], [1, 3]], [[1, 3], [1, 3], [1, 3], [1, 3]]],
+          dtype=jnp.int32,
+      )
+      f0 = jnp.concatenate([f0_ep0, f0_ep1], axis=0)
+      f1 = jnp.concatenate([f1_ep0, f1_ep1], axis=0)
+    forced = jnp.concatenate([f0, f1], axis=0)
+    fp8_kw = {
+        **_FP8_FULL_KW,
+        **_fp8_cal_kw("fixed"),
+        "shard_embed_moe_on_fsdp": shard_embed_fsdp,
+        "ici_expert_parallelism": 2,
+        "ici_fsdp_parallelism": 2,
+    }
+
+    def _build(replicas, quant=True):
+      layer = self._make_layer(
+          num_ep=2,
+          expert_replicas_per_device=replicas,
+          expert_replica_max_send=2,
+          **(fp8_kw if quant else {}),
+      )
+      layer._logical_to_mesh_axes = lambda axes: P(  # pylint: disable=protected-access
+          *(
+              ("fsdp", "expert")
+              if a == "activation_batch"
+              else ("fsdp" if a == "embed_moe" else ("expert" if a in ("exp", "exp_with_fsdp") else None))
+              for a in axes
+          )
+      )
+      return layer
+
+    out_ref, cap_ref = self._run(_build(0), tensors, forced, True, num_fsdp=2)
+    out_rep, cap_rep = self._run(_build(1), tensors, forced, True, num_fsdp=2)
+    out_hp, cap_hp = self._run(_build(0, False), tensors, forced, False, num_fsdp=2)
+    self.assertEqual(int(np.asarray(cap_rep["local_group_sizes"])[..., -1].sum()), expected_rep_tokens)
+    self._assert_fp8_parity(out_rep, cap_rep, out_ref, cap_ref, out_hp, cap_hp, exact_dw=True)
 
   @parameterized.named_parameters(("absmax", "absmax"), ("fixed", "fixed"))
   def test_fp8_full_padded_tokens_stay_on_home_slots_and_match_r0(self, calibration):
@@ -1039,23 +1124,50 @@ class RoutedMoEReplicationFp8TpuTest(parameterized.TestCase):
       return step(layer, x)
 
   @parameterized.named_parameters(
-      ("absmax_ep2", "absmax", False, 2, 1, False),
-      ("fixed_pertensor_ep2", "fixed", True, 2, 1, False),
-      ("fixed_2d_fsdp_ep_qag", "fixed", True, 2, 2, True),
+      ("absmax_ep2", "absmax", False, 2, 1, False, "same"),
+      ("fixed_pertensor_ep2", "fixed", True, 2, 1, False, "same"),
+      ("fixed_2d_fsdp_ep_distinct_plans", "fixed", True, 2, 2, False, "antisym"),
+      ("fixed_2d_fsdp_ep_qag_active_rep", "fixed", False, 2, 2, True, "asym_active"),
+      ("fixed_2d_fsdp_ep_qag_antisym", "fixed", True, 2, 2, True, "antisym"),
   )
-  def test_tpu_fp8_replication_parity_with_r0(self, calibration, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp):
-    """Verifies real Pallas gmm_v2 + tgmm_v2 fwd/bwd parity between R=1 and R=0 on TPU."""
+  def test_tpu_fp8_replication_parity_with_r0(self, calibration, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp, pattern):
+    """Verifies Pallas gmm_v2 + tgmm_v2 fwd/bwd parity on TPU (including QAG + distinct FSDP batches)."""
     if len(jax.devices()) < ici_ep * ici_fsdp:
       self.skipTest(f"Requires >= {ici_ep * ici_fsdp} TPU devices, got {len(jax.devices())}.")
     total_batch = 2 * ici_ep * ici_fsdp
     k_x, k_c = jax.random.split(jax.random.PRNGKey(31), 2)
     x = jax.random.normal(k_x, (total_batch, 64, 256), jnp.bfloat16)
     cotangent = jax.random.normal(k_c, (total_batch, 64, 256), jnp.float32)
-    forced = (
-        jnp.broadcast_to(jnp.broadcast_to(jnp.array([[0, 1]], jnp.int32), (64, 2))[None], (total_batch, 64, 2))
-        .at[:, -1, :]
-        .set(jnp.array([2, 3], jnp.int32))
-    )
+    if pattern == "antisym":
+      half = total_batch // 2
+      f0 = (
+          jnp.broadcast_to(jnp.broadcast_to(jnp.array([[0, 1]], jnp.int32), (64, 2))[None], (half, 64, 2))
+          .at[:, -1, :]
+          .set(jnp.array([2, 3], jnp.int32))
+      )
+      f1 = (
+          jnp.broadcast_to(jnp.broadcast_to(jnp.array([[2, 3]], jnp.int32), (64, 2))[None], (total_batch - half, 64, 2))
+          .at[:, -1, :]
+          .set(jnp.array([0, 1], jnp.int32))
+      )
+      forced = jnp.concatenate([f0, f1], axis=0)
+    elif pattern == "asym_active":
+      # Without cross-FSDP count sync, f0 picks expert 0 (198 vs 186) while f1 picks expert 1 (226 vs 158) for
+      # ep=1's replica slot; synced counts [356, 412, 100, 156] actively replicate expert 1 on both FSDP slices.
+      ep0_rows = jnp.broadcast_to(jnp.array([[0, 1]], jnp.int32), (2, 64, 2))
+      f0_ep1 = (
+          jnp.broadcast_to(jnp.array([[1, 3]], jnp.int32), (2, 64, 2)).at[:, :35, :].set(jnp.array([0, 2], jnp.int32))
+      )
+      f1_ep1 = (
+          jnp.broadcast_to(jnp.array([[1, 3]], jnp.int32), (2, 64, 2)).at[:, :15, :].set(jnp.array([0, 2], jnp.int32))
+      )
+      forced = jnp.concatenate([ep0_rows, f0_ep1, ep0_rows, f1_ep1], axis=0)
+    else:
+      forced = (
+          jnp.broadcast_to(jnp.broadcast_to(jnp.array([[0, 1]], jnp.int32), (64, 2))[None], (total_batch, 64, 2))
+          .at[:, -1, :]
+          .set(jnp.array([2, 3], jnp.int32))
+      )
     args = (calibration, disable_cw, ici_ep, ici_fsdp, shard_embed_fsdp, forced, x, cotangent)
     out_ref, dx_ref, mg_ref = self._run_tpu(0, *args)
     out_rep, dx_rep, mg_rep = self._run_tpu(1, *args)
