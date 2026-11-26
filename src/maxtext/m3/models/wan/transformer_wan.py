@@ -17,7 +17,7 @@
 import contextlib
 import dataclasses
 import math
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Optional, Tuple, Union
 
 from flax import nnx
 import jax
@@ -1837,6 +1837,7 @@ class WanModel(nnx.Module):
       weights_dtype: jnp.dtype = jnp.float32,
       precision: jax.lax.Precision = None,
       attention: str = "dot_product",
+      remat_policy: Optional[Callable] = None,
       mask_padding_tokens: bool = True,
       scan_layers: bool = True,
       enable_jax_named_scopes: bool = False,
@@ -1919,6 +1920,9 @@ class WanModel(nnx.Module):
           attention_config=attention_config,
       )
 
+    # A `jax.checkpoint` policy from the driver (e.g. `maxtext.m3.infra.remat.remat_policy(config.remat_policy)`),
+    # or None for no remat. Applied path-transparently to the per-layer forward in `__call__`.
+    self.remat_policy = remat_policy
     if scan_layers:
       self.blocks = init_block(rngs)
     else:
@@ -1990,6 +1994,12 @@ class WanModel(nnx.Module):
   def conditional_named_scope(self, name: str):
     """Return a JAX named scope if enabled, otherwise a null context."""
     return jax.named_scope(name) if self.enable_jax_named_scopes else contextlib.nullcontext()
+
+  def _maybe_remat(self, layer_forward):
+    """Wraps the per-layer forward with `nnx.remat` under the driver-chosen policy (no-op without one)."""
+    if self.remat_policy is None:
+      return layer_forward
+    return nnx.remat(layer_forward, prevent_cse=not self.scan_layers, policy=self.remat_policy)
 
   def compute_kv_cache(
       self,
@@ -2162,6 +2172,7 @@ class WanModel(nnx.Module):
           new_carry = (hidden_states, rngs_carry)
           return new_carry, None
 
+        rematted_block_forward = self._maybe_remat(scan_fn)
         initial_carry = (h, rngs)
 
         if kv_cache is not None:
@@ -2170,7 +2181,7 @@ class WanModel(nnx.Module):
           scan_input = self.blocks
 
         final_carry, _ = nnx.scan(
-            scan_fn,
+            rematted_block_forward,
             length=self.num_layers,
             in_axes=(nnx.Carry, 0),
             out_axes=(nnx.Carry, 0),
@@ -2198,7 +2209,8 @@ class WanModel(nnx.Module):
                 cached_kv=l_kv,
             )
 
-          h_out = layer_forward(h_out, layer_kv_cache)
+          rematted_layer_forward = self._maybe_remat(layer_forward)
+          h_out = rematted_layer_forward(h_out, layer_kv_cache)
       return h_out
 
     hidden_states_before_blocks = hidden_states
