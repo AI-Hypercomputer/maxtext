@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795711475583,
+  "lastUpdate": 1795725770134,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -77890,6 +77890,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3553.575999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 474,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Leilei Wu",
+            "username": "uwlei",
+            "email": "lewu@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "c034bc02ffe4507223e9ea1260516a9a94299fd9",
+          "message": "Enable shard_mode=explicit and FSDP prefetch for Hy4 decoder.\n\n# Description\n\n`hy4` (`hy4-preview`) was omitted from the `ShardMode.EXPLICIT` allowlist in `configs/types.py`, blocking explicit-sharding execution and deferred backward reduce-scatter (`prefetch_fsdp_weights=True`, `prefetch_fsdp_defer_grad_reduce_scatter=True`). Adding `\"hy4\"` to the allowlist also exposed explicit-sharding mismatches across `hy4` layers and `dot_product` attention with learnable sinks:\n\n* `AttentionOp.compute_local_attention` concatenated replicated `sinks_logits` with batch/head-sharded `logits` without resharding `sinks_logits` to match `logits` under `ShardMode.EXPLICIT` (masking out the trailing size-1 dimension via `PartitionSpec(*logits_sharding.spec.partitions[:3], None)`).\n* `Hy4HyperConnection.compute_pre_post` and `Hy4HyperHead.__call__` reshaped `[B, S, K, D]` to `[B, S, K * D]` and contracted with `fn`/`hc_fn` without explicit `out_sharding`, failing when `activation_embed` is sharded over `tensor`. Shared `_padded_partitions` (reading `.spec.partitions`) and `_project_hyper_streams` helpers now handle explicit sharding cleanly across `Hy4HyperConnection`, `Hy4HyperHead`, and `Hy4Indexer`.\n* `Hy4Indexer.__call__` omitted explicit `out_sharding` on `wk`/`weights_proj`, `indexer_score` einsum, and `.at[...].set(True)` mask scatter, and under context parallelism (`ici_context_parallelism > 1`) left `k` sharded on `context` before `q @ k^T` and `attention_mask` unaligned with `indexer_score`. Under `ShardMode.EXPLICIT`, `Hy4Indexer.__call__` now unshards `k`'s sequence axis before scoring and reshards `attention_mask` to match `indexer_score`'s batch and query-sequence partitions.\n* `Hy4Attention` (`q_norm`, `kv_norm`) and `Hy4DecoderLayer` (`pre_self_attention_layer_norm`, `post_self_attention_layer_norm`) omitted `shard_mode=config.shard_mode` when constructing `RMSNorm`, skipping `align_scale_with_normalized_axis` under tensor parallelism.\n* `Hy4Attention.gate_proj` now passes `weight_grad_in_kernel_order=self.config.dense_weight_grad_in_kernel_order` (matching `MLA.g_proj`) and uses mode-aware `out_logical_name` (`PREFILL_KV_BATCH`/`PREFILL_LENGTH` in prefill, `BATCH_ATTN`/`LENGTH` in train) for `gate_proj` and post-gate sharding.\n\nThis change adds `\"hy4\"` to `supported_decoders` for `ShardMode.EXPLICIT`, fixes these explicit-sharding mismatches while leaving `ShardMode.AUTO` behavior unchanged, removes the `\"shard_mode\": \"auto\"` workaround for `\"hy4\"` in `tests/unit/nnx_decoders_test.py`, adds a `@pytest.mark.tpu_only` 2-step `train.train_step` loss parity test (`TestHy4ExplicitPrefetchTpuParity`) in `tests/unit/nnx_decoders_test.py`, and adds unit tests in `tests/unit/hy4_explicit_sharding_test.py` covering config acceptance, forward and gradient parity (dense, MoE, full/shared DSA indexer, `Hy4HyperHead`, prefill, FSDP, and FSDP x TP), `Hy4Indexer` context parallelism (`FSDP x CP` and `CP x TP`), `mlp_intermediate_sharding` CP preservation, and full `NNXDecoder` loss/gradient parity (uniform and `use_indexer=True, inhomogeneous_layer_cycle_interval=2`) with `prefetch_fsdp_weights=True` and `prefetch_fsdp_defer_grad_reduce_scatter=True`.\n\n# Tests\n\n* `pytest -q tests/unit/hy4_explicit_sharding_test.py`\n* `pytest -q tests/unit/pyconfig_test.py -k test_explicit_sharding_hy4_decoder_support`\n* `pytest -q tests/unit/nnx_decoders_test.py -k \"test_mlp_intermediate_sharding_preserves_context_parallelism or test_hy4_explicit_prefetch_tpu_two_step_loss_parity\"`\n* `pytest -q tests/unit/hy4_remat_test.py`\n* `pytest -q tests/unit/fsdp_prefetch_test.py`\n\n# Checklist\n\nBefore submitting this PR, please make sure (put X in square brackets):\n- [X] I have performed a self-review of my code. For an optional AI review, add the `gemini-review` label.\n- [X] I have necessary comments in my code, particularly in hard-to-understand areas.\n- [X] I have run end-to-end tests and provided workload links above if applicable.\n- [X] I have made or will make corresponding changes to the doc if needed, including adding new documentation pages to the relevant Table of Contents (toctree directive) as explained in [our documentation](https://maxtext.readthedocs.io/en/latest/development.html#adding-new-documentation-files).\n\nPiperOrigin-RevId: 1030350127",
+          "timestamp": "2026-11-26T03:42:06Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/c034bc02ffe4507223e9ea1260516a9a94299fd9"
+        },
+        "date": 1795725769193,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 222.93799999999993,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 56.07699999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2235.0280000000002,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 175.23299999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 14,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 330.00699999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3338.7050000000027,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 474,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1846.6769999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 354.46,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3558.030999999999,
             "unit": "sec"
           },
           {
