@@ -455,6 +455,37 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
     self.assertIsNone(kwargs["preservation_policy"].n)
 
   @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
+  def test_max_text_trainer_checkpoint_multiprocessing_options(self, mock_checkpointer):
+    mp_options = ocp.options.MultiprocessingOptions(
+        primary_host=0, active_processes={0}, barrier_sync_key_prefix="trainer"
+    )
+
+    _ = maxtext_engine.MaxTextTrainingEngine(
+        self.setup_config(enable_checkpointing=True), checkpoint_multiprocessing_options=mp_options
+    )
+
+    self.assertEqual(mock_checkpointer.call_args.kwargs["context"].multiprocessing_options, mp_options)
+    self.assertEqual(self.mock_from_pretrained.call_args.kwargs["multiprocessing_options"], mp_options.v0())
+
+  def test_checkpoint_manager_round_trip_with_active_processes(self):
+    config = self.setup_config(enable_checkpointing=True)
+    # Orbax creates the root directory from the primary host of `active_processes`.
+    checkpoint_dir = os.path.join(config.checkpoint_dir, "trainer_only")
+    mp_options = ocp.options.MultiprocessingOptions(primary_host=0, active_processes={0})
+    manager = checkpointing.CheckpointManager(checkpoint_dir, config, multiprocessing_options=mp_options)
+    model = DummyNNXModel()
+
+    self.assertTrue(os.path.isdir(checkpoint_dir))
+    self.assertTrue(manager.save_checkpoint(1, checkpointing.CheckpointState(model=model)))
+    manager.wait_until_finished()
+    model.weights.set_value(jnp.zeros_like(model.weights.get_value()))
+    step, _ = manager.restore_checkpoint(checkpointing.CheckpointState(model=model))
+    manager.close()
+
+    self.assertEqual(step, 1)
+    np.testing.assert_array_equal(model.weights.get_value(), [1.0, 2.0])
+
+  @mock.patch.object(checkpointing.ocp.training, "Checkpointer")
   def test_checkpoint_manager_omits_initial_save_policy_when_save_checkpoint_on_start_is_false(self, mock_checkpointer):
     mock_config = self.setup_config(
         enable_checkpointing=True,

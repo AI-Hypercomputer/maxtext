@@ -1022,6 +1022,18 @@ class TestCreateNnxModel(unittest.TestCase):
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
     self.assertIsInstance(model, models.Transformer)
 
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_load_parameters_path_forwards_multiprocessing_options(self, mock_ocp):
+    """`multiprocessing_options` reaches the checkpointer restoring `load_parameters_path`."""
+    self._mock_ocp_for_restore(mock_ocp, self._make_nnx_metadata_mock(), _restore_as_zeros)
+    mp_options = ocp.options.MultiprocessingOptions(primary_host=0, active_processes={0})
+
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/nnx_ckpt")
+    model_creation_utils.from_pretrained(cfg, self.mesh, multiprocessing_options=mp_options)
+
+    self.assertEqual(mock_ocp.PyTreeCheckpointHandler.call_args.kwargs["multiprocessing_options"], mp_options)
+    self.assertEqual(mock_ocp.Checkpointer.call_args.kwargs["multiprocessing_options"], mp_options)
+
   def test_checkpoint_uses_value_wrapper(self):
     fn = model_creation_utils._checkpoint_uses_value_wrapper  # pylint: disable=protected-access
     param_state = nnx.state(model_creation_utils.from_pretrained(self.config, self.mesh), nnx.Param)
