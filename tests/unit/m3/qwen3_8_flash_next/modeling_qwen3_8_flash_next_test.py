@@ -34,6 +34,7 @@ import types
 from typing import Any
 import unittest
 from unittest import mock
+import warnings
 
 from absl.testing import absltest
 from flax import nnx
@@ -41,6 +42,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.configs import pyconfig  # pylint: disable=no-name-in-module
 from maxtext.m3 import models as m3_models  # pylint: disable=no-name-in-module
+from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=no-name-in-module
 from maxtext.m3.models.qwen3_8_flash_next import modeling_qwen3_8_flash_next  # pylint: disable=no-name-in-module
 from maxtext.utils import globals as maxtext_globals  # pylint: disable=no-name-in-module
 import numpy as np
@@ -76,13 +78,23 @@ def _assert_allclose_to_scale(actual: Any, desired: Any, rtol: float = 1e-4, ato
   np.testing.assert_allclose(np.asarray(actual), desired, rtol=rtol, atol=atol_scale * float(np.abs(desired).max()))
 
 
+class _SingleDeviceMeshTestCase(absltest.TestCase):
+  """Opts standalone submodule unit tests into unsharded single-device construction without leaking a 1-device mesh."""
+
+  def setUp(self):
+    super().setUp()
+    with warnings.catch_warnings():
+      warnings.simplefilter("ignore", UserWarning)
+      self.enter_context(m3_sharding.allow_unsharded_construction())
+
+
 # =================================================================================================
 # Hyper-connection and normalization layers
 # =================================================================================================
 
 
 @pytest.mark.cpu_only
-class Qwen3_8HyperConnectionTest(absltest.TestCase):
+class Qwen3_8HyperConnectionTest(_SingleDeviceMeshTestCase):
   """Validates Qwen3.8 hyper-connection primitives against PyTorch reference."""
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
@@ -257,7 +269,7 @@ class Qwen3_8HyperConnectionTest(absltest.TestCase):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8GDNTest(absltest.TestCase):
+class Qwen3_8GDNTest(_SingleDeviceMeshTestCase):
   """Tests Qwen3.8 GDN layer and recurrence kernels against PyTorch reference."""
 
   def test_qwen3_8_gdn_parameter_tree_contract(self):
@@ -541,7 +553,7 @@ class Qwen3_8GDNTest(absltest.TestCase):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8GDNNumericsTest(absltest.TestCase):
+class Qwen3_8GDNNumericsTest(_SingleDeviceMeshTestCase):
   """Validates numerical stability and PyTorch parity at long sequences."""
 
   @unittest.skipUnless(_HAS_QWEN4_EXP, "requires internal transformers qwen4_exp")
@@ -725,7 +737,7 @@ def _copy_weights(pt: Any, jx: modeling_qwen3_8_flash_next.Qwen3_8SparseAttentio
 
 
 @pytest.mark.cpu_only
-class Qwen3_8QSAAttentionTest(absltest.TestCase):
+class Qwen3_8QSAAttentionTest(_SingleDeviceMeshTestCase):
   """Tests QSA attention, indexer, and mRoPE against PyTorch reference."""
 
   def _make_jax_qsa(
@@ -1338,7 +1350,6 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
       self.skipTest("Requires >= 4 JAX devices")
     rng = np.random.default_rng(61)
     emb_dim = 64
-    w_probe = jnp.arange(1, emb_dim + 1, dtype=jnp.float32) / float(emb_dim)
     mesh = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("data", "tensor"))
     P = jax.sharding.PartitionSpec
 
@@ -1347,15 +1358,18 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
 
     b_sh, s_sh = 2, 48
     args_sh = (emb_dim, 4, 2, 32, 0.25, 10000.0, (2, 1, 1), 2, 1, 32, 16, 4, 1e-6, jnp.float32, jnp.float32)
-    dense_sh = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_sh, attention_kernel="dense", rngs=nnx.Rngs(61))
-    flash_sh = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_sh, attention_kernel="flash", rngs=nnx.Rngs(61))
-    nnx.update(flash_sh, nnx.state(dense_sh))
-    x_sh = jax.device_put(
-        jnp.array(rng.standard_normal((b_sh, s_sh, emb_dim), dtype=np.float32)), ns(P("data", None, None))
-    )
-    pos_sh = jax.device_put(jnp.tile(jnp.arange(s_sh, dtype=jnp.int32), (b_sh, 1)), ns(P("data", None)))
-    seg_sh = jax.device_put(jnp.ones((b_sh, s_sh), dtype=jnp.int32).at[:, 24:].set(2), ns(P("data", None)))
+    x_np = rng.standard_normal((b_sh, s_sh, emb_dim), dtype=np.float32)
+    with jax.set_mesh(mesh), nnx.use_eager_sharding(True):
+      dense_sh = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_sh, attention_kernel="dense", rngs=nnx.Rngs(61))
+      flash_sh = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(*args_sh, attention_kernel="flash", rngs=nnx.Rngs(61))
+      nnx.update(flash_sh, nnx.state(dense_sh))
+      m3_sharding.end_eager_placement(dense_sh)
+      m3_sharding.end_eager_placement(flash_sh)
     with jax.set_mesh(mesh):
+      w_probe = jax.device_put(jnp.arange(1, emb_dim + 1, dtype=jnp.float32) / float(emb_dim), ns(P(None)))
+      x_sh = jax.device_put(jnp.asarray(x_np), ns(P("data", None, None)))
+      pos_sh = jax.device_put(jnp.tile(jnp.arange(s_sh, dtype=jnp.int32), (b_sh, 1)), ns(P("data", None)))
+      seg_sh = jax.device_put(jnp.ones((b_sh, s_sh), dtype=jnp.int32).at[:, 24:].set(2), ns(P("data", None)))
       out_sh_d = dense_sh(x_sh, position_ids=pos_sh, segment_ids=seg_sh)
       out_sh_f = flash_sh(x_sh, position_ids=pos_sh, segment_ids=seg_sh)
       np.testing.assert_allclose(np.array(out_sh_f), np.array(out_sh_d), rtol=1e-4, atol=1e-4)
@@ -1450,19 +1464,34 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
       return jax.sharding.NamedSharding(mesh_ct, spec)
 
     with jax.set_mesh(mesh_ct):
-      q_ct = jax.device_put(q_ref, ns_ct(P(None, "context", "tensor", None)))
-      k_ct = jax.device_put(k_ref, ns_ct(P(None, None, "tensor", None)))
-      v_ct = jax.device_put(v_ref, ns_ct(P(None, None, "tensor", None)))
-      blk_ct = jax.device_put(jnp.asarray(blk_np), ns_ct(P(None, "context", None)))
-      seg_ct = jax.device_put(seg_ref, ns_ct(P(None, "context")))
+      mod_ct = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+          emb_dim=64,
+          num_query_heads=h_q,
+          num_kv_heads=2,
+          head_dim=d,
+          mrope_section=(2, 1, 1),
+          index_n_heads=2,
+          index_kv_heads=1,
+          index_head_dim=16,
+          token_budget=16,
+          compress_ratio=4,
+          dtype=jnp.float32,
+          weight_dtype=jnp.float32,
+          attention_kernel="flash",
+          rngs=nnx.Rngs(params=0),
+      )
+      m3_sharding.end_eager_placement(mod_ct)
+      q_ct = jax.device_put(q_np, ns_ct(P(None, "context", "tensor", None)))
+      k_ct = jax.device_put(k_np, ns_ct(P(None, None, "tensor", None)))
+      v_ct = jax.device_put(v_np, ns_ct(P(None, None, "tensor", None)))
+      blk_ct = jax.device_put(blk_np, ns_ct(P(None, "context", None)))
+      seg_ct = jax.device_put(seg_np, ns_ct(P(None, "context")))
 
-      w_ct = jax.device_put(w_out, ns_ct(P(None, "context", None)))
+      w_ct = jax.device_put(np.asarray(w_out), ns_ct(P(None, "context", None)))
       loss_ct, (dq_ct, dk_ct, dv_ct) = jax.jit(
           jax.value_and_grad(
               lambda qq, kk, vv: jnp.sum(
-                  mod_default.flash_block_sparse_attention(
-                      qq, kk, vv, blk_ct, segment_ids=seg_ct, block_q=16, block_kv=16
-                  )
+                  mod_ct.flash_block_sparse_attention(qq, kk, vv, blk_ct, segment_ids=seg_ct, block_q=16, block_kv=16)
                   * w_ct
               ),
               argnums=(0, 1, 2),
@@ -1475,9 +1504,7 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
 
       # Unpacked forward HLO with pre-replicated KV has zero all-gathers (positive control: forcing None on Q emits one).
       fwd_hlo = (
-          jax.jit(
-              lambda qq, kk, vv, bb: mod_default.flash_block_sparse_attention(qq, kk, vv, bb, block_q=16, block_kv=16)
-          )
+          jax.jit(lambda qq, kk, vv, bb: mod_ct.flash_block_sparse_attention(qq, kk, vv, bb, block_q=16, block_kv=16))
           .lower(q_ct, k_ct, v_ct, blk_ct)
           .compile()
           .as_text()
@@ -1497,9 +1524,7 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
       self.assertNotIn("f32[4,2,16,1,2,32]", fwd_hlo)
 
       # Eager call on SingleDeviceSharding inputs inside `with jax.set_mesh` also succeeds cleanly.
-      out_eager = mod_default.flash_block_sparse_attention(
-          q_ref, k_ref, v_ref, jnp.asarray(blk_np), block_q=16, block_kv=16
-      )
+      out_eager = mod_ct.flash_block_sparse_attention(q_ref, k_ref, v_ref, jnp.asarray(blk_np), block_q=16, block_kv=16)
       self.assertEqual(out_eager.shape, (b, s, h_q * d))
 
     # GQA head repetition when head_shards (2) > num_kv_heads (1), compared against unsharded reference.
@@ -1513,12 +1538,13 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
         )
     )(q_ref, k1_ref, v1_ref)
     with jax.set_mesh(mesh_ct):
-      k1_ct = jax.device_put(k1_ref, ns_ct(P(None, None, None, None)))
-      v1_ct = jax.device_put(v1_ref, ns_ct(P(None, None, None, None)))
+      k1_ct = jax.device_put(k1_np := k_np[:, :, :1, :], ns_ct(P(None, None, None, None)))
+      v1_ct = jax.device_put(v_np[:, :, :1, :], ns_ct(P(None, None, None, None)))
+      del k1_np
       l1_ct, (dq1_ct, dk1_ct, dv1_ct) = jax.jit(
           jax.value_and_grad(
               lambda qq, kk, vv: jnp.sum(
-                  mod_default.flash_block_sparse_attention(qq, kk, vv, blk_ct, block_q=16, block_kv=16) * w_ct
+                  mod_ct.flash_block_sparse_attention(qq, kk, vv, blk_ct, block_q=16, block_kv=16) * w_ct
               ),
               argnums=(0, 1, 2),
           )
@@ -1528,47 +1554,45 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
       np.testing.assert_allclose(np.asarray(dk1_ct), np.asarray(dk1_ref), rtol=1e-4, atol=1e-4)
       np.testing.assert_allclose(np.asarray(dv1_ct), np.asarray(dv1_ref), rtol=1e-4, atol=1e-4)
 
-    # 2. Custom EP=CP Sharding (`batch -> fsdp`, `length -> expert`) + `tensor_sequence` head sharding.
-    class _EpCpSharding(modeling_qwen3_8_flash_next.DefaultSharding):
-      """Custom sharding mapping activation batch off `expert` and length onto `expert`."""
-
-      def map_axis(self, axis, tensor_name, tensor_type):
-        if tensor_type == modeling_qwen3_8_flash_next.TensorType.ACTIVATION:
-          if axis == "batch":
-            return ("data", "fsdp", "fsdp_transpose")
-          if axis == "length":
-            return ("context", "expert")
-        return super().map_axis(axis, tensor_name, tensor_type)
-
-    ep_cp = _EpCpSharding()
-    mod_epcp = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
-        emb_dim=64,
-        num_query_heads=h_q,
-        num_kv_heads=2,
-        head_dim=d,
-        mrope_section=(2, 1, 1),
-        index_n_heads=2,
-        index_kv_heads=1,
-        index_head_dim=16,
-        token_budget=16,
-        compress_ratio=4,
-        dtype=jnp.float32,
-        weight_dtype=jnp.float32,
-        sharding=ep_cp,
-        attention_kernel="flash",
-        rngs=nnx.Rngs(params=0),
-    )
+    # 2. EPasCP (`batch -> fsdp`, `length -> expert`) + `tensor_sequence` head sharding.
+    ep_cp = m3_sharding.EPasCP()
+    loss_unpacked_ref, (dq_u_ref, dk_u_ref, dv_u_ref) = jax.jit(
+        jax.value_and_grad(
+            lambda qq, kk, vv: jnp.sum(
+                mod_default.flash_block_sparse_attention(qq, kk, vv, jnp.asarray(blk_np), block_q=16, block_kv=16) * w_out
+            ),
+            argnums=(0, 1, 2),
+        )
+    )(q_ref, k_ref, v_ref)
     mesh_ep = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("fsdp", "expert"))
 
     def ns_ep(spec):
       return jax.sharding.NamedSharding(mesh_ep, spec)
 
     with jax.set_mesh(mesh_ep):
-      q_ep = jax.device_put(q_ref, ns_ep(P("fsdp", "expert", None, None)))
-      k_ep = jax.device_put(k_ref, ns_ep(P("fsdp", None, None, None)))
-      v_ep = jax.device_put(v_ref, ns_ep(P("fsdp", None, None, None)))
-      blk_ep = jax.device_put(jnp.asarray(blk_np), ns_ep(P("fsdp", "expert", None)))
-      w_ep = jax.device_put(w_out, ns_ep(P("fsdp", "expert", None)))
+      mod_epcp = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+          emb_dim=64,
+          num_query_heads=h_q,
+          num_kv_heads=2,
+          head_dim=d,
+          mrope_section=(2, 1, 1),
+          index_n_heads=2,
+          index_kv_heads=1,
+          index_head_dim=16,
+          token_budget=16,
+          compress_ratio=4,
+          dtype=jnp.float32,
+          weight_dtype=jnp.float32,
+          sharding=ep_cp,
+          attention_kernel="flash",
+          rngs=nnx.Rngs(params=0),
+      )
+      m3_sharding.end_eager_placement(mod_epcp)
+      q_ep = jax.device_put(q_np, ns_ep(P("fsdp", "expert", None, None)))
+      k_ep = jax.device_put(k_np, ns_ep(P("fsdp", None, None, None)))
+      v_ep = jax.device_put(v_np, ns_ep(P("fsdp", None, None, None)))
+      blk_ep = jax.device_put(blk_np, ns_ep(P("fsdp", "expert", None)))
+      w_ep = jax.device_put(np.asarray(w_out), ns_ep(P("fsdp", "expert", None)))
       l_ep, (dq_ep, dk_ep, dv_ep) = jax.jit(
           jax.value_and_grad(
               lambda qq, kk, vv: jnp.sum(
@@ -1577,14 +1601,6 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
               argnums=(0, 1, 2),
           )
       )(q_ep, k_ep, v_ep)
-    loss_unpacked_ref, (dq_u_ref, dk_u_ref, dv_u_ref) = jax.jit(
-        jax.value_and_grad(
-            lambda qq, kk, vv: jnp.sum(
-                mod_epcp.flash_block_sparse_attention(qq, kk, vv, jnp.asarray(blk_np), block_q=16, block_kv=16) * w_out
-            ),
-            argnums=(0, 1, 2),
-        )
-    )(q_ref, k_ref, v_ref)
     with jax.set_mesh(mesh_ep):
       np.testing.assert_allclose(float(l_ep), float(loss_unpacked_ref), rtol=1e-4, atol=1e-4)
       np.testing.assert_allclose(np.asarray(dq_ep), np.asarray(dq_u_ref), rtol=1e-4, atol=1e-4)
@@ -1833,25 +1849,29 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
     emb_dim = 64
 
     # 1. _flash_attention (s <= token_budget) on 4-device ('context', 'tensor') where batch_axes == ().
-    attn_short = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
-        emb_dim=emb_dim,
-        num_query_heads=4,
-        num_kv_heads=2,
-        head_dim=128,
-        mrope_section=(8, 4, 4),
-        index_n_heads=2,
-        index_kv_heads=1,
-        index_head_dim=32,
-        token_budget=256,
-        compress_ratio=4,
-        dtype=jnp.bfloat16,
-        weight_dtype=jnp.float32,
-        attention_kernel="flash",
-        rngs=nnx.Rngs(params=13),
-    )
     mesh_ct = jax.sharding.Mesh(np.array(jax.devices()[:4]).reshape(2, 2), ("context", "tensor"))
-    x_ct = jnp.ones((1, 128, emb_dim), dtype=jnp.bfloat16)
-    with jax.set_mesh(mesh_ct):
+    x_ct = jax.device_put(
+        jnp.ones((1, 128, emb_dim), dtype=jnp.bfloat16),
+        jax.sharding.NamedSharding(mesh_ct, jax.sharding.PartitionSpec(None, "context", None)),
+    )
+    with jax.set_mesh(mesh_ct), nnx.use_eager_sharding(True):
+      attn_short = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+          emb_dim=emb_dim,
+          num_query_heads=4,
+          num_kv_heads=2,
+          head_dim=128,
+          mrope_section=(8, 4, 4),
+          index_n_heads=2,
+          index_kv_heads=1,
+          index_head_dim=32,
+          token_budget=256,
+          compress_ratio=4,
+          dtype=jnp.bfloat16,
+          weight_dtype=jnp.float32,
+          attention_kernel="flash",
+          rngs=nnx.Rngs(params=13),
+      )
+      m3_sharding.end_eager_placement(attn_short)
       out_ct = nnx.jit(lambda m, xi: m(xi))(attn_short, x_ct)
       self.assertEqual(out_ct.shape, (1, 128, emb_dim))
 
@@ -1873,10 +1893,6 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
     dense_ep = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
         *args_ep, sharding=ep_shd, attention_kernel="dense", rngs=nnx.Rngs(91)
     )
-    flash_ep = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
-        *args_ep, sharding=ep_shd, attention_kernel="flash", rngs=nnx.Rngs(91)
-    )
-    nnx.update(flash_ep, nnx.state(dense_ep))
     x_ep_np = rng.standard_normal((b_ep, s_ep, emb_dim), dtype=np.float32)
     w_ep_probe = jnp.arange(1, emb_dim + 1, dtype=jnp.float32) / float(emb_dim)
     pos_ep0 = jnp.tile(jnp.arange(s_ep, dtype=jnp.int32), (b_ep, 1))
@@ -1897,7 +1913,18 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
     def _ns_ep4(sp):
       return jax.sharding.NamedSharding(mesh_ep4, sp)
 
+    with jax.set_mesh(mesh_ep4), nnx.use_eager_sharding(True):
+      flash_ep = modeling_qwen3_8_flash_next.Qwen3_8SparseAttention(
+          *args_ep, sharding=ep_shd, attention_kernel="flash", rngs=nnx.Rngs(91)
+      )
+      for src_v, dst_v in zip(
+          jax.tree_util.tree_leaves(nnx.state(dense_ep, nnx.Param), is_leaf=lambda v: isinstance(v, nnx.Variable)),
+          jax.tree_util.tree_leaves(nnx.state(flash_ep, nnx.Param), is_leaf=lambda v: isinstance(v, nnx.Variable)),
+      ):
+        dst_v.set_value(jax.device_put(np.asarray(src_v.get_value()), dst_v.get_value().sharding))
+      m3_sharding.end_eager_placement(flash_ep)
     with jax.set_mesh(mesh_ep4):
+      w_ep_probe = jax.device_put(w_ep_probe, _ns_ep4(P(None)))
       x_ep_sh = jax.device_put(jnp.asarray(x_ep_np), _ns_ep4(P("fsdp", "expert", None)))
       pos_ep_sh = jax.device_put(pos_ep0, _ns_ep4(P("fsdp", "expert")))
       seg_ep_sh = jax.device_put(seg_ep0, _ns_ep4(P("fsdp", "expert")))
@@ -1939,7 +1966,7 @@ class Qwen3_8QSAAttentionTest(absltest.TestCase):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8MoETest(absltest.TestCase):
+class Qwen3_8MoETest(_SingleDeviceMeshTestCase):
 
   def _make_moe(self, **kwargs) -> modeling_qwen3_8_flash_next.Qwen3_8SparseMoeBlock:
     """Helper to instantiate Qwen3_8SparseMoeBlock with test defaults."""
@@ -2047,18 +2074,20 @@ class Qwen3_8MoETest(absltest.TestCase):
       np.testing.assert_allclose(np.asarray(actual), np.asarray(expected), rtol=1e-4, atol=1e-4)
 
     # Outside a mesh, direct init without sharding/executor keeps the unsharded ragged_dot default.
-    unsharded = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-        num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(0)
-    )
-    self.assertEqual(unsharded.executor.kind, "ragged_dot")
+    with jax.sharding.set_mesh(None), m3_sharding.allow_unsharded_construction():
+      unsharded = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+          num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(0)
+      )
+      self.assertEqual(unsharded.executor.kind, "ragged_dot")
 
   def test_experts_shard_map_matches_reference_forward_on_cpu_mesh(self):
     if len(jax.devices()) < 4:
       self.skipTest("Needs 4 devices (e.g. XLA_FLAGS=--xla_force_host_platform_device_count=4).")
     n, d, m, e, k = 16, 32, 16, 12, 2
-    experts = modeling_qwen3_8_flash_next.Qwen3_8Experts(
-        num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(7)
-    )
+    with jax.sharding.set_mesh(None), m3_sharding.allow_unsharded_construction():
+      experts = modeling_qwen3_8_flash_next.Qwen3_8Experts(
+          num_experts=e, emb_dim=d, moe_mlp_dim=m, dtype=jnp.float32, weight_dtype=jnp.float32, rngs=nnx.Rngs(7)
+      )
     x = jax.random.normal(jax.random.key(11), (n, d))
     top_k_idx = jax.random.randint(jax.random.key(12), (n, k), 0, e)
     top_k_w = jax.random.uniform(jax.random.key(13), (n, k))
@@ -2222,7 +2251,7 @@ class Qwen3_8MoETest(absltest.TestCase):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8PLETest(absltest.TestCase):
+class Qwen3_8PLETest(_SingleDeviceMeshTestCase):
 
   def test_splitmix64_known_vectors(self):
     multipliers, moduli, table_offsets, padded_vocab_size = modeling_qwen3_8_flash_next.compute_ple_buffers(
@@ -2547,7 +2576,7 @@ def _make_matching_hf_config(c) -> Any:
 
 
 @pytest.mark.cpu_only
-class Qwen3_8BackboneTest(absltest.TestCase):
+class Qwen3_8BackboneTest(_SingleDeviceMeshTestCase):
   """Backbone tests for scanned/unscanned parity and PyTorch reference match."""
 
   def test_scanned_vs_unscanned_parity_2_cycles(self):
@@ -2887,7 +2916,7 @@ def _copy_layer_and_mixer_weights(pt_layer, pt_mixer, jx_layer, jx_mixer):
 
 
 @pytest.mark.cpu_only
-class Qwen3_8MTPLossTest(absltest.TestCase):
+class Qwen3_8MTPLossTest(_SingleDeviceMeshTestCase):
 
   def test_mtp_block_shapes_and_parity(self):
     cfg = _create_mini_config()

@@ -47,6 +47,22 @@ def clear_input_shardings_dump():
 
 def get_input_data_sharding(config, mesh, rules=None):
   """Get the input data sharding for the model"""
+  if (
+      (rules is None or rules == getattr(config, "logical_axis_rules", None))
+      and bool(getattr(config, "use_m3_model", False))
+      and tuple(getattr(config, "input_data_sharding_logical_axes", ()))
+      == ("activation_embed_and_logits_batch", "activation_norm_length")
+  ):
+    from maxtext.m3.core import sharding as m3_sharding  # pylint: disable=import-outside-toplevel
+
+    strategy = m3_sharding.sharding_from_config(config)
+    spec = m3_sharding.project_spec_to_mesh(
+        strategy("input_tokens", ("batch", "norm_length"), m3_sharding.TensorType.ACTIVATION),
+        mesh,
+    )
+    if getattr(config, "enable_diloco", False):
+      spec = P("diloco", *spec)
+    return NamedSharding(mesh, remove_size_one_mesh_axis(spec, mesh))
   if rules is None:
     rules = config.logical_axis_rules
   if config.enable_diloco:
