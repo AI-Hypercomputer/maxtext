@@ -32,10 +32,12 @@ Plan invariants required from `moe_replica_planner` (verified in
 """
 
 import functools
+from typing import NamedTuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+import qwix.pallas as qpl
 
 MAX_REPLICA_SEND = 8
 
@@ -106,19 +108,13 @@ def _extend_direct_bwd(axis_name, r_slots, max_send, dtype, wdtype, res, g):
 _extend_direct.defvjp(_extend_direct_fwd, _extend_direct_bwd)
 
 
-def extend_with_replicas(w_local, plan, axis_name, num_ep, dtype):
-  """Extends `w_local` `[L, ...]` to `[L + R, ...]` in `dtype`, summing replica grads back into home slots.
-
-  Relies on the `moe_replica_planner.ReplicaPlan` invariants: at most one replica row per
-  `(home, receiver)` pair, distinct valid home IDs across each receiver's `R` slots, and valid
-  send entries compacted at the front of `send_slots[:, :max_send]` (`1 <= max_send <= 8`).
-  Returns `w_local.astype(dtype)` directly when `plan.num_replicas == 0` or `num_ep == 1`.
-  """
+def _prepare_move(w_local, plan, axis_name, num_ep):
+  """Validates `plan` against `w_local` and returns `(r_slots, max_send, idx)` or None when replication is off."""
   r_slots = int(plan.num_replicas)
   if r_slots < 0 or num_ep < 1:
     raise ValueError(f"Expected num_replicas >= 0 and num_ep >= 1, got num_replicas={r_slots}, num_ep={num_ep}.")
   if r_slots == 0 or num_ep == 1:
-    return w_local.astype(dtype)
+    return None
   if plan.send_slots.ndim != 2:
     raise ValueError(f"Expected 2D send_slots [EP, max_send], got shape {plan.send_slots.shape}.")
   max_send = int(plan.send_slots.shape[1])
@@ -132,4 +128,106 @@ def extend_with_replicas(w_local, plan, axis_name, num_ep, dtype):
   in_off, send_sz, out_off, recv_sz = _direct_move_params(plan, me, num_ep)
   bwd_in_off, bwd_out_off = _bwd_offsets(plan, me, num_ep)
   idx = (in_off, send_sz, out_off, recv_sz, plan.send_slots[me], bwd_in_off, recv_sz, bwd_out_off, send_sz)
+  return r_slots, max_send, idx
+
+
+def extend_with_replicas(w_local, plan, axis_name, num_ep, dtype):
+  """Extends `w_local` `[L, ...]` to `[L + R, ...]` in `dtype`, summing replica grads back into home slots.
+
+  Relies on the `moe_replica_planner.ReplicaPlan` invariants: at most one replica row per
+  `(home, receiver)` pair, distinct valid home IDs across each receiver's `R` slots, and valid
+  send entries compacted at the front of `send_slots[:, :max_send]` (`1 <= max_send <= 8`).
+  Returns `w_local.astype(dtype)` directly when `plan.num_replicas == 0` or `num_ep == 1`.
+  """
+  move = _prepare_move(w_local, plan, axis_name, num_ep)
+  if move is None:
+    return w_local.astype(dtype)
+  r_slots, max_send, idx = move
   return _extend_direct(axis_name, r_slots, max_send, jnp.dtype(dtype), jnp.dtype(w_local.dtype), w_local, idx)
+
+
+class _QuantMoveSpec(NamedTuple):
+  """Static specification for home-side quantization and replica movement."""
+
+  axis_name: str | tuple[str, ...]
+  r_slots: int
+  max_send: int
+  dtype: jnp.dtype
+  wdtype: jnp.dtype
+  qtype: jnp.dtype
+  calibration_method: str | None
+  channelwise_axes: tuple[int, ...]
+
+
+@functools.partial(jax.custom_vjp, nondiff_argnums=(0,))
+def _extend_quantized(spec, w, idx):
+  """Quantizes `w` on its home shard and moves FP8 codes (and dynamic scales) to replica slots."""
+  q = qpl.quantize(
+      w.astype(spec.dtype),
+      spec.qtype,
+      channelwise_axes=list(spec.channelwise_axes),
+      calibration_method=spec.calibration_method,
+  )
+  if q.zero_point is not None:
+    raise NotImplementedError("extend_quantized_with_replicas does not support asymmetric zero_point quantization.")
+  if idx is None:
+    return q
+  codes = _extend_direct(spec.axis_name, spec.r_slots, spec.max_send, q.qvalue.dtype, q.qvalue.dtype, q.qvalue, idx)
+  # Static fixed-range calibration yields a constant (1, 1, 1) scale identical on all shards, so keep it
+  # unmoved (matching R=0); dynamic calibration depends on the home shard's weights, so move one scale row
+  # per replica alongside the FP8 codes.
+  if (spec.calibration_method or "").lower().startswith("fixed") and q.scale.size == 1:
+    scale = q.scale
+  else:
+    scale = jnp.broadcast_to(q.scale, (w.shape[0], *q.scale.shape[1:]))
+    scale = _extend_direct(spec.axis_name, spec.r_slots, spec.max_send, scale.dtype, scale.dtype, scale, idx)
+  return qpl.QArray(qvalue=codes, scale=scale, zero_point=None, qtype=q.qtype)
+
+
+def _extend_quantized_fwd(spec, w, idx):
+  return _extend_quantized(spec, w, idx), (idx, w.shape)
+
+
+def _extend_quantized_bwd(spec, res, g):
+  """Straight-through: gmm returns d(dequantized weight) as g.qvalue; route replica grads home."""
+  idx, _ = res
+  if idx is None:
+    return g.qvalue.astype(spec.wdtype), None
+  return _extend_direct_bwd(spec.axis_name, spec.r_slots, spec.max_send, spec.dtype, spec.wdtype, res, g.qvalue)
+
+
+_extend_quantized.defvjp(_extend_quantized_fwd, _extend_quantized_bwd)
+
+
+def extend_quantized_with_replicas(
+    w_local, plan, axis_name, num_ep, dtype, qtype, calibration_method="absmax", channelwise_axes=(2,)
+):
+  """Quantized variant of `extend_with_replicas` for Qwix `gmm` rules (e.g. `quantization=fp8_full`).
+
+  Quantizes `w_local` `[L, K, N]` on its home device using the same rule as an unreplicated `gmm`
+  (scale reduced over the `L` home experts and `K`, so home rows keep exact `R=0` codes and scales
+  under both dynamic `absmax` and static `fixed` calibration). Moves the quantized codes (and, for
+  non-static calibration, per-row home scales) via `ragged_all_to_all`, returning a `qpl.QArray` with
+  codes `[L + R, K, N]` and scale `[L + R, 1, N]` / `[L + R, 1, 1]` (or `[1, 1, 1]` for static fixed
+  calibration). The weight gradient is straight-through into `w_local` with replica grads summed home.
+  """
+  if w_local.ndim != 3:
+    raise ValueError(f"Expected a 3D [L, K, N] expert weight, got shape {w_local.shape}.")
+  raw_axes = tuple(channelwise_axes)
+  channelwise_axes = tuple(dict.fromkeys(d % w_local.ndim if -w_local.ndim <= d < w_local.ndim else d for d in raw_axes))
+  if not set(channelwise_axes).issubset({2}):
+    raise ValueError(f"Expected channelwise_axes subset of (2,), got {raw_axes}.")
+  calibration_method = calibration_method or "absmax"
+  move = _prepare_move(w_local, plan, axis_name, num_ep)
+  r_slots, max_send, idx = (0, 0, None) if move is None else move
+  spec = _QuantMoveSpec(
+      axis_name=axis_name,
+      r_slots=r_slots,
+      max_send=max_send,
+      dtype=jnp.dtype(dtype),
+      wdtype=jnp.dtype(w_local.dtype),
+      qtype=jnp.dtype(qtype),
+      calibration_method=calibration_method,
+      channelwise_axes=channelwise_axes,
+  )
+  return _extend_quantized(spec, w_local, idx)

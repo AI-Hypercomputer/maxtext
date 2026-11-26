@@ -26,6 +26,7 @@ from jax.sharding import Mesh
 from jax.sharding import PartitionSpec as P
 import numpy as np
 import pytest
+import qwix.pallas as qpl
 
 from maxtext.layers import moe_replica_weights as mrw
 from tests.utils import moe_replica_test_utils
@@ -299,6 +300,296 @@ class ExtendWithReplicasTpuTest(parameterized.TestCase):
     g_ref = np.asarray(jnp.asarray(g_np, dtype=compute_dtype), dtype=np.float32)
     reps, dw_rep = moe_replica_test_utils.replica_reference(w_ref, g_ref[:, LOCAL:], plan)
     np.testing.assert_array_equal(np.asarray(out, dtype=np.float32), np.concatenate([w_ref, reps], axis=1))
+    tol = 1e-2 if compute_dtype == jnp.bfloat16 else 1e-5
+    np.testing.assert_allclose(np.asarray(dw), g_ref[:, :LOCAL] + dw_rep, rtol=tol, atol=tol)
+
+
+@jax.custom_vjp
+def _ste_consume(q, g):
+  """sum(dequant(q) * g) whose bwd mimics gmm: float d(dequantized weight) as the QArray qvalue cotangent."""
+  return jnp.sum(q.qvalue.astype(jnp.float32) * q.scale.astype(jnp.float32) * g.astype(jnp.float32))
+
+
+def _ste_consume_fwd(q, g):
+  return _ste_consume(q, g), (q, g)
+
+
+def _ste_consume_bwd(res, ct):
+  q, g = res
+  dq = qpl.QArray(qvalue=(ct * g).astype(g.dtype), scale=jnp.zeros_like(q.scale), zero_point=None, qtype=q.qtype)
+  return dq, jnp.zeros_like(g)
+
+
+_ste_consume.defvjp(_ste_consume_fwd, _ste_consume_bwd)
+
+
+class ExtendQuantizedWithReplicasTest(parameterized.TestCase):
+  """CPU tests for `extend_quantized_with_replicas` (dynamic & static FP8, channelwise & per-tensor, STE grads)."""
+
+  def setUp(self):
+    """Initializes deterministic 4-shard weights/grads and patches `ragged_all_to_all` on CPU."""
+    super().setUp()
+    rng = np.random.default_rng(1)
+    self.plan = _hand_plan()
+    # Home 0 (the sender) holds 8x larger weights than its receivers 1 and 3.
+    mag = np.array([8.0, 1.0, 1.0, 1.0], np.float32).reshape((NUM_EP, 1, 1, 1))
+    self.w = (rng.standard_normal((NUM_EP, LOCAL, DIM, 4)) * mag).astype(np.float32)
+    self.g = rng.standard_normal((NUM_EP, LOCAL + NUM_REPLICAS, DIM, 4)).astype(np.float32)
+    patcher = mock.patch.object(jax.lax, "ragged_all_to_all", moe_replica_test_utils.emulated_ragged_all_to_all)
+    patcher.start()
+    self.addCleanup(patcher.stop)
+
+  def _extend(self, calibration, channelwise_axes=(2,), dtype=jnp.float32):
+    def per_device(w):
+      return mrw.extend_quantized_with_replicas(
+          w, self.plan, AXIS, NUM_EP, dtype, jnp.float8_e4m3fn, calibration, channelwise_axes
+      )
+
+    return jax.jit(jax.vmap(per_device, axis_name=AXIS))(jnp.asarray(self.w))
+
+  @parameterized.named_parameters(
+      ("absmax_channelwise", "absmax", (2,)),
+      ("absmax_neg_axis", "absmax", (-1,)),
+      ("absmax_pertensor", "absmax", ()),
+      ("none_calibration", None, (2,)),
+      ("fixed_channelwise_arg", "fixed,-224,224", (2,)),
+      ("fixed_pertensor", "fixed,224", ()),
+  )
+  def test_home_and_replica_codes_and_scales(self, calibration, channelwise_axes):
+    out = self._extend(calibration, channelwise_axes)
+    self.assertEqual(out.qvalue.dtype, jnp.float8_e4m3fn)
+    self.assertEqual(out.qvalue.shape, (NUM_EP, LOCAL + NUM_REPLICAS, DIM, 4))
+    ref_cal = calibration or "absmax"
+    ref_axes = [a % 3 for a in channelwise_axes]
+    is_static = ref_cal.lower().startswith("fixed")
+    expected_scale_shape = (
+        (NUM_EP, 1, 1, 1) if is_static else (NUM_EP, LOCAL + NUM_REPLICAS, 1, 4 if channelwise_axes else 1)
+    )
+    self.assertEqual(out.scale.shape, expected_scale_shape)
+
+    codes = np.asarray(out.qvalue.astype(jnp.float32))
+    scale = np.asarray(out.scale)
+    rep_home, rep_slot = np.asarray(self.plan.rep_home), np.asarray(self.plan.rep_slot)
+    for d in range(NUM_EP):
+      ref = qpl.quantize(
+          jnp.asarray(self.w[d]),
+          jnp.float8_e4m3fn,
+          channelwise_axes=ref_axes,
+          calibration_method=ref_cal,
+      )
+      np.testing.assert_array_equal(codes[d, :LOCAL], np.asarray(ref.qvalue.astype(jnp.float32)))
+      if is_static:
+        np.testing.assert_array_equal(scale[d], np.asarray(ref.scale))
+      else:
+        ref_scale = np.broadcast_to(np.asarray(ref.scale), (LOCAL, *ref.scale.shape[1:]))
+        np.testing.assert_allclose(scale[d, :LOCAL], ref_scale, rtol=1e-6, atol=1e-7)
+      for s in range(NUM_REPLICAS):
+        h = int(rep_home[d, s])
+        if h < 0:
+          np.testing.assert_array_equal(codes[d, LOCAL + s], 0.0)
+          continue
+        home = qpl.quantize(
+            jnp.asarray(self.w[h]),
+            jnp.float8_e4m3fn,
+            channelwise_axes=ref_axes,
+            calibration_method=ref_cal,
+        )
+        loc = int(rep_slot[d, s])
+        np.testing.assert_array_equal(codes[d, LOCAL + s], np.asarray(home.qvalue.astype(jnp.float32))[loc])
+        if not is_static:
+          np.testing.assert_allclose(scale[d, LOCAL + s], np.asarray(home.scale)[0], rtol=1e-6, atol=1e-7)
+
+  def test_static_calibration_skips_scale_collective(self):
+    """Static fixed calibration shares a constant (1, 1, 1) scale, so only codes use ragged_all_to_all."""
+    calls = 0
+    orig = moe_replica_test_utils.emulated_ragged_all_to_all
+
+    def counting_ra2a(*args, **kwargs):
+      nonlocal calls
+      calls += 1
+      return orig(*args, **kwargs)
+
+    with mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=counting_ra2a):
+      self._extend("fixed,-224,224", ())
+    self.assertEqual(calls, 1)
+    calls = 0
+    with mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=counting_ra2a):
+      self._extend("absmax", (2,))
+    self.assertEqual(calls, 2)
+
+  def test_naive_requantization_would_change_receiver_home_scale(self):
+    """Documents why scales move: requantizing [home | replica] on receiver 1 inflates its home scale."""
+    dense = jax.jit(
+        jax.vmap(lambda w: mrw.extend_with_replicas(w, self.plan, AXIS, NUM_EP, jnp.float32), axis_name=AXIS)
+    )(jnp.asarray(self.w))
+    naive = qpl.quantize(dense[1], jnp.float8_e4m3fn, channelwise_axes=[2], calibration_method="absmax")
+    home = jax.jit(lambda w: qpl.quantize(w, jnp.float8_e4m3fn, channelwise_axes=[2], calibration_method="absmax"))(
+        jnp.asarray(self.w[1])
+    )
+    self.assertGreater(float(np.min(np.asarray(naive.scale) / np.asarray(home.scale))), 2.0)
+    np.testing.assert_array_equal(
+        np.asarray(self._extend("absmax").scale[1, :LOCAL]), np.broadcast_to(home.scale, (LOCAL, 1, 4))
+    )
+
+  @parameterized.named_parameters(
+      ("absmax_f32", "absmax", (2,), jnp.float32, jnp.float32),
+      ("absmax_pertensor_f32_weights_bf16_compute", "absmax", (), jnp.bfloat16, jnp.float32),
+      ("fixed_f32_weights_bf16_compute", "fixed,-224,224", (), jnp.bfloat16, jnp.float32),
+      ("absmax_pure_bf16", "absmax", (2,), jnp.bfloat16, jnp.bfloat16),
+      ("fixed_pure_bf16", "fixed,-224,224", (), jnp.bfloat16, jnp.bfloat16),
+  )
+  def test_straight_through_grads_return_home_like_dense_move(self, calibration, channelwise_axes, dtype, weight_dtype):
+    w_in = jnp.asarray(self.w, dtype=weight_dtype)
+    g_in = jnp.asarray(self.g, dtype=dtype)
+
+    def per_device(w, g):
+      def loss_q(w_):
+        q = mrw.extend_quantized_with_replicas(
+            w_, self.plan, AXIS, NUM_EP, dtype, jnp.float8_e4m3fn, calibration, channelwise_axes
+        )
+        return _ste_consume(q, g)
+
+      def loss_dense(w_):
+        extended = mrw.extend_with_replicas(w_, self.plan, AXIS, NUM_EP, dtype)
+        return jnp.sum(extended.astype(jnp.float32) * g.astype(jnp.float32))
+
+      return jax.grad(loss_q)(w), jax.grad(loss_dense)(w)
+
+    dw_q, dw_dense = jax.jit(jax.vmap(per_device, axis_name=AXIS))(w_in, g_in)
+    self.assertEqual(dw_q.dtype, weight_dtype)
+    self.assertEqual(dw_dense.dtype, weight_dtype)
+    w_ref = np.asarray(w_in, dtype=np.float32)
+    g_ref = np.asarray(g_in, dtype=np.float32)
+    _, dw_rep = moe_replica_test_utils.replica_reference(w_ref, g_ref[:, LOCAL:], self.plan)
+    tol = 2e-2 if jnp.bfloat16 in (dtype, weight_dtype) else 1e-6
+    np.testing.assert_allclose(np.asarray(dw_q, dtype=np.float32), g_ref[:, :LOCAL] + dw_rep, rtol=tol, atol=tol)
+    np.testing.assert_array_equal(np.asarray(dw_q, dtype=np.float32), np.asarray(dw_dense, dtype=np.float32))
+
+  def test_noop_when_zero_replicas_or_single_device(self):
+    w_single = jnp.asarray(self.w[0], dtype=jnp.float32)
+    g_single = jnp.asarray(self.g[0, :LOCAL], dtype=jnp.bfloat16)
+    zero_rep_plan = types.SimpleNamespace(num_replicas=0, send_slots=jnp.zeros((NUM_EP, 2), jnp.int32))
+    with mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=AssertionError("must not call ra2a")):
+      out_r0 = mrw.extend_quantized_with_replicas(w_single, zero_rep_plan, AXIS, NUM_EP, jnp.bfloat16, jnp.float8_e4m3fn)
+      dw_r0 = jax.grad(
+          lambda w: _ste_consume(
+              mrw.extend_quantized_with_replicas(w, zero_rep_plan, AXIS, NUM_EP, jnp.bfloat16, jnp.float8_e4m3fn),
+              g_single,
+          )
+      )(w_single)
+      out_ep1 = mrw.extend_quantized_with_replicas(w_single, self.plan, AXIS, 1, jnp.bfloat16, jnp.float8_e4m3fn)
+      dw_ep1 = jax.grad(
+          lambda w: _ste_consume(
+              mrw.extend_quantized_with_replicas(w, self.plan, AXIS, 1, jnp.bfloat16, jnp.float8_e4m3fn),
+              g_single,
+          )
+      )(w_single)
+    self.assertEqual(out_r0.qvalue.shape, w_single.shape)
+    self.assertEqual(out_ep1.qvalue.shape, w_single.shape)
+    self.assertEqual(dw_r0.dtype, jnp.float32)
+    self.assertEqual(dw_ep1.dtype, jnp.float32)
+    np.testing.assert_array_equal(np.asarray(dw_r0), np.asarray(g_single.astype(jnp.float32)))
+    np.testing.assert_array_equal(np.asarray(dw_ep1), np.asarray(g_single.astype(jnp.float32)))
+
+  def test_invalid_inputs_raise(self):
+    w_single = jnp.asarray(self.w[0], dtype=jnp.float32)
+    with self.assertRaises(ValueError):
+      mrw.extend_quantized_with_replicas(
+          w_single[0], self.plan, AXIS, NUM_EP, jnp.float32, jnp.float8_e4m3fn, "absmax", (2,)
+      )
+    with self.assertRaises(ValueError):
+      mrw.extend_quantized_with_replicas(
+          w_single, self.plan, AXIS, NUM_EP, jnp.float32, jnp.float8_e4m3fn, "absmax", (0, 2)
+      )
+    with self.assertRaises(ValueError):
+      mrw.extend_quantized_with_replicas(
+          w_single, self.plan, AXIS, NUM_EP, jnp.float32, jnp.float8_e4m3fn, "absmax", (-4,)
+      )
+    with self.assertRaises(NotImplementedError):
+      jax.jit(
+          jax.vmap(
+              lambda w: mrw.extend_quantized_with_replicas(
+                  w, self.plan, AXIS, NUM_EP, jnp.float32, jnp.int8, "minmax", ()
+              ),
+              axis_name=AXIS,
+          )
+      )(jnp.asarray(self.w))
+
+
+@pytest.mark.tpu_only
+class ExtendQuantizedWithReplicasTpuTest(parameterized.TestCase):
+  """Runs `extend_quantized_with_replicas` under `jax.shard_map` with real TPU `ragged_all_to_all`."""
+
+  @parameterized.named_parameters(
+      ("absmax_channelwise_bf16", "absmax", (2,), jnp.bfloat16),
+      ("absmax_pertensor_f32", "absmax", (), jnp.float32),
+      ("fixed_bf16", "fixed,-224,224", (), jnp.bfloat16),
+  )
+  def test_real_ragged_all_to_all_quantized_forward_and_backward(self, calibration, channelwise_axes, compute_dtype):
+    devs = jax.devices()
+    if len(devs) < 4:
+      self.skipTest(f"_hand_plan requires 4 TPU devices, got {len(devs)}.")
+    self.assertIsNot(jax.lax.ragged_all_to_all, moe_replica_test_utils.emulated_ragged_all_to_all)
+    devs = devs[:4]
+    plan = _hand_plan()
+    rng = np.random.default_rng(77)
+    mag = np.array([8.0, 1.0, 1.0, 1.0], np.float32).reshape((NUM_EP, 1, 1, 1))
+    w_np = (rng.standard_normal((NUM_EP, LOCAL, 16, 128)) * mag).astype(np.float32)
+    g_np = rng.standard_normal((NUM_EP, LOCAL + NUM_REPLICAS, 16, 128)).astype(np.float32)
+    mesh = Mesh(np.asarray(devs), (AXIS,))
+    w_sharded = jax.device_put(jnp.asarray(w_np), jax.sharding.NamedSharding(mesh, P(AXIS)))
+    g_sharded = jax.device_put(jnp.asarray(g_np, dtype=compute_dtype), jax.sharding.NamedSharding(mesh, P(AXIS)))
+
+    @jax.jit
+    @functools.partial(jax.shard_map, mesh=mesh, in_specs=(P(AXIS), P(AXIS)), out_specs=(P(AXIS), P(AXIS)))
+    def step(w_shard, g_shard):
+      def loss_q(w_):
+        q = mrw.extend_quantized_with_replicas(
+            w_, plan, AXIS, NUM_EP, compute_dtype, jnp.float8_e4m3fn, calibration, channelwise_axes
+        )
+        return _ste_consume(q, g_shard[0]), q
+
+      (_, q_out), dw_local = jax.value_and_grad(loss_q, has_aux=True)(w_shard[0])
+      return jax.tree.map(lambda a: a[None], q_out), dw_local[None]
+
+    @jax.jit
+    @functools.partial(jax.shard_map, mesh=mesh, in_specs=P(AXIS), out_specs=P(AXIS))
+    def quant_r0(w_shard):
+      ref = qpl.quantize(
+          w_shard[0].astype(compute_dtype),
+          jnp.float8_e4m3fn,
+          channelwise_axes=list(channelwise_axes),
+          calibration_method=calibration,
+      )
+      return jax.tree.map(lambda a: a[None], ref)
+
+    ref_r0 = quant_r0(w_sharded)
+    ref_codes = np.asarray(ref_r0.qvalue.astype(jnp.float32))
+    ref_scale = np.asarray(ref_r0.scale, dtype=np.float32)
+
+    q_out, dw = step(w_sharded, g_sharded)
+    codes = np.asarray(q_out.qvalue.astype(jnp.float32))
+    scale = np.asarray(q_out.scale, dtype=np.float32)
+    is_static = calibration.startswith("fixed")
+    rep_home, rep_slot = np.asarray(plan.rep_home), np.asarray(plan.rep_slot)
+    for d in range(NUM_EP):
+      np.testing.assert_array_equal(codes[d, :LOCAL], ref_codes[d])
+      if is_static:
+        np.testing.assert_array_equal(scale[d], ref_scale[d])
+      else:
+        np.testing.assert_array_equal(
+            scale[d, :LOCAL],
+            np.broadcast_to(ref_scale[d], (LOCAL, *ref_scale.shape[2:])),
+        )
+      for s in range(NUM_REPLICAS):
+        h = int(rep_home[d, s])
+        if h >= 0:
+          np.testing.assert_array_equal(codes[d, LOCAL + s], ref_codes[h, int(rep_slot[d, s])])
+          if not is_static:
+            np.testing.assert_array_equal(scale[d, LOCAL + s], ref_scale[h, 0])
+
+    g_ref = np.asarray(jnp.asarray(g_np, dtype=compute_dtype), dtype=np.float32)
+    _, dw_rep = moe_replica_test_utils.replica_reference(w_np, g_ref[:, LOCAL:], plan)
     tol = 1e-2 if compute_dtype == jnp.bfloat16 else 1e-5
     np.testing.assert_allclose(np.asarray(dw), g_ref[:, :LOCAL] + dw_rep, rtol=tol, atol=tol)
 
