@@ -109,16 +109,20 @@ def _drop_fsdp_mesh_axes(entry):
   return rest[0] if len(rest) == 1 else rest
 
 
+def _extend_remat_policy_with_name(policy, name):
+  """Extends a remat `policy` so residuals tagged with `name` are saved on device."""
+  keep = jax.checkpoint_policies.save_only_these_names(name)
+  return keep if policy is None else jax.checkpoint_policies.save_from_both_policies(policy, keep)
+
+
 def save_gathered_fsdp_weights_policy(policy):
   """Extend a remat policy so the hoisted FSDP weight gathers survive as residuals."""
-  keep = jax.checkpoint_policies.save_only_these_names(_GATHERED_FSDP_WEIGHT)
-  return keep if policy is None else jax.checkpoint_policies.save_from_both_policies(policy, keep)
+  return _extend_remat_policy_with_name(policy, _GATHERED_FSDP_WEIGHT)
 
 
 def _save_moe_combine_order_policy(policy):
   """Extends boolean/full remat `policy` so `moe_combine_order` is saved on device."""
-  keep = jax.checkpoint_policies.save_only_these_names("moe_combine_order")
-  return keep if policy is None else jax.checkpoint_policies.save_from_both_policies(policy, keep)
+  return _extend_remat_policy_with_name(policy, "moe_combine_order")
 
 
 def hoist_fsdp_weight_gather(params, mesh, config):

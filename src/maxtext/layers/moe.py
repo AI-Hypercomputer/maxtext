@@ -6017,7 +6017,10 @@ class RoutedMoE(nnx.Module):
           self.moe_ring_pipeline_mode if self.moe_ring_pipeline_mode is not None else self.config.moe_ring_pipeline_mode
       )
       software_pipeline_enabled = (
-          pipeline_mode == "software_pipeline" and n_chunks > 1 and self.config.use_ring_of_experts
+          pipeline_mode == "software_pipeline"
+          and n_chunks > 1
+          and self.config.use_ring_of_experts
+          and not barrier_enabled
       )
       if software_pipeline_enabled and max_utils.xla_strips_optimization_barriers(self.config.compile_xla_flags):
         # XLA would remove the barriers before scheduling, so the pipeline could not order anything.
@@ -6028,7 +6031,10 @@ class RoutedMoE(nnx.Module):
         )
         software_pipeline_enabled = False
       combine_per_chunk_enabled = (
-          pipeline_mode == "combine_per_chunk" and n_chunks > 1 and self.config.use_ring_of_experts
+          pipeline_mode == "combine_per_chunk"
+          and n_chunks > 1
+          and self.config.use_ring_of_experts
+          and not barrier_enabled
       )
 
       def _pipelined_route_and_compute(force_dropless, n_chunks=n_chunks, packed_topk=None):
@@ -6179,7 +6185,7 @@ class RoutedMoE(nnx.Module):
             per_expert_scale=per_expert_scale,
             token_mask=token_mask,
         )
-        if software_pipeline_enabled and n_chunks > 1:
+        if software_pipeline_enabled and n_chunks > 1 and not barrier_enabled:
           return _pipelined_route_and_compute(force_dropless, n_chunks=n_chunks, packed_topk=packed_topk)
         if n_chunks <= 1:
           out, lb_loss, bias_updates, has_overflow, required_rbf, max_load_ratio, _ = _moe_body(

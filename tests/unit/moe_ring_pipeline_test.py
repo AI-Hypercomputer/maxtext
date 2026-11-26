@@ -1249,6 +1249,70 @@ class MoeRingPipelineParityAndHloTest(parameterized.TestCase):
       np.testing.assert_allclose(np.asarray(got_out[1]), np.asarray(ref_out[1]), rtol=1e-5, atol=1e-5)
       np.testing.assert_allclose(np.asarray(got_out[3]), np.asarray(ref_out[3]), rtol=1e-5, atol=1e-5)
 
+  def test_runtime_moe_chunk_barrier_override_skips_ring_pipeline(self):
+    """Runtime `moe_chunk_barrier=True` (e.g. `build_dropless_graphdef` step retry) disables RoE pipelining."""
+    n_chunks = 2
+    num_devices = min(4, len(jax.devices()))
+
+    def run_with_dropless_barrier(mode: str, shared_params=None):
+      cfg = _moe_cfg(
+          f"dropless_barrier_{mode}",
+          num_devices=num_devices,
+          num_moe_token_chunks=n_chunks,
+          moe_ring_pipeline_mode=mode,
+      )
+      mesh = _make_mesh(cfg, num_devices)
+      x, upstream, _ = _make_inputs(cfg, num_devices)
+      with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+        model = _build_moe(cfg, mesh)
+        # Mirror `train.build_dropless_graphdef` runtime overrides on step retry.
+        model.force_dropless = True
+        model.moe_chunk_barrier = True
+        graphdef, init_params, rest = nnx.split(model, nnx.Param, ...)
+        params = init_params if shared_params is None else shared_params
+
+        def loss_fn(p, act):
+          m = nnx.merge(graphdef, p, rest)
+          out, lb_loss, bias_updates = m(act)
+          loss = jnp.mean(out.astype(jnp.float32) * upstream)
+          if lb_loss is not None:
+            loss = loss + lb_loss.astype(jnp.float32)
+          return loss, (out, lb_loss, bias_updates)
+
+        grad_fn = jax.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True)
+        fwd_jaxpr = jax.make_jaxpr(loss_fn)(params, x).jaxpr
+        fwd_hlo = jax.jit(loss_fn).lower(params, x).as_text("hlo")
+        (_, (out, _, _)), (param_grads, x_grad) = jax.jit(grad_fn)(params, x)
+        _, vjp_fn = jax.vjp(lambda p, act: loss_fn(p, act)[0], params, x)
+        bwd_only_hlo = jax.jit(vjp_fn).lower(jnp.ones((), dtype=jnp.float32)).as_text("hlo")
+
+      diag = {
+          "fwd_hlo_opt_barriers": _count_hlo_opt_barriers(fwd_hlo),
+          "vjp_pullback_opt_barriers": _count_hlo_opt_barriers(bwd_only_hlo),
+          "combine_order_names": _count_checkpoint_name(fwd_jaxpr, "moe_combine_order"),
+      }
+      return jax.device_get((out, param_grads, x_grad)), diag, params
+
+    ref_vals, ref_diag, shared_params = run_with_dropless_barrier("none")
+    self.assertEqual(ref_diag["fwd_hlo_opt_barriers"], n_chunks - 1)
+    self.assertEqual(ref_diag["vjp_pullback_opt_barriers"], n_chunks - 1)
+    self.assertEqual(ref_diag["combine_order_names"], 0)
+
+    for mode in ("software_pipeline", "combine_per_chunk"):
+      with self.subTest(mode=mode):
+        got_vals, got_diag, _ = run_with_dropless_barrier(mode, shared_params=shared_params)
+        self.assertEqual(got_diag, ref_diag)
+        np.testing.assert_allclose(
+            np.asarray(got_vals[0], np.float32), np.asarray(ref_vals[0], np.float32), atol=0, rtol=0
+        )
+        for g_ref, g_got in zip(
+            jax.tree_util.tree_leaves(ref_vals[1]), jax.tree_util.tree_leaves(got_vals[1]), strict=True
+        ):
+          np.testing.assert_allclose(np.asarray(g_got, np.float32), np.asarray(g_ref, np.float32), rtol=1e-5, atol=1e-6)
+        np.testing.assert_allclose(
+            np.asarray(got_vals[2], np.float32), np.asarray(ref_vals[2], np.float32), rtol=1e-5, atol=1e-6
+        )
+
   @pytest.mark.cpu_only
   def test_8_device_cpu_mesh_bfloat16_bit_exact(self):
     """Runs an 8-device CPU child process with `--xla_allow_excess_precision=false` for bit-identical bf16 checks."""
