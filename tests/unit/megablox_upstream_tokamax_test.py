@@ -354,10 +354,14 @@ class UpstreamTokamaxDispatchTest(parameterized.TestCase):
         mock.patch.object(ops.jax, "jit", wraps=jax.jit) as jit_spy,
     ):
       y_fuser, y_up, dw_fuser = intercepted()
+      # Second eager call with identical static args must hit the lru_cache instead of re-jitting.
+      y_fuser_2, _, dw_fuser_2 = intercepted()
 
     self.assertEqual(y_fuser.shape, (64, 256))
+    self.assertEqual(y_fuser_2.shape, (64, 256))
     self.assertEqual(y_up.shape, (64, 256))
     self.assertEqual(dw_fuser.shape, (2, 1024, 256))
+    self.assertEqual(dw_fuser_2.shape, (2, 1024, 256))
     self.assertEqual(jit_spy.call_count, 2)
 
 
