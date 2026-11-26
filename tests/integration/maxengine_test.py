@@ -278,6 +278,37 @@ class MaxEngineTest(unittest.TestCase):
     for leaf in jax.tree.leaves(cache):
       self.assertTrue(jnp.all(jnp.isfinite(leaf)), msg=f"non-finite cache leaf, shape={leaf.shape}")
 
+  def test_prefill_concat_insert_partial_nnx(self):
+    """Packed prefill results insert into their slots, carrying each prompt's first token and its log-prob."""
+    packed = {
+        "padded_tokens": jnp.array([1, 306, 5360, 304]),
+        "decoder_positions": jnp.array([0, 1, 0, 1]),
+        "decoder_segment_ids": jnp.array([1, 1, 2, 2]),
+        "start_pos": jnp.array([0, 2]),
+        "true_lengths": jnp.array([2, 2]),
+        "num_prompts": 2,
+    }
+    slots = jnp.array([1, 0])
+
+    cfg = self._init_nnx_pyconfig(scan_layers=False, per_device_batch_size=2.0)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    params = engine.load_params(params=self._build_nnx_params(cfg, mesh))
+    cache, result, first_tokens = engine.prefill_concat(params=params, **packed)
+    decode_state = engine.insert_partial(
+        result,
+        engine.init_decode_state(),
+        cache,
+        slots,
+        start_indices=packed["start_pos"],
+        num_prompts=packed["num_prompts"],
+        seq_len=packed["padded_tokens"].shape[0],
+    )
+
+    for i, slot in enumerate(slots.tolist()):
+      np.testing.assert_array_equal(decode_state["tokens"][slot], first_tokens[i].data[:, 0])
+      np.testing.assert_allclose(decode_state["token_logp"][slot], first_tokens[i].log_prob[0])
+
   def _stack_prefill_roundtrip(self, cfg):
     """NNX prefill -> insert -> generate round-trip with stack_prefill_result_cache=True."""
     mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)

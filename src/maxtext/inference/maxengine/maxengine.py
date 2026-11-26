@@ -1143,7 +1143,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       if self.config.return_log_prob:
         token_logp = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
       else:
-        token_logp = None
+        token_logp = jnp.zeros(first_generated_token.shape, dtype=jnp.float32)
       result = engine_api.ResultTokens(
           data=jnp.concatenate((first_generated_token, all_valid, generated_tokens), axis=1),
           # Tokens are shape [batch, speculations], so when we concatenate
@@ -1163,6 +1163,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
           "next_pos": next_pos,
           "generated_tokens": generated_tokens,
           "tokens": first_generated_token,
+          "token_logp": token_logp,
       }, result
 
     prefill_results = defaultdict(list)
