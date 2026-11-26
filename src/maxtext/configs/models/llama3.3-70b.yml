@@ -26,4 +26,5 @@ enable_dropout: false
 logits_via_embedding: false
 normalization_layer_epsilon: 1.0e-5
 rope_max_timescale: 500_000
+rope_type: "llama3.1"
 decoder_block: "llama2" # Uses the same decoder block as llama2
