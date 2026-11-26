@@ -33,6 +33,8 @@ Sections (in dependency order):
 
 from collections.abc import Callable
 from collections.abc import Sequence
+import contextlib
+import contextvars
 import dataclasses
 import math
 from typing import Any
@@ -63,12 +65,60 @@ tokamax_splash_kernel, tokamax_splash_mask = m3_kernels.splash_modules()
 # Sharding helpers
 # =================================================================================================
 
+_ALIGN_EMBED_32: contextvars.ContextVar[bool] = contextvars.ContextVar("_ALIGN_EMBED_32", default=False)
+
+
+@contextlib.contextmanager
+def _align_embed_32_scope(config: Any):
+  """Enables 32-row TPU FP8 tile alignment on 2D `embed` weights when 8-bit `quantization` is active."""
+  quant = getattr(config, "quantization", None)
+  active = bool(quant and str(quant).strip().lower() not in ("", "none"))
+  tok = _ALIGN_EMBED_32.set(active)
+  try:
+    yield
+  finally:
+    _ALIGN_EMBED_32.reset(tok)
+
 
 def _mesh_axis_names(entry: Any) -> tuple[str, ...]:
   """Mesh axis names carried by one `PartitionSpec` entry."""
   if entry is None:
     return ()
   return (entry,) if isinstance(entry, str) else tuple(entry)
+
+
+def _fp8_param_metadata(
+    sharding: Sharding | None,
+    tensor_name: str,
+    axes: Sequence[str | None],
+    shape: Sequence[int],
+) -> dict[str, Any]:
+  """Returns `param_metadata`, trimming `'expert'` on 2D TPU FP8 `embed` weights when rows are not 32-aligned."""
+  if len(axes) != len(shape):
+    raise ValueError(f"{tensor_name}: got {len(axes)} logical axes {tuple(axes)} for shape {tuple(shape)}.")
+  meta = param_metadata(sharding or DefaultSharding(), tensor_name, axes)
+  mesh = jax.sharding.get_abstract_mesh()
+  if mesh.empty or not _ALIGN_EMBED_32.get() or not m3_kernels.is_tpu_mesh(mesh) or len(shape) != 2:
+    return meta
+  entries = []
+  for ax_name, dim, entry in zip(axes, shape, meta["out_sharding"]):
+    names = _mesh_axis_names(entry)
+    shards = math.prod(int(mesh.shape.get(name, 1)) for name in names)
+    if (
+        ax_name == "embed"
+        and "expert" in names
+        and len(names) > 1
+        and shards > 0
+        and dim % shards == 0
+        and (dim // shards) % 32 != 0
+    ):
+      trimmed = tuple(n for n in names if n != "expert")
+      trim_shards = math.prod(int(mesh.shape.get(n, 1)) for n in trimmed)
+      if trim_shards > 0 and dim % trim_shards == 0 and (dim // trim_shards) % 32 == 0:
+        entry = trimmed[0] if len(trimmed) == 1 else trimmed
+    entries.append(entry)
+  meta["out_sharding"] = jax.sharding.PartitionSpec(*entries)
+  return meta
 
 
 def _linear(
@@ -80,7 +130,7 @@ def _linear(
     **kwargs: Any,
 ) -> nnx.Linear:
   """Builds a bias-free `nnx.Linear` whose `(in_features, out_features)` kernel carries logical `axes`."""
-  meta = param_metadata(sharding or DefaultSharding(), tensor_name, axes)
+  meta = _fp8_param_metadata(sharding, tensor_name, axes, (in_features, out_features))
   return nnx.Linear(in_features, out_features, use_bias=False, kernel_metadata=meta, **kwargs)
 
 
@@ -92,7 +142,7 @@ def _depthwise_conv1d(
     **kwargs: Any,
 ) -> nnx.Conv:
   """Builds a bias-free depthwise 1D `nnx.Conv` whose `(kernel_size, 1, features)` kernel shards over its channels."""
-  meta = param_metadata(sharding or DefaultSharding(), tensor_name, (None, None, "conv_channels"))
+  meta = _fp8_param_metadata(sharding, tensor_name, (None, None, "conv_channels"), (kernel_size, 1, features))
   return nnx.Conv(
       in_features=features,
       out_features=features,
@@ -322,7 +372,7 @@ class Qwen3_8RMSNorm(nnx.Module):
     if group_size is not None and dim % group_size != 0:
       raise ValueError(f"dim ({dim}) not divisible by group_size ({group_size}).")
     self.scale = nnx.Param(
-        jnp.zeros((dim,), dtype=jnp.float32), **param_metadata(sharding or DefaultSharding(), "scale", ("norm",))
+        jnp.zeros((dim,), dtype=jnp.float32), **_fp8_param_metadata(sharding, "scale", ("norm",), (dim,))
     )
 
   def _norm(self, x: jax.Array) -> jax.Array:
@@ -377,7 +427,7 @@ class Qwen3_8RMSNormGated(nnx.Module):
     else:
       raise ValueError(f"Unsupported activation: {activation}. Expected 'silu' or 'sigmoid'.")
     self.scale = nnx.Param(
-        jnp.ones((dim,), dtype=jnp.float32), **param_metadata(sharding or DefaultSharding(), "scale", ("norm",))
+        jnp.ones((dim,), dtype=jnp.float32), **_fp8_param_metadata(sharding, "scale", ("norm",), (dim,))
     )
 
   def __call__(self, x: jax.Array, gate: jax.Array) -> jax.Array:
@@ -656,10 +706,10 @@ class Qwen3_8GatedDeltaNet(nnx.Module):
 
     self.conv1d = _depthwise_conv1d(conv_dim, conv_kernel_size, sharding, "conv1d", padding="CAUSAL", **kw)
     u = jax.random.uniform(rngs.params(), (num_v_heads,), minval=0.01, maxval=16.0)
-    head_meta = param_metadata(sharding or DefaultSharding(), "A_log", (None,))
+    head_meta = _fp8_param_metadata(sharding, "A_log", (None,), (num_v_heads,))
     self.A_log = nnx.Param(jnp.log(u.astype(jnp.float32)), **head_meta)  # pylint: disable=invalid-name
     self.dt_bias = nnx.Param(
-        jnp.ones((num_v_heads,), dtype=jnp.float32), **param_metadata(sharding or DefaultSharding(), "dt_bias", (None,))
+        jnp.ones((num_v_heads,), dtype=jnp.float32), **_fp8_param_metadata(sharding, "dt_bias", (None,), (num_v_heads,))
     )
     self.norm = Qwen3_8RMSNormGated(head_v_dim, eps=eps, activation=output_gate_activation, sharding=sharding, rngs=rngs)
     self.out_proj = _linear(self.value_dim, emb_dim, sharding, "out_proj", (None, "embed"), **kw)
@@ -2200,11 +2250,11 @@ class Qwen3_8Experts(nnx.Module):
     dn_shape = (num_experts, moe_mlp_dim, emb_dim)
     self.gate_up_proj = nnx.Param(
         nnx.initializers.lecun_normal(in_axis=1, out_axis=3, batch_axis=(0, 2))(rngs.params(), gu_shape, weight_dtype),
-        **param_metadata(sharding_obj, "gate_up_proj", ("experts", "expert_embed", None, "expert_mlp")),
+        **_fp8_param_metadata(sharding_obj, "gate_up_proj", ("experts", "expert_embed", None, "expert_mlp"), gu_shape),
     )
     self.down_proj = nnx.Param(
         nnx.initializers.lecun_normal(in_axis=1, out_axis=2, batch_axis=(0,))(rngs.params(), dn_shape, weight_dtype),
-        **param_metadata(sharding_obj, "down_proj", ("experts", "expert_mlp", "expert_embed")),
+        **_fp8_param_metadata(sharding_obj, "down_proj", ("experts", "expert_mlp", "expert_embed"), dn_shape),
     )
 
   def __call__(
@@ -2650,7 +2700,7 @@ class Qwen3_8NGramEmbedding(nnx.Module):
         *table_shape,
         dtype=dtype,
         param_dtype=weight_dtype,
-        embedding_metadata=param_metadata(sharding or DefaultSharding(), "ngram_embedding", ("ngram_vocab", None)),
+        embedding_metadata=_fp8_param_metadata(sharding, "ngram_embedding", ("ngram_vocab", None), table_shape),
         rngs=rngs,
     )
 
@@ -3653,50 +3703,51 @@ class Qwen3_8Decoder(nnx.Module):
   """Decoder stack with token embedding, 4-stream residual, and final mixer."""
 
   def __init__(self, config: Any, *, sharding: Sharding | None = None, rngs: nnx.Rngs):
-    c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
-    self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
-    self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
-    self.remat_policy: Callable[..., Any] | None = None
-    self.remat = False
-    self.dtype, self.weight_dtype = dt, wdt
-    self.sharding = sharding or sharding_from_config(config)
-    table_shape = (self.vocab_size, self.emb_dim)
-    self.token_embedder = nnx.Embed(
-        *table_shape,
-        dtype=dt,
-        param_dtype=wdt,
-        embedding_metadata=param_metadata(self.sharding, "token_embedder", ("vocab", "embed")),
-        rngs=rngs,
-    )
-    self.ple_layer_id = int(c.ple_layer_id) if bool(c.use_ple_layer) else None
-    if int(config.inhomogeneous_layer_cycle_interval) != 4:
-      raise ValueError(
-          f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
-          f"{config.inhomogeneous_layer_cycle_interval}."
+    with _align_embed_32_scope(config):
+      c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
+      self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
+      self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
+      self.remat_policy: Callable[..., Any] | None = None
+      self.remat = False
+      self.dtype, self.weight_dtype = dt, wdt
+      self.sharding = sharding or sharding_from_config(config)
+      table_shape = (self.vocab_size, self.emb_dim)
+      self.token_embedder = nnx.Embed(
+          *table_shape,
+          dtype=dt,
+          param_dtype=wdt,
+          embedding_metadata=_fp8_param_metadata(self.sharding, "token_embedder", ("vocab", "embed"), table_shape),
+          rngs=rngs,
       )
-    if self.num_layers < 4 or self.num_layers % 4 != 0:
-      raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {self.num_layers}.")
-    if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
-      raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
-    self.num_cycles = self.num_layers // 4
-    self.num_stacked_cycles = self.num_cycles - 1
-    self.first_cycle = Qwen3_8CycleBlock(config, include_ple=True, sharding=self.sharding, rngs=rngs)
-    self.cycles = (
-        create_scanned_cycles(config, self.num_stacked_cycles, sharding=self.sharding, rngs=rngs)
-        if self.num_stacked_cycles > 0
-        else None
-    )
-    self.hyper_connection_mixer = Qwen3_8GatedResidual(
-        emb_dim=self.emb_dim,
-        hc_count=self.hc_count,
-        hc_lowrank=int(config.hc_lowrank),
-        use_combine=False,
-        eps=float(config.normalization_layer_epsilon),
-        dtype=self.dtype,
-        weight_dtype=self.weight_dtype,
-        sharding=self.sharding,
-        rngs=rngs,
-    )
+      self.ple_layer_id = int(c.ple_layer_id) if bool(c.use_ple_layer) else None
+      if int(config.inhomogeneous_layer_cycle_interval) != 4:
+        raise ValueError(
+            f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
+            f"{config.inhomogeneous_layer_cycle_interval}."
+        )
+      if self.num_layers < 4 or self.num_layers % 4 != 0:
+        raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {self.num_layers}.")
+      if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
+        raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
+      self.num_cycles = self.num_layers // 4
+      self.num_stacked_cycles = self.num_cycles - 1
+      self.first_cycle = Qwen3_8CycleBlock(config, include_ple=True, sharding=self.sharding, rngs=rngs)
+      self.cycles = (
+          create_scanned_cycles(config, self.num_stacked_cycles, sharding=self.sharding, rngs=rngs)
+          if self.num_stacked_cycles > 0
+          else None
+      )
+      self.hyper_connection_mixer = Qwen3_8GatedResidual(
+          emb_dim=self.emb_dim,
+          hc_count=self.hc_count,
+          hc_lowrank=int(config.hc_lowrank),
+          use_combine=False,
+          eps=float(config.normalization_layer_epsilon),
+          dtype=self.dtype,
+          weight_dtype=self.weight_dtype,
+          sharding=self.sharding,
+          rngs=rngs,
+      )
 
   def __call__(
       self,
@@ -3791,6 +3842,8 @@ class Qwen3_8FlashNextModel(nnx.Module):
           "ple",
           "conv1d",
           "experts",
+          "in_proj_a",
+          "in_proj_b",
       }
   )
 
@@ -3804,7 +3857,7 @@ class Qwen3_8FlashNextModel(nnx.Module):
       rngs: nnx.Rngs,
   ):
     entered_mesh = mesh is not None and jax.sharding.get_abstract_mesh().empty
-    with enter_mesh_scope(mesh, shard_mode=getattr(config, "shard_mode", "auto")):
+    with enter_mesh_scope(mesh, shard_mode=getattr(config, "shard_mode", "auto")), _align_embed_32_scope(config):
       self.config, self.mesh, self.quant_mode = config, mesh, quant_mode
       self.sharding = sharding or sharding_from_config(config)
       self.decoder = Qwen3_8Decoder(config, sharding=self.sharding, rngs=rngs)

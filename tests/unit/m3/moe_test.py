@@ -2634,5 +2634,94 @@ class ValidationErrorTest(parameterized.TestCase):
     self.assertIsNone(_ALL_GATHER_OP_RE.search(async_done_line.split("=", 1)[1]))
 
 
+class FP8AndTCRaggedMoETest(parameterized.TestCase):
+  """Tests `_chunk_indices_from_ends`, `_backward_wgrad_tie`, and `ep_allgather_tc` / `moe_fp8` on `DefaultSharding`."""
+
+  def test_chunk_indices_and_wgrad_tie_helpers(self):
+    ends = jnp.array([0, 3, 3, 7, 12], dtype=jnp.int32)
+    row_idx = jnp.arange(15, dtype=jnp.int32)
+    np.testing.assert_array_equal(
+        np.asarray(m3_moe._chunk_indices_from_ends(ends, 15)),  # pylint: disable=protected-access
+        np.asarray(jnp.searchsorted(ends, row_idx, side="right")),
+    )
+    x = jnp.array([[1.0, -2.0], [3.0, 0.5]], dtype=jnp.float32)
+    w = (jnp.array([[0.5, 1.5], [-1.0, 2.0]], dtype=jnp.float32),)
+    v_tie, (dx_tie, dw_tie) = jax.value_and_grad(
+        lambda xi, wi: jnp.sum(m3_moe._backward_wgrad_tie(xi, wi)[0] @ m3_moe._backward_wgrad_tie(xi, wi)[1][0]),  # pylint: disable=protected-access
+        argnums=(0, 1),
+    )(x, w)
+    v_ref, (dx_ref, dw_ref) = jax.value_and_grad(lambda xi, wi: jnp.sum(xi @ wi[0]), argnums=(0, 1))(x, w)
+    np.testing.assert_allclose(float(v_tie), float(v_ref))
+    np.testing.assert_allclose(np.asarray(dx_tie), np.asarray(dx_ref))
+    np.testing.assert_allclose(np.asarray(dw_tie[0]), np.asarray(dw_ref[0]))
+
+  @parameterized.named_parameters(
+      ("tc_bf16", True, False),
+      ("tc_fp8", True, True),
+      ("a2a_fp8", False, True),
+  )
+  def test_sharded_default_sharding_tc_and_fp8_forward_and_grad_parity(self, ep_allgather_tc: bool, moe_fp8: bool):
+    if jax.device_count() < 4:
+      self.skipTest(f"Requires >= 4 devices; got {jax.device_count()}.")
+    mesh = create_mesh(ici={"fsdp": 2, "expert": 2, "tensor": 1}, devices=jax.devices()[:4])
+    b, s, d, m, e, k = 2, 8, 64, 32, 4, 2
+    x, weights, indices, _ = _make_routing_inputs(batch=b, length=s, embed=d, num_experts=e, top_k=k, dtype=jnp.float32)
+    wi_0, wi_1, wo = _make_expert_weights(num_experts=e, embed=d, mlp=m, dtype=jnp.float32)
+    w_gu_4d = jnp.stack([wi_0, wi_1], axis=2)
+    cot = jax.random.normal(jax.random.key(313), x.shape, dtype=jnp.float32)
+
+    ref_loss, ref_grads = jax.value_and_grad(
+        lambda xi, wi, gui, dni: jnp.sum(m3_moe.DENSE.fused(xi, wi, indices, gui, dni) * cot),
+        argnums=(0, 1, 2, 3),
+    )(x, weights, w_gu_4d, wo)
+    ref_out = m3_moe.DENSE.fused(x, weights, indices, w_gu_4d, wo)
+
+    exec_test = m3_moe.MoEExecutor(
+        kind="gmm_v2",
+        batch="fsdp",
+        length="expert",
+        experts="expert",
+        ep_allgather_tc=ep_allgather_tc,
+        moe_fp8=moe_fp8,
+        bwd_wgrad_overlap=True,
+        ragged_buffer_factor=1.5,
+    )
+    with jax.set_mesh(mesh):
+      tok_shd = NamedSharding(mesh, P("fsdp", "expert", None))
+      gu_shd = NamedSharding(mesh, P("expert", "fsdp", None, None))
+      dn_shd = NamedSharding(mesh, P("expert", None, "fsdp"))
+      xs = jax.device_put(x, tok_shd)
+      ws = jax.device_put(weights, tok_shd)
+      idxs = jax.device_put(indices, tok_shd)
+      cots = jax.device_put(cot, tok_shd)
+      gus = jax.device_put(w_gu_4d, gu_shd)
+      dns = jax.device_put(wo, dn_shd)
+
+      got_out = exec_test.fused(xs, ws, idxs, gus, dns)
+      got_loss, got_grads = jax.jit(
+          jax.value_and_grad(
+              lambda xi, wi, gui, dni: jnp.sum(exec_test.fused(xi, wi, idxs, gui, dni) * cots),
+              argnums=(0, 1, 2, 3),
+          )
+      )(xs, ws, gus, dns)
+
+    if not moe_fp8:
+      np.testing.assert_allclose(float(got_loss), float(ref_loss), rtol=1e-4, atol=1e-4)
+      np.testing.assert_allclose(np.asarray(got_out), np.asarray(ref_out), rtol=1e-4, atol=1e-4)
+      for ga, gr in zip(got_grads, ref_grads, strict=True):
+        np.testing.assert_allclose(np.asarray(ga), np.asarray(gr), rtol=1e-4, atol=1e-4)
+    else:
+      for name, ga, gr in zip(
+          ("out", "dx", "dw", "dgu", "ddn"),
+          (got_out, *got_grads),
+          (ref_out, *ref_grads),
+          strict=True,
+      ):
+        va = np.asarray(ga, dtype=np.float64).ravel()
+        vr = np.asarray(gr, dtype=np.float64).ravel()
+        cos = float(np.dot(va, vr) / (np.linalg.norm(va) * np.linalg.norm(vr) + 1e-12))
+        self.assertGreater(cos, 0.99, msg=f"Low FP8 cosine similarity on {name}: {cos}")
+
+
 if __name__ == "__main__":
   absltest.main()

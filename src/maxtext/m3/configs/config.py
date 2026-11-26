@@ -260,6 +260,14 @@ class TransformerConfig(BaseModel):
   norm_num_groups: int = 32
   use_base2_exp: bool = True
   sa_gqa_head_stacking: bool = False
+  moe_bwd_wgrad_overlap: bool = False
+  moe_ep_allgather_tc: bool = False
+  moe_fp8: bool = False
+  moe_tc_ragged_flatten_block_size: int = 0
+  moe_ep_combine_mode: str = "auto"
+  moe_row_scale_placement: str = "tc"
+  moe_tc_3d_gmm: bool = False
+  moe_fused_bwd_quant: bool = False
 
 
 # ----------------------------------------------------------------------------

@@ -1590,6 +1590,10 @@ def get_qt_provider(config, model: Any = None):
 
 def maybe_quantize_model(model, config):
   """Quantize the model if quantization is enabled."""
+  if bool(getattr(config, "use_m3_model", False)) and config.quantization and not config.use_qwix_quantization:
+    raise ValueError(
+        f"m3 models require use_qwix_quantization=True when quantization={config.quantization!r} is enabled."
+    )
   # Batch split is not using Qwix's interception feature but manual plumbing
   if config.quantization and config.use_qwix_quantization and not config.use_batch_split_schedule:
     quantization_provider = get_qt_provider(config, model=model)

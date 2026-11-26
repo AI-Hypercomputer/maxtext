@@ -3646,6 +3646,45 @@ class Qwen3_8MTPLossTest(_SingleDeviceMeshTestCase):
     reprojected = model.lm_head(deferred)
     np.testing.assert_allclose(np.array(reprojected), np.array(logits), rtol=1e-5, atol=1e-5)
 
+  def test_fp8_full_exempts_gdn_gates_and_preserves_hc_fusion(self):
+    """Verifies Qwix `fp8_full` skips GDN `in_proj_a`/`in_proj_b`, routers, and HC while preserving HC fusion."""
+    mesh_1 = m3_sharding.create_mesh(devices=jax.devices()[:1])
+    with jax.set_mesh(mesh_1):
+      cfg = _create_mini_config(
+          num_layers=8,
+          scan_layers=True,
+          dtype="bfloat16",
+          weight_dtype="bfloat16",
+          quantization="fp8_full",
+      )
+      model = modeling_qwen3_8_flash_next.Qwen3_8FlashNextModel(cfg, rngs=nnx.Rngs(params=0))
+      gdn0 = model.decoder.first_cycle.gdn_0
+      self.assertTrue(getattr(gdn0.attn_hyper_connection.input_mix_weight_down, "_allow_qwix_unquantized_fusion", False))
+      self.assertFalse(getattr(gdn0.attn_hyper_connection.input_mix_weight_down, "_disable_linear_fusion", False))
+      self.assertTrue(getattr(gdn0.linear_attn.in_proj_a, "_disable_linear_fusion", False))
+      self.assertTrue(getattr(gdn0.linear_attn.in_proj_b, "_disable_linear_fusion", False))
+
+      qcfg = SimpleNamespace(
+          quantization="fp8_full",
+          use_qwix_quantization=True,
+          quantize_router_proj=False,
+          micro_batch_size_to_train_on=1,
+          max_target_length=16,
+      )
+      ex_args = m3_quantization.example_inputs(qcfg)
+      qmodel = m3_quantization.maybe_quantize(model, qcfg, *ex_args)
+      unquantized_paths = (
+          "decoder/first_cycle/gdn_0/linear_attn/in_proj_a",
+          "decoder/first_cycle/gdn_0/linear_attn/in_proj_b",
+          "decoder/first_cycle/gdn_0/mlp/shared_expert_gate",
+          "decoder/cycles/gdn_0/linear_attn/in_proj_a",
+          "decoder/cycles/gdn_0/linear_attn/in_proj_b",
+          "decoder/cycles/gdn_0/mlp/shared_expert_gate",
+      )
+      fp8_counts = m3_quantization.quantized_matmuls_by_module(qmodel, unquantized_paths, jnp.float8_e4m3fn, *ex_args)
+      for path, cnt in fp8_counts.items():
+        self.assertEqual(cnt, 0, msg=f"Expected 0 FP8 matmuls on {path}, got {cnt}")
+
 
 if __name__ == "__main__":
   absltest.main()

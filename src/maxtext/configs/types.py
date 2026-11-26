@@ -1804,7 +1804,7 @@ class MoEGeneral(BaseModel):
           " before the wo matmul instead of into the (buffer, emb) expert output before the unsort."
       ),
   )
-  moe_tc_ragged_flatten_block_size: int = Field(
+  moe_tc_ragged_flatten_block_size: NonNegativeInt = Field(
       0,
       description=(
           "If > 0, relayout (N, D/128, 128) <-> (N, D) around the TC ragged kernels with a Pallas kernel over"
@@ -1838,6 +1838,34 @@ class MoEGeneral(BaseModel):
           "combine metadata sorts cap instead of N * topk slots), skip the unused inverse permutation, use uint32 "
           "bit-packed sorts, and gather buffer row weights with unique_indices=True (no backward scatter-sort)."
       ),
+  )
+  moe_bwd_wgrad_overlap: bool = Field(
+      False,
+      description="Fence m3 MoE dx with expert wgrads in backward to overlap FSDP weight-gradient reduce-scatter.",
+  )
+  moe_ep_allgather_tc: bool = Field(
+      False,
+      description="Use EP token all_gather + TensorCore ring_ragged_sort_tc + psum_scatter combine in m3 MoE.",
+  )
+  moe_fp8: bool = Field(
+      False,
+      description="Enable per-token dynamic FP8 QArray dispatch and per-(expert, out_channel) STE weights in m3 MoE.",
+  )
+  moe_ep_combine_mode: Literal["auto", "tensorcore"] = Field(
+      "auto",
+      description="m3 MoE EP combine/backward-gather placement: 'auto' (SparseCore) or 'tensorcore'.",
+  )
+  moe_row_scale_placement: Literal["tc", "auto", "sc"] = Field(
+      "tc",
+      description="m3 MoE 1D row-weight/scale placement: 'tc', 'auto', or 'sc' (explicit SparseCore).",
+  )
+  moe_tc_3d_gmm: bool = Field(
+      False,
+      description="Enable validated 3D T(8, 128) MoE token layout when can_use_3d_gmm_tpu passes.",
+  )
+  moe_fused_bwd_quant: bool = Field(
+      False,
+      description="Fuse Megablox gmm_v2 backward rhs/lhs scaling + float8_e5m2 quantization in Pallas VMEM.",
   )
   moe_use_direct_token_gather: bool = Field(
       False,

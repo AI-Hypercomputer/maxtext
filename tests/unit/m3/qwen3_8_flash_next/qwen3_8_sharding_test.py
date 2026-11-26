@@ -616,8 +616,8 @@ class SequenceShardingTest(absltest.TestCase):
       np.testing.assert_allclose(dx, ref_dx, atol=1e-5, rtol=1e-5, err_msg=str(ici))
       np.testing.assert_allclose(dk, ref_dk, atol=1e-5, rtol=1e-5, err_msg=str(ici))
 
-  def test_tpu7x_torus_yx_zcore_rings(self):
-    """Verifies 1-hop tpu7x_torus_yx_zcore rings across (16, 8), (8, 16), and (4, 32) ICI shapes."""
+  def test_tpu7x_torus_yx_zcore_and_quantization_gated_32row_embed_alignment(self):
+    """Verifies 1-hop tpu7x_torus_yx_zcore rings and quantization-gated 2D embed 32-row alignment."""
     from types import SimpleNamespace  # pylint: disable=import-outside-toplevel
     from maxtext.utils import maxtext_utils  # pylint: disable=import-outside-toplevel
 
@@ -652,6 +652,24 @@ class SequenceShardingTest(absltest.TestCase):
       )
       drv_arr = maxtext_utils.create_device_mesh(cfg_mock, devices=mock_devs)
       self.assertEqual([d.id for d in drv_arr.ravel()], [d.id for d in dev_arr.ravel()])
+
+    abs_mesh = jax.sharding.AbstractMesh((16, 8), ("fsdp", "expert"))
+    shd = EPasCP()
+    with (
+        m3_sharding.enter_mesh_scope(abs_mesh),
+        mock.patch.object(modeling_qwen3_8_flash_next.m3_kernels, "is_tpu_mesh", return_value=True),
+    ):
+      with modeling_qwen3_8_flash_next._align_embed_32_scope(SimpleNamespace(quantization="")):  # pylint: disable=protected-access
+        bf16_meta = modeling_qwen3_8_flash_next._fp8_param_metadata(shd, "q_proj", ("embed", "heads"), (2560, 6144))  # pylint: disable=protected-access
+      self.assertEqual(bf16_meta["out_sharding"], jax.sharding.PartitionSpec(("fsdp", "expert"), None))
+
+      with modeling_qwen3_8_flash_next._align_embed_32_scope(SimpleNamespace(quantization="fp8_full")):  # pylint: disable=protected-access
+        fp8_meta = modeling_qwen3_8_flash_next._fp8_param_metadata(shd, "q_proj", ("embed", "heads"), (2560, 6144))  # pylint: disable=protected-access
+        ple_meta = modeling_qwen3_8_flash_next._fp8_param_metadata(  # pylint: disable=protected-access
+            shd, "ngram_embedding", ("ngram_vocab", None), (320_001_536, 160)
+        )
+      self.assertEqual(fp8_meta["out_sharding"], jax.sharding.PartitionSpec("fsdp", None))
+      self.assertEqual(ple_meta["out_sharding"], jax.sharding.PartitionSpec(("fsdp", "expert"), None))
 
   def test_checkpoint_names_emitted_and_gdn_context_tag(self):
     """Both GDN and QSA sublayers emit savepoint tags including `moe_disp_ep_qtr`/`moe_disp_ep_half`."""
