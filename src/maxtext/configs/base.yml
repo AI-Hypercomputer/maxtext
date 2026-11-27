@@ -443,6 +443,7 @@ moe_tc_permute_expert_chunks: 1 # expert chunks per token block (1 = single pass
 moe_tc_permute_col_chunks: 1 # hidden-dimension column chunks (1 = single pass)
 use_gather_mosaic_kernel: false # whether to use a custom mosaic kernel for token gather ops
 ragged_unsort_spread_masked_indices: false # bit-identical: masked slots of the count-index unsort gather read distinct entries, not entry 0
+moe_sc_gather_reduce: false # sparse_matmul without the ring-of-experts ragged sort, moe_use_fused_gmm3d, moe_tc_permute or moe_tc_combine: gather tokens in expert order and run the top-k sums (dispatch backward, and the combine when it is a plain sum) on the SparseCore gather-reduce kernel on TPU7x (num_experts_per_tok 1, 2, 4 or 8); f32 TensorCore sum for other top-k, shapes it cannot take and other chips. With expert parallelism 1 and a non-Llama4 model (and no mlp_bias with use_te_grouped_gemm), routing weights are applied before wo (and to the wo bias) so the combine is a plain sum.
 ragged_gather_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
                               # ragged gather SparseCore kernel. When false (default), use the SparseCore kernel.
 ragged_gather_reduce_fallback: false # when true, unconditionally use the JAX reference implementation instead of the
@@ -648,6 +649,7 @@ moe_mlpwi_1: 'remat'
 moe_mlpwo: 'remat'
 te_moe_dispatch_remat_location: 'remat' # TE EP dispatch outputs: recompute, save on device, or offload under custom remat.
 moe_x_sorted: 'remat' # routed (expert-sorted) MoE input plus its routing metadata; 'device' keeps it in HBM (tokens x top-k x emb per layer) so the backward skips the dispatch all-gather and ragged sort, 'offload' moves it to host, 'remat' recomputes it. Not supported with num_moe_emb_chunks > 0.
+moe_routed_output: 'remat' # routed MoE output after unpermute and the top-k combine; 'device' keeps it in HBM (tokens x emb per layer) for a consumer whose backward needs it (e.g. Gemma4's post-feedforward norm), so the backward skips replaying the combine, and with moe_sc_gather_reduce also the wo matmul and unpermute (the weighted combine still replays them for the routing-weight gradient). Not supported with te_moe_block.
 moe_routing_maps: 'remat' # MoE routing maps (top-k expert ids, ragged-sort permutations, sorted token indices and group sizes); with moe_tc_window_routing, also the TC group sizes
 moe_packed_routing_maps: 'remat' # routing state of the top-k router + packed routing sort (top-k values/ids, sorted routing, group sizes, density, fused gmm3d exact-top_k combine src_rows); 'device' or 'offload' needs remat_policy=custom, router_topk_matmul_vjp and moe_packed_routing_sort; not with use_ring_of_experts + use_ragged_sort, DeepSeek-V3-style / Gemma 4 routing, or use_random_routing
 # TODO: Update to moe_tc_routing_weights.

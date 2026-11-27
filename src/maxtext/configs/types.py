@@ -2105,6 +2105,18 @@ class MoEGeneral(BaseModel):
       False,
       description="Whether to use a custom mosaic kernel for token gather ops.",
   )
+  moe_sc_gather_reduce: bool = Field(
+      False,
+      description=(
+          "sparse_matmul without the ring-of-experts ragged sort, moe_use_fused_gmm3d, moe_tc_permute or"
+          " moe_tc_combine: gather tokens straight into expert order (no top-k repeat) and run the top-k sums (dispatch"
+          " backward, and the combine when it is a plain sum) on the SparseCore gather-reduce kernel on TPU7x, with an"
+          " f32 TensorCore sum for shapes it cannot take and other chips. The kernel takes num_experts_per_tok 1, 2, 4"
+          " or 8; other top-k values always use the TensorCore sum. With expert parallelism 1 and a non-Llama4 model"
+          " (and no mlp_bias with use_te_grouped_gemm), the routing weights are applied to the (rows, mlp) activation"
+          " before wo, and to the wo bias, so the combine is a plain sum (not bit-identical)."
+      ),
+  )
   ragged_gather_fallback: bool = Field(
       False,
       description="When true, unconditionally use the JAX reference implementation instead of the ragged gather "
@@ -3409,6 +3421,17 @@ class RematAndOffload(BaseModel):
           "routing/metadata bundle. 'device' saves them across the remat boundary so the backward "
           "does not re-run the dispatch token all-gather and ragged sort; the expert GMMs re-run "
           "from the saved tensor. Default 'remat' recomputes (existing behavior)."
+      ),
+  )
+  moe_routed_output: RematLocation = Field(
+      RematLocation.REMAT,
+      description=(
+          "Remat policy for the routed MoE output after unpermute and the top-k combine (RoutedMoE sparse and"
+          " dense training paths). 'device' saves it where a consumer's backward needs it (e.g. Gemma4's"
+          " post-feedforward norm), so the backward does not replay the combine; with moe_sc_gather_reduce (weights"
+          " applied before wo) it also skips the wo matmul and unpermute, which the weighted combine still replays"
+          " for the routing-weight gradient. Default 'remat' recomputes (existing behavior). Not supported with"
+          " te_moe_block."
       ),
   )
   moe_routing_maps: RematLocation = Field(
@@ -6740,6 +6763,27 @@ class MaxTextConfig(
             "use moe_x_sorted=remat."
         )
 
+  def validate_moe_sc_gather_reduce(self):
+    """Rejects moe_sc_gather_reduce on the MoE paths where it would have no effect."""
+    if self.moe_sc_gather_reduce:
+      if not self.sparse_matmul:
+        raise ValueError("moe_sc_gather_reduce=True requires sparse_matmul=True.")
+      if self.use_ring_of_experts and self.use_ragged_sort:
+        raise ValueError(
+            "moe_sc_gather_reduce=True has no effect with use_ring_of_experts=True and use_ragged_sort=True."
+        )
+      if self.moe_use_fused_gmm3d:
+        raise ValueError("moe_sc_gather_reduce=True has no effect with moe_use_fused_gmm3d=True.")
+      # moe.py takes the moe_sc_gather_reduce token gather and plain-sum combine before the TensorCore kernels.
+      if self.moe_tc_permute or self.moe_tc_combine:
+        raise ValueError("moe_sc_gather_reduce=True cannot be combined with moe_tc_permute or moe_tc_combine.")
+      # The kernel needs 2 * k to divide the SparseCore lane count (16 on TPU7x).
+      if self.num_experts_per_tok not in (1, 2, 4, 8):
+        max_logging.warning(
+            f"moe_sc_gather_reduce: num_experts_per_tok={self.num_experts_per_tok} is not supported by the SparseCore"
+            " gather-reduce kernel (top-k 1, 2, 4 or 8), so both top-k sums run on the TensorCore."
+        )
+
   def validate_moe_quantize_token_all_gather(self):
     """Validates that moe_quantize_token_all_gather is used with supported settings."""
     if self.moe_quantize_token_all_gather:
@@ -7886,6 +7930,7 @@ class MaxTextConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routed_output",
           "moe_routing_maps",
           "moe_packed_routing_maps",
           "moe_tc_routing_checkpoint",
@@ -8613,6 +8658,13 @@ class MaxTextConfig(
         raise ValueError("Loss-free load balancing is only supported for the DeepSeek/GLM decoder block.")
       if self.te_moe_block and not self.sparse_matmul:
         raise ValueError("te_moe_block=True requires sparse_matmul=True.")
+      # te_moe_block returns from RoutedMoE.__call__ before the checkpoint_name("moe_routed_output") tag, so a
+      # non-remat moe_routed_output would be silently ignored there.
+      if self.te_moe_block and self.moe_routed_output != RematLocation.REMAT:
+        raise ValueError(
+            f"moe_routed_output={RematLocation(self.moe_routed_output).value} is not supported with te_moe_block=True,"
+            " whose output is not tagged; use moe_routed_output=remat."
+        )
       if self.te_moe_quantize_before_fsdp_all_gather:
         if not self.te_moe_block or self.te_gmm_quantization != TEGroupedGemmQuantizationType.TE_MXFP8:
           raise ValueError(
@@ -8656,6 +8708,7 @@ class MaxTextConfig(
     _validate_moe_unsliced_prefused_wi(self)
     self.validate_num_moe_emb_chunks()
     self.validate_moe_quantize_token_all_gather()
+    self.validate_moe_sc_gather_reduce()
     self.validate_moe_topk_before_ep_all_gather()
     self.validate_moe_tc_routing_offload_free()
     self.validate_moe_quantize_combine_bwd_method()
@@ -10103,6 +10156,7 @@ class RLConfig(
           "mlpwi",
           "moe_mlpwi_0",
           "moe_x_sorted",
+          "moe_routed_output",
           "moe_routing_maps",
           "moe_packed_routing_maps",
           "moe_tc_routing_checkpoint",
