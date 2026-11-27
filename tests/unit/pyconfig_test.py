@@ -95,6 +95,18 @@ class PyconfigTest(unittest.TestCase):
           sparse_matmul=False,
       )
 
+  def test_moe_sc_gather_reduce_rejects_moe_tc_kernels(self):
+    for flag in ("moe_tc_permute", "moe_tc_combine"):
+      with self.subTest(flag=flag):
+        with self.assertRaisesRegex(ValueError, "moe_sc_gather_reduce=True cannot be combined with moe_tc_permute"):
+          pyconfig.initialize(
+              [os.path.join(MAXTEXT_PKG_DIR, "train.py"), get_test_config_path()],
+              moe_sc_gather_reduce=True,
+              sparse_matmul=True,
+              moe_use_direct_token_gather=True,
+              **{flag: True},
+          )
+
   def test_moe_tc_kernels_require_tpu(self):
     with self.assertRaisesRegex(ValueError, "only supported on TPU"):
       pyconfig.initialize(
