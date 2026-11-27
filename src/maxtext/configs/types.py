@@ -7655,13 +7655,85 @@ class MaxTextConfig(
         self.quantization_local_shard_count = 1
 
     # F. CALCULATE BATCH SIZES
+    def _mesh_axes_size(axes: tuple[str, ...], num_devices: int, num_slices: int | None = None) -> int:
+      """Returns combined size of `axes`, resolving `-1` and DCN slices."""
+      alias = {"stage": "pipeline", "model": "tensor"}
+
+      def _axis_parallelism(prefix: str) -> list[int]:
+        axis_map = {"attn_dp": 1, "attn_dp_expert": 1, "dcp": 1, "pcp": 1}
+        for axis in self.mesh_axes:
+          attr = f"{prefix}_{alias.get(axis, axis)}_parallelism"
+          if hasattr(self, attr):
+            axis_map[axis] = getattr(self, attr)
+        return _resolve_parallelism(getattr(self, f"{prefix}_parallelism"), axis_map, self.mesh_axes)
+
+      raw_slices = self.num_slices if num_slices is None else num_slices
+      slices = raw_slices if raw_slices > 1 and num_devices % raw_slices == 0 else 1
+      size = _resolved_axis_product(
+          self.mesh_axes,
+          _axis_parallelism("ici"),
+          max(num_devices // slices, 1),
+          axes,
+      )
+      if slices > 1:
+        size *= _resolved_axis_product(self.mesh_axes, _axis_parallelism("dcn"), slices, axes)
+      return size
+
+    def _input_batch_axes() -> tuple[str, ...]:
+      """Returns mesh axes that split input batch rows (empty if unknown).
+
+      Mirrors `sharding.logical_to_spec` (in rule order, first rule for a
+      dimension whose mesh axes no other dimension uses yet) because `types.py`
+      cannot import `sharding` (`sharding` imports `pyconfig`, which imports
+      `types`). By default rows split over data, stage, fsdp, fsdp_transpose,
+      and expert; context, context_usp_ulysses, and tensor_sequence split
+      positions inside each row; tensor holds a copy of each row.
+
+      Returns:
+        Tuple of physical mesh axis names for the input batch dimension.
+      """
+      names = list(self.input_data_sharding_logical_axes or [])
+      assigned: dict[str, tuple[str, ...]] = {}
+      used: set[str] = set()
+      for rule in self.logical_axis_rules:
+        if rule and len(rule) >= 2 and rule[0] in names and rule[0] not in assigned:
+          axes = _normalize_axes(rule[1])
+          if used.isdisjoint(axes):
+            assigned[rule[0]] = axes
+            used.update(axes)
+      return assigned.get(names[0], ()) if names else ()
+
     def calculate_global_batch_sizes(per_device_batch_size, expansion_factor, num_devices, grad_accum_steps):
       """Helper to calculate global and micro batch sizes for training and loading."""
-      if per_device_batch_size < 1.0:
-        micro_batch_to_load = num_devices * (expansion_factor if expansion_factor > 0 else 1)
-      else:
-        micro_batch_to_load = int(num_devices * per_device_batch_size * (expansion_factor if expansion_factor > 0 else 1))
+      scale = expansion_factor if expansion_factor > 0 else 1
       micro_batch_to_train = int(num_devices * per_device_batch_size)
+      if per_device_batch_size < 1.0:
+        micro_batch_to_load = num_devices * scale
+        in_step_accumulation = grad_accum_steps > 1 and not (
+            self.use_tunix_gradient_accumulation
+            or self.enable_diloco
+            or self.te_moe_block
+            or self.enable_rampup_batch_size
+            or self.ici_pipeline_parallelism > 1
+            or self.dcn_pipeline_parallelism > 1
+        )
+        batch_axes = _input_batch_axes() if in_step_accumulation else ()
+        if batch_axes and num_devices > 0 and micro_batch_to_train >= 1 and float(scale).is_integer():
+          step_rows = num_devices * int(scale)
+          step_unit = step_rows // math.gcd(step_rows, int(grad_accum_steps))
+          micro_unit = math.lcm(_mesh_axes_size(batch_axes, num_devices) * int(scale), step_unit)
+          padded = -(-(micro_batch_to_train * int(scale)) // micro_unit) * micro_unit
+          # Trained rows must end on a `get_process_loading_real_data` block
+          # boundary (over `data_sharding[0]`), or a host holding trained rows
+          # can receive a `PlaceHolderDataIterator`.
+          row_blocks = num_devices
+          if self.data_sharding:
+            row_blocks = _mesh_axes_size(_normalize_axes(self.data_sharding[0]), num_devices)
+          while padded < step_rows and (micro_batch_to_train * row_blocks) % padded:
+            padded += micro_unit
+          micro_batch_to_load = min(padded, step_rows)  # Never more rows than before.
+      else:
+        micro_batch_to_load = int(num_devices * per_device_batch_size * scale)
       global_batch_to_load = int(micro_batch_to_load * grad_accum_steps)
       global_batch_to_train = int(micro_batch_to_train * grad_accum_steps)
       return global_batch_to_load, global_batch_to_train, micro_batch_to_train
@@ -7731,23 +7803,9 @@ class MaxTextConfig(
             "fsdp_transpose",
             "expert",
         )
-        alias = {"stage": "pipeline", "model": "tensor"}
-
-        def _axis_parallelism(prefix: str) -> list[int]:
-          axis_map = {"attn_dp": 1, "attn_dp_expert": 1, "dcp": 1, "pcp": 1}
-          for axis in self.mesh_axes:
-            attr = f"{prefix}_{alias.get(axis, axis)}_parallelism"
-            if hasattr(self, attr):
-              axis_map[axis] = getattr(self, attr)
-          return _resolve_parallelism(getattr(self, f"{prefix}_parallelism"), axis_map, self.mesh_axes)
-
-        ici_par, dcn_par = _axis_parallelism("ici"), _axis_parallelism("dcn")
 
         def _non_batch_devices(num_devices: int, num_slices: int) -> int:
-          slices = num_slices if num_slices > 1 and num_devices % num_slices == 0 else 1
-          batch_devs = _resolved_axis_product(self.mesh_axes, ici_par, max(num_devices // slices, 1), batch_axes)
-          if slices > 1:
-            batch_devs *= _resolved_axis_product(self.mesh_axes, dcn_par, slices, batch_axes)
+          batch_devs = _mesh_axes_size(batch_axes, num_devices, num_slices)
           return max(num_devices // max(batch_devs, 1), 1)
 
         job_non_batch_devices = _non_batch_devices(job_devices, job_slices)
