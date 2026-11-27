@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795725770134,
+  "lastUpdate": 1795740495011,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -78002,6 +78002,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 3558.030999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 474,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Shraer CA",
+            "username": "shralex",
+            "email": "shralex@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "999478b97643e9f097982bc88e364940f0be1e31",
+          "message": "Speed up slow MaxText CPU unit tests, add global CPU test defaults, and add a test-efficiency review guide.\n\nThe cpu-unit flavor spends most of its time in a few hundred tests that each take 10 s to 15 min. Most of that time goes to work the tests don't need to do to check what they check.\n\nGlobal test-only improvements (never applied to production runs or TPU/GPU runners):\n\n- XLA:CPU LLVM backend fast codegen: set `--xla_backend_optimization_level=0 --xla_llvm_disable_expensive_passes=true --xla_cpu_parallel_codegen_split_count=1` for all CPU CI flavors (`inputs.device_type == 'cpu'`) in `.github/workflows/run_tests_against_package.yml` and for explicit local `JAX_PLATFORMS=cpu` pytest runs in `tests/conftest.py`. These flags skip post-HLO LLVM backend optimization passes and 32-way parallel codegen splitting (which oversubscribes cores under xdist) while leaving HLO passes, collectives, sharding, and TPU AOT compilation unchanged.\n- Automatic `xdist_group` and shard-level grouping: `tests/conftest.py` automatically attaches `xdist_group` to any test class with a custom `setUpClass` / `setup_class` or test-defined class-scoped fixture (excluding conftest autouse fixtures so stateless classes like `TrainCompile` stay ungrouped). CPU CI uses `--class-splits ... --class-split-by=xdist_group` (`tests/utils/class_split.py`) together with `pytest-xdist --dist loadgroup`, keeping grouped fixture classes on one CI shard and one worker while splitting ungrouped tests evenly across all shards and workers.\n- Test-efficiency review guide: add `.agents/review/testing.md` (referenced from `AGENTS.md`, `.agents/review/protocol.md`, `.gemini/commands/maxtext-review.toml`, and `README.md`) documenting CPU test best practices so new PRs avoid introducing oversized configs, eager CPU init/execution, duplicate compiles, accidental Megablox CPU interpret mode, or serial multi-device subprocesses.\n\nPer-test improvements:\n\n- `train_compile_test`: compile tiny model configs (`deepseek4-tiny` with 1 hash prefix + 2 scanned blocks, shrunk Qwen3.5/Qwen3-Next GDN/attention/MoE widths, TPU-lane-aligned `num_moe_emb_chunks=4`, shrunk experts and vocab) on the smallest TPU slice that still has every mesh axis under test larger than 1. Pass class-level fast-compile XLA flags (`--xla_optimization_level=EFFORT_O0 --xla_jf_llo_level=0 --xla_jf_critical_path_scheduler=false --xla_jf_xlu_optimizer=false`) in `_aot()` by default while keeping full compiler optimization (`full_opt=True`) on full-size/offload HBM-fit checks. Also: remove the module-level persistent compilation cache (it always missed, and it was turned on for every other test in the same xdist worker); write the compiled executable only in the save tests; use the vendored tokenizer for engram; memoize the engram tokenizer and `NgramHashMapping` in `models/deepseek.py`. Full-size compile checks are kept as `scheduled_only` tests.\n- Child-process CPU-mesh tests (`attention_load_balance`, `cp_as_ep_dense_no_cp`, `dense_grad_reduce`, `hoist_ids`, `query_proj`, `moe_routing`, `gdn_cp`, `ulysses_*`, `moe_ring_pipeline`, `gdn_layer_layouts`, …): split serial child processes into parameterized phases via `tests/utils/cpu_mesh_child.py` (running in-process when the worker already matches the requested CPU device count, such as 4 devices on `cpu-unit`), so xdist runs them in parallel. Remove repeated compiles, redundant traces, and eager VJPs (reusing traced/lowered/compiled objects in `moe_ring_pipeline_test` and `moe_roe_packed_routing_gather_test`, `eval_shape` for VJP pullback HLO, and shared baselines), and derive positive controls from existing results where identical.\n- Set `hardware=cpu` / `megablox=False` in test configs whose purpose is not the megablox kernel (`moe_roe_packed_routing_gather_test`, etc.), so RoutedMoE uses `ragged_dot` instead of the Pallas interpreter. Kernel-focused tests keep megablox.\n- Jit previously eager model initialization (`from_config`, `Transformer`, `NNXDecoder`, `Embed`, `AutoencoderKLWan`, `model_ref.init`), forwards, losses, gradients (`value_and_grad`), and decode steps across `nnx_decoders_test`, `hy4_explicit_sharding_test`, `kimi_k3_scan_test`, `glm5_vs_reference_test`, `generate_param_only_checkpoint_nnx_test`, `autoencoder_kl_wan_test`, `kimi_k3_latent_moe_test`, and `moe_prefuse_and_fallback_test`. Use `eval_shape` or tracing for structure, jaxpr, and guard tests, and `nnx.clone` instead of rebuilding identical models.\n- Remove exact or strict-subset duplicates and fold redundant sweep cases (including folding `deepseek_v4_remat_test`'s 4-line compiled FLOP recompute ratio assertion into `test_remat_advances_dropout_rngs` so it never triggers a duplicate compile).\n- Mark slow tests `scheduled_only` where a test that runs on every PR covers the same code path, with each mark naming that PR test and placed directly above `def` (below `@parameterized` decorators).\n\nPositive and negative controls and tolerances are unchanged, apart from stricter checks where noted in comments.\n\nPiperOrigin-RevId: 1030885240",
+          "timestamp": "2026-11-26T23:36:47Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/999478b97643e9f097982bc88e364940f0be1e31"
+        },
+        "date": 1795740494091,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 223.35699999999989,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 56.72,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 38,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 2251.703,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 173.6199999999999,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 14,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 331.29200000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 3263.3870000000024,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 474,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1830.9560000000001,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 356.613,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 3428.500000000001,
             "unit": "sec"
           },
           {
