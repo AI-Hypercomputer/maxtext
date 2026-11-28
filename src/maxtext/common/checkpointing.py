@@ -18,6 +18,7 @@
 import collections
 import contextlib
 import importlib
+import math
 import os
 import time
 from typing import Any
@@ -1035,10 +1036,21 @@ def _flat_moe_restore_plan(want, stored_weights):
     rest = dim0_axes[1:] if len(dim0_axes) > 1 else dim0_axes
     rest_spec = None if not rest else (rest[0] if len(rest) == 1 else rest)
     tail = tuple(spec)[1:] + (None,) * max(0, len(flat_shape) - len(spec))
+    # Standard 3D checkpoints shard `wo` [E, (L,) mlp, embed] along its last (`embed`) dim on FSDP,
+    # whereas `wi_0`/`wi_1` [E, (L,) embed, mlp] shard along `rows` (`embed`). Aligning `wo`'s restore
+    # sharding with its on-disk `embed` axis avoids reading every FSDP chunk per host; `_flat_moe_convert`
+    # then reshards layer-by-layer into the flat target layout.
+    rest_shards = math.prod(mesh.shape[a] for a in rest) if rest else 1
     if len(stored_shape) == 4:
-      stored_spec = jax.sharding.PartitionSpec(expert_axis, tail[0], rest_spec, tail[1])
+      if path[-1] == "wo" and tail[1] is None and stored_shape[3] % rest_shards == 0:
+        stored_spec = jax.sharding.PartitionSpec(expert_axis, tail[0], None, rest_spec)
+      else:
+        stored_spec = jax.sharding.PartitionSpec(expert_axis, tail[0], rest_spec, tail[1])
     else:
-      stored_spec = jax.sharding.PartitionSpec(expert_axis, rest_spec, tail[0])
+      if path[-1] == "wo" and tail[0] is None and stored_shape[2] % rest_shards == 0:
+        stored_spec = jax.sharding.PartitionSpec(expert_axis, None, rest_spec)
+      else:
+        stored_spec = jax.sharding.PartitionSpec(expert_axis, rest_spec, tail[0])
     stored_sds = jax.ShapeDtypeStruct(stored_shape, w.dtype, sharding=jax.sharding.NamedSharding(mesh, stored_spec))
     plan[path] = (w, stored_sds)
 
