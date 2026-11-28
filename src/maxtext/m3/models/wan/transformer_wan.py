@@ -828,6 +828,8 @@ class WanAttention(nnx.Module):
         else:
           image_seq_len_actual = 257
         padded_img_len = ((image_seq_len_actual + alignment - 1) // alignment) * alignment  # 257 -> 384
+        if encoder_attention_mask is None:
+          padded_img_len = image_seq_len_actual
         encoder_hidden_states_img = encoder_hidden_states[:, :padded_img_len, :]
         encoder_hidden_states_text = encoder_hidden_states[:, padded_img_len:, :]
 
@@ -873,7 +875,7 @@ class WanAttention(nnx.Module):
             key_proj_img = self.norm_added_k(key_proj_img)
           with self.conditional_named_scope("add_proj_v"):
             value_proj_img = self.add_v_proj(encoder_hidden_states_img)
-        query_proj_img = query_proj_raw
+        query_proj_img = query_proj_text
         # Check norm_added_k too
         # Checkpointing
         query_proj_text = checkpoint_name(query_proj_text, "query_proj")
@@ -1167,19 +1169,19 @@ class WanImageEmbedding(nnx.Module):
       flash_min_seq_length: int = 4096,
       sharding: Sharding | None = None,
   ):
-    self.norm1 = FP32LayerNorm(rngs=rngs, dim=in_features, elementwise_affine=True, eps=1e-6)
+    self.norm1 = FP32LayerNorm(rngs=rngs, dim=in_features, elementwise_affine=True, eps=1e-5)
     self.ff = SimpleFeedForward(
         rngs=rngs,
         dim=in_features,
         dim_out=out_features,
         mult=1,
-        activation_fn="gelu",
+        activation_fn="gelu_exact",
         dtype=dtype,
         weights_dtype=weights_dtype,
         precision=precision,
         sharding=sharding,
     )
-    self.norm2 = FP32LayerNorm(rngs=rngs, dim=out_features, elementwise_affine=True, eps=1e-6)
+    self.norm2 = FP32LayerNorm(rngs=rngs, dim=out_features, elementwise_affine=True, eps=1e-5)
     if alignment is None:
       tpu_type = get_tpu_type()
       self.alignment = 256 if tpu_type in [TpuType.TPU_V6_LITE, TpuType.TPU_7X] else 128

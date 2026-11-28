@@ -174,6 +174,7 @@ _ACTIVATIONS = {
     "silu": jax.nn.silu,
     "relu": jax.nn.relu,
     "gelu": jax.nn.gelu,
+    "gelu_exact": lambda x: jax.nn.gelu(x, approximate=False),
     "gelu_tanh": jax.nn.gelu,
     "mish": jax.nn.mish,
 }
