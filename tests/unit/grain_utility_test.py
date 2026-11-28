@@ -25,7 +25,9 @@ from unittest import mock
 import grain
 from grain import experimental as grain_experimental
 import grain.sharding
+import numpy as np
 from maxtext.common import grain_utility
+from maxtext.input_pipeline import grain_data_processing
 from orbax.checkpoint import v1 as ocp
 
 
@@ -243,3 +245,117 @@ class TestGrainUtilityFactories(unittest.TestCase):
 
 
 # pylint: enable=protected-access
+
+
+class _MultiHostLike:
+  """Holds a dataloader the way `MultiHostDataLoadIterator` does: `local_iterator = iter(dataloader)`.
+
+  With OSS grain 0.2.x, `iter()` of a plain `ElasticIterator` is its internal `_default_iterator` (not an
+  `ElasticIterator`), while `_PaddedElasticIterator` returns itself.
+  """
+
+  def __init__(self, dataloader):
+    self.dataloader = dataloader
+    self.local_iterator = iter(dataloader)
+
+
+_ROWS = grain.MapDataset.range(100).map(lambda x: x + 1000)  # no real row equals a zero padding row
+_SHARD = grain.sharding.ShardOptions(shard_index=0, shard_count=1)
+
+
+def _unpadded(batch=4):
+  return _MultiHostLike(ElasticIterator(_ROWS, global_batch_size=batch, shard_options=_SHARD))
+
+
+def _padded(logical=4, physical=6):
+  return _MultiHostLike(
+      grain_data_processing._PaddedElasticIterator(  # pylint: disable=protected-access
+          _ROWS, logical_batch_size=logical, physical_batch_size=physical, shard_options=_SHARD
+      )
+  )
+
+
+class TestElasticResizeIteratorCheckpoint(unittest.TestCase):
+  """A replica resize that adds or removes padding restores the data position written before it."""
+
+  def _save(self, path, data_iterator):
+    ocp.save_checkpointables(str(path), {"iter": grain_utility.for_save(data_iterator, 1)})
+
+  def _restore(self, path, data_iterator):
+    manager = mock.MagicMock()
+    manager.directory = path.parent
+    target = grain_utility.for_restore(manager, int(path.name), data_iterator, 1)
+    ocp.load_checkpointables(str(path), {"iter": target})
+
+  def test_unpadded_elastic_iterator_is_checkpointed_through_its_dataloader(self):
+    data_iterator = _unpadded()
+    self.assertNotIsInstance(data_iterator.local_iterator, ElasticIterator)  # the grain 0.2.x behaviour
+    # pylint: disable-next=protected-access
+    self.assertIs(grain_utility.for_save(data_iterator, 1)._item, data_iterator.dataloader)
+    # pylint: disable-next=protected-access
+    self.assertIs(grain_utility.for_restore(None, 0, data_iterator, 1)._item, data_iterator.dataloader)
+
+  def test_unpadded_and_padded_write_the_same_shared_file(self):
+    with tempfile.TemporaryDirectory() as d:
+      for name, data_iterator in (("unpadded", _unpadded()), ("padded", _padded())):
+        path = pathlib.Path(d) / name / "0"
+        self._save(path, data_iterator)
+        self.assertEqual(sorted(p.name for p in (path / "iter").iterdir()), ["process_0.json"])
+
+  def test_scale_down_then_up_continues_with_the_next_real_rows(self):
+    with tempfile.TemporaryDirectory() as d:
+      root = pathlib.Path(d)
+      full = _unpadded()  # e.g. 3 slices: logical batch == physical batch
+      seen = [next(full.local_iterator) for _ in range(2)]
+      np.testing.assert_array_equal(np.concatenate(seen), np.arange(1000, 1008))
+      self._save(root / "2", full)
+
+      degraded = _padded()  # 2 slices: 4 real rows padded to 6
+      self._restore(root / "2", degraded)
+      batch = next(degraded.local_iterator)
+      np.testing.assert_array_equal(batch[:4], np.arange(1008, 1012))
+      np.testing.assert_array_equal(batch[4:], np.zeros(2))
+      self._save(root / "3", degraded)  # the checkpoint taken before scaling back up
+
+      restored = _unpadded()
+      self._restore(root / "3", restored)
+      np.testing.assert_array_equal(next(restored.local_iterator), np.arange(1012, 1016))
+
+  def test_rewind_from_padded_to_an_unpadded_checkpoint(self):
+    with tempfile.TemporaryDirectory() as d:
+      root = pathlib.Path(d)
+      degraded = _padded()
+      for _ in range(3):
+        next(degraded.local_iterator)
+      self._save(root / "3", degraded)
+      full = _unpadded()
+      self._restore(root / "3", full)
+      np.testing.assert_array_equal(next(full.local_iterator), np.arange(1012, 1016))
+
+  def test_restores_a_legacy_per_process_checkpoint_of_an_unpadded_elastic_iterator(self):
+    with tempfile.TemporaryDirectory() as d:
+      path = pathlib.Path(d) / "5"
+      (path / "iter").mkdir(parents=True)
+      # Written before the fix, by the per-process path. The position is global, so the padded iterator can use it.
+      (path / "iter" / "process_0-of-1.json").write_text(json.dumps({"global_next_index": 8}))
+      for data_iterator in (_unpadded(), _padded()):
+        target = grain_utility.for_restore(None, 5, data_iterator, 1)
+        asyncio.run(_load(target, path / "iter"))
+        np.testing.assert_array_equal(next(data_iterator.local_iterator)[:4], np.arange(1008, 1012))
+
+  def test_missing_state_still_raises(self):
+    with tempfile.TemporaryDirectory() as d:
+      empty = pathlib.Path(d)
+      target = grain_utility.for_restore(None, 0, _unpadded(), 1)
+      with self.assertRaisesRegex(ValueError, "does not exist"):
+        asyncio.run(_load(target, empty))
+
+
+async def _load(checkpointable, directory):
+  pending = await checkpointable.load(directory)
+  if pending is not None:
+    await pending
+
+
+if __name__ == "__main__":
+  unittest.main()
