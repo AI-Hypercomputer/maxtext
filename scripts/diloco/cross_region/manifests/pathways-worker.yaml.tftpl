@@ -1,0 +1,170 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: pathways-worker-slice-${slice_id}
+  namespace: default
+spec:
+  completionMode: Indexed
+  parallelism: ${nodes_per_slice}
+  completions: ${nodes_per_slice}
+  backoffLimit: 30
+  template:
+    metadata:
+      labels:
+        job-name: pathways-worker-slice-${slice_id}
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: ${node_pool_name}
+        cloud.google.com/gke-tpu-accelerator: ${tpu_accelerator}
+        cloud.google.com/gke-tpu-topology: ${slice_topology}
+      tolerations:
+      - key: "google.com/tpu"
+        operator: "Equal"
+        value: "present"
+        effect: "NoSchedule"
+      - key: "cloud.google.com/gke-spot"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+      restartPolicy: OnFailure
+      subdomain: pathways-worker-slice-${slice_id}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      # For longer Spot runs with colocated Python checkpointing, add an emptyDir Memory volume
+      # and colocated-python-sidecar container (see docs/run_maxtext/run_maxtext_snapshotting.md).
+      volumes:
+      - name: shared-tmp
+        hostPath:
+          path: /tmp
+          type: DirectoryOrCreate
+      - name: worker-tools
+        emptyDir: {}
+      initContainers:
+      # Stage static BusyBox tools and resolve slice FQDNs into raw VPC IPv4 addresses
+      # because Cluster 1's pathways-rm cannot resolve Cluster 2's cluster-local DNS names.
+      - name: stage-worker-tools
+        image: mirror.gcr.io/library/busybox:1.36.1-musl
+        volumeMounts:
+        - name: worker-tools
+          mountPath: /tools
+        command:
+        - /bin/sh
+        - -eu
+        - -c
+        - |
+          cp /bin/busybox /tools/busybox
+          chmod 755 /tools/busybox
+          ln -sf /tools/busybox /tools/sh
+          ln -sf /tools/busybox /tools/nslookup
+          ln -sf /tools/busybox /tools/awk
+          ln -sf /tools/busybox /tools/sleep
+          cat <<'EOF' > /tools/launch_worker.sh
+          #!/tools/sh
+          set -eu
+          export PATH="/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          if [ -z "$${POD_IP:-}" ]; then
+            echo "[WORKER] ERROR: POD_IP is empty. Cannot bind IPv4 Pathways transport." >&2
+            exit 1
+          fi
+          slice_subdomain="$${SLICE_SUBDOMAIN}"
+          slice_id="$${SLICE_ID}"
+          nodes_per_slice="$${NODES_PER_SLICE}"
+          my_idx="$${TPU_WORKER_ID:-0}"
+          resolved=""
+          attempt=1
+          while [ "$${attempt}" -le 90 ]; do
+            resolved=""
+            all_ok=1
+            idx=0
+            while [ "$${idx}" -lt "$${nodes_per_slice}" ]; do
+              fqdn="$${slice_subdomain}-$${idx}.$${slice_subdomain}.default.svc.cluster.local"
+              ip="$(nslookup -type=a "$${fqdn}" 2>/dev/null | awk '/^Name:/{seen=1; next} seen && /^Address:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/{print $2; exit}')" || true
+              if [ -z "$${ip}" ]; then
+                all_ok=0
+                break
+              fi
+              if [ "$${idx}" = "$${my_idx}" ] && [ -n "$${POD_IP:-}" ] && [ "$${ip}" != "$${POD_IP}" ]; then
+                all_ok=0
+                break
+              fi
+              if [ -z "$${resolved}" ]; then
+                resolved="$${ip}"
+              else
+                resolved="$${resolved},$${ip}"
+              fi
+              idx=$((idx + 1))
+            done
+            if [ "$${all_ok}" -eq 1 ]; then
+              break
+            fi
+            attempt=$((attempt + 1))
+            sleep 2
+          done
+          if [ -z "$${resolved}" ] || [ "$${all_ok:-0}" -ne 1 ]; then
+            echo "[WORKER] ERROR: Timed out resolving TPU worker IPs for $${slice_subdomain} (attempt $${attempt})." >&2
+            exit 1
+          fi
+          export TPU_WORKER_ID="$${my_idx}"
+          export TPU_WORKER_HOSTNAMES="$${resolved}"
+          unset TPU_PROCESS_ADDRESSES || true
+          echo "[WORKER] Slice $${slice_id} worker $${TPU_WORKER_ID} resolved TPU_WORKER_HOSTNAMES=$${TPU_WORKER_HOSTNAMES} (POD_IP=$${POD_IP:-unset})"
+          exec /opt/pathways/pathways_server "$@"
+          EOF
+          chmod 755 /tools/launch_worker.sh
+      containers:
+      - name: pathways-worker
+        image: ${worker_image}
+        securityContext:
+          privileged: true
+        command:
+        - /tools/sh
+        - /tools/launch_worker.sh
+        volumeMounts:
+        - name: shared-tmp
+          mountPath: /tmp
+        - name: worker-tools
+          mountPath: /tools
+        ports:
+        - containerPort: 29005
+        - containerPort: 29006
+        - containerPort: 8471
+        - containerPort: 8080
+        args:
+        - --server_port=29005
+        - --temporary_flags_for_debugging=temporary_flag_for_debugging_grpc_transport_port=29006;;;temporary_flag_for_debugging_pipe_unreachable_timeout=600s;;;temporary_flag_for_debugging_ip_address_override=$(POD_IP);;;temporary_flag_for_debugging_megascale_address_derive_from_megascale_grpc=false
+        - --resource_manager_address=${rm_address}
+        - --gcs_scratch_location=${gcs_scratch}
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: TPU_WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+        - name: TPU_WORKER_HOSTNAMES
+          value: "PENDING_DNS_RESOLUTION"
+        - name: SLICE_SUBDOMAIN
+          value: "pathways-worker-slice-${slice_id}"
+        - name: SLICE_ID
+          value: "${slice_id}"
+        - name: NODES_PER_SLICE
+          value: "${nodes_per_slice}"
+        - name: TPU_MIN_LOG_LEVEL
+          value: "0"
+        - name: TF_CPP_MIN_LOG_LEVEL
+          value: "0"
+        - name: XCLOUD_ENVIRONMENT
+          value: GCP
+        - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+          value: "false"
+        - name: MEGASCALE_NUM_SLICES
+          value: "${num_slices}"
+        - name: MEGASCALE_SLICE_ID
+          value: "${slice_id}"
+        - name: MEGASCALE_COORDINATOR_ADDRESS
+          value: "${coordinator_address}"
+        resources:
+          limits:
+            google.com/tpu: "${chips_per_vm}"

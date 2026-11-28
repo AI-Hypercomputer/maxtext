@@ -61,6 +61,14 @@ Demonstrate fault-tolerant training with Pathways on GKE: lose a TPU slice mid-r
 Run elastic training with in-memory snapshotting on GKE across pause/resume,
 replica resize, constant global batch size, and colocated Python data input.
 :::
+
+:::{grid-item-card} 🌐 Cross-region DiLoCo (Cluster Toolkit)
+:link: run_maxtext/run_maxtext_cross_region_diloco
+:link-type: doc
+
+Train large models across geographically distributed GKE clusters using Cluster
+Toolkit blueprints, Cloud Pathways or McJax orchestration, and DiLoCo.
+:::
 ::::
 
 ```{toctree}
@@ -73,7 +81,9 @@ run_maxtext/run_maxtext_single_host_gpu.md
 run_maxtext/run_maxtext_via_cluster_toolkit.md
 run_maxtext/run_maxtext_via_xpk.md
 run_maxtext/run_maxtext_via_pathways.md
+run_maxtext/run_maxtext_cross_region_diloco.md
 run_maxtext/decoupled_mode.md
 run_maxtext/run_maxtext_elastic_training.md
 run_maxtext/run_maxtext_snapshotting.md
 ```
+

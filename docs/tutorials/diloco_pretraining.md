@@ -194,7 +194,45 @@ This script also defaults `DILOCO_OUTER_LR` to `0.1`. The recipe above overrides
 
 ______________________________________________________________________
 
-## 6. Checkpointing & Resumption
+## 6. Production Recipe 4: Cross-Zone & Cross-Region Deployment
+
+Cluster Toolkit handles cross-zone and cross-region DiLoCo deployments
+differently because a Kubernetes `JobSet` cannot span multiple GKE clusters:
+
+- **Cross-Zone (Single Region, e.g., `us-east5-a` + `us-east5-b`)**: Create one
+  regional GKE cluster (`LOCATION="us-east5"`) with TPU node pools in each zone.
+  Recipes 2 and 3 (`gcluster job submit --num-slices=2`) schedule directly
+  across those zones through one Kueue and `JobSet` control plane.
+- **Cross-Region (Multi-Region WAN, e.g., `us-east5` + `europe-west1`)**: No
+  single GKE cluster spans two regions, so `gcluster job submit` cannot place
+  slices across regions. Deploy two regional GKE clusters over a shared global
+  VPC using `gcluster deploy` and `scripts/diloco/cross_region/deployment.yaml`.
+
+To provision the two-region stack, run 60 Streaming DiLoCo steps on
+**Qwen3-30B-A3B** (`2x v5p-16`), and tear down all cloud resources on exit:
+
+```bash
+export PROJECT_ID="your-project-id"
+export GCS_BUCKET="gs://${PROJECT_ID}-diloco"
+
+# Cloud Pathways single-controller mode (default)
+./scripts/diloco/cross_region/run_cross_region_diloco.sh
+
+# McJax multi-controller mode (omits the CPU controller pool)
+./scripts/diloco/cross_region/run_cross_region_diloco.sh --runtime mcjax
+```
+
+- **Uniform WAN Transfers (`diloco_bucketize_non_scanned=true`)**: Splits 2D+
+  non-scanned matrices (embedding and output projection) along their longest
+  unsharded axis across fragments `1..P-1` to avoid a fragment-`0` WAN burst.
+- **Blueprint & Architecture**: See
+  [Cross-region DiLoCo with Cluster Toolkit](../run_maxtext/run_maxtext_cross_region_diloco.md)
+  for VPC subnets, Global-Access ILBs, Spot autoscaling, and manual
+  `gcluster deploy` commands.
+
+______________________________________________________________________
+
+## 7. Checkpointing & Resumption
 
 ### Automatic Resumption
 
@@ -225,13 +263,14 @@ MaxText recognizes the restored state as a single-replica (non-DiLoCo) checkpoin
 
 ______________________________________________________________________
 
-## 7. Tuning Guidelines
+## 8. Tuning Guidelines
 
 | Hyperparameter                               | Recommended Setting          | Description                                                                                                                                                                                                                                                                                      |
 | :------------------------------------------- | :--------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `diloco_sync_period` ($H$)                   | **`= num_diloco_fragments`** | Sync period. Setting $H = P$ ensures exactly 1 fragment is synchronized every local step ($\Delta h = 1$). In general $\Delta h = \max(1, \text{round}(H/P))$ and the effective period is $P \cdot \Delta h$, so prefer an $H$ that is a multiple of $P$.                                        |
 | `num_diloco_fragments` ($P$)                 | **`num_layers + 1`**         | Partition count (1 for non-scanned embeddings/head + 1 per transformer decoder layer). Must be $\ge 2$, and `num_decoder_layers` must be divisible by $P - 1$.                                                                                                                                   |
 | `use_sequential_layers`                      | `false`                      | Layer-to-fragment assignment. `false` interleaves layers round-robin across fragments (each sync touches the full depth of the network); `true` gives each fragment a contiguous block of layers.                                                                                                |
+| `diloco_bucketize_non_scanned`               | `true` (over WAN)            | Default `false`. Splits 2D+ non-scanned matrices (such as embeddings and output projections) along unsharded axes across fragments `1..P-1` so every step transfers a similar byte volume. Requires `enable_streaming_diloco=true`, $P \ge 3$, and `shard_optimizer_over_data=false`.            |
 | `diloco_outer_lr` ($\eta_{\text{outer}}$)    | **`0.3` – `0.9`**            | Outer learning rate. Start from `0.3` – `0.9` (e.g. `0.7`) and tune based on inner LR.                                                                                                                                                                                                           |
 | `diloco_outer_momentum` ($\beta$)            | `0.9`                        | Nesterov momentum coefficient for the outer optimizer.                                                                                                                                                                                                                                           |
 | `num_communication_overlapping_steps` ($V$)  | `0` (or `1`)                 | Delay in inner steps before applying outer weights. In the current SPMD design, this does not enhance hardware efficiency but simulates the algorithmic behavior of delayed weight merging; it will provide non-blocking hardware overlap in future MPMD multi-threading. Coupled with $\alpha$. |
@@ -274,7 +313,7 @@ Read the table as $P - 1 \in \text{divisors}(N_{\text{layers}})$. If you need a 
 
 ______________________________________________________________________
 
-## 8. Monitoring Convergence
+## 9. Monitoring Convergence
 
 Aggregate scalars (`learning/loss`, throughput, etc.) are reported from replica 0. DiLoCo additionally emits a **per-island loss** for every replica:
 
@@ -289,7 +328,7 @@ Use these to diagnose the failure mode specific to low-communication training: i
 
 ______________________________________________________________________
 
-## 9. Emulating a Slow Network
+## 10. Emulating a Slow Network
 
 To measure DiLoCo's benefit on a cluster whose DCN is *not* actually the bottleneck, MaxText can throttle per-VM egress using a Linux traffic-control token bucket filter:
 
@@ -304,7 +343,7 @@ This lets you compare synchronous data parallelism against DiLoCo at a realistic
 
 ______________________________________________________________________
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 All DiLoCo misconfigurations are caught at startup, before any accelerator work begins. The table maps each error to its cause.
 
@@ -314,18 +353,23 @@ All DiLoCo misconfigurations are caught at startup, before any accelerator work 
 | `num_diloco_fragments must be specified when enable_streaming_diloco is True.`         | `num_diloco_fragments` defaults to `null`. Set it explicitly, typically to `num_layers + 1`.                                       |
 | `num_diloco_fragments (N) must be at least 2 ...`                                      | You need at least one fragment for non-scanned params and one for layers.                                                          |
 | `enable_streaming_diloco=True requires scan_layers=True.`                              | Fragments are slices of the scanned layer stack; unscanned models have no such stack. Enable `scan_layers`, or use Vanilla DiLoCo. |
-| `The number of decoder layers (N) must be divisible by (num_diloco_fragments - 1) ...` | Pick $P$ such that $P - 1$ divides $N_{\text{layers}}$. See the table in §7.                                                       |
+| `The number of decoder layers (N) must be divisible by (num_diloco_fragments - 1) ...` | Pick $P$ such that $P - 1$ divides $N_{\text{layers}}$. See the table in §8.                                                       |
 | `Batch dimension B is not divisible by num_diloco_replicas K.`                         | The global batch is split across islands. Adjust `per_device_batch_size` or the slice count so $GBS$ is a multiple of $K$.         |
 | `Cannot resolve dcn_diloco_parallelism=-1 ...`                                         | `num_slices` isn't divisible by the product of the other DCN axes. Set `dcn_diloco_parallelism` explicitly.                        |
 
 **Run diverges or loss spikes at sync boundaries.** Lower `diloco_outer_lr` first — it is the most sensitive knob, and the inverse scaling rule above means a high inner LR needs a lower outer LR. If per-island losses spread apart steadily, reduce `diloco_sync_period` so islands reconcile more often.
 
-**No throughput gain versus synchronous training.** Confirm the DCN link was actually the bottleneck. On a fast interconnect, DiLoCo mainly adds outer-state memory without a speedup; use `dcn_bandwidth_limit` (§9) to verify the benefit under realistic bandwidth before committing to a multi-datacenter run.
+**No throughput gain versus synchronous training.** Confirm the DCN link was
+actually the bottleneck. On a fast interconnect, DiLoCo mainly adds outer-state
+memory without a speedup. Use `dcn_bandwidth_limit` (§10) to verify the benefit
+under realistic bandwidth before committing to a multi-datacenter run.
 
 ______________________________________________________________________
 
-## 11. Next Steps
+## 12. Next Steps
 
+- Deploy across multiple cloud regions with Cluster Toolkit:
+  [Cross-region DiLoCo with Cluster Toolkit](../run_maxtext/run_maxtext_cross_region_diloco.md).
 - Deep dive into mathematical foundations: [DiLoCo Theory & Mathematics Reference](../reference/core_concepts/diloco.md).
 - Explore input pipeline options: [Data Input Pipeline Guides](../guides/data_input_pipeline.md).
 - Learn about sharding strategies on TPUs: [Sharding on TPUs](../guides/optimization/sharding.md).

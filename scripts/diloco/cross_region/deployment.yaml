@@ -1,0 +1,557 @@
+# Copyright 2026 Google LLC
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#    https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+blueprint_name: pathways-cross-region-diloco
+
+vars:
+  project_id: ## SET YOUR GCP PROJECT ID HERE ##
+  deployment_name: pw-diloco
+  region: us-east5
+  zone: us-east5-b
+  authorized_cidr: 0.0.0.0/0
+
+  # Region 1 (us-east5: CPU pools in us-east5-a, TPU slice 0 in us-east5-b)
+  region_r1: us-east5
+  zone_r1: us-east5-b
+  zone_r1_system: us-east5-a
+  system_machine_type_r1: n4d-standard-4
+  head_machine_type_r1: n4d-standard-32
+
+  # Region 2 (europe-west1: CPU system pool and TPU slice 1 in europe-west1-b)
+  region_r2: europe-west1
+  zone_r2: europe-west1-b
+  zone_r2_system: europe-west1-b
+  system_machine_type_r2: n2d-standard-4
+
+  # Symmetric TPU Slice Topology Across Both Regions (2x2x2 = 2 VMs / 8 v5p chips per slice)
+  tpu_type: ct5p-hightpu-4t
+  tpu_accelerator: tpu-v5p-slice
+  tpu_topology: 2x2x2
+  nodes_per_slice: 2
+  chips_per_vm: 4
+  pathways_tpu_prefix: tpuv5
+  spot_tpu: true
+
+  # Cross-Region Global-Access Internal Load Balancer VIPs in Region 1 (10.10.0.0/18)
+  ilb_ip_r1: 10.10.0.50
+  mcjax_ilb_ip_r1: 10.10.0.51
+
+  # Distinct /28 GKE control-plane peering CIDRs prevent collisions in the shared VPC
+  master_cidr_r1: 172.16.0.32/28
+  master_cidr_r2: 172.16.0.48/28
+
+  # Container Images, Scratch Storage & Training Overrides
+  gcs_scratch_location: gs://## SET YOUR GCS SCRATCH BUCKET ##/pathways-scratch
+  maxtext_image: us-docker.pkg.dev/$(vars.project_id)/maxtext-images/maxtext_jax_stable:latest
+  pathways_server_image: us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/server:latest
+  pathways_proxy_image: us-docker.pkg.dev/cloud-tpu-v2-images/cloud-pathways/proxy_server:latest
+  run_name: qwen3_30b_streaming_diloco_cross_region
+  steps: 60
+  extra_maxtext_args: ""
+
+deployment_groups:
+# -----------------------------------------------------------------------------
+# Group 1: Global VPC & Inter-Region Firewall
+# -----------------------------------------------------------------------------
+- group: networking
+  modules:
+  - id: global_vpc
+    source: modules/network/vpc
+    settings:
+      network_name: $(vars.deployment_name)-vpc
+      subnetworks:
+      - subnet_name: $(vars.deployment_name)-sub-r1
+        subnet_region: $(vars.region_r1)
+        subnet_ip: 10.10.0.0/18
+        subnet_private_access: "true"
+      - subnet_name: $(vars.deployment_name)-sub-r2
+        subnet_region: $(vars.region_r2)
+        subnet_ip: 10.20.0.0/18
+        subnet_private_access: "true"
+      secondary_ranges_list:
+      - subnetwork_name: $(vars.deployment_name)-sub-r1
+        ranges:
+        - range_name: pods-r1
+          ip_cidr_range: 10.12.0.0/14
+        - range_name: services-r1
+          ip_cidr_range: 10.10.64.0/20
+      - subnetwork_name: $(vars.deployment_name)-sub-r2
+        ranges:
+        - range_name: pods-r2
+          ip_cidr_range: 10.24.0.0/14
+        - range_name: services-r2
+          ip_cidr_range: 10.20.64.0/20
+      firewall_rules:
+      - name: $(vars.deployment_name)-allow-pathways-cross-region
+        # Permits Pathways (29000-29006), TPU/JAX (8471-8482), and MegaScale (8080-8081)
+        # traffic across primary node subnets and secondary Pod CIDRs.
+        ranges: [10.0.0.0/8]
+        allow:
+        - protocol: tcp
+          ports: ["29000-29006", "8471-8482", "8080-8081"]
+        - protocol: icmp
+
+# -----------------------------------------------------------------------------
+# Group 2: Primary Region GKE Cluster & TPU Slice 0 (us-east5)
+# -----------------------------------------------------------------------------
+- group: cluster_r1
+  terraform_providers:
+    google:
+      source: hashicorp/google
+      version: ">= 6.9.0, <= 8.0.0"
+      configuration:
+        project: $(vars.project_id)
+        region: $(vars.region_r1)
+        zone: $(vars.zone_r1)
+    google-beta:
+      source: hashicorp/google-beta
+      version: ">= 6.9.0, <= 8.0.0"
+      configuration:
+        project: $(vars.project_id)
+        region: $(vars.region_r1)
+        zone: $(vars.zone_r1)
+  modules:
+  - id: cluster_r1
+    source: modules/scheduler/gke-cluster
+    use: [global_vpc]
+    settings:
+      name_suffix: c1
+      region: $(vars.region_r1)
+      cluster_availability_type: REGIONAL
+      cluster_reference_type: NAME
+      system_node_pool_zones: [$(vars.zone_r1_system)]
+      system_node_pool_machine_type: $(vars.system_machine_type_r1)
+      master_ipv4_cidr_block: $(vars.master_cidr_r1)
+      enable_private_endpoint: false
+      # Keep eth0 on routable IPv4 so MegaScale does not select a Google-API-only /128 IPv6 address.
+      enable_private_ipv6_google_access: false
+      enable_pathways_for_tpus: false
+      subnetwork_self_link: projects/$(vars.project_id)/regions/$(vars.region_r1)/subnetworks/$(vars.deployment_name)-sub-r1
+      pods_ip_range_name: pods-r1
+      services_ip_range_name: services-r1
+      master_authorized_networks:
+      - display_name: admin-access
+        cidr_block: $(vars.authorized_cidr)
+
+  - id: tpu_slice_0
+    source: modules/compute/gke-node-pool
+    use: [cluster_r1]
+    settings:
+      name: tpu-slice-0
+      zones: [$(vars.zone_r1)]
+      machine_type: $(vars.tpu_type)
+      num_slices: 1
+      spot: $(vars.spot_tpu)
+      static_node_count: $(null)
+      initial_node_count: $(vars.nodes_per_slice)
+      autoscaling_min_node_count: 0
+      autoscaling_max_node_count: $(vars.nodes_per_slice)
+      auto_repair: true
+      reservation_affinity:
+        consume_reservation_type: NO_RESERVATION
+        specific_reservations: []
+      placement_policy:
+        type: COMPACT
+        tpu_topology: $(vars.tpu_topology)
+
+# -----------------------------------------------------------------------------
+# Group 3: Secondary Region GKE Cluster & TPU Slice 1 (europe-west1)
+# -----------------------------------------------------------------------------
+- group: cluster_r2
+  terraform_providers:
+    google:
+      source: hashicorp/google
+      version: ">= 6.9.0, <= 8.0.0"
+      configuration:
+        project: $(vars.project_id)
+        region: $(vars.region_r2)
+        zone: $(vars.zone_r2)
+    google-beta:
+      source: hashicorp/google-beta
+      version: ">= 6.9.0, <= 8.0.0"
+      configuration:
+        project: $(vars.project_id)
+        region: $(vars.region_r2)
+        zone: $(vars.zone_r2)
+  modules:
+  - id: cluster_r2
+    source: modules/scheduler/gke-cluster
+    use: [global_vpc]
+    settings:
+      name_suffix: c2
+      region: $(vars.region_r2)
+      cluster_availability_type: REGIONAL
+      cluster_reference_type: NAME
+      system_node_pool_zones: [$(vars.zone_r2_system)]
+      system_node_pool_machine_type: $(vars.system_machine_type_r2)
+      master_ipv4_cidr_block: $(vars.master_cidr_r2)
+      enable_private_endpoint: false
+      enable_private_ipv6_google_access: false
+      enable_pathways_for_tpus: false
+      subnetwork_self_link: projects/$(vars.project_id)/regions/$(vars.region_r2)/subnetworks/$(vars.deployment_name)-sub-r2
+      pods_ip_range_name: pods-r2
+      services_ip_range_name: services-r2
+      master_authorized_networks:
+      - display_name: admin-access
+        cidr_block: $(vars.authorized_cidr)
+
+  - id: tpu_slice_1
+    source: modules/compute/gke-node-pool
+    use: [cluster_r2]
+    settings:
+      name: tpu-slice-1
+      zones: [$(vars.zone_r2)]
+      machine_type: $(vars.tpu_type)
+      num_slices: 1
+      spot: $(vars.spot_tpu)
+      static_node_count: $(null)
+      initial_node_count: $(vars.nodes_per_slice)
+      autoscaling_min_node_count: 0
+      autoscaling_max_node_count: $(vars.nodes_per_slice)
+      auto_repair: true
+      reservation_affinity:
+        consume_reservation_type: NO_RESERVATION
+        specific_reservations: []
+      placement_policy:
+        type: COMPACT
+        tpu_topology: $(vars.tpu_topology)
+
+# -----------------------------------------------------------------------------
+# Group 4: Cloud Pathways Workload Orchestration (Default: --skip workload_mcjax)
+# -----------------------------------------------------------------------------
+- group: workload_pathways
+  terraform_providers:
+    google:
+      source: hashicorp/google
+      version: ">= 6.9.0, <= 8.0.0"
+      configuration:
+        project: $(vars.project_id)
+        region: $(vars.region_r1)
+        zone: $(vars.zone_r1)
+    google-beta:
+      source: hashicorp/google-beta
+      version: ">= 6.9.0, <= 8.0.0"
+      configuration:
+        project: $(vars.project_id)
+        region: $(vars.region_r1)
+        zone: $(vars.zone_r1)
+  modules:
+  - id: cpu_np
+    source: modules/compute/gke-node-pool
+    use: [cluster_r1]
+    settings:
+      name: cpu-np
+      zones: [$(vars.zone_r1_system)]
+      machine_type: $(vars.head_machine_type_r1)
+      static_node_count: 1
+      auto_repair: false
+      boot_disk_kms_key: $(null)
+      confidential_instance_type: $(null)
+      reservation_affinity:
+        consume_reservation_type: NO_RESERVATION
+        specific_reservations: []
+
+  - id: rm_ilb_service
+    source: modules/management/kubectl-apply
+    use: [cluster_r1]
+    settings:
+      apply_manifests:
+      - wait_for_rollout: true
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: pathways-rm-ilb
+            namespace: default
+            annotations:
+              networking.gke.io/load-balancer-type: "Internal"
+              networking.gke.io/internal-load-balancer-allow-global-access: "true"
+          spec:
+            type: LoadBalancer
+            loadBalancerIP: "$(vars.ilb_ip_r1)"
+            selector:
+              app: pathways-head
+            ports:
+            - name: rm-port
+              port: 29001
+              targetPort: 29001
+              protocol: TCP
+            - name: rm-coord-port
+              port: 29002
+              targetPort: 29002
+              protocol: TCP
+
+  - id: deploy_head
+    source: modules/management/kubectl-apply
+    use: [cluster_r1]
+    settings:
+      apply_manifests:
+      - source: $(ghpc_stage("manifests/pathways-head.yaml.tftpl"))
+        wait_for_rollout: false
+        template_vars:
+          image: $(vars.maxtext_image)
+          proxy_image: $(vars.pathways_proxy_image)
+          rm_image: $(vars.pathways_server_image)
+          gcs_scratch: $(vars.gcs_scratch_location)
+          num_slices: 2
+          slice_topology: $(vars.tpu_topology)
+          pathways_tpu_prefix: $(vars.pathways_tpu_prefix)
+          run_name: $(vars.run_name)
+          steps: $(vars.steps)
+          extra_maxtext_args: $(vars.extra_maxtext_args)
+          maxtext_config_yaml: $(file(ghpc_stage("../../../src/maxtext/configs/tpu/v5p/qwen3_30b_streaming_diloco_cross_region.yml")))
+
+  - id: deploy_slice0
+    source: modules/management/kubectl-apply
+    use: [cluster_r1]
+    settings:
+      apply_manifests:
+      - wait_for_rollout: true
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: pathways-worker-slice-0
+            namespace: default
+          spec:
+            clusterIP: None
+            publishNotReadyAddresses: true
+            selector:
+              job-name: pathways-worker-slice-0
+            ports:
+            - name: grpc
+              port: 29005
+              targetPort: 29005
+            - name: transport
+              port: 29006
+              targetPort: 29006
+            - name: tpu-runtime
+              port: 8471
+              targetPort: 8471
+            - name: megascale
+              port: 8080
+              targetPort: 8080
+      - source: $(ghpc_stage("manifests/pathways-worker.yaml.tftpl"))
+        wait_for_rollout: false
+        template_vars:
+          slice_id: "0"
+          node_pool_name: "tpu-slice-0"
+          tpu_accelerator: $(vars.tpu_accelerator)
+          slice_topology: $(vars.tpu_topology)
+          worker_image: $(vars.pathways_server_image)
+          rm_address: "$(vars.ilb_ip_r1):29001"
+          coordinator_address: $(vars.ilb_ip_r1)
+          gcs_scratch: $(vars.gcs_scratch_location)
+          num_slices: 2
+          nodes_per_slice: $(vars.nodes_per_slice)
+          chips_per_vm: $(vars.chips_per_vm)
+
+  - id: deploy_slice1
+    source: modules/management/kubectl-apply
+    use: [cluster_r2]
+    settings:
+      apply_manifests:
+      - wait_for_rollout: true
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: pathways-worker-slice-1
+            namespace: default
+          spec:
+            clusterIP: None
+            publishNotReadyAddresses: true
+            selector:
+              job-name: pathways-worker-slice-1
+            ports:
+            - name: grpc
+              port: 29005
+              targetPort: 29005
+            - name: transport
+              port: 29006
+              targetPort: 29006
+            - name: tpu-runtime
+              port: 8471
+              targetPort: 8471
+            - name: megascale
+              port: 8080
+              targetPort: 8080
+      - source: $(ghpc_stage("manifests/pathways-worker.yaml.tftpl"))
+        wait_for_rollout: false
+        template_vars:
+          slice_id: "1"
+          node_pool_name: "tpu-slice-1"
+          tpu_accelerator: $(vars.tpu_accelerator)
+          slice_topology: $(vars.tpu_topology)
+          worker_image: $(vars.pathways_server_image)
+          rm_address: "$(vars.ilb_ip_r1):29001"
+          coordinator_address: $(vars.ilb_ip_r1)
+          gcs_scratch: $(vars.gcs_scratch_location)
+          num_slices: 2
+          nodes_per_slice: $(vars.nodes_per_slice)
+          chips_per_vm: $(vars.chips_per_vm)
+
+# -----------------------------------------------------------------------------
+# Group 5: McJax Multi-Controller Orchestration (Opt-in: --skip workload_pathways)
+# -----------------------------------------------------------------------------
+- group: workload_mcjax
+  terraform_providers:
+    google:
+      source: hashicorp/google
+      version: ">= 6.9.0, <= 8.0.0"
+      configuration:
+        project: $(vars.project_id)
+        region: $(vars.region_r1)
+        zone: $(vars.zone_r1)
+    google-beta:
+      source: hashicorp/google-beta
+      version: ">= 6.9.0, <= 8.0.0"
+      configuration:
+        project: $(vars.project_id)
+        region: $(vars.region_r1)
+        zone: $(vars.zone_r1)
+  modules:
+  - id: mcjax_ilb_service
+    source: modules/management/kubectl-apply
+    use: [cluster_r1]
+    settings:
+      apply_manifests:
+      - wait_for_rollout: true
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: mcjax-coord-ilb
+            namespace: default
+            annotations:
+              networking.gke.io/load-balancer-type: "Internal"
+              networking.gke.io/internal-load-balancer-allow-global-access: "true"
+          spec:
+            type: LoadBalancer
+            loadBalancerIP: "$(vars.mcjax_ilb_ip_r1)"
+            publishNotReadyAddresses: true
+            selector:
+              job-name: maxtext-worker-slice-0
+              batch.kubernetes.io/job-completion-index: "0"
+            ports:
+            - name: megascale-coord
+              port: 8080
+              targetPort: 8080
+              protocol: TCP
+            - name: jax-coord
+              port: 8482
+              targetPort: 8482
+              protocol: TCP
+
+  - id: deploy_mcjax_slice0
+    source: modules/management/kubectl-apply
+    use: [cluster_r1]
+    settings:
+      apply_manifests:
+      - wait_for_rollout: true
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: maxtext-worker-slice-0
+            namespace: default
+          spec:
+            clusterIP: None
+            publishNotReadyAddresses: true
+            selector:
+              job-name: maxtext-worker-slice-0
+            ports:
+            - name: tpu-runtime
+              port: 8471
+              targetPort: 8471
+            - name: sdk-barrier
+              port: 8477
+              targetPort: 8477
+            - name: jax-coord
+              port: 8482
+              targetPort: 8482
+            - name: megascale
+              port: 8080
+              targetPort: 8080
+            - name: megascale-debug
+              port: 8081
+              targetPort: 8081
+      - source: $(ghpc_stage("manifests/mcjax-worker.yaml.tftpl"))
+        wait_for_rollout: false
+        template_vars:
+          slice_id: "0"
+          node_pool_name: "tpu-slice-0"
+          tpu_accelerator: $(vars.tpu_accelerator)
+          slice_topology: $(vars.tpu_topology)
+          image: $(vars.maxtext_image)
+          coordinator_address: "$(vars.mcjax_ilb_ip_r1):8080"
+          gcs_scratch: $(vars.gcs_scratch_location)
+          num_slices: 2
+          nodes_per_slice: $(vars.nodes_per_slice)
+          chips_per_vm: $(vars.chips_per_vm)
+          run_name: $(vars.run_name)
+          steps: $(vars.steps)
+          extra_maxtext_args: $(vars.extra_maxtext_args)
+          maxtext_config_yaml: $(file(ghpc_stage("../../../src/maxtext/configs/tpu/v5p/qwen3_30b_streaming_diloco_cross_region.yml")))
+
+  - id: deploy_mcjax_slice1
+    source: modules/management/kubectl-apply
+    use: [cluster_r2]
+    settings:
+      apply_manifests:
+      - wait_for_rollout: true
+        content: |
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: maxtext-worker-slice-1
+            namespace: default
+          spec:
+            clusterIP: None
+            publishNotReadyAddresses: true
+            selector:
+              job-name: maxtext-worker-slice-1
+            ports:
+            - name: tpu-runtime
+              port: 8471
+              targetPort: 8471
+            - name: sdk-barrier
+              port: 8477
+              targetPort: 8477
+            - name: jax-coord
+              port: 8482
+              targetPort: 8482
+            - name: megascale
+              port: 8080
+              targetPort: 8080
+            - name: megascale-debug
+              port: 8081
+              targetPort: 8081
+      - source: $(ghpc_stage("manifests/mcjax-worker.yaml.tftpl"))
+        wait_for_rollout: false
+        template_vars:
+          slice_id: "1"
+          node_pool_name: "tpu-slice-1"
+          tpu_accelerator: $(vars.tpu_accelerator)
+          slice_topology: $(vars.tpu_topology)
+          image: $(vars.maxtext_image)
+          coordinator_address: "$(vars.mcjax_ilb_ip_r1):8080"
+          gcs_scratch: $(vars.gcs_scratch_location)
+          num_slices: 2
+          nodes_per_slice: $(vars.nodes_per_slice)
+          chips_per_vm: $(vars.chips_per_vm)
+          run_name: $(vars.run_name)
+          steps: $(vars.steps)
+          extra_maxtext_args: $(vars.extra_maxtext_args)
+          maxtext_config_yaml: $(file(ghpc_stage("../../../src/maxtext/configs/tpu/v5p/qwen3_30b_streaming_diloco_cross_region.yml")))

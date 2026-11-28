@@ -1,0 +1,212 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: maxtext-diloco-config-${slice_id}
+  namespace: default
+data:
+  qwen3_30b_streaming_diloco_cross_region.yml: |
+    ${indent(4, maxtext_config_yaml)}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: maxtext-worker-slice-${slice_id}
+  namespace: default
+spec:
+  completionMode: Indexed
+  parallelism: ${nodes_per_slice}
+  completions: ${nodes_per_slice}
+  # Do not retry individual Pods in place. External orchestration must restart both slice Jobs together from a checkpoint.
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        job-name: maxtext-worker-slice-${slice_id}
+    spec:
+      nodeSelector:
+        cloud.google.com/gke-nodepool: ${node_pool_name}
+        cloud.google.com/gke-tpu-accelerator: ${tpu_accelerator}
+        cloud.google.com/gke-tpu-topology: ${slice_topology}
+      tolerations:
+      - key: "google.com/tpu"
+        operator: "Equal"
+        value: "present"
+        effect: "NoSchedule"
+      - key: "cloud.google.com/gke-spot"
+        operator: "Equal"
+        value: "true"
+        effect: "NoSchedule"
+      restartPolicy: Never
+      subdomain: maxtext-worker-slice-${slice_id}
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      volumes:
+      - name: shared-tmp
+        hostPath:
+          path: /tmp
+          type: DirectoryOrCreate
+      - name: worker-tools
+        emptyDir: {}
+      - name: maxtext-config
+        configMap:
+          name: maxtext-diloco-config-${slice_id}
+      initContainers:
+      # Stage static BusyBox tools and resolve slice FQDNs into raw VPC IPv4 addresses.
+      - name: stage-worker-tools
+        image: mirror.gcr.io/library/busybox:1.36.1-musl
+        volumeMounts:
+        - name: worker-tools
+          mountPath: /tools
+        command:
+        - /bin/sh
+        - -eu
+        - -c
+        - |
+          cp /bin/busybox /tools/busybox
+          chmod 755 /tools/busybox
+          ln -sf /tools/busybox /tools/sh
+          ln -sf /tools/busybox /tools/nslookup
+          ln -sf /tools/busybox /tools/awk
+          ln -sf /tools/busybox /tools/sleep
+          cat <<'EOF' > /tools/launch_mcjax.sh
+          #!/tools/sh
+          set -eu
+          export PATH="/tools:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+          if [ -z "$${POD_IP:-}" ]; then
+            echo "[MCJAX] ERROR: POD_IP is empty. Cannot configure McJax worker networking." >&2
+            exit 1
+          fi
+          slice_subdomain="$${SLICE_SUBDOMAIN}"
+          slice_id="$${SLICE_ID}"
+          nodes_per_slice="$${NODES_PER_SLICE}"
+          my_idx="$${TPU_WORKER_ID:-0}"
+          resolved=""
+          attempt=1
+          while [ "$${attempt}" -le 90 ]; do
+            resolved=""
+            all_ok=1
+            idx=0
+            while [ "$${idx}" -lt "$${nodes_per_slice}" ]; do
+              fqdn="$${slice_subdomain}-$${idx}.$${slice_subdomain}.default.svc.cluster.local"
+              ip="$(nslookup -type=a "$${fqdn}" 2>/dev/null | awk '/^Name:/{seen=1; next} seen && /^Address:[[:space:]]*[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/{print $2; exit}')" || true
+              if [ -z "$${ip}" ]; then
+                all_ok=0
+                break
+              fi
+              if [ "$${idx}" = "$${my_idx}" ] && [ -n "$${POD_IP:-}" ] && [ "$${ip}" != "$${POD_IP}" ]; then
+                all_ok=0
+                break
+              fi
+              if [ -z "$${resolved}" ]; then
+                resolved="$${ip}"
+              else
+                resolved="$${resolved},$${ip}"
+              fi
+              idx=$((idx + 1))
+            done
+            if [ "$${all_ok}" -eq 1 ]; then
+              break
+            fi
+            attempt=$((attempt + 1))
+            sleep 2
+          done
+          if [ -z "$${resolved}" ] || [ "$${all_ok:-0}" -ne 1 ]; then
+            echo "[MCJAX] ERROR: Timed out resolving TPU worker IPs for $${slice_subdomain} (attempt $${attempt})." >&2
+            exit 1
+          fi
+          export TPU_WORKER_ID="$${my_idx}"
+          export TPU_WORKER_HOSTNAMES="$${resolved}"
+          # Use Slice 0 Pod 0's direct VPC IP inside Cluster 1 to avoid ILB hairpinning.
+          # Cluster 2 (Slice 1) reaches Pod 0 across regions via the Global-Access ILB VIP.
+          if [ "$${slice_id}" = "0" ]; then
+            export MEGASCALE_COORDINATOR_ADDRESS="$${resolved%%,*}:8080"
+          fi
+          unset TPU_PROCESS_ADDRESSES || true
+          echo "[MCJAX] Slice $${slice_id} worker $${TPU_WORKER_ID} resolved TPU_WORKER_HOSTNAMES=$${TPU_WORKER_HOSTNAMES} MEGASCALE_COORDINATOR_ADDRESS=$${MEGASCALE_COORDINATOR_ADDRESS:-unset} (POD_IP=$${POD_IP:-unset})"
+          exec "$@"
+          EOF
+          chmod 755 /tools/launch_mcjax.sh
+      containers:
+      - name: maxtext-worker
+        image: ${image}
+        securityContext:
+          privileged: true
+        command:
+        - /tools/sh
+        - /tools/launch_mcjax.sh
+        volumeMounts:
+        - name: shared-tmp
+          mountPath: /tmp
+        - name: worker-tools
+          mountPath: /tools
+        - name: maxtext-config
+          mountPath: /etc/maxtext-config
+          readOnly: true
+        ports:
+        - containerPort: 8471
+        - containerPort: 8477
+        - containerPort: 8482
+        - containerPort: 8080
+        - containerPort: 8081
+        env:
+        - name: POD_IP
+          valueFrom:
+            fieldRef:
+              fieldPath: status.podIP
+        - name: TPU_WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.annotations['batch.kubernetes.io/job-completion-index']
+        - name: TPU_WORKER_HOSTNAMES
+          value: "PENDING_DNS_RESOLUTION"
+        - name: SLICE_SUBDOMAIN
+          value: "maxtext-worker-slice-${slice_id}"
+        - name: SLICE_ID
+          value: "${slice_id}"
+        - name: NODES_PER_SLICE
+          value: "${nodes_per_slice}"
+        - name: XCLOUD_ENVIRONMENT
+          value: GCP
+        - name: TPU_MIN_LOG_LEVEL
+          value: "0"
+        - name: TF_CPP_MIN_LOG_LEVEL
+          value: "0"
+        - name: MEGASCALE_GRPC_ENABLE_XOR_TRACER
+          value: "false"
+        - name: MEGASCALE_NUM_SLICES
+          value: "${num_slices}"
+        - name: MEGASCALE_SLICE_ID
+          value: "${slice_id}"
+        - name: MEGASCALE_COORDINATOR_ADDRESS
+          value: "${coordinator_address}"
+        - name: MEGASCALE_PORT
+          value: "8080"
+        - name: LIBTPU_INIT_ARGS
+          value: "--xla_enable_async_all_gather=true --xla_tpu_prefer_async_allgather_to_allreduce=true --xla_tpu_overlap_compute_collective_tc=true --xla_tpu_enable_sparse_core_collective_offload_all_gather=true --xla_tpu_enable_sparse_core_collective_offload_3d_all_gather=true"
+        args:
+        - bash
+        - -euo
+        - pipefail
+        - -c
+        - |
+          echo "[MCJAX] Starting slice $${SLICE_ID} worker $${TPU_WORKER_ID} for ${steps} steps (${num_slices} slices)..."
+          # MaxText skips jax.distributed.initialize() when enable_checkpointing is false.
+          # Enable checkpointing with startup/completion saves off and a high period for short runs;
+          # pass checkpoint_period=49 via extra_maxtext_args for periodic saves on longer Spot runs.
+          python3 -m maxtext.trainers.pre_train.train \
+            /etc/maxtext-config/qwen3_30b_streaming_diloco_cross_region.yml \
+            enable_single_controller=false \
+            num_slices=${num_slices} \
+            dcn_diloco_parallelism=${num_slices} \
+            enable_checkpointing=true \
+            save_checkpoint_on_start=false \
+            save_checkpoint_on_completion=false \
+            checkpoint_period=10000 \
+            jax_distributed_initialization_timeout=1800 \
+            base_output_directory="${gcs_scratch}/runs" \
+            run_name="${run_name}" \
+            steps=${steps} \
+            ${extra_maxtext_args}
+        resources:
+          limits:
+            google.com/tpu: "${chips_per_vm}"
