@@ -280,8 +280,12 @@ class RMSNorm(nnx.Module):
   def __call__(self, x: jnp.ndarray, out_sharding: NamedSharding | None = None) -> jnp.ndarray:
     """Applies layer normalization on the input."""
     x = jnp.asarray(x, jnp.float32)
-    mean2 = jnp.mean(lax.square(x), axis=-1, keepdims=True)
-    y = jnp.asarray(x * lax.rsqrt(mean2 + self.epsilon), self.dtype)
+    # Avoid keepdims=True here and the zero-contraction einsum below outside
+    # explicit sharding: on TPU both produce non-default layouts and extra
+    # layout copies in the forward/backward passes.
+    mean2 = jnp.mean(lax.square(x), axis=-1)
+    rsqrt_eps = jnp.expand_dims(lax.rsqrt(mean2 + self.epsilon), axis=-1)
+    y = jnp.asarray(x * rsqrt_eps, self.dtype)
 
     # out_sharding must be None in auto shard mode
     if self.shard_mode != ShardMode.EXPLICIT:
@@ -348,13 +352,28 @@ class RMSNorm(nnx.Module):
     if self.shard_mode == ShardMode.EXPLICIT:
       effective_scale = align_scale_with_normalized_axis(effective_scale, y)
 
+    # Keep einsum in EXPLICIT shard mode to preserve explicit sharding
+    # propagation and out_sharding.
+    use_einsum = self.shard_mode == ShardMode.EXPLICIT
     if self.scale_offset != 0.0:
-      normed_fp32 = x * lax.rsqrt(mean2 + self.epsilon)
-      y = jnp.einsum("...k,k->...k", normed_fp32, effective_scale, out_sharding=out_sharding)
+      normed_fp32 = x * rsqrt_eps
+      if use_einsum:
+        y = jnp.einsum(
+            "...k,k->...k",
+            normed_fp32,
+            effective_scale,
+            out_sharding=out_sharding,
+        )
+      else:
+        y = normed_fp32 * effective_scale
       return jnp.asarray(y, self.dtype)
 
     effective_scale = jnp.asarray(effective_scale, self.dtype)
-    return jnp.einsum("...k,k->...k", y, effective_scale, out_sharding=out_sharding)
+    if use_einsum:
+      return jnp.einsum(
+          "...k,k->...k", y, effective_scale, out_sharding=out_sharding
+      )
+    return y * effective_scale
 
 
 class GlobalRMSNorm(RMSNorm):
