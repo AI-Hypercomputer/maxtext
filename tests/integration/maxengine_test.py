@@ -254,6 +254,26 @@ class MaxEngineTest(unittest.TestCase):
     for leaf in jax.tree.leaves(result["cache"]):
       self.assertTrue(jnp.all(jnp.isfinite(leaf)), msg=f"non-finite cache leaf, shape={leaf.shape}")
 
+  def test_prefill_multisampling_bulk_insert_nnx(self):
+    """Each sample of a multi-sampling prefill is inserted into its own slot with its first token and log-prob."""
+    num_samples = 2
+    slots = [1, 0]
+    cfg = self._init_nnx_pyconfig(per_device_batch_size=2.0)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+    engine = maxengine.MaxEngine(cfg, jax.devices())
+    params = engine.load_params(params=self._build_nnx_params(cfg, mesh))
+    result, first = engine.prefill_multisampling(
+        params=params,
+        padded_tokens=jnp.array([1, 306, 5360, 0]),
+        true_length=3,
+        num_samples=num_samples,
+    )
+    decode_state = engine.bulk_insert(result, engine.init_decode_state(), slots)
+
+    for i, slot in enumerate(slots):
+      np.testing.assert_array_equal(decode_state["tokens"][slot], first.data[i, :1])
+      np.testing.assert_allclose(decode_state["token_logp"][slot], first.log_prob[i])
+
   def test_prefill_concat_nnx(self):
     """NNX prefill_concat returns one result per packed prompt; logits + cache stay finite."""
     # Two prompts of length 2 packed into one prefill of length max_prefill_predict_length=4.

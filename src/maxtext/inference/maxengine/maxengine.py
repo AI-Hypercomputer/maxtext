@@ -999,7 +999,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
 
     # sampling first tokens
     first_generated_tokens = []
-    token_logps = [] if self.config.return_log_prob else None
+    token_logps = []
     for _ in range(num_samples):
       rng, new_rng = jax.random.split(rng)
       first_generated_token = inference_utils.sampling(
@@ -1012,11 +1012,11 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
       )
       first_generated_tokens.append(first_generated_token)
       if self.config.return_log_prob:
-        p = inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token)
-        token_logps.append(p)  # pytype: disable=attribute-error
+        token_logps.append(inference_utils.log_prob_of_chosen_token(selected_logits, first_generated_token))
+      else:
+        token_logps.append(jnp.zeros(first_generated_token.shape, dtype=jnp.float32))
     first_generated_tokens = jnp.concatenate(first_generated_tokens, axis=0)
-    if self.config.return_log_prob:
-      token_logps = jnp.concatenate(token_logps, axis=0)  # pyrefly: ignore[bad-argument-type]
+    token_logps = jnp.concatenate(token_logps, axis=0)
 
     all_valid = jnp.ones((num_samples, 1), dtype=jnp.int8)
     generated_tokens = jnp.zeros((num_samples, 1), dtype=jnp.int32)
@@ -1043,6 +1043,7 @@ class MaxEngine(_BaseEngine):  # pyrefly: ignore[invalid-inheritance]
         "next_pos": next_pos,
         "generated_tokens": generated_tokens,
         "tokens": first_generated_tokens,
+        "token_logp": token_logps,
     }, result
 
   @functools.partial(
