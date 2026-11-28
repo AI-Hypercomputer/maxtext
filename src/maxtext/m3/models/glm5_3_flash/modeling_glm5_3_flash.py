@@ -27,6 +27,7 @@ from jax.sharding import Mesh
 from jax.typing import DTypeLike
 from maxtext.m3.core import sharding as m3_sharding
 from maxtext.m3.configs import glm5_3_flash_config as glm5_config
+from maxtext.m3.models.glm5_3_flash.glm5_config import Glm5ModelConfig
 import optax
 
 
@@ -2329,6 +2330,8 @@ class Glm5Model(nnx.Module):
       raise TypeError("place_on_devices must be a bool, got" f" {type(place_on_devices).__name__}")
     if rngs is None:
       raise ValueError("rngs must be provided as a non-None nnx.Rngs instance.")
+    if isinstance(config, Glm5ModelConfig):
+      config = config.to_glm5_config()
     if not isinstance(config, glm5_config.Glm5Config) and config.quantization not in (None, ""):
       raise ValueError("Quantization is unsupported for GLM-5.3-Flash:" f" {config.quantization!r}.")
     if quant_mode_str not in (None, "", "train", "serve", "convert"):
@@ -2357,6 +2360,8 @@ def create_glm5_3_flash_model(
     )
   if "remat_policy" in kwargs:
     raise TypeError("remat_policy must be configured via config.remat_policy, not as a" " keyword argument.")
+  if isinstance(config, Glm5ModelConfig):
+    config = config.to_glm5_config()
   if not hasattr(config, "remat_policy"):
     raise AttributeError("config must define 'remat_policy'.")
   remat_policy = config.remat_policy

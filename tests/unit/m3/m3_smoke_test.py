@@ -110,6 +110,7 @@ class M3SmokeTest(absltest.TestCase):
         "base_num_query_heads=4",
         "base_num_kv_heads=2",
         "head_dim=16",
+        "mrope_section=[3,3,2]",
         "vocab_size=151936",
         "num_hidden_layers_for_vit=2",
         "deepstack_visual_indexes_for_vit=[1]",

@@ -66,7 +66,7 @@ MODEL_REGISTRY: dict[str, Callable] = {
     "qwen3-vl-2b": create_qwen3_vl_model,
     "qwen3.8-flash-next": create_qwen3_8_flash_next_model,
     # Debug-only mini variant of qwen3.8-flash-next: same architecture and constructor, shrunk to
-    # 4 layers / 1 cycle (configs/models/qwen3.8-flash-next-mini.yml). Used only by CPU/CI unit tests.
+    # 4 layers / 1 cycle (`Qwen3_8FlashNextConfig.qwen3_8_flash_next_mini`). Used only by CPU/CI unit tests.
     "qwen3.8-flash-next-mini": create_qwen3_8_flash_next_model,
 }
 

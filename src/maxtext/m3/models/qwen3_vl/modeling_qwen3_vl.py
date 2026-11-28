@@ -42,6 +42,13 @@ from maxtext.m3.models.qwen3.modeling_qwen3 import (
     Qwen3MLP,
     norm_kwargs,
 )
+from maxtext.m3.models.qwen3_vl.qwen3_vl_config import Qwen3VLConfig
+
+
+def _jnp_dtype(dtype: Any) -> jnp.dtype:
+  """Converts a `DType` enum, string, or JAX/NumPy dtype to `jnp.dtype`."""
+  return jnp.dtype(getattr(dtype, "value", dtype))
+
 
 # ---------------------------------------------------------------------------
 # Core Pure Linear Layer
@@ -251,16 +258,17 @@ class Qwen3VLVisionPatchEmbed(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
       rngs: Optional[nnx.Rngs] = None,
   ):
-    self.config = config
-    self.patch_size = config.patch_size_for_vit
-    self.temporal_patch_size = config.temporal_patch_size_for_vit
-    self.in_channels = config.num_channels_for_vit
-    self.embed_dim = config.hidden_size_for_vit
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
+    self.patch_size = cfg.vision_patch_size
+    self.temporal_patch_size = cfg.vision_temporal_patch_size
+    self.in_channels = cfg.vision_in_channels
+    self.embed_dim = cfg.vision_hidden_size
 
     kernel_size = (self.temporal_patch_size, self.patch_size, self.patch_size)
 
@@ -380,42 +388,45 @@ class Qwen3VLVisionAttn(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       mesh: Optional[Mesh] = None,
       *,
       rngs: Optional[nnx.Rngs] = None,
   ):
-    self.config = config
-    self.num_heads = config.num_attention_heads_for_vit
-    self.head_dim = config.hidden_size_for_vit // self.num_heads
-    self.hidden_size = config.hidden_size_for_vit
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
+    self.num_heads = cfg.vision_num_heads
+    self.head_dim = cfg.vision_hidden_size // self.num_heads
+    self.hidden_size = cfg.vision_hidden_size
+    vision_dtype = _jnp_dtype(cfg.vision_dtype)
+    param_dtype = _jnp_dtype(cfg.param_dtype)
 
     self.query = DenseGeneral(
         in_features_shape=self.hidden_size,
         out_features_shape=(self.num_heads, self.head_dim),
-        dtype=config.dtype_mm,
-        weight_dtype=config.weight_dtype,
+        dtype=vision_dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
     self.key = DenseGeneral(
         in_features_shape=self.hidden_size,
         out_features_shape=(self.num_heads, self.head_dim),
-        dtype=config.dtype_mm,
-        weight_dtype=config.weight_dtype,
+        dtype=vision_dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
     self.value = DenseGeneral(
         in_features_shape=self.hidden_size,
         out_features_shape=(self.num_heads, self.head_dim),
-        dtype=config.dtype_mm,
-        weight_dtype=config.weight_dtype,
+        dtype=vision_dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
     self.out = DenseGeneral(
         in_features_shape=(self.num_heads, self.head_dim),
         out_features_shape=self.hidden_size,
-        dtype=config.dtype_mm,
-        weight_dtype=config.weight_dtype,
+        dtype=vision_dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
 
@@ -425,16 +436,17 @@ class Qwen3VLVisionAttention(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       mesh: Optional[Mesh] = None,
       *,
       rngs: Optional[nnx.Rngs] = None,
   ):
-    self.config = config
-    self.num_heads = config.num_attention_heads_for_vit
-    self.head_dim = config.hidden_size_for_vit // self.num_heads
-    self.hidden_size = config.hidden_size_for_vit
-    self.attn = Qwen3VLVisionAttn(config, rngs=rngs)
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
+    self.num_heads = cfg.vision_num_heads
+    self.head_dim = cfg.vision_hidden_size // self.num_heads
+    self.hidden_size = cfg.vision_hidden_size
+    self.attn = Qwen3VLVisionAttn(cfg, rngs=rngs)
 
   def __call__(
       self,
@@ -454,8 +466,8 @@ class Qwen3VLVisionAttention(nnx.Module):
         num_frames,
         height,
         width,
-        self.config.spatial_merge_size_for_vit,
-        self.config.rope_theta_for_vit,
+        self.config.vision_spatial_merge_size,
+        self.config.vision_rope_theta,
         valid_grid=valid_grid,
         token_mask=attention_mask,
     )
@@ -464,8 +476,8 @@ class Qwen3VLVisionAttention(nnx.Module):
         num_frames,
         height,
         width,
-        self.config.spatial_merge_size_for_vit,
-        self.config.rope_theta_for_vit,
+        self.config.vision_spatial_merge_size,
+        self.config.vision_rope_theta,
         valid_grid=valid_grid,
         token_mask=attention_mask,
     )
@@ -488,31 +500,34 @@ class Qwen3VLVisionBlock(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       mesh: Optional[Mesh] = None,
       *,
       rngs: Optional[nnx.Rngs] = None,
   ):
-    self.config = config
-    hs = self.config.hidden_size_for_vit
-    inter_dim = self.config.intermediate_size_for_vit
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
+    hs = cfg.vision_hidden_size
+    inter_dim = cfg.vision_intermediate_size
+    vision_dtype = _jnp_dtype(cfg.vision_dtype)
+    param_dtype = _jnp_dtype(cfg.param_dtype)
 
-    self.ln1 = nnx.LayerNorm(num_features=hs, epsilon=config.normalization_layer_epsilon, rngs=rngs)
-    self.ln2 = nnx.LayerNorm(num_features=hs, epsilon=config.normalization_layer_epsilon, rngs=rngs)
-    self.attn = Qwen3VLVisionAttention(config=config, rngs=rngs)
+    self.ln1 = nnx.LayerNorm(num_features=hs, epsilon=cfg.rms_norm_eps, rngs=rngs)
+    self.ln2 = nnx.LayerNorm(num_features=hs, epsilon=cfg.rms_norm_eps, rngs=rngs)
+    self.attn = Qwen3VLVisionAttention(config=cfg, rngs=rngs)
 
     self.mlp = DenseGeneral(
         in_features_shape=hs,
         out_features_shape=inter_dim,
-        dtype=config.dtype_mm,
-        weight_dtype=config.weight_dtype,
+        dtype=vision_dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
     self.mlp_out = DenseGeneral(
         in_features_shape=inter_dim,
         out_features_shape=hs,
-        dtype=config.dtype_mm,
-        weight_dtype=config.weight_dtype,
+        dtype=vision_dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
 
@@ -545,27 +560,28 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       use_postshuffle_norm: bool = False,
       dtype: Any = jnp.float32,
       weight_dtype: Any = jnp.float32,
       rngs: Optional[nnx.Rngs] = None,
   ):
-    self.config = config
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
     self.use_postshuffle_norm = use_postshuffle_norm
     self.dtype = dtype
     self.weight_dtype = weight_dtype
 
-    spatial_merge_size = config.spatial_merge_size_for_vit
-    base_hidden_size = config.hidden_size_for_vit
-    out_hidden_size = config.out_hidden_size_for_vit
+    spatial_merge_size = cfg.vision_spatial_merge_size
+    base_hidden_size = cfg.vision_hidden_size
+    out_hidden_size = cfg.vision_out_hidden_size
 
     self.hidden_size = base_hidden_size * (spatial_merge_size**2)
 
     ln_features = self.hidden_size if use_postshuffle_norm else base_hidden_size
     self.ln_q = nnx.LayerNorm(
         num_features=ln_features,
-        epsilon=config.normalization_layer_epsilon,
+        epsilon=cfg.rms_norm_eps,
         dtype=dtype,
         rngs=rngs,
     )
@@ -586,8 +602,8 @@ class Qwen3VLVisionPatchMerger(nnx.Module):
     )
 
   def __call__(self, hidden: jax.Array) -> jax.Array:
-    spatial_merge_size = self.config.spatial_merge_size_for_vit
-    base_hidden_size = self.config.hidden_size_for_vit
+    spatial_merge_size = self.config.vision_spatial_merge_size
+    base_hidden_size = self.config.vision_hidden_size
     tokens_per_block = spatial_merge_size**2
 
     batch_size = hidden.shape[0]
@@ -614,17 +630,18 @@ class Qwen3VLVisionEncoder(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       mesh: Optional[Mesh] = None,
       *,
       rngs: Optional[nnx.Rngs] = None,
   ):
-    self.config = config
-    self.patch_embed = Qwen3VLVisionPatchEmbed(config=config, rngs=rngs)
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
+    self.patch_embed = Qwen3VLVisionPatchEmbed(config=cfg, rngs=rngs)
 
-    num_pos = config.num_position_embeddings_for_vit
-    hs = config.hidden_size_for_vit
-    self.spatial_merge_size = config.spatial_merge_size_for_vit
+    num_pos = cfg.vision_num_position_embeddings
+    hs = cfg.vision_hidden_size
+    self.spatial_merge_size = cfg.vision_spatial_merge_size
 
     self.pos_embed_interpolate = Qwen3VLVisionPosEmbedInterpolate(
         num_position_embeddings=num_pos,
@@ -633,13 +650,13 @@ class Qwen3VLVisionEncoder(nnx.Module):
         rngs=rngs,
     )
 
-    self.depth = config.num_hidden_layers_for_vit
+    self.depth = cfg.vision_depth
     for i in range(self.depth):
-      setattr(self, f"blocks_{i}", Qwen3VLVisionBlock(config=config, rngs=rngs))
+      setattr(self, f"blocks_{i}", Qwen3VLVisionBlock(config=cfg, rngs=rngs))
 
-    self.deep_idx = tuple(config.deepstack_visual_indexes_for_vit)
+    self.deep_idx = tuple(cfg.deepstack_visual_indexes)
     for i, _ in enumerate(self.deep_idx):
-      setattr(self, f"merger_{i}", Qwen3VLVisionPatchMerger(config=config, use_postshuffle_norm=True, rngs=rngs))
+      setattr(self, f"merger_{i}", Qwen3VLVisionPatchMerger(config=cfg, use_postshuffle_norm=True, rngs=rngs))
 
   def __call__(
       self,
@@ -648,25 +665,25 @@ class Qwen3VLVisionEncoder(nnx.Module):
       video_grid_thw: Optional[Any] = None,
   ):
     batch_size, _, num_frames, height, width = hidden_states.shape
-    num_frames = num_frames // self.config.temporal_patch_size_for_vit
-    height = height // self.config.patch_size_for_vit
-    width = width // self.config.patch_size_for_vit
+    num_frames = num_frames // self.config.vision_temporal_patch_size
+    height = height // self.config.vision_patch_size
+    width = width // self.config.vision_patch_size
     attention_mask = None
     if video_mask is not None:
       mask_patch_elements = (
-          self.config.temporal_patch_size_for_vit * self.config.patch_size_for_vit * self.config.patch_size_for_vit
+          self.config.vision_temporal_patch_size * self.config.vision_patch_size * self.config.vision_patch_size
       )
       attention_mask = video_mask.reshape(batch_size, -1, mask_patch_elements).max(axis=-1).astype(jnp.int32)
     hidden_states = hidden_states.reshape(
         -1,
-        self.config.num_channels_for_vit,
-        self.config.temporal_patch_size_for_vit,
-        self.config.patch_size_for_vit,
-        self.config.patch_size_for_vit,
+        self.config.vision_in_channels,
+        self.config.vision_temporal_patch_size,
+        self.config.vision_patch_size,
+        self.config.vision_patch_size,
     )
 
     x, _ = self.patch_embed(hidden_states)
-    x = x.reshape(batch_size, -1, self.config.hidden_size_for_vit)
+    x = x.reshape(batch_size, -1, self.config.vision_hidden_size)
     pos = self.pos_embed_interpolate(
         num_frames,
         height,
@@ -701,9 +718,10 @@ class Qwen3VLVisionEncoder(nnx.Module):
 class Qwen3VLVisionProjector(nnx.Module):
   """Projection layer converting vision encoder output to model embedding space."""
 
-  def __init__(self, config: Config, *, rngs: Optional[nnx.Rngs] = None):
-    self.config = config
-    self.merger = Qwen3VLVisionPatchMerger(config=config, use_postshuffle_norm=False, rngs=rngs)
+  def __init__(self, config: Config | Qwen3VLConfig, *, rngs: Optional[nnx.Rngs] = None):
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
+    self.merger = Qwen3VLVisionPatchMerger(config=cfg, use_postshuffle_norm=False, rngs=rngs)
 
   def __call__(self, hidden_states: jax.Array) -> jax.Array:
     return self.merger(hidden_states)
@@ -714,14 +732,15 @@ class Qwen3VLVisionTower(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       mesh: Optional[Mesh] = None,
       *,
       rngs: Optional[nnx.Rngs] = None,
   ):
-    self.config = config
-    self.Qwen3VLVisionEncoder_0 = Qwen3VLVisionEncoder(config=config, rngs=rngs)
-    self.Qwen3VLVisionProjector_0 = Qwen3VLVisionProjector(config=config, rngs=rngs)
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
+    self.Qwen3VLVisionEncoder_0 = Qwen3VLVisionEncoder(config=cfg, rngs=rngs)
+    self.Qwen3VLVisionProjector_0 = Qwen3VLVisionProjector(config=cfg, rngs=rngs)
 
   def __call__(
       self,
@@ -748,53 +767,56 @@ class Qwen3VLAttention(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
   ):
-    self.config = config
-    self.num_query_heads = config.num_query_heads
-    self.num_kv_heads = config.num_kv_heads
-    self.head_dim = config.head_dim
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
+    self.num_query_heads = cfg.num_attention_heads
+    self.num_kv_heads = cfg.num_key_value_heads
+    self.head_dim = cfg.head_dim
+    dtype = _jnp_dtype(cfg.compute_dtype)
+    param_dtype = _jnp_dtype(cfg.param_dtype)
 
     self.query = DenseGeneral(
-        in_features_shape=config.emb_dim,
+        in_features_shape=cfg.hidden_size,
         out_features_shape=(self.num_query_heads, self.head_dim),
         use_bias=False,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
+        dtype=dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
     self.key = DenseGeneral(
-        in_features_shape=config.emb_dim,
+        in_features_shape=cfg.hidden_size,
         out_features_shape=(self.num_kv_heads, self.head_dim),
         use_bias=False,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
+        dtype=dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
     self.value = DenseGeneral(
-        in_features_shape=config.emb_dim,
+        in_features_shape=cfg.hidden_size,
         out_features_shape=(self.num_kv_heads, self.head_dim),
         use_bias=False,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
+        dtype=dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
     self.out = DenseGeneral(
         in_features_shape=(self.num_query_heads, self.head_dim),
-        out_features_shape=config.emb_dim,
+        out_features_shape=cfg.hidden_size,
         use_bias=False,
-        dtype=config.dtype,
-        weight_dtype=config.weight_dtype,
+        dtype=dtype,
+        weight_dtype=param_dtype,
         rngs=rngs,
     )
 
     norm_kw = {
-        "epsilon": config.normalization_layer_epsilon,
-        "dtype": config.dtype,
-        "param_dtype": config.weight_dtype,
+        "epsilon": cfg.rms_norm_eps,
+        "dtype": dtype,
+        "param_dtype": param_dtype,
         "rngs": rngs,
     }
     self.query_norm = nnx.RMSNorm(num_features=self.head_dim, **norm_kw)
@@ -816,10 +838,12 @@ class Qwen3VLAttention(nnx.Module):
     key = self.key_norm(key)
 
     if decoder_positions is not None:
-      mrope_section = getattr(self.config, "mrope_section", (24, 20, 20))
-      rope_theta = getattr(self.config, "rope_max_timescale", 5000000.0)
-      query = apply_mrope(query, decoder_positions, mrope_section=mrope_section, rope_theta=rope_theta)
-      key = apply_mrope(key, decoder_positions, mrope_section=mrope_section, rope_theta=rope_theta)
+      query = apply_mrope(
+          query, decoder_positions, mrope_section=self.config.mrope_section, rope_theta=self.config.rope_theta
+      )
+      key = apply_mrope(
+          key, decoder_positions, mrope_section=self.config.mrope_section, rope_theta=self.config.rope_theta
+      )
 
     query = query * (self.head_dim**-0.5)
 
@@ -843,23 +867,25 @@ class Qwen3VLDecoderLayer(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
       sharding: Optional[Sharding] = None,
   ):
-    self.config = config
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
+    self.dtype = _jnp_dtype(cfg.compute_dtype)
     s = sharding or DefaultSharding()
     self.pre_self_attention_layer_norm = nnx.RMSNorm(
-        num_features=config.emb_dim, **norm_kwargs(config, s, "pre_self_attention_layer_norm", rngs)
+        num_features=cfg.hidden_size, **norm_kwargs(cfg, s, "pre_self_attention_layer_norm", rngs)
     )
     self.post_self_attention_layer_norm = nnx.RMSNorm(
-        num_features=config.emb_dim, **norm_kwargs(config, s, "post_self_attention_layer_norm", rngs)
+        num_features=cfg.hidden_size, **norm_kwargs(cfg, s, "post_self_attention_layer_norm", rngs)
     )
     # The attention is hand-rolled (`DenseGeneral`) and carries no sharding yet; the shared MLP does.
-    self.self_attention = Qwen3VLAttention(config, rngs=rngs)
-    self.mlp = Qwen3MLP(config, rngs=rngs, sharding=s)
+    self.self_attention = Qwen3VLAttention(cfg, rngs=rngs)
+    self.mlp = Qwen3MLP(cfg, rngs=rngs, sharding=s)
 
   def __call__(
       self,
@@ -876,11 +902,11 @@ class Qwen3VLDecoderLayer(nnx.Module):
         decoder_segment_ids=decoder_segment_ids,
         deterministic=deterministic,
     )
-    x = (inputs + attn_out).astype(self.config.dtype)
+    x = (inputs + attn_out).astype(self.dtype)
 
     normed_mlp_in = self.post_self_attention_layer_norm(x)
     mlp_out = self.mlp(normed_mlp_in)
-    output = (x + mlp_out).astype(self.config.dtype)
+    output = (x + mlp_out).astype(self.dtype)
     return output
 
 
@@ -898,13 +924,14 @@ class Qwen3VLDecoder(Qwen3Decoder):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
       sharding: Optional[Sharding] = None,
   ):
-    super().__init__(config, mesh, rngs=rngs, layer_cls=Qwen3VLDecoderLayer, sharding=sharding)
+    cfg = Qwen3VLConfig.from_config(config)
+    super().__init__(cfg, mesh, rngs=rngs, layer_cls=Qwen3VLDecoderLayer, sharding=sharding)
 
   def __call__(
       self,
@@ -993,7 +1020,7 @@ class Qwen3VLModel(nnx.Module):
 
   def __init__(
       self,
-      config: Config,
+      config: Config | Qwen3VLConfig,
       mesh: Optional[Mesh] = None,
       *,
       rngs: nnx.Rngs,
@@ -1001,29 +1028,28 @@ class Qwen3VLModel(nnx.Module):
       **kwargs,
   ):
     # DeepStack injects visual features between individual decoder layers.
-    if config.scan_layers:
+    if getattr(config, "scan_layers", False):
       raise ValueError("m3 Qwen3-VL does not support layer scanning. Set scan_layers=false.")
     check_construction_mesh()
-    self.config = config
+    cfg = Qwen3VLConfig.from_config(config)
+    self.config = cfg
     self.mesh = mesh
     self.sharding = sharding or DefaultSharding()
 
     # 1. Vision Tower matching checkpoint parameter hierarchy
-    self.vision_encoder = (
-        Qwen3VLVisionTower(config=config, rngs=rngs) if getattr(config, "use_multimodal", False) else None
-    )
+    self.vision_encoder = Qwen3VLVisionTower(config=cfg, rngs=rngs) if cfg.use_multimodal else None
 
     # 2. Text LLM Token Embedder & Decoder
     self.token_embedder = nnx.Embed(
-        num_embeddings=config.vocab_size,
-        features=config.emb_dim,
-        dtype=config.dtype,
-        param_dtype=config.weight_dtype,
+        num_embeddings=cfg.vocab_size,
+        features=cfg.hidden_size,
+        dtype=_jnp_dtype(cfg.compute_dtype),
+        param_dtype=_jnp_dtype(cfg.param_dtype),
         embedding_metadata=param_metadata(self.sharding, "token_embedder", ("vocab", "embed")),
         rngs=rngs,
     )
     self.decoder = Qwen3VLDecoder(
-        config=config,
+        config=cfg,
         rngs=rngs,
         sharding=self.sharding,
     )
@@ -1054,7 +1080,7 @@ class Qwen3VLModel(nnx.Module):
     image_embeddings = None
     deepstack_feats = None
 
-    if getattr(self.config, "use_multimodal", False) and encoder_images is not None and self.vision_encoder is not None:
+    if self.config.use_multimodal and encoder_images is not None and self.vision_encoder is not None:
       image_embeddings, deepstack_feats = self.vision_encoder(
           input_images=encoder_images,
           input_masks=encoder_image_masks,
@@ -1072,9 +1098,9 @@ class Qwen3VLModel(nnx.Module):
     if image_embeddings is not None:
       feature_mask = None
       if encoder_image_masks is not None:
-        patch_elements = self.config.temporal_patch_size_for_vit * self.config.patch_size_for_vit**2
+        patch_elements = self.config.vision_temporal_patch_size * self.config.vision_patch_size**2
         patch_mask = encoder_image_masks.reshape(image_embeddings.shape[0], -1, patch_elements).any(axis=-1)
-        feature_mask = patch_mask.reshape(image_embeddings.shape[0], -1, self.config.spatial_merge_size_for_vit**2).any(
+        feature_mask = patch_mask.reshape(image_embeddings.shape[0], -1, self.config.vision_spatial_merge_size**2).any(
             axis=-1
         )
       multimodal_input = MultimodalInput(
@@ -1096,7 +1122,7 @@ class Qwen3VLModel(nnx.Module):
 
 
 def create_qwen3_vl_model(
-    config: Config,
+    config: Config | Qwen3VLConfig,
     mesh: Optional[Mesh] = None,
     *,
     rngs: Optional[nnx.Rngs] = None,

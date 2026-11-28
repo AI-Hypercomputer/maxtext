@@ -41,6 +41,7 @@ import jax
 import jax.numpy as jnp
 from maxtext.kernels.tokamax_splash_attention import splash_attention_kernel as tokamax_splash_kernel
 from maxtext.kernels.tokamax_splash_attention import splash_attention_mask as tokamax_splash_mask
+from maxtext.m3.models.qwen3_8_flash_next.qwen3_8_config import Qwen3_8FlashNextConfig
 import tokamax
 
 
@@ -1556,12 +1557,13 @@ class Qwen3_8PLELayer(nnx.Module):
 
 def build_ple_layer(config: Any, layer_idx: int = 1, *, rngs: nnx.Rngs) -> Qwen3_8PLELayer | None:
   """Instantiates a Qwen3_8PLELayer if configured at layer_idx, else None."""
-  if not (bool(config.use_ple_layer) and layer_idx == int(config.ple_layer_id)):
+  c = Qwen3_8FlashNextConfig.from_config(config)
+  if not (c.use_ple_layer and layer_idx == c.ple_layer_id):
     return None
-  c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
+  dt, wdt = jnp.dtype(c.compute_dtype.value), jnp.dtype(c.param_dtype.value)
   return Qwen3_8PLELayer(
-      eos_token_id=int(c.ple_eos_token_id),
-      emb_dim=int(c.emb_dim),
+      eos_token_id=int(c.eos_token_id),
+      emb_dim=int(c.hidden_size),
       hc_count=int(c.hc_count),
       vocab_size=int(c.vocab_size),
       ple_embed_dim=int(c.ple_embed_dim),
@@ -1571,7 +1573,7 @@ def build_ple_layer(config: Any, layer_idx: int = 1, *, rngs: nnx.Rngs) -> Qwen3
       make_ngram_vocab_size_divisible_by=int(c.make_ngram_vocab_size_divisible_by),
       seed=int(c.ple_seed),
       ple_conv_kernel_size=int(c.ple_conv_kernel_size),
-      eps=float(c.normalization_layer_epsilon),
+      eps=float(c.rms_norm_eps),
       dtype=dt,
       weight_dtype=wdt,
       rngs=rngs,
@@ -1582,51 +1584,52 @@ class Qwen3_8DecoderLayer(nnx.Module):
   """Single decoder layer with Hyper-Connection residuals and MoE."""
 
   def __init__(self, config: Any, layer_idx: int, *, include_ple: bool = True, rngs: nnx.Rngs):
-    c, emb, dt, wdt = config, int(config.emb_dim), jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
-    ckw = {"eps": float(c.normalization_layer_epsilon), "dtype": dt, "weight_dtype": wdt, "rngs": rngs}
+    c = Qwen3_8FlashNextConfig.from_config(config)
+    emb, dt, wdt = int(c.hidden_size), jnp.dtype(c.compute_dtype.value), jnp.dtype(c.param_dtype.value)
+    ckw = {"eps": float(c.rms_norm_eps), "dtype": dt, "weight_dtype": wdt, "rngs": rngs}
     hc_kw = {"emb_dim": emb, "hc_count": int(c.hc_count), "hc_lowrank": int(c.hc_lowrank), **ckw}
-    cyc = int(c.inhomogeneous_layer_cycle_interval)
+    cyc = int(c.full_attention_interval)
     self.layer_type = "linear_attention" if (layer_idx % cyc) != (cyc - 1) else "full_attention"
     self.attn_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
     if self.layer_type == "linear_attention":
       self.linear_attn = Qwen3_8GatedDeltaNet(
           emb_dim=emb,
-          num_k_heads=int(c.gdn_num_key_heads),
-          num_v_heads=int(c.gdn_num_value_heads),
+          num_k_heads=int(c.linear_num_key_heads),
+          num_v_heads=int(c.linear_num_value_heads),
           **ckw,
-          head_k_dim=int(c.gdn_key_head_dim),
-          head_v_dim=int(c.gdn_value_head_dim),
+          head_k_dim=int(c.linear_key_head_dim),
+          head_v_dim=int(c.linear_value_head_dim),
           chunk_size=int(c.gdn_chunk_size),
-          conv_kernel_size=int(c.gdn_conv_kernel_dim),
+          conv_kernel_size=int(c.linear_conv_kernel_dim),
           output_gate_activation=str(c.gdn_output_gate_activation),
           chunk_inverse=str(c.gdn_chunk_inverse),
       )
     else:
       self.self_attn = Qwen3_8SparseAttention(
           emb_dim=emb,
-          num_query_heads=int(c.num_query_heads),
-          num_kv_heads=int(c.num_kv_heads),
+          num_query_heads=int(c.num_attention_heads),
+          num_kv_heads=int(c.num_key_value_heads),
           head_dim=int(c.head_dim),
           partial_rotary_factor=float(c.partial_rotary_factor),
-          rope_theta=float(c.rope_max_timescale),
+          rope_theta=float(c.rope_theta),
           **ckw,
           mrope_section=tuple(c.mrope_section),
-          index_n_heads=int(c.index_n_heads),
-          index_kv_heads=int(c.index_kv_heads),
-          index_head_dim=int(c.index_head_dim),
-          token_budget=int(c.index_select_budget),
-          compress_ratio=int(c.index_select_block_size),
+          index_n_heads=int(c.indexer_n_heads),
+          index_kv_heads=int(c.indexer_kv_heads),
+          index_head_dim=int(c.indexer_head_dim),
+          token_budget=int(c.indexer_budget),
+          compress_ratio=int(c.indexer_compress_ratio),
           indexer_mask_mode=str(c.qsa_indexer_mask),
           attention_kernel=str(c.qsa_attention_kernel),
       )
     self.mlp_hyper_connection = Qwen3_8GatedResidual(use_combine=True, **hc_kw)
-    use_tokamax_gmm = bool(getattr(c, "sparse_matmul", False) and getattr(c, "use_tokamax_gmm", False))
+    use_tokamax_gmm = bool(getattr(config, "sparse_matmul", False) and getattr(config, "use_tokamax_gmm", False))
     self.mlp = Qwen3_8SparseMoeBlock(
         emb_dim=emb,
-        shared_expert_intermediate_size=int(c.mlp_dim),
-        moe_mlp_dim=int(c.moe_mlp_dim),
+        shared_expert_intermediate_size=int(c.shared_expert_intermediate_size),
+        moe_mlp_dim=int(c.moe_intermediate_size),
         routed_scaling_factor=float(c.routed_scaling_factor),
-        num_experts=int(c.num_experts),
+        num_experts=int(c.n_routed_experts),
         rngs=rngs,
         num_experts_per_tok=int(c.num_experts_per_tok),
         norm_topk_prob=bool(c.norm_topk_prob),
@@ -1680,15 +1683,13 @@ class Qwen3_8CycleBlock(nnx.Module):
 
 def create_scanned_cycles(config: Any, num_cycles: int, *, rngs: nnx.Rngs) -> Qwen3_8CycleBlock:
   """Creates scanned cycle block with stacked parameters along cycle axis."""
-  if int(config.inhomogeneous_layer_cycle_interval) != 4:
-    raise ValueError(
-        f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
-        f"{config.inhomogeneous_layer_cycle_interval}."
-    )
-  if int(config.num_decoder_layers) % 4 != 0:
-    raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {config.num_decoder_layers}.")
-  if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
-    raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
+  c = Qwen3_8FlashNextConfig.from_config(config)
+  if int(c.full_attention_interval) != 4:
+    raise ValueError(f"Scanned cycles require full_attention_interval == 4, got {c.full_attention_interval}.")
+  if int(c.num_hidden_layers) % 4 != 0:
+    raise ValueError(f"Scanned cycles require num_hidden_layers to be a multiple of 4, got {c.num_hidden_layers}.")
+  if c.use_ple_layer and int(c.ple_layer_id) != 1:
+    raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {c.ple_layer_id}.")
   sp = [nnx.split(Qwen3_8CycleBlock(config, rngs=rngs), nnx.Param, ...) for _ in range(num_cycles)]
   return nnx.merge(sp[0][0], *(jax.tree.map(lambda *x: jnp.stack(x, 0), *(s[i] for s in sp)) for i in (1, 2)))
 
@@ -1775,15 +1776,16 @@ class Qwen3_8MTPBlock(nnx.Module):
   """Single-layer MTP draft block fusing next-token embeddings and HC streams."""
 
   def __init__(self, config: Any, *, rngs: nnx.Rngs):
-    self.config, self.emb_dim = config, int(config.emb_dim)
-    self.hc_count, self.hc_lowrank = int(config.hc_count), int(config.hc_lowrank)
-    dt, wdt, eps = jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype), float(config.normalization_layer_epsilon)
+    c = Qwen3_8FlashNextConfig.from_config(config)
+    self.config, self.emb_dim = c, int(c.hidden_size)
+    self.hc_count, self.hc_lowrank = int(c.hc_count), int(c.hc_lowrank)
+    dt, wdt, eps = jnp.dtype(c.compute_dtype.value), jnp.dtype(c.param_dtype.value), float(c.rms_norm_eps)
     self.pre_fc_norm_embedding = Qwen3_8RMSNorm(self.emb_dim, eps=eps, rngs=rngs)
     self.pre_fc_norm_hidden = Qwen3_8RMSNorm(self.hc_count * self.emb_dim, eps=eps, rngs=rngs)
     l_kw = {"use_bias": False, "dtype": dt, "param_dtype": wdt, "rngs": rngs}
     self.fc_embedding = nnx.Linear(self.emb_dim, self.emb_dim, **l_kw)
     self.fc_hidden = nnx.Linear(self.emb_dim, self.emb_dim, **l_kw)
-    cyc = int(config.inhomogeneous_layer_cycle_interval)
+    cyc = int(c.full_attention_interval)
     self.layers_0 = Qwen3_8DecoderLayer(config, layer_idx=cyc - 1, include_ple=False, rngs=rngs)
     self.hyper_connection_mixer = Qwen3_8GatedResidual(
         emb_dim=self.emb_dim,
@@ -1919,9 +1921,14 @@ def compute_total_loss(
 ) -> tuple[jax.Array, dict[str, jax.Array]]:
   """Computes primary CE loss, router load balancing loss, and optional MTP loss."""
   if router_aux_coeff is None:
-    router_aux_coeff = getattr(model.config, "load_balance_loss_weight", None)
+    router_aux_coeff = getattr(model.config, "router_aux_loss_coef", None)
+    if router_aux_coeff is None:
+      router_aux_coeff = getattr(model.config, "load_balance_loss_weight", None)
   if router_aux_coeff is None:
-    raise ValueError("router_aux_coeff must be specified or present in model.config.load_balance_loss_weight.")
+    raise ValueError(
+        "router_aux_coeff must be specified or present in model.config.router_aux_loss_coef "
+        "(or load_balance_loss_weight)."
+    )
   router_aux_coeff = float(router_aux_coeff)
 
   run_mtp, need_aux = use_mtp and (model.mtp is not None), router_aux_coeff > 0.0
@@ -1949,10 +1956,13 @@ def compute_total_loss(
       mtp_loss = cross_entropy_loss(mtp_logits[:, :-1, :], target_tokens[:, 1:], mask=m)
       mtp_aux_mask = jnp.pad(m, ((0, 0), (0, 1)))
 
+  n_experts = getattr(model.config, "n_routed_experts", None)
+  if n_experts is None:
+    n_experts = model.config.num_experts
   router_loss = (
       router_load_balancing_loss(
           aux,
-          int(model.config.num_experts),
+          int(n_experts),
           mask=target_mask,
           mtp_mask=mtp_aux_mask,
       )
@@ -1999,39 +2009,38 @@ class Qwen3_8Decoder(nnx.Module):
   """Decoder stack with token embedding, 4-stream residual, and final mixer."""
 
   def __init__(self, config: Any, *, rngs: nnx.Rngs):
-    c, dt, wdt = config, jnp.dtype(config.dtype), jnp.dtype(config.weight_dtype)
-    self.emb_dim, self.vocab_size, self.eos_token_id = int(c.emb_dim), int(c.vocab_size), int(c.ple_eos_token_id)
-    self.num_layers, self.hc_count, self.scan_layers = int(c.num_decoder_layers), int(c.hc_count), bool(c.scan_layers)
-    self.remat = str(getattr(c, "remat_policy", "none")) not in (
+    c = Qwen3_8FlashNextConfig.from_config(config)
+    dt, wdt = jnp.dtype(c.compute_dtype.value), jnp.dtype(c.param_dtype.value)
+    self.emb_dim, self.vocab_size, self.eos_token_id = int(c.hidden_size), int(c.vocab_size), int(c.eos_token_id)
+    self.num_layers, self.hc_count = int(c.num_hidden_layers), int(c.hc_count)
+    self.scan_layers = bool(getattr(config, "scan_layers", False))
+    self.remat = str(getattr(config, "remat_policy", "none")) not in (
         "none",
         "",
         "None",
     )
     self.dtype, self.weight_dtype = dt, wdt
     self.token_embedder = nnx.Embed(self.vocab_size, self.emb_dim, dtype=dt, param_dtype=wdt, rngs=rngs)
-    self.ple_layer_id = int(c.ple_layer_id) if bool(c.use_ple_layer) else None
+    self.ple_layer_id = int(c.ple_layer_id) if c.use_ple_layer else None
     if self.scan_layers:
-      if int(config.inhomogeneous_layer_cycle_interval) != 4:
-        raise ValueError(
-            f"Scanned cycles require inhomogeneous_layer_cycle_interval == 4, got "
-            f"{config.inhomogeneous_layer_cycle_interval}."
-        )
+      if int(c.full_attention_interval) != 4:
+        raise ValueError(f"Scanned cycles require full_attention_interval == 4, got {c.full_attention_interval}.")
       if self.num_layers % 4 != 0:
-        raise ValueError(f"Scanned cycles require num_decoder_layers to be a multiple of 4, got {self.num_layers}.")
-      if bool(config.use_ple_layer) and int(config.ple_layer_id) != 1:
-        raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {config.ple_layer_id}.")
+        raise ValueError(f"Scanned cycles require num_hidden_layers to be a multiple of 4, got {self.num_layers}.")
+      if c.use_ple_layer and int(c.ple_layer_id) != 1:
+        raise ValueError(f"Scanned cycles only support ple_layer_id == 1, got {c.ple_layer_id}.")
       self.num_cycles = self.num_layers // 4
       self.cycles = create_scanned_cycles(config, self.num_cycles, rngs=rngs)
-      self.ple = build_ple_layer(config, rngs=rngs)
+      self.ple = build_ple_layer(c, rngs=rngs)
     else:
       for i in range(self.num_layers):
         setattr(self, f"layers_{i}", Qwen3_8DecoderLayer(config, i, include_ple=True, rngs=rngs))
     self.hyper_connection_mixer = Qwen3_8GatedResidual(
         emb_dim=self.emb_dim,
         hc_count=self.hc_count,
-        hc_lowrank=int(config.hc_lowrank),
+        hc_lowrank=int(c.hc_lowrank),
         use_combine=False,
-        eps=float(config.normalization_layer_epsilon),
+        eps=float(c.rms_norm_eps),
         dtype=self.dtype,
         weight_dtype=self.weight_dtype,
         rngs=rngs,
@@ -2085,7 +2094,9 @@ class Qwen3_8FlashNextModel(nnx.Module):
   """Top-level Qwen3.8-Flash-Next model with decoder and lm_head."""
 
   def __init__(self, config: Any, mesh: Any = None, *, quant_mode: str = "train", rngs: nnx.Rngs):
-    self.config, self.mesh, self.quant_mode, self.decoder = config, mesh, quant_mode, Qwen3_8Decoder(config, rngs=rngs)
+    cfg = Qwen3_8FlashNextConfig.from_config(config)
+    self.config, self.mesh, self.quant_mode = config, mesh, quant_mode
+    self.decoder = Qwen3_8Decoder(config, rngs=rngs)
     self.lm_head = nnx.Linear(
         self.decoder.emb_dim,
         self.decoder.vocab_size,
@@ -2094,9 +2105,13 @@ class Qwen3_8FlashNextModel(nnx.Module):
         param_dtype=self.decoder.weight_dtype,
         rngs=rngs,
     )
-    mtp_layers = int(getattr(config, "mtp_num_layers", 0))
+    mtp_layers = (
+        int(cfg.num_nextn_predict_layers)
+        if isinstance(config, Qwen3_8FlashNextConfig) or hasattr(config, "num_nextn_predict_layers")
+        else int(getattr(config, "mtp_num_layers", 0))
+    )
     if mtp_layers not in (0, 1):
-      raise ValueError(f"mtp_num_layers must be 0 or 1, got {mtp_layers}.")
+      raise ValueError(f"num_nextn_predict_layers must be 0 or 1, got {mtp_layers}.")
     self.mtp = Qwen3_8MTPBlock(config, rngs=rngs) if mtp_layers > 0 else None
 
   def __call__(

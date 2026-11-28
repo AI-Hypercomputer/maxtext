@@ -47,15 +47,16 @@ _GRANITEMOE_ONLY_DEFAULTS: dict[str, Any] = {
 
 
 def _resolve_jnp_dtype(dt: Any) -> jnp.dtype:
-  """Resolves a string, NumPy dtype, or JAX dtype into a `jnp.dtype`."""
+  """Resolves a string, `DType` enum, NumPy dtype, or JAX dtype into a `jnp.dtype`."""
   if isinstance(dt, jnp.dtype):
     return dt
   if isinstance(dt, np.dtype):
     return jnp.dtype(dt)
   if isinstance(dt, str):
-    if hasattr(jnp, dt):
-      return jnp.dtype(getattr(jnp, dt))
-    return jnp.dtype(dt)
+    name = getattr(dt, "value", dt)
+    if hasattr(jnp, name):
+      return jnp.dtype(getattr(jnp, name))
+    return jnp.dtype(name)
   return jnp.dtype(dt)
 
 
@@ -150,8 +151,8 @@ class GraniteMoeConfig:
         return default
       raise KeyError(f"Missing required GraniteMoe config field {primary!r} (checked {(primary, *fallbacks)}).")
 
-    dtype_val = _get("dtype", "activations_dtype", default="float32")
-    weight_dtype_val = _get("weight_dtype", "weights_dtype", default="float32")
+    dtype_val = _get("dtype", "compute_dtype", "activations_dtype", default="float32")
+    weight_dtype_val = _get("weight_dtype", "param_dtype", "weights_dtype", default="float32")
     remat_val = _get("remat_policy", default="none")
     if remat_val is None or remat_val is False:
       remat_val = "none"

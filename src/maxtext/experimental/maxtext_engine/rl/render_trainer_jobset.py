@@ -410,6 +410,11 @@ def _is_moe_model(model_name: str, hp: resolve_config.DistHyperParameters) -> bo
     with open(yml, encoding="utf-8") as f:
       data = yaml.safe_load(f) or {}
     return int(data.get("num_experts") or 1) > 1
+  from maxtext.m3.models import registry as m3_registry  # pylint: disable=import-outside-toplevel
+
+  m3_model_dict = m3_registry.get_pyconfig_model_dict(model_name)
+  if m3_model_dict is not None:
+    return int(m3_model_dict.get("num_experts") or 1) > 1
   return hp.mesh_axes("actor_model_config")["expert"] > 1 or bool(
       hp.config_mapping("vllm_config")["return_routed_experts"]
   )
