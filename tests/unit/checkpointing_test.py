@@ -14,6 +14,7 @@
 
 """Unit tests for the checkpointing components."""
 
+import concurrent.futures
 import json
 import os
 from typing import Any
@@ -708,12 +709,11 @@ class LoadDynamicTest(parameterized.TestCase):
   ):
     mock_fs_instance = mock_hf_fs.return_value
     mock_fs_instance.glob.return_value = ["repo/meta-llama/model.safetensors"]
-    mock_fs_instance.exists.return_value = True  # The repo has a config.json, already in the cache.
+    mock_fs_instance.exists.return_value = True  # The repo has a config.json, not yet in the GCS cache.
 
     mock_client_instance = mock_storage_client.return_value
-    blobs = [mock.MagicMock(), mock.MagicMock()]
+    blobs = [mock.MagicMock()]
     blobs[0].name = "hf_cache/repo_meta-llama/model.safetensors"
-    blobs[1].name = "hf_cache/repo_meta-llama/config.json"
     mock_client_instance.list_blobs.return_value = blobs
 
     mock_load_sharded.return_value = {}
@@ -730,17 +730,29 @@ class LoadDynamicTest(parameterized.TestCase):
         self.safetensors_dynamic_streaming = streaming
 
     config = MockConfig()
+    done_future = concurrent.futures.Future()
+    done_future.set_result(None)
 
     path = "repo/meta-llama"
     # The cached config.json is in a GCS bucket that doesn't exist; it has no quantization_config.
-    with mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None) as mock_qc:
+    with (
+        mock.patch.object(load_dynamic, "_checkpoint_quantization_config", return_value=None) as mock_qc,
+        mock.patch.object(load_dynamic.concurrent.futures, "ProcessPoolExecutor") as mock_pool,
+    ):
+      mock_submit = mock_pool.return_value.__enter__.return_value.submit
+      mock_submit.return_value = done_future
       dummy_ret_val, loaded_vars = load_dynamic.load_safetensors_dynamic_state(path, {}, config)
-    # Only the streaming loader copies config.json to the cache and reads its quantization_config.
+    # Both modes cache config.json (for on-the-fly FP8 block-size resolution); only streaming overrides mappings with it.
     cache_dir = "gs://dummy-bucket/hf_cache/repo_meta-llama"
     mock_qc.assert_called_once_with(cache_dir if streaming else None)
-    self.assertEqual(mock_fs_instance.exists.called, streaming)
+    mock_fs_instance.exists.assert_called_once_with("repo/meta-llama/config.json")
+    mock_submit.assert_called_once_with(
+        load_dynamic.build_gcs_cache_worker, "repo/meta-llama/config.json", cache_dir, "dummy_token"
+    )
     (mock_load_streaming if streaming else mock_load_sharded).assert_called_once()
     self.assertEqual((mock_load_streaming if streaming else mock_load_sharded).call_args.args[0], cache_dir)
+    if not streaming:
+      self.assertEqual(mock_transform.call_args.kwargs.get("ckpt_dir"), cache_dir)
 
     self.assertIsNone(dummy_ret_val)
     self.assertEqual(loaded_vars, {"params": {}})

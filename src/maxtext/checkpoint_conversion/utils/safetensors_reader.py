@@ -50,11 +50,13 @@ Once Orbax's loader fixes these, `hf_streaming_load` can switch back to it.
 
 import collections
 import concurrent.futures
+import contextlib
 import dataclasses
 import functools
 import json
 import math
 import os
+import threading
 import time
 from typing import Any, Callable
 
@@ -100,6 +102,39 @@ _DTYPES = {
     "F8_E5M2": jnp.float8_e5m2,
     "F8_E8M0": jnp.float8_e8m0fnu,  # power-of-two block scales (e.g. DeepSeek-V4.1 `.scale` tensors)
 }
+
+_gcs_read_ahead_lock = threading.Lock()
+_gcs_read_ahead_depth = 0
+_gcs_saved_block_size: int | None = None
+
+
+@contextlib.contextmanager
+def no_gcs_read_ahead():
+  """Makes gcsfs read only the requested bytes of a `gs://` file within this context.
+
+  `epath`'s `gs://` backend (`gcsfs`) defaults to reading `default_block_size` (5 MiB) ahead per
+  opened file. Both Orbax and `SafetensorsReader` issue explicit ranged reads (and background
+  prefetch threads may overlap), so a lock-protected depth counter disables read-ahead across
+  concurrent readers and restores `default_block_size` once the last reader exits.
+  """
+  global _gcs_read_ahead_depth, _gcs_saved_block_size
+  try:
+    import gcsfs  # pylint: disable=import-outside-toplevel
+  except ImportError:
+    yield
+    return
+  with _gcs_read_ahead_lock:
+    if _gcs_read_ahead_depth == 0:
+      _gcs_saved_block_size = gcsfs.GCSFileSystem.default_block_size
+      gcsfs.GCSFileSystem.default_block_size = 0
+    _gcs_read_ahead_depth += 1
+  try:
+    yield
+  finally:
+    with _gcs_read_ahead_lock:
+      _gcs_read_ahead_depth -= 1
+      if _gcs_read_ahead_depth == 0:
+        gcsfs.GCSFileSystem.default_block_size = _gcs_saved_block_size
 
 
 @dataclasses.dataclass(frozen=True)
@@ -277,7 +312,9 @@ class SafetensorsReader:
           f" {chunk_bytes >> 20} MiB reads, {len(os.sched_getaffinity(0))} usable CPUs (of {os.cpu_count()})"
       )
     index: dict[str, _Entry] = {}
-    for file, (header, data_start, length) in zip(files, self._pool.map(_read_header, files)):
+    with no_gcs_read_ahead():
+      headers = list(self._pool.map(_read_header, files))
+    for file, (header, data_start, length) in zip(files, headers):
       for name, info in header.items():
         if name == "__metadata__":
           continue
@@ -495,32 +532,33 @@ class SafetensorsReader:
           build(unit)
 
     futures = {}
-    for block in blocks:
-      block.buf = np.empty(block.end - block.start, np.uint8)
-      offsets = range(block.start, block.end, self._chunk_bytes)
-      block.reads_left = len(offsets)
-      for offset in offsets:
-        length = min(self._chunk_bytes, block.end - offset)
-        futures[self._pool.submit(self._read_range, block, offset, length)] = block
     read_seconds, t_last_read = 0.0, t_start
-    try:
-      for unit in units:
-        if not unit.pieces:  # A TPU chip that holds only stack padding.
-          build(unit)
+    with no_gcs_read_ahead():
       for block in blocks:
-        if not block.reads_left:  # Zero-byte tensors.
-          finish(block)
-      for future in concurrent.futures.as_completed(futures):
-        read_seconds += future.result()
-        t_last_read = time.perf_counter()
-        block = futures[future]
-        block.reads_left -= 1
-        if not block.reads_left:
-          finish(block)
-    except BaseException:
-      for future in futures:
-        future.cancel()
-      raise
+        block.buf = np.empty(block.end - block.start, np.uint8)
+        offsets = range(block.start, block.end, self._chunk_bytes)
+        block.reads_left = len(offsets)
+        for offset in offsets:
+          length = min(self._chunk_bytes, block.end - offset)
+          futures[self._pool.submit(self._read_range, block, offset, length)] = block
+      try:
+        for unit in units:
+          if not unit.pieces:  # A TPU chip that holds only stack padding.
+            build(unit)
+        for block in blocks:
+          if not block.reads_left:  # Zero-byte tensors.
+            finish(block)
+        for future in concurrent.futures.as_completed(futures):
+          read_seconds += future.result()
+          t_last_read = time.perf_counter()
+          block = futures[future]
+          block.reads_left -= 1
+          if not block.reads_left:
+            finish(block)
+      except BaseException:
+        for future in futures:
+          future.cancel()
+        raise
 
     for stack in stacks:
       stacked_shape = (len(stack.names) + stack.num_padded,) + stack.shape
