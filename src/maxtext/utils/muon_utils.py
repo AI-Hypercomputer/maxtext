@@ -276,6 +276,26 @@ def to_stacked_layout(dim_num: Optional[mdn], ndim: int, scan_axes: Tuple[int, .
   return mdn(remap(dim_num.reduction_axis), remap(dim_num.output_axis))
 
 
+def get_stacked_dimension_numbers(
+    path: Tuple[str, ...], shape: Optional[Tuple[int, ...]], scan_axes: Tuple[int, ...], include_routers: bool = True
+) -> Optional[mdn]:
+  """Returns Muon dimension numbers in the stacked layout; shared by Optax and MaxText Muon.
+
+  Split mHC alphas `[k, d, n]` (`mhc_split_axis_contraction`) are detected by rank, not
+  config, and contracted as one `(k*d) x n` matrix like the flat `[k*d, n]` layout.
+  """
+  n_features = len(shape or ()) - len(scan_axes)
+  if (
+      n_features > 2
+      and _is_path_contain_any(("mhc_attention", "mhc_mlp"), path)
+      and _is_path_contain_any(("pre_alpha", "post_alpha", "res_alpha"), path)
+  ):
+    dim_num = mdn(tuple(range(n_features - 1)), (-1,))
+  else:
+    dim_num = transform_logic(path, shape=shape, include_routers=include_routers)
+  return to_stacked_layout(dim_num, len(shape or ()), scan_axes)
+
+
 def get_transform_tree(tree, path=(), include_routers: bool = True):
   """Recursively extracts `MuonDimensionNumbers` for Linen abstract parameters."""
   if isinstance(tree, (dict, collections.abc.Mapping)) or hasattr(tree, "items"):
@@ -295,8 +315,7 @@ def get_muon_weight_dimension_numbers(model, config=None, verbose=False):
     # Convert jax.tree_util.KeyEntry path to Tuple[str, ...]
     path_strings = tuple(p.key for p in path if isinstance(p, jax.tree_util.DictKey))
     val_shape = getattr(variable.get_value(), "shape", None)
-    dim_num = transform_logic(path_strings, shape=val_shape, include_routers=include_routers)
-    return to_stacked_layout(dim_num, len(val_shape or ()), get_scan_axes(variable))
+    return get_stacked_dimension_numbers(path_strings, val_shape, get_scan_axes(variable), include_routers)
 
   # Map over whole variables so each one's scan metadata is at hand; the result is an nnx.State
   # with the same structure, holding the mdn result in place of each Param.

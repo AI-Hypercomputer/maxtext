@@ -17,6 +17,7 @@
 import dataclasses
 import itertools
 import math
+import re
 import unittest
 from unittest import mock
 from absl.testing import absltest
@@ -25,9 +26,10 @@ from flax import nnx
 from flax.linen import partitioning as nn_partitioning
 import jax
 import jax.numpy as jnp
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding, PartitionSpec as P
 from maxtext.common.common_types import HyperConnectionType
 from maxtext.configs import pyconfig
+from maxtext.configs import types as config_types
 from maxtext.kernels import mhc as mhc_kernel
 from maxtext.kernels.mhc import common as mhc_kernel_common
 from maxtext.layers import attention_mla, linears, mhc, moe
@@ -113,6 +115,8 @@ class TestMHC(parameterized.TestCase):
       sequence_length=7,
       per_device_batch_size=None,
       dtype=None,
+      mhc_split_axis_contraction=False,
+      ici_tensor_parallelism=1,
   ):
     """Sets up the common configurations and modules for MHC testing."""
     self.dim = dim
@@ -143,6 +147,8 @@ class TestMHC(parameterized.TestCase):
         "base_moe_mlp_dim": self.dim * 4,
         "base_mlp_dim": self.dim * 4,
         "engram_layers": [],
+        "mhc_split_axis_contraction": mhc_split_axis_contraction,
+        "ici_tensor_parallelism": ici_tensor_parallelism,
     }
     if mhc_pallas_kernel_fwd_block_size is not None:
       kwargs["mhc_pallas_kernel_fwd_block_size"] = mhc_pallas_kernel_fwd_block_size
@@ -575,6 +581,19 @@ class TestMHC(parameterized.TestCase):
     with self.assertRaises(ValueError):
       mhc.ManifoldConstrainedHyperConnections(mock_config, 16, self.mesh, self.rngs)
 
+  def test_split_axis_contraction_rejects_fused_kernels(self):
+    """mhc_split_axis_contraction is only implemented on the pure-JAX path, so the fused kernels are rejected."""
+    with self.assertRaisesRegex(ValueError, "use_mhc_pallas_kernel=True is not supported"):
+      config_types.ManifoldConstrainedHyperConnections(
+          enable_mhc_lite=True, use_mhc_pallas_kernel=True, mhc_split_axis_contraction=True
+      )
+    with self.assertRaisesRegex(ValueError, "te_mhc=True is not supported"):
+      config_types.ManifoldConstrainedHyperConnections(te_mhc=True, mhc_expansion_rate=4, mhc_split_axis_contraction=True)
+    # Each kernel on its own, and the split on its own, stay valid.
+    config_types.ManifoldConstrainedHyperConnections(enable_mhc_lite=True, use_mhc_pallas_kernel=True)
+    config_types.ManifoldConstrainedHyperConnections(te_mhc=True, mhc_expansion_rate=4)
+    config_types.ManifoldConstrainedHyperConnections(mhc_split_axis_contraction=True)
+
   def test_layer_vjp_parity_kernel_vs_baseline(self):
     """Verify that ManifoldConstrainedHyperConnections with kernel matches baseline under VJP."""
     self._setup_mhc(
@@ -648,6 +667,82 @@ class TestMHC(parameterized.TestCase):
           rtol=5e-2,
           atol=5e-2,
       )
+
+  @parameterized.named_parameters(("Sinkhorn", False), ("Lite", True))
+  def test_split_axis_contraction_matches_baseline(self, enable_mhc_lite):
+    outputs = {}
+    for split in (False, True):
+      self._setup_mhc(4, enable_mhc_lite=enable_mhc_lite, mhc_split_axis_contraction=split)
+      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
+        norm_scale = jnp.arange(self.config.mhc_expansion_rate * self.dim, dtype=self.config.weight_dtype) / 32 + 0.5
+        module.mhc_norm.scale[...] = jnp.reshape(norm_scale, module.mhc_norm.scale.shape)
+        layer = linears.MlpBlock(
+            config=self.config,
+            mesh=self.mesh,
+            in_features=self.config.emb_dim,
+            intermediate_dim=self.config.moe_mlp_dim,
+            activations=self.config.mlp_activations,
+            intermediate_dropout_rate=self.config.dropout_rate,
+            dtype=self.config.dtype,
+            weight_dtype=self.config.weight_dtype,
+            model_mode=self.config.model_call_mode,
+            rngs=self.rngs,
+        )
+        out, _ = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_DENSE)
+        outputs[split] = np.asarray(out, dtype=np.float32)
+
+    np.testing.assert_allclose(outputs[False], outputs[True], rtol=1e-5, atol=1e-5)
+
+  def test_split_axis_param_layout(self):
+    params = {}
+    for split in (False, True):
+      self._setup_mhc(4, mhc_split_axis_contraction=split)
+      with nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        module = mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs)
+      params[split] = {
+          "norm": np.asarray(module.mhc_norm.scale[...]),
+          "res": np.asarray(module.res_alpha[...]),
+          "pre": np.asarray(module.pre_alpha[...]),
+          "post": np.asarray(module.post_alpha[...]),
+      }
+
+    k, d = self.config.mhc_expansion_rate, self.dim
+    self.assertEqual(params[False]["norm"].shape, (k * d,))
+    self.assertEqual(params[False]["res"].shape, (k * d, k * k))
+    self.assertEqual(params[False]["pre"].shape, (k * d, k))
+    self.assertEqual(params[False]["post"].shape, (k * d, k))
+    self.assertEqual(params[True]["norm"].shape, (k, d))
+    self.assertEqual(params[True]["res"].shape, (k, d, k * k))
+    self.assertEqual(params[True]["pre"].shape, (k, d, k))
+    self.assertEqual(params[True]["post"].shape, (k, d, k))
+
+    for name in ("norm", "res", "pre", "post"):
+      np.testing.assert_array_equal(params[True][name], params[False][name].reshape(params[True][name].shape))
+
+  def test_split_axis_contraction_avoids_embed_all_gather(self):
+    """With the embed axis sharded over tensor, the flat path all-gathers the activation and the split path does not."""
+    if jax.device_count() < 4:
+      self.skipTest("Needs 4 devices for tensor parallelism.")
+    collectives = {}
+    for split in (False, True):
+      self._setup_mhc(4, mhc_split_axis_contraction=split, ici_tensor_parallelism=4)
+      with jax.set_mesh(self.mesh), nn_partitioning.axis_rules(self.config.logical_axis_rules):
+        graphdef, state = nnx.split(mhc.ManifoldConstrainedHyperConnections(self.config, self.dim, self.mesh, self.rngs))
+
+        def forward(state, x):
+          module = nnx.merge(graphdef, state)  # pylint: disable=cell-var-from-loop
+          out, _ = module(lambda y: y, lambda inputs: inputs, x=x, mhc_type=HyperConnectionType.MLP_DENSE)
+          return out
+
+        x = jax.ShapeDtypeStruct(
+            self.x.shape, self.x.dtype, sharding=NamedSharding(self.mesh, P(None, None, None, "tensor"))
+        )
+        hlo = jax.jit(forward).lower(state, x).compile().as_text()
+      collectives[split] = re.findall(r"= \S+ (all-gather|all-reduce)(?:-start)?\(", hlo)
+
+    self.assertIn("all-gather", collectives[False])
+    self.assertNotIn("all-gather", collectives[True])
 
 
 def _get_permutation_matrices(k: int) -> jax.Array:
