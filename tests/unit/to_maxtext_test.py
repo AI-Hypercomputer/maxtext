@@ -14,7 +14,10 @@
 
 """Tests for to_maxtext.py"""
 
+import threading
+from types import SimpleNamespace
 import unittest
+import unittest.mock
 import ml_dtypes
 import numpy as np
 import pytest
@@ -32,6 +35,7 @@ from maxtext.checkpoint_conversion.to_maxtext import (
     _param_save_dtype,
     resolve_scale_key,
 )
+from maxtext.checkpoint_conversion.utils import utils as conv_utils
 
 
 class ResolveScaleKeyTest(unittest.TestCase):
@@ -177,6 +181,48 @@ class ExtractConversionArgsTest(unittest.TestCase):
     self.assertEqual(extracted["eager_load_method"], "safetensors")
     self.assertEqual(extracted["simulated_cpu_devices_count"], 4)
     self.assertEqual(remaining, ["base.yml", "model_name=qwen3.5-35b-a3b-fp8", "steps=10"])
+
+
+class SaveWeightsToCheckpointTest(unittest.TestCase):
+  """Tests that save_weights_to_checkpoint sizes the Orbax save buffers from the config."""
+
+  def _save_real(self, config):
+    """Runs save_weights_to_checkpoint end-to-end into a temp dir and returns build_context's concurrent GB."""
+    import tempfile  # pylint: disable=import-outside-toplevel
+
+    build_ctx = conv_utils.checkpointing.checkpoint_context.build_context
+    with (
+        tempfile.TemporaryDirectory() as tmp_dir,
+        unittest.mock.patch.object(conv_utils.checkpointing.checkpoint_context, "build_context", wraps=build_ctx) as spy,
+    ):
+      before = set(threading.enumerate())
+      try:
+        conv_utils.save_weights_to_checkpoint(
+            tmp_dir,
+            {"w": np.zeros((2, 2), dtype=np.float32)},
+            device_count=1,
+            use_ocdbt=True,
+            use_zarr3=True,
+            config=config,
+        )
+      finally:
+        # Let Orbax async tmp-dir threads finish on aborted saves before tmp_dir is removed.
+        for t in set(threading.enumerate()) - before:
+          if "_target_setting_result" in t.name:
+            threading.Thread.join(t, timeout=5)
+    return spy.call_args.kwargs["checkpoint_storage_concurrent_gb"]
+
+  def test_passes_checkpoint_storage_concurrent_gb_from_config(self):
+    self.assertEqual(self._save_real(SimpleNamespace(checkpoint_storage_concurrent_gb=40)), 40)
+
+  def test_zero_concurrent_gb_is_forwarded_and_rejected_by_orbax(self):
+    with self.assertRaisesRegex(ValueError, "Must provide positive"):
+      self._save_real(SimpleNamespace(checkpoint_storage_concurrent_gb=0))
+
+  def test_keeps_the_manager_default_without_config(self):
+    for config in (None, SimpleNamespace(), SimpleNamespace(checkpoint_storage_concurrent_gb=None)):
+      with self.subTest(config=config):
+        self.assertEqual(self._save_real(config), 96)
 
 
 if __name__ == "__main__":
