@@ -15,12 +15,13 @@
 """Quantization library."""
 
 import functools
+import inspect
 import json
 import math
 import qwix.pallas as qpl
 import re
 from typing import Any, ClassVar, Tuple, Sequence, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from aqt.jax.v2 import config as aqt_config
 from aqt.jax.v2 import aqt_tensor
@@ -1981,12 +1982,24 @@ class TransformerEngineQuantization(Quantization):
           if self._te_comm_gemm_overlap_policy != TeCommGemmOverlapPolicy.DISABLED
           else tex.noop_collective_op_set
       )
+      dense_kwargs = {}
+      if (
+          "mesh_resource" in inspect.signature(transformer_engine.jax.dense.dense).parameters
+          and transformer_engine.jax.sharding.is_mesh_available()
+      ):
+        from transformer_engine.jax.sharding import global_mesh_resource  # pylint: disable=import-outside-toplevel
+
+        mesh_resource = global_mesh_resource()
+        # Dense weights use expert parallelism as an additional FSDP axis.
+        fsdp_axes = tuple(axis for axis in (mesh_resource.ep_resource, mesh_resource.fsdp_resource) if axis is not None)
+        dense_kwargs["mesh_resource"] = replace(mesh_resource, ep_resource=None, fsdp_resource=fsdp_axes or None)
       return transformer_engine.jax.dense.dense(
           x,
           kernel,
           contracting_dims=contracting_dims,
           quantizer_set=quantizer_set,
           collective_op_set=collective_op_set,
+          **dense_kwargs,
       )
 
     return self._wrap(te_dot_general, "dot_general")
