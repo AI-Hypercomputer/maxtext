@@ -1996,8 +1996,8 @@ class TransformerEngineQuantization(Quantization):
     # quant.einsum is only required for MoE or for inference with KVCache.
     raise ValueError("Einsum is not yet supported for TransformerEngine quantization.")
 
+  @staticmethod
   def get_moe_block_quantizer_set(
-      self,
       te_gmm_quantization_recipe_name: str,
       n_token_groups: int,
       n_expert_groups: int,
@@ -2039,15 +2039,15 @@ class TransformerEngineQuantization(Quantization):
         dgrad=token_quantizer_set.dgrad,
     )
 
+  @staticmethod
   def get_moe_block_quantizer_sets(
-      self,
       te_gmm_quantization_recipe_name: str,
       n_token_groups: int,
       n_expert_groups: int,
   ):
     """Create independent FC1 and FC2 quantizer sets for TE's MoE custom VJP."""
     return tuple(
-        self.get_moe_block_quantizer_set(
+        TransformerEngineQuantization.get_moe_block_quantizer_set(
             te_gmm_quantization_recipe_name,
             n_token_groups=n_token_groups,
             n_expert_groups=n_expert_groups,

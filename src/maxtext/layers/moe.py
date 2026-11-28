@@ -7481,8 +7481,9 @@ class RoutedMoE(nnx.Module):
           "Please upgrade to the latest version of TransformerEngine."
       ) from exc
 
-    if self.quant is None or not hasattr(self.quant, "get_moe_block_quantizer_sets"):
-      raise ValueError("te_moe_block=True requires TransformerEngine quantization or te_gmm_quantization=te_no_quant.")
+    if not self.config.te_gmm_quantization:
+      raise ValueError("te_moe_block=True requires te_gmm_quantization (te_no_quant or te_mxfp8).")
+    get_moe_block_quantizer_sets = quantizations.TransformerEngineQuantization.get_moe_block_quantizer_sets
     if self.is_hash_routing and (routing_indices is None or routing_weights is None):
       raise ValueError("TE MoE hash routing requires precomputed routing indices and weights.")
 
@@ -7498,7 +7499,7 @@ class RoutedMoE(nnx.Module):
     if self.num_experts % ep_size != 0:
       raise ValueError(f"num_experts={self.num_experts} must be divisible by EP size={ep_size}.")
 
-    fc1_quantizer_set, fc2_quantizer_set = self.quant.get_moe_block_quantizer_sets(
+    fc1_quantizer_set, fc2_quantizer_set = get_moe_block_quantizer_sets(
         self.config.te_gmm_quantization,
         # Dispatch buffers have one group per (fsdp, ep, local_expert),
         # while model weights retain their global expert-group descriptor.
