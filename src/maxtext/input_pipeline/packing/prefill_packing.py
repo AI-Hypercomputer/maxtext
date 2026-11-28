@@ -43,6 +43,13 @@ PRNGKeyType = Any
 log = logging.getLogger(__name__)
 
 
+def _decode_state_out_layouts(decode_state_layouts, return_prompt_logp: bool):
+  """The layouts of the decode state a prefill returns: with return_prompt_logp it also holds "prompt_logp"."""
+  if return_prompt_logp and isinstance(decode_state_layouts, dict):
+    return {**decode_state_layouts, "prompt_logp": None}
+  return decode_state_layouts
+
+
 class PrefillBucket:
   """Manage a list of prefill requests."""
 
@@ -140,7 +147,7 @@ class PrefillProcessor:
               in_shardings=(self.engine.param_layouts, None, None, None, self.engine.decode_state_layouts, None),
               out_shardings=(
                   None,
-                  self.engine.decode_state_layouts,
+                  _decode_state_out_layouts(self.engine.decode_state_layouts, return_prompt_logp),
               ),
               donate_argnames=("decode_state"),
               static_argnames=("return_prompt_logp",),
@@ -319,8 +326,9 @@ class BatchedPrefillProcessor:
       prefill_fn = self._process_batch_compiled(
           model_params, input_padding, bucket.capacity, bucket.count, return_prompt_logp
       )
+      # return_prompt_logp is static: it is compiled into prefill_fn, which takes the other eight arguments
       first_tokens, decode_state = prefill_fn(
-          model_params, tok_ids, slots, pos_ids, seg_ids, offsets_jax, lengths_jax, decode_state, return_prompt_logp
+          model_params, tok_ids, slots, pos_ids, seg_ids, offsets_jax, lengths_jax, decode_state
       )
 
     prefill_result = []
@@ -340,7 +348,7 @@ class BatchedPrefillProcessor:
   ):
     """Ahead-of-time compilation wrapper of _process_batch()."""
 
-    if (padded_length, num_prompts) not in self.process_batch_func:
+    if (padded_length, num_prompts, return_prompt_logp) not in self.process_batch_func:
       log.info("compile prefill process_batch{(%d, %d)} capacity=%d", padded_length, num_prompts, capacity)
       self.process_batch_func[(padded_length, num_prompts, return_prompt_logp)] = (
           jax.jit(
@@ -355,7 +363,7 @@ class BatchedPrefillProcessor:
                   None,
                   self.engine.decode_state_layouts,
               ),
-              out_shardings=(None, self.engine.decode_state_layouts),
+              out_shardings=(None, _decode_state_out_layouts(self.engine.decode_state_layouts, return_prompt_logp)),
               static_argnames=(
                   "num_prompts",
                   "padded_length",

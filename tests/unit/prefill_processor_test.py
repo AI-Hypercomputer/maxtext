@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Tests for PrefillProcessor's ahead-of-time compiled path."""
+"""Tests for PrefillProcessor's and BatchedPrefillProcessor's ahead-of-time compiled paths."""
 
 import unittest
 
@@ -21,14 +21,22 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from maxtext.input_pipeline.packing.prefill_packing import PrefillProcessor
+from maxtext.common.gcloud_stub import is_decoupled
+
+pytestmark = [pytest.mark.cpu_only, pytest.mark.external_serving]
+
+# prefill_packing raises on import when decoupled and jetstream is stubbed.
+if not is_decoupled():
+  from maxtext.input_pipeline.packing.prefill_packing import BatchedPrefillProcessor, PrefillProcessor
+else:
+  BatchedPrefillProcessor = PrefillProcessor = None  # Never used: the external_serving marker deselects these tests.
 
 
 class _FakeEngine:
   """The parts of MaxEngine that PrefillProcessor uses, as tiny JAX functions."""
 
   param_layouts = None
-  decode_state_layouts = None
+  decode_state_layouts = {"tokens": None}  # a dict, as a real MaxEngine's after aot_compile
   decode_state_shapes = {"tokens": jax.ShapeDtypeStruct((2,), jnp.int32)}
 
   def prefill(self, params, padded_tokens, true_length, rng, return_prompt_logp=False):
@@ -43,7 +51,33 @@ class _FakeEngine:
     return {"tokens": decode_state["tokens"].at[slot].set(prefill_result["first_token"])}
 
 
-@pytest.mark.cpu_only
+class _FakeBatchEngine(_FakeEngine):
+  """The packed-prefill parts of MaxEngine that BatchedPrefillProcessor uses."""
+
+  def prefill_concat(
+      self,
+      params,
+      padded_tokens,
+      decoder_positions,
+      decoder_segment_ids,
+      start_pos,
+      true_lengths,
+      num_prompts,
+      return_prompt_logp=False,
+  ):
+    """The first token of each packed prompt, and its prompt_logp when asked for."""
+    del decoder_positions, decoder_segment_ids
+    first_tokens = (padded_tokens[start_pos + true_lengths - 1] + params["offset"])[:num_prompts]
+    prefix = {"first_tokens": first_tokens}
+    if return_prompt_logp:
+      prefix["prompt_logp"] = jnp.zeros((1, padded_tokens.shape[0]), jnp.float32)
+    return jnp.zeros(()), prefix, first_tokens
+
+  def insert_partial(self, prefix, decode_state, cache, slots, start_indices, num_prompts, seq_len):
+    del cache, start_indices, seq_len
+    return {"tokens": decode_state["tokens"].at[slots[:num_prompts]].set(prefix["first_tokens"])}
+
+
 class PrefillProcessorAotTest(unittest.TestCase):
   """process() after aot_compile, as the MLPerf offline harness calls it.
   Command: pytest tests/unit/prefill_processor_test.py
@@ -81,6 +115,50 @@ class PrefillProcessorAotTest(unittest.TestCase):
     processor = PrefillProcessor(_FakeEngine())
     compiled = processor.aot_compile(self.params, len(self.tokens))
     self.assertIs(processor._process_compiled(self.params, len(self.tokens)), compiled)  # pylint: disable=protected-access
+
+
+class BatchedPrefillProcessorAotTest(unittest.TestCase):
+  """BatchedPrefillProcessor's compiled path (auto_layout_supported=True), used after aot_compile.
+  Command: pytest tests/unit/prefill_processor_test.py
+  """
+
+  def setUp(self):
+    super().setUp()
+    self.params = {"offset": jnp.int32(100)}
+    self.prompts = [jnp.array([5, 6, 7], jnp.int32), jnp.array([8, 9], jnp.int32)]
+    self.results = []
+
+  def prefill_done(self, prefill_result, row_ids, decode_state):
+    self.results.append((prefill_result, row_ids, decode_state))
+
+  def run_bucket(self, processor, return_prompt_logp=False):
+    decode_state = {"tokens": jnp.zeros((2,), jnp.int32)}
+    for slot, prompt in enumerate(self.prompts):
+      processor.process(
+          self.params, decode_state, slot, slot, prompt, 8, 8, self.prefill_done, return_prompt_logp=return_prompt_logp
+      )
+    processor.flush(self.params, decode_state, self.prefill_done, return_prompt_logp=return_prompt_logp)
+    return self.results[-1]
+
+  def test_process_after_aot_compile(self):
+    processor = BatchedPrefillProcessor(_FakeBatchEngine(), max_batch_size=2)
+    processor.aot_compile(self.params, 8, 8, 2)
+    prefill_result, row_ids, decode_state = self.run_bucket(processor)
+    self.assertEqual(row_ids, [0, 1])
+    self.assertEqual([int(r.result_tokens) for r in prefill_result], [107, 109])
+    self.assertEqual(decode_state["tokens"].tolist(), [107, 109])
+
+  def test_return_prompt_logp_is_compiled_separately(self):
+    processor = BatchedPrefillProcessor(_FakeBatchEngine(), max_batch_size=2)
+    processor.aot_compile(self.params, 8, 8, 2)
+    prefill_result, _, _ = self.run_bucket(processor, return_prompt_logp=True)
+    self.assertEqual([r.prompt_logp.shape for r in prefill_result], [(1, 3), (1, 2)])
+    self.assertEqual(set(processor.process_batch_func), {(8, 2, False), (8, 2, True)})
+
+  def test_compiled_process_batch_is_reused(self):
+    processor = BatchedPrefillProcessor(_FakeBatchEngine(), max_batch_size=2)
+    compiled = processor.aot_compile(self.params, 8, 8, 2)
+    self.assertIs(processor._process_batch_compiled(self.params, 8, 8, 2, False), compiled)  # pylint: disable=protected-access
 
 
 if __name__ == "__main__":
