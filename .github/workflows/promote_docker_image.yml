@@ -19,6 +19,8 @@
 #      verified-e2e-<tag>, failed-e2e-<tag>, or unknown-e2e-<tag>.
 #    - If E2E passed on an image from the daily build that also passed CI (verified-ci-<tag>),
 #      it promotes the image (and its nightly counterpart) by tagging it with the latest tag.
+#    - After a post-training run, it also tags the image with pw_<first 12 characters of the digest>_<build date>
+#      for each Pathways server image the run used, whether the E2E tests passed or not.
 # 2. Manual workflow dispatch (workflow_dispatch):
 #    - Forcefully promotes a Docker image when Airflow E2E tests could not run (e.g. due to capacity).
 
@@ -107,6 +109,7 @@ jobs:
         env:
           E2E_STATE: ${{ needs.handle_result.outputs.e2e_state || 'success' }}
           PAYLOAD_IMAGE: ${{ github.event.client_payload.docker_image || inputs.docker_image }}
+          PATHWAYS_SERVER_DIGESTS: ${{ github.event.client_payload.pathways_server_digests }}
         run: |
           tag_image() {
             local img="$1"
@@ -130,6 +133,29 @@ jobs:
             else
               echo "${IMAGE}:verified-ci-${IMAGE_TAG} does not exist. Skipping latest tag."
             fi
+          }
+
+          # Prints the tags of image $1:$2, one per line (same lookup as release_pipeline.yml).
+          tags_of() {
+            local digest
+            digest=$(gcloud container images describe "$1:$2" --format='value(image_summary.digest)') || return 0
+            gcloud container images list-tags "$1" --filter="digest=\"${digest}\"" --flatten='tags[]' --format='value(tags)'
+          }
+
+          # Tags a post-training image pw_<first 12 characters of the digest>_<build date> for each Pathways
+          # server digest that its E2E run sent. The build date comes from its maxtext_<commit>_<date> tag.
+          tag_pathways_digests() {
+            local commit_tag digest digests
+            [[ -n "${PATHWAYS_SERVER_DIGESTS}" ]] || return 0
+            commit_tag=$(tags_of "${IMAGE}" "${IMAGE_TAG}" | grep -m 1 -E '^maxtext_[0-9a-f]+_[0-9]{8}$' || true)
+            IFS=', ' read -ra digests <<< "${PATHWAYS_SERVER_DIGESTS}"
+            for digest in "${digests[@]}"; do
+              if [[ -n "${commit_tag}" && "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+                tag_image "${IMAGE}" "pw_${digest:7:12}_${commit_tag##*_}" || echo "Could not add the Pathways tag for ${digest}."
+              else
+                echo "Skipping Pathways digest ${digest}: no maxtext_<commit>_<date> tag on the image, or not a digest."
+              fi
+            done
           }
 
           # Both Airflow and manual runs pass the full image URI (<image>:<tag>).
@@ -160,3 +186,6 @@ jobs:
               tag_image "${IMAGE}" "unknown-e2e-${IMAGE_TAG}"
               ;;
           esac
+
+          # Post-training runs send the Pathways server images they used, whatever the result.
+          tag_pathways_digests
