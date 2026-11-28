@@ -443,11 +443,11 @@ class TestSafetensorsFullStateIntoNNX(unittest.TestCase):
     with (
         mock.patch.object(checkpointing, "ocp") as v1,
         mock.patch.object(checkpointing, "sharding_utils") as shardings,
-        mock.patch.object(checkpointing, "checkpoint_context") as context,
+        # A with-able context.
+        mock.patch.object(checkpointing.checkpoint_context, "build_context", return_value=mock.MagicMock()),
     ):
       v1.metadata.return_value = mock.Mock(metadata={"w": jax.ShapeDtypeStruct((1,), jnp.float32)})
       shardings.construct_maximal_shardings.return_value = {"w": None}
-      context.build_context.return_value = mock.MagicMock()  # a with-able context
       return checkpointing._load_full_state_from_path(  # pylint: disable=protected-access
           path="gs://does-not-exist/hf",
           abstract_unboxed_pre_state=abstract,

@@ -437,6 +437,8 @@ class CheckpointManager:
           f"Checkpoint at step {step} exists but could not be restored; refusing to silently start a "
           f"fresh run over it. {type(e).__name__}: {e}"
       ) from e
+    # Colocated Python checkpoints have no ArrayMetadata, so their PRNG keys come back as raw key data.
+    restored_items = checkpoint_context.rewrap_raw_prng_keys(restored_items, abstract_checkpointables)
 
     nnx.update(checkpoint_state.model, restored_items["model_params"])
     if checkpoint_state.optimizer is not None:
