@@ -19,6 +19,7 @@ Planned modules:
   * `loss.py` — cross entropy plus auxiliary losses.
   * `step.py` — train/eval step functions.
   * `loop.py` — training loop and infrastructure composition site.
+  * `loop_diffusers.py` — the diffusion (flow-matching) training loop (Wan 2.x).
 
 m3 models are drivable by two things: this loop, and the existing
 `maxtext.training_engine.maxtext_engine` (which the RL stack targets). Anything
