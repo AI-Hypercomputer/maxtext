@@ -6170,17 +6170,35 @@ class MaxTextConfig(
     ):
       if getattr(self, flag_name):
         raise ValueError(f"expert_replicas_per_device > 0 does not support {flag_name}=True.")
-    if (
-        self.fp8_moe
-        or self.fp8_moe_fake_quant
-        or self.quantization not in (None, QuantizationType.NONE, QuantizationType.TE_NO_QUANT)
-        or self.te_gmm_quantization
-        not in (None, TEGroupedGemmQuantizationType.EMPTY, TEGroupedGemmQuantizationType.TE_NO_QUANT)
+    if self.fp8_moe or self.te_gmm_quantization not in (
+        None,
+        TEGroupedGemmQuantizationType.EMPTY,
+        TEGroupedGemmQuantizationType.TE_NO_QUANT,
     ):
       raise ValueError(
-          "expert_replicas_per_device > 0 does not yet support FP8 or quantized MoE GEMMs "
-          "(fp8_moe, fp8_moe_fake_quant, quantization, or te_gmm_quantization)."
+          f"expert_replicas_per_device > 0 does not support fp8_moe={self.fp8_moe} or "
+          f"te_gmm_quantization={self.te_gmm_quantization!r}."
       )
+    if self.quantization not in (None, QuantizationType.NONE, QuantizationType.TE_NO_QUANT):
+      # fp8_moe_fake_quant arrives at sparse_matmul as dense fake-dequantized weights; fp8_full
+      # replicates home-quantized codes and per-group scales for tokamax gmm_v2.
+      if not (self.quantization == QuantizationType.FP8_FULL and self.use_qwix_quantization):
+        raise ValueError(
+            "expert_replicas_per_device > 0 only supports quantization='fp8_full' with "
+            f"use_qwix_quantization=True, got quantization={self.quantization!r}, "
+            f"use_qwix_quantization={self.use_qwix_quantization}."
+        )
+      if not (self.use_tokamax_gmm and self.use_gmm_v2):
+        raise ValueError(
+            "expert_replicas_per_device > 0 with quantization='fp8_full' requires "
+            "use_tokamax_gmm=True and use_gmm_v2=True (per-group replica weight scales)."
+        )
+      if self.prefuse_moe_weights:
+        raise ValueError(
+            "expert_replicas_per_device > 0 with quantization='fp8_full' does not support prefuse_moe_weights."
+        )
+      if self.weight_sparsity_n and self.weight_sparsity_m:
+        raise ValueError("expert_replicas_per_device > 0 with quantization='fp8_full' does not support weight sparsity.")
     if not self.override_logical_axis_rules and not ep_enabled(self):
       raise ValueError("expert_replicas_per_device > 0 requires expert parallelism > 1.")
 
@@ -7048,6 +7066,8 @@ class MaxTextConfig(
       if self.moe_use_fused_gmm3d:
         # The fused gmm3d kernels take only a static weight scale.
         unsupported.append("moe_use_fused_gmm3d")
+      if self.expert_replicas_per_device > 0:
+        unsupported.append("expert_replicas_per_device > 0")
       if self.moe_weight_quantization_granularity == "per_expert_channel":
         # Flat shards split experts; the gmm v1 dlhs takes only [1, 1, N] rhs scales, and with ring of experts the
         # gmm can get group sizes for all E experts, which the per-expert dlhs scaling does not handle.

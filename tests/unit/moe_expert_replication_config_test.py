@@ -69,6 +69,65 @@ class ExpertReplicationConfigTest(parameterized.TestCase):
     self.assertEqual(cfg.quantization, "te_no_quant")
     self.assertEqual(cfg.te_gmm_quantization, "te_no_quant")
 
+  @parameterized.named_parameters(
+      (
+          "fp8_full_dynamic",
+          {
+              "quantization": "fp8_full",
+              "use_qwix_quantization": True,
+              "use_tokamax_gmm": True,
+              "use_gmm_v2": True,
+              "shard_embed_moe_on_fsdp": False,
+          },
+      ),
+      (
+          "fp8_full_dynamic_ep_only",
+          {
+              "quantization": "fp8_full",
+              "use_qwix_quantization": True,
+              "use_tokamax_gmm": True,
+              "use_gmm_v2": True,
+              "ici_fsdp_parallelism": 1,
+              "ici_expert_parallelism": 4,
+              "shard_embed_moe_on_fsdp": False,
+          },
+      ),
+      (
+          "fp8_full_static_fsdp_ep",
+          {
+              "quantization": "fp8_full",
+              "use_qwix_quantization": True,
+              "use_tokamax_gmm": True,
+              "use_gmm_v2": True,
+              "weight_quantization_calibration_method": "fixed,-224,224",
+              "act_quantization_calibration_method": "fixed,-224,224",
+              "bwd_quantization_calibration_method": "fixed,0.00125",
+              "shard_embed_moe_on_fsdp": False,
+              "ici_fsdp_parallelism": 2,
+              "ici_expert_parallelism": 2,
+          },
+      ),
+      (
+          "fp8_full_static_fsdp_qag",
+          {
+              "quantization": "fp8_full",
+              "use_qwix_quantization": True,
+              "use_tokamax_gmm": True,
+              "use_gmm_v2": True,
+              "weight_quantization_calibration_method": "fixed,-224,224",
+              "act_quantization_calibration_method": "fixed,-224,224",
+              "bwd_quantization_calibration_method": "fixed,0.00125",
+              "shard_embed_moe_on_fsdp": True,
+              "ici_fsdp_parallelism": 2,
+              "ici_expert_parallelism": 2,
+          },
+      ),
+      ("fp8_moe_fake_quant", {"fp8_moe_fake_quant": True}),
+  )
+  def test_config_validator_accepts_fp8_recipes(self, overrides):
+    """Validates dynamic/static Qwix fp8_full and fp8_moe_fake_quant with replication."""
+    self.assertEqual(self._init(expert_replicas_per_device=2, **overrides).expert_replicas_per_device, 2)
+
   @parameterized.parameters(
       ({"expert_replicas_per_device": -1},),
       ({"expert_replica_max_send": 0},),
@@ -104,10 +163,52 @@ class ExpertReplicationConfigTest(parameterized.TestCase):
           },
           "moe_use_fused_gmm3d=True",
       ),
-      ("fp8_moe", {"fp8_moe": True}, "FP8 or quantized MoE"),
-      ("fp8_moe_fake_quant", {"fp8_moe_fake_quant": True}, "FP8 or quantized MoE"),
-      ("quantization", {"quantization": "int8"}, "FP8 or quantized MoE"),
-      ("te_gmm_quantization", {"te_gmm_quantization": "te_mxfp8"}, "FP8 or quantized MoE"),
+      ("quantization_int8", {"quantization": "int8"}, "only supports quantization='fp8_full'"),
+      ("fp8_qwix", {"quantization": "fp8", "use_qwix_quantization": True}, "only supports quantization='fp8_full'"),
+      ("fp8_full_no_qwix", {"quantization": "fp8_full"}, "only supports quantization='fp8_full'"),
+      (
+          "fp8_full_no_gmm_v2",
+          {"quantization": "fp8_full", "use_qwix_quantization": True},
+          "use_tokamax_gmm=True and use_gmm_v2=True",
+      ),
+      (
+          "fp8_full_sparsity",
+          {
+              "quantization": "fp8_full",
+              "use_qwix_quantization": True,
+              "use_tokamax_gmm": True,
+              "use_gmm_v2": True,
+              "weight_sparsity_n": 2,
+              "weight_sparsity_m": 4,
+          },
+          "does not support weight sparsity",
+      ),
+      (
+          "fp8_full_prefuse",
+          {
+              "quantization": "fp8_full",
+              "use_qwix_quantization": True,
+              "use_tokamax_gmm": True,
+              "use_gmm_v2": True,
+              "prefuse_moe_weights": True,
+          },
+          "does not support prefuse_moe_weights",
+      ),
+      (
+          "fp8_full_dynamic_fsdp_gather",
+          {
+              "quantization": "fp8_full",
+              "use_qwix_quantization": True,
+              "use_tokamax_gmm": True,
+              "use_gmm_v2": True,
+              "shard_embed_moe_on_fsdp": True,
+              "ici_fsdp_parallelism": 2,
+              "ici_expert_parallelism": 2,
+          },
+          "absmax weight calibration does not support expert_replicas_per_device > 0",
+      ),
+      ("fp8_moe", {"fp8_moe": True, "weight_dtype": "float8_e4m3fn"}, "fp8_moe=True"),
+      ("te_gmm_quantization", {"te_gmm_quantization": "te_mxfp8"}, "te_gmm_quantization"),
       ("vllm_rpa", {"attention": "vllm_rpa"}, "does not support attention='vllm_rpa'"),
       ("vllm_batched_rpa", {"attention": "vllm_batched_rpa"}, "does not support attention='vllm_batched_rpa'"),
       ("batch_split", {"use_batch_split_schedule": True}, "does not support use_batch_split_schedule=True"),

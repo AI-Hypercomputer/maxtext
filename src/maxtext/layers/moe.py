@@ -3945,6 +3945,21 @@ class RoutedMoE(nnx.Module):
         output = jnp.roll(output, row_start, axis=0)
       return jax.lax.convert_element_type(output, out_dtype)
 
+    def extract_vma(tensor):
+      # Extract underlying array from QArray to inspect sharding annotation string.
+      if isinstance(tensor, qpl.QArray):
+        tensor = tensor.qvalue
+      # Parses the varying mesh axes from JAX's type string for a tensor inside shard_map.
+      # jax.typeof(t) renders as e.g. 'f32[128,256]{V:(expert, fsdp)}'; this extracts
+      # ('expert', 'fsdp'). Returns () if the tensor has no varying axes.
+      type_str = str(jax.typeof(tensor))
+      if "{V:" in type_str:
+        start = type_str.index("{V:") + 3
+        end = type_str.index("}", start)
+        vma_content = type_str[start:end].strip("()")
+        return tuple(sorted(a.strip() for a in vma_content.split(",")))
+      return tuple()
+
     def gmm(
         inputs,
         kernel,
@@ -3962,21 +3977,6 @@ class RoutedMoE(nnx.Module):
         bias=None,
         rhs_amax=None,
     ):
-      def extract_vma(tensor):
-        # Extract underlying array from QArray to inspect sharding annotation string.
-        if isinstance(tensor, qpl.QArray):
-          tensor = tensor.qvalue
-        # Parses the varying mesh axes from JAX's type string for a tensor inside shard_map.
-        # jax.typeof(t) renders as e.g. 'f32[128,256]{V:(expert, fsdp)}'; this extracts
-        # ('expert', 'fsdp'). Returns () if the tensor has no varying axes.
-        type_str = str(jax.typeof(tensor))
-        if "{V:" in type_str:
-          start = type_str.index("{V:") + 3
-          end = type_str.index("}", start)
-          vma_content = type_str[start:end].strip("()")
-          return tuple(sorted(a.strip() for a in vma_content.split(",")))
-        return tuple()
-
       is_native_kernel = isinstance(kernel, qpl.QArray)
       if self.config.megablox and not self.config.use_tokamax_gmm and not self.config.moe_quantize_token_all_gather:
         lhs_vma_axes = extract_vma(inputs)
@@ -4357,6 +4357,13 @@ class RoutedMoE(nnx.Module):
       token_mask_pspec = maybe_replicate_incompatible_batch(
           self._logical_to_mesh_axes((batch_logical_axis, "activation_norm_length_routed")), token_mask
       )
+    varying_route_axes = set()
+    for route_spec in (gate_logits_pspec, decoder_tokens_pspec, token_mask_pspec):
+      if route_spec is not None:
+        for dim in route_spec.partitions if isinstance(route_spec, P) else route_spec:
+          for ax in mesh_axes_for_dim(dim):
+            if self.mesh.shape.get(ax, 1) > 1:
+              varying_route_axes.add(ax)
     bias_update_axis_names = _batch_axis_names(gate_logits_pspec)
     # In RoE, logits are already all-gathered across self._expert_parallelism_name before
     # routing, so each shard evaluates the full batch and computes identical token counts.
@@ -4707,6 +4714,7 @@ class RoutedMoE(nnx.Module):
         per_expert_scale=None,
         skip_token_gather=False,
         token_mask=None,
+        replica_gather_axes=(),
     ):
       local_sorted_indices = None
       all_shards_group_sizes = None
@@ -4743,6 +4751,13 @@ class RoutedMoE(nnx.Module):
           local_counts = jnp.bincount(flat_logical, weights=count_weights, length=self.config.num_experts).astype(
               jnp.int32
           )
+          if replica_gather_axes:
+            varying_axes = extract_vma(local_counts) if self.config.check_vma else varying_route_axes
+            sync_axes = tuple(ax for ax in replica_gather_axes if ax in varying_axes)
+            if sync_axes:
+              # Sum counts across non-EP weight-gather axes (e.g. QAG over "fsdp") so every shard that gathers
+              # or reduce-scatters replica slots [L, L + R) computes the exact same ReplicaPlan.
+              local_counts = jax.lax.psum(local_counts, axis_name=sync_axes[0] if len(sync_axes) == 1 else sync_axes)
           counts_src = jax.lax.all_gather(local_counts, axis_name=self._expert_parallelism_name)
           replica_plan = moe_replica_planner.compute_plan_iter(
               counts_src,
@@ -4918,6 +4933,7 @@ class RoutedMoE(nnx.Module):
         skip_token_gather=False,
         token_mask=None,
         gathered_topk=None,
+        replica_gather_axes=(),
     ):
       """Performs both across device and within device token routing/sorting"""
       num_ep = self.get_expert_parallelism_size()
@@ -4958,6 +4974,7 @@ class RoutedMoE(nnx.Module):
             per_expert_scale=per_expert_scale,
             skip_token_gather=skip_token_gather,
             token_mask=token_mask,
+            replica_gather_axes=replica_gather_axes,
         )
 
     def non_expert_axes(pspec_dim_axes):
@@ -5766,6 +5783,13 @@ class RoutedMoE(nnx.Module):
             token_mask=token_mask,
         )
       else:
+        ep_name = self._expert_parallelism_name
+        ep_names = set(ep_name) if isinstance(ep_name, tuple) else {ep_name}
+        replica_gather_axes = (
+            tuple(dict.fromkeys(ax for ax, _ in get_wi_gmm_params()[0] + get_wo_gmm_params()[0] if ax not in ep_names))
+            if self.config.expert_replicas_per_device > 0
+            else ()
+        )
         x_tokens = x
         x, routing, route_metadata = route(
             x,
@@ -5779,6 +5803,7 @@ class RoutedMoE(nnx.Module):
             skip_token_gather=use_fused_gmm3d,
             token_mask=token_mask,
             gathered_topk=gathered_topk,
+            replica_gather_axes=replica_gather_axes,
         )
         x, routing, route_metadata = _tag_routed(x, routing, route_metadata)
         if route_metadata.replica_plan is not None:
@@ -5797,11 +5822,45 @@ class RoutedMoE(nnx.Module):
                   f"expert replication expects 3D local {w_name} weights with leading dim {expected_local} "
                   f"(num_experts={self.config.num_experts} // num_ep={ep_size}), got shape {w_arr.shape}."
               )
-          ep_name = self._expert_parallelism_name
-          w0 = moe_replica_weights.extend_with_replicas(w0, plan, ep_name, ep_size, self.dtype)
-          if w1 is not None:
-            w1 = moe_replica_weights.extend_with_replicas(w1, plan, ep_name, ep_size, self.dtype)
-          wo = moe_replica_weights.extend_with_replicas(wo, plan, ep_name, ep_size, self.dtype)
+          gmm_rule = qpl.get_current_rule("gmm") if self.config.use_qwix_quantization else None
+          if gmm_rule is not None and gmm_rule.weight_qtype is not None:
+            # Quantize at home so home rows match R=0 codes/scales and replicas carry their home scale.
+            if not (self.config.use_tokamax_gmm and self.config.use_gmm_v2 and self.config.hardware != "cpu"):
+              raise NotImplementedError("quantized expert replication requires the tokamax gmm_v2 kernel on TPU.")
+            # ops.gmm only runs QAG (_fwd_gather_weight / _drhs_scatter_weight) when both bwd_qtype and fixed
+            # weight calibration are set on the gmm rule.
+            if replica_gather_axes and not (
+                gmm_rule.bwd_qtype and (gmm_rule.weight_calibration_method or "").startswith("fixed")
+            ):
+              raise NotImplementedError(
+                  "expert_replicas_per_device > 0 with in-kernel expert weight gathers (e.g. "
+                  "shard_embed_moe_on_fsdp=True) requires fixed weight calibration and bwd_qtype on the Qwix gmm rule."
+              )
+            channelwise = () if gmm_rule.disable_channelwise_axes else (2,)
+            w0, w1, wo = (
+                None
+                if w is None
+                else moe_replica_weights.extend_quantized_with_replicas(
+                    w,
+                    plan,
+                    ep_name,
+                    ep_size,
+                    self.dtype,
+                    gmm_rule.weight_qtype,
+                    gmm_rule.weight_calibration_method,
+                    channelwise,
+                )
+                for w in (w0, w1, wo)
+            )
+          else:
+            if replica_gather_axes:
+              raise NotImplementedError(
+                  "unquantized expert_replicas_per_device > 0 does not support in-kernel expert weight gathers."
+              )
+            w0 = moe_replica_weights.extend_with_replicas(w0, plan, ep_name, ep_size, self.dtype)
+            if w1 is not None:
+              w1 = moe_replica_weights.extend_with_replicas(w1, plan, ep_name, ep_size, self.dtype)
+            wo = moe_replica_weights.extend_with_replicas(wo, plan, ep_name, ep_size, self.dtype)
 
         if use_fused_gmm3d:
           # The fused kernels gather the tokens in-kernel (route() returned x=None): the whole expert MLP and
