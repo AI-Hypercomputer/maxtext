@@ -31,6 +31,7 @@ Grain ensures determinism in data input pipelines by saving the pipeline's state
 
 - **Global shuffle**: [ArrayRecord](https://github.com/google/array_record) and direct Megatron `mmap` are random-access sources that can shuffle indices globally before reading elements. The `mmap_npy` mode instead consumes its precomputed Megatron-compatible document and sample shuffle indices.
 - **Hierarchical shuffle**: For sequential access format [Parquet](https://arrow.apache.org/docs/python/parquet/index.html), shuffle is performed by these steps: file shuffling, interleave from files, and window shuffle using a fixed size buffer.
+- **Window shuffle**: For `grain_file_type=hf` (Hugging Face streaming), elements are shuffled with a fixed size window buffer.
 
 (using-grain)=
 
@@ -49,7 +50,16 @@ MOUNT_PATH=${MOUNT_PATH?} \
 
 Note that `FILE_PATH` is optional; when provided, the script runs `ls -R` for pre-filling the metadata cache (see ["Performance tuning best practices" on the Google Cloud documentation](https://docs.cloud.google.com/storage/docs/cloud-storage-fuse/performance)).
 
-1. Set `dataset_type=grain`, `grain_file_type={arrayrecord|parquet|tfrecord|mmap|mmap_npy}`, and `grain_train_files` in `src/maxtext/configs/base.yml` or through command line arguments. You can also stream datasets directly from Hugging Face by providing `hf://` prefix patterns in `grain_train_files` (e.g., `hf://datasets/dvruette/lm1b/**/*.parquet`), or simply specifying `hf_path` with `grain_file_type=parquet` to automatically construct the `hf://` pattern. Note that streaming directly from Hugging Face is currently only supported for datasets in the Parquet format. For gated datasets, make sure to set the `hf_access_token` config. Megatron `mmap` modes require a local or mounted filesystem path; they do not accept a `gs://` or `hf://` URI directly.
+1. Set `dataset_type=grain`, `grain_file_type={arrayrecord|parquet|tfrecord|hf|mmap|mmap_npy}`, and `grain_train_files` in `src/maxtext/configs/base.yml` or through command line arguments. You can also stream datasets directly from Hugging Face by providing `hf://` prefix patterns in `grain_train_files` (e.g., `hf://datasets/dvruette/lm1b/**/*.parquet`), or simply specifying `hf_path` with `grain_file_type=parquet` to automatically construct the `hf://` pattern. To stream any other Hugging Face dataset (JSON/JSONL, `.gz`, CSV, text, Arrow, or a Hub repo in any format), use `grain_file_type=hf` (see below). For gated datasets, make sure to set the `hf_access_token` config. Megatron `mmap` modes require a local or mounted filesystem path; they do not accept a `gs://` or `hf://` URI directly.
+
+1. **Hugging Face streaming (`grain_file_type=hf`)**: streams anything `datasets.load_dataset(hf_path, name=hf_name, data_dir=hf_data_dir, data_files=hf_train_files, split=train_split, streaming=True)` can read, i.e. the same sources as `dataset_type=hf`, using the same `hf_*` config fields. This includes Hub repos and the `json` (JSON lines or JSON arrays, optionally `.gz`), `csv`, `text`, `parquet` and `arrow` builders over local, `gs://` or `hf://` files. To migrate from `dataset_type=hf`, change only `dataset_type=grain grain_file_type=hf`. Pretraining, SFT (including `chat_template_path` and `formatting_func_path`), DPO, multimodal SFT and `training_objective=block_diffusion` are supported. Data is split across hosts by file when the number of files is divisible by the number of data-loading hosts (by example otherwise, which is slower), and further across Grain workers by file, so keep `grain_worker_count` at most the number of files per host. Shuffling uses a window buffer of `grain_shuffle_buffer_size`. The iterator position is checkpointed, but the shuffle-buffer contents are not, so a resumed run with shuffling sees a slightly different order. Requires `grain>=0.2.19`.
+
+   ```sh
+   python3 -m maxtext.trainers.pre_train.train ... dataset_type=grain grain_file_type=hf \
+     hf_path=allenai/c4 hf_data_dir=en grain_worker_count=4
+   python3 -m maxtext.trainers.pre_train.train ... dataset_type=grain grain_file_type=hf \
+     hf_path=json hf_train_files='gs://my-bucket/data/*.jsonl.gz'
+   ```
 
 2. Tune `grain_worker_count` for performance. This parameter controls the number of child processes used by Grain (more details in [behind_the_scenes](https://google-grain.readthedocs.io/en/latest/behind_the_scenes.html)). If you use a large number of workers, check your config for gcsfuse in [setup_gcsfuse.sh](https://github.com/AI-Hypercomputer/maxtext/blob/main/src/dependencies/scripts/setup_gcsfuse.sh) to avoid gcsfuse throttling.
 

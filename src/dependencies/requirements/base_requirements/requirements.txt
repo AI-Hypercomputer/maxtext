@@ -11,7 +11,7 @@ google-api-python-client
 google-cloud-aiplatform
 google-cloud-mldiagnostics>=1.0.9
 google-cloud-monitoring
-grain[parquet]
+grain[parquet]>=0.2.19
 huggingface_hub>=1.14.0
 jax
 jaxlib
