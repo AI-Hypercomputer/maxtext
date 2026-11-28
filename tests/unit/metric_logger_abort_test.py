@@ -319,6 +319,49 @@ class MoeDroplessFallbackLogTest(unittest.TestCase):
     self.assertNotIn("eval/moe_dropless_fallback_layers", cumulative)
 
 
+class PostTrainEvalLogTest(unittest.TestCase):
+  """Tests eval logging of the scalars written by the post-training eval hook."""
+
+  def _eval_logged(self, num_experts=1, mtp_num_layers=0, extra_scalars=None):
+    logger = MetricLogger.__new__(MetricLogger)  # skip __init__
+    logger.config = SimpleNamespace(num_experts=num_experts, mtp_num_layers=mtp_num_layers, use_indexer=False)
+    # The only eval scalars set by `BaseTrainingHooks.on_eval_step_end` in trainers/post_train/hooks.py.
+    metrics = {
+        "scalar": {
+            "eval/total_loss": 2.0,
+            "eval/avg_loss": 1.0,
+            "eval/total_weights": 8.0,
+            "eval/avg_perplexity": 2.7,
+            **(extra_scalars or {}),
+        }
+    }
+    with mock.patch.object(metric_logger_module.max_logging, "log") as log:
+      logger.log_metrics(metrics, step=0, metric_type="eval")
+    return [c.args[0] for c in log.call_args_list]
+
+  def test_moe_eval_without_moe_lb_loss(self):
+    lines = self._eval_logged(num_experts=8)
+    self.assertTrue(any("Completed eval after train step 0, loss=1.000" in l for l in lines))
+    self.assertFalse(any("avg_moe_lb_loss" in l for l in lines))
+
+  def test_mtp_eval_without_mtp_metrics(self):
+    lines = self._eval_logged(mtp_num_layers=1)
+    self.assertTrue(any("Completed eval after train step 0, loss=1.000" in l for l in lines))
+    self.assertFalse(any("mtp" in l for l in lines))
+
+  def test_pretrain_eval_logs_moe_and_mtp_metrics(self):
+    lines = self._eval_logged(
+        num_experts=8,
+        mtp_num_layers=1,
+        extra_scalars={
+            "eval/avg_moe_lb_loss": 0.25,
+            "eval/avg_mtp_loss": 0.5,
+            "eval/avg_mtp_acceptance_rate_percent": 40.0,
+        },
+    )
+    self.assertTrue(any("avg_moe_lb_loss=0.250, avg_mtp_loss=0.500, avg_mtp_acceptance_rate=40.00%" in l for l in lines))
+
+
 class MetricLoggerHostMaterializationTest(unittest.TestCase):
   """Tests host-CPU LR evaluation and batched jax.device_get scalar reads."""
 
