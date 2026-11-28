@@ -193,12 +193,16 @@ class CheckpointManager:
       self,
       checkpoint_dir: str,
       config: pyconfig.HyperParameters,
+      multiprocessing_options: ocp.options.MultiprocessingOptions | None = None,
   ) -> None:
     """Initializes the CheckpointManager.
 
     Args:
       checkpoint_dir: The root directory for saving checkpoints. Empty disables checkpointing.
       config: The training configuration.
+      multiprocessing_options: Orbax multiprocessing options for every save and restore, e.g. to
+        checkpoint from a subset of the JAX processes (`active_processes`) when they share a
+        `jax.distributed` world with processes that never checkpoint. None keeps Orbax's defaults.
 
     Raises:
       ValueError: If the workers write the checkpoint (ENABLE_PATHWAYS_PERSISTENCE=1 or
@@ -252,6 +256,10 @@ class CheckpointManager:
         colocated_python_checkpointing=colocated_python,
         enable_pathways_persistence=enable_pathways_persistence,
     )
+    if multiprocessing_options is not None:
+      context.multiprocessing.primary_host = multiprocessing_options.primary_host
+      context.multiprocessing.active_processes = multiprocessing_options.active_processes
+      context.multiprocessing.barrier_sync_key_prefix = multiprocessing_options.barrier_sync_key_prefix
     if colocated_python:
       _verify_colocated_python(context)
     elif enable_pathways_persistence:

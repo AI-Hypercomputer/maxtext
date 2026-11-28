@@ -1203,12 +1203,17 @@ def from_pretrained(
     tokenizer_pad_id=None,
     *,
     quant_mode_str: str = "train",
+    multiprocessing_options: ocp.options.MultiprocessingOptions | None = None,
 ):
   """Creates a NNX model with sharded parameters, possibly loading from a checkpoint.
 
   `quant_mode_str` is forwarded to model construction. Pass `"serve"` when
   loading a pre-quantized checkpoint so AQT layers materialize the on-disk
   scale factors instead of full-precision kernels.
+
+  `multiprocessing_options` configures the Orbax checkpointer restoring
+  `load_parameters_path`, e.g. to restore on a subset of the JAX processes
+  (`active_processes`). None keeps Orbax's all-process defaults.
   """
   original_mesh = mesh
   loads_safetensors_dynamic = config.source_checkpoint_layout == "safetensors_dynamic"
@@ -1308,6 +1313,10 @@ def from_pretrained(
       pathways_registry = _create_pathways_zarr2_registry(config)
       if pathways_registry is not None:
         handler_kwargs["type_handler_registry"] = pathways_registry
+      checkpointer_kwargs: dict[str, Any] = {}
+      if multiprocessing_options is not None:
+        handler_kwargs["multiprocessing_options"] = multiprocessing_options
+        checkpointer_kwargs["multiprocessing_options"] = multiprocessing_options
       ckptr = ocp.Checkpointer(
           ocp.PyTreeCheckpointHandler(
               restore_concurrent_gb=config.checkpoint_storage_concurrent_gb,
@@ -1315,7 +1324,8 @@ def from_pretrained(
               use_ocdbt=config.checkpoint_storage_use_ocdbt,
               use_zarr3=config.checkpoint_storage_use_zarr3,
               **handler_kwargs,
-          )
+          ),
+          **checkpointer_kwargs,
       )
 
       # This is a memory optimization. We don't want to restore the entire checkpoint - only the params.

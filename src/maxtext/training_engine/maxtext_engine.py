@@ -57,6 +57,7 @@ from maxtext.utils import model_creation_utils
 from maxtext.utils import sharding
 from maxtext.utils import train_utils
 import numpy as np
+from orbax.checkpoint import v1 as ocp
 
 # `id` of the empty buffer `get_metrics` returns when no metrics have been recorded.
 # Mirrors Tunix's `PeftTrainer.get_metrics`, which returns `MetricsBuffer(id=-1)` in the
@@ -707,6 +708,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       mesh: jax.sharding.Mesh | None = None,
       wrap_with_tunix_adapter: bool = False,
       tokenizer_pad_id: int | None = None,
+      checkpoint_multiprocessing_options: ocp.options.MultiprocessingOptions | None = None,
   ) -> None:
     """Initializes the MaxText trainer state and sharded model.
 
@@ -720,6 +722,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
         `wrap_with_tunix_adapter` is True: without it the adapter has no `segment_ids` to synthesize when
         Tunix supplies none, MaxText falls back to causal-only masking, and pad positions are attended to --
         silently corrupting trainer log-probs on every batch.
+      checkpoint_multiprocessing_options: Orbax multiprocessing options for every checkpoint this engine
+        saves or restores (including `load_parameters_path`), e.g. to scope barriers and the primary host
+        to the processes of `mesh` when they share a `jax.distributed` world with processes that never
+        checkpoint. None keeps Orbax's all-process defaults.
 
     Raises:
       TypeError: If training_config is not a pyconfig.HyperParameters instance.
@@ -768,6 +774,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       )
     self._config = training_config
     self._mesh = mesh
+    self._checkpoint_multiprocessing_options = checkpoint_multiprocessing_options
     self._init_rng = jax.random.PRNGKey(training_config.init_weights_seed)
     self._loss_fn: Callable[..., Any] | None = None
     self._fwd_only_fn: Callable[..., Any] | None = None
@@ -859,6 +866,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     self._checkpoint_manager = checkpointing.CheckpointManager(
         checkpoint_dir=self._checkpoint_dir(),
         config=self._config,
+        multiprocessing_options=self._checkpoint_multiprocessing_options,
     )
     self._metrics_recorder = metrics_module.MetricsRecorder()
     self._eval_metrics_recorder = metrics_module.MetricsRecorder(mode=metrics_module.Mode.EVAL)
@@ -899,6 +907,9 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
 
   def _build_model(self, wrap_with_tunix_adapter: bool, tokenizer_pad_id: int | None) -> Any:
     """Returns the model to train, adopting a mesh when this engine was given none."""
+    # `from_pretrained` restores through the Orbax v0 API, which takes the v0 options.
+    mp_options = self._checkpoint_multiprocessing_options
+    mp_options = None if mp_options is None else mp_options.v0()
     # Built under the logical axis rules, which some layers check at `__init__` (Tokamax ring
     # attention validates its sequence sharding there), and with any caller's `jax.set_mesh`
     # cleared: under a set mesh, `nnx.eval_shape` in `create_nnx_abstract_model` re-derives each
@@ -912,6 +923,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
           rng_key=self._init_rng,
           wrap_with_tunix_adapter=wrap_with_tunix_adapter,
           tokenizer_pad_id=tokenizer_pad_id,
+          multiprocessing_options=mp_options,
       )
     # `from_pretrained` returns `(model, mesh)` only when it had to derive the mesh itself. Adopt the
     # derived one so `self._model` is always a module and `compile()` can still build shardings.
