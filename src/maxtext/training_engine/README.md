@@ -191,6 +191,7 @@ sharding at construction (for example Tokamax ring attention), while under `jax.
 | `grad_dtype` | dtype the optimizer receives gradients in |
 | `cast_grads_after_all_reduce` (default false) | gradients that `fwd_bwd` sums across devices by an all-reduce alone leave it in the parameters' dtype and are cast to `grad_dtype` as they join the accumulator (see [One optimizer step](#one-optimizer-step)). Meant for TPU together with the libtpu flag `--xla_tpu_enable_offloading_copy_to_sparsecore=false`; see [Running fast on TPU](#running-fast-on-tpu). No effect when the parameters are already in `grad_dtype`, on the eager path (no `compile()`), or under the deferred data-parallel all-reduce, where `fwd_bwd` reduces no gradient |
 | `optimizer_memory_host_offload` | the optimizer state lives in pinned host memory; `update` moves it to the device and back, so it is not resident during the forward and backward passes |
+| `optimizer_device_resident_gib` (default 0.0) | under `optimizer_memory_host_offload`, keeps the largest non-scalar optimizer state leaves up to this many GiB per device in device memory between updates (updated in place via donation), offloading only the remaining leaves to pinned host memory |
 | `parameter_memory_host_offload` | not supported; raises |
 | `shard_optimizer_over_data` (Zero-1) | shards the optimizer state over the `data` axis inside `update`; requires `shard_mode=explicit` |
 | `skip_step_on_nan` (default false), `skip_step_on_spikes` | a non-finite or spiking step leaves the state unchanged and records `step_skipped` |

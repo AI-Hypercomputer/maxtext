@@ -48,6 +48,7 @@ import optax
 import orbax.checkpoint as ocp_v0
 from orbax.checkpoint import pathways as ocp_pathways
 from orbax.checkpoint import v1 as ocp
+import pydantic
 import pytest
 from tunix.dist_rl.common import datatypes
 from tunix.dist_rl.train import abstract_trainer
@@ -3633,6 +3634,345 @@ class MaxTextTrainingEngineTest(parameterized.TestCase):
       t = maxtext_engine.MaxTextTrainingEngine(cfg)
     t.with_loss_fn(self._weighted_loss_fn)
     return t
+
+  def _multi_leaf_adamw_engine(self, *, mesh=None, tx=None, **config_overrides):
+    """Returns an engine over a 3-parameter dummy model (64 B, 32 B, and 8 B float32 weights) with AdamW."""
+
+    class MultiLeafDummyModel(nnx.Module):
+
+      def __init__(self):
+        self.big = nnx.Param(jnp.arange(16, dtype=jnp.float32).reshape(4, 4) * 0.1)  # 64 B replicated
+        self.mid = nnx.Param(jnp.arange(8, dtype=jnp.float32).reshape(4, 2) * 0.1)  # 32 B replicated
+        self.bias = nnx.Param(jnp.array([0.5, -0.5], dtype=jnp.float32))  # 8 B replicated
+
+    cfg = self.setup_config(gradient_clipping_threshold=0.0, **config_overrides)
+    target_mesh = mesh if mesh is not None else self.mock_from_pretrained.return_value[1]
+    self.mock_from_pretrained.return_value = (MultiLeafDummyModel(), target_mesh)
+    chosen_tx = optax.adamw(0.05, weight_decay=0.01) if tx is None else tx
+    with mock.patch.object(
+        maxtext_engine.train_utils,
+        "create_training_optimizer",
+        return_value=(lambda step: jnp.array(0.05), chosen_tx),
+    ):
+      t = maxtext_engine.MaxTextTrainingEngine(cfg)
+    t.with_loss_fn(
+        lambda model, *_a, **_k: abstract_engine.WeightedMetric(
+            unreduced_sum=jnp.sum(model.big[...] * 2.0) + jnp.sum(model.mid[...] * 3.0) + jnp.sum(model.bias[...]),
+            denominator=jnp.array(2.0),
+        )
+    )
+    return t
+
+  def _array_and_scalar_kinds(self, t):
+    kinds = [
+        (leaf.ndim, leaf.sharding.memory_kind)
+        for leaf in jax.tree.leaves(nnx.state(t.state.optimizer))
+        if hasattr(leaf, "sharding")
+    ]
+    return [kind for ndim, kind in kinds if ndim > 0], {kind for ndim, kind in kinds if ndim == 0}
+
+  def test_optimizer_device_resident_gib_is_validated(self):
+    """Validates default 0.0, positive GiB with offload, and ValueError / ValidationError on invalid setups."""
+    common = {"model_name": "llama3.1-8b", "run_name": "test_run", "skip_jax_distributed_system": True}
+    cfg_argv = [None, get_test_config_path()]
+    self.assertEqual(pyconfig.initialize(cfg_argv, **common).optimizer_device_resident_gib, 0.0)
+    on_cfg = pyconfig.initialize(cfg_argv, optimizer_memory_host_offload=True, optimizer_device_resident_gib=6, **common)
+    self.assertEqual(on_cfg.optimizer_device_resident_gib, 6.0)
+    self.assertEqual(maxtext_engine._optimizer_device_resident_gib(on_cfg), 6.0)
+
+    for bad in (-1.0, float("inf"), float("-inf"), float("nan")):
+      with self.subTest(bad=bad):
+        with self.assertRaisesRegex(pydantic.ValidationError, "optimizer_device_resident_gib"):
+          pyconfig.initialize(cfg_argv, optimizer_memory_host_offload=True, optimizer_device_resident_gib=bad, **common)
+        mutated = self.setup_config(optimizer_memory_host_offload=True)
+        mutated.get_keys()["optimizer_device_resident_gib"] = bad
+        with self.assertRaisesRegex(ValueError, "optimizer_device_resident_gib"):
+          maxtext_engine.MaxTextTrainingEngine(mutated)
+
+    with self.assertRaisesRegex(pydantic.ValidationError, "requires optimizer_memory_host_offload=True"):
+      pyconfig.initialize(cfg_argv, optimizer_device_resident_gib=6, **common)
+
+    mutated_no_offload = self.setup_config(optimizer_memory_host_offload=False)
+    mutated_no_offload.get_keys()["optimizer_device_resident_gib"] = 0.25
+    with self.assertRaisesRegex(ValueError, "requires optimizer_memory_host_offload=True"):
+      maxtext_engine.MaxTextTrainingEngine(mutated_no_offload)
+
+    # Runtime `_compile_for_batch` guards when mesh is missing or offload was disabled post-init:
+    t_no_mesh = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=0.25)
+    t_no_mesh._mesh = None
+    with self.assertRaisesRegex(ValueError, "requires a mesh and optimizer_memory_host_offload=True"):
+      t_no_mesh.compile(DummyPayload())
+
+    t_disabled_offload = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=0.25)
+    t_disabled_offload._opt_resident_mask = None
+    t_disabled_offload._config.get_keys()["optimizer_memory_host_offload"] = False
+    with self.assertRaisesRegex(ValueError, "requires optimizer_memory_host_offload=True"):
+      t_disabled_offload.compile(DummyPayload())
+
+  def test_optimizer_device_resident_greedy_largest_first_backfill_ties_and_scalars(self):
+    """Greedy largest-first selection keeps budgeted array leaves on device, backfills smaller ones, and offloads scalars."""
+    # 1. Budget above the whole state keeps both array leaves on device and scalars on pinned_host.
+    t_all = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=1.0)
+    self.assertEqual(self._array_and_scalar_kinds(t_all), (["device", "device"], {"pinned_host"}))
+    t_all.compile(DummyPayload())
+    for _ in range(2):
+      t_all.fwd_bwd(DummyPayload())
+      t_all.fwd_bwd(DummyPayload())
+      t_all.update()
+      self.assertEqual(self._array_and_scalar_kinds(t_all), (["device", "device"], {"pinned_host"}))
+      self.assertEqual(self._memory_kinds(nnx.state(t_all.state.model, nnx.Param)), {"device"})
+
+    # 2. Budget of one 8-byte leaf keeps the first equal leaf (mu) on device and offloads the second (nu).
+    t_tie = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=8 / 2**30)
+    t_tie.compile(DummyPayload())
+    for _ in range(2):
+      t_tie.fwd_bwd(DummyPayload())
+      t_tie.update()
+      self.assertEqual(self._array_and_scalar_kinds(t_tie), (["device", "pinned_host"], {"pinned_host"}))
+
+    # 3. Budget smaller than every leaf logs a warning once and keeps every leaf in pinned_host.
+    with self.assertLogs(level="WARNING") as logs:
+      t_small = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=4 / 2**30)
+    self.assertTrue(any("smaller than every optimizer leaf" in line for line in logs.output), logs.output)
+    t_small.compile(DummyPayload())
+    t_small.fwd_bwd(DummyPayload())
+    t_small.update()
+    self.assertEqual(self._array_and_scalar_kinds(t_small), (["pinned_host", "pinned_host"], {"pinned_host"}))
+
+    # 4. Multi-size model (big=64 B, mid=32 B, bias=8 B for mu and nu): budget 140 B selects
+    #    big.mu (64 B) + big.nu (64 B) = 128 B, skips mid (32 B), and backfills bias.mu (8 B) = 136 B.
+    t_backfill = self._multi_leaf_adamw_engine(
+        optimizer_memory_host_offload=True,
+        optimizer_device_resident_gib=140 / 2**30,
+    )
+    t_backfill.compile(DummyPayload())
+    t_backfill.fwd_bwd(DummyPayload())
+    t_backfill.update()
+    opt_state = t_backfill.state.optimizer.opt_state[0]
+    self.assertEqual(opt_state.mu["big"].get_value().sharding.memory_kind, "device")
+    self.assertEqual(opt_state.nu["big"].get_value().sharding.memory_kind, "device")
+    self.assertEqual(opt_state.mu["bias"].get_value().sharding.memory_kind, "device")
+    self.assertEqual(opt_state.nu["bias"].get_value().sharding.memory_kind, "pinned_host")
+    self.assertEqual(opt_state.mu["mid"].get_value().sharding.memory_kind, "pinned_host")
+    self.assertEqual(opt_state.nu["mid"].get_value().sharding.memory_kind, "pinned_host")
+    self.assertEqual(opt_state.count.get_value().sharding.memory_kind, "pinned_host")
+    self.assertEqual(t_backfill.state.optimizer.step.get_value().sharding.memory_kind, "pinned_host")
+
+  def test_optimizer_device_resident_preserves_numerics_and_donates_resident_leaves(self):
+    """Compiled multi-microbatch steps match bit-for-bit across all budgets and donate resident leaves in place."""
+    trained = []
+    for overrides in (
+        {},
+        {"optimizer_memory_host_offload": True, "optimizer_device_resident_gib": 0.0},
+        {"optimizer_memory_host_offload": True, "optimizer_device_resident_gib": 140 / 2**30},
+        {"optimizer_memory_host_offload": True, "optimizer_device_resident_gib": 1.0},
+    ):
+      t = self._multi_leaf_adamw_engine(**overrides)
+      t.compile(DummyPayload())
+      for step_idx in range(2):
+        p1 = DummyPayload(token_ids=jnp.ones((2, 2)) * (step_idx + 1))
+        p2 = DummyPayload(token_ids=jnp.ones((2, 2)) * (step_idx + 2))
+        t.fwd_bwd(p1)
+        t.fwd_bwd(p2)
+        t.update()
+      trained.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    for other in trained[1:]:
+      jax.tree.map(np.testing.assert_array_equal, trained[0], other)
+
+    # Verify resident device leaves are donated into the compiled update executable in place:
+    t_donate = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=1.0)
+    t_donate.compile(DummyPayload())
+    t_donate.fwd_bwd(DummyPayload())
+    t_donate.update()
+    before = [leaf for leaf in jax.tree.leaves(nnx.state(t_donate.state.optimizer)) if getattr(leaf, "ndim", 0) > 0]
+    self.assertLen(before, 2)
+    t_donate.fwd_bwd(DummyPayload())
+    t_donate.update()
+    self.assertEqual([leaf.is_deleted() for leaf in before], [True, True])
+
+  def test_optimizer_device_resident_eager_caching_spikes_and_zero1(self):
+    """Covers eager execution, once-per-layout selection caching, skip_step_on_spikes, and Zero-1 interaction."""
+    # 1. Eager path numerical parity and residency preservation:
+    eager_results = []
+    for overrides in (
+        {},
+        {"optimizer_memory_host_offload": True, "optimizer_device_resident_gib": 140 / 2**30},
+    ):
+      t = self._multi_leaf_adamw_engine(**overrides)
+      for _ in range(2):
+        t.fwd_bwd(DummyPayload())
+        t.fwd_bwd(DummyPayload())
+        t.update()
+        if overrides:
+          self.assertEqual(self._memory_kinds(nnx.state(t.state.optimizer)), {"device", "pinned_host"})
+      self.assertFalse(t._compiled)
+      eager_results.append(jax.device_get((nnx.state(t.state.model, nnx.Param), nnx.state(t.state.optimizer))))
+    jax.tree.map(np.testing.assert_array_equal, eager_results[0], eager_results[1])
+
+    # 2. Selection is cached per layout rather than recomputed on every step:
+    with mock.patch.object(
+        train_state_nnx,
+        "pick_device_resident_optimizer_leaves",
+        wraps=train_state_nnx.pick_device_resident_optimizer_leaves,
+    ) as picker:
+      t_cached = self._adam_engine(optimizer_memory_host_offload=True, optimizer_device_resident_gib=1.0)
+      t_cached.compile(DummyPayload())
+      t_cached.fwd_bwd(DummyPayload())
+      t_cached.update()
+      calls_after_first = picker.call_count
+      self.assertGreaterEqual(calls_after_first, 1)
+      for _ in range(3):
+        t_cached.fwd_bwd(DummyPayload())
+        t_cached.update()
+      self.assertEqual(picker.call_count, calls_after_first)
+
+    # 3. Compiled `skip_step_on_spikes=True` with partial `optimizer_device_resident_gib > 0`:
+    cfg_spikes = self.setup_config(
+        gradient_clipping_threshold=0.0,
+        optimizer_memory_host_offload=True,
+        optimizer_device_resident_gib=140 / 2**30,
+        skip_step_on_spikes=True,
+        skip_step_interval=6,
+        skip_step_scaling_factor=6.0,
+    )
+    real_tx = maxtext_engine.optimizers.get_optimizer(cfg_spikes, lambda step: jnp.array(0.05))
+    t_spikes = self._multi_leaf_adamw_engine(
+        tx=real_tx,
+        optimizer_memory_host_offload=True,
+        optimizer_device_resident_gib=140 / 2**30,
+        skip_step_on_spikes=True,
+        skip_step_interval=6,
+        skip_step_scaling_factor=6.0,
+    )
+    t_spikes.with_loss_fn(
+        lambda model, _cfg, data, *_a, **_k: abstract_engine.WeightedMetric(
+            unreduced_sum=jnp.mean(data["token_ids"])
+            * (jnp.sum(model.big[...] * 2.0) + jnp.sum(model.mid[...] * 3.0) + jnp.sum(model.bias[...])),
+            denominator=jnp.array(2.0),
+        )
+    )
+    t_spikes.compile(DummyPayload(token_ids=jnp.ones((4, 2))))
+    for s in (1.0, 1.1):
+      t_spikes.fwd_bwd(DummyPayload(token_ids=jnp.full((4, 2), s)))
+      t_spikes.update()
+      np.testing.assert_array_equal(
+          np.asarray(t_spikes.get_metrics(clear_cache=True).scalar_metrics["step_skipped"]), [0.0]
+      )
+      self.assertEqual(self._memory_kinds(nnx.state(t_spikes.state.optimizer)), {"device", "pinned_host"})
+
+    weights_before_spike = jax.device_get(nnx.state(t_spikes.state.model, nnx.Param))
+    t_spikes.fwd_bwd(DummyPayload(token_ids=jnp.full((4, 2), 1000.0)))
+    t_spikes.update()
+    np.testing.assert_array_equal(
+        np.asarray(t_spikes.get_metrics(clear_cache=True).scalar_metrics["step_skipped"]), [1.0]
+    )
+    jax.tree.map(
+        np.testing.assert_array_equal,
+        weights_before_spike,
+        jax.device_get(nnx.state(t_spikes.state.model, nnx.Param)),
+    )
+    self.assertEqual(self._memory_kinds(nnx.state(t_spikes.state.optimizer)), {"device", "pinned_host"})
+
+    # 4. Zero-1 (`shard_optimizer_over_data=True`): per-device shard bytes shrink on compile() and preserve parity.
+    if jax.device_count() >= 2:
+      data_parallelism = min(2, jax.device_count())
+      tensor_parallelism = jax.device_count() // data_parallelism
+      z1_states = []
+      for gib in (0.0, 40 / 2**30):
+        cfg_z1 = self.setup_config(
+            gradient_clipping_threshold=0.0,
+            optimizer_memory_host_offload=True,
+            optimizer_device_resident_gib=gib,
+            shard_optimizer_over_data=True,
+            shard_mode="explicit",
+            ici_fsdp_parallelism=1,
+            ici_data_parallelism=data_parallelism,
+            ici_tensor_parallelism=tensor_parallelism,
+        )
+        mesh_z1 = jax.sharding.Mesh(
+            maxtext_utils.create_device_mesh(cfg_z1),
+            cfg_z1.mesh_axes,
+            axis_types=(jax.sharding.AxisType.Explicit,) * len(cfg_z1.mesh_axes),
+        )
+        t_z1 = self._multi_leaf_adamw_engine(
+            mesh=mesh_z1,
+            optimizer_memory_host_offload=True,
+            optimizer_device_resident_gib=gib,
+            shard_optimizer_over_data=True,
+            shard_mode="explicit",
+            ici_fsdp_parallelism=1,
+            ici_data_parallelism=data_parallelism,
+            ici_tensor_parallelism=tensor_parallelism,
+        )
+        if gib > 0.0:
+          # Before Zero-1 (`__init__`), `big.mu` is 64 B (> 40 B) and starts on `pinned_host`;
+          # on `compile()`, Zero-1 shards `big.mu` over `data=2` to 32 B/device and promotes it to `device`.
+          self.assertEqual(t_z1.state.optimizer.opt_state[0].mu["big"].get_value().sharding.memory_kind, "pinned_host")
+        t_z1.compile(DummyPayload(token_ids=jnp.ones((4, 2))))
+        if gib > 0.0:
+          self.assertEqual(t_z1.state.optimizer.opt_state[0].mu["big"].get_value().sharding.memory_kind, "device")
+        for _ in range(2):
+          t_z1.fwd_bwd(DummyPayload(token_ids=jnp.ones((4, 2))))
+          t_z1.update()
+        if gib > 0.0:
+          self.assertEqual(self._memory_kinds(nnx.state(t_z1.state.optimizer)), {"device", "pinned_host"})
+        z1_states.append(jax.device_get((nnx.state(t_z1.state.model, nnx.Param), nnx.state(t_z1.state.optimizer))))
+      jax.tree.map(np.testing.assert_array_equal, z1_states[0], z1_states[1])
+
+  def test_optimizer_device_resident_checkpoint_save_and_restore_round_trip(self):
+    """Orbax save/restore round-trip preserves mixed device/pinned_host placement and bit-exact continuation."""
+    budget_gib = 140 / 2**30
+    ckpt_dir = self.create_tempdir().full_path
+    t_src = self._multi_leaf_adamw_engine(
+        enable_checkpointing=True,
+        checkpoint_dir=ckpt_dir,
+        optimizer_memory_host_offload=True,
+        optimizer_device_resident_gib=budget_gib,
+    )
+    t_src.compile(DummyPayload())
+    for step_idx in range(2):
+      t_src.fwd_bwd(DummyPayload(token_ids=jnp.ones((2, 2)) * (step_idx + 1)))
+      t_src.fwd_bwd(DummyPayload(token_ids=jnp.ones((2, 2)) * (step_idx + 2)))
+      t_src.update()
+
+    expected_kinds = [
+        leaf.sharding.memory_kind
+        for leaf in jax.tree.leaves(nnx.state(t_src.state.optimizer))
+        if hasattr(leaf, "sharding")
+    ]
+    self.assertEqual(set(expected_kinds), {"device", "pinned_host"})
+    t_src.save_checkpoint(metadata={"step": t_src.train_step}, force=True)
+
+    next_payload = DummyPayload(token_ids=jnp.ones((2, 2)) * 5.0)
+    t_src.fwd_bwd(next_payload)
+    t_src.update()
+    expected_step3 = jax.device_get((nnx.state(t_src.state.model, nnx.Param), nnx.state(t_src.state.optimizer)))
+
+    for compile_before_restore in (False, True):
+      with self.subTest(compile_before_restore=compile_before_restore):
+        t_dst = self._multi_leaf_adamw_engine(
+            enable_checkpointing=True,
+            checkpoint_dir=ckpt_dir,
+            optimizer_memory_host_offload=True,
+            optimizer_device_resident_gib=budget_gib,
+        )
+        if compile_before_restore:
+          t_dst.compile(DummyPayload())
+        self.assertEqual(t_dst.restore_checkpoint(), {"step": 2})
+        self.assertEqual(t_dst.train_step, 2)
+        restored_kinds = [
+            leaf.sharding.memory_kind
+            for leaf in jax.tree.leaves(nnx.state(t_dst.state.optimizer))
+            if hasattr(leaf, "sharding")
+        ]
+        self.assertEqual(restored_kinds, expected_kinds)
+        if not compile_before_restore:
+          t_dst.compile(DummyPayload())
+        t_dst.fwd_bwd(next_payload)
+        t_dst.update()
+        self.assertEqual(t_dst.train_step, 3)
+        restored_after_step3 = jax.device_get((nnx.state(t_dst.state.model, nnx.Param), nnx.state(t_dst.state.optimizer)))
+        jax.tree.map(np.testing.assert_array_equal, expected_step3, restored_after_step3)
 
   def test_parameter_offload_is_rejected(self):
     """The engine has no parameter-offload path, so the flag must fail loudly."""

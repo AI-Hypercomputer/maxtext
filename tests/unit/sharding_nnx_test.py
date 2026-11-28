@@ -31,6 +31,7 @@ import optax
 @dataclass
 class _Cfg:
   shard_optimizer_over_data: bool = False
+  optimizer_device_resident_gib: float = 0.0
 
 
 class _LinearNNX(nnx.Module):

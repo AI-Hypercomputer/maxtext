@@ -219,6 +219,21 @@ class ModelBundle(nnx.Module):
     return jax.lax.stop_gradient(self.teacher_model(*args, **kwargs))  # pyrefly: ignore[not-callable]
 
 
+def _validate_distill_optimizer_budget(
+    student_config: Any,
+    teacher_config: Any = None,
+) -> None:
+  """Rejects unsupported optimizer_device_resident_gib > 0 on distillation configs."""
+  for role_name, role_cfg in (("student_config", student_config), ("teacher_config", teacher_config)):
+    if role_cfg is None:
+      continue
+    if role_cfg.optimizer_device_resident_gib > 0.0:
+      raise ValueError(
+          f"Distillation ({role_name}) does not support optimizer_device_resident_gib > 0 "
+          f"(got {role_cfg.optimizer_device_resident_gib}); set optimizer_device_resident_gib=0.0."
+      )
+
+
 class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
   """Custom Trainer to preserve MaxText fields and log Teacher metrics.
 
@@ -238,6 +253,7 @@ class MaxTextDistillationTrainer(peft_trainer.PeftTrainer):
       student_freeze_param_filter: Callable[[Any], bool] | None = None,
       **kwargs,
   ):
+    _validate_distill_optimizer_budget(student_config, teacher_config)
     # We pass a dummy optimizer to the base PeftTrainer temporarily to prevent PeftTrainer from eagerly
     # allocating massive optimizer states for the entire ModelBundle (including the frozen teacher) before
     # redefining the trainer optimizer here.
@@ -710,6 +726,7 @@ def train_distill(
     teacher_config: Configuration object for the Teacher model (frozen).
   """
   # Validate vocab size match between Student and Teacher
+  _validate_distill_optimizer_budget(student_config, teacher_config)
   if student_config.vocab_size != teacher_config.vocab_size:
     raise ValueError(
         f"Vocab size mismatch! Student: {student_config.vocab_size}, Teacher: {teacher_config.vocab_size}. "
