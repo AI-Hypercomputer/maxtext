@@ -90,9 +90,71 @@ def upload_blob(destination_gcs_name, source_file_name):
   blob.upload_from_filename(source_file_name)
 
 
+def _is_same_or_nested_path(local_dir, target_dir):
+  """Returns True if `target_dir` is the same path as, or nested inside, `local_dir`."""
+  real_local = os.path.realpath(local_dir)
+  real_target = os.path.realpath(target_dir)
+  try:
+    return os.path.commonpath([real_local, real_target]) == real_local
+  except ValueError:
+    return False
+
+
+def _save_dump_to_local(local_dir, target_dir, module_name=None, delete_local_after=True, all_host_upload=False):
+  """Copies a local dump directory to a local or mounted filesystem target directory."""
+  if all_host_upload:
+    hostname = socket.gethostname()  # Alternatively can use jax.process_id()
+    target_dir = os.path.join(target_dir, hostname)
+
+  real_local = os.path.realpath(local_dir)
+  real_target = os.path.realpath(target_dir)
+  if real_local == real_target:
+    max_logging.log(f"Dump target {target_dir} matches local directory; keeping files in place.")
+    return
+
+  # Guard against infinite walk or data loss if target_dir is inside local_dir.
+  target_inside_local = _is_same_or_nested_path(local_dir, target_dir)
+  os.makedirs(target_dir, exist_ok=True)
+  max_logging.log(f"Saving Dump to {target_dir}...")
+  for root, dirs, files in os.walk(local_dir):
+    if target_inside_local:
+      dirs[:] = [d for d in dirs if os.path.realpath(os.path.join(root, d)) != real_target]
+    for file in files:
+      if module_name and module_name not in file:
+        continue
+      max_logging.log(f"Saving {file}")
+      local_path = os.path.join(root, file)
+      relative_path = os.path.relpath(local_path, local_dir)
+      dest_path = os.path.join(target_dir, relative_path)
+      os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+      shutil.copy2(local_path, dest_path)
+  max_logging.log(f"Dump Saved to {target_dir}!")
+
+  if delete_local_after and not target_inside_local:
+    shutil.rmtree(local_dir)
+
+
 def upload_dump(local_dir, target_dir, module_name=None, delete_local_after=True, all_host_upload=False):
-  """Uploads a directory to a GCS location, with an optional filter (no-op if not found and decoupled)."""
+  """Uploads a dump directory to GCS or copies it to a local/mounted target directory.
+
+  When `target_dir` starts with `gs://`, uploads matching files to GCS (no-op if GCS is
+  unavailable and decoupled) and optionally deletes `local_dir`. Otherwise, copies matching
+  files to the local/mounted filesystem path without invoking GCS APIs; if `target_dir`
+  resolves to `local_dir` (or a subdirectory of it), files are preserved and `local_dir` is
+  not deleted even when `delete_local_after=True`.
+  """
   if not all_host_upload and jax.process_index() != 0:
+    return
+  if not target_dir:
+    return
+  if not str(target_dir).startswith("gs://"):
+    _save_dump_to_local(
+        local_dir,
+        target_dir,
+        module_name=module_name,
+        delete_local_after=delete_local_after,
+        all_host_upload=all_host_upload,
+    )
     return
   if not _gcs_guard("upload_dump"):
     return
