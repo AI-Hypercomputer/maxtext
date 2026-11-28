@@ -4333,6 +4333,14 @@ class Muon(BaseModel):
           "Whether to use all-to-all communication during Newton-Schulz" " iterations in the maxtext_muon optimizer."
       ),
   )
+  muon_per_head_qkv: bool = Field(
+      False,
+      description=(
+          "Whether to apply Per-Head Muon orthogonalization to attention Q, K, and V projection matrices"
+          " (partitioning momentum along the head dimension and splitting MLA wkv_b into separate K and V blocks"
+          " per head, as in Kimi K3 §2.5)."
+      ),
+  )
 
 
 class PositionalEmbedding(BaseModel):
@@ -9207,10 +9215,27 @@ class MaxTextConfig(
         DecoderBlockType.GPT_OSS,
         DecoderBlockType.GEMMA3,
         DecoderBlockType.LLAMA2,
+        DecoderBlockType.KIMI_LINEAR,
     ]:
       raise ValueError(
           "Muon dimension numbers haven't been tested for this model. Run this command first: "
           f"`python3 -m maxtext.utils.muon_utils {self.model_name} True`"
+      )
+    if self.opt_type == "muon" and self.moe_flat_fsdp_weights:
+      raise ValueError(
+          "opt_type='muon' is not yet supported with moe_flat_fsdp_weights=True: flattened 2D expert kernels"
+          " [num_experts * in_dim, out_dim] would be orthogonalized across all experts jointly instead of per expert."
+      )
+    if (
+        self.opt_type == "muon"
+        and self.muon_per_head_qkv
+        and self.attention_type == "mla"
+        and self.qk_nope_head_dim != self.v_head_dim
+    ):
+      raise ValueError(
+          "muon_per_head_qkv=True with attention_type='mla' currently requires qk_nope_head_dim == v_head_dim"
+          f" so wkv_b can be split evenly into K and V blocks, got qk_nope_head_dim={self.qk_nope_head_dim}"
+          f" and v_head_dim={self.v_head_dim}."
       )
     if self.force_q_layout and not self.use_jax_splash:
       raise ValueError("`force_q_layout` can only be true if `use_jax_splash` is also true.")
@@ -9218,6 +9243,12 @@ class MaxTextConfig(
     if self.use_qk_clip and self.attention_type != "mla":
       raise ValueError(
           f"QK-Clip is only supported when attention_type='mla', but found attention_type='{self.attention_type}'."
+      )
+
+    if self.use_qk_clip and self.prefetch_fsdp_weights:
+      raise ValueError(
+          "use_qk_clip=True is not supported with prefetch_fsdp_weights=True because FSDP weight prefetching"
+          " does not propagate sown nnx.Intermediate stats (max_logits) from scanned layers."
       )
 
     if self.use_qk_clip and self.attn_logits_soft_cap is not None:

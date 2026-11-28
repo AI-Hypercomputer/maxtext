@@ -429,19 +429,48 @@ def scale_by_muon(
         if dim_nums is not None and dim_nums.split_output_chunks > 1:
           _, output_axes = _validate_split_output_chunks(x, dim_nums)
           out_ax = output_axes[0]
+          k = dim_nums.split_output_chunks
           sharding = dim_nums.sharding
-          if (
-              sharding is not None
-              and reshape_utils.is_explicit_axes(sharding)
-              and reshape_utils.get_dim_mesh_axes(sharding, out_ax)
-          ):
-            unsharded_out = _drop_axes_sharding(sharding, x.ndim, (out_ax,))
-            x = jax.reshard(x, unsharded_out)
-            y = jax.reshard(y, unsharded_out)
-          x_chunks = jnp.split(x, dim_nums.split_output_chunks, axis=out_ax)
-          y_chunks = jnp.split(y, dim_nums.split_output_chunks, axis=out_ax)
-          scaled = [jnp.sum(xc * yc) * yc for xc, yc in zip(x_chunks, y_chunks)]
-          res = jnp.concatenate(scaled, axis=out_ax)
+          out_mesh_axes = reshape_utils.get_dim_mesh_axes(sharding, out_ax)
+          out_shards = (
+              math.prod(sharding.mesh.shape.get(axis, 1) for axis in out_mesh_axes) if sharding is not None else 1
+          )
+          explicit_axes = reshape_utils.is_explicit_axes(sharding)
+          work_sharding = sharding
+          split_sharding = None
+          if sharding is not None:
+            if out_shards > 1 and k % out_shards == 0:
+              # Each output shard owns an exact integer number of chunks: reshape locally with zero communication.
+              work_sharding = _drop_axes_sharding(sharding, x.ndim, ())
+              work_spec = list(work_sharding.spec)
+              split_spec = jax.sharding.PartitionSpec(
+                  *(work_spec[:out_ax] + [work_spec[out_ax], None] + work_spec[out_ax + 1 :])
+              )
+            else:
+              if out_mesh_axes:
+                work_sharding = _drop_axes_sharding(sharding, x.ndim, (out_ax,))
+                if explicit_axes:
+                  x = jax.reshard(x, work_sharding)
+                  y = jax.reshard(y, work_sharding)
+              else:
+                work_sharding = _drop_axes_sharding(sharding, x.ndim, ())
+              work_spec = list(work_sharding.spec)
+              split_spec = jax.sharding.PartitionSpec(*(work_spec[:out_ax] + [None, None] + work_spec[out_ax + 1 :]))
+            split_sharding = jax.sharding.NamedSharding(sharding.mesh, split_spec)
+          split_shape = (*x.shape[:out_ax], k, x.shape[out_ax] // k, *x.shape[out_ax + 1 :])
+          if explicit_axes and split_sharding is not None:
+            x_r = jnp.reshape(x, split_shape, out_sharding=split_sharding)
+            y_r = jnp.reshape(y, split_shape, out_sharding=split_sharding)
+          else:
+            x_r = jnp.reshape(x, split_shape)
+            y_r = jnp.reshape(y, split_shape)
+          sum_axes = tuple(i for i in range(len(split_shape)) if i != out_ax)
+          scaled_r = jnp.sum(x_r * y_r, axis=sum_axes, keepdims=True) * y_r
+          res = (
+              jnp.reshape(scaled_r, x.shape, out_sharding=work_sharding)
+              if explicit_axes and work_sharding is not None
+              else jnp.reshape(scaled_r, x.shape)
+          )
           return reshape_utils.reshard_or_constrain(res, sharding) if sharding is not None else res
         return jnp.sum(x * y) * y
 
@@ -494,18 +523,24 @@ def orthogonalize(
     k = dim_nums.split_output_chunks
     sharding = dim_nums.sharding
     out_mesh_axes = reshape_utils.get_dim_mesh_axes(sharding, out_ax)
-    is_out_actively_sharded = bool(
-        sharding is not None and any(sharding.mesh.shape.get(axis, 1) > 1 for axis in out_mesh_axes)
-    )
-    if not is_out_actively_sharded:
-      # Fast batched path (TP=1 or unsharded): fold the `k` concatenated output matrices into an
-      # unsharded batch axis and run a single batched Newton-Schulz orthogonalization.
+    out_shards = math.prod(sharding.mesh.shape.get(axis, 1) for axis in out_mesh_axes) if sharding is not None else 1
+    is_out_actively_sharded = out_shards > 1
+    if not is_out_actively_sharded or k % out_shards == 0:
+      # Fast batched path: fold the `k` concatenated output matrices into a batch axis and run a
+      # single batched Newton-Schulz orthogonalization.
+      # - When `out_ax` is unsharded (TP=1): `k` becomes an unsharded batch axis.
+      # - When `out_ax` is actively sharded and `k % out_shards == 0` (e.g. KDA per-head Q/K/V
+      #   with `k = num_heads` and TP dividing `num_heads`, or pre-fused MoE with `k=2, TP=2`):
+      #   each TP rank already owns `k // out_shards` complete chunks, so reshaping
+      #   `(..., k * d, ...) -> (..., k, d, ...)` keeps `out_mesh_axes` on the chunk batch axis
+      #   and unshards `d` with zero TP communication and no Python loop over `k`.
       # Under 3D flattening in reshape_utils, local_batch_size == 1 replicates instead of padding to
-      # matrix_shards. Folding k chunks raises local_batch_size from 1 to k; when k < matrix_shards,
-      # replicate reduction_axes once up front to mirror that path (zero pad, 1 all-gather instead of
-      # repeated all-reduces across NS steps, and spectral preconditioning SVD under Explicit sharding).
-      # When orig_local_batch_size > 1, ceil(k * b / M) <= k * ceil(b / M), so all-to-all never increases padding.
+      # matrix_shards. Folding `local_k = k // out_shards` chunks raises local_batch_size from 1 to
+      # `local_k`; when `local_k < matrix_shards`, replicate `reduction_axes` once up front to mirror
+      # that path (zero pad, 1 all-gather instead of repeated all-reduces across NS steps, and
+      # spectral preconditioning SVD under Explicit sharding).
       replicate_matrix = False
+      local_k = k // out_shards
       if use_all_to_all and sharding is not None:
         orig_batch_axes = tuple(ax for ax in range(x.ndim) if ax not in reduction_axes and ax != out_ax)
         orig_batch_size = math.prod(x.shape[ax] for ax in orig_batch_axes)
@@ -514,22 +549,33 @@ def orthogonalize(
         orig_local_batch_size = orig_batch_size // orig_batch_shards
         matrix_mesh_axes = reshape_utils.get_flat_mesh_axes(sharding, reduction_axes)
         matrix_shards = math.prod(sharding.mesh.shape.get(ax, 1) for ax in matrix_mesh_axes)
-        replicate_matrix = matrix_shards > 1 and orig_local_batch_size == 1 and k < matrix_shards
+        replicate_matrix = matrix_shards > 1 and orig_local_batch_size == 1 and local_k < matrix_shards
       x_work = x
       work_sharding = sharding
       split_sharding = None
       if sharding is not None:
-        if replicate_matrix:
-          work_sharding = _drop_axes_sharding(sharding, x.ndim, (out_ax, *reduction_axes))
-          x_work = reshape_utils.reshard_or_constrain(x_work, work_sharding)
-        elif out_mesh_axes:
-          # Strip size-1 mesh axes on `out_ax` before reshaping (metadata-only under Explicit sharding).
-          work_sharding = _drop_axes_sharding(sharding, x.ndim, (out_ax,))
-          x_work = reshape_utils.reshard_or_constrain(x_work, work_sharding)
+        if is_out_actively_sharded:
+          if replicate_matrix:
+            work_sharding = _drop_axes_sharding(sharding, x.ndim, reduction_axes)
+            x_work = reshape_utils.reshard_or_constrain(x_work, work_sharding)
+          else:
+            work_sharding = _drop_axes_sharding(sharding, x.ndim, ())
+          work_spec = list(work_sharding.spec)
+          split_spec = jax.sharding.PartitionSpec(
+              *(work_spec[:out_ax] + [work_spec[out_ax], None] + work_spec[out_ax + 1 :])
+          )
         else:
-          work_sharding = _drop_axes_sharding(sharding, x.ndim, ())
-        work_spec = list(work_sharding.spec)
-        split_spec = jax.sharding.PartitionSpec(*(work_spec[:out_ax] + [None, None] + work_spec[out_ax + 1 :]))
+          if replicate_matrix:
+            work_sharding = _drop_axes_sharding(sharding, x.ndim, (out_ax, *reduction_axes))
+            x_work = reshape_utils.reshard_or_constrain(x_work, work_sharding)
+          elif out_mesh_axes:
+            # Strip size-1 mesh axes on `out_ax` before reshaping (metadata-only under Explicit sharding).
+            work_sharding = _drop_axes_sharding(sharding, x.ndim, (out_ax,))
+            x_work = reshape_utils.reshard_or_constrain(x_work, work_sharding)
+          else:
+            work_sharding = _drop_axes_sharding(sharding, x.ndim, ())
+          work_spec = list(work_sharding.spec)
+          split_spec = jax.sharding.PartitionSpec(*(work_spec[:out_ax] + [None, None] + work_spec[out_ax + 1 :]))
         split_sharding = jax.sharding.NamedSharding(sharding.mesh, split_spec)
       explicit_axes = reshape_utils.is_explicit_axes(sharding)
       split_shape = (*x.shape[:out_ax], k, x.shape[out_ax] // k, *x.shape[out_ax + 1 :])

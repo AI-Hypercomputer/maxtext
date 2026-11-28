@@ -59,11 +59,11 @@ def get_maxtext_muon_weight_dimension_numbers(model, config=None, mesh=None, ver
   if config is not None:
     logical_rules = getattr(config, "logical_axis_rules", ())
     include_routers = getattr(config, "muon_include_routers", True)
-    prefuse_moe_weights = muon_utils.is_prefuse_moe_weights_enabled(config)
+    per_head_qkv = muon_utils.is_per_head_qkv_enabled(config)
   else:
     logical_rules = ()
     include_routers = True
-    prefuse_moe_weights = False
+    per_head_qkv = False
 
   with jax.set_mesh(mesh), logical_axis_rules(logical_rules):
     # Extract abstract parameters from the NNX model hierarchy
@@ -78,15 +78,18 @@ def get_maxtext_muon_weight_dimension_numbers(model, config=None, mesh=None, ver
       abs_val = _get_leaf_value(abs_leaf)
       val_shape = getattr(abs_val, "shape", None)
       dim_num = muon_utils.to_stacked_layout(
-          muon_utils.transform_logic(path_strings, shape=val_shape, include_routers=include_routers),
+          muon_utils.transform_logic(
+              path_strings,
+              shape=val_shape,
+              include_routers=include_routers,
+              per_head_qkv=per_head_qkv,
+          ),
           len(val_shape or ()),
           muon_utils.get_scan_axes(abs_leaf),
       )
       if dim_num is not None:
         sharding = _extract_sharding(leaf)
-        split_chunks = (
-            2 if prefuse_moe_weights and muon_utils.is_prefused_moe_wi_path(path_strings, shape=val_shape) else 1
-        )
+        split_chunks = muon_utils.get_split_output_chunks(path_strings, shape=val_shape, config=config)
         return smdn(
             reduction_axis=dim_num.reduction_axis,
             output_axis=dim_num.output_axis,

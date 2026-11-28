@@ -98,3 +98,5 @@ logits_via_embedding: false
 # Kimi-K3's HF tokenizer is tiktoken-based custom code (tokenization_kimi.py), loaded through AutoTokenizer.
 tokenizer_type: "huggingface"
 tokenizer_trust_remote_code: true
+# When opt_type=muon is selected, use Kimi-K3's Per-Head Muon (§2.5) for Q, K, and V projections.
+muon_per_head_qkv: true

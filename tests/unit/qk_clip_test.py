@@ -662,6 +662,61 @@ class QKClipNNXTest(unittest.TestCase):
     np.testing.assert_allclose(linen_wq, nnx_wq, rtol=1e-6, atol=1e-6)
     np.testing.assert_allclose(linen_wkv, nnx_wkv, rtol=1e-6, atol=1e-6)
 
+  def test_scanned_mla_clips_per_layer_independently(self):
+    """Scanned MLA layers clip each scanned layer using its own max_logits (both param_scan_axis=0 and 1)."""
+    num_layers, rank, num_heads, nope_dim, rope_dim = 2, 3, 2, 4, 2
+    dim = nope_dim + rope_dim
+    rng_q, rng_kv = jax.random.split(jax.random.PRNGKey(19))
+    wq_l0_first = jax.random.normal(rng_q, (num_layers, rank, num_heads, dim))
+    wkv_l0_first = jax.random.normal(rng_kv, (num_layers, rank, num_heads, dim))
+
+    # Layer 0: head 0 = 40.0 (scale=0.25), head 1 = 5.0 (no clip).
+    # Layer 1: head 0 = 5.0 (no clip), head 1 = 20.0 (scale=0.5).
+    # `max_logits` from lax.scan always has scan axis at dim 0: [num_layers, batch, num_heads].
+    max_logits = jnp.array(
+        [
+            [[40.0, 5.0], [10.0, 2.0]],
+            [[3.0, 20.0], [5.0, 8.0]],
+        ]
+    )
+
+    Config = namedtuple("Config", ["qk_clip_threshold", "qk_nope_head_dim", "attention_type", "param_scan_axis"])
+    for psa in (0, 1):
+      wq = wq_l0_first if psa == 0 else jnp.moveaxis(wq_l0_first, 0, 1)
+      wkv = wkv_l0_first if psa == 0 else jnp.moveaxis(wkv_l0_first, 0, 1)
+      config = Config(qk_clip_threshold=10.0, qk_nope_head_dim=nope_dim, attention_type="mla", param_scan_axis=psa)
+
+      # Build NNX state with scanned variable metadata matching nnx_scan.
+      state = _build_mock_nnx_state(wq, wkv)
+      attn = state.model.decoder.layers_0.self_attention
+      attn.wq_b.kernel = nnx.Param(wq, **{nnx.PARTITION_NAME: "scanned_blocks", "param_scan_axis": psa})
+      attn.wkv_b.kernel = nnx.Param(wkv, **{nnx.PARTITION_NAME: "scanned_blocks", "param_scan_axis": psa})
+
+      intermediates = {"decoder": {"layers_0": {"self_attention": {"attention_op": {"max_logits": max_logits}}}}}
+      new_state = apply_qk_clip_nnx(state, intermediates, config)
+      new_wq, new_wkv = _read_kernels(new_state)
+      if psa == 1:
+        new_wq = jnp.moveaxis(new_wq, 1, 0)
+        new_wkv = jnp.moveaxis(new_wkv, 1, 0)
+
+      # Layer 0, Head 0 clipped by 0.25; Head 1 untouched.
+      np.testing.assert_allclose(new_wq[0, :, 0, :nope_dim], wq_l0_first[0, :, 0, :nope_dim] * jnp.sqrt(0.25), rtol=1e-5)
+      np.testing.assert_allclose(new_wq[0, :, 0, nope_dim:], wq_l0_first[0, :, 0, nope_dim:] * 0.25, rtol=1e-5)
+      np.testing.assert_allclose(
+          new_wkv[0, :, 0, :nope_dim], wkv_l0_first[0, :, 0, :nope_dim] * jnp.sqrt(0.25), rtol=1e-5
+      )
+      np.testing.assert_allclose(new_wkv[0, :, 0, nope_dim:], wkv_l0_first[0, :, 0, nope_dim:], rtol=1e-6)
+      np.testing.assert_allclose(new_wq[0, :, 1, :], wq_l0_first[0, :, 1, :], rtol=1e-6)
+      np.testing.assert_allclose(new_wkv[0, :, 1, :], wkv_l0_first[0, :, 1, :], rtol=1e-6)
+
+      # Layer 1, Head 0 untouched (must NOT be clipped by Layer 0's 40.0!); Head 1 clipped by 0.5.
+      np.testing.assert_allclose(new_wq[1, :, 0, :], wq_l0_first[1, :, 0, :], rtol=1e-6)
+      np.testing.assert_allclose(new_wkv[1, :, 0, :], wkv_l0_first[1, :, 0, :], rtol=1e-6)
+      np.testing.assert_allclose(new_wq[1, :, 1, :nope_dim], wq_l0_first[1, :, 1, :nope_dim] * jnp.sqrt(0.5), rtol=1e-5)
+      np.testing.assert_allclose(new_wq[1, :, 1, nope_dim:], wq_l0_first[1, :, 1, nope_dim:] * 0.5, rtol=1e-5)
+      np.testing.assert_allclose(new_wkv[1, :, 1, :nope_dim], wkv_l0_first[1, :, 1, :nope_dim] * jnp.sqrt(0.5), rtol=1e-5)
+      np.testing.assert_allclose(new_wkv[1, :, 1, nope_dim:], wkv_l0_first[1, :, 1, nope_dim:], rtol=1e-6)
+
 
 class CalculateMaxLogitNNXTest(unittest.TestCase):
   """`calculate_max_logit_metric` should accept the bare-array NNX shape."""
