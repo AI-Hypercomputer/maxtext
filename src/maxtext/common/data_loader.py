@@ -47,6 +47,11 @@ def loader_exception_guard(config):
       raise exceptions.StopTraining(
           f"You may have run out of training data. Received {type(e)}" f" exception: ({e})"
       ) from e
+    elif elastic_utils.elastic_enabled(config):
+      # `StopTraining` ends the run as if it had completed (exit code 0). In an elastic run a broken data pipeline,
+      # e.g. a grain worker process killed by SIGBUS when /dev/shm is full, would then look like a finished job
+      # hundreds of steps early; fail the attempt instead so the failure is visible and the job can be resumed.
+      raise
     else:
       raise exceptions.StopTraining(
           f"`next(self.data_iterator)` failed with {type(e)} exception: ({e}).",
