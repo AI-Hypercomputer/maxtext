@@ -3716,6 +3716,11 @@ class NNXDecoder(nnx.Module):
         norm_weight=self.output_attn_res_norm.scale.value,
         epsilon=cfg.normalization_layer_epsilon,
         num_blocks=None,
+        use_pallas_kernel=cfg.use_attn_res_pallas_kernel,
+        mesh=self.mesh,
+        shard_mode=cfg.shard_mode,
+        logical_axis_names=("activation_batch", "activation_norm_length", "activation_embed"),
+        logical_axis_rules=cfg.logical_axis_rules,
     )
     return y, kv_caches
 
@@ -3806,6 +3811,11 @@ class NNXDecoder(nnx.Module):
         epsilon=cfg.normalization_layer_epsilon,
         num_blocks=num_slots,
         num_committed=attn_res_state.count,
+        use_pallas_kernel=cfg.use_attn_res_pallas_kernel,
+        mesh=self.mesh,
+        shard_mode=cfg.shard_mode,
+        logical_axis_names=("activation_batch", "activation_norm_length", "activation_embed"),
+        logical_axis_rules=cfg.logical_axis_rules,
     )
     return y, kv_caches
 
