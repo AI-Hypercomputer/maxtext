@@ -81,6 +81,11 @@ class TrainRLTest(unittest.TestCase):
     self.assertEqual(config.max_seq_token_per_tpu, 12288)
     self.assertEqual(config.vllm_block_size, 128)
 
+  def test_rl_config_compute_logps_chunk_size_default(self):
+    """Chunked log-probs are off unless a chunk size is set."""
+    self.assertEqual(types.RLConfig(model_name="gemma4-26b").compute_logps_chunk_size, 0)
+    self.assertEqual(types.RLConfig(model_name="gemma4-26b", compute_logps_chunk_size=2048).compute_logps_chunk_size, 2048)
+
   def test_rl_config_tunix_knob_defaults(self):
     """The forwarded tunix knobs default to tunix's own defaults."""
     config = types.RLConfig(model_name="gemma4-26b")
@@ -358,6 +363,63 @@ class TrainRLTest(unittest.TestCase):
 
     self.assertNotIn(field, received)
     self.assertIn("max_tokens_to_generate", received)
+
+  def _training_config_kwargs_from_create_rl_components(self, training_config_fields, **config_overrides):
+    """Runs create_rl_components with the tunix pieces faked; returns the kwargs RLTrainingConfig received.
+
+    `training_config_fields` is the set of optional keyword names the fake RLTrainingConfig declares, which is how
+    `_kwargs_supported_by` tells a tunix that has an option from one that predates it.
+    """
+    received = {}
+
+    def fake_training_config(**fields):
+      received.update(fields)
+
+    fake_training_config.__signature__ = inspect.Signature(
+        [
+            inspect.Parameter(name, inspect.Parameter.KEYWORD_ONLY, default=None)
+            for name in sorted(training_config_fields)
+        ]
+    )
+    trainer_config = types.RLConfig(
+        model_name="qwen3-0.6b", enable_checkpointing=False, enable_tunix_perf_metrics=False, **config_overrides
+    )
+    with (
+        mock.patch.object(train_rl.utils_rl, "get_optimizer"),
+        mock.patch.object(train_rl.pyconfig, "initialize", return_value=SimpleNamespace(logical_axis_rules=[])),
+        mock.patch.object(train_rl.base_rollout, "RolloutConfig"),
+        mock.patch.object(train_rl.rl_cluster_lib, "ClusterConfig"),
+        mock.patch.object(train_rl.rl_cluster_lib, "RLTrainingConfig", fake_training_config),
+        mock.patch.object(train_rl.rl_cluster_lib, "RLCluster"),
+        mock.patch.object(train_rl, "get_rollout_kwargs_for_parallelism", return_value={}),
+        mock.patch.object(train_rl, "build_reward_fns", return_value=[]),
+        mock.patch.object(train_rl, "GrpoLearner"),
+    ):
+      train_rl.create_rl_components(
+          trainer_config=trainer_config,
+          sampler_config=SimpleNamespace(enable_expert_parallel=False),
+          sampler_devices=[object()],
+          actor_model=object(),
+          actor_mesh=object(),
+          reference_model=object(),
+          reference_mesh=object(),
+          rollout_mesh=object(),
+          model_tokenizer=object(),
+      )
+    return received
+
+  def test_create_rl_components_forwards_compute_logps_chunk_size(self):
+    """The RLConfig key must reach tunix's RLTrainingConfig under the same name."""
+    received = self._training_config_kwargs_from_create_rl_components(
+        {"compute_logps_chunk_size"}, compute_logps_chunk_size=2048
+    )
+    self.assertEqual(received["compute_logps_chunk_size"], 2048)
+
+  def test_create_rl_components_drops_compute_logps_chunk_size_for_a_tunix_that_predates_it(self):
+    """An older tunix RLTrainingConfig must not receive (and choke on) the unknown kwarg."""
+    received = self._training_config_kwargs_from_create_rl_components(set(), compute_logps_chunk_size=2048)
+    self.assertNotIn("compute_logps_chunk_size", received)
+    self.assertIn("mini_batch_size", received)
 
   def test_kwargs_supported_by_keeps_declared_fields_only(self):
     """Knobs the installed tunix does not declare are dropped, with a log line."""

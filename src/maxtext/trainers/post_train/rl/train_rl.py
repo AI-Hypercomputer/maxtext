@@ -513,6 +513,10 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
           train_micro_batch_size=train_micro_batch_size,
           rollout_micro_batch_size=rollout_micro_batch_size,
           max_seq_token_per_tpu=trainer_config.max_seq_token_per_tpu or None,
+          **_kwargs_supported_by(
+              rl_cluster_lib.RLTrainingConfig,
+              compute_logps_chunk_size=trainer_config.compute_logps_chunk_size,
+          ),
           metrics_logging_options=metrics_logging_options,
           profiler_options=None,
           rl_profiler_config=rl_profiler_config,

@@ -134,6 +134,7 @@ num_batches: 4
 train_micro_batch_size: -1
 rollout_micro_batch_size: -1
 max_seq_token_per_tpu: 0  # > 0 packs sequences into rows of this many tokens for training; 0 = one padded row per sequence
+compute_logps_chunk_size: 0  # > 0 computes training log-probs in sequence chunks of this many tokens; 0 = full logits
 # Keep `num_test_batches` low so that evaluation runs quickly. It can be
 # increased to a max. of 330 (if batch size is 4).
 num_test_batches: 5  # 200

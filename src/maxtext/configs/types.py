@@ -5225,6 +5225,16 @@ class RLDataset(BaseModel):
           "sequence (max_prefill_predict_length + generation length) must fit in one row. 0 disables packing."
       ),
   )
+  compute_logps_chunk_size: int = Field(
+      0,
+      ge=0,
+      description=(
+          "Sequence chunk size for the actor/reference per-token log-probs (Tunix `compute_logps_chunk_size`). 0"
+          " computes full-vocabulary logits for the whole sequence; > 0 projects the final hidden states to the vocab"
+          " chunk by chunk under remat (`TunixMaxTextAdapter.compute_final_logits`), so the [rows, seq, vocab] float32"
+          " logits are never materialized. An older tunix without the option drops it."
+      ),
+  )
   dataset_processor_path: str = Field(
       "",
       description=(
