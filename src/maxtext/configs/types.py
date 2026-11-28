@@ -4213,6 +4213,14 @@ class Optimizer(BaseModel):
   """Configuration for the optimizer and learning rate schedule."""
 
   opt_type: OptimizerType = Field(OptimizerType.ADAMW, description="The type of optimizer to use.")
+  param_update_stochastic_rounding: bool = Field(
+      False,
+      description=(
+          "Apply optimizer updates to low-precision (bf16) params with stochastic rounding instead of"
+          " round-to-nearest. Without an fp32 master copy, updates far below the bf16 ulp of a weight"
+          " (e.g. Muon's ~lr/sqrt(d) per-element updates) are otherwise rounded away."
+      ),
+  )
   skip_step_on_spikes: bool = Field(
       False,
       description="If True, skip the training step when loss or gradient spike is detected.",
