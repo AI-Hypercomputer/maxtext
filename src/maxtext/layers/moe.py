@@ -4821,7 +4821,20 @@ class RoutedMoE(nnx.Module):
               buffer_size=buffer_size,
           )
 
-          buffer_init = jnp.zeros if ragged_buffer_factor > 0.0 else jax.lax.empty
+          # Even in dropless mode (ragged_buffer_factor <= 0.0), the worst-case dispatch buffer
+          # leaves ~(1 - 1/num_ep) tail rows unwritten by ragged_all_to_all. With
+          # use_ragged_sort=True, a2a_ragged_sort only reads [0, valid_end) and zeros the tail;
+          # otherwise XLA _sort_activations forwards uninitialized tail rows to GMM, where
+          # dynamic absmax quantization over all rows turns NaN/Inf HBM garbage into NaN
+          # wi_0/wi_1 weight gradients.
+          has_quantization = (
+              bool(self.config.quantization)
+              or get_quantization_dtypes()[0] is not None
+              or qpl.get_current_rule("gmm") is not None
+              or qpl.get_current_rule("ragged_dot") is not None
+          )
+          zero_init_dispatch = ragged_buffer_factor > 0.0 or (not self.config.use_ragged_sort and has_quantization)
+          buffer_init = jnp.zeros if zero_init_dispatch else jax.lax.empty
           output_shape = buffer_init((buffer_size, self.moe_expert_input_dim), dtype=x.dtype)
 
           # Token Dispatch: leg 1 (forward) and leg 4 (backward) of the EP ragged all-to-all.

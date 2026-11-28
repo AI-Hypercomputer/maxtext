@@ -481,14 +481,11 @@ class MoePrefuseAndFallbackTest(parameterized.TestCase):
 
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
       with mock.patch.object(jax.lax, "ragged_all_to_all", side_effect=_cpu_ragged_all_to_all):
-        # Jit init so the CPU ragged_all_to_all reference is not dispatched op by op during shape inference.
-        variables = jax.jit(
-            lambda: model_ref.init(
-                {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)},
-                x,
-                forced_routed_experts=forced,
-            )
-        )()
+        # ToLinen.__call__ saves NNX variables before invoking nnx_method, so a no-op skips the discarded forward.
+        variables = model_ref.init(
+            {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)},
+            nnx_method=lambda _: None,
+        )
         params = variables["params"]
 
         def loss_and_out(model, p, x_in, return_mutated: bool = False):

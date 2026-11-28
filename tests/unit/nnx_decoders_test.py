@@ -2408,6 +2408,7 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
 
           @jax.jit
           def _run_pure(st, toks, in_emb):
+            """Runs merged decoder and embedding in train mode."""
             dec, emb = nnx.merge(graphdef, st)
             logits_out, hidden_out, _ = dec(
                 emb,
@@ -2443,7 +2444,6 @@ class TestNNXDecoderDeepseekAndGemma4(unittest.TestCase):
         np.testing.assert_allclose(np.asarray(hidden_unscanned), np.asarray(hidden_scanned), rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.tpu_only
 class TestGemma4SmallNNXDecoder(unittest.TestCase):
   """Unit tests for Gemma4 Small NNXDecoder to improve code coverage."""
 
@@ -2519,15 +2519,23 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
 
   def test_gemma4_small_decoder(self):
     cfg, decoder, shared_embedding, ids, segment_ids, positions = self._get_decoder_and_inputs()
+    graphdef, state = nnx.split((decoder, shared_embedding))
 
-    logits, _, _ = decoder(
-        shared_embedding,
-        ids,
-        positions,
-        decoder_segment_ids=segment_ids,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    @jax.jit
+    def _run_pure(st, x_ids, x_pos, x_seg):
+      """Runs a jitted train-mode forward pass on Gemma4 Small NNXDecoder."""
+      dec, emb = nnx.merge(graphdef, st)
+      logits_out, _, _ = dec(
+          emb,
+          x_ids,
+          x_pos,
+          decoder_segment_ids=x_seg,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
+      return logits_out
+
+    logits = _run_pure(state, ids, positions, segment_ids)
 
     self.assertEqual(
         logits.shape,
@@ -2539,7 +2547,7 @@ class TestGemma4SmallNNXDecoder(unittest.TestCase):
 
     # Mock each layer's compute_shared_kv and restore after the test
     for layer in decoder.get_layers():
-      self.addCleanup(setattr, layer, "compute_shared_kv", layer.compute_shared_kv)
+      self.addCleanup(delattr, layer, "compute_shared_kv")
       layer.compute_shared_kv = MagicMock(return_value=(jnp.zeros((1, 16, 128)), jnp.zeros((1, 16, 128))))
 
     layer_types = gemma4_small.build_layer_types(cfg.num_decoder_layers, cfg.model_name)

@@ -27,6 +27,7 @@ import os
 import sys
 import unittest
 
+from absl.testing import absltest
 from flax import nnx
 from flax import traverse_util
 from flax.linen import partitioning as nn_partitioning
@@ -1333,13 +1334,13 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
         num_experts_per_tok=2,
         norm_topk_prob=False,
         override_model_config=True,
-        base_emb_dim=2048,  # >= 2048 so SparseCore ragged_gather_reduce satisfies num_row_partitions <= 8
+        base_emb_dim=1024 if jax.devices()[0].device_kind == "TPU7x" else 2048,
         base_mlp_dim=256,
         base_moe_mlp_dim=256,
         dtype="bfloat16",
         megablox=True,
         sparse_matmul=True,
-        per_device_batch_size=2,
+        per_device_batch_size=1 if jax.device_count() >= 8 else 2,
         ici_expert_parallelism=2,
         use_ring_of_experts=True,
         max_target_length=64,
@@ -1390,10 +1391,9 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
       model = self._build_model(cfg, mesh)
       with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
         if variables is None:
-          variables = model.init(
+          variables = linen_wrappers.init_variables(
+              model,
               {"params": rng_model, "dropout": rng_model},
-              hidden_states,
-              forced_routed_experts=forced,
           )
         out, _, _ = jax.jit(lambda params, x, f: model.apply({"params": params}, x, forced_routed_experts=f))(
             variables["params"], hidden_states, forced
@@ -1419,4 +1419,4 @@ class RaggedSortForcedRoutingEquivalenceTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

@@ -280,8 +280,7 @@ def _run_routed_moe(cfg, params=None, forward_only=False):
   )
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
     if params is None:
-      # Jitted init: an eager linen init runs the whole forward op by op.
-      params = jax.jit(model.init)({"params": rng_model, "dropout": rng_model}, inputs)["params"]
+      params = linen_wrappers.init_variables(model, {"params": rng_model, "dropout": rng_model})["params"]
 
     def loss_fn(params):
       (out, lb_loss, bias_updates), mutated = model.apply({"params": params}, inputs, mutable=["intermediates"])
@@ -577,8 +576,7 @@ def _run_routed_moe_lb_loss(cfg):
       rng_inputs, (cfg.per_device_batch_size * jax.device_count(), cfg.max_target_length, cfg.base_emb_dim)
   )
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-    # Jitted init: an eager linen init runs the whole forward op by op.
-    params = jax.jit(model.init)({"params": rng_model, "dropout": rng_model}, inputs)["params"]
+    params = linen_wrappers.init_variables(model, {"params": rng_model, "dropout": rng_model})["params"]
 
     def loss_fn(params):
       (_, lb_loss, _), _ = model.apply({"params": params}, inputs, mutable=["intermediates"])

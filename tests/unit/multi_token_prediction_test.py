@@ -23,7 +23,6 @@ from absl import logging as absl_logging
 import jax
 import jax.numpy as jnp
 import numpy as np
-import pytest
 from jax.sharding import Mesh
 from flax import nnx
 
@@ -1204,7 +1203,6 @@ class CrossEntropyWithIntegerLabelsTest(unittest.TestCase):
     np.testing.assert_allclose(actual_grad, expected_grad, rtol=1e-5, atol=1e-5)
 
 
-@pytest.mark.tpu_only
 class MTPReuseInputEmbeddingTest(unittest.TestCase):
   """mtp_reuse_input_embedding on the full Transformer.
 

@@ -44,6 +44,8 @@ class PrefusedWiSparseMatmulTest(unittest.TestCase):
         run_name=f"moe_prefused_wi_{prefuse}_{tensor_parallel}",
         enable_checkpointing=False,
         model_name="qwen3-30b-a3b",
+        num_experts=((8 + num_devices - 1) // num_devices) * num_devices,
+        num_experts_per_tok=2,
         override_model_config=True,
         base_emb_dim=512,
         base_mlp_dim=1024,
@@ -116,14 +118,12 @@ class PrefusedWiSparseMatmulTest(unittest.TestCase):
 
     def loss(model, x):
       out, _, _ = model(x)
-      return jnp.sum(out.astype(jnp.float32) * cotangent)
+      return jnp.sum(out.astype(jnp.float32) * cotangent), out
 
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      forward = nnx.jit(lambda model, x: model(x)[0])
-      out_split, out_fused = forward(split_model, inputs), forward(fused_model, inputs)
-      run = nnx.jit(nnx.value_and_grad(loss, argnums=(0, 1)))
-      _, (grads_split, dx_split) = run(split_model, inputs)
-      _, (grads_fused, dx_fused) = run(fused_model, inputs)
+      run = nnx.jit(nnx.value_and_grad(loss, argnums=(0, 1), has_aux=True))
+      (_, out_split), (grads_split, dx_split) = run(split_model, inputs)
+      (_, out_fused), (grads_fused, dx_fused) = run(fused_model, inputs)
 
     # Compared elementwise (the scalar loss is a near-zero sum of signed terms), against each array's own scale:
     # the values here are small (outputs ~1e-4), so a fixed absolute tolerance would accept anything.

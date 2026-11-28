@@ -335,10 +335,13 @@ class Gmm3dTest(parameterized.TestCase):
     """
     if use_gmm_v2 and pltpu.get_tpu_info().fp8_ops_per_second == 0:
       self.skipTest("A fixed act scale in gmm_v2 needs fp8 matmul hardware.")
+    m_sz, d_sz, f_sz = 512, 1024, 256
+    gs = np.array([100, 0, 157, 140], np.int32)  # sum 397 < m_sz: empty group + padding rows.
+    gs_jnp = jnp.asarray(gs)
     k0, k1 = jax.random.split(jax.random.key(11))
-    lhs = _rand(k0, (M, D), jnp.bfloat16)
-    rhs = _rand(k1, (E, D, F), jnp.bfloat16, 0.05)
-    tiling = (512, 7168, 512, 512, 512, 1024, 512, 1024, 512)
+    lhs = _rand(k0, (m_sz, d_sz), jnp.bfloat16)
+    rhs = _rand(k1, (E, d_sz, f_sz), jnp.bfloat16, 0.05)
+    tiling = (128, 1024, 256, 128, 256, 256, 128, 256, 256)
 
     def rule(act_cal):
       return qwix.QtRule(
@@ -354,7 +357,7 @@ class Gmm3dTest(parameterized.TestCase):
       out = ops.gmm(
           lhs,
           rhs,
-          self.gs,
+          gs_jnp,
           tiling=tiling,
           preferred_element_type=jnp.bfloat16,
           use_qwix_quantization=True,
@@ -368,7 +371,7 @@ class Gmm3dTest(parameterized.TestCase):
     dlhs_on, drhs_on = grad_fn(lhs, rhs, rule("fixed,-224,224"))
     dlhs_off, drhs_off = grad_fn(lhs, rhs, rule("fixed,-224.0,224.0"))
     # Rows past sum(group_sizes) are padding the gmm backward may leave unwritten (garbage), so compare valid rows.
-    valid = int(GROUP_SIZES.sum())
+    valid = int(gs.sum())
     for on, off in ((dlhs_on[:valid], dlhs_off[:valid]), (drhs_on, drhs_off)):
       self.assertTrue(bool(jnp.any(on != 0)))
       np.testing.assert_array_equal(_f32(on), _f32(off))

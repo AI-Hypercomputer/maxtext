@@ -165,7 +165,7 @@ def _has_tpu_backend_support() -> bool:
 
 
 def _has_shared_class_fixture(item) -> bool:
-  """Returns whether `item` belongs to a class with a custom setUpClass or class-scoped fixture.
+  """Returns whether `item` belongs to a class with shared class-level setup/teardown or fixtures.
 
   Excludes autouse class-scoped fixtures defined in this conftest (such as
   `restore_jax_prng_and_libtpu_env_for_class`), so stateless test classes like
@@ -177,17 +177,27 @@ def _has_shared_class_fixture(item) -> bool:
   if issubclass(cls, unittest.TestCase):
     if getattr(cls.setUpClass, "__func__", None) is not unittest.TestCase.setUpClass.__func__:
       return True
-  elif callable(getattr(cls, "setup_class", None)):
+    if getattr(cls.tearDownClass, "__func__", None) is not unittest.TestCase.tearDownClass.__func__:
+      return True
+  elif callable(getattr(cls, "setup_class", None)) or callable(getattr(cls, "teardown_class", None)):
     return True
   fixtureinfo = getattr(item, "_fixtureinfo", None)
   name2fixturedefs = getattr(fixtureinfo, "name2fixturedefs", None) or {}
   for fixturedefs in name2fixturedefs.values():
     for fd in fixturedefs:
-      if fd.scope == "class" and getattr(fd.func, "__module__", None) != __name__:
+      mod = getattr(fd.func, "__module__", None) or ""
+      # Ignore conftest's own autouse class fixtures and pytest's internal xunit wrappers
+      # (e.g., `_pytest.unittest._make_xunit_fixture`, which pytest attaches to every
+      # `unittest.TestCase` even when it has no custom `setUpClass`/`tearDownClass`).
+      if fd.scope == "class" and mod != __name__ and not mod.startswith("_pytest."):
         return True
   return False
 
 
+# tryfirst: run before plugins registered after conftest (notably pytest-xdist's WorkerInteractor,
+# which reads `xdist_group` inside its own `pytest_collection_modifyitems` hook on xdist 3.x) and
+# before pytest's `-m` marker deselection.
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
   """Customize pytest collection behavior.
 
@@ -250,7 +260,8 @@ def pytest_collection_modifyitems(config, items):
     if cur_test_markers.isdisjoint(HARDWARE_MARKERS):
       item.add_marker(pytest.mark.cpu_only)
     if "xdist_group" not in cur_test_markers and _has_shared_class_fixture(item):
-      item.add_marker(pytest.mark.xdist_group(f"{item.cls.__module__}.{item.cls.__qualname__}"))
+      group_name = f"{item.cls.__module__}.{item.cls.__qualname__}".replace(".", "_")
+      item.add_marker(pytest.mark.xdist_group(group_name))
 
 
 def pytest_addoption(parser):
@@ -304,9 +315,11 @@ def restore_jax_remove_size_one_mesh_axis_from_type():
 
 @contextlib.contextmanager
 def _restore_jax_prng_and_libtpu_env():
-  """Saves and restores global JAX PRNG/Shardy config and LIBTPU_INIT_ARGS across a scope."""
+  """Saves and restores global JAX PRNG/Shardy/effort config and LIBTPU_INIT_ARGS across a scope."""
   previous_prng = getattr(jax.config, "jax_default_prng_impl", None)
   previous_shardy = getattr(jax.config, "jax_use_shardy_partitioner", None)
+  previous_opt_level = getattr(jax.config, "jax_optimization_level", None)
+  previous_mem_level = getattr(jax.config, "jax_memory_fitting_level", None)
   previous_libtpu = os.environ.get("LIBTPU_INIT_ARGS")
   try:
     yield
@@ -315,6 +328,10 @@ def _restore_jax_prng_and_libtpu_env():
       jax.config.update("jax_default_prng_impl", previous_prng)
     if previous_shardy is not None and getattr(jax.config, "jax_use_shardy_partitioner", None) != previous_shardy:
       jax.config.update("jax_use_shardy_partitioner", previous_shardy)
+    if previous_opt_level is not None and getattr(jax.config, "jax_optimization_level", None) != previous_opt_level:
+      jax.config.update("jax_optimization_level", previous_opt_level)
+    if previous_mem_level is not None and getattr(jax.config, "jax_memory_fitting_level", None) != previous_mem_level:
+      jax.config.update("jax_memory_fitting_level", previous_mem_level)
     if previous_libtpu is None:
       os.environ.pop("LIBTPU_INIT_ARGS", None)
     else:
@@ -381,6 +398,49 @@ def handle_gpu_only(request):
       has_gpu = False
     if not has_gpu:
       pytest.skip("Skipped: requires GPU hardware, none detected")
+
+
+@contextlib.contextmanager
+def _tpu_test_compiler_defaults():
+  """Applies fast XLA:TPU compilation effort defaults for TPU test sessions and restores on exit.
+
+  `O0` optimization level skips latency-hiding/async-op scheduling, MSA, collective pipelining,
+  and narrows HLO fixpoint iterations and lowering VMEM budget, cutting TPU test compile time
+  without changing numerical semantics or synchronous collective presence in HLO.
+  `O1` memory fitting keeps post-fusion rematerialization enabled so larger TPU tests do not OOM.
+
+  Only active inside pytest on TPU hardware (never production runs or CPU/GPU tests), skipped if
+  the caller already set `JAX_OPTIMIZATION_LEVEL` / `JAX_MEMORY_FITTING_LEVEL`, and overridable
+  per test via `jax.config.update("jax_optimization_level", "O2")` (auto-restored on teardown).
+  """
+  previous_opt_level = None
+  previous_mem_level = None
+  if os.getenv("JAX_PLATFORMS", "").lower() != "cpu" and os.getenv("INPUTS_DEVICE_TYPE", "").lower() != "cpu":
+    try:
+      has_tpu = any(d.platform == "tpu" for d in jax.devices())
+    except Exception:  # pylint: disable=broad-exception-caught
+      has_tpu = False
+    if has_tpu:
+      if not os.getenv("JAX_OPTIMIZATION_LEVEL") and hasattr(jax.config, "jax_optimization_level"):
+        previous_opt_level = jax.config.jax_optimization_level
+        jax.config.update("jax_optimization_level", "O0")
+      if not os.getenv("JAX_MEMORY_FITTING_LEVEL") and hasattr(jax.config, "jax_memory_fitting_level"):
+        previous_mem_level = jax.config.jax_memory_fitting_level
+        jax.config.update("jax_memory_fitting_level", "O1")
+  try:
+    yield
+  finally:
+    if previous_opt_level is not None:
+      jax.config.update("jax_optimization_level", previous_opt_level)
+    if previous_mem_level is not None:
+      jax.config.update("jax_memory_fitting_level", previous_mem_level)
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _configure_tpu_test_compiler_defaults():
+  """Session-scoped fixture enabling fast XLA:TPU effort levels during pytest runs on TPU."""
+  with _tpu_test_compiler_defaults():
+    yield
 
 
 def pytest_runtest_setup(item):

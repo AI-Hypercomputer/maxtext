@@ -2520,26 +2520,29 @@ class AttentionTest(parameterized.TestCase):
     decode_total_length = self.cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(self.dtype)
 
-    mha_full, _ = self._attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    @nnx.jit(static_argnames=("model_mode",))
+    def run_mha(mod, x, seg, pos, model_mode):
+      return mod(
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=model_mode,
+      )[0]
+
+    mha_full = run_mha(self._attention_as_mha_generic, lnx, decoder_segment_ids, decoder_positions, MODEL_MODE_TRAIN)
 
     lnx_prefill = lnx[:, 0:prefill_length, :]
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    mha_prefill, _ = self._attention_as_mha_generic(
+    mha_prefill = run_mha(
+        self._attention_as_mha_generic,
         lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+        decoder_segment_ids_prefill,
+        decoder_positions_prefill,
+        MODEL_MODE_PREFILL,
     )
 
     self.assertTrue(
@@ -2549,13 +2552,7 @@ class AttentionTest(parameterized.TestCase):
     for idx in range(prefill_length, min(prefill_length + 3, decode_total_length)):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      mha_idx, _ = self._attention_as_mha_generic(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-      )
+      mha_idx = run_mha(self._attention_as_mha_generic, lnx_idx, None, decoder_positions_idx, MODEL_MODE_AUTOREGRESSIVE)
 
       mha_full_this_idx = mha_full[:, idx : idx + 1, :]
       self.assertTrue(mha_full_this_idx.shape == mha_idx.shape)
@@ -2597,14 +2594,11 @@ class AttentionTest(parameterized.TestCase):
         rngs=self.nnx_rng,
     )
 
-    mha_prefill, _ = attention_as_mha_generic(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
-    )
+    mha_prefill, _ = nnx.jit(
+        lambda mod, x, seg, pos: mod(
+            x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_PREFILL
+        )
+    )(attention_as_mha_generic, lnx_prefill, decoder_segment_ids_prefill, decoder_positions_prefill)
 
     self.assertEqual(dtype, mha_prefill.dtype)
 
@@ -2653,15 +2647,13 @@ class AttentionTest(parameterized.TestCase):
     )
 
     generic_state = nnx.state(attention_as_mha_generic)
-
-    mha_generic_output, _ = attention_as_mha_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    run_train = nnx.jit(
+        lambda mod, x, seg, pos: mod(
+            x, x, decoder_segment_ids=seg, inputs_positions=pos, deterministic=True, model_mode=MODEL_MODE_TRAIN
+        )[0]
     )
+
+    mha_generic_output = run_train(attention_as_mha_generic, lnx, decoder_segment_ids, decoder_positions)
 
     dummy_inputs_q = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
     dummy_inputs_kv = jnp.ones((self.global_batch_size, self.max_target_length, self.embed_dim))
@@ -2683,14 +2675,7 @@ class AttentionTest(parameterized.TestCase):
     )
     nnx.update(attention_as_mha_flash, generic_state)
 
-    mha_generic_flash_output, _ = attention_as_mha_flash(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    mha_generic_flash_output = run_train(attention_as_mha_flash, lnx, decoder_segment_ids, decoder_positions)
 
     self.assertTrue(
         jax.numpy.allclose(mha_generic_output, mha_generic_flash_output, rtol=1e-01, atol=1e-01, equal_nan=False)
@@ -2830,14 +2815,17 @@ class AttentionTest(parameterized.TestCase):
       setattr(self.__class__, "_cp_generic_cache", cache)
 
     if not need_grad and entry["output"] is None:
-      out, _ = entry["module"](
-          entry["lnx"],
-          entry["lnx"],
-          decoder_segment_ids=entry["seg"],
-          inputs_positions=entry["pos"],
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
+      gdef, state = nnx.split(entry["module"])
+      out, _ = jax.jit(
+          lambda state_in, x_in, seg_in, pos_in: nnx.merge(gdef, state_in)(
+              x_in,
+              x_in,
+              decoder_segment_ids=seg_in,
+              inputs_positions=pos_in,
+              deterministic=True,
+              model_mode=MODEL_MODE_TRAIN,
+          )
+      )(state, entry["lnx"], entry["seg"], entry["pos"])
       entry["output"] = jax.device_get(out)
 
     if need_grad and entry["grad"] is None:
@@ -3153,18 +3141,20 @@ class AttentionTest(parameterized.TestCase):
       )
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
-    def ring_loss(lnx):
+    ring_gdef, ring_state = nnx.split(attention_as_mha_flash_cp)
+
+    def ring_loss(state_in, x_in, seg_in, pos_in):
       if context_parallel_load_balance:
         context_parallel_size = cfg_cp.ici_context_parallelism
-        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
-        ring_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
-        ring_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+        x_in = max_utils.reorder_sequence(x_in, cp_size=context_parallel_size)
+        ring_decoder_segment_ids = max_utils.reorder_sequence(seg_in, cp_size=context_parallel_size)
+        ring_decoder_positions = max_utils.reorder_sequence(pos_in, cp_size=context_parallel_size)
       else:
-        ring_decoder_segment_ids = decoder_segment_ids
-        ring_decoder_positions = decoder_positions
-      output, _ = attention_as_mha_flash_cp(
-          lnx,
-          lnx,
+        ring_decoder_segment_ids = seg_in
+        ring_decoder_positions = pos_in
+      output, _ = nnx.merge(ring_gdef, state_in)(
+          x_in,
+          x_in,
           decoder_segment_ids=ring_decoder_segment_ids,
           inputs_positions=ring_decoder_positions,
           deterministic=True,
@@ -3173,7 +3163,7 @@ class AttentionTest(parameterized.TestCase):
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      ring_grad = jax.grad(ring_loss)(lnx)
+      ring_grad = jax.jit(jax.grad(ring_loss, argnums=1))(ring_state, lnx, decoder_segment_ids, decoder_positions)
     ring_grad = jax.device_get(ring_grad)
 
     self.assertTrue(
@@ -3356,19 +3346,23 @@ class AttentionTest(parameterized.TestCase):
     _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
-    def ulysses_loss(lnx):
-      output, _ = attention_as_mha_flash_cp(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
+    ulysses_gdef, ulysses_state = nnx.split(attention_as_mha_flash_cp)
+
+    def ulysses_loss(state_in, x_in, seg_in, pos_in):
+      output, _ = nnx.merge(ulysses_gdef, state_in)(
+          x_in,
+          x_in,
+          decoder_segment_ids=seg_in,
+          inputs_positions=pos_in,
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      ulysses_grad = jax.grad(ulysses_loss)(lnx)
+      ulysses_grad = jax.jit(jax.grad(ulysses_loss, argnums=1))(
+          ulysses_state, lnx, decoder_segment_ids, decoder_positions
+      )
     ulysses_grad = jax.device_get(ulysses_grad)
 
     self.assertTrue(
@@ -3500,18 +3494,20 @@ class AttentionTest(parameterized.TestCase):
     _, attention_as_mha_flash_cp = self._ulysses_test_modules(cfg_cp, mesh_cp, lnx)
     nnx.update(attention_as_mha_flash_cp, generic_state)
 
-    def usp_loss(lnx):
+    usp_gdef, usp_state = nnx.split(attention_as_mha_flash_cp)
+
+    def usp_loss(state_in, x_in, seg_in, pos_in):
       if context_parallel_load_balance:
         context_parallel_size = cfg_cp.ici_context_parallelism
-        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
-        usp_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
-        usp_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+        x_in = max_utils.reorder_sequence(x_in, cp_size=context_parallel_size)
+        usp_decoder_segment_ids = max_utils.reorder_sequence(seg_in, cp_size=context_parallel_size)
+        usp_decoder_positions = max_utils.reorder_sequence(pos_in, cp_size=context_parallel_size)
       else:
-        usp_decoder_segment_ids = decoder_segment_ids
-        usp_decoder_positions = decoder_positions
-      output, _ = attention_as_mha_flash_cp(
-          lnx,
-          lnx,
+        usp_decoder_segment_ids = seg_in
+        usp_decoder_positions = pos_in
+      output, _ = nnx.merge(usp_gdef, state_in)(
+          x_in,
+          x_in,
           decoder_segment_ids=usp_decoder_segment_ids,
           inputs_positions=usp_decoder_positions,
           deterministic=True,
@@ -3520,7 +3516,7 @@ class AttentionTest(parameterized.TestCase):
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      usp_grad = jax.grad(usp_loss)(lnx)
+      usp_grad = jax.jit(jax.grad(usp_loss, argnums=1))(usp_state, lnx, decoder_segment_ids, decoder_positions)
     usp_grad = jax.device_get(usp_grad)
 
     self.assertTrue(
@@ -4273,6 +4269,106 @@ class MLATest(attention_test_util.MLATestBase):
       "mla_naive_kvcache": False,
   }
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_mla_cp_generic_cache"):
+      delattr(cls, "_mla_cp_generic_cache")
+    super().tearDownClass()
+
+  def _get_mla_cp_generic_ref(self, config_arguments, *, structured_data=False, need_grad=False):
+    """Returns cached single-device dot_product MLA reference for CP tests."""
+    cache = getattr(self.__class__, "_mla_cp_generic_cache", None)
+    if cache is None:
+      cache = {}
+      setattr(self.__class__, "_mla_cp_generic_cache", cache)
+    use_indexer = bool(config_arguments.get("use_indexer", False))
+    key = (
+        structured_data,
+        tuple(sorted((k, v) for k, v in config_arguments.items() if not k.startswith("sa_block_"))),
+    )
+    entry = cache.get(key)
+    if entry is None:
+      cfg, mla = self.init_mla(config_arguments, rope_type="default")
+      if structured_data:
+        lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
+      else:
+        lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
+      generic_graphdef, generic_state = nnx.split(mla)
+      entry = {
+          "cfg": cfg,
+          "lnx": lnx,
+          "decoder_segment_ids": decoder_segment_ids,
+          "decoder_positions": decoder_positions,
+          "graphdef": generic_graphdef,
+          "state": generic_state,
+          "output": None,
+          "grad": None,
+      }
+      cache[key] = entry
+    generic_graphdef = entry["graphdef"]
+    if need_grad and entry["grad"] is None:
+      if entry["output"] is None and not use_indexer:
+
+        def generic_loss_with_aux(x, st, seg, pos):
+          """Computes mean-squared MLA dot-product loss and returns the output as aux."""
+          output, _ = nnx.merge(generic_graphdef, st)(
+              x,
+              x,
+              decoder_segment_ids=seg,
+              inputs_positions=pos,
+              deterministic=True,
+              model_mode=MODEL_MODE_TRAIN,
+          )
+          return jnp.mean(output.astype(jnp.float32) ** 2), output
+
+        (_, generic_output), generic_grad = jax.jit(jax.value_and_grad(generic_loss_with_aux, argnums=0, has_aux=True))(
+            entry["lnx"], entry["state"], entry["decoder_segment_ids"], entry["decoder_positions"]
+        )
+        entry["output"] = jax.device_get(generic_output)
+        entry["grad"] = jax.device_get(generic_grad)
+      else:
+
+        def generic_loss(x, st, seg, pos):
+          """Computes mean-squared MLA dot-product loss for input-gradient reference."""
+          output, _ = nnx.merge(generic_graphdef, st)(
+              x,
+              x,
+              decoder_segment_ids=seg,
+              inputs_positions=pos,
+              deterministic=True,
+              model_mode=MODEL_MODE_TRAIN,
+          )
+          return jnp.mean(output.astype(jnp.float32) ** 2)
+
+        entry["grad"] = jax.device_get(
+            jax.jit(jax.grad(generic_loss, argnums=0))(
+                entry["lnx"], entry["state"], entry["decoder_segment_ids"], entry["decoder_positions"]
+            )
+        )
+    elif not need_grad and entry["output"] is None:
+      if use_indexer:
+        generic_output, _ = nnx.merge(generic_graphdef, entry["state"])(
+            entry["lnx"],
+            entry["lnx"],
+            decoder_segment_ids=entry["decoder_segment_ids"],
+            inputs_positions=entry["decoder_positions"],
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+      else:
+        generic_output, _ = jax.jit(
+            lambda x, st, seg, pos: nnx.merge(generic_graphdef, st)(
+                x,
+                x,
+                decoder_segment_ids=seg,
+                inputs_positions=pos,
+                deterministic=True,
+                model_mode=MODEL_MODE_TRAIN,
+            )
+        )(entry["lnx"], entry["state"], entry["decoder_segment_ids"], entry["decoder_positions"])
+      entry["output"] = jax.device_get(generic_output)
+    return entry
+
   @parameterized.named_parameters(
       {"testcase_name": "RoPE_Yarn_Autoregression", "rope_type": "yarn"},
       {"testcase_name": "Default_Autoregression", "rope_type": "default"},
@@ -4284,26 +4380,25 @@ class MLATest(attention_test_util.MLATestBase):
     decode_total_length = cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
 
-    mla_full, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    @nnx.jit(static_argnames=("model_mode",))
+    def call_mla(model, x, seg, pos, model_mode):
+      return model(
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=model_mode,
+      )
+
+    mla_full, _ = call_mla(mla, lnx, decoder_segment_ids, decoder_positions, MODEL_MODE_TRAIN)
 
     lnx_prefill = lnx[:, 0:prefill_length, :]
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    mla_prefill, _ = mla(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+    mla_prefill, _ = call_mla(
+        mla, lnx_prefill, decoder_segment_ids_prefill, decoder_positions_prefill, MODEL_MODE_PREFILL
     )
 
     self.assertTrue(
@@ -4313,13 +4408,7 @@ class MLATest(attention_test_util.MLATestBase):
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      mla_idx, _ = mla(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-      )
+      mla_idx, _ = call_mla(mla, lnx_idx, None, decoder_positions_idx, MODEL_MODE_AUTOREGRESSIVE)
 
       mla_full_this_idx = mla_full[:, idx : idx + 1, :]
       self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
@@ -4348,26 +4437,26 @@ class MLATest(attention_test_util.MLATestBase):
     prefill_length = cfg.max_prefill_predict_length
     decode_total_length = cfg.max_target_length
     lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
-    mla_full, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+
+    @nnx.jit(static_argnames=("model_mode",))
+    def call_mla(model, x, seg, pos, model_mode):
+      return model(
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=model_mode,
+      )
+
+    mla_full, _ = call_mla(mla, lnx, decoder_segment_ids, decoder_positions, MODEL_MODE_TRAIN)
 
     lnx_prefill = lnx[:, 0:prefill_length, :]
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    mla_prefill, _ = mla(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+    mla_prefill, _ = call_mla(
+        mla, lnx_prefill, decoder_segment_ids_prefill, decoder_positions_prefill, MODEL_MODE_PREFILL
     )
 
     self.assertTrue(
@@ -4377,13 +4466,7 @@ class MLATest(attention_test_util.MLATestBase):
     for idx in range(prefill_length, decode_total_length):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      mla_idx, _ = mla(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-      )
+      mla_idx, _ = call_mla(mla, lnx_idx, None, decoder_positions_idx, MODEL_MODE_AUTOREGRESSIVE)
 
       mla_full_this_idx = mla_full[:, idx : idx + 1, :]
       self.assertEqual(mla_full_this_idx.shape, mla_idx.shape)
@@ -4416,13 +4499,9 @@ class MLATest(attention_test_util.MLATestBase):
       )
       return jnp.mean(out.astype(jnp.float32) ** 2), out
 
-    (loss_normal, out_normal_train), (grad_model_normal, grad_x_normal) = nnx.value_and_grad(
-        loss_fn, argnums=(0, 1), has_aux=True
-    )(mla_normal, lnx)
-
-    (loss_sliced, out_sliced_train), (grad_model_sliced, grad_x_sliced) = nnx.value_and_grad(
-        loss_fn, argnums=(0, 1), has_aux=True
-    )(mla_sliced, lnx)
+    loss_and_grad = nnx.jit(nnx.value_and_grad(loss_fn, argnums=(0, 1), has_aux=True))
+    (loss_normal, out_normal_train), (grad_model_normal, grad_x_normal) = loss_and_grad(mla_normal, lnx)
+    (loss_sliced, out_sliced_train), (grad_model_sliced, grad_x_sliced) = loss_and_grad(mla_sliced, lnx)
 
     self.assertTrue(jnp.allclose(loss_normal, loss_sliced, rtol=1e-05, atol=1e-05, equal_nan=False))
     self.assertTrue(jnp.allclose(out_normal_train, out_sliced_train, rtol=1e-05, atol=1e-05, equal_nan=False))
@@ -4444,26 +4523,26 @@ class MLATest(attention_test_util.MLATestBase):
     _, mla_sliced = self.init_mla(config_arguments_sliced, rope_type="default")
     nnx.update(mla_sliced, nnx.state(mla_normal))
 
+    @nnx.jit(static_argnames=("model_mode",))
+    def call_mla(model, x, seg, pos, model_mode):
+      return model(
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
+          deterministic=True,
+          model_mode=model_mode,
+      )
+
     lnx_prefill = lnx[:, 0:prefill_length, :]
     decoder_segment_ids_prefill = decoder_segment_ids[:, 0:prefill_length]
     decoder_positions_prefill = decoder_positions[:, 0:prefill_length]
 
-    out_normal_prefill, _ = mla_normal(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+    out_normal_prefill, _ = call_mla(
+        mla_normal, lnx_prefill, decoder_segment_ids_prefill, decoder_positions_prefill, MODEL_MODE_PREFILL
     )
-
-    out_sliced_prefill, _ = mla_sliced(
-        lnx_prefill,
-        lnx_prefill,
-        decoder_segment_ids=decoder_segment_ids_prefill,
-        inputs_positions=decoder_positions_prefill,
-        deterministic=True,
-        model_mode=MODEL_MODE_PREFILL,
+    out_sliced_prefill, _ = call_mla(
+        mla_sliced, lnx_prefill, decoder_segment_ids_prefill, decoder_positions_prefill, MODEL_MODE_PREFILL
     )
 
     self.assertTrue(jnp.allclose(out_normal_prefill, out_sliced_prefill, rtol=1e-05, atol=1e-05, equal_nan=False))
@@ -4473,21 +4552,8 @@ class MLATest(attention_test_util.MLATestBase):
       lnx_idx = lnx[:, idx : idx + 1, :]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
 
-      out_normal_idx, _ = mla_normal(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-      )
-
-      out_sliced_idx, _ = mla_sliced(
-          lnx_idx,
-          lnx_idx,
-          inputs_positions=decoder_positions_idx,
-          deterministic=True,
-          model_mode=MODEL_MODE_AUTOREGRESSIVE,
-      )
+      out_normal_idx, _ = call_mla(mla_normal, lnx_idx, None, decoder_positions_idx, MODEL_MODE_AUTOREGRESSIVE)
+      out_sliced_idx, _ = call_mla(mla_sliced, lnx_idx, None, decoder_positions_idx, MODEL_MODE_AUTOREGRESSIVE)
 
       self.assertTrue(jnp.allclose(out_normal_idx, out_sliced_idx, rtol=1e-05, atol=1e-05, equal_nan=False))
 
@@ -4595,18 +4661,13 @@ class MLATest(attention_test_util.MLATestBase):
         "shard_mode": shard_mode,
     }
 
-    cfg, mla = self.init_mla(config_arguments, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
-    # Dot product
-    mla_generic_output, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    generic_state = nnx.state(mla)
+    ref = self._get_mla_cp_generic_ref(config_arguments, structured_data=False, need_grad=False)
+    cfg = ref["cfg"]
+    lnx = ref["lnx"]
+    decoder_segment_ids = ref["decoder_segment_ids"]
+    decoder_positions = ref["decoder_positions"]
+    mla_generic_output = ref["output"]
+    generic_state = ref["state"]
 
     # Test with Context Parallelism
     cfg_cp = pyconfig.initialize(
@@ -4654,7 +4715,6 @@ class MLATest(attention_test_util.MLATestBase):
     )
 
     # This removes all sharding information and makes them standard NumPy arrays.
-    mla_generic_output = jax.device_get(mla_generic_output)
     mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
 
     self.assertTrue(
@@ -4692,17 +4752,13 @@ class MLATest(attention_test_util.MLATestBase):
         "dtype": "float32",
     }
 
-    cfg, mla = self.init_mla(config_arguments, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
-    generic_state = nnx.state(mla)
+    ref = self._get_mla_cp_generic_ref(config_arguments, structured_data=False, need_grad=False)
+    cfg = ref["cfg"]
+    lnx = ref["lnx"]
+    decoder_segment_ids = ref["decoder_segment_ids"]
+    decoder_positions = ref["decoder_positions"]
+    mla_generic_output = ref["output"]
+    generic_state = ref["state"]
 
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -4752,7 +4808,6 @@ class MLATest(attention_test_util.MLATestBase):
         decoder_positions,
     )
 
-    mla_generic_output = jax.device_get(mla_generic_output)
     mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
 
     self.assertTrue(
@@ -4789,8 +4844,12 @@ class MLATest(attention_test_util.MLATestBase):
         "dtype": "float32",
     }
 
-    cfg, mla = self.init_mla(config_arguments, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg, cfg.dtype)
+    ref = self._get_mla_cp_generic_ref(config_arguments, structured_data=False, need_grad=True)
+    cfg = ref["cfg"]
+    lnx = ref["lnx"]
+    decoder_segment_ids = ref["decoder_segment_ids"]
+    decoder_positions = ref["decoder_positions"]
+    generic_grad = ref["grad"]
 
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -4829,46 +4888,28 @@ class MLATest(attention_test_util.MLATestBase):
           model_mode=MODEL_MODE_PREFILL,
           rngs=self.nnx_rng,
       )
-    nnx.update(attention_as_mla_flash_cp, nnx.state(mla))
-    generic_graphdef, generic_state = nnx.split(mla)
+    nnx.update(attention_as_mla_flash_cp, ref["state"])
     ring_graphdef, ring_state = nnx.split(attention_as_mla_flash_cp)
 
-    def generic_loss(lnx):
-      mla_merged = nnx.merge(generic_graphdef, generic_state)
-      output, _ = mla_merged(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
-
-    def ring_loss(lnx):
+    def ring_loss(x, st, seg, pos):
       if context_parallel_load_balance:
         context_parallel_size = cfg_cp.ici_context_parallelism
-        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
-        ring_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
-        ring_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
-      else:
-        ring_decoder_segment_ids = decoder_segment_ids
-        ring_decoder_positions = decoder_positions
-      ring_merged = nnx.merge(ring_graphdef, ring_state)
+        x = max_utils.reorder_sequence(x, cp_size=context_parallel_size)
+        seg = max_utils.reorder_sequence(seg, cp_size=context_parallel_size)
+        pos = max_utils.reorder_sequence(pos, cp_size=context_parallel_size)
+      ring_merged = nnx.merge(ring_graphdef, st)
       output, _ = ring_merged(
-          lnx,
-          lnx,
-          decoder_segment_ids=ring_decoder_segment_ids,
-          inputs_positions=ring_decoder_positions,
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      ring_grad = jax.grad(ring_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
+      ring_grad = jax.jit(jax.grad(ring_loss, argnums=0))(lnx, ring_state, decoder_segment_ids, decoder_positions)
     ring_grad = jax.device_get(ring_grad)
 
     self.assertTrue(
@@ -4913,17 +4954,15 @@ class MLATest(attention_test_util.MLATestBase):
         "dtype": "float32",
     }
 
-    cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    ref = self._get_mla_cp_generic_ref(
+        {**config_arguments, "attention": "dot_product"}, structured_data=True, need_grad=False
     )
-    generic_state = nnx.state(mla)
+    cfg = ref["cfg"]
+    lnx = ref["lnx"]
+    decoder_segment_ids = ref["decoder_segment_ids"]
+    decoder_positions = ref["decoder_positions"]
+    mla_generic_output = ref["output"]
+    generic_state = ref["state"]
 
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -4970,7 +5009,6 @@ class MLATest(attention_test_util.MLATestBase):
         decoder_positions,
     )
 
-    mla_generic_output = jax.device_get(mla_generic_output)
     mla_cp_output = jax.device_get(mla_cp_output)
 
     tol = 1e-02 if context_parallel_load_balance else 2e-02
@@ -5031,17 +5069,15 @@ class MLATest(attention_test_util.MLATestBase):
         "dtype": "float32",
     }
 
-    cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    ref = self._get_mla_cp_generic_ref(
+        {**config_arguments, "attention": "dot_product"}, structured_data=True, need_grad=False
     )
-    generic_state = nnx.state(mla)
+    cfg = ref["cfg"]
+    lnx = ref["lnx"]
+    decoder_segment_ids = ref["decoder_segment_ids"]
+    decoder_positions = ref["decoder_positions"]
+    mla_generic_output = ref["output"]
+    generic_state = ref["state"]
 
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -5091,7 +5127,6 @@ class MLATest(attention_test_util.MLATestBase):
         decoder_positions,
     )
 
-    mla_generic_output = jax.device_get(mla_generic_output)
     mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
 
     tol = 1e-02 if context_parallel_load_balance else 2e-02
@@ -5149,8 +5184,14 @@ class MLATest(attention_test_util.MLATestBase):
         "dtype": "float32",
     }
 
-    cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
+    ref = self._get_mla_cp_generic_ref(
+        {**config_arguments, "attention": "dot_product"}, structured_data=True, need_grad=True
+    )
+    cfg = ref["cfg"]
+    lnx = ref["lnx"]
+    decoder_segment_ids = ref["decoder_segment_ids"]
+    decoder_positions = ref["decoder_positions"]
+    generic_grad = ref["grad"]
 
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -5189,46 +5230,28 @@ class MLATest(attention_test_util.MLATestBase):
           model_mode=MODEL_MODE_PREFILL,
           rngs=self.nnx_rng,
       )
-    nnx.update(attention_as_mla_flash_cp, nnx.state(mla))
-    generic_graphdef, generic_state = nnx.split(mla)
+    nnx.update(attention_as_mla_flash_cp, ref["state"])
     cp_graphdef, cp_state = nnx.split(attention_as_mla_flash_cp)
 
-    def generic_loss(lnx):
-      mla_merged = nnx.merge(generic_graphdef, generic_state)
-      output, _ = mla_merged(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
-
-    def cp_loss(lnx):
+    def cp_loss(x, st, seg, pos):
       if context_parallel_load_balance:
         context_parallel_size = cfg_cp.ici_context_parallelism
-        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
-        cp_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
-        cp_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
-      else:
-        cp_decoder_segment_ids = decoder_segment_ids
-        cp_decoder_positions = decoder_positions
-      cp_merged = nnx.merge(cp_graphdef, cp_state)
+        x = max_utils.reorder_sequence(x, cp_size=context_parallel_size)
+        seg = max_utils.reorder_sequence(seg, cp_size=context_parallel_size)
+        pos = max_utils.reorder_sequence(pos, cp_size=context_parallel_size)
+      cp_merged = nnx.merge(cp_graphdef, st)
       output, _ = cp_merged(
-          lnx,
-          lnx,
-          decoder_segment_ids=cp_decoder_segment_ids,
-          inputs_positions=cp_decoder_positions,
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      cp_grad = jax.grad(cp_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
+      cp_grad = jax.jit(jax.grad(cp_loss, argnums=0))(lnx, cp_state, decoder_segment_ids, decoder_positions)
     cp_grad = jax.device_get(cp_grad)
 
     self.assertTrue(
@@ -5281,17 +5304,15 @@ class MLATest(attention_test_util.MLATestBase):
         "dtype": "float32",
     }
 
-    cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
-    mla_generic_output, _ = mla(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    ref = self._get_mla_cp_generic_ref(
+        {**config_arguments, "attention": "dot_product"}, structured_data=True, need_grad=False
     )
-    generic_state = nnx.state(mla)
+    cfg = ref["cfg"]
+    lnx = ref["lnx"]
+    decoder_segment_ids = ref["decoder_segment_ids"]
+    decoder_positions = ref["decoder_positions"]
+    mla_generic_output = ref["output"]
+    generic_state = ref["state"]
 
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -5341,7 +5362,6 @@ class MLATest(attention_test_util.MLATestBase):
         decoder_positions,
     )
 
-    mla_generic_output = jax.device_get(mla_generic_output)
     mla_generic_flash_cp_output = jax.device_get(mla_generic_flash_cp_output)
 
     tol = 1e-02 if context_parallel_load_balance else 2e-02
@@ -5393,8 +5413,14 @@ class MLATest(attention_test_util.MLATestBase):
         "dtype": "float32",
     }
 
-    cfg, mla = self.init_mla({**config_arguments, "attention": "dot_product"}, rope_type="default")
-    lnx, decoder_segment_ids, decoder_positions = self.get_structured_data(cfg, cfg.dtype)
+    ref = self._get_mla_cp_generic_ref(
+        {**config_arguments, "attention": "dot_product"}, structured_data=True, need_grad=True
+    )
+    cfg = ref["cfg"]
+    lnx = ref["lnx"]
+    decoder_segment_ids = ref["decoder_segment_ids"]
+    decoder_positions = ref["decoder_positions"]
+    generic_grad = ref["grad"]
 
     cfg_cp = pyconfig.initialize(
         [sys.argv[0], get_test_config_path()],
@@ -5433,46 +5459,28 @@ class MLATest(attention_test_util.MLATestBase):
           model_mode=MODEL_MODE_PREFILL,
           rngs=self.nnx_rng,
       )
-    nnx.update(attention_as_mla_flash_cp, nnx.state(mla))
-    generic_graphdef, generic_state = nnx.split(mla)
+    nnx.update(attention_as_mla_flash_cp, ref["state"])
     ring_graphdef, ring_state = nnx.split(attention_as_mla_flash_cp)
 
-    def generic_loss(lnx):
-      mla_merged = nnx.merge(generic_graphdef, generic_state)
-      output, _ = mla_merged(
-          lnx,
-          lnx,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
-
-    def ring_loss(lnx):
+    def ring_loss(x, st, seg, pos):
       if context_parallel_load_balance:
         context_parallel_size = cfg_cp.ici_context_parallelism
-        lnx = max_utils.reorder_sequence(lnx, cp_size=context_parallel_size)
-        ring_decoder_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
-        ring_decoder_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
-      else:
-        ring_decoder_segment_ids = decoder_segment_ids
-        ring_decoder_positions = decoder_positions
-      ring_merged = nnx.merge(ring_graphdef, ring_state)
+        x = max_utils.reorder_sequence(x, cp_size=context_parallel_size)
+        seg = max_utils.reorder_sequence(seg, cp_size=context_parallel_size)
+        pos = max_utils.reorder_sequence(pos, cp_size=context_parallel_size)
+      ring_merged = nnx.merge(ring_graphdef, st)
       output, _ = ring_merged(
-          lnx,
-          lnx,
-          decoder_segment_ids=ring_decoder_segment_ids,
-          inputs_positions=ring_decoder_positions,
+          x,
+          x,
+          decoder_segment_ids=seg,
+          inputs_positions=pos,
           deterministic=True,
           model_mode=MODEL_MODE_TRAIN,
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with jax.set_mesh(mesh_cp), nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
-      ring_grad = jax.grad(ring_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
+      ring_grad = jax.jit(jax.grad(ring_loss, argnums=0))(lnx, ring_state, decoder_segment_ids, decoder_positions)
     ring_grad = jax.device_get(ring_grad)
 
     self.assertTrue(
@@ -7067,22 +7075,18 @@ class CompressedAttentionTest(parameterized.TestCase):
         (batch_size, total_len),
     )
 
-    out_dot, _ = attn_dot(
-        x,
-        x,
-        decoder_segment_ids=seg,
-        inputs_positions=pos,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
+    run_compressed = nnx.jit(
+        lambda mod, x_in, seg_in, pos_in: mod(
+            x_in,
+            x_in,
+            decoder_segment_ids=seg_in,
+            inputs_positions=pos_in,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )[0]
     )
-    out_flash, _ = attn_flash(
-        x,
-        x,
-        decoder_segment_ids=seg,
-        inputs_positions=pos,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    out_dot = run_compressed(attn_dot, x, seg, pos)
+    out_flash = run_compressed(attn_flash, x, seg, pos)
 
     np.testing.assert_allclose(
         np.array(out_flash),
@@ -7339,14 +7343,16 @@ class CompressedAttentionTest(parameterized.TestCase):
     )
 
     # Run forward pass (train mode)
-    output, _ = attn(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    output, _ = nnx.jit(
+        lambda mod, x_in, seg_in, pos_in: mod(
+            x_in,
+            x_in,
+            decoder_segment_ids=seg_in,
+            inputs_positions=pos_in,
+            deterministic=True,
+            model_mode=MODEL_MODE_TRAIN,
+        )
+    )(attn, lnx, decoder_segment_ids, decoder_positions)
 
     self.assertEqual(output.shape, (batch_size, cur_seq_len, embed_dim))
     cache[cache_key] = jax.device_get(output)

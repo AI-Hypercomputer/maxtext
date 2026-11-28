@@ -20,13 +20,10 @@ rather than on "it ran".
 
 Device-count note: the mesh arithmetic lives in `_resolve_axis_sizes`, which
 takes its target as a plain integer and is therefore fully testable on a
-single CPU. Only the tests that need a real multi-device mesh are marked
-`tpu_only`. That marker matters -- the repo conftest auto-marks unmarked tests
-`cpu_only` and skips them on accelerator testbeds, so a multi-device test
-without it would silently never run anywhere it matters. Those tests size
-their meshes and expectations from `jax.device_count()` rather than assuming
-eight: the TPU runner CI uses has four chips, and a hard-coded eight turned
-every one of them into a skip.
+single CPU. The multi-device mesh tests run on CPU CI (`cpu-unit` sets
+`XLA_FLAGS=--xla_force_host_platform_device_count=4`) and size their meshes
+and expectations from `jax.device_count()` rather than assuming eight, while
+gracefully skipping on single-device local runs.
 
 Slice-count note: no testbed here spans more than one slice, and a device's
 slice membership comes from an attribute jax sets, so the multi-slice tests
@@ -48,7 +45,6 @@ import jax.numpy as jnp
 from jax.sharding import NamedSharding
 from jax.sharding import PartitionSpec as P
 import numpy as np
-import pytest
 
 from maxtext.m3.core import sharding as sharding_lib
 from maxtext.m3.core.sharding import DefaultSharding
@@ -618,14 +614,13 @@ class DefaultShardingTest(parameterized.TestCase):
     self.assertEqual(layer.kernel[...].shape, (4, 8))
 
 
-@pytest.mark.tpu_only
 class DefaultShardingMultiDeviceTest(parameterized.TestCase):
   """`DefaultSharding` driving real parameter placement through NNX metadata.
 
-  Marked `tpu_only` for the same reason as `CreateMeshMultiDeviceTest`. Sizes
-  come from the device count `n`: `tensor=2` leaves `fsdp = n/2`, and the
-  expert case uses `fsdp=2, expert = n/2`. Tensor dimensions are chosen as
-  multiples of those so every expected shard shape is an exact integer.
+  Sizes come from the device count `n` (four virtual host devices on CPU CI):
+  `tensor=2` leaves `fsdp = n/2`, and the expert case uses `fsdp=2, expert = n/2`.
+  Tensor dimensions are chosen as multiples of those so every expected shard
+  shape is an exact integer.
   """
 
   def setUp(self):
@@ -927,14 +922,8 @@ class CreateMeshTest(parameterized.TestCase):
     self.assertFalse(any(k == "linen" for k in vars(sharding_lib)))
 
 
-@pytest.mark.tpu_only
 class CreateMeshMultiDeviceTest(parameterized.TestCase):
-  """Cases that need a real multi-device mesh.
-
-  Marked `tpu_only` deliberately: unmarked tests are auto-marked `cpu_only` by
-  the repo conftest and skipped on accelerator testbeds, which is exactly where
-  these need to run.
-  """
+  """Cases that need a multi-device mesh (run on 4 forced host CPU devices in CI)."""
 
   def setUp(self):
     super().setUp()
@@ -1003,7 +992,6 @@ class CreateMeshMultiDeviceTest(parameterized.TestCase):
     self.assertEqual(out.sharding.shard_shape(out.shape), (1, 2, 8))
 
 
-@pytest.mark.tpu_only
 class CreateMeshMultiSliceTest(parameterized.TestCase):
   """The DCN branch, with the pieces m3 does not own stubbed out.
 

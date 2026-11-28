@@ -29,7 +29,6 @@ import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
 import numpy as np
-import pytest
 
 from maxtext.common.common_types import (
     MODEL_MODE_TRAIN,
@@ -38,15 +37,18 @@ from maxtext.configs import pyconfig
 from maxtext.m3.core import checkpoint as m3_checkpoint
 from maxtext.m3.models.qwen3.modeling_qwen3 import Qwen3Model, create_qwen3_model
 from maxtext.utils import max_utils, model_creation_utils
+from tests.utils.test_helpers import get_test_config_path
 
 
 def _get_base_config_args(use_m3: bool, reduced: bool = True, tp: int = 1):
   """Generates CLI config arguments for Qwen3 comparison tests."""
   args = [
       "",
-      "src/maxtext/configs/base.yml",
+      get_test_config_path(),
       "model_name=qwen3-0.6b",
       f"use_m3_model={str(use_m3).lower()}",
+      "attention=dot_product",
+      "skip_jax_distributed_system=true",
       "scan_layers=false",
       "weight_dtype=bfloat16",
       "per_device_batch_size=1",
@@ -71,8 +73,6 @@ def _get_base_config_args(use_m3: bool, reduced: bool = True, tp: int = 1):
   return args
 
 
-@pytest.mark.tpu_backend
-@pytest.mark.tpu_only
 class Qwen3ComparisonTest(unittest.TestCase):
   """Compares legacy Qwen3 (use_m3_model=false) vs modern M3 Qwen3 (use_m3_model=true)."""
 
@@ -114,7 +114,7 @@ class Qwen3ComparisonTest(unittest.TestCase):
       batch_size, seq_len = 2, 8
       tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
       positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
-      logits = model(tokens, positions, model_mode=MODEL_MODE_TRAIN)
+      logits = nnx.jit(lambda m, t, p: m(t, p, model_mode=MODEL_MODE_TRAIN))(model, tokens, positions)
       self.assertEqual(logits.shape, (batch_size, seq_len, cfg.vocab_size))
 
   def test_qwen3_forward_pass_variable_length(self):
@@ -126,7 +126,7 @@ class Qwen3ComparisonTest(unittest.TestCase):
       batch_size, seq_len = 1, 4
       tokens = jnp.ones((batch_size, seq_len), dtype=jnp.int32)
       positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
-      logits = model(tokens, positions)
+      logits = nnx.jit(lambda m, t, p: m(t, p))(model, tokens, positions)
       self.assertEqual(logits.shape, (batch_size, seq_len, cfg.vocab_size))
 
   def test_parameter_shapes_and_paths_match(self):
@@ -182,8 +182,9 @@ class Qwen3ComparisonTest(unittest.TestCase):
       tokens = jax.random.randint(jax.random.PRNGKey(0), (batch_size, seq_len), 0, cfg_old.vocab_size)
       positions = jnp.broadcast_to(jnp.arange(seq_len, dtype=jnp.int32)[None, :], (batch_size, seq_len))
 
-      logits_old = model_old(tokens, positions, enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
-      logits_new = model_new(tokens, positions, enable_dropout=False, model_mode=MODEL_MODE_TRAIN)
+      forward = nnx.jit(lambda m, t, p: m(t, p, enable_dropout=False, model_mode=MODEL_MODE_TRAIN))
+      logits_old = forward(model_old, tokens, positions)
+      logits_new = forward(model_new, tokens, positions)
 
       max_diff = float(jnp.max(jnp.abs(logits_old - logits_new)))
       self.assertLess(max_diff, 1e-4, f"Max logits diff too high: {max_diff}")
@@ -206,17 +207,14 @@ class Qwen3ComparisonTest(unittest.TestCase):
         xent, _ = max_utils.cross_entropy_with_logits(logits, one_hot)
         return jnp.mean(xent)
 
-      # Test direct loss evaluation parity
-      loss_direct_old = float(loss_fn(model_old))
-      loss_direct_new = float(loss_fn(model_new))
+      # Test loss and backward pass gradients parity in a single jitted value_and_grad per model
+      loss_and_grad = nnx.jit(nnx.value_and_grad(loss_fn))
+      loss_old, grads_old = loss_and_grad(model_old)
+      loss_new, grads_new = loss_and_grad(model_new)
+
       self.assertAlmostEqual(
-          loss_direct_old, loss_direct_new, places=3, msg=f"Direct loss mismatch: {loss_direct_old} vs {loss_direct_new}"
+          float(loss_old), float(loss_new), places=3, msg=f"Loss mismatch: {float(loss_old)} vs {float(loss_new)}"
       )
-
-      # Test backward pass gradients parity
-      loss_old, grads_old = nnx.value_and_grad(loss_fn)(model_old)
-      loss_new, grads_new = nnx.value_and_grad(loss_fn)(model_new)
-
       rel_loss_diff = abs(float(loss_old) - float(loss_new)) / (float(loss_old) + 1e-6)
       self.assertLess(rel_loss_diff, 0.01, f"Relative loss diff in value_and_grad too high: {rel_loss_diff}")
 

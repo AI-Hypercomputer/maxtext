@@ -37,7 +37,6 @@ from maxtext.m3.models.qwen3_vl.modeling_qwen3_vl import (
 from maxtext.utils import model_creation_utils
 from maxtext.utils.globals import MAXTEXT_CONFIGS_DIR
 import numpy as np
-import pytest
 
 BASE_CONFIG_PATH = os.path.join(MAXTEXT_CONFIGS_DIR, "base.yml")
 
@@ -50,6 +49,7 @@ def _get_qwen3_vl_config_args(use_m3: bool = True, reduced: bool = True):
       "model_name=qwen3-vl-2b",
       f"use_m3_model={'true' if use_m3 else 'false'}",
       "use_multimodal=true",
+      "attention=dot_product",
       "scan_layers=false",
       "per_device_batch_size=1",
       "dtype=float32",
@@ -61,15 +61,24 @@ def _get_qwen3_vl_config_args(use_m3: bool = True, reduced: bool = True):
         [
             "override_model_config=true",
             "base_num_decoder_layers=2",
+            "base_emb_dim=64",
+            "base_mlp_dim=128",
+            "base_num_query_heads=4",
+            "base_num_kv_heads=2",
+            "head_dim=32",
+            "mrope_section=[6,5,5]",
             "num_hidden_layers_for_vit=2",
+            "hidden_size_for_vit=64",
+            "intermediate_size_for_vit=128",
+            "num_attention_heads_for_vit=4",
+            "out_hidden_size_for_vit=64",
+            "num_position_embeddings_for_vit=16",
             "deepstack_visual_indexes_for_vit=[1]",
         ]
     )
   return args
 
 
-@pytest.mark.tpu_backend
-@pytest.mark.tpu_only
 class Qwen3VLComparisonTest(absltest.TestCase):
   """Unit tests for self-contained m3 Qwen3-VL implementation."""
 
@@ -124,11 +133,16 @@ class Qwen3VLComparisonTest(absltest.TestCase):
           [[151644, 872, 198, 151652, 151655, 151653, 151645]],
           dtype=jnp.int32,
       )
-      logits = model(
-          decoder_input_tokens=tokens,
-          encoder_images=images,
-          encoder_video_grid_thw=grid_thw,
-      )
+
+      @nnx.jit
+      def _forward(m, dec_tokens, enc_images, enc_grid_thw):
+        return m(
+            decoder_input_tokens=dec_tokens,
+            encoder_images=enc_images,
+            encoder_video_grid_thw=enc_grid_thw,
+        )
+
+      logits = _forward(model, tokens, images, grid_thw)
       self.assertEqual(logits.shape, (1, tokens.shape[1], cfg.vocab_size))
 
 

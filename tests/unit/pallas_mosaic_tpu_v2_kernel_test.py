@@ -634,19 +634,27 @@ _ROUTING_PATTERNS = ("uniform", "short", "skewed", "edge", "padded", "local_grou
 _BF16 = jnp.dtype(jnp.bfloat16)
 
 
+_UNIFIED_TAIL_CHUNK_ROWS = 32768
+_UNIFIED_TAIL_CHUNK_GROUPS = 128
+
+
 def _routing(pattern: str) -> tuple[np.ndarray, int, int, int]:
   """Returns (group_sizes, rows, group_offset, local groups) of a routing pattern.
 
-  The mean group sizes keep every call of GmmV2TailChunksTpuTest inside the gate.
+  The mean group sizes keep every call of GmmV2TailChunksTpuTest inside the gate. Patterns that do not specifically
+  test a non-tile-multiple `m` (`padded`) or expert sharding (`local_groups`) share the static shape
+  (`_UNIFIED_TAIL_CHUNK_ROWS`, `_UNIFIED_TAIL_CHUNK_GROUPS`) so `gmm_v2` compiles once per call config and reuses the
+  compiled Pallas executable across routing patterns.
 
   Args:
     pattern: One of _ROUTING_PATTERNS.
   """
   rng = np.random.default_rng(0)
-  groups, offset, extra_rows = 128, 0, 0
-  if pattern == "uniform":  # ~1024 rows per group: gemma4-26b at 16384 tokens per device, 32 of its experts.
-    groups = 32
-    sizes = np.bincount(rng.integers(0, groups, groups * 1024), minlength=groups)
+  groups, offset, extra_rows = _UNIFIED_TAIL_CHUNK_GROUPS, 0, 0
+  rows = _UNIFIED_TAIL_CHUNK_ROWS
+  if pattern == "uniform":  # ~1024 rows per active group (32 active experts, remaining 96 empty): sum == rows.
+    active = 32
+    sizes = np.pad(np.bincount(rng.integers(0, active, active * 1024), minlength=active), (0, groups - active))
   elif pattern == "short":  # ~120 rows per group: gemma4-26b at about 2048 tokens per device.
     sizes = np.bincount(rng.integers(0, groups, groups * 120), minlength=groups)
   elif pattern == "skewed":  # Zipf-like sizes off the tile grid; six groups empty.
@@ -655,20 +663,22 @@ def _routing(pattern: str) -> tuple[np.ndarray, int, int, int]:
     sizes = np.floor(weights / weights.sum() * groups * 256).astype(np.int64)
     sizes[np.argmax(sizes)] += groups * 256 - sizes.sum()
     sizes = rng.permutation(sizes)
-  elif pattern in ("edge", "padded"):  # The boundary sizes, the other groups empty; "padded" adds unrouted rows.
+  elif pattern in ("edge", "padded"):  # The boundary sizes, the other groups empty; "padded" uses non-tile-multiple m.
     sizes = rng.permutation(np.pad(np.array(_EDGE_SIZES), (0, groups - len(_EDGE_SIZES))))
-    extra_rows = 333 if pattern == "padded" else 0
+    if pattern == "padded":
+      extra_rows = 333
+      # gmm_v2 zero-fills unrouted rows in whole 16-row sublanes (MaxText pads the rows to a tile multiple).
+      rows = -(-(int(sizes.sum()) + extra_rows) // 16) * 16
   elif pattern == "local_groups":  # Expert sharding: groups 0-1 and 38-39 are another shard's.
     groups, offset = 40, 2
     sizes = np.bincount(rng.integers(0, groups, groups * 1024), minlength=groups)
-  elif pattern == "long":  # 768 rows per group: no tile of 1024 rows is short, so the kernel runs without the chunks.
-    groups = 32
-    sizes = np.full(groups, 768)
+    rows = -(-int(sizes.sum()) // 16) * 16
+  elif pattern == "long":  # 768 rows per active group: no tile of 1024 rows is short, so the kernel skips tail chunks.
+    active = 32
+    sizes = np.pad(np.full(active, 768), (0, groups - active))
   else:
     raise ValueError(f"Unknown pattern {pattern!r}.")
   local_groups = groups - 4 if pattern == "local_groups" else groups
-  # gmm_v2 zero-fills unrouted rows in whole 16-row sublanes (MaxText pads the rows to a tile multiple).
-  rows = -(-(int(sizes.sum()) + extra_rows) // 16) * 16
   return sizes.astype(np.int32), rows, offset, local_groups
 
 
@@ -688,19 +698,19 @@ def _random_operands(m: int, k: int, n: int, groups: int, transpose_rhs: bool) -
   return lhs, rhs
 
 
-def _run_recording_configs(fn, *args):
-  """Runs jit(fn)(*args). Returns the outputs as numpy arrays and the GmmConfigs of each gmm_v2 call."""
-  jax.clear_caches()  # gmm_v2 is jitted: retrace it, so that make_gmm_configs runs again.
+def _compile_recording_configs(fn, *args):
+  """Compiles `jax.jit(fn)` on `args`, clearing only `gmm_v2`'s trace cache so `make_gmm_configs` runs."""
+  gmm_backend.gmm_v2.clear_cache()
   configs = []
   make_gmm_configs = gmm_backend.make_gmm_configs
 
-  def recording_make_gmm_configs(*args, **kwargs):
-    configs.append(make_gmm_configs(*args, **kwargs))  # pylint: disable=missing-kwoa
+  def recording_make_gmm_configs(*c_args, **c_kwargs):
+    configs.append(make_gmm_configs(*c_args, **c_kwargs))  # pylint: disable=missing-kwoa
     return configs[-1]
 
   with mock.patch.object(gmm_backend, "make_gmm_configs", side_effect=recording_make_gmm_configs):
-    out = jax.block_until_ready(jax.jit(fn)(*args))
-  return jax.tree.map(np.asarray, out), configs
+    compiled = jax.jit(fn).lower(*args).compile()
+  return compiled, configs
 
 
 # Every call with every pattern for one call per chunk size; the other calls with two patterns.
@@ -719,6 +729,22 @@ class GmmV2TailChunksTpuTest(parameterized.TestCase):
   routing makes the kernel run the chunks (except for the "long" routing, which has no short tile), and with it off
   (the default). It then requires the same bits.
   """
+
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_compiled_cache"):
+      delattr(cls, "_compiled_cache")
+    super().tearDownClass()
+
+  def _run_cached_recording_configs(self, cache_key, fn, *args):
+    """Runs `fn(*args)` using a class-cached compiled executable and returns `(np_out, recorded_configs)`."""
+    cache = getattr(self.__class__, "_compiled_cache", {})
+    if cache_key not in cache:
+      cache[cache_key] = _compile_recording_configs(fn, *args)
+      setattr(self.__class__, "_compiled_cache", cache)
+    compiled, configs = cache[cache_key]
+    out = jax.block_until_ready(compiled(*args))
+    return jax.tree.map(np.asarray, out), configs
 
   def setUp(self):
     super().setUp()
@@ -758,8 +784,12 @@ class GmmV2TailChunksTpuTest(parameterized.TestCase):
       )
 
     args = (lhs, rhs, jnp.asarray(sizes), jnp.asarray([offset], jnp.int32))
-    on, on_configs = _run_recording_configs(functools.partial(gmm, tail_chunks=True), *args)
-    off, off_configs = _run_recording_configs(functools.partial(gmm, tail_chunks=False), *args)
+    on, on_configs = self._run_cached_recording_configs(
+        ("gmm_v2", call, m, sizes.shape[0], local_groups, True), functools.partial(gmm, tail_chunks=True), *args
+    )
+    off, off_configs = self._run_cached_recording_configs(
+        ("gmm_v2", call, m, sizes.shape[0], local_groups, False), functools.partial(gmm, tail_chunks=False), *args
+    )
     self.assertEqual([c.tail_chunks for c in on_configs], [True])
     self.assertEqual([c.tail_chunks for c in off_configs], [False])
     self.assertEqual(_runs_tail_chunks(sizes, offset, local_groups, tiles[0], transpose_rhs), pattern != "long")
@@ -792,8 +822,12 @@ class GmmV2TailChunksTpuTest(parameterized.TestCase):
       return (out, *vjp(dout))
 
     args = (lhs, rhs, dout, jnp.asarray(sizes))
-    on, on_configs = _run_recording_configs(functools.partial(fwd_bwd, tail_chunks=True), *args)
-    off, off_configs = _run_recording_configs(functools.partial(fwd_bwd, tail_chunks=False), *args)
+    on, on_configs = self._run_cached_recording_configs(
+        ("maxtext_gmm", which, m, groups, True), functools.partial(fwd_bwd, tail_chunks=True), *args
+    )
+    off, off_configs = self._run_cached_recording_configs(
+        ("maxtext_gmm", which, m, groups, False), functools.partial(fwd_bwd, tail_chunks=False), *args
+    )
     # gmm_v2 runs the forward and the input gradient. tgmm_v2 runs the weight gradient; tail chunks leave it alone.
     self.assertEqual([c.tail_chunks for c in on_configs], [True, True])
     self.assertEqual([c.tail_chunks for c in off_configs], [False, False])

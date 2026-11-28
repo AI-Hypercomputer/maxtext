@@ -422,7 +422,7 @@ class QuantTest(unittest.TestCase):
         )
         return jnp.mean((logits_b) ** 2), logits_b
 
-      (_, logits_base), grads_base = nnx.value_and_grad(loss_base, has_aux=True)(base_model)
+      (_, logits_base), grads_base = nnx.jit(nnx.value_and_grad(loss_base, has_aux=True))(base_model)
       self.__class__._cached_base_results_nnx = jax.device_get((grads_base, logits_base))
 
     grads_base, logits = self.__class__._cached_base_results_nnx
@@ -436,7 +436,7 @@ class QuantTest(unittest.TestCase):
       )
       return jnp.mean((logits_q) ** 2), logits_q
 
-    (_, quant_logits), grads_quant = nnx.value_and_grad(loss_quant, has_aux=True)(qt_model)
+    (_, quant_logits), grads_quant = nnx.jit(nnx.value_and_grad(loss_quant, has_aux=True))(qt_model)
 
     print("relative error in logits:" f" {jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean()}")
     assert jnp.abs(quant_logits - logits).mean() / jnp.abs(logits).mean() < logits_tolerance
@@ -467,23 +467,11 @@ class QuantTest(unittest.TestCase):
     self.quantization_config("int8")
 
   @pytest.mark.tpu_only
-  def test_int8_quantization_nnx(self):
-    self.quantization_config("int8")
-
-  @pytest.mark.tpu_only
   def test_fp8_quantization(self):
     self.quantization_config("fp8")
 
   @pytest.mark.tpu_only
-  def test_fp8_quantization_nnx(self):
-    self.quantization_config("fp8")
-
-  @pytest.mark.tpu_only
   def test_fp8_full_quantization(self):
-    self.quantization_config("fp8_full")
-
-  @pytest.mark.tpu_only
-  def test_fp8_full_quantization_nnx(self):
     self.quantization_config("fp8_full")
 
   @pytest.mark.gpu_only
@@ -493,17 +481,7 @@ class QuantTest(unittest.TestCase):
 
   @pytest.mark.gpu_only
   @pytest.mark.external_serving
-  def test_fp8_gpu_quantization_nnx(self):
-    self.quantization_config("fp8_gpu", grad_tolerance=1.5)
-
-  @pytest.mark.gpu_only
-  @pytest.mark.external_serving
   def test_fp8_nanoo_quantization(self):
-    self.quantization_config("fp8_nanoo", grad_tolerance=1.5)
-
-  @pytest.mark.gpu_only
-  @pytest.mark.external_serving
-  def test_fp8_nanoo_quantization_nnx(self):
     self.quantization_config("fp8_nanoo", grad_tolerance=1.5)
 
   @pytest.mark.skip(reason="No runner with GPU arch >= 89 is available")

@@ -26,6 +26,19 @@ def get_repo_root() -> str:
   return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
+def _strip_xdist_group_suffix(key: str) -> str:
+  """Strips a trailing pytest-xdist `@<group>` suffix (including pytest >= 9.2's `]@<group>]` artifact)."""
+  if key.endswith("]") and "]@" in key:
+    close_at = key.rfind("]@")
+    prefix = key[: close_at + 1]
+    if prefix.count("[") > 0 and prefix.count("[") == prefix.count("]"):
+      return prefix
+  at_idx = key.rfind("@")
+  if at_idx != -1 and at_idx > key.rfind("]"):
+    return key[:at_idx]
+  return key
+
+
 def convert_entry(
     key: str,
     duration: float,
@@ -48,6 +61,8 @@ def convert_entry(
   flavor = ""
   if "::" in key:
     flavor, key = key.split("::", 1)
+
+  key = _strip_xdist_group_suffix(key)
 
   # Extract pytest parametrization bracket (e.g. '[param1.ext-param2]') if present
   # so dots within parameter values are preserved and not split into '::'.

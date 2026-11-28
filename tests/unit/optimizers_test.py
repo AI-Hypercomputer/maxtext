@@ -30,7 +30,6 @@ from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 import optax
 from optax.contrib._muon import MuonDimensionNumbers as mdn
-import pytest
 
 # MLA without Q-LoRA (q_lora_rank=0, e.g. deepseek3-test with q_lora_rank=0 override)
 _DEEPSEEK2_ATTENTION = {
@@ -601,7 +600,6 @@ class MuonDimensionTest(parameterized.TestCase):
       ("qwen3-next-80b-a3b", "qwen3-next-80b-a3b", QWEN3_NEXT_DIMENSION_NUMBER),
       ("gpt-oss-20b", "gpt-oss-20b", GPT_OSS_DIMENSION_NUMBER),
   )
-  @pytest.mark.tpu_only
   def test_model_integration(self, model_name, expected_output):
     """
     Initializes the specified MaxText model and asserts that the generated

@@ -217,14 +217,30 @@ def forward_with_context_expert_parallelism(
     decoder_segment_ids = jax.device_put(decoder_segment_ids, pos_sharding)
     decoder_positions = jax.device_put(decoder_positions, pos_sharding)
 
-    attention_cp_output, _ = attention_cp(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=MODEL_MODE_TRAIN,
-    )
+    # Skip whole-module jit when `use_indexer` is enabled: XLA fusion of
+    # bfloat16-precision Indexer projections can perturb borderline `top_k`
+    # ties relative to the eager reference.
+    if isinstance(attention_cp, nnx.Module) and not cfg_cp.use_indexer:
+      graphdef, state = nnx.split(attention_cp)
+      attention_cp_output, _ = jax.jit(
+          lambda st, x, seg, pos: nnx.merge(graphdef, st)(
+              x,
+              x,
+              decoder_segment_ids=seg,
+              inputs_positions=pos,
+              deterministic=True,
+              model_mode=MODEL_MODE_TRAIN,
+          )
+      )(state, lnx, decoder_segment_ids, decoder_positions)
+    else:
+      attention_cp_output, _ = attention_cp(
+          lnx,
+          lnx,
+          decoder_segment_ids=decoder_segment_ids,
+          inputs_positions=decoder_positions,
+          deterministic=True,
+          model_mode=MODEL_MODE_TRAIN,
+      )
     attention_cp_output = attention_cp_output[0] if isinstance(attention_cp_output, tuple) else attention_cp_output
 
     # All-gather before re-shuffle to avoid re-order sharding confusion

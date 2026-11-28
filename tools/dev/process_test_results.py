@@ -125,6 +125,23 @@ def find_missing_shards(xml_files):
   return missing
 
 
+def strip_xdist_group_suffix(name):
+  """Strips a trailing pytest-xdist `@<group>` suffix from a JUnit testcase name.
+
+  Preserves `@` inside `[...]` parametrization values, and normalizes the pytest >= 9.2 JUnit XML
+  artifact where `test_x[p]@Group` is emitted as `test_x[p]@Group]`.
+  """
+  if name.endswith("]") and "]@" in name:
+    close_at = name.rfind("]@")
+    prefix = name[: close_at + 1]
+    if prefix.count("[") > 0 and prefix.count("[") == prefix.count("]"):
+      return prefix
+  at_idx = name.rfind("@")
+  if at_idx != -1 and at_idx > name.rfind("]"):
+    return name[:at_idx]
+  return name
+
+
 def testcase_markers(testcase):
   """Returns the pytest markers that tests/conftest.py records as 'marker' properties of a JUnit testcase."""
   markers = set()
@@ -150,7 +167,8 @@ def process_testcase(testcase, xml_file, job_name, baseline_data, new_baseline_d
 
   time_val = float(testcase.get("time", 0.0))
   classname = testcase.get("classname", "unknown")
-  full_name = f"{classname}.{testcase.get('name', 'unknown')}"
+  name = strip_xdist_group_suffix(testcase.get("name", "unknown"))
+  full_name = f"{classname}.{name}"
   markers = testcase_markers(testcase)
 
   baseline_key = f"{job_name}::{full_name}"
@@ -327,7 +345,7 @@ def main():
         job_time += time_val
 
         if testcase.find("skipped") is None:
-          name = testcase.get("name", "unknown")
+          name = strip_xdist_group_suffix(testcase.get("name", "unknown"))
           classname = testcase.get("classname", "unknown")
           active_keys_by_job.setdefault(job_name, set()).add(f"{job_name}::{classname}.{name}")
 

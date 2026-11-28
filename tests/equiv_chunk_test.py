@@ -95,12 +95,12 @@ def init_run(n_chunks, x_shape):
   model = build_model(cfg, mesh)
   with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
     x = jax.random.uniform(jax.random.PRNGKey(7), x_shape, dtype=cfg.dtype)
-    variables = model.init(
+    variables = linen_wrappers.init_variables(
+        model,
         {
             "params": jax.random.PRNGKey(2345),
             "dropout": jax.random.PRNGKey(2345),
         },
-        x,
     )
     return variables, x
 

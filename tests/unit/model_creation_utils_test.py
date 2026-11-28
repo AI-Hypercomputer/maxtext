@@ -45,7 +45,6 @@ from maxtext.utils.model_creation_utils import (
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
 from orbax import checkpoint as ocp
-import pytest
 
 if "maxtext" in sys.modules and not hasattr(sys.modules["maxtext"], "utils"):
   setattr(sys.modules["maxtext"], "utils", sys.modules["maxtext.src.maxtext.utils"])
@@ -96,6 +95,7 @@ def _make_config(**kwargs):
       "per_device_batch_size": 1.0,
       "run_name": "test",
       "enable_checkpointing": False,
+      "skip_jax_distributed_system": True,
       "base_num_decoder_layers": 2,
       "attention": "dot_product",
       "max_target_length": 16,
@@ -132,7 +132,6 @@ def _make_mesh(config):
   return Mesh(devices_array, config.mesh_axes)
 
 
-@pytest.mark.tpu_only
 class FixRestoreArgsRankGuardTest(unittest.TestCase):
   """_fix_restore_args_for_shape_mismatch must dispatch correctly on rank/divisibility.
 
@@ -210,7 +209,6 @@ class FixRestoreArgsRankGuardTest(unittest.TestCase):
     self.assertEqual(arg.global_shape, stored_shape)
 
 
-@pytest.mark.tpu_only
 class TestAlignCheckpointToModelShapes(unittest.TestCase):
   """_align_checkpoint_to_model_shapes must dispatch on logical axis names.
 
@@ -333,7 +331,6 @@ class TestAlignCheckpointToModelShapes(unittest.TestCase):
       _align_checkpoint_to_model_shapes(ckpt, model, ("scan", "embed", "kv_heads", "kv_head_dim"))
 
 
-@pytest.mark.tpu_only
 class TestFuseMoeWeights(unittest.TestCase):
   """_fuse_moe_weights must zero-pad each half BEFORE concatenation when MLP-dim padding applies.
 
@@ -486,7 +483,6 @@ class TestFuseMoeWeightsFusedKernelLayout(unittest.TestCase):
     np.testing.assert_array_equal(np.asarray(sliced), np.asarray(single_pass))
 
 
-@pytest.mark.tpu_only
 class TestShardedZeroPad(unittest.TestCase):
   """Covers the per-shard zero-pad path that avoids the replicated-fanout OOM.
 
@@ -561,7 +557,6 @@ class TestShardedZeroPad(unittest.TestCase):
       np.testing.assert_array_equal(out_np[:, s * 3 + 2, :], np.zeros((2, 2), dtype=np.float32))
 
 
-@pytest.mark.tpu_only
 class TestPartitionSpecUnwrapForAlignment(unittest.TestCase):
   """Locks in the runtime extraction path used by from_pretrained.
 
@@ -1522,6 +1517,7 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     # Since they match, it should return early, and NO log should be printed.
     mock_load_meta.return_value = {"scan_layers": True}
     cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+    mock_log.reset_mock()
 
     synced_cfg = model_creation_utils.verify_and_sync_scan_layers(cfg)
     self.assertTrue(synced_cfg.scan_layers)
@@ -1531,6 +1527,7 @@ class TestVerifyAndSyncScanLayers(unittest.TestCase):
     # It should log the auto-resolution and update scan_layers to False.
     mock_load_meta.return_value = {"scan_layers": False}
     cfg2 = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/ckpt")
+    mock_log.reset_mock()
 
     synced_cfg2 = model_creation_utils.verify_and_sync_scan_layers(cfg2)
     self.assertFalse(synced_cfg2.scan_layers)

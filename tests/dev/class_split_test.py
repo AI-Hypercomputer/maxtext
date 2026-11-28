@@ -69,6 +69,16 @@ class GroupKeyTest(unittest.TestCase):
   def test_nodeid_without_separator_is_its_own_key(self):
     self.assertEqual(group_key("tests/unit/a_test.py"), "tests/unit/a_test.py")
 
+  def test_at_sign_in_a_directory_name_is_not_stripped_as_an_xdist_group(self):
+    self.assertEqual(
+        group_key("tests/unit/dir@1/a_test.py::ATest::test_x"),
+        "tests/unit/dir@1/a_test.py::ATest",
+    )
+    self.assertEqual(
+        group_key("tests/unit/dir@1/a_test.py::test_fn@G"),
+        "tests/unit/dir@1/a_test.py::test_fn",
+    )
+
 
 class LoadDurationsTest(unittest.TestCase):
 
@@ -103,6 +113,29 @@ class LoadDurationsTest(unittest.TestCase):
       durations, warning = load_durations(path)
     self.assertEqual(durations, {})
     self.assertIn("not a JSON object", warning)
+
+  def test_load_durations_indexes_ungrouped_fallback_for_xdist_group_entries(self):
+    with tempfile.TemporaryDirectory() as tmpdir:
+      path = os.path.join(tmpdir, ".test_durations")
+      with open(path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "tests/a_test.py::A::test_1@G": 12.0,
+                "tests/b_test.py::B::test_1[user@host]@G": 8.0,
+                "tests/c_test.py::C::test_1[p]@G]": 9.0,
+                "tests/d_test.py::D::test_1": 3.0,
+                "tests/d_test.py::D::test_1@G": 30.0,
+            },
+            f,
+        )
+      durations, warning = load_durations(path)
+    self.assertEqual(warning, "")
+    self.assertEqual(durations["tests/a_test.py::A::test_1"], 12.0)
+    self.assertEqual(durations["tests/b_test.py::B::test_1[user@host]"], 8.0)
+    self.assertEqual(durations["tests/c_test.py::C::test_1[p]"], 9.0)
+    # Existing exact ungrouped entry is preserved rather than overwritten by the suffixed entry.
+    self.assertEqual(durations["tests/d_test.py::D::test_1"], 3.0)
+    self.assertEqual(durations["tests/d_test.py::D::test_1@G"], 30.0)
 
 
 class DealGroupsTest(unittest.TestCase):
@@ -168,6 +201,50 @@ class DealGroupsTest(unittest.TestCase):
   def test_splits_below_one_is_rejected(self):
     with self.assertRaises(ValueError):
       deal_groups(["tests/a_test.py::A::t"], {}, 0)
+
+  def test_duration_lookup_falls_back_to_nodeid_without_xdist_group_suffix(self):
+    nodeids = [
+        "tests/a_test.py::A::test_1@tests_a_test_A",
+        "tests/b_test.py::B::test_1[user@host]@tests_b_test_B",
+        "tests/c_test.py::C::test_1[user@host]",
+    ]
+    # Baseline recorded before `@<group>` suffixes existed (plus an exact `@` inside `[...]`).
+    durations = {
+        "tests/a_test.py::A::test_1": 25.0,
+        "tests/b_test.py::B::test_1[user@host]": 50.0,
+        "tests/c_test.py::C::test_1[user@host]": 10.0,
+    }
+
+    groups = deal_groups(nodeids, durations, 2)
+
+    # B (50s) outweighs A (25s) + C (10s), so B lands alone on shard 1 (a miss on B drops it to 17.5s and flips shards).
+    self.assertEqual(groups, [[nodeids[1]], [nodeids[0], nodeids[2]]])
+    with tempfile.TemporaryDirectory() as tmpdir:
+      durations_path = os.path.join(tmpdir, ".test_durations")
+      with open(durations_path, "w", encoding="utf-8") as f:
+        json.dump(durations, f)
+      out = io.StringIO()
+      items = [_fake_item(n) for n in nodeids]
+      config = _fake_config(1, 1, [])
+      with contextlib.redirect_stdout(out):
+        ClassSplitPlugin(config, durations_path=durations_path).pytest_collection_modifyitems(config, items)
+    self.assertIn("3 tests in 3 classes, 3 with a recorded duration", out.getvalue())
+
+  def test_exact_xdist_group_suffixed_duration_wins_over_ungrouped_fallback(self):
+    nodeids = [
+        "tests/a_test.py::A::test_1@G",
+        "tests/b_test.py::B::test_1",
+    ]
+    durations = {
+        "tests/a_test.py::A::test_1": 1.0,
+        "tests/a_test.py::A::test_1@G": 50.0,
+        "tests/b_test.py::B::test_1": 10.0,
+    }
+
+    groups = deal_groups(nodeids, durations, 2)
+
+    # Exact `@G` duration (50s) outweighs B (10s), so A lands on shard 1.
+    self.assertEqual(groups, [[nodeids[0]], [nodeids[1]]])
 
 
 def _fake_config(splits, group, deselected, split_by="class"):

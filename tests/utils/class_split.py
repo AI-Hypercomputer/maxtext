@@ -40,6 +40,23 @@ import pytest
 DURATIONS_FILE = ".test_durations"
 
 
+def _strip_xdist_group_suffix(nodeid):
+  """Strips a trailing `@<group>` added by pytest-xdist `--dist loadgroup`, ignoring `@` in paths or `[...]`."""
+  sep_idx = nodeid.rfind("::")
+  if sep_idx == -1:
+    return nodeid
+  if nodeid.endswith("]") and "]@" in nodeid:
+    close_at = nodeid.rfind("]@")
+    if close_at > sep_idx:
+      prefix = nodeid[: close_at + 1]
+      if prefix.count("[") > 0 and prefix.count("[") == prefix.count("]"):
+        return prefix
+  at_idx = nodeid.rfind("@")
+  if at_idx > max(nodeid.rfind("]"), sep_idx):
+    return nodeid[:at_idx]
+  return nodeid
+
+
 def group_key(nodeid):
   """Returns the split unit a nodeid belongs to: its class, or the function itself for module-level tests.
 
@@ -48,6 +65,7 @@ def group_key(nodeid):
   The path is kept whole, so a '[' in a directory or file name cannot cut the key short, and parameters
   are stripped only from the class or function part, so a parameter value containing '::' cannot shift it.
   """
+  nodeid = _strip_xdist_group_suffix(nodeid)
   parts = nodeid.split("::")
   if len(parts) < 2:
     return parts[0]
@@ -79,6 +97,10 @@ def load_durations(path):
       durations[str(key)] = float(value)
     except (TypeError, ValueError):
       continue
+  for key, value in list(durations.items()):
+    base = _strip_xdist_group_suffix(key)
+    if base != key and base not in durations:
+      durations[base] = value
   if not durations:
     return {}, f"durations file {path!r} holds no usable entries; using equal weights"
   return durations, ""
@@ -101,6 +123,16 @@ def xdist_group_key(item):
   return f"xdist_group:{name}" if name else group_key(item.nodeid)
 
 
+def _lookup_duration(durations, nodeid):
+  """Returns the recorded duration for `nodeid`, falling back to the ungrouped nodeid without `@<group>`."""
+  if nodeid in durations:
+    return durations[nodeid]
+  base = _strip_xdist_group_suffix(nodeid)
+  if base != nodeid and base in durations:
+    return durations[base]
+  return None
+
+
 def _weights_and_members(nodeids, durations, key_fn=group_key):
   """Returns `(weight per group key, members per group key as (collection index, nodeid))`.
 
@@ -108,13 +140,13 @@ def _weights_and_members(nodeids, durations, key_fn=group_key):
   being dealt (1.0 when none are recorded), so entries for tests that were deselected before the
   deal cannot influence it.
   """
-  recorded = [durations[n] for n in nodeids if n in durations]
-  fallback = sum(recorded) / len(recorded) if recorded else 1.0
+  resolved = {n: d for n in nodeids if (d := _lookup_duration(durations, n)) is not None}
+  fallback = sum(resolved.values()) / len(resolved) if resolved else 1.0
   weights = {}
   members = {}
   for index, nodeid in enumerate(nodeids):
     key = key_fn(nodeid)
-    weights[key] = weights.get(key, 0.0) + durations.get(nodeid, fallback)
+    weights[key] = weights.get(key, 0.0) + resolved.get(nodeid, fallback)
     members.setdefault(key, []).append((index, nodeid))
   return weights, members
 
@@ -192,7 +224,7 @@ class ClassSplitPlugin:
     if dropped:
       config.hook.pytest_deselected(items=dropped)
     units = len({key_fn(item.nodeid) for item in kept})
-    recorded = sum(1 for item in kept if item.nodeid in durations)
+    recorded = sum(1 for item in kept if _lookup_duration(durations, item.nodeid) is not None)
     self._report(
         config,
         f"[class-split] Running group {self.group}/{self.splits}: {len(kept)} tests in {units} {unit_label}, "

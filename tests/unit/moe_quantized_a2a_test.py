@@ -43,6 +43,7 @@ from maxtext.layers import nnx_wrappers
 from maxtext.layers.initializers import nd_dense_init, variable_to_logically_partitioned
 from maxtext.utils import max_logging
 from maxtext.utils import maxtext_utils
+from tests.utils import linen_wrappers
 from tests.utils.test_helpers import get_test_config_path
 
 _NUM_SHARDS = 4
@@ -693,7 +694,7 @@ class _MoeRun:
     self.x = (x * jnp.exp(sigma * jax.random.normal(jax.random.PRNGKey(4), (*shape[:2], 1)))).astype(cfg.dtype)
     with self.context():
       rngs = {"params": jax.random.PRNGKey(5), "dropout": jax.random.PRNGKey(5)}
-      self.variables = variables or self.model.init(rngs, self.x)
+      self.variables = variables or linen_wrappers.init_variables(self.model, rngs)
 
   @contextlib.contextmanager
   def context(self):

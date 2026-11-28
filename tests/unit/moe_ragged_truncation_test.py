@@ -20,6 +20,7 @@ from unittest import mock
 
 os.environ.setdefault("XLA_FLAGS", "--xla_force_host_platform_device_count=4")
 
+from absl.testing import absltest
 import flax.linen as nn
 from flax.linen import partitioning as nn_partitioning
 import jax
@@ -191,7 +192,9 @@ class MoeRaggedTruncationTest(unittest.TestCase):
     x = jnp.asarray(x_np, dtype=jnp.float32)
 
     with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
-      variables = model.init({"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)}, x)
+      variables = linen_wrappers.init_variables(
+          model, {"params": jax.random.PRNGKey(0), "dropout": jax.random.PRNGKey(1)}
+      )
     params = jax.tree_util.tree_map(np.asarray, nn.unbox(variables["params"]))
     params["gate"]["kernel"] = gate_kernel
     rng = np.random.default_rng(12345)
@@ -334,6 +337,7 @@ class MoeRaggedTruncationTest(unittest.TestCase):
         )
 
         def _gmm_probe_loss(lhs_arr, rhs_arr, gs_arr=jnp.asarray(l_gs, dtype=jnp.int32), n_valid=valid_n):
+          """Computes scalar quantized GMM loss over valid dispatched rows."""
           gmm_out = mblx.gmm(
               lhs_arr,
               rhs_arr,
@@ -482,6 +486,99 @@ class MoeRaggedTruncationTest(unittest.TestCase):
     with self.assertRaises(AssertionError):
       np.testing.assert_allclose(perturbed_wi0, np.asarray(grads_ref["wi_0"]), rtol=0.0, atol=0.0)
 
+  def test_5_dropless_quantized_dispatch_zero_init_under_nan_empty(self):
+    """Dropless quantized dispatch (`ragged_buffer_factor=-1.0`, `use_ragged_sort=False`) stays finite under NaN empty."""
+    cfg, mesh, model = self._build_cfg_and_model(ragged_buffer_factor=-1.0)
+    x, params, _, _ = self._construct_overflow_routing_inputs_and_params(cfg, mesh, model)
+    q_rule = qwix.QtRule(
+        module_path=".*",
+        weight_qtype=jnp.int8,
+        weight_calibration_method="absmax",
+        act_qtype=jnp.int8,
+        act_calibration_method="absmax",
+        bwd_qtype=jnp.int8,
+        bwd_calibration_method="absmax",
+        op_names=("gmm", "ragged_dot"),
+    )
+    q_model = qwix.quantize_model(model, qwix.QtProvider([q_rule]))
+
+    captured_dispatches = []
+    orig_local_permute = moe.RoutedMoE.local_permute
+
+    def _spy_local_permute(*args, **kwargs):
+      res = orig_local_permute(*args, **kwargs)
+      sorted_inputs, _, local_group_size, _ = res
+      jax.debug.callback(
+          lambda s_in, l_gs: captured_dispatches.append((np.array(s_in), np.array(l_gs))),
+          sorted_inputs,
+          local_group_size,
+      )
+      return res
+
+    def loss_and_out(p, inp):
+      out, lb_loss, _ = q_model.apply({"params": p}, inp)
+      loss = jnp.mean(out.astype(jnp.float32) ** 2) + (0.0 if lb_loss is None else jnp.sum(lb_loss))
+      return loss, out
+
+    with (
+        mock.patch("jax.lax.empty", side_effect=_nan_empty),
+        mock.patch.object(moe.RoutedMoE, "local_permute", side_effect=_spy_local_permute),
+        jax.set_mesh(mesh),
+        nn_partitioning.axis_rules(cfg.logical_axis_rules),
+    ):
+      (loss, out), (param_grads, x_grad) = jax.jit(jax.value_and_grad(loss_and_out, argnums=(0, 1), has_aux=True))(
+          params, x
+      )
+      jax.block_until_ready((loss, out, param_grads, x_grad))
+
+    self.assertTrue(bool(jnp.isfinite(loss)), f"Expected finite loss, got {loss}")
+    self.assertTrue(bool(jnp.all(jnp.isfinite(out))), "Forward output contains NaN/Inf under dirty jax.lax.empty")
+    self.assertTrue(bool(jnp.all(jnp.isfinite(x_grad))), "Input gradient contains NaN/Inf under dirty jax.lax.empty")
+    for leaf_name in ("gate", "wi_0", "wi_1", "wo"):
+      for arr in jax.tree_util.tree_leaves(param_grads[leaf_name]):
+        self.assertTrue(
+            bool(jnp.all(jnp.isfinite(arr))),
+            f"Dropless quantized gradient leaf {leaf_name} contains NaN/Inf under dirty jax.lax.empty",
+        )
+
+    self.assertEqual(len(captured_dispatches), 4)
+    gmm_tiling = (8, 8, 8, 8, 8, 8, 8, 8, 8)
+    rhs_probe = jnp.ones((2, 8, 8), dtype=jnp.float32)
+    underfull = 0
+    for s_in, l_gs in captured_dispatches:
+      valid_n = int(l_gs.sum())
+      self.assertLess(valid_n, s_in.shape[0], "Dropless EP=4 worst-case buffer should have unpopulated tail rows")
+      underfull += 1
+      np.testing.assert_array_equal(s_in[valid_n:], np.zeros_like(s_in[valid_n:]))
+
+      def _gmm_probe_loss(lhs_arr, rhs_arr, gs_arr=jnp.asarray(l_gs, dtype=jnp.int32), n_valid=valid_n):
+        """Computes scalar quantized GMM loss over valid dispatched rows."""
+        gmm_out = mblx.gmm(
+            lhs_arr,
+            rhs_arr,
+            gs_arr,
+            jnp.float32,
+            gmm_tiling,
+            interpret=True,
+            use_qwix_quantization=True,
+            qwix_rule=q_rule,
+        )
+        return jnp.sum(gmm_out[:n_valid])
+
+      _, (_, dr_clean) = jax.jit(jax.value_and_grad(_gmm_probe_loss, argnums=(0, 1)))(
+          jnp.asarray(s_in, dtype=jnp.float32), rhs_probe
+      )
+      self.assertTrue(bool(jnp.all(jnp.isfinite(dr_clean))))
+
+      # Negative control: a single NaN in an unpopulated tail row poisons all of drhs via absmax.
+      dirty_in = s_in.copy()
+      dirty_in[valid_n, 0] = np.nan
+      _, (_, dr_dirty) = jax.jit(jax.value_and_grad(_gmm_probe_loss, argnums=(0, 1)))(
+          jnp.asarray(dirty_in, dtype=jnp.float32), rhs_probe
+      )
+      self.assertTrue(bool(jnp.all(jnp.isnan(dr_dirty))))
+    self.assertEqual(underfull, 4)
+
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

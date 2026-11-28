@@ -106,3 +106,24 @@ def test_convert_entry_absl_parameterized_method_dots(mock_repo_root):
       "tests/unit/attention_test.py::AttentionTest::test_model_llama3.1-8b",
       44.5,
   )
+
+
+def test_convert_entry_strips_xdist_group_suffixes(mock_repo_root):
+  """Strips xdist `@<group>` suffixes (and pytest >= 9.2 `]@<group>]`) before parsing params."""
+  assert convert_durations.convert_entry(
+      "cpu-unit::tests.unit.attention_test.AttentionTest.test_dot_product@AttentionTest",
+      12.3,
+      repo_root=mock_repo_root,
+  ) == ("cpu-unit", "tests/unit/attention_test.py::AttentionTest::test_dot_product", 12.3)
+
+  assert convert_durations.convert_entry(
+      "cpu-unit::tests.unit.no_class_test.test_fn[qwen3_1.7b-user@host]@group_a",
+      4.5,
+      repo_root=mock_repo_root,
+  ) == ("cpu-unit", "tests/unit/no_class_test.py::test_fn[qwen3_1.7b-user@host]", 4.5)
+
+  assert convert_durations.convert_entry(
+      "cpu-unit::tests.unit.attention_test.AttentionTest.test_fn[qwen3_1.7b]@AttentionTest]",
+      6.7,
+      repo_root=mock_repo_root,
+  ) == ("cpu-unit", "tests/unit/attention_test.py::AttentionTest::test_fn[qwen3_1.7b]", 6.7)

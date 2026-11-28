@@ -27,6 +27,19 @@ def to_linen(nnx_class, *, name=None, **kwargs):
   )
 
 
+def init_variables(model, rngs):
+  """Initializes variables of a `ToLinen`-wrapped NNX module without running its forward pass.
+
+  `nnx_wrappers.ToLinen.__call__` saves all NNX module variables via `_update_variables(module)`
+  before invoking `nnx_method` and does not update variables again during `init`. Passing a no-op
+  `nnx_method` returns bit-identical parameters while skipping the discarded eager forward pass
+  (avoiding slow eager TPU Pallas kernel compiles and collectives during test setup). Do not use
+  for modules whose forward pass lazily creates additional collections (for example `quant_stats`
+  under static-scale quantization).
+  """
+  return model.init(rngs, nnx_method=lambda _: None)
+
+
 SimpleDecoderLayerToLinen = nnx_wrappers.to_linen_class(
     SimpleDecoderLayer, base_metadata_fn=variable_to_logically_partitioned
 )

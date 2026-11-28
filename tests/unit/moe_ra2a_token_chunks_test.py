@@ -50,7 +50,8 @@ def _config(run_name, **overrides):
       "float32_gate_logits": True,
       "megablox": True,
       "sparse_matmul": True,
-      "per_device_batch_size": 2,
+      # Keep global batch at 8 on 8-device TPUs (same token count as 4-device v6e-4).
+      "per_device_batch_size": 1 if jax.device_count() >= 8 else 2,
       "max_target_length": 16,
       "load_balance_loss_weight": 0.01,
       "moe_use_megatron_seq_aux_loss": True,
@@ -85,29 +86,40 @@ def _loss_and_grad_fn(graphdef, rest, inputs):
   return jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
 
 
-def _run(cfg_ref, cfg, compiled_text=False, seq_len=None):
-  """Runs RoutedMoE forward and backward for cfg_ref and cfg on shared parameters and inputs."""
-  mesh = Mesh(maxtext_utils.create_device_mesh(cfg_ref), cfg_ref.mesh_axes)
-  length = cfg_ref.max_target_length if seq_len is None else seq_len
+def _make_inputs(cfg, seq_len=None):
+  """Builds deterministic spread-magnitude inputs for RoutedMoE chunk parity tests."""
+  length = cfg.max_target_length if seq_len is None else seq_len
   inputs = jax.random.normal(
       jax.random.PRNGKey(7),
-      (cfg_ref.per_device_batch_size * jax.device_count(), length, cfg_ref.base_emb_dim),
+      (cfg.per_device_batch_size * jax.device_count(), length, cfg.base_emb_dim),
   )
   # Spread token magnitudes so a token routed to or combined at the wrong position changes the output.
-  inputs = inputs * jnp.exp(jax.random.normal(jax.random.PRNGKey(8), inputs.shape[:2] + (1,)))
-  results = []
-  with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg_ref.logical_axis_rules):
-    model_ref = _build(cfg_ref, mesh)
-    _, params, _ = nnx.split(model_ref, nnx.Param, ...)
-    for c in (cfg_ref, cfg):
-      graphdef, _, rest = nnx.split(_build(c, mesh), nnx.Param, ...)
-      fn = _loss_and_grad_fn(graphdef, rest, inputs)
-      if compiled_text:
-        results.append(fn.lower(params).compile().as_text())
-      else:
-        (_, aux), grads = fn(params)
-        results.append((aux, grads))
-  return results[0], results[1]
+  return inputs * jnp.exp(jax.random.normal(jax.random.PRNGKey(8), inputs.shape[:2] + (1,)))
+
+
+def _run_one(cfg, *, mesh=None, params=None, inputs=None, compiled_text=False, seq_len=None):
+  """Runs (or compiles to HLO) RoutedMoE forward and backward for one config."""
+  if mesh is None:
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg), cfg.mesh_axes)
+  if inputs is None:
+    inputs = _make_inputs(cfg, seq_len=seq_len)
+  with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg.logical_axis_rules):
+    model = _build(cfg, mesh)
+    graphdef, model_params, rest = nnx.split(model, nnx.Param, ...)
+    if params is None:
+      params = model_params
+    fn = _loss_and_grad_fn(graphdef, rest, inputs)
+    if compiled_text:
+      return fn.lower(params).compile().as_text(), params, inputs, mesh
+    (_, aux), grads = fn(params)
+    return (aux, grads), params, inputs, mesh
+
+
+def _run(cfg_ref, cfg, compiled_text=False, seq_len=None):
+  """Runs RoutedMoE forward and backward for cfg_ref and cfg on shared parameters and inputs."""
+  res_ref, params, inputs, mesh = _run_one(cfg_ref, compiled_text=compiled_text, seq_len=seq_len)
+  res_tgt, _, _, _ = _run_one(cfg, mesh=mesh, params=params, inputs=inputs, compiled_text=compiled_text, seq_len=seq_len)
+  return res_ref, res_tgt
 
 
 def _num_ragged_all_to_all(hlo_text):
@@ -153,6 +165,12 @@ class Ra2aTokenChunksConfigTest(absltest.TestCase):
 class Ra2aTokenChunksParityTest(parameterized.TestCase):
   """Ragged all-to-all RoutedMoE: num_moe_token_chunks=2 matches num_moe_token_chunks=1."""
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_ref_cache"):
+      delattr(cls, "_ref_cache")
+    super().tearDownClass()
+
   def setUp(self):
     super().setUp()
     if jax.devices()[0].platform != "tpu":
@@ -164,9 +182,18 @@ class Ra2aTokenChunksParityTest(parameterized.TestCase):
   def _assert_chunk_parity(self, seq_len=None, **overrides):
     """Asserts output, aux loss, bias update and gradients match between 1 and 2 token chunks."""
     name = "_".join(f"{k}{v}" for k, v in sorted(overrides.items()))
-    cfg1 = _config(f"ra2a_chunks1_{name}", num_moe_token_chunks=1, **overrides)
+    # moe_chunk_barrier is only active when num_moe_token_chunks > 1, so strip it from the 1-chunk reference key.
+    ref_overrides = {k: v for k, v in overrides.items() if k != "moe_chunk_barrier"}
+    ref_key = (jax.device_count(), seq_len, tuple(sorted(ref_overrides.items())))
+    ref_cache = getattr(self.__class__, "_ref_cache", {})
+    if ref_key not in ref_cache:
+      cfg1 = _config(f"ra2a_chunks1_{name}", num_moe_token_chunks=1, **ref_overrides)
+      res1, params, inputs, mesh = _run_one(cfg1, seq_len=seq_len)
+      ref_cache[ref_key] = (jax.device_get(res1), params, inputs, mesh)
+      setattr(self.__class__, "_ref_cache", ref_cache)
+    ((out1, lb1, bias1), grads1), params, inputs, mesh = ref_cache[ref_key]
     cfg2 = _config(f"ra2a_chunks2_{name}", num_moe_token_chunks=2, **overrides)
-    ((out1, lb1, bias1), grads1), ((out2, lb2, bias2), grads2) = _run(cfg1, cfg2, seq_len=seq_len)
+    ((out2, lb2, bias2), grads2), _, _, _ = _run_one(cfg2, mesh=mesh, params=params, inputs=inputs, seq_len=seq_len)
     self.assertTrue(np.all(np.isfinite(out1)))
     np.testing.assert_allclose(out2, out1, rtol=1e-5, atol=1e-6)
     np.testing.assert_allclose(lb2, lb1, rtol=1e-6)
@@ -192,8 +219,8 @@ class Ra2aTokenChunksParityTest(parameterized.TestCase):
       ("layer_fallback", {"ragged_buffer_factor": 1.0, "moe_dropless_fallback": "layer"}),
   )
   def test_ragged_sort_matches_unchunked(self, overrides):
-    # SparseCore ragged_gather_reduce_v2 requires hidden size >= 2048 on v6e (num_row_partitions <= 8) and >= 1024 on
-    # v7x to fit its row partitions in the SIMD lanes.
+    # SparseCore ragged_gather_reduce_v2 requires hidden size >= 2048 on v6e (num_row_partitions <= 8) to fit
+    # its row partitions in the SIMD lanes; keep 2048 on all TPUs so the fan-in weight scale stays within atol=1e-6.
     self._assert_chunk_parity(use_ragged_sort=True, base_emb_dim=2048, **overrides)
 
   def test_accumulate_chunk_wgrad_matches_unchunked(self):
@@ -201,21 +228,26 @@ class Ra2aTokenChunksParityTest(parameterized.TestCase):
 
   def test_single_token_decode_clamps_to_one_chunk(self):
     """Autoregressive decode (seq_len=1) clamps effective chunks to 1 instead of producing empty chunks."""
+    emb_dim = 1024 if jax.devices()[0].device_kind == "TPU7x" else 2048
     self._assert_chunk_parity(
         seq_len=1,
         use_ragged_sort=True,
-        base_emb_dim=2048,
+        base_emb_dim=emb_dim,
         ragged_buffer_factor=1.0,
         moe_dropless_fallback="layer",
     )
 
   def test_unaligned_per_shard_sequence_rejected(self):
-    cfg1 = _config("ra2a_unaligned1", num_moe_token_chunks=1)
     cfg4 = _config("ra2a_unaligned4", num_moe_token_chunks=4)
-    with self.assertRaisesRegex(
-        ValueError, r"Per-shard sequence length \(6\) must be divisible by num_moe_token_chunks \(4\)"
-    ):
-      _run(cfg1, cfg4, seq_len=6)
+    mesh = Mesh(maxtext_utils.create_device_mesh(cfg4), cfg4.mesh_axes)
+    inputs = jax.ShapeDtypeStruct((cfg4.per_device_batch_size * jax.device_count(), 6, cfg4.base_emb_dim), jnp.float32)
+    with jax.set_mesh(mesh), nn_partitioning.axis_rules(cfg4.logical_axis_rules):
+      model = nnx.eval_shape(lambda: _build(cfg4, mesh))
+      graphdef, params, rest = nnx.split(model, nnx.Param, ...)
+      with self.assertRaisesRegex(
+          ValueError, r"Per-shard sequence length \(6\) must be divisible by num_moe_token_chunks \(4\)"
+      ):
+        jax.eval_shape(lambda p, r, x: nnx.merge(graphdef, p, r)(x), params, rest, inputs)
 
   def test_each_chunk_runs_its_own_ragged_all_to_all(self):
     """Two chunks compile to twice the ragged all-to-alls (dispatch and combine, forward and backward)."""

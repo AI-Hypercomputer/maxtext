@@ -699,6 +699,54 @@ class ProcessTestResultsTest(unittest.TestCase):
     self.assertIn("One or more flavors grew past the suite limits", out)
     self.assertNotIn("One or more tests regressed significantly.", out)
 
+  def test_strip_xdist_group_suffix_in_junit_and_baseline(self):
+    """Strips xdist `@<group>` suffixes (and pytest >= 9.2 `]@<group>]`) without touching `@` inside `[...]`."""
+    strip = process_test_results.strip_xdist_group_suffix
+    self.assertEqual(strip("test_plain"), "test_plain")
+    self.assertEqual(strip("test_grouped@MyGroup"), "test_grouped")
+    self.assertEqual(strip("test_param[user@host]"), "test_param[user@host]")
+    self.assertEqual(strip("test_param[user@host]@MyGroup"), "test_param[user@host]")
+    self.assertEqual(strip("test_param[user@host]@MyGroup]"), "test_param[user@host]")
+    self.assertEqual(strip("test_nested[[a]@b]"), "test_nested[[a]@b]")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+      xml_dir = pathlib.Path(tmpdir) / "xml"
+      xml_dir.mkdir()
+      (xml_dir / "test-results-cpu-unit-1of1.xml").write_text(
+          "<testsuite>"
+          '<testcase name="test_a@MyGroup" classname="tests.unit.foo_test.Foo" time="3.5"/>'
+          '<testcase name="test_b[user@host]@MyGroup]" classname="tests.unit.foo_test.Foo" time="4.2"/>'
+          "</testsuite>",
+          encoding="utf-8",
+      )
+      old_baseline = pathlib.Path(tmpdir) / "old.json"
+      old_baseline.write_text(
+          json.dumps({"cpu-unit::tests.unit.foo_test.Foo.test_a@MyGroup": 2.0}),
+          encoding="utf-8",
+      )
+      new_baseline = pathlib.Path(tmpdir) / "new.json"
+      argv = [
+          "process_test_results.py",
+          str(xml_dir),
+          "--baseline",
+          str(old_baseline),
+          "--save-baseline",
+          str(new_baseline),
+          "--warn-only",
+      ]
+      with mock.patch("sys.argv", argv), contextlib.redirect_stdout(io.StringIO()):
+        with self.assertRaises(SystemExit) as cm:
+          process_test_results.main()
+      self.assertEqual(cm.exception.code, 0)
+      saved = json.loads(new_baseline.read_text(encoding="utf-8"))
+    self.assertEqual(
+        saved,
+        {
+            "cpu-unit::tests.unit.foo_test.Foo.test_a": 3.5,
+            "cpu-unit::tests.unit.foo_test.Foo.test_b[user@host]": 4.2,
+        },
+    )
+
 
 if __name__ == "__main__":
   unittest.main()

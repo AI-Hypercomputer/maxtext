@@ -37,7 +37,6 @@ from maxtext.utils import maxtext_utils
 from maxtext.utils import sharding
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
-import pytest
 
 
 class TestExpandReduce(unittest.TestCase):
@@ -138,6 +137,7 @@ class TestMHC(parameterized.TestCase):
         "enable_mhc_lite": enable_mhc_lite,
         "use_mhc_pallas_kernel": use_mhc_pallas_kernel,
         "decoder_block": "deepseek",
+        "megablox": False,
         "num_experts": 4,
         "num_experts_per_tok": 2,
         "base_moe_mlp_dim": self.dim * 4,
@@ -181,8 +181,6 @@ class TestMHC(parameterized.TestCase):
         rngs=self.rngs,
     )
 
-  # Skip GPU due to NotImplementedError: dynamic grid bounds not supported in the Triton backend
-  @pytest.mark.tpu_only
   @parameterized.named_parameters(("Rate3", 3), ("Rate4", 4))
   def test_moe_layer_output_shape(self, rate):
     self._setup_mhc(rate)
@@ -206,7 +204,12 @@ class TestMHC(parameterized.TestCase):
         setattr(self.__class__, "_cached_moe_layer", layer)
 
       b, s, k, d = self.x.shape
-      output, metadata = module(self.pre_norm, layer, x=self.x, mhc_type=HyperConnectionType.MLP_MOE)
+
+      @nnx.jit
+      def _forward(mhc_mod, norm_mod, moe_mod, x):
+        return mhc_mod(norm_mod, moe_mod, x=x, mhc_type=HyperConnectionType.MLP_MOE)
+
+      output, metadata = _forward(module, self.pre_norm, layer, self.x)
       # metadata includes load_balance_loss & moe_bias_updates
       self.assertLen(metadata, 2)
       for key, value in metadata.items():  # pyrefly: ignore[missing-attribute]

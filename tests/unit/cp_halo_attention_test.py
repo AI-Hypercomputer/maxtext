@@ -501,25 +501,14 @@ class CpHaloAttentionTest(parameterized.TestCase):
         dtype="float32",
     )
 
+  @classmethod
+  def tearDownClass(cls):
+    if hasattr(cls, "_halo_generic_cache"):
+      delattr(cls, "_halo_generic_cache")
+    super().tearDownClass()
+
   def _halo_test_modules(self, cfg_cp, mesh_cp, lnx):
-    """Builds the dot-product reference and halo flash attention modules."""
-    attention_generic = attentions.Attention(
-        config=self.cfg,
-        num_query_heads=cfg_cp.num_query_heads,
-        num_kv_heads=cfg_cp.num_kv_heads,
-        head_dim=cfg_cp.head_dim,
-        max_target_length=cfg_cp.max_target_length,
-        max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
-        inputs_q_shape=lnx.shape,
-        inputs_kv_shape=lnx.shape,
-        mesh=self.mesh,
-        attention_kernel="dot_product",
-        dtype=cfg_cp.dtype,
-        dropout_rate=cfg_cp.dropout_rate,
-        attention_type=common_types.AttentionType.LOCAL_SLIDING,
-        sliding_window_size=cfg_cp.sliding_window_size,
-        rngs=self.nnx_rng,
-    )
+    """Builds the halo flash attention module for CP tests."""
     with nn_partitioning.axis_rules(cfg_cp.logical_axis_rules):
       attention_flash_cp = attentions.Attention(
           config=cfg_cp,
@@ -539,7 +528,87 @@ class CpHaloAttentionTest(parameterized.TestCase):
           model_mode=common_types.MODEL_MODE_PREFILL,
           rngs=self.nnx_rng,
       )
-    return attention_generic, attention_flash_cp
+    return attention_flash_cp
+
+  def _get_halo_generic_ref(self, cfg_cp, packing, need_grad=False):
+    """Returns cached (lnx, seg, pos, generic_state, output, grad) for the sliding-window dot_product reference."""
+    cache = getattr(self.__class__, "_halo_generic_cache", {})
+    key = (str(cfg_cp.dtype), packing)
+    entry = cache.get(key)
+    if entry is None:
+      if packing:
+        lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
+      else:
+        lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
+      attention_generic = attentions.Attention(
+          config=self.cfg,
+          num_query_heads=cfg_cp.num_query_heads,
+          num_kv_heads=cfg_cp.num_kv_heads,
+          head_dim=cfg_cp.head_dim,
+          max_target_length=cfg_cp.max_target_length,
+          max_prefill_predict_length=cfg_cp.max_prefill_predict_length,
+          inputs_q_shape=lnx.shape,
+          inputs_kv_shape=lnx.shape,
+          mesh=self.mesh,
+          attention_kernel="dot_product",
+          dtype=cfg_cp.dtype,
+          dropout_rate=cfg_cp.dropout_rate,
+          attention_type=common_types.AttentionType.LOCAL_SLIDING,
+          sliding_window_size=cfg_cp.sliding_window_size,
+          rngs=nnx.Rngs(params=0, dropout=jax.random.PRNGKey(42)),
+      )
+      entry = {
+          "lnx": lnx,
+          "seg": decoder_segment_ids,
+          "pos": decoder_positions,
+          "module": attention_generic,
+          "state": nnx.state(attention_generic),
+          "output": None,
+          "grad": None,
+      }
+      cache[key] = entry
+      setattr(self.__class__, "_halo_generic_cache", cache)
+
+    if not need_grad and entry["output"] is None:
+      gdef, state = nnx.split(entry["module"])
+      out, _ = jax.jit(
+          lambda st, x, seg, pos: nnx.merge(gdef, st)(
+              x,
+              x,
+              decoder_segment_ids=seg,
+              inputs_positions=pos,
+              deterministic=True,
+              model_mode=common_types.MODEL_MODE_TRAIN,
+          )
+      )(state, entry["lnx"], entry["seg"], entry["pos"])
+      entry["output"] = jax.device_get(out)
+
+    if need_grad and entry["grad"] is None:
+      gdef, state = nnx.split(entry["module"])
+
+      @jax.jit
+      def _generic_out_and_grad(state_in, x_in, seg_in, pos_in):
+        """Computes jitted dot-product reference output and input gradient."""
+
+        def generic_loss(inputs):
+          """Computes mean-squared loss for the dot-product reference."""
+          out, _ = nnx.merge(gdef, state_in)(
+              inputs,
+              inputs,
+              decoder_segment_ids=seg_in,
+              inputs_positions=pos_in,
+              deterministic=True,
+              model_mode=common_types.MODEL_MODE_TRAIN,
+          )
+          return jnp.mean(out.astype(jnp.float32) ** 2), out
+
+        return jax.value_and_grad(generic_loss, has_aux=True)(x_in)
+
+      (_, out), grad = _generic_out_and_grad(state, entry["lnx"], entry["seg"], entry["pos"])
+      entry["output"] = jax.device_get(out)
+      entry["grad"] = jax.device_get(grad)
+
+    return entry["lnx"], entry["seg"], entry["pos"], entry["state"], entry["output"], entry["grad"]
 
   @parameterized.named_parameters(*_HALO_CP_TEST_CASES)
   @pytest.mark.tpu_only
@@ -557,20 +626,11 @@ class CpHaloAttentionTest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_generic, attention_flash_cp = self._halo_test_modules(cfg_cp, mesh_cp, lnx)
-    generic_output, _ = attention_generic(
-        lnx,
-        lnx,
-        decoder_segment_ids=decoder_segment_ids,
-        inputs_positions=decoder_positions,
-        deterministic=True,
-        model_mode=common_types.MODEL_MODE_TRAIN,
+    lnx, decoder_segment_ids, decoder_positions, generic_state, generic_output, _ = self._get_halo_generic_ref(
+        cfg_cp, packing=packing, need_grad=False
     )
-    nnx.update(attention_flash_cp, nnx.state(attention_generic))
+    attention_flash_cp = self._halo_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_flash_cp, generic_state)
 
     flash_cp_output = attention_test_util.forward_with_context_expert_parallelism(
         cfg_cp,
@@ -581,7 +641,6 @@ class CpHaloAttentionTest(parameterized.TestCase):
         decoder_positions,
     )
 
-    generic_output = jax.device_get(generic_output)
     flash_cp_output = jax.device_get(flash_cp_output)
 
     np.testing.assert_allclose(
@@ -615,34 +674,23 @@ class CpHaloAttentionTest(parameterized.TestCase):
     )
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
-    if packing:
-      lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    else:
-      lnx, decoder_segment_ids, decoder_positions = self.get_data(cfg_cp.dtype)
-    attention_generic, attention_flash_cp = self._halo_test_modules(cfg_cp, mesh_cp, lnx)
-    nnx.update(attention_flash_cp, nnx.state(attention_generic))
+    lnx, decoder_segment_ids, decoder_positions, generic_state, _, generic_grad = self._get_halo_generic_ref(
+        cfg_cp, packing=packing, need_grad=True
+    )
+    attention_flash_cp = self._halo_test_modules(cfg_cp, mesh_cp, lnx)
+    nnx.update(attention_flash_cp, generic_state)
+    halo_gdef, halo_state = nnx.split(attention_flash_cp)
 
-    def generic_loss(inputs):
-      output, _ = attention_generic(
-          inputs,
-          inputs,
-          decoder_segment_ids=decoder_segment_ids,
-          inputs_positions=decoder_positions,
-          deterministic=True,
-          model_mode=common_types.MODEL_MODE_TRAIN,
-      )
-      return jnp.mean(output.astype(jnp.float32) ** 2)
-
-    def halo_loss(inputs):
+    def halo_loss(state_in, inputs, seg_in, pos_in):
       if context_parallel_load_balance:
         context_parallel_size = cfg_cp.ici_context_parallelism
         inputs = max_utils.reorder_sequence(inputs, cp_size=context_parallel_size)
-        halo_segment_ids = max_utils.reorder_sequence(decoder_segment_ids, cp_size=context_parallel_size)
-        halo_positions = max_utils.reorder_sequence(decoder_positions, cp_size=context_parallel_size)
+        halo_segment_ids = max_utils.reorder_sequence(seg_in, cp_size=context_parallel_size)
+        halo_positions = max_utils.reorder_sequence(pos_in, cp_size=context_parallel_size)
       else:
-        halo_segment_ids = decoder_segment_ids
-        halo_positions = decoder_positions
-      output, _ = attention_flash_cp(
+        halo_segment_ids = seg_in
+        halo_positions = pos_in
+      output, _ = nnx.merge(halo_gdef, state_in)(
           inputs,
           inputs,
           decoder_segment_ids=halo_segment_ids,
@@ -652,13 +700,11 @@ class CpHaloAttentionTest(parameterized.TestCase):
       )
       return jnp.mean(output.astype(jnp.float32) ** 2)
 
-    generic_grad = jax.grad(generic_loss)(lnx)
     with (
         jax.set_mesh(mesh_cp),
         nn_partitioning.axis_rules(cfg_cp.logical_axis_rules),
     ):
-      halo_grad = jax.grad(halo_loss)(lnx)
-    generic_grad = jax.device_get(generic_grad)
+      halo_grad = jax.jit(jax.grad(halo_loss, argnums=1))(halo_state, lnx, decoder_segment_ids, decoder_positions)
     halo_grad = jax.device_get(halo_grad)
 
     np.testing.assert_allclose(
@@ -685,7 +731,7 @@ class CpHaloAttentionTest(parameterized.TestCase):
     devices_array_cp = maxtext_utils.create_device_mesh(cfg_cp)
     mesh_cp = Mesh(devices_array_cp, cfg_cp.mesh_axes)
     lnx, decoder_segment_ids, decoder_positions = self.get_packed_data(cfg_cp.dtype)
-    _, attention_flash_cp = self._halo_test_modules(cfg_cp, mesh_cp, lnx)
+    attention_flash_cp = self._halo_test_modules(cfg_cp, mesh_cp, lnx)
 
     def attention_forward(x, pos, seg):
       output, _ = attention_flash_cp(

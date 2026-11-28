@@ -129,10 +129,7 @@ class _Harness:
     self.real_rows = 2 * jax.device_count()
     self.inputs = jax.random.normal(rng_inputs, (self.real_rows, _SEQ_LEN, cfg.base_emb_dim), jnp.float32)
     with self._scope():
-      # Under jax.jit: an eager init runs the whole RoutedMoE forward op by op (the sparse path's interpreted megablox
-      # kernel included).
-      init = jax.jit(lambda x: self.model.init({"params": rng_model, "dropout": rng_model}, x))
-      self.params = init(self.inputs)["params"]
+      self.params = linen_wrappers.init_variables(self.model, {"params": rng_model, "dropout": rng_model})["params"]
 
   def _build(self, cfg):
     return linen_wrappers.to_linen(
@@ -280,6 +277,30 @@ class _PaddingTestCase(parameterized.TestCase):
 _SPARSE = {"sparse_matmul": True, "megablox": True}
 
 
+_SPARSE_PADDING_CASES = (
+    {
+        "testcase_name": "_sparse_dropless",
+        "config_fn": _mixtral_config,
+        "run_name": "padding_sparse",
+        "overrides": _SPARSE,
+        "global_loss_run_name": "padding_sparse_ref",
+    },
+    {
+        "testcase_name": "_sparse_direct_token_gather",
+        "config_fn": _mixtral_config,
+        "run_name": "padding_sparse_gather",
+        "overrides": {**_SPARSE, "moe_use_direct_token_gather": True},
+        "global_loss_run_name": "padding_sparse_gather_ref",
+    },
+    {
+        "testcase_name": "_deepseek_sparse_megatron_loss_and_bias",
+        "config_fn": _deepseek_config,
+        "run_name": "padding_deepseek_sparse",
+        "expect_bias_updates": True,
+    },
+)
+
+
 class RoutedMoePaddingTest(_PaddingTestCase):
   """Padded and unpadded batches agree on the real rows."""
 
@@ -293,26 +314,7 @@ class RoutedMoePaddingTest(_PaddingTestCase):
           "run_name": "padding_dense_capacity",
           "overrides": {"capacity_factor": 1.0},
       },
-      {
-          "testcase_name": "_sparse_dropless",
-          "config_fn": _mixtral_config,
-          "run_name": "padding_sparse",
-          "overrides": _SPARSE,
-          "global_loss_run_name": "padding_sparse_ref",
-      },
-      {
-          "testcase_name": "_sparse_direct_token_gather",
-          "config_fn": _mixtral_config,
-          "run_name": "padding_sparse_gather",
-          "overrides": {**_SPARSE, "moe_use_direct_token_gather": True},
-          "global_loss_run_name": "padding_sparse_gather_ref",
-      },
-      {
-          "testcase_name": "_deepseek_sparse_megatron_loss_and_bias",
-          "config_fn": _deepseek_config,
-          "run_name": "padding_deepseek_sparse",
-          "expect_bias_updates": True,
-      },
+      *_SPARSE_PADDING_CASES,
       {
           "testcase_name": "_deepseek_dense_switch_loss_and_bias",
           "config_fn": _deepseek_config,
@@ -354,12 +356,41 @@ class RoutedMoePaddingTest(_PaddingTestCase):
 
 
 @pytest.mark.tpu_only
-class RoutedMoePaddingTpuTest(RoutedMoePaddingTest):
-  """The same checks on TPU (unmarked tests run on CPU only)."""
+class RoutedMoePaddingTpuTest(_PaddingTestCase):
+  """Sparse (compiled Megablox Pallas) padding checks on TPU; dense/router paths are covered on CPU."""
+
+  @parameterized.named_parameters(*_SPARSE_PADDING_CASES)
+  def test(self, **case):
+    self._check(**case)
 
 
 _TAIL_PADDING_DEVICES = 4
 _TAIL_PADDING_MARKER = "MOE_TAIL_PADDING_TESTS_PASSED"
+
+_SPARSE_TAIL_PADDING_CASES = (
+    # The Switch loss of the shard_map path: forward loss (the global mean) and gradients of the unpadded batch.
+    {
+        "testcase_name": "_sparse_dropless_tail",
+        "config_fn": _mixtral_config,
+        "run_name": "tail_sparse",
+        "overrides": _SPARSE,
+        "global_loss_run_name": "tail_sparse_ref",
+    },
+    {
+        "testcase_name": "_sparse_direct_token_gather_tail",
+        "config_fn": _mixtral_config,
+        "run_name": "tail_sparse_gather",
+        "overrides": {**_SPARSE, "moe_use_direct_token_gather": True},
+        "global_loss_run_name": "tail_sparse_gather_ref",
+    },
+    # The Megatron seq aux loss is computed after the shard_map on the global arrays; the bias counts are psum'd.
+    {
+        "testcase_name": "_deepseek_sparse_megatron_loss_and_bias_tail",
+        "config_fn": _deepseek_config,
+        "run_name": "tail_deepseek_sparse",
+        "expect_bias_updates": True,
+    },
+)
 
 
 class TailPaddingTest(_PaddingTestCase):
@@ -381,30 +412,10 @@ class TailPaddingTest(_PaddingTestCase):
 
   # The generated names are "test" + testcase_name, e.g. test_sparse_dropless_tail.
   @parameterized.named_parameters(
-      # The Switch loss of the shard_map path: forward loss (the global mean) and gradients of the unpadded batch.
-      {
-          "testcase_name": "_sparse_dropless_tail",
-          "config_fn": _mixtral_config,
-          "run_name": "tail_sparse",
-          "overrides": _SPARSE,
-          "global_loss_run_name": "tail_sparse_ref",
-      },
-      {
-          "testcase_name": "_sparse_direct_token_gather_tail",
-          "config_fn": _mixtral_config,
-          "run_name": "tail_sparse_gather",
-          "overrides": {**_SPARSE, "moe_use_direct_token_gather": True},
-          "global_loss_run_name": "tail_sparse_gather_ref",
-      },
+      *_SPARSE_TAIL_PADDING_CASES[:2],
       # Outside the shard_map the loss already sees the global batch; the placement of the padding must not matter.
       {"testcase_name": "_dense_tail", "config_fn": _mixtral_config, "run_name": "tail_dense"},
-      # The Megatron seq aux loss is computed after the shard_map on the global arrays; the bias counts are psum'd.
-      {
-          "testcase_name": "_deepseek_sparse_megatron_loss_and_bias_tail",
-          "config_fn": _deepseek_config,
-          "run_name": "tail_deepseek_sparse",
-          "expect_bias_updates": True,
-      },
+      *_SPARSE_TAIL_PADDING_CASES[2:],
   )
   def test(self, **case):
     self._check(**case)
@@ -462,8 +473,19 @@ class TailPaddingTest(_PaddingTestCase):
 
 
 @pytest.mark.tpu_only
-class TailPaddingTpuTest(TailPaddingTest):
-  """The tail-padding checks on the TPU's devices (unmarked tests are auto-marked cpu_only and skipped on TPU)."""
+class TailPaddingTpuTest(_PaddingTestCase):
+  """Sparse (compiled Megablox Pallas) tail-padding checks on TPU; dense/pure-loss paths are covered on CPU."""
+
+  tail_padding = True
+
+  def setUp(self):
+    super().setUp()
+    if jax.device_count() < 2:
+      self.skipTest("Needs at least 2 devices so that some batch shards hold only padded rows.")
+
+  @parameterized.named_parameters(*_SPARSE_TAIL_PADDING_CASES)
+  def test(self, **case):
+    self._check(**case)
 
 
 # TailPaddingTest's cases split over two child processes, so that pytest-xdist can run them in parallel;

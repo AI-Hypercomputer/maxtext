@@ -16,6 +16,7 @@
 import sys
 import unittest
 
+from flax import nnx
 import jax
 import jax.numpy as jnp
 from jax.sharding import Mesh
@@ -26,7 +27,6 @@ from maxtext.models import models
 from maxtext.utils import maxtext_utils
 from tests.utils.test_helpers import get_test_config_path
 import numpy as np
-import pytest
 
 MAX_PREFILL_PREDICT_LENGTH = 4
 
@@ -78,28 +78,27 @@ class TestModel(unittest.TestCase):
     new_config = self.init_pyconfig(cast_logits_to_fp32=cast_logits_to_fp32, logits_dot_in_fp32=False)
     devices_array = maxtext_utils.create_device_mesh(new_config)
     mesh = Mesh(devices_array, new_config.mesh_axes)
-    model = models.transformer_as_linen(config=new_config, mesh=mesh, quant=None, model_mode=MODEL_MODE_TRAIN)
+    model = nnx.eval_shape(
+        lambda: models.Transformer(
+            config=new_config,
+            mesh=mesh,
+            quant=None,
+            model_mode=MODEL_MODE_TRAIN,
+            rngs=nnx.Rngs(params=self.rng, aqt=self.rng, dropout=self.rng),
+        )
+    )
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
-    transformer_vars = model.init(
-        {"params": self.rng, "aqt": self.rng, "dropout": self.rng},
-        ids,
-        decoder_positions,
-        decoder_segment_ids,
-        enable_dropout=False,
-    )
-
-    logits = jax.eval_shape(
-        lambda: model.apply(
-            transformer_vars,
+    logits = nnx.eval_shape(
+        lambda m: m(
             ids,
             decoder_positions,
             decoder_segment_ids,
             enable_dropout=False,
             model_mode=MODEL_MODE_TRAIN,
-            rngs={"aqt": self.rng},
-        )
+        ),
+        model,
     )
 
     self.assertEqual(logits.dtype, expected_dtype)
@@ -112,7 +111,6 @@ class TestModel(unittest.TestCase):
     """Test logits datatype without casting."""
     self._test_logits_cast_driver(cast_logits_to_fp32=False, expected_dtype=jnp.bfloat16)
 
-  @pytest.mark.tpu_only
   def test_train_vs_prefill_and_autoregress(self):
     """Test train versus prefill and autoregress."""
     PREFILL_RANGE = MAX_PREFILL_PREDICT_LENGTH
@@ -120,48 +118,41 @@ class TestModel(unittest.TestCase):
     devices_array = maxtext_utils.create_device_mesh(self.cfg)
     mesh = Mesh(devices_array, self.cfg.mesh_axes)
     quant = quantizations.configure_quantization(self.cfg)
-    train_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_TRAIN)
-    prefill_model = models.transformer_as_linen(config=self.cfg, mesh=mesh, quant=quant, model_mode=MODEL_MODE_PREFILL)
+    train_model = models.Transformer(
+        config=self.cfg,
+        mesh=mesh,
+        quant=quant,
+        model_mode=MODEL_MODE_TRAIN,
+        rngs=nnx.Rngs(params=self.rng, aqt=self.rng, dropout=self.rng),
+    )
+    prefill_model = models.Transformer(
+        config=self.cfg,
+        mesh=mesh,
+        quant=quant,
+        model_mode=MODEL_MODE_PREFILL,
+        rngs=nnx.Rngs(params=self.rng, aqt=self.rng, dropout=self.rng),
+    )
+    nnx.update(prefill_model, nnx.state(train_model, nnx.Param))
 
     ids, decoder_segment_ids, decoder_positions = self.get_data()
 
-    train_transformer_vars = train_model.init(
-        {"params": self.rng, "aqt": self.rng},
-        ids,
-        decoder_positions,
-        model_mode=MODEL_MODE_TRAIN,
-        decoder_segment_ids=decoder_segment_ids,
-        enable_dropout=False,
-    )
+    @nnx.jit(static_argnames=("model_mode",))
+    def call_model(model, ids_in, pos_in, seg_in, model_mode):
+      return model(
+          ids_in,
+          pos_in,
+          decoder_segment_ids=seg_in,
+          model_mode=model_mode,
+          enable_dropout=False,
+      )
 
-    prefill_transformer_vars = prefill_model.init(
-        {"params": self.rng, "aqt": self.rng},
-        ids,
-        decoder_positions,
-        model_mode=MODEL_MODE_PREFILL,
-        decoder_segment_ids=decoder_segment_ids,
-        enable_dropout=False,
-    )
-
-    full_train_logits = train_model.apply(
-        train_transformer_vars,
-        ids,
-        decoder_positions,
-        model_mode=MODEL_MODE_TRAIN,
-        decoder_segment_ids=decoder_segment_ids,
-        enable_dropout=False,
-        rngs={"aqt": self.rng},
-    )
-
-    partial_prefill_logits, partial_cache = prefill_model.apply(
-        prefill_transformer_vars,
+    full_train_logits = call_model(train_model, ids, decoder_positions, decoder_segment_ids, MODEL_MODE_TRAIN)
+    partial_prefill_logits = call_model(
+        prefill_model,
         ids[:, :PREFILL_RANGE],
         decoder_positions[:, :PREFILL_RANGE],
-        model_mode=MODEL_MODE_PREFILL,
-        decoder_segment_ids=decoder_segment_ids[:, :PREFILL_RANGE],
-        enable_dropout=False,
-        rngs={"aqt": self.rng},
-        mutable=["cache"],
+        decoder_segment_ids[:, :PREFILL_RANGE],
+        MODEL_MODE_PREFILL,
     )
 
     np.testing.assert_allclose(
@@ -172,26 +163,10 @@ class TestModel(unittest.TestCase):
         equal_nan=False,
     )
 
-    ar_apply = jax.jit(
-        lambda vars_in, ids_in, pos_in: prefill_model.apply(
-            vars_in,
-            ids_in,
-            pos_in,
-            model_mode=MODEL_MODE_AUTOREGRESSIVE,
-            enable_dropout=False,
-            rngs={"aqt": self.rng},
-            mutable=["cache"],
-        )
-    )
     for idx in range(PREFILL_RANGE, min(PREFILL_RANGE + 3, self.cfg.max_target_length)):
       ids_idx = ids[:, idx : idx + 1]
       decoder_positions_idx = decoder_positions[:, idx : idx + 1]
-      prefill_transformer_vars.update(partial_cache)
-      ar_logits, partial_cache = ar_apply(
-          prefill_transformer_vars,
-          ids_idx,
-          decoder_positions_idx,
-      )
+      ar_logits = call_model(prefill_model, ids_idx, decoder_positions_idx, None, MODEL_MODE_AUTOREGRESSIVE)
 
       full_train_logits_idx = full_train_logits[:, idx : idx + 1, :]
       self.assertTrue(full_train_logits_idx.shape == ar_logits.shape)

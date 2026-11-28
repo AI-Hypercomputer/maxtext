@@ -132,9 +132,9 @@ class TrainTokenizerTest(unittest.TestCase):
     grain_train_files = "gs://maxtext-dataset/hf/c4/c4-train-00000-of-01637.parquet"
     cls.vocab_size = 32_768
     cls.max_corpus_chars = 10_000_000
-    assets_path = "tests"
-    vocab_model_name = "test_tokenizer"
-    cls.tokenizer_path = os.path.join(assets_path, vocab_model_name)
+    cls._temp_dir = tempfile.TemporaryDirectory()  # pylint: disable=consider-using-with
+    cls.addClassCleanup(cls._temp_dir.cleanup)
+    cls.tokenizer_path = os.path.join(cls._temp_dir.name, "test_tokenizer")
     cls.source_tokenizer = input_pipeline_utils.get_tokenizer(
         os.path.join(MAXTEXT_ASSETS_ROOT, "tokenizers", "tokenizer.default"),
         "sentencepiece",
@@ -151,10 +151,6 @@ class TrainTokenizerTest(unittest.TestCase):
     cls.test_tokenizer = input_pipeline_utils.get_tokenizer(
         cls.tokenizer_path, "sentencepiece", add_bos=False, add_eos=False
     )
-
-  @classmethod
-  def tearDownClass(cls):
-    os.remove(cls.tokenizer_path)
 
   def test_tokenize(self):
     text = "This is a test"
