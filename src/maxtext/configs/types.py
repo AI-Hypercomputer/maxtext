@@ -4225,9 +4225,13 @@ class Optimizer(BaseModel):
   skip_step_on_nan: bool = Field(
       False,
       description=(
-          "MaxTextTrainingEngine only. If True, skip the training step and preserve weights/optimizer state when the"
-          " gradient norm is NaN/Inf."
+          "If True, skip the training step and preserve weights and optimizer state when loss or gradient norm is"
+          " NaN/Inf."
       ),
+  )
+  max_grad_norm_spike: NonNegativeFloat = Field(
+      0.0,
+      description="If positive, skip the training step when raw pre-clipping gradient norm exceeds this threshold.",
   )
   gradient_accumulation_steps: PositiveInt = Field(
       1, description="Number of steps to accumulate gradients before updating."

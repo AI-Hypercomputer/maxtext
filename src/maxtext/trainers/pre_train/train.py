@@ -81,6 +81,7 @@ from maxtext.common.gcloud_stub import vertex_tensorboard_modules
 from maxtext.common import metric_logger
 from maxtext.common.metric_logger import record_activation_metrics
 from maxtext.experimental.lineage import lineage_adapter
+from maxtext.optimizers import optimizers
 from maxtext.utils import exceptions
 from maxtext.utils import gcs_utils
 from maxtext.utils import max_logging
@@ -475,9 +476,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
   return loss, aux
 
 
-def _rollback_on_overflow(new_state, old_leaves, has_moe_overflow):
-  """Returns the pre-step state leaves instead of `new_state` if the MoE ragged buffer overflowed."""
-  if not isinstance(has_moe_overflow, jax.core.Tracer) and not bool(has_moe_overflow):
+def _rollback_on_overflow(new_state, old_leaves, should_rollback):
+  """Returns the pre-step state leaves instead of `new_state` when `should_rollback` is true."""
+  if not isinstance(should_rollback, jax.core.Tracer) and not bool(should_rollback):
     return new_state
 
   def _select(new, old):
@@ -485,12 +486,12 @@ def _rollback_on_overflow(new_state, old_leaves, has_moe_overflow):
     if dtype is not None and jnp.issubdtype(dtype, jax.dtypes.extended):
       # NNX never updates typed PRNG keys in place; their stream counts are rolled back.
       return new
-    return jnp.where(has_moe_overflow, old, new)
+    return jnp.where(should_rollback, old, new)
 
   new_leaves, treedef = jax.tree_util.tree_flatten(new_state)
   if len(new_leaves) != len(old_leaves):
     raise ValueError(
-        "moe_dropless_fallback='step': cannot roll back the step -- the updated state has "
+        "Cannot roll back the step -- the updated state has "
         f"{len(new_leaves)} leaves but the input state had {len(old_leaves)}."
     )
   return jax.tree_util.tree_unflatten(treedef, [_select(n, o) for n, o in zip(new_leaves, old_leaves)])
@@ -618,10 +619,19 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   # --- Per-path initialization ---
   input_state_leaves = jax.tree_util.tree_leaves(state) if config.moe_dropless_fallback == "step" else None
   state = nnx.merge(model, state)  # reconstruct TrainStateNNX
+  use_skip_step = bool(
+      config.skip_step_on_spikes
+      or getattr(config, "skip_step_on_nan", False)
+      or getattr(config, "max_grad_norm_spike", 0.0) > 0.0
+  )
+  pre_step_model_leaves = None
   loss_model, loss_params, loss_rng = state.model, None, None
 
   # --- Gradient computation ---
   if config.gradient_accumulation_steps > 1:
+    if use_skip_step:
+      nnx.pop(state.model, nnx.Intermediate)
+      pre_step_model_leaves = jax.tree_util.tree_leaves(nnx.state(state.model, nnx.Not(nnx.Intermediate)))
     loss, aux, raw_grads = gradient_accumulation_loss_and_grad(
         loss_fn,
         config,
@@ -676,6 +686,8 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
           is_leaf=lambda x: isinstance(x, nnx.Variable),
       )
       nnx.update(state.model, curr_params)
+    if use_skip_step:
+      pre_step_model_leaves = jax.tree_util.tree_leaves(nnx.state(state.model, nnx.Not(nnx.Intermediate)))
 
     def diff_wrapper(curr_params, custom_params, rest, config, data):
       local_model = nnx.merge(model_graphdef, curr_params, custom_params, rest, copy=True)
@@ -721,10 +733,18 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
   # log_step_diagnostics: the updated router biases and this step's bias updates (see step_diagnostics).
   diag_bias_values, diag_bias_updates = [], []
 
-  if config.gradient_clipping_threshold > 0:
-    grads = maxtext_utils.apply_gradient_clipping(raw_grads, None, config.gradient_clipping_threshold)
+  raw_grad_norm_for_skip = None
+  if use_skip_step:
+    raw_grad_norm_for_skip = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), raw_grads))
+    is_raw_grad_finite = jnp.isfinite(raw_grad_norm_for_skip)
+    grads_to_clip = jax.tree.map(lambda g: jnp.where(is_raw_grad_finite, g, jnp.zeros_like(g)), raw_grads)
   else:
-    grads = raw_grads
+    grads_to_clip = raw_grads
+
+  if config.gradient_clipping_threshold > 0:
+    grads = maxtext_utils.apply_gradient_clipping(grads_to_clip, None, config.gradient_clipping_threshold)
+  else:
+    grads = grads_to_clip
   if config.optimizer_memory_host_offload:
     # state.optimizer is an NNX Optimizer module; state_mesh_shardings.optimizer
     # is an NNX State. Use nnx.state() to get a compatible State for device_put.
@@ -736,12 +756,15 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     opt_state = nnx.state(state.optimizer)
     new_opt_state = jax.device_put(opt_state, device_opt_shardings)
     nnx.update(state.optimizer, new_opt_state)
-  if config.skip_step_on_spikes:
-    # The skip-step optimizer is a GradientTransformationExtraArgs that reads
-    # loss/grad_norm to decide whether to zero the update on a spike. nnx
-    # Optimizer.update forwards these kwargs to tx.update.
-    grad_norm = max_utils.l2norm_pytree(grads)
-    state.apply_gradients(grads, loss=loss, grad_norm=grad_norm)
+  has_skip_wrapper = (
+      use_skip_step
+      and optimizers.extract_is_skipped(nnx.to_pure_dict(nnx.state(state.optimizer)).get("opt_state", {})) is not None
+  )
+  pass_kwargs = has_skip_wrapper or bool(config.skip_step_on_spikes)
+  if pass_kwargs:
+    # The skip-step optimizer wrappers are GradientTransformationExtraArgs that read
+    # loss and pre-clipping float32 grad_norm to zero the update on a spike or NaN/Inf.
+    state.apply_gradients(grads, loss=loss, grad_norm=raw_grad_norm_for_skip)
   else:
     state.apply_gradients(grads)
   new_state = state
@@ -848,6 +871,24 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
     if global_max_logit is not None:
       scalar_metrics["learning/max_logits"] = global_max_logit
 
+  # Surface skip-step rejections as a TB metric and roll back non-optimizer model state
+  # (such as custom _overwrite_with_gradient vars, routed_bias updates, and QK-Clip scaling)
+  # when the optimizer skipped the step, while keeping new_state.optimizer's rolling stats intact.
+  if use_skip_step:
+    opt_state = nnx.to_pure_dict(nnx.state(new_state.optimizer)).get("opt_state", {})
+    is_skipped = optimizers.extract_is_skipped(opt_state)
+    if is_skipped is not None:
+      if pre_step_model_leaves is not None:
+        nnx.update(
+            new_state.model,
+            _rollback_on_overflow(
+                nnx.state(new_state.model, nnx.Not(nnx.Intermediate)),
+                pre_step_model_leaves,
+                is_skipped,
+            ),
+        )
+      scalar_metrics["optim/step_skipped"] = is_skipped.astype(jnp.float32)
+
   if not config.optimizer_memory_host_offload:
     scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
     scalar_metrics["learning/raw_grad_norm"] = max_utils.l2norm_pytree(raw_grads)
@@ -861,13 +902,6 @@ def train_step(model, config, state_mesh_shardings, params_shardings, state, dat
       scalar_metrics["learning/grad_norm"] = max_utils.l2norm_pytree(grads)
       scalar_metrics["learning/param_norm"] = max_utils.l2norm_pytree(nnx.state(new_state.model, nnx.Param))
 
-  # Surface skip-step rejections as a TB metric. The skip-step optimizer stores
-  # is_skipped in its opt_state; read it back off the optimizer just updated in place.
-  if config.skip_step_on_spikes:
-    opt_state = nnx.to_pure_dict(nnx.state(new_state.optimizer)).get("opt_state", {})
-    is_skipped = opt_state.get("is_skipped") if isinstance(opt_state, dict) else None
-    if is_skipped is not None:
-      scalar_metrics["optim/step_skipped"] = is_skipped.astype(jnp.float32)
   metrics = {
       "scalar": scalar_metrics,
       "scalars": {},

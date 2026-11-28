@@ -1506,18 +1506,23 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     """
     return jax.tree.map(lambda acc, g: acc + g.astype(acc.dtype), acc_grads, grads), acc_denom + denominator
 
+  def _needs_mean_loss(self) -> bool:
+    """Returns True when `_update_kernel` consumes scalar `mean_loss` for spike/NaN guards."""
+    return bool(self._config.skip_step_on_spikes or self._config.skip_step_on_nan)
+
   def _update_kernel(
       self, state_pure, accumulated_grads, accumulated_denominator, mean_loss, optimizer_device_shardings=None
   ):
     """Applies accumulated gradients to update the NNX model state.
 
-    A step whose gradient norm is not finite (`skip_step_on_nan`) leaves the state unchanged.
+    A step whose loss or gradient norm is not finite (`skip_step_on_nan`) or exceeds
+    `max_grad_norm_spike` leaves the state unchanged.
 
     Args:
       state_pure: The train state's pure form.
       accumulated_grads: Gradients summed over this step's micro-batches, not yet normalized.
       accumulated_denominator: The summed loss denominators to normalize them by.
-      mean_loss: Mean micro-batch loss, read only under `skip_step_on_spikes`.
+      mean_loss: Mean micro-batch loss, read only under `skip_step_on_spikes` or `skip_step_on_nan`.
       optimizer_device_shardings: Device shardings to move a pinned-host optimizer state onto
         under `optimizer_memory_host_offload`, or None if it is already on the device, as it
         always is on the eager path.
@@ -1528,9 +1533,10 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       when no skip rule is on.
     """
     grad_norm = None
-    is_skipped_val = (
-        jnp.array(0.0, dtype=jnp.float32) if self._config.skip_step_on_nan or self._config.skip_step_on_spikes else None
-    )
+    skip_on_nan = bool(self._config.skip_step_on_nan)
+    max_spike = float(self._config.max_grad_norm_spike)
+    use_skip_guard = skip_on_nan or max_spike > 0.0
+    is_skipped_val = jnp.array(0.0, dtype=jnp.float32) if use_skip_guard or self._config.skip_step_on_spikes else None
     if state_pure is not None:
       if optimizer_device_shardings is not None:
         # Move offloaded optimizer state from pinned host memory onto device before the update so
@@ -1571,28 +1577,43 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
       # does not overflow. Frozen parameters already have exact zero gradients from
       # `_stop_frozen_gradients` in `_fwd_bwd_kernel`, so they do not contribute to `grad_norm`.
       grad_norm = max_utils.l2norm_pytree(jax.tree.map(lambda g: g.astype(jnp.float32), grads))
-      if self._config.skip_step_on_nan:
-        should_skip = jnp.logical_not(jnp.isfinite(grad_norm))
-        # Zeroed, so a non-finite gradient cannot reach the optimizer's arithmetic either.
-        grads = jax.tree.map(lambda g: jnp.where(should_skip, jnp.zeros_like(g), g), grads)
 
       if self._config.gradient_clipping_threshold > 0:
         grads = maxtext_utils.apply_gradient_clipping(grads, None, self._config.gradient_clipping_threshold)
       local_state = nnx.merge(self._state_graphdef, state_pure, copy=True)
-      if isinstance(local_state, train_state_nnx.TrainStateNNX):
-        if self._config.skip_step_on_spikes:
+      should_skip = None
+      if hasattr(local_state, "apply_gradients"):
+        opt_obj = getattr(local_state, "optimizer", self._optimizer)
+        has_skip_wrapper = (
+            (self._config.skip_step_on_spikes or use_skip_guard)
+            and opt_obj is not None
+            and optimizers.extract_is_skipped(nnx.to_pure_dict(nnx.state(opt_obj)).get("opt_state", {})) is not None
+        )
+        pass_kwargs = has_skip_wrapper or bool(self._config.skip_step_on_spikes)
+        if pass_kwargs:
           local_state.apply_gradients(grads, loss=mean_loss, grad_norm=grad_norm)
+          if opt_obj is not None:
+            opt_state = nnx.to_pure_dict(nnx.state(opt_obj)).get("opt_state", {})
+            is_skipped = optimizers.extract_is_skipped(opt_state)
+            if is_skipped is not None:
+              is_skipped_val = is_skipped.astype(jnp.float32)
+        elif use_skip_guard:
+          is_valid = jnp.array(True, dtype=jnp.bool_)
+          if skip_on_nan:
+            is_valid = jnp.logical_and(is_valid, jnp.isfinite(grad_norm))
+            if mean_loss is not None:
+              is_valid = jnp.logical_and(is_valid, jnp.isfinite(mean_loss))
+          if max_spike > 0.0:
+            is_valid = jnp.logical_and(is_valid, jnp.logical_and(jnp.isfinite(grad_norm), grad_norm <= max_spike))
+          should_skip = jnp.logical_not(is_valid)
+          safe_grads = jax.tree.map(lambda g: jnp.where(should_skip, jnp.zeros_like(g), g), grads)
+          local_state.apply_gradients(safe_grads)
         else:
           local_state.apply_gradients(grads)
       _, new_state_pure = nnx.split(local_state)
-      if self._config.skip_step_on_spikes and _OPTIMIZER_STATE_KEY in new_state_pure:
-        opt_state = nnx.to_pure_dict(new_state_pure[_OPTIMIZER_STATE_KEY])["opt_state"]
-        if isinstance(opt_state, dict) and "is_skipped" in opt_state:
-          is_skipped_val = opt_state["is_skipped"].astype(jnp.float32)
-      if self._config.skip_step_on_nan:
-        new_state_pure = jax.tree.map(lambda new, old: jnp.where(should_skip, old, new), new_state_pure, state_pure)
-        is_skipped_val = jnp.where(should_skip, 1.0, is_skipped_val)
-
+      if should_skip is not None:
+        new_state_pure = jax.tree.map(lambda n, o: jnp.where(should_skip, o, n), new_state_pure, state_pure)
+        is_skipped_val = should_skip.astype(jnp.float32)
       if self._zero1_params_shardings is not None:
         # The one all-gather Zero-1 costs: each replica updated its own slice of every
         # parameter, and the forward pass needs all of them. The moments stay behind,
@@ -2145,7 +2166,7 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     params_aval = self._mesh_avals(params_pure)
     rest_aval = self._mesh_avals(rest_pure)
     batch_aval = self._batch_avals(dynamic_batch)
-    mean_loss_aval = jax.ShapeDtypeStruct((), jnp.float32) if self._config.skip_step_on_spikes else None
+    mean_loss_aval = jax.ShapeDtypeStruct((), jnp.float32) if self._needs_mean_loss() else None
 
     with self._sharding_ctx():
       fwd_bwd_traced = self._jitted_kernels["fwd_bwd"].trace(params_aval, rest_aval, batch_aval)
@@ -2286,15 +2307,16 @@ class MaxTextTrainingEngine(abstract_engine.AbstractTrainingEngine):
     if not self._compiled and self._optimizer_offload_enabled():
       state_pure = self._with_optimizer_on_device(state_pure)
 
-    # `_update_kernel` reads `mean_loss` only under `skip_step_on_spikes`, which is traced off
-    # `self._config`; skip reducing cached losses otherwise to avoid eager host-device syncs.
-    if not self._config.skip_step_on_spikes:
+    # `_update_kernel` reads `mean_loss` only under `skip_step_on_spikes` or
+    # `skip_step_on_nan`, which is traced off `self._config`; skip reducing cached losses
+    # otherwise to avoid eager host-device syncs.
+    if not self._needs_mean_loss():
       mean_loss = None
     elif self._cached_losses:
       loss_values = [l.compute() if isinstance(l, abstract_engine.WeightedMetric) else l for l in self._cached_losses]
-      mean_loss = jnp.mean(jnp.stack(loss_values)) if len(loss_values) > 1 else loss_values[0]
+      mean_loss = (jnp.mean(jnp.stack(loss_values)) if len(loss_values) > 1 else loss_values[0]).astype(jnp.float32)
     else:
-      mean_loss = jnp.array(0.0)
+      mean_loss = jnp.array(0.0, dtype=jnp.float32)
     # `state_pure` is donated, so between this call and the `nnx.update` below `self._state`
     # is torn -- reading one of its arrays raises "Array has been deleted". Keep them adjacent.
     with self._sharding_ctx():
