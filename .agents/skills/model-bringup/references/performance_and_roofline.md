@@ -1,6 +1,6 @@
 # FLOP Calculation, Training Benchmarking & Roofline Analysis
 
-After functional correctness is verified, update per-step FLOP accounting, run a steady-state TPU pre-training benchmark, and compare measured throughput/HBM against an analytical roofline model.
+After functional correctness is verified, update per-step FLOP accounting, run ahead-of-time TPU memory and static HLO gates, execute a steady-state TPU pre-training benchmark, and compare measured throughput/HBM against an analytical roofline model.
 
 ---
 
@@ -15,7 +15,32 @@ Update `calculate_tflops_training_per_device` (and block helpers in `src/maxtext
 
 ---
 
-## 2. End-to-End Pre-Training Benchmark on TPU
+## 2. Ahead-of-Time TPU HBM Preflight & Static HLO Gate (`aot_preflight.py`, `check_hlo_perf.py`)
+
+Before launching multi-host TPU jobs, verify per-device HBM headroom and static HLO collective overlap on CPU:
+
+1. **Multi-Topology Forward HBM Preflight (`scripts/aot_preflight.py`)**:
+   - Infers usable per-device HBM automatically from `TOPOLOGY_HBM_GIB` (`v4`, `v5e`/`v5litepod`, `v5p`, `v6e`, `tpu7x`) or accepts `--hbm-limit-gib=<GiB>`, defaulting `compile_topology_num_slices=1` unless explicitly overridden:
+   ```bash
+   PYTHONPATH=$PWD/src python3 .agents/skills/model-bringup/scripts/aot_preflight.py \
+     src/maxtext/configs/base.yml \
+     model_name={model_name} \
+     compile_topology=v5p-128 \
+     --seqs=4096,8192
+   ```
+2. **Static HLO Overlap, FLOP Inflation & Memory Gate (`scripts/check_hlo_perf.py`)**:
+   - Audits `train_compile` HLO text dumps and AOT memory stats for naive/calibrated HBM ceilings, rematerialization FLOP inflation, synchronous collective stalls vs. overlapped `-start`/`-done` pairs, accidental `S(5)` host-memory spills, and fixed-seed loss trajectory parity (`check_loss_trajectory`):
+   ```bash
+   python3 .agents/skills/model-bringup/scripts/check_hlo_perf.py \
+     --summary-json /tmp/{run_name}_aot_summary.json \
+     --hlo-path /tmp/{run_name}_after_optimizations.txt \
+     --hbm-ceiling-gib 92.0 \
+     --forbid-host-offload
+   ```
+
+---
+
+## 3. End-to-End Pre-Training Benchmark on TPU (`extract_run_metrics.py`)
 
 Run a synthetic-data steady-state training benchmark on the target TPU slice with XPlane profiling and HLO memory reporting enabled:
 
@@ -42,6 +67,16 @@ python3 -u -m maxtext.trainers.pre_train.train src/maxtext/configs/base.yml \
   log_period=1
 ```
 
+Extract steady-state step time, `TFLOP/s/device`, MFU %, loss trajectory, and `grad_norm` diagnostics deterministically from the worker log (and verify prose numbers before publishing in `{model_name}_handover.md`):
+
+```bash
+python3 .agents/skills/model-bringup/scripts/extract_run_metrics.py \
+  /tmp/{run_name}_worker0.log \
+  --steady-start-step 10 \
+  --steady-end-step 14 \
+  --peak-tflops-per-device 459.0
+```
+
 Record the following benchmark artifacts and steady-state metrics (e.g., steps 10–14):
 - **Configuration**: Hardware topology & TensorCore count, precision, `max_target_length`, `per_device_batch_size`, global batch tokens, and `(FSDP, TP, EP)` sharding (plus any `LIBTPU_INIT_ARGS` / SparseCore offload flags and `shard_map` / per-layer remat optimizations needed to fit HBM).
 - **Memory & HLO Artifacts**: Compile-time `Total estimated memory size` (`output`, `temp`, `argument` GB vs device HBM capacity), `after_optimizations-memory-usage-report.txt`, HLO dumps (`before_optimizations`, `after_optimizations`, `buffer-assignment`), and XPlane traces (`.xplane.pb`, `.trace.json.gz`).
@@ -49,7 +84,7 @@ Record the following benchmark artifacts and steady-state metrics (e.g., steps 1
 
 ---
 
-## 3. Roofline Analysis & Measured Comparison
+## 4. Roofline Analysis & Measured Comparison
 
 Generate a deterministic analytical roofline report (e.g., via `roofline_cli.py` with the `jasmine` backend; do not hand-estimate MFU/HFU figures) matching the exact model architecture (`config.json` / `modeling_{model_name}.py`) and benchmarked `(DP, FSDP, TP, EP, B, S, bf16, remat_policy)` workload (plus any target production topology such as `v7x_8x8x8` alongside the measured slice such as `v7x_4x4x4`).
 
