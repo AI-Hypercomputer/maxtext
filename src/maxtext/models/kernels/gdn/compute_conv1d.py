@@ -13,10 +13,18 @@
 # limitations under the License.
 # ==============================================================================
 
-# pylint: disable=missing-module-docstring
+"""In-VMEM causal depthwise Conv1D computation."""
+
 import jax
 import jax.numpy as jnp
-from tokamax._src.ops.causal_conv1d_gated_delta_rule import config
+
+try:
+  from maxtext.models.kernels.gdn import config
+except (ImportError, ModuleNotFoundError):
+  try:
+    from maxtext.src.maxtext.models.kernels.gdn import config
+  except (ImportError, ModuleNotFoundError):
+    from . import config
 
 
 def causal_conv1d(
