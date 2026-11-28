@@ -16,7 +16,7 @@
 
 # Optimization
 
-Explore techniques for maximizing performance, including model customization, sharding strategies, Pallas kernels, and benchmarking.
+Explore techniques for maximizing performance, including model customization, sharding strategies, Pallas kernels, benchmarking, and pipeline profiling.
 
 ````{grid} 1 2 2 2
 ---
@@ -63,6 +63,13 @@ Overlap the FSDP all-gather of the next layer's weights with the current layer's
 
 Measured HLO and xprof comparison of `shard_mode: explicit` against `shard_mode: auto` on the onboarded models.
 ```
+
+```{grid-item-card} ⏱️ Pipeline Parallelism Profiling
+:link: optimization/pipeline_parallelism_profiling
+:link-type: doc
+
+Automatic multi-stage XProf trace augmentation, cross-host clock alignment, and schedule extensibility.
+```
 ````
 
 ```{toctree}
@@ -77,4 +84,5 @@ optimization/custom_mesh_and_rule.md
 optimization/pallas_kernels_performance.md
 optimization/benchmark_and_performance.md
 optimization/shard_mode_performance.md
+optimization/pipeline_parallelism_profiling.md
 ```

@@ -44,6 +44,12 @@ from maxtext.utils import jax_reduced_compat
 from maxtext.utils import pipeline_utils
 
 
+# Maintainer note (XProf pipeline stage profiling):
+# `src/maxtext/utils/pipeline_trace_lens.py` decodes pipeline stages using the zero-cost `jax.named_scope`
+# markers below (`pp_stage_compute`, `pp_bubble_select`, `pp_shift`). If you add a new pipeline schedule,
+# split execution into multiple phase loops, or peel iterations outside `jax.lax.scan`, register the
+# schedule via `register_pipeline_schedule(...)` in `src/maxtext/utils/pipeline_trace_lens.py` and update
+# `docs/guides/optimization/pipeline_parallelism_profiling.md`.
 class PipelineBase(nnx.Module):
   """
   Base module that implements shared pipelining logic across stages.
@@ -617,9 +623,11 @@ class PipelineBase(nnx.Module):
           spmd_axis_name="stage",
       )
       args = (graph, state, stages_inputs, stages_segment_ids, stages_positions)
-      if self.config.shard_mode == ShardMode.EXPLICIT:
-        return pipeline_utils.call_with_stage_axis_auto(vmapped, self.stage_mesh, *args)
-      return vmapped(*args)
+      # Zero-cost name scope so every stage's compute is identifiable in XProf profiles.
+      with jax.named_scope("pp_stage_compute"):
+        if self.config.shard_mode == ShardMode.EXPLICIT:
+          return pipeline_utils.call_with_stage_axis_auto(vmapped, self.stage_mesh, *args)
+        return vmapped(*args)
 
     return vmap_func
 
@@ -797,6 +805,9 @@ class NNXPipeline(PipelineBase):
 
     return nnx.State.merge(gathered_params, gathered_rest)
 
+  # Keep `pp_bubble_select`, `pp_stage_compute`, and `pp_shift` scopes intact; update
+  # `src/maxtext/utils/pipeline_trace_lens.py` and `docs/guides/optimization/pipeline_parallelism_profiling.md`
+  # if adding new schedule phases or peeled iterations.
   def run_one_iteration(
       self,
       loop_state,
@@ -817,7 +828,8 @@ class NNXPipeline(PipelineBase):
     microbatch_ids, _ = self.get_microbatch_and_repeat_ids(loop_iteration)
     physical_partition_spec = logical_to_mesh(logical_partition_spec, self.mesh, rules=self.config.logical_axis_rules)
 
-    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
+    with jax.named_scope("pp_bubble_select"):
+      stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
     stages_inputs = jax.ad_checkpoint.checkpoint_name(stages_inputs, "iteration_input")
     stages_positions = self.vmap_gather(positions, microbatch_ids, 0) if positions is not None else None
     stages_segment_ids = self.vmap_gather(segment_ids, microbatch_ids, 0) if segment_ids is not None else None
@@ -879,7 +891,8 @@ class NNXPipeline(PipelineBase):
     else:
       pipeline_weights_state = updated_stage_weights_state
 
-    new_state = self.get_new_loop_state(stages_output, loop_state)
+    with jax.named_scope("pp_shift"):
+      new_state = self.get_new_loop_state(stages_output, loop_state)
     return new_state, pipeline_weights_state
 
   def __call__(
@@ -1353,6 +1366,9 @@ class NNXCircularPipeline(PipelineBase):
 
     return weights
 
+  # Keep `pp_bubble_select`, `pp_stage_compute`, and `pp_shift` scopes intact; update
+  # `src/maxtext/utils/pipeline_trace_lens.py` and `docs/guides/optimization/pipeline_parallelism_profiling.md`
+  # if adding new schedule phases or peeled iterations.
   def run_one_iteration(
       self,
       loop_state,
@@ -1385,7 +1401,8 @@ class NNXCircularPipeline(PipelineBase):
     microbatch_ids, _ = self.get_microbatch_and_repeat_ids(loop_iteration)
     physical_partition_spec = logical_to_mesh(logical_partition_spec, self.mesh, rules=self.config.logical_axis_rules)
 
-    stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
+    with jax.named_scope("pp_bubble_select"):
+      stages_inputs = self.get_iteration_inputs(loop_iteration, state_io, circ_storage, shift)
     stages_inputs = jax.ad_checkpoint.checkpoint_name(stages_inputs, "iteration_input")
 
     stages_positions = self.gather_microbatch_inputs_vmap(positions, microbatch_ids, 0) if positions is not None else None
@@ -1452,7 +1469,8 @@ class NNXCircularPipeline(PipelineBase):
     else:
       new_layer_state = nnx.State.merge(updated_stage_metrics, updated_stage_mutables)
 
-    new_state = self.get_new_loop_state(stages_output, loop_state)
+    with jax.named_scope("pp_shift"):
+      new_state = self.get_new_loop_state(stages_output, loop_state)
     return new_state, new_layer_state
 
   def __call__(

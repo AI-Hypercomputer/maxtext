@@ -556,6 +556,9 @@ lineage_dq_reduction_steps: 1 # Lineage dkv dq reduction steps: 1 for VMEM reduc
 inhomogeneous_layer_cycle_interval: 1
 
 # pipeline parallelism
+# Maintainer note: If you add a new pipeline schedule or change the pipeline loop structure,
+# register it with src/maxtext/utils/pipeline_trace_lens.py (register_pipeline_schedule)
+# and update docs/guides/optimization/pipeline_parallelism_profiling.md.
 # The number of decoder layers is equal to the product of num_stages, num_layers_per_pipeline_stage and num_pipeline_repeats.
 # There is a tradeoff between the num_layers_per_pipeline_stage and num_pipeline_repeats: The more layers per stage the easier
 # it is to hide the pipeline communication behind the compute since there is more compute per stage, however there will be a larger bubble
@@ -1317,6 +1320,12 @@ profile_periodically_period: -1 # If set to a positive integer, profile every pr
 # This is useful to debug scenarios where performance is changing.
 enable_tpu_profiling_options: false
 tpu_num_chips_to_profile_per_task: 1
+# When true and using pipeline parallelism with profiler="xplane", automatically profile one representative process
+# per pipeline stage, synchronize trace flush across processes, and merge the decoded cross-stage pipeline timeline
+# in-place into Process 0's .xplane.pb for XProf. If enable_tpu_profiling_options=true and a profiled process owns
+# devices from multiple pipeline stages, tpu_num_chips_to_profile_per_task is automatically raised to cover all local
+# chips. Set to false to restore legacy Process-0-only profiling.
+enable_pipeline_stage_profiling: true
 tpu_num_sparse_core_tiles_to_trace: 1
 tpu_num_sparse_cores_to_trace: 2
 
