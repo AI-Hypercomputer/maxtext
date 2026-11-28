@@ -46,7 +46,7 @@ class Profiler:
     self.output_path = ""
     self.upload_all_profiler_results = config.upload_all_profiler_results
     self.profile_cleanly = config.profile_cleanly
-    self.xplane_trace_active = False
+    self._active = False  # whether an nsys / xplane trace is currently running
     self.profile_period = config.profile_periodically_period
     self.start_initial_profile_step = self._set_first_profiler_step(config.skip_first_n_steps_for_profiler, offset_step)
     self.finished_initial_profile_step = self._set_last_profiler_step(config.profiler_steps, config.steps)
@@ -98,6 +98,10 @@ class Profiler:
   def activate(self, blocking_object=None, optional_postfix=""):
     """Start the profiler.
     nsys profiler becomes no-op when libcudart.so is not available on the system."""
+    if self._active:
+      # e.g. profile_periodically_period shorter than profiler_steps: a trace is already running.
+      max_logging.log("Profiler already active; skipping activate().")
+      return
     if self.profile_cleanly and blocking_object is not None:
       jax.block_until_ready(blocking_object)
 
@@ -121,9 +125,10 @@ class Profiler:
         max_logging.log(f"WARNING: Failed to load library for nsys: {e}\n" "profiler has no effect")
         return
       self.libcudart.cudaProfilerStart()
+      self._active = True
     elif self.mode == "xplane":
       jax.profiler.start_trace(self.output_path, profiler_options=self.profiling_options)
-      self.xplane_trace_active = True
+      self._active = True
 
   def maybe_deactivate_profiler(self, step, state):
     """Conditionally deactivates the profiler based on the current step.
@@ -148,6 +153,13 @@ class Profiler:
 
     if not (self.upload_all_profiler_results or jax.process_index() == 0):
       return
+    if not self._active:
+      # Nothing is running: deactivate() can be called more than once (e.g. by the step schedule and
+      # by train_loop when training stops early), and stop_trace() raises if no trace is active.
+      return
+    # Clear the flag before stopping so that a failed stop does not leave _active set, which would make a
+    # later deactivate() (e.g. the StopTraining handler) try to stop again.
+    self._active = False
     if self.mode == "nsys":
       if self.libcudart is not None:
         self.libcudart.cudaProfilerStop()
@@ -159,10 +171,8 @@ class Profiler:
         subprocess.Popen(["gcloud", "storage", "cp", "*nsys-rep", self.output_path])  # pylint: disable=consider-using-with
       else:
         max_logging.log("WARNING: gcloud is not installed or not found in the system's PATH. Skipping upload...")
-    elif self.mode == "xplane" and self.xplane_trace_active:
-      # train_loop also calls this when training stops early, possibly after the trace has ended.
+    elif self.mode == "xplane":
       jax.profiler.stop_trace()
-      self.xplane_trace_active = False
 
   def _set_first_profiler_step(self, skip_steps, start_step):
     return start_step + skip_steps

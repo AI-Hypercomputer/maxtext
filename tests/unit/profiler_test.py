@@ -194,6 +194,120 @@ class ProfilerTest(unittest.TestCase):
     mock_start_trace.assert_called_once()
     mock_stop_trace.assert_called_once()
 
+  # The nsys tests mock libcudart and gcloud, so they run on any platform (cpu, gpu or tpu).
+  def _nsys_profiler(self, run_name):
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        enable_checkpointing=False,
+        run_name=run_name,
+        base_output_directory="/tmp",
+        profiler="nsys",
+    )
+    return profiler.Profiler(config)
+
+  @patch("maxtext.common.profiler.shutil.which", return_value="/usr/bin/gcloud")
+  @patch("maxtext.common.profiler.subprocess.Popen")
+  @patch("maxtext.common.profiler.cdll")
+  def test_nsys_deactivate_without_activate_is_noop(self, mock_cdll, mock_popen, _mock_which):
+    """deactivate() before any activate() must not stop the profiler or upload."""
+    prof = self._nsys_profiler("test_nsys_deactivate_without_activate_is_noop")
+
+    prof.deactivate()
+
+    mock_cdll.LoadLibrary.return_value.cudaProfilerStop.assert_not_called()
+    mock_popen.assert_not_called()
+
+  @patch("maxtext.common.profiler.shutil.which", return_value="/usr/bin/gcloud")
+  @patch("maxtext.common.profiler.subprocess.Popen")
+  @patch("maxtext.common.profiler.cdll")
+  def test_nsys_deactivate_is_idempotent(self, mock_cdll, mock_popen, _mock_which):
+    """Two deactivate() calls stop and upload once."""
+    prof = self._nsys_profiler("test_nsys_deactivate_is_idempotent")
+    libcudart = mock_cdll.LoadLibrary.return_value
+
+    prof.activate()
+    prof.deactivate()
+    prof.deactivate()
+
+    libcudart.cudaProfilerStart.assert_called_once()
+    libcudart.cudaProfilerStop.assert_called_once()
+    mock_popen.assert_called_once()
+
+    # A later activate()/deactivate() cycle (periodic profiling) still works.
+    prof.activate()
+    prof.deactivate()
+    self.assertEqual(libcudart.cudaProfilerStart.call_count, 2)
+    self.assertEqual(libcudart.cudaProfilerStop.call_count, 2)
+
+  @patch("maxtext.common.profiler.shutil.which", return_value="/usr/bin/gcloud")
+  @patch("maxtext.common.profiler.subprocess.Popen")
+  @patch("maxtext.common.profiler.cdll")
+  def test_nsys_activate_twice_starts_once(self, mock_cdll, _mock_popen, _mock_which):
+    """activate() while a session is running (e.g. period shorter than profiler_steps) is skipped."""
+    prof = self._nsys_profiler("test_nsys_activate_twice_starts_once")
+    libcudart = mock_cdll.LoadLibrary.return_value
+
+    prof.activate()
+    prof.activate()
+    libcudart.cudaProfilerStart.assert_called_once()
+
+    prof.deactivate()
+    prof.activate()  # a new session after the stop starts normally
+    self.assertEqual(libcudart.cudaProfilerStart.call_count, 2)
+
+  @patch("maxtext.common.profiler.shutil.which", return_value="/usr/bin/gcloud")
+  @patch("maxtext.common.profiler.subprocess.Popen")
+  @patch("maxtext.common.profiler.cdll")
+  def test_nsys_failed_stop_clears_active(self, mock_cdll, _mock_popen, _mock_which):
+    """If stopping fails, a later deactivate() (e.g. StopTraining teardown) must not stop again."""
+    prof = self._nsys_profiler("test_nsys_failed_stop_clears_active")
+    libcudart = mock_cdll.LoadLibrary.return_value
+    libcudart.cudaProfilerStop.side_effect = RuntimeError("stop failed")
+
+    prof.activate()
+    with self.assertRaises(RuntimeError):
+      prof.deactivate()
+    prof.deactivate()
+    libcudart.cudaProfilerStop.assert_called_once()
+
+  def _xplane_profiler(self, run_name):
+    config = pyconfig.initialize(
+        [sys.argv[0], get_test_config_path()],
+        enable_checkpointing=False,
+        run_name=run_name,
+        base_output_directory="/tmp",
+        profiler="xplane",
+    )
+    return profiler.Profiler(config)
+
+  @patch("jax.profiler.stop_trace")
+  @patch("jax.profiler.start_trace")
+  def test_xplane_activate_twice_starts_once(self, mock_start_trace, mock_stop_trace):
+    """activate() while a trace is running is skipped; a new trace after the stop starts normally."""
+    prof = self._xplane_profiler("test_xplane_activate_twice_starts_once")
+
+    prof.activate()
+    prof.activate()
+    mock_start_trace.assert_called_once()
+
+    prof.deactivate()
+    prof.activate()
+    self.assertEqual(mock_start_trace.call_count, 2)
+    mock_stop_trace.assert_called_once()
+
+  @patch("jax.profiler.stop_trace")
+  @patch("jax.profiler.start_trace")
+  def test_xplane_failed_stop_clears_active(self, _mock_start_trace, mock_stop_trace):
+    """If stop_trace() raises, a later deactivate() must not call it again (it would raise again)."""
+    mock_stop_trace.side_effect = RuntimeError("stop failed")
+    prof = self._xplane_profiler("test_xplane_failed_stop_clears_active")
+
+    prof.activate()
+    with self.assertRaises(RuntimeError):
+      prof.deactivate()
+    prof.deactivate()
+    mock_stop_trace.assert_called_once()
+
 
 if __name__ == "__main__":
   unittest.main()
