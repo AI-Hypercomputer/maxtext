@@ -28,7 +28,11 @@ import jax.numpy as jnp
 
 from maxtext.experimental.lineage import dsv3_expert_shuffle
 from maxtext.experimental.lineage import dsv3_sharding
+from maxtext.experimental.lineage import dsv3_types
 from maxtext.experimental.lineage import quantization
+
+_VALID_MLA_OFFLOAD_FIELDS = frozenset(dsv3_types.DSv3MLAResiduals._fields)
+_VALID_MOE_OFFLOAD_FIELDS = frozenset(("out_proj_out", "orig_x"))
 
 # Quantization flag value -> `QuantConfig` (None runs in bf16).
 QUANT_CONFIGS: dict[str, quantization.QuantConfig | None] = {
@@ -38,7 +42,8 @@ QUANT_CONFIGS: dict[str, quantization.QuantConfig | None] = {
     "fp8_full_splash_qk_e3": quantization.FP8_FULL_SPLASH_QK_E3,
     "fp8_full_combine": quantization.FP8_FULL_COMBINE,
     "fp8_full_combine_per_hop": quantization.FP8_FULL_COMBINE_PER_HOP,
-    "fp8_full_splash_qk_e3_combine_per_hop": (quantization.FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP),
+    "fp8_full_splash_qk_e3_combine_per_hop": quantization.FP8_FULL_SPLASH_QK_E3_COMBINE_PER_HOP,
+    "fp8_full_all_splash_qk_e3_combine_per_hop": quantization.FP8_FULL_ALL_SPLASH_QK_E3_COMBINE_PER_HOP,
 }
 
 
@@ -204,7 +209,20 @@ class DSv3KernelConfig:
   ragged_buffer_factor: float = 1.2
   quant: quantization.QuantConfig | None = None
   max_async_overlap_transform: bool = True
+  max_async_overlap_entry: bool = True
   expert_permutation: str = "none"
+  mla_offload_fields: tuple[str, ...] = ()
+  moe_offload_fields: tuple[str, ...] = ()
+  offload_bank: bool = False
+  offload_w_grad: bool = False
+  remat_dense_layers: bool = False
+  stream_param_cast: bool = False
+  remat_mtp: bool = False
+  router_metadata_sc0: bool = False
+  bwd_fp8_combine: bool = False
+  norm_reduce_tc: bool = False
+  out_proj_2d: bool = False
+  fp8_splash_out: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -233,6 +251,7 @@ class DSv3TrainingConfig:
   mtp_loss_scaling_factor: float = 0.1
   mtp_eval_target_module: int = 0
   mtp_reuse_input_embedding: bool = False
+  loss_chunk_tokens: int = 0
 
 
 @dataclasses.dataclass(frozen=True)
@@ -280,13 +299,23 @@ class DSv3Config:
       raise ValueError("dq_reduction_steps must be one of (None, 1, 3), got" f" {k.dq_reduction_steps}.")
     if k.capacity_factor <= 0:
       raise ValueError(f"capacity_factor must be > 0, got {k.capacity_factor}.")
-    if k.ragged_buffer_factor <= 0.0:
-      raise ValueError(f"ragged_buffer_factor must be > 0, got {k.ragged_buffer_factor}.")
+    if k.ragged_buffer_factor < 0.0:
+      raise ValueError(f"ragged_buffer_factor must be >= 0, got {k.ragged_buffer_factor}.")
     if k.expert_permutation not in (dsv3_expert_shuffle.EXPERT_PERMUTATION_ALGORITHMS):
       raise ValueError(
           "expert_permutation must be one of"
           f" {dsv3_expert_shuffle.EXPERT_PERMUTATION_ALGORITHMS}, got"
           f" {k.expert_permutation!r}."
+      )
+    invalid_mla = [f for f in k.mla_offload_fields if f not in _VALID_MLA_OFFLOAD_FIELDS]
+    if invalid_mla:
+      raise ValueError(
+          f"mla_offload_fields contains unknown fields {invalid_mla}; valid: {sorted(_VALID_MLA_OFFLOAD_FIELDS)}."
+      )
+    invalid_moe = [f for f in k.moe_offload_fields if f not in _VALID_MOE_OFFLOAD_FIELDS]
+    if invalid_moe:
+      raise ValueError(
+          f"moe_offload_fields contains unknown fields {invalid_moe}; valid: {sorted(_VALID_MOE_OFFLOAD_FIELDS)}."
       )
     if t.mtp_eval_target_module < 0 or (t.mtp_eval_target_module > m.num_mtp_layers):
       raise ValueError(

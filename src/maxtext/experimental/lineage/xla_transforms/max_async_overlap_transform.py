@@ -1778,22 +1778,38 @@ def restamp_send_recv_aggregation(serialized_hlo: bytes, computation_names: Iter
   return proto.SerializeToString()
 
 
-def max_async_overlap_transform(serialized_hlo: bytes) -> bytes:
+def while_only_computation_filter(
+    module: "_hlo.HloModule",
+) -> Callable[["_hlo.HloComputation"], bool]:
+  """Returns a predicate selecting only while bodies (skipping entry)."""
+  selected = while_body_names(module)
+  return lambda computation: computation.name in selected
+
+
+def max_async_overlap_transform(
+    serialized_hlo: bytes,
+    *,
+    include_entry: bool = True,
+) -> bytes:
   """XLA post-scheduler transformation pass.
 
   Bubbles async starts as early as possible and async dones as late as possible
-  in the entry computation and every while body, to maximize overlap, then
-  restamps send/recv aggregation to match the new schedules.
+  in the entry computation (when `include_entry` is True) and every while body,
+  to maximize overlap, then restamps send/recv aggregation to match the new
+  schedules.
 
   Args:
     serialized_hlo: Serialized HloModuleProto bytes.
+    include_entry: Whether to rewrite the entry computation in addition to while
+      bodies.
 
   Returns:
     Serialized HloModuleProto bytes.
   """
   from_proto = getattr(_hlo.HloModule, "from_serialized_hlo_module_proto")
   module: _hlo.HloModule = from_proto(serialized_hlo)
-  results = transform_module(module)
+  comp_filter = default_computation_filter if include_entry else while_only_computation_filter
+  results = transform_module(module, computation_filter=comp_filter)
   return restamp_send_recv_aggregation(
       module.as_serialized_hlo_module_proto(),
       [name for name, _, _ in results],
@@ -1862,6 +1878,8 @@ def debug_report(serialized_hlo: bytes, max_bundle_members: int = 6) -> str:
 def register_transform(
     name: str = _DEFAULT_TRANSFORM_NAME,
     platforms: Sequence[str] | str | None = None,
+    *,
+    include_entry: bool = True,
 ) -> None:
   """Registers the post-scheduler transformation with JAX/XLA.
 
@@ -1873,12 +1891,14 @@ def register_transform(
   Args:
     name: Registration name passed to XLA.
     platforms: Target platform name(s), or None for all platforms.
+    include_entry: Whether to rewrite the entry computation in addition to while
+      bodies.
   """
 
   def _transform_if_applicable(serialized_hlo: bytes) -> bytes | None:
     if b"fsdp_prefetch" not in serialized_hlo and b"lineage" not in serialized_hlo:
       return None
-    return max_async_overlap_transform(serialized_hlo)
+    return max_async_overlap_transform(serialized_hlo, include_entry=include_entry)
 
   unregister_transform(name=name, platforms=platforms)
   jex_xla.register_hlo_module_transformation(

@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping
 import dataclasses
 import functools
 import math
-from typing import Any, Protocol, overload
+from typing import Any, Protocol
 
 import jax
 from jax.experimental import layout as jax_layout
@@ -87,36 +87,16 @@ def _get_local_dim_size(
   return dim_size
 
 
-@overload
-def _offload_to_host(x: jax.Array) -> jax.Array:
-  ...
-
-
-@overload
-def _offload_to_host(x: None) -> None:
-  ...
-
-
 def _offload_to_host(x: jax.Array | None) -> jax.Array | None:
   if x is None:
     return None
-  return jax.device_put(x, jax.typeof(x).sharding.with_memory_kind("pinned_host"))
-
-
-@overload
-def _load_to_device(x: jax.Array) -> jax.Array:
-  ...
-
-
-@overload
-def _load_to_device(x: None) -> None:
-  ...
+  return jax.device_put(x, jax.memory.Space.Host)
 
 
 def _load_to_device(x: jax.Array | None) -> jax.Array | None:
   if x is None:
     return None
-  return jax.device_put(x, jax.typeof(x).sharding.with_memory_kind("device"))
+  return jax.device_put(x, jax.memory.Space.Device)
 
 
 # Residual fields offloaded to host memory between the forward and backward
@@ -127,64 +107,94 @@ _MOE_OFFLOAD_FIELDS: tuple[str, ...] = ()
 
 def _offload_mla(
     mla: dsv3_types.DSv3MLAResiduals,
+    fields: tuple[str, ...],
 ) -> dsv3_types.DSv3MLAResiduals:
-  return mla._replace(**{f: _offload_to_host(getattr(mla, f)) for f in _MLA_OFFLOAD_FIELDS})
+  if not fields:
+    return mla
+  return mla._replace(**{f: _offload_to_host(getattr(mla, f)) for f in fields})
 
 
 def _load_mla(
     mla: dsv3_types.DSv3MLAResiduals,
+    fields: tuple[str, ...],
 ) -> dsv3_types.DSv3MLAResiduals:
-  return mla._replace(**{f: _load_to_device(getattr(mla, f)) for f in _MLA_OFFLOAD_FIELDS})
+  if not fields:
+    return mla
+  return mla._replace(**{f: _load_to_device(getattr(mla, f)) for f in fields})
 
 
 def _offload_moe(
     moe: dsv3_types.DSv3MoEResiduals,
+    fields: tuple[str, ...],
 ) -> dsv3_types.DSv3MoEResiduals:
-  return moe._replace(**{f: _offload_to_host(getattr(moe, f)) for f in _MOE_OFFLOAD_FIELDS})
+  if not fields:
+    return moe
+  return moe._replace(**{f: _offload_to_host(getattr(moe, f)) for f in fields})
 
 
 def _load_moe(
     moe: dsv3_types.DSv3MoEResiduals,
+    fields: tuple[str, ...],
 ) -> dsv3_types.DSv3MoEResiduals:
-  return moe._replace(**{f: _load_to_device(getattr(moe, f)) for f in _MOE_OFFLOAD_FIELDS})
+  if not fields:
+    return moe
+  return moe._replace(**{f: _load_to_device(getattr(moe, f)) for f in fields})
 
 
 def _offload_mb(
     mb: dsv3_types.DSv3MicrobatchResiduals,
+    mla_fields: tuple[str, ...],
+    moe_fields: tuple[str, ...],
 ) -> dsv3_types.DSv3MicrobatchResiduals:
-  mla = _offload_mla(mb.mla) if mb.mla is not None else None
-  moe = _offload_moe(mb.moe) if mb.moe is not None else None
+  mla = _offload_mla(mb.mla, mla_fields) if mb.mla is not None else None
+  moe = _offload_moe(mb.moe, moe_fields) if mb.moe is not None else None
   return dsv3_types.DSv3MicrobatchResiduals(mla=mla, moe=moe)
 
 
 def _load_mb(
     mb: dsv3_types.DSv3MicrobatchResiduals,
+    mla_fields: tuple[str, ...],
+    moe_fields: tuple[str, ...],
 ) -> dsv3_types.DSv3MicrobatchResiduals:
-  mla = _load_mla(mb.mla) if mb.mla is not None else None
-  moe = _load_moe(mb.moe) if mb.moe is not None else None
+  mla = _load_mla(mb.mla, mla_fields) if mb.mla is not None else None
+  moe = _load_moe(mb.moe, moe_fields) if mb.moe is not None else None
   return dsv3_types.DSv3MicrobatchResiduals(mla=mla, moe=moe)
 
 
 def offload_residuals(
     res: dsv3_types.DSv3LayerResiduals,
+    *,
+    mla_fields: tuple[str, ...] = _MLA_OFFLOAD_FIELDS,
+    moe_fields: tuple[str, ...] = _MOE_OFFLOAD_FIELDS,
+    offload_bank: bool = False,
 ) -> dsv3_types.DSv3LayerResiduals:
   """Offloads layer residual activations to host memory."""
+  bank = res.bank
+  if offload_bank and bank is not None:
+    bank = (_offload_to_host(bank[0]), _offload_to_host(bank[1]))
   return dsv3_types.DSv3LayerResiduals(
-      mb0=_offload_mb(res.mb0),
-      mb1=(_offload_mb(res.mb1) if res.mb1 is not None else None),
-      bank=res.bank,
+      mb0=_offload_mb(res.mb0, mla_fields, moe_fields),
+      mb1=(_offload_mb(res.mb1, mla_fields, moe_fields) if res.mb1 is not None else None),
+      bank=bank,
       bank_offset=res.bank_offset,
   )
 
 
 def load_residuals(
     res: dsv3_types.DSv3LayerResiduals,
+    *,
+    mla_fields: tuple[str, ...] = _MLA_OFFLOAD_FIELDS,
+    moe_fields: tuple[str, ...] = _MOE_OFFLOAD_FIELDS,
+    offload_bank: bool = False,
 ) -> dsv3_types.DSv3LayerResiduals:
   """Loads layer residual activations from host memory to device."""
+  bank = res.bank
+  if offload_bank and bank is not None:
+    bank = (_load_to_device(bank[0]), _load_to_device(bank[1]))
   return dsv3_types.DSv3LayerResiduals(
-      mb0=_load_mb(res.mb0),
-      mb1=(_load_mb(res.mb1) if res.mb1 is not None else None),
-      bank=res.bank,
+      mb0=_load_mb(res.mb0, mla_fields, moe_fields),
+      mb1=(_load_mb(res.mb1, mla_fields, moe_fields) if res.mb1 is not None else None),
+      bank=bank,
       bank_offset=res.bank_offset,
   )
 
@@ -461,6 +471,14 @@ def quantize_weights(
     )
   if quant.mla is not None:
     w = dataclasses.replace(w, mla=dsv3_mla.quantize_mla_weights(w.mla, quant.mla))
+  if quant.shared_mlp is not None:
+    w = dataclasses.replace(
+        w,
+        moe=dataclasses.replace(
+            w.moe,
+            shared=dsv3_mla.quantize_swiglu_weights(w.moe.shared, quant.shared_mlp),
+        ),
+    )
   return w
 
 
@@ -815,6 +833,7 @@ def ubatch_expert(
     gmm_fn: GmmFn,
     mesh: jax.sharding.Mesh,
     quant_rule: quantization.GmmQuantRule | None = None,
+    shared_quant_rule: quantization.GmmQuantRule | None = None,
 ) -> tuple[
     tuple[
         tuple[
@@ -850,7 +869,9 @@ def ubatch_expert(
       out_specs=(x_ag_pspec, bank_pspec, offset_pspec),
   )(x_ag, router_metadata, w_routed, bank, bank_offset)
 
-  shared_or_moe_in = moe_in if w_shared is None else dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
+  shared_or_moe_in = (
+      moe_in if w_shared is None else dsv3_experts.dsv3_shared_expert(moe_in, w_shared, quant_rule=shared_quant_rule)
+  )
   expert_out = (
       y_ag,
       shared_or_moe_in,
@@ -874,6 +895,7 @@ def ubatch_combine(
     out_specs: jax.sharding.PartitionSpec,
     combine_qtype: Any | None = None,
     combine_per_hop_scaling: bool = False,
+    shared_quant_rule: quantization.GmmQuantRule | None = None,
 ) -> tuple[
     tuple[
         jt.Num[jax.Array, "B T D"],
@@ -899,7 +921,11 @@ def ubatch_combine(
       combine_qtype=combine_qtype,
       combine_per_hop_scaling=combine_per_hop_scaling,
   )
-  shared_x = shared_or_moe_in if w_shared is None else dsv3_experts.dsv3_shared_expert(shared_or_moe_in, w_shared)
+  shared_x = (
+      shared_or_moe_in
+      if w_shared is None
+      else dsv3_experts.dsv3_shared_expert(shared_or_moe_in, w_shared, quant_rule=shared_quant_rule)
+  )
   combine_out = (
       combined_x,
       shared_x,
@@ -1455,6 +1481,7 @@ def dsv3_sparse_layer_epilogue_fwd(
   """Forward pass for DSv3 sparse layer epilogue."""
   quant_rule = quant.routed_experts if quant else None
   mla_rule = quant.mla if quant else None
+  shared_rule = quant.shared_mlp if quant else None
   combine_qtype = quant.combine_qtype if quant else None
   combine_per_hop_scaling = quant.combine_per_hop_scaling if quant else False
   w_routed = w.moe.routed if quant_rule is None else _quantize_routed_weights(w.moe.routed, quant_rule)
@@ -1607,6 +1634,7 @@ def dsv3_sparse_layer_epilogue_fwd(
         out_specs=x_pspec,
         combine_qtype=combine_qtype,
         combine_per_hop_scaling=combine_per_hop_scaling,
+        shared_quant_rule=shared_rule,
     )
     (outputs_expert_curr_1, (bank_1, bank_offset_1)), res_expert_curr_1 = ubatch_expert(
         *outputs_dispatch_curr_1,
@@ -1647,6 +1675,7 @@ def dsv3_sparse_layer_epilogue_fwd(
         out_specs=x_pspec,
         combine_qtype=combine_qtype,
         combine_per_hop_scaling=combine_per_hop_scaling,
+        shared_quant_rule=shared_rule,
     )
     return (out_mb0_wait, outputs_combine_curr_1), ()
 
@@ -1796,6 +1825,7 @@ def dsv3_sparse_layer_epilogue_bwd(
   """Backward pass for DSv3 sparse layer epilogue."""
   quant_rule = quant.routed_experts if quant else None
   mla_rule = quant.mla if quant else None
+  shared_rule = quant.shared_mlp if quant else None
   w_routed_q = None if quant_rule is None else _quantize_routed_weights(w.moe.routed, quant_rule)
   grad_out, grad_aux = grad_outputs
   grad_out_mb0, grad_out_mb1 = grad_out
@@ -1917,11 +1947,9 @@ def dsv3_sparse_layer_epilogue_bwd(
         quant_rule=quant_rule,
     )
 
-    def _shared_expert_fwd_1(moe_in, w_shared):
-      return dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
-
-    _, vjp_shared_1 = jax.vjp(_shared_expert_fwd_1, moe_in_curr_1, w.moe.shared)
-    grad_moe_in_shared_1, grad_w_shared_1 = vjp_shared_1(grad_shared_x_1)
+    grad_moe_in_shared_1, grad_w_shared_1 = dsv3_experts.dsv3_shared_expert_bwd(
+        grad_shared_x_1, moe_in_curr_1, w.moe.shared, quant_rule=shared_rule
+    )
 
     (
         grad_x_ag_1,
@@ -2071,11 +2099,9 @@ def dsv3_sparse_layer_epilogue_bwd(
         out_specs=x_pspec,
     )
 
-    def _shared_expert_fwd_0(moe_in, w_shared):
-      return dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
-
-    _, vjp_shared_0 = jax.vjp(_shared_expert_fwd_0, moe_in_curr_0, w.moe.shared)
-    grad_moe_in_shared_0, grad_w_shared_0 = vjp_shared_0(grad_shared_x_0)
+    grad_moe_in_shared_0, grad_w_shared_0 = dsv3_experts.dsv3_shared_expert_bwd(
+        grad_shared_x_0, moe_in_curr_0, w.moe.shared, quant_rule=shared_rule
+    )
 
     grad_moe_in_expert_1 = grad_moe_in_routed_1 + grad_moe_in_shared_1
 
@@ -2488,6 +2514,7 @@ def dsv3_sparse_layer_scan_body_fwd(
   """Forward pass for DSv3 sparse layer scan body."""
   quant_rule = quant.routed_experts if quant else None
   mla_rule = quant.mla if quant else None
+  shared_rule = quant.shared_mlp if quant else None
   combine_qtype = quant.combine_qtype if quant else None
   combine_per_hop_scaling = quant.combine_per_hop_scaling if quant else False
   w_routed = w_curr.moe.routed if quant_rule is None else _quantize_routed_weights(w_curr.moe.routed, quant_rule)
@@ -2634,6 +2661,7 @@ def dsv3_sparse_layer_scan_body_fwd(
         out_specs=x_pspec,
         combine_qtype=combine_qtype,
         combine_per_hop_scaling=combine_per_hop_scaling,
+        shared_quant_rule=shared_rule,
     )
     (outputs_expert_curr_1, (bank_1, bank_offset_1)), res_expert_curr_1 = ubatch_expert(
         *outputs_dispatch_curr_1,
@@ -2645,6 +2673,7 @@ def dsv3_sparse_layer_scan_body_fwd(
         bank=bank_1,
         bank_offset=bank_offset_1,
         quant_rule=quant_rule,
+        shared_quant_rule=shared_rule,
     )
     return (
         outputs_combine_curr_0,
@@ -2883,6 +2912,7 @@ def dsv3_sparse_layer_scan_body_bwd(
   """
   quant_rule = quant.routed_experts if quant else None
   mla_rule = quant.mla if quant else None
+  shared_rule = quant.shared_mlp if quant else None
   w_routed_q = None if quant_rule is None else _quantize_routed_weights(w_curr.moe.routed, quant_rule)
   grad_carry, grad_aux_curr = grad_outputs
   (grad_outputs_mla_next_0, bank_0, bank_offset_0), (
@@ -3059,11 +3089,9 @@ def dsv3_sparse_layer_scan_body_bwd(
         quant_rule=quant_rule,
     )
 
-    def _shared_expert_fwd_1(moe_in, w_shared):
-      return dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
-
-    _, vjp_shared_1 = jax.vjp(_shared_expert_fwd_1, moe_in_curr_1, w_curr.moe.shared)
-    grad_moe_in_shared_1, grad_w_shared_1 = vjp_shared_1(grad_shared_x_1)
+    grad_moe_in_shared_1, grad_w_shared_1 = dsv3_experts.dsv3_shared_expert_bwd(
+        grad_shared_x_1, moe_in_curr_1, w_curr.moe.shared, quant_rule=shared_rule
+    )
 
     (
         grad_x_ag_1,
@@ -3145,11 +3173,9 @@ def dsv3_sparse_layer_scan_body_bwd(
         )
     )
 
-    def _shared_expert_fwd_0(moe_in, w_shared):
-      return dsv3_experts.dsv3_shared_expert(moe_in, w_shared)
-
-    _, vjp_shared_0 = jax.vjp(_shared_expert_fwd_0, moe_in_curr_0, w_curr.moe.shared)
-    grad_moe_in_shared_0, grad_w_shared_0 = vjp_shared_0(grad_shared_x_0)
+    grad_moe_in_shared_0, grad_w_shared_0 = dsv3_experts.dsv3_shared_expert_bwd(
+        grad_shared_x_0, moe_in_curr_0, w_curr.moe.shared, quant_rule=shared_rule
+    )
 
     (
         grad_x_ag_0,
@@ -4029,6 +4055,13 @@ _SC0_KWARGS = dict(
     compute_type="tpu_sparsecore",
     compiler_options={"sparse_core_config": {"core_ids": [0]}},
 )
+_NORM_REDUCE_TC: bool = False
+
+
+def set_norm_reduce_tc(enabled: bool) -> None:
+  """Controls whether 1D RMSNorm scale cotangents reduce on TensorCore."""
+  global _NORM_REDUCE_TC
+  _NORM_REDUCE_TC = bool(enabled)
 
 
 def _sc1_reduce_axes(
@@ -4337,9 +4370,63 @@ def reduce_w_ici_sc1(
       grad_w,
       moe=dataclasses.replace(grad_w.moe, routed=routed),
   )
+  w_axes = _w_ici_axes()
+  if _NORM_REDUCE_TC:
+    norm_grads = (
+        grad_w.pre_attn_norm_scale,
+        grad_w.mla.q_norm_scale,
+        grad_w.mla.kv_norm_scale,
+        grad_w.post_attn_norm_scale,
+    )
+    norm_likes = (
+        like.pre_attn_norm_scale,
+        like.mla.q_norm_scale,
+        like.mla.kv_norm_scale,
+        like.post_attn_norm_scale,
+    )
+    norm_axes = (
+        w_axes.pre_attn_norm_scale,
+        w_axes.mla.q_norm_scale,
+        w_axes.mla.kv_norm_scale,
+        w_axes.post_attn_norm_scale,
+    )
+    pre_s, q_s, kv_s, post_s = ops.reduce_along_axis(
+        norm_grads,
+        norm_axes,
+        axis_mapping,
+        norm_likes,
+        compute_type="device",
+    )
+    grad_w_sc1 = dataclasses.replace(
+        grad_w,
+        pre_attn_norm_scale=None,
+        post_attn_norm_scale=None,
+        mla=dataclasses.replace(grad_w.mla, q_norm_scale=None, kv_norm_scale=None),
+    )
+    like_sc1 = dataclasses.replace(
+        like,
+        pre_attn_norm_scale=None,
+        post_attn_norm_scale=None,
+        mla=dataclasses.replace(like.mla, q_norm_scale=None, kv_norm_scale=None),
+    )
+    reduced = ops.reduce_along_axis(
+        grad_w_sc1,
+        w_axes,
+        axis_mapping,
+        like_sc1,
+        axes=_sc1_reduce_axes(axis_mapping),
+        split_scatters=_w_ici_split_scatters(),
+        **_SC1_KWARGS,
+    )
+    return dataclasses.replace(
+        reduced,
+        pre_attn_norm_scale=pre_s,
+        post_attn_norm_scale=post_s,
+        mla=dataclasses.replace(reduced.mla, q_norm_scale=q_s, kv_norm_scale=kv_s),
+    )
   return ops.reduce_along_axis(
       grad_w,
-      _w_ici_axes(),
+      w_axes,
       axis_mapping,
       like,
       axes=_sc1_reduce_axes(axis_mapping),

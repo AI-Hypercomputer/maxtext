@@ -313,13 +313,26 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       head_dot_in_fp32=bool(getattr(cfg, "logits_dot_in_fp32", False)),
       cast_logits_to_fp32=bool(getattr(cfg, "cast_logits_to_fp32", True)),
   )
-  sharding = dsv3_sharding.sharding_config(mesh)
+  layout_4x4x4 = str(getattr(cfg, "lineage_layout_4x4x4", "default") or "default")
+  sharding = dsv3_sharding.sharding_config(mesh, layout_4x4x4=layout_4x4x4)
+  cp_expert_axes = bool(getattr(cfg, "lineage_cp_expert_axes", False))
+  if cp_expert_axes:
+    sharding = dsv3_sharding.expert_axes_as_cp_config(sharding, strip_mla_overlap=(layout_4x4x4 == "ep8_fsdp64"))
   eval_sharding = None
   eval_pdb = float(getattr(cfg, "eval_per_device_batch_size", 0) or 0)
-  if 0 < eval_pdb < 1:
-    eval_sharding = dsv3_sharding.expert_axes_as_cp_config(sharding)
+  if 0 < eval_pdb < 1 and not cp_expert_axes:
+    eval_sharding = dsv3_sharding.expert_axes_as_cp_config(sharding, strip_mla_overlap=(layout_4x4x4 == "ep8_fsdp64"))
   expert_permutation = getattr(cfg, "lineage_expert_permutation", None)
   dq_reduction_steps = int(getattr(cfg, "lineage_dq_reduction_steps", 1))
+  parse_fields = lambda s: tuple(
+      f.strip() for f in str(s or "").split(",") if f.strip() and f.strip().lower() not in ("none", "empty")
+  )
+  mla_offload_fields = parse_fields(getattr(cfg, "lineage_offload_mla_fields", ""))
+  moe_offload_fields = parse_fields(getattr(cfg, "lineage_offload_moe_fields", ""))
+  offload_bank = bool(getattr(cfg, "lineage_offload_bank", False))
+  if "bank" in moe_offload_fields:
+    offload_bank = True
+    moe_offload_fields = tuple(f for f in moe_offload_fields if f != "bank")
   kernels = dsv3_config.DSv3KernelConfig(
       max_target_length=int(cfg.max_target_length),
       sa_block_q=int(cfg.sa_block_q),
@@ -331,17 +344,31 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       sa_q_layout=cfg.sa_q_layout,
       sa_k_layout=cfg.sa_k_layout,
       sa_v_layout=cfg.sa_v_layout,
+      qk_diag_grid=int(getattr(cfg, "lineage_qk_diag_grid", 8)),
       diag_band_skip=bool(getattr(cfg, "lineage_diag_band_skip", True)),
       dq_reduction_steps=None if dq_reduction_steps == 0 else dq_reduction_steps,
       capacity_factor=get_capacity_factor(cfg),
       ragged_buffer_factor=(
           float(cfg.ragged_buffer_factor)
-          if float(getattr(cfg, "ragged_buffer_factor", -1.0)) > 0.0
+          if float(getattr(cfg, "ragged_buffer_factor", -1.0)) >= 0.0
           else _RAGGED_BUFFER_FACTOR
       ),
       quant=get_quant_config(cfg),
-      max_async_overlap_transform=True,
+      max_async_overlap_transform=bool(getattr(cfg, "lineage_max_async_overlap", True)),
+      max_async_overlap_entry=bool(getattr(cfg, "lineage_max_async_overlap_entry", True)),
       expert_permutation=("none" if expert_permutation is None else str(expert_permutation)),
+      mla_offload_fields=mla_offload_fields,
+      moe_offload_fields=moe_offload_fields,
+      offload_bank=offload_bank,
+      offload_w_grad=bool(getattr(cfg, "lineage_offload_w_grad", False)),
+      remat_dense_layers=bool(getattr(cfg, "lineage_remat_dense_layers", False)),
+      stream_param_cast=bool(getattr(cfg, "lineage_stream_param_cast", False)),
+      remat_mtp=bool(getattr(cfg, "lineage_remat_mtp", False)),
+      router_metadata_sc0=bool(getattr(cfg, "lineage_router_metadata_sc0", False)),
+      bwd_fp8_combine=bool(getattr(cfg, "lineage_bwd_fp8_combine", False)),
+      norm_reduce_tc=bool(getattr(cfg, "lineage_norm_reduce_tc", False)),
+      out_proj_2d=bool(getattr(cfg, "lineage_out_proj_2d", False)),
+      fp8_splash_out=bool(getattr(cfg, "lineage_fp8_splash_out", False)),
   )
   routed_bias_update_rate = float(cfg.routed_bias_update_rate) if getattr(cfg, "routed_bias", False) else 0.0
   training = dsv3_config.DSv3TrainingConfig(
@@ -352,6 +379,7 @@ def dsv3_config_from_maxtext(cfg: Any, mesh: jax.sharding.Mesh | jax.sharding.Ab
       mtp_loss_scaling_factor=float(getattr(cfg, "mtp_loss_scaling_factor", 0.1)),
       mtp_eval_target_module=int(getattr(cfg, "mtp_eval_target_module", 0)),
       mtp_reuse_input_embedding=bool(getattr(cfg, "mtp_reuse_input_embedding", False)),
+      loss_chunk_tokens=int(getattr(cfg, "lineage_loss_chunk_tokens", 0) or 0),
   )
   lineage_cfg = dsv3_config.DSv3Config(
       model=model,
@@ -438,18 +466,17 @@ class LineageTransformer(nnx.Module):
     self.config = config
     self.mesh = mesh
     self.model_mode = model_mode
-    cfg = dsv3_config_from_maxtext(config, mesh)
-    if cfg.eval_sharding is not None:
-      eval_sharding = cfg.eval_sharding
-      token_spec = ops.physical_pspec(
-          eval_sharding.token,
-          eval_sharding.axis_mapping,
-      )
-      override_keys = {
-          "activation_embed_and_logits_batch",
-          "activation_norm_length",
-      }
-      base_rules = list(getattr(config, "logical_axis_rules_for_eval", ()))
+
+    def _set_cfg_attr(attr: str, value: Any) -> None:
+      if hasattr(config, "get_keys"):
+        config.get_keys()[attr] = value
+      else:
+        setattr(config, attr, value)
+
+    def _override_token_rules(rules_attr: str, sharding_cfg: Any) -> tuple[Any, Any]:
+      token_spec = ops.physical_pspec(sharding_cfg.token, sharding_cfg.axis_mapping)
+      override_keys = {"activation_embed_and_logits_batch", "activation_norm_length"}
+      base_rules = list(getattr(config, rules_attr, ()))
       new_rules = tuple(
           [
               ("activation_embed_and_logits_batch", token_spec[0]),
@@ -457,10 +484,17 @@ class LineageTransformer(nnx.Module):
           ]
           + [r for r in base_rules if r[0] not in override_keys]
       )
-      if hasattr(config, "get_keys"):
-        config.get_keys()["logical_axis_rules_for_eval"] = new_rules
-      else:
-        config.logical_axis_rules_for_eval = new_rules
+      _set_cfg_attr(rules_attr, new_rules)
+      return token_spec
+
+    cfg = dsv3_config_from_maxtext(config, mesh)
+    if getattr(config, "lineage_cp_expert_axes", False):
+      train_token_spec = _override_token_rules("logical_axis_rules", cfg.sharding)
+      _override_token_rules("logical_axis_rules_for_eval", cfg.sharding)
+      to_list = lambda v: [] if v is None else ([v] if isinstance(v, str) else list(v))
+      _set_cfg_attr("data_sharding", [to_list(train_token_spec[0]), to_list(train_token_spec[1])])
+    if cfg.eval_sharding is not None:
+      _override_token_rules("logical_axis_rules_for_eval", cfg.eval_sharding)
     param_shardings, state_shardings = dsv3_model.dsv3_param_shardings(cfg, mesh)
     with _mesh_scope(mesh):
       params, state = dsv3_model.init_dsv3_params(rngs.params(), cfg, mesh)
@@ -856,6 +890,19 @@ def restore_params(
   from maxtext.experimental.lineage.interop import maxtext_layout  # pylint: disable=g-import-not-at-top,import-outside-toplevel
 
   cfg = dsv3_config_from_maxtext(config, mesh)
+  # Free initialized parameter/router-bias device buffers before converting so
+  # 64-chip restores don't hold init params + MaxText params + Lineage params in
+  # HBM simultaneously.
+  for key in (PARAMS_KEY, ROUTER_BIAS_KEY, MTP_ROUTER_BIAS_KEY):
+    if key in model_state:
+      for leaf in jax.tree.leaves(model_state[key]):
+        if isinstance(leaf, jax.Array) and not leaf.is_deleted():
+          leaf.delete()
   tree = _merge_restored_collections(maxtext_params)
-  params, state = maxtext_layout.convert_maxtext_params(tree, cfg, mesh, param_scan_axis=config.param_scan_axis)
+  if isinstance(maxtext_params, dict):
+    maxtext_params.clear()
+  unboxed = jax.tree.map(maxtext_layout._unbox, tree)  # pylint: disable=protected-access
+  del tree
+  params, state = maxtext_layout.convert_maxtext_params(unboxed, cfg, mesh, param_scan_axis=config.param_scan_axis)
+  del unboxed
   nnx.replace_by_pure_dict(model_state, lineage_state_pure_dict(params, state))
