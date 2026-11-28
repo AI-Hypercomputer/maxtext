@@ -731,6 +731,21 @@ class TestSamplingFunctions(unittest.TestCase):
       )
       self.assertEqual(token.item(), greedy_token_index)
 
+  def test_zero_temperature_is_greedy(self):
+    """Tests that temperature 0 selects the argmax for every sampling algorithm."""
+    for logits in (self.logits, -self.logits, jnp.array([[1.0, 2.0]])):
+      greedy_token = jnp.argmax(logits, axis=-1).item()
+      vocab_size = logits.shape[-1]
+      for algorithm, kwargs in (
+          ("weighted", {}),
+          ("nucleus", {"nucleus_topp": 1.0}),
+          ("topk", {"topk": vocab_size}),
+          ("composite", {"topk": vocab_size, "nucleus_topp": 1.0}),
+      ):
+        for r in jax.random.split(self.rng, 5):
+          token = inference_utils.sampling(logits, r, algorithm, temperature=0.0, **kwargs)
+          self.assertEqual(token.item(), greedy_token, msg=f"{algorithm=} {logits=}")
+
   def test_invalid_args_raise_error(self):
     """Tests that invalid arguments for topk and nucleus_topp raise errors."""
     with self.assertRaises(ValueError):
