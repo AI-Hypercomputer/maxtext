@@ -19,16 +19,8 @@ import jax
 from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 
-try:
-  from maxtext.models.kernels.gdn import config
-  from maxtext.models.kernels.gdn import memory_ref
-except (ImportError, ModuleNotFoundError):
-  try:
-    from maxtext.src.maxtext.models.kernels.gdn import config
-    from maxtext.src.maxtext.models.kernels.gdn import memory_ref
-  except (ImportError, ModuleNotFoundError):
-    from . import config
-    from . import memory_ref
+from . import config
+from . import memory_ref
 
 
 def load_as_qkv_large(qkv_vmem_ref: jax.Ref, cfgs: config.GDNConfig) -> tuple[jax.Array, jax.Array, jax.Array]:

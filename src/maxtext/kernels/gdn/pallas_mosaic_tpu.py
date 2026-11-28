@@ -22,16 +22,8 @@ from jax.experimental.pallas import tpu as pltpu
 import jax.numpy as jnp
 from tokamax._src.ops.causal_conv1d_gated_delta_rule import base
 
-try:
-  from maxtext.models.kernels.gdn import config
-  from maxtext.models.kernels.gdn import wrapper
-except (ImportError, ModuleNotFoundError):
-  try:
-    from maxtext.src.maxtext.models.kernels.gdn import config
-    from maxtext.src.maxtext.models.kernels.gdn import wrapper
-  except (ImportError, ModuleNotFoundError):
-    from . import config
-    from . import wrapper
+from . import config
+from . import wrapper
 
 GDNConfig = config.GDNConfig
 
