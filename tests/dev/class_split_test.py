@@ -246,6 +246,34 @@ class DealGroupsTest(unittest.TestCase):
     # Exact `@G` duration (50s) outweighs B (10s), so A lands on shard 1.
     self.assertEqual(groups, [[nodeids[0]], [nodeids[1]]])
 
+  def test_zero_weight_nodeids_get_zero_weight_and_do_not_bias_fallback(self):
+    skipped = [f"tests/skip_test.py::HugeSkipped::test_{i}" for i in range(10)]
+    active_a = "tests/a_test.py::RealA::test_1"
+    active_b = "tests/b_test.py::RealB::test_1"
+    unknown_c = "tests/c_test.py::RealC::test_1"
+    nodeids = [*skipped, active_a, active_b, unknown_c]
+    # Give a skipped item a huge stale duration to verify zero_weight overrides durations and fallback mean.
+    durations = {skipped[0]: 1000.0, active_a: 20.0, active_b: 10.0}
+
+    groups = deal_groups(nodeids, durations, 2, zero_weight_nodeids=skipped)
+
+    # Fallback mean is (20 + 10) / 2 = 15 (not inflated by skipped[0]'s stale 1000s), so RealA (20s)
+    # lands on shard 1, RealC (15s) + RealB (10s) land on shard 2, and HugeSkipped (0s) does not steal shard 1.
+    self.assertIn(active_a, groups[0])
+    self.assertNotIn(active_b, groups[0])
+    self.assertNotIn(unknown_c, groups[0])
+    self.assertIn(active_b, groups[1])
+    self.assertIn(unknown_c, groups[1])
+    # All skipped items stay together in their class on the lighter shard (shard 1: 20s vs shard 2: 25s).
+    self.assertEqual([n for n in groups[0] if n in skipped], skipped)
+
+  def test_zero_weight_groups_distribute_across_tied_shards(self):
+    nodeids = [f"tests/skip_test.py::S{i}::test_1" for i in range(4)]
+
+    groups = deal_groups(nodeids, {}, 2, zero_weight_nodeids=nodeids)
+
+    self.assertEqual(groups, [[nodeids[0], nodeids[2]], [nodeids[1], nodeids[3]]])
+
 
 def _fake_config(splits, group, deselected, split_by="class"):
   """A stand-in for pytest's Config: options, a deselection hook that records, and no terminal reporter."""
@@ -513,6 +541,88 @@ class TestStateless:
     # TestGrouped (weight 2) lands together on group 1; TestStateless's two tests (weight 1 each) land on group 2.
     self.assertEqual(first, ["sample_test.py::TestGrouped::test_1", "sample_test.py::TestGrouped::test_2"])
     self.assertEqual(second, ["sample_test.py::TestStateless::test_1", "sample_test.py::TestStateless::test_2"])
+
+  def test_unconditionally_skipped_tests_get_zero_weight_and_do_not_steal_shards(self):
+    sample = """
+import unittest
+import pytest
+
+class TestHugePytestSkip:
+  @pytest.mark.skip(reason="disabled")
+  @pytest.mark.parametrize("i", range(10))
+  def test_skipped(self, i): pass
+
+@unittest.skip("whole class disabled")
+class TestUnittestSkippedClass(unittest.TestCase):
+  def test_1(self): pass
+  def test_2(self): pass
+  def test_3(self): pass
+
+@pytest.mark.skipif(True, reason="always skipped")
+class TestStackedSkipIf:
+  @pytest.mark.skipif(False, reason="not skipped")
+  def test_1(self): pass
+
+class TestRealA(unittest.TestCase):
+  def test_active(self): pass
+  @unittest.skip("method disabled")
+  def test_skipped_method(self): pass
+  @pytest.mark.skipif(condition=True, reason="kwarg condition")
+  def test_kwarg_skipif_true(self): pass
+  @pytest.mark.skipif(reason="unconditional skipif")
+  def test_empty_skipif(self): pass
+
+class TestRealB:
+  @pytest.mark.skipif(False, reason="active")
+  def test_active(self): pass
+  @pytest.mark.skipif(condition=False, reason="kwarg active")
+  def test_kwarg_active(self): pass
+  @pytest.mark.skipif("1 == 1", reason="string condition is not evaluated at collection time")
+  def test_string_skipif(self): pass
+"""
+    # Calibrated so every skip/non-skip branch flips shard 1 if broken:
+    # - Active weights: TestRealA=30s, TestRealB=10s + 10s + fallback(50/3=16.67s) = 36.67s.
+    # - If any TestRealB method were wrongly zeroed, TestRealB drops to <=30s and loses to TestRealA.
+    # - If any skipped method/class failed to zero-weight, its stale 500s or fallback steals shard 1.
+    durations = {
+        "sample_test.py::TestStackedSkipIf::test_1": 500.0,
+        "sample_test.py::TestRealA::test_active": 30.0,
+        "sample_test.py::TestRealA::test_skipped_method": 500.0,
+        "sample_test.py::TestRealA::test_kwarg_skipif_true": 500.0,
+        "sample_test.py::TestRealA::test_empty_skipif": 500.0,
+        "sample_test.py::TestRealB::test_active": 10.0,
+        "sample_test.py::TestRealB::test_kwarg_active": 10.0,
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+      workdir = pathlib.Path(tmpdir).resolve()
+      (workdir / "sample_test.py").write_text(sample, encoding="utf-8")
+      (workdir / ".test_durations").write_text(json.dumps(durations), encoding="utf-8")
+      unsplit = self._collect(workdir)
+      first = self._collect(workdir, "--class-splits=2", "--class-group=1")
+      second = self._collect(workdir, "--class-splits=2", "--class-group=2")
+      second_verbose = self._run_pytest(workdir, "-v", "--class-splits=2", "--class-group=2")
+      first_xg = self._collect(workdir, "--class-splits=2", "--class-group=1", "--class-split-by=xdist_group")
+      second_xg = self._collect(workdir, "--class-splits=2", "--class-group=2", "--class-split-by=xdist_group")
+
+    self.assertCountEqual(first + second, unsplit)
+    self.assertCountEqual(first_xg + second_xg, unsplit)
+    self.assertIn("sample_test.py::TestRealB::test_active", first)
+    self.assertIn("sample_test.py::TestRealB::test_kwarg_active", first)
+    self.assertIn("sample_test.py::TestRealB::test_string_skipif", first)
+    self.assertNotIn("sample_test.py::TestRealA::test_active", first)
+    self.assertIn("sample_test.py::TestRealA::test_active", second)
+    self.assertIn("sample_test.py::TestHugePytestSkip::test_skipped[0]", second)
+    # Status line excludes stale durations on skipped items (only TestRealA::test_active counts).
+    self.assertIn(", 1 with a recorded duration", second_verbose)
+    # In xdist_group mode: TestRealA::test_active (30s) lands alone among active tests on shard 1,
+    # while TestRealB's 3 active items (16.67s + 10s + 10s = 36.67s) land together on shard 2.
+    self.assertIn("sample_test.py::TestRealA::test_active", first_xg)
+    self.assertNotIn("sample_test.py::TestRealB::test_active", first_xg)
+    self.assertNotIn("sample_test.py::TestRealB::test_kwarg_active", first_xg)
+    self.assertNotIn("sample_test.py::TestRealB::test_string_skipif", first_xg)
+    self.assertIn("sample_test.py::TestRealB::test_active", second_xg)
+    self.assertIn("sample_test.py::TestRealB::test_kwarg_active", second_xg)
+    self.assertIn("sample_test.py::TestRealB::test_string_skipif", second_xg)
 
 
 if __name__ == "__main__":

@@ -164,21 +164,28 @@ def _has_tpu_backend_support() -> bool:
     return False
 
 
+_FRAMEWORK_TESTCASE_MODULES = frozenset({"unittest.case", "absl.testing.absltest", "absl.testing.parameterized"})
+
+
 def _has_shared_class_fixture(item) -> bool:
   """Returns whether `item` belongs to a class with shared class-level setup/teardown or fixtures.
 
-  Excludes autouse class-scoped fixtures defined in this conftest (such as
-  `restore_jax_prng_and_libtpu_env_for_class`), so stateless test classes like
-  `TrainCompile` remain ungrouped and fan out freely across workers and shards.
+  Excludes framework-default `setUpClass`/`tearDownClass` hooks (such as `absltest.TestCase.setUpClass`
+  in `absl-py`) and autouse class-scoped fixtures defined in this conftest (such as
+  `restore_jax_prng_and_libtpu_env_for_class`), so stateless test classes like `TrainCompile` remain
+  ungrouped and fan out freely across workers and shards.
   """
   cls = getattr(item, "cls", None)
   if cls is None:
     return False
   if issubclass(cls, unittest.TestCase):
-    if getattr(cls.setUpClass, "__func__", None) is not unittest.TestCase.setUpClass.__func__:
-      return True
-    if getattr(cls.tearDownClass, "__func__", None) is not unittest.TestCase.tearDownClass.__func__:
-      return True
+    for base in cls.__mro__:
+      if base is unittest.TestCase:
+        break
+      if (getattr(base, "__module__", None) or "") in _FRAMEWORK_TESTCASE_MODULES:
+        continue
+      if base.__dict__.get("setUpClass") is not None or base.__dict__.get("tearDownClass") is not None:
+        return True
   elif callable(getattr(cls, "setup_class", None)) or callable(getattr(cls, "teardown_class", None)):
     return True
   fixtureinfo = getattr(item, "_fixtureinfo", None)

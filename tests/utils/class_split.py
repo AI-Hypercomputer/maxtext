@@ -133,38 +133,64 @@ def _lookup_duration(durations, nodeid):
   return None
 
 
-def _weights_and_members(nodeids, durations, key_fn=group_key):
+def _is_unconditionally_skipped(item):
+  """Returns whether `item` is statically skipped at collection time.
+
+  Recognizes `@pytest.mark.skip`, `@pytest.mark.skipif` with no condition or a boolean `True`
+  condition (without evaluating string expressions), and `@unittest.skip` / `skipIf(True, ...)`
+  on either the test class or method.
+  """
+  get_closest_marker = getattr(item, "get_closest_marker", None)
+  if get_closest_marker is not None and get_closest_marker("skip") is not None:
+    return True
+  iter_markers = getattr(item, "iter_markers", None)
+  if iter_markers is not None:
+    for mark in iter_markers("skipif"):
+      conditions = (mark.kwargs["condition"],) if "condition" in mark.kwargs else mark.args
+      if not conditions or any(isinstance(c, bool) and c for c in conditions):
+        return True
+  cls = getattr(item, "cls", None)
+  if cls is not None and getattr(cls, "__unittest_skip__", False):
+    return True
+  obj = getattr(cls, getattr(item, "originalname", ""), None) if cls is not None else getattr(item, "obj", None)
+  return bool(getattr(obj, "__unittest_skip__", False))
+
+
+def _weights_and_members(nodeids, durations, key_fn=group_key, zero_weight_nodeids=()):
   """Returns `(weight per group key, members per group key as (collection index, nodeid))`.
 
-  An item with no recorded duration is charged the mean of the durations recorded for the items
-  being dealt (1.0 when none are recorded), so entries for tests that were deselected before the
-  deal cannot influence it.
+  An item with no recorded duration is charged the mean of the durations recorded for the non-skipped
+  items being dealt (1.0 when none are recorded), so entries for deselected or statically skipped
+  tests cannot influence it. Items in `zero_weight_nodeids` receive weight 0.0 so large skipped
+  suites cannot monopolize a CI shard.
   """
-  resolved = {n: d for n in nodeids if (d := _lookup_duration(durations, n)) is not None}
+  zero_weight = set(zero_weight_nodeids)
+  resolved = {n: d for n in nodeids if n not in zero_weight and (d := _lookup_duration(durations, n)) is not None}
   fallback = sum(resolved.values()) / len(resolved) if resolved else 1.0
   weights = {}
   members = {}
   for index, nodeid in enumerate(nodeids):
     key = key_fn(nodeid)
-    weights[key] = weights.get(key, 0.0) + resolved.get(nodeid, fallback)
+    weight = 0.0 if nodeid in zero_weight else resolved.get(nodeid, fallback)
+    weights[key] = weights.get(key, 0.0) + weight
     members.setdefault(key, []).append((index, nodeid))
   return weights, members
 
 
-def deal_groups(nodeids, durations, splits, key_fn=group_key):
+def deal_groups(nodeids, durations, splits, key_fn=group_key, zero_weight_nodeids=()):
   """Deals whole group keys into `splits` shards, heaviest key first.
 
   Deterministic: keys are ordered by (-weight, key), each key goes to the currently lightest shard
-  with ties broken by the lowest shard index, and inside a shard the items keep their collection
-  order. Returns one list of nodeids per shard.
+  with ties broken by fewest items then lowest shard index, and inside a shard the items keep their
+  collection order. Returns one list of nodeids per shard.
   """
   if splits < 1:
     raise ValueError(f"splits must be >= 1, got {splits}")
-  weights, members = _weights_and_members(nodeids, durations, key_fn=key_fn)
+  weights, members = _weights_and_members(nodeids, durations, key_fn=key_fn, zero_weight_nodeids=zero_weight_nodeids)
   totals = [0.0] * splits
   shards = [[] for _ in range(splits)]
   for key in sorted(weights, key=lambda k: (-weights[k], k)):
-    target = min(range(splits), key=lambda i: (totals[i], i))
+    target = min(range(splits), key=lambda i: (totals[i], len(shards[i]), i))
     totals[target] += weights[key]
     shards[target].extend(members[key])
   return [[nodeid for _, nodeid in sorted(shard)] for shard in shards]
@@ -216,7 +242,14 @@ class ClassSplitPlugin:
     else:
       key_fn = group_key
       unit_label = "classes"
-    shards = deal_groups([item.nodeid for item in items], durations, self.splits, key_fn=key_fn)
+    zero_weight = {item.nodeid for item in items if _is_unconditionally_skipped(item)}
+    shards = deal_groups(
+        [item.nodeid for item in items],
+        durations,
+        self.splits,
+        key_fn=key_fn,
+        zero_weight_nodeids=zero_weight,
+    )
     keep = set(shards[self.group - 1])
     kept = [item for item in items if item.nodeid in keep]
     dropped = [item for item in items if item.nodeid not in keep]
@@ -224,7 +257,9 @@ class ClassSplitPlugin:
     if dropped:
       config.hook.pytest_deselected(items=dropped)
     units = len({key_fn(item.nodeid) for item in kept})
-    recorded = sum(1 for item in kept if _lookup_duration(durations, item.nodeid) is not None)
+    recorded = sum(
+        1 for item in kept if item.nodeid not in zero_weight and _lookup_duration(durations, item.nodeid) is not None
+    )
     self._report(
         config,
         f"[class-split] Running group {self.group}/{self.splits}: {len(kept)} tests in {units} {unit_label}, "
