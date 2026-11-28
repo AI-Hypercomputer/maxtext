@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1795870105295,
+  "lastUpdate": 1795885141235,
   "repoUrl": "https://github.com/AI-Hypercomputer/maxtext",
   "entries": {
     "MaxText Test Execution Times": [
@@ -79122,6 +79122,118 @@ window.BENCHMARK_DATA = {
           {
             "name": "Total TPU7X-UNIT Tests Duration",
             "value": 1498.6909999999998,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Count",
+            "value": 391,
+            "unit": "count"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "name": "Alexander Shraer CA",
+            "username": "shralex",
+            "email": "shralex@google.com"
+          },
+          "committer": {
+            "name": "maxtext authors",
+            "username": "Google-ML-Automation",
+            "email": "google-ml-automation@google.com"
+          },
+          "id": "5c79cad4a21afd3e7fc6ef9688e6fc56ce317a9e",
+          "message": "Speed up MaxText TPU unit tests without reducing coverage, fix pytest-xdist auto-grouping hook ordering and `TrainTokenizerTest` path isolation, and expand the test-efficiency review guide to cover TPU tests.\n\nThe TPU pytest jobs (`tpu-unit`, `tpu7x-unit`, and other TPU flavors) spend most of their wall time recompiling large XLA:TPU programs at full optimization effort, running discarded eager forward passes during Linen-wrapped NNX initialization, executing unjitted test forwards and backward passes, and running pure-CPU `dot_product` tests on TPU hardware.\n\nAdd a session-scoped autouse pytest fixture in `tests/conftest.py` that sets `jax_optimization_level=\"O0\"` and `jax_memory_fitting_level=\"O1\"` on TPU hardware across TPU pytest sessions, skipping latency-hiding scheduling and collective pipelining while keeping post-fusion rematerialization enabled to avoid HBM OOMs. The fixture never activates outside pytest or on CPU/GPU backends, honors `JAX_OPTIMIZATION_LEVEL` / `JAX_MEMORY_FITTING_LEVEL` environment overrides, restores previous values on session teardown, and extends `_restore_jax_prng_and_libtpu_env` so per-test overrides do not leak. Also fix automatic `xdist_group` assignment in `tests/conftest.py`: extend `_has_shared_class_fixture` to detect custom `tearDownClass` / `teardown_class` hooks while ignoring pytest's internal `_pytest.*` xunit wrappers (so stateless `unittest.TestCase` classes stay ungrouped), decorate `pytest_collection_modifyitems` with `@pytest.hookimpl(tryfirst=True)` so auto-added `xdist_group` markers are visible before `pytest-xdist` 3.x's `WorkerInteractor` runs, use underscore-separated group names, strip `@<group>` suffixes (including `pytest >= 9.2`'s `]@<group>]` JUnit XML mangling) in `tools/dev/process_test_results.py` and `tools/dev/convert_durations.py` with symmetric fallback (preserving `@` in directory paths) in `tests/utils/class_split.py`, and isolate `TrainTokenizerTest` in `tests/unit/tokenizer_test.py` with `tempfile.TemporaryDirectory()` and `addClassCleanup` instead of a shared `tests/test_tokenizer` path. Add `linen_wrappers.init_variables` in `tests/utils/linen_wrappers.py` to initialize `ToLinen`-wrapped NNX modules via a no-op `nnx_method` without executing a discarded eager forward pass, and JIT `forward_with_context_expert_parallelism` in `tests/utils/attention_test_util.py` while keeping `use_indexer=True` eager so XLA fusion of bfloat16 Indexer projections does not perturb borderline `top_k` ties.\n\nAcross MoE and quantization TPU tests, switch discarded `model.init` calls to `init_variables`, merge separate forward and gradient passes with `has_aux=True`, override `qwen3-30b-a3b` defaults from `num_experts=128, num_experts_per_tok=8` to `num_experts=8` (rounded up to a multiple of `jax.device_count()` where sharded on `fsdp`) and `num_experts_per_tok=2` in `moe_prefused_wi_test` and `moe_combine_tc_test`, split `RoutedMoeTest` into four classes for balanced TPU CI sharding, keep only sparse Megablox Pallas cases in the TPU subclasses of `moe_padding_test` (dense and router paths already run on CPU), and remove five exact duplicate `*_nnx` tests in `quantizations_test`. Also fix a latent uninitialized-buffer bug exposed in `QuantizedMoeTest.test_gmm_grad_equivalence_tokamax_v2_fp8_dynamic_ep4`: in `src/maxtext/layers/moe.py` (`ra2a_and_route`), dropless EP dispatch (`ragged_buffer_factor <= 0.0`) still leaves `~(1 - 1/num_ep)` unwritten tail rows in the worst-case receive buffer, so zero-initialize it when `not use_ragged_sort` and quantization is active (preserving `jax.lax.empty` for unquantized models and for `use_ragged_sort=True`, where `a2a_ragged_sort` already zeros the tail), and add a `NaN`-buffer regression test in `tests/unit/moe_ragged_truncation_test.py`.\n\nFurther speed up TPU7x and MoE kernel tests without reducing coverage: in `pallas_mosaic_tpu_v2_kernel_test.py` (`GmmV2TailChunksTpuTest`), unify the static `(m=32768, groups=128)` shape across the five full-group routing patterns (`uniform`, `short`, `skewed`, `edge`, `long`) while keeping `padded` and `local_groups` distinct, and replace per-call `jax.clear_caches()` wipes with a class-level compiled executable cache (clearing only `gmm_v2`'s config cache on cache misses); in `moe_ra2a_token_chunks_test.py`, cache shared 1-chunk references (stripping `moe_chunk_barrier`, which is inert for 1 chunk), keep global batch at 8 on 8-device TPUs, use `base_emb_dim=1024` on TPU7x for single-token decode, and validate unaligned sequence rejection via `jax.eval_shape`; in `megablox_gmm_3d_test.py`, shrink `test_shared_fixed_scale_bwd_is_bit_exact` from `(2048, 7168, 512)` to `(512, 1024, 256)` while preserving empty groups, non-sublane boundaries, padding rows, and multi-tile backward passes; in `router_replay_test.py`, use `base_emb_dim=1024` on TPU7x, keep global tokens at 512 on 8-device TPUs, and use `absltest.main()`; and in `moe_test.py`, remove `@pytest.mark.tpu_only` from four pure-JAX fallback tests in `RoutedMoeSparseCoreRaggedSortTest` (with `jax.device_count() < 2` skip guards for `ici_expert_parallelism=2`), reuse validated `3d_gmm[default]` targets as references in `RoutedMoeTcRaggedSortTest`, share overflow/capped forward passes in `RoutedMoeDroplessFallbackTest`, and cache shared TC-3D references while using `emb_dim=1024` where hardware permits in `QuantizedMoeTest.test_moe_quantize_token_all_gather`.\n\nAcross attention TPU tests, JIT unjitted forwards, autoregression loops, and gradient checks, and cache shared single-device `dot_product` references in `CpHaloAttentionTest` and `MLATest`. Remove `@pytest.mark.tpu_only` and `tpu_backend` from pure-CPU `dot_product` and host-sharding tests (`model_test`, `gpt3_test`, `mhc_test`, `optimizers_test`, `model_creation_utils_test`, `multi_token_prediction_test`, `nnx_decoders_test`, and `m3` comparison/sharding tests), setting `megablox=False` in `mhc_test` to avoid Pallas CPU interpret mode, migrating `model_test` and `gpt3_test` from deprecated `models.transformer_as_linen` to native NNX `models.Transformer`, and shrinking the `reduced=True` dimensions in `qwen3_vl_comparison_test` while preserving its full 2B shape-parity check.\n\nUpdate `.agents/review/testing.md` and `AGENTS.md` with TPU test-efficiency review criteria: `linen_wrappers.init_variables` for discarded `ToLinen.init` forwards, jitting TPU forwards/grads and caching shared `dot_product` references, overriding large inherited `num_experts` defaults, splitting monolithic TPU classes for CI shard balance, respecting `conftest.py`'s `O0`/`O1` defaults and `tearDownClass` grouping, and avoiding unnecessary `tpu_only` markers, CPU-covered TPU duplicates, or deprecated Linen test duplicates.\n\nPiperOrigin-RevId: 1031476872",
+          "timestamp": "2026-11-28T01:46:29Z",
+          "url": "https://github.com/AI-Hypercomputer/maxtext/commit/5c79cad4a21afd3e7fc6ef9688e6fc56ce317a9e"
+        },
+        "date": 1795885140246,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Total GPU-INTEGRATION Tests Duration",
+            "value": 228.51299999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-INTEGRATION Tests Count",
+            "value": 41,
+            "unit": "count"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Duration",
+            "value": 39.742,
+            "unit": "sec"
+          },
+          {
+            "name": "Total GPU-UNIT Tests Count",
+            "value": 36,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Duration",
+            "value": 1806.715,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Duration",
+            "value": 153.15599999999992,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-INTEGRATION Tests Count",
+            "value": 14,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Duration",
+            "value": 330.26399999999995,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Duration",
+            "value": 1459.4629999999993,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU-UNIT Tests Count",
+            "value": 391,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Duration",
+            "value": 1609.4849999999997,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-INTEGRATION Tests Count",
+            "value": 123,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Duration",
+            "value": 354.03000000000003,
+            "unit": "sec"
+          },
+          {
+            "name": "Total TPU7X-POST-TRAINING-UNIT Tests Count",
+            "value": 84,
+            "unit": "count"
+          },
+          {
+            "name": "Total TPU7X-UNIT Tests Duration",
+            "value": 1483.1220000000003,
             "unit": "sec"
           },
           {
