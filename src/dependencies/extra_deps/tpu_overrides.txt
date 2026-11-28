@@ -10,6 +10,7 @@ ml-dtypes>=0.7.0
 oauthlib>=4.0.1
 pillow>=13.0.0
 setuptools>=84.0.0
+tokamax>=0.0.18,!=0.1.0
 urllib3>=2.8.0
 virtualenv>=21.15.1
 werkzeug>=3.1.9
