@@ -58,8 +58,8 @@ MaxText is an open-source, high-performance LLM framework written in Python/JAX.
 
 ### Qwen3.8
 
-- **Variants**: MoE with Hybrid Attention (2.4T-A95B)
-- **Notes**: GatedDeltaNet, GQA, MoE.
+- **Variants**: Dense with Hybrid Attention (27B); MoE with Hybrid Attention (2.4T-A95B)
+- **Notes**: GatedDeltaNet, GQA, Multimodal, MoE.
 
 ### GPT-OSS
 

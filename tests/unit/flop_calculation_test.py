@@ -243,6 +243,7 @@ class FlopCalculation(parameterized.TestCase):
 
   @parameterized.named_parameters(
       ("dense_9b", "qwen3.5-9b", 32, 0),
+      ("dense_27b", "qwen3.8-27b", 64, 0),
       ("moe_35b", "qwen3.5-35b-a3b", 0, 40),
       ("moe_397b", "qwen3.5-397b-a17b", 0, 60),
   )
@@ -251,10 +252,10 @@ class FlopCalculation(parameterized.TestCase):
     cfg = self._initialize_model_config(model_name)
     self.assertEqual(maxtext_utils.get_dense_moe_layers(cfg), (dense_layers, moe_layers))
 
-  def test_qwen3_5_9b_flops(self):
-    """Test Qwen3.5-9B dense model Flops calculation"""
+  def _assert_qwen3_5_dense_flops(self, model_name):
+    """Asserts calculated training TFLOPs match the analytical formula for dense Qwen3.5/3.8 models."""
     cfg = self._initialize_model_config(
-        "qwen3.5-9b",
+        model_name,
         max_target_length=4096,
         per_device_batch_size=1,
     )
@@ -312,6 +313,14 @@ class FlopCalculation(parameterized.TestCase):
     calculated_tflops, _, _ = calculate_tflops_training_per_device(cfg)
 
     self.assertFlopsAlmostEqual(calculated_tflops, golden_tflops)
+
+  def test_qwen3_5_9b_flops(self):
+    """Test Qwen3.5-9B dense model Flops calculation"""
+    self._assert_qwen3_5_dense_flops("qwen3.5-9b")
+
+  def test_qwen3_8_27b_flops(self):
+    """Test Qwen3.8-27B dense model Flops calculation"""
+    self._assert_qwen3_5_dense_flops("qwen3.8-27b")
 
   def test_llama3_3_70b_flops(self):
     """Test Llama3.3 70b Flops calculation with default parameters"""

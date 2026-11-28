@@ -93,7 +93,7 @@ def _rule_table_for(model_name: str):
   """
   if model_name == "qwen3-0.6b":
     return MODEL_TO_CONVERSION_RULES["qwen3"]
-  if model_name.startswith("qwen3.5"):
+  if model_name.startswith("qwen3.5") or model_name == "qwen3.8-27b":
     return None
   return _NO_RULE_TABLE
 
