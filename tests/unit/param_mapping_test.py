@@ -519,6 +519,63 @@ class ParamMappingTest(unittest.TestCase):
           self.assertIsInstance(got, jax.Array, kind)
           np.testing.assert_array_equal(np.asarray(got), want, err_msg=kind)
 
+  def test_hooks_that_split_or_join_keep_jax_arrays_as_jax_arrays(self):
+    """The HF->MaxText hooks that split or join tensors use jnp on `jax.Array`s.
+
+    The safetensors_dynamic loader passes sharded `jax.Array`s. A hook that goes through numpy copies the
+    tensor to host RAM, and on several hosts it fails and the loader gathers the tensor to every host.
+    Each hook must give a `jax.Array` with the same values as for numpy inputs.
+    """
+
+    def hook(hooks, name):
+      return next(fn for fn in hooks.values() if getattr(fn, "__name__", "") == name)
+
+    gpt_oss = param_mapping.GPT_OSS_TO_HF_PARAM_HOOK_FN(
+        {"num_hidden_layers": 2}, mock.Mock(inhomogeneous_layer_cycle_interval=1), scan_layers=False
+    )
+    qwen3_vl = param_mapping.QWEN3_VL_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        {
+            "text_config": {"num_hidden_layers": 1, "num_local_experts": 2},
+            "vision_config": {"depth": 1, "hidden_size": 4},
+        },
+        mock.Mock(use_multimodal=True),
+        scan_layers=False,
+    )
+    hy4 = param_mapping.HY4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        {"num_hidden_layers": 4},
+        mock.Mock(num_decoder_layers=4, first_num_dense_layers=1, inhomogeneous_layer_cycle_interval=4),
+        scan_layers=False,
+    )
+    deepseek_v4 = param_mapping.DEEPSEEK_V4_MAXTEXT_TO_HF_PARAM_HOOK_FN(
+        *self._deepseek_v4_mtp_config(), scan_layers=True, saving_to_hf=False
+    )
+
+    rng = np.random.default_rng(0)
+
+    def randn(*shape):
+      return rng.standard_normal(shape).astype(np.float32)
+
+    cases = {
+        # gate_up_proj with wi_0 and wi_1 interleaved on the last axis.
+        "gpt_oss_interleave": (hook(gpt_oss, "interleave"), randn(3, 6, 10), None),
+        # gate_up_proj with wi_0 and wi_1 side by side on the last axis.
+        "qwen3_vl_fused": (hook(qwen3_vl, "process_wi_0_wi_1_fused"), randn(2, 6, 10), None),
+        # Vision qkv (3 * hidden, hidden) and its bias (3 * hidden,).
+        "qwen3_vl_qkv": (hook(qwen3_vl, "process_qkv_vision"), randn(12, 4), ((4, 2, 2),) * 3),
+        "qwen3_vl_qkv_bias": (hook(qwen3_vl, "process_qkv_bias_vision"), randn(12), ((2, 2),) * 3),
+        # gate_up_proj (experts, 2 * mlp, emb).
+        "hy4_wi": (hook(hy4, "process_wi_0_wi_1"), randn(3, 10, 6), None),
+        # (e_proj, h_proj) of the MTP projection.
+        "deepseek_v4_mtp_projection": (hook(deepseek_v4, "reshape_mtp_projection"), (randn(4, 4), randn(4, 4)), None),
+    }
+    for name, (hook_fn, x, target_shape) in cases.items():
+      with self.subTest(name):
+        want = hook_fn(x, target_shape)
+        self.assertIsInstance(want, np.ndarray)
+        got = hook_fn(jax.tree.map(jnp.asarray, x), target_shape)
+        self.assertIsInstance(got, jax.Array)
+        np.testing.assert_array_equal(np.asarray(got), want)
+
   def test_qwen3_hybrid_mappings_cover_the_scan_remainder(self):
     """Layers past the last whole cycle live in `layers_remainder`, whose local layers stack [local] alone."""
     num_layers, cycle, num_experts = 10, 4, 2
