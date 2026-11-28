@@ -40,7 +40,7 @@ from maxtext.integration.vllm.convert_utils import (
     pad_to_tpu_lanes,
     resolve_rollout_tp,
 )
-from maxtext.layers.quantizations import quantize_weight_per_channel
+from maxtext.layers.quantizations import quantize_moe_weight_fp4, quantize_weight_per_channel
 
 
 # ==========================================
@@ -262,6 +262,7 @@ class WeightConverter:
       kv_tp_size: Optional[int] = None,
       moe_mlp_tp_size: Optional[int] = None,
       fp8_moe: Optional[bool] = None,
+      fp4_moe: Optional[bool] = None,
       num_kv_heads: Optional[int] = None,
       head_dim: Optional[int] = None,
       config: Any = None,
@@ -301,6 +302,11 @@ class WeightConverter:
       self.kv_tp_size = kv_tp_size if kv_tp_size is not None else (config.kv_tp_size or self.tp)
       self.moe_mlp_tp_size = moe_mlp_tp_size if moe_mlp_tp_size is not None else (config.moe_mlp_tp_size or self.tp)
       self.fp8_moe = fp8_moe if fp8_moe is not None else bool(config.fp8_moe or config.rollout_fp8_moe)
+      self.fp4_moe = (
+          fp4_moe
+          if fp4_moe is not None
+          else bool(getattr(config, "fp4_moe", False) or getattr(config, "rollout_fp4_moe", False))
+      )
 
       self._direct = MaxTextToMaxTextConverter(
           config=config,
@@ -313,6 +319,7 @@ class WeightConverter:
           prefuse_moe_weights=prefuse_moe_weights,
           target_dtype=target_dtype,
           fp8_moe=self.fp8_moe,
+          fp4_moe=self.fp4_moe,
       )
       logging.info("WeightConverter: direct MaxText-to-MaxText mode (debug=%s).", debug)
     else:
@@ -323,6 +330,11 @@ class WeightConverter:
       )
       self.fp8_moe = (
           fp8_moe if fp8_moe is not None else (bool(config.fp8_moe or config.rollout_fp8_moe) if config else False)
+      )
+      self.fp4_moe = (
+          fp4_moe
+          if fp4_moe is not None
+          else (bool(getattr(config, "fp4_moe", False) or getattr(config, "rollout_fp4_moe", False)) if config else False)
       )
 
       if self.rules is None and config is not None:
@@ -558,6 +570,7 @@ class _PlanGroup:
   # leaf-name check inside `_align_per_axis`.
   source_path: str
   quantize_to_fp8: bool = False
+  quantize_to_fp4: bool = False
   local_index: Optional[int] = None
 
 
@@ -571,6 +584,7 @@ def _group_plan(
     plan: List[_PlanEntry],
     fp8_moe: bool = False,
     src_flat: Optional[Mapping[Tuple[Any, ...], Any]] = None,
+    fp4_moe: bool = False,
 ) -> List[_PlanGroup]:
   """Collapses per-leaf plan entries into one group per source parameter.
 
@@ -580,6 +594,9 @@ def _group_plan(
   produce the wrong shape for one of them -- which `convert()`'s post-execution
   shape check catches loudly rather than silently writing incorrect weights.
   """
+  is_quantized_moe = fp8_moe or fp4_moe
+  quant_label = "FP4" if fp4_moe else "FP8"
+  flag_label = "fp4_moe" if fp4_moe else "fp8_moe"
   grouped: Dict[Tuple[Any, ...], List[_PlanEntry]] = {}
   order: List[Tuple[Any, ...]] = []
   for entry in plan:
@@ -601,22 +618,22 @@ def _group_plan(
       is_expert = _is_expert_tensor(val, is_nested=is_nested, is_scanned=is_scanned)
       is_moe_weight = is_expert and (op == "fuse_moe" or str(source_keys[0][-1]) in ("wi", "wi_0", "wi_1", "wo"))
     else:
-      if fp8_moe:
+      if is_quantized_moe:
         raise ConversionPlanError(f"Cannot classify expert tensor {'.'.join(map(str, source_keys[0]))} without src_flat.")
       is_moe_weight = False
-    if has_scale_target and not fp8_moe:
+    if has_scale_target and not is_quantized_moe:
       raise ConversionPlanError(
-          f"Rollout expects an FP8 scale for {'.'.join(map(str, source_keys[0]))}, but fp8_moe is False."
+          f"Rollout expects an {quant_label} scale for {'.'.join(map(str, source_keys[0]))}, but {flag_label} is False."
       )
     if has_scale_target and not is_moe_weight:
       raise ConversionPlanError(
-          f"Rollout expects an FP8 scale for {'.'.join(map(str, source_keys[0]))}, which is not an "
-          "FP8-quantized MoE expert weight."
+          f"Rollout expects an {quant_label} scale for {'.'.join(map(str, source_keys[0]))}, which is not an "
+          f"{quant_label}-quantized MoE expert weight."
       )
-    if fp8_moe and is_moe_weight and not has_scale_target:
+    if is_quantized_moe and is_moe_weight and not has_scale_target:
       raise ConversionPlanError(
-          f"Converter has fp8_moe=True for {'.'.join(map(str, source_keys[0]))}, but rollout target "
-          "state has no corresponding FP8 scale."
+          f"Converter has {flag_label}=True for {'.'.join(map(str, source_keys[0]))}, but rollout target "
+          f"state has no corresponding {quant_label} scale."
       )
     groups.append(
         _PlanGroup(
@@ -635,6 +652,7 @@ def _group_plan(
             ),
             source_path=".".join(map(str, source_keys[0])),
             quantize_to_fp8=bool(fp8_moe and is_moe_weight),
+            quantize_to_fp4=bool(fp4_moe and is_moe_weight),
         )
     )
   return groups
@@ -654,12 +672,31 @@ def _last_group_reading(groups: List[_PlanGroup]) -> Dict[Tuple[Any, ...], int]:
 
 
 def _quantize_fp8_targets(group: _PlanGroup, per_block) -> List[Tuple[Tuple[Any, ...], Any]]:
-  """Returns (target_key, array) pairs for an FP8 group: each block's FP8 weight or its per-channel scale.
+  """Returns (target_key, array) pairs for an FP8 group: each block's quantized weight or its scale.
 
   A block feeds both a weight and a `_scale` target, so quantize it once and hand out both halves.
   """
   quantized = {
       idx: quantize_weight_per_channel(per_block[idx], channel_axis=2)
+      for idx in dict.fromkeys(idx for idx, _ in group.targets)
+  }
+  return [
+      (tgt_key, quantized[idx][1] if str(tgt_key[-1]).endswith("_scale") else quantized[idx][0])
+      for idx, tgt_key in group.targets
+  ]
+
+
+def _quantize_fp4_targets(
+    group: _PlanGroup,
+    per_block,
+    moe_weight_block_size: Optional[int] = None,
+) -> List[Tuple[Tuple[Any, ...], Any]]:
+  """Returns (target_key, array) pairs for an FP4 group: each block's quantized weight or its scale.
+
+  A block feeds both a weight and a `_scale` target, so quantize it once and hand out both halves.
+  """
+  quantized = {
+      idx: quantize_moe_weight_fp4(per_block[idx], block_size=moe_weight_block_size)
       for idx in dict.fromkeys(idx for idx, _ in group.targets)
   }
   return [
@@ -781,6 +818,7 @@ class MaxTextToMaxTextConverter:
       prefuse_moe_weights: Optional[bool] = None,
       target_dtype: Optional[Any] = None,
       fp8_moe: Optional[bool] = None,
+      fp4_moe: Optional[bool] = None,
       kv_tp_size: Optional[int] = None,
       moe_mlp_tp_size: Optional[int] = None,
   ):
@@ -789,6 +827,12 @@ class MaxTextToMaxTextConverter:
     self.kv_tp_size = kv_tp_size if kv_tp_size is not None else (config.kv_tp_size or self.tp)
     self.moe_mlp_tp_size = moe_mlp_tp_size if moe_mlp_tp_size is not None else (config.moe_mlp_tp_size or self.tp)
     self.fp8_moe = fp8_moe if fp8_moe is not None else bool(config.fp8_moe or config.rollout_fp8_moe)
+    self.fp4_moe = (
+        fp4_moe
+        if fp4_moe is not None
+        else bool(getattr(config, "fp4_moe", False) or getattr(config, "rollout_fp4_moe", False))
+    )
+    self.moe_weight_block_size = getattr(config, "moe_weight_block_size", None)
     self.moe_fused_layout = moe_fused_layout
     self.allow_unused_source_keys = allow_unused_source_keys
     self.debug = debug
@@ -934,7 +978,7 @@ class MaxTextToMaxTextConverter:
             global_idx = b * self.cycle + slot
             tgt_key = prefix + (f"layers_{global_idx}",) + suffix[:-1] + ("wi",)
             plan.append(_PlanEntry(tgt_key, (src_key, wi_1_key), b, "fuse_moe", local_index))
-            if self.fp8_moe and is_expert_kernel:
+            if (self.fp8_moe or self.fp4_moe) and is_expert_kernel:
               tgt_scale_key = prefix + (f"layers_{global_idx}",) + suffix[:-1] + ("wi_scale",)
               plan.append(_PlanEntry(tgt_scale_key, (src_key, wi_1_key), b, "fuse_moe", local_index))
       elif self.prefuse_moe_weights and suffix and suffix[-1] == "wi_1" and (src_key[:-1] + ("wi_0",) in src_flat):
@@ -947,7 +991,7 @@ class MaxTextToMaxTextConverter:
             global_idx = b * self.cycle + slot
             tgt_key = prefix + (f"layers_{global_idx}",) + suffix
             plan.append(_PlanEntry(tgt_key, (src_key,), b, "slice", local_index))
-            if self.fp8_moe and is_expert_kernel and (is_wo or is_wi):
+            if (self.fp8_moe or self.fp4_moe) and is_expert_kernel and (is_wo or is_wi):
               scale_name = suffix[-1] + "_scale"
               tgt_scale_key = prefix + (f"layers_{global_idx}",) + suffix[:-1] + (scale_name,)
               plan.append(_PlanEntry(tgt_scale_key, (src_key,), b, "slice", local_index))
@@ -1204,10 +1248,11 @@ class MaxTextToMaxTextConverter:
           val = _jit_repeat_axes(val, ((-2, self.kv_replication),))
       return [(tgt_key, val) for _, tgt_key in group.targets]
 
-    # For FP8 MoE quantization, quantize from self.compute_dtype (the trainer's
+    # For FP8/FP4 MoE quantization, quantize from self.compute_dtype (the trainer's
     # `dtype`, typically bfloat16) to match the trainer's forward pass in
     # RoutedMoE, which casts weights to compute_dtype before fake-quantization.
-    calc_dtype = self.compute_dtype if group.quantize_to_fp8 else target_dtype
+    is_quantized = group.quantize_to_fp8 or group.quantize_to_fp4
+    calc_dtype = self.compute_dtype if is_quantized else target_dtype
     if group.op == "fuse_moe":
       raw_0 = src_flat[group.source_keys[0]]
       raw_1 = src_flat[group.source_keys[1]]
@@ -1217,8 +1262,10 @@ class MaxTextToMaxTextConverter:
       )
       self._check_scan_axis(wi_0, path)
       per_block = self._fuse_moe_bulk_target_free(wi_0, wi_1, path)
-      if not group.quantize_to_fp8:
+      if not is_quantized:
         return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
+      if group.quantize_to_fp4:
+        return _quantize_fp4_targets(group, per_block, moe_weight_block_size=self.moe_weight_block_size)
       return _quantize_fp8_targets(group, per_block)
 
     # group.op == "slice"
@@ -1226,13 +1273,15 @@ class MaxTextToMaxTextConverter:
     val = _cast_target_free_floating_leaf(self._take_cycle_slot(raw_val, group), calc_dtype, path)
     self._check_scan_axis(val, path)
     per_block = self._slice_bulk_target_free(val, path)
-    if not group.quantize_to_fp8:
+    if not is_quantized:
       return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
+    if group.quantize_to_fp4:
+      return _quantize_fp4_targets(group, per_block, moe_weight_block_size=self.moe_weight_block_size)
     return _quantize_fp8_targets(group, per_block)
 
   def _execute_group(self, group: _PlanGroup, src_flat, tgt_flat):
     """Produces every target leaf in `group`. Returns (target_key, array) pairs."""
-    # Shape, sharding and dtype come from a weight target: in an FP8 group the first target may be an (E, 1, out) scale.
+    # Shape, sharding and dtype come from a weight target: in an FP8/FP4 group the first target may be a scale.
     first_tgt_key = next((k for _, k in group.targets if not str(k[-1]).endswith("_scale")), group.targets[0][1])
     first_tgt = tgt_flat[first_tgt_key]
     path = group.source_path
@@ -1242,10 +1291,11 @@ class MaxTextToMaxTextConverter:
       out = _align_per_axis(val, first_tgt.shape, getattr(first_tgt, "sharding", None), path)
       return [(tgt_key, out) for _, tgt_key in group.targets]
 
-    # For FP8 MoE quantization, quantize from self.compute_dtype (the trainer's
+    # For FP8/FP4 MoE quantization, quantize from self.compute_dtype (the trainer's
     # `dtype`, typically bfloat16) to match the trainer's forward pass in
     # RoutedMoE, which casts weights to compute_dtype before fake-quantization.
-    calc_dtype = self.compute_dtype if group.quantize_to_fp8 else first_tgt.dtype
+    is_quantized = group.quantize_to_fp8 or group.quantize_to_fp4
+    calc_dtype = self.compute_dtype if is_quantized else first_tgt.dtype
     if group.op == "fuse_moe":
       wi_0, wi_1 = (
           _apply_dtype_cast(self._take_cycle_slot(src_flat[k], group), calc_dtype, path) for k in group.source_keys
@@ -1257,11 +1307,23 @@ class MaxTextToMaxTextConverter:
       self._check_scan_axis(val, path)
       per_block = _bulk_align_and_unstack(val, self.scan_axis, first_tgt, path)
 
-    if not group.quantize_to_fp8:
+    if not is_quantized:
       return [(tgt_key, per_block[idx]) for idx, tgt_key in group.targets]
 
+    if group.quantize_to_fp4:
+      moe_block_size = self.moe_weight_block_size
+      if moe_block_size is None:
+        scale_tgt_key = next((k for _, k in group.targets if str(k[-1]).endswith("_scale")), None)
+        if scale_tgt_key is not None and scale_tgt_key in tgt_flat:
+          scale_tgt = tgt_flat[scale_tgt_key]
+          if len(scale_tgt.shape) == 3 and scale_tgt.shape[1] > 1:
+            moe_block_size = first_tgt.shape[1] // scale_tgt.shape[1]
+      quantized_targets = _quantize_fp4_targets(group, per_block, moe_weight_block_size=moe_block_size)
+    else:
+      quantized_targets = _quantize_fp8_targets(group, per_block)
+
     outs = []
-    for tgt_key, arr in _quantize_fp8_targets(group, per_block):
+    for tgt_key, arr in quantized_targets:
       tgt_val = tgt_flat[tgt_key]
       if str(tgt_key[-1]).endswith("_scale"):
         arr = arr.astype(tgt_val.dtype)
@@ -1328,7 +1390,7 @@ class MaxTextToMaxTextConverter:
 
     if self._plan is None:
       self._plan = self._build_plan(src_flat, tgt_flat, skip_paths)
-      self._groups = _group_plan(self._plan, fp8_moe=self.fp8_moe, src_flat=src_flat)
+      self._groups = _group_plan(self._plan, fp8_moe=self.fp8_moe, src_flat=src_flat, fp4_moe=self.fp4_moe)
 
     if self.debug:
       src_span = _summarize_tree_placement(src_flat)
@@ -1435,7 +1497,7 @@ class MaxTextToMaxTextConverter:
 
     if self._plan is None:
       self._plan = self._build_target_free_plan(src_flat)
-      self._groups = _group_plan(self._plan, fp8_moe=self.fp8_moe, src_flat=src_flat)
+      self._groups = _group_plan(self._plan, fp8_moe=self.fp8_moe, src_flat=src_flat, fp4_moe=self.fp4_moe)
 
     groups_per_piece = max(1, groups_per_piece)
     last_reader = _last_group_reading(self._groups)
