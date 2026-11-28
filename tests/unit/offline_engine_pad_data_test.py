@@ -20,10 +20,17 @@ from unittest import mock
 import numpy as np
 import pytest
 
-from maxtext.inference.offline_engine import InputData, OfflineEngine
+from maxtext.common.gcloud_stub import is_decoupled
+
+pytestmark = [pytest.mark.cpu_only, pytest.mark.external_serving]
+
+# offline_engine raises on import when decoupled and jetstream is stubbed.
+if not is_decoupled():
+  from maxtext.inference.offline_engine import InputData, OfflineEngine
+else:
+  InputData = OfflineEngine = None  # Never used: the external_serving marker deselects these tests.
 
 
-@pytest.mark.cpu_only
 class PadDataTest(unittest.TestCase):
   """OfflineEngine.pad_data pads each prompt to a prefill length.
   Command: pytest tests/unit/offline_engine_pad_data_test.py
