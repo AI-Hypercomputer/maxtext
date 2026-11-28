@@ -345,6 +345,38 @@ class NgramFilterTest(unittest.TestCase):
     m = found[0]
     self.assertEqual(arr[m.start : m.end].tolist(), [1, 2] * m.times)
 
+  def test_run_ending_the_array_keeps_its_true_repeat_count(self):
+    # The repeating span ends exactly at the last token, so there is no following
+    # non-repeating row to stop the span. A 31-token run is one short of the 32
+    # `is_clean_instance` threshold, so the instance must stay clean; reporting one
+    # extra repeat here would mask a legitimate instance out of the loss.
+    # The instance also starts with the repeated token: that is what made the
+    # missing trailing sentinel row wrap around to row 0 and extend the span.
+    rng = np.random.default_rng(0)
+    head = rng.integers(100, 30_000, size=2048 - 31, dtype=np.uint32)
+    head[0] = 7
+    arr = np.concatenate([head, np.full(31, 7, dtype=np.uint32)])
+
+    matches = [m for m in find_periodic_sequences(arr, max_period=13) if m.period == 1]
+    self.assertEqual(len(matches), 1, matches)
+    run = matches[0]
+    self.assertEqual((run.start, run.end, run.times), (2048 - 31, 2048, 31))
+    self.assertTrue(is_clean_instance(arr))
+
+  def test_spans_stay_inside_the_array_and_match_their_times(self):
+    # A period that divides the length leaves no trailing partial row; the span
+    # reported for it must still lie inside the array and hold times*period tokens.
+    for length, period in ((93, 3), (40, 5), (2048, 8)):
+      unit = (np.arange(period, dtype=np.uint32) * 7 + 3) % 1000 + 1
+      arr = np.tile(unit, length // period)
+      for m in find_periodic_sequences(arr, max_period=13):
+        self.assertGreaterEqual(m.start, 0, (length, period, m))
+        self.assertLessEqual(m.end, len(arr), (length, period, m))
+        self.assertEqual(m.times, (m.end - m.start) // m.period, (length, period, m))
+        # The span may end mid-period, so compare the first times*period tokens.
+        block = arr[m.start : m.start + m.period].tolist()
+        self.assertEqual(arr[m.start : m.start + m.times * m.period].tolist(), block * m.times, (length, period, m))
+
 
 if __name__ == "__main__":
   unittest.main()
