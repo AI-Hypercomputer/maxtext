@@ -226,8 +226,77 @@ def add_extra_tokens_for_ming(tokens: np.ndarray, processor_output) -> np.ndarra
 
 
 def get_dummy_audio_shape_for_init_ming(config):
-  """(batch, T_mel, n_mels) for one full whisper chunk."""
-  return (config.micro_batch_size_to_train_on, config.ming_audio_chunk_size, config.num_mel_bins_for_audio)
+  """(batch, T_mel, n_mels): the static per-example mel length used by the training pipeline."""
+  return (config.micro_batch_size_to_train_on, config.audio_max_mel_frames, config.num_mel_bins_for_audio)
+
+
+# ---------------------------------------------------------------------------
+# Training (SFT) audio preprocessing
+# ---------------------------------------------------------------------------
+
+
+def decode_audio(audio) -> tuple[np.ndarray, int]:
+  """Decodes one dataset audio value to (waveform [N] or [C, N] float32, sample_rate).
+
+  Accepts the HF `Audio` feature dict (`{"bytes": ..., "path": ...}` or `{"array": ..., "sampling_rate": ...}`),
+  raw encoded bytes (wav/flac/ogg...), or a file path.
+  """
+  import io  # pylint: disable=import-outside-toplevel
+  import soundfile as sf  # pylint: disable=import-outside-toplevel
+
+  if isinstance(audio, dict):
+    if audio.get("array") is not None:
+      return np.asarray(audio["array"], dtype=np.float32), int(audio["sampling_rate"])
+    if audio.get("bytes") is not None:
+      audio = audio["bytes"]
+    else:
+      audio = audio["path"]
+  if isinstance(audio, (bytes, bytearray, memoryview)):
+    samples, sample_rate = sf.read(io.BytesIO(bytes(audio)), dtype="float32", always_2d=True)
+  elif isinstance(audio, str):
+    samples, sample_rate = sf.read(audio, dtype="float32", always_2d=True)
+  else:
+    raise TypeError(f"Unsupported audio value of type {type(audio)}")
+  return samples.T, int(sample_rate)
+
+
+def preprocess_audio_for_training_ming(audio, config) -> MingPreprocessorOutput:
+  """Static-shape audio features for one SFT example.
+
+  The waveform is converted to mono 16 kHz and zero-padded / truncated to `config.audio_max_mel_frames`
+  mel frames (100 frames per second), so every example yields `audio_values` of shape
+  `[1, audio_max_mel_frames, n_mels]` and batches compile once. Zero-padding the *waveform* mirrors
+  whisper's own 30 s padding, so the padded frames are ordinary "silence" to the encoder.
+
+  `audio_lengths` holds the number of `<|audio_pad|>` placeholders to emit for the *unpadded* audio
+  (`get_num_audio_tokens(true_mel_length)`), exactly what the HF processor would produce at inference.
+  The encoder still outputs embeddings for the padded tail; `merge_mm_embeddings` assigns the i-th
+  projected embedding to the i-th placeholder and drops the surplus, so the decoder never sees the
+  padded tail. (Future: bucketing / dynamic packing can shrink the padding instead.)
+  """
+  waveform, sample_rate = decode_audio(audio)
+  if sample_rate != SAMPLE_RATE:
+    waveform = resample(waveform, sample_rate, SAMPLE_RATE)
+  if waveform.ndim == 2:
+    waveform = waveform.mean(axis=0)
+  waveform = waveform.astype(np.float32)
+
+  max_frames = int(config.audio_max_mel_frames)
+  max_samples = max_frames * HOP_LENGTH
+  true_samples = min(waveform.shape[0], max_samples)
+  # whisper's log-mel yields floor(N / hop) frames (centered STFT, last frame dropped).
+  true_mel_length = max(1, true_samples // HOP_LENGTH)
+  waveform = waveform[:max_samples]
+  if waveform.shape[0] < max_samples:
+    waveform = np.pad(waveform, (0, max_samples - waveform.shape[0]))
+
+  mel = log_mel_spectrogram(waveform)[:max_frames]  # [max_frames, n_mels]
+  out = MingPreprocessorOutput()
+  out.num_audios = 1
+  out.audio_values = mel[None]
+  out.audio_mask = (np.arange(max_frames) < true_mel_length).astype(np.int32)[None]
+  out.audio_lengths = np.asarray([get_num_audio_tokens(true_mel_length)], dtype=np.int32)
+  return out
 
 
 # -----------------------------------------

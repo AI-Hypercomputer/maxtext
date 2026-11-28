@@ -104,6 +104,7 @@ class EncoderKwargs(TypedDict, total=False):
   encoder_videos: Any
   encoder_video_masks: Any
   encoder_video_grid_thw: Any
+  encoder_audios: Any
 
 
 VertexTensorboardManager, _vertex_tb_is_stub = vertex_tensorboard_modules()
@@ -226,6 +227,9 @@ def loss_fn(model, config, data, dropout_rng, params, sparsity_state=None, is_tr
         "encoder_images": encoder_images,
         "encoder_image_masks": encoder_image_masks,
     }
+  # Audio SFT batches carry static-shape mel features under "audios" (see audio_sft_preprocessing_pipeline).
+  if config.use_audio and "audios" in data:
+    encoder_kwargs["encoder_audios"] = data["audios"]
   # Flax NNX model: forward pass, then pop Intermediates sown during it.
   logits = model(
       decoder_input_tokens=data["inputs"],
