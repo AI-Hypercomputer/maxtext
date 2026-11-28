@@ -109,12 +109,15 @@ class TunixMaxTextAdapter(nnx.Module):
   ):
     super().__init__()
     self.base = base_model
-    self._vllm_weight_mapping = VllmWeightMapping(
-        self.base.config.model_name,
-        HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
-        use_standalone_mappings,
-    )
     self.use_no_op_mappings = use_no_op_mappings
+    if use_no_op_mappings:
+      self._vllm_weight_mapping = None
+    else:
+      self._vllm_weight_mapping = VllmWeightMapping(
+          self.base.config.model_name,
+          HF_MODEL_CONFIGS[self.base.config.model_name].to_dict(),
+          use_standalone_mappings,
+      )
     # Lowest-priority source of segment ids, used only when Tunix supplies
     # neither `segment_ids` nor an `attention_mask` (`__call__` has the order).
     # Synthesizes them per token -- 1 for non-pad, 0 for pad -- so MaxText's
@@ -176,25 +179,25 @@ class TunixMaxTextAdapter(nnx.Module):
     )
 
   def to_hf_mappings(self):
-    if self.use_no_op_mappings:
+    if self.use_no_op_mappings or self._vllm_weight_mapping is None:
       return {}
 
     return self._vllm_weight_mapping.to_hf_mapping()
 
   def to_hf_transpose_keys(self):
-    if self.use_no_op_mappings:
+    if self.use_no_op_mappings or self._vllm_weight_mapping is None:
       return {}
 
     return self._vllm_weight_mapping.to_hf_transpose_keys()
 
   def to_hf_hook_fns(self):
-    if self.use_no_op_mappings:
+    if self.use_no_op_mappings or self._vllm_weight_mapping is None:
       return {}
 
     return self._vllm_weight_mapping.to_hf_hook_fns()
 
   def lora_to_hf_mappings(self):
-    if self.use_no_op_mappings:
+    if self.use_no_op_mappings or self._vllm_weight_mapping is None:
       return {}
 
     return self._vllm_weight_mapping.lora_to_hf_mappings()

@@ -16,10 +16,12 @@
 
 import json
 import os
+import pathlib
 import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
+from absl.testing import absltest
 import datasets
 
 from maxtext.input_pipeline import instruction_data_processing
@@ -54,6 +56,51 @@ class InstructionDataProcessingTest(unittest.TestCase):
             "TEMPLATE": ("<start_of_turn>user\n{system_prompt}\n\n{question}<end_of_turn>\n<start_of_turn>model"),
         },
     )
+
+  def test_load_templates_support_absolute_and_cwd_relative_paths(self):
+    """Data and chat template loaders resolve absolute and CWD-relative paths."""
+    with tempfile.TemporaryDirectory() as tmpdir:
+      sub = os.path.join(tmpdir, "nested")
+      os.makedirs(sub)
+      data_file = os.path.join(sub, "data_tmpl.json")
+      chat_file = os.path.join(sub, "chat_tmpl.jinja")
+      with open(data_file, "w", encoding="utf-8") as f:
+        json.dump({"TEMPLATE": "{question}"}, f)
+      with open(chat_file, "w", encoding="utf-8") as f:
+        f.write("{{ messages[0]['content'] }}")
+
+      self.assertEqual(
+          instruction_data_processing.load_data_template_from_file(data_file),
+          {"TEMPLATE": "{question}"},
+      )
+      self.assertEqual(
+          instruction_data_processing.load_data_template_from_file(pathlib.Path(data_file)),
+          {"TEMPLATE": "{question}"},
+      )
+      self.assertEqual(
+          instruction_data_processing.load_chat_template_from_file(chat_file),
+          "{{ messages[0]['content'] }}",
+      )
+      self.assertEqual(
+          instruction_data_processing.load_chat_template_from_file(pathlib.Path(chat_file)),
+          "{{ messages[0]['content'] }}",
+      )
+
+      orig_cwd = os.getcwd()
+      try:
+        os.chdir(tmpdir)
+        rel_data = os.path.join("nested", "data_tmpl.json")
+        rel_chat = os.path.join("nested", "chat_tmpl.jinja")
+        self.assertEqual(
+            instruction_data_processing.load_data_template_from_file(rel_data),
+            {"TEMPLATE": "{question}"},
+        )
+        self.assertEqual(
+            instruction_data_processing.load_chat_template_from_file(rel_chat),
+            "{{ messages[0]['content'] }}",
+        )
+      finally:
+        os.chdir(orig_cwd)
 
   def test_math_qa_formatting_with_prompt_completion_template(self):
     self._run_math_qa_test(
@@ -259,4 +306,4 @@ class TestDataProcessingUtils(unittest.TestCase):
 
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

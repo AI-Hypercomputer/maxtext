@@ -591,5 +591,20 @@ class TunixAdapterChunkedLogpsTest(unittest.TestCase):
       np.testing.assert_allclose(g1, g0, rtol=1e-5, atol=1e-5)
 
 
+class TunixAdapterNoOpMappingsTest(unittest.TestCase):
+  """Tests use_no_op_mappings=True skips HF_MODEL_CONFIGS lookup."""
+
+  def test_no_op_mappings_does_not_require_hf_model_config(self):
+    base = _CallableStubBase()
+    base.config = SimpleNamespace(model_name="_unregistered_direct_sync_model")
+    self.assertNotIn(base.config.model_name, tunix_adapter_module.HF_MODEL_CONFIGS)
+    adapter = TunixMaxTextAdapter(base_model=base, use_no_op_mappings=True)
+    self.assertIsNone(adapter._vllm_weight_mapping)  # pylint: disable=protected-access
+    self.assertEqual(adapter.to_hf_mappings(), {})
+    self.assertEqual(adapter.to_hf_transpose_keys(), {})
+    self.assertEqual(adapter.to_hf_hook_fns(), {})
+    self.assertEqual(adapter.lora_to_hf_mappings(), {})
+
+
 if __name__ == "__main__":
   unittest.main()

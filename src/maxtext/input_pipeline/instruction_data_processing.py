@@ -22,16 +22,24 @@ import re
 from maxtext.utils import max_logging
 
 
-def load_data_template_from_file(template_path):
-  """Loads a data template from a file."""
+def _resolve_template_path(template_path):
+  """Resolves an existing absolute/CWD-relative or repo-relative path."""
   if not template_path:
     return None
-
+  if os.path.isfile(template_path):
+    return os.fspath(template_path)
   current_dir = os.path.dirname(os.path.abspath(__file__))
   repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
-  template_full_path = os.path.join(repo_root, template_path)
+  candidate = os.path.join(repo_root, template_path)
+  if os.path.isfile(candidate):
+    return candidate
+  return None
 
-  if not os.path.isfile(template_full_path):
+
+def load_data_template_from_file(template_path):
+  """Loads a data template from a file."""
+  template_full_path = _resolve_template_path(template_path)
+  if not template_full_path:
     return None
 
   if template_full_path.endswith(".json"):
@@ -46,14 +54,8 @@ def load_data_template_from_file(template_path):
 
 def load_chat_template_from_file(template_path):
   """Loads a chat template from a file."""
-  if not template_path:
-    return None
-
-  current_dir = os.path.dirname(os.path.abspath(__file__))
-  repo_root = os.path.abspath(os.path.join(current_dir, "..", ".."))
-  template_full_path = os.path.join(repo_root, template_path)
-
-  if not os.path.isfile(template_full_path):
+  template_full_path = _resolve_template_path(template_path)
+  if not template_full_path:
     return None
 
   if template_full_path.endswith((".jinja", ".j2", ".txt")):
