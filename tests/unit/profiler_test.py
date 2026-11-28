@@ -19,8 +19,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from maxtext.configs import components
 from maxtext.configs import pyconfig
-from maxtext.configs import types
 from maxtext.common import profiler
 from tests.utils.test_helpers import get_test_config_path
 
@@ -70,7 +70,7 @@ class ProfilerTest(unittest.TestCase):
 
       # Verify advanced_configuration was populated
       expected_advanced_config = {
-          "tpu_power_trace_level": types.XProfTPUPowerTraceMode.POWER_TRACE_NORMAL,
+          "tpu_power_trace_level": components.XProfTPUPowerTraceMode.POWER_TRACE_NORMAL,
           "e2e_enable_fw_throttle_event": True,
           "e2e_enable_fw_power_level_event": True,
           "e2e_enable_fw_thermal_event": True,
@@ -103,7 +103,7 @@ class ProfilerTest(unittest.TestCase):
       self.assertEqual(kwargs["profiler_options"], prof.profiling_options)
       self.assertEqual(
           prof.profiling_options.advanced_configuration["tpu_power_trace_level"],
-          types.XProfTPUPowerTraceMode.POWER_TRACE_SPI,
+          components.XProfTPUPowerTraceMode.POWER_TRACE_SPI,
       )
 
   # These periodic proilfer tests can run on any platform (cpu, gpu or tpu)

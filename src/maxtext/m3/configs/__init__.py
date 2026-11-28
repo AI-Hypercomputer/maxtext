@@ -12,15 +12,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""m3 configuration: slim Pydantic types plus YAML defaults.
+"""m3 configuration types.
 
-Planned contents:
-  * `config.py` — `ModelConfig`, `TransformConfig`, `RootConfig`, `load_config`.
-  * `base.yml` — base defaults that model YAMLs override.
+Modules:
+  * `training_config.py` — frozen Pydantic `TrainingConfig` (mesh, optimizer,
+    checkpoint, data, transforms) for LLM pre-training, plus
+    `validate_training_config`. Model architecture lives in
+    `maxtext.m3.models.model_config.ModelConfig`.
+  * `config.py`, `diffusers_config.py` — YAML-driven configs for the diffusion
+    pipelines (`maxtext/inference/sample.py`).
+  * `glm5_3_flash_config.py` — GLM-5 runtime config and sharding rules.
 
-m3 configs are intentionally small and additive: fields are added as
-architectures require them, not preemptively. Interop with the legacy
-`maxtext.configs.pyconfig.HyperParameters` surface (required by the training
-engine and the RL path) is handled by a separate bridge, not by widening these
-types.
+Keep this package free of package-level imports so config types stay cheap to
+import.
 """
