@@ -97,6 +97,20 @@ from maxtext.utils.model_creation_utils import get_rollout_kwargs_for_parallelis
 _RECURRENT_ROLLOUT_DECODER_BLOCKS = frozenset((DecoderBlockType.QWEN3_NEXT, DecoderBlockType.QWEN3_5))
 
 
+def rollout_engine_dtype(trainer_config: Any) -> str:
+  """Returns the dtype the vLLM rollout engines are created with.
+
+  This is `rollout_weight_dtype` when set and `weight_dtype` otherwise, the same
+  dtype the trainer->rollout weight sync converts to. Keying the engine on
+  `weight_dtype` alone made float32 master weights also create float32 engines
+  (float32 decode weights and KV cache) even with `rollout_weight_dtype=bfloat16`.
+  """
+  rollout_dtype = getattr(trainer_config, "rollout_weight_dtype", "") or ""
+  if rollout_dtype:
+    return str(getattr(rollout_dtype, "value", rollout_dtype))
+  return trainer_config.weight_dtype.value
+
+
 def rollout_prefix_caching_enabled(trainer_config: Any) -> bool:
   """Returns whether vLLM prefix caching is safe for this rollout model.
 
@@ -481,7 +495,7 @@ def create_rl_components(  # pylint: disable=too-many-positional-arguments
       "enable_expert_parallel": sampler_config.enable_expert_parallel,
       "enable_prefix_caching": rollout_prefix_caching_enabled(trainer_config),
       # Ensures vLLM model initializes with correct dtype (not float32 default)
-      "dtype": trainer_config.weight_dtype.value,
+      "dtype": rollout_engine_dtype(trainer_config),
   }
   if trainer_config.vllm_block_size is not None:
     # Pin the KV-cache page size; left unset, the backend derives it from the

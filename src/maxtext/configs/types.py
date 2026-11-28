@@ -5060,7 +5060,11 @@ class VLLM(BaseModel):
   )
   rollout_weight_dtype: str = Field(
       "",
-      description="Target weight dtype for trainer->rollout weight conversion. When empty, defaults to weight_dtype.",
+      description=(
+          "Target weight dtype for trainer->rollout weight conversion, and the dtype the vLLM rollout engines are"
+          " created with. When empty, defaults to weight_dtype; set 'bfloat16' to keep float32 master weights while"
+          " sampling in bfloat16."
+      ),
   )
   weight_sync_debug: bool = Field(
       False,
