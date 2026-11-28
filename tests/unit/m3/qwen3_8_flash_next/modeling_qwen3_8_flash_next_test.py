@@ -1606,7 +1606,7 @@ def _get_mini_config(
     weight_dtype: str = "float32",
     **kwargs,
 ):
-  """Builds a test config initialized from qwen3.8-flash-next-mini.yml."""
+  """Builds a test config initialized for `qwen3.8-flash-next-mini`."""
   return pyconfig.initialize(
       [None, f"{maxtext_globals.MAXTEXT_CONFIGS_DIR}/base.yml"],
       model_name="qwen3.8-flash-next-mini",
