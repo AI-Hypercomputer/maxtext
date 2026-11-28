@@ -22,6 +22,8 @@ from jax import numpy as jnp
 from jax.experimental import pallas as pl
 from jax.experimental.pallas import tpu as pltpu
 from jax.sharding import Mesh
+from jax.sharding import NamedSharding
+from jax.sharding import PartitionSpec
 import numpy as np
 from maxtext.common.common_types import MODEL_MODE_AUTOREGRESSIVE
 from maxtext.configs import pyconfig
@@ -377,6 +379,12 @@ class MaxTextForCausalLM(nnx.Module):
 
       if isinstance(res, tuple) and len(res) == 3:
         hidden, layer_kv_caches, expert_indices = res
+        if expert_indices is not None:
+          # Replicate across mesh for multi-host device_get() in tpu_runner.
+          expert_indices = jax.lax.with_sharding_constraint(
+              expert_indices,
+              NamedSharding(self.mesh, PartitionSpec()),
+          )
       else:
         hidden, layer_kv_caches = res
 
