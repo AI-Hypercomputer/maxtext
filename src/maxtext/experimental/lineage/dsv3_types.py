@@ -58,6 +58,39 @@ def _resolve_shardings(
   return jax.tree.map(_to_sharding, out_shardings)
 
 
+def _unshard_last_axis(
+    sharding: ShardingType,
+    ndim: int,
+) -> jax.sharding.NamedSharding | None:
+  """Returns `sharding` with its trailing axis replicated when sharded."""
+  if not isinstance(sharding, jax.sharding.NamedSharding):
+    return None
+  if sharding.mesh.empty:
+    return None
+  if len(sharding.spec) < ndim or sharding.spec[ndim - 1] is None:
+    return None
+  spec = list(sharding.spec)
+  spec[ndim - 1] = None
+  return sharding.update(spec=spec)
+
+
+def _permute_rope_channels(
+    w: jax.Array,
+    prefix_dim: int,
+    sharding: ShardingType,
+) -> jax.Array:
+  """Deinterleaves trailing RoPE channels while preserving `sharding`."""
+  if (unsharded := _unshard_last_axis(sharding, w.ndim)) is not None:
+    w = jax.reshard(w, unsharded)
+  nope = w[..., :prefix_dim]
+  rope = w[..., prefix_dim:]
+  rope_perm = jnp.concatenate([rope[..., 0::2], rope[..., 1::2]], axis=-1)
+  w = jnp.concatenate([nope, rope_perm], axis=-1)
+  if unsharded is not None and sharding is not None:
+    w = jax.reshard(w, sharding)
+  return w
+
+
 @jax.tree_util.register_dataclass
 @dataclasses.dataclass
 class DSv3RouterAux(Generic[T]):
@@ -298,25 +331,31 @@ def init_dsv3_mla_weights(
     subkeys = jax.random.split(rng, 7)
     k_init = functools.partial(kernel_init, dtype=weight_dtype)
     s_init = functools.partial(scale_init, dtype=weight_dtype)
-    q_up = k_init(
-        subkeys[1],
-        add_layer_dim((cq_dim, num_query_heads, qk_head_dim + rope_head_dim)),
-        out_sharding=out_shardings.q_up,
+    q_up_shape = add_layer_dim(
+        (
+            cq_dim,
+            num_query_heads,
+            qk_head_dim + rope_head_dim,
+        )
     )
-    q_nope = q_up[..., :qk_head_dim]
-    q_rope = q_up[..., qk_head_dim:]
-    q_rope_perm = jnp.concatenate([q_rope[..., 0::2], q_rope[..., 1::2]], axis=-1)
-    q_up = jnp.concatenate([q_nope, q_rope_perm], axis=-1)
-
-    kv_down = k_init(
-        subkeys[3],
-        add_layer_dim((emb_dim, ckv_dim + rope_head_dim)),
-        out_sharding=out_shardings.kv_down,
+    q_up = _permute_rope_channels(
+        k_init(
+            subkeys[1],
+            q_up_shape,
+            out_sharding=out_shardings.q_up,
+        ),
+        qk_head_dim,
+        out_shardings.q_up,
     )
-    kv_comp = kv_down[..., :ckv_dim]
-    k_rope = kv_down[..., ckv_dim:]
-    k_rope_perm = jnp.concatenate([k_rope[..., 0::2], k_rope[..., 1::2]], axis=-1)
-    kv_down = jnp.concatenate([kv_comp, k_rope_perm], axis=-1)
+    kv_down = _permute_rope_channels(
+        k_init(
+            subkeys[3],
+            add_layer_dim((emb_dim, ckv_dim + rope_head_dim)),
+            out_sharding=out_shardings.kv_down,
+        ),
+        ckv_dim,
+        out_shardings.kv_down,
+    )
 
     kv_up = k_init(
         subkeys[4],
@@ -512,18 +551,26 @@ def init_dsv3_moe_routed_expert_weights(
     linear_shape = (
         (num_experts * expert_hidden_dim, emb_dim) if flat_routed else (num_experts, expert_hidden_dim, emb_dim)
     )
+    gate_full_shape = add_layer_dim(gate_shape)
     gate_0 = k_init(
         subkeys[0],
-        add_layer_dim(gate_shape),
+        gate_full_shape,
         out_sharding=out_shardings.gate,
     )
     gate_1 = k_init(
         subkeys[1],
-        add_layer_dim(gate_shape),
+        gate_full_shape,
         out_sharding=out_shardings.gate,
     )
+    unsharded = _unshard_last_axis(out_shardings.gate, len(gate_full_shape))
+    if unsharded is not None:
+      gate_0 = jax.reshard(gate_0, unsharded)
+      gate_1 = jax.reshard(gate_1, unsharded)
+    gate = jnp.concatenate([gate_0, gate_1], axis=-1)
+    if unsharded is not None and out_shardings.gate is not None:
+      gate = jax.reshard(gate, out_shardings.gate)
     return DSv3MoERoutedExpertWeightsPytree[ArrayType](
-        gate=jnp.concatenate([gate_0, gate_1], axis=-1),
+        gate=gate,
         linear=k_init(
             subkeys[2],
             add_layer_dim(linear_shape),
