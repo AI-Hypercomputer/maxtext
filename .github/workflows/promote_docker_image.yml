@@ -19,6 +19,8 @@
 #      verified-e2e-<tag>, failed-e2e-<tag>, or unknown-e2e-<tag>.
 #    - If E2E passed on an image from the daily build that also passed CI (verified-ci-<tag>),
 #      it promotes the image (and its nightly counterpart) by tagging it with the latest tag.
+#    - On Sundays the daily build skips E2E, so a passing scheduled RC run promotes the daily
+#      images built from the same commit instead.
 # 2. Manual workflow dispatch (workflow_dispatch):
 #    - Forcefully promotes a Docker image when Airflow E2E tests could not run (e.g. due to capacity).
 
@@ -45,8 +47,13 @@ jobs:
   handle_result:
     name: Handle Airflow DAG Result
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
     outputs:
       e2e_state: ${{ steps.report.outputs.e2e_state }}
+      caller_workflow: ${{ steps.caller.outputs.caller_workflow }}
+      caller_event: ${{ steps.caller.outputs.caller_event }}
     steps:
       - name: Report DAG result
         id: report
@@ -83,6 +90,21 @@ jobs:
               ;;
           esac
 
+      - name: Look up the workflow run that requested the E2E tests
+        id: caller
+        if: github.event_name == 'repository_dispatch' && github.event.client_payload.github_run_id != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CALLER_RUN_ID: ${{ github.event.client_payload.github_run_id }}
+        run: |
+          # On an error, gh prints the error JSON to stdout, so write the outputs only if the lookup works.
+          if caller=$(gh api "repos/${GITHUB_REPOSITORY}/actions/runs/${CALLER_RUN_ID}" \
+              --jq '"caller_workflow=\(.path)", "caller_event=\(.event)"'); then
+            echo "${caller}" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "Could not look up workflow run ${CALLER_RUN_ID}, so an RC run won't promote the daily images."
+          fi
+
       - name: Report manual trigger
         if: github.event_name == 'workflow_dispatch'
         env:
@@ -107,6 +129,8 @@ jobs:
         env:
           E2E_STATE: ${{ needs.handle_result.outputs.e2e_state || 'success' }}
           PAYLOAD_IMAGE: ${{ github.event.client_payload.docker_image || inputs.docker_image }}
+          CALLER_WORKFLOW: ${{ needs.handle_result.outputs.caller_workflow }}
+          CALLER_EVENT: ${{ needs.handle_result.outputs.caller_event }}
         run: |
           tag_image() {
             local img="$1"
@@ -132,6 +156,34 @@ jobs:
             fi
           }
 
+          # Prints the tags of image $1:$2, one per line (same lookup as release_pipeline.yml).
+          tags_of() {
+            local digest
+            digest=$(gcloud container images describe "$1:$2" --format='value(image_summary.digest)') || return 0
+            gcloud container images list-tags "$1" --filter="digest=\"${digest}\"" --flatten='tags[]' --format='value(tags)'
+          }
+
+          # Promotes the daily stable image built from the same commit as this RC image, found by
+          # their shared maxtext_<commit>_<date> tag.
+          promote_daily_image_from_rc() {
+            local daily commit_tag run_id
+            case "${IMAGE##*/}" in
+              tpu_pre_training) daily="${IMAGE%/*}/maxtext_jax_stable" ;;
+              tpu_post_training) daily="${IMAGE%/*}/maxtext_post_training_stable" ;;
+              *) return ;;
+            esac
+            commit_tag=$(tags_of "${IMAGE}" "${IMAGE_TAG}" | grep -m 1 -E '^maxtext_[0-9a-f]+_[0-9]{8}$' || true)
+            if [[ -n "${commit_tag}" ]]; then
+              run_id=$(tags_of "${daily}" "${commit_tag}" | grep -m 1 -E '^[0-9]+$' || true)
+            fi
+            if [[ -z "${run_id}" ]]; then
+              echo "No ${daily} image built from the same commit as ${IMAGE}:${IMAGE_TAG} could be found or listed. Skipping latest tag."
+              return
+            fi
+            local IMAGE="${daily}" IMAGE_TAG="${run_id}"  # Read by promote_to_latest and tag_image.
+            promote_to_latest
+          }
+
           # Both Airflow and manual runs pass the full image URI (<image>:<tag>).
           IMAGE="${PAYLOAD_IMAGE%:*}"
           IMAGE_TAG="${PAYLOAD_IMAGE##*:}"
@@ -148,9 +200,11 @@ jobs:
               gcloud container images untag "${IMAGE}:failed-e2e-${IMAGE_TAG}" --quiet 2>/dev/null || true
               gcloud container images untag "${IMAGE}:unknown-e2e-${IMAGE_TAG}" --quiet 2>/dev/null || true
               # Only daily-build images are promoted to latest. RC images already get latest-rc
-              # when they are built.
+              # when they are built; a scheduled (Sunday) RC run promotes the daily images instead.
               if [[ "$IMAGE" == *_stable ]]; then
                 promote_to_latest
+              elif [[ "${CALLER_WORKFLOW}" == .github/workflows/rc_release.yml && "${CALLER_EVENT}" == schedule ]]; then
+                promote_daily_image_from_rc
               fi
               ;;
             failed)
