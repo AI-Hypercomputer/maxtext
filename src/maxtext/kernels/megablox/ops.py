@@ -632,6 +632,44 @@ def _gmm_route(
   return "fork"
 
 
+@functools.lru_cache(maxsize=64)
+def _jitted_fused_gmm(
+    module_ids: tuple[int, int, int],
+    tile_m: int,
+    tile_k: int,
+    tile_n: int,
+    vmem_limit_bytes: int | None,
+    out_dtype: jnp.dtype,
+    maybe_quantize_lhs: bool,
+    zero_initialize: bool,
+    transpose_rhs: bool,
+):
+  """Returns a cached jax.jit-wrapped fused GMM callable so eager calls reuse the JIT cache."""
+  del module_ids
+  assert gmm_fuser is not None and tokamax_gmm_v2 is not None and op_fusion is not None
+  fuser_tiles = tokamax_gmm_v2.TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n, bucket_base=tile_m)
+
+  def _fused_gmm(lhs_arr, rhs_arr, gs, r_scale, g_offset, l_scale):
+    assert gmm_fuser is not None
+    return gmm_fuser.gmm_v2_fusible(
+        lhs=lhs_arr.reshape(lhs_arr.shape[0], -1),
+        rhs=rhs_arr,
+        group_sizes=gs,
+        rhs_scale=r_scale,
+        group_offset=g_offset,
+        lhs_scale=l_scale,
+        tile_info=fuser_tiles,
+        vmem_limit_bytes=vmem_limit_bytes,
+        preferred_element_type=out_dtype,
+        maybe_quantize_lhs=maybe_quantize_lhs,
+        zero_initialize=zero_initialize,
+        transpose_rhs=transpose_rhs,
+    )
+
+  return jax.jit(op_fusion.fuse(_fused_gmm))
+
+
+@quantizations.without_qwix_interception
 def _call_gmm_v2(
     *,
     lhs: jnp.ndarray,
@@ -661,27 +699,18 @@ def _call_gmm_v2(
     )
     if route == "fuser":
       assert not callable(tile_info)
-      vmem_limit_bytes = _tpu_vmem_limit_bytes()
-      fuser_tiles = _upstream_tiles(tile_info, up_gmm)
-      offset_1d = _group_offset_1d(group_offset)
-
-      def _fused_gmm(lhs_arr, rhs_arr, gs, r_scale, g_offset, l_scale):
-        return fuser.gmm_v2_fusible(
-            lhs=lhs_arr.reshape(lhs_arr.shape[0], -1),
-            rhs=rhs_arr,
-            group_sizes=gs,
-            rhs_scale=r_scale,
-            group_offset=g_offset,
-            lhs_scale=l_scale,
-            tile_info=fuser_tiles,
-            vmem_limit_bytes=vmem_limit_bytes,
-            preferred_element_type=preferred_element_type,
-            maybe_quantize_lhs=maybe_quantize_lhs,
-            zero_initialize=zero_initialize,
-            transpose_rhs=transpose_rhs,
-        )
-
-      out = fusion.fuse(_fused_gmm)(lhs, rhs, group_sizes, rhs_scale, offset_1d, lhs_scale)
+      fn = _jitted_fused_gmm(
+          (id(fuser), id(up_gmm), id(fusion)),
+          int(tile_info.tile_m),
+          int(tile_info.tile_k),
+          int(tile_info.tile_n),
+          _tpu_vmem_limit_bytes(),
+          jnp.dtype(preferred_element_type),
+          bool(maybe_quantize_lhs),
+          bool(zero_initialize),
+          bool(transpose_rhs),
+      )
+      out = fn(lhs, rhs, group_sizes, rhs_scale, _group_offset_1d(group_offset), lhs_scale)
       return out.reshape(out.shape[0], out.shape[1] // 128, 128) if out_is_3d else out
     if route == "upstream":
       assert not callable(tile_info)
@@ -1531,6 +1560,39 @@ def _tgmm_route(
   return "upstream"
 
 
+@functools.lru_cache(maxsize=64)
+def _jitted_fused_tgmm(
+    module_ids: tuple[int, int, int],
+    num_actual_groups: int,
+    tile_m: int,
+    tile_k: int,
+    tile_n: int,
+    vmem_limit_bytes: int | None,
+    out_dtype: jnp.dtype,
+):
+  """Returns a cached jax.jit-wrapped fused TGMM callable so eager calls reuse the JIT cache."""
+  del module_ids
+  assert gmm_fuser is not None and tokamax_gmm_v2 is not None and op_fusion is not None
+  fuser_tiles = tokamax_gmm_v2.TileSizes(tile_m=tile_m, tile_k=tile_k, tile_n=tile_n, bucket_base=tile_m)
+
+  def _fused_tgmm(lhs_arr, rhs_arr, gs, r_scale, g_offset):
+    assert gmm_fuser is not None
+    return gmm_fuser.tgmm_v2_fusible(
+        lhs=_to_2d(lhs_arr),
+        rhs=_to_2d(rhs_arr),
+        group_sizes=gs,
+        num_actual_groups=num_actual_groups,
+        rhs_scale=r_scale,
+        group_offset=g_offset,
+        tile_info=fuser_tiles,
+        vmem_limit_bytes=vmem_limit_bytes,
+        preferred_element_type=out_dtype,
+    )
+
+  return jax.jit(op_fusion.fuse(_fused_tgmm))
+
+
+@quantizations.without_qwix_interception
 def _call_tgmm_v2(
     *,
     lhs: jnp.ndarray,
@@ -1562,25 +1624,16 @@ def _call_tgmm_v2(
         n_dim=rhs.shape[1] * rhs.shape[2] if rhs.ndim == 3 else None,
     )
     if route == "fuser":
-      vmem_limit_bytes = _tpu_vmem_limit_bytes()
-      fuser_tiles = _upstream_tiles(explicit_tiles, up_gmm)
-      offset_1d = _group_offset_1d(group_offset)
-      out_dtype = jnp.dtype(preferred_element_type)
-
-      def _fused_tgmm(lhs_arr, rhs_arr, gs, r_scale, g_offset):
-        return fuser.tgmm_v2_fusible(
-            lhs=_to_2d(lhs_arr),
-            rhs=_to_2d(rhs_arr),
-            group_sizes=gs,
-            num_actual_groups=num_actual_groups,
-            rhs_scale=r_scale,
-            group_offset=g_offset,
-            tile_info=fuser_tiles,
-            vmem_limit_bytes=vmem_limit_bytes,
-            preferred_element_type=out_dtype,
-        )
-
-      return fusion.fuse(_fused_tgmm)(lhs, rhs, group_sizes, rhs_scale, offset_1d)
+      fn = _jitted_fused_tgmm(
+          (id(fuser), id(up_gmm), id(fusion)),
+          int(num_actual_groups),
+          int(explicit_tiles.tile_m),
+          int(explicit_tiles.tile_k),
+          int(explicit_tiles.tile_n),
+          _tpu_vmem_limit_bytes(),
+          jnp.dtype(preferred_element_type),
+      )
+      return fn(lhs, rhs, group_sizes, rhs_scale, _group_offset_1d(group_offset))
     if route == "upstream":
       return up_tgmm.tgmm_v2(
           lhs=_to_2d(lhs),
