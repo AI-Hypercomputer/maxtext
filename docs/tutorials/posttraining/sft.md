@@ -144,6 +144,14 @@ To customize the tokenizer's chat formatting (e.g., adding special tokens like `
 - **`chat_template`**: Use this config to specify a custom Jinja2 template string directly.
 - **`chat_template_path`**: Path to a custom Jinja2 template file (e.g., `.jinja`) or a JSON file containing the template.
 - **`use_chat_template=True`**: Enables chat template formatting.
+- **`sft_label_mode`**: Controls how completion loss masks are derived when `sft_train_on_completion_only=true`. The default `"generation_blocks"` uses `{% generation %}` / `{% endgeneration %}` ranges directly when present in the template (falling back to prefix comparison if a turn terminator sits outside the block); set `"prefix"` to derive completion boundaries solely by whole-conversation prefix comparisons and boundary probes.
+
+### Whole-Conversation Masking, Reasoning Turns, and Document Replay
+
+MaxText renders each conversation once as a whole (rather than turn by turn), preserving single-conversation semantics such as one leading BOS token, one default system prompt, one final EOS token, and masked intermediate roles such as `tool` or trailing `user` turns.
+
+- **Multi-turn reasoning traces**: Whole-conversation rendering follows the tokenizer chat template directly. Templates that strip historical thinking traces in multi-turn context (such as Qwen 3 or Gemma 4) omit reasoning blocks from non-final turns in both input and loss targets, while retaining full reasoning supervision on the final turn (and templates like DeepSeek-V4 keep stripped historical turns masked).
+- **`document` passthrough role**: For raw pretraining-style replay inside an SFT mixture, a single-message example `[{"role": "document", "content": "..."}]` bypasses the chat template, tokenizes `content` with `add_special_tokens=False`, appends `tokenizer.eos_token_id` (requires a non-`None` `eos_token_id`), and trains on all tokens. Note that on chat tokenizers whose `eos_token_id` is a turn closer rather than a document separator (for example `<|im_end|>` on Qwen 3), `document` rows still terminate with `eos_token_id` and omit BOS.
 
 ### Advanced: Custom Dataset Formatter (e.g., ShareGPT)
 
