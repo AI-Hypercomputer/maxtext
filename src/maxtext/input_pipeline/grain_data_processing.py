@@ -40,6 +40,7 @@ from maxtext.input_pipeline import input_pipeline_utils
 from maxtext.input_pipeline import grain_tokenizer
 from maxtext.input_pipeline import dpo_utils
 from maxtext.input_pipeline import multihost_dataloading
+from maxtext.input_pipeline import synthetic_data_processing
 from maxtext.input_pipeline._mmap_datasource import MMapDatasetConfig, get_mmap_dataset, get_mmap_npy_dataset
 from maxtext.multimodal import processor as mm_processor
 from maxtext.utils import gcs_utils
@@ -775,6 +776,7 @@ def vision_sft_preprocessing_pipeline(
     tokenize: bool = True,
     grain_worker_count: int = 0,
     grain_per_worker_buffer_size: int = 1,
+    is_training: bool = True,
 ):
   """Use grain pipeline to pre-process dataset and return iterators for multimodal SFT fine-tuning."""
   if config.grain_use_elastic_iterator:
@@ -877,7 +879,7 @@ def vision_sft_preprocessing_pipeline(
 
   dataset = dataset.map(input_pipeline_utils.ExtractImagesAndMasks())
 
-  batch_size = data_processing_utils.get_local_batch_size(config)
+  batch_size = data_processing_utils.get_local_batch_size(config, is_training=is_training)
   if config.use_tunix_gradient_accumulation:
     batch_size = batch_size // config.gradient_accumulation_steps
 
@@ -1270,3 +1272,63 @@ def make_grain_eval_iterator(
         elastic=False,
         count_shards=count_shards,
     )
+
+
+def _make_synthetic_multimodal_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    process_indices,
+    *,
+    is_training: bool,
+):
+  """Builds a deterministic Grain multimodal iterator backed by `SyntheticMultimodalDataSource`.
+
+  Each row is a pure function of `(seed, index)`, so sharding by strided slice
+  `shard_index::shard_count` across hosts is deterministic and avoids building a
+  shuffle permutation over `_NUM_SYNTHETIC_RECORDS`.
+  """
+  global_batch_size = config.global_batch_size_to_load if is_training else config.global_batch_size_to_load_eval
+  assert global_batch_size % global_mesh.size == 0, "Batch size should be divisible by number of global devices."
+
+  seed = config.data_shuffle_seed if is_training else config.data_shuffle_seed + 1
+  source = synthetic_data_processing.SyntheticMultimodalDataSource(config, seed=seed)
+  shard_index, shard_count = input_pipeline_utils.get_dataloading_shard(config, process_indices)
+  dataset = grain.MapDataset.source(source)[shard_index::shard_count]
+
+  image_column = source.modalities[0] if len(source.modalities) == 1 else list(source.modalities)
+  dataloader = vision_sft_preprocessing_pipeline(
+      dataset=dataset,
+      config=config,
+      data_columns=list(source.TEXT_COLUMNS),
+      image_column=image_column,
+      tokenize=True,
+      grain_worker_count=config.grain_worker_count if is_training else config.grain_worker_count_eval,
+      grain_per_worker_buffer_size=(
+          config.grain_per_worker_buffer_size if is_training else config.grain_per_worker_buffer_size_eval
+      ),
+      is_training=is_training,
+  )
+  return multihost_dataloading.MultiHostDataLoadIterator(
+      dataloader,
+      global_mesh,
+      generate_padding_batch=(config.generate_padding_batch_train if is_training else config.generate_padding_batch_eval),
+      expansion_loading_factor_for_grain=config.expansion_factor_real_data,
+  )
+
+
+def make_synthetic_multimodal_train_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    process_indices,
+):
+  """Creates the deterministic synthetic multimodal training iterator."""
+  return _make_synthetic_multimodal_iterator(config, global_mesh, process_indices, is_training=True)
+
+
+def make_synthetic_multimodal_eval_iterator(
+    config: ml_collections.ConfigDict,
+    global_mesh,
+    process_indices,
+):
+  """Creates the deterministic synthetic multimodal eval iterator."""
+  return _make_synthetic_multimodal_iterator(config, global_mesh, process_indices, is_training=False)
