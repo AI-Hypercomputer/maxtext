@@ -312,12 +312,19 @@ def _intersect_with_metadata(target, meta_tree):
   """Returns the sub-tree of `target` whose paths exist in checkpoint `meta_tree`."""
   if not hasattr(target, "items"):
     return target
+  if not hasattr(meta_tree, "items"):
+    return {}
   out = {}
   for k, v in target.items():
-    if hasattr(meta_tree, "items") and k in meta_tree:
-      sub_tree = _intersect_with_metadata(v, meta_tree[k])
-      if not hasattr(sub_tree, "items") or sub_tree:
-        out[k] = sub_tree
+    if k in meta_tree:
+      sub_meta = meta_tree[k]
+    elif isinstance(k, int) and str(k) in meta_tree:
+      sub_meta = meta_tree[str(k)]
+    else:
+      continue
+    sub_tree = _intersect_with_metadata(v, sub_meta)
+    if not hasattr(sub_tree, "items") or sub_tree:
+      out[k] = sub_tree
   return out
 
 
@@ -392,6 +399,15 @@ def _fuse_moe_halves_concatenated(wi_0, wi_1, wi_model, n_shards, num_slices=_FU
     )
     fused = _write_embed_slice(fused, part, start)
   return fused
+
+
+def _leaf_paths(tree, prefix=()):
+  """Yields the key path of every leaf in a nested mapping."""
+  if not hasattr(tree, "items"):
+    yield prefix
+    return
+  for k, v in tree.items():
+    yield from _leaf_paths(v, prefix + (k,))
 
 
 def _fuse_moe_weights(ckpt_tree, model_arrays_tree, config=None):
@@ -1394,11 +1410,7 @@ def from_pretrained(
       ):
         # structure of linen checkpoint: {'params': {'params': {'decoder': ...}}}
         is_nnx_checkpoint = False
-        target_for_restore = jax.tree.map(
-            lambda v: v[...],
-            param_state,
-            is_leaf=lambda n: isinstance(n, nnx.Variable),
-        )
+        target_for_restore = nnx.to_pure_dict(param_state)
 
         if config.use_m3_model:
           target_for_restore = m3_checkpoint.match_checkpoint_layer_names(
@@ -1411,12 +1423,29 @@ def from_pretrained(
         # Linen checkpoints keep non-trainable variables (e.g. `Tid2EidVar`) in
         # collections beside "params"; restore the model leaves they hold too.
         ckpt_collections = metadata.item_metadata.tree["params"]
-        item_to_restore = {"params": {"params": target_for_restore}}
+        item_to_restore = {
+            "params": {
+                "params": _intersect_with_metadata(target_for_restore, ckpt_collections["params"])
+                if len(ckpt_collections) > 1
+                else target_for_restore
+            }
+        }
         for col, col_meta in ckpt_collections.items():
           if col != "params":
             col_target = _intersect_with_metadata(target_for_restore, col_meta)
             if col_target:
               item_to_restore["params"][col] = col_target
+        if len(ckpt_collections) > 1:
+          # Every model leaf must come from some checkpoint collection; never silently keep init values.
+          restored_paths = set()
+          for col_target in item_to_restore["params"].values():
+            restored_paths.update(_leaf_paths(col_target))
+          missing_paths = sorted(set(_leaf_paths(target_for_restore)) - restored_paths, key=lambda p: tuple(map(str, p)))
+          if missing_paths:
+            raise ValueError(
+                f"Checkpoint {config.load_parameters_path} is missing {len(missing_paths)} model leaves, e.g."
+                f" {['/'.join(map(str, p)) for p in missing_paths[:5]]}"
+            )
         restore_args = {
             "params": {
                 col: _fix_restore_args_for_shape_mismatch(

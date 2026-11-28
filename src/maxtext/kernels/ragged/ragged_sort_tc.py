@@ -44,6 +44,7 @@ backward gradient) would see the uninitialized rows.
 
 import dataclasses
 import functools
+from typing import Callable
 
 import jax
 from jax.experimental import pallas as pl
@@ -64,6 +65,18 @@ class TcRouting:
   num_out_tokens: int = jax.tree.static()
   # slot_order / token_ids_sorted hold only this shard's [cap] window (start == 0), see `window_routing`.
   windowed: bool = jax.tree.static()
+
+
+@jax.tree_util.register_dataclass
+@dataclasses.dataclass(frozen=True)
+class LocalEpRouting:
+  """Compact post-EP-AG routing state safe to checkpoint across remat."""
+
+  tc_routing: TcRouting
+  group_sizes: jax.Array
+  raw_group_sizes: jax.Array
+  raw_count: jax.Array
+  local_expert_of_row: jax.Array
 
 
 def _to3d(x):
@@ -180,8 +193,21 @@ def _tokens_3d(blocks):
   return len(blocks) > 3 and bool(blocks[3])
 
 
+def _is_tpu(blocks):
+  """Explicit target-platform flag (`False` selects pure-JAX CPU fallback without calling `jax.default_backend()`)."""
+  return len(blocks) <= 4 or bool(blocks[4])
+
+
 def _gather(x2d, routing, cap, blocks, mask_padding):
   """TC ragged gather of the shard's sorted slots into a [cap, D] buffer ([cap, D // 128, 128] with keep_3d)."""
+  if not _is_tpu(blocks):
+    x3d = x2d if x2d.ndim == 3 else _to3d(x2d)
+    valid = jnp.arange(cap, dtype=jnp.int32) < routing.count
+    idx_slice = jax.lax.dynamic_slice_in_dim(jnp.pad(routing.token_ids_sorted, (0, cap)), routing.start, cap, axis=0)
+    safe_idx = jnp.where(valid, idx_slice, 0)
+    out = jnp.where(valid[:, None, None], x3d[safe_idx], jnp.zeros((), x3d.dtype))
+    return out if _keep_3d(blocks) else _to2d(out)
+
   block_size, flat_block = blocks[:2]
   if x2d.ndim == 3:
     x3d = x2d
@@ -213,6 +239,24 @@ def _gather(x2d, routing, cap, blocks, mask_padding):
 
 def _gather_reduce(buf2d, routing, num_out_tokens, topk, blocks):
   """TC ragged gather-reduce: sums each token's valid buffer rows into a [num_out_tokens, D] output."""
+  if not _is_tpu(blocks):
+    buf3d = buf2d if buf2d.ndim == 3 else _to3d(buf2d)
+    if num_out_tokens == 0 or buf3d.shape[0] == 0:
+      out = jnp.zeros((num_out_tokens, buf3d.shape[1], buf3d.shape[2]), buf3d.dtype)
+    else:
+      slot_iota = jnp.arange(routing.reduce_meta.tokens.shape[0], dtype=jnp.int32)
+      valid = (slot_iota < routing.count) & (routing.reduce_meta.tokens < num_out_tokens)
+      safe_src = jnp.clip(routing.reduce_meta.src_rows, 0, buf3d.shape[0] - 1)
+      rows_f32 = jnp.where(valid[:, None, None], buf3d[safe_src].astype(jnp.float32), 0.0)
+      safe_tok = jnp.where(valid, routing.reduce_meta.tokens, num_out_tokens)
+      out_pad = (
+          jnp.zeros((num_out_tokens + 1, buf3d.shape[1], buf3d.shape[2]), jnp.float32)
+          .at[safe_tok]
+          .add(rows_f32)[:num_out_tokens]
+      )
+      out = out_pad.astype(buf3d.dtype)
+    return out if _tokens_3d(blocks) else _to2d(out)
+
   flat_block = blocks[1]
   if buf2d.ndim == 3:
     buf3d = buf2d
@@ -367,6 +411,122 @@ def ring_ragged_sort_tc(
   return x, group_sizes_local, topk_argsort_revert_indices, routing
 
 
+def local_ep_ragged_sort_tc(
+    ep_x: jax.Array,
+    ep_expert_ids: jax.Array,
+    *,
+    num_local_experts: int,
+    expert_start: jax.Array | int,
+    topk: int,
+    buffer_size: int | None,
+    ep_valid: jax.Array | None = None,
+    gather_block_size: int = 1024,
+    reduce_block_size: int = 896,
+    mask_padding: bool = False,
+    flatten_block_size: int = 0,
+    keep_3d: bool = False,
+    return_full_perm: bool = False,
+    is_tpu: bool = True,
+    tag_routing_fn: Callable[[jax.Array], jax.Array] | None = None,
+) -> tuple[jax.Array, LocalEpRouting, jax.Array | None]:
+  """Muse-tuned local-bucket TC ragged dispatch avoiding global 256-expert `one_hot`.
+
+  Buckets `[expert_start, expert_start + num_local_experts)` into `0..num_local_experts-1`
+  and clamps all non-local (`< 0` or `>= num_local_experts`) or invalid (`~ep_valid`) slots
+  to positive sentinel `num_local_experts` before `packed_stable_sort`. Local slots therefore
+  always occupy `[0, raw_count)` (`start == 0`), eliminating global `jax.nn.one_hot` and
+  unused `topk_argsort_revert_indices` remat buffers while optionally returning `perm` for
+  dropless overflow windows.
+
+  Args:
+    ep_x: Input token activations (`[N, D]` or `[N, D // 128, 128]`).
+    ep_expert_ids: Global expert assignments (`[N, topk]`).
+    num_local_experts: Number of experts hosted on this EP shard.
+    expert_start: Global expert ID of local expert 0 on this shard.
+    topk: Number of experts selected per token.
+    buffer_size: Optional ragged capacity bound (`None` uses `N * topk`).
+    ep_valid: Optional boolean validity mask (`[N, topk]`).
+    gather_block_size: Rows per Pallas gather tile.
+    reduce_block_size: Slots per Pallas gather-reduce tile.
+    mask_padding: Whether to zero-fill rows `[count, cap)` in the forward buffer.
+    flatten_block_size: Optional flatten block size (`0` disables flattening).
+    keep_3d: Whether to return `(cap, D // 128, 128)` output.
+    return_full_perm: Whether to return the full `[N * topk]` sort permutation.
+    is_tpu: Explicit target-platform flag (`False` uses pure-JAX CPU fallback).
+    tag_routing_fn: Optional `checkpoint_name` tagger applied to integer routing leaves.
+
+  Returns:
+    Tuple `(x_sorted, local_routing, full_perm)`.
+  """
+  num_tokens_local = ep_x.shape[0]
+  flat_ids = ep_expert_ids.reshape(-1).astype(jnp.int32)
+  n = flat_ids.shape[0]
+  local_ids = flat_ids - jnp.asarray(expert_start, dtype=jnp.int32)
+  is_local = (local_ids >= 0) & (local_ids < num_local_experts)
+  if ep_valid is not None:
+    is_local = is_local & ep_valid.reshape(-1).astype(jnp.bool_)
+  bucket_ids = jnp.where(is_local, local_ids, jnp.int32(num_local_experts))
+
+  sorted_bucket_ids, perm = tc.packed_stable_sort(bucket_ids, num_local_experts)
+  raw_group_sizes = jnp.sum(
+      bucket_ids[:, None] == jnp.arange(num_local_experts, dtype=jnp.int32)[None, :],
+      axis=0,
+      dtype=jnp.int32,
+  )
+  raw_count = jnp.sum(raw_group_sizes, dtype=jnp.int32)
+
+  cap = n if buffer_size is None else min(buffer_size, n)
+  cum_groups = jnp.minimum(jnp.cumsum(raw_group_sizes, dtype=jnp.int32), cap)
+  group_sizes = jnp.concatenate([cum_groups[:1], cum_groups[1:] - cum_groups[:-1]]).astype(jnp.int32)
+  count = cum_groups[-1].astype(jnp.int32) if num_local_experts > 0 else jnp.int32(0)
+
+  slot_order = perm[:cap]
+  max_local_id = jnp.int32(max(num_local_experts - 1, 0))
+  local_expert_of_row = jnp.minimum(sorted_bucket_ids[:cap], max_local_id).astype(jnp.int32)
+  token_ids_sorted = jax.lax.stop_gradient(jax.lax.div(slot_order, jnp.int32(topk)))
+  reduce_meta = tc.ragged_gather_reduce_tc_metadata(
+      token_ids_sorted,
+      0,
+      count,
+      top_k=topk,
+      block_size=reduce_block_size,
+      num_out_tokens=num_tokens_local,
+      packed_sort=True,
+  )
+  tc_routing = TcRouting(
+      token_ids_sorted=token_ids_sorted,
+      slot_order=slot_order,
+      start=jnp.int32(0),
+      count=count,
+      reduce_meta=reduce_meta,
+      num_out_tokens=num_tokens_local,
+      windowed=True,
+  )
+  local_routing = LocalEpRouting(
+      tc_routing=tc_routing,
+      group_sizes=group_sizes,
+      raw_group_sizes=raw_group_sizes,
+      raw_count=raw_count,
+      local_expert_of_row=local_expert_of_row,
+  )
+  full_perm = perm if return_full_perm else None
+  if tag_routing_fn is not None:
+    local_routing = jax.tree.map(tag_routing_fn, local_routing)
+    if full_perm is not None:
+      full_perm = tag_routing_fn(full_perm)
+
+  tokens_3d = ep_x.ndim == 3
+  x_sorted = tc_sort_gather(
+      ep_x,
+      local_routing.tc_routing,
+      cap,
+      topk,
+      (gather_block_size, flatten_block_size, keep_3d, tokens_3d, is_tpu),
+      mask_padding,
+  )
+  return x_sorted, local_routing, full_perm
+
+
 def tc_buffer_row_weights(routing, topk_weights, cap):
   """Routing weight of each buffer row: w[slot_order[start + i]] for i < count, else 0.
 
@@ -391,6 +551,77 @@ def tc_buffer_row_weights(routing, topk_weights, cap):
   return jnp.where(valid, jnp.take(w_flat, jnp.where(valid, rows, 0), axis=0), 0.0)
 
 
+@functools.partial(jax.custom_vjp, nondiff_argnums=(3, 4, 5))
+def _windowed_row_weights(
+    w_flat: jax.Array,
+    slot_order: jax.Array,
+    count: jax.Array,
+    cap: int,
+    num_slots: int,
+    is_tpu: bool,
+) -> jax.Array:
+  """Gathers unique `[0, count)` slot weights without saving `w_flat` in VJP residuals."""
+  iota = jnp.arange(cap, dtype=jnp.int32)
+  valid = iota < count
+  rows = jnp.where(valid, slot_order, num_slots + iota)
+  if is_tpu and num_slots >= 4096:
+    # Under `--xla_tpu_offload_gather_to_sparsecore=false`, a 1D HBM gather emits `cap`
+    # scalar 4B DMAs (`2.49 ms` at `cap=98304`). VMEM scatter + sort runs ~4.5x faster
+    # on TensorCore with `0-ULP` identical results because `[0, count)` keys are unique.
+    dst_of_slot = jnp.full((num_slots,), cap, dtype=jnp.int32).at[rows].set(iota, mode="drop", unique_indices=True)
+    _, w_sorted = jax.lax.sort((dst_of_slot, w_flat), num_keys=1, is_stable=False)
+    return jnp.where(valid, w_sorted[:cap], 0.0)
+  return w_flat.at[rows].get(mode="fill", fill_value=0.0, unique_indices=True)
+
+
+def _windowed_row_weights_fwd(
+    w_flat: jax.Array,
+    slot_order: jax.Array,
+    count: jax.Array,
+    cap: int,
+    num_slots: int,
+    is_tpu: bool,
+):
+  """Forward VJP rule for `_windowed_row_weights`."""
+  out = _windowed_row_weights(w_flat, slot_order, count, cap, num_slots, is_tpu)
+  # Save ONLY `(slot_order, count)` — never `w_flat` (`ep_weights`) — so checkpointing
+  # `w_rows` across remat eliminates the backward remat `ep_weights` all-gather.
+  return out, (slot_order, count)
+
+
+def _windowed_row_weights_bwd(cap: int, num_slots: int, is_tpu: bool, res, g: jax.Array):
+  del is_tpu
+  slot_order, count = res
+  iota = jnp.arange(cap, dtype=jnp.int32)
+  valid = iota < count
+  g_valid = jnp.where(valid, g.astype(jnp.float32), 0.0)
+  rows = jnp.where(valid, slot_order, num_slots + iota)
+  dw = jnp.zeros((num_slots,), jnp.float32).at[rows].set(g_valid, mode="drop", unique_indices=True)
+  return dw, None, None
+
+
+_windowed_row_weights.defvjp(_windowed_row_weights_fwd, _windowed_row_weights_bwd)
+
+
+def tc_local_ep_row_weights(routing: TcRouting, topk_weights: jax.Array, cap: int, *, is_tpu: bool = True):
+  """Routing weight of each buffer row of a `local_ep_ragged_sort_tc` routing: `w[slot_order[i]]` for `i < count`.
+
+  Unlike `tc_buffer_row_weights`, the VJP saves only `(slot_order, count)`, never the weights, so a checkpointed
+  result does not keep the gathered `[N * topk]` weights alive across rematerialization.
+
+  Args:
+    routing: `LocalEpRouting.tc_routing`.
+    topk_weights: `[N * topk]` or `[N, topk]` routing weights (differentiated).
+    cap: buffer rows.
+    is_tpu: True uses a scatter and sort that stay in VMEM on TPU.
+
+  Returns:
+    `[cap]` float32 weights, zero for rows at or beyond `count`.
+  """
+  w_flat = topk_weights.reshape(-1).astype(jnp.float32)
+  return _windowed_row_weights(w_flat, routing.slot_order, routing.count, cap, w_flat.shape[0], is_tpu)
+
+
 def ring_ragged_unsort_tc(
     sorted_tokens_local,
     routing,
@@ -401,6 +632,7 @@ def ring_ragged_unsort_tc(
     flatten_block_size=0,
     prescaled=False,
     out_3d=False,
+    is_tpu: bool = True,
 ):
   """TC version of `ring_ragged_unsort`: weighted top-k combine of this shard's slots.
 
@@ -414,6 +646,7 @@ def ring_ragged_unsort_tc(
       activation, see `tc_buffer_row_weights`), so only the unweighted combine is done.
     out_3d: return the combine in the TC kernels' (N, hidden // 128, 128) layout (no relayout);
       the cotangent is then expected in that layout too.
+    is_tpu: False runs a pure-JAX fallback instead of the TensorCore kernel.
 
   Returns:
     [N, hidden] (or [N, hidden // 128, 128] if out_3d) partial combine for this shard's experts.
@@ -432,6 +665,6 @@ def ring_ragged_unsort_tc(
       routing,
       num_out_tokens,
       topk,
-      (gather_block_size, flatten_block_size, keep_3d, out_3d),
+      (gather_block_size, flatten_block_size, keep_3d, out_3d, is_tpu),
       mask_padding,
   )

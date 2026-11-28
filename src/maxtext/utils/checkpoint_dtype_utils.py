@@ -18,6 +18,7 @@ from typing import Any, Iterable
 
 from flax import nnx
 from flax.nnx import variablelib
+import jax.numpy as jnp
 
 # Router state bf16 cannot hold exactly: the fp32 routing bias and integer
 # token-to-expert ids (bf16 rounds integers above 256).
@@ -44,6 +45,13 @@ FULL_PRECISION_SUFFIXES_BY_MODEL: dict[str, tuple[str, ...]] = {
         "-self_attention-v_conv1d-kernel",
         "-self_attention-o_norm-scale",
     ),
+    # `MuseSparkPreTrainedModel._keep_in_fp32_modules_strict` keeps router kernels/biases and residual gates in fp32.
+    "muse-spark-816b-a42b": (
+        "-moe_block-gate-kernel",
+        "-moe_block-gate-bias",
+        "-post_attention_residual_gate-gate",
+        "-post_feedforward_residual_gate-gate",
+    ),
 }
 
 
@@ -57,7 +65,12 @@ def is_full_precision_param_key(mt_param_key: str, model_name: str | None = None
 
 def param_save_dtype(mt_param_key_or_keys: str | tuple[str, ...], save_dtype: Any, model_name: str | None = None) -> Any:
   """Returns `'float32'` for full-precision router/HC/sink/indexer or per-model F32 state when saving `'bfloat16'`."""
-  if getattr(save_dtype, "value", save_dtype) != "bfloat16":
+  raw_dtype = getattr(save_dtype, "value", save_dtype)
+  try:
+    is_bf16 = raw_dtype == "bfloat16" or jnp.dtype(raw_dtype) == jnp.bfloat16
+  except TypeError:
+    is_bf16 = False
+  if not is_bf16:
     return save_dtype
   keys = mt_param_key_or_keys if isinstance(mt_param_key_or_keys, tuple) else (mt_param_key_or_keys,)
   if any(is_full_precision_param_key(k, model_name=model_name) for k in keys):

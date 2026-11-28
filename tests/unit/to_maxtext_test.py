@@ -14,9 +14,13 @@
 
 """Tests for to_maxtext.py"""
 
+import types
 import unittest
+from absl.testing import absltest
+import jax.numpy as jnp
 import ml_dtypes
 import numpy as np
+import orbax.checkpoint as ocp
 import pytest
 
 try:
@@ -27,11 +31,19 @@ except ImportError:
 pytestmark = [pytest.mark.decoupled_target]
 
 from maxtext.checkpoint_conversion.to_maxtext import (
+    _build_multi_axis_stacked_tensor,
+    _build_single_axis_stacked_tensor,
     _convert_tensor_to_numpy,
     _extract_conversion_args,
     _param_save_dtype,
     resolve_scale_key,
 )
+from maxtext.checkpoint_conversion.utils.utils import (
+    load_hf_dict_from_transformers,
+    load_orbax_checkpoint,
+    process_maxtext_param,
+)
+from maxtext.configs.types import DType
 
 
 class ResolveScaleKeyTest(unittest.TestCase):
@@ -93,6 +105,77 @@ class ParamSaveDtypeTest(unittest.TestCase):
   def test_other_params_keep_save_dtype(self):
     self.assertEqual(_param_save_dtype("params-decoder-layers_3-mlp-MoeBlock_0-gate-kernel", "bfloat16"), "bfloat16")
     self.assertEqual(_param_save_dtype(("params-a", "params-b"), "bfloat16"), "bfloat16")
+
+  def test_model_specific_float32_params(self):
+    muse_fp32_keys = (
+        "params-decoder-scanned_blocks-layers_0-moe_block-gate-kernel",
+        "params-decoder-scanned_blocks-layers_0-moe_block-gate-bias",
+        "params-decoder-scanned_blocks-layers_0-post_attention_residual_gate-gate",
+        "params-decoder-layers_0-post_feedforward_residual_gate-gate",
+    )
+    for key in muse_fp32_keys:
+      self.assertEqual(_param_save_dtype(key, "bfloat16", "muse-spark-816b-a42b"), "float32")
+      self.assertEqual(_param_save_dtype(key, DType.BFLOAT16, "muse-spark-816b-a42b"), "float32")
+      self.assertEqual(_param_save_dtype(key, jnp.bfloat16, "muse-spark-816b-a42b"), "float32")
+      self.assertEqual(_param_save_dtype(key, "bfloat16", "qwen3-30b-a3b"), "bfloat16")
+      self.assertEqual(_param_save_dtype(key, "bfloat16"), "bfloat16")
+
+  def test_process_maxtext_param_preserves_full_precision_keys(self):
+    arr = np.array([1.1234567, -0.9876543], dtype=np.float32)
+    gate_key = "params-decoder-layers_0-post_attention_residual_gate-gate"
+    proj_key = "params-decoder-layers_0-self_attention-query-kernel"
+    param_map = {gate_key: "hf.gate", proj_key: "hf.proj"}
+    hf_shape_map = {"hf.gate": [2], "hf.proj": [2]}
+    cfg = types.SimpleNamespace(weight_dtype=DType.BFLOAT16, model_name="muse-spark-816b-a42b")
+    gate_outputs = process_maxtext_param(gate_key, arr, param_map, {}, hf_shape_map, cfg)
+    proj_outputs = process_maxtext_param(proj_key, arr, param_map, {}, hf_shape_map, cfg)
+    self.assertEqual(len(gate_outputs), 1)
+    self.assertEqual(len(proj_outputs), 1)
+    gate_out, proj_out = gate_outputs[0][1], proj_outputs[0][1]
+    self.assertEqual(gate_out.dtype, np.float32)
+    np.testing.assert_array_equal(gate_out, arr)
+    self.assertEqual(proj_out.dtype, ml_dtypes.bfloat16)
+
+  def test_load_orbax_checkpoint_preserves_full_precision_keys(self):
+    import tempfile  # pylint: disable=import-outside-toplevel
+
+    fp32_vals = np.array([47.3456789, -16.061234], dtype=np.float32)
+    ckpt_tree = {
+        "params": {
+            "params": {
+                "decoder": {
+                    "layers_0": {
+                        "post_attention_residual_gate": {"gate": fp32_vals},
+                        "moe_block": {"gate": {"kernel": fp32_vals}},
+                        "self_attention": {"query": {"kernel": fp32_vals}},
+                    }
+                }
+            },
+            "MoEBiasVar": {"decoder": {"layers_0": {"moe_block": {"gate": {"bias": fp32_vals}}}}},
+        }
+    }
+    with tempfile.TemporaryDirectory() as tmpdir:
+      ckpt_dir = f"{tmpdir}/ckpt"
+      ckptr = ocp.Checkpointer(ocp.PyTreeCheckpointHandler())
+      ckptr.save(ckpt_dir, args=ocp.args.PyTreeSave(ckpt_tree))
+      cfg = types.SimpleNamespace(
+          load_parameters_path=ckpt_dir,
+          lora=types.SimpleNamespace(lora_restore_path=""),
+          checkpoint_storage_concurrent_gb=1,
+          checkpoint_storage_use_ocdbt=True,
+          checkpoint_storage_use_zarr3=False,
+          weight_dtype=jnp.bfloat16,
+          model_name="muse-spark-816b-a42b",
+      )
+      restored = load_orbax_checkpoint(cfg)
+    layers_0 = restored["params"]["params"]["decoder"]["layers_0"]
+    bias = restored["params"]["MoEBiasVar"]["decoder"]["layers_0"]["moe_block"]["gate"]["bias"]
+    self.assertEqual(layers_0["post_attention_residual_gate"]["gate"].dtype, jnp.float32)
+    np.testing.assert_array_equal(np.asarray(layers_0["post_attention_residual_gate"]["gate"]), fp32_vals)
+    self.assertEqual(layers_0["moe_block"]["gate"]["kernel"].dtype, jnp.float32)
+    self.assertEqual(bias.dtype, jnp.float32)
+    np.testing.assert_array_equal(np.asarray(bias), fp32_vals)
+    self.assertEqual(layers_0["self_attention"]["query"]["kernel"].dtype, jnp.bfloat16)
 
   def test_non_bf16_save_dtype_unchanged(self):
     self.assertEqual(_param_save_dtype("MoEBiasVar-x", "float8_e4m3fn"), "float8_e4m3fn")
@@ -179,5 +262,91 @@ class ExtractConversionArgsTest(unittest.TestCase):
     self.assertEqual(remaining, ["base.yml", "model_name=qwen3.5-35b-a3b-fp8", "steps=10"])
 
 
+class CompositeStackingAndAutoModelCascadeTest(unittest.TestCase):
+
+  def test_build_single_and_multi_axis_stacked_tensor_with_list_target_shape(self):
+    hf_tensors = {
+        "layer0": np.arange(12, dtype=np.float32).reshape(4, 3),
+        "layer1": (np.arange(12, dtype=np.float32).reshape(4, 3) + 100.0),
+    }
+    seen_slice_shapes = []
+
+    def split_hook(tensor, slice_shape):
+      seen_slice_shapes.append(slice_shape)
+      return np.stack([tensor[:2, :], tensor[2:, :]], axis=-1)
+
+    cfg = types.SimpleNamespace(scan_layers=True, param_scan_axis=1)
+    mt_key = ("params-decoder-scanned_blocks-wi_0", "params-decoder-scanned_blocks-wi_1")
+    target_shapes = [(2, 2, 3), (2, 2, 3)]
+    stacked = _build_single_axis_stacked_tensor(
+        ["layer0", "layer1"],
+        hf_tensors.__getitem__,
+        split_hook,
+        target_shapes,
+        cfg,
+        mt_key=mt_key,
+    )
+    self.assertEqual(seen_slice_shapes, [[(2, 3), (2, 3)], [(2, 3), (2, 3)]])
+    # Hook returns (2, 3, 2_parts) with composite parts on the trailing axis; stacking 2 layers at
+    # param_scan_axis=1 yields (2, 2_layers, 3, 2_parts) so `stacked[..., i]` matches `(2, 2, 3)`.
+    self.assertEqual(stacked.shape, (2, 2, 3, 2))
+    np.testing.assert_array_equal(stacked[:, 0, :, 0], hf_tensors["layer0"][:2, :])
+    np.testing.assert_array_equal(stacked[:, 1, :, 1], hf_tensors["layer1"][2:, :])
+
+    seen_multi_shapes = []
+
+    def multi_hook(tensor, slice_shape):
+      seen_multi_shapes.append(slice_shape)
+      return np.stack([tensor[:2, :], tensor[2:, :]], axis=-1)
+
+    multi = _build_multi_axis_stacked_tensor(
+        [["layer0", "layer1"]],
+        hf_tensors.__getitem__,
+        multi_hook,
+        [(1, 2, 2, 3), (1, 2, 2, 3)],
+        cfg,
+        mt_key=mt_key,
+    )
+    self.assertEqual(seen_multi_shapes, [[(2, 3), (2, 3)], [(2, 3), (2, 3)]])
+    self.assertEqual(multi.shape, (1, 2, 2, 3, 2))
+    np.testing.assert_array_equal(multi[0, 0, :, :, 0], hf_tensors["layer0"][:2, :])
+    np.testing.assert_array_equal(multi[0, 1, :, :, 1], hf_tensors["layer1"][2:, :])
+
+  def test_load_hf_dict_from_transformers_tries_image_text_to_text_before_base_automodel(self):
+    from unittest import mock  # pylint: disable=import-outside-toplevel
+
+    fake_vlm = mock.MagicMock()
+    fake_vlm.state_dict.return_value = {"language_model.lm_head.weight": np.ones((4, 2), dtype=np.float32)}
+    call_order = []
+
+    def fail_causal_lm(*args, **kwargs):
+      del args, kwargs
+      call_order.append("AutoModelForCausalLM")
+      raise ValueError("Unrecognized configuration class for AutoModelForCausalLM")
+
+    def succeed_vlm(*args, **kwargs):
+      del args, kwargs
+      call_order.append("AutoModelForImageTextToText")
+      return fake_vlm
+
+    def fail_if_called(*args, **kwargs):
+      del args, kwargs
+      call_order.append("AutoModel")
+      raise AssertionError("Base AutoModel should not be called when AutoModelForImageTextToText succeeds")
+
+    with (
+        mock.patch(
+            "maxtext.src.maxtext.checkpoint_conversion.utils.utils.AutoModelForCausalLM.from_pretrained",
+            side_effect=fail_causal_lm,
+        ),
+        mock.patch("transformers.AutoModelForImageTextToText.from_pretrained", side_effect=succeed_vlm),
+        mock.patch("transformers.AutoModel.from_pretrained", side_effect=fail_if_called),
+    ):
+      state_dict = load_hf_dict_from_transformers("meta-models/Muse-Spark-Open-816B-A42B", token="tok", dtype="float32")
+
+    self.assertEqual(call_order, ["AutoModelForCausalLM", "AutoModelForImageTextToText"])
+    self.assertIn("language_model.lm_head.weight", state_dict)
+
+
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

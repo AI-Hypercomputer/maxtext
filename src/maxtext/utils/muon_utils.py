@@ -57,6 +57,7 @@ EXCLUDED_SUBSTRINGS = (
     "dt_bias",
     "conv1d",
     "shared_expert_gate",
+    "residual_gate",
 )
 
 EXCLUDED_EXACT_SEGMENTS = {
@@ -86,10 +87,10 @@ ATTENTION_QKV_NAMES = (
 
 ATTENTION_OUT_NAMES = ("out",)
 
-# Output-gate projections. Head-expanded (3D unscanned / 4D scanned) in MLA, e.g. Kimi-K3
-# `[emb_dim, num_heads, v_head_dim]`; flat 2D in linear-attention blocks (KDA), which keep the
-# standard mapping.
-ATTENTION_GATE_NAMES = ("g_proj",)
+# Output-gate projections. Head-expanded (3D unscanned / 4D scanned) in MLA and Muse-Spark GQA, e.g. Kimi-K3
+# `[emb_dim, num_heads, v_head_dim]` and Muse-Spark `gate_proj` `[emb_dim, num_heads, head_dim]`; flat 2D in
+# linear-attention blocks (KDA), which keep the standard mapping.
+ATTENTION_GATE_NAMES = ("g_proj", "gate_proj")
 
 # Path entries of scanned decoder stacks (the scanned layer axis sits at `param_scan_axis`).
 SCANNED_LAYER_NAMES = ("layers", "scanned_blocks", "dense_layers", "moe_layers")

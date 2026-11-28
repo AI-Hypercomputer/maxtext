@@ -29,6 +29,7 @@ import tempfile
 import unittest
 from types import SimpleNamespace
 
+from absl.testing import absltest
 from flax import nnx
 import jax
 import jax.numpy as jnp
@@ -60,6 +61,22 @@ class _PlainModel(nnx.Module):
     return self.linear(x)
 
 
+class _CustomBiasVar(nnx.Variable):
+  """Persistent non-trainable model variable (mirrors `MoEBiasVar`)."""
+
+
+class _CustomCollectionModel(nnx.Module):
+  """Linear + a non-trainable persistent `_CustomBiasVar` variable."""
+
+  def __init__(self, rngs: nnx.Rngs):
+    self.linear = nnx.Linear(2, 3, rngs=rngs)
+    self.routing_bias = _CustomBiasVar(jnp.zeros((3,), dtype=jnp.float32))
+
+  def __call__(self, x, deterministic=False):
+    del deterministic
+    return self.linear(x) + self.routing_bias[...]
+
+
 class _CacheModel(nnx.Module):
   """Linear + dropout + a cache, to check non-weight variables are not checkpointed."""
 
@@ -76,9 +93,11 @@ class _CacheModel(nnx.Module):
 # flatten. Exercises the chained reshape end to end; setup_initial_state_nnx_test covers the flat one.
 _TX = optax.adamw(1e-3)
 
+
 # Rows must differ: batch-norm centres identical rows to zero, which zeroes the gradients and leaves
 # the adam moments at zero, so a dropped-moment restore would go unnoticed.
-_TRAIN_X = jnp.arange(8, dtype=jnp.float32).reshape(4, 2)
+def _train_x():
+  return jnp.arange(8, dtype=jnp.float32).reshape(4, 2)
 
 
 def _config():
@@ -151,7 +170,7 @@ class TestNNXCheckpointRoundTrip(unittest.TestCase):
   def _trained(self, model):
     """One training step: advances step + dropout rng + batch stats + optimizer moments."""
     state = train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, _TX, wrt=nnx.Param))
-    grads = nnx.grad(lambda m: jnp.mean(m(_TRAIN_X, deterministic=False) ** 2))(state.model)
+    grads = nnx.grad(lambda m: jnp.mean(m(_train_x(), deterministic=False) ** 2))(state.model)
     state.apply_gradients(grads)
     return state
 
@@ -336,7 +355,7 @@ class TestNNXCheckpointRoundTrip(unittest.TestCase):
     model = nnx.merge(graphdef, abstract["model"])
     resumed = train_state_nnx.TrainStateNNX(model, nnx.Optimizer(model, _TX, wrt=nnx.Param))
     # The restored model carries the saved rng stream; one more step advances it past that point.
-    grads = nnx.grad(lambda m: jnp.mean(m(_TRAIN_X, deterministic=False) ** 2))(resumed.model)
+    grads = nnx.grad(lambda m: jnp.mean(m(_train_x(), deterministic=False) ** 2))(resumed.model)
     resumed.apply_gradients(grads)
     count_after = int(nnx.state(resumed).to_pure_dict()["model"]["dropout"]["rngs"]["count"])
     self.assertGreater(count_after, count_at_save)  # stream advanced past the restored point
@@ -390,6 +409,31 @@ class TestNNXCheckpointRoundTrip(unittest.TestCase):
     self.assertEqual(int(restored["model"]["dropout"]["rngs"]["count"]), orig_count)
     self.assertEqual(int(restored["optimizer"]["step"]), 1)
 
+  def test_custom_variable_collection_saved_under_params_and_restored_by_load_params_from_path(self):
+    """`save_checkpoint` writes custom `nnx.Variable` collections under `params/<col>` for `load_params_from_path`."""
+    from orbax.checkpoint import v1 as ocp  # pylint: disable=import-outside-toplevel
+
+    manager = self._manager()
+    model = _CustomCollectionModel(nnx.Rngs(0))
+    expected_bias = jnp.array([1.25, -2.5, 3.75], dtype=jnp.float32)
+    model.routing_bias[...] = expected_bias
+    state = self._trained(model)
+    saved_kernel = nnx.state(state).to_pure_dict()["model"]["linear"]["kernel"]
+    self._save(manager, state)
+
+    step_root = os.path.join(self._dir, "ckpt", "1")
+    stored_meta = ocp.metadata(step_root, checkpointable_name="items").metadata
+    self.assertIn("_CustomBiasVar", stored_meta["params"])
+
+    abstract_model_state = _abstract_state(_CustomCollectionModel)["model"]
+    restored_params = checkpointing.load_params_from_path(
+        os.path.join(step_root, "items"),
+        abstract_unboxed_params=abstract_model_state,
+        checkpoint_storage_concurrent_gb=8,
+    )
+    self.assertTrue(jnp.allclose(restored_params["linear"]["kernel"], saved_kernel))
+    self.assertTrue(jnp.allclose(restored_params["routing_bias"], expected_bias))
+
 
 if __name__ == "__main__":
-  unittest.main()
+  absltest.main()

@@ -1255,12 +1255,15 @@ class TestCreateNnxModel(unittest.TestCase):
 
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_load_linen_checkpoint_restores_side_collection(self, mock_ocp):
-    """Variables stored in a collection beside "params" (e.g. Tid2EidVar) are restored."""
+    """Variables stored only in a side collection beside "params" (e.g. MoEBiasVar) are restored."""
     params = nnx.to_pure_dict(nnx.state(model_creation_utils.from_pretrained(self.config, self.mesh), nnx.Param))
     fake_meta = lambda a: _FakeArrayMetadata(tuple(a.shape))  # pylint: disable=unnecessary-lambda-assignment
-    side_meta = {"decoder": {"decoder_norm": {"scale": fake_meta(params["decoder"]["decoder_norm"]["scale"])}}}
+    params_meta = jax.tree.map(fake_meta, params)
+    # Remove decoder_norm.scale from "params" so it lives *exclusively* in "SideVar" (disjoint collections).
+    scale_meta = params_meta["decoder"].pop("decoder_norm")["scale"]
+    side_meta = {"decoder": {"decoder_norm": {"scale": scale_meta}}}
     metadata = MagicMock()
-    metadata.item_metadata.tree = {"params": {"params": jax.tree.map(fake_meta, params), "SideVar": side_meta}}
+    metadata.item_metadata.tree = {"params": {"params": params_meta, "SideVar": side_meta}}
 
     def restore_fn(path, item=None, **kw):
       restored = _restore_as_zeros(path, item, **kw)
@@ -1270,9 +1273,34 @@ class TestCreateNnxModel(unittest.TestCase):
     mock_ckptr = self._mock_ocp_for_restore(mock_ocp, metadata, restore_fn)
     cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/linen_side_ckpt")
     model = model_creation_utils.from_pretrained(cfg, self.mesh)
-    self.assertIn("SideVar", mock_ckptr.restore.call_args.kwargs["item"]["params"])
+    restore_item = mock_ckptr.restore.call_args.kwargs["item"]["params"]
+    self.assertNotIn("decoder_norm", restore_item["params"]["decoder"])
+    self.assertIn("SideVar", restore_item)
     np.testing.assert_array_equal(np.asarray(model.decoder.decoder_norm.scale[...]), 7.0)
     np.testing.assert_array_equal(np.asarray(model.decoder.layers.mlp.wo.kernel[...]), 0.0)
+
+  def test_intersect_with_metadata_matches_integer_keys_against_string_metadata(self):
+    """`nnx.to_pure_dict` emits integer keys for `nnx.List`, while Orbax stores string keys in JSON metadata."""
+    target = {"decoder": {"layers": {0: {"kernel": jnp.ones((2, 2))}, 1: {"bias": jnp.zeros((2,))}}}}
+    meta_tree = {"decoder": {"layers": {"0": {"kernel": _FakeArrayMetadata((2, 2))}}}}
+    intersected = model_creation_utils._intersect_with_metadata(target, meta_tree)  # pylint: disable=protected-access
+    self.assertEqual(list(intersected["decoder"]["layers"].keys()), [0])
+    self.assertIn("kernel", intersected["decoder"]["layers"][0])
+
+  @patch("maxtext.utils.model_creation_utils.ocp")
+  def test_load_linen_checkpoint_multi_collection_missing_leaf_raises(self, mock_ocp):
+    """Missing a leaf across all collections when len(ckpt_collections) > 1 raises ValueError naming the leaf."""
+    params = nnx.to_pure_dict(nnx.state(model_creation_utils.from_pretrained(self.config, self.mesh), nnx.Param))
+    fake_meta = lambda a: _FakeArrayMetadata(tuple(a.shape))  # pylint: disable=unnecessary-lambda-assignment
+    params_meta = jax.tree.map(fake_meta, params)
+    params_meta["decoder"].pop("decoder_norm")
+    # SideVar carries an unrelated extra key so len(ckpt_collections) > 1, leaving decoder_norm.scale missing everywhere.
+    metadata = MagicMock()
+    metadata.item_metadata.tree = {"params": {"params": params_meta, "SideVar": {"unused": _FakeArrayMetadata((1,))}}}
+    self._mock_ocp_for_restore(mock_ocp, metadata, _restore_as_zeros)
+    cfg = _make_config(enable_checkpointing=True, load_parameters_path="gs://fake/linen_missing_multi_ckpt")
+    with self.assertRaisesRegex(ValueError, r"missing 1 model leaves.*decoder/decoder_norm/scale"):
+      model_creation_utils.from_pretrained(cfg, self.mesh)
 
   @patch("maxtext.utils.model_creation_utils.ocp")
   def test_load_checkpoint_missing_variable_raises(self, mock_ocp):

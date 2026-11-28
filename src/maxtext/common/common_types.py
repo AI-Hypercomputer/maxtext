@@ -196,6 +196,7 @@ class DecoderBlockType(enum.Enum):
   HY4 = "hy4"
   KIMI_LINEAR = "kimi_linear"
   GLM5 = "glm5"
+  MUSE_SPARK = "muse_spark"
 
 
 class VisionEncoderBlockType(enum.Enum):
