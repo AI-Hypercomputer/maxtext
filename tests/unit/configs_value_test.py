@@ -1305,6 +1305,266 @@ class ConfigTest(absltest.TestCase):
       config = pyconfig.initialize(argv)
     self.assertEqual(config.rampup_end_step, 0)
 
+  def test_fractional_batch_loads_fewer_rows_with_grad_accum(self):
+    """Fractional batches with GA load only the rows the step needs.
+
+    The loader needs the rows of a whole step to be a multiple of the device
+    count, and each microbatch to split evenly over the input batch shards.
+    Context parallelism splits the positions inside a row, not the rows; on the
+    tensor axis each device holds a copy of the row. Values are
+    (global_batch_size_to_load, global_batch_size_to_train_on,
+    micro_batch_size_to_train_on).
+    """
+    base_args = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "skip_jax_distributed_system=True",
+    ]
+    fsdp4_cp2 = ["ici_fsdp_parallelism=4", "ici_context_parallelism=2"]
+    fsdp2_cp4 = ["ici_fsdp_parallelism=2", "ici_context_parallelism=4"]
+    fsdp8 = ["ici_fsdp_parallelism=8"]
+    fsdp4_tp2 = ["ici_fsdp_parallelism=4", "ici_tensor_parallelism=2"]
+    pipeline = [
+        "ici_pipeline_parallelism=2",
+        "ici_fsdp_parallelism=2",
+        "ici_context_parallelism=2",
+    ]
+    diloco = [
+        "enable_diloco=True",
+        "ici_diloco_parallelism=2",
+        "ici_fsdp_parallelism=2",
+        "ici_context_parallelism=2",
+    ]
+    moe_ep_as_cp = [
+        "custom_mesh_and_rule=ep-as-cp",
+        "ici_fsdp_parallelism=2",
+        "ici_expert_parallelism=4",
+        "num_experts=4",
+        "base_mlp_dim=64",
+        "base_moe_mlp_dim=64",
+    ]
+    cases = [
+        # 16 -> 8 and 32 -> 8 loaded rows.
+        (fsdp4_cp2 + ["per_device_batch_size=0.5"], 2, (8, 8, 4)),
+        (fsdp2_cp4 + ["per_device_batch_size=0.25"], 4, (8, 8, 2)),
+        (fsdp4_tp2 + ["per_device_batch_size=0.5"], 2, (8, 8, 4)),
+        # Two trained rows cannot fill four batch shards: pad each microbatch
+        # to 4 rows (16, not 32), including when FSDP width comes from -1.
+        (fsdp4_cp2 + ["per_device_batch_size=0.25"], 4, (16, 8, 2)),
+        (
+            [
+                "ici_fsdp_parallelism=-1",
+                "ici_context_parallelism=2",
+                "per_device_batch_size=0.25",
+            ],
+            4,
+            (16, 8, 2),
+        ),
+        # 5 trained rows/microbatch: 6 rows would split a device's rows
+        # (24 rows, 3 per device), so it keeps 8 per microbatch as before.
+        (fsdp2_cp4 + ["per_device_batch_size=0.6875"], 4, (32, 20, 5)),
+        # Integral expansion scales rows (float field: 1.0 equals default).
+        (
+            fsdp4_cp2 + ["per_device_batch_size=0.5", "expansion_factor_real_data=1.0"],
+            2,
+            (8, 8, 4),
+        ),
+        (
+            fsdp4_cp2 + ["per_device_batch_size=0.5", "expansion_factor_real_data=2.0"],
+            2,
+            (16, 8, 4),
+        ),
+        # Expert parallelism as CP (ep-as-cp) does not split input batch rows.
+        (moe_ep_as_cp + ["per_device_batch_size=0.25"], 4, (8, 8, 2)),
+        # Unchanged: without accumulation the step itself fills the devices,
+        (fsdp4_cp2 + ["per_device_batch_size=0.5"], 1, (8, 4, 4)),
+        # without non-batch parallelism each microbatch fills the batch shards,
+        (fsdp8 + ["per_device_batch_size=0.5"], 2, (16, 8, 4)),
+        # per_device_batch_size >= 1 loads what it trains,
+        (fsdp4_cp2 + ["per_device_batch_size=1"], 2, (16, 16, 8)),
+        # micro_batch_to_train == 0 keeps the old rule (8 * 0.0625 = 0.5 -> 0),
+        (fsdp4_cp2 + ["per_device_batch_size=0.0625"], 2, (16, 0, 0)),
+        # Tunix GA loads each microbatch as a global array over every device,
+        (
+            fsdp4_cp2
+            + [
+                "per_device_batch_size=0.5",
+                "use_tunix_gradient_accumulation=True",
+            ],
+            2,
+            (16, 8, 4),
+        ),
+        # DiLoCo splits per replica, TE MoE needs FSDP x EP rows, ramp-up
+        # computes stage schedules from loaded batch sizes, and pipeline
+        # parallelism rewrites the input batch rule after batch sizes are set,
+        (diloco + ["per_device_batch_size=0.5"], 2, (16, 8, 4)),
+        (
+            fsdp4_cp2 + ["per_device_batch_size=0.5", "te_moe_block=True"],
+            2,
+            (16, 8, 4),
+        ),
+        (
+            fsdp4_cp2
+            + [
+                "enable_rampup_batch_size=True",
+                "per_device_batch_size_start=0.25",
+                "per_device_batch_size_increment=0.25",
+                "per_device_batch_size=0.75",
+                "global_rampup_samples=500",
+            ],
+            2,
+            (16, 12, 6),
+        ),
+        (pipeline + ["per_device_batch_size=0.5"], 2, (16, 8, 4)),
+        # unknown or no input batch axes count every device as a batch shard,
+        (
+            fsdp4_cp2
+            + [
+                "per_device_batch_size=0.5",
+                "input_data_sharding_logical_axes=['no_such_axis']",
+            ],
+            2,
+            (16, 8, 4),
+        ),
+        (
+            fsdp4_cp2
+            + [
+                "per_device_batch_size=0.5",
+                "input_data_sharding_logical_axes=[]",
+            ],
+            2,
+            (16, 8, 4),
+        ),
+        # and a non-integral expansion factor keeps the old rule (24, not 8).
+        (
+            fsdp4_cp2 + ["per_device_batch_size=0.5", "expansion_factor_real_data=1.5"],
+            2,
+            (24, 8, 4),
+        ),
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    for extra_args, grad_accum, expected in cases:
+      with self.subTest(extra_args=extra_args, grad_accum=grad_accum):
+        argv = (
+            base_args
+            + extra_args
+            + [
+                f"gradient_accumulation_steps={grad_accum}",
+                "eval_per_device_batch_size=0.5",
+            ]
+        )
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
+          config = pyconfig.initialize(argv)
+        self.assertEqual(
+            (
+                config.global_batch_size_to_load,
+                config.global_batch_size_to_train_on,
+                config.micro_batch_size_to_train_on,
+            ),
+            expected,
+        )
+        # Loaded steps still fill devices, and eval (no GA) is unchanged.
+        self.assertEqual(config.global_batch_size_to_load % 8, 0)
+        scale = config.expansion_factor_real_data if config.expansion_factor_real_data > 0 else 1
+        eval_rows = (
+            config.global_batch_size_to_load_eval,
+            config.global_batch_size_to_eval_on,
+        )
+        self.assertEqual(eval_rows, (int(8 * scale), 4))
+
+  def test_fractional_batch_rampup_keeps_schedule(self):
+    """Fractional ramp-up with GA > 1 keeps the loaded-batch schedule."""
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "skip_jax_distributed_system=True",
+        "ici_fsdp_parallelism=4",
+        "ici_context_parallelism=2",
+        "gradient_accumulation_steps=2",
+        "enable_rampup_batch_size=True",
+        "per_device_batch_size_start=0.5",
+        "per_device_batch_size_increment=0.5",
+        "per_device_batch_size=2.0",
+        "global_rampup_samples=500",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(8)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+    self.assertEqual(config.global_batch_size_to_load, 32)
+    self.assertEqual(config.global_batch_size_to_load_start, 16)
+    self.assertEqual(config.global_batch_size_to_load_increment, 16)
+    self.assertEqual(config.rampup_end_step, 32)
+
+  def test_fractional_batch_rows_across_slices(self):
+    """2 slices x (FSDP=4, CP=2), pdbs=0.25, GA=4 (64 rows loaded before).
+
+    Data parallelism over DCN doubles the batch shards, so each microbatch
+    needs 8 rows (32 per step); context parallelism over DCN does not, so 4
+    rows are enough (16 per step).
+    """
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "skip_jax_distributed_system=True",
+        "ici_fsdp_parallelism=4",
+        "ici_context_parallelism=2",
+        "per_device_batch_size=0.25",
+        "gradient_accumulation_steps=4",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=i // 8) for i in range(16)]
+    # Explicit DCN data width, default -1 (leftover slices), and DCN CP.
+    for dcn_args, expected in (
+        (["dcn_data_parallelism=2"], (32, 16)),
+        ([], (32, 16)),
+        (["dcn_data_parallelism=1", "dcn_context_parallelism=2"], (16, 16)),
+    ):
+      with self.subTest(dcn_args=dcn_args):
+        with unittest.mock.patch("jax.devices", return_value=mock_devices):
+          config = pyconfig.initialize(argv + dcn_args)
+        self.assertEqual(config.num_slices, 2)
+        self.assertEqual(
+            (
+                config.global_batch_size_to_load,
+                config.global_batch_size_to_train_on,
+            ),
+            expected,
+        )
+
+  def test_fractional_batch_trained_rows_end_on_device_boundary(self):
+    """16 devices, FSDP=2, CP=8, pdbs=0.3125 (5 rows), GA=8 (128 before).
+
+    6 rows per microbatch would split the trained rows inside a device's rows
+    (48 rows, 3 per device), so the microbatch steps up to 8 rows: 64 per step.
+    """
+    argv = [
+        "",
+        _BASE_CONFIG_PATH,
+        "run_name=test",
+        "steps=1",
+        "skip_jax_distributed_system=True",
+        "ici_fsdp_parallelism=2",
+        "ici_context_parallelism=8",
+        "per_device_batch_size=0.3125",
+        "gradient_accumulation_steps=8",
+    ]
+    mock_devices = [unittest.mock.MagicMock(slice_index=0) for _ in range(16)]
+    with unittest.mock.patch("jax.devices", return_value=mock_devices):
+      config = pyconfig.initialize(argv)
+    self.assertEqual(
+        (
+            config.global_batch_size_to_load,
+            config.global_batch_size_to_train_on,
+            config.micro_batch_size_to_train_on,
+        ),
+        (64, 40, 5),
+    )
+
   @unittest.mock.patch.dict(os.environ, {pyconfig.yaml_key_to_env_key("steps"): "123"})
   def test_env_override(self):
     """Tests that environment variables override YAML values."""
