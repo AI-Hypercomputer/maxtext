@@ -68,6 +68,8 @@ _SUBLANE = 32  # Sublane tiling of the fp8 act rows.
 _IDX_ALIGN = 128  # Alignment of the SMEM token windows.
 _MXU_COLS = 256  # TPU v7x MXU column size.
 _ISSUE_UNROLL = 16  # Row DMAs issued per loop iteration.
+_ADD_UNROLL = 8  # Read-modify-write row adds per loop iteration.
+_SEEN_UNROLL = 64  # Seen-token bitmap words cleared per loop iteration.
 _SEEN_BITS = 32  # Tokens per word of the seen-token bitmap.
 # SMEM token windows: those of the visit, of the next visit (classified during
 # the visit) and of the prefetched one; a power of two for a cheap modulo.
@@ -503,7 +505,7 @@ def _kernel(
     if not cfg.accumulate:
       zbuf[...] = jnp.zeros_like(zbuf)
 
-      @pl.loop(0, seen_ref.shape[0])
+      @pl.loop(0, seen_ref.shape[0], unroll=_SEEN_UNROLL)
       def _clear_seen(i):
         seen_ref[i] = 0
 
@@ -661,10 +663,11 @@ def _kernel(
     # Read-modify-write: add the current y rows in f32.
     _wait_rows(rd_sem.at[0], rbuf, num_rmw, tile_m)
 
-    @pl.loop(0, num_rmw)
-    def _add(j):
+    def add(j):
       r = lo + rmw_row(j)
       obuf[slot, r] = (obuf[slot, r].astype(jnp.float32) + rbuf[j].astype(jnp.float32)).astype(jnp.bfloat16)
+
+    _unrolled_loop(num_rmw, _ADD_UNROLL, add)
 
     _unrolled_loop(nrows, _ISSUE_UNROLL, functools.partial(write_row, lo, tok_base, slot))
     meta_ref[wpending_i + slot] = nrows
