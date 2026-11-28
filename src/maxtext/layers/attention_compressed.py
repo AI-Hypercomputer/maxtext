@@ -1485,10 +1485,12 @@ class CompressedAttention(Attention):
     # DeepSeek-V4 uses a mathematical attention sink (a learnable scalar per-head added to the
     # attention logits prior to softmax, rather than a physical key/value token). We unconditionally
     # initialize it here, overriding the base Attention class which disables it by default.
+    sinks_val = jnp.zeros((self.num_query_heads,), dtype=self.weight_dtype)
     self.sinks = nnx.data(
         nnx.Param(
-            jnp.zeros((self.num_query_heads,), dtype=self.weight_dtype),
+            sinks_val,
             sharding=(None,),
+            keep_fp32_master=sinks_val.dtype == jnp.float32,
         )
     )
 

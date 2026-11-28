@@ -433,23 +433,29 @@ class DeepSeek4HyperHead(nnx.Module):
 
     # Weight matrices
     weight_init = nd_dense_init(1.0, "fan_in", "normal")
+    hc_fn_val = weight_init(
+        rngs.params(),
+        (self.mhc_expansion_rate * self.emb_dim, self.mhc_expansion_rate),
+        self.weight_dtype,
+        in_axis=0,
+        out_axis=1,
+    )
+    hc_base_val = default_bias_init(rngs.params(), (self.mhc_expansion_rate,), self.weight_dtype)
+    hc_scale_val = default_scalar_init(rngs.params(), (1,), self.weight_dtype)
     self.hc_fn = nnx.Param(
-        weight_init(
-            rngs.params(),
-            (self.mhc_expansion_rate * self.emb_dim, self.mhc_expansion_rate),
-            self.weight_dtype,
-            in_axis=0,
-            out_axis=1,
-        ),
+        hc_fn_val,
         out_sharding=("activation_embed", None),
+        keep_fp32_master=hc_fn_val.dtype == jnp.float32,
     )
     self.hc_base = nnx.Param(
-        default_bias_init(rngs.params(), (self.mhc_expansion_rate,), self.weight_dtype),
+        hc_base_val,
         out_sharding=(None,),
+        keep_fp32_master=hc_base_val.dtype == jnp.float32,
     )
     self.hc_scale = nnx.Param(
-        default_scalar_init(rngs.params(), (1,), self.weight_dtype),
+        hc_scale_val,
         out_sharding=(None,),
+        keep_fp32_master=hc_scale_val.dtype == jnp.float32,
     )
 
   def __call__(self, x: Array) -> Array:

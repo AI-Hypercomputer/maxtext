@@ -239,8 +239,8 @@ class MingKimiDeltaAttention(nnx.Module):
       return jnp.log(jax.random.uniform(key, shape, dtype=jnp.float32, minval=1.0, maxval=16.0)).astype(dtype)
 
     # A_log and dt_bias are stored in float32 in the HF checkpoint.
-    self.A_log = nnx.Param(a_log_init(rngs.params(), (self.num_heads,)))  # pylint: disable=invalid-name
-    self.dt_bias = nnx.Param(jnp.zeros((self.proj_dim,), dtype=jnp.float32))
+    self.A_log = nnx.Param(a_log_init(rngs.params(), (self.num_heads,)), keep_fp32_master=True)  # pylint: disable=invalid-name
+    self.dt_bias = nnx.Param(jnp.zeros((self.proj_dim,), dtype=jnp.float32), keep_fp32_master=True)
 
     self.o_norm = RMSNorm(
         num_features=self.head_dim,

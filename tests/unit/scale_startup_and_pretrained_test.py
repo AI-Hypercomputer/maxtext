@@ -218,6 +218,7 @@ class ScaleStartupAndPretrainedTest(unittest.TestCase):
 
     cfg = SimpleNamespace(
         logical_axis_rules=(("batch", "data"),),
+        fp32_master_storage="f32",
         load_parameters_path="",
         load_full_state_path="",
         checkpoint_storage_concurrent_gb=1,

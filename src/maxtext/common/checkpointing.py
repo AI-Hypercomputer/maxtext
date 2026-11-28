@@ -312,6 +312,7 @@ def _linen_items_to_nnx(restored_linen, abstract_nnx_state):
   """
   linen_state, aux_state, ephemeral = train_state_nnx.split_for_checkpoint(abstract_nnx_state)
   weights = train_state_nnx.from_linen_checkpoint_dict(restored_linen)
+  weights = train_state_nnx.reshape_restored_weights_for_residual16(weights, linen_state)
   if "model" in weights:
     nnx.replace_by_pure_dict(linen_state, {"model": weights["model"]})
   if "optimizer" in weights:
@@ -406,12 +407,21 @@ def _abstract_params(abstract_unboxed_pre_state):
     model_state = (
         abstract_unboxed_pre_state["model"] if "model" in abstract_unboxed_pre_state else abstract_unboxed_pre_state
     )
-    return model_state.filter(
+    filtered = model_state.filter(
         lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
     )
+    return train_state_nnx.promote_abstract_params_for_residual16(filtered, abstract_unboxed_pre_state)
   elif hasattr(abstract_unboxed_pre_state, "model") and isinstance(abstract_unboxed_pre_state.model, nnx.Module):
     state = nnx.state(abstract_unboxed_pre_state.model)
-    return state.filter(lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat)))
+    filtered = state.filter(
+        lambda path, var: not isinstance(var, (nnx.RngState, nnx.Cache, nnx.Intermediate, nnx.BatchStat))
+    )
+    return train_state_nnx.promote_abstract_params_for_residual16(
+        filtered,
+        nnx.state(abstract_unboxed_pre_state)
+        if isinstance(abstract_unboxed_pre_state, nnx.Module)
+        else abstract_unboxed_pre_state,
+    )
   return abstract_unboxed_pre_state.params
 
 

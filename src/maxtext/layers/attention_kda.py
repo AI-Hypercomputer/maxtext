@@ -758,6 +758,9 @@ class KimiDeltaAttention(nnx.Module):
         kernel_axes=(None, None, "heads"),
         rngs=rngs,
     )
+    self.q_conv1d.kernel.set_metadata(keep_fp32_master=True)
+    self.k_conv1d.kernel.set_metadata(keep_fp32_master=True)
+    self.v_conv1d.kernel.set_metadata(keep_fp32_master=True)
 
     # Channel Decay Projections and Parameters
     self.f_a_proj = DenseGeneral(
@@ -789,8 +792,8 @@ class KimiDeltaAttention(nnx.Module):
     a_log_val = jnp.log(jax.random.uniform(rngs.params(), (self.num_heads,), minval=1.0, maxval=16.0, dtype=jnp.float32))
     dt_bias_val = jax.random.uniform(rngs.params(), (self.projection_size,), minval=-1.0, maxval=1.0, dtype=jnp.float32)
 
-    self.A_log = nnx.Param(a_log_val, out_sharding=("heads",))
-    self.dt_bias = nnx.Param(dt_bias_val, out_sharding=("heads",))
+    self.A_log = nnx.Param(a_log_val, out_sharding=("heads",), keep_fp32_master=True)
+    self.dt_bias = nnx.Param(dt_bias_val, out_sharding=("heads",), keep_fp32_master=True)
 
     # Step Size (Beta) Projection: hidden_size -> num_heads
     self.b_proj = DenseGeneral(
@@ -831,6 +834,7 @@ class KimiDeltaAttention(nnx.Module):
         shard_mode=self.shard_mode,
         rngs=rngs,
     )
+    self.o_norm.scale.set_metadata(keep_fp32_master=True)
     self.out = DenseGeneral(
         in_features_shape=self.projection_size,
         out_features_shape=self.hidden_size,

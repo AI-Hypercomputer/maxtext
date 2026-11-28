@@ -569,6 +569,21 @@ class DataTypes(BaseModel):
       ),
   )
   weight_dtype: DType = Field(DType.FLOAT32, description="The data type for model weights.")
+  fp32_master_storage: Literal["f32", "residual16"] = Field(
+      "f32",
+      description=(
+          "Storage format for float32 master weights on the pre-training path. 'f32' (default) keeps standard model"
+          " parameter storage (4 B/param). 'residual16' stores working model parameters in bfloat16 (2 B/param) plus"
+          " signed int16 master_residuals (2 B/param) in optimizer state (sharded and offloaded identically to Optax"
+          " mu/nu), reconstructing exact float32 master weights during optimizer updates and Orbax checkpoint saves."
+          " Under un-offloaded FSDP or shard_optimizer_over_data=True (ZeRO-1, which also shards model parameters over"
+          " data at rest), steady-state persistent device state (params + opt_state + master_residuals) is unchanged"
+          " (12 B/param per device shard with float32 AdamW) and the benefit is bfloat16 parameter all-gathers and"
+          " backward weight-gradient reduce-scatters; net persistent device HBM savings occur with"
+          " optimizer_memory_host_offload=True (halving persistent device state from 4 to 2 B/param per shard, while"
+          " pinned_host state grows from 8 to 10 B/param per shard due to master_residuals)."
+      ),
+  )
   matmul_precision: MatmulPrecision = Field(
       MatmulPrecision.DEFAULT,
       description="Precision level for matrix multiplications.",
@@ -578,6 +593,16 @@ class DataTypes(BaseModel):
       description="If True, sets activations to float32 before the nonlinearity.",
   )
   dtype_mm: str = Field("float32", description="Data type for multimodal model's vision encoder")
+
+  @model_validator(mode="after")
+  def validate_fp32_master_storage(self) -> "DataTypes":
+    """Validates compatibility of fp32_master_storage with weight_dtype."""
+    if self.fp32_master_storage == "residual16" and self.weight_dtype not in (DType.FLOAT32, DType.BFLOAT16):
+      raise ValueError(
+          "fp32_master_storage='residual16' requires weight_dtype to be 'float32' or 'bfloat16', got"
+          f" {self.weight_dtype!r}."
+      )
+    return self
 
 
 class Quantization(BaseModel):
@@ -6722,6 +6747,25 @@ class MaxTextConfig(
         f"{reason}. Diagonal sub-tile skipping requires a pure causal mask."
     )
 
+  @model_validator(mode="after")
+  def validate_residual16_compatibility(self) -> "MaxTextConfig":
+    """Validates cross-field compatibility of fp32_master_storage='residual16'."""
+    if self.fp32_master_storage == "residual16":
+      if self.use_m3_model:
+        raise ValueError("fp32_master_storage='residual16' is not supported with the m3 backend (use_m3_model=True).")
+      if self.lora.enable_lora:
+        raise ValueError("fp32_master_storage='residual16' is not supported with LoRA (lora.enable_lora=True).")
+      if self.enable_diloco:
+        raise ValueError("fp32_master_storage='residual16' is not supported with DiLoCo (enable_diloco=True).")
+      for post_train_name, post_train_enabled in (
+          ("use_sft", self.use_sft),
+          ("use_dpo", self.use_dpo),
+          ("use_grpo", self.use_grpo),
+      ):
+        if post_train_enabled:
+          raise ValueError(f"fp32_master_storage='residual16' is not supported with {post_train_name}=True.")
+    return self
+
   def validate_num_moe_emb_chunks(self):
     """
     Validates that num_moe_emb_chunks is used with supported settings.
@@ -9985,6 +10029,9 @@ class RLConfig(
       )
 
     max_utils.check_no_load_balanced_context_parallelism(self, "train_rl")
+
+    if self.fp32_master_storage == "residual16":
+      raise ValueError("fp32_master_storage='residual16' is not supported on the post-training RL path (RLConfig).")
 
     # Set checkpoint_dir based on run_name and base_output_directory, unless set explicitly.
     if self.checkpoint_dir:
